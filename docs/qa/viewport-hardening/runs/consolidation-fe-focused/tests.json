@@ -1,0 +1,132 @@
+{
+  "version": 1,
+  "runId": "consolidation-fe-focused",
+  "cases": {
+    "TEST-LIFE-01": {
+      "lane": "vitest-viewport",
+      "result": "pass",
+      "exit": 0,
+      "logSha256": "d4aed9159491af9e0b1536bf2d791bb03ff9ea82b231cd6350054d634ac9af1b",
+      "summary": " Test Files  70 passed (70)"
+    },
+    "TEST-LIFE-02": {
+      "lane": "vitest-viewport",
+      "result": "pass",
+      "exit": 0,
+      "logSha256": "d4aed9159491af9e0b1536bf2d791bb03ff9ea82b231cd6350054d634ac9af1b",
+      "summary": " Test Files  70 passed (70)"
+    },
+    "TEST-LIFE-04": {
+      "lane": "vitest-viewport",
+      "result": "pass",
+      "exit": 0,
+      "logSha256": "d4aed9159491af9e0b1536bf2d791bb03ff9ea82b231cd6350054d634ac9af1b",
+      "summary": " Test Files  70 passed (70)"
+    },
+    "TEST-LIFE-05": {
+      "lane": "vitest-viewport",
+      "result": "pass",
+      "exit": 0,
+      "logSha256": "d4aed9159491af9e0b1536bf2d791bb03ff9ea82b231cd6350054d634ac9af1b",
+      "summary": " Test Files  70 passed (70)"
+    },
+    "TEST-BACKEND-01": {
+      "lane": "vitest-viewport",
+      "result": "pass",
+      "exit": 0,
+      "logSha256": "d4aed9159491af9e0b1536bf2d791bb03ff9ea82b231cd6350054d634ac9af1b",
+      "summary": " Test Files  70 passed (70)"
+    },
+    "TEST-BACKEND-03": {
+      "lane": "vitest-viewport",
+      "result": "pass",
+      "exit": 0,
+      "logSha256": "d4aed9159491af9e0b1536bf2d791bb03ff9ea82b231cd6350054d634ac9af1b",
+      "summary": " Test Files  70 passed (70)"
+    },
+    "TEST-RES-02": {
+      "lane": "vitest-viewport",
+      "result": "pass",
+      "exit": 0,
+      "logSha256": "d4aed9159491af9e0b1536bf2d791bb03ff9ea82b231cd6350054d634ac9af1b",
+      "summary": " Test Files  70 passed (70)"
+    },
+    "TEST-RES-03": {
+      "lane": "vitest-viewport",
+      "result": "pass",
+      "exit": 0,
+      "logSha256": "d4aed9159491af9e0b1536bf2d791bb03ff9ea82b231cd6350054d634ac9af1b",
+      "summary": " Test Files  70 passed (70)"
+    },
+    "TEST-MESH-01": {
+      "lane": "vitest-viewport",
+      "result": "pass",
+      "exit": 0,
+      "logSha256": "d4aed9159491af9e0b1536bf2d791bb03ff9ea82b231cd6350054d634ac9af1b",
+      "summary": " Test Files  70 passed (70)"
+    },
+    "TEST-MESH-02": {
+      "lane": "vitest-viewport",
+      "result": "pass",
+      "exit": 0,
+      "logSha256": "d4aed9159491af9e0b1536bf2d791bb03ff9ea82b231cd6350054d634ac9af1b",
+      "summary": " Test Files  70 passed (70)"
+    },
+    "TEST-MESH-03": {
+      "lane": "vitest-viewport",
+      "result": "pass",
+      "exit": 0,
+      "logSha256": "d4aed9159491af9e0b1536bf2d791bb03ff9ea82b231cd6350054d634ac9af1b",
+      "summary": " Test Files  70 passed (70)"
+    },
+    "TEST-MESH-04": {
+      "lane": "vitest-viewport",
+      "result": "pass",
+      "exit": 0,
+      "logSha256": "d4aed9159491af9e0b1536bf2d791bb03ff9ea82b231cd6350054d634ac9af1b",
+      "summary": " Test Files  70 passed (70)"
+    },
+    "TEST-MESH-05": {
+      "lane": "vitest-viewport",
+      "result": "pass",
+      "exit": 0,
+      "logSha256": "d4aed9159491af9e0b1536bf2d791bb03ff9ea82b231cd6350054d634ac9af1b",
+      "summary": " Test Files  70 passed (70)"
+    },
+    "TEST-PUB-01": {
+      "lane": "vitest-viewport",
+      "result": "pass",
+      "exit": 0,
+      "logSha256": "d4aed9159491af9e0b1536bf2d791bb03ff9ea82b231cd6350054d634ac9af1b",
+      "summary": " Test Files  70 passed (70)"
+    },
+    "TEST-PUB-02": {
+      "lane": "vitest-viewport",
+      "result": "pass",
+      "exit": 0,
+      "logSha256": "d4aed9159491af9e0b1536bf2d791bb03ff9ea82b231cd6350054d634ac9af1b",
+      "summary": " Test Files  70 passed (70)"
+    },
+    "TEST-PUB-03": {
+      "lane": "vitest-viewport",
+      "result": "pass",
+      "exit": 0,
+      "logSha256": "d4aed9159491af9e0b1536bf2d791bb03ff9ea82b231cd6350054d634ac9af1b",
+      "summary": " Test Files  70 passed (70)"
+    },
+    "TEST-LINE-01": {
+      "lane": "vitest-viewport",
+      "result": "pass",
+      "exit": 0,
+      "logSha256": "d4aed9159491af9e0b1536bf2d791bb03ff9ea82b231cd6350054d634ac9af1b",
+      "summary": " Test Files  70 passed (70)"
+    },
+    "TEST-LINE-03": {
+      "lane": "vitest-viewport",
+      "result": "pass",
+      "exit": 0,
+      "logSha256": "d4aed9159491af9e0b1536bf2d791bb03ff9ea82b231cd6350054d634ac9af1b",
+      "summary": " Test Files  70 passed (70)"
+    }
+  }
+}

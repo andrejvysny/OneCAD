@@ -41,10 +41,17 @@ struct OrientedNormal {
 // location once, the face orientation and the location's determinant sign are
 // applied once each.
 //
-// Astra F6 adds the acceptance half of NUM §7.1 to it: a normal whose DIRECTION
-// carries no error bound (`normal_angular_error_rad` above kNormalAcceptanceRad)
-// is not evidence of anything, so the sample is reported UNEVALUABLE rather than
+// Astra F6 adds the acceptance half of NUM §7.1 to it: a normal a derivative
+// budget REFUTES — `normal_angular_error_rad` above kNormalAcceptanceRad — is
+// not evidence of anything, so the sample is reported UNEVALUABLE rather than
 // folded into a dihedral the rest of the ladder then trusts.
+//
+// R1(c) MINOR 6: "refuted" is not the same as "uncertified". Where no enclosure
+// exists for the representation at all (a surface of extrusion or revolution, an
+// offset surface) the error is +infinity by default, and rejecting on that made
+// EVERY join between two such faces `unknown` — the same defect BLOCKER 2 found
+// on the shading side. A budget that does not exist refutes nothing; a budget
+// that exists and exceeds the window does.
 OrientedNormal face_normal_at(const TopoDS_Face& face, const BRepAdaptor_Surface& surf,
                               const DerivativeBudget& budget, const TopoDS_Edge& edge, double t) {
     OrientedNormal out;
@@ -61,7 +68,9 @@ OrientedNormal face_normal_at(const TopoDS_Face& face, const BRepAdaptor_Surface
         const gp_Vec cross = du.Crossed(dv);
         const double g = cross.Magnitude();
         if (!std::isfinite(g) || g <= 0.0) return out;
-        if (!(normal_angular_error_rad(budget, du, dv) <= kNormalAcceptanceRad)) return out;
+        if (budget.known && !(normal_angular_error_rad(budget, du, dv) <= kNormalAcceptanceRad)) {
+            return out;
+        }
         double sign = face.Orientation() == TopAbs_REVERSED ? -1.0 : 1.0;
         if (face.Location().Transformation().VectorialPart().Determinant() < 0.0) sign = -sign;
         out.direction = cross.Multiplied(sign / g);

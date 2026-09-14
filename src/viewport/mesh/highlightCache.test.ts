@@ -231,6 +231,62 @@ describe("TEST-RES-03 — highlight cache bounds", () => {
     expect(errors[0].msg).toContain("reservation");
   });
 
+  /*
+   * A refused `put` must not have destroyed anything on its way to refusing:
+   * it used to drop (and dispose) the slot already under that key first, so a
+   * rejected admission took a perfectly good overlay with it — and would have
+   * freed one that was still on screen.
+   */
+  it("a refused put leaves the existing slot intact", () => {
+    const cache = new HighlightCache(250, 8);
+    const entry = fakeEntry();
+    const kept = fakeValue(entry, 192);
+    const receipt = cache.reserve(192, "faceSet")!;
+    cache.put("k", kept, receipt);
+
+    expect(cache.put("k", fakeValue(entry, 288), { bytes: 240 })).toBeUndefined();
+
+    expect(cache.get("k")).toBe(kept);
+    expect(cache.bytes).toBe(192);
+    expect(kept.geometry.dispose).not.toHaveBeenCalled();
+  });
+
+  it("never replaces a PINNED slot — something is still drawing it", () => {
+    const cache = new HighlightCache();
+    const entry = fakeEntry();
+    const displayed = fakeValue(entry, 64);
+    cache.put("k", displayed, { bytes: 64 });
+    cache.pin("k");
+
+    expect(cache.put("k", fakeValue(entry, 64), { bytes: 64 })).toBeUndefined();
+
+    expect(cache.get("k")).toBe(displayed);
+    expect(displayed.geometry.dispose).not.toHaveBeenCalled();
+    expect(cache.bytes).toBe(64);
+  });
+
+  /*
+   * D5: the receipt holds the PEAK (old buffer + new buffer during the copy),
+   * which is roughly twice the resting size after a growth step. Admitting
+   * against the peak would let a build that disagreed with its plan by up to
+   * that factor through, so the receipt also carries the exact resting bytes
+   * the plan predicted and `put` asserts equality against THAT.
+   */
+  it("asserts the planned resting bytes, not the peak reservation", () => {
+    const cache = new HighlightCache();
+    const entry = fakeEntry();
+    const receipt = cache.reserve(480, "faceSet", 288)!;
+    expect(receipt.expectedBytes).toBe(288);
+
+    // Inside the peak, but not what the plan predicted.
+    expect(cache.put("k", fakeValue(entry, 300), receipt)).toBeUndefined();
+    expect(cache.put("k", fakeValue(entry, 192), receipt)).toBeUndefined();
+    expect(cache.bytes).toBe(0);
+
+    expect(cache.put("k", fakeValue(entry, 288), receipt)).toBeTruthy();
+    expect(cache.bytes).toBe(288);
+  });
+
   it("clear disposes every slot, pinned included (document close)", () => {
     const cache = new HighlightCache();
     const entry = fakeEntry();

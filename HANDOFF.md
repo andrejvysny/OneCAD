@@ -1,3 +1,42 @@
+# Handoff — VP-HARDENING consolidation pass (review PR-01…PR-12), session 3 of the pass, L3 in flight
+
+Session 32 · 2026-09-14 · worktree `/Users/andrejvysny/workspace/viewport-hardening`, branch `viewport-hardening`, HEAD `8807630c` (pushed) + ~51 uncommitted files from the review fix rounds · plan of record: root `PLAN.md` (its Run log is the per-task evidence ledger) · program ledger `docs/viewport-hardening/execution/STATUS.md` §9
+
+## Goal
+
+Close the external review of the viewport-hardening branch (`docs/01-PROGRESS-REVIEW.md`, findings PR-01…PR-12, brief `docs/02-CODING-AGENT-CORRECTION-BRIEF.md`): fix every finding red-first, close the owed WP03/WP08/WP09 reviews, make the acceptance evidence portable, run the full L3 rung, commit at L3-green (user-authorised, push authorised). Then resume WP05 → WP06 → WP10 in a NEW plan. Nothing here is native (N-lane) acceptance.
+
+## Original plan
+
+`PLAN.md` (copied from `~/.claude/plans/act-as-senior-software-cached-petal.md`, status `paused` → work resumed): tasks T0–T10, A1 (Astra WP09 `break`), A2 (Astra WP08 `verify`), R1 (three adversarial reviews), G1 (L3 + ledgers + commit). Decisions D1–D14 there are the design authority for the fixes.
+
+## Done so far (and why)
+
+- **Commit `8807630c`** (pushed): T0–T10 + A1 — all twelve findings fixed with red-first tests; evidence recorder (`scripts/record-viewport-run.mjs`, committed `runs/*/manifest.json`, ignored raw logs); TEST-RES-05 probes.
+- **Session 3 (uncommitted, on disk):** A2 Astra `verify` (record `docs/design/astra/wp08-curve-sampler-verify.md`); R1 reviews (a) identity DEFECTIVE, (b) ownership sound-with-conditions, (c) worker fix-required — EVERY blocker/major/minor from all three fixed by the original implementers and re-verified by the orchestrator (see PLAN.md Run log "session 3"): sketch-on-face `el_` bypass, `adoptPublication` nulling on bodiless changes, unfenced offset/library picks, NOTIFY isolation + hint placement, edgeless degraded fallback, halted-frame held reasons, windowed scheduler bound, extrusion/revolution/offset normals kept as `Unresolved`, `Tessellate` verb `OP_FAILED` with diagnostic, derivative budget in parameter units, sampler noise gate deleted, no reversal-based singular exemption, J interval, subnormal-net refusal, enclosure charged into E.
+- **Why the fix rounds went back to the same agents:** they keep their context (cheaper than a cold brief); every diff was still orchestrator-reviewed and every gate re-run on the main thread.
+- **Dead ends ruled out:** dashed degraded outline (would write untracked attributes onto leased geometry → DEV-WP03-2); a MESH1 completeness flag (user chose `ok=false`, D11); fencing library `classifyElement` (needs a `GeometryQueryService` contract change → follow-up, refuse-only for now); `cargo clean -p onecad` alone (ten dependency build scripts cached the pre-rename path → full `cargo clean` was required).
+- **Gates measured this session (orchestrator-run):** tsc 0 · hex 0 · three QA verifiers OK · `cargo fmt --check` 0 · `cargo clippy -D warnings` 0 · `bun run test` 443 failed / 5846 passed = IDENTICAL to the STATUS §5.1 baseline set (0 new) · FE focused lane 1175 passed / 6 expected fail (`runs/consolidation-fe-focused`) · worker focused ctest 47/47 · G lane hover 1 / preview 2 / line-width 3 passed (`runs/consolidation-g-lane`) · `bun run e2e` (both projects, `E2E_PORT=4179`) **RUNNING at handoff** through the recorder into `runs/consolidation-l3` lane `e2e-mock-lane` (started 16:31 local; result lands in that manifest when it exits — check `lanes["e2e-mock-lane"].exit` and `tailLines`).
+
+## How to resume
+
+1. Run the `handoff` skill with "resume"; read `PLAN.md` (Run log tail), `STATUS.md` §9, `TODO.md` "Now".
+2. Check the e2e result: `python3 -c "import json;m=json.load(open('docs/qa/viewport-hardening/runs/consolidation-l3/manifest.json'));print({k:(v['exit'],v['tailLines'][-3:]) for k,v in m['lanes'].items()})"`. If the lane is missing, the run was killed — rerun `node scripts/record-viewport-run.mjs consolidation-l3 e2e-mock-lane -- env E2E_PORT=4179 bun run e2e` ALONE (~30–55 min; port 4177 belongs to another session).
+3. Worker: `ONECAD_OCCT_ROOT=~/.onecad-occt/8.0.1 scripts/build-worker.sh Release` (restages the sidecar — the staged one predates the T5/T8 fix rounds), then `node scripts/record-viewport-run.mjs consolidation-worker-focused ctest-focused --case TEST-CURVE-01,…,TEST-CURVE-07,TEST-MESH-06 -- ctest --test-dir worker/build -R "surface_normals|curve_sampler|tessellation_quality|wp5_mesh1|wp6_meshexport|parity|canonical|determinism" --output-on-failure` (expect 47/47), then full `ctest --test-dir worker/build --output-on-failure` (expect only `feature_pattern`, `chamfer_reference_face` red), then from `src-tauri/`: `ONECAD_WORKER_PATH=$PWD/../worker/build/onecad-worker ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` and compare to the 24 baseline reds in STATUS §5.1 (0 worker skips). D11 makes `ok=false` reachable — any new Rust red naming a tessellation failure is a REAL finding, not noise.
+4. Re-point the seven TEST-CURVE rows + add TEST-MESH-06 in `docs/qa/viewport-hardening/acceptance-matrix.json` to `runs/consolidation-worker-focused/manifest.json`; `node scripts/verify-viewport-acceptance.mjs` must exit 0; then the clean-checkout check: `git worktree add <scratch> HEAD` after committing and run the verifier there (no ignored files present).
+5. Ledgers: STATUS.md §9 final numbers + §7 WP08/WP09 completion lines; TODO.md; CURRENT_STATE.md. Commit on `viewport-hardening` (`fix(viewport): VP-HARDENING consolidation — review fix rounds, L3`), push (both authorised by the user on 2026-09-14).
+6. Then a NEW plan for WP05 → WP06 → WP10.
+
+## Open questions
+
+- none for the user. Owed user-run native checks (never faked): TEST-MESH-05/TEST-PUB-03 N (failed replacement → click → fillet refused in the bundled app), TEST-RES-05 N, TEST-MESH-06 N.
+
+## Pointers
+
+- Tasks → TODO.md · Snapshot → CURRENT_STATE.md · Per-task evidence → PLAN.md Run log · Program ledger → docs/viewport-hardening/execution/STATUS.md §9 · Astra records → docs/design/astra/wp09-surface-normals-break.md, wp08-curve-sampler-verify.md
+
+---
+
 # Handoff — VP-HARDENING 1.0 (viewport program), session 1 paused for a fresh session
 
 > **Committed 2026-09-13:** all session-1 work is commit `67331740` on branch `viewport-hardening` (worktree `/Users/andrejvysny/workspace/viewport-hardening`), pushed to `origin/viewport-hardening`. Statements below about an uncommitted/dirty tree, a dirty-diff hash, and "no commits" describe the state BEFORE that commit; the design baseline remains `65b4c60`. The L3 rung was not run for this commit (user-directed checkpoint), so it is a checkpoint, not a gate boundary.

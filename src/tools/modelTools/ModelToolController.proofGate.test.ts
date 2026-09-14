@@ -30,6 +30,7 @@ import { STALE_PICK_HINT } from "@/ipc/promote";
 import { makeBoxMesh } from "@/ipc/mockMeshes";
 import { documentStore } from "@/stores/documentStore";
 import { selectionStore, type EntityRef } from "@/stores/selectionStore";
+import { toolStore } from "@/stores/toolStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { resetStores } from "@/test/resetStores";
 import { measureStore } from "@/stores/measureStore";
@@ -84,6 +85,21 @@ function makeClientMock() {
     elementInfo: vi.fn(async (_bodyId: string, elementId: string) =>
       elementInfoNaming(elementId || "el_unknown")),
     classifyElement: vi.fn(async () => null),
+    prepareOffsetFace: vi.fn(async () => ({
+      snapshotId: 7,
+      targetBodyId: "body1",
+      // The PICKED face plus one the tangent closure added — the second is a
+      // label the user never clicked, which is why this whole lane is fenced by
+      // the handshake's snapshot rather than by a pick proof.
+      faces: [
+        { topoKey: "f:0", picked: true },
+        { topoKey: "f:1", picked: false },
+      ],
+      currentDims: {},
+    })),
+    beginPreview: vi.fn(async () => ({ sessionId: "pv-1", previewBodyId: "pb-1" })),
+    updatePreview: vi.fn(),
+    endPreview: vi.fn(async () => ({ revision: 1, features: [], changedBodies: [], removedBodies: [] })),
   };
 }
 
@@ -270,6 +286,53 @@ describe("ModelToolController — the promotion proof gate (PR-01)", () => {
     );
     expect(measureStore.getState().picks).toHaveLength(1);
     expect(viewportStore.getState().statusHint?.message).not.toBe(STALE_PICK_HINT);
+  });
+
+  /*
+   * R1(a) MAJOR 3 — an OffsetFace record's `faceIds` are authored identities.
+   *
+   * `promoteOffsetEvidence` short-circuits on the ElementId the matching
+   * SELECTION ref already carries. That id is only as good as the publication it
+   * was minted against: on a body whose replacement failed it names an element
+   * of a snapshot the document has moved past, and the record would store it as
+   * the face the op operates on. The fenced lane must run instead.
+   */
+  it("does not reuse a selection ref's ElementId for an offset closure without a current proof", async () => {
+    const picked = installBody();
+    const ref = faceRef("el_stale");
+    attachPickProof(ref, { entry: picked, kind: "face", topoKey: "f:0" });
+    picked.displayState = "stale-inspection-only";
+    selectionStore.getState().set([ref]);
+
+    toolStore.getState().setTool("offsetFace");
+    await flush();
+    await flush();
+
+    // Both closure faces go through the snapshot-fenced authoritative lane —
+    // the picked one included, because nothing vouches for its cached id.
+    expect(clientMock.promoteSelection).toHaveBeenCalledWith("body1", [
+      expect.objectContaining({ topoKey: "f:0" }),
+    ], 7);
+    expect(clientMock.promoteSelection).toHaveBeenCalledWith("body1", [
+      expect.objectContaining({ topoKey: "f:1" }),
+    ], 7);
+  });
+
+  it("reuses a selection ref's ElementId when its pick-time proof IS current", async () => {
+    const picked = installBody();
+    const ref = faceRef("el_fresh");
+    attachPickProof(ref, { entry: picked, kind: "face", topoKey: "f:0" });
+    selectionStore.getState().set([ref]);
+
+    toolStore.getState().setTool("offsetFace");
+    await flush();
+    await flush();
+
+    // Only the CHAINED face needs the wire: the picked one's id was proved.
+    expect(clientMock.promoteSelection).toHaveBeenCalledTimes(1);
+    expect(clientMock.promoteSelection).toHaveBeenCalledWith("body1", [
+      expect.objectContaining({ topoKey: "f:1" }),
+    ], 7);
   });
 
   it("still measures an ElementId-bearing ref whose proof names a REPLACED entry", async () => {

@@ -107,18 +107,65 @@ PoleExtent pole_extent(const Patch& patch) {
 // each level. Conservative op-count accounting in the accepted WP08 family, not
 // a new derivation: an under-count would UNDER-state the budget, so the count is
 // deliberately the larger of the two ladders' lengths added together.
-double patch_derivative_budget(int uDegree, int vDegree, const PoleExtent& extent) {
-    if (!extent.valid) return kInfinity;
+//
+// That product is a POSITION enclosure, in mm. The DERIVATIVE control net is
+// `Q_i = degree * (P_{i+1} - P_i) / (u_{i+degree+1} - u_{i+1})`, so a position
+// error of `e` on each pole becomes at most `2 * degree * e / span` on each
+// derivative pole, and by the convex-hull property that bounds the evaluated
+// derivative too. `span` is the SMALLEST knot interval rather than the knot
+// window it divides by — the window is never smaller, so this over-states the
+// error and fails closed. Dividing is also what makes the bound
+// reparameterization invariant: compress the knot vector by 1/lambda and both
+// `|S_u|` and this bound grow by lambda (R1(c) MAJOR 5).
+struct PatchBudget {
+    double u = kInfinity;
+    double v = kInfinity;
+};
+
+PatchBudget patch_derivative_budget(int uDegree, int vDegree, double uSpanMin, double vSpanMin,
+                                    const PoleExtent& extent, double scale) {
+    PatchBudget out;
+    if (!extent.valid || !(uSpanMin > 0.0) || !(vSpanMin > 0.0) || !(scale > 0.0) ||
+        !std::isfinite(scale)) {
+        return out;
+    }
     const int depth = std::max(uDegree, 0) + std::max(vDegree, 0) + 1;
     const int degree = std::max(std::max(uDegree, vDegree), 0);
     const double mult = pole_roundoff_multiplier(depth, degree);
-    if (!std::isfinite(mult)) return kInfinity;
+    if (!std::isfinite(mult)) return out;
     // Dehomogenisation divides by w(u,v) >= minWeight while the recurrence
     // handled magnitudes up to maxWeight * |pole|; the ratio is 1 for every
     // polynomial patch.
     const double ratio = extent.maxWeight / extent.minWeight;
-    const double budget = mult * extent.maxAbs * ratio;
-    return std::isfinite(budget) ? budget : kInfinity;
+    // `GeomAdaptor_TransformedSurface` evaluates on the ORIGINAL surface and
+    // applies the location afterwards ("D1 evaluation. Applies transformation
+    // after evaluation."), so the magnitudes the recurrence actually rounded are
+    // the LOCAL pole magnitudes; `|s|` then carries the result into the world
+    // units the caller's derivatives are in. Reading `BRepAdaptor_Surface's`
+    // transformed `BSpline()` instead made the bound grow with the face's
+    // distance from the world origin, which nothing in the evaluation does.
+    const double positionMm = mult * extent.maxAbs * ratio * scale;
+    if (!std::isfinite(positionMm)) return out;
+    out.u = positionMm * 2.0 * static_cast<double>(std::max(uDegree, 1)) / uSpanMin;
+    out.v = positionMm * 2.0 * static_cast<double>(std::max(vDegree, 1)) / vSpanMin;
+    if (!std::isfinite(out.u) || !std::isfinite(out.v)) return PatchBudget{};
+    return out;
+}
+
+// Smallest positive interval of a B-spline's knot vector. OCCT stores knots
+// strictly increasing with separate multiplicities, so consecutive entries
+// already differ.
+double min_knot_span(const Handle(Geom_BSplineSurface)& patch, bool inU) {
+    const int n = inU ? patch->NbUKnots() : patch->NbVKnots();
+    if (n < 2) return 0.0;
+    double best = kInfinity;
+    for (int i = 1; i < n; ++i) {
+        const double lo = inU ? patch->UKnot(i) : patch->VKnot(i);
+        const double hi = inU ? patch->UKnot(i + 1) : patch->VKnot(i + 1);
+        const double span = hi - lo;
+        if (std::isfinite(span) && span > 0.0) best = std::min(best, span);
+    }
+    return std::isfinite(best) ? best : 0.0;
 }
 
 }  // namespace
@@ -134,7 +181,8 @@ DerivativeBudget derivative_error_budget(const BRepAdaptor_Surface& surf) {
                 // wrong rather than merely conservative.
                 const double s = std::abs(surf.Trsf().ScaleFactor());
                 const double m = std::max(std::isfinite(s) && s > 0.0 ? s : 1.0, 1.0);
-                out.absoluteMm = kAnalyticDerivativeUlps * kUnitRoundoff * kSqrt3 * m;
+                out.uAbsoluteMm = kAnalyticDerivativeUlps * kUnitRoundoff * kSqrt3 * m;
+                out.vAbsoluteMm = out.uAbsoluteMm;
                 out.known = true;
                 out.reason = "plane: closed-form unit axis derivatives";
                 break;
@@ -142,8 +190,9 @@ DerivativeBudget derivative_error_budget(const BRepAdaptor_Surface& surf) {
             case GeomAbs_Cylinder: {
                 const double r = std::abs(surf.Cylinder().Radius());
                 if (!std::isfinite(r)) break;
-                out.absoluteMm =
+                out.uAbsoluteMm =
                     kAnalyticDerivativeUlps * kUnitRoundoff * kSqrt3 * std::max(r, 1.0);
+                out.vAbsoluteMm = out.uAbsoluteMm;
                 out.known = true;
                 out.reason = "cylinder: closed-form, radius-scaled";
                 break;
@@ -156,8 +205,9 @@ DerivativeBudget derivative_error_budget(const BRepAdaptor_Surface& surf) {
                 // `R + v*sin(a)` CANCELS to zero at the apex, so the magnitude
                 // the closed form handles is the reference radius and the apex
                 // offset, never the (vanishing) result.
-                out.absoluteMm = kAnalyticDerivativeUlps * kUnitRoundoff * kSqrt3 *
-                                 std::max(std::max(r, apex), 1.0);
+                out.uAbsoluteMm = kAnalyticDerivativeUlps * kUnitRoundoff * kSqrt3 *
+                                  std::max(std::max(r, apex), 1.0);
+                out.vAbsoluteMm = out.uAbsoluteMm;
                 out.known = true;
                 out.reason = "cone: closed-form, reference-radius scaled";
                 break;
@@ -165,8 +215,9 @@ DerivativeBudget derivative_error_budget(const BRepAdaptor_Surface& surf) {
             case GeomAbs_Sphere: {
                 const double r = std::abs(surf.Sphere().Radius());
                 if (!std::isfinite(r)) break;
-                out.absoluteMm =
+                out.uAbsoluteMm =
                     kAnalyticDerivativeUlps * kUnitRoundoff * kSqrt3 * std::max(r, 1.0);
+                out.vAbsoluteMm = out.uAbsoluteMm;
                 out.known = true;
                 out.reason = "sphere: closed-form, radius-scaled";
                 break;
@@ -175,30 +226,38 @@ DerivativeBudget derivative_error_budget(const BRepAdaptor_Surface& surf) {
                 const gp_Torus torus = surf.Torus();
                 const double m = std::abs(torus.MajorRadius()) + std::abs(torus.MinorRadius());
                 if (!std::isfinite(m)) break;
-                out.absoluteMm =
+                out.uAbsoluteMm =
                     kAnalyticDerivativeUlps * kUnitRoundoff * kSqrt3 * std::max(m, 1.0);
+                out.vAbsoluteMm = out.uAbsoluteMm;
                 out.known = true;
                 out.reason = "torus: closed-form, (R+r)-scaled";
                 break;
             }
             case GeomAbs_BezierSurface: {
-                const Handle(Geom_BezierSurface) patch = surf.Bezier();
+                // The ORIGINAL (untransformed) patch: see patch_derivative_budget.
+                const Handle(Geom_BezierSurface) patch = surf.AdaptorSurfaceOriginal().Bezier();
                 if (patch.IsNull()) break;
-                const double budget =
-                    patch_derivative_budget(patch->UDegree(), patch->VDegree(), pole_extent(patch));
-                if (!std::isfinite(budget)) break;
-                out.absoluteMm = budget;
+                // A Bezier patch's domain is [0,1] in both directions.
+                const PatchBudget budget =
+                    patch_derivative_budget(patch->UDegree(), patch->VDegree(), 1.0, 1.0,
+                                            pole_extent(patch), std::abs(surf.Trsf().ScaleFactor()));
+                if (!std::isfinite(budget.u) || !std::isfinite(budget.v)) break;
+                out.uAbsoluteMm = budget.u;
+                out.vAbsoluteMm = budget.v;
                 out.known = true;
                 out.reason = "Bezier patch: WP08 F6 roundoff enclosure of the control net";
                 break;
             }
             case GeomAbs_BSplineSurface: {
-                const Handle(Geom_BSplineSurface) patch = surf.BSpline();
+                const Handle(Geom_BSplineSurface) patch = surf.AdaptorSurfaceOriginal().BSpline();
                 if (patch.IsNull()) break;
-                const double budget =
-                    patch_derivative_budget(patch->UDegree(), patch->VDegree(), pole_extent(patch));
-                if (!std::isfinite(budget)) break;
-                out.absoluteMm = budget;
+                const PatchBudget budget = patch_derivative_budget(
+                    patch->UDegree(), patch->VDegree(), min_knot_span(patch, /*inU=*/true),
+                    min_knot_span(patch, /*inU=*/false), pole_extent(patch),
+                    std::abs(surf.Trsf().ScaleFactor()));
+                if (!std::isfinite(budget.u) || !std::isfinite(budget.v)) break;
+                out.uAbsoluteMm = budget.u;
+                out.vAbsoluteMm = budget.v;
                 out.known = true;
                 out.reason = "B-spline patch: WP08 F6 roundoff enclosure of the control net";
                 break;
@@ -210,7 +269,8 @@ DerivativeBudget derivative_error_budget(const BRepAdaptor_Surface& surf) {
         out.known = false;
     }
     if (!out.known) {
-        out.absoluteMm = kInfinity;
+        out.uAbsoluteMm = kInfinity;
+        out.vAbsoluteMm = kInfinity;
         // Astra F3: an asserted bound is not a bound. A surface of revolution,
         // a surface of extrusion, an offset surface and an unrecognised type all
         // evaluate through a basis this file has no enclosure for, so every node
@@ -222,14 +282,18 @@ DerivativeBudget derivative_error_budget(const BRepAdaptor_Surface& surf) {
 
 double normal_angular_error_rad(const DerivativeBudget& budget, const gp_Vec& du,
                                 const gp_Vec& dv) {
-    if (!budget.known || !std::isfinite(budget.absoluteMm)) return kInfinity;
+    if (!budget.known || !std::isfinite(budget.uAbsoluteMm) ||
+        !std::isfinite(budget.vAbsoluteMm)) {
+        return kInfinity;
+    }
     const double lu = du.Magnitude();
     const double lv = dv.Magnitude();
     const double g = du.Crossed(dv).Magnitude();
     if (!std::isfinite(lu) || !std::isfinite(lv) || !std::isfinite(g)) return kInfinity;
     if (!(g > 0.0)) return kInfinity;
-    const double e = budget.absoluteMm;
-    const double perturbation = e * (lu + lv) + e * e;
+    const double eu = budget.uAbsoluteMm;
+    const double ev = budget.vAbsoluteMm;
+    const double perturbation = eu * lv + ev * lu + eu * ev;
     if (!std::isfinite(perturbation)) return kInfinity;
     const double ratio = perturbation / g;
     if (!(ratio < 1.0)) return kInfinity;  // the perturbation reaches the cross product
@@ -406,9 +470,10 @@ FaceDegeneracy classify_face_degeneracy(const TopoDS_Face& face) {
         try {
             surf.D1(0.5 * (u0 + u1), 0.5 * (v0 + v1), at, du, dv);
             witnessArea = du.Crossed(dv).Magnitude();
-            const double e = budget.absoluteMm;
+            const double eu = budget.uAbsoluteMm;
+            const double ev = budget.vAbsoluteMm;
             witness = budget.known && std::isfinite(witnessArea) &&
-                      witnessArea > e * (du.Magnitude() + dv.Magnitude()) + e * e;
+                      witnessArea > eu * dv.Magnitude() + ev * du.Magnitude() + eu * ev;
         } catch (const Standard_Failure&) {
             witness = false;
         }
@@ -626,7 +691,7 @@ SurfaceSample surface_normal_at(const BRepAdaptor_Surface& surf, GeomAbs_Surface
     // an axial normal (a 10/0/20 mm cone's -2/0/+2 degree apex fan spreads
     // 1.7889 degrees; a shallow 72-sector cone spreads 4.0038 degrees, and both
     // used to be averaged).
-    if (type == GeomAbs_Cone && budget.known && !(lu > budget.absoluteMm)) {
+    if (type == GeomAbs_Cone && budget.known && !(lu > budget.uAbsoluteMm)) {
         out.coneApex = true;
         return out;
     }
@@ -845,6 +910,22 @@ FaceNormalResult compute_face_normals(const TopoDS_Face& face,
         if (sample.sphereSingular) {
             pendingSphere[n] = 1;
             anyPendingSphere = true;
+            continue;
+        }
+        if (!budget.known && sample.hasDirection) {
+            // R1(c) BLOCKER 2. No enclosure exists for this representation — a
+            // surface of extrusion or revolution, an offset surface — so the
+            // node cannot be CERTIFIED. That is not evidence against its own
+            // S_u x S_v, and the facet ladder is a strictly worse estimator of
+            // it: routing these nodes there split 1 835 of a spline prism's
+            // 1 582 nodes and 10 917 of a revolve's 2 702, inflating the emitted
+            // vertex count 2.0x and 4.4x for geometry with no singularity in it
+            // at all. Keep the surface's own answer and label it `Unresolved`.
+            // A budget that EXISTS and refuses the node is a different case: the
+            // direction is then known to be untrustworthy, so it still falls to
+            // the ladder below.
+            decisions[n].normal = sample.direction.Multiplied(orientedSign);
+            decisions[n].provenance = NormalProvenance::Unresolved;
             continue;
         }
         decisions[n] = decide_from_triangles(triangles, incident_begin(n), incident_count(n));

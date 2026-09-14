@@ -102,6 +102,14 @@ const IDLE: FrameWorkResult = { changedThisTick: false, stillActive: false };
  */
 const WORK_ERROR_LIMIT = 3;
 
+/**
+ * The bound is counted over a WINDOW of recent ticks, not only consecutive
+ * ones: a work that throws on every other tick while re-invalidating would
+ * otherwise reset the count on each good tick and loop forever (R1(b)). Eight
+ * ticks is long enough that three failures inside it is never routine.
+ */
+const WORK_ERROR_WINDOW = 8;
+
 export class FrameScheduler {
   private readonly deps: FrameSchedulerDeps;
   /** The owner's frame work, run by a scheduled frame. See {@link setWork}. */
@@ -114,7 +122,8 @@ export class FrameScheduler {
   private revision = 0;
   /** `stillActive` from the last tick — a transition suspend/resume must survive. */
   private transitionActive = false;
-  private workErrors = 0;
+  /** Outcomes of the last {@link WORK_ERROR_WINDOW} ticks, newest in bit 0; a set bit is a throw. */
+  private recentThrows = 0;
   /** The last tick's tail hit {@link WORK_ERROR_LIMIT} and queued nothing. */
   private isParked = false;
   /**
@@ -181,8 +190,15 @@ export class FrameScheduler {
    * as forgiving as a fresh one.
    */
   resetErrors(): void {
-    this.workErrors = 0;
+    this.recentThrows = 0;
     this.isParked = false;
+  }
+
+  /** Throwing ticks inside the window. */
+  private get workErrors(): number {
+    let n = 0;
+    for (let bits = this.recentThrows; bits !== 0; bits >>>= 1) n += bits & 1;
+    return n;
   }
 
   /** Mark the frame dirty for `reason` and ensure exactly one frame is pending. */
@@ -243,10 +259,14 @@ export class FrameScheduler {
       throw error;
     } finally {
       this.inTick = false;
-      this.workErrors = threw ? this.workErrors + 1 : 0;
+      this.recentThrows = ((this.recentThrows << 1) | (threw ? 1 : 0)) & ((1 << WORK_ERROR_WINDOW) - 1);
       this.isParked = threw && this.workErrors >= WORK_ERROR_LIMIT;
-      this.transitionActive = result.stillActive;
-      if (this.isParked) {
+      // A `dispose()` raised inside the work has already cleared everything;
+      // the tail must not resurrect a transition on a dead scheduler.
+      if (!this.destroyed) this.transitionActive = result.stillActive;
+      if (this.destroyed) {
+        // nothing to schedule
+      } else if (this.isParked) {
         // Defensive: nothing may be queued from inside a tick any more, but a
         // park must leave the queue EMPTY whatever the work managed to do.
         this.cancelPending();

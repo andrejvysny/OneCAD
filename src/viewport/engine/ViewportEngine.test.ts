@@ -1510,6 +1510,34 @@ describe("ViewportEngine submission record and failure bounds (TEST-LIFE-05)", (
     engine.dispose();
   });
 
+  it("a halted engine HOLDS the reasons its idle frames consumed and replays them on the wake (R1(b))", async () => {
+    const { canvas, overlay } = newDom();
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+    let calls = 0;
+    engine.onAfterRender(() => {
+      calls++;
+      engine.invalidate(); // in-frame request …
+      throw new Error("listener blew up"); // … then the failure that parks
+    });
+    for (let i = 0; i < 12 && rafCbs.length > 0; i++) flushFrame();
+    expect(calls).toBe(3);
+    // The frame after the park is the one that consumed the third listener's
+    // in-frame request; the engine must still be holding that reason.
+    const peek = engine as unknown as { heldReasons: number };
+    expect(peek.heldReasons).not.toBe(0);
+    // An explicit retry lifts the park; the wake frame replays the held reasons.
+    await engine.retryRenderer();
+    const framesBefore = engine.frameCount;
+    // Exactly the wake frame: it merges the held reasons before the listener
+    // (still registered, still failing) can start a new hold.
+    expect(rafCbs.length).toBeGreaterThan(0);
+    flushFrame();
+    expect(engine.frameCount).toBe(framesBefore + 1);
+    expect(peek.heldReasons).toBe(0);
+    engine.dispose();
+  });
+
   it("an async submission REJECTION is the same failure — nothing is acknowledged", async () => {
     let reject!: (e: Error) => void;
     mocks.renderer.render.mockImplementationOnce(

@@ -229,6 +229,38 @@ describe("FrameScheduler (TEST-LIFE-01)", () => {
     expect(queued).toHaveLength(0);
   });
 
+  it("parks a work that throws on alternate ticks while re-invalidating (windowed bound, R1(b))", () => {
+    const { scheduler, queued, flush } = harness();
+    let attempts = 0;
+    scheduler.setWork(() => {
+      attempts++;
+      scheduler.invalidate(DirtyReason.camera);
+      if (attempts % 2 === 1) throw new Error("odd");
+      return { changedThisTick: true, stillActive: false };
+    });
+    scheduler.invalidate(DirtyReason.geometry);
+    for (let i = 0; i < 40 && queued.length > 0; i++) {
+      try { flush(); } catch { /* the odd ticks throw by design */ }
+    }
+    // Three throws inside the eight-tick window: attempts 1, 3, 5 → parked at 5.
+    expect(attempts).toBe(5);
+    expect(scheduler.parked).toBe(true);
+    expect(queued).toHaveLength(0);
+  });
+
+  it("dispose() from inside the work leaves no transition reported running", () => {
+    const { scheduler, queued, flush } = harness();
+    scheduler.setWork(() => {
+      scheduler.dispose();
+      return { changedThisTick: true, stillActive: true };
+    });
+    scheduler.invalidate(DirtyReason.camera);
+    flush();
+    expect(scheduler.disposed).toBe(true);
+    expect(scheduler.transitionRunning).toBe(false);
+    expect(queued).toHaveLength(0);
+  });
+
   it("stops rescheduling after three consecutive throwing ticks, but invalidate still works", () => {
     const { scheduler, queued, flush } = harness();
     scheduler.setWork(() => {

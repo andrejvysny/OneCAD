@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "runId": "consolidation-fe-focused",
+  "createdAt": "2026-09-14T14:20:30.426Z",
+  "commit": "8807630cdb1ab06f1c4ef65ee93f0d159592f923",
+  "branch": "viewport-hardening",
+  "dirtyDiffSha256": "0595344f857869519af3a2bffb2f71e4db4b51c9abcb616280eb0aa7d03e4a68",
+  "tools": {
+    "node": "v22.23.2",
+    "bun": "1.4.0",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "cmake": "cmake version 4.1.3"
+  },
+  "worker": {
+    "path": "worker/build/onecad-worker",
+    "sha256": "08765cfe30c54fdc80a9929a7a2f54c14e5b9456db69fdb7e11d084785233301"
+  },
+  "lanes": {
+    "vitest-viewport": {
+      "command": [
+        "bunx",
+        "vitest",
+        "run",
+        "src/viewport",
+        "src/ipc/promote.test.ts",
+        "src/ipc/mockClient.test.ts",
+        "src/features/selection",
+        "src/tools/sketch/SketchController.face.test.ts",
+        "src/tools/modelTools/ModelToolController.proofGate.test.ts",
+        "src/tools/modelTools/ModelToolController.previewAdmission.test.ts",
+        "src/modules/library"
+      ],
+      "cwd": "",
+      "env": {
+        "ONECAD_REQUIRE_WORKER": "1"
+      },
+      "startedAt": "2026-09-14T14:20:51.242Z",
+      "endedAt": "2026-09-14T14:20:57.061Z",
+      "durationMs": 5819,
+      "exit": 0,
+      "logPath": "docs/qa/viewport-hardening/runs/consolidation-fe-focused/logs/vitest-viewport.log",
+      "logSha256": "d4aed9159491af9e0b1536bf2d791bb03ff9ea82b231cd6350054d634ac9af1b",
+      "tailLines": [
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package",
+        "Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package"
+      ]
+    }
+  }
+}

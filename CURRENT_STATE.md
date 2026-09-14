@@ -1,4 +1,14 @@
-> **2026-09-14 — VP-HARDENING consolidation pass (session 2) PAUSED, uncommitted.** Review findings PR-01…PR-12 all have production fixes with red-first tests and orchestrator-run focused gates (root `PLAN.md` Run log; `docs/viewport-hardening/execution/STATUS.md` §9; `TODO.md` "Now"). Owed before commit: Astra `verify` WP08 r3 (approval pending), three adversarial reviews, matrix re-pointing to recorder manifests, `src-tauri/target/` rebuild, full L3.
+# Current State — VP-HARDENING consolidation pass (AUTHORITATIVE, 2026-09-14 17:30)
+
+Last verified: 2026-09-14 17:30 (local)
+
+- **Branch:** `viewport-hardening`, HEAD `8807630c` (pushed to origin); **dirty**: 51 files changed (+2,712 / −405) + 3 untracked (`docs/design/astra/wp08-curve-sampler-verify.md`, `runs/consolidation-fe-focused/`, `runs/consolidation-l3/`) — the review fix rounds and this session's gate evidence, NOT yet committed.
+- **Changed files (session 3):** `src/ipc/promote.ts`, `src/viewport/mesh/meshSync.ts`, `src/tools/sketch/SketchController.ts`, `src/tools/modelTools/ModelToolController.ts`, `src/modules/library/placementController.ts`, `src/modules/library/attachmentPicker.ts` (R1(a) fixes); `src/viewport/engine/FrameScheduler.ts`, `ViewportEngine.ts`, `HighlightLayer.ts`, `SectionLayer.ts`, `src/viewport/mesh/highlightCache.ts`, `faceSliceGeometry.ts`, `e2e/vph-*.spec.ts` (R1(b) fixes); `worker/src/tess/CurveSampler.*`, `SurfaceNormals.*`, `EdgeClassification.*`, `Tessellate.cpp`, `worker/src/main.cpp`, `worker/src/session/PlanExecutor.cpp` (R1(c) + Astra verify fixes); tests alongside; `acceptance-matrix.json` (20 rows re-pointed, TEST-PUB-03/TEST-RES-05 added); STATUS.md §2/§6; PLAN.md Run log; `src-tauri/tests/feature_pattern_integration.rs` (cargo fmt only).
+- **Build/test:** `bunx tsc --noEmit` → 0 · hex gate → 0 · QA verifiers → OK · `cargo fmt --check` → 0 · `cargo clippy -D warnings` → 0 (after full `cargo clean`) · `bun run test` → 443 failed / 5846 passed / 6 expected fail (== baseline set, 0 new) · FE focused lane → 1175 passed · worker focused ctest → 47/47 · G lane → hover 1 / preview 2 / line-width 3 passed · `bun run e2e` → RUNNING (recorder lane `runs/consolidation-l3/e2e-mock-lane`) · full ctest, `cargo test --workspace`, worker lane recorder, matrix verifier (7 TEST-CURVE rows), clean-checkout verifier → NOT RUN yet.
+- **Key decisions:** D1–D14 in PLAN.md; DEV-WP03-2 (solid degraded outline), DEV-WP08-3 (turn rule without noise gate; reversal ≠ singularity; underflow refusal) in STATUS.md §6; library `classifyElement` refuse-only (fence needs a service-contract change); an `Undefined` join does not block the POSITIONAL `Certified` (only a proved violation does).
+- **Blockers:** none. Serialize the heavy lane: the worker rebuild must wait for the e2e run to finish (retries 0).
+
+---
 
 # Current State — VP-HARDENING 1.0 viewport program (AUTHORITATIVE, 2026-09-13)
 

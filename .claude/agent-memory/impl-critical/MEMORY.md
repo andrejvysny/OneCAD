@@ -17,4 +17,4 @@
 - [Curve sampling + MESH1 edges](repo_curve_sampler.md) — EDGE_RANGES is 7 not 8, gp_XYZ::IsEqual is strict, OCCT conversion behaviour, worker/build is Makefiles
 - [Mesh validation + admission](repo_mesh_validation.md) — buildBodyObjects' 15-file caller fan-out, what worker MESH1 bytes really guarantee, parser-vs-validator boundary
 - [Mesh preparation plan](repo_mesh_preparation_plan.md) — one layout/cost authority, why `plan` is the last param, reserve-after-colour-resolve, pre-existing red modelTools lane
-- [Surface normals + tessellation](repo_surface_normals.md) — BRepAdaptor world frame + transformed BSpline poles, IsNegative is not det, wireless-face UVBounds, synthetic Poly_Triangulation probes, per-node cost
+- [Surface normals + tessellation](repo_surface_normals.md) — BRepAdaptor world frame + transformed BSpline poles, IsNegative is not det, untransformed poles for a derivative bound, per-parameter units, why "no enclosure" is not "refuted", brep injection for verb tests

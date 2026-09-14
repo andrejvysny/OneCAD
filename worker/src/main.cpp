@@ -217,13 +217,29 @@ Envelope handle_tessellate(Session& session, const Envelope& req) {
 
     nlohmann::json meshes = nlohmann::json::array();
     Envelope resp = Envelope::ok_response(req.id, nlohmann::json::object());
+    // D11 / WP09 F1: `tessellate_body` now returns `ok = false` when a
+    // NONDEGENERATE face of a body carried no triangles. Dropping such a body
+    // silently left Rust with an empty `meshes` array, which it can only report
+    // as a PROTOCOL error ("Tessellate result carried no meshes") — a generic
+    // failure in place of the body-named diagnostic the producer already has.
+    nlohmann::json incomplete = nlohmann::json::array();
+    std::string first_failure;
     for (const std::string& bid : which) {
         const onecad::session::BodyRecord* rec = bodies.get(bid);
         if (!rec) continue;
         onecad::tess::BodyMesh bm =
             onecad::tess::tessellate_body(rec->geom, bid, lod, include_edges, &part,
                                           &rec->face_colors);
-        if (!bm.ok) continue;
+        if (!bm.ok) {
+            const std::string why = bm.diagnostic.empty()
+                                        ? std::string("the body produced no triangulation")
+                                        : bm.diagnostic;
+            WLOG_WARN("Tessellate: body %s tessellated incompletely (%s)", bid.c_str(),
+                      why.c_str());
+            incomplete.push_back(nlohmann::json{{"bodyId", bid}, {"message", why}});
+            if (first_failure.empty()) first_failure = bid + ": " + why;
+            continue;
+        }
         const std::uint64_t off = resp.out_bin.size();
         resp.out_bin.insert(resp.out_bin.end(), bm.blob.begin(), bm.blob.end());
         const std::string section = "mesh:" + bid;
@@ -233,6 +249,24 @@ Envelope handle_tessellate(Session& session, const Envelope& req) {
         meshes.push_back(onecad::tess::mesh_handle_json(
             bid, section, lod, bm.blob.size(), bm.triangle_count,
             onecad::hashing::sha256_hex(bm.blob.data(), bm.blob.size()), snapshot_id));
+    }
+    // A body that failed never blocks the ones that succeeded — the verb answers
+    // with every mesh it could build. Only when NOTHING could be built does the
+    // failure become the answer, and then it is a §8 `OP_FAILED` carrying the
+    // producer's own diagnostic instead of an empty result the caller has to
+    // guess about. No new wire field: `error.detail` is the existing structured
+    // slot (§7.6 already uses it for `{requested, head}`).
+    if (meshes.empty() && !incomplete.empty()) {
+        return Envelope::error_response(
+            req.id,
+            onecad::protocol::ErrorInfo{
+                "OP_FAILED", "Tessellate: " + first_failure, /*retriable=*/false,
+                nlohmann::json{{"incompleteBodies", std::move(incomplete)}}});
+    }
+    if (!incomplete.empty()) {
+        WLOG_WARN("Tessellate: %zu of %zu requested bodies tessellated incompletely and are "
+                  "absent from the result",
+                  incomplete.size(), which.size());
     }
     resp.result = nlohmann::json{{"meshes", std::move(meshes)}};
     return resp;

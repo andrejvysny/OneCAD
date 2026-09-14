@@ -256,7 +256,7 @@ describe("promotePick proof gate (PR-01, spec §9)", () => {
     vi.mocked(promoteRef).mockImplementation((client, ref) => promoteLane.real!(client, ref));
   });
 
-  it("a click on a body whose replacement FAILED selects but refuses to promote", async () => {
+  it("TEST-PUB-03: a click on a body whose replacement FAILED selects but refuses to promote", async () => {
     const entry = installBody();
     entry.displayState = "stale-inspection-only";
     const promoteSelection = vi.fn();

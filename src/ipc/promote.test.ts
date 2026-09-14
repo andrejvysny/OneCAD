@@ -129,7 +129,7 @@ describe("promoteViewportPick", () => {
     expect(ok).toHaveBeenCalledTimes(1);
   });
 
-  it("PR-01: refuses an `el_` label read off a stale-inspection-only entry", async () => {
+  it("TEST-PUB-03 / PR-01: refuses an `el_` label read off a stale-inspection-only entry", async () => {
     // The exact hole this package closes. `el_…` labels come out of the SAME
     // two-namespace MESH1 id table as `f:N`, so an ElementId lifted off a mesh
     // whose replacement failed is a persistent-looking handle for a publication
@@ -412,6 +412,35 @@ describe("promoteAuthoritativeRef", () => {
       "body_1", { topoKey: "f:5" }, 4, "offset-closure",
     )).resolves.toBeNull();
     expect(hint()).toBe(STALE_PICK_HINT);
+  });
+
+  it("refuses a reply that does not name the element it asked about", async () => {
+    // The viewport lane has always re-checked the reply's identity; this lane
+    // had nothing but the snapshot fence. A `promote_selection` that answers
+    // about another body, another label, or another kind of element is not an
+    // answer to this question, and an authored record would carry it forever.
+    await expect(promoteAuthoritativeRef(
+      clientWith(async () => [{ topoKey: "f:5", elementId: "el_9", kind: "face", bodyId: "other" }]),
+      "body_1", { topoKey: "f:5" }, 4, "history-repair",
+    )).resolves.toBeNull();
+    await expect(promoteAuthoritativeRef(
+      clientWith(async () => [{ topoKey: "f:6", elementId: "el_9", kind: "face", bodyId: "body_1" }]),
+      "body_1", { topoKey: "f:5" }, 4, "history-repair",
+    )).resolves.toBeNull();
+    await expect(promoteAuthoritativeRef(
+      clientWith(async () => [{ topoKey: "f:5", elementId: "el_9", kind: "edge", bodyId: "body_1" }]),
+      "body_1", { topoKey: "f:5", kind: "face" }, 4, "edge-op-closure",
+    )).resolves.toBeNull();
+    expect(hint()).toBe(STALE_PICK_HINT);
+  });
+
+  it("accepts a reply whose kind the caller never declared", async () => {
+    // `historyActions` sends no `kind` — the candidate's TopoKey decides it
+    // later — so the backend's own answer cannot be contradicted here.
+    const promoted = { topoKey: "f:5", elementId: "el_9", kind: "edge", bodyId: "body_1" };
+    await expect(promoteAuthoritativeRef(
+      clientWith(async () => [promoted]), "body_1", { topoKey: "f:5" }, 4, "history-repair",
+    )).resolves.toEqual(promoted);
   });
 
   it("cannot be reached without naming a non-viewport origin (compile-time)", () => {

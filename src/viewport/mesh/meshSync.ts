@@ -243,6 +243,28 @@ export class MeshIngest {
   }
 
   /**
+   * Run ONE post-commit announcement in isolation.
+   *
+   * Everything after the atomic publish announces something that has already
+   * happened, so an observer's failure is a fault in that observer — not in the
+   * publication. It is logged against the step that threw and the loop carries
+   * on; the display state is not touched and no hint is published.
+   */
+  private announce(bodyId: string, step: string, run: () => void): void {
+    try {
+      run();
+    } catch (error) {
+      logError("mesh", `body mesh post-install step FAILED body=${bodyId}`, {
+        bodyId,
+        step,
+        error,
+        code: "load-failed",
+        state: "current",
+      });
+    }
+  }
+
+  /**
    * Announce a completed publication. Each subscriber is isolated: one that
    * throws is reported and the rest still run, and none of them can change the
    * fact that the body IS installed (PR-02). Called only after the commit.
@@ -484,6 +506,31 @@ export class MeshIngest {
 
   private adoptPublication(change: DocumentChange | null): void {
     const liveDocumentId = documentStore.getState().documentId;
+    // A change that publishes NO bodies says nothing about the geometry on
+    // screen (R1(a) BLOCKER 2). Most `DocumentChange`s are like that —
+    // `upsertVariable`, `renameVariable`, `deleteRecord`, an
+    // `editOperationInput` that resolved to the same shape — and dropping the
+    // publication for one makes `installedEntryIsCurrent` false for EVERY body
+    // while those very meshes are still drawn: every pick refuses and the
+    // sticky stale hint never clears again. Keep what was published, but only
+    // while the change is still ABOUT the live document and runtime; a foreign
+    // or superseded one falls through and clears exactly as before.
+    const liveRuntimeSession = documentStore.getState().runtimeSession;
+    if (
+      change !== null &&
+      change.changedBodies.length === 0 &&
+      change.documentId !== undefined &&
+      change.documentId === liveDocumentId &&
+      change.runtimeSession !== undefined &&
+      change.runtimeSession === liveRuntimeSession &&
+      // …and only while what is retained is itself still about this document.
+      // After a document switch the old publication is not evidence about the
+      // new one, so a bodiless change there clears exactly as before.
+      this.currentPublication?.documentId === liveDocumentId &&
+      this.currentPublication.runtimeSession === liveRuntimeSession
+    ) {
+      return;
+    }
     const generations = change?.changedBodies.map((ref) => meshGeneration(ref.meshKey)) ?? [];
     const generation = generations[0];
     this.currentPublication =
@@ -827,18 +874,30 @@ export class MeshIngest {
       // is not relabelled stale when they do.
       notifyRetired(prev);
       this.setDisplayState(bodyId, "current");
+      // Each call-out is ISOLATED (R1(a) MAJOR 4). These are observers of a
+      // publication that already happened: one of them failing must not cost
+      // the next one its notification, must not skip `notifyBodyLoaded` — which
+      // every commit's completion waits on — and must never be reported as a
+      // load failure over geometry that loaded perfectly.
+      //
       // A regen renumbers TopoKeys and consumes elements outright, so a selection
       // made before it may name nothing after it. Decide each ref's fate against
       // the NEW mesh (and, for a promoted one, against the backend) BEFORE the
       // highlight rebuild below reads them — never by searching for a lookalike.
       // A cosmetic reload re-publishes the SAME topology: nothing to survive.
-      if (reason === "regen") reconcileSelectionForBody(bodyId, prev, entry, this.client);
-      this.updateGeometryPending();
-
-      this.engine.refreshHighlights();
-      this.engine.invalidate();
+      if (reason === "regen") {
+        this.announce(bodyId, "reconcileSelection", () =>
+          reconcileSelectionForBody(bodyId, prev, entry, this.client));
+      }
+      this.announce(bodyId, "geometryPending", () => this.updateGeometryPending());
+      // Captured: `this.engine` is nullable and a closure cannot carry the
+      // narrowing the straight-line COMMIT block above relies on.
+      const engine = this.engine;
+      this.announce(bodyId, "refreshHighlights", () => engine.refreshHighlights());
+      this.announce(bodyId, "invalidate", () => engine.invalidate());
       trace("mesh", `mesh installed body=${bodyId} token=${token} elapsedMs=${(performance.now() - startedAt).toFixed(1)}`);
-      this.traceRendered(bodyId, token, startedAt, entry.provenance ?? null);
+      this.announce(bodyId, "traceRendered", () =>
+        this.traceRendered(bodyId, token, startedAt, entry.provenance ?? null));
       this.notifyBodyLoaded(bodyId);
     } catch (e) {
       if (this.detached || this.loadSeq.get(bodyId) !== token) return;
@@ -846,9 +905,6 @@ export class MeshIngest {
       // simply never appears and nothing anywhere says why (the SAVE/OPEN bug
       // class). Keep serving other bodies.
       const reason = e instanceof Error ? e.message : String(e);
-      viewportStore.getState().setStatusHint(`Body failed to load — ${reason}`, {
-        severity: "error",
-      });
       if (installed) {
         // The publish SUCCEEDED and something after it threw — a selection
         // reconcile, a highlight rebuild, a `bodyLoaded` subscriber. The
@@ -866,6 +922,12 @@ export class MeshIngest {
         // Nothing was published: the last valid geometry STAYS installed and
         // visible, demoted to stale-inspection-only exactly as a rejected
         // payload would be, rather than being torn out of the scene.
+        // The hint belongs HERE and nowhere else: "Body failed to load" over a
+        // body that IS loaded is a lie about the geometry the user is looking
+        // at, and it also blocks every operation authored from it (MAJOR 4).
+        viewportStore.getState().setStatusHint(`Body failed to load — ${reason}`, {
+          severity: "error",
+        });
         const state: MeshDisplayState = getEntry(bodyId) ? "stale-inspection-only" : "failed-initial";
         logError("mesh", `body mesh load FAILED body=${bodyId}`, { bodyId, error: e, state });
         const installedEntry = getEntry(bodyId);

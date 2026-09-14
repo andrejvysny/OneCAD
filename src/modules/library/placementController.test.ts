@@ -34,7 +34,16 @@ import {
 } from "./placementController";
 import { makeBoxMesh } from "@/ipc/mockMeshes";
 import { __resetDocumentAdmissionForTests, getDocumentAdmission } from "@/viewport/mesh/meshAdmission";
-import { disposeAll, __resetRegistryForTests } from "@/viewport/mesh/meshRegistry";
+import {
+  buildBodyObjects,
+  disposeAll,
+  setCurrentMeshPublication,
+  swap,
+  __resetRegistryForTests,
+  type MeshEntry,
+} from "@/viewport/mesh/meshRegistry";
+import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
+import { documentStore } from "@/stores/documentStore";
 import { __resetPreviewMeshReportsForTests } from "@/viewport/mesh/previewMesh";
 import { __resetLogForTests, logSnapshot } from "@/debug/log";
 
@@ -95,6 +104,8 @@ interface Harness {
   placeComponent: ReturnType<typeof vi.fn>;
   beginPreview: ReturnType<typeof vi.fn>;
   engine: ViewportEngine;
+  entry: MeshEntry;
+  classifyElement: ReturnType<typeof vi.fn>;
   session: PreviewSession;
   /** Hand the controller's own ghost-lane subscriber one preview result. */
   deliver: (r: PreviewResult) => void;
@@ -106,7 +117,40 @@ interface Harness {
  * lane — with a camera ray straight down from 100 mm above (0,0), so the
  * ground-plane intersection is the origin and any drift is visible.
  */
+const PUBLICATION = {
+  documentId: "doc-1",
+  runtimeSession: "runtime-1",
+  snapshotId: 7,
+  generation: 3,
+} as const;
+
+/**
+ * Install `body_1` as the CURRENT publication — the state a real hover happens
+ * in. A `PickHit` carries the exact entry its ordinal was decoded against
+ * (PR-01), and the placement gesture now refuses a hit whose entry is no longer
+ * current rather than classifying its label against the head.
+ */
+function installBody(): MeshEntry {
+  const entry = buildBodyObjects(
+    parseMeshPayload(makeBoxMesh()), "body_1", 1, undefined, undefined, PUBLICATION,
+  );
+  swap("body_1", entry);
+  setCurrentMeshPublication(PUBLICATION);
+  documentStore.setState({
+    documentId: "doc-1",
+    runtimeSession: "runtime-1",
+    geometrySource: "live",
+    bodies: { body_1: { id: "body_1", name: "Body", visible: true } },
+  });
+  return entry;
+}
+
 function install(radius: number, opts?: { hit?: boolean }): Harness {
+  // Each harness starts from a clean registry: `installBody` swaps `body_1`, and
+  // an entry retired by an earlier case would otherwise still be live here.
+  disposeAll();
+  __resetRegistryForTests();
+  const entry = installBody();
   const engine = {
     setOrbitSuppressed: vi.fn(),
     probePick: vi.fn(() =>
@@ -118,6 +162,7 @@ function install(radius: number, opts?: { hit?: boolean }): Harness {
             elementId: "el_1",
             topoKey: "f:1",
             worldPos: { x: 0, y: 0, z: 0 },
+            entry,
           },
     ),
     screenRay: vi.fn(() => ({ origin: [0, 0, 100], dir: [0, 0, -1] })),
@@ -134,13 +179,12 @@ function install(radius: number, opts?: { hit?: boolean }): Harness {
   } as PreviewSession;
 
   const beginPreview = vi.fn(async () => session);
+  const classifyElement = vi.fn(async () => cylinderClassify(radius));
   /** The ghost lane's own subscriber, so a test can deliver a preview result. */
   let previewCb: ((r: PreviewResult) => void) | null = null;
 
   configurePlacementController({
-    geometryQuery: {
-      classifyElement: vi.fn(async () => cylinderClassify(radius)),
-    },
+    geometryQuery: { classifyElement },
     commandApi: {
       placeComponent,
       detachComponent: vi.fn(),
@@ -159,6 +203,8 @@ function install(radius: number, opts?: { hit?: boolean }): Harness {
     placeComponent,
     beginPreview,
     engine,
+    entry,
+    classifyElement,
     session,
     deliver: (r: PreviewResult) => previewCb?.(r),
   };
@@ -483,5 +529,53 @@ describe("placementController ghost admission", () => {
     expect(harness.engine.setPreviewBody).toHaveBeenCalledTimes(1);
     expect(getDocumentAdmission().snapshot().holdings).toBe(1);
     expect(previewWarnings()[0].ctx).toMatchObject({ code: "bad-magic" });
+  });
+});
+
+/*
+ * R1(a) MAJOR 5 — a placement hover never classifies a label off a mesh the
+ * user is no longer really looking at.
+ *
+ * `classifyElement` resolves `f:N` against the HEAD. On a body whose
+ * replacement failed — still drawn, demoted to `stale-inspection-only` — that
+ * ordinal names whatever the head calls it now, so the gesture would snap the
+ * component to a face nobody picked and then RECORD that mate. The gate is the
+ * hit's own pick-time proof; with no honest target the ghost falls back to the
+ * free-space lane, which is the existing behaviour for "nothing under the
+ * cursor" and the only answer that records nothing false.
+ */
+describe("placementController pick currency (PR-01)", () => {
+  afterEach(() => {
+    cancelPlacement();
+    configurePlacementController(null);
+    setViewportEngine(null);
+    setCurrentMeshPublication(null);
+    disposeAll();
+    __resetRegistryForTests();
+  });
+
+  it("classifies a hover on a CURRENT body", async () => {
+    const harness = install(CLEARANCE_HOLE_M6_RADIUS);
+    armPlacement(componentFixture());
+    await settle();
+
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 10, clientY: 10 }));
+    await settle();
+
+    expect(harness.classifyElement).toHaveBeenCalledWith("body_1", "el_1", "f:1");
+  });
+
+  it("refuses to classify a hover on a stale-inspection-only body", async () => {
+    const harness = install(CLEARANCE_HOLE_M6_RADIUS);
+    harness.entry.displayState = "stale-inspection-only";
+    armPlacement(componentFixture());
+    await settle();
+
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 10, clientY: 10 }));
+    await settle();
+
+    expect(harness.classifyElement).not.toHaveBeenCalled();
+    // The ghost still follows — free space, identity rotation, no mate.
+    expect(harness.updatePreview).toHaveBeenCalled();
   });
 });

@@ -47,6 +47,7 @@
  */
 import { getViewportEngine } from "@/viewport/engineBridge";
 import type { PickHit } from "@/viewport/engine/Picker";
+import { viewportHitIsCurrent } from "@/ipc/promote";
 import { remove as removeMesh, swap as swapMesh } from "@/viewport/mesh/meshRegistry";
 import { buildPreviewEntry } from "@/viewport/mesh/previewMesh";
 import { viewportStore } from "@/stores/viewportStore";
@@ -374,7 +375,15 @@ function onPointerMove(e: PointerEvent): void {
   const { clientX, clientY } = e;
   const engine = getViewportEngine();
   const hit: PickHit | null = engine?.probePick(clientX, clientY) ?? null;
-  if (!hit) {
+  // A hit is only a snap target while the mesh it was read from is still the
+  // installed, current publication (PR-01). `classifyElement` resolves a
+  // snapshot-scoped `f:N` against the HEAD, so hovering a body whose
+  // replacement failed — drawn, but demoted to `stale-inspection-only` — would
+  // measure whatever the head calls that ordinal now and then RECORD the mate
+  // against it. With no honest target the ghost takes the free-space lane,
+  // which is what "nothing under the cursor" already does and records nothing
+  // false.
+  if (!hit || !viewportHitIsCurrent(hit)) {
     followFreeSpace(clientX, clientY);
     return;
   }

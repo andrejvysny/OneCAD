@@ -5196,8 +5196,19 @@ export class ModelToolController {
       (ev.anchor?.worldPoint as Vec3 | undefined) ??
       this.offsetPicks.find((p) => p.topoKey === ev.topoKey)?.anchor?.worldPoint;
     const anchor = worldPoint ? { worldPoint } : undefined;
+    // An already-promoted PICK answers without a round trip — but only while its
+    // own pick-time proof still holds (R1(a) MAJOR 3). This id is authored into
+    // the record as the face the op operates on, and a cached id from a
+    // publication the document has moved past names a different element. An
+    // unproved one falls through to the fenced lane below rather than being
+    // trusted.
     const known = this.offsetPicks.find((p) => p.topoKey === ev.topoKey && p.elementId);
-    if (known?.elementId) {
+    const knownProof = known ? pickProofFor(known) : undefined;
+    if (
+      known?.elementId &&
+      knownProof !== undefined &&
+      installedProofIsCurrent(known.bodyId ?? bodyId, knownProof)
+    ) {
       return { primary: { bodyId, elementId: known.elementId, kind: "face" }, anchor };
     }
     // AUTHORITATIVE, not viewport-derived: `ev.topoKey` is `PrepareOffsetFace`'s

@@ -114,6 +114,7 @@ CurveSampleResult endpoints_only(const BRepAdaptor_Curve& curve, const std::stri
         out.points.push_back(first);
         out.points.push_back(last);
         out.certification = CurveCertification::QualityLimited;
+        out.qualityLimited = true;
         out.diagnostic = reason;
         WLOG_WARN("tessellate: edge %s display quality limited at %.6g mm, %s (%s); emitting "
                   "endpoints only",
@@ -180,23 +181,41 @@ CurveSampleResult sample_edge_polyline(const BRepAdaptor_Curve& curve, const std
         relaxed.angularToleranceRad = std::min(request.angularToleranceRad * factor, kMaxAngularRad);
         CurveSampleResult retry = sample_edge_curve(curve, relaxed, limits, {});
         if (!retry.points.empty() && retry.certification != CurveCertification::Failed) {
-            // PR-07 / D9: the polyline is real and inside the RELAXED budget, and
-            // that is exactly what the result now says. The retry's own
-            // certification — frequently `Certified`, against a tolerance nobody
-            // asked for — must never reach a metadata consumer as if the request
-            // had been met, so requested and achieved are carried separately and
-            // the outcome is QualityLimited whatever the retry thought.
-            retry.certification = CurveCertification::QualityLimited;
-            retry.certifiedChordBoundMm = -1;
+            // PR-07 / D9, sharpened by R1(c) MINOR 7. The polyline is real, but
+            // what it ACHIEVED is whatever the retry itself certified — not the
+            // budget the retry was handed. A retry that is only QualityLimited
+            // did not meet the relaxed tolerance either, so it reports no
+            // achieved tolerance at all; a retry that came through the
+            // approximate fallback keeps its PROVENANCE and carries the quality
+            // limitation in `qualityLimited` instead of having `KernelEstimated`
+            // overwritten. What must never happen either way is the retry's own
+            // `Certified` reaching a consumer as if the request had been met.
+            const bool certified_at_relaxed =
+                retry.certification == CurveCertification::Certified;
+            retry.qualityLimited = true;
             retry.requestedChordToleranceMm = request.chordToleranceMm;
             retry.requestedAngularToleranceRad = request.angularToleranceRad;
-            retry.achievedChordToleranceMm = relaxed.chordToleranceMm;
-            retry.achievedAngularToleranceRad = relaxed.angularToleranceRad;
+            std::string achieved_text;
+            if (certified_at_relaxed) {
+                retry.certification = CurveCertification::QualityLimited;
+                retry.certifiedChordBoundMm = -1;
+                retry.achievedChordToleranceMm = relaxed.chordToleranceMm;
+                retry.achievedAngularToleranceRad = relaxed.angularToleranceRad;
+                achieved_text = "achieved " + num_text(relaxed.chordToleranceMm) + " mm";
+            } else {
+                // Provenance (KernelEstimated) or a further shortfall
+                // (QualityLimited) is preserved exactly as the retry reported it.
+                retry.achievedChordToleranceMm = -1;
+                retry.achievedAngularToleranceRad = -1;
+                achieved_text = "achieved nothing certified even at " +
+                                num_text(relaxed.chordToleranceMm) + " mm";
+            }
             retry.diagnostic = "display quality limited: requested " +
-                               num_text(request.chordToleranceMm) + " mm, achieved " +
-                               num_text(relaxed.chordToleranceMm) + " mm after " +
-                               std::to_string(doubling) + " tolerance doubling" +
-                               (doubling == 1 ? "" : "s") + " (" + result.diagnostic + ")";
+                               num_text(request.chordToleranceMm) + " mm, " + achieved_text +
+                               " after " + std::to_string(doubling) + " tolerance doubling" +
+                               (doubling == 1 ? "" : "s") + " (" + result.diagnostic + ")" +
+                               (retry.diagnostic.empty() ? std::string()
+                                                         : "; retry reported: " + retry.diagnostic);
             WLOG_WARN(
                 "tessellate: edge %s display quality limited at %.6g mm (%s); emitting the "
                 "%.6g mm polyline instead after %d doubling(s)",

@@ -114,6 +114,10 @@ test("TEST-RES-01: renderer geometry count plateaus after warm-up across 1,000 r
   const b = await findFacePoint(page, "body1", "f:4");
 
   const before = await readCounters(page);
+  // A missing WebGL renderer would make every `geometries` reading `null`, and
+  // `null === null` turns the whole resource assertion into a no-op. The probe
+  // only means anything if the renderer is actually reporting.
+  expect(before.renderer, "renderer info — no WebGL means the geometry assertions are vacuous").not.toBeNull();
   const samples: ResourceSample[] = [];
 
   for (let i = 1; i <= HOVER_ITERATIONS; i++) {

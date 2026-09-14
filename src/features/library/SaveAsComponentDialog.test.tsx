@@ -20,6 +20,17 @@ import {
 import type { ClassifyResult, LibraryComponent, NewComponentSpec } from "@/ipc/types";
 import { configureAuthoringController } from "@/modules/library/authoringController";
 import { cancelAttachmentPick } from "@/modules/library/attachmentPicker";
+import { makeBoxMesh } from "@/ipc/mockMeshes";
+import { documentStore } from "@/stores/documentStore";
+import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
+import {
+  buildBodyObjects,
+  disposeAll,
+  setCurrentMeshPublication,
+  swap,
+  __resetRegistryForTests,
+  type MeshEntry,
+} from "@/viewport/mesh/meshRegistry";
 
 const saveAsComponent = vi.fn();
 const listVariables = vi.fn();
@@ -43,15 +54,46 @@ vi.mock("@/viewport/engineBridge", () => ({
   }),
 }));
 
+/**
+ * Install `body_1` as the CURRENT publication — the state a real pick happens
+ * in. `attachmentPicker` refuses a hit whose installed entry is no longer
+ * current (PR-01) rather than classifying its label against the head, so the
+ * hit below has to carry a real entry the registry still holds.
+ */
+const PUBLICATION = {
+  documentId: "doc-1",
+  runtimeSession: "runtime-1",
+  snapshotId: 7,
+  generation: 3,
+} as const;
+
+function installBody(): MeshEntry {
+  const entry = buildBodyObjects(
+    parseMeshPayload(makeBoxMesh()), "body_1", 1, undefined, undefined, PUBLICATION,
+  );
+  swap("body_1", entry);
+  setCurrentMeshPublication(PUBLICATION);
+  documentStore.setState({
+    documentId: "doc-1",
+    runtimeSession: "runtime-1",
+    geometrySource: "live",
+    bodies: { body_1: { id: "body_1", name: "Body", visible: true } },
+  });
+  return entry;
+}
+
+let installedBody: MeshEntry | null = null;
+
 /** A viewport pick landing at `world`, as `ViewportEngine.probePick` reports it. */
 function hitAt(world: [number, number, number]) {
   return {
     bodyId: "body_1",
     kind: "face" as const,
-    topoKey: "f:22",
+    topoKey: "f:1",
     elementId: "el_1",
     distance: 1,
     worldPos: { x: world[0], y: world[1], z: world[2] },
+    entry: installedBody ?? undefined,
   };
 }
 
@@ -132,12 +174,19 @@ describe("SaveAsComponentDialog", () => {
     classifyElement.mockReset();
     engine.probePick.mockReset();
     engine.setOrbitSuppressed.mockReset();
+    disposeAll();
+    __resetRegistryForTests();
+    installedBody = installBody();
     configureAuthoringController({ geometryQuery: { classifyElement } });
   });
 
   afterEach(() => {
     cancelAttachmentPick();
     configureAuthoringController(null);
+    installedBody = null;
+    setCurrentMeshPublication(null);
+    disposeAll();
+    __resetRegistryForTests();
   });
 
   it("sends the body, the typed identity, and a viewport thumbnail", async () => {
@@ -320,12 +369,19 @@ describe("SaveAsComponentDialog attachment picking", () => {
     classifyElement.mockReset();
     engine.probePick.mockReset();
     engine.setOrbitSuppressed.mockReset();
+    disposeAll();
+    __resetRegistryForTests();
+    installedBody = installBody();
     configureAuthoringController({ geometryQuery: { classifyElement } });
   });
 
   afterEach(() => {
     cancelAttachmentPick();
     configureAuthoringController(null);
+    installedBody = null;
+    setCurrentMeshPublication(null);
+    disposeAll();
+    __resetRegistryForTests();
   });
 
   it("turns a planar face pick into a seat attachment framed at the clicked point", async () => {

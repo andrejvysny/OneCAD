@@ -38,7 +38,27 @@ Attach sites: `ViewportRoot.refFromHit` (every click/hover ref), `OverlapCandida
 `rebindPick.reconcileSelectionForBody` CLEARS the proof of every ref of the regenerated body — a
 survivor carries an `elementId` and needs no promotion.
 
+Read-only lanes: `viewportHitIsCurrent(hit)` (also in `promote.ts`) is the gate for code that QUERIES
+geometry from a hit instead of minting an id — `placementController.onPointerMove` and
+`attachmentPicker.onPointerDown`, both of which call `classifyElement`. `CadClient.classifyElement`
+takes a `GeometryReadFence`, but the library module may only reach it through
+`GeometryQueryService` (`modules/modeling/manifest.ts`), which deliberately does not expose one
+(ADR-0002 narrow surface) — so those lanes REFUSE rather than fence.
+
 Traps:
+- ANY test that stubs `engine.probePick` must put a real registry `entry` on the hit, or every
+  currency gate refuses. `placementController.test.ts`, `attachmentPicker.test.ts`,
+  `SaveAsComponentDialog.test.tsx` and `SketchController.face.test.ts` all install a body for this.
+- `meshSync.adoptPublication` must KEEP the previous publication when `change.changedBodies` is
+  empty. Most `DocumentChange`s carry no geometry (`upsertVariable`, `renameVariable`,
+  `deleteRecord`, a no-op `editOperationInput`), and clearing it makes `installedEntryIsCurrent`
+  false for every body while those meshes are still drawn — every pick refuses and the sticky stale
+  hint never clears. It still clears for a foreign/superseded change, and for one whose retained
+  publication is about another document.
+- `meshSync.loadBody`'s NOTIFY block runs every call-out through `announce()` (try/catch → logError),
+  and the "Body failed to load" hint lives ONLY in the not-installed branch of the outer catch.
+  `this.engine` must be captured into a local first — a closure cannot carry the COMMIT block's
+  non-null narrowing.
 - A COSMETIC republish (colour, visibility, `reconcile()` self-heal) swaps the entry WITHOUT
   reconciling the selection, so every selected ref's proof then names a retired entry. Gate
   promotion on the proof, but gate anything an `elementId` can answer on

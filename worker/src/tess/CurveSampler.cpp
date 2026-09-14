@@ -267,6 +267,26 @@ bool control_net_is_valid(const RationalBezierSpan& span) {
     return true;
 }
 
+bool homogeneous_arithmetic_is_supported(const RationalBezierSpan& span) {
+    if (!control_net_is_valid(span)) return false;
+    for (std::size_t i = 0; i < span.poles.size(); ++i) {
+        const double w = span.weights[i];
+        if (!std::isnormal(w)) return false;
+        for (int axis = 0; axis < 3; ++axis) {
+            const double p = span.poles[i].Coord(axis + 1);
+            if (p == 0.0) continue;
+            const double h = w * p;
+            // The de Casteljau recurrence carries w*P, not P. A product that
+            // underflows to zero or into the subnormal range silently deletes
+            // the coordinate: w = (2^-1074, 1), P = (1e-5, 2e-5) mm dehomogenizes
+            // its first endpoint to 0/w0 = 0 against an exact 1e-5 mm, which no
+            // relative-error enclosure can cover (verify §6).
+            if (!std::isnormal(h)) return false;
+        }
+    }
+    return true;
+}
+
 double pole_roundoff_multiplier(int depth, int degree) {
     if (depth < 0 || degree < 0) return std::numeric_limits<double>::infinity();
     const long long k = static_cast<long long>(depth) * (static_cast<long long>(degree) + 3) + 2;
@@ -358,11 +378,13 @@ void subdivide_homogeneous(const RationalBezierSpan& span, RationalBezierSpan& l
 }
 
 double hull_chord_bound(const RationalBezierSpan& span) {
-    if (span.poles.size() < 2) return 0.0;
     // followup §2 F6: `std::max(worst, NaN)` returns `worst`, so a single
     // non-finite pole used to hand back a ZERO bound for a net that bounds
-    // nothing. An invalid net has no hull certificate at all.
+    // nothing. An invalid net has no hull certificate at all. verify §6: the
+    // validation goes BEFORE the degenerate-size shortcut, so "invalid implies
+    // infinity" is universally true rather than true for nets of two or more.
     if (!control_net_is_valid(span)) return std::numeric_limits<double>::infinity();
+    if (span.poles.size() < 2) return 0.0;
     const gp_XYZ& a = span.poles.front();
     const gp_XYZ v = span.poles.back().Subtracted(a);
     const double len2 = v.SquareModulus();
@@ -392,11 +414,21 @@ namespace {
 // multiplies, and running it on absolute values is what makes it see the
 // cancellation the signed sum hides: Q = X'W - XW' for a curve with a constant
 // coordinate M cancels that coordinate exactly, so the computed coefficient is
-// ~0 while the terms behind it are ~M. K counts the roundings on the chain from
-// the input poles and weights to one coefficient — one for w_i*P_i, two for the
-// scaled difference, three for the binomial ratio, two per product term, at most
-// 2n accumulations and one final subtraction, i.e. at most 2n + 9. K = 3n + 16
-// keeps headroom over that count.
+// ~0 while the terms behind it are ~M.
+//
+// The operation count (verify §1, correcting an earlier "2n + 9" that left the
+// binomial table out): Pascal rows through 56 are exact, since their entries are
+// below 2^53, so only the denominator row 2n-1 rounds. With h = max(0, 2n - 57)
+// that row carries gamma_h and its reciprocal conservatively gamma_2h. Each
+// Bernstein product coefficient contains at most n terms, not 2n. A sufficient
+// SIGNED count is therefore L = n + 8 + 2h, and including the norm evaluations
+// and the final magnitude sum a sufficient MAGNITUDE count is H = L + 4. At
+// n = 32: L = 54, H = 58.
+//
+// K = 3n + 16 covers both: the coverage condition (1-u)^2 * gamma_K *
+// (1 - gamma_H) >= gamma_L holds with a ratio of at least 2.074 over n = 1..32,
+// which is also why the computed absolute sums need not themselves be rounded
+// outward here.
 struct DerivativeNumerator {
     std::vector<gp_XYZ> q;
     std::vector<double> uncertainty;
@@ -462,7 +494,7 @@ std::vector<gp_XYZ> derivative_numerator_bernstein(const RationalBezierSpan& spa
 }
 
 ConeVerdict tangent_cone_verdict(const RationalBezierSpan& span, double angularTol,
-                                 const gp_XYZ& axis) {
+                                 const gp_XYZ& axis, double poleEnclosureMm) {
     ConeVerdict verdict;
     verdict.uncertaintyRad = kPi;  // "nothing established" until the bound closes
     const DerivativeNumerator dn = derivative_numerator_with_uncertainty(span);
@@ -494,14 +526,37 @@ ConeVerdict tangent_cone_verdict(const RationalBezierSpan& span, double angularT
     // Q(0) and Q(1) are the first and last Bernstein coefficients, and they ARE
     // the curve's one-sided tangents there up to the positive factor W^2. Read
     // them out before anything can return early: the display-turn rule needs
-    // them at every join, including joins whose cone did not close.
-    auto unit_or_zero = [](const gp_XYZ& v) {
+    // them at every join, including joins whose cone did not close. Each carries
+    // its own enclosure, so the DIRECTION comes with an uncertainty half-angle
+    // asin(eps/||q||) — pi/2 once the enclosure swallows the coefficient, which
+    // is the only honest way to say "there is no tangent here" (verify §4).
+    auto direction_of = [](const gp_XYZ& v, double epsilon, gp_XYZ& unit, double& uncertainty) {
         const double len = v.Modulus();
-        if (!(len > 0.0) || !std::isfinite(len)) return gp_XYZ(0.0, 0.0, 0.0);
-        return v.Multiplied(1.0 / len);
+        if (!(len > 0.0) || !std::isfinite(len) || !std::isfinite(epsilon) || epsilon >= len) {
+            unit = gp_XYZ(0.0, 0.0, 0.0);
+            uncertainty = 0.5 * kPi;
+            return;
+        }
+        unit = v.Multiplied(1.0 / len);
+        uncertainty = std::asin(std::clamp(epsilon / len, 0.0, 1.0));
     };
-    verdict.startDirection = unit_or_zero(q.front());
-    verdict.endDirection = unit_or_zero(q.back());
+    direction_of(q.front(), dn.uncertainty.front(), verdict.startDirection,
+                 verdict.startDirectionUncertaintyRad);
+    direction_of(q.back(), dn.uncertainty.back(), verdict.endDirection,
+                 verdict.endDirectionUncertaintyRad);
+
+    // verify §2: a COMPUTED zero is not a proved zero, so it may not mint a
+    // singular vertex. Q(0) = n w_0 w_1 (P_1 - P_0) and Q(1) = n w_{n-1} w_n
+    // (P_n - P_{n-1}) EXACTLY, so the one thing that does prove the endpoint
+    // derivative vanishes is the two adjacent poles being bit-for-bit equal —
+    // no arithmetic is involved in that. Everything else that computes to zero
+    // is `Undefined`: evidence incomplete.
+    if (span.poles.size() >= 2) {
+        verdict.singularAtStart = span.poles[0].Subtracted(span.poles[1]).SquareModulus() == 0.0;
+        const std::size_t last = span.poles.size() - 1;
+        verdict.singularAtEnd =
+            span.poles[last].Subtracted(span.poles[last - 1]).SquareModulus() == 0.0;
+    }
 
     const double axisLength = axis.Modulus();
     if (!(axisLength > 0.0) || !std::isfinite(axisLength)) {
@@ -516,7 +571,6 @@ ConeVerdict tangent_cone_verdict(const RationalBezierSpan& span, double angularT
     double beta = 0.0;
     double pMin = std::numeric_limits<double>::infinity();
     double excludedPeak = 0.0;
-    double excludedNorm = 0.0;
     double worstUncertainty = 0.0;
     bool anyRetained = false;
     for (std::size_t k = 0; k < q.size(); ++k) {
@@ -524,10 +578,8 @@ ConeVerdict tangent_cone_verdict(const RationalBezierSpan& span, double angularT
         if (q[k].Modulus() == 0.0) {
             // followup §2 C2: ONLY an exactly zero coefficient may leave the
             // retained set, and even then its uncertainty is still charged
-            // through E — a computed floating-point zero is not a proved zero.
-            // At an END it IS Q(0) or Q(1), so no tangent exists there.
-            if (k == 0) verdict.singularAtStart = true;
-            if (static_cast<int>(k) == m) verdict.singularAtEnd = true;
+            // through E — a computed floating-point zero is not a proved zero,
+            // which is also why it mints no singular label here (verify §2).
             excludedPeak += bernstein_peak(m, static_cast<int>(k));
             continue;
         }
@@ -546,7 +598,20 @@ ConeVerdict tangent_cone_verdict(const RationalBezierSpan& span, double angularT
         }
     }
     verdict.coneHalfAngleRad = beta;
-    verdict.excludedMass = excludedNorm + worstUncertainty;
+    // verify §6 / R1(c) MAJOR 4: the coefficients were built FROM computed poles,
+    // and the positional enclosure says those poles may be off by delta. Perturb
+    // every pole by at most delta: x_i = w_i P_i moves by <= wmax*delta,
+    // dx_i = n(x_{i+1} - x_i) by <= 2n*wmax*delta, each Bernstein product
+    // coefficient by <= 2n*wmax^2*delta (the mixing weights sum to one), and
+    // q = X'W - XW' by at most the sum of the two, 4n*wmax^2*delta. That term is
+    // part of E, not a separate allowance.
+    double wMax = 0.0;
+    for (const double w : span.weights) wMax = std::max(wMax, std::abs(w));
+    const double poleTerm = std::isfinite(poleEnclosureMm)
+                                ? 4.0 * static_cast<double>(span.poles.size() - 1) * wMax * wMax *
+                                      poleEnclosureMm / qmax
+                                : std::numeric_limits<double>::infinity();
+    verdict.excludedMass = worstUncertainty + poleTerm;
     if (!anyRetained) {
         verdict.status = AngularStatus::Undefined;
         verdict.incompleteReason = "every derivative-numerator coefficient is exactly zero";
@@ -596,7 +661,8 @@ AngularStatus tangent_cone_status(const RationalBezierSpan& span, double angular
                                   bool& undefinedAtStart, bool& undefinedAtEnd) {
     gp_XYZ axis(0.0, 0.0, 0.0);
     if (span.poles.size() >= 2) axis = span.poles.back().Subtracted(span.poles.front());
-    const ConeVerdict verdict = tangent_cone_verdict(span, angularTol, axis);
+    const ConeVerdict verdict =
+        tangent_cone_verdict(span, angularTol, axis, pole_roundoff_enclosure(span));
     undefinedAtStart = verdict.singularAtStart;
     undefinedAtEnd = verdict.singularAtEnd;
     return verdict.status;
@@ -983,10 +1049,11 @@ struct Acceptance {
     AngularStatus geometricAngular = AngularStatus::Uncertified;
     bool singularAtStart = false;
     bool singularAtEnd = false;
-    bool singularBracket = false;
+    bool unresolvedRegion = false;
     gp_XYZ startTangent = gp_XYZ(0.0, 0.0, 0.0);
     gp_XYZ endTangent = gp_XYZ(0.0, 0.0, 0.0);
-    bool representationLimited = false;
+    double startTangentUncertainty = 0.5 * kPi;
+    double endTangentUncertainty = 0.5 * kPi;
     bool invalidNet = false;
     std::string reason;
 };
@@ -1007,13 +1074,23 @@ Acceptance evaluate_span(const RationalBezierSpan& span, double chordTolerance,
         verdict.reason = "the generated control net is not finite with positive weights";
         return verdict;
     }
+    if (!homogeneous_arithmetic_is_supported(span)) {
+        // verify §6: finite poles and positive weights are NOT enough. A
+        // homogeneous product that underflows deletes a coordinate outright, and
+        // no relative-error enclosure covers that.
+        verdict.invalidNet = true;
+        verdict.reason = "the span's homogeneous coordinates leave the normal floating-point "
+                         "range, so nothing computed from this net can be certified";
+        return verdict;
+    }
     verdict.chordBound = hull_chord_bound(span);
     verdict.chordLength = span.poles.back().Subtracted(span.poles.front()).Modulus();
 
     // followup §2 F6: the poles this bound is computed from are themselves
     // computed, so the enclosure of their roundoff is charged to the certificate.
     // Twice, because the chord the distance is measured to is built from two of
-    // those same uncertain poles.
+    // those same uncertain poles (verify §6: sharp for the computed chord,
+    // conservative for the exact curve against it).
     const double enclosure = pole_roundoff_enclosure(span);
     if (!std::isfinite(enclosure)) {
         verdict.invalidNet = true;
@@ -1029,10 +1106,7 @@ Acceptance evaluate_span(const RationalBezierSpan& span, double chordTolerance,
     // bounded error for an unbounded one.
     const double rho = span_representation_allowance(span);
     double budget = chordTolerance - callerAllowance - rho;
-    if (!(budget > 0.0)) {
-        verdict.representationLimited = true;
-        budget = chordTolerance - callerAllowance;
-    }
+    if (!(budget > 0.0)) budget = chordTolerance - callerAllowance;
     if (!(budget > 0.0)) return verdict;
     // The cone test builds a degree-2n-1 Bernstein product; skip it for a span
     // the chord certificate has already rejected.
@@ -1046,12 +1120,14 @@ Acceptance evaluate_span(const RationalBezierSpan& span, double chordTolerance,
     // chord and rotate it further, so it is published with the claim withdrawn,
     // never refused and never silently kept.
     const gp_XYZ doubleChord = span.poles.back().Subtracted(span.poles.front());
-    const ConeVerdict geometric = tangent_cone_verdict(span, angularTol, doubleChord);
+    const ConeVerdict geometric = tangent_cone_verdict(span, angularTol, doubleChord, enclosure);
     verdict.geometricAngular = geometric.status;
     verdict.singularAtStart = geometric.singularAtStart;
     verdict.singularAtEnd = geometric.singularAtEnd;
     verdict.startTangent = geometric.startDirection;
     verdict.endTangent = geometric.endDirection;
+    verdict.startTangentUncertainty = geometric.startDirectionUncertaintyRad;
+    verdict.endTangentUncertainty = geometric.endDirectionUncertaintyRad;
 
     const gp_XYZ emittedChord = encoded_chord(span);
     const double rotation = vector_angle(doubleChord, emittedChord);
@@ -1060,21 +1136,21 @@ Acceptance evaluate_span(const RationalBezierSpan& span, double chordTolerance,
     if (geometric.status == AngularStatus::Uncertified) {
         // The cone genuinely fails about the curve's own chord. Splitting is the
         // answer while it can help — and for an ordinary curve it always can.
-        // It cannot at a SINGULARITY, where the tangent reverses at a point and
-        // every containing span fails at every tolerance. followup §2 C1 is
-        // explicit that neither the cone failure nor the span's small size may
-        // authorise stopping on its own: the exemption needs BOTH the
-        // independently established bracket (no tested direction separates the
-        // coefficient hull from the origin, so Q may vanish inside) AND a span
-        // already below the positional resolution floor, where it is a vertex
-        // rather than a segment. A regular corner — a 0.05 mm quarter circle
-        // between two straights — has a separating direction and is refined.
+        // Below the positional resolution floor the span is a vertex rather than
+        // a segment and refining it changes nothing on screen, so subdivision
+        // stops. verify §3 REFUTED reading that as PROOF of a singularity: the
+        // regular straight cubic with poles (0, 1/3, 1/30, 11/30) has
+        // Q(t) >= 0.05 everywhere and still reverses its coefficient signs. So
+        // the leaf is published `Undefined` and LABELLED a possible unresolved
+        // region — it is exempt from nothing, and the emitted-turn rule is
+        // applied to its joins like any other.
         const double floor = budget * kAngularExhaustionFraction;
         if (geometric.reversalPresent && verdict.chordLength + verdict.chordBound <= floor) {
             verdict.angular = AngularStatus::Undefined;
-            verdict.singularBracket = true;
+            verdict.unresolvedRegion = true;
             verdict.accepted = true;
-            verdict.reason = "unresolved singular region below the positional resolution floor";
+            verdict.reason = "possible unresolved singular region below the positional "
+                             "resolution floor";
         }
         return verdict;
     }
@@ -1089,7 +1165,7 @@ Acceptance evaluate_span(const RationalBezierSpan& span, double chordTolerance,
         return verdict;
     }
 
-    const ConeVerdict emitted = tangent_cone_verdict(span, angularTol, emittedChord);
+    const ConeVerdict emitted = tangent_cone_verdict(span, angularTol, emittedChord, enclosure);
     verdict.angular = emitted.status == AngularStatus::Uncertified ? AngularStatus::Undefined
                                                                   : emitted.status;
     verdict.angularMargin = emitted.marginRad;
@@ -1119,38 +1195,75 @@ void record_leaf(const RationalBezierSpan& span, const Acceptance& verdict,
     leaf.encodedChordRotationRad = verdict.encodedChordRotation;
     leaf.singularVertexAtStart = verdict.singularAtStart;
     leaf.singularVertexAtEnd = verdict.singularAtEnd;
-    leaf.singularBracket = verdict.singularBracket;
     leaf.startTangent = verdict.startTangent;
     leaf.endTangent = verdict.endTangent;
+    leaf.startTangentUncertaintyRad = verdict.startTangentUncertainty;
+    leaf.endTangentUncertaintyRad = verdict.endTangentUncertainty;
+    leaf.startsAtSourceStart = span.at_source_start;
+    leaf.endsAtSourceEnd = span.at_source_end;
+    leaf.unresolvedRegion = verdict.unresolvedRegion;
     out.leaves.push_back(leaf);
 }
 
-// followup §2 C1: which joins the display-turn rule does NOT bind. A join is
-// exempt only where a singularity is established INDEPENDENTLY of the turn
-// itself — an exactly vanishing derivative numerator at that very parameter, or
-// an unresolved singular bracket on one side. A failed cone, a short leaf, or
-// incomplete arithmetic evidence authorises nothing.
-bool join_is_singular(const CurveLeaf& before, const CurveLeaf& after) {
-    return before.singularVertexAtEnd || after.singularVertexAtStart || before.singularBracket ||
-           after.singularBracket;
-}
-
-// followup §2 C1: the curve's OWN tangent jump J at a join, measured from the two
-// one-sided analytic tangents that meet there. Zero at a smooth join (a
-// subdivision boundary shares its split point, so both sides read the same Q),
-// the real corner angle at a C0 knot, and undefined where either side has no
-// tangent — in which case the join is already exempt.
-double genuine_tangent_jump(const CurveLeaf& before, const CurveLeaf& after) {
-    const double jump = vector_angle(before.endTangent, after.startTangent);
-    return jump >= 0.0 ? jump : 0.0;
-}
-
 // The turn between two consecutive EMITTED chords, or -1 when either encodes to
-// zero length.
+// zero length. EXACT on the emitted points up to the angle evaluation itself.
 double encoded_turn(const gp_Pnt& a, const gp_Pnt& b, const gp_Pnt& c) {
     const gp_XYZ ea = encode32(b).Subtracted(encode32(a));
     const gp_XYZ eb = encode32(c).Subtracted(encode32(b));
     return vector_angle(ea, eb);
+}
+
+// atan2(||a x b||, a.b) with both arguments carrying a relative error of at most
+// gamma_6 gives an angle within gamma_6 of the true one: the two partial
+// derivatives contribute 2*gamma_6*c*|d|/(c^2+d^2) <= gamma_6.
+double angle_evaluation_slack() { return gamma_k(6); }
+
+// verify §4 (D-b). The contract the tolerance bounds is the polyline's EXCESS
+// over the curve's own tangent jump J at the join. theta is exact on the emitted
+// points; J is COMPUTED, so it is an interval. Raising the threshold by J's
+// uncertainty would silently relax the contract, so the three outcomes are:
+//   Certified iff theta_upper <= tol + J_lower
+//   Violated  iff theta_lower >  tol + J_upper
+//   otherwise the join is Undefined — not certified, and not a reported defect.
+enum class JoinVerdict { Certified, Violated, Undefined };
+
+JoinVerdict classify_join(const CurveLeaf& before, const CurveLeaf& after, double turn,
+                          double angularTol, double& jLower, double& jUpper) {
+    const double slack = angle_evaluation_slack();
+    const double thetaLower = std::max(0.0, turn - slack);
+    const double thetaUpper = std::min(kPi, turn + slack);
+
+    const double etaBefore = before.endTangentUncertaintyRad;
+    const double etaAfter = after.startTangentUncertaintyRad;
+    const bool resolved = etaBefore >= 0.0 && etaAfter >= 0.0 && etaBefore < 0.5 * kPi &&
+                          etaAfter < 0.5 * kPi;
+    if (!resolved) {
+        // One side has no resolved tangent DIRECTION — the derivative numerator's
+        // enclosure swallows it. That is what a genuine cusp looks like, and it
+        // is the only honest reason a join escapes: J could be anything in
+        // [0, pi], so no excess can be established either way.
+        jLower = 0.0;
+        jUpper = kPi;
+    } else if (!before.endsAtSourceEnd) {
+        // Interior to ONE exact source span: both sides are the same analytic Q
+        // at the same parameter, so J = 0 is proved. Independently rounded child
+        // tangents need not agree numerically and must not weaken it.
+        jLower = 0.0;
+        jUpper = 0.0;
+    } else {
+        const double jHat = vector_angle(before.endTangent, after.startTangent);
+        if (jHat < 0.0) {
+            jLower = 0.0;
+            jUpper = kPi;
+        } else {
+            const double etaJ = etaBefore + etaAfter + slack;
+            jLower = std::max(0.0, jHat - etaJ);
+            jUpper = std::min(kPi, jHat + etaJ);
+        }
+    }
+    if (thetaUpper <= angularTol + jLower) return JoinVerdict::Certified;
+    if (thetaLower > angularTol + jUpper) return JoinVerdict::Violated;
+    return JoinVerdict::Undefined;
 }
 
 SubdivideOutcome subdivide_spans(const std::vector<RationalBezierSpan>& sources,
@@ -1190,24 +1303,30 @@ SubdivideOutcome subdivide_spans(const std::vector<RationalBezierSpan>& sources,
         // followup §2 C1: the display turn between the EMITTED chords is the
         // acceptance rule, not a by-product of the cone. Where the cone closed on
         // both sides the turn is within tolerance by construction, so this only
-        // ever bites at a join whose evidence was incomplete — check it directly
-        // and refine while refining can still help.
+        // ever bites at a join whose evidence was incomplete — refine on a
+        // DEFINITE violation, while refining can still help (verify §4: the
+        // three-way classification; verify D-d: this is a bounded repair
+        // heuristic and the final pass stays authoritative).
         bool refine_for_turn = false;
         if (verdict.accepted && !out.leaves.empty() && turnSplits < kTurnSplitAttempts) {
             CurveLeaf provisional;
-            provisional.singularVertexAtStart = verdict.singularAtStart;
-            provisional.singularBracket = verdict.singularBracket;
             provisional.startTangent = verdict.startTangent;
+            provisional.startTangentUncertaintyRad = verdict.startTangentUncertainty;
+            provisional.startsAtSourceStart = span.at_source_start;
+            provisional.angular = verdict.angular;
             const CurveLeaf& before = out.leaves.back();
-            if (!join_is_singular(before, provisional)) {
-                const double turn = encoded_turn(out.points[out.points.size() - 2],
-                                                 out.points.back(), gp_Pnt(span.poles.back()));
-                const double allowed = angularTol + genuine_tangent_jump(before, provisional);
+            const double turn = encoded_turn(out.points[out.points.size() - 2], out.points.back(),
+                                             gp_Pnt(span.poles.back()));
+            if (turn >= 0.0) {
+                double jLower = 0.0;
+                double jUpper = 0.0;
+                const JoinVerdict join =
+                    classify_join(before, provisional, turn, angularTol, jLower, jUpper);
                 const bool worth_splitting =
                     verdict.chordLength + verdict.chordBound > floor &&
                     !(before.angular == AngularStatus::Satisfied &&
                       verdict.angular == AngularStatus::Satisfied);
-                if (turn > allowed && worth_splitting) refine_for_turn = true;
+                if (join == JoinVerdict::Violated && worth_splitting) refine_for_turn = true;
             }
         }
 
@@ -1220,10 +1339,10 @@ SubdivideOutcome subdivide_spans(const std::vector<RationalBezierSpan>& sources,
             // negligible — inside the chord budget and below the resolution
             // floor, so on screen it is a vertex. Publishing it keeps a bounded
             // error where refusing would delete the edge outright. It gets NO
-            // singular label and NO exemption from the display-turn rule, so the
+            // singular label and no exemption from the display-turn rule, so the
             // angular quality it failed to reach is measured and reported rather
-            // than quietly claimed (followup §2 C1: the floor bounds an
-            // unresolved region, it never certifies one).
+            // than quietly claimed (followup §2 C1 + verify D-a: the floor bounds
+            // an unresolved region, it never certifies one).
             verdict.accepted = true;
             verdict.angular = AngularStatus::Undefined;
             verdict.angularMargin = -1.0;
@@ -1310,7 +1429,6 @@ bool edge_is_semantically_closed(const BRepAdaptor_Curve& curve, const Handle(Ge
 // no longer exists. Re-run it about the chord actually emitted.
 void recheck_leaf_after_endpoint_move(const RationalBezierSpan& span, double angularTol,
                                       const gp_Pnt& a, const gp_Pnt& b, CurveLeaf& leaf) {
-    if (leaf.singularBracket) return;  // its evidence is positional, not a cone
     const gp_XYZ chord = b.XYZ().Subtracted(a.XYZ());
     const gp_XYZ emitted = encode32(b).Subtracted(encode32(a));
     const double rotation = vector_angle(chord, emitted);
@@ -1320,10 +1438,13 @@ void recheck_leaf_after_endpoint_move(const RationalBezierSpan& span, double ang
         leaf.angularMarginRad = -1.0;
         return;
     }
-    const ConeVerdict verdict = tangent_cone_verdict(span, angularTol, emitted);
+    const ConeVerdict verdict =
+        tangent_cone_verdict(span, angularTol, emitted, pole_roundoff_enclosure(span));
     leaf.angular = verdict.status == AngularStatus::Uncertified ? AngularStatus::Undefined
                                                                 : verdict.status;
     leaf.angularMarginRad = verdict.marginRad;
+    leaf.startTangentUncertaintyRad = verdict.startDirectionUncertaintyRad;
+    leaf.endTangentUncertaintyRad = verdict.endDirectionUncertaintyRad;
 }
 
 // NUM §2.3: keep the analytic endpoints, so closure and seam identity survive
@@ -1389,18 +1510,18 @@ struct EncodedEvidence {
     bool turnViolation = false;
     bool zeroChord = false;
     double worstTurn = -1.0;
+    double worstViolation = 0.0;
     std::size_t violationJoin = 0;
-    std::size_t unmeasurableJoins = 0;
+    std::size_t conditionedJoins = 0;
 };
 
-// followup §2 F5 read as a MEASUREMENT bound rather than an acceptance rule: an
-// emitted chord of length L whose two endpoints were displaced by at most e- and
-// e+ by float32 rounding has a direction uncertain by asin((e- + e+)/L). This is
-// the derived quantity, from the MEASURED per-point displacement — not a
-// constant multiple of anything. When the two chords meeting at a join are each
-// so short that this uncertainty alone covers the whole allowance, the turn
-// there is rounding jitter between points a viewer cannot tell apart, and no
-// measurement of it can distinguish a real excess from noise.
+// followup §2 F5's chord-direction bound: an emitted chord of length L whose two
+// endpoints were displaced by at most e- and e+ has a direction uncertain by
+// asin((e- + e+)/L), from the MEASURED per-point displacement. verify §5 proves
+// that bound (coordinatewise rounding is monotone, so the original and encoded
+// chords cannot make an obtuse angle) and REFUTES the use this code used to put
+// it to: it bounds chord-vs-curve, NOT the emitted turn, which the emitted
+// vertices determine exactly. It survives only as a conditioning diagnostic.
 double encoded_direction_uncertainty(const gp_Pnt& a, const gp_Pnt& b) {
     const double length = encode32(b).Subtracted(encode32(a)).Modulus();
     if (!(length > 0.0)) return kPi;
@@ -1420,7 +1541,8 @@ EncodedEvidence apply_encoded_evidence(CurveSampleResult& out, double angularTol
         if (!(chord.Modulus() > 0.0)) {
             // A segment whose two emitted endpoints coincide has no direction at
             // all; the join it takes part in is skipped explicitly rather than
-            // measured from a zero vector.
+            // measured from a zero vector — and the coincidence is itself
+            // reported, so nothing is hidden by the skip.
             evidence.zeroChord = true;
             out.leaves[k].angular = AngularStatus::Undefined;
             out.leaves[k].angularMarginRad = -1.0;
@@ -1428,38 +1550,39 @@ EncodedEvidence apply_encoded_evidence(CurveSampleResult& out, double angularTol
     }
 
     for (std::size_t i = 1; i + 1 < out.points.size() && i < out.leaves.size(); ++i) {
-        if (join_is_singular(out.leaves[i - 1], out.leaves[i])) continue;
         const double turn = encoded_turn(out.points[i - 1], out.points[i], out.points[i + 1]);
-        if (turn < 0.0) continue;  // zero-length encoded chord, already recorded
-        // followup §2 C1: what the tolerance bounds is the polyline's EXCESS over
-        // the curve's own tangent jump at this join. A C0 knot really does turn
-        // 166 degrees and no refinement removes it; what must not happen is the
-        // POLYLINE adding more than the tolerance on top of it.
-        const double allowed = angularTol + genuine_tangent_jump(out.leaves[i - 1], out.leaves[i]);
-        const double noise = encoded_direction_uncertainty(out.points[i - 1], out.points[i]) +
-                             encoded_direction_uncertainty(out.points[i], out.points[i + 1]);
-        if (noise >= allowed) {
-            // Unmeasurable: the two chords are shorter than the rounding of their
-            // own endpoints, so this join is three points inside one float32
-            // cell. Both leaves keep `Undefined` — the claim is withdrawn — but a
-            // turn that carries no information is not reported as a defect.
-            ++evidence.unmeasurableJoins;
-            out.leaves[i - 1].angular = AngularStatus::Undefined;
-            out.leaves[i - 1].angularMarginRad = -1.0;
-            out.leaves[i].angular = AngularStatus::Undefined;
-            out.leaves[i].angularMarginRad = -1.0;
-            continue;
-        }
+        if (turn < 0.0) continue;  // a coincident emitted pair, already reported
+        // The emitted turn is measured at EVERY join and always enters the
+        // published maximum. verify §5: a large quantization bound establishes
+        // neither a large actual rotation nor an inability to measure this one.
         evidence.worstTurn = std::max(evidence.worstTurn, turn);
-        if (turn > allowed) {
-            if (!evidence.turnViolation) evidence.violationJoin = i;
+
+        double jLower = 0.0;
+        double jUpper = 0.0;
+        const JoinVerdict join =
+            classify_join(out.leaves[i - 1], out.leaves[i], turn, angularTol, jLower, jUpper);
+
+        // Conditioning diagnostic only, kept separate and reported.
+        const double conditioning =
+            encoded_direction_uncertainty(out.points[i - 1], out.points[i]) +
+            encoded_direction_uncertainty(out.points[i], out.points[i + 1]);
+        if (conditioning >= angularTol + jLower) ++evidence.conditionedJoins;
+
+        if (join == JoinVerdict::Certified) continue;
+        out.leaves[i - 1].angular = AngularStatus::Undefined;
+        out.leaves[i - 1].angularMarginRad = -1.0;
+        out.leaves[i].angular = AngularStatus::Undefined;
+        out.leaves[i].angularMarginRad = -1.0;
+        if (join == JoinVerdict::Violated) {
+            const double excess = turn - (angularTol + jUpper);
+            if (!evidence.turnViolation || excess > evidence.worstViolation) {
+                evidence.violationJoin = i;
+                evidence.worstViolation = excess;
+            }
             evidence.turnViolation = true;
-            out.leaves[i - 1].angular = AngularStatus::Undefined;
-            out.leaves[i - 1].angularMarginRad = -1.0;
-            out.leaves[i].angular = AngularStatus::Undefined;
-            out.leaves[i].angularMarginRad = -1.0;
         }
     }
+    out.quantizationConditionedJoins = evidence.conditionedJoins;
     out.encodedTurnMaxRad = evidence.worstTurn;
     return evidence;
 }
@@ -1545,14 +1668,22 @@ IndependentCheck independent_max_error(const BRepAdaptor_Curve& curve,
 
 std::string encoded_shortfall_text(const CurveSampleResult& out, const EncodedEvidence& encoded,
                                    double angularTol) {
-    return "float32 representation: measured quantization " + num_text(out.quantizationErrorMm) +
-           " mm; " +
-           (encoded.turnViolation
+    std::string text = "float32 representation: measured quantization " +
+                       num_text(out.quantizationErrorMm) + " mm; ";
+    text += encoded.turnViolation
                 ? "the emitted turn at join " +
-                      num_text(static_cast<double>(encoded.violationJoin)) + " is " +
-                      num_text(encoded.worstTurn) + " rad against the requested " +
-                      num_text(angularTol) + " rad"
-                : std::string("a segment's two emitted endpoints coincide"));
+                      num_text(static_cast<double>(encoded.violationJoin)) + " exceeds the "
+                      "requested " +
+                      num_text(angularTol) + " rad plus the curve's own jump by " +
+                      num_text(encoded.worstViolation) + " rad (greatest emitted turn " +
+                      num_text(encoded.worstTurn) + " rad)"
+                : std::string("a segment's two emitted endpoints coincide");
+    if (encoded.conditionedJoins > 0) {
+        text += "; " + num_text(static_cast<double>(encoded.conditionedJoins)) +
+                " join(s) are quantization-conditioned (their emitted chords are shorter than "
+                "the rounding of their own endpoints)";
+    }
+    return text;
 }
 
 CurveSampleResult failure(const std::string& reason) {
@@ -1593,6 +1724,7 @@ CurveSampleResult sample_edge_curve(const BRepAdaptor_Curve& curve,
     if (limits.remainingBodySegments < 1) {
         CurveSampleResult exhausted;
         exhausted.certification = CurveCertification::QualityLimited;
+        exhausted.qualityLimited = true;
         exhausted.diagnostic = "the per-body segment budget is exhausted";
         return stamp(std::move(exhausted));
     }
@@ -1634,6 +1766,7 @@ CurveSampleResult sample_edge_curve(const BRepAdaptor_Curve& curve,
             // endpoints would hand back a polyline with no bound at all.
             CurveSampleResult invalid;
             invalid.certification = CurveCertification::QualityLimited;
+            invalid.qualityLimited = true;
             invalid.diagnostic = outcome.diagnostic;
             return stamp(std::move(invalid));
         }
@@ -1642,6 +1775,7 @@ CurveSampleResult sample_edge_curve(const BRepAdaptor_Curve& curve,
             // straight chord in its place would be a lie (header contract).
             CurveSampleResult limited;
             limited.certification = CurveCertification::QualityLimited;
+            limited.qualityLimited = true;
             limited.diagnostic = outcome.diagnostic;
             return stamp(std::move(limited));
         }
@@ -1679,10 +1813,13 @@ CurveSampleResult sample_edge_curve(const BRepAdaptor_Curve& curve,
                                  : "GeomConvert_ApproxCurve fallback: sampled evidence only, and "
                                    "the independent check stopped at its evaluation cap";
             if (encoded.turnViolation || encoded.zeroChord) {
-                // The provenance is still the fallback, but the REQUESTED display
-                // quality was not reached, and that is the claim a consumer acts
-                // on. QualityLimited wins and the diagnostic keeps both facts.
-                out.certification = CurveCertification::QualityLimited;
+                // R1(c) MINOR 7, applied here for the same reason it applies to
+                // the doubling ladder: `KernelEstimated` is a PROVENANCE label
+                // and the quality verdict must not overwrite it. The shortfall
+                // rides `qualityLimited` and the diagnostic instead, so a
+                // consumer can see both that this came from an approximation and
+                // that the approximation did not reach the requested quality.
+                out.qualityLimited = true;
                 out.diagnostic += "; " + encoded_shortfall_text(out, encoded, angular);
             }
             return stamp(std::move(out));
@@ -1694,6 +1831,7 @@ CurveSampleResult sample_edge_curve(const BRepAdaptor_Curve& curve,
             // in the float32 representation, not in the curve. Publish the
             // double-certified geometry and say exactly what is wrong with it.
             out.certification = CurveCertification::QualityLimited;
+            out.qualityLimited = true;
             out.certifiedChordBoundMm = -1;
             out.diagnostic = encoded_shortfall_text(out, encoded, angular);
             return stamp(std::move(out));
@@ -1708,6 +1846,7 @@ CurveSampleResult sample_edge_curve(const BRepAdaptor_Curve& curve,
         // output format can carry. Publish it and say so (header contract:
         // QualityLimited WITH points means representation-limited, not capped).
         out.certification = CurveCertification::QualityLimited;
+        out.qualityLimited = true;
         out.certifiedChordBoundMm = -1;
         out.diagnostic = "float32 representation: measured quantization " +
                          num_text(out.quantizationErrorMm) + " mm plus the chord bound " +

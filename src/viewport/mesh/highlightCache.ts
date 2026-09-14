@@ -47,7 +47,19 @@ export const HIGHLIGHT_CACHE_MAX_ENTRIES = 256;
  * caller was granted; {@link HighlightCache.put} admits nothing larger.
  */
 export interface CacheReservation {
+  /**
+   * Budget bytes held. For a face set this is the PEAK — the outgoing buffer is
+   * still allocated while the new one is filled — which is roughly twice the
+   * resting size after a growth step.
+   */
   readonly bytes: number;
+  /**
+   * The exact resting bytes the caller's plan predicted, when it can predict
+   * them. {@link HighlightCache.put} admits only a value that matches, so a
+   * build that disagrees with its plan is caught instead of slipping through
+   * on the peak's slack (decision D5).
+   */
+  readonly expectedBytes?: number;
 }
 
 /** What kind of owned overlay a cache slot holds. */
@@ -137,7 +149,7 @@ export class HighlightCache {
    * allocates more than it priced is refused instead of quietly pushing the
    * occupancy over the ceiling (finding PR-04).
    */
-  reserve(bytes: number, reason: string): CacheReservation | null {
+  reserve(bytes: number, reason: string, expectedBytes?: number): CacheReservation | null {
     if (bytes > this.maxBytes) return this.refuse(bytes, reason);
     for (const [key, value] of this.slots) {
       if (this.totalBytes + bytes <= this.maxBytes && this.slots.size < this.maxEntries) break;
@@ -147,7 +159,7 @@ export class HighlightCache {
     if (this.totalBytes + bytes > this.maxBytes || this.slots.size >= this.maxEntries) {
       return this.refuse(bytes, reason);
     }
-    return { bytes };
+    return { bytes, expectedBytes };
   }
 
   private refuse(bytes: number, reason: string): null {
@@ -168,10 +180,15 @@ export class HighlightCache {
 
   /**
    * Insert an owned overlay against the receipt {@link reserve} issued. Does
-   * not evict — and REFUSES a value that outgrew its reservation, because the
-   * budget was checked against the receipt and nothing else has made room for
-   * the difference. The caller owns the geometry it built and must dispose it,
-   * then take the degraded path.
+   * not evict — and REFUSES a value that does not match its reservation,
+   * because the budget was checked against the receipt and nothing else has
+   * made room for a difference. The caller owns the geometry it built and must
+   * dispose it, then take the degraded path.
+   *
+   * Every refusal is NON-DESTRUCTIVE: the decision is taken before the slot
+   * already under this key is touched, and a PINNED slot is never replaced at
+   * all — something is drawing it, and both dropping it and silently
+   * overwriting the reference to it are ways of losing live geometry.
    */
   put(
     key: string,
@@ -179,19 +196,36 @@ export class HighlightCache {
     receipt: CacheReservation,
   ): HighlightCacheValue | undefined {
     const existing = this.slots.get(key);
-    if (existing) this.drop(key, existing);
-    if (value.bytes > receipt.bytes || this.totalBytes + value.bytes > this.maxBytes) {
+    // Only an unpinned same-key slot is about to be freed, so only its bytes
+    // may be counted as headroom for the ceiling check.
+    const freed = existing && existing.pinned === 0 ? existing.bytes : 0;
+    const mismatch =
+      receipt.expectedBytes === undefined
+        ? value.bytes > receipt.bytes
+        : value.bytes !== receipt.expectedBytes;
+    if (mismatch || this.totalBytes - freed + value.bytes > this.maxBytes) {
       this.degradedFlag = true;
-      logError("vp", "highlight overlay outgrew its reservation — refused", {
+      logError("vp", "highlight overlay does not match its reservation — refused", {
         key,
         kind: value.kind,
         reservedBytes: receipt.bytes,
+        plannedBytes: receipt.expectedBytes,
         actualBytes: value.bytes,
         bytes: this.totalBytes,
         maxBytes: this.maxBytes,
       });
       return undefined;
     }
+    if (existing && existing.pinned > 0) {
+      this.degradedFlag = true;
+      logError("vp", "highlight cache slot is displayed — refused", {
+        key,
+        kind: value.kind,
+        pinned: existing.pinned,
+      });
+      return undefined;
+    }
+    if (existing) this.drop(key, existing);
     this.slots.set(key, value);
     this.totalBytes += value.bytes;
     this.report();

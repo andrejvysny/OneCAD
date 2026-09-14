@@ -43,7 +43,12 @@ import { sketchStore } from "@/stores/sketchStore";
 import { toolChipStore } from "@/stores/toolChipStore";
 import { isInteractiveBoundary } from "@/ui/interactiveBoundary";
 import { applySketchSolveResult } from "./solveResult";
-import { promoteViewportPick, stalePickHint, type InstalledPickProof } from "@/ipc/promote";
+import {
+  promoteViewportPick,
+  stalePickHint,
+  STALE_PICK_HINT,
+  type InstalledPickProof,
+} from "@/ipc/promote";
 import { pickProofFor, proofFromHit } from "@/viewport/mesh/pickProof";
 import type { MeshEntry } from "@/viewport/mesh/meshRegistry";
 import { errorKind } from "@/ipc/apiError";
@@ -1054,8 +1059,14 @@ export class SketchController {
     // A pick is promoted to a minted ElementId by ViewportRoot; if that has not
     // landed yet, promote here rather than sending a snapshot-scoped TopoKey the
     // attachment could not survive an edit with.
-    const elementId = await this.promoteFace(pick);
-    if (!elementId) return { kind: "unresolved" };
+    const acquired = await this.promoteFace(pick);
+    // A STALE pick is refused out loud. "Unresolved" falls through silently —
+    // the user asked for a sketch, not for this face — but "the face you picked
+    // is out of date" is something only this flow can tell them, and the picker
+    // carries the reason into its own prompt.
+    if (acquired.kind === "stale") return { kind: "refused", reason: STALE_PICK_HINT };
+    if (acquired.kind === "none") return { kind: "unresolved" };
+    const elementId = acquired.elementId;
 
     // `topoKey` rides along: this id was just minted (never consumed by an op),
     // so it is genuinely absent from the worker's on-demand element-map
@@ -1081,24 +1092,45 @@ export class SketchController {
     };
   }
 
-  /** The pick's persistent ElementId, promoting the TopoKey on demand. */
-  private async promoteFace(pick: FacePickTarget): Promise<string | undefined> {
-    if (pick.elementId) return pick.elementId;
-    if (!pick.topoKey) return undefined;
-    // FAILS CLOSED (PR-01). A face with no pick-time proof is not a live
-    // viewport pick, and a sketch attached to a face promoted off a publication
-    // that is no longer installed is exactly the attachment this migration
-    // exists to prevent.
-    if (!pick.proof) {
-      stalePickHint();
-      return undefined;
+  /**
+   * The pick's persistent ElementId, promoting the picked label on demand.
+   *
+   * The rung is chosen by PROVENANCE, not by whether an id happens to be
+   * present (R1(a) BLOCKER 1):
+   *
+   *  - A pick that carries a PROOF came off a MESH1 id table. That table is
+   *    two-namespace: `Tessellate.cpp` substitutes the minted ElementId for any
+   *    element it already has a live binding for, so an `el_…` label is still a
+   *    label read off one particular publication — on a body whose replacement
+   *    failed it names an element the document has moved past. It therefore
+   *    clears the proof like any other pick, and `promoteViewportPick` answers
+   *    it with no wire call once it does.
+   *  - A pick with NO proof and a persistent id got that id from a regen
+   *    reconcile, which is the only path that strips a proof while keeping a
+   *    ref: it kept the ref precisely because the new mesh's id table (or the
+   *    backend) named that ElementId. That is authoritative and head-relative,
+   *    which is what `faceSketchPlane` resolves it against.
+   *  - Anything else fails closed.
+   */
+  private async promoteFace(
+    pick: FacePickTarget,
+  ): Promise<{ kind: "ok"; elementId: string } | { kind: "stale" } | { kind: "none" }> {
+    if (pick.proof) {
+      if (!pick.topoKey) return { kind: "stale" };
+      const promoted = await promoteViewportPick(this.deps.client, pick.proof, {
+        topoKey: pick.topoKey,
+        kind: "face",
+        anchor: pick.worldPoint ? { worldPoint: pick.worldPoint } : undefined,
+      });
+      return promoted?.elementId
+        ? { kind: "ok", elementId: promoted.elementId }
+        : { kind: "stale" };
     }
-    const promoted = await promoteViewportPick(this.deps.client, pick.proof, {
-      topoKey: pick.topoKey,
-      kind: "face",
-      anchor: pick.worldPoint ? { worldPoint: pick.worldPoint } : undefined,
-    });
-    return promoted?.elementId;
+    if (pick.elementId) return { kind: "ok", elementId: pick.elementId };
+    if (!pick.topoKey) return { kind: "none" };
+    // A snapshot-scoped label with nothing to vouch for it.
+    stalePickHint();
+    return { kind: "stale" };
   }
 
   /**

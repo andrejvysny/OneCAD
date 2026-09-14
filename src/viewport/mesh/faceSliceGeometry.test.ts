@@ -10,7 +10,6 @@ import { describe, it, expect, vi } from "vitest";
 import {
   buildFaceSetGeometry,
   buildTriangleRangeGeometry,
-  estimateFaceSetBytes,
   planFaceSetCapacity,
 } from "./faceSliceGeometry";
 import { buildBodyObjects, type MeshEntry } from "./meshRegistry";
@@ -156,14 +155,14 @@ describe("buildFaceSetGeometry", () => {
     entry.dispose();
   });
 
-  it("estimateFaceSetBytes bounds what the build will own", () => {
+  it("refuses to resurrect a disposed buffer", () => {
     const entry = fixtureEntry();
-    const estimate = estimateFaceSetBytes(entry, [1]);
     const owned = buildFaceSetGeometry(entry, [1]);
-
-    expect(owned.bytes).toBeLessThanOrEqual(estimate);
-    expect(estimate).toBe(7 * 3 * (3 * 4 + 4));
     owned.dispose();
+
+    // The cache disposes a slot THROUGH the owner precisely so a later update
+    // on a taken-then-dropped buffer cannot bring it back as live geometry.
+    expect(() => owned.update(entry, [0])).toThrow(/disposed/i);
     entry.dispose();
   });
 
@@ -200,10 +199,11 @@ describe("buildFaceSetGeometry", () => {
 });
 
 /*
- * D5 — the capacity PLAN (PR-04). The cache used to reserve
- * `estimateFaceSetBytes` and then charge whatever the ×1.5 growth rule actually
- * allocated, which is strictly larger whenever the buffer grows: 4 triangles
- * (192 B) followed by 5 (estimate 240 B) allocates 288 B. The plan is the one
+ * D5 — the capacity PLAN (PR-04). The cache used to reserve a naive
+ * per-triangle estimate (`triangles × 3 × 16 B`) and then charge whatever the
+ * ×1.5 growth rule actually allocated, which is strictly larger whenever the
+ * buffer grows: 4 triangles (192 B) followed by 5 (estimate 240 B) allocates
+ * 288 B. The plan is the one
  * authority for both numbers, and `peakBytes` also carries the outgoing buffer,
  * which is alive at the same time as the new one during the copy.
  */
@@ -250,16 +250,14 @@ describe("planFaceSetCapacity", () => {
     const entry = fourAndFiveTriangleEntry();
 
     const four = planFaceSetCapacity(entry, [0, 1, 2, 3]);
-    expect(estimateFaceSetBytes(entry, [0, 1, 2, 3])).toBe(192);
-    expect(four.bytes).toBe(192);
+    expect(four.bytes).toBe(192); // 4 triangles × 3 corners × 16 B — the old estimate too
     const owned = buildFaceSetGeometry(entry, [0, 1, 2, 3]);
     expect(owned.bytes).toBe(192);
 
     // The estimate says 240; the buffer the build will actually own is 288,
     // and 192 of the old one is still live while it is copied.
     const five = planFaceSetCapacity(entry, [0, 1, 2, 3, 4], owned);
-    expect(estimateFaceSetBytes(entry, [0, 1, 2, 3, 4])).toBe(240);
-    expect(five.bytes).toBe(288);
+    expect(five.bytes).toBe(288); // the retired estimate said 240
     expect(five.peakBytes).toBe(288 + 192);
     buildFaceSetGeometry(entry, [0, 1, 2, 3, 4], owned);
     expect(owned.bytes).toBe(288);

@@ -26,6 +26,7 @@
 #include <Geom_Ellipse.hxx>
 #include <Geom_OffsetCurve.hxx>
 #include <NCollection_Array1.hxx>
+#include <Standard_Failure.hxx>
 #include <TopExp.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
@@ -294,6 +295,31 @@ void check_encoded_rotation_matches_points(const CurveSampleResult& r, const std
             return;
         }
     }
+}
+
+// The greatest turn of the EMITTED float32 polyline, over every join whose two
+// chords have a direction at all. This is the quantity `encodedTurnMaxRad`
+// claims to be, measured here from the published points and nothing else.
+double independent_encoded_turn_max(const std::vector<gp_Pnt>& points) {
+    double worst = -1.0;
+    for (std::size_t i = 1; i + 1 < points.size(); ++i) {
+        const double turn = encoded_join_turn(points, i);
+        if (turn < 0.0) continue;
+        worst = std::max(worst, turn);
+    }
+    return worst;
+}
+
+// verify §5 / R1(c) Blocker 1: the emitted turn is EXACT on the emitted points.
+// `encodedTurnMaxRad` must equal an independent measurement of it — no join may
+// be dropped from the maximum on the grounds that its chords are short.
+void check_published_turn_matches_points(const CurveSampleResult& r, const std::string& label) {
+    const double measured = independent_encoded_turn_max(r.points);
+    if (measured < 0.0 && r.encodedTurnMaxRad < 0.0) return;
+    check(std::abs(r.encodedTurnMaxRad - measured) <= 1e-12 + 1e-9 * std::abs(measured),
+          label + ": encodedTurnMaxRad " + std::to_string(r.encodedTurnMaxRad) +
+              " must equal the independently measured emitted maximum " +
+              std::to_string(measured));
 }
 
 CurveSampleResult sample(const TopoDS_Edge& edge, double tolerance, double angular = kFiveDegrees,
@@ -1074,9 +1100,11 @@ void test_curve_07_offset_curve_fallback() {
                  "quantization %.3e mm (%s)\n",
                  static_cast<int>(far_result.certification), far_result.points.size(),
                  far_result.quantizationErrorMm, far_result.diagnostic.c_str());
-    check(far_result.certification == CurveCertification::QualityLimited,
+    check(far_result.certification == CurveCertification::KernelEstimated &&
+              far_result.qualityLimited,
           "TEST-CURVE-07: an approximation whose emitted segments cannot carry the requested "
-          "angular quality is QualityLimited, not KernelEstimated");
+          "angular quality keeps its PROVENANCE and reports the shortfall alongside it "
+          "(R1(c) MINOR 7), rather than having KernelEstimated overwritten");
     check(!far_result.points.empty(),
           "TEST-CURVE-07: and it still publishes its polyline — QualityLimited WITH points");
     check(far_result.diagnostic.find("ApproxCurve") != std::string::npos &&
@@ -1263,8 +1291,17 @@ void test_curve_05_non_dyadic_stationary_point() {
                  "TEST-CURVE-05: non-dyadic stationary point t*=0.4 -> certification %d, %zu "
                  "points, dense max error %.3e mm (%s)\n",
                  static_cast<int>(r.certification), r.points.size(), worst, r.diagnostic.c_str());
-    check(r.certification == CurveCertification::Certified,
-          "TEST-CURVE-05: a non-dyadic stationary point converges instead of hitting the cap");
+    // ROUND 3 FIX ROUND (verify §5). A cusp at t* = 0.4 never lands on a leaf
+    // boundary, so the leaf whose chord crosses it emits a 178 degree spike at a
+    // join where the curve's own jump J = 0 is PROVED. That is a real excess over
+    // the emitted-turn contract and it is now reported instead of suppressed —
+    // the POSITION certificate is untouched, which is why the polyline is still
+    // published and still inside its chord budget.
+    check(r.certification == CurveCertification::QualityLimited && !r.points.empty(),
+          "TEST-CURVE-05: a non-dyadic stationary point converges on its chord and reports the "
+          "emitted turn it cannot avoid");
+    check(r.diagnostic.find("emitted turn") != std::string::npos,
+          "TEST-CURVE-05: and the diagnostic names that turn (" + r.diagnostic + ")");
     check(worst <= 0.002,
           "TEST-CURVE-05: the non-dyadic stationary fixture is inside its chord budget (measured " +
               std::to_string(worst) + " mm)");
@@ -1617,8 +1654,26 @@ void test_curve_04_degenerate_weights_on_a_collinear_span() {
     std::fprintf(stderr, "TEST-CURVE-04: near-semicircle weights (1,1e-7,1) -> certification %d, "
                          "%zu points\n",
                  static_cast<int>(ra.certification), ra.points.size());
-    check(ra.certification == CurveCertification::Certified,
-          "TEST-CURVE-04: the near-semicircle weight pattern still converges");
+    // ROUND 3 FIX ROUND (verify §5, REFUTED suppression). This fixture's tail
+    // leaves are 1e-11 mm long at 0.1 mm coordinates — far under one float32
+    // ULP — so the EMITTED polyline really does turn 88 degrees there. The
+    // retired `noise >= allowed -> skip` branch hid exactly that, on the grounds
+    // that a bound on chord-vs-curve error was large. The emitted vertices
+    // determine the turn exactly, so it is measured, published and reported.
+    const double arc_error = dense_deviation_of_edge(arc_edge, ra.points, 8000);
+    std::fprintf(stderr,
+                 "TEST-CURVE-04: near-semicircle published turn %.4f deg, dense max error "
+                 "%.3e mm (%s)\n",
+                 ra.encodedTurnMaxRad * 180.0 / kPi, arc_error, ra.diagnostic.c_str());
+    check(ra.certification == CurveCertification::QualityLimited && !ra.points.empty(),
+          "TEST-CURVE-04: the near-semicircle weight pattern converges on its chord and reports "
+          "the emitted turn of its sub-ULP tail");
+    check(arc_error <= 0.01,
+          "TEST-CURVE-04: its POSITION is still inside the requested budget (measured " +
+              std::to_string(arc_error) + " mm)");
+    check(ra.diagnostic.find("quantization-conditioned") != std::string::npos,
+          "TEST-CURVE-04: and the conditioning of those joins is reported separately, not used "
+          "to erase them");
 }
 
 // --- ITEM 7: closure snapping is semantic, never distance-based --------------
@@ -1816,7 +1871,7 @@ void test_curve_08_c1_regular_corner_turns() {
         bool any_singular_label = false;
         for (const CurveLeaf& leaf : result.leaves) {
             any_singular_label = any_singular_label || leaf.singularVertexAtStart ||
-                                 leaf.singularVertexAtEnd || leaf.singularBracket;
+                                 leaf.singularVertexAtEnd || leaf.unresolvedRegion;
         }
         std::fprintf(stderr,
                      "TEST-CURVE-08: regular corner M=%.3g r=%.3g -> certification %d, %zu "
@@ -1884,7 +1939,7 @@ void test_curve_08_c1_genuine_cusp_bracket() {
     std::size_t brackets = 0;
     double widest_bracket = 0.0;
     for (const CurveLeaf& leaf : result.leaves) {
-        if (!leaf.singularBracket) continue;
+        if (!leaf.unresolvedRegion) continue;
         ++brackets;
         widest_bracket = std::max(widest_bracket, leaf.chordLengthMm + leaf.chordBoundMm);
         if (bracket_t0 < 0.0 || leaf.t0 < bracket_t0) bracket_t0 = leaf.t0;
@@ -1896,6 +1951,9 @@ void test_curve_08_c1_genuine_cusp_bracket() {
                  static_cast<int>(result.certification), result.points.size(), brackets,
                  bracket_t0, bracket_t1, widest_bracket, tolerance / 1024.0);
     check(result.points.size() > 4, "TEST-CURVE-08: the cusped cubic is sampled, not collapsed");
+    check(!result.points.empty(),
+          "TEST-CURVE-08: and it is published — the reported turn is an angular shortfall, not a "
+          "positional one");
     check(brackets >= 1,
           "TEST-CURVE-08: the reversal at t = 1/3 is bracketed as an unresolved singular region");
     check(bracket_t0 <= cusp && cusp <= bracket_t1,
@@ -1904,11 +1962,20 @@ void test_curve_08_c1_genuine_cusp_bracket() {
           "TEST-CURVE-08: the bracket is bounded by the positional resolution floor (measured " +
               std::to_string(widest_bracket) + " mm)");
 
-    // The turn rule binds at every join OUTSIDE the bracket.
+    // FIX ROUND (verify §3/§4): the label exempts NOTHING. What excuses the two
+    // joins around a cusp is that the one-sided tangent DIRECTIONS there are not
+    // resolved — the derivative-numerator enclosure swallows the coefficient — so
+    // J's interval is the whole [0, pi] and no excess can be established either
+    // way. Every join whose two tangents ARE resolved is held to the tier.
     double worst_outside = 0.0;
+    bool bracket_join_reported = false;
     for (std::size_t i = 1; i + 1 < result.points.size() && i < result.leaves.size(); ++i) {
-        if (result.leaves[i - 1].singularBracket || result.leaves[i].singularBracket) continue;
-        if (result.leaves[i - 1].singularVertexAtEnd || result.leaves[i].singularVertexAtStart) {
+        if (result.leaves[i - 1].unresolvedRegion || result.leaves[i].unresolvedRegion) {
+            // A join touching the unresolved region. Its turn is NOT excused —
+            // the label carries no exemption — it is simply the one place this
+            // fixture cannot meet the tier.
+            bracket_join_reported =
+                bracket_join_reported || encoded_join_turn(result.points, i) > kFiveDegrees;
             continue;
         }
         worst_outside = std::max(worst_outside, encoded_join_turn(result.points, i));
@@ -1916,8 +1983,15 @@ void test_curve_08_c1_genuine_cusp_bracket() {
     std::fprintf(stderr, "TEST-CURVE-08: cusp fixture greatest turn outside the bracket %.4f deg\n",
                  degrees(worst_outside));
     check(worst_outside <= kFiveDegrees * 1.0001,
-          "TEST-CURVE-08: away from the bracketed cusp the 5 degree tier still binds (measured " +
+          "TEST-CURVE-08: away from the unresolved region the 5 degree tier still binds "
+          "(measured " +
               std::to_string(degrees(worst_outside)) + " deg)");
+    check(bracket_join_reported && result.certification != CurveCertification::Certified &&
+              result.diagnostic.find("emitted turn") != std::string::npos,
+          "TEST-CURVE-08: and the turn at the unresolved region's own join is REPORTED, not "
+          "excused by the label (" +
+              result.diagnostic + ")");
+    check_published_turn_matches_points(result, "TEST-CURVE-08: cusp fixture");
     const double positional = dense_deviation(
         [&](double t) { return rational_bezier_point(poles, weights, t); }, 0.0, 1.0,
         result.points, 8000);
@@ -1945,7 +2019,7 @@ void test_curve_08_c1_oracle_integrity() {
           "TEST-CURVE-08: the fixture really does sit under the positional resolution floor");
     bool any_label = false;
     for (const CurveLeaf& leaf : r.leaves) {
-        any_label = any_label || leaf.singularBracket || leaf.singularVertexAtStart ||
+        any_label = any_label || leaf.unresolvedRegion || leaf.singularVertexAtStart ||
                     leaf.singularVertexAtEnd;
     }
     check(!any_label,
@@ -2050,7 +2124,8 @@ void test_curve_08_c2_four_regimes() {
         span.poles = {gp_XYZ(0, 0, 0), gp_XYZ(1, 0, 0), gp_XYZ(2, 0, 0)};
         span.weights = {1.0, 1.0, 1.0};
         const onecad::tess::ConeVerdict v =
-            onecad::tess::tangent_cone_verdict(span, kFiveDegrees, gp_XYZ(1, 0, 0));
+            onecad::tess::tangent_cone_verdict(span, kFiveDegrees, gp_XYZ(1, 0, 0),
+                                              onecad::tess::pole_roundoff_enclosure(span));
         std::fprintf(stderr,
                      "TEST-CURVE-08: C2 passing regime -> status %d, beta %.3e, E %.3e, g %.3e, "
                      "margin %.6f rad\n",
@@ -2067,7 +2142,8 @@ void test_curve_08_c2_four_regimes() {
         span.poles = {gp_XYZ(0, 0, 0), gp_XYZ(0, 0, 0), gp_XYZ(1, 2, 0), gp_XYZ(2, 0, 0)};
         span.weights = {1.0, 1.0, 1.0, 1.0};
         const onecad::tess::ConeVerdict v =
-            onecad::tess::tangent_cone_verdict(span, 3.0, gp_XYZ(2, 0, 0));
+            onecad::tess::tangent_cone_verdict(span, 3.0, gp_XYZ(2, 0, 0),
+                                              onecad::tess::pole_roundoff_enclosure(span));
         std::fprintf(stderr,
                      "TEST-CURVE-08: C2 vanishing-mass regime -> status %d, s_min %.3e, "
                      "singularAtStart %d (%s)\n",
@@ -2095,7 +2171,8 @@ void test_curve_08_c2_four_regimes() {
             span.poles = {gp_XYZ(1e9, 0, 0), gp_XYZ(1e9, d, 0), gp_XYZ(1e9, 2 * d, 0)};
             span.weights = {1.0, 0.8, 1.0};
             const onecad::tess::ConeVerdict v =
-                onecad::tess::tangent_cone_verdict(span, kFiveDegrees, gp_XYZ(0, 1, 0));
+                onecad::tess::tangent_cone_verdict(span, kFiveDegrees, gp_XYZ(0, 1, 0),
+                                              onecad::tess::pole_roundoff_enclosure(span));
             const std::string reason = v.incompleteReason ? v.incompleteReason : "";
             if (v.status == AngularStatus::Satisfied) {
                 saw_pass = true;
@@ -2166,6 +2243,8 @@ void test_curve_08_c2_determinism() {
                      a.certification == b.certification &&
                      a.quantizationErrorMm == b.quantizationErrorMm &&
                      a.encodedTurnMaxRad == b.encodedTurnMaxRad &&
+                     a.quantizationConditionedJoins == b.quantizationConditionedJoins &&
+                     a.qualityLimited == b.qualityLimited &&
                      a.singularParameters == b.singularParameters;
     for (std::size_t i = 0; identical && i < a.points.size(); ++i) {
         identical = a.points[i].X() == b.points[i].X() && a.points[i].Y() == b.points[i].Y() &&
@@ -2177,7 +2256,12 @@ void test_curve_08_c2_determinism() {
                     a.leaves[i].angular == b.leaves[i].angular &&
                     a.leaves[i].angularMarginRad == b.leaves[i].angularMarginRad &&
                     a.leaves[i].encodedChordRotationRad == b.leaves[i].encodedChordRotationRad &&
-                    a.leaves[i].singularBracket == b.leaves[i].singularBracket;
+                    a.leaves[i].startTangentUncertaintyRad ==
+                        b.leaves[i].startTangentUncertaintyRad &&
+                    a.leaves[i].endTangentUncertaintyRad == b.leaves[i].endTangentUncertaintyRad &&
+                    a.leaves[i].startsAtSourceStart == b.leaves[i].startsAtSourceStart &&
+                    a.leaves[i].endsAtSourceEnd == b.leaves[i].endsAtSourceEnd &&
+                    a.leaves[i].unresolvedRegion == b.leaves[i].unresolvedRegion;
     }
     check(identical,
           "TEST-CURVE-08: identical requests reproduce the points AND the evidence exactly");
@@ -2234,7 +2318,7 @@ void test_curve_08_f5_encoded_chord_withdraws_the_angular_claim() {
           "TEST-CURVE-08: the fixture really does pass the RETIRED 16x length rule, which is why "
           "that rule had to be replaced rather than supplemented");
     check(!r.leaves.empty() && !r.leaves.front().singularVertexAtStart &&
-              !r.leaves.front().singularVertexAtEnd && !r.leaves.front().singularBracket,
+              !r.leaves.front().singularVertexAtEnd && !r.leaves.front().unresolvedRegion,
           "TEST-CURVE-08: an encoding limit is not a singularity");
 }
 
@@ -2343,9 +2427,11 @@ void test_curve_08_f6_invalid_control_nets_never_certify() {
         check(std::isinf(onecad::tess::hull_chord_bound(underflowed)),
               "TEST-CURVE-08: and it has no hull certificate at all");
     }
-    // The same weights through the real conversion: the scaling is abandoned
-    // rather than allowed to underflow, and nothing is certified on a net the
-    // arithmetic cannot support — even though both analytic endpoints are finite.
+    // The same weights through the real conversion. Round 3 stopped the scaling
+    // from underflowing in the first place, so this net is now SUPPORTED and is
+    // sampled honestly; what it demonstrates is that the guard works, and the
+    // separate subnormal fixture in TEST-CURVE-09 covers a net that genuinely
+    // cannot be supported.
     {
         NCollection_Array1<gp_Pnt> poles(1, 3);
         poles.SetValue(1, gp_Pnt(0.0, 0.0, 0.0));
@@ -2371,10 +2457,27 @@ void test_curve_08_f6_invalid_control_nets_never_certify() {
                   std::isfinite(last.Y()),
               "TEST-CURVE-08: the fixture's own analytic endpoints ARE finite, which is what made "
               "the underflow invisible");
-        check(r.certification != CurveCertification::Certified,
-              "TEST-CURVE-08: a normalisation underflow can never end in a certified result");
+        RationalBezierSpan raw;
+        for (int i = 1; i <= 3; ++i) {
+            raw.poles.push_back(poles.Value(i).XYZ());
+            raw.weights.push_back(weights.Value(i));
+        }
+        check(onecad::tess::homogeneous_arithmetic_is_supported(raw),
+              "TEST-CURVE-08: with the normalisation guard in place this net never underflows");
+        std::vector<gp_XYZ> p;
+        std::vector<double> w;
+        for (int i = 1; i <= 3; ++i) {
+            p.push_back(poles.Value(i).XYZ());
+            w.push_back(weights.Value(i));
+        }
+        const double worst = dense_deviation(
+            [&](double t) { return rational_bezier_point(p, w, t); }, 0.0, 1.0, r.points, 8000);
         check(all_finite(r.points),
               "TEST-CURVE-08: and it never emits a non-finite point either");
+        check(worst <= 0.05,
+              "TEST-CURVE-08: the polyline it does emit is inside the requested budget, measured "
+              "against an independent rational evaluation (" +
+                  std::to_string(worst) + " mm)");
     }
 }
 
@@ -2695,6 +2798,392 @@ void test_curve_08_doubling_ladder_separates_requested_from_achieved() {
               std::to_string(positional) + " mm)");
 }
 
+
+// ===========================================================================
+// ROUND 3 FIX ROUND — the local adversarial review R1(c) and the Astra `verify`
+// (docs/design/astra/wp08-curve-sampler-verify.md). Every construction that was
+// REFUTED there gets its counterexample as a fixture here.
+// ===========================================================================
+
+// --- FIX / verify §5 + R1(c) Blocker 1 ---------------------------------------
+
+// A 0.1 mm circle in the XY plane at X = 8192 mm: float32 spacing there is
+// 2^-10 = 0.0009765625 mm, so a chord of a few thousandths of a millimetre is a
+// handful of ULPs and the EMITTED polyline zig-zags by up to 90 degrees. The
+// positional certificate is untouched by that — every emitted point is within
+// half an ULP of the curve — but the emitted TURN contract is violated, and the
+// retired `noise >= allowed -> skip` branch suppressed exactly the joins that
+// prove it: the sampler published `Certified` with encodedTurnMaxRad = 0.0837 rad
+// while the polyline turned 1.54 rad.
+TopoDS_Edge quantized_small_circle() {
+    Handle(Geom_Circle) circle =
+        new Geom_Circle(gp_Ax2(gp_Pnt(8192.0, 0.0, 0.0), gp_Dir(0, 0, 1)), 0.1);
+    return BRepBuilderAPI_MakeEdge(Handle(Geom_Curve)(circle)).Edge();
+}
+
+void test_curve_09_emitted_turn_is_never_suppressed() {
+    const TopoDS_Edge edge = quantized_small_circle();
+    // The three display tiers' (linear, angular) pairs for a 50 mm body.
+    const double tiers[3][2] = {{0.5, 0.5}, {0.15, 0.21}, {0.025, kFiveDegrees}};
+    const char* names[3] = {"coarse", "medium", "fine"};
+    int tiers_seen[2] = {0, 0};
+    for (int i = 0; i < 3; ++i) {
+        const CurveSampleResult r = sample(edge, tiers[i][0], tiers[i][1]);
+        const double measured = independent_encoded_turn_max(r.points);
+        std::size_t over = 0;
+        for (std::size_t k = 1; k + 1 < r.points.size(); ++k) {
+            const double turn = encoded_join_turn(r.points, k);
+            if (turn >= 0.0 && turn > tiers[i][1]) ++over;
+        }
+        std::fprintf(stderr,
+                     "TEST-CURVE-09: r=0.1 circle at X=8192, %s tier -> certification %d, %zu "
+                     "points, %zu joins past the tier, published turn %.6f rad, INDEPENDENT "
+                     "maximum %.6f rad, quantization-conditioned joins %zu (%s)\n",
+                     names[i], static_cast<int>(r.certification), r.points.size(), over,
+                     r.encodedTurnMaxRad, measured, r.quantizationConditionedJoins,
+                     r.diagnostic.c_str());
+        const std::string label = std::string("TEST-CURVE-09: X=8192 circle, ") + names[i];
+        // The published maximum must be the measured one at EVERY tier, whether
+        // or not the tier was met. Suppressing a join because its chords are
+        // short is what let this fixture publish `Certified` with a 0.084 rad
+        // maximum while the polyline turned 1.54 rad.
+        check_published_turn_matches_points(r, label);
+        if (over > 0) {
+            check(r.certification != CurveCertification::Certified,
+                  label + ": an emitted turn past the tier can never be published as Certified — "
+                          "the turn is EXACT on the emitted points, so a large quantization bound "
+                          "proves nothing about it");
+            check(!r.diagnostic.empty(), label + ": and the result says what is wrong with it");
+            check(r.quantizationConditionedJoins > 0 &&
+                      r.diagnostic.find("quantization-conditioned") != std::string::npos,
+                  label + ": the conditioning count is REPORTED as its own diagnostic rather than "
+                          "used to suppress the turn");
+        } else {
+            check(measured <= tiers[i][1] * 1.0001,
+                  label + ": where no join passes the tier, the polyline really does meet it "
+                          "(measured " +
+                      std::to_string(degrees(measured)) + " deg against " +
+                      std::to_string(degrees(tiers[i][1])) + " deg)");
+        }
+        ++tiers_seen[over > 0 ? 1 : 0];
+    }
+    check(tiers_seen[1] > 0,
+          "TEST-CURVE-09: at its finest tier the fixture really is beyond repair — the emitted "
+          "chords are a few ULPs long and no refinement makes their directions better");
+    check(tiers_seen[0] > 0,
+          "TEST-CURVE-09: and at its coarser tiers the turn rule REPAIRS the polyline instead of "
+          "reporting it, which is what deleting the suppression made possible");
+}
+
+// --- FIX / verify §3 (REFUTED): coefficient reversal is not a singularity -----
+
+// Astra's counterexample. The scalar cubic with unit weights and poles
+// (0, 1/3, 1/30, 11/30) has Q(t) = 1 - 3.8t + 3.8t^2 >= 0.05 everywhere — a
+// regular, monotonically traversed STRAIGHT LINE — yet its degree-5 Bernstein
+// coefficients (1, 0.24, -0.14, -0.14, 0.24, 1) change sign. Scaled to 1e-4 mm
+// its chord is 3.667e-5 mm, under the fine floor of 4.883e-5 mm, so the retired
+// floor-plus-reversal rule labelled it a singular bracket and exempted its joins
+// from the emitted-turn rule.
+void test_curve_09_reversal_is_not_singularity_evidence() {
+    for (const double scale : {1.0, 1e-4}) {
+        std::vector<gp_XYZ> poles = {gp_XYZ(0.0, 0.0, 0.0), gp_XYZ(scale / 3.0, 0.0, 0.0),
+                                     gp_XYZ(scale / 30.0, 0.0, 0.0),
+                                     gp_XYZ(scale * 11.0 / 30.0, 0.0, 0.0)};
+        std::vector<double> weights = {1.0, 1.0, 1.0, 1.0};
+        RationalBezierSpan span;
+        span.poles = poles;
+        span.weights = weights;
+
+        // INDEPENDENT: Q(t) = 3 * scale * (1 - 3.8t + 3.8t^2), whose minimum over
+        // [0,1] is at t = 0.5 and equals 0.05 * 3 * scale > 0. The curve never
+        // stops and never reverses.
+        double q_min = 1e300;
+        for (int i = 0; i <= 1000; ++i) {
+            const double t = static_cast<double>(i) / 1000.0;
+            q_min = std::min(q_min, 1.0 - 3.8 * t + 3.8 * t * t);
+        }
+        check(q_min > 0.049,
+              "TEST-CURVE-09: the reversal counterexample's derivative never vanishes (minimum " +
+                  std::to_string(q_min) + ")");
+
+        // INDEPENDENT: its degree-5 Bernstein coefficients nevertheless change sign.
+        const std::vector<gp_XYZ> q = onecad::tess::derivative_numerator_bernstein(span);
+        bool positive = false;
+        bool negative = false;
+        for (const gp_XYZ& c : q) {
+            if (c.X() > 0.0) positive = true;
+            if (c.X() < 0.0) negative = true;
+        }
+        check(q.size() == 6 && positive && negative,
+              "TEST-CURVE-09: and its degree-5 coefficients really do change sign");
+
+        NCollection_Array1<gp_Pnt> occt(1, 4);
+        for (int i = 0; i < 4; ++i) occt.SetValue(i + 1, gp_Pnt(poles[static_cast<std::size_t>(i)]));
+        Handle(Geom_BezierCurve) bezier = new Geom_BezierCurve(occt);
+        const TopoDS_Edge real_edge = BRepBuilderAPI_MakeEdge(Handle(Geom_Curve)(bezier)).Edge();
+        const double tolerance = 0.05;
+        const CurveSampleResult r = sample(real_edge, tolerance);
+        const double chord = scale * 11.0 / 30.0;
+        std::size_t exempt_labels = 0;
+        for (const CurveLeaf& leaf : r.leaves) {
+            if (leaf.singularVertexAtStart || leaf.singularVertexAtEnd) ++exempt_labels;
+        }
+        std::fprintf(stderr,
+                     "TEST-CURVE-09: reversal counterexample at scale %.0e -> certification %d, "
+                     "%zu points, chord %.4e mm vs fine floor %.4e mm, singular vertex labels "
+                     "%zu, published turn %.6f rad\n",
+                     scale, static_cast<int>(r.certification), r.points.size(), chord,
+                     tolerance / 1024.0, exempt_labels, r.encodedTurnMaxRad);
+        const std::string label =
+            "TEST-CURVE-09: reversal counterexample at scale " + num_string(scale);
+        check(exempt_labels == 0,
+              label + ": a REGULAR straight line gets no singular vertex label, whatever its "
+                      "coefficients do");
+        check_published_turn_matches_points(r, label);
+        const double measured = independent_encoded_turn_max(r.points);
+        check(measured <= kFiveDegrees * 1.0001 || r.certification != CurveCertification::Certified,
+              label + ": the emitted-turn rule is APPLIED to it — either it meets the tier or the "
+                      "result is not Certified (measured " +
+                  std::to_string(degrees(measured)) + " deg)");
+    }
+}
+
+// --- FIX / verify §4 (D-b): the genuine tangent jump J needs an interval ------
+
+void test_curve_09_j_is_an_interval_not_a_number() {
+    // A real C0 corner: the F07 spline turns about 166 degrees at knot 1.0, and
+    // its one-sided tangents there are both WELL RESOLVED, so J's interval is
+    // tight and the join still passes.
+    Handle(Geom_BSplineCurve) spline = f07_spline();
+    const TopoDS_Edge edge = BRepBuilderAPI_MakeEdge(Handle(Geom_Curve)(spline)).Edge();
+    const CurveSampleResult r = sample(edge, 0.01);
+    std::size_t corner = 0;
+    double corner_turn = 0.0;
+    for (std::size_t i = 1; i + 1 < r.points.size() && i < r.leaves.size(); ++i) {
+        const double turn = encoded_join_turn(r.points, i);
+        if (turn > corner_turn) {
+            corner_turn = turn;
+            corner = i;
+        }
+    }
+    double jump = -1.0;
+    double jump_uncertainty = -1.0;
+    if (corner > 0 && corner < r.leaves.size()) {
+        jump = angle_between(r.leaves[corner - 1].endTangent, r.leaves[corner].startTangent);
+        jump_uncertainty = r.leaves[corner - 1].endTangentUncertaintyRad +
+                           r.leaves[corner].startTangentUncertaintyRad;
+    }
+    std::fprintf(stderr,
+                 "TEST-CURVE-09: F07 C0 join %zu -> emitted turn %.4f deg, computed J %.4f deg, "
+                 "J uncertainty %.3e rad, certification %d\n",
+                 corner, degrees(corner_turn), degrees(jump), jump_uncertainty,
+                 static_cast<int>(r.certification));
+    check(degrees(corner_turn) > 150.0,
+          "TEST-CURVE-09: the F07 fixture really does carry a ~166 degree C0 corner");
+    check(jump_uncertainty >= 0.0 && jump_uncertainty < 1e-6,
+          "TEST-CURVE-09: both one-sided tangents at that corner are well resolved, so J's "
+          "interval is tight (measured " +
+              std::to_string(jump_uncertainty) + " rad)");
+    check(r.certification == CurveCertification::Certified,
+          "TEST-CURVE-09: a genuine C0 corner with a tight J interval still certifies");
+    check_published_turn_matches_points(r, "TEST-CURVE-09: F07 C0 corner");
+
+    // A cusp AT a leaf boundary: Q vanishes at that very parameter, so BOTH
+    // one-sided coefficients compute to ~0, their directions are unresolved, J's
+    // interval is the whole [0, pi] — and the 180 degree turn there is neither
+    // certified nor reported as a violation. This is the J interval doing the
+    // work the retired `singularBracket` exemption used to do, on evidence about
+    // the CURVE rather than on a sign pattern in the coefficients.
+    Handle(Geom_BezierCurve) dyadic = polynomial_cubic(gp_Pnt(0, 0, 0), gp_Pnt(1, 1, 0),
+                                                       gp_Pnt(0, 1, 0), gp_Pnt(1, 0, 0));
+    const TopoDS_Edge dyadic_edge = BRepBuilderAPI_MakeEdge(Handle(Geom_Curve)(dyadic)).Edge();
+    const CurveSampleResult rd = sample(dyadic_edge, 0.001);
+    double widest_j_interval = 0.0;
+    double turn_at_widest = 0.0;
+    for (std::size_t i = 1; i + 1 < rd.points.size() && i < rd.leaves.size(); ++i) {
+        const double eta = rd.leaves[i - 1].endTangentUncertaintyRad +
+                           rd.leaves[i].startTangentUncertaintyRad;
+        if (eta > widest_j_interval) {
+            widest_j_interval = eta;
+            turn_at_widest = encoded_join_turn(rd.points, i);
+        }
+    }
+    std::fprintf(stderr,
+                 "TEST-CURVE-09: cusp at a dyadic parameter -> certification %d, widest J "
+                 "half-interval %.4f rad at a join turning %.2f deg, published turn %.6f rad\n",
+                 static_cast<int>(rd.certification), widest_j_interval, degrees(turn_at_widest),
+                 rd.encodedTurnMaxRad);
+    check(widest_j_interval >= 0.5 * kPi,
+          "TEST-CURVE-09: where Q vanishes ON a join, the one-sided tangent DIRECTIONS are "
+          "unresolved and J's interval opens to [0, pi] (measured " +
+              std::to_string(widest_j_interval) + " rad)");
+    check(rd.certification == CurveCertification::Certified,
+          "TEST-CURVE-09: so the cusp's own 180 degree turn is not reported as a defect");
+    check_published_turn_matches_points(rd, "TEST-CURVE-09: dyadic cusp");
+
+    // The SAME cusp at a non-dyadic parameter never lands on a join: it sits
+    // inside a leaf whose chord crosses it, so the neighbouring join has a proved
+    // J = 0 and a 180 degree emitted turn. That IS an excess over the curve's own
+    // jump at that vertex, and it is reported rather than excused.
+    Handle(Geom_BezierCurve) cusp = polynomial_cubic(gp_Pnt(1, -1, 0), gp_Pnt(-1, 2, 0),
+                                                     gp_Pnt(0, -4, 0), gp_Pnt(4, 8, 0));
+    const TopoDS_Edge cusp_edge = BRepBuilderAPI_MakeEdge(Handle(Geom_Curve)(cusp)).Edge();
+    const CurveSampleResult rc = sample(cusp_edge, 0.002);
+    std::fprintf(stderr,
+                 "TEST-CURVE-09: cusp at t=1/3 (non-dyadic) -> certification %d, %zu leaves, "
+                 "published turn %.6f rad (%s)\n",
+                 static_cast<int>(rc.certification), rc.leaves.size(), rc.encodedTurnMaxRad,
+                 rc.diagnostic.c_str());
+    check(rc.certification != CurveCertification::Certified &&
+              rc.diagnostic.find("emitted turn") != std::string::npos,
+          "TEST-CURVE-09: a 180 degree emitted turn at a join where J = 0 is PROVED is reported, "
+          "whatever the leaf next to it could not resolve");
+    check(!rc.points.empty(),
+          "TEST-CURVE-09: and the polyline is still published — the position bound is untouched");
+    check_published_turn_matches_points(rc, "TEST-CURVE-09: non-dyadic cusp");
+}
+
+// --- FIX / verify §6: subnormal homogeneous coordinates ----------------------
+
+void test_curve_09_f6_subnormal_homogeneous_coordinates() {
+    // Astra's counterexample: w = (2^-1074, 1), P = (1e-5, 2e-5) mm. The first
+    // homogeneous coordinate fl(2^-1074 * 1e-5) is ZERO, so the retained endpoint
+    // dehomogenizes to 0/w0 = 0 while the exact endpoint is 1e-5 mm — a 1e-5 mm
+    // error the depth-1 roundoff enclosure (2.9e-20 mm) misses by fifteen orders
+    // of magnitude. Every weight stays positive and every pole stays finite, so
+    // `control_net_is_valid` alone cannot see it.
+    const double tiny = 0x1p-1074;
+    check(tiny > 0.0 && tiny * 1e-5 == 0.0,
+          "TEST-CURVE-09: fl(2^-1074 * 1e-5) really is zero while 2^-1074 itself is positive");
+    {
+        RationalBezierSpan span;
+        span.poles = {gp_XYZ(1e-5, 0.0, 0.0), gp_XYZ(2e-5, 0.0, 0.0)};
+        span.weights = {tiny, 1.0};
+        check(onecad::tess::control_net_is_valid(span),
+              "TEST-CURVE-09: Astra's exact net passes the finite-and-positive test, which is "
+              "precisely why it needed its own detection");
+        check(!onecad::tess::homogeneous_arithmetic_is_supported(span),
+              "TEST-CURVE-09: but its homogeneous coordinates underflow, and that IS detected");
+    }
+
+    // `Geom_BezierCurve` refuses a weight of 2^-1074 outright, so the end-to-end
+    // fixture uses the smallest weight OCCT does accept together with poles small
+    // enough that the PRODUCT leaves the normal range — the same failure, reached
+    // through the real conversion.
+    NCollection_Array1<gp_Pnt> poles(1, 2);
+    poles.SetValue(1, gp_Pnt(1e-10, 0.0, 0.0));
+    poles.SetValue(2, gp_Pnt(2e-10, 0.0, 0.0));
+    NCollection_Array1<double> weights(1, 2);
+    weights.SetValue(1, 1e-300);
+    weights.SetValue(2, 1.0);
+    check(!std::isnormal(1e-300 * 1e-10) && 1e-300 * 1e-10 > 0.0,
+          "TEST-CURVE-09: fl(1e-300 * 1e-10) is subnormal — present, but with a fraction of its "
+          "significand left");
+    Handle(Geom_BezierCurve) bezier;
+    try {
+        bezier = new Geom_BezierCurve(poles, weights);
+    } catch (const Standard_Failure&) {
+        bezier.Nullify();
+    }
+    check(!bezier.IsNull(), "TEST-CURVE-09: OCCT accepts the fixture's weights");
+    if (bezier.IsNull()) return;
+    const TopoDS_Edge edge = BRepBuilderAPI_MakeEdge(Handle(Geom_Curve)(bezier)).Edge();
+    const CurveSampleResult r = sample(edge, 0.05);
+    std::fprintf(stderr,
+                 "TEST-CURVE-09: subnormal homogeneous net -> certification %d, %zu points (%s)\n",
+                 static_cast<int>(r.certification), r.points.size(), r.diagnostic.c_str());
+    check(r.certification != CurveCertification::Certified,
+          "TEST-CURVE-09: a span whose homogeneous arithmetic leaves the normal range is never "
+          "certified");
+    check(!r.diagnostic.empty(), "TEST-CURVE-09: and it names the reason");
+}
+
+void test_curve_09_f6_enclosure_is_charged_into_the_cone() {
+    // verify §6 / R1(c) MAJOR 4: a pole perturbation delta propagates into the
+    // derivative-numerator coefficients by at most 4 n wmax^2 delta, so the
+    // positional roundoff enclosure of a DEEP net has to be charged into the C2
+    // uncertainty E — otherwise the cone is certified about coefficients that
+    // were computed from poles the enclosure admits are wrong.
+    RationalBezierSpan span;
+    span.poles = {gp_XYZ(1e9, 0.0, 0.0), gp_XYZ(1e9, 1.0, 0.0), gp_XYZ(1e9, 2.0, 1.0),
+                  gp_XYZ(1e9, 3.0, 0.0)};
+    span.weights = {1.0, 0.9, 0.8, 1.0};
+    span.sourceMaxAbs = gp_XYZ(1e9, 3.0, 1.0);
+    span.depth = 32;
+
+    const double enclosure = onecad::tess::pole_roundoff_enclosure(span);
+    double qmax = 0.0;
+    for (const gp_XYZ& c : onecad::tess::derivative_numerator_bernstein(span)) {
+        qmax = std::max(qmax, c.Modulus());
+    }
+    const int n = static_cast<int>(span.poles.size()) - 1;
+    double wmax = 0.0;
+    for (const double w : span.weights) wmax = std::max(wmax, w);
+    const double pole_term = 4.0 * static_cast<double>(n) * wmax * wmax * enclosure / qmax;
+
+    const onecad::tess::ConeVerdict deep =
+        onecad::tess::tangent_cone_verdict(span, kFiveDegrees, gp_XYZ(0, 1, 0), enclosure);
+    const onecad::tess::ConeVerdict bare =
+        onecad::tess::tangent_cone_verdict(span, kFiveDegrees, gp_XYZ(0, 1, 0), 0.0);
+    std::fprintf(stderr,
+                 "TEST-CURVE-09: depth-32 cubic at 1e9 mm -> enclosure %.6e mm, 4n w^2 "
+                 "delta / qmax = %.6e, E with enclosure %.6e, E without %.6e\n",
+                 enclosure, pole_term, deep.excludedMass, bare.excludedMass);
+    check(enclosure > 0.0 && pole_term > 0.0,
+          "TEST-CURVE-09: the deep fixture really does carry a nonzero pole enclosure");
+    check(deep.excludedMass >= pole_term,
+          "TEST-CURVE-09: E includes the 4 n wmax^2 delta pole term (measured " +
+              std::to_string(deep.excludedMass) + " against " + std::to_string(pole_term) + ")");
+    check(deep.excludedMass > bare.excludedMass,
+          "TEST-CURVE-09: charging the enclosure strictly increases E");
+}
+
+// --- FIX / R1(c) MINOR 7: `achieved` is what the retry actually CERTIFIED -----
+
+void test_curve_09_ladder_achieved_is_what_was_certified() {
+    // A relaxed retry that is itself only QualityLimited did NOT achieve the
+    // relaxed tolerance either, and must not report that it did. A retry that
+    // came through the approximate fallback keeps its PROVENANCE — quality
+    // limitation is a separate flag, not a replacement label.
+    Handle(Geom_BSplineCurve) spline = oscillating_spline();
+    const TopoDS_Edge edge = BRepBuilderAPI_MakeEdge(Handle(Geom_Curve)(spline)).Edge();
+    BRepAdaptor_Curve adaptor(edge);
+    CurveSampleRequest tight;
+    tight.chordToleranceMm = 0.05;
+    tight.angularToleranceRad = kFiveDegrees;
+    CurveSampleRequest doubled = tight;
+    doubled.chordToleranceMm = 0.10;
+    doubled.angularToleranceRad = 2.0 * kFiveDegrees;
+    CurveSampleLimits roomy;
+    const std::size_t at_doubled = sample_edge_curve(adaptor, doubled, roomy, {}).leaves.size();
+    CurveSampleLimits capped;
+    capped.maxSegmentsPerEdge = at_doubled + 8;
+    const CurveSampleResult r =
+        onecad::tess::detail::sample_edge_polyline(adaptor, "e:1", tight, capped);
+    const CurveSampleResult retry = sample_edge_curve(adaptor, doubled, capped, {});
+    std::fprintf(stderr,
+                 "TEST-CURVE-09: ladder -> certification %d, qualityLimited %d, requested %.6g / "
+                 "achieved %.6g mm; the retry alone is certification %d\n",
+                 static_cast<int>(r.certification), r.qualityLimited ? 1 : 0,
+                 r.requestedChordToleranceMm, r.achievedChordToleranceMm,
+                 static_cast<int>(retry.certification));
+    check(r.qualityLimited,
+          "TEST-CURVE-09: a relaxed retry always carries the quality-limited flag");
+    check(r.requestedChordToleranceMm == 0.05,
+          "TEST-CURVE-09: and the tolerance that was REQUESTED");
+    if (retry.certification == CurveCertification::Certified) {
+        check(r.achievedChordToleranceMm == 0.10,
+              "TEST-CURVE-09: a retry that CERTIFIED at 0.10 mm reports 0.10 mm as achieved");
+        check(r.certification == CurveCertification::QualityLimited,
+              "TEST-CURVE-09: and the retry's own Certified never leaks");
+    } else {
+        check(r.achievedChordToleranceMm < 0.0,
+              "TEST-CURVE-09: a retry that certified NOTHING reports no achieved tolerance");
+        check(r.certification == retry.certification,
+              "TEST-CURVE-09: and the retry's own provenance is preserved, not overwritten");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -2745,6 +3234,13 @@ int main() {
     test_curve_08_f7_genuine_closure_still_snaps();
     test_curve_08_f9_body_segment_cap_is_hard();
     test_curve_08_doubling_ladder_separates_requested_from_achieved();
+    // ROUND 3 FIX ROUND — R1(c) and the Astra `verify` refutations
+    test_curve_09_emitted_turn_is_never_suppressed();
+    test_curve_09_reversal_is_not_singularity_evidence();
+    test_curve_09_j_is_an_interval_not_a_number();
+    test_curve_09_f6_subnormal_homogeneous_coordinates();
+    test_curve_09_f6_enclosure_is_charged_into_the_cone();
+    test_curve_09_ladder_achieved_is_what_was_certified();
     if (g_failures == 0) std::fprintf(stderr, "curve_sampler: OK\n");
     return g_failures;
 }

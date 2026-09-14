@@ -89,6 +89,37 @@ Round 2 (the Astra `break`, `docs/design/astra/wp09-surface-normals-break.md`) a
   symmetric triangle predicate (3 edge lengths instead of 2 magnitudes) plus one float32 round-trip
   per node. A valence-10 000 singular fan went 160 ms -> 0.70 ms once the pairwise spread scan is
   skipped above `kMaxSpreadValence = 64`.
+Round 3 (the fresh-context adversarial review R1(c)) added:
+
+- `GeomAdaptor_TransformedSurface::EvalD1` says "Applies transformation AFTER evaluation", and the
+  probe agrees: `AdaptorSurfaceOriginal().BSpline()->Pole(1,1)` is LOCAL (0) where `BSpline()` is
+  WORLD (1000) on a face moved 1000 mm. So any bound proportional to pole magnitude must read the
+  ORIGINAL poles and multiply by `|Trsf().ScaleFactor()|`; reading the transformed ones makes the
+  bound grow with distance from the world origin, which nothing in the evaluation does.
+- A derivative bound must be per PARAMETER unit, not plain mm. The B-spline derivative net is
+  `Q_i = degree*(P_{i+1}-P_i)/(u_{i+degree+1}-u_{i+1})`, so a pole position enclosure `e` becomes
+  `2*degree*e/span` on the derivative. Without the division the predicate is not
+  reparameterization invariant — compressing the knot vector by 1/100 scaled the angular bound by
+  exactly 100 in the PERMISSIVE direction.
+- "No derivative enclosure exists" must NOT be treated as "the normal is refuted". Routing every
+  node of a surface with no enclosure to the facet ladder split 1 835 of a spline prism's 1 582
+  nodes and 10 917 of a revolve's 2 702 (emitted vertices 2.0x and 4.4x the node count) for
+  geometry with no singularity in it. `GeomAbs_SurfaceOfExtrusion` (8) and
+  `GeomAbs_SurfaceOfRevolution` (7) are what a prism/revolve of a B-spline profile produce, and
+  they are common. The same distinction applies to the edge-classification sample screen.
+- OCCT's prism builder REGISTERS continuity across a smooth wire join: a prism over two halves of
+  one C2 B-spline reports `BRep_Tool::Continuity == GeomAbs_C2` on the shared edge while the two
+  faces carry DISTINCT surfaces. So it is a ready-made trusted-metadata fixture; strip it with
+  `BRep_Builder::Continuity(e, f1, f2, GeomAbs_C0)` to get the no-metadata arm.
+- `io::read_brep_solids` only checks the TOP-LEVEL shape type, so a hand-built `TopoDS_Solid` whose
+  shell carries a wireless face replays through the §7.3 `ImportStep` `sourceCodec:"brep"` lane
+  (`brepFormat` must equal `io::kBrepFormatVersion`). That is the ONLY way to get a pathological
+  body into a LIVE session, which is what a Tessellate/ExecutePlan verb-level test needs — no op
+  produces one, and a fixture cannot generate its own input the way `import_step.ndjson` does.
+- `worker_harness` builds to `worker/build/tools/harness/worker_harness` (not `tools/`), matches
+  `expect` as a SUBSET with `"$present"` wildcards, and prints the whole actual response on a
+  mismatch — putting a sentinel string in an `expect` is the fastest way to read a real frame.
+
 - `src-tauri/target/` in this worktree still holds absolute paths from the PRE-RENAME worktree
   (`.../OneCAD-ai-agent/...`), so any `cargo test` that compiles the app crate dies in tauri's build
   script with "failed to read plugin permissions". The Rust worker-backed gates need that target dir

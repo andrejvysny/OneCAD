@@ -300,8 +300,9 @@ were never disposed are gone (finding R02). Three shapes:
   disposed the same way.
 
 The cache is reserved against `planFaceSetCapacity`, which applies the ×1.5
-growth rule UP FRONT and prices the outgoing buffer too (`peakBytes`); the
-reservation is a receipt, and `put` refuses a value larger than it (PR-04).
+growth rule UP FRONT and prices the outgoing buffer too. The reservation is a
+receipt: `peakBytes` is held against the ceiling, `bytes` is the resting size
+`put` admits exactly, and every refusal is non-destructive (PR-04).
 When the pinned set alone exhausts the budget the layer keeps the semantic
 selection, warns once per change, and draws that body's LEASED edge outline plus
 a selection-count chip (`HighlightDeps.onDegraded` → `ViewportEngine`'s chip

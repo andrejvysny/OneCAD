@@ -558,6 +558,8 @@ export class ViewportEngine {
    * may lift {@link submissionHalted}. Consumed by the next frame.
    */
   private externalWake = false;
+  /** Dirty reasons consumed by frames the park answered with nothing; replayed on the wake. */
+  private heldReasons = 0;
   /** message → last log time, so an every-frame failure logs once per 5 s. */
   private readonly submitErrorLoggedAt = new Map<string, number>();
   /** The init options, kept so `retryRenderer()` can rebuild the same wiring. */
@@ -1202,10 +1204,17 @@ export class ViewportEngine {
     // otherwise keep the mask dirty forever and the park would never hold (B2).
     // A halted engine also freezes its transitions — they resume on a retry.
     if (this.submissionHalted && !this.externalWake) {
+      // The scheduler consumed this frame's reasons before calling us (R06).
+      // A halted engine answers nothing, so it must HOLD them for the frame
+      // that lifts the park — dropping them is the lost-invalidation class
+      // spec §6 forbids (R1(b) MAJOR 2).
+      this.heldReasons |= frame.reasons;
       return { changedThisTick: false, stillActive: false };
     }
     this.externalWake = false;
     this.submissionHalted = false;
+    const reasons = frame.reasons | this.heldReasons;
+    this.heldReasons = 0;
 
     this.inFrame = true;
     try {
@@ -1213,7 +1222,7 @@ export class ViewportEngine {
       const animating = this.controls ? this.controls.update(frame.now) : false;
       this.advancingTransitions = false;
 
-      const changedThisTick = frame.reasons !== 0 || animating;
+      const changedThisTick = reasons !== 0 || animating;
       if (changedThisTick) this.renderFrame(frame.requestedRevision);
       // A submission that failed inside `renderFrame` re-parks the engine; the
       // tween must not carry it straight back into the next failing frame.

@@ -109,6 +109,20 @@ struct CurveLeaf {
     // corner while the polyline is still held to the tolerance ON TOP of it.
     gp_XYZ startTangent = gp_XYZ(0.0, 0.0, 0.0);
     gp_XYZ endTangent = gp_XYZ(0.0, 0.0, 0.0);
+    // Whether this leaf still touches the endpoint of the EXACT source span it
+    // came from. A join with `endsAtSourceEnd == false` on its left is interior
+    // to one analytic Bezier span, where the two sides are the same Q at the
+    // same parameter and J = 0 is PROVED (verify §4: "at a boundary known to
+    // subdivide one regular analytic span, use the proven J = 0").
+    bool startsAtSourceStart = true;
+    bool endsAtSourceEnd = true;
+    // verify §4 (D-b): those directions are COMPUTED, so J is an interval, not a
+    // number. This is the half-width each side contributes: asin(eps/||q||) for
+    // the endpoint coefficient's own uncertainty enclosure, and pi/2 when the
+    // enclosure covers the coefficient entirely — which is what a genuine cusp
+    // looks like, and the only honest reason a join escapes the turn rule.
+    double startTangentUncertaintyRad = -1.0;
+    double endTangentUncertaintyRad = -1.0;
     // followup §2 C1: an UNRESOLVED SINGULAR REGION. The leaf sits below the
     // positional resolution floor AND its derivative-numerator coefficients
     // could not be separated from the origin by any tested direction, so Q may
@@ -116,7 +130,7 @@ struct CurveLeaf {
     // the ONLY evidence besides an exactly vanishing endpoint coefficient that
     // exempts a join from the display-turn rule — a failed cone or a short leaf
     // authorises nothing on its own.
-    bool singularBracket = false;
+    bool unresolvedRegion = false;
 };
 
 struct CurveSampleResult {
@@ -133,6 +147,12 @@ struct CurveSampleResult {
     // excluded). -1 when there is no such join. This is the number a faceted
     // silhouette is made of.
     double encodedTurnMaxRad = -1;
+    // verify §5: a SEPARATE conditioning diagnostic, never a licence to suppress
+    // a turn. Counts the joins whose two emitted chords are so short that the
+    // float32 rounding of their own endpoints alone spans the allowance. The
+    // turn at such a join is still measured, still published and still a
+    // violation if it is one — the emitted vertices determine it exactly.
+    std::size_t quantizationConditionedJoins = 0;
     // PR-07 / D9. What the caller ASKED for and what the emitted polyline
     // actually holds. They differ only when the caller's edge policy re-sampled
     // at a relaxed budget (`Tessellate.cpp`'s doubling ladder): a retry that
@@ -143,6 +163,11 @@ struct CurveSampleResult {
     double requestedAngularToleranceRad = -1;
     double achievedAngularToleranceRad = -1;
     CurveCertification certification = CurveCertification::Failed;
+    // PR-07 / D9, sharpened by R1(c) MINOR 7: the requested display quality was
+    // not met. Carried ALONGSIDE `certification` so a relaxed retry through the
+    // approximate fallback keeps its provenance (`KernelEstimated`) instead of
+    // having it overwritten by the quality verdict.
+    bool qualityLimited = false;
     bool angularUndefinedSomewhere = false;
     // Edge parameters where the curve's derivative vanishes exactly. Each is a
     // leaf boundary: the singularity is explicit in the output, never spanned.
@@ -234,6 +259,16 @@ struct RationalBezierSpan {
 // quietly return a ZERO chord bound for it.
 bool control_net_is_valid(const RationalBezierSpan& span);
 
+// verify §6 (REFUTED: finite positive weights are not enough). The homogeneous
+// coordinates w_i * P_i are what the de Casteljau recurrence actually carries,
+// and `fl(w_i * P_i) == 0` for a NONZERO coordinate destroys the curve without
+// making any weight non-positive or any pole non-finite: w = (2^-1074, 1),
+// P = (1e-5, 2e-5) mm dehomogenizes its first endpoint to 0 while the exact
+// endpoint is 1e-5 mm, an error fifteen orders of magnitude past the enclosure.
+// False whenever a homogeneous product underflows to zero or leaves the normal
+// range, in which case NOTHING computed from the net may be certified.
+bool homogeneous_arithmetic_is_supported(const RationalBezierSpan& span);
+
 // followup §2 F6 positional roundoff enclosure. With u = 2^-53, K = depth*(n+3)+2
 // and g = gamma_K = K*u/(1-K*u), a computed pole of a span subdivided to `depth`
 // from a degree-`n` source carries a per-axis error of at most
@@ -290,14 +325,24 @@ struct ConeVerdict {
     // derivative numerator vanishes. Independent of `axis`.
     gp_XYZ startDirection = gp_XYZ(0.0, 0.0, 0.0);
     gp_XYZ endDirection = gp_XYZ(0.0, 0.0, 0.0);
+    // asin(eps / ||q||) for the corresponding endpoint coefficient: how far its
+    // computed DIRECTION may be from the true one. pi/2 when the enclosure
+    // swallows the coefficient, i.e. the direction is not resolved at all.
+    double startDirectionUncertaintyRad = 0.5 * 3.14159265358979323846;
+    double endDirectionUncertaintyRad = 0.5 * 3.14159265358979323846;
     const char* incompleteReason = nullptr;
 };
 
 // NUM §2.4 forward-cone test about an EXPLICIT axis. The sampler passes the
 // EMITTED float32 chord (followup §2 F5): a cone proved about the double chord
 // says nothing about the segment a viewer actually sees.
+// `poleEnclosureMm` is the positional roundoff enclosure of the span's own
+// computed poles (`pole_roundoff_enclosure`). verify §6 / R1(c) MAJOR 4: the
+// coefficients are built FROM those poles, so a pole perturbation of delta moves
+// q_k by at most 4 n wmax^2 delta and that term belongs in E. Pass 0 only for a
+// net whose poles are exact by construction.
 ConeVerdict tangent_cone_verdict(const RationalBezierSpan& span, double angularTol,
-                                 const gp_XYZ& axis);
+                                 const gp_XYZ& axis, double poleEnclosureMm);
 
 // The same test about the span's own double-precision chord.
 AngularStatus tangent_cone_status(const RationalBezierSpan& span, double angularTol);

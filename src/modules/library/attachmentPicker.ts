@@ -24,6 +24,7 @@
  */
 import { getViewportEngine } from "@/viewport/engineBridge";
 import type { PickHit } from "@/viewport/engine/Picker";
+import { viewportHitIsCurrent } from "@/ipc/promote";
 import type { ClassifyResult, LibraryAttachmentFrame } from "@/ipc/types";
 import { authoringServices } from "./authoringController";
 
@@ -217,7 +218,12 @@ function onPointerDown(e: PointerEvent): void {
   e.stopPropagation();
   const engine = getViewportEngine();
   const hit: PickHit | null = engine?.probePick(e.clientX, e.clientY) ?? null;
-  if (!hit) {
+  // The pick has to be about geometry that is still current (PR-01).
+  // `classifyElement` resolves a snapshot-scoped `e:N`/`f:N` against the HEAD,
+  // so a click on a body whose replacement failed would author an attachment
+  // FRAME measured on a different element — and that frame is then baked into a
+  // saved component, which makes it the most durable wrong bind there is.
+  if (!hit || !viewportHitIsCurrent(hit)) {
     active.onReject(PICK_REJECTED);
     return;
   }

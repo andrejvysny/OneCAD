@@ -505,6 +505,29 @@ describe("stencil pairs borrow the registry resource", () => {
     layer.dispose();
   });
 
+  it("refuses a pair on a resource that is already disposed", () => {
+    __resetLogForTests({ enabled: true, console: false });
+    const bodiesRoot = new THREE.Group();
+    const group = bodyGroup("body1");
+    const face = group.children[0] as THREE.Mesh;
+    const entry = face.userData.meshEntry as reg.MeshEntry;
+    (entry as { resourceState: string }).resourceState = "disposed";
+    bodiesRoot.add(group);
+    const layer = new SectionLayer({
+      root: new THREE.Group(),
+      getBodiesRoot: () => bodiesRoot,
+      getBounds: () => null,
+      invalidate: vi.fn(),
+    });
+
+    layer.setState(state());
+    layer.update();
+
+    expect(layer.stencilCount).toBe(0);
+    expect(reg.openLeases(entry)).toEqual([]);
+    layer.dispose();
+  });
+
   it("refuses a face mesh that carries no resource at all", () => {
     __resetLogForTests({ enabled: true, console: false });
     const bodiesRoot = new THREE.Group();

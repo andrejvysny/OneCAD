@@ -6,14 +6,21 @@
       "lane": "hover-lifecycle",
       "result": "pass",
       "exit": 0,
-      "logSha256": "607e3a07d8814a12f3c11c1048407f74e9b16e2ad8646fb5cdc818e76ab18402",
+      "logSha256": "5b8151c23cbc9af00561e5966c472efb1446243c027250cb9bf4c50ec39eee81",
       "summary": null
     },
     "TEST-RES-05": {
       "lane": "preview-lifecycle",
       "result": "pass",
       "exit": 0,
-      "logSha256": "a03f4cc38a4bae84b3d25ef823ba372612b9b50ef5bb35367ab6e3b700fa5910",
+      "logSha256": "4efd78f5fce7c7e98529f81abb5a7512ccc3c024d5be06bbe5bcb1f681298975",
+      "summary": null
+    },
+    "TEST-LINE-01": {
+      "lane": "line-width",
+      "result": "pass",
+      "exit": 0,
+      "logSha256": "edc4f58813c37f3a36af2a048d84d9befe7718f01cbaf41a2aa96bfbec844137",
       "summary": null
     }
   }

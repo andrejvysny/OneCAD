@@ -19,6 +19,7 @@ import { viewportStore } from "@/stores/viewportStore";
 import { settingsStore } from "@/stores/settingsStore";
 import { __resetLogForTests, logSnapshot } from "@/debug/log";
 import type { CadClient } from "@/ipc/client";
+import { promoteViewportPick, STALE_PICK_HINT } from "@/ipc/promote";
 import type { DocumentChange } from "@/ipc/types";
 import type { FrameSubmission, ViewportEngine } from "../engine/ViewportEngine";
 import { HighlightLayer } from "../engine/HighlightLayer";
@@ -1261,6 +1262,78 @@ describe("MeshIngest publication freshness", () => {
     viewportStore.getState().setStatusHint(null);
   });
 
+  /*
+   * R1(a) BLOCKER 2 — a change that publishes NO bodies is not evidence that the
+   * installed geometry stopped being current.
+   *
+   * Most `DocumentChange`s carry no geometry at all: `upsertVariable`,
+   * `renameVariable`, `deleteRecord`, an `editOperationInput` that resolved to
+   * the same shape. Dropping the publication for one of those makes
+   * `installedEntryIsCurrent` false for EVERY body, so every pick refuses and
+   * the sticky stale hint never clears for the rest of the session.
+   */
+  it("keeps the publication across a change that publishes no bodies", async () => {
+    setBodies({ body1: true });
+    documentStore.setState({
+      documentId: "doc-1", runtimeSession: "runtime-1", geometrySource: "live",
+    });
+    const engine = fakeEngine();
+    const { client, emit } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    emit({ ...changed("body1"), documentId: "doc-1", runtimeSession: "runtime-1", snapshotId: 41 });
+    await tick();
+    const published = reg.getCurrentMeshPublication();
+    expect(published).toEqual({
+      documentId: "doc-1", runtimeSession: "runtime-1", snapshotId: 41, generation: 1,
+    });
+
+    emit({
+      revision: 2,
+      changedBodies: [],
+      removedBodies: [],
+      documentId: "doc-1",
+      runtimeSession: "runtime-1",
+      snapshotId: 42,
+    });
+    await tick();
+
+    // The SAME publication object, snapshot 41 included: the installed entry's
+    // provenance still describes what is on screen, and adopting 42 here would
+    // orphan it just as surely as dropping the publication does.
+    expect(reg.getCurrentMeshPublication()).toEqual(published);
+  });
+
+  it("a pick taken before a bodiless change still promotes afterwards", async () => {
+    setBodies({ body1: true });
+    documentStore.setState({
+      documentId: "doc-1", runtimeSession: "runtime-1", geometrySource: "live",
+    });
+    const engine = fakeEngine();
+    const { client, emit } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    emit({ ...changed("body1"), documentId: "doc-1", runtimeSession: "runtime-1", snapshotId: 41 });
+    await tick();
+    const entry = reg.getEntry("body1")!;
+    const proof = { entry, kind: "face" as const, topoKey: "f:0" };
+
+    emit({
+      revision: 2, changedBodies: [], removedBodies: [],
+      documentId: "doc-1", runtimeSession: "runtime-1", snapshotId: 42,
+    });
+    await tick();
+
+    const promoteSelection = vi.fn(async () => [
+      { topoKey: "f:0", elementId: "el_1", kind: "face", bodyId: "body1" },
+    ]);
+    const out = await promoteViewportPick(
+      { promoteSelection } as unknown as CadClient, proof, { topoKey: "f:0", kind: "face" },
+    );
+    expect(out?.elementId).toBe("el_1");
+    expect(viewportStore.getState().statusHint?.message).not.toBe(STALE_PICK_HINT);
+  });
+
   it("TEST-PUB-01 an older generation completing after a newer one installs nothing and releases its reservation", async () => {
     // The authored-colour resolve is the long await inside a load, so it is
     // where a reordered completion lands AFTER a newer publication was accepted.
@@ -1506,6 +1579,71 @@ describe("MeshIngest post-install failure isolation", () => {
   afterEach(() => {
     viewportStore.getState().setStatusHint(null);
     __resetLogForTests({ enabled: false });
+  });
+
+  /*
+   * R1(a) MAJOR 4 — every NOTIFY call-out is isolated, and the load-failure hint
+   * belongs to the NOT-INSTALLED branch only.
+   *
+   * `refreshHighlights` allocates (it rebuilds owned face-set geometry), so it
+   * is the realistic thrower. Before the fix it escaped the announcement block,
+   * skipped `notifyBodyLoaded` — which every commit's completion waits on — and
+   * published "Body failed to load" over a body that had just loaded perfectly.
+   */
+  it("isolates a throwing refreshHighlights: no hint, body-loaded still fires, state stays current", async () => {
+    setBodies({ body1: true });
+    const { client } = fakeClient();
+    const engine = fakeEngine();
+    engine.refreshHighlights.mockImplementation(() => {
+      throw new Error("highlight rebuild exploded");
+    });
+    __resetLogForTests();
+    const loaded: string[] = [];
+    ingest = new MeshIngest();
+    ingest.onBodyLoaded((bodyId) => loaded.push(bodyId));
+    ingest.attach(engine, client);
+    await tick();
+
+    const installed = reg.getEntry("body1");
+    expect(installed?.displayState).toBe("current");
+    expect(ingest.getDisplayState("body1")).toBe("current");
+    expect(loaded).toEqual(["body1"]);
+    expect(viewportStore.getState().statusHint?.message ?? "").not.toContain("failed to load");
+    const logged = logSnapshot().filter((e) => e.level === "error" && e.tag === "mesh");
+    expect(logged).toHaveLength(1);
+    expect(logged[0].ctx).toMatchObject({ bodyId: "body1", step: "refreshHighlights" });
+  });
+
+  it("isolates a throwing selection reconcile and still announces the load", async () => {
+    setBodies({ body1: true });
+    const getMesh = vi
+      .fn<() => Promise<ArrayBuffer>>()
+      .mockResolvedValueOnce(makeBoxMesh())
+      .mockResolvedValueOnce(makeCylinderMesh());
+    const { client, emit } = fakeClient(getMesh);
+    // `reconcileSelectionForBody` asks the backend about a promoted ref it
+    // cannot find in the new table; a throwing client is the realistic fault.
+    (client as unknown as { elementInfo: () => Promise<never> }).elementInfo = () => {
+      throw new Error("elementInfo exploded");
+    };
+    const engine = fakeEngine();
+    __resetLogForTests();
+    const loaded: string[] = [];
+    ingest = new MeshIngest();
+    ingest.onBodyLoaded((bodyId) => loaded.push(bodyId));
+    ingest.attach(engine, client);
+    await tick();
+    selectionStore.getState().set([
+      { kind: "face", id: "body1#f:4", bodyId: "body1", topoKey: "f:4", elementId: "el_z" },
+    ]);
+    loaded.length = 0;
+
+    emit(changed("body1"));
+    await tick();
+
+    expect(ingest.getDisplayState("body1")).toBe("current");
+    expect(loaded).toEqual(["body1"]);
+    expect(viewportStore.getState().statusHint?.message ?? "").not.toContain("failed to load");
   });
 
   it("TEST-MESH-05 a throwing bodyLoaded subscriber does not demote the freshly installed mesh", async () => {

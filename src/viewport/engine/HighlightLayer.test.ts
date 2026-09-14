@@ -545,6 +545,91 @@ describe("degraded selection display", () => {
     layer.dispose();
   });
 
+  /** A body with NO edges — `entry.edgeGeometry` is null, so there is no outline. */
+  function registerEdgelessBody(bodyId: string): void {
+    const positions: number[] = [];
+    for (let v = 0; v < 12; v++) positions.push(v, v * 2, v * 3);
+    swap(
+      bodyId,
+      buildBodyObjects(
+        parseMeshPayload(
+          encodeMesh1({
+            positions,
+            faces: [0, 1, 2, 3].map((f) => ({
+              id: `f:${f}`,
+              triangles: [[f * 3, f * 3 + 1, f * 3 + 2] as [number, number, number]],
+            })),
+          }),
+        ),
+        bodyId,
+        1,
+      ),
+    );
+  }
+
+  /*
+   * A body with no edge geometry has no outline to lease, so the degraded
+   * display falls back to the whole-body tint. That fallback is still a
+   * DEGRADED overlay: it must publish its count, read `degraded`, and be
+   * re-attempted on the next rebuild. Returning the ordinary body overlay here
+   * silently reinstated exactly the display DEV-WP03-1 removed.
+   */
+  it("an edgeless body still counts as degraded, and still recovers", () => {
+    const d = tightDeps();
+    const layer = new HighlightLayer(d);
+    registerBox("body1");
+    registerEdgelessBody("body2");
+    const two = getEntry("body2")!;
+    expect(two.edgeGeometry).toBeNull();
+
+    layer.setState(faceRef(0, "body2"), [0, 1, 2, 3].map((o) => faceRef(o, "body1")));
+
+    expect(layer.degraded).toBe(true);
+    const calls = d.onDegraded.mock.calls;
+    expect(calls[calls.length - 1][0]).toEqual([
+      expect.objectContaining({ bodyId: "body2", count: 1 }),
+    ]);
+    // The leased whole-body object, not an owned overlay.
+    const shown = d.root.children.find((o) => o.userData.bodyId === "body2") as THREE.Mesh;
+    expect(shown.geometry).toBe(two.geometry);
+    expect(openLeases(two)).toEqual(["highlight:body"]);
+
+    // …and the same hover recovers once the budget frees.
+    layer.setState(faceRef(0, "body2"), []);
+
+    expect(layer.degraded).toBe(false);
+    expect((d.root.children[0] as THREE.Mesh).geometry).not.toBe(two.geometry);
+    expect(openLeases(two)).toEqual([]);
+    const after = d.onDegraded.mock.calls;
+    expect(after[after.length - 1][0]).toEqual([]);
+    layer.dispose();
+  });
+
+  /*
+   * The chip is anchored in WORLD space, so a body that moved needs a fresh
+   * notice even though its id and count are unchanged.
+   */
+  it("republishes the notice when the anchor moves", () => {
+    const d = tightDeps();
+    const layer = new HighlightLayer(d);
+    registerBox("body1");
+    registerBox("body2");
+    const two = getEntry("body2")!;
+
+    layer.setState(faceRef(0, "body2"), [0, 1, 2, 3].map((o) => faceRef(o, "body1")));
+    const before = d.onDegraded.mock.calls.length;
+    const first = d.onDegraded.mock.calls[before - 1][0][0];
+
+    two.geometry.boundingSphere!.center.set(100, 200, 300);
+    layer.refresh();
+
+    expect(d.onDegraded.mock.calls.length).toBe(before + 1);
+    const latest = d.onDegraded.mock.calls[before][0][0];
+    expect(latest.world).toEqual([100, 200, 300]);
+    expect(latest.world).not.toEqual(first.world);
+    layer.dispose();
+  });
+
   it("keeps the whole semantic selection while degraded", () => {
     const d = tightDeps();
     const layer = new HighlightLayer(d);

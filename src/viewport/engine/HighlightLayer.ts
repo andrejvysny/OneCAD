@@ -382,7 +382,13 @@ export class HighlightLayer {
       notices.length === this.lastNotices.length &&
       notices.every((n, i) => {
         const was = this.lastNotices[i];
-        return n.bodyId === was.bodyId && n.count === was.count;
+        return (
+          n.bodyId === was.bodyId &&
+          n.count === was.count &&
+          n.world[0] === was.world[0] &&
+          n.world[1] === was.world[1] &&
+          n.world[2] === was.world[2]
+        );
       });
     if (same) return;
     this.lastNotices = notices;
@@ -525,7 +531,10 @@ export class HighlightLayer {
     const taken = previousKey ? this.cache.take(previousKey) : undefined;
     const reuse: OwnedFaceGeometry | undefined = taken?.owned ?? undefined;
     const plan = planFaceSetCapacity(want.entry, want.ordinals, reuse);
-    const receipt = this.cache.reserve(plan.peakBytes, "faceSet");
+    // Hold the PEAK against the ceiling, admit against the resting size: the
+    // two differ by the outgoing buffer, and admitting on the peak would let a
+    // build that disagreed with its plan through on that slack (D5).
+    const receipt = this.cache.reserve(plan.peakBytes, "faceSet", plan.bytes);
     if (!receipt) {
       taken?.owned?.dispose();
       return undefined;
@@ -544,8 +553,8 @@ export class HighlightLayer {
       receipt,
     );
     // Unreachable while the plan and the build agree — and if they ever stop
-    // agreeing, the cache refuses rather than overrunning, so the buffer this
-    // call owns has to go back.
+    // agreeing, the cache refuses (it admits only `plan.bytes` exactly) rather
+    // than overrunning, so the buffer this call owns has to go back.
     if (!admitted) owned.dispose();
     return admitted;
   }
@@ -587,12 +596,25 @@ export class HighlightLayer {
    * untouched, and the overlay owns nothing — which is the point, since the
    * reason it exists is that there was no budget left to own anything.
    *
-   * A body with no edge geometry falls back to the whole-body tint: still the
-   * exact leased object, still nothing dropped, just a coarser outline.
+   * A body with no edge geometry has no outline to lease and falls back to the
+   * whole-body tint. That fallback is still DEGRADED — same notice, same count,
+   * same re-attempt on the next rebuild. Handing back a plain body overlay
+   * there would reinstate the exact display DEV-WP03-1 removed, silently: no
+   * count, `degraded` reading false, and the survivor rule pinning the tint on
+   * screen until the selection itself changed.
    */
   private attachDegraded(want: Desired): Overlay | null {
     const entry = want.entry;
-    if (!entry.edgeGeometry) return this.attachBody(want);
+    const centre = entry.geometry.boundingSphere?.center;
+    const notice: DegradedSelectionNotice = {
+      bodyId: entry.bodyId,
+      count: want.ordinals.length,
+      world: centre ? [centre.x, centre.y, centre.z] : [0, 0, 0],
+    };
+    if (!entry.edgeGeometry) {
+      const fallback = this.attachBody(want);
+      return fallback && { ...fallback, degraded: notice };
+    }
     const lease = acquireLease(entry, "highlight:body");
     if (lease.entry.resourceState === "disposed") {
       lease.release();
@@ -602,19 +624,7 @@ export class HighlightLayer {
     line.renderOrder = RENDER_ORDER.HIGHLIGHT_EDGE;
     line.userData.bodyId = entry.bodyId;
     this.deps.root.add(line);
-    const centre = entry.geometry.boundingSphere?.center;
-    return {
-      object: line,
-      entry,
-      cacheKey: null,
-      lease,
-      slotKey: null,
-      degraded: {
-        bodyId: entry.bodyId,
-        count: want.ordinals.length,
-        world: centre ? [centre.x, centre.y, centre.z] : [0, 0, 0],
-      },
-    };
+    return { object: line, entry, cacheKey: null, lease, slotKey: null, degraded: notice };
   }
 
   /**

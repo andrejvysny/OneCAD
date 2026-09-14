@@ -1,6 +1,8 @@
 // PlanExecutor.cpp — see PlanExecutor.h. REAL OCCT ops (W-WP5).
 #include "session/PlanExecutor.h"
 
+#include <algorithm>
+
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>  // std::abort
@@ -915,7 +917,20 @@ void note_incomplete_body(ScratchJob& job, const std::string& body_id, const std
               "bodies without it",
               static_cast<unsigned long long>(job.job_id), body_id.c_str(), why.c_str());
     if (job.per_step.empty()) return;  // base-only prepare: the stderr line is the record
-    json& diagnostics = job.per_step.back().diagnostics;
+    // R1(c) MINOR 9: attach it to the step that actually produced the body, not
+    // merely to the last one. `StepResult::body_ids` is "bodies present/produced
+    // at this step", so the LAST step naming it is the step whose output the
+    // failing tessellation describes; a body no step names (an untouched
+    // carry-over) falls back to the terminal step.
+    std::size_t at = job.per_step.size() - 1;
+    for (std::size_t i = job.per_step.size(); i > 0; --i) {
+        const std::vector<std::string>& ids = job.per_step[i - 1].body_ids;
+        if (std::find(ids.begin(), ids.end(), body_id) != ids.end()) {
+            at = i - 1;
+            break;
+        }
+    }
+    json& diagnostics = job.per_step[at].diagnostics;
     if (!diagnostics.is_array()) diagnostics = json::array();
     if (diagnostics.size() >= 64) return;  // the §7.2 per-step diagnostic budget
     const std::string message = "body " + body_id + ": " + why;

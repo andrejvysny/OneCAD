@@ -41,7 +41,7 @@ export interface TriangleRange {
  * What {@link buildFaceSetGeometry} WILL allocate for this set, computed before
  * anything is allocated (spec §8.3, decision D5).
  *
- * The cache used to reserve {@link estimateFaceSetBytes} and then charge the
+ * The cache used to reserve a naive per-triangle estimate and then charge the
  * capacity the ×1.5 growth rule actually produced, which is strictly larger on
  * every growth step — finding PR-04, where a 52.8 MB reservation admitted a
  * 72 MB buffer into a 64 MiB budget. `bytes` is what the built geometry will
@@ -147,6 +147,12 @@ export class OwnedFaceGeometry {
 
   /** Rewrite the buffer to hold exactly `faceOrdinals` of `entry`. */
   update(entry: MeshEntry, faceOrdinals: readonly number[]): void {
+    // The cache disposes a slot THROUGH its owner so that the wrapper knows it
+    // is spent; rewriting one afterwards would hand the renderer a geometry
+    // whose GL buffers are already released, and silently draw nothing. Loud,
+    // because it is unreachable by construction and can only mean a caller
+    // kept a reference past a `drop`/`retireSource`.
+    if (this.disposed) throw new Error("OwnedFaceGeometry.update on a disposed buffer");
     const ordinals = [...faceOrdinals].sort((a, b) => a - b);
     let triangles = 0;
     for (const ord of ordinals) triangles += entry.view.faceRanges[ord * 2 + 1];
@@ -293,16 +299,3 @@ export function buildTriangleRangeGeometry(
   return geometry;
 }
 
-/**
- * Upper bound on the bytes {@link buildFaceSetGeometry} would own for this set,
- * BEFORE building it. The cache reserves against this so an overlay that cannot
- * fit the budget is never allocated only to be thrown away.
- */
-export function estimateFaceSetBytes(
-  entry: MeshEntry,
-  faceOrdinals: readonly number[],
-): number {
-  let triangles = 0;
-  for (const ord of faceOrdinals) triangles += entry.view.faceRanges[ord * 2 + 1];
-  return triangles * 3 * (3 * Float32Array.BYTES_PER_ELEMENT + Uint32Array.BYTES_PER_ELEMENT);
-}

@@ -370,6 +370,13 @@ export class SectionLayer {
       return null;
     }
     const lease = acquireLease(entry, "section");
+    // A lease on a freed resource is a no-op lease (the registry reports it),
+    // so drawing the pair anyway would write the cap from released buffers.
+    // Same back-out every other borrower takes.
+    if (lease.entry.resourceState === "disposed") {
+      lease.release();
+      return null;
+    }
     const make = (material: THREE.Material, order: number): THREE.Mesh => {
       const m = new THREE.Mesh(mesh.geometry, material);
       m.renderOrder = order;

@@ -43,11 +43,12 @@ inline constexpr double kEdgeCreaseRad = 3.4906585039886593e-3;  // 0.2 degrees
 inline constexpr int kEdgeContinuitySamples = 3;
 
 // WP09 Astra F6. What the three-sample screen actually established across one
-// edge. `evaluable` counts only samples where BOTH faces returned a normal whose
-// DIRECTION is certified by their own derivative-error budgets
-// (SurfaceNormals.h): an unbounded normal is no evidence, and the retired code
-// simply skipped such a sample and then treated the remainder as if the whole
-// edge had been screened.
+// edge. `evaluable` counts only samples where BOTH faces returned a normal no
+// derivative-error budget REFUTES (SurfaceNormals.h): a normal a budget bounds
+// away from usefulness is no evidence, and the retired code simply skipped such
+// a sample and then treated the remainder as if the whole edge had been
+// screened. A representation for which no enclosure exists refutes nothing, so
+// its samples still count (R1(c) MINOR 6).
 struct EdgeSampleAgreement {
     int required = kEdgeContinuitySamples;
     int evaluable = 0;

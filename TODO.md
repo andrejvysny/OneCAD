@@ -1,15 +1,32 @@
-# VP-HARDENING 1.0 — CONSOLIDATION PASS (2026-09-14, session 2 PAUSED by the user)
+# VP-HARDENING 1.0 — CONSOLIDATION PASS (updated 2026-09-14 17:30, session 3, L3 in flight)
 
-> Review `docs/01-PROGRESS-REVIEW.md` (PR-01…PR-12) driven a consolidation pass over WP02/03/04/08/09. Plan and per-task evidence: root `PLAN.md` (Run log). Ledger: `docs/viewport-hardening/execution/STATUS.md` §9. **Nothing committed.** All twelve findings have production fixes with red-first tests and orchestrator-run focused gates; none has integrated (L3) evidence yet.
+> `8807630c` pushed (T0–T10, A1). Session 3 fix rounds from A2 + R1(a/b/c) are on disk, uncommitted. Evidence: `PLAN.md` Run log; ledger `STATUS.md` §9. Read `HANDOFF.md` first.
 
-## Now (session 3)
+## Now
 
-- [ ] Approve/run Astra `verify` WP08 round 3 (call 3/3, packet sha `058e3de6f7bd`, scratchpad) — accept/reject, record in `docs/design/astra/`.
-- [ ] R1 adversarial reviews (fresh contexts, read-only): (a) identity/publication T3+T6+T7+T9, (b) ownership/scheduler T2+T4, (c) worker T5+T8 — red-first fix rounds by the original implementers.
-- [ ] Rerun FE + worker focused gates through `scripts/record-viewport-run.mjs`; re-point the 26 matrix rows to `runs/*/manifest.json`; add TEST-PUB-03, TEST-MESH-06, TEST-RES-05 as focused-pass; `node scripts/verify-viewport-acceptance.mjs` exit 0.
-- [ ] Rebuild `src-tauri/target/` (stale `OneCAD-ai-agent` paths in tauri's build-script output) — then `cargo fmt/clippy`, `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` vs the 24 baseline reds.
-- [ ] L3: full `ctest` (expect only `feature_pattern`, `chamfer_reference_face`), `bun run test` (vs the 443 baseline reds — `src/tools/modelTools` mocks lacking `onDocumentChanged`), `bun run e2e` both projects `E2E_PORT=4179` retries 0, hex gate, QA verifiers, clean-checkout verifier in a scratch worktree; STATUS §2/§6/§7 updates; commit (no push).
-- [ ] Owed user-run (never faked): TEST-MESH-05/TEST-PUB-03 N (failed replacement → click → fillet refused in the bundled app), TEST-RES-05 N, TEST-MESH-06 N.
+- [ ] Read `runs/consolidation-l3/manifest.json` lane `e2e-mock-lane` (running at handoff; rerun alone if missing) — must be exit 0 / 0 failed.
+- [ ] `scripts/build-worker.sh Release` (restage) → record `consolidation-worker-focused` ctest lane (47/47) → full `ctest` (only `feature_pattern`, `chamfer_reference_face` red) → `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` vs the 24 baseline reds.
+- [ ] Re-point TEST-CURVE-01…07 (+ add TEST-MESH-06) to the worker manifest; `node scripts/verify-viewport-acceptance.mjs` exit 0; clean-checkout verifier in a scratch worktree after the commit.
+- [ ] STATUS.md §9 final numbers + §7 WP08/WP09 closure lines; TODO/CURRENT_STATE; commit + push (authorised).
+- [ ] New plan: WP05 → WP06 → WP10.
+
+## Done (session 2–3)
+
+- [x] PR-01…PR-12 fixed red-first (T0–T10); A1 Astra `break` WP09; A2 Astra `verify` WP08 r3; R1 ×3 adversarial reviews, all findings fixed and re-verified; `cargo fmt`/clippy clean after full `cargo clean`; `bun run test` == baseline set; FE focused, worker focused, G lane recorded.
+
+## Owed user-run (never faked)
+
+- [ ] TEST-MESH-05 / TEST-PUB-03 N — failed replacement → ordinary click → Fillet refused in the bundled app.
+- [ ] TEST-RES-05 N; TEST-MESH-06 N.
+
+## Follow-ups (not this pass)
+
+- [ ] `GeometryQueryService.classifyElement` read fence (library hover degrades to a fenced query instead of refusal).
+- [ ] Interval-arithmetic enclosures for `s_min`/`g`/`E`/`β` and the hull distance; OCCT conversion error vs the original curve (WP12); `kTurnSplitAttempts` stays a work limit.
+- [ ] Committed ctest row for the `Tessellate` verb `OP_FAILED` path (needs a generator target); `PreviewOp` "no preview mesh" on an incomplete body (untested new failure mode); duplicate `kUnitRoundoff` definitions.
+- [ ] WP10: `completeness`, `budgetLimitedEdges`, `missingEdges`, `quantizationConditionedJoins`, requested/achieved tolerance on the wire; `meshRenderCompleted` "no longer required" outcome; consumer validation contract (DEV-WP04-1).
+- [ ] `src/tools/modelTools` harness mocks lacking `onDocumentChanged` (437 pre-existing reds); `tauriClient.test.ts` readFence red.
+
 
 # VP-HARDENING 1.0 — VIEWPORT PROGRAM (2026-09-13, session 1 PAUSED for handoff)
 

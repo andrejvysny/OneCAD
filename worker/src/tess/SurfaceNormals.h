@@ -148,12 +148,22 @@ inline constexpr std::size_t kMaxSpreadValence = 64;
 // the small derivative that came out of it. A budget that cannot see `M` cannot
 // see that failure.
 struct DerivativeBudget {
-    // Bound on |computed S_u - exact S_u| (and the same for S_v), in mm.
-    double absoluteMm = 0.0;
+    // UNITS (Astra F3, R1(c) MAJOR 5): a bound on the DERIVATIVE, so millimetres
+    // per unit of the respective PARAMETER — `uAbsoluteMm` bounds
+    // |computed S_u - exact S_u| and `vAbsoluteMm` bounds the same for S_v. The
+    // two are separate because only that form is reparameterization invariant:
+    // under `u -> u/lambda` both `|S_u|` and `uAbsoluteMm` scale by lambda while
+    // `|S_v|` and `vAbsoluteMm` do not, and the angular ratio below is unchanged.
+    // Charging a POSITION enclosure (plain mm) here instead made the predicate
+    // strictly more permissive the more the parameterization was compressed.
+    double uAbsoluteMm = 0.0;
+    double vAbsoluteMm = 0.0;
     // False when the representation carries no bound this file can derive — an
     // offset surface, a surface of revolution/extrusion, an unrecognised type, a
-    // rational patch with a non-positive weight. Every node on such a face is
-    // `Unresolved`; nothing is assumed.
+    // rational patch with a non-positive weight. A node on such a face keeps its
+    // OWN supporting-surface normal with provenance `Unresolved`: the answer is
+    // uncertified, which is not the same as wrong, and routing it to the facet
+    // ladder instead splits nearly every regular node of a swept body.
     bool known = false;
     const char* reason = "uninitialised";
 };
@@ -166,9 +176,11 @@ struct DerivativeBudget {
 DerivativeBudget derivative_error_budget(const BRepAdaptor_Surface& surf);
 
 // First-order angular uncertainty, in radians, of `normalize(du x dv)` given the
-// budget: `asin( (e*(|du| + |dv|) + e^2) / |du x dv| )`, and +infinity when the
-// perturbation can reach the cross product at all (an unbounded direction) or
-// the budget is unknown. Compare against kNormalAcceptanceRad.
+// budget: `asin( (eu*|dv| + ev*|du| + eu*ev) / |du x dv| )`, and +infinity when
+// the perturbation can reach the cross product at all (an unbounded direction)
+// or the budget is unknown. Every term is mm^2, so the ratio is dimensionless
+// and invariant under reparameterization of either direction. Compare against
+// kNormalAcceptanceRad.
 double normal_angular_error_rad(const DerivativeBudget& budget, const gp_Vec& du,
                                 const gp_Vec& dv);
 

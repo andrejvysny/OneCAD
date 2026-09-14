@@ -36,6 +36,8 @@
 #include <Geom2d_Line.hxx>
 #include <Geom_Plane.hxx>
 #include <Geom_Surface.hxx>
+#include <Geom_TrimmedCurve.hxx>
+#include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_BezierSurface.hxx>
 #include <NCollection_Array1.hxx>
@@ -51,12 +53,15 @@
 #include <gp_Pnt2d.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCone.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepPrimAPI_MakeTorus.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
@@ -948,6 +953,16 @@ void test_mesh_06_completeness() {
     check(whole.ok && whole.completeness.allNondegenerateFacesCovered &&
               whole.completeness.missingFaces.empty(),
           "TEST-MESH-06: an intact box reports complete coverage and publishes");
+    // The contract both `!ok` consumers read (the §7.6 Tessellate verb and
+    // ExecutePlan's §7.2 artifact): a failure ALWAYS carries a diagnostic naming
+    // the faces, and a success NEVER carries one, so neither caller can emit a
+    // typed failure with nothing in it or swallow one that has something to say.
+    check(whole.diagnostic.empty(),
+          "TEST-MESH-06 (R1(c) MAJOR 3): a body that tessellates carries no failure diagnostic");
+    check(!bm.ok && !bm.diagnostic.empty() &&
+              bm.diagnostic.find(bm.completeness.missingFaces.front()) != std::string::npos,
+          "TEST-MESH-06 (R1(c) MAJOR 3): a body that FAILS always carries a diagnostic naming "
+          "its missing faces, which is what the Tessellate verb returns as OP_FAILED");
 
     // --- Astra F2 / §5: the predicate is FACE-LOCAL ------------------------
     // The retired rule was `area <= 1e-12 * bodyDiagonal^2`, so a valid
@@ -1409,10 +1424,10 @@ void test_f3_derivative_budget() {
     const double err = onecad::tess::normal_angular_error_rad(budget, du, dv);
     const double deviation = angle_deg(du.Crossed(dv), exactCross);
     std::fprintf(stderr,
-                 "INFO F3 dyadic fixture: budget=%.6g mm |Su|=%.6g |Sv|=%.6g |SuxSv|=%.6g "
-                 "angularBound=%.6g rad measuredDeviation=%.6f deg\n",
-                 budget.absoluteMm, du.Magnitude(), dv.Magnitude(), du.Crossed(dv).Magnitude(),
-                 err, deviation);
+                 "INFO F3 dyadic fixture: budget u=%.6g mm/u v=%.6g mm/v |Su|=%.6g |Sv|=%.6g "
+                 "|SuxSv|=%.6g angularBound=%.6g rad measuredDeviation=%.6f deg\n",
+                 budget.uAbsoluteMm, budget.vAbsoluteMm, du.Magnitude(), dv.Magnitude(),
+                 du.Crossed(dv).Magnitude(), err, deviation);
     check(budget.known, "F3: a Bezier patch carries a control-net derivative budget");
     // The binding statement: a node is either within NUM §7.4's 0.1 deg of the
     // EXACT normal, or it is reported unresolved. Nothing in between.
@@ -1988,7 +2003,272 @@ void test_f11_valence_bound() {
           "pairwise scan (apex vertices " + std::to_string(apexVertices) + ")");
 }
 
-// --- cost record -----------------------------------------------------------
+// ---------------------------------------------------------------------------
+// R1(c) fix round — BLOCKER 2 (a surface with no enclosure must keep its own
+// normal), MAJOR 5 (the derivative budget is per PARAMETER unit, so it is
+// reparameterization invariant), MINOR 6 (an edge between two such faces can
+// still be classified from trusted metadata).
+// ---------------------------------------------------------------------------
+
+// A degree-3 B-spline profile in the XZ plane: nothing about it is elementary,
+// so a prism over it is a `GeomAbs_SurfaceOfExtrusion` and a revolve is a
+// `GeomAbs_SurfaceOfRevolution` — the two families this file has no derivative
+// enclosure for (verified against OCCT 8.0.1).
+Handle(Geom_BSplineCurve) spline_profile() {
+    NCollection_Array1<gp_Pnt> poles(1, 5);
+    poles.SetValue(1, gp_Pnt(10.0, 0.0, 0.0));
+    poles.SetValue(2, gp_Pnt(14.0, 0.0, 5.0));
+    poles.SetValue(3, gp_Pnt(9.0, 0.0, 12.0));
+    poles.SetValue(4, gp_Pnt(15.0, 0.0, 18.0));
+    poles.SetValue(5, gp_Pnt(11.0, 0.0, 25.0));
+    NCollection_Array1<double> knots(1, 3);
+    knots.SetValue(1, 0.0);
+    knots.SetValue(2, 0.5);
+    knots.SetValue(3, 1.0);
+    NCollection_Array1<int> mults(1, 3);
+    mults.SetValue(1, 4);
+    mults.SetValue(2, 1);
+    mults.SetValue(3, 4);
+    return new Geom_BSplineCurve(poles, knots, mults, 3);
+}
+
+struct ProvenanceCounts {
+    std::size_t surface = 0, analytic = 0, fallback = 0, split = 0, unresolved = 0, missing = 0;
+    std::size_t emitted = 0;
+    int nodes = 0;
+    std::string text() const {
+        return "surface=" + std::to_string(surface) + " analytic=" + std::to_string(analytic) +
+               " fallback=" + std::to_string(fallback) + " split=" + std::to_string(split) +
+               " unresolved=" + std::to_string(unresolved) + " missing=" +
+               std::to_string(missing) + " emitted=" + std::to_string(emitted) + " nodes=" +
+               std::to_string(nodes);
+    }
+};
+
+ProvenanceCounts provenance_of_face(const TopoDS_Shape& shape, const char* lod) {
+    ProvenanceCounts c;
+    const onecad::tess::BodyMesh bm = mesh_of(shape, lod);
+    (void)bm;
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    if (faces.Extent() < 1) return c;
+    const TopoDS_Face face = TopoDS::Face(faces(1));
+    TopLoc_Location loc;
+    const Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, loc);
+    if (tri.IsNull()) return c;
+    c.nodes = tri->NbNodes();
+    const onecad::tess::FaceNormalResult fn = onecad::tess::compute_face_normals(
+        face, tri, loc, face.Orientation() == TopAbs_REVERSED);
+    c.emitted = fn.vertexNode.size();
+    for (const onecad::tess::NormalProvenance p : fn.provenance) {
+        switch (p) {
+            case onecad::tess::NormalProvenance::Surface: ++c.surface; break;
+            case onecad::tess::NormalProvenance::AnalyticSingular: ++c.analytic; break;
+            case onecad::tess::NormalProvenance::TriangulationFallback: ++c.fallback; break;
+            case onecad::tess::NormalProvenance::SingularSplit: ++c.split; break;
+            case onecad::tess::NormalProvenance::Unresolved: ++c.unresolved; break;
+            case onecad::tess::NormalProvenance::Missing: ++c.missing; break;
+        }
+    }
+    return c;
+}
+
+void test_r1c_unbounded_surface_keeps_its_own_normal() {
+    const TopoDS_Edge profile = BRepBuilderAPI_MakeEdge(spline_profile()).Edge();
+    const TopoDS_Shape prism = BRepPrimAPI_MakePrism(profile, gp_Vec(0.0, 30.0, 0.0)).Shape();
+    const TopoDS_Shape revolve =
+        BRepPrimAPI_MakeRevol(profile, gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1))).Shape();
+
+    const std::pair<const char*, TopoDS_Shape> swept[2] = {{"prism", prism}, {"revolve", revolve}};
+    for (const auto& [name, shape] : swept) {
+        for (const char* lod : {"coarse", "fine"}) {
+            const ProvenanceCounts c = provenance_of_face(shape, lod);
+            std::fprintf(stderr, "INFO R1C %s %s: %s\n", name, lod, c.text().c_str());
+            check(c.nodes > 0, std::string("BLOCKER 2: the ") + name + " at " + lod + " meshes");
+            // Every node of a swept B-spline is REGULAR: the profile has no cusp
+            // and the sweep is nondegenerate, so nothing here is a singularity.
+            // The facet ladder had no business seeing any of them.
+            check(c.split == 0,
+                  std::string("BLOCKER 2: no regular node of the ") + name + " at " + lod +
+                      " is singular-split (" + c.text() + ")");
+            check(c.fallback == 0 && c.missing == 0,
+                  std::string("BLOCKER 2: no regular node of the ") + name + " at " + lod +
+                      " falls back to its facets (" + c.text() + ")");
+            check(c.surface + c.unresolved == static_cast<std::size_t>(c.nodes),
+                  std::string("BLOCKER 2: every node of the ") + name + " at " + lod +
+                      " keeps its own supporting-surface normal, certified or Unresolved (" +
+                      c.text() + ")");
+            check(c.emitted == static_cast<std::size_t>(c.nodes),
+                  std::string("BLOCKER 2: the ") + name + " at " + lod +
+                      " emits exactly one vertex per node — no split inflation (" + c.text() + ")");
+        }
+    }
+    // Provenance-count coverage for `Unresolved` itself: it must actually occur,
+    // or the whole rung is untested.
+    const ProvenanceCounts c = provenance_of_face(prism, "fine");
+    check(c.unresolved > 0,
+          "BLOCKER 2: `Unresolved` is a REACHED rung — a surface of extrusion has no derivative "
+          "enclosure, so its nodes carry an uncertified surface normal (" + c.text() + ")");
+}
+
+// MAJOR 5: the budget is an error on the DERIVATIVE, i.e. mm per unit of the
+// parameter, so scaling the knot vector by 1/lambda must leave every node's
+// Surface/Unresolved decision alone. The retired form charged a POSITION
+// enclosure (mm) and so grew strictly more permissive as the parameterization
+// was compressed.
+void test_r1c_budget_is_reparameterization_invariant() {
+    constexpr double kLambda = 100.0;
+    NCollection_Array2<gp_Pnt> poles(1, 4, 1, 4);
+    for (int i = 1; i <= 4; ++i) {
+        for (int j = 1; j <= 4; ++j) {
+            const double x = 1000.0 + 3.0 * (i - 1);
+            const double y = 1000.0 + 3.0 * (j - 1);
+            poles.SetValue(i, j, gp_Pnt(x, y, 0.4 * (i - 1) * (j - 1)));
+        }
+    }
+    NCollection_Array1<double> knots(1, 2);
+    NCollection_Array1<int> mults(1, 2);
+    mults.SetValue(1, 4);
+    mults.SetValue(2, 4);
+
+    // Two surfaces that are the SAME map up to `u -> u / lambda`: identical
+    // poles, knot vectors [0, 0.01] and [0, 0.01/lambda].
+    double bound[2] = {0.0, 0.0};
+    bool decision[2] = {false, false};
+    const double extents[2] = {0.01, 0.01 / kLambda};
+    for (int k = 0; k < 2; ++k) {
+        knots.SetValue(1, 0.0);
+        knots.SetValue(2, extents[k]);
+        const Handle(Geom_BSplineSurface) surface =
+            new Geom_BSplineSurface(poles, knots, knots, mults, mults, 3, 3);
+        const TopoDS_Face face =
+            BRepBuilderAPI_MakeFace(surface, Precision::Confusion()).Face();
+        const BRepAdaptor_Surface surf(face, /*Restriction=*/false);
+        const onecad::tess::DerivativeBudget budget = onecad::tess::derivative_error_budget(surf);
+        gp_Pnt at;
+        gp_Vec du;
+        gp_Vec dv;
+        surf.D1(0.5 * extents[k], 0.5 * extents[k], at, du, dv);
+        bound[k] = onecad::tess::normal_angular_error_rad(budget, du, dv);
+        decision[k] = bound[k] <= onecad::tess::kNormalAcceptanceRad;
+        if (k == 0) {
+            std::fprintf(stderr,
+                         "INFO R1C budget units: uAbs=%.6g mm/u vAbs=%.6g mm/v |Su|=%.6g "
+                         "|Sv|=%.6g\n",
+                         budget.uAbsoluteMm, budget.vAbsoluteMm, du.Magnitude(), dv.Magnitude());
+        }
+    }
+    std::fprintf(stderr, "INFO R1C reparameterization: bound at u-extent 0.01 = %.6g rad, at "
+                         "0.0001 = %.6g rad\n",
+                 bound[0], bound[1]);
+    check(decision[0] == decision[1],
+          "MAJOR 5: compressing the knot vector by 1/100 does not change the Surface/Unresolved "
+          "decision (before " + std::to_string(decision[0]) + ", after " +
+              std::to_string(decision[1]) + ")");
+    const double ratio = bound[1] > 0.0 ? bound[0] / bound[1] : 0.0;
+    check(bound[0] > 0.0 && std::isfinite(bound[0]) && std::abs(ratio - 1.0) <= 1e-6,
+          "MAJOR 5: the angular bound itself is reparameterization INVARIANT (ratio " +
+              std::to_string(ratio) + ")");
+}
+
+// MINOR 6 (follows from BLOCKER 2): two surfaces of extrusion sharing one edge.
+// While every sample on them was rejected as unevaluable the join could only be
+// `unknown`; with the samples restored, trusted G1 metadata classifies it
+// tangent and its absence still leaves it visible.
+void test_r1c_edge_between_unbounded_faces() {
+    const Handle(Geom_BSplineCurve) curve = spline_profile();
+    const double split = 0.5;
+    const TopoDS_Edge lower =
+        BRepBuilderAPI_MakeEdge(new Geom_TrimmedCurve(curve, curve->FirstParameter(), split))
+            .Edge();
+    const TopoDS_Edge upper =
+        BRepBuilderAPI_MakeEdge(new Geom_TrimmedCurve(curve, split, curve->LastParameter()))
+            .Edge();
+    BRepBuilderAPI_MakeWire wire(lower);
+    wire.Add(upper);
+    check(wire.IsDone(), "MINOR 6: the split B-spline profile builds one wire");
+    if (!wire.IsDone()) return;
+    const TopoDS_Shape sheet = BRepPrimAPI_MakePrism(wire.Wire(), gp_Vec(0.0, 30.0, 0.0)).Shape();
+
+    TopTools_IndexedMapOfShape faces;
+    TopTools_IndexedMapOfShape edges;
+    TopExp::MapShapes(sheet, TopAbs_FACE, faces);
+    TopExp::MapShapes(sheet, TopAbs_EDGE, edges);
+    check(faces.Extent() == 2,
+          "MINOR 6: the prism over a two-edge wire is two faces (" +
+              std::to_string(faces.Extent()) + ")");
+    if (faces.Extent() != 2) return;
+    for (int f = 1; f <= 2; ++f) {
+        const BRepAdaptor_Surface s(TopoDS::Face(faces(f)), /*Restriction=*/false);
+        check(s.GetType() == GeomAbs_SurfaceOfExtrusion,
+              "MINOR 6: both faces are surfaces of extrusion, the family with no enclosure");
+    }
+
+    const auto shared_flags = [&](const TopoDS_Shape& shape) {
+        TopTools_IndexedMapOfShape ff;
+        TopTools_IndexedMapOfShape ee;
+        TopExp::MapShapes(shape, TopAbs_FACE, ff);
+        TopExp::MapShapes(shape, TopAbs_EDGE, ee);
+        const std::vector<onecad::tess::EdgeClass> classes =
+            onecad::tess::classify_edges(shape, ff, ee);
+        for (const onecad::tess::EdgeClass& c : classes) {
+            if (c.faceOrdinals.size() == 2) return c.flags;
+        }
+        return std::uint32_t{0};
+    };
+
+    // The shared edge, its registered continuity and the two faces' supporting
+    // surfaces — read here so the assertions below name real evidence.
+    TopoDS_Edge shared;
+    TopoDS_Face fa;
+    TopoDS_Face fb;
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndAncestors(sheet, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    for (int e = 1; e <= edgeFaces.Extent(); ++e) {
+        std::vector<TopoDS_Face> incident;
+        for (const TopoDS_Shape& sh : edgeFaces.FindFromIndex(e)) {
+            const TopoDS_Face face = TopoDS::Face(sh);
+            bool seen = false;
+            for (const TopoDS_Face& have : incident) seen = seen || have.IsSame(face);
+            if (!seen) incident.push_back(face);
+        }
+        if (incident.size() != 2) continue;
+        shared = TopoDS::Edge(edgeFaces.FindKey(e));
+        fa = incident[0];
+        fb = incident[1];
+    }
+    check(!shared.IsNull(), "MINOR 6: the two extrusion faces share exactly one edge");
+    if (shared.IsNull()) return;
+    TopLoc_Location la;
+    TopLoc_Location lb;
+    const Handle(Geom_Surface) sa = BRep_Tool::Surface(fa, la);
+    const Handle(Geom_Surface) sb = BRep_Tool::Surface(fb, lb);
+    check(!(sa == sb),
+          "MINOR 6: the two faces are carried by DISTINCT surfaces, so the shared-handle "
+          "shortcut cannot answer this join");
+    const GeomAbs_Shape registered = BRep_Tool::Continuity(shared, fa, fb);
+    check(registered >= GeomAbs_G1,
+          "MINOR 6: OCCT's prism builder registers G1-or-better continuity across the smooth "
+          "profile join (got " + std::to_string(static_cast<int>(registered)) + ")");
+
+    // With trusted metadata and three evaluable samples the join is tangent.
+    // While every sample on a surface of extrusion was rejected as unevaluable it
+    // could only ever be `unknown`, whatever the metadata said.
+    check(shared_flags(sheet) == onecad::tess::kEdgeTangent,
+          "MINOR 6: a join between two surfaces of extrusion with trusted continuity metadata "
+          "is TANGENT (flags " + std::to_string(shared_flags(sheet)) + ")");
+
+    // Strip the metadata and the same geometry falls back to UNKNOWN: NUM §8.2's
+    // "sample-only results remain unknown, visible" is unaffected by the fix.
+    BRep_Builder cb;
+    cb.Continuity(shared, fa, fb, GeomAbs_C0);
+    check(BRep_Tool::Continuity(shared, fa, fb) == GeomAbs_C0,
+          "MINOR 6: the continuity metadata really was stripped");
+    check(shared_flags(sheet) == onecad::tess::kEdgeUnknown,
+          "MINOR 6: without trusted metadata the SAME join stays unknown and visible — three "
+          "consistent samples never upgrade it (flags " + std::to_string(shared_flags(sheet)) +
+              ")");
+}
 
 void report_normal_cost() {
     const TopoDS_Shape torus = BRepPrimAPI_MakeTorus(30.0, 10.0).Shape();
@@ -2045,6 +2325,9 @@ int main() {
     test_f8_cone_apex_split();
     test_f10_missing_nodes_and_nan();
     test_f11_valence_bound();
+    test_r1c_unbounded_surface_keeps_its_own_normal();
+    test_r1c_budget_is_reparameterization_invariant();
+    test_r1c_edge_between_unbounded_faces();
     test_edge_classification();
     test_determinism();
     report_normal_cost();

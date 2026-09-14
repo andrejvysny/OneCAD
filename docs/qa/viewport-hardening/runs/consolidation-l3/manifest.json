@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "runId": "consolidation-l3",
+  "createdAt": "2026-09-14T14:30:08.306Z",
+  "commit": "8807630cdb1ab06f1c4ef65ee93f0d159592f923",
+  "branch": "viewport-hardening",
+  "dirtyDiffSha256": "228bd94b8077135ca31781ded77b42f49f64cdf40e7faadf16c09d8a7fa757d8",
+  "tools": {
+    "node": "v22.23.2",
+    "bun": "1.4.0",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "cmake": "cmake version 4.1.3"
+  },
+  "worker": {
+    "path": "worker/build/onecad-worker",
+    "sha256": "08765cfe30c54fdc80a9929a7a2f54c14e5b9456db69fdb7e11d084785233301"
+  },
+  "lanes": {
+    "vitest-full": {
+      "command": [
+        "bun",
+        "run",
+        "test"
+      ],
+      "cwd": "",
+      "env": {
+        "ONECAD_REQUIRE_WORKER": "1"
+      },
+      "startedAt": "2026-09-14T14:30:08.306Z",
+      "endedAt": "2026-09-14T14:30:40.022Z",
+      "durationMs": 31716,
+      "exit": 1,
+      "logPath": "docs/qa/viewport-hardening/runs/consolidation-l3/logs/vitest-full.log",
+      "logSha256": "b443d4a147782e38f7dd925d2906664cac3d05bfdef6b628518c32626dd08331",
+      "tailLines": [
+        "",
+        " FAIL  src/tools/modelTools/modelingInteraction.selection.probe.test.ts > modeling interaction contract — boolean success selection > a split Cut selects every child output, not the stored target",
+        "TypeError: this.client.onDocumentChanged is not a function",
+        " ❯ new ModelToolController src/tools/modelTools/ModelToolController.ts:1062:19",
+        "    1060|",
+        "    1061|     this.unsubs.push(",
+        "    1062|       this.client.onDocumentChanged((change) => {",
+        "       |                   ^",
+        "    1063|         const publicationKey = `${change.documentId ?? \"\"}:${change.ru…",
+        "    1064|         if (publicationKey === this.measureFenceKey) return;",
+        " ❯ build src/tools/modelTools/modelingInteraction.selection.probe.test.ts:64:18",
+        " ❯ src/tools/modelTools/modelingInteraction.selection.probe.test.ts:100:5",
+        "",
+        "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[327/490]⎯",
+        "",
+        " FAIL  src/tools/modelTools/modelingInteraction.selection.probe.test.ts > modeling interaction contract — boolean success selection > a FAILED commit leaves the selection where the user put it",
+        "TypeError: this.client.onDocumentChanged is not a function",
+        " ❯ new ModelToolController src/tools/modelTools/ModelToolController.ts:1062:19",
+        "    1060|",
+        "    1061|     this.unsubs.push(",
+        "    1062|       this.client.onDocumentChanged((change) => {",
+        "       |                   ^",
+        "    1063|         const publicationKey = `${change.documentId ?? \"\"}:${change.ru…",
+        "    1064|         if (publicationKey === this.measureFenceKey) return;",
+        " ❯ build src/tools/modelTools/modelingInteraction.selection.probe.test.ts:64:18",
+        " ❯ src/tools/modelTools/modelingInteraction.selection.probe.test.ts:118:5",
+        "",
+        "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[328/490]⎯",
+        "",
+        "error: script \"test\" exited with code 1"
+      ]
+    }
+  }
+}

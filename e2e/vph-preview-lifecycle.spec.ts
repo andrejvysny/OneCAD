@@ -182,6 +182,10 @@ test("TEST-RES-05: 100 extrude preview apply/cancel cycles return to baseline (l
   await cancelArmedTool(page);
   await waitForRenderedFrame(page);
   const baseline = await readCounters(page);
+  // A missing WebGL renderer would make every `geometries` reading `null`, and
+  // `null === null` turns the whole resource assertion into a no-op. The probe
+  // only means anything if the renderer is actually reporting.
+  expect(baseline.renderer, "renderer info — no WebGL means the geometry assertions are vacuous").not.toBeNull();
 
   const samples: Array<{ i: number; geometries: number | null; leasesOpen: number; meshEntriesBuilt: number; meshEntriesRetired: number }> = [];
 
@@ -280,6 +284,10 @@ test("TEST-RES-05: 50 new-document/close cycles return to the empty-document bas
   await extrudeOneBody(page);
   await closeAndReopen(page);
   const baseline = await readCounters(page);
+  // A missing WebGL renderer would make every `geometries` reading `null`, and
+  // `null === null` turns the whole resource assertion into a no-op. The probe
+  // only means anything if the renderer is actually reporting.
+  expect(baseline.renderer, "renderer info — no WebGL means the geometry assertions are vacuous").not.toBeNull();
 
   const samples: Array<{
     i: number;

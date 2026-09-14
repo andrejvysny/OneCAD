@@ -21,6 +21,7 @@ import { viewportStore } from "@/stores/viewportStore";
 import { documentStore } from "@/stores/documentStore";
 import { selectionStore, type EntityRef } from "@/stores/selectionStore";
 import { resetStores } from "@/test/resetStores";
+import { STALE_PICK_HINT } from "@/ipc/promote";
 import { encodeMesh1 } from "@/ipc/mockMeshes";
 import { attachPickProof } from "@/viewport/mesh/pickProof";
 import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
@@ -44,13 +45,22 @@ const PUBLICATION = {
  * Install `body1` as the current publication and give `ref` the pick-time proof
  * a real click would have attached (PR-01). Without it a promotion from the
  * selection fails closed, which is the point of the companion spec below.
+ *
+ * `label` is the id the mesh's own face table carries — `f:22` for an ordinary
+ * pick, an `el_…` ElementId for an element the worker already has a live
+ * binding for (MESH1 `IDS_HAVE_ELEMENTIDS`, the two-namespace table). The proof
+ * has to RESOLVE that label in the entry it was read from, so the blob really
+ * names it rather than merely referencing it.
  */
-function provePick(ref: EntityRef): EntityRef {
-  // A mesh whose face id table really names `f:22` — the proof has to resolve
-  // the picked label in the entry it was read from, not merely reference it.
+function provePick(
+  ref: EntityRef,
+  label = "f:22",
+  displayState: "current" | "stale-inspection-only" = "current",
+): EntityRef {
   const blob = encodeMesh1({
     positions: [0, 0, 25, 10, 0, 25, 0, 10, 25],
-    faces: [{ triangles: [[0, 1, 2]], id: "f:22" }],
+    faces: [{ triangles: [[0, 1, 2]], id: label }],
+    idsHaveElementIds: label.startsWith("el_"),
   });
   const entry = buildBodyObjects(
     parseMeshPayload(blob), "body1", 1, undefined, undefined, PUBLICATION,
@@ -63,8 +73,17 @@ function provePick(ref: EntityRef): EntityRef {
     geometrySource: "live",
     bodies: { body1: { id: "body1", name: "Body", visible: true } },
   });
+  // A failed replacement demotes the installed geometry in place (WP04): still
+  // drawn, still inspectable, never an operation target.
+  entry.displayState = displayState;
   attachPickProof(ref, { entry, kind: "face", topoKey: ref.topoKey ?? "" });
   return ref;
+}
+
+/** The ref shape `ViewportRoot.refFromHit` produces for an `el_`-labelled face:
+ *  the MESH label IS the id, so `topoKey` and `elementId` are the same string. */
+function elementIdFaceRef(): EntityRef {
+  return faceRef({ id: "body1#el_4f2a", topoKey: "el_4f2a", elementId: "el_4f2a" });
 }
 
 /** The backend-resolved frame for the picked face — deliberately NOT the
@@ -213,6 +232,42 @@ describe("SketchController — sketch on a selected face", () => {
       newOnFace: { bodyId: "body1", elementId: "el_fresh", topoKey: "f:22", worldPoint: [1, 2, 25] },
       plane: FACE_PLANE,
     });
+  });
+
+  /*
+   * R1(a) BLOCKER 1 — an `el_` label is a MESH label, not a licence.
+   *
+   * `Picker.resolvePick` copies the id table's label into `PickHit.elementId`
+   * whenever it is already an ElementId, and `refFromHit` carries it onto the
+   * selection ref. So "the ref has an elementId" is NOT evidence that anything
+   * verified it: on a body whose replacement failed, that id names an element of
+   * a publication the document has moved past. Skipping the proof gate for it
+   * put a sketch on exactly that face.
+   */
+  it("REFUSES an `el_` face label read off a stale-inspection-only body", async () => {
+    selectionStore.getState().set([
+      provePick(elementIdFaceRef(), "el_4f2a", "stale-inspection-only"),
+    ]);
+    toolStore.getState().setMode("sketch");
+    await flush();
+
+    expect(clientMock.promoteSelection).not.toHaveBeenCalled();
+    expect(clientMock.faceSketchPlane).not.toHaveBeenCalled();
+    expect(clientMock.enterSketch).not.toHaveBeenCalled();
+    expect(viewportStore.getState().statusHint?.message ?? "").toContain(STALE_PICK_HINT);
+  });
+
+  it("an `el_` face label on a CURRENT body still enters with NO wire promotion", async () => {
+    // The gate must not cost the two-namespace short-circuit: an ElementId IS
+    // the persistent handle, so once the proof clears there is nothing to ask
+    // `AcquireElementIds` for.
+    selectionStore.getState().set([provePick(elementIdFaceRef(), "el_4f2a")]);
+    toolStore.getState().setMode("sketch");
+    await flush();
+
+    expect(clientMock.promoteSelection).not.toHaveBeenCalled();
+    expect(clientMock.faceSketchPlane).toHaveBeenCalledWith("body1", "el_4f2a", "el_4f2a");
+    expect(clientMock.enterSketch).toHaveBeenCalledTimes(1);
   });
 
   it("REFUSES an unminted pick with no pick-time proof — no promotion, no sketch", async () => {

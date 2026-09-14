@@ -43,7 +43,7 @@ import {
   isEntryPromotable,
   type MeshEntry,
 } from "@/viewport/mesh/meshRegistry";
-import { pickProofFor, type InstalledPickProof } from "@/viewport/mesh/pickProof";
+import { pickProofFor, proofFromHit, type InstalledPickProof } from "@/viewport/mesh/pickProof";
 
 export type { InstalledPickProof };
 
@@ -90,6 +90,24 @@ export function installedProofIsCurrent(bodyId: string, proof: InstalledPickProo
   if (!installedEntryIsCurrent(bodyId, proof.entry)) return false;
   const index = proof.kind === "face" ? proof.entry.faceIndex : proof.entry.edgeIndex;
   return index != null && index.ordinalForId(proof.topoKey) >= 0;
+}
+
+/**
+ * Is a Picker hit still about the installed, CURRENT publication?
+ *
+ * The read-only counterpart of {@link promoteViewportPick}'s gate, for the lanes
+ * that QUERY geometry from a hit rather than mint an identity from it — a
+ * `classifyElement` hover, an attachment pick. Those calls resolve a
+ * snapshot-scoped `f:N`/`e:N` against the HEAD, so on a body whose replacement
+ * failed they answer about whatever the head calls that ordinal now; the caller
+ * has no way to tell, which is why the check belongs before the call and not
+ * after it.
+ */
+export function viewportHitIsCurrent(
+  hit: { entry?: MeshEntry; kind: string; topoKey: string } | null | undefined,
+): boolean {
+  const proof = proofFromHit(hit);
+  return proof !== null && installedProofIsCurrent(proof.entry.bodyId, proof);
 }
 
 /** The single user-facing wording for a refused / unresolvable promotion. */
@@ -238,8 +256,17 @@ export async function promoteAuthoritativeRef(
     stalePickHint();
     return null;
   }
+  // The reply must ANSWER the question: same body, same label, and — when the
+  // caller declared one — the same kind of element. The viewport lane has always
+  // re-checked this; the snapshot fence alone does not, and an authored record
+  // carries whatever comes back here forever.
   const hit = promoted[0];
-  if (!hit) {
+  if (
+    !hit ||
+    hit.bodyId !== bodyId ||
+    hit.topoKey !== pick.topoKey ||
+    (pick.kind !== undefined && hit.kind !== pick.kind)
+  ) {
     stalePickHint();
     return null;
   }
