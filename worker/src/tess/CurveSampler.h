@@ -47,11 +47,29 @@ enum class CurveCertification {
     Failed            // not samplable, or the approximation was rejected
 };
 
-// Angular evidence for one span.
+// Angular evidence for one span. READ THE THREE MEANINGS AS WRITTEN — they are
+// three different epistemic states, not three degrees of badness.
 enum class AngularStatus {
-    Satisfied,    // every significant derivative-numerator pole is inside the cone
-    Undefined,    // the derivative vanishes at a span endpoint (stationary/singular)
-    Uncertified   // the cone criterion does not hold — the span must be split
+    // PROVED. Every derivative-numerator Bernstein coefficient lies inside the
+    // half-cone about the EMITTED (float32) chord, and the proof is complete:
+    // the retained Bernstein mass and the coefficient arithmetic uncertainty are
+    // both charged (followup §2 C2, `beta + asin(E/g) <= angularTol/2`). Because
+    // every tangent in the span is then within half the tolerance of the emitted
+    // chord, two adjacent Satisfied leaves turn by at most the full tolerance.
+    Satisfied,
+    // EVIDENCE INCOMPLETE — emphatically NOT "the derivative vanishes". The
+    // calculation did not establish the cone: the retained mass vanished, the
+    // arithmetic uncertainty reached the cone margin, the weights were too
+    // ill-conditioned to trust the numerator, or the span's emitted float32
+    // chord cannot carry a direction the double chord can. The POSITION bound is
+    // untouched; the leaf is published on its chord certificate. A computed
+    // floating-point zero is not a proved zero, so this status never asserts a
+    // property of the curve — only the absence of a proof.
+    Undefined,
+    // DISPROVED. Some coefficient provably lies outside the cone about the double
+    // chord, so the span must be split. A span is never ACCEPTED with this
+    // status.
+    Uncertified
 };
 
 // One emitted segment. `t0`/`t1` are EDGE parameters: every source piece is
@@ -64,14 +82,41 @@ enum class AngularStatus {
 struct CurveLeaf {
     double t0 = 0.0;
     double t1 = 0.0;
-    double chordBoundMm = 0.0;    // certified hull distance to this chord
+    // Certified hull distance to this chord, with the F6 roundoff enclosure of
+    // the generated control net already charged to it (followup §2 F6).
+    double chordBoundMm = 0.0;
     double chordLengthMm = 0.0;   // |P_n - P_0| for this segment
     AngularStatus angular = AngularStatus::Uncertified;
+    // followup §2 C2: `angularTol/2 - (beta + asin(E/g))`, the CONTINUOUS margin
+    // behind the discrete status. Non-negative exactly when `angular ==
+    // Satisfied`; -1 when no cone was evaluated at all.
+    double angularMarginRad = -1.0;
+    // followup §2 F5: the angle between this leaf's double-precision chord and
+    // the chord of its two EMITTED float32 endpoints. The cone is tested about
+    // the ENCODED chord, so this is published evidence, not a correction.
+    double encodedChordRotationRad = 0.0;
     // The curve's derivative vanishes exactly at this leaf boundary — a cusp or
     // stationary point, i.e. a point where no tangent exists. Distinct from
     // `angular == Undefined`, which only says the cone test established nothing.
     bool singularVertexAtStart = false;
     bool singularVertexAtEnd = false;
+    // The curve's own ONE-SIDED tangent directions at t0 and t1, as unit vectors
+    // read off the first and last derivative-numerator coefficients (Q(0) and
+    // Q(1) ARE those tangents up to the positive factor W^2). Zero when the
+    // derivative vanishes there. followup §2 C1 writes the observed turn as
+    // `J + beta- + beta+ + ...` with J the curve's GENUINE tangent jump at the
+    // join; these are how J is measured, so a real C0 corner is permitted its own
+    // corner while the polyline is still held to the tolerance ON TOP of it.
+    gp_XYZ startTangent = gp_XYZ(0.0, 0.0, 0.0);
+    gp_XYZ endTangent = gp_XYZ(0.0, 0.0, 0.0);
+    // followup §2 C1: an UNRESOLVED SINGULAR REGION. The leaf sits below the
+    // positional resolution floor AND its derivative-numerator coefficients
+    // could not be separated from the origin by any tested direction, so Q may
+    // vanish inside it and a tangent reversal there is real geometry. This is
+    // the ONLY evidence besides an exactly vanishing endpoint coefficient that
+    // exempts a join from the display-turn rule — a failed cone or a short leaf
+    // authorises nothing on its own.
+    bool singularBracket = false;
 };
 
 struct CurveSampleResult {
@@ -83,6 +128,20 @@ struct CurveSampleResult {
     // Euclidean |double - float(double)| over `points`, not a guessed ULP
     // multiple. -1 when nothing was emitted.
     double quantizationErrorMm = -1;
+    // followup §2 C1: the greatest turn between two consecutive EMITTED float32
+    // chords over the joins the display-turn rule actually binds (singular joins
+    // excluded). -1 when there is no such join. This is the number a faceted
+    // silhouette is made of.
+    double encodedTurnMaxRad = -1;
+    // PR-07 / D9. What the caller ASKED for and what the emitted polyline
+    // actually holds. They differ only when the caller's edge policy re-sampled
+    // at a relaxed budget (`Tessellate.cpp`'s doubling ladder): a retry that
+    // succeeded at 2x reports requested 0.05 / achieved 0.10 and certification
+    // QualityLimited. The retry's own internal `Certified` never leaks out.
+    double requestedChordToleranceMm = -1;
+    double achievedChordToleranceMm = -1;
+    double requestedAngularToleranceRad = -1;
+    double achievedAngularToleranceRad = -1;
     CurveCertification certification = CurveCertification::Failed;
     bool angularUndefinedSomewhere = false;
     // Edge parameters where the curve's derivative vanishes exactly. Each is a
@@ -160,7 +219,29 @@ struct RationalBezierSpan {
     int depth = 0;
     bool at_source_start = true;
     bool at_source_end = true;
+    // Per-axis greatest |coordinate| of the SOURCE span this one descends from.
+    // The F6 roundoff enclosure is proportional to the magnitudes the de
+    // Casteljau recurrence actually handled, which are the ancestor's, not the
+    // (smaller) child's. Zero on a hand-built span, where the span's own extents
+    // are used instead.
+    gp_XYZ sourceMaxAbs = gp_XYZ(0.0, 0.0, 0.0);
 };
+
+// followup §2 F6. Every GENERATED control net — source conversion and every
+// subdivision — must pass this before any bound computed from it means anything.
+// A net with a non-finite pole or a non-positive/non-finite homogeneous weight
+// breaks the convex-hull argument outright, and `std::max(worst, NaN)` would
+// quietly return a ZERO chord bound for it.
+bool control_net_is_valid(const RationalBezierSpan& span);
+
+// followup §2 F6 positional roundoff enclosure. With u = 2^-53, K = depth*(n+3)+2
+// and g = gamma_K = K*u/(1-K*u), a computed pole of a span subdivided to `depth`
+// from a degree-`n` source carries a per-axis error of at most
+// `[(2g + u(1+g)) / (1-g)] * M_j`. At n = 32, depth = 32 (K = 1122) the
+// multiplier is 2.492e-13, i.e. 4.317e-4 mm Euclidean when every |coordinate| is
+// at most 1e9 mm. Weight-ratio independent.
+double pole_roundoff_multiplier(int depth, int degree);
+double pole_roundoff_enclosure(const RationalBezierSpan& span);
 
 // de Casteljau at t=0.5 in homogeneous coordinates. The shared split point is
 // computed ONCE and handed to both children, so the two halves meet exactly.
@@ -177,15 +258,53 @@ double hull_chord_bound(const RationalBezierSpan& span);
 // the tangent direction exactly. Empty for a degree-0 span.
 std::vector<gp_XYZ> derivative_numerator_bernstein(const RationalBezierSpan& span);
 
-// NUM §2.4 forward-cone test against the span's chord direction. `roundoffBound`
-// is DIMENSIONLESS: the coefficients are scaled by their greatest magnitude
-// first, so it compares against relative sizes (NUM §1.2 suggests 64*eps).
-AngularStatus tangent_cone_status(const RationalBezierSpan& span, double angularTol,
-                                  double roundoffBound);
+// What the NUM §2.4 forward-cone test established about a span, with the
+// followup §2 C2 derivation supplying the acceptance condition. Writing
+// Q = G + H with G the RETAINED (computed-nonzero) coefficients and H the
+// excluded ones, s(t) the retained Bernstein mass, p_min the least retained
+// dot(q_i, axis), g = p_min * s_min and E the excluded mass plus the coefficient
+// arithmetic uncertainty:
+//
+//     angle(Q(t), axis) <= beta + asin(E/g)   whenever E < g and s_min > 0
+//
+// so `Satisfied` is justified exactly when `beta + asin(E/g) <= angularTol/2`.
+// There is no derivation of any universal "too small to test" threshold, and
+// this struct carries none: only an EXACTLY zero coefficient is excluded, and
+// its uncertainty is still charged through E.
+struct ConeVerdict {
+    AngularStatus status = AngularStatus::Uncertified;
+    double coneHalfAngleRad = 0.0;   // beta: greatest angle from a retained coefficient to `axis`
+    double uncertaintyRad = 0.0;     // asin(E/g), or pi when the evidence does not close
+    double marginRad = -1.0;         // angularTol/2 - (beta + uncertainty)
+    double retainedMassMin = 0.0;    // s_min, the retained Bernstein mass lower bound
+    double excludedMass = 0.0;       // E
+    double retainedGap = 0.0;        // g = p_min * s_min
+    bool singularAtStart = false;    // q_0 computed exactly zero
+    bool singularAtEnd = false;      // q_m computed exactly zero
+    // No tested direction separates the coefficient hull from the origin, so Q
+    // MAY vanish inside this span. A necessary condition for a singularity, never
+    // by itself sufficient — which is why it only ever combines with the
+    // positional resolution floor (followup §2 C1).
+    bool reversalPresent = false;
+    // Unit one-sided tangent directions at the span's two ends, zero where the
+    // derivative numerator vanishes. Independent of `axis`.
+    gp_XYZ startDirection = gp_XYZ(0.0, 0.0, 0.0);
+    gp_XYZ endDirection = gp_XYZ(0.0, 0.0, 0.0);
+    const char* incompleteReason = nullptr;
+};
 
-// Same test, additionally reporting WHICH endpoint has a vanishing derivative.
+// NUM §2.4 forward-cone test about an EXPLICIT axis. The sampler passes the
+// EMITTED float32 chord (followup §2 F5): a cone proved about the double chord
+// says nothing about the segment a viewer actually sees.
+ConeVerdict tangent_cone_verdict(const RationalBezierSpan& span, double angularTol,
+                                 const gp_XYZ& axis);
+
+// The same test about the span's own double-precision chord.
+AngularStatus tangent_cone_status(const RationalBezierSpan& span, double angularTol);
+
+// Same, additionally reporting WHICH endpoint has an exactly vanishing
+// derivative numerator.
 AngularStatus tangent_cone_status(const RationalBezierSpan& span, double angularTol,
-                                  double roundoffBound, bool& undefinedAtStart,
-                                  bool& undefinedAtEnd);
+                                  bool& undefinedAtStart, bool& undefinedAtEnd);
 
 }  // namespace onecad::tess

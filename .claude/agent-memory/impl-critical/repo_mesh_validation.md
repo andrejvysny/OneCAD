@@ -34,6 +34,12 @@ Facts the validator depends on, verified against `worker/src/tess/Tessellate.cpp
 - `FACE_COLORS` (type 12) is the one section a wrong length only downgrades (warn, colours
   dropped) — exclude it from any "corrupt a section length" negative test.
 
+As of PR-03A that signature is `buildBodyObjects(mesh, bodyId, meshRev, bodyColor?, authoredFaceColors?,
+provenance?, plan?)` — the plan was appended rather than inserted for exactly the reason above; see
+[[repo-mesh-preparation-plan]]. `MeshAccounting` is payload-only now: nothing may reserve from it.
+The preview lanes go through `previewMesh.buildPreviewEntry` (validate → plan → admit → build);
+`validatePreviewMesh` is module-private.
+
 `viewportStore.setStatusHint` severities are `"info" | "warn" | "error"` — there is no
 `"warning"`.
 

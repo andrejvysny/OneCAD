@@ -1,3 +1,16 @@
+# VP-HARDENING 1.0 — CONSOLIDATION PASS (2026-09-14, session 2 PAUSED by the user)
+
+> Review `docs/01-PROGRESS-REVIEW.md` (PR-01…PR-12) driven a consolidation pass over WP02/03/04/08/09. Plan and per-task evidence: root `PLAN.md` (Run log). Ledger: `docs/viewport-hardening/execution/STATUS.md` §9. **Nothing committed.** All twelve findings have production fixes with red-first tests and orchestrator-run focused gates; none has integrated (L3) evidence yet.
+
+## Now (session 3)
+
+- [ ] Approve/run Astra `verify` WP08 round 3 (call 3/3, packet sha `058e3de6f7bd`, scratchpad) — accept/reject, record in `docs/design/astra/`.
+- [ ] R1 adversarial reviews (fresh contexts, read-only): (a) identity/publication T3+T6+T7+T9, (b) ownership/scheduler T2+T4, (c) worker T5+T8 — red-first fix rounds by the original implementers.
+- [ ] Rerun FE + worker focused gates through `scripts/record-viewport-run.mjs`; re-point the 26 matrix rows to `runs/*/manifest.json`; add TEST-PUB-03, TEST-MESH-06, TEST-RES-05 as focused-pass; `node scripts/verify-viewport-acceptance.mjs` exit 0.
+- [ ] Rebuild `src-tauri/target/` (stale `OneCAD-ai-agent` paths in tauri's build-script output) — then `cargo fmt/clippy`, `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` vs the 24 baseline reds.
+- [ ] L3: full `ctest` (expect only `feature_pattern`, `chamfer_reference_face`), `bun run test` (vs the 443 baseline reds — `src/tools/modelTools` mocks lacking `onDocumentChanged`), `bun run e2e` both projects `E2E_PORT=4179` retries 0, hex gate, QA verifiers, clean-checkout verifier in a scratch worktree; STATUS §2/§6/§7 updates; commit (no push).
+- [ ] Owed user-run (never faked): TEST-MESH-05/TEST-PUB-03 N (failed replacement → click → fillet refused in the bundled app), TEST-RES-05 N, TEST-MESH-06 N.
+
 # VP-HARDENING 1.0 — VIEWPORT PROGRAM (2026-09-13, session 1 PAUSED for handoff)
 
 > **Committed 2026-09-13:** all session-1 work is commit `67331740` on branch `viewport-hardening` (worktree `/Users/andrejvysny/workspace/viewport-hardening`), pushed to `origin/viewport-hardening`. Statements below about an uncommitted/dirty tree, a dirty-diff hash, and "no commits" describe the state BEFORE that commit; the design baseline remains `65b4c60`. The L3 rung was not run for this commit (user-directed checkpoint), so it is a checkpoint, not a gate boundary.

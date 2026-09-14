@@ -45,6 +45,16 @@ export interface PickHit {
   worldPos: THREE.Vector3;
   /** Local hint for previews/promotion (face normal in world space). */
   surfaceHint?: { normal?: [number, number, number] };
+  /**
+   * The EXACT installed entry this hit's `topoKey` was read from — the pick-time
+   * half of an {@link import("../mesh/pickProof").InstalledPickProof} (PR-01).
+   *
+   * Stamped by {@link resolvePick} from the SAME registry lookup that produced
+   * the ordinal, never re-derived afterwards: `getEntry(bodyId)` at promotion
+   * time answers about whatever is installed THEN, which pairs an old ordinal
+   * with new geometry. Absent only when a caller built a `PickHit` by hand.
+   */
+  entry?: MeshEntry;
 }
 
 export type ProbeCandidateKind = "body" | "face" | "edge";
@@ -199,6 +209,9 @@ export function resolvePick(
     distance: hit.distance,
     worldPos: worldPos.clone(),
     surfaceHint,
+    // The object the ordinal above was decoded against — carried, not looked up
+    // again later. See {@link PickHit.entry}.
+    entry,
   };
 }
 

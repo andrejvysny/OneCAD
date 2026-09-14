@@ -52,6 +52,7 @@ import { bareBodyId } from "@/ipc/tauriCommandMap";
 import { selectionStore, type EntityRef } from "@/stores/selectionStore";
 import type { TopoIndex } from "./faceRangeIndex";
 import { getEntry, type MeshEntry } from "./meshRegistry";
+import { clearPickProof } from "./pickProof";
 import type { BodyMeshView } from "./parseMeshPayload";
 
 /**
@@ -222,6 +223,12 @@ export function reconcileSelectionForBody(
       continue;
     }
     const verdict = verdictFor(ref, next);
+    // Whatever happens below, this ref stops being a viewport pick: the
+    // publication it was taken against is gone, so its pick-time proof is no
+    // longer evidence about anything drawn and must never be reused to promote.
+    // A ref that survives here does so on its persistent `elementId` alone —
+    // which every acquisition path reads before it reaches for promotion.
+    clearPickProof(ref);
     if (verdict.kind === "keep") {
       if (ref.topoKey === verdict.label) kept.push(ref);
       else {

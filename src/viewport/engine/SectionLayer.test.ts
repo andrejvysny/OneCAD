@@ -18,6 +18,7 @@ import type { SectionState } from "@/stores/viewportStore";
 import * as reg from "../mesh/meshRegistry";
 import { parseMeshPayload } from "../mesh/parseMeshPayload";
 import { makeBoxMesh } from "@/ipc/mockMeshes";
+import { __resetLogForTests, logSnapshot } from "@/debug/log";
 
 const state = (over: Partial<SectionState> = {}): SectionState => ({
   enabled: true,
@@ -27,12 +28,19 @@ const state = (over: Partial<SectionState> = {}): SectionState => ({
   ...over,
 });
 
+/** A duck-typed registry resource for a mesh built outside the registry. */
+function fakeEntry(geometry: THREE.BufferGeometry, bodyId: string): reg.MeshEntry {
+  return { bodyId, geometry, resourceState: "installed" } as unknown as reg.MeshEntry;
+}
+
 /** A body-shaped group: one face mesh (what the layer mirrors) plus an edge. */
 function bodyGroup(id: string): THREE.Group {
   const group = new THREE.Group();
   group.userData.bodyId = id;
   const face = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial());
-  face.userData = { bodyId: id, kind: "face" };
+  // `buildBodyObject` stamps the resource it drew with; the stencil pair leases
+  // THAT object rather than re-resolving the body id (spec §8.2, PR-06).
+  face.userData = { bodyId: id, kind: "face", meshEntry: fakeEntry(face.geometry, id) };
   const edge = new THREE.Object3D();
   edge.userData = { bodyId: id, kind: "edge" };
   group.add(face, edge);
@@ -386,7 +394,7 @@ describe("stencil pairs borrow the registry resource", () => {
     const group = new THREE.Group();
     group.userData.bodyId = id;
     const face = new THREE.Mesh(entry.geometry, new THREE.MeshStandardMaterial());
-    face.userData = { bodyId: id, kind: "face" };
+    face.userData = { bodyId: id, kind: "face", meshEntry: entry };
     group.add(face);
     return { group, entry };
   }
@@ -436,9 +444,14 @@ describe("stencil pairs borrow the registry resource", () => {
     layer.dispose();
   });
 
-  it("caps a body with no registry entry (a preview) without a lease", () => {
+  it("caps a preview body under a lease on the entry it actually draws", () => {
     const bodiesRoot = new THREE.Group();
-    bodiesRoot.add(bodyGroup("preview-1"));
+    // A preview resource lives outside the registry, but it is still an entry
+    // and still disposable, so the borrow is still a lease.
+    const group = bodyGroup("preview-1");
+    const face = group.children[0] as THREE.Mesh;
+    const entry = face.userData.meshEntry as reg.MeshEntry;
+    bodiesRoot.add(group);
     const layer = new SectionLayer({
       root: new THREE.Group(),
       getBodiesRoot: () => bodiesRoot,
@@ -450,7 +463,66 @@ describe("stencil pairs borrow the registry resource", () => {
     layer.update();
 
     expect(layer.stencilCount).toBe(1);
-    expect(reg.registryDebugSnapshot().openLeases).toBe(0);
+    expect(reg.openLeases(entry)).toEqual(["section"]);
+    layer.dispose();
+    expect(reg.openLeases(entry)).toEqual([]);
+  });
+
+  /*
+   * PR-06: leasing by NAME and drawing by OBJECT is how a borrower ends up
+   * holding one resource alive while rendering another. The pair refuses rather
+   * than guessing — a cap drawn from a resource nobody is keeping alive is the
+   * silent-wrong-bind class this program exists to remove.
+   */
+  it("refuses a pair whose geometry is not the leased entry's", () => {
+    __resetLogForTests({ enabled: true, console: false });
+    const bodiesRoot = new THREE.Group();
+    const group = bodyGroup("body1");
+    const face = group.children[0] as THREE.Mesh;
+    const entry = face.userData.meshEntry as reg.MeshEntry;
+    // The scene moved on; the stamped entry now names a different resource.
+    face.geometry = new THREE.BoxGeometry(2, 2, 2);
+    bodiesRoot.add(group);
+    const layer = new SectionLayer({
+      root: new THREE.Group(),
+      getBodiesRoot: () => bodiesRoot,
+      getBounds: () => null,
+      invalidate: vi.fn(),
+    });
+
+    layer.setState(state());
+    layer.update();
+
+    expect(layer.stencilCount).toBe(0);
+    expect(reg.openLeases(entry)).toEqual([]);
+    const warns = logSnapshot().filter((e) => e.level === "warn");
+    expect(warns).toHaveLength(1);
+    expect(warns[0].msg).toContain("section pair refused");
+
+    // And it does not re-warn on every frame.
+    layer.update();
+    expect(logSnapshot().filter((e) => e.level === "warn")).toHaveLength(1);
+    layer.dispose();
+  });
+
+  it("refuses a face mesh that carries no resource at all", () => {
+    __resetLogForTests({ enabled: true, console: false });
+    const bodiesRoot = new THREE.Group();
+    const group = bodyGroup("body1");
+    delete (group.children[0] as THREE.Mesh).userData.meshEntry;
+    bodiesRoot.add(group);
+    const layer = new SectionLayer({
+      root: new THREE.Group(),
+      getBodiesRoot: () => bodiesRoot,
+      getBounds: () => null,
+      invalidate: vi.fn(),
+    });
+
+    layer.setState(state());
+    layer.update();
+
+    expect(layer.stencilCount).toBe(0);
+    expect(logSnapshot().filter((e) => e.level === "warn")).toHaveLength(1);
     layer.dispose();
   });
 });

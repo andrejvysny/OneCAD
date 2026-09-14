@@ -10,8 +10,9 @@ import type { ProbeCandidate } from "@/viewport/engine/Picker";
 import { OverlapCandidateChooser } from "./OverlapCandidateChooser";
 
 const mocks = vi.hoisted(() => ({
+  installedEntryIsCurrent: vi.fn(() => true),
   installedProofIsCurrent: vi.fn(() => true),
-  promoteOne: vi.fn(),
+  promoteViewportPick: vi.fn(),
   stalePickHint: vi.fn(),
 }));
 
@@ -64,7 +65,9 @@ describe("OverlapCandidateChooser", () => {
     toolStore.setState({ modelTool: "select" });
     mocks.installedProofIsCurrent.mockReset();
     mocks.installedProofIsCurrent.mockReturnValue(true);
-    mocks.promoteOne.mockReset();
+    mocks.installedEntryIsCurrent.mockReset();
+    mocks.installedEntryIsCurrent.mockReturnValue(true);
+    mocks.promoteViewportPick.mockReset();
     mocks.stalePickHint.mockReset();
   });
 
@@ -149,19 +152,19 @@ describe("OverlapCandidateChooser", () => {
     openChooser();
     fireEvent.keyDown(document.activeElement!, { key: "Enter" });
 
-    expect(mocks.promoteOne).not.toHaveBeenCalled();
+    expect(mocks.promoteViewportPick).not.toHaveBeenCalled();
     expect(selectionStore.getState().selected).toEqual([{ kind: "body", id: "body1" }]);
   });
 
   it("single-flights face promotion and waits to change selection", async () => {
     let resolvePromotion: ((value: { elementId: string }) => void) | undefined;
-    mocks.promoteOne.mockReturnValue(new Promise((resolve) => { resolvePromotion = resolve; }));
+    mocks.promoteViewportPick.mockReturnValue(new Promise((resolve) => { resolvePromotion = resolve; }));
     render(<Harness candidates={[candidate("face", "f:0")]} />);
     openChooser();
     fireEvent.keyDown(document.activeElement!, { key: "Enter" });
     fireEvent.keyDown(document.activeElement!, { key: "Enter" });
 
-    expect(mocks.promoteOne).toHaveBeenCalledTimes(1);
+    expect(mocks.promoteViewportPick).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: "Face · Body 1" })).toBeDisabled();
     expect(selectionStore.getState().selected).toEqual([]);
     act(() => documentStore.setState((state) => ({ revision: state.revision + 1, title: "Projection metadata" })));
@@ -175,15 +178,17 @@ describe("OverlapCandidateChooser", () => {
 
   it("does not let an old promotion dismiss a newer chooser session", async () => {
     let resolvePromotion: ((value: { elementId: string }) => void) | undefined;
-    mocks.promoteOne.mockReturnValue(new Promise((resolve) => { resolvePromotion = resolve; }));
+    mocks.promoteViewportPick.mockReturnValue(new Promise((resolve) => { resolvePromotion = resolve; }));
     const view = render(<Harness candidates={[candidate("face", "f:0")]} />);
     openChooser();
     fireEvent.keyDown(document.activeElement!, { key: "Enter" });
     mocks.installedProofIsCurrent.mockReturnValue(false);
+    mocks.installedEntryIsCurrent.mockReturnValue(false);
     act(() => documentStore.setState((state) => ({ revision: state.revision + 1 })));
     expect(screen.queryByRole("dialog", { name: "Select overlapping geometry" })).toBeNull();
 
     mocks.installedProofIsCurrent.mockReturnValue(true);
+    mocks.installedEntryIsCurrent.mockReturnValue(true);
     view.rerender(<Harness candidates={[candidate("body", "body1")]} />);
     openChooser();
     await waitFor(() => expect(selectionStore.getState().hover?.kind).toBe("body"));
@@ -198,10 +203,12 @@ describe("OverlapCandidateChooser", () => {
     openChooser();
     await waitFor(() => expect(selectionStore.getState().hover?.kind).toBe("body"));
     mocks.installedProofIsCurrent.mockReturnValue(false);
+    mocks.installedEntryIsCurrent.mockReturnValue(false);
     act(() => documentStore.setState((state) => ({ revision: state.revision + 1 })));
     expect(screen.queryByRole("dialog", { name: "Select overlapping geometry" })).toBeNull();
 
     mocks.installedProofIsCurrent.mockReturnValue(true);
+    mocks.installedEntryIsCurrent.mockReturnValue(true);
     openChooser();
     await waitFor(() => expect(selectionStore.getState().hover?.kind).toBe("body"));
     view.unmount();

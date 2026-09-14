@@ -35,7 +35,7 @@ import * as reg from "./meshRegistry";
 import { makeBoxMesh, makeCylinderMesh } from "@/ipc/mockMeshes";
 import { documentStore } from "@/stores/documentStore";
 import { viewportStore } from "@/stores/viewportStore";
-import { __resetLogForTests } from "@/debug/log";
+import { __resetLogForTests, logSnapshot } from "@/debug/log";
 import type { CadClient } from "@/ipc/client";
 import type { DocumentChange } from "@/ipc/types";
 import type { ViewportEngine } from "../engine/ViewportEngine";
@@ -162,6 +162,138 @@ describe("MeshIngest atomic install", () => {
     expect(ingest.getDisplayState("body1")).toBe("current");
     expect(reg.getEntry("body1")!.view.faceCount).toBe(3);
     expect(engine.bodiesRoot.children).toHaveLength(1);
+    // The replaced box is retired but still allocated, so it is still charged
+    // until the ordered flush frees it (PR-03B).
+    expect(ingest.admission.snapshot().holdings).toBe(2);
+    reg.flushDisposals();
     expect(ingest.admission.snapshot().holdings).toBe(1);
+  });
+});
+
+/*
+ * VP-HARDENING PR-02 — publication is a TWO-PHASE COMMIT.
+ *
+ * The commit (registry → scene → bodyObjects → reservation → installed) calls
+ * NOTHING that can run application code. Observers are notified afterwards,
+ * each in isolation, so a subscriber fault can no longer leave the registry
+ * pointing at the new mesh while the scene still draws the old one — nor mark a
+ * successfully published body as stale.
+ */
+describe("MeshIngest two-phase publication (PR-02)", () => {
+  it("TEST-PUB-03 a throwing retire listener cannot split the registry from the scene", async () => {
+    __resetLogForTests({ enabled: true, console: false });
+    const getMesh = vi
+      .fn<() => Promise<ArrayBuffer>>()
+      .mockResolvedValueOnce(makeBoxMesh())
+      .mockResolvedValueOnce(makeCylinderMesh());
+    const engine = fakeEngine();
+    const { client, emit } = fakeClient(getMesh);
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    await tick();
+
+    const original = reg.getEntry("body1")!;
+    const originalGroup = engine.bodiesRoot.children[0];
+    // The real subscriber of this event is HighlightLayer, which rebuilds (and
+    // allocates) from inside it. Here it simply fails.
+    const off = reg.onEntryRetired(() => {
+      throw new Error("retire listener exploded");
+    });
+    try {
+      emit({
+        revision: 2,
+        changedBodies: [{ bodyId: "body1", meshKey: "body1:fine:2" }],
+        removedBodies: [],
+      });
+      await tick();
+    } finally {
+      off();
+    }
+
+    // ONE display snapshot: registry entry === scene geometry === the handle.
+    const installed = reg.getEntry("body1")!;
+    expect(installed === original).toBe(false);
+    expect(installed.view.faceCount).toBe(3); // the cylinder really published
+    expect(engine.bodiesRoot.children).toHaveLength(1);
+    // Compared as identity booleans: a failed `toBe` on a THREE object drags the
+    // whole scene graph through the pretty-printer.
+    expect(engine.bodiesRoot.children[0] === originalGroup).toBe(false);
+    const faceMesh = (engine.bodiesRoot.children[0] as THREE.Group).children.find(
+      (c) => c.userData.kind === "face",
+    ) as THREE.Mesh;
+    expect(faceMesh.geometry === installed.geometry).toBe(true);
+
+    // The install COMPLETED: a listener fault is not a publication failure.
+    expect(ingest.getDisplayState("body1")).toBe("current");
+    expect(reg.isEntryPromotable(installed)).toBe(true);
+    expect(viewportStore.getState().statusHint?.message ?? "").not.toContain("failed to load");
+
+    // The new entry owns a reservation; the retired one keeps its OWN until its
+    // buffers are really freed.
+    expect(installed.reservation).toBeTruthy();
+    expect(original.resourceState).toBe("retired");
+    expect(original.reservation).toBeTruthy();
+    expect(ingest.admission.snapshot().holdings).toBe(2);
+
+    const errors = logSnapshot().filter((e) => e.level === "error");
+    expect(errors.map((e) => e.msg)).toEqual(["retire listener threw"]);
+
+    reg.flushDisposals();
+    expect(original.resourceState).toBe("disposed");
+    expect(original.reservation).toBeNull();
+    expect(ingest.admission.snapshot().holdings).toBe(1);
+  });
+
+  it("TEST-PUB-03 a throwing bodyLoaded listener does not stop the others and does not demote", async () => {
+    __resetLogForTests({ enabled: true, console: false });
+    const engine = fakeEngine();
+    const { client } = fakeClient(vi.fn<() => Promise<ArrayBuffer>>(async () => makeBoxMesh()));
+    ingest = new MeshIngest();
+    const seen: string[] = [];
+    ingest.onBodyLoaded(() => {
+      throw new Error("subscriber exploded");
+    });
+    ingest.onBodyLoaded((id) => seen.push(id));
+    ingest.attach(engine, client);
+    await tick();
+
+    expect(seen).toEqual(["body1"]); // the second subscriber still ran
+    expect(ingest.getDisplayState("body1")).toBe("current");
+    expect(reg.isEntryPromotable(reg.getEntry("body1"))).toBe(true);
+    expect(viewportStore.getState().statusHint?.message ?? "").not.toContain("failed to load");
+    const errors = logSnapshot().filter((e) => e.level === "error");
+    expect(errors.map((e) => e.msg)).toEqual(["body-loaded listener threw"]);
+  });
+
+  it("TEST-PUB-03 a preparation failure leaves no lease, no reservation and no retired entry behind", async () => {
+    const getMesh = vi
+      .fn<() => Promise<ArrayBuffer>>()
+      .mockResolvedValueOnce(makeBoxMesh())
+      .mockResolvedValueOnce(makeCylinderMesh());
+    const engine = fakeEngine();
+    const { client, emit } = fakeClient(getMesh);
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    await tick();
+    const original = reg.getEntry("body1")!;
+    const heldForBox = ingest.admission.snapshot();
+
+    fault.failHandleBuild = true;
+    emit({
+      revision: 2,
+      changedBodies: [{ bodyId: "body1", meshKey: "body1:fine:2" }],
+      removedBodies: [],
+    });
+    await tick();
+
+    expect(reg.getEntry("body1")).toBe(original);
+    expect(original.reservation).toBeTruthy(); // the survivor still pays for itself
+    // The abandoned candidate gave back its budget, took no lease, and was never
+    // retired — nothing of it is left to flush.
+    expect(ingest.admission.snapshot()).toEqual(heldForBox);
+    const snapshot = reg.registryDebugSnapshot();
+    expect(snapshot.openLeases).toBe(1); // only the installed body's handle
+    expect(snapshot.retired).toEqual([]);
+    expect(reg.leakTripwireCount).toBe(0);
   });
 });

@@ -45,7 +45,7 @@ vi.mock("@/ipc/client", () => ({
 }));
 
 vi.mock("@/ipc/promote", () => ({
-  promoteOne: vi.fn(() =>
+  promoteAuthoritativeRef: vi.fn(() =>
     Promise.resolve({
       bodyId: "bodyA",
       elementId: "el1",
@@ -53,7 +53,7 @@ vi.mock("@/ipc/promote", () => ({
   ),
 }));
 
-import { promoteOne } from "@/ipc/promote";
+import { promoteAuthoritativeRef } from "@/ipc/promote";
 
 describe("historyActions rebindCandidate WP0", () => {
   beforeEach(() => {
@@ -66,7 +66,7 @@ describe("historyActions rebindCandidate WP0", () => {
         bodyB: { id: "bodyB", name: "Body B", visible: true },
       },
       // A rebindable feature for opId "op1" (Fillet: unconditional non-null
-      // InputPath), so the repair reaches the promoteOne call under test.
+      // InputPath), so the repair reaches the promotion under test.
       features: [
         { id: "op1", kind: "fillet", opType: "Fillet", label: "Fillet", valueText: "2.0 mm", status: "ok" },
       ],
@@ -95,17 +95,20 @@ describe("historyActions rebindCandidate WP0", () => {
       bodyId: "bodyA",
     };
 
-    await rebindCandidate(item, candidate);
+    await rebindCandidate(item, candidate, 12);
 
-    // The authoritative candidate body is bodyA. The fix must promote against bodyA.
-    expect(promoteOne).toHaveBeenCalledWith(
+    // The authoritative candidate body is bodyA. The fix must promote against
+    // bodyA — through the NON-viewport lane, fenced by the snapshot the
+    // candidate was resolved at and tagged as history repair (PR-01).
+    expect(promoteAuthoritativeRef).toHaveBeenCalledWith(
       expect.anything(),
       "bodyA",
       expect.objectContaining({
         topoKey: "f:5",
         anchor: { worldPoint: [1, 2, 3] },
       }),
-      undefined,
+      12,
+      "history-repair",
     );
   });
 });
@@ -237,6 +240,7 @@ describe("rebindCandidate — the chamfer reference face's ANCHOR (SCHEMA §7.3,
     await rebindCandidate(
       { opId: "op1", refId: "op1.input0", reason: "ambiguous", candidateCount: 1 },
       { topoKey: "e:4", worldPos: [1, 2, 3], score: 0.9, margin: 0.2, summary: "", bodyId: "bodyA" },
+      700,
     );
     expect(elementInfoMock).not.toHaveBeenCalled();
     const calls = applyEditCommandMock.mock.calls as unknown as Array<

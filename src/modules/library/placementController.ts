@@ -47,8 +47,8 @@
  */
 import { getViewportEngine } from "@/viewport/engineBridge";
 import type { PickHit } from "@/viewport/engine/Picker";
-import { buildBodyObjects, remove as removeMesh, swap as swapMesh } from "@/viewport/mesh/meshRegistry";
-import { validatePreviewMesh } from "@/viewport/mesh/previewMesh";
+import { remove as removeMesh, swap as swapMesh } from "@/viewport/mesh/meshRegistry";
+import { buildPreviewEntry } from "@/viewport/mesh/previewMesh";
 import { viewportStore } from "@/stores/viewportStore";
 import { createClient } from "@/ipc/client";
 import { classifyRegen, failureReason } from "@/ipc/regenOutcome";
@@ -518,11 +518,12 @@ function onPreviewResult(r: PreviewResult): void {
   let rev = 0;
   for (const [index, b] of bodies.entries()) {
     const ghostId = `${previewSession.previewBodyId}:${index}`;
-    // Skip a ghost whose mesh fails validation rather than throwing out of the
-    // timer-driven preview listener; the remaining ghosts still place.
-    const validated = validatePreviewMesh(b.mesh, ghostId);
-    if (!validated) continue;
-    const entry = buildBodyObjects(validated, ghostId, ++rev);
+    // Skip a ghost whose mesh fails validation, or that the document budget
+    // refuses, rather than throwing out of the timer-driven preview listener;
+    // the remaining ghosts still place. `buildPreviewEntry` is also what
+    // charges this geometry to the document's §9 budget (PR-03B).
+    const entry = buildPreviewEntry(b.mesh, ghostId, ++rev);
+    if (!entry) continue;
     swapMesh(ghostId, entry);
     engine.setPreviewBody(entry);
     previewBodyIds.push(ghostId);

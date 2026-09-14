@@ -21,7 +21,7 @@
  */
 import * as THREE from "three";
 import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
-import { acquireLease, onEntryRetired, type MeshEntry, type MeshLease } from "../mesh/meshRegistry";
+import { acquireLease, type MeshEntry } from "../mesh/meshRegistry";
 import type { BodyMaterialLibrary, BodyMaterialSet } from "./bodyMaterials";
 import {
   DEFAULT_RENDER_MODE,
@@ -30,45 +30,6 @@ import {
   type MaterialKind,
   type RenderModeDef,
 } from "./renderModes";
-
-/**
- * Live handles, for the DETACHED-BORROWER sweep below.
- *
- * The committed-body owner (`meshSync`) removes a group and calls
- * {@link BodyObjectHandle.dispose} in the same step, which is the intended
- * path. The EXACT-PREVIEW owner (`ViewportEngine.setPreviewBody` /
- * `clearPreviewBody`) drops its handles by removing the group only — those
- * files belong to another work package — and a lease nobody releases would keep
- * a retired preview resource alive for the whole drag.
- *
- * Spec §8.2 says a resource may be freed once it is DETACHED from the display
- * set and lease-free. Both halves are required here: the sweep releases a
- * handle only when its OWN resource has already left the installed set AND its
- * group is out of the scene graph. That leaves the atomic-install PREPARE
- * window alone — a freshly built handle is unparented for a moment, but its
- * resource is the newly installed one — and it never runs per frame, only when
- * something retires.
- */
-interface LiveBodyHandle {
-  readonly entry: MeshEntry;
-  readonly group: THREE.Group;
-  readonly lease: MeshLease;
-}
-
-const liveHandles = new Set<LiveBodyHandle>();
-let sweepInstalled = false;
-
-function installDetachedSweep(): void {
-  if (sweepInstalled) return;
-  sweepInstalled = true;
-  onEntryRetired(() => {
-    for (const handle of [...liveHandles]) {
-      if (handle.entry.resourceState === "installed" || handle.group.parent) continue;
-      handle.lease.release();
-      liveHandles.delete(handle);
-    }
-  });
-}
 
 /** The edge material a mode's {@link RenderModeDef.edgeStyle} names. */
 function edgeMaterial(set: BodyMaterialSet, def: RenderModeDef) {
@@ -140,6 +101,11 @@ export function buildBodyObject(entry: MeshEntry, library: BodyMaterialLibrary):
   const faceMesh = new THREE.Mesh(entry.geometry, materials.face);
   faceMesh.userData.bodyId = entry.bodyId;
   faceMesh.userData.kind = "face";
+  // The RESOURCE, not just its name: a borrower that leases by body id can
+  // lease one entry and draw another whenever the registry and the scene
+  // disagree (spec §8.2, finding PR-06). `SectionLayer.createPair` reads this
+  // and refuses a pair whose geometry is not the leased entry's.
+  faceMesh.userData.meshEntry = entry;
   group.add(faceMesh);
 
   let edges: LineSegments2 | null = null;
@@ -154,15 +120,11 @@ export function buildBodyObject(entry: MeshEntry, library: BodyMaterialLibrary):
   // a handle that was never returned to the caller could never be released, and
   // would keep the resource alive to the leak tripwire.
   const lease = acquireLease(entry, "body");
-  installDetachedSweep();
-  const live: LiveBodyHandle = { entry, group, lease };
-  liveHandles.add(live);
 
   return {
     bodyId: entry.bodyId,
     group,
     dispose() {
-      liveHandles.delete(live);
       lease.release();
     },
     setVisible(visible: boolean) {

@@ -35,7 +35,8 @@
 import * as THREE from "three";
 import { palette } from "./palette";
 import { RENDER_ORDER } from "./renderOrder";
-import { acquireLease, getEntry, type MeshLease } from "../mesh/meshRegistry";
+import { acquireLease, type MeshEntry, type MeshLease } from "../mesh/meshRegistry";
+import { logWarn } from "@/debug/log";
 import type { SectionPlaneId, SectionState } from "@/stores/viewportStore";
 
 /**
@@ -123,7 +124,8 @@ export class SectionLayer {
   private readonly plane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0);
   private readonly planes: THREE.Plane[] = [this.plane];
 
-  private readonly stencils = new Map<THREE.Mesh, StencilPair>();
+  /** `null` ⇒ this face mesh was REFUSED (see {@link createPair}). */
+  private readonly stencils = new Map<THREE.Mesh, StencilPair | null>();
   private readonly backMat: THREE.MeshBasicMaterial;
   private readonly frontMat: THREE.MeshBasicMaterial;
   private readonly capMat: THREE.MeshStandardMaterial;
@@ -249,12 +251,14 @@ export class SectionLayer {
    * those two apart.
    */
   get capVisible(): boolean {
-    return this.enabled && !this.sketchActive && this.stencils.size > 0;
+    return this.enabled && !this.sketchActive && this.stencilCount > 0;
   }
 
-  /** Live stencil pair count (one per visible body face mesh). */
+  /** Live stencil pair count (one per visible body face mesh that was admitted). */
   get stencilCount(): number {
-    return this.stencils.size;
+    let n = 0;
+    for (const pair of this.stencils.values()) if (pair) n++;
+    return n;
   }
 
   /**
@@ -290,6 +294,7 @@ export class SectionLayer {
     const on = this.enabled && !this.sketchActive;
     this.cap.visible = on;
     for (const pair of this.stencils.values()) {
+      if (!pair) continue;
       pair.back.visible = on;
       pair.front.visible = on;
     }
@@ -312,13 +317,18 @@ export class SectionLayer {
       const mesh = o as THREE.Mesh;
       seen.add(mesh);
       let pair = this.stencils.get(mesh);
-      if (!pair) {
+      if (pair === undefined) {
         mesh.updateWorldMatrix(true, false); // may be new since the last render
         pair = this.createPair(mesh);
+        // A REFUSED mesh is remembered as `null` so the reconcile neither
+        // retries it nor re-warns on every frame; it clears with the mesh.
         this.stencils.set(mesh, pair);
-        this.object3D.add(pair.back, pair.front);
-        changed = true;
+        if (pair) {
+          this.object3D.add(pair.back, pair.front);
+          changed = true;
+        }
       }
+      if (!pair) return;
       // Bodies sit at identity today, but a transformed one must not leave its
       // cross-section behind at the origin.
       pair.back.matrix.copy(mesh.matrixWorld);
@@ -346,10 +356,20 @@ export class SectionLayer {
    * as long as the pair exists (spec §8.2). The body id comes off the face
    * mesh's `userData`, which `BodyObject` stamps.
    */
-  private createPair(mesh: THREE.Mesh): StencilPair {
-    const bodyId = mesh.userData.bodyId;
-    const entry = typeof bodyId === "string" ? getEntry(bodyId) : undefined;
-    const lease = entry ? acquireLease(entry, "section") : null;
+  private createPair(mesh: THREE.Mesh): StencilPair | null {
+    // The entry the face mesh was BUILT from (`BodyObject` stamps it), not one
+    // re-resolved by body id: a registry/scene divergence would otherwise let
+    // the pair lease one resource and draw another, and the cap would be
+    // written from buffers nothing is keeping alive (spec §8.2, PR-06).
+    const entry = mesh.userData.meshEntry as MeshEntry | undefined;
+    if (!entry || entry.geometry !== mesh.geometry) {
+      logWarn("vp", "section pair refused: geometry is not the leased entry", {
+        bodyId: String(mesh.userData.bodyId ?? ""),
+        hasEntry: entry !== undefined,
+      });
+      return null;
+    }
+    const lease = acquireLease(entry, "section");
     const make = (material: THREE.Material, order: number): THREE.Mesh => {
       const m = new THREE.Mesh(mesh.geometry, material);
       m.renderOrder = order;
@@ -365,9 +385,10 @@ export class SectionLayer {
     };
   }
 
-  private disposePair(pair: StencilPair): void {
+  private disposePair(pair: StencilPair | null): void {
     // Geometry belongs to the mesh registry and the materials to this layer —
     // removing the objects and giving the borrow back is the whole teardown.
+    if (!pair) return;
     this.object3D.remove(pair.back, pair.front);
     pair.lease?.release();
   }

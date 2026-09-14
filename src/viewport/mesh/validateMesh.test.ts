@@ -21,7 +21,7 @@ import {
 import {
   MESH_BUDGETS,
   MeshAdmission,
-  preparedCpuBytesOf,
+  type MeshResourceCost,
 } from "./meshAdmission";
 import {
   validateMeshView,
@@ -32,6 +32,7 @@ import {
   type MeshValidationCode,
 } from "./validateMesh";
 import { expandEdgeSegments } from "./meshRegistry";
+import { planMeshPreparation } from "./meshPreparationPlan";
 import {
   MESH_MUTATORS,
   applyNamedMutation,
@@ -43,7 +44,6 @@ import { encodeMesh1, makeBoxMesh, makeCylinderMesh } from "@/ipc/mockMeshes";
 import { makeBodyMeshViewFixture } from "@/test/fixtures/bodyMeshView";
 
 const BODY = "body_1";
-const ZERO_BOUNDS = { min: [0, 0, 0], max: [0, 0, 0] } as const;
 
 function validate(blob: ArrayBuffer, budgets?: { singleMeshPayloadBytes: number }) {
   return validateMeshView(parseMeshPayload(blob), BODY, budgets);
@@ -157,7 +157,9 @@ describe("TEST-MESH-01 structural mutations are typed parser rejections", () => 
       if (!result.ok) continue;
       const accounting: MeshAccounting = result.mesh.accounting;
       expect(accounting.payloadBytes).toBeGreaterThan(0);
-      expect(accounting.estimatedGpuBytes).toBeGreaterThan(0);
+      // Payload-only: nothing appearance-dependent is priced here (PR-03A).
+      expect(accounting).not.toHaveProperty("colorBytes");
+      expect(accounting).not.toHaveProperty("estimatedGpuBytes");
       expect(isValidatedMesh(result.mesh)).toBe(true);
       expect(isValidatedMesh(result.mesh.view)).toBe(false);
     }
@@ -558,16 +560,9 @@ describe("TEST-MESH-04 overflow-safe counts and peak resource admission", () => 
 
   it("TEST-MESH-04 admission refuses a 600 MiB replacement of a 600 MiB body but admits 400 MiB", () => {
     const MIB = 1024 * 1024;
-    const accounting = (mib: number): MeshAccounting => ({
-      actualBounds: ZERO_BOUNDS,
-      headerBoundsExcursionMm: 0,
-      headerBoundsSlackMm: 1e-4,
-      payloadBytes: mib * MIB,
-      edgeSegmentBytes: 0,
-      colorBytes: 0,
-      estimatedGpuBytes: 1,
-      triangleCount: 1,
-      segmentCount: 0,
+    const accounting = (mib: number): MeshResourceCost => ({
+      cpuBytes: mib * MIB,
+      gpuBytes: 1,
     });
     const admission = new MeshAdmission({ preparedCpuBytes: 1024 * MIB, estimatedGpuBytes: 768 * MIB });
 
@@ -606,31 +601,26 @@ describe("TEST-MESH-04 overflow-safe counts and peak resource admission", () => 
 
   it("TEST-MESH-04 admission refuses on the GPU cap independently of the CPU cap", () => {
     const admission = new MeshAdmission({ preparedCpuBytes: 1_000_000_000, estimatedGpuBytes: 1000 });
-    const refused = admission.reserve("body1", {
-      actualBounds: ZERO_BOUNDS,
-      headerBoundsExcursionMm: 0,
-      headerBoundsSlackMm: 1e-4,
-      payloadBytes: 10,
-      edgeSegmentBytes: 0,
-      colorBytes: 0,
-      estimatedGpuBytes: 1001,
-      triangleCount: 1,
-      segmentCount: 0,
-    });
+    const refused = admission.reserve("body1", { cpuBytes: 10, gpuBytes: 1001 });
     expect(refused.ok).toBe(false);
     if (!refused.ok) expect(refused.reason).toBe("gpu-budget");
     expect(admission.snapshot().holdings).toBe(0);
   });
 
-  it("TEST-MESH-04 prices a real body's prepared CPU cost from its accounting", () => {
+  it("TEST-MESH-04 prices a real body's prepared cost from its PLAN, never its accounting", () => {
     const result = validate(makeCylinderMesh());
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const { accounting } = result.mesh;
-    expect(preparedCpuBytesOf(accounting)).toBe(
-      accounting.payloadBytes + accounting.edgeSegmentBytes + accounting.colorBytes,
+    const planned = planMeshPreparation(result.mesh, {}, BODY);
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+    expect(new MeshAdmission().reserve(BODY, planned.plan).ok).toBe(true);
+    // The payload measurement is a component of the plan's CPU cost, not a
+    // substitute for it: the retained source pins the whole blob, header and
+    // section table included.
+    expect(planned.plan.cpuBytes).toBeGreaterThanOrEqual(
+      result.mesh.accounting.payloadBytes + result.mesh.accounting.edgeSegmentBytes,
     );
-    expect(new MeshAdmission().reserve(BODY, accounting).ok).toBe(true);
   });
 });
 

@@ -11,6 +11,7 @@
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
 import * as THREE from "three";
+import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import { faceDrawRange, edgeSegmentSlice, HighlightLayer } from "./HighlightLayer";
 import { palette } from "./palette";
@@ -154,14 +155,14 @@ describe("overlay materials", () => {
 });
 
 /*
- * Section clipping reaches materials, not geometry: the five shared overlay
+ * Section clipping reaches materials, not geometry: the six shared overlay
  * materials sit outside both BodyMaterialLibrary instances, so nothing else can
  * clip them.
  */
 describe("setClippingPlanes (section view)", () => {
   const planes = () => [new THREE.Plane(new THREE.Vector3(0, 0, -1), 0)];
 
-  it("reaches all FIVE overlay materials, including the ones not drawn yet", () => {
+  it("reaches all SIX overlay materials, including the ones not drawn yet", () => {
     const d = deps();
     const layer = new HighlightLayer(d);
     registerBox();
@@ -169,8 +170,8 @@ describe("setClippingPlanes (section view)", () => {
 
     layer.setClippingPlanes(p);
 
-    // Hover + selection, face + edge, at once: that is four of the five, and the
-    // whole-body tint is the fifth.
+    // Hover + selection, face + edge, at once: that is four of the six; the
+    // whole-body tint is the fifth and the degraded outline the sixth.
     layer.setState({ kind: "edge", id: "body1#e:1", bodyId: "body1", topoKey: "e:1" }, [
       { kind: "face", id: "body1#f:0", bodyId: "body1", topoKey: "f:0" },
       { kind: "edge", id: "body1#e:0", bodyId: "body1", topoKey: "e:0" },
@@ -461,6 +462,100 @@ describe("resolving a ref against the mesh", () => {
     ]);
 
     expect(d.root.children).toHaveLength(0);
+    layer.dispose();
+  });
+});
+
+/*
+ * DEV-WP03-1 — the DEGRADED display (spec §8.3 last paragraph). When the exact
+ * overlays cannot fit the budget the semantic selection is kept, one diagnostic
+ * is emitted per change, and the body is drawn as a leased OUTLINE plus a
+ * selection COUNT — never as a whole-body tint, which reads as "the body is
+ * selected" and loses which faces the user picked.
+ */
+describe("degraded selection display", () => {
+  const faceRef = (ord: number, bodyId = "body1") => ({
+    kind: "face" as const,
+    id: `${bodyId}#f:${ord}`,
+    bodyId,
+    topoKey: `f:${ord}`,
+  });
+
+  /** A budget that fits one 4-face overlay (384 B) but not that plus a hover. */
+  const tightDeps = () => ({
+    root: new THREE.Group(),
+    invalidate: vi.fn(),
+    budget: { maxBytes: 400 },
+    onDegraded: vi.fn(),
+  });
+
+  it("draws the leased body OUTLINE plus a count, not a whole-body tint", () => {
+    const d = tightDeps();
+    const layer = new HighlightLayer(d);
+    registerBox("body1");
+    registerBox("body2");
+    const two = getEntry("body2")!;
+
+    // body1's 4-face selection fills the budget and is PINNED, so body2's
+    // hover has nothing left to evict.
+    layer.setState(faceRef(0, "body2"), [0, 1, 2, 3].map((o) => faceRef(o, "body1")));
+
+    expect(layer.degraded).toBe(true);
+    const degraded = d.root.children.find((o) => o.userData.bodyId === "body2")!;
+    expect(degraded).toBeInstanceOf(LineSegments2);
+    // The EXACT leased edge geometry — no copy, nothing to dispose.
+    expect((degraded as LineSegments2).geometry).toBe(two.edgeGeometry);
+    expect(openLeases(two)).toEqual(["highlight:body"]);
+    // Not the whole-body tint: a translucent MeshBasicMaterial over the FACE
+    // geometry is the display DEV-WP03-1 replaced.
+    expect((degraded as LineSegments2).material).toBeInstanceOf(LineMaterial);
+    expect((degraded as LineSegments2).geometry).not.toBe(two.geometry);
+
+    // …and the count reaches the chip layer.
+    expect(d.onDegraded).toHaveBeenCalled();
+    const calls = d.onDegraded.mock.calls;
+    const last = calls[calls.length - 1][0];
+    expect(last).toEqual([expect.objectContaining({ bodyId: "body2", count: 1 })]);
+
+    layer.dispose();
+  });
+
+  it("re-attempts the exact overlay on every rebuild, and recovers", () => {
+    const d = tightDeps();
+    const layer = new HighlightLayer(d);
+    registerBox("body1");
+    registerBox("body2");
+    const two = getEntry("body2")!;
+
+    layer.setState(faceRef(0, "body2"), [0, 1, 2, 3].map((o) => faceRef(o, "body1")));
+    expect(layer.degraded).toBe(true);
+
+    // The pinned pressure goes away; the SAME hover is still desired, and the
+    // displayed-key short-circuit must not keep the degraded overlay on screen.
+    layer.setState(faceRef(0, "body2"), []);
+
+    expect(layer.degraded).toBe(false);
+    const exact = d.root.children[0] as THREE.Mesh;
+    expect(exact.geometry).not.toBe(two.edgeGeometry);
+    expect(exact.geometry.getAttribute("position").array).not.toBe(two.view.positions);
+    expect(openLeases(two)).toEqual([]);
+    const calls = d.onDegraded.mock.calls;
+    expect(calls[calls.length - 1][0]).toEqual([]);
+
+    layer.dispose();
+  });
+
+  it("keeps the whole semantic selection while degraded", () => {
+    const d = tightDeps();
+    const layer = new HighlightLayer(d);
+    registerBox("body1");
+    registerBox("body2");
+
+    layer.setState(faceRef(0, "body2"), [0, 1, 2, 3].map((o) => faceRef(o, "body1")));
+
+    // Both bodies still have an overlay — the refused one is degraded, not dropped.
+    const ids = d.root.children.map((o) => o.userData.bodyId).sort();
+    expect(ids).toEqual(["body1", "body2"]);
     layer.dispose();
   });
 });

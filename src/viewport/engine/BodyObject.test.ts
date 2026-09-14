@@ -43,6 +43,22 @@ function handleFor(mesh: ArrayBuffer = makeBoxMesh()) {
   return { handle, face, edges, entry, library };
 }
 
+/*
+ * D6 — the section stencils must lease the resource they actually DRAW, so the
+ * face mesh carries the entry object itself, not just a body id that a
+ * registry/scene divergence could resolve to a different resource (PR-06).
+ */
+describe("buildBodyObject resource identity", () => {
+  it("stamps the leased entry on the face mesh it drew with", () => {
+    const { handle, face, entry, library } = handleFor();
+    expect(face.userData.meshEntry).toBe(entry);
+    expect(face.geometry).toBe(entry.geometry);
+    handle.dispose();
+    entry.dispose();
+    library.dispose();
+  });
+});
+
 describe("BodyObjectHandle.applyMode", () => {
   it("shaded = faces only · shadedEdges = both · wireframe = edges only", () => {
     const { handle, face, edges, entry, library } = handleFor();
@@ -245,28 +261,36 @@ describe("TEST-RES-02 — body objects borrow the registry resource", () => {
     library.dispose();
   });
 
-  it("releases the lease of a DETACHED handle nobody disposed", () => {
+  /*
+   * D6: a handle nobody disposes KEEPS its lease. The detached-borrower sweep
+   * that used to release it is gone — it ran only on a retirement event, so it
+   * was never equivalent to ownership, and a cleanup heuristic standing in for
+   * an owner is exactly finding PR-06. The tripwire catches the leak instead of
+   * a sweep hiding it.
+   */
+  it("keeps the lease of a detached handle nobody disposed (no sweep)", () => {
     const root = new THREE.Group();
     const { handle, entry, library } = handleFor();
     swap("preview", entry);
     root.add(handle.group);
 
-    // The exact-preview owner retires the resource first…
     remove("preview");
-    expect(openLeases(entry)).toEqual(["body"]); // still on screen: still borrowed
-
-    // …then drops the handle by removing the group only, with no dispose().
     root.remove(handle.group);
     swap("other", buildBodyObjects(parseMeshPayload(makeBoxMesh()), "other", 1));
-    remove("other"); // any later retirement runs the sweep
+    remove("other");
+    flushDisposals();
+    flushDisposals();
 
-    expect(openLeases(entry)).toEqual([]);
+    expect(openLeases(entry)).toEqual(["body"]);
+    expect(entry.resourceState).toBe("retired");
+
+    handle.dispose();
     flushDisposals();
     expect(entry.resourceState).toBe("disposed");
     library.dispose();
   });
 
-  it("never sweeps a handle whose own resource is still installed (the PREPARE window)", () => {
+  it("a retirement elsewhere never touches this handle's lease (the PREPARE window)", () => {
     const root = new THREE.Group();
     const { handle, entry, library } = handleFor();
     swap("body1", entry); // this handle's resource is the CURRENT one…

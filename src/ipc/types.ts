@@ -589,9 +589,10 @@ export interface DragSolveResult {
 export interface PromotePick {
   topoKey: string;
   anchor?: { worldPoint?: [number, number, number]; surfaceUv?: [number, number] };
-  /** What the caller picked. Carried only so `promoteOne`'s already-an-ElementId
-   *  short-circuit can answer with a real kind — a mesh label has none, and the
-   *  wire promotion returns the worker's. Never sent to the backend. */
+  /** What the caller picked. Carried only so the promote lane's
+   *  already-an-ElementId short-circuit can answer with a real kind — a mesh
+   *  label has none, and the wire promotion returns the worker's. Never sent to
+   *  the backend. */
   kind?: "face" | "edge" | "vertex";
 }
 
@@ -599,9 +600,10 @@ export interface PromotePick {
 export interface PromotedElement {
   topoKey: string;
   elementId: string;
-  /** `face` | `edge` | `vertex`. ABSENT only on `promoteOne`'s local
-   *  short-circuit for a pick that is already an ElementId, when the caller
-   *  declared no {@link PromotePick.kind} — the wire DTO always carries one. */
+  /** `face` | `edge` | `vertex`. ABSENT only on the promote lane's local
+   *  short-circuit for a pick that is already an ElementId, when neither an
+   *  installed-entry proof nor the caller's {@link PromotePick.kind} established
+   *  one — the wire DTO always carries one. */
   kind?: string;
   bodyId: string;
 }

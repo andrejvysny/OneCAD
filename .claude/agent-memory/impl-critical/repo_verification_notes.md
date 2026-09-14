@@ -74,9 +74,18 @@ nothing unless it is shown to fail without the fix.
   a "the swap reconciled the selection" assertion is unreachable there. A COMMIT does publish
   (`mutateOp` returns `changed: [bodyId]` even for the no-CSG fillet/chamfer/shell/hole
   branches), so drive a regen assertion off the commit, not off undo/redo.
-- `src/tools/sketch/projectTool.ts` contains a literal NUL byte (a `${bodyId}\x00${mode}` group
-  key), so git classifies it as BINARY: `git diff` shows `Bin <n> -> <m>` and no hunks. Read the
-  file to review a change there.
+- `src/tools/sketch/projectTool.ts` and `src/viewport/mesh/previewMesh.ts` each contain a literal
+  NUL byte (a `${bodyId}\x00${code}` group key), so git classifies them as BINARY: `git diff` shows
+  `Bin <n> -> <m>` and no hunks. Read the file to review a change there.
+- A failed `expect(a).toBe(b)` on a THREE object under jsdom dies in vitest's pretty-printer
+  (`Group.toJSON` → "Cannot convert undefined or null to object") and hides the real assertion.
+  Compare scene objects/geometries as `expect(a === b).toBe(true)` instead.
 - Red-first for a FRONTEND change: `cp` the module to the scratchpad, patch the one expression
   with a short `python3` heredoc, run the single vitest/Playwright test, then `cp` the backup
   back. Playwright's `-g "<substring>"` runs one test in ~40 s including the vite boot.
+- Red-first for a LARGE C++ diff already written: copy your files to the scratchpad,
+  `git checkout HEAD -- <files>`, re-apply ONLY the behaviour-neutral test seam the new tests need
+  (a `detail::` accessor, an injectable constant), rebuild incrementally (2 TUs + archive, ~1 min),
+  run a probe that asserts the new expectations against the old behaviour, then copy your files
+  back. Cheaper and more honest than a second build dir, and it produces quotable RED lines for
+  every item at once.

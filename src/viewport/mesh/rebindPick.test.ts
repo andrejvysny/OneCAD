@@ -28,6 +28,7 @@ import type { ElementInfo } from "@/ipc/types";
 import { buildBodyObjects, swap, __resetRegistryForTests, type MeshEntry } from "./meshRegistry";
 import { parseMeshPayload } from "./parseMeshPayload";
 import { dropSelectionForBody, ordinalForRef, reconcileSelectionForBody } from "./rebindPick";
+import { attachPickProof, pickProofFor } from "./pickProof";
 import { selectionStore, topoRefId, type EntityRef } from "@/stores/selectionStore";
 import { resetStores } from "@/test/resetStores";
 
@@ -535,6 +536,84 @@ describe("reconcileSelectionForBody", () => {
     await flush();
 
     expect(selected()).toBe(before);
+  });
+
+  // ── the pick-time proof does not survive a regen (PR-01) ──────────────────
+
+  /*
+   * A ref kept across a regen is NOT a viewport hit any more. It was kept
+   * because something authoritative still names it — its promoted ElementId —
+   * and the publication its pick-time proof describes has been replaced. So the
+   * proof is cleared: a later promotion of that ref has to find nothing rather
+   * than re-prove currentness against a mesh the user never clicked.
+   *
+   * Nothing is lost by that. A ref only survives here by CARRYING an
+   * `elementId`, and an `elementId`-bearing ref never needs promotion — every
+   * acquisition path reads it first (see
+   * `ModelToolController.proofGate.test.ts` for that half, end to end).
+   */
+  it("clears the pick-time proof of every ref it KEEPS", async () => {
+    // Both publications label the bound element with its minted id, so the
+    // verdict keeps the ref OBJECT itself — nothing is rewritten, and the proof
+    // would otherwise ride straight through the regen.
+    const prev = stack(["el_top", "f:2"]);
+    const next = stack(["f:7", "f:8", "el_top"]);
+    const kept = faceRef("el_top", [2, 2, 5], "el_top");
+    attachPickProof(kept, { entry: prev, kind: "face", topoKey: "el_top" });
+    selectionStore.getState().set([kept]);
+
+    regen(prev, next, clientWith(vi.fn()));
+    await flush();
+
+    expect(selected()).toEqual([kept]); // same object: the label already matched
+    expect(pickProofFor(kept)).toBeUndefined();
+    // …and the ref still has the handle that actually speaks for it.
+    expect(selected()[0].elementId).toBe("el_top");
+  });
+
+  it("clears the proof of a ref it keeps under a REWRITTEN label", async () => {
+    const prev = stack(["f:1"]);
+    const next = stack(["f:9", "el_top"]);
+    const picked = faceRef("f:1", [2, 2, 5], "el_top");
+    attachPickProof(picked, { entry: prev, kind: "face", topoKey: "f:1" });
+    selectionStore.getState().set([picked]);
+
+    regen(prev, next, clientWith(vi.fn()));
+    await flush();
+
+    expect(pickProofFor(picked)).toBeUndefined();
+    // The stored ref is a NEW object (the topoKey moved), so it never had one.
+    expect(selected()[0].topoKey).toBe("el_top");
+    expect(pickProofFor(selected()[0])).toBeUndefined();
+  });
+
+  it("clears the proof of a ref held pending backend CONFIRMATION", async () => {
+    const prev = stack(["f:1"]);
+    const next = stack(["f:9"]);
+    const pending = faceRef("f:1", [2, 2, 5], "el_x");
+    attachPickProof(pending, { entry: prev, kind: "face", topoKey: "f:1" });
+    selectionStore.getState().set([pending]);
+
+    regen(prev, next, clientWith(vi.fn(async () => infoNaming("f:9"))));
+    expect(pickProofFor(pending)).toBeUndefined(); // cleared SYNCHRONOUSLY
+    await flush();
+
+    expect(selected()[0].topoKey).toBe("f:9");
+    expect(pickProofFor(selected()[0])).toBeUndefined();
+  });
+
+  it("leaves ANOTHER body's proof alone — only the regenerated body reconciles", async () => {
+    const prev = stack(["f:1"]);
+    const next = stack(["f:9", "el_top"]);
+    const foreign: EntityRef = { kind: "face", id: "b2#f:4", bodyId: "b2", topoKey: "f:4" };
+    const foreignProof = { entry: prev, kind: "face" as const, topoKey: "f:4" };
+    attachPickProof(foreign, foreignProof);
+    selectionStore.getState().set([foreign, faceRef("f:1", [2, 2, 5], "el_top")]);
+
+    regen(prev, next, clientWith(vi.fn()));
+    await flush();
+
+    expect(pickProofFor(foreign)).toBe(foreignProof);
   });
 });
 

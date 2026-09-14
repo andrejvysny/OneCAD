@@ -58,4 +58,38 @@ classification, or anything that reads a `TopLoc_Location`'s handedness.
   `compute_face_normals` from 12.65x to 5.40x the retired area-weighted loop.
 - Baseline red set for the whole worker suite at this tree: `feature_pattern` and
   `chamfer_reference_face` (both resolution-ladder, nothing to do with tessellation). A full run is
-  ~55 s / 199 targets, so "no full ctest" is a lease-politeness rule, not a cost one.
+  ~55-65 s / 199 targets, so "no full ctest" is a lease-politeness rule, not a cost one.
+
+Round 2 (the Astra `break`, `docs/design/astra/wp09-surface-normals-break.md`) added:
+
+- `BRepAdaptor_Surface::BSpline()`/`Bezier()`/`Sphere()` return the TRANSFORMED geometry, not the
+  basis: on a face `Moved` 1000 mm in X, `BSpline()->Pole(1,1)` comes back at x = 1000. So a
+  pole-magnitude bound is already in world units and must NOT be scaled by the location again.
+  (This is the opposite of `BRepAdaptor_Curve::GeomCurve()`, which IS untransformed.)
+- `BRepTools::UVBounds` on a face with NO wire returns the surface's whole natural domain
+  ([0,1]x[0,1] for a Bezier), not an empty box — so "no trim description" is a separate branch from
+  "zero-measure retained domain", and treating it as a certificate would excuse the standard
+  wireless-face fixture. `Bnd_Box2d::Get` THROWS on a void box, so a face whose pcurves are missing
+  surfaces as an exception rather than an inverted box; guard on `u1 >= u0 && v1 >= v0` anyway.
+- `BRepAlgoAPI_Fuse` of two r = 0.1 mm spheres whose centres are 0.0001 mm apart really does build:
+  5 two-face edges, 3 of them between two faces carved from the SAME `Geom_SphericalSurface` (those
+  are legitimately tangent) and 2 genuinely cross-surface. Any "distinct surfaces are never tangent"
+  assertion must filter on surface-handle identity or it fails on the same-surface edges.
+- A synthetic `Poly_Triangulation` handed straight to `compute_face_normals` is the cheapest way to
+  test a node policy: `Poly_Triangulation(nbNodes, nbTriangles, hasUVNodes, false)` + `SetNode` /
+  `SetUVNode` / `SetTriangle`, positions from `BRepAdaptor_Surface::Value(u,v)` (already world), and
+  `TopLoc_Location()` passed as `loc` so nothing is transformed twice. It is how the cone-apex fan,
+  the valence-10000 fan, the reversed pole facets and the cyclic-permutation sliver are all tested.
+  A triangulation built WITHOUT UV nodes is how you force the triangle-only ladder.
+- `BRepPrimAPI_MakeCone(R, 0, H)`'s apex sits at `v = -RefRadius/sin(SemiAngle)` in the adaptor's
+  parameterization, and `|S_u|` there is exactly the local radius, so `|S_u| <= derivative budget`
+  is a sound apex test that needs no separate distance-to-apex comparison.
+- Cost on this machine, same harness, fine torus face (21 025 nodes, one `compute_face_normals`
+  call): retired 1.14-1.17 ms, post-break 1.36-1.39 ms (+19%, +10 ns/node) — the extra is the
+  symmetric triangle predicate (3 edge lengths instead of 2 magnitudes) plus one float32 round-trip
+  per node. A valence-10 000 singular fan went 160 ms -> 0.70 ms once the pairwise spread scan is
+  skipped above `kMaxSpreadValence = 64`.
+- `src-tauri/target/` in this worktree still holds absolute paths from the PRE-RENAME worktree
+  (`.../OneCAD-ai-agent/...`), so any `cargo test` that compiles the app crate dies in tauri's build
+  script with "failed to read plugin permissions". The Rust worker-backed gates need that target dir
+  rebuilt before they can run here; the CMake cache had the same problem and was fixed earlier.

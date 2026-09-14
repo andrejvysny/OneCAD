@@ -54,16 +54,13 @@ export function rgbaToLinear(c: Rgba): THREE.Color {
   return new THREE.Color().setRGB(c[0] / U8_MAX, c[1] / U8_MAX, c[2] / U8_MAX, THREE.SRGBColorSpace);
 }
 
-/** True when the mesh needs de-indexed vertex colors (authored/import face colors or a body color). */
-export function needsVertexColors(
-  view: BodyMeshView,
-  bodyColor?: Rgba,
-  authoredFaceColors?: ReadonlyMap<string, Rgba>,
-): boolean {
-  return (
-    hasAuthoredFaceColors(view.faceColors) || bodyColor !== undefined || (authoredFaceColors?.size ?? 0) > 0
-  );
-}
+/*
+ * The "does this mesh need de-indexed vertex colors" predicate used to live
+ * here and was consulted a SECOND time, at construction, after admission had
+ * already priced the mesh from its payload alone. It now lives in
+ * `meshPreparationPlan.ts` as the one authority that both prices and builds
+ * (PR-03A); nothing in this module decides a layout any more.
+ */
 
 /**
  * Expand the indexed face triangles so every triangle owns its three vertices,

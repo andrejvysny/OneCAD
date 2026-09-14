@@ -57,7 +57,7 @@ import { ViewportContributionHost } from "./ContributionHost";
 import type { Registry, ViewportContribution } from "@/platform";
 import { palette } from "./palette";
 import { Picker, linePickThreshold, type PickHit, type PickModifiers, type ProbeCandidate, type ProbeCandidateFilter } from "./Picker";
-import { HighlightLayer } from "./HighlightLayer";
+import { HighlightLayer, type DegradedSelectionNotice } from "./HighlightLayer";
 import {
   SketchStaticLayer,
   sketchStaticHitKey,
@@ -392,6 +392,9 @@ export class ViewportEngine {
       // A restored context comes back at the default drawing-buffer size.
       this.applyRendererSize();
       this.scheduler.setSuspended(false);
+      // A restored context is an explicit recovery: the ticks that threw into
+      // the dead one must not count against the frames drawn into the new one.
+      this.scheduler.resetErrors();
       this.invalidate(DirtyReason.recovery);
       this.setLifecycle("active");
     });
@@ -681,6 +684,7 @@ export class ViewportEngine {
     this.highlights = new HighlightLayer({
       root: this.interactionRoot,
       invalidate: () => this.invalidate(),
+      onDegraded: (notices) => this.syncDegradedChips(notices),
     });
 
     if (this.debug) this.setupDebugOverlay(overlayEl);
@@ -820,6 +824,10 @@ export class ViewportEngine {
     const halfBuilt = !this.initialized;
     this.setLifecycle("constructing");
     this.scheduler.setSuspended(true);
+    // An EXPLICIT recovery forgives every bounded failure run: the scheduler's
+    // consecutive throwing ticks (PR-05) and this engine's listener failures.
+    this.scheduler.resetErrors();
+    this.listenerFailures = 0;
 
     // The PMREM target must go while its context is still alive (dispose order).
     this.scene.environment = null;
@@ -1236,14 +1244,56 @@ export class ViewportEngine {
     return this.lastSubmission;
   }
 
+  /** message → last log time for a throwing listener, so one logs once per 5 s. */
+  private readonly listenerErrorLoggedAt = new Map<string, number>();
+  /** Consecutive frames whose after-render listeners threw; a clean frame resets it. */
+  private listenerFailures = 0;
+
   private notifySubmitted(frame: FrameSubmission): void {
+    let threw = false;
     for (const [listener, minimum] of [...this.afterRenderListeners]) {
       // Re-checked INSIDE the loop: an after-render listener is allowed to tear
       // the viewport down, and no later listener may then run against a
       // disposed engine (spec §6).
       if (this.disposed) return;
-      if (frame.submission >= minimum) listener(frame);
+      if (frame.submission < minimum) continue;
+      try {
+        listener(frame);
+      } catch (error) {
+        // ISOLATED (PR-05). The frame is already submitted and recorded by the
+        // time any listener runs, so one bad contribution changes nothing about
+        // its outcome — and must not stop the listeners queued behind it.
+        threw = true;
+        this.reportListenerError(error);
+      }
     }
+    // …but a listener that fails on EVERY frame while asking for another one is
+    // exactly the permanent redraw loop guide §22 forbids: isolation alone would
+    // make it invisible AND unbounded. Same limit and same wake rule as a failed
+    // submission — a parked engine draws again on an `invalidate()` raised
+    // outside the frame work, or after `retryRenderer()`.
+    this.listenerFailures = threw ? this.listenerFailures + 1 : 0;
+    if (this.listenerFailures >= SUBMIT_FAILURE_LIMIT) this.submissionHalted = true;
+  }
+
+  /** One throwing listener: report at most once per distinct message per 5 s. */
+  private reportListenerError(error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    const now = performance.now();
+    const last = this.listenerErrorLoggedAt.get(message);
+    if (last !== undefined && now - last < SUBMIT_LOG_THROTTLE_MS) return;
+    // A bounded map, not a timer (see `recordSubmitFailure`): evict the OLDEST
+    // key so a recurring message keeps its window under a stream of unique ones.
+    while (this.listenerErrorLoggedAt.size >= SUBMIT_LOG_KEYS_MAX) {
+      const oldest = this.listenerErrorLoggedAt.keys().next().value;
+      if (oldest === undefined) break;
+      this.listenerErrorLoggedAt.delete(oldest);
+    }
+    this.listenerErrorLoggedAt.set(message, now);
+    logError("vp", "after-render listener threw", {
+      error: message,
+      consecutive: this.listenerFailures + 1,
+    });
   }
 
   /**
@@ -2824,7 +2874,13 @@ export class ViewportEngine {
       this.previewMaterials.setClippingPlanes(this.sectionClippingPlanes());
     }
     const prev = this.previewBodies.get(entry.bodyId);
-    if (prev) this.previewRoot.remove(prev.group);
+    if (prev) {
+      // Off the scene FIRST, then give the registry borrow back — the order
+      // `meshSync` uses, so a retirement listener never sees a lease-free
+      // resource still parented (spec §8.2).
+      this.previewRoot.remove(prev.group);
+      prev.dispose();
+    }
     const handle = buildBodyObject(entry, this.previewMaterials);
     this.previewBodies.set(entry.bodyId, handle);
     this.previewRoot.add(handle.group);
@@ -2861,10 +2917,14 @@ export class ViewportEngine {
         const handle = this.previewBodies.get(id);
         if (!handle) continue;
         this.previewRoot.remove(handle.group);
+        handle.dispose();
         this.previewBodies.delete(id);
       }
     } else {
-      for (const handle of this.previewBodies.values()) this.previewRoot.remove(handle.group);
+      for (const handle of this.previewBodies.values()) {
+        this.previewRoot.remove(handle.group);
+        handle.dispose();
+      }
       this.previewBodies.clear();
       this.restorePreviewHiddenBodies();
     }
@@ -2927,6 +2987,47 @@ export class ViewportEngine {
         : undefined,
     });
     this.invalidate();
+  }
+
+  /**
+   * The selection-COUNT half of the degraded highlight display (spec §8.3,
+   * DEV-WP03-1). The layer draws the leased outline itself; the count is DOM,
+   * so it rides the chip layer every other viewport label uses. Styled from
+   * tokens (`var(--color-*)`) like the debug origin pill — there is no raw
+   * colour here and nothing for `refreshColors` to re-read.
+   */
+  private readonly degradedChips = new Map<string, HTMLElement>();
+
+  private syncDegradedChips(notices: readonly DegradedSelectionNotice[]): void {
+    const live = new Set<string>();
+    for (const notice of notices) {
+      const id = `__degraded_selection:${notice.bodyId}`;
+      live.add(id);
+      const label = `${notice.count} selected`;
+      let el = this.degradedChips.get(id);
+      if (!el) {
+        el = document.createElement("div");
+        el.dataset.degradedSelection = notice.bodyId;
+        const style = el.style;
+        style.font = "11px ui-monospace, monospace";
+        style.padding = "1px 4px";
+        style.borderRadius = "3px";
+        style.background = "var(--color-tooltip)";
+        style.color = "var(--color-tooltip-text)";
+        style.pointerEvents = "none";
+        this.degradedChips.set(id, el);
+        el.textContent = label;
+        this.mountChip(id, el, notice.world);
+      } else {
+        el.textContent = label;
+        this.moveChip(id, notice.world);
+      }
+    }
+    for (const [id, el] of [...this.degradedChips]) {
+      if (live.has(id)) continue;
+      this.degradedChips.delete(id);
+      this.unmountChip(id, el);
+    }
   }
 
   moveChip(id: string, world: Vec3, axisFrom?: Vec3): void {
@@ -3118,6 +3219,7 @@ export class ViewportEngine {
     this.lifecycleListeners.clear();
     this.lastSubmission = null;
     this.submitErrorLoggedAt.clear();
+    this.listenerErrorLoggedAt.clear();
 
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
@@ -3137,6 +3239,9 @@ export class ViewportEngine {
     this.debugOriginEl?.remove();
     this.debugOriginEl = null;
     this.debugOriginShown = false;
+    // Before the chip layer goes: unmounting a chip has to unregister it from
+    // the overlay driver, which the removed layer cannot do for it.
+    this.syncDegradedChips([]);
     this.chipLayerEl?.remove();
     this.chipLayerEl = null;
     this.overlayEl = null;
@@ -3165,7 +3270,10 @@ export class ViewportEngine {
     this.regionPickLayer = null;
     this.planePicker?.dispose();
     this.planePicker = null;
-    for (const handle of this.previewBodies.values()) this.previewRoot.remove(handle.group);
+    for (const handle of this.previewBodies.values()) {
+      this.previewRoot.remove(handle.group);
+      handle.dispose();
+    }
     this.previewBodies.clear();
     this.restorePreviewHiddenBodies();
     this.previewMaterials?.dispose();

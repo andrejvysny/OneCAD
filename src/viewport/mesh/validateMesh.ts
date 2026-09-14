@@ -39,7 +39,16 @@ export interface MeshBounds {
   readonly max: readonly [number, number, number];
 }
 
-/** Byte cost of a mesh once every derived array is materialised, plus its measured extent. */
+/**
+ * PAYLOAD-ONLY byte cost, plus the mesh's measured extent.
+ *
+ * Appearance-free by construction (PR-03A): the numbers here describe the MESH1
+ * sections and the edge expansion those sections imply, and NOTHING about the
+ * layout the mesh will be prepared in — that depends on document metadata this
+ * module never sees. Do not price a reservation from these fields; the single
+ * authority for what a mesh costs is `meshPreparationPlan.ts`, and
+ * `MeshAdmission.reserve` only accepts that plan's totals.
+ */
 export interface MeshAccounting {
   /**
    * Bounds MEASURED from the positions and edge points — the authority the
@@ -56,10 +65,6 @@ export interface MeshAccounting {
   readonly payloadBytes: number;
   /** The expanded fat-line segment endpoint buffer (`expandEdgeSegments`). */
   readonly edgeSegmentBytes: number;
-  /** The de-indexed + baked colour representation, when the mesh carries FACE_COLORS. */
-  readonly colorBytes: number;
-  /** Typed-array bytes that will actually be handed to GPU geometry. */
-  readonly estimatedGpuBytes: number;
   readonly triangleCount: number;
   /** Fat-line segments the edge tables expand to: Σ max(0, pointCount − 1). */
   readonly segmentCount: number;
@@ -310,25 +315,11 @@ export function validateMeshView(
     return fail("payload-budget", `payload ${payloadBytes} bytes exceeds the ${payloadCap} byte cap`);
   }
 
-  // Authored FACE_COLORS force a de-indexed prepared representation (faceColors.ts):
-  // 3·T vertices carrying position, colour, and — when present — normal.
-  let colorBytes = 0;
-  if (view.faceColors) {
-    const deIndexedFloats = checkedMul(indexWords, 3);
-    const streams = view.normals ? 3 : 2;
-    const bytes = deIndexedFloats === null ? null : checkedMul(deIndexedFloats, 4 * streams);
-    if (bytes === null) {
-      return fail("count-overflow", "de-indexed colour representation overflows safe integer arithmetic");
-    }
-    colorBytes = bytes;
-    const payloadWithColor = checkedAdd(payloadBytes, colorBytes);
-    if (payloadWithColor === null || payloadWithColor > payloadCap) {
-      return fail(
-        "payload-budget",
-        `payload ${payloadBytes} + colour expansion ${colorBytes} bytes exceeds the ${payloadCap} byte cap`,
-      );
-    }
-  }
+  // The de-indexed colour expansion is deliberately NOT priced here (PR-03A):
+  // whether a mesh is prepared de-indexed depends on the document's body colour
+  // and the user's authored face overrides, neither of which is payload. That
+  // decision and its cost belong to `planMeshPreparation`, which enforces this
+  // same cap over the layout it actually chose.
 
   // Edge expansion cost, summed with checked arithmetic from the RAW ranges —
   // this is precisely the allocation `expandEdgeSegments` would make, and it is
@@ -352,8 +343,7 @@ export function validateMeshView(
   if (edgeSegmentBytes === null) {
     return fail("count-overflow", `edge expansion of ${segmentCount} segments overflows safe integer arithmetic`);
   }
-  const withColor = checkedAdd(payloadBytes, colorBytes);
-  const preparedBytes = withColor === null ? null : checkedAdd(withColor, edgeSegmentBytes);
+  const preparedBytes = checkedAdd(payloadBytes, edgeSegmentBytes);
   if (preparedBytes === null || preparedBytes > payloadCap) {
     return fail(
       "expansion-budget",
@@ -540,17 +530,12 @@ export function validateMeshView(
     }
   }
 
-  const geometryBytes = view.faceColors
-    ? colorBytes
-    : (positionFloats + (view.normals ? positionFloats : 0)) * 4 + indexWords * 4;
   const accounting: MeshAccounting = {
     actualBounds,
     headerBoundsExcursionMm,
     headerBoundsSlackMm: Math.max(BBOX_ABS_SLACK, BBOX_REL_SLACK * extent),
     payloadBytes,
     edgeSegmentBytes,
-    colorBytes,
-    estimatedGpuBytes: geometryBytes + edgeSegmentBytes,
     triangleCount,
     segmentCount,
   };

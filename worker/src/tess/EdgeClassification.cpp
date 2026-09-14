@@ -9,9 +9,7 @@
 #include <BRep_Tool.hxx>
 #include <Geom2d_Curve.hxx>
 #include <GeomAbs_Shape.hxx>
-#include <GeomAbs_SurfaceType.hxx>
 #include <Geom_Surface.hxx>
-#include <Precision.hxx>
 #include <Standard_Failure.hxx>
 #include <TopAbs_Orientation.hxx>
 #include <TopExp.hxx>
@@ -22,17 +20,12 @@
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
-#include <gp_Ax1.hxx>
-#include <gp_Cone.hxx>
-#include <gp_Cylinder.hxx>
-#include <gp_Lin.hxx>
 #include <gp_Mat.hxx>
-#include <gp_Pln.hxx>
 #include <gp_Pnt2d.hxx>
-#include <gp_Sphere.hxx>
-#include <gp_Torus.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
+
+#include "tess/SurfaceNormals.h"
 
 namespace onecad::tess {
 
@@ -47,7 +40,13 @@ struct OrientedNormal {
 // the shading normals use (SurfaceNormals.h): the adaptor applies the face
 // location once, the face orientation and the location's determinant sign are
 // applied once each.
-OrientedNormal face_normal_at(const TopoDS_Face& face, const TopoDS_Edge& edge, double t) {
+//
+// Astra F6 adds the acceptance half of NUM §7.1 to it: a normal whose DIRECTION
+// carries no error bound (`normal_angular_error_rad` above kNormalAcceptanceRad)
+// is not evidence of anything, so the sample is reported UNEVALUABLE rather than
+// folded into a dihedral the rest of the ladder then trusts.
+OrientedNormal face_normal_at(const TopoDS_Face& face, const BRepAdaptor_Surface& surf,
+                              const DerivativeBudget& budget, const TopoDS_Edge& edge, double t) {
     OrientedNormal out;
     try {
         Standard_Real first = 0.0, last = 0.0;
@@ -55,7 +54,6 @@ OrientedNormal face_normal_at(const TopoDS_Face& face, const TopoDS_Edge& edge, 
         if (pcurve.IsNull() || !(last > first)) return out;
         const double at = std::clamp(t, first, last);
         const gp_Pnt2d uv = pcurve->Value(at);
-        BRepAdaptor_Surface surf(face, /*Restriction=*/false);
         gp_Pnt p;
         gp_Vec du;
         gp_Vec dv;
@@ -63,6 +61,7 @@ OrientedNormal face_normal_at(const TopoDS_Face& face, const TopoDS_Edge& edge, 
         const gp_Vec cross = du.Crossed(dv);
         const double g = cross.Magnitude();
         if (!std::isfinite(g) || g <= 0.0) return out;
+        if (!(normal_angular_error_rad(budget, du, dv) <= kNormalAcceptanceRad)) return out;
         double sign = face.Orientation() == TopAbs_REVERSED ? -1.0 : 1.0;
         if (face.Location().Transformation().VectorialPart().Determinant() < 0.0) sign = -sign;
         out.direction = cross.Multiplied(sign / g);
@@ -73,99 +72,29 @@ OrientedNormal face_normal_at(const TopoDS_Face& face, const TopoDS_Edge& edge, 
     return out;
 }
 
-// Greatest dihedral between the two faces' oriented normals over
-// kEdgeContinuitySamples interior parameters. `measured` is false when either
-// face could not be evaluated at any sample — no evidence, not zero evidence.
-double measured_dihedral_rad(const TopoDS_Face& f1, const TopoDS_Face& f2, const TopoDS_Edge& edge,
-                             bool& measured) {
-    measured = false;
-    Standard_Real first = 0.0, last = 0.0;
-    BRep_Tool::Range(edge, first, last);
-    if (!(last > first) || !std::isfinite(first) || !std::isfinite(last)) return 0.0;
-    double worst = 0.0;
-    for (int k = 1; k <= kEdgeContinuitySamples; ++k) {
-        const double u = static_cast<double>(k) / static_cast<double>(kEdgeContinuitySamples + 1);
-        const double t = first + u * (last - first);
-        const OrientedNormal a = face_normal_at(f1, edge, t);
-        const OrientedNormal b = face_normal_at(f2, edge, t);
-        if (!a.valid || !b.valid) continue;
-        measured = true;
-        const double d = std::clamp(a.direction.Dot(b.direction), -1.0, 1.0);
-        worst = std::max(worst, std::acos(d));
-    }
-    return worst;
-}
-
-bool same_axis(const gp_Ax1& a, const gp_Ax1& b, double linear) {
-    if (!a.Direction().IsParallel(b.Direction(), Precision::Angular())) return false;
-    return a.Location().Distance(b.Location()) <= linear ||
-           gp_Lin(a).Distance(b.Location()) <= linear;
-}
-
-// NUM §8.2's "analytic supporting-surface equivalence": the two faces lie on the
-// SAME surface, so continuity holds over the complete edge interval by
-// construction rather than by sampling.
-bool same_supporting_surface(const TopoDS_Face& fa, const TopoDS_Face& fb, double linear) {
+// NUM §8.2's "analytic supporting-surface equivalence", narrowed by Astra F6 to
+// the only form that establishes continuity over the COMPLETE edge interval: the
+// two faces are carried by the SAME `Geom_Surface` object at the SAME location.
+//
+// The retired version also accepted tolerance-close analytic PARAMETERS — equal
+// radii and coincident centres within `max(tol(f1), tol(f2))`. Two spheres of
+// radius 0.1 mm whose centres are 0.0001 mm apart, both with tolerance
+// 0.0001 mm, pass that test while genuinely intersecting at a dihedral of
+// `2 asin(0.0001 / 0.2) = 0.0573 degrees` — under the 0.2 degree screen, so every
+// sample agreed and two distinct surfaces were declared tangent. Nearly-equal
+// parameters describe nearly-equal surfaces, which is not the same statement.
+bool same_supporting_surface(const TopoDS_Face& fa, const TopoDS_Face& fb) {
     TopLoc_Location la;
     TopLoc_Location lb;
     const Handle(Geom_Surface) sa = BRep_Tool::Surface(fa, la);
     const Handle(Geom_Surface) sb = BRep_Tool::Surface(fb, lb);
     if (sa.IsNull() || sb.IsNull()) return false;
-    if (sa == sb && la.IsEqual(lb)) return true;
-    try {
-        const BRepAdaptor_Surface aa(fa, /*Restriction=*/false);
-        const BRepAdaptor_Surface bb(fb, /*Restriction=*/false);
-        if (aa.GetType() != bb.GetType()) return false;
-        switch (aa.GetType()) {
-            case GeomAbs_Plane: {
-                const gp_Pln pa = aa.Plane();
-                const gp_Pln pb = bb.Plane();
-                return pa.Axis().Direction().IsParallel(pb.Axis().Direction(),
-                                                        Precision::Angular()) &&
-                       pa.Distance(pb.Location()) <= linear;
-            }
-            case GeomAbs_Cylinder: {
-                const gp_Cylinder ca = aa.Cylinder();
-                const gp_Cylinder cb = bb.Cylinder();
-                return std::abs(ca.Radius() - cb.Radius()) <= linear &&
-                       same_axis(ca.Axis(), cb.Axis(), linear);
-            }
-            case GeomAbs_Sphere: {
-                const gp_Sphere sp = aa.Sphere();
-                const gp_Sphere sq = bb.Sphere();
-                return std::abs(sp.Radius() - sq.Radius()) <= linear &&
-                       sp.Location().Distance(sq.Location()) <= linear;
-            }
-            case GeomAbs_Cone: {
-                const gp_Cone ka = aa.Cone();
-                const gp_Cone kb = bb.Cone();
-                return std::abs(ka.SemiAngle() - kb.SemiAngle()) <= Precision::Angular() &&
-                       ka.Apex().Distance(kb.Apex()) <= linear &&
-                       same_axis(ka.Axis(), kb.Axis(), linear);
-            }
-            case GeomAbs_Torus: {
-                const gp_Torus ta = aa.Torus();
-                const gp_Torus tb = bb.Torus();
-                return std::abs(ta.MajorRadius() - tb.MajorRadius()) <= linear &&
-                       std::abs(ta.MinorRadius() - tb.MinorRadius()) <= linear &&
-                       ta.Location().Distance(tb.Location()) <= linear &&
-                       same_axis(ta.Axis(), tb.Axis(), linear);
-            }
-            default:
-                return false;
-        }
-    } catch (const Standard_Failure&) {
-        return false;
-    }
+    return sa == sb && la.IsEqual(lb);
 }
 
 // The continuity/measurement ladder for an edge with exactly two incident faces.
 std::uint32_t classify_two_face_edge(const TopoDS_Edge& edge, const TopoDS_Face& f1,
                                      const TopoDS_Face& f2) {
-    const double linear = std::max(BRep_Tool::Tolerance(f1), BRep_Tool::Tolerance(f2));
-    bool measured = false;
-    const double dihedral = measured_dihedral_rad(f1, f2, edge, measured);
-
     GeomAbs_Shape continuity = GeomAbs_C0;
     try {
         continuity = BRep_Tool::Continuity(edge, f1, f2);
@@ -175,11 +104,8 @@ std::uint32_t classify_two_face_edge(const TopoDS_Edge& edge, const TopoDS_Face&
     // GeomAbs_C0 is what OCCT returns when NO continuity is registered, so it is
     // the absence of metadata, never proof of a discontinuity.
     const bool claimsG1 = continuity >= GeomAbs_G1;
-    const bool consistent = measured && dihedral <= kEdgeCreaseRad;
-    if (claimsG1 && consistent) return kEdgeTangent;
-    if (same_supporting_surface(f1, f2, linear) && consistent) return kEdgeTangent;
-    if (measured && dihedral > kEdgeCreaseRad) return kEdgeHard;
-    return kEdgeUnknown;
+    return decide_edge_continuity(claimsG1, same_supporting_surface(f1, f2),
+                                  sample_edge_agreement(f1, f2, edge));
 }
 
 bool is_seam_of(const TopoDS_Edge& edge, const TopoDS_Face& face) {
@@ -191,6 +117,48 @@ bool is_seam_of(const TopoDS_Edge& edge, const TopoDS_Face& face) {
 }
 
 }  // namespace
+
+EdgeSampleAgreement sample_edge_agreement(const TopoDS_Face& f1, const TopoDS_Face& f2,
+                                          const TopoDS_Edge& edge) {
+    EdgeSampleAgreement out;
+    Standard_Real first = 0.0, last = 0.0;
+    BRep_Tool::Range(edge, first, last);
+    if (!(last > first) || !std::isfinite(first) || !std::isfinite(last)) return out;
+    BRepAdaptor_Surface sa;
+    BRepAdaptor_Surface sb;
+    try {
+        sa.Initialize(f1, /*Restriction=*/false);
+        sb.Initialize(f2, /*Restriction=*/false);
+    } catch (const Standard_Failure&) {
+        return out;
+    }
+    const DerivativeBudget ba = derivative_error_budget(sa);
+    const DerivativeBudget bb = derivative_error_budget(sb);
+    for (int k = 1; k <= kEdgeContinuitySamples; ++k) {
+        const double u = static_cast<double>(k) / static_cast<double>(kEdgeContinuitySamples + 1);
+        const double t = first + u * (last - first);
+        const OrientedNormal a = face_normal_at(f1, sa, ba, edge, t);
+        const OrientedNormal b = face_normal_at(f2, sb, bb, edge, t);
+        if (!a.valid || !b.valid) continue;
+        ++out.evaluable;
+        const double d = std::clamp(a.direction.Dot(b.direction), -1.0, 1.0);
+        out.maxDihedralRad = std::max(out.maxDihedralRad, std::acos(d));
+    }
+    return out;
+}
+
+std::uint32_t decide_edge_continuity(bool trustedG1, bool sameSupportingSurface,
+                                     const EdgeSampleAgreement& agreement) {
+    // A measured crease is definitive evidence of a discontinuity at that
+    // parameter, whether or not the other samples could be evaluated.
+    if (agreement.evaluable > 0 && agreement.maxDihedralRad > kEdgeCreaseRad) return kEdgeHard;
+    // NUM §8.2: sampling is a DIAGNOSTIC SCREEN, never permission to hide an
+    // edge, so a partially screened join cannot be upgraded even with trusted
+    // metadata — "partial sampling cannot certify consistency" (Astra F6).
+    if (!agreement.complete()) return kEdgeUnknown;
+    if (trustedG1 || sameSupportingSurface) return kEdgeTangent;
+    return kEdgeUnknown;
+}
 
 std::vector<EdgeClass> classify_edges(const TopoDS_Shape& shape,
                                       const TopTools_IndexedMapOfShape& faces,

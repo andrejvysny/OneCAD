@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <exception>
 #include <functional>
 #include <limits>
@@ -73,29 +74,25 @@ void deflections(const std::string& lod, double diag, double& lin, double& ang) 
 // NUM §2.5 initial per-body edge budget, spent as a RUNNING total.
 constexpr std::size_t kBodyEdgeSegmentBudget = 2000000;
 
+// The live budget. Equal to kBodyEdgeSegmentBudget in every production build and
+// every production call; `detail::set_body_edge_segment_budget_for_test` is the
+// only writer and no shipped code path reaches it.
+std::size_t& body_edge_segment_budget_slot() {
+    static std::size_t budget = kBodyEdgeSegmentBudget;
+    return budget;
+}
+
+std::string num_text(double v) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.6g", v);
+    return std::string(buf);
+}
+
 bool all_points_finite(const std::vector<gp_Pnt>& points) {
     for (const gp_Pnt& p : points) {
         if (!std::isfinite(p.X()) || !std::isfinite(p.Y()) || !std::isfinite(p.Z())) return false;
     }
     return true;
-}
-
-// The endpoints of an edge that gets no sampling at all, already reported by the
-// caller's one-per-body warning.
-CurveSampleResult endpoints_only_quiet(const BRepAdaptor_Curve& curve) {
-    CurveSampleResult out;
-    const gp_Pnt first = curve.Value(curve.FirstParameter());
-    const gp_Pnt last = curve.Value(curve.LastParameter());
-    out.points.push_back(first);
-    out.points.push_back(last);
-    out.certification = CurveCertification::QualityLimited;
-    out.diagnostic = "the per-body segment budget is exhausted";
-    if (!all_points_finite(out.points)) {
-        out.points.clear();
-        out.certification = CurveCertification::Failed;
-        out.diagnostic = "the edge's analytic endpoints are not finite";
-    }
-    return out;
 }
 
 // Last rung of the edge policy, and the answer for an edge that arrives after
@@ -141,6 +138,31 @@ CurveSampleResult endpoints_only(const BRepAdaptor_Curve& curve, const std::stri
 // Cancellation: the sampler polls a callback once per span. No display job is
 // cancellable yet, so `{}` is passed here; WP12 (worker display jobs) wires the
 // real token through without touching the sampler.
+// TopoKey → minted ElementId lookup for one body (empty map when no partition).
+std::map<std::string, std::string> minted_ids(const elementmap::ElementMapPartition* partition,
+                                              const std::string& body_id) {
+    std::map<std::string, std::string> out;
+    if (!partition) return out;
+    for (const elementmap::PartitionEntry* e : partition->entries_for_body(body_id)) {
+        if (!e->topo_key.empty()) out[e->topo_key] = e->element_id;
+    }
+    return out;
+}
+
+}  // namespace
+
+namespace detail {
+
+void set_body_edge_segment_budget_for_test(std::size_t budget) {
+    body_edge_segment_budget_slot() = budget;
+}
+
+void clear_body_edge_segment_budget_for_test() {
+    body_edge_segment_budget_slot() = kBodyEdgeSegmentBudget;
+}
+
+std::size_t body_edge_segment_budget() { return body_edge_segment_budget_slot(); }
+
 CurveSampleResult sample_edge_polyline(const BRepAdaptor_Curve& curve, const std::string& label,
                                        const CurveSampleRequest& request,
                                        const CurveSampleLimits& limits) {
@@ -158,11 +180,28 @@ CurveSampleResult sample_edge_polyline(const BRepAdaptor_Curve& curve, const std
         relaxed.angularToleranceRad = std::min(request.angularToleranceRad * factor, kMaxAngularRad);
         CurveSampleResult retry = sample_edge_curve(curve, relaxed, limits, {});
         if (!retry.points.empty() && retry.certification != CurveCertification::Failed) {
+            // PR-07 / D9: the polyline is real and inside the RELAXED budget, and
+            // that is exactly what the result now says. The retry's own
+            // certification — frequently `Certified`, against a tolerance nobody
+            // asked for — must never reach a metadata consumer as if the request
+            // had been met, so requested and achieved are carried separately and
+            // the outcome is QualityLimited whatever the retry thought.
+            retry.certification = CurveCertification::QualityLimited;
+            retry.certifiedChordBoundMm = -1;
+            retry.requestedChordToleranceMm = request.chordToleranceMm;
+            retry.requestedAngularToleranceRad = request.angularToleranceRad;
+            retry.achievedChordToleranceMm = relaxed.chordToleranceMm;
+            retry.achievedAngularToleranceRad = relaxed.angularToleranceRad;
+            retry.diagnostic = "display quality limited: requested " +
+                               num_text(request.chordToleranceMm) + " mm, achieved " +
+                               num_text(relaxed.chordToleranceMm) + " mm after " +
+                               std::to_string(doubling) + " tolerance doubling" +
+                               (doubling == 1 ? "" : "s") + " (" + result.diagnostic + ")";
             WLOG_WARN(
                 "tessellate: edge %s display quality limited at %.6g mm (%s); emitting the "
-                "%.6g mm polyline instead",
+                "%.6g mm polyline instead after %d doubling(s)",
                 label.c_str(), request.chordToleranceMm, result.diagnostic.c_str(),
-                relaxed.chordToleranceMm);
+                relaxed.chordToleranceMm, doubling);
             return retry;
         }
     }
@@ -171,18 +210,7 @@ CurveSampleResult sample_edge_polyline(const BRepAdaptor_Curve& curve, const std
                           "still limited after 4 tolerance doublings");
 }
 
-// TopoKey → minted ElementId lookup for one body (empty map when no partition).
-std::map<std::string, std::string> minted_ids(const elementmap::ElementMapPartition* partition,
-                                              const std::string& body_id) {
-    std::map<std::string, std::string> out;
-    if (!partition) return out;
-    for (const elementmap::PartitionEntry* e : partition->entries_for_body(body_id)) {
-        if (!e->topo_key.empty()) out[e->topo_key] = e->element_id;
-    }
-    return out;
-}
-
-}  // namespace
+}  // namespace detail
 
 BodyMesh tessellate_body(const TopoDS_Shape& shape, const std::string& body_id,
                          const std::string& lod, bool include_edges,
@@ -261,24 +289,42 @@ BodyMesh tessellate_body(const TopoDS_Shape& shape, const std::string& body_id,
             compute_face_normals(face, tri, loc, face.Orientation() == TopAbs_REVERSED);
         out.completeness.normalFallbackNodes += fn.fallbackCount;
         out.completeness.singularSplitNodes += fn.splitCount;
+        out.completeness.normalUnresolvedNodes += fn.unresolvedCount;
         out.completeness.normalMissingNodes += fn.missingCount;
+        out.completeness.float32CollapsedTriangles += fn.float32CollapsedTriangles;
+        if (fn.float32CollapsedTriangles > 0) {
+            // Astra §4: a REPRESENTATION failure, never a degeneracy exemption.
+            // `ulp32(8192 mm) = 2^-10 mm`, so a 0.0001 x 0.01 mm rectangle at
+            // X = 8192 mm collapses in the emitted float32 while its BRep is
+            // perfectly valid.
+            WLOG_WARN("tessellate: body %s face %s has %u triangles with positive area that "
+                      "collapse to zero in the emitted float32 positions",
+                      body_id.c_str(), face_key.c_str(), fn.float32CollapsedTriangles);
+        }
 
         if (!fn.complete) {
             // Spec §14: "Incomplete display tessellation must be diagnostic." A
-            // face that cannot carry a drawable triangle keeps its zero range with
-            // an explicit reason; a nondegenerate one invalidates the COMPLETE
-            // claim and is named. Neither invents geometry.
-            const char* why = fn.diagnostic.empty() ? "no drawable triangle" : fn.diagnostic.c_str();
-            if (face_is_degenerate(face, diag)) {
+            // face whose degeneracy is CERTIFIED (Astra §3) keeps its zero range
+            // with the certificate as its reason; everything else — including an
+            // uncertain sliver — is a MISSING nondegenerate face, invalidates the
+            // COMPLETE claim, and now fails the body (D11). Neither invents
+            // geometry. The degeneracy decision is face-local: nothing about the
+            // rest of the body may excuse a face that is perfectly valid on its
+            // own (a 0.005 x 0.005 mm face on a 10 m body used to be excused).
+            const std::string why = fn.diagnostic.empty() ? "no drawable triangle" : fn.diagnostic;
+            const FaceDegeneracy degeneracy = classify_face_degeneracy(face);
+            if (degeneracy.certified()) {
                 out.completeness.degenerateFaces.push_back(face_key);
-                WLOG_DEBUG("tessellate: face %s is degenerate; zero-triangle range (%s)",
-                           face_key.c_str(), why);
+                WLOG_DEBUG("tessellate: face %s is CERTIFIED degenerate (%s); zero-triangle "
+                           "range (%s)",
+                           face_key.c_str(), degeneracy.reason.c_str(), why.c_str());
             } else {
                 out.completeness.allNondegenerateFacesCovered = false;
                 out.completeness.missingFaces.push_back(face_key);
-                WLOG_WARN("tessellate: body %s face %s is NONDEGENERATE but produced no "
-                          "triangles (%s); the display tessellation is incomplete",
-                          body_id.c_str(), face_key.c_str(), why);
+                WLOG_WARN("tessellate: body %s face %s produced no triangles and its degeneracy "
+                          "is NOT certified (%s); the display tessellation is incomplete (%s)",
+                          body_id.c_str(), face_key.c_str(), degeneracy.reason.c_str(),
+                          why.c_str());
             }
             mi.face_ranges.emplace_back(first_tri, 0);
             mi.face_ids.push_back(lbl.first);
@@ -314,11 +360,12 @@ BodyMesh tessellate_body(const TopoDS_Shape& shape, const std::string& body_id,
     }
 
     if (out.completeness.normalFallbackNodes > 0 || out.completeness.singularSplitNodes > 0 ||
-        out.completeness.normalMissingNodes > 0) {
+        out.completeness.normalUnresolvedNodes > 0 || out.completeness.normalMissingNodes > 0) {
         WLOG_DEBUG("tessellate: body %s normals — %u triangulation fallbacks, %u singular splits, "
-                   "%u without a source",
+                   "%u unresolved, %u without a source",
                    body_id.c_str(), out.completeness.normalFallbackNodes,
-                   out.completeness.singularSplitNodes, out.completeness.normalMissingNodes);
+                   out.completeness.singularSplitNodes, out.completeness.normalUnresolvedNodes,
+                   out.completeness.normalMissingNodes);
     }
     // NUM §9.2 type 19: local solid-partition ordinals for per-solid caps. Local
     // display metadata, never a persistent topology id, and only for a partition
@@ -333,7 +380,8 @@ BodyMesh tessellate_body(const TopoDS_Shape& shape, const std::string& body_id,
         // NUM §2.5: the per-body segment budget is a RUNNING total, never handed
         // to each edge as if it owned the whole thing. The walk order is the
         // MapShapes order, so the split across edges is deterministic.
-        std::size_t body_segments_left = kBodyEdgeSegmentBudget;
+        const std::size_t body_segment_budget = detail::body_edge_segment_budget();
+        std::size_t body_segments_left = body_segment_budget;
         bool budget_exhausted_reported = false;
         for (int ei = 1; ei <= edges.Extent(); ++ei) {
             const TopoDS_Edge edge = TopoDS::Edge(edges(ei));
@@ -346,65 +394,78 @@ BodyMesh tessellate_body(const TopoDS_Shape& shape, const std::string& body_id,
                 // its range and id so the edge tables stay index-aligned.
                 WLOG_DEBUG("tessellate: edge %s is degenerate; no polyline", topo_key.c_str());
             } else {
-                try {
-                    BRepAdaptor_Curve curve(edge);
-                    CurveSampleRequest request;
-                    request.chordToleranceMm = lin;
-                    request.angularToleranceRad = ang;
-                    // The float32 allowance is per span and per axis and the
-                    // sampler computes it from each span's own poles, so the
-                    // caller reserves nothing extra.
-                    request.representationAllowanceMm = 0.0;
-                    CurveSampleLimits limits;
-                    limits.remainingBodySegments = body_segments_left;
-                    CurveSampleResult sampled;
-                    if (body_segments_left == 0) {
-                        // Nothing left to spend: hand back the endpoints without
-                        // running the sampler, the doubling ladder or the
-                        // approximate fallback. One warning per body, not per edge.
-                        if (!budget_exhausted_reported) {
-                            WLOG_WARN(
-                                "tessellate: body %s exhausted its %zu-segment edge budget at "
-                                "edge %s; remaining edges emit endpoints only",
-                                body_id.c_str(), kBodyEdgeSegmentBudget, topo_key.c_str());
-                            budget_exhausted_reported = true;
-                        }
-                        sampled = endpoints_only_quiet(curve);
-                    } else {
-                        sampled = sample_edge_polyline(curve, topo_key, request, limits);
+                if (body_segments_left == 0) {
+                    // PR-07 / D9: the declared per-body cap is a HARD cap. An edge
+                    // that arrives after it is spent gets a zero-point range and
+                    // keeps its id and its slot in the range/id tables, so the
+                    // edge tables stay index-aligned and no consumer can mistake
+                    // the body for complete. It emits NO geometry — the retired
+                    // two-endpoint fallback added one uncounted segment per
+                    // remaining edge, so five extra edges took a 2 000 000-segment
+                    // body to 2 000 005. One warning per body, not per edge.
+                    out.completeness.budgetLimitedEdges.push_back(topo_key);
+                    if (!budget_exhausted_reported) {
+                        WLOG_WARN(
+                            "tessellate: body %s exhausted its %zu-segment edge budget at "
+                            "edge %s; the remaining edges keep their ids and emit no polyline",
+                            body_id.c_str(), body_segment_budget, topo_key.c_str());
+                        budget_exhausted_reported = true;
                     }
-                    if (sampled.certification == CurveCertification::Failed ||
-                        sampled.points.size() < 2) {
-                        WLOG_WARN("tessellate: edge %s produced no polyline (%s)", topo_key.c_str(),
-                                  sampled.diagnostic.c_str());
-                    } else if (!all_points_finite(sampled.points)) {
-                        WLOG_WARN("tessellate: edge %s produced a non-finite point; dropping it",
-                                  topo_key.c_str());
-                    } else {
-                        if (sampled.certification == CurveCertification::KernelEstimated) {
-                            WLOG_DEBUG(
-                                "tessellate: edge %s used the approximate fallback; sampled max "
-                                "error %.6g mm against %.6g mm",
-                                topo_key.c_str(), sampled.sampledMaxErrorMm, lin);
-                        } else if (sampled.certification == CurveCertification::QualityLimited) {
-                            WLOG_WARN("tessellate: edge %s is representation limited (%s)",
-                                      topo_key.c_str(), sampled.diagnostic.c_str());
+                } else {
+                    try {
+                        BRepAdaptor_Curve curve(edge);
+                        CurveSampleRequest request;
+                        request.chordToleranceMm = lin;
+                        request.angularToleranceRad = ang;
+                        // The float32 allowance is per span and per axis and the
+                        // sampler computes it from each span's own poles, so the
+                        // caller reserves nothing extra.
+                        request.representationAllowanceMm = 0.0;
+                        CurveSampleLimits limits;
+                        limits.remainingBodySegments = body_segments_left;
+                        const CurveSampleResult sampled =
+                            detail::sample_edge_polyline(curve, topo_key, request, limits);
+                        if (sampled.certification == CurveCertification::Failed ||
+                            sampled.points.size() < 2) {
+                            // D11 / Astra F1: an edge is display-only, not
+                            // pickable topology, so a failed nondegenerate edge
+                            // keeps its id and a WARNED zero-point range and is
+                            // recorded for WP10 — it never affects `ok`.
+                            out.completeness.missingEdges.push_back(topo_key);
+                            WLOG_WARN("tessellate: edge %s produced no polyline (%s)", topo_key.c_str(),
+                                      sampled.diagnostic.c_str());
+                        } else if (!all_points_finite(sampled.points)) {
+                            out.completeness.missingEdges.push_back(topo_key);
+                            WLOG_WARN("tessellate: edge %s produced a non-finite point; dropping it",
+                                      topo_key.c_str());
+                        } else {
+                            if (sampled.certification == CurveCertification::KernelEstimated) {
+                                WLOG_DEBUG(
+                                    "tessellate: edge %s used the approximate fallback; sampled max "
+                                    "error %.6g mm against %.6g mm",
+                                    topo_key.c_str(), sampled.sampledMaxErrorMm, lin);
+                            } else if (sampled.certification == CurveCertification::QualityLimited) {
+                                WLOG_WARN("tessellate: edge %s is representation limited (%s)",
+                                          topo_key.c_str(), sampled.diagnostic.c_str());
+                            }
+                            for (const gp_Pnt& p : sampled.points) {
+                                mi.edge_positions.push_back(static_cast<float>(p.X()));
+                                mi.edge_positions.push_back(static_cast<float>(p.Y()));
+                                mi.edge_positions.push_back(static_cast<float>(p.Z()));
+                                ++point_count;
+                            }
+                            const std::size_t used = sampled.points.size() - 1;
+                            body_segments_left = used >= body_segments_left ? 0 : body_segments_left - used;
                         }
-                        for (const gp_Pnt& p : sampled.points) {
-                            mi.edge_positions.push_back(static_cast<float>(p.X()));
-                            mi.edge_positions.push_back(static_cast<float>(p.Y()));
-                            mi.edge_positions.push_back(static_cast<float>(p.Z()));
-                            ++point_count;
-                        }
-                        const std::size_t used = sampled.points.size() - 1;
-                        body_segments_left = used >= body_segments_left ? 0 : body_segments_left - used;
+                    } catch (const Standard_Failure& failure) {
+                        out.completeness.missingEdges.push_back(topo_key);
+                        WLOG_WARN("tessellate: edge %s sampling raised %s", topo_key.c_str(),
+                                  failure.GetMessageString());
+                    } catch (const std::exception& error) {
+                        out.completeness.missingEdges.push_back(topo_key);
+                        WLOG_WARN("tessellate: edge %s sampling raised %s", topo_key.c_str(),
+                                  error.what());
                     }
-                } catch (const Standard_Failure& failure) {
-                    WLOG_WARN("tessellate: edge %s sampling raised %s", topo_key.c_str(),
-                              failure.GetMessageString());
-                } catch (const std::exception& error) {
-                    WLOG_WARN("tessellate: edge %s sampling raised %s", topo_key.c_str(),
-                              error.what());
                 }
             }
             mi.edge_ranges.emplace_back(first_point, point_count);
@@ -442,7 +503,27 @@ BodyMesh tessellate_body(const TopoDS_Shape& shape, const std::string& body_id,
 
     out.triangle_count = static_cast<std::uint32_t>(mi.indices.size() / 3);
     out.blob = encode_mesh1(mi);
-    out.ok = true;
+    // D11 / Astra F1: an incomplete display tessellation IS a failed
+    // tessellation. The retired code assigned `out.ok = true` unconditionally, so
+    // `allNondegenerateFacesCovered = false` was recorded in a field no caller
+    // read and the body published as if it were whole — exactly what spec §14
+    // forbids. Edges are deliberately excluded: they are display-only and keep a
+    // warned zero-point range instead.
+    out.ok = out.completeness.allNondegenerateFacesCovered;
+    if (!out.ok) {
+        out.diagnostic = "the display tessellation is incomplete: " +
+                         std::to_string(out.completeness.missingFaces.size()) +
+                         " nondegenerate face(s) produced no triangles (";
+        for (std::size_t i = 0; i < out.completeness.missingFaces.size(); ++i) {
+            if (i >= 16) {
+                out.diagnostic += ", ...";
+                break;
+            }
+            if (i > 0) out.diagnostic += ", ";
+            out.diagnostic += out.completeness.missingFaces[i];
+        }
+        out.diagnostic += ")";
+    }
     return out;
 }
 

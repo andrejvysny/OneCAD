@@ -42,6 +42,18 @@ The work reports two **distinct** flags. `changedThisTick` says the tick drew;
 frame. Collapsing them into one produces an extra idle frame when a tween ends.
 A frame is rescheduled when the mask is dirty again **or** `stillActive`.
 
+**Only the tail of a tick may schedule.** An `invalidate()` raised *during* the
+work sets the mask and nothing else; `tick()`'s tail is the single place a frame
+is taken. That is what makes the scheduler's error bound real: after three
+consecutive ticks whose work **threw**, the tail **parks** — it cancels any
+pending frame and leaves the mask intact instead of rescheduling, so a work that
+invalidates and then fails cannot keep the queue permanently non-empty
+(VP-HARDENING finding PR-05; the old order let it run forever). Parking is a
+bound per **external** wake, not a shutdown: the next `invalidate()` raised
+outside a tick buys exactly one more attempt, and `resetErrors()` — called by
+`retryRenderer()` and by the context-restored path — makes the scheduler as
+forgiving as a fresh one. `scheduler.parked` reports the state.
+
 `invalidate()` with no argument means `appearance`, so every legacy caller still
 works; pass the specific reason where it is known. Camera motion goes through
 the controls' `onChange` (`camera`), `resize()` / `syncDpr()` pass `resize`, and
@@ -74,6 +86,14 @@ attempt per request, re-parking on each failure — or after `retryRenderer()`.
 For the same reason a camera invalidation raised *during* `controls.update()`
 does not dirty the mask at all: that tick already draws the post-update camera,
 so a tween of N advancing ticks costs exactly N frames.
+
+**After-render listeners are isolated.** The frame is submitted and recorded
+before any of them runs, so one that throws is caught, reported at most once per
+distinct message per 5 s, and never stops the listeners behind it nor changes the
+frame's outcome. A listener that fails on **every** frame while invalidating from
+inside it is still a redraw loop, so three consecutive frames with a throwing
+listener park the engine under the same rule — and the same external-wake exit —
+as three failed submissions.
 
 `RendererLifecycle` is `constructing → active → lost → restoring → active`, with
 terminal `disposed` and the bounded `error`. Context loss suspends the scheduler
@@ -232,6 +252,33 @@ Three consequences the Picker owns, none of which apply to plain lines:
   face-vs-edge preference bias arbitrates on the world-space `distance` both hit
   kinds report.
 
+### Geometry ownership
+
+Every borrower of viewport geometry is one of exactly three things (spec §8.2,
+decisions D05/D6). There is no fourth kind, and in particular no cleanup
+heuristic standing in for an owner.
+
+- **Registry owner.** `mesh/meshRegistry.ts` is the unique disposer of installed
+  face/edge geometry. Nothing else may call `dispose()` on it.
+- **Lessee.** Borrows the registry's EXACT geometry object under
+  `acquireLease(entry, tag)` and releases it when the object leaves the scene.
+  A lease is what stops the registry freeing buffers a borrower is still drawing
+  with; a leaked one trips the tripwire, which reports the tag. The tags in use:
+  `"body"` (`BodyObject`, committed AND exact-preview bodies), `"section"`
+  (`SectionLayer` stencil pairs), `"highlight:body"` (whole-body and degraded
+  highlights), `"ghost"` (unranged pattern/mirror/transform ghosts).
+- **Compact owner.** Owns a private copy it disposes itself: face-set and edge
+  highlight overlays (`mesh/faceSliceGeometry.ts` + `mesh/highlightCache.ts`)
+  and ranged ghosts (`buildTriangleRangeGeometry`). A copy never shares a
+  `BufferAttribute` with the body, so disposing it frees only its own buffers.
+
+Two consequences worth stating outright. A borrower must lease the object it
+DRAWS, not one re-resolved by body id — `BodyObject` stamps
+`faceMesh.userData.meshEntry` and `SectionLayer.createPair` refuses (one warn,
+no pair) when that entry's geometry is not the mesh's. And every preview handle
+is disposed at its removal site (`ViewportEngine.setPreviewBody` replacement,
+`clearPreviewBody` with and without ids, and engine teardown).
+
 Highlights follow the ownership contract of `docs/viewport-hardening/01-SPECIFICATION.md`
 §8 (VP-HARDENING WP03, decision D05); the old shared-attribute wrappers that
 were never disposed are gone (finding R02). Three shapes:
@@ -252,10 +299,16 @@ were never disposed are gone (finding R02). Three shapes:
   `InstancedInterleavedBuffer`, so their own GL buffer) and are cached and
   disposed the same way.
 
-Body objects and section stencils borrow the body geometry through leases too
-(`"body"`, `"section"`); the registry is the unique disposer of installed
-geometry (`meshRegistry.ts`, ordered frame-end retirement). Never call
-`dispose()` on any geometry that shares the body's `BufferAttribute`s.
+The cache is reserved against `planFaceSetCapacity`, which applies the ×1.5
+growth rule UP FRONT and prices the outgoing buffer too (`peakBytes`); the
+reservation is a receipt, and `put` refuses a value larger than it (PR-04).
+When the pinned set alone exhausts the budget the layer keeps the semantic
+selection, warns once per change, and draws that body's LEASED edge outline plus
+a selection-count chip (`HighlightDeps.onDegraded` → `ViewportEngine`'s chip
+layer), re-attempting the exact overlay on every rebuild — DEV-WP03-1.
+
+Never call `dispose()` on any geometry that shares the body's
+`BufferAttribute`s.
 
 `SketchStaticLayer` (model-mode, non-editable presence of every sketch) picks
 DIFFERENTLY: its `hitTest` raycasts an explicit object list it maintains itself,

@@ -95,6 +95,10 @@ const IDLE: FrameWorkResult = { changedThisTick: false, stillActive: false };
  * bound exists because the recovery below (restore the reasons, then run the
  * normal tail) would otherwise re-queue a frame that throws again — the
  * permanent redraw loop guide §22 rejects. An `invalidate()` still schedules.
+ *
+ * The bound is per EXTERNAL wake, not a shutdown: parking cancels the queue and
+ * keeps the mask, and the next `invalidate()` from outside a tick buys exactly
+ * one more attempt. {@link FrameScheduler.resetErrors} is the explicit recovery.
  */
 const WORK_ERROR_LIMIT = 3;
 
@@ -111,6 +115,15 @@ export class FrameScheduler {
   /** `stillActive` from the last tick — a transition suspend/resume must survive. */
   private transitionActive = false;
   private workErrors = 0;
+  /** The last tick's tail hit {@link WORK_ERROR_LIMIT} and queued nothing. */
+  private isParked = false;
+  /**
+   * True only while the work function is running. An `invalidate()` raised in
+   * that window may NOT take a frame of its own (PR-05): the tail owns the
+   * decision, and a tick that queued its own successor before failing left a
+   * frame the error bound could not withhold — a permanent loop.
+   */
+  private inTick = false;
 
   constructor(deps: FrameSchedulerDeps) {
     this.deps = deps;
@@ -153,12 +166,32 @@ export class FrameScheduler {
     return this.transitionActive;
   }
 
+  /**
+   * The error bound tripped on the last tick: nothing is queued and the mask is
+   * held for an external wake. Cleared by the next non-throwing tick or by
+   * {@link resetErrors}.
+   */
+  get parked(): boolean {
+    return this.isParked;
+  }
+
+  /**
+   * Forget the consecutive-failure run — an EXPLICIT recovery said so
+   * (`retryRenderer()`, a restored GL context). The scheduler is then exactly
+   * as forgiving as a fresh one.
+   */
+  resetErrors(): void {
+    this.workErrors = 0;
+    this.isParked = false;
+  }
+
   /** Mark the frame dirty for `reason` and ensure exactly one frame is pending. */
   invalidate(reason: DirtyReasonMask): void {
     if (this.destroyed) return;
     this.revision += 1;
     this.mask |= reason;
-    this.ensureFrame();
+    // Inside a tick this is only a mask write: the tail schedules (or parks).
+    if (!this.inTick) this.ensureFrame();
   }
 
   /**
@@ -198,6 +231,7 @@ export class FrameScheduler {
 
     let result = IDLE;
     let threw = false;
+    this.inTick = true;
     try {
       result = work(consumed);
     } catch (error) {
@@ -208,12 +242,15 @@ export class FrameScheduler {
       this.mask |= consumed.reasons;
       throw error;
     } finally {
+      this.inTick = false;
       this.workErrors = threw ? this.workErrors + 1 : 0;
+      this.isParked = threw && this.workErrors >= WORK_ERROR_LIMIT;
       this.transitionActive = result.stillActive;
-      if (
-        (this.mask !== NO_REASON || result.stillActive) &&
-        this.workErrors < WORK_ERROR_LIMIT
-      ) {
+      if (this.isParked) {
+        // Defensive: nothing may be queued from inside a tick any more, but a
+        // park must leave the queue EMPTY whatever the work managed to do.
+        this.cancelPending();
+      } else if (this.mask !== NO_REASON || result.stillActive) {
         this.ensureFrame();
       }
     }

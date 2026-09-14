@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "kind": "baseline",
+  "commit": "65b4c60eb226a201f2fa3eb565d7283b1c63b5ac",
+  "note": "raw logs are local artifacts ignored by git; fingerprinted here",
+  "artifacts": [
+    {
+      "path": "docs/qa/viewport-hardening/baseline/bun-install.log",
+      "sha256": "77a30b0973d122cf13d7f1eafe82f33f441616cbdb3e44a8d8c41226034ddffb",
+      "bytes": 758
+    },
+    {
+      "path": "docs/qa/viewport-hardening/baseline/cargo-clippy.log",
+      "sha256": "e36adb59e4994c3c9768733538111d24a6e6c67f6eea967da295a65de9cf938f",
+      "bytes": 10498
+    },
+    {
+      "path": "docs/qa/viewport-hardening/baseline/cargo-fmt.log",
+      "sha256": "3103db8503e651a13c63df876e1859dc100f873c4ce82d8e5b67d5bba8461179",
+      "bytes": 549
+    },
+    {
+      "path": "docs/qa/viewport-hardening/baseline/cargo-test-nofailfast.log",
+      "sha256": "d91e5cb4a1159e2ccf2bd33e6908da8e63c5ce01e7801bf74b3a674d40464e75",
+      "bytes": 157826
+    },
+    {
+      "path": "docs/qa/viewport-hardening/baseline/cargo-test.log",
+      "sha256": "4f587c28836a2ba714ec4b8eac322545b4559bea457ec69f2f7349f8f1a2e780",
+      "bytes": 51685
+    },
+    {
+      "path": "docs/qa/viewport-hardening/baseline/ctest-curve-sampler-red.log",
+      "sha256": "06a69d2c54c719383a2d7d422fe56f6e8e6c28589ae92283c2b9aa8d36ddee2a",
+      "bytes": 1355
+    },
+    {
+      "path": "docs/qa/viewport-hardening/baseline/ctest-full.log",
+      "sha256": "099478c47f132d4da06a9dc76dd59c8639054088488d7ef9de6605cfcb7aff2f",
+      "bytes": 46420
+    },
+    {
+      "path": "docs/qa/viewport-hardening/baseline/ctest-surface-normals-red.log",
+      "sha256": "72fcf7d6aa33b6cb75acfec2d1a59eb994e249131dd92ff26068077e710ec16d",
+      "bytes": 2396
+    },
+    {
+      "path": "docs/qa/viewport-hardening/baseline/gates-run.log",
+      "sha256": "a117c9756ea13feb231fb30d87e461c0b3b9818481d0ed5584252ace0fa81926",
+      "bytes": 234
+    },
+    {
+      "path": "docs/qa/viewport-hardening/baseline/vitest-full.log",
+      "sha256": "a29b4d7761927cd9b57892dc8cce7964b880800bdb9502d9509db95a0736f981",
+      "bytes": 372190
+    },
+    {
+      "path": "docs/qa/viewport-hardening/baseline/vph-counterexamples-red.log",
+      "sha256": "6f2b031a11fab781d538c51c3374ae192f0042bcccae5f75dec2c15cfa2bc740",
+      "bytes": 7436
+    },
+    {
+      "path": "docs/qa/viewport-hardening/baseline/vph-g-lane-probes-at-65b4c60.log",
+      "sha256": "f308dc87c21eb6ab93a40705130d6aa1da74e4862ba6fedde3bb0d733994a4c0",
+      "bytes": 2671
+    },
+    {
+      "path": "docs/qa/viewport-hardening/baseline/vph-g-lane-probes.log",
+      "sha256": "fb235831cc38bb619750c9acd12ecc0441e4da4fbe0b9e4da1348ad5b8e5f462",
+      "bytes": 13643
+    },
+    {
+      "path": "docs/qa/viewport-hardening/baseline/worker-build.log",
+      "sha256": "abdeb0978ca72d179fe98c0dacca485f0e0b9eb764642d903aea21f863c04277",
+      "bytes": 2427727
+    }
+  ]
+}

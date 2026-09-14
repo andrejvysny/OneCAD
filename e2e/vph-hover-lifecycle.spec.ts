@@ -21,20 +21,26 @@ async function attachJson(testInfo: TestInfo, name: string, value: unknown): Pro
  *
  * Repeatedly hovers between two distinct faces of the mock box body and reads
  * the engine's own resource bookkeeping (`?vpdebug`'s
- * `window.__vpEngine.debugResourceCounters()`) every 50 iterations, over 300
- * REAL rendered hovers. A face highlight is a per-hover wrapper object built
- * around the picked geometry; if it is never disposed on hover-away, renderer
- * geometry count keeps climbing instead of plateauing once warmed up — a
- * classic never-torn-down-overlay leak that a single hover/unhover pair can't
- * show.
+ * `window.__vpEngine.debugResourceCounters()`) every 100 iterations, over
+ * 1,000 REAL rendered hovers (ACCEPTANCE §3.3's own count). A face highlight
+ * is a per-hover wrapper object built around the picked geometry; if it is
+ * never disposed on hover-away, renderer geometry count keeps climbing
+ * instead of plateauing once warmed up — a classic never-torn-down-overlay
+ * leak that a single hover/unhover pair can't show.
  *
  * History: at the design baseline (65b4c60) this measured +2 renderer
  * geometries per hover with no plateau (baseline/vph-g-lane-probes-at-65b4c60.log,
  * 11 → 611 over 300 hovers). After WP03 (owned, cached face overlays; leased
  * whole-body overlays; frame-ordered retirement) the count holds flat after
  * warm-up (11 → 13, then 13 at every sample). The test states the required
- * behaviour — count at i=300 equals count at i=100 — and preserves the series
- * via `testInfo.attach`.
+ * behaviour — count at i=1000 equals count at i=200 (§3.3: "after the first
+ * 200, no unexplained positive per-cycle growth") — and preserves the series
+ * via `testInfo.attach`. It also asserts the WP03 highlight cache (§8.3,
+ * `HighlightCache` in src/viewport/mesh/highlightCache.ts, capacity policy
+ * TEST-RES-03) stays within its ≤256-entry bound, and that the application-side
+ * lease count (`leasesOpen`, meshRegistry.ts's per-owner-tag ledger) is
+ * constant across the plateau — a hover-only lane borrows and releases within
+ * the same frame, so it must never accumulate open leases.
  */
 
 interface ResourceCounters {
@@ -43,6 +49,8 @@ interface ResourceCounters {
     meshEntriesBuilt: number;
     meshEntriesRetired: number;
     pickQueries: number;
+    highlightEntries: number;
+    leasesOpen: number;
     [k: string]: number;
   };
 }
@@ -54,6 +62,8 @@ interface ResourceSample {
   meshEntriesBuilt: number;
   meshEntriesRetired: number;
   pickQueries: number;
+  highlightEntries: number;
+  leasesOpen: number;
 }
 
 function readCounters(page: Page): Promise<ResourceCounters> {
@@ -74,16 +84,20 @@ function toSample(i: number, c: ResourceCounters): ResourceSample {
     meshEntriesBuilt: c.viewport.meshEntriesBuilt,
     meshEntriesRetired: c.viewport.meshEntriesRetired,
     pickQueries: c.viewport.pickQueries,
+    highlightEntries: c.viewport.highlightEntries,
+    leasesOpen: c.viewport.leasesOpen,
   };
 }
 
-const HOVER_ITERATIONS = 300;
-const SAMPLE_EVERY = 50;
+const HOVER_ITERATIONS = 1_000;
+const SAMPLE_EVERY = 100;
+// §3.3's cache bound (TEST-RES-03: "Cache ≤64 MiB and ≤256 entries").
+const HIGHLIGHT_CACHE_MAX_ENTRIES = 256;
 
-test("TEST-RES-01: renderer geometry count plateaus after warm-up across 300 rendered hovers", async ({
+test("TEST-RES-01: renderer geometry count plateaus after warm-up across 1,000 rendered hovers", async ({
   page,
 }, testInfo) => {
-  test.setTimeout(180_000);
+  test.setTimeout(240_000);
   // R02 baseline (65b4c60): +2 renderer geometries per hover, no plateau
   // (docs/qa/viewport-hardening/baseline/vph-g-lane-probes-at-65b4c60.log).
   // WP03 made face overlays owned + cached and whole-body overlays leased, so
@@ -115,20 +129,33 @@ test("TEST-RES-01: renderer geometry count plateaus after warm-up across 300 ren
 
   await attachJson(testInfo, "hover-lifecycle-series.json", { before: toSample(0, before), samples });
 
-  const at50 = samples.find((s) => s.i === 50);
   const at100 = samples.find((s) => s.i === 100);
-  const at300 = samples.find((s) => s.i === 300);
-  if (!at50 || !at100 || !at300) throw new Error("missing i=50, i=100, or i=300 sample");
+  const at200 = samples.find((s) => s.i === 200);
+  const at1000 = samples.find((s) => s.i === 1_000);
+  if (!at100 || !at200 || !at1000) throw new Error("missing i=100, i=200, or i=1000 sample");
 
   // Plain assertions — must pass TODAY, independent of the R02 baseline: the
   // loop is genuinely hovering (pick queries advance across the run) and mesh
   // ingestion is not re-running per hover (meshEntriesBuilt is flat ACROSS THE
   // LOOP itself — compared sample-to-sample, not against the pre-loop `before`
   // baseline, which still includes the initial body ingest settling).
-  expect(at300.pickQueries).toBeGreaterThan(before.viewport.pickQueries);
-  expect(at300.meshEntriesBuilt).toBe(at50.meshEntriesBuilt);
+  expect(at1000.pickQueries).toBeGreaterThan(before.viewport.pickQueries);
+  expect(at1000.meshEntriesBuilt).toBe(at100.meshEntriesBuilt);
 
   // R02 baseline (expected to fail today): geometry count should plateau
-  // after warm-up instead of climbing from i=100 to i=300.
-  expect(at300.geometries).toBe(at100.geometries);
+  // after warm-up instead of climbing from i=200 to i=1000 (§3.3: "after the
+  // first 200, no unexplained positive per-cycle growth").
+  expect(at1000.geometries).toBe(at200.geometries);
+
+  // TEST-RES-03's cache bound holds throughout a hover-only run (two distinct
+  // faces alternate, so the cache never needs more than a couple of entries —
+  // this is a hard ceiling check, not a tight one).
+  for (const s of samples) {
+    expect(s.highlightEntries).toBeLessThanOrEqual(HIGHLIGHT_CACHE_MAX_ENTRIES);
+  }
+
+  // Application-side lease count (meshRegistry.ts's per-owner-tag ledger) is
+  // constant across the plateau — a hover borrows and releases the same
+  // frame, so it must never accumulate open leases sample-to-sample.
+  expect(at1000.leasesOpen).toBe(at200.leasesOpen);
 });

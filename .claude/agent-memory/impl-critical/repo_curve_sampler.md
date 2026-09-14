@@ -60,3 +60,31 @@ Facts learned building the WP08 exact-span edge sampler (`worker/src/tess/CurveS
   emitted segments, measured from the published points. A position-based acceptance shortcut passed
   every chord assertion while letting 67-degree creases through the 5-degree fine tier; only the
   turn measurement caught it.
+- Round 3 (Astra followup) replaced the acceptance ladder and DELETED two constants. The order is
+  now: chord hull bound (+ twice the F6 pole-roundoff enclosure) → cone about the DOUBLE chord
+  (failure here means split) → cone about the ENCODED float32 chord (failure here means
+  `Undefined`, never a split — shortening the chord rotates its encoded direction FURTHER, so
+  splitting on an encoding shortfall diverges) → display-turn check on the emitted points. Gone:
+  `kAngularTestFloor = 1e-9` and `kShortChordQuantizationFactor = 16`.
+- The display-turn predicate is `turn <= angularTol + J`, where J is the curve's OWN one-sided
+  tangent jump at the join, read off the first/last derivative-numerator coefficients of the two
+  leaves. Without J a C0 knot (the F07 fixture turns 166 degrees at knot 1.0) reads as a defect,
+  and a nearly-vertical rational spike does too. Q(0) and Q(1) ARE the one-sided tangents up to the
+  positive factor W^2.
+- The positional resolution floor (`budget/1024`) may only STOP subdivision when a singularity is
+  established independently — no tested direction separates the derivative-numerator coefficient
+  hull from the origin, i.e. some `dot(q_k, chord) <= 0`. Used on its own it admits a 0.05 mm
+  quarter-circle corner as one chord with 45-degree turns. A span that is regular but unresolvable
+  within depth 32 (a rational quadratic whose corner lives at t ~ 1e-12) is accepted AT the depth
+  cap with `Undefined` and NO singular label, so the turn pass still measures it.
+- A turn between two encoded chords is only measurable when `asin((e- + e+)/L)` summed over both
+  chords is under the allowance (e = the MEASURED per-point float32 displacement). Below that the
+  three points sit inside one float32 cell and the "turn" is jitter — a 1e-11 mm chord at 0.1 mm
+  coordinates reads as 88 degrees.
+- `long double` is 64-bit on arm64 macOS, so it is USELESS as a higher-precision reference. Use a
+  double-double (`two_sum`/`std::fma` two_prod, ~106 bits) written in the test — that is what the
+  F6 subdivision-vs-reference comparison runs on.
+- `tess::detail` in `Tessellate.h` holds the TEST-ONLY per-body edge budget override
+  (`set/clear_body_edge_segment_budget_for_test`) plus `sample_edge_polyline` (the doubling ladder).
+  Production never calls the setter. Exhausting the real 2 000 000-segment budget honestly is not a
+  unit test; a compound of six circles plus an injected cap is.

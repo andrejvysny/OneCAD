@@ -18,7 +18,13 @@
  * and the commit agree even when nothing fits, still only happens here.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
-import type { ClassifyResult, LibraryComponent, PlaceComponentSource, PreviewSession } from "@/ipc/types";
+import type {
+  ClassifyResult,
+  LibraryComponent,
+  PlaceComponentSource,
+  PreviewResult,
+  PreviewSession,
+} from "@/ipc/types";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import { setViewportEngine } from "@/viewport/engineBridge";
 import {
@@ -26,6 +32,11 @@ import {
   cancelPlacement,
   configurePlacementController,
 } from "./placementController";
+import { makeBoxMesh } from "@/ipc/mockMeshes";
+import { __resetDocumentAdmissionForTests, getDocumentAdmission } from "@/viewport/mesh/meshAdmission";
+import { disposeAll, __resetRegistryForTests } from "@/viewport/mesh/meshRegistry";
+import { __resetPreviewMeshReportsForTests } from "@/viewport/mesh/previewMesh";
+import { __resetLogForTests, logSnapshot } from "@/debug/log";
 
 /** The default resolution; a `mock`-prefixed name is what vitest hoists `vi.mock` against. */
 let mockResolvedSource: PlaceComponentSource = {
@@ -83,6 +94,10 @@ interface Harness {
   updatePreview: ReturnType<typeof vi.fn>;
   placeComponent: ReturnType<typeof vi.fn>;
   beginPreview: ReturnType<typeof vi.fn>;
+  engine: ViewportEngine;
+  session: PreviewSession;
+  /** Hand the controller's own ghost-lane subscriber one preview result. */
+  deliver: (r: PreviewResult) => void;
 }
 
 /**
@@ -119,6 +134,8 @@ function install(radius: number, opts?: { hit?: boolean }): Harness {
   } as PreviewSession;
 
   const beginPreview = vi.fn(async () => session);
+  /** The ghost lane's own subscriber, so a test can deliver a preview result. */
+  let previewCb: ((r: PreviewResult) => void) | null = null;
 
   configurePlacementController({
     geometryQuery: {
@@ -130,11 +147,21 @@ function install(radius: number, opts?: { hit?: boolean }): Harness {
       beginPreview,
       updatePreview,
       endPreview: vi.fn(async () => null),
-      onPreviewResult: vi.fn(() => () => undefined),
+      onPreviewResult: vi.fn((cb: (r: PreviewResult) => void) => {
+        previewCb = cb;
+        return () => undefined;
+      }),
     },
   } as unknown as Parameters<typeof configurePlacementController>[0]);
 
-  return { updatePreview, placeComponent, beginPreview };
+  return {
+    updatePreview,
+    placeComponent,
+    beginPreview,
+    engine,
+    session,
+    deliver: (r: PreviewResult) => previewCb?.(r),
+  };
 }
 
 /** Lets every awaited microtask in the hover/arm chains settle. */
@@ -361,5 +388,100 @@ describe("placementController free space", () => {
     await settle();
 
     expect(harness.placeComponent).not.toHaveBeenCalled();
+  });
+});
+
+/*
+ * VP-HARDENING PR-03A/PR-03B — a placement GHOST is a real GPU resource.
+ *
+ * The ghost lane used to validate its mesh and build geometry without ever
+ * pricing it, so a placement drag could put arbitrarily many meshes on the GPU
+ * while admission reported the document's bodies only. It now goes through
+ * `buildPreviewEntry`, which plans, admits and builds as one step — and, like
+ * validation before it, a refusal SKIPS that ghost instead of throwing out of a
+ * timer-driven listener.
+ */
+describe("placementController ghost admission", () => {
+  afterEach(() => {
+    cancelPlacement();
+    configurePlacementController(null);
+    setViewportEngine(null);
+    disposeAll();
+    __resetRegistryForTests();
+    __resetDocumentAdmissionForTests();
+    __resetPreviewMeshReportsForTests();
+    __resetLogForTests({ enabled: false });
+  });
+
+  /** Arm a placement and land one hover so the ghost lane is live. */
+  async function armed(): Promise<Harness> {
+    const harness = install(CLEARANCE_HOLE_M6_RADIUS);
+    armPlacement(componentFixture());
+    await settle();
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 10, clientY: 10 }));
+    await settle();
+    return harness;
+  }
+
+  const previewWarnings = () =>
+    logSnapshot().filter((e) => e.level === "warn" && e.tag === "preview");
+
+  it("charges an admitted ghost to the DOCUMENT budget", async () => {
+    __resetDocumentAdmissionForTests();
+    const harness = await armed();
+
+    harness.deliver({
+      sessionId: harness.session.sessionId,
+      epoch: 1,
+      bodyId: "ghost",
+      bodies: [{ bodyId: "ghost", mesh: makeBoxMesh() }],
+    } as PreviewResult);
+
+    expect(harness.engine.setPreviewBody).toHaveBeenCalledTimes(1);
+    const budget = getDocumentAdmission().snapshot();
+    expect(budget.holdings).toBe(1);
+    expect(budget.estimatedGpuBytes).toBeGreaterThan(0);
+  });
+
+  it("skips a ghost the budget refuses, with the throttled warn and nothing built", async () => {
+    __resetDocumentAdmissionForTests({ estimatedGpuBytes: 1 });
+    __resetLogForTests();
+    const harness = await armed();
+
+    expect(() =>
+      harness.deliver({
+        sessionId: harness.session.sessionId,
+        epoch: 1,
+        bodyId: "ghost",
+        bodies: [{ bodyId: "ghost", mesh: makeBoxMesh() }],
+      } as PreviewResult),
+    ).not.toThrow();
+
+    expect(harness.engine.setPreviewBody).not.toHaveBeenCalled();
+    expect(getDocumentAdmission().snapshot().holdings).toBe(0);
+    expect(previewWarnings()).toHaveLength(1);
+    expect(previewWarnings()[0].ctx).toMatchObject({ code: "gpu-budget" });
+  });
+
+  it("skips only the REFUSED ghost and still places the others", async () => {
+    __resetDocumentAdmissionForTests();
+    __resetLogForTests();
+    const harness = await armed();
+    const torn = makeBoxMesh();
+    new DataView(torn).setUint32(0x00, 0x4d455349, true); // bad magic
+
+    harness.deliver({
+      sessionId: harness.session.sessionId,
+      epoch: 1,
+      bodyId: "ghost",
+      bodies: [
+        { bodyId: "ghost-a", mesh: torn },
+        { bodyId: "ghost-b", mesh: makeBoxMesh() },
+      ],
+    } as PreviewResult);
+
+    expect(harness.engine.setPreviewBody).toHaveBeenCalledTimes(1);
+    expect(getDocumentAdmission().snapshot().holdings).toBe(1);
+    expect(previewWarnings()[0].ctx).toMatchObject({ code: "bad-magic" });
   });
 });

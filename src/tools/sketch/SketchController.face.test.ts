@@ -21,6 +21,51 @@ import { viewportStore } from "@/stores/viewportStore";
 import { documentStore } from "@/stores/documentStore";
 import { selectionStore, type EntityRef } from "@/stores/selectionStore";
 import { resetStores } from "@/test/resetStores";
+import { encodeMesh1 } from "@/ipc/mockMeshes";
+import { attachPickProof } from "@/viewport/mesh/pickProof";
+import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
+import {
+  buildBodyObjects,
+  disposeAll,
+  setCurrentMeshPublication,
+  swap,
+  __resetRegistryForTests,
+} from "@/viewport/mesh/meshRegistry";
+
+/** The publication a pick-time proof has to agree with. */
+const PUBLICATION = {
+  documentId: "doc-1",
+  runtimeSession: "runtime-1",
+  snapshotId: 7,
+  generation: 3,
+} as const;
+
+/**
+ * Install `body1` as the current publication and give `ref` the pick-time proof
+ * a real click would have attached (PR-01). Without it a promotion from the
+ * selection fails closed, which is the point of the companion spec below.
+ */
+function provePick(ref: EntityRef): EntityRef {
+  // A mesh whose face id table really names `f:22` — the proof has to resolve
+  // the picked label in the entry it was read from, not merely reference it.
+  const blob = encodeMesh1({
+    positions: [0, 0, 25, 10, 0, 25, 0, 10, 25],
+    faces: [{ triangles: [[0, 1, 2]], id: "f:22" }],
+  });
+  const entry = buildBodyObjects(
+    parseMeshPayload(blob), "body1", 1, undefined, undefined, PUBLICATION,
+  );
+  swap("body1", entry);
+  setCurrentMeshPublication(PUBLICATION);
+  documentStore.setState({
+    documentId: "doc-1",
+    runtimeSession: "runtime-1",
+    geometrySource: "live",
+    bodies: { body1: { id: "body1", name: "Body", visible: true } },
+  });
+  attachPickProof(ref, { entry, kind: "face", topoKey: ref.topoKey ?? "" });
+  return ref;
+}
 
 /** The backend-resolved frame for the picked face — deliberately NOT the
  *  canonical XY basis, so a re-derivation anywhere on the frontend would show
@@ -97,6 +142,8 @@ describe("SketchController — sketch on a selected face", () => {
 
   beforeEach(() => {
     resetStores();
+    disposeAll();
+    __resetRegistryForTests();
     engineMock = makeEngineMock();
     clientMock = makeClientMock();
     container = document.createElement("div");
@@ -111,6 +158,9 @@ describe("SketchController — sketch on a selected face", () => {
   afterEach(() => {
     controller.dispose();
     container.remove();
+    disposeAll();
+    __resetRegistryForTests();
+    setCurrentMeshPublication(null);
   });
 
   // (a) exactly one selected face ─────────────────────────────────────────────
@@ -145,17 +195,43 @@ describe("SketchController — sketch on a selected face", () => {
   });
 
   it("an unminted pick promotes via topoKey first, then forwards the resulting elementId", async () => {
-    clientMock.promoteSelection.mockResolvedValueOnce([{ elementId: "el_fresh", topoKey: "f:9", kind: "face", bodyId: "body1" }]);
-    selectionStore.getState().set([faceRef({ elementId: undefined })]);
+    clientMock.promoteSelection.mockResolvedValueOnce([{ elementId: "el_fresh", topoKey: "f:22", kind: "face", bodyId: "body1" }]);
+    selectionStore.getState().set([provePick(faceRef({ elementId: undefined }))]);
     toolStore.getState().setMode("sketch");
     await flush();
 
-    expect(clientMock.promoteSelection).toHaveBeenCalledWith("body1", [{ topoKey: "f:22", anchor: { worldPoint: [1, 2, 25] } }]);
+    // PR-01: the promotion is fenced by the pick-time proof's own publication —
+    // the snapshot and runtime session the clicked mesh was fetched from.
+    expect(clientMock.promoteSelection).toHaveBeenCalledWith(
+      "body1",
+      [{ topoKey: "f:22", kind: "face", anchor: { worldPoint: [1, 2, 25] } }],
+      7,
+      "runtime-1",
+    );
     expect(clientMock.faceSketchPlane).toHaveBeenCalledWith("body1", "el_fresh", "f:22");
     expect(clientMock.enterSketch).toHaveBeenCalledWith({
       newOnFace: { bodyId: "body1", elementId: "el_fresh", topoKey: "f:22", worldPoint: [1, 2, 25] },
       plane: FACE_PLANE,
     });
+  });
+
+  it("REFUSES an unminted pick with no pick-time proof — no promotion, no sketch", async () => {
+    // A face ref restored from persistence or rewritten by a regen reconcile has
+    // no proof that the mesh it names is the one on screen. Attaching a sketch to
+    // a face promoted off a replaced publication is exactly the mis-bind PR-01
+    // removes, so the entry falls through to the plane picker instead.
+    selectionStore.getState().set([faceRef({ elementId: undefined })]);
+    toolStore.getState().setMode("sketch");
+    await flush();
+
+    expect(clientMock.promoteSelection).not.toHaveBeenCalled();
+    expect(clientMock.faceSketchPlane).not.toHaveBeenCalled();
+    expect(clientMock.enterSketch).not.toHaveBeenCalled();
+    // The entry falls through SILENTLY, exactly as an unidentifiable pick always
+    // has: the user asked for "a sketch", not for this face, so the picker's own
+    // prompt is the last word (the documented last-word-wins rule). The refusal
+    // is visible on the CLICK path instead, where `confirmFacePick` carries it.
+    expect(engineMock.setPlanePickerVisible).toHaveBeenCalled();
   });
 
   it("a document replacement during face-plane resolution cannot enter the stale target", async () => {

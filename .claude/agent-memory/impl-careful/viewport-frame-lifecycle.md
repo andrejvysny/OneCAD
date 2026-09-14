@@ -67,3 +67,13 @@ assumption. Getting the frame order wrong is silent — the redraw is just missi
 - `buildScene()` is idempotent because `retryRenderer()` re-runs the whole
   `init()` path after a FAILED init; without the guard the second pass would add
   a second light rig and leave the first in the scene.
+- Exception-ISOLATING `onAfterRender` listeners is not enough on its own: a
+  swallowed listener error that invalidated first loops forever, because the
+  frame then succeeds and the scheduler's throwing-tick bound never sees it.
+  The engine therefore counts consecutive frames with a throwing listener and
+  parks on `SUBMIT_FAILURE_LIMIT` via the same `submissionHalted` + `externalWake`
+  path as a failed submission. Isolation and boundedness are two separate jobs.
+- `FrameScheduler.invalidate()` during a tick (`inTick`) only writes the mask —
+  the tail of `tick()` is the ONLY place a frame is taken, and a park there also
+  `cancelPending()`s. Reverting either half restores PR-05's permanent loop
+  (measured 12 attempts with a frame still queued against an expected 3/0).

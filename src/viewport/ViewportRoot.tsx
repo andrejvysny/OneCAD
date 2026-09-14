@@ -51,15 +51,24 @@ import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
 import { sketchStore } from "@/stores/sketchStore";
 import type { ConstraintPosition } from "@/ipc/types";
 import { createClient } from "@/ipc/client";
-import { promoteOne } from "@/ipc/promote";
+import { promoteRef } from "@/ipc/promote";
+import { attachPickProof, pickProofFor, proofFromHit } from "@/viewport/mesh/pickProof";
 import { SketchController } from "@/tools/sketch/SketchController";
 import { ModelToolController } from "@/tools/modelTools/ModelToolController";
 import { setModelToolController } from "@/tools/modelTools/modelToolBridge";
 import type { SketchStaticHit } from "./engine/SketchStaticLayer";
 
-/** A face/edge PickHit → a selection ref (carries the anchor for AcquireElementIds). */
+/**
+ * A face/edge PickHit → a selection ref (carries the anchor for
+ * AcquireElementIds).
+ *
+ * The hit's installed-entry proof is attached to the ref OBJECT here, at hit
+ * time (PR-01): it is what later lets a promotion prove the mesh the user
+ * clicked is still the mesh on screen. A ref built anywhere else carries none,
+ * and promotion refuses it.
+ */
 function refFromHit(hit: PickHit): EntityRef {
-  return {
+  const ref: EntityRef = {
     kind: hit.kind,
     id: topoRefId(hit.bodyId, hit.topoKey),
     bodyId: hit.bodyId,
@@ -67,6 +76,9 @@ function refFromHit(hit: PickHit): EntityRef {
     elementId: hit.elementId,
     anchor: { worldPoint: [hit.worldPos.x, hit.worldPos.y, hit.worldPos.z] },
   };
+  const proof = proofFromHit(hit);
+  if (proof) attachPickProof(ref, proof);
+  return ref;
 }
 
 function refFromSketchStaticHit(hit: SketchStaticHit): EntityRef {
@@ -135,16 +147,16 @@ export function viewportGeometryChip(
  * Promote a face/edge pick to a persistent Rust-minted ElementId (SCHEMA §7.5)
  * and write it back onto the still-selected ref. Fire-and-forget; a failed / stale
  * promotion leaves the transient topoKey ref intact (the tool falls back to it)
- * and `promoteOne` hints that the pick is out of date.
+ * and `promoteRef` hints that the pick is out of date.
+ *
+ * The ref carries its own pick-time proof (attached by {@link refFromHit}), so
+ * a click on a body whose replacement FAILED — geometry still drawn, demoted to
+ * stale-inspection-only — still selects (inspection is allowed, spec §9) but
+ * never mints an id against it.
  */
 export function promotePick(client: ReturnType<typeof createClient>, ref: EntityRef): void {
   if ((ref.kind !== "face" && ref.kind !== "edge") || !ref.bodyId || !ref.topoKey) return;
-  const pick = {
-    topoKey: ref.topoKey,
-    kind: ref.kind,
-    anchor: ref.anchor ? { worldPoint: ref.anchor.worldPoint } : undefined,
-  };
-  void promoteOne(client, ref.bodyId, pick).then((promoted) => {
+  void promoteRef(client, ref).then((promoted) => {
     if (!promoted) return;
     const sel = selectionStore.getState();
     // The ref OBJECT, never its `id`: `${bodyId}#${topoKey}` is REUSABLE, so a
@@ -158,7 +170,14 @@ export function promotePick(client: ReturnType<typeof createClient>, ref: Entity
     // ahead of the mesh on screen, and an undrawable key would blank the
     // highlight. `ordinalForRef` prefers the ElementId from here on anyway.
     const out = sel.selected.slice();
-    out[at] = { ...out[at], elementId: promoted.elementId };
+    const next = { ...out[at], elementId: promoted.elementId };
+    // The replacement is the SAME pick against the SAME entry — `promoteRef`
+    // just re-proved that entry is installed and current — so the proof travels
+    // with it. Without this, writing the minted id back would silently strip the
+    // ref of its evidence and the next tool would refuse it.
+    const proof = pickProofFor(ref);
+    if (proof) attachPickProof(next, proof);
+    out[at] = next;
     sel.set(out);
   });
 }

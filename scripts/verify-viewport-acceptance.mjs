@@ -92,7 +92,32 @@ for (const c of matrix.cases) {
   const passing = ["focused-pass", "integrated-pass", "native-accepted"].includes(c.state);
   if (passing && (c.implementedIn ?? []).length === 0) fail(`${c.id}: ${c.state} without an implementation citation`);
   if (passing && !c.evidence) fail(`${c.id}: ${c.state} without an evidence path`);
-  if (passing && c.evidence && !existsSync(resolve(root, c.evidence))) fail(`${c.id}: evidence path missing: ${c.evidence}`);
+  if (passing && c.evidence) {
+    const runsPrefix = "docs/qa/viewport-hardening/runs/";
+    if (c.evidence.endsWith(".log") || !c.evidence.endsWith("manifest.json") || !c.evidence.startsWith(runsPrefix)) {
+      fail(`${c.id}: evidence must be a runs/<id>/manifest.json, not a log`);
+    } else {
+      const abs = resolve(root, c.evidence);
+      if (!existsSync(abs)) {
+        fail(`${c.id}: evidence path missing: ${c.evidence}`);
+      } else {
+        let parsed;
+        try {
+          parsed = JSON.parse(readFileSync(abs, "utf8"));
+        } catch {
+          fail(`${c.id}: evidence manifest does not parse as JSON: ${c.evidence}`);
+        }
+        if (parsed) {
+          const commitOk = typeof parsed.commit === "string" && /^[0-9a-f]{40}$/.test(parsed.commit);
+          if (!commitOk) fail(`${c.id}: evidence manifest missing a valid 40-hex commit`);
+          const lanes = parsed.lanes && typeof parsed.lanes === "object" ? Object.values(parsed.lanes) : [];
+          if (lanes.length === 0 || !lanes.some((l) => l && l.exit === 0)) {
+            fail(`${c.id}: evidence manifest has no lane with exit 0`);
+          }
+        }
+      }
+    }
+  }
   if (c.state === "native-accepted" && !c.lanes.some((l) => l === "N" || l === "P")) {
     fail(`${c.id}: native-accepted but has no N/P lane`);
   }

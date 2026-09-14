@@ -19,21 +19,36 @@
  *     geometry, and keeping it would be exactly the "silent wrong bind" the
  *     program exists to remove.
  *
+ * ADMISSION IS A RECEIPT: `reserve` prices what the caller promises to
+ * allocate and `put` refuses anything larger. The old accounting reserved a
+ * per-triangle ESTIMATE and then charged the ×1.5-grown capacity after the
+ * ceiling had already been checked, so a growing selection could push the
+ * occupancy past the advertised bound (finding PR-04). Callers price with
+ * `planFaceSetCapacity`, whose `peakBytes` also covers the outgoing buffer.
+ *
  * DEGRADED MODE: if the pinned set alone exceeds the budget, the semantic
  * selection is NEVER discarded. The cache refuses the reservation, raises
  * `degraded`, and emits ONE diagnostic per selection change; HighlightLayer
- * then draws that body's selection as a whole-body leased highlight, which owns
+ * then draws that body's leased edge outline plus a selection count, which owns
  * no buffers at all. An ordinary single-face hover always fits, because
  * unpinned entries are evicted to make room for it first.
  */
 import type * as THREE from "three";
-import { logWarn } from "@/debug/log";
+import { logError, logWarn } from "@/debug/log";
 import { reportHighlightCache } from "../vph/instrumentation";
 import type { MeshEntry } from "./meshRegistry";
 import type { OwnedFaceGeometry } from "./faceSliceGeometry";
 
 export const HIGHLIGHT_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 export const HIGHLIGHT_CACHE_MAX_ENTRIES = 256;
+
+/**
+ * A successful {@link HighlightCache.reserve}. Carries the byte budget the
+ * caller was granted; {@link HighlightCache.put} admits nothing larger.
+ */
+export interface CacheReservation {
+  readonly bytes: number;
+}
 
 /** What kind of owned overlay a cache slot holds. */
 export type HighlightCacheKind = "faceSet" | "edge";
@@ -115,10 +130,14 @@ export class HighlightCache {
 
   /**
    * Make room for `bytes` (one more entry) by evicting unpinned LRU slots.
-   * Returns false when the pinned set alone still exceeds the budget: the
-   * caller must then take the documented degraded path rather than allocate.
+   * Returns null when the pinned set alone still exceeds the budget: the caller
+   * must then take the documented degraded path rather than allocate.
+   *
+   * The returned RECEIPT is what {@link put} admits against, so a caller that
+   * allocates more than it priced is refused instead of quietly pushing the
+   * occupancy over the ceiling (finding PR-04).
    */
-  reserve(bytes: number, reason: string): boolean {
+  reserve(bytes: number, reason: string): CacheReservation | null {
     if (bytes > this.maxBytes) return this.refuse(bytes, reason);
     for (const [key, value] of this.slots) {
       if (this.totalBytes + bytes <= this.maxBytes && this.slots.size < this.maxEntries) break;
@@ -128,10 +147,10 @@ export class HighlightCache {
     if (this.totalBytes + bytes > this.maxBytes || this.slots.size >= this.maxEntries) {
       return this.refuse(bytes, reason);
     }
-    return true;
+    return { bytes };
   }
 
-  private refuse(bytes: number, reason: string): boolean {
+  private refuse(bytes: number, reason: string): null {
     this.degradedFlag = true;
     if (!this.warnedThisChange) {
       this.warnedThisChange = true;
@@ -144,13 +163,35 @@ export class HighlightCache {
         maxEntries: this.maxEntries,
       });
     }
-    return false;
+    return null;
   }
 
-  /** Insert an owned overlay. Call {@link reserve} first — this does not evict. */
-  put(key: string, value: HighlightCacheValue): HighlightCacheValue {
+  /**
+   * Insert an owned overlay against the receipt {@link reserve} issued. Does
+   * not evict — and REFUSES a value that outgrew its reservation, because the
+   * budget was checked against the receipt and nothing else has made room for
+   * the difference. The caller owns the geometry it built and must dispose it,
+   * then take the degraded path.
+   */
+  put(
+    key: string,
+    value: HighlightCacheValue,
+    receipt: CacheReservation,
+  ): HighlightCacheValue | undefined {
     const existing = this.slots.get(key);
     if (existing) this.drop(key, existing);
+    if (value.bytes > receipt.bytes || this.totalBytes + value.bytes > this.maxBytes) {
+      this.degradedFlag = true;
+      logError("vp", "highlight overlay outgrew its reservation — refused", {
+        key,
+        kind: value.kind,
+        reservedBytes: receipt.bytes,
+        actualBytes: value.bytes,
+        bytes: this.totalBytes,
+        maxBytes: this.maxBytes,
+      });
+      return undefined;
+    }
     this.slots.set(key, value);
     this.totalBytes += value.bytes;
     this.report();

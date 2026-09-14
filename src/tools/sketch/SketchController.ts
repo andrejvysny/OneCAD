@@ -43,7 +43,9 @@ import { sketchStore } from "@/stores/sketchStore";
 import { toolChipStore } from "@/stores/toolChipStore";
 import { isInteractiveBoundary } from "@/ui/interactiveBoundary";
 import { applySketchSolveResult } from "./solveResult";
-import { promoteOne } from "@/ipc/promote";
+import { promoteViewportPick, stalePickHint, type InstalledPickProof } from "@/ipc/promote";
+import { pickProofFor, proofFromHit } from "@/viewport/mesh/pickProof";
+import type { MeshEntry } from "@/viewport/mesh/meshRegistry";
 import { errorKind } from "@/ipc/apiError";
 import { diagnosticHint } from "@/ipc/operationDiagnostics";
 import type { OperationDiagnostic } from "@/ipc/types";
@@ -291,6 +293,13 @@ export interface FacePickTarget {
   /** Persistent Rust-minted id when already promoted; else promoted on demand. */
   elementId?: string;
   worldPoint?: [number, number, number];
+  /**
+   * The installed-entry proof this face was picked against (PR-01), from the
+   * click's own `PickHit` or from the selection ref it came out of. Promotion
+   * needs it and refuses without it — a `topoKey` alone proves nothing about the
+   * mesh currently on screen.
+   */
+  proof?: InstalledPickProof;
 }
 
 export interface SketchControllerDeps {
@@ -1000,6 +1009,10 @@ export class SketchController {
       topoKey: face.topoKey,
       elementId: face.elementId,
       worldPoint: face.anchor?.worldPoint,
+      // The proof captured when this ref was PICKED, never re-derived from the
+      // registry now (PR-01) — a ref that survived a regen carries none, and its
+      // `elementId` is the only rung that may still speak for it.
+      proof: pickProofFor(face),
     });
     if (!this.entryTicketCurrent(ticket)) {
       this.armRestartAfterStale(ticket);
@@ -1072,8 +1085,17 @@ export class SketchController {
   private async promoteFace(pick: FacePickTarget): Promise<string | undefined> {
     if (pick.elementId) return pick.elementId;
     if (!pick.topoKey) return undefined;
-    const promoted = await promoteOne(this.deps.client, pick.bodyId, {
+    // FAILS CLOSED (PR-01). A face with no pick-time proof is not a live
+    // viewport pick, and a sketch attached to a face promoted off a publication
+    // that is no longer installed is exactly the attachment this migration
+    // exists to prevent.
+    if (!pick.proof) {
+      stalePickHint();
+      return undefined;
+    }
+    const promoted = await promoteViewportPick(this.deps.client, pick.proof, {
       topoKey: pick.topoKey,
+      kind: "face",
       anchor: pick.worldPoint ? { worldPoint: pick.worldPoint } : undefined,
     });
     return promoted?.elementId;
@@ -4388,7 +4410,14 @@ function projectPickFrom(
 }
 
 function facePickFrom(
-  hit: { bodyId: string; kind: string; topoKey: string; elementId?: string; worldPos: { x: number; y: number; z: number } } | null,
+  hit: {
+    bodyId: string;
+    kind: string;
+    topoKey: string;
+    elementId?: string;
+    worldPos: { x: number; y: number; z: number };
+    entry?: MeshEntry;
+  } | null,
 ): FacePickTarget | null {
   if (!hit || hit.kind !== "face") return null;
   return {
@@ -4396,6 +4425,7 @@ function facePickFrom(
     topoKey: hit.topoKey,
     elementId: hit.elementId,
     worldPoint: [hit.worldPos.x, hit.worldPos.y, hit.worldPos.z],
+    proof: proofFromHit(hit) ?? undefined,
   };
 }
 

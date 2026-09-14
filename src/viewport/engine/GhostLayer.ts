@@ -9,13 +9,17 @@
  * transform MATH is pure (tools/preview/patternPreview); this layer only builds
  * the THREE.Matrix4 per descriptor and manages the clone meshes' lifetime.
  *
- * Geometry is registry-owned (zero-copy), so a clone Mesh is disposed by removing
- * it — never by disposing the shared geometry. The single translucent material is
- * unlit (MeshBasicMaterial) so a mirror's negative-determinant matrix (flipped
- * winding) still renders correctly with DoubleSide.
+ * OWNERSHIP (spec §8.2, decision D6): a whole-body ghost draws the registry's
+ * EXACT geometry object under a `"ghost"` lease, and a RANGED ghost owns a
+ * compact copy cut by `faceSliceGeometry`. `hide()`/`show()`/`dispose()` give
+ * back exactly what was taken. The single translucent material is unlit
+ * (MeshBasicMaterial) so a mirror's negative-determinant matrix (flipped
+ * winding) still renders correctly with DoubleSide — and, because it is unlit,
+ * an owned ghost copy carries positions only.
  */
 import * as THREE from "three";
-import type { MeshEntry } from "../mesh/meshRegistry";
+import { acquireLease, type MeshEntry, type MeshLease } from "../mesh/meshRegistry";
+import { buildTriangleRangeGeometry } from "../mesh/faceSliceGeometry";
 import type { GhostTransform } from "@/tools/preview/patternPreview";
 import { palette } from "./palette";
 import { RENDER_ORDER } from "./renderOrder";
@@ -37,9 +41,8 @@ export interface GhostInstances {
    * OffsetFace is the case this exists for: its L1 ghost is a translucent copy of
    * the OPERATIVE FACES at their offset positions, not of the whole solid — a
    * whole-body clone floating 2 mm away would show a translation, which is
-   * precisely what an offset is NOT. The geometry stays registry-owned and
-   * zero-copy: a shallow clone that shares the attributes + index carries its own
-   * `drawRange`, which is the same trick `HighlightLayer.buildFace` uses.
+   * precisely what an offset is NOT. A ranged item is drawn from OWNED compact
+   * geometry (`buildTriangleRangeGeometry`), disposed when the ghost clears.
    */
   range?: { start: number; count: number };
 }
@@ -81,25 +84,19 @@ export function ghostMatrix(t: GhostTransform): THREE.Matrix4 {
 }
 
 /**
- * Shallow clone that SHARES the source's attributes + index (zero-copy), so the
- * clone can carry its own `drawRange` without duplicating a single vertex. Twin of
- * `HighlightLayer.shareIndexed`; kept local because the two layers own their
- * object lifetimes independently and neither may dispose the other's.
+ * What one shown item did for its geometry — the two, and only two, ways a
+ * borrower may hold viewport geometry (spec §8.2, decision D6).
  */
-function shareIndexed(src: THREE.BufferGeometry): THREE.BufferGeometry {
-  const g = new THREE.BufferGeometry();
-  g.setAttribute("position", src.getAttribute("position"));
-  const normal = src.getAttribute("normal");
-  if (normal) g.setAttribute("normal", normal);
-  const index = src.getIndex();
-  if (index) g.setIndex(index);
-  return g;
-}
+type GhostBorrow =
+  | { readonly kind: "leased"; readonly lease: MeshLease }
+  | { readonly kind: "owned"; readonly geometry: THREE.BufferGeometry };
 
 export class GhostLayer {
   private readonly group = new THREE.Group();
   private readonly material: THREE.MeshBasicMaterial;
   private meshes: THREE.Mesh[] = [];
+  /** One per shown item, given back in `clearMeshes`. */
+  private borrows: GhostBorrow[] = [];
 
   constructor(private readonly deps: GhostLayerDeps) {
     this.group.name = "ghostLayer";
@@ -150,12 +147,29 @@ export class GhostLayer {
   showMulti(items: readonly GhostInstances[]): void {
     this.clearMeshes();
     for (const { entry, transforms, range } of items) {
-      // A ranged item needs its OWN geometry object to carry the drawRange, so it
-      // gets one shallow clone per item (shared attributes — still zero-copy) and
-      // every transform instances that. An unranged item draws the registry
-      // geometry directly, byte-for-byte the behaviour before ranges existed.
-      const geometry = range ? shareIndexed(entry.geometry) : entry.geometry;
-      if (range) geometry.setDrawRange(range.start, range.count);
+      // RANGED: compact OWNED geometry, cut the same way a face highlight is.
+      // The shallow `drawRange` clone this replaces shared the body's
+      // BufferAttributes and could therefore never be disposed (R02/PR-06).
+      // `range` is in INDEX units (3 per triangle — what `faceDrawRange`
+      // returns); the slice builder speaks triangles.
+      // UNRANGED: the registry's exact geometry object, under a lease, which is
+      // the only thing that stops the registry freeing it mid-preview.
+      let geometry: THREE.BufferGeometry;
+      if (range) {
+        geometry = buildTriangleRangeGeometry(entry, {
+          start: range.start / 3,
+          count: range.count / 3,
+        });
+        this.borrows.push({ kind: "owned", geometry });
+      } else {
+        const lease = acquireLease(entry, "ghost");
+        if (lease.entry.resourceState === "disposed") {
+          lease.release();
+          continue;
+        }
+        geometry = entry.geometry;
+        this.borrows.push({ kind: "leased", lease });
+      }
       for (const t of transforms) {
         const mesh = new THREE.Mesh(geometry, this.material);
         mesh.matrixAutoUpdate = false;
@@ -184,13 +198,18 @@ export class GhostLayer {
   }
 
   private clearMeshes(): void {
-    // NOT disposed, deliberately — every ghost geometry (the registry's own, and
-    // the shallow ranged clones above) SHARES the body's BufferAttributes, and
-    // `BufferGeometry.dispose()` frees those shared GL buffers out from under the
-    // real body that is still drawing with them. Same rule, same reason, as
-    // `HighlightLayer.clearObjects`.
+    // Off the scene first, then give each borrow back the way it was taken: a
+    // lease is released (the registry stays the unique disposer of installed
+    // geometry) and an owned compact copy is disposed by its owner, which is
+    // this layer. Never the other way round — disposing a leased body geometry
+    // would free the buffers the real body is still drawing with.
     for (const m of this.meshes) this.group.remove(m);
     this.meshes = [];
+    for (const borrow of this.borrows) {
+      if (borrow.kind === "leased") borrow.lease.release();
+      else borrow.geometry.dispose();
+    }
+    this.borrows = [];
   }
 
   dispose(): void {

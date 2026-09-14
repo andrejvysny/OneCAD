@@ -1,3 +1,5 @@
+> **2026-09-14 — VP-HARDENING consolidation pass (session 2) PAUSED, uncommitted.** Review findings PR-01…PR-12 all have production fixes with red-first tests and orchestrator-run focused gates (root `PLAN.md` Run log; `docs/viewport-hardening/execution/STATUS.md` §9; `TODO.md` "Now"). Owed before commit: Astra `verify` WP08 r3 (approval pending), three adversarial reviews, matrix re-pointing to recorder manifests, `src-tauri/target/` rebuild, full L3.
+
 # Current State — VP-HARDENING 1.0 viewport program (AUTHORITATIVE, 2026-09-13)
 
 > **Committed 2026-09-13:** all session-1 work is commit `67331740` on branch `viewport-hardening` (worktree `/Users/andrejvysny/workspace/viewport-hardening`), pushed to `origin/viewport-hardening`. Statements below about an uncommitted/dirty tree, a dirty-diff hash, and "no commits" describe the state BEFORE that commit; the design baseline remains `65b4c60`. The L3 rung was not run for this commit (user-directed checkpoint), so it is a checkpoint, not a gate boundary.

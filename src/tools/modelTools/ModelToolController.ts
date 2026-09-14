@@ -57,19 +57,22 @@ import {
 import { mintUuid } from "@/ipc/sketchWireMap";
 import type { AuthoredElementRef } from "./activeToolContext";
 import {
+  installedEntryIsCurrent,
   installedProofIsCurrent,
-  promoteOne,
+  promoteAuthoritativeRef,
+  promoteRef,
+  promoteViewportPick,
   stalePickHint,
   STALE_PICK_HINT,
-  type InstalledPickProof,
 } from "@/ipc/promote";
+import { pickProofFor, proofFromHit } from "@/viewport/mesh/pickProof";
 import { classifyRegen, failureReason, keepsRecord } from "@/ipc/regenOutcome";
 import { toFeatureMeta } from "@/ipc/projectionHydration";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
 import { datumGhostPlane } from "@/viewport/engine/DatumLayer";
 import { geometricLabel, type PickablePlane } from "@/viewport/engine/PlanePicker";
-import { buildBodyObjects, getEntry, remove as removeMesh, swap as swapMesh } from "@/viewport/mesh/meshRegistry";
-import { validatePreviewMesh } from "@/viewport/mesh/previewMesh";
+import { getEntry, remove as removeMesh, swap as swapMesh } from "@/viewport/mesh/meshRegistry";
+import { buildPreviewEntry } from "@/viewport/mesh/previewMesh";
 import type { MeshEntry } from "@/viewport/mesh/meshRegistry";
 import { toolStore } from "@/stores/toolStore";
 import { operationAttemptStore } from "@/stores/operationAttemptStore";
@@ -1224,7 +1227,7 @@ export class ModelToolController {
    * Matched on BOTH handles: `id` is the pick-time `${bodyId}#${topoKey}`
    * composite, but an op's own input list is re-derived from the backend's
    * closure, whose `topoKey` may name the same element in the other namespace
-   * (a minted ElementId — see `promoteOne`). Body / sketch / feature refs are
+   * (a minted ElementId — see `promoteViewportPick`). Body / sketch / feature refs are
    * never touched; only what the op actually named.
    */
   private clearConsumedSelection(consumed: readonly { id: string; elementId?: string }[]): void {
@@ -1360,13 +1363,26 @@ export class ModelToolController {
     if (!bodyId) return;
     const gen = this.measureGen;
     if (!ref.topoKey) return;
-    const entry = getEntry(bodyId);
-    if (!entry) {
+    // Two INDEPENDENT gates, because they answer different questions.
+    //
+    // (1) Is this body's mesh actionable at all — live document, this
+    //     publication, visible, not demoted to `stale-inspection-only` by a
+    //     failed replacement? That is a fact about the BODY, not about an
+    //     ordinal, so it is asked of whatever is installed now.
+    const gateEntry = getEntry(bodyId);
+    if (!gateEntry || !installedEntryIsCurrent(bodyId, gateEntry)) {
       stalePickHint();
       return;
     }
-    const proof: InstalledPickProof = { entry, kind: ref.kind, topoKey: ref.topoKey };
-    if (!installedProofIsCurrent(bodyId, proof)) {
+    // (2) May this ref's snapshot-scoped label be turned into a persistent id?
+    //     Only with the proof captured when it was PICKED (PR-01) — re-deriving
+    //     one from `getEntry(bodyId)` here would pair an old ordinal with new
+    //     geometry, the mis-bind this package removes. A ref that ALREADY
+    //     carries an ElementId needs no ordinal and therefore no proof: it
+    //     addresses the head directly, which is how a ref that survived a regen
+    //     (or a cosmetic republish) keeps working.
+    const proof = pickProofFor(ref);
+    if (!ref.elementId && (!proof || !installedProofIsCurrent(bodyId, proof))) {
       stalePickHint();
       return;
     }
@@ -1406,21 +1422,18 @@ export class ModelToolController {
         current?.documentId === fence.documentId &&
         current.runtimeSession === fence.runtimeSession &&
         current.snapshotId === fence.snapshotId &&
-        installedProofIsCurrent(bodyId, proof)
+        // The mesh this pick was answered against is STILL the installed one:
+        // any swap in flight (regen or cosmetic) supersedes the reading.
+        installedEntryIsCurrent(bodyId, gateEntry)
       );
     };
 
     let elementId = ref.elementId;
     if (!elementId && ref.topoKey) {
-      // A refused promotion (stale snapshot) hints and leaves `elementId` unset —
-      // the topoKey rung below still answers for a fresh pick (see `promoteOne`).
-      const promoted = await promoteOne(
-        this.client,
-        bodyId,
-        { topoKey: ref.topoKey, kind: ref.kind, anchor: ref.anchor },
-        fence.snapshotId,
-        proof,
-      );
+      // A refused promotion (stale snapshot / stale proof) hints and leaves
+      // `elementId` unset — the topoKey rung below still answers for a fresh
+      // pick (see `promoteViewportPick`).
+      const promoted = await promoteRef(this.client, ref);
       if (gen !== this.measureGen || !fenceStillCurrent()) return;
       elementId = promoted?.elementId;
     }
@@ -2067,18 +2080,26 @@ export class ModelToolController {
     if (!hit || hit.kind !== "face" || hit.bodyId.startsWith("preview:")) return;
     const gen = this.armGen;
     const worldTriple: [number, number, number] = [hit.worldPos.x, hit.worldPos.y, hit.worldPos.z];
-    let elementId = hit.elementId;
-    if (!elementId && hit.topoKey) {
-      const promoted = await promoteOne(this.client, hit.bodyId, {
-        topoKey: hit.topoKey,
-        anchor: { worldPoint: worldTriple },
-      });
-      if (gen !== this.armGen) return; // re-armed while awaiting — drop
-      // A stale pick must remain a pick. An anchor-only ToFace ref would let a
-      // later resolver reinterpret the stale face against different topology.
-      if (!promoted?.elementId) return;
-      elementId = promoted.elementId;
+    // EVERY label goes through the proof, including one the mesh already
+    // reported as an `el_` ElementId: a persistent id lifted off a publication
+    // that is no longer installed is a handle for geometry the user is not
+    // looking at (PR-01). `promoteViewportPick` answers such a label without a
+    // wire call once the proof clears.
+    const proof = proofFromHit(hit);
+    if (!proof) {
+      stalePickHint();
+      return;
     }
+    const promoted = await promoteViewportPick(this.client, proof, {
+      topoKey: hit.topoKey,
+      kind: "face",
+      anchor: { worldPoint: worldTriple },
+    });
+    if (gen !== this.armGen) return; // re-armed while awaiting — drop
+    // A stale pick must remain a pick. An anchor-only ToFace ref would let a
+    // later resolver reinterpret the stale face against different topology.
+    if (!promoted?.elementId) return;
+    const elementId = promoted.elementId;
     if (this.extrude.phase !== "facePick") return;
     const ref: SemanticRef = {
       primary: { bodyId: hit.bodyId, elementId, kind: "face" },
@@ -4096,9 +4117,25 @@ export class ModelToolController {
     const cacheKey = `${bodyId}#${faceTopoKey}`;
     const cached = this.chamferFaceRefs.get(cacheKey);
     if (cached) return cached;
-    const snapshotId = this.filletPreparedSnapshot ?? undefined;
-    // `promoteOne` publishes the stale-pick hint itself on every refusal.
-    const promoted = await promoteOne(this.client, bodyId, { topoKey: faceTopoKey }, snapshotId);
+    // AUTHORITATIVE, not viewport-derived: `faceTopoKey` is one of the
+    // `adjacentFaces` `prepareEdgeOp` answered with, so the fence is the
+    // snapshot it answered AT, and there is no installed mesh entry that proves
+    // anything about a label the user never clicked. With no prepared snapshot
+    // there is no fence at all, and a head-relative promotion of a closure
+    // label is exactly the unfenced bind PR-01 removes.
+    const snapshotId = this.filletPreparedSnapshot;
+    if (snapshotId === null) {
+      stalePickHint();
+      return null;
+    }
+    // `promoteAuthoritativeRef` publishes the stale-pick hint itself on refusal.
+    const promoted = await promoteAuthoritativeRef(
+      this.client,
+      bodyId,
+      { topoKey: faceTopoKey, kind: "face" },
+      snapshotId,
+      "edge-op-closure",
+    );
     if (!promoted) return null;
     const info = await this.client
       .elementInfo(bodyId, promoted.elementId, faceTopoKey)
@@ -5097,9 +5134,9 @@ export class ModelToolController {
     const primaryFaceIds: string[] = [];
     const keys: string[] = [];
     for (const ev of res.faces) {
-      const ref = await this.promoteOffsetEvidence(gen, bodyId, ev);
+      const ref = await this.promoteOffsetEvidence(gen, bodyId, ev, res.snapshotId);
       if (gen !== this.armGen) return false;
-      if (!ref) return false; // `promoteOne` published the stale-pick hint
+      if (!ref) return false; // the promotion published the stale-pick hint
       faces.push(ref);
       if (ev.picked && ref.primary.elementId) primaryFaceIds.push(ref.primary.elementId);
       keys.push(ev.topoKey);
@@ -5113,7 +5150,7 @@ export class ModelToolController {
     }
     let opposite: SemanticRef | undefined;
     if (res.oppositeFace) {
-      const ref = await this.promoteOffsetEvidence(gen, bodyId, res.oppositeFace);
+      const ref = await this.promoteOffsetEvidence(gen, bodyId, res.oppositeFace, res.snapshotId);
       if (gen !== this.armGen) return false;
       if (!ref) return false;
       opposite = ref;
@@ -5141,7 +5178,7 @@ export class ModelToolController {
   /**
    * One evidence entry → the typed `SemanticRef` the record holds.
    *
-   * `bodyId` is the SELECTION's (bare) form, never the promotion's: `promoteOne`
+   * `bodyId` is the SELECTION's (bare) form, never the promotion's: the promotion
    * answers in the worker's `body_<uuid>` wire form, and the preview builder
    * compares each face's body against `targetBodyId` for equality — mixing the two
    * spellings would fail that guard for a perfectly good closure.
@@ -5153,6 +5190,7 @@ export class ModelToolController {
     gen: number,
     bodyId: string,
     ev: OffsetFaceEvidence,
+    snapshotId: number,
   ): Promise<SemanticRef | null> {
     const worldPoint =
       (ev.anchor?.worldPoint as Vec3 | undefined) ??
@@ -5162,10 +5200,16 @@ export class ModelToolController {
     if (known?.elementId) {
       return { primary: { bodyId, elementId: known.elementId, kind: "face" }, anchor };
     }
-    const promoted = await promoteOne(this.client, bodyId, {
-      topoKey: ev.topoKey,
-      anchor,
-    });
+    // AUTHORITATIVE, not viewport-derived: `ev.topoKey` is `PrepareOffsetFace`'s
+    // own resolved closure — which includes tangent-CHAINED faces the user never
+    // clicked — so the fence is the snapshot that closure was computed at.
+    const promoted = await promoteAuthoritativeRef(
+      this.client,
+      bodyId,
+      { topoKey: ev.topoKey, kind: "face", ...(anchor ? { anchor } : {}) },
+      snapshotId,
+      "offset-closure",
+    );
     if (gen !== this.armGen) return null;
     // A REFUSED promotion is fatal here, unlike the hole seat's degraded path: an
     // OffsetFace record stores typed refs whose `primary.elementId` must equal its
@@ -5736,18 +5780,22 @@ export class ModelToolController {
     }
 
     const gen = ++this.armGen;
-    let elementId = hit.elementId;
-    if (!elementId && hit.topoKey) {
-      const promoted = await promoteOne(this.client, hit.bodyId, {
-        topoKey: hit.topoKey,
-        anchor: { worldPoint: point },
-      });
-      if (gen !== this.armGen) return; // re-armed while awaiting — drop
-      // A stale pick must stay in face-pick mode. The Hole seat cannot degrade
-      // to an anchor-only ref without making a later rebind author a new face.
-      if (!promoted?.elementId) return;
-      elementId = promoted.elementId;
+    // Proof first, `el_` label or not — see `tryPickExtrudeFace`.
+    const proof = proofFromHit(hit);
+    if (!proof) {
+      stalePickHint();
+      return;
     }
+    const promoted = await promoteViewportPick(this.client, proof, {
+      topoKey: hit.topoKey,
+      kind: "face",
+      anchor: { worldPoint: point },
+    });
+    if (gen !== this.armGen) return; // re-armed while awaiting — drop
+    // A stale pick must stay in face-pick mode. The Hole seat cannot degrade
+    // to an anchor-only ref without making a later rebind author a new face.
+    if (!promoted?.elementId) return;
+    const elementId = promoted.elementId;
     if (toolStore.getState().modelTool !== "hole") return;
     const face: SemanticRef = {
       primary: { bodyId: hit.bodyId, elementId, kind: "face" },
@@ -6109,16 +6157,20 @@ export class ModelToolController {
     }
 
     const gen = ++this.armGen;
-    let elementId = hit.elementId;
-    if (!elementId && hit.topoKey) {
-      const promoted = await promoteOne(this.client, hit.bodyId, {
-        topoKey: hit.topoKey,
-        anchor: { worldPoint: point },
-      });
-      if (gen !== this.armGen) return;
-      if (!promoted?.elementId) return;
-      elementId = promoted.elementId;
+    // Proof first, `el_` label or not — see `tryPickExtrudeFace`.
+    const proof = proofFromHit(hit);
+    if (!proof) {
+      stalePickHint();
+      return;
     }
+    const promoted = await promoteViewportPick(this.client, proof, {
+      topoKey: hit.topoKey,
+      kind: "face",
+      anchor: { worldPoint: point },
+    });
+    if (gen !== this.armGen) return;
+    if (!promoted?.elementId) return;
+    const elementId = promoted.elementId;
     if (toolStore.getState().modelTool !== "gear") return;
     const face: SemanticRef = {
       primary: { bodyId: hit.bodyId, elementId, kind: "face" },
@@ -8672,12 +8724,13 @@ export class ModelToolController {
     this.syncPreviewReplacedBodies();
     for (let i = 0; i < bodies.length; i++) {
       const previewId = `${es.session.previewBodyId}:${i}`;
-      // A preview mesh that fails semantic validation is SKIPPED, not thrown:
-      // this runs under a timer-driven preview listener, and one degenerate
-      // solid must not take the other candidate bodies down with it.
-      const validated = validatePreviewMesh(bodies[i].mesh, previewId);
-      if (!validated) continue;
-      const entry = buildBodyObjects(validated, previewId, ++this.previewMeshRev);
+      // A preview mesh that fails validation — or that the document budget
+      // refuses — is SKIPPED, not thrown: this runs under a timer-driven
+      // preview listener, and one degenerate or oversized solid must not take
+      // the other candidate bodies down with it. `buildPreviewEntry` is also
+      // what charges this geometry to the document's §9 budget (PR-03B).
+      const entry = buildPreviewEntry(bodies[i].mesh, previewId, ++this.previewMeshRev);
+      if (!entry) continue;
       swapMesh(previewId, entry);
       this.engine.setPreviewBody(entry);
       es.previewBodyIds.push(previewId);

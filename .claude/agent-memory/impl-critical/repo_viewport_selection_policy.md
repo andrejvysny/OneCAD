@@ -40,6 +40,9 @@ stale `f:N`/`e:N` essentially always resolves — to a different element.
   the `reconcile()` self-heal) is `"cosmetic"`. `MeshEntry.meshRev` bumps on EVERY load, so it
   cannot distinguish the two — that is why the reason is threaded rather than derived. A first
   load has no `prev` and reconciles nothing.
+- `reconcileSelectionForBody` also `clearPickProof`s every ref of the regenerated body — the
+  pick-time promotion proof is evidence about a publication that is gone. See
+  [[repo-promotion-proof]].
 - `meshSync.dropBody` calls `dropSelectionForBody`: a removed body's face/edge refs can never
   draw or author again.
 - `clearConsumedSelection` runs for fillet/chamfer and shell ONLY. The HOLE call was removed:

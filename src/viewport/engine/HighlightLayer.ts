@@ -25,10 +25,18 @@
  * event, so every hover left renderer bookkeeping behind forever (R02).
  *
  * Owned overlays live in a bounded LRU (`HighlightCache`, 64 MiB / 256 entries),
- * pinned while displayed and retired with their source resource. If the pinned
- * set alone exhausts the budget the SEMANTIC selection is kept and that body is
- * drawn with the whole-body leased overlay instead, with one diagnostic per
- * change (spec §8.3 degraded mode).
+ * pinned while displayed and retired with their source resource. The cache is
+ * reserved against the PLANNED post-growth capacity, not a per-triangle
+ * estimate, because the ×1.5 growth rule allocates more than the estimate on
+ * every growth step (PR-04).
+ *
+ * DEGRADED MODE (spec §8.3 last paragraph, DEV-WP03-1): if the pinned set alone
+ * exhausts the budget the SEMANTIC selection is kept, one diagnostic is emitted
+ * per change, and that body is drawn as its LEASED edge outline plus a
+ * selection-count chip (published through `deps.onDegraded`) — never as a
+ * whole-body tint, which says "this body is selected" and loses which elements
+ * the user picked. The degraded overlay is re-attempted on every rebuild, so a
+ * budget freed elsewhere restores the exact display at once.
  *
  * `setState` (selection change) and `refresh` (after a mesh swap) rebuild
  * against the CURRENT registry by set difference: unchanged overlays keep their
@@ -49,7 +57,7 @@ import {
 import { identityKey } from "../mesh/renderResourceIdentity";
 import {
   buildFaceSetGeometry,
-  estimateFaceSetBytes,
+  planFaceSetCapacity,
   type OwnedFaceGeometry,
 } from "../mesh/faceSliceGeometry";
 import { HighlightCache, highlightCacheKey } from "../mesh/highlightCache";
@@ -82,9 +90,32 @@ export function edgeSegmentSlice(
   return { first: segRanges[edgeOrdinal * 2], count: segRanges[edgeOrdinal * 2 + 1] };
 }
 
+/**
+ * One body whose exact overlays did not fit the budget (DEV-WP03-1). The layer
+ * draws the leased outline itself; the COUNT is DOM, so it goes out to whoever
+ * owns the chip layer.
+ */
+export interface DegradedSelectionNotice {
+  readonly bodyId: string;
+  /** Elements of that body the user selected/hovered but cannot see exactly. */
+  readonly count: number;
+  /** World anchor for the chip — the body's measured bounding-sphere centre. */
+  readonly world: [number, number, number];
+}
+
 export interface HighlightDeps {
   root: THREE.Object3D; // interactionRoot
   invalidate: () => void;
+  /**
+   * Overlay budget override. Production uses the spec's 64 MiB / 256 entries;
+   * a test drives the degraded path with a budget it can actually exhaust.
+   */
+  budget?: { maxBytes?: number; maxEntries?: number };
+  /**
+   * The set of degraded bodies changed. Called with `[]` once the exact
+   * overlays come back, so the owner can drop every count chip it mounted.
+   */
+  onDegraded?: (notices: readonly DegradedSelectionNotice[]) => void;
 }
 
 const HOVER_OPACITY = 0.45;
@@ -123,6 +154,12 @@ interface Overlay {
   /** Registry borrow, released on detach. */
   readonly lease: MeshLease | null;
   readonly slotKey: string | null;
+  /**
+   * This overlay is the DEGRADED stand-in for elements that did not fit the
+   * budget. It is re-attempted on every rebuild, so a freed budget restores the
+   * exact display without waiting for the selection to change.
+   */
+  readonly degraded: DegradedSelectionNotice | null;
 }
 
 export class HighlightLayer {
@@ -132,8 +169,10 @@ export class HighlightLayer {
   private displayed = new Map<string, Overlay>();
   /** `role|bodyId` → the cache key of that body's reusable selection buffer. */
   private faceSetSlots = new Map<string, string>();
-  private readonly cache = new HighlightCache();
+  private readonly cache: HighlightCache;
   private readonly unsubscribeRetire: () => void;
+  /** Last notice set published to `deps.onDegraded`, so `[]` is sent once. */
+  private lastNotices: readonly DegradedSelectionNotice[] = [];
 
   // Shared materials (layer-owned — the only thing disposed on teardown).
   private readonly hoverFaceMat: THREE.MeshBasicMaterial;
@@ -141,8 +180,11 @@ export class HighlightLayer {
   private readonly selBodyMat: THREE.MeshBasicMaterial;
   private readonly hoverEdgeMat: LineMaterial;
   private readonly selEdgeMat: LineMaterial;
+  /** The degraded body outline (DEV-WP03-1) — heavier than the body's own edge. */
+  private readonly degradedEdgeMat: LineMaterial;
 
   constructor(private readonly deps: HighlightDeps) {
+    this.cache = new HighlightCache(deps.budget?.maxBytes, deps.budget?.maxEntries);
     const faceOverlay = {
       transparent: true,
       depthWrite: false,
@@ -188,6 +230,16 @@ export class HighlightLayer {
       color: palette.selectedEdge().getHex(),
       ...edgeOverlay,
     });
+    // The degraded outline is the same selection token at the same halo weight,
+    // drawn over the WHOLE body rather than the picked elements. It is the one
+    // overlay that is deliberately depth-TESTED: it stands in for elements that
+    // may be on the far side, and an unclipped outline through the solid would
+    // claim more than the layer can honestly show.
+    this.degradedEdgeMat = createScreenLineMaterial(haloStyle, {
+      color: palette.selectedEdge().getHex(),
+      transparent: true,
+      toneMapped: false,
+    });
 
     // An overlay cut from a resource that just retired is stale geometry, so
     // the cache drops it and — if it was on screen — the layer rebuilds against
@@ -216,6 +268,7 @@ export class HighlightLayer {
       this.selBodyMat,
       this.hoverEdgeMat,
       this.selEdgeMat,
+      this.degradedEdgeMat,
     ] as THREE.Material[]) {
       // Only a COUNT change recompiles (the plane count is baked into the
       // shader); moving a plane is picked up per frame with no material write.
@@ -248,6 +301,7 @@ export class HighlightLayer {
     this.selBodyMat.color.copy(palette.selected3d());
     this.hoverEdgeMat.color.copy(palette.hover3d());
     this.selEdgeMat.color.copy(palette.selectedEdge());
+    this.degradedEdgeMat.color.copy(palette.selectedEdge());
   }
 
   /** Owned-overlay accounting, for the resource tests (ACCEPTANCE §3.3). */
@@ -256,9 +310,14 @@ export class HighlightLayer {
     return { entries: stats.entries, bytes: stats.bytes, displayed: this.displayed.size };
   }
 
-  /** True when the last selection change had to fall back to a degraded overlay. */
+  /**
+   * True while something on screen is the degraded stand-in — the DISPLAY
+   * state, not the last reservation outcome (DEV-WP03-1c): a refused
+   * reservation that the next rebuild satisfied is not a degraded display.
+   */
   get degraded(): boolean {
-    return this.cache.degraded;
+    for (const overlay of this.displayed.values()) if (overlay.degraded) return true;
+    return false;
   }
 
   dispose(): void {
@@ -271,6 +330,8 @@ export class HighlightLayer {
     this.selBodyMat.dispose();
     this.hoverEdgeMat.dispose();
     this.selEdgeMat.dispose();
+    this.degradedEdgeMat.dispose();
+    this.publishNotices();
   }
 
   // ── rebuild ────────────────────────────────────────────────────────────────
@@ -286,7 +347,10 @@ export class HighlightLayer {
     this.faceSetSlots = new Map();
 
     for (const [key, overlay] of [...this.displayed]) {
-      if (desired.has(key)) continue;
+      // A DEGRADED overlay is never a survivor: it is re-attempted every
+      // rebuild, so a budget freed by some other body's deselection restores
+      // the exact display immediately (DEV-WP03-1b).
+      if (desired.has(key) && !overlay.degraded) continue;
       this.detach(overlay);
       this.displayed.delete(key);
     }
@@ -300,7 +364,29 @@ export class HighlightLayer {
       const overlay = this.create(want, prevSlots);
       if (overlay) this.displayed.set(key, overlay);
     }
+    this.publishNotices();
     this.deps.invalidate();
+  }
+
+  /**
+   * Hand the current degraded set to the chip owner. Only on a CHANGE: an
+   * ordinary hover rebuilds this layer constantly and must not churn DOM.
+   */
+  private publishNotices(): void {
+    const notices: DegradedSelectionNotice[] = [];
+    for (const overlay of this.displayed.values()) {
+      if (overlay.degraded) notices.push(overlay.degraded);
+    }
+    if (notices.length === 0 && this.lastNotices.length === 0) return;
+    const same =
+      notices.length === this.lastNotices.length &&
+      notices.every((n, i) => {
+        const was = this.lastNotices[i];
+        return n.bodyId === was.bodyId && n.count === was.count;
+      });
+    if (same) return;
+    this.lastNotices = notices;
+    this.deps.onDegraded?.(notices);
   }
 
   /**
@@ -401,8 +487,9 @@ export class HighlightLayer {
     if (!value) {
       value = want.kind === "faceSet" ? this.buildFaceSet(want, prevSlots) : this.buildEdge(want);
       // Budget exhausted by the pinned set: keep the semantic selection and
-      // draw this body whole instead of dropping what the user selected.
-      if (!value) return this.attachBody(want);
+      // draw this body's outline plus a count instead of dropping what the user
+      // selected (spec §8.3, DEV-WP03-1).
+      if (!value) return this.attachDegraded(want);
     }
     this.cache.pin(cacheKey);
     const object =
@@ -417,27 +504,50 @@ export class HighlightLayer {
       cacheKey,
       lease: null,
       slotKey: want.slotKey,
+      degraded: null,
     };
   }
 
-  /** Compact owned face buffer, reusing this (body, role)'s previous one. */
+  /**
+   * Compact owned face buffer, reusing this (body, role)'s previous one.
+   *
+   * The reservation is the PLANNED post-growth capacity, not the naive
+   * per-triangle estimate: the ×1.5 growth rule allocates more than the
+   * estimate on every growth step, and charging the difference after the
+   * ceiling check is what let the cache exceed its advertised capacity
+   * (PR-04). `peakBytes` also carries the outgoing buffer, which is alive
+   * while the new one is filled. A slot the cache refuses to hand back (a
+   * pinned one is still on screen) prices a FRESH buffer, because that is
+   * what the build will allocate.
+   */
   private buildFaceSet(want: Desired, prevSlots: Map<string, string>) {
     const previousKey = want.slotKey ? prevSlots.get(want.slotKey) : undefined;
     const taken = previousKey ? this.cache.take(previousKey) : undefined;
     const reuse: OwnedFaceGeometry | undefined = taken?.owned ?? undefined;
-    if (!this.cache.reserve(estimateFaceSetBytes(want.entry, want.ordinals), "faceSet")) {
+    const plan = planFaceSetCapacity(want.entry, want.ordinals, reuse);
+    const receipt = this.cache.reserve(plan.peakBytes, "faceSet");
+    if (!receipt) {
       taken?.owned?.dispose();
       return undefined;
     }
     const owned = buildFaceSetGeometry(want.entry, want.ordinals, reuse);
-    return this.cache.put(want.cacheKey!, {
-      kind: "faceSet",
-      geometry: owned.geometry,
-      owned,
-      bytes: owned.bytes,
-      entry: want.entry,
-      pinned: 0,
-    });
+    const admitted = this.cache.put(
+      want.cacheKey!,
+      {
+        kind: "faceSet",
+        geometry: owned.geometry,
+        owned,
+        bytes: owned.bytes,
+        entry: want.entry,
+        pinned: 0,
+      },
+      receipt,
+    );
+    // Unreachable while the plan and the build agree — and if they ever stop
+    // agreeing, the cache refuses rather than overrunning, so the buffer this
+    // call owns has to go back.
+    if (!admitted) owned.dispose();
+    return admitted;
   }
 
   /**
@@ -450,17 +560,61 @@ export class HighlightLayer {
     const entry = want.entry;
     const { first, count } = edgeSegmentSlice(entry.edgeSegmentRanges!, want.ordinals[0]);
     const slice = entry.edgeSegmentPositions!.subarray(first * 6, (first + count) * 6);
-    if (!this.cache.reserve(slice.byteLength, "edge")) return undefined;
+    const receipt = this.cache.reserve(slice.byteLength, "edge");
+    if (!receipt) return undefined;
     const geometry = new LineSegmentsGeometry();
     geometry.setPositions(slice);
-    return this.cache.put(want.cacheKey!, {
-      kind: "edge",
-      geometry,
-      owned: null,
-      bytes: slice.byteLength,
+    const admitted = this.cache.put(
+      want.cacheKey!,
+      {
+        kind: "edge",
+        geometry,
+        owned: null,
+        bytes: slice.byteLength,
+        entry,
+        pinned: 0,
+      },
+      receipt,
+    );
+    if (!admitted) geometry.dispose();
+    return admitted;
+  }
+
+  /**
+   * The DEGRADED stand-in (spec §8.3 last paragraph, DEV-WP03-1): the body's
+   * EXACT leased edge geometry drawn at the selection halo weight, plus a
+   * selection COUNT published to the chip owner. The semantic selection is
+   * untouched, and the overlay owns nothing — which is the point, since the
+   * reason it exists is that there was no budget left to own anything.
+   *
+   * A body with no edge geometry falls back to the whole-body tint: still the
+   * exact leased object, still nothing dropped, just a coarser outline.
+   */
+  private attachDegraded(want: Desired): Overlay | null {
+    const entry = want.entry;
+    if (!entry.edgeGeometry) return this.attachBody(want);
+    const lease = acquireLease(entry, "highlight:body");
+    if (lease.entry.resourceState === "disposed") {
+      lease.release();
+      return null;
+    }
+    const line = new LineSegments2(entry.edgeGeometry, this.degradedEdgeMat);
+    line.renderOrder = RENDER_ORDER.HIGHLIGHT_EDGE;
+    line.userData.bodyId = entry.bodyId;
+    this.deps.root.add(line);
+    const centre = entry.geometry.boundingSphere?.center;
+    return {
+      object: line,
       entry,
-      pinned: 0,
-    });
+      cacheKey: null,
+      lease,
+      slotKey: null,
+      degraded: {
+        bodyId: entry.bodyId,
+        count: want.ordinals.length,
+        world: centre ? [centre.x, centre.y, centre.z] : [0, 0, 0],
+      },
+    };
   }
 
   /**
@@ -480,7 +634,7 @@ export class HighlightLayer {
     mesh.renderOrder = RENDER_ORDER.HIGHLIGHT_FACE;
     mesh.userData.bodyId = want.entry.bodyId;
     this.deps.root.add(mesh);
-    return { object: mesh, entry: want.entry, cacheKey: null, lease, slotKey: null };
+    return { object: mesh, entry: want.entry, cacheKey: null, lease, slotKey: null, degraded: null };
   }
 
   private faceMesh(geometry: THREE.BufferGeometry, want: Desired): THREE.Mesh {

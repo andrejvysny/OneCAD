@@ -8,8 +8,9 @@ import * as THREE from "three";
 import { MeshIngest, meshGeneration } from "./meshSync";
 import * as reg from "./meshRegistry";
 import { parseMeshPayload } from "./parseMeshPayload";
-import { preparedCpuBytesOf } from "./meshAdmission";
+import * as admissionModule from "./meshAdmission";
 import { validateMeshView } from "./validateMesh";
+import { planMeshPreparation } from "./meshPreparationPlan";
 import { makeBoxMesh, makeCylinderMesh } from "@/ipc/mockMeshes";
 import { documentStore } from "@/stores/documentStore";
 import { selectionStore } from "@/stores/selectionStore";
@@ -19,30 +20,57 @@ import { settingsStore } from "@/stores/settingsStore";
 import { __resetLogForTests, logSnapshot } from "@/debug/log";
 import type { CadClient } from "@/ipc/client";
 import type { DocumentChange } from "@/ipc/types";
-import type { ViewportEngine } from "../engine/ViewportEngine";
+import type { FrameSubmission, ViewportEngine } from "../engine/ViewportEngine";
 import { HighlightLayer } from "../engine/HighlightLayer";
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 function fakeEngine() {
   const bodiesRoot = new THREE.Group();
-  const afterRender = new Set<() => void>();
+  const afterRender = new Set<(frame: FrameSubmission) => void>();
+  let submission = 0;
+  /**
+   * Submit one frame. By default it carries every body in `bodiesRoot` with the
+   * provenance of its registry entry — what the real engine derives from the
+   * DISPLAYED geometry (PR-11). Tests pass an explicit id list to model a
+   * hidden/isolated body, or an override to model a mismatched publication.
+   */
+  const completeRender = (
+    bodyIds?: readonly string[],
+    provenanceOverride?: Record<string, reg.MeshProvenance | null>,
+  ) => {
+    const ids = bodyIds ?? bodiesRoot.children.map((c) => c.userData.bodyId as string).filter(Boolean);
+    const rows = ids.map((bodyId) => ({
+      bodyId,
+      provenance: provenanceOverride && bodyId in provenanceOverride
+        ? provenanceOverride[bodyId]
+        : reg.getEntry(bodyId)?.provenance ?? null,
+    }));
+    const frame: FrameSubmission = {
+      submission: ++submission,
+      requestedRevision: submission,
+      publication: null,
+      displayedBodyIds: ids,
+      displayedProvenance: rows,
+    };
+    [...afterRender].forEach((cb) => cb(frame));
+  };
   return {
     bodiesRoot,
     invalidate: vi.fn(),
     refreshHighlights: vi.fn(),
     setHighlightState: vi.fn(),
-    onAfterRender: (cb: () => void) => {
+    onAfterRender: (cb: (frame: FrameSubmission) => void) => {
       afterRender.add(cb);
       return () => afterRender.delete(cb);
     },
-    completeRender: () => [...afterRender].forEach((cb) => cb()),
+    completeRender,
   } as unknown as ViewportEngine & {
     bodiesRoot: THREE.Group;
     invalidate: ReturnType<typeof vi.fn>;
     refreshHighlights: ReturnType<typeof vi.fn>;
     setHighlightState: ReturnType<typeof vi.fn>;
-    completeRender: () => void;
+    completeRender: typeof completeRender;
   };
 }
 
@@ -1055,6 +1083,49 @@ describe("MeshIngest selection reconcile", () => {
     });
     expect(reg.getEntry("body1")).toBe(installed);
   });
+
+  it("PR-11 does not acknowledge a frame that did not submit the body, then acknowledges the first that does", async () => {
+    setBodies({ body1: true });
+    documentStore.setState({ documentId: "doc-a", runtimeSession: "runtime-a" });
+    const { client, emit } = fakeClient();
+    const acknowledge = vi.fn(async () => {});
+    (client as unknown as { meshRenderCompleted: typeof acknowledge }).meshRenderCompleted = acknowledge;
+    const engine = fakeEngine();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    emit({
+      ...changed("body1"),
+      snapshotId: 7,
+      documentId: "doc-a",
+      runtimeSession: "runtime-a",
+      renderExpectationId: 11,
+    });
+    await tick();
+    await tick();
+
+    // A frame with OTHER bodies only (body1 hidden / isolated away) proves nothing.
+    engine.completeRender(["someOtherBody"]);
+    await tick();
+    expect(acknowledge).not.toHaveBeenCalled();
+
+    // A frame that submits body1 under a DIFFERENT publication is not it either.
+    engine.completeRender(["body1"], { body1: { documentId: "doc-a", runtimeSession: "runtime-a", snapshotId: 6, generation: 0 } });
+    await tick();
+    expect(acknowledge).not.toHaveBeenCalled();
+
+    // The first frame that carries body1 with the installed provenance is acknowledged once.
+    engine.completeRender();
+    engine.completeRender();
+    await tick();
+    expect(acknowledge).toHaveBeenCalledTimes(1);
+    expect(acknowledge).toHaveBeenCalledWith({
+      expectationId: 11,
+      documentId: "doc-a",
+      revision: 1,
+      snapshotId: 7,
+      bodyId: "body1",
+    });
+  });
 });
 
 // ── validated installation, stale display, and publication freshness (WP04) ──
@@ -1123,6 +1194,10 @@ describe("MeshIngest validated installation and display state", () => {
     expect(ingest.getDisplayDiagnostic("body1")).toBeUndefined();
     expect(reg.isEntryPromotable(reg.getEntry("body1"))).toBe(true);
     expect(reg.getEntry("body1")!.view.faceCount).toBe(3); // the cylinder replaced the box
+    // The replaced box is retired but not yet freed, so it is still charged: the
+    // budget follows the resource, not the body id (PR-03B).
+    expect(ingest.admission.snapshot().holdings).toBe(2);
+    reg.flushDisposals();
     expect(ingest.admission.snapshot().holdings).toBe(1);
   });
 
@@ -1167,6 +1242,10 @@ describe("MeshIngest validated installation and display state", () => {
     await tick();
 
     expect(ingest.getDisplayState("body1")).toBeUndefined();
+    // Dropped is not freed: the entry is retired and its buffers survive until
+    // the ordered flush, so it keeps paying until then (PR-03B).
+    expect(ingest.admission.snapshot().holdings).toBe(1);
+    reg.flushDisposals();
     expect(ingest.admission.snapshot()).toEqual({
       preparedCpuBytes: 0,
       estimatedGpuBytes: 0,
@@ -1208,13 +1287,16 @@ describe("MeshIngest publication freshness", () => {
     const face = { kind: "face" as const, id: "body1#f:4", bodyId: "body1", topoKey: "f:4" };
     selectionStore.getState().set([face]);
 
-    // Generation 1's job is parked on its colour resolve holding a BOX-sized
-    // reservation; generation 2 publishes and coalesces behind it.
+    // Generation 1's job is parked on its colour resolve. It holds NO budget:
+    // the authored colours it is waiting for are an INPUT to the layout, so the
+    // plan — and therefore the price — does not exist yet, and neither does any
+    // derived array (PR-03A). Generation 2 publishes and coalesces behind it.
     expect(gates).toHaveLength(1);
-    const boxValidation = validateMeshView(parseMeshPayload(makeBoxMesh()), "probe");
-    if (!boxValidation.ok) throw new Error("the mock box must validate");
-    const boxCost = preparedCpuBytesOf(boxValidation.mesh.accounting);
-    expect(ingest.admission.snapshot().preparedCpuBytes).toBe(boxCost);
+    expect(ingest.admission.snapshot()).toEqual({
+      preparedCpuBytes: 0,
+      estimatedGpuBytes: 0,
+      holdings: 0,
+    });
     emit({
       ...changed("body1"),
       revision: 2,
@@ -1231,12 +1313,14 @@ describe("MeshIngest publication freshness", () => {
 
     expect(reg.getEntry("body1")).toBeUndefined(); // nothing installed by the stale job
     expect(engine.bodiesRoot.children).toHaveLength(0);
-    // The box-sized hold is gone: the only reservation outstanding belongs to
-    // the newer job, which is parked on its own colour resolve.
+    // The stale job allocated nothing and therefore owes nothing; the newer job
+    // is in turn parked on its own colour resolve, so the budget is still clear.
     expect(gates).toHaveLength(2);
-    const held = ingest.admission.snapshot();
-    expect(held.holdings).toBe(1);
-    expect(held.preparedCpuBytes).not.toBe(boxCost);
+    expect(ingest.admission.snapshot()).toEqual({
+      preparedCpuBytes: 0,
+      estimatedGpuBytes: 0,
+      holdings: 0,
+    });
     expect(selectionStore.getState().selected).toEqual([face]); // a discarded result touches nothing
 
     gates[1](null);
@@ -1244,8 +1328,8 @@ describe("MeshIngest publication freshness", () => {
     const installed = reg.getEntry("body1")!;
     expect(installed.view.faceCount).toBe(3); // the newer mesh, installed exactly once
     expect(ingest.admission.snapshot()).toEqual({
-      preparedCpuBytes: preparedCpuBytesOf(installed.accounting),
-      estimatedGpuBytes: installed.accounting.estimatedGpuBytes,
+      preparedCpuBytes: installed.plan.cpuBytes,
+      estimatedGpuBytes: installed.plan.gpuBytes,
       holdings: 1,
     });
   });
@@ -1300,8 +1384,8 @@ describe("MeshIngest publication freshness", () => {
     expect(fromB.provenance?.documentId).toBe("doc-b");
     expect(reg.registrySize()).toBe(1); // no shared-cache identity collision
     expect(ingest.admission.snapshot()).toEqual({
-      preparedCpuBytes: preparedCpuBytesOf(fromB.accounting),
-      estimatedGpuBytes: fromB.accounting.estimatedGpuBytes,
+      preparedCpuBytes: fromB.plan.cpuBytes,
+      estimatedGpuBytes: fromB.plan.gpuBytes,
       holdings: 1,
     });
     expect(ingest.getDisplayState("body1")).toBe("current");
@@ -1399,7 +1483,11 @@ describe("MeshIngest pending replacement", () => {
     expect(gates).toHaveLength(2);
     expect(ingest.getDisplayState("body1")).toBe("pending-replacement");
     expect(reg.getEntry("body1")).toBe(installed);
-    expect(ingest.admission.snapshot().holdings).toBe(2); // peak: old + prepared
+    // Only the box is charged. The replacement is parked on the colour resolve
+    // that DECIDES its layout, so its plan does not exist yet and neither does
+    // any derived array; the peak is taken the moment the plan is (PR-03A), and
+    // the box's own hold is what makes that a peak rather than a swap.
+    expect(ingest.admission.snapshot()).toEqual(heldForBox);
 
     // The runtime is replaced mid-preparation, so the fence rejects the result.
     documentStore.setState({ runtimeSession: "runtime-new" });
@@ -1443,16 +1531,19 @@ describe("MeshIngest post-install failure isolation", () => {
     expect(reg.isEntryPromotable(installed)).toBe(true);
     expect(bodyGroup(engine, "body1")).toBeDefined(); // the scene object is published
 
-    // The failure is reported once, and the hint tells the user something broke.
+    // The failure is reported once, as the listener fault it is. It gets no
+    // status hint: the body DID load, and "Body failed to load" would be a lie
+    // about the geometry the user is looking at (PR-02).
     const logged = logSnapshot().filter((e) => e.level === "error" && e.tag === "mesh");
     expect(logged).toHaveLength(1);
-    expect(logged[0].msg).toContain("post-install");
-    expect(viewportStore.getState().statusHint?.message).toContain("subscriber exploded");
+    expect(logged[0].msg).toBe("body-loaded listener threw");
+    expect(logged[0].ctx).toMatchObject({ bodyId: "body1" });
+    expect(viewportStore.getState().statusHint?.message ?? "").not.toContain("failed to load");
 
     // Exactly one reservation — the installed body's — and no leak.
     expect(ingest.admission.snapshot()).toEqual({
-      preparedCpuBytes: preparedCpuBytesOf(installed!.accounting),
-      estimatedGpuBytes: installed!.accounting.estimatedGpuBytes,
+      preparedCpuBytes: installed!.plan.cpuBytes,
+      estimatedGpuBytes: installed!.plan.gpuBytes,
       holdings: 1,
     });
   });
@@ -1479,6 +1570,8 @@ describe("MeshIngest post-install failure isolation", () => {
 
     expect(reg.getEntry("body1")!.view.faceCount).toBe(3);
     expect(ingest.getDisplayState("body1")).toBe("current");
+    expect(ingest.admission.snapshot().holdings).toBe(2); // the retired box, until the flush
+    reg.flushDisposals();
     expect(ingest.admission.snapshot().holdings).toBe(1);
   });
 });
@@ -1585,5 +1678,218 @@ describe("TEST-RES-05 — resource baseline across document cycles", () => {
     reg.flushDisposals();
     expect(entry.resourceState).toBe("disposed");
     expect(reg.leakTripwireCount).toBe(0);
+  });
+});
+
+/*
+ * VP-HARDENING PR-03B — the budget follows the RESOURCE, not the body id.
+ *
+ * Releasing the outgoing reservation at the swap priced a body, not the memory:
+ * the retired entry stays fully allocated until an ordered, lease-free frame
+ * boundary frees it, so between the swap and that flush the machine is holding
+ * BOTH meshes while the counter claims one.
+ */
+describe("TEST-MESH-04 — admission prices every live resource", () => {
+  // The document budget is a module singleton (the preview lanes share it), so
+  // each case starts from a known one and hands back the default.
+  afterEach(() => {
+    admissionModule.__resetDocumentAdmissionForTests();
+  });
+
+  it("charges all four entries when three replacements land before a frame boundary", async () => {
+    admissionModule.__resetDocumentAdmissionForTests();
+    setBodies({ body1: true });
+    const engine = fakeEngine();
+    const { client, emit } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    await tick();
+
+    const first = reg.getEntry("body1")!;
+    const unitCpu = first.plan.cpuBytes;
+    expect(ingest.admission.snapshot().holdings).toBe(1);
+
+    for (const revision of [2, 3, 4]) {
+      emit({
+        revision,
+        changedBodies: [{ bodyId: "body1", meshKey: `body1:fine:${revision}` }],
+        removedBodies: [],
+      });
+      await tick();
+    }
+
+    expect(ingest.admission.snapshot().holdings).toBe(4);
+    expect(ingest.admission.snapshot().preparedCpuBytes).toBe(4 * unitCpu);
+
+    reg.flushDisposals();
+    const installed = reg.getEntry("body1")!;
+    expect(ingest.admission.snapshot()).toEqual({
+      preparedCpuBytes: unitCpu,
+      estimatedGpuBytes: installed.plan.gpuBytes,
+      holdings: 1,
+    });
+  });
+
+  it("refuses a replacement that does not fit ALONGSIDE the resources still alive", async () => {
+    const probe = validateMeshView(parseMeshPayload(makeBoxMesh()), "probe");
+    if (!probe.ok) throw new Error("the mock box must validate");
+    const probePlan = planMeshPreparation(probe.mesh, {}, "probe");
+    if (!probePlan.ok) throw new Error("the mock box must be plannable");
+    const unitGpu = probePlan.plan.gpuBytes;
+    // Room for three of these meshes at once, not four.
+    admissionModule.__resetDocumentAdmissionForTests({
+      estimatedGpuBytes: Math.floor(unitGpu * 3.5),
+    });
+    setBodies({ body1: true });
+    const engine = fakeEngine();
+    const { client, emit } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    await tick();
+
+    for (const revision of [2, 3]) {
+      emit({
+        revision,
+        changedBodies: [{ bodyId: "body1", meshKey: `body1:fine:${revision}` }],
+        removedBodies: [],
+      });
+      await tick();
+    }
+    const third = reg.getEntry("body1")!;
+    expect(ingest.admission.snapshot().holdings).toBe(3);
+
+    emit({
+      revision: 4,
+      changedBodies: [{ bodyId: "body1", meshKey: "body1:fine:4" }],
+      removedBodies: [],
+    });
+    await tick();
+
+    // Refused: the two retired-but-alive meshes are part of the peak.
+    expect(ingest.getDisplayDiagnostic("body1")?.code).toBe("gpu-budget");
+    expect(reg.getEntry("body1")).toBe(third); // the drawn resource never changed
+    expect(bodyGroup(engine, "body1")).toBeDefined();
+    expect(ingest.admission.snapshot().holdings).toBe(3);
+
+    // Freeing the retired meshes frees the budget, and the body recovers.
+    reg.flushDisposals();
+    expect(ingest.admission.snapshot().holdings).toBe(1);
+    emit({
+      revision: 5,
+      changedBodies: [{ bodyId: "body1", meshKey: "body1:fine:5" }],
+      removedBodies: [],
+    });
+    await tick();
+    expect(ingest.getDisplayState("body1")).toBe("current");
+    expect(reg.getEntry("body1")).not.toBe(third);
+    expect(ingest.admission.snapshot().holdings).toBe(2);
+  });
+});
+
+/*
+ * VP-HARDENING PR-03A — the price is the layout that is actually built.
+ *
+ * A body colour is DOCUMENT METADATA, not a MESH1 section, so a mesh with no
+ * FACE_COLORS payload can still be built de-indexed with a baked per-vertex
+ * colour stream. Pricing that mesh from the payload alone charges the indexed
+ * layout and then allocates the de-indexed one — for the review's 1,000,000
+ * triangle body, 24,000,000 bytes charged against 108,000,000 bytes built.
+ */
+describe("TEST-MESH-04 — the reservation is the layout that gets built", () => {
+  afterEach(() => {
+    admissionModule.__resetDocumentAdmissionForTests();
+  });
+
+  /** The de-indexed cost of `blob`, computed from the payload alone. */
+  function deIndexedCost(blob: ArrayBuffer) {
+    const view = parseMeshPayload(blob);
+    const verts = view.indices.length; // 3·T, one per triangle corner
+    const positionBytes = verts * 3 * 4;
+    const normalBytes = view.normals ? verts * 3 * 4 : 0;
+    const colorBytes = verts * 3 * 4;
+    let segments = 0;
+    for (let e = 0; e < view.edgeCount; e++) {
+      segments += Math.max(0, (view.edgeRanges?.[e * 2 + 1] ?? 0) - 1);
+    }
+    const edgeExpansionBytes = segments * 24;
+    return {
+      // Zero-copy views keep the whole payload alive alongside the expansion.
+      preparedCpuBytes: view.buffer.byteLength + positionBytes + normalBytes + colorBytes + edgeExpansionBytes,
+      estimatedGpuBytes: positionBytes + normalBytes + colorBytes + edgeExpansionBytes,
+      holdings: 1,
+    };
+  }
+
+  it("charges a metadata-coloured body the DE-INDEXED bytes it actually allocates", async () => {
+    admissionModule.__resetDocumentAdmissionForTests();
+    documentStore.setState({
+      documentId: "doc-1",
+      runtimeSession: "runtime-1",
+      geometrySource: "live",
+      bodies: {
+        body1: { id: "body1", name: "body1", visible: true, color: [200, 40, 40, 255] },
+      },
+    });
+    const { client } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(fakeEngine(), client);
+    await tick();
+
+    const entry = reg.getEntry("body1")!;
+    // The layout really is de-indexed: no index, one vertex per triangle corner.
+    expect(entry.hasVertexColors).toBe(true);
+    expect(entry.geometry.getIndex()).toBeNull();
+    expect(ingest.admission.snapshot()).toEqual(deIndexedCost(makeBoxMesh()));
+  });
+
+  it("installs what it priced — the DEV off-plan tripwire stays quiet either way", async () => {
+    for (const color of [undefined, [200, 40, 40, 255] as const]) {
+      admissionModule.__resetDocumentAdmissionForTests();
+      reg.disposeAll();
+      reg.__resetRegistryForTests();
+      __resetLogForTests();
+      documentStore.setState({
+        documentId: "doc-1",
+        runtimeSession: "runtime-1",
+        geometrySource: "live",
+        bodies: { body1: { id: "body1", name: "body1", visible: true, color } },
+      });
+      const { client } = fakeClient(vi.fn(async () => makeCylinderMesh()));
+      ingest = new MeshIngest();
+      ingest.attach(fakeEngine(), client);
+      await tick();
+
+      const entry = reg.getEntry("body1")!;
+      expect(entry.plan.layout).toBe(color ? "deindexed" : "indexed");
+      expect(ingest.admission.snapshot()).toEqual({
+        preparedCpuBytes: entry.plan.cpuBytes,
+        estimatedGpuBytes: entry.plan.gpuBytes,
+        holdings: 1,
+      });
+      expect(logSnapshot().filter((e) => e.level === "error")).toEqual([]);
+      ingest.detach();
+      __resetLogForTests({ enabled: false });
+    }
+  });
+
+  it("charges an uncoloured body the INDEXED bytes it actually allocates", async () => {
+    admissionModule.__resetDocumentAdmissionForTests();
+    setBodies({ body1: true });
+    const { client } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(fakeEngine(), client);
+    await tick();
+
+    const entry = reg.getEntry("body1")!;
+    expect(entry.hasVertexColors).toBe(false);
+    const view = parseMeshPayload(makeBoxMesh());
+    const attributeBytes =
+      view.positions.byteLength + (view.normals?.byteLength ?? 0) + view.indices.byteLength;
+    const edgeBytes = entry.edgeSegmentPositions?.byteLength ?? 0;
+    expect(ingest.admission.snapshot()).toEqual({
+      preparedCpuBytes: view.buffer.byteLength + edgeBytes,
+      estimatedGpuBytes: attributeBytes + edgeBytes,
+      holdings: 1,
+    });
   });
 });

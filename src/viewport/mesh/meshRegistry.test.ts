@@ -7,7 +7,11 @@ import type * as THREE from "three";
 import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
 import * as reg from "./meshRegistry";
 import { parseMeshPayload } from "./parseMeshPayload";
-import { makeBoxMesh, type FaceColor } from "@/ipc/mockMeshes";
+import { MeshAdmission } from "./meshAdmission";
+import { makeBoxMesh, makeCylinderMesh, type FaceColor } from "@/ipc/mockMeshes";
+import { validateMeshView } from "./validateMesh";
+import { planMeshPreparation } from "./meshPreparationPlan";
+import type { Rgba } from "@/ipc/types";
 import { __resetLogForTests, logSnapshot } from "@/debug/log";
 import { readViewportCounters, resetViewportCounters } from "../vph/instrumentation";
 
@@ -180,6 +184,87 @@ describe("buildBodyObjects with FACE_COLORS", () => {
     // is observable only as a version bump.
     expect(attr.version).toBeGreaterThan(version);
     entry.dispose();
+  });
+
+  /*
+   * VP-HARDENING PR-03A — priced == built.
+   *
+   * The plan decides the layout and the admission charges its byte totals. If
+   * the geometry that comes out does not add up to those totals, the budget is
+   * describing something other than what is on the GPU, which is exactly the
+   * defect this package closes. The DEV assertion inside `buildBodyObjects` is
+   * the tripwire; these cases prove it stays quiet on every real fixture AND
+   * that it actually fires when the two disagree.
+   */
+  it("never reports off-plan across the fixtures, coloured or not", () => {
+    __resetLogForTests();
+    try {
+      const authored = new Map([["f:1", BLUE]]);
+      const cases: ReadonlyArray<[ReturnType<typeof coloredBox>, Rgba | undefined, ReadonlyMap<string, Rgba> | undefined]> = [
+        [parseMeshPayload(makeBoxMesh()), undefined, undefined],
+        [parseMeshPayload(makeBoxMesh()), RED, undefined],
+        [parseMeshPayload(makeBoxMesh()), undefined, authored],
+        [coloredBox(), undefined, undefined],
+        [coloredBox(), RED, authored],
+        [parseMeshPayload(makeCylinderMesh()), undefined, undefined],
+        [parseMeshPayload(makeCylinderMesh()), RED, undefined],
+      ];
+      for (const [view, bodyColor, faceColors] of cases) {
+        const entry = reg.buildBodyObjects(view, "body1", 1, bodyColor, faceColors);
+        // The plan is the layout that came out, in both directions.
+        expect(entry.plan.layout).toBe(entry.hasVertexColors ? "deindexed" : "indexed");
+        expect(entry.geometry.getIndex() === null).toBe(entry.plan.layout === "deindexed");
+        entry.dispose();
+      }
+      expect(logSnapshot().filter((e) => e.level === "error")).toEqual([]);
+    } finally {
+      __resetLogForTests({ enabled: false });
+    }
+  });
+
+  it("REPORTS off-plan when a caller supplies a plan for a different appearance", () => {
+    __resetLogForTests();
+    try {
+      const view = parseMeshPayload(makeBoxMesh());
+      const validated = validateMeshView(view, "body1");
+      if (!validated.ok) throw new Error("the mock box must validate");
+      // Priced uncoloured, built with a body colour: the classic PR-03A pairing.
+      const stale = planMeshPreparation(validated.mesh, {}, "body1");
+      if (!stale.ok) throw new Error("the mock box must be plannable");
+
+      const entry = reg.buildBodyObjects(view, "body1", 1, RED, undefined, undefined, stale.plan);
+
+      const errors = logSnapshot().filter((e) => e.level === "error").map((e) => e.msg);
+      expect(errors).toContain("mesh plan does not match the appearance it is being built with");
+      // The build FOLLOWED the plan it was given, so the geometry is indexed and
+      // the byte totals agree — the appearance check is what catches this pair.
+      expect(entry.plan.layout).toBe("indexed");
+      expect(entry.hasVertexColors).toBe(false);
+      entry.dispose();
+    } finally {
+      __resetLogForTests({ enabled: false });
+    }
+  });
+
+  it("REPORTS off-plan when the built bytes do not add up to the priced bytes", () => {
+    __resetLogForTests();
+    try {
+      const view = parseMeshPayload(makeBoxMesh());
+      const validated = validateMeshView(view, "body1");
+      if (!validated.ok) throw new Error("the mock box must validate");
+      const real = planMeshPreparation(validated.mesh, {}, "body1");
+      if (!real.ok) throw new Error("the mock box must be plannable");
+      const understated = { ...real.plan, positionBytes: real.plan.positionBytes - 4 };
+
+      const entry = reg.buildBodyObjects(view, "body1", 1, undefined, undefined, undefined, understated);
+
+      const off = logSnapshot().filter((e) => e.msg === "mesh built off-plan");
+      expect(off).toHaveLength(1);
+      expect(off[0].ctx).toMatchObject({ bodyId: "body1", layout: "indexed" });
+      entry.dispose();
+    } finally {
+      __resetLogForTests({ enabled: false });
+    }
   });
 
   it("refreshFaceColors reaches every REGISTERED entry", () => {
@@ -363,5 +448,132 @@ describe("TEST-RES-02 — leases and ordered retirement", () => {
     reg.flushDisposals();
     expect(entry.resourceState).toBe("disposed");
     off();
+  });
+});
+
+/*
+ * VP-HARDENING PR-02 / PR-03B — the commit phase is observer-free, and a
+ * reservation lives exactly as long as the buffers it paid for.
+ *
+ * `commitSwap` / `commitRemove` are the whole state transition; `notifyRetired`
+ * is the separate, isolated announcement. Publishing a mesh calls the first
+ * pair inside its transaction and the second one only after the scene, the
+ * handle map and the budget have all moved.
+ */
+describe("TEST-PUB-03 — two-phase commit and reservation lifetime", () => {
+  it("commitSwap moves the state and calls NO listener", () => {
+    const first = box(1);
+    reg.swap("body1", first);
+    const seen: string[] = [];
+    const off = reg.onEntryRetired((e) => seen.push(e.bodyId));
+    const second = box(2);
+
+    const prev = reg.commitSwap("body1", second);
+
+    expect(prev).toBe(first);
+    expect(reg.getEntry("body1")).toBe(second);
+    expect(first.resourceState).toBe("retired");
+    expect(seen).toEqual([]); // nothing observable ran inside the transaction
+
+    reg.notifyRetired(prev);
+    expect(seen).toEqual(["body1"]);
+    off();
+  });
+
+  it("commitRemove retires silently, and notifyRetired(undefined) is a no-op", () => {
+    const only = box(1);
+    reg.swap("body1", only);
+    const seen: string[] = [];
+    const off = reg.onEntryRetired((e) => seen.push(e.bodyId));
+
+    const prev = reg.commitRemove("body1");
+
+    expect(prev).toBe(only);
+    expect(reg.getEntry("body1")).toBeUndefined();
+    expect(seen).toEqual([]);
+    // The first publication of a body has no predecessor — the announcement
+    // must tolerate that rather than being guarded at every call site.
+    expect(() => reg.notifyRetired(reg.commitRemove("never-registered"))).not.toThrow();
+    expect(seen).toEqual([]);
+
+    reg.notifyRetired(prev);
+    expect(seen).toEqual(["body1"]);
+    off();
+  });
+
+  it("isolates a throwing retirement listener and still calls the others", () => {
+    __resetLogForTests({ enabled: true, console: false });
+    const entry = box(1);
+    reg.swap("body1", entry);
+    const seen: string[] = [];
+    const offA = reg.onEntryRetired(() => {
+      throw new Error("listener exploded");
+    });
+    const offB = reg.onEntryRetired((e) => seen.push(e.bodyId));
+    try {
+      expect(() => reg.remove("body1")).not.toThrow();
+
+      expect(seen).toEqual(["body1"]);
+      expect(entry.resourceState).toBe("retired");
+      const errors = logSnapshot().filter((e) => e.level === "error");
+      expect(errors.map((e) => e.msg)).toEqual(["retire listener threw"]);
+      expect(errors[0].ctx).toMatchObject({ bodyId: "body1" });
+    } finally {
+      // Subscriptions are module state: a failed assertion must not leave a
+      // throwing listener wired into every later case in this file.
+      offA();
+      offB();
+      __resetLogForTests({ enabled: false });
+    }
+  });
+
+  it("releases the reservation when the buffers are freed, never at the swap", () => {
+    const admission = new MeshAdmission();
+    const first = box(1);
+    const reservation = admission.reserve("body1", first.plan);
+    if (!reservation.ok) throw new Error("the mock box must be admissible");
+    first.reservation = reservation;
+    reg.swap("body1", first);
+    const charged = admission.snapshot();
+    expect(charged.holdings).toBe(1);
+
+    reg.swap("body1", box(2));
+    // Retired is not freed: the buffers are still there, so they still cost.
+    expect(first.resourceState).toBe("retired");
+    expect(admission.snapshot()).toEqual(charged);
+
+    const lease = reg.acquireLease(first, "highlight:body");
+    reg.flushDisposals();
+    reg.flushDisposals();
+    expect(first.resourceState).toBe("retired"); // a borrower holds it open
+    expect(admission.snapshot()).toEqual(charged);
+
+    lease.release();
+    expect(admission.snapshot()).toEqual(charged); // freed at the NEXT boundary
+
+    reg.flushDisposals();
+    expect(first.resourceState).toBe("disposed");
+    expect(first.reservation).toBeNull();
+    expect(admission.snapshot()).toEqual({
+      preparedCpuBytes: 0,
+      estimatedGpuBytes: 0,
+      holdings: 0,
+    });
+  });
+
+  it("gives the reservation back on the dispose of an entry that was never installed", () => {
+    const admission = new MeshAdmission();
+    const entry = box(1);
+    const reservation = admission.reserve("body1", entry.plan);
+    if (!reservation.ok) throw new Error("the mock box must be admissible");
+    entry.reservation = reservation;
+    expect(admission.snapshot().holdings).toBe(1);
+
+    entry.dispose(); // preparation failure: no registry, no scene, no frame
+
+    expect(entry.reservation).toBeNull();
+    expect(admission.snapshot().holdings).toBe(0);
+    entry.dispose(); // idempotent
+    expect(admission.snapshot().holdings).toBe(0);
   });
 });

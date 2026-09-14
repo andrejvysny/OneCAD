@@ -52,6 +52,7 @@ import {
   setCurrentMeshPublication,
   __resetRegistryForTests,
 } from "../mesh/meshRegistry";
+import * as reg from "../mesh/meshRegistry";
 import {
   contributionId,
   createPlatform,
@@ -416,6 +417,47 @@ describe("ViewportEngine lifecycle", () => {
     first.dispose();
     second.dispose();
     engine.dispose();
+  });
+
+  /*
+   * D6 — a preview body is an OWNER of its lease, not a detached borrower the
+   * registry sweeps up later (PR-06). Every removal site disposes the handle:
+   * replacement, id-clear, full clear, and engine teardown.
+   */
+  it("releases the preview body lease at replacement, clear, and dispose", () => {
+    const before = reg.leakTripwireCount;
+    const engine = new ViewportEngine();
+    const first = buildBodyObjects(parseMeshPayload(makeBoxMesh()), "preview-a", 1);
+    const replacement = buildBodyObjects(parseMeshPayload(makeBoxMesh()), "preview-a", 2);
+    const other = buildBodyObjects(parseMeshPayload(makeBoxMesh()), "preview-b", 1);
+    const full = buildBodyObjects(parseMeshPayload(makeBoxMesh()), "preview-c", 1);
+    const atDispose = buildBodyObjects(parseMeshPayload(makeBoxMesh()), "preview-d", 1);
+
+    engine.setPreviewBody(first);
+    expect(reg.openLeases(first)).toEqual(["body"]);
+
+    engine.setPreviewBody(replacement); // same bodyId ⇒ replaces `first`
+    expect(reg.openLeases(first)).toEqual([]);
+    expect(reg.openLeases(replacement)).toEqual(["body"]);
+
+    engine.setPreviewBody(other);
+    engine.clearPreviewBody(["preview-a"]);
+    expect(reg.openLeases(replacement)).toEqual([]);
+    expect(reg.openLeases(other)).toEqual(["body"]);
+
+    engine.setPreviewBody(full);
+    engine.clearPreviewBody();
+    expect(reg.openLeases(other)).toEqual([]);
+    expect(reg.openLeases(full)).toEqual([]);
+
+    engine.setPreviewBody(atDispose);
+    engine.dispose();
+    expect(reg.openLeases(atDispose)).toEqual([]);
+
+    // Freeing a resource under an open lease is what trips the tripwire, so
+    // this is the negative half of the same assertion.
+    for (const e of [first, replacement, other, full, atDispose]) e.dispose();
+    expect(reg.leakTripwireCount).toBe(before);
   });
 
   it("hides a fully deleted Cut target even when the candidate has no bodies", () => {
@@ -1415,6 +1457,57 @@ describe("ViewportEngine submission record and failure bounds (TEST-LIFE-05)", (
     expect(acked).toHaveBeenCalledTimes(1);
 
     engine.dispose(); // still disposable after a failure
+  });
+
+  /*
+   * PR-05. An after-render listener is the production entry point for the
+   * frame-loop defect: `notifySubmitted` ran listeners with no isolation, so
+   * one bad contribution took the whole frame down — and a listener that
+   * invalidates before it throws kept the queue permanently non-empty.
+   */
+  it("isolates after-render listeners: one that throws does not stop the next", async () => {
+    const { canvas, overlay } = newDom();
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+    const second = vi.fn();
+    engine.onAfterRender(() => {
+      throw new Error("listener blew up");
+    });
+    engine.onAfterRender(second);
+
+    flushFrame();
+
+    expect(second).toHaveBeenCalledTimes(1);
+    expect(engine.frameCount).toBe(1); // the frame itself still submitted
+    expect(engine.getLifecycle()).toBe("active");
+    expect(logs.error).toHaveBeenCalledTimes(1);
+    expect(logs.error.mock.calls[0][1]).toBe("after-render listener threw");
+    expect(rafCbs).toHaveLength(0); // …and nothing was rescheduled
+
+    engine.dispose();
+  });
+
+  it("a listener that invalidates and throws every frame parks the engine after three", async () => {
+    const { canvas, overlay } = newDom();
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+    let calls = 0;
+    engine.onAfterRender(() => {
+      calls++;
+      engine.invalidate(); // asks for another frame …
+      throw new Error("listener blew up"); // … and fails again
+    });
+
+    // Bounded so a live loop still terminates: the bound under test is the
+    // engine's, not this loop's.
+    for (let i = 0; i < 12 && rafCbs.length > 0; i++) flushFrame();
+
+    expect(calls).toBe(3);
+    expect(engine.frameCount).toBe(3);
+    expect(rafCbs).toHaveLength(0); // no permanent frame loop (guide §22)
+    expect(logs.error).toHaveBeenCalledTimes(1); // identical message, 5 s throttle
+
+    engine.dispose();
   });
 
   it("an async submission REJECTION is the same failure — nothing is acknowledged", async () => {

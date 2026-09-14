@@ -11,11 +11,19 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
-vi.mock("@/ipc/promote", () => ({
-  promoteOne: vi.fn(),
-  stalePickHint: vi.fn(),
-  STALE_PICK_HINT: "Selection is out of date — pick again",
+/*
+ * The promote lane is spied, not replaced: the write-back specs below drive it
+ * by hand, while the PR-01 proof specs need the REAL implementation (kept here
+ * so they can restore it onto the same spy).
+ */
+const promoteLane = vi.hoisted(() => ({
+  real: null as null | typeof import("@/ipc/promote").promoteRef,
 }));
+vi.mock("@/ipc/promote", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/ipc/promote")>();
+  promoteLane.real = actual.promoteRef;
+  return { ...actual, promoteRef: vi.fn() };
+});
 
 import * as THREE from "three";
 import {
@@ -27,7 +35,13 @@ import {
 } from "./ViewportRoot";
 import { ViewportEngine } from "./engine/ViewportEngine";
 import { viewportStore } from "@/stores/viewportStore";
-import { promoteOne } from "@/ipc/promote";
+import { documentStore } from "@/stores/documentStore";
+import { resetStores } from "@/test/resetStores";
+import * as registry from "@/viewport/mesh/meshRegistry";
+import type { MeshEntry } from "@/viewport/mesh/meshRegistry";
+import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
+import { makeBoxMesh } from "@/ipc/mockMeshes";
+import { promoteRef, STALE_PICK_HINT } from "@/ipc/promote";
 import { selectionStore, type EntityRef } from "@/stores/selectionStore";
 import type { PromotedElement } from "@/ipc/types";
 import type { PickHit } from "./engine/Picker";
@@ -132,7 +146,7 @@ describe("promotePick", () => {
   });
 
   beforeEach(() => {
-    vi.mocked(promoteOne).mockReset();
+    vi.mocked(promoteRef).mockReset();
     selectionStore.getState().set([]);
   });
 
@@ -145,7 +159,7 @@ describe("promotePick", () => {
     // displayed table may not carry at all.
     const ref = faceRef("f:4");
     selectionStore.getState().set([ref]);
-    vi.mocked(promoteOne).mockResolvedValue({
+    vi.mocked(promoteRef).mockResolvedValue({
       topoKey: "f:9",
       elementId: "el_a",
       kind: "face",
@@ -167,7 +181,7 @@ describe("promotePick", () => {
     const stale = faceRef("f:4");
     selectionStore.getState().set([stale]);
     let release!: (v: PromotedElement) => void;
-    vi.mocked(promoteOne).mockReturnValue(
+    vi.mocked(promoteRef).mockReturnValue(
       new Promise<PromotedElement>((r) => {
         release = r;
       }),
@@ -180,6 +194,123 @@ describe("promotePick", () => {
     await new Promise((r) => setTimeout(r, 0));
 
     expect(selectionStore.getState().selected).toEqual([fresh]);
+  });
+});
+
+/*
+ * VP-HARDENING PR-01 — a click on stale geometry SELECTS but never promotes.
+ *
+ * A body whose replacement failed keeps its old mesh on screen, demoted to
+ * `stale-inspection-only` (spec §9): the user can still orbit it, hover it and
+ * click it, because taking geometry away at the moment a rebuild fails is worse
+ * than labelling it. What must NOT happen is that the same click mints a
+ * persistent id — the ordinal it carries addresses a publication the document
+ * has moved past, and an id minted from it names whatever the head calls that
+ * ordinal now.
+ *
+ * Driven through the REAL `promoteRef` (the module is spied, not stubbed, at the
+ * top of this file) so the proof is the one `refFromModelHits` actually attached
+ * at hit time — not one the test invented.
+ */
+describe("promotePick proof gate (PR-01, spec §9)", () => {
+  const PUBLICATION = {
+    documentId: "doc-1",
+    runtimeSession: "runtime-1",
+    snapshotId: 7,
+    generation: 3,
+  } as const;
+
+  function installBody(): MeshEntry {
+    const entry = registry.buildBodyObjects(
+      parseMeshPayload(makeBoxMesh()), "body1", 1, undefined, undefined, PUBLICATION,
+    );
+    registry.swap("body1", entry);
+    registry.setCurrentMeshPublication(PUBLICATION);
+    documentStore.setState({
+      documentId: "doc-1",
+      runtimeSession: "runtime-1",
+      geometrySource: "live",
+      bodies: { body1: { id: "body1", name: "Body", visible: true } },
+    });
+    return entry;
+  }
+
+  /** The hit a real click produces: the entry is stamped by `resolvePick`. */
+  function hitOn(entry: MeshEntry): PickHit {
+    return {
+      bodyId: "body1",
+      kind: "face",
+      topoKey: "f:0",
+      distance: 10,
+      worldPos: new THREE.Vector3(1, 2, 3),
+      entry,
+    };
+  }
+
+  beforeEach(() => {
+    resetStores();
+    registry.disposeAll();
+    viewportStore.getState().setStatusHint(null);
+    selectionStore.getState().set([]);
+    vi.mocked(promoteRef).mockReset();
+    vi.mocked(promoteRef).mockImplementation((client, ref) => promoteLane.real!(client, ref));
+  });
+
+  it("a click on a body whose replacement FAILED selects but refuses to promote", async () => {
+    const entry = installBody();
+    entry.displayState = "stale-inspection-only";
+    const promoteSelection = vi.fn();
+    const ref = refFromModelHits(hitOn(entry), null, false)!;
+
+    // The click's own selection write — inspection is allowed on stale geometry.
+    selectionStore.getState().set([ref]);
+    promotePick({ promoteSelection } as unknown as Parameters<typeof promotePick>[0], ref);
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(promoteSelection).not.toHaveBeenCalled();
+    expect(viewportStore.getState().statusHint?.message).toBe(STALE_PICK_HINT);
+    expect(selectionStore.getState().selected).toEqual([ref]);
+    expect(selectionStore.getState().selected[0].elementId).toBeUndefined();
+  });
+
+  it("a click on a CURRENT body promotes with the pick-time proof's own fence", async () => {
+    const entry = installBody();
+    const promoteSelection = vi.fn(async () => [
+      { topoKey: "f:0", elementId: "el_a", kind: "face", bodyId: "body1" },
+    ]);
+    const ref = refFromModelHits(hitOn(entry), null, false)!;
+    selectionStore.getState().set([ref]);
+
+    promotePick({ promoteSelection } as unknown as Parameters<typeof promotePick>[0], ref);
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(promoteSelection).toHaveBeenCalledWith(
+      "body1",
+      [{ topoKey: "f:0", kind: "face", anchor: { worldPoint: [1, 2, 3] } }],
+      7,
+      "runtime-1",
+    );
+    expect(selectionStore.getState().selected[0].elementId).toBe("el_a");
+    expect(viewportStore.getState().statusHint?.message).toBeUndefined();
+  });
+
+  it("refuses a ref the viewport did not just produce (no proof, no fallback)", async () => {
+    installBody();
+    const promoteSelection = vi.fn();
+    // Hand-built: restored from persistence, or rewritten by a reconcile.
+    const ref: EntityRef = {
+      kind: "face",
+      id: "body1#f:0",
+      bodyId: "body1",
+      topoKey: "f:0",
+      anchor: { worldPoint: [1, 2, 3] },
+    };
+    selectionStore.getState().set([ref]);
+    promotePick({ promoteSelection } as unknown as Parameters<typeof promotePick>[0], ref);
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(promoteSelection).not.toHaveBeenCalled();
+    expect(viewportStore.getState().statusHint?.message).toBe(STALE_PICK_HINT);
   });
 });
 

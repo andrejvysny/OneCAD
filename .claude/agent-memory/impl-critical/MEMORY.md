@@ -11,8 +11,10 @@
 - [Fillet acceptance envelope](repo_fillet_acceptance.md) — two blend classes, curvature-derived residual, remnant floor, which kernelbench rows may move
 - [OCW1 driver for fixtures](repo_ocw1_driver.md) — harness --repl desyncs on ExecutePlan; frame the worker directly, plus the param names that bite
 - [MESH1 id namespace](repo_mesh_id_namespace.md) — mesh tables mix TopoKeys with minted ElementIds; only TopoKeys promote, and which lanes still trip on it
+- [Promotion proof lane](repo_promotion_proof.md) — the two typed promote entry points, where the pick proof is captured, what clears it, the cosmetic-republish trap
 - [Viewport selection policy](repo_viewport_selection_policy.md) — D-5 + Astra break: persistent id first, an ordinal is not evidence across a regen, regen-only reconcile
 - [Regen isolation + closure](repo_regen_isolation.md) — why graph.downstream() is not proof of independence, what timeline_of(n) really builds, checkpoint-mint seams
 - [Curve sampling + MESH1 edges](repo_curve_sampler.md) — EDGE_RANGES is 7 not 8, gp_XYZ::IsEqual is strict, OCCT conversion behaviour, worker/build is Makefiles
 - [Mesh validation + admission](repo_mesh_validation.md) — buildBodyObjects' 15-file caller fan-out, what worker MESH1 bytes really guarantee, parser-vs-validator boundary
-- [Surface normals + tessellation](repo_surface_normals.md) — BRepAdaptor world frame, IsNegative is not det, IsClosed(solid) lies, what tessellate_body mutates and drops
+- [Mesh preparation plan](repo_mesh_preparation_plan.md) — one layout/cost authority, why `plan` is the last param, reserve-after-colour-resolve, pre-existing red modelTools lane
+- [Surface normals + tessellation](repo_surface_normals.md) — BRepAdaptor world frame + transformed BSpline poles, IsNegative is not det, wireless-face UVBounds, synthetic Poly_Triangulation probes, per-node cost

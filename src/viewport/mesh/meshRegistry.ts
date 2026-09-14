@@ -5,11 +5,17 @@
  * it never belongs in a projection store. `buildBodyObjects` turns a parsed
  * BodyMeshView into THREE geometry with ZERO-COPY attributes (positions/normals/
  * index alias the MESH1 blob directly); edges are expanded into fat-line segment
- * endpoints (the only non-trivial transform). `swap` double-buffers: the new
- * entry is published immediately and the old one is disposed on the NEXT frame
- * (via flushDisposals) so nothing that referenced it this frame reads freed
- * buffers. `disposeAll` + a dev leak tripwire guarantee the registry is empty
- * after a document closes.
+ * endpoints (the only non-trivial transform). `commitSwap` double-buffers: the
+ * new entry is published immediately and the old one is disposed on the NEXT
+ * frame (via flushDisposals) so nothing that referenced it this frame reads
+ * freed buffers. `disposeAll` + a dev leak tripwire guarantee the registry is
+ * empty after a document closes.
+ *
+ * PUBLICATION IS TWO-PHASE (PR-02): `commitSwap`/`commitRemove` are the state
+ * transition and run NO listener, so a publisher can move the registry, the
+ * scene and the budget as one transaction; `notifyRetired` announces the
+ * retirement afterwards with per-listener isolation. `swap`/`remove` are the
+ * combined form for lanes whose entire publication is the registry write.
  *
  * VP-HARDENING WP04 acceptance: TEST-MESH-05 — `MeshEntry.displayState` and
  * `isEntryPromotable` carry the stale-inspection-only policy of §9.
@@ -34,8 +40,14 @@ import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeome
 import { logError, logWarn } from "@/debug/log";
 import type { BodyMeshView } from "./parseMeshPayload";
 import { TopoIndex } from "./faceRangeIndex";
-import { bakeFaceColors, deIndexTriangles, needsVertexColors } from "./faceColors";
-import { requireValidatedMesh, type MeshAccounting, type ValidatedMesh } from "./validateMesh";
+import { bakeFaceColors, deIndexTriangles } from "./faceColors";
+import {
+  needsVertexColors,
+  planMeshPreparation,
+  type MeshPreparationPlan,
+} from "./meshPreparationPlan";
+import { MeshValidationError, requireValidatedMesh, type MeshAccounting, type ValidatedMesh } from "./validateMesh";
+import type { MeshReservation } from "./meshAdmission";
 import { deriveIdentity, type RenderResourceIdentity } from "./renderResourceIdentity";
 import type { Rgba } from "@/ipc/types";
 
@@ -98,8 +110,25 @@ export interface MeshEntry {
    */
   retiredAtFrame: number;
   readonly view: BodyMeshView;
-  /** Measured byte cost of this entry, proved by semantic validation. */
+  /** PAYLOAD-only measurement of this entry, proved by semantic validation. */
   readonly accounting: MeshAccounting;
+  /**
+   * The immutable preparation plan these buffers were BUILT from, and the exact
+   * cost {@link MeshEntry.reservation} paid (PR-03A). Layout, byte totals and
+   * the reservation all come from this one object, so the price and the
+   * allocation can never describe different geometry.
+   */
+  readonly plan: MeshPreparationPlan;
+  /**
+   * The admission hold that paid for THESE buffers (spec §9, PR-03B). Written
+   * once by whoever publishes the entry — `MeshIngest` for a document body, the
+   * preview lane for a preview/ghost — and released by {@link MeshEntry.dispose}
+   * at the moment the buffers are actually freed, never at the swap that
+   * retired it. A retired entry is still allocated, so it must still be
+   * charged: that is what makes the counter a peak bound over the live set
+   * rather than over the installed body map.
+   */
+  reservation: MeshReservation | null;
   /**
    * Mutable because the entry OUTLIVES its own currency: a failed replacement
    * demotes the installed entry to `stale-inspection-only` in place rather than
@@ -276,12 +305,47 @@ export function onEntryRetired(cb: (entry: MeshEntry) => void): () => void {
   return () => retireListeners.delete(cb);
 }
 
-function retire(entry: MeshEntry): void {
-  if (entry.resourceState !== "installed") return;
+/**
+ * Mark `entry` retired and queue it for an ordered disposal. PURE with respect
+ * to the application: it runs no listener, so it is safe inside a publication
+ * transaction. Returns the entry when it really left the installed set, and
+ * undefined when there was nothing to retire.
+ */
+function retireEntry(entry: MeshEntry): MeshEntry | undefined {
+  if (entry.resourceState !== "installed") return undefined;
   entry.resourceState = "retired";
   entry.retiredAtFrame = currentFrame;
   pendingDisposal.push(entry);
-  for (const cb of [...retireListeners]) cb(entry);
+  return entry;
+}
+
+/**
+ * Announce a retirement to the subscribers, AFTER the caller's transaction has
+ * committed (spec numerics §11.2).
+ *
+ * Every subscriber here runs application code — `HighlightLayer` rebuilds, and
+ * allocates, from inside this callback — so it must never execute between the
+ * registry and the scene being updated: a throw there left the registry holding
+ * the new mesh while the scene still drew the old one, and made the publisher
+ * believe nothing had been published (PR-02). Each listener is isolated, none
+ * can stop the others, and nothing propagates out.
+ *
+ * `undefined` is the ordinary case of a body's FIRST publication, so it is a
+ * no-op rather than an error.
+ */
+export function notifyRetired(entry: MeshEntry | undefined): void {
+  if (!entry) return;
+  for (const cb of [...retireListeners]) {
+    try {
+      cb(entry);
+    } catch (error) {
+      logError("vp", "retire listener threw", {
+        bodyId: entry.bodyId,
+        meshRev: entry.meshRev,
+        error,
+      });
+    }
+  }
 }
 
 /**
@@ -295,6 +359,14 @@ function retire(entry: MeshEntry): void {
  * ghosts, fixtures — pass a raw view and are validated HERE, throwing
  * `MeshValidationError`: they have no display state to fall back to, so the
  * only alternative would be building geometry from unproven numbers.
+ *
+ * `plan` is the immutable decision the caller ADMITTED against (PR-03A):
+ * construction reads its layout instead of re-deciding, so the bytes reserved
+ * and the bytes allocated are the same bytes. A caller with nothing to admit
+ * (a fixture, a test) may omit it, and the SAME function derives it here — the
+ * point of the plan is that there is one predicate, not that there is one
+ * caller. A supplied plan is cross-checked against the appearance in DEV, and
+ * what gets built is checked against what was priced.
  */
 export function buildBodyObjects(
   mesh: ValidatedMesh | BodyMeshView,
@@ -303,14 +375,17 @@ export function buildBodyObjects(
   bodyColor?: Rgba,
   authoredFaceColors?: ReadonlyMap<string, Rgba>,
   provenance?: MeshProvenance,
+  plan?: MeshPreparationPlan,
 ): MeshEntry {
   const validated = requireValidatedMesh(mesh, bodyId);
   const view = validated.view;
+  const prepared = plan ?? planOrThrow(validated, bodyId, bodyColor, authoredFaceColors);
+  if (import.meta.env.DEV && plan) assertPlanMatchesAppearance(plan, validated, bodyId, bodyColor, authoredFaceColors);
   const geometry = new THREE.BufferGeometry();
   // `drawRange` counts INDICES when the geometry is indexed and VERTICES when it
   // is not — and de-indexing produces exactly `indices.length` vertices, so the
   // same count is right in both arms (and so are HighlightLayer's face ranges).
-  const colorAttr = buildFaceGeometry(geometry, view, bodyColor, authoredFaceColors);
+  const colorAttr = buildFaceGeometry(geometry, view, prepared, bodyColor, authoredFaceColors);
   geometry.setDrawRange(0, view.indices.length);
   // MEASURED bounds, not the header box: the header box is the producer's
   // advisory statement and can be stale (validateMesh.ts explains how OCCT
@@ -358,6 +433,8 @@ export function buildBodyObjects(
     retiredAtFrame: -1,
     view,
     accounting: validated.accounting,
+    plan: prepared,
+    reservation: null,
     displayState: "current",
     geometry,
     edgeGeometry,
@@ -397,9 +474,85 @@ export function buildBodyObjects(
       geometry.dispose();
       edgeGeometry?.dispose();
       liveGeometryCount -= edgeGeometry ? 2 : 1;
+      // The budget hold dies with the buffers it paid for, and only here: this
+      // is the one place that frees them, whether the entry reached the
+      // registry (via `flushDisposals` / `disposeAll`) or was abandoned during
+      // preparation. `release` is idempotent, so a double dispose is harmless.
+      entry.reservation?.release();
+      entry.reservation = null;
     },
   };
+  if (import.meta.env.DEV) assertBuiltMatchesPlan(entry);
   return entry;
+}
+
+/**
+ * Derive the plan for a caller that had nothing to admit. The same function the
+ * admitting callers use, so the layout is decided identically either way.
+ * A refusal throws, exactly as an unvalidated raw view does: a caller without a
+ * plan has no display state to degrade to, and building the geometry anyway
+ * would put an unpriced allocation on the GPU.
+ */
+function planOrThrow(
+  validated: ValidatedMesh,
+  bodyId: string,
+  bodyColor?: Rgba,
+  authoredFaceColors?: ReadonlyMap<string, Rgba>,
+): MeshPreparationPlan {
+  const result = planMeshPreparation(validated, { bodyColor, authoredFaceColors }, bodyId);
+  if (!result.ok) throw new MeshValidationError(result.code, result.detail, result.bodyId);
+  return result.plan;
+}
+
+/**
+ * DEV: the plan handed in must describe THIS appearance. A caller that priced
+ * one body's colours and built another's would reserve the wrong bytes with
+ * every individual step looking correct.
+ */
+function assertPlanMatchesAppearance(
+  plan: MeshPreparationPlan,
+  validated: ValidatedMesh,
+  bodyId: string,
+  bodyColor?: Rgba,
+  authoredFaceColors?: ReadonlyMap<string, Rgba>,
+): void {
+  const expected = needsVertexColors(validated.view, bodyColor, authoredFaceColors)
+    ? "deindexed"
+    : "indexed";
+  if (plan.layout === expected) return;
+  logError("vp", "mesh plan does not match the appearance it is being built with", {
+    bodyId,
+    planned: plan.layout,
+    appearance: expected,
+  });
+}
+
+/**
+ * DEV: priced == built. The plan decided the layout and the admission charged
+ * its byte totals; if the geometry that came out does not add up to those
+ * totals, the budget is describing something other than what is on the GPU —
+ * which is the entire defect PR-03A exists to close.
+ */
+function assertBuiltMatchesPlan(entry: MeshEntry): void {
+  const { plan, geometry } = entry;
+  const attributeBytes =
+    (geometry.getAttribute("position")?.array.byteLength ?? 0) +
+    (geometry.getAttribute("normal")?.array.byteLength ?? 0) +
+    (geometry.getAttribute("color")?.array.byteLength ?? 0) +
+    (geometry.getIndex()?.array.byteLength ?? 0);
+  const plannedAttributeBytes =
+    plan.positionBytes + plan.normalBytes + plan.colorBytes + plan.indexBytes;
+  const edgeBytes = entry.edgeSegmentPositions?.byteLength ?? 0;
+  if (attributeBytes === plannedAttributeBytes && edgeBytes === plan.edgeExpansionBytes) return;
+  logError("vp", "mesh built off-plan", {
+    bodyId: entry.bodyId,
+    meshRev: entry.meshRev,
+    layout: plan.layout,
+    plannedAttributeBytes,
+    attributeBytes,
+    plannedEdgeBytes: plan.edgeExpansionBytes,
+    edgeBytes,
+  });
 }
 
 /**
@@ -425,17 +578,18 @@ function reportHeaderBoundsExcursion(bodyId: string, accounting: MeshAccounting)
 }
 
 /**
- * Populate the face geometry's attributes. Returns the baked `color` attribute
- * when the mesh carries authored FACE_COLORS, else null (and the plain indexed,
- * zero-copy layout).
+ * Populate the face geometry's attributes in the layout the PLAN chose, and
+ * only that layout — there is no second predicate here (PR-03A). Returns the
+ * baked `color` attribute for a de-indexed preparation, else null.
  */
 function buildFaceGeometry(
   geometry: THREE.BufferGeometry,
   view: BodyMeshView,
+  plan: MeshPreparationPlan,
   bodyColor?: Rgba,
   authoredFaceColors?: ReadonlyMap<string, Rgba>,
 ): THREE.BufferAttribute | null {
-  if (!needsVertexColors(view, bodyColor, authoredFaceColors)) {
+  if (plan.layout === "indexed") {
     geometry.setAttribute("position", new THREE.BufferAttribute(view.positions, 3));
     if (view.normals) {
       geometry.setAttribute("normal", new THREE.BufferAttribute(view.normals, 3));
@@ -493,23 +647,46 @@ export function expandEdgeSegments(
   return { positions, segRanges, segTotal };
 }
 
-/** Publish `next` for its body; RETIRE any previous entry (disposal is ordered). */
-export function swap(bodyId: string, next: MeshEntry): void {
+/**
+ * COMMIT phase of a publication: publish `next` for its body and retire the
+ * previous entry, calling nothing observable. Returns the retired entry (or
+ * undefined for a first publication / a re-publication of the same object), to
+ * be handed to {@link notifyRetired} once the whole transaction — registry,
+ * scene, handle map, budget — has committed.
+ */
+export function commitSwap(bodyId: string, next: MeshEntry): MeshEntry | undefined {
   const prev = registry.get(bodyId);
   registry.set(bodyId, next);
   // The upload volume was already priced by semantic validation, off the same
   // counts the geometry was built from — no need to re-walk the attributes.
-  if (prev !== next) countMeshBuilt(next.accounting.estimatedGpuBytes);
-  if (prev && prev !== next) retire(prev);
+  if (prev !== next) countMeshBuilt(next.plan.gpuBytes);
+  if (prev && prev !== next) return retireEntry(prev);
+  return undefined;
+}
+
+/** COMMIT phase of a removal — the {@link commitSwap} contract, without a successor. */
+export function commitRemove(bodyId: string): MeshEntry | undefined {
+  const prev = registry.get(bodyId);
+  if (!prev) return undefined;
+  registry.delete(bodyId);
+  return retireEntry(prev);
+}
+
+/**
+ * Publish `next` and announce the retirement in one call.
+ *
+ * The transactional publisher (`MeshIngest`) does NOT use this: it has a scene
+ * graph, a handle map and a budget to move between the two halves. This is for
+ * the lanes whose whole publication IS the registry write — the exact-preview
+ * and placement-ghost lanes, and tests.
+ */
+export function swap(bodyId: string, next: MeshEntry): void {
+  notifyRetired(commitSwap(bodyId, next));
 }
 
 /** Remove a body's entry, retiring its geometry for a later frame boundary. */
 export function remove(bodyId: string): void {
-  const prev = registry.get(bodyId);
-  if (prev) {
-    registry.delete(bodyId);
-    retire(prev);
-  }
+  notifyRetired(commitRemove(bodyId));
 }
 
 export function getEntry(bodyId: string): MeshEntry | undefined {
@@ -553,6 +730,10 @@ export function refreshFaceColors(): void {
  * its `retiredAtFrame`, so it goes at the NEXT boundary. That one-frame lag is
  * the ordered retirement of spec §8.2 — the alternative would be blocking on
  * `gl.finish()`.
+ *
+ * This is also where a retired entry stops costing: `dispose()` releases its
+ * admission reservation, so the budget comes back with the memory and not one
+ * swap earlier (PR-03B).
  */
 export function flushDisposals(): void {
   currentFrame++;
@@ -590,7 +771,7 @@ export function disposeAll(): void {
   const installed = [...registry.values()];
   registry.clear();
   currentPublication = null;
-  for (const e of installed) retire(e);
+  for (const e of installed) notifyRetired(retireEntry(e));
   for (const e of pendingDisposal) e.dispose();
   countMeshRetired(pendingDisposal.length);
   pendingDisposal.length = 0;

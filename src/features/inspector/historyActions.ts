@@ -8,7 +8,7 @@
  * Errors surface through the StatusBar hint (viewportStore.setStatusHint).
  */
 import { createClient } from "@/ipc/client";
-import { promoteOne } from "@/ipc/promote";
+import { promoteAuthoritativeRef } from "@/ipc/promote";
 import {
   elementKindOfTopoKey,
   elementRefOfKind,
@@ -210,7 +210,7 @@ export const REPAIR_NOT_REBINDABLE =
 export async function rebindCandidate(
   item: NeedsRepairItem,
   candidate: ResolveCandidate,
-  snapshotId?: number,
+  snapshotId: number,
 ): Promise<boolean> {
   const path = await repairInputPath(item);
   if (!path) {
@@ -233,12 +233,16 @@ export async function rebindCandidate(
   }
   const client = createClient();
   try {
-    // `promoteOne` already hints when the candidate cannot be promoted (a stale
-    // snapshot / unresolvable pick), so this arm only has to stop the repair.
-    const promoted = await promoteOne(client, bodyId, {
+    // AUTHORITATIVE, not viewport-derived: the candidate's TopoKey came back
+    // from `ResolveRef` at `snapshotId`, so the fence is that snapshot and there
+    // is no installed mesh entry to prove anything about it (the repaired
+    // feature's body may not even be on screen). `promoteAuthoritativeRef`
+    // already hints when the candidate cannot be promoted (a stale snapshot /
+    // unresolvable pick), so this arm only has to stop the repair.
+    const promoted = await promoteAuthoritativeRef(client, bodyId, {
       topoKey: candidate.topoKey,
       anchor: { worldPoint: candidate.worldPos },
-    }, snapshotId);
+    }, snapshotId, "history-repair");
     if (!promoted) return false;
     // A CHAMFER reference-face pair (SCHEMA §7.3/§9, WP-F) needs an anchor that is
     // an INTERIOR point of the chosen face. A candidate's `worldPos` is DISPLAY

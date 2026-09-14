@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "runId": "consolidation-g-lane",
+  "cases": {
+    "TEST-RES-01": {
+      "lane": "hover-lifecycle",
+      "result": "pass",
+      "exit": 0,
+      "logSha256": "607e3a07d8814a12f3c11c1048407f74e9b16e2ad8646fb5cdc818e76ab18402",
+      "summary": null
+    },
+    "TEST-RES-05": {
+      "lane": "preview-lifecycle",
+      "result": "pass",
+      "exit": 0,
+      "logSha256": "a03f4cc38a4bae84b3d25ef823ba372612b9b50ef5bb35367ab6e3b700fa5910",
+      "summary": null
+    }
+  }
+}

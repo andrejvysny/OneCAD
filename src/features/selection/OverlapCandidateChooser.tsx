@@ -9,8 +9,9 @@ import {
 } from "react";
 import { createClient } from "@/ipc/client";
 import {
+  installedEntryIsCurrent,
   installedProofIsCurrent,
-  promoteOne,
+  promoteViewportPick,
   stalePickHint,
   type InstalledPickProof,
 } from "@/ipc/promote";
@@ -21,6 +22,7 @@ import { documentStore } from "@/stores/documentStore";
 import { toolStore } from "@/stores/toolStore";
 import { viewportStore } from "@/stores/viewportStore";
 import type { ProbeCandidate, ProbeCandidateKind } from "@/viewport/engine/Picker";
+import { attachPickProof } from "@/viewport/mesh/pickProof";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 
 const DRAG_PX = 4;
@@ -53,19 +55,32 @@ function canOpen(): boolean {
   return tool.mode === "model" && tool.modelTool === "select";
 }
 
+/**
+ * The candidate's installed-entry proof — face/edge only.
+ *
+ * A BODY candidate names a body id, not a topological element: it is selected
+ * without ever reaching `AcquireElementIds`, so it has nothing to promote and no
+ * element-level proof to carry. Its currentness is the ENTRY's alone
+ * ({@link candidateIsCurrent}).
+ */
 function proofFor(candidate: ProbeCandidate): InstalledPickProof | null {
-  if (!candidate.entry) return null;
+  if (!candidate.entry || candidate.kind === "body") return null;
   return { entry: candidate.entry, kind: candidate.kind, topoKey: candidate.topoKey };
 }
 
 function candidateIsCurrent(candidate: ProbeCandidate): boolean {
+  if (candidate.kind === "body") {
+    return candidate.entry !== undefined
+      && candidate.topoKey === candidate.bodyId
+      && installedEntryIsCurrent(candidate.bodyId, candidate.entry);
+  }
   const proof = proofFor(candidate);
   return proof !== null && installedProofIsCurrent(candidate.bodyId, proof);
 }
 
 function candidateRef(candidate: ProbeCandidate, elementId?: string): EntityRef {
   if (candidate.kind === "body") return { kind: "body", id: candidate.bodyId };
-  return {
+  const ref: EntityRef = {
     kind: candidate.kind,
     id: topoRefId(candidate.bodyId, candidate.topoKey),
     bodyId: candidate.bodyId,
@@ -73,6 +88,12 @@ function candidateRef(candidate: ProbeCandidate, elementId?: string): EntityRef 
     elementId,
     anchor: { worldPoint: [candidate.worldPos.x, candidate.worldPos.y, candidate.worldPos.z] },
   };
+  // This ref IS a viewport pick — probed, not typed — so it carries the same
+  // pick-time proof `ViewportRoot.refFromHit` attaches. Without it a chooser
+  // selection would be a second-class one that no tool could ever promote.
+  const proof = proofFor(candidate);
+  if (proof) attachPickProof(ref, proof);
+  return ref;
 }
 
 function shownCandidates(session: Session): readonly ProbeCandidate[] {
@@ -268,14 +289,13 @@ export function OverlapCandidateChooser({ containerRef, engine, meshEpoch }: Pro
     const current = sessionRef.current;
     const candidate = requested ?? (current ? current.candidates[current.active] ?? null : null);
     if (!current || !candidate || current.committing) return;
-    const proof = proofFor(candidate);
-    if (!proof || !candidateIsCurrent(candidate) || !canOpen()) {
+    if (!candidateIsCurrent(candidate) || !canOpen()) {
       stalePickHint();
       dismissSession(current.id);
       return;
     }
-    updateSession((value) => ({ ...value, committing: true }));
     if (candidate.kind === "body") {
+      updateSession((value) => ({ ...value, committing: true }));
       if (sessionRef.current?.id === current.id && candidateIsCurrent(candidate) && canOpen()) {
         selectionStore.getState().set([candidateRef(candidate)]);
       } else {
@@ -284,12 +304,20 @@ export function OverlapCandidateChooser({ containerRef, engine, meshEpoch }: Pro
       dismissSession(current.id);
       return;
     }
-    const promoted = await promoteOne(
+    // `candidateIsCurrent` already proved this above; the read is what narrows
+    // it for the promotion, which owns the snapshot fence from here (the proof
+    // carries the publication the candidate was probed against).
+    const proof = proofFor(candidate);
+    if (!proof) {
+      stalePickHint();
+      dismissSession(current.id);
+      return;
+    }
+    updateSession((value) => ({ ...value, committing: true }));
+    const promoted = await promoteViewportPick(
       createClient(),
-      candidate.bodyId,
-      { topoKey: candidate.topoKey, kind: candidate.kind, anchor: { worldPoint: [candidate.worldPos.x, candidate.worldPos.y, candidate.worldPos.z] } },
-      proof.entry.provenance?.snapshotId,
       proof,
+      { topoKey: candidate.topoKey, kind: candidate.kind, anchor: { worldPoint: [candidate.worldPos.x, candidate.worldPos.y, candidate.worldPos.z] } },
     );
     if (
       promoted &&

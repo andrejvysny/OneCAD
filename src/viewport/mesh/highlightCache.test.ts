@@ -39,8 +39,9 @@ function fakeValue(entry: MeshEntry, bytes: number): HighlightCacheValue {
 
 /** Reserve-then-put, the sequence every caller uses. */
 function admit(cache: HighlightCache, key: string, entry: MeshEntry, bytes: number): boolean {
-  if (!cache.reserve(bytes, "test")) return false;
-  cache.put(key, fakeValue(entry, bytes));
+  const receipt = cache.reserve(bytes, "test");
+  if (!receipt) return false;
+  cache.put(key, fakeValue(entry, bytes), receipt);
   return true;
 }
 
@@ -122,8 +123,8 @@ describe("TEST-RES-03 — highlight cache bounds", () => {
     const other = fakeEntry("body2");
     const a = fakeValue(doomed, 32);
     const b = fakeValue(other, 32);
-    cache.put("a", a);
-    cache.put("b", b);
+    cache.put("a", a, { bytes: 32 });
+    cache.put("b", b, { bytes: 32 });
     cache.pin("a"); // pinned, and it still goes: the source is stale
 
     cache.retireSource(doomed);
@@ -139,7 +140,7 @@ describe("TEST-RES-03 — highlight cache bounds", () => {
     const cache = new HighlightCache();
     const entry = fakeEntry();
     const value = fakeValue(entry, 64);
-    cache.put("a", value);
+    cache.put("a", value, { bytes: 64 });
     cache.pin("a");
 
     expect(cache.take("a")).toBeUndefined(); // still displayed
@@ -173,8 +174,8 @@ describe("TEST-RES-03 — highlight cache bounds", () => {
     cache.pin("b");
 
     cache.beginChange();
-    expect(cache.reserve(MIB, "faceSet")).toBe(false);
-    expect(cache.reserve(MIB, "faceSet")).toBe(false); // a second body, same change
+    expect(cache.reserve(MIB, "faceSet")).toBeFalsy();
+    expect(cache.reserve(MIB, "faceSet")).toBeFalsy(); // a second body, same change
     expect(cache.degraded).toBe(true);
     // The semantic selection is untouched — nothing was evicted or dropped.
     expect(cache.size).toBe(2);
@@ -185,7 +186,7 @@ describe("TEST-RES-03 — highlight cache bounds", () => {
     // A NEW change gets its own single diagnostic.
     cache.beginChange();
     expect(cache.degraded).toBe(false);
-    expect(cache.reserve(MIB, "faceSet")).toBe(false);
+    expect(cache.reserve(MIB, "faceSet")).toBeFalsy();
     expect(logSnapshot().filter((e) => e.level === "warn")).toHaveLength(2);
   });
 
@@ -200,11 +201,41 @@ describe("TEST-RES-03 — highlight cache bounds", () => {
     expect(cache.has("cold")).toBe(false);
   });
 
+  /*
+   * PR-04: the reservation is a RECEIPT. `reserve` prices what the caller
+   * promised to allocate; `put` refuses anything larger, because the ×1.5
+   * growth rule allocates more than the naive estimate whenever the buffer
+   * grows (4 triangles = 192 B, 5 triangles estimate 240 B, actual 288 B) and
+   * the old accounting charged the difference AFTER the ceiling was checked.
+   */
+  it("put never exceeds maxBytes — a value larger than its receipt is refused", () => {
+    const cache = new HighlightCache(250, 8);
+    const entry = fakeEntry();
+
+    const four = cache.reserve(192, "faceSet");
+    expect(four).toBeTruthy();
+    cache.put("four", fakeValue(entry, 192), four!);
+    expect(cache.bytes).toBe(192);
+
+    // The naive estimate for the 5-triangle set fits (the 4-set is evicted to
+    // make room) — and then the build owns 288.
+    const five = cache.reserve(240, "faceSet");
+    expect(five).toBeTruthy();
+    const admitted = cache.put("five", fakeValue(entry, 288), five!);
+
+    expect(admitted).toBeUndefined();
+    expect(cache.has("five")).toBe(false);
+    expect(cache.bytes).toBeLessThanOrEqual(250);
+    const errors = logSnapshot().filter((e) => e.level === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0].msg).toContain("reservation");
+  });
+
   it("clear disposes every slot, pinned included (document close)", () => {
     const cache = new HighlightCache();
     const entry = fakeEntry();
     const value = fakeValue(entry, 64);
-    cache.put("a", value);
+    cache.put("a", value, { bytes: 64 });
     cache.pin("a");
 
     cache.clear();

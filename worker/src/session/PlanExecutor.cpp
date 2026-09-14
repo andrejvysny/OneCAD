@@ -902,11 +902,35 @@ ExecResult execute_ops(ScratchJob& job, const json& ops, std::uint64_t job_id, s
     return res;
 }
 
+// D11 / WP09 F1: `tessellate_body` now returns `ok = false` when a NONDEGENERATE
+// face of a body carried no triangles, and `diagnostic` names those faces. The
+// §7.2 tessellation artifact is ADVISORY, so the plan still prepares and every
+// other body still attaches — but the failure must not be silent, or the user
+// sees one body simply not arrive. It rides the existing per-step diagnostics
+// channel as a warning under the existing §7.2 code, so no wire field changes.
+// Unlike `note_artifact_failure` this does NOT drop the tail: the meshes already
+// attached are still referenced by their handles and are still correct.
+void note_incomplete_body(ScratchJob& job, const std::string& body_id, const std::string& why) {
+    WLOG_WARN("ExecutePlan job %llu: body %s tessellated incompletely (%s); attaching the other "
+              "bodies without it",
+              static_cast<unsigned long long>(job.job_id), body_id.c_str(), why.c_str());
+    if (job.per_step.empty()) return;  // base-only prepare: the stderr line is the record
+    json& diagnostics = job.per_step.back().diagnostics;
+    if (!diagnostics.is_array()) diagnostics = json::array();
+    if (diagnostics.size() >= 64) return;  // the §7.2 per-step diagnostic budget
+    const std::string message = "body " + body_id + ": " + why;
+    diagnostics.push_back(
+        json{{"severity", "warning"},
+             {"code", "ARTIFACT_TESSELLATE_FAILED"},
+             {"stage", "artifact"},
+             {"message", message.size() <= 4096 ? message : message.substr(0, 4096)}});
+}
+
 // Inline tessellation artifact on ExecutePlan (SCHEMA §7.2 artifacts.tessellate):
 // tessellate every prepared body into a MESH1 blob attached to the terminal resp's
 // binary tail when it fits the transport limits advertised in hello. Larger meshes are
 // omitted: Rust then uses Tessellate, keeping control responses bounded.
-json attach_tessellate(const ScratchJob& job, const json& artifacts, Envelope& resp) {
+json attach_tessellate(ScratchJob& job, const json& artifacts, Envelope& resp) {
     if (!artifacts.is_object() || !artifacts.contains("tessellate") ||
         !artifacts["tessellate"].is_object()) {
         return json();
@@ -931,7 +955,13 @@ json attach_tessellate(const ScratchJob& job, const json& artifacts, Envelope& r
     for (const auto& [bid, rec] : job.bodies.all()) {
         tess::BodyMesh bm = tess::tessellate_body(rec.geom, bid, lod, include_edges, &job.partition,
                                                   &rec.face_colors);
-        if (!bm.ok) continue;
+        if (!bm.ok) {
+            note_incomplete_body(job, bid,
+                                 bm.diagnostic.empty()
+                                     ? std::string("the body produced no triangulation")
+                                     : bm.diagnostic);
+            continue;
+        }
         if (bm.blob.size() > protocol::kChunkSize ||
             resp.out_bin.size() + bm.blob.size() > protocol::kInitialBulkCredit) {
             continue;

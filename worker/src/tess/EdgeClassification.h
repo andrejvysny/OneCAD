@@ -17,6 +17,8 @@
 #include <vector>
 
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopoDS_Edge.hxx>
+#include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 
 namespace onecad::tess {
@@ -39,6 +41,38 @@ inline constexpr double kEdgeCreaseRad = 3.4906585039886593e-3;  // 0.2 degrees
 
 // Interior parameters at which both faces' oriented normals are compared.
 inline constexpr int kEdgeContinuitySamples = 3;
+
+// WP09 Astra F6. What the three-sample screen actually established across one
+// edge. `evaluable` counts only samples where BOTH faces returned a normal whose
+// DIRECTION is certified by their own derivative-error budgets
+// (SurfaceNormals.h): an unbounded normal is no evidence, and the retired code
+// simply skipped such a sample and then treated the remainder as if the whole
+// edge had been screened.
+struct EdgeSampleAgreement {
+    int required = kEdgeContinuitySamples;
+    int evaluable = 0;
+    double maxDihedralRad = 0.0;
+    bool complete() const { return required > 0 && evaluable == required; }
+};
+
+// The agreement measured across `edge` between its two incident faces.
+EdgeSampleAgreement sample_edge_agreement(const TopoDS_Face& f1, const TopoDS_Face& f2,
+                                          const TopoDS_Edge& edge);
+
+// NUM §8.2's tangency decision, separated from its evidence so the "a required
+// sample was not evaluable" branch is testable without a pathological OCCT face.
+//
+// Astra F6: tangency now needs (i) trusted `GeomAbs_G1`-or-better continuity
+// metadata on the edge, or (ii) the two faces sharing the SAME supporting surface
+// handle at the SAME location — AND, in both cases, every required sample
+// evaluable with a bounded normal and consistent within kEdgeCreaseRad. Two
+// r = 0.1 mm spheres whose centres are 0.0001 mm apart used to pass the retired
+// "tolerance-close analytic parameters" equivalence while their real dihedral is
+// 0.0573 degrees, so distinct intersecting spheres became tangent. A measured
+// crease above kEdgeCreaseRad is still definitive evidence of a discontinuity
+// even when other samples failed, so it answers `hard`.
+std::uint32_t decide_edge_continuity(bool trustedG1, bool sameSupportingSurface,
+                                     const EdgeSampleAgreement& agreement);
 
 // `FACE_SOLID_IDS` (NUM §9.2) for a face that belongs to no independently
 // verified closed solid partition.

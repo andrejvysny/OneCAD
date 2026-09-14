@@ -40,16 +40,29 @@ import { documentStore } from "@/stores/documentStore";
 import { toolStore } from "@/stores/toolStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { settingsStore } from "@/stores/settingsStore";
-import type { ViewportEngine } from "../engine/ViewportEngine";
+import type { FrameSubmission, ViewportEngine } from "../engine/ViewportEngine";
 import { buildBodyObject, type BodyObjectHandle } from "../engine/BodyObject";
 import { BodyMaterialLibrary } from "../engine/bodyMaterials";
 import { coerceRenderMode, RENDER_MODES, type RenderModeDef } from "../engine/renderModes";
 import { MeshParseError, parseMeshPayload, type MeshParseErrorKind } from "./parseMeshPayload";
 import type { BodyMeshView } from "./parseMeshPayload";
-import { buildBodyObjects, disposeAll, getEntry, refreshFaceColors, remove, setCurrentMeshPublication, swap, type MeshDisplayState, type MeshProvenance } from "./meshRegistry";
+import { buildBodyObjects, commitRemove, commitSwap, disposeAll, getEntry, notifyRetired, refreshFaceColors, setCurrentMeshPublication, type MeshDisplayState, type MeshProvenance } from "./meshRegistry";
 import { validateMeshView, type MeshValidationCode } from "./validateMesh";
-import { MeshAdmission, type MeshAdmissionReason, type MeshReservation } from "./meshAdmission";
+import { planMeshPreparation } from "./meshPreparationPlan";
+import { getDocumentAdmission, type MeshAdmission, type MeshAdmissionReason, type MeshReservation } from "./meshAdmission";
 import { dropSelectionForBody, reconcileSelectionForBody } from "./rebindPick";
+
+/** Structural equality for a provenance stamp (`null` equals only `null`). */
+function sameProvenance(a: MeshProvenance | null, b: MeshProvenance | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.documentId === b.documentId &&
+    a.runtimeSession === b.runtimeSession &&
+    a.snapshotId === b.snapshotId &&
+    a.generation === b.generation
+  );
+}
 
 export type { MeshDisplayState } from "./meshRegistry";
 
@@ -153,37 +166,68 @@ export class MeshIngest {
   /** Fires after a body's mesh finishes loading into the scene (F-WP7 commit reconcile). */
   private readonly bodyLoadedListeners = new Set<(bodyId: string) => void>();
   /**
-   * Peak resource admission for prepared mesh resources (spec §9). Public so a
-   * test or a telemetry reader can take a `snapshot()`; it is owned here and
-   * nothing else may reserve against it.
+   * Peak resource admission for prepared mesh resources (spec §9). The DOCUMENT
+   * budget, shared with the preview/ghost lanes — the §9 limits are per
+   * document, not per lane — and read through the accessor so a test that
+   * installs a smaller one is seen here too. Public so a test or a telemetry
+   * reader can take a `snapshot()`.
+   *
+   * Each hold is owned by the ENTRY it paid for (`MeshEntry.reservation`) and
+   * released when that entry's buffers are freed, so this controller keeps no
+   * per-body reservation map: a retired-but-alive mesh must keep paying.
    */
-  readonly admission = new MeshAdmission();
-  /** The budget hold behind each INSTALLED entry, released when it is replaced or dropped. */
-  private readonly reservations = new Map<string, MeshReservation>();
+  get admission(): MeshAdmission {
+    return getDocumentAdmission();
+  }
   /** What the user is looking at per body, and why. */
   private readonly displayStates = new Map<string, { state: MeshDisplayState; diagnostic?: MeshDisplayDiagnostic }>();
   private readonly displayStateListeners = new Set<(bodyId: string) => void>();
 
-  private traceRendered(bodyId: string, token: number, startedAt: number): void {
+  /**
+   * Acknowledge the FIRST frame that actually SUBMITTED this body with the
+   * provenance that was just installed (PR-11). A frame that omits the body
+   * (hidden, isolated, replaced by a preview) proves nothing about it and is
+   * skipped; the timeout then names why nothing was acknowledged.
+   */
+  private traceRendered(
+    bodyId: string,
+    token: number,
+    startedAt: number,
+    installedProvenance: MeshProvenance | null,
+  ): void {
     const engine = this.engine;
     if (!engine) return;
     const correlation = this.renderCorrelation.get(bodyId);
     if (!correlation && !import.meta.env.DEV) return;
     const revision = correlation?.revision ?? 0;
     let unsubscribe = () => {};
+    let skipped = 0;
+    let lastSkipReason = "no frame submitted";
     const timeout = setTimeout(() => {
       unsubscribe();
-      trace("mesh", `render completion timeout revision=${revision} body=${bodyId} token=${token} timeoutMs=2000`);
+      trace("mesh", `render completion timeout revision=${revision} body=${bodyId} token=${token} timeoutMs=2000 skippedFrames=${skipped} reason=${lastSkipReason}`);
     }, 2000);
-    unsubscribe = engine.onAfterRender(() => {
+    unsubscribe = engine.onAfterRender((frame: FrameSubmission) => {
+      if (this.detached || this.loadSeq.get(bodyId) !== token || !this.bodyObjects.has(bodyId)) {
+        unsubscribe();
+        clearTimeout(timeout);
+        return;
+      }
+      const at = frame.displayedBodyIds.indexOf(bodyId);
+      if (at < 0) {
+        skipped += 1;
+        lastSkipReason = "body not in submission (hidden, isolated or replaced)";
+        return;
+      }
+      const submitted = frame.displayedProvenance[at]?.provenance ?? null;
+      if (!sameProvenance(submitted, installedProvenance)) {
+        skipped += 1;
+        lastSkipReason = "submission carried a different publication";
+        return;
+      }
       unsubscribe();
       clearTimeout(timeout);
-      if (
-        this.detached ||
-        this.loadSeq.get(bodyId) !== token ||
-        !this.bodyObjects.has(bodyId)
-      ) return;
-      trace("mesh", `render completed revision=${revision} body=${bodyId} token=${token} elapsedMs=${(performance.now() - startedAt).toFixed(1)}`);
+      trace("mesh", `render completed revision=${revision} body=${bodyId} token=${token} submission=${frame.submission} skippedFrames=${skipped} elapsedMs=${(performance.now() - startedAt).toFixed(1)}`);
       if (correlation) {
         void this.client?.meshRenderCompleted({ ...correlation, bodyId }).catch((error: unknown) => {
           logDebug("mesh", "render acknowledgment unavailable", { bodyId, error });
@@ -196,6 +240,21 @@ export class MeshIngest {
   onBodyLoaded(cb: (bodyId: string) => void): () => void {
     this.bodyLoadedListeners.add(cb);
     return () => this.bodyLoadedListeners.delete(cb);
+  }
+
+  /**
+   * Announce a completed publication. Each subscriber is isolated: one that
+   * throws is reported and the rest still run, and none of them can change the
+   * fact that the body IS installed (PR-02). Called only after the commit.
+   */
+  private notifyBodyLoaded(bodyId: string): void {
+    for (const cb of [...this.bodyLoadedListeners]) {
+      try {
+        cb(bodyId);
+      } catch (error) {
+        logError("mesh", "body-loaded listener threw", { bodyId, error });
+      }
+    }
   }
 
   /** What is on screen for this body, or undefined when it has no display record. */
@@ -226,12 +285,27 @@ export class MeshIngest {
       prev.diagnostic?.detail === diagnostic?.detail
     ) return;
     this.displayStates.set(bodyId, diagnostic ? { state, diagnostic } : { state });
-    for (const cb of [...this.displayStateListeners]) cb(bodyId);
+    this.notifyDisplayStateChanged(bodyId);
   }
 
   private clearDisplayState(bodyId: string): void {
     if (!this.displayStates.delete(bodyId)) return;
-    for (const cb of [...this.displayStateListeners]) cb(bodyId);
+    this.notifyDisplayStateChanged(bodyId);
+  }
+
+  /**
+   * Announce a display-state transition. The state has ALREADY been recorded, so
+   * a subscriber that throws is isolated and reported rather than unwinding a
+   * fact the rest of the system can already see (PR-02).
+   */
+  private notifyDisplayStateChanged(bodyId: string): void {
+    for (const cb of [...this.displayStateListeners]) {
+      try {
+        cb(bodyId);
+      } catch (error) {
+        logError("mesh", "display-state listener threw", { bodyId, error });
+      }
+    }
   }
 
   /**
@@ -656,15 +730,6 @@ export class MeshIngest {
         this.rejectPayload(bodyId, validation.code, validation.detail);
         return;
       }
-      // Peak admission: the outgoing body is still installed and still holds its
-      // reservation, so the replacement must fit ALONGSIDE it.
-      const reservation = this.admission.reserve(bodyId, validation.mesh.accounting);
-      if (!reservation.ok) {
-        this.rejectPayload(bodyId, reservation.reason, reservation.detail);
-        return;
-      }
-      held = reservation;
-
       const authoredFaceColors = await this.resolveAuthoredFaceColors(bodyId, view, faceColorsMeta);
       // `resolveAuthoredFaceColors` can await one worker round-trip PER authored
       // colour, which is long enough for a newer publish to overtake this one.
@@ -683,6 +748,31 @@ export class MeshIngest {
       // and still on screen (numerics §11.2): build the geometry, then its
       // scene consumer. A failure here leaves the previous display snapshot
       // whole rather than publishing half a scene and repairing it later.
+      //
+      // The layout is decided and priced FIRST (PR-03A). It has to happen here
+      // rather than beside validation: a body colour and the authored face
+      // overrides are document metadata, and `resolveAuthoredFaceColors` above
+      // is what turns the persisted ElementIds into the mesh ids this mesh
+      // actually uses. Pricing before that resolve would charge the indexed
+      // layout for geometry about to be built de-indexed. Nothing has been
+      // allocated yet, so this is still before the first derived array.
+      const prepared = planMeshPreparation(
+        validation.mesh,
+        { bodyColor, authoredFaceColors },
+        bodyId,
+      );
+      if (!prepared.ok) {
+        this.rejectPayload(bodyId, prepared.code, prepared.detail);
+        return;
+      }
+      // Peak admission: the outgoing body is still installed and still holds its
+      // reservation, so the replacement must fit ALONGSIDE it.
+      const reservation = this.admission.reserve(bodyId, prepared.plan);
+      if (!reservation.ok) {
+        this.rejectPayload(bodyId, reservation.reason, reservation.detail);
+        return;
+      }
+      held = reservation;
       const entry = buildBodyObjects(
         validation.mesh,
         bodyId,
@@ -690,6 +780,7 @@ export class MeshIngest {
         bodyColor,
         authoredFaceColors,
         effectiveGeneration === undefined ? undefined : publication ?? undefined,
+        prepared.plan,
       );
       let handle: BodyObjectHandle;
       try {
@@ -703,11 +794,15 @@ export class MeshIngest {
         throw e;
       }
 
-      // ── PUBLISH ────────────────────────────────────────────────────────────
-      // From here to `installed = true` there is no await and nothing that can
-      // throw: registry, scene, and budget move to the new entry together.
-      const prev = getEntry(bodyId);
-      swap(bodyId, entry);
+      // ── COMMIT ─────────────────────────────────────────────────────────────
+      // The transaction (numerics §11.2). From here to `installed = true` there
+      // is no await, no listener, and nothing that can throw: the registry, the
+      // scene graph, the handle map and the budget move to the new entry
+      // together, so no observer can ever see half of a publication — and no
+      // observer's failure can make the publisher believe nothing was
+      // published. `commitSwap` is the registry half of that, deliberately
+      // silent; its retirement is announced below (PR-02).
+      const prev = commitSwap(bodyId, entry);
       const old = this.bodyObjects.get(bodyId);
       if (old) {
         this.engine.bodiesRoot.remove(old.group);
@@ -718,15 +813,20 @@ export class MeshIngest {
       }
       this.engine.bodiesRoot.add(handle.group);
       this.bodyObjects.set(bodyId, handle);
-      // The outgoing entry is retired, so its budget hold goes with it and this
-      // job's hold becomes the body's installed hold.
-      this.reservations.get(bodyId)?.release();
-      this.reservations.set(bodyId, reservation);
+      // The hold this job took becomes the ENTRY's hold: it now lives exactly as
+      // long as the buffers, and the retired entry keeps its own until it is
+      // really disposed (PR-03B). `held` is cleared so the abandon path below
+      // cannot release a budget the display is using.
+      entry.reservation = reservation;
       held = null;
       installed = true;
-      this.setDisplayState(bodyId, "current");
 
-      // ── AFTER THE FACT ─────────────────────────────────────────────────────
+      // ── NOTIFY ─────────────────────────────────────────────────────────────
+      // Everything past the commit is an ANNOUNCEMENT of a publication that has
+      // already happened. Observers may fail; the display is not rolled back and
+      // is not relabelled stale when they do.
+      notifyRetired(prev);
+      this.setDisplayState(bodyId, "current");
       // A regen renumbers TopoKeys and consumes elements outright, so a selection
       // made before it may name nothing after it. Decide each ref's fate against
       // the NEW mesh (and, for a promoted one, against the backend) BEFORE the
@@ -738,8 +838,8 @@ export class MeshIngest {
       this.engine.refreshHighlights();
       this.engine.invalidate();
       trace("mesh", `mesh installed body=${bodyId} token=${token} elapsedMs=${(performance.now() - startedAt).toFixed(1)}`);
-      this.traceRendered(bodyId, token, startedAt);
-      for (const cb of [...this.bodyLoadedListeners]) cb(bodyId);
+      this.traceRendered(bodyId, token, startedAt, entry.provenance ?? null);
+      this.notifyBodyLoaded(bodyId);
     } catch (e) {
       if (this.detached || this.loadSeq.get(bodyId) !== token) return;
       // A fetch/build failure must never be silent: without this the body
@@ -820,12 +920,13 @@ export class MeshIngest {
     this.loadSeq.set(bodyId, (this.loadSeq.get(bodyId) ?? 0) + 1);
     this.renderCorrelation.delete(bodyId);
     this.queued.delete(bodyId);
-    // The geometry is going, so its budget hold and its display record go too —
-    // a dropped body must not keep charging the document's resource budget.
-    this.reservations.get(bodyId)?.release();
-    this.reservations.delete(bodyId);
     this.clearDisplayState(bodyId);
-    remove(bodyId);
+    // Same two-phase shape as the publish path: retire the entry, then announce
+    // it. The budget hold is NOT released here — the entry is retired, not
+    // freed, and its buffers are still allocated until the ordered flush
+    // disposes it (PR-03B).
+    const retired = commitRemove(bodyId);
+    notifyRetired(retired);
     // The geometry is gone for good, so a face/edge ref naming it can never draw
     // again — and must never author an op either (D-5, drawable-or-gone).
     dropSelectionForBody(bodyId);
@@ -857,14 +958,12 @@ export class MeshIngest {
     this.activeToken.clear();
     this.queued.clear();
     this.renderCorrelation.clear();
-    // Everything this instance charged to the budget is given back before the
-    // registry is emptied, so a re-attach starts from zero rather than from the
-    // closed document's holdings.
-    for (const reservation of this.reservations.values()) reservation.release();
-    this.reservations.clear();
     this.displayStates.clear();
     this.currentPublication = null;
     setCurrentMeshPublication(null);
+    // `disposeAll` frees every entry, and each entry releases its own budget
+    // hold as its buffers go, so the document's charge returns to zero here
+    // without this controller tracking a single reservation (PR-03B).
     disposeAll(); // registry empty + leak tripwire
     this.materials?.dispose();
     this.materials = null;

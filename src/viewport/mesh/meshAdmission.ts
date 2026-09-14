@@ -17,8 +17,6 @@
  *
  * Acceptance: TEST-MESH-04, TEST-PUB-01, TEST-PUB-02.
  */
-import type { MeshAccounting } from "./validateMesh";
-
 const MIB = 1024 * 1024;
 
 /** Specification §9 resource table. Overridable per instance for tests only. */
@@ -57,9 +55,15 @@ export interface MeshAdmissionSnapshot {
   readonly holdings: number;
 }
 
-/** Prepared CPU cost of one validated mesh: the payload plus every derived array. */
-export function preparedCpuBytesOf(accounting: MeshAccounting): number {
-  return accounting.payloadBytes + accounting.edgeSegmentBytes + accounting.colorBytes;
+/**
+ * What one prepared mesh costs. The ONLY shape `reserve` accepts, and the only
+ * producer of it is `planMeshPreparation` (PR-03A) — so a reservation can never
+ * again be priced from the payload while construction builds a different
+ * layout. `MeshPreparationPlan` satisfies this structurally.
+ */
+export interface MeshResourceCost {
+  readonly cpuBytes: number;
+  readonly gpuBytes: number;
 }
 
 export class MeshAdmission {
@@ -79,9 +83,9 @@ export class MeshAdmission {
    * Take a hold on the budget for one prepared mesh. Refused when the request
    * does not fit ALONGSIDE everything currently held — the peak rule.
    */
-  reserve(bodyId: string, accounting: MeshAccounting): MeshReservation | MeshAdmissionRefusal {
-    const cpu = preparedCpuBytesOf(accounting);
-    const gpu = accounting.estimatedGpuBytes;
+  reserve(bodyId: string, cost: MeshResourceCost): MeshReservation | MeshAdmissionRefusal {
+    const cpu = cost.cpuBytes;
+    const gpu = cost.gpuBytes;
     if (this.cpuBytes + cpu > this.limits.preparedCpuBytes) {
       return {
         ok: false,
@@ -120,4 +124,27 @@ export class MeshAdmission {
       holdings: this.holdings,
     };
   }
+}
+
+/**
+ * The ACTIVE DOCUMENT's budget. The §9 limits are per document, not per lane,
+ * so every lane that puts geometry on the GPU spends this one: `MeshIngest` for
+ * committed bodies, and `previewMesh` for exact previews and placement ghosts.
+ * A preview that reserved against its own instance would be free as far as the
+ * document is concerned, which is how a drag could outspend the budget while
+ * admission reported the bodies only.
+ */
+let documentAdmission = new MeshAdmission();
+
+export function getDocumentAdmission(): MeshAdmission {
+  return documentAdmission;
+}
+
+/**
+ * Test-only: start from an empty budget, optionally a small one. Call it BEFORE
+ * building anything that reserves — holds taken against the previous instance
+ * keep releasing into that instance, which is now unobservable.
+ */
+export function __resetDocumentAdmissionForTests(limits: Partial<MeshAdmissionLimits> = {}): void {
+  documentAdmission = new MeshAdmission(limits);
 }

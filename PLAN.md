@@ -1,388 +1,180 @@
-# CURRENT STATUS: INCOMPLETE — UX HARDENING HANDOFF 2026-09-12
-
-Acceptance is open. The original `status: done` below is historical smaller-plan text only and must not compete with this current status.
-
-## RESUMED IMPLEMENTATION — 2026-09-12
-
-The handoff draft remains retained; implementation is active. ui_plan Sol owns typed presentation contract work; tools_plan Sol owns the general-pattern contract audit pending main approval. Luna= simple docs/UI, Terra=moderate UI, Sol=complex work, Astra=final review. No tests or gates are implied by this documentation note.
-
-# CURRENT APPROVED UX HARDENING PLAN — 2026-09-12
-
-This pointer is authoritative for the current larger hardening program. The older WP-U1..U12 plan below is historical and its “done” labels do not close the current program. Preserve all historical entries and use this section for new work.
-
-## Scope and status
-
-Phase 0 baseline evidence/inventory: partial/done for durable evidence, review inventory, normative wire/schema/fixtures and verifier manifests; current dirty-tree ownership and scope reruns remain owed.
-
-Phase 1A native stalls/locks/publication: partial. Runtime session/manager/epoch fencing, restart fences, latest-event coalescing, mesh identity fences, appStore success-boundary reset/single-flight and subscriber-failure isolation are implemented; scheduler fence, queued-old-runtime app-driver and restart-owner automation are 1/1. Tracing reproduced the webview-lock stall and pinned versions/narrow Tauri tracing feature are documented. Native stress and publication-to-render completion remain owed.
-
-Phase 1B interaction boundary: bounded/automated accepted; native pointer/AX/Enter equivalence and physical input behavior remain owed.
-
-Phase 1C solver/currentness/reference safety: partial. Solver currentness, persistent identity and ambiguity handling are bounded; native validation and fail-closed reference evidence remain open. Typed targets/reference consistency is tracked under 2C/2D.
-
-Phase 1D removed selection/inspector trust: partial. Removed selection/hover cleanup, currentness and ranking are bounded; inspector recovery/history, tree/canvas hover + Reveal, native recovery/undo and persistence remain open.
-
-Phase 2A atomic operation/undo/visibility: partial. Atomic operation, consumed-sketch visibility and runtime/revision/exact-entry rollback receipts with cap 200 are bounded; native rollback, 100 stress, save/autosave isolation remain open.
-
-Phase 2B palette/semantic labels/dirty behavior: partial/bounded. Palette ranking, semantic labels, no-op clean/autosave behavior and field-local undo boundaries are bounded; invalid-mode/tool-first/constraint matrix and every report-tool variant remain open.
-
-Phase 2C shared presentation/controller contract: partial. Typed targets/references and one-parameter authority are bounded; full cross-tool consistency and native window matrix remain open. Annotation work is tracked under 3B.
-
-Phase 2D chip/inspector rendering, accessibility and layout: partial. All tool families already render through the frame; typed contract/targets/reference consistency, AX labels, docking edge cases and stable full-parameter inspector remain open.
-
-Phase 2E solver-backed drag/snap/rollback: partial. Solver-backed drag, snap ordering and rollback/currentness seams are bounded; constraint/snap/trim/both-cancel, native rollback stress and complex dimensioned cases remain open.
-
-Phase 2F sketch wording/indicators: partial. Sketch wording, snap/constraint indicators and semantic labels are bounded; all variants and native constraint/snap evidence remain open.
-
-Phase 3A candidate API/reference picking: bounded partial. Candidate API, reference picking, currentness and fail-closed identity are bounded; native provenance breadth, all tool reference contracts and ambiguity handling remain open.
-
-Phase 3B candidate UI/tree hover/Reveal/framing/section/measurement/history: partial. Candidate chooser/filter/keyboard has fresh 2/2 browser proof; annotations, hover, framing, section, measurement, history and native selection trust remain open.
-
-Phase 3C FeaturePattern contracts/core/worker: restricted partial. Canonical selected IDs, shared host lineage and fail-closed validation are bounded for selected families; general mixed chains, dependency/source edit, suppression, repair, persistence and native breadth remain open. No opaque extensions or Loft/Sweep claims.
-
-Phase 3D FeaturePattern UI/tests: open/partial. Backend-hidden broad UI and tests remain incomplete; do not add registry rows to imply support.
-
-Phase 4 docs/review fixes: active. Documentation carries evidence and boundaries; Astra/main owns all-phase acceptance, not Phase 4. The recorded Rust workspace gate passed for the prior frozen source; any changed tree requires a fresh serial rerun. Full browser/native, stress, accessibility, window, recovery/currentness, pattern, save/autosave and report-tool gates remain open.
-
-## Locked decisions and constraints
-
-Small movable chip + stable inspector; invalid typed values stay visible and block confirmation; `Use maximum` is explicit and non-committing; snap occurs before constraint solve and Alt bypasses snap only; FeaturePattern uses selected canonical record IDs, shared parameters, source included in count, no per-instance override/suppression, one-host lineage and reject-all invalid input; BodyPattern V2 preserved. Normative wire/schema/fixtures stay lockstep. No speculative framework upgrades or registry edits. Physical unsupported interactions are human-blocked, never fabricated as passes. Isolated QA files are append-only and must not overwrite prior evidence.
-
-## Evidence boundary
-
-Durable evidence: Vitest 332 files/5880 pass/78 skip; worker Rust 1646/0/0/0 across exactly 100 result lines; CTest 196/196; post-DTO fmt/clippy warning-free; build tsc+Vite pass with >500kB warning. Historical Vitest RED is a record without a durable RED artifact; Rust RED is durable. Full browser is not current after final implementation; native GUI was last known closed at the prior checkpoint; full acceptance remains open.
-
-## Acceptance checklist — all-phase Astra/main gate
-
-1. Annulus: pointer/AX/Enter, exactly one hollow commit and one operation.
-2. At least 100 commits each for fillet, hole and offset families across three fresh native launches, with render completion.
-3. Invalid rapid typing, delayed cancel, tool-first and every invalid-mode path.
-4. Constraint/snap/Alt/trim and both-cancel matrix; physical unsupported input is human-blocked, never fabricated.
-5. Removed selection, recovery and currentness across changed/removed references.
-6. Fully dimensioned housing and revolved flange, including solver-backed drag/rollback.
-7. General FeaturePattern: atomic refs, twins, source edits, dependencies, suppression, repair, persistence, BodyPattern V2 unchanged.
-8. Isolated native save/open/autosave and currentness.
-9. Exact 1024×768, 1156×768 and 1440×900 normal/Retina/enlarged window matrix.
-10. Every report-tool variant: explicit pass, defect, or blocked reason.
-
-FeaturePattern acceptance additionally requires selected records rather than copied payloads; internal refs within an instance; host refs retaining host; external refs unique; cycle, multi-host and unselected-operand rejection; deterministic provenance per pattern/instance/source; whole-pattern suppression; and no opaque extension or Loft/Sweep claims.
-
-## Execution order
-
-Resume with AGENTS/CLAUDE → CURRENT_STATE/HANDOFF → this section → TODO/matrix. Recheck identity, dirty tree, processes and ports. Use the cheapest capable model; Claude Code must verify available equivalents and never assume GPT models/tools or extra GPT-call authority. Choose typed-target or D-camera bounded work, then pattern contracts serially, then UI. Build worker before Cargo, use Bun and `npx tsc`, read native Computer-Use skill before native validation, restart Vite and verify served modules, and keep heavy gates serial on main. Unresolved questions: none product-level; engineering validation remains open.
-
-# PLAN: Fix the findings of the 2026-09-11 native UX review (`OneCAD-UX-Review-2026-09-11.md`)
-status: done (uncommitted; ledger in TODO.md)
+# PLAN: VP-HARDENING consolidation pass — close PR-01…PR-12 and the owed WP03/WP08/WP09 reviews, L3-green, commit
+status: paused (T0–T10, A1 done; A2, R1, G1 owed)
+criticality: critical (identity, publication atomicity, resource accounting, worker numerics)
+run shape: parallel waves (≤3 implementers), single worktree with disjoint file ownership, no Workflow tool
 
 ## Context
 
-Source: `OneCAD-UX-Review-2026-09-11.md` (manual Computer-Use review, two live passes, three addenda). The
-reviewer's verdict: the gaps are trust in recovery, history visibility, selection clarity, and numeric-input
-confidence — not missing commands. This plan fixes every finding that has a code-side cause, records the ones
-that do not, and adds the acceptance tests the review asked for.
+Worktree `/Users/andrejvysny/workspace/viewport-hardening`, branch `viewport-hardening`, HEAD `61dab320` (checkpoint commit, **not** a gate boundary — L3 still owed per `docs/viewport-hardening/execution/STATUS.md` §8). Untracked: `docs/01-PROGRESS-REVIEW.md`, `docs/02-CODING-AGENT-CORRECTION-BRIEF.md` (the review inputs; keep, do not edit). Root `PLAN.md` holds the finished 2026-09-11 UX plan (status done).
 
-Evidence added this session from `logs/dev.jsonl` (the Addendum C session, pid 48299, 11:46–11:54 UTC):
+Review findings PR-01…PR-12 — **all twelve verified present at HEAD** by direct reads this session:
 
-- **Undo never reached the backend.** Both ⌘Z / ⌃Z presses after the Revolve landed as `ipc://localhost/redo`
-  (11:48:52, 11:49:02); `undo` was never invoked. The FE handler (`src/shortcuts/useShortcuts.ts:279-291`) maps
-  `mod+Z` → undo and `mod+Shift+Z` → redo, so the injected key carried Shift (uppercase `Z`). Independent of that:
-  there is **no native menu** (`src-tauri/src/lib.rs` never builds one; Tauri's implicit macOS default menu's
-  Edit → Undo is NSResponder text undo), the palette has **no Undo/Redo entry** (`src/features/palette/paletteItems.ts`),
-  a no-op undo/redo gives **no status hint** (`ModelToolController.ts:9302-9311` hints only when `res.opLabel` is
-  set), and the undo chord fires **before** the `isEditableTarget` guard (`useShortcuts.ts:327`), so ⌘Z inside a
-  number field undoes the document.
-- **"Selection is out of date — pick again"** = `RefUnresolved` from `document_runtime.rs:4179-4187`
-  (`promote_selection`: "element promotion returned an incomplete or mismatched batch") at 11:50:28, 24 s after the
-  hole regen published snapshot 6, with the pick addressed **to snapshot 6** (`gate_stale_pick` passed). Worker
-  `acquire_ids` (`worker/src/session/ElementIdentity.cpp:136-163`) omitted the pick: `resolve_pick` (`:62-99`)
-  matched neither the topoKey nor the anchor. One second later `face_sketch_plane` + `add_sketch_on_face` on the
-  same selection succeeded (`QueryElement` ids 96/97). Root cause not pinned. The only FE code that rewrites a
-  ref's topoKey is `src/viewport/mesh/rebindPick.ts` (geometric best-effort rebind on every mesh swap,
-  `REBIND_TOL_FRAC=1e-3`, `REBIND_DIR_MIN=0.9`, called from `meshSync.ts:391-396`). The Rust mismatch message drops
-  the requested/returned keys, so the log cannot say which key was sent.
-- **Displaced highlight after chamfer** matches `rebindSelectionForBody` (`rebindPick.ts:342-355`) re-pointing the
-  consumed edge's ref to the nearest surviving edge; `HighlightLayer` draws whatever `ordinalForRef` resolves
-  (`HighlightLayer.ts:184-227`).
-- **"12 → 2 mm"**: type-to-enter seeds `DimensionInput` with `initialText="1"` (`ModelToolController.ts:9739-9749`
-  → `toolChipStore.beginPrimaryEntry`), and the mount effect does `focus()` **+ `select()`**
-  (`DimensionInput.tsx:261-266`), so the second digit replaces the selected first digit. Deterministic.
-- **Fillet 100 → 11.99 silently**: `guardEdgeOpValue` (`ModelToolController.ts:3363-3371`) discards
-  `clampToEdgeOpRange(...).clamped/.reason` (`src/tools/preview/filletRadius.ts:148-243`).
-- **Sketch Cancel keeps geometry**: FE `exit()` always does `cancelSketch` then `finishSketch`
-  (`SketchController.ts:1211-1262`); Rust `cancel_sketch` is squash-only (`document_runtime.rs:3971-3987`).
-  `SketchSession { prior, undo_watermark, evicted_at_enter }` (`:296-312`) and `squash_sketch_session`
-  (`:5095-5121`) already collapse the session into one net undo step, so a discard is one extra `session.undo()`.
-- **Construction mode sticky across sketches** by design (`src/stores/sketchStore.ts:68-73`; reset only on document
-  close).
-- **History rows missing**: `HistorySelectionSection` (`src/features/inspector/sections.tsx:349-364`) shows
-  `features.slice(0, 3)` for a body and the first extrude otherwise. Hole / Pattern / Chamfer rows exist in
-  `HistoryList.tsx` (`OPTYPE_ICON`); they are cut off. No "Show all".
-- **Sketch intercepts solid edge**: `refFromModelHits` (`src/viewport/ViewportRoot.tsx:81-95`) lets a sketch hit win
-  any numeric tie against a body hit unless Alt (pick-through) is held; an edge-vs-sketch tie is treated like a
-  face-vs-sketch tie.
-- **Pattern disabled on a Hole**: patterns are body-only (`toolApplicability.ts:176-179`, reason "Select a body to
-  pattern"; `worker/src/ops/PatternOp.h`; SCHEMA §7.3 body-copy semantics). The reason is tooltip-only.
-- **Measure circular edge**: `ElementInfoDto` (`src-tauri/src/dto.rs:990-1016`) carries `magnitude` (arc length),
-  no radius; `MeasureOverlay.tsx:34-37` prints "Length". The worker already computes circle/cylinder radius in
-  `ClassifyElement.cpp:126,178` (different verb).
-- **Std hole picker cells** render a literal `·`, never the mm value (`HoleChipCluster.tsx:315-343`).
-- **Chip accessibility**: overlay root is `aria-hidden` (`ModelToolChips.tsx:79-84`); `DimensionInput` hardcodes
-  `aria-label="Dimension value"` (`DimensionInput.tsx:409`); hole/chamfer fields have testids only.
-- **Status verbs**: `finishExtrude` (`ModelToolController.ts:8413-8452`) says "Extruded" for Union/NewBody/Cut with
-  results; "Cut completed" only on the zero-body branch.
-- **Empty / projected sketch message**: `emptySketchCard()` exists (`constraintStatus.ts:64`); a face sketch holding
-  only projected entities (11 from `add_sketch_on_face`) still reads "Fully constrained · DOF 0".
-- **Snap kind** is resolved (`decision.primaryKind`, `snapEngine.ts:265`) and drawn as a glyph only
-  (`SnapIndicator.ts:367`).
-- **Shell / New-project freeze** (Addenda A/B): recurred with the old bundle before any shell op; rebuild fixed it; the
-  earlier log was truncated by the relaunch. No evidence survives. Not fixable from code here.
-- **Sketch vertex drag** has a green mock-lane spec (`e2e/sketch-drag.spec.ts`); the review's failure is
-  unattributed (gesture injection suspected).
+| PR | Mechanism at HEAD (file:line) |
+|---|---|
+| 01 | `src/ipc/promote.ts:93-102` stale check only inside `if (proof && …)`; `el_` fast path `:115-125` unguarded. Callers WITHOUT proof: `ViewportRoot.tsx:147`, `ModelToolController.ts:1417,2072,4101,5165,5741,6114`, `SketchController.ts:1075`, `historyActions.ts:238`. Only `OverlapCandidateChooser.tsx:287-293` passes proof. `Picker.ts` `PickHit` (`:38-49`) has no `entry`; `ProbeCandidate` (`:56-62`) does (`:296-318` pattern). |
+| 02 | `meshSync.ts:706-727` PUBLISH block comment "nothing that can throw"; `swap()` `meshRegistry.ts:497-504` calls `retire()` `:279-285` which runs `retireListeners` inline, no try/catch; `HighlightLayer.ts:196-200` subscriber calls `rebuild()` (allocates). |
+| 03A | `validateMesh.ts:313-330` colorBytes only when `view.faceColors`; `faceColors.ts:58-66` `needsVertexColors(view, bodyColor, authoredFaceColors)` used at `:438-449` — layout decided by a second predicate after pricing. |
+| 03B | `meshSync.ts:722-723` outgoing reservation released at swap; entry lives until `flushDisposals` `meshRegistry.ts:557-574` (leases + one-frame lag). Preview lanes (`previewMesh.ts:44-59`, `ModelToolController.ts:8678-8682`, `placementController.ts onPreviewResult`) never reserve. `meshAdmission.ts:25-32,82-113`. |
+| 04 | `HighlightLayer.ts:424-441` reserves `estimateFaceSetBytes`, builds with ×1.5 growth (`faceSliceGeometry.ts:32,90-94`), `highlightCache.put()` `:150-157` charges `owned.bytes` with no recheck. |
+| 05 | `FrameScheduler.ts:157-162` `invalidate()` calls `ensureFrame()` immediately; `tick()` `:210-219` only withholds its own `ensureFrame()` at `workErrors ≥ 3`, never cancels the one already queued. `ViewportEngine.ts:1239-1247` `notifySubmitted()` no per-listener isolation. |
+| 06 | `ViewportEngine.ts:2827,2863,2867,3168` remove preview groups without `handle.dispose()`; `BodyObject.ts:58-71` detached sweep compensates. `GhostLayer.ts:89-97,157,186-193` unleased whole-body borrow + undisposed `shareIndexed` clones. `SectionLayer.ts:349-364` leases `getEntry(bodyId)` but draws `mesh.geometry` unverified. |
+| 07 | `Tessellate.cpp:361-372` at `body_segments_left == 0` emits `endpoints_only_quiet` (one segment per edge, uncounted); doubling ladder `:154-171` returns the retry's certificate. |
+| 08 | `Tessellate.cpp:272-282` records `completeness`, `:445` `out.ok = true` regardless; `PlanExecutor.cpp:934` checks only `ok`. `SurfaceNormals.cpp:408-428` `face_is_degenerate`: `area <= 1e-12 × bodyDiag²` (`SurfaceNormals.h:109`). |
+| 09 | `CurveSampler.cpp:344-382` cone about the double chord; `:966-983` 16× rule (`kShortChordQuantizationFactor`:57); `:912-922` `period − 1e-9` closure; `kAngularTestFloor` `:46`, `kAngularExhaustionFraction` `:67`. Astra followup items open: C1, C2, F5, F6, F7, F9 (`docs/design/astra/wp08-curve-sampler-followup.md` §2, tests §4). |
+| 10 | `.gitignore:3` `*.log`; every focused-pass matrix row's `evidence` is a `runs/*/*.log`; `scripts/verify-viewport-acceptance.mjs:95` `existsSync` → verifier exit 0 here only because ignored files exist locally (`git status --ignored` shows `!! docs/qa/viewport-hardening/runs/`); a clean checkout fails. |
+| 11 | `meshSync.ts:178-192` `onAfterRender(() => …)` ignores the `FrameSubmission` (`ViewportEngine.ts:172-187`, has `displayedBodyIds`, `displayedProvenance`), checks `bodyObjects.has(bodyId)`. |
+| 12 | `worker/tests/test_tessellation_quality.cpp:60` `kEdgeRanges = 8`; `Mesh1.cpp:18-19` EDGE_RANGES=7, EDGE_POSITIONS=8; `protocol/mesh_format.md:109-110`. |
 
-Conventions / commands (CLAUDE.md, verified): bun + vitest (`bun run test`), Playwright mock lane (`bun run e2e`,
-port 4177, `retries: 0`), Rust from `src-tauri/` with `ONECAD_REQUIRE_WORKER=1`, ctest, hex gate, QA verifiers.
-`*.golden.test.ts` and `src/test/contracts/` are frozen; `keymapContract.ts` has no undo/redo rows.
+Owed from the ledger (STATUS.md §8): WP08 round 3, WP09 adversarial review + Astra `break`, WP03 round 2 (DEV-WP03-1 degraded outline+count, N-2/N-3/N-8), full L3. Astra budget: WP08 2/3 used, WP09 0/3.
+
+Commands (CLAUDE.md, verified in ledger): `bunx tsc --noEmit` · `bunx vitest run <paths>` · `bun run test` · `E2E_PORT=4179 bunx playwright test <spec> --project=chromium` (port 4177 is another session's Vite) · `ONECAD_OCCT_ROOT=~/.onecad-occt/8.0.1 scripts/build-worker.sh Release` then `ctest --test-dir worker/build -R <pat>` · from `src-tauri/`: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `ONECAD_WORKER_PATH=$PWD/../worker/build/onecad-worker ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` · `node scripts/verify-viewport-acceptance.mjs` · hex gate grep. Baseline red sets (STATUS §5.1): vitest 443 pre-existing failures outside viewport (later runs saw 5700/0 after UX fixes — measure again), ctest `feature_pattern` + `chamfer_reference_face`, cargo 24 deterministic reds. Heavy lane: one CMake/cargo/vitest-full/playwright process at a time.
 
 ## Scope
 
-In: WP-U1 … WP-U12 below. Out (Follow-ups): feature-level (hole) patterns, the freeze root cause, ViewCube orbit
-semantics, measurement-chip de-overlap, pure hover QA, a docked full-parameter inspector.
+In: PR-01…PR-12 fixes with red-first repository tests; WP08 round 3 (Astra followup C1/C2/F5/F6/F7/F9); WP09 adversarial review + Astra `break` and its fixes; WP03 round 2 items N-2/N-3/N-8 and DEV-WP03-1; portable evidence (JSON summaries); TEST-RES-05 G-lane probes (1,000 hovers, 100 preview cycles, 50 document cycles, mock lane); ledger records (§7 per-PR completion records in STATUS.md, TODO.md gate entry, CURRENT_STATE.md head); full L3; one commit at L3-green, no push.
+Out: WP05/WP06/WP07/WP10–WP16 (next plan); MESH1 wire changes (completeness stays off the wire — user decision); N-lane native runs (recorded blocked/owed, never faked); WebGPU/AO/renderer changes; editing the review documents.
 
 ## Decisions
 
-- **D-1 Sketch Cancel discards** (user, 2026-09-11): Cancel reverts to the state at sketch entry and deletes a
-  sketch minted this session; Esc keeps today's exit-and-keep.
-- **D-2 Construction mode resets per sketch** and shows a persistent banner while on (user).
-- **D-3 Native Edit menu is wired** to document undo/redo; FE re-dispatches text undo when an input is focused (user).
-- **D-4 One Astra `break` (xhigh) on WP-U4** after implementation; findings are red-first fixes (user).
-- **D-5 Selection never guesses.** `rebindPick` stops geometric re-pointing. A ref survives a regen only when the
-  backend confirms it (promoted ElementId resolved by `ResolveRefs`); otherwise it is dropped silently. This is the
-  same "deterministic NeedsRepair beats a silent wrong bind" law as the identity ladder, applied to the viewport.
-- **D-6 Clamped values are disclosed, not blocked.** A typed fillet/chamfer value above the measured range is
-  applied at the limit and the status hint says so with the limit and the reason.
-- **D-7 Reviewer P1 acceptance tests become gated e2e specs** (mock lane) where the mock lane can express them;
-  the real-stack items are recorded as owed user-run checks in `TODO.md`.
+- D1 **Proof is captured at hit time and required for every viewport-derived promotion.** `PickHit` gains `entry?: MeshEntry` (Picker stamps it exactly as `ProbeCandidate` does at `Picker.ts:296-318`). `promote.ts` splits into `promoteViewportPick(client, proof, pick)` (proof mandatory, checked before the `el_` fast path) and `promoteAuthoritativeRef(client, bodyId, pick, snapshotId)` (typed non-viewport entry, used only by history/repair). `promoteOne` is deleted so no optional-argument bypass survives. Proof travels with an `EntityRef` through a `WeakMap<EntityRef, InstalledPickProof>` (`src/viewport/mesh/pickProof.ts`), keyed by ref object identity (selection already compares by object, Astra F3) — because `EntityRef` is store state and must stay a plain serialisable record. Rejected: recomputing proof from `getEntry(bodyId)` at promotion time (pairs an old ordinal with new geometry — exactly the review's warning).
+- D2 **Publication is a two-phase commit; observers run after commit, isolated.** `meshRegistry.swap/remove` become pure state transitions (`commitSwap`, `commitRemove` return the retired entry, push to `pendingDisposal`, call no listener). `meshSync.loadBody` commits registry → scene → `bodyObjects` → reservation → `installed=true` with no call-out, then `notifyRetired(prev)` and body-loaded/display-state notifications, each listener in try/catch → `logError`, never rethrown, never demoting. Preparation failure releases handle lease + geometry + reservation (existing `held` path, re-asserted by test). Rejected: try/catch around `swap()` only (leaves registry/scene divergence).
+- D3 **A reservation lives as long as the resource.** `MeshReservation` is attached to the `MeshEntry` (`entry.reservation`) and released in `flushDisposals` when the entry is actually disposed (leaseCount 0, frame passed), or on preparation failure. Peak admission at reserve time therefore sees every still-live retired entry. Preview/ghost entries (`previewMesh.ts`) reserve against the same `MeshAdmission` singleton (`documentAdmission`) and release on their dispose; a refused preview is skipped with the existing throttled warn. Release is idempotent.
+- D4 **One immutable preparation plan prices and builds.** New `src/viewport/mesh/meshPreparationPlan.ts`: `planMeshPreparation(validated, appearance: {bodyColor?, authoredFaceColors?}) → MeshPreparationPlan {layout: "indexed"|"deindexed", positionBytes, normalBytes, colorBytes, indexBytes, edgeExpansionBytes, sourceRetainedBytes, cpuBytes, gpuBytes}` (checked arithmetic, same overflow policy as `validateMeshView`). `validateMeshView` stops computing appearance-dependent cost; `buildFaceGeometry(view, plan)` consumes `plan.layout` and `needsVertexColors` becomes private to the plan module. `loadBody` reserves `plan.cpuBytes/gpuBytes` before any derived allocation. Rejected: passing appearance into `validateMeshView` (validation must stay appearance-free and pure).
+- D5 **Reserve the planned capacity, not the estimate.** `faceSliceGeometry.planFaceSetCapacity(reuse, entry, ordinals) → {positionsCapacity, indexCapacity, bytes, peakBytes}` applies the ×1.5 growth rule up front; `peakBytes = bytes + (grows ? reuse.bytes : 0)` (old array alive during copy). `HighlightLayer.buildFaceSet` reserves `peakBytes`, builds, and `put()` asserts `owned.bytes === plan.bytes`. Degraded path per DEV-WP03-1: leased body outline (dashed `LINE_WIDTHS_CSS` selection style) + selection-count chip; re-attempt exact overlay on every rebuild while degraded; `degraded` getter reflects display state. Rejected: allocate then evict (what the review demonstrated).
+- D6 **Every borrower is an owner or a lessee, no third kind.** Preview handles: `ViewportEngine` calls `handle.dispose()` at all four sites; the `BodyObject` detached sweep is deleted. Whole-body ghosts lease `entry.geometry` under a `"ghost"` tag. Ranged ghosts use owned compact geometry from a new `buildTriangleRangeGeometry(entry, range)` in `faceSliceGeometry.ts` (same vertex remap as face sets), disposed on clear/hide/replace/teardown. `BodyObject` stamps `mesh.userData.meshEntry = entry`; `SectionLayer.createPair` leases that exact entry and refuses (logWarn, no pair) when `entry.geometry !== mesh.geometry`. `shareIndexed` is deleted from `GhostLayer`.
+- D7 **The scheduler never lets a tick schedule its own successor.** `invalidate()` during a tick (`inTick` flag) only sets the mask; the tail schedules. When the tail parks (`workErrors ≥ WORK_ERROR_LIMIT`) it also `cancelPending()`. An external `invalidate()` after parking still schedules exactly one frame (existing WP02 contract: one attempt per external wake). `retryRenderer()` and `setSuspended(false)` reset `workErrors`. `notifySubmitted` wraps each listener in try/catch → throttled `logError`; the frame outcome is unaffected by a listener failure.
+- D8 **Acknowledge only a frame that actually submitted the body.** `traceRendered` keeps its subscription until a `FrameSubmission` whose `displayedBodyIds` contains `bodyId` AND whose `displayedProvenance` for that body equals the loaded entry's provenance; timeout unchanged; on timeout the trace names the reason ("never submitted: hidden/isolated/replaced"). No wire change (`meshRenderCompleted` has no not-required outcome — recorded as WP10 follow-up).
+- D9 **Hard caps are hard.** `Tessellate.cpp` at `body_segments_left == 0`: emit a zero-point range (id preserved), record the edge in `completeness.budgetLimitedEdges`, no fallback geometry. The doubling ladder returns `certification = QualityLimited` with new fields `requestedChordToleranceMm` / `achievedChordToleranceMm` on `CurveSampleResult`; the retry's own `Certified` never leaks.
+- D10 **WP08 round 3 implements the Astra followup verbatim** (`docs/design/astra/wp08-curve-sampler-followup.md` is the DESIGN citation): C1 turn predicate on encoded `P32` at every regular join as the acceptance rule; C2 `Satisfied` iff `β + asin(E/g) ≤ tol/2` with retained Bernstein mass, `kAngularTestFloor` deleted; F5 cone tested against the encoded chord (or measured rotation added to the bound); F6 finite control-net validation + roundoff enclosure (`(2g + u(1+g))/(1−g)·M_j`, 2.492e-13 at n=32,d=32) charged to the positional certificate; F7 semantic closure only (`BRep_Tool`/vertex identity, no near-period shortcut); F9 = D9. Tests exactly per followup §4. After implementation: Astra `verify` (WP08 call 3/3, high, prompt-only) on the implemented constants and the F5/C1 fixtures.
+- D11 **Incomplete tessellation is a failed tessellation until WP10.** A nondegenerate face with no triangles → `out.ok = false` with a diagnostic listing `missingFaces`; FE keeps last valid geometry as `stale-inspection-only` (existing WP04 path) or `failed-initial`. A failed nondegenerate edge stays a warned zero-point range (edges are display-only, not pickable topology) and is recorded in `completeness.missingEdges` for WP10. The degeneracy predicate is NOT invented here: the WP09 Astra `break` packet (call 1/3, xhigh, grounded) asks for a scale-correct, face-local degeneracy criterion alongside its attack on the normals derivation; T8 implements the accepted answer. Rejected: MESH1 flag bit (user decision; superseded by WP10).
+- D12 **Evidence = committed JSON, raw logs stay ignored.** `scripts/record-viewport-run.mjs <run-id> <lane> -- <command>` runs the command, tees stdout/stderr to `runs/<run-id>/logs/<lane>.log` (ignored) and writes/updates `runs/<run-id>/manifest.json` (commit, dirty-diff sha256 excluding root ledgers, tool versions, worker sha256, command, cwd, env knobs, exit, started/ended, log sha256) and `runs/<run-id>/tests.json` (per case id: result, count line, failure signatures). Verifier: a passing row's `evidence` must be a `manifest.json` under `runs/` that exists, parses, carries `commit` and the cited lane with `exit === 0`. `.log` evidence is refused. Existing rows are re-pointed only after their gates are RERUN through the recorder in this run (no transcription). `baseline/manifest.json` records the existing local baseline logs by sha256 as "local artifact, ignored".
+- D13 **PR-12**: `kEdgeRanges = 7`; add a hand-authored MESH1 v1 blob fixture (E=2 ranges with bit patterns ≠ their positions) asserting `ranges.size() == E` and every `firstPoint + pointCount ≤ P`; keep the geometric-error assertion.
+- D14 Root `PLAN.md` is archived verbatim to `docs/plans/2026-09-11-ux-hardening-PLAN.md` and replaced by this plan at run start (fable-run reads root `PLAN.md`).
 
 ## Design
 
-### WP-U1 Undo/Redo reach, guard, feedback, menu, palette (FE + Rust, careful)
-- `useShortcuts.ts`: move the `isEditableTarget` bail ahead of the ⌘Z/⌘Y block so a focused input keeps native
-  text undo. ⌘K stays the one documented exception.
-- New `src/features/shell/undoActions.ts`: `runUndo()` / `runRedo()` = the existing mode branch (sketch →
-  `undoSketch/redoSketch`, model → `ModelToolController.undo/redo`) extracted so keydown, palette, and menu share
-  one router. If `document.activeElement` is editable, call `document.execCommand("undo"|"redo")` instead
-  (menu accelerators reach the FE only through this router).
-- `ModelToolController.undo/redo`: when `res.opLabel` is absent, hint "Nothing to undo" / "Nothing to redo".
-- Projection DTO (`dto.rs`, `types.ts`, mock + tauri clients, lockstep): add `undoDepth`, `redoDepth`,
-  `undoLabel?`, `redoLabel?` from `DocumentRuntime` (`undo_depth()` exists at `document_runtime.rs:894`; add the
-  redo twin and top-of-stack labels via `DocumentSession`). Palette items "Undo <label>" / "Redo <label>" enabled by
-  depth; keywords `undo`, `redo`, `revert`.
-- Rust menu (`src-tauri/src/menu.rs`, new; wired in `lib.rs` `setup`): App submenu (predefined), File (New/Open/
-  Save/Save As → `MENU_ACTION` events reusing the existing FE `fileActions` bridge), Edit (Undo `CmdOrCtrl+Z`, Redo
-  `Shift+CmdOrCtrl+Z`, then predefined Cut/Copy/Paste/Select All), Window (predefined). `on_menu_event` emits
-  `events::MENU_ACTION = "menu-action"` `{ action: "undo" | "redo" | "new" | "open" | "save" | "saveAs" }`.
-  FE `tauriClient` subscribes (EVT lockstep) and calls the router / file bridge. Mock lane: no menu.
-- Rust: `DocumentRuntime::undo/redo` unchanged.
+### Frontend identity / publication (T3, T6, T9)
 
-### WP-U2 Type-to-enter seed (FE, standard)
-- `DimensionInput.tsx` mount effect: when `initialText !== undefined`, `focus()` and place the caret at the end
-  (`setSelectionRange(len, len)`), never `select()`. Unit test: seed "1", type "2" → text "12", preview 12.
-- `useShortcuts`/controller unchanged. Also cover: seed "-" then digits, seed "." then digits (existing parse rules).
+`meshRegistry.ts`
+```ts
+export function commitSwap(bodyId: string, next: MeshEntry): MeshEntry | undefined; // pure; marks prev retired, pushes pendingDisposal, NO listeners
+export function commitRemove(bodyId: string): MeshEntry | undefined;
+export function notifyRetired(entry: MeshEntry): void; // each listener try/catch → logError("vp", "retire listener threw", {owner, bodyId})
+export interface MeshEntry { …; reservation: MeshReservation | null; }
+// flushDisposals: on dispose → entry.reservation?.release(); entry.reservation = null
+```
+`meshSync.loadBody` PUBLISH becomes: `const prev = commitSwap(…)` → scene replace → `bodyObjects.set` → `entry.reservation = reservation; held = null; installed = true` → **then** `notifyRetired(prev)`, `setDisplayState`, body-loaded subscribers, each isolated. No await, no listener, between `commitSwap` and `installed = true`.
 
-### WP-U3 Clamp disclosure (FE, standard)
-- `guardEdgeOpValue` returns the full `clampToEdgeOpRange` result; the typed-commit path
-  (`ModelToolController.ts:3340-3348`) sets the chip to the clamped value and hints
-  `Radius limited to <max> mm — largest that fits the selected edges` (or the `nonMonotonic` wording) with
-  `severity: "warn"`, cleared on the next edit. Drag path unchanged (drag already shows the live value).
+`meshPreparationPlan.ts` (D4) — pure; unit-tested against the review's arithmetic (1,000,000 tri / 500,000 verts / normals: indexed 24,000,000 B vs de-indexed with color 108,000,000 B).
 
-### WP-U4 Selection integrity across regen (FE + Rust, **critical**)
-1. Rust diagnostics first: `promote_selection` mismatch error message carries `requested=[…] returned=[…]`;
-   `acquire_ids` logs the unresolved pick at `WLOG_WARN` with topoKey, kind and anchor.
-2. Red-first Rust integration test (`src-tauri/tests/topology_rebind.rs` or new `selection_promote.rs`,
-   `real_worker()` pattern): revolve a stepped profile, add four `Hole`s on the flange face, and after **each**
-   publish tessellate the body, read every face/edge id off the MESH1 id table, and `promote_selection` each one at
-   the head snapshot — all must resolve. Same for extrude+chamfer. If this is red, the bug is worker/Rust and gets
-   fixed there before step 3; if green, the bug is FE-side and step 3 is the fix.
-3. `rebindPick.ts`: delete the geometric rebind. New behaviour on a body mesh swap (`meshSync.ts:391-396`):
-   for each selected/hovered ref on that body whose topoKey no longer resolves — if it has an `elementId`, call
-   `client.resolveRefs` (existing lane, `src/ipc/promote.ts` neighbourhood) and adopt the returned topoKey when the
-   outcome is `resolved`; otherwise remove the ref from `selectionStore` (no hint; the highlight simply goes with
-   the geometry). Hover refs are always dropped.
-4. `promotePick` (`ViewportRoot.tsx:126-149`) sends the pick-time topoKey and the current snapshot id from the
-   store, never a rewritten one.
-5. After an edge-op / shell / hole commit, the controller clears the refs the op consumed (its own inputs) before
-   the regen result lands, so the next pick starts clean (reviewer P1 "correct selection after geometry edits").
-6. Tests: vitest for the new swap policy (kept via elementId, dropped without), the e2e `filletChamfer.spec.ts`
-   gains "after chamfer commit, select the new boundary edge, start Fillet, no stale hint".
-7. Astra `break` (D-4) on this section + the diff; local `adversarial-reviewer` on the diff.
+`promote.ts` (D1)
+```ts
+export interface InstalledPickProof { entry: MeshEntry; kind: "face"|"edge"; topoKey: string }  // "body" removed; body picks never promote
+export function captureProof(hit: PickHit): InstalledPickProof | null;             // needs hit.entry
+export async function promoteViewportPick(client, proof, pick): Promise<PromotedElement|null>;  // proof currentness checked FIRST, incl. el_ path
+export async function promoteAuthoritativeRef(client, bodyId, pick, snapshotId): Promise<PromotedElement|null>; // history/repair only; never given a Picker hit
+```
+`pickProof.ts`: `attachProof(ref, proof)`, `proofFor(ref)`. `refFromModelHits` attaches; `promotePick` and every controller site read `proofFor(ref)` or `captureProof(hit)`; a missing proof on a viewport-origin ref → `stalePickHint()` + null (fail closed). Caller classification (implementer must confirm each by reading the origin): viewport → `ViewportRoot:147`, `ModelToolController:1417,2072,4101,5165,5741,6114`, `SketchController:1075`, `OverlapCandidateChooser:287`; authoritative → `historyActions:238` only.
 
-### WP-U5 Pick precedence (FE, standard)
-- `refFromModelHits`: a body **edge** hit within tie tolerance beats a sketch curve/fill of a sketch that is not
-  the active sketch; a sketch fill still beats a body **face** (keeps the flush-sketch-region target). Alt inverts as
-  today. Unit test for the three cases; e2e `sketch-hole-extrude.spec.ts` or new spec: with a finished visible sketch
-  on the top face, click the plate edge → Body edge selected, Fillet enabled.
+### Ownership / cache (T4)
 
-### WP-U6 Complete, understandable history (FE, standard)
-- `HistorySelectionSection`: for a body, list every feature whose result or input includes that body
-  (`FeatureRecord` body refs; fall back to the full timeline when the record has none) in timeline order; for a
-  sketch, the ops consuming it. Header shows `History · <n> of <total>` and a "Show all" toggle (local UI state)
-  that switches to the full timeline. No slice.
-- e2e: after hole + linear pattern + chamfer, the body inspector lists Hole, Linear pattern, Chamfer rows.
+`faceSliceGeometry.ts`: `planFaceSetCapacity`, `buildTriangleRangeGeometry`. `highlightCache.put` asserts bytes match the reserved plan (dev assert + logError). `HighlightLayer`: degraded = outline lease + count chip (DEV-WP03-1). `GhostLayer`: `{kind:"leased", lease}` | `{kind:"owned", geometry}` per item, released in `clearMeshes`. `SectionLayer.createPair`: lease by `mesh.userData.meshEntry`, identity-checked. `BodyObject`: sweep deleted; `userData.meshEntry` stamped. `ViewportEngine` preview sites dispose handles.
 
-### WP-U7 Sketch Cancel = discard (Rust + FE, careful)
-- Rust: `cancel_sketch(sketch_id, discard: bool)`. `discard=true`: squash as today, then if the squash produced a
-  net step (`undo_depth()` moved), `session.undo()` it and clear the redo entry it pushed (revert must not be
-  redoable back into a cancelled sketch); if the squash was refused (eviction), return `EngineError` "cannot discard —
-  history was trimmed; changes kept" and keep today's behaviour. If the sketch record was minted in this session
-  (FE passes `createdInSession`), delete it afterwards via the existing delete-sketch command.
-- API: `api::cancel_sketch` gains `discard: bool` (default false for the old callers); `CMD`/DTO lockstep; mock
-  client mirrors with its snapshot restore.
-- FE: the chrome **Cancel** button and its palette command call `exit({ discard: true })` → `cancelSketch(id, true)`
-  and skip `finishSketch`; Esc / Finish keep the current cancel-then-finish sequence. Hint "Sketch changes
-  discarded". Tooltip on Cancel: "Discard changes since entering the sketch".
-- Tests: Rust unit (cancel with discard restores `prior`, undo depth back to the watermark, redo empty), vitest for
-  `exit({discard})`, e2e `sketch-undo.spec.ts` gains "draw two lines, Cancel → sketch gone / unchanged".
+### Scheduler / submission (T2, T7)
 
-### WP-U8 Construction mode per sketch (FE, standard)
-- `sketchStore`: `constructionMode` reset to `false` in `SketchController.openSession`; doc comment updated (W1-B
-  note amended). Persistent banner chip in the sketch chrome bar while on ("Construction geometry — new entities are
-  reference only"), status hint on toggle. e2e `construction.spec.ts` gains "toggle on, finish, new sketch → off".
+`FrameScheduler`: `private inTick = false`; `invalidate()` → `if (!this.inTick) this.ensureFrame()`; tail: `if (parked) this.cancelPending(); else if (dirty||active) ensureFrame()`; `resetErrors()`; `get parked`. Engine: `notifySubmitted` isolation; `retryRenderer`/`resume` call `resetErrors()`. `traceRendered` per D8.
 
-### WP-U9 Verbs and reasons (FE, standard)
-- `finishExtrude`: hint by boolean mode — "Cut created" / "Joined" / "New body created" (+ "N bodies"); when a Cut
-  changes no body and no error → "Cut did not intersect any body". Revolve mirrors the same map.
-- `toolApplicability` pattern reason: "Select a body to pattern — feature patterns are not supported yet". Disabled
-  tool reason also appears in the chip/status line when the user activates a disabled tool via shortcut or palette
-  (not just the tooltip).
+### Worker (T1, T5, T8)
 
-### WP-U10 Chip labels, units, Std picker (FE, standard)
-- `DimensionInput` gains `label` (aria-label, required at the model-chip call sites) and shows the unit suffix;
-  hole fields "Hole diameter", "Counterbore diameter", "Counterbore depth", "Hole depth"; chamfer "Distance",
-  "Distance 2", "Angle"; extrude "Depth"; pattern "Spacing"/"Count"/"Angle".
-- Remove `aria-hidden` from the chip subtree only (keep it on the decorative overlay); testids stay.
-- `HoleChipCluster` Std table: cells print the value ("Ø3.4") instead of `·`; header keeps fit names.
-- Golden/contract check: `src/test/contracts/` inspector/toolbar contracts must not need edits; if a probe reads the
-  aria tree, update the probe, never the contract.
+`CurveSampleResult` += `requestedChordToleranceMm`, `achievedChordToleranceMm`, `encodedTurnMaxRad`, `angularStatusAfterEncoding`. `TessellationCompleteness` += `budgetLimitedEdges`, `missingEdges`. `tessellate_body`: `out.ok = completeness.allNondegenerateFacesCovered` (diagnostic string carries the face keys; `PlanExecutor.cpp:934` path already treats `!ok` as failure — verify the Rust side surfaces the diagnostic through `ApiError.diagnostics`).
 
-### WP-U11 Measure: diameter for circular edges (FE only — revised after the protocol audit)
-- **Audit outcome (2026-09-11):** `element_info` is backed by `QueryElement`, whose `elementId` rung normatively never
-  reaches a `TopoDS_Shape` (SCHEMA §7.5 lines 3731-3734, 6753-6756), so an additive `radius` there would be present on
-  one addressing rung and absent on the other. `ClassifyElement` (SCHEMA §7.5 :3529-3543) already returns `radius`
-  for cylinder faces and circle edges and is plumbed to `ClassifyFrame.radius` (`src/ipc/types.ts:670`). **No wire
-  change.**
-- FE: after `elementInfo` in the measure pick (`ModelToolController.ts:1255-1265`) call
-  `client.classifyElement(bodyId, elementId ?? "", topoKey)` (catch → null); `MeasurePick.radius: number | null`
-  (advisory, head-read — `present:false` renders no Ø, never an error); `MeasureOverlay` prints
-  "Ø 6.6 mm · Length 20.735 mm" for a circle edge and "R 20 mm · Area …" for a cylindrical face.
-- Mock: `mockClient.classifyElement` classifies every non-straight edge as `other` with no frame — teach it circle
-  edges (radius from the mock geometry) so the e2e `measure.spec.ts` can assert the Ø.
+### Evidence (T0)
 
-### WP-U12 Sketch guidance + snap text (FE, standard)
-- `constraintStatus`: callers pass entity counts split by origin; "Projected geometry only — draw to begin" when every
-  entity is projected/fixed; "Size fixed; position still free" when DOF equals the rigid-body freedom of the profile
-  (translation 2 / +rotation 1) — computed from the constraint set, gated to the rectangle/circle cases the
-  auto-constrain produces.
-- Snap: the DOF/status badge shows the winning rule text while a draw tool is placing ("Snap: grid", "Snap: endpoint",
-  "Length rounded"), from `decision.primaryKind` plus a `numeric` co-candidate flag.
+`scripts/record-viewport-run.mjs`; verifier changes; `runs/<id>/{manifest,tests}.json` schema documented in `docs/qa/viewport-hardening/README.md` (new, short). Run ids this pass: `consolidation-a-evidence`, `consolidation-fe-focused`, `consolidation-worker-focused`, `consolidation-g-lane`, `consolidation-l3`.
 
 ## Tasks
 
-| # | Package | Tier | Files (representative) | Depends |
-|---|---|---|---|---|
-| T1 | WP-U2 seed caret | standard | `DimensionInput.tsx`, `DimensionInput.test.tsx` | — |
-| T2 | WP-U3 clamp hint | standard | `ModelToolController.ts` (3340-3371), `filletRadius.ts`, tests | — |
-| T3 | WP-U9 verbs/reasons | standard | `ModelToolController.ts` (8413-8455, 3104), `toolApplicability.ts`, `activateTool.ts` | — |
-| T4 | WP-U8 construction | standard | `sketchStore.ts`, `SketchController.ts` (openSession), sketch chrome bar, `e2e/construction.spec.ts` | — |
-| T5 | WP-U5 pick precedence | standard | `ViewportRoot.tsx` (81-95), `Picker.ts`, tests, e2e | — |
-| T6 | WP-U6 history | standard | `sections.tsx` (349-364), `HistoryList.tsx`, e2e | — |
-| T7 | WP-U10 labels/Std | standard | `DimensionInput.tsx`, `ModelToolChips.tsx`, `HoleChipCluster.tsx`, `EdgeOpChipControls.tsx`, `ExtrudeChipControls.tsx` | T1 |
-| T8 | WP-U12 guidance/snap | standard | `constraintStatus.ts`, sketch status badge, `SnapIndicator.ts` consumer | — |
-| T9 | WP-U1 undo router + guard + hints + palette + projection depth | careful | `useShortcuts.ts`, new `undoActions.ts`, `paletteItems.ts`, `dto.rs`, `types.ts`, both clients, `document_runtime.rs` | — |
-| T10 | WP-U1 native menu | careful | new `src-tauri/src/menu.rs`, `lib.rs`, `events.rs`, `tauriClient.ts` EVT | T9 |
-| T11 | WP-U7 cancel discard | careful | `document_runtime.rs` (3971, 5095), `api/mod.rs` cancel_sketch, `SketchController.ts` exit, clients, tests | — |
-| T12 | WP-U4 diagnostics + red-first Rust test | critical | `document_runtime.rs` (4179), `ElementIdentity.cpp` (136-163), new integration test | — |
-| T13 | WP-U4 FE policy | critical | `rebindPick.ts`, `meshSync.ts`, `ViewportRoot.tsx`, `HighlightLayer.ts`, controller commit paths, tests, e2e | T12 |
-| T14 | WP-U11 measure radius (FE only) | standard | `ModelToolController.ts` (~1255), `measureTool.ts`, `MeasureOverlay.tsx`, `mockClient.ts` classifyElement, `e2e/measure.spec.ts` | — |
+| id | goal | tier | files | design | deps | group | est | verify |
+|---|---|---|---|---|---|---|---|---|
+| T0 | Portable evidence recorder + verifier; baseline manifest; README; archive PLAN.md (D14) | standard (Sonnet) | `scripts/record-viewport-run.mjs` (new), `scripts/verify-viewport-acceptance.mjs`, `docs/qa/viewport-hardening/README.md` (new), `baseline/manifest.json`, `acceptance-matrix.json` (evidence fields), `docs/plans/…` | D12, D14 | — | W0 | ~250 | `node scripts/verify-viewport-acceptance.mjs` fails on `.log` evidence (red), then passes after rerun rows; `git stash`-free clean-checkout check: `git worktree add <scratch> HEAD && node …verify` in the scratch tree → exit 0 |
+| T1 | PR-12 edge-quality oracle | standard (Sonnet) | `worker/tests/test_tessellation_quality.cpp` | D13 | — | W0 | ~120 | `ctest --test-dir worker/build -R tessellation_quality` 1/1 after red on the wrong constant |
+| T2 | PR-05 scheduler park + listener isolation (red-first) | careful (Opus) | `FrameScheduler.ts` (+test), `ViewportEngine.ts` (`notifySubmitted`, `retryRenderer`, resume), `ViewportEngine.test.ts` | D7 | — | W0 | ~200 | `bunx vitest run src/viewport/engine/FrameScheduler.test.ts src/viewport/engine/ViewportEngine.test.ts`: invalidate-then-throw → 3 attempts, 0 queued; healthy reentrant → 2 frames; listener throw does not stop other listeners |
+| T3 | PR-02 two-phase publish + PR-03B lifetime reservations + preview admission (red-first) | critical (Opus) | `meshRegistry.ts`, `meshSync.ts` (PUBLISH block, drop path, `held` path), `meshAdmission.ts`, `previewMesh.ts`, tests `meshSyncAtomicInstall.test.ts`, `meshRegistry.test.ts`, `meshSync.test.ts` | D2, D3 | T0 (recorder) | W1 | ~450 | `bunx vitest run src/viewport/mesh`: throwing retire listener / throwing highlight rebuild → registry entry === scene geometry === bodyObjects; reserved bytes == live entries incl. retired-leased; 3 replacements before flush → 4 charged; preview reserve/refuse |
+| T4 | PR-04 capacity plan + PR-06 ownership + DEV-WP03-1 degraded mode (red-first) | careful (Opus) | `faceSliceGeometry.ts`, `highlightCache.ts`, `HighlightLayer.ts`, `GhostLayer.ts`, `SectionLayer.ts`, `BodyObject.ts`, `ViewportEngine.ts` (preview sites only), tests | D5, D6 | T2 (ViewportEngine owner) | W1 | ~500 | `bunx vitest run src/viewport/engine src/viewport/mesh/faceSliceGeometry.test.ts src/viewport/mesh/highlightCache.test.ts`: 4→5 tri under 250 B refuses (estimate 240, actual 288); ranged ghost owns+disposes; section refuses mismatched entry; preview clear releases lease (leak tripwire silent) |
+| T5 | WP08 round 3 = PR-07 + PR-09 + Astra C1/C2/F5/F6/F7/F9 (red-first, tests per followup §4) | critical (Opus) | `worker/src/tess/CurveSampler.{h,cpp}`, `Tessellate.cpp` (edge loop + doubling ladder only), `worker/tests/test_curve_sampler.cpp` | D9, D10 | T1 | W1 | ~700 | build worker; `ctest -R "curve_sampler\|tessellation_quality\|wp5_mesh1\|parity\|canonical"` all green; F5 line loses angular cert; exhausted budget adds 0 segments; near-period open circle stays open |
+| A1 | Astra `break` WP09 (normals derivation + `SurfaceNormals`/`Tessellate` diff + degeneracy predicate question) — **needs user approval at run time** | orchestrator | packet in scratchpad; record → `docs/design/astra/wp09-surface-normals-break.md` | D11 | — | W1 | — | transcript read only allowlisted paths; every number recomputed |
+| T6 | PR-03A preparation plan + preview lanes through admission | critical (Opus) | `meshPreparationPlan.ts` (new+test), `validateMesh.ts`, `faceColors.ts`, `meshRegistry.ts` (build path), `meshSync.ts` (reserve site), `previewMesh.ts`, `ModelToolController.ts:~8678`, `placementController.ts` | D4, D3 | T3 | W2 | ~400 | `bunx vitest run src/viewport/mesh src/tools/modelTools/ModelToolController.preview*.test.ts`: metadata-only body colour prices de-indexed; layout used == layout priced (assert); imported FACE_COLORS unchanged |
+| T7 | PR-11 submission-matched acknowledgement | inline (orchestrator) | `meshSync.ts` `traceRendered`, `meshSync.test.ts` | D8 | T3 | W2 | ~60 | `bunx vitest run src/viewport/mesh/meshSync.test.ts`: hidden body not acked on a frame without it; acked on the first frame containing it with matching provenance |
+| T8 | PR-08 completeness → `ok=false`; degeneracy predicate per A1; WP09 review fixes | critical (Opus) | `Tessellate.{h,cpp}` (face loop + completeness), `SurfaceNormals.{h,cpp}`, `worker/tests/test_surface_normals.cpp`, Rust diagnostic surfacing if needed (`src-tauri/src/document_runtime.rs` tessellate error path — read only unless the diagnostic is dropped) | D11 | T5, A1 | W2 | ~350 | `ctest -R "surface_normals\|curve_sampler\|tessellation_quality\|wp5_mesh1\|wp6_meshexport\|parity\|canonical"` green; injected missing nondegenerate face → `ok=false` + named face; sphere/cone degenerates still ok; small valid face on 10 m body → not degenerate |
+| T9 | PR-01 proof threading (red-first) | critical (Opus) | `promote.ts`, `pickProof.ts` (new), `Picker.ts` (`PickHit.entry`), `ViewportRoot.tsx`, `ModelToolController.ts` (6 sites), `SketchController.ts`, `historyActions.ts`, `OverlapCandidateChooser.tsx`, tests (`promote.test.ts`, `ViewportRoot.test.tsx`, chooser test, controller tests) | D1 | T3, T6 | W3 | ~450 | `bunx vitest run src/ipc src/viewport/ViewportRoot.test.tsx src/features/selection src/tools`: failed replacement + ordinary click + fillet arm → refused with STALE_PICK_HINT; `el_` label on stale entry refused; late reply after a new publication refused; history repair path still promotes |
+| R1 | Adversarial reviews (fresh context): (a) T3+T6+T9 identity/publication, (b) T2+T4 ownership/scheduler, (c) T5+T8 worker | reviewer-critical ×3 | read-only | — | T9, T4, T8 | W4 | — | findings → red-first fix rounds by the original implementer |
+| A2 | Astra `verify` WP08 round-3 constants (call 3/3, high, prompt-only) — **needs approval** | orchestrator | record → `docs/design/astra/wp08-curve-sampler-verify.md` | D10 | T5 | W4 | — | numbers recomputed by orchestrator |
+| T10 | TEST-RES-05 G-lane probes: 1,000 alternating hovers; `e2e/vph-preview-lifecycle.spec.ts` 100 extrude-preview apply/cancel + 50 new/close document cycles (mock lane) | standard (Sonnet) | `e2e/vph-hover-lifecycle.spec.ts`, `e2e/vph-preview-lifecycle.spec.ts` (new), `vph/instrumentation.ts` counters if missing | — | T4, T6 | W4 | ~250 | `E2E_PORT=4179 bunx playwright test e2e/vph-*.spec.ts --project=chromium`: renderer geometries + app leases plateau; recorded via T0 recorder |
+| G1 | L3 gate (orchestrator, serial, alone), ledgers, commit | orchestrator | `STATUS.md` (§2 states, §6 DEV updates, §7 PR-xx completion records in the brief's format, §8 new handoff), `TODO.md`, `CURRENT_STATE.md` head, `acceptance-matrix.json` | — | all | W5 | — | see Verification |
 
-Parallel waves (max three implementers at once, disjoint files):
-wave A = T1, T3, T4 · wave B = T5, T6, T8 · wave C = T9, T11, T12 · wave D = T2, T7, T10 · wave E = T13 (alone,
-after T12 verdict) · wave F = T14. Every diff orchestrator-reviewed; T11/T12/T13 → `adversarial-reviewer`; T13 →
-Astra `break`; T14 → `protocol-auditor` before and after.
+Waves: W0 = T0 ∥ T1 ∥ T2 · W1 = T3 ∥ T4 ∥ T5 (+A1 proposal) · W2 = T6 ∥ T8 (+T7 inline) · W3 = T9 · W4 = R1 ×3 ∥ A2 ∥ T10 · W5 = G1. Single-owner files: `ViewportEngine.ts` (T2→T4), `meshSync.ts`/`meshRegistry.ts` (T3→T6→T9), `ModelToolController.ts` (T6→T9), `Tessellate.cpp` (T5→T8). Heavy lane serialized by the orchestrator (worker builds for T1/T5/T8 one at a time).
 
 ## Edge cases and failure modes
 
-- Undo while a drag gesture is open: runtime already refuses (`revert_blocked_by_gesture`); the hint must say
-  "Finish the drag first", not "Nothing to undo" — distinguish by `undoDepth > 0`.
-- Menu accelerator with a focused `contenteditable`/input: router must re-dispatch text undo; verify on macOS by hand
-  (owed user gate). WebKit `execCommand` returning false → fall through to document undo is **wrong**; do nothing.
-- Cancel-discard when the squash was refused (eviction) → error hint, geometry kept, sketch stays.
-- Cancel-discard on a sketch created from a face pick: also delete the datum/plane record if one was minted.
-- Selection drop on regen must not clear a `feature` or `sketch` ref (only body sub-element refs on changed bodies).
-- ResolveRefs `needsRepair` for a selected ref → drop it and surface the existing repair banner, never rebind.
-- Pick precedence: an edge exactly on a sketch region boundary with Alt held → body wins outright (unchanged).
-- Std picker values must come from `HOLE_STANDARDS` only; never persist the label.
-- `radius` absent (line edge) → overlay omits Ø; old worker without the field → Rust deserialises `None`.
+- T3: retire listener throws on the FIRST body ever installed (no prev); throw after `bodiesRoot.add` but before `bodyObjects.set` is impossible by construction (assert no call-out); document switch with `effectiveGeneration === undefined` (RISK-PRE-1) must not change; two swaps of the same body within one frame → both old entries retired, both charged until flush.
+- T4: pinned entry prevents `take()` → plan must price a fresh buffer, not reuse; shrink then regrow keeps capacity (bytes constant, no re-reserve); degraded → recovered on budget free; ghost of a body whose entry retires mid-preview → lease keeps geometry alive until ghost clears.
+- T5: last edge exactly fills the budget (0 left, no fallback needed); edge too complex for its remaining share → the sampler already refuses at the cap and returns QualityLimited with no points, so that edge gets a zero-point range and `budgetLimitedEdges` (never a truncated polyline). Cancellation param stays unwired (WP12). Determinism: identical request → identical bytes (existing `cmp` gates).
+- T8: `!ok` must not abort the whole `ExecutePlan` (verify `PlanExecutor.cpp:934` `continue` semantics: per-body skip; the regen still publishes other bodies) and the FE must show the body-specific hint, not a global error.
+- T9: a ref restored from persistence/undo has no proof → viewport promotion refuses, history path (`promoteAuthoritativeRef`) is the only way in; a ref whose entry is replaced by an identical-topology publication → proof stale (entry identity changed) → refused until re-picked (correct per spec §9, no rebind).
+- T0: recorder must never write `*.log` outside `runs/*/logs/`; manifest dirty hash excludes `TODO.md`, `HANDOFF.md`, `CURRENT_STATE.md` (ledger convention).
 
 ## Verification
 
-- L0 per task: `bunx tsc --noEmit`; Rust tasks add `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings`.
-- L1: `bunx vitest run <file>` for each touched test; `cargo test -p onecad --test <target>`; ctest for the worker change.
-- L2 per wave: `bun run test`; `bunx playwright test e2e/{model-undo,sketch-undo,filletChamfer,construction,measure,hole,sketch-hole-extrude}.spec.ts --project=chromium`.
-- L3 at commit (orchestrator re-runs, main thread, no concurrent heavy job): ctest full · `ONECAD_WORKER_PATH=$PWD/../worker/build/onecad-worker ONECAD_REQUIRE_WORKER=1 cargo test --workspace` · `bun run test` · `bun run e2e` (both projects) · fmt/clippy/hex · `node scripts/verify-modeling-coverage.mjs` · `node scripts/verify-modeling-contracts.mjs` · `scripts/check-worker-stdout-hygiene.sh`.
-- Owed user-run gates (record in `TODO.md`): native Edit → Undo on the bundled app removes the pattern and restores on Redo; ⌘Z in a focused number field undoes the field only; reviewer scenario "revolve + 4 holes + face pick" shows no stale hint.
+Per task: the `verify` column, run by the implementer AND re-run by the orchestrator before acceptance. Wave gates (orchestrator): after W1 `bunx tsc --noEmit` + `bunx vitest run src/viewport src/ipc` + focused ctest; after W3 `bun run test` (compare against the last measured full set, not "green").
+
+L3 (G1, serial, nothing else running, every count recorded through the recorder into `runs/consolidation-l3/`):
+1. `bunx tsc --noEmit` exit 0; hex gate empty; `verify-modeling-coverage.mjs`, `verify-modeling-contracts.mjs`, `verify-modeling-coverage.test.sh`, `check-worker-stdout-hygiene.sh`, `verify-viewport-acceptance.mjs` exit 0.
+2. `bun run test` — measured counts; any failure outside the baseline set is a defect.
+3. `ctest --test-dir worker/build --output-on-failure` — expect only `feature_pattern`, `chamfer_reference_face` red (baseline); anything else is a defect.
+4. `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings` (newest stable per CLAUDE.md); `ONECAD_WORKER_PATH=$PWD/../worker/build/onecad-worker ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` — compare to STATUS §5.1's 24-red set; 0 worker skips.
+5. `E2E_PORT=4179 bun run e2e` both projects, `retries: 0` (~26–31 min) — 0 failed.
+6. Clean-checkout evidence: scratch `git worktree add` of the to-be-committed tree → `node scripts/verify-viewport-acceptance.mjs` exit 0 with no ignored files present.
+7. Commit on `viewport-hardening` (message: `fix(viewport): VP-HARDENING consolidation — PR-01…PR-12, WP08 r3, WP09 review, portable evidence`), no push.
+
+Owed user-run (recorded in TODO.md, never faked): N-lane native checks for TEST-MESH-05/TEST-PUB-03 (failed replacement → click → fillet refused in the bundled app), TEST-RES-05 N, TEST-MESH-06 N.
 
 ## Constraints
 
-- No `git stash`, no branch switching, no commits without an explicit go; preserve unrelated worktree changes
-  (`src-tauri/.claude/` untracked, never staged).
-- Frozen contracts and goldens untouched; probes may change.
-- No raw hex in TS/TSX; new colors via `tokens.css` in both theme blocks.
-- No OCW1 change outside T14; T14 follows the SCHEMA change protocol.
-- Subagents never run L3; the orchestrator re-runs every gate before it is written to `TODO.md`.
+- No push, no branch switch, no `git stash`, no reset; commit only at G1 after L3 is measured green (user-authorised).
+- Do not edit `docs/01-PROGRESS-REVIEW.md`, `docs/02-CODING-AGENT-CORRECTION-BRIEF.md`, `docs/viewport-hardening/0*-*.md` (spec package), `corpus/`, `protocol/SCHEMA.md`, `protocol/mesh_format.md`, `protocol/fixtures/` (no wire change this pass).
+- Do not delete the verifier existence check, the six `it.fails` ratchets (R07×2, R09×2, R10, R18), or any baseline red; do not add Playwright retries.
+- No raw hex in TS/TSX; new colours via `tokens.css` both blocks (degraded outline uses existing selection tokens).
+- Worker: stdout frames only; `-UNDEBUG`; no OCCT tolerance changes; TopExp order and id tables unchanged; MESH1 bytes unchanged except edge-position contents and the zero-range/`ok=false` policy.
+- Subagents never run L3, never run Astra, never commit; every Astra run printed as an approval summary and awaited.
+- Heavy lane: one CMake/cargo/vitest-full/Playwright process at a time; Playwright always `E2E_PORT=4179`.
 
 ## Open questions
 
-(none — D-1…D-4 answered by the user on 2026-09-11)
+(none — scope, evidence policy, PR-08 policy, and commit authority answered by the user on 2026-09-13; the degeneracy predicate is routed to A1, not guessed)
 
 ## Run log
 
-- **T1 (WP-U2) done, inline.** `DimensionInput.tsx` mount effect: a seeded field places the caret at the end instead of `select()`; two new tests. `bunx vitest run src/features/sketch/DimensionInput.test.tsx` → 44 passed / 0 failed.
-- **T5 (WP-U5) done, inline.** `refFromModelHits`: a body edge wins a tie against a sketch hit; a sketch clearly in front still wins; Alt unchanged. `bunx vitest run src/viewport/ViewportRoot.test.tsx` → 12 passed. `bunx tsc --noEmit` clean. **Deviation:** no new e2e — the mock lane has no fixture with a finished sketch coincident with a box edge; the arbitration is unit-tested and the engine hit-test path is unchanged. Follow-up recorded.
-- **T6 (WP-U6) done, inline.** `HistorySelectionSection` lists the full timeline with a "N features · nothing filtered" line (`data-testid="history-count"`). **Deviation:** the projection has no feature→body lineage, so there is no per-body filter and therefore no "Show all" toggle; the count line makes the absence of filtering explicit. Golden `InspectorPanel.golden.test.tsx` untouched (count moved out of the section label to keep it green); `InspectorPanel.test.tsx` three `getByText("Sketch 2")` assertions relaxed to `getAllByText` because the selection header and the history row now both show the name (ordinary test, not a contract). `bunx vitest run src/features/inspector` → 190 passed / 0 failed.
-- **T4 (WP-U8) done, delegated (impl-standard), diff reviewed.** `sketchStore.resetConstructionMode()` called from `SketchController.openSession`; shared `toggleConstructionModeWithHint()` in `sketchService.ts` used by the `X` shortcut and the toolbar button; persistent "Construction" chip (`data-testid="sketch-construction-banner"`) in `FloatingToolbar.tsx` (the toggle lives there, not in `SketchChromeBar` — deviation from the brief's wording, not the design). Agent-reported: vitest `src/stores src/tools/sketch` 1412 passed; `FloatingToolbar`+`src/shortcuts` 98 passed; `e2e/construction.spec.ts` chromium 4 passed; hex gate empty. Orchestrator re-run pending in the wave L2.
-- **T8 (WP-U12) part 1 done, inline.** `projectedOnlySketchCard()` in `constraintStatus.ts`; `InspectorPanel` passes `projectedCount` (entities with `referenceLocked`) and shows "Projected geometry only · N projected reference edges · draw geometry to begin." instead of "Fully constrained". Tests: `bunx vitest run src/features/inspector src/features/sketch/constraintStatus.test.ts` → 200 passed. **Deviation:** the "Size fixed; position still free" sentence was not implemented — the projection exposes no per-entity constraint decomposition that makes the claim honest; recorded as a follow-up. Snap-rule text (part 2) still open.
-- **T8 (WP-U12) part 2 done, inline.** Cursor numeric rounding now labels itself "Rounded" (`snapArbitration.ts` numeric candidate; typed values stay unlabelled) and the decision label appends numeric labels after the visible ones (`withNumericLabels`), so the existing snap hint chip reads "Grid · Rounded" / "Rounded". Glyph, guides, and `primaryKind` unchanged. New test in `snapEngine.test.ts`. `bunx vitest run src/tools/sketch` → 1262 passed / 0 failed; `bunx tsc --noEmit` clean.
-- **T3 (WP-U9) done, delegated (impl-standard), diff reviewed.** New `completionHint.ts` (`completionVerb`) used by `finishExtrude`/`finishRevolve` — the agent also found and fixed a latent bug: `booleanMode` was read AFTER the FSM `settle` reset it to `NewBody`, so every Cut/Add commit would have been mislabelled; removed-body ids are now aggregated so a Cut that changes nothing reports "Cut did not intersect any body". Pattern reason text updated; `activateTool.ts` surfaces `verdict.reason` as a warn hint when a disabled tool is re-activated by shortcut/palette. `StatusSeverity` gained `"warn"` (renders like info; no new token). Agent-reported: `bunx vitest run src/tools src/features/toolbar src/features/palette` 2388 passed; e2e `sketch-hole-extrude` + `linear-pattern` chromium 4 passed; tsc clean. Deviation accepted: the pattern reason is 65 chars (design text kept verbatim). Orchestrator re-run pending in the wave L2.
-- **T14 re-scoped after the protocol-auditor pre-read.** Verdict: `radius` cannot be added additively to `QueryElement` without amending two normative sentences; `ClassifyElement` already carries it. WP-U11 rewritten to FE-only (see Design). No SCHEMA edit, no fixture, no §14 entry.
-- **T2 (WP-U3) done, delegated (impl-standard), diff reviewed.** `guardEdgeOpValue` returns the full clamp result; `publishEdgeOpClampHint` on the typed path (`onFilletChip`) hints "Radius/Distance limited to <v> — largest/smallest that fits the selected edges" or "moved to <v> — nearest size that builds" at `warn`, cleared on the next in-range edit; drag path unchanged. Two tests in `ModelToolController.chamferAngle.test.ts`. Agent-reported: `bunx vitest run src/tools/modelTools src/tools/preview` 978 passed. e2e skipped: the mock `analyzeEdgeOpRange` always answers `confidence: "none"`, so the clamp cannot fire in the mock lane (owed real-stack check: type 100 on the 12 mm plate → chip 11.99 + hint).
-- **T12 (WP-U4 steps 1–2) done, delegated (impl-critical), diff reviewed.** Rust mismatch message now lists `requested=[…] returned=[…]`; worker `acquire_ids` logs an unresolved pick at `WLOG_WARN` (stderr). New `src-tauri/tests/selection_promote.rs` (911 lines) is RED by design: `revolved_flange_mesh_ids_promote_after_every_hole` FAILED (4 refusals, all the same minted id), `extruded_box_mesh_ids_promote_after_chamfer` ok. Agent-measured: clippy clean; `topology_rebind` 16 passed; `element_identity` 4, `m2_gate` 2, `hole_ops` 14, `chamfer_reference` 3, `chamfer_angle` 5, `face_color_reopen` 3, `revolve_ops` 10 passed; ctest 193/193; stdout hygiene clean. **Root cause found:** the MESH1 id table substitutes a minted ElementId (`el_…`) for any bound element (`worker/src/tess/Tessellate.cpp`, `IDS_HAVE_ELEMENTIDS`); `Picker.ts` copies that label into `topoKey`; `promoteOne` sends it as a TopoKey; `resolve_pick` only parses `f:/e:/v:` → refusal → "Selection is out of date". Chamfer scenario green because the chamfer consumes the promoted edge; that finding is the FE geometric rebind. Fix routed to T13 (FE short-circuit + Rust shape guard + narrowed test).
-- **T14 (WP-U11, FE-only) done, delegated (impl-standard), diff reviewed.** `MeasurePick.radius` from a companion `classifyElement` read (caught to null, generation-guarded); overlay leads with "Ø <2r> mm · Length …" for a circle edge and "R <r> mm · Area …" for a cylindrical face. Mock `classifyElement` now fits circles for non-straight edges (`edgeCircleFit` in `mockMeshMetrics.ts`). Agent-reported: vitest measure/mock 202 passed; `e2e/measure.spec.ts` chromium 6 passed (new "circular edge shows its diameter"); tsc clean. Deviation: `ClassifyResult` has no `present` field (brief was wrong); the panel has no per-pick row so the Ø lives in the chip only.
-- **T9 (WP-U1 minus the menu) done, delegated (impl-careful), diff reviewed.** New `src/features/shell/undoActions.ts` router (`runUndo/runRedo`: editable focus → `document.execCommand`, terminal; else sketch/model branch), `isEditableTarget` extracted to `src/shortcuts/editableTarget.ts`, guard moved ahead of the ⌘Z block; projection carries `undoDepth/redoDepth/undoLabel/redoLabel` (labels exist: `Txn.label`); palette commands `onecad.modeling.command.undo/.redo` titled "Undo Extrude" etc., mode-aware; `tauriClient.revert()` reads the label off the pre-call projection and reports it only when the depth moved (the old `applyEdit(CMD.undo)` path never set `opLabel`, so a working undo would have read "Nothing to undo"); controller hints "Undid X" / "Finish the drag first" / "Nothing to undo". Agent-reported: vitest 1289 passed across the touched dirs; `e2e/model-undo.spec.ts` 3 passed; fmt/clippy clean; `cargo test -p onecad --lib api::` 24 passed; QA verifiers exit 0. Orchestrator fixed the one red it flagged: `src/test/snap-decision/arbitration.test.ts` pins "a numeric-only decision is not a snap (label null)", so the T8 "Rounded" label now appends only beside a visible snap (`snapEngine.test.ts` + `src/test/snap-decision` → 220 passed).
-- **T11 (WP-U7) done, delegated (impl-careful), diff reviewed; adversarial review dispatched.** Core: `SketchSquashOutcome {Empty|Refused|NetZero|NetStep}` returned by `squash_sketch_session`, `clear_redo`, `redo_depth/undo_label/redo_label`. Runtime `cancel_sketch(id, discard)` → `CancelSketchOutcome { discarded, kept_reason, revert }`; discard undoes only on `NetStep` (a depth delta cannot tell a net step from a refused granular one — agent's correction of the brief, accepted); api mirrors `api::undo` (projection emit, revert regen scheduled). FE: `sketchStore.exitIntent` carries the Cancel intent to `exit()`, `discardSession` drains the mutation queue, cancels with discard, deletes a sketch minted this visit, hints "Sketch changes discarded" / "Cannot discard — <reason>; changes kept". Agent-reported: fmt/clippy clean; `cargo test -p onecad cancel_sketch` 5 passed; `sketch_squash` 6 + `sketch_multi_object` 2 passed; vitest `src/tools/sketch src/ipc` 2187 passed, `src/stores src/features/sketch` 330 passed; e2e `sketch-undo` + `sketch-drag` chromium 4 passed; tsc clean.
-- **T7 (WP-U10) done, delegated (impl-standard), diff reviewed.** `DimensionInput.label` prop; every model chip names its field with unit ("Depth (mm)", "Counterbore diameter (mm)", "Angle (°)", …); chip host is `role="group"` with "<tool> options"; the blocking `aria-hidden` was on `ViewportEngine.chipLayer()` (removed there; the decorative canvas overlay stays hidden); Std picker cells print "Ø3.4" with full aria-labels. Locators updated in 12 e2e specs and one probe (`modelingInteraction.numeric.probe.test.tsx`); no contract edited. Agent-reported: `bun run test` 5672 passed / 0 failed; `hole` + `filletChamfer` chromium 24 passed. **Orchestrator-run:** `bunx playwright test` on the nine other edited specs (extrude-draft, chamfer-angle, transform-body, units, revolve-region, revolve-commit, offset-face, construction, datum-create) chromium → **50 passed / 0 failed** (the agent's single `construction.spec.ts:281` camera-settle timeout did not reproduce; it ran on a contended port). Follow-up: a chip's aria-label unit does not re-render on a unit switch while armed.
-- **T11 adversarial review (fresh context): 1 MAJOR, 3 MINOR — MAJOR and one MINOR fixed inline.** MAJOR: a refused discard returned without `finishSketch`, leaving the timeline record stale (regen would build from the previous geometry) — fixed in `SketchController.discardSession` (finish on refusal) and the refusal test now asserts the call sequence (`SketchController.exit.test.ts` 6 passed). MINOR fixed: `api::cancel_sketch` called `note_mutation()` on a no-net-step discard; now only when a revert happened (`cargo fmt` OK; clippy in the wave gate). MINOR accepted as follow-ups: ⌘Z right after cancelling a freshly created sketch first resurrects the (empty) sketch because `DeleteSketch` is its own undo step; the refusal path has no mock-lane e2e (the mock cannot refuse). Attacks run and clean: sketch-scoped ⌘Z before cancel, regen interleave, gesture guard, regen scheduling, `createdSketchId` deleting an old sketch, queue drain race, `exitIntent` leak, worker solver staleness, wire fidelity.
-- **T10 (WP-U1 native menu) done, delegated (impl-careful), diff reviewed.** New `src-tauri/src/menu.rs` (`#[cfg(desktop)]`): App (mac-only predefined), File New/Open/Save/Save As with accelerators, Edit Undo ⌘Z / Redo ⇧⌘Z + predefined cut/copy/paste/select-all, Window; `install` registers `on_menu_event` → emits `menu-action {action}` (`events::MENU_ACTION`, `MenuActionDto`); `lib.rs` installs it in `setup` and degrades to the chords on failure. FE: `EVT.menuAction` listener in `tauriClient` → `src/features/shell/menuActions.ts` (dynamic import to avoid an ipc→features cycle) → `runUndo/runRedo` and the existing file bridges; `revert()` gained `noRegenWhen` so a no-op undo hints immediately. Double-fire: impossible by construction — `wry` `performKeyEquivalent:` makes the webview and the menu mutually exclusive consumers (source cited: `wry-0.55.1/src/wkwebview/class/wry_web_view.rs:44-56`); no throttle added. Deviations accepted: no predefined Close Window (⌘W must keep meaning "close project"); the Rust test covers `action_for` only because `muda::MenuChild` panics off the main thread under `mock_app`. Agent-reported: fmt/clippy clean; `cargo test -p onecad --lib menu` 4 passed; vitest `tauriClient.test.ts` + `src/features/shell` 228 passed; `e2e/model-undo` 3 passed; `bun run test` 5679 passed / 2 failed (both in `rebindPick.test.ts`, mid-rewrite by T13). **Owed user-run checklist** (bundled app): menubar shows OneCAD/File/Edit/Window; Edit → Undo removes a committed Extrude and Redo restores it; ⌘Z undoes once (hold: steady repeat, not doubles); ⌘Z inside a number field undoes typing only; ⌘Z on empty history hints "Nothing to undo" immediately; ⌘N on a dirty doc prompts; Open/Save/Save As match the chords; ⌘W still closes the project; ⌘X/⌘C/⌘V/⌘A in a text field work.
-- **T13 (WP-U4 steps 3–6) done, delegated (impl-critical), diff reviewed; adversarial review + Astra `break` (call 1 of ~3, packet 04fb9a7c75a3, grounded, xhigh) dispatched.** `promoteOne` short-circuits an `el_` label (no wire call); Rust `promote_selection` refuses a non-TopoKey pick with a self-describing message; `rebindPick.ts` geometric rebind deleted (~250 lines) and replaced by `reconcileSelectionForBody` (keep when the new mesh names the label; else confirm via `elementInfo` by elementId, dropping on no answer; hover always dropped; later swap / deselect guards); `clearConsumedSelection` after fillet/chamfer/shell/hole success; `selection_promote.rs` narrowed to the per-namespace contract (2/2 green, red-first probes documented). Agent-reported: `bun run test` 5681 passed; e2e `filletChamfer` + `hole` chromium 24 passed; fmt/clippy clean; `selection_promote` 2, `topology_rebind` 16, `element_identity` 4 passed. Deviations accepted: `elementInfo` instead of `resolveRefs` (the ladder scores = guessing); `kind: ""` on the short-circuit (no consumer reads it). Follow-ups: the projection lane (`projectToSketch` sources carry raw labels, no `elementId`) still has the same defect; `ordinalForRef` trusts a snapshot-scoped ordinal across snapshots.
-- **Wave L2/L3 (orchestrator-run, main thread, sequential):** `bunx tsc --noEmit` clean · `bun run test` **322 files, 5681 passed / 78 skipped / 0 failed** · hex gate empty · `verify-modeling-coverage.mjs` 32 rows OK · `verify-modeling-contracts.mjs` 39 rows OK · `verify-modeling-coverage.test.sh` negative controls OK · `cargo fmt --all --check` OK · `cargo clippy --workspace --all-targets -- -D warnings` clean (forced rebuild, 35 s) · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1592 passed / 0 failed / 0 ignored over 99 targets** (worker path set; no skips) · `ctest --test-dir worker/build` **193 / 193** (56 s) · `check-worker-stdout-hygiene.sh` clean. `bun run e2e` (both projects) still owed at the commit gate.
-- **T13 reviews: Astra `break` (call 1 of ~3, xhigh, grounded, packet 04fb9a7c75a3, session 01a090eb-…) and the local adversarial-reviewer both returned DEFECTIVE, converging on one blocker.** Blocker: `namedBy` keeps a ref whose snapshot-scoped ordinal still resolves in the new mesh — element counts only grow across the measured regens (chamfer 12→15 edges; each hole +2 faces/+3 edges), so a stale ordinal always resolves, to a different element; `ordinalForRef` prefers topoKey over elementId, the highlight draws the wrong element and the fillet arm authors it (`ModelToolController.ts:3290` nulls the elementId when a topoKey is present; `gate_stale_pick` passes at head; `resolve_pick` never reaches the anchor rung). Also: head-snapshot `elementInfo` answers installed into an older displayed mesh (Astra F2); reply guards keyed by reusable `id` (F3); missing index kept an invisible selection (F4); three other lanes (`projectTool`, edge picks, library placement) still send raw `el_` labels (local MAJOR); Rust guard hardcodes `f:/e:/v:` instead of `TopoKey::parse` (`b:` exists); `kind: ""`; hole seat clear. Astra transcript read one file outside the allowlist (`worker/tests/test_wp6_ladder.cpp`) — recorded in `docs/design/astra/wp-u4-selection-survival.md`; F5 (§10 ladder guarantees) rejected as outside this package's path. Fix package T13b dispatched (impl-critical, red-first).
-- **T13b (WP-U4 fixes from both reviews) done, delegated (impl-critical, red-first), diff reviewed.** `rebindPick.ts`: `ordinalForRef` tries the ElementId first; `verdictFor` (keep only when the new id table names the ElementId / confirm via backend when the ref has one / DROP an unpromoted ref) replaces ordinal trust; `confirmRef` fences the answer on body, kind, and drawability in the displayed mesh and matches the ref by object identity; reconcile only on a regen publish (not first load, colour, visibility, self-heal); `loadBody` re-checks `loadSeq` after the colour await; `dropBody` clears the removed body's refs; `promotePick` writes back only `elementId`, by object identity, with the pick's kind. Authoring lanes prefer the persistent handle: edge picks send `elementId` (`prepareEdgeOp`), projection sources carry `elementId` and `api::project_to_sketch` skips promotion for them (`ProjectionAddress`), library placement already did. Rust guard uses `TopoKey::is_valid()`. Hole no longer clears its seat face (four-holes flow). Every finding shown RED first (agent output quoted in its report) then green: `rebindPick.test.ts` 27, `meshSync` +3, `ViewportRoot` +2, `promote` +1, `projectTool` +1, `edgePrepare` +1, `hole` flipped, Rust guard test +1, e2e `filletChamfer` +1 (bystander drop on the commit's regen; mock lane cannot publish on undo/redo, so "redo empties the selection" is an owed real-stack check), `hole` +1 (seat survives, second Hole arms with no stale hint). Agent-reported: vitest 2828 (touched dirs) / `bun run test` 5700; e2e chromium 31 + 34 passed on port 4191; fmt/clippy clean; `promote_selection` 6, `selection_promote` 2, `topology_rebind` 16, `element_identity` 4, `chamfer_reference` 3, `chamfer_angle` 5, `hole_ops` 14 passed.
-- **L3 after T13b (orchestrator-run):** `bunx tsc --noEmit` clean · `bun run test` first run **1 failed** (`useShortcuts.test.tsx` "finishSketch confirmation": passes 4×/4 alone, reds only under full-suite load — the confirmation lands after an async queue drain and the tests asserted after one `setTimeout(0)`); fixed by polling with `waitFor` (test-only), then **5700 passed / 0 failed × 2 runs** · hex empty · three QA verifiers OK · fmt OK · clippy clean · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1593 passed / 0 failed / 0 ignored, 99 targets** · ctest 193/193 (no C++ change since that run) · stdout hygiene clean · full `bun run e2e` re-launched alone (the earlier lane, 534/4 with the 4 reds all webkit in specs T13b edited mid-run, is discarded as contaminated).
-- **Commit-boundary L3 complete:** `bun run e2e` (both projects, retries 0, run alone after every change) → **542 passed / 0 failed (31.0 min)**. With the rungs above, the tree is a full L3-green gated tree. No commit made (not authorised). Ledger written to `TODO.md`.
+(appended by fable-run)
 
 ## Follow-ups
 
-- Feature-level patterns (pattern a Hole, not a body): kernel + SCHEMA work; Astra-first (`derive`) when scheduled.
-- Freeze root cause: no surviving evidence; add a `?vpdebug`-independent heartbeat line to `logs/dev.jsonl` on the
-  FE side so a future hang leaves a trace (cheap, do with the next debugging pass).
-- ViewCube drag orbit vs roll; measurement-chip de-overlap; docked full-parameter inspector; pure hover QA.
-- Sketch vertex drag: reproduce with a physical mouse before any change (`e2e/sketch-drag.spec.ts` is green).
+- WP10: put `completeness`, `budgetLimitedEdges`, `missingEdges`, requested/achieved tolerance, and `quantizationErrorMm` on the wire; `meshRenderCompleted` needs a "no longer required" outcome; document the consumer validation contract (DEV-WP04-1).
+- WP07: `Picker.ts` hover on stale entries (inspection allowed; promotion now gated) — hover currentness proper.
+- `tessellate_raw` export path still uses triangle-average normals + `+Z` fallback (spec §14 export policy decision).
+- `test_tessellation_quality` density assertions are not curve-quality proofs; keep the geometric-error oracle authoritative.
+- Then resume WP05 → WP06 → WP10 in a new plan.
 
-## Current hardening plan override — 2026-09-11 (append-only)
-
-The earlier “done” and clamp-D6 notes in this plan belong to a historical smaller plan. The current approved hardening plan overrides them: invalid typed values remain visible and block confirmation; `Use maximum` is explicit and verified non-committing. Full acceptance remains OPEN pending the required independent evidence and native validation.
-
-## Final hardening checkpoint — 2026-09-11 (append-only)
-
-The earlier “done” and clamp-D6 entries above belong to the historical smaller plan. Current approved hardening overrides them: invalid typed values remain visible and block confirmation; `Use maximum` is explicit and verified non-committing; full acceptance remains OPEN.
-
-Main independently recorded promoter + StartScreen **240/240**, native receipt **6/6** including cap, currentness **55/55**, chooser + ViewportRoot + Popover **32/32**, bounded Revolve core **9/9**, real-worker **4/4**, six frontend files **230 tests**, three UI suites **129 tests**, and fresh chooser Chromium + WebKit **2/2** retries 0 after stale-server restart. These are bounded evidence only. Preserve **61 pass / 19 fail**, preliminary A26/shared Add5 labels and mock missing-provenance observation; native app was not relaunched. Full suite/clippy, stress, persistence GUI, remaining adapters/CTest targets and D-camera remain OPEN. No percentage increase claimed.
+- **T0 done (impl-standard, Sonnet), diff reviewed.** `scripts/record-viewport-run.mjs` (new), verifier check 3 now refuses `.log` evidence and requires a parsed `runs/*/manifest.json` with a 40-hex `commit` and an `exit === 0` lane; `baseline/manifest.json` fingerprints the 14 ignored baseline logs; `docs/qa/viewport-hardening/README.md`. Orchestrator-run: `node scripts/verify-viewport-acceptance.mjs` → exit 1 with exactly 26 `evidence must be a runs/<id>/manifest.json, not a log` lines (expected red until rows are re-pointed after reruns). Deviation accepted: `spawnSync` buffers, so terminal echo is post-hoc, not live.
+- **T1 done (impl-standard, Sonnet), diff reviewed.** `kEdgeRanges = 7`, `kEdgePositions = 8`, range-length/point-bound validation, hand-authored E=2 fixture through the real `encode_mesh1` with a negative control on section 8. Agent red (constant reverted): `FAIL: reading section 7 (EDGE_RANGES) recovers the authored {0,3},{3,2} ranges`. Orchestrator-run `ctest -R "tessellation_quality|wp5_mesh1"` → 2/2 passed. Note: the agent found `worker/build` still configured under the pre-rename worktree path and sed-patched the cache; the orchestrator reconfigures via `scripts/build-worker.sh Release` before any W1 worker task.
+- **Heavy lane:** `ONECAD_OCCT_ROOT=~/.onecad-occt/8.0.1 scripts/build-worker.sh Release` rerun by the orchestrator (fresh configure after the worktree rename; Unix Makefiles) → exit 0, sidecar staged. **A1 dispatched** (user approved 2026-09-14): `codex exec` gpt-6-astra `break`, xhigh, grounded on the 10 allowlisted paths, packet sha256 18da078b1dbd, thread `01a09f36-a120-71f3-affc-53242255ec0f` (resumable), call 1/3 WP09. **T3** (impl-critical) and **T5** (impl-critical) dispatched; T2 still running.
+- **T2 done (impl-careful, Opus), diff reviewed.** `FrameScheduler`: `inTick` gate on `invalidate()`, park = `threw && workErrors ≥ 3` cancels the queue and keeps the mask, `parked` getter, `resetErrors()`; engine: per-listener isolation in `notifySubmitted` with a 5 s throttled `logError` AND a consecutive-listener-failure bound that reuses the existing `submissionHalted` park at `SUBMIT_FAILURE_LIMIT` (deviation accepted: pure isolation of an invalidate-then-throw listener would make the loop invisible and unbounded); `retryRenderer()` and the context-restored path call `resetErrors()`; README updated. Agent red quoted the review's numbers (12 attempts, 1 queued). Orchestrator-run: `bunx vitest run src/viewport/engine/FrameScheduler.test.ts src/viewport/engine/ViewportEngine.test.ts` → 90 passed / 0 failed; agent-run `src/viewport/engine src/viewport/vph` 682 passed / 6 expected fail. Deviation accepted: `setSuspended(false)` does not reset errors (the restored-context path does). Follow-ups: duplicated throttle bodies (`recordSubmitFailure`/`reportListenerError`); `transitionActive` dropped on a throwing tick (pre-existing).
+- **T3 done (impl-critical, Opus), diff reviewed.** `meshRegistry`: `commitSwap`/`commitRemove` (pure, return the retired entry), `notifyRetired` (per-listener try/catch → `logError`), `MeshEntry.reservation` released by `entry.dispose()` (the single disposer, reached from `flushDisposals`/`disposeAll`); `swap`/`remove` kept as commit+notify wrappers for the preview lanes. `meshSync.loadBody`: COMMIT block (`commitSwap` → scene → handle map → `entry.reservation = reservation; held = null; installed = true`, no call-out) then NOTIFY block; `reservations` map deleted; body-loaded and display-state listeners isolated. `previewMesh.buildPreviewEntry()` validates → reserves on the document singleton (`getDocumentAdmission()`) → builds. Agent red: 17 failed / 228 passed across 4 files (quoted). Orchestrator-run: `bunx vitest run src/viewport/mesh` → 12 files / 249 passed / 0 failed. Deviations accepted: release in `dispose()` rather than `flushDisposals` (same moment, one mechanism); display-state listeners isolated too; the false "Body failed to load" hint on a throwing bodyLoaded listener is gone. `// T6:` the two controller preview call sites must switch to `buildPreviewEntry`. Follow-ups: `reconcileSelectionForBody`/`refreshHighlights`/`invalidate` in NOTIFY are still un-isolated; `previewMesh.ts` carries a pre-existing NUL byte (git shows it as binary).
+- **T7 done (inline, orchestrator).** `meshSync.traceRendered(bodyId, token, startedAt, installedProvenance)` now consumes the `FrameSubmission`: a frame whose `displayedBodyIds` omits the body, or whose row provenance differs structurally from the installed entry's, is skipped (counted); the first matching frame acknowledges once; the 2 s timeout trace names the skip reason. Test fake engine emits real `FrameSubmission`s. Red (guards disabled): `AssertionError: expected "spy" to not be called at all` on the other-bodies frame; green: `bunx vitest run src/viewport/mesh` 12 files / 250 passed.
+- **A1 done (Astra `break` WP09, xhigh, grounded, call 1/3).** Verdict DEFECTIVE: F1 missing nondegenerate faces still publish (`out.ok = true`); F2 body-relative area escape and all-degenerate-edge flag do not prove degeneracy (0.005 mm face on a 10 m body excused; a collapsed-boundary bulge has interior Jacobian 4 mm²); F3 `kSurfaceD1RelativeNoise=1e-12` is not a demonstrated bound (dyadic fixture: 18.43° normal error passes both floors); F4 face-bbox scale is rotation-dependent and defaults to 1.0 on invalid input; F5 triangle floor is asymmetric (reject/accept/reject by vertex order) and does not compose to 1e-4 rad; F6 the 0.2° 3-sample screen + tolerance-close analytic equivalence can certify false tangency (0.0573° real dihedral); F7 sphere-pole sign is chosen by facets (180° flip keeps `AnalyticSingular`); F8 cone apex enters the 5° averaging rule (1.79° spread averaged; shallow cone 4.0°); F9 one surviving triangle = complete despite filtered positive-area losses; F10 `Missing` nodes still serialise +Z, NaN escapes the unit test via `std::max`; F11 pairwise spread is O(k²). §3 degeneracy predicate: certificate-based, fail-closed (`CertifiedZero | CertifiedKernelCollapse | Unproved`), no area threshold; §4 seven missing classes; §5 fixtures. Every number recomputed by the orchestrator (see record header). Accepted record: `docs/design/astra/wp09-surface-normals-break.md`. T8's DESIGN = this record.
+- **T4 done (impl-careful, Opus), diff reviewed.** `planFaceSetCapacity` is the single sizing authority (×1.5 growth priced up front, `peakBytes` includes the reused buffer during growth); `HighlightCache.reserve` returns a receipt, `put(key, value, receipt)` refuses and logs an over-receipt value; degraded mode = leased body outline at the selection-halo weight + a count chip through the existing chip layer (`HighlightDeps.onDegraded` → `ViewportEngine.syncDegradedChips`), re-attempted every rebuild, `degraded` = display state; `GhostLayer` leases whole bodies (`"ghost"`) and owns ranged copies via `buildTriangleRangeGeometry`, `shareIndexed` deleted; `SectionLayer.createPair` leases `mesh.userData.meshEntry` and refuses a mismatch; `BodyObject` stamps `userData.meshEntry`, sweep deleted; four preview sites call `handle.dispose()`. Agent reds quoted per item (e.g. 288-byte value vs 240-byte receipt admitted; `expected [] to deeply equal ['ghost']`). Orchestrator-run: `bunx vitest run src/viewport/engine src/viewport/mesh/faceSliceGeometry.test.ts src/viewport/mesh/highlightCache.test.ts` → 44 files / 715 passed; grep for sweep/`shareIndexed` empty; hex gate empty. Deviation accepted: outline is solid, not dashed — `computeLineDistances()` would write untracked attributes onto the LEASED geometry (the exact defect class being removed); DEV-WP03-1 wording to be amended in the ledger. Follow-ups: `estimateFaceSetBytes` has no production caller; `reportHighlightCache` still multi-writer (N-5); `ModelToolController.offsetFace.test.ts` 24 reds from a fake client lacking `onDocumentChanged` (pre-existing per WP00 baseline).
+- **T5 done (impl-critical, Opus), diff reviewed at the contract level (adversarial review R1(c) owed).** Hard body cap (zero-point range + `budgetLimitedEdges`, `endpoints_only_quiet` deleted); doubling ladder → `QualityLimited` with requested/achieved chord+angular fields; C2 cone `β + asin(E/g) ≤ tol/2` with retained Bernstein mass (`kAngularTestFloor` deleted); F5 cone about the ENCODED chord for publication (double chord decides refinement) — `kShortChordQuantizationFactor` deleted; C1 encoded-turn acceptance at every regular join (`turn ≤ tol + J`, J = the curve's own one-sided tangent jump); F6 control-net validation (+inf hull bound on NaN) + charged roundoff enclosure (2.492451e-13 at n=32,d=32; 4.317e-4 mm at 1e9 mm); F7 semantic closure only, angular re-check after snapping. Agent red (HEAD sampler): 8 RED assertions incl. cap 128 → 133 segments, F5 `Satisfied` at 7.125°, C1 corners 45° turns, F7 gap snapped to 0. Green fixtures: C1 corners 3 → 34 segments, max turn 45° → 2.966°; S-curve/r=5/X=1e9 circles byte-identical. Orchestrator-run: `ctest -R "curve_sampler|tessellation_quality|wp5_mesh1|wp6_meshexport|parity|canonical|determinism"` → 46/46; stdout hygiene clean; parity/canonical unchanged. Engineering constants without derivation (flagged for A2 `verify`): `kTurnSplitAttempts = 12`, uncertainty op-count `K = 3n + 16`, turn-measurability bound from F5's relation. Deviations accepted: depth-cap terminal acceptance publishes `Undefined` (no singular label, still turn-checked); `KernelEstimated` with a turn shortfall → `QualityLimited`.
+- **T6 done (impl-critical, Opus), diff reviewed.** `meshPreparationPlan.ts` is the single layout+cost authority (`needsVertexColors` moved here; `buildFaceGeometry` reads `plan.layout`; `MeshAdmission.reserve` takes `{cpuBytes,gpuBytes}` only — pricing from `MeshAccounting` is now a compile error); reservation in `loadBody` moved after `resolveAuthoredFaceColors` + the publication re-check, before the first derived allocation; DEV assertions `assertPlanMatchesAppearance` / `assertBuiltMatchesPlan` with positive controls; both preview lanes migrated to `buildPreviewEntry`, `validatePreviewMesh` private. Agent red: metadata-coloured body charged 1008 GPU bytes where it allocates 1584 (quoted). Orchestrator-run: `bunx tsc --noEmit` exit 0; `bunx vitest run src/viewport src/ipc/promote.test.ts src/modules/library` → 1091 passed / 6 expected fail; `previewMesh.ts` NUL byte intact. Deviations accepted: `plan` is the trailing optional parameter of `buildBodyObjects` (derived via the same function when omitted); refusal codes reuse `count-overflow`/`payload-budget`; a job parked on colour resolution holds its payload buffer uncharged (bounded by the 256 MiB payload cap; WP14 follow-up). Pre-existing: `src/tools/modelTools` 437 reds from mocks lacking `onDocumentChanged` (matches the WP00 baseline set); `tauriClient.test.ts` readFence case red at HEAD.
+- **T9 done (impl-critical, Opus), diff reviewed.** `promoteOne` deleted. `pickProof.ts` (WeakMap keyed by ref object; `proofFromHit`); `PickHit.entry` stamped inside `resolvePick` from the same lookup that decoded the ordinal; `promoteViewportPick(client, proof, pick)` checks the proof BEFORE the wire call, BEFORE the `el_` short-circuit, and after the reply (bodyId taken from the proof, never the caller); `promoteRef(client, ref)` fails closed with no proof; `promoteAuthoritativeRef(client, bodyId, pick, snapshotId, origin)` with the closed union `"history-repair" | "edge-op-closure" | "offset-closure"`; `reconcileSelectionForBody` clears proofs of kept refs. Caller table recorded in the agent report: viewport → `ViewportRoot.promotePick`, `measurePick`, the three `probePick` sites (their own caller-level `el_` bypass closed too), `SketchController.promoteFace`, `OverlapCandidateChooser`; authoritative → `historyActions.rebindCandidate`, `promoteChamferReferenceFace` (adjacent faces from `prepareEdgeOp`, now fenced on `filletPreparedSnapshot`), `promoteOffsetEvidence` (tangent-chained closure from `prepareOffsetFace`, now fenced on `res.snapshotId`). Deviation from the plan's expected classification (4101/5165 as viewport) accepted with the fence added — flagged for R1(a). Agent reds P1a–P5 quoted per mechanism (e.g. `× PR-01: refuses an el_ label read off a stale-inspection-only entry`). Orchestrator-run: `bunx tsc --noEmit` exit 0; `grep -rn promoteOne src` empty; focused vitest (promote, ViewportRoot, selection, rebindPick, proofGate, SketchController.face, historyActions) → 106 passed / 0 failed; agent's machine-diffed baseline over the affected scope: 443 failed before and after, 0 new. Follow-ups: `SketchController.promoteFace` / `promoteOffsetEvidence` still accept a bare `elementId` without a currency check; `promoteAuthoritativeRef` has no post-reply identity check; a selected ref's proof pins a retired `MeshEntry` wrapper until the next reconcile.
+- **T8 done (impl-critical, Opus), diff reviewed at the contract level (adversarial review R1(c) owed).** F1: `out.ok = completeness.allNondegenerateFacesCovered` + `BodyMesh.diagnostic` naming the faces; `PlanExecutor.attach_tessellate` routes a `!ok` body into the existing per-step diagnostics (`ARTIFACT_TESSELLATE_FAILED`, tail kept, other bodies still publish) — propagation to the FE step DTO verified by reading `wire.rs:1554` → `executor.rs:737` → `document_runtime.rs:3754`. F2/§3: `classify_face_degeneracy` (certificates: zero-measure UV box, elementary surface with a zero parametric extent, rank-one polynomial/uniform-weight derivative net; everything else `Unproved` → missing → `ok=false`; `CertifiedKernelCollapse` never returned — Astra's proof gap); `face_is_degenerate`, `kDegenerateFaceAreaRatio`, `FaceScale` (and its 1.0 default) deleted. F3/F4: representation-derived absolute derivative budget (`kAnalyticDerivativeUlps = 8`, B-spline via `pole_roundoff_multiplier`), new provenance `Unresolved`; `kSurfaceD1RelativeNoise`/`kMinDerivativeSine`/`kMinDerivativeSpanRatio` deleted. F5/F9: symmetric geometry-only triangle predicate (`kTriangleDirectionAcceptanceRad = 1e-4`), only exact-zero triangles dropped, `complete` clears on any unresolved loss. F6: tangent only from trusted G1 metadata with all samples evaluable, or the same surface handle; tolerance-close equivalence deleted. F7: analytic sphere-pole sign cached per face. F8: cone apex → split before the fallback. F10: no `Missing` slot emitted, NaN positive control. F11: `kMaxSpreadValence = 64` (valence-10,000 fan 160.5 ms → 0.70 ms). Agent red: 18 FAIL lines on the retired code reproducing every Astra number (quoted). Orchestrator-run: focused ctest pattern → 47/47; stdout hygiene clean; agent-run full ctest 197/199 (baseline reds only). Torus normals cost 54.6 → 65.2 ns/node (+19 %). Deviations accepted: a wireless face is `Unproved` (Astra §3 says missing trims are uncertainty); surfaces without an error enclosure (revolution/extrusion/offset) make every regular node `Unresolved` (fail-closed reading of F3 — behaviour change, no fixture); F6 polynomial-join cases asserted through `decide_edge_continuity` + exact arithmetic. Follow-ups: `worker/src/main.cpp` `Tessellate` verb still drops a `!ok` body silently; `PreviewOp.cpp:203` turns an incomplete body into "no preview mesh" (untested new failure mode); duplicate `kUnitRoundoff` definitions; **`src-tauri/target/` holds pre-rename absolute paths — `cargo` on the app crate fails in tauri's build script until that target dir is rebuilt (blocks the Rust rung of L3 until cleaned).**
+- **T10 done (impl-standard, Sonnet; agent stalled after ~60 min of iterating — the orchestrator finished it inline).** `e2e/vph-hover-lifecycle.spec.ts` → 1,000 hovers, plateau i=200→i=1000, highlight-cache ≤256 entries, `leasesOpen` constant; new `e2e/vph-preview-lifecycle.spec.ts` (TEST-RES-05): 100 extrude-preview apply/cancel cycles and 50 new-document/close cycles, sampled every 10, tripwire must be empty. Orchestrator fix: the document-cycle case asserted an EXACT per-ten-closes retirement delta (measured 30/26/25/26/28 — the mock lane republishes bodies a varying number of times) while geometries (3) and open leases (0) were flat at baseline on every sample; replaced by a bounded-growth check (≥ 10, ≤ 80 per window) with the measured series in the comment. **Orchestrator-run through the recorder** (`runs/consolidation-g-lane/manifest.json`, lanes `hover-lifecycle` exit 0 / 3.3 min, `preview-lifecycle` exit 0 / 5.4 min): hover — geometries 13 at i=100…1000, highlightEntries 2, leasesOpen 1; preview cycles — geometries 24 / leasesOpen 1 at every sample of 100; document cycles — geometries 3 / leasesOpen 0 at every sample of 50, tripwires `[]`.
+- **RUN PAUSED by the user (2026-09-14) after the running agents finished.** Done: T0–T10, A1. Owed (in order): A2 (Astra `verify` WP08 round 3 — packet ready, sha 058e3de6f7bd, awaiting approval); R1 adversarial reviews ×3 ((a) T3+T6+T7+T9 identity/publication, (b) T2+T4 ownership/scheduler, (c) T5+T8 worker) with red-first fix rounds; matrix rows re-pointed to recorder manifests after the FE/worker focused gates are rerun through `scripts/record-viewport-run.mjs` (`consolidation-fe-focused`, `consolidation-worker-focused`); STATUS.md §2/§6/§7 per-PR completion records; G1 = full L3 + clean-checkout verifier + commit. **Blocker for the Rust rung:** `src-tauri/target/` still carries pre-rename absolute paths (`…/OneCAD-ai-agent/…`) — tauri's build script fails until that target dir is rebuilt (`cargo clean -p onecad` or a fresh `CARGO_TARGET_DIR`); `cargo fmt/clippy/test` were NOT run this session. Pre-existing reds to compare against at L3: vitest 443 (`src/tools/modelTools` mocks lacking `onDocumentChanged` + 4 files), ctest `feature_pattern` + `chamfer_reference_face`, cargo 24 deterministic (STATUS §5.1).

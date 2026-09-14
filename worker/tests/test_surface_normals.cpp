@@ -10,6 +10,8 @@
 // by an outwardness test against the body centre, never by taking an absolute
 // value. Nothing compares the tessellator to itself.
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -20,23 +22,31 @@
 #include <vector>
 
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepTools.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <Geom2d_Line.hxx>
+#include <Geom_Plane.hxx>
+#include <Geom_Surface.hxx>
 #include <Geom_BSplineSurface.hxx>
+#include <Geom_BezierSurface.hxx>
 #include <NCollection_Array1.hxx>
 #include <NCollection_Array2.hxx>
 #include <Poly_Triangulation.hxx>
 #include <Precision.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TopoDS_Wire.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Vertex.hxx>
+#include <gp_Dir2d.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt2d.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
@@ -670,14 +680,32 @@ void test_normal_06_density_independence() {
 // Unit-length window (NUM §1.2) — asserted over every fixture in this file.
 // ---------------------------------------------------------------------------
 
-void check_unit_normals(const MeshView& m, const char* fixture) {
+// Astra F10: `std::max(worst, NaN)` returns `worst`, so the retired reduction
+// let a NaN normal through untouched. Every COMPONENT is checked finite first,
+// and the predicate is a bool so a positive control can prove it fires.
+bool unit_normals_ok(const MeshView& m, std::string& why) {
     double worst = 0.0;
-    for (std::size_t v = 0; v < m.positions.size(); ++v) {
-        worst = std::max(worst, std::abs(m.normals[v].Magnitude() - 1.0));
+    for (std::size_t v = 0; v < m.normals.size(); ++v) {
+        const gp_Vec& n = m.normals[v];
+        if (!std::isfinite(n.X()) || !std::isfinite(n.Y()) || !std::isfinite(n.Z())) {
+            why = "vertex " + std::to_string(v) + " has a non-finite normal component";
+            return false;
+        }
+        worst = std::max(worst, std::abs(n.Magnitude() - 1.0));
     }
-    check(worst <= 1e-3, std::string("NUM 1.2: every emitted normal of ") + fixture +
-                             " has unit length within [0.999, 1.001] (worst deviation " +
-                             std::to_string(worst) + ")");
+    if (!(worst <= 1e-3)) {
+        why = "worst unit-length deviation " + std::to_string(worst);
+        return false;
+    }
+    why = "worst unit-length deviation " + std::to_string(worst);
+    return true;
+}
+
+void check_unit_normals(const MeshView& m, const char* fixture) {
+    std::string why;
+    check(unit_normals_ok(m, why), std::string("NUM 1.2: every emitted normal of ") + fixture +
+                                       " is finite and has unit length within [0.999, 1.001] (" +
+                                       why + ")");
 }
 
 // ---------------------------------------------------------------------------
@@ -844,8 +872,25 @@ void test_normal_03_provenance() {
 }
 
 // ---------------------------------------------------------------------------
-// TEST-MESH-06 — incomplete display tessellation is diagnostic.
+// TEST-MESH-06 — incomplete display tessellation is a FAILED tessellation
+// (D11 / Astra F1), and degeneracy is decided by a face-local CERTIFICATE
+// (Astra F2 / §3), never by an area threshold relative to the body.
 // ---------------------------------------------------------------------------
+
+// A bounded polynomial patch `size x size` mm carried as a face with NO bounding
+// wire: BRepMesh leaves it untriangulated, and it is a perfectly valid face, so
+// it is the canonical "nondegenerate face the mesher covered with nothing".
+TopoDS_Face naked_patch(double size) {
+    NCollection_Array2<gp_Pnt> poles(1, 2, 1, 2);
+    poles.SetValue(1, 1, gp_Pnt(0.0, 0.0, 0.0));
+    poles.SetValue(2, 1, gp_Pnt(size, 0.0, 0.0));
+    poles.SetValue(1, 2, gp_Pnt(0.0, size, 0.0));
+    poles.SetValue(2, 2, gp_Pnt(size, size, 0.0));
+    TopoDS_Face face;
+    BRep_Builder builder;
+    builder.MakeFace(face, new Geom_BezierSurface(poles), Precision::Confusion());
+    return face;
+}
 
 void test_mesh_06_completeness() {
     // A nondegenerate face the mesher cannot cover: a bounded spline surface
@@ -859,7 +904,13 @@ void test_mesh_06_completeness() {
     builder.Add(compound, naked);
 
     const onecad::tess::BodyMesh bm = mesh_of(compound, "fine");
-    check(bm.ok, "TEST-MESH-06: the body still publishes when a face is missing");
+    // D11 / Astra F1: the retired code published this body with `ok = true` and
+    // recorded the contradiction in a field nothing read.
+    check(!bm.ok,
+          "TEST-MESH-06 (F1): a body with a missing NONDEGENERATE face FAILS to tessellate");
+    check(bm.diagnostic.find("f:7") != std::string::npos,
+          "TEST-MESH-06 (F1): the failure diagnostic NAMES the missing face (got \"" +
+              bm.diagnostic + "\")");
     check(!bm.completeness.allNondegenerateFacesCovered,
           "TEST-MESH-06: a NONDEGENERATE face with no triangles cannot be called complete");
     check(bm.completeness.missingFaces.size() == 1,
@@ -870,35 +921,191 @@ void test_mesh_06_completeness() {
               "TEST-MESH-06: the missing face is the naked spline face, by TopoKey (got " +
                   bm.completeness.missingFaces.front() + ")");
     }
+    // The ids and the ordinal tables are untouched by the failure: the blob is
+    // still built and every OTHER face keeps the range it earned.
     const MeshView view = read_mesh(bm.blob);
     check(view.faceRanges.size() == 7,
           "TEST-MESH-06: the missing face keeps its ordinal and a zero range");
     if (view.faceRanges.size() == 7) {
         check(view.faceRanges.back().second == 0,
               "TEST-MESH-06: the missing face's range is empty, never fabricated");
+        std::uint32_t cursor = 0;
+        bool contiguous = true;
+        std::uint32_t covered = 0;
+        for (std::size_t f = 0; f + 1 < view.faceRanges.size(); ++f) {
+            if (view.faceRanges[f].first != cursor) contiguous = false;
+            if (view.faceRanges[f].second == 0) contiguous = false;
+            cursor += view.faceRanges[f].second;
+            covered += view.faceRanges[f].second;
+        }
+        check(contiguous && covered * 3U == view.indices.size(),
+              "TEST-MESH-06 (F1): the SURVIVING faces keep contiguous, non-empty ranges that "
+              "cover every emitted triangle");
     }
 
     // A whole box is complete, with no missing and no degenerate faces.
     const onecad::tess::BodyMesh whole = mesh_of(BRepPrimAPI_MakeBox(40.0, 30.0, 20.0).Shape(), "fine");
-    check(whole.completeness.allNondegenerateFacesCovered && whole.completeness.missingFaces.empty(),
-          "TEST-MESH-06: an intact box reports complete coverage");
+    check(whole.ok && whole.completeness.allNondegenerateFacesCovered &&
+              whole.completeness.missingFaces.empty(),
+          "TEST-MESH-06: an intact box reports complete coverage and publishes");
 
-    // The degeneracy predicate itself, both arms, against a body 100 mm across.
-    TopTools_IndexedMapOfShape boxFaces;
-    TopExp::MapShapes(BRepPrimAPI_MakeBox(40.0, 30.0, 20.0).Shape(), TopAbs_FACE, boxFaces);
-    check(!onecad::tess::face_is_degenerate(TopoDS::Face(boxFaces(1)), 100.0),
-          "TEST-MESH-06: a 30x20 mm box face is NOT degenerate");
-    TopTools_IndexedMapOfShape slivers;
-    TopExp::MapShapes(BRepPrimAPI_MakeBox(1e-3, 1e-3, 1e-3).Shape(), TopAbs_FACE, slivers);
-    check(onecad::tess::face_is_degenerate(TopoDS::Face(slivers(1)), 1e6),
-          "TEST-MESH-06: a 1e-3 mm face of a 1e6 mm body IS degenerate");
-    check(!onecad::tess::face_is_degenerate(TopoDS::Face(slivers(1)), 1.0),
-          "TEST-MESH-06: the same face on a 1 mm body is NOT degenerate (the floor is relative)");
+    // --- Astra F2 / §5: the predicate is FACE-LOCAL ------------------------
+    // The retired rule was `area <= 1e-12 * bodyDiagonal^2`, so a valid
+    // 0.005 x 0.005 mm face (2.5e-5 mm^2) on a 10 000 mm body was excused by a
+    // 1e-4 mm^2 threshold. `classify_face_degeneracy` takes no body argument at
+    // all, so the same face gets the same answer inside any body.
+    const TopoDS_Face tiny =
+        BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), -0.0025, 0.0025, -0.0025,
+                                0.0025)
+            .Face();
+    for (const double bodyMm : {1.0, 1000.0, 10000.0}) {
+        BRep_Builder cb;
+        TopoDS_Compound host;
+        cb.MakeCompound(host);
+        cb.Add(host, BRepPrimAPI_MakeBox(bodyMm, bodyMm, bodyMm).Shape());
+        cb.Add(host, tiny);
+        TopTools_IndexedMapOfShape hostFaces;
+        TopExp::MapShapes(host, TopAbs_FACE, hostFaces);
+        const onecad::tess::FaceDegeneracy d =
+            onecad::tess::classify_face_degeneracy(TopoDS::Face(hostFaces(hostFaces.Extent())));
+        check(!d.certified(),
+              "TEST-MESH-06 (F2): a valid 0.005 x 0.005 mm face is NOT certified degenerate "
+              "inside a " +
+                  std::to_string(static_cast<long long>(bodyMm)) + " mm body (reason: " + d.reason +
+                  ")");
+    }
+    // The same face, with its triangulation missing, is therefore a MISSING face
+    // at every body scale, and the body fails.
+    for (const double bodyMm : {1.0, 1000.0, 10000.0}) {
+        BRep_Builder cb;
+        TopoDS_Compound host;
+        cb.MakeCompound(host);
+        cb.Add(host, BRepPrimAPI_MakeBox(bodyMm, bodyMm, bodyMm).Shape());
+        cb.Add(host, naked_patch(0.005));
+        const onecad::tess::BodyMesh hm = mesh_of(host, "fine");
+        check(!hm.ok && hm.completeness.missingFaces.size() == 1 &&
+                  hm.completeness.degenerateFaces.empty(),
+              "TEST-MESH-06 (F1/F2): a 0.005 x 0.005 mm uncovered face fails a " +
+                  std::to_string(static_cast<long long>(bodyMm)) +
+                  " mm body instead of being excused (ok=" + std::to_string(hm.ok) + ", missing=" +
+                  std::to_string(hm.completeness.missingFaces.size()) + ", degenerate=" +
+                  std::to_string(hm.completeness.degenerateFaces.size()) + ")");
+        const MeshView hv = read_mesh(hm.blob);
+        check(hv.faceRanges.size() == 7 && hv.faceRanges.back().second == 0,
+              "TEST-MESH-06 (F1): the failing body still carries all seven face ordinals with a "
+              "zero range on the uncovered one");
+    }
+
+    // Astra F2: all-degenerate boundary edges are EVIDENCE, never a certificate.
+    // `f = 16u(1-u)v(1-v)`, `S = ((2u-1)f, (2v-1)f, f)` maps its WHOLE boundary
+    // to the origin while |S_u x S_v| = 4 mm^2 at the centre.
+    {
+        const double g[4] = {0.0, 4.0 / 3.0, 4.0 / 3.0, 0.0};
+        const double q[4] = {0.0, -4.0 / 3.0, 4.0 / 3.0, 0.0};
+        NCollection_Array2<gp_Pnt> poles(1, 4, 1, 4);
+        for (int i = 1; i <= 4; ++i) {
+            for (int j = 1; j <= 4; ++j) {
+                poles.SetValue(i, j, gp_Pnt(q[i - 1] * g[j - 1], g[i - 1] * q[j - 1],
+                                            g[i - 1] * g[j - 1]));
+            }
+        }
+        const Handle(Geom_BezierSurface) bulge = new Geom_BezierSurface(poles);
+        gp_Pnt at;
+        gp_Vec du;
+        gp_Vec dv;
+        bulge->D1(0.5, 0.5, at, du, dv);
+        check(std::abs(du.Crossed(dv).Magnitude() - 4.0) <= 1e-9,
+              "TEST-MESH-06 (F2): the collapsed-boundary bulge has |S_u x S_v| = 4 mm^2 at its "
+              "centre (measured " + std::to_string(du.Crossed(dv).Magnitude()) + ")");
+        const TopoDS_Face bulgeFace =
+            BRepBuilderAPI_MakeFace(bulge, Precision::Confusion()).Face();
+        std::size_t degenerateEdgeCount = 0, edgeCount = 0;
+        for (TopExp_Explorer it(bulgeFace, TopAbs_EDGE); it.More(); it.Next()) {
+            ++edgeCount;
+            if (BRep_Tool::Degenerated(TopoDS::Edge(it.Current()))) ++degenerateEdgeCount;
+        }
+        const onecad::tess::FaceDegeneracy d = onecad::tess::classify_face_degeneracy(bulgeFace);
+        check(!d.certified(),
+              "TEST-MESH-06 (F2): the collapsed-boundary bulge is NOT certified degenerate "
+              "despite " + std::to_string(degenerateEdgeCount) + " of " +
+                  std::to_string(edgeCount) + " boundary edges being degenerate (reason: " +
+                  d.reason + ")");
+    }
+
+    // Astra §3's counterexample to a FACE-LOCAL area rule: a 1 x 1 mm square
+    // joined to a 2000 x 1e-5 mm strip has area 1.02 mm^2 and a face diagonal of
+    // about 2001 mm, so `area <= tolerance * diagonal` would excuse it too.
+    {
+        const gp_Pnt ring[6] = {gp_Pnt(0, 0, 0),      gp_Pnt(2001, 0, 0), gp_Pnt(2001, 1e-5, 0),
+                                gp_Pnt(1, 1e-5, 0),   gp_Pnt(1, 1, 0),    gp_Pnt(0, 1, 0)};
+        BRepBuilderAPI_MakeWire wire;
+        for (int i = 0; i < 6; ++i) {
+            wire.Add(BRepBuilderAPI_MakeEdge(ring[i], ring[(i + 1) % 6]).Edge());
+        }
+        const TopoDS_Face strip = BRepBuilderAPI_MakeFace(wire.Wire(), /*OnlyPlane=*/true).Face();
+        const onecad::tess::FaceDegeneracy d = onecad::tess::classify_face_degeneracy(strip);
+        check(!d.certified(),
+              "TEST-MESH-06 (§3): the 1 x 1 mm square plus 2000 x 1e-5 mm strip (1.02 mm^2) is "
+              "NOT certified degenerate (reason: " + d.reason + ")");
+    }
+
+    // A retained UV domain of zero measure IS a certificate: the retained
+    // parameter set lies in a line, so its image has dimension <= 1.
+    {
+        BRep_Builder zb;
+        TopoDS_Face flat;
+        const Handle(Geom_Surface) plane =
+            new Geom_Plane(gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)));
+        zb.MakeFace(flat, plane, Precision::Confusion());
+        TopoDS_Edge rail = BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 0), gp_Pnt(1, 0, 0)).Edge();
+        zb.UpdateEdge(rail, new Geom2d_Line(gp_Pnt2d(0.0, 0.0), gp_Dir2d(1.0, 0.0)), flat,
+                      Precision::Confusion());
+        zb.Range(rail, flat, 0.0, 1.0);
+        TopoDS_Wire seam;
+        zb.MakeWire(seam);
+        zb.Add(seam, rail);
+        zb.Add(seam, rail.Reversed());
+        zb.Add(flat, seam);
+        double u0 = 0.0, u1 = 0.0, v0 = 0.0, v1 = 0.0;
+        BRepTools::UVBounds(flat, u0, u1, v0, v1);
+        const onecad::tess::FaceDegeneracy d = onecad::tess::classify_face_degeneracy(flat);
+        check(d.cls == onecad::tess::DegeneracyClass::CertifiedZero,
+              "TEST-MESH-06 (§3): a face whose retained UV domain has zero v-measure is "
+              "CertifiedZero (v [" + std::to_string(v0) + ", " + std::to_string(v1) +
+                  "], reason: " + d.reason + ")");
+    }
+
+    // Astra §4's representation-collapse class: `ulp32(8192 mm) = 2^-10 mm`, so
+    // both 8192 and 8192.0001 cast to the same float32 and a 0.0001 x 0.01 mm
+    // rectangle there has NO float32 area. That is a representation failure to
+    // record, never permission to call the face degenerate.
+    {
+        check(static_cast<float>(8192.0001) == static_cast<float>(8192.0),
+              "TEST-MESH-06 (§4): float32(8192.0001 mm) == float32(8192 mm)");
+        const TopoDS_Face thin =
+            BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 8192.0, 8192.0001,
+                                    0.0, 0.01)
+                .Face();
+        const onecad::tess::FaceDegeneracy d = onecad::tess::classify_face_degeneracy(thin);
+        check(!d.certified(),
+              "TEST-MESH-06 (§4): a float32-collapsing 0.0001 x 0.01 mm face at X = 8192 mm is "
+              "NOT certified degenerate (reason: " + d.reason + ")");
+        const onecad::tess::BodyMesh tm = mesh_of(thin, "fine");
+        check(tm.completeness.degenerateFaces.empty(),
+              "TEST-MESH-06 (§4): float32 collapse never puts a face in degenerateFaces");
+        std::fprintf(stderr,
+                     "INFO float32-collapse fixture: ok=%d triangles=%u collapsed=%u missing=%zu\n",
+                     static_cast<int>(tm.ok), tm.triangle_count,
+                     tm.completeness.float32CollapsedTriangles,
+                     tm.completeness.missingFaces.size());
+        check(tm.triangle_count == 0 || tm.completeness.float32CollapsedTriangles > 0,
+              "TEST-MESH-06 (§4): the collapse is RECORDED when triangles are emitted");
+    }
 
     // Known degenerate topology keeps a zero range with an explicit reason and
     // does NOT invalidate completeness: a sphere's two pole edges.
     const onecad::tess::BodyMesh sphere = mesh_of(BRepPrimAPI_MakeSphere(20.0).Shape(), "fine");
-    check(sphere.completeness.allNondegenerateFacesCovered,
+    check(sphere.ok && sphere.completeness.allNondegenerateFacesCovered,
           "TEST-MESH-06: a sphere's degenerate pole EDGES do not make the mesh incomplete");
     std::size_t degenerateEdges = 0;
     for (std::size_t e = 0; e < sphere.edge_classes.size(); ++e) {
@@ -911,6 +1118,7 @@ void test_mesh_06_completeness() {
     check(degenerateEdges == 2,
           "TEST-MESH-06: both sphere pole edges are classified degenerate (found " +
               std::to_string(degenerateEdges) + ")");
+    std::fprintf(stderr, "INFO sphere display triangles at fine: %u\n", sphere.triangle_count);
 }
 
 // ---------------------------------------------------------------------------
@@ -1121,6 +1329,688 @@ void test_edge_classification() {
 }
 
 // ---------------------------------------------------------------------------
+// Astra F3/F4/F5/F7/F8/F10/F11 — the derivative budget, the symmetric triangle
+// predicate, the analytic pole sign, the cone apex, missing nodes and the
+// valence bound. Fixtures and their numbers: docs/design/astra/
+// wp09-surface-normals-break.md §5.
+// ---------------------------------------------------------------------------
+
+Handle(Poly_Triangulation) synthetic_triangulation(const std::vector<gp_Pnt>& nodes,
+                                                   const std::vector<gp_Pnt2d>& uv,
+                                                   const std::vector<std::array<int, 3>>& tris) {
+    const bool hasUv = !uv.empty();
+    Handle(Poly_Triangulation) tri = new Poly_Triangulation(
+        static_cast<int>(nodes.size()), static_cast<int>(tris.size()), hasUv, false);
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+        tri->SetNode(static_cast<int>(i) + 1, nodes[i]);
+        if (hasUv) tri->SetUVNode(static_cast<int>(i) + 1, uv[i]);
+    }
+    for (std::size_t t = 0; t < tris.size(); ++t) {
+        tri->SetTriangle(static_cast<int>(t) + 1,
+                         Poly_Triangle(tris[t][0], tris[t][1], tris[t][2]));
+    }
+    return tri;
+}
+
+// The triangle normal recomputed from the EMITTED winding of `fn`'s own node
+// positions — an oracle independent of the classifier under test.
+gp_Vec emitted_face_triangle_normal(const onecad::tess::FaceNormalResult& fn, std::size_t t) {
+    const gp_Pnt& a = fn.worldNodes[fn.vertexNode[fn.triangleVertexIndices[t * 3U]]];
+    const gp_Pnt& b = fn.worldNodes[fn.vertexNode[fn.triangleVertexIndices[t * 3U + 1]]];
+    const gp_Pnt& c = fn.worldNodes[fn.vertexNode[fn.triangleVertexIndices[t * 3U + 2]]];
+    return gp_Vec(a, b).Crossed(gp_Vec(a, c));
+}
+
+gp_Vec emitted_normal(const onecad::tess::FaceNormalResult& fn, std::size_t v) {
+    return gp_Vec(fn.normals[v * 3], fn.normals[v * 3 + 1], fn.normals[v * 3 + 2]);
+}
+
+// --- F3: an absolute, representation-derived derivative budget --------------
+
+// Astra §5's dyadic fixture, in mm: `M = 2^42`, `a = 2^-11`, `L = 2^-6`,
+// `S(u,v) = (M(u-1/2)^2 + a(u-1/2), Lv, a(u-1/2))`, trimmed to
+// `u in [1/2, 1/2 + 2^-24]`. The quadratic X poles `M/4 - a/2`, `-M/4`,
+// `M/4 + a/2` are all exactly representable, and the standard derivative-control
+// evaluation `Q0 = 2(P1-P0) = -M+a`, `Q1 = 2(P2-P1)` rounds `M+a` to `M`, so
+// `Dx(1/2) = a/2` against an exact `a` — a 50 % loss on one component and an
+// `atan(2) - 45 deg = 18.4349 deg` normal error that BOTH retired floors passed.
+void test_f3_derivative_budget() {
+    const double M = std::ldexp(1.0, 42);
+    const double a = std::ldexp(1.0, -11);
+    const double L = std::ldexp(1.0, -6);
+    NCollection_Array2<gp_Pnt> poles(1, 3, 1, 2);
+    const double xs[3] = {M / 4.0 - a / 2.0, -M / 4.0, M / 4.0 + a / 2.0};
+    const double zs[3] = {-a / 2.0, 0.0, a / 2.0};
+    for (int i = 1; i <= 3; ++i) {
+        for (int j = 1; j <= 2; ++j) {
+            poles.SetValue(i, j, gp_Pnt(xs[i - 1], (j == 1 ? 0.0 : L), zs[i - 1]));
+        }
+    }
+    const Handle(Geom_BezierSurface) surface = new Geom_BezierSurface(poles);
+    const double span = std::ldexp(1.0, -24);
+    const TopoDS_Face face =
+        BRepBuilderAPI_MakeFace(surface, 0.5, 0.5 + span, 0.0, 1.0, Precision::Confusion()).Face();
+
+    // The oracle: EXACT arithmetic on the STORED control values, never a second
+    // D1 call. For a quadratic Bezier, `S_u(1/2) = P2 - P0` exactly, and both
+    // poles and their difference are exactly representable in binary64.
+    const gp_Vec exactSu(xs[2] - xs[0], 0.0, zs[2] - zs[0]);
+    const gp_Vec exactSv(0.0, L, 0.0);
+    check(exactSu.X() == a && exactSu.Z() == a,
+          "F3: the exact derivative from the stored poles is (a, 0, a) with a = 2^-11");
+    const gp_Vec exactCross = exactSu.Crossed(exactSv);
+
+    const BRepAdaptor_Surface surf(face, /*Restriction=*/false);
+    const onecad::tess::DerivativeBudget budget = onecad::tess::derivative_error_budget(surf);
+    gp_Pnt at;
+    gp_Vec du;
+    gp_Vec dv;
+    surf.D1(0.5, 0.5, at, du, dv);
+    const double err = onecad::tess::normal_angular_error_rad(budget, du, dv);
+    const double deviation = angle_deg(du.Crossed(dv), exactCross);
+    std::fprintf(stderr,
+                 "INFO F3 dyadic fixture: budget=%.6g mm |Su|=%.6g |Sv|=%.6g |SuxSv|=%.6g "
+                 "angularBound=%.6g rad measuredDeviation=%.6f deg\n",
+                 budget.absoluteMm, du.Magnitude(), dv.Magnitude(), du.Crossed(dv).Magnitude(),
+                 err, deviation);
+    check(budget.known, "F3: a Bezier patch carries a control-net derivative budget");
+    // The binding statement: a node is either within NUM §7.4's 0.1 deg of the
+    // EXACT normal, or it is reported unresolved. Nothing in between.
+    check(!(err <= onecad::tess::kNormalAcceptanceRad) || deviation <= 0.1,
+          "F3: a node the budget CERTIFIES is within 0.1 deg of the exact normal (bound " +
+              std::to_string(err) + " rad, deviation " + std::to_string(deviation) + " deg)");
+    check(!(err <= onecad::tess::kNormalAcceptanceRad),
+          "F3: the dyadic fixture's normal is UNRESOLVED — the control net's roundoff enclosure "
+          "cannot certify 0.1 deg (bound " + std::to_string(err) + " rad)");
+}
+
+// --- F4: the budget is a property of the representation, not of a world AABB -
+
+// Astra §5: `S(u,v) = ((a u + (1-a) u^2) mm, v mm, 0)` on [0,1]^2 with
+// `a = 1.5e-9`. The retired floor compared `|S_u| * uSpan` against
+// `1e-9 * worldDiagonal`, and a unit square's AABB diagonal grows from sqrt(2) mm
+// to 2 mm under a 45 degree Z rotation, so the SAME node passed before the
+// rotation and failed after it.
+void test_f4_rotation_invariance() {
+    const double a = 1.5e-9;
+    NCollection_Array2<gp_Pnt> poles(1, 3, 1, 2);
+    const double xs[3] = {0.0, a / 2.0, 1.0};
+    for (int i = 1; i <= 3; ++i) {
+        for (int j = 1; j <= 2; ++j) {
+            poles.SetValue(i, j, gp_Pnt(xs[i - 1], (j == 1 ? 0.0 : 1.0), 0.0));
+        }
+    }
+    const Handle(Geom_BezierSurface) surface = new Geom_BezierSurface(poles);
+    const TopoDS_Face flat = BRepBuilderAPI_MakeFace(surface, Precision::Confusion()).Face();
+    gp_Trsf spin;
+    spin.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), kPi / 4.0);
+    const TopoDS_Face spun = TopoDS::Face(flat.Moved(TopLoc_Location(spin)));
+
+    bool decision[2] = {false, false};
+    double bound[2] = {0.0, 0.0};
+    const TopoDS_Face faces[2] = {flat, spun};
+    for (int k = 0; k < 2; ++k) {
+        const BRepAdaptor_Surface surf(faces[k], /*Restriction=*/false);
+        const onecad::tess::DerivativeBudget budget = onecad::tess::derivative_error_budget(surf);
+        gp_Pnt at;
+        gp_Vec du;
+        gp_Vec dv;
+        surf.D1(0.0, 0.5, at, du, dv);  // the u = 0 boundary, where |S_u| = a
+        bound[k] = onecad::tess::normal_angular_error_rad(budget, du, dv);
+        decision[k] = bound[k] <= onecad::tess::kNormalAcceptanceRad;
+    }
+    std::fprintf(stderr, "INFO F4 a=1.5e-9 patch: bound before=%.6g rad after 45 deg=%.6g rad\n",
+                 bound[0], bound[1]);
+    check(decision[0] == decision[1],
+          "F4: the u = 0 node's decision class is identical before and after a 45 degree Z "
+          "rotation (before " + std::to_string(decision[0]) + ", after " +
+              std::to_string(decision[1]) + ")");
+    check(decision[0],
+          "F4: the a = 1.5e-9 node IS certified — its derivative is small, but the control net "
+          "that produced it is not");
+}
+
+// --- F5/F9: a symmetric triangle predicate, and no silent coverage loss -----
+
+void test_f5_triangle_symmetry() {
+    const TopoDS_Face plane =
+        BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), -100.0, 100.0, -100.0,
+                                100.0)
+            .Face();
+    // Astra F5's triangle, plus one ordinary surviving triangle. Under the
+    // retired predicate the sines by cyclic permutation were 7.5e-13 / 1.5e-12 /
+    // 7.5e-13 — reject / accept / reject for the SAME triangle.
+    const std::vector<gp_Pnt> nodes = {gp_Pnt(0.0, 0.0, 0.0),   gp_Pnt(1.0, 0.0, 0.0),
+                                       gp_Pnt(2.0, 1.5e-12, 0.0), gp_Pnt(0.0, 5.0, 0.0),
+                                       gp_Pnt(5.0, 5.0, 0.0),   gp_Pnt(0.0, 10.0, 0.0)};
+    std::vector<gp_Pnt2d> uv;
+    for (const gp_Pnt& p : nodes) uv.emplace_back(p.X(), p.Y());
+
+    std::uint32_t dropped[3] = {0, 0, 0};
+    std::size_t kept[3] = {0, 0, 0};
+    bool complete[3] = {false, false, false};
+    for (int rot = 0; rot < 3; ++rot) {
+        const std::array<int, 3> sliver = {1 + rot % 3, 1 + (rot + 1) % 3, 1 + (rot + 2) % 3};
+        const Handle(Poly_Triangulation) tri =
+            synthetic_triangulation(nodes, uv, {sliver, {4, 5, 6}});
+        const onecad::tess::FaceNormalResult fn = onecad::tess::compute_face_normals(
+            plane, tri, TopLoc_Location(), plane.Orientation() == TopAbs_REVERSED);
+        dropped[rot] = fn.droppedTriangles;
+        kept[rot] = fn.triangleVertexIndices.size() / 3U;
+        complete[rot] = fn.complete;
+    }
+    std::fprintf(stderr, "INFO F5 cyclic orders: dropped=%u/%u/%u kept=%zu/%zu/%zu\n", dropped[0],
+                 dropped[1], dropped[2], kept[0], kept[1], kept[2]);
+    check(dropped[0] == dropped[1] && dropped[1] == dropped[2] && kept[0] == kept[1] &&
+              kept[1] == kept[2],
+          "F5: the sliver triangle is classified identically in all three cyclic vertex orders");
+    check(dropped[0] == 0 && kept[0] == 2,
+          "F5/F9: a positive-area triangle whose direction cannot be resolved is KEPT, not "
+          "deleted (dropped " + std::to_string(dropped[0]) + ", kept " + std::to_string(kept[0]) +
+              ")");
+    check(complete[0] && complete[1] && complete[2],
+          "F9: completeness holds only because no positive-area coverage was lost");
+
+    // An exactly-degenerate triangle IS dropped, and dropping it cannot leave a
+    // hole: it had no area to lose.
+    const std::vector<gp_Pnt> flatNodes = {gp_Pnt(0, 0, 0), gp_Pnt(1, 0, 0), gp_Pnt(2, 0, 0),
+                                           gp_Pnt(0, 5, 0), gp_Pnt(5, 5, 0), gp_Pnt(0, 10, 0)};
+    std::vector<gp_Pnt2d> flatUv;
+    for (const gp_Pnt& p : flatNodes) flatUv.emplace_back(p.X(), p.Y());
+    const onecad::tess::FaceNormalResult fz = onecad::tess::compute_face_normals(
+        plane, synthetic_triangulation(flatNodes, flatUv, {{1, 2, 3}, {4, 5, 6}}),
+        TopLoc_Location(), plane.Orientation() == TopAbs_REVERSED);
+    check(fz.droppedTriangles == 1 && fz.triangleVertexIndices.size() == 3U && fz.complete,
+          "F5: a collinear triangle has an exactly zero cross product and is the only kind that "
+          "is dropped (dropped " + std::to_string(fz.droppedTriangles) + ")");
+
+    // The tie path: an isosceles triangle whose TWO longest edges are exactly
+    // equal (|BC| and |CA| are both sqrt(0.5^2 + 10^2), computed from identical
+    // squared operands), so the base vertex cannot be picked by length alone.
+    // The remaining key is geometry-only, so every rotation must emit the same
+    // normal for the same NODE, bit for bit.
+    const std::vector<gp_Pnt> tied = {gp_Pnt(0.0, 0.0, 0.0), gp_Pnt(1.0, 0.0, 0.0),
+                                      gp_Pnt(0.5, 10.0, 0.0)};
+    std::vector<gp_Pnt2d> tiedUv;
+    for (const gp_Pnt& p : tied) tiedUv.emplace_back(p.X(), p.Y());
+    check(tied[1].Distance(tied[2]) == tied[2].Distance(tied[0]),
+          "F5: the isosceles fixture's two longest edges are EXACTLY equal, so the base vertex "
+          "is decided by the tie-break");
+    std::vector<std::array<float, 3>> perNode[3];
+    for (int rot = 0; rot < 3; ++rot) {
+        const std::array<int, 3> order = {1 + rot % 3, 1 + (rot + 1) % 3, 1 + (rot + 2) % 3};
+        const onecad::tess::FaceNormalResult fn = onecad::tess::compute_face_normals(
+            plane, synthetic_triangulation(tied, tiedUv, {order}), TopLoc_Location(),
+            plane.Orientation() == TopAbs_REVERSED);
+        perNode[rot].assign(3, {0.0F, 0.0F, 0.0F});
+        for (std::size_t v = 0; v < fn.vertexNode.size(); ++v) {
+            perNode[rot][fn.vertexNode[v]] = {fn.normals[v * 3], fn.normals[v * 3 + 1],
+                                              fn.normals[v * 3 + 2]};
+        }
+    }
+    check(perNode[0] == perNode[1] && perNode[1] == perNode[2],
+          "F5: an exact longest-edge tie resolves to the same base vertex in all three cyclic "
+          "orders, so each node's emitted normal is bit-identical");
+}
+
+// --- F6: the tangency decision and its evidence ----------------------------
+
+void test_f6_tangency_evidence() {
+    using onecad::tess::EdgeSampleAgreement;
+    EdgeSampleAgreement full;
+    full.evaluable = onecad::tess::kEdgeContinuitySamples;
+    full.maxDihedralRad = 0.0;
+    EdgeSampleAgreement partial = full;
+    partial.evaluable = onecad::tess::kEdgeContinuitySamples - 1;
+    EdgeSampleAgreement crease = full;
+    crease.maxDihedralRad = 1.0 * kPi / 180.0;
+    EdgeSampleAgreement shallow = full;
+    shallow.maxDihedralRad = 2.0 * std::asin(0.0001 / (2.0 * 0.1));  // the F6 sphere pair
+
+    check(onecad::tess::decide_edge_continuity(true, false, full) == onecad::tess::kEdgeTangent,
+          "F6: trusted G1 metadata plus THREE consistent evaluable samples is tangent");
+    check(onecad::tess::decide_edge_continuity(false, true, full) == onecad::tess::kEdgeTangent,
+          "F6: one shared supporting-surface handle plus three consistent samples is tangent");
+    check(onecad::tess::decide_edge_continuity(true, false, partial) == onecad::tess::kEdgeUnknown,
+          "F6: two of three samples evaluable stays UNKNOWN even with trusted G1 metadata — "
+          "partial sampling cannot certify consistency");
+    check(onecad::tess::decide_edge_continuity(false, false, full) == onecad::tess::kEdgeUnknown,
+          "F6: three consistent samples alone never upgrade a join (NUM §8.2)");
+    check(onecad::tess::decide_edge_continuity(true, true, crease) == onecad::tess::kEdgeHard,
+          "F6: a measured 1 deg crease is hard even when the metadata claims G1");
+    check(shallow.maxDihedralRad < onecad::tess::kEdgeCreaseRad,
+          "F6: the r = 0.1 mm sphere pair's real dihedral (" +
+              std::to_string(shallow.maxDihedralRad * 180.0 / kPi) +
+              " deg) sits UNDER the 0.2 deg screen, so sampling cannot see it");
+    check(onecad::tess::decide_edge_continuity(false, false, shallow) ==
+              onecad::tess::kEdgeUnknown,
+          "F6: two distinct spheres with tolerance-close parameters are never tangent");
+
+    // Astra §5's polynomial join: dihedral exactly 0 at the three sample
+    // parameters and 1 deg at t = 1/8. A three-sample screen therefore measures
+    // a perfectly smooth join across a real 1 degree crease.
+    const double k = (512.0 / 15.0) * std::tan(1.0 * kPi / 180.0);
+    const auto f = [k](double t) { return k * (t - 0.25) * (t - 0.5) * (t - 0.75); };
+    double worstSample = 0.0;
+    for (int i = 1; i <= 3; ++i) worstSample = std::max(worstSample, std::abs(std::atan(f(0.25 * i))));
+    const double excursion = std::abs(std::atan(f(0.125))) * 180.0 / kPi;
+    check(worstSample <= 1e-12,
+          "F6: the polynomial join is EXACTLY smooth at all three sample parameters (measured " +
+              std::to_string(worstSample) + " rad)");
+    check(std::abs(excursion - 1.0) <= 1e-9,
+          "F6: the same join has a 1 deg crease at t = 1/8 (measured " +
+              std::to_string(excursion) + " deg)");
+
+    // The real OCCT fixture for the deleted analytic-parameter equivalence: two
+    // r = 0.1 mm spheres, centres 0.0001 mm apart, fused so their intersection
+    // circle is a genuine shared edge with two spherical faces.
+    const TopoDS_Shape s1 =
+        BRepPrimAPI_MakeSphere(gp_Ax2(gp_Pnt(-0.00005, 0, 0), gp_Dir(0, 0, 1)), 0.1).Shape();
+    const TopoDS_Shape s2 =
+        BRepPrimAPI_MakeSphere(gp_Ax2(gp_Pnt(0.00005, 0, 0), gp_Dir(0, 0, 1)), 0.1).Shape();
+    BRepAlgoAPI_Fuse fuse(s1, s2);
+    fuse.Build();
+    check(fuse.IsDone(), "F6: the two near-coincident spheres fuse into a shared-edge fixture");
+    if (fuse.IsDone()) {
+        TopoDS_Shape fused = fuse.Shape();
+        BRep_Builder tb;
+        for (TopExp_Explorer it(fused, TopAbs_FACE); it.More(); it.Next()) {
+            tb.UpdateFace(TopoDS::Face(it.Current()), 0.0001);  // the explicit §5 tolerance
+        }
+        const onecad::tess::BodyMesh fm = mesh_of(fused, "fine");
+        TopTools_IndexedMapOfShape fusedFaces;
+        TopExp::MapShapes(fused, TopAbs_FACE, fusedFaces);
+        std::size_t tangent = 0, crossSurface = 0, sameSurface = 0;
+        for (const onecad::tess::EdgeClass& c : fm.edge_classes) {
+            if (c.faceOrdinals.size() != 2) continue;
+            TopLoc_Location la, lb;
+            const Handle(Geom_Surface) sa = BRep_Tool::Surface(
+                TopoDS::Face(fusedFaces(static_cast<int>(c.faceOrdinals[0]) + 1)), la);
+            const Handle(Geom_Surface) sb = BRep_Tool::Surface(
+                TopoDS::Face(fusedFaces(static_cast<int>(c.faceOrdinals[1]) + 1)), lb);
+            // Two faces carved out of the SAME sphere legitimately ARE tangent
+            // across their shared edge; the attack is about two DISTINCT spheres
+            // whose parameters merely agree to within their tolerance.
+            if (sa == sb && la.IsEqual(lb)) {
+                ++sameSurface;
+                continue;
+            }
+            ++crossSurface;
+            if (c.flags & onecad::tess::kEdgeTangent) ++tangent;
+        }
+        std::fprintf(stderr,
+                     "INFO F6 sphere pair: %zu cross-surface edges (%zu same-surface), %zu "
+                     "tangent\n",
+                     crossSurface, sameSurface, tangent);
+        check(crossSurface > 0,
+              "F6: the fused spheres really do share an edge between two DISTINCT spherical "
+              "surfaces");
+        check(tangent == 0,
+              "F6: two DISTINCT spheres whose radii and centres agree within their own tolerance "
+              "are never classified tangent (" + std::to_string(tangent) + " tangent)");
+    }
+}
+
+// --- F7: the sphere-pole sign is analytic, not facet-chosen ----------------
+
+std::vector<gp_Vec> sphere_pole_normals(const TopoDS_Face& face,
+                                        const Handle(Poly_Triangulation)& tri,
+                                        const TopLoc_Location& loc, bool reversed,
+                                        std::vector<std::uint32_t>& poleNodes) {
+    const onecad::tess::FaceNormalResult fn =
+        onecad::tess::compute_face_normals(face, tri, loc, reversed);
+    std::vector<gp_Vec> out;
+    poleNodes.clear();
+    for (std::size_t v = 0; v < fn.vertexNode.size(); ++v) {
+        if (fn.provenance[v] != onecad::tess::NormalProvenance::AnalyticSingular) continue;
+        poleNodes.push_back(fn.vertexNode[v]);
+        out.push_back(emitted_normal(fn, v));
+    }
+    return out;
+}
+
+void test_f7_sphere_pole_sign() {
+    const double radius = 20.0;
+    const gp_Ax2 axis(gp_Pnt(0, 0, 0), gp_Dir(1, 2, 3));
+    const TopoDS_Shape base = BRepPrimAPI_MakeSphere(axis, radius).Shape();
+    gp_Trsf mirror;
+    mirror.SetMirror(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(1, 0, 0)));
+
+    struct Case {
+        const char* name;
+        TopoDS_Shape shape;
+        // The material side, NOT the face orientation flag: a reflection baked by
+        // BRepBuilderAPI_Transform flips the face orientations itself, so only the
+        // complemented solid is genuinely inward (TEST-NORMAL-04's contract).
+        bool outward;
+    };
+    const std::vector<Case> cases = {
+        {"forward", base, true},
+        {"reversed", base.Reversed(), false},
+        {"baked mirror", BRepBuilderAPI_Transform(base, mirror, /*copyGeom=*/false).Shape(), true},
+        {"located mirror", base.Moved(TopLoc_Location(mirror)), true},
+    };
+    for (const Case& c : cases) {
+        BRepMesh_IncrementalMesh mesher(c.shape, 0.01, Standard_False, 0.08726646259971647,
+                                        Standard_False);
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(c.shape, TopAbs_FACE, faces);
+        const TopoDS_Face face = TopoDS::Face(faces(1));
+        TopLoc_Location loc;
+        const Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, loc);
+        check(!tri.IsNull(), std::string("F7: the ") + c.name + " sphere meshes");
+        if (tri.IsNull()) continue;
+        const bool reversed = face.Orientation() == TopAbs_REVERSED;
+
+        std::vector<std::uint32_t> poleNodes;
+        const std::vector<gp_Vec> baseline =
+            sphere_pole_normals(face, tri, loc, reversed, poleNodes);
+        check(!baseline.empty(),
+              std::string("F7: the ") + c.name + " sphere has analytically answered pole nodes");
+        if (baseline.empty()) continue;
+
+        // A copy whose POLE-INCIDENT triangles are wound the other way. Under the
+        // retired code the facet witness sum flipped and took the supposedly
+        // analytic normal 180 degrees with it, provenance unchanged.
+        std::vector<gp_Pnt> nodes;
+        std::vector<gp_Pnt2d> uv;
+        for (int i = 1; i <= tri->NbNodes(); ++i) {
+            nodes.push_back(tri->Node(i));
+            uv.push_back(tri->UVNode(i));
+        }
+        std::vector<std::array<int, 3>> flipped;
+        std::vector<std::array<int, 3>> without;
+        for (int t = 1; t <= tri->NbTriangles(); ++t) {
+            Standard_Integer n1 = 0, n2 = 0, n3 = 0;
+            tri->Triangle(t).Get(n1, n2, n3);
+            bool touchesPole = false;
+            for (const std::uint32_t p : poleNodes) {
+                const int node = static_cast<int>(p) + 1;
+                if (n1 == node || n2 == node || n3 == node) touchesPole = true;
+            }
+            flipped.push_back(touchesPole ? std::array<int, 3>{n1, n3, n2}
+                                          : std::array<int, 3>{n1, n2, n3});
+            if (!touchesPole) without.push_back({n1, n2, n3});
+        }
+        std::vector<std::uint32_t> flippedNodes;
+        const std::vector<gp_Vec> reversedWitness = sphere_pole_normals(
+            face, synthetic_triangulation(nodes, uv, flipped), loc, reversed, flippedNodes);
+        check(reversedWitness.size() == baseline.size() && flippedNodes == poleNodes,
+              std::string("F7: reversing the pole facets does not change WHICH nodes are "
+                          "answered analytically on the ") +
+                  c.name + " sphere");
+        double worst = 0.0;
+        for (std::size_t i = 0; i < std::min(baseline.size(), reversedWitness.size()); ++i) {
+            worst = std::max(worst, angle_deg(baseline[i], reversedWitness[i]));
+        }
+        check(worst <= 1e-6,
+              std::string("F7: the analytic pole normal is UNCHANGED when every incident facet "
+                          "is reversed on the ") +
+                  c.name + " sphere (moved " + std::to_string(worst) + " deg)");
+
+        // And with the pole facets REMOVED entirely there is no witness at all,
+        // so the sign must still come from the face's own regular geometry.
+        std::vector<std::uint32_t> strippedNodes;
+        const std::vector<gp_Vec> stripped = sphere_pole_normals(
+            face, synthetic_triangulation(nodes, uv, without), loc, reversed, strippedNodes);
+        double worstStripped = 0.0;
+        std::size_t matched = 0;
+        for (std::size_t i = 0; i < strippedNodes.size(); ++i) {
+            for (std::size_t j = 0; j < poleNodes.size(); ++j) {
+                if (strippedNodes[i] != poleNodes[j]) continue;
+                ++matched;
+                worstStripped = std::max(worstStripped, angle_deg(stripped[i], baseline[j]));
+            }
+        }
+        check(matched == 0 || worstStripped <= 1e-6,
+              std::string("F7: removing the pole facets leaves the analytic radial sign "
+                          "unchanged on the ") +
+                  c.name + " sphere (moved " + std::to_string(worstStripped) + " deg)");
+
+        // Outwardness, measured against the sphere's own centre (the origin is a
+        // fixed point of every transform in this table): the sign must be the
+        // physically correct one, not merely stable.
+        const gp_Pnt centre(0, 0, 0);
+        const bool wantOutward = c.outward;
+        const onecad::tess::FaceNormalResult fn =
+            onecad::tess::compute_face_normals(face, tri, loc, reversed);
+        std::size_t wrong = 0;
+        for (std::size_t v = 0; v < fn.vertexNode.size(); ++v) {
+            if (fn.provenance[v] != onecad::tess::NormalProvenance::AnalyticSingular) continue;
+            const gp_Vec radial(centre, fn.worldNodes[fn.vertexNode[v]]);
+            const bool outward = emitted_normal(fn, v).Dot(radial) > 0.0;
+            if (outward != wantOutward) ++wrong;
+        }
+        check(wrong == 0, std::string("F7: every analytic pole normal of the ") + c.name +
+                              " sphere points the way the face orientation demands (" +
+                              std::to_string(wrong) + " wrong)");
+    }
+}
+
+// --- F8: a known cone apex is SPLIT before the 5 degree averaging rule ------
+
+struct ConeFan {
+    TopoDS_Face face;
+    Handle(Poly_Triangulation) tri;
+    std::size_t apexNode = 0;
+    double spreadDeg = 0.0;
+};
+
+ConeFan build_cone_fan(double height, const std::vector<double>& azimuthsRad) {
+    ConeFan out;
+    const TopoDS_Shape cone = BRepPrimAPI_MakeCone(10.0, 0.0, height).Shape();
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(cone, TopAbs_FACE, faces);
+    out.face = TopoDS::Face(faces(1));
+    const BRepAdaptor_Surface surf(out.face, /*Restriction=*/false);
+    const gp_Cone geom = surf.Cone();
+    const double vApex = -geom.RefRadius() / std::sin(geom.SemiAngle());
+    std::vector<gp_Pnt> nodes;
+    std::vector<gp_Pnt2d> uv;
+    nodes.push_back(surf.Value(0.0, vApex));
+    uv.emplace_back(0.0, vApex);
+    for (const double u : azimuthsRad) {
+        nodes.push_back(surf.Value(u, 0.0));
+        uv.emplace_back(u, 0.0);
+    }
+    std::vector<std::array<int, 3>> tris;
+    for (std::size_t k = 1; k + 1 < nodes.size(); ++k) {
+        tris.push_back({1, static_cast<int>(k) + 1, static_cast<int>(k) + 2});
+    }
+    out.tri = synthetic_triangulation(nodes, uv, tris);
+    out.apexNode = 0;
+    // The facet spread, measured from the node positions by the test.
+    std::vector<gp_Vec> units;
+    for (const std::array<int, 3>& t : tris) {
+        const gp_Vec n = gp_Vec(nodes[t[0] - 1], nodes[t[1] - 1])
+                             .Crossed(gp_Vec(nodes[t[0] - 1], nodes[t[2] - 1]));
+        if (n.Magnitude() > 0.0) units.push_back(n.Divided(n.Magnitude()));
+    }
+    for (std::size_t i = 0; i < units.size(); ++i) {
+        for (std::size_t j = i + 1; j < units.size(); ++j) {
+            out.spreadDeg = std::max(out.spreadDeg, angle_deg(units[i], units[j]));
+        }
+    }
+    return out;
+}
+
+void test_f8_cone_apex_split() {
+    // Astra §5: cone 10 / 0 / 20 mm, apex fan at -2, 0, +2 degrees. Facet spread
+    // 1.788891 degrees, so the general 5 degree rule AVERAGED it and the mean was
+    // 0.894445 degrees from each facet.
+    const double d2r = kPi / 180.0;
+    const ConeFan narrow = build_cone_fan(20.0, {-2.0 * d2r, 0.0, 2.0 * d2r});
+    check(std::abs(narrow.spreadDeg - 1.788891) <= 1e-4,
+          "F8: the -2/0/+2 degree apex fan spreads 1.788891 deg, well inside the 5 deg averaging "
+          "window (measured " + std::to_string(narrow.spreadDeg) + ")");
+    const onecad::tess::FaceNormalResult nf = onecad::tess::compute_face_normals(
+        narrow.face, narrow.tri, TopLoc_Location(),
+        narrow.face.Orientation() == TopAbs_REVERSED);
+    std::size_t apexVertices = 0;
+    for (std::size_t v = 0; v < nf.vertexNode.size(); ++v) {
+        if (nf.vertexNode[v] != narrow.apexNode) continue;
+        ++apexVertices;
+        check(nf.provenance[v] == onecad::tess::NormalProvenance::SingularSplit,
+              "F8: every cone-apex vertex is SingularSplit, never an averaged fallback");
+    }
+    check(nf.splitCount == 1 && apexVertices == 2,
+          "F8: the apex node is split once per incident facet (splitCount " +
+              std::to_string(nf.splitCount) + ", apex vertices " + std::to_string(apexVertices) +
+              ")");
+    // Each apex copy carries its OWN facet's normal, recomputed by the test from
+    // the emitted winding.
+    double worst = 0.0;
+    for (std::size_t t = 0; t * 3U < nf.triangleVertexIndices.size(); ++t) {
+        const gp_Vec facet = emitted_face_triangle_normal(nf, t);
+        for (int corner = 0; corner < 3; ++corner) {
+            const std::uint32_t v = nf.triangleVertexIndices[t * 3U + corner];
+            if (nf.vertexNode[v] != narrow.apexNode) continue;
+            worst = std::max(worst, angle_deg(emitted_normal(nf, v), facet));
+        }
+    }
+    check(worst <= 1e-6,
+          "F8: each apex vertex's normal IS its own incident facet normal (worst " +
+              std::to_string(worst) + " deg)");
+
+    // The shallow cone: R = 10 mm, H = 10 tan(2 deg) = 0.349207695 mm, 72 equal
+    // sectors. Maximum facet spread about 4.003808 degrees — under 5, so the
+    // retired rule averaged the whole fan into an axial normal that no facet has.
+    std::vector<double> sectors;
+    for (int k = 0; k <= 72; ++k) sectors.push_back(2.0 * kPi * k / 72.0);
+    const ConeFan shallow = build_cone_fan(10.0 * std::tan(2.0 * d2r), sectors);
+    check(std::abs(shallow.spreadDeg - 4.003808) <= 1e-3,
+          "F8: the 72-sector shallow cone fan spreads 4.003808 deg (measured " +
+              std::to_string(shallow.spreadDeg) + ")");
+    const onecad::tess::FaceNormalResult sf = onecad::tess::compute_face_normals(
+        shallow.face, shallow.tri, TopLoc_Location(),
+        shallow.face.Orientation() == TopAbs_REVERSED);
+    const gp_Vec coneAxis(BRepAdaptor_Surface(shallow.face, false).Cone().Axis().Direction());
+    std::size_t averaged = 0, split = 0;
+    for (std::size_t v = 0; v < sf.vertexNode.size(); ++v) {
+        if (sf.vertexNode[v] != shallow.apexNode) continue;
+        if (sf.provenance[v] == onecad::tess::NormalProvenance::SingularSplit) ++split;
+        if (angle_deg(emitted_normal(sf, v), coneAxis) <= 0.5 ||
+            angle_deg(emitted_normal(sf, v), coneAxis.Reversed()) <= 0.5) {
+            ++averaged;
+        }
+    }
+    check(split == 72 && averaged == 0,
+          "F8: the shallow cone's apex is split per facet with no invented axial normal (split " +
+              std::to_string(split) + ", axial " + std::to_string(averaged) + ")");
+}
+
+// --- F10: no arbitrary +Z, and the finite check fires ----------------------
+
+void test_f10_missing_nodes_and_nan() {
+    // A triangulation with NO UV nodes, so the supporting surface is not
+    // consulted and a node's only evidence is its incident triangles. Node 6
+    // touches nothing but an exactly-degenerate triangle, so it has no normal
+    // source at all — the retired code still emitted world +Z for it.
+    const TopoDS_Face plane =
+        BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), -100.0, 100.0, -100.0,
+                                100.0)
+            .Face();
+    const std::vector<gp_Pnt> nodes = {gp_Pnt(0, 0, 0),  gp_Pnt(10, 0, 5), gp_Pnt(0, 10, 5),
+                                       gp_Pnt(20, 0, 0), gp_Pnt(21, 0, 0), gp_Pnt(22, 0, 0)};
+    const onecad::tess::FaceNormalResult fn = onecad::tess::compute_face_normals(
+        plane, synthetic_triangulation(nodes, {}, {{1, 2, 3}, {4, 5, 6}}), TopLoc_Location(),
+        plane.Orientation() == TopAbs_REVERSED);
+    check(fn.missingCount == 3,
+          "F10: the three nodes of the collinear triangle have no normal source (missing " +
+              std::to_string(fn.missingCount) + ")");
+    check(fn.vertexNode.size() == 3 && fn.nodeRemap[5] == onecad::tess::FaceNormalResult::kNoVertex,
+          "F10: a node with no normal source is NOT emitted, so no arbitrary +Z reaches the wire "
+          "(emitted " + std::to_string(fn.vertexNode.size()) + " of 6 nodes)");
+    std::size_t plusZ = 0;
+    for (std::size_t v = 0; v < fn.vertexNode.size(); ++v) {
+        const gp_Vec n = emitted_normal(fn, v);
+        if (n.X() == 0.0F && n.Y() == 0.0F && n.Z() == 1.0F) ++plusZ;
+    }
+    check(plusZ == 0, "F10: no emitted normal is the world +Z default");
+    check(fn.complete,
+          "F10: the face is still complete — the dropped triangle was certified zero-area");
+
+    // The positive control for the finite check: `std::max(worst, NaN)` returns
+    // `worst`, so the retired reduction could not see this.
+    MeshView poisoned;
+    poisoned.normals.emplace_back(0.0, 0.0, 1.0);
+    poisoned.normals.emplace_back(std::nan(""), 0.0, 0.0);
+    std::string why;
+    check(!unit_normals_ok(poisoned, why),
+          "F10: a NaN component makes the unit-normal check FAIL (" + why + ")");
+    MeshView clean;
+    clean.normals.emplace_back(0.0, 0.0, 1.0);
+    check(unit_normals_ok(clean, why), "F10: a clean normal array still passes");
+}
+
+// --- F11: the pairwise spread scan is bounded ------------------------------
+
+void test_f11_valence_bound() {
+    const Handle(Geom_BSplineSurface) surface = collapsed_row_patch();
+    const TopoDS_Face face = BRepBuilderAPI_MakeFace(surface, Precision::Confusion()).Face();
+    const double vMax = surface->VKnot(surface->NbVKnots());
+    constexpr int kValence = 10000;
+    std::vector<gp_Pnt> nodes;
+    std::vector<gp_Pnt2d> uv;
+    nodes.push_back(surface->Value(0.5, vMax));
+    uv.emplace_back(0.5, vMax);
+    for (int k = 0; k <= kValence; ++k) {
+        const double u = static_cast<double>(k) / static_cast<double>(kValence);
+        const double v = vMax * 0.7;
+        nodes.push_back(surface->Value(u, v));
+        uv.emplace_back(u, v);
+    }
+    std::vector<std::array<int, 3>> tris;
+    for (int k = 1; k <= kValence; ++k) tris.push_back({1, k + 1, k + 2});
+    const Handle(Poly_Triangulation) tri = synthetic_triangulation(nodes, uv, tris);
+
+    const auto started = std::chrono::steady_clock::now();
+    const onecad::tess::FaceNormalResult a = onecad::tess::compute_face_normals(
+        face, tri, TopLoc_Location(), face.Orientation() == TopAbs_REVERSED);
+    const double elapsedMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
+            .count();
+    const onecad::tess::FaceNormalResult b = onecad::tess::compute_face_normals(
+        face, tri, TopLoc_Location(), face.Orientation() == TopAbs_REVERSED);
+    std::fprintf(stderr, "INFO F11 valence %d fan: %.3f ms, %zu emitted vertices\n", kValence,
+                 elapsedMs, a.vertexNode.size());
+    check(a.triangleVertexIndices == b.triangleVertexIndices && a.provenance == b.provenance,
+          "F11: a valence-10000 fan produces repeatable indices and provenance");
+    std::size_t apexVertices = 0;
+    bool allSplit = true;
+    for (std::size_t v = 0; v < a.vertexNode.size(); ++v) {
+        if (a.vertexNode[v] != 0U) continue;
+        ++apexVertices;
+        if (a.provenance[v] != onecad::tess::NormalProvenance::SingularSplit) allSplit = false;
+    }
+    check(a.splitCount == 1 && apexVertices == static_cast<std::size_t>(kValence) && allSplit,
+          "F11: the node is split deterministically above kMaxSpreadValence without the "
+          "pairwise scan (apex vertices " + std::to_string(apexVertices) + ")");
+}
+
+// --- cost record -----------------------------------------------------------
+
+void report_normal_cost() {
+    const TopoDS_Shape torus = BRepPrimAPI_MakeTorus(30.0, 10.0).Shape();
+    BRepMesh_IncrementalMesh mesher(torus, 0.03, Standard_False, 0.08726646259971647,
+                                    Standard_False);
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(torus, TopAbs_FACE, faces);
+    const TopoDS_Face face = TopoDS::Face(faces(1));
+    TopLoc_Location loc;
+    const Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, loc);
+    if (tri.IsNull()) return;
+    const auto started = std::chrono::steady_clock::now();
+    const onecad::tess::FaceNormalResult fn = onecad::tess::compute_face_normals(
+        face, tri, loc, face.Orientation() == TopAbs_REVERSED);
+    const double ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
+            .count();
+    std::fprintf(stderr, "INFO torus compute_face_normals: %.3f ms over %d nodes (%zu emitted)\n",
+                 ms, tri->NbNodes(), fn.vertexNode.size());
+}
+
+// ---------------------------------------------------------------------------
 // Determinism: identical input must give identical bytes (Invariant 5).
 // ---------------------------------------------------------------------------
 
@@ -1147,8 +2037,17 @@ int main() {
     test_normal_05_singular_spline_patch();
     test_normal_06_density_independence();
     test_mesh_06_completeness();
+    test_f3_derivative_budget();
+    test_f4_rotation_invariance();
+    test_f5_triangle_symmetry();
+    test_f6_tangency_evidence();
+    test_f7_sphere_pole_sign();
+    test_f8_cone_apex_split();
+    test_f10_missing_nodes_and_nan();
+    test_f11_valence_bound();
     test_edge_classification();
     test_determinism();
+    report_normal_cost();
     if (g_failures == 0) std::fprintf(stderr, "surface_normals: OK\n");
     return g_failures;
 }
