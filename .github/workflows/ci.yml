@@ -66,6 +66,46 @@ jobs:
           scripts/tests/verify-modeling-coverage.test.sh
           node scripts/verify-modeling-contracts.mjs
 
+  # The tauri-agent harness (tools/tauri-agent) — the MCP server that drives the
+  # real app as a user. macOS-only by design, and macOS here is not incidental:
+  # the native input helper is Swift compiled with swiftc against Cocoa/Carbon,
+  # so there is nothing to typecheck or test on another runner.
+  #
+  # This lane is HEADLESS. A GitHub-hosted runner has no Accessibility or Screen
+  # Recording grant, and the harness is honest about that: only the seven
+  # input-POSTING helper verbs gate on AXIsProcessTrusted (move/down/up/keyDown/
+  # keyUp/press/type), and every test that reaches one wraps it in the suite's
+  # own `tolerate()`, which accepts NATIVE_INPUT_PERMISSION_DENIED as a pass.
+  # Everything else the suite touches — the build, --selftest, --version, cursor,
+  # permissions, windows, frontmost, release_all — needs no grant at all.
+  #
+  # TAURI_AGENT_REQUIRE_HELPER=1 is the load-bearing flag, mirroring
+  # ONECAD_REQUIRE_WORKER: without it the helper tests skip themselves when
+  # swiftc is missing and the job goes green having proved nothing.
+  #
+  # The three LIVE scripts (smoke.ts, smoke-actions.ts, phase0.ts) are NOT run
+  # here. They launch the real app and move the real cursor, which needs both TCC
+  # grants and a session with a window server. They stay user-run gates, recorded
+  # as owed in TODO.md.
+  tauri-agent:
+    name: tauri-agent
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install application dependencies
+        run: bun install --frozen-lockfile
+      - name: Typecheck the harness package
+        run: bunx tsc --noEmit -p tools/tauri-agent
+      - name: Swift toolchain
+        run: swiftc --version
+      - name: Harness tests (helper must really run, not skip)
+        env:
+          TAURI_AGENT_REQUIRE_HELPER: "1"
+        working-directory: tools/tauri-agent
+        run: bun test
+
   linux-worker:
     name: linux-worker
     if: >-

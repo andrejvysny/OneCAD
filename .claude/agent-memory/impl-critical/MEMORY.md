@@ -14,3 +14,10 @@
 - [Viewport selection policy](repo_viewport_selection_policy.md) — D-5 + Astra break: persistent id first, an ordinal is not evidence across a regen, regen-only reconcile
 - [Regen isolation + closure](repo_regen_isolation.md) — why graph.downstream() is not proof of independence, what timeline_of(n) really builds, checkpoint-mint seams
 - [Topology ownership ledger](repo_topology_ownership.md) — blend certificate, where the contour set comes from, fail-closed vanishing guard, origin-before-capability gate
+- [tauri-agent bridge gotchas](repo_tauri_agent_bridge.md) — webdriverio promise awaiting, window.wdioTauri, no @types/jsdom, importing app code into agent tests, jsdom layout/hit-test gaps, aria-disabled toolbar
+- [tauri-agent native backend](repo_tauri_agent_native.md) — Swift conversions trap (exit 133), never post real HID in tests, fake-helper fixture, screencapture -l lies
+- [tauri-agent helper protocol](repo_tauri_agent_helper_protocol.md) — the 3 places the version/protocol number is asserted, osState banned from automatic paths, host shadow held-state rules
+- [tauri-agent action envelope](repo_tauri_agent_envelope.md) — delivery phases are the retry signal (not status), no `error` after a delivered input, isolating the package for an attributable gate
+- [tauri-agent calibration](repo_tauri_agent_calibration.md) — read-only wheel probe, window-capture beats the canvas listener, checkPoint is the only input gate, the fake's script-name set
+- [tauri-agent process ownership](repo_tauri_agent_ownership.md) — config root vs CARGO_MANIFEST_DIR, Tauri's unknown-command wording, AppHandle::config is inherent, DELETE /session does not exit the app
+- [tauri-agent idle settling](repo_tauri_agent_idle.md) — settle reads ui_idle not ui_revision, null = unavailable (two lanes differ), async __stores, unregister alone leaves the pill on screen

@@ -24,3 +24,23 @@ Plane picker (sketch entry): hovering a base plane quad near the viewport center
 `[data-plane-pick-label]`; clicking creates the sketch on that plane. Datum planes render as quads
 too. There is no DOM per entity: entity assertions go through chrome (`sketch-dof`, inspector,
 history) or a labelled diagnostic read (`get_projection`, `get_sketch`).
+
+## Which of these work in a background session
+
+`pointer_drag_path` is the workhorse here and it is exactly what an `interaction:"background"`
+session refuses. `CadOrbitControls.onPointerDown` calls `el.setPointerCapture(e.pointerId)` with no
+guard; a page-dispatched event has no active pointer to capture, so the call throws inside the app's
+own handler and it aborts before recording the drag. A faked lane would report the orbit delivered
+and leave the camera exactly where it was — so the harness refuses instead, with
+`BACKGROUND_CAPABILITY_UNAVAILABLE`.
+
+| Gesture | background | note |
+|---|---|---|
+| Orbit, Pan | no | needs `interaction:"foreground"` |
+| Zoom (`pointer_scroll`) | yes | no pointer capture involved; the wheel event bubbles to the canvas listener |
+| Home / Fit / any keyboard view command | yes | reaches the app's own keydown handlers |
+| Reading the camera (`__vpEngine.debugSnapshot()`, diagnostic) | yes | |
+
+The zoom caveat: background dispatches a `WheelEvent` the harness shaped itself, so the app never
+classified a real notch. Direction and magnitude are exercised; the wheel-versus-trackpad scoring
+that decides zoom-versus-pan is not. Prove that part in a foreground session.

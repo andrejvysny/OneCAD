@@ -12,7 +12,9 @@
         "At least one screenshot PNG captured with captureMode window exists in the session artifacts dir and the report references it by actionId or filename",
         "Every debug_eval_js or debug_invoke_tauri_command actionId cited in the report is labelled as diagnostic and is accompanied by user-visible evidence (screenshot, snapshot, or log line)",
         "The report notes that the tools toolbar floats at the top of the viewport rather than on the left, correcting the prompt's premise",
-        "session_start precedes the first action and session_stop is the last journal entry; the report states that no onecad/onecad-worker process survived"
+        "session_start precedes the first action and session_stop is the last journal entry; the report states that no onecad/onecad-worker process survived",
+        "When a step fails, the report cites delivery.retrySafe to justify whether it was re-sent, rather than retrying blindly.",
+        "The report names the interaction policy the session ran under, because a background run and a foreground run are different strengths of evidence"
       ]
     },
     {
@@ -27,7 +29,9 @@
         "The report includes at least one window screenshot taken after the extrude commit",
         "The cross-mode key trap is avoided: no keyboard_press of e while sketch-dof is present without a warning being acknowledged in the report",
         "session_stop is the last journal entry and the report states no app process survived",
-        "The report states that a body was created (Body in the tree or status 'New body created') and that regen reported failedSteps 0, citing the actionId or log line"
+        "The report states that a body was created (Body in the tree or status 'New body created') and that regen reported failedSteps 0, citing the actionId or log line",
+        "When a step fails, the report cites delivery.retrySafe to justify whether it was re-sent, rather than retrying blindly.",
+        "The report names the interaction policy the session ran under, because a background run and a foreground run are different strengths of evidence"
       ]
     },
     {
@@ -41,7 +45,39 @@
         "Two window screenshots exist (before and after), the report references both, and it states concretely what changed in the view (view cube faces, grid scale, camera label) with the evidence source",
         "The report states the toolbar position/rect was unchanged using ui_inspect or ui_snapshot output rather than assumption",
         "No left-button drag was used to orbit",
-        "session_stop is the last journal entry and the report states the survivor check result rather than assuming it"
+        "session_stop is the last journal entry and the report states the survivor check result rather than assuming it",
+        "When a step fails, the report cites delivery.retrySafe to justify whether it was re-sent, rather than retrying blindly.",
+        "The report names the interaction policy the session ran under, because a background run and a foreground run are different strengths of evidence"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "In the real OneCAD desktop app, create a new project and save it as 'bracket' using Cmd+S. Drive the save all the way to a file on disk and report evidence a reviewer can check.",
+      "expected_output": "A report showing the native Save panel was driven natively: native_modal (or native_find) confirming the panel, a pointer_click on an {axRef} target with backend cgevent and surface native, keyboard_type_text of the filename, a click on the panel's Save button, and log evidence that save_document ran. session_stop with no surviving process. The report must NOT claim the harness cannot drive native dialogs.",
+      "files": [],
+      "expectations": [
+        "The run uses native_snapshot, native_find or native_modal to see the Save panel \u2014 NOT ui_snapshot, which cannot see a native dialog at all.",
+        "At least one pointer_click or keyboard action targets an {axRef} and its envelope reports backend cgevent with surface native.",
+        "An empty or unchanged ui_snapshot while the panel is open is interpreted as 'the WebView does not own this surface', not as 'the app is idle' or 'the dialog did not open'.",
+        "The filename reaches the panel through keyboard_type_text rather than a debug_eval_js or a Rust command.",
+        "Evidence for the save itself cites observe_logs (save_document on the fe or onecad_lib lane) or a screenshot, not an assumption that the click worked.",
+        "If any step returns status warning with delivery.evidenceIncomplete, the report says the input WAS delivered and does not re-send it.",
+        "session_stop ran and its teardown payload is cited for 'nothing left running'; a process reported with preexisting:true is not described as a leftover of this session.",
+        "The report names the interaction policy the session ran under, because a background run and a foreground run are different strengths of evidence"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Without taking over my mouse or keyboard \u2014 I'm working \u2014 check in the real OneCAD app that the Extrude button in the model toolbar is disabled until something is selected, and take a screenshot proving it.",
+      "expected_output": "A report from a background session: session_start with interaction \"background\", page-dispatched pointer actions and a window screenshot taken while the user's own application stayed frontmost, actionIds cited, session_stop clean. The report must state plainly that this was a background run and therefore not real-user evidence.",
+      "files": [],
+      "expectations": [
+        "session_start is called with interaction:\"background\"; the report says so rather than leaving the policy implicit",
+        "Every action envelope cited shows interaction.foregroundChanged false and interaction.cursorMoved false, and the report cites at least one of them as the proof that the user's desktop was untouched",
+        "Actions report mode webview and backend webdriver, and the report does NOT present them as real-user evidence \u2014 it names the weaker fidelity explicitly",
+        "A window screenshot exists and is used as the visual proof, demonstrating that capture works with the app behind other windows",
+        "If the agent needed a drag, orbit, pan or press-and-hold, it reports the BACKGROUND_CAPABILITY_UNAVAILABLE refusal and either switches deliberately to a foreground session or states the limit \u2014 it never claims a gesture it could not perform",
+        "session_stop ran and its teardown payload is cited for 'nothing left running'"
       ]
     }
   ]

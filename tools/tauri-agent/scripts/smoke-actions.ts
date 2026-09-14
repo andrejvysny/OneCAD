@@ -47,10 +47,31 @@ async function callOnce(name: string, args: Record<string, unknown>): Promise<Ac
   return JSON.parse((raw.content[0] as { text: string }).text) as ActionResult;
 }
 
-/** One retry, then give up loudly — a step that needs three tries is a defect, not a flake. */
+/**
+ * At most one retry, and ONLY when the envelope proves no input was posted
+ * (`delivery.retrySafe`) — re-sending a delivered click, key or drag double-applies it.
+ * Anything else gives up loudly on the first failure: a step that needs three tries is a
+ * defect, not a flake.
+ */
 async function step(name: string, args: Record<string, unknown>): Promise<ActionResult> {
   let envelope = await callOnce(name, args);
+  // A delivered action whose evidence failed now comes back as `warning` with no `error` field,
+  // so branching on `status === "error"` alone would march past a wedged bridge or a settle that
+  // never converged. The smoke lane exists to catch exactly that.
+  if (envelope.delivery?.evidenceIncomplete === true) {
+    const cause = (envelope.data as { postconditionError?: { code?: string } } | undefined)?.postconditionError;
+    if (cause !== undefined) {
+      say(`${name} =>`, envelope);
+      throw new Error(`${name} was delivered but its postconditions failed: ${cause.code}`);
+    }
+  }
   if (envelope.status === "error") {
+    if (envelope.delivery?.retrySafe !== true) {
+      say(`${name} =>`, envelope);
+      throw new Error(
+        `${name} failed at delivery phase ${envelope.delivery?.phase ?? "unknown"} and is not retry-safe: ${envelope.error?.code}`,
+      );
+    }
     say(`RETRY ${name} after`, envelope.error);
     envelope = await callOnce(name, args);
   }

@@ -10,6 +10,7 @@ import { z } from "zod";
 import { AgentError } from "../../errors.ts";
 import { cssToGlobal, rectCenter } from "../../geometry/mapping.ts";
 import type { Pt, Rect, WindowGeom } from "../../geometry/types.ts";
+import type { CaptureResult } from "../../platform/adapter.ts";
 import type { SnapNode, Snapshot } from "../../semantic/snapshot.ts";
 import { diffSnapshots, takeSnapshot } from "../../semantic/snapshot.ts";
 import type { Resolved, Target } from "../../semantic/resolve.ts";
@@ -300,6 +301,20 @@ function registerScreenshot(server: McpServer): void {
     kind: "query",
     handler: async (args, ctx, actionId) => {
       const session = ctx.session;
+      // An explicit request for a picture this session cannot take is refused, not attempted:
+      // the caller asked for evidence and must be told plainly that none is available.
+      const capability = session.status().capture;
+      if (!capability.available) {
+        throw new AgentError(
+          "SCREEN_CAPTURE_PERMISSION_DENIED",
+          "this session cannot take a screenshot: it was started without the Screen Recording grant",
+          {
+            remediation:
+              "Grant Screen Recording in System Settings › Privacy & Security and start a new session.",
+            details: { capture: capability },
+          },
+        );
+      }
       await session.ensureCalibrated();
       const capture = session.requirePlatform().capture;
       const geom = session.requireGeom();
@@ -307,13 +322,35 @@ function registerScreenshot(server: McpServer): void {
       const path = ctx.journal.artifactPath(`${actionId}-${safeLabel(args.label, mode)}.png`);
       const previewPath = path.replace(/\.png$/, "-preview.png");
       const started = Date.now();
-      const { warning, ...shot } = await runCapture(capture, mode, path, geom.windowId, geom.nativeBoundsPt, args.region);
+      const { warning, authoritative, reason, ...shot } = await runCapture(
+        capture,
+        mode,
+        path,
+        geom.windowId,
+        geom.nativeBoundsPt,
+        args.region,
+      );
       await capture.preview(path, previewPath, ctx.config.config.screenshots.previewMaxPx);
       return okResult(actionId, "real_user", {
         backend: "none",
         windowId: geom.windowId,
         warnings: warning === undefined ? [] : [warning],
-        screenshot: { path, previewPath, ...shot, captureMode: mode },
+        screenshot: {
+          path,
+          previewPath,
+          ...shot,
+          captureMode: mode,
+          // `mode:"screen"` photographs the whole display with NO bounds to check against, so
+          // the width/height agreement that backs `authoritative` for every other mode simply
+          // does not run — there is nothing it could have disagreed with. An unverified image
+          // must not inherit the flag; a bare `pixelScale: 1` is not evidence of anything.
+          authoritative:
+            args.mode !== "screen" &&
+            capability.authoritative &&
+            authoritative !== false &&
+            warning === undefined &&
+            reason === undefined,
+        },
         timingsMs: { resolve: 0, input: 0, settle: 0, capture: Date.now() - started },
         data: { path, previewPath, mode },
       });
@@ -328,7 +365,7 @@ async function runCapture(
   windowId: number,
   bounds: Rect,
   region?: Rect,
-): Promise<{ width: number; height: number; pixelScale: number; warning?: string }> {
+): Promise<CaptureResult> {
   switch (mode) {
     case "window":
       return capture.window(windowId, path, bounds);

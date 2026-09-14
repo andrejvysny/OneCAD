@@ -7,9 +7,11 @@
  * behind a 10s drag is not reported as that verb timing out.
  *
  * Every verb has a timeout; a timeout or an unexpected helper exit restarts the helper and
- * immediately drains held input (`release_all` with `osState`), so a wedged drag can never leave
- * a button or modifier stuck down at the OS level. On the normal path a release is TRACKED-only:
- * the OS report of held buttons includes the user's own hand on the mouse.
+ * immediately drains held input, so a wedged drag can never leave a button or modifier stuck down
+ * at the OS level. The drain names what THIS process may have pressed (`release_all` with
+ * `force`), never what the OS reports held — that report includes the user's own hand on the
+ * mouse and their own modifiers, and synthesising ups for those fights the human. On the normal
+ * path a release is TRACKED-only, which the live helper already knows.
  *
  * `mods` are physical ModKeys. The schema-level `Primary` alias is translated to
  * `Command` by the caller (the MCP tool layer), never here.
@@ -18,7 +20,7 @@ import type { ErrorCode } from "../../errors.ts";
 import { AgentError } from "../../errors.ts";
 import type { Pt } from "../../geometry/types.ts";
 import { log } from "../../log.ts";
-import type { ModKey, MouseButton, NativeInput, Permissions } from "../adapter.ts";
+import type { KeyboardLayoutInfo, ModKey, MouseButton, NativeInput, Permissions } from "../adapter.ts";
 import { ensureHelper } from "./build.ts";
 
 const DEFAULT_TIMEOUT_MS = 5_000;
@@ -41,7 +43,44 @@ const CODE_MAP: Record<string, ErrorCode> = {
   // The helper refused the request; that is the caller's argument, not an agent fault.
   INVALID_ARGS: "INVALID_TARGET",
   INVALID_VERB: "INVALID_TARGET",
+  // `ax_point`'s refusal ladder. These name the SAME conditions the webview resolver names, so
+  // they map to the same codes: a caller must be able to tell "re-snapshot" from "it is gone"
+  // from "it is still animating" without reading `details.helperCode`. Left unmapped they all
+  // surfaced as INTERNAL, which reads as an agent bug rather than the refusal it is.
+  ELEMENT_STALE: "ELEMENT_STALE",
+  ELEMENT_NOT_FOUND: "ELEMENT_NOT_FOUND",
+  ELEMENT_MOVING: "ELEMENT_MOVING",
+  POINT_OUTSIDE_WINDOW: "POINT_OUTSIDE_WINDOW",
+  // The helper's own refusal code, which it uses for every "you asked for something this element
+  // cannot do": an unadvertised AX action, a disabled control, a non-settable AXValue, an
+  // ambiguous menu path. Unmapped it fell through to INTERNAL, so a perfectly clear refusal
+  // ("that button is disabled") reached the caller looking like an agent crash.
+  INVALID_TARGET: "INVALID_TARGET",
 };
+
+/** Verb groups, for an accurate failure message. `ax_*` is a READ or an AX action, never input. */
+function verbKind(verb: string): string {
+  if (verb.startsWith("ax_")) return "accessibility verb";
+  if (verb === "windows" || verb === "focus" || verb === "frontmost") return "window verb";
+  if (verb === "permissions" || verb === "version" || verb === "layout") return "helper verb";
+  return "native input verb";
+}
+
+/** Verbs that can leave a button or modifier held if they do not complete. */
+const LATCHES = new Set(["down", "keydown", "click", "path", "press"]);
+/** Verbs whose success proves what they name is no longer held at the OS level. */
+const RELEASES = new Set(["up", "keyup", "click", "path", "press"]);
+
+/**
+ * What a verb could still be holding once it is over. Buttons and modifiers only — those are the
+ * names `release_all` can act on, exactly as the helper's own tracked release can.
+ */
+interface Held {
+  buttons: string[];
+  mods: string[];
+  /** Ordinary (non-modifier) keys, which `keydown`/`keyup` can also leave down. */
+  keys: string[];
+}
 
 export type HelperResult = Record<string, unknown>;
 
@@ -64,8 +103,25 @@ export class HelperClient {
   private pending = new Map<number, Pending>();
   private nextId = 1;
   private disposed = false;
-  /** set when a helper died on its own; the replacement must drain OS-held input first */
+  /** set when a helper died on its own; the replacement must drain held input first */
   private needsDrain = false;
+  /**
+   * Everything THIS process may have left held at the OS level. It is the only record that
+   * survives a helper crash, and it exists so recovery never has to ask the OS what is held —
+   * that answer includes the user's own hand and their own modifiers.
+   *
+   * Covers mouse buttons, modifiers AND ordinary keys: `keyboard_down("a")` followed by a crash
+   * leaves that key down and auto-repeating, and it is nameable only from here.
+   *
+   * Deliberately a superset: a name that turns out not to be held costs one ignored request,
+   * because the helper releases a `force` name only when the OS confirms it down. A name MISSING
+   * here is the expensive direction — an input left stuck.
+   */
+  private readonly potentialHeld: { buttons: Set<string>; mods: Set<string>; keys: Set<string> } = {
+    buttons: new Set<string>(),
+    mods: new Set<string>(),
+    keys: new Set<string>(),
+  };
   /**
    * The helper answers one verb at a time, so a verb behind a 10s drag would otherwise spend
    * its whole budget queueing and report ACTION_TIMEOUT for someone else's slowness. The
@@ -92,7 +148,17 @@ export class HelperClient {
       return await this.enqueue(async () => {
         await this.ensureStarted();
         await this.drainIfNeeded();
-        return this.send("release_all", {}, DEFAULT_TIMEOUT_MS);
+        const out = await this.send("release_all", {}, DEFAULT_TIMEOUT_MS);
+        // A tracked-only release clears the shadow set ONLY when no drain is still owed. This
+        // helper reports what IT is holding, and a replacement that never pressed anything holds
+        // nothing — so clearing here after a failed drain would answer "released" for a button
+        // the OS still has down, and destroy the only record of it.
+        if (!this.needsDrain) {
+          this.potentialHeld.buttons.clear();
+          this.potentialHeld.mods.clear();
+          this.potentialHeld.keys.clear();
+        }
+        return out;
       });
     } catch (e) {
       log.warn("release_all failed", { error: String(e) });
@@ -122,12 +188,35 @@ export class HelperClient {
   private async run(verb: string, args: Record<string, unknown>, timeoutMs?: number): Promise<HelperResult> {
     await this.ensureStarted();
     await this.drainIfNeeded();
+    // Recorded BEFORE the write: if the helper dies mid-verb there is no reply to learn from,
+    // and this set is all that is left to say what the crash left held.
+    const latched = LATCHES.has(verb) ? this.latch(heldBy(verb, args)) : null;
     try {
-      return await this.send(verb, args, timeoutMs ?? verbTimeout(verb, args));
+      const out = await this.send(verb, args, timeoutMs ?? verbTimeout(verb, args));
+      // `up`/`keyup` name what they just released. A compound verb releases exactly what IT
+      // pressed (its own Swift `defer`), which is what `latch` reported — so a modifier an
+      // earlier `keydown` is still holding is not dropped by a `press` that rode on top of it.
+      if (RELEASES.has(verb)) this.unlatch(latched ?? heldBy(verb, args));
+      return out;
     } catch (e) {
       if (isRecoverable(e)) await this.recover();
       throw e;
     }
+  }
+
+  /** Records what a verb may leave held, and reports back only the names it actually added. */
+  private latch(held: Held): Held {
+    return {
+      buttons: addNew(this.potentialHeld.buttons, held.buttons),
+      mods: addNew(this.potentialHeld.mods, held.mods),
+      keys: addNew(this.potentialHeld.keys, held.keys),
+    };
+  }
+
+  private unlatch(held: Held): void {
+    for (const b of held.buttons) this.potentialHeld.buttons.delete(b);
+    for (const m of held.mods) this.potentialHeld.mods.delete(m);
+    for (const k of held.keys) this.potentialHeld.keys.delete(k);
   }
 
   private async ensureStarted(): Promise<void> {
@@ -195,31 +284,54 @@ export class HelperClient {
     });
   }
 
-  /** After an unplanned helper death, the replacement releases whatever the OS still holds. */
+  /** After an unplanned helper death, the replacement releases what this process may have held. */
   private async drainIfNeeded(): Promise<void> {
     if (!this.needsDrain) return;
-    this.needsDrain = false;
-    try {
-      await this.send("release_all", { osState: true }, DEFAULT_TIMEOUT_MS);
-    } catch (e) {
-      log.warn("post-restart release_all failed", { error: String(e) });
-    }
+    // Cleared only by a drain that actually LANDED. Clearing it here would mean a drain that
+    // threw — a respawn that failed, a replacement that timed out — silently became the last
+    // attempt ever made, leaving a button down at the OS level with no path left to release it.
+    this.needsDrain = !(await this.drainPotentialHeld());
   }
 
   /**
-   * Restart, then drain OS-level held buttons/modifiers before any further verb runs.
-   * This is the one path allowed to release OS state: the tracked state died with the helper,
-   * so the OS report is all that is left to say what a wedged drag left held.
+   * Asks the replacement helper to release exactly the buttons and modifiers this process may
+   * have pressed. Never `osState`: the tracked state died with the old helper, but the host
+   * already knows what it might have caused, and the OS's own answer would include the user's
+   * hand on the mouse and their own held modifiers.
+   *
+   * The helper drops any of these the OS does not actually report held, so an over-wide guess
+   * costs nothing. Never throws — it runs ahead of someone else's verb.
    */
+  private async drainPotentialHeld(): Promise<boolean> {
+    const force = [...this.potentialHeld.buttons, ...this.potentialHeld.mods, ...this.potentialHeld.keys];
+    try {
+      await this.send("release_all", { osState: false, force }, DEFAULT_TIMEOUT_MS);
+      this.potentialHeld.buttons.clear();
+      this.potentialHeld.mods.clear();
+      this.potentialHeld.keys.clear();
+      return true;
+    } catch (e) {
+      // Both the record AND the obligation outlive a failed drain: the caller re-arms
+      // `needsDrain`, so the next verb through the queue tries again against a fresh helper.
+      log.warn("post-restart release_all failed", { error: String(e), force });
+      // An empty force list owed nothing, so a failed send leaves no obligation behind; a
+      // non-empty one must be retried or the named input stays down.
+      return force.length === 0;
+    }
+  }
+
+  /** Restart, then release what this process may have left held before any further verb runs. */
   private async recover(): Promise<void> {
     if (this.disposed) return;
     log.warn("restarting native input helper");
     this.kill(new AgentError("HELPER_FAILED", "native input helper restarted"));
-    this.needsDrain = false;
     try {
       await this.ensureStarted();
-      await this.send("release_all", { osState: true }, DEFAULT_TIMEOUT_MS);
+      // Re-armed rather than assumed done: if this respawn or its drain fails, the obligation
+      // has to survive to the next attempt or the held button is lost for the session.
+      this.needsDrain = !(await this.drainPotentialHeld());
     } catch (e) {
+      this.needsDrain = true;
       log.error("native input helper restart failed", { error: String(e) });
     }
   }
@@ -338,9 +450,103 @@ function isRecoverable(e: unknown): boolean {
   return e instanceof AgentError && (e.code === "ACTION_TIMEOUT" || e.code === "HELPER_FAILED");
 }
 
+/** Adds `names` to `set`, returning only those that were not already in it. */
+function addNew(set: Set<string>, names: string[]): string[] {
+  const added: string[] = [];
+  for (const name of names) {
+    if (set.has(name)) continue;
+    set.add(name);
+    added.push(name);
+  }
+  return added;
+}
+
+/**
+ * Mirror of the helper's `canonicalButton`. Aliases MUST collapse the same way on both sides: a
+ * button pressed as "center" that a release named "middle" could not find would stay down.
+ */
+function canonicalButton(raw: unknown): string | null {
+  switch (String(raw).toLowerCase()) {
+    case "left":
+      return "left";
+    case "right":
+      return "right";
+    case "middle":
+    case "center":
+    case "other":
+      return "middle";
+    default:
+      return null;
+  }
+}
+
+/** Mirror of the helper's `Mods.canonical`; a name that is not a modifier is simply not one. */
+function canonicalMod(raw: unknown): string | null {
+  switch (String(raw).toLowerCase()) {
+    case "command":
+    case "cmd":
+      return "Command";
+    case "control":
+    case "ctrl":
+      return "Control";
+    case "option":
+    case "alt":
+      return "Option";
+    case "shift":
+      return "Shift";
+    case "fn":
+    case "function":
+      return "Fn";
+    default:
+      return null;
+  }
+}
+
+function present(names: Array<string | null>): string[] {
+  return names.filter((n): n is string => n !== null);
+}
+
+/**
+ * The buttons and modifiers a verb holds down while it runs — the names the helper's own `defer`
+ * would release, and therefore the names left held if the helper never gets that far.
+ *
+ * A verb's `mods` option only sets event FLAGS (`flagsNow`) except in `press`, which physically
+ * presses the modifier keys; so only `press` reports them.
+ */
+function heldBy(verb: string, args: Record<string, unknown>): Held {
+  switch (verb) {
+    case "down":
+    case "up":
+    case "click":
+    case "path":
+      return { buttons: present([canonicalButton(args.button)]), mods: [], keys: [] };
+    case "keydown":
+    case "keyup": {
+      // A modifier goes in `mods`; anything else is an ordinary key, which `keydown` can leave
+      // down and auto-repeating just as easily — and which nothing could release before.
+      const mod = canonicalMod(args.key);
+      if (mod !== null) return { buttons: [], mods: [mod], keys: [] };
+      const key = typeof args.key === "string" && args.key.length > 0 ? args.key.toLowerCase() : null;
+      return { buttons: [], mods: [], keys: present([key]) };
+    }
+    case "press": {
+      // `press` holds its modifiers around the key and unwinds them in a `defer`; a throw in
+      // between latches them. `key` counts too — pressing a modifier BY NAME latches it the same.
+      const list: unknown[] = Array.isArray(args.mods) ? args.mods : [];
+      // `press` releases its own key in the same verb, so only the modifiers it holds AROUND
+      // that key can be left latched by a throw in between.
+      return { buttons: [], mods: present([...list, args.key].map(canonicalMod)), keys: [] };
+    }
+    default:
+      return { buttons: [], mods: [], keys: [] };
+  }
+}
+
 export function mapHelperError(verb: string, code: string | undefined, message: string | undefined): AgentError {
   const mapped: ErrorCode = (code === undefined ? undefined : CODE_MAP[code]) ?? "INTERNAL";
-  return new AgentError(mapped, `native input verb '${verb}' failed: ${message ?? code ?? "unknown error"}`, {
+  // The prefix names what actually failed. Calling an `ax_press` refusal a "native input verb"
+  // failure sent a reader looking for a CGEvent problem that does not exist.
+  return new AgentError(mapped, `${verbKind(verb)} '${verb}' failed: ${message ?? code ?? "unknown error"}`, {
     details: { verb, helperCode: code },
   });
 }
@@ -518,6 +724,11 @@ export class MacInput implements NativeInput {
   async permissions(opts?: { prompt?: boolean }): Promise<Permissions> {
     const r = await this.client.request("permissions", { prompt: opts?.prompt ?? false });
     return { accessibility: Boolean(r.accessibility), screenRecording: Boolean(r.screenRecording) };
+  }
+
+  async layout(): Promise<KeyboardLayoutInfo> {
+    const r = await this.client.request("layout");
+    return { inputSourceId: String(r.inputSourceId ?? ""), isAnsiUs: Boolean(r.isAnsiUs) };
   }
 
   /** Disposes this input's helper, so `MacWindows` stops working until a new adapter is made. */

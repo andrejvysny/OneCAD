@@ -12,8 +12,8 @@ import { SEGMENT_IDLE_MS } from "../../geometry/wheelClass.ts";
 import type { MouseButton } from "../../platform/adapter.ts";
 import { defineTool, type ToolCtx } from "../defineTool.ts";
 import type { ActionResult } from "../envelope.ts";
-import { ButtonSchema, ModsSchema, OffsetSchema, SpaceSchema, TargetSchema, type TargetInput } from "../schemas.ts";
-import type { ActionEnv, Hit } from "./actionPipeline.ts";
+import { ButtonSchema, ModsSchema, OffsetSchema, SpaceSchema, TargetSchema, isAxTargetInput, type TargetInput } from "../schemas.ts";
+import type { ActionEnv, Hit, PipelineSession, WheelProbeLike } from "./actionPipeline.ts";
 import {
   MOVE_RECHECK_MS,
   beginAction,
@@ -25,12 +25,19 @@ import {
   targetBrief,
   toModKeys,
 } from "./actionPipeline.ts";
-import { dispatchPointer, selectorOf, webviewUnsupported } from "./webviewInput.ts";
+import { dispatchPointer, dispatchWheel, laneFor, selectorOf, webviewUnsupported } from "./webviewInput.ts";
 
 const ModeSchema = z
   .enum(["real_user", "webview"])
   .optional()
-  .describe('"real_user" (default) posts OS events; "webview" dispatches DOM events and is not user-grade evidence.');
+  .describe(
+    '"real_user" (default in a foreground session) posts OS events; "webview" dispatches DOM events in the page and is not user-grade evidence. An interaction:"background" session has no OS input at all: "webview" is its default and an explicit "real_user" is refused.',
+  );
+
+/** `laneFor` with the session's policy already supplied. */
+function lane(ctx: ToolCtx, requested: "real_user" | "webview" | undefined, tool: string): "real_user" | "webview" {
+  return laneFor(ctx.session.interactionPolicy, requested, tool);
+}
 
 const DEFAULT_MOVE_MS = 180;
 const DEFAULT_DRAG_MS = 400;
@@ -61,6 +68,9 @@ async function singleTarget(ctx: ToolCtx, actionId: string, spec: SingleSpec): P
     actionId,
     mode: "real_user",
     backend: "cgevent",
+    // Native pointer verbs position the real cursor before they act.
+    movesCursor: true,
+    surface: hit.surface,
     stateChanging: spec.stateChanging,
     resolveMs: Date.now() - t0,
     ...(spec.screenshot === undefined ? {} : { screenshot: spec.screenshot }),
@@ -70,13 +80,30 @@ async function singleTarget(ctx: ToolCtx, actionId: string, spec: SingleSpec): P
   });
 }
 
-/** The webview lane for move and click; refuses to pretend for anything else. */
+/** An accessibility target has no page element, so the webview lane cannot address it at all. */
+function axTargetNeedsRealUser(tool: string): AgentError {
+  return new AgentError("INVALID_TARGET", `${tool} cannot drive an {axRef} target in webview mode`, {
+    remediation:
+      'An accessibility element belongs to the native UI, not to the page: there is no DOM node to dispatch to. Drop `mode:"webview"` — the default real_user lane clicks it with real OS events.',
+    details: { tool, mode: "webview" },
+  });
+}
+
+export const HOVER_CSS_WARNING =
+  'dispatched in the page: JavaScript hover handlers ran, but CSS :hover did not light up because the engine applies it from the REAL pointer position — a screenshot will not show a hover-styled control. Use interaction:"foreground" to prove the visual state.';
+
+/** The webview lane for move, hover and click; refuses to pretend for anything else. */
 async function webviewPointer(
   ctx: ToolCtx,
   actionId: string,
   kind: "move" | "click",
   args: { target: TargetInput; offset?: Pt; button?: MouseButton; mods?: z.infer<typeof ModsSchema>; screenshot?: boolean },
+  extra: { dwellMs?: number; warning?: string } = {},
 ): Promise<ActionResult> {
+  // The webview lane dispatches DOM events at an element the page owns. A native element is
+  // precisely what the page does NOT own, so there is nothing to dispatch to and pretending
+  // otherwise would report a success no user could have produced.
+  if (isAxTargetInput(args.target)) throw axTargetNeedsRealUser(kind === "click" ? "pointer_click" : "pointer_move");
   const env = await beginAction(ctx, { requireFrontmost: false });
   const t0 = Date.now();
   const hit = await resolveTarget(env, args.target, args.offset === undefined ? {} : { offset: args.offset });
@@ -85,20 +112,27 @@ async function webviewPointer(
     actionId,
     mode: "webview",
     backend: "webdriver",
+    surface: hit.surface,
     stateChanging: kind === "click",
     resolveMs: Date.now() - t0,
+    ...(extra.warning === undefined ? {} : { warnings: [extra.warning] }),
     ...(args.screenshot === undefined ? {} : { screenshot: args.screenshot }),
     ...(brief === undefined ? {} : { target: brief }),
     resolvedPoint: { global: hit.global, css: hit.css },
     input: async (e) => {
       const out = await dispatchPointer(e.bridge, {
-        ref: hit.resolved.node?.ref ?? null,
-        selector: selectorOf(args.target, hit.resolved.node?.css),
+        ref: hit.resolved?.node?.ref ?? null,
+        selector: selectorOf(args.target, hit.resolved?.node?.css),
         point: hit.css,
         kind,
         button: buttonIndex(args.button ?? "left"),
         mods: args.mods ?? [],
       });
+      if (extra.dwellMs !== undefined || kind === "move") {
+        // The dwell is what makes a hover-delayed tooltip open. It costs nothing on a plain
+        // move, where the caller passes no dwell and this is a zero wait.
+        if (extra.dwellMs !== undefined) await sleep(extra.dwellMs === 0 ? 0 : extra.dwellMs);
+      }
       if (!out.ok) {
         throw new AgentError("ELEMENT_NOT_FOUND", "no element received the dispatched events", {
           details: { css: hit.css },
@@ -123,7 +157,7 @@ function registerMove(server: McpServer): void {
     }),
     kind: "action",
     handler: async (args, ctx, actionId) => {
-      if (args.mode === "webview") {
+      if (lane(ctx, args.mode, "pointer_move") === "webview") {
         return webviewPointer(ctx, actionId, "move", args as Parameters<typeof webviewPointer>[3]);
       }
       return singleTarget(ctx, actionId, {
@@ -153,7 +187,14 @@ function registerHover(server: McpServer): void {
     }),
     kind: "action",
     handler: async (args, ctx, actionId) => {
-      if (args.mode === "webview") throw webviewUnsupported("pointer_hover");
+      if (lane(ctx, args.mode, "pointer_hover") === "webview") {
+        return webviewPointer(ctx, actionId, "move", args as Parameters<typeof webviewPointer>[3], {
+          dwellMs: args.dwellMs,
+          // `:hover` is applied by the engine from the REAL pointer position, so a dispatched
+          // pointerover never lights it. JS hover handlers do run; CSS-only hover states do not.
+          warning: HOVER_CSS_WARNING,
+        });
+      }
       return singleTarget(ctx, actionId, {
         target: args.target,
         ...(args.offset === undefined ? {} : { offset: args.offset }),
@@ -172,7 +213,7 @@ function registerClick(server: McpServer): void {
   defineTool(server, {
     name: "pointer_click",
     description:
-      "Move the real cursor onto an element and click it with the OS mouse. Re-checks the hit test after the move, so a tooltip or popover that opened under the cursor is refused (ELEMENT_OCCLUDED) instead of being clicked by mistake.",
+      "Move the real cursor onto an element and click it with the OS mouse. Re-checks the hit test after the move, so a tooltip or popover that opened under the cursor is refused (ELEMENT_OCCLUDED) instead of being clicked by mistake. Accepts {axRef} from native_snapshot to click something the WebView does not own — a button in a native Save/Open panel, a sheet, a menu item, a title-bar button — with the same real mouse; the envelope then reports surface \"native\" and settles on the accessibility tree.",
     input: z.object({
       target: TargetSchema,
       offset: OffsetSchema.optional(),
@@ -186,7 +227,7 @@ function registerClick(server: McpServer): void {
     }),
     kind: "action",
     handler: async (args, ctx, actionId) => {
-      if (args.mode === "webview") {
+      if (lane(ctx, args.mode, "pointer_click") === "webview") {
         return webviewPointer(ctx, actionId, "click", args as Parameters<typeof webviewPointer>[3]);
       }
       const mods = toModKeys(args.mods);
@@ -226,7 +267,7 @@ function registerDownUp(server: McpServer): void {
       input,
       kind: "action",
       handler: async (args, ctx, actionId) => {
-        if (args.mode === "webview") throw webviewUnsupported(name);
+        if (lane(ctx, args.mode, name) === "webview") throw webviewUnsupported(name);
         const button = args.button ?? "left";
         const mods = toModKeys(args.mods);
         const act = async (e: ActionEnv, hit: Hit): Promise<void> => {
@@ -269,6 +310,9 @@ async function atCursor(
     actionId,
     mode: "real_user",
     backend: "cgevent",
+    // Native pointer verbs position the real cursor before they act.
+    movesCursor: true,
+    surface: hit.surface,
     stateChanging: true,
     resolveMs: Date.now() - t0,
     resolvedPoint: { global: hit.global, css: hit.css },
@@ -317,7 +361,7 @@ function registerDrag(server: McpServer): void {
     }),
     kind: "action",
     handler: async (args, ctx, actionId) => {
-      if (args.mode === "webview") throw webviewUnsupported("pointer_drag");
+      if (lane(ctx, args.mode, "pointer_drag") === "webview") throw webviewUnsupported("pointer_drag");
       const env = await beginAction(ctx);
       const t0 = Date.now();
       const from = await resolveTarget(env, args.from, { forDrag: true });
@@ -327,6 +371,11 @@ function registerDrag(server: McpServer): void {
         actionId,
         mode: "real_user",
         backend: "cgevent",
+        // Native pointer verbs position the real cursor before they act.
+        movesCursor: true,
+        // Either end on a native surface makes the whole gesture native: the DOM idle tuple
+        // cannot report on a drag that half of it never saw.
+        surface: from.surface === "native" || to.surface === "native" ? "native" : "webview",
         stateChanging: true,
         resolveMs: Date.now() - t0,
         ...(args.screenshot === undefined ? {} : { screenshot: args.screenshot }),
@@ -366,7 +415,7 @@ function registerDragPath(server: McpServer): void {
     input: DragPathInput,
     kind: "action",
     handler: async (args, ctx, actionId) => {
-      if (args.mode === "webview") throw webviewUnsupported("pointer_drag_path");
+      if (lane(ctx, args.mode, "pointer_drag_path") === "webview") throw webviewUnsupported("pointer_drag_path");
       const env = await beginAction(ctx);
       const t0 = Date.now();
       // "window" and "webview" coincide: the Overlay title bar makes content span the frame.
@@ -378,6 +427,9 @@ function registerDragPath(server: McpServer): void {
         actionId,
         mode: "real_user",
         backend: "cgevent",
+        // Native pointer verbs position the real cursor before they act.
+        movesCursor: true,
+        surface: "webview",
         stateChanging: true,
         resolveMs: Date.now() - t0,
         ...(args.screenshot === undefined ? {} : { screenshot: args.screenshot }),
@@ -399,6 +451,33 @@ function registerDragPath(server: McpServer): void {
   });
 }
 
+/**
+ * The wheel probe the last calibration recorded, BY IDENTITY. `ensureWheelProbe` hands back
+ * exactly this object when it reuses it and a fresh one when it ran a new probe, which is
+ * the only signal the narrow `PipelineSession` surface carries. `undefined` means "cannot
+ * tell" (a session that has not calibrated, or a test fake) — then we stay quiet rather
+ * than claim a probe ran.
+ */
+function calibratedWheelProbe(session: PipelineSession): WheelProbeLike | undefined {
+  return (session as PipelineSession & { calibration?: { wheelProbe: WheelProbeLike } }).calibration?.wheelProbe;
+}
+
+function probeRanWarning(probe: WheelProbeLike): string {
+  if ("skipped" in probe) {
+    // A skip does NOT imply nothing was posted: the sample is written by the same listener that
+    // swallows the notch, so "no wheel event" means the notch escaped to whatever was under the
+    // cursor. Reporting that as "posted no input" would hide an unattributed CGEvent.
+    const posted = (probe as { posted?: boolean }).posted === true;
+    return posted
+      ? `a wheel calibration probe ran inside this action and posted at least one notch that was NOT swallowed (skipped: ${probe.skipped}); the viewport may have moved`
+      : `a wheel calibration probe ran inside this action (skipped: ${probe.skipped}); it posted no input`;
+  }
+  // `WheelProbeLike` is the pipeline's narrow view; the real probe reports its attempt count.
+  const attempts = (probe as { attempts?: number }).attempts;
+  const count = attempts === undefined ? "one or more" : String(attempts);
+  return `a wheel calibration probe ran inside this action and posted ${count} probe notch${attempts === 1 ? "" : "es"} at the viewport before the requested scroll; they are swallowed in the page and move no camera`;
+}
+
 function registerScroll(server: McpServer): void {
   defineTool(server, {
     name: "pointer_scroll",
@@ -417,10 +496,17 @@ function registerScroll(server: McpServer): void {
     }),
     kind: "action",
     handler: async (args, ctx, actionId) => {
-      if (args.mode === "webview") throw webviewUnsupported("pointer_scroll");
+      if (lane(ctx, args.mode, "pointer_scroll") === "webview") {
+        return webviewScroll(ctx, actionId, args);
+      }
       const env = await beginAction(ctx);
       const warnings: string[] = [];
+      // A calibration that skipped the wheel probe (no viewport on the start screen) makes
+      // this call run one here — real notches, posted before the action pipeline's
+      // captureBefore, so the caller has to be told they are in this action's before/after.
+      const memoised = calibratedWheelProbe(env.session);
       const probe = await env.session.ensureWheelProbe();
+      if (memoised !== undefined && probe !== memoised) warnings.push(probeRanWarning(probe));
       if ("ok" in probe && !probe.ok) {
         warnings.push(
           "the app did not score a synthetic notch as a mouse wheel; scrolling may pan instead of zoom (force it in Settings -> Navigation -> Mouse)",
@@ -436,6 +522,9 @@ function registerScroll(server: McpServer): void {
         actionId,
         mode: "real_user",
         backend: "cgevent",
+        // Native pointer verbs position the real cursor before they act.
+        movesCursor: true,
+        surface: hit.surface,
         stateChanging: true,
         resolveMs: Date.now() - t0,
         warnings,
@@ -454,6 +543,76 @@ interface ScrollArgs {
   dx?: number;
   notches?: boolean;
   mods?: z.infer<typeof ModsSchema>;
+}
+
+export const WEBVIEW_WHEEL_WARNING =
+  'dispatched in the page, so the app never classified a real notch: the wheel-vs-trackpad device scoring and the calibrated lines-per-notch are both bypassed. Zoom direction and magnitude are exercised; wheel FIDELITY is not. Use interaction:"foreground" to prove the device classification.';
+
+/**
+ * The in-page wheel lane.
+ *
+ * Wheel is the one viewport gesture the background policy can still perform, because zooming
+ * needs no pointer capture: `CadOrbitControls` binds `wheel` on the canvas with `passive:false`,
+ * and a WheelEvent dispatched at `elementFromPoint` bubbles straight to it. There is no wheel
+ * probe and no notch spacing — nothing is being scored by the app's device classifier — so
+ * `notches` is turned into a line-mode delta directly and the warning above says as much.
+ */
+async function webviewScroll(ctx: ToolCtx, actionId: string, args: ScrollArgs & {
+  target?: TargetInput;
+  offset?: Pt;
+  screenshot?: boolean;
+}): Promise<ActionResult> {
+  if (args.target !== undefined && isAxTargetInput(args.target)) throw axTargetNeedsRealUser("pointer_scroll");
+  const env = await beginAction(ctx, { requireFrontmost: false });
+  const t0 = Date.now();
+  // Without a real cursor there is no "wherever the cursor is": the page lane needs a point,
+  // and the window centre is the only defensible default over a viewport-filling canvas.
+  const hit =
+    args.target === undefined
+      ? pointHit(env, {
+          x: env.geom.innerSizePx.width / env.geom.scaleFactor / 2,
+          y: env.geom.innerSizePx.height / env.geom.scaleFactor / 2,
+        })
+      : await resolveTarget(env, args.target, args.offset === undefined ? {} : { offset: args.offset });
+  const brief = targetBrief(hit);
+  // The app's own sign convention: positive dy means wheel up / zoom in, which is a NEGATIVE
+  // DOM deltaY. Keeping the tool's argument identical across both lanes is the point.
+  const lines = args.notches === false ? 1 : env.session.wheelLinesPerNotch;
+  const deltaY = -args.dy * lines;
+  const deltaX = (args.dx ?? 0) * lines;
+  return finishAction(env, {
+    actionId,
+    mode: "webview",
+    backend: "webdriver",
+    surface: "webview",
+    stateChanging: true,
+    resolveMs: Date.now() - t0,
+    warnings: [WEBVIEW_WHEEL_WARNING],
+    ...(args.screenshot === undefined ? {} : { screenshot: args.screenshot }),
+    ...(brief === undefined ? {} : { target: brief }),
+    resolvedPoint: { global: hit.global, css: hit.css },
+    data: { deltaY, deltaX, deltaMode: 1, linesPerNotch: lines },
+    input: async (e) => {
+      const out = await dispatchWheel(e.bridge, {
+        point: hit.css,
+        deltaX,
+        deltaY,
+        // Line mode, matching what a real mouse wheel reports through WebKit.
+        deltaMode: 1,
+        mods: args.mods ?? [],
+      });
+      if (!out.ok) {
+        throw new AgentError("ELEMENT_NOT_FOUND", "no element received the dispatched wheel event", {
+          details: { css: hit.css },
+        });
+      }
+      if (!out.defaultPrevented) {
+        e.warnings.push(
+          `the wheel event reached <${out.tag}> but nothing called preventDefault, so no listener consumed it — the point may not be over the viewport canvas`,
+        );
+      }
+    },
+  });
 }
 
 async function scrollNotches(env: ActionEnv, p: Pt, args: ScrollArgs, linesPerNotch: number): Promise<void> {

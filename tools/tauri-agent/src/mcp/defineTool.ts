@@ -56,6 +56,18 @@ export function defineTool<S extends z.ZodTypeAny>(
       log.error("tool failed", { tool: def.name, actionId, error: String(cause) });
       result = errorResult(actionId, fallbackMode, cause);
     }
+    // `interaction.policy` is stamped HERE, centrally, and nowhere else.
+    //
+    // Only `beginAction` knows what a call did to the desktop, but most tools never go through it
+    // — the twenty-odd bare `okResult`/`errorResult` sites, the three accessibility actuation
+    // tools that deliberately skip the pipeline, and the catch above. Every one of those inherits
+    // `quietInteraction()`'s "foreground" default, which in a background session is a plain lie in
+    // the very block that exists to prove the session kept its promise. This is the single place
+    // every result passes through, and the session is the only authority on its own policy.
+    //
+    // The two booleans are NOT touched: a call that did not run the frontmost gate genuinely
+    // changed nothing, and overwriting what `beginAction` measured would be worse than the default.
+    result.interaction = { ...result.interaction, policy: ctx.session.interactionPolicy };
     const durationMs = Date.now() - started;
     await ctx.journal.append({
       ts: new Date().toISOString(),

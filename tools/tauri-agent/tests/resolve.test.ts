@@ -401,6 +401,22 @@ describe("bridged scripts", () => {
    * with no stack worth reading. Rebuilding each captured script here turns that
    * into a test failure instead.
    */
+  /**
+   * `{axRef}` is a NATIVE target that shares `TargetSchema` with the webview verbs, so `ui_find`
+   * and friends accept one. Before this guard it fell through to the point branch and died as
+   * `INTERNAL: undefined is not an object (evaluating 'point.space')` — nothing was clicked, but
+   * the caller was told the harness had broken rather than that it had asked the wrong surface.
+   */
+  test("a native {axRef} target is refused by name, not by dereferencing a point", async () => {
+    const { r } = resolver();
+    const e = await r.resolve({ axRef: "@a1e7" } as never).then(
+      () => null,
+      (err: unknown) => err,
+    );
+    expect(isAgentError(e) && e.code).toBe("INVALID_TARGET");
+    expect(isAgentError(e) && e.remediation).toMatch(/native_find|native_inspect/);
+  });
+
   test("every script the Resolver sends is plain, self-contained JavaScript", async () => {
     const seen: Array<{ name: string; src: string }> = [];
     const capture: BridgeLike = {

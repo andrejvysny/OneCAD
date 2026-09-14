@@ -1,3 +1,13 @@
+# CURRENT STATE — session 32 (2026-09-14, Fable, tauri-agent harness) — HANDOFF
+
+Last verified: 2026-09-14 00:40 (this session). Ledger: `TODO.md` § "SESSION 32". Plan: `~/.claude/plans/analyze-this-plan-tauri-agent-real-user-humming-candle.md`.
+
+- **Delivered, uncommitted:** `tools/tauri-agent/` MCP server (Phase 0+1 macOS), `.mcp.json`, `tauri-agent.config.json`, `src-tauri/tauri.agent.conf.json`, root `package.json` script `tauri:agent` + devDeps (`@modelcontextprotocol/sdk`, `zod`, `@types/bun`), root `tsconfig.json` `types: ["node"]`, `.gitignore` (+`.tauri-agent/`, eval workspace), skills `~/.claude/skills/tauri-agent-test` and `.claude/skills/onecad-agent-test`.
+- **Gate:** package tsc clean · `TAURI_AGENT_REQUIRE_HELPER=1 bun test` 473/0 · root tsc clean · hex 0 · live Phase-0 exit through MCP green · skill-creator iteration 1: with skill 16/18, baseline 9/18.
+- **Session-31 work is untouched** (the user committed it as `fd62d408` during this session); its owed items stand.
+- **Processes:** none left running (verified `ps`/`lsof` after the last run). Eval artifacts: ~800 MB under `.tauri-agent/artifacts/` and `.claude/skills/onecad-agent-test-workspace/` (both gitignored).
+- **Blockers:** account session limit hit at ~00:20 (subagents died; work finished on the main thread). Owed: commit decision, iteration 2 of the evals, spec phases 2–5.
+
 # CURRENT STATE — session 31 (2026-09-13, Fable, UX-hardening resume) — PAUSED
 
 Last verified: 2026-09-13 20:45 (this session). Plan: `~/.claude/plans/act-as-senior-software-atomic-sparrow.md`. Ledger: `TODO.md` § "SESSION 31" (read its "Now" block first).

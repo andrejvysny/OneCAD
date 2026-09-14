@@ -15,10 +15,12 @@ export type ErrorCode =
   | "SCREEN_CAPTURE_PERMISSION_DENIED"
   | "PORT_IN_USE"
   | "DEV_SERVER_PORT_IN_USE"
+  | "APP_IDENTITY_MISMATCH"
   | "ACTION_TIMEOUT"
   | "SETTLE_TIMEOUT"
   | "STOP_INCOMPLETE"
   | "UNSUPPORTED_PLATFORM_CAPABILITY"
+  | "BACKGROUND_CAPABILITY_UNAVAILABLE"
   | "INVALID_TARGET"
   | "HELPER_FAILED"
   | "INTERNAL";
@@ -56,6 +58,8 @@ export const REMEDIATION: Record<ErrorCode, string> = {
     "The WebDriver port is held by another process. Either stop that process, or call session_start with {mode:\"attach\"} (or {reuseExisting:true}) to bind to the app that already owns it. The agent never kills a port owner it did not launch.",
   DEV_SERVER_PORT_IN_USE:
     "The Vite dev port (devServer.port, default 1420) is already taken — usually a `bun run dev` or `tauri dev` left running. Stop it, then retry session_start.",
+  APP_IDENTITY_MISMATCH:
+    "The process serving WebDriver is not the app from this checkout (see details.identity for what it reported: agentTesting, pid and the compile-time cargoManifestDir). No input was sent. Stop that process, or point session_start at the port your own app serves with {port:<n>} — the agent never drives an app it cannot identify.",
   ACTION_TIMEOUT:
     "The action exceeded its budget. Check session_status for a wedged bridge, look at observe_logs for a blocked regen, and retry with a larger timeoutMs once the app is idle.",
   SETTLE_TIMEOUT:
@@ -64,6 +68,8 @@ export const REMEDIATION: Record<ErrorCode, string> = {
     "Processes survived session_stop. Inspect with `pgrep -fl 'target/debug/onecad|onecad-worker-'` and kill the leftovers manually before starting a new session; a surviving app will hold the WebDriver and dev ports.",
   UNSUPPORTED_PLATFORM_CAPABILITY:
     "This capability exists only in the macOS adapter (Phase 1). Run the agent on macOS, or use mode:\"webview\" tools, which do not need native input.",
+  BACKGROUND_CAPABILITY_UNAVAILABLE:
+    "This session runs under interaction:\"background\", which never moves the cursor, never activates the app and never posts an OS event. Nothing was sent. Either use a verb the background lane supports (see details.supportedInBackground), drive the native chrome with native_press / native_set_value / native_menu_invoke, or start a session with interaction:\"foreground\" for real CGEvent fidelity \u2014 which WILL take over the pointer and the frontmost application.",
   INVALID_TARGET:
     "The target object is malformed. Use exactly one of {ref}, {testId}, {role,name?}, {text}, {css}, {point:{x,y,space}} with space one of webview|window|global.",
   HELPER_FAILED:

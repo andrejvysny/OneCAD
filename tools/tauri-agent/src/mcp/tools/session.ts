@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { defineTool } from "../defineTool.ts";
-import { okResult } from "../envelope.ts";
+import { deliveryFor, okResult } from "../envelope.ts";
 
 const StartInput = z.object({
   mode: z
@@ -22,6 +22,12 @@ const StartInput = z.object({
     .boolean()
     .optional()
     .describe("Start without the Screen Recording grant; screenshots then show wallpaper only."),
+  interaction: z
+    .enum(["foreground", "background"])
+    .optional()
+    .describe(
+      'How much of the user\'s desktop this session may touch. "foreground" (default) activates the app and posts real CGEvents — full fidelity, and it TAKES the pointer and the frontmost application. "background" never moves the cursor, never activates and never posts an OS event: it dispatches events inside the page, actuates native chrome through accessibility, and still screenshots the window while it sits behind whatever you are working in. Launching still activates the app once (a Tauri/tao behaviour no flag avoids) — use mode:"attach" to avoid even that.',
+    ),
 });
 
 export function registerSessionTools(server: McpServer): void {
@@ -36,6 +42,16 @@ export function registerSessionTools(server: McpServer): void {
       return okResult(actionId, "real_user", {
         backend: "none",
         ...(status.windowId === undefined ? {} : { windowId: status.windowId }),
+        // Starting a session launches a process and runs calibration, which posts real cursor
+        // moves. Re-sending it is never a no-op, so it is not retry-safe.
+        delivery: deliveryFor("input_completed", true),
+        // The one honest place to report the launch activation: it happened during THIS call,
+        // and `foregroundStolenAtLaunch` on the session says it will not happen again.
+        interaction: {
+          policy: status.interaction,
+          foregroundChanged: status.interaction === "foreground" || status.foregroundStolenAtLaunch === true,
+          cursorMoved: status.interaction === "foreground",
+        },
         data: status,
       });
     },
@@ -44,16 +60,29 @@ export function registerSessionTools(server: McpServer): void {
   defineTool(server, {
     name: "session_stop",
     description:
-      "Stop the session: release input, close the bridge, kill the launched process tree, sweep for survivors of this checkout and check the ports. The returned `teardown` {survivors, portsFree, launched} is the measured evidence a report should cite for 'nothing left running'.",
+      "Stop the session: release input, close the bridge, kill the process tree this session LAUNCHED, sweep for survivors of this checkout and check the ports. An attached session never signals the app — it detaches and its sweep is report-only. The returned `teardown` {survivors, portsFree, launched, detached} is the measured evidence a report should cite for 'nothing left running'.",
     input: z.object({
       killApp: z
         .boolean()
         .optional()
-        .describe("Default true. false leaves an attached app running and only detaches from it."),
+        .describe(
+          "Launched sessions only. Default true; false detaches instead. Ignored when the session attached.",
+        ),
+      forceKillAttached: z
+        .boolean()
+        .optional()
+        .describe(
+          "Attached sessions only. Default false. true deliberately terminates an app this session did NOT launch.",
+        ),
     }),
     kind: "action",
     handler: async (args, ctx, actionId) =>
-      okResult(actionId, "real_user", { backend: "none", data: await ctx.session.stop(args) }),
+      okResult(actionId, "real_user", {
+        backend: "none",
+        // Stopping signals processes and releases held input: side effects by definition.
+        delivery: deliveryFor("input_completed", true),
+        data: await ctx.session.stop(args),
+      }),
   });
 
   defineTool(server, {

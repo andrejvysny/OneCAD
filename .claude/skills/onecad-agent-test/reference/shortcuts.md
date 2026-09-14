@@ -18,6 +18,16 @@ J project edges · X construction toggle · Delete/Backspace delete selection ·
 constraints ⇧H horizontal, ⇧V vertical, ⇧C coincident, ⇧E equal, ⇧P parallel, ⇧M midpoint.
 
 ## Traps
+
+- **Keyboard layout: ⌘Z and ⌘Y can be swapped.** The helper's key map is positional US/ANSI
+  (`kVK_ANSI_*`) with no layout translation, so `keyboard_press` sends whatever key sits at that
+  ANSI position. Measured on this development machine under `com.apple.keylayout.Slovak`:
+  `kVK_ANSI_Z` produces `y` and `kVK_ANSI_Y` produces `z` — and OneCAD binds `⌘Z` to undo and `⌘Y`
+  to redo, so **`keyboard_shortcut {combo:"Primary+Z"}` fires REDO there**. The letter tools
+  (`e r f b k p c m t d s h`) sit at identical positions on both layouts and are unaffected.
+  `session_status.input.keyboardLayout` reports the active input source and `session_start` warns
+  when it is not ANSI/US. Check that warning before trusting an undo/redo step, and prefer the
+  History panel or the app menu when it fires.
 - **Cross-mode fallback.** A letter bound only in the *other* mode still fires: pressing `E`
   inside a sketch **finishes the sketch and arms Extrude** (`keymap.ts` `resolveBinding`). Finish
   with `Enter` deliberately, then press `E`. Measure (`⇧?`) is exempt.

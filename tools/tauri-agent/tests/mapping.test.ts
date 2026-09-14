@@ -1,16 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import { isAgentError } from "../src/errors.ts";
 import {
+  checkGlobalPoint,
   checkPoint,
   cssToGlobal,
   globalToCss,
   pointInNativeOcclusion,
+  pointInRect,
   pointInWindow,
   rectCenter,
   rectIsFinite,
   rectStable,
   windowToGlobal,
 } from "../src/geometry/mapping.ts";
+import type { OwnedWindow } from "../src/geometry/mapping.ts";
 import type { Rect, WindowGeom } from "../src/geometry/types.ts";
 
 function geom(over: Partial<WindowGeom> = {}): WindowGeom {
@@ -165,7 +168,109 @@ describe("checkPoint", () => {
   });
 });
 
+describe("checkGlobalPoint", () => {
+  // The calibrated main window: global (200,100) 800x600, and the traffic lights in its own
+  // content-box css space.
+  const g = geom({ innerPositionPx: { x: 200, y: 100 }, innerSizePx: { width: 800, height: 600 }, scaleFactor: 1 });
+  const lights: Rect[] = [{ x: 0, y: 0, width: 80, height: 28 }];
+  const MAIN: OwnedWindow = { windowId: 42, bounds: { x: 200, y: 100, width: 800, height: 600 } };
+  /** A second window of the SAME app, nowhere near the main one. */
+  const SECONDARY: OwnedWindow = { windowId: 43, bounds: { x: 1200, y: 700, width: 400, height: 300 } };
+  /** A modal sheet that overhangs the main window's bottom edge — legitimate, and unreachable
+   *  through `checkPoint`, which only knows the main window. */
+  const SHEET: OwnedWindow = { windowId: 44, bounds: { x: 300, y: 500, width: 600, height: 400 } };
+  const anchored = { geom: g, rects: lights };
+
+  test("admits a point in the main window", () => {
+    expect(checkGlobalPoint({ x: 500, y: 300 }, [MAIN], anchored)).toEqual({ x: 500, y: 300 });
+  });
+
+  test("admits a point in a secondary window of this application", () => {
+    expect(checkGlobalPoint({ x: 1300, y: 800 }, [MAIN, SECONDARY], anchored)).toEqual({ x: 1300, y: 800 });
+  });
+
+  test("admits a point in a modal that extends past the main window", () => {
+    // (600, 850) is below the main window's bottom edge (100 + 600 = 700), so `checkPoint` would
+    // refuse it. That is exactly the NSSavePanel case this gate exists for.
+    expect(pointInWindow({ x: 600, y: 850 }, g)).toBe(false);
+    expect(checkGlobalPoint({ x: 600, y: 850 }, [MAIN, SHEET], anchored)).toEqual({ x: 600, y: 850 });
+  });
+
+  test("refuses a point in another application's window", () => {
+    // Inside SECONDARY's rect, but SECONDARY is not in the allowed list: it belongs to someone else.
+    expect(codeOf(() => checkGlobalPoint({ x: 1300, y: 800 }, [MAIN], anchored))).toBe("POINT_OUTSIDE_WINDOW");
+    expect(codeOf(() => checkGlobalPoint({ x: 5000, y: 5000 }, [MAIN, SECONDARY], null))).toBe(
+      "POINT_OUTSIDE_WINDOW",
+    );
+  });
+
+  test("the refusal names the windows it did check", () => {
+    try {
+      checkGlobalPoint({ x: 1300, y: 800 }, [MAIN], anchored);
+      throw new Error("expected a refusal");
+    } catch (e) {
+      if (!isAgentError(e)) throw e;
+      expect(e.details?.windows).toEqual([{ windowId: 42, bounds: MAIN.bounds }]);
+    }
+  });
+
+  test("an empty window list is WINDOW_NOT_FOUND, not a silent pass", () => {
+    expect(codeOf(() => checkGlobalPoint({ x: 500, y: 300 }, [], anchored))).toBe("WINDOW_NOT_FOUND");
+  });
+
+  test("a non-finite point is refused as an invalid target, never as 'outside the window'", () => {
+    expect(codeOf(() => checkGlobalPoint({ x: Number.NaN, y: 300 }, [MAIN], anchored))).toBe("INVALID_TARGET");
+    expect(codeOf(() => checkGlobalPoint({ x: 500, y: Number.POSITIVE_INFINITY }, [MAIN], anchored))).toBe(
+      "INVALID_TARGET",
+    );
+  });
+
+  test("occlusion applies inside the anchor window", () => {
+    // css (20, 14) in the main window is global (220, 114) — under the traffic lights.
+    expect(codeOf(() => checkGlobalPoint({ x: 220, y: 114 }, [MAIN], anchored))).toBe("ELEMENT_OCCLUDED");
+    expect(checkGlobalPoint({ x: 220, y: 114 }, [MAIN], null)).toEqual({ x: 220, y: 114 });
+  });
+
+  test("occlusion does NOT leak into another window of the same app", () => {
+    // A point 14 pt below a secondary window's top-left corner is under NOTHING the config knows
+    // about: those rects were measured against the main window's content box. Interpreting them
+    // in any other window would refuse a legitimate native target.
+    const panel: OwnedWindow = { windowId: 43, bounds: { x: 210, y: 110, width: 400, height: 300 } };
+    expect(checkGlobalPoint({ x: 220, y: 114 }, [panel, MAIN], anchored)).toEqual({ x: 220, y: 114 });
+  });
+
+  test("the front-most containing window decides, because it is the one that receives the click", () => {
+    // Same point, two overlapping windows of this app. CGWindowList order is front-to-back, so
+    // the first match is the window a click would actually land in — here the panel, which has no
+    // occlusion rects of its own.
+    const panel: OwnedWindow = { windowId: 43, bounds: { x: 200, y: 100, width: 200, height: 100 } };
+    expect(checkGlobalPoint({ x: 220, y: 114 }, [panel, MAIN], anchored)).toEqual({ x: 220, y: 114 });
+    expect(codeOf(() => checkGlobalPoint({ x: 220, y: 114 }, [MAIN, panel], anchored))).toBe("ELEMENT_OCCLUDED");
+  });
+
+  test("far edges are half-open, exactly as pointInWindow is", () => {
+    expect(checkGlobalPoint({ x: 999.9, y: 699.9 }, [MAIN], null)).toEqual({ x: 999.9, y: 699.9 });
+    expect(codeOf(() => checkGlobalPoint({ x: 1000, y: 400 }, [MAIN], null))).toBe("POINT_OUTSIDE_WINDOW");
+    expect(codeOf(() => checkGlobalPoint({ x: 500, y: 700 }, [MAIN], null))).toBe("POINT_OUTSIDE_WINDOW");
+  });
+
+  test("a window whose bounds did not survive the wire contains nothing", () => {
+    const broken = { windowId: 9, bounds: { x: Number.NaN, y: 0, width: 100, height: 100 } } as OwnedWindow;
+    expect(codeOf(() => checkGlobalPoint({ x: 50, y: 50 }, [broken], null))).toBe("POINT_OUTSIDE_WINDOW");
+  });
+});
+
 describe("rect helpers", () => {
+  test("pointInRect is half-open on the far edges and screens non-finite input", () => {
+    const r: Rect = { x: 10, y: 20, width: 100, height: 30 };
+    expect(pointInRect({ x: 10, y: 20 }, r)).toBe(true);
+    expect(pointInRect({ x: 109.9, y: 49.9 }, r)).toBe(true);
+    expect(pointInRect({ x: 110, y: 30 }, r)).toBe(false);
+    expect(pointInRect({ x: 50, y: 50 }, r)).toBe(false);
+    expect(pointInRect({ x: Number.NaN, y: 30 }, r)).toBe(false);
+    expect(pointInRect({ x: 50, y: 30 }, { ...r, width: Number.NaN })).toBe(false);
+  });
+
   test("rectStable tolerates 0.5 px of sub-pixel jitter and nothing more", () => {
     const a: Rect = { x: 10, y: 20, width: 100, height: 30 };
     expect(rectStable(a, { x: 10.5, y: 20.5, width: 100.5, height: 30.5 })).toBe(true);

@@ -181,6 +181,17 @@ export class Resolver {
       return fromNode(one(byNameTiers(pool, target.text, true), "text", target.text, pool), "text", off);
     }
     if ("css" in target) return this.#locateCss(target.css, off);
+    // `{axRef}` is a NATIVE target. It shares `TargetSchema` with the webview verbs, so a query
+    // tool like `ui_find` will accept one and it arrives here — where falling through to the
+    // point branch dereferences a `point` that does not exist. Refuse it by name instead: the
+    // webview resolver cannot see a native element at all, and saying so is the whole answer.
+    if (!("point" in target)) {
+      throw new AgentError("INVALID_TARGET", "this tool addresses the WebView and cannot resolve a native target", {
+        remediation:
+          "An {axRef} names an element in the accessibility tree, which the WebView does not own. Use native_inspect / native_find to read it, and the pointer/keyboard verbs to act on it.",
+        details: { target },
+      });
+    }
     return { css: this.#locatePoint(target.point, opts), source: "point" };
   }
 

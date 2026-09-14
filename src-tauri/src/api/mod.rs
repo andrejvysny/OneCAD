@@ -4569,6 +4569,28 @@ fn acknowledge_render(
     }
 }
 
+/// Outstanding render expectations, for the `tauri-agent` harness's idle probe.
+///
+/// The watchdog ledger is the only per-body record of "the kernel published this geometry but
+/// no frame carrying it has been acknowledged yet", which is exactly the question an automated
+/// run must answer before it photographs the viewport and calls an operation verified. It is
+/// written by [`render_watchdog_expect`] and retired by [`mesh_render_completed`]; until now
+/// nothing could read it.
+///
+/// Debug builds only, like the ledger itself. Returns the number of outstanding expectations
+/// and the union of the body ids they are still waiting on.
+#[cfg(debug_assertions)]
+pub(crate) fn pending_render_expectations() -> (usize, Vec<String>) {
+    let guard = render_expectations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut bodies = std::collections::BTreeSet::new();
+    for expectation in guard.values() {
+        bodies.extend(expectation.bodies.iter().cloned());
+    }
+    (guard.len(), bodies.into_iter().collect())
+}
+
 #[tauri::command]
 pub fn mesh_render_completed(
     expectation_id: u64,

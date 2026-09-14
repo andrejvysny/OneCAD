@@ -1,7 +1,10 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { AgentError } from "../src/errors.ts";
-import { pixelScaleOf, readPngSize } from "../src/platform/macos/capture.ts";
+import { measure, pixelScaleOf, readPngSize } from "../src/platform/macos/capture.ts";
 
 const SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
@@ -71,5 +74,69 @@ describe("pixelScaleOf", () => {
     const out = pixelScaleOf({ width: 2880, height: 1200 }, { width: 1440, height: 900 });
     expect(out.pixelScale).toBe(2);
     expect(out.warning).toMatch(/1440x900/);
+  });
+});
+
+/**
+ * The size heuristic can only say an image LOOKS degraded. Which error that is depends on the
+ * LIVE grant: a preflight reading taken minutes ago may have been revoked, and sending a user
+ * to a System Settings toggle that is already correct hides the real failure.
+ */
+describe("measure — degraded capture verdict", () => {
+  const files: string[] = [];
+
+  afterEach(() => {
+    for (const f of files.splice(0)) rmSync(f, { recursive: true, force: true });
+  });
+
+  function tinyFile(): string {
+    const dir = mkdtempSync(join(tmpdir(), "tauri-agent-capture-"));
+    files.push(dir);
+    const path = join(dir, "shot.png");
+    writeFileSync(path, Buffer.alloc(64));
+    return path;
+  }
+
+  function fullPng(): string {
+    const dir = mkdtempSync(join(tmpdir(), "tauri-agent-capture-"));
+    files.push(dir);
+    const path = join(dir, "shot.png");
+    const body = new Uint8Array(4096);
+    body.set(pngHeader(2880, 1800), 0);
+    writeFileSync(path, body);
+    return path;
+  }
+
+  test("a sub-kilobyte image with the grant present is NOT the permission error", async () => {
+    const err = (await measure(tinyFile(), undefined, async () => true).catch((e: unknown) => e)) as AgentError;
+    expect(err).toBeInstanceOf(AgentError);
+    expect(err.code).not.toBe("SCREEN_CAPTURE_PERMISSION_DENIED");
+    expect(err.message).toContain("IS granted");
+    // The user must not be sent to fix a setting that is already correct.
+    expect(err.remediation).not.toContain("System Settings");
+    expect(err.details?.screenRecording).toBe(true);
+  });
+
+  test("a sub-kilobyte image with the grant genuinely gone is the permission error", async () => {
+    const err = (await measure(tinyFile(), undefined, async () => false).catch((e: unknown) => e)) as AgentError;
+    expect(err.code).toBe("SCREEN_CAPTURE_PERMISSION_DENIED");
+    expect(err.details?.screenRecording).toBe(false);
+  });
+
+  test("an unanswerable grant question stays on the conservative verdict", async () => {
+    const err = (await measure(tinyFile(), undefined, async () => undefined).catch((e: unknown) => e)) as AgentError;
+    expect(err.code).toBe("SCREEN_CAPTURE_PERMISSION_DENIED");
+    expect(err.message).toContain("most likely");
+  });
+
+  test("an image whose aspect disagrees with the bounds is returned, but not as evidence", async () => {
+    const out = await measure(fullPng(), { width: 1440, height: 900 }, async () => true);
+    expect(out.pixelScale).toBe(2);
+    expect(out.authoritative).toBeUndefined();
+
+    const bad = await measure(fullPng(), { width: 1440, height: 1200 }, async () => true);
+    expect(bad.authoritative).toBe(false);
+    expect(bad.reason).toBe("bounds-mismatch");
+    expect(bad.warning).toBeDefined();
   });
 });
