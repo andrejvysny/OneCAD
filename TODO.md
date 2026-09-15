@@ -9,7 +9,13 @@ Source: `docs/qa/UX_REVIEW_2026-09-14.md` (59 findings, 8 blocking). Nine work p
 - [x] Commit boundary 1 (review docs + race fix + clippy dead-code fix + three accepted Astra derivations + this ledger).
 - [x] Astra A1/A2/A3 derived and accepted (`docs/design/astra/sketch-host-face-transport.md`, `sketch-solver-truth.md`, `sketch-fillet-fill-and-tangency.md`); protocol pre-audit folded into `PLAN.md` (P-1…P-11).
 - [x] WP-1 + WP-1b (SCHEMA + worker + Rust, Astra `break` folded in) · WP-2 frontend half · WP-4 · WP-5 · the WP-6/7/8 chrome, inspector, copy and tool-chip groups — all landed, reviewed and gated. **Commit boundary 2 taken.**
-- [ ] **NEXT: WP-2 worker/Rust half** (brief ready at `scratchpad/brief-wp2-worker.md`): `SketchUpsert` reports solved `positions`/`curves`, Rust adopts them at the three ADOPT sites in one undo entry, the per-dimension residual gate (τ_len = 1e-4 mm, τ_ang = τ_len / L_c) with named culprits, drive-only point drag, `solverPolicyVersion` 1 → 2. Derivation: `docs/design/astra/sketch-solver-truth.md`. Then WP-3 (brief at `scratchpad/brief-wp3.md`, derivation `sketch-fillet-fill-and-tangency.md`) — B4 reproduction FIRST.
+## Remaining program (after boundary 2)
+
+- [ ] **WP-2 worker/Rust half** — brief `docs/design/briefs-wp2-worker.md`, derivation `docs/design/astra/sketch-solver-truth.md`. Then an Astra `break` on the diff before the boundary.
+- [ ] **WP-3 + WP-3b** — 2D fillet/trim and the `TangentAtPoint` kind; brief `docs/design/briefs-wp3.md`, derivation `docs/design/astra/sketch-fillet-fill-and-tangency.md`. **First gate: reproduce B4's exact `incomplete triangulation` refusal from the dumped frontend geometry — the fix site is chosen after the repro, not before (amendment A-15).**
+- [ ] **WP-6/7/8 remainder** — the camera and viewport rows (FP-V1…FP-V5), FP-T4 cut-preview tint, FP-N1 (`EngineError` Display) and FP-N12 (negative feature value), FP-C8 visibility-undo (D11). Table in `PLAN.md` § Appendix.
+- [ ] **Follow-ups raised this session (see the Gate ledger for each):** an `update_sketch_attachment` re-pick command (HIGH — a legacy off-face anchor has no in-app repair); whether sketch entry should absorb input until the camera tween settles; `findFacePoint` has the same stale-coordinate exposure the gizmo helper had; face→edge adjacency should come from `QueryBodyTopology` rather than the mesh; `persistIntents` replays the prior anchor's intent onto a later entity; `sketchId` on `FeatureDto` would make the consumed-sketch lineage synchronous.
+
 
 ## WP-6/7/8 chrome group (G-CHR: C1, C2, C3/C4/C5, C9, C10, C11) — landed, orchestrator-reviewed 2026-09-15
 

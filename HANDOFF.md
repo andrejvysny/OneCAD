@@ -1,3 +1,48 @@
+# HANDOFF — session 35 (2026-09-15) — UX review 2026-09-14 fix program, boundary 2 committed
+
+Session 35 · 2026-09-15 · plan `~/.claude/plans/act-as-senior-software-imperative-boot.md` (copied to repo `PLAN.md`, status `ready`)
+
+## Goal
+
+Fix every finding of `docs/qa/UX_REVIEW_2026-09-14.md` (59 findings, 8 blocking) and harden the implementation toward professional CAD behaviour, with Shapr3D as the UX standard. Nine work packages, five commit boundaries, Astra-first on the math.
+
+## Original plan
+
+`PLAN.md` at the repo root — Context (every mechanism traced to source), Decisions D1–D16, the plan-review amendments A-1…A-16 (a fresh-context `reviewer-critical` returned "fix-required" and all sixteen were folded in), the protocol pre-audit outcomes P-1…P-11, the task table, and the FE polish appendix. User decisions taken during planning: full banded program; Astra pre-approved (3 `derive` + `break`); commit at each green gate boundary, never push; baseline + chamfer race first; perspective 35° default camera; Fillet/Chamfer from a face selection; visibility toggles off the undo stack; endpoint tangency included.
+
+## Done so far (and why)
+
+Two commits, each behind a measured gate — counts are in `TODO.md` § Gate ledger, never "all green".
+
+- **`87dd647d` boundary 1** — the review documents, the program plan, the WP-0 baseline on untouched HEAD, the `commitFillet` same-turn race (the measured cause was NOT the arm generation everyone assumed: the chip sat on `validation.status === "pending"` while `AnalyzeEdgeOpRange` was in flight and the confirm returned silently), a dead-code clippy fix, and three accepted Astra derivations.
+- **`a9c79e84` boundary 2** — WP-1 + WP-1b (sketch-on-face tracking, the review's B1), the frontend half of WP-2, WP-4 snapping, WP-5 picking, and the chrome / inspector / copy / tool-chip groups. 171 files, +10846/−594.
+
+Reasoning worth keeping:
+
+- **B1 is fixed at the anchor, not at the symptom.** WP-1 first shipped an info-only escape for a host that resolved below the auto-bind gate, because an imported STEP cap scored 0.75. The root cause was that `add_sketch_on_face` froze the face's `gp_Pln` LOCATION as the ref anchor, which for that cap lies off the face, so the ladder's anchor feature contributed 0 of the 0.85 bar — and re-picking re-froze the same bad point. WP-1b made `ProjectFaceBoundary` return an on-face `exact.anchor` (0.75 → 1.0 measured) and restored the deterministic halt. Deterministic NeedsRepair beats a silent wrong bind; the info escape would have let a 15 mm cut remove 1000 mm³ instead of 1500 with no warning.
+- **Astra `break` on WP-1 returned "defective" and four of its findings were real**: the version field was overwritten before the worker could refuse it, the seat witness was skipped exactly when the anchor equalled the origin, the cut epsilon sat below binary64 spacing at cubic-metre volumes, and a malformed placement parsed as "absent". All four are closed; F4 (tracked-rung trust) and F5 (checkpoints) were rejected with reasons recorded in `docs/design/astra/sketch-host-face-transport.md` § Break record.
+- **The measured causes repeatedly contradicted the hypotheses**, which is why every one was probed rather than assumed: the grid finding S1 was the status-bar readout being an independent raycast, not the arbitration; the six webkit e2e failures were camera-tween races in the test helpers, not the snap path I suspected, and explicitly not picker-side.
+- **Dead ends ruled out:** do not add a transport deadband (a 0.0005 mm host move must still carry the sketch); do not lift `mockConflicts` R5 wholesale into the shared direction rule; do not reuse `Tangent` + `positions` for endpoint tangency (an older worker would silently solve the degenerate entity-level form — use the distinct `TangentAtPoint` kind); a speculative picker hover guard was written and reverted because the chip overlay is a sibling of the canvas and the guard could never fire.
+
+## How to resume
+
+1. Run the `handoff` skill with "resume".
+2. Read `PLAN.md` (Decisions, the amendments, P-1…P-11) and `TODO.md` § Now.
+3. The next package is **WP-2's worker/Rust half** — brief already written at `/private/tmp/claude-501/-Users-andrejvysny-workspace-OneCAD/f83a45a4-2bfa-41c3-bb89-eae2d949908c/scratchpad/brief-wp2-worker.md` (copy it somewhere durable before that scratchpad is cleaned), derivation `docs/design/astra/sketch-solver-truth.md`. Then WP-3 (brief `brief-wp3.md`, derivation `sketch-fillet-fill-and-tangency.md`) — its first gate is reproducing B4's exact refusal, not writing the fix.
+4. Build the worker before any cargo command: `ONECAD_OCCT_ROOT=$HOME/.onecad-occt/8.0.1 scripts/build-worker.sh Release`. Run heavy gates alone — a lane run under load is not attributable, and two runs were lost to that this session.
+
+## Open questions
+
+- **No re-pick command exists** (`update_sketch_attachment` is not in the API). A document saved before this change whose sketch anchor lies off its host face now halts with `sketchSeatOffFace` and cannot be repaired in-app. This is the highest-value follow-up and it needs a product call on migration.
+- Should sketch entry absorb pointer input until the camera tween completes? Every user-visible signal reads ready while the camera is still swinging, so a fast click on a slow machine lands where the user did not aim — the same mechanism that failed six webkit specs.
+- The webkit-vs-chromium attribution for those specs stays open: they were green alone earlier in the day, and no bisect was run to prove which package moved the timing.
+
+## Pointers
+
+- Tasks → `TODO.md` · Snapshot → `CURRENT_STATE.md` · Program → `PLAN.md` · Derivations → `docs/design/astra/` · Review → `docs/qa/UX_REVIEW_2026-09-14.md`
+
+---
+
 # HANDOFF — session 31 (2026-09-13) — UX-hardening resume, Gate A one race from green — PAUSED
 
 Session 31 · 2026-09-13 · plan `~/.claude/plans/act-as-senior-software-atomic-sparrow.md`

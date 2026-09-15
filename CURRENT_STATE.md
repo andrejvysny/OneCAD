@@ -1,3 +1,20 @@
+# CURRENT STATE — session 35 (2026-09-15, UX review 2026-09-14 fix program) — HANDOFF
+
+Last verified: 2026-09-15 15:27 (this session). Entry point: `HANDOFF.md`. Program: `PLAN.md`. Ledger: `TODO.md` § Gate ledger (measured counts only).
+
+- **Branch:** `master` at `a9c79e84`, **3 commits ahead of `origin/master`** (`f438ced0`). Push not authorized. Working tree clean apart from `.claude/agent-memory/**`, which is never staged.
+- **Commits this session:** `87dd647d` (boundary 1 — review docs, program plan, WP-0 baseline, the `commitFillet` race, three Astra derivations) and `a9c79e84` (boundary 2 — WP-1 + WP-1b, the WP-2 frontend half, WP-4, WP-5, and the chrome / inspector / copy / tool-chip groups; 171 files, +10846/−594).
+- **Gate of record for `a9c79e84`** (main thread, each rung alone): worker build + stage ✓, fingerprint `0a6a1dce34181289` unchanged · `ctest --test-dir worker/build` **199 / 199** · stdout hygiene clean · `cargo fmt --all --check` ✓ · `cargo clippy --workspace --all-targets -- -D warnings` on **1.97.0** and **1.98.1** ✓ · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` **100 result lines / 1660 passed / 0 failed / 0 ignored**, no missing-worker skips · `bunx tsc --noEmit` ✓ · `bun run build` ✓ · `bun run test` **361 files / 6180 passed / 0 failed / 78 skipped** · hex **0** · coverage **34 / 9 / 17 / 20** · contracts **41 / 19 / 15** · coverage self-test ✓ · `bun run e2e` per project, `retries: 0`: **chromium 282 / 0** (21.9 min) and **webkit 282 / 0** (12.7 min).
+- **Key decisions** (full text and rationale in `PLAN.md` § Decisions and § Plan-review amendments):
+  - D1 sketch host-face tracking mirrors the component-mate reseat; the authored frame stays immutable and the transported frame is derived state, so no planner or prefix hash moves.
+  - D2 a Cut that removes no material is refused on every subtracting tail; `test_revolve_boolean_modes` and `test_preview_op` were flipped deliberately.
+  - D9 edge picking arbitrates in screen space at the hit's own depth; Fillet/Chamfer arms from a face selection.
+  - D11 visibility toggles leave the undo stack. D14 `INSPECTOR_SECTIONS_CONTRACT.sketchMode` gains "Entity" — a recorded user-visible contract change, cited in the test.
+  - Astra `break` on WP-1 returned "defective"; four findings accepted and closed in WP-1b, two rejected with reasons in `docs/design/astra/sketch-host-face-transport.md`.
+- **Blockers:** none technical. Owed and unchanged: the user-run manual checklist, the merged-stack Tauri smoke, "does the exported STEP open coloured elsewhere", "3MF opens in a slicer" (only meaningful after WP-J).
+- **Highest-value follow-up:** there is no re-pick command (`update_sketch_attachment` does not exist), so a document saved before this change whose sketch anchor lies off its host face halts with `sketchSeatOffFace` and has no in-app repair path.
+- **Processes:** none left running (the Playwright lane and the port-4177 dev server were stopped; ports free).
+
 # CURRENT STATE — session 32 (2026-09-14, Fable, tauri-agent harness) — HANDOFF
 
 Last verified: 2026-09-14 00:40 (this session). Ledger: `TODO.md` § "SESSION 32". Plan: `~/.claude/plans/analyze-this-plan-tauri-agent-real-user-humming-candle.md`.
