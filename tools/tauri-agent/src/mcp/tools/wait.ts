@@ -10,7 +10,8 @@ import { AgentError, isAgentError } from "../../errors.ts";
 import { tailLogs, devJsonlPath, type LogLevel } from "../../observe/logs.ts";
 import { Resolver, refStoreFrom } from "../../semantic/resolve.ts";
 import type { Target } from "../../semantic/resolve.ts";
-import { readRevision, takeSnapshot } from "../../semantic/snapshot.ts";
+import type { IdleReading } from "../../semantic/idleScript.ts";
+import { readIdle, readRevision, takeSnapshot } from "../../semantic/snapshot.ts";
 import type { SessionBridge } from "../../session/types.ts";
 import { defineTool, type ToolCtx } from "../defineTool.ts";
 import type { ActionResult } from "../envelope.ts";
@@ -35,6 +36,22 @@ const ConditionSchema = z.discriminatedUnion("kind", [
     value: z.string().optional().describe("Omit to wait for the attribute to merely be present."),
   }),
   z.object({ kind: z.literal("revision_stable"), quietMs: z.number().int().positive().max(10_000).optional() }),
+  z.object({
+    kind: z.literal("worker_idle"),
+    // No options: "idle" is regenBusy === 0 AND geometryPending === false, both read from the
+    // app's own stores. An UNKNOWN reading (the signal is not published) is never reported as
+    // idle — the wait times out reporting exactly that, rather than claiming a finished regen.
+  }),
+  z.object({ kind: z.literal("render_idle"), quietMs: z.number().int().positive().max(10_000).optional() }),
+  z.object({
+    kind: z.literal("render_frame_after"),
+    frames: z.number().int().nonnegative().describe("Wait until ViewportEngine.frameCount exceeds this."),
+  }),
+  z.object({
+    kind: z.literal("snapshot_at_least"),
+    id: z.number().int().nonnegative().describe("Wait until the backend's published snapshot id reaches this."),
+  }),
+  z.object({ kind: z.literal("camera_stable"), quietMs: z.number().int().positive().max(10_000).optional() }),
   z.object({
     kind: z.literal("log_line"),
     grep: z.string().min(1).describe("Regular expression matched against the raw dev.jsonl line."),
@@ -156,6 +173,29 @@ function otherProbes(ctx: ToolCtx, cond: Condition, startedAt: number): Probe {
   switch (cond.kind) {
     case "revision_stable":
       return revisionProbe(ctx.session.requireBridge(), cond.quietMs ?? ctx.config.config.settle.quietMs);
+    case "worker_idle":
+      return workerIdleProbe(ctx.session.requireBridge());
+    case "render_idle":
+      return idleStableProbe(
+        ctx.session.requireBridge(),
+        cond.quietMs ?? ctx.config.config.settle.quietMs,
+        (r) => (r.frames === null ? null : String(r.frames)),
+        (r) => ({ frames: r.frames }),
+      );
+    case "camera_stable":
+      return idleStableProbe(
+        ctx.session.requireBridge(),
+        cond.quietMs ?? ctx.config.config.settle.quietMs,
+        (r) =>
+          r.camera === null
+            ? null
+            : `${r.camera.x},${r.camera.y},${r.camera.z},${r.camera.tx},${r.camera.ty},${r.camera.tz},${r.camera.distance}`,
+        (r) => ({ camera: r.camera }),
+      );
+    case "render_frame_after":
+      return renderFrameAfterProbe(ctx.session.requireBridge(), cond.frames);
+    case "snapshot_at_least":
+      return snapshotProbe(ctx.session.requireBridge(), cond.id);
     case "log_line":
       return logProbe(ctx, cond);
     case "window":
@@ -178,6 +218,97 @@ function revisionProbe(bridge: SessionBridge, quietMs: number): Probe {
     }
     const quietFor = Date.now() - since;
     return { done: quietFor >= quietMs, observed: { revision: rev, quietForMs: quietFor } };
+  };
+}
+
+/**
+ * The CAD transaction, not the DOM: `regenBusy` counts in-flight regen jobs and
+ * `geometryPending` is "document READY but a visible body still has no scene object".
+ *
+ * A null is UNKNOWN, and unknown is never reported as idle — unlike `settle`, which must
+ * not block every action on a signal a build does not publish, an explicit `wait_for` was
+ * asked for this specific fact and claiming it from an absent reading would be a lie. The
+ * timeout's `lastObserved` then says precisely which signal was missing.
+ */
+function workerIdleProbe(bridge: SessionBridge): Probe {
+  return async () => {
+    const r = await readIdle(bridge);
+    return {
+      done: r.regenBusy === 0 && r.geometryPending === false,
+      observed: {
+        regenBusy: r.regenBusy,
+        geometryPending: r.geometryPending,
+        documentRevision: r.documentRevision,
+      },
+    };
+  };
+}
+
+/**
+ * Quiet window over one derived key of the idle reading — `frames` for `render_idle`,
+ * the camera pose for `camera_stable`.
+ *
+ * Rendering is on-demand (`invalidate()` schedules exactly one rAF; an idle viewport
+ * renders nothing), so "frameCount stopped moving" really is render-idle. A null key means
+ * the signal is unavailable, which restarts the window rather than satisfying it.
+ */
+function idleStableProbe(
+  bridge: SessionBridge,
+  quietMs: number,
+  key: (r: IdleReading) => string | null,
+  observe: (r: IdleReading) => Record<string, unknown>,
+): Probe {
+  let last: string | null | undefined;
+  let since = Date.now();
+  return async () => {
+    const r = await readIdle(bridge);
+    const k = key(r);
+    if (last === undefined || k !== last) {
+      last = k;
+      since = Date.now();
+    }
+    const quietFor = Date.now() - since;
+    return {
+      done: k !== null && quietFor >= quietMs,
+      observed: { ...observe(r), quietForMs: quietFor, available: k !== null },
+    };
+  };
+}
+
+/** A frame COMMITTED after the given count — the positive counterpart of `render_idle`. */
+function renderFrameAfterProbe(bridge: SessionBridge, after: number): Probe {
+  return async () => {
+    const r = await readIdle(bridge);
+    return { done: r.frames !== null && r.frames > after, observed: { frames: r.frames, after } };
+  };
+}
+
+/**
+ * The backend's published snapshot id, via the feature-gated `agent_status` command.
+ *
+ * `snapshotId` is null when the document runtime is busy — it is read with `try_lock` so the
+ * probe can never stall the regen it is waiting for — so null means UNKNOWN and the wait
+ * keeps polling. It is never treated as "reached".
+ */
+function snapshotProbe(bridge: SessionBridge, atLeast: number): Probe {
+  return async () => {
+    const s = await bridge.invoke<{
+      snapshotId: number | null;
+      pendingRenderExpectations: number | null;
+      pendingBodies: string[] | null;
+    }>("agent_status", {}, { readOnly: true });
+    const raw = s === null || typeof s !== "object" ? null : s.snapshotId;
+    const id = typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+    return {
+      done: typeof id === "number" && id >= atLeast,
+      observed: {
+        snapshotId: id,
+        atLeast,
+        runtimeBusy: id === null,
+        pendingRenderExpectations: s?.pendingRenderExpectations ?? null,
+        pendingBodies: s?.pendingBodies ?? null,
+      },
+    };
   };
 }
 
@@ -223,7 +354,7 @@ export function registerWaitTools(server: McpServer): void {
   defineTool(server, {
     name: "wait_for",
     description:
-      "Poll until a condition holds, or fail with ACTION_TIMEOUT reporting what was last observed. Conditions: element / element_hidden / attribute (by target), text / text_gone (visible page text), revision_stable (the DOM stopped mutating), log_line (a regex over dev.jsonl), window (the app's on-screen windows), delay. Use this instead of guessing at sleeps around a regen.",
+      "Poll until a condition holds, or fail with ACTION_TIMEOUT reporting what was last observed. Conditions: element / element_hidden / attribute (by target), text / text_gone (visible page text), revision_stable (the DOM stopped mutating), worker_idle (no regen in flight and no body waiting for geometry), render_idle (the WebGL frame count stopped moving), render_frame_after (a frame committed past a given count), snapshot_at_least (the backend published a snapshot id), camera_stable (the viewport camera stopped moving), log_line (a regex over dev.jsonl), window (the app's on-screen windows), delay. Use this instead of guessing at sleeps around a regen.",
     input: z.object({
       condition: ConditionSchema,
       timeoutMs: z.number().int().positive().max(600_000).optional().describe("Default 10000."),

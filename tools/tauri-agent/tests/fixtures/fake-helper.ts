@@ -6,9 +6,18 @@
  * request line is appended to `--log` so a test can assert what the client actually sent —
  * including the recovery `release_all` the client is supposed to issue on its own.
  *
+ * `--osheld` is this fake's "OS": buttons and modifiers a HUMAN is holding. They are reachable
+ * only by `osState:true` or by naming them in `force`, which is exactly what the client must
+ * never do on its own — so a test can prove the user's hand was left alone.
+ *
+ * `--canned=<path>` is a JSON file of `{ "<verb>": <result object> }`. It answers a verb the
+ * built-in table has no reply for — the accessibility verbs, whose replies are shaped data
+ * rather than a constant — and it is consulted FIRST, so a test can also override a built-in.
+ *
  *   bun fake-helper.ts --log=<path> [--fail=<verb>:<code>] [--hang=<verb>] [--exit=<verb>]
+ *                      [--osheld=<name>,...] [--canned=<path>]
  */
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 
 function flag(name: string): string | undefined {
   const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
@@ -19,19 +28,33 @@ const logPath = flag("log");
 const hangVerb = flag("hang");
 const exitVerb = flag("exit");
 const [failVerb, failCode] = (flag("fail") ?? ":").split(":");
+const BUTTONS = new Set(["left", "right", "middle"]);
+const osHeld = (flag("osheld") ?? "").split(",").filter((n) => n.length > 0);
+const cannedPath = flag("canned");
+const canned: Record<string, Record<string, unknown>> =
+  cannedPath === undefined ? {} : (JSON.parse(readFileSync(cannedPath, "utf8")) as Record<string, Record<string, unknown>>);
 
 function write(obj: Record<string, unknown>): void {
   process.stdout.write(`${JSON.stringify(obj)}\n`);
 }
 
-function result(verb: string): Record<string, unknown> {
+function result(verb: string, req: Record<string, unknown>): Record<string, unknown> {
+  if (Object.hasOwn(canned, verb)) return canned[verb] as Record<string, unknown>;
   switch (verb) {
     case "cursor":
       return { x: 100, y: 200 };
-    case "release_all":
-      return { releasedButtons: [], releasedMods: [] };
+    case "release_all": {
+      // Mirrors the real helper: a name is released only when it is BOTH reached for and
+      // actually held. This fake tracks nothing of its own, so `osHeld` is all there is.
+      const force = new Set((Array.isArray(req.force) ? req.force : []).map(String));
+      const released = osHeld.filter((n) => req.osState === true || force.has(n));
+      return {
+        releasedButtons: released.filter((n) => BUTTONS.has(n)),
+        releasedMods: released.filter((n) => !BUTTONS.has(n)),
+      };
+    }
     case "version":
-      return { version: "fake", protocol: 2 };
+      return { version: "fake", protocol: 3 };
     case "windows":
       return { windows: [] };
     case "frontmost":
@@ -56,7 +79,7 @@ async function handle(line: string): Promise<void> {
     write({ id: req.id, ok: false, code: failCode, message: `fake failure for '${verb}'` });
     return;
   }
-  write({ id: req.id, ok: true, result: result(verb) });
+  write({ id: req.id, ok: true, result: result(verb, req) });
 }
 
 process.stderr.write(`fake-helper ready pid=${process.pid}\n`);

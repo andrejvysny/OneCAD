@@ -4,6 +4,7 @@ import { defineTool, setToolCtx, type ToolCtx } from "../defineTool.ts";
 import { okResult } from "../envelope.ts";
 import { registerDebugTools } from "./debug.ts";
 import { registerKeyboardTools } from "./keyboard.ts";
+import { registerNativeTools } from "./native.ts";
 import { registerObserveTools } from "./observe.ts";
 import { registerPointerTools } from "./pointer.ts";
 import { registerSessionTools } from "./session.ts";
@@ -16,6 +17,7 @@ export function registerAllTools(server: McpServer, ctx: ToolCtx): void {
   registerSessionTools(server);
   registerWindowTools(server);
   registerUiTools(server);
+  registerNativeTools(server);
   registerPointerTools(server);
   registerKeyboardTools(server);
   registerWaitTools(server);

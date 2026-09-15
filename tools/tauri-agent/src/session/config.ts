@@ -4,6 +4,8 @@ import { z } from "zod";
 import { AgentError } from "../errors.ts";
 import type { Rect } from "../geometry/types.ts";
 import { log } from "../log.ts";
+import type { SettleSignals } from "../mcp/tools/settle.ts";
+import type { InteractionPolicy } from "./types.ts";
 
 export interface AgentConfig {
   app: { bundleId: string; windowLabel: string; title: string; processPatterns: string[] };
@@ -12,11 +14,13 @@ export interface AgentConfig {
   devServer: { port: number };
   artifacts: { dir: string };
   screenshots: { policy: "never" | "on_failure" | "state_changing" | "always"; previewMaxPx: number };
-  settle: { frameMs: number; quietMs: number; timeoutMs: number };
+  settle: { frameMs: number; quietMs: number; timeoutMs: number; signals: SettleSignals };
   calibration: { probeTestId: string };
   input: { wheelLinesPerNotch: number; dwellMs: number; clickIntervalMs: number };
   logs: { devJsonl: string | null };
   nativeOcclusion: { rects: Rect[] };
+  /** Default interaction policy for a session_start that does not name one. */
+  interaction: { default: InteractionPolicy };
 }
 
 export interface ResolvedConfig {
@@ -80,6 +84,20 @@ export const AgentConfigSchema = z
         frameMs: z.number().int().positive().default(16),
         quietMs: z.number().int().positive().default(120),
         timeoutMs: z.number().int().positive().default(1500),
+        /**
+         * Individual members of the settle tuple, so a build that does not publish one can
+         * turn it off rather than warn on every action. The DOM revision itself is not
+         * listed on purpose: it is the baseline, and its -1 guard is what catches a page
+         * that was never instrumented.
+         */
+        signals: z
+          .object({
+            regenBusy: z.boolean().default(true),
+            geometryPending: z.boolean().default(true),
+            documentRevision: z.boolean().default(true),
+            frames: z.boolean().default(true),
+          })
+          .default({}),
       })
       .default({}),
     calibration: z.object({ probeTestId: z.string().default("document-title") }).default({}),
@@ -95,6 +113,10 @@ export const AgentConfigSchema = z
       .object({
         rects: z.array(occlusionRect).default([{ x: 0, y: 0, width: 80, height: 28 }]),
       })
+      .default({}),
+    // "foreground" keeps the original behaviour for anyone who never sets this key.
+    interaction: z
+      .object({ default: z.enum(["foreground", "background"]).default("foreground") })
       .default({}),
   })
   .strict();

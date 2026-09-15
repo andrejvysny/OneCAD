@@ -24,8 +24,17 @@ what is specific to OneCAD. Reference files: `reference/selectors.md` (testids, 
 ## Session
 
 ```
-session_start {mode:"launch", launch:"dev"}
+session_start {mode:"launch", launch:"dev"}                            # foreground: takes the pointer
+session_start {mode:"launch", launch:"dev", interaction:"background"}  # leaves the user's desktop alone
 ```
+
+**Pick the policy first.** Background is right for most OneCAD work: toolbar buttons, the inspector,
+property fields, the history tree, keyboard commands, zoom, and every native Save/Open panel all
+work there, and the user keeps their cursor. Foreground is required for exactly the gestures
+background refuses — **sketch drags, orbit, pan, and the extrude depth-handle drag** — plus anything
+where hover styling, wheel device classification or a real keyboard chord is the thing under test.
+A background launch still activates the app once; `mode:"attach"` against an app the user started
+avoids even that.
 The app opens on the start screen. Click `{role:"button", name:"New project"}` (exact) to reach
 the editor. Never open one of the user's recent documents or the autosave "Restore" entries for a
 test: those are real files on this machine, and a test flow must not mutate them; the viewport container is `{testId:"viewport-canvas"}`. Wait for the initial camera fit
@@ -56,12 +65,49 @@ click `{testId:"chip-confirm"}`. `wait_for {kind:"element_hidden", target:{testI
 then confirm the history row: `ui_find {target:{css:'[data-testid^="history-row-"]'}}` or
 `{text:"Extrude"}` in the inspector history section.
 
-**Save.** `keyboard_shortcut {combo:"Primary+S"}`; the first save of a new document opens the native
-Save dialog — the harness cannot yet drive native dialogs (Phase 1 gap), so use `Escape` and report
-that the shortcut reached the app via `observe_logs {grep:"save_document"}` on the `fe` lane.
+**Save, including the native dialog.** `keyboard_shortcut {combo:"Primary+S"}`. The first save of a
+new document opens a native `NSSavePanel`, which the WebView does not own — `ui_snapshot` sees
+nothing of it, and an empty snapshot here means you are looking at the wrong surface, not that the
+app is idle. Drive it natively:
+
+1. `native_modal` confirms a panel is up (and the input gate refuses webview targets while it is).
+2. `native_find {role:"AXTextField"}` for the filename field, `pointer_click {axRef}`, then
+   `keyboard_type_text` the name.
+3. `native_find {role:"AXButton", title:"Save"}` and `pointer_click {axRef}`.
+4. `wait_for {kind:"element_hidden", target:{testId:"regen-busy"}}` is the wrong probe here — the
+   panel is not a regen. Confirm with `observe_logs {grep:"save_document"}` and the title bar losing
+   its modified marker.
+
+**Save in a background session.** Same panel, no cursor. Note the order matters: set the filename
+BEFORE pressing Save, because an `NSSavePanel`'s Save button is disabled while the field is empty
+and `native_press` refuses a disabled control rather than reporting a press that did nothing. Note
+too that these three tools observe nothing — no settle, no screenshot, no effects — so confirm the
+outcome with `native_modal`, `observe_logs {grep:"save_document"}` or a `ui_snapshot` afterwards.
+`native_menu_invoke {path:["File","Save"]}`
+opens it (or `keyboard_shortcut {combo:"Primary+S"}`, which reaches the app's own keydown handler
+rather than the menu item). Then `native_find {role:"AXTextField"}` →
+`native_set_value {ref, value:"part.onecad"}` → `native_find {role:"AXButton", title:"Save"}` →
+`native_press {ref}`. Those report `mode:"accessibility"`: they prove the save command runs, not that
+a user could click Save, so pair a background pass with one foreground run before calling the flow
+accepted.
+
+**Undo and redo: prefer the menu.** `native_menu_invoke {path:["Edit","Undo"]}` and
+`{path:["Edit","Redo"]}` press the menu item directly. This side-steps a real defect on this machine:
+the helper key map is positional US/ANSI and the active input source is Slovak, where the Z and Y
+keys are swapped — so `Primary+Z` sends the wrong character. Use the menu unless the binding itself
+is what you are testing.
+
+`Escape` dismisses the panel if you only meant to prove the shortcut arrived.
 
 **Viewport.** See `reference/viewport-gestures.md`: orbit = right button + Shift drag, pan = middle
 or plain right drag, zoom = wheel. Never left-drag to orbit; left is selection.
+
+Orbit, pan and every sketch drag need `interaction:"foreground"`; a background session refuses them
+with `BACKGROUND_CAPABILITY_UNAVAILABLE` rather than faking a gesture that would move nothing
+(`CadOrbitControls` captures the pointer on `pointerdown`, and a synthetic pointer id cannot be
+captured). Wheel zoom DOES work in background, because it needs no pointer capture — but the app
+never scores a real notch there, so the wheel-versus-trackpad behaviour is untested and the envelope
+says so.
 
 ## Settle probes
 
@@ -69,9 +115,26 @@ or plain right drag, zoom = wheel. Never left-drag to orbit; left is selection.
 saw. `{testId:"sketch-dof"}` carries `data-dof`. History rows are `history-row-<id>` with
 `aria-label "Select feature N: <label>"`.
 
+The harness now settles on more than the DOM, which matters twice in OneCAD. An **orbit** changes
+camera matrices and repaints WebGL with zero DOM mutations, so settling waits on the rendered-frame
+counter; an **Extrude** runs frontend → Rust → OCCT worker → mesh → Three.js upload, so settling
+waits on `regenBusy` reaching 0 and geometry no longer pending. Use `wait_for {kind:"worker_idle"}`,
+`{kind:"render_idle"}`, `{kind:"render_frame_after"}`, `{kind:"snapshot_at_least"}` and
+`{kind:"camera_stable"}` for those rather than a `delay`.
+
+If a settle warning says a signal was **unavailable**, the session is missing `?vpdebug` or the
+`__stores` DEV surface and the check proved less than it looks — say so rather than treating the
+action as verified.
+
+The agent lane launches with `?vpdebug&trace` so those signals exist; the `?vpdebug` origin pill is
+removed at instrumentation time, so it should never appear in a screenshot. If you see it, report it.
+
 ## Evidence for a OneCAD report
 
-- Native input in the journal for every user step (`backend:"cgevent"`).
+- Native input in the journal for every user step (`backend:"cgevent"`). A background run instead
+  shows `backend:"webdriver"` or `"ax"` — real interactions with the real app and the real Rust
+  backend, but not physical input. Name the policy in the report and do not present a background pass
+  as an acceptance result.
 - A window screenshot after each state change (the harness attaches them under
   `.tauri-agent/artifacts/<session>/`).
 - For geometry claims, pair the screenshot with `observe_logs {grep:"regen:"}` (outcome line) or a
@@ -90,8 +153,9 @@ saw. `{testId:"sketch-dof"}` carries `data-dof`. History rows are `history-row-<
   tooltip always formats `Label (Shortcut)`. A real defect, but a known one; note it, don't chase it.
 - The Measure tool's tooltip shows `?`, not `⇧?`; the shifted-slash binding is correct.
 - **`Primary+S` on a never-saved document logs `io error: no save path`** and does not open a Save As
-  dialog (the harness cannot drive native dialogs yet anyway). Verify the shortcut reached the app via
-  `observe_logs {grep:"save_document"}`, and report the missing Save As as an app gap, not a harness one.
+  dialog. Verify the shortcut reached the app via `observe_logs {grep:"save_document"}`, and report
+  the missing Save As as an app gap, not a harness one. (The harness CAN drive native dialogs — see
+  the Save recipe above — so an absent panel here is the app's behaviour, not a missing capability.)
 - Rarely, the first Extrude commit can roll back with a "did not complete in time" message even though
   the kernel published the body (a frontend apply-edit correlation timeout). If it happens, re-commit;
   it succeeds. Capture the `dev.jsonl` lines (`correlation TIMED OUT`, `rollback`) as evidence.

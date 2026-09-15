@@ -641,6 +641,10 @@ pub fn run() {
             assistant::commands::assistant_configure_provider,
             #[cfg(feature = "tauri-e2e")]
             tauri_e2e::composition_status,
+            #[cfg(feature = "tauri-e2e")]
+            tauri_e2e::agent_identity,
+            #[cfg(feature = "tauri-e2e")]
+            tauri_e2e::agent_status,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

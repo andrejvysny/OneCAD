@@ -5,10 +5,15 @@ const CODES = Object.keys(REMEDIATION) as ErrorCode[];
 
 describe("errors", () => {
   test("every code has actionable remediation text", () => {
-    expect(CODES.length).toBe(23);
+    expect(CODES.length).toBe(25);
     for (const code of CODES) {
       expect(REMEDIATION[code].length).toBeGreaterThan(40);
     }
+  });
+
+  test("the identity refusal names what the agent could not prove and what to do", () => {
+    expect(REMEDIATION.APP_IDENTITY_MISMATCH).toContain("cargoManifestDir");
+    expect(REMEDIATION.APP_IDENTITY_MISMATCH).toContain("No input was sent");
   });
 
   test("permission codes name the exact macOS grant", () => {

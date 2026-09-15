@@ -26,6 +26,11 @@ export class MacWindows implements NativeWindows {
    *
    * That order is NOT identity: it is front-to-back at the moment of the call and changes when
    * a panel opens or the window is raised. Callers pick a window by area, name and layer.
+   *
+   * `all: true` swaps `kCGWindowListOptionOnScreenOnly` for `kCGWindowListOptionAll`, so windows
+   * that are minimised or on another Space come back too and `onscreen` becomes a real reading
+   * rather than a constant true. The window-identity table asks for that set, because a window
+   * that is not on screen this instant is still the window a Tauri label names.
    */
   async list(pid: number, opts?: { all?: boolean }): Promise<NativeWindowInfo[]> {
     const r = await this.client.request("windows", { pid, all: opts?.all ?? false });

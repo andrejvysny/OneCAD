@@ -20,15 +20,36 @@ export const OffsetSchema = PtSchema;
 
 export const SpacePointSchema = z.object({ x: z.number(), y: z.number(), space: SpaceSchema });
 
-export const TargetSchema = z.union([
-  z.object({ ref: z.string().regex(/^@s\d+e\d+$/, "a ref looks like @s3e12, from the latest ui_snapshot") }),
-  z.object({ testId: z.string().min(1) }),
-  z.object({ role: z.string().min(1), name: z.string().optional() }),
-  z.object({ text: z.string().min(1) }),
-  z.object({ css: z.string().min(1) }),
-  z.object({ point: SpacePointSchema }),
-]);
+/**
+ * An accessibility ref, minted by `native_snapshot` / `native_find`. Generation-scoped exactly
+ * as a webview ref is: `@a1e7` is dead the moment a newer AX walk runs, and is then refused
+ * (ELEMENT_STALE) rather than aliased onto whatever now occupies that slot.
+ */
+export const AxRefSchema = z
+  .string()
+  .regex(/^@a\d+e\d+$/, "an accessibility ref looks like @a1e7, from the latest native_snapshot or native_find");
+
+export const TargetSchema = z
+  .union([
+    z.object({ ref: z.string().regex(/^@s\d+e\d+$/, "a ref looks like @s3e12, from the latest ui_snapshot") }),
+    z.object({ axRef: AxRefSchema }),
+    z.object({ testId: z.string().min(1) }),
+    z.object({ role: z.string().min(1), name: z.string().optional() }),
+    z.object({ text: z.string().min(1) }),
+    z.object({ css: z.string().min(1) }),
+    z.object({ point: SpacePointSchema }),
+  ])
+  .describe(
+    "How to find what to act on. {ref} @s<gen>e<n> from ui_snapshot, {testId}, {role,name}, {text}, {css} and {point} all address the WebView. " +
+      "{axRef} @a<gen>e<n> from native_snapshot / native_find addresses a NATIVE element the WebView does not own — a Save/Open panel, a sheet, " +
+      "a native menu, a permission dialog, the title-bar buttons. Both are clicked the same way, with real OS events.",
+  );
 export type TargetInput = z.infer<typeof TargetSchema>;
+
+/** An accessibility target: a ref the caller is holding from an AX walk. */
+export function isAxTargetInput(target: TargetInput): target is { axRef: string } {
+  return "axRef" in target;
+}
 
 export const RectSchema = z.object({
   x: z.number(),

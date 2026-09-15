@@ -110,6 +110,131 @@ describe("wait_for", () => {
     expect(env.error?.details?.lastObserved).toMatchObject({ count: 0 });
   });
 
+  /**
+   * The CAD half of the idle tuple. DOM quietness says nothing about a regen that is still
+   * running in the OCCT worker, so these read the app's own counters — and an UNKNOWN reading
+   * is never reported as idle, because a caller that asked for this fact specifically would
+   * act on a lie.
+   */
+  test("worker_idle resolves when no regen is in flight", async () => {
+    const h = harness();
+    const env = await h.call("wait_for", { condition: { kind: "worker_idle" }, timeoutMs: 500 });
+    expect(env.status).toBe("ok");
+    expect((env.data as { observed: { regenBusy: number } }).observed.regenBusy).toBe(0);
+  });
+
+  test("worker_idle waits out an in-flight regen and reports it on timeout", async () => {
+    const h = harness();
+    h.bridge.idle = { ...h.bridge.idle, regenBusy: 2 };
+    const env = await h.call("wait_for", { condition: { kind: "worker_idle" }, timeoutMs: 150 });
+    expect(env.status).toBe("error");
+    expect(env.error?.code).toBe("ACTION_TIMEOUT");
+    expect(env.error?.details?.lastObserved).toMatchObject({ regenBusy: 2, geometryPending: false });
+  });
+
+  test("worker_idle refuses to call an unavailable signal idle", async () => {
+    const h = harness();
+    h.bridge.idle = { ...h.bridge.idle, regenBusy: null };
+    const env = await h.call("wait_for", { condition: { kind: "worker_idle" }, timeoutMs: 150 });
+    expect(env.status).toBe("error");
+    expect(env.error?.details?.lastObserved).toMatchObject({ regenBusy: null });
+  });
+
+  test("render_idle resolves once the frame count stops moving", async () => {
+    const h = harness();
+    let frames = 0;
+    h.bridge.canned["ui_idle"] = () => {
+      frames += frames < 3 ? 1 : 0;
+      return { rev: 1, regenBusy: 0, geometryPending: false, documentRevision: 1, frames, camera: null };
+    };
+    const env = await h.call("wait_for", { condition: { kind: "render_idle", quietMs: 50 }, timeoutMs: 3000 });
+    expect(env.status).toBe("ok");
+    expect((env.data as { observed: { frames: number } }).observed.frames).toBe(3);
+  });
+
+  test("render_idle reports the frame count it last saw when rendering never stops", async () => {
+    const h = harness();
+    let frames = 0;
+    h.bridge.canned["ui_idle"] = () => {
+      frames += 1;
+      return { rev: 1, regenBusy: 0, geometryPending: false, documentRevision: 1, frames, camera: null };
+    };
+    const env = await h.call("wait_for", { condition: { kind: "render_idle", quietMs: 50 }, timeoutMs: 150 });
+    expect(env.status).toBe("error");
+    expect(env.error?.details?.lastObserved).toMatchObject({ available: true });
+    expect((env.error?.details?.lastObserved as { frames: number }).frames).toBeGreaterThan(0);
+  });
+
+  test("render_frame_after resolves on a frame committed past the given count", async () => {
+    const h = harness();
+    h.bridge.idle = { ...h.bridge.idle, frames: 9 };
+    const ok = await h.call("wait_for", { condition: { kind: "render_frame_after", frames: 5 }, timeoutMs: 500 });
+    expect(ok.status).toBe("ok");
+    const late = await h.call("wait_for", { condition: { kind: "render_frame_after", frames: 20 }, timeoutMs: 150 });
+    expect(late.status).toBe("error");
+    expect(late.error?.details?.lastObserved).toMatchObject({ frames: 9, after: 20 });
+  });
+
+  test("snapshot_at_least reads agent_status and reports the id it last saw", async () => {
+    const h = harness();
+    h.bridge.canned["invoke:agent_status"] = () => ({
+      snapshotId: 7,
+      pendingRenderExpectations: 0,
+      pendingBodies: [],
+    });
+    const ok = await h.call("wait_for", { condition: { kind: "snapshot_at_least", id: 5 }, timeoutMs: 500 });
+    expect(ok.status).toBe("ok");
+    expect(h.bridge.invoked).toContain("agent_status");
+    const late = await h.call("wait_for", { condition: { kind: "snapshot_at_least", id: 9 }, timeoutMs: 150 });
+    expect(late.status).toBe("error");
+    expect(late.error?.details?.lastObserved).toMatchObject({ snapshotId: 7, atLeast: 9 });
+  });
+
+  /** `snapshotId` is null while the document runtime is busy — unknown, never "reached". */
+  test("snapshot_at_least treats a busy runtime as unknown, not as reached", async () => {
+    const h = harness();
+    h.bridge.canned["invoke:agent_status"] = () => ({
+      snapshotId: null,
+      pendingRenderExpectations: null,
+      pendingBodies: null,
+    });
+    const env = await h.call("wait_for", { condition: { kind: "snapshot_at_least", id: 0 }, timeoutMs: 150 });
+    expect(env.status).toBe("error");
+    expect(env.error?.details?.lastObserved).toMatchObject({ snapshotId: null, runtimeBusy: true });
+  });
+
+  test("camera_stable resolves once the orbit stops and reports the pose on timeout", async () => {
+    const h = harness();
+    const pose = { x: 1, y: 2, z: 3, tx: 0, ty: 0, tz: 0, distance: 10 };
+    h.bridge.idle = { ...h.bridge.idle, camera: pose };
+    const ok = await h.call("wait_for", { condition: { kind: "camera_stable", quietMs: 50 }, timeoutMs: 3000 });
+    expect(ok.status).toBe("ok");
+
+    let n = 0;
+    h.bridge.canned["ui_idle"] = () => {
+      n += 1;
+      return {
+        rev: 1,
+        regenBusy: 0,
+        geometryPending: false,
+        documentRevision: 1,
+        frames: 1,
+        camera: { ...pose, x: n },
+      };
+    };
+    const late = await h.call("wait_for", { condition: { kind: "camera_stable", quietMs: 50 }, timeoutMs: 150 });
+    expect(late.status).toBe("error");
+    expect((late.error?.details?.lastObserved as { camera: { x: number } }).camera.x).toBeGreaterThan(0);
+  });
+
+  test("camera_stable does not call an unavailable camera stable", async () => {
+    const h = harness();
+    h.bridge.idle = { ...h.bridge.idle, camera: null };
+    const env = await h.call("wait_for", { condition: { kind: "camera_stable", quietMs: 10 }, timeoutMs: 150 });
+    expect(env.status).toBe("error");
+    expect(env.error?.details?.lastObserved).toMatchObject({ camera: null, available: false });
+  });
+
   test("delay simply waits", async () => {
     const h = harness();
     const started = Date.now();

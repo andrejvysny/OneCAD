@@ -1,9 +1,13 @@
-# CURRENT STATE — session 32 (2026-09-14, Opus 5, assistant host program WP-AI1)
+# CURRENT STATE — session 35 (2026-09-14, Opus 5, assistant host program WP-AI1)
 
-Ledger: `TODO.md` § "SESSION 32". Handoff: `docs/assistant/implementation-status.md`.
+Ledger: `TODO.md` § "SESSION 35". Handoff: `docs/assistant/implementation-status.md`.
 Contract: `docs/assistant/wire-protocol.md`. Decisions: ADRs 0015–0018.
 
-- **Branch:** `claude/loving-cori-rz1v4i`, based on `c947636`. Session 31's UX-hardening debt
+- **Branch:** `claude/loving-cori-rz1v4i`, originally cut from `c947636`, now merged
+  with `origin/master` at `f438ced` (the tauri-agent harness session below). The merge
+  conflicted only in this file and `TODO.md`, where both sessions prepended a block;
+  every code file auto-merged and was re-verified after the merge, not assumed. This
+  session's work is [PR #5](https://github.com/andrejvysny/OneCAD/pull/5).
   on `master` is **untouched by decision** — see the session-31 header below, which remains
   accurate for that work.
 - **What landed:** a supervised Bun child process running AgentKit, a private framed stdio
@@ -48,6 +52,15 @@ Contract: `docs/assistant/wire-protocol.md`. Decisions: ADRs 0015–0018.
   floor — a compiled `console.log("hi")` is 99,295,580, so our code plus AgentKit adds
   ~104 KB and minifying changes nothing. See ADR-0015; this is not a bundling problem.
 - **Processes:** none left running.
+# CURRENT STATE — session 32 (2026-09-14, Fable, tauri-agent harness) — HANDOFF
+
+Last verified: 2026-09-14 00:40 (this session). Ledger: `TODO.md` § "SESSION 32". Plan: `~/.claude/plans/analyze-this-plan-tauri-agent-real-user-humming-candle.md`.
+
+- **Delivered, uncommitted:** `tools/tauri-agent/` MCP server (Phase 0+1 macOS), `.mcp.json`, `tauri-agent.config.json`, `src-tauri/tauri.agent.conf.json`, root `package.json` script `tauri:agent` + devDeps (`@modelcontextprotocol/sdk`, `zod`, `@types/bun`), root `tsconfig.json` `types: ["node"]`, `.gitignore` (+`.tauri-agent/`, eval workspace), skills `~/.claude/skills/tauri-agent-test` and `.claude/skills/onecad-agent-test`.
+- **Gate:** package tsc clean · `TAURI_AGENT_REQUIRE_HELPER=1 bun test` 473/0 · root tsc clean · hex 0 · live Phase-0 exit through MCP green · skill-creator iteration 1: with skill 16/18, baseline 9/18.
+- **Session-31 work is untouched** (the user committed it as `fd62d408` during this session); its owed items stand.
+- **Processes:** none left running (verified `ps`/`lsof` after the last run). Eval artifacts: ~800 MB under `.tauri-agent/artifacts/` and `.claude/skills/onecad-agent-test-workspace/` (both gitignored).
+- **Blockers:** account session limit hit at ~00:20 (subagents died; work finished on the main thread). Owed: commit decision, iteration 2 of the evals, spec phases 2–5.
 
 # CURRENT STATE — session 31 (2026-09-13, Fable, UX-hardening resume) — PAUSED
 

@@ -7,3 +7,7 @@
 - [Supervisor + stub lanes](repo_supervisor_and_stub_lanes.md) — SupervisorConfig/WorkerHead fan-out, GeometryEngine default+forward rule, no tokio `rt` in core, stub's three threads
 - [Native menu lane](native-menu-lane.md) — muda's main-thread panic kills a build() test, predefined items steal OS chords, the duplicate-client emit trap, noRegenWhen
 - [Regen provenance in tests](regen-provenance-in-tests.md) — RevertToEnd vs ToEnd{from} in real-worker tests; v6 blanket-refuses anchor-only refs downstream of editedFrom
+- [tauri-agent harness](tauri-agent-harness.md) — SDK 1.30 registerTool TS2589 workaround, bun-types via root @types/bun, rm denied in tests, NDJSON stdio framing
+- [tauri-agent session lifecycle](tauri-agent-session.md) — detached spawn needs node:child_process, start-screen has no document-title/viewport probe, sweep owner filter
+- [tauri-agent macOS helper](tauri-agent-macos-helper.md) — single-file swiftc build, hash-cached binary, move-readback lag, both TCC grants present, @types/bun root leak
+- [tauri-agent acting tools](tauri-agent-actions.md) — @s<gen>e<n> refs schema-enforced, releaseAll only on failure, stub McpServer, capture-capability gate

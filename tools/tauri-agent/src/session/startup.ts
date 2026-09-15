@@ -8,10 +8,11 @@
 import { AgentError } from "../errors.ts";
 import { log } from "../log.ts";
 import type { NativeInput, Permissions } from "../platform/adapter.ts";
+import type { CaptureCapability } from "./types.ts";
 import type { LaunchHandle } from "./launch.ts";
 import { tailFile } from "./launch.ts";
 import type { Runner } from "./procs.ts";
-import { listeningPids, matchesAny, processCommand } from "./procs.ts";
+import { executablePath, isOwnedExecutable, listeningPids, processCommand } from "./procs.ts";
 
 const LAUNCHER_LOG_TAIL = 40;
 const PID_TRIES = 6;
@@ -33,12 +34,30 @@ export async function checkPermissions(input: NativeInput, allowDegradedCapture:
 }
 
 /**
+ * What the session may claim about screenshots, from the grant it actually holds.
+ *
+ * `checkPermissions` has already refused the no-grant/no-flag case, so reaching here without
+ * the grant means the caller asked for a degraded session on purpose — and a degraded session
+ * must SAY so rather than discovering it one failed capture at a time.
+ */
+export function captureCapabilityOf(perms: Permissions): CaptureCapability {
+  if (perms.screenRecording) return { available: true, authoritative: true };
+  return { available: false, authoritative: false, reason: "SCREEN_RECORDING_PERMISSION_DENIED" };
+}
+
+/**
  * True when the WebDriver port is already served by our own app and reuse was requested.
  * Any other owner is fatal: killing it could take out a developer's own dev session.
+ *
+ * "Ours" is CHECKOUT-SCOPED. A bare pattern match is not enough — `target/debug/onecad`
+ * also matches another checkout of this same project, and adopting that app would later
+ * let this session tear down something it does not own. The executable path must carry
+ * the pattern AND one of `owners`, exactly as the survivor sweep decides.
  */
 export async function portOwnerIsOurs(
   port: number,
   patterns: string[],
+  owners: string[],
   reuseExisting: boolean,
   run: Runner,
 ): Promise<boolean> {
@@ -46,13 +65,16 @@ export async function portOwnerIsOurs(
   if (pids.length === 0) return false;
   const pid = pids[0] as number;
   const command = (await processCommand(pid, run)) ?? "";
-  const ours = matchesAny(command, patterns);
+  const exe = await executablePath(pid, command, run);
+  const ours = patterns.some((p) => isOwnedExecutable(exe, p, owners));
   if (ours && reuseExisting) {
     log.info("reusing the app already serving the WebDriver port", { pid, port });
     return true;
   }
   throw new AgentError("PORT_IN_USE", `TCP port ${port} is held by pid ${pid}`, {
-    details: { port, pid, command, matchesApp: ours },
+    // `matchesApp` is the checkout-scoped verdict: false covers both "not this app"
+    // and "this app, but built in another checkout".
+    details: { port, pid, command, executable: exe, matchesApp: ours },
   });
 }
 

@@ -54,12 +54,31 @@ export async function listeningPids(port: number, run: Runner): Promise<number[]
   return parsePids(r.stdout);
 }
 
-/** Full command line of a pid, or null when it is gone. */
+/** Full command line of a pid, or null when it is gone. Reporting only — never ownership. */
 export async function processCommand(pid: number, run: Runner): Promise<string | null> {
   if (!Number.isInteger(pid) || pid <= 0) return null;
   const r = await run([PS, "-o", "command=", "-p", String(pid)]);
   const cmd = r.stdout.trim();
   return r.code === 0 && cmd.length > 0 ? cmd : null;
+}
+
+/**
+ * Executable path of a pid, or null when it is gone.
+ *
+ * `comm=` is the executable itself, with no arguments appended, so a checkout path that
+ * contains a space survives it — deriving argv[0] from the command line by splitting on
+ * whitespace does not, and that false negative would silently un-own a real survivor.
+ */
+export async function processExecutable(pid: number, run: Runner): Promise<string | null> {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  const r = await run([PS, "-o", "comm=", "-p", String(pid)]);
+  const exe = r.stdout.trim();
+  return r.code === 0 && exe.length > 0 ? exe : null;
+}
+
+/** `ps -o comm=`, falling back to argv[0] of `command` so ownership never silently weakens. */
+export async function executablePath(pid: number, command: string, run: Runner): Promise<string> {
+  return (await processExecutable(pid, run)) ?? (command.trim().split(/\s+/)[0] ?? "");
 }
 
 /** pids whose full command line matches `pattern` (a pgrep ERE). Never includes this process. */
@@ -113,7 +132,9 @@ export async function findSurvivors(
       if (found.has(pid)) continue;
       const command = await processCommand(pid, run);
       if (command === null) continue;
-      if (!isOwnedExecutable(command, pattern, owners)) continue;
+      // Ownership is decided on the EXECUTABLE path; the full command line is recorded
+      // for the report only, because arguments are not evidence of what is running.
+      if (!isOwnedExecutable(await executablePath(pid, command, run), pattern, owners)) continue;
       found.set(pid, command);
     }
   }
@@ -122,12 +143,14 @@ export async function findSurvivors(
 
 
 /**
- * The pattern must sit in the EXECUTABLE token (argv[0]), not merely somewhere in the
- * arguments: a shell running `grep target/debug/onecad` inside this checkout carries both
- * the pattern and the project root in its command line and must never be a kill candidate.
+ * The pattern must sit in the EXECUTABLE PATH, not merely somewhere in the arguments: a
+ * shell running `grep target/debug/onecad` inside this checkout carries both the pattern
+ * and the project root in its command line and must never be a kill candidate.
+ *
+ * `exe` is an executable path (`processExecutable`), never a command line — the split
+ * this function used to do mis-derived argv[0] whenever the path contained a space.
  */
-export function isOwnedExecutable(command: string, pattern: string, owners: string[]): boolean {
-  const exe = command.trim().split(/\s+/)[0] ?? "";
-  if (!exe.includes(pattern)) return false;
+export function isOwnedExecutable(exe: string, pattern: string, owners: string[]): boolean {
+  if (pattern.length === 0 || !exe.includes(pattern)) return false;
   return owners.some((o) => o.length > 0 && exe.includes(o));
 }

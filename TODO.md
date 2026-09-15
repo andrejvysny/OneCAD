@@ -1,4 +1,4 @@
-# SESSION 32 — ASSISTANT HOST PROGRAM, WP-AI1 (2026-09-14, Opus 5, branch `claude/loving-cori-rz1v4i`)
+# SESSION 35 — ASSISTANT HOST PROGRAM, WP-AI1 (2026-09-14, Opus 5, branch `claude/loving-cori-rz1v4i`)
 
 Scope chosen by the user from the five-document AI-assistant specification package: **the
 Bun sidecar that runs the AI agent using AgentKit, with Rust starting and supervising that
@@ -130,6 +130,311 @@ worker-backed workspace run and `bun run e2e`, both owed below.
       `a450d6ff470fcfaacf3a37375d00d962ed2632e8` instead. When the tag lands: point
       `assistant-host/package.json` at it, delete the script, drop its two `ci.yml` call
       sites.
+# SESSION 34 — TAURI-AGENT BACKGROUND INTERACTION POLICY (2026-09-14, Fable, plan `~/.claude/plans/act-as-expert-on-calm-stallman.md`)
+
+Acted on an architecture review proposing four fidelity tiers so Claude can drive OneCAD without
+taking over the Mac. Scope chosen by the user: **background webview lane + accessibility actuation,
+host only** (no Tart VM, no `CGEventPostToPid`, no ScreenCaptureKit). Hard constraint, also from the
+user: **the existing foreground lane does not change.** Everything here is additive and opt-in.
+
+## Two review claims that were wrong, and why it mattered
+
+- **W3C `/actions` is not native input on this stack.** `tauri-plugin-wdio-webdriver` 1.3.0
+  implements `POST /session/:id/actions` by injecting JavaScript — `executor.rs:1391` builds
+  `new MouseEvent(...)` and dispatches it on `document.elementFromPoint`. OneCAD's viewport, picker
+  and sketch controller bind POINTER events (`CadOrbitControls.ts:266-269`, `Picker.ts:282-285`,
+  `SketchController.ts:603-612`), so a MouseEvent reaches none of them. Migrating to `/actions`
+  would have been a **downgrade** from the harness's own `PointerEvent` dispatch.
+- **`focus:false` cannot give an unfocused launch.** tao 0.35.3 `window_activation_hack`
+  (`app_state.rs:440-453`) calls `makeKeyAndOrderFront` on every visible window at `launched`, and
+  `activate_ignoring_other_apps` defaults true (`app_delegate.rs:107`). A background launch
+  therefore reports `foregroundStolenAtLaunch`; `mode:"attach"` avoids it.
+
+Also measured: background capture was already solved — `capture.ts:50` is
+`screencapture -x -o -l <windowId>`, which photographs an occluded window and needs no frontmost
+check — so ScreenCaptureKit was dropped as scope with no capability lost.
+
+## Landed
+
+- **Interaction policy.** `session_start {interaction:"foreground"|"background"}`, default
+  `foreground` (unchanged), overridable by `interaction.default` in `tauri-agent.config.json`.
+- **Non-interference is structural.** `src/platform/refusing.ts` hands a background session a
+  `PlatformAdapter` whose input verbs and `windows.focus` throw
+  `BACKGROUND_CAPABILITY_UNAVAILABLE`. No code path can escalate by accident. `releaseAll`,
+  `cursor`, `permissions`, `layout`, `dispose`, both window reads, all AX verbs and the whole
+  capture path pass through.
+- **Passive calibration.** A background `session_start` runs geometry + the window table and skips
+  `windows.focus`, the hover probe and the wheel probe. `HoverProbe` became a union so the skip is
+  a variant, not a missing field: the hover probe is what VERIFIES the CSS→global mapping, and
+  nothing in this policy posts a global point.
+- **Background webview lane.** `webviewInput.ts` gained wheel and keyboard dispatch alongside the
+  existing PointerEvent sequence; `pointer_hover` and `pointer_scroll` gained real lanes. The
+  press-and-hold verbs refuse, with the reason: `CadOrbitControls.ts:306` calls
+  `setPointerCapture(e.pointerId)` unguarded, a synthetic pointer id cannot be captured, and the
+  handler aborts — a faked drag would report delivered and move nothing.
+- **Accessibility actuation (helper 1.3.0, protocol 4).** `ax_press`, `ax_set_value`,
+  `ax_menu_press`, surfaced as `native_press`, `native_set_value`, `native_menu_invoke`. Each
+  refuses rather than reporting a success the app did not give: an unadvertised action, a
+  non-settable attribute, a menu path matching none or several.
+- **Envelope.** `Mode` gained `"accessibility"`, `backend` gained `"ax"`, and every result now
+  carries required `interaction: {policy, foregroundChanged, cursorMoved}`.
+
+## Amended invariant (deliberate, stated everywhere the old one was)
+
+"AX reads, never AX acts" is replaced by **"CGEvent is the only acceptance-grade actuator."** AX
+actuation is labelled `mode:"accessibility"` / `backend:"ax"` and never closes a real-user
+acceptance claim — the standing `mode:"webview"` already had. Updated in `main.swift`,
+`adapter.ts`, `ax.ts`, `native.ts`, `CONTRACTS.md`, `README.md` and both skills.
+
+## Side benefit worth using
+
+`native_menu_invoke ["Edit","Undo"]` presses the menu item instead of sending a chord, so it is
+immune to the ⌘Z/⌘Y swap recorded in SESSION 33 (positional US/ANSI key map, Slovak input source).
+Recommended in the OneCAD skill for undo/redo unless the binding itself is under test.
+
+## Adversarial review of the accessibility actuation — returned "defective", all findings closed
+
+Two HIGH findings, both reproduced by the reviewer against a live Finder, both would have made an
+actuation report success for something that did not happen:
+
+- **A disabled control reported a successful press.** A disabled element still advertises `AXPress`
+  (a disabled Finder menu item advertises `AXCancel, AXPress, AXPick`) and
+  `AXUIElementPerformAction` still answers `.success`. The action-advertised gate guarded the rare
+  case and missed the common one. The motivating shape is an `NSSavePanel` whose Save button is
+  disabled until the filename is non-empty — and `native_set_value` does not fire the
+  text-did-change notification, so that is exactly the state the documented recipe produces.
+  Fixed with an `AXEnabled != false` gate, and verified side by side on a real disabled menu item:
+  pre-fix `{"actuated":true,"ok":true}`, post-fix `INVALID_TARGET ... is disabled`.
+- **`native_menu_snapshot` printed a path `native_menu_invoke` could not resolve.** The helper's
+  `path` already ends with the item's own title; the renderer appended it again, producing
+  `File > Save > Save`, and used a typographic separator the verb does not parse. Both fixed. It
+  shipped green because `FakeAx.menu()` hardcoded an EMPTY menu — a renderer cannot be wrong about
+  zero items. The fixture now carries real items shaped the way the helper reports them.
+
+Also fixed: `interaction.policy` was never actually stamped (every bare `okResult` inherited a
+"foreground" default, so a background session's own honesty block claimed it was a foreground
+session) — now stamped centrally in `defineTool`, with a test proven to fail without it; menu
+candidate lists ranked by shared prefix instead of alphabetically (Finder has 132 two-segment paths,
+so an alphabetical list capped at 40 never reached `File >`); AppKit alternate menu items narrowed
+by `AXEnabled` before a path is called ambiguous (13 duplicate paths in Finder's menu bar);
+truncated menu walks told apart from genuinely missing items; `ax_set_value`'s read-back no longer
+blames the app for the helper's own 256-character transport clip; and `rectText`/`ptText` no longer
+use `Int(Double)`, which TRAPS above `Int64` and would have exited 133 from inside an error message.
+
+## Two pre-existing defects the review surfaced, now closed
+
+- [x] **`mapHelperError` mislabelled every accessibility failure.** `INVALID_TARGET` was missing from
+      `CODE_MAP`, so every AX refusal surfaced as `INTERNAL`, and the message prefix said "native
+      input verb", sending a reader after a CGEvent problem that does not exist. Recorded in
+      SESSION 33 as known; it mattered much more once AX could act. Now
+      `INVALID_TARGET — accessibility verb 'ax_press' failed: ... is disabled`.
+- [x] **The AX helper tests were silently vacuous on this machine.** `guiTarget()` scanned only the
+      first 25 `.app/Contents/MacOS/` processes; this machine has 70 and the ones with visible
+      windows sort late, so the whole accessibility group logged "assertions are vacuous" and went
+      green having proved nothing — the AX layer added in SESSION 33 had never run against a real
+      AX tree here. The sweep is now wide enough to find one, and the group really runs:
+      `ax/CGWindowList bounds agreed for 2 window(s)`, `ax_menu items=358`, `ax_snapshot rooted=true`.
+
+## Adversarial review of the background seam — "the central claim holds", three defects, all closed
+
+The reviewer could not construct any path by which a background session posts an OS input event or
+activates the application: every `createPlatformAdapter` / `requirePlatform` / `.windows.focus` site
+enumerated, `#recover` / `reconnectBridge` / watchdog / `stop` / `#failStart` checked for re-creating
+the adapter, every registered tool traced, and no silent escalation anywhere. What it found instead:
+
+- **HIGH — `window_focus` lied in the one field retry logic reads.** `focusWindow`'s catch stamped
+  `details.raised = true` on ANY throw inside its try, and the first statement in that try was the
+  activation call — which in background is the refusing seam and throws before raising anything. The
+  tool turned that flag into `delivery.inputCompleted` / `mayHaveSideEffects` / `retrySafe:false`,
+  so a refusal that touched nothing reported a delivered, side-effecting action, and the repo's own
+  `smoke-actions.ts` aborts a background run on it. Fixed by attempting activation outside that try
+  and keeping `raised` only for the `returns false` case, where the adapter really did try.
+- **HIGH — the seam's INSTALLATION was untested.** Replacing the one line in `#preflight` that wraps
+  the adapter with `this.platform = real` left 129 policy tests passing: the tool tests use a
+  FakeSession that hands back the raw fake, and the start test's probes are skipped by the policy
+  branches regardless of which adapter is installed. The suite covered `refusing.ts` in isolation and
+  the tool routing, never the join. Now asserted on the adapter a real session holds, and the
+  mutation fails.
+- **MEDIUM — a background session dead-ended when its window left the active Space**, which is the
+  advertised use case. `windows.list(pid)` is on-screen only and there is no focus step, so every
+  recalibration threw `WINDOW_NOT_FOUND`, taking out `ui_snapshot`, `ui_screenshot`, `window_list`
+  and every webview action at once — with no way out, since `window_focus` also refuses. Background
+  now lists `{all: true}`; foreground keeps the stricter list, which is right there.
+- **MEDIUM — two AX actuations could visibly disrupt the user.** `native_menu_invoke {path:["File"]}`
+  presses a menu BAR item, which opens the menu over whatever they are looking at; `native_press` on
+  an `AXFullScreenButton` switches their Space. A one-segment menu path is now refused outright (it
+  names no command), and window chrome needs an explicit `acceptDisruption:"yes"`.
+- **LOW — `keyboard_release_all`** is the single documented exception to "no OS event" and now says
+  so in a warning: the helper process is shared across sessions, so clearing a key an earlier
+  foreground session latched posts a real key-up.
+
+Every fix is pinned by a test proven to fail against the pre-fix code (mutation-verified for the
+seam installation, the focus refusal and the off-Space recovery).
+
+Hygiene from the same review: `CONTRACTS.md`'s `actuated` claim was true on the helper wire and false
+at the MCP boundary — the sentence is now scoped to the wire; `tauri-agent.config.json` had been
+wholesale reformatted for a two-line addition and is back to an 8-line diff.
+
+## Gate (main thread, run alone, stable tree)
+
+- [x] `bunx tsc --noEmit -p tools/tauri-agent` 0 · `TAURI_AGENT_REQUIRE_HELPER=1 bun test`
+      **753 / 0** across 30 files (was 702/0 at session start). The helper really ran
+      (`--selftest exit=0 "version":"1.3.0","protocol":4`) and the accessibility assertions were
+      real rather than vacuous this time (`ax/CGWindowList bounds agreed`, `ax_menu items=1438`,
+      `ax_snapshot ladder rooted=true`).
+- [x] `cargo fmt --all --check` 0 · `cargo clippy --workspace --all-targets --features tauri-e2e
+      -- -D warnings` 0 · `cargo check -p onecad` 0 (production shape still excludes `tauri_e2e.rs`).
+- [x] `bun run test` **5998 passed / 78 skipped** across 346 files.
+- [x] `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1652 passed / 0 failed** over 99 suites
+      (worker staged).
+- [x] hex gate 0 · `verify-modeling-coverage.mjs` 0 · `verify-modeling-contracts.mjs` 0 ·
+      `check-worker-stdout-hygiene.sh` 0.
+- No `src-tauri` production change was made this session; the Rust ladder is re-run as regression
+  because the tree still carries SESSION 33's uncommitted work.
+
+## Owed (user-run; the harness cannot run these itself)
+
+- [ ] **Non-interference, measured.** Background session; scripted clicks/hovers/wheels/shortcuts/
+      screenshots while typing in another app. Sample `input.cursor()` and `windows.isFrontmost()`
+      before and after each step: the cursor must not move and OneCAD must never become frontmost.
+- [ ] **Background native Save.** `native_menu_invoke ["File","Save"]` → `native_find` the filename
+      field → `native_set_value` → `native_press` Save, with the user's own app frontmost throughout.
+- [ ] **Background webview zoom.** `pointer_scroll` over the viewport changes camera distance
+      (`__vpEngine.debugSnapshot()`), proving the wheel event reaches `CadOrbitControls`.
+- [ ] **Refusal is real.** `pointer_drag` refuses in background; the same drag still orbits in
+      foreground.
+- [ ] **Foreground regression, live.** `bun tools/tauri-agent/scripts/smoke-actions.ts` unchanged.
+
+## Deliberately out of scope (recorded, not forgotten)
+
+- `CGEventPostToPid` — no unique coverage once AX actuation exists, and least reliable for an
+  out-of-process WKWebView.
+- ScreenCaptureKit — `screencapture -l` already captures occluded; SCK's only real win is the
+  recorded `-l` mis-targeting bug (`capture.ts:51-53`), which needs an async bridge inside a
+  strictly synchronous helper loop.
+- Isolated native testing in a Tart macOS VM — the only way to get full CGEvent fidelity with zero
+  host impact. Tart 2.32.1 is already installed and `scripts/bundle-dylibs.sh` already produces a
+  self-contained `.app`, so a guest would need no toolchain: copy the bundle, run the Swift helper
+  over SSH (it already speaks JSON-lines on stdio). Blocked on nothing but a decision.
+
+# SESSION 33 — TAURI-AGENT PHASE 2 HARDENING (2026-09-14, Fable, plan `~/.claude/plans/act-as-expert-on-calm-stallman.md`)
+
+Acted on an external implementation review of the Phase 0+1 harness (16 findings). Closed **all 11
+P0/P1** items plus the CI gate, then ran an independent adversarial review of that work which
+returned "defective" with 11 further findings, of which 9 are now fixed. Uncommitted; commit
+boundary owed (user decides).
+
+## Gate (main thread, run alone, stable tree)
+
+- [x] `bunx tsc --noEmit -p tools/tauri-agent` clean · `TAURI_AGENT_REQUIRE_HELPER=1 bun test`
+      **699 / 0** (was 473/0 at session start; helper tests ran, not skipped — `--selftest exit=0
+      "version":"1.2.0","protocol":3`).
+- [x] `cargo fmt --all --check` 0 · `cargo clippy --workspace --all-targets --features tauri-e2e
+      -- -D warnings` 0 · `cargo check -p onecad` 0 (production shape still excludes `tauri_e2e.rs`).
+- [x] `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1652 passed / 0 failed** (worker staged).
+- [x] hex gate 0 · `verify-modeling-coverage.mjs` 0 · `verify-modeling-contracts.mjs` 0 ·
+      `check-worker-stdout-hygiene.sh` 0.
+- Final harness count **702 / 0** across 28 files.
+
+## Landed
+
+- **Ownership (F01).** `ProcessOwnership` is explicit; only a LAUNCHED session may terminate the
+  app. `killApp` governs that case alone, `forceKillAttached` is the one deliberate way to kill an
+  attached app, and a failed start signals nothing it did not launch. Port-owner checks are
+  checkout-scoped via `ps -o comm=`. Feature-gated `agent_identity` proves the binary was built from
+  THIS tree via compile-time `CARGO_MANIFEST_DIR`.
+- **Calibration neutrality (F02/F06).** The wheel probe's listener moved to `window` capture phase
+  and swallows its own notch before `CadOrbitControls` sees it — proven in jsdom: the app handler saw
+  1 notch under the old registration and 0 under the new. Hover step-off is a `checkPoint` candidate
+  search. No calibration path reaches `input.move`/`input.scroll` without passing `checkPoint`.
+- **Delivery semantics (F03).** `ActionResult.delivery` is required; `retrySafe` is true only at
+  phase `not_started`. A delivered action whose evidence failed is `warning` with no `error` field.
+- **Instrumentation at start (F09)** and **CAD/WebGL settling (F08).** Probes install at every bridge
+  construction; the quiet window is over `(rev, regenBusy, geometryPending, documentRevision,
+  frames)`. A null signal always warns — silent DOM-only degradation was the defect.
+- **Shadow held-state (F07).** The host names what IT may have pressed — buttons, modifiers AND
+  ordinary keys — and the helper releases a `force` name only when `CGEventSource` confirms it down.
+  No automatic path can release the human's own input.
+- **Capture capability (F10)**, **keyboard fidelity (F11)**, **native AX layer (F04)**, **window
+  identity (F05)**, **CI gate (F14)**: see `tools/tauri-agent/CONTRACTS.md`, now 507 lines.
+
+## App/environment defects surfaced
+
+- [ ] **⌘Z and ⌘Y are swapped on this machine.** Active input source is
+      `com.apple.keylayout.Slovak`; the helper key map is positional US/ANSI with no translation.
+      Probed with `UCKeyTranslate` under the live layout: `kVK_ANSI_Z` → `y`, `kVK_ANSI_Y` → `z`.
+      OneCAD binds ⌘Z undo / ⌘Y redo, so every harness run here has had them reversed. Letter tools
+      are unaffected. `session_start` now warns; layout translation is NOT implemented.
+
+## Owed (user-run; the harness cannot run these itself)
+
+- [ ] `scripts/smoke.ts`, `scripts/smoke-actions.ts`, `scripts/phase0.ts` — live, move the real
+      cursor, need both TCC grants.
+- [ ] Attach safety: start OneCAD by hand with `TAURI_WEBDRIVER_PORT=4445`, `session_start
+      {mode:"attach"}` then `session_stop {}`, confirm it is still running.
+- [ ] Calibration neutrality live: camera position/target/distance unchanged across `session_start`.
+- [ ] First `pointer_scroll {dy:2}` delivers exactly two notches at the nav layer.
+- [ ] Native Save panel driven end to end through `native_find` + CGEvent.
+- [ ] Screenshot truth with Screen Recording revoked + `allowDegradedCapture:true`.
+- [ ] The new `tauri-agent` CI job's first real run on GitHub (grant-less runner behaviour is
+      reasoned, not yet observed).
+
+## Not fixed, recorded
+
+- Sandboxed apps host their Save/Open panel in a separate process, so it is invisible under the
+  app's own pid. OneCAD's panels are in-process, so this does not bite here.
+- `mapHelperError` labels AX reads as "native input verb" failures.
+- `PORT_IN_USE` remediation still suggests attach/reuseExisting, which now reproduces the same error
+  for a different checkout.
+
+# SESSION 32 — TAURI-AGENT REAL-USER HARNESS (2026-09-13/14, Fable, plan `~/.claude/plans/analyze-this-plan-tauri-agent-real-user-humming-candle.md`)
+
+Spec: `tauri-agent-real-user-testing-specification.md` (v1.0). Delivered Phase 0+1 on macOS: MCP server `tools/tauri-agent/` (registered in `.mcp.json`), global skill `~/.claude/skills/tauri-agent-test`, project overlay `.claude/skills/onecad-agent-test` (+ `evals/evals.json`). Uncommitted; commit boundary owed (user decides).
+
+## Manual validation (2026-09-14 ~11:25, Fable→Opus, main thread)
+
+Built and launched the real dev app through the harness and inspected it end to end. `bun tools/tauri-agent/scripts/inspect.ts` (one long-lived driver, spawns the MCP server, drives 40 tool calls): New project → New sketch → pick XY plane → Rectangle → two corners → Finish → click region → Extrude → Enter → orbit (right+Shift) → wheel zoom → session_stop. Every native step `backend:"cgevent"`; screenshots read back and visually confirmed:
+
+- Start screen, editor, sketch mode (rectangle, inspector "Under-constrained · DOF 4", 4 Coincident + 2 Horizontal + 2 Vertical), extruded **Body 1 / Solid body** (Extrude · Completed · 10 mm · Regions 1), history "2 features · Sketch + Extrude 10 mm", orbited/zoomed view with the toolbar unmoved.
+- Logs: `regen: published changed:1 failedSteps:0`, `apply_operation resolved rev=4 changed=1 error=none`, **0 ERROR lines**. The intermittent extrude correlation-timeout from the eval run did NOT reproduce this run.
+- Teardown report `{survivors:[], portsFree:{1420:true,4445:true}, launched:true}`; no surviving processes.
+
+**Two real robustness bugs found and fixed while validating (package tsc clean, `TAURI_AGENT_REQUIRE_HELPER=1 bun test` 473/0):**
+
+- [x] **Multi-Space window query.** `windows.list(pid)` (`.optionOnScreenOnly`) returns the app window only while its Mission Control Space is active, so on a busy desktop `pickLargestWindow` intermittently threw `WINDOW_NOT_FOUND` during recalibration. Fix: the action pipeline now focuses the app (`assertFrontmostOrFocus`) BEFORE reading geometry, and `geometryChanged` treats an empty window list as "recalibrate" instead of throwing. (`beginAction`, `orchestrator.geometryChanged`.)
+- [x] **Hover-probe brittleness when the app is not frontmost.** WebKit only applies `:hover` to the key window; a background window reported `hit:true, hover:false, pageFocus:true`. Fix: the hover probe steps off then onto the element and retries up to 3× with a re-focus between attempts (`ProbeDeps.refocus`), and the reading now carries `pageFocus`/`visibility` for diagnosis. (`calibrate.hoverProbe`.)
+- Confirmed the iteration-2 pool-refresh fix live: the Rectangle and Extrude tool clicks each emitted `target pool refreshed …` (the toolbar was not in the stale post-sketch pool) and resolved instead of failing `ELEMENT_NOT_FOUND`.
+
+Caveat: these bugs mostly bite a bash-per-call manual driver (each call re-foregrounds Terminal); a real MCP session keeps the app frontmost, which is why the six eval runs and `phase0.ts`/`smoke.ts` calibrated fine earlier. The fixes harden both. New manual-driver scripts: `scripts/{mcp-shell,mcp-call,inspect}.ts`.
+
+## Gate (main thread, run alone, 2026-09-14 00:3x)
+
+- [x] `bunx tsc --noEmit -p tools/tauri-agent` clean · `TAURI_AGENT_REQUIRE_HELPER=1 bun test` **473 / 0** (21 files; helper tests ran, not skipped) · root `bunx tsc --noEmit` clean (root `tsconfig.json` now `"types": ["node"]` — `@types/bun` otherwise leaks into the app check) · hex gate 0 · vitest sanity after the tsconfig change **346 files / 5998 passed / 78 skipped** (background, not the run of record).
+- [x] Live Phase-0 exit (spec §37) through the MCP stdio boundary, `scripts/phase0.ts`: 19 tool calls, 0 errors — launch (dev, `tauri-e2e` feature), calibration ok (sf 2, hover probe hit), snapshot, native click/hover/press, right+Shift orbit drag, wheel (probe = mouse), `Primary+S`, window_context capture, stop → `pgrep` empty.
+- [x] `scripts/smoke.ts` ×2 and `scripts/smoke-actions.ts` (T5/T6 agents) green; screenshots inspected (tooltip visible, view cube rotated).
+- [x] skill-creator iteration 1 (6 headless `claude -p` runs, sequential, user hands-off): **with skill 16/18 assertions (89 %)**, baseline **9/18 (50 %)**; per eval 5/6·3/6, 5/6·3/6, 6/6·3/6. Turns 124/108, 42/28, 24/31. Viewer: `.claude/skills/onecad-agent-test-workspace/iteration-1/review.html` (gitignored). First baseline batch discarded (overlay skill leaked via `--add-dir`); 5 of 6 grading files reconstructed from recorded grader verdicts after a workspace re-copy overwrote them.
+
+## Landed (all orchestrator-reviewed; adversarial reviews on semantic/geometry and native helper, red-first fixes)
+
+- Semantic: WebDriver bridge with named budgets/read-only retry/wedge latch; snapshot script with per-generation refs `@s<gen>e<n>` (held refs never re-found by positional selector — review B1); resolver ladder with STALE/MOVING/OCCLUDED/drag-region gates; NaN-over-the-wire guard; pool auto-refresh on a semantic miss (`targetPool.ts`).
+- Geometry: `inner/sf + css` mapping, calibration (4 numeric checks + hover probe + wheel probe), occlusion rects `{x,y,width,height}` (review B2 — config shape mismatch had made the traffic-light guard a no-op).
+- Native (macOS): single Swift CGEvent helper (all buttons, drag paths, wheel in line units, keys, unicode typing, modifier flags on every event, `release_all` tracked-only, `frontmost`), range-checked args (was SIGTRAP on 1e20), defer-release on failed gestures, FIFO client with head-start timers.
+- Session: launch/attach/bundled, port ownership checks, failed start tears the launched tree down, survivor sweep matches the executable token only (never a shell whose *arguments* mention the pattern), teardown report `{survivors, portsFree}` in `session_stop`.
+- Tools (28): session/window/ui/pointer/keyboard/wait/observe/debug with the §23 envelope; post-move occlusion re-check before a click; screenshot policy; `observe_logs` cursor tail of `dev.jsonl`.
+
+## App defects surfaced (not fixed here; evidence in `.tauri-agent/artifacts/`)
+
+- [ ] `⌘S` on a never-saved document: `save_document` called with no path → `io error: no save path; provide one` (session s-20260913-231727-74ab, A-013). Expected: Save As.
+- [ ] Library tool tooltip renders `Library ()` — `src/modules/library/register.ts:69` has no `shortcutLabel`, `ToolButton.tsx:61` always renders `label (shortcut)`.
+- [ ] Intermittent: first Extrude confirm rolled back after the kernel published rev 4 and the FE rendered it; `applyEdit … correlation TIMED OUT (rev=4)` 8 s later, rollback to rev 5 (session s-20260913-235159-c2be, `app-logs/dev.jsonl` lines 202/246/257).
+- [ ] Face picking: left-click on a body top face selected nothing (edge click did) in the toolbar audit run (s-20260913-232949-a3ad, A-073/A-074/A-076) — needs its own repro.
+
+## Owed / next
+
+- [ ] Commit at this boundary (user call); `graphify update .` after code changes.
+- [ ] skill-creator iteration 2 with the rewritten assertions (`evals/evals.json`) and the diagnostic-labelling rule; description optimisation loop not run.
+- [ ] Spec phases 2–5: Windows/Linux adapters, native dialog tree (§16.2 — `⌘S` Save As dialog cannot be driven yet), record/replay + WDIO export, token auth, ScreenCaptureKit, multi-window, CI Lane B.
+- [ ] `tools/tauri-agent/src/platform/macos/input.ts` (528 lines) and `helper/main.swift` (single-file by necessity) exceed the 500-line guideline.
 
 # SESSION 31 — UX-HARDENING RESUME (2026-09-13, Fable, plan `~/.claude/plans/act-as-senior-software-atomic-sparrow.md`)
 

@@ -3,10 +3,12 @@ import type { Runner } from "../src/session/procs.ts";
 import {
   findSurvivors,
   isAlive,
+  isOwnedExecutable,
   listeningPids,
   matchesAny,
   parsePids,
   processCommand,
+  processExecutable,
 } from "../src/session/procs.ts";
 
 interface Recorded {
@@ -63,42 +65,97 @@ describe("processCommand", () => {
   });
 });
 
+describe("processExecutable", () => {
+  test("reads `ps -o comm=` — the executable path, with no arguments appended", async () => {
+    const rec = recorder(() => ({ stdout: "/repo/target/debug/onecad\n" }));
+    expect(await processExecutable(77, rec.runner)).toBe("/repo/target/debug/onecad");
+    expect(rec.calls[0]).toEqual(["/bin/ps", "-o", "comm=", "-p", "77"]);
+  });
+
+  test("a dead pid is null", async () => {
+    const rec = recorder(() => ({ code: 1, stdout: "" }));
+    expect(await processExecutable(77, rec.runner)).toBeNull();
+  });
+});
+
+describe("isOwnedExecutable", () => {
+  test("accepts an executable path containing a space", () => {
+    const root = "/Users/me/My Projects/OneCAD";
+    expect(isOwnedExecutable(`${root}/src-tauri/target/debug/onecad`, "target/debug/onecad", [root])).toBe(true);
+  });
+
+  test("the pattern alone is not ownership — another checkout is refused", () => {
+    expect(
+      isOwnedExecutable("/Users/other/OneCAD/src-tauri/target/debug/onecad", "target/debug/onecad", [
+        "/Users/me/OneCAD",
+      ]),
+    ).toBe(false);
+  });
+
+  test("an empty pattern never owns anything", () => {
+    expect(isOwnedExecutable("/Users/me/OneCAD/x", "", ["/Users/me/OneCAD"])).toBe(false);
+  });
+});
+
 describe("findSurvivors", () => {
   const MINE = "/Users/me/OneCAD";
+  const SPACED = "/Users/me/My Projects/OneCAD";
+
+  interface Proc {
+    command: string;
+    /** `ps -o comm=`: the executable path only. */
+    comm: string;
+  }
+
+  const PROCS: Record<number, Proc> = {
+    10: { command: `${MINE}/src-tauri/target/debug/onecad`, comm: `${MINE}/src-tauri/target/debug/onecad` },
+    11: {
+      command: "/Users/other/OneCAD/src-tauri/target/debug/onecad",
+      comm: "/Users/other/OneCAD/src-tauri/target/debug/onecad",
+    },
+    12: {
+      command: `${MINE}/src-tauri/binaries/onecad-worker-aarch64-apple-darwin`,
+      comm: `${MINE}/src-tauri/binaries/onecad-worker-aarch64-apple-darwin`,
+    },
+    13: { command: `/bin/zsh -c grep -rn target/debug/onecad ${MINE}/src`, comm: "/bin/zsh" },
+    14: { command: `/usr/bin/pgrep -f target/debug/onecad|onecad-worker- ${MINE}`, comm: "/usr/bin/pgrep" },
+    15: {
+      command: `${SPACED}/src-tauri/target/debug/onecad --flag`,
+      comm: `${SPACED}/src-tauri/target/debug/onecad`,
+    },
+  };
 
   function sweepRunner(): Runner {
-    const commands: Record<number, string> = {
-      10: `${MINE}/src-tauri/target/debug/onecad`,
-      11: "/Users/other/OneCAD/src-tauri/target/debug/onecad",
-      12: `${MINE}/src-tauri/binaries/onecad-worker-aarch64-apple-darwin`,
-      13: `/bin/zsh -c grep -rn target/debug/onecad ${MINE}/src`,
-      14: `/usr/bin/pgrep -f target/debug/onecad|onecad-worker- ${MINE}`,
-    };
     return async (argv) => {
       if (argv[0] === "/usr/bin/pgrep") {
         const pattern = argv[2] as string;
-        const hits = Object.entries(commands)
-          .filter(([, cmd]) => cmd.includes(pattern))
+        const hits = Object.entries(PROCS)
+          .filter(([, p]) => p.command.includes(pattern))
           .map(([pid]) => pid);
         return { code: hits.length > 0 ? 0 : 1, stdout: hits.join("\n"), stderr: "" };
       }
-      const pid = Number(argv[4]);
-      const cmd = commands[pid];
-      return { code: cmd ? 0 : 1, stdout: cmd ?? "", stderr: "" };
+      const proc = PROCS[Number(argv[4])];
+      const out = proc === undefined ? "" : argv[2] === "comm=" ? proc.comm : proc.command;
+      return { code: out.length > 0 ? 0 : 1, stdout: out, stderr: "" };
     };
   }
 
-  test("only reports processes whose command line also names this project", async () => {
-    const found = await findSurvivors(
-      ["target/debug/onecad", "onecad-worker-"],
-      [MINE],
-      sweepRunner(),
-    );
+  const PATTERNS = ["target/debug/onecad", "onecad-worker-"];
+
+  test("only reports processes whose EXECUTABLE also names this project", async () => {
+    const found = await findSurvivors(PATTERNS, [MINE], sweepRunner());
     expect(found.map((s) => s.pid).sort()).toEqual([10, 12]);
     // pid 11 matches the pattern but belongs to another checkout.
     expect(found.some((s) => s.pid === 11)).toBe(false);
     // pids 13/14 carry the pattern AND the project root in their ARGUMENTS only.
     expect(found.some((s) => s.pid === 13 || s.pid === 14)).toBe(false);
+    // pid 15 is the same app in a DIFFERENT checkout as far as this sweep is concerned.
+    expect(found.some((s) => s.pid === 15)).toBe(false);
+  });
+
+  test("a checkout path containing a space is still owned, and reports its full command line", async () => {
+    const found = await findSurvivors(PATTERNS, [SPACED], sweepRunner());
+    expect(found).toEqual([{ pid: 15, command: `${SPACED}/src-tauri/target/debug/onecad --flag` }]);
   });
 });
 

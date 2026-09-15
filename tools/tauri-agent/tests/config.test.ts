@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -77,11 +77,45 @@ describe("loadConfig", () => {
     expect(d.webdriver.port).toBe(4445);
     expect(d.devServer.port).toBe(1420);
     expect(d.screenshots).toEqual({ policy: "state_changing", previewMaxPx: 1600 });
-    expect(d.settle).toEqual({ frameMs: 16, quietMs: 120, timeoutMs: 1500 });
+    expect(d.settle).toEqual({
+      frameMs: 16,
+      quietMs: 120,
+      timeoutMs: 1500,
+      signals: { regenBusy: true, geometryPending: true, documentRevision: true, frames: true },
+    });
     expect(d.calibration.probeTestId).toBe("document-title");
     expect(d.input).toEqual({ wheelLinesPerNotch: 3, dwellMs: 600, clickIntervalMs: 80 });
     expect(d.logs.devJsonl).toBe("logs/dev.jsonl");
     expect(d.nativeOcclusion.rects).toEqual([{ x: 0, y: 0, width: 80, height: 28 }]);
+  });
+
+  /**
+   * The settle tuple is what decides whether an action is reported as finished, so a member
+   * silently switched off in the committed file — or one the schema defaults differently from
+   * the file — would weaken every settle without anyone reading a line of it.
+   */
+  test("settle.signals in the committed config matches the parsed defaults", () => {
+    process.env.TAURI_AGENT_ROOT = REPO_ROOT;
+    const { config } = loadConfig();
+    const d = parseConfig({}, "<defaults>");
+    expect(config.settle).toEqual(d.settle);
+    expect(config.settle.signals).toEqual({
+      regenBusy: true,
+      geometryPending: true,
+      documentRevision: true,
+      frames: true,
+    });
+  });
+
+  test("a settle signal can be switched off without touching the others", () => {
+    process.env.TAURI_AGENT_ROOT = tempRoot({ settle: { signals: { frames: false } } });
+    const { config } = loadConfig();
+    expect(config.settle.signals).toEqual({
+      regenBusy: true,
+      geometryPending: true,
+      documentRevision: true,
+      frames: false,
+    });
   });
 
   test("the committed config's occlusion rects are the geometry Rect shape", () => {
@@ -96,5 +130,26 @@ describe("loadConfig", () => {
   test("rejects an invalid config with the offending field in details", () => {
     process.env.TAURI_AGENT_ROOT = tempRoot({ webdriver: { port: 0 } });
     expect(() => loadConfig()).toThrow(/Invalid/);
+  });
+});
+
+describe("interaction policy default", () => {
+  test("defaults to foreground, so an existing config keeps today's behaviour", () => {
+    expect(parseConfig({}, "<test>").interaction.default).toBe("foreground");
+  });
+
+  test("the repo's own config file is explicit about it", () => {
+    const repo = JSON.parse(
+      readFileSync(join(import.meta.dir, "..", "..", "..", CONFIG_FILENAME), "utf8"),
+    ) as Record<string, unknown>;
+    // The project deliberately does NOT default to background: flipping it here would silently
+    // change what every existing session proves. Opting in is per session_start.
+    expect((repo.interaction as { default: string }).default).toBe("foreground");
+    // And it must still parse — the schema is `.strict()`, so an unknown key is a hard failure.
+    expect(() => parseConfig(repo, "<repo>")).not.toThrow();
+  });
+
+  test("an unknown top-level key is still a hard failure", () => {
+    expect(() => parseConfig({ interactionn: { default: "background" } }, "<test>")).toThrow();
   });
 });

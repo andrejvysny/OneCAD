@@ -107,4 +107,49 @@ describe("keyboard_release_all", () => {
     expect(env.status).toBe("warning");
     expect(env.warnings[0]).toContain("nothing was released");
   });
+
+  test("delivery does not claim nothing happened when a release was posted", async () => {
+    const h = harness();
+    const env = await h.call("keyboard_release_all", {});
+    expect(env.delivery.inputStarted).toBe(true);
+    expect(env.delivery.inputCompleted).toBe(true);
+  });
+
+  test("delivery reports not-started when the platform refuses (nothing was actually posted)", async () => {
+    const h = harness();
+    h.session.requirePlatform = () => {
+      throw new Error("no platform adapter in this session");
+    };
+    const env = await h.call("keyboard_release_all", {});
+    expect(env.delivery.inputStarted).toBe(false);
+    expect(env.delivery.retrySafe).toBe(true);
+  });
+});
+
+describe("keyboard fidelity", () => {
+  test("keyboard_type_text reports text_entry", async () => {
+    const h = keyboardHarness();
+    const env = await h.call("keyboard_type_text", { text: "hello" });
+    expect(env.fidelity).toBe("text_entry");
+  });
+
+  test("keyboard_press reports physical_key", async () => {
+    const h = keyboardHarness();
+    const env = await h.call("keyboard_press", { key: "a" });
+    expect(env.fidelity).toBe("physical_key");
+  });
+
+  test("keyboard_shortcut reports physical_key", async () => {
+    const h = keyboardHarness();
+    const env = await h.call("keyboard_shortcut", { combo: "Primary+S" });
+    expect(env.fidelity).toBe("physical_key");
+  });
+
+  test("keyboard_down and keyboard_up report physical_key", async () => {
+    const h = keyboardHarness();
+    const down = await h.call("keyboard_down", { key: "Shift" });
+    expect(down.fidelity).toBe("physical_key");
+    const up = await h.call("keyboard_up", { key: "Shift" });
+    expect(up.fidelity).toBe("physical_key");
+  });
 });

@@ -1,6 +1,10 @@
 import { AgentError } from "../errors.ts";
 import type { BridgeLike } from "./webdriver.ts";
 import { SNAPSHOT_BUDGET_MS } from "./webdriver.ts";
+import type { InstrumentReport } from "./instrumentScript.ts";
+import { installInstrumentation } from "./instrumentScript.ts";
+import type { IdleCamera, IdleReading } from "./idleScript.ts";
+import { readIdleInPage } from "./idleScript.ts";
 import { snapshotInPage } from "./snapshotScript.ts";
 import type {
   AgentWindow,
@@ -12,6 +16,8 @@ import type {
 
 /** Pins the script's signature at compile time; `execute` erases it on the way out. */
 const SNAPSHOT_SCRIPT: (o: SnapshotScriptOpts) => PageSnapshot = snapshotInPage;
+const INSTRUMENT_SCRIPT: () => InstrumentReport = installInstrumentation;
+const IDLE_SCRIPT: () => IdleReading = readIdleInPage;
 
 export type SnapshotMode = "interactive" | "accessibility" | "dom" | "diff";
 
@@ -141,7 +147,76 @@ export function diffSnapshots(
   return { added, removed, changed };
 }
 
-/** `rev === -1` means the probes are not installed yet — take a snapshot first. */
+/**
+ * Installs the mutation-revision and console probes the action pipeline depends on.
+ *
+ * Called once per bridge (session start, bridge rebuild, app reconnect) so an action taken
+ * before the first `ui_snapshot` still settles against a real counter. Idempotent in the page,
+ * so calling it again after a snapshot already installed them is a no-op.
+ */
+export function ensureInstrumentation(bridge: BridgeLike): Promise<InstrumentReport> {
+  return bridge.execute<InstrumentReport>(
+    "instrument.install",
+    INSTRUMENT_SCRIPT as never,
+    [],
+    // Writes page globals but touches no application state, and a retry simply re-reports
+    // the live state — "read-only" here means "safe to re-send", as for the snapshot script.
+    { readOnly: true },
+  );
+}
+
+function finiteOr(v: unknown, fallback: number | null): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+}
+
+function idleCamera(v: unknown): IdleCamera | null {
+  if (v === null || typeof v !== "object") return null;
+  const c = v as Record<string, unknown>;
+  const keys = ["x", "y", "z", "tx", "ty", "tz", "distance"] as const;
+  const out = {} as Record<string, number>;
+  for (const k of keys) {
+    const n = finiteOr(c[k], null);
+    if (n === null) return null;
+    out[k] = n;
+  }
+  return out as unknown as IdleCamera;
+}
+
+/**
+ * The webview is a system boundary, so an unusable field is turned into `null` here rather
+ * than compared as `undefined` later: `null` is the ONE encoding of "this signal is
+ * unavailable", and the settle path warns on it instead of quietly treating it as idle.
+ */
+function normalizeIdle(raw: unknown): IdleReading {
+  const r = (raw === null || typeof raw !== "object" ? {} : raw) as Record<string, unknown>;
+  return {
+    rev: finiteOr(r.rev, -1) ?? -1,
+    regenBusy: finiteOr(r.regenBusy, null),
+    geometryPending: typeof r.geometryPending === "boolean" ? r.geometryPending : null,
+    documentRevision: finiteOr(r.documentRevision, null),
+    frames: finiteOr(r.frames, null),
+    camera: idleCamera(r.camera ?? null),
+  };
+}
+
+/**
+ * One reading of the CAD/WebGL idle signals — what `settle()` and the `worker_idle` /
+ * `render_idle` / `camera_stable` waits compare. Also removes the `?vpdebug` origin pill
+ * from the viewport the first time it finds it; see `idleScript.ts`.
+ */
+export async function readIdle(bridge: BridgeLike): Promise<IdleReading> {
+  const raw = await bridge.execute<IdleReading>(
+    "ui_idle",
+    IDLE_SCRIPT as never,
+    [],
+    // Writes one page global (the chrome-removed latch) and unregisters a debug-only
+    // overlay item; touches no application state, so it is safe to re-send.
+    { readOnly: true },
+  );
+  return normalizeIdle(raw);
+}
+
+/** `rev === -1` means the probes are not installed — the page was never instrumented. */
 export function readRevision(bridge: BridgeLike): Promise<{ rev: number; lastMutationAt: number; now: number }> {
   return bridge.execute<{ rev: number; lastMutationAt: number; now: number }>(
     "ui_revision",

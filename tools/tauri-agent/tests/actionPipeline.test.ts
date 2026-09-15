@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { AgentError } from "../src/errors.ts";
 import { fakeNode, harness } from "./fixtures/fakeEnv.ts";
 
@@ -129,6 +129,80 @@ describe("screenshot policy", () => {
   });
 });
 
+/**
+ * A session without the Screen Recording grant must not ATTEMPT a picture it cannot take, and
+ * must not hide that it took none. Every image it does return has to say whether it is evidence.
+ */
+describe("capture capability", () => {
+  function degraded(h: ReturnType<typeof harness>): ReturnType<typeof harness> {
+    h.session.capture = { available: false, authoritative: false, reason: "SCREEN_RECORDING_PERMISSION_DENIED" };
+    return h;
+  }
+
+  test("a state-changing action skips the policy screenshot, says so, and never calls capture", async () => {
+    const h = degraded(withNode(harness()));
+    const env = await h.call("pointer_click", { target: TARGET });
+    expect(env.status).toBe("warning");
+    expect(env.error).toBeUndefined();
+    expect(env.screenshot).toBeUndefined();
+    expect(env.warnings.some((w) => w.includes("Screen Recording"))).toBe(true);
+    // The click itself was delivered in full; only the picture is missing.
+    expect(env.delivery.inputCompleted).toBe(true);
+    expect(env.delivery.evidenceIncomplete).toBe(true);
+    // The whole point: nothing was attempted, so there is no "capture failed" to explain.
+    expect(h.order).not.toContain("capture");
+  });
+
+  test("an explicitly requested screenshot is refused before any input is posted", async () => {
+    const h = degraded(withNode(harness()));
+    const env = await h.call("pointer_hover", { target: TARGET, screenshot: true });
+    expect(env.status).toBe("error");
+    expect(env.error?.code).toBe("SCREEN_CAPTURE_PERMISSION_DENIED");
+    expect(env.delivery).toMatchObject({ phase: "not_started", retrySafe: true });
+    // `releaseAll` is recover's cleanup and posts nothing; no pointer verb ever ran.
+    expect(h.input.calls.map((c) => c.verb)).toEqual(["releaseAll"]);
+    expect(h.order).not.toContain("capture");
+  });
+
+  test("ui_screenshot is refused outright rather than answering with a picture of nothing", async () => {
+    const h = degraded(harness());
+    const env = await h.call("ui_screenshot", {});
+    expect(env.status).toBe("error");
+    expect(env.error?.code).toBe("SCREEN_CAPTURE_PERMISSION_DENIED");
+    expect(env.error?.remediation).toContain("Screen Recording");
+    expect(h.order).not.toContain("capture");
+  });
+
+  test("with the grant, a captured image is marked authoritative", async () => {
+    const h = withNode(harness());
+    const click = await h.call("pointer_click", { target: TARGET });
+    expect(click.screenshot?.authoritative).toBe(true);
+    const shot = await h.call("ui_screenshot", {});
+    expect(shot.screenshot?.authoritative).toBe(true);
+  });
+
+  test("a capture that reports degradation is never authoritative, grant or no grant", async () => {
+    const h = withNode(harness());
+    h.session.platform.capture.window = async (_id, outPath) => {
+      writeFileSync(outPath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+      return {
+        width: 2880,
+        height: 1200,
+        pixelScale: 2,
+        warning: "captured 2880x1200px does not match the requested 1440x900pt",
+        authoritative: false,
+        reason: "bounds-mismatch",
+      };
+    };
+    const env = await h.call("pointer_click", { target: TARGET });
+    expect(env.screenshot?.path).toContain("-after.png");
+    expect(env.screenshot?.authoritative).toBe(false);
+    // The image is still returned; the caller is told why it is not evidence.
+    expect(env.status).toBe("warning");
+    expect(env.warnings.some((w) => w.includes("does not match the requested"))).toBe(true);
+  });
+});
+
 describe("pointer verbs", () => {
   test("drag interpolates between the two resolved points and holds the button", async () => {
     const h = withNode(harness());
@@ -191,18 +265,46 @@ describe("pointer verbs", () => {
     expect((scrolls[0]?.opts as { delta: { dy: number } }).delta.dy).toBe(-40);
   });
 
-  test("the verbs with no webview lane refuse instead of faking one", async () => {
+  /**
+   * The refusal set is exactly the press-and-hold verbs, and the reason is specific rather than
+   * "we did not get round to it": OneCAD calls `setPointerCapture` on pointerdown, a synthetic
+   * pointer id cannot be captured, and the call throws inside the app's own handler. A faked
+   * lane would report the drag delivered and move nothing.
+   */
+  test("the press-and-hold verbs refuse a webview lane instead of faking one", async () => {
     const h = withNode(harness());
     for (const [tool, args] of [
-      ["pointer_hover", { target: TARGET, mode: "webview" }],
-      ["pointer_scroll", { target: TARGET, dy: 1, mode: "webview" }],
+      ["pointer_down", { target: TARGET, mode: "webview" }],
+      ["pointer_up", { target: TARGET, mode: "webview" }],
       ["pointer_drag", { from: { ref: "@s1e1" }, to: { ref: "@s1e1" }, mode: "webview" }],
+      ["pointer_drag_path", { points: [{ x: 10, y: 10 }, { x: 20, y: 20 }], space: "webview", mode: "webview" }],
     ] as const) {
       const env = await h.call(tool, args as Record<string, unknown>);
-      expect(env.error?.code).toBe("INVALID_TARGET");
-      expect(env.error?.message).toContain("not supported in webview mode");
+      expect(env.error?.code, tool).toBe("INVALID_TARGET");
+      expect(env.error?.message, tool).toContain("not supported in webview mode");
     }
     expect(h.input.calls).toEqual([]);
+  });
+
+  test("hover and scroll DO have a webview lane, and post no native input", async () => {
+    const h = withNode(harness());
+    h.bridge.canned["webview.pointer"] = { ok: true, tag: "button" };
+    h.bridge.canned["webview.wheel"] = { ok: true, tag: "canvas", defaultPrevented: true };
+
+    const hover = await h.call("pointer_hover", { target: TARGET, mode: "webview", dwellMs: 0 });
+    expect(hover.mode).toBe("webview");
+    expect(hover.backend).toBe("webdriver");
+    // The CSS-:hover limit is stated in the envelope, not buried in a doc.
+    expect(hover.warnings.some((w) => w.includes("CSS :hover"))).toBe(true);
+
+    const scroll = await h.call("pointer_scroll", { target: TARGET, dy: 2, mode: "webview" });
+    expect(scroll.mode).toBe("webview");
+    expect(scroll.backend).toBe("webdriver");
+    // Positive dy is "zoom in" for the tool and a NEGATIVE DOM deltaY; the sign must survive.
+    expect((scroll.data as { deltaY: number }).deltaY).toBeLessThan(0);
+
+    expect(h.input.calls).toEqual([]);
+    expect(h.order).not.toContain("focus");
   });
 
   test("webview mode is labelled as the webdriver backend", async () => {
@@ -213,5 +315,183 @@ describe("pointer verbs", () => {
     expect(env.backend).toBe("webdriver");
     expect(h.input.calls.filter((c) => c.verb === "click")).toEqual([]);
     expect(h.order).not.toContain("focus");
+  });
+});
+
+/**
+ * The envelope must distinguish "the click was never sent" from "the click was sent and the
+ * evidence failed". Getting this wrong makes a caller re-send a Save, a Delete or a drag.
+ */
+describe("delivery semantics", () => {
+  test("a delivered click whose screenshot fails is a warning, not an error", async () => {
+    const h = withNode(harness());
+    h.session.platform.capture.window = async () => {
+      throw new AgentError("SCREEN_CAPTURE_PERMISSION_DENIED", "fake capture failed");
+    };
+    const env = await h.call("pointer_click", { target: TARGET });
+    expect(env.status).toBe("warning");
+    expect(env.error).toBeUndefined();
+    expect(env.screenshot).toBeUndefined();
+    expect(env.delivery).toMatchObject({
+      phase: "postconditions_completed",
+      inputStarted: true,
+      inputCompleted: true,
+      mayHaveSideEffects: true,
+      retrySafe: false,
+      evidenceIncomplete: true,
+    });
+    expect(env.warnings.some((w) => w.includes("WAS delivered") && w.includes("SCREEN_CAPTURE_PERMISSION_DENIED"))).toBe(true);
+    // The action itself still reports what it observed; only the picture is missing.
+    expect(env.state?.settled).toBe(true);
+    expect(env.effects).toBeDefined();
+  });
+
+  test("a delivered evidence failure is not an MCP protocol error", async () => {
+    const h = withNode(harness());
+    h.session.platform.capture.window = async () => {
+      throw new AgentError("SCREEN_CAPTURE_PERMISSION_DENIED", "fake capture failed");
+    };
+    // isError would invite a client to auto-retry a click the window server already delivered.
+    expect((await h.raw("pointer_click", { target: TARGET, inline: false })).isError).toBe(false);
+  });
+
+  test("a refusal before the input is retry-safe and posted nothing", async () => {
+    const h = withNode(harness());
+    h.session.frontmost = false;
+    const env = await h.call("pointer_click", { target: TARGET });
+    expect(env.status).toBe("error");
+    expect(env.delivery).toMatchObject({
+      phase: "not_started",
+      inputStarted: false,
+      inputCompleted: false,
+      mayHaveSideEffects: false,
+      retrySafe: true,
+    });
+    expect(env.delivery.evidenceIncomplete).toBeUndefined();
+    expect(h.input.calls).toEqual([]);
+  });
+
+  test("a failure reading the before-state is retry-safe: the input never ran", async () => {
+    const h = withNode(harness());
+    h.bridge.canned["ui_revision"] = () => {
+      throw new AgentError("BRIDGE_WEDGED", "two consecutive bridged scripts exceeded their budget");
+    };
+    const env = await h.call("pointer_click", { target: TARGET });
+    expect(env.status).toBe("error");
+    expect(env.delivery.phase).toBe("not_started");
+    expect(env.delivery.retrySafe).toBe(true);
+    expect(h.input.calls.filter((c) => c.verb === "click")).toEqual([]);
+    expect(h.session.reconnects).toBe(1);
+  });
+
+  test("a throw mid-gesture may have landed, so it is never retry-safe", async () => {
+    const h = withNode(harness());
+    h.input.failOn = "click";
+    const env = await h.call("pointer_click", { target: TARGET });
+    expect(env.status).toBe("error");
+    expect(env.delivery).toMatchObject({
+      phase: "input_started",
+      inputStarted: true,
+      inputCompleted: false,
+      mayHaveSideEffects: true,
+      retrySafe: false,
+    });
+    expect(h.input.calls.at(-1)?.verb).toBe("releaseAll");
+  });
+
+  test("a settle failure after a delivered input reports the cause without an error field", async () => {
+    const h = withNode(harness());
+    // captureBefore reads `ui_revision`; settle reads the whole idle tuple via `ui_idle`.
+    h.bridge.canned["ui_idle"] = () => {
+      throw new AgentError("SETTLE_TIMEOUT", "fake settle read failed");
+    };
+    const env = await h.call("pointer_click", { target: TARGET });
+    expect(env.status).toBe("warning");
+    expect(env.error).toBeUndefined();
+    expect(env.state).toBeUndefined();
+    expect(env.effects).toBeUndefined();
+    expect((env.data as { postconditionError: { code: string; message: string } }).postconditionError).toEqual({
+      code: "SETTLE_TIMEOUT",
+      message: "fake settle read failed",
+    });
+    expect(env.delivery).toMatchObject({
+      phase: "input_completed",
+      inputCompleted: true,
+      mayHaveSideEffects: true,
+      retrySafe: false,
+      evidenceIncomplete: true,
+    });
+    expect(h.input.calls.at(-1)?.verb).toBe("releaseAll");
+  });
+
+  test("a wedged bridge AFTER a delivered input still releases and rebuilds, and never errors", async () => {
+    const h = withNode(harness());
+    h.bridge.canned["ui_idle"] = () => {
+      throw new AgentError("BRIDGE_WEDGED", "two consecutive bridged scripts exceeded their budget");
+    };
+    const env = await h.call("pointer_click", { target: TARGET });
+    expect(env.status).toBe("warning");
+    expect(env.error).toBeUndefined();
+    expect(h.session.reconnects).toBe(1);
+    expect(env.warnings.some((w) => w.includes("bridge wedged and was rebuilt"))).toBe(true);
+    // releaseAll runs FIRST in recover: before the reconnect and before the failure picture.
+    expect(h.order.indexOf("releaseAll")).toBeGreaterThan(-1);
+    expect(h.order.indexOf("releaseAll")).toBeLessThan(h.order.indexOf("capture"));
+    expect(env.delivery.retrySafe).toBe(false);
+  });
+
+  test("a delivered failure keeps the tool's own payload beside the cause", async () => {
+    const h = withNode(harness());
+    h.bridge.canned["ui_idle"] = () => {
+      throw new AgentError("SETTLE_TIMEOUT", "fake settle read failed");
+    };
+    const env = await h.call("pointer_drag_path", {
+      points: [
+        { x: 100, y: 100 },
+        { x: 220, y: 100 },
+      ],
+      space: "webview",
+    });
+    const data = env.data as { points: Array<{ x: number }>; postconditionError: { code: string } };
+    expect(data.points[0]?.x).toBe(200);
+    expect(data.postconditionError.code).toBe("SETTLE_TIMEOUT");
+  });
+
+  test("a clean state-changing action is delivered and not retry-safe", async () => {
+    const h = withNode(harness());
+    const env = await h.call("pointer_click", { target: TARGET });
+    expect(env.status).toBe("ok");
+    expect(env.delivery).toEqual({
+      phase: "postconditions_completed",
+      inputStarted: true,
+      inputCompleted: true,
+      mayHaveSideEffects: true,
+      retrySafe: false,
+    });
+  });
+
+  test("a hover reports no side effects even though it posted input", async () => {
+    const h = withNode(harness());
+    const env = await h.call("pointer_hover", { target: TARGET });
+    expect(env.status).toBe("ok");
+    expect(env.delivery.mayHaveSideEffects).toBe(false);
+    expect(env.delivery.retrySafe).toBe(false);
+  });
+
+  test("a query tool posts nothing and is always safe to repeat", async () => {
+    const h = harness();
+    h.bridge.canned["wait.element"] = { present: true, visible: true, attr: null };
+    const env = await h.call("wait_for", {
+      condition: { kind: "element", target: { testId: "viewport-canvas" } },
+    });
+    expect(env.status).toBe("ok");
+    expect(env.delivery).toEqual({
+      phase: "not_started",
+      inputStarted: false,
+      inputCompleted: false,
+      mayHaveSideEffects: false,
+      retrySafe: true,
+    });
+    expect(h.input.calls).toEqual([]);
   });
 });

@@ -13,9 +13,15 @@
   "devServer": { "port": 1420 },
   "artifacts": { "dir": ".tauri-agent/artifacts" },
   "screenshots": { "policy": "state_changing", "previewMaxPx": 1600 },
-  "settle": { "frameMs": 16, "quietMs": 120, "timeoutMs": 1500 },
+  "settle": {
+    "frameMs": 16,
+    "quietMs": 120,
+    "timeoutMs": 1500,
+    "signals": { "regenBusy": true, "geometryPending": true, "documentRevision": true, "frames": true }
+  },
   "calibration": { "probeTestId": "document-title" },
   "input": { "wheelLinesPerNotch": 3, "dwellMs": 600, "clickIntervalMs": 80 },
   "logs": { "devJsonl": "logs/dev.jsonl" },
-  "nativeOcclusion": { "rects": [{ "x": 0, "y": 0, "width": 80, "height": 28 }] }
+  "nativeOcclusion": { "rects": [{ "x": 0, "y": 0, "width": 80, "height": 28 }] },
+  "interaction": { "default": "foreground" }
 }
