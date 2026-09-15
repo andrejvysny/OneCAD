@@ -327,7 +327,7 @@ fn unsupported_sketch_chain_index(types: &[&str]) -> usize {
         return types[sketches + 1..]
             .iter()
             .position(|kind| {
-                !matches!(*kind, "Fillet" | "Chamfer") && !(extrude && *kind == "Hole")
+                !(matches!(*kind, "Fillet" | "Chamfer") || (extrude && *kind == "Hole"))
             })
             .map_or(sketches, |index| index + sketches + 1);
     }

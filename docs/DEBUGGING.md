@@ -8,7 +8,7 @@ don't paraphrase.
 See `CLAUDE.md` § **Debugging & logs** for the condensed version. This is the
 deep manual it points to.
 
-## 1. The four lanes and where they come from
+## 1. The lanes and where they come from
 
 | Lane (`target`) | Producer | Source |
 |---|---|---|
@@ -17,7 +17,19 @@ deep manual it points to.
 | `worker` | Forwarded C++ worker stderr, one JSONL event per line, level sniffed from the WLOG prefix | `src-tauri/src/worker/manager.rs` `forward_worker_stderr` (~line 604) |
 | `fe` | Batched frontend log events re-emitted server-side | `src/debug/log.ts` (core) → `src/debug/logSink.ts` (batches, POSTs via `log_event`) → `src-tauri/src/api/mod.rs` `log_event`/`emit_fe_event` (~line 1474) |
 | `onecad_protocol::frames` | OCW1 tx/rx frame trace, debug-gated (off by default) | `src-tauri/crates/onecad-protocol/src/client.rs` `trace_tx`/`trace_rx`/`trace_rx_frame` (~line 59) |
+| `assistant` | Forwarded Bun assistant-host stderr, one JSONL event per line, level sniffed from the line prefix | `src-tauri/src/assistant/supervisor.rs` stderr forwarder |
 | `panic` | Rust panic hook, chained before the previous hook | `src-tauri/src/logging.rs` `install_panic_hook` |
+
+The `assistant` lane is the geometry worker's lane repeated for the second child
+process, and it carries the same caveat as § 7's: the forwarder is a detached task,
+so its lines have **no span context**. Join them to a bridge request by the OCAK1
+request `id`. The assistant host's stdout is reserved for OCAK1 frames exactly as the
+worker's is for OCW1 — `assistant-host/src/main.ts` redirects `console.*` to stderr at
+startup so a stray `console.log` from a dependency cannot corrupt the frame stream.
+
+Note `RUST_LOG` must name the new target: the default filter carries
+`assistant=debug` alongside `fe=debug,worker=debug`, and a bare `info` silently drops
+all three synthetic lanes.
 
 The C++ worker itself never touches `dev.jsonl` — it only writes lines to its
 own stderr (`worker/src/util/Log.h`, `WLOG_*` macros), which the Rust parent
@@ -135,7 +147,7 @@ grep, not the doc comment's aspiration:
 
 | Knob | Consumer | Default | Effect |
 |---|---|---|---|
-| `RUST_LOG` | app (`logging::env_filter`) + `onecad-regen` CLI | `info,onecad_lib=debug,onecad=debug,fe=debug,worker=debug` (`DEFAULT_FILTER`, `logging.rs`) | Standard `EnvFilter` syntax. The `fe=debug`/`worker=debug` directives are REQUIRED — both lanes emit at `debug`, so `RUST_LOG=info` alone silently drops them both (pinned by `logging.rs::tests::default_filter_keeps_the_synthetic_lanes_at_debug`) |
+| `RUST_LOG` | app (`logging::env_filter`) + `onecad-regen` CLI | `info,onecad_lib=debug,onecad=debug,fe=debug,worker=debug,assistant=debug` (`DEFAULT_FILTER`, `logging.rs`) | Standard `EnvFilter` syntax. The `fe=debug`/`worker=debug`/`assistant=debug` directives are REQUIRED — all three lanes emit at `debug`, so `RUST_LOG=info` alone silently drops them (pinned by `logging.rs::tests::default_filter_keeps_the_synthetic_lanes_at_debug`) |
 | `RUST_LOG=…,onecad_protocol::frames=debug` | `onecad-protocol` `client.rs` | frames lane off by default | Turns on tx/rx per OCW1 frame (`id`, `verb`, `elapsed_ms`, `ok`, `binLen`); `=trace` additionally logs bulk `chunk` frames (a mesh transfer is thousands of them) |
 | `ONECAD_LOG_DIR` | app (`logging::log_dir`) | debug build: `<repo>/logs`; release: off | `off` (any case) kills the file lane even in a debug build; any other value is used as the directory verbatim (works in a packaged build too) |
 | `ONECAD_WORKER_LOG` | C++ worker (`Log.h::init_level_from_env`) | `info` | `error\|warn\|info\|debug`, case-insensitive, read once as the literal first statement of `main()` (so it covers `--selftest` too); an unrecognized value falls back to `info` plus one `WLOG_WARN` |

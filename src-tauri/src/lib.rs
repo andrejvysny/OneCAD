@@ -15,6 +15,7 @@
 //! * [`dto`]/[`events`] — the camelCase projection DTOs + event channel names.
 
 pub mod api;
+pub mod assistant;
 pub mod autosave;
 pub mod document_runtime;
 pub mod dto;
@@ -492,6 +493,31 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 prewarm.state::<AppState>().prewarm();
             });
+            // Install the assistant host's slot (ADR-0015). Unlike the geometry
+            // worker above, NOTHING is spawned here: the host starts lazily on the
+            // first `assistant_start` or bridge call, so an app the user never asks
+            // an assistant question in never pays for a 99 MB child. That also
+            // makes this a plain synchronous call — there is no process to spawn,
+            // so it needs no Tokio reactor and no `async_runtime::spawn`, and doing
+            // it inline closes the window where an early command could find the
+            // slot unconfigured.
+            match (
+                assistant::resolve_assistant_host_path(),
+                app.path().app_data_dir(),
+            ) {
+                (Some(binary), Ok(app_data)) => state
+                    .assistant
+                    .configure(assistant::HostConfig::production(binary, app_data)),
+                (None, _) => tracing::info!(
+                    target: "assistant",
+                    "no assistant host binary staged; the assistant is unavailable in this build"
+                ),
+                (Some(_), Err(e)) => tracing::warn!(
+                    target: "assistant",
+                    error = %e,
+                    "no app-data directory; the assistant host cannot be given one and stays unavailable"
+                ),
+            }
             let driver = make_regen_driver(
                 state.runtime.clone(),
                 app.handle().clone(),
@@ -608,6 +634,11 @@ pub fn run() {
             api::cancel_exit,
             api::log_event,
             api::mesh_render_completed,
+            assistant::commands::assistant_bridge_fetch,
+            assistant::commands::assistant_status,
+            assistant::commands::assistant_start,
+            assistant::commands::assistant_stop,
+            assistant::commands::assistant_configure_provider,
             #[cfg(feature = "tauri-e2e")]
             tauri_e2e::composition_status,
             #[cfg(feature = "tauri-e2e")]

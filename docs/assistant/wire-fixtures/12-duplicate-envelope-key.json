@@ -1,0 +1,11 @@
+{
+  "name": "duplicate-envelope-key",
+  "rule": "2a: a duplicate key in the envelope's own object is fatal on both sides. JSON.parse would take the last one and serde would refuse; the policy is refuse.",
+  "setup": "none",
+  "deliver": [
+    {
+      "json": "{\"t\":\"ping\",\"id\":3,\"id\":5}"
+    }
+  ],
+  "expect": "close"
+}

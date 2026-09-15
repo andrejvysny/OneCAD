@@ -1,0 +1,19 @@
+{
+  "name": "duplicate-inflight-request-id",
+  "rule": "2a: an inbound req reusing an id that is still in flight is refused WITHOUT touching the in-flight registration.",
+  "setup": "inboundInFlight",
+  "deliver": [
+    {
+      "t": "req",
+      "id": "peer:0",
+      "principal": "host",
+      "verb": "@inflight",
+      "payload": {}
+    }
+  ],
+  "expect": "refuse",
+  "refusal": {
+    "id": "peer:0",
+    "code": "duplicate_id"
+  }
+}

@@ -1,3 +1,57 @@
+# CURRENT STATE — session 35 (2026-09-14, Opus 5, assistant host program WP-AI1)
+
+Ledger: `TODO.md` § "SESSION 35". Handoff: `docs/assistant/implementation-status.md`.
+Contract: `docs/assistant/wire-protocol.md`. Decisions: ADRs 0015–0018.
+
+- **Branch:** `claude/loving-cori-rz1v4i`, originally cut from `c947636`, now merged
+  with `origin/master` at `f438ced` (the tauri-agent harness session below). The merge
+  conflicted only in this file and `TODO.md`, where both sessions prepended a block;
+  every code file auto-merged and was re-verified after the merge, not assumed. This
+  session's work is [PR #5](https://github.com/andrejvysny/OneCAD/pull/5).
+  on `master` is **untouched by decision** — see the session-31 header below, which remains
+  accurate for that work.
+- **What landed:** a supervised Bun child process running AgentKit, a private framed stdio
+  bridge (OCAK1) between it and Rust, an `onecad.assistant` sidebar module gated off by
+  default, and a Rust-owned local-provider gateway. From the five-document specification
+  package this is WP1 + WP2 + the read-only half of WP5.
+- **The assistant cannot change a CAD document, structurally** (ADR-0018). No CAD tool is
+  registered in the agent's catalog; the OCAK1 verb table has no document, filesystem or
+  network verb; and AgentKit's `ProposalApplier` — the one place a write could land — is a
+  `NoopProposalApplier` that throws. The next work package replaces exactly that object,
+  behind a draft workspace, an authorization grant, idempotent operation ids and durable
+  receipts.
+- **Gate (measured, this session, this container):** `cargo fmt --all --check` ✓ ·
+  `cargo clippy --workspace --all-targets -- -D warnings` ✓ ·
+  `cargo test -p onecad-assistant-protocol --all-features` **68/0** (58/0 without features) ·
+  `cargo test -p onecad --lib` **537/0** · `cargo test --test assistant_provider_gateway`
+  **15/0** · `ONECAD_REQUIRE_ASSISTANT_HOST=1 cargo test --test assistant_bridge` **6/0
+  against the REAL compiled sidecar** · `assistant-host` `bun test` **59/0, 7 files** ·
+  `bunx tsc --noEmit` ✓ · `bun run test` **350 files / 6023 / 0 / 78 skipped** (baseline
+  346 / 5992) · `bun run build` ✓ · hex 0 · coverage 34/9/16/20 · contracts 41/19/15.
+- **OWED, not passed:** every worker-backed gate. This container has no OCCT, so
+  `src-tauri/binaries/onecad-worker-<triple>` is a **placeholder that exits 66** and prints
+  two lines saying so — staged only because `tauri_build::build()` resolves every
+  `externalBin` entry inside the build script and the app crate will not compile without a
+  file there. `ONECAD_REQUIRE_WORKER=1 cargo test --workspace`, `bun run e2e` of record,
+  `tauri build` + a packaged launch (EMB-01), and an offline run against real local weights
+  (LOC-01) are all owed. The anti-vacuous-green guard was verified to fire: with
+  `ONECAD_REQUIRE_ASSISTANT_HOST=1` and a missing binary the suite hard-fails 4/6 rather
+  than skipping green.
+- **Blocked on you:** AgentKit publishes nothing installable — no tags, no committed
+  `dist/` — so `github:andrejvysny/AgentKit#v0.5.0` does not resolve.
+  `scripts/bootstrap-agentkit.sh` builds pinned commit `a450d6ff` instead. When you cut the
+  tag, point `assistant-host/package.json` at it and delete the script and its two `ci.yml`
+  call sites.
+- **Pre-existing defects found and fixed to make the gate honest** (all verified untouched at
+  HEAD first): the hex gate silently skipped 3 of 753 files because they contain literal NUL
+  bytes (`CLAUDE.md` now uses `grep -rna`; the gate is genuinely empty either way), and two
+  newest-stable clippy lints in `onecad-core/src/regen/feature_pattern{,_tests}.rs` blocked
+  `--workspace -D warnings`. Also closed a real Rust/TypeScript protocol asymmetry found by
+  cross-checking the two bridge implementations.
+- **Size, measured:** the compiled host is 100,543,494 bytes and that is the Bun runtime
+  floor — a compiled `console.log("hi")` is 99,295,580, so our code plus AgentKit adds
+  ~104 KB and minifying changes nothing. See ADR-0015; this is not a bundling problem.
+- **Processes:** none left running.
 # CURRENT STATE — session 32 (2026-09-14, Fable, tauri-agent harness) — HANDOFF
 
 Last verified: 2026-09-14 00:40 (this session). Ledger: `TODO.md` § "SESSION 32". Plan: `~/.claude/plans/analyze-this-plan-tauri-agent-real-user-humming-candle.md`.

@@ -1,0 +1,25 @@
+{
+  "name": "failed-head-after-success",
+  "rule": "2a: a res with ok:false after a successful head is fatal; the body is already owned by a consumer that must be failed, not abandoned.",
+  "setup": "outboundStream",
+  "deliver": [
+    {
+      "t": "res",
+      "id": "self:0",
+      "ok": true,
+      "payload": {
+        "status": 200
+      }
+    },
+    {
+      "t": "res",
+      "id": "self:0",
+      "ok": false,
+      "error": {
+        "code": "late",
+        "message": "too late"
+      }
+    }
+  ],
+  "expect": "close"
+}

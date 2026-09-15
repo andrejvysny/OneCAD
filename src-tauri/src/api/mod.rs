@@ -932,6 +932,11 @@ pub async fn confirm_exit(app: AppHandle) {
     // button both route here via `events::CLOSE_REQUESTED`), so this is where both
     // worker slots are retired — once, and before the event loop unwinds.
     app.state::<AppState>().retire_all();
+    // The assistant sidecar is app-scoped, so it is torn down here rather than in
+    // `RunEvent::Exit`: by the time that arm fires the exit is already unwinding,
+    // and a 99 MB child that missed its `shutdown` would be left to `kill_on_drop`
+    // with its SQLite store mid-write.
+    app.state::<AppState>().assistant.stop();
     app.state::<crate::ExitGuard>().clear();
     app.exit(0);
 }
@@ -4579,7 +4584,13 @@ fn acknowledge_render(
 ///
 /// Debug builds only, like the ledger itself. Returns the number of outstanding expectations
 /// and the union of the body ids they are still waiting on.
-#[cfg(debug_assertions)]
+///
+/// Gated on `tauri-e2e` as well as `debug_assertions` because `tauri_e2e::agent_status` is
+/// its only caller and that whole module carries the feature gate. Without this second
+/// condition the function is dead code in an ordinary debug build, which `-D warnings`
+/// rejects — `cargo clippy --workspace --all-targets -- -D warnings` does not pass the
+/// feature, so the CI lane that runs it never compiles the consumer.
+#[cfg(all(debug_assertions, feature = "tauri-e2e"))]
 pub(crate) fn pending_render_expectations() -> (usize, Vec<String>) {
     let guard = render_expectations()
         .lock()

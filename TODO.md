@@ -1,3 +1,249 @@
+# SESSION 36 — ASSISTANT HARDENING H0–H5 (2026-09-15, Opus 5, branch `claude/loving-cori-rz1v4i`)
+
+Acting on an external review of `0a0de65` that found 16 defects, 11 at P1, and whose verdict
+was: keep the architecture, but the host/sidebar package is **not complete** and CAD mutation
+stays disabled. I agree with that verdict. Its two headline findings were confirmed by
+reading this branch's code, not taken on trust, and all eight of its companion probes
+reproduce.
+
+**The chat loop could not complete.** `buildApp` seeded no AgentKit provider and the panel
+submitted no `providerId`, so a turn reached `no_provider` before the factory that would have
+used Rust's gateway was ever called (F01); and `AssistantPanel` never called
+`streamRun`/`listMessages`/`useChat`, so no reply or terminal failure could render (F02) —
+which is what hid F01. The WP2 exit gate was not met, and `implementation-status.md` had
+understated that. Corrected there and here.
+
+## Landed
+
+- [x] **Merged `origin/master` (`f438ced`)** — the PR was `mergeable_state: dirty` and no CI
+      could run, because GitHub cannot build a merge commit for a conflicted PR. Conflict was
+      the two ledgers only; both blocks kept. Exposed one real breakage:
+      `pending_render_expectations` is dead code without the `tauri-e2e` feature. **Verified
+      pre-existing** by building `origin/master` alone in a scratch worktree with only this
+      branch's two `onecad-core` lint fixes applied — it fails identically there.
+- [x] **F03 — clean-checkout CI, which this branch had broken.** Root `package.json` depends
+      on `agentkit: file:.agentkit-src/...`, a generated gitignored prefix; the bootstrap had
+      been added to two jobs only, and in both AFTER the install. Measured on a disposable
+      `git archive` checkout: without it, 678 packages, *"Failed to install 1 package"*,
+      `node_modules/agentkit` absent, `tsc` failing `TS2307` on four files; with it, 679 and
+      clean. All six installing jobs now bootstrap first. **Confirmed by real CI**: the
+      `frontend` job went green.
+- [x] **New `assistant` CI lane** — ubuntu-latest, minutes not an hour. It can exist because
+      `onecad-assistant-protocol` is a PURE crate: the OCAK1 conformance suite needs no
+      system libraries and no staged binaries. Catches BUILD-01 in a minute rather than in a
+      60-minute e2e lane.
+- [x] **H1 — authoritative configuration and execution-ready barrier (F01, F08).** Rust mints
+      a monotonic generation and sends `config.install` over the bridge; the sidecar projects
+      it into AgentKit's provider store and only then opens an execution gate. **No endpoint
+      and no credential cross** — the projection stores `http://provider.invalid`, and a unit
+      test asserts no `baseUrl`/`apiKey`/`http://`/`127.0.0.1` string can appear in the
+      payload. F08 is structural rather than ordered: `buildApp` no longer calls
+      `startWorker`, and the only thing that opens the gate is a `config.install`, which
+      cannot arrive before `accept`. Four honest states replace one "ready".
+- [x] **H2 — protocol lifecycle, cancellation, bounds (F04, F05, F09, F10, F16).** Both peers
+      now implement §2a identically, pinned by a **shared 14-case wire-fixture corpus** both
+      runners execute. Closed two silent parser divergences the corpus surfaced (ids above
+      2^53−1; duplicate envelope keys). One connection-failure authority settles every
+      pending request when either IO half fails. Byte-credit and item bounds at every hop.
+      Contract version now gates the handshake.
+- [x] **ORDERING BUG found by H5 in H2's file, fixed by H2.** `next_outgoing` was a `biased`
+      select draining control before body; `end` is control and `chunk` is body, so a fast
+      response emitted its terminator BEFORE its own chunks. Measured on the wire:
+      `Res{content-length:112}` → `End{ok:true}` → `Chunk{seq:0}`. Fixed by a rule rather
+      than a re-order — everything after the head travels one lane in production order —
+      keeping the control bias that stops a `cancel` queueing behind the flood it stops.
+      Verified red-first: 3/3 red on reverting the one-line change. It was also the cause of
+      two red gateway tests, which went green without touching their assertions.
+- [x] **H5 — gateway policy and packaging (F11, F12, F15).** Windows startup was a blocker,
+      not cosmetic: `parseArgs` gated on `startsWith('/')`, so a native `C:\Users\...` path
+      was refused. Now `path.isAbsolute` with a named UNC/drive-relative policy, exercised on
+      this Linux box by passing `path.win32`. Gateway narrowed to a two-operation allowlist
+      with model identity enforced; the segment-boundary fix carries **the exact Rust
+      regression** the review asked for, asserting the `url` crate normalizes
+      `/%2e%2e/v1-admin/reset` past a `/v1` prefix, and that the upstream request counter
+      stays at 0. The `rm -rf "${PREFIX}"` hazard is gone — a directory is deleted only if it
+      carries the marker the script itself wrote.
+- [x] **Minimal child environment wired** (H5 implemented and tested it; the call site was in
+      another package's file). The host no longer inherits the parent environment: an
+      inherited `*_PROXY` would route "local" provider traffic off-box and silently defeat
+      ADR-0017, and nobody would have chosen it.
+- [x] **AgentKit patch prepared for the user** at `docs/assistant/patches/`. Adds
+      `TaskStore.selectOrphanedRunningTasks` and a bounded periodic sweep, needing **no schema
+      change** — deliberate, because that adapter refuses to migrate and a version bump would
+      strand existing conversations. AgentKit's own suite caught two wrong designs: the
+      periodic pass must not expire leases, since on a timer an idle runner would strip a busy
+      one of the lease it needs to commit its own result.
+
+## Gate of record (2026-09-15, serial, unloaded, run by the orchestrator)
+
+`cargo fmt --all --check` ✓ · `cargo clippy --workspace --all-targets -- -D warnings` ✓ ·
+`onecad-assistant-protocol` **74/0** all-features, **64/0** default ·
+`cargo test -p onecad --lib` **566/0** ·
+`ONECAD_REQUIRE_ASSISTANT_HOST=1` `assistant_bridge` **6/0**, `assistant_configuration`
+**5/0**, `assistant_provider_gateway` **22/0**, all against the real compiled sidecar ·
+`assistant-host` `bun test` **107/0, 9 files** · `scripts/tests/assistant-host-build.test.sh`
+**24 controls** ✓ · `bunx tsc --noEmit` ✓ · `bun run test` **352 files / 6052 / 0 / 78
+skipped** · `bun run build` ✓ · hex gate empty · coverage 34/9/18/20 · contracts 41/19/15 ·
+`tools/tauri-agent` typecheck ✓.
+
+CI on the merge commit: **9 jobs green**; `e2e-chromium` 271 passed / 1 failed on
+`sketch-on-face.spec.ts`, which is named in session 31's pre-existing red list; `e2e-webkit`
+fully green.
+
+## Owed — not run, not passed
+
+- [ ] **H3 (F06, F07) and H4 (F02, F14) not started.** The sidebar still cannot render a
+      reply: H1 made the provider reachable, but the panel rewrite onto AgentKit's hooks is
+      H4's work. **Do not describe the chat sidebar as working until H4 lands.**
+- [ ] F07: `stop()` frees the slot on *retirement requested*, not on process exit, so
+      `start()` can still overlap two hosts on one SQLite database. The `torn_down` flag
+      exists and is not yet used to fence replacement.
+- [ ] MEM-03/MEM-04 and the native half of REST-01 — `collect_body` unbounded, stderr
+      `read_until` before truncation, `u64 → u16` status cast — all in `commands.rs` /
+      `supervisor.rs`, named in the contract's §9 table as specified-but-unenforced so the
+      table does not read as a guarantee it cannot make.
+- [ ] No authenticated native cancel command (CAN-02 native half). The desktop half is done.
+- [ ] PKG-01/PKG-02: no Windows or macOS binary was built, bundled or launched here.
+- [ ] Every worker-backed gate. The staged worker is a placeholder that exits 66.
+- [ ] Upstream, found by H1 and not fixed: `SqliteProviderStore.deleteProvider` deletes the
+      `providers` row before the rows referencing it, throwing `SQLITE_CONSTRAINT_FOREIGNKEY`
+      whenever capabilities were saved. Worked around by disabling the row instead.
+- [ ] Build manifest records `agentkitContractVersion` and `bridge.rs` hard-codes what it
+      serves; nothing compares them at build time. A mismatch fails loudly at first handshake,
+      which is the intent, but it is detectable earlier.
+
+# SESSION 35 — ASSISTANT HOST PROGRAM, WP-AI1 (2026-09-14, Opus 5, branch `claude/loving-cori-rz1v4i`)
+
+Scope chosen by the user from the five-document AI-assistant specification package: **the
+Bun sidecar that runs the AI agent using AgentKit, with Rust starting and supervising that
+process.** In the package's numbering that is WP1 + WP2 plus the read-only half of WP5.
+Everything touching CAD geometry is deliberately out of scope and is the next package.
+
+**The assistant cannot change a document, structurally** (ADR-0018): no CAD tool in the
+agent's catalog, no document/filesystem/network verb in the OCAK1 table, and AgentKit's
+`ProposalApplier` — the one place a write could land — is a `NoopProposalApplier` that
+throws. A later package replaces exactly that object.
+
+## Landed
+
+- [x] **A0 — decisions.** ADRs 0015 (supervised Bun child process), 0016 (private framed
+      stdio, not HTTP), 0017 (same-machine inference only), 0018 (no mutation authority in
+      v1). `docs/assistant/wire-protocol.md` is the normative OCAK1 contract, implemented
+      twice and cross-checked. `docs/assistant/evidence-map.md` is the WP0 deliverable;
+      `docs/assistant/implementation-status.md` is the required handoff.
+- [x] **A1 — `onecad-assistant-protocol`.** New pure workspace crate, no `tauri`, no
+      `onecad-core`, so its tests run without GTK/WebKit here and in CI. OCAK1 framing
+      (magic `OCAK`, u32 LE jsonLen/binLen, 1 MiB / 8 MiB caps), envelopes, principals,
+      verb tables with no wildcard, split-at-every-byte-boundary decode tests. **68 tests
+      all-features / 58 no-features.**
+- [x] **A2 — `assistant-host`.** Bun package; AgentKit composition copied from
+      `examples/desktop-host/wiring.ts` minus its MCP steps and minus `Bun.serve`.
+      `createRestHandler` is held as a plain function and fed from the bridge — **no socket
+      is ever bound**, asserted two ways (a runtime trap on `Bun.serve`/`Bun.listen`, and a
+      source scan). stdout is claimed for frames before anything else and all five
+      `console.*` methods are rebound to stderr, so a dependency's stray `console.log`
+      cannot corrupt the stream. **59 tests / 7 files.**
+- [x] **A3 — Rust supervisor, bridge, commands.** Path resolution mirroring the worker's
+      shape with its own constants; lazy start, decoupled from geometry-worker restart;
+      stderr forwarded under a new `assistant` tracing lane; duplex reader (a lockstep
+      reader deadlocks the first time a provider callback lands mid-request). **6
+      integration tests against the REAL compiled sidecar** — handshake, a real
+      `agentkit.fetch` streaming its body, cancellation, SIGKILL→respawn→serves again,
+      version refusal, and a forged-principal refusal. `cargo test -p onecad --lib` 516/0.
+- [x] **A5 — local provider gateway** (`src-tauri/src/assistant/provider_gateway.rs`).
+      Registered provider ids, never a URL. Loopback validated at REGISTRATION against the
+      RAW host text, not `Url`'s parsed output — the WHATWG parser normalises
+      `2130706433`, `0177.0.0.1` and `0x7f.1` all to `127.0.0.1`, so a literal must
+      round-trip to its own canonical spelling. Redirects off, proxy inheritance off,
+      bounded body/response/time, cancellation that actually closes the upstream
+      connection. `https` is refused at registration with a named reason rather than
+      pulling a TLS stack into every desktop build for a loopback nobody serves over TLS.
+      Runtime-swappable registry read per request, installed only through the trusted
+      `assistant_configure_provider` command; a refused reconfiguration leaves the working
+      provider installed rather than silently disarming it. **17 integration / 21 unit
+      tests.**
+- [x] **A6 — the settings form.** `LocalModelSettings.tsx`: the only way to name an
+      endpoint without hand-editing `localStorage`. Opens itself while unconfigured or
+      refused, collapses once accepted. Placeholders, never defaults — an unconfigured
+      assistant must not silently point at a port the user never named. Validation stays in
+      Rust; duplicating it here would create a second answer to "is this endpoint allowed?"
+      and the two would drift.
+- [x] **A4 — `onecad.assistant` frontend module.** Third tab in the existing left sidebar
+      tab strip (`sidebarTabStore`), priority 120, **off by default**
+      (`settingsStore.assistantEnabled`, persist version 11 → 12 with its migration note).
+      Virtual AgentKit transport: origin-locked to `https://agentkit.invalid`, no
+      global-fetch fallback on any path, SSE reassembled from a Tauri channel.
+- [x] **Decision recorded (user-visible): `EDITOR_MOUNT_ORDER_CONTRACT` amended** with
+      `AssistantPanel` between `VariablesPanel` and `InspectorPanel`, with a dated
+      `AMENDED 2026-09-14` note per `src/test/contracts/README.md`. The probe changed; no
+      assertion was deleted.
+
+## Defects found in existing code, fixed or recorded
+
+- [x] **The hex gate was unsound and is now corrected in `CLAUDE.md` (`-a` added).** Three
+      files carry a literal NUL byte as a composite-key separator
+      (`src/features/tree/ModelTreePanel.tsx:96`, `src/shortcuts/keymap.golden.test.ts:56`,
+      `src/tools/sketch/projectTool.ts:80`), so `grep` treated them as binary and **skipped
+      them silently** — 750 of 753 files read, exit 0, indistinguishable from a clean run.
+      Measured: genuinely empty with and without the flag, so nothing was hiding. The three
+      NUL separators are left alone as out of scope; a future cleanup could use `\u001f`.
+- [x] **Two pre-existing clippy lints fixed**, both the newest-stable trap CLAUDE.md names
+      (1.94.0 `nonminimal_bool`): `crates/onecad-core/src/regen/feature_pattern.rs:330` and
+      `feature_pattern_tests.rs:217`. Both verified untouched at HEAD with `git diff HEAD`.
+      Fixed only so `cargo clippy --workspace -- -D warnings` could be run and reported
+      honestly; unrelated to this program.
+- [x] **Protocol asymmetry closed.** Rust's `Res`/`End` accepted `ok: false` with no
+      `error`, which the TypeScript peer rejects on decode. The doc comment claimed the
+      invariant and nothing enforced it. `Envelope::validate` now enforces it on every
+      decode (5 new tests). Found by cross-checking the two implementations, not by a test.
+- [ ] **Recorded, not fixed — `operation` is carried but not enforced.**
+      `createDesktopAgentKitFetch.ts` says the bridge authorizes on AgentKit's
+      `RestOperation` rather than on `path`. Rust has no copy of `REST_ROUTES`, so today
+      `operation` rides in the tracing span for diagnostics and the sidecar routes on
+      `path`; the only Rust-side check is that `path` is rooted at `/`. Making the comment
+      true needs an operation allowlist in Rust, which duplicates a TypeScript table — a
+      design decision, not a patch.
+- [ ] **Recorded — `sidebarTabStore` is now load-bearing for three modules**, not two. It
+      is shell chrome in `src/stores/`, not modeling-private, so this is legal today; a
+      future refactor should know the assistant reads it.
+- [ ] **Recorded — blank-sidebar state is reachable once a settings row ships.** Turning
+      `assistantEnabled` off while the assistant tab is active leaves all three ShellLeft
+      panels rendering `null`. No shipped UI can flip that preference yet.
+
+## Gate of record (measured, 2026-09-14, this container, serial)
+
+`bunx tsc --noEmit` ✓ · `bun run test` **352 files / 6040 / 0 / 78 skipped** ·
+`bun run build` ✓ · hex gate (with `-a`, all 753 files) **empty** · coverage 34/9/16/20 ·
+contracts 41/19/15 · `assistant-host` `bun test` **59/0, 7 files** ·
+`cargo fmt --all --check` ✓ · `cargo clippy --workspace --all-targets -- -D warnings` ✓ ·
+`cargo test -p onecad-assistant-protocol --all-features` **68/0** ·
+`cargo test -p onecad --lib` **540/0** · `cargo test --test assistant_provider_gateway`
+**17/0** · `ONECAD_REQUIRE_ASSISTANT_HOST=1 cargo test --test assistant_bridge` **6/0
+against the real compiled sidecar**.
+
+Rung: L2 for both layers plus the full non-worker Rust suite. **Not L3** — L3 requires the
+worker-backed workspace run and `bun run e2e`, both owed below.
+
+## Owed — not run, not passed
+
+- [ ] `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` with a real OCCT 8.0.1 worker. This
+      machine has no OCCT; `src-tauri/binaries/onecad-worker-<triple>` is a **placeholder
+      that exits 66** and says so on stderr, staged only so `tauri_build::build()` lets the
+      app crate compile. Every worker-backed gate is owed.
+- [ ] `bun run e2e` of record. Pre-existing Gate A debt (438 / 106 at HEAD) is untouched by
+      decision; the new panel is off by default and the targeted suites pass.
+- [ ] `bun run tauri build` and a packaged launch on macOS/Windows proving the assistant
+      starts on a clean target with no globally installed Bun or Node (EMB-01).
+- [ ] An offline run against real local weights with non-loopback networking disabled
+      (LOC-01). A loopback endpoint can proxy a cloud model; no code check can establish
+      locality, which is why ADR-0017 says so explicitly.
+- [ ] **AgentKit `v0.5.0` tag — blocked on the AgentKit repository owner.** It publishes
+      nothing installable today (no tags, no committed `dist/`), so the documented
+      `github:andrejvysny/AgentKit#v0.5.0` does not resolve.
+      `scripts/bootstrap-agentkit.sh` builds the pinned commit
+      `a450d6ff470fcfaacf3a37375d00d962ed2632e8` instead. When the tag lands: point
+      `assistant-host/package.json` at it, delete the script, drop its two `ci.yml` call
+      sites.
 # SESSION 34 — TAURI-AGENT BACKGROUND INTERACTION POLICY (2026-09-14, Fable, plan `~/.claude/plans/act-as-expert-on-calm-stallman.md`)
 
 Acted on an architecture review proposing four fidelity tiers so Claude can drive OneCAD without

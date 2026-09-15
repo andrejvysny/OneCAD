@@ -1,0 +1,26 @@
+{
+  "name": "late-end-for-a-settled-request",
+  "rule": "2: a res/end for a cancelled or already-settled id may still arrive and MUST be discarded. The allocation cursor is what separates this from case 06.",
+  "setup": "outboundStream",
+  "deliver": [
+    {
+      "t": "res",
+      "id": "self:0",
+      "ok": true,
+      "payload": {
+        "status": 200
+      }
+    },
+    {
+      "t": "end",
+      "id": "self:0",
+      "ok": true
+    },
+    {
+      "t": "end",
+      "id": "self:0",
+      "ok": true
+    }
+  ],
+  "expect": "discard"
+}

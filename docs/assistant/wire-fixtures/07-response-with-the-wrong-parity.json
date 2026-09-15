@@ -1,0 +1,14 @@
+{
+  "name": "response-with-the-wrong-parity",
+  "rule": "3: a res/chunk/end may only name an id the receiver allocated. The sender's own space is the wrong space.",
+  "setup": "none",
+  "deliver": [
+    {
+      "t": "res",
+      "id": "peer:0",
+      "ok": true,
+      "payload": {}
+    }
+  ],
+  "expect": "close"
+}

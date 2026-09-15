@@ -65,6 +65,7 @@ use onecad_core::ids::DocumentId;
 use onecad_core::io::recovery::RecoveryOffer;
 use onecad_core::regen::{GeometryEngine, RegenRequest, SchedulerHandle};
 
+use crate::assistant::AssistantSlot;
 use crate::document_runtime::DocumentRuntime;
 use crate::dto::WorkerStatusDto;
 use crate::events;
@@ -241,6 +242,16 @@ pub struct AppState {
     /// The in-flight backend swap's displaced half — `Some` between
     /// [`make_backend`](AppState::make_backend) and its commit/rollback.
     displaced: StdMutex<Option<DisplacedBackend>>,
+    /// The assistant sidecar's slot (ADR-0015).
+    ///
+    /// Deliberately NOT part of [`BackendBundle`], [`DisplacedBackend`] or the
+    /// backend factory: the assistant's lifetime is APP-scoped, not
+    /// document-scoped. Putting it there would hand it the two-phase document-swap
+    /// machinery — retire-on-commit, restore-on-rollback — which would kill a
+    /// running chat every time the user opened a file, for no reason at all. It is
+    /// also LAZY: `crate::run`'s setup only configures it, and the first
+    /// `assistant_start` or bridge call spawns the child.
+    pub assistant: AssistantSlot,
 }
 
 impl AppState {
@@ -296,6 +307,7 @@ impl AppState {
             circuit: RwLock::new(Arc::new(PendingBackend)),
             readiness: RwLock::new(Arc::new(PendingBackend)),
             backend_factory,
+            assistant: AssistantSlot::new(),
         }
     }
 
@@ -671,6 +683,7 @@ impl Default for AppState {
             circuit: RwLock::new(Arc::new(PendingBackend)),
             readiness: RwLock::new(Arc::new(PendingBackend)),
             backend_factory,
+            assistant: AssistantSlot::new(),
         }
     }
 }

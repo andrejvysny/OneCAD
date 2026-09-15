@@ -1,9 +1,10 @@
 /*
  * Which occupant of the LEFT sidebar region is showing. `Slots.ShellLeft`
  * hosts one full-bleed panel worth of space; `ModelTreePanel` and
- * `VariablesPanel` (both modeling) register into it and each render `null`
- * when they aren't the active tab, reading this shared store — a VS
- * Code-style sidebar-tabs pattern that needs no platform/slot changes
+ * `VariablesPanel` (both modeling) and `AssistantPanel` (`onecad.assistant`,
+ * and only when `settingsStore.assistantEnabled` is on) register into it and
+ * each render `null` when they aren't the active tab, reading this shared
+ * store — a VS Code-style sidebar-tabs pattern that needs no platform/slot changes
  * (`SlotHost` still just mounts every registered panel; only their OWN
  * render output is conditional).
  *
@@ -12,7 +13,7 @@
  */
 import { createStore, useStore } from "zustand";
 
-export type SidebarTab = "model" | "variables";
+export type SidebarTab = "model" | "variables" | "assistant";
 
 interface SidebarTabState {
   activeTab: SidebarTab;

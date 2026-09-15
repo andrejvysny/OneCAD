@@ -1,0 +1,21 @@
+{
+  "name": "empty-chunk",
+  "rule": "2a/9: a chunk with no tail is fatal. It costs a queue slot and a wakeup while charging nothing against any byte bound.",
+  "setup": "outboundStream",
+  "deliver": [
+    {
+      "t": "res",
+      "id": "self:0",
+      "ok": true,
+      "payload": {
+        "status": 200
+      }
+    },
+    {
+      "t": "chunk",
+      "id": "self:0",
+      "seq": 0
+    }
+  ],
+  "expect": "close"
+}

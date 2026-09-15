@@ -1,0 +1,14 @@
+{
+  "name": "chunk-before-head",
+  "rule": "2a: a chunk for a not-yet-headed id is fatal.",
+  "setup": "outboundStream",
+  "deliver": [
+    {
+      "t": "chunk",
+      "id": "self:0",
+      "seq": 0,
+      "bin": "aGk="
+    }
+  ],
+  "expect": "close"
+}

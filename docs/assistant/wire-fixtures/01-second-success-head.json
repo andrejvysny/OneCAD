@@ -1,0 +1,24 @@
+{
+  "name": "second-success-head",
+  "rule": "2a: a second res for a request that already has a head is fatal; it is not a replacement.",
+  "setup": "outboundStream",
+  "deliver": [
+    {
+      "t": "res",
+      "id": "self:0",
+      "ok": true,
+      "payload": {
+        "status": 200
+      }
+    },
+    {
+      "t": "res",
+      "id": "self:0",
+      "ok": true,
+      "payload": {
+        "status": 200
+      }
+    }
+  ],
+  "expect": "close"
+}

@@ -1,0 +1,18 @@
+[package]
+name = "onecad-assistant-protocol"
+version = "0.1.0"
+description = "OCAK1 assistant-bridge protocol: framing, envelopes, principals, request ids"
+edition = "2021"
+
+[features]
+# The async codec pulls the transport stack. The pure half (framing + envelopes +
+# verb tables) compiles with no async runtime at all, so a non-tokio consumer --
+# a test harness, or a future blocking peer -- pays nothing for it.
+codec = ["dep:tokio-util", "dep:bytes"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio-util = { workspace = true, optional = true, features = ["codec"] }
+bytes = { workspace = true, optional = true }

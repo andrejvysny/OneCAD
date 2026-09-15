@@ -1,0 +1,13 @@
+{
+  "name": "end-before-head",
+  "rule": "2a: an end for a not-yet-headed id is fatal.",
+  "setup": "outboundStream",
+  "deliver": [
+    {
+      "t": "end",
+      "id": "self:0",
+      "ok": true
+    }
+  ],
+  "expect": "close"
+}

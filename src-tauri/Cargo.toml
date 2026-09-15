@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/onecad-assistant-protocol",
     "crates/onecad-core",
     "crates/onecad-protocol",
     "crates/onecad-worker-stub",
@@ -61,6 +62,11 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 onecad-core = { workspace = true }
 onecad-library = { path = "crates/onecad-library" }
+# WP-AI: the OCAK1 assistant-bridge codec (ADR-0016). Its `codec` feature is the
+# async half; the app crate is the only consumer that needs it.
+onecad-assistant-protocol = { path = "crates/onecad-assistant-protocol", features = [
+    "codec",
+] }
 onecad-protocol = { workspace = true, features = ["client", "tracing"] }
 # Do not enable Tauri's `tracing` feature. In tauri-runtime-wry 2.11.x it makes
 # background `eval_script` synchronous; `AppHandle::emit` then waits for the main
@@ -83,6 +89,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+# The OCAK1 reader/writer tasks frame over `OcakCodec` and buffer into `BytesMut`
+# (`crate::assistant::bridge`); both are already in the graph via onecad-protocol.
+tokio-util = { workspace = true, features = ["codec"] }
+bytes = { workspace = true }
 # The dev-observability subscriber (`crate::logging`): stderr fmt layer + the
 # `logs/dev.jsonl` JSONL layer, both behind one `RUST_LOG`-aware `EnvFilter`.
 tracing-subscriber = { workspace = true }
@@ -104,6 +114,18 @@ toml = "0.8"
 # Recents card management: move a deleted project to the OS trash instead of
 # a permanent `remove_file` (macOS/Windows/Linux).
 trash = "5"
+# The assistant's local-provider gateway (ADR-0017) needs an HTTP client. reqwest
+# is already resolved in this lock -- tauri depends on it on Android and Apple
+# mobile -- so this adds no new crate to the dependency graph, only to the desktop
+# build. `default-features = false` is deliberate and load-bearing:
+#   * it drops `system-proxy`, so the client cannot pick a proxy up from the
+#     environment even before `ClientBuilder::no_proxy()` says so explicitly;
+#   * it drops `default-tls`. The gateway talks to loopback inference servers over
+#     plain HTTP, and pulling rustls in to serve an `https://127.0.0.1` nobody has
+#     asked for would add a TLS stack to every desktop build. A registered `https`
+#     base is refused at registration with that reason named
+#     (`GatewayError::TlsNotBuilt`), never attempted and failed obscurely.
+reqwest = { version = "0.13", default-features = false }
 
 # M5b: crash-marker liveness — `kill(pid, 0)` for the autosave recovery scan
 # (`io::recovery` injects the predicate; the app owns the platform syscall).
@@ -128,11 +150,15 @@ onecad-core = { workspace = true }
 onecad-protocol = { workspace = true, features = ["client", "tracing"] }
 uuid = { workspace = true }
 serde_json = { workspace = true }
+# `net` is for test fixtures only: `assistant_provider_gateway.rs` stands up a
+# throwaway HTTP/1.1 server on 127.0.0.1:0 so the redirect, size and cancellation
+# gates have a real upstream to observe. No product code binds a listener.
 tokio = { workspace = true, features = [
     "rt-multi-thread",
     "macros",
     "process",
     "io-util",
+    "net",
     "time",
     "sync",
 ] }

@@ -169,7 +169,7 @@ describe("settingsStore displayUnit", () => {
     const raw = localStorage.getItem(STORAGE_KEY);
     expect(raw).not.toBeNull();
     expect(JSON.parse(raw!).state.displayUnit).toBe("in");
-    expect(JSON.parse(raw!).version).toBe(11);
+    expect(JSON.parse(raw!).version).toBe(13);
   });
 });
 
@@ -438,3 +438,112 @@ describe("settingsStore deep hydration", () => {
     expect(mergeBooleanRecord(SNAP_DEFAULTS, [])).toEqual(SNAP_DEFAULTS);
   });
 });
+
+/*
+ * The assistant gate (v11 → v12). Not a fresh-install-parity backfill and not a
+ * coercion: the assistant is opt-in for EVERY user, so a pre-v12 blob lands off
+ * regardless of what it carried.
+ */
+describe("settingsStore assistantEnabled", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+    settingsStore.setState({ assistantEnabled: false });
+  });
+
+  it("defaults to off", () => {
+    expect(settingsStore.getInitialState().assistantEnabled).toBe(false);
+  });
+
+  it("a v11 blob (predates the key) migrates to v12 with the gate off", async () => {
+    seed(11, { autoConstrainMode: "off" });
+    await settingsStore.persist.rehydrate();
+    expect(settingsStore.getState().assistantEnabled).toBe(false);
+    // The rest of the blob is untouched by the bump.
+    expect(settingsStore.getState().autoConstrainMode).toBe("off");
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!).version).toBe(13);
+  });
+
+  it("a v11 blob that somehow carries a true still lands off", async () => {
+    seed(11, { assistantEnabled: true });
+    await settingsStore.persist.rehydrate();
+    expect(settingsStore.getState().assistantEnabled).toBe(false);
+  });
+
+  it("an explicit opt-in at the current version survives hydration", async () => {
+    seed(13, { assistantEnabled: true });
+    await settingsStore.persist.rehydrate();
+    expect(settingsStore.getState().assistantEnabled).toBe(true);
+  });
+});
+
+/*
+ * The assistant's local provider (v12 → v13). Endpoint and model are the user's
+ * PROPOSAL — Rust validates them (ADR-0017) — so nothing here is checked for
+ * shape beyond "is it a string": what a pre-v13 blob gets is "", which is the
+ * "no provider configured" value, and which is exactly what every pre-v13 build
+ * effectively had since nothing populated the registry at all.
+ */
+describe("settingsStore assistant provider", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+    settingsStore.setState({ assistantProviderBaseUrl: "", assistantProviderModel: "" });
+  });
+
+  it("defaults to no endpoint and no model", () => {
+    expect(settingsStore.getInitialState().assistantProviderBaseUrl).toBe("");
+    expect(settingsStore.getInitialState().assistantProviderModel).toBe("");
+  });
+
+  it("a v12 blob (predates both keys) migrates to v13 with both defaulted", async () => {
+    seed(12, { assistantEnabled: true, autoConstrainMode: "off" });
+    await settingsStore.persist.rehydrate();
+    expect(settingsStore.getState().assistantProviderBaseUrl).toBe("");
+    expect(settingsStore.getState().assistantProviderModel).toBe("");
+    // The bump carries the rest of the blob through untouched.
+    expect(settingsStore.getState().assistantEnabled).toBe(true);
+    expect(settingsStore.getState().autoConstrainMode).toBe("off");
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!).version).toBe(13);
+  });
+
+  it("a configured endpoint and model survive hydration", async () => {
+    seed(13, {
+      assistantProviderBaseUrl: "http://127.0.0.1:11434/v1",
+      assistantProviderModel: "qwen3:8b",
+    });
+    await settingsStore.persist.rehydrate();
+    expect(settingsStore.getState().assistantProviderBaseUrl).toBe(
+      "http://127.0.0.1:11434/v1",
+    );
+    expect(settingsStore.getState().assistantProviderModel).toBe("qwen3:8b");
+  });
+
+  it("a non-string in a same-version blob coerces to no provider", async () => {
+    // `merge` runs on every hydration, not just across a bump — a hand-edited
+    // blob must not reach the configure command as a number.
+    seed(13, { assistantProviderBaseUrl: 11434, assistantProviderModel: null });
+    await settingsStore.persist.rehydrate();
+    expect(settingsStore.getState().assistantProviderBaseUrl).toBe("");
+    expect(settingsStore.getState().assistantProviderModel).toBe("");
+  });
+
+  it("the setters write through to localStorage", () => {
+    setProvider("http://127.0.0.1:1234/v1", "llama3");
+    expect(settingsStore.getState().assistantProviderBaseUrl).toBe("http://127.0.0.1:1234/v1");
+    const raw = JSON.parse(localStorage.getItem(STORAGE_KEY)!);
+    expect(raw.state.assistantProviderBaseUrl).toBe("http://127.0.0.1:1234/v1");
+    expect(raw.state.assistantProviderModel).toBe("llama3");
+  });
+});
+
+function setProvider(baseUrl: string, model: string): void {
+  settingsStore.getState().setAssistantProviderBaseUrl(baseUrl);
+  settingsStore.getState().setAssistantProviderModel(model);
+}
