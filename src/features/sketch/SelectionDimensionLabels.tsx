@@ -19,6 +19,7 @@ import { useSketchStore } from "@/stores/sketchStore";
 import { useSketchSelectionStore } from "@/stores/sketchSelectionStore";
 import { useViewportEngine } from "@/viewport/engineBridge";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
+import { ANNOTATION_PRIORITY } from "@/viewport/engine/HtmlOverlayDriver";
 import {
   hasAuthoredLength,
   unconstrainedEdgeLabel,
@@ -63,7 +64,13 @@ export function SelectionDimensionLabels() {
     for (const l of labels) {
       const el = refs.current.get(l.id);
       if (!el) continue;
-      overlay.register(l.id, el, planePointToWorld(plane, l.at));
+      overlay.register(l.id, el, planePointToWorld(plane, l.at), {
+        annotation: {
+          priority: ANNOTATION_PRIORITY.dimensionLabel,
+          pinned: false,
+          keepWhenUnplaced: true,
+        },
+      });
       ids.push(l.id);
     }
     engine.invalidate();

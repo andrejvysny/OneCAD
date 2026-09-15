@@ -121,7 +121,7 @@ describe("SketchController exit ordering", () => {
   });
 
   it("exiting sketch mode runs cancelSketch THEN finishSketch (record mint after the squash)", async () => {
-    toolStore.getState().setMode("sketch", "sketch1");
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" });
     await flush();
     expect(sketchStore.getState().session).not.toBeNull();
 
@@ -144,7 +144,7 @@ describe("SketchController exit ordering", () => {
     // F), whose gate vitest keeps closed — open it just for this assertion.
     __resetLogForTests();
 
-    toolStore.getState().setMode("sketch", "sketch1");
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" });
     await flush();
     toolStore.getState().setMode("model");
     await flush();
@@ -200,7 +200,7 @@ describe("SketchController exit ordering", () => {
     // assertion, exactly as the cancel-failure spec above does.
     __resetLogForTests();
 
-    toolStore.getState().setMode("sketch", "sketch1");
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" });
     await flush();
     toolStore.getState().setMode("model");
     await flush();
@@ -228,7 +228,7 @@ describe("SketchController exit ordering", () => {
    * reverted would record something the user never asked for).
    */
   it("a discarding exit reverts the session and never mints the record", async () => {
-    toolStore.getState().setMode("sketch", "sketch1");
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" });
     await flush();
 
     sketchStore.getState().setExitIntent("discard");
@@ -252,7 +252,7 @@ describe("SketchController exit ordering", () => {
       return Promise.resolve({ discarded: false, keptReason: "history was trimmed" });
     });
 
-    toolStore.getState().setMode("sketch", "sketch1");
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" });
     await flush();
     sketchStore.getState().setExitIntent("discard");
     toolStore.getState().setMode("model");
@@ -269,7 +269,7 @@ describe("SketchController exit ordering", () => {
   });
 
   it("Esc / Finish leave the keep-exit untouched", async () => {
-    toolStore.getState().setMode("sketch", "sketch1");
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" });
     await flush();
     toolStore.getState().setMode("model"); // no intent armed
     await flush();

@@ -101,6 +101,16 @@ struct OpOutcome {
     // it is the evidence Rust adopts ONCE into a record that carries no frozen
     // `mate.targetAxis`.
     std::optional<nlohmann::json> mate_resolved;
+    // UX-2026-09-14 WP-1 (B1, SCHEMA §7.2 `planStep.sketchPlacement`): set ONLY on
+    // a `Sketch` step whose `params.hostFace` resolved AND whose transported frame
+    // differs from the AUTHORED one — `{plane:{origin,xAxis,yAxis,normal},
+    // translationMm, rotationDeg}`. The comparison is EXACT (no deadband): a
+    // sub-epsilon plane displacement still moves the sketch, and `significant`
+    // rides the `SKETCH_HOST_RESEATED` info diagnostic instead of gating this.
+    // Absent on a world/datum sketch, on a legacy record with no `hostFace`, on a
+    // resolved host that did not move, and on a host that fell to NeedsRepair
+    // (the AUTHORED frame stands there — the sketch is never silently moved).
+    std::optional<nlohmann::json> sketch_placement;
 
     static OpOutcome ok() { return OpOutcome{}; }
     static OpOutcome fail(std::string code, std::string msg) {

@@ -58,7 +58,9 @@ export function ToolButton({
   disabledReason,
 }: ToolButtonProps) {
   return (
-    <Tooltip label={disabled && disabledReason ? disabledReason : `${label} (${shortcut})`}>
+    <Tooltip
+      label={disabled && disabledReason ? disabledReason : shortcut ? `${label} (${shortcut})` : label}
+    >
       <button
         type="button"
         aria-label={label}

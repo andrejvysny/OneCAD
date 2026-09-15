@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { RefObject } from "react";
@@ -31,8 +31,8 @@ describe("SnapPopover", () => {
     render(<SnapPopover open onClose={() => {}} anchorRef={anchorRef} />);
     const live = [
       "Grid",
-      "Sketch guide lines",
-      "Sketch guide points",
+      "Alignment guides",
+      "Snap to sketch points (end, mid, center)",
       "Quadrant points",
       "Intersections",
       "On-curve points",
@@ -109,6 +109,15 @@ describe("SnapPopover", () => {
     const raw = localStorage.getItem("onecad.settings");
     expect(raw).not.toBeNull();
     expect(JSON.parse(raw!).state.snapTo.grid).toBe(false);
+  });
+
+  // C1: Escape must close the snap popover, same as Navigation help.
+  it("C1: Escape closes the popover", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<SnapPopover open onClose={onClose} anchorRef={anchorRef} />);
+    await user.keyboard("{Escape}");
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it("persists a SHOW toggle", async () => {

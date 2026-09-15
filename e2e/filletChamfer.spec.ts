@@ -196,7 +196,8 @@ test("F arms the unified tool with an edge seeded; an empty selection hints for 
   // No edge selected → the tool arms nothing and names the CURRENT (default) type,
   // exactly as before unification (armEdgeOpFromSelection's empty-selection guard).
   await page.keyboard.press("f");
-  await expect(page.getByText("Select edges, then Fillet")).toBeVisible();
+  // C7 named the second entry point in this copy: a face arms the tool too.
+  await expect(page.getByText("Select edges or a face, then Fillet")).toBeVisible();
 
   await page.keyboard.press("Escape");
   await seedSelection(page, [EDGE_REF]);
@@ -520,4 +521,52 @@ test("a two-distance chamfer BLOCKS the type flip, and allows it once d2 is clea
   await expect.poll(async () => (await lastFeature(page)).label).toBe("Fillet");
   expect((await lastFeature(page)).id).toBe(id);
   expect((await getFeatureLabels(page)).length).toBe(rowCount);
+});
+
+// ── arming from a FACE selection (C7 / D9) ──────────────────────────────────
+
+/*
+ * The review's second session found Fillet unreachable: the edges could not be
+ * clicked (T8) AND the tool was disabled with a face selected (A-265) or a whole
+ * body selected (A-289). Picking is fixed in `Picker.ts` (`edge-pick.spec.ts`);
+ * this is the other entry point — a selected face arms the tool over that face's
+ * boundary edges, which is what most CAD does.
+ */
+const FACE_REF = {
+  kind: "face",
+  id: "body1#f:0",
+  bodyId: "body1",
+  topoKey: "f:0",
+  // The +X face's centre. No `elementId` for the same reason `EDGE_REF` has
+  // none: a seeded ref stands in for a FRESH pick.
+  anchor: { worldPoint: [40, 0, 0] as [number, number, number] },
+};
+
+test("a FACE selection arms Fillet over that face's four edges, and commits", async ({ page }) => {
+  await openEditorDebug(page);
+  await seedSelection(page, [FACE_REF]);
+  const before = await getFeatureLabels(page);
+
+  await page.getByRole("button", { name: "Fillet / Chamfer", exact: true }).click();
+  await expect.poll(async () => (await toolPhases(page))?.filletPhase).toBe("armed");
+  // The mock box's +X face is bounded by e:1, e:5, e:9 and e:10 — and the hint
+  // says WHERE the four came from, so a whole-face arm is not mistaken for the
+  // single edge the user thought they clicked.
+  await expect(page.getByTestId("status-hint")).toHaveText(/Fillet 4 edges of Face 0/);
+
+  await page.keyboard.press("Enter");
+  await expect.poll(async () => (await getFeatureLabels(page)).length).toBe(before.length + 1);
+  expect((await getFeatureLabels(page)).at(-1)).toBe("Fillet");
+});
+
+test("a whole-BODY selection leaves Fillet disabled, with a reason", async ({ page }) => {
+  await openEditorDebug(page);
+  await seedSelection(page, [{ kind: "body", id: "body1" }]);
+  const button = page.getByRole("button", { name: "Fillet / Chamfer", exact: true });
+  await expect(button).toHaveAttribute("aria-disabled", "true");
+  await button.hover();
+  await expect(page.getByRole("tooltip")).toHaveText(/Select edges or a face/);
+  // "Fillet this body" has no defensible edge set, so the button stays inert.
+  await button.click({ force: true });
+  await expect(button).toHaveAttribute("aria-pressed", "false");
 });

@@ -12,6 +12,9 @@ import {
   Picker,
   linePickThreshold,
   line2PickThreshold,
+  pixelWorldSize,
+  edgeDepthSlack,
+  EDGE_DEPTH_SLACK_PX,
   choosePreferredHit,
   firstUnclippedHit,
   secondaryHitWins,
@@ -552,6 +555,217 @@ describe("Picker overlap enumeration", () => {
       kinds: ["vertex" as unknown as "face"],
     })).toEqual([]);
     picker.dispose();
+  });
+});
+
+/*
+ * Edge-vs-face arbitration in SCREEN space (D9, finding T8).
+ *
+ * The two halves are tested apart. The DEPTH window is pure arithmetic over
+ * fabricated hits, because the point of the change is which depth the window is
+ * measured at — something no scene can demonstrate on its own. The SCREEN
+ * distance is a real raycast against the real box, because it is three's Line2
+ * radius that enforces it and only a raycast proves what that radius is.
+ */
+describe("edgeDepthSlack — the window follows the HIT depth, not the orbit target", () => {
+  const H = 600;
+  const cam = (fov: number) => {
+    const c = new THREE.PerspectiveCamera(fov, 4 / 3, 0.1, 5000);
+    c.updateProjectionMatrix();
+    return c;
+  };
+
+  it("is exactly EDGE_DEPTH_SLACK_PX pixels of world size at the given depth", () => {
+    const c = cam(35);
+    expect(edgeDepthSlack(c, H, 400)).toBeCloseTo(EDGE_DEPTH_SLACK_PX * pixelWorldSize(c, H, 400), 9);
+    // …and a pixel really does grow with depth and with the field of view.
+    expect(pixelWorldSize(c, H, 800)).toBeCloseTo(pixelWorldSize(c, H, 400) * 2, 9);
+    expect(pixelWorldSize(cam(76), H, 400)).toBeGreaterThan(pixelWorldSize(cam(35), H, 400));
+  });
+
+  it("is depth-independent for an orthographic camera", () => {
+    const oc = new THREE.OrthographicCamera(-100, 100, 50, -50, 0.1, 1000); // height 100
+    expect(pixelWorldSize(oc, H, 10)).toBeCloseTo(pixelWorldSize(oc, H, 9000), 9);
+    expect(pixelWorldSize(oc, H, 10)).toBeCloseTo(100 / H, 9);
+  });
+
+  it("accepts a boundary edge a pixel behind its face and refuses one forty deep", () => {
+    const c = cam(35);
+    const faceDepth = 400;
+    const px = pixelWorldSize(c, H, faceDepth);
+    const face = { ...fakeFaceHit("body1", 0), distance: faceDepth } as THREE.Intersection;
+    const justBehind = fakeEdgeHit("body1", 0, faceDepth + 1.5 * px);
+    const farBehind = fakeEdgeHit("body1", 0, faceDepth + 40 * px);
+    const slack = edgeDepthSlack(c, H, faceDepth);
+    expect(choosePreferredHit(face, justBehind, slack)?.kind).toBe("edge");
+    expect(choosePreferredHit(face, farBehind, slack)?.kind).toBe("face");
+
+    /*
+     * The retired rule read the ORBIT-TARGET distance instead of the face's own,
+     * so the same two hits flipped with nothing but a pan or a zoom: a target
+     * pulled in to 30 refused the boundary edge (T8), and one pushed out to 3000
+     * accepted geometry forty pixels deep (the session-32 inverse).
+     */
+    expect(choosePreferredHit(face, justBehind, linePickThreshold(c, H, 30))?.kind).toBe("face");
+    expect(choosePreferredHit(face, farBehind, linePickThreshold(c, H, 3000))?.kind).toBe("edge");
+  });
+
+  it("keeps the face when the edge is far behind it, whatever the camera", () => {
+    for (const c of [cam(76), cam(35)]) {
+      const face = { ...fakeFaceHit("body1", 0), distance: 100 } as THREE.Intersection;
+      const occluded = fakeEdgeHit("body1", 0, 400);
+      expect(choosePreferredHit(face, occluded, edgeDepthSlack(c, 600, 100))?.kind).toBe("face");
+    }
+  });
+});
+
+/*
+ * The screen-distance half, end to end. The mock box (80×60×30, origin-centred)
+ * carries both its face mesh and its fat edge lines, so every pick below goes
+ * through the same `raycastAll` + `choosePreferredHit` path the pointer uses.
+ */
+describe("Picker screen-space edge arbitration — real faces and real edges", () => {
+  const VIEW = { w: 800, h: 600 };
+  /** The vertical edge at the (+x,+y) corner: [40,30,−15]..[40,30,15]. */
+  const CORNER: [number, number, number] = [40, 30, 0];
+  const CORNER_TOP: [number, number, number] = [40, 30, 15];
+
+  afterEach(() => {
+    disposeAll();
+    __resetRegistryForTests();
+  });
+
+  function harness(camera: THREE.Camera) {
+    const entry = boxEntry();
+    swap("body1", entry);
+    const root = new THREE.Group();
+    const mesh = new THREE.Mesh(
+      entry.geometry,
+      new THREE.MeshStandardMaterial({ side: THREE.DoubleSide }),
+    );
+    mesh.userData = { bodyId: "body1", kind: "face" };
+    root.add(mesh);
+    const line = new LineSegments2(
+      entry.edgeGeometry!,
+      new LineMaterial({ linewidth: BODY_EDGE_WIDTH }),
+    );
+    line.userData = { bodyId: "body1", kind: "edge" };
+    root.add(line);
+    root.updateMatrixWorld(true);
+
+    const canvas = document.createElement("canvas");
+    canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: VIEW.w, height: VIEW.h }) as DOMRect;
+
+    const picker = new Picker({
+      canvas,
+      getCamera: () => camera,
+      getRoot: () => root,
+      getViewportHeight: () => VIEW.h,
+      // Deliberately NOT the camera's distance: the orbit target is wherever the
+      // user last panned to, and the arbitration must not read it.
+      getFocusDistance: () => 30,
+      // dpr 1, so one device pixel IS one CSS pixel and the offsets below are
+      // the CSS px the EDGE_PICK_PX radius is expressed in.
+      getResolution: () => ({ w: VIEW.w, h: VIEW.h }),
+      invalidate: vi.fn(),
+      isActive: () => true,
+      onHover: vi.fn(),
+      onPick: vi.fn(),
+    });
+    return picker;
+  }
+
+  /** World point → client px, the inverse of the Picker's own NDC math. */
+  function toScreen(camera: THREE.Camera, p: readonly [number, number, number]) {
+    const v = new THREE.Vector3(p[0], p[1], p[2]).project(camera);
+    return { x: ((v.x + 1) / 2) * VIEW.w, y: ((1 - v.y) / 2) * VIEW.h };
+  }
+
+  /** Unit screen vector perpendicular to the corner edge, pointing INTO the box. */
+  function inward(camera: THREE.Camera) {
+    const a = toScreen(camera, CORNER);
+    const b = toScreen(camera, CORNER_TOP);
+    const along = { x: b.x - a.x, y: b.y - a.y };
+    const len = Math.hypot(along.x, along.y);
+    expect(len).toBeGreaterThan(1); // a head-on edge would make this meaningless
+    const n = { x: -along.y / len, y: along.x / len };
+    const centre = toScreen(camera, [0, 0, 0]);
+    const sign = Math.sign(n.x * (centre.x - a.x) + n.y * (centre.y - a.y)) || 1;
+    return { x: n.x * sign, y: n.y * sign };
+  }
+
+  /** Pick `px` CSS pixels off the corner edge (positive = into the body). */
+  function pickOffEdge(camera: THREE.Camera, px: number) {
+    const picker = harness(camera);
+    const at = toScreen(camera, CORNER);
+    const dir = inward(camera);
+    const hit = picker.probe(at.x + dir.x * px, at.y + dir.y * px);
+    picker.dispose();
+    return hit;
+  }
+
+  function perspective(fov: number): THREE.Camera {
+    const c = new THREE.PerspectiveCamera(fov, VIEW.w / VIEW.h, 0.1, 5000);
+    c.up.set(0, 0, 1); // engine invariant: world is Z-up
+    c.position
+      .set(...CORNER)
+      .addScaledVector(new THREE.Vector3(1, 1, 0.35).normalize(), 400);
+    c.lookAt(...CORNER);
+    c.updateMatrixWorld(true);
+    return c;
+  }
+
+  function ortho(): THREE.Camera {
+    const halfH = 60;
+    const c = new THREE.OrthographicCamera(
+      (-halfH * VIEW.w) / VIEW.h,
+      (halfH * VIEW.w) / VIEW.h,
+      halfH,
+      -halfH,
+      0.1,
+      5000,
+    );
+    c.up.set(0, 0, 1);
+    c.position
+      .set(...CORNER)
+      .addScaledVector(new THREE.Vector3(1, 1, 0.35).normalize(), 400);
+    c.lookAt(...CORNER);
+    c.updateMatrixWorld(true);
+    return c;
+  }
+
+  describe.each([
+    ["FOV 76", perspective(76)],
+    ["FOV 35", perspective(35)],
+    ["orthographic", ortho()],
+  ])("%s", (_label, camera) => {
+    it("takes the edge two pixels inside it, with the face directly behind", () => {
+      expect(pickOffEdge(camera, 2)).toMatchObject({ kind: "edge", topoKey: "e:10" });
+    });
+
+    it("still takes the edge seven pixels in — the raised EDGE_PICK_PX", () => {
+      expect(pickOffEdge(camera, 7)).toMatchObject({ kind: "edge", topoKey: "e:10" });
+    });
+
+    it("gives the face the pick twelve pixels in, past the radius", () => {
+      expect(pickOffEdge(camera, 12)?.kind).toBe("face");
+    });
+
+    it("takes the silhouette edge from three pixels OUTSIDE the body", () => {
+      // Nothing behind it at all, so the face can never be the answer here.
+      expect(pickOffEdge(camera, -3)).toMatchObject({ kind: "edge", topoKey: "e:10" });
+    });
+
+    it("takes the face in the middle of it, far from any edge", () => {
+      // The session-32 inverse: a left-click on a body face must select that
+      // face, never an edge that happens to be near in world units.
+      const picker = harness(camera);
+      const at = toScreen(camera, [40, 0, 0]); // centre of the +X face
+      const hit = picker.probe(at.x, at.y);
+      picker.dispose();
+      expect(hit).toMatchObject({ kind: "face", bodyId: "body1" });
+    });
   });
 });
 

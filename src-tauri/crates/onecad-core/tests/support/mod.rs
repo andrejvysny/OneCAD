@@ -338,6 +338,7 @@ impl GeometryEngine for FakeEngine {
                             diagnostics: vec![],
                             mate_placement: None,
                             mate_resolved: None,
+                            sketch_placement: None,
                         }));
                         per_step.push(StepResult {
                             step_index: step,
@@ -360,6 +361,7 @@ impl GeometryEngine for FakeEngine {
                             diagnostics: vec![],
                             mate_placement: None,
                             mate_resolved: None,
+                            sketch_placement: None,
                         }));
                         per_step.push(StepResult {
                             step_index: step,

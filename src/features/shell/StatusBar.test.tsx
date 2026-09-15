@@ -137,6 +137,24 @@ describe("StatusBar", () => {
     expect(second).not.toBe(first); // remounted, not reused — the animation replays
   });
 
+  // FP-N2 (docs/qa/UX_REVIEW_2026-09-14.md N2): a long error hint must never push
+  // FOV/DOF/the mono XYZ read-out off the row — it truncates with the full text
+  // reachable via `title` instead of wrapping or overflowing.
+  it("truncates a long hint instead of pushing FOV/DOF off the row", () => {
+    renderStatusBar();
+    const longMessage = "E".repeat(200);
+
+    act(() =>
+      viewportStore.getState().setStatusHint(longMessage, { severity: "error", sticky: true }),
+    );
+
+    const hint = screen.getByTestId("status-hint");
+    expect(hint).toHaveClass("truncate");
+    expect(hint.title).toBe(longMessage);
+    expect(screen.getByTestId("fov")).toBeInTheDocument();
+    expect(screen.getByText("DOF: 3")).toBeInTheDocument();
+  });
+
   it("toggles projection and dims FOV in ortho", async () => {
     const user = userEvent.setup();
     renderStatusBar();

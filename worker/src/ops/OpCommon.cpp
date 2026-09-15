@@ -5,6 +5,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <optional>
 
 #include <BOPAlgo_Operation.hxx>
@@ -818,6 +819,120 @@ std::optional<OpOutcome> boolean_result_policy(app::BooleanMode mode, const Topo
     if (result_solids == 0) {
         return refuse(empty_code, std::string(op_name) + " " + boolean_mode_name(mode) +
                                       ": the result would be empty");
+    }
+    return std::nullopt;
+}
+
+VolumeMeasurement measure_volume(const TopoDS_Shape& shape, double eps) {
+    VolumeMeasurement out;
+    if (shape.IsNull()) return out;
+    try {
+        GProp_GProps props;
+        // The RETURN value is the relative error the integration achieved — the only
+        // bound on this measurement available, and what makes `U` measurable per call
+        // rather than assumed.
+        const double achieved = BRepGProp::VolumeProperties(shape, props, eps);
+        const double volume = props.Mass();
+        if (!std::isfinite(volume) || !std::isfinite(achieved) || achieved < 0.0) return out;
+        out.volume_mm3 = volume;
+        out.relative_error = achieved;
+        out.measured = true;
+    } catch (const Standard_Failure&) {
+        return out;  // unmeasurable — the caller refuses rather than guessing zero
+    }
+    return out;
+}
+
+std::optional<OpOutcome> cut_effect_policy(app::BooleanMode mode, const TopoDS_Shape& target,
+                                           const TopoDS_Shape& result, const char* op_name,
+                                           const std::string& target_id, json evidence_extra) {
+    if (mode != app::BooleanMode::Cut) return std::nullopt;
+
+    const VolumeMeasurement before = measure_volume(target);
+    const VolumeMeasurement after = measure_volume(result);
+
+    json evidence = std::move(evidence_extra);
+    evidence["operation"] = boolean_mode_name(mode);
+    evidence["targetBodyId"] = target_id;
+    const auto refuse = [&](const char* code, const std::string& message) {
+        OpOutcome failure = OpOutcome::fail("OP_FAILED", message);
+        failure.diagnostics.push_back({{"severity", "error"},
+                                       {"code", code},
+                                       {"message", message},
+                                       {"stage", "publish"},
+                                       {"evidence", json{{"boolean", evidence}}}});
+        return failure;
+    };
+
+    if (!before.measured || !after.measured) {
+        evidence["volumeBefore"] = before.measured ? json(before.volume_mm3) : json(nullptr);
+        evidence["volumeAfter"] = after.measured ? json(after.volume_mm3) : json(nullptr);
+        return refuse("CUT_VOLUME_UNMEASURABLE",
+                      std::string(op_name) +
+                          " Cut: the body's volume could not be measured, so material removal "
+                          "cannot be demonstrated");
+    }
+
+    // εV = a³ + U + κ·ulp(V). Three independent floors, deliberately summed rather
+    // than maxed, because each bounds a different way `delta` can be nonzero
+    // without material having been removed:
+    //
+    //   a³  the SEMANTIC floor (`minimum_volume()` — the smallest cube whose side
+    //       is a change worth claiming). Absolute, does not scale with the body.
+    //   U   what the two INTEGRATIONS could be off by, from the relative error
+    //       `BRepGProp::VolumeProperties` actually returns.
+    //   κ·ulp  the REPRESENTATION floor. `a³ = 1e−9 mm³` does not scale but binary64
+    //       resolution does: at V = 1e9 mm³ (a 1 m cube) consecutive doubles are
+    //       2^(29−52) ≈ 1.19e−7 mm³ apart — a hundred times `a³`. An imprint-only
+    //       cut CHANGES THE TOPOLOGY, so the before/after integrations run over
+    //       different face sets and can land a few ULP apart with nothing removed;
+    //       with `VolumeProperties` reporting zero error (U = 0) that spurious
+    //       decrease would otherwise pass as demonstrated material removal.
+    //       κ = 8 covers the handful of roundings a volume integral accumulates.
+    constexpr double kCutUlpSlack = 8.0;
+    const auto absolute_error = [](const VolumeMeasurement& m) {
+        // OCCT's `e` is relative to the TRUE volume: |V̂ − V| ≤ e·|V|. Measured, we
+        // only have V̂, and |V| ≤ |V̂|/(1−e), so the absolute bound is e·|V̂|/(1−e).
+        // For the e ≈ 0 that a converged integration reports this is just e·|V̂|; it
+        // only widens when the integration barely converged.
+        const double e = m.relative_error;
+        if (!(e < 1.0)) return std::numeric_limits<double>::infinity();
+        return e * std::abs(m.volume_mm3) / (1.0 - e);
+    };
+    const double u = absolute_error(before) + absolute_error(after);
+    const double scale = std::max(std::abs(before.volume_mm3), std::abs(after.volume_mm3));
+    const double ulp = std::nextafter(scale, std::numeric_limits<double>::infinity()) - scale;
+    const double epsilon_v =
+        kernel::validation::precision_of(target).minimum_volume() + u + kCutUlpSlack * ulp;
+    const double delta = before.volume_mm3 - after.volume_mm3;
+
+    if (!std::isfinite(epsilon_v)) {
+        // A relative error of 100% or more bounds nothing. Refusing as
+        // UNMEASURABLE is the honest answer; letting εV run to infinity would
+        // report the same body as `CUT_NO_EFFECT` and claim a measurement was made.
+        evidence["volumeBefore"] = before.volume_mm3;
+        evidence["volumeAfter"] = after.volume_mm3;
+        evidence["relErrBefore"] = before.relative_error;
+        evidence["relErrAfter"] = after.relative_error;
+        return refuse("CUT_VOLUME_UNMEASURABLE",
+                      std::string(op_name) +
+                          " Cut: the volume measurement carries no usable error bound, so "
+                          "material removal cannot be demonstrated");
+    }
+
+    evidence["volumeBefore"] = before.volume_mm3;
+    evidence["volumeAfter"] = after.volume_mm3;
+    evidence["toleranceMm3"] = epsilon_v;
+    evidence["relErrBefore"] = before.relative_error;
+    evidence["relErrAfter"] = after.relative_error;
+
+    if (delta < -epsilon_v) {
+        return refuse("CUT_VOLUME_INCREASED",
+                      std::string(op_name) + " Cut: the result is LARGER than the target body");
+    }
+    if (std::abs(delta) <= epsilon_v) {
+        return refuse("CUT_NO_EFFECT",
+                      std::string(op_name) + " Cut: the tool removes no material from " + target_id);
     }
     return std::nullopt;
 }

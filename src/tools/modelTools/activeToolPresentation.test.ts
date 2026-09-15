@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import { toolChipStore } from "@/stores/toolChipStore";
-import { activeToolPresentation } from "./activeToolPresentation";
+import { activeToolPresentation, activeToolPresentationTitle } from "./activeToolPresentation";
 import { documentStore, seedMockDocument } from "@/stores/documentStore";
 import type { ActiveToolContextFor } from "./activeToolContext";
 
@@ -211,5 +211,53 @@ describe("activeToolPresentation", () => {
       canConfirm: false,
       canCancel: false,
     });
+  });
+
+  /*
+   * N3 — the inspector titled a committed Fillet "Edge operation" while the
+   * history row said "Fillet". The live chip already reads `state.edgeOp`; the
+   * read-only recap renders from the PRESENTATION (the chip is cleared by then),
+   * so the operation has to survive on the presentation's intent.
+   */
+  it("titles an edge operation by the operation it actually is", () => {
+    const fn = vi.fn();
+    toolChipStore.getState().showFillet(2, [0, 0, 0], fn, { onConfirm: fn }, { edgeOp: "Chamfer" });
+    const chamfer = activeToolPresentation(toolChipStore.getState());
+    if (chamfer === null) throw new Error("no presentation");
+    expect(activeToolPresentationTitle(chamfer)).toBe("Chamfer");
+
+    toolChipStore.getState().showFillet(2, [0, 0, 0], fn, { onConfirm: fn }, { edgeOp: "Fillet" });
+    const fillet = activeToolPresentation(toolChipStore.getState());
+    if (fillet === null) throw new Error("no presentation");
+    expect(activeToolPresentationTitle(fillet)).toBe("Fillet");
+  });
+
+  /*
+   * T5 — `Direction: Normal [0, 0, 1]` never changed, through a symmetric toggle
+   * or a drag through zero. The arm-time vector is the BASIS; the live sense
+   * comes from the signed value and the symmetric flag.
+   */
+  it("derives the profile direction from the signed value and the symmetric flag", () => {
+    const fn = vi.fn();
+    const armed = (value: number, symmetric: boolean) => {
+      toolChipStore
+        .getState()
+        .showExtrude(value, [0, 0, 0], { onValue: fn, onSymmetric: fn, onConfirm: fn, onCancel: fn }, { symmetric });
+      toolChipStore.getState().setContext("extrudeDepth", {
+        tool: "extrudeDepth",
+        kind: "profile",
+        sketch: { sketchId: "sketch2" },
+        regionIds: ["r1"],
+        hostBodies: [],
+        direction: { kind: "normal", vector: [0, 0, 1] },
+      });
+      const presentation = activeToolPresentation(toolChipStore.getState());
+      if (presentation?.tool !== "extrudeDepth") throw new Error("wrong presentation tool");
+      return presentation.targets?.direction ?? null;
+    };
+
+    expect(armed(12, false)).toMatchObject({ sense: "positive", label: "+Normal [0, 0, 1]" });
+    expect(armed(-12, false)).toMatchObject({ sense: "negative", label: "\u2212Normal [0, 0, 1]" });
+    expect(armed(12, true)).toMatchObject({ sense: "both", label: "Both \u00b1 normal [0, 0, 1]" });
   });
 });

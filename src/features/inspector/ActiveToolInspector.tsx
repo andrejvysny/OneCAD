@@ -1,5 +1,6 @@
 import {
   BooleanModeSegments,
+  DirectionFlipButton,
   DraftSegment,
   EndConditionSegments,
   SymmetricToggle,
@@ -18,15 +19,16 @@ import {
   SegmentToggle,
   TransformModeSegments,
 } from "@/features/toolbar/ModelToolChips";
-import { useCallback, type ReactNode } from "react";
+import { useCallback, useEffect, type ReactNode } from "react";
 import { toolChipStore, useToolChipStore } from "@/stores/toolChipStore";
 import type { ToolChipState, ToolValueValidation } from "@/stores/toolChipStore";
 import {
-  activeToolLabel,
   activeToolPresentation,
+  activeToolPresentationTitle,
   formatActiveToolField,
 } from "@/tools/modelTools/activeToolPresentation";
-import { useOperationAttemptStore } from "@/stores/operationAttemptStore";
+import { operationAttemptStore, useOperationAttemptStore } from "@/stores/operationAttemptStore";
+import { selectionStore } from "@/stores/selectionStore";
 import { useDocumentStore } from "@/stores/documentStore";
 import { setToolChipDockHost } from "@/features/toolbar/toolChipDockBridge";
 import { ActiveToolTargets } from "./ActiveToolTargets";
@@ -142,12 +144,16 @@ function ExtrudeInspector({
           onConfirm={() => toolChipStore.getState().onConfirm?.()}
         />
       )}
-      {state.showSymmetric && state.endCondition === "Blind" && (
-        <SymmetricToggle
-          pressed={state.symmetric}
-          onToggle={() => toolChipStore.getState().onSymmetric?.(!state.symmetric)}
-        />
-      )}
+      <div className="flex items-center gap-1">
+        {state.showSymmetric && state.endCondition === "Blind" && (
+          <SymmetricToggle
+            pressed={state.symmetric}
+            onToggle={() => toolChipStore.getState().onSymmetric?.(!state.symmetric)}
+          />
+        )}
+        {/* T3: the direction flip the drag-through-zero gesture used to hide. */}
+        {state.onFlip && <DirectionFlipButton onFlip={() => toolChipStore.getState().onFlip?.()} />}
+      </div>
       <BooleanModeControls state={state} />
     </InspectorSection>
   );
@@ -260,6 +266,32 @@ export function ActiveToolInspector() {
   const presentation = activeToolPresentation(state) ?? scopedAttempt?.presentation ?? null;
   const showTargetSummary = presentation !== null && presentation.tool !== "dimension" && presentation.tool !== "sketchValue";
   const dockRef = useCallback((host: HTMLDivElement | null) => setToolChipDockHost(host), []);
+  /*
+   * A settled `completed` attempt stops being about anything on screen the
+   * moment the user selects something else (N7/N8): the recap kept the previous
+   * operation's targets pinned above the new selection, and after a fillet it
+   * sat over a panel that read "Nothing selected".
+   *
+   * Only `completed` is dropped. `applying` is still in flight — and a re-edit
+   * entered from a history row never passes through `activateTool`, the only
+   * other caller of `clear()`, so a selection write during its apply is the one
+   * thing that could take its section away. `failed` is a message the user has
+   * not acknowledged yet.
+   *
+   * Subscribed ONCE, outside React's render, because the trigger is the WRITE
+   * itself: a `useEffect` on the selection value could not tell a genuine
+   * re-selection of the same refs from a re-render.
+   */
+  useEffect(() => {
+    let previous = selectionStore.getState().selected;
+    return selectionStore.subscribe((next) => {
+      if (next.selected === previous) return;
+      previous = next.selected;
+      if (operationAttemptStore.getState().attempt?.phase === "completed") {
+        operationAttemptStore.getState().clear();
+      }
+    });
+  }, []);
   if (!presentation) return null;
 
   /*
@@ -286,7 +318,7 @@ export function ActiveToolInspector() {
           : "Last operation";
     return (
       <InspectorSection
-        title={activeToolLabel(presentation.tool)}
+        title={activeToolPresentationTitle(presentation)}
         validation={presentation.validation}
         subtitle={terminalSubtitle}
       >

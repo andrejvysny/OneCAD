@@ -385,11 +385,13 @@ describe("ModelToolController host-boolean (sketch on a face defaults to modifyi
     controller.editExtrudeFeature("feat-ex");
     await flush();
 
-    // The host default must not touch a re-edit — its commit deep-merges the STORED
-    // params, so a fresh-arm default here would silently re-target the feature.
-    expect(debug().booleanMode).toBe("NewBody");
-    expect(debug().booleanTargetId).toBeNull();
-    expect(toolChipStore.getState().showBooleanSegments).toBe(false);
+    // The host default must not touch a re-edit — a fresh-arm default here would
+    // silently re-target the feature. T6: the arm now seeds from the RECORD, so
+    // the stored Cut is what the FSM and the (now visible) segments both hold.
+    expect(debug().booleanMode).toBe("Cut");
+    expect(debug().booleanTargetId).toBe("body1");
+    expect(toolChipStore.getState().showBooleanSegments).toBe(true);
+    expect(toolChipStore.getState().booleanMode).toBe("Cut");
 
     toolChipStore.getState().onValue?.(25);
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
@@ -403,7 +405,12 @@ describe("ModelToolController host-boolean (sketch on a face defaults to modifyi
       record: "feat-ex",
       op: {
         opType: "Extrude",
-        params: { ...stored, distance: { value: 25 }, draftAngleDeg: { value: 0 } },
+        params: {
+          ...stored,
+          distance: { value: 25 },
+          draftAngleDeg: { value: 0 },
+          extrudeMode: "Blind",
+        },
       },
     });
   });

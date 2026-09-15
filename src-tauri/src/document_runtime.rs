@@ -2229,6 +2229,12 @@ impl DocumentRuntime {
                 // is derived data the same way `outputs` is — write it back
                 // onto the document's own record right beside it.
                 self.sync_mate_placements(&executed);
+                // UX-2026-09-14 WP-1: and the re-seated frame of every face-hosted
+                // sketch this plan reached — DERIVED document state, not a record
+                // field, so no planner or prefix hash moves and nothing enters the
+                // undo stack. Inside the same fencing guard as every writeback
+                // above, so a `Superseded` prepare discards it.
+                self.sync_sketch_placements(&executed, &snap.sketch_placement_by_step);
                 // WP-I: and the mate's ORIENTATION evidence, adopted once per
                 // record. It rides here, not on some later unlocked pass,
                 // because `mate` is part of the canonical planner line: the
@@ -2600,6 +2606,21 @@ impl DocumentRuntime {
     fn sync_mate_placements(&mut self, executed: &BTreeSet<RecordId>) {
         self.session
             .sync_mate_placements(&self.regen.timeline, executed);
+    }
+
+    /// UX-2026-09-14 WP-1 (SCHEMA §7.2 `sketchPlacement`): adopts the worker's
+    /// re-seated frames onto `Document.sketches[..].resolved_plane` — the same
+    /// derived, no-undo treatment [`sync_mate_placements`](Self::sync_mate_placements)
+    /// gives `placement`, except that the SKETCH's authoritative `plane` is left
+    /// alone (it is the authored frame; see `DocumentSession::sync_sketch_placements`
+    /// for why the record must not move).
+    fn sync_sketch_placements(
+        &mut self,
+        executed: &BTreeSet<RecordId>,
+        placements: &BTreeMap<usize, onecad_core::regen::SketchPlacement>,
+    ) {
+        self.session
+            .sync_sketch_placements(&self.regen.timeline, executed, placements);
     }
 
     /// Kernel-hardening WP-I (SCHEMA §7.2 `mateResolved`): adopts the mate
@@ -6168,6 +6189,10 @@ fn drive_clear(
         diagnostics: Vec::new(),
         diagnostics_by_step: BTreeMap::new(),
         repair_summary: onecad_core::regen::RepairSummary::default(),
+        // Nothing executed, so no sketch re-seated. `sync_sketch_placements` is
+        // scoped to the plan's own records, so an empty map leaves every sketch's
+        // derived frame exactly where the last real regen left it.
+        sketch_placement_by_step: BTreeMap::new(),
     });
     Outcome::Published(snapshot)
 }

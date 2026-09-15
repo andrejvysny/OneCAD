@@ -38,6 +38,7 @@
 #include "session/ClassifyElement.h"
 #include "session/FeaturePattern.h"
 #include "session/Signatures.h"
+#include "session/SketchHostReseat.h"
 #include "tess/MeshHandle.h"
 #include "tess/Tessellate.h"
 #include "util/Hashing.h"
@@ -308,7 +309,8 @@ bool emit_plan_step(HandlerContext& ctx, std::uint64_t req_id, std::uint64_t job
                     const json& element_map_delta, const json& needs_repair, const json& signatures,
                     const json& diagnostics,
                     const std::optional<json>& mate_placement = std::nullopt,
-                    const std::optional<json>& mate_resolved = std::nullopt) {
+                    const std::optional<json>& mate_resolved = std::nullopt,
+                    const std::optional<json>& sketch_placement = std::nullopt) {
     json body_events = json::array();
     for (const auto& e : events) {
         json be = {{"kind", e.kind}, {"bodyId", e.body_id}};
@@ -335,6 +337,10 @@ bool emit_plan_step(HandlerContext& ctx, std::uint64_t req_id, std::uint64_t job
     // mate's axis (and sidedness when measurable) on EVERY such step, seat
     // moved or not — absence keeps every other step byte-identical.
     if (mate_resolved) payload["mateResolved"] = *mate_resolved;
+    // UX-2026-09-14 WP-1 (SCHEMA §7.2, additive): present ONLY on a `Sketch` step
+    // whose host face resolved and whose effective frame differs from the authored
+    // one — absence keeps every other step byte-identical.
+    if (sketch_placement) payload["sketchPlacement"] = *sketch_placement;
     // §4/§3.4 (WP-H): sanitise at the PRODUCER. A degenerate measurement (an
     // evidence number over a zero-area face, a ratio with a vanishing denominator)
     // must not reach the encoder as NaN/±Inf: there it would fail serialization and
@@ -428,9 +434,49 @@ ops::OpOutcome run_single_op(ScratchJob& job, const json& op, const std::string&
 
     if (op_type == "Sketch") {
         const std::string sid = get_str(params, "sketchId", "sk_" + op_id);
-        job.sketches.emplace_back(sid, params);  // raw Sketch op params (profile source)
+        // UX-2026-09-14 WP-1 (B1): a sketch glued to a solid FACE follows that face.
+        // `hostFace` is resolved HERE and not through the generic `inputs[]`
+        // pre-flight (the `mate.target` rule) for two reasons: an unresolved host
+        // must halt THIS step rather than zero the plan's bodies, and
+        // `execute_candidate_op` skips `run_single_op` entirely once the pre-flight
+        // has left repair items — which would leave the sketch unmaterialized.
+        // Absent `hostFace` (world/datum sketches, every legacy record) this is a
+        // no-op and the raw-params path below is byte-identical to before.
+        if (!params.contains("hostFace")) {
+            job.sketches.emplace_back(sid, params);  // raw Sketch op params, byte for byte
+            last_sketch_id = sid;
+            return ops::OpOutcome::ok();  // materializes a sketch; no body, empty delta
+        }
+        ops::OpOutcome out = ops::OpOutcome::ok();
+        SketchHostReseatResult host = reseat_sketch_on_host(
+            job.bodies, job.partition, params, op_id,
+            em::LadderEditContext{post_upstream_edit, from_zero_replay});
+        if (host.unsupported_transport) {
+            // SCHEMA §13: a `frameTransportVersion` this build does not implement is
+            // refused BY NAME. Re-seating it under a different rule would move the
+            // sketch somewhere the producer never asked for — the one outcome the
+            // version field exists to prevent.
+            return ops::OpOutcome::unsupported(*host.unsupported_transport);
+        }
+        json sketch_params = params;
+        if (!host.resolved) {
+            // A body-less step carrying repair items is `NeedsRepair` (see
+            // `merge_outcome`), which halts the plan at m−1. The sketch itself is
+            // Rust-owned document state, so it stays visible at its AUTHORED frame:
+            // what halts is every downstream feature that would otherwise have cut
+            // against a guessed plane.
+            out.needs_repair = std::move(host.needs_repair);
+            out.diagnostics = std::move(host.diagnostics);
+        } else {
+            // Rewrite ONLY the basis. Every stored (u,v) is carried verbatim, so
+            // local distances, angles and region ids are untouched.
+            sketch_params["plane"] = sketch_plane_params(host.effective);
+            out.diagnostics = std::move(host.diagnostics);
+            out.sketch_placement = std::move(host.sketch_placement);
+        }
+        job.sketches.emplace_back(sid, std::move(sketch_params));
         last_sketch_id = sid;
-        return ops::OpOutcome::ok();  // materializes a sketch; no body, empty delta
+        return out;
     }
 
     const OpDeterminism det = read_determinism(op);
@@ -544,6 +590,7 @@ void merge_outcome(CandidateResult& result, ops::OpOutcome outcome) {
     for (auto& diag : outcome.diagnostics) result.diagnostics.push_back(std::move(diag));
     if (outcome.mate_placement) result.mate_placement = std::move(outcome.mate_placement);
     if (outcome.mate_resolved) result.mate_resolved = std::move(outcome.mate_resolved);
+    if (outcome.sketch_placement) result.sketch_placement = std::move(outcome.sketch_placement);
     if (outcome.status == ops::OpOutcome::Status::Ok) {
         // A step that PUBLISHED geometry stays Ok even when it ALSO carries
         // NeedsRepair evidence (Component Library P3 WP-3.1: a mated
@@ -830,7 +877,8 @@ ExecResult execute_ops(ScratchJob& job, const json& ops, std::uint64_t job_id, s
                                candidate.delta.to_json(), candidate.needs_repair,
                                signatures_json(job.bodies, candidate.body_events,
                                                candidate.ref_bindings),
-                               diagnostics, candidate.mate_placement, candidate.mate_resolved);
+                               diagnostics, candidate.mate_placement, candidate.mate_resolved,
+                               candidate.sketch_placement);
             if (!verbatim) {
                 // The step RAN, but its evidence never left the process. Undo it
                 // and end the plan here, exactly as a failed op does: prepare

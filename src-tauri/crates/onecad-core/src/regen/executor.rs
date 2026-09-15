@@ -267,6 +267,13 @@ struct Scratch {
     /// `mate_placement_by_step`, and ADOPTED only into a record that carries no
     /// `targetAxis` yet.
     mate_resolved_by_step: BTreeMap<usize, crate::document::record::MateResolved>,
+    /// UX-2026-09-14 WP-1: per-step SCHEMA §7.2 `sketchPlacement` echoes, present
+    /// only for a `Sketch` step whose host face resolved and moved. Unlike the two
+    /// mate maps this one is NOT applied to the timeline here — the record's
+    /// `plane` stays the AUTHORED frame — it is carried out on the published
+    /// [`ModelSnapshot`] for `document_runtime::sync_sketch_placements` to adopt as
+    /// DERIVED document state.
+    sketch_placement_by_step: BTreeMap<usize, super::SketchPlacement>,
 }
 
 impl Scratch {
@@ -281,6 +288,7 @@ impl Scratch {
             diagnostics_by_step: BTreeMap::new(),
             mate_placement_by_step: BTreeMap::new(),
             mate_resolved_by_step: BTreeMap::new(),
+            sketch_placement_by_step: BTreeMap::new(),
         }
     }
 
@@ -313,6 +321,9 @@ impl Scratch {
         }
         if let Some(resolved) = event.mate_resolved {
             self.mate_resolved_by_step.insert(step, resolved);
+        }
+        if let Some(placement) = event.sketch_placement {
+            self.sketch_placement_by_step.insert(step, *placement);
         }
     }
 
@@ -836,6 +847,7 @@ impl<E: GeometryEngine> RegenExecutor<E> {
             .collect();
         let repair_summary = repair_summary(&session.repair);
         let bodies = body_snapshots(&session.bodies, lod, signatures.as_ref());
+        let sketch_placements = std::mem::take(&mut scratch.sketch_placement_by_step);
 
         let snapshot = publisher.publish(|generation| ModelSnapshot {
             id: accept.snapshot_id,
@@ -848,6 +860,16 @@ impl<E: GeometryEngine> RegenExecutor<E> {
             diagnostics,
             diagnostics_by_step: scratch.diagnostics_by_step,
             repair_summary,
+            // Same `≤ last_valid` gate as body/element buffering: a placement from a
+            // step beyond the last valid one never reaches the accepted timeline
+            // (Invariant 6).
+            sketch_placement_by_step: match last_valid {
+                Some(cutoff) => sketch_placements
+                    .into_iter()
+                    .filter(|(step, _)| *step <= cutoff)
+                    .collect(),
+                None => BTreeMap::new(),
+            },
         });
         // Key the inline meshes with the SAME generation `bodies_with_generation`
         // just stamped onto the published bodies — that is what makes them cache

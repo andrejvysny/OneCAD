@@ -48,6 +48,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { sketchSelectionStore, useSketchSelectionStore } from "@/stores/sketchSelectionStore";
 import { useViewportEngine } from "@/viewport/engineBridge";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
+import { ANNOTATION_PRIORITY } from "@/viewport/engine/HtmlOverlayDriver";
 import { createClient } from "@/ipc/client";
 import { editConstraintValue } from "@/tools/sketch/sketchService";
 import { LENGTH_SUFFIX } from "@/units/format";
@@ -158,6 +159,16 @@ export function ConstraintBadgeLayer() {
         axisFrom: b.axisFrom ? planePointToWorld(plane, b.axisFrom) : undefined,
         offsetPx: b.standoffPx,
         clusterId: anchorKey(b.at),
+        // Lowest annotation priority (S9): a badge states a fact that is not
+        // going anywhere, so it is the one that moves when a live chip or a
+        // snap hint needs the same pixels. Its leader line keeps it readable
+        // wherever it lands, and `keepWhenUnplaced` means a crowded frame
+        // leaves it overlapping rather than making a constraint invisible.
+        annotation: {
+          priority: ANNOTATION_PRIORITY.constraintBadge,
+          pinned: false,
+          keepWhenUnplaced: true,
+        },
       });
       ids.push(b.id);
     }

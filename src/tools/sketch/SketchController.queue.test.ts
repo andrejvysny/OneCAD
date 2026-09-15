@@ -106,7 +106,7 @@ describe("SketchController mutation queue", () => {
       client: clientMock as unknown as CadClient,
       container,
     });
-    toolStore.getState().setMode("sketch", "sketch1");
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" });
     await flush();
     // Advance the id counter past the seeded src/axis so minted ids don't collide.
     sketchStore.setState({ entitySeq: 2, constraintSeq: 0 });
@@ -277,7 +277,7 @@ describe("SketchController click intent is atomic", () => {
       client: clientMock as unknown as CadClient,
       container,
     });
-    toolStore.getState().setMode("sketch", "sketch1");
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" });
     await flush();
   });
 

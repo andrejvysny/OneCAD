@@ -228,6 +228,22 @@ export interface DocumentState extends DocumentProjection {
   displayTitle: string | null;
   /** Set (or clear, with null) the local title override. */
   setDisplayTitle(title: string | null): void;
+  /**
+   * The document's on-disk path, or `null` for a document that has never been
+   * saved (C9). NOT a projection fact — the backend snapshot carries no path
+   * (`SaveOutcome` is the only DTO that has one) — so this is session-local,
+   * mirroring `displayTitle`. `fileActions.saveDocument` reads it to route a
+   * never-saved document straight to Save As instead of trying `saveDocument`,
+   * hitting a backend "no save path" error, and only then recovering.
+   *
+   * Populated by `applySaveOutcome` after any save/Save As, and by `appStore`
+   * at every open/new-document call site that already knows the answer. Left
+   * unset by a few rarer entry points (project import, STEP import) — those
+   * fall back to the existing `isNoPathError` backstop, unchanged.
+   */
+  path: string | null;
+  /** Set (or clear, with null) the known save path. */
+  setPath(path: string | null): void;
   /** A regen job started (`regen-started`). */
   regenStarted(): void;
   /** A regen job completed (`regen-finished`). CLAMPED at zero: a no-op regen
@@ -467,13 +483,29 @@ function initialDocument(): DocumentProjection {
   return underTauri ? emptyDocument() : seedMockDocument();
 }
 
+/**
+ * Initial {@link DocumentState.path} companion to {@link initialDocument}: the
+ * mock seed represents an already-opened, previously-saved project (see
+ * {@link seedMockDocument}'s doc comment), so it starts with a known path. A
+ * real Tauri boot starts with no document at all, so no known path either.
+ */
+function initialPath(): string | null {
+  const underTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  return underTauri ? null : "/Users/andrej/CAD/Projects/Bracket v2.onecad";
+}
+
 export const documentStore = createStore<DocumentState>()((set) => ({
   ...initialDocument(),
   regenBusy: 0,
   displayTitle: null,
+  path: initialPath(),
 
   setDisplayTitle(displayTitle) {
     set({ displayTitle });
+  },
+
+  setPath(path) {
+    set({ path });
   },
 
   regenStarted() {
@@ -496,6 +528,12 @@ export const documentStore = createStore<DocumentState>()((set) => ({
         snapshot.documentId !== undefined && snapshot.documentId !== s.documentId
           ? null
           : s.displayTitle,
+      // Closing to the empty projection is the one snapshot transition safe to
+      // reset `path` on here — an OPEN/new document's path is set explicitly by
+      // `appStore` (see {@link DocumentState.path}), and this event can race
+      // that explicit call, so it must not also clear it on every documentId
+      // change.
+      path: snapshot.status === "empty" ? null : s.path,
     }));
     // Publish backend truth first. Selection subscribers can synchronously arm
     // or disarm tools, so clearing a removed ref against the old document would
@@ -521,6 +559,9 @@ export const documentStore = createStore<DocumentState>()((set) => ({
         // Save As changes the backend title, so an older session-only nickname
         // must not mask the authoritative filename.
         displayTitle: null,
+        // The whole point of adopting this here (C9): a successful save/Save As
+        // is the moment a never-saved document GETS a known path.
+        path: outcome.path,
       };
     });
   },

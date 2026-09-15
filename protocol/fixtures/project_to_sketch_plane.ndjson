@@ -100,8 +100,18 @@
 # drift no lane catches, so §7.6 makes the equality normative and this pair pins
 # it. (The equality binds where both verbs answer at all: `ProjectFaceBoundary`
 # TESSELLATES an unsupported curve, WP-P refuses it by name — see round G.)
+#
+# It also pins §7.6 `exact` (UX-2026-09-14 WP-1b): `origin` is the seed face's
+# `gp_Pln` LOCATION and `anchor` is a point the kernel classified IN/ON the face.
+# They are DIFFERENT points here and that is the whole point of the field — the
+# location (0,0,20) is the box cap's CORNER, the anchor (10,10,20) its centre. A
+# caller freezing a resolution-ladder anchor must freeze the second: on an imported
+# body the plane location routinely lies outside the face entirely, where it scores
+# 0 on the ladder's `anchor` feature and keeps a correct host below the auto-bind
+# gate for good (`src-tauri/tests/step_import_gate.rs` PHASE 4: 0.75 with it, 1.00
+# with the on-face anchor).
 {"send":{"v":1,"t":"req","id":10,"verb":"ProjectFaceBoundary","args":{"bodyId":"body_op1","topoKey":"f:6","scope":"faceOnly","plane":{"origin":[0,0,20],"xAxis":[1,0,0],"yAxis":[0,1,0],"normal":[0,0,1]}}}}
-{"expect":{"v":1,"t":"resp","id":10,"ok":true,"result":{"present":true,"points":[{"ref":"p0","at":[0.0,0.0]},{"ref":"p1","at":[20.0,0.0]},{"ref":"p2","at":[20.0,20.0]},{"ref":"p3","at":[0.0,20.0]}],"entities":[{"type":"Line","p0Ref":"p0","p1Ref":"p1"},{"type":"Line","p0Ref":"p1","p1Ref":"p2"},{"type":"Line","p0Ref":"p2","p1Ref":"p3"},{"type":"Line","p0Ref":"p3","p1Ref":"p0"}]}}}
+{"expect":{"v":1,"t":"resp","id":10,"ok":true,"result":{"present":true,"exact":{"origin":[0.0,0.0,20.0],"normal":[0.0,0.0,1.0],"anchor":[10.0,10.0,20.0]},"points":[{"ref":"p0","at":[0.0,0.0]},{"ref":"p1","at":[20.0,0.0]},{"ref":"p2","at":[20.0,20.0]},{"ref":"p3","at":[0.0,20.0]}],"entities":[{"type":"Line","p0Ref":"p0","p1Ref":"p1"},{"type":"Line","p0Ref":"p1","p1Ref":"p2"},{"type":"Line","p0Ref":"p2","p1Ref":"p3"},{"type":"Line","p0Ref":"p3","p1Ref":"p0"}]}}}
 # ROUND B — PLANE-PARALLEL circle. The cap edge lies in a plane parallel to the
 # sketch plane, so the projection keeps the radius verbatim and stays a `Circle`.
 # Addressed by `elementId`; note the `sourceRef` echoes the rung that was used.

@@ -78,6 +78,8 @@ export function offsetForAxis(
 interface OverlayItem {
   worldPos: THREE.Vector3;
   el: HTMLElement;
+  /** The OWNER has hidden this item — see {@link HtmlOverlayDriver.setHidden}. */
+  hidden?: boolean;
   /**
    * The other end of the axis this element should sit BESIDE. Optional: without
    * it the element is centered on `worldPos`, exactly as before.
@@ -168,6 +170,27 @@ export type AnnotationPlacementStatus = "visible" | "no-space" | "unknown";
 export interface OverlayAnnotationPlacement {
   priority: number;
   pinned: boolean;
+  /**
+   * Stay on screen at the anchor when the layout could not place this item.
+   *
+   * A MEASUREMENT hides instead (its default, false): a measurement label in the
+   * wrong place is a wrong reading. Sketch feedback — the snap hint, a live
+   * dimension chip, a constraint badge — is transient annotation on geometry the
+   * user is looking at, and vanishing is far worse than overlapping: it happens
+   * whenever the work-area rect is momentarily unknown, which is every frame
+   * before the panels have measured themselves.
+   */
+  keepWhenUnplaced?: boolean;
+  /**
+   * Reserve a square of this half-size (CSS px) around this item's ANCHOR that
+   * no annotation may cover — including this one's own neighbours.
+   *
+   * The snap hint declares it, which is how the CURSOR gets protected: the hint
+   * is anchored on the snapped point, i.e. where the user is looking and about
+   * to click. Without it the collision layout is free to park a chip exactly
+   * over the thing being aimed at.
+   */
+  protectRadiusPx?: number;
   onPlacementStatus?: (status: AnnotationPlacementStatus) => void;
   onScreenPosition?: (position: { x: number; y: number } | null) => void;
   onSizeChanged?: () => void;
@@ -225,6 +248,28 @@ export function keepOutShiftY(
   return { dy: dir === -1 ? up : down, dir };
 }
 
+/**
+ * Who yields to whom when screen annotations collide (UX review S9).
+ *
+ * Highest number is placed FIRST and keeps its spot; everything below it is
+ * pushed to the nearest free position. The order is "what is the user doing
+ * right now": the snap hint answers the click about to happen, a live dimension
+ * chip the gesture in progress, a selection label a passive measurement, and a
+ * constraint badge a fact about geometry that is not going anywhere.
+ *
+ * A measurement annotation (`MeasureOverlay`) sits above all of them at its own
+ * per-slot priority — it is a reading the user explicitly asked for.
+ */
+export const ANNOTATION_PRIORITY = {
+  snapHint: 4,
+  liveDimChip: 3,
+  dimensionLabel: 2,
+  constraintBadge: 1,
+} as const;
+
+/** Half-size (CSS px) of the square the snap hint reserves around the cursor. */
+export const CURSOR_PROTECT_PX = 24;
+
 /** Default screen gap between neighbours within an overlay cluster. Deliberately
  *  larger than the worst chip height so a cluster reads as one stacked set. */
 export const CLUSTER_GAP_PX = 24;
@@ -277,6 +322,22 @@ export class HtmlOverlayDriver {
   setWorldPos(id: string, worldPos: THREE.Vector3): void {
     const item = this.items.get(id);
     if (item) item.worldPos.copy(worldPos);
+  }
+
+  /**
+   * Hide or show a registered item, from its OWNER.
+   *
+   * The driver writes `display` on every registered element once per frame, so
+   * an owner that hid its own element with `style.display = "none"` had it
+   * un-hidden on the very next render — which is how the snap hint chip and the
+   * auto-constraint ghost went on advertising a decision that had already been
+   * cleared (UX review S4: "the snap badge is stale and sticky", surviving a
+   * commit and an Escape). Hiding is therefore a driver fact, not a style the
+   * owner writes behind its back.
+   */
+  setHidden(id: string, hidden: boolean): void {
+    const item = this.items.get(id);
+    if (item) item.hidden = hidden;
   }
 
   /** Move the axis' other end (no-op for an item registered without one). */
@@ -348,7 +409,7 @@ export class HtmlOverlayDriver {
       const p = item.screenPosition
         ? { ...item.screenPosition, visible: true, behind: false }
         : projected;
-      if (!p.visible) {
+      if (!p.visible || item.hidden) {
         placed.push({
           id,
           el,
@@ -509,15 +570,39 @@ export class HtmlOverlayDriver {
         const centerY = it.y + (it.uy ?? 0) * (item.size.h / 2);
         protectedRects.push({ x: centerX - item.size.w / 2, y: centerY - item.size.h / 2, width: item.size.w, height: item.size.h });
       }
+      // Anchor reservations (the cursor vicinity): a square around the ANCHOR,
+      // not around the placed element — the point being protected is where the
+      // user is pointing, which is `anchorX/anchorY` when the item carries an
+      // axis and its own projected position otherwise.
+      for (const it of annotationItems) {
+        const r = it.item!.annotation!.protectRadiusPx;
+        if (!it.visible || !r || !(r > 0)) continue;
+        const ax = it.anchorX ?? it.x;
+        const ay = it.anchorY ?? it.y;
+        protectedRects.push({ x: ax - r, y: ay - r, width: r * 2, height: r * 2 });
+      }
+      // Candidate centres are the element's REAL centres — `it.x/it.y` is the
+      // axis attachment point, and the `edge` transform then shifts the element
+      // by half its own size. Feeding the unshifted point in (and writing the
+      // result back the same way) is what keeps an axis-anchored chip's standoff
+      // intact through the collision pass.
+      const halfOffset = (it: Placed): { dx: number; dy: number } => {
+        const size = it.item?.size;
+        if (!size) return { dx: 0, dy: 0 };
+        return { dx: (it.ux ?? 0) * (size.w / 2), dy: (it.uy ?? 0) * (size.h / 2) };
+      };
       const outcomes = placeAnnotations(
-        annotationItems.map((it) => ({
-          id: it.id,
-          priority: it.item!.annotation!.priority,
-          center: { x: it.x, y: it.y },
-          size: it.item!.size ? { width: it.item!.size.w, height: it.item!.size.h } : null,
-          pinned: it.item!.annotation!.pinned,
-          visible: it.visible,
-        })),
+        annotationItems.map((it) => {
+          const { dx, dy } = halfOffset(it);
+          return {
+            id: it.id,
+            priority: it.item!.annotation!.priority,
+            center: { x: it.x + dx, y: it.y + dy },
+            size: it.item!.size ? { width: it.item!.size.w, height: it.item!.size.h } : null,
+            pinned: it.item!.annotation!.pinned,
+            visible: it.visible,
+          };
+        }),
         { x: 0, y: 0, width, height },
         safeRect ?? null,
         protectedRects,
@@ -528,10 +613,11 @@ export class HtmlOverlayDriver {
         const annotation = item.annotation!;
         const outcome = byId.get(it.id);
         const status = outcome?.status ?? "unknown";
-        it.visible = status === "visible";
+        it.visible = status === "visible" || (annotation.keepWhenUnplaced === true && it.visible);
         if (outcome?.center) {
-          it.x = outcome.center.x;
-          it.y = outcome.center.y;
+          const { dx, dy } = halfOffset(it);
+          it.x = outcome.center.x - dx;
+          it.y = outcome.center.y - dy;
         }
         annotation.onScreenPosition?.(outcome?.center ?? null);
         if (item.lastAnnotationStatus === status) continue;
@@ -563,7 +649,10 @@ export class HtmlOverlayDriver {
     }
     for (const it of placed) {
       if (!it.visible) {
-        if (it.item?.annotation) {
+        // An OWNER-hidden item is gone, not merely unplaced: `display: none`,
+        // whatever its placement mode. `visibility: hidden` is reserved for an
+        // annotation the LAYOUT could not fit, which keeps its box measurable.
+        if (it.item?.annotation && !this.items.get(it.id)?.hidden) {
           it.el.style.display = "";
           it.el.style.visibility = "hidden";
         } else {

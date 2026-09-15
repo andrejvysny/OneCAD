@@ -84,6 +84,8 @@ export interface ChipAnchorOpts {
 export interface ExtrudeChipHandlers {
   onValue: (v: number) => void;
   onSymmetric: (symmetric: boolean) => void;
+  /** Reverse the extrude direction (T3) — consumed ONCE into the signed depth. */
+  onFlip?: () => void;
   onConfirm: () => void;
   onCancel: () => void;
   /** Boolean segment picked (New Body / Add / Cut — Wave 2). */
@@ -601,6 +603,8 @@ export interface ToolChipState {
   onValue: ((v: number) => void) | null;
   /** Symmetric toggled (armed extrude cluster). */
   onSymmetric: ((symmetric: boolean) => void) | null;
+  /** Direction flip pressed (armed extrude cluster — T3). */
+  onFlip: (() => void) | null;
   onEndCondition: ((end: ExtrudeEndCondition) => void) | null;
   /** Draft angle authored on the armed extrude cluster (WP-C3). */
   onDraftAngle: ((deg: number) => void) | null;
@@ -957,6 +961,7 @@ const CLEARED = {
   anchorOffsetPx: 0,
   onValue: null,
   onSymmetric: null,
+  onFlip: null,
   onConfirm: null,
   onCancel: null,
   onSwap: null,
@@ -997,6 +1002,7 @@ export const toolChipStore = createStore<ToolChipState>()((set, get) => ({
       ...resolveChipAnchor(opts),
       onValue: handlers.onValue,
       onSymmetric: handlers.onSymmetric,
+      onFlip: handlers.onFlip ?? null,
       onConfirm: handlers.onConfirm,
       onCancel: handlers.onCancel,
       onBooleanMode: handlers.onBooleanMode ?? null,

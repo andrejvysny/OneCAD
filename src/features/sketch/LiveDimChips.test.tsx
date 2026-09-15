@@ -138,7 +138,9 @@ describe("LiveDimChips", () => {
     show([chip(), chip({ field: "angle", label: "∠", domain: "angle", value: 30, drives: false })]);
 
     expect([...mounted.keys()]).toEqual(["__live_dim_length", "__live_dim_angle"]);
-    expect(screen.getByTestId("live-dim-length")).toHaveValue("30");
+    // A LENGTH chip is fixed at 2 decimals (UX review S15 — one precision per
+    // live pair); an angle keeps `formatUnitless`'s trimmed degrees.
+    expect(screen.getByTestId("live-dim-length")).toHaveValue("30.00");
     expect(screen.getByTestId("live-dim-angle")).toHaveValue("30");
 
     act(() => liveDimStore.getState().clear());
@@ -182,7 +184,7 @@ describe("LiveDimChips", () => {
   it("an UNFOCUSED field reads the live value; a FOCUSED one reads the typed text", () => {
     render(<LiveDimChips />);
     show([chip()]);
-    expect(screen.getByTestId("live-dim-length")).toHaveValue("30");
+    expect(screen.getByTestId("live-dim-length")).toHaveValue("30.00");
 
     act(() => liveDimStore.getState().setFocus("length", "5"));
     expect(screen.getByTestId("live-dim-length")).toHaveValue("5");
@@ -238,6 +240,20 @@ describe("LiveDimChips", () => {
     act(() => liveDimStore.getState().setFocus("length", ""));
     fireEvent.keyDown(screen.getByTestId("live-dim-length"), { key: "Tab" });
     expect(handlers.onTab).toHaveBeenCalledWith(false, null);
+  });
+
+  /* UX review S8: "Tab in the Line tool wipes the typed value". The field half
+   * of that — a Tab the chip cannot parse must keep the text and do nothing. */
+  it("Tab on a value the field refuses keeps the text and relays nothing", () => {
+    render(<LiveDimChips />);
+    show([chip()]);
+    act(() => liveDimStore.getState().setFocus("length", "12abc"));
+    const input = screen.getByTestId("live-dim-length");
+    fireEvent.keyDown(input, { key: "Tab" });
+
+    expect(handlers.onTab).not.toHaveBeenCalled();
+    expect(input).toHaveValue("12abc"); // the store's text is untouched
+    expect(input).toHaveAttribute("aria-invalid", "true");
   });
 
   it("Escape relays to the controller's field ladder", () => {
@@ -342,29 +358,30 @@ describe("LiveDimChips", () => {
     expect(input.className).not.toMatch(/\bw-14\b/);
     expect(input.style.width).toBe("7ch"); // 6 chars + 1 for the caret
 
-    // Shorter content shrinks, but never below the floor.
+    // Shorter content shrinks, but never below the floor ("5.00" is 4 chars).
     act(() => liveDimStore.getState().update([chip({ value: 5 })], ANCHORS, {}));
-    expect(screen.getByTestId("live-dim-length").style.width).toBe("4ch");
+    expect(screen.getByTestId("live-dim-length").style.width).toBe("5ch");
   });
 
   it("the content-driven width applies to non-mm units too", () => {
     render(<LiveDimChips />);
     show([chip({ value: 25.4 })]);
     act(() => settingsStore.getState().setDisplayUnit("in"));
-    // "1" in inches — the old rule gave every non-mm length a fixed 56px.
+    // "1.0000" in inches (the unit's own 4 decimals, fixed like mm's 2) — the
+    // old rule gave every non-mm length a fixed 56px.
     const input = screen.getByTestId("live-dim-length");
-    expect(input).toHaveValue("1");
-    expect(input.style.width).toBe("4ch");
+    expect(input).toHaveValue("1.0000");
+    expect(input.style.width).toBe("7ch");
     expect(input.className).not.toMatch(/\bw-14\b/);
   });
 
   it("a unit switch re-displays the same mm — it never re-commits", () => {
     render(<LiveDimChips />);
     show([chip({ value: 25.4 })]);
-    expect(screen.getByTestId("live-dim-length")).toHaveValue("25.4");
+    expect(screen.getByTestId("live-dim-length")).toHaveValue("25.40");
 
     act(() => settingsStore.getState().setDisplayUnit("in"));
-    expect(screen.getByTestId("live-dim-length")).toHaveValue("1");
+    expect(screen.getByTestId("live-dim-length")).toHaveValue("1.0000");
     expect(handlers.onEnter).not.toHaveBeenCalled();
     expect(handlers.onText).not.toHaveBeenCalled();
   });

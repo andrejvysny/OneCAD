@@ -222,6 +222,36 @@ describe("ModelToolController — Hole", () => {
     expect(viewportStore.getState().statusHint?.message).toMatch(/flat face/i);
   });
 
+  /*
+   * C6 — the tool used to fall through to `default: ENABLED`, so an empty
+   * document answered a Hole with "click a flat face", an instruction with no
+   * face on screen to follow. Same predicate the toolbar greys the button with.
+   */
+  it("does not arm on a document with no visible body", async () => {
+    documentStore.setState({ bodies: {} });
+    build();
+    toolStore.getState().setTool("hole");
+    await flush();
+    expect(debug().holePhase).toBe("idle");
+    expect(engineMock.setOrbitSuppressed).not.toHaveBeenCalledWith(true);
+    expect(viewportStore.getState().statusHint?.message).toBe("Add a body first");
+  });
+
+  it("does not arm when the only body is hidden", async () => {
+    const { bodies } = documentStore.getState();
+    expect(Object.keys(bodies).length).toBeGreaterThan(0); // guard: there IS one to hide
+    documentStore.setState({
+      bodies: Object.fromEntries(
+        Object.entries(bodies).map(([id, body]) => [id, { ...body, visible: false }]),
+      ),
+    });
+    build();
+    toolStore.getState().setTool("hole");
+    await flush();
+    expect(debug().holePhase).toBe("idle");
+    expect(viewportStore.getState().statusHint?.message).toBe("Add a body first");
+  });
+
   it("a planar face click arms at the clicked point, mints the seat, and previews it", async () => {
     build();
     await armHole();

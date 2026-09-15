@@ -42,7 +42,7 @@ test("point tool drops points and auto-constrains a repeat click", async ({ page
   // Snap-to-endpoint: +2 free from the new point, −2 from the inferred
   // Coincident ⇒ the pill does not move, but the constraint row appears.
   await clickAt(page, -120, -60);
-  await expect(page.getByText("Coincident", { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Coincident(\s|$)/ }).first()).toBeVisible();
   await expect(dofPill(page)).toHaveText("DOF: 4");
   expect(await getSketchEntityCount(page)).toBe(3);
 });

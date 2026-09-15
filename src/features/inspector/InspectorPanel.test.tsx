@@ -8,7 +8,7 @@ import { sketchStore } from "@/stores/sketchStore";
 import { documentStore } from "@/stores/documentStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { toolChipStore } from "@/stores/toolChipStore";
-import { getMockLatency, mockClient } from "@/ipc/mockClient";
+import { getMockLatency, mockClient, setMockLatency } from "@/ipc/mockClient";
 import { setModelToolController } from "@/tools/modelTools/modelToolBridge";
 import type { ModelToolController } from "@/tools/modelTools/ModelToolController";
 import { resetStores } from "@/test/resetStores";
@@ -177,7 +177,10 @@ describe("InspectorPanel", () => {
     renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => {
       documentStore.setState({ sketches: {} });
-      selectionStore.getState().set([{ kind: "sketch", id: "sketch2" }]);
+      // `sketch5` on purpose (N10): the seeded timeline holds no Sketch row for
+      // it, so nothing in the document stands on it and "Not evaluated" is the
+      // honest reading. A CONSUMED sketch gets its own case below.
+      selectionStore.getState().set([{ kind: "sketch", id: "sketch5" }]);
     });
 
     expect(screen.getByText("Sketch")).toBeInTheDocument();
@@ -193,8 +196,8 @@ describe("InspectorPanel", () => {
       documentStore.setState({
         sketches: {
           ...sketches,
-          sketch2: {
-            ...sketches.sketch2,
+          sketch5: {
+            ...sketches.sketch5,
             dof: 0,
             status: "ok",
             geometryToken: undefined as never,
@@ -202,11 +205,42 @@ describe("InspectorPanel", () => {
           },
         },
       });
+      // Unconsumed (see above) — the legacy-token case is about evidence, not
+      // about lineage, so it is asserted on a sketch nothing stands on.
+      selectionStore.getState().set([{ kind: "sketch", id: "sketch5" }]);
     });
 
     expect(screen.getByText("Not evaluated")).toBeInTheDocument();
     expect(screen.queryByText(/Fully constrained/)).toBeNull();
     expect(screen.queryByText(/constrained · DOF/)).toBeNull();
+  });
+
+  /*
+   * UX review 2026-09-14 — N10. Cancelling a sketch edit leaves the registry
+   * entry without a current evaluation, and the panel then claimed the sketch
+   * had never been evaluated — while a completed Extrude was standing on it
+   * (A-136). "Not evaluated" belongs to a sketch nothing consumes.
+   */
+  it("reports the feature standing on a sketch with no current evaluation", async () => {
+    // The lineage read goes through the real mock lane, whose simulated latency
+    // is a WALL-CLOCK timer — `settleUntil` counts event-loop turns on purpose
+    // and would out-run it.
+    const latency = getMockLatency();
+    setMockLatency(0);
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    act(() => {
+      const sketches = documentStore.getState().sketches;
+      documentStore.setState({
+        sketches: { ...sketches, sketch2: { ...sketches.sketch2, solveGeometryToken: undefined } },
+      });
+      selectionStore.getState().set([{ kind: "sketch", id: "sketch2" }]);
+    });
+
+    await settleUntil(() => expect(screen.getByText("Consumed by Extrude")).toBeInTheDocument(), {
+      turn: () => act(async () => void (await new Promise((r) => setTimeout(r, 0)))),
+    });
+    expect(screen.queryByText("Not evaluated")).toBeNull();
+    setMockLatency(latency);
   });
 
   it("shows body status + full history when a body is selected", () => {

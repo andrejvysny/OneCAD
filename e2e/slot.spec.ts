@@ -43,8 +43,8 @@ test("slot tool draws a slot with welded caps and reports its DOF", async ({ pag
   await expect(page.getByText(/^Under-constrained · DOF 9/).first()).toBeVisible();
 
   // The authored set is visible in the inspector's Constraints list.
-  await expect(page.getByText("Coincident", { exact: true }).first()).toBeVisible();
-  await expect(page.getByText("Equal", { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Coincident(\s|$)/ }).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Equal(\s|$)/ }).first()).toBeVisible();
 
   // 2 walls + 2 cap arcs — nothing else.
   expect(await getSketchEntityCount(page)).toBe(4);

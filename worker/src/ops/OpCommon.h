@@ -219,6 +219,44 @@ std::optional<OpOutcome> boolean_result_policy(app::BooleanMode mode, const Topo
                                                 const char* empty_code,
                                                 nlohmann::json evidence_extra = nlohmann::json::object());
 
+// One measured volume plus the relative error the measurement ACHIEVED — what
+// `BRepGProp::VolumeProperties(shape, props, Eps)` returns (UX-2026-09-14 WP-1,
+// decision A-3 / `docs/design/astra/sketch-host-face-transport.md` §3e).
+struct VolumeMeasurement {
+    double volume_mm3 = 0.0;
+    double relative_error = 0.0;  // achieved, dimensionless; negative ⇒ not measured
+    bool measured = false;        // false ⇒ non-finite or the measurement threw
+};
+
+// Measure `shape`'s volume at `eps` and report the error the integration achieved.
+VolumeMeasurement measure_volume(const TopoDS_Shape& shape, double eps = 1.0e-6);
+
+// The CUT EFFECT POLICY shared by every SUBTRACTING tail — Extrude Cut, Revolve
+// Cut, Boolean Cut (UX-2026-09-14 WP-1, decision D2/A-3). Runs on the raw
+// `checked_boolean` result BEFORE publication, symmetric with the Add-disjoint
+// refusal above: a Cut that removes no demonstrable material is a NAMED refusal,
+// never a feature that reports success and changes nothing.
+//
+// `docs/design/astra/sketch-host-face-transport.md` §3e, verbatim:
+//
+//     a  = precision_of(target).authoring_resolution()     (1e-3 mm, v1 absolute)
+//     U  = errBefore·Vbefore + errAfter·Vafter             (measurement bound)
+//     εV = a³ + U
+//     |ΔV| ≤ εV  ⇒ CUT_NO_EFFECT           (no demonstrable removal)
+//     ΔV  < −εV  ⇒ CUT_VOLUME_INCREASED    (a Cut that GREW the body)
+//     unmeasurable ⇒ CUT_VOLUME_UNMEASURABLE
+//
+// with `ΔV = Vbefore − Vafter`. Separating the semantic floor `a³` from the
+// measurement bound `U` is what makes the predicate honest at both ends: a true
+// zero-volume imprint always refuses because `|ΔV| ≤ U ≤ εV`, and passing implies
+// the true removal exceeds `a³`.
+//
+// No-op for every non-Cut mode. Returns the failure to hand back, or nullopt.
+std::optional<OpOutcome> cut_effect_policy(app::BooleanMode mode, const TopoDS_Shape& target,
+                                            const TopoDS_Shape& result, const char* op_name,
+                                            const std::string& target_id,
+                                            nlohmann::json evidence_extra = nlohmann::json::object());
+
 // Publish a boolean / boolean-mode-Cut result into the scratch as the successor of
 // `target_id`. A SINGLE-solid result MODIFIES `target_id` in place (BodyId preserved
 // — corpus invariant — + OCCT history applied to its partition). A MULTI-solid

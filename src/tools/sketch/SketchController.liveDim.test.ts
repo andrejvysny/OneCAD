@@ -35,6 +35,7 @@ import { viewportStore } from "@/stores/viewportStore";
 import { resetStores } from "@/test/resetStores";
 import { flushSketchMutations } from "./sketchService";
 import { liveDimInit, type LiveDimState } from "./liveDimension";
+import type { DraftEntity } from "./toolMachine";
 import { liveDimStore } from "@/stores/liveDimStore";
 
 const PLANE: SketchPlane = {
@@ -154,7 +155,7 @@ describe("SketchController live dimensions (Wave 2 wiring)", () => {
       client: clientMock as unknown as CadClient,
       container,
     });
-    toolStore.getState().setMode("sketch", "sketch1"); // default tool = line
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" }); // default tool = line
     await flush();
   });
 
@@ -457,7 +458,7 @@ describe("SketchController live dimensions (Wave 3 chips + typing)", () => {
       client: clientMock as unknown as CadClient,
       container,
     });
-    toolStore.getState().setMode("sketch", "sketch1");
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" });
     await flush();
   });
 
@@ -501,6 +502,13 @@ describe("SketchController live dimensions (Wave 3 chips + typing)", () => {
   type Internals = { liveDim: LiveDimState };
   const internals = (): Internals => controller as unknown as Internals;
 
+  /** The rubber-band leg the engine was last handed (plane coords). */
+  const lastPreview = (): DraftEntity => {
+    const calls = engineMock.setSketchPreview.mock.calls;
+    const drafts = calls[calls.length - 1][0] as DraftEntity[];
+    return drafts[drafts.length - 1];
+  };
+
   // ── the chips appear, and a digit opens one ────────────────────────────────
 
   it("an armed gesture publishes chips; a digit over the viewport opens the first", () => {
@@ -515,6 +523,54 @@ describe("SketchController live dimensions (Wave 3 chips + typing)", () => {
     expect(chips().focus).toBe("length");
     expect(chips().text).toBe("5"); // the opening character is already in the field
     expect(internals().liveDim.locks).toEqual({}); // …but nothing is pinned yet
+  });
+
+  /*
+   * UX review S6 — "typed values do not appear until the mouse moves": the chip
+   * set was only republished by a LOCK (Enter/Tab) or by the rAF pointer-move
+   * loop, so a typed number was buffered and invisible until the pointer
+   * happened to twitch.
+   *
+   * S7 — "sketch tools have no live preview of a typed dimension": the rubber
+   * band ignored the number until Enter. The parsed text now rides the
+   * locks-before-quantum path as a PROVISIONAL lock, so the preview obeys it
+   * while it is being typed and drops it if the user backs out.
+   */
+  it("a typed value previews on the rubber band, with no pointer move (S6/S7)", () => {
+    click(0, 0);
+    move(30, 0);
+    const previewsBefore = engineMock.setSketchPreview.mock.calls.length;
+
+    type("5"); // opens the chip on the first character
+    expect(chips().focus).toBe("length");
+    expect(chips().text).toBe("5");
+    // Republished synchronously — no pointer move in between.
+    expect(engineMock.setSketchPreview.mock.calls.length).toBeGreaterThan(previewsBefore);
+    let leg = lastPreview();
+    expect(leg.p1!.x).toBeCloseTo(5, 6);
+
+    // A second character re-previews at the new value…
+    handlers().onText("50");
+    leg = lastPreview();
+    expect(leg.p1!.x).toBeCloseTo(50, 6);
+
+    // …and nothing is PINNED by any of it: the FSM's locks stay empty until
+    // Enter/Tab, and Escape drops the provisional value entirely.
+    expect(internals().liveDim.locks).toEqual({});
+    handlers().onEscape();
+    expect(lastPreview().p1!.x).toBeCloseTo(30, 6); // back on the cursor
+  });
+
+  it("a half-typed number is not a refusal — it simply previews nothing new", () => {
+    click(0, 0);
+    move(30, 0);
+    type("5");
+    handlers().onText("5.");
+    // "5." parses to 5 (`Number("5.")` is 5), so the preview holds there rather
+    // than snapping back to the cursor mid-keystroke.
+    expect(lastPreview().p1!.x).toBeCloseTo(5, 6);
+    handlers().onText("5.x");
+    expect(lastPreview().p1!.x).toBeCloseTo(30, 6); // unparseable ⇒ cursor
   });
 
   it("suppresses the snap hint label while a live-dim chip set is open", () => {

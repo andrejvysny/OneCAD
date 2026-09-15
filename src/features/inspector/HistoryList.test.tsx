@@ -98,6 +98,17 @@ describe("HistoryList row affordances (M4b)", () => {
     expect(screen.getByText("Extrude").className).toContain("line-through");
   });
 
+  // C10: the affordance cluster must be an overlay, not a flex sibling of the
+  // value — sharing the row let a long value + the icon cluster wrap onto a
+  // second line, which is what actually shifted the list on selection.
+  it("C10: the affordance cluster is an absolute overlay, not part of the details flow", () => {
+    render(<HistoryList items={items} selectedId="f2" rowActions={actions()} />);
+    const cluster = screen.getByTestId("history-suppress-f2").parentElement;
+    expect(cluster?.className).toContain("absolute");
+    expect(cluster?.className).not.toContain("ml-auto");
+    expect(screen.getByTestId("history-details-f2").className).toContain("relative");
+  });
+
   it("affordance clicks do not also select the row", () => {
     const onSelect = vi.fn();
     render(<HistoryList items={items} onSelect={onSelect} rowActions={actions()} />);

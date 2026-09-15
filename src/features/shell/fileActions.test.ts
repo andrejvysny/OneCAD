@@ -25,7 +25,12 @@ function saveOutcome(path = "/Users/andrej/CAD/Foo.onecad", clean = true) {
 
 beforeEach(() => {
   viewportStore.getState().setStatusHint(null);
-  documentStore.setState(seedMockDocument()); // title "Bracket v2"
+  // `path` is session state OUTSIDE the projection (mirrors `displayTitle`), so
+  // seeding the projection alone would leak one test's `setPath` into the next.
+  documentStore.setState({
+    ...seedMockDocument(), // title "Bracket v2"
+    path: "/Users/andrej/CAD/Projects/Bracket v2.onecad",
+  });
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -49,6 +54,31 @@ describe("fileActions", () => {
 
     expect(saveAs).toHaveBeenCalledTimes(1);
     expect(hint()).toBe("Saved Foo");
+  });
+
+  // C9: a never-saved document must route straight to Save As — no doomed
+  // `client.saveDocument` call, no "no save path" error logged in between.
+  it("C9: a never-saved document (no known path) skips straight to Save As", async () => {
+    documentStore.getState().setPath(null);
+    const save = vi.spyOn(mockClient, "saveDocument");
+    const saveAs = vi.spyOn(mockClient, "saveDocumentAs").mockResolvedValue(saveOutcome());
+
+    await saveDocument();
+
+    expect(save).not.toHaveBeenCalled();
+    expect(saveAs).toHaveBeenCalledTimes(1);
+    expect(hint()).toBe("Saved Foo");
+  });
+
+  it("C9: once a document has a known path, ⌘S calls saveDocument directly again", async () => {
+    documentStore.getState().setPath("/Users/andrej/CAD/Projects/Bracket v2.onecad");
+    const save = vi.spyOn(mockClient, "saveDocument");
+    const saveAs = vi.spyOn(mockClient, "saveDocumentAs");
+
+    await saveDocument();
+
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(saveAs).not.toHaveBeenCalled();
   });
 
   it("Save surfaces a non-path failure as an error hint", async () => {

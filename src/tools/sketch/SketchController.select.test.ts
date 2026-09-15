@@ -147,7 +147,7 @@ describe("SketchController select tool", () => {
       container,
     });
     // Enter an existing sketch, then arm the select tool.
-    toolStore.getState().setMode("sketch", "sketch1");
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" });
     await flush();
     toolStore.getState().setTool("select");
     await flush();
@@ -527,7 +527,7 @@ describe("SketchController select tool", () => {
     await flush();
 
     expect(viewportStore.getState().statusHint?.message).toBe(
-      "Snap target not reached; the solver kept the geometry at its solved position",
+      "Held by constraints — the point stops where the sketch allows",
     );
     expect(engineMock.setSketchSnap).toHaveBeenLastCalledWith(null, false);
     expect(engineMock.updateSketchSession).toHaveBeenLastCalledWith(
@@ -606,7 +606,7 @@ describe("SketchController select tool — locked reference geometry", () => {
       client: clientMock as unknown as CadClient,
       container,
     });
-    toolStore.getState().setMode("sketch", "sketch1");
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" });
     await flush();
     toolStore.getState().setTool("select");
     await flush();
@@ -698,7 +698,7 @@ describe("SketchController select tool — SP-2 gesture kinds", () => {
       client: clientMock as unknown as CadClient,
       container,
     });
-    toolStore.getState().setMode("sketch", "sketch1");
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" });
     await flush();
     toolStore.getState().setTool("select");
     await flush();

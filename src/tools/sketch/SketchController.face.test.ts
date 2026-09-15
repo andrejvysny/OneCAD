@@ -117,7 +117,7 @@ describe("SketchController — sketch on a selected face", () => {
 
   it("a SELECTED face enters directly on it — no plane picker, topoKey forwarded, backend plane verbatim", async () => {
     selectionStore.getState().set([faceRef()]);
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     await flush();
 
     expect(engineMock.setPlanePickerVisible).not.toHaveBeenCalled();
@@ -147,7 +147,7 @@ describe("SketchController — sketch on a selected face", () => {
   it("an unminted pick promotes via topoKey first, then forwards the resulting elementId", async () => {
     clientMock.promoteSelection.mockResolvedValueOnce([{ elementId: "el_fresh", topoKey: "f:9", kind: "face", bodyId: "body1" }]);
     selectionStore.getState().set([faceRef({ elementId: undefined })]);
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     await flush();
 
     expect(clientMock.promoteSelection).toHaveBeenCalledWith("body1", [{ topoKey: "f:22", anchor: { worldPoint: [1, 2, 25] } }]);
@@ -164,7 +164,7 @@ describe("SketchController — sketch on a selected face", () => {
       resolvePlane = resolve;
     }));
     selectionStore.getState().set([faceRef()]);
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     await flush();
     documentStore.setState({ documentId: "replacement", runtimeSession: "replacement-runtime" });
     resolvePlane(FACE_PLANE);
@@ -179,7 +179,7 @@ describe("SketchController — sketch on a selected face", () => {
 
   it("no selected face falls through to the world-plane picker", async () => {
     selectionStore.getState().set([]);
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     await flush();
 
     expect(clientMock.faceSketchPlane).not.toHaveBeenCalled();
@@ -194,7 +194,7 @@ describe("SketchController — sketch on a selected face", () => {
       faceRef({ id: "body1#f:22" }),
       faceRef({ id: "body1#f:23", topoKey: "f:23", elementId: "el_2" }),
     ]);
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     await flush();
 
     expect(clientMock.faceSketchPlane).not.toHaveBeenCalled();
@@ -207,7 +207,7 @@ describe("SketchController — sketch on a selected face", () => {
   it("a REJECTED face falls back to the picker instead of stranding the user", async () => {
     clientMock.faceSketchPlane.mockRejectedValueOnce(new Error("only a planar face can host a sketch"));
     selectionStore.getState().set([faceRef()]);
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     await flush();
 
     expect(clientMock.enterSketch).not.toHaveBeenCalled();
@@ -223,7 +223,7 @@ describe("SketchController — sketch on a selected face", () => {
     // face was rejected. The reason is threaded through instead.
     clientMock.faceSketchPlane.mockRejectedValueOnce(new Error("only a planar face can host a sketch"));
     selectionStore.getState().set([faceRef()]);
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     await flush();
 
     const hint = viewportStore.getState().statusHint;

@@ -40,12 +40,12 @@ describe("ActiveToolTargets", () => {
       sketch: { kind: "sketch", sketchId: "sketch-1", label: "Base sketch", resolution: "current" },
       regionIds: ["r1", "r2"],
       hostBodies: [body("body-1", "Housing")],
-      direction: { kind: "normal", vector: [0, 0, 1] },
+      direction: { kind: "normal", vector: [0, 0, 1], sense: "positive", label: "+Normal [0, 0, 1]" },
     };
     render(<ActiveToolTargets targets={targets} />);
     expect(screen.getByText("Base sketch")).toBeInTheDocument();
     expect(screen.getByText("Regions: 2")).toBeInTheDocument();
-    expect(screen.getByText("Direction: Normal [0, 0, 1]")).toBeInTheDocument();
+    expect(screen.getByText("Direction: +Normal [0, 0, 1]")).toBeInTheDocument();
   });
 
   it("keeps Boolean Target and Tool distinct while identifiers stay collapsed", () => {
@@ -77,10 +77,12 @@ describe("ActiveToolTargets", () => {
       referenceFaces: [{ a: { ...edge("body1", "face-a"), kind: "face" }, b: { ...edge("body1", "face-b"), kind: "face" } }],
     };
     render(<ActiveToolTargets targets={targets} />);
-    expect(screen.getByText("Housing · Edge")).toBeInTheDocument();
-    expect(screen.getAllByText("Housing · Face")).toHaveLength(2);
+    // N11: each element label now names WHICH element, by the tail of its id.
+    expect(screen.getByText("Housing · Edge …e-main")).toBeInTheDocument();
+    expect(screen.getByText("Housing · Face face-a")).toBeInTheDocument();
+    expect(screen.getByText("Housing · Face face-b")).toBeInTheDocument();
     expect(screen.getAllByText("Reference details")).toHaveLength(4);
-    const referenceA = screen.getByLabelText("Reference A reference details");
+    const referenceA = screen.getByLabelText("First face reference details");
     const details = referenceA.closest("details");
     expect(details).not.toHaveAttribute("open");
     fireEvent.click(referenceA);
@@ -99,7 +101,7 @@ describe("ActiveToolTargets", () => {
       },
     };
     render(<ActiveToolTargets targets={targets} />);
-    expect(screen.getByText("Missing body (missing-body) · Edge")).toBeInTheDocument();
+    expect(screen.getByText("Missing body (missing-body) · Edge …e-uuid")).toBeInTheDocument();
     expect(screen.getByText("(missing)")).toBeInTheDocument();
     expect(screen.queryByText("Leaked body · edge-uuid")).toBeNull();
   });

@@ -9,6 +9,15 @@ export interface AuthoredElementRef extends AuthoredBodyRef {
   elementId?: string;
   /** Snapshot evidence only. Never presented as persistent identity. */
   topoKey?: string;
+  /**
+   * Measured size of the element the publisher already had in hand — a face's
+   * area or an edge's arc length, in mm² / mm (`ElementInfo.magnitude`). OPTIONAL
+   * and never fetched for presentation: the inspector says what it was handed
+   * and stays silent otherwise (UX review 2026-09-14, N11).
+   */
+  area?: number;
+  /** Surface normal the publisher already had (`ElementInfo.normal`), same rule. */
+  normal?: readonly [number, number, number];
 }
 
 export interface AuthoredSketchRef {

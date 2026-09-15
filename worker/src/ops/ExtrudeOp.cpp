@@ -1320,6 +1320,16 @@ OpOutcome extrude_impl(OpContext& ctx, const json& op, const std::string& op_id,
         return publication_refusal(decision, "publication");
     }
 
+    // UX-2026-09-14 WP-1 (D2/A-3): a Cut that removes no demonstrable material is a
+    // NAMED refusal, symmetric with the Add-disjoint refusal above. Before this the
+    // op published a body identical to the target and reported success. It runs
+    // AFTER the publication decision on purpose: a malformed boolean result keeps
+    // its own publication refusal rather than being re-labelled a no-op Cut.
+    if (auto refusal = cut_effect_policy(*boolean_mode, old_target, br.shape, "Extrude",
+                                         target_id)) {
+        return *refusal;
+    }
+
     // Publish the successor: a single-solid result modifies the target in place; a
     // multi-solid boolean-Cut splits into deterministic children (SCHEMA §2, D1).
     publish_boolean_result(ctx, op_id, target_id, br.shape, builder.get(), out);

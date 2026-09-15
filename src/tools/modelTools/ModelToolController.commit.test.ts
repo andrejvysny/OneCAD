@@ -583,7 +583,8 @@ describe("ModelToolController commit gesture (Wave 1)", () => {
 
     expect(controller.extrudeActive).toBe(true);
     expect(toolChipStore.getState().kind).toBe("extrudeDepth");
-    expect(toolChipStore.getState().showSymmetric).toBe(false); // re-edit hides ⇔
+    // T6: a re-edit now offers the SAME option set a fresh arm does.
+    expect(toolChipStore.getState().showSymmetric).toBe(true);
     // The winning arm carried the featureId into the draft (param-only edit path).
     const calls = clientMock.beginPreview.mock.calls;
     const draft = calls[calls.length - 1][0] as PreviewDraft;
@@ -669,7 +670,16 @@ describe("ModelToolController commit gesture (Wave 1)", () => {
       record: "feat-ex",
       op: {
         opType: "Extrude",
-        params: { ...stored, distance: { value: 20 }, draftAngleDeg: { value: 15 } },
+        // T6: the re-edit patch also carries the option set it now exposes. This
+        // record stores neither, so the arm seeds Blind/NewBody — the values its
+        // geometry was already built with — and the patch writes them explicitly.
+        params: {
+          ...stored,
+          distance: { value: 20 },
+          draftAngleDeg: { value: 15 },
+          extrudeMode: "Blind",
+          booleanMode: "NewBody",
+        },
       },
     });
   });

@@ -72,6 +72,8 @@ import { SNAP_RADIUS_PX } from "./snapRadius";
 import { AUTO_KINDS_V2, inferConstraints, entityPoints } from "./autoConstrain";
 import { commitPointRefs, orderSlotCaps } from "./commitPointProvenance";
 import { canonicalKey as canonicalConstraintKey, persistAcceptedIntents } from "./snapPersistence";
+import { admitDirectionCandidates, orderDirectionCandidates } from "./directionLock";
+import { directionSkippedHint } from "@/features/sketch/entityNames";
 
 /** Alt-held placement: infer nothing (spec §38). Module-level so the commit path
  *  allocates no set per commit. */
@@ -178,8 +180,10 @@ import {
   type DimValues,
   type LiveDimEvent,
   type LiveDimState,
+  type LiveDimStep,
   type ToolDimension,
 } from "./liveDimension";
+import { parseChipValue } from "./liveDimParse";
 import { chainRefAngleDeg, dimFrame } from "./liveDimFrames";
 import { arcPreviewSweep } from "./angleArcPreview";
 import {
@@ -199,6 +203,9 @@ import {
 import { LIVE_TOOL_MACHINES } from "./liveToolMachines";
 
 const DRAG_PX = 4;
+
+/** Hint-chip label for a click that would close the open chain (UX review S3). */
+export const CLOSE_LOOP_LABEL = "Close loop";
 
 /** `autoConstrain`'s own coincidence tolerance (1e-6): the draw tools place
  *  endpoints EXACTLY, so an anchor is only ever re-seated onto the point it
@@ -450,6 +457,30 @@ export class SketchController {
   // here so `syncLiveDims` can tell a first `show` from a per-move `update`.
   private liveDimsOpen = false;
   private liveDimPlacement: LiveDimPlacement = "tr";
+  /**
+   * The value being TYPED into the focused chip right now, applied as a soft
+   * lock so the rubber band previews it (UX review S7).
+   *
+   * Not part of the chip FSM's `locks`: a provisional value is not a promise.
+   * Enter/Tab turn it into a real lock (and it clears, because the FSM also
+   * clears the text); Escape, a commit and a tool change drop it with nothing
+   * authored. It rides the SAME locks-before-quantum path a hard lock does
+   * (`stepCtx` → `projectEvent`, `decisionAt` → `numericCandidates`), so the
+   * preview and the eventual commit cannot place the point differently.
+   */
+  private provisionalLock: { field: DimFieldId; value: number } | null = null;
+  /**
+   * The point the machine was last STEPPED with, before `projectEvent` rebuilt
+   * it through the locks.
+   *
+   * `ToolState.cursor` is the PROJECTED point, so re-stepping from it feeds a
+   * lock its own output: type 50 and the machine's cursor moves to 50 along the
+   * aim, and dropping the lock leaves the rubber band stuck there instead of
+   * returning to where the pointer actually is. A provisional lock changes on
+   * every keystroke, which makes that drift visible immediately — so the
+   * re-step reads the raw aim and lets the locks re-apply from scratch.
+   */
+  private stepCursor: Point2 | null = null;
   // The last Line this chain committed — the only entity an ABSOLUTE typed angle
   // can be expressed against (`Angle` is relative). Written by the commit turn,
   // cleared whenever the chain it belongs to ends.
@@ -1316,7 +1347,7 @@ export class SketchController {
     this.deps.container.style.cursor = "";
     this.deps.engine.setSketchDrawingActive(false);
     this.deps.engine.setSketchPreview([]);
-    this.deps.engine.setSketchSnap(null, false);
+    this.publishSnapFeedback(null, false);
     this.deps.engine.setSketchGhost(null, null);
     this.deps.engine.setSketchTrimGhost(null);
     this.deps.engine.exitSketch({ restoreView: opts.restoreProjection });
@@ -1725,6 +1756,18 @@ export class SketchController {
       this.updateRectHint();
       return;
     }
+    // FP-S14 (docs/qa/UX_REVIEW_2026-09-14.md S14): Select is not a draw tool
+    // (`LIVE_TOOL_MACHINES` has no entry for it, so `m` is null here) and its
+    // hint is not a live-dimension affordance, so it stays visible with the
+    // pref off — unlike every `DRAW_TOOL_HINT` entry below.
+    if (this.selectActive) {
+      viewportStore
+        .getState()
+        .setStatusHint("Click geometry to select · drag to move · Delete to remove", {
+          sticky: true,
+        });
+      return;
+    }
     const hint = m && this.liveDimsEnabled() ? (DRAW_TOOL_HINT[m.id] ?? null) : null;
     viewportStore.getState().setStatusHint(hint, hint ? { sticky: true } : undefined);
   }
@@ -1802,7 +1845,7 @@ export class SketchController {
     const tangent = this.chainSeedTangent();
     return {
       minSize: 4 * this.deps.engine.planePixelWorld(),
-      locks: this.liveDim.locks,
+      locks: this.effectiveLocks(),
       // The values the snap DECISION accepted for this sample — the decorator
       // applies them, it no longer decides them (SNAP §8.3).
       dimValues: this.lastDimValues,
@@ -1925,7 +1968,7 @@ export class SketchController {
       toolId: this.machine?.id ?? "",
       toolAnchors: anchors,
       arcMode,
-      locks: this.liveDim.locks,
+      locks: this.effectiveLocks(),
       // Cursor rounding is a PREFERENCE, and Alt already short-circuits the
       // whole engine above; passing null here is what turns it off.
       quantum: this.cursorQuantum(),
@@ -2017,7 +2060,68 @@ export class SketchController {
     this.interactionEpoch++;
     this.pendingMove = null;
     this.snapLatch = emptyLatch();
+    // The published feedback described the epoch that just ended (UX review S4).
+    // Every caller invalidates the MEANING of the last pointer sample, and three
+    // of them — the snap-settings subscriber and Alt down/up — used to call this
+    // ALONE, leaving the marker, the hint chip and the readout advertising a
+    // decision taken under rules that no longer apply. Alt in particular has to
+    // clear in the same frame it suppresses snapping.
+    this.publishSnapFeedback(null, false);
     logDebug("snap", `latch reset: ${why}`, { epoch: this.interactionEpoch, why });
+  }
+
+  /**
+   * THE ONE WRITER of snap feedback (decision D8).
+   *
+   * The in-canvas indicator and `viewportStore.snapFeedback` are set from the
+   * same call, so the marker, the hint chip and the status-bar readout cannot
+   * disagree about what is snapped — which they did as long as the readout was
+   * its own raycast in `ViewportRoot`.
+   */
+  /** Whether the hint CHIP may show. A live-dim chip set already says everything
+   *  the label would, and showing both lets the two collide (SP-1 UX). */
+  private snapHintsVisible(): boolean {
+    return settingsStore.getState().show.snappingHints && !this.liveDimsOpen;
+  }
+
+  private publishSnapFeedback(decision: SnapDecision | null, showHints: boolean): void {
+    const published = decision ? this.withCloseLoopLabel(decision) : null;
+    // "Close loop" OVERRIDES the live-dim suppression. That suppression exists
+    // because a snap label sitting next to the chips repeats what they already
+    // say — but this one says the thing they cannot: that the click is about to
+    // close the profile. Mid-chain, with the chips open, is exactly when it
+    // matters (UX review S3).
+    const hints = showHints || published?.label === CLOSE_LOOP_LABEL;
+    this.deps.engine.setSketchSnap(published, hints);
+    // `snapped: false` is a decision that placed nothing: the indicator hides it
+    // and the readout must fall back to the raw cursor, so it is published as a
+    // clear rather than as live feedback.
+    viewportStore.getState().setSnapFeedback(published?.snapped ? published : null);
+  }
+
+  /**
+   * Rename the decision "Close loop" when the point it resolved to IS the open
+   * start of the chain being drawn (UX review S3).
+   *
+   * Closing a loop happens silently today: the click binds Coincident and fills
+   * the region, but nothing before the click says the loop is what is about to
+   * happen — and an open profile costs a whole extrude (B5). The test is the
+   * line machine's OWN closing rule (within `minSize` of `anchors[0]`, chain of
+   * at least two anchors), so the label promises exactly what the click does.
+   *
+   * Feedback only: the accepted set, the point and every relation intent are
+   * untouched, so nothing downstream of the commit can read a different
+   * placement than the one the marker showed.
+   */
+  private withCloseLoopLabel(decision: SnapDecision): SnapDecision {
+    if (this.machine?.id !== "line") return decision;
+    const anchors = this.machineState?.anchors ?? [];
+    if (anchors.length < 2) return decision;
+    const first = anchors[0];
+    const minSize = 4 * this.deps.engine.planePixelWorld();
+    const d = Math.hypot(decision.point.x - first.x, decision.point.y - first.y);
+    if (!(d < minSize)) return decision;
+    return { ...decision, label: CLOSE_LOOP_LABEL };
   }
 
   /**
@@ -2036,7 +2140,7 @@ export class SketchController {
     // which schedules a frame ITSELF and only when something was actually
     // visible. Adding one here would repaint on every idle pointerleave, which
     // the on-demand render contract forbids (viewport README).
-    this.deps.engine.setSketchSnap(null, false);
+    this.publishSnapFeedback(null, false);
   }
 
   private onPointerLeave = (): void => {
@@ -2175,13 +2279,10 @@ export class SketchController {
         return;
       }
       this.noteDecision(snap);
-      // A live-dim chip set already says everything the hint label would —
-      // showing both lets the snap hint visually collide with the chips it
-      // has nothing new to add next to (SP-1 UX).
-      const showHints = settingsStore.getState().show.snappingHints && !this.liveDimsOpen;
-      this.deps.engine.setSketchSnap(snap, showHints);
+      this.publishSnapFeedback(snap, this.snapHintsVisible());
       // Dimension mode: the indicator aids aiming; there is no rubber-band preview.
       if (!this.machine || !this.machineState) return;
+      this.stepCursor = snap.point;
       const stepped = this.machine.step(this.machineState, { kind: "move", pt: snap.point }, this.stepCtx());
       this.machineState = stepped.state;
       this.deps.engine.setSketchPreview(this.decorate(stepped.preview));
@@ -2217,6 +2318,8 @@ export class SketchController {
     const snap = this.decisionAt(e.clientX, e.clientY, "click");
     if (!snap) return;
     this.noteDecision(snap);
+    this.publishSnapFeedback(snap, this.snapHintsVisible());
+    this.stepCursor = snap.point;
     const dims = this.dimCommitContext();
     const stepped = this.machine.step(this.machineState, { kind: "click", pt: snap.point }, this.stepCtx());
     logSketchStep(this.machine.id, "arcDrag", stepped);
@@ -2236,7 +2339,7 @@ export class SketchController {
     // Self-healing: a press starts a fresh gesture, so a drag-to-arc whose release
     // landed OUTSIDE the container (no container `pointerup`) cannot leak into it.
     this.arcDragging = false;
-    if (this.selectActive) this.onSelectPointerDown(e);
+    if (this.selectActive && !this.planePicking) this.onSelectPointerDown(e);
   };
 
   private onPointerUp = (e: PointerEvent): void => {
@@ -2245,7 +2348,10 @@ export class SketchController {
       this.downButton = -1;
       return;
     }
-    if (this.selectActive) {
+    // A plane pick outranks the Select lane: with Select the default sketch tool
+    // (FP-S13), `selectMachine("select")` can run before `beginPlanePick()` and a
+    // click meant to resolve the plane must not be swallowed as a selection.
+    if (this.selectActive && !this.planePicking) {
       this.onSelectPointerUp(e);
       return;
     }
@@ -2324,6 +2430,13 @@ export class SketchController {
     const snap = this.decisionAt(e.clientX, e.clientY, "click");
     if (!snap) return;
     this.noteDecision(snap);
+    // Publish the CLICK's own decision: the bump above cleared the previous
+    // one, and the readout must keep naming the point the click is landing on
+    // for the frame the click owns. A committing click clears it again inside
+    // `applySteppedClick`; an ARMING click keeps it, so the marker stays on the
+    // anchor it just placed instead of blinking out until the next move.
+    this.publishSnapFeedback(snap, this.snapHintsVisible());
+    this.stepCursor = snap.point;
     // Captured BEFORE the step consumes the anchors / the commit clears the locks.
     const dims = this.dimCommitContext();
     const stepped = this.machine.step(this.machineState, { kind: "click", pt: snap.point }, this.stepCtx());
@@ -2357,6 +2470,8 @@ export class SketchController {
    *  the chips showing them, and the chain's angle reference. Idempotent. */
   private clearLiveDimGesture(): void {
     this.liveDim = liveDimInit();
+    this.provisionalLock = null;
+    this.stepCursor = null;
     this.lastChainLineId = null;
     this.closeLiveDims();
   }
@@ -2412,6 +2527,7 @@ export class SketchController {
     // click keeps them, which is what carries an arc's radius phase 1 → 2.
     if (committed.length > 0 || stepped.done) {
       this.liveDim = liveDimInit();
+      this.provisionalLock = null;
       // The click that just committed (or ended the gesture) describes a snap
       // decision that no longer applies — leaving the marker/hint chip on
       // screen reads as still-live feedback for a point already placed (audit
@@ -2612,8 +2728,8 @@ export class SketchController {
    * it really is, re-step at the cursor so the preview shows the new lock at
    * once, and commit the gesture when Enter said so.
    */
-  private applyLiveDimStep(ev: LiveDimEvent): void {
-    if (this.disposed) return;
+  private applyLiveDimStep(ev: LiveDimEvent): LiveDimStep {
+    if (this.disposed) return { state: this.liveDim };
     const step = liveDimStep(this.liveDim, ev);
     this.liveDim = step.state;
     liveDimStore.getState().setFocus(step.state.focus, step.state.text);
@@ -2621,10 +2737,46 @@ export class SketchController {
     // polygon machine's own `sides` verb. The lock is kept anyway so the chip
     // still reads as pinned (it authors nothing either way).
     if (step.locked === "sides") this.stepSides(step.state.locks.sides ?? DEFAULT_POLYGON_SIDES);
-    // Only a LOCK changes geometry — re-stepping on every character would repaint
-    // the rubber-band at typing speed to produce the identical point.
-    if (ev.kind !== "text") this.restepAtCursor();
+    // EVERY accepted key re-steps, including a plain character (UX review S6/S7).
+    // It used to re-step only on a lock, so a typed number showed nothing at all
+    // until the pointer happened to move — the value was buffered and invisible —
+    // and the rubber band ignored it until Enter. Re-stepping republishes the
+    // chip set synchronously AND previews the provisional value below.
+    this.syncProvisionalLock(step.state);
+    this.restepAtCursor();
     if (step.commitGesture) this.commitLiveDimGesture();
+    return step;
+  }
+
+  /** Locks as the geometry sees them: the pinned ones, with the value currently
+   *  being typed laid over the top (see {@link provisionalLock}). */
+  private effectiveLocks(): DimLocks {
+    const p = this.provisionalLock;
+    return p ? { ...this.liveDim.locks, [p.field]: p.value } : this.liveDim.locks;
+  }
+
+  /**
+   * Re-read the focused chip's raw text as a provisional lock, or drop it.
+   *
+   * Parsed through the chip's OWN reader (`liveDimParse`), so a half-typed
+   * number ("3.", "-") simply yields nothing rather than flashing an error at
+   * someone who is still typing. `sides` is excluded: a side count is a machine
+   * verb, not a point placement, and it already has its own path.
+   */
+  private syncProvisionalLock(state: LiveDimState): void {
+    const field = state.focus;
+    if (field === null || field === "sides" || state.text.trim() === "") {
+      this.provisionalLock = null;
+      return;
+    }
+    const chip = this.liveDims.find((d) => d.field === field);
+    if (!chip) {
+      this.provisionalLock = null;
+      return;
+    }
+    const parsed = parseChipValue(chip, state.text, settingsStore.getState().displayUnit);
+    this.provisionalLock =
+      parsed.ok && parsed.value !== null ? { field, value: parsed.value } : null;
   }
 
   /** Push a typed side count into the polygon machine. */
@@ -2645,7 +2797,7 @@ export class SketchController {
    */
   private restepAtCursor(): void {
     if (!this.machine || !this.machineState) return;
-    const cursor = this.machineState.cursor;
+    const cursor = this.stepCursor ?? this.machineState.cursor;
     if (!cursor) return;
     const stepped = this.machine.step(this.machineState, { kind: "move", pt: cursor }, this.stepCtx());
     this.machineState = stepped.state;
@@ -2680,14 +2832,18 @@ export class SketchController {
     if (!LIVE_DIM_TYPE_KEY.test(e.key) || e.metaKey || e.ctrlKey || e.altKey) return false;
     if (!this.liveDimsEnabled() || !this.machineState) return false;
     if (this.machineState.anchors.length === 0 || this.liveDims.length === 0) return false;
-    const step = liveDimStep(this.liveDim, {
-      kind: "typeStart",
-      ch: e.key,
-      fields: this.liveDimFieldIds(),
-    });
-    if (step.state.focus === null) return false;
-    this.liveDim = step.state;
-    liveDimStore.getState().setFocus(step.state.focus, step.state.text);
+    // Probed first (the FSM is pure), so a key the chip set refuses falls
+    // through to the rest of the ladder untouched.
+    if (
+      liveDimStep(this.liveDim, { kind: "typeStart", ch: e.key, fields: this.liveDimFieldIds() })
+        .state.focus === null
+    ) {
+      return false;
+    }
+    // Through the SAME applier every other chip event uses, so the first
+    // character republishes the chips and previews immediately — the buffered,
+    // invisible first keystroke is UX review S6.
+    this.applyLiveDimStep({ kind: "typeStart", ch: e.key, fields: this.liveDimFieldIds() });
     e.stopPropagation();
     e.preventDefault();
     return true;
@@ -2724,7 +2880,12 @@ export class SketchController {
       id: sketchStore.getState().nextEntityId(),
       ...draftToEntityFields(d),
     }));
-    const { toolAuthored, dimAuthored } = this.buildCommitConstraints(session, newEntities, specs, dims);
+    const { toolAuthored, dimAuthored, admissionHint } = this.buildCommitConstraints(
+      session,
+      newEntities,
+      specs,
+      dims,
+    );
 
     const entities = [...session.entities, ...newEntities];
     const base = [...session.constraints, ...toolAuthored];
@@ -2753,7 +2914,10 @@ export class SketchController {
     // entity the user drew, so undo has to land on the state before the click,
     // not between the two upserts.
     sketchStore.getState().pushUndoSnapshot(before, { kind: "commit" });
+    // A refused DIMENSION outranks a refused direction inference: the user typed
+    // the one and only aimed at the other.
     if (rejectHint) viewportStore.getState().setStatusHint(rejectHint, { severity: "error" });
+    else if (admissionHint) viewportStore.getState().setStatusHint(admissionHint, { severity: "warn" });
     // The chain's angle reference for the NEXT segment. `?? null` on purpose: a
     // batch with no line (circle, ellipse) leaves nothing to measure against.
     this.lastChainLineId = newEntities.find((e) => e.type === "Line")?.id ?? null;
@@ -2825,7 +2989,11 @@ export class SketchController {
     newEntities: SketchEntity[],
     specs: ToolConstraintSpec[] | undefined,
     dims: CommitIntentContext | undefined,
-  ): { toolAuthored: SketchConstraint[]; dimAuthored: SketchConstraint[] } {
+  ): {
+    toolAuthored: SketchConstraint[];
+    dimAuthored: SketchConstraint[];
+    admissionHint?: string;
+  } {
     const nextId = (): string => sketchStore.getState().nextConstraintId();
     /*
      * PLACEMENT PROVENANCE (SNAP P1). Everything below comes from the intents
@@ -2890,7 +3058,23 @@ export class SketchController {
     // curve or intersection snap (SNAP §9.5).
     const persisted = this.persistIntents(intents, newEntities, dims, toolAuthored, session, mode);
     toolAuthored.push(...persisted);
-    if (!dims || Object.keys(dims.locks).length === 0) return { toolAuthored, dimAuthored: [] };
+    /*
+     * FINAL DIRECTION ADMISSION (B3 / D6).
+     *
+     * `canonicalKey` dedupe above compares SIGNATURES, so the two authoring
+     * paths can still hand the solver `Vertical(b)` and `Perpendicular(a, b)`
+     * for an already-Horizontal `a` — the same equation twice, which PlaneGCS
+     * reports as rank-dependent and, on never-solved geometry, as Conflicting.
+     * The parity graph in `directionLock.ts` is the semantic half of the same
+     * dedupe. It runs LAST, over the assembled batch, because only here are the
+     * inferred and the snap-intent halves both present.
+     */
+    const admission = this.admitDirections(session, newEntities, toolAuthored, persisted);
+    const admitted = admission.toolAuthored;
+    const hintPart = admission.admissionHint !== undefined ? { admissionHint: admission.admissionHint } : {};
+    if (!dims || Object.keys(dims.locks).length === 0) {
+      return { toolAuthored: admitted, dimAuthored: [], ...hintPart };
+    }
     const dimSpecs = dimConstraintSpecs(dims.toolId, dims.anchors, dims.locks, {
       // Read HERE rather than captured at the click: this field is written only
       // by the commit turn, and the queue is serial, so inside the turn it names
@@ -2901,7 +3085,67 @@ export class SketchController {
       ...(dims.arcMode ? { arcMode: true } : {}),
     });
     const resolved = resolveDimConstraints(dimSpecs, newEntities, nextId);
-    return { toolAuthored, dimAuthored: dedupeDimConstraints(resolved, toolAuthored) };
+    return {
+      toolAuthored: admitted,
+      dimAuthored: dedupeDimConstraints(resolved, admitted),
+      ...hintPart,
+    };
+  }
+
+  /**
+   * Run the batch through the direction parity graph and report what it refused
+   * (B3 / D6, derivation `sketch-solver-truth.md` §3).
+   *
+   * Precedence is `orderDirectionCandidates`: an axis lock outranks a pair
+   * relation, and inside one rank an explicit snap intent outranks an incidental
+   * coordinate inference (P-6). Only THIS batch's candidates are judged — the
+   * sketch's committed constraints are the graph and are never removed.
+   */
+  private admitDirections(
+    session: SketchSession,
+    newEntities: SketchEntity[],
+    toolAuthored: SketchConstraint[],
+    persisted: readonly SketchConstraint[],
+  ): { toolAuthored: SketchConstraint[]; admissionHint?: string } {
+    const snapIntentIds = new Set(persisted.map((c) => c.id));
+    const ordered = orderDirectionCandidates(toolAuthored, snapIntentIds);
+    const { dropped, unassessed } = admitDirectionCandidates(session.constraints, ordered);
+    if (dropped.length === 0 && unassessed.length === 0) return { toolAuthored };
+
+    const refused = new Set(dropped.map((d) => d.constraint.id));
+    for (const u of unassessed) {
+      logDebug("snap", `direction: ${u.constraint.type} authored unassessed`, { reason: u.reason });
+    }
+    for (const d of dropped) {
+      logDebug("snap", `direction: ${d.constraint.type} ${d.decision.kind}`, {
+        id: d.constraint.id,
+        entities: d.constraint.entities,
+        witness: d.decision.witness.join(" → "),
+      });
+    }
+
+    // A redundant drop is silent: the sketch ends up saying exactly what the
+    // user asked for, just once. A CONTRADICTORY one is not — the user aimed at
+    // a relation the sketch cannot hold, so name the fact that beat it.
+    const clash = dropped.find((d) => d.decision.kind === "contradictory");
+    let admissionHint: string | undefined;
+    if (clash) {
+      const byId = new Map(
+        [...session.constraints, ...toolAuthored].map((c) => [c.id, c] as const),
+      );
+      const witness = clash.decision.witness
+        .filter((id) => id !== clash.constraint.id)
+        .map((id) => byId.get(id))
+        .filter((c): c is SketchConstraint => c !== undefined);
+      admissionHint = directionSkippedHint(clash.constraint.type, witness, [
+        ...session.entities,
+        ...newEntities,
+      ]);
+    }
+    return {
+      toolAuthored: toolAuthored.filter((c) => !refused.has(c.id)),
+      ...(admissionHint !== undefined ? { admissionHint } : {}),
+    };
   }
 
   /**
@@ -3840,10 +4084,7 @@ export class SketchController {
     });
     this.dragSnapLatch = latch;
     this.dragRequestedSnap = decision.snapped;
-    this.deps.engine.setSketchSnap(
-      decision,
-      settings.show.snappingHints,
-    );
+    this.publishSnapFeedback(decision, settings.show.snappingHints);
     return [decision.point.x, decision.point.y];
   }
 
@@ -3886,9 +4127,13 @@ export class SketchController {
       const snapUnsatisfied = requestedSnap && actual !== null &&
         Math.hypot(actual[0] - target[0], actual[1] - target[1]) > 0.25 * this.deps.engine.planePixelWorld();
       if (snapUnsatisfied) {
-        this.deps.engine.setSketchSnap(null, false);
+        this.publishSnapFeedback(null, false);
+        // B6 copy. The old wording ("Snap target not reached; the solver kept
+        // the geometry at its solved position") blamed a failure and named an
+        // internal actor; what actually happened is that the constraints the
+        // user authored do not admit the point they aimed at.
         viewportStore.getState().setStatusHint(
-          "Snap target not reached; the solver kept the geometry at its solved position",
+          "Held by constraints — the point stops where the sketch allows",
         );
       }
       // TRANSIENT: this runs once per rAF for the whole drag, so the engine must

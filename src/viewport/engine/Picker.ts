@@ -4,8 +4,19 @@
  * Hover follows the pointer (coalesced to one raycast per frame) and fires only
  * when the hit CHANGES, so an idle pointer schedules no frames (render-on-demand
  * preserved). Edges win over faces within a screen-space tolerance: an edge hit
- * is preferred when it is no farther than the face hit (+bias) — so a boundary
+ * is preferred when it is no farther than the face hit (+slack) — so a boundary
  * edge lying on a face surface is selectable, while an occluded edge is not.
+ *
+ * BOTH halves of that rule are expressed in SCREEN pixels (D9, finding T8). The
+ * first half is three's own Line2 screen-space raycast, which only reports an
+ * edge within {@link EDGE_PICK_PX} CSS px of the cursor. The second is the depth
+ * window: {@link EDGE_DEPTH_SLACK_PX} CSS px of world size AT THE FACE HIT DEPTH
+ * ({@link pixelWorldSize}). The slack used to be `linePickThreshold` at the
+ * camera's ORBIT-TARGET distance, which is not the depth anything was hit at —
+ * so a panned or zoomed camera made the same click land on the edge or on the
+ * face depending on where the orbit target happened to sit. That produced both
+ * reported symptoms: edges unpickable at one camera (T8) and faces unpickable at
+ * another (the session-32 inverse).
  *
  * Body edges are LineSegments2 (P3), whose raycast is SCREEN-SPACE: the hit
  * radius is `(material.linewidth + params.Line2.threshold) / 2` in the DEVICE px
@@ -16,8 +27,8 @@
  *   - `material.resolution` is flushed before every raycast, because a raycast
  *     that happens before the first render would otherwise see (0,0) and return
  *     silently — no hits, no error.
- * `params.Line.threshold` (world units) is still driven: LineSegments2 reports a
- * world-space `distance`, so it remains the right unit for the face-vs-edge bias.
+ * `params.Line.threshold` (world units) is still driven for any PLAIN THREE.Line
+ * that may be gathered; the fat-line path ignores it.
  *
  * A hit resolves through the mesh registry: triangle index → face id, or segment
  * ordinal → edge id (both lazy TopoKey/ElementId decode). Click captures the
@@ -65,7 +76,28 @@ export interface PickModifiers {
   alt: boolean;
 }
 
-const EDGE_PICK_PX = 6;
+/**
+ * How close, in CSS px, the cursor must be to a body edge for that edge to be a
+ * pick candidate at all. Raised 6 → 8 (T8): three's Line2 raycast enforces this
+ * exactly — `line2PickThreshold` cancels the drawn width out — so it IS the
+ * screen-distance half of the edge-vs-face rule, and five real-user clicks aimed
+ * at 1–3 px accuracy still missing means the aiming target was too small.
+ */
+export const EDGE_PICK_PX = 8;
+
+/**
+ * `k` in D9: the edge-vs-face depth window, in CSS px of world size AT THE FACE
+ * HIT DEPTH. An edge that is within {@link EDGE_PICK_PX} of the cursor and no
+ * more than this far BEHIND the face under the cursor wins; anything deeper is
+ * occluded geometry and the face keeps the pick.
+ *
+ * Two pixels, not one: a boundary edge and its own face tie in depth only in
+ * exact arithmetic, and the two hits come from different tessellations (edge
+ * polylines are sampled off the curve, faces are chordal triangles), so a
+ * grazing view puts a genuine boundary edge up to about a pixel behind its face.
+ */
+export const EDGE_DEPTH_SLACK_PX = 2;
+
 const DRAG_PX = 4; // pointer travel over this ⇒ a drag, not a click
 
 // ── Pure helpers (unit-tested) ──────────────────────────────────────────────
@@ -86,6 +118,41 @@ export function linePickThreshold(
   const oc = camera as THREE.OrthographicCamera;
   const worldPerPx = (oc.top - oc.bottom) / h;
   return px * worldPerPx;
+}
+
+/**
+ * The world size of ONE CSS pixel at ray depth `depth`, for both camera kinds.
+ *
+ * Perspective: `2·depth·tan(fov/2) / viewportHeight`. Orthographic: the frustum
+ * height over the viewport height (depth-independent, which is the point — an
+ * ortho camera has one pixel size everywhere).
+ *
+ * Deliberately `linePickThreshold(…, 1)` rather than a second copy of the same
+ * trigonometry: one screen→world conversion in this file, two callers.
+ */
+export function pixelWorldSize(
+  camera: THREE.Camera,
+  viewportHeight: number,
+  depth: number,
+): number {
+  return linePickThreshold(camera, viewportHeight, depth, 1);
+}
+
+/**
+ * D9's depth window: how far BEHIND the face hit an edge may sit and still win.
+ *
+ * Measured at the FACE hit's own depth, which is what makes the answer
+ * camera-pose invariant — the same click on the same pixel of the same body
+ * arbitrates identically however the orbit target has been panned or zoomed.
+ * `faceDepth` is the caller's fallback (the focus distance) when nothing was
+ * hit, where the value is unused anyway.
+ */
+export function edgeDepthSlack(
+  camera: THREE.Camera,
+  viewportHeight: number,
+  faceDepth: number,
+): number {
+  return EDGE_DEPTH_SLACK_PX * pixelWorldSize(camera, viewportHeight, faceDepth);
 }
 
 /**
@@ -112,16 +179,23 @@ function cappedDpr(): number {
 }
 
 /**
- * Prefer the edge hit when it is no farther than the face hit plus `bias`
- * (edges lie on face boundaries, so distances tie; bias covers float wobble and
- * lets a coincident boundary edge win). An occluded edge (much farther) loses.
+ * Prefer the edge hit when it is no farther than the face hit plus `slack`
+ * (edges lie on face boundaries, so distances tie; the slack covers float wobble
+ * and lets a coincident boundary edge win). An occluded edge (much farther)
+ * loses, and so does a face-interior click, where three reports no edge at all.
+ *
+ * A SILHOUETTE edge — one with no face behind it inside the depth window, and in
+ * particular none at all — always wins, because `faceHit` is null there.
+ *
+ * `slack` comes from {@link edgeDepthSlack}; this function stays a pure
+ * comparison so the rule and the screen→world conversion are tested apart.
  */
 export function choosePreferredHit(
   faceHit: THREE.Intersection | null,
   edgeHit: THREE.Intersection | null,
-  bias: number,
+  slack: number,
 ): { hit: THREE.Intersection; kind: "face" | "edge" } | null {
-  if (edgeHit && (!faceHit || edgeHit.distance <= faceHit.distance + bias)) {
+  if (edgeHit && (!faceHit || edgeHit.distance <= faceHit.distance + slack)) {
     return { hit: edgeHit, kind: "edge" };
   }
   if (faceHit) return { hit: faceHit, kind: "face" };
@@ -345,8 +419,8 @@ export class Picker {
       if (!prior || candidate.distance < prior.distance) nearest.set(key, candidate);
     }
     return [...nearest.values()].sort((a, b) => {
-      const ad = a.distance - (a.kind === "edge" ? raw.threshold : 0);
-      const bd = b.distance - (b.kind === "edge" ? raw.threshold : 0);
+      const ad = a.distance - (a.kind === "edge" ? raw.edgeDepthSlack : 0);
+      const bd = b.distance - (b.kind === "edge" ? raw.edgeDepthSlack : 0);
       const rank = (kind: ProbeCandidateKind) => kind === "edge" ? 0 : kind === "face" ? 1 : 2;
       return ad - bd || rank(a.kind) - rank(b.kind) ||
         a.bodyId.localeCompare(b.bodyId) || a.topoKey.localeCompare(b.topoKey);
@@ -450,13 +524,14 @@ export class Picker {
     if (!all) return null;
     const faceHit = all.faceHits[0] ?? null;
     const edgeHit = all.edgeHits[0] ?? null;
-    return choosePreferredHit(faceHit, edgeHit, all.threshold);
+    return choosePreferredHit(faceHit, edgeHit, all.edgeDepthSlack);
   }
 
   private raycastAll(clientX: number, clientY: number, includeEdges: boolean): {
     faceHits: THREE.Intersection[];
     edgeHits: THREE.Intersection[];
-    threshold: number;
+    /** D9 depth window for the edge-vs-face rule, world units. */
+    edgeDepthSlack: number;
   } | null {
     const rect = this.deps.canvas.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return null;
@@ -466,12 +541,16 @@ export class Picker {
     );
     const camera = this.deps.getCamera();
     this.raycaster.setFromCamera(ndc, camera);
-    const threshold = linePickThreshold(
-      camera,
-      this.deps.getViewportHeight(),
-      this.deps.getFocusDistance(),
-    );
-    this.raycaster.params.Line = { threshold };
+    // Plain THREE.Line only (nothing under bodiesRoot is one today); the fat-line
+    // path ignores `params.Line` and the edge-vs-face rule no longer reads it.
+    this.raycaster.params.Line = {
+      threshold: linePickThreshold(
+        camera,
+        this.deps.getViewportHeight(),
+        this.deps.getFocusDistance(),
+        EDGE_PICK_PX,
+      ),
+    };
     // Screen-space tolerance for the fat edge lines (see line2PickThreshold).
     this.raycaster.params.Line2 = {
       threshold: line2PickThreshold(cappedDpr(), BODY_EDGE_WIDTH),
@@ -494,10 +573,18 @@ export class Picker {
       ? hits
       : hits.filter((hit) => planes.every((p) =>
           p.distanceToPoint(hit.pointOnLine ?? hit.point) >= 0));
+    const faceHits = visible(this.raycaster.intersectObjects(faceObjects, false));
+    const edgeHits = visible(this.raycaster.intersectObjects(edgeObjects, false));
     return {
-      faceHits: visible(this.raycaster.intersectObjects(faceObjects, false)),
-      edgeHits: visible(this.raycaster.intersectObjects(edgeObjects, false)),
-      threshold,
+      faceHits,
+      edgeHits,
+      // At the FACE's depth, not the camera's orbit distance (D9). The focus
+      // distance survives only as the no-face fallback, where the slack is unused.
+      edgeDepthSlack: edgeDepthSlack(
+        camera,
+        this.deps.getViewportHeight(),
+        faceHits[0]?.distance ?? this.deps.getFocusDistance(),
+      ),
     };
   }
 

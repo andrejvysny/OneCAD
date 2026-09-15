@@ -39,12 +39,35 @@ export interface PaletteItem {
   run(): void;
 }
 
+/**
+ * Registered `group` id → the human category shown under an item
+ * (docs/qa/UX_REVIEW_2026-09-14.md N6: a raw contribution id like
+ * "modeling.action" reads as an internal detail, not a category).
+ */
+const GROUP_LABELS: Record<string, string> = {
+  "shell.view": "View",
+  "shell.app": "App",
+  "modeling.action": "Modeling",
+  "modeling.tree": "Model tree",
+};
+
+/** The human category for a `group` id, or `undefined` for an unrecognised one. */
+function groupLabel(group: string): string | undefined {
+  if (group in GROUP_LABELS) return GROUP_LABELS[group];
+  if (group.startsWith("library.")) return "Library";
+  // No dot: already a plain word (e.g. an add-on's own group) — safe to show
+  // verbatim. A dotted, unmapped id is an internal namespace, not a category,
+  // so it is dropped rather than leaked into the UI.
+  return group.includes(".") ? undefined : group;
+}
+
 /** Owner id → the label shown under an item. */
 export function sourceLabel(owner: string, group: string | undefined): string {
   const builtIn = owner.startsWith("onecad.");
   const domain = owner.split(".").slice(1).join(" ") || owner;
   const base = builtIn ? capitalize(domain) : `Add-on · ${owner}`;
-  return group ? `${base} · ${group}` : base;
+  const label = group ? groupLabel(group) : undefined;
+  return label ? `${base} · ${label}` : base;
 }
 
 function capitalize(s: string): string {

@@ -14,6 +14,7 @@ import { log } from "@/debug/log";
 import { formatCursorAxis, lengthSuffix } from "@/units/format";
 import type { LengthUnitId } from "@/units/lengthUnits";
 import type { InputDevice } from "@/viewport/engine/navInput";
+import type { SnapDecision } from "@/tools/sketch/snapTypes";
 
 export type Projection = "persp" | "ortho";
 
@@ -153,6 +154,21 @@ export interface ViewportState {
   cursor: CursorCoords;
   /** `cursor`'s plane-local (u, v) counterpart — see {@link CursorPlaneCoords}. */
   cursorPlaneUV: CursorPlaneCoords;
+  /**
+   * The LIVE snap decision, or null when nothing is snapped (decision D8).
+   *
+   * ONE WRITER: `SketchController`, from the same `decisionAt` call that drives
+   * the in-canvas indicator, and cleared by every path that ends a pointer
+   * sample's meaning (commit, tool switch, Escape, Alt, a snap-settings change,
+   * blur, pointerleave). The indicator, the hint chip and the status-bar readout
+   * all read THIS — before it existed the readout was a second, independent
+   * raycast that showed raw coordinates while the badge advertised a snap
+   * (UX review S1/S4), and the two could not be made to agree.
+   */
+  snapFeedback: SnapDecision | null;
+  /** Bumped on every {@link ViewportState.setSnapFeedback} that changed anything —
+   *  lets a consumer re-key off a decision whose fields happen to repeat. */
+  snapFeedbackSeq: number;
   /** Current DOF count the shell displays (mirrors the active sketch solver). */
   dofBadge: number | null;
   /** Status-bar hint (tool prompt, error, or transient confirmation). */
@@ -196,6 +212,12 @@ export interface ViewportState {
    * the active sketch plane (null when no sketch plane is live).
    */
   setCursor(c: CursorCoords, planeUV: CursorPlaneCoords | null): void;
+  /**
+   * `SketchController` → store: the decision this pointer sample resolved to, or
+   * null to clear. No-op when the feedback is already cleared, so the repeated
+   * clears every teardown path fires (bump + explicit clear) cost one write.
+   */
+  setSnapFeedback(decision: SnapDecision | null): void;
   /** Engine → store: canonical view name (TOP/FRONT/…/ISO/—). */
   setCameraViewLabel(label: string): void;
   setDetectedInputDevice(device: InputDevice): void;
@@ -261,6 +283,8 @@ export const viewportStore = createStore<ViewportState>()((set, get) => ({
   fov: 76,
   cursor: { x: 273, y: 210, z: 0 },
   cursorPlaneUV: { u: 0, v: 0 },
+  snapFeedback: null,
+  snapFeedbackSeq: 0,
   dofBadge: null,
   statusHint: null,
   statusHintSeq: 0,
@@ -292,6 +316,11 @@ export const viewportStore = createStore<ViewportState>()((set, get) => ({
 
   setCursor(c, planeUV) {
     set({ cursor: c, cursorPlaneUV: planeUV ?? { u: 0, v: 0 } });
+  },
+
+  setSnapFeedback(decision) {
+    if (decision === null && get().snapFeedback === null) return;
+    set((s) => ({ snapFeedback: decision, snapFeedbackSeq: s.snapFeedbackSeq + 1 }));
   },
 
   setDetectedInputDevice(device) {

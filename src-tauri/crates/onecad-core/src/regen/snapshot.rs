@@ -94,6 +94,16 @@ pub struct ModelSnapshot {
     pub diagnostics_by_step: BTreeMap<usize, Vec<Diagnostic>>,
     /// Compact repair summary.
     pub repair_summary: RepairSummary,
+    /// UX-2026-09-14 WP-1 (SCHEMA §7.2 `sketchPlacement`): per-step re-seated
+    /// frames for face-hosted sketches whose host moved, carried out of the
+    /// executor so the app crate can adopt them as DERIVED document state
+    /// (`document_runtime::sync_sketch_placements`).
+    ///
+    /// It rides the SNAPSHOT rather than the regen timeline on purpose: the
+    /// timeline record's `plane` stays the AUTHORED frame (no planner or prefix
+    /// hash may move because a host face moved), so unlike `matePlacement` there is
+    /// no record field for the executor to write it into.
+    pub sketch_placement_by_step: BTreeMap<usize, crate::regen::SketchPlacement>,
 }
 
 /// Publishes immutable [`ModelSnapshot`]s over a `watch` channel and mints their
@@ -179,6 +189,7 @@ mod tests {
             diagnostics: vec![],
             diagnostics_by_step: BTreeMap::new(),
             repair_summary: RepairSummary::default(),
+            sketch_placement_by_step: BTreeMap::new(),
         }
     }
 

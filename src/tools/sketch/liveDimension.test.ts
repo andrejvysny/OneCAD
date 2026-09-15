@@ -178,6 +178,21 @@ describe("liveDimStep — full transition table", () => {
     expect(back.state.focus).toBe("angle");
   });
 
+  /*
+   * UX review S8: Rectangle and Circle teach Tab as "second field", so a Line
+   * user presses it too — and the wrap landed back on `length`, took the lock
+   * and cleared the text, leaving a focused input that had visibly emptied
+   * itself. A single-field ring has nowhere to go.
+   */
+  it("tab is a NO-OP on a single-field tool, text and locks intact", () => {
+    const one: LiveDimState = { focus: "length", locks: {}, text: "37" };
+    const step = liveDimStep(one, { kind: "tab", fields: ["length"], back: false, value: 37 });
+    expect(step.state).toBe(one);
+    expect(step.locked).toBeUndefined();
+    const back = liveDimStep(one, { kind: "tab", fields: ["length"], back: true, value: 37 });
+    expect(back.state).toBe(one);
+  });
+
   it("tab is a no-op with nothing focused", () => {
     const idle = liveDimInit();
     expect(liveDimStep(idle, { kind: "tab", fields: FIELDS, back: false, value: 5 }).state).toBe(idle);

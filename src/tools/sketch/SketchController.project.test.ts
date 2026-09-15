@@ -138,7 +138,7 @@ describe("SketchController — Project edges (WP-P)", () => {
     // publishes through the engine BRIDGE, not `deps.engine` — register the same
     // double there or the projected-marker write goes nowhere.
     setViewportEngine(engineMock as unknown as ViewportEngine);
-    toolStore.getState().setMode("sketch", "sketch1");
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" });
     await flush();
     toolStore.getState().setTool("project");
     await flush();

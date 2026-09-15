@@ -84,6 +84,32 @@ export type SnapKind =
   | "numeric";
 
 /**
+ * What each snap kind is CALLED, on the hint chip and in the status-bar readout.
+ *
+ * One table, here in the vocabulary module rather than beside the generator, so
+ * the badge the user reads and the readout beside it can never name the same
+ * decision two different things (UX review S2). A kind with no entry is not
+ * something the user aims AT — an alignment guide or a polar ray names its own
+ * arm ("Vertical", "45°") on the candidate itself, and cursor rounding names the
+ * rule ("Rounded"), so neither has a kind name to show.
+ */
+export const SNAP_KIND_LABEL: Partial<Record<SnapKind, string>> = {
+  origin: "Origin",
+  endpoint: "Endpoint",
+  midpoint: "Midpoint",
+  center: "Center",
+  quadrant: "Quadrant",
+  intersection: "Intersection",
+  onCurve: "On curve",
+  grid: "Grid",
+};
+
+/** {@link SNAP_KIND_LABEL} as a lookup, null for a kind that names no target. */
+export function snapKindLabel(kind: SnapKind): string | null {
+  return SNAP_KIND_LABEL[kind] ?? null;
+}
+
+/**
  * The degrees of freedom a candidate CLAIMS. Two candidates compose only when
  * their claims are disjoint — `point` conflicts with everything, `x` and `y`
  * compose, `angle` composes with `length`.
@@ -345,6 +371,26 @@ export function gridReachPx(
  * suppress the cursor numeric rounding that is the useful answer at that zoom.
  */
 export const GRID_MIN_CELL_PX = 4;
+
+/**
+ * Floor on an ALIGNMENT GUIDE's reach, in CSS pixels.
+ *
+ * A guide is not a hit test. It claims ONE axis, it moves the cursor only along
+ * that axis, and it draws a dashed line saying why — so a reach tuned for
+ * "did the user aim at this point" is far too mean for "is the user lining up
+ * with that point". At the default 8px reach the user has to be within a
+ * millimetre or two of an existing x before anything appears, which is why the
+ * 2026-09-14 review saw no inference guide in an entire session (S5).
+ *
+ * Applied as a FLOOR, never a cap: a user who raised the snap radius to L (12px)
+ * keeps that reach, and one on S (5px) still gets guides at 12.
+ */
+export const GUIDE_MIN_REACH_PX = 12;
+
+/** Alignment-guide reach in CSS pixels — see {@link GUIDE_MIN_REACH_PX}. */
+export function guideReachPx(acquirePx: number): number {
+  return Math.max(acquirePx, GUIDE_MIN_REACH_PX);
+}
 
 /** Radius (px) inside which the origin gets its absolute-capture bias. */
 export const ORIGIN_CORE_PX = 2;

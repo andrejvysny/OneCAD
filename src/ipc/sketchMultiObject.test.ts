@@ -331,10 +331,13 @@ describe("multi-object sketch session (real tauriClient marshalling)", () => {
     await tick();
   }
 
-  /** Enter a fresh sketch through the plane-pick path the app really uses. */
+  /** Enter a fresh sketch through the plane-pick path the app really uses.
+   *  FP-S13: `setMode`'s bare-entry default is now Select (for re-opening),
+   *  so the New Sketch flow's own call site (`activateTool`, the `S` shortcut)
+   *  passes `opts.tool: "line"` explicitly — mirror that here. */
   async function enterFreshSketch(): Promise<void> {
     engine.planePickerHitTest.mockReturnValue("XY" as unknown as null);
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     await tick();
     await tick();
     click(0, 0); // plane pick → openSession

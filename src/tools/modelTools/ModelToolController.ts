@@ -71,8 +71,11 @@ import { geometricLabel, type PickablePlane } from "@/viewport/engine/PlanePicke
 import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
 import { buildBodyObjects, getEntry, remove as removeMesh, swap as swapMesh } from "@/viewport/mesh/meshRegistry";
 import type { MeshEntry } from "@/viewport/mesh/meshRegistry";
+import { faceBoundaryEdgeOrdinals } from "@/viewport/mesh/faceEdges";
+import { ordinalForRef } from "@/viewport/mesh/rebindPick";
 import { toolStore } from "@/stores/toolStore";
 import { operationAttemptStore } from "@/stores/operationAttemptStore";
+import { settingsStore } from "@/stores/settingsStore";
 import { activeToolPresentation } from "./activeToolPresentation";
 import { trace, traceWarn } from "@/debug/trace";
 import { logDebug } from "@/debug/log";
@@ -98,7 +101,15 @@ import {
 import { profileFromRegion, profileBounds, type PrismProfile } from "@/tools/preview/prismPreview";
 import { regionAnchorOf } from "@/tools/modelTools/regionAnchor";
 import { regionAtPoint } from "@/tools/preview/regionPick";
-import { axisDepthFromRay, normalize, type Vec3 } from "@/tools/preview/depthProjection";
+import {
+  axisDepthFromRay,
+  normalize,
+  resolveDepth,
+  snapDepth,
+  type Vec3,
+} from "@/tools/preview/depthProjection";
+import { dimQuantum } from "@/tools/sketch/liveDimension";
+import { chooseGridStep } from "@/viewport/engine/GridPlane";
 import {
   clampToEdgeOpRange,
   radiusFromDrag,
@@ -110,7 +121,7 @@ import {
   type EdgeOpRangeGuard,
   type ScreenAxis,
 } from "@/tools/preview/filletRadius";
-import { averageOutward, edgeOutward } from "@/tools/preview/edgeDirection";
+import { averageOutward, edgeMidAndTangent, edgeOutward } from "@/tools/preview/edgeDirection";
 import { axisSplitsRegion, type LatheAxis } from "@/tools/preview/lathePreview";
 import { angleFromDrag, snapRevolveAngle, clampAngle, angleFromValueText } from "@/tools/preview/revolveAngle";
 import { thicknessFromValueText } from "@/tools/preview/shellThickness";
@@ -273,6 +284,17 @@ function sameIdSet(a: readonly string[], b: readonly string[]): boolean {
   return a.every((id) => set.has(id));
 }
 
+/**
+ * What to call a picked face on screen — "Face 3" from the snapshot TopoKey
+ * `f:3`, plain "Face" for a promoted ElementId (which carries no ordinal a user
+ * could recognise) or anything else unparseable. Provenance for a status hint
+ * only; nothing is authored from it.
+ */
+function faceDisplayName(ref: EntityRef): string {
+  const ordinal = /^f:(\d+)$/.exec(ref.topoKey ?? "");
+  return ordinal ? `Face ${ordinal[1]}` : "Face";
+}
+
 function authoredElement(ref: EntityRef | SemanticRef, kind: "face" | "edge"): AuthoredElementRef {
   if ("primary" in ref) {
     return { kind, bodyId: ref.primary.bodyId, elementId: ref.primary.elementId };
@@ -300,6 +322,28 @@ function storedScalar(v: unknown): number {
     return (v as { value: number }).value;
   }
   return 0;
+}
+
+/**
+ * A stored `extrudeMode` read back as the tool's TWO separate controls (T6):
+ * `Symmetric` is the ⇔ toggle, every other member is an end-condition segment.
+ * A record written before MODEL-OPS W1 carries no `extrudeMode` at all and opens
+ * on Blind — the value that record's geometry was actually built with.
+ */
+function storedExtrudeMode(v: unknown): {
+  endCondition: ExtrudeEndCondition;
+  symmetric: boolean;
+} {
+  if (v === "Symmetric") return { endCondition: "Blind", symmetric: true };
+  if (v === "Blind" || v === "ThroughAll" || v === "ToNext" || v === "ToFace") {
+    return { endCondition: v, symmetric: false };
+  }
+  return { endCondition: "Blind", symmetric: false };
+}
+
+/** A stored `booleanMode`, or `NewBody` for a record that carries none (T6). */
+function storedBooleanMode(v: unknown): BooleanMode {
+  return v === "Add" || v === "Cut" || v === "Intersect" ? v : "NewBody";
 }
 
 /**
@@ -676,6 +720,13 @@ export class ModelToolController {
   private previewArmHint: string | null = null;
   private plane: SketchPlane | null = null;
   private centroidWorld: Vec3 = [0, 0, 0];
+  /**
+   * In-plane shift the armed extrude chip rides at, so it sits BESIDE the profile
+   * instead of over the region the user is being asked to click (T1). Applied to
+   * the chip anchor ONLY — the arrow, the preview and the drag axis all stay on
+   * the centroid.
+   */
+  private chipSideOffset: Vec3 = [0, 0, 0];
   private normal: Vec3 = [0, 0, 1];
   /**
    * The extrude drag's grab basis: the depth the arm held at the press, and the
@@ -703,6 +754,12 @@ export class ModelToolController {
   private stalePreviewRetryAttempted = false;
   /** Full wire params retained verbatim for scalar-only feature re-edit. */
   private extrudeStoredParams: Record<string, unknown> | undefined;
+  /**
+   * The boolean mode the RECORD held when a re-edit armed, or null outside one.
+   * D12: crossing the NewBody boundary from here may cascade `NeedsRepair` onto
+   * downstream features — deterministic and accepted, but it must be hinted.
+   */
+  private extrudeReeditBooleanMode: BooleanMode | null = null;
   /** Fresh commits wait for the matching exact candidate before materializing. */
   private readonly exactPreviewWaiters = new Map<string, ExactPreviewWaiter>();
   /** One-shot "choose Cut" hint fired on the first depth sign-flip while bodies exist. */
@@ -718,6 +775,8 @@ export class ModelToolController {
   /** One resolved picker may open exactly one preview lane, even if AX/Enter/click
    *  confirmations arrive again while that lane is still opening. */
   private regionPickConfirming = false;
+  /** One-shot per pick: the chip already told this user it ate their click (T1). */
+  private regionClickAbsorbedReported = false;
 
   // Commit-generation token (MODEL-HARDEN Wave 1). Bumped at every confirm start,
   // cancel, tool switch, and mode change; every await in a confirm sequence
@@ -825,6 +884,9 @@ export class ModelToolController {
     return this.filletAxisSource === "screen" || !this.filletOutward;
   }
   private filletEditFeatureId: string | undefined;
+  /** Display name of the face this arm was EXPANDED from (C7), or null for a
+   *  plain edge pick. Only the status hint reads it. */
+  private filletFromFace: string | null = null;
   /** Stored params of the fillet being re-edited (radius-only edit preserves edges). */
   private filletStoredParams: Record<string, unknown> | undefined;
   /** Document revision whose prepared tangent closure `filletEdges` represents. */
@@ -1654,6 +1716,12 @@ export class ModelToolController {
 
     const centroid = combinedCentroidWorld(plane, profiles);
     this.centroidWorld = centroid;
+    const beside = besideProfilesWorld(plane, profiles);
+    this.chipSideOffset = [
+      beside[0] - centroid[0],
+      beside[1] - centroid[1],
+      beside[2] - centroid[2],
+    ];
     this.normal = normalize(this.plane.normal as Vec3);
 
     // The boolean seed is resolved AFTER the plane basis, because the probe half
@@ -1667,6 +1735,34 @@ export class ModelToolController {
       draft: storedDraft,
       ...(seed ? { boolean: seed } : {}),
     }).state;
+    // T6 / D12: a re-edit used to open on the draft angle alone — `Blind / Through
+    // all / To next / To face` and `New Body / Add / Cut` were hidden, so an
+    // Extrude could never be changed from Add to Cut after the fact. Seed all
+    // three from the RECORD (never from a fresh material probe, which would be a
+    // lie about what ✓ writes back) and let the commit carry them.
+    this.extrudeReeditBooleanMode = null;
+    if (editFeatureId) {
+      const storedMode = storedExtrudeMode(this.extrudeStoredParams?.extrudeMode);
+      const mode = storedBooleanMode(this.extrudeStoredParams?.booleanMode);
+      const storedTarget = this.extrudeStoredParams?.targetBodyId;
+      this.extrudeReeditBooleanMode = mode;
+      this.extrude = extrudeStep(this.extrude, {
+        kind: "setBooleanMode",
+        mode,
+        targetBodyId: typeof storedTarget === "string" ? storedTarget : null,
+      }).state;
+      // The stored `targetFace` rides along verbatim so a ToFace record re-arms on
+      // its own target instead of dropping into a face pick.
+      this.extrude = extrudeStep(this.extrude, {
+        kind: "setEndCondition",
+        end: storedMode.endCondition,
+        targetFace: this.extrudeStoredParams?.targetFace ?? null,
+      }).state;
+      this.extrude = extrudeStep(this.extrude, {
+        kind: "setSymmetric",
+        symmetric: storedMode.symmetric,
+      }).state;
+    }
 
     this.engine.showExtrudePreviews(this.plane, profiles, this.centroidWorld, this.normal);
     this.engine.setExtrudeDepth(startDepth, false);
@@ -1754,23 +1850,26 @@ export class ModelToolController {
       {
         onValue: (v) => this.onExtrudeChip(v),
         onSymmetric: (sym) => this.setExtrudeSymmetric(sym),
+        onFlip: () => this.onExtrudeFlip(),
         onConfirm: () => void this.confirmExtrude(),
         onCancel: () => toolStore.getState().setTool("select"),
         onBooleanMode: (mode) => this.onExtrudeBooleanMode(mode),
         onEndCondition: (end) => void this.onExtrudeEndCondition(end),
         onDraftAngle: (deg) => this.onExtrudeDraftAngle(deg),
       },
-      // Re-edit is param-only (depth) → value + ✓/✕ only, no symmetric toggle, no
-      // boolean/end-condition segments (fresh arms only).
+      // T6/D12: a re-edit offers the SAME option set a fresh arm does, seeded from
+      // the record above. Every flag reads off the armed state so the two paths
+      // cannot drift.
       {
-        symmetric: false,
-        showSymmetric: !editFeatureId,
-        showBooleanSegments: !editFeatureId,
-        showEndConditions: !editFeatureId,
+        symmetric: this.extrude.symmetric,
+        showSymmetric: true,
+        showBooleanSegments: true,
+        showEndConditions: true,
         // ThroughAll/ToNext/ToFace all need something to reach — the same visible
-        // bodies the boolean target resolution counts.
+        // bodies the boolean target resolution counts, recomputed for the CURRENT
+        // document (a re-edit's document is not the one the record was authored in).
         canUseBodyEnds: canBoolean,
-        endCondition: "Blind",
+        endCondition: this.extrude.endCondition,
         canBoolean,
         // The RESOLVED mode, not a literal — a host-seeded arm opens on Add.
         booleanMode: this.extrude.booleanMode,
@@ -1809,8 +1908,15 @@ export class ModelToolController {
     });
   }
 
+  /** The armed extrude chip's world anchor: the arrowhead, pushed in-plane clear
+   *  of the profile (T1). The leader line still runs back to the centroid. */
   private chipWorld(): Vec3 {
-    return this.extrudeHeadWorld(this.extrude.depth);
+    const head = this.extrudeHeadWorld(this.extrude.depth);
+    return [
+      head[0] + this.chipSideOffset[0],
+      head[1] + this.chipSideOffset[1],
+      head[2] + this.chipSideOffset[2],
+    ];
   }
 
   /**
@@ -1852,7 +1958,7 @@ export class ModelToolController {
     // The chip rides the arrowhead. Straight to the engine, NEVER through
     // `toolChipStore.worldPos`: that field is the mount effect's key, so writing
     // it per frame would remount the chip and drop the focus out of its input.
-    this.engine.moveChip(MODEL_TOOL_CHIP_ID, head, this.centroidWorld);
+    this.engine.moveChip(MODEL_TOOL_CHIP_ID, this.chipWorld(), this.centroidWorld);
   }
 
   private onExtrudeChip(v: number): void {
@@ -1862,6 +1968,19 @@ export class ModelToolController {
     this.syncExtrudeHandle(); // a typed depth moves the arrow exactly like a drag
     toolChipStore.getState().setValue(v);
     this.sendPreview();
+  }
+
+  /**
+   * "Flip" on the armed cluster (T3): reverse the extrude direction.
+   *
+   * The flip is CONSUMED immediately into the signed depth rather than held as a
+   * modifier flag — a latched flag would be re-applied by the next drag frame and
+   * negate a drag through zero a second time, leaving the arrow and the number
+   * disagreeing. `resolveDepth` is the one place that negation lives.
+   */
+  private onExtrudeFlip(): void {
+    if (this.extrude.phase !== "armed" && this.extrude.phase !== "dragging") return;
+    this.onExtrudeChip(resolveDepth(this.extrude.depth, { flip: true }));
   }
 
   /** ⇔ toggle on the armed cluster: mirror Alt-during-drag onto the live preview. */
@@ -2041,6 +2160,15 @@ export class ModelToolController {
       this.extrude = extrudeStep(this.extrude, { kind: "setBooleanMode", mode, needsPick: true }).state;
     }
     this.applyBooleanState(this.extrude.booleanMode, this.extrude.phase === "targetPick", "extrude");
+    // D12: on a RE-EDIT, crossing the NewBody boundary changes what the record
+    // produces, which can cascade `NeedsRepair` onto everything downstream of it.
+    // Deterministic and accepted — but never silent.
+    const storedMode = this.extrudeReeditBooleanMode;
+    if (storedMode !== null && (storedMode === "NewBody") !== (this.extrude.booleanMode === "NewBody")) {
+      viewportStore
+        .getState()
+        .setStatusHint("Downstream features may need repair", { severity: "warn", sticky: true });
+    }
     if (this.extrude.phase === "armed") this.sendPreview();
   }
 
@@ -2261,7 +2389,7 @@ export class ModelToolController {
     }
     // Wave 2: >1 region → MULTI-select. Toggle membership; Enter / chip ✓ / a
     // double-click on one region confirms; Esc cancels.
-    const chipWorld = regionsCentroidWorld(session.plane, pickable);
+    const chipWorld = regionsChipWorld(session.plane, pickable);
     this.regionPick = {
       kind,
       sketchId,
@@ -2274,6 +2402,7 @@ export class ModelToolController {
       chipWorld,
     };
     this.regionPickConfirming = false;
+    this.regionClickAbsorbedReported = false;
     this.lastRegionClickId = null;
     this.engine.showRegionPick(session.plane, pickable);
     this.engine.setRegionSelected([]);
@@ -2323,6 +2452,32 @@ export class ModelToolController {
       return;
     }
     this.beginRevolveArmed(sketchId, valid, validProfiles, session, editFeatureId, startValue);
+  }
+
+  /**
+   * A press the chip absorbed while a region is still required (T1).
+   *
+   * The chip is an interactive boundary, so `onPointerDown` already refuses it —
+   * which is exactly why the review's click was SILENTLY swallowed: the count
+   * stayed `0 regions` and nothing said why. A press on one of the chip's own
+   * controls is a real interaction and stays silent; anything else on the chip
+   * reports, once per pick, so the message cannot drown the pick instructions.
+   */
+  private reportAbsorbedRegionClick(target: EventTarget | null): void {
+    if (!this.regionPick || this.regionClickAbsorbedReported) return;
+    if (
+      target instanceof Element &&
+      target.closest("button,input,select,textarea,[role=button],[contenteditable]")
+    ) {
+      return;
+    }
+    this.regionClickAbsorbedReported = true;
+    viewportStore
+      .getState()
+      .setStatusHint("The chip absorbed that click — click the region beside it", {
+        severity: "warn",
+        sticky: true,
+      });
   }
 
   /** Pointer hover during region pick: tint the region under the pointer. */
@@ -3458,14 +3613,30 @@ export class ModelToolController {
   ): Promise<void> {
     const selected = selectionStore.getState().selected;
     const edges = selected.filter((r) => r.kind === "edge");
-    if (edges.length === 0) {
+    // C7 / D9: with no edge picked, a FACE selection arms the whole face —
+    // expanded here to its boundary edges and then run through the ordinary
+    // `prepareEdgeOp` closure exactly as if those edges had been clicked.
+    const expanded = edges.length === 0 ? this.edgesOfSelectedFaces(selected) : null;
+    const picks = edges.length > 0 ? edges : expanded?.edges ?? [];
+    if (picks.length === 0) {
+      if (expanded) {
+        // A face IS selected (so the toolbar offered the tool) but it bounds no
+        // edge this mesh can name — a seam-only or non-manifold face. The
+        // existing edge-op refusal copy, not a "select something" nudge.
+        this.publishEdgePrepareFailure(kind, `${expanded.faceLabel} has no edges to ${kind.toLowerCase()}`);
+        return;
+      }
       const verdict = getToolApplicability("fillet", selected, this.applicabilityCtx());
-      viewportStore.getState().setStatusHint(verdict.reason ?? `Select edges, then ${kind}`, { sticky: true });
+      viewportStore.getState().setStatusHint(
+        verdict.reason ?? `Select edges or a face, then ${kind}`,
+        { sticky: true },
+      );
       return;
     }
     const gen = ++this.armGen;
-    if (!(await this.prepareEdgeClosure(gen, kind, edges))) return;
+    if (!(await this.prepareEdgeClosure(gen, kind, picks))) return;
     if (gen !== this.armGen) return;
+    this.filletFromFace = expanded?.faceLabel ?? null;
     this.filletEditFeatureId = undefined;
     this.computeEdgeOpOutward();
     // Direction-driven typing is armed ONLY on the bisector tier. The bbox proxy is
@@ -3572,6 +3743,53 @@ export class ModelToolController {
       edges,
       referenceFaces,
     });
+  }
+
+  /**
+   * A FACE selection expanded to the boundary edges of every selected face
+   * (C7 / D9), or null when no face is selected at all — the caller
+   * distinguishes "nothing to expand" from "expanded to nothing", which are
+   * different messages.
+   *
+   * The expansion is derived from the installed MESH1 (`faceBoundaryEdgeOrdinals`)
+   * because no `CadClient` verb answers "which edges bound this face": the worker
+   * knows, but only reports the inverse, per PREPARED edge, on `prepareEdgeOp`.
+   * The refs built here are the same shape `ViewportRoot.refFromHit` produces for
+   * a real click, so everything downstream — `prepareEdgeOp`, the tangent
+   * closure, the chip, the preview — runs on the picked-edges path unchanged.
+   */
+  private edgesOfSelectedFaces(
+    selected: readonly EntityRef[],
+  ): { edges: EntityRef[]; faceLabel: string } | null {
+    const faces = selected.filter((ref) => ref.kind === "face");
+    if (faces.length === 0) return null;
+    const edges: EntityRef[] = [];
+    const seen = new Set<string>();
+    for (const face of faces) {
+      const bodyId = face.bodyId;
+      const entry = bodyId ? getEntry(bodyId) : undefined;
+      if (!bodyId || !entry?.edgeIndex) continue;
+      const ordinal = ordinalForRef(entry.faceIndex, entry.view, face);
+      if (ordinal < 0) continue;
+      for (const edgeOrdinal of faceBoundaryEdgeOrdinals(entry.view, ordinal)) {
+        const topoKey = entry.edgeIndex.idOf(edgeOrdinal);
+        const id = topoRefId(bodyId, topoKey);
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const mid = edgeMidAndTangent(entry.view, edgeOrdinal)?.mid;
+        edges.push({
+          kind: "edge",
+          id,
+          bodyId,
+          topoKey,
+          // Same classification `resolvePick` makes: the label is an ElementId
+          // only when it carries Rust's `el_` contract, never by position.
+          elementId: topoKey.startsWith("el_") ? topoKey : undefined,
+          anchor: mid ? { worldPoint: mid } : undefined,
+        });
+      }
+    }
+    return { edges, faceLabel: faceDisplayName(faces[0]) };
   }
 
   private async prepareEdgeClosure(
@@ -3772,7 +3990,10 @@ export class ModelToolController {
       return `Edit ${kind.toLowerCase()} ${noun} — drag or type, Enter to apply`;
     }
     const n = this.filletEdges.length;
-    return `${kind} ${n} edge${n > 1 ? "s" : ""} — drag or type ${noun} · Enter or ✓ to apply`;
+    // C7: an arm expanded from a face says WHICH face, so the user can tell a
+    // whole-face arm from the single edge they thought they clicked.
+    const of = this.filletFromFace ? ` of ${this.filletFromFace}` : "";
+    return `${kind} ${n} edge${n > 1 ? "s" : ""}${of} — drag or type ${noun} · Enter or ✓ to apply`;
   }
 
   /**
@@ -5717,6 +5938,19 @@ export class ModelToolController {
   // mesh (`faceFrame`) — no round-trip on a pointer click.
 
   private startHole(): void {
+    // C6: a Hole needs a flat face to sit on, so an empty document must not arm
+    // one — "Click a flat face to place the hole" on a document with no bodies
+    // is an instruction the user cannot follow. Same predicate the toolbar
+    // greys the button with, so the button and the click cannot disagree.
+    const verdict = getToolApplicability(
+      "hole",
+      selectionStore.getState().selected,
+      this.applicabilityCtx(),
+    );
+    if (!verdict.enabled) {
+      viewportStore.getState().setStatusHint(verdict.reason ?? null, { sticky: true });
+      return;
+    }
     this.hole = holeStep(this.hole, { kind: "start" }).state;
     const key = documentStore.getState().documentId;
     const defaults = key ? this.holeDefaults.get(key) : undefined;
@@ -7913,6 +8147,9 @@ export class ModelToolController {
     // geometry gesture whose matching pointerup would pick through the chrome.
     if (isInteractiveBoundary(e)) {
       this.downButton = -1;
+      // …and while a region pick is open that refusal is indistinguishable from a
+      // click that simply did nothing, because the chip floats over the sketch (T1).
+      if (e.button === 0) this.reportAbsorbedRegionClick(e.target);
       return;
     }
     this.downX = e.clientX;
@@ -8142,7 +8379,10 @@ export class ModelToolController {
       // the absolute projection would add an arrow-length to D on EVERY re-grab —
       // a ratchet. Same fix, same reason as the offset-face arrow (`:5635`).
       const raw = axisDepthFromRay(ray.origin, ray.dir, this.centroidWorld, this.normal);
-      const depth = this.extrudeStartDepth + (raw - this.extrudeGrabDepth);
+      const depth = snapDepth(
+        this.extrudeStartDepth + (raw - this.extrudeGrabDepth),
+        this.dragQuantumMm(),
+      );
       const modeBefore = this.extrude.booleanMode;
       this.extrude = extrudeStep(this.extrude, { kind: "drag", depth, symmetric: this.altHeld }).state;
       this.engine.setExtrudeDepth(this.extrude.depth, this.extrude.symmetric);
@@ -8409,6 +8649,25 @@ export class ModelToolController {
   /** Backward-compatible target-only wrapper for drag-claim call sites. */
   private isExcludedClickAwayTarget(target: EventTarget | null): boolean {
     return isInteractiveBoundaryTarget(target);
+  }
+
+  /**
+   * The granularity a DRAGGED length rounds to, in mm, or 0 for "do not round"
+   * (T7). Dragging the depth handle produced `52.09 mm` while sketch dimension
+   * rounding was on by default — two policies in one app.
+   *
+   * Exactly `SketchController.cursorQuantum()`'s answer: the same
+   * `snapTo.dimensionRound` preference, the same zoom-adaptive quantum computed
+   * in the DISPLAY unit and converted back to mm, so an inch session rounds to a
+   * round number of inches. Typed values never come through here.
+   */
+  private dragQuantumMm(): number {
+    if (!settingsStore.getState().snapTo.dimensionRound) return 0;
+    // Not every engine double in the unit lanes carries this reader; without a
+    // camera distance there is no grid step to key off, so rounding stays off.
+    const distance = (this.engine as Partial<ViewportEngine>).getCameraDistance?.();
+    if (typeof distance !== "number" || !Number.isFinite(distance)) return 0;
+    return dimQuantum(chooseGridStep(distance).minor, settingsStore.getState().displayUnit).length;
   }
 
   private get engine(): ViewportEngine {
@@ -9072,6 +9331,15 @@ export class ModelToolController {
               // re-edit writes the identical value back (no-op) and an edited one
               // actually lands — the only two behaviours a chip may have.
               draftAngleDeg: { value: this.extrude.draftAngleDeg },
+              // T6: same rule for the option set the re-edit now exposes. Seeded
+              // from this record, so an untouched re-edit is a no-op here too.
+              // `targetBodyId` is written only when a boolean actually needs one —
+              // the worker ignores a stale one under NewBody (`ExtrudeOp.cpp`).
+              extrudeMode: this.extrude.symmetric ? "Symmetric" : this.extrude.endCondition,
+              booleanMode: this.extrude.booleanMode,
+              ...(this.extrude.booleanMode !== "NewBody" && this.extrude.targetBodyId
+                ? { targetBodyId: this.extrude.targetBodyId }
+                : {}),
             }),
           ));
         } else {
@@ -10839,6 +11107,7 @@ export class ModelToolController {
     this.filletAxis = SCREEN_UP_AXIS;
     this.filletAxisSource = "screen";
     this.filletEditFeatureId = undefined;
+    this.filletFromFace = null;
     this.filletStoredParams = undefined;
     if (this.dragging === "fillet") this.dragging = null;
     toolChipStore.getState().clear();
@@ -11205,6 +11474,38 @@ function combinedCentroidWorld(plane: SketchPlane, profiles: PrismProfile[]): Ve
 }
 
 /**
+ * Clearance past the profile's own +u half-extent the chip anchor sits at, as a
+ * FRACTION of that half-extent (T1). A fraction rather than a world constant so
+ * the gap holds at every model scale; the chip's existing `anchorOffsetPx` keeps
+ * the remaining screen-space clearance.
+ */
+const CHIP_PROFILE_CLEARANCE = 0.15;
+
+/**
+ * The world point a profile-anchored chip sits at: {@link combinedCentroidWorld}
+ * pushed along the plane's in-plane +x past the profile's own +u half-extent
+ * (2026-09-14 review T1).
+ *
+ * The chip used to sit ON the centroid, i.e. directly over the region the user
+ * was being asked to click, and a press it absorbed was reported nowhere. The +u
+ * reach is measured from the SAME anchor `combinedCentroidWorld` returns, so the
+ * two stay consistent for one profile and for N.
+ */
+function besideProfilesWorld(plane: SketchPlane, profiles: PrismProfile[]): Vec3 {
+  const centre = combinedCentroidWorld(plane, profiles);
+  if (profiles.length === 0) return centre;
+  const bounds = profiles.map(profileBounds);
+  const maxU = Math.max(...bounds.map((b) => b.maxU));
+  const anchorU =
+    profiles.length === 1
+      ? bounds[0].centroidU
+      : (Math.min(...bounds.map((b) => b.minU)) + maxU) / 2;
+  const reach = Math.max(maxU - anchorU, 0) * (1 + CHIP_PROFILE_CLEARANCE);
+  const x = normalize(plane.xAxis as Vec3);
+  return [centre[0] + x[0] * reach, centre[1] + x[1] * reach, centre[2] + x[2] * reach];
+}
+
+/**
  * A point KNOWN to be inside `profile`, in world space — the centroid of its
  * largest cap triangle.
  *
@@ -11245,12 +11546,13 @@ function strongerProbe(a: SideProbe | null, b: SideProbe | null): SideProbe | nu
   return b.gap < a.gap ? b : a;
 }
 
-/** World centroid over N pickable regions (the region-select chip anchor). */
-function regionsCentroidWorld(plane: SketchPlane, regions: SketchRegion[]): Vec3 {
+/** Anchor for the region-select chip: BESIDE the regions it asks the user to
+ *  click, never over them (T1). */
+function regionsChipWorld(plane: SketchPlane, regions: SketchRegion[]): Vec3 {
   const profiles = regions
     .map((r) => profileFromRegion(r))
     .filter((p): p is PrismProfile => p !== null);
-  return combinedCentroidWorld(plane, profiles);
+  return besideProfilesWorld(plane, profiles);
 }
 
 /** Perpendicular distance from a plane point (u,v) to the segment a→b. */

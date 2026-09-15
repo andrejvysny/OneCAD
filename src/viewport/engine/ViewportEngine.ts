@@ -1571,6 +1571,9 @@ export class ViewportEngine {
     }
     if (!label || !at) {
       this.ghostEl.style.display = "none";
+      // …and tell the driver, which owns `display` per frame and would otherwise
+      // un-hide the stale glyph on the next render (see `setHidden`).
+      if (this.ghostRegistered) this.overlayDriver.setHidden("__sketch_ghost", true);
       return;
     }
     const world = new THREE.Vector3();
@@ -1582,6 +1585,7 @@ export class ViewportEngine {
     } else {
       this.overlayDriver.setWorldPos("__sketch_ghost", world);
     }
+    this.overlayDriver.setHidden("__sketch_ghost", false);
     this.ghostEl.textContent = label;
     this.ghostEl.style.display = "";
     this.invalidate();

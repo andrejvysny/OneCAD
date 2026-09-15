@@ -501,6 +501,12 @@ OpOutcome revolve_impl(OpContext& ctx, const json& op, const std::string& op_id,
     // Publish the successor: a single-solid result modifies the target in place; a
     // multi-solid boolean result splits into deterministic children `body_<opId>:<k>`
     // (SCHEMA §2, §7.2, D1 — parity with ExtrudeOp/BooleanOp).
+    // UX-2026-09-14 WP-1 (D2/A-3): see `ExtrudeOp.cpp` — every subtracting tail
+    // shares the one predicate, after the publication decision for the same reason.
+    if (auto refusal = cut_effect_policy(boolean_mode, target_rec->geom, br.shape, "Revolve",
+                                         target_id)) {
+        return *refusal;
+    }
     if (publish_boolean_result(ctx, op_id, target_id, br.shape, builder.get(), out) ==
         BooleanPublishResult::Empty) {
         // Unreachable after boolean_result_policy; kept as a defensive terminal.

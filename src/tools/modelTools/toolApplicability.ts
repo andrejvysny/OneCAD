@@ -29,11 +29,14 @@ export interface ToolApplicability {
   severity?: ToolApplicabilitySeverity;
 }
 
-/** Structural subset of `SketchMeta` (documentStore.ts) — kept local so this
- *  module never imports a store, only the two fields the sketch fallback needs. */
+/** Structural subset of `SketchMeta` / `BodyMeta` (documentStore.ts) — kept local
+ *  so this module never imports a store, only the fields the document-level
+ *  fallbacks need. `visible` is REQUIRED, not defaulted: Hole and Measure are
+ *  gated on a body the user can actually click, and a silent "assume visible"
+ *  would re-enable them on exactly the empty document C6 is about. */
 export interface ToolApplicabilityContext {
   sketches: Record<string, { id: string; visible: boolean }>;
-  bodies?: Record<string, { health?: "healthy" | "quarantined" }>;
+  bodies?: Record<string, { visible: boolean; health?: "healthy" | "quarantined" }>;
 }
 
 const ENABLED: ToolApplicability = { enabled: true };
@@ -118,6 +121,12 @@ function requireKind(
   return selected.some((r) => r.kind === kind) ? ENABLED : { enabled: false, reason };
 }
 
+/** How many bodies the document holds — all of them, or only the visible ones. */
+function bodyCount(ctx: ToolApplicabilityContext, visibleOnly: boolean): number {
+  const bodies = Object.values(ctx.bodies ?? {});
+  return visibleOnly ? bodies.filter((b) => b.visible).length : bodies.length;
+}
+
 function selectedBodyIds(selected: readonly EntityRef[]): string[] {
   const ids = new Set<string>();
   for (const ref of selected) {
@@ -131,8 +140,8 @@ function selectedBodyIds(selected: readonly EntityRef[]): string[] {
  * Applicability of `tool` given the current selection (and, for the
  * extrude/revolve document-level fallback, which sketches exist). Called
  * with `Tool` (not just `ModelTool`) for call-site ergonomics — every id this
- * module has no rule for (select/sketch/datum/hole/measure, and every
- * SketchTool id) falls through to always-enabled.
+ * module has no rule for (select/sketch/datum/gear, and every SketchTool id)
+ * falls through to always-enabled.
  */
 export function getToolApplicability(
   tool: Tool,
@@ -162,13 +171,43 @@ export function getToolApplicability(
     case "revolve":
       return regionApplicability("Revolve", selected, ctx, "Select a sketch to revolve");
     case "fillet":
-      return requireKind(selected, "edge", "Select edges, then Fillet");
+      // C7 / D9: a FACE selection arms too — the controller expands it to that
+      // face's boundary edges. Most CAD lets you fillet every edge of a face,
+      // and a disabled button with an edge that cannot be hit was the whole of
+      // T8's dead end. A BODY selection stays disabled: "fillet this body"
+      // has no defensible edge set, so it would be a guess.
+      if (selected.some((r) => r.kind === "edge" || r.kind === "face")) return ENABLED;
+      return {
+        enabled: false,
+        // A BODY is the one selection that LOOKS like it should work, so it gets
+        // the corrective wording; every other state (including none) gets the
+        // full "…, then Fillet" call to action.
+        reason: selected.some((r) => r.kind === "body")
+          ? "Select edges or a face"
+          : "Select edges or a face, then Fillet",
+      };
     case "boolean":
+      // C6: Combine takes a target and a tool body, so one body in the document
+      // can never satisfy it however it is selected.
+      if (bodyCount(ctx, false) < 2) {
+        return { enabled: false, reason: "Two bodies are needed to combine" };
+      }
       return requireKind(
         selected,
         "body",
         "Select the target body, then pick the tool body",
       );
+    // C6: both were falling through to `default: ENABLED`, so an empty document
+    // offered a Hole to place on nothing and a Measure with nothing to read.
+    // VISIBLE bodies: both tools start by clicking geometry on screen.
+    case "hole":
+      return bodyCount(ctx, true) > 0
+        ? ENABLED
+        : { enabled: false, reason: "Add a body first" };
+    case "measure":
+      return bodyCount(ctx, true) > 0
+        ? ENABLED
+        : { enabled: false, reason: "Nothing to measure" };
     case "shell":
       return requireKind(selected, "face", "Select faces to remove, then Shell");
     case "offsetFace":

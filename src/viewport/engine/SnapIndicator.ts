@@ -24,7 +24,11 @@ import { Line2 } from "three/examples/jsm/lines/Line2.js";
 import { LineGeometry } from "three/examples/jsm/lines/LineGeometry.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import type { SketchPlane } from "@/ipc/types";
-import type { HtmlOverlayDriver } from "./HtmlOverlayDriver";
+import {
+  ANNOTATION_PRIORITY,
+  CURSOR_PROTECT_PX,
+  type HtmlOverlayDriver,
+} from "./HtmlOverlayDriver";
 import type { SnapDecision, SnapKind } from "@/tools/sketch/snapTypes";
 import { cssToDevice, currentDpr } from "./dpr";
 import { buildDotTexture, buildRingTexture } from "./markerTextures";
@@ -43,6 +47,25 @@ export const GUIDE_GAP_CSS = 4;
 const MARKER_SIZE_CSS = 11;
 /** Halo ring size, in CSS px — larger than the marker so the glyph sits inside it. */
 const HALO_SIZE_CSS = 20;
+/** Attach-target ring size, in CSS px — outside the halo, so the two read as one
+ *  emphasised target rather than a thicker halo. */
+const TARGET_RING_SIZE_CSS = 28;
+
+/**
+ * The snap kinds that name an EXISTING point the click will attach to.
+ *
+ * These get the accent target ring (UX review S3): approaching an endpoint used
+ * to produce no highlight on the thing being approached at all, so closing a
+ * loop — which costs a whole extrude when it silently does not happen (B5) —
+ * looked identical to placing a free point nearby. Grid, guides, polar and
+ * on-curve deliberately do NOT: nothing is there to attach to.
+ */
+const ATTACH_TARGET_KINDS: ReadonlySet<SnapKind> = new Set<SnapKind>([
+  "endpoint",
+  "midpoint",
+  "center",
+]);
+
 /** Guide reference-point dot size, in CSS px. */
 const REF_DOT_SIZE_CSS = 6;
 
@@ -195,6 +218,8 @@ export class SnapIndicator {
   private readonly group = new THREE.Group();
   private readonly halo: THREE.Points;
   private readonly haloMat: THREE.PointsMaterial;
+  private readonly targetRing: THREE.Points;
+  private readonly targetRingMat: THREE.PointsMaterial;
   private readonly marker: THREE.Points;
   private readonly markerMat: THREE.PointsMaterial;
   private readonly refDots: THREE.Points;
@@ -239,6 +264,27 @@ export class SnapIndicator {
     this.halo.name = "snapHalo";
     this.halo.renderOrder = RENDER_ORDER.SNAP_MARKER;
     this.group.add(this.halo);
+
+    // Attach-target ring — the accent-coloured emphasis on an EXISTING point the
+    // click would bind to. Added before the marker so the glyph paints over it.
+    this.targetRingMat = new THREE.PointsMaterial({
+      color: palette.hoverAccent(),
+      map: buildRingTexture(),
+      size: TARGET_RING_SIZE_CSS,
+      sizeAttenuation: false,
+      depthTest: false,
+      transparent: true,
+      alphaTest: 0.4,
+      toneMapped: false,
+    });
+    this.targetRing = new THREE.Points(
+      new THREE.BufferGeometry().setAttribute("position", new THREE.Float32BufferAttribute([0, 0, 0], 3)),
+      this.targetRingMat,
+    );
+    this.targetRing.name = "snapTargetRing";
+    this.targetRing.renderOrder = RENDER_ORDER.SNAP_MARKER;
+    this.targetRing.visible = false;
+    this.group.add(this.targetRing);
 
     this.markerMat = new THREE.PointsMaterial({
       color: palette.sketchUnder(),
@@ -339,6 +385,7 @@ export class SnapIndicator {
   refreshColors(): void {
     this.markerMat.color.copy(palette.sketchUnder());
     this.haloMat.color.copy(palette.sketchSnap());
+    this.targetRingMat.color.copy(palette.hoverAccent());
     this.refDotsMat.color.copy(palette.sketchSnap());
     for (const g of this.guideObjects) g.material.color.copy(palette.sketchSnap());
   }
@@ -376,6 +423,15 @@ export class SnapIndicator {
     haloPos.setXYZ(0, snap.point.x, snap.point.y, 0);
     haloPos.needsUpdate = true;
 
+    // Attach-target ring — only for the kinds that name an existing point; it
+    // sits ON the target, which for a full-point snap IS the snapped point.
+    this.targetRing.visible = ATTACH_TARGET_KINDS.has(snap.primaryKind);
+    if (this.targetRing.visible) {
+      const ringPos = this.targetRing.geometry.getAttribute("position") as THREE.BufferAttribute;
+      ringPos.setXYZ(0, snap.point.x, snap.point.y, 0);
+      ringPos.needsUpdate = true;
+    }
+
     // Guides — REFERENCE point to snapped point only, not a fixed span across
     // the whole plane (P2 hardening): a full-viewport cross read as excessive
     // even faded, and a local segment is what actually shows WHICH relationship
@@ -402,19 +458,32 @@ export class SnapIndicator {
     if (showHints && snap.label) {
       const world = planePointToWorld(this.plane, snap.point);
       if (!this.hintRegistered) {
-        this.deps.overlay.register(HINT_ID, this.hintEl, world);
+        // Opted into the collision layout (UX review S9): the hint used to be
+        // registered with NO placement at all, so it sat wherever the anchor
+        // projected — on top of a live dimension chip, a dimension label, or the
+        // geometry the user was aiming at. It is placed FIRST (highest
+        // priority) and reserves the cursor's own vicinity for itself.
+        this.deps.overlay.register(HINT_ID, this.hintEl, world, {
+          annotation: {
+            priority: ANNOTATION_PRIORITY.snapHint,
+            pinned: false,
+            keepWhenUnplaced: true,
+            protectRadiusPx: CURSOR_PROTECT_PX,
+          },
+        });
         this.hintRegistered = true;
       } else {
         this.deps.overlay.setWorldPos(HINT_ID, world);
       }
       this.hintEl.textContent = snap.label;
       this.hintEl.style.display = "";
+      this.deps.overlay.setHidden(HINT_ID, false);
       // Sit close to the marker, not detached from it (Track B4) — a small
       // nudge up-right so the text doesn't sit directly on the glyph.
       this.hintEl.style.marginLeft = "6px";
       this.hintEl.style.marginTop = "-8px";
     } else {
-      this.hintEl.style.display = "none";
+      this.hideHint();
     }
     this.deps.invalidate();
   }
@@ -519,7 +588,21 @@ export class SnapIndicator {
       this.group.visible = false;
       this.deps.invalidate();
     }
+    this.hideHint();
+  }
+
+  /**
+   * Put the hint chip away — through the DRIVER, not only through its own
+   * `display`.
+   *
+   * The overlay driver rewrites `display` on every registered element once per
+   * frame, so a chip that hid itself came back on the next render still reading
+   * whatever the last decision said. That is UX review S4 exactly: a `Grid`
+   * badge sitting on a point two segments ago, surviving a commit and an Escape.
+   */
+  private hideHint(): void {
     this.hintEl.style.display = "none";
+    if (this.hintRegistered) this.deps.overlay.setHidden(HINT_ID, true);
   }
 
   dispose(): void {
@@ -529,6 +612,9 @@ export class SnapIndicator {
     this.halo.geometry.dispose();
     this.haloMat.map?.dispose();
     this.haloMat.dispose();
+    this.targetRing.geometry.dispose();
+    this.targetRingMat.map?.dispose();
+    this.targetRingMat.dispose();
     this.refDots.geometry.dispose();
     this.refDotsMat.map?.dispose();
     this.refDotsMat.dispose();

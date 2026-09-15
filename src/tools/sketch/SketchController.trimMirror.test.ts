@@ -114,7 +114,7 @@ describe("SketchController — Trim + Mirror", () => {
       client: clientMock as unknown as CadClient,
       container,
     });
-    toolStore.getState().setMode("sketch", "sketch1");
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" });
     await flush();
     // Advance the id counters past the seeded e1/e2 so mirrored ids don't collide.
     sketchStore.setState({ entitySeq: 2, constraintSeq: 0 });
@@ -342,7 +342,7 @@ describe("SketchController — Trim + Mirror over LOCKED reference geometry", ()
       client: clientMock as unknown as CadClient,
       container,
     });
-    toolStore.getState().setMode("sketch", "sketch1");
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" });
     await flush();
     sketchStore.setState({ entitySeq: 2, constraintSeq: 0 });
   });

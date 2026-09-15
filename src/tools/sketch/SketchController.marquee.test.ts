@@ -108,7 +108,7 @@ describe("SketchController marquee select", () => {
       client: clientMock as unknown as CadClient,
       container,
     });
-    toolStore.getState().setMode("sketch", "sketch1");
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" });
     await flush();
     toolStore.getState().setTool("select");
     await flush();

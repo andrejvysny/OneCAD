@@ -16,6 +16,7 @@
  * it inline — collapsing happens in the extrude branch, not in these controls.
  */
 import { cn } from "@/ui/cn";
+import { Tooltip } from "@/ui/Tooltip";
 import { DimensionInput } from "@/features/sketch/DimensionInput";
 import { ChipOverflow } from "@/features/toolbar/ChipOverflow";
 import { toolChipStore } from "@/stores/toolChipStore";
@@ -140,23 +141,63 @@ export function DraftSegment({
 
 
 
-/** The ⇔ symmetric toggle on the armed extrude cluster (Alt-drag syncs it). */
+/**
+ * The ⇔ symmetric toggle on the armed extrude cluster (Alt-drag syncs it).
+ *
+ * T2 (2026-09-14 review): the glyph alone was read as a direction flip by
+ * everyone, and neither the `aria-label` nor the native `title` reached a sighted
+ * user — the WebView renders no native tooltip. The word is now on the control,
+ * and the hint goes through the app's own {@link Tooltip}. The real direction
+ * flip is the separate {@link DirectionFlipButton} (T3).
+ */
 export function SymmetricToggle({ pressed, onToggle }: { pressed: boolean; onToggle: () => void }) {
   return (
-    <button
-      type="button"
-      data-testid="chip-symmetric"
-      aria-label="Symmetric"
-      aria-pressed={pressed}
-      title="Symmetric (hold Alt while dragging)"
-      onClick={onToggle}
-      className={cn(
-        "rounded-full px-2 py-1 text-[11.5px] font-medium",
-        pressed ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
-      )}
-    >
-      ⇔
-    </button>
+    <Tooltip label="Symmetric (hold Alt while dragging)">
+      <button
+        type="button"
+        data-testid="chip-symmetric"
+        aria-label="Symmetric"
+        aria-pressed={pressed}
+        onClick={onToggle}
+        className={cn(
+          "flex items-center gap-1 rounded-full px-2 py-1 text-[11.5px] font-medium",
+          pressed ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
+        )}
+      >
+        <span aria-hidden="true">⇔</span>
+        Symmetric
+      </button>
+    </Tooltip>
+  );
+}
+
+/**
+ * Reverse the extrude direction (T3).
+ *
+ * Dragging the depth handle back through zero already reversed the prism, but
+ * nothing said so — the discoverable-looking control was the symmetric toggle,
+ * and the working one was undocumented. The controller consumes this ONCE into
+ * the signed depth (`resolveDepth(raw, {flip:true})`), so the arrow and the
+ * number stay in agreement and a later drag through zero is not negated twice.
+ *
+ * Named "Flip", never "cancel"/"✕": the frozen chip probe in
+ * `modelingInteraction.golden.test.tsx` resolves the single cancel control by
+ * accessible name.
+ */
+export function DirectionFlipButton({ onFlip }: { onFlip: () => void }) {
+  return (
+    <Tooltip label="Reverse the extrude direction">
+      <button
+        type="button"
+        data-testid="chip-flip"
+        aria-label="Flip direction"
+        onClick={onFlip}
+        className="flex items-center gap-1 rounded-full bg-chip px-2 py-1 text-[11.5px] font-medium text-ink-3 hover:bg-hover-2"
+      >
+        <span aria-hidden="true">⇅</span>
+        Flip
+      </button>
+    </Tooltip>
   );
 }
 
@@ -222,6 +263,7 @@ export interface ExtrudeOverflowProps {
   symmetric: boolean;
   showSymmetric: boolean;
   onSymmetric?: (symmetric: boolean) => void;
+  onFlip?: () => void;
   booleanMode: BooleanMode;
   canBoolean: boolean;
   showBooleanSegments: boolean;
@@ -286,6 +328,7 @@ export function ExtrudeOverflow(props: ExtrudeOverflowProps): React.ReactElement
             onToggle={() => props.onSymmetric?.(!props.symmetric)}
           />
         )}
+        {props.onFlip && <DirectionFlipButton onFlip={props.onFlip} />}
       </div>
     </ChipOverflow>
   );

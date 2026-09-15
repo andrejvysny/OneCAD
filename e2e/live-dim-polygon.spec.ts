@@ -10,6 +10,15 @@ import {
   liveDimField,
 } from "./helpers";
 
+/**
+ * Constraint ROWS are named now ("Distance · Line 2 start – Line 2 end", S10),
+ * so the row's accessible name is what identifies a kind — an exact-text match
+ * on the bare kind finds nothing. Anchored on the kind so a delete button or a
+ * longer kind (Distance vs DistanceX) cannot be mistaken for it.
+ */
+const constraintRows = (page: import("@playwright/test").Page, kind: string) =>
+  page.getByRole("button", { name: new RegExp(`^${kind}(\\s|$)`) });
+
 /*
  * Live dimension chips — polygon tool (SP-1 W4).
  *
@@ -67,7 +76,7 @@ test("idle digits set sides, armed digits type the radius chip, sides stays put"
   const circle = await getSketchCircle(page);
   expect(circle.radius).toBeCloseTo(30, 3);
 
-  await expect(page.getByText("Radius", { exact: true })).toHaveCount(1);
+  await expect(constraintRows(page, "Radius")).toHaveCount(1);
   // 4 (regular n-gon) − 1 (Radius) − 2 (the centre click snapped to the origin,
   // now persisted as a `Fixed` — see the note in polygon.spec.ts).
   await expect(dofPill(page)).toHaveText("DOF: 1");

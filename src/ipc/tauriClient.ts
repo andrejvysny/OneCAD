@@ -433,7 +433,7 @@ function toClientError(e: unknown): Error {
       message?: string;
       diagnostics?: unknown;
     };
-    const err = new Error(message ? `${kind}: ${message}` : kind);
+    const err = new Error(message ?? kind);
     const typed = err as Error & { kind?: string; diagnostics?: OperationDiagnostic[] };
     typed.kind = kind;
     typed.diagnostics = parseOperationDiagnostics(diagnostics);

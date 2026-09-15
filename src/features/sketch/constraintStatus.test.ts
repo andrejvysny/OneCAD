@@ -13,6 +13,7 @@ import {
   sketchStatusIsAlert,
   emptySketchCard,
   projectedOnlySketchCard,
+  consumingFeatureLabel,
 } from "./constraintStatus";
 
 describe("constraintStatus WP0", () => {
@@ -36,10 +37,12 @@ describe("constraintStatus WP0", () => {
 });
 
 describe("constraintStatus 4-state tone (Sketcher UX cleanup)", () => {
-  it("renders Over-constrained with tone 'over', not 'warn'", () => {
+  it("names the benign-redundancy state 'Redundant constraint', tone 'over' (S11)", () => {
     const result = sketchStatusText("over", 2);
-    expect(result.label).toBe("Over-constrained · DOF 2");
+    expect(result.label).toBe("Redundant constraint · DOF 2");
     expect(result.tone).toBe("over");
+    // The old wording read as the same failure as Conflicting; it must be gone.
+    expect(result.label).not.toMatch(/Over-constrained/);
   });
 
   it("renders Conflicting with tone 'error', not 'warn'", () => {
@@ -48,11 +51,26 @@ describe("constraintStatus 4-state tone (Sketcher UX cleanup)", () => {
     expect(result.tone).toBe("error");
   });
 
-  it("keeps over-constrained and conflicting sentences at DOF 0", () => {
+  it("explains redundancy as a cleanup, not a failure (S11)", () => {
     expect(sketchStatusSentence("over", 0)).toBe(
-      "Sketch is over-constrained. Remove or change a conflicting constraint.",
+      "A constraint repeats one already implied — remove it to keep the sketch clean.",
     );
+  });
+
+  it("names the blamed constraints when the solver reported culprits (S11)", () => {
+    expect(sketchStatusSentence("error", 0, ["Horizontal · Line 2"])).toBe(
+      "1 constraint cannot be met: Horizontal · Line 2",
+    );
+    expect(
+      sketchStatusSentence("error", 0, ["Horizontal · Line 2", "Distance 30 mm · Line 1"]),
+    ).toBe("2 constraints cannot be met: Horizontal · Line 2, Distance 30 mm · Line 1");
+  });
+
+  it("falls back to the unspecific conflict sentence when no culprit is known", () => {
     expect(sketchStatusSentence("error", 0)).toBe(
+      "Conflicting constraints. Remove one to resolve.",
+    );
+    expect(sketchStatusSentence("error", 0, [])).toBe(
       "Conflicting constraints. Remove one to resolve.",
     );
   });
@@ -92,5 +110,50 @@ describe("projectedOnlySketchCard (UX review 2026-09-11)", () => {
     expect(card.sentence).toBe("11 projected reference edges · draw geometry to begin.");
     expect(sketchStatusIsAlert(card.tone)).toBe(false);
     expect(projectedOnlySketchCard(1).sentence).toBe("1 projected reference edge · draw geometry to begin.");
+  });
+});
+
+/*
+ * UX review 2026-09-14 — N10: a sketch read "Not evaluated" after a cancelled
+ * edit although a completed Extrude was standing on it (A-136). "Not evaluated"
+ * is only honest for a sketch nothing in the timeline consumes.
+ */
+describe("consumingFeatureLabel (UX review 2026-09-14, N10)", () => {
+  const timeline = [
+    { id: "f1", kind: "sketch", label: "Sketch 1", status: "ok" },
+    { id: "f2", kind: "extrude", label: "Extrude", status: "ok" },
+    { id: "f3", kind: "fillet", label: "Fillet", status: "ok" },
+    { id: "f4", kind: "sketch", label: "Sketch 2", status: "ok" },
+    { id: "f5", kind: "extrude", label: "Extrude 2", status: "ok" },
+  ];
+
+  it("names the first applied feature standing on the sketch's own row", () => {
+    expect(consumingFeatureLabel(timeline, "f1", 5)).toBe("Extrude");
+    expect(consumingFeatureLabel(timeline, "f4", 5)).toBe("Extrude 2");
+  });
+
+  it("claims nothing for a sketch row with no row of its own to stand on", () => {
+    expect(consumingFeatureLabel(timeline, null, 5)).toBeNull();
+    expect(consumingFeatureLabel(timeline, "unknown", 5)).toBeNull();
+  });
+
+  it("stops at the next sketch rather than borrowing a later sketch's feature", () => {
+    const lonely = [
+      { id: "f1", kind: "sketch", label: "Sketch 1", status: "ok" },
+      { id: "f4", kind: "sketch", label: "Sketch 2", status: "ok" },
+      { id: "f5", kind: "extrude", label: "Extrude 2", status: "ok" },
+    ];
+    expect(consumingFeatureLabel(lonely, "f1", 3)).toBeNull();
+  });
+
+  it("ignores rolled-back and failed features", () => {
+    expect(consumingFeatureLabel(timeline, "f1", 1)).toBeNull();
+    expect(
+      consumingFeatureLabel(
+        [timeline[0], { ...timeline[1], status: "error" }, timeline[2]],
+        "f1",
+        3,
+      ),
+    ).toBe("Fillet");
   });
 });

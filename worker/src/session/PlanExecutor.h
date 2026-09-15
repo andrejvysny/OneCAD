@@ -65,6 +65,11 @@ struct CandidateResult {
     // comment), echoed as `planStep.mateResolved` (SCHEMA §7.2) on every step
     // whose mate resolved against a cylindrical target.
     std::optional<nlohmann::json> mate_resolved;
+    // UX-2026-09-14 WP-1 (B1): `ops::OpOutcome::sketch_placement` (see its own doc
+    // comment), echoed as `planStep.sketchPlacement` (SCHEMA §7.2) on a `Sketch`
+    // step whose `params.hostFace` resolved AND whose effective frame differs from
+    // the authored one.
+    std::optional<nlohmann::json> sketch_placement;
 };
 
 // Execute one complete candidate step: predecessor input resolution, operation,

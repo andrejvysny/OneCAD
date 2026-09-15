@@ -14,7 +14,20 @@ const ONE_VISIBLE: ToolApplicabilityContext = {
 };
 const QUARANTINED: ToolApplicabilityContext = {
   sketches: {},
-  bodies: { body1: { health: "quarantined" } },
+  bodies: { body1: { visible: true, health: "quarantined" } },
+};
+/** C6 fixtures: what the document holds, independent of what is selected. */
+const ONE_BODY: ToolApplicabilityContext = {
+  sketches: {},
+  bodies: { body1: { visible: true } },
+};
+const ONE_HIDDEN_BODY: ToolApplicabilityContext = {
+  sketches: {},
+  bodies: { body1: { visible: false } },
+};
+const TWO_BODIES: ToolApplicabilityContext = {
+  sketches: {},
+  bodies: { body1: { visible: true }, body2: { visible: true } },
 };
 const TWO_VISIBLE: ToolApplicabilityContext = {
   sketches: {
@@ -108,33 +121,88 @@ describe("getToolApplicability — revolve", () => {
 });
 
 describe("getToolApplicability — fillet", () => {
-  it("empty selection ⇒ disabled", () => {
-    expect(getToolApplicability("fillet", [], NO_SKETCHES)).toEqual({
+  it.each([
+    ["nothing", [] as EntityRef[]],
+    ["an unrelated sketch", [sketch("sketch1")]],
+  ])("%s selected ⇒ disabled, and the reason names both entry points", (_label, selection) => {
+    expect(getToolApplicability("fillet", selection, NO_SKETCHES)).toEqual({
       enabled: false,
-      reason: "Select edges, then Fillet",
+      reason: "Select edges or a face, then Fillet",
     });
   });
 
-  it("wrong-kind selection (a face) ⇒ disabled, same reason", () => {
-    const v = getToolApplicability("fillet", [face("f1", "body1")], NO_SKETCHES);
-    expect(v).toEqual({ enabled: false, reason: "Select edges, then Fillet" });
+  // C7 / D9: the controller expands the face to its boundary edges at arm.
+  it("a face selected ⇒ enabled", () => {
+    expect(getToolApplicability("fillet", [face("f1", "body1")], ONE_BODY)).toEqual({
+      enabled: true,
+    });
   });
 
   it("an edge selected ⇒ enabled", () => {
     expect(getToolApplicability("fillet", [edge], NO_SKETCHES)).toEqual({ enabled: true });
   });
+
+  // "Fillet this body" has no defensible edge set, so it stays a refusal.
+  it("a BODY selected ⇒ still disabled, with the shorter reason", () => {
+    expect(getToolApplicability("fillet", [body("body1")], ONE_BODY)).toEqual({
+      enabled: false,
+      reason: "Select edges or a face",
+    });
+  });
 });
 
 describe("getToolApplicability — boolean", () => {
   it("empty selection ⇒ disabled", () => {
-    expect(getToolApplicability("boolean", [], NO_SKETCHES)).toEqual({
+    expect(getToolApplicability("boolean", [], TWO_BODIES)).toEqual({
       enabled: false,
       reason: "Select the target body, then pick the tool body",
     });
   });
 
   it("a body selected ⇒ enabled", () => {
-    expect(getToolApplicability("boolean", [body("body1")], NO_SKETCHES)).toEqual({ enabled: true });
+    expect(getToolApplicability("boolean", [body("body1")], TWO_BODIES)).toEqual({ enabled: true });
+  });
+
+  // C6: one body can never satisfy a target + tool pairing, however it is picked.
+  it.each([
+    ["an empty document", NO_SKETCHES],
+    ["a document with one body", ONE_BODY],
+  ])("fewer than two bodies ⇒ disabled (%s)", (_label, ctx) => {
+    expect(getToolApplicability("boolean", [body("body1")], ctx)).toEqual({
+      enabled: false,
+      reason: "Two bodies are needed to combine",
+    });
+  });
+
+  it("counts a HIDDEN second body — combining does not need it on screen", () => {
+    expect(
+      getToolApplicability("boolean", [body("body1")], {
+        sketches: {},
+        bodies: { body1: { visible: true }, body2: { visible: false } },
+      }),
+    ).toEqual({ enabled: true });
+  });
+});
+
+/*
+ * C6 — both used to fall through to `default: ENABLED`, so an empty document
+ * offered a Hole to place on nothing and a Measure with nothing to read.
+ */
+describe("getToolApplicability — hole and measure need a body on screen", () => {
+  it.each([
+    ["hole", "Add a body first"],
+    ["measure", "Nothing to measure"],
+  ] as const)("%s is disabled on an empty document", (tool, reason) => {
+    expect(getToolApplicability(tool, [], NO_SKETCHES)).toEqual({ enabled: false, reason });
+    expect(getToolApplicability(tool, [edge], NO_SKETCHES)).toEqual({ enabled: false, reason });
+  });
+
+  it.each(["hole", "measure"] as const)("%s is disabled when the only body is hidden", (tool) => {
+    expect(getToolApplicability(tool, [], ONE_HIDDEN_BODY).enabled).toBe(false);
+  });
+
+  it.each(["hole", "measure"] as const)("%s is enabled with one visible body", (tool) => {
+    expect(getToolApplicability(tool, [], ONE_BODY)).toEqual({ enabled: true });
   });
 });
 
@@ -259,7 +327,7 @@ describe("getToolApplicability — quarantined geometry", () => {
 });
 
 describe("getToolApplicability — always-enabled tools", () => {
-  it.each(["select", "sketch", "datum", "hole", "measure"] as const)(
+  it.each(["select", "sketch", "datum", "gear"] as const)(
     "%s is enabled regardless of selection",
     (tool) => {
       expect(getToolApplicability(tool, [], NO_SKETCHES)).toEqual({ enabled: true });

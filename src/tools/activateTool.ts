@@ -122,8 +122,11 @@ export async function activateTool(tool: Tool): Promise<void> {
   operationAttempt.clear();
   const s = toolStore.getState();
   // The model toolbar's "New sketch" id is an enter intent, not a real tool.
+  // FP-S13: `setMode` now defaults a bare entry to Select — that default is for
+  // RE-OPENING an existing sketch. This IS the New Sketch flow, so it keeps the
+  // Shapr3D "Line auto-armed on entry" convention explicitly.
   if (tool === "sketch") {
-    if (s.mode === "model") s.setMode("sketch");
+    if (s.mode === "model") s.setMode("sketch", undefined, { tool: "line" });
     return;
   }
   if (s.mode === "model" && SKETCH_ONLY.has(tool)) {

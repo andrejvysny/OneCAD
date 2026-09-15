@@ -38,9 +38,9 @@ use onecad_core::regen::{
     CheckpointArtifacts, CheckpointEnvelope, Diagnostic, ElementMapDelta, ElementMapEntry,
     EngineError, HistoryPrefixHash, Lod, OpFailureCode, OpenSessionRequest, PlanPrepared,
     PlanRequest, PlanStepEvent, PlannedOp, PreparedMeshRef, RefResolution, ResolveOutcome,
-    ResolveRequest, RestoreRequest, SessionMode, Severity, Signature, StepResult, StepSignatures,
-    StepStatus, StoppedReason, TessellateRequest, WorkerElementEvidence, WorkerHead,
-    ARTIFACT_SCHEMA_VERSION,
+    ResolveRequest, RestoreRequest, SessionMode, Severity, Signature, SketchPlacement, StepResult,
+    StepSignatures, StepStatus, StoppedReason, TessellateRequest, WorkerElementEvidence,
+    WorkerHead, ARTIFACT_SCHEMA_VERSION,
 };
 use onecad_core::sketch::WorldPlane;
 use onecad_core::sketch::{
@@ -274,7 +274,7 @@ fn lower_operation(
     op_id: &str,
 ) -> Value {
     let (op_type, mut params) = split_operation(operation, wire_form(operation));
-    strip_sketch_host_face(operation, &mut params);
+    stamp_sketch_frame_transport_version(operation, &mut params);
     strip_chamfer_reference_face_refs(operation, &mut params);
     lower_feature_pattern_sources(operation, &mut params);
     to_wire_body_form(&mut params);
@@ -446,26 +446,47 @@ fn wire_form(operation: &Operation) -> Value {
     }
 }
 
-/// Drops the core-only `hostFace` key from `Sketch` op params (VF-B5a).
+/// Stamps SCHEMA §7.3 `frameTransportVersion` onto a `Sketch` op that carries a
+/// `hostFace` (UX-2026-09-14 WP-1).
 ///
-/// `SketchOpParams::host_face` is the RECORD's copy of a face-hosted sketch's
-/// attachment: it exists so `derive_inputs` can declare the dependency (and the
-/// §7.3 edit-safety gate can see it), and it participates in the planner's
-/// prefix hash. It is NOT part of the §7.3 `Sketch` wire params — the SCHEMA
-/// states the attachment is core-owned and never crosses the wire, and the worker
-/// stores raw sketch params verbatim, so emitting it would put a core-only field
-/// into every plan frame for no consumer. Legacy/world/datum records carry `None`
-/// and never render the key at all, so this only bites newly stamped host-face
-/// records. (Rust remains the sole hash authority — the planner hashes the CORE
-/// params, so this omission cannot move a hash.)
-fn strip_sketch_host_face(operation: &Operation, params: &mut Value) {
-    if !matches!(operation, Operation::Known(KnownOperation::Sketch(_))) {
+/// **`hostFace` now CROSSES the wire.** Until WP-1 this function was
+/// `strip_sketch_host_face`: `SketchOpParams::host_face` was a core-only
+/// dependency field (it let `derive_inputs` declare the edge and the §7.3
+/// `TransformBody` edit-safety gate see it) and the SCHEMA said the attachment
+/// never reached the worker, so the lowering dropped it. The worker now RESOLVES
+/// it at the `Sketch` step and re-seats the sketch onto the face it names, so
+/// dropping it would restore exactly the B1 defect — a sketch left behind at a
+/// stale plane, cutting at the wrong depth with no diagnostic. The 2026-09-15 §14
+/// entry records the reversal; `hostFace` stays OUT of the wire `inputs[]` array
+/// (the `mate.target` rule), which is what `wire_op_inputs` already does.
+///
+/// The version names the transport policy the producer authored against so an
+/// older worker refuses by name rather than re-seating under a different rule
+/// (§13). Absent for world/datum sketches and every legacy record, so their plan
+/// frames stay byte-identical. Rust remains the sole hash authority: the planner
+/// hashes the CORE params, so a wire-only key cannot move a hash.
+fn stamp_sketch_frame_transport_version(operation: &Operation, params: &mut Value) {
+    let Operation::Known(KnownOperation::Sketch(sketch)) = operation else {
+        return;
+    };
+    if sketch.host_face.is_none() {
         return;
     }
     if let Some(map) = params.as_object_mut() {
-        map.remove("hostFace");
+        // DEFAULT, never overwrite. A record authored against a LATER policy carries
+        // its own `frameTransportVersion` through `SketchOpParams::extra` (unknown
+        // keys round-trip verbatim), and stamping ours over it would hand the worker
+        // a version the producer never authored — the §13 refusal this field exists
+        // for could then never fire, and the sketch would be re-seated under a rule
+        // nobody asked for.
+        map.entry("frameTransportVersion")
+            .or_insert_with(|| Value::from(SKETCH_FRAME_TRANSPORT_VERSION));
     }
 }
+
+/// SCHEMA §7.3 `Sketch.frameTransportVersion` — the plane re-seating policy this
+/// build authors against (`docs/design/astra/sketch-host-face-transport.md`).
+const SKETCH_FRAME_TRANSPORT_VERSION: u64 = 1;
 
 /// Drops the document-only `referenceFaceRefs` key from `Chamfer` op params
 /// (SCHEMA §7.3, kernel-hardening WP-F).
@@ -905,7 +926,114 @@ pub fn parse_plan_step(payload: &Value, envelope_step: usize) -> Result<PlanStep
         diagnostics: parse_diagnostics(payload.get("diagnostics")),
         mate_placement: parse_mate_placement(payload.get("matePlacement")),
         mate_resolved: parse_mate_resolved(payload.get("mateResolved")),
+        sketch_placement: parse_sketch_placement(payload.get("sketchPlacement"))?,
     })
+}
+
+/// SCHEMA §7.2 `sketchPlacement` (UX-2026-09-14 WP-1) — OPTIONAL, absent on every
+/// step but a `Sketch` whose host face resolved AND moved it off its authored
+/// frame.
+///
+/// **NOT infallible, unlike `parse_mate_placement`.** A mate placement that fails
+/// to parse means "the component stays where it was" — the worker's own frozen
+/// placement still describes the body it published. A sketch placement does not
+/// work that way: the worker has ALREADY materialised the transported frame into
+/// the step it executed, so dropping a malformed one silently tells Rust "the
+/// authored plane is current" while every downstream feature in that same regen
+/// was cut against a different plane. The two frames then disagree with nothing
+/// to reconcile them. A malformed payload is therefore a malformed `planStep`,
+/// surfaced by the caller as `PROTOCOL_ERROR` and discarded whole.
+///
+/// The basis is validated, not merely read: finite, unit within `1e-9`, mutually
+/// orthogonal within `1e-9`, and RIGHT-handed (`(x × y)·n > 0`). A left-handed or
+/// skewed frame adopted as `Sketch.resolved_plane` would mirror or shear every
+/// stored `(u,v)` the next time the sketch is opened.
+///
+/// # Errors
+/// A human reason when `sketchPlacement` is present but malformed.
+fn parse_sketch_placement(v: Option<&Value>) -> Result<Option<Box<SketchPlacement>>, String> {
+    let value = match v {
+        None | Some(Value::Null) => return Ok(None),
+        Some(value) => value,
+    };
+    let obj = value
+        .as_object()
+        .ok_or("planStep sketchPlacement is not an object")?;
+    let plane_obj = obj
+        .get("plane")
+        .and_then(Value::as_object)
+        .ok_or("planStep sketchPlacement is missing `plane`")?;
+    let vec3 = |key: &str| -> Result<onecad_core::math::Vec3, String> {
+        let a = plane_obj
+            .get(key)
+            .and_then(Value::as_array)
+            .filter(|a| a.len() == 3)
+            .ok_or_else(|| {
+                format!("planStep sketchPlacement.plane.{key} must be a 3-number array")
+            })?;
+        let c: Vec<f64> = a.iter().filter_map(Value::as_f64).collect();
+        if c.len() != 3 {
+            return Err(format!(
+                "planStep sketchPlacement.plane.{key} has a non-numeric component"
+            ));
+        }
+        onecad_core::math::Vec3::new(c[0], c[1], c[2])
+            .ok_or_else(|| format!("planStep sketchPlacement.plane.{key} is non-finite"))
+    };
+    let plane = onecad_core::sketch::SketchPlane {
+        origin: vec3("origin")?,
+        x_axis: vec3("xAxis")?,
+        y_axis: vec3("yAxis")?,
+        normal: vec3("normal")?,
+    };
+    validate_orthonormal_basis(&plane)?;
+    let finite = |key: &str| -> f64 {
+        obj.get(key)
+            .and_then(Value::as_f64)
+            .filter(|x| x.is_finite())
+            .unwrap_or(0.0)
+    };
+    Ok(Some(Box::new(SketchPlacement {
+        plane,
+        translation_mm: finite("translationMm"),
+        rotation_deg: finite("rotationDeg"),
+    })))
+}
+
+/// Unit, mutually orthogonal and right-handed within `1e-9` — the SAME tolerances
+/// the worker's `sketch_frame_valid` applies before it publishes the frame, so the
+/// two ends of the wire agree on what a valid basis is.
+fn validate_orthonormal_basis(plane: &onecad_core::sketch::SketchPlane) -> Result<(), String> {
+    const EPS: f64 = 1e-9;
+    let dot = |a: &onecad_core::math::Vec3, b: &onecad_core::math::Vec3| {
+        a.x * b.x + a.y * b.y + a.z * b.z
+    };
+    for (name, v) in [
+        ("xAxis", &plane.x_axis),
+        ("yAxis", &plane.y_axis),
+        ("normal", &plane.normal),
+    ] {
+        if (dot(v, v).sqrt() - 1.0).abs() > EPS {
+            return Err(format!(
+                "planStep sketchPlacement.plane.{name} is not a unit vector"
+            ));
+        }
+    }
+    if dot(&plane.x_axis, &plane.y_axis).abs() > EPS
+        || dot(&plane.x_axis, &plane.normal).abs() > EPS
+        || dot(&plane.y_axis, &plane.normal).abs() > EPS
+    {
+        return Err("planStep sketchPlacement.plane basis is not orthogonal".into());
+    }
+    let cross = onecad_core::math::Vec3::new_unchecked(
+        plane.x_axis.y * plane.y_axis.z - plane.x_axis.z * plane.y_axis.y,
+        plane.x_axis.z * plane.y_axis.x - plane.x_axis.x * plane.y_axis.z,
+        plane.x_axis.x * plane.y_axis.y - plane.x_axis.y * plane.y_axis.x,
+    );
+    if dot(&cross, &plane.normal) <= 0.0 {
+        return Err("planStep sketchPlacement.plane basis is left-handed".into());
+    }
+    Ok(())
 }
 
 /// SCHEMA §7.2 `matePlacement` (Component Library P3 WP-3.1, spec §5.5) —
@@ -2231,12 +2359,20 @@ pub fn map_error(err: &ErrorObject) -> EngineError {
 /// `Geom_Ellipse` boundary.
 #[must_use]
 pub fn sketch_wire(sketch: &Sketch) -> (Value, Value, Value) {
+    // The EFFECTIVE frame (UX-2026-09-14 WP-1): a sketch whose host face moved is
+    // edited and solved where it is DISPLAYED, not where it was authored. This is
+    // the solver/projection lane only — the timeline record's plane comes from
+    // `document_runtime::plane_ref_of`, which reads the AUTHORED
+    // `Sketch::plane` and must keep doing so (it is inside the planner hash).
+    // `Sketch::effective_plane` is the authored frame whenever no host has moved
+    // the sketch, so every world/datum sketch is byte-identical to before.
+    let effective = sketch.effective_plane();
     let plane = json!({
         "kind": plane_kind_str(sketch),
-        "origin": [sketch.plane.origin.x, sketch.plane.origin.y, sketch.plane.origin.z],
-        "xAxis": [sketch.plane.x_axis.x, sketch.plane.x_axis.y, sketch.plane.x_axis.z],
-        "yAxis": [sketch.plane.y_axis.x, sketch.plane.y_axis.y, sketch.plane.y_axis.z],
-        "normal": [sketch.plane.normal.x, sketch.plane.normal.y, sketch.plane.normal.z],
+        "origin": [effective.origin.x, effective.origin.y, effective.origin.z],
+        "xAxis": [effective.x_axis.x, effective.x_axis.y, effective.x_axis.z],
+        "yAxis": [effective.y_axis.x, effective.y_axis.y, effective.y_axis.z],
+        "normal": [effective.normal.x, effective.normal.y, effective.normal.z],
     });
     let entities: Vec<Value> = sketch
         .entities()
@@ -3119,6 +3255,13 @@ fn parse_exact_frame(result: &Value) -> Result<FaceFrame, String> {
     Ok(FaceFrame {
         origin: projection_vec3(exact.get("origin"), "exact.origin")?,
         normal: projection_vec3(exact.get("normal"), "exact.normal")?,
+        // OPTIONAL and additive: absent means the worker could produce no point it
+        // could classify on the face. Present-but-malformed is a protocol break, not
+        // a miss — defaulting it would freeze a fabricated anchor.
+        anchor: match exact.get("anchor") {
+            None | Some(Value::Null) => None,
+            some => Some(projection_vec3(some, "exact.anchor")?),
+        },
     })
 }
 
@@ -5075,13 +5218,16 @@ fn u64_at(v: Option<&Value>, key: &str) -> u64 {
 mod tests {
     use super::*;
 
-    /// VF-B5a: `SketchOpParams::host_face` is a CORE-ONLY dependency field. SCHEMA
-    /// §7.3 states the sketch attachment never crosses the wire, and the worker
-    /// stores raw sketch params verbatim, so the lowering must drop it — otherwise
-    /// every plan frame for a face-hosted sketch would carry an undocumented key
-    /// with no consumer, and every runtime-baseline fixture holding one would move.
+    /// **INVERTED by UX-2026-09-14 WP-1 (2026-09-15), deliberately.** This golden
+    /// used to pin `hostFace` being DROPPED (VF-B5a: a core-only dependency field
+    /// with no wire consumer). SCHEMA §7.3 now carries it, because the worker
+    /// resolves it at the `Sketch` step and re-seats the sketch onto the face it
+    /// names — dropping it restores exactly the B1 defect, a sketch left behind at
+    /// a stale plane cutting at the wrong depth with no diagnostic. What the test
+    /// pins now is the full contract: the key AND its `frameTransportVersion`
+    /// reach `params`, and it still does NOT become a wire `inputs[]` entry.
     #[test]
-    fn sketch_host_face_is_dropped_from_the_wire_params() {
+    fn sketch_host_face_reaches_the_wire_params_but_not_inputs() {
         use onecad_core::document::record::{PlaneKind, SketchOpParams, SketchPlaneRef};
         use onecad_core::document::refs::{ElementKind, ElementRef, PrimaryRef};
         use onecad_core::ids::{ElementId, SketchId};
@@ -5115,14 +5261,162 @@ mod tests {
         }));
         let lowered = preview_wire_op(&op, "op_1");
         assert_eq!(lowered["opType"], "Sketch");
-        assert!(
-            lowered["params"].get("hostFace").is_none(),
-            "hostFace must not reach the worker, got {}",
+        assert_eq!(
+            lowered["params"]["hostFace"]["primary"]["elementId"], "el_top",
+            "hostFace must reach the worker verbatim, got {}",
             lowered["params"]
         );
-        // …and the derived record inputs are likewise not echoed into the §7.3
-        // `inputs[]` array for a Sketch op (the worker resolves nothing there).
+        assert_eq!(
+            lowered["params"]["frameTransportVersion"], 1,
+            "the transport policy version rides beside it (SCHEMA §7.3), got {}",
+            lowered["params"]
+        );
+        // …and it is STILL not echoed into the §7.3 `inputs[]` array: the `Sketch`
+        // step resolves the host itself (the `mate.target` rule), because the
+        // generic input pre-flight would zero the plan's bodies on an unresolved
+        // host AND skip the very op that materialises the sketch.
         assert_eq!(lowered["inputs"], serde_json::json!([]));
+
+        // A world/datum sketch renders NEITHER key, so its plan frame is
+        // byte-identical to every build before this one.
+        let Operation::Known(KnownOperation::Sketch(mut params)) = op else {
+            unreachable!("built a Sketch op above")
+        };
+        params.host_face = None;
+        let plain = preview_wire_op(&Operation::Known(KnownOperation::Sketch(params)), "op_1");
+        assert!(plain["params"].get("hostFace").is_none());
+        assert!(plain["params"].get("frameTransportVersion").is_none());
+    }
+
+    /// A record authored against a LATER transport policy keeps ITS version.
+    ///
+    /// `frameTransportVersion` is not a typed field of `SketchOpParams`, so a
+    /// document written by a newer build carries it in the params `extra` map and
+    /// round-trips it verbatim (M2). Stamping this build's `1` over it would hand
+    /// the worker a version the producer never authored: the §13 refusal could
+    /// never fire and the sketch would be re-seated under a rule nobody asked for.
+    #[test]
+    fn a_stored_frame_transport_version_is_never_overwritten_by_this_builds_default() {
+        use onecad_core::document::record::{PlaneKind, SketchOpParams, SketchPlaneRef};
+        use onecad_core::document::refs::{ElementKind, ElementRef, PrimaryRef};
+        use onecad_core::ids::{ElementId, SketchId};
+        use onecad_core::math::Vec3;
+
+        let mut params = SketchOpParams {
+            sketch: SketchId(Uuid::from_u128(0x11)),
+            plane: SketchPlaneRef {
+                kind: PlaneKind::Xy,
+                origin: Vec3::new_unchecked(0.0, 0.0, 0.0),
+                x_axis: Vec3::new_unchecked(0.0, 1.0, 0.0),
+                y_axis: Vec3::new_unchecked(-1.0, 0.0, 0.0),
+                normal: Vec3::new_unchecked(0.0, 0.0, 1.0),
+                extra: Default::default(),
+            },
+            entities: vec![],
+            constraints: vec![],
+            host_face: Some(ElementRef {
+                primary: Some(PrimaryRef {
+                    body: BodyId(Uuid::from_u128(0x77)),
+                    element: ElementId::new("el_top"),
+                    kind: ElementKind::Face,
+                    extra: Default::default(),
+                }),
+                intent: None,
+                anchor: None,
+                extra: Default::default(),
+            }),
+            extra: Default::default(),
+        };
+        params
+            .extra
+            .insert("frameTransportVersion".into(), Value::from(2));
+        // The record survives a full document round-trip with the unknown key in
+        // place — the shape a newer build actually leaves on disk.
+        let round_tripped: SketchOpParams =
+            serde_json::from_value(serde_json::to_value(&params).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(
+            round_tripped.extra.get("frameTransportVersion"),
+            Some(&Value::from(2)),
+            "the unknown key must survive the round trip for this test to mean anything"
+        );
+        let lowered = preview_wire_op(
+            &Operation::Known(KnownOperation::Sketch(round_tripped)),
+            "op_1",
+        );
+        assert_eq!(
+            lowered["params"]["frameTransportVersion"], 2,
+            "a stored version reaches the worker unchanged, got {}",
+            lowered["params"]
+        );
+    }
+
+    /// SCHEMA §7.2 `sketchPlacement`: MALFORMED is a malformed `planStep`, not
+    /// "absent".
+    ///
+    /// Absent means "the authored plane is current". The worker has already
+    /// materialised the transported frame into the step it executed, so silently
+    /// degrading a malformed placement to absent would leave Rust believing the
+    /// authored plane while every downstream feature of that same regen was cut
+    /// against a different one.
+    #[test]
+    fn a_malformed_sketch_placement_rejects_the_plan_step() {
+        let step = |placement: Value| -> Result<PlanStepEvent, String> {
+            parse_plan_step(
+                &json!({ "stepIndex": 0, "bodyEvents": [], "sketchPlacement": placement }),
+                0,
+            )
+        };
+        let basis = json!({
+            "origin": [0.0, 0.0, 25.0],
+            "xAxis": [0.0, 1.0, 0.0],
+            "yAxis": [-1.0, 0.0, 0.0],
+            "normal": [0.0, 0.0, 1.0],
+        });
+
+        let ok = step(json!({ "plane": basis, "translationMm": 15.0, "rotationDeg": 0.0 }))
+            .expect("a well-formed placement parses");
+        let adopted = ok.sketch_placement.expect("adopted");
+        assert!((adopted.plane.origin.z - 25.0).abs() < 1e-12);
+        assert!((adopted.translation_mm - 15.0).abs() < 1e-12);
+
+        let mut no_normal = basis.as_object().expect("object").clone();
+        no_normal.remove("normal");
+        let err = step(json!({ "plane": no_normal })).expect_err("a missing axis is rejected");
+        assert!(err.contains("normal"), "reason names the axis, got {err}");
+
+        let mut skewed = basis.as_object().expect("object").clone();
+        skewed.insert("yAxis".into(), json!([0.0, 1.0, 0.0]));
+        assert!(step(json!({ "plane": skewed }))
+            .expect_err("a non-orthogonal basis is rejected")
+            .contains("orthogonal"));
+
+        let mut long = basis.as_object().expect("object").clone();
+        long.insert("xAxis".into(), json!([0.0, 2.0, 0.0]));
+        assert!(step(json!({ "plane": long }))
+            .expect_err("a non-unit axis is rejected")
+            .contains("unit"));
+
+        let mut left_handed = basis.as_object().expect("object").clone();
+        left_handed.insert("normal".into(), json!([0.0, 0.0, -1.0]));
+        assert!(step(json!({ "plane": left_handed }))
+            .expect_err("a left-handed basis is rejected")
+            .contains("left-handed"));
+
+        let mut nan = basis.as_object().expect("object").clone();
+        nan.insert("origin".into(), json!([0.0, 0.0, "nope"]));
+        assert!(
+            step(json!({ "plane": nan })).is_err(),
+            "a non-number is rejected"
+        );
+
+        // ABSENT still means absent — the authored plane stands and the step parses.
+        assert!(
+            parse_plan_step(&json!({ "stepIndex": 0, "bodyEvents": [] }), 0)
+                .expect("no placement parses")
+                .sketch_placement
+                .is_none()
+        );
     }
 
     /// MEASURE V1a: `magnitude` / `size` / `curveType` used to be DROPPED here.
@@ -7976,15 +8270,22 @@ mod body_wire_tests {
 
         // (opType, params, expected element_refs_mut slots, expected wire inputs[]
         // typed-ref slots). The two counts are the SAME for every op except
-        // PlaceComponent (see its own case below) — kept as two columns rather
-        // than one shared `expected` so that deliberate exception is a data
-        // difference, not a special-cased assertion.
+        // `PlaceComponent` and `Sketch` (see their own cases) — kept as two columns
+        // rather than one shared `expected` so those deliberate exceptions are a
+        // data difference, not a special-cased assertion.
         let cases: Vec<(&str, Value, usize, usize)> = vec![
-            // hostFace is core-only (`strip_sketch_host_face`) ⇒ no slot either side.
+            // DELIBERATELY ASYMMETRIC, inverted by UX-2026-09-14 WP-1 (2026-09-15).
+            // `hostFace` used to be core-only (`strip_sketch_host_face`) and had no
+            // slot on either side. It now rides `params` — the worker resolves it at
+            // the `Sketch` step and re-seats the sketch onto it — and
+            // `element_refs_mut` returns it at index 0 so the §9 items address
+            // `"<opId>.input0"`. It stays OUT of the wire `inputs[]` array (the
+            // `mate.target` rule): an unresolved host must halt its own step, not
+            // zero the plan's bodies through the generic pre-flight.
             (
                 "Sketch",
                 json!({ "sketchId": sk, "plane": { "kind": "XY", "origin": [0,0,0], "xAxis": [0,1,0], "yAxis": [-1,0,0], "normal": [0,0,1] }, "hostFace": face_ref }),
-                0,
+                1,
                 0,
             ),
             (

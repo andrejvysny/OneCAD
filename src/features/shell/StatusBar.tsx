@@ -12,6 +12,7 @@ import { useDocumentStore } from "@/stores/documentStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useWorkerStore, type WorkerLifecycleState } from "@/stores/workerStore";
 import { hasCurrentSketchEvaluation } from "@/features/sketch/constraintStatus";
+import { snapKindLabel } from "@/tools/sketch/snapTypes";
 import {
   useViewportStore,
   formatCursor,
@@ -32,6 +33,11 @@ export function StatusBar() {
   const fov = useViewportStore((s) => s.fov);
   const cursor = useViewportStore((s) => s.cursor);
   const cursorPlaneUV = useViewportStore((s) => s.cursorPlaneUV);
+  // D8: the live snap decision, published by `SketchController` from the SAME
+  // call that drives the in-canvas indicator. While one is live the readout
+  // shows the SNAPPED point and names the snap — S1 was exactly this row
+  // reporting a raw raycast while the badge said `Grid`.
+  const snapFeedback = useViewportStore((s) => s.snapFeedback);
   const statusHint = useViewportStore((s) => s.statusHint);
   const statusHintSeq = useViewportStore((s) => s.statusHintSeq);
   const workerState = useWorkerStore((s) => s.state);
@@ -75,6 +81,8 @@ export function StatusBar() {
     : null;
   const showDof = dof !== null;
   const persp = projection === "persp";
+  const snapped = sketching ? snapFeedback : null;
+  const snapName = snapped ? snapKindLabel(snapped.primaryKind) : null;
   const statusLeft = sketching
     ? `Sketch mode — ${activeSketch?.name ?? "Sketch"}`
     : "Ready";
@@ -94,7 +102,9 @@ export function StatusBar() {
           <span
             key={`${statusHint.message}:${statusHintSeq}`}
             data-testid="status-hint"
+            title={statusHint.message}
             className={cn(
+              "min-w-0 max-w-[42ch] truncate",
               statusHint.severity === "error"
                 ? "hint-error-pulse text-traffic-close"
                 : "text-ink-5",
@@ -152,12 +162,29 @@ export function StatusBar() {
           <span aria-hidden="true" className="h-[14px] w-px bg-border" />
         </>
       )}
-      <MonoValue className="whitespace-pre text-[11.5px]">
+      {/* The snap NAME sits before the numbers so the pair reads as one
+          sentence: "Endpoint  U 30.00  V 0.00 mm". Absent when nothing is
+          snapped, and for the guide/polar/rounding kinds that name their own
+          arm on the hint chip rather than a target. */}
+      {snapName && (
+        <span data-testid="cursor-snap-kind" className="text-accent text-[11.5px]">
+          {snapName}
+        </span>
+      )}
+      <MonoValue className="whitespace-pre text-[11.5px]" data-testid="cursor-readout">
         {/* Design item 11 / audit A8: on the sketch plane world XYZ is not
             the sketch's own axes (XY plane's u is world +Y) — while sketching
             the read-out switches to the plane-local U/V the controller itself
-            draws against, same unit formatting as the world X/Y/Z it replaces. */}
-        {sketching ? formatCursorPlane(cursorPlaneUV, displayUnit) : formatCursor(cursor, displayUnit)}
+            draws against, same unit formatting as the world X/Y/Z it replaces.
+            A LIVE snap decision replaces the raw raycast with the point the
+            click would actually land on (D8) — the readout and the marker are
+            then the same number, which is the whole of S1. */}
+        {sketching
+          ? formatCursorPlane(
+              snapped ? { u: snapped.point.x, v: snapped.point.y } : cursorPlaneUV,
+              displayUnit,
+            )
+          : formatCursor(cursor, displayUnit)}
       </MonoValue>
       {/* APPLICATION settings, so shell chrome — it was mounted from
           `ModelTreePanel`, which made "which application-wide preferences exist"

@@ -106,6 +106,46 @@ pub enum RepairReason {
     /// component, and the item's `ui_label` says so.
     #[serde(rename = "mateSeatOffFace")]
     MateSeatOffFace,
+    /// **Worker-emitted but OP-BUILT by the `Sketch` step** (SCHEMA §9 + §7.3
+    /// `hostFace`, UX-2026-09-14 WP-1 2026-09-15). The resolved host face's
+    /// surface type is not a plane. A surface-TYPE predicate with no distance
+    /// epsilon: an approximately planar cylinder or spline is refused, never
+    /// fitted.
+    ///
+    /// Unlike the two `mate*` reasons these five ride a step that publishes NO
+    /// geometry, so the step is `NeedsRepair` and the plan halts at `m−1`. The
+    /// sketch itself is core-owned document state and stays in the document at its
+    /// AUTHORED [`plane`](crate::sketch::Sketch::plane); what halts is every
+    /// downstream feature that would otherwise cut against a guessed plane. There
+    /// is no repair COMMAND for any of them — the fix is to re-pick the host face
+    /// (or move the sketch), and `ui_label` says so.
+    #[serde(rename = "sketchHostNonPlanar")]
+    SketchHostNonPlanar,
+    /// **Worker-emitted, OP-BUILT by the `Sketch` step** (SCHEMA §9, WP-1). The
+    /// transported attachment ANCHOR classifies `OUT` against the resolved face —
+    /// the face shrank past the sketch. Deliberately not the plane ORIGIN: an
+    /// unchanged annular face legitimately places its origin in its own hole.
+    #[serde(rename = "sketchSeatOffFace")]
+    SketchSeatOffFace,
+    /// **Worker-emitted, OP-BUILT by the `Sketch` step** (SCHEMA §9, WP-1). The
+    /// authored X axis lies along the resolved normal (`h ≤ √DBL_EPSILON`), so the
+    /// frame cannot be carried across continuously. The item may carry an OPTIONAL
+    /// `fallbackPlane` as repair EVIDENCE; it MUST NOT be applied automatically —
+    /// that fallback is discontinuous at the singularity, so publishing it would
+    /// silently spin the sketch.
+    #[serde(rename = "sketchFrameIllConditioned")]
+    SketchFrameIllConditioned,
+    /// **Worker-emitted, OP-BUILT by the `Sketch` step** (SCHEMA §9, WP-1). The
+    /// STORED frame is not a finite, unit, orthogonal, right-handed basis. Never
+    /// silently corrected: correcting a left-handed basis would mirror every
+    /// stored `(u,v)`.
+    #[serde(rename = "sketchFrameInvalid")]
+    SketchFrameInvalid,
+    /// **Worker-emitted, OP-BUILT by the `Sketch` step** (SCHEMA §9, WP-1). The
+    /// seat classification returned `UNKNOWN` or threw, or the `hostFace` carries
+    /// no usable anchor to witness with. "Unmeasurable" is never "seated".
+    #[serde(rename = "sketchSeatUnmeasurable")]
+    SketchSeatUnmeasurable,
 }
 
 impl<'de> Deserialize<'de> for RepairReason {
@@ -118,6 +158,11 @@ impl<'de> Deserialize<'de> for RepairReason {
             "legacyReferenceFace" => Self::LegacyReferenceFace,
             "mateAxisReversed" => Self::MateAxisReversed,
             "mateSeatOffFace" => Self::MateSeatOffFace,
+            "sketchHostNonPlanar" => Self::SketchHostNonPlanar,
+            "sketchSeatOffFace" => Self::SketchSeatOffFace,
+            "sketchFrameIllConditioned" => Self::SketchFrameIllConditioned,
+            "sketchFrameInvalid" => Self::SketchFrameInvalid,
+            "sketchSeatUnmeasurable" => Self::SketchSeatUnmeasurable,
             _ => Self::Unknown,
         })
     }
@@ -659,6 +704,49 @@ mod tests {
         v["reason"] = serde_json::json!("something-new");
         let back: RepairItem = serde_json::from_value(v).expect("item still parses");
         assert_eq!(back.reason, RepairReason::Unknown);
+    }
+
+    /// UX-2026-09-14 WP-1: the five op-built `Sketch` reasons are camelCase on the
+    /// wire (SCHEMA §9) and survive a document round trip, so a saved
+    /// `needsRepair` state written by this build reopens as itself rather than
+    /// flattening to `unknown`.
+    #[test]
+    fn sketch_host_reasons_round_trip_as_camel_case_tokens() {
+        let from = |tok: &str| -> RepairReason {
+            serde_json::from_value(serde_json::json!(tok)).expect("never an error")
+        };
+        for (token, reason) in [
+            ("sketchHostNonPlanar", RepairReason::SketchHostNonPlanar),
+            ("sketchSeatOffFace", RepairReason::SketchSeatOffFace),
+            (
+                "sketchFrameIllConditioned",
+                RepairReason::SketchFrameIllConditioned,
+            ),
+            ("sketchFrameInvalid", RepairReason::SketchFrameInvalid),
+            (
+                "sketchSeatUnmeasurable",
+                RepairReason::SketchSeatUnmeasurable,
+            ),
+        ] {
+            assert_eq!(from(token), reason, "reading {token}");
+            assert_eq!(
+                serde_json::to_value(reason).unwrap(),
+                serde_json::json!(token),
+                "writing {token}"
+            );
+            // A whole item carrying the token round-trips, including through the
+            // `refId` form the worker addresses the host with.
+            let mut v = serde_json::to_value(item(4, "op_4.input0")).unwrap();
+            v["reason"] = serde_json::json!(token);
+            let back: RepairItem = serde_json::from_value(v).expect("item parses");
+            assert_eq!(back.reason, reason);
+            assert_eq!(back.ref_id, "op_4.input0");
+        }
+        // Adding five tokens must not have taught the reader to accept junk, and the
+        // kebab-case ladder tokens must not have been re-spelled.
+        assert_eq!(from("sketchHostNonplanar"), RepairReason::Unknown);
+        assert_eq!(from("sketch-host-non-planar"), RepairReason::Unknown);
+        assert_eq!(from("no-candidates"), RepairReason::NoCandidates);
     }
 
     /// WP-I: the two op-built `PlaceComponent` reasons are camelCase on the wire

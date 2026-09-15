@@ -1,20 +1,29 @@
 import { formatArea, formatLengthWithUnit, formatUnitless } from "@/units/format";
 import type { MeasurePick, MeasureSummary } from "@/tools/modelTools/measureTool";
+import type { BodyMeta } from "@/stores/documentStore";
 
 function kindLabel(kind: string): string {
   const trimmed = kind.trim();
   return trimmed.length > 0 ? trimmed : "Element";
 }
 
-function bodyLabel(bodyId: string): string {
+/**
+ * The body's display name — same facts `ActiveToolTargets` reads off
+ * `documentStore.bodies` — falling back to the raw id only when the body is
+ * gone from the projection (docs/qa/UX_REVIEW_2026-09-14.md N5: a UUID is not
+ * a fact the user asked for).
+ */
+export function bodyLabel(bodyId: string, bodies?: Record<string, BodyMeta>): string {
   const trimmed = bodyId.trim();
-  return trimmed.length > 0 ? trimmed : "body unavailable";
+  if (trimmed.length === 0) return "body unavailable";
+  const name = bodies?.[trimmed]?.name;
+  return name && name.trim().length > 0 ? name : trimmed;
 }
 
 /** Factual, anchored readout for the fixed panel; no inferred geometry. */
-export function pickReadout(pick: MeasurePick): string {
+export function pickReadout(pick: MeasurePick, bodies?: Record<string, BodyMeta>): string {
   const kind = kindLabel(pick.kind);
-  const body = bodyLabel(pick.bodyId);
+  const body = bodyLabel(pick.bodyId, bodies);
   if (pick.kind === "face") {
     const radius =
       pick.radius === null ? "" : ` · Radius ${formatLengthWithUnit(pick.radius)}`;

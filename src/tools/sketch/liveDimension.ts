@@ -265,6 +265,12 @@ export function liveDimStep(s: LiveDimState, e: LiveDimEvent): LiveDimStep {
     case "tab": {
       if (s.focus === null) return { state: s };
       const focus = nextField(e.fields, s.focus, e.back) ?? s.focus;
+      // NOWHERE TO TAB TO (UX review S8). Rectangle and Circle teach Tab as
+      // "second field"; the Line tool has only a length, so the wrap landed
+      // back on the same field — taking the lock and clearing the text, which
+      // on screen is an input that just emptied itself. A single-field ring is
+      // a no-op: the text, the focus and the locks all stand.
+      if (focus === s.focus && e.fields.includes(s.focus)) return { state: s };
       if (e.value === null) return { state: { ...s, focus, text: "" } };
       return { state: { focus, locks: withLock(s.locks, s.focus, e.value), text: "" }, locked: s.focus };
     }

@@ -4,7 +4,18 @@
 #include <string>
 #include <vector>
 
+#include <cmath>
+#include <optional>
+
+#include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
+#include <BRepGProp.hxx>
+#include <BRep_Tool.hxx>
+#include <GProp_GProps.hxx>
+#include <Standard_Failure.hxx>
 #include <TopAbs_ShapeEnum.hxx>
+#include <TopAbs_State.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
@@ -12,6 +23,7 @@
 #include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Vec.hxx>
 
 #include "elementmap/ElementMapPartition.h"
 #include "kernel/topology/CoplanarFacePatch.h"
@@ -68,6 +80,79 @@ json vec3_json(double x, double y, double z) {
 
 std::string point_ref(std::size_t index) {
     return "p" + std::to_string(index);
+}
+
+// `IN`/`ON` at the face's OWN tolerance — the same face-owned classification the
+// mate seat uses (`ComponentOp.cpp`). An unmeasurable point is never "on".
+bool on_face(const TopoDS_Face& face, const gp_Pnt& p) {
+    if (!std::isfinite(p.X()) || !std::isfinite(p.Y()) || !std::isfinite(p.Z())) return false;
+    try {
+        BRepClass_FaceClassifier classifier(face, p, BRep_Tool::Tolerance(face));
+        const TopAbs_State state = classifier.State();
+        return state == TopAbs_IN || state == TopAbs_ON;
+    } catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
+// The point of `face` nearest `p` — `ComponentOp.cpp::nearest_point_on_face`, kept
+// local because op/session executors stay self-contained rather than reaching into
+// each other. `std::nullopt` when OCCT cannot measure it.
+std::optional<gp_Pnt> nearest_point_on_face(const TopoDS_Face& face, const gp_Pnt& p) {
+    try {
+        BRepExtrema_DistShapeShape dist(face, BRepBuilderAPI_MakeVertex(p).Vertex());
+        if (dist.IsDone() && dist.NbSolution() > 0) return dist.PointOnShape1(1);
+    } catch (const Standard_Failure&) {
+        // fall through — no claim
+    }
+    return std::nullopt;
+}
+
+// SCHEMA §7.6 `exact.anchor` — a point of the seed face that is genuinely ON it, so
+// a caller can freeze it as a resolution-ladder anchor.
+//
+// WHY THIS IS NOT `exact.origin`. The `gp_Pln` LOCATION of a face's surface is a
+// property of the PLANE, not of the face's boundary, and for an imported STEP body
+// it routinely lies far outside the face it came from (measured 2026-09-15,
+// `src-tauri/tests/step_import_gate.rs` PHASE 4: location (0,0,10) for a cap centred
+// at (−5,215,10)). An anchor there scores 0 on the ladder's `anchor` feature, so a
+// correct, unambiguous host binds at 0.75 and never clears the 0.85 auto-bind bar —
+// and re-picking the face freezes the same location again, so the miss is permanent.
+//
+// Three candidates, in order, each accepted only if it CLASSIFIES on the face:
+//   1. the element descriptor's centre — what the ladder scores the anchor against,
+//      so a coincident anchor is the strongest evidence available;
+//   2. the point of the face nearest the plane location — always on the face when
+//      OCCT can measure it (on its boundary if the location projects outside);
+//   3. the face's surface centre of mass.
+// Absent when none classifies (an annulus whose every candidate falls in its hole).
+// The caller then keeps whatever it did before — this field is purely additive.
+std::optional<gp_Pnt> face_anchor_point(const TopoDS_Face& face, const TopoDS_Shape& body_shape,
+                                        const gp_Pln& plane) {
+    const gp_Pnt center = em::ElementMapPartition::describe(face, body_shape).center;
+    if (on_face(face, center)) return center;
+
+    if (const std::optional<gp_Pnt> nearest = nearest_point_on_face(face, plane.Location())) {
+        if (on_face(face, *nearest)) return nearest;
+    }
+
+    try {
+        GProp_GProps props;
+        BRepGProp::SurfaceProperties(face, props);
+        if (props.Mass() > 0.0) {
+            // The face is planar (the caller refused it otherwise), so its surface
+            // centre of mass already lies in `plane`; projecting is a no-op that
+            // costs nothing and cannot drift off it.
+            const gp_Pnt com = props.CentreOfMass();
+            const gp_Pnt on_plane = com.Translated(
+                gp_Vec(plane.Axis().Direction()) *
+                -gp_Vec(plane.Location(), com).Dot(gp_Vec(plane.Axis().Direction())));
+            if (on_face(face, on_plane)) return on_plane;
+        }
+    } catch (const Standard_Failure&) {
+        // fall through — no claim
+    }
+    return std::nullopt;
 }
 
 // The face this request names, within the CURRENT head. Two addressing forms
@@ -146,6 +231,13 @@ Envelope handle_project_face_boundary(Session& session, const Envelope& req) {
         {"origin", vec3_json(exact_origin.X(), exact_origin.Y(), exact_origin.Z())},
         {"normal", vec3_json(seed_normal.X(), seed_normal.Y(), seed_normal.Z())},
     };
+    // SCHEMA §7.6 `exact.anchor` (OPTIONAL) — a point ON the seed face, for a caller
+    // that freezes an identity anchor. Returned in BOTH modes, absent when no such
+    // point can be produced.
+    if (const std::optional<gp_Pnt> anchor =
+            face_anchor_point(seed_face, seed.body_shape, seed_plane)) {
+        exact["anchor"] = vec3_json(anchor->X(), anchor->Y(), anchor->Z());
+    }
 
     const bool frame_only = args.is_object() && args.contains("frameOnly") &&
                             args["frameOnly"].is_boolean() && args["frameOnly"].get<bool>();

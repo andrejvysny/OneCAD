@@ -1120,12 +1120,33 @@ add_test(
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/resolve_refs.ndjson
 )
+# UX-2026-09-14 WP-1 (B1) — the WIRE CONTRACT of sketch host-face tracking:
+# §7.2 `planStep.sketchPlacement` + the `SKETCH_HOST_RESEATED` info diagnostic on a
+# host that moved, a §9 item at `<opId>.input0` with the plan halted at m−1 when the
+# host is gone, the op-built `sketchHostNonPlanar` on a cylindrical host, and the
+# `CUT_NO_EFFECT` refusal riding `perStepResults` (a failed step emits no planStep).
+# The NUMBERS are `test_sketch_host_reseat.cpp`. See the fixture header.
+add_test(
+    NAME canonical_sketch_host_face_reseat
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/sketch_host_face_reseat.ndjson
+)
 
 # Kernel-hardening WP-E — commit-tier validation: a revolve profile crossing its axis
 # refuses by name; touching the axis is legal (degenerate pole edges).
 add_executable(test_commit_tier_validation test_commit_tier_validation.cpp)
 target_link_libraries(test_commit_tier_validation PRIVATE worker_core)
 add_test(NAME commit_tier_validation COMMAND test_commit_tier_validation)
+
+# UX-2026-09-14 WP-1 (B1) — the NUMBERS from `docs/design/astra/
+# sketch-host-face-transport.md` §6: frame transport G1/G2/G4/G8/G9, the τGS
+# conditioning boundary, an invalid stored basis, the significance thresholds, the
+# anchor-not-origin seat witness, and the Cut-effect vectors G10/G11/G12. The wire
+# contract is `canonical_sketch_host_face_reseat` below.
+add_executable(test_sketch_host_reseat test_sketch_host_reseat.cpp)
+target_link_libraries(test_sketch_host_reseat PRIVATE worker_core)
+add_test(NAME sketch_host_reseat COMMAND test_sketch_host_reseat)
 
 # Kernel-hardening WP-B — `regionAnchor` rebinds a profile whose stored V3 `regionId`
 # was re-minted by a dimensional edit; an anchor outside every cell keeps the refusal.

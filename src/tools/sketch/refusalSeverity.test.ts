@@ -240,7 +240,7 @@ describe("the Dimension tool's chip refuses at error severity", () => {
       client,
       container,
     });
-    toolStore.getState().setMode("sketch", "sk-refuse");
+    toolStore.getState().setMode("sketch", "sk-refuse", { tool: "line" });
     await flush();
     toolStore.getState().setTool("dimension");
     await flush();

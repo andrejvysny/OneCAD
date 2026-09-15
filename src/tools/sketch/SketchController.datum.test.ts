@@ -2,7 +2,7 @@
  * SketchController — sketch-on-datum entry (DATUM W1), jsdom.
  *
  * Two routes into a datum-hosted sketch, both exercised here:
- *   1. a SELECTED datum + `setMode("sketch")` (the tree row double-click) →
+ *   1. a SELECTED datum + `setMode("sketch", undefined, { tool: "line" })` (the tree row double-click) →
  *      `tryEnterOnSelectedDatum`, checked before the world-plane picker;
  *   2. a datum QUAD clicked while the plane picker is up → `confirmDatumPick`,
  *      which wins over the world quads under the same pointer.
@@ -147,7 +147,7 @@ describe("SketchController — sketch on a datum plane", () => {
 
   it("a SELECTED datum enters directly on it — no plane picker, backend plane verbatim", async () => {
     selectionStore.getState().set([{ kind: "datum", id: "d1" }]);
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     await flush();
 
     expect(engineMock.setPlanePickerVisible).not.toHaveBeenCalled();
@@ -166,7 +166,7 @@ describe("SketchController — sketch on a datum plane", () => {
   it("an UNRESOLVED datum is refused with a message and falls back to the plane picker", async () => {
     documentStore.getState().addDatum(datum({ resolvedValid: false }));
     selectionStore.getState().set([{ kind: "datum", id: "d1" }]);
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     await flush();
 
     expect(clientMock.enterSketch).not.toHaveBeenCalled();
@@ -177,7 +177,7 @@ describe("SketchController — sketch on a datum plane", () => {
 
   it("a datum ref for an id that is not in the projection falls through to the picker", async () => {
     selectionStore.getState().set([{ kind: "datum", id: "ghost" }]);
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     await flush();
     expect(clientMock.enterSketch).not.toHaveBeenCalled();
     expect(engineMock.setPlanePickerVisible).toHaveBeenCalledWith(true);
@@ -189,7 +189,7 @@ describe("SketchController — sketch on a datum plane", () => {
       { kind: "datum", id: "d1" },
       { kind: "datum", id: "d2" },
     ]);
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     await flush();
     expect(clientMock.enterSketch).not.toHaveBeenCalled();
     expect(engineMock.setPlanePickerVisible).toHaveBeenCalledWith(true);
@@ -197,7 +197,7 @@ describe("SketchController — sketch on a datum plane", () => {
 
   it("an explicit sketch id still wins over a selected datum (re-open, not a new sketch)", async () => {
     selectionStore.getState().set([{ kind: "datum", id: "d1" }]);
-    toolStore.getState().setMode("sketch", "sketch2");
+    toolStore.getState().setMode("sketch", "sketch2", { tool: "line" });
     await flush();
     expect(clientMock.enterSketch).toHaveBeenCalledWith("sketch2");
   });
@@ -205,7 +205,7 @@ describe("SketchController — sketch on a datum plane", () => {
   // ── route 2: a datum quad clicked during the plane pick ─────────────────────
 
   it("a datum quad WINS over the world quads under the same pointer", async () => {
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     await flush();
     expect(engineMock.setPlanePickerVisible).toHaveBeenCalledWith(true);
 
@@ -224,7 +224,7 @@ describe("SketchController — sketch on a datum plane", () => {
   });
 
   it("with no datum under the pointer the world quad still resolves normally", async () => {
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     await flush();
     datumHit = null;
     planeHit = "XZ";
@@ -234,7 +234,7 @@ describe("SketchController — sketch on a datum plane", () => {
   });
 
   it("hovering a datum during the pick tints it and drops the picker's own hover", async () => {
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     await flush();
 
     datumHit = "d1";
@@ -250,7 +250,7 @@ describe("SketchController — sketch on a datum plane", () => {
 
   it("clicking an UNRESOLVED datum quad stays in the pick phase with an error hint", async () => {
     documentStore.getState().addDatum(datum({ resolvedValid: false }));
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     await flush();
 
     datumHit = "d1";
@@ -264,7 +264,7 @@ describe("SketchController — sketch on a datum plane", () => {
   });
 
   it("leaving the pick phase clears the datum hover tint", async () => {
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     await flush();
     datumVisualsMock.setHover.mockClear();
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));

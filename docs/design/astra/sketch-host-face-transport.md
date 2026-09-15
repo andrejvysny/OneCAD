@@ -439,3 +439,23 @@ planStep:
 - Persistent immutable-frame storage and strict host-resolution gate semantics.
 
 **[Inference]** These gaps prevent an unconditional production epsilon and globally continuous rigid transport from being derived honestly from the supplied inputs.
+
+---
+
+## Break record (2026-09-15, call 2 of ~3 for WP-1, mode break, effort xhigh, grounded on the 12 paths named in the packet, packet sha256 4dfc61a7880f, session 01a0a46d-bfb9-7ef2-8ee5-2c2d49cdcbda)
+
+**Verdict returned: defective.** Fable's rulings:
+
+- **F1 accepted** (info-only `SKETCH_HOST_UNTRACKED` lets a low-confidence host execute dependents at the authored frame — a 40→35 edit with a 15 mm cut removes 1000 instead of 1500 mm³ and passes the Cut predicate). Closed by WP-1b: the halt is restored for every below-gate resolution, with the candidates carried.
+- **F2 accepted** (`wire.rs` lowering overwrote a stored `frameTransportVersion` with 1, so the §13 refusal could never fire). Closed in WP-1b: default only when absent; no narrowing compare.
+- **F3 accepted** (the origin-anchor seat exemption skips the witness exactly when the anchor is the origin; a face trimmed from [−3,3]² to [−1,1]² with the anchor at (2,0) resolved "successfully"). Closed in WP-1b: exemption dropped; on-face anchor frozen at creation/re-pick.
+- **F4 rejected as a defect, recorded as a residual:** the tracked rung's bypass of descriptor scoring is the same trust every op places in the element-map partition (mate: `ComponentOp.cpp`, hole: `HoleOp.cpp::resolve_host_face`); the partition removes consumed elements through `elementMapDelta`, which the allowlist did not include. Follow-up test recorded: consume the host face by a through-cut, add a congruent replacement ⇒ `NeedsRepair`, never a bind.
+- **F5 rejected:** the planner refuses any checkpoint that swallows a `Sketch` op a later executed step consumes (`onecad-core/src/regen/planner.rs` `a_checkpoint_that_swallows_a_consumed_sketch_op_is_refused`, outside the allowlist), so a suffix can never lack its profile.
+- **F6 accepted in part:** the a³ floor is below binary64 spacing at 1e9 mm³ (2^(29−52) ≈ 1.19e-7 mm³), so a one-ULP integration difference on a 1 m body would pass as removal. Closed in WP-1b: εV gains a κ·ulp(V) floor (κ = 8) and the e/(1−e) form. The 1e-10 mm³ "real removal refuses" case is the accepted semantic floor.
+- **F7 accepted as a consequence, not a defect:** a legacy hosted record with an off-face anchor halts after an upstream edit until re-picked (WP-1b makes re-pick freeze the on-face anchor). Strict refusal over silent replay, per the identity law.
+- **F8 accepted** (b = 2e-8 passes the τGS guard but the projected x fails the 1e-9 orthogonality check ⇒ a valid authored frame is blamed). Closed in WP-1b: cross-product re-orthogonalisation after projection; stored-frame validity checked before transport, transport residuals after, with distinct reasons.
+- **F9 accepted** (a malformed `sketchPlacement` parsed as "absent"). Closed in WP-1b: malformed ⇒ planStep parse failure; basis validated.
+- **F10 recorded as an accepted residual:** `moved` is exact by design (no deadband); Rust's equality on `resolved_plane` prevents repeated adoption; representation jitter would show as a stable, harmless first adoption.
+- Also recorded from § 4 "Tests required": the fixture's follow round replays a previously bound host without `editedFrom`; an empty-base + explicit-edit-context round is owed; Revolve ring and Boolean disjoint-Cut vectors are owed; `BOOLEAN_DISJOINT_RESULT` is a Union code in §7.3, so the Cut refusal keeps its own `CUT_NO_EFFECT` name.
+
+Raw output: scratchpad `astra-break-sketch-host-face-20260915-113730.md` (not copied here; accepted findings above are the record).

@@ -79,8 +79,16 @@ function adoptSaveOutcome(outcome: SaveOutcome): void {
  * reads this to decide whether it may proceed with the close/quit); `false` on
  * any failure or a cancelled Save As dialog — the error hint (if any) is already
  * surfaced here, so callers just need the boolean.
+ *
+ * C9: a document `documentStore` already knows has no path goes straight to
+ * Save As — no doomed `saveDocument` call, no "no save path" error logged and
+ * then silently recovered from. `isNoPathError` stays as the backstop for the
+ * few entry points that don't set `documentStore.path` (project/STEP import).
  */
 export async function saveDocument(): Promise<SaveOutcome | null> {
+  if (documentStore.getState().path === null) {
+    return saveDocumentAs();
+  }
   try {
     const outcome = await client.saveDocument(undefined, capturePreview());
     adoptSaveOutcome(outcome);

@@ -36,6 +36,9 @@ type Layout = { pos: Pos; maxHeight: number; width: number };
 
 const VIEWPORT_MARGIN = 8;
 const PANEL_GAP = 6;
+/** Height of the status bar the shell docks at the bottom of the window — a
+ *  popover must stay clear of it rather than clipping underneath (C2). */
+const BOTTOM_INSET = 34;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), Math.max(min, max));
@@ -57,13 +60,18 @@ function preferredPosition(
   return { left: anchor.left, top: anchor.bottom + PANEL_GAP };
 }
 
+/** Bottom of the usable work area — above the status bar, not the window edge (C2). */
+function workAreaBottom(): number {
+  return window.innerHeight - BOTTOM_INSET;
+}
+
 function layoutFor(
   anchor: HTMLElement | null,
   panel: HTMLDivElement | null,
   width: number,
   placement: Placement,
 ): Layout {
-  const maxHeight = Math.max(0, window.innerHeight - VIEWPORT_MARGIN * 2);
+  const maxHeight = Math.max(0, workAreaBottom() - VIEWPORT_MARGIN * 2);
   const nextWidth = popupWidth(width);
   if (!anchor || !panel) {
     return { pos: { left: VIEWPORT_MARGIN, top: VIEWPORT_MARGIN }, maxHeight, width: nextWidth };
@@ -73,7 +81,7 @@ function layoutFor(
   return {
     pos: {
       left: clamp(preferred.left, VIEWPORT_MARGIN, window.innerWidth - nextWidth - VIEWPORT_MARGIN),
-      top: clamp(preferred.top, VIEWPORT_MARGIN, window.innerHeight - panelHeight - VIEWPORT_MARGIN),
+      top: clamp(preferred.top, VIEWPORT_MARGIN, workAreaBottom() - panelHeight - VIEWPORT_MARGIN),
     },
     maxHeight,
     width: nextWidth,

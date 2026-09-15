@@ -22,6 +22,7 @@ import {
   type LiveDimPlacement,
 } from "@/stores/liveDimStore";
 import type { DimFieldId } from "@/tools/sketch/liveDimension";
+import { ANNOTATION_PRIORITY } from "@/viewport/engine/HtmlOverlayDriver";
 import { LiveDimField } from "./LiveDimField";
 
 /** Perpendicular screen-space clearance for a chip with an `axisFrom` (the
@@ -94,6 +95,16 @@ export function LiveDimChips() {
         clusterId,
         axisFrom,
         offsetPx: axisFrom ? AXIS_OFFSET_PX : undefined,
+        // S9: a circle's Ø and R chips overlapped each other AND the 30 mm
+        // dimension label beside them. `clusterId` only separates chips from
+        // their own siblings; the collision layout is what keeps the set clear
+        // of everything else on screen. `keepWhenUnplaced` because a live
+        // dimension that disappears mid-gesture is worse than one that overlaps.
+        annotation: {
+          priority: ANNOTATION_PRIORITY.liveDimChip,
+          pinned: false,
+          keepWhenUnplaced: true,
+        },
       });
       mounted.push([liveDimChipId(field), host]);
     }

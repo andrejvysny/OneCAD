@@ -11,6 +11,15 @@ import {
   liveDimField,
 } from "./helpers";
 
+/**
+ * Constraint ROWS are named now ("Distance · Line 2 start – Line 2 end", S10),
+ * so the row's accessible name is what identifies a kind — an exact-text match
+ * on the bare kind finds nothing. Anchored on the kind so a delete button or a
+ * longer kind (Distance vs DistanceX) cannot be mistaken for it.
+ */
+const constraintRows = (page: import("@playwright/test").Page, kind: string) =>
+  page.getByRole("button", { name: new RegExp(`^${kind}(\\s|$)`) });
+
 /*
  * Live dimension chips — circle tool (SP-1 W4).
  *
@@ -52,8 +61,8 @@ test("typing on the diameter chip authors a Diameter constraint at half the valu
   const circle = await getSketchCircle(page);
   expect(circle.radius).toBeCloseTo(12.5, 3);
 
-  await expect(page.getByText("Diameter", { exact: true })).toHaveCount(1);
-  await expect(page.getByText("Radius", { exact: true })).toHaveCount(0);
+  await expect(constraintRows(page, "Diameter")).toHaveCount(1);
+  await expect(constraintRows(page, "Radius")).toHaveCount(0);
   await expect(dofPill(page)).toHaveText("DOF: 2"); // 3 (lone circle) − 1 (Diameter)
 });
 
@@ -89,5 +98,5 @@ test("Tab-ing from diameter to radius authors a Radius constraint instead", asyn
 
   const circle = await getSketchCircle(page);
   expect(circle.radius).toBeCloseTo(12.5, 3);
-  await expect(page.getByText("Radius", { exact: true })).toHaveCount(1);
+  await expect(constraintRows(page, "Radius")).toHaveCount(1);
 });

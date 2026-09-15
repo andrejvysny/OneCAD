@@ -36,8 +36,14 @@ export const INSPECTOR_SECTIONS_CONTRACT: Readonly<Record<string, readonly strin
    * Sketch mode. The Constraints section is unconditional — an empty sketch
    * shows the label with a "No constraints yet." body rather than hiding it, so
    * the panel does not reflow as the first constraint appears.
+   *
+   * "Entity" (PLAN.md D14, 2026-09-15 — a recorded user-visible decision, not a
+   * probe going green) leads it, and is unconditional for the same reason:
+   * selecting a sketch entity used to change nothing in the inspector at all
+   * (UX review 2026-09-14, S12), and a section that appears and disappears with
+   * the pick would reflow the panel on every click.
    */
-  sketchMode: ["Constraints"],
+  sketchMode: ["Entity", "Constraints"],
 };
 
 /**

@@ -280,6 +280,23 @@ export async function enterSketchViaPlanePicker(page: Page): Promise<void> {
     "aria-pressed",
     "true",
   );
+  // …and settle AGAIN, because the plane click above started a SECOND tween:
+  // `enterSketch` aims the camera along the plane normal. Every chrome signal a
+  // caller can see — "Editing …", the armed tool, even "DOF: 0" — is true the
+  // instant the session exists, while the camera is still swinging into the
+  // plane, so a spec that clicks straight away resolves its coordinates against
+  // a pose that no longer exists a frame later.
+  //
+  // Measured (webkit, idle machine, circle.spec's own flow): `screenToPlane` at
+  // the canvas centre read (17.68, −16.69) before the first click and
+  // (13.32, −12.74) after it, with the world origin projecting to (538, 359)
+  // then (564, 348) — i.e. still moving. The centre click committed a circle at
+  // (7.71, −7.47) instead of the origin, 45px away, so the origin snap was
+  // correctly declined, no `Fixed` was authored, and the DOF pill read 2 higher
+  // than the spec expects. Chromium finishes the same tween before the click
+  // lands and reads (0, 0) both times, which is why this only ever showed on
+  // webkit.
+  await waitForCameraSettled(page);
 }
 
 /** Body rows in the model tree (mirrors sketchOptions — ModelTreePanel's "Bodies" listbox). */

@@ -137,8 +137,17 @@ consequences the Picker owns, none of which apply to plain lines:
   and the Picker **flushes `material.resolution` itself before every raycast** —
   at (0,0), which is where a body sits until its first rendered frame,
   `LineSegments2.raycast` returns silently with no hits. `params.Line.threshold`
-  (world units) is still driven, because the face-vs-edge preference bias
-  arbitrates on the world-space `distance` both hit kinds report.
+  (world units) is still driven for any plain `THREE.Line` that may be gathered;
+  the fat-line path ignores it.
+
+Edge-vs-face arbitration (D9, finding T8) is expressed in SCREEN pixels on both
+axes. The cursor must be within `EDGE_PICK_PX` (8) CSS px of the edge — three's
+Line2 raycast enforces that — and the edge must be no more than
+`EDGE_DEPTH_SLACK_PX` (2) CSS px of world size BEHIND the face under the cursor,
+measured by `pixelWorldSize` **at the face hit's own depth**. It used to be six
+pixels of world size at the camera's orbit-target distance, which is not the
+depth anything was hit at, so the same click arbitrated differently after a pan
+or a zoom. A silhouette edge has no face behind it and always wins.
 
 Highlights are two shapes. FACE and BODY overlays are shallow-cloned geometries
 that SHARE the body's BufferAttributes and only narrow `drawRange` — they own no

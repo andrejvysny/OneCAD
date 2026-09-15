@@ -1,0 +1,130 @@
+# CANONICAL §7.2/§7.3/§9 fixture — a sketch glued to a solid FACE FOLLOWS that
+# face, halts by name when it cannot, and a Cut that removes nothing is REFUSED
+# (UX review 2026-09-14 WP-1 / B1 + N9, 2026-09-15).
+#
+# The design is `docs/design/astra/sketch-host-face-transport.md` (A1). What this
+# file pins is the WIRE CONTRACT a Rust or frontend consumer branches on; the
+# NUMBERS (frame transport vectors G1/G2/G4/G8/G9, the τGS conditioning boundary,
+# the significance thresholds, the seat witness, the Cut εV) live in
+# `worker/tests/test_sketch_host_reseat.cpp`. Same contract/geometry split as the
+# component fixtures.
+#
+# Four legs, one document:
+#
+#   1. FOLLOW. The plate is re-planned from 40 mm to 25 mm thick. Its top cap moves
+#      along its OWN normal and the sketch glued to it follows exactly: the step
+#      carries `sketchPlacement` with the complete re-seated basis (origin z = 25,
+#      the authored xAxis/yAxis/normal carried VERBATIM because n₁ == n₀), the
+#      reported `translationMm` 15 / `rotationDeg` 0, and the worker-emitted
+#      `SKETCH_HOST_RESEATED` info diagnostic. Every number here is a
+#      PLANE-TO-PLANE distance between faces the extrude placed at exactly z=0 and
+#      z=40 / z=25 — not a measurement — which is why it may be pinned at all (the
+#      rule `place_component_mate_reseat.ndjson` follows). Before this build the
+#      worker stored the sketch's raw params verbatim and the sketch stayed 15 mm
+#      in the air with no diagnostic, silently cutting at the wrong plane.
+#
+#   2. HOST VANISHED. The same host sketch in a FROM-ZERO plan (§7.2 D5: an
+#      `expectedBaseHash` equal to the empty-prefix anchor clones a genuinely empty
+#      base) that no longer contains the extrude producing its body. The host
+#      cannot resolve, so the Sketch step reports
+#      `needsRepair` with the §9 item at `refId "op2.input0"` (the
+#      `element_refs_mut` slot, NOT a wire `inputs[]` entry — `hostFace` is never
+#      one, the `mate.target` rule) and the plan HALTS at m−1. The sketch is
+#      Rust-owned document state and is never dropped; what stops is every
+#      downstream feature that would otherwise cut at a guessed plane.
+#
+#   3. NON-PLANAR HOST. The same sketch pointed at the CYLINDER's lateral face:
+#      planarity is a surface-TYPE predicate with no distance epsilon, so the step
+#      halts with the op-built reason `sketchHostNonPlanar` rather than fitting an
+#      approximate plane.
+#
+#   4. CUT THAT REMOVES NOTHING. A prism whose base plane is EXACTLY the plate's
+#      top cap (z = 40) and which grows away from the solid: the boolean touches
+#      the target and subtracts zero. `OP_FAILED` carrying `CUT_NO_EFFECT` at
+#      `stage:"publish"`, riding `perStepResults[].diagnostics` because a failed
+#      step emits no `planStep`. `volumeBefore`/`volumeAfter` are 240000 exactly
+#      (100·60·40 of a box the extrude placed there); `toleranceMm3`,
+#      `relErrBefore` and `relErrAfter` are MEASURED and therefore matched with
+#      `$present`, never pinned.
+#
+# EVIDENCE. Every `hostFace` here carries the frozen `intent.descriptor` a real
+# record is stamped with at mint (`document_runtime::stamp_intents`, through the new
+# `element_refs_mut` `Sketch` arm). It is load-bearing for LEG 1: a from-zero plan
+# clones an empty partition, so the tracked rung is unavailable by construction and
+# the descriptor is the only thing that can re-find the cap.
+#
+# Leg 2 halts because the host's BODY is absent. EVERY unresolvable host halts the
+# same way (§7.3 `hostFace`): a confidence shortfall raises the ladder's own §9 item
+# with its own token and its ranked candidates, the step is `needsRepair`, and the
+# plan stops at m−1. That is only honest because the frozen `anchor.worldPoint` is a
+# point the kernel classified ON the face (§7.6 `exact.anchor`) — while it was the
+# face's `gp_Pln` LOCATION a correct, unambiguous host scored 0.75 and re-picking
+# re-froze the same miss, so the halt could never be cleared
+# (`src-tauri/tests/step_import_gate.rs` PHASE 4, measured 0.75 → 1.00).
+#
+# The anchors below are the cap's own centre for that reason, not its plane origin.
+#
+# GEOMETRY. `plane:{kind:"XY"}` maps sketch u to world +Y and v to world −X
+# (`worker/src/sketch/Sketch.h`), so the u∈[0,100] v∈[0,60] rectangle is a plate at
+# world x∈[−60,0], y∈[0,100] and the circle at sketch (200,0) is a Ø40 cylinder on
+# the world Z line through (0,200). The host sketch's own plane is the `custom`
+# form `plane_from_point_normal` produces for a +Z normal — the NORMATIVE XY basis
+# (xAxis=(0,1,0), yAxis=(−1,0,0)) at the cap's own origin — so a frame silently
+# re-derived anywhere would show up as a different basis, not a coincidental match.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_sketch_host_face_reseat","documentRevision":0,"workerEpoch":4,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+# The 40 mm plate and the cylinder, one plan.
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":80,"documentRevision":1,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],"targetStep":3,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk1","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[100,0]},{"id":"e2","type":"Line","p0":[100,0],"p1":[100,60]},{"id":"e3","type":"Line","p0":[100,60],"p1":[0,60]},{"id":"e4","type":"Line","p0":[0,60],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"inputs":[{"primary":{"bodyId":"","elementId":"sk1.region.r0","kind":"face"}}],"params":{"sketchId":"sk1","distance":40.0,"extrudeMode":"Blind","booleanMode":"NewBody"}},{"opType":"Sketch","opId":"opc","stepIndex":2,"params":{"sketchId":"sk_c","plane":{"kind":"XY"},"entities":[{"id":"c1","type":"Circle","center":[200,0],"radius":20.0}],"constraints":[]}},{"opType":"Extrude","opId":"op3","stepIndex":3,"inputs":[{"primary":{"bodyId":"","elementId":"sk_c.region.r0","kind":"face"}}],"params":{"sketchId":"sk_c","distance":30.0,"extrudeMode":"Blind","booleanMode":"NewBody"}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"jobId":80}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":1,"jobId":80,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":2,"jobId":80}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":3,"jobId":80,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op3"}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":80,"result":{"planPrepared":true,"lastValidStep":3,"stoppedReason":"completed","historyPrefixHash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":80,"documentRevision":1,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":80,"result":{"accepted":true,"snapshotId":1,"documentRevision":1}}}
+# The two hosts: the plate's top cap and the cylinder's lateral face.
+{"send":{"v":1,"t":"req","id":4,"verb":"BindElementIds","args":{"snapshotId":1,"bindings":[{"bodyId":"body_op1","topoKey":"f:6","elementId":"el_top","kind":"face"},{"bodyId":"body_op3","topoKey":"f:1","elementId":"el_side","kind":"face"}]}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"bound":[{"bodyId":"body_op1","topoKey":"f:6","elementId":"el_top","kind":"face"},{"bodyId":"body_op3","topoKey":"f:1","elementId":"el_side","kind":"face"}]}}}
+# The two host frames, stated once (§7.5): the cap plane at z=40 with an outward
+# +Z normal, and the cylinder whose surface type is not a plane at all.
+{"send":{"v":1,"t":"req","id":5,"verb":"ClassifyElement","args":{"elementId":"el_top"}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"present":true,"kind":"face","surfaceType":"plane","frame":{"origin":[0.0,0.0,40.0],"normal":[0.0,0.0,1.0]}}}}
+{"send":{"v":1,"t":"req","id":6,"verb":"ClassifyElement","args":{"elementId":"el_side"}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"result":{"present":true,"kind":"face","surfaceType":"cylinder"}}}
+# LEG 1 — the plate is re-planned 15 mm THINNER and the sketch follows its cap
+# along the cap's own normal. `plane` is the COMPLETE re-seated basis; the axes are
+# the authored ones verbatim (n1 == n0 exactly, so nothing is rebuilt).
+{"send":{"v":1,"t":"req","id":7,"verb":"ExecutePlan","args":{"jobId":81,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","prefixHashes":["1111111111111111111111111111111111111111111111111111111111111111","2222222222222222222222222222222222222222222222222222222222222222","3333333333333333333333333333333333333333333333333333333333333333"],"targetStep":4,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk1","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[100,0]},{"id":"e2","type":"Line","p0":[100,0],"p1":[100,60]},{"id":"e3","type":"Line","p0":[100,60],"p1":[0,60]},{"id":"e4","type":"Line","p0":[0,60],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"inputs":[{"primary":{"bodyId":"","elementId":"sk1.region.r0","kind":"face"}}],"params":{"sketchId":"sk1","distance":25.0,"extrudeMode":"Blind","booleanMode":"NewBody"}},{"opType":"Sketch","opId":"op2","stepIndex":4,"params":{"sketchId":"sk_on_face","frameTransportVersion":1,"plane":{"kind":"custom","origin":[0.0,0.0,40.0],"xAxis":[0.0,1.0,0.0],"yAxis":[-1.0,0.0,0.0],"normal":[0.0,0.0,1.0]},"hostFace":{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"},"intent":{"version":1,"kind":"face","descriptor":{"shapeType":4,"surfaceType":0,"center":[-30.0,50.0,40.0],"size":116.619037896906,"magnitude":6000.0,"hasNormal":true,"normal":[0.0,0.0,1.0]}},"anchor":{"worldPoint":[-30.0,50.0,40.0]}},"entities":[{"id":"p1","type":"Line","p0":[0,0],"p1":[30,0]},{"id":"p2","type":"Line","p0":[30,0],"p1":[30,20]},{"id":"p3","type":"Line","p0":[30,20],"p1":[0,20]},{"id":"p4","type":"Line","p0":[0,20],"p1":[0,0]}],"constraints":[]}}]}}}
+{"expect":{"v":1,"t":"event","id":7,"event":"planStep","stepIndex":0,"jobId":81}}
+{"expect":{"v":1,"t":"event","id":7,"event":"planStep","stepIndex":1,"jobId":81,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"event","id":7,"event":"planStep","stepIndex":4,"jobId":81,"payload":{"bodyEvents":[],"needsRepair":[],"sketchPlacement":{"plane":{"kind":"custom","origin":[0.0,0.0,25.0],"xAxis":[0.0,1.0,0.0],"yAxis":[-1.0,0.0,0.0],"normal":[0.0,0.0,1.0]},"translationMm":15.0,"rotationDeg":0.0},"diagnostics":[{"severity":"info","code":"SKETCH_HOST_RESEATED","stage":"sketch","message":"$present","evidence":{"translationMm":15.0,"rotationDeg":0.0,"significant":true}}]}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"jobId":81,"result":{"planPrepared":true,"lastValidStep":4,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":8,"verb":"DiscardPrepared","args":{"jobId":81}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"jobId":81,"result":{"discarded":true}}}
+# LEG 2 — the host's producer is gone from the plan, so the host cannot resolve:
+# the Sketch step itself reports NeedsRepair at `<opId>.input0` and the plan stops
+# at m−1 (step 0 is the last valid one). No `sketchPlacement`, no silent move.
+{"send":{"v":1,"t":"req","id":9,"verb":"ExecutePlan","args":{"jobId":82,"documentRevision":3,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["4444444444444444444444444444444444444444444444444444444444444444","5555555555555555555555555555555555555555555555555555555555555555"],"targetStep":4,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk1","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[100,0]},{"id":"e2","type":"Line","p0":[100,0],"p1":[100,60]},{"id":"e3","type":"Line","p0":[100,60],"p1":[0,60]},{"id":"e4","type":"Line","p0":[0,60],"p1":[0,0]}],"constraints":[]}},{"opType":"Sketch","opId":"op2","stepIndex":4,"params":{"sketchId":"sk_on_face","frameTransportVersion":1,"plane":{"kind":"custom","origin":[0.0,0.0,40.0],"xAxis":[0.0,1.0,0.0],"yAxis":[-1.0,0.0,0.0],"normal":[0.0,0.0,1.0]},"hostFace":{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"},"intent":{"version":1,"kind":"face","descriptor":{"shapeType":4,"surfaceType":0,"center":[-30.0,50.0,40.0],"size":116.619037896906,"magnitude":6000.0,"hasNormal":true,"normal":[0.0,0.0,1.0]}},"anchor":{"worldPoint":[-30.0,50.0,40.0]}},"entities":[{"id":"p1","type":"Line","p0":[0,0],"p1":[30,0]},{"id":"p2","type":"Line","p0":[30,0],"p1":[30,20]},{"id":"p3","type":"Line","p0":[30,20],"p1":[0,20]},{"id":"p4","type":"Line","p0":[0,20],"p1":[0,0]}],"constraints":[]}}]}}}
+{"expect":{"v":1,"t":"event","id":9,"event":"planStep","stepIndex":0,"jobId":82}}
+{"expect":{"v":1,"t":"event","id":9,"event":"planStep","stepIndex":4,"jobId":82,"payload":{"bodyEvents":[],"needsRepair":[{"refId":"op2.input0","elementId":"el_top","ladderFailed":"descriptor","reason":"no-candidates","scoringVersion":6,"candidates":[],"anchor":{"worldPoint":[-30.0,50.0,40.0]},"uiLabel":"$present"}]}}}
+{"expect":{"v":1,"t":"resp","id":9,"ok":true,"jobId":82,"result":{"planPrepared":true,"lastValidStep":0,"stoppedReason":"needsRepair","perStepResults":[{"stepIndex":0,"status":"ok"},{"stepIndex":4,"status":"needsRepair"}]}}}
+{"send":{"v":1,"t":"req","id":10,"verb":"DiscardPrepared","args":{"jobId":82}}}
+{"expect":{"v":1,"t":"resp","id":10,"ok":true,"jobId":82,"result":{"discarded":true}}}
+# LEG 3 — the same sketch pointed at the CYLINDER's lateral face. Planarity is a
+# surface-TYPE predicate: the step halts by name rather than fitting a plane to it.
+{"send":{"v":1,"t":"req","id":11,"verb":"ExecutePlan","args":{"jobId":83,"documentRevision":4,"workerEpoch":4,"expectedBaseHash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","prefixHashes":["6666666666666666666666666666666666666666666666666666666666666666"],"targetStep":4,"ops":[{"opType":"Sketch","opId":"op5","stepIndex":4,"params":{"sketchId":"sk_on_cyl","frameTransportVersion":1,"plane":{"kind":"custom","origin":[0.0,0.0,40.0],"xAxis":[0.0,1.0,0.0],"yAxis":[-1.0,0.0,0.0],"normal":[0.0,0.0,1.0]},"hostFace":{"primary":{"bodyId":"body_op3","elementId":"el_side","kind":"face"},"intent":{"version":1,"kind":"face","descriptor":{"shapeType":4,"surfaceType":1,"center":[0.0,200.0,15.0],"size":125.6,"magnitude":3769.911184308,"hasNormal":false}},"anchor":{"worldPoint":[-30.0,50.0,40.0]}},"entities":[{"id":"p1","type":"Line","p0":[0,0],"p1":[30,0]},{"id":"p2","type":"Line","p0":[30,0],"p1":[30,20]},{"id":"p3","type":"Line","p0":[30,20],"p1":[0,20]},{"id":"p4","type":"Line","p0":[0,20],"p1":[0,0]}],"constraints":[]}}]}}}
+{"expect":{"v":1,"t":"event","id":11,"event":"planStep","stepIndex":4,"jobId":83,"payload":{"bodyEvents":[],"needsRepair":[{"refId":"op5.input0","elementId":"el_side","ladderFailed":"descriptor","reason":"sketchHostNonPlanar","scoringVersion":6,"candidates":[{"topoKey":"f:1","score":1.0,"margin":1.0,"worldPos":"$any","summary":"$present"}],"anchor":{"worldPoint":[-30.0,50.0,40.0]},"uiLabel":"$present"}]}}}
+{"expect":{"v":1,"t":"resp","id":11,"ok":true,"jobId":83,"result":{"planPrepared":true,"stoppedReason":"needsRepair","perStepResults":[{"stepIndex":4,"status":"needsRepair"}]}}}
+{"send":{"v":1,"t":"req","id":12,"verb":"DiscardPrepared","args":{"jobId":83}}}
+{"expect":{"v":1,"t":"resp","id":12,"ok":true,"jobId":83,"result":{"discarded":true}}}
+# LEG 4 — a prism whose base plane IS the plate's top cap, grown away from the
+# solid: the Cut touches and subtracts exactly zero. Refused by name; the failed
+# step emits no `planStep`, so the diagnostic rides `perStepResults`.
+{"send":{"v":1,"t":"req","id":13,"verb":"ExecutePlan","args":{"jobId":84,"documentRevision":5,"workerEpoch":4,"expectedBaseHash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","prefixHashes":["7777777777777777777777777777777777777777777777777777777777777777","8888888888888888888888888888888888888888888888888888888888888888"],"targetStep":5,"ops":[{"opType":"Sketch","opId":"op6","stepIndex":4,"params":{"sketchId":"sk_imprint","plane":{"kind":"custom","origin":[0.0,0.0,40.0],"xAxis":[0.0,1.0,0.0],"yAxis":[-1.0,0.0,0.0],"normal":[0.0,0.0,1.0]},"entities":[{"id":"q1","type":"Line","p0":[0,0],"p1":[100,0]},{"id":"q2","type":"Line","p0":[100,0],"p1":[100,60]},{"id":"q3","type":"Line","p0":[100,60],"p1":[0,60]},{"id":"q4","type":"Line","p0":[0,60],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op7","stepIndex":5,"inputs":[{"primary":{"bodyId":"","elementId":"sk_imprint.region.r0","kind":"face"}}],"params":{"sketchId":"sk_imprint","distance":10.0,"extrudeMode":"Blind","booleanMode":"Cut","targetBodyId":"body_op1"}}]}}}
+{"expect":{"v":1,"t":"event","id":13,"event":"planStep","stepIndex":4,"jobId":84}}
+{"expect":{"v":1,"t":"resp","id":13,"ok":true,"jobId":84,"result":{"planPrepared":true,"lastValidStep":4,"stoppedReason":"opFailed","perStepResults":[{"stepIndex":4,"status":"ok"},{"stepIndex":5,"status":"opFailed","message":"$present","diagnostics":[{"severity":"error","code":"CUT_NO_EFFECT","stage":"publish","message":"$present","evidence":{"boolean":{"operation":"Cut","targetBodyId":"body_op1","volumeBefore":240000.0,"volumeAfter":240000.0,"toleranceMm3":"$present","relErrBefore":"$present","relErrAfter":"$present"}}}]}]}}}
+{"send":{"v":1,"t":"req","id":14,"verb":"DiscardPrepared","args":{"jobId":84}}}
+{"expect":{"v":1,"t":"resp","id":14,"ok":true,"jobId":84,"result":{"discarded":true}}}
+{"send":{"v":1,"t":"req","id":15,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":15,"ok":true,"result":{"goodbye":true}}}

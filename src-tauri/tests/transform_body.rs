@@ -1093,7 +1093,21 @@ const HOST_FACE_EL: &str = "el_host_top";
 
 /// A rect sketch glued to a face of `body` — the shape `add_sketch_on_face`
 /// authors: a typed `ElementRef` host plus a frame frozen on that face.
-fn hosted_rect_sketch(sid: SketchId, base: u128, body: BodyId, el: &str, z: f64) -> Sketch {
+///
+/// `anchor` is a point ON the host face (SCHEMA §7.6 `exact.anchor`), which is what
+/// `add_sketch_on_face` freezes. It is deliberately NOT the frozen plane's origin:
+/// this box's cap plane origin sits on the EDGE it shares with a side face, so both
+/// are at distance 0 from it and an anchor-only reference cannot separate them —
+/// the resolver answers `ambiguous` and the step halts, which is correct and is not
+/// what this test is about.
+fn hosted_rect_sketch(
+    sid: SketchId,
+    base: u128,
+    body: BodyId,
+    el: &str,
+    z: f64,
+    anchor: Vec3,
+) -> Sketch {
     let src = rect_sketch(sid, base, 2.0, 2.0, 6.0, 6.0);
     let mut sk = Sketch::new(
         sid,
@@ -1108,7 +1122,7 @@ fn hosted_rect_sketch(sid: SketchId, base: u128, body: BodyId, el: &str, z: f64)
                 }),
                 intent: None,
                 anchor: Some(AnchorIntent {
-                    world_point: Vec3::new_unchecked(0.0, 0.0, z),
+                    world_point: anchor,
                     surface_uv: None,
                     local_frame: None,
                     adjacency_hint: None,
@@ -1166,7 +1180,16 @@ async fn editing_a_transform_gates_a_sketch_hosted_on_the_moved_face() {
 
     let host_sid = SketchId(Uuid::from_u128(SKETCH_HOST_REC));
     rt.apply(EditCommand::AddSketch {
-        sketch: hosted_rect_sketch(host_sid, SKETCH_HOST_REC << 8, body, HOST_FACE_EL, 25.0),
+        sketch: hosted_rect_sketch(
+            host_sid,
+            SKETCH_HOST_REC << 8,
+            body,
+            HOST_FACE_EL,
+            25.0,
+            // The MOVED cap's centre: the 20×20 footprint sits at world
+            // x∈[−20,0] y∈[0,20] and the Move carried it +15 in x.
+            Vec3::new_unchecked(5.0, 10.0, 25.0),
+        ),
     })
     .expect("AddSketch on the moved face");
     rt.finish_sketch(host_sid)
@@ -1269,7 +1292,16 @@ async fn a_legacy_hosted_sketch_record_is_gated_through_its_attachment() {
 
     // The document knows the attachment…
     let host_sid = SketchId(Uuid::from_u128(SKETCH_HOST_REC));
-    let sk = hosted_rect_sketch(host_sid, SKETCH_HOST_REC << 8, body, HOST_FACE_EL, 25.0);
+    let sk = hosted_rect_sketch(
+        host_sid,
+        SKETCH_HOST_REC << 8,
+        body,
+        HOST_FACE_EL,
+        25.0,
+        // The MOVED cap's centre: the 20×20 footprint sits at world
+        // x∈[−20,0] y∈[0,20] and the Move carried it +15 in x.
+        Vec3::new_unchecked(5.0, 10.0, 25.0),
+    );
     rt.apply(EditCommand::AddSketch { sketch: sk.clone() })
         .expect("AddSketch");
     // …but the RECORD is authored in the pre-W4 shape: no `host_face` param.

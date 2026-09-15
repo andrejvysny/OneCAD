@@ -559,7 +559,7 @@ describe("tauriClient getSketch (pure read)", () => {
 
   it("surfaces a rejected get_sketch as an Error with the ApiError kind", async () => {
     mockIPC((cmd) => (cmd === "get_sketch" ? Promise.reject({ kind: "notFound", message: "no sketch" }) : undefined));
-    await expect(createTauriClient().getSketch("ghost")).rejects.toThrow(/notFound: no sketch/);
+    await expect(createTauriClient().getSketch("ghost")).rejects.toThrow(/^no sketch$/);
   });
 
   it("resolves an ENTERED sketch's frontend id to its backend UUID (like its siblings)", async () => {
@@ -1171,7 +1171,7 @@ describe("tauriClient enterSketch orphan cleanup (DeleteSketch compensation)", (
     const client = createTauriClient();
 
     // First attempt: AddSketch commits, enter_sketch rejects → DeleteSketch fires.
-    await expect(client.enterSketch({ newOnPlane: "XZ", sketchId: "sk" })).rejects.toThrow(/workerDown: no worker/);
+    await expect(client.enterSketch({ newOnPlane: "XZ", sketchId: "sk" })).rejects.toThrow(/^no worker$/);
     expect(commands.map((c) => c.cmd)).toEqual(["addSketch", "deleteSketch"]);
     const add1 = commands[0].sketch as { id: string };
     // The DeleteSketch targets the SAME backend SketchId AddSketch minted.
@@ -1179,7 +1179,7 @@ describe("tauriClient enterSketch orphan cleanup (DeleteSketch compensation)", (
 
     // Retry: the map was cleaned, so a fresh AddSketch fires with a DISTINCT id
     // (had the map leaked, ensureBackendSketch would reuse it and skip AddSketch).
-    await expect(client.enterSketch({ newOnPlane: "XZ", sketchId: "sk" })).rejects.toThrow(/workerDown/);
+    await expect(client.enterSketch({ newOnPlane: "XZ", sketchId: "sk" })).rejects.toThrow(/no worker/);
     expect(commands.map((c) => c.cmd)).toEqual(["addSketch", "deleteSketch", "addSketch", "deleteSketch"]);
     const add2 = commands[2].sketch as { id: string };
     expect(add2.id).not.toBe(add1.id);
@@ -1200,7 +1200,7 @@ describe("tauriClient enterSketch orphan cleanup (DeleteSketch compensation)", (
       { shouldMockEvents: true },
     );
     await expect(createTauriClient().enterSketch({ newOnPlane: "XZ" })).rejects.toThrow(
-      /workerDown: no worker \(cleanup failed — empty sketch left in tree\)$/,
+      /^no worker \(cleanup failed — empty sketch left in tree\)$/,
     );
     expect(
       logSnapshot().filter((e) => e.level === "error" && e.msg.includes("orphan cleanup")),
@@ -1646,7 +1646,32 @@ describe("tauriClient edit + correlation", () => {
         opType: "Boolean",
         params: { operation: "Union", targetBodyId: "t", toolBodyId: "u" },
       } as OperationOp),
-    ).rejects.toThrow(/opFailed: boom/);
+    ).rejects.toThrow(/^boom$/);
+  });
+
+  // FP-N2: the status bar shows the wire message verbatim — a "opFailed: "
+  // prefix ahead of it read as an internal error code, not a sentence
+  // (docs/qa/UX_REVIEW_2026-09-14.md N2). `err.kind` stays for callers that
+  // branch on it (e.g. `errorKind`), only the rendered message drops the prefix.
+  it("does not prefix the ApiError kind onto the thrown message", async () => {
+    mockIPC(
+      (cmd) => {
+        if (cmd === "apply_operation") return Promise.reject({ kind: "opFailed", message: "boom" });
+      },
+      { shouldMockEvents: true },
+    );
+    __setRegenTimeoutForTests(50);
+    try {
+      await createTauriClient().applyOperation({
+        opType: "Boolean",
+        params: { operation: "Union", targetBodyId: "t", toolBodyId: "u" },
+      } as OperationOp);
+      expect.unreachable("applyOperation should have rejected");
+    } catch (e) {
+      const err = e as Error & { kind?: string };
+      expect(err.message).toBe("boom");
+      expect(err.kind).toBe("opFailed");
+    }
   });
 });
 
@@ -3210,7 +3235,7 @@ describe("tauriClient sketch-solved + errors", () => {
     await client.enterSketch({ newOnPlane: "XZ", sketchId: "sk" });
     await expect(
       client.sketchUpsert("sk", [{ id: "e1", type: "Line", p0: [0, 0], p1: [1, 0] }], []),
-    ).rejects.toThrow(/opFailed: solve boom/);
+    ).rejects.toThrow(/^solve boom$/);
   });
 });
 
@@ -3244,7 +3269,7 @@ describe("tauriClient sketchUpsert transactional id-map", () => {
     const line = [{ id: "e1", type: "Line" as const, p0: [0, 0] as [number, number], p1: [40, 0] as [number, number] }];
 
     // 1) REJECTED upsert of the line.
-    await expect(client.sketchUpsert("sk", line, [])).rejects.toThrow(/opFailed/);
+    await expect(client.sketchUpsert("sk", line, [])).rejects.toThrow(/solve boom/);
     // 2) The SAME line again SUCCEEDS — because the rejected call left the id-map
     //    untouched, this still marshals the full add ops (2 synth points + line).
     await client.sketchUpsert("sk", line, []);

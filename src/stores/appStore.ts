@@ -197,6 +197,7 @@ export const appStore = createStore<AppState>()((set, get) => {
       return;
     }
     enter(document);
+    documentStore.getState().setPath(path); // C9 — this document's path IS the one just opened
     // The backend recorded this open in the recents store; refresh so the
     // start-screen list reflects it (newest first) next time it renders.
     void get().loadRecents();
@@ -271,6 +272,10 @@ export const appStore = createStore<AppState>()((set, get) => {
       await get().requestReplacement(async () => {
         const document = await client.newDocument({ beforeAdopt: resetIfReplacing });
         enter(document);
+        // C9: a fresh blank document has no known path — ⌘S must go straight
+        // to Save As instead of trying `saveDocument` and recovering from its
+        // "no save path" error.
+        documentStore.getState().setPath(null);
       });
     },
 
@@ -281,6 +286,7 @@ export const appStore = createStore<AppState>()((set, get) => {
         // rather than the user's copy.
         const document = await client.newFromTemplate(id, { beforeAdopt: resetIfReplacing });
         enter(document);
+        documentStore.getState().setPath(null); // C9 — see newProject
       });
     },
 
@@ -443,6 +449,7 @@ export const appStore = createStore<AppState>()((set, get) => {
           });
           set({ recovery: get().recovery.filter((o) => o.originalPath !== conflict.path) });
           enter(document);
+          documentStore.getState().setPath(conflict.path); // C9 — see openOrPrompt
         } catch (e) {
           logError("app", "openProject (openSaved) FAILED", { error: e });
           return;

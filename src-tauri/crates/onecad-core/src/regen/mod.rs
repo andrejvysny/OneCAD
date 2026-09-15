@@ -62,8 +62,9 @@ pub use engine::{
     GeometryEngine, InflightJob, MeshHandle, OpFailureCode, OpenSessionRequest, Pick,
     PlanArtifacts, PlanEvent, PlanPrepared, PlanRequest, PlanStepEvent, PlannedOp, PolicyVersions,
     PreparedMeshRef, RefResolution, ResolveOutcome, ResolveRef, ResolveRequest, RestoreRequest,
-    SessionMode, Severity, Signature, StepResult, StepSignatures, StepStatus, StoppedReason,
-    TessellateRequest, TessellateResult, TessellateSpec, WorkerElementEvidence, WorkerHead,
+    SessionMode, Severity, Signature, SketchPlacement, StepResult, StepSignatures, StepStatus,
+    StoppedReason, TessellateRequest, TessellateResult, TessellateSpec, WorkerElementEvidence,
+    WorkerHead,
 };
 pub use executor::{CancelToken, MeshSink, Outcome, RegenExecutor, RegenSession, RevisionGate};
 pub use feature_pattern::{

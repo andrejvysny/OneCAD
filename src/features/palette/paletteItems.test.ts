@@ -17,7 +17,13 @@ import {
   type ToolId,
   type WorkspaceId,
 } from "@/platform";
-import { buildPaletteItems, filterPaletteItems, formatShortcut, type PaletteItem } from "./paletteItems";
+import {
+  buildPaletteItems,
+  filterPaletteItems,
+  formatShortcut,
+  sourceLabel,
+  type PaletteItem,
+} from "./paletteItems";
 
 const OWNER = moduleId("onecad.demo");
 const EMPTY = { selection: [], scopes: [] };
@@ -135,6 +141,34 @@ describe("palette items", () => {
     };
 
     expect(filterPaletteItems([undo, redo], "redo").map((item) => item.id)).toEqual(["redo", "undo"]);
+  });
+
+  // FP-N6 (docs/qa/UX_REVIEW_2026-09-14.md N6): a raw dotted contribution-group
+  // id must never leak into the rendered category.
+  it("shows a human category for a registered group, not the raw contribution id", () => {
+    expect(sourceLabel("onecad.modeling", "modeling.action")).toBe("Modeling · Modeling");
+    expect(sourceLabel("onecad.modeling", "modeling.tree")).toBe("Modeling · Model tree");
+    expect(sourceLabel("onecad.shell", "shell.view")).toBe("Shell · View");
+    expect(sourceLabel("onecad.library", "library.insert")).toBe("Library · Library");
+  });
+
+  it("drops an unmapped dotted group instead of showing it raw", () => {
+    expect(sourceLabel("onecad.modeling", "model.solid")).toBe("Modeling");
+  });
+
+  it("no rendered category contains a raw contribution id (a dot)", () => {
+    const groups = [
+      "shell.view",
+      "shell.app",
+      "modeling.action",
+      "modeling.tree",
+      "library.insert",
+      "model.create",
+      "sketch.draw",
+    ];
+    for (const group of groups) {
+      expect(sourceLabel("onecad.modeling", group)).not.toContain(".");
+    }
   });
 
   it("formats modifiers in the conventional order", () => {

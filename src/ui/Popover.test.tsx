@@ -163,11 +163,42 @@ describe("Popover", () => {
     act(() => window.dispatchEvent(new Event("resize")));
     const dialog = screen.getByRole("dialog");
     await waitFor(() => {
-      expect(dialog).toHaveStyle({ left: "8px", width: "164px", maxHeight: "164px" });
+      // maxHeight clears BOTTOM_INSET (34px status bar) in addition to the
+      // viewport margin: 180 - 34 - 8*2 = 130.
+      expect(dialog).toHaveStyle({ left: "8px", width: "164px", maxHeight: "130px" });
     });
 
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 300 });
     act(() => window.dispatchEvent(new Event("resize")));
     await waitFor(() => expect(dialog).toHaveStyle({ left: "54px", width: "238px" }));
+  });
+
+  // C2: a tall popover must stay clear of the status bar (BOTTOM_INSET) rather
+  // than clipping under it, and must scroll instead of overflowing silently.
+  it("C2: clamps maxHeight above the status bar and keeps overflowY scrollable", async () => {
+    Object.defineProperties(window, {
+      innerHeight: { configurable: true, value: 400 },
+      innerWidth: { configurable: true, value: 800 },
+    });
+    render(<Harness />);
+    const anchor = screen.getByRole("button", { name: "anchor" });
+    vi.spyOn(anchor, "getBoundingClientRect").mockReturnValue({
+      bottom: 380,
+      height: 20,
+      left: 400,
+      right: 420,
+      top: 360,
+      width: 20,
+      x: 400,
+      y: 360,
+      toJSON: () => ({}),
+    });
+    act(() => window.dispatchEvent(new Event("resize")));
+    const dialog = screen.getByRole("dialog");
+    await waitFor(() => {
+      // 400 - 34 (status bar) - 8*2 (viewport margin) = 350 — NOT the naive
+      // 400 - 16 = 384 a status-bar-blind clamp would produce.
+      expect(dialog).toHaveStyle({ maxHeight: "350px", overflowY: "auto" });
+    });
   });
 });

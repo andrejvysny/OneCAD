@@ -12,6 +12,15 @@ import {
   liveDimField,
 } from "./helpers";
 
+/**
+ * Constraint ROWS are named now ("Distance · Line 2 start – Line 2 end", S10),
+ * so the row's accessible name is what identifies a kind — an exact-text match
+ * on the bare kind finds nothing. Anchored on the kind so a delete button or a
+ * longer kind (Distance vs DistanceX) cannot be mistaken for it.
+ */
+const constraintRows = (page: import("@playwright/test").Page, kind: string) =>
+  page.getByRole("button", { name: new RegExp(`^${kind}(\\s|$)`) });
+
 /** Move the pointer (no click) to a canvas-center-relative offset — hovers a
  *  point so the live dimension chips populate NON-degenerate values before
  *  anything is typed (`clickAt` moves+downs+ups, which would commit early). */
@@ -133,6 +142,6 @@ test("typing a length + corner angle on the second chain leg drives an exact seg
   expect(Math.min(spread, 360 - spread)).toBeCloseTo(30, 3);
 
   // ── Constraints: the typed length and the typed corner, each authored once ─
-  await expect(page.getByText("Distance", { exact: true })).toHaveCount(1);
-  await expect(page.getByText("Angle", { exact: true })).toHaveCount(1);
+  await expect(constraintRows(page, "Distance")).toHaveCount(1);
+  await expect(constraintRows(page, "Angle")).toHaveCount(1);
 });

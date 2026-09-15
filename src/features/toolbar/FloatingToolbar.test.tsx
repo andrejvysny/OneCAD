@@ -6,6 +6,7 @@ import { ICON_MONO } from "@/icons/Icon";
 import { resetStores } from "@/test/resetStores";
 import { bootTestPlatform, renderWithPlatform } from "@/test/renderWithPlatform";
 import { selectionStore } from "@/stores/selectionStore";
+import { documentStore } from "@/stores/documentStore";
 import { sketchStore } from "@/stores/sketchStore";
 import {
   addonId,
@@ -16,6 +17,15 @@ import {
   type ToolId,
 } from "@/platform";
 import { ModelingScopes } from "@/modules/modeling/manifest";
+
+/** C6: Combine needs TWO bodies in the DOCUMENT, not just one selected — the
+ *  seed document carries only `body1`. */
+function seedSecondBody(): void {
+  const { bodies } = documentStore.getState();
+  documentStore.setState({
+    bodies: { ...bodies, body2: { id: "body2", name: "Body 2", visible: true } },
+  });
+}
 
 describe("FloatingToolbar", () => {
   beforeEach(() => resetStores());
@@ -64,11 +74,11 @@ describe("FloatingToolbar", () => {
     renderWithPlatform(<FloatingToolbar />);
 
     await user.hover(screen.getByRole("button", { name: "Extrude" }));
-    expect(screen.getByRole("tooltip")).toHaveTextContent("Extrude (E)");
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Extrude (E)");
 
     await user.unhover(screen.getByRole("button", { name: "Extrude" }));
     await user.hover(screen.getByRole("button", { name: "New sketch" }));
-    expect(screen.getByRole("tooltip")).toHaveTextContent("New sketch (S)");
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("New sketch (S)");
   });
 
   it("toggles the active tool on click", async () => {
@@ -128,6 +138,7 @@ describe("FloatingToolbar", () => {
   });
 
   it("selecting a body enables the body-gated tools but not the edge/face-gated ones", () => {
+    seedSecondBody();
     selectionStore.getState().set([{ kind: "body", id: "body1" }]);
     renderWithPlatform(<FloatingToolbar />);
     for (const name of ["Combine", "Linear pattern", "Mirror", "Move"]) {
@@ -135,6 +146,37 @@ describe("FloatingToolbar", () => {
     }
     for (const name of ["Fillet / Chamfer", "Shell", "Offset face"]) {
       expect(screen.getByRole("button", { name })).toHaveAttribute("aria-disabled", "true");
+    }
+  });
+
+  /*
+   * C6 — what the DOCUMENT holds, independent of the selection. Combine needs a
+   * second body to combine WITH, and Hole/Measure need something on screen to
+   * click; all three used to answer from the selection alone.
+   */
+  it("keeps Combine disabled while the document holds only one body", () => {
+    selectionStore.getState().set([{ kind: "body", id: "body1" }]);
+    renderWithPlatform(<FloatingToolbar />);
+    expect(screen.getByRole("button", { name: "Combine" })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+  });
+
+  it("grays out Hole and Measure on a document with no body", () => {
+    documentStore.setState({ bodies: {} });
+    renderWithPlatform(<FloatingToolbar />);
+    for (const name of ["Hole", "Measure"]) {
+      expect(screen.getByRole("button", { name })).toHaveAttribute("aria-disabled", "true");
+    }
+  });
+
+  it("selecting a FACE enables Fillet / Chamfer as well as Shell and Offset face", () => {
+    // C7 / D9: the arm expands the face to its boundary edges.
+    selectionStore.getState().set([{ kind: "face", id: "f1", bodyId: "body1" }]);
+    renderWithPlatform(<FloatingToolbar />);
+    for (const name of ["Fillet / Chamfer", "Shell", "Offset face"]) {
+      expect(screen.getByRole("button", { name })).toHaveAttribute("aria-disabled", "false");
     }
   });
 
@@ -271,6 +313,7 @@ describe("FloatingToolbar", () => {
 
   it("the ACTIVE tool is exempt from its own gray-out (must not disable mid-gesture)", async () => {
     const user = userEvent.setup();
+    seedSecondBody();
     selectionStore.getState().set([{ kind: "body", id: "body1" }]);
     renderWithPlatform(<FloatingToolbar />);
     await user.click(screen.getByRole("button", { name: "Combine" }));

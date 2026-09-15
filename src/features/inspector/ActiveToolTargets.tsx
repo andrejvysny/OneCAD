@@ -5,6 +5,8 @@ import type {
   ActiveToolSketchReference,
 } from "@/tools/modelTools/activeToolPresentation";
 import { useDocumentStore } from "@/stores/documentStore";
+import { formatArea, formatLengthWithUnit } from "@/units/format";
+import { useSettingsStore } from "@/stores/settingsStore";
 
 type PresentedTargets = NonNullable<ActiveToolPresentation["targets"]>;
 type TargetFacts = {
@@ -27,10 +29,35 @@ function sketchLabel(reference: ActiveToolSketchReference, facts: TargetFacts): 
   return facts.sketches[reference.sketchId]?.name ?? reference.label;
 }
 
+/**
+ * Enough of an ElementId to tell two picked faces apart, and no more.
+ *
+ * A real one is `el_` + a 32-character uuid (`regen/engine.rs`), which is not a
+ * one-line label; the full value stays in the collapsed reference details. The
+ * tail is the discriminating half of a uuid, so six characters of it is what
+ * makes "Body 1 · Face" answer WHICH face (UX review 2026-09-14, N11).
+ */
+function shortElementId(elementId: string): string {
+  return elementId.length <= 8 ? elementId : `…${elementId.slice(-6)}`;
+}
+
+/**
+ * "Body 1 · Face …d70e41 · 800 mm² · n [0, 0, 1]".
+ *
+ * Area and normal appear only when the PUBLISHER already measured them — this
+ * component never reaches for geometry of its own, so an unmeasured element is
+ * named without being described rather than described with a fabricated zero.
+ */
 function elementLabel(reference: ActiveToolElementReference, facts: TargetFacts): string {
   const kind = reference.kind === "edge" ? "Edge" : "Face";
   const body = facts.bodies[reference.bodyId];
-  return body ? `${body.name} · ${kind}` : `Missing body (${reference.bodyId}) · ${kind}`;
+  const head = body ? `${body.name} · ${kind}` : `Missing body (${reference.bodyId}) · ${kind}`;
+  const parts = [reference.elementId ? `${head} ${shortElementId(reference.elementId)}` : head];
+  if (reference.area !== undefined) {
+    parts.push(reference.kind === "edge" ? formatLengthWithUnit(reference.area) : formatArea(reference.area));
+  }
+  if (reference.normal) parts.push(`n [${reference.normal.join(", ")}]`);
+  return parts.join(" · ");
 }
 
 function BodyReference({ reference, label, facts, testId }: {
@@ -93,7 +120,9 @@ function ElementSlot({ reference, label, facts }: {
   facts: TargetFacts;
 }) {
   if (!reference) {
-    return <div className="min-w-0"><span className="mr-1 text-ink-5">{label}</span>Not selected</div>;
+    // "Not selected" read as an error in the middle of a working pick (N4); the
+    // slot is simply waiting its turn.
+    return <div className="min-w-0"><span className="mr-1 text-ink-5">{label}</span>Awaiting pick</div>;
   }
   return <ElementReference reference={reference} label={label} facts={facts} />;
 }
@@ -142,13 +171,9 @@ function ProfileTargets({ targets, facts }: { targets: ProfileTargets; facts: Ta
       <SketchReference reference={targets.sketch} facts={facts} />
       <div>Regions: {targets.regionIds.length}</div>
       <BodyList label="Affected bodies" references={targets.hostBodies} facts={facts} />
-      <div>
-        Direction: {targets.direction
-          ? targets.direction.kind === "normal"
-            ? `Normal [${targets.direction.vector.join(", ")}]`
-            : `Sketch line ${targets.direction.lineId}`
-          : "Not selected"}
-      </div>
+      {/* The label carries the LIVE sense (T5): the context's vector is the
+          basis, and a symmetric toggle or a drag through zero never moves it. */}
+      <div>Direction: {targets.direction ? targets.direction.label : "Awaiting pick"}</div>
     </>
   );
 }
@@ -163,8 +188,10 @@ function TargetDetails({ targets, facts }: { targets: PresentedTargets; facts: T
         <BodyList label="Affected bodies" references={targets.affectedBodies} facts={facts} />
         <ElementList label="Edges" references={targets.edges} facts={facts} />
         {targets.referenceFaces.map((pair, index) => <div key={index}>
-          <ElementSlot reference={pair.a} label={`Reference A${targets.referenceFaces.length > 1 ? ` ${index + 1}` : ""}`} facts={facts} />
-          <ElementSlot reference={pair.b} label={`Reference B${targets.referenceFaces.length > 1 ? ` ${index + 1}` : ""}`} facts={facts} />
+          {/* N4: "Reference A/B" was internal vocabulary — these are the two
+              faces the chamfer runs between, so that is what they are called. */}
+          <ElementSlot reference={pair.a} label={`First face${targets.referenceFaces.length > 1 ? ` ${index + 1}` : ""}`} facts={facts} />
+          <ElementSlot reference={pair.b} label={`Second face${targets.referenceFaces.length > 1 ? ` ${index + 1}` : ""}`} facts={facts} />
         </div>)}
       </>;
     case "faces":
@@ -188,6 +215,10 @@ function TargetDetails({ targets, facts }: { targets: PresentedTargets; facts: T
 export function ActiveToolTargets({ targets }: { targets: ActiveToolPresentation["targets"] }) {
   const bodyFacts = useDocumentStore((current) => current.bodies);
   const sketchFacts = useDocumentStore((current) => current.sketches);
+  // `formatArea`/`formatLengthWithUnit` read the display unit at call time, so
+  // the section has to re-render when it changes or a measured face keeps the
+  // previous unit's number under the new suffix.
+  void useSettingsStore((current) => current.displayUnit);
   const facts: TargetFacts = { bodies: bodyFacts, sketches: sketchFacts };
   return (
     <section

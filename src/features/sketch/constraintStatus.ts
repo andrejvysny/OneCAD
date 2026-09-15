@@ -30,7 +30,13 @@ export function sketchStatusText(status: SketchStatus, dof: number): { label: st
     case "ok":
       return { label: `Fully constrained · DOF ${dof}`, tone: "ok" };
     case "over":
-      return { label: `Over-constrained · DOF ${dof}`, tone: "over" };
+      // NOT "Over-constrained" (S11). PlaneGCS reports `OverConstrained` for
+      // BENIGN redundancy — a constraint whose equation the others already
+      // imply, at a residual below the convergence threshold (SCHEMA §7.4).
+      // Nothing is broken and nothing is unsatisfiable; the honest word for it
+      // is redundant, and "over-constrained" read to users as the same failure
+      // as `Conflicting`.
+      return { label: `Redundant constraint · DOF ${dof}`, tone: "over" };
     case "error":
       return { label: `Conflicting · DOF ${dof}`, tone: "error" };
     default:
@@ -99,12 +105,82 @@ export function projectedOnlySketchCard(projectedCount: number): {
   };
 }
 
-/** Inspector card body sentence. */
-export function sketchStatusSentence(status: SketchStatus, dof: number): string {
+/**
+ * Inspector card body sentence.
+ *
+ * `conflictLabels` are the row labels of the constraints the solver actually
+ * BLAMED (`conflicting`, SCHEMA §7.4), already formatted by the caller through
+ * `entityNames.constraintRowLabel` — this module stays a pure string lookup
+ * with no notion of an entity or a display unit. Naming them is the whole point
+ * of S11: "Conflicting constraints. Remove one to resolve." tells a user
+ * nothing about WHICH one. With no labels (an older solve, or a state that
+ * reported no culprits) the sentence falls back to the unspecific wording
+ * rather than claiming a count it cannot show.
+ */
+export function sketchStatusSentence(
+  status: SketchStatus,
+  dof: number,
+  conflictLabels: readonly string[] = [],
+): string {
   // DOF is not a redundant-constraint count — "over-constrained by N" claims a
   // number the solver never reports. State the fact, not a fabricated count.
-  if (status === "over") return "Sketch is over-constrained. Remove or change a conflicting constraint.";
-  if (status === "error") return "Conflicting constraints. Remove one to resolve.";
+  if (status === "over") {
+    return "A constraint repeats one already implied — remove it to keep the sketch clean.";
+  }
+  if (status === "error") {
+    if (conflictLabels.length === 0) return "Conflicting constraints. Remove one to resolve.";
+    const noun = conflictLabels.length === 1 ? "constraint cannot" : "constraints cannot";
+    return `${conflictLabels.length} ${noun} be met: ${conflictLabels.join(", ")}`;
+  }
   if (status === "ok" || dof === 0) return "Sketch is fully defined.";
   return `${dof} degrees of freedom remain. Add distance or coincident constraints to fully define.`;
+}
+
+/**
+ * The minimum a timeline row has to expose for the lineage scan below. Widened
+ * from `FeatureMeta` on purpose: this module must stay renderable from a test
+ * with no store, and the scan reads four plain fields.
+ */
+export interface LineageFeature {
+  id: string;
+  kind: string;
+  label: string;
+  status: string;
+}
+
+/**
+ * The applied feature standing on the sketch whose OWN timeline row is
+ * `sketchFeatureId` — or `null` when nothing does.
+ *
+ * Why this exists (UX review 2026-09-14, N10): cancelling a sketch edit leaves
+ * the registry entry without a current evaluation, and the inspector then
+ * reported "Not evaluated" for a sketch a completed Extrude was standing on
+ * (A-136). "Not evaluated" is only honest for a sketch nothing consumes.
+ *
+ * The rule is deliberately conservative, because the projection carries no
+ * sketch→feature link at all (`FeatureDto` has no sketch id, and every sketch
+ * record is labelled literally "Sketch"): the caller resolves the sketch's OWN
+ * row through the record's stored params, and this walks FORWARD from it to the
+ * first applied, non-failed feature. It STOPS at the next sketch row rather than
+ * reaching past it — a feature authored after a later sketch cannot be claimed
+ * for this one without evidence, and naming the wrong feature is worse than
+ * naming none. Rows beyond `appliedOps` are rolled back and are not standing on
+ * anything yet.
+ */
+export function consumingFeatureLabel(
+  features: readonly LineageFeature[],
+  sketchFeatureId: string | null,
+  appliedOps: number,
+): string | null {
+  if (!sketchFeatureId) return null;
+  const own = features.findIndex((f) => f.id === sketchFeatureId);
+  if (own < 0) return null;
+  const applied = Math.min(features.length, appliedOps);
+  for (let i = own + 1; i < applied; i++) {
+    const feature = features[i];
+    if (feature.kind === "sketch") return null;
+    if (feature.status === "error") continue;
+    return feature.label;
+  }
+  return null;
 }

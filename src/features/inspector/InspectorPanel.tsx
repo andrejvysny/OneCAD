@@ -26,6 +26,11 @@ import {
   useInspectorLayoutStore,
 } from "@/stores/inspectorLayoutStore";
 import { ActiveToolInspector } from "./ActiveToolInspector";
+import { SketchEntityProperties } from "./SketchEntityProperties";
+import { useSketchConsumer } from "./sketchLineage";
+import { constraintValueText } from "./ConstraintList";
+import { constraintRowLabel } from "@/features/sketch/entityNames";
+import { useSettingsStore } from "@/stores/settingsStore";
 import {
   sketchStatusText,
   sketchStatusSentence,
@@ -193,14 +198,18 @@ export function InspectorPanel() {
         {gearArmed ? (
           <GearPropertiesPanel />
         ) : sketching && activeSketchId && sketches[activeSketchId] ? (
-          <SketchState
-            sketchName={sketches[activeSketchId].name}
-            dof={sketches[activeSketchId].dof}
-            status={sketches[activeSketchId].status}
-            solveCurrent={hasCurrentSketchEvaluation(sketches[activeSketchId])}
-            entityCount={sketchSession?.entities.length ?? 0}
-            projectedCount={sketchSession?.entities.filter((e) => e.referenceLocked).length ?? 0}
-          />
+          <>
+            {/* S12 / D14: what is selected comes before the sketch's own state. */}
+            <SketchEntityProperties />
+            <SketchState
+              sketchName={sketches[activeSketchId].name}
+              dof={sketches[activeSketchId].dof}
+              status={sketches[activeSketchId].status}
+              solveCurrent={hasCurrentSketchEvaluation(sketches[activeSketchId])}
+              entityCount={sketchSession?.entities.length ?? 0}
+              projectedCount={sketchSession?.entities.filter((e) => e.referenceLocked).length ?? 0}
+            />
+          </>
         ) : sketching ? (
           // Plane-pick phase (no activeSketchId yet) or the sketch registry
           // hasn't caught up: no solve state exists, so claim nothing about DOF
@@ -292,10 +301,17 @@ function SelectionState({
    */
   const solve = sketches[sketchId];
   const solveCurrent = hasCurrentSketchEvaluation(solve);
+  // N10: a sketch a completed feature is standing on has not "never been
+  // evaluated" — its evaluation is simply not current (a cancelled edit is the
+  // common way in). The lineage read only runs when the alternative would be to
+  // make that claim; `null` back means nothing consumes it and the claim is true.
+  const consumedBy = useSketchConsumer(isSketch && !solveCurrent ? sketchId : null);
   const status = solveCurrent
     ? sketchStatusText(solve.status, solve.dof)
     : isSketch
-      ? { label: "Not evaluated", tone: "under" as const }
+      ? consumedBy
+        ? { label: `Consumed by ${consumedBy}`, tone: "ok" as const }
+        : { label: "Not evaluated", tone: "under" as const }
       : null;
 
   return (
@@ -380,6 +396,19 @@ function SketchState({
   /** Entities that are host-face projections (`referenceLocked`), never drawn. */
   projectedCount?: number;
 }) {
+  // S11: the conflict sentence names the constraints the solver BLAMED. Read
+  // here rather than threaded through props — the card is the only consumer,
+  // and it already re-renders on every solve.
+  const session = useSketchStore((s) => s.session);
+  const conflictingIds = useSketchStore((s) => s.conflictingIds);
+  const displayUnit = useSettingsStore((s) => s.displayUnit);
+  const conflictLabels = (session?.constraints ?? [])
+    .filter((c) => conflictingIds.includes(c.id))
+    .map((c) =>
+      constraintRowLabel(c, session?.entities ?? [], {
+        value: constraintValueText(c, displayUnit),
+      }),
+    );
   // A blank sketch has nothing to be "fully defined" about — its registry
   // dof/status (typically 0/"ok") reads through the ordinary path as the
   // false completeness claim the audit caught (design item 12 / A11a). A sketch
@@ -392,7 +421,10 @@ function SketchState({
     : projectedOnly
       ? projectedOnlySketchCard(projectedCount)
       : solveCurrent && dof !== undefined && status !== undefined
-        ? { ...sketchStatusText(status, dof), sentence: sketchStatusSentence(status, dof) }
+        ? {
+            ...sketchStatusText(status, dof),
+            sentence: sketchStatusSentence(status, dof, conflictLabels),
+          }
         : {
             label: "Not evaluated",
             tone: "under" as const,

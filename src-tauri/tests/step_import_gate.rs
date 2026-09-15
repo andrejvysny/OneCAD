@@ -1089,6 +1089,44 @@ async fn imported_bodies_are_first_class_downstream_citizens() {
         snap.repair_summary.needs_repair_count, 0,
         "PHASE 4: the host-boolean Add needs no repair"
     );
+    // THE IMPORTED HOST IS TRACKED, not merely tolerated (UX-2026-09-14 WP-1b).
+    //
+    // This is the case that forced WP-1's info-only `SKETCH_HOST_UNTRACKED` escape.
+    // `add_sketch_on_face` used to freeze the cap's `gp_Pln` LOCATION as the
+    // resolution anchor, and an imported plane's location is routinely nowhere near
+    // its own face — measured here on 2026-09-15 as (0,0,10) for a cap centred at
+    // (−5,215,10), so the ladder's `anchor` feature contributed 0 and the CORRECT,
+    // unambiguous cap resolved at score 0.750000 / margin 0.200000, under the 0.85
+    // auto-bind gate. Re-picking re-froze the same location, so no halt built on it
+    // could ever be cleared. SCHEMA §7.6 `exact.anchor` now hands Rust a point the
+    // kernel classified ON the face, the same cap scores 1.000000, and every
+    // unresolvable host halts instead.
+    //
+    // A resolved-and-unmoved host writes NOTHING to the wire by design (§7.2 keeps
+    // that step byte-identical), so what is asserted is the absence of both escapes
+    // AND the fact that the plan ran to completion — a below-gate host would now
+    // halt the Sketch step and the Add below would never publish.
+    assert!(
+        report.needs_repair.is_empty(),
+        "PHASE 4: the sketch's imported host binds — no repair item, got {:?}",
+        report
+            .needs_repair
+            .iter()
+            .map(|i| (&i.ref_id, &i.reason))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !report
+            .diagnostics
+            .iter()
+            .any(|d| d.code.starts_with("SKETCH_HOST_")),
+        "PHASE 4: a tracked, unmoved host says nothing at all, got {:?}",
+        report
+            .diagnostics
+            .iter()
+            .map(|d| &d.code)
+            .collect::<Vec<_>>()
+    );
     assert_eq!(
         snap.bodies.len(),
         3,

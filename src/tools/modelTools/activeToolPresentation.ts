@@ -27,11 +27,31 @@ export type ActiveToolElementReference = {
       elementId: string | null;
       label: string;
       resolution: "identity-only" | "unresolved" | "missing";
+      /** Measured area/arc length carried by the publisher; absent ⇒ unmeasured. */
+      area?: number;
+      /** Surface normal carried by the publisher; absent ⇒ unknown. */
+      normal?: readonly [number, number, number];
     };
 export type ActiveToolReference = ActiveToolBodyReference | ActiveToolSketchReference | ActiveToolElementReference;
 
+/**
+ * Which way the tool is currently going, from the LIVE signed value plus the
+ * symmetric flag — the arm-time vector is only the basis (UX review 2026-09-14,
+ * T5: `Direction: Normal [0, 0, 1]` never moved, through a symmetric toggle or a
+ * drag through zero).
+ */
+export type ActiveToolDirectionSense = "positive" | "negative" | "both";
+
+export type ActiveToolDirectionReference =
+  | { kind: "normal"; vector: readonly [number, number, number]; sense: ActiveToolDirectionSense; label: string }
+  | { kind: "sketchLine"; lineId: string; sense: ActiveToolDirectionSense; label: string };
+
 type PresentedContext<C extends ActiveToolContext> =
-  C extends { kind: "profile" } ? Omit<C, "sketch" | "hostBodies"> & { sketch: ActiveToolSketchReference; hostBodies: ActiveToolBodyReference[] } :
+  C extends { kind: "profile" } ? Omit<C, "sketch" | "hostBodies" | "direction"> & {
+    sketch: ActiveToolSketchReference;
+    hostBodies: ActiveToolBodyReference[];
+    direction: ActiveToolDirectionReference | null;
+  } :
   C extends { kind: "regions" } ? Omit<C, "sketch"> & { sketch: ActiveToolSketchReference } :
   C extends { kind: "edgeOperation" } ? Omit<C, "affectedBodies" | "edges" | "referenceFaces"> & {
     affectedBodies: ActiveToolBodyReference[];
@@ -120,6 +140,21 @@ export function activeToolLabel(tool: ToolChipState["kind"]): string {
   return TOOL_LABELS[tool] ?? tool.charAt(0).toUpperCase() + tool.slice(1);
 }
 
+/**
+ * The heading for one presentation — the operation as the user knows it.
+ *
+ * `activeToolLabel` maps the CHIP KIND, and one chip kind serves two operations:
+ * `filletRadius` arms both Fillet and Chamfer, which is why the inspector titled
+ * a committed Chamfer "Edge operation" while its history row said "Chamfer" (UX
+ * review 2026-09-14, N3). The read-only recap renders after the chip is cleared,
+ * so the live `state.edgeOp` is gone by then; the operation survives on the
+ * presentation's own intent, which is what this reads.
+ */
+export function activeToolPresentationTitle(presentation: ActiveToolPresentation): string {
+  if (presentation.tool === "filletRadius") return presentation.intent.operation;
+  return activeToolLabel(presentation.tool);
+}
+
 export function formatActiveToolField(field: ActiveToolField): string {
   if (field.value === null) return "—";
   if (field.unit === "length" && typeof field.value === "number") return formatLengthWithUnit(field.value);
@@ -143,10 +178,37 @@ function presentBody(ref: AuthoredBodyRef): ActiveToolBodyReference {
 }
 
 function presentElement(ref: AuthoredElementRef): ActiveToolElementReference {
+  // Carried through verbatim, never fetched: the inspector reports the evidence
+  // the publisher already had and stays silent otherwise (N11).
+  const measured = {
+    ...(ref.area !== undefined ? { area: ref.area } : {}),
+    ...(ref.normal !== undefined ? { normal: ref.normal } : {}),
+  };
   const body = documentStore.getState().bodies[ref.bodyId];
-  if (!body) return { kind: ref.kind, bodyId: ref.bodyId, elementId: ref.elementId ?? null, label: `Missing ${ref.kind} body (${ref.bodyId})`, resolution: "missing" };
-  if (!ref.elementId) return { kind: ref.kind, bodyId: ref.bodyId, elementId: null, label: `${body.name} · unresolved ${ref.kind}`, resolution: "unresolved" };
-  return { kind: ref.kind, bodyId: ref.bodyId, elementId: ref.elementId, label: `${body.name} · ${ref.kind} ${ref.elementId}`, resolution: "identity-only" };
+  if (!body) return { kind: ref.kind, bodyId: ref.bodyId, elementId: ref.elementId ?? null, label: `Missing ${ref.kind} body (${ref.bodyId})`, resolution: "missing", ...measured };
+  if (!ref.elementId) return { kind: ref.kind, bodyId: ref.bodyId, elementId: null, label: `${body.name} · unresolved ${ref.kind}`, resolution: "unresolved", ...measured };
+  return { kind: ref.kind, bodyId: ref.bodyId, elementId: ref.elementId, label: `${body.name} · ${ref.kind} ${ref.elementId}`, resolution: "identity-only", ...measured };
+}
+
+/** The word for each sense, as a label prefix. */
+const SENSE_PREFIX: Readonly<Record<ActiveToolDirectionSense, string>> = {
+  positive: "+",
+  negative: "−",
+  both: "Both ± ",
+};
+
+function presentDirection(
+  direction: ActiveToolContextFor<"extrudeDepth">["direction"],
+  sense: ActiveToolDirectionSense,
+): ActiveToolDirectionReference | null {
+  if (!direction) return null;
+  const prefix = SENSE_PREFIX[sense];
+  // "Normal" leads the label when the sense is signed and follows the "Both ± "
+  // phrase when it is not, which is the only reason the noun changes case here.
+  const noun = direction.kind === "normal"
+    ? `${sense === "both" ? "normal" : "Normal"} [${direction.vector.join(", ")}]`
+    : `${sense === "both" ? "sketch line" : "Sketch line"} ${direction.lineId}`;
+  return { ...direction, sense, label: `${prefix}${noun}` };
 }
 
 function presentSketch(sketchId: string): ActiveToolSketchReference {
@@ -159,10 +221,15 @@ function presentSketch(sketchId: string): ActiveToolSketchReference {
   };
 }
 
-function presentContext<C extends ActiveToolContext>(context: C): PresentedContext<C>;
-function presentContext(context: ActiveToolContext): PresentedContext<ActiveToolContext> {
+function presentContext<C extends ActiveToolContext>(context: C, sense: ActiveToolDirectionSense): PresentedContext<C>;
+function presentContext(context: ActiveToolContext, sense: ActiveToolDirectionSense): PresentedContext<ActiveToolContext> {
   switch (context.kind) {
-    case "profile": return { ...context, sketch: presentSketch(context.sketch.sketchId), hostBodies: context.hostBodies.map(presentBody) };
+    case "profile": return {
+      ...context,
+      sketch: presentSketch(context.sketch.sketchId),
+      hostBodies: context.hostBodies.map(presentBody),
+      direction: presentDirection(context.direction, sense),
+    };
     case "regions": return { ...context, sketch: presentSketch(context.sketch.sketchId) };
     case "edgeOperation": return {
       ...context,
@@ -339,22 +406,26 @@ export function activeToolPresentation(s: ToolChipState): ActiveToolPresentation
       (s.kind !== "regionSelect" || s.count > 0),
     canCancel: s.onCancel !== null && s.previewLifecycle.status !== "applying",
   };
+  // T5: the live direction sense. The arm-time vector in the context is only the
+  // BASIS — a symmetric toggle or a drag through zero changes the direction
+  // without ever touching it.
+  const sense: ActiveToolDirectionSense = s.symmetric ? "both" : s.value < 0 ? "negative" : "positive";
   switch (s.kind) {
-    case "extrudeDepth": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context) : null, { tool: s.kind, kind: "extrude", operation: s.booleanMode, extent: s.endCondition, symmetric: s.symmetric }, base);
-    case "revolveAngle": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context) : null, { tool: s.kind, kind: "revolve", operation: s.booleanMode }, base);
-    case "revolveAxisPick": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context) : null, { tool: s.kind, kind: "revolve", operation: s.booleanMode }, base);
-    case "filletRadius": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context) : null, { tool: s.kind, kind: "edgeOperation", operation: s.edgeOp }, base);
-    case "shellThickness": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context) : null, { tool: s.kind, kind: "shell" }, base);
-    case "offsetFace": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context) : null, { tool: s.kind, kind: "offsetFace", distanceType: s.distanceType, tangent: s.chainTangentFaces }, base);
-    case "linearPattern": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context) : null, { tool: s.kind, kind: "pattern", axis: s.axis }, base);
-    case "circularPattern": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context) : null, { tool: s.kind, kind: "pattern", axis: s.axis }, base);
-    case "booleanOp": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context) : null, { tool: s.kind, kind: "boolean", operation: s.op }, base);
-    case "datumOffset": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context) : null, { tool: s.kind, kind: "datum" }, base);
-    case "regionSelect": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context) : null, { tool: s.kind, kind: "regionSelect" }, base);
-    case "mirror": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context) : null, { tool: s.kind, kind: "mirror", plane: s.plane, fuse: s.fuse }, base);
-    case "transform": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context) : null, { tool: s.kind, kind: "transform", mode: s.transformMode, axis: s.axis, copy: s.copy }, base);
-    case "hole": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context) : null, { tool: s.kind, kind: "hole", holeType: s.holeType }, base);
-    case "gear": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context) : null, { tool: s.kind, kind: "gear" }, base);
+    case "extrudeDepth": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context, sense) : null, { tool: s.kind, kind: "extrude", operation: s.booleanMode, extent: s.endCondition, symmetric: s.symmetric }, base);
+    case "revolveAngle": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context, sense) : null, { tool: s.kind, kind: "revolve", operation: s.booleanMode }, base);
+    case "revolveAxisPick": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context, sense) : null, { tool: s.kind, kind: "revolve", operation: s.booleanMode }, base);
+    case "filletRadius": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context, sense) : null, { tool: s.kind, kind: "edgeOperation", operation: s.edgeOp }, base);
+    case "shellThickness": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context, sense) : null, { tool: s.kind, kind: "shell" }, base);
+    case "offsetFace": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context, sense) : null, { tool: s.kind, kind: "offsetFace", distanceType: s.distanceType, tangent: s.chainTangentFaces }, base);
+    case "linearPattern": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context, sense) : null, { tool: s.kind, kind: "pattern", axis: s.axis }, base);
+    case "circularPattern": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context, sense) : null, { tool: s.kind, kind: "pattern", axis: s.axis }, base);
+    case "booleanOp": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context, sense) : null, { tool: s.kind, kind: "boolean", operation: s.op }, base);
+    case "datumOffset": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context, sense) : null, { tool: s.kind, kind: "datum" }, base);
+    case "regionSelect": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context, sense) : null, { tool: s.kind, kind: "regionSelect" }, base);
+    case "mirror": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context, sense) : null, { tool: s.kind, kind: "mirror", plane: s.plane, fuse: s.fuse }, base);
+    case "transform": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context, sense) : null, { tool: s.kind, kind: "transform", mode: s.transformMode, axis: s.axis, copy: s.copy }, base);
+    case "hole": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context, sense) : null, { tool: s.kind, kind: "hole", holeType: s.holeType }, base);
+    case "gear": return pairPresentation(s.kind, s.context?.tool === s.kind ? presentContext(s.context, sense) : null, { tool: s.kind, kind: "gear" }, base);
     case "dimension": return pairPresentation(s.kind, null, { tool: s.kind, kind: "sketchParameter" }, base);
     case "sketchValue": return pairPresentation(s.kind, null, { tool: s.kind, kind: "sketchParameter" }, base);
   }

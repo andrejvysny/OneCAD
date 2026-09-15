@@ -109,6 +109,7 @@ add_library(worker_core STATIC
     src/session/ShapeMetrics.cpp
     src/session/Signatures.cpp
     src/session/PlanExecutor.cpp
+    src/session/SketchHostReseat.cpp
     src/session/FeaturePattern.cpp
     src/session/FeaturePatternIdentity.cpp
     src/session/FeaturePatternValidation.cpp

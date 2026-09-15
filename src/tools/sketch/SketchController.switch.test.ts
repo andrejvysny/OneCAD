@@ -197,12 +197,12 @@ describe("SketchController sketch→sketch switch", () => {
   const upserts = (): string[] => calls.filter((c) => c.startsWith("sketchUpsert:"));
 
   it("[a] a switch retargets the commits: geometry drawn after it lands in B, not A", async () => {
-    toolStore.getState().setMode("sketch", "A");
+    toolStore.getState().setMode("sketch", "A", { tool: "line" });
     await settle();
     await drawSegment(0);
     expect(upserts()).toEqual(["sketchUpsert:A"]);
 
-    toolStore.getState().setMode("sketch", "B"); // tree activate while IN sketch mode
+    toolStore.getState().setMode("sketch", "B", { tool: "line" }); // tree activate while IN sketch mode
     await settle();
     expect(sketchStore.getState().session?.sketchId).toBe("B");
 
@@ -213,11 +213,11 @@ describe("SketchController sketch→sketch switch", () => {
   });
 
   it("[b] closes A (cancel THEN finish) BEFORE opening B", async () => {
-    toolStore.getState().setMode("sketch", "A");
+    toolStore.getState().setMode("sketch", "A", { tool: "line" });
     await settle();
     calls.length = 0;
 
-    toolStore.getState().setMode("sketch", "B");
+    toolStore.getState().setMode("sketch", "B", { tool: "line" });
     await settle();
 
     expect(calls).toEqual(["cancelSketch:A", "finishSketch:A", "enterSketch:B"]);
@@ -225,12 +225,12 @@ describe("SketchController sketch→sketch switch", () => {
   });
 
   it("[c] rapid A→B→C is latest-wins: lands on C, and B is never opened", async () => {
-    toolStore.getState().setMode("sketch", "A");
+    toolStore.getState().setMode("sketch", "A", { tool: "line" });
     await settle();
     calls.length = 0;
 
-    toolStore.getState().setMode("sketch", "B");
-    toolStore.getState().setMode("sketch", "C"); // arrives while the B switch is in flight
+    toolStore.getState().setMode("sketch", "B", { tool: "line" });
+    toolStore.getState().setMode("sketch", "C", { tool: "line" }); // arrives while the B switch is in flight
     await settle();
 
     expect(sketchStore.getState().session?.sketchId).toBe("C");
@@ -248,9 +248,9 @@ describe("SketchController sketch→sketch switch", () => {
       });
     });
 
-    toolStore.getState().setMode("sketch", "A");
+    toolStore.getState().setMode("sketch", "A", { tool: "line" });
     await tick(); // enter() is now parked on the deferred enterSketch
-    toolStore.getState().setMode("sketch", "B"); // retarget mid-enter
+    toolStore.getState().setMode("sketch", "B", { tool: "line" }); // retarget mid-enter
 
     resolveEnter({
       sketchId: "A",
@@ -270,7 +270,7 @@ describe("SketchController sketch→sketch switch", () => {
   });
 
   it("[e] the plane-pick create path is NOT a switch: one enterSketch, zero cancel/finish", async () => {
-    toolStore.getState().setMode("sketch"); // bare intent → plane picker
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" }); // bare intent → plane picker
     await settle();
 
     hitKind = "XZ";
@@ -287,7 +287,7 @@ describe("SketchController sketch→sketch switch", () => {
     engineMock.enterSketch.mockImplementationOnce(() => {
       expect(viewportStore.getState().projection).toBe("ortho");
     });
-    toolStore.getState().setMode("sketch", "A");
+    toolStore.getState().setMode("sketch", "A", { tool: "line" });
     await settle();
 
     expect(calls).toEqual(["enterSketch:A"]);
@@ -295,7 +295,7 @@ describe("SketchController sketch→sketch switch", () => {
   });
 
   it("[f] a mode exit during an in-flight switch bails cleanly (B never opens)", async () => {
-    toolStore.getState().setMode("sketch", "A");
+    toolStore.getState().setMode("sketch", "A", { tool: "line" });
     await settle();
     calls.length = 0;
 
@@ -307,7 +307,7 @@ describe("SketchController sketch→sketch switch", () => {
       });
     });
 
-    toolStore.getState().setMode("sketch", "B"); // switch starts, parks on finish(A)
+    toolStore.getState().setMode("sketch", "B", { tool: "line" }); // switch starts, parks on finish(A)
     await tick();
     toolStore.getState().setMode("model"); // user leaves sketch mode mid-switch
     await tick();
@@ -322,11 +322,11 @@ describe("SketchController sketch→sketch switch", () => {
   it("[g] exit after a switch restores the projection saved at the ORIGINAL entry", async () => {
     expect(viewportStore.getState().projection).toBe("persp");
 
-    toolStore.getState().setMode("sketch", "A");
+    toolStore.getState().setMode("sketch", "A", { tool: "line" });
     await settle();
     expect(viewportStore.getState().projection).toBe("ortho");
 
-    toolStore.getState().setMode("sketch", "B");
+    toolStore.getState().setMode("sketch", "B", { tool: "line" });
     await settle();
     expect(viewportStore.getState().projection).toBe("ortho"); // sketch→sketch stays ortho
 
@@ -337,12 +337,12 @@ describe("SketchController sketch→sketch switch", () => {
   });
 
   it("[i] a rejected switch-open falls back to model mode instead of stranding the chrome", async () => {
-    toolStore.getState().setMode("sketch", "A");
+    toolStore.getState().setMode("sketch", "A", { tool: "line" });
     await settle();
     clientMock.enterSketch.mockImplementationOnce(() => Promise.reject(new Error("worker gone")));
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    toolStore.getState().setMode("sketch", "B");
+    toolStore.getState().setMode("sketch", "B", { tool: "line" });
     await settle();
 
     expect(toolStore.getState().mode).toBe("model");
@@ -360,12 +360,12 @@ describe("SketchController sketch→sketch switch", () => {
 
   it("[j] the switch bumps the CLOSED sketch's geometryToken so its static layer refetches", async () => {
     documentStore.setState({ sketches: { A: sketchMeta("A"), B: sketchMeta("B") } });
-    toolStore.getState().setMode("sketch", "A");
+    toolStore.getState().setMode("sketch", "A", { tool: "line" });
     await settle();
     const beforeA = documentStore.getState().sketches.A.geometryToken;
     const beforeB = documentStore.getState().sketches.B.geometryToken;
 
-    toolStore.getState().setMode("sketch", "B");
+    toolStore.getState().setMode("sketch", "B", { tool: "line" });
     await settle();
 
     expect(documentStore.getState().sketches.A.geometryToken).not.toBe(beforeA);
@@ -377,12 +377,12 @@ describe("SketchController sketch→sketch switch", () => {
     documentStore.setState({
       sketches: { A: sketchMeta("A"), B: sketchMeta("B"), C: sketchMeta("C") },
     });
-    toolStore.getState().setMode("sketch", "A");
+    toolStore.getState().setMode("sketch", "A", { tool: "line" });
     await settle();
     const beforeA = documentStore.getState().sketches.A.geometryToken;
 
-    toolStore.getState().setMode("sketch", "B");
-    toolStore.getState().setMode("sketch", "C"); // supersedes the B switch mid-close
+    toolStore.getState().setMode("sketch", "B", { tool: "line" });
+    toolStore.getState().setMode("sketch", "C", { tool: "line" }); // supersedes the B switch mid-close
     await settle();
 
     expect(sketchStore.getState().session?.sketchId).toBe("C");
@@ -393,18 +393,18 @@ describe("SketchController sketch→sketch switch", () => {
     documentStore.setState({ sketches: { A: sketchMeta("A") } });
     const before = documentStore.getState().sketches.A.geometryToken;
 
-    toolStore.getState().setMode("sketch", "A");
+    toolStore.getState().setMode("sketch", "A", { tool: "line" });
     await settle();
 
     expect(documentStore.getState().sketches.A.geometryToken).toBe(before);
   });
 
   it("[h] re-activating the SAME sketch is a no-op (no close/reopen churn)", async () => {
-    toolStore.getState().setMode("sketch", "A");
+    toolStore.getState().setMode("sketch", "A", { tool: "line" });
     await settle();
     calls.length = 0;
 
-    toolStore.getState().setMode("sketch", "A");
+    toolStore.getState().setMode("sketch", "A", { tool: "line" });
     await settle();
 
     expect(calls).toEqual([]);

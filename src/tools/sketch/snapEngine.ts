@@ -40,6 +40,7 @@ import {
 import {
   emptyLatch,
   gridReachPx,
+  guideReachPx,
   isotropicMetric,
   releaseRadiusPx,
   type GuideLine,
@@ -197,6 +198,7 @@ export function computeSnapDecision(
   const metric = opts.metric ?? isotropicMetric(opts.pixelWorld);
   const acquirePx = opts.snapPx ?? SNAP_PX;
   const releasePx = releaseRadiusPx(acquirePx);
+  const guideReach = guideReachPx(acquirePx);
   const sources: SnapSourceToggles = {
     guidePoints: opts.enableGuidePoints,
     guideLines: opts.enableGuideLines,
@@ -220,6 +222,7 @@ export function computeSnapDecision(
     acquirePx,
     reachPx: releasePx,
     gridReachPx: gridReachPx(metric, opts.gridStep, acquirePx),
+    guideReachPx: guideReach,
     sources,
     polarAnchor: opts.polarAnchor ?? null,
     polarRefDir: opts.polarRefDir ?? null,
@@ -251,6 +254,7 @@ export function computeSnapDecision(
     acquirePx,
     releasePx,
     gridReachPx: ctx.gridReachPx,
+    guideReachPx: guideReach,
     latch: opts.latch ?? emptyLatch(),
     frame: opts.frame ?? null,
     radial: opts.frame ? radialComposition(opts.toolId ?? "", toolAnchors, arcMode) : null,

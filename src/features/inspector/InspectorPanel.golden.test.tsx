@@ -120,7 +120,10 @@ describe("inspector section order", () => {
     expect(await sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.sketchRegion]);
   });
 
-  it("sketch mode renders Constraints whether or not the session has any", async () => {
+  // PLAN.md D14, 2026-09-15: sketch mode now leads with the "Entity" section
+  // (UX review 2026-09-14, S12). The contract was amended with the decision; this
+  // probe follows it rather than the other way round.
+  it("sketch mode renders Entity then Constraints whether or not the session has any", async () => {
     const { container } = renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => {
       toolStore.getState().setMode("sketch", "sketch2");

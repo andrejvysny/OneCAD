@@ -141,7 +141,7 @@ describe("SketchController draw tools (pointer path)", () => {
       client: clientMock as unknown as CadClient,
       container,
     });
-    toolStore.getState().setMode("sketch", "sketch1"); // default tool = line
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" }); // default tool = line
     await flush();
   });
 
@@ -198,7 +198,7 @@ describe("SketchController draw tools (pointer path)", () => {
     // from the previous sketch must not carry over into the new one.
     toolStore.getState().setMode("model");
     await flush();
-    toolStore.getState().setMode("sketch", "sketch2");
+    toolStore.getState().setMode("sketch", "sketch2", { tool: "line" });
     await flush();
 
     expect(sketchStore.getState().constructionMode).toBe(false);
@@ -291,6 +291,54 @@ describe("SketchController draw tools (pointer path)", () => {
     expect(ents).toHaveLength(3);
     expect(ents[2]).toMatchObject({ p0: [50, 50], p1: [0, 0] });
     expect(internals().machineState?.anchors).toEqual([]); // chain done
+  });
+
+  /*
+   * B3 / A-182 — the review's four-click rectangle.
+   *
+   * Every leg is drawn ~1.15° off its axis, which is the shape the review
+   * produced by hand: inside `autoConstrain`'s ±5° H/V window, but far enough
+   * off that the POLAR fan's perpendicular ray is a distinct candidate from its
+   * fixed 90° ray (`snapCandidates.ts polarCandidates`, deduped mod π). Legs are
+   * 1000 units long so the fixed ray sits 20px off the click — outside the 8px
+   * snap reach — and the perpendicular ray, which the click is exactly on, is
+   * the only polar candidate that can win.
+   *
+   * Both authoring paths then fire on the same leg: coordinate inference says
+   * Vertical, the accepted snap intent says Perpendicular to the previous leg.
+   * `canonicalKey` cannot see that those are the same equation. The committed
+   * set must carry the axis locks and no Perpendicular at all.
+   */
+  it("line: a 4-click rectangle drawn 1° off-axis authors H/V and NO Perpendicular (A-182)", async () => {
+    // Polar tracking is OFF in `resetStores` for every pointer spec (its 0°/90°
+    // rays move pinned click coordinates); this is the one test that needs it,
+    // so it opts back in the way `SketchController.polar.test.ts` does.
+    settingsStore.getState().setSnap("polarTracking", true);
+
+    // Each click has to settle before the next: the polar fan's Parallel /
+    // Perpendicular rays only carry a relation intent once `lastChainLineId`
+    // names the committed previous leg, and that is written by the commit turn.
+    const corners: Array<[number, number]> = [
+      [200, 200],
+      [1200, 220],
+      [1180, 1220],
+      [180, 1200],
+      [200, 200],
+    ];
+    for (const [x, y] of corners) {
+      click(x, y);
+      await flushSketchMutations();
+    }
+
+    const ents = entities();
+    expect(ents).toHaveLength(4);
+    const cons = session().constraints;
+    const count = (t: string): number => cons.filter((c) => c.type === t).length;
+    expect(count("Perpendicular")).toBe(0);
+    expect(count("Parallel")).toBe(0);
+    expect(count("Horizontal")).toBe(2);
+    expect(count("Vertical")).toBe(2);
+    expect(count("Coincident")).toBe(4);
   });
 
   it("Enter mid-chain ends it without a stray commit", async () => {
@@ -499,7 +547,7 @@ describe("SketchController — entityStates threading (SCHEMA §7.4)", () => {
       client: clientMock as unknown as CadClient,
       container,
     });
-    toolStore.getState().setMode("sketch", "sketch1");
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" });
     return flush();
   }
 

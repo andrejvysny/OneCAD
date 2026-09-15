@@ -207,6 +207,10 @@ describe("ModelToolController regionAnchor (SCHEMA §7.3 WP-B)", () => {
           profile: { sketchId: "sk", regionId: "r0", regionAnchor: storedAnchor },
           distance: { value: 25 },
           draftAngleDeg: { value: 0 },
+          // T6: the option set the re-edit now exposes rides along; this record
+          // stores neither, so the arm seeds the wire defaults.
+          extrudeMode: "Blind",
+          booleanMode: "NewBody",
         },
       },
     });

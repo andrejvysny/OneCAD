@@ -10,6 +10,7 @@ import {
   displayToMm,
   formatArea,
   formatCursorAxis,
+  formatChipLength,
   formatLength,
   formatLengthWithUnit,
   formatMillimetres,
@@ -302,5 +303,35 @@ describe("wire/document values are display-unit INDEPENDENT", () => {
       setUnit(unit);
       expect(`${formatMillimetres(2)} ${MM_SUFFIX}`).toBe("2 mm");
     }
+  });
+});
+
+/*
+ * UX review S15: a rectangle read `W 30 mm` beside `H 16.225 mm` in the same
+ * frame, because `formatLength` trims trailing zeros. A live pair must share
+ * one precision.
+ */
+describe("formatChipLength (live dimension chips — fixed, never trimmed)", () => {
+  it("pins millimetres at 2 decimals, whole numbers included", () => {
+    expect(formatChipLength(30)).toBe("30.00");
+    expect(formatChipLength(16.225)).toBe("16.23");
+    expect(formatChipLength(0)).toBe("0.00");
+    expect(formatChipLength(100)).toBe("100.00");
+  });
+
+  it("keeps every other unit's own declared precision, also fixed", () => {
+    setUnit("in");
+    expect(formatChipLength(25.4)).toBe("1.0000"); // 4 decimals for inches
+    setUnit("cm");
+    expect(formatChipLength(30)).toBe("3.0000"); // cm also declares 4
+  });
+
+  it("is the one that differs from formatLength — the trimmed sibling stands", () => {
+    expect(formatLength(30)).toBe("30");
+    expect(formatChipLength(30)).toBe("30.00");
+  });
+
+  it("passes a non-finite value through like its siblings", () => {
+    expect(formatChipLength(Number.NaN)).toBe("NaN");
   });
 });

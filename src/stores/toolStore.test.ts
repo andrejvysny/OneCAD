@@ -8,24 +8,40 @@ import { operationAttemptStore } from "./operationAttemptStore";
 describe("toolStore.setMode (sketch entry)", () => {
   beforeEach(() => resetStores());
 
-  it("bare sketch entry leaves activeSketchId null and selection untouched", () => {
+  // FP-S13 (docs/qa/UX_REVIEW_2026-09-14.md S13): a bare `setMode("sketch")`
+  // with no caller-chosen tool now defaults to Select, idle — the store no
+  // longer assumes "new sketch". A NEW sketch's own call site (`activateTool`,
+  // the `S` shortcut) passes `opts.tool: "line"` explicitly to keep the
+  // Shapr3D "Line auto-armed on entry" convention.
+  it("bare sketch entry (no caller-chosen tool) arms Select, idle", () => {
     const before = selectionStore.getState().selected;
 
     toolStore.getState().setMode("sketch");
 
     expect(toolStore.getState().mode).toBe("sketch");
-    expect(toolStore.getState().sketchTool).toBe("line");
+    expect(toolStore.getState().sketchTool).toBe("select");
+    expect(toolStore.getState().phase).toBe("idle");
     // No target → the controller shows the plane picker; nothing is active yet.
     expect(viewportStore.getState().activeSketchId).toBeNull();
     // A bare entry must not run the select side effect.
     expect(selectionStore.getState().selected).toBe(before);
   });
 
-  it("an explicit id targets + selects that existing sketch", () => {
+  it("re-opening an existing sketch (an explicit id, no opts.tool) lands in Select", () => {
     toolStore.getState().setMode("sketch", "sketch2");
 
+    expect(toolStore.getState().sketchTool).toBe("select");
+    expect(toolStore.getState().phase).toBe("idle");
     expect(viewportStore.getState().activeSketchId).toBe("sketch2");
     expect(selectionStore.getState().selected).toEqual([{ kind: "sketch", id: "sketch2" }]);
+  });
+
+  it("a NEW sketch still arms Line when the caller passes it explicitly", () => {
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
+
+    expect(toolStore.getState().sketchTool).toBe("line");
+    expect(toolStore.getState().phase).toBe("armed");
+    expect(viewportStore.getState().activeSketchId).toBeNull();
   });
 
   it("leaving sketch mode clears the active sketch", () => {

@@ -83,6 +83,74 @@ describe("ConstraintList", () => {
     }
   });
 
+  // ── Named rows (S10) ──────────────────────────────────────────────────────
+
+  describe("named rows", () => {
+    const geometry: SketchEntity[] = [
+      { id: "l1", type: "Line", p0: [0, 0], p1: [40, 0] },
+      { id: "l2", type: "Line", p0: [40, 0], p1: [40, 30] },
+      { id: "c1", type: "Circle", center: [0, 0], radius: 5 },
+    ];
+    const named: SketchConstraint[] = [
+      { id: "n1", type: "Horizontal", entities: ["l2"] },
+      { id: "n2", type: "Coincident", entities: ["l1", "l2"], positions: ["End", "Start"] },
+      { id: "n3", type: "Distance", entities: ["l1"], value: 30 },
+      { id: "n4", type: "Perpendicular", entities: ["l1", "l2"] },
+    ];
+
+    it("names the geometry each constraint binds", () => {
+      render(<ConstraintList constraints={named} entities={geometry} onDelete={() => {}} />);
+      expect(screen.getByTestId("constraint-row-n1")).toHaveTextContent("Horizontal · Line 2");
+      expect(screen.getByTestId("constraint-row-n2")).toHaveTextContent(
+        "Coincident · Line 1 end – Line 2 start",
+      );
+      expect(screen.getByTestId("constraint-row-n4")).toHaveTextContent(
+        "Perpendicular · Line 1 ⟂ Line 2",
+      );
+    });
+
+    it("keeps the value in its own column, not duplicated into the label", () => {
+      render(<ConstraintList constraints={named} entities={geometry} onDelete={() => {}} />);
+      expect(screen.getByTestId("constraint-row-n3")).toHaveTextContent("Distance · Line 1");
+      expect(screen.getByText("30 mm")).toBeInTheDocument();
+    });
+
+    it("rows are focusable buttons that delete on Enter, Delete and Backspace", () => {
+      const onDelete = vi.fn();
+      render(<ConstraintList constraints={named} entities={geometry} onDelete={onDelete} />);
+      const row = screen.getByTestId("constraint-select-n1");
+      expect(row.tagName).toBe("BUTTON");
+      row.focus();
+      expect(document.activeElement).toBe(row);
+      for (const key of ["Enter", "Delete", "Backspace"]) {
+        fireEvent.keyDown(row, { key });
+      }
+      expect(onDelete).toHaveBeenCalledTimes(3);
+      expect(onDelete).toHaveBeenCalledWith("n1");
+    });
+
+    it("focusing a row cross-highlights it, blurring clears it", () => {
+      render(<ConstraintList constraints={named} entities={geometry} onDelete={() => {}} />);
+      const row = screen.getByTestId("constraint-select-n2");
+      fireEvent.focus(row);
+      expect(sketchSelectionStore.getState().constraintHover).toBe("n2");
+      fireEvent.blur(row);
+      expect(sketchSelectionStore.getState().constraintHover).toBeNull();
+    });
+
+    it("an unnameable operand renders the kind alone — never the raw id", () => {
+      render(
+        <ConstraintList
+          constraints={[{ id: "n9", type: "Horizontal", entities: ["gone"] }]}
+          entities={geometry}
+          onDelete={() => {}}
+        />,
+      );
+      expect(screen.getByTestId("constraint-row-n9")).toHaveTextContent("Horizontal");
+      expect(screen.queryByText(/gone/)).toBeNull();
+    });
+  });
+
   // ── Machine `Fixed` rows from a host-face projection (SKETCH-ON-FACE W2) ──
 
   describe("locked reference geometry", () => {

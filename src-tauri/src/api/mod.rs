@@ -2678,9 +2678,19 @@ pub async fn add_sketch_on_face(
             // it would cost a third round-trip this command has no other use for.
             intent: None,
             anchor: Some(AnchorIntent {
-                // The kernel-exact plane origin — a point genuinely ON the face,
-                // unlike a bbox centre.
-                world_point: frame.origin,
+                // SCHEMA §7.6 `exact.anchor`: a point the KERNEL classified IN/ON
+                // this face. Deliberately NOT the plane origin: that is a property
+                // of the surface, not of the face's boundary, and for an imported
+                // STEP body it routinely lies far outside the face it came from
+                // (measured 2026-09-15, `step_import_gate.rs` PHASE 4: (0,0,10) for
+                // a cap centred at (−5,215,10)). An anchor there contributes 0 to
+                // the resolution ladder's `anchor` feature, so the correct,
+                // unambiguous host binds at 0.75 and never clears the 0.85
+                // auto-bind bar — and re-picking freezes the same location again.
+                // `origin` remains the fallback for a face the worker could find no
+                // classifiable point on; the sketch's PLANE is unaffected either
+                // way and stays the kernel-exact frame built above.
+                world_point: frame.anchor.unwrap_or(frame.origin),
                 surface_uv: None,
                 local_frame: None,
                 adjacency_hint: None,

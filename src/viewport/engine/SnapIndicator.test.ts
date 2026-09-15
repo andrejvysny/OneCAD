@@ -30,6 +30,7 @@ function makeIndicator() {
     register: vi.fn(),
     unregister: vi.fn(),
     setWorldPos: vi.fn(),
+    setHidden: vi.fn(),
   };
   const invalidate = vi.fn();
   const ind = new SnapIndicator({
@@ -327,6 +328,49 @@ describe("hint chip", () => {
     ind.show(decision(), false);
     ind.show(decision({ snapped: false }), false);
     expect(interactionRoot.getObjectByName("snapIndicator")?.visible).toBe(false);
+    ind.dispose();
+  });
+});
+
+/*
+ * UX review S3 — "closing a loop happens silently". Approaching an existing
+ * endpoint produced no highlight on the thing being approached, so a click that
+ * would bind Coincident (and close the profile) looked identical to one that
+ * places a free point nearby.
+ */
+describe("attach-target ring", () => {
+  const ringOf = (root: THREE.Object3D): THREE.Points =>
+    root.getObjectByName("snapIndicator")?.getObjectByName("snapTargetRing") as THREE.Points;
+
+  it("rings the target for the kinds that name an EXISTING point", () => {
+    const { ind, interactionRoot } = makeIndicator();
+    for (const kind of ["endpoint", "midpoint", "center"] as SnapKind[]) {
+      ind.show(decision({ primaryKind: kind, point: { x: 12, y: -4 } }), false);
+      const ring = ringOf(interactionRoot);
+      expect(ring.visible, kind).toBe(true);
+      const pos = ring.geometry.getAttribute("position") as THREE.BufferAttribute;
+      expect(pos.getX(0)).toBeCloseTo(12, 9);
+      expect(pos.getY(0)).toBeCloseTo(-4, 9);
+    }
+    ind.dispose();
+  });
+
+  it("stays off for the kinds with nothing to attach to", () => {
+    const { ind, interactionRoot } = makeIndicator();
+    for (const kind of ["grid", "onCurve", "alignV", "polar"] as SnapKind[]) {
+      ind.show(decision({ primaryKind: kind }), false);
+      expect(ringOf(interactionRoot).visible, kind).toBe(false);
+    }
+    ind.dispose();
+  });
+
+  it("is registered for the theme refresh like every other material", () => {
+    const { ind, interactionRoot } = makeIndicator();
+    ind.show(decision({ primaryKind: "endpoint" }), false);
+    const mat = ringOf(interactionRoot).material as THREE.PointsMaterial;
+    mat.color.set(0x010203);
+    ind.refreshColors();
+    expect(mat.color.getHex()).not.toBe(0x010203);
     ind.dispose();
   });
 });

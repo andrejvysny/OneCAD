@@ -171,8 +171,8 @@ void test_add_tool_fully_inside() {
           "revolve-add: fused volume == target volume 30000 (tool fully inside, adds nothing)");
 }
 
-// --- Case 2: Cut, tool entirely disjoint from the target -> removes nothing. ---
-void test_cut_removes_nothing() {
+// --- Case 2: Cut, tool entirely disjoint from the target -> REFUSED by name. ---
+void test_cut_removes_nothing_refuses() {
     // Same target box as test_add_tool_fully_inside: world x∈[-10,10], y∈[-10,40],
     // z∈[0,30], vol 30000. Farthest box corner from the axis (0,0) is (±10,40) at
     // r = √(10² + 40²) = √1700 ≈ 41.23.
@@ -181,26 +181,56 @@ void test_cut_removes_nothing() {
     // 50 > 41.23, the washer's material (r ∈ [50,60]) never reaches ANY point of the
     // box footprint, at any z ⇒ the tool is entirely disjoint from the target.
     //
-    // A boolean Cut of disjoint operands removes nothing: OCCT returns the target
-    // shape unchanged (still a single solid) ⇒ modified event, target id preserved,
-    // volume EXACTLY 30000, no children minted, no delete.
+    // THIS ASSERTION DELIBERATELY FLIPPED (UX-2026-09-14 plan decision A-3 /
+    // D2, 2026-09-15). It used to pin "modified event, volume unchanged at 30000":
+    // a Revolve Cut that removed nothing reported SUCCESS and published a body
+    // byte-identical to its target, which is exactly the "a failed feature must not
+    // report success" defect the Cut-no-effect predicate exists to close. The
+    // refusal is now symmetric with the Add-disjoint one two cases up: `OP_FAILED`
+    // carrying `CUT_NO_EFFECT` at `stage:"publish"`, the plan stopped at m−1, and
+    // the target intact at its ORIGINAL volume because nothing was published.
     Session s;
     std::vector<json> body_events;
-    run_plan(s, body_events,
+    const Envelope prepared = run_plan(s, body_events,
              -10, -10, 40, 10, 30.0,
              0, 0, 20,
              50, 5, 60, 25,
              "Cut");
 
-    check_single_modify(body_events, "body_op1", "revolve-cut-miss");
+    check(prepared.result.value("stoppedReason", std::string("?")) == "opFailed",
+          "revolve-cut-miss: a Cut that removes nothing stops the plan");
+    check(prepared.result.value("lastValidStep", -1) == 2,
+          "revolve-cut-miss: prepared at m−1 (the Revolve step never published)");
+    bool refused = false;
+    json evidence;
+    for (const json& step : prepared.result.value("perStepResults", json::array())) {
+        for (const json& d : step.value("diagnostics", json::array())) {
+            if (d.value("code", std::string()) == "CUT_NO_EFFECT") {
+                refused = true;
+                check(d.value("stage", std::string()) == "publish",
+                      "revolve-cut-miss: the refusal is a publish-stage diagnostic");
+                evidence = d.value("evidence", json::object()).value("boolean", json::object());
+            }
+        }
+    }
+    check(refused, "revolve-cut-miss: refused by name with CUT_NO_EFFECT");
+    check(evidence.value("targetBodyId", std::string()) == "body_op1",
+          "revolve-cut-miss: the evidence names the target body");
+    check(std::abs(evidence.value("volumeBefore", -1.0) - 30000.0) < 1e-3 &&
+              std::abs(evidence.value("volumeAfter", -1.0) - 30000.0) < 1e-3,
+          "revolve-cut-miss: the evidence carries both measured volumes (30000 → 30000)");
+    check(evidence.contains("toleranceMm3") && evidence["toleranceMm3"].is_number(),
+          "revolve-cut-miss: the evidence carries the εV it was judged against");
 
+    // The Revolve step published NOTHING: the target keeps its id and its volume,
+    // and no split child was minted.
     const onecad::session::BodyStore bodies = s.bodies_copy();
     check(bodies.contains("body_op1"), "revolve-cut-miss: target id survives");
     check(!bodies.contains("body_op3:0"), "revolve-cut-miss: no split children minted");
 
     const double v = vol_of(s, "body_op1");
     check(std::abs(v - 30000.0) < 1e-3,
-          "revolve-cut-miss: volume unchanged at 30000 (disjoint tool removes nothing)");
+          "revolve-cut-miss: the target is untouched at 30000");
 }
 
 // --- Case 3: Intersect, reusing test_revolve_split.cpp's box+washer geometry. ---
@@ -386,7 +416,7 @@ void test_unsolved_axis_sketch_refuses() {
 
 int main() {
     test_add_tool_fully_inside();
-    test_cut_removes_nothing();
+    test_cut_removes_nothing_refuses();
     test_intersect_single_solid_zslab();
     test_intersect_disjoint_refuses();
     test_unknown_boolean_mode_refuses();

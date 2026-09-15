@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import * as THREE from "three";
 import {
   projectToScreen,
+  ANNOTATION_PRIORITY,
+  CURSOR_PROTECT_PX,
   HtmlOverlayDriver,
   CLUSTER_GAP_PX,
   KEEP_OUT_PAD_PX,
@@ -705,5 +707,171 @@ describe("keepOutShiftY (pure)", () => {
     expect(
       888 >= moved.x && 888 <= moved.x + moved.width && 398 >= moved.y && 398 <= moved.y + moved.height,
     ).toBe(false);
+  });
+});
+
+/*
+ * UX review S9 — "chips overlap each other and the geometry": a circle's Ø and
+ * R chips sat on top of each other and on the 30 mm dimension label beside
+ * them, because only `MeasureOverlay` had ever opted into the collision layout.
+ */
+describe("sketch annotations at one anchor (S9)", () => {
+  function camAt(z: number): THREE.PerspectiveCamera {
+    const cam = new THREE.PerspectiveCamera(60, 1, 0.1, 1000);
+    cam.position.set(0, 0, z);
+    cam.up.set(0, 1, 0);
+    cam.lookAt(0, 0, 0);
+    cam.updateProjectionMatrix();
+    cam.updateMatrixWorld();
+    return cam;
+  }
+
+  /** The element's screen box, read back off the transform the driver wrote. */
+  function rectOf(el: HTMLElement, w: number, h: number) {
+    const m = /translate\(-50%, -50%\) translate\(([-\d.]+)px, ([-\d.]+)px\)/.exec(
+      el.style.transform,
+    );
+    if (!m) throw new Error(`no transform on ${el.dataset.id}`);
+    return { x: Number(m[1]) - w / 2, y: Number(m[2]) - h / 2, width: w, height: h };
+  }
+
+  const overlaps = (
+    a: { x: number; y: number; width: number; height: number },
+    b: { x: number; y: number; width: number; height: number },
+  ): boolean =>
+    a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+
+  it("resolves three co-anchored overlays to non-overlapping boxes, by priority", () => {
+    const cam = camAt(10);
+    const driver = new HtmlOverlayDriver();
+    const size = { width: 60, height: 20 };
+    const make = (id: string, priority: number): HTMLElement => {
+      const el = document.createElement("div");
+      el.dataset.id = id;
+      vi.spyOn(el, "getBoundingClientRect").mockReturnValue(size as DOMRect);
+      // ALL THREE on the SAME world point — the exact case S9 describes.
+      driver.register(id, el, new THREE.Vector3(0, 0, 0), {
+        annotation: { priority, pinned: false, keepWhenUnplaced: true },
+      });
+      return el;
+    };
+    const hint = make("hint", ANNOTATION_PRIORITY.snapHint);
+    const chip = make("chip", ANNOTATION_PRIORITY.liveDimChip);
+    const badge = make("badge", ANNOTATION_PRIORITY.constraintBadge);
+
+    driver.update(cam, 400, 400, null, { x: 0, y: 0, width: 400, height: 400 });
+
+    const rects = [hint, chip, badge].map((el) => rectOf(el, size.width, size.height));
+    for (let i = 0; i < rects.length; i += 1) {
+      for (let j = i + 1; j < rects.length; j += 1) {
+        expect(overlaps(rects[i], rects[j]), `${i} vs ${j}`).toBe(false);
+      }
+    }
+    // The highest priority keeps the anchor; the others were pushed off it.
+    expect(rects[0].x + rects[0].width / 2).toBeCloseTo(200, 0);
+    expect(rects[0].y + rects[0].height / 2).toBeCloseTo(200, 0);
+  });
+
+  it("the snap hint reserves the cursor's own vicinity from the rest", () => {
+    const cam = camAt(10);
+    const driver = new HtmlOverlayDriver();
+    const size = { width: 20, height: 12 };
+    const hintEl = document.createElement("div");
+    vi.spyOn(hintEl, "getBoundingClientRect").mockReturnValue(size as DOMRect);
+    driver.register("hint", hintEl, new THREE.Vector3(0, 0, 0), {
+      annotation: {
+        priority: ANNOTATION_PRIORITY.snapHint,
+        pinned: false,
+        keepWhenUnplaced: true,
+        protectRadiusPx: CURSOR_PROTECT_PX,
+      },
+    });
+    const chipEl = document.createElement("div");
+    vi.spyOn(chipEl, "getBoundingClientRect").mockReturnValue(size as DOMRect);
+    driver.register("chip", chipEl, new THREE.Vector3(0, 0, 0), {
+      annotation: { priority: ANNOTATION_PRIORITY.liveDimChip, pinned: false, keepWhenUnplaced: true },
+    });
+
+    driver.update(cam, 400, 400, null, { x: 0, y: 0, width: 400, height: 400 });
+
+    const chip = rectOf(chipEl, size.width, size.height);
+    const cursorBox = {
+      x: 200 - CURSOR_PROTECT_PX,
+      y: 200 - CURSOR_PROTECT_PX,
+      width: CURSOR_PROTECT_PX * 2,
+      height: CURSOR_PROTECT_PX * 2,
+    };
+    expect(overlaps(chip, cursorBox)).toBe(false);
+  });
+
+  it("keeps a sketch annotation on screen when the layout has nowhere to put it", () => {
+    const cam = camAt(10);
+    const driver = new HtmlOverlayDriver();
+    const el = document.createElement("div");
+    vi.spyOn(el, "getBoundingClientRect").mockReturnValue({ width: 80, height: 24 } as DOMRect);
+    driver.register("badge", el, new THREE.Vector3(0, 0, 0), {
+      annotation: {
+        priority: ANNOTATION_PRIORITY.constraintBadge,
+        pinned: false,
+        keepWhenUnplaced: true,
+      },
+    });
+
+    // No safe rect at all — every frame before the panels have measured
+    // themselves. A measurement hides here; a constraint badge must not.
+    driver.update(cam, 400, 400, null, null);
+    expect(el.style.visibility).not.toBe("hidden");
+  });
+});
+
+/*
+ * UX review S4 — "the snap badge is stale and sticky": it sat at the position
+ * of an earlier step, survived a commit and survived Escape. The owner DID hide
+ * it; the driver writes `display` on every registered element once per frame
+ * and un-hid it again on the next render.
+ */
+describe("owner-driven hiding (S4)", () => {
+  function camAt(z: number): THREE.PerspectiveCamera {
+    const cam = new THREE.PerspectiveCamera(60, 1, 0.1, 1000);
+    cam.position.set(0, 0, z);
+    cam.up.set(0, 1, 0);
+    cam.lookAt(0, 0, 0);
+    cam.updateProjectionMatrix();
+    cam.updateMatrixWorld();
+    return cam;
+  }
+
+  it("a hidden item stays hidden across renders", () => {
+    const cam = camAt(10);
+    const driver = new HtmlOverlayDriver();
+    const el = document.createElement("div");
+    driver.register("hint", el, new THREE.Vector3(0, 0, 0));
+
+    driver.update(cam, 400, 400);
+    expect(el.style.display).toBe("");
+
+    driver.setHidden("hint", true);
+    driver.update(cam, 400, 400);
+    expect(el.style.display).toBe("none");
+    driver.update(cam, 400, 400); // …and the frame after that
+    expect(el.style.display).toBe("none");
+
+    driver.setHidden("hint", false);
+    driver.update(cam, 400, 400);
+    expect(el.style.display).toBe("");
+  });
+
+  it("hides an ANNOTATION outright rather than leaving it measurable", () => {
+    const cam = camAt(10);
+    const driver = new HtmlOverlayDriver();
+    const el = document.createElement("div");
+    vi.spyOn(el, "getBoundingClientRect").mockReturnValue({ width: 40, height: 16 } as DOMRect);
+    driver.register("hint", el, new THREE.Vector3(0, 0, 0), {
+      annotation: { priority: 4, pinned: false, keepWhenUnplaced: true },
+    });
+
+    driver.setHidden("hint", true);
+    driver.update(cam, 400, 400, null, { x: 0, y: 0, width: 400, height: 400 });
+    expect(el.style.display).toBe("none");
   });
 });

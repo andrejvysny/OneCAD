@@ -369,6 +369,7 @@ impl GeometryEngine for FakeBackend {
                     diagnostics: vec![],
                     mate_placement: None,
                     mate_resolved: *self.mate_resolved.lock().unwrap(),
+                    sketch_placement: None,
                 }));
                 per_step.push(StepResult {
                     step_index: step,

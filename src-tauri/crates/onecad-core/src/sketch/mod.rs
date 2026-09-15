@@ -288,6 +288,10 @@ struct SketchData {
     /// pre-WP-P sketch serializes byte-identically and no schema version moves.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     projections: BTreeMap<EntityId, ProjectedSource>,
+    /// DERIVED re-seated frame (UX-2026-09-14 WP-1). Additive and OMITTED when
+    /// absent, so every pre-WP-1 sketch serializes byte-identically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resolved_plane: Option<SketchPlane>,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     extra: Extra,
 }
@@ -326,6 +330,25 @@ pub struct Sketch {
     /// [`From<SketchData>`]) and the edit layer re-filters after every batch, so a
     /// removed entity can never leave a row behind.
     pub projections: BTreeMap<EntityId, ProjectedSource>,
+    /// The DERIVED frame this sketch is currently seated at, when its host face
+    /// has moved it off [`plane`](Self::plane) (UX-2026-09-14 WP-1, SCHEMA §7.2
+    /// `planStep.sketchPlacement`).
+    ///
+    /// **`plane` stays the AUTHORED frame**, frozen when the sketch was created
+    /// and never rewritten. This field is the worker's re-seat echo, adopted as a
+    /// derived, no-undo writeback inside the same `finish_regen` commit as
+    /// `sync_mate_placements`. It is deliberately OUTSIDE every hash: it is not in
+    /// the timeline record, not in the planner's canonical params, and not in
+    /// `document_runtime::sketch_geometry_token` (which hashes `plane`), so no
+    /// prefix hash moves and no checkpoint drifts because a host face moved.
+    ///
+    /// `None` means "the authored frame IS the effective frame" — which is what a
+    /// world/datum sketch, a host that resolved unmoved, and a host that could not
+    /// be re-seated all report. It is never "keep whatever was derived last time":
+    /// a regen that reports the host resolved-and-unmoved CLEARS this, so undoing
+    /// a host edit returns the sketch to its authored frame with no stale
+    /// intermediate. Read it through [`effective_plane`](Self::effective_plane).
+    pub resolved_plane: Option<SketchPlane>,
     /// Document-level unknown keys, preserved verbatim.
     pub extra: Extra,
 
@@ -343,6 +366,7 @@ impl From<SketchData> for Sketch {
             name: d.name,
             plane: d.plane,
             attachment: d.attachment,
+            resolved_plane: d.resolved_plane,
             regions: d.regions,
             projections: d.projections,
             extra: d.extra,
@@ -377,6 +401,7 @@ impl From<Sketch> for SketchData {
             constraints: s.constraints,
             regions: s.regions,
             projections: s.projections,
+            resolved_plane: s.resolved_plane,
             extra: s.extra,
         }
     }
@@ -397,6 +422,7 @@ impl Sketch {
             name: name.into(),
             plane,
             attachment,
+            resolved_plane: None,
             regions: Vec::new(),
             projections: BTreeMap::new(),
             extra: Extra::new(),
@@ -411,6 +437,19 @@ impl Sketch {
     #[must_use]
     pub fn on_world_plane(id: SketchId, name: impl Into<String>, plane: WorldPlane) -> Self {
         Self::new(id, name, SketchAttachment::World { plane })
+    }
+
+    /// The frame this sketch is actually SEATED at — the DERIVED
+    /// [`resolved_plane`](Self::resolved_plane) when a host face has moved it,
+    /// otherwise the AUTHORED [`plane`](Self::plane) (UX-2026-09-14 WP-1).
+    ///
+    /// Everything that DISPLAYS or EDITS the sketch reads this: the projection,
+    /// the solver lane's `SketchUpsert`, the region/profile lane. The timeline
+    /// record and every hash read `plane` instead — that separation is what keeps a
+    /// host-face move out of the planner hash and out of the undo stack.
+    #[must_use]
+    pub fn effective_plane(&self) -> SketchPlane {
+        self.resolved_plane.unwrap_or(self.plane)
     }
 
     /// The host FACE this sketch is glued to, or `None` for a world/datum

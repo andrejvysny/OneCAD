@@ -21,8 +21,8 @@ import type { DevicePref } from "@/viewport/engine/navInput";
 
 const SNAP_ROWS: { key: SnapKey; label: string }[] = [
   { key: "grid", label: "Grid" },
-  { key: "sketchGuideLines", label: "Sketch guide lines" },
-  { key: "sketchGuidePoints", label: "Sketch guide points" },
+  { key: "sketchGuideLines", label: "Alignment guides" },
+  { key: "sketchGuidePoints", label: "Snap to sketch points (end, mid, center)" },
   { key: "quadrant", label: "Quadrant points" },
   { key: "intersection", label: "Intersections" },
   { key: "onCurve", label: "On-curve points" },
@@ -47,7 +47,7 @@ const AUTO_CONSTRAIN_HELP: Record<AutoConstrainMode, string> = {
 };
 
 const SHOW_ROWS: { key: ShowKey; label: string }[] = [
-  { key: "guidePoints", label: "Guide points" },
+  { key: "guidePoints", label: "Show point markers" },
   { key: "snappingHints", label: "Snapping hints" },
   { key: "liveDimensions", label: "Live dimensions" },
   { key: "constraintChips", label: "Constraint chips" },
@@ -109,6 +109,7 @@ export function SnapPopover({ open, onClose, anchorRef }: SnapPopoverProps) {
       width={238}
       caret
       placement="left-start"
+      autoFocus="first"
       className="pb-2 pt-1.5"
     >
       <SectionLabel className="px-3.5 pb-0.5 pt-2">Snap to</SectionLabel>

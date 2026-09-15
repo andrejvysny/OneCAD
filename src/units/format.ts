@@ -114,6 +114,27 @@ export function formatLength(mm: number, unit: LengthUnitId = currentLengthUnit(
   return fixedTrimmed(mmToDisplay(mm, unit), LENGTH_UNITS[unit].decimals);
 }
 
+/**
+ * Format a length (mm) for a LIVE dimension chip — fixed precision, NOT trimmed.
+ *
+ * Separate from {@link formatLength} because the two want opposite things.
+ * `formatLength` trims trailing zeros, which is right for a settled field and
+ * wrong for a pair of chips tracking the cursor together: the 2026-09-14 review
+ * caught a rectangle reading `W 30 mm` beside `H 16.225 mm` in the same frame
+ * (S15). Millimetres are therefore pinned at {@link CHIP_MM_DECIMALS} — finer
+ * than any reachable rounding quantum, coarse enough to stop the chip jittering
+ * through a column of digits — and every other unit keeps its own declared
+ * precision, also fixed.
+ */
+export function formatChipLength(mm: number, unit: LengthUnitId = currentLengthUnit()): string {
+  if (!Number.isFinite(mm)) return String(mm);
+  const decimals = unit === "mm" ? CHIP_MM_DECIMALS : LENGTH_UNITS[unit].decimals;
+  return mmToDisplay(mm, unit).toFixed(decimals);
+}
+
+/** Decimals a live chip shows in millimetres — see {@link formatChipLength}. */
+export const CHIP_MM_DECIMALS = 2;
+
 /** Format a length (mm) as `"<value> <unit>"` in the display unit. */
 export function formatLengthWithUnit(
   mm: number,

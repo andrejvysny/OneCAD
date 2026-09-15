@@ -4,7 +4,7 @@
  * forbids a spec importing another spec, hence a module of its own.
  */
 import { expect, type Page } from "@playwright/test";
-import { CANVAS, findExtrudeHandle } from "./helpers";
+import { CANVAS, findExtrudeHandle, waitForCameraSettled } from "./helpers";
 
 /**
  * Seed a face/edge selection straight into the selection store.
@@ -267,6 +267,16 @@ export interface GizmoHandle {
  * real pointerdown will classify as the Z ring.
  */
 export async function findGizmoHandle(page: Page, want: GizmoHandle): Promise<{ x: number; y: number }> {
+  // A SCANNED coordinate is only worth anything against a camera that has
+  // stopped moving. The initial-load auto-fit runs after the `vpdemo` body
+  // ingest, and the gizmo's arms are ~2px apart on screen at the scan point
+  // (measured on chromium: `axis:Z` at dy −2, `axis:X` from dy −1) — so a pose
+  // that shifts even slightly between the scan and the drag hands the pointer a
+  // NEIGHBOURING arm. Measured on webkit: `controls.tween` still live at the
+  // grab, and `hitTransformGizmo` returned null at the scanned point and at
+  // every pixel ±3 around it, i.e. the handle had already left. The drag then
+  // grabbed Y where the spec asked for X.
+  await waitForCameraSettled(page);
   let found: { x: number; y: number } | null = null;
   await expect(async () => {
     found = await page.evaluate((target) => {
@@ -290,6 +300,22 @@ export async function findGizmoHandle(page: Page, want: GizmoHandle): Promise<{ 
       return null;
     }, want);
     expect(found).not.toBeNull();
+    // …and the point must STILL be that handle when the scan returns: the scan
+    // itself takes a while (a full-canvas raycast sweep), so re-reading it is
+    // what stops a coordinate that was already stale on arrival from escaping.
+    const still = await page.evaluate(
+      ({ at, target }) => {
+        const engine = (
+          window as unknown as {
+            __vpEngine?: { hitTransformGizmo(x: number, y: number): GizmoHandle | null };
+          }
+        ).__vpEngine;
+        const hit = engine?.hitTransformGizmo(at.x, at.y) ?? null;
+        return hit !== null && hit.kind === target.kind && hit.axis === target.axis;
+      },
+      { at: found as unknown as { x: number; y: number }, target: want },
+    );
+    expect(still).toBe(true);
   }).toPass({ timeout: 15_000, intervals: [200, 400, 800] });
   return found as unknown as { x: number; y: number };
 }

@@ -255,6 +255,8 @@ export interface ArbitrationInput {
   acquirePx: number;
   releasePx: number;
   gridReachPx: number;
+  /** Alignment guides' own reach — see `snapTypes.guideReachPx`. */
+  guideReachPx: number;
   latch: SnapLatch;
   frame: DimFrame | null;
   radial: { anchor: Point2; field: DimFieldId } | null;
@@ -301,7 +303,12 @@ export function resolveSnap(input: ArbitrationInput): ArbitrationOutput {
   //    jitter that would otherwise drop it at the acquire boundary.
   const spatial: SnapCandidate[] = [];
   for (const c of input.candidates) {
-    const reach = c.source === "grid" ? input.gridReachPx : input.acquirePx;
+    const reach =
+      c.source === "grid"
+        ? input.gridReachPx
+        : c.source === "guide"
+          ? input.guideReachPx
+          : input.acquirePx;
     if (c.errorPx <= reach) {
       spatial.push(c);
       continue;
@@ -585,7 +592,9 @@ function buildSet(
         ...all.map((c) =>
           c.source === "grid"
             ? input.gridReachPx
-            : c.source === "numeric"
+            : c.source === "guide"
+              ? input.guideReachPx
+              : c.source === "numeric"
               ? c.errorPx
               : // A LATCHED member promised the wider release reach — charging it
                 // the acquire reach here would throw away the retention the
@@ -771,6 +780,26 @@ function shadowByGridCrossing(
       survivors.push(s);
       continue;
     }
+    // INVISIBLE ROUNDING NEVER OUTBIDS A REACHABLE CROSSING (UX review S1).
+    // A set whose only members are cursor numeric fields resolves both plane
+    // degrees of freedom for almost nothing — a rounded length and a rounded
+    // angle each cost a fraction of a pixel — so by score alone it beats a grid
+    // crossing the cursor is practically sitting on. Measured: grid 5 mm at
+    // ~1.94 px/mm, cursor 0.97 px from a crossing — grid cost 0.97, the
+    // length+angle rounding set 0.88, so the point landed at 20.26/−0.05 with
+    // `snapped: false` and no badge. That is exactly "the grid badge advertises
+    // a snap that never happens": before the gesture's first click there is no
+    // dimension frame, so grid wins; after it, rounding silently takes over and
+    // the cursor tracks continuously through every crossing.
+    //
+    // Rounding is placement help that names nothing and persists nothing
+    // (SNAP §12), so inside the crossing's own reach it yields. A set carrying
+    // any VISIBLE member (a guide, a polar ray) still competes on score: it
+    // explains itself on screen and carries a relation worth keeping.
+    if (!s.members.some((c) => c.source !== "numeric")) {
+      shadowedSets.push(s);
+      continue;
+    }
     const dxPx = metricNorm(input.metric, s.point.x - crossing.x, 0);
     const dyPx = metricNorm(input.metric, 0, s.point.y - crossing.y);
     const onX = dxPx < GRID_SHADOW_ON_LINE_EPS_PX;
@@ -823,6 +852,18 @@ function chooseSet(
   }
   const challenger = byCost.find((s) => s.primary?.id !== retainedId);
   const challengerId = challenger?.primary?.id ?? null;
+  // SAME POINT ⇒ IMMEDIATE YIELD (UX review S2). Hysteresis exists so tiny
+  // pointer motion cannot flicker the cursor between two targets that are in
+  // DIFFERENT places. Two candidates resolving to the identical coordinate
+  // cannot flicker anything — nothing on screen moves — so the only thing the
+  // 2px/2-frame gate buys there is a stale NAME: an `onCurve` latched at a
+  // vertex keeps reading "On curve" against the endpoint sitting on the same
+  // point, because the whole bias spread (−1.0 vs +0.75) is under the 2px
+  // advantage and can never clear it. The better-ranked candidate takes over at
+  // once instead, and the placement is unchanged by construction.
+  if (challenger && challenger.cost < retained.cost && samePoint(challenger.point, retained.point)) {
+    return { set: challenger, latch: latchFor(challenger), retainedBlocked: false, challengerId };
+  }
   if (!challenger || challenger.cost > retained.cost - HYSTERESIS_ADVANTAGE_PX) {
     // Nothing beats the held target by enough — keep it, and forget any
     // half-formed challenge (the streak must be CONSECUTIVE).
@@ -840,6 +881,12 @@ function chooseSet(
     challengerId,
   };
 }
+
+/** Plane-unit tolerance for "these two sets place the point in the same spot". */
+const SAME_POINT_TOL = 1e-6;
+
+const samePoint = (a: Point2, b: Point2): boolean =>
+  Math.abs(a.x - b.x) <= SAME_POINT_TOL && Math.abs(a.y - b.y) <= SAME_POINT_TOL;
 
 function latchFor(set: CandidateSet): SnapLatch {
   return {

@@ -139,7 +139,12 @@ export const toolStore = createStore<ToolState>()((set, get) => ({
       // No id ⇒ new-sketch intent: leave activeSketchId null so the controller
       // shows the plane picker. An explicit id targets that existing sketch.
       const targetId = sketchId ?? null;
-      const tool = (opts?.tool ?? "line") as SketchTool;
+      // FP-S13 (docs/qa/UX_REVIEW_2026-09-14.md S13): a bare entry — no caller-
+      // chosen tool — lands in Select, idle. RE-OPENING a sketch (tree/viewport
+      // double-click) always goes through this default. A NEW sketch keeps the
+      // Shapr3D "Line auto-armed on entry" convention by passing `opts.tool:
+      // "line"` explicitly at its own call site instead.
+      const tool = (opts?.tool ?? "select") as SketchTool;
       set({ mode: "sketch", sketchTool: tool, phase: opts?.tool ? phaseFor(tool) : "idle" });
       viewportStore.getState().setActiveSketch(targetId);
       // Selecting the sketch keeps tree + inspector coherent with the chrome bar.

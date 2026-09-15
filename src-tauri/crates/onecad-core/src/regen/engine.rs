@@ -410,6 +410,36 @@ pub struct PlanStepEvent {
     /// already carries one is never rewritten by regen; only the §9
     /// `mateAxisReversed` repair re-freezes it.
     pub mate_resolved: Option<crate::document::record::MateResolved>,
+    /// UX-2026-09-14 WP-1 (SCHEMA §7.2 `sketchPlacement`, §7.3 `Sketch.hostFace`).
+    /// Present ONLY on a `Sketch` step whose `hostFace` RESOLVED and whose
+    /// re-seated frame differs from the AUTHORED one (compared EXACTLY — no
+    /// deadband). Absent on a world/datum sketch, on a record with no `hostFace`,
+    /// on a resolved host that did not move, and on a host that fell to
+    /// `NeedsRepair`; in the last two cases the AUTHORED frame IS the effective
+    /// frame, which is not the same as "keep the previously derived one".
+    ///
+    /// Rust adopts it as DERIVED document state
+    /// ([`Sketch::resolved_plane`](crate::sketch::Sketch::resolved_plane)), never
+    /// into the record's `plane`, so no planner or prefix hash moves and nothing
+    /// enters the undo stack — see `document_runtime.rs::sync_sketch_placements`.
+    // Boxed for the same reason as `mate_placement`: most steps carry `None`.
+    pub sketch_placement: Option<Box<SketchPlacement>>,
+}
+
+/// SCHEMA §7.2 `planStep.sketchPlacement` — the re-seated frame of a face-hosted
+/// sketch plus the movement it reports (UX-2026-09-14 WP-1).
+///
+/// `translation_mm` / `rotation_deg` are REPORTING values: the worker publishes a
+/// placement whenever the frame differs at all, and these say by how much. Neither
+/// is a gate, and neither is persisted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SketchPlacement {
+    /// The complete re-seated basis (world mm, Z-up, right-handed).
+    pub plane: crate::sketch::SketchPlane,
+    /// `‖o₁ − o₀‖`.
+    pub translation_mm: f64,
+    /// The WHOLE-FRAME rotation between the authored and re-seated bases.
+    pub rotation_deg: f64,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

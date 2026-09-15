@@ -122,7 +122,7 @@ describe("SketchController dispose parity", () => {
 
   it("dispose mid-session cancels the sketch and nulls the session", async () => {
     build();
-    toolStore.getState().setMode("sketch", "sketch1");
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" });
     await flush();
     expect(sketchStore.getState().session).not.toBeNull();
 
@@ -140,7 +140,7 @@ describe("SketchController dispose parity", () => {
       return 1;
     });
     build();
-    toolStore.getState().setMode("sketch", "sketch1"); // default tool = line (drawing)
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" }); // default tool = line (drawing)
     await flush();
     engineMock.setSketchSnap.mockClear();
 
@@ -159,7 +159,7 @@ describe("SketchController dispose parity", () => {
 
   it("dispose mid-drag closes the gesture on the wire (endGesture)", async () => {
     build();
-    toolStore.getState().setMode("sketch", "sketch1");
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" });
     await flush();
     toolStore.getState().setTool("select");
     await flush();

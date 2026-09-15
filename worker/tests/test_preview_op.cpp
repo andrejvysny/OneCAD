@@ -42,21 +42,34 @@ int g_failures = 0;
         }                                                                        \
     } while (0)
 
-/// A 10×10 rectangle sketch in the solver-lane `wire_args` shape (what
-/// `SketchStore` holds and what `PreviewOp` seeds the scratch with).
-json rect_sketch_args(double w, double h) {
+/// A `w`×`h` rectangle sketch with its lower-left corner at sketch `(u0, v0)`, in
+/// the solver-lane `wire_args` shape (what `SketchStore` holds and what
+/// `PreviewOp` seeds the scratch with).
+///
+/// The XY sketch plane is the NON-STANDARD one (SCHEMA §7.3): sketch u maps to
+/// world +Y and sketch v to world −X, so `v0 = 0` puts the profile at world
+/// x ∈ [−w, 0] and `v0 = −h` puts it at world x ∈ [0, h].
+json rect_sketch_args_at(double w, double h, double u0, double v0) {
     return json{
         {"plane", json{{"kind", "XY"}}},
         {"entities",
          json::array({
-             json{{"id", "e1"}, {"type", "Line"}, {"p0", {0, 0}}, {"p1", {w, 0}}},
-             json{{"id", "e2"}, {"type", "Line"}, {"p0", {w, 0}}, {"p1", {w, h}}},
-             json{{"id", "e3"}, {"type", "Line"}, {"p0", {w, h}}, {"p1", {0, h}}},
-             json{{"id", "e4"}, {"type", "Line"}, {"p0", {0, h}}, {"p1", {0, 0}}},
+             json{{"id", "e1"}, {"type", "Line"}, {"p0", {u0, v0}}, {"p1", {u0 + w, v0}}},
+             json{{"id", "e2"},
+                  {"type", "Line"},
+                  {"p0", {u0 + w, v0}},
+                  {"p1", {u0 + w, v0 + h}}},
+             json{{"id", "e3"},
+                  {"type", "Line"},
+                  {"p0", {u0 + w, v0 + h}},
+                  {"p1", {u0, v0 + h}}},
+             json{{"id", "e4"}, {"type", "Line"}, {"p0", {u0, v0 + h}}, {"p1", {u0, v0}}},
          })},
         {"constraints", json::array()},
     };
 }
+
+json rect_sketch_args(double w, double h) { return rect_sketch_args_at(w, h, 0.0, 0.0); }
 
 /// Seed one body into the session HEAD through the real transaction (fence →
 /// mutate the scratch → store → accept), because `Session` has no test-only body
@@ -187,6 +200,15 @@ int main() {
          {"body_b",
           BRepPrimAPI_MakeBox(gp_Pnt(30, 0, 0), 5.0, 5.0, 5.0).Shape()}});
     session.sketches().upsert("sk1", rect_sketch_args(10, 10));
+    // The CUT profile, and it is deliberately a SECOND sketch: `sk1` sits at world
+    // x ∈ [−10, 0] (the non-standard XY basis mirrors sketch v into world −X), so a
+    // Cut of `sk1` against `body_a` at x ∈ [0, 10] only ever TOUCHED the target and
+    // removed exactly zero volume — the case UX-2026-09-14 WP-1's `CUT_NO_EFFECT`
+    // predicate now refuses by name (measured 2026-09-15; the case-2 assertions
+    // below were passing on a boolean that did nothing). `sk_cut` is that same
+    // 10×10 rectangle shifted to v ∈ [−10, 0], i.e. world x ∈ [0, 10], so it lands
+    // squarely on `body_a` and the Cut subtracts for real.
+    session.sketches().upsert("sk_cut", rect_sketch_args_at(10, 10, 0.0, -10.0));
 
     const HeadFingerprint base = fingerprint(session);
     CHECK(std::abs(base.total_volume - 1125.0) < 1e-6);
@@ -227,13 +249,13 @@ int main() {
         json op = {{"opType", "Extrude"},
                    {"opId", "op_cut"},
                    {"params",
-                    {{"sketchId", "sk1"},
+                    {{"sketchId", "sk_cut"},
                      {"distance", 5.0},
                      {"extrudeMode", "Blind"},
                      {"booleanMode", "Cut"},
                      {"targetBodyId", "body_a"}}}};
         Envelope resp = onecad::session::handle_preview_op(
-            session, preview_req(json{{"op", op}, {"sketchId", "sk1"}}));
+            session, preview_req(json{{"op", op}, {"sketchId", "sk_cut"}}));
         CHECK(!resp.error.has_value());
         // The target is MODIFIED, so it is the body shipped back.
         CHECK(resp.result["changedBodies"].size() == 1);

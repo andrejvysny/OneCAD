@@ -1833,6 +1833,13 @@ fn repair_reason_str(r: onecad_core::document::repair::RepairReason) -> &'static
         // reason `legacyReferenceFace` is: the token is normative.
         RepairReason::MateAxisReversed => "mateAxisReversed",
         RepairReason::MateSeatOffFace => "mateSeatOffFace",
+        // UX-2026-09-14 WP-1, op-built by the `Sketch` step (SCHEMA §9). camelCase
+        // for the same reason: the tokens are normative.
+        RepairReason::SketchHostNonPlanar => "sketchHostNonPlanar",
+        RepairReason::SketchSeatOffFace => "sketchSeatOffFace",
+        RepairReason::SketchFrameIllConditioned => "sketchFrameIllConditioned",
+        RepairReason::SketchFrameInvalid => "sketchFrameInvalid",
+        RepairReason::SketchSeatUnmeasurable => "sketchSeatUnmeasurable",
         RepairReason::Unknown => "unknown",
     }
 }

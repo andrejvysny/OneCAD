@@ -93,6 +93,14 @@ OpOutcome execute_boolean(OpContext& ctx, const json& op, const std::string& op_
         return publication_refusal(decision, "publication");
     }
 
+    // UX-2026-09-14 WP-1 (D2/A-3): see `ExtrudeOp.cpp` — every subtracting tail
+    // shares the one predicate, after the publication decision for the same reason.
+    // Scoped to `Cut` inside the policy, so Union / Intersect are untouched.
+    if (auto refusal = cut_effect_policy(*mode, old_target, br.shape, "Boolean", target_id,
+                                         json{{"toolBodyId", tool_id}})) {
+        return *refusal;
+    }
+
     OpOutcome out;
     // Publish the successor of the target: a single-solid result MODIFIES it in place
     // (BodyId preserved — corpus c invariant); a multi-solid result SPLITS into

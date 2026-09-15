@@ -316,6 +316,11 @@ fn repair_reason_token(item: &RepairItem) -> &'static str {
         RepairReason::LegacyReferenceFace => "legacyReferenceFace",
         RepairReason::MateAxisReversed => "mateAxisReversed",
         RepairReason::MateSeatOffFace => "mateSeatOffFace",
+        RepairReason::SketchHostNonPlanar => "sketchHostNonPlanar",
+        RepairReason::SketchSeatOffFace => "sketchSeatOffFace",
+        RepairReason::SketchFrameIllConditioned => "sketchFrameIllConditioned",
+        RepairReason::SketchFrameInvalid => "sketchFrameInvalid",
+        RepairReason::SketchSeatUnmeasurable => "sketchSeatUnmeasurable",
         RepairReason::Unknown => "unknown",
     }
 }

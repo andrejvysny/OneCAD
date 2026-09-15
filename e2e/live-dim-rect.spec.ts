@@ -12,6 +12,15 @@ import {
   liveDimField,
 } from "./helpers";
 
+/**
+ * Constraint ROWS are named now ("Distance · Line 2 start – Line 2 end", S10),
+ * so the row's accessible name is what identifies a kind — an exact-text match
+ * on the bare kind finds nothing. Anchored on the kind so a delete button or a
+ * longer kind (Distance vs DistanceX) cannot be mistaken for it.
+ */
+const constraintRows = (page: import("@playwright/test").Page, kind: string) =>
+  page.getByRole("button", { name: new RegExp(`^${kind}(\\s|$)`) });
+
 /** Move the pointer (no click) to a canvas-center-relative offset — hovers a
  *  point so the live dimension chips populate NON-degenerate values. */
 async function hoverAt(page: import("@playwright/test").Page, dx: number, dy: number): Promise<void> {
@@ -47,7 +56,7 @@ test("typing width + height on the rect chip drives exact extents and authors tw
   await expect(dofPill(page)).not.toHaveText("DOF: 0");
   const baselineDofText = (await dofPill(page).textContent()) ?? "";
   const baselineDof = Number(baselineDofText.match(/\d+/)?.[0]);
-  const baselineDistanceRows = await page.getByText("Distance", { exact: true }).count();
+  const baselineDistanceRows = await constraintRows(page, "Distance").count();
   expect(baselineDistanceRows).toBe(0); // width/height untyped ⇒ nothing dimensional
 
   await page.keyboard.press("ControlOrMeta+z");
@@ -106,7 +115,7 @@ test("typing width + height on the rect chip drives exact extents and authors tw
   expect(lineLength(heightLine)).toBeCloseTo(40, 3);
 
   // ── Constraint + DOF: two Distance rows, DOF two lower than baseline ────────
-  await expect(page.getByText("Distance", { exact: true })).toHaveCount(2);
+  await expect(constraintRows(page, "Distance")).toHaveCount(2);
   const finalDofText = (await dofPill(page).textContent()) ?? "";
   const finalDof = Number(finalDofText.match(/\d+/)?.[0]);
   expect(finalDof).toBe(baselineDof - 2);

@@ -342,11 +342,17 @@ impl KnownOperation {
     /// freshly authored or re-edited ref (HISTORY-HARDEN H5), so the worker's
     /// resolution ladder scores real evidence instead of a bare anchor.
     ///
-    /// **No `Sketch` arm, deliberately.** `SketchOpParams::host_face` is a
-    /// CORE-ONLY dependency field — `wire::strip_sketch_host_face` drops `hostFace`
-    /// from the lowered params (VF-B5a), so evidence stamped there could never
-    /// reach the ladder. It would only churn the golden-pinned history-prefix hash
-    /// for zero effect (the WP-FIX W4 no-backfill discipline).
+    /// **The `Sketch` arm returns `host_face` as its ONLY entry** (index 0 ⇒ repair
+    /// `refId "<opId>.input0"`, the `PlaceComponent` mate addressing). It was
+    /// deliberately absent until UX-2026-09-14 WP-1, when `hostFace` started
+    /// crossing the wire (SCHEMA §7.3) and the worker began resolving it at the
+    /// `Sketch` step: evidence stamped here now DOES reach the ladder. Like
+    /// `mate.target` it is not a wire `inputs[]` entry, so this is the one
+    /// documented place where the two tables differ in count — see the `Sketch`
+    /// row of `wire.rs::element_refs_mut_covers_exactly_the_wire_typed_ref_slots`.
+    /// Stamping still happens on MINT / RE-EDIT only; a record loaded from disk
+    /// stays unstamped and resolves through the tracked rung or refuses
+    /// deterministically (the WP-FIX W4 no-backfill discipline).
     ///
     #[must_use]
     pub fn element_refs_mut(&mut self) -> Vec<&mut ElementRef> {
@@ -382,6 +388,10 @@ impl KnownOperation {
                 }
                 refs
             }
+            // A face-hosted sketch's only topological input is the host FACE it
+            // stands on (UX-2026-09-14 WP-1). World/datum sketches and every legacy
+            // record carry `None` and contribute no slot at all.
+            KnownOperation::Sketch(p) => p.host_face.iter_mut().collect(),
             KnownOperation::Hole(p) => vec![&mut p.face],
             // A gear's ONLY topological input is its placement face; a frame
             // placement contributes none.

@@ -719,3 +719,160 @@ describe("computeSnap snapPx", () => {
     expect(computeSnap({ x: 45, y: 0 }, [hLine], opts).snapped).toBe(false);
   });
 });
+
+// ── UX review 2026-09-14: S1 / S2 / S5 ───────────────────────────────────────
+
+/**
+ * S1 — "the badge is advertising a snap that never happens".
+ *
+ * A gesture with an anchor has a live dimension frame, so the cursor-rounding
+ * candidates enter the arbitration. A rounded LENGTH and a rounded ANGLE
+ * together resolve both plane degrees of freedom and cost a fraction of a
+ * pixel each, so by score alone they outbid a grid crossing the cursor is
+ * practically sitting on — and they are invisible (`snapped: false`, no badge,
+ * no marker), so the cursor just tracks continuously through the crossing.
+ *
+ * The existing crossing-shadow rule misses this shape: the rebuilt point lands
+ * within the on-line epsilon of BOTH of the crossing's lines, which that rule
+ * deliberately exempts as "this IS the crossing, and it names more".
+ *
+ * Numbers are the review's own configuration (5 mm grid at ~2 px/mm ⇒ a 10px
+ * cell, grid reach 4.2px, rounding quantum 0.5 mm).
+ */
+describe("cursor rounding never outbids a reachable grid crossing (S1)", () => {
+  const METRIC = { m00: 2, m01: 0, m10: 0, m11: 2 };
+  const ANCHOR: Point2 = { x: 1, y: 3 };
+  const gridOpts: SnapOptions = {
+    gridStep: 5,
+    pixelWorld: 0.5,
+    metric: METRIC,
+    snapPx: 8,
+    enableGrid: true,
+    enableGuideLines: true,
+    enableGuidePoints: true,
+    enablePolar: true,
+    polarAnchor: ANCHOR,
+    suppress: false,
+    anchors: [{ point: ANCHOR, key: "g0:0" }],
+    frame: dimFrame("line", [ANCHOR], undefined, { arcMode: false }),
+    toolId: "line",
+    toolAnchors: [ANCHOR],
+    locks: {},
+    quantum: { length: 0.5, angle: 1 },
+  };
+
+  it("lands ON the crossing, 1px away, with a live dimension frame", () => {
+    // Without the rule this resolved to (20.2599, −0.0505), kind `none`:
+    // length rounding cost 0.46px + angle rounding 0.17px + 0.25px set
+    // complexity = 0.88px, against the crossing's own 1.0px.
+    const r = computeSnap({ x: 20.5, y: 0 }, [], gridOpts);
+    expect(r.kind).toBe("grid");
+    expect(r.snapped).toBe(true);
+    expect(r.point).toEqual({ x: 20, y: 0 });
+  });
+
+  it("still rounds MID-CELL, where no crossing is in reach", () => {
+    // Dead centre between the crossings at 20 and 25: 2.5 mm (5px) from either,
+    // outside the 4.2px grid reach, so the rounding is the only answer left and
+    // must still be given. This is the 16% mid-cell corridor GRID_REACH_FACTOR
+    // exists to leave open.
+    const r = computeSnap({ x: 22.5, y: 0 }, [], gridOpts);
+    expect(r.kind).not.toBe("grid");
+  });
+});
+
+/**
+ * S2 — "the snap badge names the wrong snap". `nearestOnCurveMetric` clamps to
+ * the segment's own endpoint, so an `onCurve` candidate is generated at the
+ * identical coordinate as the endpoint/midpoint candidate; the badge could then
+ * read "On curve" for a click that authors Coincident or Midpoint.
+ */
+describe("a named point is never reported as On curve (S2)", () => {
+  const opts: SnapOptions = { ...base, enableGrid: false, enableGuideLines: false };
+
+  it("an endpoint click reads Endpoint and carries the Coincident intent", () => {
+    const d = computeSnapDecision({ x: 40.5, y: 0.5 }, [hLine], opts).decision;
+    expect(d.primaryKind).toBe("endpoint");
+    expect(d.label).toBe("Endpoint");
+    expect(d.accepted.flatMap((c) => c.relationIntents.map((i) => i.kind))).toEqual(["Coincident"]);
+    // The shadowed duplicate is gone before arbitration, not merely outranked.
+    expect(d.accepted.some((c) => c.kind === "onCurve")).toBe(false);
+    expect(d.rejected.some((r) => r.candidateId === "curve:e1")).toBe(false);
+  });
+
+  it("a midpoint click reads Midpoint and carries the Midpoint intent", () => {
+    const d = computeSnapDecision({ x: 20.5, y: 0.5 }, [hLine], opts).decision;
+    expect(d.primaryKind).toBe("midpoint");
+    expect(d.label).toBe("Midpoint");
+    expect(d.accepted.flatMap((c) => c.relationIntents.map((i) => i.kind))).toEqual(["Midpoint"]);
+  });
+
+  it("an interior point is still On curve — only an EXACT coincidence is dropped", () => {
+    const d = computeSnapDecision({ x: 30, y: 1 }, [hLine], opts).decision;
+    expect(d.primaryKind).toBe("onCurve");
+    expect(d.label).toBe("On curve");
+  });
+});
+
+/**
+ * S5 — "no inference guide lines, ever". A guide claims ONE axis and draws a
+ * dashed line saying why; the shared 8px point reach was far too mean for that,
+ * so nothing ever appeared. `GUIDE_MIN_REACH_PX` floors it at 12.
+ */
+describe("alignment guides reach 12px (S5)", () => {
+  const opts: SnapOptions = {
+    ...base,
+    enableGrid: false,
+    enableGuidePoints: false,
+    enableOnCurve: false,
+  };
+
+  it("renders an alignV guide 6px off an existing point's x", () => {
+    const d = computeSnapDecision({ x: 46, y: 60 }, [], { ...opts, recentPoints: [{ x: 40, y: 0 }] })
+      .decision;
+    expect(d.primaryKind).toBe("alignV");
+    expect(d.point.x).toBe(40);
+    expect(d.guides).toEqual([{ orientation: "vertical", value: 40, ref: { x: 40, y: 0 } }]);
+  });
+
+  it("still renders it at 11px, where the 8px point reach refused", () => {
+    const d = computeSnapDecision({ x: 51, y: 60 }, [], { ...opts, recentPoints: [{ x: 40, y: 0 }] })
+      .decision;
+    expect(d.primaryKind).toBe("alignV");
+    expect(d.point.x).toBe(40);
+    expect(d.guides).toHaveLength(1);
+  });
+
+  it("gives up past 12px", () => {
+    const d = computeSnapDecision({ x: 53, y: 60 }, [], { ...opts, recentPoints: [{ x: 40, y: 0 }] })
+      .decision;
+    expect(d.snapped).toBe(false);
+  });
+});
+
+/**
+ * S2, second half — the hysteresis latch must not hold a STALE NAME.
+ *
+ * Hysteresis exists so tiny pointer motion cannot flicker the cursor between
+ * two targets in DIFFERENT places. Two candidates at the identical coordinate
+ * cannot flicker anything, and the whole semantic-bias spread is under the 2px
+ * advantage the latch demands — so a latched lower-ranked candidate kept its
+ * label forever while the higher-ranked one sat on the same point.
+ */
+describe("the latch yields immediately to a better candidate at the SAME point (S2)", () => {
+  // A circle CENTRED on the line's end: centre and endpoint resolve identically.
+  const coincident: SketchEntity = { id: "e3", type: "Circle", center: [40, 0], radius: 10 };
+  const opts: SnapOptions = { ...base, enableGrid: false, enableGuideLines: false };
+  const raw: Point2 = { x: 40.2, y: 0 };
+
+  it("swaps a latched Center for the Endpoint on the next sample", () => {
+    // Latch onto the centre by resolving with the circle ALONE.
+    const held = computeSnapDecision(raw, [coincident], opts);
+    expect(held.decision.primaryKind).toBe("center");
+
+    const next = computeSnapDecision(raw, [hLine, coincident], { ...opts, latch: held.latch });
+    expect(next.decision.primaryKind).toBe("endpoint");
+    expect(next.decision.label).toBe("Endpoint");
+    expect(next.decision.point).toEqual({ x: 40, y: 0 });
+  });
+});

@@ -691,7 +691,9 @@ Per-step `event`s (`event:"planStep"`), one per executed step:
   "diagnostics": [ { "severity": "warning", "code": "…", "message": "…" },
                    { "severity": "error", "code": "GEOMETRY_INVALID", "message": "…",
                      "stage": "publication", "reasonCode": "PUBLICATION_TOO_MANY_SOLIDS" } ],
-  "matePlacement": { "translate": [0, 0, 5], "rotate": { "center": [0,0,0], "axis": [0,0,1], "angleDeg": 0 } }
+  "matePlacement": { "translate": [0, 0, 5], "rotate": { "center": [0,0,0], "axis": [0,0,1], "angleDeg": 0 } },
+  "sketchPlacement": { "plane": { "origin": [0,0,25], "xAxis": [0,1,0], "yAxis": [-1,0,0], "normal": [0,0,1] },
+                       "translationMm": 15.0, "rotationDeg": 0.0 }
 }
 ```
 
@@ -734,6 +736,41 @@ Per-step `event`s (`event:"planStep"`), one per executed step:
   with a resolved mate. For a document that carries such a mate the `planStep`
   payload of that step therefore changes shape under this build (one added
   optional key); for every other document the wire is byte-identical.
+- **`sketchPlacement` (OPTIONAL, UX-2026-09-14 WP-1, 2026-09-15).** Present ONLY on
+  a `Sketch` step whose [`params.hostFace`](#73-op-payload-schemas-vertical-slice)
+  RESOLVED **and** whose re-seated frame differs from the AUTHORED one. The
+  comparison is **EXACT** — any differing frame component at all, with no deadband:
+  a positive deadband would leave a sketch behind on a sub-epsilon plane
+  displacement, and a `0.009°` tilt at radius `10000 mm` moves a point `1.57 mm`.
+  Absent on a world/datum sketch, on a record with no `hostFace`, on a resolved host
+  that did not move, and on a host that fell to `needsRepair` — in the last two
+  cases the AUTHORED frame is the effective frame, which is NOT the same statement
+  as "retain the previously derived one".
+
+  ```json
+  { "plane": { "origin": [0,0,25], "xAxis": [0,1,0], "yAxis": [-1,0,0], "normal": [0,0,1] },
+    "translationMm": 15.0, "rotationDeg": 0.0 }
+  ```
+
+  `plane` is the complete re-seated basis (world mm, Z-up, right-handed).
+  `translationMm` is `‖o₁ − o₀‖` and `rotationDeg` the WHOLE-FRAME rotation
+  `atan2(‖(Q₃₂−Q₂₃, Q₁₃−Q₃₁, Q₂₁−Q₁₂)‖/2, (tr Q − 1)/2)` with `Q = B₁B₀ᵀ` — both
+  REPORTING values, neither a gate. Rust adopts `plane` as **derived document
+  state** (`Sketch.resolved_plane`), never into the timeline record's `plane`,
+  which stays the authored frame: no planner or prefix hash moves, and undoing the
+  host edit returns the sketch to its authored frame with no stale intermediate.
+  A `Superseded` regen discards it.
+- **Sketch re-seat diagnostics (UX-2026-09-14 WP-1).** Two WORKER-emitted `info`
+  entries ride the same step at `stage: "sketch"` — worker-emitted, unlike the
+  Rust-side `MATE_AXIS_ADOPTED` above, because the worker alone knows the frame
+  moved: `SKETCH_HOST_RESEATED` (`evidence: {translationMm, rotationDeg,
+  significant}`, emitted with every `sketchPlacement`) and
+  `SKETCH_HOST_NORMAL_REVERSED` (`evidence: {normal}`). `significant` is the
+  `1e−3 mm` / `0.01°` verdict and is EVIDENCE ONLY — it gates nothing.
+
+  There is no third, "tracked but unresolved" diagnostic. EVERY `hostFace` that
+  cannot be re-seated raises its §9 item and the step becomes `needsRepair` — see
+  the §7.3 `hostFace` entry.
 
 `diagnostics[]` is additive structured evidence. Required fields are
 `severity` (`"info" | "warning" | "error"`), `code` (≤128 bytes), and
@@ -1154,6 +1191,9 @@ the full authoritative sketch so replay is deterministic.
     "kind": "XY",
     "origin": [0,0,0], "xAxis": [0,1,0], "yAxis": [-1,0,0], "normal": [0,0,1]
   },
+  "hostFace": { "primary": { "bodyId": "body_1", "elementId": "el_…4a1", "kind": "face" },
+                "intent": { /* … */ }, "anchor": { "worldPoint": [12.0, 3.5, 40.0] } },
+  "frameTransportVersion": 1,
   "entities": [
     { "id": "e1", "type": "Line",   "p0": [0,0], "p1": [40,0] },
     { "id": "e2", "type": "Line",   "p0": [40,0], "p1": [40,20] },
@@ -1171,8 +1211,11 @@ the full authoritative sketch so replay is deterministic.
 
 - `plane.kind` ∈ `XY` | `XZ` | `YZ` | `custom`. A `custom` plane carries an arbitrary
   `origin`/`xAxis`/`yAxis`/`normal` and is what a sketch attached to a DATUM or a
-  model FACE sends (the attachment itself is core-owned and never crosses the
-  wire — see the 2026-07-26 changelog entry). **Hard invariant — non-standard
+  model FACE sends. It is the **AUTHORED** frame, frozen when the sketch was
+  created and never rewritten by a regen; `hostFace` below is what lets the worker
+  re-seat it. (A DATUM attachment is still core-owned and does not cross the wire
+  — see the 2026-07-26 changelog entry, narrowed by the 2026-09-15 one.)
+  **Hard invariant — non-standard
   XY basis** (ported verbatim from OneCAD-CPP `Sketch.h` `SketchPlane::XY()`):
   `xAxis = (0,1,0)`, `yAxis = (−1,0,0)`, `normal = (0,0,1)` (User X → World Y+,
   User Y → World X−). `XZ` = `{x:(0,1,0), y:(0,0,1), n:(1,0,0)}`; `YZ` =
@@ -1344,6 +1387,97 @@ the full authoritative sketch so replay is deterministic.
     `Constraint::Angle`), distinct from op-param angles (`angleDeg`,
     `draftAngleDeg`) which are degrees. UI layers author/display degrees and
     MUST convert at the wire boundary.
+- **`hostFace` (OPTIONAL, UX-2026-09-14 WP-1, 2026-09-15)** — the model FACE this
+  sketch is glued to, as the SAME typed semantic reference shape Extrude's
+  `targetFace` uses (identity + evidence + anchor, see **Semantic reference**
+  above). Present only for a `hostFace`-attached sketch whose record carries the
+  dependency; absent for world- and datum-hosted sketches and for every record
+  authored before this entry, which therefore stay byte-identical on the wire.
+
+  **NOT an `inputs[]` entry.** Like `PlaceComponent`'s `mate.target`, `hostFace`
+  rides `params` and is resolved by the `Sketch` step itself, never by the generic
+  input pre-flight. Two reasons, both normative: an unresolvable host must halt
+  THIS step rather than zero the plan's bodies, and the pre-flight's own repair
+  path skips the op entirely, which would leave the sketch unmaterialized for every
+  downstream profile. The §9 items the step emits still address it as
+  `"<opId>.input0"` — the slot the Rust side's `element_refs_mut` returns it at.
+
+  **What the worker does with it.** It resolves the face against the body AT THIS
+  STEP — tracked binding first, then the §10 descriptor stage — under a gate
+  STRICTER than the ladder's own: an `AutoBind` is accepted only at `score ≥ 0.85`
+  AND `margin ≥ 0.10`, so the anchor-decided binds §10 admits below margin are
+  refused here as `ambiguous`. It then RE-SEATS the authored frame onto the
+  resolved plane (**plane re-seating**, not rigid following):
+
+  ```text
+  d  = (p₁ − o₀)·n₁        o₁ = o₀ + d·n₁                  (project the origin)
+  q  = x₀ − (x₀·n₁)·n₁     h  = ‖q‖    x₁ = q/h        (Gram-Schmidt the X axis)
+  y₁ = n₁ × x₁
+  ```
+
+  with `n₁` the resolved face's ORIENTATION-CORRECTED normal (reversed for a
+  `REVERSED` face). Every stored `(u,v)` is carried verbatim, so local distances,
+  angles and region ids are untouched. Normative consequences:
+  - **`h ≤ τGS = sqrt(DBL_EPSILON)`** (the frozen X axis lies along `n₁`) is
+    `sketchFrameIllConditioned`. The Gram-Schmidt-against-Y fallback is computed as
+    repair evidence and MUST NOT be published: it is discontinuous at the
+    singularity, so publishing it would silently spin the sketch.
+  - **Planarity is a surface-TYPE predicate** with no distance epsilon. A resolved
+    host whose surface is not a plane is `sketchHostNonPlanar`; an approximately
+    planar cylinder or spline is never fitted.
+  - **A reversed normal is FOLLOWED**, never re-signed toward the frozen one, and
+    reported as the `SKETCH_HOST_NORMAL_REVERSED` info diagnostic.
+  - **Spin about the normal is undetectable.** An unchanged face and the same face
+    rotated about its own normal supply identical plane inputs, so `F₁ = F₀` there
+    by definition. Rigid following would need transform evidence the sketch does
+    not carry.
+  - **The seat witness is the transported ANCHOR, not the origin.** An unchanged
+    annular face legitimately places its plane origin inside its own central hole,
+    so the origin classifying `OUT` is advisory only. The frozen `anchor.worldPoint`
+    is expressed in the authored frame's `(u,v)`, re-planted in the candidate frame
+    and classified against the resolved face at the face's OWN `BRep_Tool::Tolerance`:
+    `IN`/`ON` seats, `OUT` is `sketchSeatOffFace`, `UNKNOWN` is
+    `sketchSeatUnmeasurable`. The witness is classified even when the plane did not
+    move: a face that shrank under an unchanged plane still loses its sketch.
+    **There is no exemption.** The anchor a producer freezes is a point the kernel
+    classified IN/ON the face — [§7.6](#projectfaceboundary) `exact.anchor` exists to
+    supply one — so `OUT` means the sketch genuinely left its host, even when the
+    anchor coincides with the plane origin. A LEGACY record whose anchor is the
+    face's plane LOCATION and lies outside it therefore reports `sketchSeatOffFace`,
+    which is the honest verdict for a seat nobody can vouch for; re-picking the face
+    freezes an on-face anchor and clears it. An ABSENT anchor is
+    `sketchSeatUnmeasurable` — no witness is never "seated".
+  - **The transport is recomputed from the AUTHORED frame on every regen**, never
+    from the previously published one, and is a fixed point when nothing moved.
+  - **Every unresolvable host halts.** A host whose BODY is absent from the plan, or
+    whose reference names no body at all, reports the ladder token `no-candidates`;
+    a host the resolver LOOKED for and could not confidently pick out reports the
+    ladder's own token (`ambiguous` / `low-confidence`) together with its RANKED
+    CANDIDATES; and an `AutoBind` that clears the ladder but not the stricter host
+    gate reports `ambiguous`. In every case the step carries the §9 item, becomes
+    `needsRepair` and stops the plan at `m−1` (§8).
+
+    This is only honest because the frozen `anchor.worldPoint` is a point the kernel
+    classified ON the face ([§7.6](#projectfaceboundary) `exact.anchor`). While it
+    was the face's `gp_Pln` LOCATION — which on an imported body routinely lies
+    nowhere near the face it came from — the anchor feature contributed nothing to
+    the score, a correct and unambiguous host bound at 0.75, and RE-PICKING the face
+    re-froze the same location, so no halt could ever be cleared. Measured
+    2026-09-15 on `src-tauri/tests/step_import_gate.rs` PHASE 4: the correct face at
+    margin 0.20 scored **0.75** with the plane-location anchor (0,0,10) against a
+    face centred at (−5,215,10), and **1.00** with the on-face anchor.
+  - Each of the five POST-resolution refusals — non-planar, ill-conditioned, invalid
+    frame, seat off-face, seat unmeasurable — leaves the AUTHORED frame standing and
+    DOES halt: there the host was found and genuinely cannot seat the sketch, and
+    re-picking is a real fix. The sketch is Rust-owned document state and is NOT
+    dropped in any case; what halts is every downstream feature that would otherwise
+    have cut against a guessed plane.
+- **`frameTransportVersion` (OPTIONAL, integer, UX-2026-09-14 WP-1)** — the
+  transport policy the producer authored against; `1` is the rule above. Absent
+  means `1`. A reader that does not implement the value MUST refuse the step as
+  [§8](#8-error-taxonomy) `UNSUPPORTED` rather than silently re-seating under a
+  different rule (§13). It is deliberately NOT a §9 repair: nothing is wrong with
+  the binding, the reader is simply older than the policy.
 
 **Extrude** (`op.extrude`) — end conditions `Blind` / `ThroughAll` / `Symmetric`
 / `ToNext` / `ToFace`, optional two directions. Field names ported from
@@ -1481,6 +1615,33 @@ OneCAD-CPP `ExtrudeParams`.
   `deleted` lifecycle event. Revolve carries the same two codes as
   `REVOLVE_ADD_DISJOINT` / `REVOLVE_EMPTY_RESULT`. Cross-track fixture:
   `protocol/fixtures/extrude_add_disjoint_refusal.ndjson`.
+- **Cut effect policy** (shared by EVERY subtracting tail — Extrude `Cut`, Revolve
+  `Cut`, Boolean `Cut`; UX-2026-09-14 WP-1, 2026-09-15). A `Cut` that removes no
+  DEMONSTRABLE material is a recoverable `OP_FAILED`, symmetric with the
+  Add-disjoint refusal above: a feature that changes nothing must not report
+  success. The predicate is measured, not assumed —
+  `BRepGProp::VolumeProperties(shape, props, Eps)` returns the relative error the
+  integration ACHIEVED, so the measurement bound is per-call:
+
+  ```text
+  a  = authoring resolution (1e−3 mm)          ΔV = V_before − V_after
+  U  = errBefore·V_before + errAfter·V_after     εV = a³ + U
+  |ΔV| ≤ εV   ⇒ CUT_NO_EFFECT
+  ΔV  < −εV   ⇒ CUT_VOLUME_INCREASED
+  either volume non-finite or unmeasurable ⇒ CUT_VOLUME_UNMEASURABLE
+  ```
+
+  The SEMANTIC floor `a³` and the MEASUREMENT bound `U` are deliberately separate:
+  `a³` alone would let a large body's integration noise pass as a real removal,
+  and any size-scaled epsilon (`a·L²` gives `1000 mm³` at `L = 1000 mm`) would
+  refuse a genuine `5 mm³` pocket. All three codes carry `stage: "publish"` and
+  evidence `{boolean:{operation, targetBodyId, volumeBefore, volumeAfter,
+  toleranceMm3, relErrBefore, relErrAfter}}` — the same evidence envelope the
+  policy above uses, plus `toolBodyId` on a standalone Boolean. A refused step
+  emits NO `planStep`, so the diagnostic rides `PlanPrepared.perStepResults[].diagnostics`
+  and `error.detail.diagnostics` (§3.2); the target keeps its id, geometry and every
+  tracked element. Cross-track fixture:
+  `protocol/fixtures/sketch_host_face_reseat.ndjson`.
 - **Draft is applied completely and measured, or refused — never silently
   degraded.** V1 proves draft semantics only for a single-direction `Blind`
   extrusion; any other end condition or `twoDirections:true` is refused until its
@@ -2167,6 +2328,11 @@ OneCAD-CPP `BooleanParams` (`operation` ∈ Union/Cut/Intersect; distinct from t
   `{boolean:{operation:"Add",targetBodyId,toolBodyId,targetSolids,solidCount}}`):
   target and tool stay intact, nothing is consumed. It is never a split — a split
   is a Cut/Intersect outcome only (§7.2). Kernel-hardening WP-C, 2026-09-02.
+- A `Cut` that removes no demonstrable material refuses under the shared **Cut
+  effect policy** documented with Extrude above (`CUT_NO_EFFECT` /
+  `CUT_VOLUME_INCREASED` / `CUT_VOLUME_UNMEASURABLE`, `stage:"publish"`), with
+  `toolBodyId` in the evidence beside `targetBodyId`. UX-2026-09-14 WP-1,
+  2026-09-15.
 
 **Shell** (`op.shell`) — hollow a body, removing (opening) selected faces. Field
 names from OneCAD-CPP `ShellParams`. Added M6a (see the [Changelog](#14-changelog)).
@@ -3796,7 +3962,7 @@ stale or absent reference is `present:false` — an **answer, not an error**.
                "planeDistanceTolerance": 1e-3, "fallbackSegmentsPerCurve": 24 } }
 // result
 { "present": true,
-  "exact": { "origin": [0,0,30], "normal": [0,0,1] },
+  "exact": { "origin": [0,0,30], "normal": [0,0,1], "anchor": [40,25,30] },
   "hasClosedBoundary": true,
   "faceCount": 2,
   "points": [ { "ref": "p0", "at": [0,0] }, { "ref": "p1", "at": [80,0] } ],
@@ -3832,6 +3998,22 @@ the face plane — a descriptor `center` does not, being an axis-aligned bbox
 centre, which for a tilted face sits off-plane and would extrude a sliver.
 Outside `frameOnly` it is an echo the caller SHOULD compare against the plane it
 supplied (a tripwire, not a fence).
+
+**`exact.anchor` (OPTIONAL, ADDITIVE, UX-2026-09-14 WP-1b)** is a point of the seed
+face that the kernel CLASSIFIED `IN` or `ON` it at `BRep_Tool::Tolerance(face)`.
+The worker tries, in order, the element descriptor's centre, the point of the face
+nearest the plane location, and the face's surface centre of mass; it OMITS the key
+when none classifies (an annulus every candidate falls into the hole of). Present
+in both modes, and deterministic like everything else here.
+
+`anchor` is on the face; `origin` is on the face's PLANE, which is not the same
+claim. The `gp_Pln` location is a property of the surface, not of the boundary, and
+for an imported body it routinely lies far outside the face it came from. A caller
+freezing a resolution-ladder [§10](#10-resolution-ladder) anchor MUST freeze
+`anchor`: an anchor off its own face contributes 0 to the `anchor` feature, so a
+correct and unambiguous reference scores below the auto-bind gate — and re-picking
+the same face freezes the same miss again. A caller building a sketch BASIS still
+uses `origin` (that is the kernel-exact frame the boundary is expressed in).
 
 **The `plane` argument is authoritative.** Every `at` and every arc/circle centre
 is expressed in ITS UV; the worker MUST NOT substitute a basis of its own, even
@@ -4864,6 +5046,9 @@ STATE (see [§8](#8-error-taxonomy)).
                                          //   | "ordinal-permutation" (Rust-seeded only)
                                          //   | "legacyReferenceFace" (op-built, Chamfer only)
                                          //   | "mateAxisReversed" | "mateSeatOffFace" (op-built, PlaceComponent only)
+                                         //   | "sketchHostNonPlanar" | "sketchSeatOffFace"
+                                         //   | "sketchFrameIllConditioned" | "sketchFrameInvalid"
+                                         //   | "sketchSeatUnmeasurable" (op-built, Sketch only)
   "scoringVersion": 6,                   // = resolverVersion the scores were computed under
   "seedEdgeId": "el_…e14",               // OPTIONAL — only with reason "legacyReferenceFace"
   "resolvedAxis": [0, 0, -1],            // OPTIONAL — only with reason "mateAxisReversed"
@@ -4987,6 +5172,39 @@ STATE (see [§8](#8-error-taxonomy)).
   resolved face as its single candidate (`score` 1.0, `margin` 1.0, `worldPos` the
   nearest point of the face to the seat) and has NO repair command: the fix is to
   move or re-mate the component, and the item says so in `uiLabel`.
+  **The five `sketch*` reasons are worker-emitted, OP-BUILT by the `Sketch` step**
+  (UX-2026-09-14 WP-1, 2026-09-15; §7.3 `hostFace`). Unlike the two mate reasons
+  they ride a step that publishes NO geometry, so the step is `needsRepair` and the
+  plan stops at `m−1` — the sketch itself is Rust-owned document state and stays
+  in the document at its AUTHORED frame; what halts is every downstream feature
+  that would otherwise cut against a guessed plane. `ladderFailed` is
+  `"descriptor"` (closed enum; for four of the five the ladder itself resolved),
+  `refId` is `"<opId>.input0"` — the slot `element_refs_mut`'s `Sketch` arm returns
+  `host_face` at, and the addressing `parse_input_ref_id` already understands — and
+  `elementId` is the stored host-face id. Each carries the resolved face as its
+  single candidate where one was resolved:
+  - `sketchHostNonPlanar` — the resolved host's surface type is not a plane. A
+    surface-TYPE predicate with no distance epsilon: an approximately planar
+    cylinder or spline is refused, never fitted.
+  - `sketchSeatOffFace` — the transported attachment anchor classifies `OUT`
+    against the resolved face (the face shrank past the sketch). NOT the plane
+    origin: an annular face legitimately places that in its own hole.
+  - `sketchSeatUnmeasurable` — the classification returned `UNKNOWN` or threw, or
+    the `hostFace` carries no usable anchor. "Unmeasurable" is never "seated".
+  - `sketchFrameIllConditioned` — the authored X axis lies along the resolved
+    normal (`h ≤ τGS`). The item MAY carry an OPTIONAL `fallbackPlane`
+    (`{kind:"custom",origin,xAxis,yAxis,normal}`) as repair EVIDENCE; a reader MUST
+    NOT apply it automatically, because that fallback is discontinuous at the
+    singularity.
+  - `sketchFrameInvalid` — the STORED frame is not a finite, unit, orthogonal,
+    right-handed basis. Never silently corrected: correcting a left-handed basis
+    would mirror every stored `(u,v)`.
+  A host that could not be RESOLVED reports the ordinary ladder token from the same
+  slot and halts: `no-candidates` when its body is absent, and `ambiguous` /
+  `low-confidence` — with the ladder's own ranked `candidates[]` — when the resolver
+  looked for it and could not pick it out confidently (see §7.3 `hostFace`). There
+  is no repair COMMAND for any of the five reasons above, nor for those: the fix is
+  to re-pick the host face (or move the sketch), and `uiLabel` says so.
   **Readers MUST tolerate an unknown `reason` token** rather than failing the
   payload; a Rust reader degrades an unrecognized token to an opaque `unknown` so an
   older release can still open a document written by a newer one.
@@ -5253,6 +5471,140 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-09-15 — §7.6 ADDITIVE `ProjectFaceBoundary` result `exact.anchor`; §7.2
+  `SKETCH_HOST_UNTRACKED` REMOVED; §7.3/§9 the sketch-host seat and failure policy
+  restated.** (UX review 2026-09-14 WP-1b; same design
+  `docs/design/astra/sketch-host-face-transport.md`.) ADDITIVE, so
+  `kernelPolicyVersion` stays **1** and worker fingerprint `0a6a1dce34181289` is
+  unchanged; a caller that ignores the new key sees byte-identical behaviour.
+
+  1. **§7.6 `exact.anchor`** — a point the kernel classified `IN`/`ON` the seed
+     face, for a caller freezing a §10 anchor. `exact.origin` is the plane
+     LOCATION and is NOT such a point: on an imported STEP cap it sat 215 mm from
+     its own face, contributing 0 to the ladder's `anchor` feature, so the correct
+     and unambiguous host bound at **0.75** against the 0.85 auto-bind gate — and
+     re-picking re-froze the same location, which made any halt built on it
+     permanent. With the on-face anchor the same case scores **1.00**
+     (`src-tauri/tests/step_import_gate.rs` PHASE 4, measured both ways).
+  2. **§7.2 `SKETCH_HOST_UNTRACKED` removed.** It was the info-only escape that
+     shortfall made necessary. EVERY unresolvable `hostFace` now raises the
+     ladder's own §9 item from `<opId>.input0` — `no-candidates` when the body is
+     absent, `ambiguous` / `low-confidence` with its ranked candidates when the
+     resolver could not pick the face out — the step becomes `needsRepair`, and the
+     plan stops at `m−1`. Recorded behaviour change for a LEGACY record whose
+     anchor is the face's plane location and lies off the face: it now reports
+     `sketchSeatOffFace` rather than seating silently. Re-picking the face freezes
+     an on-face anchor and clears it.
+  3. **§7.3 seat witness: no exemption.** The "an anchor coinciding with the frozen
+     origin is not a witness" carve-out is gone with the reason for it; an ABSENT
+     anchor is `sketchSeatUnmeasurable`, as §9 already said.
+  4. **§7.3 `frameTransportVersion` is a DEFAULT, not a stamp.** A record carrying
+     its own version reaches the worker unchanged, and the worker compares at the
+     value's own width (an oversized integer refuses by name instead of wrapping).
+  5. **§7.2 `sketchPlacement` parses strictly** (entry above, item 3) and **§7.3's
+     `εV` gains the representation floor** (entry above, item 5).
+
+  Fixtures: `project_to_sketch_plane.ndjson` round L pins `exact.origin` /
+  `exact.normal` / `exact.anchor` — different points for the same face.
+
+- **2026-09-15 — §7.3 ADDITIVE `Sketch.hostFace` + `frameTransportVersion`; §7.2
+  ADDITIVE `planStep.sketchPlacement` + three `info` codes; §7.3 the shared Cut
+  effect policy; §9 five op-built `sketch*` reasons.** (UX review 2026-09-14
+  WP-1 / B1; design `docs/design/astra/sketch-host-face-transport.md`.)
+  Every shape is ADDITIVE and `kernelPolicyVersion` stays **1** — worker fingerprint
+  `0a6a1dce34181289` is unchanged. A document that carries no face-hosted sketch
+  and no subtracting Cut is byte-identical on the wire.
+
+  1. **[§7.3](#73-op-payload-schemas-vertical-slice) `Sketch.hostFace`** — the host
+     FACE a face-attached sketch stands on, as the same typed semantic reference
+     Extrude's `targetFace` uses. It is NOT an `inputs[]` entry (the
+     `PlaceComponent.mate.target` rule): the `Sketch` step resolves it itself,
+     because the generic input pre-flight would both zero the plan's bodies on an
+     unresolved host and skip the op that materialises the sketch. This NARROWS the
+     2026-07-26 entry's "the attachment is core-owned and never crosses the wire":
+     the DATUM attachment still does not, the host FACE now does. Rust previously
+     stripped the key (`wire.rs::strip_sketch_host_face`); it no longer does, and
+     the golden that pinned the strip is inverted deliberately.
+     `frameTransportVersion` (optional, default `1`) names the transport policy;
+     an unimplemented value is refused as §8 `UNSUPPORTED` rather than re-seated
+     under a different rule.
+  2. **Plane re-seating, not rigid following.** The worker resolves the host at the
+     `Sketch` step (tracked rung, then the §10 descriptor stage, under a gate
+     STRICTER than the ladder's own: `score ≥ 0.85` AND `margin ≥ 0.10`, so the
+     anchor-decided binds §10 admits below margin are refused as `ambiguous`), then
+     projects the authored origin onto the resolved plane along `n₁` and
+     Gram-Schmidts the authored X axis against `n₁`. Every stored `(u,v)` is
+     carried verbatim, so region ids do not move. The transport is recomputed from
+     the AUTHORED frame on every regen and is a fixed point when nothing moved; it
+     is never seeded from the previously published frame. A spin about the face's
+     own normal is UNDETECTABLE from plane inputs and is therefore `F₁ = F₀` by
+     definition — a stated limit, not an omission.
+  3. **[§7.2](#72-regen--executeplan) `planStep.sketchPlacement`** — present only
+     when the host resolved AND the re-seated frame differs from the authored one,
+     compared EXACTLY with no deadband (a deadband would leave a sketch behind on a
+     sub-epsilon plane displacement). Rust adopts `plane` as DERIVED document state
+     (`Sketch.resolved_plane`) and never into the record's `plane`, which stays the
+     authored frame — so no planner or prefix hash moves, nothing enters the undo
+     stack, and undoing the host edit restores the authored frame with no stale
+     intermediate. `Superseded` discards it. The two `info` diagnostics
+     `SKETCH_HOST_RESEATED` / `SKETCH_HOST_NORMAL_REVERSED` (`stage:"sketch"`) are
+     WORKER-emitted, deliberately unlike the Rust-side `MATE_AXIS_ADOPTED`
+     precedent: the worker alone knows the frame moved. Those two are the ONLY
+     sketch-host diagnostics; an unresolvable host raises its §9 item instead. A
+     MALFORMED `sketchPlacement` is a malformed `planStep` (`PROTOCOL_ERROR`,
+     discarded whole), never degraded to "absent" — the worker has already
+     materialised the transported frame into the step it executed, so silently
+     reading it as the authored plane would leave the two ends of the wire
+     describing different geometry for the same regen. The basis is validated on
+     arrival: finite, unit and orthogonal within `1e−9`, and right-handed.
+  4. **[§9](#9-needsrepair-payload) five op-built `sketch*` reasons** —
+     `sketchHostNonPlanar`, `sketchSeatOffFace`, `sketchSeatUnmeasurable`,
+     `sketchFrameIllConditioned`, `sketchFrameInvalid`, all at
+     `refId "<opId>.input0"`. Unlike the two mate reasons they ride a step that
+     publishes no geometry, so the step is `needsRepair` and the plan stops at
+     `m−1`; the sketch stays in the document at its AUTHORED frame and the
+     downstream features halt deterministically instead of cutting at a guessed
+     plane. The seat witness is the transported frozen ANCHOR, not the plane
+     origin, because an unchanged annular face legitimately places its origin in
+     its own central hole. There is no exemption for an anchor that coincides with
+     the origin: with §7.6 `exact.anchor` the frozen anchor is a point the kernel
+     classified on the face, so `OUT` is the honest verdict and a re-pick clears it.
+
+     **Every unresolvable host halts, 2026-09-15.** A confidence shortfall raises
+     the ladder's own token (`ambiguous` / `low-confidence`) with its ranked
+     candidates from the same slot. That became honest only with the on-face anchor:
+     a sketch on an imported STEP body's cap resolved to the right face at margin
+     0.20 but scored **0.75** while the frozen anchor was the face's plane LOCATION
+     (routinely far outside its own face), and re-picking re-froze the same miss.
+     With `exact.anchor` the same case scores **1.00**
+     (`src-tauri/tests/step_import_gate.rs` PHASE 4).
+  5. **[§7.3](#73-op-payload-schemas-vertical-slice) Cut effect policy** —
+     `CUT_NO_EFFECT` / `CUT_VOLUME_INCREASED` / `CUT_VOLUME_UNMEASURABLE`
+     (`stage:"publish"`, evidence `{volumeBefore, volumeAfter, toleranceMm3,
+     relErrBefore, relErrAfter}`) on EVERY subtracting tail — Extrude `Cut`,
+     Revolve `Cut`, Boolean `Cut` — symmetric with the existing Add-disjoint
+     refusal. `εV = a³ + U + κ·ulp(max(|V_before|, |V_after|))` with `κ = 8`: `a³` is
+     the semantic floor, `U = Σ e·|V̂|/(1−e)` the measurement bound
+     `BRepGProp::VolumeProperties` actually reports rather than an assumed one, and
+     the ULP term the REPRESENTATION floor — at `V = 1e9 mm³` consecutive binary64
+     values are `2^(29−52) ≈ 1.19e−7 mm³` apart, a hundred times `a³`, and an
+     imprint changes the topology so the two integrations can land a few ULP apart
+     with nothing removed. A relative error `e ≥ 1` bounds nothing and refuses as
+     `CUT_VOLUME_UNMEASURABLE`.
+     Catalogued in the §7.3 op prose and NOT in the §8 table, which stays 1:1 with
+     `evaluate_publication_policy`. A refused step emits no `planStep`, so the
+     diagnostic rides `perStepResults[].diagnostics` and `error.detail.diagnostics`.
+     Recorded behaviour change: a Cut that previously "succeeded" while removing
+     nothing now fails by name — `worker/tests/test_revolve_boolean_modes.cpp`'s
+     `revolve-cut-miss` case flips to assert the refusal (plan decision A-3), and
+     `test_preview_op.cpp`'s Cut fixture was moved onto a profile that genuinely
+     overlaps its target (it had been asserting "Cut ACTUALLY subtracts" over a
+     boolean that removed exactly zero).
+
+  Cross-track fixture: `protocol/fixtures/sketch_host_face_reseat.ndjson`
+  (`canonical_sketch_host_face_reseat`). Numbers:
+  `worker/tests/test_sketch_host_reseat.cpp`. Rust: `src-tauri/tests/sketch_on_face.rs`.
 
 - **2026-09-13 — §9 FeaturePattern repair-item extras documented; `ladderFailed` kept closed.**
   [§9](#9-needsrepair-payload) Records the wire surface the worker has emitted since

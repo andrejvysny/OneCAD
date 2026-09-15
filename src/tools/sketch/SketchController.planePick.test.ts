@@ -100,7 +100,7 @@ describe("SketchController plane-pick", () => {
   }
 
   it("bare sketch entry shows the plane picker and does NOT enter a session", async () => {
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     await flush();
 
     expect(engineMock.setPlanePickerVisible).toHaveBeenCalledWith(true);
@@ -109,7 +109,7 @@ describe("SketchController plane-pick", () => {
   });
 
   it("a click on a plane creates the sketch and opens the session", async () => {
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     await flush();
 
     hitKind = "XZ";
@@ -129,7 +129,7 @@ describe("SketchController plane-pick", () => {
   });
 
   it("Esc during the pick cancels back to model without entering a session", async () => {
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     await flush();
     expect(engineMock.setPlanePickerVisible).toHaveBeenCalledWith(true);
 
@@ -149,7 +149,7 @@ describe("SketchController plane-pick", () => {
     });
     clientMock.enterSketch.mockImplementationOnce(() => deferred);
 
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     await flush(); // beginPlanePick
 
     hitKind = "XZ";
@@ -178,7 +178,7 @@ describe("SketchController plane-pick", () => {
     clientMock.enterSketch.mockImplementationOnce(() => new Promise<SketchSession>((resolve) => {
       resolveEnter = resolve;
     }));
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     await flush();
     hitKind = "XZ";
     pointer("pointerdown", 100, 100, 0, 1);
@@ -186,7 +186,7 @@ describe("SketchController plane-pick", () => {
     await flush();
 
     toolStore.getState().setMode("model");
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     resolveEnter(makeSession({ newOnPlane: "XZ" }));
     await flush();
     await flush();
@@ -207,14 +207,14 @@ describe("SketchController plane-pick", () => {
       discarded: false,
       keptReason: "history changed",
     });
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     await flush();
     hitKind = "XZ";
     pointer("pointerdown", 100, 100, 0, 1);
     pointer("pointerup", 100, 100, 0, 0);
     await flush();
     toolStore.getState().setMode("model");
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     resolveEnter(makeSession({ newOnPlane: "XZ" }));
     await flush();
     await flush();
@@ -228,7 +228,7 @@ describe("SketchController plane-pick", () => {
   });
 
   it("Cancel delegates removal of this visit's sketch to the atomic backend cancel", async () => {
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     await flush();
     hitKind = "XZ";
     pointer("pointerdown", 100, 100, 0, 1);
@@ -246,7 +246,7 @@ describe("SketchController plane-pick", () => {
   });
 
   it("Esc after a plane pick KEEPS the sketch (only Cancel discards)", async () => {
-    toolStore.getState().setMode("sketch");
+    toolStore.getState().setMode("sketch", undefined, { tool: "line" });
     await flush();
     hitKind = "XZ";
     pointer("pointerdown", 100, 100, 0, 1);
@@ -262,7 +262,7 @@ describe("SketchController plane-pick", () => {
   });
 
   it("an explicit id skips the picker and enters that sketch directly", async () => {
-    toolStore.getState().setMode("sketch", "sketch2");
+    toolStore.getState().setMode("sketch", "sketch2", { tool: "line" });
     await flush();
 
     expect(engineMock.setPlanePickerVisible).not.toHaveBeenCalled();

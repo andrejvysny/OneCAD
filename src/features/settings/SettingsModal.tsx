@@ -42,15 +42,15 @@ const DEVICE_OPTIONS: SegmentedOption<DevicePref>[] = [
 
 const SNAP_ROWS: { key: SnapKey; label: string }[] = [
   { key: "grid", label: "Grid" },
-  { key: "sketchGuideLines", label: "Sketch guide lines" },
-  { key: "sketchGuidePoints", label: "Sketch guide points" },
+  { key: "sketchGuideLines", label: "Alignment guides" },
+  { key: "sketchGuidePoints", label: "Snap to sketch points (end, mid, center)" },
   { key: "quadrant", label: "Quadrant points" },
   { key: "intersection", label: "Intersections" },
   { key: "onCurve", label: "On-curve points" },
 ];
 
 const SHOW_ROWS: { key: ShowKey; label: string }[] = [
-  { key: "guidePoints", label: "Guide points" },
+  { key: "guidePoints", label: "Show point markers" },
   { key: "snappingHints", label: "Snapping hints" },
   { key: "liveDimensions", label: "Live dimensions" },
   { key: "constraintChips", label: "Constraint chips" },

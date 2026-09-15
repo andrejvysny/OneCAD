@@ -206,7 +206,9 @@ export function modelingTreeSections(): readonly TreeSection[] {
           // Select FIRST, then flip: SketchController's
           // `tryEnterOnSelectedDatum` reads the selection when the mode changes.
           selectionStore.getState().set([{ kind: "datum", id: d.id }]);
-          setMode("sketch");
+          // A NEW sketch on the datum: keep Line armed on entry (FP-S13 reserves
+          // the bare Select default for RE-OPENING an existing sketch).
+          setMode("sketch", undefined, { tool: "line" });
         },
         // No `rename`: DATUM W1 ships no RenameDatum command, so offering the
         // affordance would be a dead end.

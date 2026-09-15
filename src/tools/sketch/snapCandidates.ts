@@ -38,6 +38,7 @@ import {
   metricTensor,
   tensorDot,
   SEMANTIC_BIAS_PX,
+  SNAP_KIND_LABEL,
   ORIGIN_CORE_PX,
   CANDIDATE_DEDUPE_TOL,
   type FrontendPointRef,
@@ -910,6 +911,8 @@ export interface CandidateContext {
   reachPx: number;
   /** Grid's own, cell-relative reach. */
   gridReachPx: number;
+  /** Alignment guides' own reach — see `snapTypes.guideReachPx`. */
+  guideReachPx: number;
   sources: SnapSourceToggles;
   polarAnchor?: Point2 | null;
   polarRefDir?: Point2 | null;
@@ -942,17 +945,6 @@ function biasFor(kind: SnapKind, errorPx: number): number {
   }
 }
 
-const KIND_LABEL: Partial<Record<SnapKind, string>> = {
-  origin: "Origin",
-  endpoint: "Endpoint",
-  midpoint: "Midpoint",
-  center: "Center",
-  quadrant: "Quadrant",
-  intersection: "Intersection",
-  onCurve: "On Curve",
-  grid: "Grid",
-};
-
 /** Build a full-point candidate (the common shape for every geometry snap). */
 function pointCandidate(args: {
   id: string;
@@ -975,7 +967,7 @@ function pointCandidate(args: {
     errorPx: args.errorPx,
     semanticBiasPx: bias,
     scorePx: args.errorPx + bias,
-    label: args.label ?? KIND_LABEL[args.kind] ?? "",
+    label: args.label ?? SNAP_KIND_LABEL[args.kind] ?? "",
     guides: [],
     refs: args.refs ?? [],
     relationIntents: args.relationIntents ?? [],
@@ -1102,7 +1094,44 @@ export function generateCandidates(ctx: CandidateContext): SnapCandidate[] {
   // Stable order: the arbitration sorts by (score, id), but a deterministic
   // generation order makes the trace readable and the tests diffable.
   out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  return out;
+  return dropShadowedOnCurve(out);
+}
+
+/** Two points are the SAME point below this, in plane units (UX review S2). */
+const NAMED_POINT_COINCIDENCE_TOL = 1e-6;
+
+/** The named point kinds an `onCurve` candidate must never stand in for. */
+const NAMED_POINT_KINDS: ReadonlySet<SnapKind> = new Set<SnapKind>([
+  "endpoint",
+  "midpoint",
+  "center",
+  "quadrant",
+]);
+
+/**
+ * Drop an `onCurve` candidate that resolves to the SAME point as a named one.
+ *
+ * `nearestOnCurveMetric` clamps to the segment's own endpoint, so hovering an
+ * endpoint — or a midpoint, or a circle's centre-adjacent quadrant — generates
+ * BOTH the named candidate and an `onCurve` candidate at the identical
+ * coordinate. They then place identically and differ only by a ±1px bias, so
+ * arbitration could name the click "On curve" while `autoConstrain` (which
+ * matches coordinates after the commit, not the badge) authored Coincident or
+ * Midpoint. That is UX review S2: "the badge names the wrong snap" — the label
+ * is the whole contract between the user and the engine, and a duplicate that
+ * says less about the same coordinate has nothing to add.
+ *
+ * Only an EXACT coincidence is dropped: an `onCurve` point a hair off a vertex
+ * is a genuinely different placement and keeps competing on score.
+ */
+function dropShadowedOnCurve(candidates: SnapCandidate[]): SnapCandidate[] {
+  const named = candidates.filter((c) => NAMED_POINT_KINDS.has(c.kind));
+  if (named.length === 0) return candidates;
+  return candidates.filter(
+    (c) =>
+      c.kind !== "onCurve" ||
+      !named.some((n) => dist(n.previewPoint, c.previewPoint) <= NAMED_POINT_COINCIDENCE_TOL),
+  );
 }
 
 function relationForCachedPoint(c: CachedPointCandidate): readonly SnapRelationIntent[] {
@@ -1163,8 +1192,12 @@ function guideCandidates(ctx: CandidateContext): SnapCandidate[] {
     // reach depend on zoom.
     const dx = metricNorm(ctx.metric, r.point.x - ctx.raw.x, 0);
     const dy = metricNorm(ctx.metric, 0, r.point.y - ctx.raw.y);
-    if (dx <= ctx.reachPx && (bestX === null || dx < bestX.d - EPS)) bestX = { r, d: dx };
-    if (dy <= ctx.reachPx && (bestY === null || dy < bestY.d - EPS)) bestY = { r, d: dy };
+    // The guide's OWN reach, not the shared release radius (SNAP S5): an
+    // alignment is worth advertising from further out than a point is worth
+    // grabbing from.
+    const reach = Math.max(ctx.reachPx, ctx.guideReachPx);
+    if (dx <= reach && (bestX === null || dx < bestX.d - EPS)) bestX = { r, d: dx };
+    if (dy <= reach && (bestY === null || dy < bestY.d - EPS)) bestY = { r, d: dy };
   }
   const out: SnapCandidate[] = [];
   if (bestX) {

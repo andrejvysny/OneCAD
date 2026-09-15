@@ -151,6 +151,7 @@ fn published(generation: u64) -> Arc<ModelSnapshot> {
         diagnostics: vec![],
         diagnostics_by_step: std::collections::BTreeMap::new(),
         repair_summary: RepairSummary::default(),
+        sketch_placement_by_step: std::collections::BTreeMap::new(),
     })
 }
 

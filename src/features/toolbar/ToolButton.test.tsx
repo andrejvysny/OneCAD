@@ -10,7 +10,7 @@ describe("ToolButton", () => {
     render(<ToolButton icon="fillet" label="Fillet / Chamfer" shortcut="F" active={false} onClick={onClick} />);
     const button = screen.getByRole("button", { name: "Fillet / Chamfer" });
     await user.hover(button);
-    expect(screen.getByRole("tooltip")).toHaveTextContent("Fillet / Chamfer (F)");
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Fillet / Chamfer (F)");
     await user.click(button);
     expect(onClick).toHaveBeenCalledTimes(1);
   });
@@ -57,7 +57,18 @@ describe("ToolButton", () => {
     );
     const button = screen.getByRole("button", { name: "Shell" });
     await user.hover(button);
-    expect(screen.getByRole("tooltip")).toHaveTextContent("Select faces to remove, then Shell");
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Select faces to remove, then Shell");
     expect(screen.queryByText("Shell (K)")).not.toBeInTheDocument();
+  });
+
+  // C11: a tool registered without a shortcut (e.g. Library) must not render
+  // "Label ()" — the empty-shortcut case falls back to the bare label.
+  it("C11: an empty shortcut renders the bare label, not 'Label ()'", async () => {
+    const user = userEvent.setup();
+    render(<ToolButton icon="select" label="Library" shortcut="" active={false} onClick={vi.fn()} />);
+    const button = screen.getByRole("button", { name: "Library" });
+    await user.hover(button);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Library");
+    expect(screen.queryByText("Library ()")).not.toBeInTheDocument();
   });
 });

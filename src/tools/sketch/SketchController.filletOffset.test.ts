@@ -126,7 +126,7 @@ describe("SketchController — Sketch Fillet + Offset (WP-C T2b)", () => {
       client: clientMock as unknown as CadClient,
       container,
     });
-    toolStore.getState().setMode("sketch", "sketch1");
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" });
     await flush();
     sketchStore.setState({ entitySeq: 10, constraintSeq: 10 });
   });

@@ -1115,10 +1115,46 @@ async fn add_sketch_on_face_projects_the_top_face_boundary_as_locked_geometry() 
     let primary = face.primary.as_ref().expect("the picked face is bound");
     assert_eq!(primary.body, body);
     assert_eq!(primary.kind, onecad_core::document::refs::ElementKind::Face);
+    // THE FROZEN ANCHOR IS A POINT ON THE FACE (SCHEMA §7.6 `exact.anchor`), not
+    // the plane LOCATION. The two are different points even here: this cap's
+    // `gp_Pln` location is one of its own CORNERS, and on an imported body it is
+    // routinely outside the face altogether — where it contributes 0 to the
+    // resolution ladder's `anchor` feature and keeps a correct, unambiguous host
+    // below the auto-bind gate for good, because re-picking freezes the same miss.
     let anchor = face.anchor.as_ref().expect("an anchor is captured");
     assert!(
         (anchor.world_point.z - BOX_H).abs() < 1e-9,
-        "the anchor is the kernel-exact ON-plane origin, not a bbox centre"
+        "the anchor lies on the host cap's plane at z = {BOX_H}, got {:?}",
+        anchor.world_point
+    );
+    // Expressed in the sketch's own UV, it is STRICTLY inside the projected
+    // outline — i.e. genuinely on the face, not merely on its plane. (The worker
+    // classifies it with `BRepClass_FaceClassifier`; this is the same claim read
+    // back through the only geometry Rust has.)
+    let to_uv = |w: onecad_core::math::Vec3| {
+        let d = [
+            w.x - dto.plane.origin[0],
+            w.y - dto.plane.origin[1],
+            w.z - dto.plane.origin[2],
+        ];
+        let dot = |a: [f64; 3]| d[0] * a[0] + d[1] * a[1] + d[2] * a[2];
+        [dot(dto.plane.x_axis), dot(dto.plane.y_axis)]
+    };
+    let auv = to_uv(anchor.world_point);
+    assert!(
+        auv[0] > umin + 1e-6
+            && auv[0] < umax - 1e-6
+            && auv[1] > vmin + 1e-6
+            && auv[1] < vmax - 1e-6,
+        "the anchor sits strictly inside the cap's outline u∈({umin},{umax}) \
+         v∈({vmin},{vmax}), got {auv:?}"
+    );
+    // …and it is NOT the plane origin the sketch's BASIS was built from. That
+    // origin is still the kernel-exact one; only the ANCHOR moved.
+    assert!(
+        auv[0].abs() > 1e-6 || auv[1].abs() > 1e-6,
+        "the anchor is distinct from the plane LOCATION (which is at u=v=0 by \
+         construction), got {auv:?}"
     );
 
     wm.shutdown().await;
@@ -1936,6 +1972,556 @@ async fn a_host_cut_extrude_removes_material_from_the_host_body() {
         "the cut face is the new top at z ≈ {}, got {}",
         BOX_H - DEPTH,
         view.bbox_max[2]
+    );
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (m) UX-2026-09-14 WP-1 / B1 — a sketch glued to a solid FACE FOLLOWS that face
+//     through a parametric edit of its host, halts by name when it cannot, and a
+//     Cut that removes nothing is refused.
+//
+//     Design: `docs/design/astra/sketch-host-face-transport.md` (A1). These are
+//     the END-TO-END assertions over the real worker; the transport NUMBERS live
+//     in `worker/tests/test_sketch_host_reseat.cpp` and the wire contract in
+//     `protocol/fixtures/sketch_host_face_reseat.ndjson`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Re-plan the host box to `height` mm through the real edit path. The op is
+/// rebuilt from the same constructor `box_with_projected_top` used, so the
+/// distance is the ONLY difference.
+async fn edit_host_height(state: &AppState, height: f64) {
+    let mut guard = state.runtime.lock().await;
+    guard
+        .as_mut()
+        .expect("runtime")
+        .apply(EditCommand::UpdateOperationParams {
+            record: RecordId(Uuid::from_u128(EXTRUDE_A)),
+            op: extrude_record(EXTRUDE_A, SketchId(Uuid::from_u128(0xF)), height).op,
+        })
+        .expect("edit the host extrude's distance");
+}
+
+/// The document as it round-trips to disk — the only route to a sketch's AUTHORED
+/// `plane`, its DERIVED `resolved_plane` and the timeline record's frozen plane
+/// (none of the three is on a DTO).
+async fn saved_document(
+    state: &AppState,
+    path: &std::path::Path,
+) -> onecad_core::document::Document {
+    {
+        let mut guard = state.runtime.lock().await;
+        guard
+            .as_mut()
+            .expect("runtime")
+            .save(path, save_meta())
+            .expect("save");
+    }
+    ContainerReader::open(path)
+        .expect("reopen container")
+        .document()
+        .clone()
+}
+
+/// `(record id, the record's frozen plane origin z)` for `sid`'s `Sketch` record.
+/// `finish_sketch` mints that record with a FRESH id, so it can only be found by
+/// matching the sketch it carries.
+fn sketch_record_of(
+    doc: &onecad_core::document::Document,
+    sid: SketchId,
+) -> (RecordId, SketchOpParams) {
+    doc.timeline
+        .records()
+        .iter()
+        .find_map(|r| match &r.op {
+            Operation::Known(KnownOperation::Sketch(p)) if p.sketch == sid => {
+                Some((r.record_id, p.clone()))
+            }
+            _ => None,
+        })
+        .expect("the sketch's timeline record")
+}
+
+/// The EFFECTIVE plane origin the frontend is handed (`sketch_wire` publishes
+/// `resolved_plane` when a host moved the sketch, else the authored frame).
+fn session_plane_origin(session: &SketchSessionDto) -> [f64; 3] {
+    let o = session.plane["origin"].as_array().expect("plane.origin");
+    [
+        o[0].as_f64().expect("x"),
+        o[1].as_f64().expect("y"),
+        o[2].as_f64().expect("z"),
+    ]
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_face_hosted_sketch_follows_its_host_through_a_parametric_edit() {
+    if real_worker().is_none() {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    }
+    let (wm, app, sid, host, _snap) = box_with_projected_top().await;
+    let state: tauri::State<'_, AppState> = app.state();
+    state_enter(&state, sid).await;
+    let regions = state_finish(&state, sid).await.regions;
+    assert_eq!(regions.len(), 1);
+
+    // A pocket cut INTO the host off the projected boundary (negative against the
+    // host face's outward normal — the direction-aware default's Cut).
+    const DEPTH: f64 = 7.0;
+    state_add_op(
+        &state,
+        host_extrude_record(
+            OP_TAIL,
+            sid,
+            &regions[0].region_id,
+            -DEPTH,
+            BooleanMode::Cut,
+            host,
+        ),
+    )
+    .await;
+    published(&state_regen(&state).await, "pocket at the authored height");
+    let before = state_get_sketch(&state, sid).await;
+    assert!(
+        (session_plane_origin(&before)[2] - BOX_H).abs() < 1e-9,
+        "the sketch starts on the authored cap at z = {BOX_H}, got {:?}",
+        session_plane_origin(&before)
+    );
+
+    // ── The edit: the host is re-planned 10 mm shorter ───────────────────────
+    const EDITED_H: f64 = 15.0;
+    edit_host_height(&state, EDITED_H).await;
+    let report = state_regen(&state).await;
+    published(&report, "host edited 25 → 15");
+
+    // 1. The sketch FOLLOWED. Pinned at 1e-9: this is a plane-to-plane distance
+    //    between two faces the extrude placed exactly, not a measurement.
+    let after = state_get_sketch(&state, sid).await;
+    let origin = session_plane_origin(&after);
+    assert!(
+        (origin[2] - EDITED_H).abs() < 1e-9,
+        "the sketch re-seats onto the cap at z = {EDITED_H}, got {origin:?}"
+    );
+    assert!(
+        origin[0].abs() < 1e-9 && origin[1].abs() < 1e-9,
+        "only the NORMAL component moves — a projected origin never drifts \
+         tangentially, got {origin:?}"
+    );
+    // The basis is carried verbatim (n₁ == n₀ exactly ⇒ nothing is rebuilt).
+    assert_eq!(before.plane["xAxis"], after.plane["xAxis"]);
+    assert_eq!(before.plane["yAxis"], after.plane["yAxis"]);
+    assert_eq!(before.plane["normal"], after.plane["normal"]);
+
+    // 2. The POCKET followed with it: the cut is 7 mm below the NEW cap, so the
+    //    solid is exactly the edited box minus the full-footprint pocket. Had the
+    //    sketch stayed at z = 25 the tool would have floated above the solid and
+    //    the Cut would have been refused outright (`CUT_NO_EFFECT`).
+    let mesh = state_mesh(&state, host).await;
+    let view = validate_mesh_blob(&mesh).expect("re-seated MESH1");
+    let vol = mesh_volume(&view, &mesh);
+    let want = BOX_W * BOX_D * (EDITED_H - DEPTH);
+    assert!(
+        (vol - want).abs() < 1.0,
+        "the pocket followed: {BOX_W}·{BOX_D}·({EDITED_H}−{DEPTH}) = {want}, got {vol}"
+    );
+
+    // 3. The worker said so, on the record's own step.
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "SKETCH_HOST_RESEATED"),
+        "the re-seat is reported, got {:?}",
+        report
+            .diagnostics
+            .iter()
+            .map(|d| &d.code)
+            .collect::<Vec<_>>()
+    );
+
+    // 4. The AUTHORED frame is untouched — in the sketch AND in the timeline
+    //    record. That separation is what keeps a host-face move out of the planner
+    //    hash and out of the undo stack.
+    let dir = tempfile::tempdir().unwrap();
+    let doc = saved_document(&state, &dir.path().join("Followed.onecad")).await;
+    let sketch = doc.sketch(sid).expect("the sketch");
+    assert!(
+        (sketch.plane.origin.z - BOX_H).abs() < 1e-9,
+        "Sketch::plane STAYS the authored frame at z = {BOX_H}, got {}",
+        sketch.plane.origin.z
+    );
+    let (_, record_params) = sketch_record_of(&doc, sid);
+    assert!(
+        (record_params.plane.origin.z - BOX_H).abs() < 1e-9,
+        "the timeline record's plane STAYS authored at z = {BOX_H}, got {}",
+        record_params.plane.origin.z
+    );
+    let resolved = sketch.resolved_plane.expect("a derived frame was adopted");
+    assert!((resolved.origin.z - EDITED_H).abs() < 1e-9);
+    assert!((sketch.effective_plane().origin.z - EDITED_H).abs() < 1e-9);
+
+    // 5. UNDO returns the host to 25 and the derived frame is CLEARED, not left
+    //    stale: the worker reports the host resolved-and-unmoved and Rust drops it.
+    {
+        let mut guard = state.runtime.lock().await;
+        guard.as_mut().expect("runtime").undo().expect("undo");
+    }
+    published(&state_regen(&state).await, "after undo");
+    let back = state_get_sketch(&state, sid).await;
+    assert!(
+        (session_plane_origin(&back)[2] - BOX_H).abs() < 1e-9,
+        "undo puts the sketch back on the authored cap, got {:?}",
+        session_plane_origin(&back)
+    );
+    let doc = saved_document(&state, &dir.path().join("Undone.onecad")).await;
+    assert_eq!(
+        doc.sketch(sid).expect("sketch").resolved_plane,
+        None,
+        "the derived frame is CLEARED, never left as a stale intermediate"
+    );
+    wm.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_vanished_host_face_halts_the_plan_and_leaves_the_sketch_authored() {
+    if real_worker().is_none() {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    }
+    let (wm, app, sid, host, _snap) = box_with_projected_top().await;
+    let state: tauri::State<'_, AppState> = app.state();
+    state_enter(&state, sid).await;
+    let regions = state_finish(&state, sid).await.regions;
+    state_add_op(
+        &state,
+        host_extrude_record(
+            OP_TAIL,
+            sid,
+            &regions[0].region_id,
+            -7.0,
+            BooleanMode::Cut,
+            host,
+        ),
+    )
+    .await;
+    published(&state_regen(&state).await, "pocket");
+
+    let dir = tempfile::tempdir().unwrap();
+    let (sketch_record, _) = sketch_record_of(
+        &saved_document(&state, &dir.path().join("Before.onecad")).await,
+        sid,
+    );
+
+    // SUPPRESS the op that produces the host body: the face the sketch is glued to
+    // stops existing. A regen replays from 0 against a genuinely empty base, so the
+    // body is gone from the plan's world, not merely re-planned.
+    {
+        let mut guard = state.runtime.lock().await;
+        guard
+            .as_mut()
+            .expect("runtime")
+            .apply(EditCommand::SetOperationSuppression {
+                record: RecordId(Uuid::from_u128(EXTRUDE_A)),
+                suppressed: true,
+                cascade: false,
+            })
+            .expect("suppress the host extrude");
+    }
+    let report = state_regen(&state).await;
+
+    // The §9 item addresses the sketch's own host slot — `element_refs_mut`'s
+    // `Sketch` arm returns `host_face` at index 0 — so a repair UI can rebind it
+    // like any other typed ref.
+    let want_ref = format!("{sketch_record}.input0");
+    assert!(
+        report.needs_repair.iter().any(|i| i.ref_id == want_ref),
+        "the Sketch step reports NeedsRepair at {want_ref}, got {:?}",
+        report
+            .needs_repair
+            .iter()
+            .map(|i| (&i.ref_id, &i.reason))
+            .collect::<Vec<_>>()
+    );
+
+    // The plan HALTED at m−1: the downstream Cut never ran, so no body is published
+    // at a guessed plane. The host's body is gone with its suppressed producer.
+    assert!(
+        report.changed.is_empty(),
+        "nothing downstream publishes, got {:?}",
+        report.changed
+    );
+    assert!(
+        report.removed.contains(&host),
+        "the suppressed host takes its body with it, got {:?}",
+        report.removed
+    );
+
+    // The SKETCH is still in the document, at its AUTHORED frame — never dropped,
+    // never silently moved — and its derived frame is cleared rather than stale.
+    let doc = saved_document(&state, &dir.path().join("Vanished.onecad")).await;
+    let sketch = doc.sketch(sid).expect("the sketch survives its host");
+    assert!((sketch.plane.origin.z - BOX_H).abs() < 1e-9);
+    assert_eq!(sketch.resolved_plane, None);
+    assert!(
+        (session_plane_origin(&state_get_sketch(&state, sid).await)[2] - BOX_H).abs() < 1e-9,
+        "the sketch still displays at its authored frame"
+    );
+    wm.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cut_that_removes_no_material_is_refused_by_name() {
+    if real_worker().is_none() {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    }
+    let (wm, app, sid, host, _snap) = box_with_projected_top().await;
+    let state: tauri::State<'_, AppState> = app.state();
+    state_enter(&state, sid).await;
+    let regions = state_finish(&state, sid).await.regions;
+
+    // A `Cut` whose tool grows AWAY from the host: it starts exactly on the cap the
+    // sketch sits on and rises out of the solid, so the boolean touches the target
+    // and subtracts precisely zero — the imprint case. Before WP-1 this published a
+    // body byte-identical to its target and reported success.
+    state_add_op(
+        &state,
+        host_extrude_record(
+            OP_TAIL,
+            sid,
+            &regions[0].region_id,
+            7.0,
+            BooleanMode::Cut,
+            host,
+        ),
+    )
+    .await;
+    let report = state_regen(&state).await;
+
+    let failed = report
+        .failed_steps
+        .first()
+        .unwrap_or_else(|| panic!("the imprint Cut FAILS, got {:?}", report.outcome));
+    assert_eq!(
+        failed.record_id,
+        RecordId(Uuid::from_u128(OP_TAIL)).to_string(),
+        "the failure is attributed to the Cut, not to the sketch"
+    );
+    assert!(
+        report.diagnostics.iter().any(|d| d.code == "CUT_NO_EFFECT"),
+        "refused by name, got {:?}",
+        report
+            .diagnostics
+            .iter()
+            .map(|d| &d.code)
+            .collect::<Vec<_>>()
+    );
+
+    // The target is INTACT at its full volume — a refusal publishes nothing.
+    let mesh = state_mesh(&state, host).await;
+    let view = validate_mesh_blob(&mesh).expect("intact MESH1");
+    let vol = mesh_volume(&view, &mesh);
+    let want = BOX_W * BOX_D * BOX_H;
+    assert!(
+        (vol - want).abs() < 1.0,
+        "the refused Cut left the host untouched at {want}, got {vol}"
+    );
+    wm.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_record_without_a_host_face_stays_frozen_across_a_host_edit() {
+    if real_worker().is_none() {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    }
+    // The LEGACY shape (VF-B5a no-backfill): the sketch is attached to the host
+    // face in the DOCUMENT, but its timeline record carries no `host_face` — which
+    // is every record minted before the attachment was stamped, and is deliberately
+    // never backfilled at load (that would move the golden prefix hash). Such a
+    // record must behave EXACTLY as it did before this work package: frozen plane,
+    // no re-seat, no diagnostic.
+    let (wm, app, sid, _host, _snap) = box_with_projected_top().await;
+    let state: tauri::State<'_, AppState> = app.state();
+    state_enter(&state, sid).await;
+    state_finish(&state, sid).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (record, mut params) = sketch_record_of(
+        &saved_document(&state, &dir.path().join("Stamped.onecad")).await,
+        sid,
+    );
+    assert!(
+        params.host_face.is_some(),
+        "the freshly minted record DOES stamp its host (the case this test then \
+         strips back to the legacy shape)"
+    );
+    let authored_z = params.plane.origin.z;
+    params.host_face = None;
+    {
+        let mut guard = state.runtime.lock().await;
+        guard
+            .as_mut()
+            .expect("runtime")
+            .apply(EditCommand::UpdateOperationParams {
+                record,
+                op: Operation::Known(KnownOperation::Sketch(params)),
+            })
+            .expect("de-stamp the host face");
+    }
+    published(&state_regen(&state).await, "legacy-shaped record");
+
+    const EDITED_H: f64 = 15.0;
+    edit_host_height(&state, EDITED_H).await;
+    let report = state_regen(&state).await;
+    published(&report, "host edited under a legacy record");
+
+    assert!(
+        !report
+            .diagnostics
+            .iter()
+            .any(|d| d.code.starts_with("SKETCH_HOST_")),
+        "a record with no hostFace emits no re-seat diagnostic, got {:?}",
+        report
+            .diagnostics
+            .iter()
+            .map(|d| &d.code)
+            .collect::<Vec<_>>()
+    );
+    let session = state_get_sketch(&state, sid).await;
+    assert!(
+        (session_plane_origin(&session)[2] - authored_z).abs() < 1e-9,
+        "the frozen plane stays at z = {authored_z} exactly as before WP-1, got {:?}",
+        session_plane_origin(&session)
+    );
+    let doc = saved_document(&state, &dir.path().join("Legacy.onecad")).await;
+    assert_eq!(
+        doc.sketch(sid).expect("sketch").resolved_plane,
+        None,
+        "nothing derived is adopted for a record that declares no host"
+    );
+
+    wm.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_resolved_below_the_gate_halts_the_plan_with_a_ladder_item() {
+    if real_worker().is_none() {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    }
+    // The shape that actually exists on disk in documents written before host-face
+    // tracking: `host_face` IS stamped (VF-B5a has stamped it since that work
+    // package) but its `intent` is NOT, because `element_refs_mut` had no `Sketch`
+    // arm to fill it and the no-backfill discipline forbids adding one at load.
+    //
+    // The construction reproduces the EXACT arithmetic of the imported-cap case
+    // that forced WP-1's escape: the descriptor still matches the cap perfectly, so
+    // the descriptor features contribute their full 0.75, and the frozen anchor sits
+    // far enough off the face that the ladder's `anchor` feature (weight 0.25)
+    // contributes 0. Total 0.75, under the 0.85 auto-bind gate ⇒ `low-confidence`.
+    //
+    // That is precisely what an imported STEP cap measured while `add_sketch_on_face`
+    // froze the face's `gp_Pln` LOCATION as the anchor — the correct face, margin
+    // 0.20, score 0.75 — and re-picking re-froze the same location, so WP-1 could
+    // only degrade it to an info diagnostic. With an on-face anchor (SCHEMA §7.6
+    // `exact.anchor`) a real pick never lands here, so a shortfall means what it
+    // says and HALTS: deterministic `NeedsRepair` beats cutting against a plane
+    // nobody can vouch for, and re-picking the face is a real fix.
+    let (wm, app, sid, _host, _snap) = box_with_projected_top().await;
+    let state: tauri::State<'_, AppState> = app.state();
+    state_enter(&state, sid).await;
+    state_finish(&state, sid).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let doc = saved_document(&state, &dir.path().join("Stamped.onecad")).await;
+    let (record, mut params) = sketch_record_of(&doc, sid);
+    let authored_z = params.plane.origin.z;
+    let mut host = params.host_face.clone().expect("the stamped host ref");
+    assert!(
+        host.intent.is_some(),
+        "the descriptor IS stamped on mint — this case keeps it and moves the ANCHOR"
+    );
+    let anchor = host.anchor.as_mut().expect("the stamped anchor");
+    anchor.world_point = Vec3::new_unchecked(
+        anchor.world_point.x,
+        anchor.world_point.y,
+        anchor.world_point.z + 500.0,
+    );
+    params.host_face = Some(host);
+    {
+        let mut guard = state.runtime.lock().await;
+        guard
+            .as_mut()
+            .expect("runtime")
+            .apply(EditCommand::UpdateOperationParams {
+                record,
+                op: Operation::Known(KnownOperation::Sketch(params)),
+            })
+            .expect("move the frozen anchor off the host face");
+    }
+    let report = state_regen(&state).await;
+
+    let want_ref = format!("{record}.input0");
+    let item = report
+        .needs_repair
+        .iter()
+        .find(|i| i.ref_id == want_ref)
+        .unwrap_or_else(|| {
+            panic!(
+                "a host below the auto-bind gate HALTS at {want_ref}, got items {:?} and \
+                 diagnostics {:?}",
+                report
+                    .needs_repair
+                    .iter()
+                    .map(|i| (&i.ref_id, &i.reason))
+                    .collect::<Vec<_>>(),
+                report
+                    .diagnostics
+                    .iter()
+                    .map(|d| &d.code)
+                    .collect::<Vec<_>>()
+            )
+        });
+    // The LADDER's own token, not a sketch-specific one — a repair UI treats this
+    // item exactly like any other unresolved reference. `low-confidence` is the
+    // measured verdict: the score fell short, the margin did not.
+    assert_eq!(
+        item.reason, "low-confidence",
+        "the item carries the ladder's own reason for a score shortfall"
+    );
+    assert!(
+        item.candidate_count > 0,
+        "…and the ranked candidates ride along as repair evidence, got {}",
+        item.candidate_count
+    );
+    // The info-only escape is gone: a halt is reported through §9, never ALSO as a
+    // diagnostic.
+    assert!(
+        !report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "SKETCH_HOST_UNTRACKED"),
+        "SKETCH_HOST_UNTRACKED no longer exists, got {:?}",
+        report
+            .diagnostics
+            .iter()
+            .map(|d| &d.code)
+            .collect::<Vec<_>>()
+    );
+    // The SKETCH is Rust-owned document state, so it stays visible at its AUTHORED
+    // frame; what halts is everything downstream of it.
+    let session = state_get_sketch(&state, sid).await;
+    assert!(
+        (session_plane_origin(&session)[2] - authored_z).abs() < 1e-9,
+        "the sketch still displays at its authored plane z = {authored_z}, got {:?}",
+        session_plane_origin(&session)
+    );
+    let doc = saved_document(&state, &dir.path().join("Halted.onecad")).await;
+    assert_eq!(
+        doc.sketch(sid).expect("sketch").resolved_plane,
+        None,
+        "nothing derived is adopted for a host that could not be re-seated"
     );
     wm.shutdown().await;
 }

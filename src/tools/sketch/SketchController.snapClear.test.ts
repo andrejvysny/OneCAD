@@ -140,7 +140,7 @@ describe("SketchController — snap indicator clears (A3)", () => {
       client: clientMock as unknown as CadClient,
       container,
     });
-    toolStore.getState().setMode("sketch", "sketch1"); // default tool = line
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" }); // default tool = line
     await flush();
   });
 

@@ -364,7 +364,12 @@ function FeatureRow({
         <div
           data-testid={`history-details-${item.id}`}
           className={cn(
-            "mt-1 flex min-w-0 flex-wrap items-center gap-1 px-2.5",
+            "relative mt-1 flex min-w-0 flex-wrap items-center gap-1 px-2.5",
+            // The affordance cluster is an absolute overlay (below), so its
+            // width has to be reserved here instead of shared in the flex row —
+            // sharing it let a long value + the cluster wrap onto a second line,
+            // which is what actually shifted the list on selection (C10).
+            actions && "pr-20",
             editing && "flex-col items-stretch",
           )}
         >
@@ -454,10 +459,11 @@ function FeatureRow({
 
       {actions && (
         <div
-          className={cn(
-            "ml-auto flex flex-wrap items-center justify-end gap-1 opacity-100",
-            editing && "self-end",
-          )}
+          // C10: an absolutely positioned overlay so the cluster's own presence
+          // never changes the row's height — it always sits on top of the details
+          // row rather than sharing (and possibly wrapping) its flex layout.
+          // `opacity-100`: not hover-gated — every row's cluster stays visible.
+          className="absolute inset-y-0 right-2 flex items-center gap-1 opacity-100"
           // H10: the cluster becoming interactive is the "menu open" moment for the
           // dependent-count hint — fetched once, not on every render.
           onMouseEnter={ensureDeps}

@@ -95,7 +95,7 @@ describe("SketchController — Enter ends the line chain (U4)", () => {
       client: clientMock as unknown as CadClient,
       container,
     });
-    toolStore.getState().setMode("sketch", "sketch1"); // default tool = line
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" }); // default tool = line
     await flush();
   });
 

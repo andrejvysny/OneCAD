@@ -228,7 +228,10 @@ export function runAction(action: ShortcutAction): void {
       void activateTool(action.tool);
       break;
     case "enterSketch":
-      if (tool.mode === "model") tool.setMode("sketch");
+      // FP-S13: same New Sketch flow as the toolbar's "sketch" id
+      // (`activateTool`) — `setMode`'s bare-entry default is for RE-OPENING an
+      // existing sketch, not this. Keep Line armed on entry.
+      if (tool.mode === "model") tool.setMode("sketch", undefined, { tool: "line" });
       break;
     case "finishSketch":
       if (tool.mode === "sketch") void exitSketch("finish");

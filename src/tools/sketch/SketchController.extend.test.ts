@@ -107,7 +107,7 @@ describe("SketchController — Extend", () => {
       client: clientMock as unknown as CadClient,
       container,
     });
-    toolStore.getState().setMode("sketch", "sketch1");
+    toolStore.getState().setMode("sketch", "sketch1", { tool: "line" });
     await flush();
     sketchStore.setState({ entitySeq: 2, constraintSeq: 0 });
     toolStore.getState().setTool("extend");

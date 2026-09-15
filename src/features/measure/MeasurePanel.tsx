@@ -107,6 +107,7 @@ export function MeasurePanel() {
   const bodyId = measuredBodyId(picks);
   const documentId = useDocumentStore((s) => s.documentId);
   const runtimeSession = useDocumentStore((s) => s.runtimeSession);
+  const bodies = useDocumentStore((s) => s.bodies);
   useDocumentStore((s) => s.revision);
   const publication = createClient().getCurrentMeshPublication();
   const publishedDocumentId = publication?.documentId;
@@ -208,7 +209,7 @@ export function MeasurePanel() {
           <Row
             key={`${pick.elementId}-${index}`}
             label={`Pick ${index === 0 ? "A" : "B"}`}
-            value={pickReadout(pick)}
+            value={pickReadout(pick, bodies)}
             testid={`measure-pick-${index}`}
           />
         ))}

@@ -64,6 +64,17 @@ pub struct FaceFrame {
     pub origin: Vec3,
     /// Orientation-corrected unit normal.
     pub normal: Vec3,
+    /// A point the kernel classified **IN or ON** the seed face (SCHEMA §7.6
+    /// `exact.anchor`, OPTIONAL).
+    ///
+    /// This is NOT [`Self::origin`]: the plane origin is a property of the
+    /// surface, not of the face's boundary, and for an imported STEP body it
+    /// routinely lies far outside the face it came from — where it scores 0 on
+    /// the resolution ladder's `anchor` feature and keeps a correct, unambiguous
+    /// host below the auto-bind gate. Freeze THIS as an [`crate::document::AnchorIntent`]'s
+    /// `world_point`; fall back to `origin` only when the worker could produce no
+    /// such point (an annulus whose every candidate falls in its own hole).
+    pub anchor: Option<Vec3>,
 }
 
 impl FaceFrame {
@@ -71,10 +82,20 @@ impl FaceFrame {
     ///
     /// Used as the §7.6 handshake **tripwire**: the second round-trip echoes
     /// `exact`, and it must still describe the frame the first round-trip
-    /// reported, or the head moved underneath the two calls.
+    /// reported, or the head moved underneath the two calls. The anchor is part
+    /// of that comparison — two congruent coplanar faces share an origin and a
+    /// normal but not a boundary, so it is the component that would catch a
+    /// mid-handshake swap between them.
     #[must_use]
     pub fn approx_eq(&self, other: &Self, eps: f64) -> bool {
-        self.origin.approx_eq(&other.origin, eps) && self.normal.approx_eq(&other.normal, eps)
+        let anchors = match (self.anchor, other.anchor) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.approx_eq(&b, eps),
+            _ => false,
+        };
+        self.origin.approx_eq(&other.origin, eps)
+            && self.normal.approx_eq(&other.normal, eps)
+            && anchors
     }
 }
 

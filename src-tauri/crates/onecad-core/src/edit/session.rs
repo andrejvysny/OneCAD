@@ -67,7 +67,7 @@ use crate::document::repair::{LadderLevel, RepairItem, RepairReason};
 use crate::document::variables::{Scalar, Variable, VariableTable};
 use crate::document::Document;
 use crate::error::DomainError;
-use crate::history::{DependencyGraph, DirtyRange, Timeline};
+use crate::history::{DependencyGraph, DirtyRange, StepState, Timeline};
 use crate::ids::{BodyId, ElementId, RecordId, SketchId};
 use crate::math::{Vec2, Vec3};
 use crate::sketch::{Constraint, Sketch, SketchAttachment, SketchEntity, SketchError};
@@ -486,6 +486,63 @@ impl DocumentSession {
                 .document
                 .timeline
                 .set_place_component_placement(index, regen_params.placement.clone());
+        }
+        changed
+    }
+
+    /// Adopts the SCHEMA §7.2 `sketchPlacement` echoes from a just-committed regen
+    /// onto the document's face-hosted sketches as DERIVED state
+    /// ([`Sketch::resolved_plane`](crate::sketch::Sketch::resolved_plane)) —
+    /// UX-2026-09-14 WP-1.
+    ///
+    /// Deliberately NOT the same shape as
+    /// [`sync_mate_placements`](Self::sync_mate_placements): a re-seated mate writes
+    /// back onto its own timeline RECORD, while a re-seated sketch must not, because
+    /// the record's `plane` is the AUTHORED frame and moving it would move the
+    /// planner hash, every prefix hash after it, and the undo stack, for geometry the
+    /// user never edited. The placements therefore ride the published
+    /// [`ModelSnapshot`](crate::regen::ModelSnapshot) keyed by STEP and land on
+    /// `Document.sketches` instead.
+    ///
+    /// **Scoped to the records this plan actually REACHED.** For every executed
+    /// `Sketch` record whose step came back `Valid` or `NeedsRepair`, the derived
+    /// frame becomes the echoed placement — or `None` when the step reported none,
+    /// which is what "the host resolved and did not move", "this sketch has no host"
+    /// and "the host could not be re-seated" all mean. A step left `Dirty`
+    /// (the plan halted upstream and it never ran) or `Suppressed` carries NO
+    /// evidence and is left exactly as it was; guessing there would revert a
+    /// correctly seated sketch to its authored frame on an unrelated failure.
+    ///
+    /// Returns whether anything changed.
+    pub fn sync_sketch_placements(
+        &mut self,
+        regen_timeline: &Timeline,
+        executed: &BTreeSet<RecordId>,
+        placements: &BTreeMap<usize, crate::regen::SketchPlacement>,
+    ) -> bool {
+        let mut changed = false;
+        for &id in executed {
+            let Some(index) = regen_timeline.index_of(id) else {
+                continue;
+            };
+            let Some(regen_rec) = regen_timeline.record_by_id(id) else {
+                continue;
+            };
+            let Operation::Known(KnownOperation::Sketch(params)) = &regen_rec.op else {
+                continue;
+            };
+            match regen_timeline.state(index) {
+                Some(StepState::Valid) | Some(StepState::NeedsRepair) => {}
+                _ => continue,
+            }
+            let Some(sketch) = self.document.sketches.get_mut(&params.sketch) else {
+                continue;
+            };
+            let next = placements.get(&index).map(|p| p.plane);
+            if sketch.resolved_plane != next {
+                sketch.resolved_plane = next;
+                changed = true;
+            }
         }
         changed
     }
