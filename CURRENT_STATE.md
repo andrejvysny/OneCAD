@@ -1,3 +1,17 @@
+# CURRENT STATE — session 36 (2026-09-15, unified modeling controls, Phase B) — HANDOFF
+
+Last verified: 2026-09-15 15:54 (this session). Entry point: `HANDOFF.md`. Plan: `~/.claude/plans/analyze-this-plan-and-generic-sutherland.md`. Ledger: `TODO.md` § SESSION 36.
+
+- **Branch:** `master` at `3242c39b`, **4 commits ahead of `origin/master`** (`f438ced0`). Push not authorized. Working tree clean apart from `.claude/agent-memory/**`, which is never staged.
+- **Commit this session:** `3242c39b` — `DragHandle.orient()` now uses the true projected axis derivative instead of the camera-space shortcut; new pure module `src/tools/preview/handleProjection.ts`; `resolveDepth`'s half-span doc comment corrected. 7 files, +541/−25.
+- **Gate of record for `3242c39b`** (main thread, nothing else running): `bunx tsc --noEmit` ✓ · `bun run build` ✓ · `bun run test` **362 files / 6201 passed / 0 failed / 78 skipped** (baseline 361 / 6180 / 78 — the delta is exactly the 21 new cases) · hex **0** · coverage **34 / 9 / 17 / 20** · contracts **41 / 19 / 15** · Playwright chromium across all 16 specs that raycast the handle: **39 / 0** and **27 / 0**.
+- **NOT run, owed:** webkit for those 16 specs, and the full `bun run e2e` both projects. Frontend-only change — no Rust or worker gate applies, and none was run.
+- **Key decisions:**
+  - Phase A of the handed-over spec was NOT re-planned: `PLAN.md` already owned it and session 35 landed it. This session implements only the half `PLAN.md` does not cover, the handle and label architecture.
+  - `MIN_AXIS_CONDITIONING = 0.08` sits deliberately ABOVE `transformDrag.MIN_VIEW_SIN = 0.05`. The latter is where a projection turns destructive and must refuse; the former is where a handle should stop pretending and offer a labelled screen proxy. Strategy is chosen at grab, never mid-gesture.
+  - Only `handleProjection.ts` was built, not the `manipulationSession` / adapter scaffolding the plan also lists. Building those before a consumer exists would be speculative abstraction; they land with the package that needs them.
+- **Blockers:** none technical. One decision is owed before B3 — see `TODO.md` § SESSION 36 "Open".
+
 # CURRENT STATE — session 35 (2026-09-15, UX review 2026-09-14 fix program) — HANDOFF
 
 Last verified: 2026-09-15 15:27 (this session). Entry point: `HANDOFF.md`. Program: `PLAN.md`. Ledger: `TODO.md` § Gate ledger (measured counts only).

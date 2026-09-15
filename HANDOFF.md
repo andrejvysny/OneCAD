@@ -1,3 +1,62 @@
+# HANDOFF — session 36 (2026-09-15) — unified modeling controls, Phase B started
+
+Session 36 · 2026-09-15 · plan `~/.claude/plans/analyze-this-plan-and-generic-sutherland.md`
+
+## Goal
+
+Deliver the handed-over spec "Unified Modeling Controls and Direct Manipulation" v1.0 — compact parameter labels instead of floating operation panels, and one coherent family of bidirectional handles across every modeling tool.
+
+## Original plan
+
+The spec proposed eight work packages. Auditing it against the code split it in two, and only the second half is this session's work.
+
+Its correctness half was already owned by the repo's own `PLAN.md` and landed in session 35, so it was NOT re-planned. What remains — and what `~/.claude/plans/analyze-this-plan-and-generic-sutherland.md` covers — is B0…B7: shared projection and gesture math, the shared renderer and Extrude, compact labels and a stable operation strip, edge ops / Shell / Offset Face, angular tools and patterns, the transform gizmo, and lifecycle hardening.
+
+**The spec was a STATIC review — never built, never run — and three of its claims do not survive contact with the code.** They are recorded in `TODO.md` § SESSION 36 so nobody re-implements them:
+
+- **A09 / §9.5 "remove incidental click-away confirmation" — there is nothing to remove.** No click-away commit exists anywhere in `ModelToolController`. `isExcludedClickAwayTarget` is a fossil name wrapping `isInteractiveBoundaryTarget` and only excludes chip chrome from drag claims. Three stale comments still assert otherwise.
+- **D06 "explicit operation completion" is not a new decision.** `src/test/contracts/modelingInteractionContract.ts` already pins `clickAwayPolicy: "cancel"` on all 12 rows, and every drag release already returns to `armed`.
+- **§5.1 "unify `DragHandle` and `TransformGizmo`" reverses a recorded decision.** `src/viewport/engine/README.md` calls them "a deliberate SIBLING ... rather than a generalisation". Reversing it needs an explicit supersession.
+
+## Done so far (and why)
+
+One commit, `3242c39b`, behind a measured gate — counts in `CURRENT_STATE.md` and `TODO.md` § SESSION 36, never "all green".
+
+**B1 — the handle now points where the drag actually goes.** `DragHandle.orient()` derived the arrow's screen angle by rotating the world axis into CAMERA space and taking `atan2(y, x)`. That is exact for an ORTHOGRAPHIC camera only: perspective divides by `w`, so a world axis projects to a different screen direction depending on where in the frustum it is ANCHORED. The arrow was drawn along one direction while the drag mapped along another, and the gap widened with distance from the optical axis — the default camera is FOV 76, so that is most of the viewport. Neither the static spec nor the real-user UX review found this.
+
+New pure module `src/tools/preview/handleProjection.ts` computes the exact CSS-pixel derivative and follows the `transformDrag` conventions: number triples, no THREE, `null` as the only failure signal. `axisConditioning` reduces the same numbers to a 0–1 measure of how square-on an axis is, which is what will select a world-axis mapping or an honest screen proxy in the later packages.
+
+Reasoning worth keeping:
+
+- **The new test was proven load-bearing, not assumed.** Run against a temporarily restored old `orient()`, the `DragHandle` case fails with `expected +0 to be -0` — without an anchor term both handles hold the identical angle. A test that passes the moment you write it proves nothing.
+- **The projection was verified by hand, not just by its own test.** Camera at z=20, anchor (8,0,0), axis +Z gives 7.68 px and direction `[1,0]`, mirroring to `[-1,0]` at x=−8 — correct, because off-axis points spread outward from the vanishing point as they approach the camera.
+- **`resolveDepth`'s doc comment claimed symmetric `depth` is the HALF-span.** It is the TOTAL span, verified against `PreviewMesh.setDepth` and `extrudeHeadWorld`. Harmless while the function was dead, but session 35's FP-T2/T3 gave it a live caller, and `PreviewMesh` records that this exact 2× confusion once shipped: "the L1 used to draw 2·|depth| and the user approved a body twice the committed size."
+- **Only `handleProjection.ts` was built**, not the `manipulationSession` / adapter modules the plan also lists under B1. Building those before a consumer exists is speculative abstraction; they land with the package that needs them.
+
+Dead ends and process notes:
+
+- **The chamfer same-turn race did not reproduce** — 29/29 vitest, 21/21 chromium, 21/21 webkit, and 4/4 under a deliberate load average of 75. It had already been fixed in `87dd647d` during this session. Do not re-investigate it.
+- **The repo was under concurrent work for the first half of this session.** HEAD moved twice underneath me and 175 files were being rewritten. Test results gathered in that window were discarded as invalid for attribution. **Check `git log` and `git status` for concurrent activity before inducing load or running a gate on this machine** — a 12-way spin-loop reproduction attempt took the load average to 123 and may have perturbed the other session's timing.
+
+## How to resume
+
+1. Run the `handoff` skill with "resume".
+2. Read `~/.claude/plans/analyze-this-plan-and-generic-sutherland.md` (Phase B, B0…B7) and `TODO.md` § SESSION 36.
+3. The next package is **B2 — shared renderer and Extrude**: shorten and re-centre the glyph (currently a ~60 px forward silhouette), make renderer / hit test / keep-out consume one projected description, stop retiring `twoWay` on first grab, and correct the symmetric drag gain to 2× endpoint displacement. `handleProjection` is in place for it.
+4. **B0 and B4 are unblocked** — session 35's WP-5 landed screen-space edge picking (D9) and Fillet/Chamfer from a face selection, which is what made edges reachable at all.
+
+## Open questions
+
+- **`PLAN.md` D14 blocks B3.** It requires `modelingInteraction.golden` to stay green untouched, but moving Cancel out of `ModelToolChips` into a stable operation strip fails `modelingInteraction.golden.test.tsx`, which renders the chip and asserts a Cancel button inside it. The contract ROW `visibleCancel: true` stays true, so this is a PROBE change and `src/test/contracts/README.md` permits it — D14 as written does not. Needs a recorded decision before B3 starts.
+- **FP-T1 vs B3.** Session 35 spent ~140 lines moving the chip off the pick target; B3 replaces the chip wholesale. Drop FP-T1 rather than port it?
+- **Owed gates:** webkit for the 16 handle-raycasting specs, and a full `bun run e2e` both projects.
+
+## Pointers
+
+- Tasks and gate ledger → `TODO.md` § SESSION 36 · Snapshot → `CURRENT_STATE.md` · Correctness program → `PLAN.md`
+
+---
+
 # HANDOFF — session 35 (2026-09-15) — UX review 2026-09-14 fix program, boundary 2 committed
 
 Session 35 · 2026-09-15 · plan `~/.claude/plans/act-as-senior-software-imperative-boot.md` (copied to repo `PLAN.md`, status `ready`)
