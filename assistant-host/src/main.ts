@@ -28,6 +28,11 @@
  * correctness property rather than a preference.
  */
 import { claimStdout, createLogger, isLogLevel, LOG_LEVELS, type LogLevel } from "./log.js";
+// `node:path` is a builtin with no module-scope output, so it is safe above the
+// stdout claim for the same reason `./log.js` is. Everything the doc comment
+// above is about — a dependency printing during its own evaluation — needs a
+// dependency; this has none.
+import nodePath from "node:path";
 
 /**
  * Claimed only when this module IS the process, so that importing it from a
@@ -41,11 +46,25 @@ import type { AiProviderConfig } from "agentkit/contracts";
 import type { BridgePeer as BridgePeerType } from "./bridge/peer.js";
 
 /**
- * Where the store goes under the host's data directory. Fixed here rather than
- * passed, so the host names a directory it owns and this process names the one
- * file inside it that belongs to the assistant.
+ * Where the store goes under the host's data directory, as path SEGMENTS. Fixed
+ * here rather than passed, so the host names a directory it owns and this
+ * process names the one file inside it that belongs to the assistant.
+ *
+ * Segments rather than a `"a/b"` string because the separator is the platform's,
+ * and `path.join` is what knows which one that is.
  */
-const DB_RELATIVE_PATH = "assistant/agentkit.sqlite";
+const DB_RELATIVE_SEGMENTS = ["assistant", "agentkit.sqlite"] as const;
+
+/**
+ * The subset of `node:path` this module needs, so a test can hand it
+ * `path.win32` or `path.posix` and check the OTHER platform's behaviour from
+ * whichever platform it happens to be running on.
+ */
+export interface PathImpl {
+  isAbsolute(value: string): boolean;
+  join(...parts: string[]): string;
+  readonly sep: string;
+}
 
 export interface HostArgs {
   appDataDir: string;
@@ -57,11 +76,79 @@ export class ArgumentError extends Error {
 }
 
 /**
+ * Whether a path is one this process will accept as its data directory, and if
+ * not, why.
+ *
+ * `startsWith("/")` was the whole test here, and on Windows it rejects
+ * `C:\Users\Andrej\AppData\Roaming\OneCAD` — a perfectly ordinary absolute path,
+ * and the exact one the Rust supervisor passes as a platform-native `PathBuf`.
+ * That is a startup blocker, not a display bug: the process exits 2 before the
+ * handshake and the supervisor reads it as a crash-looping sidecar.
+ *
+ * `path.isAbsolute` is the platform's own answer and is the primary gate. It is
+ * not the whole policy, though, because on Windows it is true of two forms this
+ * process must still refuse:
+ *
+ * * **Root-relative** (`\OneCAD\data`) — absolute on the CURRENT DRIVE, which is
+ *   process state, so the path names a different directory depending on where
+ *   the process was started. Unreproducible is exactly what the original check
+ *   was trying to prevent.
+ * * **Device namespace** (`\\?\C:\…`, `\\.\PIPE\…`) — not a filesystem path in
+ *   the ordinary sense, and the escape-hatch semantics differ per API.
+ *
+ * Drive-relative (`C:data`) is refused by `isAbsolute` itself, which reports it
+ * as relative. UNC (`\\server\share\…`) is ACCEPTED and requires both a server
+ * and a share: `\\server` alone names no directory.
+ *
+ * A regular expression is deliberately not the gate. The platform's own
+ * definition of "absolute" is the one the platform's own file APIs will use, and
+ * a pattern that agrees with it today is a pattern that has to be maintained
+ * against it forever.
+ */
+export function assertAbsoluteDataDir(value: string, impl: PathImpl = nodePath): void {
+  const windows = impl.sep === "\\";
+  if (!impl.isAbsolute(value)) {
+    // Relative would resolve against whatever cwd the supervisor happened to
+    // have, which is not something the app can state or reproduce. On Windows a
+    // drive-relative path (`C:data`) lands here too, and for the same reason:
+    // the drive's current directory is process state.
+    throw new ArgumentError(`--app-data-dir must be absolute, got ${value}`);
+  }
+  if (!windows) return;
+
+  const separator = /^[\\/]/;
+  const uncPrefix = /^[\\/]{2}/;
+  if (uncPrefix.test(value)) {
+    const rest = value.slice(2);
+    if (/^[?.][\\/]/.test(rest) || rest === "?" || rest === ".") {
+      throw new ArgumentError(
+        `--app-data-dir must be a drive or UNC path, not a device path, got ${value}`,
+      );
+    }
+    const [server, share] = rest.split(/[\\/]/);
+    if (!server || !share) {
+      throw new ArgumentError(
+        `--app-data-dir must name a UNC server AND share (\\\\server\\share\\...), got ${value}`,
+      );
+    }
+    return;
+  }
+  if (separator.test(value)) {
+    throw new ArgumentError(
+      `--app-data-dir must name a drive or a UNC share, not the current drive's root, ` +
+        `got ${value}`,
+    );
+  }
+  // `isAbsolute` said yes and it is neither UNC nor root-relative, so it is
+  // drive-qualified (`C:\...`), which is the form the host passes.
+}
+
+/**
  * Argument handling is the one place where a bad input must produce a refusal
  * to start rather than a guess — a sidecar that silently picked a default data
  * directory would look healthy while writing to the wrong place.
  */
-export function parseArgs(argv: readonly string[]): HostArgs {
+export function parseArgs(argv: readonly string[], impl: PathImpl = nodePath): HostArgs {
   let appDataDir: string | undefined;
   let logLevel: LogLevel = "info";
   for (let i = 0; i < argv.length; i += 1) {
@@ -87,16 +174,18 @@ export function parseArgs(argv: readonly string[]): HostArgs {
   if (appDataDir === undefined) {
     throw new ArgumentError("--app-data-dir is required; the host chooses where data lives");
   }
-  if (!appDataDir.startsWith("/")) {
-    // Relative would resolve against whatever cwd the supervisor happened to
-    // have, which is not something the app can state or reproduce.
-    throw new ArgumentError(`--app-data-dir must be absolute, got ${appDataDir}`);
-  }
+  assertAbsoluteDataDir(appDataDir, impl);
   return { appDataDir, logLevel };
 }
 
-export function resolveDbPath(appDataDir: string): string {
-  return `${appDataDir.replace(/\/+$/, "")}/${DB_RELATIVE_PATH}`;
+/**
+ * The store file inside the host's data directory.
+ *
+ * `path.join` rather than string concatenation: it is what normalises a trailing
+ * separator, and it is what writes the separator the platform actually uses.
+ */
+export function resolveDbPath(appDataDir: string, impl: PathImpl = nodePath): string {
+  return impl.join(appDataDir, ...DB_RELATIVE_SEGMENTS);
 }
 
 async function main(write: (bytes: Uint8Array) => Promise<void>): Promise<void> {
@@ -116,6 +205,9 @@ async function main(write: (bytes: Uint8Array) => Promise<void>): Promise<void> 
     VERB_AGENTKIT_FETCH,
     VERB_SHUTDOWN,
   } = await import("./bridge/verbs.js");
+  const { createConfigInstallRoute, VERB_CONFIG_INSTALL } = await import(
+    "./composition/configuration.js"
+  );
   const { buildApp, HOST_VERSION } = await import("./composition/app.js");
 
   const dbPath = resolveDbPath(args.appDataDir);
@@ -123,9 +215,14 @@ async function main(write: (bytes: Uint8Array) => Promise<void>): Promise<void> 
   // sits in, and a missing parent surfaces as an opaque sqlite error.
   mkdirSync(dirname(dbPath), { recursive: true });
 
-  // Declared before `buildApp` because the provider factory closes over it, and
-  // assigned before any turn can run, because a turn needs a request from a
-  // host that has already seen `hello`.
+  // Declared before `buildApp` because the provider factory closes over it.
+  //
+  // It being `undefined` here is no longer something a turn can observe:
+  // `buildApp` COMPOSES the graph and starts no worker, so the first thing that
+  // can claim a turn is the execution gate, and the only thing that opens the
+  // gate is a `config.install` — which cannot arrive before `accept`, which
+  // cannot happen before this binding is assigned. The throw below is an
+  // assertion about that ordering, not a case that can occur.
   let peer: BridgePeerType | undefined;
 
   const app = await buildApp({
@@ -158,17 +255,21 @@ async function main(write: (bytes: Uint8Array) => Promise<void>): Promise<void> 
     routes: {
       [VERB_AGENTKIT_FETCH]: createAgentkitFetchRoute(restFetch),
       [VERB_SHUTDOWN]: createShutdownRoute(() => void stop("shutdown requested", 0)),
+      [VERB_CONFIG_INSTALL]: createConfigInstallRoute(app.configuration),
     },
   });
 
-  // `hello` doubles as this process's readiness signal: the graph above is
-  // already built, so the first `agentkit.fetch` after `accept` is served
-  // rather than refused.
+  // `hello` doubles as this process's readiness signal for ADMINISTRATIVE work:
+  // the graph above is already built, so the first `agentkit.fetch` after
+  // `accept` is served rather than refused. Provider work is separately gated —
+  // this process claims nothing until the host installs a generation carrying a
+  // provider (`composition/configuration.ts`).
   const accept = await peer.start();
   logger.info("assistant bridge open", {
     appVersion: accept.appVersion,
     bridgeVersion: accept.bridgeVersion,
     dbPath,
+    executing: app.configuration.executing,
   });
 
   process.on("SIGINT", () => void stop("SIGINT", 0));

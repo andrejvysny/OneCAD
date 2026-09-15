@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  FRAME_HEADER_LEN,
   FrameDecoder,
   FrameError,
   MAX_BIN_LEN,
@@ -149,3 +150,82 @@ describe("OCAK1 framing", () => {
     expect(Array.from(first.bin)).toEqual([1, 2, 3]);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §2a: the cross-language acceptance policy
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Every rule below is one the Rust half enforces on the same bytes
+// (`onecad-assistant-protocol::envelope`). A divergence here is not a local
+// bug — it is two peers disagreeing about which frames exist.
+
+describe("acceptance policy", () => {
+  test("a duplicate key in the envelope's own object is refused", () => {
+    // `JSON.parse` would silently keep the last one; serde refuses the object.
+    // Refusing is the policy, because a frame whose meaning depends on which
+    // parser read it is a frame neither peer can reason about.
+    expect(() => parseFrames(rawFrame('{"t":"ping","id":3,"id":5}'))).toThrow(FrameError);
+  });
+
+  test("a duplicate key inside an opaque payload is not the envelope's business", () => {
+    const frames = parseFrames(
+      rawFrame('{"t":"req","id":2,"principal":"ui","verb":"v","payload":{"a":1,"a":2}}'),
+    );
+    expect(frames[0]?.envelope).toMatchObject({ t: "req", id: 2 });
+    expect((frames[0]?.envelope as { payload: { a: number } }).payload.a).toBe(2);
+  });
+
+  test("an unknown envelope field is ignored, so a newer peer may add one", () => {
+    expect(parseFrames(rawFrame('{"t":"ping","id":4,"future":true}'))).toHaveLength(1);
+  });
+
+  test("a duplicate is still caught after a nested object has been walked", () => {
+    // The depth counter has to come back to 1 for this to fire, which is the
+    // one way a hand-written scanner gets this wrong.
+    expect(() =>
+      parseFrames(
+        rawFrame('{"t":"req","id":2,"principal":"ui","payload":{"a":1},"verb":"v","verb":"w"}'),
+      ),
+    ).toThrow(FrameError);
+  });
+
+  test("an escaped quote inside a value does not confuse the scan", () => {
+    expect(
+      parseFrames(rawFrame('{"t":"req","id":2,"principal":"ui","verb":"a\\"b","payload":null}')),
+    ).toHaveLength(1);
+  });
+
+  test("a key repeated only inside a nested string is not a duplicate", () => {
+    const frames = parseFrames(
+      rawFrame('{"t":"req","id":2,"principal":"ui","verb":"\\"id\\":1","payload":null}'),
+    );
+    expect(frames).toHaveLength(1);
+  });
+
+  test("an id above the safe-integer cap is refused", () => {
+    expect(() => parseFrames(rawFrame('{"t":"ping","id":9007199254740992}'))).toThrow(FrameError);
+    expect(parseFrames(rawFrame('{"t":"ping","id":9007199254740991}'))).toHaveLength(1);
+  });
+
+  test("a chunk with no binary tail is refused on both encode and decode", () => {
+    expect(() => encodeFrame({ t: "chunk", id: 1, seq: 0 })).toThrow(FrameError);
+    expect(() => parseFrames(rawFrame('{"t":"chunk","id":1,"seq":0}'))).toThrow(FrameError);
+  });
+});
+
+/** A frame built without the encoder, so the DECODER is what is under test. */
+function rawFrame(json: string, bin: Uint8Array = new Uint8Array(0)): Uint8Array {
+  const jsonBytes = new TextEncoder().encode(json);
+  const frame = new Uint8Array(FRAME_HEADER_LEN + jsonBytes.byteLength + bin.byteLength);
+  frame.set(new TextEncoder().encode("OCAK"), 0);
+  const header = new DataView(frame.buffer, 0, FRAME_HEADER_LEN);
+  header.setUint32(4, jsonBytes.byteLength, true);
+  header.setUint32(8, bin.byteLength, true);
+  frame.set(jsonBytes, FRAME_HEADER_LEN);
+  frame.set(bin, FRAME_HEADER_LEN + jsonBytes.byteLength);
+  return frame;
+}
+
+function parseFrames(bytes: Uint8Array) {
+  return new FrameDecoder().push(bytes);
+}

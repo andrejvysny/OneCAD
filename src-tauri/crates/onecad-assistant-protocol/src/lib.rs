@@ -38,7 +38,7 @@ pub mod codec;
 
 pub use envelope::{
     Accept, Cancel, Chunk, End, Envelope, ErrorObject, Hello, IdAllocator, Ping, Pong, Principal,
-    Reject, Req, Res, VerbEntry, VerbTable, HOST_TO_SIDECAR_VERBS, PROTOCOL_VERSION,
+    Reject, Req, Res, VerbEntry, VerbTable, HOST_TO_SIDECAR_VERBS, MAX_SAFE_ID, PROTOCOL_VERSION,
     SIDECAR_TO_HOST_VERBS,
 };
 pub use error::ProtocolError;

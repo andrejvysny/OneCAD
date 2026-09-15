@@ -85,6 +85,33 @@ pub enum ProtocolError {
         has_error: bool,
     },
 
+    /// A frame id exceeded [`crate::envelope::MAX_SAFE_ID`]. Contract §3: ids are
+    /// `u64` on the wire but capped at 2^53−1, because the TypeScript peer
+    /// cannot compare a larger JSON number against the map key it is supposed to
+    /// match. Accepting one here would let Rust route a frame the sidecar refuses.
+    #[error("{tag} frame id {id} exceeds the safe-integer cap {cap}")]
+    IdOutOfRange {
+        /// The envelope tag the id arrived on.
+        tag: &'static str,
+        /// The id as received.
+        id: u64,
+        /// The cap it violated.
+        cap: u64,
+    },
+
+    /// A non-`chunk` envelope carried a non-empty binary tail, or a `chunk`
+    /// carried an empty one (contract §2a). The framing layer yields the tail
+    /// uninterpreted by design, so this is the dispatcher's check.
+    #[error("{tag} frame for id {id} carries a {len}-byte binary tail, which it may not")]
+    BadBinaryTail {
+        /// The envelope tag that carried (or failed to carry) the tail.
+        tag: &'static str,
+        /// The request id the frame names.
+        id: u64,
+        /// The tail length as received.
+        len: usize,
+    },
+
     /// JSON (de)serialization of an envelope failed — including an unknown `t`
     /// tag, which the contract §2 makes an error rather than an ignorable frame.
     #[error("json (de)serialization error: {0}")]

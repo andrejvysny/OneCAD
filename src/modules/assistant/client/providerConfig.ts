@@ -68,13 +68,39 @@ export function providerFromSettings(
 }
 
 /**
- * Installs `provider`, or clears the registry with `null`.
+ * How far a configured provider actually got — four states, not one "ready".
  *
- * Takes effect on the next `provider.fetch` — Rust reads the registry per
- * request — so an edit reaches a sidecar that is already running.
+ * Mirrors Rust's `ProviderReadinessDto`. They are a LADDER: `configured` is only
+ * "Rust accepted the endpoint and will resolve this id", which is not a working
+ * model and must never be shown as one.
+ */
+export interface AssistantProviderReadiness {
+  /** The Rust-minted generation carrying this configuration; 0 when cleared. */
+  readonly generation: number;
+  /** Rust validated the base and installed the gateway. */
+  readonly configured: boolean;
+  /** The running sidecar acknowledged the generation — until then, no turn runs. */
+  readonly synchronized: boolean;
+  /** The endpoint answered a probe. */
+  readonly reachable: boolean;
+  /** The endpoint's own catalogue lists the configured model. */
+  readonly eligible: boolean;
+  /** Why the ladder stopped where it did; `null` when every rung is true. */
+  readonly detail: string | null;
+}
+
+/**
+ * Installs `provider`, or clears the registry with `null`, and reports how far
+ * it got.
+ *
+ * The gateway takes effect on the next `provider.fetch` — Rust reads the
+ * registry per request — and the sidecar is told over the bridge, so an edit
+ * reaches a sidecar that is already running without a restart.
  */
 export async function configureAssistantProvider(
   provider: AssistantProviderSettings | null,
-): Promise<void> {
-  await invoke(ASSISTANT_CONFIGURE_PROVIDER_COMMAND, { provider });
+): Promise<AssistantProviderReadiness> {
+  return await invoke<AssistantProviderReadiness>(ASSISTANT_CONFIGURE_PROVIDER_COMMAND, {
+    provider,
+  });
 }

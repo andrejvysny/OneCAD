@@ -31,11 +31,31 @@ use crate::error::ApiError;
 use crate::state::AppState;
 
 use super::bridge::{StreamEvent, StreamResponse};
-use super::provider_gateway::ProviderConfig;
-use super::supervisor::AssistantHost;
+use super::provider_gateway::{ProviderConfig, ProviderRegistry};
+use super::supervisor::{AssistantHost, ProjectedCapabilities, ProjectedProvider};
 
 /// The `agentkit.fetch` verb (`docs/assistant/wire-protocol.md` §5).
 const VERB_AGENTKIT_FETCH: &str = "agentkit.fetch";
+
+/// How long a settings save waits for the running sidecar to acknowledge the
+/// generation it just minted.
+///
+/// Short on purpose. A host that is already up answers in milliseconds; a host
+/// that is cold-starting, restarting or absent is not something the user should
+/// wait on, because the projection is re-sent on connect regardless. What they
+/// get instead is `synchronized: false` with the reason, which is the truth.
+const SYNC_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long the endpoint probe waits for `GET /models`.
+///
+/// The endpoint is on loopback, so three seconds is already generous; a local
+/// runtime that has not answered by then is not running, and a settings save
+/// must not hang on discovering that.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Cap on the probe's response body. A model catalogue is kilobytes; anything
+/// past this is not one.
+const PROBE_MAX_BYTES: usize = 256 * 1024;
 
 /// How long the first assistant call waits for a cold child.
 ///
@@ -163,6 +183,33 @@ pub struct ProviderSettingsDto {
     pub model: String,
 }
 
+/// How far a configured provider actually got — four states, not one "ready".
+///
+/// Rust accepting a URL is not a working model, and reporting it as one is how a
+/// user ends up staring at a green light while every answer fails. The four are
+/// a LADDER, each one meaningful only over the one below it:
+///
+/// * `configured` — Rust validated the base and installed it in the registry, so
+///   a `provider.fetch` naming this id would now resolve to a URL.
+/// * `synchronized` — the running sidecar acknowledged the generation carrying
+///   it. Until this is true nothing will run a turn, and `false` here with a
+///   `detail` of "no host running" is the ordinary lazy-start case, not a fault.
+/// * `reachable` — the endpoint answered a probe. This is the first state that
+///   says anything about the world outside this process.
+/// * `eligible` — the endpoint's own catalogue lists the configured model.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderReadinessDto {
+    /// The generation minted for this configuration. 0 when it was cleared.
+    pub generation: u64,
+    pub configured: bool,
+    pub synchronized: bool,
+    pub reachable: bool,
+    pub eligible: bool,
+    /// Why the ladder stopped where it did. `None` when every rung is true.
+    pub detail: Option<String>,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Commands
 // ─────────────────────────────────────────────────────────────────────────────
@@ -277,37 +324,236 @@ pub async fn assistant_start(state: State<'_, AppState>) -> Result<AssistantStat
     Ok(AssistantStatusDto::of(true, Some(&host)))
 }
 
-/// Installs the local provider the user configured, or clears it with `null`.
+/// Installs the local provider the user configured, or clears it with `null`,
+/// and reports how far it actually got.
 ///
 /// **The one trusted path by which a provider is registered** (ADR-0017): a
 /// `#[tauri::command]`'s only caller is the webview's settings surface, and no
 /// frame arriving from the sidecar can reach this.
 ///
-/// Takes effect on the next `provider.fetch` — the bridge reads the registry per
-/// request — so a user editing their endpoint never restarts the app.
+/// Three things happen here, in this order, and the answer says which of them
+/// succeeded:
 ///
-/// A refused base comes back as an error naming the gateway's own code and the
-/// reason, and leaves any working provider installed. A misconfiguration the
-/// user is told about is worth more than a silent drop that resurfaces later as
-/// "unknown provider" on every answer.
+///  1. **Rust decides.** The base is validated and the gateway installed, so a
+///     later `provider.fetch` naming this id resolves to a URL. A refused base
+///     is an error and leaves any working provider in place.
+///  2. **The endpoint is probed.** `GET /models` says whether anything is
+///     listening and whether it serves the configured model. Its result is also
+///     what fills in the `modelList` capability the sidecar is told about —
+///     measured rather than assumed.
+///  3. **A generation is minted and the projection is sent.** Rust is the
+///     configuration authority; AgentKit's provider row is a projection of this
+///     one, installed over the bridge (§5) and re-sent on every reconnect. A
+///     host that is not running has nothing to send to, which is reported as
+///     `synchronized: false` rather than as a failure — the projection installs
+///     when it next connects.
 #[tauri::command]
 #[tracing::instrument(skip_all, err(Display))]
 pub async fn assistant_configure_provider(
     state: State<'_, AppState>,
     provider: Option<ProviderSettingsDto>,
-) -> Result<(), ApiError> {
+) -> Result<ProviderReadinessDto, ApiError> {
     let config = provider.map(|dto| ProviderConfig {
         id: dto.id,
         base_url: dto.base_url,
         model: dto.model,
         api_key: None,
     });
+    let configured = config.as_ref().map(|c| (c.id.clone(), c.model.clone()));
     state.assistant.configure_provider(config).map_err(|err| {
         ApiError::InvalidCommand(format!(
             "assistant provider refused ({}): {err}",
             err.code()
         ))
+    })?;
+
+    let Some((id, model)) = configured else {
+        // Cleared. The projection still advances — the sidecar has to be TOLD
+        // there is no provider, or it keeps serving turns against the one the
+        // user just removed.
+        state.assistant.project_provider(None);
+        return Ok(ProviderReadinessDto {
+            generation: 0,
+            configured: false,
+            synchronized: false,
+            reachable: false,
+            eligible: false,
+            detail: Some("no provider is configured".into()),
+        });
+    };
+
+    let probe = probe_provider(&state.assistant.provider_registry(), &id, &model).await;
+    let generation = state.assistant.project_provider(Some(ProjectedProvider {
+        id,
+        model,
+        capabilities: ProjectedCapabilities {
+            streaming: true,
+            tool_calling: true,
+            model_list: probe.model_list,
+        },
+    }));
+
+    let (synchronized, sync_detail) = match state.assistant.host() {
+        Some(host) if host.wait_acknowledged(generation, SYNC_TIMEOUT).await => (true, None),
+        Some(_) => (
+            false,
+            Some("the assistant host has not acknowledged this configuration yet".to_string()),
+        ),
+        None => (
+            false,
+            Some("the assistant host is not running; it is told on connect".to_string()),
+        ),
+    };
+
+    Ok(ProviderReadinessDto {
+        generation,
+        configured: true,
+        synchronized,
+        reachable: probe.reachable,
+        eligible: probe.eligible,
+        // The lowest rung that failed is the one worth reporting: a model that
+        // is not listed matters more than a host that has not started yet.
+        detail: probe.detail.or(sync_detail),
     })
+}
+
+/// What `GET /models` said about the configured endpoint.
+struct ProbeOutcome {
+    reachable: bool,
+    eligible: bool,
+    model_list: bool,
+    detail: Option<String>,
+}
+
+impl ProbeOutcome {
+    fn unreachable(detail: String) -> Self {
+        ProbeOutcome {
+            reachable: false,
+            eligible: false,
+            model_list: false,
+            detail: Some(detail),
+        }
+    }
+}
+
+/// Asks the configured endpoint whether it is there and whether it serves
+/// `model`.
+///
+/// Through the gateway, never through a URL built here: the probe is one more
+/// `provider.fetch`-shaped call against the id Rust just registered, so it is
+/// bound by the same loopback validation, the same header refusals and the same
+/// caps as a real model call. A probe with its own HTTP path would be a second
+/// way out of this process, which is exactly what ADR-0017 removes.
+async fn probe_provider(registry: &ProviderRegistry, id: &str, model: &str) -> ProbeOutcome {
+    let Some(gateway) = registry.current() else {
+        return ProbeOutcome::unreachable("no provider gateway is installed".into());
+    };
+    let request = gateway.fetch(json!({
+        "providerId": id,
+        "method": "GET",
+        "path": "/models",
+        "headers": {},
+    }));
+    let mut stream = match tokio::time::timeout(PROBE_TIMEOUT, request).await {
+        Err(_) => {
+            return ProbeOutcome::unreachable(format!(
+                "the endpoint did not answer GET /models within {}s",
+                PROBE_TIMEOUT.as_secs()
+            ))
+        }
+        Ok(Err(err)) => {
+            return ProbeOutcome::unreachable(format!("the endpoint could not be reached: {err}"))
+        }
+        Ok(Ok(stream)) => stream,
+    };
+
+    let status = stream.head().status;
+    if !(200..300).contains(&status) {
+        // Something IS listening — that is what `reachable` means — but it has
+        // no catalogue to check the model against.
+        return ProbeOutcome {
+            reachable: true,
+            eligible: false,
+            model_list: false,
+            detail: Some(format!("the endpoint answered GET /models with {status}")),
+        };
+    }
+
+    let mut body = Vec::new();
+    loop {
+        match tokio::time::timeout(PROBE_TIMEOUT, stream.next_chunk()).await {
+            Ok(Ok(Some(chunk))) => {
+                body.extend_from_slice(&chunk);
+                if body.len() > PROBE_MAX_BYTES {
+                    return ProbeOutcome {
+                        reachable: true,
+                        eligible: false,
+                        model_list: false,
+                        detail: Some("the endpoint's model list is implausibly large".into()),
+                    };
+                }
+            }
+            Ok(Ok(None)) => break,
+            Ok(Err(err)) => {
+                return ProbeOutcome {
+                    reachable: true,
+                    eligible: false,
+                    model_list: false,
+                    detail: Some(format!(
+                        "the endpoint's model list could not be read: {err}"
+                    )),
+                }
+            }
+            Err(_) => {
+                return ProbeOutcome {
+                    reachable: true,
+                    eligible: false,
+                    model_list: false,
+                    detail: Some("the endpoint stopped sending its model list".into()),
+                }
+            }
+        }
+    }
+
+    let listed: Vec<String> = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|value| value.get("data").and_then(Value::as_array).cloned())
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.get("id").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if listed.is_empty() {
+        return ProbeOutcome {
+            reachable: true,
+            eligible: false,
+            model_list: false,
+            detail: Some("the endpoint listed no models".into()),
+        };
+    }
+    if !listed.iter().any(|listed| listed == model) {
+        return ProbeOutcome {
+            reachable: true,
+            eligible: false,
+            model_list: true,
+            // The available ids, so the user can fix a typo without guessing —
+            // the same discipline a stale `regionId` follows.
+            detail: Some(format!(
+                "the endpoint does not serve {model}; it lists {}",
+                listed.join(", ")
+            )),
+        };
+    }
+    ProbeOutcome {
+        reachable: true,
+        eligible: true,
+        model_list: true,
+        detail: None,
+    }
 }
 
 /// Stops the assistant host: a graceful `shutdown`, then a kill after the grace
@@ -493,6 +739,40 @@ mod tests {
         }))
         .expect_err("apiKey is not part of this DTO");
         assert!(err.to_string().contains("apiKey"), "{err}");
+    }
+
+    #[test]
+    fn the_readiness_dto_is_the_four_state_ladder_the_panel_reads() {
+        // Four states, not one "ready": Rust accepting a URL is `configured` and
+        // nothing more, and each rung above it is a separate claim about the
+        // world. The spellings are pinned by `useAssistantProviderConfig.ts`.
+        let dto = ProviderReadinessDto {
+            generation: 3,
+            configured: true,
+            synchronized: false,
+            reachable: true,
+            eligible: false,
+            detail: Some("the endpoint does not serve qwen3:8b; it lists llama3.2:3b".into()),
+        };
+        let value = serde_json::to_value(&dto).unwrap();
+        assert_eq!(value["generation"], 3);
+        assert_eq!(value["configured"], true);
+        assert_eq!(value["synchronized"], false);
+        assert_eq!(value["reachable"], true);
+        assert_eq!(value["eligible"], false);
+        assert!(value["detail"].as_str().unwrap().contains("llama3.2:3b"));
+    }
+
+    #[tokio::test]
+    async fn the_probe_reports_an_endpoint_that_is_not_there_as_unreachable() {
+        // An empty registry is the "nothing is installed" case; the probe must
+        // report it rather than panic or claim reachability it never tested.
+        let registry = ProviderRegistry::new();
+        let outcome = probe_provider(&registry, "local", "qwen3:8b").await;
+        assert!(!outcome.reachable);
+        assert!(!outcome.eligible);
+        assert!(!outcome.model_list);
+        assert!(outcome.detail.is_some());
     }
 
     #[test]

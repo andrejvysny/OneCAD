@@ -181,6 +181,10 @@ export function createGatewayFetch(peer: BridgePeer, config: AiProviderConfig): 
         `assistant gateway refused ${request.url}: outside provider '${config.id}' base URL`,
       );
     }
+    // §2a: a request whose signal is ALREADY aborted is not sent. Dispatching it
+    // costs the host a registration and the provider a connection, and the only
+    // possible outcome is the rejection the caller already asked for.
+    if (request.signal.aborted) throw request.signal.reason;
     const suffix = request.url.slice(base.length);
     const headers = headersToRecord(request.headers);
     delete headers.authorization;
@@ -196,11 +200,11 @@ export function createGatewayFetch(peer: BridgePeer, config: AiProviderConfig): 
       payload.bodyBase64 = Buffer.from(body).toString("base64");
     }
 
-    const answer = await peer.requestStream(
-      VERB_PROVIDER_FETCH,
-      payload,
-      init?.signal ?? undefined,
-    );
+    // `request.signal`, not `init?.signal`: a caller that built a `Request` with
+    // its own signal and passed no `init` — which is how AgentKit's client and
+    // most `fetch` wrappers cancel — had its cancellation silently dropped here.
+    // The constructed `Request` is the one object that carries every form of it.
+    const answer = await peer.requestStream(VERB_PROVIDER_FETCH, payload, request.signal);
     const head = answer.head as HttpResponseHead | undefined;
     if (!head || typeof head.status !== "number") {
       throw new TypeError("assistant gateway received a provider reply with no status");

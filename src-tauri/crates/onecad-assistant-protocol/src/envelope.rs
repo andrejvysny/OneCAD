@@ -21,6 +21,19 @@ use crate::error::ProtocolError;
 /// Wire protocol version carried by `hello` and `accept`.
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// The largest request id either peer may put on the wire: 2^53 − 1.
+///
+/// Contract §3 types ids as `u64`, and this crate keeps that type — but the
+/// TypeScript peer holds them as JSON numbers, and a value above
+/// `Number.MAX_SAFE_INTEGER` cannot be compared for equality against the map key
+/// it is supposed to match. It refuses one on decode. Rust caps at the same
+/// value so the two implementations accept exactly the same bytes; a cap that
+/// only one side enforces is a divergence waiting for a peer to find it.
+///
+/// Not reachable in practice: ids advance by two per request, so this is 2^52
+/// requests on one connection.
+pub const MAX_SAFE_ID: u64 = (1 << 53) - 1;
+
 // ---------------------------------------------------------------------------
 // Principals
 // ---------------------------------------------------------------------------
@@ -140,6 +153,12 @@ pub const HOST_TO_SIDECAR_VERBS: VerbTable = VerbTable::new(&[
         verb: "shutdown",
         principals: &[Principal::Ui],
     },
+    // Install the authoritative provider projection. Carries a monotonic
+    // generation and `{id, model, capabilities}` — no endpoint, no credential.
+    VerbEntry {
+        verb: "config.install",
+        principals: &[Principal::Ui],
+    },
 ]);
 
 /// Verbs the sidecar may send to the host (contract §5).
@@ -198,6 +217,18 @@ impl IdAllocator {
     /// 2^63 ids within one connection is not reachable.
     pub fn next(&self) -> u64 {
         self.next.fetch_add(2, Ordering::Relaxed)
+    }
+
+    /// The id [`IdAllocator::next`] would hand out now.
+    ///
+    /// The receiver needs this to tell "an id I allocated and have since settled"
+    /// from "an id nobody ever allocated": the first is a late frame for a
+    /// cancelled request, which §2 says to discard, and the second is a peer
+    /// inventing correlation, which §2a says is fatal. Without the cursor both
+    /// look identical — a miss in the pending table — and the receiver would
+    /// have to pick one interpretation for both.
+    pub fn peek(&self) -> u64 {
+        self.next.load(Ordering::Relaxed)
     }
 }
 
@@ -405,6 +436,15 @@ impl Envelope {
     /// would accept frames the other side refuses and the "same protocol" would
     /// quietly mean two different things.
     pub fn validate(&self) -> Result<(), ProtocolError> {
+        if let Some(id) = self.id() {
+            if id > MAX_SAFE_ID {
+                return Err(ProtocolError::IdOutOfRange {
+                    tag: self.tag(),
+                    id,
+                    cap: MAX_SAFE_ID,
+                });
+            }
+        }
         let (tag, id, ok, has_error) = match self {
             Envelope::Res(r) => ("res", r.id, r.ok, r.error.is_some()),
             Envelope::End(e) => ("end", e.id, e.ok, e.error.is_some()),
@@ -419,6 +459,61 @@ impl Envelope {
             });
         }
         Ok(())
+    }
+
+    /// The `t` tag exactly as it appears on the wire.
+    pub const fn tag(&self) -> &'static str {
+        match self {
+            Envelope::Hello(_) => "hello",
+            Envelope::Accept(_) => "accept",
+            Envelope::Reject(_) => "reject",
+            Envelope::Req(_) => "req",
+            Envelope::Res(_) => "res",
+            Envelope::Chunk(_) => "chunk",
+            Envelope::End(_) => "end",
+            Envelope::Cancel(_) => "cancel",
+            Envelope::Ping(_) => "ping",
+            Envelope::Pong(_) => "pong",
+        }
+    }
+
+    /// The request id this envelope correlates on, if it has one.
+    pub const fn id(&self) -> Option<u64> {
+        match self {
+            Envelope::Req(r) => Some(r.id),
+            Envelope::Res(r) => Some(r.id),
+            Envelope::Chunk(c) => Some(c.id),
+            Envelope::End(e) => Some(e.id),
+            Envelope::Cancel(c) => Some(c.id),
+            Envelope::Ping(p) => Some(p.id),
+            Envelope::Pong(p) => Some(p.id),
+            Envelope::Hello(_) | Envelope::Accept(_) | Envelope::Reject(_) => None,
+        }
+    }
+
+    /// Contract §2a: the binary tail belongs to `chunk` and to nothing else, and
+    /// a `chunk` that carries none is not a chunk.
+    ///
+    /// The framing layer hands the tail back uninterpreted on purpose — it never
+    /// parses the JSON, so it cannot know which envelope arrived. Deciding
+    /// whether the pairing is legal is therefore the dispatcher's job, and a
+    /// dispatcher that skips it accepts frames the TypeScript peer refuses on
+    /// decode. An empty `chunk` is refused for the §9 budget's sake as much as
+    /// the contract's: it costs a queue slot and a map lookup while charging
+    /// nothing against any byte bound.
+    pub fn check_binary_tail(&self, len: usize) -> Result<(), ProtocolError> {
+        let legal = match self {
+            Envelope::Chunk(_) => len > 0,
+            _ => len == 0,
+        };
+        if legal {
+            return Ok(());
+        }
+        Err(ProtocolError::BadBinaryTail {
+            tag: self.tag(),
+            id: self.id().unwrap_or(0),
+            len,
+        })
     }
 }
 
@@ -741,6 +836,7 @@ mod tests {
             vec![
                 ("agentkit.fetch", &[Principal::Ui][..]),
                 ("shutdown", &[Principal::Ui][..]),
+                ("config.install", &[Principal::Ui][..]),
             ]
         );
     }
@@ -757,7 +853,7 @@ mod tests {
 
     #[test]
     fn each_host_to_sidecar_verb_allows_exactly_its_listed_principals() {
-        for verb in ["agentkit.fetch", "shutdown"] {
+        for verb in ["agentkit.fetch", "shutdown", "config.install"] {
             assert!(HOST_TO_SIDECAR_VERBS.allows(verb, Principal::Ui), "{verb}");
             assert!(
                 !HOST_TO_SIDECAR_VERBS.allows(verb, Principal::Host),
@@ -902,5 +998,99 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), 1_000);
+    }
+
+    // -- §2a/§3 cross-language acceptance policy ---------------------------
+    //
+    // Every case below is a byte string both peers see. The TypeScript peer
+    // makes the same call on the same bytes; the shared fixture corpus under
+    // `docs/assistant/wire-fixtures/` is what proves they still agree.
+
+    #[test]
+    fn an_id_above_the_safe_integer_cap_is_refused() {
+        // 2^53. The sidecar cannot hold this as a JSON number without losing
+        // the ability to match it against its own pending map, so Rust refuses
+        // it too rather than routing a frame the peer would have thrown on.
+        let wire = br#"{"t":"ping","id":9007199254740992}"#;
+        match Envelope::from_json_slice(wire) {
+            Err(ProtocolError::IdOutOfRange { tag, id, cap }) => {
+                assert_eq!(tag, "ping");
+                assert_eq!(id, 9_007_199_254_740_992);
+                assert_eq!(cap, MAX_SAFE_ID);
+            }
+            other => panic!("expected IdOutOfRange, got {other:?}"),
+        }
+        // One below the cap is legal, so the boundary is the cap and not a
+        // rounded-down approximation of it.
+        assert!(Envelope::from_json_slice(br#"{"t":"ping","id":9007199254740991}"#).is_ok());
+    }
+
+    #[test]
+    fn a_duplicate_envelope_key_is_refused() {
+        // Policy, pinned: duplicate keys in the envelope's OWN object are fatal
+        // on both sides. serde gives Rust this for free; the TypeScript peer
+        // scans for it, because `JSON.parse` would silently take the last one.
+        assert!(Envelope::from_json_slice(br#"{"t":"ping","id":1,"id":2}"#).is_err());
+    }
+
+    #[test]
+    fn an_unknown_envelope_field_is_ignored_on_both_sides() {
+        // The other half of the same policy: unknown fields are additive, so a
+        // newer peer may send one without partitioning the protocol.
+        assert!(Envelope::from_json_slice(br#"{"t":"ping","id":4,"future":true}"#).is_ok());
+    }
+
+    #[test]
+    fn a_duplicate_key_inside_an_opaque_payload_is_not_the_envelope_s_business() {
+        // `payload` is verb-specific and opaque to this layer; both platforms
+        // resolve a duplicate there as last-wins. Pinned so the policy is a
+        // decision rather than a coincidence.
+        let wire = br#"{"t":"req","id":1,"principal":"host","verb":"provider.fetch","payload":{"a":1,"a":2}}"#;
+        let Envelope::Req(req) = Envelope::from_json_slice(wire).expect("decodes") else {
+            panic!("expected a req");
+        };
+        assert_eq!(req.payload["a"], serde_json::json!(2));
+    }
+
+    #[test]
+    fn only_a_chunk_may_carry_a_binary_tail() {
+        let chunk = Envelope::Chunk(Chunk { id: 1, seq: 0 });
+        assert!(chunk.check_binary_tail(4).is_ok());
+        match chunk.check_binary_tail(0) {
+            Err(ProtocolError::BadBinaryTail { tag, id, len }) => {
+                assert_eq!((tag, id, len), ("chunk", 1, 0));
+            }
+            other => panic!("an empty chunk must be refused, got {other:?}"),
+        }
+        for envelope in [
+            Envelope::Ping(Ping { id: 2 }),
+            Envelope::Cancel(Cancel { id: 2 }),
+            Envelope::End(End {
+                id: 2,
+                ok: true,
+                error: None,
+            }),
+        ] {
+            assert!(envelope.check_binary_tail(0).is_ok());
+            assert!(
+                matches!(
+                    envelope.check_binary_tail(1),
+                    Err(ProtocolError::BadBinaryTail { .. })
+                ),
+                "{} must refuse a tail",
+                envelope.tag()
+            );
+        }
+    }
+
+    #[test]
+    fn the_allocation_cursor_separates_settled_ids_from_invented_ones() {
+        let alloc = IdAllocator::host();
+        assert_eq!(alloc.peek(), 0);
+        assert_eq!(alloc.next(), 0);
+        assert_eq!(alloc.next(), 2);
+        // 0 and 2 were issued and may legitimately still be answered late; 4 has
+        // never existed and a frame naming it is a peer inventing correlation.
+        assert_eq!(alloc.peek(), 4);
     }
 }

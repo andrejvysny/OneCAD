@@ -1,0 +1,15 @@
+{
+  "name": "request-with-the-wrong-parity",
+  "rule": "2a: an inbound req whose id has the wrong parity is FATAL on both sides. There is no safe reply to a diverged allocator.",
+  "setup": "none",
+  "deliver": [
+    {
+      "t": "req",
+      "id": "self:0",
+      "principal": "host",
+      "verb": "provider.fetch",
+      "payload": {}
+    }
+  ],
+  "expect": "close"
+}

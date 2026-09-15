@@ -25,7 +25,9 @@ import { ASSISTANT_BRIDGE_COMMAND } from "../client/createDesktopAgentKitFetch";
 import {
   ASSISTANT_CONFIGURE_PROVIDER_COMMAND,
   providerFromSettings,
+  type AssistantProviderReadiness,
 } from "../client/providerConfig";
+import { statusOf } from "./useAssistantProviderConfig";
 import { AssistantPanel } from "./AssistantPanel";
 
 interface ConfigureArgs {
@@ -39,14 +41,34 @@ let configured: ConfigureArgs[];
  * with the backend's `{kind, message}` envelope — the shape Tauri really rejects
  * an `invoke` with (see `src/ipc/apiError.ts`).
  */
-function installIpc(refusal?: string): void {
+function installIpc(refusal?: string, readiness?: Partial<AssistantProviderReadiness>): void {
   mockIPC((command, args) => {
     if (command === ASSISTANT_CONFIGURE_PROVIDER_COMMAND) {
-      configured.push(args as unknown as ConfigureArgs);
+      const call = args as unknown as ConfigureArgs;
+      configured.push(call);
       if (refusal !== undefined) {
         throw { kind: "invalidCommand", message: refusal };
       }
-      return null;
+      // The command answers with the four-state ladder, not with nothing: Rust
+      // accepting a URL is only the first rung of it.
+      return call.provider === null
+        ? {
+            generation: 0,
+            configured: false,
+            synchronized: false,
+            reachable: false,
+            eligible: false,
+            detail: "no provider is configured",
+          }
+        : {
+            generation: configured.length,
+            configured: true,
+            synchronized: true,
+            reachable: true,
+            eligible: true,
+            detail: null,
+            ...readiness,
+          };
     }
     // The indicator's own provider probe. Failing it keeps this file about the
     // configuration path: the probe result is never what these cases assert.
@@ -164,5 +186,34 @@ describe("the assistant panel's provider configuration", () => {
       "error",
     );
     expect(configured).toHaveLength(1);
+  });
+});
+
+describe("the four states a configured provider can be in", () => {
+  const rung = (over: Partial<AssistantProviderReadiness>): AssistantProviderReadiness => ({
+    generation: 1,
+    configured: true,
+    synchronized: true,
+    reachable: true,
+    eligible: true,
+    detail: null,
+    ...over,
+  });
+
+  it("reports the highest rung actually reached, never more", () => {
+    // The whole point: Rust accepting an endpoint is `configured`, and a panel
+    // that painted that green would be claiming three things it never checked.
+    expect(statusOf(rung({ configured: false }))).toBe("none");
+    expect(statusOf(rung({ synchronized: false, reachable: false, eligible: false }))).toBe(
+      "configured",
+    );
+    expect(statusOf(rung({ reachable: false, eligible: false }))).toBe("synchronized");
+    expect(statusOf(rung({ eligible: false }))).toBe("reachable");
+    expect(statusOf(rung({}))).toBe("eligible");
+  });
+
+  it("a sidecar that has not acknowledged the edit is not a working model", () => {
+    const state = rung({ synchronized: false, reachable: true, eligible: true });
+    expect(statusOf(state)).toBe("configured");
   });
 });

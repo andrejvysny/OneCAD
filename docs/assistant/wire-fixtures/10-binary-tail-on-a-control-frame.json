@@ -1,0 +1,13 @@
+{
+  "name": "binary-tail-on-a-control-frame",
+  "rule": "2a: a non-chunk envelope carrying a non-empty binary tail is fatal. The framing layer yields the tail uninterpreted by design.",
+  "setup": "none",
+  "deliver": [
+    {
+      "t": "ping",
+      "id": "peer:1",
+      "bin": "AAECAw=="
+    }
+  ],
+  "expect": "close"
+}

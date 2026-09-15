@@ -10,10 +10,22 @@ import { settingsStore } from "@/stores/settingsStore";
 import { LocalModelSettings } from "./LocalModelSettings";
 import type { AssistantProviderConfigState } from "./useAssistantProviderConfig";
 
-const ACCEPTED: AssistantProviderConfigState = { status: "ready", error: null };
+const ACCEPTED: AssistantProviderConfigState = {
+  status: "eligible",
+  error: null,
+  readiness: {
+    generation: 1,
+    configured: true,
+    synchronized: true,
+    reachable: true,
+    eligible: true,
+    detail: null,
+  },
+};
 const REFUSED: AssistantProviderConfigState = {
   status: "error",
   error: "not a loopback address",
+  readiness: null,
 };
 
 function seed(baseUrl: string, model: string): void {

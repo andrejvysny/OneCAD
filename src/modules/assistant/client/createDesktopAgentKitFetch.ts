@@ -36,6 +36,28 @@ export const ASSISTANT_BRIDGE_COMMAND = "assistant_bridge_fetch";
 const STREAMING_OPERATION: RestOperation = "streamRun";
 
 /**
+ * §9, webview hop: bytes this transport will hold for a body nobody is reading.
+ *
+ * The producer's 8 MiB bound does not protect this queue — draining Rust's
+ * buffer quickly into a Tauri channel moves the bytes, it does not bound them,
+ * and a `ReadableStream` that is enqueued into regardless of `desiredSize` grows
+ * its own internal queue behind a stalled reader. This is the bound for THIS hop.
+ */
+export const MAX_STREAM_BUFFER_BYTES = 8 * 1024 * 1024;
+
+/**
+ * §9: chunks this transport will hold for a body nobody is reading.
+ *
+ * The second axis. Byte accounting alone accepts an unbounded number of tiny
+ * SSE frames, each one an array slot and a wakeup, while reporting the stream
+ * as comfortably inside its budget.
+ */
+export const MAX_STREAM_BUFFER_ITEMS = 4096;
+
+/** Statuses the Fetch standard forbids a body on; constructing one throws. */
+const NULL_BODY_STATUS: ReadonlySet<number> = new Set([101, 103, 204, 205, 304]);
+
+/**
  * Every refusal and every bridge-reported stream failure. `code` is stable and
  * machine-readable: the backend's own codes (`stream_overflow`, §7) arrive
  * verbatim, so a caller can tell a resumable overflow from a local refusal.
@@ -170,73 +192,218 @@ function decodeBase64(data: string): Uint8Array {
 }
 
 /**
- * A channel and the stream it feeds.
+ * A channel, the stream it feeds, and the handle that detaches both.
  *
  * Chunks can land before anything reads the response — `invoke` has not even
  * resolved yet when the first one arrives — so messages queue and the stream
- * drains the queue once it has a controller.
+ * drains the queue once a reader asks for them.
  *
- * Backpressure is deliberately absent, matching the protocol: OCAK1 §7 states
- * the transport gives none end-to-end and makes the SENDER hold a bounded
- * buffer, ending the stream with `stream_overflow` on overrun. That error
- * surfaces here as a stream ERROR, never as a quiet truncation, because a
- * truncated SSE log and the client's resume cursor would then disagree with
- * nothing able to detect it.
+ * Three rules this shape exists to enforce:
+ *
+ *  1. **The queue is bounded on this hop.** OCAK1 §7 makes the SENDER hold a
+ *     bounded buffer, and §9 makes every hop hold its own: the sender's bound
+ *     says nothing about how much a stalled webview accumulates after the bytes
+ *     have already crossed the channel.
+ *  2. **Delivery is pull-driven.** Enqueuing on arrival ignores `desiredSize`
+ *     and grows the `ReadableStream`'s own internal queue behind a reader that
+ *     is not reading, which is the one place a bound cannot see.
+ *  3. **Terminal is idempotent and detaching.** Cancelling the reader detaches
+ *     the channel, so a chunk that arrives afterwards is dropped instead of
+ *     throwing into a closed controller (F04/R03).
  */
 function createChannelStream(): {
   channel: Channel<AssistantBridgeStreamMessage>;
   stream: ReadableStream<Uint8Array>;
+  /** Terminal, idempotent: fails the stream and detaches the channel. */
   fail(error: Error): void;
+  /** Detaches the channel without failing a stream nobody took. */
+  detach(): void;
+  /**
+   * Resolves once this request can no longer deliver anything — end, error,
+   * abort or reader cancellation. The caller hangs its listener cleanup off it
+   * instead of reading the body, which would lock a stream the `Response` needs.
+   */
+  whenSettled: Promise<void>;
+  /** §9 instrumentation: what this hop is currently holding. */
+  held(): { bytes: number; items: number };
 } {
   const queue: Uint8Array[] = [];
-  let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
+  let queuedBytes = 0;
   let failure: Error | null = null;
   let ended = false;
+  let detached = false;
+  let wake: (() => void) | null = null;
+  let markSettled!: () => void;
+  const whenSettled = new Promise<void>((resolve) => {
+    markSettled = resolve;
+  });
 
-  const flush = (): void => {
-    if (controller === null) return;
-    while (queue.length > 0) controller.enqueue(queue.shift()!);
-    if (failure !== null) {
-      controller.error(failure);
-      controller = null;
-      return;
-    }
-    if (ended) {
-      controller.close();
-      controller = null;
-    }
+  const signal = (): void => {
+    const resume = wake;
+    wake = null;
+    resume?.();
   };
 
   const settle = (error: Error | null): void => {
     if (ended || failure !== null) return; // first terminal message wins
     if (error === null) ended = true;
     else failure = error;
-    flush();
+    markSettled();
+    signal();
+  };
+
+  const detach = (): void => {
+    if (detached) return;
+    detached = true;
+    // The channel object stays alive inside Tauri until the native side stops
+    // sending; replacing the handler is what makes a late message harmless.
+    channel.onmessage = () => {};
+    queue.length = 0;
+    queuedBytes = 0;
+    markSettled();
+    signal();
   };
 
   const channel = new Channel<AssistantBridgeStreamMessage>();
   channel.onmessage = (message) => {
     if (message.event === "chunk") {
-      if (ended || failure !== null) return;
-      queue.push(decodeBase64(message.data));
-      flush();
+      if (ended || failure !== null || detached) return;
+      let bytes: Uint8Array;
+      try {
+        bytes = decodeBase64(message.data);
+      } catch {
+        // §9: a malformed chunk is a terminal failure, not a thrown exception
+        // on whatever stack the channel callback happens to run on.
+        settle(new AssistantBridgeError("invalid-chunk", "a stream chunk was not valid base64"));
+        return;
+      }
+      if (
+        queuedBytes + bytes.byteLength > MAX_STREAM_BUFFER_BYTES ||
+        queue.length + 1 > MAX_STREAM_BUFFER_ITEMS
+      ) {
+        settle(
+          new AssistantBridgeError(
+            "stream_overflow",
+            `the assistant stream exceeded this transport's buffer (${MAX_STREAM_BUFFER_BYTES} bytes / ${MAX_STREAM_BUFFER_ITEMS} chunks)`,
+          ),
+        );
+        return;
+      }
+      queue.push(bytes);
+      queuedBytes += bytes.byteLength;
+      signal();
       return;
     }
     settle(
-      message.event === "end"
-        ? null
-        : new AssistantBridgeError(message.code, message.message),
+      message.event === "end" ? null : new AssistantBridgeError(message.code, message.message),
     );
   };
 
   const stream = new ReadableStream<Uint8Array>({
-    start(c) {
-      controller = c;
-      flush();
+    async pull(controller) {
+      for (;;) {
+        const next = queue.shift();
+        if (next !== undefined) {
+          queuedBytes -= next.byteLength;
+          controller.enqueue(next);
+          return;
+        }
+        if (failure !== null) {
+          controller.error(failure);
+          return;
+        }
+        if (ended || detached) {
+          controller.close();
+          return;
+        }
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+        });
+      }
+    },
+    /**
+     * UNSUBSCRIBE, not "stop the run". Cancelling this reader detaches the
+     * webview from the delivery channel; the run keeps executing and its durable
+     * event log keeps filling, so a reopened panel replays from `Last-Event-ID`.
+     * Cancelling the RUN is a separate, explicit AgentKit REST operation, and
+     * conflating the two would make closing a panel destroy work.
+     */
+    cancel() {
+      detach();
     },
   });
 
-  return { channel, stream, fail: (error) => settle(error) };
+  return {
+    channel,
+    stream,
+    fail: (error) => {
+      settle(error);
+    },
+    detach,
+    whenSettled,
+    held: () => ({ bytes: queuedBytes, items: queue.length }),
+  };
+}
+
+/**
+ * The one place an IPC rejection becomes a typed error (F16).
+ *
+ * Tauri rejects with whatever the command's error serialised to — for OneCAD
+ * that is `ApiError { kind, message, diagnostics? }`, a plain object. A `catch`
+ * that interpolates it renders `[object Object]`, which loses the kind, the
+ * message and any diagnosis with it. Callers outside this module import this
+ * rather than writing a second, differently-wrong version.
+ */
+export function normalizeBridgeFailure(error: unknown): AssistantBridgeError {
+  if (error instanceof AssistantBridgeError) return error;
+  if (error instanceof Error) return new AssistantBridgeError("bridge-error", error.message);
+  if (typeof error === "string") return new AssistantBridgeError("bridge-error", error);
+  if (typeof error === "object" && error !== null) {
+    const record = error as Record<string, unknown>;
+    const code = typeof record.kind === "string" ? record.kind : "bridge-error";
+    const message =
+      typeof record.message === "string" ? record.message : JSON.stringify(error);
+    const diagnostics = Array.isArray(record.diagnostics) ? record.diagnostics : undefined;
+    return new AssistantBridgeError(
+      code,
+      diagnostics === undefined || diagnostics.length === 0
+        ? message
+        : `${message} (${diagnostics.map((d) => String(d)).join("; ")})`,
+    );
+  }
+  return new AssistantBridgeError("bridge-error", String(error));
+}
+
+/**
+ * The response head, checked before it is turned into a `Response` (F16).
+ *
+ * `new Response()` throws on a status outside 200–599 and on a non-null body for
+ * a null-body status, and a throw from a constructor is indistinguishable at the
+ * call site from the transport itself failing. Validating first means an
+ * out-of-range status is reported as the malformed head it is, rather than
+ * truncated into a plausible-looking one.
+ */
+function requireStatus(head: AssistantBridgeResponse): number {
+  const { status } = head;
+  if (!Number.isInteger(status) || status < 200 || status > 599) {
+    throw new AssistantBridgeError(
+      "invalid-status",
+      `the assistant bridge answered with status ${String(status)}, which is not a final HTTP status`,
+    );
+  }
+  return status;
+}
+
+/**
+ * The body a `Response` may legally carry for this status and method.
+ *
+ * A collected body that is empty comes back as `""`, and `new Response("", {
+ * status: 204 })` THROWS — AgentKit's revoke-allowance route answers 204, so
+ * this is a supported contract edge and not a hypothetical one (F16/R08).
+ */
+function responseBody(method: string, status: number, body: string | null): string | null {
+  if (method === "HEAD" || NULL_BODY_STATUS.has(status)) return null;
+  return body === null || body === "" ? null : body;
 }
 
 /**
@@ -252,37 +419,100 @@ export function createDesktopAgentKitFetch(): FetchLike {
     const method = (init?.method ?? "GET").toUpperCase();
     const operation = resolveOperation(method, url.pathname);
 
-    const signal = init?.signal;
-    if (signal?.aborted === true) throw signal.reason;
+    const signal = init?.signal ?? null;
+    // Read through a function, never as a narrowed property: `aborted` changes
+    // between the two checks below, and the compiler's control-flow narrowing
+    // would otherwise decide the second one is unreachable.
+    const isAborted = (): boolean => signal?.aborted === true;
+    // §2a: an already-aborted request is not dispatched at all. Sending it costs
+    // the host a registration and the sidecar a handler, and the only outcome
+    // available is the rejection the caller has already asked for.
+    if (isAborted()) throw signal?.reason;
 
     const streaming = operation === STREAMING_OPERATION;
     const sink = streaming ? createChannelStream() : null;
 
-    const head = await invoke<AssistantBridgeResponse>(ASSISTANT_BRIDGE_COMMAND, {
-      request: {
-        operation,
-        method,
-        path: `${url.pathname}${url.search}`,
-        headers: normalizeHeaders(init),
-        body: normalizeBody(init),
-        ...(sink === null ? {} : { onChunk: sink.channel }),
-      } satisfies AssistantBridgeRequest,
-    });
+    // The handle exists BEFORE the dispatch, so an abort during the `invoke`
+    // wait has something to act on. Attaching the listener after the head
+    // arrived — the old shape — missed every abort raised while waiting, which
+    // is the whole window a slow host actually spends (F04/R05).
+    let terminal = false;
+    const onAbort = (): void => {
+      if (terminal) return;
+      terminal = true;
+      const reason = signal?.reason;
+      sink?.fail(
+        reason instanceof Error
+          ? reason
+          : new AssistantBridgeError("aborted", "the assistant request was aborted"),
+      );
+      sink?.detach();
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    /** Idempotent terminal cleanup: removes the listener, detaches nothing else. */
+    const release = (): void => {
+      signal?.removeEventListener("abort", onAbort);
+    };
+
+    let head: AssistantBridgeResponse;
+    try {
+      head = await invoke<AssistantBridgeResponse>(ASSISTANT_BRIDGE_COMMAND, {
+        request: {
+          operation,
+          method,
+          path: `${url.pathname}${url.search}`,
+          headers: normalizeHeaders(init),
+          body: normalizeBody(init),
+          ...(sink === null ? {} : { onChunk: sink.channel }),
+        } satisfies AssistantBridgeRequest,
+      });
+    } catch (err) {
+      // An allocated sink is ALWAYS settled and detached when the dispatch
+      // fails: a stream left open here is a body no one will ever close (F16).
+      const failure = normalizeBridgeFailure(err);
+      sink?.fail(failure);
+      sink?.detach();
+      release();
+      throw failure;
+    }
+
+    // Rechecked after the transition: the abort may have landed while `invoke`
+    // was in flight, in which case `onAbort` has already failed the sink.
+    if (isAborted()) {
+      sink?.detach();
+      release();
+      throw signal?.reason;
+    }
+
+    let status: number;
+    try {
+      status = requireStatus(head);
+    } catch (err) {
+      sink?.fail(normalizeBridgeFailure(err));
+      sink?.detach();
+      release();
+      throw err;
+    }
 
     if (sink !== null && head.streaming === true) {
-      // Abort ends the reader's wait. The bridge's own cancellation (OCAK1's
-      // `cancel` envelope) belongs to the backend command, which is where the
-      // request id lives.
-      signal?.addEventListener("abort", () => sink.fail(signal.reason as Error), { once: true });
+      // The reader owns the lifetime from here: `cancel()` detaches the channel,
+      // and `release()` runs when the body terminates for any reason. Hung off
+      // `whenSettled` rather than off a reader, because taking a reader would
+      // lock the very stream this `Response` is about to be handed.
+      void sink.whenSettled.finally(release);
       return new Response(sink.stream, {
-        status: head.status,
+        status,
         statusText: head.statusText,
         headers: head.headers,
       });
     }
 
-    return new Response(head.body, {
-      status: head.status,
+    // Not streaming after all: the bridge answered with a whole body, so the
+    // channel this request allocated is detached rather than left subscribed.
+    sink?.detach();
+    release();
+    return new Response(responseBody(method, status, head.body), {
+      status,
       statusText: head.statusText,
       headers: head.headers,
     });

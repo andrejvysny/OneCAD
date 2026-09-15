@@ -18,6 +18,8 @@ import {
   ASSISTANT_BRIDGE_COMMAND,
   AssistantBridgeError,
   createDesktopAgentKitFetch,
+  MAX_STREAM_BUFFER_ITEMS,
+  normalizeBridgeFailure,
   type AssistantBridgeRequest,
   type AssistantBridgeResponse,
   type AssistantBridgeStreamMessage,
@@ -247,5 +249,160 @@ describe("desktop AgentKit fetch — streaming", () => {
     expect(response.status).toBe(409);
     await expect(response.text()).resolves.toBe('{"code":"run_finished"}');
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cancellation (CAN-01..03), boundedness (MEM-01/02) and Fetch faithfulness
+// (REST-01). Every case here is a trace the old shape got wrong.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("desktop AgentKit fetch — cancellation", () => {
+  it("does not dispatch a request whose signal is already aborted", async () => {
+    bridge({ status: 200, headers: {}, body: "{}" });
+    const aborter = new AbortController();
+    aborter.abort(new Error("already gone"));
+
+    await expect(
+      createDesktopAgentKitFetch()(`${ORIGIN}/v1/version`, { signal: aborter.signal }),
+    ).rejects.toThrow("already gone");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("observes an abort raised WHILE the head is still being awaited", async () => {
+    // The old shape attached its listener only after `invoke` resolved, so an
+    // abort during the wait — the entire window a slow host occupies — was lost.
+    let channel: Channel<AssistantBridgeStreamMessage> | undefined;
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mockIPC(async (_cmd, args) => {
+      channel = (args as { request: AssistantBridgeRequest }).request.onChunk;
+      await held;
+      return { status: 200, headers: {}, body: null, streaming: true };
+    });
+
+    const aborter = new AbortController();
+    const pending = createDesktopAgentKitFetch()(`${ORIGIN}/v1/runs/r1/stream`, {
+      signal: aborter.signal,
+    });
+    await Promise.resolve();
+    aborter.abort(new Error("user cancelled"));
+    release!();
+
+    await expect(pending).rejects.toThrow("user cancelled");
+    // And the channel this request allocated is detached: a late chunk is
+    // dropped rather than thrown into a stream nobody owns.
+    expect(() => deliver(channel!, chunk("late"))).not.toThrow();
+  });
+
+  it("cancelling the reader detaches the channel and a later chunk is harmless", async () => {
+    let channel: Channel<AssistantBridgeStreamMessage> | undefined;
+    bridge({ status: 200, headers: {}, body: null, streaming: true }, (request) => {
+      channel = request.onChunk;
+    });
+
+    const response = await createDesktopAgentKitFetch()(`${ORIGIN}/v1/runs/r1/stream`);
+    await response.body!.cancel();
+
+    // R03: this threw a TypeError into whatever stack the channel callback ran
+    // on, because the controller was already closed.
+    expect(() => deliver(channel!, chunk("after cancel"))).not.toThrow();
+    expect(() => deliver(channel!, { event: "end" })).not.toThrow();
+  });
+
+  it("settles and detaches an allocated sink when the dispatch itself fails", async () => {
+    // F16: an `invoke` rejection used to leave the sink open and the channel
+    // subscribed, so the body was one no one would ever close.
+    mockIPC(() => {
+      throw { kind: "worker", message: "the assistant host is not running" };
+    });
+
+    await expect(
+      createDesktopAgentKitFetch()(`${ORIGIN}/v1/runs/r1/stream`),
+    ).rejects.toMatchObject({
+      name: "AssistantBridgeError",
+      code: "worker",
+      message: "the assistant host is not running",
+    });
+  });
+});
+
+describe("desktop AgentKit fetch — boundedness", () => {
+  it("refuses an unread stream past its own buffer instead of accepting 9 MiB", async () => {
+    // R04: the queue was unbounded and `desiredSize` was ignored, so a stalled
+    // reader accepted every byte the producer could hand over.
+    let channel: Channel<AssistantBridgeStreamMessage> | undefined;
+    bridge({ status: 200, headers: {}, body: null, streaming: true }, (request) => {
+      channel = request.onChunk;
+    });
+    const response = await createDesktopAgentKitFetch()(`${ORIGIN}/v1/runs/r1/stream`);
+
+    const mib = btoa("x".repeat(1024 * 1024));
+    for (let i = 0; i < 9; i += 1) deliver(channel!, { event: "chunk", data: mib });
+
+    await expect(readAll(response)).rejects.toMatchObject({ code: "stream_overflow" });
+  });
+
+  it("refuses a flood of tiny chunks on the item bound", async () => {
+    let channel: Channel<AssistantBridgeStreamMessage> | undefined;
+    bridge({ status: 200, headers: {}, body: null, streaming: true }, (request) => {
+      channel = request.onChunk;
+    });
+    const response = await createDesktopAgentKitFetch()(`${ORIGIN}/v1/runs/r1/stream`);
+
+    const one = btoa("x");
+    for (let i = 0; i < MAX_STREAM_BUFFER_ITEMS + 1; i += 1) {
+      deliver(channel!, { event: "chunk", data: one });
+    }
+    await expect(readAll(response)).rejects.toMatchObject({ code: "stream_overflow" });
+  });
+
+  it("turns a malformed chunk into a terminal stream error, not a thrown callback", async () => {
+    let channel: Channel<AssistantBridgeStreamMessage> | undefined;
+    bridge({ status: 200, headers: {}, body: null, streaming: true }, (request) => {
+      channel = request.onChunk;
+    });
+    const response = await createDesktopAgentKitFetch()(`${ORIGIN}/v1/runs/r1/stream`);
+
+    expect(() => deliver(channel!, { event: "chunk", data: "not base64!!" })).not.toThrow();
+    await expect(readAll(response)).rejects.toMatchObject({ code: "invalid-chunk" });
+  });
+});
+
+describe("desktop AgentKit fetch — Fetch faithfulness", () => {
+  it("builds a 204 with a genuinely null body", async () => {
+    // R08: `new Response("", { status: 204 })` THROWS, and AgentKit's
+    // revoke-allowance route answers 204 with an empty collected body.
+    bridge({ status: 204, headers: {}, body: "" });
+
+    const response = await createDesktopAgentKitFetch()(
+      `${ORIGIN}/v1/chats/c1/write-policy/allowances/a1`,
+      { method: "DELETE" },
+    );
+    expect(response.status).toBe(204);
+    expect(response.body).toBeNull();
+  });
+
+  it("refuses a status outside the final-response range instead of truncating it", async () => {
+    bridge({ status: 70_000, headers: {}, body: "{}" });
+
+    await expect(createDesktopAgentKitFetch()(`${ORIGIN}/v1/version`)).rejects.toMatchObject({
+      code: "invalid-status",
+    });
+  });
+
+  it("normalizes a non-Error IPC rejection into a readable typed error", () => {
+    const normalized = normalizeBridgeFailure({
+      kind: "internal",
+      message: "assistant bridge closed",
+      diagnostics: ["writer failed"],
+    });
+    expect(normalized).toBeInstanceOf(AssistantBridgeError);
+    expect(normalized.code).toBe("internal");
+    // The panel's generic catch used to render this object as `[object Object]`.
+    expect(String(normalized)).toContain("assistant bridge closed");
+    expect(String(normalized)).toContain("writer failed");
   });
 });

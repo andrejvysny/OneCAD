@@ -35,7 +35,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use onecad_assistant_protocol::{Hello, Principal};
-use serde_json::json;
+use serde::Serialize;
+use serde_json::{json, Value};
 use tokio::sync::Notify;
 
 use super::bridge::{AssistantBridge, BridgeError, BridgeOptions};
@@ -45,6 +46,9 @@ use super::provider_gateway::{
 
 /// The `shutdown` verb (`docs/assistant/wire-protocol.md` §5, host → sidecar).
 const VERB_SHUTDOWN: &str = "shutdown";
+
+/// The `config.install` verb (§5, host → sidecar, configuration).
+const VERB_CONFIG_INSTALL: &str = "config.install";
 
 /// How long a retired host gets to honour its graceful `shutdown` before it is
 /// killed. Bounded so a wedged sidecar can never outlive its supervisor.
@@ -145,6 +149,91 @@ impl HostConfig {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// The provider projection (`docs/assistant/wire-protocol.md` §5)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// What the sidecar is told about the provider — and the whole of it.
+///
+/// **No endpoint and no credential.** The sidecar names this `id` on
+/// `provider.fetch` and [`ProviderGateway`] turns it into a URL, so the
+/// model-facing layer never holds a real endpoint to leak or rewrite. That is
+/// the property ADR-0017 buys, and a `baseUrl` field here would spend it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectedProvider {
+    /// The logical id, the same one the registry is keyed by.
+    pub id: String,
+    /// The model this provider serves, as the user configured it.
+    pub model: String,
+    pub capabilities: ProjectedCapabilities,
+}
+
+/// What AgentKit needs to know about a provider before it stages a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectedCapabilities {
+    /// The gateway streams response bodies chunk by chunk, so this is a fact
+    /// about the transport rather than a guess about the provider.
+    pub streaming: bool,
+    /// Optimistic by default: AgentKit probes nothing here, and its chat-only
+    /// retry is what recovers from a wrong `true`, whereas a wrong `false`
+    /// leaves a capable model permanently toolless with no way to say so.
+    pub tool_calling: bool,
+    /// Whether `GET /models` answered with a catalogue when the endpoint was
+    /// probed. Measured, not assumed.
+    pub model_list: bool,
+}
+
+/// The Rust-minted generation counter and the projection it stamps.
+///
+/// **Rust is the configuration authority; AgentKit's provider row is a
+/// projection of this.** The counter is monotonic and app-global, so a settings
+/// edit that loses a race arrives at the sidecar as a stale generation and is
+/// refused there rather than silently winning.
+#[derive(Debug, Default)]
+pub struct ProviderProjection {
+    /// `(generation, provider)`. Generation 0 means nothing has been configured
+    /// in this app run, which is distinct from a configuration that is `None`.
+    state: Mutex<(u64, Option<ProjectedProvider>)>,
+}
+
+impl ProviderProjection {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records a new projection and mints the generation that carries it.
+    pub fn install(&self, provider: Option<ProjectedProvider>) -> u64 {
+        let mut state = self.state.lock().expect("assistant projection poisoned");
+        state.0 += 1;
+        state.1 = provider;
+        state.0
+    }
+
+    /// The projection to install on a connection, or `None` when nothing has
+    /// ever been configured — in which case there is nothing to install and the
+    /// sidecar's execution gate stays closed, which is what a build with no
+    /// local model should do.
+    #[must_use]
+    pub fn current(&self) -> Option<(u64, Option<ProjectedProvider>)> {
+        let state = self.state.lock().expect("assistant projection poisoned");
+        (state.0 > 0).then(|| (state.0, state.1.clone()))
+    }
+
+    /// The latest generation minted; 0 before the first configuration.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.state.lock().expect("assistant projection poisoned").0
+    }
+}
+
+/// The `config.install` payload (§5) for one projection.
+fn install_payload(generation: u64, provider: Option<&ProjectedProvider>) -> Value {
+    json!({ "generation": generation, "provider": provider })
+}
+
 struct Shared {
     config: HostConfig,
     /// The app's provider holder, shared with [`AssistantSlot`] and read fresh on
@@ -152,6 +241,23 @@ struct Shared {
     /// a config is captured once per host, and a user editing their endpoint must
     /// not have to restart the sidecar to be heard.
     provider: Arc<ProviderRegistry>,
+    /// The authoritative provider projection, shared with [`AssistantSlot`].
+    ///
+    /// The supervisor is the SOLE installer: a settings edit mints a generation
+    /// here and wakes the run loop, which sends it. One writer means a connect
+    /// racing an edit cannot install the older of the two — the loop always
+    /// sends whatever is current when it wakes.
+    projection: Arc<ProviderProjection>,
+    /// The generation THIS connection's child has acknowledged. Cleared on every
+    /// new connection, because a new child has acknowledged nothing.
+    acknowledged: Mutex<Option<u64>>,
+    /// The generation this connection last TRIED to install, acknowledged or
+    /// not. It is what stops a failed install from re-arming its own wakeup and
+    /// spinning: a generation that failed is retried when a newer one is minted
+    /// or when the next connection installs from scratch, not immediately.
+    attempted: Mutex<Option<u64>>,
+    /// Wakes the run loop when the projection changes.
+    projection_signal: Notify,
     /// The current connection; `None` while (re)starting, failed or retired.
     conn: Mutex<Option<Arc<AssistantBridge>>>,
     state: Mutex<AssistantState>,
@@ -211,6 +317,50 @@ impl Shared {
         }
     }
 
+    /// Resolves when the projection has advanced past what this connection has
+    /// acknowledged — immediately if it already has. The waiter is enabled
+    /// BEFORE the state is re-read, so a wakeup cannot be lost.
+    async fn projection_ahead(&self) {
+        loop {
+            let notified = self.projection_signal.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let generation = self.projection.generation();
+            if generation > 0 && self.attempted() != Some(generation) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    fn acknowledged(&self) -> Option<u64> {
+        *self
+            .acknowledged
+            .lock()
+            .expect("assistant acknowledged generation poisoned")
+    }
+
+    fn set_acknowledged(&self, generation: Option<u64>) {
+        *self
+            .acknowledged
+            .lock()
+            .expect("assistant acknowledged generation poisoned") = generation;
+    }
+
+    fn attempted(&self) -> Option<u64> {
+        *self
+            .attempted
+            .lock()
+            .expect("assistant attempted generation poisoned")
+    }
+
+    fn set_attempted(&self, generation: Option<u64>) {
+        *self
+            .attempted
+            .lock()
+            .expect("assistant attempted generation poisoned") = generation;
+    }
+
     fn note_error(&self, reason: &str) {
         *self
             .last_error
@@ -230,9 +380,28 @@ impl AssistantHost {
     /// started and handshaken asynchronously. Must be called from a Tokio context.
     #[must_use]
     pub fn spawn(config: HostConfig, provider: Arc<ProviderRegistry>) -> Self {
+        // Its own, empty projection: nothing has been configured for this host,
+        // so there is nothing to install and its child's execution gate stays
+        // closed. `AssistantSlot` shares the app's holder instead.
+        Self::spawn_with_projection(config, provider, Arc::new(ProviderProjection::new()))
+    }
+
+    /// [`spawn`](Self::spawn), sharing the app's projection holder so every
+    /// child this host starts is told the current configuration on connect and
+    /// every settings edit reaches the one that is running.
+    #[must_use]
+    pub fn spawn_with_projection(
+        config: HostConfig,
+        provider: Arc<ProviderRegistry>,
+        projection: Arc<ProviderProjection>,
+    ) -> Self {
         let shared = Arc::new(Shared {
             config,
             provider,
+            projection,
+            acknowledged: Mutex::new(None),
+            attempted: Mutex::new(None),
+            projection_signal: Notify::new(),
             conn: Mutex::new(None),
             state: Mutex::new(AssistantState::Starting),
             hello: Mutex::new(None),
@@ -279,6 +448,45 @@ impl AssistantHost {
             .lock()
             .expect("assistant conn poisoned")
             .clone()
+    }
+
+    /// The generation the running child has acknowledged, or `None` when it has
+    /// acknowledged none.
+    ///
+    /// **This is the execution gate, seen from the host side.** A connection
+    /// that has acknowledged nothing answers administrative requests and starts
+    /// no provider work; this host does not reach [`AssistantState::Ready`]
+    /// until the projection it had at connect time was installed, so a bridge
+    /// call that waits for `Ready` cannot be served by an unconfigured child.
+    #[must_use]
+    pub fn acknowledged_generation(&self) -> Option<u64> {
+        self.shared.acknowledged()
+    }
+
+    /// Tells the run loop the projection changed. The loop is the sole installer;
+    /// this only wakes it.
+    pub fn notify_projection_changed(&self) {
+        self.shared.projection_signal.notify_waiters();
+    }
+
+    /// Awaits an acknowledgement of `generation` (or a later one) up to
+    /// `timeout`. `false` on timeout or on a terminal state — both meaning the
+    /// projection is configured but not yet synchronized, which is a state the
+    /// settings surface reports rather than an error.
+    pub async fn wait_acknowledged(&self, generation: u64, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if self
+                .acknowledged_generation()
+                .is_some_and(|acked| acked >= generation)
+            {
+                return true;
+            }
+            if self.state().is_terminal() || tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     /// Awaits [`AssistantState::Ready`] up to `timeout`; `false` on a terminal
@@ -391,6 +599,10 @@ pub struct AssistantSlot {
     /// this same holder, per request, so an edit reaches a RUNNING sidecar
     /// (ADR-0017).
     provider: Arc<ProviderRegistry>,
+    /// The authoritative projection every host this slot starts installs into
+    /// its child. Outlives any one host, because the configuration is the app's
+    /// and a restarted child must be told it again.
+    projection: Arc<ProviderProjection>,
 }
 
 impl AssistantSlot {
@@ -444,7 +656,11 @@ impl AssistantSlot {
                 return Ok(existing.clone());
             }
         }
-        let host = AssistantHost::spawn(config.clone(), self.provider.clone());
+        let host = AssistantHost::spawn_with_projection(
+            config.clone(),
+            self.provider.clone(),
+            self.projection.clone(),
+        );
         *slot = Some(host.clone());
         Ok(host)
     }
@@ -482,6 +698,32 @@ impl AssistantSlot {
     #[must_use]
     pub fn provider_registry(&self) -> Arc<ProviderRegistry> {
         self.provider.clone()
+    }
+
+    /// Mints the generation that carries `provider` to the sidecar and wakes the
+    /// running host, if any, to install it. Returns the minted generation.
+    ///
+    /// Separate from [`configure_provider`](Self::configure_provider) because
+    /// the two answer different questions: that one decides whether Rust will
+    /// SERVE this provider at all (and refuses a base it will not), this one
+    /// decides what the sidecar is TOLD. A projection is only ever minted for a
+    /// configuration Rust already accepted.
+    ///
+    /// Sending is the supervisor's job, never this one's: the run loop is the
+    /// single installer, so a connection coming up while an edit is in flight
+    /// installs whatever is current rather than racing it.
+    pub fn project_provider(&self, provider: Option<ProjectedProvider>) -> u64 {
+        let generation = self.projection.install(provider);
+        if let Some(host) = self.host() {
+            host.notify_projection_changed();
+        }
+        generation
+    }
+
+    /// The projection holder every host this slot starts installs from.
+    #[must_use]
+    pub fn projection(&self) -> Arc<ProviderProjection> {
+        self.projection.clone()
     }
 
     /// Retires the running host, if any, and empties the slot. Idempotent.
@@ -542,6 +784,40 @@ async fn supervise_loop(shared: &Shared) {
                 }
                 *shared.hello.lock().expect("assistant hello poisoned") =
                     Some(bridge.hello().clone());
+                // A new child acknowledges nothing until it says so, and nothing
+                // has been tried on this connection yet.
+                shared.set_acknowledged(None);
+                shared.set_attempted(None);
+                // THE EXECUTION-READY BARRIER. A new child has an empty store
+                // and has acknowledged nothing, so the projection is installed
+                // BEFORE this host is published as `Ready` — and `Ready` is what
+                // every bridge caller waits on. A turn therefore cannot be
+                // submitted to a child that does not yet know which provider to
+                // run it against.
+                if let Err(err) = install_projection(shared, &bridge).await {
+                    let reason = format!("assistant configuration install failed: {err}");
+                    bridge.close(&reason);
+                    terminate_child(&mut child, RETIRE_GRACE).await;
+                    if shared.is_retired() {
+                        return;
+                    }
+                    flap_strikes += 1;
+                    shared.note_error(&reason);
+                    shared.set_state(AssistantState::Restarting);
+                    tracing::warn!(target: "assistant", %reason, "assistant host restarting");
+                    if flap_strikes > shared.config.max_rapid_deaths {
+                        shared.set_state(AssistantState::Failed);
+                        tracing::error!(target: "assistant", %reason, "assistant host failed: install budget exhausted");
+                        return;
+                    }
+                    if shared
+                        .sleep_or_retired(backoff_delay(shared, flap_strikes))
+                        .await
+                    {
+                        return;
+                    }
+                    continue;
+                }
                 *shared.conn.lock().expect("assistant conn poisoned") = Some(bridge.clone());
                 shared.set_state(AssistantState::Ready);
                 tracing::info!(
@@ -630,6 +906,44 @@ fn backoff_delay(shared: &Shared, strike: u32) -> Duration {
         .unwrap_or(Duration::from_millis(500))
 }
 
+/// Sends the current projection as `config.install` and records what the child
+/// acknowledged (§5).
+///
+/// A no-op when nothing has ever been configured: there is no projection to
+/// install, the child's execution gate stays closed, and that is exactly what a
+/// build the user has not given a local model should do.
+///
+/// The sidecar ECHOES the generation it installed, and that echo is the gate. A
+/// reply naming a different one means the two sides disagree about which
+/// configuration is live, which is not something to paper over with a retry.
+async fn install_projection(shared: &Shared, bridge: &AssistantBridge) -> Result<(), BridgeError> {
+    let Some((generation, provider)) = shared.projection.current() else {
+        return Ok(());
+    };
+    if shared.acknowledged() == Some(generation) {
+        return Ok(());
+    }
+    shared.set_attempted(Some(generation));
+    let payload = install_payload(generation, provider.as_ref());
+    let reply = bridge
+        .request(VERB_CONFIG_INSTALL, Principal::Ui, payload)
+        .await?;
+    let echoed = reply.get("generation").and_then(Value::as_u64);
+    if echoed != Some(generation) {
+        return Err(BridgeError::StateViolation(format!(
+            "assistant host acknowledged generation {echoed:?}, not the {generation} it was sent"
+        )));
+    }
+    shared.set_acknowledged(Some(generation));
+    tracing::info!(
+        target: "assistant",
+        generation,
+        provider = provider.as_ref().map(|p| p.id.as_str()).unwrap_or("none"),
+        "assistant configuration installed"
+    );
+    Ok(())
+}
+
 /// Spawns the child and completes the OCAK1 handshake. `Err(reason)` on a spawn
 /// or handshake failure — a restart trigger.
 async fn spawn_and_connect(
@@ -643,7 +957,18 @@ async fn spawn_and_connect(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true);
+        .kill_on_drop(true)
+        // The child gets a CONSTRUCTED environment, not ours. It keeps what a
+        // process genuinely needs — PATH, HOME, temp and locale — and drops API
+        // keys, `*_PROXY`, `NODE_OPTIONS`, `BUN_*`, `LD_PRELOAD` and
+        // `DYLD_INSERT_LIBRARIES`. A proxy variable matters most: it would route
+        // "local" provider traffic off-box, silently defeating ADR-0017's whole
+        // claim, and inheriting it by default means nobody ever chose it.
+        //
+        // Application hardening, NOT an OS sandbox: it constrains a cooperating
+        // child, not a compromised one. See `minimal_child_env`.
+        .env_clear();
+    cmd.envs(super::assistant_child_env());
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("spawn {:?}: {e}", shared.config.binary))?;
@@ -718,6 +1043,19 @@ async fn run_until_death(
                     Err(err) => tracing::warn!(target: "assistant", error = %err, "assistant host wait failed"),
                 }
                 return Death::Exited;
+            }
+            () = shared.projection_ahead() => {
+                // A settings edit while the child is up. The loop is the sole
+                // installer, so what goes out is whatever is CURRENT at this
+                // moment rather than the value the edit carried — two rapid
+                // edits collapse into one install of the newer one.
+                if let Err(err) = install_projection(shared, bridge).await {
+                    // Not fatal to the connection: the child is still serving,
+                    // and the settings surface reports "configured, not yet
+                    // synchronized" rather than losing the configuration. The
+                    // next edit, ping failure or reconnect tries again.
+                    tracing::warn!(target: "assistant", error = %err, "assistant configuration install failed");
+                }
             }
             () = bridge.closed() => {
                 // A fatal frame or a closed stdout with the process still alive.
@@ -978,11 +1316,86 @@ mod tests {
         assert!(slot.provider_registry().current().is_none());
     }
 
+    fn projected(model: &str) -> ProjectedProvider {
+        ProjectedProvider {
+            id: "local".into(),
+            model: model.into(),
+            capabilities: ProjectedCapabilities {
+                streaming: true,
+                tool_calling: true,
+                model_list: true,
+            },
+        }
+    }
+
+    #[test]
+    fn the_generation_is_monotonic_and_zero_means_never_configured() {
+        let projection = ProviderProjection::new();
+        // Nothing to install before the first configuration: the sidecar's
+        // execution gate stays closed, which is not the same as being told
+        // "no provider".
+        assert_eq!(projection.generation(), 0);
+        assert!(projection.current().is_none());
+
+        assert_eq!(projection.install(Some(projected("qwen3:8b"))), 1);
+        assert_eq!(projection.install(None), 2);
+        assert_eq!(projection.install(Some(projected("llama3.2:3b"))), 3);
+        assert_eq!(projection.generation(), 3);
+
+        let (generation, provider) = projection.current().expect("a configured projection");
+        assert_eq!(generation, 3);
+        assert_eq!(provider.expect("a provider").model, "llama3.2:3b");
+    }
+
+    #[test]
+    fn the_slot_mints_a_generation_per_edit_and_a_cleared_one_still_advances() {
+        let slot = AssistantSlot::new();
+        assert_eq!(slot.project_provider(Some(projected("qwen3:8b"))), 1);
+        // A clear is a configuration too: the sidecar has to be TOLD, or it
+        // keeps serving turns against the provider the user removed.
+        assert_eq!(slot.project_provider(None), 2);
+        assert_eq!(slot.projection().generation(), 2);
+    }
+
+    #[test]
+    fn the_install_payload_carries_no_endpoint_and_no_credential() {
+        // §5: the sidecar names a logical id and Rust resolves it. A `baseUrl`
+        // or an `apiKey` reaching the child would hand the model-facing layer an
+        // endpoint it could leak or rewrite.
+        let payload = install_payload(7, Some(&projected("qwen3:8b")));
+        assert_eq!(payload["generation"], 7);
+        assert_eq!(payload["provider"]["id"], "local");
+        assert_eq!(payload["provider"]["model"], "qwen3:8b");
+        assert_eq!(payload["provider"]["capabilities"]["toolCalling"], true);
+        assert_eq!(payload["provider"]["capabilities"]["modelList"], true);
+        let text = payload.to_string();
+        for forbidden in [
+            "baseUrl",
+            "base_url",
+            "apiKey",
+            "api_key",
+            "http://",
+            "127.0.0.1",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "{forbidden} must not cross: {text}"
+            );
+        }
+
+        // A cleared projection is an explicit null, never an absent key.
+        assert_eq!(install_payload(8, None)["provider"], Value::Null);
+    }
+
     #[test]
     fn backoff_saturates_at_the_last_delay() {
         let shared = Shared {
             config: config(),
             provider: Arc::new(ProviderRegistry::new()),
+            projection: Arc::new(ProviderProjection::new()),
+            acknowledged: Mutex::new(None),
+            attempted: Mutex::new(None),
+            projection_signal: Notify::new(),
             conn: Mutex::new(None),
             state: Mutex::new(AssistantState::Starting),
             hello: Mutex::new(None),

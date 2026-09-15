@@ -1,0 +1,11 @@
+{
+  "name": "id-above-the-safe-integer-cap",
+  "rule": "3: ids are capped at 2^53-1 so both peers can hold them exactly. 2^53 is refused.",
+  "setup": "none",
+  "deliver": [
+    {
+      "json": "{\"t\":\"ping\",\"id\":9007199254740992}"
+    }
+  ],
+  "expect": "close"
+}

@@ -34,6 +34,32 @@ export const OCAK_PROTOCOL_VERSION = 1;
 /** Default per-stream buffer bound (§7). One `end{stream_overflow}` beyond this. */
 export const DEFAULT_STREAM_BUFFER_BYTES = 8 * 1024 * 1024;
 
+/**
+ * Default per-stream ITEM bound (§9).
+ *
+ * The second axis, and not a redundant one: a producer sending one-byte chunks
+ * charges 1/8388608th of the byte budget per frame while costing a full array
+ * slot, a wakeup and a map lookup each. A byte-only bound calls that stream
+ * healthy right up to the point the process dies.
+ */
+export const DEFAULT_STREAM_BUFFER_ITEMS = 4096;
+
+/**
+ * Aggregate bytes this process will hold in its outbound write chain (§9).
+ *
+ * Per-stream bounds do not bound arbitrarily many streams, and the write chain
+ * is where every one of them converges. A frame that would take the chain past
+ * this waits for room rather than being queued; the producer is a pump that can
+ * be slowed, and slowing it is the whole point of a budget.
+ */
+export const MAX_QUEUED_WRITE_BYTES = 16 * 1024 * 1024;
+
+/** Concurrent outbound requests one connection will carry (§9). */
+export const MAX_ACTIVE_OUTBOUND = 64;
+
+/** Concurrent inbound requests one connection will serve (§9). */
+export const MAX_ACTIVE_INBOUND = 64;
+
 /** The `hello` payload, minus the tag and the two values the peer mints itself. */
 export interface HelloIdentity {
   hostVersion: string;
@@ -108,6 +134,7 @@ export interface BridgePeerOptions {
   routes: Readonly<Record<string, VerbRoute>>;
   logger?: Logger;
   maxStreamBufferBytes?: number;
+  maxStreamBufferItems?: number;
 }
 
 type Phase = "idle" | "handshake" | "open" | "closed";
@@ -126,6 +153,15 @@ interface PendingStream {
   nextSeq: number;
 }
 
+/**
+ * A peer that has broken the connection or per-request state machine of §2a.
+ * Distinct from {@link FrameError} only in what it reports; both are fatal, and
+ * both reach the same `close` in the read loop.
+ */
+export class StateViolationError extends Error {
+  override readonly name = "StateViolationError";
+}
+
 type Pending = PendingUnary | PendingStream;
 
 interface Inflight {
@@ -140,7 +176,11 @@ export class BridgePeer {
   private readonly pendingPings = new Map<number, { resolve(): void; reject(err: Error): void }>();
   private readonly inflight = new Map<number, Inflight>();
   private readonly streamLimit: number;
+  private readonly streamItemLimit: number;
   private readonly logger: Logger | undefined;
+  /** §9: bytes handed to the write chain and not yet flushed. */
+  private queuedWriteBytes = 0;
+  private readonly writeAdmission: (() => void)[] = [];
 
   private phase: Phase = "idle";
   private nextId = 1; // §3: odd ids belong to the sidecar.
@@ -154,6 +194,7 @@ export class BridgePeer {
 
   constructor(private readonly options: BridgePeerOptions) {
     this.streamLimit = options.maxStreamBufferBytes ?? DEFAULT_STREAM_BUFFER_BYTES;
+    this.streamItemLimit = options.maxStreamBufferItems ?? DEFAULT_STREAM_BUFFER_ITEMS;
     this.logger = options.logger;
     this.finished = new Promise<void>((resolve) => {
       this.finish = resolve;
@@ -201,6 +242,7 @@ export class BridgePeer {
 
   /** §5, sidecar → host. Every request this process originates is `host`. */
   async request(verb: string, payload: unknown, signal?: AbortSignal): Promise<unknown> {
+    this.admitRequest();
     const id = this.allocateId();
     const answered = new Promise<unknown>((resolve, reject) => {
       this.pending.set(id, { kind: "unary", resolve, reject });
@@ -220,6 +262,7 @@ export class BridgePeer {
     payload: unknown,
     signal?: AbortSignal,
   ): Promise<StreamResponse> {
+    this.admitRequest();
     const id = this.allocateId();
     const answered = new Promise<StreamResponse>((resolve, reject) => {
       this.pending.set(id, { kind: "stream", resolve, reject, nextSeq: 0 });
@@ -263,6 +306,8 @@ export class BridgePeer {
       entry.controller.abort(failure);
     }
     this.inflight.clear();
+    const waiters = this.writeAdmission.splice(0, this.writeAdmission.length);
+    for (const wake of waiters) wake();
     this.finish?.();
   }
 
@@ -356,8 +401,28 @@ export class BridgePeer {
   private onRequest(id: number, principal: Principal, verb: string, payload: unknown): void {
     // §3: the host allocates even ids. An odd one means the two counters have
     // diverged, and a diverged counter crosses responses silently.
-    if (id % 2 !== 0) throw new FrameError(`inbound request id ${id} is not host-allocated`);
-    if (this.inflight.has(id)) throw new FrameError(`inbound request id ${id} reused`);
+    if (id % 2 !== 0) {
+      throw new StateViolationError(
+        `inbound request id ${id} is sidecar-allocated; the host's allocator has diverged`,
+      );
+    }
+    // §2a: refused WITHOUT touching the in-flight registration. Ownership is
+    // bound to the entry that is already there, so nothing a late handler does
+    // can retire a replacement's slot.
+    if (this.inflight.has(id)) {
+      void this.fail(id, {
+        code: "duplicate_id",
+        message: `an inbound request with id ${id} is still in flight`,
+      });
+      return;
+    }
+    if (this.inflight.size >= MAX_ACTIVE_INBOUND) {
+      void this.fail(id, {
+        code: "too_many_requests",
+        message: `${MAX_ACTIVE_INBOUND} inbound requests are already in flight`,
+      });
+      return;
+    }
 
     const route = this.options.routes[verb];
     if (!route) {
@@ -388,7 +453,7 @@ export class BridgePeer {
     try {
       result = await route.handle(request);
     } catch (err) {
-      this.inflight.delete(id);
+      this.retire(id, entry);
       if (request.signal.aborted) return; // §2: a cancelled id's reply is discarded anyway.
       const failure =
         err instanceof BridgeRequestError
@@ -399,19 +464,19 @@ export class BridgePeer {
     }
 
     if (request.signal.aborted) {
-      this.inflight.delete(id);
+      this.retire(id, entry);
       if (result.kind === "stream") void result.body?.cancel();
       return;
     }
 
     await this.send({ t: "res", id, ok: true, payload: result.payload });
     if (result.kind === "unary") {
-      this.inflight.delete(id);
+      this.retire(id, entry);
       result.onSent?.();
       return;
     }
     if (!result.body) {
-      this.inflight.delete(id);
+      this.retire(id, entry);
       await this.send({ t: "end", id, ok: true });
       result.onSent?.();
       return;
@@ -464,14 +529,14 @@ export class BridgePeer {
             return;
           }
           outstanding += slice.byteLength;
-          void this.send({ t: "chunk", id, seq }, slice).then(
-            () => {
-              outstanding -= slice.byteLength;
-            },
-            () => {
-              outstanding -= slice.byteLength;
-            },
-          );
+          // Awaited HERE, in the producer, so the frames stay in `seq` order and
+          // the aggregate budget is charged before the bytes are handed over.
+          await this.admitWrite(slice.byteLength);
+          const settle = (): void => {
+            outstanding -= slice.byteLength;
+            this.releaseWrite(slice.byteLength);
+          };
+          void this.send({ t: "chunk", id, seq }, slice).then(settle, settle);
           seq += 1;
         }
       }
@@ -484,14 +549,37 @@ export class BridgePeer {
         error: { code: "stream_failed", message: (err as Error).message },
       });
     } finally {
-      this.inflight.delete(id);
+      this.retire(id, entry);
     }
+  }
+
+  /**
+   * Retires an inbound request, but only if `entry` still owns the slot.
+   *
+   * The identity check is the fix for the half of F09 that bit the Rust side:
+   * an unconditional `delete(id)` lets a handler that is finishing late remove
+   * whatever now holds its id, after which a `cancel` for that id reaches
+   * nothing. Cleanup is bound to the registration, never to the bare integer.
+   */
+  private retire(id: number, entry: Inflight): void {
+    if (this.inflight.get(id) === entry) this.inflight.delete(id);
   }
 
   private onResponse(envelope: Extract<Envelope, { t: "res" }>): void {
     const entry = this.pending.get(envelope.id);
-    // §2: a `res` for a cancelled id may still arrive and is discarded.
-    if (!entry) return;
+    if (!entry) {
+      this.discardOrThrow("res", envelope.id);
+      return;
+    }
+    // §2a: a request is `Settled` exactly once. A second head — successful or
+    // not — is FATAL and never a replacement. Overwriting the sink resolved an
+    // already-resolved promise and left the ORIGINAL reader waiting forever
+    // while the chunks flowed to a sink nobody was reading (F09/R06).
+    if (entry.kind === "stream" && entry.sink) {
+      throw new StateViolationError(
+        `a second res arrived for request ${envelope.id}, which already has a head`,
+      );
+    }
     if (!envelope.ok) {
       this.pending.delete(envelope.id);
       entry.reject(new BridgeRequestError(envelope.error.code, envelope.error.message));
@@ -503,7 +591,7 @@ export class BridgePeer {
       return;
     }
     // A streaming reply keeps its pending entry until `end`: `res` is only the head.
-    const sink = new ChunkSink(this.streamLimit, () => {
+    const sink = new ChunkSink(this.streamLimit, this.streamItemLimit, () => {
       this.pending.delete(envelope.id);
       void this.send({ t: "cancel", id: envelope.id });
     });
@@ -511,15 +599,39 @@ export class BridgePeer {
     entry.resolve({ head: envelope.payload, body: sink.readable });
   }
 
+  /**
+   * §2a's correlation-miss ladder, shared by `res`, `chunk` and `end`.
+   *
+   * Three outcomes, not two. An id in THIS peer's space that it has already
+   * allocated is a late answer to something it cancelled, and §2 says to discard
+   * it. An id of the wrong parity, or one past this peer's allocation cursor, is
+   * the other side inventing correlation — and a peer whose allocator has
+   * diverged crosses responses, which is precisely what a discarded frame would
+   * hide until it did.
+   */
+  private discardOrThrow(tag: string, id: number): void {
+    if (id % 2 === 1 && id < this.nextId) return;
+    throw new StateViolationError(
+      `${tag} names request id ${id}, which this host has never issued`,
+    );
+  }
+
   private onChunk(id: number, seq: number, bin: Uint8Array): void {
     const entry = this.pending.get(id);
-    if (!entry) return; // discarded: cancelled, or already ended.
+    if (!entry) {
+      this.discardOrThrow("chunk", id);
+      return;
+    }
     if (entry.kind !== "stream" || !entry.sink) {
-      throw new FrameError(`chunk for request ${id}, which is not streaming`);
+      throw new StateViolationError(
+        `chunk for request ${id}, which has not been answered with a head`,
+      );
     }
     // §2: "seq starts at 0 and increases by one per chunk. A gap is fatal."
     if (seq !== entry.nextSeq) {
-      throw new FrameError(`chunk ${seq} out of order on request ${id}, expected ${entry.nextSeq}`);
+      throw new StateViolationError(
+        `chunk ${seq} out of order on request ${id}, expected ${entry.nextSeq}`,
+      );
     }
     entry.nextSeq = seq + 1;
     if (!entry.sink.push(bin)) {
@@ -527,7 +639,9 @@ export class BridgePeer {
       // never drop the chunk, because the reader would then be silently wrong.
       this.pending.delete(id);
       entry.sink.fail(
-        new StreamOverflowError(`inbound stream ${id} exceeded its ${this.streamLimit}-byte buffer`),
+        new StreamOverflowError(
+          `inbound stream ${id} exceeded its buffer (${this.streamLimit} bytes / ${this.streamItemLimit} chunks)`,
+        ),
       );
       void this.send({ t: "cancel", id });
     }
@@ -535,10 +649,15 @@ export class BridgePeer {
 
   private onEnd(envelope: Extract<Envelope, { t: "end" }>): void {
     const entry = this.pending.get(envelope.id);
-    if (!entry) return;
+    if (!entry) {
+      this.discardOrThrow("end", envelope.id);
+      return;
+    }
     this.pending.delete(envelope.id);
     if (entry.kind !== "stream" || !entry.sink) {
-      throw new FrameError(`end for request ${envelope.id}, which is not streaming`);
+      throw new StateViolationError(
+        `end for request ${envelope.id}, which has not been answered with a head`,
+      );
     }
     if (envelope.ok) entry.sink.finish();
     else entry.sink.fail(new BridgeRequestError(envelope.error.code, envelope.error.message));
@@ -562,6 +681,43 @@ export class BridgePeer {
     return id;
   }
 
+  /** §9: the correlation table is not allowed to grow without bound. */
+  private admitRequest(): void {
+    if (this.pending.size >= MAX_ACTIVE_OUTBOUND) {
+      throw new BridgeRequestError(
+        "too_many_requests",
+        `${MAX_ACTIVE_OUTBOUND} requests are already in flight on this connection`,
+      );
+    }
+  }
+
+  /**
+   * §9: waits until `size` bytes fit in the write chain's aggregate budget.
+   *
+   * Only body frames go through here. A control frame is small, already bounded
+   * by the in-flight request caps, and is the thing that settles a request or
+   * stops a runaway producer — queueing it behind a stream's megabytes is how a
+   * `cancel` arrives after the flood it was meant to stop.
+   */
+  private async admitWrite(size: number): Promise<void> {
+    while (
+      this.queuedWriteBytes > 0 &&
+      this.queuedWriteBytes + size > MAX_QUEUED_WRITE_BYTES &&
+      this.phase !== "closed"
+    ) {
+      await new Promise<void>((resolve) => {
+        this.writeAdmission.push(resolve);
+      });
+    }
+    this.queuedWriteBytes += size;
+  }
+
+  private releaseWrite(size: number): void {
+    this.queuedWriteBytes -= size;
+    const waiters = this.writeAdmission.splice(0, this.writeAdmission.length);
+    for (const wake of waiters) wake();
+  }
+
   private watchAbort(id: number, signal: AbortSignal | undefined): void {
     if (!signal) return;
     const onAbort = (): void => {
@@ -577,8 +733,16 @@ export class BridgePeer {
     else signal.addEventListener("abort", onAbort, { once: true });
   }
 
+  /**
+   * Answers `res{ok:false}` for an id this peer is NOT serving — an unknown
+   * verb, a forbidden principal, a duplicate id, a full table.
+   *
+   * It deliberately does not touch `inflight`: on the duplicate-id path the
+   * entry under that key belongs to a request that is still running, and
+   * deleting it here is exactly the ownership transfer §2a forbids. A handler
+   * retires its own entry, in `serve`.
+   */
   private fail(id: number, error: BridgeErrorBody): Promise<void> {
-    this.inflight.delete(id);
     return this.send({ t: "res", id, ok: false, error });
   }
 
@@ -626,6 +790,7 @@ export class ChunkSink {
 
   constructor(
     private readonly limit: number,
+    private readonly itemLimit: number = DEFAULT_STREAM_BUFFER_ITEMS,
     onCancel?: () => void,
   ) {
     this.readable = new ReadableStream<Uint8Array>({
@@ -659,13 +824,27 @@ export class ChunkSink {
     });
   }
 
+  /**
+   * Queues one chunk, or returns `false` so the caller can end the stream loudly.
+   *
+   * Bounded on BOTH axes (§9). Byte-only accounting accepted an unbounded number
+   * of tiny chunks — each one a live array slot and a wakeup — while reporting
+   * the stream as well inside its budget (F10/R07). An empty chunk never reaches
+   * here: §2a makes a tailless `chunk` frame fatal at the decoder.
+   */
   push(bytes: Uint8Array): boolean {
     if (this.ended || this.failure) return true;
     if (this.queued + bytes.byteLength > this.limit) return false;
+    if (this.chunks.length + 1 > this.itemLimit) return false;
     this.chunks.push(bytes);
     this.queued += bytes.byteLength;
     this.signal();
     return true;
+  }
+
+  /** §9 instrumentation: what this sink is currently holding. */
+  get held(): { bytes: number; items: number } {
+    return { bytes: this.queued, items: this.chunks.length };
   }
 
   finish(): void {

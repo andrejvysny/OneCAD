@@ -26,6 +26,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use onecad_assistant_protocol::{
     decode_frame, encode_frame, Envelope, Hello, Ping, Principal, Req, PROTOCOL_VERSION,
 };
+use onecad_lib::assistant::bridge::SUPPORTED_AGENTKIT_CONTRACTS;
 use onecad_lib::assistant::{
     resolve_assistant_host_path, AssistantBridge, AssistantHost, AssistantState, BridgeError,
     BridgeOptions, HostConfig, StreamEvent,
@@ -295,7 +296,9 @@ fn hello(version: u32) -> Envelope {
     Envelope::Hello(Hello {
         protocol_version: version,
         host_version: "0.0.0-scripted".into(),
-        agentkit_contract_version: "scripted".into(),
+        // §2: the host refuses a contract version it cannot serve, so a
+        // scripted sidecar must claim one it can.
+        agentkit_contract_version: SUPPORTED_AGENTKIT_CONTRACTS[0].into(),
         pid: 1,
         session_nonce: "scripted".into(),
     })

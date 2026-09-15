@@ -25,7 +25,13 @@
 //!    name that could resolve somewhere else the second time it is looked up.
 //! 2. The HTTP client is built with redirects off and proxies off, for the
 //!    reasons given at [`ProviderGateway::build_client`].
-//! 3. Everything is bounded — request body, response body, total time — and a
+//! 3. [`ProviderOperation`] is an allowlist of the two calls a chat loop makes.
+//!    Locality is not enough on its own: a local inference server's HTTP surface
+//!    is much larger than those two calls, and its model-management and admin
+//!    routes live inside the very same loopback origin. Method, path, headers,
+//!    content type, JSON shape and **model identity** are checked per operation,
+//!    and anything not on the list is refused by not being on it.
+//! 4. Everything is bounded — request body, response body, total time — and a
 //!    cancelled request drops the upstream response rather than leaving it
 //!    running (the bridge owns that half; see `bridge::serve_provider_fetch`).
 
@@ -100,6 +106,46 @@ pub enum GatewayError {
     /// A method that is not an HTTP token.
     #[error("provider.fetch method {method:?} is not a valid HTTP method")]
     BadMethod { method: String },
+    /// A method/path pair that is not one of the supported [`ProviderOperation`]s.
+    #[error(
+        "provider.fetch {method} {path} is not a supported provider operation \
+         (supported: {supported})"
+    )]
+    UnsupportedOperation {
+        method: String,
+        path: String,
+        supported: String,
+    },
+    /// A supported operation reached by the wrong method.
+    #[error("provider operation {operation} is {allowed} only; got {method}")]
+    MethodNotAllowed {
+        operation: &'static str,
+        allowed: &'static str,
+        method: String,
+    },
+    /// A content type the operation does not accept.
+    #[error("provider operation {operation} does not accept content type {got:?}")]
+    BadContentType {
+        operation: &'static str,
+        got: String,
+    },
+    /// A request body that is not the shape the operation defines.
+    #[error("provider operation {operation} body is refused: {reason}")]
+    BadBodyShape {
+        operation: &'static str,
+        reason: String,
+    },
+    /// A body naming a model other than the one this provider is registered for.
+    #[error(
+        "provider.fetch names model {got:?}, but this provider is registered for {expected:?}"
+    )]
+    ModelMismatch { expected: String, got: String },
+    /// An image part whose source is not inline data — a URL the gateway would
+    /// have to fetch, or the provider would.
+    #[error(
+        "provider.fetch carries a non-inline image source ({url}); only data: URLs are accepted"
+    )]
+    RemoteImageSource { url: String },
     /// The request body is over the cap, or not base64.
     #[error("provider.fetch body is refused: {reason}")]
     BadBody { reason: String },
@@ -126,7 +172,14 @@ impl GatewayError {
             | GatewayError::BadPath { .. }
             | GatewayError::BadHeader { .. }
             | GatewayError::BadMethod { .. }
+            | GatewayError::BadContentType { .. }
+            | GatewayError::BadBodyShape { .. }
             | GatewayError::BadBody { .. } => "bad_request",
+            GatewayError::UnsupportedOperation { .. } | GatewayError::MethodNotAllowed { .. } => {
+                "unsupported_operation"
+            }
+            GatewayError::ModelMismatch { .. } => "model_mismatch",
+            GatewayError::RemoteImageSource { .. } => "remote_image_source",
             GatewayError::RequestTooLarge { .. } => "request_too_large",
             GatewayError::ResponseTooLarge { .. } => "response_too_large",
             GatewayError::Upstream { .. } => "provider_unreachable",
@@ -173,6 +226,22 @@ pub mod path_reason {
     pub const TOO_LONG: &str = "longer than the path cap";
     /// The path moved the built URL off the registered endpoint.
     pub const ESCAPED_BASE: &str = "resolves to a URL outside the registered provider base";
+    /// A percent-encoded dot. `%2e%2e` carries no raw `..` segment, and a URL
+    /// parser decodes it back into one — so a text check that looked only for
+    /// `..` would pass it straight through into a normalisation it never saw.
+    pub const ENCODED_DOT: &str = "contains a percent-encoded dot segment";
+    /// A backslash. WHATWG reads `\` as `/` in a special scheme, so the path a
+    /// reader sees and the path the parser builds are two different paths.
+    pub const BACKSLASH: &str = "contains a backslash, which a URL parser reads as a separator";
+    /// The parsed URL's path is not the text that was appended to the prefix —
+    /// the parser normalised something, and a path with two readings has no safe
+    /// reading.
+    pub const NOT_NORMALIZED: &str =
+        "does not survive URL parsing unchanged: it normalises to a different path";
+    /// The built path is not the prefix or a child of it. A STRING prefix test
+    /// accepts `/v1-admin` for a `/v1` prefix; a segment-boundary test does not.
+    pub const NOT_UNDER_PREFIX: &str =
+        "is not the registered path prefix or a path segment beneath it";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -272,29 +341,64 @@ impl ProviderBase {
     /// back and re-compared to this base**. The second check is the one that
     /// matters: it does not care which encoding trick got a path past the first,
     /// only whether the URL that came out still names the registered endpoint.
+    ///
+    /// Two properties beyond "same origin", and both are there because a string
+    /// prefix test is not a path-subtree test:
+    ///
+    /// * **The parse must change nothing.** `url.path()` has to be byte-identical
+    ///   to the text that was appended. `/%2e%2e/v1-admin/reset` carries no raw
+    ///   `..` segment, so a text scan passes it; the parser then decodes the dots
+    ///   and pops a segment, and what comes out is `/v1-admin/reset`. Comparing
+    ///   the parser's output against the input is what notices, whatever the
+    ///   encoding was.
+    /// * **The prefix must match on a segment boundary.** `starts_with("/v1")` is
+    ///   true of `/v1-admin`, which is a sibling of the registered subtree and not
+    ///   a member of it. `== prefix || starts_with(prefix + "/")` is the same test
+    ///   done on segments.
     pub fn resolve(&self, path: &str) -> Result<Url, GatewayError> {
         validate_operation_path(path)?;
+        let refuse = |reason: &'static str| GatewayError::BadPath {
+            path: path.to_string(),
+            reason,
+        };
         let text = format!("{}{}{}", self.origin(), self.path_prefix, path);
         // A path that makes the joined text unparseable is malformed, and there is
         // no reading of it that is safe to guess at.
-        let url = Url::parse(&text).map_err(|_| GatewayError::BadPath {
-            path: path.to_string(),
-            reason: path_reason::ESCAPED_BASE,
-        })?;
+        let url = Url::parse(&text).map_err(|_| refuse(path_reason::ESCAPED_BASE))?;
         let on_base = url.scheme() == self.scheme.as_str()
             && url.host_str() == Some(self.host_literal().as_str())
             && url.port_or_known_default() == Some(self.port)
             && url.username().is_empty()
-            && url.password().is_none()
-            && url.path().starts_with(&self.path_prefix);
+            && url.password().is_none();
         if !on_base {
-            return Err(GatewayError::BadPath {
-                path: path.to_string(),
-                reason: path_reason::ESCAPED_BASE,
-            });
+            return Err(refuse(path_reason::ESCAPED_BASE));
+        }
+
+        // Boundary first, so that an input which DID escape is refused for
+        // escaping rather than for the encoding it escaped with.
+        if !path_is_under_prefix(url.path(), &self.path_prefix) {
+            return Err(refuse(path_reason::NOT_UNDER_PREFIX));
+        }
+        let appended = path.split('?').next().unwrap_or(path);
+        if url.path() != format!("{}{}", self.path_prefix, appended) {
+            return Err(refuse(path_reason::NOT_NORMALIZED));
         }
         Ok(url)
     }
+}
+
+/// Whether a built path lies inside a prefix's subtree, **on a segment
+/// boundary**.
+///
+/// The property a `starts_with` test does not have: `/v1-admin/reset` starts with
+/// `/v1` and is not inside `/v1`. It is a sibling — a different first segment
+/// that happens to share a few bytes — and the difference between "shares a byte
+/// prefix" and "is in the subtree" is the whole of F12's escape.
+fn path_is_under_prefix(path: &str, prefix: &str) -> bool {
+    if prefix.is_empty() {
+        return true;
+    }
+    path == prefix || path.starts_with(&format!("{prefix}/"))
 }
 
 /// The longest operation path this gateway will build a URL from.
@@ -497,6 +601,16 @@ fn validate_operation_path(path: &str) -> Result<(), GatewayError> {
     if path.contains('#') {
         return Err(refuse(path_reason::FRAGMENT));
     }
+    if path.contains('\\') {
+        return Err(refuse(path_reason::BACKSLASH));
+    }
+    // Cheapest form of the normalisation check, and the one that names the real
+    // reason: `%2e` is a dot however it is cased, and a dot the text checks below
+    // cannot see is a dot the URL parser will act on.
+    let lower = path.to_ascii_lowercase();
+    if lower.contains("%2e") {
+        return Err(refuse(path_reason::ENCODED_DOT));
+    }
     if !path.bytes().all(|b| b.is_ascii_graphic()) {
         return Err(refuse(path_reason::NOT_PRINTABLE_ASCII));
     }
@@ -505,6 +619,222 @@ fn validate_operation_path(path: &str) -> Result<(), GatewayError> {
         return Err(refuse(path_reason::DOT_DOT));
     }
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The operation allowlist
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The provider operations this build supports, and the only ones the gateway
+/// forwards.
+///
+/// **Locality is not the whole policy.** An Ollama or llama.cpp server answers a
+/// great deal more than the two calls a chat loop makes — model pull, model
+/// delete, and in some builds an administrative surface — and all of it lives at
+/// the same loopback origin behind the same path prefix. A gateway that checked
+/// only where a request went would forward every one of those. Naming the two
+/// operations means everything else is refused by not being on the list, which is
+/// a property a reader can verify by reading the list rather than by imagining
+/// what a path could spell.
+///
+/// The two entries are what `OpenAiCompatibleClient` calls: `GET /models` when it
+/// probes, and `POST /chat/completions` for every turn, streamed or not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderOperation {
+    /// `GET /models` — the provider's model list.
+    ListModels,
+    /// `POST /chat/completions` — one turn, streamed or not.
+    ChatCompletions,
+}
+
+impl ProviderOperation {
+    /// Every supported operation.
+    pub const ALL: [ProviderOperation; 2] = [
+        ProviderOperation::ListModels,
+        ProviderOperation::ChatCompletions,
+    ];
+
+    /// The one path this operation is reached at, appended to the provider's
+    /// prefix. An exact path, not a pattern: a pattern is a place for a second
+    /// reading to hide.
+    #[must_use]
+    pub const fn path(self) -> &'static str {
+        match self {
+            ProviderOperation::ListModels => "/models",
+            ProviderOperation::ChatCompletions => "/chat/completions",
+        }
+    }
+
+    /// The one method this operation accepts.
+    #[must_use]
+    pub const fn method(self) -> &'static str {
+        match self {
+            ProviderOperation::ListModels => "GET",
+            ProviderOperation::ChatCompletions => "POST",
+        }
+    }
+
+    /// The name this operation is reported under.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ProviderOperation::ListModels => "models.list",
+            ProviderOperation::ChatCompletions => "chat.completions",
+        }
+    }
+
+    /// `GET /models, POST /chat/completions` — what a refusal lists.
+    fn supported() -> String {
+        ProviderOperation::ALL
+            .iter()
+            .map(|op| format!("{} {}", op.method(), op.path()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// The operation a method and an operation path name, or a refusal.
+    ///
+    /// The path must match exactly, query included — which is how a query string
+    /// is refused without a separate rule for it: neither supported operation
+    /// takes one, so `/models?limit=10` simply is not `/models`.
+    fn classify(method: &Method, path: &str) -> Result<ProviderOperation, GatewayError> {
+        match ProviderOperation::ALL
+            .iter()
+            .copied()
+            .find(|op| op.path() == path)
+        {
+            Some(op) if op.method() == method.as_str() => Ok(op),
+            Some(op) => Err(GatewayError::MethodNotAllowed {
+                operation: op.as_str(),
+                allowed: op.method(),
+                method: method.to_string(),
+            }),
+            None => Err(GatewayError::UnsupportedOperation {
+                method: method.to_string(),
+                path: path.to_string(),
+                supported: ProviderOperation::supported(),
+            }),
+        }
+    }
+
+    /// Whether this operation carries a JSON request body.
+    const fn takes_json_body(self) -> bool {
+        matches!(self, ProviderOperation::ChatCompletions)
+    }
+
+    /// Checks the body this operation was given, and returns the bytes to
+    /// forward.
+    ///
+    /// The return value is the body rather than `()` because of the one case
+    /// where the gateway edits: a chat body with no `model` gets the registered
+    /// one **injected**. A body that already names the right model is forwarded
+    /// byte-for-byte, so the common path re-serialises nothing.
+    fn check_body(self, body: Vec<u8>, model: &str) -> Result<Vec<u8>, GatewayError> {
+        let refuse = |reason: &str| GatewayError::BadBodyShape {
+            operation: self.as_str(),
+            reason: reason.to_string(),
+        };
+        match self {
+            ProviderOperation::ListModels => {
+                if !body.is_empty() {
+                    return Err(refuse("a model list request carries no body"));
+                }
+                Ok(body)
+            }
+            ProviderOperation::ChatCompletions => {
+                if body.is_empty() {
+                    return Err(refuse("a chat completion needs a JSON body"));
+                }
+                let mut value: Value =
+                    serde_json::from_slice(&body).map_err(|e| refuse(&format!("not JSON: {e}")))?;
+                let object = value
+                    .as_object_mut()
+                    .ok_or_else(|| refuse("not a JSON object"))?;
+                match object.get("messages") {
+                    Some(Value::Array(messages)) if !messages.is_empty() => {}
+                    Some(Value::Array(_)) => return Err(refuse("messages is empty")),
+                    Some(_) => return Err(refuse("messages is not an array")),
+                    None => return Err(refuse("no messages")),
+                }
+                // Before the model check, so a body carrying BOTH a wrong model
+                // and a remote image is refused for whichever reason the reader
+                // would consider worse.
+                reject_non_inline_image_sources(&value)?;
+                let Some(object) = value.as_object_mut() else {
+                    unreachable!("checked above")
+                };
+                match object.get("model") {
+                    // The overwhelmingly common case: forward the bytes the
+                    // sidecar built, unmodified.
+                    Some(Value::String(named)) if named == model => Ok(body),
+                    Some(Value::String(named)) => Err(GatewayError::ModelMismatch {
+                        expected: model.to_string(),
+                        got: named.clone(),
+                    }),
+                    Some(_) => Err(refuse("model is not a string")),
+                    None => {
+                        object.insert("model".to_string(), Value::String(model.to_string()));
+                        serde_json::to_vec(&value)
+                            .map_err(|e| refuse(&format!("re-serialising the body failed: {e}")))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Refuses any image part whose source is not inline data.
+///
+/// An OpenAI `image_url` part may name a URL, and the party that would fetch it
+/// is the inference server — off this machine, at an address nothing in this
+/// module validated, chosen by whatever produced the request. Until OneCAD has an
+/// attachment resolver that turns a local file into inline data, the honest
+/// answer is that only `data:` URLs go out.
+///
+/// The walk is over the whole body rather than over `messages[*].content[*]`,
+/// because "the only place an image part can appear" is a claim about a schema
+/// that the provider, not this gateway, owns. Depth is bounded by `serde_json`'s
+/// own parse recursion limit, so the recursion here is bounded by the parse that
+/// already happened.
+fn reject_non_inline_image_sources(value: &Value) -> Result<(), GatewayError> {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                if key == "image_url" {
+                    let url = child
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .or_else(|| child.as_str());
+                    match url {
+                        Some(url) if url.starts_with("data:") => {}
+                        Some(url) => {
+                            return Err(GatewayError::RemoteImageSource { url: elide(url) })
+                        }
+                        None => {
+                            return Err(GatewayError::BadBodyShape {
+                                operation: ProviderOperation::ChatCompletions.as_str(),
+                                reason: "an image part with no url".to_string(),
+                            })
+                        }
+                    }
+                }
+                reject_non_inline_image_sources(child)?;
+            }
+            Ok(())
+        }
+        Value::Array(items) => items.iter().try_for_each(reject_non_inline_image_sources),
+        _ => Ok(()),
+    }
+}
+
+/// The first 96 characters of a string, for an error message that must name what
+/// it refused without pasting a megabyte of base64 into a log line.
+fn elide(text: &str) -> String {
+    const LIMIT: usize = 96;
+    match text.char_indices().nth(LIMIT) {
+        Some((index, _)) => format!("{}…", &text[..index]),
+        None => text.to_string(),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -608,11 +938,34 @@ struct ProviderFetchPayload {
     body_base64: Option<String>,
 }
 
-/// Headers the sidecar may not set, and why.
-const REFUSED_REQUEST_HEADERS: [(&str, &str); 4] = [
+/// The only headers the sidecar may set.
+///
+/// An allowlist, for the same reason the operations are one: the set of headers
+/// a chat client needs is two, and every header beyond them is either something
+/// the HTTP client owns (framing, length, host) or something that changes where
+/// or as whom the request arrives.
+const PERMITTED_REQUEST_HEADERS: [&str; 2] = ["accept", "content-type"];
+
+/// Headers with a refusal of their own, so the message names the real reason
+/// instead of "not on the list". Every one of these is also absent from
+/// [`PERMITTED_REQUEST_HEADERS`] — this table only improves the diagnosis.
+const REFUSED_REQUEST_HEADERS: [(&str, &str); 14] = [
     (
         "authorization",
         "the gateway injects the provider credential; the sidecar holds none",
+    ),
+    (
+        "proxy-authorization",
+        "a credential for a proxy, and this gateway has no proxy",
+    ),
+    ("cookie", "a credential the sidecar has no business holding"),
+    (
+        "x-api-key",
+        "a credential the sidecar has no business holding",
+    ),
+    (
+        "api-key",
+        "a credential the sidecar has no business holding",
     ),
     (
         "host",
@@ -626,7 +979,98 @@ const REFUSED_REQUEST_HEADERS: [(&str, &str); 4] = [
         "transfer-encoding",
         "framing belongs to the HTTP client, not to the caller",
     ),
+    (
+        "proxy-connection",
+        "proxying is disabled; a header cannot turn it back on",
+    ),
+    (
+        "forwarded",
+        "the gateway does not forward on anyone's behalf",
+    ),
+    (
+        "x-forwarded-for",
+        "the gateway does not forward on anyone's behalf",
+    ),
+    (
+        "x-forwarded-host",
+        "the gateway does not forward on anyone's behalf",
+    ),
+    (
+        "x-forwarded-proto",
+        "the gateway does not forward on anyone's behalf",
+    ),
+    ("via", "the gateway does not forward on anyone's behalf"),
 ];
+
+/// The content type a JSON operation is sent with, and the only one it accepts.
+const CONTENT_TYPE_JSON: &str = "application/json";
+
+/// Checks the sidecar's headers against the allowlist and the operation's
+/// content-type policy, and returns the headers to actually send.
+///
+/// The content type is supplied when the operation takes a body and the sidecar
+/// did not name one, rather than left off: the body IS JSON, and a provider that
+/// guesses at an unlabelled body is a provider guessing.
+fn validate_request_headers(
+    headers: &BTreeMap<String, String>,
+    operation: ProviderOperation,
+) -> Result<Vec<(HeaderName, HeaderValue)>, GatewayError> {
+    let mut validated: Vec<(HeaderName, HeaderValue)> = Vec::with_capacity(headers.len() + 1);
+    let mut saw_content_type = false;
+    for (name, value) in headers {
+        let lower = name.to_ascii_lowercase();
+        if let Some((_, reason)) = REFUSED_REQUEST_HEADERS
+            .iter()
+            .find(|(refused, _)| *refused == lower)
+        {
+            return Err(GatewayError::BadHeader {
+                name: name.clone(),
+                reason,
+            });
+        }
+        if !PERMITTED_REQUEST_HEADERS.contains(&lower.as_str()) {
+            return Err(GatewayError::BadHeader {
+                name: name.clone(),
+                reason: "not one of the headers a provider operation may carry",
+            });
+        }
+        if lower == "content-type" {
+            // `application/json; charset=utf-8` is the same content type; the
+            // parameters after the `;` are not part of the decision.
+            let essence = value
+                .split(';')
+                .next()
+                .unwrap_or(value)
+                .trim()
+                .to_ascii_lowercase();
+            let accepted = operation.takes_json_body() && essence == CONTENT_TYPE_JSON;
+            if !accepted {
+                return Err(GatewayError::BadContentType {
+                    operation: operation.as_str(),
+                    got: value.clone(),
+                });
+            }
+            saw_content_type = true;
+        }
+        let header_name =
+            HeaderName::from_bytes(lower.as_bytes()).map_err(|_| GatewayError::BadHeader {
+                name: name.clone(),
+                reason: "not a legal HTTP header name",
+            })?;
+        let header_value = HeaderValue::from_str(value).map_err(|_| GatewayError::BadHeader {
+            name: name.clone(),
+            reason: "not a legal HTTP header value",
+        })?;
+        validated.push((header_name, header_value));
+    }
+    if operation.takes_json_body() && !saw_content_type {
+        validated.push((
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static(CONTENT_TYPE_JSON),
+        ));
+    }
+    Ok(validated)
+}
 
 /// The Rust-owned registry of local providers, plus the one HTTP client they
 /// share.
@@ -780,6 +1224,8 @@ impl ProviderGateway {
             Method::from_bytes(request.method.as_bytes()).map_err(|_| GatewayError::BadMethod {
                 method: request.method.clone(),
             })?;
+        let operation = ProviderOperation::classify(&method, &request.path)?;
+        let headers = validate_request_headers(&request.headers, operation)?;
 
         let body = match &request.body_base64 {
             Some(encoded) => base64::engine::general_purpose::STANDARD
@@ -789,36 +1235,19 @@ impl ProviderGateway {
                 })?,
             None => Vec::new(),
         };
+        // The cap is checked on the decoded bytes before the body is parsed, so
+        // an oversized body costs a base64 decode and not a JSON parse.
         if body.len() > self.limits.max_request_body_bytes {
             return Err(GatewayError::RequestTooLarge {
                 len: body.len(),
                 cap: self.limits.max_request_body_bytes,
             });
         }
+        let body = operation.check_body(body, &provider.model)?;
 
         let mut builder = self.client.request(method, url);
-        for (name, value) in &request.headers {
-            let lower = name.to_ascii_lowercase();
-            if let Some((_, reason)) = REFUSED_REQUEST_HEADERS
-                .iter()
-                .find(|(refused, _)| *refused == lower)
-            {
-                return Err(GatewayError::BadHeader {
-                    name: name.clone(),
-                    reason,
-                });
-            }
-            let header_name =
-                HeaderName::from_bytes(lower.as_bytes()).map_err(|_| GatewayError::BadHeader {
-                    name: name.clone(),
-                    reason: "not a legal HTTP header name",
-                })?;
-            let header_value =
-                HeaderValue::from_str(value).map_err(|_| GatewayError::BadHeader {
-                    name: name.clone(),
-                    reason: "not a legal HTTP header value",
-                })?;
-            builder = builder.header(header_name, header_value);
+        for (name, value) in headers {
+            builder = builder.header(name, value);
         }
         if let Some(key) = &provider.api_key {
             let mut value = HeaderValue::from_str(&format!("Bearer {key}")).map_err(|_| {
@@ -1366,6 +1795,43 @@ mod tests {
                 "a raw space is not a legal path byte",
                 path_reason::NOT_PRINTABLE_ASCII,
             ),
+            (
+                "/%2e%2e/v1-admin/reset",
+                "F12: a percent-encoded .. that a URL parser decodes and acts on",
+                path_reason::ENCODED_DOT,
+            ),
+            (
+                "/%2E%2E/v1-admin/reset",
+                "the same, cased the other way",
+                path_reason::ENCODED_DOT,
+            ),
+            (
+                "/chat/%2e%2e%2f%2e%2e/admin",
+                "encoded dots and encoded separators together",
+                path_reason::ENCODED_DOT,
+            ),
+            (
+                "/chat\\completions",
+                "a backslash, which a URL parser reads as a separator",
+                path_reason::BACKSLASH,
+            ),
+            (
+                "/..\\..\\admin",
+                "backslash-spelled parent segments",
+                path_reason::BACKSLASH,
+            ),
+            (
+                "/a/./b",
+                "a single-dot segment the parser collapses, so the built path is \
+                 not the path that was written",
+                path_reason::NOT_NORMALIZED,
+            ),
+            (
+                "/chat`completions",
+                "a byte the URL parser percent-encodes, so the built path is not \
+                 the path that was written",
+                path_reason::NOT_NORMALIZED,
+            ),
         ];
         for (path, why, reason) in cases {
             match base.resolve(path) {
@@ -1641,6 +2107,435 @@ mod tests {
 
         registry.install(None);
         assert!(registry.current().is_none(), "None clears the registry");
+    }
+
+    /// THE F12 regression, against the `url` crate rather than against WHATWG in
+    /// the abstract.
+    ///
+    /// `/%2e%2e/v1-admin/reset` carries no raw `..` segment, so every text check
+    /// the gateway used to run passed it. The parser then decodes the dots, pops
+    /// `/v1`, and produces `/v1-admin/reset` — which `starts_with("/v1")` says is
+    /// fine. It is not fine: `/v1-admin` is a SIBLING of the registered subtree.
+    /// This test pins both halves of the fix, and pins them against the real
+    /// parser so it keeps telling the truth if the parser's normalisation
+    /// changes.
+    #[test]
+    fn a_sibling_prefix_reached_through_encoded_dots_is_refused() {
+        let base = validate_provider_base("http://127.0.0.1:11434/v1").unwrap();
+
+        // 1. What the parser actually does with the escape, stated as a fact
+        //    rather than assumed: this is the behaviour being defended against.
+        let escaped = Url::parse("http://127.0.0.1:11434/v1/%2e%2e/v1-admin/reset").unwrap();
+        assert_eq!(
+            escaped.path(),
+            "/v1-admin/reset",
+            "the url crate normalises encoded dot segments, which is why a text \
+             scan for `..` is not enough"
+        );
+        assert!(
+            escaped.path().starts_with("/v1"),
+            "and the escaped path passes a STRING prefix test, which is why that \
+             test is not enough either"
+        );
+
+        // 2. The gateway refuses it.
+        match base.resolve("/%2e%2e/v1-admin/reset") {
+            Err(GatewayError::BadPath { reason, .. }) => {
+                assert_eq!(reason, path_reason::ENCODED_DOT)
+            }
+            other => panic!("the encoded-dot escape must be refused, got {other:?}"),
+        }
+
+        // 3. And the boundary test itself, which is what would catch an escape
+        //    arriving by some encoding nobody has thought of yet.
+        for (path, under) in [
+            ("/v1", true),
+            ("/v1/models", true),
+            ("/v1/chat/completions", true),
+            ("/v1-admin/reset", false),
+            ("/v1-admin", false),
+            ("/v10/models", false),
+            ("/", false),
+            ("/admin", false),
+        ] {
+            assert_eq!(
+                path_is_under_prefix(path, "/v1"),
+                under,
+                "{path} under /v1 should be {under}"
+            );
+        }
+        // An empty prefix is the whole origin, so everything on it is under it.
+        assert!(path_is_under_prefix("/anything", ""));
+    }
+
+    #[tokio::test]
+    async fn only_the_two_supported_operations_are_forwarded() {
+        // Port 1 has nothing listening: every row below must be refused BEFORE a
+        // socket is opened, so a `provider_unreachable` here would be a failure.
+        let gateway = ProviderGateway::new(
+            vec![local("local", "http://127.0.0.1:1/v1")],
+            GatewayLimits::default(),
+        )
+        .unwrap();
+
+        let cases: &[(&str, &str, &str, &str)] = &[
+            (
+                "DELETE",
+                "/chat/completions",
+                "a supported path reached by a method that is not its own",
+                "unsupported_operation",
+            ),
+            (
+                "PUT",
+                "/chat/completions",
+                "likewise PUT",
+                "unsupported_operation",
+            ),
+            (
+                "DELETE",
+                "/models",
+                "deleting a model is model management, not a chat loop",
+                "unsupported_operation",
+            ),
+            (
+                "POST",
+                "/models",
+                "the model list is a GET",
+                "unsupported_operation",
+            ),
+            (
+                "GET",
+                "/chat/completions",
+                "a completion is a POST",
+                "unsupported_operation",
+            ),
+            (
+                "POST",
+                "/api/pull",
+                "Ollama's model pull lives at the same loopback origin",
+                "unsupported_operation",
+            ),
+            (
+                "DELETE",
+                "/api/delete",
+                "so does its model delete",
+                "unsupported_operation",
+            ),
+            (
+                "GET",
+                "/admin/reset",
+                "an administrative route",
+                "unsupported_operation",
+            ),
+            (
+                "GET",
+                "/models?limit=10",
+                "neither operation takes a query, so a query is not that operation",
+                "unsupported_operation",
+            ),
+            (
+                "POST",
+                "/chat//completions",
+                "an empty segment is a different path",
+                "unsupported_operation",
+            ),
+            (
+                "POST",
+                "/chat/%2e%2e/chat/completions",
+                "an encoded dot is refused as a path, before it is classified",
+                "bad_request",
+            ),
+            (
+                "POST",
+                "/chat\\completions",
+                "a backslash is refused as a path",
+                "bad_request",
+            ),
+        ];
+        for (method, path, why, code) in cases {
+            let err = gateway
+                .fetch(json!({
+                    "providerId": "local",
+                    "method": method,
+                    "path": path,
+                    "headers": {"content-type": "application/json"},
+                    "bodyBase64": base64_chat_body("test-model"),
+                }))
+                .await
+                .expect_err(&format!("{method} {path} must be refused: {why}"));
+            assert_eq!(err.code(), *code, "{method} {path} ({why}): {err}");
+        }
+
+        // And the two that ARE supported get as far as the socket, which is the
+        // proof that the rows above were refused by policy and not by the
+        // connection failing first.
+        for (method, path, body) in [
+            ("GET", "/models", None),
+            (
+                "POST",
+                "/chat/completions",
+                Some(base64_chat_body("test-model")),
+            ),
+        ] {
+            let mut payload = json!({
+                "providerId": "local",
+                "method": method,
+                "path": path,
+            });
+            if let Some(body) = body {
+                payload["bodyBase64"] = json!(body);
+                payload["headers"] = json!({"content-type": "application/json"});
+            }
+            let err = gateway
+                .fetch(payload)
+                .await
+                .expect_err("nothing is listening on port 1");
+            assert_eq!(
+                err.code(),
+                "provider_unreachable",
+                "{method} {path} must reach the connect attempt: {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_credential_or_proxy_header_is_refused_by_name() {
+        let gateway = ProviderGateway::new(
+            vec![local("local", "http://127.0.0.1:1/v1")],
+            GatewayLimits::default(),
+        )
+        .unwrap();
+        for (name, why) in [
+            ("Authorization", "the gateway injects the credential"),
+            ("proxy-authorization", "a credential for a proxy"),
+            ("Cookie", "a credential"),
+            ("x-api-key", "a credential"),
+            ("api-key", "a credential"),
+            ("host", "the host is the registered provider's"),
+            ("Content-Length", "set from the body the gateway sends"),
+            ("transfer-encoding", "framing belongs to the client"),
+            ("proxy-connection", "proxying is disabled"),
+            ("forwarded", "the gateway forwards for nobody"),
+            ("X-Forwarded-For", "the gateway forwards for nobody"),
+            ("x-forwarded-host", "the gateway forwards for nobody"),
+            ("x-forwarded-proto", "the gateway forwards for nobody"),
+            ("via", "the gateway forwards for nobody"),
+            ("x-anything-else", "not on the allowlist"),
+            ("user-agent", "not on the allowlist"),
+        ] {
+            let err = gateway
+                .fetch(json!({
+                    "providerId": "local",
+                    "method": "GET",
+                    "path": "/models",
+                    "headers": {name: "x"},
+                }))
+                .await
+                .expect_err(why);
+            assert!(
+                matches!(err, GatewayError::BadHeader { .. }),
+                "{name}: {why} — got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_content_type_a_provider_operation_accepts_is_the_one_it_defines() {
+        let gateway = ProviderGateway::new(
+            vec![local("local", "http://127.0.0.1:1/v1")],
+            GatewayLimits::default(),
+        )
+        .unwrap();
+        for (content_type, why) in [
+            ("text/plain", "a chat body is JSON"),
+            ("application/x-www-form-urlencoded", "a chat body is JSON"),
+            ("multipart/form-data; boundary=x", "a chat body is JSON"),
+        ] {
+            let err = gateway
+                .fetch(json!({
+                    "providerId": "local",
+                    "method": "POST",
+                    "path": "/chat/completions",
+                    "headers": {"content-type": content_type},
+                    "bodyBase64": base64_chat_body("test-model"),
+                }))
+                .await
+                .expect_err(why);
+            assert!(
+                matches!(err, GatewayError::BadContentType { .. }),
+                "{content_type}: {why} — got {err:?}"
+            );
+        }
+
+        // A model list carries no body, so it names no content type either.
+        let err = gateway
+            .fetch(json!({
+                "providerId": "local",
+                "method": "GET",
+                "path": "/models",
+                "headers": {"content-type": "application/json"},
+            }))
+            .await
+            .expect_err("a bodiless operation does not carry a content type");
+        assert!(matches!(err, GatewayError::BadContentType { .. }), "{err}");
+    }
+
+    /// The registered model is the model. A body naming another one is refused,
+    /// and a body naming none has the registered one injected — the two halves of
+    /// "stored but never enforced".
+    #[test]
+    fn the_registered_model_is_enforced_and_injected() {
+        let chat = ProviderOperation::ChatCompletions;
+
+        // Named correctly: forwarded byte-for-byte.
+        let exact = br#"{"model":"qwen3:8b","messages":[{"role":"user","content":"hi"}]}"#;
+        assert_eq!(
+            chat.check_body(exact.to_vec(), "qwen3:8b").unwrap(),
+            exact.to_vec(),
+            "a body that already names the right model is not rewritten"
+        );
+
+        // Named wrongly: refused, with both names in the message.
+        let wrong = br#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#;
+        match chat.check_body(wrong.to_vec(), "qwen3:8b") {
+            Err(err @ GatewayError::ModelMismatch { .. }) => {
+                assert_eq!(err.code(), "model_mismatch");
+                let text = err.to_string();
+                assert!(
+                    text.contains("gpt-4o") && text.contains("qwen3:8b"),
+                    "{text}"
+                );
+            }
+            other => panic!("a body naming another model must be refused, got {other:?}"),
+        }
+
+        // Named not at all: injected, so the request that goes out cannot
+        // disagree with the configuration that built it.
+        let absent = br#"{"messages":[{"role":"user","content":"hi"}]}"#;
+        let sent: Value =
+            serde_json::from_slice(&chat.check_body(absent.to_vec(), "qwen3:8b").unwrap()).unwrap();
+        assert_eq!(sent["model"], "qwen3:8b");
+        assert_eq!(sent["messages"][0]["content"], "hi");
+
+        // Not a string at all.
+        let typed = br#"{"model":{"id":"x"},"messages":[{"role":"user","content":"hi"}]}"#;
+        assert!(matches!(
+            chat.check_body(typed.to_vec(), "qwen3:8b"),
+            Err(GatewayError::BadBodyShape { .. })
+        ));
+    }
+
+    #[test]
+    fn a_chat_body_that_is_not_the_shape_the_operation_defines_is_refused() {
+        let chat = ProviderOperation::ChatCompletions;
+        for (body, why) in [
+            (&b""[..], "a chat completion needs a body"),
+            (&b"not json"[..], "not JSON"),
+            (&b"[1,2,3]"[..], "not a JSON object"),
+            (&br#"{"model":"m"}"#[..], "no messages"),
+            (&br#"{"model":"m","messages":[]}"#[..], "no messages"),
+            (
+                &br#"{"model":"m","messages":"hello"}"#[..],
+                "messages is not an array",
+            ),
+        ] {
+            assert!(
+                matches!(
+                    chat.check_body(body.to_vec(), "m"),
+                    Err(GatewayError::BadBodyShape { .. })
+                ),
+                "{why}: {}",
+                String::from_utf8_lossy(body)
+            );
+        }
+
+        // A model list carries nothing at all.
+        assert!(matches!(
+            ProviderOperation::ListModels.check_body(b"{}".to_vec(), "m"),
+            Err(GatewayError::BadBodyShape { .. })
+        ));
+        assert!(ProviderOperation::ListModels
+            .check_body(Vec::new(), "m")
+            .unwrap()
+            .is_empty());
+    }
+
+    /// An `image_url` part naming a URL is a fetch someone else performs, at an
+    /// address nothing here validated. Inline `data:` is the only accepted form
+    /// until OneCAD has an attachment resolver of its own.
+    #[test]
+    fn a_non_inline_image_source_is_refused() {
+        let chat = ProviderOperation::ChatCompletions;
+        for (url, why) in [
+            ("https://evil.example/pixel.png", "a remote https image"),
+            ("http://169.254.169.254/latest/meta-data/", "link-local"),
+            ("file:///etc/passwd", "a local file the provider would read"),
+            ("//evil.example/x.png", "protocol-relative"),
+        ] {
+            let body = json!({
+                "model": "m",
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "what is this"},
+                        {"type": "image_url", "image_url": {"url": url}},
+                    ],
+                }],
+            });
+            let err = chat
+                .check_body(serde_json::to_vec(&body).unwrap(), "m")
+                .expect_err(why);
+            assert_eq!(err.code(), "remote_image_source", "{why}: {err}");
+            assert!(
+                err.to_string().contains("evil") || err.to_string().contains(url),
+                "{err}"
+            );
+        }
+
+        // Inline data is what the sidecar actually sends for an attachment, and
+        // it reaches nothing.
+        let inline = json!({
+            "model": "m",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="},
+                }],
+            }],
+        });
+        assert!(chat
+            .check_body(serde_json::to_vec(&inline).unwrap(), "m")
+            .is_ok());
+    }
+
+    /// The operation table, as a table. A row added here without a policy is a
+    /// row this assertion notices.
+    #[test]
+    fn the_operation_allowlist_is_the_two_calls_a_chat_loop_makes() {
+        let rows: Vec<(&str, &str, &str)> = ProviderOperation::ALL
+            .iter()
+            .map(|op| (op.as_str(), op.method(), op.path()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("models.list", "GET", "/models"),
+                ("chat.completions", "POST", "/chat/completions"),
+            ],
+            "a third provider operation is an authorization decision, not a new \
+             row in an enum"
+        );
+    }
+
+    /// A minimal, valid chat body for the registered model, base64 as the wire
+    /// carries it.
+    fn base64_chat_body(model: &str) -> String {
+        let body = json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&body).unwrap())
     }
 
     #[test]

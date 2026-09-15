@@ -1,3 +1,117 @@
+# SESSION 36 — ASSISTANT HARDENING H0–H5 (2026-09-15, Opus 5, branch `claude/loving-cori-rz1v4i`)
+
+Acting on an external review of `0a0de65` that found 16 defects, 11 at P1, and whose verdict
+was: keep the architecture, but the host/sidebar package is **not complete** and CAD mutation
+stays disabled. I agree with that verdict. Its two headline findings were confirmed by
+reading this branch's code, not taken on trust, and all eight of its companion probes
+reproduce.
+
+**The chat loop could not complete.** `buildApp` seeded no AgentKit provider and the panel
+submitted no `providerId`, so a turn reached `no_provider` before the factory that would have
+used Rust's gateway was ever called (F01); and `AssistantPanel` never called
+`streamRun`/`listMessages`/`useChat`, so no reply or terminal failure could render (F02) —
+which is what hid F01. The WP2 exit gate was not met, and `implementation-status.md` had
+understated that. Corrected there and here.
+
+## Landed
+
+- [x] **Merged `origin/master` (`f438ced`)** — the PR was `mergeable_state: dirty` and no CI
+      could run, because GitHub cannot build a merge commit for a conflicted PR. Conflict was
+      the two ledgers only; both blocks kept. Exposed one real breakage:
+      `pending_render_expectations` is dead code without the `tauri-e2e` feature. **Verified
+      pre-existing** by building `origin/master` alone in a scratch worktree with only this
+      branch's two `onecad-core` lint fixes applied — it fails identically there.
+- [x] **F03 — clean-checkout CI, which this branch had broken.** Root `package.json` depends
+      on `agentkit: file:.agentkit-src/...`, a generated gitignored prefix; the bootstrap had
+      been added to two jobs only, and in both AFTER the install. Measured on a disposable
+      `git archive` checkout: without it, 678 packages, *"Failed to install 1 package"*,
+      `node_modules/agentkit` absent, `tsc` failing `TS2307` on four files; with it, 679 and
+      clean. All six installing jobs now bootstrap first. **Confirmed by real CI**: the
+      `frontend` job went green.
+- [x] **New `assistant` CI lane** — ubuntu-latest, minutes not an hour. It can exist because
+      `onecad-assistant-protocol` is a PURE crate: the OCAK1 conformance suite needs no
+      system libraries and no staged binaries. Catches BUILD-01 in a minute rather than in a
+      60-minute e2e lane.
+- [x] **H1 — authoritative configuration and execution-ready barrier (F01, F08).** Rust mints
+      a monotonic generation and sends `config.install` over the bridge; the sidecar projects
+      it into AgentKit's provider store and only then opens an execution gate. **No endpoint
+      and no credential cross** — the projection stores `http://provider.invalid`, and a unit
+      test asserts no `baseUrl`/`apiKey`/`http://`/`127.0.0.1` string can appear in the
+      payload. F08 is structural rather than ordered: `buildApp` no longer calls
+      `startWorker`, and the only thing that opens the gate is a `config.install`, which
+      cannot arrive before `accept`. Four honest states replace one "ready".
+- [x] **H2 — protocol lifecycle, cancellation, bounds (F04, F05, F09, F10, F16).** Both peers
+      now implement §2a identically, pinned by a **shared 14-case wire-fixture corpus** both
+      runners execute. Closed two silent parser divergences the corpus surfaced (ids above
+      2^53−1; duplicate envelope keys). One connection-failure authority settles every
+      pending request when either IO half fails. Byte-credit and item bounds at every hop.
+      Contract version now gates the handshake.
+- [x] **ORDERING BUG found by H5 in H2's file, fixed by H2.** `next_outgoing` was a `biased`
+      select draining control before body; `end` is control and `chunk` is body, so a fast
+      response emitted its terminator BEFORE its own chunks. Measured on the wire:
+      `Res{content-length:112}` → `End{ok:true}` → `Chunk{seq:0}`. Fixed by a rule rather
+      than a re-order — everything after the head travels one lane in production order —
+      keeping the control bias that stops a `cancel` queueing behind the flood it stops.
+      Verified red-first: 3/3 red on reverting the one-line change. It was also the cause of
+      two red gateway tests, which went green without touching their assertions.
+- [x] **H5 — gateway policy and packaging (F11, F12, F15).** Windows startup was a blocker,
+      not cosmetic: `parseArgs` gated on `startsWith('/')`, so a native `C:\Users\...` path
+      was refused. Now `path.isAbsolute` with a named UNC/drive-relative policy, exercised on
+      this Linux box by passing `path.win32`. Gateway narrowed to a two-operation allowlist
+      with model identity enforced; the segment-boundary fix carries **the exact Rust
+      regression** the review asked for, asserting the `url` crate normalizes
+      `/%2e%2e/v1-admin/reset` past a `/v1` prefix, and that the upstream request counter
+      stays at 0. The `rm -rf "${PREFIX}"` hazard is gone — a directory is deleted only if it
+      carries the marker the script itself wrote.
+- [x] **Minimal child environment wired** (H5 implemented and tested it; the call site was in
+      another package's file). The host no longer inherits the parent environment: an
+      inherited `*_PROXY` would route "local" provider traffic off-box and silently defeat
+      ADR-0017, and nobody would have chosen it.
+- [x] **AgentKit patch prepared for the user** at `docs/assistant/patches/`. Adds
+      `TaskStore.selectOrphanedRunningTasks` and a bounded periodic sweep, needing **no schema
+      change** — deliberate, because that adapter refuses to migrate and a version bump would
+      strand existing conversations. AgentKit's own suite caught two wrong designs: the
+      periodic pass must not expire leases, since on a timer an idle runner would strip a busy
+      one of the lease it needs to commit its own result.
+
+## Gate of record (2026-09-15, serial, unloaded, run by the orchestrator)
+
+`cargo fmt --all --check` ✓ · `cargo clippy --workspace --all-targets -- -D warnings` ✓ ·
+`onecad-assistant-protocol` **74/0** all-features, **64/0** default ·
+`cargo test -p onecad --lib` **566/0** ·
+`ONECAD_REQUIRE_ASSISTANT_HOST=1` `assistant_bridge` **6/0**, `assistant_configuration`
+**5/0**, `assistant_provider_gateway` **22/0**, all against the real compiled sidecar ·
+`assistant-host` `bun test` **107/0, 9 files** · `scripts/tests/assistant-host-build.test.sh`
+**24 controls** ✓ · `bunx tsc --noEmit` ✓ · `bun run test` **352 files / 6052 / 0 / 78
+skipped** · `bun run build` ✓ · hex gate empty · coverage 34/9/18/20 · contracts 41/19/15 ·
+`tools/tauri-agent` typecheck ✓.
+
+CI on the merge commit: **9 jobs green**; `e2e-chromium` 271 passed / 1 failed on
+`sketch-on-face.spec.ts`, which is named in session 31's pre-existing red list; `e2e-webkit`
+fully green.
+
+## Owed — not run, not passed
+
+- [ ] **H3 (F06, F07) and H4 (F02, F14) not started.** The sidebar still cannot render a
+      reply: H1 made the provider reachable, but the panel rewrite onto AgentKit's hooks is
+      H4's work. **Do not describe the chat sidebar as working until H4 lands.**
+- [ ] F07: `stop()` frees the slot on *retirement requested*, not on process exit, so
+      `start()` can still overlap two hosts on one SQLite database. The `torn_down` flag
+      exists and is not yet used to fence replacement.
+- [ ] MEM-03/MEM-04 and the native half of REST-01 — `collect_body` unbounded, stderr
+      `read_until` before truncation, `u64 → u16` status cast — all in `commands.rs` /
+      `supervisor.rs`, named in the contract's §9 table as specified-but-unenforced so the
+      table does not read as a guarantee it cannot make.
+- [ ] No authenticated native cancel command (CAN-02 native half). The desktop half is done.
+- [ ] PKG-01/PKG-02: no Windows or macOS binary was built, bundled or launched here.
+- [ ] Every worker-backed gate. The staged worker is a placeholder that exits 66.
+- [ ] Upstream, found by H1 and not fixed: `SqliteProviderStore.deleteProvider` deletes the
+      `providers` row before the rows referencing it, throwing `SQLITE_CONSTRAINT_FOREIGNKEY`
+      whenever capabilities were saved. Worked around by disabling the row instead.
+- [ ] Build manifest records `agentkitContractVersion` and `bridge.rs` hard-codes what it
+      serves; nothing compares them at build time. A mismatch fails loudly at first handshake,
+      which is the intent, but it is detectable earlier.
+
 # SESSION 35 — ASSISTANT HOST PROGRAM, WP-AI1 (2026-09-14, Opus 5, branch `claude/loving-cori-rz1v4i`)
 
 Scope chosen by the user from the five-document AI-assistant specification package: **the

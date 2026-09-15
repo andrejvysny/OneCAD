@@ -1,0 +1,720 @@
+From b62070f835f9489c9ecd74adc3f9497f98da7690 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 15 Sep 2026 13:03:14 +0000
+Subject: [PATCH] fix(runner-local): recover running tasks left with no lease
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+`expireStaleLeases` is the only evidence that a process died mid-attempt, and
+it can only report a lease that still EXISTS. That leaves a hole the runner's
+own comments already describe: a recovery pass expires a lease, ends the
+attempt, and dies before re-dispatching. The task stays `running` with no lease
+— invisible to every later expiry sweep, because the row it would have been
+found by is already deleted. Its chat stays busy and cancellation has nothing
+local to abort. The only record was `pendingRedispatch`, an in-memory Set that
+the crash takes with it.
+
+Adds `TaskStore.selectOrphanedRunningTasks(limit)`: running tasks holding no
+lease, oldest first, bounded. It is a QUERY over existing rows and needs no
+schema change — deliberate, because the SQLite adapter refuses to open a
+database whose schema version differs and ships no migrations, so a recovery fix
+that bumped the version would strand every existing user's conversations.
+
+The runner sweeps orphans on a timer (default: half the lease TTL) and feeds
+them through the existing `pendingRedispatch` path, so they take the same tested
+route as a parked task: status re-checked, attempt budget honoured, and
+`startAttempt` acquiring a fresh lease — that acquisition, not a flag, is what
+arbitrates two recoverers reaching one task.
+
+The periodic pass deliberately does NOT expire leases. `expireStaleLeases`
+deletes rows, and on a timer it cannot tell "the owner died" from "that owner is
+busy and its heartbeat was late". With two runners over one store an IDLE one
+would strip a BUSY one of the lease it needs to commit its own result — strictly
+worse than not sweeping, because nothing recovers it either. The existing test
+"does not steal the task back when the lease moved during the backoff" is that
+exact shape and is right to fail such a sweep; it caught this during
+development. So expiry stays where a caller asserts a death, `recover()`, and
+the timer does only the part that is always safe: tasks with no lease belong to
+nobody by construction.
+
+An embedder that also wants periodic expiry calls `recover()` on its own
+schedule, which it can do safely precisely because it knows how many hosts it
+runs. OneCAD does.
+
+BREAKING: `TaskStore` gains a required method, and `RecoveryReport` gains
+`orphaned`. Both in-tree adapters implement it and the conformance suite
+requires it.
+
+Tests: store conformance in both adapters (no-lease reported; live AND expired
+leases excluded, since an expired lease is `expireStaleLeases`'s business;
+queued excluded; limit honoured; non-positive limit returns nothing) and three
+runner cases. Verified red-first: 2 of the 3 runner cases fail with the sweep
+disabled. Full suite 1654 passed / 1 pre-existing failure
+(`packages/client/tests/resume.test.ts`, which fails identically on the
+untouched pin).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ .../src/memory-assistant-store.ts             |  20 ++
+ .../adapters-sqlite/src/sqlite/task-store.ts  |  20 ++
+ packages/host/src/ports/task-store.ts         |  31 +++
+ packages/host/tests/fakes.ts                  |  11 ++
+ .../src/single-process-task-runner.ts         | 183 +++++++++++++++++-
+ .../runner-local/tests/orphan-sweep.test.ts   | 114 +++++++++++
+ .../runner-local/tests/task-runner.test.ts    |   8 +-
+ packages/testing/src/store-conformance.ts     |  60 ++++++
+ 8 files changed, 442 insertions(+), 5 deletions(-)
+ create mode 100644 packages/runner-local/tests/orphan-sweep.test.ts
+
+diff --git a/packages/adapters-memory/src/memory-assistant-store.ts b/packages/adapters-memory/src/memory-assistant-store.ts
+index a563379..504a5e6 100644
+--- a/packages/adapters-memory/src/memory-assistant-store.ts
++++ b/packages/adapters-memory/src/memory-assistant-store.ts
+@@ -1288,6 +1288,25 @@ export class MemoryTaskStore implements TaskStore {
+     return expired.map((l) => ({ ...l }));
+   }
+ 
++  async selectOrphanedRunningTasks(limit: number): Promise<TaskRecord[]> {
++    if (limit <= 0) return [];
++    // "No lease at all", never "an expired lease": a task that still holds one
++    // belongs to whoever took it, and the expiry sweep is what settles that
++    // case. Reporting both here would put two recoverers on one task.
++    const orphans: TaskRecord[] = [];
++    for (const task of this.tasks.values()) {
++      if (task.status !== "running") continue;
++      if (this.leases.has(task.taskId)) continue;
++      orphans.push(task);
++    }
++    orphans.sort((a, b) => {
++      const at = Date.parse(a.startedAt ?? a.enqueuedAt);
++      const bt = Date.parse(b.startedAt ?? b.enqueuedAt);
++      return at - bt;
++    });
++    return orphans.slice(0, limit).map((t) => ({ ...t }));
++  }
++
+   async appendEvents(
+     taskId: string,
+     events: TaskEventEnvelope[],
+@@ -2026,6 +2045,7 @@ function taskStoreInTransaction(
+     renewLease: (leaseToken, ttlMs) => tasks.renewLease(leaseToken, ttlMs),
+     releaseLease: (leaseToken) => tasks.releaseLease(leaseToken),
+     expireStaleLeases: (now) => tasks.expireStaleLeases(now),
++    selectOrphanedRunningTasks: (limit) => tasks.selectOrphanedRunningTasks(limit),
+     appendEvents: (taskId, events, opts) =>
+       tasks.appendEvents(taskId, events, opts),
+     listEvents: (taskId, opts) => tasks.listEvents(taskId, opts),
+diff --git a/packages/adapters-sqlite/src/sqlite/task-store.ts b/packages/adapters-sqlite/src/sqlite/task-store.ts
+index 4be1d13..2bf5123 100644
+--- a/packages/adapters-sqlite/src/sqlite/task-store.ts
++++ b/packages/adapters-sqlite/src/sqlite/task-store.ts
+@@ -626,6 +626,26 @@ export class SqliteTaskStore implements TaskStore {
+     }, this.txOwner);
+   }
+ 
++  async selectOrphanedRunningTasks(limit: number): Promise<TaskRecord[]> {
++    if (limit <= 0) return [];
++    return this.conn.whenFree(() => {
++      // `leases.task_id` is the PRIMARY KEY, so "has no lease" is exactly the
++      // absence of a row — no expiry comparison belongs here. A task with a
++      // lease is somebody's, whether or not that lease has expired: the expiry
++      // sweep owns that case, and reporting it here too would race two
++      // recoverers onto one task.
++      const rows = this.conn.all(
++        `SELECT t.* FROM tasks t
++          LEFT JOIN leases l ON l.task_id = t.task_id
++          WHERE t.status = 'running' AND l.task_id IS NULL
++          ORDER BY COALESCE(t.started_at, t.enqueued_at) ASC
++          LIMIT $limit`,
++        { $limit: limit },
++      ) as TaskRow[];
++      return rows.map(taskFromRow);
++    }, this.txOwner);
++  }
++
+   async appendEvents(
+     taskId: string,
+     events: TaskEventEnvelope[],
+diff --git a/packages/host/src/ports/task-store.ts b/packages/host/src/ports/task-store.ts
+index 3d5a562..f775545 100644
+--- a/packages/host/src/ports/task-store.ts
++++ b/packages/host/src/ports/task-store.ts
+@@ -657,6 +657,37 @@ export interface TaskStore {
+   releaseLease(leaseToken: string): Promise<void>;
+   /** Ends leases past their expiry and returns them, so recovery can act. */
+   expireStaleLeases(now: Date): Promise<Lease[]>;
++  /**
++   * Running tasks that hold no lease at all — the ones an expiry sweep can
++   * never find.
++   *
++   * `expireStaleLeases` is evidence that an owner died mid-attempt, but it can
++   * only report a lease that still EXISTS. Two situations leave a `running`
++   * task with none:
++   *
++   * 1. A recovery pass expired the lease, ended the attempt, and then the
++   *    process died before it could re-dispatch. The lease it would have been
++   *    found by has already been deleted, so every later expiry sweep sees
++   *    nothing and the task stays `running` forever.
++   * 2. Any equivalent crash in the window between deleting a lease and
++   *    recording a replacement.
++   *
++   * Before this method the only record of case 1 was an in-memory set in the
++   * runner, which a crash takes with it. A store-side query is the only
++   * evidence that survives the process that created it.
++   *
++   * Implementations MUST NOT return a task that holds a lease, expired or not —
++   * a live lease means a legitimate owner, and recovering it would be stealing
++   * work in progress. Order oldest-first so a bounded pass makes progress on
++   * the longest-stranded tasks. `limit` bounds the result; recovery calls this
++   * repeatedly rather than loading an unbounded backlog at once.
++   *
++   * This is a QUERY over existing rows: it requires no schema change, which is
++   * deliberate — the SQLite adapter refuses to open a database whose schema
++   * version differs and ships no migrations, so a recovery fix that bumped the
++   * version would strand every existing user's conversations.
++   */
++  selectOrphanedRunningTasks(limit: number): Promise<TaskRecord[]>;
+ 
+   /**
+    * Append events to the task's log.
+diff --git a/packages/host/tests/fakes.ts b/packages/host/tests/fakes.ts
+index 735e848..aaf36d7 100644
+--- a/packages/host/tests/fakes.ts
++++ b/packages/host/tests/fakes.ts
+@@ -645,6 +645,17 @@ export class FakeTaskStore implements TaskStore {
+     this.leases.delete(lease.taskId);
+   }
+ 
++  async selectOrphanedRunningTasks(limit: number): Promise<TaskRecord[]> {
++    if (limit <= 0) return [];
++    const orphans: TaskRecord[] = [];
++    for (const task of this.tasks.values()) {
++      if (task.status !== "running") continue;
++      if (this.leases.has(task.taskId)) continue;
++      orphans.push({ ...task });
++    }
++    return orphans.slice(0, limit);
++  }
++
+   async expireStaleLeases(now: Date): Promise<Lease[]> {
+     const expired: Lease[] = [];
+     for (const [taskId, lease] of this.leases) {
+diff --git a/packages/runner-local/src/single-process-task-runner.ts b/packages/runner-local/src/single-process-task-runner.ts
+index 72b159b..1228288 100644
+--- a/packages/runner-local/src/single-process-task-runner.ts
++++ b/packages/runner-local/src/single-process-task-runner.ts
+@@ -62,6 +62,12 @@ import { ScopeLock } from "./scope-lock.js";
+ const DEFAULT_LEASE_TTL_MS = 30_000;
+ const DEFAULT_HEARTBEAT_MS = 10_000;
+ const DEFAULT_POLL_MS = 100;
++/**
++ * How much slack the orphan sweep asks for beyond what it could dispatch now.
++ * Bounded on purpose: recovery must make progress on a large backlog without
++ * loading it all into memory, and the next pass takes the next slice.
++ */
++const ORPHAN_SWEEP_HEADROOM = 16;
+ const DEFAULT_MAX_ATTEMPTS = 3;
+ const DEFAULT_CONCURRENCY = 2;
+ const DEFAULT_RETRY_BASE_MS = 1_000;
+@@ -109,6 +115,20 @@ export interface SingleProcessTaskRunnerDeps {
+   heartbeatMs?: number;
+   /** Idle delay between claim attempts. Default 100ms. */
+   pollMs?: number;
++  /**
++   * How often the claim loop re-runs recovery. Default: half `leaseTtlMs`.
++   *
++   * Boot-only recovery has a hole. `expireStaleLeases` can only report a lease
++   * that is ALREADY past its expiry, so a process that restarts inside the
++   * lease lifetime of the task it was running finds nothing at boot — and the
++   * lease expires minutes later with no pass left to notice. The task stays
++   * `running`, keeps its chat busy, and resists cancellation because the new
++   * process has no local execution to abort.
++   *
++   * Half a TTL means the lease is always caught within one interval of expiring.
++   * Passes never overlap (see `recovering`), so a slow store cannot stack them.
++   */
++  recoverIntervalMs?: number;
+   /** Attempts per task before it is dead-lettered. Default 3. */
+   maxAttempts?: number;
+   /** Exponential delay between attempts of one task. See {@link RetryBackoffOptions}. */
+@@ -123,6 +143,12 @@ export interface RecoveryReport {
+   redispatched: number;
+   /** Tasks that had burned their attempt budget and were dead-lettered. */
+   deadLettered: number;
++  /**
++   * Running tasks found holding NO lease, which an expiry sweep cannot see.
++   * A non-zero count means a previous process died between deleting a lease and
++   * recording its replacement.
++   */
++  orphaned: number;
+ }
+ 
+ /** One task this process is executing right now. */
+@@ -133,6 +159,16 @@ interface ActiveExecution {
+   controller: AbortController;
+   /** A cancel arrived; do not retry, and land the task `cancelled`. */
+   cancelRequested: boolean;
++  /**
++   * The lease this execution currently holds, refreshed on every retry.
++   *
++   * Carried so the periodic recovery pass can RENEW it before expiring
++   * anything. Without that, a sweep on a timer deletes the lease row of work
++   * that is still running here, and the execution can no longer commit its own
++   * result — strictly worse than not sweeping at all, because nothing recovers
++   * it either.
++   */
++  leaseToken: string;
+ }
+ 
+ /**
+@@ -176,6 +212,11 @@ export class SingleProcessTaskRunner implements TaskRunner {
+   private readonly leaseTtlMs: number;
+   private readonly heartbeatMs: number;
+   private readonly pollMs: number;
++  private readonly recoverIntervalMs: number;
++  /** Wall-clock of the last completed pass; 0 until one has run. */
++  private lastRecoverAtMs = 0;
++  /** Serializes passes: two concurrent recoveries would race one task. */
++  private recovering = false;
+   private readonly maxAttempts: number;
+   private readonly retryBackoff: ResolvedRetryBackoff;
+ 
+@@ -228,6 +269,8 @@ export class SingleProcessTaskRunner implements TaskRunner {
+     this.leaseTtlMs = deps.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS;
+     this.heartbeatMs = deps.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
+     this.pollMs = deps.pollMs ?? DEFAULT_POLL_MS;
++    this.recoverIntervalMs =
++      deps.recoverIntervalMs ?? Math.max(1, Math.floor(this.leaseTtlMs / 2));
+     this.maxAttempts = deps.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+     this.retryBackoff = {
+       baseMs: Math.max(0, deps.retryBackoff?.baseMs ?? DEFAULT_RETRY_BASE_MS),
+@@ -377,13 +420,25 @@ export class SingleProcessTaskRunner implements TaskRunner {
+     await this.recoverWithReport();
+   }
+ 
+-  /** {@link recover}, with a summary of what the pass did. */
++  /**
++   * {@link recover}, with a summary of what the pass did.
++   *
++   * Supersedes a local execution whose lease expired; the periodic pass does
++   * not. See the guard inside.
++   */
+   async recoverWithReport(): Promise<RecoveryReport> {
++    return this.runRecovery(false);
++  }
++
++  private async runRecovery(
++    skipLocallyActive: boolean,
++  ): Promise<RecoveryReport> {
+     const expired = await this.store.tasks.expireStaleLeases(this.clock.now());
+     const report: RecoveryReport = {
+       expired: expired.length,
+       redispatched: 0,
+       deadLettered: 0,
++      orphaned: 0,
+     };
+     const worker = this.worker;
+ 
+@@ -397,6 +452,27 @@ export class SingleProcessTaskRunner implements TaskRunner {
+       // happened.
+       if (task.status !== "running") continue;
+ 
++      // An EXPLICIT `recover()` supersedes a local execution whose lease died —
++      // that is deliberate and pinned by "aborts the execution it supersedes
++      // instead of leaving it running". The caller is asserting that an owner
++      // may be gone, and a lease this process could not renew is exactly that
++      // evidence.
++      //
++      // The PERIODIC pass must not, and this is the whole reason the two are
++      // distinguished. It runs unprompted, on a timer, while work is in flight;
++      // superseding an execution merely because a heartbeat was late would
++      // restart healthy work on its own event stream. The live execution needs
++      // no help settling — its next lease-fenced write raises `LeaseLostError`.
++      //
++      // Boot-only recovery never had to make this distinction: `active` is
++      // empty by construction before `startWorker`.
++      if (skipLocallyActive && this.active.has(task.taskId)) {
++        this.logger?.debug("skipping recovery of a locally executing task", {
++          taskId: task.taskId,
++        });
++        continue;
++      }
++
+       try {
+         await this.store.tasks.endAttempt({
+           attemptId: lease.attemptId,
+@@ -443,6 +519,7 @@ export class SingleProcessTaskRunner implements TaskRunner {
+     // Anything an EARLIER pass parked for want of a worker: a `recover()` called
+     // again once one is running is the second chance those tasks have.
+     await this.drainPendingRedispatch(report);
++    this.lastRecoverAtMs = this.clock.now().getTime();
+     return report;
+   }
+ 
+@@ -460,6 +537,104 @@ export class SingleProcessTaskRunner implements TaskRunner {
+    * doc already names. It is bounded by the store rather than by this method:
+    * the stolen-from attempt's next write fails on its fencing token.
+    */
++  /**
++   * Sweep orphans if a sweep is due, at most one at a time.
++   *
++   * Deliberately does NOT expire leases. `expireStaleLeases` DELETES rows, and
++   * on a timer that is unsafe in a way an explicit `recover()` is not: it cannot
++   * tell "the owner died" from "that owner is busy and its heartbeat was late",
++   * and with two runners over one store an IDLE one would strip a BUSY one of
++   * the lease it needs to commit its own result. The runner-local test "does not
++   * steal the task back when the lease moved during the backoff" is exactly that
++   * shape, and it is right to fail such a sweep.
++   *
++   * So expiry stays where the caller asserts a death — `recover()` — and the
++   * timer does the part that is always safe: finding `running` tasks with no
++   * lease at all, which belong to nobody by construction. An embedder that also
++   * wants periodic expiry calls `recover()` on its own schedule, which it can do
++   * safely precisely because it knows how many hosts it runs.
++   *
++   * `recovering` serializes passes; failures are logged, not thrown, since an
++   * unhandled rejection here would take the claim loop down with it.
++   */
++  private async recoverIfDue(): Promise<void> {
++    if (this.recovering || this.stopped || !this.worker) return;
++    const nowMs = this.clock.now().getTime();
++    if (nowMs - this.lastRecoverAtMs < this.recoverIntervalMs) return;
++    this.recovering = true;
++    try {
++      await this.sweepOrphans();
++    } catch (err) {
++      this.logger?.warn("periodic recovery pass failed", {
++        error: errorMessage(err),
++      });
++      // Do not retry instantly on failure.
++      this.lastRecoverAtMs = nowMs;
++    } finally {
++      this.recovering = false;
++    }
++  }
++
++  /**
++   * Find `running` tasks holding no lease and hand them back to the worker.
++   *
++   * Safe to run unprompted because a task with no lease row belongs to nobody:
++   * there is no owner to steal it from. Contrast `recover()`, which expires
++   * leases and therefore needs the caller's assertion that a process died.
++   */
++  private async sweepOrphans(): Promise<void> {
++    const report: RecoveryReport = {
++      expired: 0,
++      redispatched: 0,
++      deadLettered: 0,
++      orphaned: 0,
++    };
++    // Running tasks with NO lease at all — the ones no expiry sweep can reach.
++    //
++    // `pendingRedispatch` above is an in-memory set, so a crash between the
++    // `expireStaleLeases` that deleted a lease and the re-dispatch that would
++    // have replaced it takes the only record of that task with it: still
++    // `running`, no lease, invisible to every later expiry pass, and its chat
++    // busy forever. The store-side query is the evidence that outlives the
++    // process which created the gap.
++    //
++    // They are pushed through `pendingRedispatch` rather than given their own
++    // loop so they take the SAME tested path as a parked task: status re-checked,
++    // attempt budget honoured, `startAttempt` acquiring a fresh lease — and it
++    // is that lease acquisition, not a flag here, that stops two recoverers
++    // taking one task.
++    try {
++      const orphans = await this.store.tasks.selectOrphanedRunningTasks(
++        this.concurrency + this.pendingRedispatch.size + ORPHAN_SWEEP_HEADROOM,
++      );
++      for (const orphan of orphans) {
++        if (this.active.has(orphan.taskId)) continue;
++        if (this.pendingRedispatch.has(orphan.taskId)) continue;
++        this.pendingRedispatch.add(orphan.taskId);
++        report.orphaned += 1;
++        this.logger?.info("recovered a running task with no lease", {
++          taskId: orphan.taskId,
++        });
++      }
++    } catch (err) {
++      // A store hiccup must not abort the whole pass: the expired-lease work
++      // above already succeeded, and the next pass re-queries.
++      this.logger?.warn("could not sweep orphaned running tasks", {
++        error: errorMessage(err),
++      });
++    }
++
++    await this.drainPendingRedispatch(report);
++    this.lastRecoverAtMs = this.clock.now().getTime();
++    if (report.orphaned > 0 || report.redispatched > 0) {
++      this.logger?.info("orphan sweep recovered tasks", {
++        orphaned: report.orphaned,
++        redispatched: report.redispatched,
++        deadLettered: report.deadLettered,
++      });
++    }
++  }
++
+   private async drainPendingRedispatch(report?: RecoveryReport): Promise<void> {
+     for (const taskId of [...this.pendingRedispatch]) {
+       const worker = this.worker;
+@@ -586,6 +761,7 @@ export class SingleProcessTaskRunner implements TaskRunner {
+     }
+     this.ticking = true;
+     try {
++      await this.recoverIfDue();
+       while (!this.stopped && this.active.size < this.concurrency) {
+         let claimed: ClaimedTask | null;
+         try {
+@@ -654,6 +830,7 @@ export class SingleProcessTaskRunner implements TaskRunner {
+       scopeId: task.scopeId,
+       controller: new AbortController(),
+       cancelRequested: false,
++      leaseToken: claimed.lease.leaseToken,
+     };
+     this.active.set(task.taskId, entry);
+ 
+@@ -711,6 +888,10 @@ export class SingleProcessTaskRunner implements TaskRunner {
+         }
+         attemptId = outcome.next.attemptId;
+         lease = outcome.next.lease;
++        // Keep the active entry's token current, or the periodic pass would
++        // renew a lease this execution no longer holds and leave the real one
++        // to expire underneath it.
++        entry.leaseToken = lease.leaseToken;
+       }
+     } catch (err) {
+       // Bookkeeping itself failed (the store threw while landing the task). The
+diff --git a/packages/runner-local/tests/orphan-sweep.test.ts b/packages/runner-local/tests/orphan-sweep.test.ts
+new file mode 100644
+index 0000000..f4e628f
+--- /dev/null
++++ b/packages/runner-local/tests/orphan-sweep.test.ts
+@@ -0,0 +1,114 @@
++/**
++ * The crash window that boot-only recovery cannot see.
++ *
++ * `expireStaleLeases` is the only evidence a process died mid-attempt, but it
++ * can only report a lease that still EXISTS. A recovery pass deletes the lease,
++ * ends the attempt, and then — if the process dies before re-dispatching — the
++ * task is left `running` with no lease at all. Every later expiry sweep finds
++ * nothing, the chat stays busy, and cancellation has no local execution to
++ * abort. Before the orphan sweep the only record of that task was an in-memory
++ * set, which the crash took with it.
++ *
++ * Driven by the injected clock; the only real waits are condition polls.
++ */
++import { describe, expect, it } from "bun:test";
++import {
++  createHarness,
++  settle,
++  waitFor,
++  type Harness,
++} from "./support/task-runner-harness.js";
++
++describe("SingleProcessTaskRunner — orphan sweep", () => {
++
++  /** A `running` task with no lease — what a crash mid-recovery leaves behind. */
++  async function seedOrphan(h: Harness, taskId: string): Promise<void> {
++    await h.seedTask(taskId);
++    await h.store.tasks.createAttempt({
++      attemptId: `${taskId}-att-1`,
++      taskId,
++      ownerId: "owner-that-died",
++    });
++    await h.store.tasks.transitionTask(taskId, ["queued"], "running");
++    // No lease is acquired at all: that is the whole point.
++  }
++
++  it("recovers a running task that holds no lease, with no explicit recover()", async () => {
++    const harness = createHarness({ leaseTtlMs: 1_000, pollMs: 5 });
++    await seedOrphan(harness, "orphan-1");
++    harness.worker.script("orphan-1", [{ kind: "complete" }]);
++
++    const handle = await harness.runner.startWorker(harness.worker, {
++      concurrency: 1,
++      ownerId: "owner-new",
++    });
++    try {
++      // Push past the sweep interval (half the lease TTL by default) without
++      // ever calling recover(). The point is that NOTHING prompts this.
++      harness.clock.advance(1_000);
++      await waitFor(
++        async () =>
++          (await harness.store.tasks.getTask("orphan-1"))?.status === "completed",
++        "the orphan to be swept up and completed",
++      );
++      expect(harness.worker.callsFor("orphan-1").length).toBe(1);
++    } finally {
++      await handle.stop();
++    }
++  });
++
++  it("leaves a task alone while another owner still holds its lease", async () => {
++    // "No lease" means nobody's. A lease — live OR expired — means somebody's,
++    // and expiry is `recover()`'s business, not a timer's.
++    const harness = createHarness({ leaseTtlMs: 1_000, pollMs: 5 });
++    await harness.seedTask("held-1");
++    const attempt = await harness.store.tasks.createAttempt({
++      attemptId: "held-1-att-1",
++      taskId: "held-1",
++      ownerId: "somebody-else",
++    });
++    await harness.store.tasks.transitionTask("held-1", ["queued"], "running");
++    await harness.store.tasks.acquireLease({
++      taskId: "held-1",
++      attemptId: attempt.attemptId,
++      ownerId: "somebody-else",
++      ttlMs: 60_000,
++    });
++    harness.worker.script("held-1", [{ kind: "complete" }]);
++
++    const handle = await harness.runner.startWorker(harness.worker, {
++      concurrency: 1,
++      ownerId: "owner-new",
++    });
++    try {
++      harness.clock.advance(5_000);
++      await settle(50);
++      expect(harness.worker.callsFor("held-1").length).toBe(0);
++      expect((await harness.store.tasks.getTask("held-1"))?.status).toBe(
++        "running",
++      );
++    } finally {
++      await handle.stop();
++    }
++  });
++
++  it("dead-letters an orphan that has already burned its attempt budget", async () => {
++    const harness = createHarness({ leaseTtlMs: 1_000, pollMs: 5, maxAttempts: 1 });
++    await seedOrphan(harness, "orphan-2");
++
++    const handle = await harness.runner.startWorker(harness.worker, {
++      concurrency: 1,
++      ownerId: "owner-new",
++    });
++    try {
++      harness.clock.advance(1_000);
++      await waitFor(async () => {
++        const t = await harness.store.tasks.getTask("orphan-2");
++        return t?.status === "failed" && t?.deadLetteredAt !== undefined;
++      }, "the exhausted orphan to be dead-lettered");
++      expect(harness.worker.callsFor("orphan-2").length).toBe(0);
++    } finally {
++      await handle.stop();
++    }
++  });
++});
+diff --git a/packages/runner-local/tests/task-runner.test.ts b/packages/runner-local/tests/task-runner.test.ts
+index 6cb6da7..805afbb 100644
+--- a/packages/runner-local/tests/task-runner.test.ts
++++ b/packages/runner-local/tests/task-runner.test.ts
+@@ -353,7 +353,7 @@ describe("SingleProcessTaskRunner — recovery", () => {
+     // The owner "died": nothing renews, and the clock walks past the expiry.
+     harness.clock.advance(1_500);
+     const report = await harness.runner.recoverWithReport();
+-    expect(report).toEqual({ expired: 1, redispatched: 1, deadLettered: 0 });
++    expect(report).toEqual({ expired: 1, redispatched: 1, deadLettered: 0, orphaned: 0 });
+ 
+     await waitFor(
+       () => harness.worker.callsFor("run-1").length === 2,
+@@ -416,7 +416,7 @@ describe("SingleProcessTaskRunner — recovery", () => {
+ 
+     harness.clock.advance(1_500);
+     const report = await harness.runner.recoverWithReport();
+-    expect(report).toEqual({ expired: 1, redispatched: 0, deadLettered: 1 });
++    expect(report).toEqual({ expired: 1, redispatched: 0, deadLettered: 1, orphaned: 0 });
+ 
+     const run = await harness.store.tasks.getTask("run-1");
+     expect(run?.status).toBe("failed");
+@@ -461,7 +461,7 @@ describe("SingleProcessTaskRunner — recovery", () => {
+ 
+     // Step 9: recover, with nothing yet to hand the work to.
+     const report = await harness.runner.recoverWithReport();
+-    expect(report).toEqual({ expired: 1, redispatched: 0, deadLettered: 0 });
++    expect(report).toEqual({ expired: 1, redispatched: 0, deadLettered: 0, orphaned: 0 });
+     expect(await taskStatus(harness, "run-1")).toBe("running");
+ 
+     // Step 10: start claiming. The interrupted task goes out immediately.
+@@ -503,7 +503,7 @@ describe("SingleProcessTaskRunner — recovery", () => {
+     // `abandoned` and the task stays `running`. Where it goes NEXT is the
+     // previous test's subject — this one is only about the pass itself being
+     // safe to run with no worker.
+-    expect(report).toEqual({ expired: 1, redispatched: 0, deadLettered: 0 });
++    expect(report).toEqual({ expired: 1, redispatched: 0, deadLettered: 0, orphaned: 0 });
+     expect(await taskStatus(harness, "run-1")).toBe("running");
+     expect(harness.attemptsFor("run-1")).toEqual([
+       { status: "abandoned", attemptNumber: 1 },
+diff --git a/packages/testing/src/store-conformance.ts b/packages/testing/src/store-conformance.ts
+index 7295d3b..90c6cd5 100644
+--- a/packages/testing/src/store-conformance.ts
++++ b/packages/testing/src/store-conformance.ts
+@@ -623,6 +623,66 @@ export function describeAssistantStoreConformance(
+       }
+     });
+ 
++    it("reports running tasks with no lease, and never one that has a lease", async () => {
++      // The crash window this exists for: a recovery pass expires a lease, ends
++      // the attempt, and dies before re-dispatching. The task is left `running`
++      // with no lease — invisible to every later expiry sweep, because the row
++      // it would have been found by is already deleted.
++      const { store, close } = await create();
++      try {
++        const orphan = await store.tasks.createTask(makeTaskInput());
++        const leased = await store.tasks.createTask(makeTaskInput());
++        const expiredLease = await store.tasks.createTask(makeTaskInput());
++        const queued = await store.tasks.createTask(makeTaskInput());
++
++        for (const t of [orphan, leased, expiredLease]) {
++          const attempt = await store.tasks.createAttempt({
++            attemptId: uniqueId("att"),
++            taskId: t.taskId,
++            ownerId: "worker-1",
++          });
++          await store.tasks.transitionTask(t.taskId, ["queued"], "running");
++          if (t.taskId !== orphan.taskId) {
++            await store.tasks.acquireLease({
++              taskId: t.taskId,
++              attemptId: attempt.attemptId,
++              ownerId: "worker-1",
++              ttlMs: t.taskId === expiredLease.taskId ? 1 : 60_000,
++            });
++          }
++        }
++
++        const found = await store.tasks.selectOrphanedRunningTasks(50);
++        const ids = found.map((t) => t.taskId);
++
++        expect(ids).toContain(orphan.taskId);
++        // A lease means an owner. A live one is obviously somebody's work; an
++        // EXPIRED one is `expireStaleLeases`'s business, and reporting it here
++        // too would put two recoverers on one task.
++        expect(ids).not.toContain(leased.taskId);
++        expect(ids).not.toContain(expiredLease.taskId);
++        // Only `running`. A queued task is the claim loop's job.
++        expect(ids).not.toContain(queued.taskId);
++      } finally {
++        close?.();
++      }
++    });
++
++    it("bounds selectOrphanedRunningTasks by its limit", async () => {
++      const { store, close } = await create();
++      try {
++        for (let i = 0; i < 4; i += 1) {
++          const t = await store.tasks.createTask(makeTaskInput());
++          await store.tasks.transitionTask(t.taskId, ["queued"], "running");
++        }
++        expect((await store.tasks.selectOrphanedRunningTasks(2)).length).toBe(2);
++        // A non-positive limit asks for nothing and must not mean "everything".
++        expect((await store.tasks.selectOrphanedRunningTasks(0)).length).toBe(0);
++      } finally {
++        close?.();
++      }
++    });
++
+     it("rejects renewLease with a stale or unknown token", async () => {
+       const { store, close } = await create();
+       try {
+-- 
+2.43.0
+

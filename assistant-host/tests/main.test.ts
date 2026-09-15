@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix, win32 } from "node:path";
 import { ArgumentError, parseArgs, resolveDbPath } from "../src/main.js";
 import { HostMock, Pipe, text } from "./harness.js";
 
@@ -32,6 +32,96 @@ describe("host-supplied configuration", () => {
     expect(() => parseArgs(["--app-data-dir"])).toThrow(/needs a path/);
     expect(() => parseArgs(["--app-data-dir", "relative/dir"])).toThrow(/must be absolute/);
     expect(() => parseArgs(["--data-dir", "/tmp/x"])).toThrow(/unknown argument/);
+  });
+});
+
+/**
+ * F11. The check used to be `appDataDir.startsWith("/")`, which refuses
+ * `C:\Users\Andrej\AppData\Roaming\OneCAD` — an ordinary Windows absolute path, and
+ * the exact one the Rust supervisor passes as a platform-native `PathBuf`. The
+ * sidecar exited 2 before the handshake, so the supervisor saw a crash loop.
+ *
+ * Both platform tables run on EVERY platform: `parseArgs` takes the path
+ * implementation, so a Linux CI box checks Windows behaviour against
+ * `path.win32` rather than against an idea of what Windows does.
+ */
+describe("the data directory, on each platform's own terms", () => {
+  const windows = (value: string): string => parseArgs(["--app-data-dir", value], win32).appDataDir;
+  const unix = (value: string): string => parseArgs(["--app-data-dir", value], posix).appDataDir;
+
+  test("R01: the Windows paths the old predicate rejected are absolute and accepted", () => {
+    for (const value of [
+      "C:\\Users\\Andrej\\AppData\\Roaming\\OneCAD",
+      "\\\\server\\share\\OneCAD",
+    ]) {
+      // The probe's claim, restated against the module that has to honour it.
+      expect(win32.isAbsolute(value)).toBe(true);
+      expect(value.startsWith("/")).toBe(false);
+      expect(windows(value)).toBe(value);
+    }
+  });
+
+  test("Windows accepts drive-qualified and UNC paths, spaces and Unicode included", () => {
+    for (const value of [
+      "C:\\Users\\Andrej\\AppData\\Roaming\\OneCAD",
+      "C:/Users/Andrej/AppData/Roaming/OneCAD",
+      "D:\\Program Files\\OneCAD data",
+      "C:\\Users\\Ond\u0159ej\\\u6587\u4ef6\\OneCAD",
+      "\\\\server\\share\\OneCAD",
+      "\\\\server\\share",
+      "//server/share/OneCAD",
+    ]) {
+      expect(windows(value)).toBe(value);
+    }
+  });
+
+  test("Windows refuses every form that is not a reproducible directory", () => {
+    for (const [value, why] of [
+      ["relative\\dir", "relative"],
+      ["C:data", "drive-relative: the drive's current directory is process state"],
+      ["\\OneCAD\\data", "root-relative: absolute on whichever drive we started on"],
+      ["/OneCAD/data", "root-relative, spelled the other way"],
+      ["\\\\server", "a UNC server with no share names no directory"],
+      ["\\\\server\\", "likewise an empty share"],
+      ["\\\\?\\C:\\OneCAD", "the device namespace is not an ordinary path"],
+      ["\\\\.\\PIPE\\onecad", "nor is a device name"],
+      ["", "nothing at all"],
+    ] as const) {
+      expect(() => windows(value), why).toThrow(ArgumentError);
+    }
+  });
+
+  test("macOS and Linux accept rooted paths and refuse everything else", () => {
+    for (const value of [
+      "/var/onecad",
+      "/Users/andrej/Library/Application Support/OneCAD",
+      "/home/andrej/\u00dcnicode/OneCAD",
+    ]) {
+      expect(unix(value)).toBe(value);
+    }
+    for (const [value, why] of [
+      ["relative/dir", "relative"],
+      ["C:\\Users\\Andrej", "a Windows path is not absolute here, and is not a fallback"],
+      ["~/onecad", "the shell expands this; this process does not"],
+      ["", "nothing at all"],
+    ] as const) {
+      expect(() => unix(value), why).toThrow(ArgumentError);
+    }
+  });
+
+  test("the store path is joined with the platform's separator", () => {
+    expect(resolveDbPath("C:\\Users\\Andrej\\OneCAD", win32)).toBe(
+      "C:\\Users\\Andrej\\OneCAD\\assistant\\agentkit.sqlite",
+    );
+    // A trailing separator is normalised rather than doubled.
+    expect(resolveDbPath("C:\\Users\\Andrej\\OneCAD\\", win32)).toBe(
+      "C:\\Users\\Andrej\\OneCAD\\assistant\\agentkit.sqlite",
+    );
+    expect(resolveDbPath("\\\\server\\share", win32)).toBe(
+      "\\\\server\\share\\assistant\\agentkit.sqlite",
+    );
+    expect(resolveDbPath("/var/onecad", posix)).toBe("/var/onecad/assistant/agentkit.sqlite");
+    expect(resolveDbPath("/var/onecad/", posix)).toBe("/var/onecad/assistant/agentkit.sqlite");
   });
 
   test("the process exits non-zero instead of guessing a data directory", async () => {

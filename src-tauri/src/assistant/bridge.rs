@@ -30,13 +30,14 @@
 //!    disagreeing with nothing able to detect it.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use bytes::BytesMut;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{mpsc, oneshot, Notify};
+use tokio::sync::{mpsc, oneshot, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{Decoder, Encoder};
 use tokio_util::sync::CancellationToken;
@@ -44,7 +45,7 @@ use tokio_util::sync::CancellationToken;
 use onecad_assistant_protocol::{
     Accept, Cancel, Chunk, End, Envelope, ErrorObject, Hello, IdAllocator, OcakCodec, Ping, Pong,
     Principal, ProtocolError, RawFrame, Reject, Req, Res, HOST_TO_SIDECAR_VERBS, MAX_BIN_LEN,
-    PROTOCOL_VERSION, SIDECAR_TO_HOST_VERBS,
+    MAX_JSON_LEN, PROTOCOL_VERSION, SIDECAR_TO_HOST_VERBS,
 };
 
 use super::provider_gateway::{ProviderGateway, ProviderRegistry};
@@ -56,14 +57,75 @@ const VERB_PROVIDER_FETCH: &str = "provider.fetch";
 /// Tracks `BRIDGE_VERSION` in `assistant-host/src/bridge/peer.ts`.
 pub const BRIDGE_VERSION: &str = "0.1.0";
 
+/// The AgentKit contract versions this host can serve (§2, `hello`).
+///
+/// `protocolVersion` gates the FRAMING; this gates the DTOs that ride inside it.
+/// A sidecar built against a different contract speaks the same envelopes and a
+/// different `agentkit.fetch` payload, so the handshake is the last point at
+/// which the mismatch is still one clear refusal rather than a decode error in
+/// the middle of somebody's first message.
+///
+/// Exact match against a list, not a range: AgentKit is pre-1.0, where a minor
+/// bump is allowed to break anything. Two places move together when it does —
+/// this constant, and the `agentkitContractVersion` field
+/// `scripts/build-assistant-host.sh` records for the shipped binary. A mismatch
+/// between them is a packaging bug the handshake will report on first use.
+pub const SUPPORTED_AGENTKIT_CONTRACTS: &[&str] = &["0.5.0"];
+
 /// Default per-stream inbound buffer bound (§7), matching the sidecar's
 /// `DEFAULT_STREAM_BUFFER_BYTES`. One `stream_overflow` beyond this.
 pub const DEFAULT_STREAM_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
-/// Depth of the outbound frame queue. Bounded so a wedged child cannot make this
-/// process buffer without limit; the reader never blocks on it (see
-/// [`Inner::try_send`]).
-const FRAME_QUEUE_DEPTH: usize = 64;
+/// Default per-stream inbound item bound (§9). A second axis beside the byte
+/// bound: a flood of one-byte chunks charges almost nothing against
+/// [`DEFAULT_STREAM_BUFFER_BYTES`] while costing a queue slot each.
+pub const DEFAULT_STREAM_BUFFER_ITEMS: usize = 4096;
+
+/// Depth of the CONTROL frame queue (§9). Control frames are small and never
+/// carry a tail, so this is a count bound and needs no byte budget.
+///
+/// Separate from the body queue on purpose: a control frame that cannot be
+/// delivered fails the connection, and sharing one queue with 8 MiB body frames
+/// would make that failure a routine consequence of a busy stream rather than
+/// the signal it is meant to be.
+const CONTROL_QUEUE_DEPTH: usize = 64;
+
+/// Depth of the outbound BODY frame queue, in frames (§9). The byte budget
+/// below is the real bound; this only keeps the queue from holding many small
+/// frames' worth of per-frame overhead.
+const BODY_QUEUE_DEPTH: usize = 32;
+
+/// Aggregate bytes this process will hold in the outbound body queue (§9).
+///
+/// Frame COUNT is not a budget: 32 near-cap frames is a quarter of a gigabyte.
+/// Every queued body frame takes credits proportional to its size and returns
+/// them once the writer has flushed it, so the queue's memory is bounded by this
+/// number rather than by how large the frames happen to be.
+const MAX_QUEUED_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// One outbound-body credit, in bytes. A frame takes `ceil(len / CREDIT)` of
+/// them, so the accounting overshoots by at most one credit per frame.
+const QUEUE_CREDIT_BYTES: usize = 64 * 1024;
+
+/// Concurrent outbound requests this host will have in flight on one connection
+/// (§9). Reached only by a caller looping without bound; refused rather than
+/// allowed to grow the correlation table forever.
+const MAX_ACTIVE_OUTBOUND: usize = 64;
+
+/// Concurrent inbound requests this host will serve on one connection (§9).
+/// Beyond this the sidecar is refused with `too_many_requests`, which is a
+/// backpressure signal it can act on — unlike an unbounded task spawn.
+const MAX_ACTIVE_INBOUND: usize = 64;
+
+/// How long an outbound request waits for its response HEAD before giving up
+/// (§9).
+///
+/// A head, not a body: `agentkit.fetch` is answered out of the sidecar's memory,
+/// so a head that has not arrived in this long means the child is wedged, not
+/// slow. The BODY that follows is deliberately not on a deadline — an SSE
+/// subscription is long-lived by design and a finite RPC timeout applied to it
+/// would cancel healthy runs.
+pub const REQUEST_HEAD_DEADLINE: Duration = Duration::from_secs(30);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Errors
@@ -91,6 +153,24 @@ pub enum BridgeError {
         /// Human-readable detail.
         message: String,
     },
+    /// A peer broke the connection or per-request state machine of contract
+    /// §2a — a second response head, a chunk before one, an id nobody issued.
+    /// Fatal: the connection is torn down and the supervisor restarts the child.
+    #[error("assistant bridge state violation: {0}")]
+    StateViolation(String),
+    /// The response head did not arrive within [`REQUEST_HEAD_DEADLINE`]. The
+    /// correlation slot is reclaimed and the peer is sent `cancel`; a request
+    /// with no deadline pins its slot for as long as the child stays silent.
+    #[error("assistant bridge request timed out after {seconds}s waiting for a response head")]
+    Timeout {
+        /// The deadline that expired, in seconds.
+        seconds: u64,
+    },
+    /// A §9 budget refused the request: too many in flight on this connection.
+    /// Distinct from [`BridgeError::Closed`] because the connection is healthy
+    /// and the caller may retry once something finishes.
+    #[error("assistant bridge is at capacity: {0}")]
+    Busy(String),
     /// No assistant host is running (never started, stopped, or failed).
     #[error("assistant host is not running: {0}")]
     NotRunning(String),
@@ -145,9 +225,23 @@ pub struct StreamResponse {
     /// The `res` payload — for `agentkit.fetch`, the HTTP response head.
     pub head: Value,
     rx: mpsc::UnboundedReceiver<StreamEvent>,
-    buffered: Arc<AtomicUsize>,
+    budget: Arc<StreamBudget>,
     inner: Arc<Inner>,
     ended: bool,
+}
+
+/// What one inbound stream currently holds against its §9 bounds.
+///
+/// Two axes, because one does not imply the other: bytes bound a fast producer
+/// and items bound a producer sending many tiny chunks, which charges almost
+/// nothing in bytes while costing a queue slot and a wakeup each. Charged by the
+/// reader as a chunk is queued and released by [`StreamResponse::next`] as the
+/// consumer takes it, so the budget measures what is actually held rather than
+/// what has passed through.
+#[derive(Debug, Default)]
+struct StreamBudget {
+    bytes: AtomicUsize,
+    items: AtomicUsize,
 }
 
 impl StreamResponse {
@@ -161,7 +255,8 @@ impl StreamResponse {
         }
         match self.rx.recv().await {
             Some(StreamEvent::Chunk(bytes)) => {
-                self.buffered.fetch_sub(bytes.len(), Ordering::SeqCst);
+                self.budget.bytes.fetch_sub(bytes.len(), Ordering::SeqCst);
+                self.budget.items.fetch_sub(1, Ordering::SeqCst);
                 Some(StreamEvent::Chunk(bytes))
             }
             Some(StreamEvent::End(error)) => {
@@ -187,9 +282,10 @@ impl Drop for StreamResponse {
         if self.ended {
             return;
         }
+        // Settled locally and detached WITHOUT waiting for the peer (§2a): a
+        // sidecar that never answers must not pin this registration forever.
         self.inner.forget(self.id);
-        self.inner
-            .try_send(&Envelope::Cancel(Cancel { id: self.id }));
+        self.inner.cancel_outbound(self.id);
     }
 }
 
@@ -206,7 +302,7 @@ impl std::fmt::Debug for StreamResponse {
 struct StreamHeadDelivery {
     head: Value,
     rx: mpsc::UnboundedReceiver<StreamEvent>,
-    buffered: Arc<AtomicUsize>,
+    budget: Arc<StreamBudget>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -221,7 +317,7 @@ enum Pending {
     /// Head delivered; `chunk`s and one `end` still to come.
     StreamBody {
         tx: mpsc::UnboundedSender<StreamEvent>,
-        buffered: Arc<AtomicUsize>,
+        budget: Arc<StreamBudget>,
         next_seq: u64,
     },
 }
@@ -249,8 +345,15 @@ struct PendingTable {
 pub struct BridgeOptions {
     /// The OneCAD version reported in `accept`.
     pub app_version: String,
-    /// Per-stream inbound buffer bound (§7).
+    /// Per-stream inbound buffer bound, in bytes (§7, §9).
     pub max_stream_buffer_bytes: usize,
+    /// Per-stream inbound buffer bound, in chunks (§9). The second axis: a
+    /// thousand one-byte chunks cost a thousand queue slots and almost no bytes.
+    pub max_stream_buffer_items: usize,
+    /// How long an outbound request waits for its response head (§9). Defaults
+    /// to [`REQUEST_HEAD_DEADLINE`]; a test shortens it rather than sleeping
+    /// through the production budget.
+    pub request_head_deadline: Duration,
     /// The holder the local-provider gateway that serves `provider.fetch` is read
     /// out of (ADR-0017).
     ///
@@ -271,15 +374,82 @@ impl Default for BridgeOptions {
         BridgeOptions {
             app_version: env!("CARGO_PKG_VERSION").to_string(),
             max_stream_buffer_bytes: DEFAULT_STREAM_BUFFER_BYTES,
+            max_stream_buffer_items: DEFAULT_STREAM_BUFFER_ITEMS,
+            request_head_deadline: REQUEST_HEAD_DEADLINE,
             provider_registry: Arc::new(ProviderRegistry::new()),
         }
     }
 }
 
+/// One frame on its way out, holding the queue credits it took (§9).
+///
+/// The credits ride WITH the frame rather than being released at `send` time:
+/// they are what bounds the queue's memory, so they must be returned by the
+/// writer once the bytes are gone, not by the producer once they are handed over.
+struct Outgoing {
+    frame: RawFrame,
+    credit: Option<OwnedSemaphorePermit>,
+}
+
+impl Outgoing {
+    fn control(frame: RawFrame) -> Self {
+        Outgoing {
+            frame,
+            credit: None,
+        }
+    }
+}
+
+/// Why an inbound `req` could not be registered (§2a, §9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InboundRefusal {
+    /// The id is already in flight. The existing registration is untouched.
+    DuplicateId,
+    /// [`MAX_ACTIVE_INBOUND`] handlers are already running.
+    TooMany,
+}
+
+impl InboundRefusal {
+    const fn code(self) -> &'static str {
+        match self {
+            InboundRefusal::DuplicateId => "duplicate_id",
+            InboundRefusal::TooMany => "too_many_requests",
+        }
+    }
+}
+
+/// Encodes one control envelope and checks its §1 cap BEFORE it is queued.
+///
+/// The writer fails the whole connection now, which makes an avoidable encode
+/// failure expensive: a caller that hands over an over-cap payload would take
+/// down a healthy child rather than getting told no. Checked here, the refusal
+/// belongs to the request that caused it.
+fn control_frame(envelope: &Envelope) -> Result<RawFrame, BridgeError> {
+    let json = envelope.to_json_vec()?;
+    if json.len() > MAX_JSON_LEN as usize {
+        return Err(BridgeError::Protocol(ProtocolError::TooLarge {
+            what: "json",
+            len: u32::try_from(json.len()).unwrap_or(u32::MAX),
+            cap: MAX_JSON_LEN,
+        }));
+    }
+    Ok(RawFrame::json_only(json))
+}
+
+/// Outbound-body credits a frame of `len` bytes takes, rounded up (§9).
+fn credits_for(len: usize) -> u32 {
+    let credits = len.div_ceil(QUEUE_CREDIT_BYTES).max(1);
+    u32::try_from(credits).unwrap_or(u32::MAX)
+}
+
 struct Inner {
     /// Host ids are EVEN (§3); the sidecar owns the odd ones.
     ids: IdAllocator,
-    frames: mpsc::Sender<RawFrame>,
+    /// Small control frames: `req`, `res`, `end`, `cancel`, `ping`, `pong`.
+    control: mpsc::Sender<Outgoing>,
+    /// `chunk` frames and their tails, bounded by [`Inner::body_credit`].
+    body: mpsc::Sender<Outgoing>,
+    body_credit: Arc<Semaphore>,
     pending: Mutex<PendingTable>,
     /// Cancellation tokens for the inbound requests this host is still serving.
     ///
@@ -288,78 +458,180 @@ struct Inner {
     /// request already talking to a provider has to reach the task holding that
     /// response, or the upstream call keeps generating into a socket nobody will
     /// read.
-    inbound: Mutex<HashMap<u64, CancellationToken>>,
+    ///
+    /// Keyed by id and TICKETED: cleanup names the ticket it registered, never
+    /// the bare integer, so a handler retiring late cannot remove an entry that
+    /// now belongs to something else (§2a).
+    inbound: Mutex<HashMap<u64, (u64, CancellationToken)>>,
+    next_ticket: AtomicU64,
     closed: AtomicBool,
     closed_signal: Notify,
+    /// Cancelled by [`Inner::fail_all`]. **The one connection-failure authority**:
+    /// whichever half notices first, both IO tasks stop on this token, every
+    /// waiter is settled, and `closed_signal` wakes the supervisor. A writer that
+    /// merely returned would leave a half-open peer looking Ready forever.
+    shutdown: CancellationToken,
     stream_cap: usize,
+    stream_item_cap: usize,
+    head_deadline: Duration,
     provider: Arc<ProviderRegistry>,
 }
 
 impl Inner {
-    /// Queues a frame without ever blocking the caller.
+    /// Queues a control frame without ever blocking the caller.
     ///
     /// Used by the reader task, which MUST keep draining (§6): awaiting a full
     /// outbound queue there would couple inbound progress to a child that has
     /// stopped reading its stdin, i.e. deadlock the bridge to avoid dropping a
-    /// pong. The queue is 64 frames deep and a full one means the connection is
-    /// already dead, so a dropped control frame changes nothing.
-    fn try_send(&self, envelope: &Envelope) {
-        let raw = match envelope.to_json_vec() {
-            Ok(json) => RawFrame::json_only(json),
-            Err(err) => {
-                tracing::warn!(target: "assistant", error = %err, "bridge: failed to encode a control frame");
-                return;
+    /// pong.
+    ///
+    /// **A control frame that cannot be delivered fails the connection.** The
+    /// control queue is reserved — body frames cannot occupy it — so a full one
+    /// is not a busy stream, it is a child that has stopped reading its stdin
+    /// for [`CONTROL_QUEUE_DEPTH`] frames. Logging and continuing was the old
+    /// behaviour, and it silently dropped the `cancel` that stops a runaway
+    /// producer and the `res` that settles a waiting request.
+    fn try_send(&self, envelope: &Envelope) -> Result<(), BridgeError> {
+        let raw = control_frame(envelope)?;
+        match self.control.try_send(Outgoing::control(raw)) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                let reason = format!(
+                    "control frame '{}' could not be delivered: outbound control queue full",
+                    envelope.tag()
+                );
+                tracing::warn!(target: "assistant", tag = envelope.tag(), "bridge: {reason}");
+                self.fail_all(&reason);
+                Err(BridgeError::Closed(reason))
             }
-        };
-        if self.frames.try_send(raw).is_err() {
-            tracing::warn!(target: "assistant", "bridge: outbound queue full or closed; control frame dropped");
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(BridgeError::Closed("writer task ended".into()))
+            }
         }
     }
 
+    /// Best-effort control send from a `Drop` or a cleanup path, where there is
+    /// no caller left to report to. The connection-failure authority still runs.
+    fn try_send_detached(&self, envelope: &Envelope) {
+        let _ = self.try_send(envelope);
+    }
+
+    /// Settles an outbound request locally and tells the peer to stop (§2a).
+    fn cancel_outbound(&self, id: u64) {
+        self.try_send_detached(&Envelope::Cancel(Cancel { id }));
+    }
+
     async fn send(&self, envelope: &Envelope) -> Result<(), BridgeError> {
-        let raw = RawFrame::json_only(envelope.to_json_vec()?);
-        self.frames
-            .send(raw)
+        let raw = control_frame(envelope)?;
+        self.control
+            .send(Outgoing::control(raw))
             .await
             .map_err(|_| BridgeError::Closed("writer task ended".into()))
     }
 
     /// Queues one outbound `chunk` with its binary tail.
     ///
-    /// Awaits the bounded frame queue rather than `try_send`ing: this is a BODY
-    /// frame, and dropping one would truncate a response silently. The wait is
-    /// the backpressure that keeps a provider streaming faster than the sidecar
-    /// reads from turning into unbounded memory here.
+    /// Awaits both the byte credits and the bounded frame queue rather than
+    /// `try_send`ing: this is a BODY frame, and dropping one would truncate a
+    /// response silently. The wait is the backpressure that keeps a provider
+    /// streaming faster than the sidecar reads from turning into unbounded
+    /// memory here — and the credits are what make that bound a byte count
+    /// rather than a frame count, which for 8 MiB frames is not a bound at all.
+    ///
+    /// An empty chunk is never queued: §2a makes a tailless `chunk` fatal at the
+    /// receiver, so producing one would be this side inventing a frame the peer
+    /// must tear the connection down over.
     async fn send_chunk(&self, id: u64, seq: u64, bin: Vec<u8>) -> Result<(), BridgeError> {
+        debug_assert!(!bin.is_empty(), "an empty chunk is not a legal frame");
+        // A tail past the frame cap would ask for more credits than the budget
+        // holds, and an unsatisfiable acquire waits forever. Callers split by
+        // `MAX_BIN_LEN` before they get here; this refuses rather than hangs if
+        // one ever stops.
+        if bin.len() > MAX_BIN_LEN as usize {
+            return Err(BridgeError::Protocol(ProtocolError::TooLarge {
+                what: "bin",
+                len: u32::try_from(bin.len()).unwrap_or(u32::MAX),
+                cap: MAX_BIN_LEN,
+            }));
+        }
+        let credit = self
+            .body_credit
+            .clone()
+            .acquire_many_owned(credits_for(bin.len()))
+            .await
+            .map_err(|_| BridgeError::Closed("writer task ended".into()))?;
         let json = Envelope::Chunk(Chunk { id, seq }).to_json_vec()?;
-        self.frames
-            .send(RawFrame { json, bin })
+        self.body
+            .send(Outgoing {
+                frame: RawFrame { json, bin },
+                credit: Some(credit),
+            })
             .await
             .map_err(|_| BridgeError::Closed("writer task ended".into()))
     }
 
-    /// Registers an inbound request's cancellation token. Registered BEFORE the
-    /// handler is spawned, so a `cancel` can never arrive in the window between
-    /// the task starting and the table learning about it.
-    fn track_inbound(&self, id: u64, token: CancellationToken) {
-        let previous = self
-            .inbound
-            .lock()
-            .expect("assistant inbound table poisoned")
-            .insert(id, token);
-        if let Some(previous) = previous {
-            // §3 says ids are never reused, so this is a peer that has lost track
-            // of its own counter. Cancel the handler it just orphaned.
-            tracing::warn!(target: "assistant", id, "bridge: inbound request id reused; cancelling the older handler");
-            previous.cancel();
-        }
+    /// Queues a frame that must stay BEHIND this request's body.
+    ///
+    /// The writer drains control before body, which is what keeps a `cancel`
+    /// from queueing behind the flood it is meant to stop — and it is also why a
+    /// stream's `end` cannot travel on the control lane. `end` is the terminator
+    /// of a chunk sequence (§2), so sending it there lets it overtake chunks
+    /// that are still queued and puts `res → end → chunk` on the wire. Per-request
+    /// order is total precisely because every frame after the head rides the one
+    /// lane, in the order it was produced.
+    async fn send_after_body(&self, envelope: &Envelope) -> Result<(), BridgeError> {
+        let frame = control_frame(envelope)?;
+        let credit = self
+            .body_credit
+            .clone()
+            .acquire_many_owned(1)
+            .await
+            .map_err(|_| BridgeError::Closed("writer task ended".into()))?;
+        self.body
+            .send(Outgoing {
+                frame,
+                credit: Some(credit),
+            })
+            .await
+            .map_err(|_| BridgeError::Closed("writer task ended".into()))
     }
 
-    fn finish_inbound(&self, id: u64) {
-        self.inbound
+    /// Registers an inbound request's cancellation token, returning the TICKET
+    /// that owns it. Registered BEFORE the handler is spawned, so a `cancel` can
+    /// never arrive in the window between the task starting and the table
+    /// learning about it.
+    ///
+    /// **An id that is still in flight is refused, and the existing registration
+    /// is not touched** (§2a). Replacing it was the old behaviour and it created
+    /// an unsafe ownership transfer: the displaced handler's unconditional
+    /// `finish_inbound(id)` then removed its replacement's token, after which a
+    /// `cancel` for that id reached nothing at all. Ownership is bound to the
+    /// ticket, never to the bare integer.
+    fn track_inbound(&self, id: u64, token: CancellationToken) -> Result<u64, InboundRefusal> {
+        let mut table = self
+            .inbound
             .lock()
-            .expect("assistant inbound table poisoned")
-            .remove(&id);
+            .expect("assistant inbound table poisoned");
+        if table.contains_key(&id) {
+            return Err(InboundRefusal::DuplicateId);
+        }
+        if table.len() >= MAX_ACTIVE_INBOUND {
+            return Err(InboundRefusal::TooMany);
+        }
+        let ticket = self.next_ticket.fetch_add(1, Ordering::Relaxed);
+        table.insert(id, (ticket, token));
+        Ok(ticket)
+    }
+
+    /// Retires an inbound request, but only if `ticket` still owns the slot.
+    fn finish_inbound(&self, id: u64, ticket: u64) {
+        let mut table = self
+            .inbound
+            .lock()
+            .expect("assistant inbound table poisoned");
+        if table.get(&id).is_some_and(|(owner, _)| *owner == ticket) {
+            table.remove(&id);
+        }
     }
 
     fn cancel_inbound(&self, id: u64) {
@@ -368,12 +640,13 @@ impl Inner {
             .lock()
             .expect("assistant inbound table poisoned")
             .remove(&id);
-        if let Some(token) = token {
+        if let Some((_, token)) = token {
             token.cancel();
         }
     }
 
-    /// Registers a correlation slot, refusing once the connection has closed.
+    /// Registers a correlation slot, refusing once the connection has closed or
+    /// the §9 in-flight bound is reached.
     fn register(&self, id: u64, pending: Pending) -> Result<(), BridgeError> {
         let mut table = self
             .pending
@@ -382,8 +655,25 @@ impl Inner {
         if table.closed {
             return Err(BridgeError::Closed("connection closed".into()));
         }
+        if table.entries.len() >= MAX_ACTIVE_OUTBOUND {
+            return Err(BridgeError::Busy(format!(
+                "{MAX_ACTIVE_OUTBOUND} requests are already in flight on this connection"
+            )));
+        }
         table.entries.insert(id, pending);
         Ok(())
+    }
+
+    /// Whether `id` is one this host allocated and has since settled.
+    ///
+    /// §2a's id ladder needs three outcomes from a correlation miss, not two: an
+    /// id in our space below the allocation cursor is a late frame for a request
+    /// we cancelled and is discarded, while an id of the wrong parity or one
+    /// nobody has allocated yet is a peer inventing correlation and is fatal.
+    /// Treating both as "unknown, ignore" is how a diverged allocator goes
+    /// unnoticed until it crosses two responses.
+    fn is_settled_outbound(&self, id: u64) -> bool {
+        id.is_multiple_of(2) && id < self.ids.peek()
     }
 
     fn forget(&self, id: u64) {
@@ -394,11 +684,35 @@ impl Inner {
             .remove(&id);
     }
 
+    /// The §9 in-flight counters: `(outbound, inbound)`.
+    ///
+    /// Read by the tests that assert a request's registration comes back to
+    /// baseline after a timeout, a drop or a duplicate refusal — "it settled" is
+    /// not the same claim as "nothing is still pinned".
+    #[cfg(test)]
+    fn in_flight(&self) -> (usize, usize) {
+        let outbound = self
+            .pending
+            .lock()
+            .expect("assistant pending table poisoned")
+            .entries
+            .len();
+        let inbound = self
+            .inbound
+            .lock()
+            .expect("assistant inbound table poisoned")
+            .len();
+        (outbound, inbound)
+    }
+
     fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
     }
 
-    /// Drains every waiter and latches the connection closed. Idempotent.
+    /// **The connection-failure authority.** Drains every waiter, cancels every
+    /// inbound handler, stops both IO tasks and notifies the supervisor.
+    /// Idempotent, and called from either half: whichever notices first, the
+    /// whole connection ends in one place.
     fn fail_all(&self, reason: &str) {
         {
             let mut table = self
@@ -427,7 +741,7 @@ impl Inner {
         // A teardown must not leave a provider call running: the frames it would
         // produce have nowhere to go, and the upstream connection would stay open
         // until the model finished talking to nobody.
-        for (_, token) in self
+        for (_, (_, token)) in self
             .inbound
             .lock()
             .expect("assistant inbound table poisoned")
@@ -436,6 +750,13 @@ impl Inner {
             token.cancel();
         }
         self.closed.store(true, Ordering::SeqCst);
+        // Stops BOTH IO tasks, whichever half noticed the failure. A writer that
+        // returned quietly used to leave the reader parked on a half-open pipe,
+        // and the supervisor reading Ready off a connection nothing could use.
+        self.shutdown.cancel();
+        // Wakes anything blocked on outbound-body credits so it fails rather
+        // than waiting for a writer that has stopped returning them.
+        self.body_credit.close();
         self.closed_signal.notify_waiters();
     }
 }
@@ -505,6 +826,27 @@ impl AssistantBridge {
             return Err(BridgeError::Handshake(reason));
         }
 
+        // §2: an incompatible pair is refused BEFORE any other frame is
+        // exchanged, so it can never perform a partial operation. The contract
+        // version was advertised and then ignored, which let a sidecar built
+        // against DTOs this host does not understand activate a connection and
+        // fail later, one request at a time.
+        if !SUPPORTED_AGENTKIT_CONTRACTS.contains(&hello.agentkit_contract_version.as_str()) {
+            let reason = format!(
+                "unsupported AgentKit contract version {}; this host serves {}",
+                hello.agentkit_contract_version,
+                SUPPORTED_AGENTKIT_CONTRACTS.join(", ")
+            );
+            write_one(
+                &mut writer,
+                &Envelope::Reject(Reject {
+                    reason: reason.clone(),
+                }),
+            )
+            .await?;
+            return Err(BridgeError::Handshake(reason));
+        }
+
         write_one(
             &mut writer,
             &Envelope::Accept(Accept {
@@ -515,19 +857,26 @@ impl AssistantBridge {
         )
         .await?;
 
-        let (frames_tx, frames_rx) = mpsc::channel::<RawFrame>(FRAME_QUEUE_DEPTH);
+        let (control_tx, control_rx) = mpsc::channel::<Outgoing>(CONTROL_QUEUE_DEPTH);
+        let (body_tx, body_rx) = mpsc::channel::<Outgoing>(BODY_QUEUE_DEPTH);
         let inner = Arc::new(Inner {
             ids: IdAllocator::host(),
-            frames: frames_tx,
+            control: control_tx,
+            body: body_tx,
+            body_credit: Arc::new(Semaphore::new(MAX_QUEUED_BODY_BYTES / QUEUE_CREDIT_BYTES)),
             pending: Mutex::new(PendingTable::default()),
             inbound: Mutex::new(HashMap::new()),
+            next_ticket: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             closed_signal: Notify::new(),
+            shutdown: CancellationToken::new(),
             stream_cap: options.max_stream_buffer_bytes,
+            stream_item_cap: options.max_stream_buffer_items,
+            head_deadline: options.request_head_deadline,
             provider: options.provider_registry.clone(),
         });
 
-        let writer_handle = tokio::spawn(writer_task(writer, frames_rx));
+        let writer_handle = tokio::spawn(writer_task(writer, control_rx, body_rx, inner.clone()));
         let reader_handle = tokio::spawn(reader_task(reader, buf, inner.clone()));
 
         tracing::debug!(
@@ -588,10 +937,12 @@ impl AssistantBridge {
         let id = self.inner.ids.next();
         let (tx, rx) = oneshot::channel();
         self.inner.register(id, Pending::Unary(tx))?;
+        // Armed from here on: every early return, every `?`, and a caller that
+        // drops this future mid-await all retire the slot and tell the peer.
+        let mut guard = PendingGuard::arm(&self.inner, id);
         self.send_req(id, principal, verb, payload).await?;
-        let res = rx
-            .await
-            .map_err(|_| BridgeError::Closed("response channel dropped".into()))??;
+        let res = await_head(self.inner.head_deadline, rx).await??;
+        guard.disarm();
         if res.ok {
             Ok(res.payload.unwrap_or(Value::Null))
         } else {
@@ -611,15 +962,17 @@ impl AssistantBridge {
         let id = self.inner.ids.next();
         let (tx, rx) = oneshot::channel();
         self.inner.register(id, Pending::StreamHead(tx))?;
+        let mut guard = PendingGuard::arm(&self.inner, id);
         self.send_req(id, principal, verb, payload).await?;
-        let delivery = rx
-            .await
-            .map_err(|_| BridgeError::Closed("response channel dropped".into()))??;
+        let delivery = await_head(self.inner.head_deadline, rx).await??;
+        // Ownership of the cancellation passes to the `StreamResponse`, whose
+        // own `Drop` sends `cancel` if the body is abandoned before its `end`.
+        guard.disarm();
         Ok(StreamResponse {
             id,
             head: delivery.head,
             rx: delivery.rx,
-            buffered: delivery.buffered,
+            budget: delivery.budget,
             inner: self.inner.clone(),
             ended: false,
         })
@@ -641,8 +994,18 @@ impl AssistantBridge {
             table.pings.insert(id, tx);
         }
         self.inner.send(&Envelope::Ping(Ping { id })).await?;
-        rx.await
-            .map_err(|_| BridgeError::Closed("ping never answered".into()))
+        // Interrupted by retirement, not merely by a `pong` that will never come:
+        // `fail_all` drops the ping's sender, so this resolves as soon as the
+        // connection fails instead of holding the supervisor's probe open.
+        tokio::select! {
+            biased;
+            () = self.inner.shutdown.cancelled() => {
+                Err(BridgeError::Closed("connection closed while pinging".into()))
+            }
+            answered = rx => {
+                answered.map_err(|_| BridgeError::Closed("ping never answered".into()))
+            }
+        }
     }
 
     /// Tears the connection down: every waiter fails, both tasks stop.
@@ -682,6 +1045,61 @@ impl std::fmt::Debug for AssistantBridge {
             .field("host_version", &self.hello.host_version)
             .field("closed", &self.is_closed())
             .finish_non_exhaustive()
+    }
+}
+
+/// Awaits a response head under [`REQUEST_HEAD_DEADLINE`].
+///
+/// A request with no deadline pins its correlation slot for as long as the child
+/// stays silent, and the supervisor's own ping can keep succeeding the whole
+/// time — a wedged route is not a wedged process.
+async fn await_head<T>(
+    deadline: Duration,
+    rx: oneshot::Receiver<Result<T, BridgeError>>,
+) -> Result<Result<T, BridgeError>, BridgeError> {
+    match tokio::time::timeout(deadline, rx).await {
+        Ok(Ok(answer)) => Ok(answer),
+        Ok(Err(_)) => Err(BridgeError::Closed("response channel dropped".into())),
+        Err(_) => Err(BridgeError::Timeout {
+            seconds: deadline.as_secs(),
+        }),
+    }
+}
+
+/// RAII cleanup for one outbound correlation slot.
+///
+/// The slot is released and the peer is sent `cancel` unless the request
+/// completed — including when the caller's future is dropped mid-await, which no
+/// amount of care on the success path can cover. §2a: a request is settled
+/// locally and detached WITHOUT waiting for the peer, so a sidecar that never
+/// answers cannot pin a registration forever.
+struct PendingGuard<'a> {
+    inner: &'a Arc<Inner>,
+    id: u64,
+    armed: bool,
+}
+
+impl<'a> PendingGuard<'a> {
+    fn arm(inner: &'a Arc<Inner>, id: u64) -> Self {
+        PendingGuard {
+            inner,
+            id,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.inner.forget(self.id);
+        self.inner.cancel_outbound(self.id);
     }
 }
 
@@ -731,21 +1149,74 @@ async fn write_one<W: AsyncWrite + Unpin>(
 // Tasks
 // ─────────────────────────────────────────────────────────────────────────────
 
-async fn writer_task<W>(mut writer: W, mut frames: mpsc::Receiver<RawFrame>)
-where
+/// The next frame to write, control first.
+///
+/// `biased` is load-bearing: a `cancel` that stops a runaway producer must not
+/// queue behind the megabytes that producer has already handed over.
+///
+/// The cost of that bias is that a frame on the control lane may overtake one on
+/// the body lane, so **no request may split its post-head frames across the two**.
+/// A stream's `chunk`s and its terminating `end` all ride the body lane
+/// ([`Inner::send_after_body`]); the head goes out on control before any of them
+/// exist, so it cannot be overtaken by its own body. Per-request order is
+/// therefore total, and only unrelated requests interleave — which §2 allows.
+async fn next_outgoing(
+    control: &mut mpsc::Receiver<Outgoing>,
+    body: &mut mpsc::Receiver<Outgoing>,
+) -> Option<Outgoing> {
+    tokio::select! {
+        biased;
+        Some(frame) = control.recv() => Some(frame),
+        Some(frame) = body.recv() => Some(frame),
+        else => None,
+    }
+}
+
+/// Drains the outbound queues onto the child's stdin.
+///
+/// **Every exit from this loop fails the whole connection.** The old version
+/// returned on a write error and assumed the reader would notice, which is only
+/// true of a peer that closes both halves: a child holding its stdout open with
+/// a broken stdin left every pending request waiting and the supervisor reading
+/// Ready off a connection that could no longer carry a frame (F05).
+async fn writer_task<W>(
+    mut writer: W,
+    mut control: mpsc::Receiver<Outgoing>,
+    mut body: mpsc::Receiver<Outgoing>,
+    inner: Arc<Inner>,
+) where
     W: AsyncWrite + Unpin,
 {
     let mut codec = OcakCodec;
     let mut out = BytesMut::new();
-    while let Some(frame) = frames.recv().await {
+    let reason = loop {
+        let next = tokio::select! {
+            biased;
+            () = inner.shutdown.cancelled() => break None,
+            next = next_outgoing(&mut control, &mut body) => next,
+        };
+        let Some(outgoing) = next else {
+            break Some("assistant bridge outbound queue closed".to_string());
+        };
         out.clear();
-        if let Err(err) = codec.encode(frame, &mut out) {
-            tracing::warn!(target: "assistant", error = %err, "bridge writer: encode failed");
-            break;
+        if let Err(err) = codec.encode(outgoing.frame, &mut out) {
+            break Some(format!(
+                "assistant bridge writer could not encode a frame: {err}"
+            ));
         }
-        if writer.write_all(&out).await.is_err() || writer.flush().await.is_err() {
-            break; // transport gone; the reader fails every pending request.
+        if let Err(err) = writer.write_all(&out).await {
+            break Some(format!("assistant bridge writer failed: {err}"));
         }
+        if let Err(err) = writer.flush().await {
+            break Some(format!("assistant bridge writer could not flush: {err}"));
+        }
+        // Returned only now: the credits bound what is HELD, and it is held
+        // until the bytes are actually gone.
+        drop(outgoing.credit);
+    };
+    if let Some(reason) = reason {
+        tracing::warn!(target: "assistant", "bridge writer: {reason}");
+        inner.fail_all(&reason);
     }
     let _ = writer.shutdown().await;
 }
@@ -775,7 +1246,15 @@ where
                 }
             }
         }
-        match reader.read_buf(&mut buf).await {
+        // Selected against the shutdown token so a WRITER failure stops this
+        // half too. Without it the reader parks on a half-open pipe that will
+        // never produce another frame, and nothing retires the connection.
+        let read = tokio::select! {
+            biased;
+            () = inner.shutdown.cancelled() => return,
+            read = reader.read_buf(&mut buf) => read,
+        };
+        match read {
             Ok(0) => {
                 inner.fail_all("assistant host closed its stdout");
                 return;
@@ -793,14 +1272,16 @@ where
 /// Routes one decoded frame. `Err` is FATAL and tears the connection down.
 fn dispatch(inner: &Arc<Inner>, frame: RawFrame) -> Result<(), BridgeError> {
     let envelope = Envelope::from_json_slice(&frame.json)?;
+    // §2a: the framing layer yields the tail uninterpreted by design, so the
+    // pairing check belongs here. A tail on a control frame is a peer writing a
+    // frame shape this protocol does not have; an EMPTY chunk is a queue slot
+    // charging nothing against any byte budget (§9).
+    envelope.check_binary_tail(frame.bin.len())?;
     match envelope {
         Envelope::Res(res) => on_res(inner, res),
         Envelope::Chunk(chunk) => on_chunk(inner, chunk, frame.bin),
         Envelope::End(end) => on_end(inner, end),
-        Envelope::Req(req) => {
-            on_req(inner, req);
-            Ok(())
-        }
+        Envelope::Req(req) => on_req(inner, req),
         Envelope::Cancel(cancel) => {
             // §2: cancelling an unknown id is a no-op, not an error — the request
             // may have finished a frame ago. A known id reaches the task serving
@@ -809,10 +1290,7 @@ fn dispatch(inner: &Arc<Inner>, frame: RawFrame) -> Result<(), BridgeError> {
             inner.cancel_inbound(cancel.id);
             Ok(())
         }
-        Envelope::Ping(ping) => {
-            inner.try_send(&Envelope::Pong(Pong { id: ping.id }));
-            Ok(())
-        }
+        Envelope::Ping(ping) => inner.try_send(&Envelope::Pong(Pong { id: ping.id })),
         Envelope::Pong(pong) => {
             let waiter = inner
                 .pending
@@ -836,6 +1314,20 @@ fn dispatch(inner: &Arc<Inner>, frame: RawFrame) -> Result<(), BridgeError> {
     }
 }
 
+/// §2a's correlation-miss ladder, shared by `res`, `chunk` and `end`.
+///
+/// `Ok(())` means the frame is a late answer to something this host cancelled
+/// and must be discarded; `Err` means the peer named an id it could not have
+/// been answering, which is fatal.
+fn discard_or_fatal(inner: &Arc<Inner>, tag: &str, id: u64) -> Result<(), BridgeError> {
+    if inner.is_settled_outbound(id) {
+        return Ok(());
+    }
+    Err(BridgeError::StateViolation(format!(
+        "{tag} names request id {id}, which this host has never issued"
+    )))
+}
+
 fn on_res(inner: &Arc<Inner>, res: Res) -> Result<(), BridgeError> {
     let mut table = inner
         .pending
@@ -852,19 +1344,19 @@ fn on_res(inner: &Arc<Inner>, res: Res) -> Result<(), BridgeError> {
                 return Ok(());
             }
             let (chunks_tx, chunks_rx) = mpsc::unbounded_channel();
-            let buffered = Arc::new(AtomicUsize::new(0));
+            let budget = Arc::new(StreamBudget::default());
             table.entries.insert(
                 res.id,
                 Pending::StreamBody {
                     tx: chunks_tx,
-                    buffered: buffered.clone(),
+                    budget: budget.clone(),
                     next_seq: 0,
                 },
             );
             let delivery = StreamHeadDelivery {
                 head: res.payload.unwrap_or(Value::Null),
                 rx: chunks_rx,
-                buffered,
+                budget,
             };
             if tx.send(Ok(delivery)).is_err() {
                 // The caller went away between sending the request and reading
@@ -872,19 +1364,25 @@ fn on_res(inner: &Arc<Inner>, res: Res) -> Result<(), BridgeError> {
                 // owns. The peer learns about it from the `cancel` below.
                 table.entries.remove(&res.id);
                 drop(table);
-                inner.try_send(&Envelope::Cancel(Cancel { id: res.id }));
+                inner.cancel_outbound(res.id);
             }
             Ok(())
         }
+        // §2a: a second head is FATAL, and so is a failed `res` after a
+        // successful one. It is not a replacement — the body is already owned by
+        // a consumer that would be left waiting forever while the chunks flowed
+        // to a sink nobody reads.
         Some(entry @ Pending::StreamBody { .. }) => {
             table.entries.insert(res.id, entry);
-            Err(BridgeError::Handshake(format!(
-                "second res for streaming request {}",
+            Err(BridgeError::StateViolation(format!(
+                "a second res arrived for request {}, which already has a head",
                 res.id
             )))
         }
-        // §2: a `res` for a cancelled id may still arrive and MUST be discarded.
-        None => Ok(()),
+        None => {
+            drop(table);
+            discard_or_fatal(inner, "res", res.id)
+        }
     }
 }
 
@@ -894,16 +1392,17 @@ fn on_chunk(inner: &Arc<Inner>, chunk: Chunk, bin: Vec<u8>) -> Result<(), Bridge
         .lock()
         .expect("assistant pending table poisoned");
     let Some(entry) = table.entries.get_mut(&chunk.id) else {
-        return Ok(()); // discarded: cancelled, or already ended.
+        drop(table);
+        return discard_or_fatal(inner, "chunk", chunk.id);
     };
     let Pending::StreamBody {
         tx,
-        buffered,
+        budget,
         next_seq,
     } = entry
     else {
-        return Err(BridgeError::Handshake(format!(
-            "chunk for request {}, which is not streaming",
+        return Err(BridgeError::StateViolation(format!(
+            "chunk for request {}, which has not been answered with a head",
             chunk.id
         )));
     };
@@ -911,32 +1410,48 @@ fn on_chunk(inner: &Arc<Inner>, chunk: Chunk, bin: Vec<u8>) -> Result<(), Bridge
     // receiver cannot tell a dropped chunk from a reordered one, and guessing
     // would let the stream and its durable log disagree undetectably.
     if chunk.seq != *next_seq {
-        return Err(BridgeError::Handshake(format!(
+        return Err(BridgeError::StateViolation(format!(
             "chunk {} out of order on request {}, expected {}",
             chunk.seq, chunk.id, next_seq
         )));
     }
     *next_seq += 1;
 
-    // §7: bounded, and loud on overflow. The buffer is charged here and released
-    // in `StreamResponse::next`, so a consumer that keeps up never trips it.
-    let pending_bytes = buffered.load(Ordering::SeqCst);
-    if pending_bytes + bin.len() > inner.stream_cap {
-        let cap = inner.stream_cap;
+    // §7/§9: bounded on BOTH axes, and loud on overflow. The buffer is charged
+    // here and released in `StreamResponse::next`, so a consumer that keeps up
+    // never trips it. Bytes alone are not a bound — an item cap is what stops a
+    // producer whose chunks are one byte each from costing a queue slot apiece.
+    let held_bytes = budget.bytes.load(Ordering::SeqCst);
+    let held_items = budget.items.load(Ordering::SeqCst);
+    let overflow = if held_bytes + bin.len() > inner.stream_cap {
+        Some(format!(
+            "stream {} exceeded its {}-byte buffer",
+            chunk.id, inner.stream_cap
+        ))
+    } else if held_items + 1 > inner.stream_item_cap {
+        Some(format!(
+            "stream {} exceeded its {}-chunk buffer",
+            chunk.id, inner.stream_item_cap
+        ))
+    } else {
+        None
+    };
+    if let Some(message) = overflow {
         let _ = tx.send(StreamEvent::End(Some(ErrorObject {
             code: "stream_overflow".into(),
-            message: format!("stream {} exceeded its {cap}-byte buffer", chunk.id),
+            message: message.clone(),
         })));
         table.entries.remove(&chunk.id);
         drop(table);
         // `cancel`, not `end`: on an INBOUND stream this host is the receiver,
         // and `end` belongs to the responder. Cancelling is what §2 gives the
         // originator to stop a producer it can no longer keep up with.
-        inner.try_send(&Envelope::Cancel(Cancel { id: chunk.id }));
-        tracing::warn!(target: "assistant", id = chunk.id, cap, "bridge: inbound stream overflowed its buffer");
+        inner.cancel_outbound(chunk.id);
+        tracing::warn!(target: "assistant", id = chunk.id, "bridge: {message}");
         return Ok(());
     }
-    buffered.fetch_add(bin.len(), Ordering::SeqCst);
+    budget.bytes.fetch_add(bin.len(), Ordering::SeqCst);
+    budget.items.fetch_add(1, Ordering::SeqCst);
     let _ = tx.send(StreamEvent::Chunk(bin));
     Ok(())
 }
@@ -961,12 +1476,15 @@ fn on_end(inner: &Arc<Inner>, end: End) -> Result<(), BridgeError> {
         }
         Some(entry) => {
             table.entries.insert(end.id, entry);
-            Err(BridgeError::Handshake(format!(
-                "end for request {}, which is not streaming",
+            Err(BridgeError::StateViolation(format!(
+                "end for request {}, which has not been answered with a head",
                 end.id
             )))
         }
-        None => Ok(()), // cancelled or already ended — the race is normal.
+        None => {
+            drop(table);
+            discard_or_fatal(inner, "end", end.id)
+        }
     }
 }
 
@@ -982,23 +1500,17 @@ fn on_end(inner: &Arc<Inner>, end: End) -> Result<(), BridgeError> {
 /// one that reaches the network, `provider.fetch`, reaches exactly the registered
 /// loopback provider its payload names and nothing else (ADR-0017) — the payload
 /// carries a provider id, and the gateway owns every part of the URL.
-fn on_req(inner: &Arc<Inner>, req: Req) {
-    // §3: the sidecar allocates ODD ids. An even one means the two counters have
-    // diverged, and a diverged counter crosses responses silently. Refused rather
-    // than answered, because there is no way to know whose request it is.
+fn on_req(inner: &Arc<Inner>, req: Req) -> Result<(), BridgeError> {
+    // §2a/§3: the sidecar allocates ODD ids, and a wrong-parity inbound request
+    // is FATAL on both sides. Answering it, as this host used to, assumes the
+    // peer's allocator is merely confused — but a diverged allocator crosses
+    // responses, and an even id here is one this host may itself allocate, so
+    // there is no reply that cannot be mistaken for the answer to something else.
     if req.id.is_multiple_of(2) {
-        tracing::warn!(
-            target: "assistant",
-            id = req.id,
-            "bridge: inbound request id is not sidecar-allocated; refusing"
-        );
-        fail(
-            inner,
-            req.id,
-            "bad_request",
-            "inbound request id is not sidecar-allocated",
-        );
-        return;
+        return Err(BridgeError::StateViolation(format!(
+            "inbound request id {} is host-allocated; the sidecar's allocator has diverged",
+            req.id
+        )));
     }
 
     let principal = Principal::Host; // STAMPED. Never read from the frame.
@@ -1015,23 +1527,19 @@ fn on_req(inner: &Arc<Inner>, req: Req) {
     }
 
     match SIDECAR_TO_HOST_VERBS.check(&req.verb, principal) {
-        Err(ProtocolError::UnknownVerb(verb)) => {
-            fail(
-                inner,
-                req.id,
-                "unknown_verb",
-                &format!("no verb '{verb}' on this bridge"),
-            );
-        }
-        Err(err) => {
-            fail(inner, req.id, "forbidden", &err.to_string());
-        }
+        Err(ProtocolError::UnknownVerb(verb)) => fail(
+            inner,
+            req.id,
+            "unknown_verb",
+            &format!("no verb '{verb}' on this bridge"),
+        ),
+        Err(err) => fail(inner, req.id, "forbidden", &err.to_string()),
         Ok(()) => route(inner, req),
     }
 }
 
 /// Dispatches an authorized inbound request to its host-side route.
-fn route(inner: &Arc<Inner>, req: Req) {
+fn route(inner: &Arc<Inner>, req: Req) -> Result<(), BridgeError> {
     match req.verb.as_str() {
         VERB_PROVIDER_FETCH => {
             // Read here, per request: a provider installed since this bridge
@@ -1039,19 +1547,39 @@ fn route(inner: &Arc<Inner>, req: Req) {
             // trusted settings path), and one cleared since then stops serving
             // just as promptly.
             let Some(gateway) = inner.provider.current() else {
-                fail(
+                return fail(
                     inner,
                     req.id,
                     "unimplemented",
                     "no local-provider gateway is configured on this bridge",
                 );
-                return;
             };
             let id = req.id;
             // Registered BEFORE the spawn, so a `cancel` that races the first
-            // frame still finds something to cancel.
+            // frame still finds something to cancel — and refused, WITHOUT
+            // touching what is already there, if this id is still in flight
+            // (§2a). The ticket is what the handler retires; a bare id would let
+            // a late handler retire a registration that is no longer its own.
             let token = CancellationToken::new();
-            inner.track_inbound(id, token.clone());
+            let ticket = match inner.track_inbound(id, token.clone()) {
+                Ok(ticket) => ticket,
+                Err(refusal) => {
+                    tracing::warn!(target: "assistant", id, code = refusal.code(), "bridge: inbound request refused");
+                    return fail(
+                        inner,
+                        id,
+                        refusal.code(),
+                        match refusal {
+                            InboundRefusal::DuplicateId => {
+                                "an inbound request with this id is still in flight"
+                            }
+                            InboundRefusal::TooMany => {
+                                "too many inbound requests are in flight on this connection"
+                            }
+                        },
+                    );
+                }
+            };
             let inner = inner.clone();
             // Spawned rather than awaited: §6 requires the reader to keep
             // draining, and a provider call can run for minutes. Serving it
@@ -1068,8 +1596,9 @@ fn route(inner: &Arc<Inner>, req: Req) {
                     }
                     () = serve_provider_fetch(&inner, &gateway, id, req.payload) => {}
                 }
-                inner.finish_inbound(id);
+                inner.finish_inbound(id, ticket);
             });
+            Ok(())
         }
         other => fail(
             inner,
@@ -1153,8 +1682,10 @@ async fn serve_provider_fetch(
         }
     };
 
+    // On the BODY lane: this `end` terminates the chunks above it and must never
+    // be written before one of them.
     let _ = inner
-        .send(&Envelope::End(End {
+        .send_after_body(&Envelope::End(End {
             id,
             ok: error.is_none(),
             error,
@@ -1162,7 +1693,7 @@ async fn serve_provider_fetch(
         .await;
 }
 
-fn fail(inner: &Arc<Inner>, id: u64, code: &str, message: &str) {
+fn fail(inner: &Arc<Inner>, id: u64, code: &str, message: &str) -> Result<(), BridgeError> {
     inner.try_send(&Envelope::Res(Res {
         id,
         ok: false,
@@ -1171,7 +1702,7 @@ fn fail(inner: &Arc<Inner>, id: u64, code: &str, message: &str) {
             code: code.to_string(),
             message: message.to_string(),
         }),
-    }));
+    }))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1181,9 +1712,11 @@ fn fail(inner: &Arc<Inner>, id: u64, code: &str, message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
     use onecad_assistant_protocol::{decode_frame, encode_frame};
     use serde_json::json;
     use tokio::io::DuplexStream;
+    use tokio::time::timeout;
 
     /// A scripted peer on the sidecar's end of an in-process duplex.
     ///
@@ -1224,7 +1757,7 @@ mod tests {
         Envelope::Hello(Hello {
             protocol_version: version,
             host_version: "0.1.0".into(),
-            agentkit_contract_version: "test".into(),
+            agentkit_contract_version: SUPPORTED_AGENTKIT_CONTRACTS[0].into(),
             pid: 4242,
             session_nonce: "nonce".into(),
         })
@@ -1279,6 +1812,45 @@ mod tests {
             Some(Envelope::Reject(reject)) => {
                 assert!(
                     reject.reason.contains("unsupported protocol version 2"),
+                    "{reject:?}"
+                );
+            }
+            other => panic!("expected reject, got {other:?}"),
+        }
+        assert!(peer.recv().await.is_none(), "nothing follows a reject");
+    }
+
+    /// §2: the contract version gates the DTOs the same way `protocolVersion`
+    /// gates the framing, and both are settled before any other frame.
+    ///
+    /// It was advertised and then ignored, so a sidecar built against DTOs this
+    /// host does not understand could activate a connection and fail later, one
+    /// request at a time, in a way no caller could distinguish from a real error.
+    #[tokio::test]
+    async fn handshake_rejects_an_unsupported_agentkit_contract() {
+        let (host_io, peer_io) = tokio::io::duplex(64 * 1024);
+        let mut peer = ScriptedPeer {
+            io: peer_io,
+            buf: BytesMut::new(),
+        };
+        peer.send(&Envelope::Hello(Hello {
+            protocol_version: PROTOCOL_VERSION,
+            host_version: "0.1.0".into(),
+            agentkit_contract_version: "0.4.0".into(),
+            pid: 4242,
+            session_nonce: "nonce".into(),
+        }))
+        .await;
+        let (rx, tx) = tokio::io::split(host_io);
+        let err = AssistantBridge::connect(rx, tx, BridgeOptions::default())
+            .await
+            .expect_err("an unservable contract must be refused");
+        assert!(matches!(err, BridgeError::Handshake(_)), "{err}");
+
+        match peer.recv().await {
+            Some(Envelope::Reject(reject)) => {
+                assert!(
+                    reject.reason.contains("AgentKit contract version 0.4.0"),
                     "{reject:?}"
                 );
             }
@@ -1358,9 +1930,15 @@ mod tests {
         }
     }
 
+    /// §2a: a wrong-parity inbound `req` is FATAL, not answered.
+    ///
+    /// This used to be a refusal, and the TypeScript peer has always torn down.
+    /// The two behaviours are not both defensible: an even id here is one this
+    /// host may itself allocate, so a reply to it can be mistaken for the answer
+    /// to a request this host is waiting on.
     #[tokio::test]
-    async fn an_inbound_request_with_a_host_allocated_id_is_refused() {
-        let (_bridge, mut peer) = connected(BridgeOptions::default()).await;
+    async fn an_inbound_request_with_a_host_allocated_id_is_fatal() {
+        let (bridge, mut peer) = connected(BridgeOptions::default()).await;
         peer.send(&Envelope::Req(Req {
             id: 2, // even: the host's own id space (§3)
             principal: Principal::Host,
@@ -1368,13 +1946,12 @@ mod tests {
             payload: Value::Null,
         }))
         .await;
-        match peer.recv().await {
-            Some(Envelope::Res(res)) => {
-                assert!(!res.ok);
-                assert_eq!(res.error.expect("error body").code, "bad_request");
-            }
-            other => panic!("expected a refusing res, got {other:?}"),
-        }
+        bridge.closed().await;
+        assert!(bridge.is_closed());
+        assert!(
+            peer.recv().await.is_none(),
+            "a diverged allocator gets no reply at all"
+        );
     }
 
     #[tokio::test]
@@ -1675,6 +2252,635 @@ mod tests {
             .await
             .expect_err("a closed bridge refuses new work");
         assert!(matches!(err, BridgeError::Closed(_)), "{err}");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // §2a: the shared adverse-wire fixture corpus
+    // ─────────────────────────────────────────────────────────────────────
+    //
+    // The cases live in `docs/assistant/wire-fixtures/` and are executed by BOTH
+    // implementations — this runner and `assistant-host/tests/wireFixtures.test.ts`.
+    // That is the point: F09 was not one bug but two peers that had each decided
+    // something reasonable and different, and no test either of them owned could
+    // have noticed. A fixture the two run against their own real dispatchers is
+    // the only artefact that can.
+    //
+    // Ids in a fixture are symbolic. `self:N` is the Nth id in the RECEIVING
+    // peer's own space (even here, odd in the sidecar) and `peer:N` is the Nth in
+    // the sender's. One corpus therefore describes both directions without a
+    // single hard-coded integer to keep in sync.
+
+    /// The id a `self:N` / `peer:N` token names, seen from this host.
+    fn resolve_token(token: &str) -> u64 {
+        let (space, index) = token
+            .split_once(':')
+            .unwrap_or_else(|| panic!("malformed id token {token:?}"));
+        let index: u64 = index.parse().expect("id token index");
+        match space {
+            // The host allocates EVEN ids; the sidecar the odd ones (§3).
+            "self" => index * 2,
+            "peer" => index * 2 + 1,
+            other => panic!("unknown id space {other:?}"),
+        }
+    }
+
+    /// One fixture frame → the bytes to put on the wire.
+    fn fixture_frame(spec: &Value) -> Vec<u8> {
+        if let Some(raw) = spec.get("json").and_then(Value::as_str) {
+            // A literal: duplicate keys and out-of-range ids cannot be expressed
+            // as structured JSON, so those cases name their bytes exactly.
+            return encode_frame(raw.as_bytes(), &[]).expect("encode literal frame");
+        }
+        let mut object = spec.as_object().expect("fixture frame object").clone();
+        let bin = match object.remove("bin") {
+            Some(Value::String(encoded)) => base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .expect("fixture bin is base64"),
+            _ => Vec::new(),
+        };
+        if let Some(Value::String(token)) = object.get("id").cloned() {
+            object.insert("id".into(), json!(resolve_token(&token)));
+        }
+        // `@inflight` is the corpus's placeholder for "whatever verb this peer
+        // serves with a handler that does not finish". Each side substitutes its
+        // own, because the two do not serve the same verbs (§5).
+        if object.get("verb").and_then(Value::as_str) == Some("@inflight") {
+            object.insert("verb".into(), json!(VERB_PROVIDER_FETCH));
+            object.insert("payload".into(), inflight_payload());
+        }
+        let json = serde_json::to_vec(&Value::Object(object)).expect("fixture json");
+        encode_frame(&json, &bin).expect("encode fixture frame")
+    }
+
+    /// The payload the `@inflight` placeholder carries on this side.
+    fn inflight_payload() -> Value {
+        json!({ "providerId": "p", "method": "GET", "path": "/models", "headers": {} })
+    }
+
+    /// A provider whose endpoint accepts the connection and never answers, so a
+    /// `provider.fetch` stays genuinely in flight for the duplicate-id case.
+    async fn hanging_provider() -> (Arc<ProviderRegistry>, tokio::net::TcpListener) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let port = listener.local_addr().expect("local addr").port();
+        let gateway = crate::assistant::provider_gateway::ProviderGateway::new(
+            vec![crate::assistant::provider_gateway::ProviderConfig {
+                id: "p".into(),
+                base_url: format!("http://127.0.0.1:{port}/v1"),
+                model: "m".into(),
+                api_key: None,
+            }],
+            crate::assistant::provider_gateway::GatewayLimits::default(),
+        )
+        .expect("gateway");
+        let registry = Arc::new(ProviderRegistry::new());
+        registry.install(Some(Arc::new(gateway)));
+        (registry, listener)
+    }
+
+    async fn run_wire_fixture(case: &Value) {
+        let name = case["name"].as_str().expect("fixture name");
+        let setup = case["setup"].as_str().expect("fixture setup");
+        let expect = case["expect"].as_str().expect("fixture expectation");
+
+        let mut options = BridgeOptions::default();
+        let mut listener = None;
+        if setup == "inboundInFlight" {
+            let (registry, socket) = hanging_provider().await;
+            options.provider_registry = registry;
+            listener = Some(socket);
+        }
+        let (bridge, mut peer) = connected(options).await;
+        let bridge = Arc::new(bridge);
+
+        // A task that issues one streaming request and then HOLDS the response,
+        // so the per-request state machine has something to be in a state about.
+        let mut streaming: Option<JoinHandle<()>> = None;
+        match setup {
+            "none" => {}
+            "outboundStream" => {
+                let held = bridge.clone();
+                streaming = Some(tokio::spawn(async move {
+                    let stream = held
+                        .request_stream("agentkit.fetch", Principal::Ui, json!({}))
+                        .await;
+                    // Held, never read: releasing the budget is not what these
+                    // cases are about, and dropping it would send `cancel`.
+                    let _held = stream;
+                    std::future::pending::<()>().await;
+                }));
+                match timeout(Duration::from_secs(2), peer.recv()).await {
+                    Ok(Some(Envelope::Req(req))) => assert_eq!(req.id, 0, "{name}: first host id"),
+                    other => panic!("{name}: expected the host's req, got {other:?}"),
+                }
+            }
+            "inboundInFlight" => {
+                peer.send(&Envelope::Req(Req {
+                    id: resolve_token("peer:0"),
+                    principal: Principal::Host,
+                    verb: "provider.fetch".into(),
+                    payload: inflight_payload(),
+                }))
+                .await;
+                // The gateway connecting is the proof the handler is running.
+                let socket = listener.as_ref().expect("listener");
+                let (held, _) = timeout(Duration::from_secs(5), socket.accept())
+                    .await
+                    .expect("the provider fetch must reach the endpoint")
+                    .expect("accept");
+                std::mem::forget(held); // held open: the request must not settle
+            }
+            other => panic!("{name}: unknown setup {other:?}"),
+        }
+
+        for spec in case["deliver"].as_array().expect("deliver") {
+            peer.io
+                .write_all(&fixture_frame(spec))
+                .await
+                .expect("write fixture frame");
+            peer.io.flush().await.expect("flush");
+        }
+
+        // The liveness probe. A connection that is still open answers it; one
+        // that tore down never will, and that difference is the whole assertion.
+        let probe = resolve_token("peer:9");
+        peer.send(&Envelope::Ping(Ping { id: probe })).await;
+
+        match expect {
+            "close" => {
+                timeout(Duration::from_secs(2), bridge.closed())
+                    .await
+                    .unwrap_or_else(|_| panic!("{name}: the connection must tear down"));
+                while let Ok(Some(frame)) = timeout(Duration::from_secs(1), peer.recv()).await {
+                    assert!(
+                        !matches!(frame, Envelope::Pong(Pong { id }) if id == probe),
+                        "{name}: a torn-down connection must not answer the probe"
+                    );
+                }
+            }
+            "refuse" => {
+                let refusal = &case["refusal"];
+                let want_id = resolve_token(refusal["id"].as_str().expect("refusal id"));
+                let want_code = refusal["code"].as_str().expect("refusal code");
+                let mut refused = false;
+                let mut ponged = false;
+                while !(refused && ponged) {
+                    match timeout(Duration::from_secs(2), peer.recv()).await {
+                        Ok(Some(Envelope::Res(res))) if res.id == want_id && !res.ok => {
+                            assert_eq!(
+                                res.error.expect("error body").code,
+                                want_code,
+                                "{name}: refusal code"
+                            );
+                            refused = true;
+                        }
+                        Ok(Some(Envelope::Pong(Pong { id }))) if id == probe => ponged = true,
+                        Ok(Some(_)) => {}
+                        other => panic!("{name}: expected a refusal and a pong, got {other:?}"),
+                    }
+                }
+                assert!(!bridge.is_closed(), "{name}: a refusal is not a teardown");
+            }
+            "discard" => {
+                loop {
+                    match timeout(Duration::from_secs(2), peer.recv()).await {
+                        Ok(Some(Envelope::Pong(Pong { id }))) if id == probe => break,
+                        Ok(Some(_)) => {}
+                        other => panic!("{name}: the probe must be answered, got {other:?}"),
+                    }
+                }
+                assert!(
+                    !bridge.is_closed(),
+                    "{name}: a discarded frame is not fatal"
+                );
+            }
+            other => panic!("{name}: unknown expectation {other:?}"),
+        }
+
+        if let Some(handle) = streaming {
+            handle.abort();
+        }
+        bridge.close("fixture over");
+    }
+
+    #[tokio::test]
+    async fn every_shared_wire_fixture_produces_the_contracted_outcome() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../docs/assistant/wire-fixtures");
+        let mut paths: Vec<_> = std::fs::read_dir(&dir)
+            .expect("the shared fixture corpus must exist")
+            .map(|entry| entry.expect("dir entry").path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .collect();
+        paths.sort();
+        assert!(
+            paths.len() >= 14,
+            "the corpus lost cases: found {}",
+            paths.len()
+        );
+        for path in paths {
+            let text = std::fs::read_to_string(&path).expect("read fixture");
+            let case: Value = serde_json::from_str(&text).expect("parse fixture");
+            run_wire_fixture(&case).await;
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // §9 budgets and the connection-failure authority
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Wires a bridge whose read and write halves are SEPARATE pipes, so one can
+    /// be broken while the other stays open — the half-open peer F05 is about.
+    async fn connected_split() -> (AssistantBridge, ScriptedPeer, DuplexStream) {
+        let (host_rx, peer_tx) = tokio::io::duplex(64 * 1024);
+        let (host_tx, peer_rx) = tokio::io::duplex(64 * 1024);
+        let mut peer = ScriptedPeer {
+            io: peer_tx,
+            buf: BytesMut::new(),
+        };
+        peer.send(&hello(PROTOCOL_VERSION)).await;
+        let bridge = AssistantBridge::connect(host_rx, host_tx, BridgeOptions::default())
+            .await
+            .expect("handshake");
+        (bridge, peer, peer_rx)
+    }
+
+    /// IO-01. A writer that fails while the reader stays open must still retire
+    /// the whole connection.
+    ///
+    /// The old writer returned quietly and assumed the reader would notice. That
+    /// holds only for a peer that closes both halves: a child keeping stdout open
+    /// with a broken stdin left every pending request waiting forever and the
+    /// supervisor reading `Ready` off a connection that could not carry a frame.
+    #[tokio::test]
+    async fn a_writer_failure_alone_retires_the_connection() {
+        let (bridge, _peer, peer_rx) = connected_split().await;
+        // Only the host's WRITE side is broken. Its read side is still open and
+        // the scripted peer is still holding it.
+        drop(peer_rx);
+
+        let err = bridge
+            .request("shutdown", Principal::Ui, Value::Null)
+            .await
+            .expect_err("a request cannot succeed over a dead writer");
+        assert!(
+            matches!(err, BridgeError::Closed(_) | BridgeError::Timeout { .. }),
+            "{err}"
+        );
+        timeout(Duration::from_secs(2), bridge.closed())
+            .await
+            .expect("the connection must retire when either half fails");
+        assert!(bridge.is_closed());
+        assert_eq!(bridge.inner.in_flight(), (0, 0), "no slot is left pinned");
+    }
+
+    /// IO-02. A control frame that cannot be delivered fails the connection
+    /// explicitly rather than being logged and dropped.
+    ///
+    /// A dropped control frame is not a harmless one: it is the `cancel` that
+    /// stops a runaway producer or the `res` that settles a waiting caller.
+    #[tokio::test]
+    async fn an_undeliverable_control_frame_fails_the_connection() {
+        // A pipe small enough that the writer parks almost at once, and a peer
+        // that never reads what it asked for.
+        let (host_io, peer_io) = tokio::io::duplex(512);
+        let mut peer = ScriptedPeer {
+            io: peer_io,
+            buf: BytesMut::new(),
+        };
+        peer.send(&hello(PROTOCOL_VERSION)).await;
+        let (rx, tx) = tokio::io::split(host_io);
+        let bridge = AssistantBridge::connect(rx, tx, BridgeOptions::default())
+            .await
+            .expect("handshake");
+
+        // Every ping demands a pong. The peer never drains, so the reserved
+        // control queue fills and the next pong has nowhere to go.
+        //
+        // Spawned, not looped inline: once the host retires, the peer's own
+        // writes block against a buffer nobody is reading, and the assertion
+        // below is about the host's behaviour rather than the flood's.
+        let flood = tokio::spawn(async move {
+            for id in 0..5_000u64 {
+                peer.send(&Envelope::Ping(Ping { id: id * 2 + 1 })).await;
+            }
+        });
+        let outcome = timeout(Duration::from_secs(10), bridge.closed()).await;
+        flood.abort();
+        outcome.expect("an undeliverable control frame must fail the connection");
+    }
+
+    /// PRO-01. A second head is fatal, and the ORIGINAL consumer is told.
+    ///
+    /// Tearing the connection down is only half the requirement: the reader that
+    /// already owns the body must settle, or the caller waits forever on a
+    /// connection that no longer exists. The fixture corpus asserts the
+    /// teardown; this asserts what the consumer sees.
+    #[tokio::test]
+    async fn a_second_head_settles_the_original_consumer() {
+        let (bridge, mut peer) = connected(BridgeOptions::default()).await;
+        let request = bridge.request_stream("agentkit.fetch", Principal::Ui, json!({}));
+        let serve = async {
+            let Some(Envelope::Req(req)) = peer.recv().await else {
+                panic!("expected a req");
+            };
+            for _ in 0..2 {
+                peer.send(&Envelope::Res(Res {
+                    id: req.id,
+                    ok: true,
+                    payload: Some(json!({ "status": 200 })),
+                    error: None,
+                }))
+                .await;
+            }
+        };
+        let (stream, ()) = tokio::join!(request, serve);
+        let mut stream = stream.expect("the first head is delivered");
+
+        match timeout(Duration::from_secs(2), stream.next()).await {
+            Ok(Some(StreamEvent::End(Some(error)))) => {
+                assert_eq!(
+                    error.code, "bridge_closed",
+                    "the original body is failed, never abandoned"
+                );
+            }
+            other => panic!("the original consumer must settle, got {other:?}"),
+        }
+        assert!(bridge.is_closed());
+    }
+
+    /// §2: "a streaming request is answered by a `res` carrying the head, then
+    /// zero or more `chunk`s, then exactly one `end`" — in that order, always.
+    ///
+    /// The writer drains control before body so a `cancel` cannot queue behind a
+    /// flood. `end` used to ride the control lane, so for any body that finished
+    /// quickly the terminator overtook its own chunks and the wire carried
+    /// `res → end → chunk`. It was timing-dependent, which is the worst kind of
+    /// wrong: a fixture with an extra EOF round trip, or a sleep between events,
+    /// hid it completely.
+    ///
+    /// **This test contains no sleep.** The provider answers with
+    /// `content-length` and then HOLDS the socket open, so the body completes
+    /// immediately with no EOF to slow it down — the exact shape that exposed
+    /// the inversion.
+    #[tokio::test]
+    async fn a_stream_end_never_overtakes_its_own_chunks() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let port = listener.local_addr().expect("addr").port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut scratch = [0u8; 2048];
+            let _ = socket.read(&mut scratch).await;
+            let body = r#"{"data":[{"id":"m"}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.expect("write");
+            socket.flush().await.expect("flush");
+            // Held open: the client must finish on `content-length` alone.
+            std::future::pending::<()>().await;
+        });
+
+        let gateway = crate::assistant::provider_gateway::ProviderGateway::new(
+            vec![crate::assistant::provider_gateway::ProviderConfig {
+                id: "p".into(),
+                base_url: format!("http://127.0.0.1:{port}/v1"),
+                model: "m".into(),
+                api_key: None,
+            }],
+            crate::assistant::provider_gateway::GatewayLimits::default(),
+        )
+        .expect("gateway");
+        let registry = Arc::new(ProviderRegistry::new());
+        registry.install(Some(Arc::new(gateway)));
+        let options = BridgeOptions {
+            provider_registry: registry,
+            ..BridgeOptions::default()
+        };
+        let (bridge, mut peer) = connected(options).await;
+
+        peer.send(&Envelope::Req(Req {
+            id: 1,
+            principal: Principal::Host,
+            verb: "provider.fetch".into(),
+            payload: inflight_payload(),
+        }))
+        .await;
+
+        // The frames, in the order they reached the wire.
+        let mut order: Vec<&'static str> = Vec::new();
+        let mut seqs: Vec<u64> = Vec::new();
+        loop {
+            match timeout(Duration::from_secs(10), peer.recv()).await {
+                Ok(Some(Envelope::Res(res))) => {
+                    assert!(res.ok, "the provider answered 200: {res:?}");
+                    order.push("res");
+                }
+                Ok(Some(Envelope::Chunk(chunk))) => {
+                    order.push("chunk");
+                    seqs.push(chunk.seq);
+                }
+                Ok(Some(Envelope::End(end))) => {
+                    assert!(end.ok, "{end:?}");
+                    order.push("end");
+                    break;
+                }
+                Ok(Some(_)) => {}
+                other => panic!("expected the stream's frames, got {other:?}"),
+            }
+        }
+        assert_eq!(order.first().copied(), Some("res"), "the head comes first");
+        assert_eq!(order.last().copied(), Some("end"), "and the end comes last");
+        assert!(
+            order[1..order.len() - 1].iter().all(|tag| *tag == "chunk"),
+            "nothing may come between the head and the terminator: {order:?}"
+        );
+        assert!(
+            !seqs.is_empty(),
+            "the provider sent a body, so at least one chunk must precede the end"
+        );
+        assert_eq!(
+            seqs,
+            (0..seqs.len() as u64).collect::<Vec<_>>(),
+            "chunk seqs are contiguous from zero"
+        );
+
+        server.abort();
+        bridge.close("test over");
+    }
+
+    /// F05. An over-cap request this host generated itself is refused at its own
+    /// call site, not by poisoning a healthy connection.
+    ///
+    /// The writer now fails the whole connection on an encode error, which makes
+    /// an avoidable one expensive: without this check a caller handing over two
+    /// megabytes of payload would take down a child that was working perfectly.
+    #[tokio::test]
+    async fn an_over_cap_request_is_refused_without_touching_the_connection() {
+        let (bridge, _peer) = connected(BridgeOptions::default()).await;
+        let payload = json!({ "blob": "x".repeat(2 * 1024 * 1024) });
+        let err = bridge
+            .request("agentkit.fetch", Principal::Ui, payload)
+            .await
+            .expect_err("an over-cap envelope cannot be sent");
+        assert!(
+            matches!(
+                err,
+                BridgeError::Protocol(ProtocolError::TooLarge { what: "json", .. })
+            ),
+            "{err}"
+        );
+        assert!(!bridge.is_closed(), "the connection is untouched");
+        assert_eq!(bridge.inner.in_flight(), (0, 0), "and so is the table");
+    }
+
+    /// IO-03. A head that never arrives expires and gives its slot back, while
+    /// the connection itself stays healthy — a wedged route is not a wedged
+    /// process, and the supervisor's ping would have kept saying so.
+    #[tokio::test]
+    async fn a_head_that_never_arrives_expires_and_reclaims_its_slot() {
+        let options = BridgeOptions {
+            request_head_deadline: Duration::from_millis(50),
+            ..BridgeOptions::default()
+        };
+        let (bridge, mut peer) = connected(options).await;
+
+        let err = bridge
+            .request("shutdown", Principal::Ui, Value::Null)
+            .await
+            .expect_err("an unanswered request must expire");
+        assert!(matches!(err, BridgeError::Timeout { .. }), "{err}");
+        assert_eq!(
+            bridge.inner.in_flight(),
+            (0, 0),
+            "the correlation slot is reclaimed without waiting for the peer"
+        );
+        assert!(
+            !bridge.is_closed(),
+            "one dead route is not a dead connection"
+        );
+
+        // The peer is told, and the connection still answers.
+        let mut cancelled = false;
+        let mut ponged = false;
+        peer.send(&Envelope::Ping(Ping { id: 9 })).await;
+        while !(cancelled && ponged) {
+            match timeout(Duration::from_secs(2), peer.recv()).await {
+                Ok(Some(Envelope::Cancel(Cancel { id: 0 }))) => cancelled = true,
+                Ok(Some(Envelope::Pong(Pong { id: 9 }))) => ponged = true,
+                Ok(Some(_)) => {}
+                other => panic!("expected cancel and pong, got {other:?}"),
+            }
+        }
+    }
+
+    /// §2a. Inbound cleanup is bound to the ticket issued at registration, never
+    /// to the bare integer.
+    ///
+    /// This is the ownership transfer that made the Rust side's duplicate-id
+    /// handling unsafe: the displaced handler's unconditional `finish_inbound`
+    /// removed its REPLACEMENT's token, after which a `cancel` for that id
+    /// reached nothing at all.
+    #[tokio::test]
+    async fn inbound_cleanup_is_bound_to_its_ticket() {
+        let (bridge, _peer) = connected(BridgeOptions::default()).await;
+        let inner = &bridge.inner;
+        let first = CancellationToken::new();
+        let ticket = inner.track_inbound(3, first.clone()).expect("registers");
+
+        // While it is in flight, the id is refused and the original is untouched.
+        assert_eq!(
+            inner.track_inbound(3, CancellationToken::new()),
+            Err(InboundRefusal::DuplicateId)
+        );
+        assert_eq!(inner.in_flight().1, 1);
+        assert!(
+            !first.is_cancelled(),
+            "the in-flight handler is not disturbed"
+        );
+
+        // A stale ticket retires nothing.
+        inner.finish_inbound(3, ticket + 1000);
+        assert_eq!(inner.in_flight().1, 1);
+
+        inner.finish_inbound(3, ticket);
+        assert_eq!(inner.in_flight().1, 0);
+
+        // And a LATE retirement by the first owner cannot remove the second.
+        let second = inner
+            .track_inbound(3, CancellationToken::new())
+            .expect("re-registers");
+        inner.finish_inbound(3, ticket);
+        assert_eq!(inner.in_flight().1, 1, "the replacement keeps its slot");
+        inner.finish_inbound(3, second);
+        assert_eq!(inner.in_flight().1, 0);
+    }
+
+    /// MEM-02. A flood of tiny chunks trips the ITEM bound, which byte
+    /// accounting alone cannot see.
+    #[tokio::test]
+    async fn a_flood_of_tiny_chunks_overflows_on_the_item_bound() {
+        let options = BridgeOptions {
+            max_stream_buffer_bytes: 8 * 1024 * 1024,
+            max_stream_buffer_items: 4,
+            ..BridgeOptions::default()
+        };
+        let (bridge, mut peer) = connected(options).await;
+        let request = async {
+            bridge
+                .request_stream("agentkit.fetch", Principal::Ui, json!({}))
+                .await
+        };
+        let serve = async {
+            match peer.recv().await {
+                Some(Envelope::Req(req)) => {
+                    peer.send(&Envelope::Res(Res {
+                        id: req.id,
+                        ok: true,
+                        payload: Some(json!({ "status": 200 })),
+                        error: None,
+                    }))
+                    .await;
+                    // Five one-byte chunks: 5 bytes against an 8 MiB byte budget,
+                    // and one chunk past a four-item one.
+                    for seq in 0..5u64 {
+                        peer.send_with_bin(&Envelope::Chunk(Chunk { id: req.id, seq }), &[7])
+                            .await;
+                    }
+                    req.id
+                }
+                other => panic!("expected a req, got {other:?}"),
+            }
+        };
+        let (stream, id) = tokio::join!(request, serve);
+        let mut stream = stream.expect("head");
+        let mut delivered = 0usize;
+        let error = loop {
+            match stream.next().await {
+                Some(StreamEvent::Chunk(bytes)) => delivered += bytes.len(),
+                Some(StreamEvent::End(error)) => break error,
+                None => panic!("the stream must terminate"),
+            }
+        };
+        assert_eq!(
+            error.expect("overflow is loud, never a silent drop").code,
+            "stream_overflow"
+        );
+        assert!(delivered <= 4, "at most the item budget was ever queued");
+        // §2: the producer is told to stop.
+        loop {
+            match timeout(Duration::from_secs(2), peer.recv()).await {
+                Ok(Some(Envelope::Cancel(cancel))) if cancel.id == id => break,
+                Ok(Some(_)) => {}
+                other => panic!("expected a cancel, got {other:?}"),
+            }
+        }
     }
 
     #[tokio::test]

@@ -122,6 +122,11 @@ export function encodeFrame(envelope: Envelope, bin: Uint8Array = EMPTY): Uint8A
   if (envelope.t !== "chunk" && bin.byteLength !== 0) {
     throw new FrameError(`bin tail is only valid on chunk, got ${envelope.t}`);
   }
+  // §2a: a chunk with no tail is fatal at the receiver, so producing one here
+  // would be this process inventing a frame the peer must tear down over.
+  if (envelope.t === "chunk" && bin.byteLength === 0) {
+    throw new FrameError(`chunk ${envelope.seq} on request ${envelope.id} has no bin tail`);
+  }
   const json = encoder.encode(JSON.stringify(envelope));
   if (json.byteLength > MAX_JSON_LEN) {
     throw new FrameError(`json envelope of ${json.byteLength} exceeds MAX_JSON_LEN`);
@@ -191,8 +196,15 @@ export class FrameDecoder {
       // Copied, not sub-viewed: the carry buffer is reallocated on the next
       // push, and a chunk handed downstream outlives this call.
       const bin = binLen === 0 ? EMPTY : this.carry.slice(binStart, binStart + binLen);
+      // §2a, both directions of the same rule: the tail belongs to `chunk` and
+      // to nothing else, and a `chunk` that carries none is not a chunk. An
+      // empty one costs a queue slot and a wakeup while charging nothing against
+      // any byte bound (§9).
       if (envelope.t !== "chunk" && binLen !== 0) {
         throw new FrameError(`bin tail on a ${envelope.t} envelope`);
+      }
+      if (envelope.t === "chunk" && binLen === 0) {
+        throw new FrameError(`chunk ${envelope.seq} on request ${envelope.id} has no bin tail`);
       }
       frames.push({ envelope, bin });
       offset += total;
@@ -221,11 +233,74 @@ function decodeJson(bytes: Uint8Array): unknown {
   } catch {
     throw new FrameError("json payload is not valid UTF-8");
   }
+  let value: unknown;
   try {
-    return JSON.parse(text) as unknown;
+    value = JSON.parse(text) as unknown;
   } catch (err) {
     throw new FrameError(`json payload is not parseable: ${(err as Error).message}`);
   }
+  const duplicate = findDuplicateEnvelopeKey(text);
+  if (duplicate !== null) {
+    throw new FrameError(`json envelope repeats the key '${duplicate}'`);
+  }
+  return value;
+}
+
+/**
+ * §2a's duplicate-key policy, enforced on the ENVELOPE's own object only.
+ *
+ * `JSON.parse` silently keeps the last of two identical keys; Rust's serde
+ * refuses the object outright. One of those had to win, and refusing does:
+ * a frame whose meaning depends on which parser read it is a frame neither
+ * peer can reason about. The scan stops at depth 1 because `payload` and any
+ * verb-specific subtree are opaque to this layer — both platforms resolve a
+ * duplicate there as last-wins, and that is the documented half of the policy.
+ *
+ * Cost is one pass over at most `MAX_JSON_LEN` bytes of already-validated JSON,
+ * so it cannot loop, throw, or outrun the frame budget.
+ */
+function findDuplicateEnvelopeKey(text: string): string | null {
+  const seen = new Set<string>();
+  let depth = 0;
+  let i = 0;
+  let expectKey = false;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '"') {
+      const start = i;
+      i += 1;
+      while (i < text.length) {
+        if (text[i] === "\\") {
+          i += 2;
+          continue;
+        }
+        if (text[i] === '"') break;
+        i += 1;
+      }
+      const literal = text.slice(start, i + 1);
+      i += 1;
+      // A string is a KEY when it is followed by a colon at depth 1.
+      let j = i;
+      while (j < text.length && /\s/.test(text[j]!)) j += 1;
+      if (depth === 1 && expectKey && text[j] === ":") {
+        const key = JSON.parse(literal) as string;
+        if (seen.has(key)) return key;
+        seen.add(key);
+      }
+      continue;
+    }
+    if (ch === "{" || ch === "[") {
+      depth += 1;
+      expectKey = ch === "{";
+    } else if (ch === "}" || ch === "]") {
+      depth -= 1;
+      expectKey = false;
+    } else if (ch === ",") {
+      expectKey = depth === 1;
+    }
+    i += 1;
+  }
+  return null;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

@@ -130,3 +130,43 @@ describe("provider.fetch gateway", () => {
     expect(response.body).toBeNull();
   });
 });
+
+describe("provider.fetch cancellation", () => {
+  test("a signal carried only by a Request object is observed", async () => {
+    // CAN-04. The gateway used to forward `init?.signal`, so a caller that built
+    // a `Request` with its own signal and passed no `init` — which is how
+    // AgentKit's client and most `fetch` wrappers cancel — had its cancellation
+    // silently dropped. The constructed `Request` is the one object that carries
+    // every form of it.
+    const { host, fetchImpl } = await gateway();
+    const aborter = new AbortController();
+    const request = new Request(`${CONFIG.baseUrl}/chat/completions`, {
+      method: "POST",
+      body: "{}",
+      signal: aborter.signal,
+    });
+
+    const answer = fetchImpl(request);
+    const sent = await host.waitFor(1, (f) => f.envelope.t === "req");
+    expect(sent.envelope).toMatchObject({ t: "req", verb: "provider.fetch" });
+
+    aborter.abort(new Error("user cancelled"));
+    await expect(answer).rejects.toThrow();
+    // The peer is told, which is what makes the abort reach the upstream call.
+    await host.waitFor(1, (f) => f.envelope.t === "cancel");
+  });
+
+  test("an already-aborted request is never dispatched", async () => {
+    const { host, fetchImpl } = await gateway();
+    const aborter = new AbortController();
+    aborter.abort(new Error("already gone"));
+    const request = new Request(`${CONFIG.baseUrl}/chat/completions`, {
+      method: "POST",
+      body: "{}",
+      signal: aborter.signal,
+    });
+
+    await expect(fetchImpl(request)).rejects.toThrow("already gone");
+    expect(host.received.some((f) => f.envelope.t === "req")).toBe(false);
+  });
+});

@@ -13,9 +13,19 @@
  *  6. `TurnRunner` — the durable worker over the run loop.
  *  7. `ExecutorRegistry` + `ChatTurnExecutor`, via `createDispatchingWorker`.
  *  8. `recoverOnBoot` — clean up after the last crash, BEFORE claiming work.
- *  9. `taskRunner.startWorker` — start claiming.
+ *  9. The execution gate over `taskRunner.startWorker` — built, NOT opened.
  * 10. `RestHandlerDeps` — what `createRestHandler` needs. `main.ts` holds the
  *     resulting function in memory and feeds it frames.
+ *
+ * ## Composition is not activation
+ *
+ * Step 9 is where the example calls `startWorker`. This one does not: building
+ * the object graph and starting to claim provider work are separate acts, and
+ * only the first one belongs to a process that has not yet spoken to its host.
+ * A worker started here would claim a recovered turn while the bridge peer did
+ * not exist, so the provider factory would have no open bridge to route through
+ * and the turn would fail as though the model had. Claiming starts when
+ * `config.install` lands — see `./configuration.ts`.
  *
  * ## What is deliberately missing
  *
@@ -65,6 +75,7 @@ import {
 import { SingleProcessTaskRunner } from "agentkit/runner-local";
 import type { RestHandlerDeps } from "agentkit/transport-http";
 import { NoopProposalApplier } from "./noopApplier.js";
+import { Configuration, createExecutionGate } from "./configuration.js";
 import { createOneCadToolSetContributor } from "../tools/index.js";
 
 /** Reported to the host in `hello`, and to a client by `GET /v1/version`. */
@@ -108,6 +119,11 @@ export interface App {
   taskService: TaskService;
   proposals: ProposalService;
   taskRunner: SingleProcessTaskRunner;
+  /**
+   * The provider projection this process has been given, and the execution gate
+   * it opens. `main.ts` routes `config.install` here; nothing else may write it.
+   */
+  configuration: Configuration;
   /** What `createRestHandler` needs. `main.ts` never turns it into a server. */
   deps: RestHandlerDeps;
   /** Stops the worker, disposes contributors, closes the DB. Idempotent. */
@@ -170,11 +186,20 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
   // routine event here rather than an exceptional one.
   await recoverOnBoot({ taskRunner, proposals, logger });
 
-  // 9. Start claiming.
-  const handle = await taskRunner.startWorker(
-    createDispatchingWorker(registry, { store, clock, logger, taskService }),
-    { concurrency: WORKER_CONCURRENCY, ownerId: WORKER_OWNER_ID },
-  );
+  // 9. The gate over claiming — built closed. `recoverOnBoot` above ran with no
+  // worker, so anything it recovered is parked and re-dispatched the moment the
+  // gate opens, which is exactly the boot order `SingleProcessTaskRunner`
+  // documents. Nothing is claimed until a `config.install` says what to claim it
+  // for.
+  const gate = createExecutionGate({
+    start: () =>
+      taskRunner.startWorker(
+        createDispatchingWorker(registry, { store, clock, logger, taskService }),
+        { concurrency: WORKER_CONCURRENCY, ownerId: WORKER_OWNER_ID },
+      ),
+    logger,
+  });
+  const configuration = new Configuration({ store, gate, logger });
 
   // 10. What the transport needs.
   //
@@ -211,9 +236,15 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
     taskService,
     proposals,
     taskRunner,
+    configuration,
     deps,
     async stop(): Promise<void> {
-      await handle.stop();
+      // Shutdown DOES wait for in-flight work to settle — unlike a gate close,
+      // which must not park a settings edit behind a completion. The host asked
+      // this process to finish and exit, and a half-written turn is the thing
+      // `recoverOnBoot` would otherwise have to clean up next boot.
+      gate.stop();
+      await gate.settle();
       await turnRunner.disposeContributors();
       store.close();
     },

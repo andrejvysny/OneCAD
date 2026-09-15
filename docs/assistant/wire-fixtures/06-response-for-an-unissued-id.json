@@ -1,0 +1,14 @@
+{
+  "name": "response-for-an-unissued-id",
+  "rule": "2a: an id in the receiver's own space that it has never allocated is a peer inventing correlation. Fatal.",
+  "setup": "none",
+  "deliver": [
+    {
+      "t": "res",
+      "id": "self:8",
+      "ok": true,
+      "payload": {}
+    }
+  ],
+  "expect": "close"
+}

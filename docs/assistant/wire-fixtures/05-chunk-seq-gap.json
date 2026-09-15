@@ -1,0 +1,28 @@
+{
+  "name": "chunk-seq-gap",
+  "rule": "2: seq starts at 0 and increases by one per chunk of that request. A gap is fatal.",
+  "setup": "outboundStream",
+  "deliver": [
+    {
+      "t": "res",
+      "id": "self:0",
+      "ok": true,
+      "payload": {
+        "status": 200
+      }
+    },
+    {
+      "t": "chunk",
+      "id": "self:0",
+      "seq": 0,
+      "bin": "aGk="
+    },
+    {
+      "t": "chunk",
+      "id": "self:0",
+      "seq": 2,
+      "bin": "aGk="
+    }
+  ],
+  "expect": "close"
+}

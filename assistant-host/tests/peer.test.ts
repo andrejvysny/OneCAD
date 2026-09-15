@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { BridgePeer, BridgeRequestError, type VerbRoute } from "../src/bridge/peer.js";
+import {
+  BridgePeer,
+  BridgeRequestError,
+  ChunkSink,
+  MAX_ACTIVE_OUTBOUND,
+  type VerbRoute,
+} from "../src/bridge/peer.js";
 import { encodeFrame } from "../src/bridge/frame.js";
 import { HostMock, Pipe, bytes, text } from "./harness.js";
 
@@ -419,5 +425,110 @@ describe("teardown", () => {
     toSidecar.close();
     await closed;
     expect(peer.isOpen).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §2a per-request states, and the §9 budgets
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The shared corpus in `docs/assistant/wire-fixtures/` pins the ACCEPT/REFUSE/
+// CLOSE outcome of each adverse frame on both sides. These pin the consequences
+// the corpus cannot observe from outside: which promise settles, whose
+// registration survives, and what the budget actually holds.
+
+describe("per-request states", () => {
+  test("a second response head fails the ORIGINAL reader rather than stranding it", async () => {
+    const { peer, host, toSidecar } = await wire();
+    const answer = peer.requestStream("provider.fetch", {});
+    const req = await host.waitFor(1, (f) => f.envelope.t === "req");
+    expect(req.envelope.t).toBe("req");
+    await host.send({ t: "res", id: 1, ok: true, payload: { status: 200 } });
+    const first = await answer;
+    const read = first.body.getReader().read();
+
+    // The defect this replaces built a SECOND sink, overwrote the entry and
+    // resolved an already-resolved promise; the read below never settled while
+    // the chunks flowed to a sink nobody was reading.
+    const closed = peer.waitForClose();
+    await host.send({ t: "res", id: 1, ok: true, payload: { status: 200 } });
+    await closed;
+    await expect(read).rejects.toThrow();
+    void toSidecar;
+  });
+
+  test("a failed response head after a successful one also fails the original reader", async () => {
+    const { peer, host } = await wire();
+    const answer = peer.requestStream("provider.fetch", {});
+    await host.waitFor(1, (f) => f.envelope.t === "req");
+    await host.send({ t: "res", id: 1, ok: true, payload: { status: 200 } });
+    const first = await answer;
+    const read = first.body.getReader().read();
+    const closed = peer.waitForClose();
+    await host.send({ t: "res", id: 1, ok: false, error: { code: "late", message: "no" } });
+    await closed;
+    await expect(read).rejects.toThrow();
+  });
+
+  test("a duplicate inbound id is refused without disturbing the request in flight", async () => {
+    let seen: AbortSignal | undefined;
+    const holdRoute: VerbRoute = {
+      principals: ["ui"],
+      handle(request) {
+        seen = request.signal;
+        return new Promise(() => {});
+      },
+    };
+    const { peer, host } = await wire({ "test.hold": holdRoute });
+    await host.send({ t: "req", id: 0, principal: "ui", verb: "test.hold", payload: {} });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(seen).toBeDefined();
+
+    await host.send({ t: "req", id: 0, principal: "ui", verb: "test.hold", payload: {} });
+    const refusal = await host.waitFor(
+      0,
+      (f) => f.envelope.t === "res" && f.envelope.ok === false,
+    );
+    expect(refusal.envelope).toMatchObject({ t: "res", ok: false });
+    expect(peer.isOpen).toBe(true);
+
+    // The original registration still owns the id: a `cancel` reaches IT, which
+    // is the property a replaced token silently destroys.
+    expect(seen?.aborted).toBe(false);
+    await host.send({ t: "cancel", id: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(seen?.aborted).toBe(true);
+  });
+});
+
+describe("§9 budgets", () => {
+  test("a flood of tiny chunks trips the item bound that byte accounting cannot see", async () => {
+    const sink = new ChunkSink(8 * 1024 * 1024, 4);
+    for (let i = 0; i < 4; i += 1) expect(sink.push(new Uint8Array([1]))).toBe(true);
+    expect(sink.held).toEqual({ bytes: 4, items: 4 });
+    // Five bytes against an eight-megabyte budget, and one chunk too many.
+    expect(sink.push(new Uint8Array([1]))).toBe(false);
+    sink.finish();
+    await sink.readable.cancel();
+  });
+
+  test("the byte bound still applies on its own axis", async () => {
+    const sink = new ChunkSink(8, 4096);
+    expect(sink.push(new Uint8Array(8))).toBe(true);
+    expect(sink.push(new Uint8Array(1))).toBe(false);
+    sink.finish();
+    await sink.readable.cancel();
+  });
+
+  test("a peer at its outbound request bound refuses rather than growing the table", async () => {
+    const { peer } = await wire();
+    const pending: Promise<unknown>[] = [];
+    for (let i = 0; i < MAX_ACTIVE_OUTBOUND; i += 1) {
+      pending.push(peer.request("provider.fetch", {}).catch(() => undefined));
+    }
+    await expect(peer.request("provider.fetch", {})).rejects.toMatchObject({
+      code: "too_many_requests",
+    });
+    void pending;
   });
 });

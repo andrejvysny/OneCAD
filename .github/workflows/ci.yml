@@ -74,6 +74,50 @@ jobs:
           scripts/tests/verify-modeling-coverage.test.sh
           node scripts/verify-modeling-contracts.mjs
 
+  # The assistant foundation, on the cheapest runner that can prove it.
+  #
+  # This lane exists because every other assistant gate is expensive: the Rust
+  # app crate needs GTK/WebKit and a staged sidecar, and the packaged lanes need
+  # macOS. None of that is required to catch the things that actually break here
+  # — a clean-checkout install, a wire-contract divergence between the two peers,
+  # or a broken host composition.
+  #
+  # `onecad-assistant-protocol` is deliberately a PURE crate: no tauri, no
+  # onecad-core, no async runtime in its default build. That is what lets the
+  # OCAK1 conformance suite run on ubuntu-latest in seconds, with no system
+  # libraries and no staged binaries, and it is why the crate was split out
+  # rather than living inside the app crate.
+  #
+  # BUILD-01 from the hardening review is this job's first step: the checkout is
+  # clean, so if the AgentKit bootstrap ordering regresses, this fails here in a
+  # minute instead of in a 60-minute e2e lane.
+  assistant:
+    name: assistant
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Bootstrap AgentKit
+        run: scripts/bootstrap-agentkit.sh
+      - name: Install application dependencies
+        run: bun install --frozen-lockfile
+      - name: Typecheck the assistant host package
+        run: bunx tsc --noEmit -p assistant-host/tsconfig.json
+      - name: Assistant host unit tests
+        working-directory: assistant-host
+        run: bun install --frozen-lockfile && bun test
+      - name: OCAK1 protocol conformance
+        working-directory: src-tauri
+        # Both feature configurations: the codec is feature-gated, and a pure
+        # build that stops compiling is a regression in the crate's whole reason
+        # for existing.
+        run: |
+          cargo test -p onecad-assistant-protocol --all-features
+          cargo test -p onecad-assistant-protocol
+      - name: Assistant frontend tests
+        run: bunx vitest run src/modules/assistant src/stores/settingsStore.test.ts
+
   # The tauri-agent harness (tools/tauri-agent) — the MCP server that drives the
   # real app as a user. macOS-only by design, and macOS here is not incidental:
   # the native input helper is Swift compiled with swiftc against Cocoa/Carbon,
