@@ -54,6 +54,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
+      - name: Bootstrap AgentKit
+        # MUST precede every `bun install`. The root package.json depends on
+        # `agentkit: file:.agentkit-src/packages/agentkit`, and that prefix is
+        # GENERATED and gitignored — a clean checkout has nothing there, so the
+        # install fails outright. Temporary: it exists only until AgentKit cuts a
+        # release tag with a committed dist, at which point the dependency points
+        # at the tag and this step and its script are deleted.
+        run: scripts/bootstrap-agentkit.sh
       - name: Install
         run: bun install --frozen-lockfile
       - name: Build
@@ -94,6 +102,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
+      - name: Bootstrap AgentKit
+        # MUST precede every `bun install`. The root package.json depends on
+        # `agentkit: file:.agentkit-src/packages/agentkit`, and that prefix is
+        # GENERATED and gitignored — a clean checkout has nothing there, so the
+        # install fails outright. Temporary: it exists only until AgentKit cuts a
+        # release tag with a committed dist, at which point the dependency points
+        # at the tag and this step and its script are deleted.
+        run: scripts/bootstrap-agentkit.sh
       - name: Install application dependencies
         run: bun install --frozen-lockfile
       - name: Typecheck the harness package
@@ -465,6 +481,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
+      - name: Bootstrap AgentKit
+        # MUST precede every `bun install`. The root package.json depends on
+        # `agentkit: file:.agentkit-src/packages/agentkit`, and that prefix is
+        # GENERATED and gitignored — a clean checkout has nothing there, so the
+        # install fails outright. Temporary: it exists only until AgentKit cuts a
+        # release tag with a committed dist, at which point the dependency points
+        # at the tag and this step and its script are deleted.
+        run: scripts/bootstrap-agentkit.sh
       - name: Install
         run: bun install --frozen-lockfile
       - name: Cache Playwright browsers
@@ -498,6 +522,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
+      - name: Bootstrap AgentKit
+        # MUST precede every `bun install`. The root package.json depends on
+        # `agentkit: file:.agentkit-src/packages/agentkit`, and that prefix is
+        # GENERATED and gitignored — a clean checkout has nothing there, so the
+        # install fails outright. Temporary: it exists only until AgentKit cuts a
+        # release tag with a committed dist, at which point the dependency points
+        # at the tag and this step and its script are deleted.
+        run: scripts/bootstrap-agentkit.sh
       - name: Install
         run: bun install --frozen-lockfile
       - name: Cache Playwright browsers
@@ -525,6 +557,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
+      - name: Bootstrap AgentKit
+        # MUST precede every `bun install`. The root package.json depends on
+        # `agentkit: file:.agentkit-src/packages/agentkit`, and that prefix is
+        # GENERATED and gitignored — a clean checkout has nothing there, so the
+        # install fails outright. Temporary: it exists only until AgentKit cuts a
+        # release tag with a committed dist, at which point the dependency points
+        # at the tag and this step and its script are deleted.
+        run: scripts/bootstrap-agentkit.sh
       - name: Install application dependencies
         run: bun install --frozen-lockfile
       - name: Install worker dependencies
@@ -547,10 +587,9 @@ jobs:
         run: scripts/build-worker.sh Release
       - name: Build and stage assistant host
         # Second `bundle.externalBin` entry — the packaged app carries it, and
-        # `tauri build` refuses to start without it. This job already has bun.
-        run: |
-          scripts/bootstrap-agentkit.sh
-          scripts/build-assistant-host.sh
+        # `tauri build` refuses to start without it. AgentKit is already
+        # bootstrapped by the step above the dependency install.
+        run: scripts/build-assistant-host.sh
       - name: Build seed Tauri test artifact
         # NO `--` before the flags. `tauri build` is `[OPTIONS] [ARGS]...`, and
         # everything after `--` is forwarded to `cargo build` — which accepts

@@ -99,15 +99,35 @@ contributions therefore live in `src/modules/assistant/ui.ts`, not `register.ts`
 `dist/assets/index-*.js` contains **0** AgentKit/TypeBox markers; `EditorScreen-*.js`
 contains them.
 
-### The user-facing path, end to end
+### CORRECTION (2026-09-15): the chat loop does not complete
 
-A user can now: turn the assistant on, open the sidebar tab, type a local endpoint and
-model into the form, and have Rust validate and install it. A refused endpoint is named in
-the panel rather than resurfacing later as "unknown provider". The form opens itself while
-the configuration is missing or refused and collapses once accepted.
+An external review of commit `0a0de65` found two defects that this document previously
+understated, and I confirmed both by reading the code rather than taking them on trust:
 
-What is NOT verifiable here: that a real local model then answers. That needs an inference
-runtime and is part of the owed offline run.
+1. **The configured provider never reaches AgentKit.** `assistant_configure_provider`
+   populates Rust's `ProviderRegistry`, but `buildApp` performs no provider seeding — it
+   contains no `upsertProvider` and no `defaultProviderId` — and the panel submits only
+   `{content}` with no `providerId`. AgentKit's `TurnRunner` resolves its provider from its
+   own store, which is empty, so a fresh install reaches `no_provider` before the factory
+   that would have used Rust's gateway is ever called.
+2. **The panel cannot render a reply.** `AssistantPanel` holds only `{key, text}` user
+   echoes, discards the submit result, and never calls `streamRun`, `listMessages`,
+   `useChat` or `useRun`. No assistant message can appear, and a terminal run failure is
+   invisible.
+
+Together these mean the WP2 exit gate — *a local durable chat sidebar* — **is not met**.
+The earlier text here said only that "a real local model answering" was unverified. That
+was too generous: the path is not merely unverified, it is structurally incomplete, and
+saying so is the point of this document.
+
+The panel's empty-state copy compounds it by claiming the assistant "can read the model and
+propose edits; every proposal is reviewed before it is applied". Neither is true — the sole
+tool reports constants — and the second sentence also contradicts the product's
+approve-before-start autonomy decision.
+
+What *is* real and independently gated stands: the supervised child process, the OCAK1
+bridge with its principal boundary, the loopback-only gateway, and the absence of mutation
+authority. What does not work yet is the last mile between them.
 
 ---
 
