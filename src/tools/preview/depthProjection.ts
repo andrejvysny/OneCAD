@@ -48,12 +48,14 @@ export function axisDepthFromRay(
 
 /**
  * Apply the direction / symmetry modifiers to a raw signed depth.
- *  - `symmetric`: the prism grows both ways; the reported (single-side) magnitude
- *    is the half-length, but the extrude spans `2·|depth|`. We keep the signed
- *    drag value and let the op carry `extrudeMode: "Symmetric"`.
+ *  - `symmetric`: the prism grows both ways and `depth` is the TOTAL span, half
+ *    to each side — `PreviewMesh.setDepth` scales by `|depth|` and offsets by
+ *    `-|depth|/2`, and `ModelToolController.extrudeHeadWorld` puts the handle on
+ *    the `+|depth|/2` face the worker builds. The value is unchanged either way;
+ *    symmetry is carried as a MODE, not as a different number.
  *  - `flip`: negate (an explicit UI flip, distinct from dragging through zero).
- * Returns the depth the op + preview should use (always the drag magnitude with
- * its sign; symmetric handling is a MODE, not a value change).
+ * Returns the depth the op + preview should use, always the drag magnitude with
+ * its sign.
  */
 export function resolveDepth(raw: number, opts: { flip?: boolean } = {}): number {
   return opts.flip ? -raw : raw;

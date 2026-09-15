@@ -186,6 +186,9 @@ describe("DragHandle materials", () => {
  * the viewer — the commonest camera for a depth drag — drew a dot.
  */
 describe("DragHandle billboard", () => {
+  /** Square, to match the aspect-1 cameras below. */
+  const VW = 600;
+  const VH = 600;
   const camera = (position: [number, number, number]) => {
     const cam = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
     cam.up.set(0, 0, 1); // the world is Z-up, and so is CameraRig's UP
@@ -212,7 +215,7 @@ describe("DragHandle billboard", () => {
       [30, 40, 50],
     ] as [number, number, number][]) {
       const cam = camera(pos);
-      handle.orient(cam);
+      handle.orient(cam, VW, VH);
       const toCamera = cam.position.clone().normalize();
       expect(facing(root).dot(toCamera)).toBeGreaterThan(0.999);
     }
@@ -223,7 +226,7 @@ describe("DragHandle billboard", () => {
     // World +Z, viewed from +X: straight up the screen.
     handle.setAxis(O, new THREE.Vector3(0, 0, 1));
     const cam = camera([60, 0, 0]);
-    handle.orient(cam);
+    handle.orient(cam, VW, VH);
 
     const screenUp = new THREE.Vector3(0, 1, 0).applyQuaternion(cam.quaternion);
     expect(along(root).dot(screenUp)).toBeGreaterThan(0.999);
@@ -233,12 +236,12 @@ describe("DragHandle billboard", () => {
     const { handle, root } = makeHandle();
     handle.setAxis(O, new THREE.Vector3(0, 0, 1));
     const side = camera([60, 0, 0]);
-    handle.orient(side);
+    handle.orient(side, VW, VH);
     const before = along(root).clone();
 
     // Now look straight down that axis: it has NO screen direction left.
     const down = camera([0, 0, 60]);
-    handle.orient(down);
+    handle.orient(down, VW, VH);
 
     // The last good angle is held rather than spinning to an arbitrary one, and
     // the arrow still faces the viewer at full length — not the old dot.
@@ -246,6 +249,40 @@ describe("DragHandle billboard", () => {
     const nowInCamera = along(root).clone().applyQuaternion(down.quaternion.clone().invert());
     expect(nowInCamera.dot(heldInCamera)).toBeGreaterThan(0.999);
     expect(facing(root).dot(down.position.clone().normalize())).toBeGreaterThan(0.999);
+  });
+
+  /*
+   * The PERSPECTIVE case the old camera-space shortcut could not express.
+   *
+   * Both handles carry the SAME world axis (+Z) under the SAME camera. The
+   * shortcut derived the screen angle from the axis and the camera rotation
+   * alone, so it necessarily gave both the identical angle. The true projection
+   * depends on the anchor too: off the optical axis, +Z runs towards the
+   * vanishing point and picks up a sideways component whose sign follows which
+   * side of centre the anchor sits on.
+   */
+  it("gives the SAME world axis different screen angles at different anchors", () => {
+    // Camera on −Y looking at the origin, world Z up: screen right is +X and the
+    // VIEW direction is +Y. An axis along +Y is therefore end-on at the centre
+    // and purely radial away from it — the cleanest read of the anchor term.
+    const cam = camera([0, -60, 0]);
+    const axis = new THREE.Vector3(0, 1, 0);
+
+    const left = makeHandle();
+    left.handle.setAxis(new THREE.Vector3(-25, 0, 0), axis);
+    left.handle.orient(cam, VW, VH);
+
+    const right = makeHandle();
+    right.handle.setAxis(new THREE.Vector3(25, 0, 0), axis);
+    right.handle.orient(cam, VW, VH);
+
+    const inCam = (root: THREE.Object3D) =>
+      along(root).clone().applyQuaternion(cam.quaternion.clone().invert());
+
+    // Mirror-image anchors ⇒ opposite horizontal components, and not a tie.
+    expect(Math.sign(inCam(left.root).x)).toBe(-Math.sign(inCam(right.root).x));
+    expect(Math.abs(inCam(left.root).x)).toBeGreaterThan(0.1);
+    expect(inCam(left.root).dot(inCam(right.root))).toBeLessThan(0.999);
   });
 });
 

@@ -1,3 +1,38 @@
+# SESSION 36 — UNIFIED MODELING CONTROLS, PHASE B (2026-09-15, Fable, plan `~/.claude/plans/analyze-this-plan-and-generic-sutherland.md`)
+
+Source: the handed-over spec "Unified Modeling Controls and Direct Manipulation" v1.0 (a STATIC review — never built, never run). Its correctness half was already owned by `PLAN.md` and landed in session 35; this session starts the half `PLAN.md` does not cover, the handle and label architecture. Three of the spec's own claims were checked against the code and are wrong or already done — recorded below so nobody re-implements them.
+
+## B1 — perspective-correct handle projection [LANDED, gated]
+
+**The defect.** `DragHandle.orient()` derived the arrow's screen angle by rotating the world axis into CAMERA space and taking `atan2(y, x)`. That is exact for an ORTHOGRAPHIC camera only. Perspective divides by `w`, so a world axis projects to a different screen direction depending on where in the frustum it is ANCHORED. The arrow was therefore drawn along one direction while the drag mapped along another, widening with distance from the optical axis — and the default camera is FOV 76 (`CameraRig.ts`), so that is most of the viewport. Neither the static spec nor the real-user UX review found this.
+
+**The fix.** New pure module `src/tools/preview/handleProjection.ts` — the exact CSS-pixel derivative. For anchor `P`, unit `a`, view-projection `M`, `c = M·[P,1]`, `d = M·[a,0]`:
+
+    dNDC = (d.xy·c.w − c.xy·d.w) / c.w²      then ×(w/2, −h/2) for CSS px
+
+`projectAxis` returns `{derivative, pxPerWorld, direction}` or `null`; `null` is the ONLY failure signal, as in `transformDrag`. Refuses: non-finite inputs, a short matrix, a zero viewport, a zero-length direction, an anchor on or behind the camera plane, and an exactly end-on axis. `DragHandle.orient(camera, width, height)` now uses it and holds the last good angle when it refuses — the existing degenerate behaviour is unchanged.
+
+`axisConditioning(projection, worldPerPixel)` is `pxPerWorld · worldPerPixel`, dimensionless and equal to |sin∠(axis, view ray)| to first order: 1 square-on, 0 end-on. `MIN_AXIS_CONDITIONING = 0.08` (≈4.6°) is the single place the world-axis-vs-screen-proxy choice lives, deliberately ABOVE `transformDrag.MIN_VIEW_SIN` (0.05 ≈ 3°) — that constant is where a projection turns destructive and must refuse; this one is where a handle should stop pretending and offer a labelled proxy, because a control that is merely *hard* to use is worse than one that honestly changes mapping. Chosen at grab, never mid-gesture.
+
+**The new test is load-bearing, proven not assumed.** `DragHandle.test.ts` "gives the SAME world axis different screen angles at different anchors" was re-run against a temporarily restored old `orient()` and FAILED (`expected +0 to be -0`: with no anchor term both handles hold the identical angle). Restored, green. The pure lane's numbers were also checked by hand: camera at z=20, anchor (8,0,0), axis +Z ⇒ `dx = 7.68 px`, `direction [1,0]`, mirroring to `[-1,0]` at x=−8 — off-axis points spread outward from the vanishing point as they approach the camera.
+
+**Also fixed:** `depthProjection.ts` `resolveDepth`'s doc comment claimed symmetric `depth` is the HALF-span and the extrude spans `2·|depth|`. It is the TOTAL span — verified against `PreviewMesh.setDepth` (`scale.z = |depth|`, `position.z = −|depth|/2`) and `ModelToolController.extrudeHeadWorld` (`|depth|/2`). Harmless while the function was dead, but session 35's FP-T2/T3 gave it a live caller (`ModelToolController.ts:1983`), and `PreviewMesh` records that this exact 2× confusion once shipped: "the L1 used to draw 2·|depth| and the user approved a body twice the committed size."
+
+**Gate (main thread, this tree, nothing else running):** `bunx tsc --noEmit` ✓ · `bun run build` ✓ · `bun run test` **362 files / 6201 passed / 0 failed / 78 skipped** (baseline 361 / 6180 / 78 — the delta is exactly the 20 new `handleProjection` cases plus 1 new `DragHandle` case) · hex **0** · coverage **34 / 9 / 17 / 20** · contracts **41 / 19 / 15** · Playwright chromium, every spec that raycasts the handle (`findExtrudeHandle` / `dragExtrudeDepth` / `commitExtrudeAtHandle` / `dragEdgeOpHandle` consumers — 16 specs in two batches): **39 / 0** and **27 / 0**.
+
+**NOT run, owed:** webkit for those specs, and the full `bun run e2e` both projects. Frontend-only change, no Rust or worker gate needed.
+
+## Three spec claims checked and corrected (do not re-implement)
+
+- **Spec A09 / §9.5 "remove incidental click-away confirmation" — there is nothing to remove.** No click-away commit exists anywhere in `ModelToolController`. `isExcludedClickAwayTarget` is a fossil name wrapping `isInteractiveBoundaryTarget` and only excludes chip chrome from DRAG CLAIMS. D2 removed click-away commit long ago. Three comments still assert it exists and are stale.
+- **Spec D06 "explicit operation completion" is not a new decision.** `src/test/contracts/modelingInteractionContract.ts` already pins `clickAwayPolicy: "cancel"` on all 12 rows, and every drag release already returns to `armed` with no implicit commit.
+- **Spec §5.1 "unify `DragHandle` and `TransformGizmo`" reverses a recorded decision.** `src/viewport/engine/README.md` states they are "a deliberate SIBLING ... rather than a generalisation". Reversing it needs an explicit recorded supersession, not silence.
+
+## Open, for whoever picks Phase B up
+
+- **`PLAN.md` D14 blocks the compact-label work.** It requires `modelingInteraction.golden` to stay green untouched, but moving Cancel out of `ModelToolChips` into a stable operation strip fails `modelingInteraction.golden.test.tsx` (it renders the chip and asserts a Cancel button inside it). The contract ROW `visibleCancel: true` stays true, so this is a PROBE change, which `src/test/contracts/README.md` permits — D14 as written does not. Needs a recorded decision before B3.
+- **FP-T1 vs B3.** Session 35 spent ~140 lines moving the chip off the pick target; B3 replaces the chip wholesale. Consider dropping FP-T1 rather than porting it.
+
 # SESSION 35 — UX REVIEW 2026-09-14 FIX PROGRAM (2026-09-15, Fable, plan `~/.claude/plans/act-as-senior-software-imperative-boot.md`, repo `PLAN.md`)
 
 Source: `docs/qa/UX_REVIEW_2026-09-14.md` (59 findings, 8 blocking). Nine work packages, five commit boundaries, Astra pre-approved (3 derive + 3 break, xhigh). User decisions recorded in `PLAN.md` § Decisions D10–D16: perspective 35° default, Fillet/Chamfer from a face selection, visibility toggles OFF the undo stack, endpoint-tangency constraint kind included, baseline + chamfer race first, commit at each green gate boundary, never push.

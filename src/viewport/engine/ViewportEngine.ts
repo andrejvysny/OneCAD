@@ -902,7 +902,7 @@ export class ViewportEngine {
       this.dragHandle.setScale(worldPerPixel(camera, this.dragHandle.worldAnchor(), height));
       // …and billboard it, so the flat arrow always faces the viewer and runs
       // along its axis's SCREEN direction rather than collapsing edge-on.
-      this.dragHandle.orient(camera);
+      this.dragHandle.orient(camera, width, height);
     }
     if (this.transformGizmo?.visible) {
       this.transformGizmo.setScale(

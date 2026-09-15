@@ -36,6 +36,7 @@
 import * as THREE from "three";
 import { palette } from "./palette";
 import { RENDER_ORDER } from "./renderOrder";
+import { projectAxis } from "@/tools/preview/handleProjection";
 
 const SHAFT_PX = 44; // shaft length in screen pixels, tail → head base
 const SHAFT_W_PX = 5; // shaft width (was a 2.2px-radius cylinder — a hairline)
@@ -43,9 +44,6 @@ const HEAD_PX = 16; // head length
 const HEAD_W_PX = 14; // head width
 const HALO_PX = 1.6; // outset of the contrast outline, per side
 const HIT_RADIUS_PX = 7; // ≥12px across for a trackpad, wider than the silhouette
-/** Below this projected length the axis is pointing at the camera and has no
- *  screen direction left to draw along. */
-const MIN_SCREEN_DIR = 1e-3;
 
 /** Which heads the arrow draws — and therefore what it can be grabbed by. */
 export type DragHandleMode = "forward" | "twoWay";
@@ -102,10 +100,12 @@ export class DragHandle {
   private readonly _q = new THREE.Quaternion();
   private readonly _dir = new THREE.Vector3();
   private readonly _up = new THREE.Vector3(0, 1, 0);
-  private readonly _camDir = new THREE.Vector3();
   private readonly _roll = new THREE.Quaternion();
-  private readonly _invCam = new THREE.Quaternion();
   private readonly _z = new THREE.Vector3(0, 0, 1);
+  /** Reused rather than rebuilt each frame: `orient` runs on the render path, so
+   *  the 16-float matrix is worth holding. (`projectAxis` still returns a small
+   *  result object, the same young-gen cost `worldAnchor()` beside it already pays.) */
+  private readonly _viewProj = new THREE.Matrix4();
   private hovered = false;
   private destructive = false;
   private mode: DragHandleMode = "forward";
@@ -185,18 +185,36 @@ export class DragHandle {
    * Billboard the silhouette: face `camera`, length along the axis's SCREEN
    * direction. Called every frame by the engine, before the render.
    *
-   * The screen direction is the axis in CAMERA space — its x/y are exactly
-   * screen right/up for both projections, so no unprojection is needed and an
-   * orthographic camera behaves identically. When those two components vanish
-   * the axis points at the viewer and has no screen direction at all: the last
-   * good angle is held, so the arrow stays a full-length, grabbable arrow
+   * The screen direction is the TRUE projected derivative of the world axis at
+   * this handle's own anchor (`handleProjection.projectAxis`), not the axis
+   * rotated into camera space. Those two agree only under an orthographic
+   * camera: perspective divides by `w`, so a world axis projects to a different
+   * screen direction depending on where in the frustum it is anchored. The old
+   * camera-space shortcut therefore drew the arrow along one direction while
+   * the drag mapped along another, and the gap widened the further the anchor
+   * sat from the optical axis — at FOV 76 that is most of the viewport.
+   *
+   * When the projection refuses — the axis points at the viewer, or the anchor
+   * is behind the camera plane — there is no screen direction to draw and the
+   * last good angle is held, so the arrow stays a full-length, grabbable arrow
    * instead of collapsing to the dot the old cone became.
    */
-  orient(camera: THREE.Camera): void {
-    this._invCam.copy(camera.quaternion).invert();
-    this._camDir.copy(this.axis).applyQuaternion(this._invCam);
-    if (Math.hypot(this._camDir.x, this._camDir.y) > MIN_SCREEN_DIR) {
-      this.screenAngle = Math.atan2(this._camDir.y, this._camDir.x) - Math.PI / 2;
+  orient(camera: THREE.Camera, viewportWidth: number, viewportHeight: number): void {
+    this._viewProj.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    const anchor = this.group.position;
+    const projected = projectAxis(
+      this._viewProj.elements,
+      [anchor.x, anchor.y, anchor.z],
+      [this.axis.x, this.axis.y, this.axis.z],
+      viewportWidth,
+      viewportHeight,
+    );
+    if (projected) {
+      // `direction` is CSS-pixel space (+Y DOWN); the roll below is applied in
+      // the camera's own frame (+Y UP), so the vertical component flips once,
+      // here, and nowhere else.
+      const [dx, dy] = projected.direction;
+      this.screenAngle = Math.atan2(-dy, dx) - Math.PI / 2;
     }
     this._roll.setFromAxisAngle(this._z, this.screenAngle);
     this.group.quaternion.copy(camera.quaternion).multiply(this._roll);
