@@ -844,6 +844,15 @@ export class ModelToolController {
    * change, since the closure and the head are both frozen for the arm's life.
    */
   private filletRangeGen: number | null = null;
+  /**
+   * Settles when the in-flight analysis has DECIDED the chip's validation — its
+   * answer applied, refused, or dropped as superseded. Never rejects: a range
+   * failure costs the guard and nothing else, exactly as the fire-and-forget call
+   * it replaces. While it is unsettled the
+   * chip reads `pending`, which is "not measured yet", never "refused": a ✓ that
+   * lands in that window must WAIT for the verdict, not be discarded by it.
+   */
+  private filletRangeSettled: Promise<void> = Promise.resolve();
   /** Typed request awaiting range evidence; never enters the FSM before validation. */
   private filletDraft: number | null = null;
   /** The fenced head `prepareEdgeOp` answered against — what the range is measured on. */
@@ -3651,7 +3660,7 @@ export class ModelToolController {
       // builds and the arm must appear on the same frame the user asked for it.
       // The guard simply does not exist until the answer lands, which is the
       // pre-WP4 behaviour and therefore a safe intermediate state.
-      void this.armEdgeOpRange(gen, kind, res.snapshotId);
+      this.filletRangeSettled = this.armEdgeOpRange(gen, kind, res.snapshotId).catch(() => {});
       return true;
     } catch (error) {
       if (gen === this.armGen) this.publishEdgePrepareFailure(kind, errMessage(error));
@@ -3922,7 +3931,11 @@ export class ModelToolController {
       // A DELIBERATE flip (a chip segment) is worth re-measuring; a mid-drag auto
       // flip is not, per the note above.
       if (!wasDragging && this.filletPreparedSnapshot !== null) {
-        void this.armEdgeOpRange(gen, this.fillet.edgeOp, this.filletPreparedSnapshot);
+        this.filletRangeSettled = this.armEdgeOpRange(
+          gen,
+          this.fillet.edgeOp,
+          this.filletPreparedSnapshot,
+        ).catch(() => {});
       }
     }
     this.updateDebug();
@@ -9471,6 +9484,16 @@ export class ModelToolController {
    */
   private async commitFillet(): Promise<void> {
     if (this.retainedCommitBlocked()) return;
+    // The chip's Enter applies the value and confirms in the SAME turn, and a
+    // deliberate arm or type flip puts the measured-range analysis (SCHEMA §7.6)
+    // in flight ahead of it. `pending` is that analysis not having answered yet —
+    // it is not a refusal, so returning on it drops the ✓ SILENTLY, and whether it
+    // does is pure timing (the confirm loses the race only when the machine is
+    // loaded). Wait for the verdict, then judge it; only a DECIDED validation
+    // blocks the commit, exactly as before.
+    if (toolChipStore.getState().validation.status === "pending") {
+      await this.filletRangeSettled;
+    }
     if (toolChipStore.getState().validation.status !== "valid") return;
     const editFeatureId = this.filletEditFeatureId;
     if (editFeatureId) {

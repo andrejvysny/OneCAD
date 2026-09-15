@@ -1,3 +1,20 @@
+# SESSION 35 — UX REVIEW 2026-09-14 FIX PROGRAM (2026-09-15, Fable, plan `~/.claude/plans/act-as-senior-software-imperative-boot.md`, repo `PLAN.md`)
+
+Source: `docs/qa/UX_REVIEW_2026-09-14.md` (59 findings, 8 blocking). Nine work packages, five commit boundaries, Astra pre-approved (3 derive + 3 break, xhigh). User decisions recorded in `PLAN.md` § Decisions D10–D16: perspective 35° default, Fillet/Chamfer from a face selection, visibility toggles OFF the undo stack, endpoint-tangency constraint kind included, baseline + chamfer race first, commit at each green gate boundary, never push.
+
+## Now (resume here)
+
+- [x] WP-0.1 full L3 baseline on untouched HEAD `f438ced0` (serial, alone) — every red attributed (see Gate ledger).
+- [x] WP-0.2 `commitFillet` same-turn race — measured cause + fix in the Gate ledger; chromium ×5 95/95, webkit 19/19 alone.
+- [x] Commit boundary 1 (review docs + race fix + clippy dead-code fix + three accepted Astra derivations + this ledger).
+- [x] Astra A1/A2/A3 derived and accepted (`docs/design/astra/sketch-host-face-transport.md`, `sketch-solver-truth.md`, `sketch-fillet-fill-and-tangency.md`); protocol pre-audit folded into `PLAN.md` (P-1…P-11).
+- [ ] WP-1 (impl-critical: SCHEMA + worker + Rust) ∥ WP-2 FE half (impl-careful) → then WP-2 worker/Rust half → Astra `break` ×2 → commit boundary 2.
+
+## Gate ledger
+
+- **WP-0.1 baseline on untouched HEAD `f438ced0` (2026-09-15 09:09–09:45, serial, alone, `scratchpad/gate0/`):** build+stage ✓ (staged sha == built) · ctest **197/197** · fmt ✓ · **clippy RED** (`src/api/mod.rs:4583 pending_render_expectations` dead code — `#[cfg(debug_assertions)]` on a fn only `tauri_e2e.rs` calls; introduced by `f438ced0`; fixed by gating it `all(debug_assertions, feature = "tauri-e2e")`, clippy re-run clean) · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` **100 result lines / 1652 passed / 0 failed / 0 ignored / 0 filtered** · tsc ✓ · build ✓ · vitest **346 files / 5998 passed / 0 failed / 78 skipped** · hex **0** · coverage ✓ · contracts ✓ · coverage self-test ✓ · hygiene ✓ · **e2e 540 passed / 4 failed (32.0 min, both projects, `retries: 0`)** — `[chromium] chamfer-angle.spec.ts:129` (the known session-31 race) and three webkit-only reds `arc.spec.ts:13`, `circle.spec.ts:19`, `ellipse.spec.ts:69` (attribution measured: the three webkit specs re-run ALONE → **3/3 green** (`gate0/webkit3.log`), so they are load-induced reds of the 32-min run, recorded as reds; `chamfer-angle` + `filletChamfer` on chromium `--repeat-each=5` after the WP-0.2 fix → **95 passed / 0 failed** (6.1 min, `gate0/chamfer5.log`)).
+- **WP-0.2 measured cause (impl-careful, main-thread review of the diff):** NOT the stale-arm guard. `commitFillet`'s second statement returns on `toolChipStore.validation.status !== "valid"`, and `armEdgeOpRange` (fire-and-forget from `adoptPreparedEdges` / `applyEdgeOpKindChange`) parks the chip on `pending` until `AnalyzeEdgeOpRange` answers — a ✓ inside that window was dropped silently, with no hint. Fix: `filletRangeSettled` (the in-flight analysis promise, never rejects) awaited by `commitFillet` when the chip reads `pending`; decided validations still block as before. Red-first `ModelToolController.chamferSameTurn.test.ts` (2 tests, red against the unfixed method: every `endPreview` was a release). Agent-run: 6 files / 53 tests, whole `src/tools/modelTools` 47 / 829, tsc clean. Follow-ups recorded by the agent: `openEdgeOpPreview` is fenced by `armGen` alone (last writer wins between the arm's open and the sync's reopen); a superseded analysis can leave the chip `pending` forever if `clearValidation` is ever skipped; the plain Fillet ✓ has the same drop (covered by the fix, no test).
+
 # SESSION 34 — TAURI-AGENT BACKGROUND INTERACTION POLICY (2026-09-14, Fable, plan `~/.claude/plans/act-as-expert-on-calm-stallman.md`)
 
 Acted on an architecture review proposing four fidelity tiers so Claude can drive OneCAD without

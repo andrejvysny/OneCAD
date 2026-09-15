@@ -4579,7 +4579,7 @@ fn acknowledge_render(
 ///
 /// Debug builds only, like the ledger itself. Returns the number of outstanding expectations
 /// and the union of the body ids they are still waiting on.
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, feature = "tauri-e2e"))]
 pub(crate) fn pending_render_expectations() -> (usize, Vec<String>) {
     let guard = render_expectations()
         .lock()
