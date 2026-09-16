@@ -61,6 +61,11 @@
  * now have `display: contents` measurement wrappers. The wrappers add DOM
  * nodes but no layout boxes, preserve contribution order and component
  * identity, and let floating chrome use the panels' actual rendered bounds.
+ *
+ * AMENDED 2026-09-16 (Unified modeling controls, B3) — `ModelOperationBar`
+ * follows `SketchChromeBar` in `ToolbarContextual`. It renders only for armed
+ * model operations and owns stable Done/Cancel controls; it is intentionally
+ * not a world-following viewport overlay.
  */
 export const EDITOR_MOUNT_ORDER_CONTRACT: readonly string[] = [
   "TitleBar",
@@ -79,6 +84,7 @@ export const EDITOR_MOUNT_ORDER_CONTRACT: readonly string[] = [
   // active, not as its own shell contribution — recorded decision in TODO.md.
   "FloatingToolbar",
   "SketchChromeBar",
+  "ModelOperationBar",
   "ModelTreePanel",
   "VariablesPanel",
   "InspectorPanel",

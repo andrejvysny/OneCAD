@@ -104,6 +104,7 @@ function makeEngineMock() {
     hideGhostPreview: vi.fn(),
     showGhostPreviewMulti: vi.fn(),
     showValueHandle: vi.fn(),
+    showScreenValueHandle: vi.fn(),
     hideValueHandle: vi.fn(),
     setDatumGhost: vi.fn(),
     mountChip: vi.fn(),
@@ -405,16 +406,29 @@ describe("ModelToolController OffsetFace", () => {
     expect(engineMock.setOrbitSuppressed).toHaveBeenLastCalledWith(false);
   });
 
-  it("DEGRADES to the screen drag (no arrow, no ghost) for a curved face", async () => {
+  it("DEGRADES to a visible screen proxy (no geometric arrow or ghost) for a curved face", async () => {
     planar = false;
     build();
     await arm();
     expect(debug().offsetFacePhase).toBe("armed");
     expect(debug().offsetDegraded).toBe(true);
     expect(engineMock.showValueHandle).not.toHaveBeenCalled();
+    expect(engineMock.showScreenValueHandle).toHaveBeenCalledWith([0, 0, 10]);
     expect(engineMock.showGhostPreviewMulti).not.toHaveBeenCalled();
-    // Without a handle to miss, the tool claims every press — so orbit must go.
-    expect(engineMock.setOrbitSuppressed).toHaveBeenLastCalledWith(true);
+    expect(engineMock.setOrbitSuppressed).toHaveBeenLastCalledWith(false);
+  });
+
+  it("does not start a degraded offset drag from empty viewport space", async () => {
+    planar = false;
+    build();
+    await arm();
+    engineMock.hitExtrudeHandle.mockReturnValue(false);
+
+    container.dispatchEvent(
+      new PointerEvent("pointerdown", { clientX: 10, clientY: 10, button: 0, bubbles: true }),
+    );
+
+    expect(debug().offsetFacePhase).toBe("armed");
   });
 
   // ── drag ──────────────────────────────────────────────────────────────────

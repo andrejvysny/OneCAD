@@ -18,32 +18,26 @@
  * theme.
  *
  * TWO MODES.
- *  - `forward` — one head, pointing along `dir`. The historical shape; every value
- *    tool (OffsetFace) uses it, and extrude uses it as soon as a direction exists.
- *  - `twoWay` — a mirrored second head. The RESTING state of an extrude arm, where
- *    the sign has not been chosen yet: both directions are live, so the glyph says
- *    so rather than implying the +normal side.
+ *  - `forward` — legacy one-head compatibility for value tools still migrating.
+ *  - `twoWay` — centered bidirectional scalar/linear control. Extrude keeps it
+ *    while armed and dragged: travel direction does not change its axis.
  *
- * The pick envelope stays a fat cylinder about the local axis — rotationally
- * symmetric, so the billboard roll cannot change what is grabbable, and it
- * presents the same corridor width whichever way the arrow points on screen. It
- * TRACKS the visible heads: a tail head that renders but cannot be grabbed is a
- * dead affordance; an envelope left permanently symmetric would reach backwards
- * through the prism and the body it grew from — the visible materials are
- * `depthTest: false` and `raycast` has no occlusion test, so that envelope would
- * silently swallow selection clicks over the model.
+ * The pick envelope is centered with compact glyph: 40 × 30 CSS-pixel corridor.
+ * It remains a camera-facing cylinder, so billboard roll cannot change pickability.
+ * DOM chrome wins before this raycast is consulted.
  */
 import * as THREE from "three";
 import { palette } from "./palette";
 import { RENDER_ORDER } from "./renderOrder";
 import { projectAxis } from "@/tools/preview/handleProjection";
 
-const SHAFT_PX = 44; // shaft length in screen pixels, tail → head base
-const SHAFT_W_PX = 5; // shaft width (was a 2.2px-radius cylinder — a hairline)
-const HEAD_PX = 16; // head length
+const GLYPH_HALF_PX = 15; // compact 30px glyph, centered on attachment
+const SHAFT_END_PX = 6; // shaft endpoint before either head
+const SHAFT_W_PX = 4; // visible 2px stroke
 const HEAD_W_PX = 14; // head width
 const HALO_PX = 1.6; // outset of the contrast outline, per side
-const HIT_RADIUS_PX = 7; // ≥12px across for a trackpad, wider than the silhouette
+const HIT_RADIUS_PX = 15; // 30px corridor width
+const HIT_LENGTH_PX = 40; // 40px corridor length
 
 /** Which heads the arrow draws — and therefore what it can be grabbed by. */
 export type DragHandleMode = "forward" | "twoWay";
@@ -55,25 +49,23 @@ export interface DragHandleDeps {
 
 /**
  * The arrow silhouette in the local XY plane, +Y along the axis, tail at the
- * origin. `inflate` grows it on every side for the halo, so the outline keeps a
+ * origin. `inflate` grows it on every side for halo, so outline keeps a
  * uniform width instead of the uneven edge a uniform scale would give a shape
  * this thin.
  */
 function arrowShape(twoWay: boolean, inflate: number): THREE.Shape {
   const sw = SHAFT_W_PX / 2 + inflate;
   const hw = HEAD_W_PX / 2 + inflate;
-  const tip = SHAFT_PX + HEAD_PX + inflate;
-  const base = SHAFT_PX; // head base stays put; only the outline grows outward
+  const tip = GLYPH_HALF_PX + inflate;
+  const base = SHAFT_END_PX;
   const shape = new THREE.Shape();
   if (twoWay) {
-    // Mirrored head hanging off the tail — same silhouette, pointing back.
-    const tailTip = -HEAD_PX - inflate;
-    shape.moveTo(0, tailTip);
-    shape.lineTo(hw, -HEAD_PX);
-    shape.lineTo(sw, -HEAD_PX);
+    shape.moveTo(0, -tip);
+    shape.lineTo(hw, -base);
+    shape.lineTo(sw, -base);
   } else {
-    shape.moveTo(-sw, -inflate);
-    shape.lineTo(sw, -inflate);
+    shape.moveTo(-sw, -tip);
+    shape.lineTo(sw, -tip);
   }
   shape.lineTo(sw, base);
   shape.lineTo(hw, base);
@@ -81,8 +73,8 @@ function arrowShape(twoWay: boolean, inflate: number): THREE.Shape {
   shape.lineTo(-hw, base);
   shape.lineTo(-sw, base);
   if (twoWay) {
-    shape.lineTo(-sw, -HEAD_PX);
-    shape.lineTo(-hw, -HEAD_PX);
+    shape.lineTo(-sw, -base);
+    shape.lineTo(-hw, -base);
   }
   shape.closePath();
   return shape;
@@ -112,6 +104,9 @@ export class DragHandle {
   /** World axis the arrow represents — `orient()` needs it every frame, and
    *  `setAxis` is only called when the tool moves it. */
   private readonly axis = new THREE.Vector3(0, 1, 0);
+  /** Screen-space proxy direction (`+Y` down), used when source geometry has
+   * no trustworthy world axis. Cleared by every geometric axis update. */
+  private screenProxyDirection: readonly [number, number] | null = null;
   /** Last screen angle that was well defined, held through the degenerate case
    *  so an axis rotating INTO the camera does not spin the arrow on its way. */
   private screenAngle = 0;
@@ -138,10 +133,9 @@ export class DragHandle {
     this.halo.position.z = -0.5;
 
     this.hitCyl = new THREE.Mesh(
-      new THREE.CylinderGeometry(HIT_RADIUS_PX, HIT_RADIUS_PX, SHAFT_PX + HEAD_PX, 8),
+      new THREE.CylinderGeometry(HIT_RADIUS_PX, HIT_RADIUS_PX, HIT_LENGTH_PX, 8),
       new THREE.MeshBasicMaterial({ visible: false, toneMapped: false }),
     );
-    this.hitCyl.position.y = (SHAFT_PX + HEAD_PX) / 2;
     this.hitCyl.userData.extrudeHandle = true;
 
     this.group.add(this.halo, this.fill, this.hitCyl);
@@ -165,6 +159,7 @@ export class DragHandle {
    * dependent. The extrude arm reaches exactly that case at depth 0.
    */
   setAxis(origin: THREE.Vector3, dir: THREE.Vector3, mode: DragHandleMode = "forward"): void {
+    this.screenProxyDirection = null;
     this.group.position.copy(origin);
     this._dir.copy(dir);
     if (this._dir.lengthSq() > 1e-12) {
@@ -179,6 +174,16 @@ export class DragHandle {
   /** Position/orient only, keeping the current mode (the historical entry point). */
   setAnchor(origin: THREE.Vector3, dir: THREE.Vector3): void {
     this.setAxis(origin, dir, this.mode);
+  }
+
+  /** Show an explicitly screen-space scalar proxy at a truthful attachment. */
+  setScreenProxy(origin: THREE.Vector3, direction: readonly [number, number] = [0, -1]): void {
+    const length = Math.hypot(direction[0], direction[1]);
+    if (!(length > 1e-6) || !Number.isFinite(length)) return;
+    this.group.position.copy(origin);
+    this.screenProxyDirection = [direction[0] / length, direction[1] / length];
+    this.setMode("twoWay");
+    this.deps.invalidate();
   }
 
   /**
@@ -202,18 +207,21 @@ export class DragHandle {
   orient(camera: THREE.Camera, viewportWidth: number, viewportHeight: number): void {
     this._viewProj.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     const anchor = this.group.position;
-    const projected = projectAxis(
-      this._viewProj.elements,
-      [anchor.x, anchor.y, anchor.z],
-      [this.axis.x, this.axis.y, this.axis.z],
-      viewportWidth,
-      viewportHeight,
-    );
-    if (projected) {
+    const projected = this.screenProxyDirection === null
+      ? projectAxis(
+        this._viewProj.elements,
+        [anchor.x, anchor.y, anchor.z],
+        [this.axis.x, this.axis.y, this.axis.z],
+        viewportWidth,
+        viewportHeight,
+      )
+      : null;
+    const direction = this.screenProxyDirection ?? projected?.direction;
+    if (direction) {
       // `direction` is CSS-pixel space (+Y DOWN); the roll below is applied in
       // the camera's own frame (+Y UP), so the vertical component flips once,
       // here, and nowhere else.
-      const [dx, dy] = projected.direction;
+      const [dx, dy] = direction;
       this.screenAngle = Math.atan2(-dy, dx) - Math.PI / 2;
     }
     this._roll.setFromAxisAngle(this._z, this.screenAngle);
@@ -228,11 +236,6 @@ export class DragHandle {
     this.fill.geometry = new THREE.ShapeGeometry(arrowShape(twoWay, 0));
     this.halo.geometry.dispose();
     this.halo.geometry = new THREE.ShapeGeometry(arrowShape(twoWay, HALO_PX));
-    // The envelope follows the heads: symmetric ONLY while both heads are drawn.
-    const length = twoWay ? SHAFT_PX + 2 * HEAD_PX : SHAFT_PX + HEAD_PX;
-    this.hitCyl.geometry.dispose();
-    this.hitCyl.geometry = new THREE.CylinderGeometry(HIT_RADIUS_PX, HIT_RADIUS_PX, length, 8);
-    this.hitCyl.position.y = twoWay ? SHAFT_PX / 2 : (SHAFT_PX + HEAD_PX) / 2;
   }
 
   /** Keep the handle a constant screen size: `worldPerPx` world units per pixel. */
@@ -242,12 +245,10 @@ export class DragHandle {
   }
 
   /**
-   * How far the arrow reaches from its anchor, in CSS pixels — what a chip must
-   * clear. The far head is the same distance in both modes; `twoWay` only adds a
-   * head on the near side, which is inside that radius.
+   * Furthest selectable corridor edge from attachment, in CSS pixels.
    */
   reachPx(): number {
-    return SHAFT_PX + HEAD_PX;
+    return HIT_LENGTH_PX / 2;
   }
 
   /**

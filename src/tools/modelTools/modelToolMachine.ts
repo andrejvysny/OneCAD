@@ -11,7 +11,7 @@
  *   committing — pointer released; awaiting the exact L2 result before select
  */
 import type { BooleanOperation, OffsetDistanceType, TransformBodyParams } from "@/ipc/types";
-import { EDGE_OP_FLIP_HOLD, EDGE_OP_MIN_VALUE } from "@/tools/preview/filletRadius";
+import { EDGE_OP_MIN_VALUE } from "@/tools/preview/filletRadius";
 import { DEFAULT_OFFSET_DISTANCE, OFFSET_MIN_MAGNITUDE } from "@/tools/preview/faceOffset";
 import { WORLD_AXIS } from "@/tools/preview/patternPreview";
 import type { Vec3 } from "@/tools/preview/depthProjection";
@@ -380,14 +380,9 @@ export function extrudeStep(s: ExtrudeFsm, e: ExtrudeEvent): ExtrudeStep {
 
 // ── Edge op (Fillet / Chamfer) ───────────────────────────────────────────────
 //
-// FILLET-CHAMFER-UNIFY: ONE machine drives both edge ops. The DRAG DIRECTION
-// picks which one while the arm is direction-driven (`auto`) — away from the
-// body rounds it, into it bevels — and the [Fillet|Chamfer] chip segments are
-// the explicit override (which locks the type for the session). `auto` is armed
-// ONLY where the direction is honest: the bisector tier. The bbox proxy points
-// INTO material on a concave edge, so an auto flip there would silently author
-// the op the user did not ask for; those arms seed `auto:false` and the chip is
-// the type control (see tools/preview/edgeDirection.ts).
+// FILLET-CHAMFER-UNIFY: ONE machine drives both edge ops. The [Fillet|Chamfer]
+// segment is the explicit type control. Dragging only adjusts that type's
+// magnitude; it must never silently re-author a feature as the other operation.
 //
 // EDGE-OP PREVIEW wave: the edge ops join the professional commit gesture the
 // extrude/revolve lanes already use. A pointer RELEASE keeps the tool ARMED (the
@@ -421,9 +416,8 @@ export interface FilletFsm {
   edgeCount: number;
   /** The op this arm commits (drives `opType`, so a change is a session swap). */
   edgeOp: EdgeOpKind;
-  /** The DRAG DIRECTION still owns `edgeOp` — see {@link autoEdgeOp}. Any explicit
-   *  `setEdgeOp` clears it, so a manual override sticks for the rest of the session. */
-  auto: boolean;
+  /** Retained projection compatibility field. New arms are always locked. */
+  auto: false;
   /** Whether the user has authored a size yet (drag or typed). A pristine arm
    *  reseeds to the picked op's default on `setEdgeOp`; a touched one keeps the
    *  user's number. */
@@ -458,6 +452,7 @@ export type FilletEvent =
       edgeCount: number;
       radius?: number;
       edgeOp?: EdgeOpKind;
+      /** Ignored compatibility input. Edge-operation type is always explicit. */
       auto?: boolean;
       /** Seed the arm as already-authored. A RE-EDIT passes `true`: the seeded
        *  size IS the committed size, i.e. the user's own number, so a later
@@ -502,17 +497,6 @@ export function filletInit(): FilletFsm {
 }
 
 /**
- * The op a drag frame lands on while the arm is still direction-driven: dragging
- * AWAY from the body rounds it (Fillet), pushing INTO it bevels (Chamfer) — the
- * Shapr3D convention. Mirror of {@link autoBooleanMode} for the extrude lane.
- *
- * `EDGE_OP_FLIP_HOLD` is a HYSTERESIS band, not a dead zone around zero: a
- * gesture crossing zero must not strobe the authored type, because every flip
- * tears the kernel preview session down and reopens it under the new `opType`
- * (`beginPreview` freezes it). A non-finite value keeps the current type for
- * the same reason a zero does.
- */
-/**
  * Coerce a second-leg candidate to the FSM's domain: `null` (equal-leg) or a
  * value at/above the shared magnitude clamp. A non-finite or non-positive number
  * is equal-leg, NOT a zero-width bevel — SCHEMA §7.3 requires `distance2 > 0`
@@ -536,13 +520,6 @@ function normalizeAngleDeg(v: number | null): number | null {
   return v;
 }
 
-function autoEdgeOp(s: FilletFsm, signed: number): EdgeOpKind {
-  if (!s.auto) return s.edgeOp;
-  if (!Number.isFinite(signed)) return s.edgeOp;
-  if (Math.abs(signed) < EDGE_OP_FLIP_HOLD) return s.edgeOp;
-  return signed < 0 ? "Chamfer" : "Fillet";
-}
-
 export function filletStep(s: FilletFsm, e: FilletEvent): FilletStep {
   switch (e.kind) {
     case "arm": {
@@ -558,7 +535,7 @@ export function filletStep(s: FilletFsm, e: FilletEvent): FilletStep {
           radius: e.radius ?? DEFAULT_FILLET_RADIUS,
           edgeCount: e.edgeCount,
           edgeOp: e.edgeOp ?? "Fillet",
-          auto: e.auto === true,
+          auto: false,
           touched: e.touched === true,
           distance2: angleDeg === null ? normalizeDistance2(e.distance2 ?? null) : null,
           angleDeg,
@@ -571,17 +548,6 @@ export function filletStep(s: FilletFsm, e: FilletEvent): FilletStep {
       return { state: { ...s, phase: "dragging" }, effect: "none" };
     case "drag": {
       if (s.phase !== "dragging") return { state: s, effect: "none" };
-      if (s.auto) {
-        return {
-          state: {
-            ...s,
-            radius: Math.max(EDGE_OP_MIN_VALUE, Math.abs(e.signed)),
-            edgeOp: autoEdgeOp(s, e.signed),
-            touched: true,
-          },
-          effect: "update",
-        };
-      }
       // A LOCKED type projects the drag onto its own half-line rather than taking
       // the magnitude: dragging a locked Chamfer the "wrong" way must bottom out at
       // the minimum and STAY there, not V-bounce back up as |signed| would.
@@ -593,17 +559,14 @@ export function filletStep(s: FilletFsm, e: FilletEvent): FilletStep {
     }
     case "setRadius":
       if (s.phase !== "armed" && s.phase !== "dragging") return { state: s, effect: "none" };
-      // A TYPED value never re-types the op (TODO.md:32 precedent): the number is a
-      // magnitude, and the sign convention belongs to the gesture, not the keyboard.
+      // A typed value is a magnitude; it never changes the explicit operation type.
       return {
         state: { ...s, radius: Math.max(EDGE_OP_MIN_VALUE, Math.abs(e.radius)), touched: true },
         effect: "update",
       };
     case "setEdgeOp": {
       if (s.phase !== "armed" && s.phase !== "dragging") return { state: s, effect: "none" };
-      // An EXPLICIT choice (chip segment) ends the direction-driven lane for the
-      // rest of the session — a manual override must stick even when the user
-      // afterwards drags back through zero (host-boolean precedent).
+      // An explicit segment is the only way to change the operation type.
       // PRISTINE RESEED: an untouched arm takes the picked op's own default; once
       // the user has authored a size, that size is theirs and survives the swap.
       const radius = s.touched

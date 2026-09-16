@@ -675,9 +675,8 @@ export class ModelToolController {
    * by `opType`/`mode` at the wire — so one lane with a discriminator, not two
    * copies of the arm/drag/commit path.
    *
-   * The FSM OWNS it (FILLET-CHAMFER-UNIFY): the drag direction can re-type the op
-   * mid-gesture, and a second copy of that decision here would be a second source
-   * of truth for what the ✓ commits.
+   * The FSM owns the explicit selection, so preview and ✓ share one source of
+   * truth for the operation type.
    */
   private get edgeOpKind(): EdgeOpKind {
     return this.fillet.edgeOp;
@@ -737,13 +736,9 @@ export class ModelToolController {
    */
   private extrudeStartDepth = 0;
   private extrudeGrabDepth = 0;
-  /**
-   * Whether this arm has been grabbed yet. Until it has, the arrow draws BOTH
-   * heads: the sign is genuinely undecided, and a single head pointing along
-   * +normal would claim otherwise. Symmetric is deliberately NOT drawn two-way —
-   * one glyph, one meaning.
-   */
-  private extrudeGrabbed = false;
+  /** Latest fixed-frame axis sample. Used only to rebase a deliberate symmetric
+   * mode change; preview geometry never changes this drag frame. */
+  private extrudeLastRawDepth = 0;
   private lastArmedSketch: string | null = null;
   /** `lastArmedSketch`'s geometryToken at arm time — a change invalidates the arm. */
   private armedSketchToken: string | null = null;
@@ -1357,11 +1352,9 @@ export class ModelToolController {
     if (tool === "datum") this.startDatum();
     else if (tool === "extrude") this.armExtrudeFromSelection();
     else if (tool === "revolve") this.armRevolveFromSelection();
-    // The unified edge tool seeds Fillet and lets the DRAG DIRECTION re-type it
-    // (where the direction is honest — `armEdgeOpFromSelection` downgrades `auto`
-    // off the bisector tier). The `chamfer` tool id is dead (FILLET-CHAMFER-UNIFY
-    // W2) — Chamfer is reached only via drag-into or the chip segment now.
-    else if (tool === "fillet") void this.armEdgeOpFromSelection("Fillet", { auto: true });
+    // The unified edge tool starts a locked Fillet. Chamfer remains an explicit
+    // segment action; ordinary drags change only the selected operation's size.
+    else if (tool === "fillet") void this.armEdgeOpFromSelection("Fillet");
     else if (tool === "boolean") this.startBooleanFromSelection();
     else if (tool === "shell") void this.armShellFromSelection();
     else if (tool === "offsetFace") void this.armOffsetFaceFromSelection();
@@ -1766,8 +1759,6 @@ export class ModelToolController {
 
     this.engine.showExtrudePreviews(this.plane, profiles, this.centroidWorld, this.normal);
     this.engine.setExtrudeDepth(startDepth, false);
-    // A fresh arm has not chosen a direction yet — the arrow opens two-way.
-    this.extrudeGrabbed = false;
     this.syncExtrudeHandle();
 
     // Open one preview session per region. A superseded arm (gen bumped mid-await)
@@ -1940,20 +1931,21 @@ export class ModelToolController {
    * the symmetry or the resolved boolean mode can change — the arrow is the
    * primary readout of all three now that the chip carries only a dimension.
    *
-   * A zero depth passes a zero direction on purpose: `DragHandle.setAxis` holds
-   * its previous orientation there rather than snapping to an arbitrary flip.
+   * The interaction axis is always the prepared +normal. Depth sign only moves
+   * endpoint/preview; it never flips this bidirectional control at zero.
    */
   private syncExtrudeHandle(): void {
     if (!this.plane) return;
     const depth = this.extrude.depth;
-    const sign = this.extrude.symmetric ? 1 : Math.sign(depth);
-    const dir: Vec3 = [this.normal[0] * sign, this.normal[1] * sign, this.normal[2] * sign];
+    const dir: Vec3 = this.normal;
     const head = this.extrudeHeadWorld(depth);
     this.engine.setExtrudeHandle(
       head,
       dir,
-      this.extrudeGrabbed ? "forward" : "twoWay",
-      this.extrude.booleanMode === "Cut",
+      "twoWay",
+      // Cut tint belongs to preview material. A geometry handle keeps its neutral
+      // interaction identity; Boolean resolution is not a drag direction.
+      false,
     );
     // The chip rides the arrowhead. Straight to the engine, NEVER through
     // `toolChipStore.worldPos`: that field is the mount effect's key, so writing
@@ -1986,6 +1978,11 @@ export class ModelToolController {
   /** ⇔ toggle on the armed cluster: mirror Alt-during-drag onto the live preview. */
   private setExtrudeSymmetric(symmetric: boolean): void {
     if (this.extrude.phase !== "armed" && this.extrude.phase !== "dragging") return;
+    if (this.dragging === "extrude" && this.extrude.symmetric !== symmetric) {
+      // Changing endpoint derivative must not make the next one-pixel move jump.
+      this.extrudeStartDepth = this.extrude.depth;
+      this.extrudeGrabDepth = this.extrudeLastRawDepth;
+    }
     this.extrude = extrudeStep(this.extrude, { kind: "setSymmetric", symmetric }).state;
     this.engine.setExtrudeDepth(this.extrude.depth, symmetric);
     this.syncExtrudeHandle();
@@ -3607,10 +3604,7 @@ export class ModelToolController {
     this.updateDebug();
   }
 
-  private async armEdgeOpFromSelection(
-    kind: EdgeOpKind,
-    opts?: { auto?: boolean },
-  ): Promise<void> {
+  private async armEdgeOpFromSelection(kind: EdgeOpKind): Promise<void> {
     const selected = selectionStore.getState().selected;
     const edges = selected.filter((r) => r.kind === "edge");
     // C7 / D9: with no edge picked, a FACE selection arms the whole face —
@@ -3639,30 +3633,22 @@ export class ModelToolController {
     this.filletFromFace = expanded?.faceLabel ?? null;
     this.filletEditFeatureId = undefined;
     this.computeEdgeOpOutward();
-    // Direction-driven typing is armed ONLY on the bisector tier. The bbox proxy is
-    // convex-only — on a pocket edge it points INTO material, so an automatic flip
-    // there would author the op the user did not ask for. Off that tier the chip
-    // segments are the type control and the drag only sizes.
-    const auto = opts?.auto === true && this.filletAxisSource === "bisector";
     const size = kind === "Chamfer" ? DEFAULT_CHAMFER_DISTANCE : DEFAULT_FILLET_RADIUS;
     this.fillet = filletStep(filletInit(), {
       kind: "arm",
       edgeCount: this.filletEdges.length,
       radius: size,
       edgeOp: kind,
-      auto,
     }).state;
     toolStore.setState({ phase: "armed" });
-    // A resolved world axis gets a real handle (the extrude/offset-face rule): only
-    // a press ON it starts the drag, everything else stays free to orbit/select. The
-    // "screen" tier has no honest axis to put a handle on, so it keeps claiming
-    // every viewport press — orbit suppressed there, exactly as before this change.
+    // A resolved world axis gets a real handle. A screen tier gets an honest,
+    // visible scalar proxy; neither may claim arbitrary viewport presses.
     if (this.filletDegraded) {
-      this.engine.hideValueHandle();
+      (this.deps.engine as Partial<ViewportEngine>).showScreenValueHandle?.(this.filletAnchor);
     } else {
       this.engine.showValueHandle(this.filletAnchor, this.filletOutward as Vec3);
     }
-    this.deps.engine.setOrbitSuppressed(this.filletDegraded);
+    this.deps.engine.setOrbitSuppressed(false);
     const hint = this.edgeOpArmHint();
     this.previewArmHint = hint;
     viewportStore.getState().setStatusHint(hint, { sticky: true });
@@ -4915,14 +4901,17 @@ export class ModelToolController {
       thickness: startThickness,
     }).state;
     toolStore.setState({ phase: "armed" });
-    this.deps.engine.setOrbitSuppressed(true); // modal: drag adjusts thickness, not orbit
+    this.deps.engine.setOrbitSuppressed(false); // only visible proxy claims a drag
     const n = faces.length;
     const hint = editFeatureId
-      ? "Edit shell thickness — drag or type, Enter to apply"
-      : `Shell ${n} face${n > 1 ? "s" : ""} — drag or type thickness · Enter or ✓ to apply`;
+      ? "Edit shell thickness — drag visible control vertically or type, Enter to apply"
+      : `Shell ${n} face${n > 1 ? "s" : ""} — drag visible thickness control vertically or type · Enter or ✓ to apply`;
     this.previewArmHint = editFeatureId ? null : hint;
     viewportStore.getState().setStatusHint(hint, { sticky: true });
     const anchor = faces[0]?.anchor?.worldPoint ?? [0, 0, 0];
+    // No certified wall normal crosses this frontend boundary. Keep mapping
+    // honest: visible screen proxy, not a fake geometric thickness witness.
+    (this.deps.engine as Partial<ViewportEngine>).showScreenValueHandle?.(anchor);
     toolChipStore.getState().showShell(startThickness, anchor, (v) => this.onShellChip(v), {
       onConfirm: () => void this.commitShell(),
       onCancel: () => toolStore.getState().setTool("select"),
@@ -5242,10 +5231,8 @@ export class ModelToolController {
     }
     this.offsetFace = step.state;
     toolStore.setState({ phase: "armed" });
-    // Orbit stays FREE while a real arrow exists (the extrude rule: the handle is
-    // hit-tested, so a press that misses it is an orbit). The degraded gesture has
-    // no handle to miss, so it claims every press and must suppress orbit.
-    this.deps.engine.setOrbitSuppressed(this.offsetDegraded);
+    // Both a geometric arrow and an explicit screen proxy are hit-tested.
+    this.deps.engine.setOrbitSuppressed(false);
     const hint = this.offsetArmHint();
     this.previewArmHint = hint;
     viewportStore.getState().setStatusHint(hint, { sticky: true });
@@ -5262,7 +5249,7 @@ export class ModelToolController {
     const face = `${n} face${n > 1 ? "s" : ""}`;
     const tail = chained > 0 ? ` (+${chained} tangent)` : "";
     return this.offsetDegraded
-      ? `Offset ${face}${tail} — drag or type a distance · Enter or ✓ to apply`
+      ? `Offset ${face}${tail} — drag visible distance control or type · Enter or ✓ to apply`
       : `Offset ${face}${tail} — drag the arrow or type · Enter or ✓ to apply`;
   }
 
@@ -5538,7 +5525,12 @@ export class ModelToolController {
    * comes back if that candidate later fails.
    */
   private applyOffsetFaceState(): void {
-    if (this.offsetDegraded || !this.offsetAxis) return;
+    if (this.offsetDegraded || !this.offsetAxis) {
+      if (this.offsetFace.distanceType === "Offset") {
+        (this.deps.engine as Partial<ViewportEngine>).showScreenValueHandle?.(this.offsetAnchor);
+      }
+      return;
+    }
     const d = this.offsetFace.distance;
     const axis = this.offsetAxis;
     const origin: Vec3 = [
@@ -8185,23 +8177,19 @@ export class ModelToolController {
       this.extrudeGrabDepth = ray
         ? axisDepthFromRay(ray.origin, ray.dir, this.centroidWorld, this.normal)
         : this.extrude.depth;
+      this.extrudeLastRawDepth = this.extrudeGrabDepth;
       this.extrude = extrudeStep(this.extrude, { kind: "grab" }).state;
-      this.extrudeGrabbed = true;
-      this.syncExtrudeHandle(); // the second head retires once a direction is owned
+      this.syncExtrudeHandle();
       this.engine.setExtrudeHandleHover(true);
       toolStore.setState({ phase: "dragging" });
       this.updateDebug(); // publish the live "dragging" phase to the debug surface
     } else if (
       this.fillet.phase === "armed" &&
       !this.isExcludedClickAwayTarget(e.target) &&
-      (this.filletDegraded || this.engine.hitExtrudeHandle(e.clientX, e.clientY))
+      this.engine.hitExtrudeHandle(e.clientX, e.clientY)
     ) {
-      // A resolved axis gets a real handle (the extrude/offset-face rule): only a
-      // press ON it starts the drag, and orbit/select stay free everywhere else.
-      // DEGRADED has no handle to hit-test, so it still claims every viewport press
-      // — which is exactly why it has no click-away commit. The chip lives inside
-      // the container's overlay, so a press ON the chip must NOT be swallowed as a
-      // drag either way: excluding it is what makes the ✓ clickable.
+      // The shared handle or visible screen proxy alone may start a drag. The chip
+      // is excluded so its value and confirmation controls remain interactive.
       this.dragging = "fillet";
       this.filletDownX = e.clientX;
       this.filletDownY = e.clientY;
@@ -8211,11 +8199,15 @@ export class ModelToolController {
         this.fillet.edgeOp === "Chamfer" ? -this.fillet.radius : this.fillet.radius;
       this.filletAxis = this.edgeOpScreenAxis(); // per grab — the camera may have orbited
       this.fillet = filletStep(this.fillet, { kind: "grabEdge" }).state;
-      if (!this.filletDegraded) this.engine.setExtrudeHandleHover(true);
+      this.engine.setExtrudeHandleHover(true);
       toolStore.setState({ phase: "dragging" });
       this.throttle.setTrailingMs(EDGE_OP_DRAG_TRAILING_MS); // live while the pointer owns it
       this.updateDebug();
-    } else if (this.shell.phase === "armed" && !this.isExcludedClickAwayTarget(e.target)) {
+    } else if (
+      this.shell.phase === "armed" &&
+      !this.isExcludedClickAwayTarget(e.target) &&
+      this.engine.hitExtrudeHandle(e.clientX, e.clientY)
+    ) {
       this.dragging = "shell";
       this.shellDownY = e.clientY;
       this.shellStartThickness = this.shell.thickness;
@@ -8238,11 +8230,7 @@ export class ModelToolController {
    * Claim a press for the armed offset, or decline it. Returns whether the drag
    * started.
    *
-   * Two gestures, one tool. With a real arrow (`!offsetDegraded`) only a press ON
-   * the handle counts, exactly like Extrude — every other press stays available to
-   * orbit and select, which is why orbit is not suppressed there. In the DEGRADED
-   * case there is no handle to hit-test, so the tool claims every viewport press
-   * (the fillet/shell rule) and the chip is excluded so its ✓ stays clickable.
+   * Both geometric arrows and explicit screen proxies require a handle hit.
    *
    * Both capture their start value AT THE PRESS and report DIFFERENCES against it —
    * the grab point is never the arrow's origin, and taking the absolute depth
@@ -8259,9 +8247,7 @@ export class ModelToolController {
       if (!ray) return false;
       this.offsetGrabDepth = axisDepthFromRay(ray.origin, ray.dir, this.offsetAnchor, this.offsetAxis);
       this.engine.setExtrudeHandleHover(true);
-    } else {
-      if (this.isExcludedClickAwayTarget(e.target)) return false;
-    }
+    } else if (this.isExcludedClickAwayTarget(e.target) || !this.engine.hitExtrudeHandle(e.clientX, e.clientY)) return false;
     this.dragging = "offsetFace";
     this.offsetDownX = e.clientX;
     this.offsetDownY = e.clientY;
@@ -8379,12 +8365,16 @@ export class ModelToolController {
       // the absolute projection would add an arrow-length to D on EVERY re-grab —
       // a ratchet. Same fix, same reason as the offset-face arrow (`:5635`).
       const raw = axisDepthFromRay(ray.origin, ray.dir, this.centroidWorld, this.normal);
+      this.extrudeLastRawDepth = raw;
+      // The strip's symmetric mode is persistent; Alt changes it through the
+      // same rebased setter. Do not overwrite a deliberate toggle on each frame.
+      const symmetric = this.extrude.symmetric;
       const depth = snapDepth(
-        this.extrudeStartDepth + (raw - this.extrudeGrabDepth),
+        this.extrudeStartDepth + (symmetric ? 2 : 1) * (raw - this.extrudeGrabDepth),
         this.dragQuantumMm(),
       );
       const modeBefore = this.extrude.booleanMode;
-      this.extrude = extrudeStep(this.extrude, { kind: "drag", depth, symmetric: this.altHeld }).state;
+      this.extrude = extrudeStep(this.extrude, { kind: "drag", depth, symmetric }).state;
       this.engine.setExtrudeDepth(this.extrude.depth, this.extrude.symmetric);
       toolChipStore.getState().setValue(this.extrude.depth);
       toolChipStore.getState().setSymmetric(this.extrude.symmetric); // Alt-drag syncs the ⇔ toggle
@@ -8396,9 +8386,6 @@ export class ModelToolController {
       if (this.extrude.booleanMode !== modeBefore) {
         this.applyBooleanState(this.extrude.booleanMode, false, "extrude");
       }
-      // AFTER the mode resolves: the arrow carries the destructive tint too, and
-      // a Cut that only reddened the prism would leave the primary affordance
-      // saying the opposite of what the op is about to do.
       this.syncExtrudeHandle();
       this.sendPreview();
       this.updateDebug(); // publish live phase ("dragging") + depth to the debug surface
@@ -8413,12 +8400,8 @@ export class ModelToolController {
         this.filletAxis,
         { worldPerPx: this.engine.planePixelWorld() },
       );
-      const before = this.fillet.edgeOp;
-      // TYPE first, off the RAW drag, then SIZE. The guard is about how big the
-      // value may be and has nothing to say about which op the gesture authors,
-      // so clamping `signed` before the reducer saw it could suppress a type flip
-      // on a closure whose feasible maximum happens to be under the hysteresis
-      // band — a size measurement silently deciding a type.
+      // The guard is about size only. The reducer preserves the explicit edge-op
+      // type throughout this ordinary drag.
       let next = filletStep(this.fillet, { kind: "drag", signed }).state;
       const guarded = this.guardEdgeOpValue(next.radius);
       if (guarded.value !== next.radius) {
@@ -8426,12 +8409,7 @@ export class ModelToolController {
       }
       this.fillet = next;
       toolChipStore.getState().setValue(this.fillet.radius);
-      // The flip has to be VISIBLE on the frame its params change, and it swaps the
-      // whole preview session (opType is frozen per session) — so it replaces the
-      // ordinary send rather than following it. Cheap by construction: the compare
-      // only does work on an actual type crossing.
-      if (this.fillet.edgeOp !== before) this.applyEdgeOpKindChange();
-      else this.sendPreview();
+      this.sendPreview();
     } else if (this.dragging === "shell") {
       const dy = this.shellDownY - e.clientY; // up-drag grows the thickness
       const thickness = radiusFromDrag(this.shellStartThickness, dy, { worldPerPx: this.engine.planePixelWorld() });
@@ -8456,7 +8434,9 @@ export class ModelToolController {
       // The offset arrow IS the extrude drag handle (one shared instance), so its
       // hover reads through the same probe.
       this.engine.setExtrudeHandleHover(this.engine.hitExtrudeHandle(e.clientX, e.clientY));
-    } else if (this.fillet.phase === "armed" && !this.filletDegraded) {
+    } else if (this.fillet.phase === "armed") {
+      this.engine.setExtrudeHandleHover(this.engine.hitExtrudeHandle(e.clientX, e.clientY));
+    } else if (this.shell.phase === "armed") {
       this.engine.setExtrudeHandleHover(this.engine.hitExtrudeHandle(e.clientX, e.clientY));
     } else if (this.transform.phase === "armed") {
       this.engine.setTransformGizmoHover(this.engine.hitTransformGizmo(e.clientX, e.clientY));
@@ -8537,7 +8517,7 @@ export class ModelToolController {
       // Release KEEPS the tool armed at the dragged size (no implicit commit) —
       // the live kernel preview + editable chip stay, Enter / ✓ applies.
       this.dragging = null;
-      if (!this.filletDegraded) this.engine.setExtrudeHandleHover(false);
+      this.engine.setExtrudeHandleHover(false);
       this.fillet = filletStep(this.fillet, { kind: "release" }).state; // → armed
       toolStore.setState({ phase: "armed" });
       this.throttle.setTrailingMs(EDGE_OP_TRAILING_MS); // back to the armed floor
@@ -8617,7 +8597,7 @@ export class ModelToolController {
       this.updateDebug();
     } else if (this.dragging === "fillet") {
       this.dragging = null;
-      if (!this.filletDegraded) this.engine.setExtrudeHandleHover(false);
+      this.engine.setExtrudeHandleHover(false);
       this.fillet = filletStep(this.fillet, { kind: "release" }).state;
       toolStore.setState({ phase: "armed" });
       this.throttle.setTrailingMs(EDGE_OP_TRAILING_MS);
@@ -8687,7 +8667,7 @@ export class ModelToolController {
     this.dragging = "extrude";
     this.extrudeStartDepth = 0;
     this.extrudeGrabDepth = 0;
-    this.extrudeGrabbed = true;
+    this.extrudeLastRawDepth = 0;
     this.extrude = extrudeStep(this.extrude, { kind: "grab" }).state;
     toolStore.setState({ phase: "dragging" });
   }
@@ -9738,6 +9718,7 @@ export class ModelToolController {
   private teardownPreviewedTool(): void {
     this.settleOperationAttempt("completed");
     this.deps.engine.setOrbitSuppressed(false);
+    this.deps.engine.hideValueHandle();
     toolChipStore.getState().clear();
     this.closePreviewSessions();
     this.previewArmHint = null;
@@ -11006,10 +10987,7 @@ export class ModelToolController {
     if (e.key === "Alt") {
       this.altHeld = true;
       if (this.dragging === "extrude") {
-        this.extrude = extrudeStep(this.extrude, { kind: "drag", depth: this.extrude.depth, symmetric: true }).state;
-        this.engine.setExtrudeDepth(this.extrude.depth, true);
-        toolChipStore.getState().setSymmetric(true);
-        this.sendPreview();
+        this.setExtrudeSymmetric(true);
       } else if (this.dragging === "revolve") {
         this.applyRevolveDrag(this.revolveLastX); // re-evaluate the snap without Alt
       }
@@ -11020,10 +10998,7 @@ export class ModelToolController {
     if (e.key === "Alt") {
       this.altHeld = false;
       if (this.dragging === "extrude") {
-        this.extrude = extrudeStep(this.extrude, { kind: "drag", depth: this.extrude.depth, symmetric: false }).state;
-        this.engine.setExtrudeDepth(this.extrude.depth, false);
-        toolChipStore.getState().setSymmetric(false);
-        this.sendPreview();
+        this.setExtrudeSymmetric(false);
       } else if (this.dragging === "revolve") {
         this.applyRevolveDrag(this.revolveLastX); // re-apply the 45° snap
       }
@@ -11136,6 +11111,7 @@ export class ModelToolController {
     this.closePreviewSessions();
     this.previewArmHint = null;
     this.deps.engine.setOrbitSuppressed(false);
+    this.deps.engine.hideValueHandle();
     this.shell = shellInit();
     this.shellFaces = [];
     this.shellEditFeatureId = undefined;

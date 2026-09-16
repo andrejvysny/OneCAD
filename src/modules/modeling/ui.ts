@@ -30,6 +30,7 @@ import { ModelToolChips } from "@/features/toolbar/ModelToolChips";
 import { MeasureOverlay } from "@/features/measure/MeasureOverlay";
 import { RepairMarkerOverlay } from "@/features/repair/RepairMarkerOverlay";
 import { FloatingToolbar } from "@/features/toolbar/FloatingToolbar";
+import { ModelOperationBar } from "@/features/toolbar/ModelOperationBar";
 import { SketchChromeBar } from "@/features/sketch/SketchChromeBar";
 import { ModelTreePanel } from "@/features/tree/ModelTreePanel";
 import { VariablesPanel } from "@/features/inspector/VariablesPanel";
@@ -66,6 +67,12 @@ export function contributeModelingUi(scope: ModuleScope): void {
     slot: Slots.ToolbarContextual,
     priority: 100,
     component: SketchChromeBar,
+  });
+  scope.registerPanel({
+    id: ModelingPanels.ModelOperationBar,
+    slot: Slots.ToolbarContextual,
+    priority: 110,
+    component: ModelOperationBar,
   });
 
   scope.registerPanel({

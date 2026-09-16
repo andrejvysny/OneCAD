@@ -98,3 +98,11 @@ nothing unless it is shown to fail without the fix.
 - Red-first for a FRONTEND change: `cp` the module to the scratchpad, patch the one expression
   with a short `python3` heredoc, run the single vitest/Playwright test, then `cp` the backup
   back. Playwright's `-g "<substring>"` runs one test in ~40 s including the vite boot.
+- A red-first probe that "does not go red" can mean the test no longer pins what you
+  think: `sketch_on_face.rs`'s below-gate case stayed green under an intent-strip probe
+  because `UpdateOperationParams` RE-STAMPS `intent.descriptor` through
+  `stamp_intents`. Measure the worker's actual decision (temporarily push an extra
+  `info_diagnostic` carrying `topoKey`/score/margin/postEdit — it lands in
+  `RegenReport::diagnostics`, which a test can `eprintln!`) instead of inferring it.
+- `cargo test --workspace | awk '/^test result:/'` over-counts: a test NAMED
+  `result::…` matches `^test result:`. Filter on `$4 ~ /^[0-9]+$/`.

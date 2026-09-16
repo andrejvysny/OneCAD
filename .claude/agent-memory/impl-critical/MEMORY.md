@@ -21,3 +21,5 @@
 - [tauri-agent calibration](repo_tauri_agent_calibration.md) — read-only wheel probe, window-capture beats the canvas listener, checkPoint is the only input gate, the fake's script-name set
 - [tauri-agent process ownership](repo_tauri_agent_ownership.md) — config root vs CARGO_MANIFEST_DIR, Tauri's unknown-command wording, AppHandle::config is inherent, DELETE /session does not exit the app
 - [tauri-agent idle settling](repo_tauri_agent_idle.md) — settle reads ui_idle not ui_revision, null = unavailable (two lanes differ), async __stores, unregister alone leaves the pill on screen
+- [Sketch host transport](repo_sketch_host_transport.md) — §7.6 exact.anchor is the identity anchor, every unresolvable host halts, frameTransportVersion is a default not a stamp
+- [Cut effect policy](repo_cut_effect_policy.md) — the three floors in εV (semantic + measurement + κ·ulp), and the two tests whose "Cut" removed nothing

@@ -27,6 +27,7 @@ export const ModelingPanels = {
   RepairMarkerOverlay: panelId("repairMarkerOverlay"),
   MeasurePanel: panelId("measurePanel"),
   FloatingToolbar: panelId("floatingToolbar"),
+  ModelOperationBar: panelId("modelOperationBar"),
   SketchChromeBar: panelId("sketchChromeBar"),
   ModelTree: panelId("modelTree"),
   /** The left-sidebar "Variables" tab — shares `Slots.ShellLeft` with `ModelTree`. */

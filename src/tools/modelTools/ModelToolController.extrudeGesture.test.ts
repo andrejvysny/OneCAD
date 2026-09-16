@@ -300,28 +300,28 @@ describe("ModelToolController extrude gesture (chip exclusion + grab-relative de
     expect(mode).toBe("twoWay");
   });
 
-  it("the arrow follows the depth and flips with its sign, single-headed once grabbed", () => {
+  it("the arrow follows signed depth on one stable axis and stays two-way after grabbing", () => {
     controller.forceExtrudeGrab();
 
     move(yFor(40));
     let [origin, dir, mode] = handle();
     expect(origin[2]).toBeCloseTo(65, 6); // 25 + 40
     expect(dir[2]).toBeCloseTo(1, 6);
-    expect(mode).toBe("forward");
+    expect(mode).toBe("twoWay");
 
     move(yFor(-40));
     [origin, dir, mode] = handle();
     expect(origin[2]).toBeCloseTo(-15, 6); // 25 - 40
-    expect(dir[2]).toBeCloseTo(-1, 6); // points where the material is going
-    expect(mode).toBe("forward");
+    expect(dir[2]).toBeCloseTo(1, 6); // sign moves material; axis stays +normal
+    expect(mode).toBe("twoWay");
   });
 
-  it("depth 0 hands the handle a zero direction (it holds its own orientation)", () => {
+  it("depth 0 keeps the prepared +normal axis", () => {
     controller.forceExtrudeGrab();
     move(yFor(0));
     const [origin, dir] = handle();
     expect(origin[2]).toBeCloseTo(25, 6);
-    expect(dir).toEqual([0, 0, 0]);
+    expect(dir).toEqual([0, 0, 1]);
   });
 
   it("a typed depth moves the arrow exactly like a drag", () => {
@@ -330,7 +330,7 @@ describe("ModelToolController extrude gesture (chip exclusion + grab-relative de
     expect(origin[2]).toBeCloseTo(58, 6); // 25 + 33
   });
 
-  it("symmetric keeps ONE head, at the +|depth|/2 face the worker builds", () => {
+  it("symmetric keeps two heads at the +|depth|/2 face the worker builds", () => {
     controller.forceExtrudeGrab();
     move(yFor(-18));
     toolChipStore.getState().onSymmetric?.(true);
@@ -338,7 +338,17 @@ describe("ModelToolController extrude gesture (chip exclusion + grab-relative de
     // `depth` is the TOTAL span of a symmetric extrude (SCHEMA §7.3), half per side.
     expect(origin[2]).toBeCloseTo(34, 6); // 25 + |−18| / 2
     expect(dir[2]).toBeCloseTo(1, 6);
-    expect(mode).toBe("forward");
+    expect(mode).toBe("twoWay");
+  });
+
+  it("symmetric endpoint motion changes Total span at twice physical displacement", () => {
+    controller.forceExtrudeGrab();
+    move(yFor(20));
+    toolChipStore.getState().onSymmetric?.(true);
+
+    move(yFor(25)); // positive endpoint moved outward 5 mm
+
+    expect(debug().depth).toBeCloseTo(30, 6); // Total 20 + 2 × 5
   });
 });
 

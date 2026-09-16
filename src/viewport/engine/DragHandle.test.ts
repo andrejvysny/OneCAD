@@ -6,10 +6,9 @@
  * arbitrary 180° flip rather than a NaN. The extrude arm hits exactly that at
  * depth 0, so the handle must HOLD its orientation instead.
  *
- * PICK ENVELOPE tracks the visible heads. `twoWay` draws a mirrored head and must
- * be grabbable from that side; `forward` must NOT be, or the envelope reaches
- * backwards through the prism and the body (the visible materials are
- * `depthTest: false` and `raycast` has no occlusion test) and swallows selection.
+ * PICK ENVELOPE is a compact centered corridor. Both variants share it; chrome
+ * exclusion at input boundary, rather than asymmetric hidden geometry, protects
+ * nearby controls.
  */
 import { describe, it, expect, vi } from "vitest";
 import * as THREE from "three";
@@ -47,6 +46,20 @@ const ZERO = new THREE.Vector3(0, 0, 0);
 const O = new THREE.Vector3(0, 0, 0);
 
 describe("DragHandle orientation", () => {
+  it("uses requested vertical screen direction for an explicit scalar proxy", () => {
+    const { handle, root } = makeHandle();
+    const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
+    camera.position.set(0, 0, 20);
+    camera.lookAt(0, 0, 0);
+    camera.updateMatrixWorld();
+    camera.updateProjectionMatrix();
+    handle.setScreenProxy(O);
+    handle.orient(camera, 800, 800);
+
+    const up = new THREE.Vector3(0, 1, 0).applyQuaternion(root.children[0].quaternion);
+    expect(up.y).toBeGreaterThan(0.99);
+  });
+
   it("holds its orientation when handed a zero-length direction", () => {
     const { handle, root } = makeHandle();
     handle.setAxis(O, new THREE.Vector3(0, 0, 1));
@@ -76,6 +89,19 @@ describe("DragHandle orientation", () => {
 });
 
 describe("DragHandle pick envelope", () => {
+  it("uses a compact centered two-way glyph and matching 40px keep-out reach", () => {
+    const { handle, root } = makeHandle();
+    handle.setAxis(O, Y, "twoWay");
+    const geometry = parts(root).fill.geometry;
+    geometry.computeBoundingBox();
+    const bounds = geometry.boundingBox;
+
+    expect(bounds).not.toBeNull();
+    expect(bounds?.min.y).toBeCloseTo(-15, 6);
+    expect(bounds?.max.y).toBeCloseTo(15, 6);
+    expect(handle.reachPx()).toBe(20);
+  });
+
   it("twoWay is grabbable from the NEGATIVE side", () => {
     const { handle, hitAt } = makeHandle();
     handle.setAxis(O, Y, "twoWay");
@@ -84,20 +110,19 @@ describe("DragHandle pick envelope", () => {
     expect(hitAt(-10)).toBe(true);
   });
 
-  it("forward is NOT grabbable behind its origin", () => {
+  it("forward keeps the same centered corridor during compatibility migration", () => {
     const { handle, hitAt } = makeHandle();
     handle.setAxis(O, Y, "forward");
-    expect(hitAt(-10)).toBe(false);
-    // …but the forward body still picks.
+    expect(hitAt(-10)).toBe(true);
     expect(hitAt(20)).toBe(true);
   });
 
-  it("switching back to forward shrinks the envelope again", () => {
+  it("switching mode never creates a mismatched pick envelope", () => {
     const { handle, hitAt } = makeHandle();
     handle.setAxis(O, Y, "twoWay");
     expect(hitAt(-10)).toBe(true);
     handle.setAxis(O, Y, "forward");
-    expect(hitAt(-10)).toBe(false);
+    expect(hitAt(-10)).toBe(true);
   });
 
   it("a hidden handle is never picked", () => {
@@ -136,7 +161,7 @@ describe("DragHandle materials", () => {
 
     expect(handle.axisMode).toBe("forward");
     expect(parts(root).fill.material).not.toBe(tinted);
-    expect(hitAt(-10)).toBe(false);
+    expect(hitAt(-10)).toBe(true);
   });
 
   /*

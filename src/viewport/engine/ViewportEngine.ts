@@ -1795,6 +1795,19 @@ export class ViewportEngine {
     this.invalidate();
   }
 
+  /** Visible vertical proxy for a scalar with no certified world-axis mapping. */
+  showScreenValueHandle(origin: Vec3): void {
+    if (this.disposed) return;
+    if (!this.dragHandle) {
+      this.dragHandle = new DragHandle({ root: this.interactionRoot, invalidate: () => this.invalidate() });
+    }
+    this.dragHandle.reset();
+    this.dragHandle.setScreenProxy(new THREE.Vector3().fromArray(origin));
+    this.dragHandle.setScale(this.planePixelWorld());
+    this.dragHandle.setVisible(true);
+    this.invalidate();
+  }
+
   /**
    * Re-anchor the extrude arrow WITHOUT touching the L1 prisms — the per-frame
    * counterpart of {@link showExtrudePreviews}, which rebuilds the profiles.

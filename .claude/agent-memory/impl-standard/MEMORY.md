@@ -6,3 +6,4 @@
 - [Resolver v6 post-edit tie refusal](resolver-v6-post-edit-tie-refusal.md) — unminted seed ref + post_upstream_edit halts on the SEED's own descriptor tie before any op-built pair halt; mint the seed to reach the realistic path
 - [ToolChip confirm gate requires context](toolchip-confirm-gate-requires-context.md) — chip-confirm tests need setContext + seeded documentStore.bodies, else they hit the missing-target fallback, not the real gate
 - [tauri-agent keyboard fidelity (WP-H)](tauri-agent-keyboard-fidelity.md) — deliveryFor can't express posted+retrySafe; SessionStatus needs status() touched despite "only inside #preflight()"; layout() kept optional so fakeEnv.ts stays untouched
+- [FP-S13 setMode default blast radius](fp-s13-setmode-default-blast-radius.md) — toolStore's sketch bare-entry default (Line→Select) breaks 10 files/69 tests in src/tools/sketch/** that assume the old default; out-of-scope fix owed there

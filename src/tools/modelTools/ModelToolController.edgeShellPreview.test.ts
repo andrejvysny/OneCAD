@@ -121,6 +121,7 @@ function makeEngineMock() {
     hideGhostPreview: vi.fn(),
     hideValueHandle: vi.fn(),
     showValueHandle: vi.fn(),
+    showScreenValueHandle: vi.fn(),
     showGhostPreviewMulti: vi.fn(),
     probePick: vi.fn(() => null),
   };
@@ -333,6 +334,33 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
     expect(draft.params.openFaces).toEqual(["el-face-2"]);
     expect(draft.inputs?.map((ref) => ref.primary.elementId)).toEqual(draft.params.openFaces);
     expect(draft.params.targetBodyId).toBe("body1");
+    expect(engineMock.showScreenValueHandle).toHaveBeenCalledWith([0, 0, 10]);
+  });
+
+  it("does not start a shell thickness drag from empty viewport space", async () => {
+    build();
+    await armShell();
+
+    container.dispatchEvent(
+      new MouseEvent("pointerdown", { clientX: 10, clientY: 40, button: 0, buttons: 1, bubbles: true }),
+    );
+
+    expect(engineMock.hitExtrudeHandle).toHaveBeenCalledWith(10, 40);
+    expect(toolStore.getState().phase).toBe("armed");
+    expect(toolChipStore.getState().kind).toBe("shellThickness");
+  });
+
+  it("does not start a degraded edge-op drag from empty viewport space", async () => {
+    build();
+    await armFillet();
+
+    container.dispatchEvent(
+      new MouseEvent("pointerdown", { clientX: 10, clientY: 40, button: 0, buttons: 1, bubbles: true }),
+    );
+
+    expect(engineMock.showScreenValueHandle).toHaveBeenCalled();
+    expect(toolStore.getState().phase).toBe("armed");
+    expect(toolChipStore.getState().kind).toBe("filletRadius");
   });
 
   it('publishes "Computing preview…" on arm and clears it on the first answer', async () => {
@@ -365,6 +393,7 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
     build();
     await armFillet();
     answerPreview();
+    engineMock.hitExtrudeHandle.mockReturnValue(true);
 
     container.dispatchEvent(
       new MouseEvent("pointerdown", { clientX: 10, clientY: 40, button: 0, buttons: 1, bubbles: true }),

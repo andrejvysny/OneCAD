@@ -2,6 +2,35 @@
 
 Source: the handed-over spec "Unified Modeling Controls and Direct Manipulation" v1.0 (a STATIC review — never built, never run). Its correctness half was already owned by `PLAN.md` and landed in session 35; this session starts the half `PLAN.md` does not cover, the handle and label architecture. Three of the spec's own claims were checked against the code and are wrong or already done — recorded below so nobody re-implements them.
 
+## B2 — Extrude persistent bidirectional control [IN PROGRESS, 2026-09-16]
+
+- [x] Rechecked current checkout: `1073a90a` on `master`; unrelated `.claude/agent-memory/**` changes pre-existed and remain untouched. Read root instructions, state/ledger heads, handoff, B1 projection work, Extrude controller/gesture tests, overlay rules, and native GUI skill.
+- [x] Centered `DragHandle` to 30px; shared 40×30px corridor/keep-out reach replaces forward 60px silhouette. Existing Three billboard retained.
+- [x] Extrude now keeps stable +normal and two heads through grab/sign/zero; mode changes rebase at latest fixed-frame raw sample; symmetric endpoint gain is 2x.
+- [x] Focused: `bunx tsc --noEmit` ✓; `bun run test src/viewport/engine/DragHandle.test.ts src/tools/modelTools/ModelToolController.extrudeGesture.test.ts` **2 files / 37 passed** ✓; `bun run build` ✓; `git diff --check` ✓. Chromium attempt `extrude-boolean` + `extrude-commit-gesture` **blocked before test setup**: browser launch exits `SIGTRAP`, `MachPortRendezvousServer ... Permission denied (1100)` under sandbox. No product attribution, no browser/native acceptance claim.
+- [ ] Run browser/native acceptance outside browser-launch sandbox; native remains foreground-only and real-worker.
+
+## B3 — stable operation strip [IN PROGRESS, 2026-09-16]
+
+- [x] Product spec supersedes stale `PLAN.md` D14 probe constraint: completion controls must leave geometry-following chrome. Existing interaction contract fields remain authoritative.
+- [x] Added stable model-operation strip in `ToolbarContextual`: title, two semantic mode readouts, inspector action, Cancel, Done. It uses existing presentation/store lifecycle; no operation state duplicated.
+- [x] Updated shell mount-order golden for the intentional `ModelOperationBar` contribution after the full unit lane identified it as the sole stale contract.
+- [ ] Move legacy chip confirmation controls out of anchored panels after contract/probe migration; retain one primary editor draft.
+
+**Full unit:** Initial `bun run test` reached **363 files / 6203 passed / 78 skipped** and failed only the two stale `editorMountOrder.golden` expectations for the newly registered bar. After the intentional golden update: **363 files / 6206 passed / 78 skipped** ✓.
+
+## B4 — Shell visible control [IN PROGRESS, 2026-09-16]
+
+- [x] Shell now arms a visible, vertical, labeled screen-space scalar proxy at picked-face anchor. Empty viewport presses no longer claim thickness; proxy hit owns drag. No wall normal fabricated.
+- [x] Fillet/Chamfer now lock explicit type during ordinary drag. Legacy `auto:true` reducer input is ignored; only the explicit segment can reopen its preview session under the other op type.
+- [x] Degraded Fillet/Chamfer gets the same visible screen scalar proxy. Empty viewport presses do not alter it; resolved local axes retain world handles.
+- [x] Degraded ordinary Offset now uses the visible scalar proxy and requires its hit; no arbitrary viewport drag. Geometric Offset keeps its existing axis arrow. Absolute Total/Radius/Diameter remain typed-only pending certified mappings.
+- [ ] Add certified absolute Offset mappings where preparation evidence supplies them.
+
+**Focused gate:** `bunx tsc --noEmit` ✓ · `bun run test src/tools/modelTools/modelToolMachine.test.ts src/tools/modelTools/ModelToolController.edgeOpDirection.test.ts src/tools/modelTools/ModelToolController.edgeShellPreview.test.ts src/viewport/engine/DragHandle.test.ts` **4 files / 145 passed** ✓ · `bun run build` ✓ · `git diff --check` ✓.
+
+**Offset follow-up:** `bunx tsc --noEmit` ✓ · `bun run test src/tools/modelTools/ModelToolController.offsetFace.test.ts src/tools/modelTools/ModelToolController.edgeShellPreview.test.ts src/viewport/engine/DragHandle.test.ts` **3 files / 87 passed** ✓.
+
 ## B1 — perspective-correct handle projection [LANDED, gated]
 
 **The defect.** `DragHandle.orient()` derived the arrow's screen angle by rotating the world axis into CAMERA space and taking `atan2(y, x)`. That is exact for an ORTHOGRAPHIC camera only. Perspective divides by `w`, so a world axis projects to a different screen direction depending on where in the frustum it is ANCHORED. The arrow was therefore drawn along one direction while the drag mapped along another, widening with distance from the optical axis — and the default camera is FOV 76 (`CameraRig.ts`), so that is most of the viewport. Neither the static spec nor the real-user UX review found this.

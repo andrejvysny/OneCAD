@@ -219,3 +219,154 @@ CLAUDE.md and none is derivable without running the suite.
   Never both keys at once — `offsetAllowedTypes` tests `radius` FIRST, so the old
   `{ radius: 10, thickness: 10 }` made every mock-lane face read as curved and
   removed `Total` from the UI entirely.
+- `commitFillet` refuses on `toolChipStore.validation.status !== "valid"`, and the
+  fire-and-forget `armEdgeOpRange` (`AnalyzeEdgeOpRange`, SCHEMA §7.6) parks the
+  chip on `"pending"` after EVERY deliberate arm and type flip. A chip Enter
+  applies its value and confirms in one turn, so a ✓ that lands before the
+  measurement answers used to be dropped SILENTLY — timing-dependent, passes
+  alone, red on a loaded machine. `commitFillet` now awaits `filletRangeSettled`
+  when the status is pending. "pending" is never a refusal anywhere.
+- `openEdgeOpPreview(gen)` is fenced by `armGen` ONLY, and `runChamferSync`'s
+  reopen does not bump it — so the arm's own in-flight open and the sync's reopen
+  both install at the same gen. Measured: two `beginPreview` sessions installed at
+  one `armGen`, last writer wins, and the loser's frozen `inputs[]` can be the one
+  the ✓ materializes. Still unfixed.
+- `resetStores()` forces `snapTo.polarTracking` and `snapTo.dimensionRound` OFF
+  for EVERY vitest (the pointer specs pin raw click coords). A spec that needs
+  the polar fan must `settingsStore.getState().setSnap("polarTracking", true)`
+  itself — `disableSnapping()` in `SketchController.draw.test.ts` enumerates
+  only the older keys, so reading it is misleading.
+- The polar fan's `Parallel` / `Perpendicular` rays carry a relation INTENT only
+  when `SketchController.lastChainLineId` is set — written at the very END of
+  `commitNow`. A burst of synchronous clicks therefore produces none; a chain
+  test must `await flushSketchMutations()` between clicks. The rays are also
+  deduped mod π against the fixed 0/45/90/135 ones (`polarCandidates`
+  `isNew`), so an EXACTLY axis-aligned chain never offers Perpendicular — the
+  B3 bug needs a leg a degree or two off, and legs long enough (≥1000 units at
+  the 1:1 test metric) that the fixed 90° ray falls outside the 8px reach.
+- `persistIntents` maps `intents[i] → commitPointRefs()[i]`, and `intents`
+  begins with the PRIOR anchor's intent. One accepted polar Perpendicular
+  therefore authors TWO constraints on the next commit — one against the new
+  entity's Start (replayed prior intent) and one against its End.
+- In `directionLock.ts`'s parity graph every Horizontal/Vertical joins the SAME
+  axis node, so a single H+V contradiction anywhere puts an odd cycle in the
+  component every axis-locked line belongs to. `classifyDirectionCandidate`
+  then answers `invalid` for all of them; `admitDirectionCandidates` AUTHORS
+  those (reporting them as `unassessed`) rather than dropping on an unsound
+  verdict.
+- `__vpEngine.projectPoint(world)` answers in CANVAS-RELATIVE px, not client px.
+  An e2e spec that feeds it to `page.mouse` must add the canvas
+  `getBoundingClientRect()` origin back. `filletChamfer.spec.ts` gets away
+  without it only because it takes the DIFFERENCE of two projected points, which
+  the offset cancels out of.
+- NOTHING on `CadClient` answers "which edges bound this face". `prepareEdgeOp`
+  reports the inverse (`adjacentFaces` per PREPARED edge) and the mock derives
+  that only for the seed box. `src/viewport/mesh/faceEdges.ts` derives face →
+  edges from MESH1 geometry instead (point-to-TRIANGLE, not point-to-plane, so a
+  coplanar neighbour cannot pass), with a tolerance mirroring the worker's
+  `deflections()` in `worker/src/tess/Tessellate.cpp` — move it when that moves.
+- The worker samples edge polylines INDEPENDENTLY of the face triangulation
+  (`sample_edge`, same chordal policy, different nodes), so an edge point does
+  NOT coincide with a face triangulation vertex on curved geometry. Any
+  "does this edge lie on this face" test has to be a distance test, never
+  vertex identity.
+- On a CONVEX body a silhouette edge's adjacent faces always RECEDE from the
+  camera, so the edge-vs-face DEPTH window never decides there — only the screen
+  radius (`EDGE_PICK_PX`) does. A real-box raycast test therefore cannot
+  exercise the depth rule; fabricate hits at chosen depths for that.
+- A model tool's arm status hint is overwritten by "Computing preview…" a
+  microtask later and restored from `previewArmHint` when the preview result
+  lands. A vitest assertion on the FINAL `viewportStore.statusHint` misses the
+  arm sentence entirely — subscribe to the store and collect the sequence.
+- `resetStores()` seeds a document that already has one VISIBLE body (`body1`),
+  so every document-level `getToolApplicability` gate (hole/measure need ≥1
+  visible body, combine needs ≥2 bodies — C6) passes by default. Exercising one
+  needs an explicit `documentStore.setState({ bodies: … })`.
+- `ToolButton` renders `aria-disabled` plus a `role="tooltip"` on hover, never
+  the native `disabled` attribute and never a `title`. An e2e assertion on a
+  greyed tool is `toHaveAttribute("aria-disabled","true")` + `.hover()` +
+  `getByRole("tooltip")` (precedent: `offset-face.spec.ts`).
+- `constraint-row-<id>` is counted PAGE-WIDE by four e2e specs (`acceptance`,
+  `constraint-apply`, `dimension-conflict`, `line`), so a second `ConstraintList`
+  anywhere on screen breaks them by inflating the count. `ConstraintList` takes a
+  `testIdPrefix` for exactly that (the Entity section passes `"entity-"`); the
+  default `""` keeps every existing selector working.
+- `settleUntil` (`src/test/settle.ts`) counts EVENT-LOOP TURNS, not milliseconds,
+  so it can out-run the mock lane's 120 ms simulated latency: a test that awaits a
+  real `mockClient` round-trip must `setMockLatency(0)` first (`InspectorPanel.test.tsx`
+  does NOT zero it in its `beforeEach`, unlike the golden file).
+- `DocumentProjection.sketches` is a Rust `BTreeMap<String, SketchDto>` — sorted by
+  sketch id, NOT timeline order — so the k-th registry sketch is NOT the k-th
+  `kind: "sketch"` feature row. `FeatureDto` carries no sketch id and every sketch
+  record is labelled literally "Sketch", so the ONLY sound sketch→row link in the
+  frontend is `getOperationParams(rowId).sketchId` (`sketchLineage.ts`).
+- Inch display decimals are 4 (`lengthUnits.ts`), so 5 mm renders `0.1969 in`, not
+  `0.197 in` — a test that eyeballs three decimals for `in` goes red.
+- The inspector's read-only recap title comes from `activeToolPresentationTitle`,
+  not `activeToolLabel`: one chip kind (`filletRadius`) serves two operations, and
+  the live `state.edgeOp` is already cleared when the recap renders.
+- `Picker.ts`'s `onPointerDown`/`onPointerUp` guard on `isInteractiveBoundary`,
+  but `onPointerMove` (the HOVER path) does NOT — so a cursor resting on a chip
+  raycasts and highlights the face behind it. That, not a click, is the "click
+  fell through and highlighted the top face" the 2026-09-14 review saw; the
+  click itself is already refused twice (`Picker.ts` and
+  `ModelToolController.onPointerDown`).
+- `ExtrudeOverflow` is dead but `SymmetricToggle`/`BooleanModeSegments`/
+  `EndConditionSegments`/`DraftSegment` are NOT — `ActiveToolInspector`'s
+  `ExtrudeInspector` is the live render path for all of them. A new extrude
+  secondary control has to be added there to be reachable.
+- The extrude RE-EDIT commit is `updateScalarParamsCommand(id, "Extrude",
+  stored, patch)` — a SHALLOW merge, so any option the re-edit exposes must be
+  added to that patch or the control is inert. Three existing specs pin the exact
+  patch object (`commit`, `hostBoolean`, `regionAnchor` test files); adding a key
+  reds all three.
+- `extrudeStep({kind:"arm"})` takes only depth/draft/boolean — seed `endCondition`
+  and `symmetric` with follow-up `setEndCondition`/`setSymmetric` steps. Pass the
+  stored `targetFace` to `setEndCondition` or a `ToFace` seed drops the FSM into
+  `facePick` instead of staying armed.
+- `ViewportEngine.getCameraDistance()` exists but is absent from most hand-rolled
+  engine doubles: call it through `(this.engine as Partial<ViewportEngine>)
+  .getCameraDistance?.()`, the same escape hatch the controller already uses at
+  its `Partial<ViewportEngine>` site.
+- `HtmlOverlayDriver.update()` rewrites `display` on EVERY registered element each
+  frame, so an owner that hides its own overlay with `style.display = "none"` is
+  un-hidden on the next render (root cause of the stale snap hint / H-V ghost,
+  UX S4). Hide through `overlay.setHidden(id, true)` instead.
+- `SketchController.snapHintsVisible()` SUPPRESSES the snap hint chip while live-dim
+  chips are open, so mid-chain `[data-sketch-snap-hint]` is hidden in e2e even with
+  a live decision. Only a "Close loop" label overrides that. Read
+  `__stores.viewport.getState().snapFeedback` for the decision itself.
+- `ToolState.cursor` is the point AFTER `projectEvent` applied the locks. Re-stepping
+  from it feeds a lock its own output (the rubber band stays stuck at the typed
+  length after the lock drops), so `restepAtCursor` uses `stepCursor`, the raw aim.
+- A controller test's first click is itself SNAPPED: the origin sits inside the 8px
+  reach of any click within ~4 plane units at a 1:1 metric, so the "anchor" is often
+  (0,0), not the click. Pick anchors far from the origin and off grid crossings.
+- `snapArbitration`'s crossing-shadow rule treats a set within 0.75px of BOTH of a
+  crossing's lines as "at the crossing" and keeps it. Rounding-only sets therefore
+  slipped past it; they now always yield to a reachable crossing. Reproducing the old
+  bug needs an anchor/cursor pair whose rounded point falls in that band.
+- Constraint rows carry operand names now ("Distance · Line 2 start – Line 2 end"),
+  so `getByText("Distance", { exact: true })` matches nothing. Use
+  `getByRole("button", { name: /^Distance(\s|$)/ })`.
+- `SketchEntity` lines use `p0`/`p1`, not `start`/`end`. An `as SketchEntity` cast
+  hides the mistake and the entity silently produces no snap candidates.
+- `rm` is denied in this repo's shell. Move scratch files into the session
+  scratchpad instead; `git checkout -- e2e/zzdebug.spec.ts` still works.
+- `enterSketchViaPlanePicker` settles the camera BEFORE the plane pick, but that
+  click starts a SECOND tween (`enterSketch` aims along the plane normal) and every
+  chrome signal — "Editing …", the armed tool, even "DOF: 0" — is true while it is
+  still swinging. A spec that clicks straight after entering resolves coordinates
+  against a dead pose; webkit loses this race where chromium wins it. Measured:
+  `screenToPlane` at the canvas centre read (17.7, −16.7) then (13.3, −12.7) on
+  webkit, so a centre click committed at (7.7, −7.5) and the origin snap was
+  correctly declined (+2 DOF, no `Fixed`). The helper now settles again at the end.
+- `findGizmoHandle` scans the canvas for a handle, and the transform gizmo's arms
+  are only ~2px apart on screen at the scan point, so ANY camera motion between the
+  scan and the drag hands the pointer a neighbouring arm (X→Y). It now settles first
+  and re-verifies the hit before returning. `hitTransformGizmo` does NOT go through
+  `Picker` — it raycasts `TransformGizmo` directly — so a gizmo axis flip is never
+  a picker-arbitration bug.
+- A DOF that is exactly 2 higher than a sketch spec expects means the origin `Fixed`
+  was not authored, which nearly always means the click missed the origin, not that
+  snapping or persistence broke. Dump the committed entity's own coordinates first.

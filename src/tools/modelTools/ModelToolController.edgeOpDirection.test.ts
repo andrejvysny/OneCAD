@@ -1,17 +1,12 @@
 /*
- * ModelToolController — FILLET-CHAMFER-UNIFY: the drag DIRECTION types the edge
- * op, and a type change swaps the kernel preview session (jsdom).
+ * ModelToolController — explicit Fillet/Chamfer type and session swaps (jsdom).
  *
  * Three things are pinned here and nowhere else:
  *
- *  1. TIER HONESTY. `auto` is armed ONLY when the outward direction came from the
- *     bisector tier. The bbox proxy is convex-only — on a pocket edge it points
- *     INTO material — so an arm that falls back to it (or has no mesh at all)
- *     must seed `auto:false` and let the chip segments own the type.
- *  2. THE FLIP IS A SESSION SWAP. `beginPreview` freezes `opType`, so a re-type
- *     has to `endPreview(id,false)` the old session and open a new one under the
- *     new op. A params patch would author a Chamfer through a Fillet's builder.
- *  3. NO STALE SESSION SURVIVES A RACE. Two flips inside one in-flight
+ *  1. TYPE IS EXPLICIT. Every drag only sizes its armed Fillet or Chamfer.
+ *  2. THE EXPLICIT FLIP IS A SESSION SWAP. `beginPreview` freezes `opType`, so a
+ *     re-type has to `endPreview(id,false)` the old session and open a new one.
+ *  3. NO STALE SESSION SURVIVES A RACE. Two explicit flips inside one in-flight
  *     `beginPreview` must leave exactly ONE live session, carrying the FINAL op —
  *     which is what the `armGen` bump before the close+reopen buys.
  *
@@ -215,19 +210,19 @@ describe("ModelToolController edge-op drag direction", () => {
     meshRegistry.__resetRegistryForTests();
   });
 
-  // ── tier 1: the bisector arm is the only one that may re-type ────────────────
+  // ── a resolved local axis still leaves type explicit ─────────────────────────
 
-  it("arms auto on the BISECTOR tier when the picked edge's mesh is present", async () => {
+  it("arms a locked Fillet on the BISECTOR tier when mesh is present", async () => {
     build();
     registerBox();
     await armFillet();
 
     expect(debugState().edgeOpAxisSource).toBe("bisector");
-    expect(debugState().edgeOpAuto).toBe(true);
+    expect(debugState().edgeOpAuto).toBe(false);
     expect(debugState().edgeOpKind).toBe("Fillet");
   });
 
-  it("a drag INTO the body re-types to Chamfer and SWAPS the preview session", async () => {
+  it("a drag INTO the body only reduces the locked Fillet", async () => {
     build();
     registerBox();
     await armFillet();
@@ -238,19 +233,13 @@ describe("ModelToolController edge-op drag direction", () => {
     drag(0, -10);
     await flush();
 
-    expect(debugState().edgeOpKind).toBe("Chamfer");
-    expect(toolChipStore.getState().edgeOp).toBe("Chamfer"); // the chip follows
-    expect(toolChipStore.getState().value).toBe(8); // MAGNITUDE, not −8
-
-    // The old session was released and a NEW one opened under the new opType —
-    // `beginPreview` freezes opType, so a params patch would be a lie.
-    expect(clientMock.client.endPreview).toHaveBeenCalledWith("pv-1", false);
-    expect(clientMock.client.beginPreview).toHaveBeenCalledTimes(2);
-    expect(drafts()[1].opType).toBe("Chamfer");
-    expect(drafts()[1].params.mode).toBe("Chamfer");
-    expect(drafts()[1].params.radius).toBe(8);
+    expect(debugState().edgeOpKind).toBe("Fillet");
+    expect(toolChipStore.getState().edgeOp).toBe("Fillet");
+    expect(toolChipStore.getState().value).toBe(0.1);
+    expect(clientMock.client.endPreview).not.toHaveBeenCalled();
+    expect(clientMock.client.beginPreview).toHaveBeenCalledTimes(1);
     expect(debugState().previewSessionCount).toBe(1);
-    expect(debugState().sessionId).toBe("pv-2");
+    expect(debugState().sessionId).toBe("pv-1");
   });
 
   it("a drag AWAY keeps the Fillet and its ONE session", async () => {
@@ -267,9 +256,9 @@ describe("ModelToolController edge-op drag direction", () => {
     expect(toolChipStore.getState().value).toBe(42); // 2 + 40 px × 1 world/px
   });
 
-  // ── tier 3 fallback: today's behaviour, unchanged ────────────────────────────
+  // ── screen fallback also keeps the explicit type ─────────────────────────────
 
-  it("no mesh + no projectPoint: auto is OFF and the up-grows mapping is preserved", async () => {
+  it("no mesh + no projectPoint: the locked up-grows mapping is preserved", async () => {
     build({ projectPoint: false }); // an engine mock from before the seam existed
     await armFillet(); // no registerBox → nothing to reconstruct a direction from
 
@@ -291,7 +280,7 @@ describe("ModelToolController edge-op drag direction", () => {
     expect(clientMock.client.beginPreview).toHaveBeenCalledTimes(1); // no session churn
   });
 
-  it("a chip segment locks the type on a bisector arm (auto dies, session swaps)", async () => {
+  it("a chip segment explicitly changes the type on a bisector arm", async () => {
     build();
     registerBox();
     await armFillet();
@@ -304,8 +293,7 @@ describe("ModelToolController edge-op drag direction", () => {
     expect(toolChipStore.getState().value).toBe(1); // pristine arm reseeds to the chamfer default
     expect(drafts()[1].opType).toBe("Chamfer");
 
-    // The direction can no longer speak: a drag AWAY sizes the chamfer, it does
-    // not restore the fillet.
+    // A drag AWAY only sizes the explicit Chamfer; it cannot restore Fillet.
     drag(0, 40);
     await flush();
     expect(debugState().edgeOpKind).toBe("Chamfer");

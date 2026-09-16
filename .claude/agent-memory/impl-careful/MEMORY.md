@@ -1,4 +1,4 @@
-- [Frontend gotchas](frontend-gotchas.md) — engine doubles, showXxx nulls chip context, chip-vs-inspector split, mock lane had no mesh publication, stale chain anchors after a solve, first-vs-second-click snap asymmetry
+- [Frontend gotchas](frontend-gotchas.md) — engine doubles, overlay driver owns `display` (use setHidden), snap hint hidden under live-dim chips, projected ToolState.cursor, resetStores kills polar/dimensionRound
 - [Projection seams](projection-seams.md) — PROJECTION_STALE has no evidence, feature rows have no sketch id, why every projection verb re-enters the sketch
 - [Core record gotchas](core-record-gotchas.md) — inputs re-derived on deserialize, ~65 SketchRegionRef literals, no regex on struct literals, insta snaps by hand
 - [Edge-op authoring seams](edge-op-authoring-seams.md) — the four seams a fillet/chamfer param must cross, core-serde vs OCW1, re-edit is a whole-op replace
