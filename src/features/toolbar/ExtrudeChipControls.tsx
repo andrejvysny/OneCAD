@@ -134,6 +134,15 @@ export function DraftSegment({
         }
         onCommit={onDeg}
         onConfirm={onConfirm}
+        // Spec §9.2: Escape drops the draft's raw error and restores the draft
+        // the edit started from. `onRevertValue` belongs to the PRIMARY field,
+        // so this field always takes the clear-validation fallback.
+        onEscapeRevert={(startDeg, text) => {
+          const s = toolChipStore.getState();
+          s.setRawValueValidity("extrude-draft", true, text);
+          s.clearValidation();
+          onDeg(startDeg);
+        }}
       />
     </span>
   );

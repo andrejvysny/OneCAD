@@ -18,6 +18,10 @@ import { viewportStore } from "@/stores/viewportStore";
 import { toolChipStore } from "@/stores/toolChipStore";
 import { resetStores } from "@/test/resetStores";
 import { operationAttemptStore } from "@/stores/operationAttemptStore";
+import { createElement } from "react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { ModelToolChips } from "@/features/toolbar/ModelToolChips";
+import { setViewportEngine } from "@/viewport/engineBridge";
 
 // The datum layer is a viewport CONTRIBUTION now, so its imperative surface is
 // published through `modules/modeling/datumViewport` rather than hung off the
@@ -313,6 +317,37 @@ describe("ModelToolController — datum plane tool", () => {
     expect(toolChipStore.getState().kind).toBe("none");
     expect(debug().datumPhase).toBe("idle");
     expect(toolStore.getState().modelTool).toBe("select");
+  });
+
+  // Spec §9.2, TODO.md SESSION 37 H2b: the capture-phase Esc used to cancel the
+  // whole tool before a focused offset field ever saw the key.
+  it("Esc in the focused offset field reverts the edit first; the NEXT Esc cancels the tool", () => {
+    setViewportEngine({
+      mountChip: (_id: string, el: HTMLElement) => document.body.appendChild(el),
+      unmountChip: (_id: string, el: HTMLElement) => el.remove(),
+    } as unknown as ViewportEngine);
+    const view = render(createElement(ModelToolChips));
+    try {
+      act(() => armAndPickBase("XY"));
+      const input = screen.getByLabelText("Offset (mm)");
+      input.focus();
+      fireEvent.change(input, { target: { value: "25" } });
+      expect(debug().datumOffset).toBe(25);
+
+      fireEvent.keyDown(input, { key: "Escape" });
+
+      expect(debug().datumPhase).toBe("offset");
+      expect(debug().datumOffset).toBe(10);
+      expect(toolStore.getState().modelTool).toBe("datum");
+      expect(document.activeElement).not.toBe(input);
+
+      act(() => key("Escape"));
+      expect(debug().datumPhase).toBe("idle");
+      expect(toolStore.getState().modelTool).toBe("select");
+    } finally {
+      view.unmount();
+      setViewportEngine(null);
+    }
   });
 
   it("the chip ✕ cancels exactly like Esc", () => {

@@ -215,7 +215,8 @@ export interface OrbitOptions {
   /**
    * True while a tool drag is IN FLIGHT (extrude depth, fillet radius, revolve
    * angle…). Those drags project the pointer against the current camera, so
-   * moving it mid-drag makes the value jump — wheel-orbit is gated on this.
+   * moving it mid-drag makes the value jump — wheel, trackpad-pinch and two-pointer
+   * navigation (orbit, pan and zoom) is gated on this.
    *
    * Deliberately NOT `lmbOrbitSuppressed`: that flag is also set while a tool is
    * merely ARMED, and orbiting to look around while armed is expected CAD
@@ -319,6 +320,13 @@ export class CadOrbitControls {
     prev.set(e.clientX, e.clientY);
 
     if (this.pointers.size >= 2) {
+      if (this.isDragActive()) {
+        // A tool value drag owns a pointer (spec §7.8): no competing camera move.
+        // Track the spread anyway, so the first pinch after the drag measures from
+        // here rather than from before the suppressed stretch.
+        this.lastPinch = this.pinchDistance();
+        return;
+      }
       this.pan(dx, dy);
       this.applyPinchZoom(this.pinchDistance());
       return;
@@ -395,15 +403,17 @@ export class CadOrbitControls {
       this.onDeviceChange?.(detected);
     }
     if (!op) return;
+    // ANY camera move mid-drag changes the ray every drag frame is projected from,
+    // so the dragged value would jump — pan and zoom as surely as orbit. The
+    // reducer above still consumed the event, so its gesture state stays coherent.
+    if (this.isDragActive()) return;
     switch (op.kind) {
       case "pan":
         // Wheel deltas are scroll-direction; pan() takes drag-direction.
         this.pan(-op.dx, -op.dy);
         break;
       case "orbit":
-        // A camera move mid-drag would make the dragged value jump.
-        if (!this.isDragActive())
-          this.applyOrbit(this.wheelOrbitSign * op.dx, this.wheelOrbitSign * op.dy);
+        this.applyOrbit(this.wheelOrbitSign * op.dx, this.wheelOrbitSign * op.dy);
         break;
       case "zoom":
         this.zoomAtScreen(op.clientX, op.clientY, op.factor);

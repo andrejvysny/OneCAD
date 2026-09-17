@@ -6,7 +6,8 @@
  * chip. There is NO cheap-and-honest L1 mesh for a shell (hollowing needs OCCT),
  * so the tool is chip + status-hint driven — the exact shelled body arrives from
  * the backend on commit. The drag mapping is shared with fillet
- * (`radiusFromDrag`); this module owns the thickness defaults + the re-edit parse.
+ * (`signedValueFromDrag` + `flooredDrag`); this module owns the thickness defaults
+ * + the re-edit parse.
  */
 import { MM_SUFFIX, formatMillimetres } from "@/units/format";
 

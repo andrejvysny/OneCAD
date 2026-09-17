@@ -204,8 +204,9 @@ export interface ScreenRect {
   height: number;
 }
 
-/** Clearance kept between a displaced item and the keep-out box, in CSS px. */
-export const KEEP_OUT_PAD_PX = 6;
+/** Clearance kept between a displaced item and the keep-out box, in CSS px —
+ *  at least 8 beyond the active hit corridor (acceptance spec §4.5). */
+export const KEEP_OUT_PAD_PX = 8;
 
 function clampCentre(value: number, start: number, span: number, itemSpan: number): number {
   if (itemSpan >= span) return start + span / 2;

@@ -16,6 +16,7 @@ import {
   MIRROR_PLANES,
   OffsetFaceInspectorControls,
   PATTERN_AXES,
+  requestConfirm,
   SegmentToggle,
   TransformModeSegments,
 } from "@/features/toolbar/ModelToolChips";
@@ -95,7 +96,7 @@ function EdgeOperationInspector({ state, validation }: { state: ToolChipState; v
           onChamferAngle={(angle) => toolChipStore.getState().onChamferAngle?.(angle)}
           showChamferFlip={state.showChamferFlip}
           onChamferFlip={() => toolChipStore.getState().onChamferFlip?.()}
-          onConfirm={() => toolChipStore.getState().onConfirm?.()}
+          onConfirm={requestConfirm}
         />
       )}
       {state.kind === "offsetFace" && <OffsetFaceInspectorControls />}
@@ -356,7 +357,9 @@ export function ActiveToolInspector() {
     />
   );
   const fitPreview = <FitPreviewButton tool={presentation.tool} phase={presentation.phase} preview={presentation.preview} validationStatus={presentation.validation.status} />;
-  if (scopedAttempt?.phase === "applying") {
+  // Inert while applying (review R1): the attempt OR the presentation's own
+  // `applying` state — nothing on screen may change an operation being committed.
+  if (scopedAttempt?.phase === "applying" || presentation.phase === "applying") {
     return <>{dockTarget}{fitPreview}<div role="status">Applying…</div><fieldset disabled>{content}</fieldset></>;
   }
   if (scopedAttempt?.phase === "failed") {

@@ -14,7 +14,9 @@ import { cn } from "@/ui/cn";
 import { ChipOverflow } from "@/features/toolbar/ChipOverflow";
 import { toolChipStore } from "@/stores/toolChipStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { formatLength, parseLength } from "@/units/format";
+import { formatLength, formatLengthWithUnit, parseLength } from "@/units/format";
+import type { LengthUnitId } from "@/units/lengthUnits";
+import { EDGE_OP_MIN_VALUE } from "@/tools/preview/filletRadius";
 import type { EdgeOpKind } from "@/tools/modelTools/modelToolMachine";
 
 /** The armed-edge-op segments (FILLET-CHAMFER-UNIFY): the explicit override of
@@ -61,6 +63,23 @@ export function EdgeOpSegments({
  */
 const EQUAL_LEG_TEXT = "=";
 
+/** The chip's raw-validity field id for the second leg. */
+const DISTANCE2_FIELD = "chamfer-distance2";
+
+/**
+ * The second-leg text's verdict (spec §8.2, H4b W3): empty or `=` is the equal-leg
+ * answer; a number must parse and reach the shared authoring floor. Anything else
+ * is RAW-INVALID with its reason — never reverted, never normalized.
+ */
+function readDistance2(text: string, unit: LengthUnitId): { value: number | null } | { error: string } {
+  const trimmed = text.trim();
+  if (trimmed === "" || trimmed === EQUAL_LEG_TEXT) return { value: null };
+  const n = parseLength(trimmed, unit);
+  if (n === null || !Number.isFinite(n)) return { error: "Enter a complete numeric value" };
+  if (n < EDGE_OP_MIN_VALUE) return { error: `Must be at least ${formatLengthWithUnit(EDGE_OP_MIN_VALUE)}` };
+  return { value: n };
+}
+
 /**
  * The CHAMFER second-distance field (SCHEMA §7.3, 2026-08-03 — WP-C T2a). Rendered
  * ONLY while the armed edge op is a Chamfer.
@@ -71,9 +90,10 @@ const EQUAL_LEG_TEXT = "=";
  * a second instance of it would make that locator ambiguous.
  *
  * Commit rules (mirroring the cluster's own): Enter applies the text and then
- * confirms the op; blur applies it; Esc reverts the text to the committed value.
- * Empty or `=` commits `null` — equal-leg. A value the length parser refuses is
- * reverted rather than silently read as a partial number.
+ * confirms the op through the caller's fresh gate; blur applies it; Esc reverts
+ * the text to the committed value. Empty or `=` commits `null` — equal-leg. Text
+ * the domain refuses (unparseable, ≤ 0, below the 0.1 mm floor) stays on screen as
+ * a raw-invalid draft that blocks the ✓ and authors nothing (spec §8.2).
  */
 export function ChamferDistance2Field({
   value,
@@ -95,25 +115,21 @@ export function ChamferDistance2Field({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value, unit]);
 
+  const publish = (next: string): { value: number | null } | null => {
+    const read = readDistance2(next, unit);
+    if ("error" in read) {
+      toolChipStore.getState().setRawValueValidity(DISTANCE2_FIELD, false, next, read.error);
+      return null;
+    }
+    toolChipStore.getState().setRawValueValidity(DISTANCE2_FIELD, true, "");
+    return read;
+  };
+
   const commit = (): void => {
-    const trimmed = text.trim();
-    if (trimmed === "" || trimmed === EQUAL_LEG_TEXT) {
-      if (value !== null) onValue(null);
-      setText(EQUAL_LEG_TEXT);
-      toolChipStore.getState().setRawValueValidity("chamfer-distance2", true, "");
-      return;
-    }
-    const n = parseLength(trimmed, unit);
-    // SCHEMA §7.3 requires `distance2 > 0` when present, and the backend refuses
-    // anything else — so a rejected entry reverts rather than authoring it.
-    if (n === undefined || n === null || !Number.isFinite(n) || n <= 0) {
-      setText(shown(value));
-      toolChipStore.getState().setRawValueValidity("chamfer-distance2", true, "");
-      return;
-    }
-    if (n !== value) onValue(n);
-    setText(shown(n));
-    toolChipStore.getState().setRawValueValidity("chamfer-distance2", true, "");
+    const read = publish(text);
+    if (!read) return; // the draft stays, flagged — nothing is authored
+    if (read.value !== value) onValue(read.value);
+    setText(shown(read.value));
   };
 
   return (
@@ -133,13 +149,8 @@ export function ChamferDistance2Field({
         placeholder={EQUAL_LEG_TEXT}
         title="Second chamfer distance — '=' for equal legs"
         onChange={(e) => {
-          const next = e.target.value;
-          setText(next);
-          const trimmed = next.trim();
-          const parsed = parseLength(trimmed, unit);
-          const valid = trimmed === "" || trimmed === EQUAL_LEG_TEXT ||
-            (parsed !== undefined && parsed !== null && Number.isFinite(parsed) && parsed > 0);
-          toolChipStore.getState().setRawValueValidity("chamfer-distance2", valid, next);
+          setText(e.target.value);
+          publish(e.target.value);
         }}
         onBlur={commit}
         onKeyDown={(e) => {
@@ -152,7 +163,7 @@ export function ChamferDistance2Field({
             e.preventDefault();
             e.stopPropagation();
             setText(shown(value));
-            toolChipStore.getState().setRawValueValidity("chamfer-distance2", true, "");
+            toolChipStore.getState().setRawValueValidity(DISTANCE2_FIELD, true, "");
           }
         }}
       />

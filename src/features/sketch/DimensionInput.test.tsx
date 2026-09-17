@@ -3,6 +3,7 @@
  * (ConstraintBadgeLayer wiring). Reject must NOT call onCommit and must flash
  * an error style on the input; back-compat (no `kind`) stays finite-only.
  */
+import { useState } from "react";
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
 import { settingsStore } from "@/stores/settingsStore";
@@ -520,5 +521,150 @@ describe("DimensionInput — accessible name (WP-U10)", () => {
     const field = screen.getByLabelText("Depth (mm)") as HTMLInputElement;
     expect(field.value).toBe("24.5");
     expect(screen.queryByLabelText("Dimension value")).toBeNull();
+  });
+});
+
+/*
+ * Numeric edit transaction (spec §9.2, TODO.md SESSION 37 H2). A model-operation
+ * field previews every keystroke, so the `value` prop already holds the typed
+ * number by the time Escape arrives; Escape must restore the value the field held
+ * when the EDIT started, not the latest preview.
+ */
+describe("DimensionInput — Escape edit session (onEscapeRevert)", () => {
+  function LiveField({
+    start,
+    onEscapeRevert,
+    onValidityChange,
+    initialText,
+    autoFocus,
+  }: {
+    start: number;
+    onEscapeRevert?: (value: number, text: string) => void;
+    onValidityChange?: (valid: boolean, draft: string) => void;
+    initialText?: string;
+    autoFocus?: boolean;
+  }) {
+    const [value, setValue] = useState(start);
+    return (
+      <DimensionInput
+        value={value}
+        commitOnBlur={false}
+        initialText={initialText}
+        autoFocus={autoFocus}
+        onValidityChange={onValidityChange}
+        onPreview={setValue}
+        onCommit={setValue}
+        onEscapeRevert={
+          onEscapeRevert
+            ? (v, text) => {
+                onEscapeRevert(v, text);
+                setValue(v);
+              }
+            : undefined
+        }
+      />
+    );
+  }
+
+  const flushBlurCheck = () =>
+    act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+  it("restores the edit-start value, not the previewed one", () => {
+    const onEscapeRevert = vi.fn();
+    render(<LiveField start={20} onEscapeRevert={onEscapeRevert} />);
+    input().focus();
+    fireEvent.change(input(), { target: { value: "25" } });
+    expect(input().value).toBe("25");
+    fireEvent.keyDown(input(), { key: "Escape" });
+    expect(onEscapeRevert).toHaveBeenCalledTimes(1);
+    expect(onEscapeRevert).toHaveBeenCalledWith(20, "20");
+    expect(input().value).toBe("20");
+    expect(document.activeElement).not.toBe(input());
+  });
+
+  it("reverts even when the value never changed (a controller draft may still need clearing)", () => {
+    const onEscapeRevert = vi.fn();
+    render(<LiveField start={20} onEscapeRevert={onEscapeRevert} />);
+    input().focus();
+    fireEvent.keyDown(input(), { key: "Escape" });
+    expect(onEscapeRevert).toHaveBeenCalledTimes(1);
+    expect(onEscapeRevert).toHaveBeenCalledWith(20, "20");
+  });
+
+  it("clears the raw-input error of incomplete text it throws away", () => {
+    const onValidityChange = vi.fn();
+    render(<LiveField start={20} onEscapeRevert={vi.fn()} onValidityChange={onValidityChange} />);
+    input().focus();
+    fireEvent.change(input(), { target: { value: "20abc" } });
+    expect(onValidityChange).toHaveBeenLastCalledWith(false, "20abc");
+    fireEvent.keyDown(input(), { key: "Escape" });
+    expect(onValidityChange).toHaveBeenLastCalledWith(true, "20");
+    expect(input().value).toBe("20");
+  });
+
+  it("a type-to-enter seed reverts to the pre-seed value, not the seed", () => {
+    const onEscapeRevert = vi.fn();
+    render(<LiveField start={20} initialText="1" autoFocus onEscapeRevert={onEscapeRevert} />);
+    expect(input().value).toBe("1");
+    fireEvent.keyDown(input(), { key: "Escape" });
+    expect(onEscapeRevert).toHaveBeenCalledWith(20, "20");
+    expect(input().value).toBe("20");
+  });
+
+  it("a blur + refocus in the same tick (host reparent) keeps the session", async () => {
+    const onEscapeRevert = vi.fn();
+    const { container } = render(<LiveField start={20} onEscapeRevert={onEscapeRevert} />);
+    const field = input();
+    field.focus();
+    fireEvent.change(field, { target: { value: "25" } });
+    // What ModelToolChips does when it docks the chip: the host leaves the DOM
+    // (the input blurs), is re-appended, and focus is restored synchronously.
+    field.blur();
+    container.remove();
+    document.body.appendChild(container);
+    field.focus();
+    await flushBlurCheck();
+    fireEvent.change(field, { target: { value: "30" } });
+    fireEvent.keyDown(field, { key: "Escape" });
+    expect(onEscapeRevert).toHaveBeenCalledTimes(1);
+    expect(onEscapeRevert).toHaveBeenCalledWith(20, "20");
+    expect(field.value).toBe("20");
+  });
+
+  it("a real blur closes the session; the next focus opens a new one", async () => {
+    const onEscapeRevert = vi.fn();
+    render(<LiveField start={20} onEscapeRevert={onEscapeRevert} />);
+    input().focus();
+    fireEvent.change(input(), { target: { value: "25" } });
+    input().blur();
+    await flushBlurCheck();
+    input().focus();
+    fireEvent.change(input(), { target: { value: "30" } });
+    fireEvent.keyDown(input(), { key: "Escape" });
+    expect(onEscapeRevert).toHaveBeenCalledWith(25, "25");
+    expect(input().value).toBe("25");
+  });
+
+  it("without onEscapeRevert, Escape keeps resetting to the latest value (sketch consumers)", () => {
+    render(<LiveField start={20} />);
+    input().focus();
+    fireEvent.change(input(), { target: { value: "25" } });
+    fireEvent.keyDown(input(), { key: "Escape" });
+    expect(input().value).toBe("25");
+    expect(document.activeElement).not.toBe(input());
+  });
+
+  // N7: the Escape branch blurs synchronously, and a blur-commit field used to
+  // commit the text it was abandoning.
+  it("Escape on a blur-commit field does not commit the abandoned text", () => {
+    const onCommit = vi.fn();
+    render(<DimensionInput value={5} onCommit={onCommit} />);
+    input().focus();
+    fireEvent.change(input(), { target: { value: "12" } });
+    fireEvent.keyDown(input(), { key: "Escape" });
+    expect(onCommit).not.toHaveBeenCalledWith(12);
+    expect(input().value).toBe("5");
   });
 });

@@ -96,6 +96,14 @@ export class PreviewThrottle<P> {
     return this.dispatch(params, now);
   }
 
+  /**
+   * Drop coalesced params without sending them — the owner has nothing to ask for
+   * any more. The in-flight slot and the epoch counter are untouched.
+   */
+  discardPending(): void {
+    this.pendingParams = null;
+  }
+
   /** Forget all state (drag ended / tool changed). */
   reset(): void {
     this.epochCounter = 0;

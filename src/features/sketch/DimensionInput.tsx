@@ -84,6 +84,17 @@ export interface DimensionInputProps {
   commitOnBlur?: boolean;
   /** Esc handler — when provided, Esc calls this instead of resetting the text. */
   onCancel?: () => void;
+  /**
+   * OPT-IN numeric edit transaction (spec §9.2) for model-operation fields. A
+   * live-preview field's `value` prop already holds the typed number when Escape
+   * arrives, so resetting to it would keep the abandoned edit. With this prop the
+   * field snapshots `{value, text}` once per EDIT SESSION (mount with a seed, else
+   * the first focus/change) and Escape restores that snapshot and reports it here
+   * — always, because the owner may hold a range error or draft to clear.
+   *
+   * Sketch consumers never pass it: their Escape keeps resetting to `value`.
+   */
+  onEscapeRevert?: (startValue: number, startText: string) => void;
   /** Focus + select the field on mount (the dimension tool opens ready to type). */
   autoFocus?: boolean;
   /**
@@ -132,6 +143,7 @@ export function DimensionInput({
   initialText,
   commitOnBlur = true,
   onCancel,
+  onEscapeRevert,
   autoFocus = false,
   kind,
   label = "Dimension value",
@@ -187,6 +199,27 @@ export function DimensionInput({
   const [isError, setIsError] = useState(false);
   const ref = useRef<HTMLInputElement>(null);
   const errorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const restingText = () => (expr ? `=${expr}` : formatValue(value));
+  /*
+   * The edit-session snapshot behind `onEscapeRevert`. A type-to-enter seed opens
+   * it HERE, at the first render, because the seed effect below previews the seed
+   * and the `value` prop is only the pre-seed document value until then.
+   */
+  const session = useRef<{ value: number; text: string } | null>(
+    onEscapeRevert && initialText !== undefined ? { value, text: restingText() } : null,
+  );
+  const blurCheck = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /*
+   * Set around the Escape branch's own `blur()`: that blur fires synchronously
+   * while `text` still holds the abandoned edit, so a blur-commit field would
+   * otherwise commit exactly what Escape is throwing away.
+   */
+  const escaping = useRef(false);
+  const openSession = () => {
+    if (onEscapeRevert && session.current === null) {
+      session.current = { value, text: restingText() };
+    }
+  };
 
   /*
    * The `=` EXPRESSION lane. `exprText` is what the field currently holds after
@@ -294,6 +327,8 @@ export function DimensionInput({
   useEffect(() => {
     return () => {
       if (errorTimer.current) clearTimeout(errorTimer.current);
+      if (blurCheck.current) clearTimeout(blurCheck.current);
+      session.current = null;
     };
   }, []);
 
@@ -444,7 +479,10 @@ export function DimensionInput({
         /* A bindable field takes `=name`, so it must not ask for a numeric
            keypad — that would make the "=" unreachable on a touch keyboard. */
         inputMode={onCommitExpr ? "text" : "decimal"}
+        onFocus={openSession}
         onChange={(e) => {
+          // Before any preview: `value` is still the number the edit started from.
+          openSession();
           setText(e.target.value);
           const n = parse(e.target.value);
           const valid = Number.isFinite(n) && (!kind || isValidForKind(kind, n));
@@ -469,27 +507,50 @@ export function DimensionInput({
             // Apply the typed value, THEN confirm the op (armed cluster) — else
             // just blur (legacy dimension chips / fillet / shell).
             if (commit()) {
+              session.current = null;
               if (onConfirm) onConfirm();
               else ref.current?.blur();
             }
           } else if (e.key === "Escape") {
             if (onCancel) {
               onCancel();
+            } else if (onEscapeRevert) {
+              // No open session means the last Enter already applied this value,
+              // so the value on screen now IS the edit start.
+              const start = session.current ?? { value, text: restingText() };
+              session.current = null;
+              lastPreviewed.current = null;
+              setText(start.text);
+              onValidityChange?.(true, start.text);
+              onEscapeRevert(start.value, start.text);
+              escaping.current = true;
+              ref.current?.blur();
+              escaping.current = false;
             } else {
               // Abandoning the edit abandons the preview claim with it: leaving
               // `lastPreviewed` set would let the guard swallow the next
               // legitimate echo of that same number.
               lastPreviewed.current = null;
-              setText(expr ? `=${expr}` : formatValue(value));
+              setText(restingText());
+              escaping.current = true;
               ref.current?.blur();
+              escaping.current = false;
             }
           }
           e.stopPropagation();
         }}
         onBlur={() => {
-          if (commitOnBlur) {
+          if (commitOnBlur && !escaping.current) {
             if (!commit()) ref.current?.focus();
           }
+          if (!onEscapeRevert) return;
+          // A dock/return move blurs the input and refocuses it in the same
+          // commit; only a blur that is still a blur a tick later ends the edit.
+          if (blurCheck.current) clearTimeout(blurCheck.current);
+          blurCheck.current = setTimeout(() => {
+            blurCheck.current = null;
+            if (document.activeElement !== ref.current) session.current = null;
+          }, 0);
         }}
       />
       {shownSuffix && !exprText && <span className="text-ink-5">{shownSuffix}</span>}

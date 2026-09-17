@@ -501,6 +501,40 @@ export function AlignButton({ phase, onStart }: { phase: AlignPhase | null; onSt
   );
 }
 
+/**
+ * The one gate every chip confirm entry (field Enter, ✓) passes, read FRESH from
+ * the store at call time rather than from the render that built the handler.
+ *
+ * It refuses only what is SETTLED: `pending` validation passes because
+ * `commitFillet` deliberately awaits the in-flight range check, and a stale
+ * `previewLifecycle` of `invalid` is not consulted because a throttled status
+ * would silently drop a corrected Enter — the controller refuses those with a
+ * message instead.
+ */
+export function requestConfirm(): void {
+  const s = toolChipStore.getState();
+  if (s.validation.status === "invalid") return;
+  if (s.retainedCommitFailure !== null) return;
+  if (s.previewLifecycle.status === "applying") return;
+  s.onConfirm?.();
+}
+
+/**
+ * Escape in a primary field (spec §9.2): drop the field's raw error, then restore
+ * the edit-start value through the tool's registered handler, or — until a tool
+ * registers one — clear the controller's range validation and re-preview it.
+ */
+function revertPrimary(fieldId: string, value: number, text: string): void {
+  const s = toolChipStore.getState();
+  s.setRawValueValidity(fieldId, true, text);
+  if (s.onRevertValue) {
+    s.onRevertValue(value);
+    return;
+  }
+  s.clearValidation();
+  s.onValue?.(value);
+}
+
 export function ModelToolChips() {
   const engine = useViewportEngine();
   const kind = useToolChipStore((s) => s.kind);
@@ -663,11 +697,14 @@ export function ModelToolChips() {
       }
       onPreview={(v) => toolChipStore.getState().onValue?.(v)}
       onCommit={(v) => toolChipStore.getState().onValue?.(v)}
-      onConfirm={opts?.onConfirm ? () => toolChipStore.getState().onConfirm?.() : undefined}
+      onConfirm={opts?.onConfirm ? requestConfirm : undefined}
+      onEscapeRevert={(v, text) => revertPrimary(opts?.fieldId ?? "primary", v, text)}
     />
   );
 
-  const numericChip = (suffix: string, fieldLabel: string) => primaryField(suffix, fieldLabel);
+  // Both pattern chips confirm on Enter like every other armed cluster (D07).
+  const numericChip = (suffix: string, fieldLabel: string) =>
+    primaryField(suffix, fieldLabel, { onConfirm: true });
 
   /*
    * The OperationHUD frame (U4) — ONE wrapper for every armed model tool.
@@ -828,7 +865,7 @@ export function ModelToolChips() {
     primaryField(unit, fieldLabel, { onConfirm: true });
   const confirmButtons = (
     <ConfirmButtons
-      onConfirm={() => toolChipStore.getState().onConfirm?.()}
+      onConfirm={requestConfirm}
       onCancel={presentation?.canCancel ? () => toolChipStore.getState().onCancel?.() : undefined}
       disabled={presentation?.canConfirm === false}
     />
@@ -917,7 +954,7 @@ export function ModelToolChips() {
           {count} region{count === 1 ? "" : "s"}
         </span>
         <ConfirmButtons
-          onConfirm={() => toolChipStore.getState().onConfirm?.()}
+          onConfirm={requestConfirm}
           onCancel={() => toolChipStore.getState().onCancel?.()}
           disabled={presentation?.canConfirm === false}
         />
@@ -969,7 +1006,10 @@ export function ModelToolChips() {
   } else if (kind === "hole") {
     content = panel(
       <>
-        {primaryField(LENGTH_SUFFIX, `Hole diameter (${LENGTH_SUFFIX})`, { fieldId: "hole-diameter" })}
+        {primaryField(LENGTH_SUFFIX, `Hole diameter (${LENGTH_SUFFIX})`, {
+          fieldId: "hole-diameter",
+          onConfirm: true,
+        })}
         <span data-testid="chip-hole-badge" className="rounded-full bg-chip px-2 py-1 text-[11px] font-medium text-ink-3">
           Hole
         </span>

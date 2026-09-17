@@ -555,6 +555,13 @@ export async function waitForCameraSettled(page: Page): Promise<void> {
  * the only robust way to find a genuine click target. Wrapped in `toPass` so
  * the first attempt can land before the handle's first post-arm render (the
  * engine is render-on-demand — see ViewportEngine `invalidate()`).
+ *
+ * The first grid hit is the corridor's top edge, which is exactly where an
+ * anchored chip sits closest — measured on 9f573ecd, that pixel resolved to the
+ * chip's HUD and the press never reached the canvas. So the scan refines to the
+ * hit region's centre and returns the hit pixel nearest it that the CANVAS
+ * itself receives (`elementFromPoint`); if DOM chrome covers every hit pixel it
+ * returns nothing and the `toPass` retries.
  */
 export async function findExtrudeHandle(page: Page): Promise<{ x: number; y: number }> {
   let found: { x: number; y: number } | null = null;
@@ -566,12 +573,28 @@ export async function findExtrudeHandle(page: Page): Promise<{ x: number; y: num
       if (!engine || !canvas) return null;
       const rect = canvas.getBoundingClientRect();
       const step = 6;
-      for (let y = rect.top; y <= rect.bottom; y += step) {
+      let first: { x: number; y: number } | null = null;
+      for (let y = rect.top; y <= rect.bottom && !first; y += step) {
         for (let x = rect.left; x <= rect.right; x += step) {
-          if (engine.hitExtrudeHandle(x, y)) return { x, y };
+          if (engine.hitExtrudeHandle(x, y)) {
+            first = { x, y };
+            break;
+          }
         }
       }
-      return null;
+      if (!first) return null;
+      // The corridor is at most 50 px on a side (a 30 × 40 rectangle, rolled).
+      const reach = 56;
+      const hits: { x: number; y: number }[] = [];
+      for (let y = first.y - reach; y <= first.y + reach; y += 2) {
+        for (let x = first.x - reach; x <= first.x + reach; x += 2) {
+          if (engine.hitExtrudeHandle(x, y)) hits.push({ x, y });
+        }
+      }
+      const cx = hits.reduce((sum, p) => sum + p.x, 0) / hits.length;
+      const cy = hits.reduce((sum, p) => sum + p.y, 0) / hits.length;
+      hits.sort((a, b) => Math.hypot(a.x - cx, a.y - cy) - Math.hypot(b.x - cx, b.y - cy));
+      return hits.find((p) => document.elementFromPoint(p.x, p.y) === canvas) ?? null;
     });
     expect(found).not.toBeNull();
   }).toPass({ timeout: 10_000, intervals: [100, 200, 400, 800] });

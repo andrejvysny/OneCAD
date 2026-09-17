@@ -1,3 +1,14 @@
+# CURRENT STATE — session 37 (2026-09-17, modeling interaction fix + harden, Boundary 1) — HANDOFF
+
+Last verified: 2026-09-17 (this session). Entry point: `HANDOFF.md`. Plan: `~/.claude/plans/analyze-this-report-and-bright-axolotl.md`. Ledger: `TODO.md` § SESSION 37.
+
+- **Branch:** `master`, Boundary 1 committed on top of `9f573ecd`. Push not authorized. Working tree clean apart from `.claude/agent-memory/**`, which is never staged.
+- **Source:** the external review of `9f573ecd` (`OneCAD-Modeling-Implementation-Review-9f573ecd.md`) against the acceptance spec. Every review finding was re-verified against source; R01–R08 and §4.1–4.4 confirmed, nine more found (N1–N9). Two adversarial reviews then found 9 + 8 further defects in the fix packages themselves; all fixed.
+- **Boundary 1 gate of record** (main thread, nothing else running): `bunx tsc --noEmit` ✓ · `bun run build` ✓ · `bun run test` **368 files / 6469 passed / 0 failed / 78 skipped** (baseline 363 / 6206 / 78) · hex **0** · coverage **34 / 9 / 17 / 20** · contracts **41 / 19 / 15** · self-test ✓ · `bun run e2e` per project, `retries: 0`: **chromium 282 / 0** (21.2 min), **webkit 282 / 0** (29.0 min) — `9f573ecd` was 277/5 and 279/3 · native tauri-agent pass, foreground `real_user`/`cgevent`, 14 checks, 0 error log lines (table in `TODO.md`).
+- **Decisions:** D-S1 hardening first; D-S2 symmetric span clamps at 0 keeping its sign; D-S3 Fillet and Chamfer both grow along the arrow; D-S4 Astra derive approved for Boundary 2 attachment rules (not yet run).
+- **Not run / owed:** Boundary 2 and 3 (compact label + operation strip, edge-op/Shell/Offset attachment, Revolve, patterns, Move gizmo, Hole/Datum/Gear, lifecycle A17/A18); the Astra derive; the user-run manual checklist; the merged-stack Tauri smoke; "STEP opens coloured elsewhere" and "3MF opens in a slicer".
+- **Harness defects found (tools/tauri-agent, not the app):** `session_start {mode:"launch"}` races the dev page load and fails on `window.__TAURI__.core`; attach refuses a port owner whose executable path is relative. Workaround recorded in `TODO.md`.
+
 # CURRENT STATE — session 36 (2026-09-15, unified modeling controls, Phase B) — HANDOFF
 
 Last verified: 2026-09-15 15:54 (this session). Entry point: `HANDOFF.md`. Plan: `~/.claude/plans/analyze-this-plan-and-generic-sutherland.md`. Ledger: `TODO.md` § SESSION 36.

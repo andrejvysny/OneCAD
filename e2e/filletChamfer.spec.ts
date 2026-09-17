@@ -12,22 +12,23 @@ import {
 /*
  * FILLET-CHAMFER-UNIFY W2 — the `chamfer` TOOL ID and its `H` binding are dead;
  * one "Fillet / Chamfer" tool remains (id/icon/shortcut stay `fillet`/`fillet`/
- * `F`), and the drag DIRECTION — or an explicit chip segment — decides which op
- * gets authored. `H` now falls through to the GLOBAL `home` binding.
+ * `F`), and the explicit chip segment decides which op gets authored — a drag
+ * sizes it and never re-types it (D04 type lock). `H` now falls through to the
+ * GLOBAL `home` binding.
  *
  * Folds the two specs this wave deletes:
  *   - `chamfer.spec.ts` (the armed-commit gesture: released-stays-armed, ✓
  *     commits, Enter/✕) — armed here via the chip segment rather than a
  *     dedicated tool, since that tool id no longer exists.
  *   - `fillet-direction.spec.ts` (the bisector-tier direction drive + segment
- *     lock) — ported unchanged; the direction math itself did not move in W2.
+ *     lock) — since rewritten as the D04 type-lock cases.
  * Plus the W2 sweep cases: no separate Chamfer button, and `h` is inert as an
  * edge-op trigger.
  *
  * The seeded mock document publishes the box body's MESH1 through the ingest
  * path, so `body1`'s edges resolve on the bisector tier here — which is what
- * lets the direction-driven cases below drive the real gesture rather than
- * only the chip segments.
+ * lets the type-lock cases below drive the real gesture rather than only the
+ * chip segments.
  */
 
 /** `e:5` of the mock box (80×60×30, origin-centred): the +x/+z top edge. Its
@@ -209,59 +210,55 @@ test("F arms the unified tool with an edge seeded; an empty selection hints for 
   );
 });
 
-// ── bisector-tier direction drive (ported from fillet-direction.spec.ts) ─────
+// ── type lock: a drag never re-types the edge op ─────────────────────────────
 
-test("a bisector-tier arm is direction-driven: drag INTO the body types a Chamfer, back OUT types a Fillet", async ({
+// D04 type lock (spec), TODO.md SESSION 37: dragging sizes the op; only the segment re-types it.
+test("a Fillet arm is type-locked: dragging INTO the body keeps Fillet and bottoms at the minimum, dragging back out grows it", async ({
   page,
 }) => {
   await armFillet(page);
 
   const armed = await toolPhases(page);
-  expect(armed?.edgeOpAxisSource).toBe("bisector"); // the only tier auto may trust
-  expect(armed?.edgeOpAuto).toBe(true);
+  expect(armed?.edgeOpAxisSource).toBe("bisector"); // a real world-axis handle to drag
+  expect(armed?.edgeOpAuto).toBe(false);
   expect(armed?.edgeOpKind).toBe("Fillet");
 
   const away = await awayOnScreen(page);
-  // UNIFY-UX Phase 1: the bisector tier resolved, so a real handle exists and the
-  // drag has to start ON it — the delta math is press-relative, so the direction
-  // vector below still drives the same type flip regardless of where the press
-  // itself lands.
-  await dragEdgeOpHandle(page, -away.x * 140, -away.y * 140); // INTO the body
-
-  await expect.poll(async () => (await toolPhases(page))?.edgeOpKind).toBe("Chamfer");
-  await openFilletOverflow(page);
-  await expect(page.getByTestId("chip-edgeop-chamfer")).toHaveAttribute("aria-pressed", "true");
-  expect(await chipValue(page)).toBeGreaterThan(1); // a MAGNITUDE, never negative
-  // A flip is not a commit — the tool is still armed on the same edges.
-  await expect.poll(async () => (await toolPhases(page))?.filletPhase).toBe("armed");
-  await closeFilletOverflow(page); // the popover can float over the handle
-
-  // …and the gesture is reversible: dragging back out re-types to Fillet.
-  await dragEdgeOpHandle(page, away.x * 200, away.y * 200);
-  await expect.poll(async () => (await toolPhases(page))?.edgeOpKind).toBe("Fillet");
-});
-
-test("an explicit segment pick LOCKS the type against any later drag", async ({ page }) => {
-  await armFillet(page);
-  expect((await toolPhases(page))?.edgeOpAuto).toBe(true);
-
-  // Picking the ACTIVE segment changes no op — it ends the direction-driven lane.
-  await openFilletOverflow(page);
-  await page.getByTestId("chip-edgeop-fillet").click();
-  await expect.poll(async () => (await toolPhases(page))?.edgeOpAuto).toBe(false);
-  expect((await toolPhases(page))?.edgeOpKind).toBe("Fillet");
-  await closeFilletOverflow(page); // the popover can float over the handle
-
-  const away = await awayOnScreen(page);
   await dragEdgeOpHandle(page, -away.x * 200, -away.y * 200); // hard INTO the body
+  await expect.poll(async () => (await toolPhases(page))?.filletPhase).toBe("armed");
   expect((await toolPhases(page))?.edgeOpKind).toBe("Fillet"); // no re-type
   // The locked type projects the drag onto its own half-line: bottomed at the
   // minimum rather than bouncing back up as a magnitude would.
-  expect(await chipValue(page)).toBeCloseTo(0.1, 5);
+  await expect.poll(async () => await chipValue(page)).toBeCloseTo(0.1, 5);
 
   await dragEdgeOpHandle(page, away.x * 200, away.y * 200);
-  expect(await chipValue(page)).toBeGreaterThan(1); // …and it recovers, still a Fillet
+  await expect.poll(async () => await chipValue(page)).toBeGreaterThan(1); // …and it recovers
   expect((await toolPhases(page))?.edgeOpKind).toBe("Fillet");
+});
+
+// D04 type lock (spec), TODO.md SESSION 37: the explicit segment is the only type switch.
+test("the explicit segment is the only type switch: a picked Chamfer survives drags either way", async ({
+  page,
+}) => {
+  await armFillet(page);
+  expect((await toolPhases(page))?.edgeOpAuto).toBe(false);
+
+  await openFilletOverflow(page);
+  await page.getByTestId("chip-edgeop-chamfer").click();
+  await expect.poll(async () => (await toolPhases(page))?.edgeOpKind).toBe("Chamfer");
+  await closeFilletOverflow(page); // the popover can float over the handle
+
+  // Which way a Chamfer grows is not this test's business — only that neither
+  // direction re-types it and the size stays a positive magnitude.
+  const away = await awayOnScreen(page);
+  for (const sign of [-1, 1]) {
+    await dragEdgeOpHandle(page, sign * away.x * 140, sign * away.y * 140);
+    await expect.poll(async () => (await toolPhases(page))?.filletPhase).toBe("armed");
+    expect((await toolPhases(page))?.edgeOpKind).toBe("Chamfer");
+    expect(await chipValue(page)).toBeGreaterThan(0);
+  }
+  await openFilletOverflow(page);
+  await expect(page.getByTestId("chip-edgeop-chamfer")).toHaveAttribute("aria-pressed", "true");
 });
 
 // ── armed-commit gesture (ported from chamfer.spec.ts, armed via segment) ───

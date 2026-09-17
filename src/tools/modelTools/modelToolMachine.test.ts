@@ -357,14 +357,15 @@ describe("fillet FSM", () => {
     // …and it recovers monotonically from there.
     expect(filletStep(backwards.state, { kind: "drag", signed: 3 }).state.radius).toBe(3);
 
-    // A locked Chamfer is the mirror image: its half-line is the negative one.
+    // Spec §8.2 / review §4.2, TODO.md SESSION 37 H5 (D-S3): a Chamfer shares the
+    // Fillet's half-line — both GROW along the displayed outward arrow.
     const lockedChamfer = grabbed(
       filletStep(filletInit(), { kind: "arm", edgeCount: 1, radius: 1, edgeOp: "Chamfer" }).state,
     );
     const away = filletStep(lockedChamfer, { kind: "drag", signed: 5 });
     expect(away.state.edgeOp).toBe("Chamfer");
-    expect(away.state.radius).toBe(0.1);
-    expect(filletStep(away.state, { kind: "drag", signed: -2 }).state.radius).toBe(2);
+    expect(away.state.radius).toBe(5);
+    expect(filletStep(away.state, { kind: "drag", signed: -2 }).state.radius).toBe(0.1);
   });
 
   it("setEdgeOp locks the type for the session (a later drag cannot re-type)", () => {
@@ -373,7 +374,8 @@ describe("fillet FSM", () => {
     expect(picked.state.edgeOp).toBe("Chamfer");
     expect(picked.state.auto).toBe(false);
 
-    const dragged = filletStep(grabbed(picked.state), { kind: "drag", signed: -5 });
+    // Spec §8.2 / review §4.2, TODO.md SESSION 37 H5: outward (+) grows a Chamfer too.
+    const dragged = filletStep(grabbed(picked.state), { kind: "drag", signed: 5 });
     expect(dragged.state.edgeOp).toBe("Chamfer"); // still the user's choice
     expect(dragged.state.radius).toBe(5);
   });
@@ -393,12 +395,27 @@ describe("fillet FSM", () => {
     expect(filletStep(typed, { kind: "setEdgeOp", edgeOp: "Chamfer" }).state.radius).toBe(7);
   });
 
-  it("a TYPED value is a magnitude and never re-types the op", () => {
-    const s = filletStep(filletArm(), { kind: "setRadius", radius: -7 });
+  // Spec §8.2 / review §4.2, TODO.md SESSION 37 H5: a typed size below the floor is
+  // INVALID at the controller, so the reducer only ever receives a valid one and
+  // stores it verbatim — no Math.abs, no silent clamp to 0.1.
+  it("a TYPED value is stored verbatim and never re-types the op", () => {
+    const s = filletStep(filletArm(), { kind: "setRadius", radius: 7 });
     expect(s.state.radius).toBe(7);
     expect(s.state.edgeOp).toBe("Fillet");
     expect(s.state.auto).toBe(false);
-    expect(filletStep(filletArm(), { kind: "setRadius", radius: 0 }).state.radius).toBe(0.1);
+    expect(filletStep(filletArm(), { kind: "setRadius", radius: 0.25 }).state.radius).toBe(0.25);
+    expect(filletStep(filletArm(), { kind: "setRadius", radius: 0.1 }).state.radius).toBe(0.1);
+  });
+
+  // H4b W7, defence in depth: the controller refuses a size below the floor, and the
+  // reducer refuses it again rather than storing (or converting) it.
+  it("setRadius below EDGE_OP_MIN_VALUE is refused: no effect, state untouched", () => {
+    const armed = filletArm();
+    for (const bad of [0.05, 0, -7, Number.NaN]) {
+      const step = filletStep(armed, { kind: "setRadius", radius: bad });
+      expect(step.effect, String(bad)).toBe("none");
+      expect(step.state).toBe(armed);
+    }
   });
 
   it("setEdgeOp is inert outside armed/dragging", () => {
@@ -452,16 +469,16 @@ describe("fillet FSM", () => {
       .toBeNull();
   });
 
-  it("setDistance2 refuses a non-positive / non-finite second leg (equal-leg, never 0)", () => {
-    // SCHEMA §7.3 requires `distance2 > 0` when present — a zero-width bevel is
-    // not a value the wire may carry, so it collapses to equal-leg.
-    for (const bad of [0, -3, Number.NaN, Number.POSITIVE_INFINITY]) {
-      expect(filletStep(chamferArm(2.5), { kind: "setDistance2", distance2: bad }).state.distance2)
-        .toBeNull();
+  // Spec §8.2 (H4b W3): an out-of-domain second leg is REFUSED — never collapsed to
+  // equal-leg, never clamped to the floor. Only `null` means equal-leg.
+  it("setDistance2 refuses a non-positive / non-finite / sub-minimum second leg, state untouched", () => {
+    const armed = chamferArm(2.5);
+    for (const bad of [0, -3, Number.NaN, Number.POSITIVE_INFINITY, 0.0001, 0.05]) {
+      const step = filletStep(armed, { kind: "setDistance2", distance2: bad });
+      expect(step.effect, String(bad)).toBe("none");
+      expect(step.state).toBe(armed);
     }
-    // …and a tiny positive one is clamped to the shared magnitude floor.
-    expect(filletStep(chamferArm(), { kind: "setDistance2", distance2: 0.0001 }).state.distance2)
-      .toBe(0.1);
+    expect(filletStep(chamferArm(), { kind: "setDistance2", distance2: 0.1 }).state.distance2).toBe(0.1);
   });
 
   it("distance2 is CHAMFER-only: a Fillet arm ignores it (arm seed and event)", () => {
@@ -489,7 +506,7 @@ describe("fillet FSM", () => {
   });
 
   it("the DRAG lane sizes d1 only — it never touches the second leg", () => {
-    const dragged = filletStep(grabbed(chamferArm(2.5)), { kind: "drag", signed: -4 });
+    const dragged = filletStep(grabbed(chamferArm(2.5)), { kind: "drag", signed: 4 }); // SESSION 37 H5: outward grows
     expect(dragged.state.radius).toBe(4);
     expect(dragged.state.distance2).toBe(2.5);
   });
@@ -582,7 +599,7 @@ describe("fillet FSM", () => {
     expect(filletStep(toFillet, { kind: "setEdgeOp", edgeOp: "Chamfer" }).state.angleDeg).toBe(30);
 
     // The drag sizes d1 alone.
-    const dragged = filletStep(grabbed(angleArm(30)), { kind: "drag", signed: -4 });
+    const dragged = filletStep(grabbed(angleArm(30)), { kind: "drag", signed: 4 }); // SESSION 37 H5: outward grows
     expect(dragged.state.radius).toBe(4);
     expect(dragged.state.angleDeg).toBe(30);
   });

@@ -44,8 +44,7 @@ export const NO_MATERIAL: MaterialSides = { pos: null, neg: null };
  * Rule 4 flips to Add the moment the prism reaches a separate body. A pointer
  * hovering at exactly that distance would otherwise strobe Add↔NewBody every
  * frame, and each flip re-sends the previewed op. Entering costs `+HOLD`, leaving
- * costs `−HOLD`, so the two thresholds never coincide. Mirrors
- * `EDGE_OP_FLIP_HOLD`'s reasoning in `modelToolMachine`.
+ * costs `−HOLD`, so the two thresholds never coincide.
  */
 export const CONTACT_FLIP_HOLD = 0.5;
 

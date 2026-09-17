@@ -66,3 +66,70 @@ export function snapDepth(depth: number, step: number): number {
   if (step <= 0) return depth;
   return Math.round(depth / step) * step;
 }
+
+/**
+ * A grab-relative drag basis: the value the gesture started from and the input
+ * coordinate (world units) it was grabbed at. A frame reports
+ * `start + (input − grab)`, so only the pointer's own travel moves the value.
+ */
+export interface DragBasis {
+  readonly start: number;
+  readonly grab: number;
+}
+
+/**
+ * One frame of a grab-relative drag bounded below by `floor`.
+ *
+ * At the bound the basis is REBASED onto the current input rather than clamped: a
+ * pointer that overshoots by 50 units and turns around must move the value on its
+ * first reversing sample, not after 50 units of dead travel (wind-up).
+ */
+export function flooredDrag(
+  basis: DragBasis,
+  input: number,
+  floor: number,
+): { value: number; basis: DragBasis } {
+  const value = basis.start + (input - basis.grab);
+  if (value >= floor) return { value, basis };
+  return { value: floor, basis: { start: floor, grab: input } };
+}
+
+/**
+ * How an extrude drag maps its input onto the stored depth (TODO.md SESSION 37,
+ * decision D-S2):
+ *  - `oneSided` — the signed depth follows the input 1:1 and crosses zero freely.
+ *  - `symmetricAxis` — the input moves the head, which sits at `|depth|/2`, so the
+ *    physical HALF-span follows the pointer and the Total moves at twice its rate.
+ *  - `symmetricTotal` — a screen proxy has no head to track; the input drives the
+ *    Total at gain 1.
+ * Both symmetric modes clamp the span at 0 (rebasing) and carry the caller's sign
+ * hint: the worker builds `|distance|` for Symmetric, so the sign is encoding only
+ * and must not flip because a drag passed through zero.
+ */
+export type ExtrudeDragMode = "oneSided" | "symmetricAxis" | "symmetricTotal";
+
+/** The basis a grab (or a mid-drag mode change) takes from the current depth. */
+export function extrudeDragBasis(mode: ExtrudeDragMode, depth: number, input: number): DragBasis {
+  switch (mode) {
+    case "oneSided":
+      return { start: depth, grab: input };
+    case "symmetricAxis":
+      return { start: Math.abs(depth) / 2, grab: input };
+    case "symmetricTotal":
+      return { start: Math.abs(depth), grab: input };
+  }
+}
+
+/** One extrude drag frame: the depth to store, and the basis the next frame reads. */
+export function extrudeDragFrame(
+  mode: ExtrudeDragMode,
+  basis: DragBasis,
+  input: number,
+  signHint: 1 | -1,
+): { depth: number; basis: DragBasis } {
+  if (mode === "oneSided") return { depth: basis.start + (input - basis.grab), basis };
+  const extent = flooredDrag(basis, input, 0);
+  const span = mode === "symmetricAxis" ? 2 * extent.value : extent.value;
+  // `signHint * 0` would store −0, which reads as a sign it cannot carry.
+  return { depth: span === 0 ? 0 : signHint * span, basis: extent.basis };
+}

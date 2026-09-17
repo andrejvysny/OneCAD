@@ -63,6 +63,7 @@ import { currentDpr, MAX_DPR } from "./dpr";
 import type { DraftEntity } from "@/tools/sketch/toolMachine";
 import { PreviewMesh } from "./PreviewMesh";
 import { DragHandle, type DragHandleMode } from "./DragHandle";
+import type { HandleMapping, HandleStrategy } from "@/tools/preview/handleProjection";
 import { TransformGizmo, type GizmoHit } from "./TransformGizmo";
 import { RevolvePreview, type AxisCandidate } from "./RevolvePreview";
 import { PlanePicker, type PickablePlane } from "./PlanePicker";
@@ -899,10 +900,12 @@ export class ViewportEngine {
     // other constant-size layer here (OriginTriad, PlanePicker, contributions)
     // has always used. One implementation, and the accurate one.
     if (this.dragHandle) {
-      this.dragHandle.setScale(worldPerPixel(camera, this.dragHandle.worldAnchor(), height));
+      const handleWorldPerPx = worldPerPixel(camera, this.dragHandle.worldAnchor(), height);
+      this.dragHandle.setScale(handleWorldPerPx);
       // …and billboard it, so the flat arrow always faces the viewer and runs
-      // along its axis's SCREEN direction rather than collapsing edge-on.
-      this.dragHandle.orient(camera, width, height);
+      // along its mapping's SCREEN direction rather than collapsing edge-on. The
+      // SAME per-anchor scale classifies axis vs proxy (`handleProjection`).
+      this.dragHandle.orient(camera, width, height, handleWorldPerPx);
     }
     if (this.transformGizmo?.visible) {
       this.transformGizmo.setScale(
@@ -1778,8 +1781,11 @@ export class ViewportEngine {
    * limitation — but it does mean a caller MUST pair this with
    * {@link hideValueHandle} on its cancel path, or the next tool inherits a
    * floating arrow.
+   *
+   * `tangent` is an edge op's world edge tangent at `origin`: the handle then
+   * draws, and {@link valueHandleMapping} reports, the tangent-REJECTED axis.
    */
-  showValueHandle(origin: Vec3, dir: Vec3): void {
+  showValueHandle(origin: Vec3, dir: Vec3, tangent?: Vec3): void {
     if (this.disposed) return;
     if (!this.dragHandle) {
       this.dragHandle = new DragHandle({ root: this.interactionRoot, invalidate: () => this.invalidate() });
@@ -1789,7 +1795,12 @@ export class ViewportEngine {
     // passes `dir = +axis` even for a negative distance, so a flipped red arrow
     // would be a lie about the direction it is going to move the face.
     this.dragHandle.reset();
-    this.dragHandle.setAxis(new THREE.Vector3().fromArray(origin), new THREE.Vector3().fromArray(dir));
+    this.dragHandle.setAxis(
+      new THREE.Vector3().fromArray(origin),
+      new THREE.Vector3().fromArray(dir),
+      "forward",
+      tangent ? new THREE.Vector3().fromArray(tangent) : null,
+    );
     this.dragHandle.setScale(this.planePixelWorld());
     this.dragHandle.setVisible(true);
     this.invalidate();
@@ -1898,6 +1909,32 @@ export class ViewportEngine {
     return this.dragHandle?.visible ?? false;
   }
 
+  /**
+   * The mapping the shared drag arrow offers under the camera as it is NOW —
+   * axis or screen proxy, direction and gain (`handleProjection.HandleMapping`).
+   * Computed fresh from the current camera, viewport size and the anchor's own
+   * `worldPerPixel`, never read off the last rendered frame, so a grab right
+   * after a camera move classifies what the user sees. Ignores any freeze.
+   * Null while the arrow is hidden.
+   */
+  valueHandleMapping(): HandleMapping | null {
+    const handle = this.dragHandle;
+    if (!handle?.visible) return null;
+    const { width, height } = this.viewportSize();
+    const camera = this.rig.getCamera();
+    return handle.computeMapping(camera, width, height, worldPerPixel(camera, handle.worldAnchor(), height));
+  }
+
+  /**
+   * Freeze the arrow's drawn strategy at grab (`null` releases it), so glyph,
+   * pick and gesture keep one mapping for the whole drag even as the camera or
+   * the per-frame axis update would reclassify it.
+   */
+  freezeValueHandleStrategy(strategy: HandleStrategy | null): void {
+    this.dragHandle?.freezeStrategy(strategy);
+    this.invalidate();
+  }
+
   /** Set the live extrude depth on the L1 prism(s) (symmetric grows both ways). */
   setExtrudeDepth(depth: number, symmetric: boolean): void {
     this.previewMesh?.setDepth(depth, symmetric);
@@ -1992,10 +2029,16 @@ export class ViewportEngine {
       const anchor = handle.worldAnchor();
       const projected = this.projectPoint([anchor.x, anchor.y, anchor.z]);
       if (!projected) return null;
-      // The arrow is billboarded, so it reaches `reachPx` from its anchor in
-      // whatever screen direction its axis points — the box that holds every
-      // such direction is the square of that radius.
-      return boxAround(projected, handle.reachPx());
+      // The pick corridor is a flat camera-parallel rectangle rolled with the
+      // glyph, so its screen box is that rectangle's axis-aligned bounds at the
+      // roll `orient()` last applied — exact, not a worst-case square.
+      const half = handle.corridorHalfExtentsPx();
+      return {
+        x: projected.x - half.x,
+        y: projected.y - half.y,
+        width: half.x * 2,
+        height: half.y * 2,
+      };
     }
     const gizmo = this.transformGizmo;
     if (!gizmo || !gizmo.visible) return null;

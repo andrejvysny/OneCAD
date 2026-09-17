@@ -79,7 +79,7 @@ import { settingsStore } from "@/stores/settingsStore";
 import { activeToolPresentation } from "./activeToolPresentation";
 import { trace, traceWarn } from "@/debug/trace";
 import { logDebug } from "@/debug/log";
-import { viewportStore, type StatusSeverity, type ViewportState } from "@/stores/viewportStore";
+import { viewportStore, type StatusHint, type StatusSeverity, type ViewportState } from "@/stores/viewportStore";
 import { formatLengthWithUnit } from "@/units/format";
 import { isInteractiveBoundary, isInteractiveBoundaryTarget } from "@/ui/interactiveBoundary";
 import { documentStore, nextAppliedOps, nextDatumName, type SketchMeta } from "@/stores/documentStore";
@@ -103,24 +103,29 @@ import { regionAnchorOf } from "@/tools/modelTools/regionAnchor";
 import { regionAtPoint } from "@/tools/preview/regionPick";
 import {
   axisDepthFromRay,
+  extrudeDragBasis,
+  extrudeDragFrame,
+  flooredDrag,
   normalize,
   resolveDepth,
   snapDepth,
+  type DragBasis,
+  type ExtrudeDragMode,
   type Vec3,
 } from "@/tools/preview/depthProjection";
 import { dimQuantum } from "@/tools/sketch/liveDimension";
 import { chooseGridStep } from "@/viewport/engine/GridPlane";
 import {
   clampToEdgeOpRange,
-  radiusFromDrag,
   radiusFromValueText,
-  screenDragAxis,
   signedValueFromDrag,
+  EDGE_OP_MIN_VALUE,
   SCREEN_UP_AXIS,
   type EdgeOpClampResult,
   type EdgeOpRangeGuard,
   type ScreenAxis,
 } from "@/tools/preview/filletRadius";
+import type { HandleMapping, HandleStrategy } from "@/tools/preview/handleProjection";
 import { averageOutward, edgeMidAndTangent, edgeOutward } from "@/tools/preview/edgeDirection";
 import { axisSplitsRegion, type LatheAxis } from "@/tools/preview/lathePreview";
 import { angleFromDrag, snapRevolveAngle, clampAngle, angleFromValueText } from "@/tools/preview/revolveAngle";
@@ -202,6 +207,7 @@ import {
   booleanStep as booleanStepRaw,
   extrudeInit,
   extrudeStep as extrudeStepRaw,
+  isDistanceDriven,
   type ExtrudeEndCondition,
   filletInit,
   filletStep as filletStepRaw,
@@ -257,6 +263,19 @@ import {
 } from "./modelToolMachine";
 import { completionVerb } from "./completionHint";
 import { withPhaseLog } from "./fsmLog";
+import {
+  beginModelGesture,
+  cancelsLiveGesture,
+  gestureOwnerOf,
+  isMissedRelease,
+  normalizePointerId,
+  pointerMatches,
+  restoreAllowed,
+  supersedesLostContact,
+  type GestureOwner,
+  type ModelGesture,
+  type ModelGestureKind,
+} from "./modelGesture";
 import type { FeatureBooleanMode, TransformBodyParams } from "@/ipc/types";
 
 // ── Observability wrapping (DEV-OBSERVABILITY Wave F) ────────────────────────
@@ -275,6 +294,15 @@ const mirrorStep = withPhaseLog("mirror", mirrorStepRaw);
 const transformStep = withPhaseLog("transform", transformStepRaw);
 
 const DRAG_PX = 4;
+
+/** A distance-driven extrude of depth 0 builds nothing (TODO.md SESSION 37 H3). */
+const EXTRUDE_ZERO_DEPTH_MESSAGE = "No effect: depth is 0";
+/** The same refusal for a distance-driven SECOND direction (the worker refuses it too). */
+const EXTRUDE_ZERO_DEPTH2_MESSAGE = "No effect: second depth is 0";
+/** What a fresh edge-op ✓ says while it waits for the newest preview reopen (review R5). */
+const EDGE_OP_CONFIRM_WAIT_HINT = "Waiting for preview…";
+/** The status line an OffsetFace re-edit arms with (no closure to name). */
+const OFFSET_REEDIT_HINT = "Edit offset distance — type a value, Enter to apply";
 
 
 /** Set-equality over body ids (order-insensitive; ids are unique per selection). */
@@ -562,7 +590,54 @@ export interface ModelToolDeps {
   debug?: boolean;
 }
 
-type DragKind = "extrude" | "fillet" | "revolve" | "shell" | "offsetFace" | "transform" | null;
+type DragKind = ModelGestureKind | null;
+
+/**
+ * What a gesture CANCEL puts back, per kind: exactly the fields one gesture can
+ * change — its drag frames plus the side effects riding it (extrude's Alt
+ * symmetric toggle and auto boolean flip, the gizmo grab re-typing mode, axis and
+ * copy). Nothing else, so a chip edit that is not part of the drag survives.
+ */
+interface GestureSnapshots {
+  extrude: Pick<ExtrudeFsm, "depth" | "symmetric" | "twoDirections" | "booleanMode" | "targetBodyId" | "booleanAuto">;
+  fillet: Pick<FilletFsm, "radius" | "touched">;
+  shell: Pick<ShellFsm, "thickness">;
+  offsetFace: Pick<OffsetFaceFsm, "distance" | "touched" | "valueError">;
+  revolve: Pick<RevolveFsm, "angle">;
+  transform: Pick<TransformFsm, "mode" | "axis" | "translate" | "angleDeg" | "rotAxis" | "rotAxisVec" | "copy">;
+}
+
+type ActiveGesture = {
+  [K in ModelGestureKind]: ModelGesture<GestureSnapshots[K]> & { readonly kind: K };
+}[ModelGestureKind];
+
+/**
+ * The value-handle mapping one gesture takes AT GRAB and keeps until it ends
+ * (TODO.md SESSION 37 H3/H5): the glyph's own strategy, the screen direction the
+ * value grows along, and the world units one CSS pixel of that travel is worth.
+ */
+interface GrabMapping {
+  strategy: HandleStrategy;
+  axis: ScreenAxis;
+  worldPerPx: number;
+}
+
+/**
+ * `HandleMapping` → the gesture's form. An axis moves `p / pxPerWorld` world units
+ * per `p` px along its direction; anything else is the vertical proxy at the
+ * anchor's scale (the orbit metric only when the anchor's was unusable).
+ */
+function toGrabMapping(mapping: HandleMapping, orbitMetric: () => number): GrabMapping {
+  const [x, y] = mapping.direction;
+  if (mapping.strategy === "axis") {
+    if (mapping.pxPerWorld !== null && mapping.pxPerWorld > 0) {
+      return { strategy: "axis", axis: { x, y }, worldPerPx: 1 / mapping.pxPerWorld };
+    }
+    return { strategy: "screenProxy", axis: SCREEN_UP_AXIS, worldPerPx: orbitMetric() };
+  }
+  const worldPerPx = mapping.worldPerPx > 0 ? mapping.worldPerPx : orbitMetric();
+  return { strategy: "screenProxy", axis: { x, y }, worldPerPx };
+}
 
 /**
  * One placement gizmo gesture (WP-B W2). Everything is captured AT GRAB and the
@@ -689,6 +764,8 @@ export class ModelToolController {
   private mirror: MirrorFsm = mirrorInit();
   private transform: TransformFsm = transformInit();
   private readonly throttle = new PreviewThrottle<PreviewParams>({ trailingMs: 80 });
+  /** Offset added to every lifecycle request (see `resetPreviewThrottle`). */
+  private lifecycleRequestBase = 0;
 
   // Kernel-preview context. One session per armed target (Extrude: one per region
   // — N==1 single-region, N in Wave 2 multi-select). The first session paces the
@@ -728,17 +805,25 @@ export class ModelToolController {
   private chipSideOffset: Vec3 = [0, 0, 0];
   private normal: Vec3 = [0, 0, 1];
   /**
-   * The extrude drag's grab basis: the depth the arm held at the press, and the
-   * axis projection of the press itself. A frame reports
-   * `extrudeStartDepth + (raw - extrudeGrabDepth)`, so the pointer's own travel
-   * since the grab is the only thing that moves the value. Both stay 0 on the
-   * `forceExtrudeGrab` path, which collapses that back to the absolute mapping.
+   * The extrude drag's grab basis (`extrudeDragBasis`): the value the press started
+   * from and the drag INPUT at the press — the axis projection of the press ray, or
+   * 0 for a screen proxy. Only the pointer's own travel since the grab moves the
+   * value. Zeroed on the `forceExtrudeGrab` path, which collapses that back to the
+   * absolute mapping.
    */
-  private extrudeStartDepth = 0;
-  private extrudeGrabDepth = 0;
-  /** Latest fixed-frame axis sample. Used only to rebase a deliberate symmetric
-   * mode change; preview geometry never changes this drag frame. */
-  private extrudeLastRawDepth = 0;
+  private extrudeBasis: DragBasis = { start: 0, grab: 0 };
+  /** Latest drag input. Used only to rebase a deliberate symmetric mode change;
+   * preview geometry never changes this drag frame. */
+  private extrudeLastInput = 0;
+  /** Whether this extrude gesture has travelled past `DRAG_PX`; until then its
+   * value is exactly the start (review §4.3 — no snap on a zero-travel frame). */
+  private extrudeDragMoved = false;
+  /**
+   * The sign a symmetric span is STORED with (decision D-S2). The worker builds
+   * `|distance|`, so the sign is encoding only — it is taken from every non-zero
+   * depth and kept through 0, which `-0` could not carry.
+   */
+  private extrudeSignHint: 1 | -1 = 1;
   private lastArmedSketch: string | null = null;
   /** `lastArmedSketch`'s geometryToken at arm time — a change invalidates the arm. */
   private armedSketchToken: string | null = null;
@@ -765,7 +850,29 @@ export class ModelToolController {
   // Revolve multi-region pick. `armGen` is bumped on every arm request +
   // every tool/mode change, so a finishSketch/enterSketch result that returns AFTER
   // the user re-triggered (or cancelled) is dropped instead of clobbering state.
-  private armGen = 0;
+  private armGenValue = 0;
+  /** Settled by the next `armGen` change — lets an await stop the moment its arm is gone. */
+  private armGenChange: { promise: Promise<void>; resolve: () => void } | null = null;
+  private get armGen(): number {
+    return this.armGenValue;
+  }
+  private set armGen(value: number) {
+    this.armGenValue = value;
+    const change = this.armGenChange;
+    this.armGenChange = null;
+    change?.resolve();
+  }
+  /** Resolves at the next `armGen` change (never, if the arm outlives the caller's wait). */
+  private nextArmChange(): Promise<void> {
+    if (!this.armGenChange) {
+      let resolve!: () => void;
+      const promise = new Promise<void>((r) => {
+        resolve = r;
+      });
+      this.armGenChange = { promise, resolve };
+    }
+    return this.armGenChange.promise;
+  }
   private regionPick: RegionPickState | null = null;
   /** One resolved picker may open exactly one preview lane, even if AX/Enter/click
    *  confirmations arrive again while that lane is still opening. */
@@ -837,6 +944,18 @@ export class ModelToolController {
    * committing ahead of the reopen would send an op with no face slots.
    */
   private chamferSync: Promise<void> = Promise.resolve();
+  /** Syncs queued or running on {@link chamferSync} — the ✓'s synchronous "anything in flight?" read. */
+  private chamferSyncPending = 0;
+  /**
+   * Bumped by EVERY {@link openEdgeOpPreview} call; only the newest open may install
+   * its session. Several opens can be in flight inside ONE arm generation (a type
+   * flip and a same-turn chamfer sync, a failed-commit re-arm and a [Flip
+   * reference]) and the backend answers them in any order, which `armGen` alone
+   * cannot tell apart (review §4.1).
+   */
+  private edgeOpOpenSeq = 0;
+  /** The newest edge-op open while it is still in flight; cleared when it settles. */
+  private edgeOpOpening: { token: number; done: Promise<void> } | null = null;
   /**
    * RE-EDIT only: whether the record's stored reference face could be matched to
    * one of its seed edge's adjacent faces on the current head.
@@ -852,14 +971,9 @@ export class ModelToolController {
   private chamferReeditFlip: "none" | "unknown" | "bound" = "none";
   private filletDownX = 0;
   private filletDownY = 0;
-  /**
-   * SIGNED value at the grab (negated for a Chamfer). The gesture lives on ONE
-   * number line through zero — positive is Fillet, negative is Chamfer — so a
-   * drag that crosses back over zero re-types continuously instead of jumping.
-   */
-  private filletStartValue = DEFAULT_FILLET_RADIUS;
-  /** Screen direction one world unit of "away from the body" points, resolved per grab. */
-  private filletAxis: ScreenAxis = SCREEN_UP_AXIS;
+  /** The size at the grab, rebased at `EDGE_OP_MIN_VALUE`. Fillet and Chamfer both
+   *  grow along the displayed outward arrow (decision D-S3). */
+  private filletBasis: DragBasis = { start: DEFAULT_FILLET_RADIUS, grab: 0 };
   /** World outward direction for the armed edges (null = none honest enough to use). */
   private filletOutward: Vec3 | null = null;
   /** World point the drag axis is projected from (mean of the armed edge midpoints). */
@@ -917,8 +1031,10 @@ export class ModelToolController {
 
   // Shell context (mirrors fillet: face selection + vertical thickness drag).
   private shellFaces: EntityRef[] = [];
+  private shellDownX = 0;
   private shellDownY = 0;
-  private shellStartThickness = DEFAULT_SHELL_THICKNESS;
+  /** The thickness at the grab, rebased at `EDGE_OP_MIN_VALUE`. */
+  private shellBasis: DragBasis = { start: DEFAULT_SHELL_THICKNESS, grab: 0 };
   private shellEditFeatureId: string | undefined;
   /** Stored params of the shell being re-edited (thickness-only edit preserves faces). */
   private shellStoredParams: Record<string, unknown> | undefined;
@@ -1062,6 +1178,8 @@ export class ModelToolController {
   private revolveAxis: LatheAxis | null = null;
   private revolveAxisLineId: string | null = null;
   private revolveArmedDown = false; // LMB pressed while armed (maybe an angle drag)
+  /** The pointer that made the armed press; only it may promote the press to a drag. */
+  private revolveArmedPointerId: number | null = null;
   private revolveDownX = 0;
   private revolveLastX = 0;
   private revolveStartAngle = DEFAULT_REVOLVE_ANGLE;
@@ -1085,7 +1203,25 @@ export class ModelToolController {
   private downY = 0;
   private downButton = -1;
   private moved = false;
-  private dragging: DragKind = null;
+  /** The ONE live value gesture, from its grab until release, cancel or abandon. */
+  private gesture: ActiveGesture | null = null;
+  /** The handle mapping the live value gesture took at its grab (R03), or null. */
+  private gestureMapping: GrabMapping | null = null;
+  /** The status line a proxy grab replaced, restored when the gesture ends. */
+  private gestureHint: { message: string; before: StatusHint | null } | null = null;
+  /** A capture loss waiting one task to learn whether its pointerup follows. */
+  private captureLossTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Each open lane session's refusal AT THE GRAB — what a cancel restores. */
+  private gesturePreviewFailures: ReadonlyMap<string, PreviewFailure | null> = new Map();
+  /**
+   * An arm whose install is still awaiting the kernel. Its handle may already be
+   * on screen, but the landing arm resets the value — a grab now would drag a
+   * number that jumps under the pointer when it lands. Inert once `armGen` moves on.
+   */
+  private armLanding: { kind: ModelGestureKind; gen: number } | null = null;
+  private get dragging(): DragKind {
+    return this.gesture?.kind ?? null;
+  }
   private altHeld = false;
 
   private readonly unsubs: Array<() => void> = [];
@@ -1095,6 +1231,9 @@ export class ModelToolController {
     c.addEventListener("pointerdown", this.onPointerDown);
     c.addEventListener("pointermove", this.onPointerMove);
     c.addEventListener("pointerup", this.onPointerUp);
+    c.addEventListener("pointercancel", this.onPointerCancel);
+    c.addEventListener("lostpointercapture", this.onLostPointerCapture);
+    window.addEventListener("blur", this.onWindowBlur);
     window.addEventListener("keydown", this.onKeyDown, true);
     window.addEventListener("keyup", this.onKeyUp, true);
 
@@ -1142,6 +1281,9 @@ export class ModelToolController {
         if (s.documentId !== lastDocumentId || s.runtimeSession !== lastRuntimeSession) {
           lastDocumentId = s.documentId;
           lastRuntimeSession = s.runtimeSession;
+          // Another document or worker session: nothing a live drag measured
+          // against is on screen any more, and nothing may be written back.
+          this.abandonGesture();
           if (toolStore.getState().modelTool === "measure") this.cancelMeasure();
         }
         if (s.revision === lastRevision) return;
@@ -1325,6 +1467,7 @@ export class ModelToolController {
     // previous tool's transient state first.
     this.invalidateArm();
     this.commitGen++;
+    this.abandonGesture();
     // Before the sweep: the per-tool cancels below reset the FSMs this hover was
     // keyed to, and `selectionStore` outlives every one of them.
     this.clearToolHover();
@@ -1695,6 +1838,11 @@ export class ModelToolController {
       return;
     }
     const gen = this.armGen;
+    // This arm replaces the FSM: nothing dragged on a previous arm may write into it.
+    this.abandonGesture();
+    // …and its own handle is on screen before the sessions open, but the landing
+    // below re-seats the chip at `startDepth`, so grabs wait for it.
+    this.armLanding = { kind: "extrude", gen };
     this.plane = plane;
     this.lastArmedSketch = sketchId;
     this.armedSketchToken = documentStore.getState().sketches[sketchId]?.geometryToken ?? null;
@@ -1728,6 +1876,8 @@ export class ModelToolController {
       draft: storedDraft,
       ...(seed ? { boolean: seed } : {}),
     }).state;
+    this.extrudeSignHint = 1;
+    this.noteExtrudeSign(startDepth);
     // T6 / D12: a re-edit used to open on the draft angle alone — `Blind / Through
     // all / To next / To face` and `New Body / Add / Cut` were hidden, so an
     // Extrude could never be changed from Add to Cut after the fact. Seed all
@@ -1755,6 +1905,7 @@ export class ModelToolController {
         kind: "setSymmetric",
         symmetric: storedMode.symmetric,
       }).state;
+      this.seedStoredSecondDirection(storedMode.symmetric);
     }
 
     this.engine.showExtrudePreviews(this.plane, profiles, this.centroidWorld, this.normal);
@@ -1797,6 +1948,7 @@ export class ModelToolController {
               sticky: true,
             });
         }
+        this.endArmLanding(gen);
         return;
       }
       if (gen !== this.armGen) {
@@ -1822,7 +1974,7 @@ export class ModelToolController {
     this.previewParamsFn = () => this.extrudePreviewParams(this.extrude.depth);
     this.previewPending = false;
 
-    this.throttle.reset();
+    this.resetPreviewThrottle();
     this.engine.setPreviewTint("normal");
     toolStore.setState({ phase: "armed" });
     const n = regions.length;
@@ -1876,7 +2028,12 @@ export class ModelToolController {
         anchorOffsetPx: DEFAULT_CHIP_OFFSET_PX,
       },
     );
+    toolChipStore.getState().setRevertHandler((v) => this.revertExtrudeValue(v));
+    // `showExtrude` re-seats the chip from CLEARED: a re-edit that opens on a stored
+    // 0 must be refused from its first frame.
+    this.syncExtrudeZeroValidation();
     this.publishExtrudeContext();
+    this.endArmLanding(gen);
 
     this.sendPreview(); // initial exact L2 (all sessions)
     // The armed phase has no other publisher: `sendPreview` reaches
@@ -1884,6 +2041,30 @@ export class ModelToolController {
     // its own `updateDebug()`. Without this the `?vpdebug` surface keeps
     // reporting the pre-arm phase for the whole arm.
     this.updateDebug();
+  }
+
+  /**
+   * A two-direction record re-arms WITH its second direction (review R7/W8). The
+   * commit merges into the record, whose second direction rides verbatim, so the
+   * preview and the no-effect verdict must describe it too. A ToFace second
+   * direction without its stored face is left unseeded rather than dropped into a
+   * face pick the user never asked for.
+   */
+  private seedStoredSecondDirection(symmetric: boolean): void {
+    const stored = this.extrudeStoredParams;
+    if (symmetric || stored?.twoDirections !== true) return;
+    this.extrude = extrudeStep(this.extrude, { kind: "setTwoDirections", on: true }).state;
+    const end2 = storedExtrudeMode(stored.extrudeMode2).endCondition;
+    const face2 = stored.targetFace2 ?? null;
+    if (end2 !== "ToFace" || face2 !== null) {
+      this.extrude = extrudeStep(this.extrude, {
+        kind: "setEndCondition",
+        end: end2,
+        direction: 2,
+        targetFace: face2,
+      }).state;
+    }
+    this.extrude = extrudeStep(this.extrude, { kind: "setDepth2", depth: storedScalar(stored.distance2) }).state;
   }
 
   private publishExtrudeContext(): void {
@@ -1953,13 +2134,73 @@ export class ModelToolController {
     this.engine.moveChip(MODEL_TOOL_CHIP_ID, this.chipWorld(), this.centroidWorld);
   }
 
-  private onExtrudeChip(v: number): void {
+  private onExtrudeChip(value: number): void {
     if (this.extrude.phase !== "armed" && this.extrude.phase !== "dragging") return;
+    // −0 (a Flip at 0, a typed "-0") reads as a sign the depth cannot carry (D-S2
+    // keeps the sign in the hint), so it is stored as +0 like every drag frame.
+    const v = value === 0 ? 0 : value;
     this.extrude = extrudeStep(this.extrude, { kind: "setDepth", depth: v }).state;
+    this.noteExtrudeSign(v);
     this.engine.setExtrudeDepth(v, this.extrude.symmetric);
     this.syncExtrudeHandle(); // a typed depth moves the arrow exactly like a drag
     toolChipStore.getState().setValue(v);
+    this.syncExtrudeZeroValidation();
     this.sendPreview();
+  }
+
+  /** Escape in the depth field (spec §9.2): the typed path re-derives the zero verdict. */
+  private revertExtrudeValue(start: number): void {
+    toolChipStore.getState().clearValidation();
+    this.onExtrudeChip(start);
+  }
+
+  /** Keep the stored-sign hint in step with every non-zero depth (D-S2). */
+  private noteExtrudeSign(depth: number): void {
+    if (depth > 0) this.extrudeSignHint = 1;
+    else if (depth < 0) this.extrudeSignHint = -1;
+  }
+
+  /** Whether the armed extrude would build nothing: a distance-driven depth of 0. */
+  private extrudeDepthIsZero(): boolean {
+    return this.extrudeZeroMessage() !== null;
+  }
+
+  /**
+   * Which distance-driven depth of 0 makes the armed extrude build nothing, as the
+   * refusal the chip shows — or null. A two-direction extrude's distance-driven
+   * SECOND depth counts too: the worker refuses it ("second distance too small").
+   */
+  private extrudeZeroMessage(): string | null {
+    const e = this.extrude;
+    if ((e.symmetric || isDistanceDriven(e.endCondition)) && e.depth === 0) return EXTRUDE_ZERO_DEPTH_MESSAGE;
+    if (!e.symmetric && e.twoDirections && isDistanceDriven(e.endCondition2) && e.depth2 === 0) {
+      return EXTRUDE_ZERO_DEPTH2_MESSAGE;
+    }
+    return null;
+  }
+
+  /**
+   * Publish, or retract, the zero-depth refusal on the controller's range channel.
+   * Only this verdict is retracted here, never another owner's.
+   */
+  private syncExtrudeZeroValidation(): void {
+    const chip = toolChipStore.getState();
+    const range = chip.rangeValidation;
+    const flagged =
+      range.status === "invalid" &&
+      (range.message === EXTRUDE_ZERO_DEPTH_MESSAGE || range.message === EXTRUDE_ZERO_DEPTH2_MESSAGE);
+    const zero = this.extrudeZeroMessage();
+    if (zero !== null && !(flagged && range.status === "invalid" && range.message === zero)) {
+      chip.setRangeValidation({ status: "invalid", draft: 0, message: zero });
+    } else if (zero === null && flagged) {
+      chip.clearValidation();
+    }
+  }
+
+  /** How the live extrude drag maps its input, for `symmetric` (see `ExtrudeDragMode`). */
+  private extrudeDragMode(symmetric: boolean): ExtrudeDragMode {
+    if (!symmetric) return "oneSided";
+    return this.gestureMapping?.strategy === "screenProxy" ? "symmetricTotal" : "symmetricAxis";
   }
 
   /**
@@ -1980,13 +2221,14 @@ export class ModelToolController {
     if (this.extrude.phase !== "armed" && this.extrude.phase !== "dragging") return;
     if (this.dragging === "extrude" && this.extrude.symmetric !== symmetric) {
       // Changing endpoint derivative must not make the next one-pixel move jump.
-      this.extrudeStartDepth = this.extrude.depth;
-      this.extrudeGrabDepth = this.extrudeLastRawDepth;
+      this.noteExtrudeSign(this.extrude.depth);
+      this.extrudeBasis = extrudeDragBasis(this.extrudeDragMode(symmetric), this.extrude.depth, this.extrudeLastInput);
     }
     this.extrude = extrudeStep(this.extrude, { kind: "setSymmetric", symmetric }).state;
     this.engine.setExtrudeDepth(this.extrude.depth, symmetric);
     this.syncExtrudeHandle();
     toolChipStore.getState().setSymmetric(symmetric);
+    this.syncExtrudeZeroValidation();
     this.sendPreview();
   }
 
@@ -2180,6 +2422,7 @@ export class ModelToolController {
     if (end !== "Blind" && !this.resolveBooleanTarget().canBoolean) return;
     this.extrude = extrudeStep(this.extrude, { kind: "setEndCondition", end }).state;
     toolChipStore.setState({ endCondition: end });
+    this.syncExtrudeZeroValidation(); // a depth of 0 only matters while the depth drives the result
     if (this.extrude.phase === "facePick") {
       this.engine.setOrbitSuppressed(true);
       viewportStore
@@ -2236,6 +2479,7 @@ export class ModelToolController {
     if (this.extrude.phase !== "facePick") return;
     this.extrude = extrudeStep(this.extrude, { kind: "cancelFacePick" }).state;
     toolChipStore.setState({ endCondition: this.extrude.endCondition });
+    this.syncExtrudeZeroValidation();
     this.clearToolHover();
     this.engine.setOrbitSuppressed(false);
     viewportStore.getState().setStatusHint(this.armHintFor("extrude"), { sticky: true });
@@ -2361,6 +2605,31 @@ export class ModelToolController {
     this.armGen++;
   }
 
+  /** Re-edit requests (history rows); a newer one supersedes an older in flight. */
+  private reeditRequestSeq = 0;
+
+  /**
+   * A history re-edit's stored params, or null when it was superseded while the
+   * fetch was out — by a newer re-edit request or by any arm change.
+   *
+   * It takes NO arm token itself (review R6): a re-edit whose stored params turn
+   * out unusable refuses and leaves the live arm — its preview reopen, its waiting
+   * ✓ — exactly as it was. Each starter invalidates the arm only once it has
+   * decided to proceed. A live value DRAG is the one thing the request does end at
+   * once, keeping the value it reached: the user has moved on to the history row,
+   * and a drag must not keep writing into an arm a re-edit may be about to replace.
+   */
+  private async fetchReeditParams(
+    featureId: string,
+  ): Promise<{ stored: Record<string, unknown> | undefined } | null> {
+    const request = ++this.reeditRequestSeq;
+    this.abandonGesture();
+    const armGen = this.armGen;
+    const stored = await this.client.getOperationParams(featureId).catch(() => undefined);
+    if (request !== this.reeditRequestSeq || armGen !== this.armGen) return null;
+    return { stored };
+  }
+
   private async enterRegionPick(
     kind: "extrude" | "revolve",
     sketchId: string,
@@ -2386,6 +2655,7 @@ export class ModelToolController {
     }
     // Wave 2: >1 region → MULTI-select. Toggle membership; Enter / chip ✓ / a
     // double-click on one region confirms; Esc cancels.
+    this.abandonGesture(); // the pick owns the pointer from here
     const chipWorld = regionsChipWorld(session.plane, pickable);
     this.regionPick = {
       kind,
@@ -2518,6 +2788,7 @@ export class ModelToolController {
 
   /** Enter / region chip ✓: confirm the current multi-selection (≥1 region). */
   private confirmRegionSelect(): void {
+    if (this.gestureBlocksCommit()) return;
     const ctx = this.regionPick;
     if (!ctx) return;
     const step = regionSelectStep(ctx.select, { kind: "confirm" });
@@ -2733,6 +3004,8 @@ export class ModelToolController {
     startAngle = DEFAULT_REVOLVE_ANGLE,
     storedParams?: Record<string, unknown>,
   ): void {
+    // This arm replaces the FSM: nothing dragged on a previous arm may write into it.
+    this.abandonGesture();
     const region = regions[0];
     const profile = profiles[0];
     const candidates: AxisCandidate[] = session.entities
@@ -2907,7 +3180,7 @@ export class ModelToolController {
     this.revolveAxis = null;
     this.revolveAxisLineId = null;
     this.revolveArmedDown = false;
-    if (this.dragging === "revolve") this.dragging = null;
+    this.abandonGesture("revolve");
     // STILL suppressed: this drops back into axis-pick, which is modal in exactly
     // the same way the first one was — not to a free-orbit armed state.
     this.deps.engine.setOrbitSuppressed(true);
@@ -3108,7 +3381,7 @@ export class ModelToolController {
     this.previewOwner = "revolve";
     this.previewParamsFn = () => this.revolvePreviewParams();
     this.previewPending = false;
-    this.throttle.reset();
+    this.resetPreviewThrottle();
     this.throttle.setTrailingMs(REVOLVE_PREVIEW_TRAILING_MS);
     this.sendPreview(); // initial exact L2 (all sessions)
     this.updateDebug();
@@ -3152,6 +3425,7 @@ export class ModelToolController {
    * consumed sketch. A commitGen token guards every await.
    */
   private async confirmRevolve(): Promise<void> {
+    if (this.gestureBlocksCommit()) return;
     if (this.retainedCommitBlocked()) return;
     if (toolChipStore.getState().validation.status !== "valid") return;
     if (this.revolve.phase !== "armed") return;
@@ -3502,7 +3776,7 @@ export class ModelToolController {
     if (!failed) {
       this.previewSessions = remaining.map((s) => ({ ...s, lastAppliedEpoch: 0, failure: null }));
       this.recomputePreviewFailure();
-      this.throttle.reset();
+      this.resetPreviewThrottle();
       this.sendPreview();
       return;
     }
@@ -3530,7 +3804,7 @@ export class ModelToolController {
       ...remaining.map((s) => ({ ...s, lastAppliedEpoch: 0, failure: null })),
     ];
     this.recomputePreviewFailure();
-    this.throttle.reset();
+    this.resetPreviewThrottle();
     this.throttle.setTrailingMs(REVOLVE_PREVIEW_TRAILING_MS);
     this.sendPreview();
     this.updateDebug();
@@ -3558,7 +3832,7 @@ export class ModelToolController {
     this.previewPendingHint = false;
     this.previewFailure = null;
     this.clearExactPreviewWaiters();
-    this.throttle.reset();
+    this.resetPreviewThrottle();
     this.engine.setPreviewTint("normal");
     toolChipStore.getState().clear();
     this.revolve = revolveStep(this.revolve, { kind: "settle" }).state;
@@ -3573,7 +3847,7 @@ export class ModelToolController {
     this.revolveEditFeatureId = undefined;
     this.revolveStoredParams = undefined;
     this.revolveArmedDown = false;
-    if (this.dragging === "revolve") this.dragging = null;
+    this.abandonGesture("revolve");
     const unique = bodyIds.filter((id, i, a) => a.indexOf(id) === i);
     let completionHint: string | undefined;
     let severity: StatusSeverity | undefined;
@@ -3634,6 +3908,8 @@ export class ModelToolController {
     this.filletEditFeatureId = undefined;
     this.computeEdgeOpOutward();
     const size = kind === "Chamfer" ? DEFAULT_CHAMFER_DISTANCE : DEFAULT_FILLET_RADIUS;
+    // This arm replaces the FSM: nothing dragged on a previous arm may write into it.
+    this.abandonGesture();
     this.fillet = filletStep(filletInit(), {
       kind: "arm",
       edgeCount: this.filletEdges.length,
@@ -3645,6 +3921,10 @@ export class ModelToolController {
     // visible scalar proxy; neither may claim arbitrary viewport presses.
     if (this.filletDegraded) {
       (this.deps.engine as Partial<ViewportEngine>).showScreenValueHandle?.(this.filletAnchor);
+    } else if (this.filletTangent && this.filletEdges.length === 1) {
+      // ONE projection (SESSION 37 H5): the glyph rejects the edge tangent, and the
+      // grab reads that same mapping back — a multi-edge mean has no tangent.
+      this.engine.showValueHandle(this.filletAnchor, this.filletOutward as Vec3, this.filletTangent);
     } else {
       this.engine.showValueHandle(this.filletAnchor, this.filletOutward as Vec3);
     }
@@ -3694,6 +3974,7 @@ export class ModelToolController {
         anchorAxisFrom: degraded ? undefined : this.filletAnchor,
       },
     );
+    toolChipStore.getState().setRevertHandler((v) => this.revertEdgeOpValue(v));
     this.publishEdgeOperationContext();
   }
 
@@ -4048,42 +4329,14 @@ export class ModelToolController {
   }
 
   /**
-   * The screen axis a value drag is measured along, resolved PER GRAB (the camera
-   * may have orbited since the arm). Finite difference rather than a transformed
-   * vector: one projection of the anchor and one of a point a few pixels' worth of
-   * world along `outward` capture perspective foreshortening exactly.
-   *
-   * Falls back to the screen convention (up grows) whenever there is nothing
-   * honest to project — no outward direction, an engine without `projectPoint`
-   * (test mocks), a point behind the camera, or a collapsed projected difference
-   * (a head-on edge, which `screenDragAxis` refuses rather than normalizing noise).
-   */
-  private edgeOpScreenAxis(): ScreenAxis {
-    const outward = this.filletOutward;
-    if (!outward) return SCREEN_UP_AXIS;
-    const engine = this.engine as Partial<ViewportEngine>;
-    if (typeof engine.projectPoint !== "function") return SCREEN_UP_AXIS;
-    const project = engine.projectPoint.bind(this.engine);
-    const step = 10 * this.engine.planePixelWorld();
-    const a = this.filletAnchor;
-    const along = (d: Vec3): Vec3 => [a[0] + step * d[0], a[1] + step * d[1], a[2] + step * d[2]];
-    const pMid = project(a);
-    const pOut = project(along(outward));
-    if (!pMid || !pOut) return SCREEN_UP_AXIS;
-    const pTan = this.filletTangent ? project(along(this.filletTangent)) : null;
-    return screenDragAxis(pMid, pOut, pTan ?? undefined) ?? SCREEN_UP_AXIS;
-  }
-
-  /**
-   * Commit a Fillet↔Chamfer change — the ONE place a type flip becomes real,
-   * whether the drag direction or a chip segment caused it.
+   * Commit a Fillet↔Chamfer change — the ONE place a type flip becomes real. Only
+   * an explicit chip segment causes one; a drag sizes the op and never re-types it.
    *
    * `beginPreview` FREEZES the draft's `opType` (`localSolver.ts:495-508`; the
    * per-opType builders in `previewOps.ts` are chosen there), so a type change is
    * a session close + REOPEN, never a params patch. `armGen` is bumped BEFORE the
-   * close: two hysteresis crossings inside one in-flight `beginPreview` would
-   * otherwise both pass the gen fence, installing a stale-kind session and leaking
-   * the other.
+   * close: two flips inside one in-flight `beginPreview` would otherwise both pass
+   * the gen fence, installing a stale-kind session and leaking the other.
    */
   private applyEdgeOpKindChange(): void {
     toolChipStore.getState().setEdgeOp(this.fillet.edgeOp);
@@ -4091,14 +4344,13 @@ export class ModelToolController {
     this.previewArmHint = hint;
     viewportStore.getState().setStatusHint(hint, { sticky: true });
     const gen = ++this.armGen;
-    const wasDragging = this.dragging === "fillet";
+    // The flip re-opens the lane under a new `armGen`, so a live drag belongs to an
+    // arm that is gone: it ends here rather than writing into the new one.
+    this.abandonGesture("fillet");
     // A measured range is MODE-SPECIFIC — a fillet and a chamfer roll onto the
     // adjacent faces differently, so a Fillet ceiling is not a Chamfer ceiling.
-    // Dropping it is mandatory; re-measuring is not, and is deliberately skipped
-    // MID-DRAG: an auto type flip is a drag-frequency event and re-issuing dozens
-    // of OCCT builds per flip is exactly the per-frame kernel load this codebase
-    // forbids. The guard is simply absent until the next deliberate arm, which is
-    // the honest state — nothing has been measured for this type.
+    // Drop it, and re-measure below: the only flip left is an explicit segment
+    // press (one event, never drag-frequency), and it always ends any drag first.
     this.filletRange = null;
     this.filletRangeGen = null;
     this.filletDraft = null;
@@ -4108,14 +4360,7 @@ export class ModelToolController {
     // previewing an existing feature double-applies it (the rule `armShell` states
     // for its own re-edit). The flip there is chip + record only.
     if (!this.filletEditFeatureId) {
-      const reopen = (): Promise<void> =>
-        this.openEdgeOpPreview(gen).then(() => {
-          // The reopen re-raises the ARMED trailing floor; a flip DURING a drag has to
-          // get the drag floor back or the value stops tracking the pointer.
-          if (wasDragging && this.dragging === "fillet") {
-            this.throttle.setTrailingMs(EDGE_OP_DRAG_TRAILING_MS);
-          }
-        });
+      const reopen = (): Promise<void> => this.openEdgeOpPreview(gen);
       // WP-F: a flip to Fillet DROPS the reference-face pairs (a Fillet may not
       // carry them) and a flip back to an already-asymmetric Chamfer re-authors
       // them — either way `inputs[]` moves, so the pairs are resolved BEFORE the
@@ -4129,15 +4374,20 @@ export class ModelToolController {
         this.pushChamferFlipToChip();
         void reopen();
       } else {
-        void this.resolveChamferReferenceFaces(gen).then(() => {
-          if (gen !== this.armGen) return undefined;
-          this.pushChamferFlipToChip();
-          return reopen();
-        });
+        // The resolution runs INSIDE the open, so the open's token is taken now and
+        // a ✓ in this window waits for the reopen instead of finding no session —
+        // and ON the reference-face chain, so it can never interleave its write with
+        // a sync's (review R3).
+        void this.openEdgeOpPreview(gen, () =>
+          this.enqueueChamferStep(async () => {
+            await this.resolveChamferReferenceFaces(gen);
+            if (gen !== this.armGen) return false;
+            this.pushChamferFlipToChip();
+            return true;
+          }),
+        );
       }
-      // A DELIBERATE flip (a chip segment) is worth re-measuring; a mid-drag auto
-      // flip is not, per the note above.
-      if (!wasDragging && this.filletPreparedSnapshot !== null) {
+      if (this.filletPreparedSnapshot !== null) {
         this.filletRangeSettled = this.armEdgeOpRange(
           gen,
           this.fillet.edgeOp,
@@ -4150,6 +4400,7 @@ export class ModelToolController {
 
   /** A [Fillet|Chamfer] segment was clicked: lock the type for the session. */
   private onEdgeOpChip(edgeOp: EdgeOpKind): void {
+    if (this.edgeOpFrozenForCommit()) return;
     // Idempotent — but only once the type is already LOCKED. Re-picking the active
     // segment while the drag still owns the type is the gesture that kills `auto`,
     // so it must fall through.
@@ -4166,8 +4417,28 @@ export class ModelToolController {
    * `tauriCommandMap.filletParams` silently drops the typed `params.edges` on one):
    * the draft's `inputs` and `params.edgeIds` are both derived from `this.filletEdges`,
    * in that array's order, by the two helpers below and nowhere else.
+   *
+   * PUBLICATION ORDER (review §4.1): every call takes a new token, and only the
+   * newest open may install. `prepare` (a type flip's reference-face resolution)
+   * runs inside the open so the token is taken at the request, not after it; with
+   * no `prepare` the draft is captured synchronously, as before.
    */
-  private async openEdgeOpPreview(gen: number): Promise<void> {
+  private openEdgeOpPreview(gen: number, prepare?: () => Promise<boolean>): Promise<void> {
+    const token = ++this.edgeOpOpenSeq;
+    const done = this.runEdgeOpOpen(gen, token, prepare).finally(() => {
+      if (this.edgeOpOpening?.token === token) this.edgeOpOpening = null;
+    });
+    this.edgeOpOpening = { token, done };
+    return done;
+  }
+
+  private async runEdgeOpOpen(
+    gen: number,
+    token: number,
+    prepare?: () => Promise<boolean>,
+  ): Promise<void> {
+    // Superseded while preparing: a newer open already carries the newer state.
+    if (prepare && (!(await prepare()) || token !== this.edgeOpOpenSeq)) return;
     const draft: PreviewDraft = {
       opType: this.edgeOpKind,
       inputs: this.edgeOpInputs(),
@@ -4177,32 +4448,128 @@ export class ModelToolController {
     try {
       session = await this.deps.client.beginPreview(draft);
     } catch (error) {
-      if (gen !== this.armGen) return;
+      if (gen !== this.armGen || token !== this.edgeOpOpenSeq) return;
       // The chip stays armed and usable: commitEdgeOp falls back to a plain
       // applyOperation when no session exists, so a lane refusal costs the
-      // preview, never the tool.
+      // preview, never the tool — and the lifecycle stops claiming one is coming.
+      this.publishPreviewLifecycle("none");
       traceWarn(
         this.edgeOpKind.toLowerCase(),
         `${this.edgeOpKind} preview session failed: ${errMessage(error)}`,
       );
       return;
     }
-    if (gen !== this.armGen) {
+    if (!this.edgeOpOpenMayPublish(gen, token)) {
       void this.deps.client.endPreview(session.sessionId, false);
       return;
     }
+    // Replace, never overwrite: a session installed by an earlier open is ended and
+    // its meshes and barriers dropped. Safe only because the fillet cannot be
+    // committing here (see `edgeOpOpenMayPublish`).
+    if (this.previewSessions.length > 0) this.closePreviewSessions();
     this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [], failure: null }];
     this.previewOwner = "edgeOp";
     this.previewParamsFn = () => this.edgeOpPreviewParams();
     this.previewPending = false;
     this.previewFailure = null;
     this.stalePreviewRetryAttempted = false;
-    this.throttle.reset();
+    this.resetPreviewThrottle();
     // A fillet/chamfer rebuild is dearer than a prism sweep — pace the armed lane
-    // slower than the 80ms drag floor (restored on every release).
-    this.throttle.setTrailingMs(EDGE_OP_TRAILING_MS);
+    // slower than the 80ms drag floor (restored on every release). A drag that
+    // grabbed while this session was opening keeps its own floor.
+    this.throttle.setTrailingMs(this.dragging === "fillet" ? EDGE_OP_DRAG_TRAILING_MS : EDGE_OP_TRAILING_MS);
     this.sendPreview();
     this.updateDebug();
+  }
+
+  /**
+   * Whether a resolved edge-op open may install its session: same arm, still the
+   * newest open, the fillet armed or dragging, and the lane free or already the
+   * edge op's. NEVER while committing — replacing the lane then would end the
+   * session the commit is materializing and release its exact-preview barrier.
+   */
+  private edgeOpOpenMayPublish(gen: number, token: number): boolean {
+    return (
+      gen === this.armGen &&
+      token === this.edgeOpOpenSeq &&
+      (this.fillet.phase === "armed" || this.fillet.phase === "dragging") &&
+      (this.previewOwner === null || this.previewOwner === "edgeOp")
+    );
+  }
+
+  /**
+   * While an edge op is materializing (fresh or re-edit), NOTHING may change it —
+   * segment, second leg, angle, [Flip reference], size or a chamfer sync (spec §9.4,
+   * review R1/R8). The inspector renders those controls inert under the `applying`
+   * presentation; every controller entry refuses here BEFORE touching state, so a
+   * failed commit hands back exactly the arm it started from.
+   */
+  private edgeOpFrozenForCommit(): boolean {
+    return this.fillet.phase === "committing";
+  }
+
+  /** True while a reference-face sync or the newest edge-op open is still in flight. */
+  private edgeOpPreviewInFlight(): boolean {
+    return this.chamferSyncPending > 0 || this.edgeOpOpening !== null;
+  }
+
+  /**
+   * Resolve once no reference-face sync and no newest edge-op open is in flight,
+   * re-reading both after every await: a sync can start an open, and an open can
+   * be superseded by a newer one while we wait.
+   */
+  private async settleEdgeOpPreviewOpens(armGen: number): Promise<void> {
+    // Stops the moment the arm changes (review R4): a ✓ from an arm the user left
+    // must not wait on the NEW arm's opens and then speak over it.
+    while (armGen === this.armGen && this.edgeOpPreviewInFlight()) {
+      const next = this.chamferSyncPending > 0
+        ? this.chamferSync
+        : this.edgeOpOpening?.done.catch(() => undefined);
+      await Promise.race([next, this.nextArmChange()]);
+    }
+  }
+
+  /**
+   * Re-judge a fresh ✓ after one of its awaits (review R2/R4). Still this arm, still
+   * armed, no retained failure, and the validation as it reads NOW — a size typed
+   * while the ✓ waited is judged, never committed under the old one. Every refusal
+   * says why, except a dropped arm whose status line a newer arm already owns: that
+   * one is logged only.
+   */
+  private edgeOpConfirmSurvives(armGen: number, kind: EdgeOpKind): boolean {
+    if (this.disposed) return false;
+    if (armGen !== this.armGen) {
+      const message = `${kind} not applied: the operation changed before its preview was ready`;
+      traceWarn(kind.toLowerCase(), message);
+      const line = viewportStore.getState().statusHint?.message;
+      if (line === undefined || line === EDGE_OP_CONFIRM_WAIT_HINT) {
+        viewportStore.getState().setStatusHint(message, { severity: "warn", sticky: true });
+      }
+      return false;
+    }
+    // Another ✓ that waited alongside this one took the commit, or a drag took the
+    // value — either now owns it, exactly as a ✓ during a gesture is ignored.
+    if (this.fillet.phase !== "armed") {
+      this.endEdgeOpConfirmWait();
+      return false;
+    }
+    const chip = toolChipStore.getState();
+    const refusal = chip.retainedCommitFailure?.message ??
+      (chip.validation.status === "valid" ? null : chip.validation.message);
+    if (refusal !== null) {
+      viewportStore.getState().setStatusHint(`Cannot confirm ${kind}: ${refusal}`, {
+        severity: "error",
+        sticky: true,
+      });
+      return false;
+    }
+    return true;
+  }
+
+  /** Hand the status line back to the arm once the ✓ stopped waiting on it. */
+  private endEdgeOpConfirmWait(): void {
+    if (viewportStore.getState().statusHint?.message !== EDGE_OP_CONFIRM_WAIT_HINT) return;
+    viewportStore.getState().setStatusHint(this.previewArmHint ?? this.edgeOpArmHint(), { sticky: true });
   }
 
   /**
@@ -4371,11 +4738,37 @@ export class ModelToolController {
    * here ever invents a face.
    */
   private async resolveChamferReferenceFaces(gen: number): Promise<void> {
-    if (!this.chamferNeedsReferenceFaces()) {
-      this.chamferPairs = null;
-      this.chamferPairsError = null;
+    // A lookup is a SNAPSHOT of what it was asked about (review R3). Its promotions
+    // are round trips; if the type, the asymmetry, the flip side or a mode changed
+    // while they were out, its answer describes an op the user no longer holds and
+    // is never written — the lookup starts over on the current inputs instead.
+    for (;;) {
+      const inputs = this.chamferLookupInputs();
+      const answer = await this.lookupChamferReferenceFaces(gen);
+      if (gen !== this.armGen) return;
+      if (inputs !== this.chamferLookupInputs()) continue;
+      this.chamferPairs = answer.pairs;
+      this.chamferPairsError = answer.error;
       return;
     }
+  }
+
+  /** Everything a reference-face lookup reads, as one comparable key. */
+  private chamferLookupInputs(): string {
+    return [
+      this.edgeOpKind,
+      this.chamferNeedsReferenceFaces(),
+      this.chamferFlipped,
+      this.fillet.distance2,
+      this.fillet.angleDeg,
+    ].join("|");
+  }
+
+  /** One pass of the lookup: the pairs (or why there are none), written by the caller. */
+  private async lookupChamferReferenceFaces(
+    gen: number,
+  ): Promise<{ pairs: { pairs: ChamferReferenceFace[]; inputs: SemanticRef[] } | null; error: string | null }> {
+    if (!this.chamferNeedsReferenceFaces()) return { pairs: null, error: null };
     const pairs: ChamferReferenceFace[] = [];
     const inputs: SemanticRef[] = [];
     for (const contour of this.chamferContours()) {
@@ -4383,27 +4776,22 @@ export class ModelToolController {
       const faceTopoKey =
         contour.adjacentFaces[this.chamferFlipped ? 1 : 0] ?? contour.adjacentFaces[0];
       if (!bodyId || !edgeId || !faceTopoKey) {
-        this.chamferPairs = null;
         // Deliberately NEUTRAL wording: an empty `adjacentFaces` is a real answer on
         // the real lane too (a genuinely free edge, SCHEMA §7.6), so the user must
         // be told what to do about their model, not about the backend. The mock's
         // own gap is stated where it exists, in `mockClient.prepareEdgeOp`.
-        this.chamferPairsError =
-          "this edge has no adjacent faces to measure the first distance on — pick another edge";
-        return;
+        return {
+          pairs: null,
+          error: "this edge has no adjacent faces to measure the first distance on — pick another edge",
+        };
       }
       const ref = await this.promoteChamferReferenceFace(bodyId, faceTopoKey);
-      if (gen !== this.armGen) return;
-      if (!ref?.primary.elementId) {
-        this.chamferPairs = null;
-        this.chamferPairsError = STALE_PICK_HINT;
-        return;
-      }
+      if (gen !== this.armGen) return { pairs: null, error: null };
+      if (!ref?.primary.elementId) return { pairs: null, error: STALE_PICK_HINT };
       pairs.push({ edgeId, faceId: ref.primary.elementId });
       inputs.push(ref);
     }
-    this.chamferPairs = { pairs, inputs };
-    this.chamferPairsError = null;
+    return { pairs: { pairs, inputs }, error: null };
   }
 
   /**
@@ -4419,12 +4807,30 @@ export class ModelToolController {
   private syncChamferReferenceFaces(): Promise<void> {
     // SERIALIZED. Two edits in flight would race each other's session close/reopen
     // and could leave the lane holding a session built for the wrong `inputs[]`.
-    const next = this.chamferSync.then(() => this.runChamferSync());
-    this.chamferSync = next.catch(() => undefined);
+    return this.enqueueChamferStep(() => this.runChamferSync());
+  }
+
+  /**
+   * Run `step` on the ONE reference-face chain (after every step already queued),
+   * counted in `chamferSyncPending` so a fresh ✓ waits for it. Every writer of
+   * `chamferPairs` goes through here — a sync, and a type flip's lookup (review R3).
+   */
+  private enqueueChamferStep<T>(step: () => Promise<T>): Promise<T> {
+    this.chamferSyncPending += 1;
+    const next = this.chamferSync.then(step).finally(() => {
+      this.chamferSyncPending -= 1;
+    });
+    this.chamferSync = next.then(
+      () => undefined,
+      () => undefined,
+    );
     return next;
   }
 
   private async runChamferSync(): Promise<void> {
+    // Refused BEFORE it resolves anything: the pairs are part of the op a commit is
+    // materializing (spec §9.4, review R1).
+    if (this.edgeOpFrozenForCommit()) return;
     const gen = this.armGen;
     const before = this.chamferPairsKey();
     await this.resolveChamferReferenceFaces(gen);
@@ -4435,6 +4841,8 @@ export class ModelToolController {
       this.updateDebug();
       return;
     }
+    // A commit that started while this lookup was out still owns its session.
+    if (this.edgeOpFrozenForCommit()) return;
     this.closePreviewSessions();
     await this.openEdgeOpPreview(gen);
   }
@@ -4467,6 +4875,7 @@ export class ModelToolController {
    * the `EditCommand` vocabulary to collapse them into.
    */
   private onChamferFlip(): void {
+    if (this.edgeOpFrozenForCommit()) return;
     this.chamferFlipped = !this.chamferFlipped;
     if (this.filletEditFeatureId) {
       void this.flipStoredChamferReferenceFaces(this.filletEditFeatureId);
@@ -4691,7 +5100,9 @@ export class ModelToolController {
   }
 
   private onFilletChip(v: number): void {
+    if (this.edgeOpFrozenForCommit()) return;
     this.filletDraft = v;
+    if (this.refuseBelowEdgeOpMinimum(v)) return;
     if (this.filletRangeGen !== null && this.filletRange === null) {
       toolChipStore.getState().setValidation({
         status: "pending",
@@ -4704,24 +5115,23 @@ export class ModelToolController {
   }
 
   private validateEdgeOpDraft(v: number): void {
+    // First, and at every entry — the deferred ones included: a measured floor
+    // below the authoring minimum would otherwise offer a "use nearest" for it.
+    if (this.refuseBelowEdgeOpMinimum(v)) return;
     const guard = this.guardEdgeOpValue(v);
+    if (this.refuseUnbuildableEdgeOpRange(v, guard)) return;
     if (guard.clamped) {
-      const noun = this.fillet.edgeOp === "Chamfer" ? "Distance" : "Radius";
-      const reason =
-        guard.reason === "interval"
-          ? `${noun} does not build in the measured gap`
-          : guard.reason === "floor"
-            ? `${noun} is below the verified minimum`
-            : `${noun} exceeds the verified maximum`;
+      const reason = this.edgeOpClampReason(guard);
+      const suggested = guard.value; // ≥ EDGE_OP_MIN_VALUE: `refuseUnbuildableEdgeOpRange` took the rest
       toolChipStore.getState().setRangeValidation(
         {
           status: "invalid",
           draft: v,
-          message: `${reason}. Keep the last valid preview or use ${formatLengthWithUnit(guard.value)}.`,
-          suggestedValue: guard.value,
+          message: `${reason}. Keep the last valid preview or use ${formatLengthWithUnit(suggested)}.`,
+          suggestedValue: suggested,
           suggestedLabel: guard.reason === "ceiling" ? "Use maximum" : "Use nearest",
         },
-        () => this.applySuggestedEdgeOpValue(guard.value),
+        () => this.applySuggestedEdgeOpValue(suggested),
       );
       viewportStore.getState().setStatusHint(reason, { severity: "error", sticky: true });
       return;
@@ -4737,12 +5147,80 @@ export class ModelToolController {
   }
 
   private applySuggestedEdgeOpValue(value: number): void {
+    if (this.edgeOpFrozenForCommit()) return;
     this.filletDraft = null;
     this.fillet = filletStep(this.fillet, { kind: "setRadius", radius: value }).state;
     toolChipStore.getState().clearValidation();
     toolChipStore.getState().setValue(this.fillet.radius);
     viewportStore.getState().setStatusHint(this.edgeOpArmHint(), { sticky: true });
     this.sendPreview();
+  }
+
+  /**
+   * Spec §8.2 / review §4.2: a size below `EDGE_OP_MIN_VALUE` is INVALID, never
+   * converted — the typed text stays, the preview keeps the last valid size, and
+   * the ✓ is refused. Returns whether `v` was refused.
+   */
+  private refuseBelowEdgeOpMinimum(v: number): boolean {
+    if (Number.isFinite(v) && v >= EDGE_OP_MIN_VALUE) return false;
+    const message = `Must be at least ${formatLengthWithUnit(EDGE_OP_MIN_VALUE)}`;
+    toolChipStore.getState().setRangeValidation({ status: "invalid", draft: v, message });
+    // The status line follows the verdict (review W6): an earlier range refusal's
+    // "exceeds the verified maximum" must not stay next to this one.
+    viewportStore.getState().setStatusHint(message, { severity: "error", sticky: true });
+    return true;
+  }
+
+  /** The measured-range clamp's reason, as the chip and the status line word it. */
+  private edgeOpClampReason(guard: EdgeOpClampResult): string {
+    const noun = this.fillet.edgeOp === "Chamfer" ? "Distance" : "Radius";
+    return guard.reason === "interval"
+      ? `${noun} does not build in the measured gap`
+      : guard.reason === "floor"
+        ? `${noun} is below the verified minimum`
+        : `${noun} exceeds the verified maximum`;
+  }
+
+  /**
+   * A measured clamp that lands BELOW the authoring floor has no buildable size to
+   * offer (review W5): suggesting — or dragging onto — the 0.1 floor would sit
+   * above the verified maximum. Refused with no suggestion; returns whether it was.
+   */
+  private refuseUnbuildableEdgeOpRange(v: number, guard: EdgeOpClampResult): boolean {
+    if (!guard.clamped || guard.value >= EDGE_OP_MIN_VALUE) return false;
+    const reason = this.edgeOpClampReason(guard);
+    const message = `${reason}. No verified size reaches the ${formatLengthWithUnit(EDGE_OP_MIN_VALUE)} minimum.`;
+    const current = toolChipStore.getState().rangeValidation;
+    if (current.status === "invalid" && current.message === message) return true;
+    toolChipStore.getState().setRangeValidation({ status: "invalid", draft: v, message });
+    viewportStore.getState().setStatusHint(reason, { severity: "error", sticky: true });
+    return true;
+  }
+
+  /**
+   * A value grab REPLACES a typed draft (review W1): its refusal, its pending range
+   * judgement and the status line that named it go, so a later range answer cannot
+   * re-refuse a number the user has dragged away from.
+   */
+  private dropTypedEdgeOpDraft(): void {
+    const range = toolChipStore.getState().rangeValidation;
+    if (this.filletDraft === null && range.status !== "invalid") return;
+    this.filletDraft = null;
+    toolChipStore.getState().clearValidation();
+    viewportStore.getState().setStatusHint(this.edgeOpArmHint(), { sticky: true });
+  }
+
+  /**
+   * Escape in the size field (spec §9.2): the abandoned draft and its verdict go —
+   * status line included — and the edit-start size re-enters through the typed
+   * path, so a range check still in flight settles on it, not on the draft.
+   */
+  private revertEdgeOpValue(start: number): void {
+    if (this.edgeOpFrozenForCommit()) return;
+    this.filletDraft = null;
+    toolChipStore.getState().clearValidation();
+    viewportStore.getState().setStatusHint(this.edgeOpArmHint(), { sticky: true });
+    this.onFilletChip(start);
   }
 
   /** No range evidence: accept the draft unchanged and let exact preview judge it. */
@@ -4755,6 +5233,7 @@ export class ModelToolController {
       toolChipStore.getState().clearValidation();
       return;
     }
+    if (this.refuseBelowEdgeOpMinimum(draft)) return;
     this.filletDraft = null;
     this.fillet = filletStep(this.fillet, { kind: "setRadius", radius: draft }).state;
     toolChipStore.getState().clearValidation();
@@ -4770,6 +5249,7 @@ export class ModelToolController {
    * params. A re-edit has no session and `sendPreview` is a no-op there.
    */
   private onEdgeOpDistance2(distance2: number | null): void {
+    if (this.edgeOpFrozenForCommit()) return;
     this.fillet = filletStep(this.fillet, { kind: "setDistance2", distance2 }).state;
     this.pushChamferModeToChip();
     // …but the SECOND leg is also what makes the chamfer asymmetric, and an
@@ -4786,6 +5266,7 @@ export class ModelToolController {
    * is simply re-sent.
    */
   private onEdgeOpChamferAngle(angleDeg: number | null): void {
+    if (this.edgeOpFrozenForCommit()) return;
     this.fillet = filletStep(this.fillet, { kind: "setAngleDeg", angleDeg }).state;
     this.pushChamferModeToChip();
     // The angle mode is asymmetric too — same reference-face rule (see above).
@@ -4890,6 +5371,8 @@ export class ModelToolController {
     editFeatureId?: string,
     startThickness = DEFAULT_SHELL_THICKNESS,
   ): Promise<void> {
+    // This arm replaces the FSM: nothing dragged on a previous arm may write into it.
+    this.abandonGesture();
     const gen = ++this.armGen;
     this.shellFaces = faces;
     this.shellEditFeatureId = editFeatureId;
@@ -4968,7 +5451,7 @@ export class ModelToolController {
     this.previewPending = false;
     this.previewFailure = null;
     this.stalePreviewRetryAttempted = false;
-    this.throttle.reset();
+    this.resetPreviewThrottle();
     this.throttle.setTrailingMs(SHELL_TRAILING_MS);
     this.sendPreview();
     this.updateDebug();
@@ -5000,7 +5483,9 @@ export class ModelToolController {
    * row on the timeline.
    */
   private async commitShell(): Promise<void> {
+    if (this.gestureBlocksCommit()) return;
     if (this.retainedCommitBlocked()) return;
+    if (toolChipStore.getState().validation.status !== "valid") return;
     const editFeatureId = this.shellEditFeatureId;
     if (editFeatureId) {
       await this.commitShellEdit(editFeatureId);
@@ -5185,12 +5670,25 @@ export class ModelToolController {
     chainTangentFaces = true,
     seedDistance?: number,
   ): Promise<void> {
+    // A re-arm requested mid-drag ends the drag at its current value FIRST, so the
+    // retained controls (`kept`) are an armed state, never a dragging one.
+    this.abandonGesture();
     const gen = ++this.armGen;
+    // The old arm stays on screen through the handshake, but the landing re-seats
+    // the value: grabs wait for it.
+    this.armLanding = { kind: "offsetFace", gen };
     const kept = this.offsetFace.phase === "idle" ? undefined : this.offsetFace;
-    if (!(await this.prepareOffsetClosure(gen, distanceType, chainTangentFaces))) {
+    let prepared = false;
+    try {
+      prepared = await this.prepareOffsetClosure(gen, distanceType, chainTangentFaces);
+    } finally {
+      this.endArmLanding(gen);
+    }
+    if (!prepared) {
       // A refused MODE switch retains the last valid controls, closure and preview.
       // Initial arm has nothing valid to retain and remains in target-pick state.
       if (gen === this.armGen) {
+        this.abandonGesture(); // backstop: the grab refusal above should leave none
         if (kept) {
           this.offsetFace = kept;
           this.showOffsetFaceChip();
@@ -5205,6 +5703,7 @@ export class ModelToolController {
       return;
     }
     if (gen !== this.armGen) return;
+    this.abandonGesture(); // backstop: the grab refusal above should leave none
     // Successful replacement owns a new closure; only now retire the old lane.
     this.closePreviewSessions();
     this.engine.hideGhostPreview();
@@ -5494,6 +5993,7 @@ export class ModelToolController {
         valueError: s.valueError,
       },
     );
+    toolChipStore.getState().setRevertHandler((v) => this.revertOffsetFaceValue(v));
     // A RE-EDIT arms with NO picks: `setTool` fires `cancelOffsetFace`, which
     // clears `offsetFaces` and `offsetTargetBodyId`, so the live picks alone would
     // publish an EMPTY context — which `missingRequiredTargetMessage` reads as
@@ -5539,6 +6039,11 @@ export class ModelToolController {
       this.offsetAnchor[2] + axis[2] * d,
     ];
     this.engine.showValueHandle(origin, axis);
+    // `showValueHandle` resets the shared handle, freeze included: a live grab
+    // re-asserts the strategy it took, or the glyph would reclassify mid-drag.
+    if (this.dragging === "offsetFace" && this.gestureMapping) {
+      (this.engine as Partial<ViewportEngine>).freezeValueHandleStrategy?.(this.gestureMapping.strategy);
+    }
     if (this.offsetGhostHidden) return;
     const entry = getEntry(this.offsetTargetBodyId);
     if (!entry) return;
@@ -5579,7 +6084,7 @@ export class ModelToolController {
     this.previewPending = false;
     this.previewFailure = null;
     this.stalePreviewRetryAttempted = false;
-    this.throttle.reset();
+    this.resetPreviewThrottle();
     this.throttle.setTrailingMs(OFFSET_FACE_TRAILING_MS);
     this.sendPreview();
     this.updateDebug();
@@ -5631,6 +6136,17 @@ export class ModelToolController {
     this.updateDebug();
   }
 
+  /**
+   * Escape in the distance field (spec §9.2): the refusal, its value-error flag and
+   * its status line go, and the edit-start distance re-enters the typed path.
+   */
+  private revertOffsetFaceValue(start: number): void {
+    toolChipStore.getState().clearValidation();
+    const hint = this.offsetEditFeatureId ? OFFSET_REEDIT_HINT : this.previewArmHint;
+    if (hint) viewportStore.getState().setStatusHint(hint, { sticky: true });
+    this.onOffsetFaceChip(start);
+  }
+
   /** A distance-type segment pick. Re-runs the handshake: the closure depends on it. */
   private onOffsetDistanceType(t: OffsetDistanceType): void {
     const step = offsetFaceStep(this.offsetFace, { kind: "setDistanceType", distanceType: t });
@@ -5666,6 +6182,7 @@ export class ModelToolController {
    *     closure the kernel never evaluated.
    */
   private async commitOffsetFace(): Promise<void> {
+    if (this.gestureBlocksCommit()) return;
     if (this.retainedCommitBlocked()) return;
     if (toolChipStore.getState().validation.status !== "valid") return;
     const editFeatureId = this.offsetEditFeatureId;
@@ -5860,6 +6377,8 @@ export class ModelToolController {
     this.offsetStoredParams = stored; // set AFTER the tool-change cancel
     this.offsetEditFeatureId = featureId;
     const gen = ++this.armGen;
+    // This arm replaces the FSM: nothing dragged on a previous arm may write into it.
+    this.abandonGesture();
     // `faceCount: 1` keeps the FSM out of its bail path — a re-edit has no fresh
     // picks (the fillet/shell re-edit seed rule).
     this.offsetFace = offsetFaceStep(offsetFaceInit(), {
@@ -5874,9 +6393,7 @@ export class ModelToolController {
     toolStore.setState({ phase: "armed" });
     this.offsetAnchor = [0, 0, 0];
     this.showOffsetFaceChip();
-    viewportStore
-      .getState()
-      .setStatusHint("Edit offset distance — type a value, Enter to apply", { sticky: true });
+    viewportStore.getState().setStatusHint(OFFSET_REEDIT_HINT, { sticky: true });
     this.updateDebug();
   }
 
@@ -5911,7 +6428,7 @@ export class ModelToolController {
     this.engine.hideValueHandle();
     this.engine.hideGhostPreview();
     this.resetOffsetFaceState();
-    if (this.dragging === "offsetFace") this.dragging = null;
+    this.abandonGesture("offsetFace");
     toolChipStore.getState().clear();
     this.updateDebug(); // republish the now-idle phase (a tool switch has no other hook)
   }
@@ -6133,7 +6650,7 @@ export class ModelToolController {
     this.previewPending = false;
     this.previewFailure = null;
     this.stalePreviewRetryAttempted = false;
-    this.throttle.reset();
+    this.resetPreviewThrottle();
     this.throttle.setTrailingMs(SHELL_TRAILING_MS);
     this.sendPreview();
     this.updateDebug();
@@ -6276,9 +6793,9 @@ export class ModelToolController {
     // Gate on `opType`, NEVER `kind`: `dto.rs feature_kind` buckets Hole under
     // `boolean`, so a `kind === "hole"` guard is unsatisfiable on the Tauri lane.
     if (!feat || feat.opType !== "Hole") return;
-    const requestGen = ++this.armGen;
-    const stored = await this.client.getOperationParams(featureId).catch(() => undefined);
-    if (requestGen !== this.armGen) return; // superseded while in flight
+    const fetched = await this.fetchReeditParams(featureId);
+    if (!fetched) return; // superseded while in flight
+    const stored = fetched.stored;
     const seeded = holeFsmFromParams(stored);
     if (!seeded) {
       viewportStore
@@ -6289,6 +6806,7 @@ export class ModelToolController {
         });
       return;
     }
+    this.invalidateArm(); // proceeding: only now does the re-edit replace the current arm
     toolStore.getState().setTool("hole"); // fires cancelHole (clears the seed fields)
     this.armGen++; // the async startHole path must not clobber the seed
     this.holeEditFeatureId = featureId; // set AFTER the tool-change cancel
@@ -6550,7 +7068,7 @@ export class ModelToolController {
     this.previewPending = false;
     this.previewFailure = null;
     this.stalePreviewRetryAttempted = false;
-    this.throttle.reset();
+    this.resetPreviewThrottle();
     this.throttle.setTrailingMs(SHELL_TRAILING_MS);
     this.sendPreview();
     this.updateDebug();
@@ -6660,9 +7178,9 @@ export class ModelToolController {
     if (this.authoringEntryBlocked()) return;
     const feat = documentStore.getState().features.find((f) => f.id === featureId);
     if (!feat || feat.opType !== "Gear") return;
-    const requestGen = ++this.armGen;
-    const stored = await this.client.getOperationParams(featureId).catch(() => undefined);
-    if (requestGen !== this.armGen) return;
+    const fetched = await this.fetchReeditParams(featureId);
+    if (!fetched) return;
+    const stored = fetched.stored;
     const seeded = gearFsmFromParams(stored);
     if (!seeded) {
       viewportStore
@@ -6673,6 +7191,7 @@ export class ModelToolController {
         });
       return;
     }
+    this.invalidateArm(); // proceeding: only now does the re-edit replace the current arm
     toolStore.getState().setTool("gear"); // fires cancelGear (clears the seed fields)
     this.armGen++;
     this.gearEditFeatureId = featureId; // set AFTER the tool-change cancel
@@ -7124,9 +7643,9 @@ export class ModelToolController {
     // Gate on `opType`, NEVER `kind` — see `editShellFeature`: `dto.rs
     // feature_kind` folds LinearPattern/CircularPattern/MirrorBody into `boolean`.
     if (!feat || feat.opType !== "LinearPattern") return;
-    const requestGen = ++this.armGen;
-    const stored = await this.client.getOperationParams(featureId).catch(() => undefined);
-    if (requestGen !== this.armGen) return; // superseded while getOperationParams was in flight
+    const fetched = await this.fetchReeditParams(featureId);
+    if (!fetched) return; // superseded while getOperationParams was in flight
+    const stored = fetched.stored;
     const bodyId = this.reeditSourceBodyFromParams(stored, "linear pattern");
     if (!bodyId) return;
     const axis = matchWorldAxis(stored?.direction);
@@ -7141,6 +7660,7 @@ export class ModelToolController {
     }
     const spacing = scalarNumber(stored?.spacing);
     const count = typeof stored?.count === "number" ? stored.count : countFromValueText(feat.valueText);
+    this.invalidateArm(); // proceeding: only now does the re-edit replace the current arm
     toolStore.getState().setTool("linearPattern");
     const resultPolicyVersion = stored?.resultPolicyVersion === 2 ? 2 : undefined;
     const fuseResult = typeof stored?.fuseResult === "boolean" ? stored.fuseResult : true;
@@ -7153,9 +7673,9 @@ export class ModelToolController {
     if (this.authoringEntryBlocked()) return;
     const feat = documentStore.getState().features.find((f) => f.id === featureId);
     if (!feat || feat.opType !== "CircularPattern") return;
-    const requestGen = ++this.armGen;
-    const stored = await this.client.getOperationParams(featureId).catch(() => undefined);
-    if (requestGen !== this.armGen) return;
+    const fetched = await this.fetchReeditParams(featureId);
+    if (!fetched) return;
+    const stored = fetched.stored;
     const bodyId = this.reeditSourceBodyFromParams(stored, "circular pattern");
     if (!bodyId) return;
     const axis = matchWorldAxis(stored?.axisDirection);
@@ -7171,6 +7691,7 @@ export class ModelToolController {
     const angle = scalarNumber(stored?.angleDeg);
     const count = typeof stored?.count === "number" ? stored.count : countFromValueText(feat.valueText);
     const origin = storedVec3(stored?.axisOrigin) ?? undefined;
+    this.invalidateArm(); // proceeding: only now does the re-edit replace the current arm
     toolStore.getState().setTool("circularPattern");
     const resultPolicyVersion = stored?.resultPolicyVersion === 2 ? 2 : undefined;
     const fuseResult = typeof stored?.fuseResult === "boolean" ? stored.fuseResult : true;
@@ -7183,9 +7704,9 @@ export class ModelToolController {
     if (this.authoringEntryBlocked()) return;
     const feat = documentStore.getState().features.find((f) => f.id === featureId);
     if (!feat || feat.opType !== "MirrorBody") return;
-    const requestGen = ++this.armGen;
-    const stored = await this.client.getOperationParams(featureId).catch(() => undefined);
-    if (requestGen !== this.armGen) return;
+    const fetched = await this.fetchReeditParams(featureId);
+    if (!fetched) return;
+    const stored = fetched.stored;
     const bodyId = this.reeditSourceBodyFromParams(stored, "mirror");
     if (!bodyId) return;
     const plane = matchWorldPlane(stored?.planeNormal);
@@ -7205,6 +7726,7 @@ export class ModelToolController {
     // `fuseWithOriginal` loads NON-fused in Rust but would have re-edited as
     // fused here — and committing that would silently flip the result mode.
     const fuseWithOriginal = stored?.fuseWithOriginal === true;
+    this.invalidateArm(); // proceeding: only now does the re-edit replace the current arm
     toolStore.getState().setTool("mirror");
     this.armMirror(bodyId, featureId, plane, planePoint, fuseWithOriginal);
   }
@@ -7310,6 +7832,8 @@ export class ModelToolController {
   }
 
   private armTransform(targets: string[], editFeatureId?: string, seed?: TransformSeed): void {
+    // This arm replaces the FSM: nothing dragged on a previous arm may write into it.
+    this.abandonGesture();
     this.transformEditFeatureId = editFeatureId;
     this.transform = transformStep(transformInit(), { kind: "arm", targets, ...seed }).state;
     // Freeze what the visible geometry already carries — see the field's note.
@@ -7462,11 +7986,15 @@ export class ModelToolController {
    * single `copy` flag — so Alt sets the flag the [Copy] segment shows, and the
    * user can see and undo it. Returns false when the press missed every handle.
    */
-  private startGizmoDrag(hit: TransformGrab, clientX: number, clientY: number, alt: boolean): boolean {
+  private startGizmoDrag(hit: TransformGrab, e: PointerEvent): boolean {
+    const { clientX, clientY } = e;
     const ray = this.engine.screenRay(clientX, clientY);
     if (!ray) return false;
     const origin = this.transformGizmoOrigin();
-    this.transform = transformStep(this.transform, { kind: "grab", grab: hit, copy: alt || undefined }).state;
+    // Before the grab step: the grab itself re-types mode/axis/copy, and a cancel
+    // must put those back too.
+    this.beginGesture(e, "transform");
+    this.transform = transformStep(this.transform, { kind: "grab", grab: hit, copy: e.altKey || undefined }).state;
     const axis = WORLD_AXIS[hit.axis];
     const grabScalar = hit.kind === "axis" ? (axisDragDelta(ray, origin, axis) ?? 0) : 0;
     // A FREE (aligned) axis is not any of the three rings, so a ring grab starts
@@ -7484,7 +8012,6 @@ export class ModelToolController {
       prevAngle: hit.kind === "ring" ? (ringAngleDeg(ray, origin, axis) ?? 0) : 0,
       rawTranslate: [...this.transform.translate],
     };
-    this.dragging = "transform";
     this.engine.setTransformGizmoActive(hit);
     toolStore.setState({ phase: "dragging" });
     this.publishTransformState();
@@ -7539,15 +8066,6 @@ export class ModelToolController {
     }
     drag.rawTranslate = next;
     return [snapTranslate(next[0], fine), snapTranslate(next[1], fine), snapTranslate(next[2], fine)];
-  }
-
-  /** Release: the placement stays ARMED at the dragged value (Enter / ✓ commits). */
-  private endGizmoDrag(): void {
-    this.gizmoDrag = null;
-    this.dragging = null;
-    this.engine.setTransformGizmoActive(null);
-    toolStore.setState({ phase: "armed" });
-    this.publishTransformState();
   }
 
   // ── align face-to-face (WP-B W2.5) ───────────────────────────────────────────
@@ -7859,6 +8377,7 @@ export class ModelToolController {
   }
 
   private async commitTransform(): Promise<void> {
+    if (this.gestureBlocksCommit()) return;
     if (this.retainedCommitBlocked()) return;
     if (toolChipStore.getState().validation.status !== "valid") return;
     if (this.transform.phase !== "armed" || this.transform.targets.length === 0) return;
@@ -7954,10 +8473,9 @@ export class ModelToolController {
     // Gate on `opType`, never `kind`: `dto.rs feature_kind` folds TransformBody
     // into `boolean` alongside the pattern/mirror ops.
     if (!feat || feat.opType !== "TransformBody") return;
-    const gen = ++this.armGen;
-    const stored = await this.client.getOperationParams(featureId).catch(() => undefined);
-    if (gen !== this.armGen) return;
-    const seed = transformSeedFromParams(stored);
+    const fetched = await this.fetchReeditParams(featureId);
+    if (!fetched) return;
+    const seed = transformSeedFromParams(fetched.stored);
     if (!seed) {
       viewportStore
         .getState()
@@ -7967,6 +8485,7 @@ export class ModelToolController {
         });
       return;
     }
+    this.invalidateArm(); // proceeding: only now does the re-edit replace the current arm
     toolStore.getState().setTool("transform");
     // `setTool` runs `onToolChange` → `armTransformFromSelection`, whose fold
     // query is async; bump the token so that in-flight arm cannot land after this
@@ -8007,8 +8526,8 @@ export class ModelToolController {
 
   /** Drop the gizmo AND any gesture it owns (idempotent — every teardown hits it). */
   private hideTransformGizmo(): void {
+    this.abandonGesture("transform");
     this.gizmoDrag = null;
-    if (this.dragging === "transform") this.dragging = null;
     if (!this.transformGizmoShown) return; // never shown ⇒ nothing of ours to take down
     this.transformGizmoShown = false;
     this.deps.engine.setTransformGizmoActive(null);
@@ -8134,6 +8653,15 @@ export class ModelToolController {
 
   private onPointerDown = (e: PointerEvent): void => {
     if (toolStore.getState().mode !== "model") return;
+    // One gesture at a time. A second press (another finger, or a missed pointerup's
+    // successor before its move) must neither re-grab on a new basis nor overwrite
+    // the press bookkeeping the live gesture's release still reads — unless the press
+    // itself proves the owner's contact already lifted (a new PRIMARY contact of the
+    // same type): then the stale gesture releases and this press is processed.
+    if (this.gesture) {
+      if (!supersedesLostContact(this.gesture, e)) return;
+      this.releaseGesture();
+    }
     // The controller is attached to the viewport container, not the canvas.
     // Therefore a chip/menu descendant bubbles here too; it must never seed a
     // geometry gesture whose matching pointerup would pick through the chrome.
@@ -8157,7 +8685,7 @@ export class ModelToolController {
     // and a press that still grabbed it would eat the face click (W2.5).
     if (this.transform.phase === "armed" && this.transform.alignPhase === null) {
       const grab = this.engine.hitTransformGizmo(e.clientX, e.clientY);
-      if (grab && this.startGizmoDrag(grab, e.clientX, e.clientY, e.altKey)) return;
+      if (grab && this.startGizmoDrag(grab, e)) return;
     }
 
     // The chip layer is a SIBLING of the canvas overlay inside the same container
@@ -8168,16 +8696,21 @@ export class ModelToolController {
     // degraded-offset branches already apply.
     if (
       this.extrude.phase === "armed" &&
+      !this.armLandingBlocksGrab("extrude") &&
       !this.isExcludedClickAwayTarget(e.target) &&
       this.engine.hitExtrudeHandle(e.clientX, e.clientY)
     ) {
-      this.dragging = "extrude";
-      const ray = this.engine.screenRay(e.clientX, e.clientY);
-      this.extrudeStartDepth = this.extrude.depth;
-      this.extrudeGrabDepth = ray
-        ? axisDepthFromRay(ray.origin, ray.dir, this.centroidWorld, this.normal)
-        : this.extrude.depth;
-      this.extrudeLastRawDepth = this.extrudeGrabDepth;
+      this.beginGesture(e, "extrude");
+      // R03: the grab takes the arrow's own mapping. An axis pointing (nearly) at
+      // the camera has no usable ray intersection, so it drags as the proxy the
+      // glyph already shows.
+      this.gestureMapping = this.grabHandleMapping("axis");
+      const grabInput = this.extrudeDragInput(e.clientX, e.clientY) ?? this.extrude.depth;
+      this.noteExtrudeSign(this.extrude.depth);
+      this.extrudeBasis = extrudeDragBasis(this.extrudeDragMode(this.extrude.symmetric), this.extrude.depth, grabInput);
+      this.extrudeLastInput = grabInput;
+      this.extrudeDragMoved = false;
+      if (this.gestureMapping.strategy === "screenProxy") this.showGestureHint("Depth: drag vertically");
       this.extrude = extrudeStep(this.extrude, { kind: "grab" }).state;
       this.syncExtrudeHandle();
       this.engine.setExtrudeHandleHover(true);
@@ -8190,14 +8723,14 @@ export class ModelToolController {
     ) {
       // The shared handle or visible screen proxy alone may start a drag. The chip
       // is excluded so its value and confirmation controls remain interactive.
-      this.dragging = "fillet";
+      this.beginGesture(e, "fillet");
+      this.dropTypedEdgeOpDraft();
       this.filletDownX = e.clientX;
       this.filletDownY = e.clientY;
-      // Signed continuity: a Chamfer's size lives on the NEGATIVE half of the same
-      // number line, so a drag that reverses past zero re-types instead of jumping.
-      this.filletStartValue =
-        this.fillet.edgeOp === "Chamfer" ? -this.fillet.radius : this.fillet.radius;
-      this.filletAxis = this.edgeOpScreenAxis(); // per grab — the camera may have orbited
+      // ONE projection (SESSION 37 H5): the glyph's tangent-rejected axis or its
+      // proxy, read at the grab. Fillet and Chamfer both grow along it (D-S3).
+      this.gestureMapping = this.grabHandleMapping("screenProxy");
+      this.filletBasis = { start: this.fillet.radius, grab: 0 };
       this.fillet = filletStep(this.fillet, { kind: "grabEdge" }).state;
       this.engine.setExtrudeHandleHover(true);
       toolStore.setState({ phase: "dragging" });
@@ -8208,18 +8741,25 @@ export class ModelToolController {
       !this.isExcludedClickAwayTarget(e.target) &&
       this.engine.hitExtrudeHandle(e.clientX, e.clientY)
     ) {
-      this.dragging = "shell";
+      this.beginGesture(e, "shell");
+      this.shellDownX = e.clientX;
       this.shellDownY = e.clientY;
-      this.shellStartThickness = this.shell.thickness;
+      this.gestureMapping = this.grabHandleMapping("screenProxy");
+      this.shellBasis = { start: this.shell.thickness, grab: 0 };
       this.shell = shellStep(this.shell, { kind: "grab" }).state;
       toolStore.setState({ phase: "dragging" });
       this.updateDebug();
-    } else if (this.offsetFace.phase === "armed" && this.startOffsetFaceGrab(e)) {
+    } else if (
+      this.offsetFace.phase === "armed" &&
+      !this.armLandingBlocksGrab("offsetFace") &&
+      this.startOffsetFaceGrab(e)
+    ) {
       // Handled inside the helper (which decides between the ARROW grab and the
       // degraded screen-space drag, and declines a press that is neither).
     } else if (this.revolve.phase === "armed") {
       // Defer grab to the first move: a plain click (no move) commits 360° instead.
       this.revolveArmedDown = true;
+      this.revolveArmedPointerId = normalizePointerId(e);
       this.revolveDownX = e.clientX;
       this.revolveLastX = e.clientX;
       this.revolveStartAngle = this.revolve.angle;
@@ -8248,7 +8788,11 @@ export class ModelToolController {
       this.offsetGrabDepth = axisDepthFromRay(ray.origin, ray.dir, this.offsetAnchor, this.offsetAxis);
       this.engine.setExtrudeHandleHover(true);
     } else if (this.isExcludedClickAwayTarget(e.target) || !this.engine.hitExtrudeHandle(e.clientX, e.clientY)) return false;
-    this.dragging = "offsetFace";
+    this.beginGesture(e, "offsetFace");
+    this.gestureMapping = this.grabHandleMapping(this.offsetDegraded ? "screenProxy" : "axis");
+    if (!this.offsetDegraded && this.gestureMapping.strategy === "screenProxy") {
+      this.showGestureHint("Offset: drag vertically");
+    }
     this.offsetDownX = e.clientX;
     this.offsetDownY = e.clientY;
     this.offsetStartDistance = this.offsetFace.distance;
@@ -8261,7 +8805,7 @@ export class ModelToolController {
   /** One drag frame for the armed offset (both gestures land here). */
   private applyOffsetFaceDrag(e: PointerEvent): void {
     let distance: number;
-    if (!this.offsetDegraded && this.offsetAxis) {
+    if (this.gestureMapping?.strategy === "axis" && !this.offsetDegraded && this.offsetAxis) {
       const ray = this.engine.screenRay(e.clientX, e.clientY);
       if (!ray) return;
       const depth = axisDepthFromRay(ray.origin, ray.dir, this.offsetAnchor, this.offsetAxis);
@@ -8270,15 +8814,9 @@ export class ModelToolController {
       // only thing that may move the value.
       distance = this.offsetStartDistance + (depth - this.offsetGrabDepth);
     } else {
-      // Degraded: raw screen deltas along the up-is-positive axis, the same
-      // mapping the edge ops use when no world direction is resolvable.
-      distance = signedValueFromDrag(
-        this.offsetStartDistance,
-        e.clientX - this.offsetDownX,
-        e.clientY - this.offsetDownY,
-        SCREEN_UP_AXIS,
-        { worldPerPx: this.engine.planePixelWorld() },
-      );
+      // A proxy — degraded, or an arrow too end-on to drag along — maps screen
+      // travel at the scale the grab took, never the per-move orbit metric.
+      distance = this.offsetStartDistance + this.gestureTravel(e.clientX - this.offsetDownX, e.clientY - this.offsetDownY);
     }
     this.offsetFace = offsetFaceStep(this.offsetFace, { kind: "drag", distance }).state;
     toolChipStore.getState().setValue(this.offsetFace.distance);
@@ -8287,6 +8825,17 @@ export class ModelToolController {
   }
 
   private onPointerMove = (e: PointerEvent): void => {
+    if (this.abandonedAsStale()) return; // its arm is gone: never write into the new one
+    const g = this.gesture;
+    if (g) {
+      if (!pointerMatches(g.pointerId, normalizePointerId(e))) return; // another pointer's move
+      if (isMissedRelease(e)) {
+        // The pointerup never arrived: end at the last APPLIED value. This sample
+        // is hover, not drag, so it must not move the number first.
+        this.releaseGesture();
+        return;
+      }
+    }
     if (Math.abs(e.clientX - this.downX) > DRAG_PX || Math.abs(e.clientY - this.downY) > DRAG_PX) {
       this.moved = true;
     }
@@ -8358,21 +8907,25 @@ export class ModelToolController {
       return;
     }
     if (this.dragging === "extrude") {
-      const ray = this.engine.screenRay(e.clientX, e.clientY);
-      if (!ray) return;
+      const input = this.extrudeDragInput(e.clientX, e.clientY);
+      if (input === null) return;
+      this.extrudeLastInput = input;
+      if (this.moved) this.extrudeDragMoved = true;
+      // Below the drag threshold the value is exactly the start: snapping a
+      // zero-travel frame quantized a typed value merely for touching the arrow.
+      if (!this.extrudeDragMoved) return;
       // GRAB-DELTA, not the absolute depth. The arrow now travels with the prism
       // (`syncExtrudeHandle`), so grabbing it mid-shaft at depth D and reporting
       // the absolute projection would add an arrow-length to D on EVERY re-grab —
       // a ratchet. Same fix, same reason as the offset-face arrow (`:5635`).
-      const raw = axisDepthFromRay(ray.origin, ray.dir, this.centroidWorld, this.normal);
-      this.extrudeLastRawDepth = raw;
       // The strip's symmetric mode is persistent; Alt changes it through the
       // same rebased setter. Do not overwrite a deliberate toggle on each frame.
       const symmetric = this.extrude.symmetric;
-      const depth = snapDepth(
-        this.extrudeStartDepth + (symmetric ? 2 : 1) * (raw - this.extrudeGrabDepth),
-        this.dragQuantumMm(),
-      );
+      const frame = extrudeDragFrame(this.extrudeDragMode(symmetric), this.extrudeBasis, input, this.extrudeSignHint);
+      this.extrudeBasis = frame.basis;
+      const snapped = snapDepth(frame.depth, this.dragQuantumMm());
+      const depth = snapped === 0 ? 0 : snapped; // never store −0 (D-S2 keeps the sign in the hint)
+      this.noteExtrudeSign(depth);
       const modeBefore = this.extrude.booleanMode;
       this.extrude = extrudeStep(this.extrude, { kind: "drag", depth, symmetric }).state;
       this.engine.setExtrudeDepth(this.extrude.depth, this.extrude.symmetric);
@@ -8387,42 +8940,53 @@ export class ModelToolController {
         this.applyBooleanState(this.extrude.booleanMode, false, "extrude");
       }
       this.syncExtrudeHandle();
+      this.syncExtrudeZeroValidation();
       this.sendPreview();
       this.updateDebug(); // publish live phase ("dragging") + depth to the debug surface
     } else if (this.dragging === "fillet") {
-      // RAW screen deltas: the sign lives entirely in `filletAxis` (which is
-      // SCREEN_UP_AXIS — up grows — whenever no world direction was resolvable, so
-      // the pre-unification mapping is reproduced exactly there).
-      const signed = signedValueFromDrag(
-        this.filletStartValue,
-        e.clientX - this.filletDownX,
-        e.clientY - this.filletDownY,
-        this.filletAxis,
-        { worldPerPx: this.engine.planePixelWorld() },
-      );
+      // RAW screen deltas along the grab's mapping; the floor REBASES, so reversing
+      // off it grows the size on the very next sample (no wind-up).
+      const travel = this.gestureTravel(e.clientX - this.filletDownX, e.clientY - this.filletDownY);
+      const frame = flooredDrag(this.filletBasis, travel, EDGE_OP_MIN_VALUE);
+      this.filletBasis = frame.basis;
       // The guard is about size only. The reducer preserves the explicit edge-op
       // type throughout this ordinary drag.
-      let next = filletStep(this.fillet, { kind: "drag", signed }).state;
+      let next = filletStep(this.fillet, { kind: "drag", signed: frame.value }).state;
       const guarded = this.guardEdgeOpValue(next.radius);
+      this.refuseUnbuildableEdgeOpRange(next.radius, guarded);
       if (guarded.value !== next.radius) {
-        next = filletStep(next, { kind: "setRadius", radius: guarded.value }).state;
+        // A measured bound may sit below the authoring floor; the reducer no longer
+        // floors a size itself, so the drag keeps the floor it always had.
+        next = filletStep(next, { kind: "setRadius", radius: Math.max(EDGE_OP_MIN_VALUE, guarded.value) }).state;
       }
       this.fillet = next;
       toolChipStore.getState().setValue(this.fillet.radius);
       this.sendPreview();
     } else if (this.dragging === "shell") {
-      const dy = this.shellDownY - e.clientY; // up-drag grows the thickness
-      const thickness = radiusFromDrag(this.shellStartThickness, dy, { worldPerPx: this.engine.planePixelWorld() });
-      this.shell = shellStep(this.shell, { kind: "drag", thickness }).state;
-      toolChipStore.getState().setValue(thickness);
+      const travel = this.gestureTravel(e.clientX - this.shellDownX, e.clientY - this.shellDownY);
+      const frame = flooredDrag(this.shellBasis, travel, EDGE_OP_MIN_VALUE);
+      this.shellBasis = frame.basis;
+      this.shell = shellStep(this.shell, { kind: "drag", thickness: frame.value }).state;
+      toolChipStore.getState().setValue(frame.value);
       this.sendPreview();
     } else if (this.dragging === "offsetFace") {
       this.applyOffsetFaceDrag(e);
     } else if (this.dragging === "revolve") {
       this.applyRevolveDrag(e.clientX);
-    } else if (this.revolveArmedDown && this.moved && this.downButton === 0 && this.revolve.phase === "armed") {
+    } else if (
+      this.revolveArmedDown &&
+      this.moved &&
+      this.downButton === 0 &&
+      this.revolve.phase === "armed" &&
+      pointerMatches(this.revolveArmedPointerId, normalizePointerId(e))
+    ) {
+      if (isMissedRelease(e)) {
+        // The press's pointerup was lost: a hover must not promote it into a drag.
+        this.revolveArmedDown = false;
+        return;
+      }
       // First movement past the threshold promotes the armed press into an angle drag.
-      this.dragging = "revolve";
+      this.beginGesture(e, "revolve");
       this.revolve = revolveStep(this.revolve, { kind: "grab" }).state;
       toolStore.setState({ phase: "dragging" });
       this.applyRevolveDrag(e.clientX);
@@ -8444,10 +9008,19 @@ export class ModelToolController {
   };
 
   private onPointerUp = (e: PointerEvent): void => {
+    const g = this.gesture;
+    if (g) {
+      // A live gesture owns its pointer's release outright, ahead of every pick
+      // branch and wherever the pointer is — a canvas drag may legally end over a
+      // chip. Release KEEPS the tool armed at the dragged value (no implicit
+      // commit); Enter / ✓ applies. Another pointer's release is not this one's.
+      if (!pointerMatches(g.pointerId, normalizePointerId(e))) return;
+      this.releaseGesture(); // abandons instead if the gesture's arm was superseded
+      return;
+    }
     if (isInteractiveBoundary(e)) {
-      // A canvas-owned drag may legally end over a chip. Finish only the active
-      // drag; never interpret the chip coordinates as a geometry pick/commit.
-      this.releaseActiveModelGesture();
+      // Never interpret chip coordinates as a geometry pick/commit.
+      this.revolveArmedDown = false;
       this.downButton = -1;
       return;
     }
@@ -8496,64 +9069,6 @@ export class ModelToolController {
       return;
     }
 
-    if (this.dragging === "transform") {
-      // House armed-commit pattern: release keeps the placement ARMED at the
-      // dragged value; nothing reaches the timeline until Enter or the chip ✓.
-      this.endGizmoDrag();
-      return;
-    }
-    if (this.dragging === "extrude") {
-      // MODEL-HARDEN Wave 1: release KEEPS the tool armed (no implicit commit).
-      // Flush the trailing L2 at the final depth; the chip cluster stays editable.
-      this.dragging = null;
-      this.engine.setExtrudeHandleHover(false);
-      this.extrude = extrudeStep(this.extrude, { kind: "release" }).state; // → armed
-      toolStore.setState({ phase: "armed" });
-      this.sendPreview();
-      this.updateDebug();
-      return;
-    }
-    if (this.dragging === "fillet") {
-      // Release KEEPS the tool armed at the dragged size (no implicit commit) —
-      // the live kernel preview + editable chip stay, Enter / ✓ applies.
-      this.dragging = null;
-      this.engine.setExtrudeHandleHover(false);
-      this.fillet = filletStep(this.fillet, { kind: "release" }).state; // → armed
-      toolStore.setState({ phase: "armed" });
-      this.throttle.setTrailingMs(EDGE_OP_TRAILING_MS); // back to the armed floor
-      this.sendPreview();
-      this.updateDebug();
-      return;
-    }
-    if (this.dragging === "shell") {
-      this.dragging = null;
-      this.shell = shellStep(this.shell, { kind: "release" }).state; // → armed
-      toolStore.setState({ phase: "armed" });
-      this.sendPreview();
-      this.updateDebug();
-      return;
-    }
-    if (this.dragging === "offsetFace") {
-      // Release KEEPS the tool armed at the dragged distance (no implicit commit):
-      // the live kernel preview + editable chip stay, Enter / ✓ applies.
-      this.dragging = null;
-      this.engine.setExtrudeHandleHover(false);
-      this.offsetFace = offsetFaceStep(this.offsetFace, { kind: "release" }).state; // → armed
-      toolStore.setState({ phase: "armed" });
-      this.sendPreview();
-      this.updateDebug();
-      return;
-    }
-    if (this.dragging === "revolve") {
-      // Release keeps the revolve armed at the final angle (no implicit commit);
-      // Enter / chip-✓ / click-away confirm.
-      this.dragging = null;
-      this.revolveArmedDown = false;
-      this.revolve = revolveStep(this.revolve, { kind: "release" }).state; // → armed
-      toolStore.setState({ phase: "armed" });
-      this.updateDebug();
-      return;
-    }
     // A plain click while the revolve is armed is handled by the window-level
     // click-away commit (confirmRevolve at the current angle, 360° default) — the
     // old quickCommit branch is removed. Just drop the armed-down flag here.
@@ -8584,46 +9099,359 @@ export class ModelToolController {
     }
   };
 
-  /** Release an already-owned drag without consuming a pointer location. */
-  private releaseActiveModelGesture(): void {
-    if (this.dragging === "transform") {
-      this.endGizmoDrag();
-    } else if (this.dragging === "extrude") {
-      this.dragging = null;
-      this.engine.setExtrudeHandleHover(false);
-      this.extrude = extrudeStep(this.extrude, { kind: "release" }).state;
-      toolStore.setState({ phase: "armed" });
-      this.sendPreview();
-      this.updateDebug();
-    } else if (this.dragging === "fillet") {
-      this.dragging = null;
-      this.engine.setExtrudeHandleHover(false);
-      this.fillet = filletStep(this.fillet, { kind: "release" }).state;
-      toolStore.setState({ phase: "armed" });
-      this.throttle.setTrailingMs(EDGE_OP_TRAILING_MS);
-      this.sendPreview();
-      this.updateDebug();
-    } else if (this.dragging === "shell") {
-      this.dragging = null;
-      this.shell = shellStep(this.shell, { kind: "release" }).state;
-      toolStore.setState({ phase: "armed" });
-      this.sendPreview();
-      this.updateDebug();
-    } else if (this.dragging === "offsetFace") {
-      this.dragging = null;
-      this.engine.setExtrudeHandleHover(false);
-      this.offsetFace = offsetFaceStep(this.offsetFace, { kind: "release" }).state;
-      toolStore.setState({ phase: "armed" });
-      this.sendPreview();
-      this.updateDebug();
-    } else if (this.dragging === "revolve") {
-      this.dragging = null;
-      this.revolveArmedDown = false;
-      this.revolve = revolveStep(this.revolve, { kind: "release" }).state;
-      toolStore.setState({ phase: "armed" });
-      this.updateDebug();
+  // ── gesture ownership: release / cancel / abandon ────────────────────────────
+  //
+  // Three endings, never conflated. RELEASE keeps the dragged value. CANCEL puts
+  // the pre-grab value back — but only for the arm that grabbed, while its FSM is
+  // still dragging. ABANDON (teardown) writes nothing a user would read as a value.
+  // A gesture whose arm was superseded (`armGen` moved on) can only be abandoned:
+  // its grab basis and snapshot describe an arm that is no longer on screen.
+
+  /** Claim a value gesture for `e`'s pointer. Call BEFORE the grab mutates state. */
+  private beginGesture(e: { pointerId?: unknown; pointerType?: unknown } | null, kind: ModelGestureKind): void {
+    this.gesture = this.captureGesture(kind, gestureOwnerOf(e));
+    this.gesturePreviewFailures = new Map(
+      this.previewSessions.map((es) => [es.session.sessionId, es.failure] as const),
+    );
+    toolStore.setState({ gestureLive: true });
+  }
+
+  private captureGesture(kind: ModelGestureKind, owner: GestureOwner): ActiveGesture {
+    const gen = this.armGen;
+    switch (kind) {
+      case "extrude": {
+        const { depth, symmetric, twoDirections, booleanMode, targetBodyId, booleanAuto } = this.extrude;
+        const snapshot = { depth, symmetric, twoDirections, booleanMode, targetBodyId, booleanAuto };
+        return beginModelGesture(kind, owner, gen, snapshot);
+      }
+      case "fillet":
+        return beginModelGesture(kind, owner, gen, { radius: this.fillet.radius, touched: this.fillet.touched });
+      case "shell":
+        return beginModelGesture(kind, owner, gen, { thickness: this.shell.thickness });
+      case "offsetFace": {
+        const { distance, touched, valueError } = this.offsetFace;
+        return beginModelGesture(kind, owner, gen, { distance, touched, valueError });
+      }
+      case "revolve":
+        // The angle the ARMED PRESS captured: the promoting move has not applied yet.
+        return beginModelGesture(kind, owner, gen, { angle: this.revolveStartAngle });
+      case "transform": {
+        const { mode, axis, translate, angleDeg, rotAxis, rotAxisVec, copy } = this.transform;
+        const snapshot = { mode, axis, translate: [...translate] as Vec3, angleDeg, rotAxis, rotAxisVec, copy };
+        return beginModelGesture(kind, owner, gen, snapshot);
+      }
     }
-    this.revolveArmedDown = false;
+  }
+
+  /** Detach the live gesture (marking it released so no late event acts on it). */
+  private endGesture(): ActiveGesture | null {
+    const g = this.gesture;
+    if (!g) return null;
+    g.released = true;
+    this.gesture = null;
+    this.gesturePreviewFailures = new Map();
+    toolStore.setState({ gestureLive: false });
+    // The freeze outlives hide/show on the shared handle, so EVERY ending drops it.
+    this.gestureMapping = null;
+    (this.engine as Partial<ViewportEngine>).freezeValueHandleStrategy?.(null);
+    this.restoreGestureHint();
+    // The press belonged to the gesture: its eventual pointerup (after an Escape,
+    // a blur or a tool switch) must not read as a click on whatever is armed then.
+    this.downButton = -1;
+    if (this.captureLossTimer) {
+      clearTimeout(this.captureLossTimer);
+      this.captureLossTimer = null;
+    }
+    return g;
+  }
+
+  /**
+   * The shared handle's mapping under the camera AS IT IS NOW, frozen for the
+   * gesture about to start (`endGesture` releases it), so glyph and drag keep one
+   * strategy and one metric until the gesture ends. A double without the seam, or
+   * a hidden handle, keeps `fallback` at the orbit metric — the pre-seam mapping.
+   */
+  private grabHandleMapping(fallback: HandleStrategy): GrabMapping {
+    const engine = this.engine as Partial<ViewportEngine>;
+    const mapping = engine.valueHandleMapping?.() ?? null;
+    const orbitMetric = (): number => this.engine.planePixelWorld();
+    if (!mapping) return { strategy: fallback, axis: SCREEN_UP_AXIS, worldPerPx: orbitMetric() };
+    const grab = toGrabMapping(mapping, orbitMetric);
+    engine.freezeValueHandleStrategy?.(grab.strategy);
+    return grab;
+  }
+
+  /** World units a screen delta travels along the live gesture's grab mapping. */
+  private gestureTravel(dxPx: number, dyPx: number): number {
+    const m = this.gestureMapping;
+    return m ? signedValueFromDrag(0, dxPx, dyPx, m.axis, { worldPerPx: m.worldPerPx }) : 0;
+  }
+
+  /**
+   * The extrude drag's input at a pointer: the axis projection of its ray, or the
+   * proxy's screen travel from the press. Null when the axis has no ray to read.
+   */
+  private extrudeDragInput(clientX: number, clientY: number): number | null {
+    if (this.gestureMapping?.strategy === "screenProxy") {
+      return this.gestureTravel(clientX - this.downX, clientY - this.downY);
+    }
+    const ray = this.engine.screenRay(clientX, clientY);
+    return ray ? axisDepthFromRay(ray.origin, ray.dir, this.centroidWorld, this.normal) : null;
+  }
+
+  /** A proxy grab says how it maps; `endGesture` puts back the line it replaced. */
+  private showGestureHint(message: string): void {
+    this.gestureHint = { message, before: viewportStore.getState().statusHint };
+    viewportStore.getState().setStatusHint(message, { sticky: true });
+  }
+
+  private restoreGestureHint(): void {
+    const hint = this.gestureHint;
+    this.gestureHint = null;
+    // Something newer (a preview refusal, a tool switch) owns the line: keep it.
+    if (!hint || viewportStore.getState().statusHint?.message !== hint.message) return;
+    const before = hint.before;
+    viewportStore.getState().setStatusHint(
+      before?.message ?? null,
+      before ? { severity: before.severity, sticky: before.sticky } : undefined,
+    );
+  }
+
+  /** Whether the live gesture's arm has been superseded; if so it is abandoned. */
+  private abandonedAsStale(): boolean {
+    const g = this.gesture;
+    if (!g || g.armGen === this.armGen) return false;
+    this.abandonGesture();
+    return true;
+  }
+
+  /** RELEASE: pointerup, or a sample proving it was missed. Keeps the value. */
+  private releaseGesture(): void {
+    if (this.abandonedAsStale()) return;
+    const g = this.endGesture();
+    if (!g) return;
+    this.settleReleasedGesture(g.kind);
+    // Flush the trailing exact preview at the final value (revolve's drag frames
+    // already sent theirs; a placement has no lane).
+    if (g.kind !== "revolve" && g.kind !== "transform") this.sendPreview();
+    this.updateDebug();
+  }
+
+  /**
+   * CANCEL: pointercancel, an unexpected capture loss, window blur or Escape. With
+   * no live gesture it only drops an armed revolve press that never became a drag.
+   */
+  private cancelGesture(): void {
+    const g = this.gesture;
+    if (!g) {
+      this.revolveArmedDown = false;
+      return;
+    }
+    if (this.abandonedAsStale()) return;
+    const restore = restoreAllowed(g, this.armGen, this.gestureStillDragging(g.kind));
+    const failures = this.gesturePreviewFailures;
+    if (restore) this.restoreGestureSnapshot(g);
+    this.endGesture();
+    this.settleReleasedGesture(g.kind);
+    if (restore) this.sendRestorePreview(failures);
+    else if (g.kind !== "revolve" && g.kind !== "transform") this.sendPreview();
+    this.updateDebug();
+  }
+
+  /**
+   * ABANDON: every teardown. Drops the gesture and restores nothing, sends nothing,
+   * republishes nothing. Only "dragging" itself is taken down — on the kind's FSM
+   * and on `toolStore` — and `toolStore` only while it still says so: a `setTool`
+   * has already written the new tool's phase, which must never be overwritten.
+   */
+  private abandonGesture(kind?: ModelGestureKind): void {
+    const g = this.gesture;
+    if (!g || (kind !== undefined && g.kind !== kind)) return;
+    this.endGesture();
+    if (g.kind === "transform") this.gizmoDrag = null;
+    else if (this.gestureStillDragging(g.kind)) this.stepGestureFsmRelease(g.kind);
+    if (g.kind === "revolve") this.revolveArmedDown = false;
+    if (toolStore.getState().phase === "dragging") {
+      toolStore.setState({ phase: toolStore.getState().modelTool === "select" ? "idle" : "armed" });
+    }
+  }
+
+  private gestureStillDragging(kind: ModelGestureKind): boolean {
+    switch (kind) {
+      case "extrude":
+        return this.extrude.phase === "dragging";
+      case "fillet":
+        return this.fillet.phase === "dragging";
+      case "shell":
+        return this.shell.phase === "dragging";
+      case "offsetFace":
+        return this.offsetFace.phase === "dragging";
+      case "revolve":
+        return this.revolve.phase === "dragging";
+      case "transform":
+        // The placement FSM stays "armed" through a gizmo drag; the drag record is the phase.
+        return this.gizmoDrag !== null;
+    }
+  }
+
+  /** The FSM half of a release: dragging → armed (a no-op in any other phase). */
+  private stepGestureFsmRelease(kind: Exclude<ModelGestureKind, "transform">): void {
+    switch (kind) {
+      case "extrude":
+        this.extrude = extrudeStep(this.extrude, { kind: "release" }).state;
+        return;
+      case "fillet":
+        this.fillet = filletStep(this.fillet, { kind: "release" }).state;
+        return;
+      case "shell":
+        this.shell = shellStep(this.shell, { kind: "release" }).state;
+        return;
+      case "offsetFace":
+        this.offsetFace = offsetFaceStep(this.offsetFace, { kind: "release" }).state;
+        return;
+      case "revolve":
+        this.revolve = revolveStep(this.revolve, { kind: "release" }).state;
+        return;
+    }
+  }
+
+  /** The per-kind release shared by RELEASE and CANCEL: back to armed, handles idle. */
+  private settleReleasedGesture(kind: ModelGestureKind): void {
+    if (kind === "transform") {
+      this.gizmoDrag = null;
+      this.engine.setTransformGizmoActive(null);
+      toolStore.setState({ phase: "armed" });
+      this.publishTransformState(); // chip, ghost and gizmo pose from the FSM
+      return;
+    }
+    if (kind === "extrude" || kind === "fillet" || kind === "offsetFace") {
+      this.engine.setExtrudeHandleHover(false);
+    }
+    if (kind === "revolve") this.revolveArmedDown = false;
+    this.stepGestureFsmRelease(kind);
+    toolStore.setState({ phase: "armed" });
+    if (kind === "fillet") this.throttle.setTrailingMs(EDGE_OP_TRAILING_MS); // back to the armed floor
+  }
+
+  /**
+   * Put the pre-grab fields back while the FSM is still dragging, and re-sync the
+   * surfaces a typed value would (engine L1, arrow, chip). A placement's surfaces
+   * are republished by its release, which always follows.
+   */
+  private restoreGestureSnapshot(g: ActiveGesture): void {
+    switch (g.kind) {
+      case "extrude":
+        this.restoreExtrudeSnapshot(g.snapshot);
+        return;
+      case "fillet":
+        this.fillet = { ...this.fillet, ...g.snapshot };
+        toolChipStore.getState().setValue(this.fillet.radius);
+        return;
+      case "shell":
+        this.shell = { ...this.shell, ...g.snapshot };
+        toolChipStore.getState().setValue(this.shell.thickness);
+        return;
+      case "offsetFace":
+        this.offsetFace = { ...this.offsetFace, ...g.snapshot };
+        toolChipStore.getState().setValue(this.offsetFace.distance);
+        this.applyOffsetFaceState();
+        return;
+      case "revolve":
+        this.revolve = { ...this.revolve, ...g.snapshot };
+        if (this.revolveAxis && this.revolveProfile) {
+          this.engine.setRevolveAngle(this.revolveProfile.ring, this.revolveAxis, this.revolve.angle);
+        }
+        toolChipStore.getState().setValue(this.revolve.angle);
+        return;
+      case "transform":
+        this.transform = { ...this.transform, ...g.snapshot, translate: [...g.snapshot.translate] };
+        return;
+    }
+  }
+
+  private restoreExtrudeSnapshot(snapshot: GestureSnapshots["extrude"]): void {
+    const { booleanMode, targetBodyId } = this.extrude;
+    this.extrude = { ...this.extrude, ...snapshot };
+    this.noteExtrudeSign(this.extrude.depth);
+    this.syncExtrudeZeroValidation();
+    this.engine.setExtrudeDepth(this.extrude.depth, this.extrude.symmetric);
+    toolChipStore.getState().setValue(this.extrude.depth);
+    toolChipStore.getState().setSymmetric(this.extrude.symmetric);
+    if (this.extrude.booleanMode !== booleanMode || this.extrude.targetBodyId !== targetBodyId) {
+      this.applyBooleanState(this.extrude.booleanMode, false, "extrude");
+    }
+    this.syncExtrudeHandle();
+  }
+
+  /**
+   * The restore's exact request goes out NOW under a fresh epoch, and that epoch
+   * becomes every session's acceptance floor. `flush` consumes the cancelled drag's
+   * coalesced trailing params, and the floor drops its in-flight answers — result
+   * or refusal — so nothing computed for the cancelled value can land over the
+   * restored one.
+   *
+   * The refusal state goes back to what it was AT THE GRAB (`failuresAtGrab`, by
+   * session): a refusal the cancelled value earned is not the restored value's, but
+   * one the restored value earned before the grab still is — and it stays on the
+   * status line, the chip and every commit gate until the restore's own answer
+   * replaces it. A session opened mid-drag has no grab-time state and starts clear.
+   */
+  private sendRestorePreview(failuresAtGrab: ReadonlyMap<string, PreviewFailure | null>): void {
+    const paramsFn = this.previewParamsFn;
+    if (this.previewSessions.length === 0 || !paramsFn) return;
+    const dragFailed = this.previewFailure !== null;
+    for (const es of this.previewSessions) es.failure = failuresAtGrab.get(es.session.sessionId) ?? null;
+    this.recomputePreviewFailure();
+    this.stalePreviewRetryAttempted = false;
+    const restored = this.previewFailure;
+    if (restored) this.showPreviewFailureHint(restored);
+    else if (dragFailed) this.restoreArmHint();
+    if (this.extrudePreviewSuppressed()) {
+      this.suppressExtrudePreview(); // restored to depth 0: nothing to ask for
+      return;
+    }
+    const now = performance.now();
+    this.throttle.request(paramsFn(), now);
+    const send = this.throttle.flush(now);
+    if (!send) return;
+    for (const es of this.previewSessions) {
+      es.lastAppliedEpoch = send.epoch;
+      this.client.updatePreview(es.session.sessionId, send.params, send.epoch);
+    }
+    this.markPreviewPending();
+    if (restored) this.publishPreviewLifecycle("invalid", restored.message, send.epoch);
+  }
+
+  private onPointerCancel = (e: PointerEvent): void => {
+    if (!this.gesture) {
+      if (pointerMatches(this.revolveArmedPointerId, normalizePointerId(e))) this.revolveArmedDown = false;
+      return;
+    }
+    if (cancelsLiveGesture(this.gesture, normalizePointerId(e))) this.cancelGesture();
+  };
+
+  /**
+   * Capture is released INSIDE a pointerup's own dispatch (CadOrbitControls does it
+   * on the canvas, possibly before this container's pointerup listener runs), so a
+   * loss is only unexpected once that dispatch is over. One task later the matching
+   * pointerup has either released this gesture or never came.
+   */
+  private onLostPointerCapture = (e: PointerEvent): void => {
+    const g = this.gesture;
+    if (!cancelsLiveGesture(g, normalizePointerId(e)) || this.captureLossTimer) return;
+    this.captureLossTimer = setTimeout(() => {
+      this.captureLossTimer = null;
+      if (this.gesture === g && cancelsLiveGesture(g, null)) this.cancelGesture();
+    }, 0);
+  };
+
+  private onWindowBlur = (): void => {
+    this.cancelGesture();
+  };
+
+  /** A live gesture owns the value: nothing may commit or start typed entry over it. */
+  private gestureBlocksCommit(): boolean {
+    return this.gesture !== null;
   }
 
   /** Backward-compatible target-only wrapper for drag-claim call sites. */
@@ -8664,10 +9492,15 @@ export class ModelToolController {
    */
   forceExtrudeGrab(): void {
     if (this.extrude.phase !== "armed") return;
-    this.dragging = "extrude";
-    this.extrudeStartDepth = 0;
-    this.extrudeGrabDepth = 0;
-    this.extrudeLastRawDepth = 0;
+    this.beginGesture(null, "extrude"); // no press ⇒ no pointer: any pointer may drive it
+    // No press to classify: the absolute ray mapping, frozen as an axis, and past
+    // the drag threshold by definition (there is no press to jitter around).
+    this.gestureMapping = { strategy: "axis", axis: SCREEN_UP_AXIS, worldPerPx: 0 };
+    (this.engine as Partial<ViewportEngine>).freezeValueHandleStrategy?.("axis");
+    this.noteExtrudeSign(this.extrude.depth);
+    this.extrudeBasis = { start: 0, grab: 0 };
+    this.extrudeLastInput = 0;
+    this.extrudeDragMoved = true;
     this.extrude = extrudeStep(this.extrude, { kind: "grab" }).state;
     toolStore.setState({ phase: "dragging" });
   }
@@ -8729,6 +9562,12 @@ export class ModelToolController {
     if (this.previewSessions.length === 0) return;
     const paramsFn = this.previewParamsFn;
     if (!paramsFn) return;
+    if (this.extrudePreviewSuppressed()) {
+      this.suppressExtrudePreview();
+      return;
+    }
+    // A committing edge op's session carries exactly the params its commit flushed.
+    if (this.previewOwner === "edgeOp" && this.edgeOpFrozenForCommit()) return;
     if (!staleRetry) this.stalePreviewRetryAttempted = false;
     const send = this.throttle.request(paramsFn(), performance.now());
     if (send) {
@@ -8738,6 +9577,27 @@ export class ModelToolController {
       this.markPreviewPending();
     }
     this.scheduleTrailing();
+  }
+
+  /**
+   * A distance-driven extrude at depth 0 builds nothing (the chip already says "No
+   * effect"), and the kernel would only answer with a refusal beside it. While the
+   * arm sits there nothing is requested and no candidate is drawn; the next
+   * non-zero value previews again through the ordinary path.
+   */
+  private extrudePreviewSuppressed(): boolean {
+    return this.previewOwner === "extrude" && this.extrudeDepthIsZero();
+  }
+
+  /** Drop what a non-zero depth left behind: coalesced params, drawn candidates and a pending read. */
+  private suppressExtrudePreview(): void {
+    this.throttle.discardPending();
+    for (const es of this.previewSessions) this.clearPreviewCandidate(es);
+    // Nothing is coming (review R7): the fit-preview control must not keep saying
+    // "still updating" for a request that was never sent.
+    if (toolChipStore.getState().previewLifecycle.status !== "none") {
+      this.publishPreviewLifecycle("none", undefined, this.throttle.epoch + 1);
+    }
   }
 
   /**
@@ -8759,11 +9619,24 @@ export class ModelToolController {
     // buried the reason would hide the only explanation the user gets.
     const hasMesh = this.previewSessions.some((es) => es.previewBodyIds.length > 0);
     const showing = viewportStore.getState().statusHint;
-    if (!hasMesh && showing?.severity !== "error") {
+    // …nor over a waiting ✓, which already says what is being computed.
+    if (!hasMesh && showing?.severity !== "error" && showing?.message !== EDGE_OP_CONFIRM_WAIT_HINT) {
       viewportStore.getState().setStatusHint("Computing preview…", { sticky: true });
       this.previewPendingHint = true;
     }
     this.updateDebug();
+  }
+
+  /**
+   * Restart the throttle's epochs for a new lane generation. `setPreviewLifecycle`
+   * orders publications by (arm, request) and drops a LOWER request as stale, so
+   * the lifecycle's request space is offset past every epoch the old generation
+   * used (plus the `epoch + 1` publications) — a same-arm reopen's first answers
+   * would otherwise never be shown.
+   */
+  private resetPreviewThrottle(): void {
+    this.lifecycleRequestBase += this.throttle.epoch + 2;
+    this.throttle.reset();
   }
 
   private publishPreviewLifecycle(
@@ -8784,7 +9657,7 @@ export class ModelToolController {
     toolChipStore.getState().setPreviewLifecycle({
       status,
       arm: this.armGen,
-      request,
+      request: this.lifecycleRequestBase + request,
       ...(message ? { message } : {}),
     });
   }
@@ -8909,7 +9782,10 @@ export class ModelToolController {
       const fresh = this.throttle.onResponse(r.epoch, now);
       if (!fresh) return; // stale drag result — discard
       es.lastAppliedEpoch = r.epoch;
-      if (r.error) {
+      if (this.extrudePreviewSuppressed()) {
+        // Answers a value the arm has since left for depth 0: nothing to draw or refuse.
+        this.clearPreviewCandidate(es);
+      } else if (r.error) {
         this.clearPreviewCandidate(es);
         this.onPreviewFailure(es, r.error, r.epoch);
       } else if (r.bodies || r.mesh) {
@@ -8930,7 +9806,9 @@ export class ModelToolController {
     } else {
       // Secondary sessions don't touch the throttle; per-session lastAppliedEpoch
       // is the only staleness guard (they follow the primary's epochs).
-      if (r.error) {
+      if (this.extrudePreviewSuppressed()) {
+        this.clearPreviewCandidate(es);
+      } else if (r.error) {
         this.clearPreviewCandidate(es);
         this.onPreviewFailure(es, r.error, r.epoch);
       } else if (r.bodies || r.mesh) {
@@ -9067,12 +9945,25 @@ export class ModelToolController {
       this.stalePreviewRetryAttempted = true;
       this.sendPreview(true);
     }
+    this.showPreviewFailureHint(error);
+  }
+
+  private showPreviewFailureHint(error: PreviewFailure): void {
     viewportStore
       .getState()
       .setStatusHint(`${this.previewOwnerNoun()} preview failed: ${error.message}`, {
         severity: "error",
         sticky: true,
       });
+  }
+
+  private armLandingBlocksGrab(kind: ModelGestureKind): boolean {
+    const landing = this.armLanding;
+    return landing !== null && landing.kind === kind && landing.gen === this.armGen;
+  }
+
+  private endArmLanding(gen: number): void {
+    if (this.armLanding?.gen === gen) this.armLanding = null;
   }
 
   /**
@@ -9137,7 +10028,14 @@ export class ModelToolController {
    * cannot reconstruct the feature's predecessor. Every await is generation-gated.
    */
   private async confirmExtrude(): Promise<void> {
+    if (this.gestureBlocksCommit()) return;
     if (this.retainedCommitBlocked()) return;
+    // Re-derived rather than trusted to the chip: another field's Escape clears the
+    // range channel, and a depth of 0 still builds nothing.
+    if (this.extrudeDepthIsZero()) {
+      this.syncExtrudeZeroValidation();
+      return;
+    }
     if (toolChipStore.getState().validation.status !== "valid") return;
     if (this.previewSessions.length === 0 || this.extrude.phase !== "armed") {
       trace(
@@ -9502,7 +10400,7 @@ export class ModelToolController {
     // `showExtrudePreviews` re-anchors the arrow at the CENTROID; the arm is mid-
     // gesture, so put it back on the depth it actually holds.
     this.syncExtrudeHandle();
-    this.throttle.reset();
+    this.resetPreviewThrottle();
     this.sendPreview();
     this.updateDebug();
   }
@@ -9572,7 +10470,7 @@ export class ModelToolController {
     this.previewPendingHint = false;
     this.extrude = extrudeStep(this.extrude, { kind: "settle" }).state;
     this.engine.setPreviewTint("normal");
-    this.throttle.reset();
+    this.resetPreviewThrottle();
     const uniqueBodyIds = bodyIds.filter((id, i, a) => a.indexOf(id) === i);
     let completionHint: string;
     let severity: StatusSeverity | undefined;
@@ -9722,7 +10620,7 @@ export class ModelToolController {
     toolChipStore.getState().clear();
     this.closePreviewSessions();
     this.previewArmHint = null;
-    this.dragging = null;
+    this.abandonGesture();
   }
 
   /**
@@ -9732,7 +10630,11 @@ export class ModelToolController {
    * instead of committing an errored row.
    */
   private async commitFillet(): Promise<void> {
+    if (this.gestureBlocksCommit()) return;
     if (this.retainedCommitBlocked()) return;
+    // The arm this ✓ was pressed on: a fresh commit re-checks it after every await.
+    const armGenAtConfirm = this.armGen;
+    const kindAtConfirm = this.edgeOpKind;
     // The chip's Enter applies the value and confirms in the SAME turn, and a
     // deliberate arm or type flip puts the measured-range analysis (SCHEMA §7.6)
     // in flight ahead of it. `pending` is that analysis not having answered yet —
@@ -9741,7 +10643,8 @@ export class ModelToolController {
     // loaded). Wait for the verdict, then judge it; only a DECIDED validation
     // blocks the commit, exactly as before.
     if (toolChipStore.getState().validation.status === "pending") {
-      await this.filletRangeSettled;
+      await Promise.race([this.filletRangeSettled, this.nextArmChange()]);
+      if (!this.edgeOpConfirmSurvives(armGenAtConfirm, kindAtConfirm)) return;
     }
     if (toolChipStore.getState().validation.status !== "valid") return;
     const editFeatureId = this.filletEditFeatureId;
@@ -9766,21 +10669,21 @@ export class ModelToolController {
       });
       return;
     }
-    // SCHEMA §7.3 (WP-F): an asymmetric chamfer MUST name the face `radius` is
-    // measured on. The second leg and the ✓ can arrive in the SAME turn (the chip's
-    // Enter applies the value and then confirms), so wait for the in-flight
-    // resolution — and the preview-session reopen it forces — before judging it.
-    if (this.chamferNeedsReferenceFaces()) {
-      // ALWAYS wait, not just when the pairs are missing: a [Flip reference] press
-      // in the same turn as the ✓ leaves the OLD pairs in place while the resolution
-      // — and the preview-session reopen it forces — is still in flight, so a
-      // commit that raced it would `updatePreview` a session the reopen is about to
-      // close and then time out waiting for an exact answer that can never arrive.
-      // Every OTHER edge-op commit stays synchronous to the turn it was confirmed
-      // in, which is what the preview-epoch specs pin — hence the gate.
-      const armGenAtConfirm = this.armGen;
-      await this.chamferSync;
-      if (armGenAtConfirm !== this.armGen || this.fillet.phase !== "armed") return;
+    // The session a fresh ✓ materializes must be the NEWEST reopen (review §4.1). A
+    // type flip, a second leg or a [Flip reference] in the same turn as the ✓ closes
+    // the lane and reopens it asynchronously — and an asymmetric chamfer's pairs
+    // (SCHEMA §7.3) are resolved first — so a ✓ that raced it would find no session,
+    // or `updatePreview` one the reopen is about to close. Wait for every such
+    // reopen to land. A ✓ with nothing in flight stays synchronous to the turn it
+    // was confirmed in, which is what the preview-epoch specs pin.
+    if (this.edgeOpPreviewInFlight()) {
+      // Visible while it lasts (review R5): the lifecycle reads pending and the
+      // status line says what the ✓ is waiting for.
+      this.publishPreviewLifecycle("pending");
+      viewportStore.getState().setStatusHint(EDGE_OP_CONFIRM_WAIT_HINT, { sticky: true });
+      await this.settleEdgeOpPreviewOpens(armGenAtConfirm);
+      if (!this.edgeOpConfirmSurvives(armGenAtConfirm, kindAtConfirm)) return;
+      this.endEdgeOpConfirmWait();
     }
     // If the pairs could not be authored — no adjacency evidence, or a refused
     // promotion — the ✓ refuses WITH THE REASON. Committing anyway would either be
@@ -9999,6 +10902,7 @@ export class ModelToolController {
     // re-set by this function's own re-edit state below, in program order, so
     // nothing here can clobber it.
     this.invalidateArm();
+    this.abandonGesture();
     this.cancelFillet();
     this.filletStoredParams = stored; // set AFTER the tool-change cancel
     this.filletEdges = [];
@@ -10064,6 +10968,7 @@ export class ModelToolController {
         onChamferFlip: () => this.onChamferFlip(),
       },
     );
+    toolChipStore.getState().setRevertHandler((v) => this.revertEdgeOpValue(v));
     // `showFillet` re-seats the chip from CLEARED, which NULLS the typed context —
     // and the gate that Enter/✓ both read refuses a chip without one. The fresh arm
     // publishes it from inside `showEdgeOpChip`; this path has its own chip call, so
@@ -10217,7 +11122,7 @@ export class ModelToolController {
     // No drag on this lane (a chip op-swap, not a continuous gesture) — every send
     // should go out at its own leading edge rather than sit behind the drag floor.
     this.throttle.setTrailingMs(0);
-    this.throttle.reset();
+    this.resetPreviewThrottle();
     this.engine.setPreviewTint(this.boolean.op === "Cut" ? "cut" : "normal");
     this.sendPreview();
     this.updateDebug();
@@ -10351,7 +11256,7 @@ export class ModelToolController {
     this.previewArmHint = null;
     this.engine.clearPreviewBody();
     this.engine.setPreviewTint("normal");
-    this.throttle.reset();
+    this.resetPreviewThrottle();
     if (outcome.kind === "published") {
       selectionStore.getState().set(this.booleanResultSelection(res as ApplyOperationResult, targetBodyId));
     }
@@ -10446,9 +11351,9 @@ export class ModelToolController {
     if (this.authoringEntryBlocked()) return;
     const feat = documentStore.getState().features.find((f) => f.id === featureId);
     if (!feat || feat.opType !== "Boolean") return;
-    const requestGen = ++this.armGen;
-    const stored = await this.client.getOperationParams(featureId).catch(() => undefined);
-    if (requestGen !== this.armGen) return; // superseded while getOperationParams was in flight
+    const fetched = await this.fetchReeditParams(featureId);
+    if (!fetched) return; // superseded while getOperationParams was in flight
+    const stored = fetched.stored;
     const operation = matchBooleanOperation(stored?.operation);
     const targetBodyId = typeof stored?.targetBodyId === "string" ? stored.targetBodyId : null;
     const toolBodyId = typeof stored?.toolBodyId === "string" ? stored.toolBodyId : null;
@@ -10461,6 +11366,7 @@ export class ModelToolController {
         });
       return;
     }
+    this.invalidateArm(); // proceeding: only now does the re-edit replace the current arm
     // Already on the boolean tool? `setTool` is then a no-op that skips the
     // onToolChange teardown, so cancel explicitly (extrude/revolve finding 10).
     if (toolStore.getState().modelTool === "boolean") this.cancelBoolean();
@@ -10547,10 +11453,10 @@ export class ModelToolController {
   private async beginExtrudeFeatureEdit(featureId: string): Promise<void> {
     const feat = documentStore.getState().features.find((f) => f.id === featureId);
     if (!feat || feat.kind !== "extrude") return;
-    const requestGen = ++this.armGen;
-    const stored = await this.client.getOperationParams(featureId).catch(() => undefined);
-    if (requestGen !== this.armGen) return;
+    const fetched = await this.fetchReeditParams(featureId);
+    if (!fetched) return;
     if (this.authoringEntryBlocked()) return;
+    const stored = fetched.stored;
     const profile =
       stored && typeof stored.profile === "object" && stored.profile !== null
         ? (stored.profile as { sketchId?: unknown; regionId?: unknown })
@@ -10570,6 +11476,7 @@ export class ModelToolController {
         : Number.NaN;
     const depth =
       Number.isFinite(storedDistance) ? storedDistance : parseFloat(feat.valueText) || DEFAULT_EXTRUDE_DEPTH;
+    this.invalidateArm(); // proceeding: only now does the re-edit replace the current arm
     // If the extrude tool is ALREADY armed, setTool("extrude") is a no-op and skips the
     // onToolChange → cancelPreview that would end the open lane sessions — so end them
     // explicitly here or the re-edit arm leaks them (finding 10).
@@ -10595,10 +11502,10 @@ export class ModelToolController {
   private async beginRevolveFeatureEdit(featureId: string): Promise<void> {
     const feat = documentStore.getState().features.find((f) => f.id === featureId);
     if (!feat || feat.kind !== "revolve") return;
-    const requestGen = ++this.armGen;
-    const stored = await this.client.getOperationParams(featureId).catch(() => undefined);
-    if (requestGen !== this.armGen) return; // superseded while getOperationParams was in flight
+    const fetched = await this.fetchReeditParams(featureId);
+    if (!fetched) return; // superseded while getOperationParams was in flight
     if (this.authoringEntryBlocked()) return;
+    const stored = fetched.stored;
     const profile =
       stored && typeof stored.profile === "object" && stored.profile !== null
         ? (stored.profile as { sketchId?: unknown; regionId?: unknown })
@@ -10617,6 +11524,7 @@ export class ModelToolController {
         ? Number((stored.angleDeg as { value?: unknown }).value)
         : Number.NaN;
     const angle = Number.isFinite(storedAngle) ? storedAngle : angleFromValueText(feat.valueText);
+    this.invalidateArm(); // proceeding: only now does the re-edit replace the current arm
     // If the revolve tool is ALREADY armed, setTool("revolve") is a no-op and skips the
     // onToolChange → cancelRevolve that tears the previous arm down — so cancel here
     // explicitly or the re-edit leaks the prior preview + chip (extrude finding 10).
@@ -10683,9 +11591,9 @@ export class ModelToolController {
       // gesture the same way (they have no 3D handle to scan for).
       filletPhase: this.fillet.phase,
       edgeOpKind: this.edgeOpKind,
-      // Whether the DRAG DIRECTION still owns the edge-op type, and which tier
-      // produced the direction it reads. e2e asserts the rule that binds them:
-      // auto is armed only where the direction is sign-correct (bisector).
+      // Always false under the D04 type lock (only an explicit segment re-types the
+      // op); kept so e2e can assert that no drag re-types it. `edgeOpAxisSource` is
+      // the tier the drag axis came from.
       edgeOpAuto: this.fillet.auto,
       edgeOpAxisSource: this.filletAxisSource,
       // The CHAMFER second leg (`null` = equal-leg, SCHEMA §7.3) — the only
@@ -10865,6 +11773,7 @@ export class ModelToolController {
    * tears the others down, so the first match IS the armed tool.
    */
   private armedConfirm(): (() => void) | null {
+    if (this.gestureBlocksCommit()) return null;
     if (!canConfirmActiveTool(toolChipStore.getState())) return null;
     const armed: [boolean, () => void][] = [
       [this.extrude.phase === "armed", () => void this.confirmExtrude()],
@@ -10890,6 +11799,15 @@ export class ModelToolController {
   }
 
   private onKeyDown = (e: KeyboardEvent): void => {
+    // Esc during a value gesture cancels THAT gesture — pre-grab value back, tool
+    // kept — and owns the key, so the global Esc ladder does not also drop the
+    // tool. The next Esc (no gesture left) takes the normal path.
+    if (e.key === "Escape" && this.gesture) {
+      this.cancelGesture();
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     if (eventHasKeyboardScope(e)) return;
     if ((e.key === "Escape" || e.key === "Enter") && this.authoringEntryBlocked()) {
       e.preventDefault();
@@ -10898,7 +11816,9 @@ export class ModelToolController {
     }
     // Esc cancels the datum tool from EITHER phase (base pick / offset) and owns
     // the key, so the global Esc-ladder does not also fire.
-    if (e.key === "Escape" && this.datum) {
+    // …unless a chip field has focus: its own Escape reverts the edit first (spec
+    // §9.2), and the next Escape — the field blurred — cancels the tool.
+    if (e.key === "Escape" && this.datum && !isEditableTarget(e.target)) {
       e.preventDefault();
       e.stopPropagation();
       this.endDatumPick();
@@ -10973,6 +11893,7 @@ export class ModelToolController {
     //   - the armed chip must actually HAVE a primary value — a boolean or a
     //     mirror has nothing a digit could mean.
     if (
+      !this.gestureBlocksCommit() &&
       isPrimaryEntryChar(e.key) &&
       !e.ctrlKey &&
       !e.metaKey &&
@@ -11016,6 +11937,7 @@ export class ModelToolController {
    * `cancelPreview`, so a future tool's cancel path can reuse this half as-is.
    */
   private closePreviewSessions(): void {
+    const closedEdgeOpLane = this.previewOwner === "edgeOp" && this.previewSessions.length > 0;
     for (const es of this.previewSessions) {
       // `Promise.resolve(...)` normalizes a lane that returns nothing and keeps the
       // post-dispose rejection guard the old dispose() path had (finding 6).
@@ -11031,10 +11953,16 @@ export class ModelToolController {
     this.previewFailure = null;
     this.stalePreviewRetryAttempted = false;
     this.engine.clearPreviewBody();
-    this.throttle.reset();
+    this.resetPreviewThrottle();
     if (this.trailingTimer) {
       clearTimeout(this.trailingTimer);
       this.trailingTimer = null;
+    }
+    // The closed session's `valid` no longer describes anything on screen: an armed
+    // edge op's lane is being re-opened (type flip, reference-face pair), so it reads
+    // pending until the new session answers (review R5).
+    if (closedEdgeOpLane && toolChipStore.getState().kind === "filletRadius") {
+      this.publishPreviewLifecycle("pending");
     }
   }
 
@@ -11055,7 +11983,7 @@ export class ModelToolController {
     this.engine.hideExtrudePreview();
     this.engine.setPreviewTint("normal");
     this.extrude = extrudeInit();
-    this.dragging = null;
+    this.abandonGesture();
   }
 
   private cancelFillet(): void {
@@ -11079,12 +12007,11 @@ export class ModelToolController {
     this.filletRangeGen = null;
     this.filletOutward = null;
     this.filletTangent = null;
-    this.filletAxis = SCREEN_UP_AXIS;
     this.filletAxisSource = "screen";
     this.filletEditFeatureId = undefined;
     this.filletFromFace = null;
     this.filletStoredParams = undefined;
-    if (this.dragging === "fillet") this.dragging = null;
+    this.abandonGesture("fillet");
     toolChipStore.getState().clear();
     this.updateDebug(); // republish the now-idle phase (a tool switch has no other hook)
   }
@@ -11116,7 +12043,7 @@ export class ModelToolController {
     this.shellFaces = [];
     this.shellEditFeatureId = undefined;
     this.shellStoredParams = undefined;
-    if (this.dragging === "shell") this.dragging = null;
+    this.abandonGesture("shell");
     toolChipStore.getState().clear();
     this.updateDebug(); // republish the now-idle phase (a tool switch has no other hook)
   }
@@ -11159,7 +12086,7 @@ export class ModelToolController {
     this.revolveEditFeatureId = undefined;
     this.revolveStoredParams = undefined;
     this.revolveArmedDown = false;
-    if (this.dragging === "revolve") this.dragging = null;
+    this.abandonGesture("revolve");
     toolChipStore.getState().clear();
     this.updateDebug();
   }
@@ -11167,6 +12094,7 @@ export class ModelToolController {
   private cancelAll(): void {
     this.invalidateArm();
     this.commitGen++;
+    this.abandonGesture();
     this.cancelRegionPick();
     this.cancelPreview();
     this.cancelFillet();
@@ -11190,6 +12118,9 @@ export class ModelToolController {
     // Supersede any in-flight commit sequence: its awaits resume after teardown
     // (the barrier + body waits are released below) and must not touch dead state.
     this.commitGen++;
+    // `toolStore` outlives this controller: a remount mid-drag must not strand it
+    // in "dragging", which blocks wheel navigation until something else resets it.
+    this.abandonGesture();
     if (this.operationAttemptToken !== null) {
       // The view no longer owns UI publication, but the document-scoped backend
       // submission remains the global single flight until its observed terminal.
@@ -11236,6 +12167,9 @@ export class ModelToolController {
     c.removeEventListener("pointerdown", this.onPointerDown);
     c.removeEventListener("pointermove", this.onPointerMove);
     c.removeEventListener("pointerup", this.onPointerUp);
+    c.removeEventListener("pointercancel", this.onPointerCancel);
+    c.removeEventListener("lostpointercapture", this.onLostPointerCapture);
+    window.removeEventListener("blur", this.onWindowBlur);
     window.removeEventListener("keydown", this.onKeyDown, true);
     window.removeEventListener("keyup", this.onKeyUp, true);
     if (this.trailingTimer) clearTimeout(this.trailingTimer);

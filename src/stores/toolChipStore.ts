@@ -601,6 +601,12 @@ export interface ToolChipState {
   anchorOffsetPx: number;
   /** Committed value from the editable chip (Enter/blur). */
   onValue: ((v: number) => void) | null;
+  /**
+   * Escape in the primary field restores its edit-start value through this
+   * (spec §9.2). A tool registers one when reverting must also drop controller
+   * drafts; null means the chip's fallback: clear range validation + `onValue`.
+   */
+  onRevertValue: ((v: number) => void) | null;
   /** Symmetric toggled (armed extrude cluster). */
   onSymmetric: ((symmetric: boolean) => void) | null;
   /** Direction flip pressed (armed extrude cluster — T3). */
@@ -819,8 +825,11 @@ export interface ToolChipState {
   setValidation(validation: ToolValueValidation): void;
   setRetainedCommitFailure(message: string): void;
   setRangeValidation(validation: ToolValueValidation, onUseSuggestedValue?: (() => void) | null): void;
-  setRawValueValidity(fieldId: string, valid: boolean, draft: string): void;
+  /** A field's raw draft verdict; `message` defaults to the incomplete-number wording. */
+  setRawValueValidity(fieldId: string, valid: boolean, draft: string, message?: string): void;
   clearValidation(): void;
+  /** Register (or drop) the primary field's Escape revert handler; `show*` resets it. */
+  setRevertHandler(handler: ((v: number) => void) | null): void;
   setPreviewLifecycle(lifecycle: ToolPreviewLifecycle): void;
   /** Update just the armed placement's mode (Move / Rotate). */
   setTransformMode(mode: TransformMode): void;
@@ -960,6 +969,7 @@ const CLEARED = {
   anchorAxisFrom: null,
   anchorOffsetPx: 0,
   onValue: null,
+  onRevertValue: null as ((v: number) => void) | null,
   onSymmetric: null,
   onFlip: null,
   onConfirm: null,
@@ -1313,10 +1323,10 @@ export const toolChipStore = createStore<ToolChipState>()((set, get) => ({
       onUseSuggestedValue: raw ? null : rangeSuggestedAction,
     });
   },
-  setRawValueValidity(fieldId, valid, draft) {
+  setRawValueValidity(fieldId, valid, draft, message = "Enter a complete numeric value") {
     const rawInputErrors = { ...get().rawInputErrors };
     if (valid) delete rawInputErrors[fieldId];
-    else rawInputErrors[fieldId] = { draft, message: "Enter a complete numeric value" };
+    else rawInputErrors[fieldId] = { draft, message };
     const raw = firstRawInputError(rawInputErrors);
     const validation = raw ?? get().rangeValidation;
     set({
@@ -1337,6 +1347,9 @@ export const toolChipStore = createStore<ToolChipState>()((set, get) => ({
       valueError: validation.status === "invalid",
       onUseSuggestedValue: null,
     });
+  },
+  setRevertHandler(onRevertValue) {
+    set({ onRevertValue });
   },
   setPreviewLifecycle(previewLifecycle) {
     const current = get().previewLifecycle;

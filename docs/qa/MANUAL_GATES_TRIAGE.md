@@ -43,8 +43,8 @@ down from ~112.
 
 | Check | Dest | Status |
 | --- | --- | --- |
-| drag AWAY = fillet, drag INTO = chamfer, chip flips live | F | COVERED `e2e/filletChamfer.spec.ts:169` |
-| segment click locks type, later drag must not flip | F | COVERED `e2e/filletChamfer.spec.ts:355` |
+| ~~drag AWAY = fillet, drag INTO = chamfer, chip flips live~~ — SUPERSEDED by spec D04 (type lock): an arm keeps its type through any drag | F | COVERED (inverse) `e2e/filletChamfer.spec.ts:216` |
+| segment click is the only type switch, later drag must not flip | F | COVERED `e2e/filletChamfer.spec.ts:240` |
 | ✓ commits correct label + icon | F | COVERED `e2e/filletChamfer.spec.ts:231,248` |
 | Enter commits / ✕ cancels | F | COVERED `e2e/filletChamfer.spec.ts:258` |
 | dblclick row → flip type → same row swaps label + geometry | F | COVERED `e2e/filletChamfer.spec.ts:278` |

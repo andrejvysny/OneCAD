@@ -91,7 +91,7 @@ awaited construction resolves after disposal).
 | `BodyObject.ts`      | Per-body face Mesh + fat edge `LineSegments2`; shared materials.|
 | `Picker.ts`          | rAF-coalesced raycast → face/edge PickHit; edge screen-bias.    |
 | `HighlightLayer.ts`  | Hover/selected highlight: shared-attribute faces, sliced edges. |
-| `DragHandle.ts`      | Extrude depth handle: screen-scaled arrow + fat pick cylinder.  |
+| `DragHandle.ts`      | Value handle: screen-scaled arrow + flat 30×40 px pick corridor.|
 | `TransformGizmo.ts`  | Placement gizmo: 3 arrows / 3 plane quads / 3 rings (WP-B W2).  |
 
 Both grab gizmos follow the same wiring, and a new one should too: created lazily
@@ -210,6 +210,17 @@ The contract, for any future overlay that shares an anchor with a grab handle:
 - `ViewportEngine.getInteractionOverlayBounds("valueHandle")` is the arrow's screen
   box, and the render loop passes it to `HtmlOverlayDriver.update()` **per frame**,
   right after `dragHandle.orient()` so it is current for that frame.
+- The box must hold the **whole pick corridor**, not a nominal reach. The corridor
+  is a flat, invisible 30 × 40 px rectangle in the billboarded glyph's plane — camera
+  parallel, so it projects to exactly that size — and the box is its axis-aligned
+  bounds at the glyph's current roll (`DragHandle.corridorHalfExtentsPx()`). A 3D
+  pick volume breaks this: the cylinder it replaced had its radius along the view
+  direction, and off the optical axis at FOV 76 perspective parallax stretched its
+  corridor to 32 × 48 px past a 40 × 40 box, so the chip covered the corridor's rim
+  again (`boolean-preview.spec.ts`, 9f573ecd). The pinning test is
+  `ViewportEngine.test.ts` "holds every pixel the handle picks…".
+- `KEEP_OUT_PAD_PX` is **8**: a displaced item keeps at least 8 CSS px clear of the
+  corridor (acceptance spec §4.5).
 - An overlay opts in with `ChipPlacement.avoidValueHandle`
   (→ `OverlayPlacement.avoidKeepOut`). Opting in is the caller's choice; the driver
   never displaces an item that did not ask.

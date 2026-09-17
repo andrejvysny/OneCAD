@@ -29,6 +29,7 @@ export function resetStores(): void {
     modelTool: "select",
     sketchTool: "line",
     phase: "idle",
+    gestureLive: false,
   });
   selectionStore.setState({
     selected: [{ kind: "sketch", id: "sketch2" }],

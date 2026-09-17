@@ -760,4 +760,89 @@ describe("ModelToolController OffsetFace", () => {
     expect(op.params.resultPolicyVersion).toBe(2);
     expect(viewportStore.getState().statusHint?.message).toBe("Offset distance updated");
   });
+
+  // ── the grab's mapping owns the drag (TODO.md SESSION 37 H3, R03) ────────────
+
+  /**
+   * The engine seam the real `ViewportEngine` exposes, reduced to what a grab
+   * reads. `showValueHandle` drops the freeze exactly as `DragHandle.reset()` does,
+   * so a glyph that stays frozen through the drag proves the controller re-froze it.
+   */
+  function withMapping(worldPerPx: { value: number }, strategy: "axis" | "screenProxy") {
+    const frozen = { value: null as string | null };
+    return Object.assign(engineMock, {
+      valueHandleMapping: vi.fn(() => ({ strategy, direction: [0, -1] as const, pxPerWorld: null, worldPerPx: worldPerPx.value })),
+      freezeValueHandleStrategy: vi.fn((s: string | null) => (frozen.value = s)),
+      showValueHandle: vi.fn(() => (frozen.value = null)),
+      frozen,
+    });
+  }
+
+  const drag = (type: string, y: number): void => {
+    container.dispatchEvent(new PointerEvent(type, { clientX: 10, clientY: y, button: 0, buttons: type === "pointerup" ? 0 : 1, bubbles: true }));
+  };
+
+  it("an arrow that maps as a screen proxy drags vertically at the grab's scale, says so, and stays frozen", async () => {
+    build();
+    await arm();
+    answerExactPreview();
+    const armHint = viewportStore.getState().statusHint?.message;
+    const engine = withMapping({ value: 0.25 }, "screenProxy");
+    const start = debug().offsetDistance as number;
+
+    drag("pointerdown", 100);
+    drag("pointermove", 60); // 40 px UP
+
+    expect(toolChipStore.getState().value).toBeCloseTo(start + 40 * 0.25, 9); // drag frames do not republish the debug surface
+    expect(viewportStore.getState().statusHint?.message).toBe("Offset: drag vertically");
+    expect(engine.showValueHandle).toHaveBeenCalled(); // the per-frame re-show…
+    expect(engine.frozen.value).toBe("screenProxy"); // …did not unfreeze the glyph
+
+    drag("pointerup", 60);
+    expect(engine.freezeValueHandleStrategy).toHaveBeenLastCalledWith(null);
+    expect(viewportStore.getState().statusHint?.message).toBe(armHint);
+  });
+
+  it("a DEGRADED offset proxy keeps the scale it grabbed with", async () => {
+    planar = false;
+    build();
+    await arm();
+    const scale = { value: 0.25 };
+    withMapping(scale, "screenProxy");
+    const start = debug().offsetDistance as number;
+
+    drag("pointerdown", 100);
+    drag("pointermove", 90);
+    expect(toolChipStore.getState().value).toBeCloseTo(start + 10 * 0.25, 9);
+
+    scale.value = 5;
+    engineMock.planePixelWorld.mockReturnValue(9);
+    drag("pointermove", 80);
+    expect(toolChipStore.getState().value).toBeCloseTo(start + 20 * 0.25, 9);
+  });
+
+  it("Escape in the distance field reverts through the controller: the refusal and its status line go", async () => {
+    build();
+    await arm();
+    chipType("Diameter");
+    await flush();
+    await flush();
+    await flush();
+    answerExactPreview();
+    const armHint = viewportStore.getState().statusHint?.message;
+    const start = debug().offsetDistance as number;
+
+    chipValue(-5);
+    expect(toolChipStore.getState().validation.status).toBe("invalid");
+    expect(viewportStore.getState().statusHint?.severity).toBe("error");
+
+    const revert = toolChipStore.getState().onRevertValue;
+    expect(revert).toBeTypeOf("function");
+    revert?.(start);
+
+    expect(toolChipStore.getState().validation).toEqual({ status: "valid" });
+    expect(toolChipStore.getState().valueError).toBe(false);
+    expect(debug().offsetDistance).toBe(start);
+    expect(viewportStore.getState().statusHint?.message).toBe(armHint);
+  });
 });

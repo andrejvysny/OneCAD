@@ -157,13 +157,110 @@ describe("CadOrbitControls — drag gating", () => {
     expect(h.controls.pitch).toBe(pitch);
   });
 
-  it("still pans while a tool drag is in flight", () => {
-    // Only orbit is hazardous: it changes the projection the drag is measured against.
+  it("suppresses wheel-pan while a tool drag is in flight", () => {
+    // Any camera move changes the ray a drag frame is projected from, so a pan
+    // mid-drag jumps the value exactly like an orbit would.
     const h = setup("trackpad");
     h.dragActive.value = true;
     const before = h.controls.getTarget().clone();
     padScroll(h.el, 3);
-    expect(h.controls.getTarget().distanceTo(before)).toBeGreaterThan(0);
+    expect(h.controls.getTarget().distanceTo(before)).toBe(0);
+  });
+
+  it("suppresses wheel-zoom while a tool drag is in flight", () => {
+    const h = setup("mouse");
+    h.dragActive.value = true;
+    const distance = h.controls.getDistance();
+    const target = h.controls.getTarget().clone();
+    wheel(h.el, { deltaY: 120 });
+    wheel(h.el, { deltaY: 3, deltaMode: 1 });
+    expect(h.controls.getDistance()).toBe(distance);
+    expect(h.controls.getTarget().distanceTo(target)).toBe(0);
+  });
+
+  it("suppresses a WebKit trackpad pinch while a tool drag is in flight", () => {
+    // Same reducer lane as a ctrl+wheel pinch (the Chromium spelling of the same
+    // gesture), so the two platforms cannot disagree about a mid-drag zoom.
+    const h = setup();
+    h.dragActive.value = true;
+    const distance = h.controls.getDistance();
+    const gesture = (type: string, scale: number): void => {
+      const ev = new Event(type, { cancelable: true }) as Event & { scale: number; clientX: number; clientY: number };
+      Object.assign(ev, { scale, clientX: 500, clientY: 400 });
+      h.el.dispatchEvent(ev);
+    };
+    gesture("gesturestart", 1);
+    gesture("gesturechange", 1.5);
+    gesture("gestureend", 1.5);
+    expect(h.controls.getDistance()).toBe(distance);
+  });
+
+  it("zooms and pans again once the drag ends", () => {
+    const h = setup("mouse");
+    h.dragActive.value = true;
+    wheel(h.el, { deltaY: 120 });
+    h.dragActive.value = false;
+    const distance = h.controls.getDistance();
+    wheel(h.el, { deltaY: 120 });
+    expect(h.controls.getDistance()).toBeGreaterThan(distance);
+
+    h.pref.value = "trackpad";
+    const target = h.controls.getTarget().clone();
+    padScroll(h.el, 3);
+    expect(h.controls.getTarget().distanceTo(target)).toBeGreaterThan(0);
+  });
+
+  describe("two-pointer pan and pinch (spec §7.8: a claimed parameter pointer owns the camera)", () => {
+    const CAPTURE_METHODS = ["setPointerCapture", "releasePointerCapture", "hasPointerCapture"] as const;
+    let saved: (PropertyDescriptor | undefined)[] = [];
+
+    beforeEach(() => {
+      saved = CAPTURE_METHODS.map((name) => Object.getOwnPropertyDescriptor(HTMLElement.prototype, name));
+      Object.assign(HTMLElement.prototype, {
+        setPointerCapture: () => {},
+        releasePointerCapture: () => {},
+        hasPointerCapture: () => false,
+      });
+    });
+
+    afterEach(() => {
+      CAPTURE_METHODS.forEach((name, i) => {
+        const original = saved[i];
+        if (original) Object.defineProperty(HTMLElement.prototype, name, original);
+        else delete (HTMLElement.prototype as unknown as Record<string, unknown>)[name];
+      });
+    });
+
+    const ptr = (h: Harness, type: string, pointerId: number, x: number): void => {
+      h.el.dispatchEvent(new PointerEvent(type, { pointerId, clientX: x, clientY: 400, bubbles: true }));
+    };
+
+    it("suppresses a two-pointer pan and pinch while a tool drag is in flight", () => {
+      const h = setup();
+      h.dragActive.value = true;
+      const target = h.controls.getTarget().clone();
+      const distance = h.controls.getDistance();
+      ptr(h, "pointerdown", 1, 400);
+      ptr(h, "pointerdown", 2, 600);
+      ptr(h, "pointermove", 1, 440); // pan
+      ptr(h, "pointermove", 2, 740); // spread 200 → 300: pinch
+      expect(h.controls.getTarget().distanceTo(target)).toBe(0);
+      expect(h.controls.getDistance()).toBe(distance);
+    });
+
+    it("pans and pinches again once the drag ends, without a jump from the suppressed stretch", () => {
+      const h = setup();
+      h.dragActive.value = true;
+      ptr(h, "pointerdown", 1, 400);
+      ptr(h, "pointerdown", 2, 600);
+      ptr(h, "pointermove", 2, 700); // suppressed: spread 200 → 300
+      h.dragActive.value = false;
+      const target = h.controls.getTarget().clone();
+      const distance = h.controls.getDistance();
+      ptr(h, "pointermove", 2, 710); // spread 300 → 310
+      expect(h.controls.getTarget().distanceTo(target)).toBeGreaterThan(0);
+      expect(h.controls.getDistance()).toBeCloseTo(distance * (300 / 310), 6);
+    });
   });
 
   it("orbits again once the drag ends", () => {

@@ -105,6 +105,14 @@ export interface ToolState {
   sketchTool: SketchTool;
   phase: InteractionPhase;
   /**
+   * True exactly while a model-tool value gesture owns a pointer (extrude depth,
+   * edge-op size, revolve angle, placement gizmo…). Written ONLY where that
+   * controller begins and ends a gesture — never by `setTool`/`setMode`, which
+   * rewrite `phase` whenever the active tool is re-selected, even mid-drag. The
+   * camera's wheel/pinch gate reads this, not `phase`.
+   */
+  gestureLive: boolean;
+  /**
    * The flyout family's last-picked member (`family` key → member `ToolId`).
    * The toolbar's split button activates this member on a plain click; absent ⇒
    * the lowest-priority member is the default. Keyed by the OPAQUE family id so
@@ -127,6 +135,7 @@ export const toolStore = createStore<ToolState>()((set, get) => ({
   modelTool: "select",
   sketchTool: "line",
   phase: "idle",
+  gestureLive: false,
   flyoutDefault: {},
 
   setMode(mode, sketchId, opts) {

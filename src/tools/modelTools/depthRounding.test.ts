@@ -200,4 +200,38 @@ describe("extrude depth drag rounds like a sketch dimension (T7)", () => {
     toolChipStore.getState().onValue?.(52.09);
     expect(toolChipStore.getState().value).toBe(52.09);
   });
+
+  /*
+   * Review §4.3, TODO.md SESSION 37 H3: absolute snapping used to run on the FIRST
+   * move even with zero travel, so merely touching the arrow quantized a typed
+   * value. Below the drag threshold the value is exactly the start.
+   */
+  it("a typed off-grid depth survives 20 grab/release cycles with sub-threshold jitter; a deliberate move snaps", async () => {
+    settingsStore.getState().setSnap("dimensionRound", true);
+    await armExtrude();
+    engineMock.hitExtrudeHandle.mockReturnValue(true);
+    // Perpendicular to +Z: 10 px of travel is 1 mm along the axis.
+    (engineMock.screenRay as ReturnType<typeof vi.fn>).mockImplementation((_x: number, y: number) => ({
+      origin: [0, 0, (100 - y) / 10] as const,
+      dir: [1, 0, 0] as const,
+    }));
+    toolChipStore.getState().onValue?.(12.37);
+    const ptr = (type: string, x: number, y: number): void => {
+      container.dispatchEvent(
+        new MouseEvent(type, { clientX: x, clientY: y, button: 0, buttons: type === "pointerup" ? 0 : 1, bubbles: true }),
+      );
+    };
+
+    for (let i = 0; i < 20; i++) {
+      ptr("pointerdown", 50, 100);
+      ptr("pointermove", 52, 98);
+      ptr("pointermove", 49, 103);
+      ptr("pointerup", 49, 103);
+    }
+    expect(toolChipStore.getState().value).toBe(12.37);
+
+    ptr("pointerdown", 50, 100);
+    ptr("pointermove", 50, 90); // +1 mm, past the threshold
+    expect(toolChipStore.getState().value).toBeCloseTo(13.5, 9); // 13.37 onto the 0.5 mm quantum
+  });
 });

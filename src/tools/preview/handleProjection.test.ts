@@ -14,7 +14,10 @@ import {
   projectAxis,
   axisConditioning,
   axisIsWellConditioned,
+  classifyHandleMapping,
+  projectRejectedAxis,
   MIN_AXIS_CONDITIONING,
+  type HandleMapping,
   type Mat4,
 } from "./handleProjection";
 import type { Vec3 } from "./depthProjection";
@@ -227,5 +230,202 @@ describe("axisConditioning", () => {
     const p = projectAxis(vp, [0, 0, 0], [Math.sin(r), 0, Math.cos(r)], W, H)!;
     expect(axisIsWellConditioned(p, wpp, 0.5)).toBe(false);
     expect(axisIsWellConditioned(p, wpp, 0.01)).toBe(true);
+  });
+});
+
+/*
+ * R06. An edge op's glyph used the exact projected OUTWARD axis while its drag
+ * used a finite-difference screen axis with the projected edge TANGENT rejected,
+ * so the two disagreed whenever the tangent was not screen-perpendicular to the
+ * outward axis. One exact tangent-rejected projection now feeds both.
+ */
+describe("projectRejectedAxis", () => {
+  // 40 px per world unit on both screen axes, looking down world −Z.
+  const vp = viewProjAt(orthographic(10, 7.5, 0.1, 100), [0, 0, 20]);
+  /** That camera's world units per CSS px: (top − bottom) / H. */
+  const WPP = 15 / H;
+  // Perpendicular in 3D, as a fillet's outward axis and its edge tangent are:
+  // (1,−1,−1)·(1,0,1) = 0. On screen outward ∝ (10,10) and tangent ∝ (10,0).
+  const outward: Vec3 = [1, -1, -1];
+  const tangent: Vec3 = [1, 0, 1];
+
+  it("with no tangent is exactly projectAxis", () => {
+    const perspVp = viewProjAt(perspective(76, W / H, 0.1, 1000), [0, 0, 20]);
+    for (const [m, anchor, axis] of [
+      [vp, [0, 0, 0], outward],
+      [perspVp, [8, -3, 1], [0.2, 0.4, 1]],
+    ] as [Mat4, Vec3, Vec3][]) {
+      expect(projectRejectedAxis(m, anchor, axis, null, W, H, 0.025)).toEqual(projectAxis(m, anchor, axis, W, H));
+    }
+  });
+
+  it("the 45° counterexample: outward (10,10)·k with tangent (10,0)·k rejects to vertical", () => {
+    const raw = projectAxis(vp, [0, 0, 0], outward, W, H)!;
+    expect(raw.direction[0]).toBeCloseTo(Math.SQRT1_2, 9);
+    expect(raw.direction[1]).toBeCloseTo(Math.SQRT1_2, 9);
+    const t = projectAxis(vp, [0, 0, 0], tangent, W, H)!;
+    expect(t.direction[0]).toBeCloseTo(1, 9);
+    expect(t.direction[1]).toBeCloseTo(0, 9);
+
+    const r = projectRejectedAxis(vp, [0, 0, 0], outward, tangent, W, H, WPP)!;
+    expect(r.direction[0]).toBeCloseTo(0, 9);
+    expect(r.direction[1]).toBeCloseTo(1, 9);
+    // Only the tangent-perpendicular part of the motion remains: 40/√3 px.
+    expect(r.pxPerWorld).toBeCloseTo(40 / Math.sqrt(3), 9);
+    expect(r.derivative[0]).toBeCloseTo(0, 9);
+    expect(r.derivative[1]).toBeCloseTo(r.pxPerWorld, 9);
+  });
+
+  it("refuses when the tangent runs along the axis on screen — nothing is left to drag", () => {
+    expect(projectRejectedAxis(vp, [0, 0, 0], [1, 0, 1], [1, 0, -1], W, H, WPP)).toBeNull();
+    expect(projectRejectedAxis(vp, [0, 0, 0], outward, [-2, 2, 5], W, H, WPP)).toBeNull();
+  });
+
+  it("does not reject a tangent that has no screen direction of its own", () => {
+    // The tangent points straight at the camera: no usable derivative.
+    expect(projectRejectedAxis(vp, [0, 0, 0], outward, [0, 0, 1], W, H, WPP)).toEqual(
+      projectAxis(vp, [0, 0, 0], outward, W, H),
+    );
+  });
+
+  it("refuses whenever projectAxis refuses the axis", () => {
+    expect(projectRejectedAxis(vp, [0, 0, 0], [0, 0, 1], tangent, W, H, WPP)).toBeNull();
+    expect(projectRejectedAxis(vp, [NaN, 0, 0], outward, tangent, W, H, WPP)).toBeNull();
+  });
+});
+
+/** Column-major `a · b`. */
+function mul(a: Mat4, b: Mat4): Mat4 {
+  const out = new Array<number>(16).fill(0);
+  for (let c = 0; c < 4; c++) {
+    for (let r = 0; r < 4; r++) {
+      let sum = 0;
+      for (let k = 0; k < 4; k++) sum += a[r + 4 * k] * b[k + 4 * c];
+      out[r + 4 * c] = sum;
+    }
+  }
+  return out;
+}
+
+/*
+ * H4b W2 (orchestrator decision): the tangent is rejected only when the TANGENT
+ * itself is well conditioned on screen. A nearly end-on edge projects to a
+ * vanishing, round-off-dominated direction; rejecting it in full rotated a
+ * square-on outward axis 45° with ×1.414 gain, flipping with the tilt azimuth.
+ * Continuity across the threshold is deliberately NOT asserted here.
+ */
+describe("projectRejectedAxis — the tangent's own conditioning gates the rejection", () => {
+  // Orthographic, 40 px per world unit, looking along world +Y with +Z up.
+  const view: Mat4 = [1, 0, 0, 0, 0, 0, -1, 0, 0, 1, 0, 0, 0, 0, -50, 1];
+  const vp = mul(orthographic(10, 7.5, 0.1, 100), view);
+  const wpp = 15 / H;
+  const edge = (tiltDeg: number, azimuthDeg: number): { tangent: Vec3; outward: Vec3 } => {
+    const t = (tiltDeg * Math.PI) / 180;
+    const a = (azimuthDeg * Math.PI) / 180;
+    const ox = Math.cos(t);
+    const oy = -Math.sin(t) * Math.cos(a);
+    const n = Math.hypot(ox, oy);
+    return {
+      tangent: [Math.sin(t) * Math.cos(a), Math.cos(t), Math.sin(t) * Math.sin(a)],
+      outward: [ox / n, oy / n, 0], // square-on, perpendicular to the tangent
+    };
+  };
+
+  for (const tiltDeg of [0.01, 0.5]) {
+    for (const azimuthDeg of [0, 45]) {
+      it(`a nearly end-on tangent (tilt ${tiltDeg}°, azimuth ${azimuthDeg}°) rejects nothing`, () => {
+        const { tangent, outward } = edge(tiltDeg, azimuthDeg);
+        const along = projectAxis(vp, [0, 0, 0], tangent, W, H);
+        expect(along === null || axisConditioning(along, wpp) < MIN_AXIS_CONDITIONING).toBe(true);
+        expect(projectRejectedAxis(vp, [0, 0, 0], outward, tangent, W, H, wpp)).toEqual(
+          projectAxis(vp, [0, 0, 0], outward, W, H),
+        );
+      });
+    }
+  }
+
+  it("a well-conditioned tangent is still rejected", () => {
+    const { tangent, outward } = edge(30, 45);
+    const along = projectAxis(vp, [0, 0, 0], tangent, W, H)!;
+    expect(axisConditioning(along, wpp)).toBeGreaterThanOrEqual(MIN_AXIS_CONDITIONING);
+    const raw = projectAxis(vp, [0, 0, 0], outward, W, H)!;
+    const rejected = projectRejectedAxis(vp, [0, 0, 0], outward, tangent, W, H, wpp)!;
+    // Nothing of the result runs along the tangent's screen direction any more…
+    const dot = rejected.direction[0] * along.direction[0] + rejected.direction[1] * along.direction[1];
+    expect(dot).toBeCloseTo(0, 9);
+    // …which the raw outward axis did.
+    expect(Math.abs(raw.direction[0] * along.direction[0] + raw.direction[1] * along.direction[1])).toBeGreaterThan(0.1);
+  });
+
+  it("an unusable scale rejects nothing", () => {
+    const { tangent, outward } = edge(30, 45);
+    expect(projectRejectedAxis(vp, [0, 0, 0], outward, tangent, W, H, 0)).toEqual(
+      projectAxis(vp, [0, 0, 0], outward, W, H),
+    );
+  });
+});
+
+describe("classifyHandleMapping", () => {
+  const FOV = 76;
+  const eyeZ = 20;
+  const perspVp = viewProjAt(perspective(FOV, W / H, 0.1, 1000), [0, 0, eyeZ]);
+  const perspWpp = worldPerPixelPersp(FOV, eyeZ, H);
+  const orthoVp = viewProjAt(orthographic(10, 7.5, 0.1, 100), [0, 0, 20]);
+  const orthoWpp = 1 / 40;
+  const tilted = (deg: number): Vec3 => {
+    const r = (deg * Math.PI) / 180;
+    return [Math.sin(r), 0, Math.cos(r)];
+  };
+  const finiteMapping = (m: HandleMapping): boolean =>
+    Number.isFinite(m.direction[0]) &&
+    Number.isFinite(m.direction[1]) &&
+    Number.isFinite(m.worldPerPx) &&
+    (m.pxPerWorld === null || Number.isFinite(m.pxPerWorld));
+
+  it("a well-conditioned axis maps along its projected direction", () => {
+    const p = projectAxis(perspVp, [0, 0, 0], [1, 0, 0], W, H)!;
+    const m = classifyHandleMapping(p, perspWpp);
+    expect(m.strategy).toBe("axis");
+    expect(m.direction).toEqual(p.direction);
+    expect(m.pxPerWorld).toBe(p.pxPerWorld);
+    expect(m.worldPerPx).toBe(perspWpp);
+  });
+
+  it("an end-on axis is a vertical screen proxy, orthographic and perspective alike", () => {
+    for (const [vp, wpp] of [
+      [orthoVp, orthoWpp],
+      [perspVp, perspWpp],
+    ] as [Mat4, number][]) {
+      const m = classifyHandleMapping(projectAxis(vp, [0, 0, 0], [0, 0, 1], W, H), wpp);
+      expect(m).toEqual({ strategy: "screenProxy", direction: [0, -1], pxPerWorld: null, worldPerPx: wpp });
+    }
+  });
+
+  it("switches exactly at MIN_AXIS_CONDITIONING", () => {
+    const below = (Math.asin(MIN_AXIS_CONDITIONING) * 180) / Math.PI - 0.05;
+    const above = (Math.asin(MIN_AXIS_CONDITIONING) * 180) / Math.PI + 0.05;
+    for (const [vp, wpp] of [
+      [orthoVp, orthoWpp],
+      [perspVp, perspWpp],
+    ] as [Mat4, number][]) {
+      const lo = projectAxis(vp, [0, 0, 0], tilted(below), W, H)!;
+      const hi = projectAxis(vp, [0, 0, 0], tilted(above), W, H)!;
+      expect(axisConditioning(lo, wpp)).toBeLessThan(MIN_AXIS_CONDITIONING);
+      expect(axisConditioning(hi, wpp)).toBeGreaterThan(MIN_AXIS_CONDITIONING);
+      expect(classifyHandleMapping(lo, wpp).strategy).toBe("screenProxy");
+      expect(classifyHandleMapping(hi, wpp).strategy).toBe("axis");
+    }
+  });
+
+  it("an unusable scale is a proxy, and every output stays finite", () => {
+    const p = projectAxis(perspVp, [0, 0, 0], [1, 0, 0], W, H)!;
+    for (const wpp of [0, -1, NaN, Infinity]) {
+      const m = classifyHandleMapping(p, wpp);
+      expect(m.strategy).toBe("screenProxy");
+      expect(m.worldPerPx).toBe(0);
+      expect(finiteMapping(m)).toBe(true);
+    }
+    expect(finiteMapping(classifyHandleMapping(null, perspWpp))).toBe(true);
+    expect(finiteMapping(classifyHandleMapping(p, perspWpp))).toBe(true);
   });
 });

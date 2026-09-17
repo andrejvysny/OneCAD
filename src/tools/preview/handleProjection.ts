@@ -191,3 +191,110 @@ export function axisIsWellConditioned(
 ): boolean {
   return axisConditioning(projection, worldPerPixel) >= floor;
 }
+
+/**
+ * The exact screen axis of `axis` at `anchor` with the projected `tangent`
+ * REJECTED — what an edge op (fillet, chamfer) must both draw and drag along.
+ *
+ * Pointer motion along a projected edge is ambiguous: it reads as sliding along
+ * the edge as much as growing the value. So the component of the axis
+ * derivative along the tangent derivative's unit direction is removed, and what
+ * is left is the only screen motion that unambiguously means "more".
+ *
+ * GAIN. A pointer displacement of `p` CSS px along `direction` corresponds to
+ * `p / pxPerWorld` world units along `axis`: moving `s` world units along `axis`
+ * moves the screen point by `s · derivative_raw`, whose component along the
+ * rejected unit direction is exactly `s · pxPerWorld`.
+ *
+ * With `tangent` null this IS `projectAxis`. A tangent that is not itself WELL
+ * CONDITIONED on screen — its px-per-world × `worldPerPixel` below
+ * `MIN_AXIS_CONDITIONING`, which includes one pointing straight at the camera and
+ * an unusable scale — rejects nothing: a nearly end-on edge projects to a
+ * vanishing, round-off-dominated direction, and rejecting it in full rotated a
+ * square-on axis by up to 45° with it (review W2). `worldPerPixel` is the scale
+ * at the SAME anchor (see `axisConditioning`).
+ * Returns `null` when `projectAxis` refuses the axis, or when nothing survives
+ * the rejection — the axis runs along the edge on screen, so no drag exists.
+ */
+export function projectRejectedAxis(
+  viewProj: Mat4,
+  anchor: Vec3,
+  axis: Vec3,
+  tangent: Vec3 | null,
+  viewportWidth: number,
+  viewportHeight: number,
+  worldPerPixel: number,
+): AxisProjection | null {
+  const projected = projectAxis(viewProj, anchor, axis, viewportWidth, viewportHeight);
+  if (!projected || tangent === null) return projected;
+  const along = projectAxis(viewProj, anchor, tangent, viewportWidth, viewportHeight);
+  if (!along || !axisIsWellConditioned(along, worldPerPixel)) return projected;
+
+  const [tx, ty] = along.direction;
+  const [ax, ay] = projected.derivative;
+  const dot = ax * tx + ay * ty;
+  const dx = ax - dot * tx;
+  const dy = ay - dot * ty;
+  const pxPerWorld = Math.hypot(dx, dy);
+  // Relative floor: a screen-parallel tangent leaves only round-off, which
+  // scales with the axis's own magnitude.
+  if (!Number.isFinite(pxPerWorld) || !(pxPerWorld > 1e-9 * Math.max(1, projected.pxPerWorld))) {
+    return null;
+  }
+  return {
+    derivative: [dx, dy],
+    pxPerWorld,
+    direction: [dx / pxPerWorld, dy / pxPerWorld],
+  };
+}
+
+/** Which mapping a value handle offers: its world axis, or a screen proxy. */
+export type HandleStrategy = "axis" | "screenProxy";
+
+/**
+ * The ONE description a value handle's glyph, pick and gesture share.
+ *
+ * `direction` is the CSS-pixel unit screen direction (+Y DOWN) the glyph draws
+ * and the gesture maps against — `[0, -1]` (up = increase) for a proxy.
+ * `pxPerWorld` is the axis gain (see `projectRejectedAxis`), `null` for a
+ * proxy. `worldPerPx` is the anchor's scale the decision was made with, or 0
+ * when that scale was unusable.
+ */
+export interface HandleMapping {
+  strategy: HandleStrategy;
+  direction: readonly [number, number];
+  pxPerWorld: number | null;
+  worldPerPx: number;
+}
+
+/** Up the screen: the proxy's increasing direction. */
+const PROXY_DIRECTION: readonly [number, number] = [0, -1];
+
+/**
+ * The single classifier between a world-axis drag and a vertical screen proxy.
+ *
+ * `worldPerPx` must be measured at the SAME anchor the projection was (see
+ * `axisConditioning`). A refused projection, an unusable scale, or an axis below
+ * `MIN_AXIS_CONDITIONING` all yield the proxy: an end-on arrow must never look
+ * grabbable while its drag maps to zero.
+ */
+export function classifyHandleMapping(
+  projection: AxisProjection | null,
+  worldPerPx: number,
+): HandleMapping {
+  const scaleUsable = Number.isFinite(worldPerPx) && worldPerPx > 0;
+  if (!projection || !scaleUsable || !axisIsWellConditioned(projection, worldPerPx)) {
+    return {
+      strategy: "screenProxy",
+      direction: PROXY_DIRECTION,
+      pxPerWorld: null,
+      worldPerPx: scaleUsable ? worldPerPx : 0,
+    };
+  }
+  return {
+    strategy: "axis",
+    direction: projection.direction,
+    pxPerWorld: projection.pxPerWorld,
+    worldPerPx,
+  };
+}

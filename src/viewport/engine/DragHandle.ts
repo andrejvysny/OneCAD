@@ -22,22 +22,39 @@
  *  - `twoWay` — centered bidirectional scalar/linear control. Extrude keeps it
  *    while armed and dragged: travel direction does not change its axis.
  *
- * The pick envelope is centered with compact glyph: 40 × 30 CSS-pixel corridor.
- * It remains a camera-facing cylinder, so billboard roll cannot change pickability.
- * DOM chrome wins before this raycast is consulted.
+ * THE PICK CORRIDOR is an invisible flat 30 × 40 CSS-pixel rectangle in the
+ * glyph's own plane, centred on the attachment, length along the glyph axis. The
+ * group is billboarded, so the rectangle is camera-parallel: every point of it
+ * sits at the same view depth, and the per-anchor `worldPerPixel` scale makes it
+ * project to exactly 30 × 40 px, rolled with the glyph. A 3D pick volume does
+ * not: the camera-facing cylinder it replaces had its radius along the view
+ * direction, and perspective parallax off the optical axis stretched its
+ * corridor past the keep-out box (measured 32 × 48 px at FOV 76), so the chip
+ * covered part of the grab area. `corridorHalfExtentsPx()` is that rectangle's
+ * rolled screen box. DOM chrome wins before this raycast is consulted.
  */
 import * as THREE from "three";
 import { palette } from "./palette";
 import { RENDER_ORDER } from "./renderOrder";
-import { projectAxis } from "@/tools/preview/handleProjection";
+import {
+  classifyHandleMapping,
+  projectRejectedAxis,
+  type AxisProjection,
+  type HandleMapping,
+  type HandleStrategy,
+} from "@/tools/preview/handleProjection";
 
 const GLYPH_HALF_PX = 15; // compact 30px glyph, centered on attachment
 const SHAFT_END_PX = 6; // shaft endpoint before either head
 const SHAFT_W_PX = 4; // visible 2px stroke
 const HEAD_W_PX = 14; // head width
 const HALO_PX = 1.6; // outset of the contrast outline, per side
-const HIT_RADIUS_PX = 15; // 30px corridor width
-const HIT_LENGTH_PX = 40; // 40px corridor length
+const HIT_WIDTH_PX = 30; // corridor width, across the glyph axis
+const HIT_LENGTH_PX = 40; // corridor length, along the glyph axis
+/** Relative change below which `setScale` is a no-op (and schedules no frame). */
+const SCALE_EPS = 1e-9;
+/** Up the screen, CSS px (+Y down): the proxy's increasing direction. */
+const PROXY_UP: readonly [number, number] = [0, -1];
 
 /** Which heads the arrow draws — and therefore what it can be grabbed by. */
 export type DragHandleMode = "forward" | "twoWay";
@@ -84,7 +101,7 @@ export class DragHandle {
   private readonly group = new THREE.Group();
   private readonly fill: THREE.Mesh;
   private readonly halo: THREE.Mesh;
-  private readonly hitCyl: THREE.Mesh; // invisible fat pick target
+  private readonly hitPlane: THREE.Mesh; // invisible flat pick target
   private readonly matNormal: THREE.MeshBasicMaterial;
   private readonly matHover: THREE.MeshBasicMaterial;
   private readonly matDestructive: THREE.MeshBasicMaterial;
@@ -107,6 +124,15 @@ export class DragHandle {
   /** Screen-space proxy direction (`+Y` down), used when source geometry has
    * no trustworthy world axis. Cleared by every geometric axis update. */
   private screenProxyDirection: readonly [number, number] | null = null;
+  /** World edge tangent whose projection is REJECTED from the axis (edge ops),
+   *  or null. Replaced by every `setAxis`. */
+  private tangent: THREE.Vector3 | null = null;
+  /** Strategy frozen at grab, or null. Survives `setAxis` — the controller
+   *  re-issues that every drag frame — and is cleared only by an explicit
+   *  `freezeStrategy(null)` or `reset()`. */
+  private frozenStrategy: HandleStrategy | null = null;
+  /** The mapping `orient` last drew; null before the first `orient`. */
+  private lastMapping: HandleMapping | null = null;
   /** Last screen angle that was well defined, held through the degenerate case
    *  so an axis rotating INTO the camera does not spin the arrow on its way. */
   private screenAngle = 0;
@@ -132,13 +158,15 @@ export class DragHandle {
     // sort do it deterministically instead.
     this.halo.position.z = -0.5;
 
-    this.hitCyl = new THREE.Mesh(
-      new THREE.CylinderGeometry(HIT_RADIUS_PX, HIT_RADIUS_PX, HIT_LENGTH_PX, 8),
-      new THREE.MeshBasicMaterial({ visible: false, toneMapped: false }),
+    // Local XY like the glyph, length along +Y; DoubleSide so the pick never
+    // depends on which way the billboard's roll left the face winding.
+    this.hitPlane = new THREE.Mesh(
+      new THREE.PlaneGeometry(HIT_WIDTH_PX, HIT_LENGTH_PX),
+      new THREE.MeshBasicMaterial({ visible: false, toneMapped: false, side: THREE.DoubleSide }),
     );
-    this.hitCyl.userData.extrudeHandle = true;
+    this.hitPlane.userData.extrudeHandle = true;
 
-    this.group.add(this.halo, this.fill, this.hitCyl);
+    this.group.add(this.halo, this.fill, this.hitPlane);
     this.group.renderOrder = RENDER_ORDER.DRAG_HANDLE;
     this.fill.renderOrder = RENDER_ORDER.DRAG_HANDLE;
     this.halo.renderOrder = RENDER_ORDER.DRAG_HANDLE;
@@ -157,9 +185,20 @@ export class DragHandle {
    * it to (0,0,0) and `setFromUnitVectors` then takes its degenerate branch, which
    * produces an arbitrary 180° flip rather than a NaN — silent, and camera-
    * dependent. The extrude arm reaches exactly that case at depth 0.
+   *
+   * `tangent`, for an edge op, is the world edge tangent at `origin`: its
+   * projection is rejected from the axis's, so the glyph and the gesture share
+   * `handleProjection.projectRejectedAxis`. Omitting it clears any previous one.
+   * A frozen strategy is deliberately NOT cleared here.
    */
-  setAxis(origin: THREE.Vector3, dir: THREE.Vector3, mode: DragHandleMode = "forward"): void {
+  setAxis(
+    origin: THREE.Vector3,
+    dir: THREE.Vector3,
+    mode: DragHandleMode = "forward",
+    tangent: THREE.Vector3 | null = null,
+  ): void {
     this.screenProxyDirection = null;
+    this.tangent = tangent ? tangent.clone() : null;
     this.group.position.copy(origin);
     this._dir.copy(dir);
     if (this._dir.lengthSq() > 1e-12) {
@@ -171,7 +210,12 @@ export class DragHandle {
     this.deps.invalidate();
   }
 
-  /** Position/orient only, keeping the current mode (the historical entry point). */
+  /**
+   * Position/orient only, keeping the current mode (the historical entry point).
+   * The tangent is CLEARED, not kept: this handle is shared, the only caller is
+   * the extrude arm (no tangent), and keeping one would let a fillet's edge
+   * tangent leak into an extrude arrow armed without a `reset()`.
+   */
   setAnchor(origin: THREE.Vector3, dir: THREE.Vector3): void {
     this.setAxis(origin, dir, this.mode);
   }
@@ -187,45 +231,124 @@ export class DragHandle {
   }
 
   /**
-   * Billboard the silhouette: face `camera`, length along the axis's SCREEN
-   * direction. Called every frame by the engine, before the render.
+   * The mapping this handle offers under `camera` RIGHT NOW, ignoring any freeze:
+   * the axis (tangent-rejected when a tangent is set) classified by
+   * `handleProjection.classifyHandleMapping`, or the explicit screen proxy when
+   * one is set. Changes no handle state. `worldPerPx` must be measured at this
+   * handle's anchor (`screenScale.worldPerPixel(camera, worldAnchor(), height)`).
+   */
+  computeMapping(
+    camera: THREE.Camera,
+    viewportWidth: number,
+    viewportHeight: number,
+    worldPerPx: number,
+  ): HandleMapping {
+    if (this.screenProxyDirection !== null) return this.proxyMapping(worldPerPx);
+    return classifyHandleMapping(this.projectedAxis(camera, viewportWidth, viewportHeight, worldPerPx), worldPerPx);
+  }
+
+  /**
+   * Freeze the strategy `orient` draws — called at grab so glyph, pick and
+   * gesture cannot swap mapping under the user mid-drag. `null` unfreezes.
+   * An explicit screen proxy (`setScreenProxy`) always draws as a proxy.
+   */
+  freezeStrategy(strategy: HandleStrategy | null): void {
+    this.frozenStrategy = strategy;
+  }
+
+  /** The mapping `orient` last drew, or null before the first `orient`. */
+  mapping(): HandleMapping | null {
+    return this.lastMapping;
+  }
+
+  /**
+   * Billboard the silhouette: face `camera`, length along the mapping's SCREEN
+   * direction. Called every frame by the engine, before the render, with the
+   * same per-anchor `worldPerPx` it just passed to `setScale`.
    *
    * The screen direction is the TRUE projected derivative of the world axis at
-   * this handle's own anchor (`handleProjection.projectAxis`), not the axis
-   * rotated into camera space. Those two agree only under an orthographic
+   * this handle's own anchor (`handleProjection.projectRejectedAxis`), not the
+   * axis rotated into camera space. Those two agree only under an orthographic
    * camera: perspective divides by `w`, so a world axis projects to a different
-   * screen direction depending on where in the frustum it is anchored. The old
-   * camera-space shortcut therefore drew the arrow along one direction while
-   * the drag mapped along another, and the gap widened the further the anchor
-   * sat from the optical axis — at FOV 76 that is most of the viewport.
+   * screen direction depending on where in the frustum it is anchored.
    *
-   * When the projection refuses — the axis points at the viewer, or the anchor
-   * is behind the camera plane — there is no screen direction to draw and the
+   * UNFROZEN, the glyph draws `computeMapping`: an axis too close to the view
+   * ray to drag draws the vertical proxy rather than a stale angle, so an
+   * arrow never looks like it drags along a direction whose drag maps to zero.
+   *
+   * FROZEN `axis` keeps drawing the axis even ill-conditioned; when its
+   * projection refuses outright (end-on, anchor behind the camera plane) the
    * last good angle is held, so the arrow stays a full-length, grabbable arrow
-   * instead of collapsing to the dot the old cone became.
+   * and never spins. FROZEN `screenProxy` draws the proxy.
    */
-  orient(camera: THREE.Camera, viewportWidth: number, viewportHeight: number): void {
-    this._viewProj.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-    const anchor = this.group.position;
-    const projected = this.screenProxyDirection === null
-      ? projectAxis(
-        this._viewProj.elements,
-        [anchor.x, anchor.y, anchor.z],
-        [this.axis.x, this.axis.y, this.axis.z],
-        viewportWidth,
-        viewportHeight,
-      )
-      : null;
-    const direction = this.screenProxyDirection ?? projected?.direction;
-    if (direction) {
-      // `direction` is CSS-pixel space (+Y DOWN); the roll below is applied in
-      // the camera's own frame (+Y UP), so the vertical component flips once,
-      // here, and nowhere else.
-      const [dx, dy] = direction;
-      this.screenAngle = Math.atan2(-dy, dx) - Math.PI / 2;
-    }
+  orient(camera: THREE.Camera, viewportWidth: number, viewportHeight: number, worldPerPx: number): void {
+    const mapping = this.frozenStrategy === "axis" && this.screenProxyDirection === null
+      ? this.frozenAxisMapping(camera, viewportWidth, viewportHeight, worldPerPx)
+      : this.frozenStrategy === "screenProxy"
+        ? this.proxyMapping(worldPerPx)
+        : this.computeMapping(camera, viewportWidth, viewportHeight, worldPerPx);
+    // `direction` is CSS-pixel space (+Y DOWN); the roll below is applied in
+    // the camera's own frame (+Y UP), so the vertical component flips once,
+    // here, and nowhere else.
+    const [dx, dy] = mapping.direction;
+    this.screenAngle = Math.atan2(-dy, dx) - Math.PI / 2;
+    this.lastMapping = mapping;
     this._roll.setFromAxisAngle(this._z, this.screenAngle);
     this.group.quaternion.copy(camera.quaternion).multiply(this._roll);
+  }
+
+  /** Exact (tangent-rejected) projection of the axis at the anchor, or null. */
+  private projectedAxis(
+    camera: THREE.Camera,
+    viewportWidth: number,
+    viewportHeight: number,
+    worldPerPx: number,
+  ): AxisProjection | null {
+    this._viewProj.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    const anchor = this.group.position;
+    const tangent = this.tangent;
+    return projectRejectedAxis(
+      this._viewProj.elements,
+      [anchor.x, anchor.y, anchor.z],
+      [this.axis.x, this.axis.y, this.axis.z],
+      tangent ? [tangent.x, tangent.y, tangent.z] : null,
+      viewportWidth,
+      viewportHeight,
+      worldPerPx,
+    );
+  }
+
+  private proxyMapping(worldPerPx: number): HandleMapping {
+    return {
+      strategy: "screenProxy",
+      direction: this.screenProxyDirection ?? PROXY_UP,
+      pxPerWorld: null,
+      worldPerPx: Number.isFinite(worldPerPx) && worldPerPx > 0 ? worldPerPx : 0,
+    };
+  }
+
+  /**
+   * A frozen axis: the projection whatever its conditioning; on refusal the
+   * held angle with no gain (`pxPerWorld: null`). The held direction inverts
+   * `orient`'s roll: glyph axis (dx, dy) = (−sin a, −cos a).
+   */
+  private frozenAxisMapping(
+    camera: THREE.Camera,
+    viewportWidth: number,
+    viewportHeight: number,
+    worldPerPx: number,
+  ): HandleMapping {
+    const scale = Number.isFinite(worldPerPx) && worldPerPx > 0 ? worldPerPx : 0;
+    const projected = this.projectedAxis(camera, viewportWidth, viewportHeight, worldPerPx);
+    if (projected) {
+      return { strategy: "axis", direction: projected.direction, pxPerWorld: projected.pxPerWorld, worldPerPx: scale };
+    }
+    return {
+      strategy: "axis",
+      direction: [-Math.sin(this.screenAngle), -Math.cos(this.screenAngle)],
+      pxPerWorld: null,
+      worldPerPx: scale,
+    };
   }
 
   private setMode(mode: DragHandleMode): void {
@@ -238,17 +361,32 @@ export class DragHandle {
     this.halo.geometry = new THREE.ShapeGeometry(arrowShape(twoWay, HALO_PX));
   }
 
-  /** Keep the handle a constant screen size: `worldPerPx` world units per pixel. */
+  /**
+   * Keep the handle a constant screen size: `worldPerPx` world units per pixel.
+   * Invalidates only on a real change — the engine calls this inside every
+   * rendered frame, and an unconditional invalidate there schedules a wasted
+   * frame after each one, so idle never reaches zero frames.
+   */
   setScale(worldPerPx: number): void {
-    this.group.scale.setScalar(Math.max(worldPerPx, 1e-6));
+    const next = Math.max(worldPerPx, 1e-6);
+    const current = this.group.scale.x;
+    if (Math.abs(next - current) <= SCALE_EPS * Math.max(Math.abs(next), Math.abs(current))) return;
+    this.group.scale.setScalar(next);
     this.deps.invalidate();
   }
 
   /**
-   * Furthest selectable corridor edge from attachment, in CSS pixels.
+   * Half extents, in CSS pixels, of the screen box that holds the pick corridor
+   * at its current roll: the 30 × 40 rectangle's axis-aligned bounds. The glyph
+   * axis runs along screen (dx, dy) = (−sin a, −cos a) for roll `a` (see
+   * `orient`), so |dx| = |sin a| and |dy| = |cos a|.
    */
-  reachPx(): number {
-    return HIT_LENGTH_PX / 2;
+  corridorHalfExtentsPx(): { x: number; y: number } {
+    const along = HIT_LENGTH_PX / 2;
+    const across = HIT_WIDTH_PX / 2;
+    const ax = Math.abs(Math.sin(this.screenAngle));
+    const ay = Math.abs(Math.cos(this.screenAngle));
+    return { x: ax * along + ay * across, y: ay * along + ax * across };
   }
 
   /**
@@ -295,6 +433,8 @@ export class DragHandle {
 
   /** Drop the extrude-specific state so a plain value tool inherits a clean arrow. */
   reset(): void {
+    this.frozenStrategy = null;
+    this.tangent = null;
     this.setMode("forward");
     this.setDestructive(false);
     this.setHover(false);
@@ -310,17 +450,17 @@ export class DragHandle {
     return this.mode;
   }
 
-  /** True when `raycaster` hits the handle's (fat) pick envelope. */
+  /** True when `raycaster` hits the handle's pick corridor. */
   raycast(raycaster: THREE.Raycaster): boolean {
     if (!this.group.visible) return false;
-    return raycaster.intersectObject(this.hitCyl, false).length > 0;
+    return raycaster.intersectObject(this.hitPlane, false).length > 0;
   }
 
   dispose(): void {
     this.fill.geometry.dispose();
     this.halo.geometry.dispose();
-    this.hitCyl.geometry.dispose();
-    (this.hitCyl.material as THREE.Material).dispose();
+    this.hitPlane.geometry.dispose();
+    (this.hitPlane.material as THREE.Material).dispose();
     this.matNormal.dispose();
     this.matHover.dispose();
     this.matDestructive.dispose();

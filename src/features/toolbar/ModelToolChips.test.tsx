@@ -16,6 +16,7 @@ import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import { toolChipPlacementStore } from "@/stores/toolChipPlacementStore";
 import { viewportWorkAreaStore } from "@/stores/viewportWorkAreaStore";
 import { documentStore } from "@/stores/documentStore";
+import { activeToolPresentation } from "@/tools/modelTools/activeToolPresentation";
 
 const WORLD: [number, number, number] = [0, 0, 0];
 
@@ -574,16 +575,90 @@ describe("ModelToolChips (M6b)", () => {
     expect(onDistance2).toHaveBeenCalledWith(null);
   });
 
-  it("a non-positive or unparseable second leg is REVERTED, never authored", () => {
+  // Spec §8.2 (H4b W3): a second leg outside the authoring domain is RAW-INVALID —
+  // the typed text stays, nothing is authored or normalized, and the ✓ is refused.
+  // An explicitly empty field (or `=`) is still the equal-leg answer.
+  it("a second leg below the 0.1 mm floor, non-positive or unparseable is raw-invalid, kept and never authored", () => {
     render(<ModelToolChips />);
     const onDistance2 = vi.fn();
     edgeOpCluster({ edgeOp: "Chamfer", distance2: 2.5, onDistance2 });
     openFilletOverflow();
-    for (const bad of ["0", "-1", "2abc"]) {
+    for (const [bad, message] of [
+      ["0.05", /Must be at least 0\.1 mm/],
+      ["0", /Must be at least 0\.1 mm/],
+      ["-1", /Must be at least 0\.1 mm/],
+      ["2abc", /Enter a complete numeric value/],
+    ] as const) {
       fireEvent.change(d2Field(), { target: { value: bad } });
       fireEvent.blur(d2Field());
       expect(onDistance2).not.toHaveBeenCalled();
-      expect(d2Field().value).toBe("2.5");
+      expect(d2Field().value).toBe(bad);
+      const validation = toolChipStore.getState().validation;
+      expect(validation.status).toBe("invalid");
+      expect(validation.status === "invalid" ? validation.message : "").toMatch(message);
+    }
+    // Escape reverts the text and clears the field's own error.
+    fireEvent.keyDown(d2Field(), { key: "Escape" });
+    expect(d2Field().value).toBe("2.5");
+    expect(toolChipStore.getState().validation.status).toBe("valid");
+  });
+
+  it("Enter on an out-of-domain second leg neither authors nor confirms", () => {
+    render(<ModelToolChips />);
+    const onDistance2 = vi.fn();
+    const onConfirm = vi.fn();
+    act(() =>
+      toolChipStore.getState().showFillet(
+        1,
+        WORLD,
+        vi.fn(),
+        { onConfirm, onCancel: vi.fn() },
+        { showEdgeOpSegments: true, edgeOp: "Chamfer", onDistance2 },
+      ),
+    );
+    fireEvent.change(d2Field(), { target: { value: "0.05" } });
+    fireEvent.keyDown(d2Field(), { key: "Enter" });
+    expect(onDistance2).not.toHaveBeenCalled();
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(d2Field().value).toBe("0.05");
+  });
+
+  it("Enter in the second leg confirms through the same fresh gate as the primary field", () => {
+    render(<ModelToolChips />);
+    const onDistance2 = vi.fn();
+    const onConfirm = vi.fn();
+    act(() =>
+      toolChipStore.getState().showFillet(
+        1,
+        WORLD,
+        vi.fn(),
+        { onConfirm, onCancel: vi.fn() },
+        { showEdgeOpSegments: true, edgeOp: "Chamfer", onDistance2 },
+      ),
+    );
+    // The PRIMARY field holds an incomplete draft: the op is not confirmable.
+    act(() => toolChipStore.getState().setRawValueValidity("primary", false, "1."));
+    fireEvent.change(d2Field(), { target: { value: "3" } });
+    fireEvent.keyDown(d2Field(), { key: "Enter" });
+    expect(onDistance2).toHaveBeenCalledWith(3);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it("while applying, the edge-op secondaries render inert: segments, second leg, angle, flip", () => {
+    render(<ModelToolChips />);
+    edgeOpCluster({
+      edgeOp: "Chamfer",
+      onDistance2: vi.fn(),
+      onChamferAngle: vi.fn(),
+      showChamferFlip: true,
+      onChamferFlip: vi.fn(),
+    });
+    for (const id of ["chip-edgeop-fillet", "chip-edgeop-chamfer", "chip-chamfer-d2", "chip-chamfer-angle", "chip-chamfer-flip"]) {
+      expect(screen.getByTestId(id)).not.toBeDisabled();
+    }
+    act(() => toolChipStore.getState().setPreviewLifecycle({ status: "applying", arm: 1, request: 1 }));
+    for (const id of ["chip-edgeop-fillet", "chip-edgeop-chamfer", "chip-chamfer-d2", "chip-chamfer-angle", "chip-chamfer-flip"]) {
+      expect(screen.getByTestId(id), id).toBeDisabled();
     }
   });
 
@@ -927,6 +1002,26 @@ describe("extrude draft segment", () => {
     showExtrude({ draftAngleDeg: 12 });
     expect(draftInput()).toHaveValue("12");
     expect(screen.getByText("°")).toBeInTheDocument();
+  });
+
+  // Spec §9.2, TODO.md SESSION 37 H2: the draft is a blur-commit field, so the
+  // Escape's own blur must not commit the abandoned text either.
+  it("Escape restores the edit-start draft, clears its raw error and commits nothing typed", () => {
+    renderExtrudeUi();
+    const onDraft = showExtrude({ draftAngleDeg: 12 });
+    draftInput().focus();
+    fireEvent.change(draftInput(), { target: { value: "5x" } });
+    expect(toolChipStore.getState().rawInputErrors).toHaveProperty("extrude-draft");
+    fireEvent.keyDown(draftInput(), { key: "Escape" });
+    expect(toolChipStore.getState().rawInputErrors).toEqual({});
+    expect(draftInput()).toHaveValue("12");
+
+    draftInput().focus();
+    fireEvent.change(draftInput(), { target: { value: "20" } });
+    fireEvent.keyDown(draftInput(), { key: "Escape" });
+    expect(onDraft).not.toHaveBeenCalledWith(20);
+    expect(onDraft).toHaveBeenLastCalledWith(12);
+    expect(draftInput()).toHaveValue("12");
   });
 });
 
@@ -1314,6 +1409,222 @@ describe("ModelToolChips anchor lifecycle", () => {
     expect(handle.setPointerCapture).not.toHaveBeenCalled();
     expect(setChipScreenPosition).not.toHaveBeenCalled();
     expect(toolChipPlacementStore.getState().placement).toEqual({ mode: "anchored" });
+  });
+
+  /*
+   * Numeric edit transaction (spec §9.2, TODO.md SESSION 37 H2): Escape in a
+   * model-operation field restores the EDIT-START value and stays in the tool;
+   * Enter/✓ confirm exactly once and only past a fresh store gate.
+   */
+  describe("numeric edit transaction (spec §9.2)", () => {
+    beforeEach(() => {
+      trackingEngine();
+    });
+
+    const liveShell = (value: number, handlers: { onConfirm?: () => void } = {}) => {
+      const onValue = vi.fn((v: number) => toolChipStore.getState().setValue(v));
+      act(() =>
+        toolChipStore.getState().showShell(value, WORLD, onValue, {
+          onConfirm: handlers.onConfirm ?? vi.fn(),
+          onCancel: vi.fn(),
+        }),
+      );
+      return onValue;
+    };
+
+    it("Escape restores the edit-start value after a live preview", () => {
+      render(<ModelToolChips />);
+      const onValue = liveShell(20);
+      const input = screen.getByLabelText("Thickness (mm)");
+      input.focus();
+      fireEvent.change(input, { target: { value: "25" } });
+      expect(onValue).toHaveBeenLastCalledWith(25);
+      fireEvent.keyDown(input, { key: "Escape" });
+      expect(onValue).toHaveBeenLastCalledWith(20);
+      expect(screen.getByLabelText("Thickness (mm)")).toHaveValue("20");
+      expect(toolChipStore.getState().rawInputErrors).toEqual({});
+      expect(toolChipStore.getState().kind).toBe("shellThickness");
+    });
+
+    it("Escape over incomplete text clears its raw error and re-enables confirm", () => {
+      render(<ModelToolChips />);
+      act(() =>
+        toolChipStore.getState().showLinearPattern("X", 3, 20, WORLD, {
+          onAxis: vi.fn(),
+          onCount: vi.fn(),
+          onSpacing: vi.fn(),
+          onConfirm: vi.fn(),
+        }),
+      );
+      act(() => publishBodyContext("linearPattern"));
+      const input = screen.getByLabelText("Spacing (mm)");
+      input.focus();
+      fireEvent.change(input, { target: { value: "20abc" } });
+      expect(activeToolPresentation(toolChipStore.getState())?.canConfirm).toBe(false);
+      fireEvent.keyDown(input, { key: "Escape" });
+      expect(toolChipStore.getState().rawInputErrors).toEqual({});
+      expect(activeToolPresentation(toolChipStore.getState())?.canConfirm).toBe(true);
+      expect(input).toHaveValue("20");
+    });
+
+    it("Escape clears a controller range error through the fallback", () => {
+      render(<ModelToolChips />);
+      const onValue = liveShell(20);
+      act(() =>
+        toolChipStore.getState().setRangeValidation({ status: "invalid", draft: 25, message: "Too thick" }),
+      );
+      const input = screen.getByLabelText("Thickness (mm)");
+      input.focus();
+      fireEvent.keyDown(input, { key: "Escape" });
+      expect(toolChipStore.getState().validation).toEqual({ status: "valid" });
+      expect(onValue).toHaveBeenLastCalledWith(20);
+    });
+
+    it("a registered revert handler replaces the fallback", () => {
+      render(<ModelToolChips />);
+      const onValue = liveShell(20);
+      const onRevert = vi.fn();
+      act(() => toolChipStore.getState().setRevertHandler(onRevert));
+      act(() =>
+        toolChipStore.getState().setRangeValidation({ status: "invalid", draft: 25, message: "Too thick" }),
+      );
+      const input = screen.getByLabelText("Thickness (mm)");
+      input.focus();
+      fireEvent.change(input, { target: { value: "25" } });
+      onValue.mockClear();
+      fireEvent.keyDown(input, { key: "Escape" });
+      expect(onRevert).toHaveBeenCalledTimes(1);
+      expect(onRevert).toHaveBeenCalledWith(20);
+      expect(onValue).not.toHaveBeenCalled();
+      expect(toolChipStore.getState().rangeValidation.status).toBe("invalid");
+    });
+
+    it("show* resets the registered revert handler", () => {
+      act(() => toolChipStore.getState().setRevertHandler(vi.fn()));
+      liveShell(20);
+      expect(toolChipStore.getState().onRevertValue).toBeNull();
+    });
+
+    it("Escape after a dock move reverts the original value on the same input node", () => {
+      render(<ModelToolChips />);
+      const onValue = liveShell(2);
+      const input = screen.getByLabelText("Thickness (mm)");
+      input.focus();
+      fireEvent.change(input, { target: { value: "12abc" } });
+      fireEvent.click(screen.getByRole("button", { name: "Dock" }));
+      expect(screen.getByLabelText("Thickness (mm)")).toBe(input);
+      expect(document.activeElement).toBe(input);
+      fireEvent.keyDown(input, { key: "Escape" });
+      expect(onValue).toHaveBeenLastCalledWith(2);
+      expect(screen.getByLabelText("Thickness (mm)")).toBe(input);
+      expect(input).toHaveValue("2");
+      expect(toolChipStore.getState().rawInputErrors).toEqual({});
+    });
+
+    it("Enter while the range check is pending confirms once", () => {
+      const onConfirm = vi.fn();
+      render(<ModelToolChips />);
+      liveShell(2, { onConfirm });
+      act(() => toolChipStore.getState().setRangeValidation({ status: "pending", message: "Checking…" }));
+      const input = screen.getByLabelText("Thickness (mm)");
+      fireEvent.change(input, { target: { value: "3" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      expect(onConfirm).toHaveBeenCalledTimes(1);
+    });
+
+    it("Enter does not confirm while another field holds a settled raw error", () => {
+      const onConfirm = vi.fn();
+      render(<ModelToolChips />);
+      liveShell(2, { onConfirm });
+      act(() => toolChipStore.getState().setRawValueValidity("extrude-draft", false, "5x"));
+      const input = screen.getByLabelText("Thickness (mm)");
+      fireEvent.change(input, { target: { value: "3" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      expect(onConfirm).not.toHaveBeenCalled();
+    });
+
+    it("✓ does not confirm over a retained commit failure", () => {
+      const onConfirm = vi.fn();
+      render(<ModelToolChips />);
+      liveShell(2, { onConfirm });
+      act(() => toolChipStore.getState().setRetainedCommitFailure("Kernel refused"));
+      fireEvent.click(screen.getByTestId("chip-confirm"));
+      fireEvent.keyDown(screen.getByLabelText("Thickness (mm)"), { key: "Enter" });
+      expect(onConfirm).not.toHaveBeenCalled();
+    });
+
+    it("hole diameter Enter applies the value and confirms once", () => {
+      const onConfirm = vi.fn();
+      const onValue = vi.fn();
+      documentStore.setState({ bodies: { body1: { id: "body1", name: "Body 1", visible: true } } });
+      render(<ModelToolChips />);
+      act(() => {
+        toolChipStore.getState().showHole(
+          6.6,
+          WORLD,
+          {
+            onValue,
+            onHoleType: vi.fn(),
+            onDepth: vi.fn(),
+            onCbDiameter: vi.fn(),
+            onCbDepth: vi.fn(),
+            onCsDiameter: vi.fn(),
+            onCsAngle: vi.fn(),
+            onStandard: vi.fn(),
+            onConfirm,
+            onCancel: vi.fn(),
+          },
+          { holeType: "simple", depth: null },
+        );
+        toolChipStore.getState().setContext("hole", {
+          tool: "hole",
+          kind: "faces",
+          affectedBodies: [{ bodyId: "body1" }],
+          faces: [],
+        });
+      });
+      const input = screen.getByLabelText("Hole diameter (mm)");
+      fireEvent.change(input, { target: { value: "7" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      expect(onValue).toHaveBeenLastCalledWith(7);
+      expect(onConfirm).toHaveBeenCalledTimes(1);
+    });
+
+    it("linear pattern spacing Enter confirms once", () => {
+      const onConfirm = vi.fn();
+      render(<ModelToolChips />);
+      act(() =>
+        toolChipStore.getState().showLinearPattern("X", 3, 20, WORLD, {
+          onAxis: vi.fn(),
+          onCount: vi.fn(),
+          onSpacing: vi.fn(),
+          onConfirm,
+        }),
+      );
+      act(() => publishBodyContext("linearPattern"));
+      const input = screen.getByLabelText("Spacing (mm)");
+      fireEvent.change(input, { target: { value: "30" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      expect(onConfirm).toHaveBeenCalledTimes(1);
+    });
+
+    it("circular pattern angle Enter confirms once", () => {
+      const onConfirm = vi.fn();
+      render(<ModelToolChips />);
+      act(() =>
+        toolChipStore.getState().showCircularPattern("Z", 4, 360, WORLD, {
+          onAxis: vi.fn(),
+          onCount: vi.fn(),
+          onAngle: vi.fn(),
+          onConfirm,
+        }),
+      );
+      act(() => publishBodyContext("circularPattern"));
+      const input = screen.getByLabelText("Angle (°)");
+      fireEvent.change(input, { target: { value: "180" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      expect(onConfirm).toHaveBeenCalledTimes(1);
+    });
   });
 });
 

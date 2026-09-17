@@ -162,6 +162,18 @@ export function promotePick(client: ReturnType<typeof createClient>, ref: Entity
   });
 }
 
+/**
+ * The camera's navigation gate: whether a model-tool value drag (extrude depth,
+ * fillet radius, revolve angle…) owns a pointer right now. Those drags project
+ * the pointer against the current camera, so any camera move mid-drag would make
+ * the dragged value jump. Gesture OWNERSHIP, not `phase`: re-selecting the active
+ * tool rewrites `phase` to "armed" while the drag is still live. Sketch drags
+ * re-raycast the plane each move and are deliberately not gated.
+ */
+export function viewportDragActive(): boolean {
+  return toolStore.getState().gestureLive;
+}
+
 // Faint 45° hatch behind the placeholder (prototype 1c) — fallback only.
 // Tinted from a token so it inverts with the theme; a fixed black wash is
 // invisible on a dark canvas.
@@ -243,11 +255,7 @@ export function ViewportRoot({ className }: { className?: string }) {
         gridVisible: viewportStore.getState().gridVisible,
         // Read live so a preference change takes effect without a remount.
         getDevicePref: () => settingsStore.getState().navigation.inputDevice,
-        // Model-tool drags (extrude depth, fillet radius, revolve angle) project
-        // the pointer against the current camera, so a wheel-orbit mid-drag
-        // would make the dragged value jump. Sketch drags re-raycast the plane
-        // each move and are unaffected, so they are deliberately not gated.
-        isDragActive: () => toolStore.getState().phase === "dragging",
+        isDragActive: viewportDragActive,
         onDeviceChange: (device) =>
           viewportStore.getState().setDetectedInputDevice(device),
       })

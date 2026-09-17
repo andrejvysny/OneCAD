@@ -42,6 +42,7 @@ import { BodyMaterialLibrary } from "./bodyMaterials";
 import { parseMeshPayload } from "../mesh/parseMeshPayload";
 import type { ProbeCandidateFilter } from "./Picker";
 import type { CadOrbitControls, FrameViewRequest } from "./CadOrbitControls";
+import type { DragHandle } from "./DragHandle";
 
 let rafCbs: FrameRequestCallback[] = [];
 function flushFrame(t = 16): void {
@@ -763,16 +764,229 @@ describe("ViewportEngine interaction-overlay bounds", () => {
     expect(engine.getInteractionOverlayBounds("valueHandle")).toBeNull();
 
     engine.showValueHandle([0, 0, 0], [0, 0, 1]);
+    flushFrame();
     const box = engine.getInteractionOverlayBounds("valueHandle");
+    const centre = engine.projectPoint([0, 0, 0]);
     expect(box).not.toBeNull();
-    // Square, because the billboarded arrow can reach that far in ANY screen
-    // direction, and centred on the anchor.
-    expect(box!.width).toBeCloseTo(box!.height, 6);
-    expect(box!.width).toBeGreaterThan(0);
+    // Centred on the anchor, and the rolled AABB of the 30 × 40 corridor: no
+    // side shorter than its width, none longer than the 50 px a 45° roll gives.
+    expect(box!.x + box!.width / 2).toBeCloseTo(centre!.x, 6);
+    expect(box!.y + box!.height / 2).toBeCloseTo(centre!.y, 6);
+    expect(Math.min(box!.width, box!.height)).toBeGreaterThanOrEqual(30 - 1e-9);
+    expect(Math.max(box!.width, box!.height)).toBeLessThanOrEqual(50 + 1e-9);
 
     engine.hideValueHandle();
     expect(engine.getInteractionOverlayBounds("valueHandle")).toBeNull();
 
+    engine.dispose();
+  });
+
+  /*
+   * The keep-out box must hold EVERY pixel the pick target answers to, or a chip
+   * pushed clear of the box still covers part of the grab corridor. Measured in
+   * e2e on 9f573ecd: a 3D pick cylinder's radius ran along the view direction,
+   * so perspective parallax off the optical axis stretched the corridor to
+   * 32 × 48 px while the box stayed 40 × 40 — the chip's HUD ate the top rows.
+   */
+  it("holds every pixel the handle picks, far off the optical axis of a tilted FOV-76 camera", async () => {
+    const W = 1200;
+    const H = 800;
+    const { canvas: container, overlay } = newDom();
+    Object.defineProperty(container, "clientWidth", { value: W });
+    Object.defineProperty(container, "clientHeight", { value: H });
+    const engine = new ViewportEngine();
+    await engine.init(container, overlay, {});
+    const internals = engine as unknown as {
+      canvas: HTMLCanvasElement;
+      controls: CadOrbitControls;
+      rig: { getCamera(): THREE.Camera };
+    };
+    internals.canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, right: W, bottom: H, width: W, height: H, x: 0, y: 0 }) as DOMRect;
+    internals.controls.setView({ yaw: 0.6, pitch: 0.5, distance: 150, target: new THREE.Vector3() }, false);
+    flushFrame();
+    const camera = internals.rig.getCamera() as THREE.PerspectiveCamera;
+    expect(camera.isPerspectiveCamera).toBe(true);
+    expect(camera.fov).toBe(76);
+
+    // A world point on the ray through NDC (0.75, 0.65), at view depth 150:
+    // near the top-right corner, far from the optical axis.
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(new THREE.Vector2(0.75, 0.65), camera);
+    const viewDir = camera.getWorldDirection(new THREE.Vector3());
+    const anchor = ray.ray.origin
+      .clone()
+      .addScaledVector(ray.ray.direction, 150 / ray.ray.direction.dot(viewDir));
+
+    // [1,0,0] sits at conditioning ≈ 0.077 at this anchor — just under
+    // MIN_AXIS_CONDITIONING — so it draws the vertical screen proxy; the others
+    // are well-conditioned axes drawn along their projected direction.
+    for (const axis of [[0, 0, 1], [1, 0, 0], [0, 1, 0]] as [number, number, number][]) {
+      engine.showValueHandle([anchor.x, anchor.y, anchor.z], axis);
+      flushFrame();
+      engine.interactionRoot.updateWorldMatrix(true, true);
+
+      const box = engine.getInteractionOverlayBounds("valueHandle")!;
+      const centre = engine.projectPoint([anchor.x, anchor.y, anchor.z])!;
+      expect(box).not.toBeNull();
+      expect(centre.x).toBeGreaterThan(W * 0.8);
+      expect(centre.y).toBeLessThan(H * 0.2);
+
+      const outside: string[] = [];
+      let hits = 0;
+      for (let dy = -60; dy <= 60; dy++) {
+        for (let dx = -60; dx <= 60; dx++) {
+          const x = centre.x + dx;
+          const y = centre.y + dy;
+          if (!engine.hitExtrudeHandle(x, y)) continue;
+          hits++;
+          const inside =
+            x >= box.x - 0.5 && x <= box.x + box.width + 0.5 && y >= box.y - 0.5 && y <= box.y + box.height + 0.5;
+          if (!inside) outside.push(`(${dx},${dy})`);
+        }
+      }
+      expect(hits).toBeGreaterThan(0);
+      expect(outside, `axis ${axis}: hits outside the keep-out box ${JSON.stringify(box)}`).toEqual([]);
+
+      // …and the corridor itself is the 30 × 40 px rectangle, rolled with the
+      // glyph: its length runs along the mapping's screen direction — the
+      // axis's projected direction, or straight up for a proxy.
+      const mapping = engine.valueHandleMapping()!;
+      const u = { x: mapping.direction[0], y: mapping.direction[1] };
+      if (axis[0] === 1) {
+        expect(mapping.strategy).toBe("screenProxy");
+        expect([u.x, u.y]).toEqual([0, -1]);
+      } else {
+        expect(mapping.strategy).toBe("axis");
+        const tip = engine.projectPoint([anchor.x + axis[0] * 0.05, anchor.y + axis[1] * 0.05, anchor.z + axis[2] * 0.05])!;
+        const len = Math.hypot(tip.x - centre.x, tip.y - centre.y);
+        expect(u.x).toBeCloseTo((tip.x - centre.x) / len, 3);
+        expect(u.y).toBeCloseTo((tip.y - centre.y) / len, 3);
+      }
+      const v = { x: -u.y, y: u.x };
+      const at = (along: number, across: number) =>
+        engine.hitExtrudeHandle(
+          centre.x + u.x * along + v.x * across,
+          centre.y + u.y * along + v.y * across,
+        );
+      expect([at(18, 0), at(-18, 0), at(0, 13), at(0, -13)]).toEqual([true, true, true, true]);
+      expect([at(24, 0), at(-24, 0), at(0, 19), at(0, -19)]).toEqual([false, false, false, false]);
+    }
+
+    engine.dispose();
+  });
+});
+
+/*
+ * The value handle's mapping at the engine seam (R03/R06). The controller asks
+ * at grab, so the answer must be computed from the camera as it is NOW — a
+ * camera move with no frame rendered yet must not serve the previous frame's.
+ */
+describe("ViewportEngine value-handle mapping", () => {
+  type Internals = {
+    controls: CadOrbitControls;
+    rig: { getCamera(): THREE.Camera };
+    dragHandle: DragHandle;
+  };
+  const sized = async () => {
+    const { canvas, overlay } = newDom();
+    Object.defineProperty(canvas, "clientWidth", { value: 1000, configurable: true });
+    Object.defineProperty(canvas, "clientHeight", { value: 800, configurable: true });
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+    return { engine, internals: engine as unknown as Internals };
+  };
+  const toVec = (v: THREE.Vector3): [number, number, number] => [v.x, v.y, v.z];
+
+  it("is null while the handle is hidden", async () => {
+    const { engine } = await sized();
+    expect(engine.valueHandleMapping()).toBeNull();
+    engine.showValueHandle([0, 0, 0], [1, 0, 0]);
+    expect(engine.valueHandleMapping()).not.toBeNull();
+    engine.hideValueHandle();
+    expect(engine.valueHandleMapping()).toBeNull();
+    engine.dispose();
+  });
+
+  it("an end-on axis maps and DRAWS as the vertical screen proxy", async () => {
+    const { engine, internals } = await sized();
+    // getViewDirection() is target→camera: exactly along the view ray.
+    engine.showValueHandle([0, 0, 0], toVec(engine.getViewDirection()));
+    expect(engine.valueHandleMapping()!.strategy).toBe("screenProxy");
+    flushFrame();
+    expect(internals.dragHandle.mapping()).toMatchObject({ strategy: "screenProxy", direction: [0, -1] });
+    const box = engine.getInteractionOverlayBounds("valueHandle")!;
+    expect(box.width).toBeCloseTo(30, 6);
+    expect(box.height).toBeCloseTo(40, 6);
+    engine.dispose();
+  });
+
+  it("is computed fresh after a camera move that has not rendered yet", async () => {
+    const { engine, internals } = await sized();
+    const axis = engine.getViewDirection().clone();
+    engine.showValueHandle([0, 0, 0], toVec(axis));
+    flushFrame();
+    expect(internals.dragHandle.mapping()!.strategy).toBe("screenProxy");
+
+    internals.controls.setView(
+      { yaw: internals.controls.yaw + Math.PI / 2, pitch: 0.1, distance: 200, target: new THREE.Vector3() },
+      false,
+    );
+    expect(Math.abs(engine.getViewDirection().dot(axis))).toBeLessThan(0.9);
+    // No frame flushed: the last DRAWN mapping is stale, the query is not.
+    expect(internals.dragHandle.mapping()!.strategy).toBe("screenProxy");
+    const fresh = engine.valueHandleMapping()!;
+    expect(fresh.strategy).toBe("axis");
+    expect(fresh.pxPerWorld).toBeGreaterThan(0);
+    expect(fresh.worldPerPx).toBeGreaterThan(0);
+    engine.dispose();
+  });
+
+  it("passes an edge tangent through, so the mapping rejects it", async () => {
+    const { engine } = await sized();
+    const plain = (engine.showValueHandle([0, 0, 0], [1, -1, -1]), engine.valueHandleMapping()!);
+    engine.showValueHandle([0, 0, 0], [1, -1, -1], [1, 0, 1]);
+    const rejected = engine.valueHandleMapping()!;
+    expect(rejected.strategy).toBe("axis");
+    const cross = plain.direction[0] * rejected.direction[1] - plain.direction[1] * rejected.direction[0];
+    expect(Math.abs(cross)).toBeGreaterThan(1e-3);
+    engine.dispose();
+  });
+
+  it("freezes the drawn strategy and repaints", async () => {
+    const { engine, internals } = await sized();
+    engine.showValueHandle([0, 0, 0], [1, 0, 0]);
+    flushFrame();
+    expect(internals.dragHandle.mapping()!.strategy).toBe("axis");
+    mocks.renderer.render.mockClear();
+
+    engine.freezeValueHandleStrategy("screenProxy");
+    flushFrame();
+    expect(mocks.renderer.render).toHaveBeenCalledTimes(1);
+    expect(internals.dragHandle.mapping()!.strategy).toBe("screenProxy");
+    // The fresh query is freeze-agnostic: it reports the geometry.
+    expect(engine.valueHandleMapping()!.strategy).toBe("axis");
+
+    engine.freezeValueHandleStrategy(null);
+    flushFrame();
+    expect(internals.dragHandle.mapping()!.strategy).toBe("axis");
+    engine.dispose();
+  });
+
+  // N9: `setScale` runs inside `renderFrame`; an unconditional invalidate there
+  // re-armed a rAF after every frame. `tick` clears `dirty` after rendering, so
+  // it drew nothing — but idle must mean no scheduled callback at all.
+  it("an idle shown handle schedules no further animation frame (N9)", async () => {
+    const { engine } = await sized();
+    engine.showValueHandle([0, 0, 0], [1, 0, 0]);
+    flushFrame();
+    flushFrame();
+    // One ordinary repaint with nothing changed: it must not re-arm a frame.
+    mocks.renderer.render.mockClear();
+    engine.invalidate();
+    flushFrame();
+    expect(mocks.renderer.render).toHaveBeenCalledTimes(1);
+    expect(rafCbs).toHaveLength(0);
     engine.dispose();
   });
 });

@@ -6,14 +6,16 @@
  * arbitrary 180° flip rather than a NaN. The extrude arm hits exactly that at
  * depth 0, so the handle must HOLD its orientation instead.
  *
- * PICK ENVELOPE is a compact centered corridor. Both variants share it; chrome
- * exclusion at input boundary, rather than asymmetric hidden geometry, protects
- * nearby controls.
+ * PICK CORRIDOR is a flat 30 × 40 px rectangle in the glyph's plane, centred on
+ * the attachment. Both variants share it; chrome exclusion at input boundary,
+ * rather than asymmetric hidden geometry, protects nearby controls. Being flat,
+ * it is only hit by rays crossing the glyph plane, as a billboarded view ray does.
  */
 import { describe, it, expect, vi } from "vitest";
 import * as THREE from "three";
 import { DragHandle } from "./DragHandle";
 import { palette } from "./palette";
+import { worldPerPixel } from "./screenScale";
 
 /** The two drawn meshes, in the order the handle adds them (halo first). */
 function parts(root: THREE.Object3D): { halo: THREE.Mesh; fill: THREE.Mesh } {
@@ -28,15 +30,15 @@ function makeHandle() {
   handle.setVisible(true);
   handle.setScale(1);
   /**
-   * Raycast a horizontal ray at height `y`, aimed at the axis. Three's raycaster
-   * reads `matrixWorld` and never refreshes it, so the update is the caller's job
-   * — in the app the render loop has already done it before any pick.
+   * Raycast straight through the glyph plane (local −Z, the billboard's view
+   * direction) at height `y` on the axis. Three's raycaster reads `matrixWorld`
+   * and never refreshes it, so the update is the caller's job — in the app the
+   * render loop has already done it before any pick.
    */
   const hitAt = (y: number): boolean => {
     root.updateMatrixWorld(true);
-    const origin = new THREE.Vector3(50, y, 0);
-    const dir = new THREE.Vector3(0, y, 0).sub(origin).normalize();
-    return handle.raycast(new THREE.Raycaster(origin, dir));
+    const origin = new THREE.Vector3(0, y, 50);
+    return handle.raycast(new THREE.Raycaster(origin, new THREE.Vector3(0, 0, -1)));
   };
   return { handle, root, invalidate, hitAt };
 }
@@ -54,7 +56,7 @@ describe("DragHandle orientation", () => {
     camera.updateMatrixWorld();
     camera.updateProjectionMatrix();
     handle.setScreenProxy(O);
-    handle.orient(camera, 800, 800);
+    handle.orient(camera, 800, 800, worldPerPixel(camera, handle.worldAnchor(), 800));
 
     const up = new THREE.Vector3(0, 1, 0).applyQuaternion(root.children[0].quaternion);
     expect(up.y).toBeGreaterThan(0.99);
@@ -89,8 +91,8 @@ describe("DragHandle orientation", () => {
 });
 
 describe("DragHandle pick envelope", () => {
-  it("uses a compact centered two-way glyph and matching 40px keep-out reach", () => {
-    const { handle, root } = makeHandle();
+  it("uses a compact centered two-way glyph inside a 30 × 40 px corridor", () => {
+    const { handle, root, hitAt } = makeHandle();
     handle.setAxis(O, Y, "twoWay");
     const geometry = parts(root).fill.geometry;
     geometry.computeBoundingBox();
@@ -99,7 +101,30 @@ describe("DragHandle pick envelope", () => {
     expect(bounds).not.toBeNull();
     expect(bounds?.min.y).toBeCloseTo(-15, 6);
     expect(bounds?.max.y).toBeCloseTo(15, 6);
-    expect(handle.reachPx()).toBe(20);
+    expect([hitAt(18), hitAt(-18), hitAt(22), hitAt(-22)]).toEqual([true, true, false, false]);
+  });
+
+  it("reports the corridor's screen box at the glyph's current roll", () => {
+    const { handle } = makeHandle();
+    const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
+    camera.position.set(0, 0, 20);
+    camera.lookAt(0, 0, 0);
+    camera.updateMatrixWorld();
+    const extentsFor = (direction: [number, number]) => {
+      handle.setScreenProxy(O, direction);
+      handle.orient(camera, 800, 800, worldPerPixel(camera, handle.worldAnchor(), 800));
+      return handle.corridorHalfExtentsPx();
+    };
+
+    const vertical = extentsFor([0, -1]);
+    expect(vertical.x).toBeCloseTo(15, 9);
+    expect(vertical.y).toBeCloseTo(20, 9);
+    const horizontal = extentsFor([1, 0]);
+    expect(horizontal.x).toBeCloseTo(20, 9);
+    expect(horizontal.y).toBeCloseTo(15, 9);
+    const diagonal = extentsFor([1, 1]);
+    expect(diagonal.x).toBeCloseTo(35 / Math.SQRT2, 9);
+    expect(diagonal.y).toBeCloseTo(35 / Math.SQRT2, 9);
   });
 
   it("twoWay is grabbable from the NEGATIVE side", () => {
@@ -114,7 +139,7 @@ describe("DragHandle pick envelope", () => {
     const { handle, hitAt } = makeHandle();
     handle.setAxis(O, Y, "forward");
     expect(hitAt(-10)).toBe(true);
-    expect(hitAt(20)).toBe(true);
+    expect(hitAt(18)).toBe(true);
   });
 
   it("switching mode never creates a mismatched pick envelope", () => {
@@ -129,7 +154,7 @@ describe("DragHandle pick envelope", () => {
     const { handle, hitAt } = makeHandle();
     handle.setAxis(O, Y, "twoWay");
     handle.setVisible(false);
-    expect(hitAt(20)).toBe(false);
+    expect(hitAt(0)).toBe(false);
   });
 });
 
@@ -240,7 +265,7 @@ describe("DragHandle billboard", () => {
       [30, 40, 50],
     ] as [number, number, number][]) {
       const cam = camera(pos);
-      handle.orient(cam, VW, VH);
+      handle.orient(cam, VW, VH, worldPerPixel(cam, handle.worldAnchor(), VH));
       const toCamera = cam.position.clone().normalize();
       expect(facing(root).dot(toCamera)).toBeGreaterThan(0.999);
     }
@@ -251,22 +276,23 @@ describe("DragHandle billboard", () => {
     // World +Z, viewed from +X: straight up the screen.
     handle.setAxis(O, new THREE.Vector3(0, 0, 1));
     const cam = camera([60, 0, 0]);
-    handle.orient(cam, VW, VH);
+    handle.orient(cam, VW, VH, worldPerPixel(cam, handle.worldAnchor(), VH));
 
     const screenUp = new THREE.Vector3(0, 1, 0).applyQuaternion(cam.quaternion);
     expect(along(root).dot(screenUp)).toBeGreaterThan(0.999);
   });
 
-  it("holds a full-length arrow when the axis points at the camera", () => {
+  it("a FROZEN axis holds a full-length arrow when it points at the camera", () => {
     const { handle, root } = makeHandle();
     handle.setAxis(O, new THREE.Vector3(0, 0, 1));
     const side = camera([60, 0, 0]);
-    handle.orient(side, VW, VH);
+    handle.orient(side, VW, VH, worldPerPixel(side, handle.worldAnchor(), VH));
     const before = along(root).clone();
+    handle.freezeStrategy("axis"); // as at grab
 
     // Now look straight down that axis: it has NO screen direction left.
     const down = camera([0, 0, 60]);
-    handle.orient(down, VW, VH);
+    handle.orient(down, VW, VH, worldPerPixel(down, handle.worldAnchor(), VH));
 
     // The last good angle is held rather than spinning to an arbitrary one, and
     // the arrow still faces the viewer at full length — not the old dot.
@@ -295,11 +321,11 @@ describe("DragHandle billboard", () => {
 
     const left = makeHandle();
     left.handle.setAxis(new THREE.Vector3(-25, 0, 0), axis);
-    left.handle.orient(cam, VW, VH);
+    left.handle.orient(cam, VW, VH, worldPerPixel(cam, left.handle.worldAnchor(), VH));
 
     const right = makeHandle();
     right.handle.setAxis(new THREE.Vector3(25, 0, 0), axis);
-    right.handle.orient(cam, VW, VH);
+    right.handle.orient(cam, VW, VH, worldPerPixel(cam, right.handle.worldAnchor(), VH));
 
     const inCam = (root: THREE.Object3D) =>
       along(root).clone().applyQuaternion(cam.quaternion.clone().invert());
@@ -312,11 +338,11 @@ describe("DragHandle billboard", () => {
 });
 
 describe("DragHandle pick corridor", () => {
-  /** Ray parallel to the axis-crossing plane, offset `off` px sideways. */
+  /** Ray through the glyph plane, offset `off` px sideways from the axis. */
   const hitOffAxis = (handle: DragHandle, root: THREE.Group, off: number): boolean => {
     root.updateMatrixWorld(true);
-    const origin = new THREE.Vector3(off, -50, 0);
-    return handle.raycast(new THREE.Raycaster(origin, new THREE.Vector3(0, 1, 0)));
+    const origin = new THREE.Vector3(off, 0, 50);
+    return handle.raycast(new THREE.Raycaster(origin, new THREE.Vector3(0, 0, -1)));
   };
 
   it("is at least 12 px across — a trackpad must not have to land on a hairline", () => {
@@ -331,5 +357,202 @@ describe("DragHandle pick corridor", () => {
     handle.setAxis(O, Y);
     handle.setScale(2); // e.g. a 2× device scale / zoomed-out camera
     expect(hitOffAxis(handle, root, 11.8)).toBe(true);
+  });
+});
+
+/*
+ * ONE mapping for glyph, pick and gesture (R03, R06). `computeMapping` is the
+ * classifier's answer for the current camera; `orient` draws it; a strategy
+ * frozen at grab survives the per-frame `setAxis` the controller issues.
+ */
+describe("DragHandle mapping", () => {
+  const VW = 600;
+  const VH = 600;
+  const camera = (position: [number, number, number]) => {
+    const cam = new THREE.PerspectiveCamera(50, 1, 0.1, 500);
+    cam.up.set(0, 0, 1);
+    cam.position.set(...position);
+    cam.lookAt(0, 0, 0);
+    cam.updateMatrixWorld(true);
+    return cam;
+  };
+  const wpp = (cam: THREE.Camera, handle: DragHandle) => worldPerPixel(cam, handle.worldAnchor(), VH);
+  const orient = (handle: DragHandle, cam: THREE.Camera) => handle.orient(cam, VW, VH, wpp(cam, handle));
+
+  /** The drawn glyph's length direction in CSS pixels (+Y down), unit. */
+  const glyphDir = (root: THREE.Object3D, cam: THREE.Camera): [number, number] => {
+    const v = new THREE.Vector3(0, 1, 0)
+      .applyQuaternion((root.children[0] as THREE.Group).quaternion)
+      .applyQuaternion(cam.quaternion.clone().invert());
+    const l = Math.hypot(v.x, v.y);
+    return [v.x / l, -v.y / l];
+  };
+
+  /** CSS-px screen derivative of `dir` at `anchor`, by finite difference through three's own `project`. */
+  const screenDerivative = (cam: THREE.Camera, anchor: THREE.Vector3, dir: THREE.Vector3): [number, number] => {
+    const px = (p: THREE.Vector3): [number, number] => {
+      const n = p.clone().project(cam);
+      return [((n.x + 1) / 2) * VW, ((1 - n.y) / 2) * VH];
+    };
+    const eps = 1e-5;
+    const a = px(anchor);
+    const b = px(anchor.clone().addScaledVector(dir.clone().normalize(), eps));
+    return [(b[0] - a[0]) / eps, (b[1] - a[1]) / eps];
+  };
+  const unit2 = (v: [number, number]): [number, number] => {
+    const l = Math.hypot(v[0], v[1]);
+    return [v[0] / l, v[1] / l];
+  };
+
+  // Perpendicular in 3D, like a fillet's outward axis and its edge tangent.
+  const outward = new THREE.Vector3(1, -1, -1).normalize();
+  const tangent = new THREE.Vector3(1, 0, 1).normalize();
+  const anchor = new THREE.Vector3(8, 3, -2);
+
+  it("draws the tangent-REJECTED axis for an oblique perspective edge op", () => {
+    const { handle, root } = makeHandle();
+    const cam = camera([40, -70, 50]);
+    handle.setAxis(anchor, outward, "forward", tangent);
+    orient(handle, cam);
+
+    const raw = screenDerivative(cam, anchor, outward);
+    const t = unit2(screenDerivative(cam, anchor, tangent));
+    const dot = raw[0] * t[0] + raw[1] * t[1];
+    const expected = unit2([raw[0] - dot * t[0], raw[1] - dot * t[1]]);
+    // The case is only a counterexample if rejection actually moves the axis.
+    const rawDir = unit2(raw);
+    expect(Math.acos(rawDir[0] * expected[0] + rawDir[1] * expected[1])).toBeGreaterThan((10 * Math.PI) / 180);
+
+    const drawn = glyphDir(root, cam);
+    expect(drawn[0]).toBeCloseTo(expected[0], 3);
+    expect(drawn[1]).toBeCloseTo(expected[1], 3);
+  });
+
+  it("the glyph direction IS computeMapping's direction", () => {
+    const { handle, root } = makeHandle();
+    const cam = camera([40, -70, 50]);
+    handle.setAxis(anchor, outward, "forward", tangent);
+    const mapping = handle.computeMapping(cam, VW, VH, wpp(cam, handle));
+    expect(mapping.strategy).toBe("axis");
+    expect(handle.mapping()).toBeNull();
+
+    orient(handle, cam);
+    const drawn = glyphDir(root, cam);
+    expect(drawn[0]).toBeCloseTo(mapping.direction[0], 9);
+    expect(drawn[1]).toBeCloseTo(mapping.direction[1], 9);
+    expect(handle.mapping()).toEqual(mapping);
+  });
+
+  it("a later setAxis without a tangent drops it", () => {
+    const { handle } = makeHandle();
+    const cam = camera([40, -70, 50]);
+    handle.setAxis(anchor, outward, "forward", tangent);
+    handle.setAxis(anchor, outward);
+    const plain = handle.computeMapping(cam, VW, VH, wpp(cam, handle));
+    const raw = unit2(screenDerivative(cam, anchor, outward));
+    expect(plain.direction[0]).toBeCloseTo(raw[0], 3);
+    expect(plain.direction[1]).toBeCloseTo(raw[1], 3);
+  });
+
+  it("an unfrozen end-on axis draws the vertical proxy and reports it", () => {
+    const { handle, root } = makeHandle();
+    handle.setAxis(O, new THREE.Vector3(1, 0, 0));
+    const side = camera([0, -60, 0]);
+    orient(handle, side);
+    expect(handle.mapping()!.strategy).toBe("axis");
+    expect(glyphDir(root, side)[0]).toBeCloseTo(1, 6);
+
+    const endOn = camera([60, 0, 0]);
+    orient(handle, endOn);
+    expect(handle.mapping()!.strategy).toBe("screenProxy");
+    expect(handle.computeMapping(endOn, VW, VH, wpp(endOn, handle)).strategy).toBe("screenProxy");
+    const drawn = glyphDir(root, endOn);
+    expect(drawn[0]).toBeCloseTo(0, 6);
+    expect(drawn[1]).toBeCloseTo(-1, 6);
+    expect(handle.corridorHalfExtentsPx().x).toBeCloseTo(15, 6);
+    expect(handle.corridorHalfExtentsPx().y).toBeCloseTo(20, 6);
+  });
+
+  it("a frozen axis survives per-frame setAxis and a camera turned end-on: it holds, never switches", () => {
+    const { handle, root } = makeHandle();
+    const axis = new THREE.Vector3(1, 0, 0);
+    handle.setAxis(O, axis);
+    const side = camera([0, -60, 0]);
+    orient(handle, side);
+    handle.freezeStrategy("axis");
+
+    const endOn = camera([60, 0, 0]);
+    for (let i = 0; i < 3; i++) {
+      handle.setAxis(O, axis, "twoWay");
+      orient(handle, endOn);
+    }
+    const m = handle.mapping()!;
+    expect(m.strategy).toBe("axis");
+    expect(m.pxPerWorld).toBeNull();
+    // Held at screen-right, the last angle the axis actually had.
+    const drawn = glyphDir(root, endOn);
+    expect(drawn[0]).toBeCloseTo(1, 6);
+    expect(drawn[1]).toBeCloseTo(0, 6);
+    expect(m.direction[0]).toBeCloseTo(1, 6);
+    expect(m.direction[1]).toBeCloseTo(0, 6);
+    expect(handle.corridorHalfExtentsPx().x).toBeCloseTo(20, 6);
+    // The unfrozen classifier still reports the truth about the geometry.
+    expect(handle.computeMapping(endOn, VW, VH, wpp(endOn, handle)).strategy).toBe("screenProxy");
+  });
+
+  it("a frozen screen proxy persists across setAxis on a well-conditioned axis", () => {
+    const { handle, root } = makeHandle();
+    const axis = new THREE.Vector3(1, 0, 0);
+    handle.setAxis(O, axis);
+    handle.freezeStrategy("screenProxy");
+    const side = camera([0, -60, 0]);
+    for (let i = 0; i < 3; i++) {
+      handle.setAxis(O, axis);
+      orient(handle, side);
+    }
+    expect(handle.mapping()).toMatchObject({ strategy: "screenProxy", direction: [0, -1], pxPerWorld: null });
+    const drawn = glyphDir(root, side);
+    expect(drawn[0]).toBeCloseTo(0, 6);
+    expect(drawn[1]).toBeCloseTo(-1, 6);
+  });
+
+  it("reset() clears the freeze and the tangent", () => {
+    const { handle } = makeHandle();
+    const cam = camera([40, -70, 50]);
+    handle.setAxis(anchor, outward, "forward", tangent);
+    handle.freezeStrategy("screenProxy");
+    handle.reset();
+    orient(handle, cam);
+    expect(handle.mapping()!.strategy).toBe("axis");
+    const raw = unit2(screenDerivative(cam, anchor, outward));
+    expect(handle.mapping()!.direction[0]).toBeCloseTo(raw[0], 3);
+    expect(handle.mapping()!.direction[1]).toBeCloseTo(raw[1], 3);
+  });
+
+  it("an explicit screen proxy maps as a proxy along its own direction", () => {
+    const { handle } = makeHandle();
+    const cam = camera([40, -70, 50]);
+    handle.setScreenProxy(O, [1, 0]);
+    expect(handle.computeMapping(cam, VW, VH, wpp(cam, handle))).toMatchObject({
+      strategy: "screenProxy",
+      direction: [1, 0],
+      pxPerWorld: null,
+    });
+  });
+});
+
+/* N9: `setScale` runs inside every rendered frame; an unconditional invalidate
+ * there schedules one wasted frame after each one, so idle never reaches zero. */
+describe("DragHandle scale invalidation", () => {
+  it("does not invalidate when the scale has not changed", () => {
+    const { handle, invalidate } = makeHandle();
+    handle.setScale(0.25);
+    invalidate.mockClear();
+    handle.setScale(0.25);
+    handle.setScale(0.25 * (1 + 1e-12));
+    expect(invalidate).not.toHaveBeenCalled();
+
+    handle.setScale(0.5);
+    expect(invalidate).toHaveBeenCalledTimes(1);
   });
 });

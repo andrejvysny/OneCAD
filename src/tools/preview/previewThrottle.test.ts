@@ -75,4 +75,16 @@ describe("PreviewThrottle", () => {
     const t = new PreviewThrottle<{ d: number }>({ trailingMs: 80 });
     expect(t.flush(0)).toBeNull();
   });
+
+  it("discardPending drops coalesced params but keeps the in-flight slot and epochs", () => {
+    const t = new PreviewThrottle<{ d: number }>({ trailingMs: 0 });
+    t.request({ d: 1 }, 0); // epoch 1 in flight
+    t.request({ d: 2 }, 1); // pending
+    t.discardPending();
+    expect(t.pending).toBe(false);
+    expect(t.inFlight).toBe(1);
+    expect(t.onResponse(1, 2)).toBe(true);
+    expect(t.tick(3)).toBeNull(); // nothing left to pump
+    expect(t.request({ d: 3 }, 4)).toEqual({ epoch: 2, params: { d: 3 } });
+  });
 });

@@ -1,3 +1,185 @@
+# SESSION 37 — FIX + HARDEN AFTER THE 9f573ecd REVIEW (2026-09-17, plan `~/.claude/plans/analyze-this-report-and-bright-axolotl.md`)
+
+Source: the external review `OneCAD-Modeling-Implementation-Review-9f573ecd.md` (static, four isolated formula repros) against the acceptance contract `OneCAD-Modeling-Interaction-Unification-Spec.md`. Every review claim was re-checked against source this session (three read-only audits plus main-thread spot checks); verdict table and file:line evidence live in the plan. Summary: R01–R08 and review §4.1–4.4 all **confirmed** (R02 worse than stated: Escape mid-drag drops the whole tool, a missed pointerup keeps mutating the value on hover). Nine further issues found (N1–N9; seven defects, two unverified risks), listed in the plan.
+
+## Decisions (user, 2026-09-17)
+
+- **D-S1** hardening boundary first (red e2e + P1 + new defects), then spec completion as Boundaries 2 and 3.
+- **D-S2** Symmetric Extrude dragged past zero clamps the physical half-span at 0 (no-effect state, confirm blocked), rebases at the bound, keeps the stored sign.
+- **D-S3** Fillet and Chamfer magnitudes both grow along the displayed outward axis (drops the Chamfer negation left from the old signed number line).
+- **D-S4** Astra approved: one `derive` (xhigh) for handle attachment + gain rules before Boundary 2, one `break` after.
+
+## Boundary 1 — hardening
+
+### H3/H5-R — pure projection + renderer half (landed in tree, orchestrator spot-checked 2026-09-17; controller wiring in progress)
+
+- `handleProjection.ts`: `projectRejectedAxis` (exact derivative of the axis with the projected edge tangent's component removed; gain = p / `pxPerWorld`), `classifyHandleMapping` ⇒ `HandleMapping {strategy: "axis" | "screenProxy", direction, pxPerWorld, worldPerPx}` using `MIN_AXIS_CONDITIONING = 0.08`.
+- `DragHandle`: `setAxis(…, tangent)`, non-mutating `computeMapping`, `freezeStrategy`, `mapping()`; unfrozen `orient` draws the classified direction (an ill-conditioned axis now shows the vertical proxy instead of a held stale angle); a frozen axis holds its angle on refusal; `reset()` clears freeze + tangent; `setAnchor` clears the tangent (extrude must not inherit a fillet tangent).
+- `ViewportEngine`: `renderFrame` computes the per-anchor `worldPerPixel` once for `setScale` and `orient`; `valueHandleMapping()` (fresh from the current camera, ignores freeze), `freezeValueHandleStrategy`, `showValueHandle(…, tangent?)`.
+- **N9 fixed:** `setScale` invalidates only on a real change. Red: "expected vi.fn() to not be called at all, but actually been called 2 times"; engine-level: an idle shown handle scheduled one rAF per rendered frame (`expected [ [Function tick] ] to have a length of +0 but got 1`).
+- Red-first glyph test: oblique perspective edge op drew the raw outward axis, "expected 0.2609… to be close to 0.5095…".
+- Measured by the agent: tsc 0 · 4 targeted files 148 passed · `src/viewport src/tools/preview` 64 files / 1035 passed · hex 0.
+- Noted: at a FOV-76 corner anchor world +X measures conditioning 0.077 (< 0.08) and now draws the proxy — the overlay-bounds test was re-pointed at `valueHandleMapping().direction` and gained a `[0,1,0]` rolled case. **Until the controller wiring lands, glyph (proxy) and drag (axis) can disagree for ill-conditioned axes — no gate may run before it.**
+
+### Controller wiring — H2b + H3 + H5 controller halves (landed in tree, orchestrator-reviewed 2026-09-17; gate pending)
+
+- **H2b:** per-tool Escape revert handlers registered after `show*` — Fillet/Chamfer (`revertEdgeOpValue`: clears `filletDraft`, validation, restores arm hint), Extrude (`revertExtrudeValue` re-derives the zero-depth verdict), Offset Face (`revertOffsetFaceValue`); datum capture-phase Escape skips editable targets (field reverts first, next Escape cancels the tool); `commitShell` refuses unless validation is `valid`. Red examples: fillet over-ceiling revert left "Radius exceeds the verified maximum" on the status line; datum field Escape dropped the tool ("expected 'idle' to be 'offset'"); Shell stale raw error committed ("expected true to be false").
+- **H3:** pure `flooredDrag` / `extrudeDragBasis` / `extrudeDragFrame` in `depthProjection.ts` (modes `oneSided`, `symmetricAxis` — half-span follows the pointer, Total moves 2×, `symmetricTotal` — proxy drives Total at gain 1; symmetric spans floor at 0 with rebase and carry `extrudeSignHint`, never storing −0). Orchestrator hand-check: stored −20, pointer +1 ⇒ −22 (head 11); stored +20, pointer −15 ⇒ 0, then +1 ⇒ 2. Zero depth publishes "No effect: depth is 0" and `confirmExtrude` re-derives it itself. Snap only after the pointer passes `DRAG_PX` (red: typed 12.37 became 2.5 after grab cycles). `grabHandleMapping` freezes axis/proxy at grab for Extrude and the Offset arrow, proxy hint "Depth/Offset: drag vertically", unfreeze in `endGesture`; degraded Fillet, Shell and degraded Offset proxies use the grab-time `worldPerPx` (red: fillet proxy "expected 72 to be close to 8.6186").
+- **H5:** single-edge arm passes the tangent; fillet grab uses the engine mapping (`edgeOpScreenAxis` deleted; red on a 15.7° oblique case); D-S3 Chamfer grows along the arrow (red "expected 0.1 to be close to 12.459"); fillet and shell drags floor at `EDGE_OP_MIN_VALUE` with rebase; `refuseBelowEdgeOpMinimum` ("Must be at least 0.1 mm") at `onFilletChip`, `validateEdgeOpDraft` (covers the range-settle path) and `acceptUnboundedEdgeOpDraft`; reducer `setRadius` stores the value as given. Dead `radiusFromDrag`, `screenDragAxis`, `EDGE_OP_FLIP_HOLD` removed.
+- Agent measured: tsc 0 · targeted vitest 140 files / 2460 passed · full 367 files / 6422 passed / 78 skipped · hex 0 · coverage 34/9/17/20 · contracts 41/19/15 · Playwright chromium 11 specs **60 / 0** + 5 extra specs **11 / 0**. Not evidence until re-run on the main thread.
+- **Orchestrator decisions on the agent's two questions:** (1) a Fillet Escape-revert while the range check is pending re-enters the start value as a draft, so a freshly measured range may flag it — kept, because judging the start value against the newest measured range is the truthful state; (2) depth 0 must not send a kernel preview (a kernel refusal beside "No effect" is noise) — folded into H4 as side item S1.
+- Follow-ups: fillet drag's upper range clamp still winds up (only the lower floor rebases); Offset revert via `setDistance` marks the FSM `touched`; extrude re-edit `restoreArmHint` shows the fresh-arm hint (pre-existing).
+
+### Wiring review — fresh-context `adversarial-reviewer` on H2b/H3/H5 controller wiring (2026-09-17; verdict "sound on its main contract, two medium defects"; fixes queued with the H4 review batch)
+
+Reviewer runs: requested set 24 files / 457 passed; wider `src/tools src/viewport/engine src/features/toolbar` + DimensionInput 181 files / 3459 passed. Probes (outside repo) confirmed on a real perspective camera: symmetric head stays under the pointer (stored −20, pointer to z=15 ⇒ −30.000, head 15.0; to z=−5 ⇒ +0; back to −4 ⇒ −2), proxy sign/no wind-up, 20 jittered grabs keep 12.37, freeze cleared on tool switch, proxy hint does not leak, Alt toggle no jump.
+
+- [x] W1 (medium, confirmed) a refused typed edge-op size (e.g. 0.05) survives a drag: `filletDraft` and the range verdict are never cleared by the drag, so ✓ silently refuses after dragging to 19.85. Fix: fillet grab clears `filletDraft` + range verdict and restores the arm hint.
+- [x] W2 (medium, confirmed) `projectRejectedAxis` rejects a nearly end-on tangent in full: ortho camera, outward square-on, tangent 0.01° off the view ray ⇒ glyph and drag rotate 45° off the true outward (gain ×1.414) depending on tilt azimuth. **Orchestrator decision:** Boundary 1 applies the rejection only when the tangent's own conditioning clears the EXISTING `MIN_AXIS_CONDITIONING` (no new constant); whether the rejection should fade continuously is a conditioning-policy question added to the D-S4 Astra derive.
+- [x] W3 (low) Chamfer second-leg field: `normalizeDistance2` converts 0.05 ⇒ 0.1 and ≤0 ⇒ equal-leg, the chip rewrites the text, Enter still confirms. Fix: raw-invalid, block confirm, never normalize (spec §8.2).
+- [x] W4 (low, confirmed) Flip at depth 0 stores −0. Fix: normalize −0 in `onExtrudeChip`.
+- [x] W5 (low) a measured ceiling below 0.1 is floored to 0.1 in the drag guard and "Use maximum" suggestion — above the verified maximum. Fix: refuse with no suggestion.
+- [x] W6 (low) below-minimum refusal leaves a stale "exceeds the verified maximum" status hint. Fix: set the hint in the refusal.
+- [x] W7 (low, test quality) reducer `setRadius` accepts any value: return `effect: "none"` below the minimum (defence in depth, no conversion); the "never −0" pure test uses sign hint +1 so it cannot fail; add a snapped-drag-crossing-zero test.
+- [x] W8 (low) two-direction re-edit: `depth2 = 0` not flagged (worker refuses "second distance too small").
+- Follow-up (H7): Symmetric on top of a ThroughAll segment shows "No effect: depth is 0" while ThroughAll still looks selected — wire marshals Symmetric correctly; the strip should show the effective mode.
+
+### H4b — both review batches fixed (landed in tree, orchestrator-reviewed report 2026-09-17)
+
+- **R1/R8:** `edgeOpFrozenForCommit()` guards segment press, second leg, angle, [Flip reference], size, suggestion, revert and chamfer sync BEFORE they mutate state; `sendPreview` sends nothing on the edge-op lane while committing; `ActiveToolInspector` fieldset and chip edge-op controls inert while `applying`; a failed commit returns exactly the pre-commit arm. Red: "expected { edgeOp: 'Chamfer', radius: 1, …(6) } to deeply equal {…}".
+- **R2:** `edgeOpConfirmSurvives` re-reads arm, phase, retained failure and current validation after EVERY await in the confirm path.
+- **R3:** every writer of chamfer reference pairs runs on one queue (`enqueueChamferStep`), including the type-flip lookup; `resolveChamferReferenceFaces` snapshots its inputs and restarts if they changed.
+- **R4:** `armGen` is a getter/setter; `nextArmChange()` wakes wait loops the moment the arm changes; a dropped ✓ is always `traceWarn`-logged and only shown when the status line is empty or still shows the waiting hint.
+- **R5:** a waiting ✓ publishes lifecycle `pending` + "Waiting for preview…"; closing the edge-op lane publishes `pending`. **Root fix found on the way:** `throttle.reset()` restarted epochs below the store's lifecycle ordering floor, silently dropping a same-arm reopen's `valid`; all 15 resets now go through `resetPreviewThrottle()`, which raises `lifecycleRequestBase` (affects extrude and revolve re-arms too).
+- **R6:** `fetchReeditParams` no longer bumps `armGen`; hole, gear, linear, circular, mirror, transform, boolean, extrude and revolve re-edits `invalidateArm()` only once they proceed. Compromise kept: a re-edit request still ends a live drag at its reached value (pinned by `gestureLifecycle.test.ts`).
+- **R7/W8:** depth-0 suppression publishes lifecycle `none`; "No effect: second depth is 0" for a distance-driven second direction; the re-edit arm now seeds the stored second direction (`seedStoredSecondDirection`) — previously never seeded, so two-direction re-edits previewed one side only.
+- **W1:** `dropTypedEdgeOpDraft()` on the fillet grab. **W2:** `projectRejectedAxis` takes the anchor `worldPerPx` and rejects the tangent only when the tangent's own conditioning ≥ `MIN_AXIS_CONDITIONING`. **W3:** second-leg field keeps out-of-domain text raw-invalid (with message), Enter confirms through the exported `requestConfirm`; reducer `setDistance2` refuses instead of normalizing. **W4:** −0 normalized. **W5:** `refuseUnbuildableEdgeOpRange` (verified max < 0.1 ⇒ refuse, no suggestion). **W6:** below-minimum refusal owns the status line. **W7:** reducer `setRadius` < 0.1 ⇒ `effect: "none"`; −0 test uses hint −1.
+- M12/M13 found reachable and covered. 21 single-fix removal probes: 20 go red; the top-of-`runChamferSync` committing guard is unreachable and kept as a second layer.
+- Agent measured: tsc 0 · 127 files / 2266 · full vitest 368 / 6469 / 78 · hex 0 · chromium 6 specs 33 / 0 · webkit 3 specs 24 / 0.
+- Follow-ups: primary size field in the viewport chip not rendered disabled while applying (controller ignores edits); `ChamferAngleField` still reverts out-of-range angles instead of keeping them raw-invalid; Shell and Offset commits have no committing freeze or send gate; a dropped ✓ under a newer arm is logged, not shown.
+
+### Boundary 1 gate (main thread, 2026-09-17 18:1x, no competing build/test jobs; load ≈5 from user desktop apps)
+
+- `bunx tsc --noEmit` ✓ · `bun run build` ✓ · `bun run test` **368 files / 6469 passed / 0 failed / 78 skipped** (baseline 363 / 6206 / 78) · hex **0** · coverage **34 / 9 / 17 / 20** · contracts **41 / 19 / 15** · coverage self-test ✓.
+- `bun run e2e --project=chromium --retries=0`: **282 passed / 0 failed** (21.2 min). `--project=webkit --retries=0`: **282 passed / 0 failed** (29.0 min). Baseline on `9f573ecd` was 277/5 and 279/3.
+- Rust/worker untouched ⇒ ctest/cargo not run (stated, not skipped silently).
+
+### Native acceptance pass (tauri-agent, session `s-20260917-131238-6b6e`, 2026-09-17)
+
+Policy: **foreground, `mode: real_user`, `backend: cgevent`** on every user step; window screenshots authoritative; permissions accessibility + screen recording true; calibration ok (scale 1). Staged worker sha matches the build and manifest (`0a6a1dce34181289`, no worker source newer). `observe_logs level=error` at the end: **0 lines**. Attached session ⇒ `session_stop` detached; the app, its worker and the dev server were stopped by the orchestrator afterwards and ports 1420/4445 verified free.
+
+| Check | Action | Result |
+|---|---|---|
+| Extrude through zero (R04/D03) | A-024 | +10 → **−44 mm**, glyph stayed two-headed and travelled with the endpoint, Targets read "Direction: −Normal" |
+| Escape mid-drag (R02/A02) | A-025…A-028 | value restored to −44, **tool stayed armed**; the later release changed nothing |
+| Symmetric sign kept | A-029 | −44 preserved, "Direction: Both ± normal" |
+| Symmetric 2× gain (D-S2) | A-030 | −44 → **−86 mm** for ~21 mm of endpoint travel, sign kept |
+| Symmetric zero clamp | A-031 | ~80 px overshoot ⇒ **0 mm**, "No effect: depth is 0", Done disabled, handle still visible |
+| No wind-up | A-032 | 12 px reverse ⇒ **−14 mm** immediately |
+| Typed value + Escape (R01/A01) | A-033…A-036 | typed 40 previewed live; Escape restored **−14 mm** and stayed in the operation |
+| End-on proxy (R03/A04) | A-037, A-038 | Top view ⇒ vertical proxy glyph; vertical drag **−14 → −40 mm** (inert before this work) |
+| Done commits | A-039 | Body 1 created, history "Extrude 40 mm" |
+| Fillet glyph == drag axis (R06) | A-042, A-043 | oblique view, drag along the arrow R 2 → **39.99 mm** with a real kernel preview |
+| Typed minimum (§4.2/W6) | A-046 | "0.05" kept as text, refused "Must be at least 0.1 mm" in chip + inspector + status line, Done disabled |
+| Drag replaces a refused draft (W1) | A-047 | refusal cleared, Done re-enabled |
+| Floor + immediate reverse | A-048 | drag against the arrow ⇒ 0.1 mm floor, responds at once |
+| Chamfer type lock + direction (D04/D-S3) | A-050, A-051 | stayed Chamfer through the drag and **grew along the arrow** 0.1 → 38.60 mm |
+
+- **New minor defect found natively:** when a drag's clamped value equals the previous value, the field can keep showing the abandoned typed text (showed "0.05 mm" while the value was 39.99 mm; the echo guard suppresses the rewrite). Cosmetic, recorded for H7.
+- **Harness defects (tools/tauri-agent, not the app):** `session_start {mode:"launch"}` fails deterministically with `invoke:agent_identity: … window.__TAURI__.core` — the identity probe races the dev page load (a direct WebDriver probe against the same app showed `__TAURI__.core` present); and `{mode:"attach", reuseExisting:true}` refuses a port owner whose executable path is relative (`matchesApp:false` for `target/debug/onecad`). Workaround used: start Vite, run the binary by absolute path, then attach.
+
+
+### H4 review — fresh-context `adversarial-reviewer` (2026-09-17; verdict "sound with conditions": no stale open replaces a newer session, obsolete sessions end, a committing session is never ended, ✓ commits at most once; no wrong face can bind silently — builder + Rust `validate_reference_faces` refuse mismatches). Fixes queued as H4b together with the wiring batch (W1–W8).
+
+Reviewer runs: 5 requested files 68 passed; `src/tools/modelTools src/tools/preview` 72 files / 1263 passed; tsc clean; 13 mutations in a scratch copy — 11 caught, M12/M13 (token checks on the reject path / after `prepare`) survived.
+
+- [x] R1 (medium, probe P6) [Flip reference] during `committing` mutates `chamferFlipped`/`chamferPairs` before any guard, and `sendPreview` has no committing gate: the committing session received `faceId el_f_5` while frozen with `el_f_3` ⇒ SCHEMA mismatch, ✓ fails, re-arm silently uses the flipped face. Fix: one policy — nothing changes the op while applying (controls inert + controller guard before mutation); no edge-op sends while committing.
+- [x] R2 (medium, probe P8) validation not re-read after the ✓ wait: chip "Must be at least 0.1 mm" yet commit completed with radius 3.
+- [x] R3 (medium-low, probe P3) type-flip reference lookup not serialized with `chamferSync`; stale lookup installs 2 inputs for 1 slot (✓ blocked until a key-changing edit).
+- [x] R4 (low-medium, P1) settle loop waits on the global newest open; a ✓ from a left arm posts "not applied" over the new arm.
+- [x] R5 (low-medium, P2) no visible pending state while ✓ waits; lifecycle stays `valid` from the closed session.
+- [x] R6 (low, P4) aborted history re-edits (e.g. `editBooleanFeature`) bump `armGen` without switching tools ⇒ misleading "operation changed" then "preview unavailable".
+- [x] R7 (low) S1 lifecycle stays `pending` at depth 0 after a late answer; `twoDirections && depth2 === 0` not treated as no-effect.
+- [x] R8 (low) committing-time policy inconsistent across segment / second leg / flip — covered by R1.
+- [x] Test quality: realistic promote-race and send-during-commit tests (P3/P6/P8 pass the current suite); M12/M13 coverage or removal.
+
+### H4 — edge-op preview publication ordering (landed in tree, orchestrator spot-checked 2026-09-17; adversarial review running; gate pending)
+
+- Every `openEdgeOpPreview` bumps `edgeOpOpenSeq` synchronously; `edgeOpOpenMayPublish` installs only the newest open, only for the current `armGen`, only while the fillet FSM is armed/dragging and the preview lane is free or edge-op-owned; replacing a live session goes through `closePreviewSessions`. The asymmetric type-flip reference-face lookup moved inside the open as a `prepare` step so the token covers it.
+- A fresh ✓ captures `armGen` at the press, awaits `settleEdgeOpPreviewOpens` (pending chamfer syncs + newest open, re-read after every await, no timeouts), then re-checks arm + phase; on an arm change it warns "Chamfer not applied: the operation changed before its preview was ready". `onEdgeOpChip` and `runChamferSync` refuse to touch sessions while committing.
+- Red-first (none passed on old code): (a) stale open overwrote the newer one "expected 'pv-2' to be 'pv-3'"; (d) switch + immediate ✓ found no session "expected [] to deeply equal [ 'pv-2' ]"; (e) failure re-arm opened an extra session; (f1) stale open published during commit; (f2) committing session ended twice. Each fix part removed one at a time turned a test red.
+- **S1:** depth-driven extrude at depth 0 sends no kernel preview (throttle `discardPending()`, late results ignored, drawn candidates cleared); resumes on non-zero. **S2:** stale `edgeOpAuto` debug comment fixed.
+- Agent measured: tsc 0 · `src/tools/modelTools` 56 files / 1047 · full vitest 368 / 6436 / 78 skipped · hex 0 · chromium 5 specs **31 / 0** · webkit 3 chamfer/fillet specs **24 / 0**. Not evidence until main-thread re-run.
+- Follow-ups: reference-face lookups are not ordered against each other (older `chamferPairs` could survive with newer session inputs — under review); a never-answering `beginPreview` now makes ✓ wait forever (previously failed fast); chip fields stay live while applying (pre-existing).
+
+### H1b — adversarial review findings on H1 (fresh-context `adversarial-reviewer`, 2026-09-17, verdict "defective against its own contract"; all accepted, fixed in tree, orchestrator-reviewed)
+
+Reviewer runs: its three files 134 passed; `src/tools/modelTools src/viewport/engine` 90 files / 1593 passed; tsc clean; scratch probes (outside repo) reproduced findings 1–6.
+
+All items closed in tree by the H1 agent (red-first each; agent-run, gate re-run owed):
+
+- [x] 1 re-arm under live gesture — `abandonedAsStale()` guard in move/release/cancel (`g.armGen !== armGen` ⇒ abandon, no write) + `abandonGesture()` before every arm install (`beginExtrudeArmed`, `beginRevolveArmed`, `armEdgeOpFromSelection`, `editEdgeOpFeature`, `armShell`, `armOffsetFace`, `editOffsetFaceFeature`, `armTransform`, `enterRegionPick`). Red: transform re-edit landing mid-drag "expected [ 30, +0, +0 ] to deeply equal [ 100, +0, +0 ]".
+- [x] 2 grab during a re-arm handshake — generation-keyed `armLanding` refuses extrude and offset-face grabs while their kernel round trip is in flight. Red: "expected 'dragging' not to be 'dragging'".
+- [x] 3 wheel gate — `toolStore.gestureLive`, written only by begin/end gesture (never `setTool`/`setMode`); `ViewportRoot.viewportDragActive()` feeds `isDragActive`. `phase: "dragging"` writes kept for debug/e2e surfaces.
+- [x] 4 pen missed release (`isMissedRelease`: mouse or pen) + `supersedesLostContact` (a new PRIMARY contact of the owner's pointer type under a new id releases the stale gesture, then the press proceeds).
+- [x] 5 revolve armed press tied to its pointer id.
+- [x] 6 refusal state snapshotted per session at grab and restored on cancel (`showPreviewFailureHint` shared with `onPreviewFailure`; lifecycle "invalid" republished at the restore epoch).
+- [x] 7 two-pointer pan/pinch gated (tracks `lastPinch` while suppressed so the first pinch after the drag does not jump); test prototype patch now restored in `afterEach`.
+- [x] 8 `applyEdgeOpKindChange` `wasDragging` branches removed; the range is always re-measured after an explicit flip (`openEdgeOpPreview` picks the drag trailing floor when a fillet gesture is live).
+- [x] 9 document/runtime-session change abandons a live gesture.
+- [x] Test quality: dispose timer test uses fake timers + `vi.getTimerCount()` (fails without `clearTimeout`); tool-switch test asserts no restore-only side effects (fails when cancel precedes `invalidateArm`); fillet re-edit Enter/✓ refused mid-drag with a post-release control; `gestureBlocksCommit` removed from confirms no gesture can reach (hole, gear, boolean, linear, circular, mirror, datum) and kept on the six gesture tools + `confirmRegionSelect`.
+- Agent final measured: tsc 0 · `src/tools/modelTools src/viewport` 101 files / 1822 passed · full vitest 365 / 6392 / 0 / 78 · hex 0.
+- **Risk to watch at the gate:** ANY `armGen` bump without an install now ends a live drag at its next event (e.g. a failed re-edit load, async starts of hole/gear/pattern/boolean re-edits). The value is not written back. Must be checked by the e2e drag specs on the combined tree.
+- Follow-ups: offset-face ghost visibility is not restored with a restored refusal (self-corrects on the restore answer); a `beginPreview` that never resolves leaves that extrude arm ungrabbable by design.
+
+### H0 — red triage fix (landed in tree, orchestrator-reviewed 2026-09-17; gate pending)
+
+- `DragHandle` pick target is now an invisible flat `PlaneGeometry(30, 40)` in the billboarded glyph plane (camera-parallel ⇒ projects to exactly 30 × 40 px rolled with the glyph); `reachPx()` → `corridorHalfExtentsPx()` (rolled AABB: `x = |sin a|·20 + |cos a|·15`, `y = |cos a|·20 + |sin a|·15`). `getInteractionOverlayBounds("valueHandle")` returns that exact box; `KEEP_OUT_PAD_PX` 6 → 8 (spec §4.5). README keep-out contract updated.
+- Red-first engine test (FOV 76, yawed/pitched camera, anchor top-right): on the cylinder "hits outside the keep-out box … expected [ '(6,-28)', … (462 pixels) ] to deeply equal []"; passes on the plane.
+- `e2e/helpers.ts findExtrudeHandle`: refines to the hit-region centre and returns a hit pixel whose `elementFromPoint` is the canvas (backstop; the agent measured 0 of 301 corridor pixels under chrome after the geometry fix alone).
+- `filletChamfer.spec.ts :214/:244` rewritten as D04 type-lock tests (no drag-direction assertion for Chamfer — D-S3 changes it in H5).
+- Agent-run on a clean snapshot (HEAD + H0 files only, because the shared tree was mid-H1 at the time): vitest 363 files / 6208 / 0 / 78; the 16 handle-raycasting specs **chromium 66 / 0**, **webkit 66 / 0**. Not evidence until re-run on the main thread at the boundary.
+- Stale doc found and fixed (orchestrator): `docs/qa/MANUAL_GATES_TRIAGE.md` §1 listed "drag AWAY = fillet, drag INTO = chamfer" as covered — false under D04; row marked superseded and repointed to the rewritten tests (other rows' line numbers in that table were already stale and are untouched).
+
+### H1 — model gesture ownership + cancellation (landed in tree, orchestrator-reviewed 2026-09-17; adversarial review verdict DEFECTIVE → H1b in progress; gate pending)
+
+- New pure `src/tools/modelTools/modelGesture.ts` (`ModelGesture` record, `normalizePointerId`, `pointerMatches`, `isMissedMouseRelease`, `cancelsLiveGesture`, `restoreAllowed`). `ModelToolController.dragging` is now a getter over the ONE `gesture` field.
+- Three endings: `releaseGesture` (replaces the duplicated per-kind release blocks, `releaseActiveModelGesture`, `endGizmoDrag`), `cancelGesture` (restore only when `armGen` unchanged and FSM still dragging, then `sendRestorePreview` — fresh epoch via `throttle.flush`, every session's `lastAppliedEpoch` raised to it, failures cleared), `abandonGesture` (every teardown; steps FSM out of dragging; resets `toolStore.phase` only while it still says `dragging`).
+- Pointer rules: second press ignored while live; foreign pointer ignored on move/up/cancel/capture loss; release runs before every pick branch; mouse move with button 1 up ⇒ release at the last applied value; `lostpointercapture` waits one task (CadOrbitControls releases capture inside the pointerup dispatch); `pointercancel`, window `blur`, Escape (first `onKeyDown` branch, propagation stopped) ⇒ cancel. Every commit/confirm entry, `armedConfirm` and type-to-enter refuse while live.
+- `CadOrbitControls.dispatchNav` skips orbit, pan AND zoom while `isDragActive()`. **Decision (orchestrator, spec §7.8):** WebKit trackpad pinch is gated too (same dispatch as Chromium ctrl+wheel); two-pointer pan/pinch stays ungated. The existing test "still pans while a tool drag is in flight" asserted the opposite of §7.8 and was inverted.
+- Deviations accepted: `applyEdgeOpKindChange` mid-drag ends the drag (its grab basis was signed for the old type); the released flag lives on the record; a pointerup after Escape/blur/tool switch cannot read as a click (`downButton = -1`).
+- Agent red-first: 57 of 80 lifecycle tests + 3 orbit gating tests failed on unmodified code for the intended reasons (e.g. extrude pointercancel "expected 40 to be close to 20", transform Enter mid-drag committed, dispose left "dragging"). Agent-run counts are not evidence; gate re-run owed.
+- Follow-ups: chip value edits are still accepted mid-drag (a later cancel reverts them); `onOffsetDistanceType`/`onOffsetChainTangent` mid-drag re-arm without abandoning (cancel then skips restore — safe); `applyEdgeOpKindChange` still skips the range re-measure when the flip ended a drag.
+
+### H2a — numeric edit transaction, UI + store half (landed in tree, orchestrator-reviewed 2026-09-17; gate pending)
+
+- `DimensionInput` opt-in `onEscapeRevert`: one `{value, text}` snapshot per edit session (seeded mount captures the pre-seed value; else first focus/change; later focus ignored; session ends on successful Enter, Escape, unmount, or a blur still a blur one tick later — a dock reparent refocuses in the same commit). Escape restores the start text, reports validity, always calls the revert hook.
+- `toolChipStore.onRevertValue` + `setRevertHandler` (reset by every `show*`/`clear`); `ModelToolChips.revertPrimary` falls back to clear range validation + `onValue(start)` until a tool registers a handler (H2b).
+- `requestConfirm()` gate, read fresh at call time: refuses only settled `invalid` validation, `retainedCommitFailure`, or `applying`; `pending` passes (commitFillet awaits it). Backs field Enter, ✓ and regionSelect ✓.
+- N6: Hole diameter and Linear/Circular Pattern fields confirm on Enter.
+- **N7 reproduced** on unmodified code (blur-commit field committed the typed value on Escape: "expected vi.fn() to not be called with arguments: [ 12 ]"); fixed with an `escaping` ref that suppresses the Escape branch's own synchronous blur commit. **User-visible:** sketch constraint badges no longer commit the abandoned text on Escape.
+- Agent red-first: DimensionInput 7 failed / 47 passed; ModelToolChips 11 failed / 87 passed on unmodified code. Agent-run counts are not evidence; gate re-run owed.
+- Follow-ups: inspector/bar confirm entries (`ActiveToolInspector` edge-op + draft Enter, `HoleChipCluster`, `GearPropertiesPanel`, `ModelOperationBar`) still call `onConfirm` ungated (H7); the controller's capture-phase datum Escape (~`:10901`) fires before the field handler and does not skip editable targets (H2b); session start text is formatted in the unit at capture time.
+
+- [ ] H0 baseline + red triage
+- [ ] H1 model gesture ownership + cancellation (critical)
+- [ ] H2 numeric edit transaction + confirm gates
+- [ ] H3 Extrude/Offset linear mapping (symmetric, zero, snap, end-on)
+- [ ] H4 edge-op preview publication ordering (critical)
+- [ ] H5 edge-op mapping correctness (one projection, Chamfer direction, typed minimum)
+- [ ] Boundary 1 gate + native pass + commit
+
+### H0 — measured
+
+**CI for `9f573ecd` (run 35085523278), read 2026-09-17:** frontend, rust-8.0.1, worker-8.0.1, occt-fingerprint, persistence, tauri-agent **success**; **e2e-chromium 277 passed / 5 failed**; **e2e-webkit 279 passed / 3 failed**; tauri-composition and linux-worker cancelled. The commit landed with only focused vitest; its own Chromium attempt was sandbox-blocked (B2 row above), so this red was never seen before commit.
+
+**Local baseline on untouched `9f573ecd` (main thread, nothing else running, load ≈2.8):** `bunx tsc --noEmit` ✓ · `bun run build` ✓ · `bun run test` **363 files / 6206 passed / 0 failed / 78 skipped** · hex **0** · coverage **34 / 9 / 17 / 20** · contracts **41 / 19 / 15** · coverage self-test ✓.
+
+**Red reproduced locally** — `bunx playwright test e2e/boolean-preview.spec.ts e2e/filletChamfer.spec.ts --project=chromium --retries=0`: **15 passed / 5 failed**, the same five as CI.
+
+- `filletChamfer.spec.ts:214`, `:244` assert `edgeOpAuto === true`. Fossils of the D04 type lock `9f573ecd` introduced on purpose.
+- `boolean-preview.spec.ts:282/:336/:368` fail inside `commitExtrudeAtHandle` on the SECOND extrude (spec `:169`, the circle). **Cause measured with a scratch probe** (not committed): `findExtrudeHandle` returns the first top-down hit, client (744, 230); `document.elementFromPoint` there is `div[operation-hud]` inside `div[model-tool-chip]` (chip rect y 171–231), the real pointerdown target is `DIV[operation-hud]`, the press is excluded as chrome, phase stays `armed`. A press at the corridor centre (748, 254) reaches `dragging`. The measured pick corridor is **32 × 48 px** (x 732–764, y 230–278) while the keep-out box is a **40 × 40** square centred on the anchor (canvas y 190.7–230.7 = client 234.7–274.7). The pick target is a 3D `CylinderGeometry(15, 15, 40)` whose radius extends along the view direction, so perspective parallax off the optical axis stretches its projection past the fixed `reachPx() = 20` box; the chip sits outside the keep-out box but over the corridor rim. This is the exact failure class `src/viewport/engine/README.md` already records (grab pixel resolving to chip chrome ⇒ arrow ungrabbable), reintroduced by the resize.
+
 # SESSION 36 — UNIFIED MODELING CONTROLS, PHASE B (2026-09-15, Fable, plan `~/.claude/plans/analyze-this-plan-and-generic-sutherland.md`)
 
 Source: the handed-over spec "Unified Modeling Controls and Direct Manipulation" v1.0 (a STATIC review — never built, never run). Its correctness half was already owned by `PLAN.md` and landed in session 35; this session starts the half `PLAN.md` does not cover, the handle and label architecture. Three of the spec's own claims were checked against the code and are wrong or already done — recorded below so nobody re-implements them.

@@ -202,6 +202,33 @@ describe("Extrude re-edit exposes end condition / symmetric / boolean (T6, D12)"
     expect(chip.canBoolean).toBe(true);
   });
 
+  // H4b R7/W8: the worker refuses a distance-driven SECOND direction of 0 ("second
+  // distance too small"), so the arm reads it as no effect and asks for no preview.
+  it("a two-direction record whose second distance is 0 opens refused, with no kernel preview", async () => {
+    build({ ...STORED_CUT, twoDirections: true, extrudeMode2: "Blind", distance2: { value: 0 } });
+    controller.editExtrudeFeature("feat-ex");
+    await flush();
+    await flush();
+
+    expect(toolChipStore.getState().kind).toBe("extrudeDepth");
+    expect(toolChipStore.getState().validation).toMatchObject({
+      status: "invalid",
+      message: "No effect: second depth is 0",
+    });
+    expect(clientMock.updatePreview).not.toHaveBeenCalled();
+  });
+
+  it("a two-direction record with a real second distance previews both directions", async () => {
+    build({ ...STORED_CUT, twoDirections: true, extrudeMode2: "Blind", distance2: { value: 6 } });
+    controller.editExtrudeFeature("feat-ex");
+    await flush();
+    await flush();
+
+    expect(toolChipStore.getState().validation.status).toBe("valid");
+    const calls = clientMock.updatePreview.mock.calls as unknown as Array<[string, Record<string, unknown>, number]>;
+    expect(calls[calls.length - 1]?.[1]).toMatchObject({ twoDirections: true, extrudeMode2: "Blind", distance2: 6 });
+  });
+
   it("reads a stored Symmetric record back as the symmetric toggle, not as an end condition", async () => {
     build({ ...STORED_CUT, extrudeMode: "Symmetric" });
     controller.editExtrudeFeature("feat-ex");

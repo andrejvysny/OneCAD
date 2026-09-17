@@ -12,7 +12,9 @@
  *
  * The projection here is a deliberate fake (`x = wx`, `y = -wz`), so the screen
  * direction of "away from the body" is exact and the drag deltas below are
- * arithmetic, not calibration.
+ * arithmetic, not calibration. The engine's `valueHandleMapping` states that same
+ * fake for the bisector `(0,−√½,−√½)`: screen +y, `√½` px per world unit — the
+ * gesture reads the handle's mapping, never a projection of its own (SESSION 37 H5).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { ModelToolController } from "./ModelToolController";
@@ -82,9 +84,18 @@ function makeEngineMock(opts: { projectPoint?: boolean } = {}) {
     probePick: vi.fn(() => null),
   };
   // Absent on purpose in the fallback case: real engine mocks predate
-  // `projectPoint`, and the controller must degrade to the screen convention
-  // rather than throw.
-  if (opts.projectPoint !== false) engine.projectPoint = vi.fn(project);
+  // `projectPoint` and `valueHandleMapping`, and the controller must degrade to
+  // the screen convention rather than throw.
+  if (opts.projectPoint !== false) {
+    engine.projectPoint = vi.fn(project);
+    engine.valueHandleMapping = vi.fn(() => ({
+      strategy: "axis",
+      direction: [0, 1],
+      pxPerWorld: Math.SQRT1_2,
+      worldPerPx: 1,
+    }));
+    engine.freezeValueHandleStrategy = vi.fn();
+  }
   return engine;
 }
 
@@ -253,7 +264,8 @@ describe("ModelToolController edge-op drag direction", () => {
     expect(debugState().edgeOpKind).toBe("Fillet");
     expect(clientMock.client.beginPreview).toHaveBeenCalledTimes(1);
     expect(clientMock.client.endPreview).not.toHaveBeenCalled();
-    expect(toolChipStore.getState().value).toBe(42); // 2 + 40 px × 1 world/px
+    // 40 px along the axis is 40 / pxPerWorld world units (SESSION 37 H5).
+    expect(toolChipStore.getState().value).toBeCloseTo(2 + 40 / Math.SQRT1_2, 9);
   });
 
   // ── screen fallback also keeps the explicit type ─────────────────────────────

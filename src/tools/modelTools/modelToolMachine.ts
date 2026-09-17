@@ -390,10 +390,9 @@ export function extrudeStep(s: ExtrudeFsm, e: ExtrudeEvent): ExtrudeStep {
 // `confirm` (Enter / chip-✓). `commitFailed` returns the machine to `armed` so an
 // OCCT-refused radius never loses the user's edge selection.
 //
-// Click-away is deliberately NOT part of this gesture for fillet/shell: the armed
-// tool claims EVERY left press in the viewport as a value drag (there is no
-// handle hit-test to distinguish "grabbed the gizmo" from "clicked away"), so a
-// click-away confirm would be indistinguishable from a zero-distance drag.
+// Click-away is deliberately NOT part of this gesture for fillet/shell: the
+// interaction contract pins `clickAwayPolicy: "cancel"` for every armed model
+// tool, and only a press on the visible handle starts a value drag.
 
 export const DEFAULT_FILLET_RADIUS = 2;
 
@@ -411,7 +410,7 @@ export type EdgeOpKind = "Fillet" | "Chamfer";
 export interface FilletFsm {
   phase: ModelPhase;
   /** MAGNITUDE of the radius/distance — always ≥ EDGE_OP_MIN_VALUE, never signed.
-   *  The drag's SIGN picks {@link edgeOp}; it never reaches the wire. */
+   *  The type is {@link edgeOp}'s alone; no drag direction ever picks it. */
   radius: number;
   edgeCount: number;
   /** The op this arm commits (drives `opType`, so a change is a session swap). */
@@ -464,7 +463,7 @@ export type FilletEvent =
       angleDeg?: number | null;
     }
   | { kind: "grabEdge" }
-  /** `signed` is the raw drag projection: positive = away from the body. */
+  /** `signed` is the drag's projection on the outward arrow: positive = away from the body, for both types. */
   | { kind: "drag"; signed: number }
   | { kind: "setRadius"; radius: number }
   | { kind: "setEdgeOp"; edgeOp: EdgeOpKind }
@@ -497,15 +496,23 @@ export function filletInit(): FilletFsm {
 }
 
 /**
- * Coerce a second-leg candidate to the FSM's domain: `null` (equal-leg) or a
- * value at/above the shared magnitude clamp. A non-finite or non-positive number
- * is equal-leg, NOT a zero-width bevel — SCHEMA §7.3 requires `distance2 > 0`
- * when present, and the backend refuses anything else, so the chip must never
- * author it.
+ * A STORED second leg as the arm seeds it: `null` (equal-leg) for an absent,
+ * non-finite or non-positive value — SCHEMA §7.3 requires `distance2 > 0` when
+ * present — and otherwise the record's own number, never clamped (review W3).
  */
-function normalizeDistance2(v: number | null): number | null {
+function seedDistance2(v: number | null): number | null {
   if (v === null || !Number.isFinite(v) || v <= 0) return null;
-  return Math.max(EDGE_OP_MIN_VALUE, v);
+  return v;
+}
+
+/**
+ * Whether an AUTHORED second leg may be stored (spec §8.2, review W3): `null` is
+ * the equal-leg answer; a number must be finite and at least the shared authoring
+ * floor. Anything else is refused outright — never read as equal-leg, never
+ * clamped — and the chip keeps it as a raw-invalid draft.
+ */
+function distance2Authorable(v: number | null): boolean {
+  return v === null || (Number.isFinite(v) && v >= EDGE_OP_MIN_VALUE);
 }
 
 /**
@@ -537,7 +544,7 @@ export function filletStep(s: FilletFsm, e: FilletEvent): FilletStep {
           edgeOp: e.edgeOp ?? "Fillet",
           auto: false,
           touched: e.touched === true,
-          distance2: angleDeg === null ? normalizeDistance2(e.distance2 ?? null) : null,
+          distance2: angleDeg === null ? seedDistance2(e.distance2 ?? null) : null,
           angleDeg,
         },
         effect: "begin",
@@ -548,22 +555,23 @@ export function filletStep(s: FilletFsm, e: FilletEvent): FilletStep {
       return { state: { ...s, phase: "dragging" }, effect: "none" };
     case "drag": {
       if (s.phase !== "dragging") return { state: s, effect: "none" };
-      // A LOCKED type projects the drag onto its own half-line rather than taking
-      // the magnitude: dragging a locked Chamfer the "wrong" way must bottom out at
-      // the minimum and STAY there, not V-bounce back up as |signed| would.
-      const sign = s.edgeOp === "Chamfer" ? -1 : 1;
+      // Both types grow along the displayed outward arrow (D-S3), so the drag is
+      // projected onto that one half-line rather than taking a magnitude: a drag
+      // inward bottoms out at the minimum and STAYS there, never V-bouncing back
+      // up as |signed| would. The controller rebases at that floor.
       return {
-        state: { ...s, radius: Math.max(EDGE_OP_MIN_VALUE, sign * e.signed), touched: true },
+        state: { ...s, radius: Math.max(EDGE_OP_MIN_VALUE, e.signed), touched: true },
         effect: "update",
       };
     }
     case "setRadius":
       if (s.phase !== "armed" && s.phase !== "dragging") return { state: s, effect: "none" };
-      // A typed value is a magnitude; it never changes the explicit operation type.
-      return {
-        state: { ...s, radius: Math.max(EDGE_OP_MIN_VALUE, Math.abs(e.radius)), touched: true },
-        effect: "update",
-      };
+      // The controller refuses a typed size below the minimum before it gets here
+      // (spec §8.2); the reducer refuses it AGAIN (review W7) rather than storing or
+      // converting it. A valid value is stored as given — never abs'd, never clamped.
+      // It never changes the explicit operation type.
+      if (!(Number.isFinite(e.radius) && e.radius >= EDGE_OP_MIN_VALUE)) return { state: s, effect: "none" };
+      return { state: { ...s, radius: e.radius, touched: true }, effect: "update" };
     case "setEdgeOp": {
       if (s.phase !== "armed" && s.phase !== "dragging") return { state: s, effect: "none" };
       // An explicit segment is the only way to change the operation type.
@@ -584,7 +592,8 @@ export function filletStep(s: FilletFsm, e: FilletEvent): FilletStep {
       // LAST AUTHORED WINS: the two chamfer modes are exclusive (core refuses a
       // record carrying both), so authoring a second leg turns the angle mode off.
       // Clearing back to equal-leg leaves the angle alone — nothing was authored.
-      const distance2 = normalizeDistance2(e.distance2);
+      if (!distance2Authorable(e.distance2)) return { state: s, effect: "none" };
+      const distance2 = e.distance2;
       return {
         state: { ...s, distance2, angleDeg: distance2 === null ? s.angleDeg : null },
         effect: "update",
