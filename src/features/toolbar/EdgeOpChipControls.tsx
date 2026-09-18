@@ -179,6 +179,10 @@ export function ChamferDistance2Field({
  */
 const NO_ANGLE_TEXT = "";
 
+/** The chip's raw-validity field id for the angle, and its domain message. */
+const ANGLE_FIELD = "chamfer-angle";
+const ANGLE_RANGE_MESSAGE = "Chamfer angle must be between 0° and 180°";
+
 /**
  * The CHAMFER ANGLE field (SCHEMA §7.3) — DEGREES, rendered only while the armed
  * edge op is a Chamfer, beside {@link ChamferDistance2Field}.
@@ -191,9 +195,11 @@ const NO_ANGLE_TEXT = "";
  * field the user did not type empties in front of them rather than being silently
  * dropped at the marshalling seam.
  *
- * Commit rules mirror the second-leg field's: Enter applies then confirms, blur
- * applies, Esc reverts. Empty clears the mode. An angle outside (0, 180) is
- * reverted rather than authored — core rejects either endpoint as degenerate.
+ * Commit rules mirror the second-leg field's exactly (W3, spec §8.2): Enter
+ * applies then confirms, blur applies, Esc reverts, empty clears the mode. An
+ * angle outside (0, 180) — core rejects either endpoint as degenerate — is kept
+ * RAW-INVALID with its message and blocks confirm; it is never reverted under
+ * the user, which used to throw away the text they were correcting.
  */
 export function ChamferAngleField({
   value,
@@ -214,23 +220,28 @@ export function ChamferAngleField({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value]);
 
-  const commit = (): void => {
-    const trimmed = text.trim();
+  /** Publishes the draft's verdict and answers the angle, or null when the text
+   *  is not authorable (empty clears the mode; anything else is raw-invalid). */
+  const publish = (next: string): { value: number | null } | null => {
+    const trimmed = next.trim();
     if (trimmed === "") {
-      if (value !== null) onValue(null);
-      setText(NO_ANGLE_TEXT);
-      toolChipStore.getState().setRawValueValidity("chamfer-angle", true, "");
-      return;
+      toolChipStore.getState().setRawValueValidity(ANGLE_FIELD, true, "");
+      return { value: null };
     }
     const n = Number(trimmed);
     if (!Number.isFinite(n) || n <= 0 || n >= 180) {
-      setText(shown(value));
-      toolChipStore.getState().setRawValueValidity("chamfer-angle", true, "");
-      return;
+      toolChipStore.getState().setRawValueValidity(ANGLE_FIELD, false, next, ANGLE_RANGE_MESSAGE);
+      return null;
     }
-    if (n !== value) onValue(n);
-    setText(shown(n));
-    toolChipStore.getState().setRawValueValidity("chamfer-angle", true, "");
+    toolChipStore.getState().setRawValueValidity(ANGLE_FIELD, true, "");
+    return { value: n };
+  };
+
+  const commit = (): void => {
+    const read = publish(text);
+    if (!read) return; // the draft stays, flagged — nothing is authored
+    if (read.value !== value) onValue(read.value);
+    setText(shown(read.value));
   };
 
   return (
@@ -247,11 +258,8 @@ export function ChamferAngleField({
         placeholder="°"
         title="Chamfer angle in degrees — clears the second distance"
         onChange={(e) => {
-          const next = e.target.value;
-          setText(next);
-          const number = Number(next.trim());
-          const valid = next.trim() === "" || (Number.isFinite(number) && number > 0 && number < 180);
-          toolChipStore.getState().setRawValueValidity("chamfer-angle", valid, next);
+          setText(e.target.value);
+          publish(e.target.value);
         }}
         onBlur={commit}
         onKeyDown={(e) => {
@@ -264,7 +272,7 @@ export function ChamferAngleField({
             e.preventDefault();
             e.stopPropagation();
             setText(shown(value));
-            toolChipStore.getState().setRawValueValidity("chamfer-angle", true, "");
+            toolChipStore.getState().setRawValueValidity(ANGLE_FIELD, true, "");
           }
         }}
       />

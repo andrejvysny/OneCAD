@@ -78,9 +78,9 @@ function makeEngineMock() {
     setPreviewTint: vi.fn(),
     setExtrudeHandleHover: vi.fn(),
     hitExtrudeHandle: vi.fn(() => false),
-    // Parallel to the normal axis, so `axisDepthFromRay` falls back to projecting
-    // the ray ORIGIN onto it — a deterministic raw depth of RAW_DEPTH.
-    screenRay: vi.fn(() => ({ origin: [0, 0, RAW_DEPTH] as const, dir: [0, 0, -1] as const })),
+    // Perpendicular to the normal axis, so `axisDepthFromRay` collapses to the
+    // ray ORIGIN's height above the sketch plane — a deterministic RAW_DEPTH.
+    screenRay: vi.fn(() => ({ origin: [0, 0, RAW_DEPTH] as const, dir: [1, 0, 0] as const })),
     hideExtrudePreview: vi.fn(),
     isExtrudePreviewVisible: vi.fn(() => false),
     setPreviewBody: vi.fn(),

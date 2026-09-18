@@ -334,7 +334,9 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
     expect(draft.params.openFaces).toEqual(["el-face-2"]);
     expect(draft.inputs?.map((ref) => ref.primary.elementId)).toEqual(draft.params.openFaces);
     expect(draft.params.targetBodyId).toBe("body1");
-    expect(engineMock.showScreenValueHandle).toHaveBeenCalledWith([0, 0, 10]);
+    // No mesh is installed here, so the §5 ladder falls to the PICKED anchor and
+    // seats the proxy at the armed thickness.
+    expect(engineMock.showScreenValueHandle).toHaveBeenCalledWith([0, 0, 10], 2);
   });
 
   it("does not start a shell thickness drag from empty viewport space", async () => {
@@ -1001,8 +1003,11 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
     expect(clientMock.beginPreview).not.toHaveBeenCalled();
     expect(clientMock.endPreview).not.toHaveBeenCalled();
     expect(viewportStore.getState().statusHint?.severity ?? "info").not.toBe("error");
+    // H10: the hint names what the control on screen can DO. No mesh is
+    // registered in this lane, so the §5 ladder reaches nothing attributable, the
+    // handle is hidden and the line says so instead of promising a drag (N3).
     expect(viewportStore.getState().statusHint?.message).toBe(
-      "Edit chamfer distance — drag or type, Enter to apply",
+      "Edit chamfer distance — type a value, Enter to apply",
     );
   });
 

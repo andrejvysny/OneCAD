@@ -80,6 +80,10 @@ function makeEngineMock(opts: { projectPoint?: boolean } = {}) {
     hideGhostPreview: vi.fn(),
     hideValueHandle: vi.fn(),
     showValueHandle: vi.fn(),
+    showValueHandlePath: vi.fn(),
+    setValueHandleValue: vi.fn(),
+    showValueWitness: vi.fn(),
+    hideValueWitness: vi.fn(),
     showGhostPreviewMulti: vi.fn(),
     probePick: vi.fn(() => null),
   };
@@ -89,12 +93,15 @@ function makeEngineMock(opts: { projectPoint?: boolean } = {}) {
   if (opts.projectPoint !== false) {
     engine.projectPoint = vi.fn(project);
     engine.valueHandleMapping = vi.fn(() => ({
-      strategy: "axis",
-      direction: [0, 1],
-      pxPerWorld: Math.SQRT1_2,
-      worldPerPx: 1,
+      kind: "world" as const,
+      q0Mm: 0,
+      direction: [0, 1] as const,
+      g0PxPerMm: Math.SQRT1_2,
+      kPerMm: 0, // orthographic: the exact inverse collapses to a constant gain
+      validDeltaMm: [-Infinity, Infinity] as const,
+      conditioning: Math.SQRT1_2,
     }));
-    engine.freezeValueHandleStrategy = vi.fn();
+    engine.freezeValueHandle = vi.fn();
   }
   return engine;
 }

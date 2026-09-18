@@ -852,12 +852,13 @@ describe("ViewportEngine interaction-overlay bounds", () => {
       // glyph: its length runs along the mapping's screen direction — the
       // axis's projected direction, or straight up for a proxy.
       const mapping = engine.valueHandleMapping()!;
+      if (mapping.kind === "disabled") throw new Error("no usable scale for the value handle");
       const u = { x: mapping.direction[0], y: mapping.direction[1] };
       if (axis[0] === 1) {
-        expect(mapping.strategy).toBe("screenProxy");
+        expect(mapping.kind).toBe("proxy");
         expect([u.x, u.y]).toEqual([0, -1]);
       } else {
-        expect(mapping.strategy).toBe("axis");
+        expect(mapping.kind).toBe("world");
         const tip = engine.projectPoint([anchor.x + axis[0] * 0.05, anchor.y + axis[1] * 0.05, anchor.z + axis[2] * 0.05])!;
         const len = Math.hypot(tip.x - centre.x, tip.y - centre.y);
         expect(u.x).toBeCloseTo((tip.x - centre.x) / len, 3);
@@ -894,7 +895,7 @@ describe("ViewportEngine value-handle mapping", () => {
     Object.defineProperty(canvas, "clientHeight", { value: 800, configurable: true });
     const engine = new ViewportEngine();
     await engine.init(canvas, overlay, {});
-    return { engine, internals: engine as unknown as Internals };
+    return { engine, overlay, internals: engine as unknown as Internals };
   };
   const toVec = (v: THREE.Vector3): [number, number, number] => [v.x, v.y, v.z];
 
@@ -912,9 +913,9 @@ describe("ViewportEngine value-handle mapping", () => {
     const { engine, internals } = await sized();
     // getViewDirection() is target→camera: exactly along the view ray.
     engine.showValueHandle([0, 0, 0], toVec(engine.getViewDirection()));
-    expect(engine.valueHandleMapping()!.strategy).toBe("screenProxy");
+    expect(engine.valueHandleMapping()!.kind).toBe("proxy");
     flushFrame();
-    expect(internals.dragHandle.mapping()).toMatchObject({ strategy: "screenProxy", direction: [0, -1] });
+    expect(internals.dragHandle.mapping()).toMatchObject({ kind: "proxy", direction: [0, -1] });
     const box = engine.getInteractionOverlayBounds("valueHandle")!;
     expect(box.width).toBeCloseTo(30, 6);
     expect(box.height).toBeCloseTo(40, 6);
@@ -926,7 +927,7 @@ describe("ViewportEngine value-handle mapping", () => {
     const axis = engine.getViewDirection().clone();
     engine.showValueHandle([0, 0, 0], toVec(axis));
     flushFrame();
-    expect(internals.dragHandle.mapping()!.strategy).toBe("screenProxy");
+    expect(internals.dragHandle.mapping()!.kind).toBe("proxy");
 
     internals.controls.setView(
       { yaw: internals.controls.yaw + Math.PI / 2, pitch: 0.1, distance: 200, target: new THREE.Vector3() },
@@ -934,42 +935,124 @@ describe("ViewportEngine value-handle mapping", () => {
     );
     expect(Math.abs(engine.getViewDirection().dot(axis))).toBeLessThan(0.9);
     // No frame flushed: the last DRAWN mapping is stale, the query is not.
-    expect(internals.dragHandle.mapping()!.strategy).toBe("screenProxy");
+    expect(internals.dragHandle.mapping()!.kind).toBe("proxy");
     const fresh = engine.valueHandleMapping()!;
-    expect(fresh.strategy).toBe("axis");
-    expect(fresh.pxPerWorld).toBeGreaterThan(0);
-    expect(fresh.worldPerPx).toBeGreaterThan(0);
+    expect(fresh).toMatchObject({ kind: "world" });
+    if (fresh.kind === "world") expect(fresh.g0PxPerMm).toBeGreaterThan(0);
     engine.dispose();
   });
 
-  it("passes an edge tangent through, so the mapping rejects it", async () => {
+  /*
+   * H8 / β = 0: the mapping is the TRUE projected derivative of the point that
+   * moves. There is no tangent parameter left to reject with — a rejected
+   * direction is one H(q) cannot follow.
+   */
+  it("maps the outward axis itself, with no tangent rejection left to apply", async () => {
     const { engine } = await sized();
-    const plain = (engine.showValueHandle([0, 0, 0], [1, -1, -1]), engine.valueHandleMapping()!);
-    engine.showValueHandle([0, 0, 0], [1, -1, -1], [1, 0, 1]);
-    const rejected = engine.valueHandleMapping()!;
-    expect(rejected.strategy).toBe("axis");
-    const cross = plain.direction[0] * rejected.direction[1] - plain.direction[1] * rejected.direction[0];
-    expect(Math.abs(cross)).toBeGreaterThan(1e-3);
+    engine.showValueHandle([0, 0, 0], [1, -1, -1]);
+    const mapping = engine.valueHandleMapping()!;
+    expect(mapping.kind).toBe("world");
+    const probe = engine.projectPoint([0, 0, 0])!;
+    const tip = engine.projectPoint([0.05 / Math.sqrt(3), -0.05 / Math.sqrt(3), -0.05 / Math.sqrt(3)])!;
+    const len = Math.hypot(tip.x - probe.x, tip.y - probe.y);
+    if (mapping.kind === "world") {
+      expect(mapping.direction[0]).toBeCloseTo((tip.x - probe.x) / len, 3);
+      expect(mapping.direction[1]).toBeCloseTo((tip.y - probe.y) / len, 3);
+    }
     engine.dispose();
   });
 
-  it("freezes the drawn strategy and repaints", async () => {
+  it("freezes the whole drawn mapping and repaints", async () => {
     const { engine, internals } = await sized();
     engine.showValueHandle([0, 0, 0], [1, 0, 0]);
     flushFrame();
-    expect(internals.dragHandle.mapping()!.strategy).toBe("axis");
+    expect(internals.dragHandle.mapping()!.kind).toBe("world");
     mocks.renderer.render.mockClear();
 
-    engine.freezeValueHandleStrategy("screenProxy");
+    engine.freezeValueHandle({ kind: "proxy", q0Mm: 0, direction: [0, -1], mmPerPx: 0.5, reason: "poorScreenSensitivity" });
     flushFrame();
     expect(mocks.renderer.render).toHaveBeenCalledTimes(1);
-    expect(internals.dragHandle.mapping()!.strategy).toBe("screenProxy");
+    expect(internals.dragHandle.mapping()).toMatchObject({ kind: "proxy", mmPerPx: 0.5 });
     // The fresh query is freeze-agnostic: it reports the geometry.
-    expect(engine.valueHandleMapping()!.strategy).toBe("axis");
+    expect(engine.valueHandleMapping()!.kind).toBe("world");
 
-    engine.freezeValueHandleStrategy(null);
+    engine.freezeValueHandle(null);
     flushFrame();
-    expect(internals.dragHandle.mapping()!.strategy).toBe("axis");
+    expect(internals.dragHandle.mapping()!.kind).toBe("world");
+    engine.dispose();
+  });
+
+  /*
+   * THE HANDLE MOVES (derivation §5). The arrow is at H(q), so a value change
+   * has to move it — an arrow pinned at the arm point is attached to nothing.
+   */
+  it("seats the arrow on a parameter path and moves it as the value changes", async () => {
+    const { engine, internals } = await sized();
+    engine.showValueHandlePath({ q0Mm: 0, point0Mm: [0, 0, 0], dPointDValue: [0, 0, 1] }, 0);
+    expect(internals.dragHandle.worldAnchor().toArray()).toEqual([0, 0, 0]);
+    engine.setValueHandleValue(4);
+    expect(internals.dragHandle.worldAnchor().toArray()).toEqual([0, 0, 4]);
+    engine.dispose();
+  });
+
+  it("draws a witness only with the claim its label makes", async () => {
+    const { engine, overlay } = await sized();
+    expect(engine.isValueWitnessVisible()).toBe(false);
+    engine.showValueWitness({
+      meaning: "parameterConstruction",
+      label: "Radius parameter",
+      fromMm: [0, 0, 0],
+      toMm: [0, 0, 2],
+    });
+    expect(engine.isValueWitnessVisible()).toBe(true);
+    const label = overlay.querySelector<HTMLElement>('[data-testid="value-witness-label"]');
+    expect(label?.textContent).toBe("Radius parameter");
+    engine.hideValueWitness();
+    expect(engine.isValueWitnessVisible()).toBe(false);
+    engine.dispose();
+  });
+
+  /*
+   * H10: an OffsetFace `Total` draws TWO segments — the prepared reference
+   * thickness and the target — and each carries its own claim. One of them is a
+   * `measuredReference` and the other is not, so collapsing them into a single
+   * label would attach the kernel's measurement to a value nobody has built.
+   */
+  it("draws every witness segment a tool hands it, each with its own label", async () => {
+    const { engine, overlay } = await sized();
+    engine.showValueWitness([
+      {
+        meaning: "measuredReference",
+        label: "Reference thickness t0 — measured",
+        fromMm: [4, 0, 20],
+        toMm: [0, 0, 20],
+      },
+      {
+        meaning: "targetConstruction",
+        label: "Total target T — construction",
+        fromMm: [0, 0, 20],
+        toMm: [6, 0, 20],
+      },
+    ]);
+    expect(engine.isValueWitnessVisible()).toBe(true);
+    const labels = [...overlay.querySelectorAll<HTMLElement>('[data-testid="value-witness-label"]')]
+      .filter((el) => el.style.display !== "none")
+      .map((el) => el.textContent);
+    expect(labels).toEqual([
+      "Reference thickness t0 — measured",
+      "Total target T — construction",
+    ]);
+    // Falling back to ONE segment must retire the second, not leave it drawn.
+    engine.showValueWitness({
+      meaning: "targetConstruction",
+      label: "Offset target d — construction",
+      fromMm: [0, 0, 0],
+      toMm: [0, 0, 2],
+    });
+    const after = [...overlay.querySelectorAll<HTMLElement>('[data-testid="value-witness-label"]')]
+      .filter((el) => el.style.display !== "none")
+      .map((el) => el.textContent);
+    expect(after).toEqual(["Offset target d — construction"]);
     engine.dispose();
   });
 

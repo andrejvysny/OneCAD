@@ -22,4 +22,9 @@
 - [tauri-agent process ownership](repo_tauri_agent_ownership.md) — config root vs CARGO_MANIFEST_DIR, Tauri's unknown-command wording, AppHandle::config is inherent, DELETE /session does not exit the app
 - [tauri-agent idle settling](repo_tauri_agent_idle.md) — settle reads ui_idle not ui_revision, null = unavailable (two lanes differ), async __stores, unregister alone leaves the pill on screen
 - [Sketch host transport](repo_sketch_host_transport.md) — §7.6 exact.anchor is the identity anchor, every unresolvable host halts, frameTransportVersion is a default not a stamp
+- [Model gesture ownership](repo_model_gesture_ownership.md) — gesture record, endings, stale-arm guard, grab-time handle mapping + freeze, jsdom traps
 - [Cut effect policy](repo_cut_effect_policy.md) — the three floors in εV (semantic + measurement + κ·ulp), and the two tests whose "Cut" removed nothing
+- [Edge-op preview order](repo_edge_op_preview_order.md) — open token, ✓ waits + re-judging, committing freeze, lookup chain, lifecycle request base, re-edit fetch, deferred harness
+- [Frozen handle mapping](repo_frozen_handle_mapping.md) — FrozenMapping/β=0/exact perspective inverse, the grabHandleMapping fallback trap, one representative edge
+- [Offset value attachment](repo_offset_attachment.md) — absolute types drag now, inner-Radius grows outward, two-segment Total witness, shared re-edit ladder
+- [Shell wall attachment](repo_shell_wall_attachment.md) — rim adjacency refuses ambiguity, σ is never assumed, axisDepthFromRay returns null, chip rides H(q)

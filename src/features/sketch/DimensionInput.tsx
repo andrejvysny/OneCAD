@@ -98,6 +98,28 @@ export interface DimensionInputProps {
   /** Focus + select the field on mount (the dimension tool opens ready to type). */
   autoFocus?: boolean;
   /**
+   * Render the field inert (H4b follow-up). An armed operation being committed
+   * must not accept an edit the controller will silently ignore — the edge-op
+   * secondaries already go inert through a disabled fieldset, and the primary
+   * value was the one editable survivor.
+   */
+  disabled?: boolean;
+  /**
+   * Bump to force the field back to `value`, EVEN when the echo guard would
+   * suppress it (H7). A drag that lands on the number this field last previewed
+   * — typically after a refused draft was clamped back — leaves no prop change
+   * to react to, so the abandoned text stayed on screen over a live value
+   * (measured natively: "0.05 mm" shown while the value was 39.99 mm). The owner
+   * bumps this when something OTHER than this field set the value.
+   */
+  redisplayToken?: number;
+  /**
+   * `"label"` is the compact viewport parameter label (spec §4.5): 28–32 px
+   * high, 14–15 px tabular digits, ~8 px horizontal padding. `"badge"` (the
+   * default) is the 11 px chip on a sketch constraint badge or a history row.
+   */
+  variant?: "badge" | "label";
+  /**
    * Constraint kind driving the badge (ConstraintBadgeLayer only). When present,
    * enables constraint-specific range validation on commit (below). Absent ⇒ the
    * legacy finite-only check (model-tool chips have no constraint kind).
@@ -145,6 +167,9 @@ export function DimensionInput({
   onCancel,
   onEscapeRevert,
   autoFocus = false,
+  disabled = false,
+  redisplayToken,
+  variant = "badge",
   kind,
   label = "Dimension value",
 }: DimensionInputProps) {
@@ -306,6 +331,23 @@ export function DimensionInput({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value, unit, expr]);
 
+  /*
+   * The owner says "this value did not come from you" (H7). The echo guard above
+   * cannot tell a drag that happened to land on the last previewed number from
+   * this field's own echo, so the owner reports the boundary instead and the
+   * abandoned draft — text AND its raw-invalid verdict — is dropped here.
+   */
+  const lastRedisplay = useRef(redisplayToken);
+  useEffect(() => {
+    if (redisplayToken === lastRedisplay.current) return;
+    lastRedisplay.current = redisplayToken;
+    lastPreviewed.current = null;
+    const next = restingText();
+    setText(next);
+    onValidityChange?.(true, next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [redisplayToken]);
+
   useEffect(() => {
     if (!autoFocus) return;
     const el = ref.current;
@@ -461,20 +503,39 @@ export function DimensionInput({
       /* `relative` anchors the expression preview, which hangs BELOW the chip:
          the chip itself is laid out against a badge or a history row, and
          growing it would move whatever it is attached to. */
-      className={`pointer-events-auto relative inline-flex items-center gap-0.5 rounded-sm border bg-surface px-1 font-mono text-[11px] text-sel-text shadow-ctrl ${
-        isError ? "border-traffic-close" : "border-accent"
-      }`}
+      /* `"label"` renders BARE: the compact parameter label around it owns the
+         pill (border, height, padding, tone), so a second border here would
+         draw a box inside a box. `"badge"` is self-contained. */
+      className={`pointer-events-auto relative inline-flex items-center gap-0.5 font-mono ${
+        variant === "label"
+          ? "text-[14px] tabular-nums text-ink"
+          : `rounded-sm border bg-surface px-1 text-[11px] text-sel-text shadow-ctrl ${
+              isError ? "border-traffic-close" : "border-accent"
+            }`
+      } ${disabled ? "opacity-60" : ""}`}
     >
       <input
         ref={ref}
         aria-label={label}
         aria-invalid={isError}
-        /* The 36px field is prototype-exact for millimetres. Every other unit
-           divides, so it systematically renders more decimals ("0.0394 in" for
-           1 mm) and would scroll its leading digits out of sight — the field
+        disabled={disabled}
+        /* The 36px BADGE field is prototype-exact for millimetres. Every other
+           unit divides, so it systematically renders more decimals ("0.0394 in"
+           for 1 mm) and would scroll its leading digits out of sight — the field
            widens only when a unit that needs it is selected, leaving the mm
-           default pixel-identical. */
-        className={`${onCommitExpr ? "w-20" : isAngle || unit === "mm" ? "w-9" : "w-14"} bg-transparent text-right outline-none ${isError ? "text-traffic-close" : ""}`}
+           default pixel-identical.
+
+           The LABEL field is deliberately roomier than the value it usually
+           holds: spec §4.5 forbids letting the pill width choose the precision,
+           and a signed depth with decimals ("-123.45") has to fit without
+           scrolling its leading digits away. */
+        className={`${
+          onCommitExpr
+            ? "w-20"
+            : variant === "label"
+              ? isAngle || unit === "mm" ? "w-16" : "w-20"
+              : isAngle || unit === "mm" ? "w-9" : "w-14"
+        } bg-transparent text-right outline-none ${isError ? "text-traffic-close" : ""}`}
         value={text}
         /* A bindable field takes `=name`, so it must not ask for a numeric
            keypad — that would make the "=" unreachable on a touch keyboard. */

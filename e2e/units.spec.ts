@@ -1,11 +1,12 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import {
-  openEditorDebug,
-  waitForCameraSettled,
-  findPlaneQuad,
+  confirmOperation,
   datumOptions,
   extrudeDebug,
+  findPlaneQuad,
+  openEditorDebug,
+  waitForCameraSettled,
 } from "./helpers";
 
 /*
@@ -121,7 +122,7 @@ test("a BARE number is read in the display unit and stored as MILLIMETRES", asyn
   await input.blur();
   await expect.poll(async () => (await extrudeDebug(page))?.datumOffset).toBe(25.4);
 
-  await chip.getByTestId("chip-confirm").click();
+  await confirmOperation(page);
   await expect(datumOptions(page)).toHaveCount(1);
 
   // What LANDED in the document is millimetres, exactly — 25.4, not 1, and not
@@ -182,7 +183,7 @@ test("switching back to mm re-labels the same value — the document does not mo
   expect((await extrudeDebug(page))?.datumOffset).toBe(50.8);
 
   // …and the value that was armed all along is the one that lands.
-  await chip.getByTestId("chip-confirm").click();
+  await confirmOperation(page);
   await expect(datumOptions(page)).toHaveCount(1);
 });
 

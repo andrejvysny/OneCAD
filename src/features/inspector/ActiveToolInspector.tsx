@@ -16,10 +16,10 @@ import {
   MIRROR_PLANES,
   OffsetFaceInspectorControls,
   PATTERN_AXES,
-  requestConfirm,
   SegmentToggle,
   TransformModeSegments,
-} from "@/features/toolbar/ModelToolChips";
+} from "@/features/toolbar/ModelOperationControls";
+import { requestConfirm } from "@/features/toolbar/requestConfirm";
 import { useCallback, useEffect, type ReactNode } from "react";
 import { toolChipStore, useToolChipStore } from "@/stores/toolChipStore";
 import type { ToolChipState, ToolValueValidation } from "@/stores/toolChipStore";
@@ -142,7 +142,7 @@ function ExtrudeInspector({
         <DraftSegment
           deg={state.draftAngleDeg}
           onDeg={(degrees) => toolChipStore.getState().onDraftAngle?.(degrees)}
-          onConfirm={() => toolChipStore.getState().onConfirm?.()}
+          onConfirm={requestConfirm}
         />
       )}
       <div className="flex items-center gap-1">

@@ -1,10 +1,13 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import {
-  openEditorDebug,
-  findFaceOnBody,
-  clickAtClient,
   bodyOptions,
+  cancelOperation,
+  clickAtClient,
+  confirmControl,
+  confirmOperation,
+  findFaceOnBody,
+  openEditorDebug,
 } from "./helpers";
 
 /*
@@ -144,7 +147,7 @@ test("the tool waits for a face click before it arms anything", async ({ page })
   await page.getByRole("button", { name: "Hole", exact: true }).click();
   await expect.poll(async () => (await holeDebug(page))?.holePhase).toBe("facePick");
   // Nothing is armed, so no cluster and no ✓ — there is nothing to confirm yet.
-  await expect(page.getByTestId("chip-confirm")).toHaveCount(0);
+  await expect(confirmControl(page)).toHaveCount(0);
   await expect(page.getByTestId("chip-hole-simple")).toHaveCount(0);
 });
 
@@ -161,7 +164,7 @@ test("a face click arms the hole at the picked point with the full cluster", asy
   await expect(page.getByTestId("chip-hole-simple")).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByTestId("chip-hole-depth")).toHaveValue("Thru");
   await expect(page.getByTestId("chip-hole-std")).toBeVisible();
-  await expect(page.getByTestId("chip-confirm")).toBeVisible();
+  await expect(confirmControl(page)).toBeVisible();
   // The conditional pairs belong to the other two profiles and must NOT be here.
   await expect(page.getByTestId("chip-hole-cb-diameter")).toHaveCount(0);
   await expect(page.getByTestId("chip-hole-cs-diameter")).toHaveCount(0);
@@ -175,7 +178,7 @@ test("the Ø chip authors the diameter, ✓ commits, and the row reads it back",
   await page.keyboard.press("Tab"); // blur commits the value, Enter would commit the OP
   await expect.poll(async () => (await holeDebug(page))?.holeDiameter).toBe(5.5);
 
-  await page.getByTestId("chip-confirm").click();
+  await confirmOperation(page);
   await expect.poll(async () => (await holeDebug(page))?.holePhase).toBe("idle");
 
   const { label, valueText } = await lastFeature(page);
@@ -240,7 +243,7 @@ test("clicking the face again MOVES the armed hole instead of starting a second 
     .not.toBe(JSON.stringify(first));
 
   // Still ONE hole: the commit writes a single row.
-  await page.getByTestId("chip-confirm").click();
+  await confirmOperation(page);
   await expect.poll(async () => (await holeDebug(page))?.holePhase).toBe("idle");
   const labels = await page.evaluate(() => {
     const w = window as unknown as {
@@ -253,7 +256,7 @@ test("clicking the face again MOVES the armed hole instead of starting a second 
 
 test("the ✕ cancels the armed hole without writing a row", async ({ page }) => {
   await armHoleOnBox(page);
-  await page.getByTestId("chip-cancel").click();
+  await cancelOperation(page);
   await expect.poll(async () => (await holeDebug(page))?.holePhase).toBe("idle");
   const labels = await page.evaluate(() => {
     const w = window as unknown as {
@@ -300,7 +303,7 @@ test("a countersink COMMITS, and the row re-opens as a countersink with no stale
   await page.getByTestId("chip-hole-cs-100").click();
   await expect.poll(async () => (await holeDebug(page))?.holeCsAngleDeg).toBe(100);
 
-  await page.getByTestId("chip-confirm").click();
+  await confirmOperation(page);
   await expect.poll(async () => (await holeDebug(page))?.holePhase).toBe("idle");
 
   const { id, label, valueText } = await lastFeature(page);
@@ -337,7 +340,7 @@ test("double-clicking the row re-arms the hole seeded from the stored params", a
   await page.keyboard.press("Tab");
   await expect.poll(async () => (await holeDebug(page))?.holeDepth).toBe(18);
 
-  await page.getByTestId("chip-confirm").click();
+  await confirmOperation(page);
   await expect.poll(async () => (await holeDebug(page))?.holePhase).toBe("idle");
   const { id } = await lastFeature(page);
 
@@ -382,7 +385,7 @@ test("the thread toggle fills the ISO 261 tap-drill diameter, and the row keeps 
   // The picker is a one-shot filler, not a mode.
   await expect(page.getByTestId("chip-hole-std-panel")).toHaveCount(0);
 
-  await page.getByTestId("chip-confirm").click();
+  await confirmOperation(page);
   await expect.poll(async () => (await holeDebug(page))?.holePhase).toBe("idle");
 
   const { id, label, valueText } = await lastFeature(page);
@@ -444,7 +447,7 @@ test("the seat face SURVIVES the hole commit, and the next Hole arms on it again
   await page.getByRole("button", { name: "Hole", exact: true }).click();
   await clickAtClient(page, face.x, face.y);
   await expect.poll(async () => (await holeDebug(page))?.holePhase).toBe("armed");
-  await page.getByTestId("chip-confirm").click();
+  await confirmOperation(page);
   await expect.poll(async () => (await holeDebug(page))?.holePhase).toBe("idle");
   expect((await lastFeature(page)).label).toBe("Hole");
 

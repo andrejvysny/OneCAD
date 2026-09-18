@@ -24,6 +24,7 @@ import { useEffect, useState } from "react";
 import { cn } from "@/ui/cn";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToolChipStore, toolChipStore } from "@/stores/toolChipStore";
+import { requestConfirm } from "./requestConfirm";
 import { LENGTH_SUFFIX, formatLength, lengthSuffix, parseLength } from "@/units/format";
 import { HOLE_CS_ANGLES } from "@/tools/modelTools/holeMachine";
 import { HOLE_STANDARDS, holeStandard, type HoleFit } from "@/tools/modelTools/holeStandards";
@@ -157,7 +158,7 @@ function ThroughOrDepthField({
             e.preventDefault();
             e.stopPropagation();
             commit();
-            toolChipStore.getState().onConfirm?.();
+            requestConfirm();
           } else if (e.key === "Escape") {
             e.preventDefault();
             e.stopPropagation();
@@ -237,7 +238,7 @@ function DimField({
             e.preventDefault();
             e.stopPropagation();
             commit();
-            toolChipStore.getState().onConfirm?.();
+            requestConfirm();
           } else if (e.key === "Escape") {
             e.preventDefault();
             e.stopPropagation();

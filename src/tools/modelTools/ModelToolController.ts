@@ -20,6 +20,7 @@ import type {
   AxisRef,
   BooleanOperation,
   ChamferReferenceFace,
+  ClassifyFrame,
   FeatureRecord,
   FilletParams,
   GearParams,
@@ -71,7 +72,7 @@ import { geometricLabel, type PickablePlane } from "@/viewport/engine/PlanePicke
 import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
 import { buildBodyObjects, getEntry, remove as removeMesh, swap as swapMesh } from "@/viewport/mesh/meshRegistry";
 import type { MeshEntry } from "@/viewport/mesh/meshRegistry";
-import { faceBoundaryEdgeOrdinals } from "@/viewport/mesh/faceEdges";
+import { faceBoundaryEdgeOrdinals, retainedRimNeighbours } from "@/viewport/mesh/faceEdges";
 import { ordinalForRef } from "@/viewport/mesh/rebindPick";
 import { toolStore } from "@/stores/toolStore";
 import { operationAttemptStore } from "@/stores/operationAttemptStore";
@@ -117,24 +118,49 @@ import { dimQuantum } from "@/tools/sketch/liveDimension";
 import { chooseGridStep } from "@/viewport/engine/GridPlane";
 import {
   clampToEdgeOpRange,
+  edgeParameterPath,
+  edgeParameterWitness,
   radiusFromValueText,
-  signedValueFromDrag,
   EDGE_OP_MIN_VALUE,
-  SCREEN_UP_AXIS,
   type EdgeOpClampResult,
   type EdgeOpRangeGuard,
-  type ScreenAxis,
 } from "@/tools/preview/filletRadius";
-import type { HandleMapping, HandleStrategy } from "@/tools/preview/handleProjection";
-import { averageOutward, edgeMidAndTangent, edgeOutward } from "@/tools/preview/edgeDirection";
+import {
+  handlePointAt,
+  sampleMapping,
+  type FrozenMapping,
+  type LinearHandlePath,
+  type ValueWitness,
+} from "@/tools/preview/handleProjection";
+import {
+  edgeMidAndTangent,
+  edgeOutward,
+  edgeOutwardAt,
+  edgePolylinePoint,
+} from "@/tools/preview/edgeDirection";
 import { axisSplitsRegion, type LatheAxis } from "@/tools/preview/lathePreview";
 import { angleFromDrag, snapRevolveAngle, clampAngle, angleFromValueText } from "@/tools/preview/revolveAngle";
-import { thicknessFromValueText } from "@/tools/preview/shellThickness";
 import {
+  cylindricalWallPath,
+  cylindricalWallRadiusAt,
+  planarWallPath,
+  shellThicknessWitness,
+  thicknessFromValueText,
+  type WallSidedness,
+} from "@/tools/preview/shellThickness";
+import {
+  cylindricalOffsetPath,
   distanceFromValueText,
   ghostOffsets,
   offsetAnchorFor,
   offsetAxisFor,
+  offsetTargetWitness,
+  orientTowardReference,
+  planarOffsetPath,
+  radialDimensionPath,
+  radialDimensionWitness,
+  totalThicknessPath,
+  totalThicknessWitnesses,
   DEFAULT_OFFSET_DISTANCE,
 } from "@/tools/preview/faceOffset";
 import { faceDrawRange } from "@/viewport/engine/HighlightLayer";
@@ -301,8 +327,6 @@ const EXTRUDE_ZERO_DEPTH_MESSAGE = "No effect: depth is 0";
 const EXTRUDE_ZERO_DEPTH2_MESSAGE = "No effect: second depth is 0";
 /** What a fresh edge-op ✓ says while it waits for the newest preview reopen (review R5). */
 const EDGE_OP_CONFIRM_WAIT_HINT = "Waiting for preview…";
-/** The status line an OffsetFace re-edit arms with (no closure to name). */
-const OFFSET_REEDIT_HINT = "Edit offset distance — type a value, Enter to apply";
 
 
 /** Set-equality over body ids (order-insensitive; ids are unique per selection). */
@@ -341,6 +365,56 @@ function authoredStoredElements(value: unknown, kind: "face" | "edge"): Authored
     if (typeof bodyId !== "string" || !bodyId) return [];
     return [{ kind, bodyId, ...(typeof elementId === "string" ? { elementId } : {}) }];
   });
+}
+
+/**
+ * The record's own typed refs, ANCHORS INCLUDED — the evidence a re-edit has
+ * instead of picks. `authoredStoredElements` drops the anchor because the chip
+ * context has no use for it; an attachment ladder does.
+ */
+function storedSemanticRefs(value: unknown, kind: "face" | "edge" = "face"): SemanticRef[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((candidate) => {
+    if (!candidate || typeof candidate !== "object" || !("primary" in candidate)) return [];
+    const primary = (candidate as { primary?: unknown }).primary;
+    if (!primary || typeof primary !== "object") return [];
+    const bodyId = (primary as { bodyId?: unknown }).bodyId;
+    const elementId = (primary as { elementId?: unknown }).elementId;
+    if (typeof bodyId !== "string" || !bodyId) return [];
+    const worldPoint = (candidate as { anchor?: { worldPoint?: unknown } }).anchor?.worldPoint;
+    const anchored =
+      Array.isArray(worldPoint) && worldPoint.length === 3 && worldPoint.every((c) => typeof c === "number")
+        ? { anchor: { worldPoint: worldPoint as [number, number, number] } }
+        : {};
+    return [
+      {
+        primary: {
+          bodyId,
+          kind,
+          ...(typeof elementId === "string" ? { elementId } : {}),
+        },
+        ...anchored,
+      },
+    ];
+  });
+}
+
+/** Everything the §5 offset ladder needs, from a handshake OR from a record. */
+interface OffsetAttachmentEvidence {
+  bodyId: string;
+  /** The first operative face; the one every single-face type attaches to. */
+  face: SemanticRef | undefined;
+  /** Its snapshot TopoKey, when there is one (a stored record carries none). */
+  topoKey: string | undefined;
+  faceCount: number;
+  /** `Total`'s persisted opposite. */
+  opposite: SemanticRef | undefined;
+  /** The PREPARED `currentDims.thickness`; undefined ⇒ no `Total` path at all. */
+  thicknessMm: number | undefined;
+  /** A point ON the first face — never a classified plane's own origin. */
+  sample: Vec3 | null;
+  /** The mean planar frame, when the whole closure has one. */
+  planar: { anchorMm: Vec3; axis: Vec3 } | null;
 }
 
 /** A stored Scalar (`{value}`) or bare number, as a number. Defaults to 0. */
@@ -515,13 +589,6 @@ const OFFSET_FACE_TRAILING_MS = 160;
 const HOLE_ARMED_HINT = "Hole: set the size, click again to move it · Enter or ✓ to apply";
 const GEAR_ARMED_HINT = "Gear: set the teeth and size, click again to move it · Enter or ✓ to apply";
 
-/**
- * How many armed edges contribute to the drag-direction mean. The mean only has
- * to orient ONE screen axis, so a long tangent-chain selection must not walk
- * every mesh entry to compute it.
- */
-const EDGE_OP_OUTWARD_SAMPLE = 8;
-
 /** Seed offset for a fresh datum plane (mm) — matches DEFAULT_EXTRUDE_DEPTH's role. */
 const DEFAULT_DATUM_OFFSET = 10;
 
@@ -612,32 +679,18 @@ type ActiveGesture = {
 }[ModelGestureKind];
 
 /**
- * The value-handle mapping one gesture takes AT GRAB and keeps until it ends
- * (TODO.md SESSION 37 H3/H5): the glyph's own strategy, the screen direction the
- * value grows along, and the world units one CSS pixel of that travel is worth.
+ * What a value drag says on screen when its own mapping refuses
+ * (docs/design/astra/modeling-handle-attachment.md §8 diagnostics).
  */
-interface GrabMapping {
-  strategy: HandleStrategy;
-  axis: ScreenAxis;
-  worldPerPx: number;
-}
-
-/**
- * `HandleMapping` → the gesture's form. An axis moves `p / pxPerWorld` world units
- * per `p` px along its direction; anything else is the vertical proxy at the
- * anchor's scale (the orbit metric only when the anchor's was unusable).
- */
-function toGrabMapping(mapping: HandleMapping, orbitMetric: () => number): GrabMapping {
-  const [x, y] = mapping.direction;
-  if (mapping.strategy === "axis") {
-    if (mapping.pxPerWorld !== null && mapping.pxPerWorld > 0) {
-      return { strategy: "axis", axis: { x, y }, worldPerPx: 1 / mapping.pxPerWorld };
-    }
-    return { strategy: "screenProxy", axis: SCREEN_UP_AXIS, worldPerPx: orbitMetric() };
-  }
-  const worldPerPx = mapping.worldPerPx > 0 ? mapping.worldPerPx : orbitMetric();
-  return { strategy: "screenProxy", axis: { x, y }, worldPerPx };
-}
+const VIEW_LIMIT_HINT = "View limits this drag; release and reposition the view.";
+const edgeOpProxyHint = (kind: EdgeOpKind): string =>
+  `${kind === "Chamfer" ? "Distance" : "Radius"}: drag vertically — axis nearly end-on.`;
+const edgeOpDisabledHint = (kind: EdgeOpKind): string =>
+  `${kind === "Chamfer" ? "Distance" : "Radius"}: type a value — handle attachment unavailable.`;
+/** What a Shell drag measures (`construction-only`) — and what it cannot. */
+const SHELL_CONSTRUCTION_HINT = "Thickness target — construction.";
+const SHELL_UNAVAILABLE_HINT =
+  "Thickness: drag vertically or type — wall attachment unavailable.";
 
 /**
  * One placement gizmo gesture (WP-B W2). Everything is captured AT GRAB and the
@@ -976,17 +1029,41 @@ export class ModelToolController {
   private filletBasis: DragBasis = { start: DEFAULT_FILLET_RADIUS, grab: 0 };
   /** World outward direction for the armed edges (null = none honest enough to use). */
   private filletOutward: Vec3 | null = null;
-  /** World point the drag axis is projected from (mean of the armed edge midpoints). */
+  /**
+   * World point the handle is attached to: a point on ONE representative edge's
+   * display polyline, never a mean of the armed edges (H8 — on a closed tangent
+   * chain the outward directions cancel and the mean attaches to nothing).
+   */
   private filletAnchor: Vec3 = [0, 0, 0];
-  /** Edge tangent, only for a SINGLE-edge arm (removed from the screen axis so a
-   *  drag ALONG the edge is inert). Meaningless to average across edges. */
-  private filletTangent: Vec3 | null = null;
+  /**
+   * The parameter path the handle travels, `H(q) = E + q·b`, or null when no
+   * honest world attachment was resolved. This is what makes the arrow MOVE as
+   * the size changes.
+   */
+  private filletPath: LinearHandlePath | null = null;
+  /** TopoKeys / element ids the USER actually picked, so the representative is
+   *  one of theirs rather than a chained neighbour the kernel added. */
+  private filletPickedKeys = new Set<string>();
   /**
    * Which tier produced {@link filletOutward}. `auto` type-flipping is armed ONLY
    * on "bisector": the bbox proxy points INTO material on a concave edge, so
    * trusting it there would silently author the wrong op.
    */
   private filletAxisSource: "bisector" | "bbox" | "screen" = "screen";
+  /**
+   * H10 — which rung of the §5 ladder produced the edge op's display attachment.
+   * `edge` carries a world path; `pick`/`body` are anchor-only (labelled screen
+   * proxy); `none` has nothing attributable and HIDES the handle. A RE-EDIT used
+   * to have no ladder at all: it published its chip at `[0,0,0]` and installed no
+   * handle, while its hint said "drag or type" (audit N2/N3).
+   */
+  private edgeOpAttachment: "edge" | "pick" | "body" | "none" = "none";
+  /**
+   * How many edges the one value is SHARED BY, for the witness's own label. Read
+   * from the attachment refs rather than from `filletEdges`, which is empty on a
+   * re-edit — where a four-edge chain would otherwise read as a single edge.
+   */
+  private edgeOpSharedCount = 1;
   /** No honest world axis to put a handle on (the offset-face rule): the tool
    *  falls back to claiming every viewport press as a screen-space value drag. */
   private get filletDegraded(): boolean {
@@ -1038,6 +1115,22 @@ export class ModelToolController {
   private shellEditFeatureId: string | undefined;
   /** Stored params of the shell being re-edited (thickness-only edit preserves faces). */
   private shellStoredParams: Record<string, unknown> | undefined;
+  /**
+   * The retained wall the thickness handle rides, `H(t) = E − t·n` (planar) or
+   * `C + (R − σt)·r̂` (cylindrical), resolved ONCE at arm. Null whenever no wall
+   * could be attributed — the tool then shows a labelled screen proxy.
+   */
+  private shellPath: LinearHandlePath | null = null;
+  /** The classified cylinder behind `shellPath`, for the predicted-radius guard. */
+  private shellCylinder: { radiusMm: number; sidedness: WallSidedness } | null = null;
+  /**
+   * Where the handle and the chip attach when there is no wall path. Walks the
+   * §5 ladder down — rim point → picked anchor → the body's own centre — and is
+   * NEVER the world origin while any of those exist.
+   */
+  private shellAnchor: Vec3 = [0, 0, 0];
+  /** Which rung of that ladder answered (the debug/diagnostic provenance). */
+  private shellAttachment: "wall" | "rim" | "pick" | "body" | "none" = "none";
 
   // ── OffsetFace context (SCHEMA §7.3 + §7.6) ────────────────────────────────
   //
@@ -1065,8 +1158,41 @@ export class ModelToolController {
   private offsetRanges: { start: number; count: number }[] = [];
   /** The mean-normal drag axis; null ⇒ no honest arrow (degraded gesture). */
   private offsetAxis: Vec3 | null = null;
-  /** World anchor for the arrow + chip (mean of the operative face centres). */
+  /** World anchor for the chip + proxy: the ladder's best attributable point. */
   private offsetAnchor: Vec3 = [0, 0, 0];
+  /**
+   * H10 — the world path the value handle travels, `H(q)` for the ARMED distance
+   * type (docs/design/astra/modeling-handle-attachment.md §5). Null ⇒ no world
+   * attachment, so the tool shows a labelled screen proxy or nothing at all.
+   */
+  private offsetPath: LinearHandlePath | null = null;
+  /**
+   * `Total` only: the prepared `currentDims.thickness` the first witness segment
+   * MEASURES. Null everywhere else — a witness may not claim a measurement the
+   * prepare did not make.
+   */
+  private offsetReferenceThickness: number | null = null;
+  /**
+   * Which rung of the §5 ladder produced the display attachment. The first three
+   * carry a world path; `faces`/`pick`/`body` are anchor-only (labelled screen
+   * proxy); `none` has nothing attributable at all and HIDES the handle rather
+   * than seating it on the world origin.
+   */
+  /**
+   * How many faces the resolved path is SHARED BY, for the witness's own claim.
+   * Read from the evidence rather than from `offsetFaces`, which is empty on a
+   * re-edit — where the count lives in the record instead, and where a shared
+   * multi-face parameter would otherwise be labelled as a single face's target.
+   */
+  private offsetPathFaceCount = 1;
+  private offsetAttachment:
+    | "plane"
+    | "cylinder"
+    | "shared"
+    | "faces"
+    | "pick"
+    | "body"
+    | "none" = "none";
   /** `currentDims` from the newest successful prepare (absolute-type seeds). */
   private offsetDims: OffsetCurrentDims = {};
   /**
@@ -1206,7 +1332,16 @@ export class ModelToolController {
   /** The ONE live value gesture, from its grab until release, cancel or abandon. */
   private gesture: ActiveGesture | null = null;
   /** The handle mapping the live value gesture took at its grab (R03), or null. */
-  private gestureMapping: GrabMapping | null = null;
+  private gestureMapping: FrozenMapping | null = null;
+  /**
+   * Whether the live gesture may read its value through the AXIS RAY
+   * (`axisDepthFromRay`) rather than through the frozen mapping's screen lane.
+   * Decided at the grab and fixed for the gesture: the two lanes carry different
+   * grab-delta bookkeeping, so alternating between them would step the value.
+   */
+  private gestureAxisRay = false;
+  /** Whether the live gesture is currently held at its frozen view limit. */
+  private gestureViewLimited = false;
   /** The status line a proxy grab replaced, restored when the gesture ends. */
   private gestureHint: { message: string; before: StatusHint | null } | null = null;
   /** A capture loss waiting one task to learn whether its pointerup follows. */
@@ -2200,7 +2335,7 @@ export class ModelToolController {
   /** How the live extrude drag maps its input, for `symmetric` (see `ExtrudeDragMode`). */
   private extrudeDragMode(symmetric: boolean): ExtrudeDragMode {
     if (!symmetric) return "oneSided";
-    return this.gestureMapping?.strategy === "screenProxy" ? "symmetricTotal" : "symmetricAxis";
+    return this.gestureMapping?.kind === "proxy" ? "symmetricTotal" : "symmetricAxis";
   }
 
   /**
@@ -3917,22 +4052,15 @@ export class ModelToolController {
       edgeOp: kind,
     }).state;
     toolStore.setState({ phase: "armed" });
-    // A resolved world axis gets a real handle. A screen tier gets an honest,
+    // A resolved world axis gets a real handle; a screen tier gets an honest,
     // visible scalar proxy; neither may claim arbitrary viewport presses.
-    if (this.filletDegraded) {
-      (this.deps.engine as Partial<ViewportEngine>).showScreenValueHandle?.(this.filletAnchor);
-    } else if (this.filletTangent && this.filletEdges.length === 1) {
-      // ONE projection (SESSION 37 H5): the glyph rejects the edge tangent, and the
-      // grab reads that same mapping back — a multi-edge mean has no tangent.
-      this.engine.showValueHandle(this.filletAnchor, this.filletOutward as Vec3, this.filletTangent);
-    } else {
-      this.engine.showValueHandle(this.filletAnchor, this.filletOutward as Vec3);
-    }
+    this.showEdgeOpHandle(size);
     this.deps.engine.setOrbitSuppressed(false);
     const hint = this.edgeOpArmHint();
     this.previewArmHint = hint;
     viewportStore.getState().setStatusHint(hint, { sticky: true });
     this.showEdgeOpChip(size);
+    this.syncEdgeOpHandle();
     this.updateDebug();
     await this.openEdgeOpPreview(gen);
   }
@@ -3942,15 +4070,12 @@ export class ModelToolController {
     // picked edge — mirrors extrude's `worldPos` = arrowhead, `anchorAxisFrom` =
     // base. Only when a handle actually exists: a degraded arm has no axis, so its
     // chip stays centered on the picked point, exactly as before this change.
-    const outward = this.filletOutward;
-    const degraded = this.filletDegraded || !outward;
-    const anchor: [number, number, number] = degraded
-      ? this.filletEdges[0].anchor?.worldPoint ?? [0, 0, 0]
-      : [
-          this.filletAnchor[0] + outward[0],
-          this.filletAnchor[1] + outward[1],
-          this.filletAnchor[2] + outward[2],
-        ];
+    const degraded = this.filletDegraded || !this.filletPath;
+    // H9: `H(size)` — the point the ARROW is drawn at. Anchoring one millimetre
+    // along the construction (`E + 1·b`) made the label trail the arrow for every
+    // value but exactly 1 mm, now that the handle travels with the number. H10:
+    // the degraded arm takes the §5 ladder's own anchor, never `[0,0,0]`.
+    const anchor: Vec3 = this.edgeOpChipAnchor(size);
     toolChipStore.getState().showFillet(
       size,
       anchor,
@@ -4108,6 +4233,12 @@ export class ModelToolController {
     try {
       const topoKeys = new Set(res.edges.map((edge) => edge.topoKey));
       if (topoKeys.size !== res.edges.length) throw new Error("prepared closure contains duplicate edges");
+      // Which prepared edges the USER picked — the closure also carries the
+      // tangent neighbours the kernel chained on, and the handle must sit on an
+      // edge they actually clicked when one is available.
+      this.filletPickedKeys = new Set(
+        picks.flatMap((pick) => [pick.topoKey, pick.elementId].filter((k): k is string => !!k)),
+      );
       this.filletEdges = res.edges.map((edge) => {
         if (
           edge.kind !== "edge" ||
@@ -4250,22 +4381,35 @@ export class ModelToolController {
   private edgeOpArmHint(): string {
     const kind = this.fillet.edgeOp;
     const noun = kind === "Chamfer" ? "distance" : "radius";
+    // H10: what the CONTROL on screen can actually do. A re-edit whose edge the
+    // fillet consumed has a labelled proxy, and one with no body left has nothing
+    // at all — a hint that says "drag" for either is audit finding N3.
+    const verb = this.edgeOpControlVerb();
     // A RE-EDIT arms with NO picks (`filletEdges` is empty by construction — the
     // edges live in the stored params), so the pick-count wording would read
     // "0 edges". One hint source so a type flip republishes the right sentence.
     if (this.filletEditFeatureId) {
-      return `Edit ${kind.toLowerCase()} ${noun} — drag or type, Enter to apply`;
+      const control = verb === "type" ? "type a value" : `${verb} or type`;
+      return `Edit ${kind.toLowerCase()} ${noun} — ${control}, Enter to apply`;
     }
     const n = this.filletEdges.length;
     // C7: an arm expanded from a face says WHICH face, so the user can tell a
     // whole-face arm from the single edge they thought they clicked.
     const of = this.filletFromFace ? ` of ${this.filletFromFace}` : "";
-    return `${kind} ${n} edge${n > 1 ? "s" : ""}${of} — drag or type ${noun} · Enter or ✓ to apply`;
+    const control = verb === "type" ? `type ${noun}` : `${verb} or type ${noun}`;
+    return `${kind} ${n} edge${n > 1 ? "s" : ""}${of} — ${control} · Enter or ✓ to apply`;
+  }
+
+  /** What the armed edge op's control offers: a world drag, a proxy, or typing. */
+  private edgeOpControlVerb(): "drag" | "drag vertically" | "type" {
+    if (this.filletPath && !this.filletDegraded) return "drag";
+    return this.edgeOpAttachment === "none" ? "type" : "drag vertically";
   }
 
   /**
-   * Resolve the world "away from the body" direction for the armed edges — ONCE,
-   * at arm time.
+   * Resolve the armed edge op's ATTACHMENT — ONE representative edge, one point
+   * on it, and that point's own outward direction — ONCE, at arm time
+   * (docs/design/astra/modeling-handle-attachment.md §5).
    *
    * Deliberately NOT lazy: `MeshEntry`s are double-buffered on every mesh swap
    * (`meshRegistry.swap`), so a mid-drag lookup could read an entry whose edge
@@ -4273,59 +4417,159 @@ export class ModelToolController {
    * any document change (`onDocumentRevisionChanged`), which is exactly the event
    * that could invalidate this.
    *
-   * At most {@link EDGE_OP_OUTWARD_SAMPLE} edges contribute: the mean only has to
-   * be good enough to orient one drag axis, and a 200-edge chain selection must
-   * not walk every mesh. A mean the tier math refuses (`averageOutward` null —
-   * edges facing substantially different ways) leaves NO direction rather than a
-   * fabricated one.
+   * NO MEAN. The previous version averaged up to eight edges' outward directions
+   * and their midpoints. On a closed tangent chain — the common case for a
+   * filleted rim — those directions cancel, so the mean was refused outright and
+   * the whole arm degraded to a screen proxy; when they did not cancel, the
+   * anchor sat at a point that is on no edge at all. One representative edge is
+   * an honest attachment for a value every edge in the closure shares, and the
+   * witness label says how many edges that is.
    */
   private computeEdgeOpOutward(): void {
     this.filletOutward = null;
-    this.filletTangent = null;
-    this.filletAnchor = this.filletEdges[0]?.anchor?.worldPoint ?? [0, 0, 0];
+    this.filletPath = null;
     this.filletAxisSource = "screen";
+    const refs = this.edgeOpAttachmentRefs();
+    // H10: the §5 fallback ladder, instead of the world origin (audit N2). A
+    // re-edit reaches the lower rungs routinely — a fillet CONSUMES its edge, so
+    // the record's own ref names nothing in today's publication.
+    const ladder = this.resolveLadder([
+      ["pick", (refs[0]?.anchor?.worldPoint as Vec3 | undefined) ?? null],
+      ["body", this.bodyCentre(refs[0]?.bodyId ?? "")],
+    ]);
+    this.filletAnchor = ladder.point;
+    this.edgeOpAttachment = ladder.rung;
+    this.edgeOpSharedCount = Math.max(1, refs.length);
 
-    const dirs: Vec3[] = [];
-    const mids: Vec3[] = [];
-    let tangent: Vec3 | null = null;
-    // Every contributing edge must have resolved via the bisector for the arm to
-    // count as bisector-tier — one bbox fallback in the mean poisons the sign.
-    let allBisector = true;
-    for (const ref of this.filletEdges.slice(0, EDGE_OP_OUTWARD_SAMPLE)) {
-      const entry = ref.bodyId ? getEntry(ref.bodyId) : undefined;
-      const index = entry?.edgeIndex;
-      if (!entry || !index) {
-        allBisector = false;
-        continue;
-      }
-      const ord = index.ordinalForId(ref.topoKey ?? ref.id);
-      if (ord < 0) {
-        allBisector = false;
-        continue;
-      }
-      const res = edgeOutward(entry.view, ord);
-      if (!res) {
-        allBisector = false;
-        continue;
-      }
-      if (res.source !== "bisector") allBisector = false;
-      dirs.push(res.outward);
-      mids.push(res.mid);
-      tangent = res.tangent;
+    const ref = this.representativeEdge(refs);
+    if (!ref) return;
+    const entry = ref.bodyId ? getEntry(ref.bodyId) : undefined;
+    const index = entry?.edgeIndex;
+    if (!entry || !index) return;
+    // Persistent id first (D-5): a stored record carries an ElementId and no
+    // snapshot TopoKey at all, and a renumber can hand a live pick's transient key
+    // to a different edge.
+    const ord = ordinalForRef(index, entry.view, ref);
+    if (ord < 0) return;
+    const resolved = edgeOutward(entry.view, ord);
+    if (!resolved) return;
+
+    // E: the point on THIS edge's polyline nearest its pick anchor, else the
+    // polyline's arc-length midpoint. A display location only — mesh evidence
+    // never stands in for a topological reference.
+    const point = edgePolylinePoint(entry.view, ord, ref.anchor?.worldPoint ?? null) ?? resolved.mid;
+    // b: resolved AT E, so a curved edge attaches where the handle actually is.
+    // The edge's own mid-resolved direction is the fallback, never a chain mean.
+    const local = edgeOutwardAt(entry.view, point);
+    const outward = local?.outward ?? resolved.outward;
+    const source = local?.source ?? resolved.source;
+    if (source === "none") return;
+
+    const path = edgeParameterPath(point, outward);
+    if (!path) return;
+    this.filletAnchor = point;
+    this.filletOutward = outward;
+    this.filletAxisSource = source;
+    this.filletPath = path;
+    this.edgeOpAttachment = "edge";
+  }
+
+  /**
+   * The edge refs the handle attaches to: the live picks, else the RECORD's own
+   * typed edges.
+   *
+   * A re-edit has no picks at all — `filletEdges` is empty by construction,
+   * because the edges live in the stored params — which is why its handle had
+   * nothing to attach to and its chip published `[0,0,0]`.
+   */
+  private edgeOpAttachmentRefs(): EntityRef[] {
+    if (this.filletEdges.length) return this.filletEdges;
+    return storedSemanticRefs(this.filletStoredParams?.edges, "edge").flatMap((ref) => {
+      const elementId = ref.primary.elementId;
+      if (!elementId) return [];
+      const worldPoint = ref.anchor?.worldPoint;
+      return [
+        {
+          kind: "edge" as const,
+          id: `${ref.primary.bodyId}#${elementId}`,
+          bodyId: ref.primary.bodyId,
+          elementId,
+          ...(worldPoint ? { anchor: { worldPoint } } : {}),
+        },
+      ];
+    });
+  }
+
+  /**
+   * The prepared edge the handle attaches to: the first USER-PICKED one in
+   * prepared order, else the first one. Deterministic by construction —
+   * `filletEdges` is the worker's own closure order, and a record's `edges` its
+   * authored order.
+   */
+  private representativeEdge(
+    refs: readonly EntityRef[] = this.edgeOpAttachmentRefs(),
+  ): EntityRef | undefined {
+    const picked = refs.find(
+      (edge) =>
+        (edge.topoKey && this.filletPickedKeys.has(edge.topoKey)) ||
+        (edge.elementId && this.filletPickedKeys.has(edge.elementId)),
+    );
+    return picked ?? refs[0];
+  }
+
+  /** Where the edge op's chip hangs for `size` — `H(q)`, else the ladder's anchor. */
+  private edgeOpChipAnchor(size: number): Vec3 {
+    const path = this.filletPath;
+    return path && !this.filletDegraded ? handlePointAt(path, size) : this.filletAnchor;
+  }
+
+  /**
+   * Seat the edge op's arrow at arm time (the §5 ladder decides which), or hide
+   * it. A resolved world axis gets the real handle on `H(q) = E + q·b`; an
+   * attributable anchor with no axis gets an honest, visible screen proxy; the
+   * bottom rung gets NOTHING, because an affordance at the origin is a lie about
+   * where the operation is.
+   */
+  private showEdgeOpHandle(size: number): void {
+    const engine = this.deps.engine as Partial<ViewportEngine>;
+    if (this.filletPath && !this.filletDegraded) {
+      // ONE mapping (H8): the arrow rides the parameter path H(q) = E + q·b, so
+      // the glyph, the grab and the witness all read the same object.
+      engine.showValueHandlePath?.(this.filletPath, size);
+      return;
     }
-    if (dirs.length === 0) return;
-    const mean = averageOutward(dirs);
-    if (!mean) return;
-    this.filletOutward = mean;
-    this.filletAnchor = [
-      mids.reduce((a, m) => a + m[0], 0) / mids.length,
-      mids.reduce((a, m) => a + m[1], 0) / mids.length,
-      mids.reduce((a, m) => a + m[2], 0) / mids.length,
-    ];
-    // A tangent is only meaningful for ONE edge; averaging two tangents produces a
-    // direction neither edge has, and subtracting it would tilt the axis wrongly.
-    this.filletTangent = dirs.length === 1 ? tangent : null;
-    this.filletAxisSource = allBisector ? "bisector" : "bbox";
+    engine.hideValueWitness?.();
+    if (this.edgeOpAttachment === "none") {
+      this.deps.engine.hideValueHandle();
+      return;
+    }
+    engine.showScreenValueHandle?.(this.filletAnchor, size);
+  }
+
+  /**
+   * Put the arrow and the witness where the CURRENT size says they go.
+   *
+   * The handle is `H(q) = E + q·b`, so every value change moves it — an arrow
+   * pinned at the arm point while the number grows is attached to nothing. The
+   * witness label is a PARAMETER construction: it measures the construction's
+   * length, not the blend the kernel will build (see `edgeParameterWitness`).
+   */
+  private syncEdgeOpHandle(): void {
+    const engine = this.deps.engine as Partial<ViewportEngine>;
+    const path = this.filletPath;
+    if (!path || this.filletDegraded) {
+      engine.hideValueWitness?.();
+      return;
+    }
+    const value = this.fillet.radius;
+    engine.setValueHandleValue?.(value);
+    engine.showValueWitness?.(
+      edgeParameterWitness(this.fillet.edgeOp, path, value, this.edgeOpSharedCount),
+    );
+    // The LABEL rides the same point. Straight to the engine, never through
+    // `toolChipStore.worldPos`: that field is the mount effect's key, so writing
+    // it per frame would remount the chip and drop focus out of its input.
+    this.engine.moveChip(MODEL_TOOL_CHIP_ID, handlePointAt(path, value), path.point0Mm);
   }
 
   /**
@@ -4407,6 +4651,7 @@ export class ModelToolController {
     if (edgeOp === this.fillet.edgeOp && !this.fillet.auto) return;
     this.fillet = filletStep(this.fillet, { kind: "setEdgeOp", edgeOp }).state;
     toolChipStore.getState().setValue(this.fillet.radius); // a pristine arm reseeds
+    this.syncEdgeOpHandle(); // the witness label names the op's own quantity
     this.applyEdgeOpKindChange();
   }
 
@@ -5143,6 +5388,7 @@ export class ModelToolController {
       radius: v,
     }).state;
     toolChipStore.getState().setValue(this.fillet.radius);
+    this.syncEdgeOpHandle();
     this.sendPreview();
   }
 
@@ -5152,6 +5398,7 @@ export class ModelToolController {
     this.fillet = filletStep(this.fillet, { kind: "setRadius", radius: value }).state;
     toolChipStore.getState().clearValidation();
     toolChipStore.getState().setValue(this.fillet.radius);
+    this.syncEdgeOpHandle();
     viewportStore.getState().setStatusHint(this.edgeOpArmHint(), { sticky: true });
     this.sendPreview();
   }
@@ -5238,6 +5485,7 @@ export class ModelToolController {
     this.fillet = filletStep(this.fillet, { kind: "setRadius", radius: draft }).state;
     toolChipStore.getState().clearValidation();
     toolChipStore.getState().setValue(this.fillet.radius);
+    this.syncEdgeOpHandle();
     this.sendPreview();
   }
 
@@ -5391,14 +5639,6 @@ export class ModelToolController {
       : `Shell ${n} face${n > 1 ? "s" : ""} — drag visible thickness control vertically or type · Enter or ✓ to apply`;
     this.previewArmHint = editFeatureId ? null : hint;
     viewportStore.getState().setStatusHint(hint, { sticky: true });
-    const anchor = faces[0]?.anchor?.worldPoint ?? [0, 0, 0];
-    // No certified wall normal crosses this frontend boundary. Keep mapping
-    // honest: visible screen proxy, not a fake geometric thickness witness.
-    (this.deps.engine as Partial<ViewportEngine>).showScreenValueHandle?.(anchor);
-    toolChipStore.getState().showShell(startThickness, anchor, (v) => this.onShellChip(v), {
-      onConfirm: () => void this.commitShell(),
-      onCancel: () => toolStore.getState().setTool("select"),
-    });
     const storedBodyId = typeof this.shellStoredParams?.targetBodyId === "string"
       ? this.shellStoredParams.targetBodyId
       : "";
@@ -5406,6 +5646,25 @@ export class ModelToolController {
       ? this.shellStoredParams.openFaces.flatMap((elementId) =>
           typeof elementId === "string" ? [{ kind: "face" as const, bodyId: storedBodyId, elementId }] : [])
       : authoredStoredElements(this.shellStoredParams?.faces, "face");
+    // H9: the attachment is resolved BEFORE anything is published, so neither the
+    // handle nor the chip is ever seated at the world origin. A re-edit has no
+    // picks, so it re-resolves from the record's own stored open-face ids —
+    // whichever kind `shellParams` encoded there.
+    const storedOpenFaceIds = Array.isArray(this.shellStoredParams?.openFaces)
+      ? this.shellStoredParams.openFaces.filter((v): v is string => typeof v === "string")
+      : storedFaces.flatMap((f) => (f.elementId ? [f.elementId] : []));
+    await this.resolveShellAttachment(
+      gen,
+      faces[0]?.bodyId ?? storedBodyId,
+      faces.length ? faces : storedOpenFaceIds,
+      (faces[0]?.anchor?.worldPoint as Vec3 | undefined) ?? null,
+    );
+    if (gen !== this.armGen) return;
+    this.showShellHandle(startThickness);
+    toolChipStore.getState().showShell(startThickness, this.shellChipAnchor(startThickness), (v) => this.onShellChip(v), {
+      onConfirm: () => void this.commitShell(),
+      onCancel: () => toolStore.getState().setTool("select"),
+    });
     const contextFaces = faces.length ? faces.map((face) => authoredElement(face, "face")) : storedFaces;
     const affectedBodyIds = [...new Set(contextFaces.map((face) => face.bodyId).filter(Boolean))];
     toolChipStore.getState().setContext("shellThickness", {
@@ -5414,6 +5673,7 @@ export class ModelToolController {
       affectedBodies: affectedBodyIds.map((bodyId) => ({ bodyId })),
       faces: contextFaces,
     });
+    this.syncShellHandle(); // publishes the label's live anchor at H(t)
     this.updateDebug();
     // A re-edit runs L1-only: PreviewOp executes against the CURRENT head, so
     // previewing an existing feature would double-apply it (the extrude re-edit
@@ -5457,6 +5717,253 @@ export class ModelToolController {
     this.updateDebug();
   }
 
+  /*
+   * H9 — WHERE THE SHELL THICKNESS ATTACHES
+   * (docs/design/astra/modeling-handle-attachment.md §5 "Shell").
+   *
+   * The armed shell used to show a labelled vertical proxy at
+   * `faces[0]?.anchor?.worldPoint ?? [0,0,0]` — the WORLD ORIGIN whenever a
+   * re-edit supplied no picked faces. The ordinary open-box case has enough
+   * evidence for a real attachment, and it is NOT the removed lid's own normal:
+   * that describes the cavity's depth, not the wall's thickness.
+   *
+   * So the search is for a RETAINED WALL: the display boundary edges of the
+   * removed faces, the retained face that is the sole neighbour of one of them,
+   * the rim point on that shared edge nearest the pick, and that wall's own
+   * inward offset. Everything it produces is a DISPLAY location — mesh evidence
+   * never becomes a persistent topology reference, and `shellParams` still
+   * authors from `this.shellFaces` alone.
+   */
+
+  /** One removed face's ordinal in the installed mesh, by ref (D-5) or by mesh id. */
+  private removedFaceOrdinal(entry: MeshEntry, removed: EntityRef | string): number {
+    return typeof removed === "string"
+      ? entry.faceIndex.ordinalForId(removed)
+      : ordinalForRef(entry.faceIndex, entry.view, removed);
+  }
+
+  /**
+   * Resolve the armed shell's attachment ONCE, at arm time, and walk the §5
+   * fallback ladder down until something attributable answers:
+   *
+   *   supported retained wall → attributable rim point → the picked anchor →
+   *   the body's own centre.
+   *
+   * Deliberately NOT lazy, for the same reason `computeEdgeOpOutward` is not:
+   * `MeshEntry`s are double-buffered on every mesh swap, so a mid-drag lookup
+   * could read an entry whose face ordinals no longer mean what was picked.
+   */
+  private async resolveShellAttachment(
+    gen: number,
+    bodyId: string,
+    removed: readonly (EntityRef | string)[],
+    pickAnchor: Vec3 | null,
+  ): Promise<void> {
+    this.shellPath = null;
+    this.shellCylinder = null;
+    this.shellAnchor = pickAnchor ?? [0, 0, 0];
+    this.shellAttachment = pickAnchor ? "pick" : "none";
+
+    const entry = bodyId ? getEntry(bodyId) : undefined;
+    if (entry) {
+      // The body's own centre is the last rung, and it is why the origin is never
+      // the answer for a re-edit whose predecessor evidence is gone.
+      if (!pickAnchor) {
+        const { bboxMin, bboxMax } = entry.view;
+        this.shellAnchor = [
+          (bboxMin[0] + bboxMax[0]) / 2,
+          (bboxMin[1] + bboxMax[1]) / 2,
+          (bboxMin[2] + bboxMax[2]) / 2,
+        ];
+        this.shellAttachment = "body";
+      }
+      const ordinals = removed
+        .map((ref) => this.removedFaceOrdinal(entry, ref))
+        .filter((ordinal) => ordinal >= 0);
+      const rim = this.chooseShellRim(entry, ordinals, pickAnchor);
+      if (rim) {
+        this.shellAnchor = rim.point;
+        this.shellAttachment = "rim";
+        const wall = await this.shellWallPath(gen, bodyId, entry, rim);
+        if (gen !== this.armGen) return;
+        if (wall) {
+          this.shellPath = wall.path;
+          this.shellCylinder = wall.cylinder;
+          if (this.shellWallDrawable(this.shell.thickness)) {
+            this.shellAttachment = "wall";
+          } else {
+            // The construction has already eaten its own cylinder, and that has
+            // no inner wall to depict (§5). Keep the labelled parameter control
+            // and let the existing preview/domain validation refuse the op.
+            this.shellPath = null;
+            this.shellCylinder = null;
+          }
+        }
+      }
+    }
+    // ONCE per arm, never per frame (derivation §8): the decision and its rung.
+    trace("handle", `shell attachment ${this.shellAttachment}`, {
+      bodyId,
+      removed: removed.length,
+      cylinder: this.shellCylinder?.sidedness ?? null,
+    });
+  }
+
+  /**
+   * The rim point the handle attaches to: over every removed-face boundary edge
+   * that exactly ONE retained face also bounds, the candidate nearest the picked
+   * anchor. Ambiguous edges are already gone (`retainedRimNeighbours` discards
+   * them); ties among what is left break on snapshot face then edge ordinal,
+   * which is the order that function returns.
+   */
+  private chooseShellRim(
+    entry: MeshEntry,
+    removedOrdinals: readonly number[],
+    pickAnchor: Vec3 | null,
+  ): { faceOrdinal: number; point: Vec3 } | null {
+    let best: { faceOrdinal: number; point: Vec3 } | null = null;
+    let bestDistance = Infinity;
+    for (const candidate of retainedRimNeighbours(entry.view, removedOrdinals)) {
+      const point = edgePolylinePoint(entry.view, candidate.edgeOrdinal, pickAnchor);
+      if (!point) continue;
+      const distance = pickAnchor
+        ? Math.hypot(point[0] - pickAnchor[0], point[1] - pickAnchor[1], point[2] - pickAnchor[2])
+        : 0;
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = { faceOrdinal: candidate.faceOrdinal, point };
+      }
+    }
+    return best;
+  }
+
+  /**
+   * The retained wall's own inward offset at `rim`, or null when the wall cannot
+   * be supported.
+   *
+   * A PLANAR wall is answered from the installed mesh (`faceFrame` refuses a
+   * curved face outright). A CURVED one needs the kernel's classification, which
+   * carries the axis, the radius and — decisively — the `sidedness`. Absent
+   * sidedness means NOT MEASURED, so σ is never assumed: guessing it would run
+   * the drag backwards on every wall it guessed wrong about. The read is
+   * unfenced on purpose — it positions a glyph and nothing else, the way the
+   * placement hover reads do, and `armGen` plus the document-change arm drop
+   * already cover a head that moves underneath it.
+   */
+  private async shellWallPath(
+    gen: number,
+    bodyId: string,
+    entry: MeshEntry,
+    rim: { faceOrdinal: number; point: Vec3 },
+  ): Promise<{ path: LinearHandlePath; cylinder: { radiusMm: number; sidedness: WallSidedness } | null } | null> {
+    const planar = faceFrame(entry.view, rim.faceOrdinal);
+    if (planar) {
+      const path = planarWallPath(rim.point, planar.normal);
+      return path ? { path, cylinder: null } : null;
+    }
+    const meshId = entry.faceIndex.idOf(rim.faceOrdinal);
+    if (!meshId) return null;
+    // The same classification `resolvePick` makes: a label is an ElementId only
+    // when it carries Rust's `el_` contract, never by position.
+    const isElementId = meshId.startsWith("el_");
+    const classified = await this.deps.client
+      .classifyElement(bodyId, isElementId ? meshId : "", isElementId ? undefined : meshId)
+      .catch(() => null);
+    if (gen !== this.armGen) return null;
+    const frame = classified?.frame;
+    const sidedness = frame?.sidedness;
+    if (!frame?.axis || frame.radius === null || !sidedness) return null;
+    const path = cylindricalWallPath(frame.origin, frame.axis, rim.point, frame.radius, sidedness);
+    return path ? { path, cylinder: { radiusMm: frame.radius, sidedness } } : null;
+  }
+
+  /**
+   * Whether the wall path may be DRAWN at `thicknessMm`.
+   *
+   * A cylindrical construction that has eaten its own cylinder has no inner wall
+   * to depict (§5): the tool keeps the labelled parameter control and lets the
+   * existing preview/domain validation refuse the operation. It never clamps the
+   * value the user is holding.
+   */
+  private shellWallDrawable(thicknessMm: number): boolean {
+    if (!this.shellPath) return false;
+    const cylinder = this.shellCylinder;
+    if (!cylinder) return true;
+    return cylindricalWallRadiusAt(cylinder.radiusMm, cylinder.sidedness, thicknessMm) > 0;
+  }
+
+  /**
+   * The thickness the GLYPH is drawn at. It is the real value everywhere the
+   * construction can be depicted, and saturates at the cylinder's own radius
+   * once it cannot — the arrow holds on the axis rather than passing through it
+   * and reappearing on the far side, which would be a drawn lie about the wall.
+   */
+  private shellDrawnThickness(thicknessMm: number): number {
+    if (this.shellWallDrawable(thicknessMm)) return thicknessMm;
+    return this.shellCylinder?.radiusMm ?? thicknessMm;
+  }
+
+  /** Where the handle and the label sit for `thicknessMm` — `H(t)`, or the proxy anchor. */
+  private shellChipAnchor(thicknessMm: number): Vec3 {
+    const path = this.shellPath;
+    return path ? handlePointAt(path, this.shellDrawnThickness(thicknessMm)) : this.shellAnchor;
+  }
+
+  /** Seat the arrow and the witness at arm time (the ladder decides which). */
+  private showShellHandle(thicknessMm: number): void {
+    const engine = this.deps.engine as Partial<ViewportEngine>;
+    if (this.shellPath && this.shellWallDrawable(thicknessMm)) {
+      engine.showValueHandlePath?.(this.shellPath, thicknessMm);
+      engine.showValueWitness?.(shellThicknessWitness(this.shellPath, thicknessMm));
+      return;
+    }
+    engine.hideValueWitness?.(); // a segment with nothing to measure is a claim
+    if (this.shellAttachment === "none") {
+      // The bottom of the ladder: no body on screen and no pick, so there is no
+      // attributable point at all. §3 "No usable depth" — DISABLE the drag rather
+      // than invent an origin. The thickness stays typeable in the chip.
+      this.deps.engine.hideValueHandle();
+      return;
+    }
+    // Otherwise an honest, visible screen proxy at the attributable point the
+    // ladder reached — the rim, the pick, or the body's own centre.
+    engine.showScreenValueHandle?.(this.shellAnchor, thicknessMm);
+  }
+
+  /**
+   * Put the arrow, the witness and the LABEL where the current thickness says
+   * they go. The label's world anchor is `H(t)` — the same point the arrow is
+   * drawn at — so it stops trailing the arrow as the number changes. Straight to
+   * the engine, never through `toolChipStore.worldPos`: that field is the mount
+   * effect's key, and writing it per frame remounts the chip.
+   */
+  private syncShellHandle(): void {
+    const engine = this.deps.engine as Partial<ViewportEngine>;
+    const thickness = this.shell.thickness;
+    const path = this.shellPath;
+    if (path) {
+      engine.setValueHandleValue?.(this.shellDrawnThickness(thickness));
+      if (this.shellWallDrawable(thickness)) {
+        engine.showValueWitness?.(shellThicknessWitness(path, thickness));
+      } else {
+        // A drag has taken the value past the cylinder: the claim is no longer
+        // depictable, so the segment goes even though the number stays live.
+        engine.hideValueWitness?.();
+      }
+    }
+    this.engine.moveChip(MODEL_TOOL_CHIP_ID, this.shellChipAnchor(thickness));
+  }
+
+  /** Drop the armed shell's re-edit seed AND its resolved display attachment. */
+  private clearShellAttachment(): void {
+    this.shellEditFeatureId = undefined;
+    this.shellStoredParams = undefined;
+    this.shellPath = null;
+    this.shellCylinder = null;
+    this.shellAnchor = [0, 0, 0];
+    this.shellAttachment = "none";
+  }
+
   /** Complete canonical Shell params for both exact preview and commit. */
   private shellParams(thickness = this.shell.thickness): ShellParams {
     return {
@@ -5473,6 +5980,7 @@ export class ModelToolController {
   private onShellChip(v: number): void {
     this.shell = shellStep(this.shell, { kind: "setThickness", thickness: v }).state;
     toolChipStore.getState().setValue(v);
+    this.syncShellHandle(); // a typed thickness moves the arrow exactly like a drag
     this.sendPreview();
   }
 
@@ -5533,8 +6041,7 @@ export class ModelToolController {
     this.shell = shellInit();
     this.clearConsumedSelection(this.shellFaces); // the op opened these faces
     this.shellFaces = [];
-    this.shellEditFeatureId = undefined;
-    this.shellStoredParams = undefined;
+    this.clearShellAttachment();
     this.resetToSelect("Shelled");
     this.updateDebug();
   }
@@ -5597,8 +6104,7 @@ export class ModelToolController {
     }
     this.shell = shellInit();
     this.shellFaces = [];
-    this.shellEditFeatureId = undefined;
-    this.shellStoredParams = undefined;
+    this.clearShellAttachment();
     if (repaired) {
       this.settleOperationAttempt("completed", "Shell needs repair");
       this.resetToSelect("Shell needs repair", { severity: "info", sticky: true });
@@ -5692,6 +6198,7 @@ export class ModelToolController {
         if (kept) {
           this.offsetFace = kept;
           this.showOffsetFaceChip();
+          this.showOffsetHandle(); // the RETAINED attachment, re-seated
           this.applyOffsetFaceState();
         } else {
           this.offsetFace = offsetFaceInit();
@@ -5736,9 +6243,30 @@ export class ModelToolController {
     this.previewArmHint = hint;
     viewportStore.getState().setStatusHint(hint, { sticky: true });
     this.showOffsetFaceChip();
+    this.showOffsetHandle();
     this.applyOffsetFaceState();
     this.updateDebug();
     await this.openOffsetFacePreview(gen);
+  }
+
+  /**
+   * What the status line may promise about the control on screen: the arrow, a
+   * labelled screen proxy, or nothing draggable at all. A hint that says "drag"
+   * where no handle exists is the defect audit finding N3 named.
+   */
+  private offsetControlPhrase(): string {
+    if (this.offsetPath) return "drag the arrow or type";
+    if (this.offsetAttachment === "none") return "type a value";
+    return "drag visible distance control or type";
+  }
+
+  /**
+   * The status line an OffsetFace RE-EDIT arms with (there is no closure to
+   * name). It says what the control on screen can actually do, which for a
+   * re-edit whose predecessor geometry is gone is "type a value" and nothing more.
+   */
+  private offsetReeditHint(): string {
+    return `Edit offset distance — ${this.offsetControlPhrase()}, Enter to apply`;
   }
 
   /** The arm hint — it has to name the CLOSURE, which may exceed the picks. */
@@ -5747,9 +6275,7 @@ export class ModelToolController {
     const chained = n - this.offsetPicks.length;
     const face = `${n} face${n > 1 ? "s" : ""}`;
     const tail = chained > 0 ? ` (+${chained} tangent)` : "";
-    return this.offsetDegraded
-      ? `Offset ${face}${tail} — drag visible distance control or type · Enter or ✓ to apply`
-      : `Offset ${face}${tail} — drag the arrow or type · Enter or ✓ to apply`;
+    return `Offset ${face}${tail} — ${this.offsetControlPhrase()} · Enter or ✓ to apply`;
   }
 
   /**
@@ -5877,6 +6403,11 @@ export class ModelToolController {
     this.offsetDims = res.currentDims;
     this.offsetPreparedRevision = documentStore.getState().revision;
     this.resolveOffsetFrames();
+    // H10: the display attachment is resolved BEFORE the arm publishes anything,
+    // so neither the handle nor the chip is ever seated at the world origin while
+    // a classification is still in flight (the `armShell` rule).
+    await this.resolveOffsetAttachment(gen, distanceType, this.armedOffsetEvidence());
+    if (gen !== this.armGen) return false;
     return true;
   }
 
@@ -5947,18 +6478,337 @@ export class ModelToolController {
       }
     }
     // Anchor first: it is worth having even when the axis is not (the chip has to
-    // hang somewhere), so it falls back to the first pick's own anchor point.
-    this.offsetAnchor =
-      (frames.length === this.offsetTopoKeys.length ? offsetAnchorFor(frames) : null) ??
-      (this.offsetPicks[0]?.anchor?.worldPoint as Vec3 | undefined) ??
-      [0, 0, 0];
-    if (frames.length !== this.offsetTopoKeys.length) return; // partial ⇒ degraded
+    // hang somewhere). H10 walks the §5 ladder down instead of stopping at the
+    // world origin — the mean of the closure's own face centres, the pick's own
+    // anchor, the prepare's evidence anchor, the body's centre, then NOTHING,
+    // which hides the handle rather than seating it on a point the user's model
+    // has no relationship to (audit N2).
+    const complete = frames.length === this.offsetTopoKeys.length;
+    this.setOffsetAnchor([
+      ["faces", complete ? offsetAnchorFor(frames) : null],
+      ["pick", (this.offsetPicks[0]?.anchor?.worldPoint as Vec3 | undefined) ?? null],
+      ["pick", (this.offsetFaces[0]?.anchor?.worldPoint as Vec3 | undefined) ?? null],
+      ["body", this.bodyCentre(this.offsetTargetBodyId)],
+    ]);
+    if (!complete) return; // partial ⇒ degraded
     const axis = offsetAxisFor(frames);
     if (!axis) return;
     this.offsetFrames = frames;
     this.offsetRanges = ranges;
     this.offsetAxis = axis;
     this.offsetDegraded = false;
+  }
+
+  /**
+   * Take the first rung of an attachment ladder that actually answered, and
+   * record WHICH one it was. An exhausted ladder is `none`: the caller hides the
+   * handle rather than drawing it at `[0,0,0]`, because for an off-origin body
+   * the world origin sits inside unrelated geometry (or nothing at all).
+   */
+  private resolveLadder<R extends string>(
+    ladder: readonly (readonly [R, Vec3 | null])[],
+  ): { rung: R | "none"; point: Vec3 } {
+    for (const [rung, point] of ladder) {
+      if (!point || !point.every((c) => Number.isFinite(c))) continue;
+      return { rung, point: [point[0], point[1], point[2]] };
+    }
+    return { rung: "none", point: [0, 0, 0] };
+  }
+
+  private setOffsetAnchor(ladder: readonly (readonly ["faces" | "pick" | "body", Vec3 | null])[]): void {
+    const { rung, point } = this.resolveLadder(ladder);
+    this.offsetAnchor = point;
+    this.offsetAttachment = rung;
+  }
+
+  /**
+   * The installed mesh's own bounding-box centre — the last ATTRIBUTABLE rung of
+   * every §5 fallback ladder, and the reason a re-edit whose predecessor evidence
+   * is gone still has somewhere honest to hang its control.
+   */
+  private bodyCentre(bodyId: string): Vec3 | null {
+    const entry = bodyId ? getEntry(bodyId) : undefined;
+    if (!entry) return null;
+    const { bboxMin, bboxMax } = entry.view;
+    // A publication without a usable bbox answers NOTHING here, the way every
+    // other rung does — the ladder falls through rather than throwing inside an
+    // arm, which would leave the tool half-published.
+    if (bboxMin?.length !== 3 || bboxMax?.length !== 3) return null;
+    return [
+      (bboxMin[0] + bboxMax[0]) / 2,
+      (bboxMin[1] + bboxMax[1]) / 2,
+      (bboxMin[2] + bboxMax[2]) / 2,
+    ];
+  }
+
+  /*
+   * H10 — WHERE AN OFFSET'S VALUE ATTACHES
+   * (docs/design/astra/modeling-handle-attachment.md §5 "Offset: …").
+   *
+   * `Total`, `Radius` and `Diameter` used to return false from
+   * `startOffsetFaceGrab` on the stated grounds that an absolute value has "no
+   * zero to drag from". SCHEMA §7.3 already fixes the reference the worker reads
+   * them against, so each one has an explicit drag reference and a derivative of
+   * the point that actually moves:
+   *
+   *     Offset (plane)     H(q) = P + q·n              Offset (cylinder) C + (R0+σq)·r̂
+   *     Radius             H(R) = C + R·r̂              Diameter          C + (D/2)·r̂
+   *     Total              H(T) = B + T·n, B = P − t0·n
+   *
+   * Resolved ONCE per arm, never per frame, and before anything is published —
+   * so the handle and the chip are never seated on the world origin while the
+   * classification is still in flight.
+   */
+
+  /** The handshake's own evidence for the §5 ladder, after the frames settle. */
+  private armedOffsetEvidence(): OffsetAttachmentEvidence {
+    return {
+      bodyId: this.offsetTargetBodyId,
+      face: this.offsetFaces[0],
+      topoKey: this.offsetTopoKeys[0],
+      faceCount: this.offsetFaces.length,
+      opposite: this.offsetOppositeFace,
+      thicknessMm: this.offsetDims.thickness,
+      sample: this.offsetSurfaceSample(),
+      planar:
+        !this.offsetDegraded && this.offsetAxis
+          ? { anchorMm: this.offsetAnchor, axis: this.offsetAxis }
+          : null,
+    };
+  }
+
+  /**
+   * The offset RE-EDIT's evidence: the record's own FROZEN refs, resolved against
+   * the installed mesh.
+   *
+   * There is no handshake here and there must not be one — re-preparing would
+   * compute a new closure against today's geometry and quietly replace the
+   * operative set the user authored. Two consequences: the faces are addressed by
+   * their persistent ElementIds alone (a stored record carries no snapshot
+   * TopoKey), and there is no `currentDims.thickness`, so a `Total` re-edit has
+   * no prepared reference and keeps a labelled control instead of a path.
+   */
+  private storedOffsetEvidence(): OffsetAttachmentEvidence {
+    const stored = this.offsetStoredParams;
+    const bodyId = typeof stored?.targetBodyId === "string" ? stored.targetBodyId : "";
+    const faces = storedSemanticRefs(stored?.faces);
+    const entry = bodyId ? getEntry(bodyId) : undefined;
+    const frames: PlanarFaceFrame[] = [];
+    if (entry && faces.length) {
+      for (const face of faces) {
+        const elementId = face.primary.elementId ?? "";
+        const ordinal = elementId && entry.view.idsHaveElementIds
+          ? entry.faceIndex.ordinalForId(elementId)
+          : -1;
+        const frame = ordinal >= 0 ? faceFrame(entry.view, ordinal) : null;
+        if (!frame) {
+          frames.length = 0; // partial ⇒ no honest mean; fall down the ladder
+          break;
+        }
+        frames.push(frame);
+      }
+    }
+    const complete = faces.length > 0 && frames.length === faces.length;
+    const anchorMm = complete ? offsetAnchorFor(frames) : null;
+    const axis = complete ? offsetAxisFor(frames) : null;
+    const sample =
+      frames[0]?.center ?? (faces[0]?.anchor?.worldPoint as Vec3 | undefined) ?? null;
+    return {
+      bodyId,
+      face: faces[0],
+      topoKey: undefined,
+      faceCount: faces.length,
+      opposite: storedSemanticRefs(stored?.oppositeFace ? [stored.oppositeFace] : [])[0],
+      thicknessMm: undefined,
+      sample: sample ? [sample[0], sample[1], sample[2]] : null,
+      planar: anchorMm && axis ? { anchorMm, axis } : null,
+    };
+  }
+
+  /**
+   * A point ON the first operative face: the local mesh frame's centre (which is
+   * inside the trimmed face), else the prepare's own anchor, else the user's
+   * pick.
+   *
+   * NEVER a classified plane's `origin` — an analytic plane origin can sit
+   * arbitrarily far from the finite face it supports, and portraying it as a
+   * point inside that face is exactly the claim §5 forbids.
+   */
+  private offsetSurfaceSample(): Vec3 | null {
+    const centre = this.offsetFrames[0]?.center;
+    if (centre) return [centre[0], centre[1], centre[2]];
+    const anchored =
+      (this.offsetFaces[0]?.anchor?.worldPoint as Vec3 | undefined) ??
+      (this.offsetPicks[0]?.anchor?.worldPoint as Vec3 | undefined);
+    return anchored ? [anchored[0], anchored[1], anchored[2]] : null;
+  }
+
+  /**
+   * Classify one operative face for a GLYPH, or null.
+   *
+   * UNFENCED on purpose, exactly like `shellWallPath`'s read: it positions a
+   * handle and authors nothing, and `armGen` plus the document-change arm drop
+   * already cover a head that moves underneath it. The promoted ElementId is the
+   * stronger address and wins where present.
+   */
+  private async classifyOffsetFace(
+    gen: number,
+    bodyId: string,
+    face: SemanticRef | undefined,
+    topoKey: string | undefined,
+  ): Promise<ClassifyFrame | null> {
+    const elementId = face?.primary.elementId ?? "";
+    if (!bodyId || (!elementId && !topoKey)) return null;
+    const classified = await this.deps.client
+      .classifyElement(bodyId, elementId, elementId ? undefined : topoKey)
+      .catch(() => null);
+    if (gen !== this.armGen) return null;
+    return classified?.frame ?? null;
+  }
+
+  /**
+   * Resolve the armed offset's world path for `distanceType`, after
+   * {@link resolveOffsetFrames} has settled the frames and the anchor ladder.
+   *
+   * Only ever UPGRADES the attachment: a type with no supportable path keeps the
+   * anchor-only rung the ladder reached, which is a labelled screen proxy rather
+   * than an arrow that cannot be dragged.
+   */
+  private async resolveOffsetAttachment(
+    gen: number,
+    distanceType: OffsetDistanceType,
+    ev: OffsetAttachmentEvidence,
+  ): Promise<void> {
+    this.offsetPath = null;
+    this.offsetReferenceThickness = null;
+    this.offsetPathFaceCount = Math.max(1, ev.faceCount);
+    const single = ev.faceCount === 1;
+
+    if (distanceType === "Offset" && ev.planar) {
+      // One planar face, or the mean-axis SHARED PARAMETER construction a
+      // multi-face closure drags. `A` is not a moving centroid, and no per-face
+      // motion is claimed: a V3 closure can contain rebuilt blends and fixed
+      // supports whose roles the frontend does not have.
+      this.adoptOffsetPath(
+        planarOffsetPath(ev.planar.anchorMm, ev.planar.axis),
+        single ? "plane" : "shared",
+      );
+    } else if (distanceType === "Offset" && single && ev.sample) {
+      const frame = await this.classifyOffsetFace(gen, ev.bodyId, ev.face, ev.topoKey);
+      if (gen !== this.armGen) return;
+      // Absent `sidedness` means NOT MEASURED, so σ is never assumed — guessing
+      // it would run a signed offset backwards on every wall it guessed wrong.
+      if (frame?.axis && frame.radius !== null && frame.sidedness) {
+        this.adoptOffsetPath(
+          cylindricalOffsetPath(frame.origin, frame.axis, ev.sample, frame.radius, frame.sidedness),
+          "cylinder",
+        );
+      }
+    } else if ((distanceType === "Radius" || distanceType === "Diameter") && single && ev.sample) {
+      const frame = await this.classifyOffsetFace(gen, ev.bodyId, ev.face, ev.topoKey);
+      if (gen !== this.armGen) return;
+      // Sidedness is deliberately NOT consulted: an inner wall's radius grows
+      // outward exactly like an outer one's (§7 "Inner cylinder sign inversion").
+      if (frame?.axis && frame.radius !== null) {
+        this.adoptOffsetPath(
+          radialDimensionPath(frame.origin, frame.axis, ev.sample, distanceType),
+          "cylinder",
+        );
+      }
+    } else if (distanceType === "Total" && single && ev.sample && ev.opposite && ev.thicknessMm !== undefined) {
+      // BOTH faces classified on the same snapshot; `normal` is non-null only for
+      // a plane frame, so this is also the planarity test.
+      const selected = await this.classifyOffsetFace(gen, ev.bodyId, ev.face, ev.topoKey);
+      if (gen !== this.armGen) return;
+      const opposite = await this.classifyOffsetFace(gen, ev.bodyId, ev.opposite, undefined);
+      if (gen !== this.armGen) return;
+      if (selected?.normal && opposite?.normal) {
+        const n = orientTowardReference(opposite.normal, opposite.origin, ev.sample);
+        if (n && this.adoptOffsetPath(totalThicknessPath(ev.sample, n, ev.thicknessMm), "plane")) {
+          this.offsetReferenceThickness = ev.thicknessMm;
+        }
+      }
+    }
+
+    // ONCE per arm, never per frame (derivation §8): the decision and its rung.
+    trace("handle", `offset attachment ${this.offsetAttachment}`, {
+      bodyId: ev.bodyId,
+      distanceType,
+      faces: ev.faceCount,
+      path: this.offsetPath !== null,
+    });
+  }
+
+  /** Install a resolved path (and its rung), or leave the anchor-only ladder. */
+  private adoptOffsetPath(
+    path: LinearHandlePath | null,
+    rung: "plane" | "cylinder" | "shared",
+  ): boolean {
+    if (!path) return false;
+    this.offsetPath = path;
+    this.offsetAttachment = rung;
+    return true;
+  }
+
+  /** Which segments the armed offset draws for `value` — none without a path. */
+  private offsetWitnesses(value: number): readonly ValueWitness[] {
+    const path = this.offsetPath;
+    if (!path) return [];
+    const type = this.offsetFace.distanceType;
+    if (type === "Radius" || type === "Diameter") return [radialDimensionWitness(path, value, type)];
+    if (type === "Total") {
+      const t0 = this.offsetReferenceThickness;
+      // `measuredReference` on the first segment is earned: `t0` only ever comes
+      // from `PrepareOffsetFace.currentDims.thickness`, which the kernel measured.
+      return t0 === null ? [] : totalThicknessWitnesses(path, value, t0, true);
+    }
+    return [offsetTargetWitness(path, value, this.offsetPathFaceCount)];
+  }
+
+  /** Where the chip hangs for `value` — `H(q)`, or the ladder's own anchor. */
+  private offsetChipAnchor(value: number): Vec3 {
+    return this.offsetPath ? handlePointAt(this.offsetPath, value) : this.offsetAnchor;
+  }
+
+  /**
+   * Seat the arrow and the witness at arm time (the §5 ladder decides which).
+   *
+   * A handle is drawn ONLY where it can be dragged. Before H10 a planar `Total`
+   * drew the shared arrow, hover-reacted to the pointer and then refused every
+   * press, because `startOffsetFaceGrab` returned false for it (audit N3).
+   */
+  private showOffsetHandle(): void {
+    const engine = this.deps.engine as Partial<ViewportEngine>;
+    const value = this.offsetFace.distance;
+    if (this.offsetPath) {
+      engine.showValueHandlePath?.(this.offsetPath, value);
+      engine.showValueWitness?.(this.offsetWitnesses(value));
+      return;
+    }
+    engine.hideValueWitness?.(); // a segment with nothing to measure is a claim
+    if (this.offsetAttachment === "none") {
+      // §3 "No usable depth": nothing attributable at all, so DISABLE the drag
+      // rather than invent an origin. The distance stays typeable in the chip.
+      this.deps.engine.hideValueHandle();
+      return;
+    }
+    engine.showScreenValueHandle?.(this.offsetAnchor, value);
+  }
+
+  /**
+   * Put the arrow, the witness and the LABEL where the current distance says
+   * they go. `setValueHandleValue` rather than a re-seat, so a live gesture's
+   * freeze survives the frame; the label goes straight to the engine, never
+   * through `toolChipStore.worldPos` (that field is the mount effect's key).
+   */
+  private syncOffsetHandle(): void {
+    const engine = this.deps.engine as Partial<ViewportEngine>;
+    const value = this.offsetFace.distance;
+    if (this.offsetPath) {
+      engine.setValueHandleValue?.(value);
+      engine.showValueWitness?.(this.offsetWitnesses(value));
+    }
+    this.engine.moveChip(MODEL_TOOL_CHIP_ID, this.offsetChipAnchor(value));
   }
 
   /** Which distance types this closure may offer (the chip's segment group). */
@@ -5978,7 +6828,7 @@ export class ModelToolController {
     const s = this.offsetFace;
     toolChipStore.getState().showOffsetFace(
       s.distance,
-      this.offsetAnchor,
+      this.offsetChipAnchor(s.distance),
       {
         onValue: (v) => this.onOffsetFaceChip(v),
         onDistanceType: (t) => this.onOffsetDistanceType(t),
@@ -6025,25 +6875,18 @@ export class ModelToolController {
    * comes back if that candidate later fails.
    */
   private applyOffsetFaceState(): void {
-    if (this.offsetDegraded || !this.offsetAxis) {
-      if (this.offsetFace.distanceType === "Offset") {
-        (this.deps.engine as Partial<ViewportEngine>).showScreenValueHandle?.(this.offsetAnchor);
-      }
-      return;
-    }
+    // H10: the handle rides `H(q)` through `setValueHandleValue`, which does NOT
+    // reset the shared handle — so a live gesture's freeze survives the frame and
+    // there is no re-assert to forget.
+    this.syncOffsetHandle();
     const d = this.offsetFace.distance;
-    const axis = this.offsetAxis;
-    const origin: Vec3 = [
-      this.offsetAnchor[0] + axis[0] * d,
-      this.offsetAnchor[1] + axis[1] * d,
-      this.offsetAnchor[2] + axis[2] * d,
-    ];
-    this.engine.showValueHandle(origin, axis);
-    // `showValueHandle` resets the shared handle, freeze included: a live grab
-    // re-asserts the strategy it took, or the glyph would reclassify mid-drag.
-    if (this.dragging === "offsetFace" && this.gestureMapping) {
-      (this.engine as Partial<ViewportEngine>).freezeValueHandleStrategy?.(this.gestureMapping.strategy);
-    }
+    if (this.offsetDegraded || !this.offsetAxis) return;
+    // The L1 ghost translates each face by `d` along its own normal, which is what
+    // `d` MEANS only for a signed `Offset`. An absolute dimension is a position,
+    // not a displacement — translating a 4 mm plate's face by a 6 mm Total would
+    // draw it 6 mm away instead of 2 (H10; the types were typed-only before, so
+    // nothing dragged this ghost live).
+    if (this.offsetFace.distanceType !== "Offset") return;
     if (this.offsetGhostHidden) return;
     const entry = getEntry(this.offsetTargetBodyId);
     if (!entry) return;
@@ -6142,7 +6985,7 @@ export class ModelToolController {
    */
   private revertOffsetFaceValue(start: number): void {
     toolChipStore.getState().clearValidation();
-    const hint = this.offsetEditFeatureId ? OFFSET_REEDIT_HINT : this.previewArmHint;
+    const hint = this.offsetEditFeatureId ? this.offsetReeditHint() : this.previewArmHint;
     if (hint) viewportStore.getState().setStatusHint(hint, { sticky: true });
     this.onOffsetFaceChip(start);
   }
@@ -6391,9 +7234,22 @@ export class ModelToolController {
     }).state;
     if (gen !== this.armGen) return;
     toolStore.setState({ phase: "armed" });
-    this.offsetAnchor = [0, 0, 0];
+    // H10: the re-edit's display attachment comes from the RECORD's own frozen
+    // refs — the same §5 ladder a fresh arm walks, minus the handshake it must
+    // not re-run. Resolved before anything is published, so the chip never mounts
+    // at the world origin and the hint never promises a drag that does not exist
+    // (audit N2/N3).
+    const evidence = this.storedOffsetEvidence();
+    this.setOffsetAnchor([
+      ["faces", evidence.planar?.anchorMm ?? null],
+      ["pick", evidence.sample],
+      ["body", this.bodyCentre(evidence.bodyId)],
+    ]);
+    await this.resolveOffsetAttachment(gen, distanceType, evidence);
+    if (gen !== this.armGen) return;
     this.showOffsetFaceChip();
-    viewportStore.getState().setStatusHint(OFFSET_REEDIT_HINT, { sticky: true });
+    this.showOffsetHandle();
+    viewportStore.getState().setStatusHint(this.offsetReeditHint(), { sticky: true });
     this.updateDebug();
   }
 
@@ -6410,6 +7266,10 @@ export class ModelToolController {
     this.offsetRanges = [];
     this.offsetAxis = null;
     this.offsetAnchor = [0, 0, 0];
+    this.offsetPath = null;
+    this.offsetReferenceThickness = null;
+    this.offsetPathFaceCount = 1;
+    this.offsetAttachment = "none";
     this.offsetDims = {};
     this.offsetPreparedRevision = null;
     this.offsetDegraded = false;
@@ -8704,13 +9564,21 @@ export class ModelToolController {
       // R03: the grab takes the arrow's own mapping. An axis pointing (nearly) at
       // the camera has no usable ray intersection, so it drags as the proxy the
       // glyph already shows.
-      this.gestureMapping = this.grabHandleMapping("axis");
+      this.gestureMapping = this.grabHandleMapping("world");
+      // H9: and the RAY lane is decided here too, once. `axisDepthFromRay` now
+      // refuses a ray it cannot certifiably intersect with the axis instead of
+      // projecting the ray origin onto it, so a refusal at the grab sends the
+      // whole gesture down the frozen mapping's own screen lane.
+      this.gestureAxisRay =
+        this.axisRayDepth(e.clientX, e.clientY, this.centroidWorld, this.normal) !== null;
       const grabInput = this.extrudeDragInput(e.clientX, e.clientY) ?? this.extrude.depth;
       this.noteExtrudeSign(this.extrude.depth);
       this.extrudeBasis = extrudeDragBasis(this.extrudeDragMode(this.extrude.symmetric), this.extrude.depth, grabInput);
       this.extrudeLastInput = grabInput;
       this.extrudeDragMoved = false;
-      if (this.gestureMapping.strategy === "screenProxy") this.showGestureHint("Depth: drag vertically");
+      if (this.gestureMapping.kind !== "world" || !this.gestureAxisRay) {
+        this.showGestureHint("Depth: drag vertically");
+      }
       this.extrude = extrudeStep(this.extrude, { kind: "grab" }).state;
       this.syncExtrudeHandle();
       this.engine.setExtrudeHandleHover(true);
@@ -8727,9 +9595,16 @@ export class ModelToolController {
       this.dropTypedEdgeOpDraft();
       this.filletDownX = e.clientX;
       this.filletDownY = e.clientY;
-      // ONE projection (SESSION 37 H5): the glyph's tangent-rejected axis or its
-      // proxy, read at the grab. Fillet and Chamfer both grow along it (D-S3).
-      this.gestureMapping = this.grabHandleMapping("screenProxy");
+      // ONE mapping (H8): the glyph's own frozen world mapping or its proxy,
+      // read at the grab. Fillet and Chamfer both grow along it (D-S3).
+      this.gestureMapping = this.grabHandleMapping("proxy");
+      // §8 diagnostics: an axis that is merely END-ON says so; an arm with no
+      // world attachment at all is already drawn as a proxy and needs no excuse.
+      if (this.gestureMapping.kind === "proxy" && this.gestureMapping.reason === "poorScreenSensitivity") {
+        this.showGestureHint(edgeOpProxyHint(this.fillet.edgeOp));
+      } else if (this.gestureMapping.kind === "disabled") {
+        this.showGestureHint(edgeOpDisabledHint(this.fillet.edgeOp));
+      }
       this.filletBasis = { start: this.fillet.radius, grab: 0 };
       this.fillet = filletStep(this.fillet, { kind: "grabEdge" }).state;
       this.engine.setExtrudeHandleHover(true);
@@ -8744,7 +9619,14 @@ export class ModelToolController {
       this.beginGesture(e, "shell");
       this.shellDownX = e.clientX;
       this.shellDownY = e.clientY;
-      this.gestureMapping = this.grabHandleMapping("screenProxy");
+      this.gestureMapping = this.grabHandleMapping("proxy");
+      // §8 diagnostics: a real wall says what the segment measures; an arm with
+      // no attributable wall says so instead of implying one.
+      this.showGestureHint(
+        this.shellPath && this.shellWallDrawable(this.shell.thickness)
+          ? SHELL_CONSTRUCTION_HINT
+          : SHELL_UNAVAILABLE_HINT,
+      );
       this.shellBasis = { start: this.shell.thickness, grab: 0 };
       this.shell = shellStep(this.shell, { kind: "grab" }).state;
       toolStore.setState({ phase: "dragging" });
@@ -8777,20 +9659,36 @@ export class ModelToolController {
    * would jump the face to the cursor on the first frame.
    */
   private startOffsetFaceGrab(e: PointerEvent): boolean {
-    // Only a free `Offset` has a drag at all: `Total`/`Radius`/`Diameter` are
-    // absolute values with no zero to drag from, so they are typed, never dragged.
-    if (this.offsetFace.distanceType !== "Offset") return false;
-    if (!this.offsetDegraded) {
-      if (!this.offsetAxis) return false;
-      if (!this.engine.hitExtrudeHandle(e.clientX, e.clientY)) return false;
+    // H10: EVERY distance type has a drag now. SCHEMA §7.3 fixes the reference
+    // each absolute one is read against (`d = σ(distance − R)` for a Radius), so
+    // "no zero to drag from" was a misframing — what an absolute dimension needs
+    // is a starting VALUE, which is exactly what `H(q)` is seated at.
+    const world = this.offsetPath !== null;
+    // Nothing attributable is drawn, so there is nothing to grab.
+    if (!world && this.offsetAttachment === "none") return false;
+    // A screen proxy may overlap DOM chrome; the world arrow's own raycast does not.
+    if (!world && this.isExcludedClickAwayTarget(e.target)) return false;
+    if (!this.engine.hitExtrudeHandle(e.clientX, e.clientY)) return false;
+    // The AXIS-RAY lane belongs to a SIGNED offset along a certified mean normal
+    // alone: `offsetAnchor + offsetAxis·q` is the only parameterization the
+    // pointer's ray can be projected onto, and the absolute types do not share it.
+    let rayUsable = false;
+    if (this.offsetFace.distanceType === "Offset" && !this.offsetDegraded && this.offsetAxis) {
       const ray = this.engine.screenRay(e.clientX, e.clientY);
-      if (!ray) return false;
-      this.offsetGrabDepth = axisDepthFromRay(ray.origin, ray.dir, this.offsetAnchor, this.offsetAxis);
-      this.engine.setExtrudeHandleHover(true);
-    } else if (this.isExcludedClickAwayTarget(e.target) || !this.engine.hitExtrudeHandle(e.clientX, e.clientY)) return false;
+      // H9: a ray the axis cannot certifiably be intersected with has NO depth.
+      // The press still grabs the arrow the user aimed at — it just drags down
+      // the frozen mapping's screen lane instead of a fabricated projection.
+      const grabDepth = ray
+        ? axisDepthFromRay(ray.origin, ray.dir, this.offsetAnchor, this.offsetAxis)
+        : null;
+      rayUsable = grabDepth !== null;
+      this.offsetGrabDepth = grabDepth ?? 0;
+    }
+    this.engine.setExtrudeHandleHover(true);
     this.beginGesture(e, "offsetFace");
-    this.gestureMapping = this.grabHandleMapping(this.offsetDegraded ? "screenProxy" : "axis");
-    if (!this.offsetDegraded && this.gestureMapping.strategy === "screenProxy") {
+    this.gestureMapping = this.grabHandleMapping(world ? "world" : "proxy");
+    this.gestureAxisRay = rayUsable;
+    if (world && this.gestureMapping.kind !== "world") {
       this.showGestureHint("Offset: drag vertically");
     }
     this.offsetDownX = e.clientX;
@@ -8805,10 +9703,12 @@ export class ModelToolController {
   /** One drag frame for the armed offset (both gestures land here). */
   private applyOffsetFaceDrag(e: PointerEvent): void {
     let distance: number;
-    if (this.gestureMapping?.strategy === "axis" && !this.offsetDegraded && this.offsetAxis) {
-      const ray = this.engine.screenRay(e.clientX, e.clientY);
-      if (!ray) return;
-      const depth = axisDepthFromRay(ray.origin, ray.dir, this.offsetAnchor, this.offsetAxis);
+    if (this.gestureMapping?.kind === "world" && this.gestureAxisRay && this.offsetAxis) {
+      const depth = this.axisRayDepth(e.clientX, e.clientY, this.offsetAnchor, this.offsetAxis);
+      // A view that swings end-on MID-drag leaves the ray uncertifiable. HOLD the
+      // value on that frame: swapping lanes mid-gesture is the gain change under
+      // the user's hand that one frozen mapping exists to prevent.
+      if (depth === null) return;
       // GRAB-DELTA, not the absolute depth: the arrow already sits at
       // `anchor + axis·distance`, so the pointer's own offset from the grab is the
       // only thing that may move the value.
@@ -8816,7 +9716,9 @@ export class ModelToolController {
     } else {
       // A proxy — degraded, or an arrow too end-on to drag along — maps screen
       // travel at the scale the grab took, never the per-move orbit metric.
-      distance = this.offsetStartDistance + this.gestureTravel(e.clientX - this.offsetDownX, e.clientY - this.offsetDownY);
+      const frame = this.gestureTravel(e.clientX - this.offsetDownX, e.clientY - this.offsetDownY);
+      this.setViewLimitHint(frame.viewLimited);
+      distance = this.offsetStartDistance + frame.travel;
     }
     this.offsetFace = offsetFaceStep(this.offsetFace, { kind: "drag", distance }).state;
     toolChipStore.getState().setValue(this.offsetFace.distance);
@@ -8946,8 +9848,9 @@ export class ModelToolController {
     } else if (this.dragging === "fillet") {
       // RAW screen deltas along the grab's mapping; the floor REBASES, so reversing
       // off it grows the size on the very next sample (no wind-up).
-      const travel = this.gestureTravel(e.clientX - this.filletDownX, e.clientY - this.filletDownY);
-      const frame = flooredDrag(this.filletBasis, travel, EDGE_OP_MIN_VALUE);
+      const sample = this.gestureTravel(e.clientX - this.filletDownX, e.clientY - this.filletDownY);
+      this.setViewLimitHint(sample.viewLimited);
+      const frame = flooredDrag(this.filletBasis, sample.travel, EDGE_OP_MIN_VALUE);
       this.filletBasis = frame.basis;
       // The guard is about size only. The reducer preserves the explicit edge-op
       // type throughout this ordinary drag.
@@ -8961,13 +9864,16 @@ export class ModelToolController {
       }
       this.fillet = next;
       toolChipStore.getState().setValue(this.fillet.radius);
+      this.syncEdgeOpHandle();
       this.sendPreview();
     } else if (this.dragging === "shell") {
-      const travel = this.gestureTravel(e.clientX - this.shellDownX, e.clientY - this.shellDownY);
-      const frame = flooredDrag(this.shellBasis, travel, EDGE_OP_MIN_VALUE);
+      const sample = this.gestureTravel(e.clientX - this.shellDownX, e.clientY - this.shellDownY);
+      this.setViewLimitHint(sample.viewLimited);
+      const frame = flooredDrag(this.shellBasis, sample.travel, EDGE_OP_MIN_VALUE);
       this.shellBasis = frame.basis;
       this.shell = shellStep(this.shell, { kind: "drag", thickness: frame.value }).state;
       toolChipStore.getState().setValue(frame.value);
+      this.syncShellHandle();
       this.sendPreview();
     } else if (this.dragging === "offsetFace") {
       this.applyOffsetFaceDrag(e);
@@ -8994,9 +9900,11 @@ export class ModelToolController {
       this.updateRevolveAxisHover(e.clientX, e.clientY);
     } else if (this.extrude.phase === "armed") {
       this.engine.setExtrudeHandleHover(this.engine.hitExtrudeHandle(e.clientX, e.clientY));
-    } else if (this.offsetFace.phase === "armed" && !this.offsetDegraded) {
+    } else if (this.offsetFace.phase === "armed" && this.offsetAttachment !== "none") {
       // The offset arrow IS the extrude drag handle (one shared instance), so its
-      // hover reads through the same probe.
+      // hover reads through the same probe. Gated on the ATTACHMENT, not on the
+      // planar lane: everything that is drawn is now grabbable, and nothing that
+      // is grabbable is left un-hovered (audit N3).
       this.engine.setExtrudeHandleHover(this.engine.hitExtrudeHandle(e.clientX, e.clientY));
     } else if (this.fillet.phase === "armed") {
       this.engine.setExtrudeHandleHover(this.engine.hitExtrudeHandle(e.clientX, e.clientY));
@@ -9153,7 +10061,9 @@ export class ModelToolController {
     toolStore.setState({ gestureLive: false });
     // The freeze outlives hide/show on the shared handle, so EVERY ending drops it.
     this.gestureMapping = null;
-    (this.engine as Partial<ViewportEngine>).freezeValueHandleStrategy?.(null);
+    this.gestureAxisRay = false;
+    this.gestureViewLimited = false;
+    (this.engine as Partial<ViewportEngine>).freezeValueHandle?.(null);
     this.restoreGestureHint();
     // The press belonged to the gesture: its eventual pointerup (after an Escape,
     // a blur or a tool switch) must not read as a click on whatever is armed then.
@@ -9166,37 +10076,105 @@ export class ModelToolController {
   }
 
   /**
-   * The shared handle's mapping under the camera AS IT IS NOW, frozen for the
-   * gesture about to start (`endGesture` releases it), so glyph and drag keep one
-   * strategy and one metric until the gesture ends. A double without the seam, or
-   * a hidden handle, keeps `fallback` at the orbit metric — the pre-seam mapping.
+   * The shared handle's WHOLE mapping under the camera AS IT IS NOW, frozen for
+   * the gesture about to start (`endGesture` releases it) — direction, gain,
+   * perspective coefficient and valid interval together, so glyph and drag keep
+   * one exact mapping until the gesture ends.
+   *
+   * A double without the seam, or a hidden handle, falls back to `fallback` at
+   * the orbit metric — the pre-seam mapping, and the reason `fallback` still
+   * exists: an extrude arrow without the seam must stay on its ray branch. A
+   * mapping the engine itself reports as `disabled` is KEPT: "no usable depth"
+   * is an answer, and inventing the orbit metric there would fabricate a gain.
    */
-  private grabHandleMapping(fallback: HandleStrategy): GrabMapping {
+  private grabHandleMapping(fallback: "world" | "proxy"): FrozenMapping {
     const engine = this.engine as Partial<ViewportEngine>;
-    const mapping = engine.valueHandleMapping?.() ?? null;
-    const orbitMetric = (): number => this.engine.planePixelWorld();
-    if (!mapping) return { strategy: fallback, axis: SCREEN_UP_AXIS, worldPerPx: orbitMetric() };
-    const grab = toGrabMapping(mapping, orbitMetric);
-    engine.freezeValueHandleStrategy?.(grab.strategy);
-    return grab;
+    const seam = engine.valueHandleMapping?.() ?? null;
+    const orbitMetric = this.engine.planePixelWorld();
+    const frozen: FrozenMapping =
+      seam ??
+      (fallback === "world"
+        ? {
+            kind: "world",
+            q0Mm: 0,
+            direction: [0, -1],
+            // Orthographic-equivalent: a constant `orbitMetric` per px, which is
+            // exactly what the pre-seam mapping did.
+            g0PxPerMm: 1 / orbitMetric,
+            kPerMm: 0,
+            validDeltaMm: [-Infinity, Infinity],
+            conditioning: 1,
+          }
+        : { kind: "proxy", q0Mm: 0, direction: [0, -1], mmPerPx: orbitMetric, reason: "noProjection" });
+    engine.freezeValueHandle?.(frozen);
+    // ONCE per gesture, never per frame (derivation §8): the decision and the
+    // numbers behind it. `conditioning` is the UNCLAMPED Cq — the clamp it
+    // replaced concealed exactly how fast a drag would move.
+    trace("handle", `grab mapping ${frozen.kind}`, {
+      tool: this.dragging ?? toolStore.getState().modelTool,
+      seam: seam !== null,
+      ...(frozen.kind === "world"
+        ? { g: frozen.g0PxPerMm, k: frozen.kPerMm, cq: frozen.conditioning, valid: frozen.validDeltaMm }
+        : frozen.kind === "proxy"
+          ? { mmPerPx: frozen.mmPerPx, reason: frozen.reason }
+          : { reason: frozen.reason }),
+    });
+    return frozen;
   }
 
-  /** World units a screen delta travels along the live gesture's grab mapping. */
-  private gestureTravel(dxPx: number, dyPx: number): number {
+  /**
+   * World units a screen delta travels along the live gesture's FROZEN mapping,
+   * and whether the frozen valid interval clipped it.
+   *
+   * The world branch is the exact perspective inverse `Δq = p / (g − k·p)`, not
+   * a constant `p / g`: at the derivation's P60 case those differ by 0.69 mm
+   * over a 50 px drag, and the error grows with the drag.
+   */
+  private gestureTravel(dxPx: number, dyPx: number): { travel: number; viewLimited: boolean } {
     const m = this.gestureMapping;
-    return m ? signedValueFromDrag(0, dxPx, dyPx, m.axis, { worldPerPx: m.worldPerPx }) : 0;
+    if (!m) return { travel: 0, viewLimited: false };
+    const sample = sampleMapping(m, [dxPx, dyPx]);
+    return { travel: sample.valueMm - m.q0Mm, viewLimited: sample.saturated === "viewLimit" };
+  }
+
+  /**
+   * Show/clear the "View limits this drag" stop exactly once per crossing.
+   *
+   * Reaching the frozen valid interval HOLDS the value and says why; it never
+   * switches strategy mid-gesture, which is the one thing a frozen mapping
+   * exists to prevent.
+   */
+  private setViewLimitHint(limited: boolean): void {
+    if (limited === this.gestureViewLimited) return;
+    this.gestureViewLimited = limited;
+    if (limited) this.showGestureHint(VIEW_LIMIT_HINT);
+    else this.restoreGestureHint();
+  }
+
+  /**
+   * The closest-approach depth of the pointer's ray along `axisDir` from
+   * `axisPoint`, or null when there is no ray or the ray cannot be certifiably
+   * intersected with the axis (`axisDepthFromRay` refuses rather than projecting
+   * the ray origin — H9).
+   */
+  private axisRayDepth(clientX: number, clientY: number, axisPoint: Vec3, axisDir: Vec3): number | null {
+    const ray = this.engine.screenRay(clientX, clientY);
+    return ray ? axisDepthFromRay(ray.origin, ray.dir, axisPoint, axisDir) : null;
   }
 
   /**
    * The extrude drag's input at a pointer: the axis projection of its ray, or the
    * proxy's screen travel from the press. Null when the axis has no ray to read.
+   *
+   * Which of the two it is was decided at the GRAB (`gestureAxisRay`), never per
+   * frame: the two lanes differ by their grab-delta bookkeeping, so alternating
+   * between them mid-drag would step the value.
    */
   private extrudeDragInput(clientX: number, clientY: number): number | null {
-    if (this.gestureMapping?.strategy === "screenProxy") {
-      return this.gestureTravel(clientX - this.downX, clientY - this.downY);
+    if (this.gestureMapping?.kind !== "world" || !this.gestureAxisRay) {
+      return this.gestureTravel(clientX - this.downX, clientY - this.downY).travel;
     }
-    const ray = this.engine.screenRay(clientX, clientY);
-    return ray ? axisDepthFromRay(ray.origin, ray.dir, this.centroidWorld, this.normal) : null;
+    return this.axisRayDepth(clientX, clientY, this.centroidWorld, this.normal);
   }
 
   /** A proxy grab says how it maps; `endGesture` puts back the line it replaced. */
@@ -9346,6 +10324,7 @@ export class ModelToolController {
       case "fillet":
         this.fillet = { ...this.fillet, ...g.snapshot };
         toolChipStore.getState().setValue(this.fillet.radius);
+        this.syncEdgeOpHandle();
         return;
       case "shell":
         this.shell = { ...this.shell, ...g.snapshot };
@@ -9495,8 +10474,17 @@ export class ModelToolController {
     this.beginGesture(null, "extrude"); // no press ⇒ no pointer: any pointer may drive it
     // No press to classify: the absolute ray mapping, frozen as an axis, and past
     // the drag threshold by definition (there is no press to jitter around).
-    this.gestureMapping = { strategy: "axis", axis: SCREEN_UP_AXIS, worldPerPx: 0 };
-    (this.engine as Partial<ViewportEngine>).freezeValueHandleStrategy?.("axis");
+    this.gestureMapping = {
+      kind: "world",
+      q0Mm: 0,
+      direction: [0, -1],
+      g0PxPerMm: 1,
+      kPerMm: 0,
+      validDeltaMm: [-Infinity, Infinity],
+      conditioning: 1,
+    };
+    (this.engine as Partial<ViewportEngine>).freezeValueHandle?.(this.gestureMapping);
+    this.gestureAxisRay = true; // the ray lane IS this helper's mapping
     this.noteExtrudeSign(this.extrude.depth);
     this.extrudeBasis = { start: 0, grab: 0 };
     this.extrudeLastInput = 0;
@@ -10936,6 +11924,13 @@ export class ModelToolController {
     }).state;
     toolStore.setState({ phase: "armed" });
     this.deps.engine.setOrbitSuppressed(true); // modal: drag adjusts the size, not orbit
+    // H10: the re-edit's display attachment comes from the RECORD's own frozen
+    // edges — the same §5 ladder a fresh arm walks. Resolved BEFORE the chip and
+    // the hint are published, so neither is seated on, or promises a drag at, the
+    // world origin (audit N2/N3). A fillet consumes its edge, so the geometric
+    // rung fails often and the ladder drops to the body: that is the honest answer.
+    this.computeEdgeOpOutward();
+    this.showEdgeOpHandle(radius);
     viewportStore.getState().setStatusHint(this.edgeOpArmHint(), { sticky: true });
     // The edge-op re-edit gets the FULL armed cluster, not the bare numeric chip:
     // a committed row's TYPE is editable here, and a pure type flip changes no
@@ -10950,7 +11945,7 @@ export class ModelToolController {
     // runs against the CURRENT head and would double-apply the edited feature.
     toolChipStore.getState().showFillet(
       radius,
-      [0, 0, 0],
+      this.edgeOpChipAnchor(radius),
       (v) => this.onFilletChip(v),
       {
         onConfirm: () => void this.commitFillet(),
@@ -10974,6 +11969,7 @@ export class ModelToolController {
     // publishes it from inside `showEdgeOpChip`; this path has its own chip call, so
     // it republishes here, off the same publisher (which reads the stored edges).
     this.publishEdgeOperationContext();
+    this.syncEdgeOpHandle(); // the label rides H(q), exactly as the fresh arm's does
     // WP-F: the record's closure adjacency, so a re-edit can offer [Flip reference]
     // and can author pairs if this edit introduces the asymmetry. Deliberately NOT
     // awaited — it is one worker round trip and the chip must open on this frame.
@@ -11596,6 +12592,7 @@ export class ModelToolController {
       // the tier the drag axis came from.
       edgeOpAuto: this.fillet.auto,
       edgeOpAxisSource: this.filletAxisSource,
+      edgeOpAttachment: this.edgeOpAttachment,
       // The CHAMFER second leg (`null` = equal-leg, SCHEMA §7.3) — the only
       // readout e2e has of a value whose chip shows `=` rather than a number.
       edgeOpDistance2: this.fillet.distance2,
@@ -11609,6 +12606,10 @@ export class ModelToolController {
       edgeOpReferenceFaceError: this.chamferPairsError,
       edgeOpReferenceFlipped: this.chamferFlipped,
       shellPhase: this.shell.phase,
+      // Which rung of the §5 fallback ladder the thickness handle attached on —
+      // `wall` is a supported retained wall, everything below it is a labelled
+      // proxy at an attributable point. Never the world origin.
+      shellAttachment: this.shellAttachment,
       // OffsetFace (SCHEMA §7.3). `offsetFaceCount` is the FROZEN CLOSURE, not the
       // picks — the difference between the two is the whole point of the
       // `PrepareOffsetFace` handshake and has no other visible surface.
@@ -11617,6 +12618,7 @@ export class ModelToolController {
       offsetFacePhase: this.offsetFace.phase,
       offsetDistance: this.offsetFace.distance,
       offsetDistanceType: this.offsetFace.distanceType,
+      offsetAttachment: this.offsetAttachment,
       offsetChainTangent: this.offsetFace.chainTangentFaces,
       offsetFaceCount: this.offsetFaces.length,
       offsetPrepared: this.offsetPreparedRevision,
@@ -12006,7 +13008,10 @@ export class ModelToolController {
     this.filletDraft = null;
     this.filletRangeGen = null;
     this.filletOutward = null;
-    this.filletTangent = null;
+    this.filletPath = null;
+    this.edgeOpAttachment = "none";
+    this.edgeOpSharedCount = 1;
+    this.filletPickedKeys = new Set();
     this.filletAxisSource = "screen";
     this.filletEditFeatureId = undefined;
     this.filletFromFace = null;
@@ -12041,8 +13046,7 @@ export class ModelToolController {
     this.deps.engine.hideValueHandle();
     this.shell = shellInit();
     this.shellFaces = [];
-    this.shellEditFeatureId = undefined;
-    this.shellStoredParams = undefined;
+    this.clearShellAttachment();
     this.abandonGesture("shell");
     toolChipStore.getState().clear();
     this.updateDebug(); // republish the now-idle phase (a tool switch has no other hook)

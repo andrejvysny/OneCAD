@@ -10,10 +10,12 @@ import { render as testingRender, screen, act, fireEvent, within } from "@testin
 import type { ReactElement } from "react";
 import { ModelToolChips } from "./ModelToolChips";
 import { ActiveToolInspector } from "@/features/inspector/ActiveToolInspector";
+import { ModelOperationBar } from "./ModelOperationBar";
 import { MODEL_TOOL_CHIP_ID, toolChipStore } from "@/stores/toolChipStore";
 import { setViewportEngine } from "@/viewport/engineBridge";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import { toolChipPlacementStore } from "@/stores/toolChipPlacementStore";
+import { toolStore } from "@/stores/toolStore";
 import { viewportWorkAreaStore } from "@/stores/viewportWorkAreaStore";
 import { documentStore } from "@/stores/documentStore";
 import { activeToolPresentation } from "@/tools/modelTools/activeToolPresentation";
@@ -48,8 +50,13 @@ function publishProfileContext(tool: "extrudeDepth" | "revolveAngle"): void {
   });
 }
 
-/** Render the compact viewport primary alongside inspector-only secondaries. */
-const render = (ui: ReactElement) => testingRender(<>{ui}<ActiveToolInspector /></>);
+/*
+ * The production shell region: the compact parameter label under test, the
+ * stable operation strip that owns Done/Cancel and the mode readouts, and the
+ * inspector that owns every secondary control (spec §4.1–4.3).
+ */
+const render = (ui: ReactElement) =>
+  testingRender(<>{ui}<ModelOperationBar /><ActiveToolInspector /></>);
 const renderExtrudeUi = () => render(<ModelToolChips />);
 
 /** Fillet secondaries are always docked in the active-tool inspector. */
@@ -83,7 +90,7 @@ describe("ModelToolChips (M6b)", () => {
 
   it("renders nothing while cleared", () => {
     render(<ModelToolChips />);
-    expect(screen.queryByRole("button", { name: "Confirm" })).toBeNull();
+    expect(screen.queryByTestId("model-operation-done")).toBeNull();
   });
 
   it("shell chip renders a mm dimension input", () => {
@@ -104,9 +111,9 @@ describe("ModelToolChips (M6b)", () => {
     );
     const input = screen.getByLabelText("Thickness (mm)");
     fireEvent.change(input, { target: { value: "12abc" } });
-    expect(screen.getByTestId("chip-confirm")).toBeDisabled();
+    expect(screen.getByTestId("model-operation-done")).toBeDisabled();
     fireEvent.keyDown(input, { key: "Enter" });
-    fireEvent.click(screen.getByTestId("chip-confirm"));
+    fireEvent.click(screen.getByTestId("model-operation-done"));
     expect(onConfirm).not.toHaveBeenCalled();
     expect(toolChipStore.getState().validation).toMatchObject({
       status: "invalid",
@@ -140,7 +147,7 @@ describe("ModelToolChips (M6b)", () => {
 
     // Spacing input present + ✓ commits (U2: one confirm vocabulary).
     expect(screen.getByLabelText("Spacing (mm)")).toHaveValue("20");
-    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    fireEvent.click(screen.getByTestId("model-operation-done"));
     expect(onConfirm).toHaveBeenCalledTimes(1);
   });
 
@@ -275,7 +282,7 @@ describe("ModelToolChips (M6b)", () => {
     expect(screen.getByRole("button", { name: "Z" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByLabelText("Angle (°)")).toHaveValue("360");
     expect(screen.getByText("°")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    fireEvent.click(screen.getByTestId("model-operation-done"));
     expect(handlers.onConfirm).toHaveBeenCalled();
   });
 
@@ -288,7 +295,7 @@ describe("ModelToolChips (M6b)", () => {
     expect(screen.getByRole("button", { name: "XY" })).toHaveAttribute("aria-pressed", "true");
     fireEvent.click(screen.getByRole("button", { name: "YZ" }));
     expect(onPlane).toHaveBeenCalledWith("YZ");
-    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    fireEvent.click(screen.getByTestId("model-operation-done"));
     expect(onConfirm).toHaveBeenCalled();
   });
 
@@ -364,9 +371,9 @@ describe("ModelToolChips (M6b)", () => {
     fireEvent.click(sym);
     expect(h.onSymmetric).toHaveBeenCalledWith(true);
 
-    fireEvent.click(screen.getByTestId("chip-confirm"));
+    fireEvent.click(screen.getByTestId("model-operation-done"));
     expect(h.onConfirm).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByTestId("chip-cancel"));
+    fireEvent.click(screen.getByTestId("model-operation-cancel"));
     expect(h.onCancel).toHaveBeenCalledTimes(1);
   });
 
@@ -388,7 +395,7 @@ describe("ModelToolChips (M6b)", () => {
     act(() => toolChipStore.getState().showExtrude(10, WORLD, extrudeHandlers(), { showSymmetric: false }));
     expect(screen.queryByTestId("chip-symmetric")).toBeNull();
     // ✓ / ✕ still present in a re-edit cluster.
-    expect(screen.getByTestId("chip-confirm")).toBeInTheDocument();
+    expect(screen.getByTestId("model-operation-done")).toBeInTheDocument();
   });
 
   it("chip-input Enter applies the typed value THEN confirms, firing onConfirm once", () => {
@@ -461,9 +468,9 @@ describe("ModelToolChips (M6b)", () => {
     act(() => toolChipStore.getState().setCount(1));
     expect(screen.getByTestId("chip-region-count")).toHaveTextContent("1 region");
 
-    fireEvent.click(screen.getByTestId("chip-confirm"));
+    fireEvent.click(screen.getByTestId("model-operation-done"));
     expect(onConfirm).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByTestId("chip-cancel"));
+    fireEvent.click(screen.getByTestId("model-operation-cancel"));
     expect(onCancel).toHaveBeenCalledTimes(1);
   });
 
@@ -482,13 +489,17 @@ describe("ModelToolChips (M6b)", () => {
     return onEdgeOp;
   };
 
-  it("the fillet badge tracks the active operation", () => {
+  // The operation IDENTITY moved to the stable strip (spec §4.2); the label
+  // keeps only the short parameter identity beside the number.
+  it("the strip title and the label prefix track the active operation", () => {
     render(<ModelToolChips />);
     edgeOpCluster({ edgeOp: "Fillet" });
-    expect(screen.getByTestId("chip-edgeop-badge")).toHaveTextContent("Fillet");
+    expect(screen.getByTestId("model-operation-title")).toHaveTextContent("Fillet");
+    expect(screen.getByTestId("chip-edgeop-prefix")).toHaveTextContent("R");
 
     act(() => toolChipStore.getState().setEdgeOp("Chamfer"));
-    expect(screen.getByTestId("chip-edgeop-badge")).toHaveTextContent("Chamfer");
+    expect(screen.getByTestId("model-operation-title")).toHaveTextContent("Chamfer");
+    expect(screen.getByTestId("chip-edgeop-prefix")).toHaveTextContent("C");
   });
 
   it("armed edge-op cluster renders the segments behind `⋯`, marks the active op, and dispatches", () => {
@@ -720,7 +731,13 @@ describe("ModelToolChips (M6b)", () => {
     expect(onChamferAngle).toHaveBeenCalledWith(null);
   });
 
-  it("an angle outside (0, 180) is REVERTED, never authored", () => {
+  /*
+   * H7, spec §8.2 (was: "REVERTED, never authored"). An out-of-domain angle is
+   * kept RAW-INVALID exactly like the second-leg field: the text the user is
+   * correcting stays on screen, nothing is authored, and confirm is blocked.
+   * Reverting under them threw the correction away.
+   */
+  it("an angle outside (0, 180) stays raw-invalid, never authored", () => {
     render(<ModelToolChips />);
     const onChamferAngle = vi.fn();
     edgeOpCluster({ edgeOp: "Chamfer", chamferAngleDeg: 30, onChamferAngle });
@@ -729,8 +746,15 @@ describe("ModelToolChips (M6b)", () => {
       fireEvent.change(angleField(), { target: { value: bad } });
       fireEvent.blur(angleField());
       expect(onChamferAngle).not.toHaveBeenCalled();
-      expect(angleField().value).toBe("30");
+      expect(angleField().value).toBe(bad);
+      expect(toolChipStore.getState().validation).toMatchObject({ status: "invalid", draft: bad });
+      expect(screen.getByTestId("model-operation-done")).toBeDisabled();
     }
+    // …and correcting it clears the flag and authors the value.
+    fireEvent.change(angleField(), { target: { value: "45" } });
+    fireEvent.blur(angleField());
+    expect(onChamferAngle).toHaveBeenCalledWith(45);
+    expect(toolChipStore.getState().validation).toEqual({ status: "valid" });
   });
 
   it("the two chamfer modes clear each other VISIBLY (last authored wins)", () => {
@@ -785,7 +809,7 @@ describe("ModelToolChips (M6b)", () => {
     act(() =>
       toolChipStore.getState().showShell(2, WORLD, vi.fn(), { onConfirm: vi.fn(), onCancel: vi.fn() }),
     );
-    expect(screen.getByTestId("chip-confirm")).toBeInTheDocument(); // the armed cluster IS up
+    expect(screen.getByTestId("model-operation-done")).toBeInTheDocument(); // the armed cluster IS up
     expect(screen.queryByTestId("chip-fillet-overflow")).toBeNull();
   });
 
@@ -799,8 +823,8 @@ describe("ModelToolChips (M6b)", () => {
       toolChipStore.getState().setPreviewLifecycle({ status: "applying", arm: 1, request: 1 }),
     );
 
-    fireEvent.click(screen.getByTestId("chip-cancel"));
-    expect(screen.getByTestId("chip-cancel")).toBeDisabled();
+    fireEvent.click(screen.getByTestId("model-operation-cancel"));
+    expect(screen.getByTestId("model-operation-cancel")).toBeDisabled();
     expect(onCancel).not.toHaveBeenCalled();
   });
 
@@ -815,9 +839,9 @@ describe("ModelToolChips (M6b)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Change axis" }));
     expect(h.onResetAxis).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByTestId("chip-confirm"));
+    fireEvent.click(screen.getByTestId("model-operation-done"));
     expect(h.onConfirm).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByTestId("chip-cancel"));
+    fireEvent.click(screen.getByTestId("model-operation-cancel"));
     expect(h.onCancel).toHaveBeenCalledTimes(1);
   });
 
@@ -854,7 +878,7 @@ describe("ModelToolChips (M6b)", () => {
 
     expect(screen.getByTestId("chip-revolve-axis-hint")).toHaveTextContent("Pick an axis line");
     expect(screen.queryByLabelText("Dimension value")).toBeNull(); // no value yet to edit
-    fireEvent.click(screen.getByTestId("chip-cancel"));
+    fireEvent.click(screen.getByTestId("model-operation-cancel"));
     expect(onCancel).toHaveBeenCalledTimes(1);
   });
 });
@@ -1057,7 +1081,7 @@ describe("offset-face cluster", () => {
     render(<ModelToolChips />);
     show(handlers());
     expect(screen.getByLabelText("Offset (mm)")).toHaveValue("2.5");
-    expect(screen.getByTestId("chip-confirm")).toBeInTheDocument();
+    expect(screen.getByTestId("model-operation-done")).toBeInTheDocument();
     expect(screen.getByTestId("chip-offset-tangent")).toHaveAttribute("aria-pressed", "true");
   });
 
@@ -1230,7 +1254,13 @@ describe("ModelToolChips anchor lifecycle", () => {
     });
   });
 
-  it("moves the same focused draft node through dock and return without confirming", () => {
+  /*
+   * Spec §10.4 / acceptance T23. The explicit placement actions live in the
+   * strip's More menu now (`ModelOperationBar.test.tsx` pins the menu wiring);
+   * what this pins is the reparenting contract behind them — the SAME input
+   * node, its partial draft, its caret and its focus survive the move.
+   */
+  it("moves the same focused draft node, caret intact, through dock and return", () => {
     const { mountChip } = trackingEngine();
     const onConfirm = vi.fn();
     render(<ModelToolChips />);
@@ -1240,25 +1270,35 @@ describe("ModelToolChips anchor lifecycle", () => {
         onCancel: vi.fn(),
       }),
     );
-    const input = screen.getByLabelText("Thickness (mm)");
+    const input = screen.getByLabelText("Thickness (mm)") as HTMLInputElement;
     fireEvent.change(input, { target: { value: "12abc" } });
     input.focus();
+    input.setSelectionRange(2, 2);
 
-    fireEvent.click(screen.getByRole("button", { name: "Dock" }));
+    act(() => toolChipPlacementStore.getState().dock());
     expect(screen.getByLabelText("Thickness (mm)")).toBe(input);
     expect(input).toHaveValue("12abc");
+    expect(input.selectionStart).toBe(2);
     expect(document.activeElement).toBe(input);
     expect(screen.getByTestId("tool-chip-dock")).toContainElement(screen.getByTestId("model-tool-chip"));
-    expect(screen.getByTestId("operation-hud")).toHaveClass("w-full", "max-w-full", "min-w-0");
+    expect(screen.getByTestId("operation-label")).toHaveClass("w-full", "max-w-full", "min-w-0");
 
-    fireEvent.click(screen.getByRole("button", { name: "Return" }));
+    act(() => toolChipPlacementStore.getState().anchor());
     expect(screen.getByLabelText("Thickness (mm)")).toBe(input);
+    expect(input).toHaveValue("12abc");
+    expect(input.selectionStart).toBe(2);
     expect(document.activeElement).toBe(input);
     expect(mountChip).toHaveBeenCalledTimes(2);
     expect(onConfirm).not.toHaveBeenCalled();
   });
 
-  it("auto-docks when measured chrome leaves no safe footprint", () => {
+  /*
+   * N8 / spec §4.4. The automatic fallback is TRANSIENT: it moves the label to
+   * the stable slot for this arm and leaves the user's own preference alone.
+   * It used to write `dock()` straight into the preference, and nothing ever
+   * wrote it back — one bad fit made every later operation open docked.
+   */
+  it("falls back to the stable slot WITHOUT writing the placement preference", () => {
     const { mountChip } = trackingEngine();
     viewportWorkAreaStore.getState().setViewport({ x: 0, y: 0, width: 320, height: 240 });
     viewportWorkAreaStore.getState().publishRegion("toolbar", { x: 0, y: 0, width: 320, height: 240 });
@@ -1268,10 +1308,32 @@ describe("ModelToolChips anchor lifecycle", () => {
       onPlacementStatus: (status: { width: number; height: number; fits: boolean | null }) => void;
     };
     act(() => placement.onPlacementStatus({ width: 280, height: 80, fits: false }));
-    expect(toolChipPlacementStore.getState().placement.mode).toBe("docked");
+    expect(toolChipPlacementStore.getState().autoFallback).toBe(true);
+    expect(toolChipPlacementStore.getState().placement).toEqual({ mode: "anchored" });
+    expect(screen.getByTestId("tool-chip-dock")).toContainElement(screen.getByTestId("model-tool-chip"));
+
+    // …and it releases the moment a placement fits again.
+    act(() => placement.onPlacementStatus({ width: 40, height: 20, fits: true }));
+    expect(toolChipPlacementStore.getState().autoFallback).toBe(false);
   });
 
-  it("auto-docks when a measured content change has no valid final placement", () => {
+  it("an EXPLICIT dock does write the preference, and outlives a fitting arm", () => {
+    const { mountChip } = trackingEngine();
+    viewportWorkAreaStore.getState().setViewport({ x: 0, y: 0, width: 800, height: 600 });
+    render(<ModelToolChips />);
+    act(() => toolChipStore.getState().showShell(2, WORLD, vi.fn()));
+    act(() => toolChipPlacementStore.getState().dock());
+    const placement = mountChip.mock.calls[0][3] as {
+      onPlacementStatus: (status: { width: number; height: number; fits: boolean | null }) => void;
+    };
+
+    act(() => placement.onPlacementStatus({ width: 40, height: 20, fits: true }));
+
+    expect(toolChipPlacementStore.getState().placement).toEqual({ mode: "docked" });
+    expect(toolChipPlacementStore.getState().autoFallback).toBe(false);
+  });
+
+  it("falls back when a measured content change has no valid final placement", () => {
     const { mountChip } = trackingEngine();
     viewportWorkAreaStore.getState().setViewport({ x: 0, y: 0, width: 800, height: 600 });
     render(<ModelToolChips />);
@@ -1282,7 +1344,8 @@ describe("ModelToolChips anchor lifecycle", () => {
 
     act(() => placement.onPlacementStatus({ width: 500, height: 80, fits: false }));
 
-    expect(toolChipPlacementStore.getState().placement.mode).toBe("docked");
+    expect(toolChipPlacementStore.getState().autoFallback).toBe(true);
+    expect(toolChipPlacementStore.getState().placement).toEqual({ mode: "anchored" });
   });
 
   it("keeps the focused draft node when its anchor moves behind the camera", () => {
@@ -1293,17 +1356,19 @@ describe("ModelToolChips anchor lifecycle", () => {
     const placement = mountChip.mock.calls[0][3] as {
       onPlacementStatus: (status: { width: number; height: number; fits: boolean | null }) => void;
     };
-    const input = screen.getByLabelText("Thickness (mm)");
+    const input = screen.getByLabelText("Thickness (mm)") as HTMLInputElement;
     fireEvent.change(input, { target: { value: "12abc" } });
     input.focus();
+    input.setSelectionRange(2, 2);
 
     act(() => placement.onPlacementStatus({ width: 280, height: 80, fits: true }));
-    expect(toolChipPlacementStore.getState().placement.mode).toBe("anchored");
+    expect(toolChipPlacementStore.getState().autoFallback).toBe(false);
     act(() => placement.onPlacementStatus({ width: 280, height: 80, fits: false }));
 
-    expect(toolChipPlacementStore.getState().placement.mode).toBe("docked");
+    expect(toolChipPlacementStore.getState().autoFallback).toBe(true);
     expect(screen.getByLabelText("Thickness (mm)")).toBe(input);
     expect(input).toHaveValue("12abc");
+    expect(input.selectionStart).toBe(2);
     expect(document.activeElement).toBe(input);
   });
 
@@ -1322,9 +1387,11 @@ describe("ModelToolChips anchor lifecycle", () => {
 
     act(() => placement.onPlacementStatus({ width: 280, height: 80, fits: null }));
 
+    expect(toolChipPlacementStore.getState().autoFallback).toBe(false);
     expect(toolChipPlacementStore.getState().placement.mode).toBe("anchored");
   });
 
+  /* Spec §4.4: an old placement choice must never make the controls disappear. */
   it("temporarily returns a dock preference to its anchor when no dock host exists", () => {
     const { mountChip } = trackingEngine();
     toolChipPlacementStore.getState().dock();
@@ -1333,7 +1400,31 @@ describe("ModelToolChips anchor lifecycle", () => {
 
     expect(toolChipPlacementStore.getState().placement.mode).toBe("docked");
     expect(mountChip).toHaveBeenCalledOnce();
-    expect(screen.getByRole("button", { name: "Return" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Thickness (mm)")).toBeInTheDocument();
+  });
+
+  /*
+   * …and a HIDDEN host is not a host (N8). `InspectorPanel` renders the dock
+   * target `hidden` + `inert` while the drawer is closed, so a stale docked
+   * preference would have moved the only primary field out of reach.
+   */
+  it("refuses a dock host that is inert behind a closed drawer", () => {
+    const { mountChip } = trackingEngine();
+    toolChipPlacementStore.getState().dock();
+    testingRender(
+      <>
+        <ModelToolChips />
+        <div hidden inert>
+          <ActiveToolInspector />
+        </div>
+      </>,
+    );
+    act(() => toolChipStore.getState().showShell(2, WORLD, vi.fn()));
+
+    expect(mountChip).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("tool-chip-dock")).not.toContainElement(
+      screen.getByTestId("model-tool-chip"),
+    );
   });
 
   it("captures a physical drag, commits screen placement on release, and never confirms", () => {
@@ -1341,6 +1432,8 @@ describe("ModelToolChips anchor lifecycle", () => {
     const onConfirm = vi.fn();
     render(<ModelToolChips />);
     act(() => toolChipStore.getState().showShell(2, WORLD, vi.fn(), { onConfirm, onCancel: vi.fn() }));
+    // The grip exists only during the explicit "Place label" action (§4.4).
+    act(() => toolChipPlacementStore.getState().setPlacing(true));
     const handle = screen.getByTestId("chip-drag-handle");
     const host = screen.getByTestId("model-tool-chip");
     vi.spyOn(host, "getBoundingClientRect").mockReturnValue({
@@ -1368,6 +1461,8 @@ describe("ModelToolChips anchor lifecycle", () => {
     const { setChipScreenPosition } = trackingEngine();
     render(<ModelToolChips />);
     act(() => toolChipStore.getState().showShell(2, WORLD, vi.fn()));
+    // The grip exists only during the explicit "Place label" action (§4.4).
+    act(() => toolChipPlacementStore.getState().setPlacing(true));
     const handle = screen.getByTestId("chip-drag-handle");
     let captured = false;
     handle.setPointerCapture = vi.fn(() => { captured = true; });
@@ -1385,6 +1480,8 @@ describe("ModelToolChips anchor lifecycle", () => {
     toolChipPlacementStore.getState().floatAt(300, 200);
     render(<ModelToolChips />);
     act(() => toolChipStore.getState().showShell(2, WORLD, vi.fn()));
+    // The grip exists only during the explicit "Place label" action (§4.4).
+    act(() => toolChipPlacementStore.getState().setPlacing(true));
     const handle = screen.getByTestId("chip-drag-handle");
     let captured = false;
     handle.setPointerCapture = vi.fn(() => { captured = true; });
@@ -1401,6 +1498,8 @@ describe("ModelToolChips anchor lifecycle", () => {
     const { setChipScreenPosition } = trackingEngine();
     render(<ModelToolChips />);
     act(() => toolChipStore.getState().showShell(2, WORLD, vi.fn()));
+    // The grip exists only during the explicit "Place label" action (§4.4).
+    act(() => toolChipPlacementStore.getState().setPlacing(true));
     const handle = screen.getByTestId("chip-drag-handle");
     handle.setPointerCapture = vi.fn();
     handle.hasPointerCapture = vi.fn(() => false);
@@ -1511,7 +1610,7 @@ describe("ModelToolChips anchor lifecycle", () => {
       const input = screen.getByLabelText("Thickness (mm)");
       input.focus();
       fireEvent.change(input, { target: { value: "12abc" } });
-      fireEvent.click(screen.getByRole("button", { name: "Dock" }));
+      act(() => toolChipPlacementStore.getState().dock());
       expect(screen.getByLabelText("Thickness (mm)")).toBe(input);
       expect(document.activeElement).toBe(input);
       fireEvent.keyDown(input, { key: "Escape" });
@@ -1532,6 +1631,76 @@ describe("ModelToolChips anchor lifecycle", () => {
       expect(onConfirm).toHaveBeenCalledTimes(1);
     });
 
+    /*
+     * Acceptance T24. Done sits in the strip now, so the press blurs the label's
+     * field on its way in — with `commitOnBlur` off, the value the operation
+     * commits has to be the one live preview already pushed, exactly once.
+     */
+    it("Done immediately after typing confirms the LATEST value, exactly once", () => {
+      const onConfirm = vi.fn();
+      render(<ModelToolChips />);
+      const onValue = liveShell(2, { onConfirm });
+      act(() => {
+        seedToolContextProjection();
+        toolChipStore.getState().setContext("shellThickness", {
+          tool: "shellThickness",
+          kind: "faces",
+          affectedBodies: [{ bodyId: "body1" }],
+          faces: [],
+        });
+      });
+      const input = screen.getByLabelText("Thickness (mm)");
+      input.focus();
+      fireEvent.change(input, { target: { value: "25" } });
+
+      fireEvent.blur(input);
+      fireEvent.click(screen.getByTestId("model-operation-done"));
+
+      expect(onValue).toHaveBeenLastCalledWith(25);
+      expect(onConfirm).toHaveBeenCalledTimes(1);
+      expect(toolChipStore.getState().value).toBe(25);
+    });
+
+    /*
+     * …and the redisplay token must NOT fire on mount: a type-to-enter seed is
+     * the one moment the field's own text outranks the store, and re-displaying
+     * `value` over it would eat the character the user typed on the canvas.
+     */
+    it("a type-to-enter seed survives the field being created", () => {
+      render(<ModelToolChips />);
+      liveShell(20);
+      act(() => toolChipStore.getState().beginPrimaryEntry("7"));
+      expect(screen.getByLabelText("Thickness (mm)")).toHaveValue("7");
+    });
+
+    /*
+     * H7 (measured natively): a drag whose clamped value lands back ON the number
+     * a refused draft had previewed left that draft on screen — "0.05 mm" over a
+     * live 39.99 mm — because the echo guard cannot tell the drag from the
+     * field's own echo. A gesture ending always re-displays the live value.
+     */
+    it("a drag always leaves the field showing the live value, abandoned draft dropped", () => {
+      render(<ModelToolChips />);
+      // A REFUSING controller: `onValue` never writes the store, so the value
+      // prop never moves off 20 and the guard below has nothing to react to.
+      act(() =>
+        toolChipStore.getState().showShell(20, WORLD, vi.fn(), { onConfirm: vi.fn(), onCancel: vi.fn() }),
+      );
+      const input = screen.getByLabelText("Thickness (mm)");
+      input.focus();
+      fireEvent.change(input, { target: { value: "0.05" } });
+      expect(input).toHaveValue("0.05");
+
+      // A drag that clamps back to 20: the store writes the SAME number the
+      // field last previewed, so neither the prop nor the echo guard moves.
+      act(() => toolStore.setState({ gestureLive: true }));
+      act(() => toolChipStore.getState().setValue(20));
+      act(() => toolStore.setState({ gestureLive: false }));
+
+      expect(input).toHaveValue("20");
+      expect(toolChipStore.getState().rawInputErrors).toEqual({});
+    });
+
     it("Enter does not confirm while another field holds a settled raw error", () => {
       const onConfirm = vi.fn();
       render(<ModelToolChips />);
@@ -1548,7 +1717,7 @@ describe("ModelToolChips anchor lifecycle", () => {
       render(<ModelToolChips />);
       liveShell(2, { onConfirm });
       act(() => toolChipStore.getState().setRetainedCommitFailure("Kernel refused"));
-      fireEvent.click(screen.getByTestId("chip-confirm"));
+      fireEvent.click(screen.getByTestId("model-operation-done"));
       fireEvent.keyDown(screen.getByLabelText("Thickness (mm)"), { key: "Enter" });
       expect(onConfirm).not.toHaveBeenCalled();
     });
@@ -1666,8 +1835,8 @@ describe("compact extrude chip and inspector", () => {
     show();
     expect(screen.getByLabelText("Depth (mm)")).toBeInTheDocument();
     expect(screen.getByTestId("chip-mode-badge")).toHaveTextContent("New");
-    expect(screen.getByTestId("chip-confirm")).toBeInTheDocument();
-    expect(screen.getByTestId("chip-cancel")).toBeInTheDocument();
+    expect(screen.getByTestId("model-operation-done")).toBeInTheDocument();
+    expect(screen.getByTestId("model-operation-cancel")).toBeInTheDocument();
     expect(screen.queryByTestId("chip-overflow")).toBeNull();
     expect(screen.getByTestId("active-tool-inspector")).toBeInTheDocument();
     expect(screen.getByTestId("chip-end-blind")).toBeInTheDocument();
@@ -1692,7 +1861,7 @@ describe("compact extrude chip and inspector", () => {
     fireEvent.click(screen.getByTestId("chip-bool-cut"));
     expect(h.onBooleanMode).toHaveBeenCalledWith("Cut");
     expect(document.activeElement).toBe(depth);
-    fireEvent.click(screen.getByTestId("chip-confirm"));
+    fireEvent.click(screen.getByTestId("model-operation-done"));
     expect(h.onConfirm).toHaveBeenCalledTimes(1);
   });
 
@@ -1701,16 +1870,16 @@ describe("compact extrude chip and inspector", () => {
     const h = show();
     const draft = within(screen.getByTestId("chip-draft-input")).getByLabelText("Draft angle (°)");
     fireEvent.change(draft, { target: { value: "12abc" } });
-    expect(screen.getByTestId("chip-confirm")).toBeDisabled();
+    expect(screen.getByTestId("model-operation-done")).toBeDisabled();
     fireEvent.change(screen.getByLabelText("Depth (mm)"), { target: { value: "22" } });
-    expect(screen.getByTestId("chip-confirm")).toBeDisabled();
+    expect(screen.getByTestId("model-operation-done")).toBeDisabled();
     expect(toolChipStore.getState().rawInputErrors).toHaveProperty("extrude-draft");
-    fireEvent.click(screen.getByTestId("chip-confirm"));
+    fireEvent.click(screen.getByTestId("model-operation-done"));
     expect(h.onConfirm).not.toHaveBeenCalled();
     expect(h.onDraftAngle).not.toHaveBeenCalled();
     expect(toolChipStore.getState().draftAngleDeg).toBe(0);
     fireEvent.change(draft, { target: { value: "12" } });
-    expect(screen.getByTestId("chip-confirm")).toBeEnabled();
+    expect(screen.getByTestId("model-operation-done")).toBeEnabled();
   });
 });
 
@@ -1782,7 +1951,7 @@ describe("critical mode closure", () => {
       toolChipStore.getState().showMirror("XY", WORLD, { onPlane: vi.fn(), onConfirm: vi.fn() }),
     );
     expect(screen.getByRole("button", { name: "XY" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Confirm" })).toBeInTheDocument();
+    expect(screen.getByTestId("model-operation-done")).toBeInTheDocument();
     expect(screen.getByTestId("chip-mirror-fuse")).toHaveAttribute("aria-pressed", "false");
     expect(screen.queryByRole("button", { name: /Union/i })).toBeNull();
   });
@@ -1797,7 +1966,7 @@ describe("critical mode closure", () => {
         onConfirm: vi.fn(),
       }),
     );
-    expect(screen.getByRole("button", { name: "Confirm" })).toBeInTheDocument();
+    expect(screen.getByTestId("model-operation-done")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Fuse|Union/i })).toBeNull();
   });
 
@@ -1811,7 +1980,7 @@ describe("critical mode closure", () => {
         onConfirm: vi.fn(),
       }),
     );
-    expect(screen.getByRole("button", { name: "Confirm" })).toBeInTheDocument();
+    expect(screen.getByTestId("model-operation-done")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Fuse|Union/i })).toBeNull();
   });
 });

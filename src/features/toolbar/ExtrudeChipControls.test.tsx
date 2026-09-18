@@ -125,7 +125,7 @@ function makeEngineMock() {
     setPreviewTint: vi.fn(),
     setExtrudeHandleHover: vi.fn(),
     hitExtrudeHandle: vi.fn(() => false),
-    screenRay: vi.fn(() => ({ origin: [0, 0, 100] as const, dir: [0, 0, -1] as const })),
+    screenRay: vi.fn(() => ({ origin: [0, 0, 100] as const, dir: [1, 0, 0] as const })),
     hideExtrudePreview: vi.fn(),
     isExtrudePreviewVisible: vi.fn(() => false),
     setPreviewBody: vi.fn(),
@@ -231,9 +231,9 @@ describe("Flip negates the armed extrude depth exactly once (T3)", () => {
     toolChipStore.getState().onFlip?.();
     expect(toolChipStore.getState().value).toBeLessThan(0);
 
-    // The parallel-ray fallback in `axisDepthFromRay` projects this fake ray onto
-    // the normal axis at +100; `forceExtrudeGrab` zeroes the grab basis, so the
-    // drag reports that projection verbatim.
+    // The fake ray runs PERPENDICULAR to the normal axis, so `axisDepthFromRay`
+    // reads its origin's height on that axis, +100; `forceExtrudeGrab` zeroes the
+    // grab basis, so the drag reports that projection verbatim.
     controller.forceExtrudeGrab();
     container.dispatchEvent(
       new MouseEvent("pointermove", { clientX: 5, clientY: 5, buttons: 1, bubbles: true }),

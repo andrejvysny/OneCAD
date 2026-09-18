@@ -1095,13 +1095,20 @@ export function offsetFaceStep(s: OffsetFaceFsm, e: OffsetFaceEvent): OffsetFace
       if (!offsetValueInDomain(e.distance, s.distanceType)) return { state: s, effect: "none" };
       return { state: { ...s, distance: e.distance, valueError: false }, effect: "update" };
     case "grab":
-      // Only a free `Offset` has a drag at all — there is no arrow for the absolute
-      // types, so a grab there is a caller bug rather than a phase to enter.
-      if (s.phase !== "armed" || s.distanceType !== "Offset") return { state: s, effect: "none" };
+      // H10: every distance type drags. SCHEMA §7.3 fixes the reference each
+      // absolute one is read against, so each has an explicit starting value the
+      // handle is seated at — "no zero to drag from" was never the requirement.
+      if (s.phase !== "armed") return { state: s, effect: "none" };
       return { state: { ...s, phase: "dragging" }, effect: "none" };
     case "drag":
-      if (s.phase !== "dragging" || s.distanceType !== "Offset") return { state: s, effect: "none" };
+      if (s.phase !== "dragging") return { state: s, effect: "none" };
       if (!Number.isFinite(e.distance)) return { state: s, effect: "none" };
+      // The DOMAIN is what an absolute type still owes: a Radius is positive. The
+      // frame is refused whole rather than clamped (the module rule), so the value
+      // HOLDS at the boundary — and since every frame is computed from the grab
+      // delta rather than accumulated, reversing recovers on the next sample. No
+      // `valueError`: a drag past the edge is a gesture, not a mistyped number.
+      if (!offsetValueInDomain(e.distance, s.distanceType)) return { state: s, effect: "none" };
       return { state: { ...s, distance: e.distance, touched: true, valueError: false }, effect: "update" };
     case "setDistance":
       if (!offsetEditable(s)) return { state: s, effect: "none" };

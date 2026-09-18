@@ -1,19 +1,20 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import {
+  bodyOptions,
+  clickAt,
+  clickAtClient,
+  confirmOperation,
+  dofPill,
+  enterSketchViaPlanePicker,
+  extrudeDebug,
+  findExtrudeHandle,
+  getSketchSnapshot,
   hideSeedSketches,
   openEditorDebug,
-  enterSketchViaPlanePicker,
-  waitForCameraSettled,
-  selectSketchTool,
-  clickAt,
-  dofPill,
-  bodyOptions,
-  findExtrudeHandle,
-  extrudeDebug,
-  getSketchSnapshot,
   planePointToClient,
-  clickAtClient,
+  selectSketchTool,
+  waitForCameraSettled,
 } from "./helpers";
 
 /*
@@ -133,7 +134,7 @@ async function drawAndExtrude(page: Page): Promise<string> {
     }
   }).toPass({ timeout: 10_000, intervals: [200, 400, 800] });
   await page.mouse.up();
-  await page.getByTestId("chip-confirm").click();
+  await confirmOperation(page);
   await expect(bodyOptions(page)).toHaveCount(2);
 
   const rows = await features(page);

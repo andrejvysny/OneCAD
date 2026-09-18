@@ -1,6 +1,12 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
-import { openEditorDebug, getFeatureLabels } from "./helpers";
+import {
+  cancelOperation,
+  confirmControl,
+  confirmOperation,
+  getFeatureLabels,
+  openEditorDebug,
+} from "./helpers";
 import { seedSelection, toolPhases, dragInCanvas } from "./modelToolHelpers";
 
 /*
@@ -41,7 +47,7 @@ async function armShell(page: Page): Promise<void> {
   await seedSelection(page, [FACE_REF]);
   await page.getByRole("button", { name: "Shell", exact: true }).click();
   await expect.poll(async () => (await toolPhases(page))?.shellPhase).toBe("armed");
-  await expect(page.getByTestId("chip-confirm")).toBeVisible();
+  await expect(confirmControl(page)).toBeVisible();
 }
 
 test("Shell asks for faces when nothing is selected", async ({ page }) => {
@@ -64,7 +70,7 @@ test("the Shell toolbar button grays out and explains why when nothing is select
   // (no debug-surface tool switch ever fires, so assert on the DOM instead).
   await shellButton.click({ force: true });
   await expect(shellButton).toHaveAttribute("aria-pressed", "false");
-  await expect(page.getByTestId("chip-confirm")).toHaveCount(0);
+  await expect(confirmControl(page)).toHaveCount(0);
 });
 
 test("a released shell drag stays ARMED and commits nothing", async ({ page }) => {
@@ -75,7 +81,7 @@ test("a released shell drag stays ARMED and commits nothing", async ({ page }) =
   await dragInCanvas(page, 180, 120);
 
   await expect.poll(async () => (await toolPhases(page))?.shellPhase).toBe("armed");
-  await expect(page.getByTestId("chip-confirm")).toBeVisible();
+  await expect(confirmControl(page)).toBeVisible();
   await expect(page.getByRole("button", { name: "Shell", exact: true })).toHaveAttribute(
     "aria-pressed",
     "true",
@@ -89,7 +95,7 @@ test("the visible ✓ commits the armed shell", async ({ page }) => {
   const before = await getFeatureLabels(page);
 
   await dragInCanvas(page, 180, 120);
-  await page.getByTestId("chip-confirm").click();
+  await confirmOperation(page);
 
   await expect.poll(async () => (await getFeatureLabels(page)).length).toBe(before.length + 1);
   expect((await getFeatureLabels(page)).at(-1)).toBe("Shell");
@@ -97,7 +103,7 @@ test("the visible ✓ commits the armed shell", async ({ page }) => {
     "aria-pressed",
     "true",
   );
-  await expect(page.getByTestId("chip-confirm")).toHaveCount(0);
+  await expect(confirmControl(page)).toHaveCount(0);
 });
 
 /*
@@ -125,9 +131,9 @@ test("a two-face selection arms ONE shell over both and commits a single row", a
   await expect.poll(async () => (await toolPhases(page))?.shellPhase).toBe("armed");
   // Plural, and counted: a one-pick regression reads "Shell 1 face".
   await expect(page.getByText(/Shell 2 faces/)).toBeVisible();
-  await expect(page.getByTestId("chip-confirm")).toBeVisible();
+  await expect(confirmControl(page)).toBeVisible();
 
-  await page.getByTestId("chip-confirm").click();
+  await confirmOperation(page);
   await expect.poll(async () => (await toolPhases(page))?.shellPhase).toBe("idle");
   // TWO open faces are still ONE Shell feature, not one row per face.
   const after = await getFeatureLabels(page);
@@ -140,7 +146,7 @@ test("Enter commits the armed shell; ✕ cancels it with no row", async ({ page 
   await armShell(page);
   const before = await getFeatureLabels(page);
 
-  await page.getByTestId("chip-cancel").click();
+  await cancelOperation(page);
   await expect.poll(async () => (await toolPhases(page))?.shellPhase).toBe("idle");
   expect(await getFeatureLabels(page)).toEqual(before);
 

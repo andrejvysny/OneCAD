@@ -14,6 +14,7 @@
 import { describe, it, expect, vi } from "vitest";
 import * as THREE from "three";
 import { DragHandle } from "./DragHandle";
+import type { LinearHandlePath } from "@/tools/preview/handleProjection";
 import { palette } from "./palette";
 import { worldPerPixel } from "./screenScale";
 
@@ -110,19 +111,21 @@ describe("DragHandle pick envelope", () => {
     camera.position.set(0, 0, 20);
     camera.lookAt(0, 0, 0);
     camera.updateMatrixWorld();
-    const extentsFor = (direction: [number, number]) => {
-      handle.setScreenProxy(O, direction);
+    // Rolled by a real world axis, since the glyph angle now comes from the
+    // projected path and not from a hand-supplied screen direction.
+    const extentsFor = (axis: [number, number, number]) => {
+      handle.setAxis(O, new THREE.Vector3(...axis));
       handle.orient(camera, 800, 800, worldPerPixel(camera, handle.worldAnchor(), 800));
       return handle.corridorHalfExtentsPx();
     };
 
-    const vertical = extentsFor([0, -1]);
+    const vertical = extentsFor([0, 1, 0]);
     expect(vertical.x).toBeCloseTo(15, 9);
     expect(vertical.y).toBeCloseTo(20, 9);
-    const horizontal = extentsFor([1, 0]);
+    const horizontal = extentsFor([1, 0, 0]);
     expect(horizontal.x).toBeCloseTo(20, 9);
     expect(horizontal.y).toBeCloseTo(15, 9);
-    const diagonal = extentsFor([1, 1]);
+    const diagonal = extentsFor([1, 1, 0]);
     expect(diagonal.x).toBeCloseTo(35 / Math.SQRT2, 9);
     expect(diagonal.y).toBeCloseTo(35 / Math.SQRT2, 9);
   });
@@ -288,7 +291,7 @@ describe("DragHandle billboard", () => {
     const side = camera([60, 0, 0]);
     handle.orient(side, VW, VH, worldPerPixel(side, handle.worldAnchor(), VH));
     const before = along(root).clone();
-    handle.freezeStrategy("axis"); // as at grab
+    handle.freeze(handle.mapping()); // the WHOLE mapping, as at grab
 
     // Now look straight down that axis: it has NO screen direction left.
     const down = camera([0, 0, 60]);
@@ -409,49 +412,81 @@ describe("DragHandle mapping", () => {
   const tangent = new THREE.Vector3(1, 0, 1).normalize();
   const anchor = new THREE.Vector3(8, 3, -2);
 
-  it("draws the tangent-REJECTED axis for an oblique perspective edge op", () => {
+  /*
+   * β = 0 (docs/design/astra/modeling-handle-attachment.md §3). The glyph draws
+   * the TRUE projected derivative of the point that moves, with nothing rejected
+   * from it. Rejecting the projected edge tangent drew a direction H(q) cannot
+   * follow: at a 1° screen angle it rotated the drawn direction ~89° and
+   * multiplied the gain by 57.2987.
+   */
+  it("draws the RAW projected derivative for an oblique perspective edge op", () => {
     const { handle, root } = makeHandle();
     const cam = camera([40, -70, 50]);
-    handle.setAxis(anchor, outward, "forward", tangent);
+    handle.setAxis(anchor, outward);
     orient(handle, cam);
 
     const raw = screenDerivative(cam, anchor, outward);
     const t = unit2(screenDerivative(cam, anchor, tangent));
     const dot = raw[0] * t[0] + raw[1] * t[1];
-    const expected = unit2([raw[0] - dot * t[0], raw[1] - dot * t[1]]);
-    // The case is only a counterexample if rejection actually moves the axis.
+    const rejected = unit2([raw[0] - dot * t[0], raw[1] - dot * t[1]]);
     const rawDir = unit2(raw);
-    expect(Math.acos(rawDir[0] * expected[0] + rawDir[1] * expected[1])).toBeGreaterThan((10 * Math.PI) / 180);
+    // The case only means something if rejection WOULD have moved the axis.
+    expect(Math.acos(rawDir[0] * rejected[0] + rawDir[1] * rejected[1])).toBeGreaterThan((10 * Math.PI) / 180);
 
     const drawn = glyphDir(root, cam);
-    expect(drawn[0]).toBeCloseTo(expected[0], 3);
-    expect(drawn[1]).toBeCloseTo(expected[1], 3);
+    expect(drawn[0]).toBeCloseTo(rawDir[0], 3);
+    expect(drawn[1]).toBeCloseTo(rawDir[1], 3);
   });
 
   it("the glyph direction IS computeMapping's direction", () => {
     const { handle, root } = makeHandle();
     const cam = camera([40, -70, 50]);
-    handle.setAxis(anchor, outward, "forward", tangent);
+    handle.setAxis(anchor, outward);
     const mapping = handle.computeMapping(cam, VW, VH, wpp(cam, handle));
-    expect(mapping.strategy).toBe("axis");
+    expect(mapping.kind).toBe("world");
     expect(handle.mapping()).toBeNull();
 
     orient(handle, cam);
     const drawn = glyphDir(root, cam);
-    expect(drawn[0]).toBeCloseTo(mapping.direction[0], 9);
-    expect(drawn[1]).toBeCloseTo(mapping.direction[1], 9);
+    expect(drawn[0]).toBeCloseTo(mapping.kind === "disabled" ? 0 : mapping.direction[0], 9);
+    expect(drawn[1]).toBeCloseTo(mapping.kind === "disabled" ? 0 : mapping.direction[1], 9);
     expect(handle.mapping()).toEqual(mapping);
   });
 
-  it("a later setAxis without a tangent drops it", () => {
+  /*
+   * THE HANDLE MOVES (derivation §5). H(q) = E + q·b, so the attachment is a
+   * function of the value: an arrow that stays put while the radius grows is
+   * not attached to anything.
+   */
+  it("sits at H(q) and travels along the path as the value changes", () => {
     const { handle } = makeHandle();
+    const path: LinearHandlePath = { q0Mm: 0, point0Mm: [40, 40, 20], dPointDValue: [Math.SQRT1_2, Math.SQRT1_2, 0] };
+    handle.setValuePath(path, 0);
+    expect(handle.worldAnchor().toArray()).toEqual([40, 40, 20]);
+
+    handle.setValue(2);
+    const at2 = handle.worldAnchor();
+    expect(at2.x).toBeCloseTo(41.414214, 6);
+    expect(at2.y).toBeCloseTo(41.414214, 6);
+    expect(at2.z).toBeCloseTo(20, 9);
+
+    handle.setValue(0.1);
+    expect(handle.worldAnchor().x).toBeCloseTo(40 + 0.1 * Math.SQRT1_2, 9);
+  });
+
+  it("a frozen mapping is drawn VERBATIM, whatever the camera does next", () => {
+    const { handle, root } = makeHandle();
     const cam = camera([40, -70, 50]);
-    handle.setAxis(anchor, outward, "forward", tangent);
     handle.setAxis(anchor, outward);
-    const plain = handle.computeMapping(cam, VW, VH, wpp(cam, handle));
-    const raw = unit2(screenDerivative(cam, anchor, outward));
-    expect(plain.direction[0]).toBeCloseTo(raw[0], 3);
-    expect(plain.direction[1]).toBeCloseTo(raw[1], 3);
+    const frozen = handle.computeMapping(cam, VW, VH, wpp(cam, handle));
+    handle.freeze(frozen);
+    orient(handle, camera([0, 0, 90]));
+    expect(handle.mapping()).toBe(frozen);
+    const drawn = glyphDir(root, camera([0, 0, 90]));
+    if (frozen.kind === "world") {
+      expect(drawn[0]).toBeCloseTo(frozen.direction[0], 6);
+      expect(drawn[1]).toBeCloseTo(frozen.direction[1], 6);
+    }
   });
 
   it("an unfrozen end-on axis draws the vertical proxy and reports it", () => {
@@ -459,13 +494,13 @@ describe("DragHandle mapping", () => {
     handle.setAxis(O, new THREE.Vector3(1, 0, 0));
     const side = camera([0, -60, 0]);
     orient(handle, side);
-    expect(handle.mapping()!.strategy).toBe("axis");
+    expect(handle.mapping()!.kind).toBe("world");
     expect(glyphDir(root, side)[0]).toBeCloseTo(1, 6);
 
     const endOn = camera([60, 0, 0]);
     orient(handle, endOn);
-    expect(handle.mapping()!.strategy).toBe("screenProxy");
-    expect(handle.computeMapping(endOn, VW, VH, wpp(endOn, handle)).strategy).toBe("screenProxy");
+    expect(handle.mapping()!.kind).toBe("proxy");
+    expect(handle.computeMapping(endOn, VW, VH, wpp(endOn, handle)).kind).toBe("proxy");
     const drawn = glyphDir(root, endOn);
     expect(drawn[0]).toBeCloseTo(0, 6);
     expect(drawn[1]).toBeCloseTo(-1, 6);
@@ -473,70 +508,72 @@ describe("DragHandle mapping", () => {
     expect(handle.corridorHalfExtentsPx().y).toBeCloseTo(20, 6);
   });
 
-  it("a frozen axis survives per-frame setAxis and a camera turned end-on: it holds, never switches", () => {
+  it("a frozen world mapping survives per-frame setAxis and a camera turned end-on", () => {
     const { handle, root } = makeHandle();
     const axis = new THREE.Vector3(1, 0, 0);
     handle.setAxis(O, axis);
     const side = camera([0, -60, 0]);
     orient(handle, side);
-    handle.freezeStrategy("axis");
+    const frozen = handle.mapping()!;
+    expect(frozen.kind).toBe("world");
+    handle.freeze(frozen);
 
     const endOn = camera([60, 0, 0]);
     for (let i = 0; i < 3; i++) {
       handle.setAxis(O, axis, "twoWay");
       orient(handle, endOn);
     }
-    const m = handle.mapping()!;
-    expect(m.strategy).toBe("axis");
-    expect(m.pxPerWorld).toBeNull();
-    // Held at screen-right, the last angle the axis actually had.
+    // The FROZEN object keeps its gain: a re-derived projection is exactly what
+    // changes the mapping under the user's hand mid-drag.
+    expect(handle.mapping()).toBe(frozen);
     const drawn = glyphDir(root, endOn);
     expect(drawn[0]).toBeCloseTo(1, 6);
     expect(drawn[1]).toBeCloseTo(0, 6);
-    expect(m.direction[0]).toBeCloseTo(1, 6);
-    expect(m.direction[1]).toBeCloseTo(0, 6);
     expect(handle.corridorHalfExtentsPx().x).toBeCloseTo(20, 6);
     // The unfrozen classifier still reports the truth about the geometry.
-    expect(handle.computeMapping(endOn, VW, VH, wpp(endOn, handle)).strategy).toBe("screenProxy");
+    expect(handle.computeMapping(endOn, VW, VH, wpp(endOn, handle)).kind).toBe("proxy");
   });
 
   it("a frozen screen proxy persists across setAxis on a well-conditioned axis", () => {
     const { handle, root } = makeHandle();
     const axis = new THREE.Vector3(1, 0, 0);
     handle.setAxis(O, axis);
-    handle.freezeStrategy("screenProxy");
+    handle.freeze({ kind: "proxy", q0Mm: 0, direction: [0, -1], mmPerPx: 0.5, reason: "poorScreenSensitivity" });
     const side = camera([0, -60, 0]);
     for (let i = 0; i < 3; i++) {
       handle.setAxis(O, axis);
       orient(handle, side);
     }
-    expect(handle.mapping()).toMatchObject({ strategy: "screenProxy", direction: [0, -1], pxPerWorld: null });
+    expect(handle.mapping()).toMatchObject({ kind: "proxy", direction: [0, -1], mmPerPx: 0.5 });
     const drawn = glyphDir(root, side);
     expect(drawn[0]).toBeCloseTo(0, 6);
     expect(drawn[1]).toBeCloseTo(-1, 6);
   });
 
-  it("reset() clears the freeze and the tangent", () => {
+  it("reset() clears the freeze", () => {
     const { handle } = makeHandle();
     const cam = camera([40, -70, 50]);
-    handle.setAxis(anchor, outward, "forward", tangent);
-    handle.freezeStrategy("screenProxy");
+    handle.setAxis(anchor, outward);
+    handle.freeze({ kind: "proxy", q0Mm: 0, direction: [0, -1], mmPerPx: 1, reason: "noScale" });
     handle.reset();
     orient(handle, cam);
-    expect(handle.mapping()!.strategy).toBe("axis");
+    const m = handle.mapping()!;
+    expect(m.kind).toBe("world");
     const raw = unit2(screenDerivative(cam, anchor, outward));
-    expect(handle.mapping()!.direction[0]).toBeCloseTo(raw[0], 3);
-    expect(handle.mapping()!.direction[1]).toBeCloseTo(raw[1], 3);
+    if (m.kind !== "disabled") {
+      expect(m.direction[0]).toBeCloseTo(raw[0], 3);
+      expect(m.direction[1]).toBeCloseTo(raw[1], 3);
+    }
   });
 
-  it("an explicit screen proxy maps as a proxy along its own direction", () => {
+  it("an explicit screen proxy maps up the screen at the anchor's own scale", () => {
     const { handle } = makeHandle();
     const cam = camera([40, -70, 50]);
-    handle.setScreenProxy(O, [1, 0]);
+    handle.setScreenProxy(O, 3);
     expect(handle.computeMapping(cam, VW, VH, wpp(cam, handle))).toMatchObject({
-      strategy: "screenProxy",
-      direction: [1, 0],
-      pxPerWorld: null,
+      kind: "proxy",
+      direction: [0, -1],
+      q0Mm: 3,
     });
   });
 });

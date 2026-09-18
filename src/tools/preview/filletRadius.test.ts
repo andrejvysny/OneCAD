@@ -3,13 +3,13 @@ import {
   formatMm,
   radiusFromValueText,
   DEFAULT_FILLET_RADIUS,
-  signedValueFromDrag,
-  SCREEN_UP_AXIS,
   clampToEdgeOpRange,
+  edgeParameterPath,
+  edgeParameterWitness,
   type EdgeOpRangeGuard,
-  type ScreenAxis,
-  type RadiusDragOpts,
 } from "./filletRadius";
+import { handlePointAt } from "./handleProjection";
+import type { Vec3 } from "./depthProjection";
 
 describe("formatMm", () => {
   // W2-A: the chip now shares the sketch-dimension formatter (≤3dp, trailing
@@ -58,32 +58,6 @@ describe("radiusFromValueText (fillet re-edit seed)", () => {
 });
 
 // ── FILLET-CHAMFER-UNIFY W0 additions below (additive only) ────────────────
-
-describe("signedValueFromDrag", () => {
-  // `dy` is the RAW screen delta (clientY − downY), so SCREEN_UP_AXIS makes an
-  // upward drag positive. The floor is the caller's (`flooredDrag`), never this.
-  const grid: Array<{ start: number; dy: number; opts: RadiusDragOpts; expected: number }> = [
-    { start: 2, dy: -10, opts: { worldPerPx: 0.5 }, expected: 7 }, // up 10px
-    { start: 5, dy: 6, opts: { worldPerPx: 0.5 }, expected: 2 }, // down 6px
-    { start: 0, dy: -10, opts: { worldPerPx: 1, sensitivity: 2 }, expected: 20 },
-    { start: 10, dy: -3, opts: { worldPerPx: 2, sensitivity: 0.5 }, expected: 13 },
-  ];
-
-  it("maps travel along SCREEN_UP_AXIS 1:1 with world units, times the gain", () => {
-    for (const { start, dy, opts, expected } of grid) {
-      expect(signedValueFromDrag(start, 0, dy, SCREEN_UP_AXIS, opts)).toBeCloseTo(expected, 9);
-    }
-  });
-
-  it("returns a negative result UNCLAMPED", () => {
-    expect(signedValueFromDrag(2, 0, 100, SCREEN_UP_AXIS, { worldPerPx: 0.5 })).toBeCloseTo(-48, 9);
-  });
-
-  it("ignores travel perpendicular to the axis", () => {
-    const axis: ScreenAxis = { x: Math.SQRT1_2, y: Math.SQRT1_2 };
-    expect(signedValueFromDrag(5, 10, -10, axis, { worldPerPx: 0.5 })).toBeCloseTo(5, 9);
-  });
-});
 
 /*
  * WP4 — the measured range guard. Five confidence rungs, five obligations. The
@@ -176,5 +150,83 @@ describe("clampToEdgeOpRange", () => {
   it("enforces nothing when nonMonotonic carries no intervals", () => {
     const g = guard({ confidence: "nonMonotonic", feasibleIntervals: [] });
     expect(clampToEdgeOpRange(1000, g).clamped).toBe(false);
+  });
+});
+
+/*
+ * H8 — the Fillet/Chamfer PARAMETER construction
+ * (docs/design/astra/modeling-handle-attachment.md §5, §7).
+ *
+ * A generic geometric fillet attachment is not available: for a certified
+ * convex 90° corner the true blend midpoint moves −(√2−1)·q·b, and that sign
+ * REVERSES on the concave corner. So the handle is the parameter point
+ * H(q) = E + q·b and the witness says so — it measures the construction's
+ * length, not a blend contact.
+ */
+describe("edgeParameterPath", () => {
+  const E: Vec3 = [40, 40, 20];
+  const B: Vec3 = [Math.SQRT1_2, Math.SQRT1_2, 0];
+
+  it("is H(q) = E + q·b, anchored at q = 0", () => {
+    const path = edgeParameterPath(E, B)!;
+    expect(path.q0Mm).toBe(0);
+    expect(path.point0Mm).toEqual(E);
+    expect(path.dPointDValue[0]).toBeCloseTo(Math.SQRT1_2, 12);
+    expect(path.dPointDValue[1]).toBeCloseTo(Math.SQRT1_2, 12);
+    expect(path.dPointDValue[2]).toBeCloseTo(0, 12);
+  });
+
+  it("§6 convex box edge: q = 2 mm puts the handle at (41.414214, 41.414214, 20)", () => {
+    const h = handlePointAt(edgeParameterPath(E, B)!, 2);
+    expect(h[0]).toBeCloseTo(41.414214, 6);
+    expect(h[1]).toBeCloseTo(41.414214, 6);
+    expect(h[2]).toBeCloseTo(20, 12);
+  });
+
+  it("is NOT the blend midpoint: that moves −0.828427·b, the opposite way", () => {
+    const h = handlePointAt(edgeParameterPath(E, B)!, 2);
+    const blendMidpoint = 39.414214; // E − (√2−1)·q·b, the real contact at r = 2
+    expect(h[0]).not.toBeCloseTo(blendMidpoint, 3);
+    // …and the parameter handle travels +2 mm along b, the full construction.
+    expect(Math.hypot(h[0] - E[0], h[1] - E[1], h[2] - E[2])).toBeCloseTo(2, 12);
+  });
+
+  it("§6 four-edge tangent chain: the 45° representative reaches (15.5563, 15.5563, 20)", () => {
+    const anchor: Vec3 = [20 * Math.SQRT1_2, 20 * Math.SQRT1_2, 20];
+    const h = handlePointAt(edgeParameterPath(anchor, [Math.SQRT1_2, Math.SQRT1_2, 0])!, 2);
+    expect(h[0]).toBeCloseTo(15.556349, 6);
+    expect(h[1]).toBeCloseTo(15.556349, 6);
+    expect(h[2]).toBeCloseTo(20, 12);
+  });
+
+  it("normalizes a non-unit outward, and refuses a degenerate one", () => {
+    const path = edgeParameterPath(E, [0, 0, 7])!;
+    expect(path.dPointDValue).toEqual([0, 0, 1]);
+    expect(edgeParameterPath(E, [0, 0, 0])).toBeNull();
+    expect(edgeParameterPath(E, [NaN, 0, 0])).toBeNull();
+    expect(edgeParameterPath([NaN, 0, 0], [0, 0, 1])).toBeNull();
+  });
+});
+
+describe("edgeParameterWitness", () => {
+  const path = edgeParameterPath([40, 40, 20], [Math.SQRT1_2, Math.SQRT1_2, 0])!;
+
+  it("is a PARAMETER construction spanning E → H(q), never a measured reference", () => {
+    const w = edgeParameterWitness("Fillet", path, 2, 1);
+    expect(w.meaning).toBe("parameterConstruction");
+    expect(w.label).toBe("Radius parameter");
+    expect(w.fromMm).toEqual([40, 40, 20]);
+    expect(w.toMm[0]).toBeCloseTo(41.414214, 6);
+  });
+
+  it("names the Chamfer quantity by its own noun", () => {
+    expect(edgeParameterWitness("Chamfer", path, 2, 1).label).toBe("Chamfer distance parameter");
+  });
+
+  it("says how many edges share the parameter when the closure grew", () => {
+    expect(edgeParameterWitness("Fillet", path, 2, 4).label).toBe("Radius parameter · shared by 4 edges");
+    expect(edgeParameterWitness("Chamfer", path, 2, 2).label).toBe(
+      "Chamfer distance parameter · shared by 2 edges",
+    );
   });
 });

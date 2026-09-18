@@ -269,7 +269,7 @@ async function clickConfirmButton(page: Page): Promise<void> {
   await expect(async () => {
     if (await laneClosed()) return;
     const rect = await page.evaluate(() => {
-      const confirm = document.querySelector('button[data-testid="chip-confirm"]');
+      const confirm = document.querySelector('button[data-testid="model-operation-done"]');
       return confirm ? confirm.getBoundingClientRect().toJSON() : null;
     });
     expect(rect).not.toBeNull();

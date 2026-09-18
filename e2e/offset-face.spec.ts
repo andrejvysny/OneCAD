@@ -1,6 +1,13 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
-import { openEditorDebug, findFaceOnBody, getFeatureLabels } from "./helpers";
+import {
+  cancelOperation,
+  confirmControl,
+  confirmOperation,
+  findFaceOnBody,
+  getFeatureLabels,
+  openEditorDebug,
+} from "./helpers";
 import { seedSelection, toolPhases, expectArmed } from "./modelToolHelpers";
 
 /*
@@ -69,7 +76,7 @@ async function armOffsetFace(
   await seedSelection(page, faces ?? [await realFace(page)]);
   await offsetTool(page).click();
   await expectArmed(page, "offsetFace");
-  await expect(page.getByTestId("chip-confirm")).toBeVisible();
+  await expect(confirmControl(page)).toBeVisible();
 }
 
 test("Offset face asks for faces when nothing is selected", async ({ page }) => {
@@ -92,7 +99,7 @@ test("a CROSS-BODY selection is refused and never arms", async ({ page }) => {
   // name, so the tool refuses rather than binding to whichever came first.
   await expect(page.getByText(/must belong to the same body/)).toBeVisible();
   expect((await toolPhases(page))?.offsetFacePhase).toBe("idle");
-  await expect(page.getByTestId("chip-confirm")).toHaveCount(0);
+  await expect(confirmControl(page)).toHaveCount(0);
 });
 
 test("the Offset face toolbar button grays out and explains why for a cross-body selection", async ({ page }) => {
@@ -105,7 +112,7 @@ test("the Offset face toolbar button grays out and explains why for a cross-body
   // (no debug-surface tool switch ever fires, so assert on the DOM instead).
   await offsetTool(page).click({ force: true });
   await expect(offsetTool(page)).toHaveAttribute("aria-pressed", "false");
-  await expect(page.getByTestId("chip-confirm")).toHaveCount(0);
+  await expect(confirmControl(page)).toHaveCount(0);
 });
 
 test("arming freezes the handshake's closure and records its revision", async ({ page }) => {
@@ -133,7 +140,7 @@ test("a single face offers the distance types; a MULTI-face closure offers none"
   await expect(page.getByTestId("chip-offset-tangent")).toBeVisible();
 
   const face = await realFace(page);
-  await page.getByTestId("chip-cancel").click();
+  await cancelOperation(page);
   await armOffsetFace(page, [face, SECOND_FACE]);
   expect((await toolPhases(page))?.offsetFaceCount).toBe(2);
   // SCHEMA §7.3: only `Offset` admits a multi-face set, and one segment is not a
@@ -157,7 +164,7 @@ test("the visible ✓ commits the armed offset", async ({ page }) => {
   await armOffsetFace(page);
   const before = await getFeatureLabels(page);
 
-  await page.getByTestId("chip-confirm").click();
+  await confirmOperation(page);
 
   await expect.poll(async () => (await getFeatureLabels(page)).length).toBe(before.length + 1);
   // Matches `dto.rs default_label` — the row must not read "OffsetFace".
@@ -166,7 +173,7 @@ test("the visible ✓ commits the armed offset", async ({ page }) => {
     "aria-pressed",
     "true",
   );
-  await expect(page.getByTestId("chip-confirm")).toHaveCount(0);
+  await expect(confirmControl(page)).toHaveCount(0);
 });
 
 test("Enter commits the armed offset; ✕ cancels it with no row", async ({ page }) => {
@@ -174,7 +181,7 @@ test("Enter commits the armed offset; ✕ cancels it with no row", async ({ page
   await armOffsetFace(page);
   const before = await getFeatureLabels(page);
 
-  await page.getByTestId("chip-cancel").click();
+  await cancelOperation(page);
   await expect.poll(async () => (await toolPhases(page))?.offsetFacePhase).toBe("idle");
   expect(await getFeatureLabels(page)).toEqual(before);
   // The handshake is dropped with the arm: a stale frozen closure must never

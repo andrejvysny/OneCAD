@@ -63,7 +63,8 @@ import { currentDpr, MAX_DPR } from "./dpr";
 import type { DraftEntity } from "@/tools/sketch/toolMachine";
 import { PreviewMesh } from "./PreviewMesh";
 import { DragHandle, type DragHandleMode } from "./DragHandle";
-import type { HandleMapping, HandleStrategy } from "@/tools/preview/handleProjection";
+import { ValueWitnessLayer } from "./ValueWitnessLayer";
+import type { FrozenMapping, LinearHandlePath, ValueWitness } from "@/tools/preview/handleProjection";
 import { TransformGizmo, type GizmoHit } from "./TransformGizmo";
 import { RevolvePreview, type AxisCandidate } from "./RevolvePreview";
 import { PlanePicker, type PickablePlane } from "./PlanePicker";
@@ -317,6 +318,8 @@ export class ViewportEngine {
   // Model-tool previews (F-WP7).
   private previewMesh: PreviewMesh | null = null; // L1 extrude prism
   private dragHandle: DragHandle | null = null;
+  /** The armed value tool's witness segment + label (H8). Built on first use. */
+  private valueWitness: ValueWitnessLayer | null = null;
   private transformGizmo: TransformGizmo | null = null; // placement drag gizmo (WP-B W2)
   /** Where the placement gizmo currently sits, for screen-bounds queries (U5). */
   private transformGizmoOrigin: Vec3 | null = null;
@@ -585,6 +588,7 @@ export class ViewportEngine {
     this.previewMesh?.refreshColors();
     this.revolvePreview?.refreshColors();
     this.dragHandle?.refreshColors();
+    this.valueWitness?.refreshColors();
     this.transformGizmo?.refreshColors();
     // Preview bodies only. The COMMITTED bodies' library belongs to MeshIngest,
     // which the engine cannot reach — ViewportRoot refreshes that one.
@@ -1782,41 +1786,60 @@ export class ViewportEngine {
    * {@link hideValueHandle} on its cancel path, or the next tool inherits a
    * floating arrow.
    *
-   * `tangent` is an edge op's world edge tangent at `origin`: the handle then
-   * draws, and {@link valueHandleMapping} reports, the tangent-REJECTED axis.
    */
-  showValueHandle(origin: Vec3, dir: Vec3, tangent?: Vec3): void {
+  showValueHandle(origin: Vec3, dir: Vec3): void {
     if (this.disposed) return;
-    if (!this.dragHandle) {
-      this.dragHandle = new DragHandle({ root: this.interactionRoot, invalidate: () => this.invalidate() });
-    }
+    const handle = this.ensureDragHandle();
     // The instance is SHARED with extrude, which drives a two-way mode and a
     // destructive tint. A value tool must never inherit either: OffsetFace always
     // passes `dir = +axis` even for a negative distance, so a flipped red arrow
     // would be a lie about the direction it is going to move the face.
-    this.dragHandle.reset();
-    this.dragHandle.setAxis(
-      new THREE.Vector3().fromArray(origin),
-      new THREE.Vector3().fromArray(dir),
-      "forward",
-      tangent ? new THREE.Vector3().fromArray(tangent) : null,
-    );
-    this.dragHandle.setScale(this.planePixelWorld());
-    this.dragHandle.setVisible(true);
+    handle.reset();
+    handle.setAxis(new THREE.Vector3().fromArray(origin), new THREE.Vector3().fromArray(dir));
+    handle.setScale(this.planePixelWorld());
+    handle.setVisible(true);
     this.invalidate();
   }
 
-  /** Visible vertical proxy for a scalar with no certified world-axis mapping. */
-  showScreenValueHandle(origin: Vec3): void {
+  /**
+   * Attach the shared arrow to a parameter PATH and seat it at `valueMm`.
+   *
+   * The difference from {@link showValueHandle} is that the handle now knows
+   * where it goes for every value, so {@link setValueHandleValue} can move it as
+   * the number changes instead of leaving it pinned at the arm point.
+   */
+  showValueHandlePath(path: LinearHandlePath, valueMm: number): void {
     if (this.disposed) return;
+    const handle = this.ensureDragHandle();
+    handle.reset();
+    handle.setValuePath(path, valueMm);
+    handle.setScale(this.planePixelWorld());
+    handle.setVisible(true);
+    this.invalidate();
+  }
+
+  /** Move the shared arrow to `H(valueMm)` on the path it was last given. */
+  setValueHandleValue(valueMm: number): void {
+    if (this.disposed) return;
+    this.dragHandle?.setValue(valueMm);
+  }
+
+  /** Visible vertical proxy for a scalar with no certified world-axis mapping. */
+  showScreenValueHandle(origin: Vec3, valueMm = 0): void {
+    if (this.disposed) return;
+    const handle = this.ensureDragHandle();
+    handle.reset();
+    handle.setScreenProxy(new THREE.Vector3().fromArray(origin), valueMm);
+    handle.setScale(this.planePixelWorld());
+    handle.setVisible(true);
+    this.invalidate();
+  }
+
+  private ensureDragHandle(): DragHandle {
     if (!this.dragHandle) {
       this.dragHandle = new DragHandle({ root: this.interactionRoot, invalidate: () => this.invalidate() });
     }
-    this.dragHandle.reset();
-    this.dragHandle.setScreenProxy(new THREE.Vector3().fromArray(origin));
-    this.dragHandle.setScale(this.planePixelWorld());
-    this.dragHandle.setVisible(true);
-    this.invalidate();
+    return this.dragHandle;
   }
 
   /**
@@ -1901,6 +1924,9 @@ export class ViewportEngine {
   hideValueHandle(): void {
     this.dragHandle?.setVisible(false);
     this.dragHandle?.setHover(false);
+    // The witness only ever describes the value this handle drags, so the two
+    // share a lifetime — separate hide calls would drift apart eventually.
+    this.valueWitness?.hide();
     this.invalidate();
   }
 
@@ -1911,13 +1937,13 @@ export class ViewportEngine {
 
   /**
    * The mapping the shared drag arrow offers under the camera as it is NOW —
-   * axis or screen proxy, direction and gain (`handleProjection.HandleMapping`).
+   * world, screen proxy or disabled (`handleProjection.FrozenMapping`).
    * Computed fresh from the current camera, viewport size and the anchor's own
    * `worldPerPixel`, never read off the last rendered frame, so a grab right
    * after a camera move classifies what the user sees. Ignores any freeze.
    * Null while the arrow is hidden.
    */
-  valueHandleMapping(): HandleMapping | null {
+  valueHandleMapping(): FrozenMapping | null {
     const handle = this.dragHandle;
     if (!handle?.visible) return null;
     const { width, height } = this.viewportSize();
@@ -1926,13 +1952,45 @@ export class ViewportEngine {
   }
 
   /**
-   * Freeze the arrow's drawn strategy at grab (`null` releases it), so glyph,
-   * pick and gesture keep one mapping for the whole drag even as the camera or
-   * the per-frame axis update would reclassify it.
+   * Freeze the WHOLE mapping at grab (`null` releases it), so glyph, pick and
+   * gesture keep one direction, one gain and one valid interval for the entire
+   * drag even as the camera or the per-frame axis update would reclassify it.
    */
-  freezeValueHandleStrategy(strategy: HandleStrategy | null): void {
-    this.dragHandle?.freezeStrategy(strategy);
+  freezeValueHandle(mapping: FrozenMapping | null): void {
+    this.dragHandle?.freeze(mapping);
     this.invalidate();
+  }
+
+  /**
+   * Draw the armed tool's witness segment(s) and the claim each label makes.
+   *
+   * The renderer never invents either: `meaning` and `label` are computed where
+   * the evidence is (see `filletRadius.edgeParameterWitness`), because a segment
+   * drawn without its claim reads as a measurement it is not. A tool may hand
+   * over SEVERAL — an OffsetFace `Total` draws the prepared reference thickness
+   * beside its target, and only one of those two is a kernel measurement.
+   */
+  showValueWitness(witness: ValueWitness | readonly ValueWitness[]): void {
+    if (this.disposed) return;
+    if (!this.valueWitness) {
+      this.valueWitness = new ValueWitnessLayer({
+        root: this.interactionRoot,
+        overlay: this.overlayDriver,
+        overlayEl: this.overlayEl,
+        invalidate: () => this.invalidate(),
+      });
+    }
+    this.valueWitness.show(witness);
+  }
+
+  /** Hide the witness segment and its label. */
+  hideValueWitness(): void {
+    this.valueWitness?.hide();
+  }
+
+  /** True while the witness segment is on screen (gate / introspection probe). */
+  isValueWitnessVisible(): boolean {
+    return this.valueWitness?.visible ?? false;
   }
 
   /** Set the live extrude depth on the L1 prism(s) (symmetric grows both ways). */
@@ -2624,6 +2682,8 @@ export class ViewportEngine {
     this.previewMesh = null;
     this.dragHandle?.dispose();
     this.dragHandle = null;
+    this.valueWitness?.dispose();
+    this.valueWitness = null;
     this.transformGizmo?.dispose();
     this.transformGizmo = null;
     this.revolvePreview?.dispose();

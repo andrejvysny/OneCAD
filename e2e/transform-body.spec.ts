@@ -1,6 +1,15 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
-import { openEditorDebug, extrudeDebug, getFeatureLabels, bodyOptions } from "./helpers";
+import {
+  bodyOptions,
+  cancelControl,
+  cancelOperation,
+  confirmControl,
+  confirmOperation,
+  extrudeDebug,
+  getFeatureLabels,
+  openEditorDebug,
+} from "./helpers";
 import { seedSelection, findGizmoHandle, dragFromTo, findFacePoint, clickAt } from "./modelToolHelpers";
 
 /*
@@ -125,7 +134,7 @@ async function armTransform(page: Page, ...bodyIds: string[]): Promise<void> {
 async function typeAndConfirm(page: Page, value: string): Promise<void> {
   await chipInput(page).fill(value);
   await chipInput(page).blur();
-  await chip(page).getByTestId("chip-confirm").click();
+  await confirmOperation(page);
   await expect(page.getByTestId("model-tool-chip")).toHaveCount(0);
 }
 
@@ -171,8 +180,8 @@ test("t arms the placement cluster on a selected body", async ({ page }) => {
   await expect(settings(page).getByTestId("chip-transform-rotate")).toHaveAttribute("aria-pressed", "false");
   await expect(axisButton(page, "X")).toHaveAttribute("aria-pressed", "true");
   await expect(chipInput(page)).toHaveValue("0");
-  await expect(chip(page).getByTestId("chip-confirm")).toBeVisible();
-  await expect(chip(page).getByTestId("chip-cancel")).toBeVisible();
+  await expect(confirmControl(page)).toBeVisible();
+  await expect(cancelControl(page)).toBeVisible();
 });
 
 test("t with nothing selected asks for a body and arms nothing", async ({ page }) => {
@@ -304,7 +313,7 @@ test("✕ cancels an armed placement with no row and no motion", async ({ page }
   await armTransform(page, BODY);
   await chipInput(page).fill("30");
   await chipInput(page).blur();
-  await chip(page).getByTestId("chip-cancel").click();
+  await cancelOperation(page);
 
   await expect(page.getByTestId("model-tool-chip")).toHaveCount(0);
   expect(await getFeatureLabels(page)).toEqual(rowsBefore);
@@ -397,7 +406,7 @@ test("the gizmo appears with the armed placement and disappears with it", async 
   await findGizmoHandle(page, { kind: "plane", axis: "Z" });
   await findGizmoHandle(page, { kind: "ring", axis: "Z" });
 
-  await chip(page).getByTestId("chip-cancel").click();
+  await cancelOperation(page);
   await expect.poll(async () => (await placement(page)).gizmo).toBe(false);
 });
 

@@ -3,10 +3,15 @@
  *
  * The two rules worth a test file of their own:
  *
- *  1. THE DRAG BELONGS TO `Offset`. `Total`/`Radius`/`Diameter` are absolute
- *     values with no zero to drag from, so a `drag` there must be INERT — not
- *     re-scaled, not partially applied. A drag silently reinterpreted as a
- *     diameter would author a number the user never typed.
+ *  1. EVERY DISTANCE TYPE DRAGS (H10). `Total`/`Radius`/`Diameter` were inert
+ *     here on the grounds that an absolute value has "no zero to drag from" —
+ *     but SCHEMA §7.3 fixes the reference each one is read against
+ *     (`d = σ(distance − R)` for a Radius), so what they need is a starting
+ *     VALUE, which is exactly what the handle is seated at. What the reducer
+ *     still owes them is their DOMAIN: an absolute dimension is positive, and a
+ *     drag that leaves the domain is refused like a typed one — the value HOLDS
+ *     at its last valid number and is never clamped into one the user never
+ *     asked for.
  *  2. NOTHING IS CLAMPED (SCHEMA §7.3 is explicit). An out-of-domain entry is
  *     REJECTED — the state keeps its last valid value and `valueError` goes true —
  *     because a clamped value desynchronizes the stored param, the preview the
@@ -72,7 +77,7 @@ describe("offsetFaceStep — arm", () => {
   });
 });
 
-describe("offsetFaceStep — drag is Offset-only", () => {
+describe("offsetFaceStep — every distance type drags, inside its own domain", () => {
   it("grabs and drags a free Offset", () => {
     const grabbed = offsetFaceStep(armed(), { kind: "grab" });
     expect(grabbed.state.phase).toBe("dragging");
@@ -82,19 +87,33 @@ describe("offsetFaceStep — drag is Offset-only", () => {
     expect(dragged.state.touched).toBe(true);
   });
 
-  it("refuses a grab for every ABSOLUTE type", () => {
+  it("grabs and drags every ABSOLUTE type (H10)", () => {
     for (const distanceType of ["Total", "Radius", "Diameter"] as const) {
       const s = armed({ distanceType, chainTangentFaces: false, distance: 10 });
-      expect(offsetFaceStep(s, { kind: "grab" }).state.phase).toBe("armed");
+      const grabbed = offsetFaceStep(s, { kind: "grab" });
+      expect(grabbed.state.phase).toBe("dragging");
+      const dragged = offsetFaceStep(grabbed.state, { kind: "drag", distance: 12 });
+      expect(dragged.effect).toBe("update");
+      expect(dragged.state.distance).toBe(12);
+      expect(dragged.state.touched).toBe(true);
     }
   });
 
-  it("IGNORES a drag frame that reaches an absolute type", () => {
-    // Not re-scaled, not partially applied — inert.
+  it("HOLDS an absolute drag at its domain boundary rather than clamping it", () => {
+    // A Radius is positive. The frame is refused whole — the state keeps the last
+    // valid number, and because the controller computes every frame from the GRAB
+    // delta rather than accumulating, reversing recovers on the very next sample.
     const s: OffsetFaceFsm = { ...armed({ distanceType: "Radius", distance: 10 }), phase: "dragging" };
-    const step = offsetFaceStep(s, { kind: "drag", distance: 99 });
+    const step = offsetFaceStep(s, { kind: "drag", distance: -3 });
     expect(step.effect).toBe("none");
     expect(step.state.distance).toBe(10);
+    expect(step.state.valueError).toBe(false); // a drag past the edge is not a typo
+    expect(offsetFaceStep(s, { kind: "drag", distance: 3 }).state.distance).toBe(3);
+  });
+
+  it("still lets a signed Offset drag straight through zero", () => {
+    const dragging = offsetFaceStep(armed(), { kind: "grab" }).state;
+    expect(offsetFaceStep(dragging, { kind: "drag", distance: 0 }).state.distance).toBe(0);
   });
 
   it("ignores a non-finite drag frame", () => {

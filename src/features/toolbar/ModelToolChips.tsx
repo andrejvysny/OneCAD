@@ -1,45 +1,42 @@
 /*
- * ModelToolChips — the floating overlay chips for the model tools (F-WP7 +
- * M6b): extrude depth, fillet radius, revolve angle, the boolean op picker, and
- * the M6b shell-thickness / linear-pattern / circular-pattern / mirror chips.
+ * ModelToolChips — the COMPACT PARAMETER LABEL for an armed model operation
+ * (spec §4.1, review R05).
+ *
+ * It holds exactly one thing: the parameter's identity, its value and its unit —
+ * `23.09 mm`, `Total 18 mm`, `R 2 mm`, `65°`, `Spacing 20 mm`. Operation title,
+ * mode readouts, result summary, More and the single Done/Cancel pair belong to
+ * `ModelOperationBar`; targets, secondary parameters and detailed validation
+ * belong to `ActiveToolInspector`. It used to carry all of that plus a drag grip
+ * and a Dock/Return row, which is what R05 calls "the main source of floating
+ * clutter"; placement now lives behind the strip's More menu, and the grip
+ * appears only during an explicit "Place label".
+ *
  * Content is React; POSITIONING is imperative — an engine-owned host node is
  * registered with the HTML overlay driver so it tracks a world anchor every
  * frame with no React re-render.
  *
  * The host node is created once (never part of React's managed layout); the
  * engine appends it to the overlay and the driver transforms it. We `createPortal`
- * the chip content INTO that host, so React only manages the content, never the
- * moved node — avoiding the "removeChild: not a child" reconciliation crash.
- *
- * The multi-control chips (boolean op, patterns, mirror) are intentionally
- * minimal button rows — a proper op popover / gizmo lands with the param-dialog
- * work (design TODO acknowledged).
+ * the label content INTO that host, so React only manages the content, never the
+ * moved node — avoiding the "removeChild: not a child" reconciliation crash, and
+ * letting the same input node survive being reparented into the inspector with
+ * its draft, caret, validity and focus intact (spec §10.4).
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "@/ui/cn";
 import { DimensionInput } from "@/features/sketch/DimensionInput";
 import { GearChipCluster } from "./GearChipCluster";
-import {
-  acceptCount,
-  PATTERN_COUNT_MAX,
-  PATTERN_COUNT_MIN,
-  PATTERN_STEPPER_MAX,
-} from "@/tools/modelTools/modelToolMachine";
 import { useToolChipStore, toolChipStore, MODEL_TOOL_CHIP_ID } from "@/stores/toolChipStore";
 import { LENGTH_SUFFIX } from "@/units/format";
 import { useViewportEngine } from "@/viewport/engineBridge";
-import type { BooleanOperation, OffsetDistanceType } from "@/ipc/types";
-import type {
-  AlignPhase,
-  PatternAxis,
-  MirrorPlane,
-  TransformMode,
-} from "@/tools/modelTools/modelToolMachine";
 import { activeToolPresentation } from "@/tools/modelTools/activeToolPresentation";
 import { useToolChipPlacement, toolChipPlacementStore } from "@/stores/toolChipPlacementStore";
 import { useViewportWorkArea } from "@/stores/viewportWorkAreaStore";
+import { useInspectorLayoutStore } from "@/stores/inspectorLayoutStore";
+import { useToolStore } from "@/stores/toolStore";
 import { useToolChipDockHost } from "./toolChipDockBridge";
+import { requestConfirm } from "./requestConfirm";
 
 const CHIP_ID = MODEL_TOOL_CHIP_ID;
 
@@ -65,458 +62,21 @@ const CHIP_GROUP_LABEL: Record<string, string> = {
   booleanOp: "Boolean operation",
 };
 
-export const BOOLEAN_OPS: BooleanOperation[] = ["Union", "Cut", "Intersect"];
-export const PATTERN_AXES: PatternAxis[] = ["X", "Y", "Z"];
-export const MIRROR_PLANES: MirrorPlane[] = ["XY", "XZ", "YZ"];
-
-/** The armed-placement mode segments (WP-B W1). */
-const TRANSFORM_MODES: { mode: TransformMode; label: string; testid: string }[] = [
-  { mode: "move", label: "Move", testid: "chip-transform-move" },
-  { mode: "rotate", label: "Rotate", testid: "chip-transform-rotate" },
-];
-
 /**
- * The armed OFFSET-FACE distance-type segments (SCHEMA §7.3). WHICH of these are
- * rendered is decided by the controller and passed through the chip store — a
- * planar face offers `Offset`/`Total`, a cylindrical one `Offset`/`Radius`/
- * `Diameter`, and a multi-face closure only `Offset`.
- */
-const OFFSET_DISTANCE_TYPES: { type: OffsetDistanceType; label: string; testid: string }[] = [
-  { type: "Offset", label: "Offset", testid: "chip-offset-type-offset" },
-  { type: "Total", label: "Total", testid: "chip-offset-type-total" },
-  { type: "Radius", label: "Radius", testid: "chip-offset-type-radius" },
-  { type: "Diameter", label: "Diameter", testid: "chip-offset-type-diameter" },
-];
-
-/** A segmented toggle row (axis / plane pickers), styled like the boolean op row. */
-export function SegmentToggle<T extends string>({
-  options,
-  active,
-  onPick,
-  label,
-  testid,
-}: {
-  options: readonly T[];
-  active: T;
-  onPick: (v: T) => void;
-  label: string;
-  /**
-   * Per-segment `data-testid`. Playwright's e2e lane keeps using it as the
-   * stable handle regardless of accessible name (WP-U10 made the chip subtree
-   * role/name-reachable in the DOM tree, but a testid is still cheaper and more
-   * resilient for e2e than chaining a group name into a button name). Optional
-   * because the pattern/mirror chips predate that need and have no spec
-   * depending on them.
-   */
-  testid?: (v: T) => string;
-}) {
-  return (
-    <div className="flex overflow-hidden rounded-full" role="group" aria-label={label}>
-      {options.map((o) => (
-        <button
-          key={o}
-          type="button"
-          data-testid={testid?.(o)}
-          aria-pressed={o === active}
-          onClick={() => onPick(o)}
-          className={cn(
-            "px-2 py-1 text-[11.5px] font-medium",
-            o === active ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
-          )}
-        >
-          {o}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-/** A −/n/+ count stepper for the pattern instance count. */
-/**
- * `Total` — the instance count, INCLUDING the source (U6).
+ * Is the fallback slot actually usable RIGHT NOW (§4.4)?
  *
- * The label matters: "count" left it ambiguous whether 3 meant three instances
- * or three COPIES, and the two differ by exactly the body the user is looking
- * at. Pattern V2 keeps the source as instance zero, so `Total 3` is the source
- * plus two children — which is what the result summary then states.
- *
- * Range: the buttons step 2–12 (the common case, one click per instance) while
- * TYPING reaches the worker's 128. An out-of-range entry is refused, not
- * clamped, and the field says what the range is instead of silently disagreeing
- * with the preview.
+ * `InspectorPanel` renders its content — and with it the dock host — `hidden` +
+ * `inert` while the drawer is closed, so docking there would move the only
+ * primary field somewhere the user can neither see nor reach. An old placement
+ * choice must never make the controls disappear, so an unreachable host simply
+ * is not a fallback and the label stays on its anchor.
  */
-export function CountStepper({
-  count,
-  onCount,
-  resetKey,
-}: {
-  count: number;
-  onCount: (n: number) => void;
-  /** Changes only when a fresh armed pattern supplies a different handler. */
-  resetKey: unknown;
-}) {
-  const [text, setText] = useState(String(count));
-  const [rejected, setRejected] = useState(false);
-  useEffect(() => {
-    setText(String(count));
-    setRejected(false);
-    toolChipStore.getState().setRawValueValidity("pattern-count", true, String(count));
-  }, [count, resetKey]);
-
-  const applyCount = (next: number, nextText: string): void => {
-    setText(nextText);
-    setRejected(false);
-    toolChipStore.getState().setRawValueValidity("pattern-count", true, nextText);
-    onCount(next);
-  };
-
-  const submit = (raw: string): void => {
-    if (!/^\d+$/.test(raw.trim())) {
-      setRejected(true);
-      toolChipStore.getState().setRawValueValidity("pattern-count", false, raw);
-      return;
-    }
-    const n = Number(raw.trim());
-    if (acceptCount(n) === null) {
-      setRejected(true);
-      toolChipStore.getState().setRawValueValidity("pattern-count", false, raw);
-      return;
-    }
-    applyCount(n, raw);
-  };
-
-  return (
-    <div className="inline-flex items-center gap-0.5">
-      <button
-        type="button"
-        aria-label="Fewer instances"
-        disabled={count <= PATTERN_COUNT_MIN}
-        onClick={() => applyCount(count - 1, String(count - 1))}
-        className="flex h-5 w-5 items-center justify-center rounded-full bg-chip text-ink-3 hover:bg-hover-2 disabled:opacity-40"
-      >
-        −
-      </button>
-      <span className="text-[11.5px] text-ink-5">Total</span>
-      <input
-        data-testid="pattern-count"
-        aria-label="Total instances"
-        aria-invalid={rejected}
-        title={`Total instances, including the source (${PATTERN_COUNT_MIN}–${PATTERN_COUNT_MAX})`}
-        className={cn(
-          "w-8 bg-transparent text-center font-mono text-[11.5px] outline-none",
-          rejected ? "text-traffic-close" : "text-ink-2",
-        )}
-        value={text}
-        inputMode="numeric"
-        onChange={(e) => {
-          setText(e.target.value);
-          submit(e.target.value);
-        }}
-        onBlur={() => undefined}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") submit(text);
-          e.stopPropagation();
-        }}
-      />
-      <button
-        type="button"
-        aria-label="More instances"
-        disabled={count >= PATTERN_STEPPER_MAX}
-        onClick={() => applyCount(count + 1, String(count + 1))}
-        className="flex h-5 w-5 items-center justify-center rounded-full bg-chip text-ink-3 hover:bg-hover-2 disabled:opacity-40"
-      >
-        +
-      </button>
-    </div>
-  );
-}
-
-/** The ✕ half shared by every chip that offers an explicit cancel. */
-function CancelButton({ onCancel }: { onCancel?: () => void }) {
-  return (
-    <button
-      type="button"
-      data-testid="chip-cancel"
-      aria-label="Cancel"
-      disabled={!onCancel}
-      onClick={() => onCancel?.()}
-      className="rounded-full bg-chip px-2 py-1 text-[11.5px] font-medium text-ink-3 hover:bg-hover-2 disabled:pointer-events-none disabled:opacity-40"
-    >
-      ✕
-    </button>
-  );
-}
-
-/**
- * The shared ✓/✕ commit/cancel pair — the ONE confirmation vocabulary for every
- * model tool (U2).
- *
- * Boolean, both patterns and mirror used to render an accent `Apply` text button
- * wired to a separate `onApply` callback, which is also why they had no Enter
- * path: two vocabularies meant two protocols. The body-lifecycle meaning that
- * button carried belongs in the result summary, where `3 total · 2 new bodies ·
- * source retained` says more than the word "Apply" ever did.
- */
-export function ConfirmButtons({
-  onConfirm,
-  onCancel,
-  disabled = false,
-}: {
-  onConfirm?: () => void;
-  onCancel?: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <>
-      <button
-        type="button"
-        data-testid="chip-confirm"
-        aria-label="Confirm"
-        disabled={disabled}
-        onClick={() => onConfirm?.()}
-        className="rounded-full bg-accent px-2 py-1 text-[11.5px] font-medium text-on-accent hover:opacity-90 disabled:pointer-events-none disabled:opacity-40"
-      >
-        ✓
-      </button>
-      <CancelButton onCancel={onCancel} />
-    </>
-  );
-}
-
-/**
- * The `[Offset | Total | Radius | Diameter]` segment group on the armed
- * offset-face cluster (SCHEMA §7.3).
- *
- * Only the types in `allowed` are RENDERED — an unavailable one is absent, not
- * disabled: unlike the boolean modes (which disable at zero bodies and say so in
- * a title), a `Radius` on a planar face is not "not yet possible", it is not a
- * thing. Offering it greyed would suggest the face could grow a radius.
- *
- * A group with a single member renders nothing at all: one segment is not a
- * choice, and the `Offset`-only multi-face case has no decision to present.
- */
-function DistanceTypeSegments({
-  active,
-  allowed,
-  onPick,
-}: {
-  active: OffsetDistanceType;
-  allowed: readonly OffsetDistanceType[];
-  onPick: (t: OffsetDistanceType) => void;
-}) {
-  const shown = OFFSET_DISTANCE_TYPES.filter((o) => allowed.includes(o.type));
-  if (shown.length < 2) return null;
-  return (
-    <div className="flex overflow-hidden rounded-full" role="group" aria-label="Distance type">
-      {shown.map((o) => (
-        <button
-          key={o.type}
-          type="button"
-          data-testid={o.testid}
-          aria-pressed={o.type === active}
-          onClick={() => onPick(o.type)}
-          className={cn(
-            "px-2 py-1 text-[11.5px] font-medium",
-            o.type === active ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
-          )}
-        >
-          {o.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-/**
- * The tangent-chain toggle on the armed offset-face cluster. ON by default: the
- * kernel auto-propagates an offset across G1-tangent junctions and CANNOT hold a
- * tangent neighbour fixed (spike-characterized), so switching it off is a
- * declaration that the closure had better already be complete — and
- * `PrepareOffsetFace` refuses with `chainMismatch` when it is not.
- *
- * Hidden for `Total`, which is single-face with the chain off by definition.
- */
-function TangentToggle({
-  pressed,
-  disabled,
-  onToggle,
-}: {
-  pressed: boolean;
-  disabled: boolean;
-  onToggle: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      data-testid="chip-offset-tangent"
-      aria-label="Follow tangent faces"
-      aria-pressed={pressed}
-      disabled={disabled}
-      title={
-        disabled
-          ? "A Total thickness measures one face against its opposite — no chain"
-          : "Include tangent-connected faces"
-      }
-      onClick={onToggle}
-      className={cn(
-        "rounded-full px-2 py-1 text-[11.5px] font-medium",
-        pressed ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
-        disabled && "cursor-not-allowed opacity-40 hover:bg-chip",
-      )}
-    >
-      ⌒
-    </button>
-  );
-}
-
-/** Inspector-only Offset Face secondaries; the primary distance stays on the chip. */
-export function OffsetFaceInspectorControls() {
-  const distanceType = useToolChipStore((s) => s.distanceType);
-  const distanceTypes = useToolChipStore((s) => s.distanceTypes);
-  const chainTangentFaces = useToolChipStore((s) => s.chainTangentFaces);
-  return (
-    <>
-      <DistanceTypeSegments
-        active={distanceType}
-        allowed={distanceTypes}
-        onPick={(type) => toolChipStore.getState().onDistanceType?.(type)}
-      />
-      <TangentToggle
-        pressed={chainTangentFaces}
-        disabled={distanceType === "Total"}
-        onToggle={() => toolChipStore.getState().onChainTangent?.(!chainTangentFaces)}
-      />
-    </>
-  );
-}
-
-/**
- * The [Move | Rotate] segment group on the armed placement cluster (WP-B W1).
- * The mode decides what the number to its right MEANS (mm along the axis vs
- * degrees about it), so it reads left-to-right as one sentence.
- */
-export function TransformModeSegments({
-  active,
-  onPick,
-}: {
-  active: TransformMode;
-  onPick: (mode: TransformMode) => void;
-}) {
-  return (
-    <div className="flex overflow-hidden rounded-full" role="group" aria-label="Placement mode">
-      {TRANSFORM_MODES.map((m) => (
-        <button
-          key={m.mode}
-          type="button"
-          data-testid={m.testid}
-          aria-pressed={m.mode === active}
-          onClick={() => onPick(m.mode)}
-          className={cn(
-            "px-2 py-1 text-[11.5px] font-medium",
-            m.mode === active ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
-          )}
-        >
-          {m.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-/**
- * The [Copy] toggle on the armed placement cluster (WP-B W2): the visible
- * surface for `TransformBodyParams.copy`, which decides whether a placement MOVES
- * the bodies or leaves them behind. Alt at gizmo-grab writes the same FSM flag,
- * so this button is where the user can see (and undo) that choice.
- */
-export function CopyToggle({ copy, onToggle }: { copy: boolean; onToggle: (copy: boolean) => void }) {
-  return (
-    <button
-      type="button"
-      data-testid="chip-transform-copy"
-      aria-pressed={copy}
-      title="Keep the originals and place copies (Alt-drag)"
-      onClick={() => onToggle(!copy)}
-      className={cn(
-        "rounded-full px-2 py-1 text-[11.5px] font-medium",
-        copy ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
-      )}
-    >
-      Copy
-    </button>
-  );
-}
-
-/**
- * The [Fuse] toggle on the armed MIRROR cluster (WP6): the visible surface for
- * `MirrorBodyParams.fuseWithOriginal`, which decides whether the mirrored copy
- * lands as its own body or is folded back into the source.
- *
- * OFF for a fresh mirror, matching the record's own `#[serde(default)] bool` —
- * the flag was previously hard-coded there with no way to author it, so a fused
- * mirror could only be reached by re-editing a record some other lane wrote.
- */
-export function FuseToggle({ fuse, onToggle }: { fuse: boolean; onToggle: (fuse: boolean) => void }) {
-  return (
-    <button
-      type="button"
-      data-testid="chip-mirror-fuse"
-      aria-label="Fuse with original"
-      aria-pressed={fuse}
-      title="Fold the mirrored copy back into the source body"
-      onClick={() => onToggle(!fuse)}
-      className={cn(
-        "rounded-full px-2 py-1 text-[11.5px] font-medium",
-        fuse ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
-      )}
-    >
-      Fuse
-    </button>
-  );
-}
-
-/**
- * The [Align] segment on the armed placement cluster (WP-B W2.5). Unlike every
- * other segment here it does not set a value — it hands the pointer a two-pick
- * face flow, so it reads as PRESSED for as long as that flow owns the pointer
- * and the label names the pick still outstanding. That is the only feedback the
- * chip can give: the picks themselves happen in the viewport.
- */
-export function AlignButton({ phase, onStart }: { phase: AlignPhase | null; onStart: () => void }) {
-  const label = phase === "pickMoving" ? "Pick face" : phase === "pickDest" ? "Pick target" : "Align";
-  return (
-    <button
-      type="button"
-      data-testid="chip-transform-align"
-      aria-pressed={phase !== null}
-      title="Align a face flush onto a face of another body"
-      onClick={onStart}
-      className={cn(
-        "rounded-full px-2 py-1 text-[11.5px] font-medium",
-        phase !== null ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
-      )}
-    >
-      {label}
-    </button>
-  );
-}
-
-/**
- * The one gate every chip confirm entry (field Enter, ✓) passes, read FRESH from
- * the store at call time rather than from the render that built the handler.
- *
- * It refuses only what is SETTLED: `pending` validation passes because
- * `commitFillet` deliberately awaits the in-flight range check, and a stale
- * `previewLifecycle` of `invalid` is not consulted because a throttled status
- * would silently drop a corrected Enter — the controller refuses those with a
- * message instead.
- */
-export function requestConfirm(): void {
-  const s = toolChipStore.getState();
-  if (s.validation.status === "invalid") return;
-  if (s.retainedCommitFailure !== null) return;
-  if (s.previewLifecycle.status === "applying") return;
-  s.onConfirm?.();
+function isHostReachable(host: HTMLElement | null): boolean {
+  if (!host?.isConnected) return false;
+  for (let el: HTMLElement | null = host; el !== null; el = el.parentElement) {
+    if (el.hasAttribute("hidden") || el.hasAttribute("inert")) return false;
+  }
+  return true;
 }
 
 /**
@@ -540,13 +100,13 @@ export function ModelToolChips() {
   const kind = useToolChipStore((s) => s.kind);
   const value = useToolChipStore((s) => s.value);
   const count = useToolChipStore((s) => s.count);
-  const op = useToolChipStore((s) => s.op);
-  const booleanMode = useToolChipStore((s) => s.booleanMode);
   const edgeOp = useToolChipStore((s) => s.edgeOp);
   const transformMode = useToolChipStore((s) => s.transformMode);
   const distanceType = useToolChipStore((s) => s.distanceType);
   const valueError = useToolChipStore((s) => s.valueError);
   const endCondition = useToolChipStore((s) => s.endCondition);
+  const symmetric = useToolChipStore((s) => s.symmetric);
+  const axis = useToolChipStore((s) => s.axis);
   const suffix = useToolChipStore((s) => s.suffix);
   const label = useToolChipStore((s) => s.label);
   const worldPos = useToolChipStore((s) => s.worldPos);
@@ -555,21 +115,26 @@ export function ModelToolChips() {
   /** Type-to-enter arm (U3): remounting on `token` is what focuses the field, and
    *  `seed` is the character that replaces the formatted value. */
   const primaryEntry = useToolChipStore((s) => s.primaryEntry);
-  const resultSummary = useToolChipStore((s) => s.resultSummary);
   const chipState = useToolChipStore((s) => s);
   const presentation = useMemo(() => activeToolPresentation(chipState), [chipState]);
   const placement = useToolChipPlacement((state) => state.placement);
+  const autoFallback = useToolChipPlacement((state) => state.autoFallback);
+  const placing = useToolChipPlacement((state) => state.placing);
   const dockHost = useToolChipDockHost();
+  // The drawer's open flag is what drives the host's `hidden`/`inert`, so it is
+  // also the re-render trigger that makes the DOM check below run again.
+  const inspectorOpen = useInspectorLayoutStore((state) => state.open);
   const safeRect = useViewportWorkArea((state) => state.obstacleClearRect);
   const viewport = useViewportWorkArea((state) => state.viewport);
-  const validation = presentation?.validation ?? { status: "valid" as const };
+  const gestureLive = useToolStore((s) => s.gestureLive);
+  const applying = presentation?.phase === "applying";
   // A plain DOM host, created once; the engine owns its DOM position.
   //
   // `role="group"` + `aria-hidden="false"` (below, alongside the tool's own
   // `aria-label`) pull this subtree back OUT of the decorative overlay's hidden
   // state: the engine's chip layer no longer carries `aria-hidden` (WP-U10,
   // `ViewportEngine.chipLayer()`) so a role/name query — or a screen reader —
-  // can reach a chip's controls, while `overlayRef`'s canvas decoration in
+  // can reach a label's field, while `overlayRef`'s canvas decoration in
   // `ViewportRoot` stays hidden. `aria-hidden="false"` on the host itself is
   // belt-and-braces: aria-hidden is a PARENT-overrides-child state (an
   // ancestor's `true` wins regardless), so the layer change is what actually
@@ -582,8 +147,30 @@ export function ModelToolChips() {
     return el;
   });
 
+  /*
+   * A gesture has ENDED, so whatever the value reads now came from the drag and
+   * not from this field. Bumping the token makes the field re-display it even
+   * when the echo guard would swallow the write (H7): a drag clamped back onto
+   * the number a refused draft had previewed used to leave that draft on screen.
+   */
+  const [valueEcho, setValueEcho] = useState(0);
+  const wasGestureLive = useRef(gestureLive);
+  useEffect(() => {
+    const was = wasGestureLive.current;
+    wasGestureLive.current = gestureLive;
+    // ONLY the falling edge. Bumping on mount too would re-display `value` over a
+    // type-to-enter seed the instant the field was created, which is the one
+    // moment the field's own text outranks the store.
+    if (was && !gestureLive) setValueEcho((n) => n + 1);
+  }, [gestureLive]);
+
   const anchorKey = worldPos ? worldPos.join(",") : "";
-  const effectiveMode = placement.mode === "docked" && dockHost ? "docked" : placement.mode === "floating" ? "floating" : "anchored";
+  const dockReachable = inspectorOpen && isHostReachable(dockHost);
+  const effectiveMode = (placement.mode === "docked" || autoFallback) && dockReachable
+    ? "docked"
+    : placement.mode === "floating"
+      ? "floating"
+      : "anchored";
   const activeDockHost = effectiveMode === "docked" ? dockHost : null;
   const dragPoint = useRef<{ x: number; y: number } | null>(null);
   const dragOffset = useRef<{ x: number; y: number } | null>(null);
@@ -618,11 +205,10 @@ export function ModelToolChips() {
       const active = document.activeElement;
       if (active instanceof HTMLElement && host.contains(active)) focusedElement.current = active;
     };
-    // `anchorKey` is the ARM's anchor, not a live one: a chip whose anchor tracks
+    // `anchorKey` is the ARM's anchor, not a live one: a label whose anchor tracks
     // the gesture (extrude) is moved by the controller through `engine.moveChip`,
-    // never by a store write — this effect UNMOUNTS on every change, and a chip
-    // detached mid-drag loses input focus and fires `commitOnBlur` on half-typed
-    // text. See the header of `toolChipStore`.
+    // never by a store write — this effect UNMOUNTS on every change, and a label
+    // detached mid-drag loses input focus. See the header of `toolChipStore`.
     if (effectiveMode === "docked" && activeDockHost) {
       engine.unmountChip(CHIP_ID, host);
       host.style.position = "";
@@ -642,9 +228,10 @@ export function ModelToolChips() {
       screenPosition: placement.mode === "floating" ? { x: placement.x, y: placement.y } : undefined,
       constrainToSafeRect: true,
       onPlacementStatus,
-      // The chip and the value arrow share this anchor, so without this the chip
-      // sits ON the arrow and every press meant for the arrow hits the chip
-      // instead (measured: the arrow's grab pixel resolved to `chip-cancel`).
+      // The label and the value arrow share this anchor, so without this the
+      // label sits ON the arrow and every press meant for the arrow hits the
+      // label instead (measured: the arrow's grab pixel resolved to
+      // `chip-cancel`).
       avoidValueHandle: true,
     });
     restoreFocus();
@@ -655,8 +242,15 @@ export function ModelToolChips() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [engine, kind, anchorKey, host, effectiveMode, activeDockHost, placement, onPlacementStatus]);
 
+  /*
+   * The automatic fallback (N8, spec §4.4). A label with no floating footprint
+   * moves to the stable slot for THIS arm only — `setAutoFallback` is transient
+   * and never touches the user's own `placement`, which is what used to leave
+   * every later operation docked after one bad fit. An explicit `docked`
+   * preference needs no fallback; an unreachable host is not one.
+   */
   useLayoutEffect(() => {
-    if (!dockHost || placement.mode === "docked" || kind === "none" || viewport.width <= 0) return;
+    if (kind === "none" || placement.mode === "docked" || viewport.width <= 0) return;
     const currentStatus = placementStatus?.kind === kind && placementStatus.anchorKey === anchorKey
       ? placementStatus
       : null;
@@ -664,31 +258,41 @@ export function ModelToolChips() {
     const height = currentStatus?.height ?? host.offsetHeight;
     const hasFootprint = currentStatus?.fits !== false
       && (safeRect === null || (width <= safeRect.width && height <= safeRect.height));
-    if (!hasFootprint) toolChipPlacementStore.getState().dock();
-  }, [anchorKey, dockHost, host, kind, placement.mode, placementStatus, safeRect, viewport.width]);
+    const store = toolChipPlacementStore.getState();
+    if (!hasFootprint && dockReachable) {
+      if (!store.autoFallback) store.setAutoFallback(true);
+    } else if (store.autoFallback && hasFootprint) {
+      store.setAutoFallback(false);
+    }
+  }, [anchorKey, dockReachable, host, kind, placement.mode, placementStatus, safeRect, viewport.width]);
 
   if (kind === "none" || !worldPos) return null;
 
   /*
-   * Every armed model-tool numeric field, in one place (U3).
+   * Every armed model-operation numeric field, in one place (U3).
    *
    *   - `onPreview` fires on every parseable keystroke, so the viewport follows
    *     the typing. It routes to `onValue`, the same channel a drag uses, so the
    *     controller's existing coalescing/fencing applies unchanged.
-   *   - `commitOnBlur` is OFF: an armed model tool commits on Enter or ✓ only.
+   *   - `commitOnBlur` is OFF: an armed model tool commits on Enter or Done only.
    *     Nothing is lost, because the value already went out through `onPreview`.
    *   - `primaryEntry` seeds + focuses the field when the user typed on canvas.
+   *   - `disabled` while applying: the controller ignores edits during a commit,
+   *     so accepting them would be a lie (H4b follow-up).
    */
   const primaryField = (
     suffix: string,
     fieldLabel: string,
-    opts?: { onConfirm?: boolean; fieldId?: string },
+    opts?: { fieldId?: string },
   ) => (
     <DimensionInput
       key={primaryEntry ? `primary-${primaryEntry.token}` : `primary-${anchorKey}`}
       value={value}
       suffix={suffix}
       label={fieldLabel}
+      variant="label"
+      disabled={applying}
+      redisplayToken={valueEcho}
       initialText={primaryEntry?.seed}
       autoFocus={primaryEntry !== null}
       commitOnBlur={false}
@@ -697,281 +301,159 @@ export function ModelToolChips() {
       }
       onPreview={(v) => toolChipStore.getState().onValue?.(v)}
       onCommit={(v) => toolChipStore.getState().onValue?.(v)}
-      onConfirm={opts?.onConfirm ? requestConfirm : undefined}
+      onConfirm={requestConfirm}
       onEscapeRevert={(v, text) => revertPrimary(opts?.fieldId ?? "primary", v, text)}
     />
   );
 
-  // Both pattern chips confirm on Enter like every other armed cluster (D07).
-  const numericChip = (suffix: string, fieldLabel: string) =>
-    primaryField(suffix, fieldLabel, { onConfirm: true });
+  /** The short identity that precedes the number, or nothing when the unit
+   *  already says what the value is (spec §4.1's `23.09 mm` / `65°`). */
+  const prefix = (testid: string, text: string) => (
+    <span data-testid={testid} className="whitespace-nowrap text-[12px] font-medium text-ink-4">
+      {text}
+    </span>
+  );
 
   /*
-   * The OperationHUD frame (U4) — ONE wrapper for every armed model tool.
-   *
-   * Each branch below still owns its operation-specific content, but the frame
-   * around it is shared, so a tool cannot quietly acquire its own tone, its own
-   * validity treatment, or no accessible status at all:
-   *
-   *   - the border takes the WARN tone while `valueError` is set, which used to
-   *     be hand-rolled in the offsetFace branch and absent everywhere else;
-   *   - `resultSummary` renders in a common slot ABOVE the controls, so a
-   *     body-lifecycle operation states what it will produce BEFORE Apply — the
-   *     audit's "3 total instances · 2 new bodies · source retained" (D18);
-   *   - that summary is also the tool's `aria-live` status. It lives here rather
-   *     than in the canvas subtree, which is `aria-hidden` decoration.
+   * The label frame (spec §4.5): 30 px high, 8 px horizontal padding, one tone
+   * change for an invalid value. No grip, no Dock row, no summary, no validation
+   * row, no confirmation — those are the strip's and the inspector's.
    */
-  const panel = (children: React.ReactNode) => (
+  const labelFrame = (children: React.ReactNode) => (
     <div
-      data-testid="operation-hud"
+      data-testid="operation-label"
       className={cn(
-        "pointer-events-auto inline-flex min-w-0 max-w-full flex-col items-stretch gap-1 rounded-2xl border bg-surface px-1.5 py-1 shadow-popover",
+        "pointer-events-auto inline-flex h-[30px] min-w-0 max-w-full items-center gap-1.5 rounded-md border bg-surface px-2 shadow-popover",
         effectiveMode === "docked" && "w-full",
         valueError ? "border-warn-border" : "border-border",
+        applying && "opacity-60",
       )}
     >
-      <div className="flex items-center justify-end gap-1 px-1">
-        {effectiveMode !== "docked" && (
-          <button
-            type="button"
-            data-testid="chip-drag-handle"
-            data-viewport-interactive
-            aria-label="Move tool controls"
-            title="Drag tool controls"
-            className="cursor-move rounded-full bg-chip px-2 py-0.5 text-[11px] text-ink-4"
-            onPointerDown={(event) => {
-              if (event.button !== 0 || dragPointerId.current !== null) return;
-              event.preventDefault();
-              event.stopPropagation();
-              event.currentTarget.setPointerCapture(event.pointerId);
-              const point = engine?.clientToViewport(event.clientX, event.clientY) ?? null;
-              const rect = host.getBoundingClientRect();
-              const center = engine?.clientToViewport(rect.left + rect.width / 2, rect.top + rect.height / 2) ?? null;
-              dragPointerId.current = event.pointerId;
-              dragOrigin.current = placement;
-              dragOffset.current = point && center
-                ? { x: point.x - center.x, y: point.y - center.y }
-                : null;
-              dragPoint.current = center;
-            }}
-            onPointerMove={(event) => {
-              if (dragPointerId.current !== event.pointerId || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
-              event.preventDefault();
-              event.stopPropagation();
-              const point = engine?.clientToViewport(event.clientX, event.clientY) ?? null;
-              const offset = dragOffset.current;
-              const center = point && offset ? { x: point.x - offset.x, y: point.y - offset.y } : null;
-              dragPoint.current = center;
-              if (center) engine?.setChipScreenPosition(CHIP_ID, center);
-            }}
-            onPointerUp={(event) => {
-              if (dragPointerId.current !== event.pointerId) return;
-              event.preventDefault();
-              event.stopPropagation();
-              if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-                event.currentTarget.releasePointerCapture(event.pointerId);
-              }
-              const point = dragPoint.current;
-              dragPoint.current = null;
-              dragOffset.current = null;
-              dragPointerId.current = null;
-              dragOrigin.current = null;
-              if (point) toolChipPlacementStore.getState().floatAt(point.x, point.y);
-            }}
-            onPointerCancel={(event) => {
-              if (dragPointerId.current !== event.pointerId) return;
-              event.stopPropagation();
-              if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-                event.currentTarget.releasePointerCapture(event.pointerId);
-              }
-              const origin = dragOrigin.current;
-              if (origin?.mode === "floating") engine?.setChipScreenPosition(CHIP_ID, { x: origin.x, y: origin.y });
-              else engine?.setChipScreenPosition(CHIP_ID, null);
-              dragPoint.current = null;
-              dragOffset.current = null;
-              dragPointerId.current = null;
-              dragOrigin.current = null;
-            }}
-            onLostPointerCapture={(event) => {
-              if (dragPointerId.current !== event.pointerId) return;
-              const origin = dragOrigin.current;
-              if (origin?.mode === "floating") engine?.setChipScreenPosition(CHIP_ID, { x: origin.x, y: origin.y });
-              else engine?.setChipScreenPosition(CHIP_ID, null);
-              dragPoint.current = null;
-              dragOffset.current = null;
-              dragPointerId.current = null;
-              dragOrigin.current = null;
-            }}
-          >
-            ⋮⋮
-          </button>
-        )}
-        {dockHost && placement.mode !== "docked" && (
-          <button
-            type="button"
-            data-testid="chip-dock"
-            onClick={() => toolChipPlacementStore.getState().dock()}
-            className="rounded-full bg-chip px-2 py-0.5 text-[11px] text-ink-4"
-          >
-            Dock
-          </button>
-        )}
-        {placement.mode === "docked" && (
-          <button
-            type="button"
-            data-testid="chip-return"
-            onClick={() => toolChipPlacementStore.getState().anchor()}
-            className="rounded-full bg-chip px-2 py-0.5 text-[11px] text-ink-4"
-          >
-            Return
-          </button>
-        )}
-      </div>
-      {resultSummary && (
-        <div
-          data-testid="chip-result-summary"
-          role="status"
-          aria-live="polite"
-          className="min-w-0 break-words px-1.5 pt-0.5 text-[11px] text-ink-5"
+      {/* The repositioning grip exists only while "Place label" is running
+          (§4.4) — it was a permanent header row on every operation before. */}
+      {placing && effectiveMode !== "docked" && (
+        <button
+          type="button"
+          data-testid="chip-drag-handle"
+          data-viewport-interactive
+          aria-label="Move tool controls"
+          title="Drag the label, then release to place it"
+          className="cursor-move rounded-full bg-chip px-1.5 text-[11px] text-ink-4"
+          onPointerDown={(event) => {
+            if (event.button !== 0 || dragPointerId.current !== null) return;
+            event.preventDefault();
+            event.stopPropagation();
+            event.currentTarget.setPointerCapture(event.pointerId);
+            const point = engine?.clientToViewport(event.clientX, event.clientY) ?? null;
+            const rect = host.getBoundingClientRect();
+            const center = engine?.clientToViewport(rect.left + rect.width / 2, rect.top + rect.height / 2) ?? null;
+            dragPointerId.current = event.pointerId;
+            dragOrigin.current = placement;
+            dragOffset.current = point && center
+              ? { x: point.x - center.x, y: point.y - center.y }
+              : null;
+            dragPoint.current = center;
+          }}
+          onPointerMove={(event) => {
+            if (dragPointerId.current !== event.pointerId || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
+            event.preventDefault();
+            event.stopPropagation();
+            const point = engine?.clientToViewport(event.clientX, event.clientY) ?? null;
+            const offset = dragOffset.current;
+            const center = point && offset ? { x: point.x - offset.x, y: point.y - offset.y } : null;
+            dragPoint.current = center;
+            if (center) engine?.setChipScreenPosition(CHIP_ID, center);
+          }}
+          onPointerUp={(event) => {
+            if (dragPointerId.current !== event.pointerId) return;
+            event.preventDefault();
+            event.stopPropagation();
+            if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+              event.currentTarget.releasePointerCapture(event.pointerId);
+            }
+            const point = dragPoint.current;
+            dragPoint.current = null;
+            dragOffset.current = null;
+            dragPointerId.current = null;
+            dragOrigin.current = null;
+            if (point) toolChipPlacementStore.getState().floatAt(point.x, point.y);
+            else toolChipPlacementStore.getState().setPlacing(false);
+          }}
+          onPointerCancel={(event) => {
+            if (dragPointerId.current !== event.pointerId) return;
+            event.stopPropagation();
+            if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+              event.currentTarget.releasePointerCapture(event.pointerId);
+            }
+            const origin = dragOrigin.current;
+            if (origin?.mode === "floating") engine?.setChipScreenPosition(CHIP_ID, { x: origin.x, y: origin.y });
+            else engine?.setChipScreenPosition(CHIP_ID, null);
+            dragPoint.current = null;
+            dragOffset.current = null;
+            dragPointerId.current = null;
+            dragOrigin.current = null;
+          }}
+          onLostPointerCapture={(event) => {
+            if (dragPointerId.current !== event.pointerId) return;
+            const origin = dragOrigin.current;
+            if (origin?.mode === "floating") engine?.setChipScreenPosition(CHIP_ID, { x: origin.x, y: origin.y });
+            else engine?.setChipScreenPosition(CHIP_ID, null);
+            dragPoint.current = null;
+            dragOffset.current = null;
+            dragPointerId.current = null;
+            dragOrigin.current = null;
+          }}
         >
-          {resultSummary}
-        </div>
+          ⋮⋮
+        </button>
       )}
-      {validation.status !== "valid" && (kind === "extrudeDepth" || kind === "hole") ? (
-        <div data-testid="tool-validation" role="status" aria-label={validation.message} className="px-1.5 text-[11px] text-warn">!</div>
-      ) : validation.status !== "valid" && (
-        <div data-testid="tool-validation" role="alert" className="flex min-w-0 flex-wrap items-center gap-1 px-1.5 text-[11px] text-warn">
-          <span>{validation.message}</span>
-          {validation.status === "invalid" && validation.suggestedValue !== undefined && (
-            <button
-              type="button"
-              data-testid="tool-validation-use-suggested"
-              className="rounded-full bg-chip px-2 py-0.5 font-medium text-ink-2 hover:bg-hover-2"
-              onClick={() => toolChipStore.getState().onUseSuggestedValue?.()}
-            >
-              {validation.suggestedLabel ?? "Use suggested"}
-            </button>
-          )}
-        </div>
-      )}
-      <div className="inline-flex min-w-0 max-w-full flex-wrap items-center gap-1">{children}</div>
+      {children}
     </div>
   );
 
-  // The armed extrude / revolve cluster commits on chip-input Enter via `onConfirm`
-  // (apply typed value THEN confirm — single fire; the input stops propagation so
-  // the controller's capture-phase Enter never double-fires).
-  const clusterInput = (unit: string, fieldLabel: string) =>
-    primaryField(unit, fieldLabel, { onConfirm: true });
-  const confirmButtons = (
-    <ConfirmButtons
-      onConfirm={requestConfirm}
-      onCancel={presentation?.canCancel ? () => toolChipStore.getState().onCancel?.() : undefined}
-      disabled={presentation?.canConfirm === false}
-    />
-  );
-  // The boolean segments now live behind revolve's own `⋯` (UNIFY-UX Phase 2) —
-  // keyed on the anchor so a fresh axis pick reopens collapsed.
-
-  // Only the FRESH edge-op arm sets this flag; the shell shares the value-chip
-  // branch below (`shellThickness`) and the edge-op re-edit renders the bare
-  // numeric chip, so neither can reach the overflow. [Fillet|Chamfer] + the
-  // chamfer second leg both live behind it (UNIFY-UX Phase 1) — keyed on the
-  // anchor so a fresh arm reopens collapsed instead of inheriting the previous
-  // arm's expanded state, mirroring extrude's `⋯`.
-
-  let content: React.ReactNode;
+  let content: React.ReactNode = null;
   if (kind === "extrudeDepth") {
-    // The viewport host keeps the primary input, resolved operation and terminal
-    // actions; inspector owns every secondary setting for this armed operation.
-    content = panel(
-      <>
-        {/* A distance is meaningless for the non-Blind end conditions — the
-            kernel derives it — so the numeric input hides rather than showing a
-            value that does not drive the result. */}
-        {endCondition === "Blind" && clusterInput(LENGTH_SUFFIX, `Depth (${LENGTH_SUFFIX})`)}
-        <span data-testid="chip-mode-badge" className="rounded-full bg-chip px-2 py-1 text-[11px] font-medium text-ink-3">
-          {booleanMode === "NewBody" ? "New" : booleanMode}
-        </span>
-        {confirmButtons}
-      </>,
-    );
+    // A distance is meaningless for the non-Blind end conditions — the kernel
+    // derives it — so there is no parameter to label at all, and an empty label
+    // over the geometry is exactly the clutter §4.1 removes.
+    content = endCondition === "Blind"
+      ? labelFrame(
+          <>
+            {symmetric && prefix("chip-extrude-prefix", "Total")}
+            {primaryField(LENGTH_SUFFIX, `Depth (${LENGTH_SUFFIX})`)}
+          </>,
+        )
+      : null;
   } else if (kind === "revolveAngle") {
-    content = panel(
-      <>
-        {clusterInput("°", "Angle (°)")}
-        <span data-testid="chip-revolve-badge" className="rounded-full bg-chip px-2 py-1 text-[11px] font-medium text-ink-3">{booleanMode}</span>
-        {confirmButtons}
-      </>,
-    );
+    content = labelFrame(primaryField("°", "Angle (°)"));
   } else if (kind === "revolveAxisPick") {
-    // No value armed yet — a text-only instructional chip (UNIFY-UX Phase 2),
-    // mirroring the regionSelect chip's shape minus the confirm half: there is
-    // nothing here for ✓ to commit.
-    content = panel(
-      <>
-        <span
-          data-testid="chip-revolve-axis-hint"
-          className="px-2 py-1 text-[11.5px] font-medium text-ink-2"
-        >
-          Pick an axis line
-        </span>
-        <button
-          type="button"
-          data-testid="chip-cancel"
-          aria-label="Cancel"
-          onClick={() => toolChipStore.getState().onCancel?.()}
-          className="rounded-full bg-chip px-2 py-1 text-[11.5px] font-medium text-ink-3 hover:bg-hover-2"
-        >
-          ✕
-        </button>
-      </>,
+    // No value armed yet — the anchored prompt for the pick that is outstanding.
+    content = labelFrame(
+      <span data-testid="chip-revolve-axis-hint" className="whitespace-nowrap text-[12px] font-medium text-ink-2">
+        Pick an axis line
+      </span>,
     );
   } else if (kind === "datumOffset") {
-    // Armed datum plane (DATUM W1): the picked base plane's GEOMETRIC name +
-    // the offset, committed by ✓ or by Enter in the input (same armed-cluster
-    // gesture the extrude/revolve chips use).
-    content = panel(
+    content = labelFrame(
       <>
-        <span
-          data-testid="chip-datum-base"
-          className="px-2 py-1 text-[11.5px] font-medium text-ink-2"
-        >
-          {label}
-        </span>
-        {clusterInput(LENGTH_SUFFIX, `Offset (${LENGTH_SUFFIX})`)}
-        {confirmButtons}
+        {prefix("chip-datum-base", label)}
+        {primaryField(LENGTH_SUFFIX, `Offset (${LENGTH_SUFFIX})`)}
       </>,
     );
   } else if (kind === "regionSelect") {
-    // Multi-region select chip: `[ N regions ✓ ✕ ]` at the sketch centroid.
-    content = panel(
-      <>
-        <span
-          data-testid="chip-region-count"
-          className="px-2 py-1 text-[11.5px] font-medium text-ink-2"
-        >
-          {count} region{count === 1 ? "" : "s"}
-        </span>
-        <ConfirmButtons
-          onConfirm={requestConfirm}
-          onCancel={() => toolChipStore.getState().onCancel?.()}
-          disabled={presentation?.canConfirm === false}
-        />
-      </>,
+    content = labelFrame(
+      <span data-testid="chip-region-count" className="whitespace-nowrap text-[12px] font-medium text-ink-2">
+        {count} region{count === 1 ? "" : "s"}
+      </span>,
     );
   } else if (kind === "filletRadius" || kind === "shellThickness") {
-    // Fillet / chamfer / shell, fresh arm AND re-edit: the same armed cluster the
-    // extrude/revolve chips use. Release no longer commits, so the visible ✓ (or
-    // Enter, which calls the same `onConfirm`) is the only way out.
-    //
-    // U2 deleted the bare-numeric fallback this branch used to fall back to when
-    // no ✓ was wired: `armShell` and both `showFillet` sites all wire ✓/✕, so it
-    // was already unreachable — and an armed operation that renders NO cancel is
-    // exactly what the interaction contract forbids.
-    content = panel(
+    content = labelFrame(
       <>
-        {clusterInput(
+        {prefix(
+          "chip-edgeop-prefix",
+          kind === "shellThickness" ? "Thickness" : edgeOp === "Chamfer" ? "C" : "R",
+        )}
+        {primaryField(
           LENGTH_SUFFIX,
           kind === "shellThickness"
             ? `Thickness (${LENGTH_SUFFIX})`
@@ -979,67 +461,41 @@ export function ModelToolChips() {
               ? `Distance (${LENGTH_SUFFIX})`
               : `Radius (${LENGTH_SUFFIX})`,
         )}
-        {kind === "filletRadius" && (
-          <span data-testid="chip-edgeop-badge" className="rounded-full bg-chip px-2 py-1 text-[11px] font-medium text-ink-3">{edgeOp}</span>
-        )}
-        {kind === "shellThickness" && (
-          <span data-testid="chip-shell-badge" className="rounded-full bg-chip px-2 py-1 text-[11px] font-medium text-ink-3">Shell</span>
-        )}
-        {confirmButtons}
       </>,
     );
   } else if (kind === "offsetFace") {
-    // SCHEMA §7.3 OffsetFace: `[distance] [type segments] [⌒] [✓ ✕]`.
-    //
-    // The WARN border while `valueError` is set now comes from the shared HUD
-    // frame (U4) rather than this branch's own copy of it — the value itself is
-    // still never rewritten, so a refused entry leaves the last valid number in
-    // the field (SCHEMA §7.3 forbids clamping, and a clamped number would
-    // desynchronize the stored param from the preview the user approved).
-    content = panel(
+    // SCHEMA §7.3 OffsetFace. The distance TYPE is parameter identity, not an
+    // operation mode: it says which distance the number is.
+    content = labelFrame(
       <>
-        {clusterInput(LENGTH_SUFFIX, `Offset (${LENGTH_SUFFIX})`)}
-        <span data-testid="chip-offset-badge" className="rounded-full bg-chip px-2 py-1 text-[11px] font-medium text-ink-3">{distanceType}</span>
-        {confirmButtons}
+        {prefix("chip-offset-badge", distanceType)}
+        {primaryField(LENGTH_SUFFIX, `Offset (${LENGTH_SUFFIX})`)}
       </>,
     );
   } else if (kind === "hole") {
-    content = panel(
+    content = labelFrame(
       <>
-        {primaryField(LENGTH_SUFFIX, `Hole diameter (${LENGTH_SUFFIX})`, {
-          fieldId: "hole-diameter",
-          onConfirm: true,
-        })}
-        <span data-testid="chip-hole-badge" className="rounded-full bg-chip px-2 py-1 text-[11px] font-medium text-ink-3">
-          Hole
-        </span>
-        {confirmButtons}
+        {prefix("chip-hole-prefix", "⌀")}
+        {primaryField(LENGTH_SUFFIX, `Hole diameter (${LENGTH_SUFFIX})`, { fieldId: "hole-diameter" })}
       </>,
     );
   } else if (kind === "gear") {
-    // Gear Generator G1-h. Same shape as the hole branch above.
-    content = panel(
-      <>
-        <GearChipCluster />
-        {confirmButtons}
-      </>,
-    );
+    content = labelFrame(<GearChipCluster />);
   } else if (kind === "sketchValue") {
     // WP-C T2b: an armed sketch EDIT tool's live parameter (fillet radius /
     // offset distance). It commits nothing — the geometry commits on a viewport
-    // click — so the chip stays open across repeated applies and is keyed on the
+    // click — so the label stays open across repeated applies and is keyed on the
     // ANCHOR alone: it mounts (and auto-focuses) once per arm, so the value can
     // be typed straight away without the field re-grabbing focus after each edit.
-    content = panel(
+    content = labelFrame(
       <>
-        <span data-testid="chip-sketch-label" className="px-2 py-1 text-[11.5px] font-medium text-ink-2">
-          {label}
-        </span>
+        {prefix("chip-sketch-label", label)}
         <DimensionInput
           key={`sketchValue-${anchorKey}`}
           value={value}
           suffix={LENGTH_SUFFIX}
           label={`${label} (${LENGTH_SUFFIX})`}
+          variant="label"
           autoFocus
           onCommit={(v) => toolChipStore.getState().onValue?.(v)}
         />
@@ -1063,58 +519,30 @@ export function ModelToolChips() {
       />
     );
   } else if (kind === "linearPattern") {
-    content = panel(
+    content = labelFrame(
       <>
-        {numericChip(LENGTH_SUFFIX, `Spacing (${LENGTH_SUFFIX})`)}
-        <span data-testid="chip-pattern-badge" className="rounded-full bg-chip px-2 py-1 text-[11px] font-medium text-ink-3">Linear</span>
-        {confirmButtons}
+        {prefix("chip-pattern-prefix", "Spacing")}
+        {primaryField(LENGTH_SUFFIX, `Spacing (${LENGTH_SUFFIX})`)}
       </>,
     );
   } else if (kind === "circularPattern") {
-    content = panel(
-      <>
-        {numericChip("°", "Angle (°)")}
-        <span data-testid="chip-pattern-badge" className="rounded-full bg-chip px-2 py-1 text-[11px] font-medium text-ink-3">Circular</span>
-        {confirmButtons}
-      </>,
-    );
+    content = labelFrame(primaryField("°", "Angle (°)"));
   } else if (kind === "transform") {
-    // Armed placement (WP-B W1): mode · axis · the one component that pair
-    // addresses · ✓/✕. Enter in the input commits, exactly like the extrude and
-    // revolve clusters (apply the typed value THEN confirm, single fire).
-    content = panel(
+    // Armed placement (WP-B W1): the axis names which component the number
+    // addresses — spec §4.1's `X 10 mm`.
+    content = labelFrame(
       <>
-        {clusterInput(
+        {prefix("chip-transform-prefix", axis)}
+        {primaryField(
           transformMode === "rotate" ? "°" : LENGTH_SUFFIX,
           transformMode === "rotate" ? "Angle (°)" : `Distance (${LENGTH_SUFFIX})`,
         )}
-        <span data-testid="chip-transform-badge" className="rounded-full bg-chip px-2 py-1 text-[11px] font-medium text-ink-3">{transformMode}</span>
-        {confirmButtons}
-      </>,
-    );
-  } else if (kind === "mirror") {
-    content = panel(
-      <>
-        <span data-testid="chip-mirror-badge" className="rounded-full bg-chip px-2 py-1 text-[11px] font-medium text-ink-3">Mirror</span>
-        {confirmButtons}
-      </>,
-    );
-  } else {
-    // booleanOp
-    content = panel(
-      <>
-        {/*
-          * ROLE BADGES (U6). A Boolean is not symmetric — which body survives is
-          * the whole decision — so the chip states both operands by NAME before
-          * the user commits. Named, not colour-coded: a colour-only cue is
-          * unreadable to a third of users and unreadable against a body that
-          * happens to be the same colour.
-          */}
-        <span data-testid="chip-boolean-badge" className="rounded-full bg-chip px-2 py-1 text-[11px] font-medium text-ink-3">{op}</span>
-        {confirmButtons}
       </>,
     );
   }
+  // `mirror` and `booleanOp` have no parameter at the feature: their whole
+  // authoring surface is the operation strip and the inspector, so they render
+  // no floating label at all rather than an empty pill over the geometry.
 
   host.setAttribute("aria-label", `${CHIP_GROUP_LABEL[kind] ?? "Model tool"} options`);
   return createPortal(content, host);

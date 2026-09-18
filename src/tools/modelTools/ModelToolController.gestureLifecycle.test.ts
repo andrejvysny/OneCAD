@@ -190,6 +190,10 @@ function makeClientMock(capture: (cb: (r: PreviewResult) => void) => void) {
           refusal: null,
         }),
     ),
+    // H10 resolves an offset's display attachment through the same classification
+    // the shell wall uses; `null` is the ordinary answer for an unclassifiable
+    // face and is what these gesture specs want (they arm on a planar frame).
+    classifyElement: vi.fn(() => Promise.resolve(null)),
     promoteSelection: vi.fn((bodyId: string, picks: { topoKey: string }[]) =>
       Promise.resolve(
         picks.map((p) => ({

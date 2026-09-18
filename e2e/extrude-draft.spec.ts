@@ -1,18 +1,19 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import {
-  hideSeedSketches,
-  openEditorDebug,
-  enterSketchViaPlanePicker,
-  waitForCameraSettled,
-  selectSketchTool,
+  bodyOptions,
   clickAt,
   clickAtClient,
+  confirmOperation,
   dofPill,
-  bodyOptions,
-  getSketchSnapshot,
-  planePointToClient,
+  enterSketchViaPlanePicker,
   extrudeDebug,
+  getSketchSnapshot,
+  hideSeedSketches,
+  openEditorDebug,
+  planePointToClient,
+  selectSketchTool,
+  waitForCameraSettled,
 } from "./helpers";
 import { openExtrudeOverflow } from "./modelToolHelpers";
 
@@ -120,7 +121,7 @@ test("the [Draft] segment authors an angle that survives the commit and the re-e
   await expect(draftInput(page)).toHaveValue("10");
 
   // (3) Commit → one new body, one Extrude row.
-  await page.getByTestId("chip-confirm").click();
+  await confirmOperation(page);
   await expect(bodyOptions(page)).toHaveCount(bodiesBefore + 1);
   const { id, label } = await lastFeature(page);
   expect(label).toBe("Extrude");

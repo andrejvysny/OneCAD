@@ -19,6 +19,7 @@ import type { HtmlOverlayDriver } from "./HtmlOverlayDriver";
 import { HighlightLayer } from "./HighlightLayer";
 import { GhostLayer } from "./GhostLayer";
 import { DragHandle } from "./DragHandle";
+import { ValueWitnessLayer } from "./ValueWitnessLayer";
 import { TransformGizmo } from "./TransformGizmo";
 import { PreviewMesh } from "./PreviewMesh";
 import { RevolvePreview } from "./RevolvePreview";
@@ -428,6 +429,23 @@ describe("refreshColors picks up a theme flip", () => {
     expectNoLightLeftovers(d.root, lightOnly);
     handle.setHover(true);
     expectNoLightLeftovers(d.root, lightOnly);
+  });
+
+  it("ValueWitnessLayer re-reads its line color", () => {
+    const lightOnly = lightOnlyHexes();
+    setTheme("light");
+    const root = new THREE.Group();
+    const layer = new ValueWitnessLayer({
+      root,
+      overlay: { register: vi.fn(), unregister: vi.fn() } as unknown as HtmlOverlayDriver,
+      overlayEl: null,
+      invalidate: vi.fn(),
+    });
+    layer.show({ meaning: "parameterConstruction", label: "Radius parameter", fromMm: [0, 0, 0], toMm: [0, 0, 2] });
+
+    setTheme("dark");
+    layer.refreshColors();
+    expectNoLightLeftovers(root, lightOnly);
   });
 
   it("TransformGizmo refreshes every handle, INCLUDING the highlighted one", () => {

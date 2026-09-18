@@ -20,18 +20,39 @@ export function normalize(a: Vec3): Vec3 {
   return [a[0] / l, a[1] / l, a[2] / l];
 }
 
+/*
+ * ARITHMETIC EPSILON for the closest-approach denominator (H9; the derivation's
+ * §3 refusal shape, already applied to `handleProjection`). `u` is the IEEE
+ * double unit roundoff and `γ_n = n·u/(1 − n·u)` is Higham's accumulated
+ * rounding factor: a THREE-term dot product carries γ₃, and a product of two of
+ * them carries `2γ₃ + u`. The bound is relative to its own operands, so the
+ * verdict depends on the ANGLE between the two lines and never on the units the
+ * model happens to be authored in — which a fixed `1e-9` cannot say.
+ */
+const UNIT_ROUNDOFF = Number.EPSILON / 2;
+const GAMMA_DOT3 = (3 * UNIT_ROUNDOFF) / (1 - 3 * UNIT_ROUNDOFF);
+const GAMMA_PRODUCT = 2 * GAMMA_DOT3 + UNIT_ROUNDOFF;
+
 /**
  * Signed depth along `axisDir` (unit) from `axisPoint`, taken at the closest
  * approach between the pointer ray and the axis line. `axisDir` MUST be unit; the
- * ray direction need not be. Parallel rays fall back to projecting the ray origin
- * onto the axis.
+ * ray direction need not be.
+ *
+ * `null` when that closest approach is NOT certifiable — a ray running along the
+ * axis, or close enough to it that the denominator is smaller than its own
+ * rounding error. The refusal is the point: the old fallback projected the ray
+ * ORIGIN onto the axis, which is a different quantity under the same name. It
+ * tracks the camera rather than the pointer, so a caller that consumed it saw
+ * the value jump the moment the axis swung end-on — exactly the class of defect
+ * H8 retired from `handleProjection`. A caller falls back to its frozen proxy
+ * mapping instead, the same way it does for a non-`world` classification.
  */
 export function axisDepthFromRay(
   rayOrigin: Vec3,
   rayDir: Vec3,
   axisPoint: Vec3,
   axisDir: Vec3,
-): number {
+): number | null {
   const d1 = axisDir; // line 1 (unit)
   const d2 = rayDir; // line 2
   const r = sub(axisPoint, rayOrigin);
@@ -41,9 +62,12 @@ export function axisDepthFromRay(
   const c = dot(d1, r);
   const b = dot(d1, d2);
   const denom = a * e - b * b;
-  // Parallel (or degenerate ray): project the ray origin onto the axis.
-  if (denom <= 1e-9) return -c / (a || 1);
-  return (b * f - c * e) / denom;
+  // `a·e` and `b²` are products of three-term dot products, and the subtraction
+  // between them is the cancelling step: below this bound the difference carries
+  // no certified sign, let alone a usable magnitude.
+  if (!(denom > GAMMA_PRODUCT * (Math.abs(a * e) + Math.abs(b * b)))) return null;
+  const depth = (b * f - c * e) / denom;
+  return Number.isFinite(depth) ? depth : null;
 }
 
 /**

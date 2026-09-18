@@ -104,6 +104,10 @@ function makeEngineMock() {
     hideGhostPreview: vi.fn(),
     showGhostPreviewMulti: vi.fn(),
     showValueHandle: vi.fn(),
+    showValueHandlePath: vi.fn(),
+    setValueHandleValue: vi.fn(),
+    showValueWitness: vi.fn(),
+    hideValueWitness: vi.fn(),
     showScreenValueHandle: vi.fn(),
     hideValueHandle: vi.fn(),
     setDatumGhost: vi.fn(),
@@ -142,6 +146,10 @@ function makeClientMock(
     finishSketch: vi.fn(() => Promise.resolve({ regions: [] })),
     getSketchRegions: vi.fn(() => Promise.resolve({ regions: [] })),
     prepareOffsetFace: vi.fn(prepare),
+    // H10 resolves the display attachment through the same classification the
+    // shell wall uses. `null` is the ordinary answer for a face the backend
+    // cannot classify, and it is what the planar specs below want.
+    classifyElement: vi.fn((_bodyId: string, _elementId: string): Promise<unknown> => Promise.resolve(null)),
     promoteSelection: vi.fn((bodyId: string, picks: { topoKey: string }[]) =>
       Promise.resolve(
         picks.map((p) => ({
@@ -188,6 +196,7 @@ type Debug = {
   offsetFaceCount?: number;
   offsetPrepared?: number | null;
   offsetDegraded?: boolean;
+  offsetAttachment?: string;
   previewOwner?: string | null;
 };
 const debug = (): Debug =>
@@ -393,7 +402,12 @@ describe("ModelToolController OffsetFace", () => {
     build();
     await arm();
     expect(debug().offsetDegraded).toBe(false);
-    expect(engineMock.showValueHandle).toHaveBeenCalled();
+    // H10: the arrow rides `H(q) = P + q·n`, so the value moves it — the old
+    // `showValueHandle(anchor + axis·d, axis)` re-anchored it per frame instead.
+    expect(engineMock.showValueHandlePath).toHaveBeenCalledWith(
+      { q0Mm: 0, point0Mm: [0, 0, 10], dPointDValue: [0, 0, 1] },
+      2,
+    );
     expect(engineMock.showGhostPreviewMulti).toHaveBeenCalled();
     const ghostCalls = engineMock.showGhostPreviewMulti.mock.calls;
     const items = ghostCalls[ghostCalls.length - 1]?.[0] as Array<{
@@ -412,8 +426,10 @@ describe("ModelToolController OffsetFace", () => {
     await arm();
     expect(debug().offsetFacePhase).toBe("armed");
     expect(debug().offsetDegraded).toBe(true);
-    expect(engineMock.showValueHandle).not.toHaveBeenCalled();
-    expect(engineMock.showScreenValueHandle).toHaveBeenCalledWith([0, 0, 10]);
+    expect(engineMock.showValueHandlePath).not.toHaveBeenCalled();
+    // The pick's own anchor — the §5 ladder's second rung, never `[0,0,0]`.
+    expect(engineMock.showScreenValueHandle).toHaveBeenCalledWith([0, 0, 10], 2);
+    expect(debug().offsetAttachment).toBe("pick");
     expect(engineMock.showGhostPreviewMulti).not.toHaveBeenCalled();
     expect(engineMock.setOrbitSuppressed).toHaveBeenLastCalledWith(false);
   });
@@ -450,7 +466,10 @@ describe("ModelToolController OffsetFace", () => {
     expect(clientMock.endPreview).not.toHaveBeenCalledWith(expect.anything(), true);
   });
 
-  it("does NOT grab for an absolute distance type (there is no zero to drag from)", async () => {
+  it("GRABS for an absolute distance type too (H10, review R08)", async () => {
+    // SCHEMA §7.3 already fixes the reference an absolute dimension is read
+    // against, so the old refusal ("no zero to drag from") left `Total`, `Radius`
+    // and `Diameter` typed-only for no reason the wire supports.
     build();
     await arm();
     chipType("Diameter");
@@ -458,6 +477,21 @@ describe("ModelToolController OffsetFace", () => {
     await flush();
     await flush();
     expect(debug().offsetDistanceType).toBe("Diameter");
+    container.dispatchEvent(
+      new PointerEvent("pointerdown", { clientX: 10, clientY: 10, button: 0, bubbles: true }),
+    );
+    expect(debug().offsetFacePhase).toBe("dragging");
+  });
+
+  it("refuses a press when the ladder reached NOTHING attributable", async () => {
+    // No mesh frame, no pick anchor and no evidence anchor: §3 "No usable depth"
+    // disables the drag instead of seating a handle on the world origin (N2).
+    planar = false;
+    build((req) => Promise.resolve({ ...closureOf(req), faces: [{ topoKey: "f:2", picked: true }] }));
+    await arm([{ ...FACE, anchor: undefined }]);
+    expect(debug().offsetAttachment).toBe("none");
+    expect(engineMock.hideValueHandle).toHaveBeenCalled();
+    expect(engineMock.showScreenValueHandle).not.toHaveBeenCalled();
     container.dispatchEvent(
       new PointerEvent("pointerdown", { clientX: 10, clientY: 10, button: 0, bubbles: true }),
     );
@@ -768,11 +802,29 @@ describe("ModelToolController OffsetFace", () => {
    * reads. `showValueHandle` drops the freeze exactly as `DragHandle.reset()` does,
    * so a glyph that stays frozen through the drag proves the controller re-froze it.
    */
-  function withMapping(worldPerPx: { value: number }, strategy: "axis" | "screenProxy") {
+  function withMapping(worldPerPx: { value: number }, kind: "world" | "proxy") {
     const frozen = { value: null as string | null };
     return Object.assign(engineMock, {
-      valueHandleMapping: vi.fn(() => ({ strategy, direction: [0, -1] as const, pxPerWorld: null, worldPerPx: worldPerPx.value })),
-      freezeValueHandleStrategy: vi.fn((s: string | null) => (frozen.value = s)),
+      valueHandleMapping: vi.fn(() =>
+        kind === "world"
+          ? {
+              kind: "world" as const,
+              q0Mm: 0,
+              direction: [0, -1] as const,
+              g0PxPerMm: 1 / worldPerPx.value,
+              kPerMm: 0,
+              validDeltaMm: [-Infinity, Infinity] as const,
+              conditioning: 1,
+            }
+          : {
+              kind: "proxy" as const,
+              q0Mm: 0,
+              direction: [0, -1] as const,
+              mmPerPx: worldPerPx.value,
+              reason: "poorScreenSensitivity" as const,
+            },
+      ),
+      freezeValueHandle: vi.fn((m: { kind: string } | null) => (frozen.value = m ? m.kind : null)),
       showValueHandle: vi.fn(() => (frozen.value = null)),
       frozen,
     });
@@ -787,7 +839,7 @@ describe("ModelToolController OffsetFace", () => {
     await arm();
     answerExactPreview();
     const armHint = viewportStore.getState().statusHint?.message;
-    const engine = withMapping({ value: 0.25 }, "screenProxy");
+    const engine = withMapping({ value: 0.25 }, "proxy");
     const start = debug().offsetDistance as number;
 
     drag("pointerdown", 100);
@@ -795,11 +847,14 @@ describe("ModelToolController OffsetFace", () => {
 
     expect(toolChipStore.getState().value).toBeCloseTo(start + 40 * 0.25, 9); // drag frames do not republish the debug surface
     expect(viewportStore.getState().statusHint?.message).toBe("Offset: drag vertically");
-    expect(engine.showValueHandle).toHaveBeenCalled(); // the per-frame re-show…
-    expect(engine.frozen.value).toBe("screenProxy"); // …did not unfreeze the glyph
+    // H10: the per-frame update is `setValueHandleValue`, which does not reset the
+    // shared handle — so the grab's freeze survives with no re-assert to forget.
+    expect(engine.setValueHandleValue).toHaveBeenCalledWith(toolChipStore.getState().value);
+    expect(engine.showValueHandle).not.toHaveBeenCalled();
+    expect(engine.frozen.value).toBe("proxy"); // the glyph never unfroze
 
     drag("pointerup", 60);
-    expect(engine.freezeValueHandleStrategy).toHaveBeenLastCalledWith(null);
+    expect(engine.freezeValueHandle).toHaveBeenLastCalledWith(null);
     expect(viewportStore.getState().statusHint?.message).toBe(armHint);
   });
 
@@ -808,7 +863,7 @@ describe("ModelToolController OffsetFace", () => {
     build();
     await arm();
     const scale = { value: 0.25 };
-    withMapping(scale, "screenProxy");
+    withMapping(scale, "proxy");
     const start = debug().offsetDistance as number;
 
     drag("pointerdown", 100);
@@ -844,5 +899,273 @@ describe("ModelToolController OffsetFace", () => {
     expect(toolChipStore.getState().valueError).toBe(false);
     expect(debug().offsetDistance).toBe(start);
     expect(viewportStore.getState().statusHint?.message).toBe(armHint);
+  });
+});
+
+/*
+ * H10 — WHERE AN OFFSET'S VALUE ATTACHES, at the controller seam
+ * (docs/design/astra/modeling-handle-attachment.md §5 "Offset: …", review R08).
+ *
+ * The pure geometry is `faceOffset.test.ts`'s to prove. What these specs pin is
+ * the WIRING: which classification each distance type asks for, which path it
+ * installs, what the witness is allowed to claim, and the fact that a handle is
+ * drawn only where it can be dragged.
+ */
+describe("ModelToolController OffsetFace — attachment (H10)", () => {
+  let engineMock: ReturnType<typeof makeEngineMock>;
+  let clientMock: ReturnType<typeof makeClientMock>;
+  let container: HTMLDivElement;
+  let controller: ModelToolController;
+
+  /** A 6 mm BORE: the inner-wall case the drag-inversion counterexample uses. */
+  const BORE: EntityRef = {
+    kind: "face",
+    id: "body1#f:9",
+    bodyId: "body1",
+    topoKey: "f:9",
+    elementId: "el-face-9",
+    anchor: { worldPoint: [6, 0, 0] },
+  };
+  const boreClosure = (req: PrepareOffsetFaceRequest): PrepareOffsetFaceResult => ({
+    snapshotId: 1,
+    targetBodyId: req.pickedFaces[0]?.bodyId ?? "",
+    faces: [{ topoKey: "f:9", picked: true, anchor: { worldPoint: [6, 0, 0] as [number, number, number] } }],
+    currentDims: { radius: 6 },
+    refusal: null,
+  });
+  const cylinder = {
+    kind: "face",
+    surfaceType: "cylinder",
+    curveType: "",
+    frame: {
+      origin: [0, 0, 0] as [number, number, number],
+      normal: null,
+      axis: [0, 0, 1] as [number, number, number],
+      radius: 6,
+      sidedness: "hole" as const,
+    },
+  };
+  const plane = (origin: [number, number, number]) => ({
+    kind: "face",
+    surfaceType: "plane",
+    curveType: "",
+    frame: { origin, normal: [0, 0, 1] as [number, number, number], axis: null, radius: null },
+  });
+
+  function build(
+    prepare: (req: PrepareOffsetFaceRequest) => Promise<PrepareOffsetFaceResult>,
+  ): void {
+    controller?.dispose();
+    engineMock = makeEngineMock();
+    clientMock = makeClientMock(undefined, prepare);
+    controller = new ModelToolController({
+      engine: engineMock as unknown as ViewportEngine,
+      client: clientMock as unknown as CadClient,
+      container,
+      onBodyLoaded: () => () => {},
+      debug: true,
+    });
+  }
+
+  async function arm(faces: EntityRef[]): Promise<void> {
+    selectionStore.getState().set(faces);
+    toolStore.getState().setTool("offsetFace");
+    await flush();
+    await flush();
+    await flush();
+  }
+
+  async function switchType(t: OffsetDistanceType): Promise<void> {
+    toolChipStore.getState().onDistanceType?.(t);
+    await flush();
+    await flush();
+    await flush();
+  }
+
+  /** The newest path the arrow was seated on. */
+  const lastPath = (): { q0Mm: number; point0Mm: number[]; dPointDValue: number[] } | undefined => {
+    const calls = engineMock.showValueHandlePath.mock.calls;
+    return calls[calls.length - 1]?.[0] as never;
+  };
+  /** The newest witness list the engine was handed, normalized to an array. */
+  const lastWitnesses = (): { meaning: string; label: string; fromMm: number[]; toMm: number[] }[] => {
+    const calls = engineMock.showValueWitness.mock.calls;
+    const arg = calls[calls.length - 1]?.[0] as never;
+    return (Array.isArray(arg) ? arg : arg ? [arg] : []) as never;
+  };
+
+  /** Every status line published during a spec — the arm hint is transient. */
+  let hints: string[] = [];
+  let unsubscribeHints: (() => void) | undefined;
+
+  beforeEach(() => {
+    planar = true;
+    resetStores();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    hints = [];
+    unsubscribeHints = viewportStore.subscribe((state) => {
+      const message = state.statusHint?.message;
+      if (message && hints[hints.length - 1] !== message) hints.push(message);
+    });
+  });
+
+  afterEach(() => {
+    unsubscribeHints?.();
+    controller?.dispose();
+    container.remove();
+    toolStore.getState().setTool("select");
+  });
+
+  it("a signed Offset on a BORE rides σ·r̂ — into the material, not outward", async () => {
+    planar = false; // a cylinder has no planar frame; the classification answers
+    build((req) => Promise.resolve(boreClosure(req)));
+    clientMock.classifyElement.mockResolvedValue(cylinder as never);
+    await arm([BORE]);
+
+    expect(debug().offsetAttachment).toBe("cylinder");
+    // H(q) = C + (R0 + σq)·r̂, seated at the CLASSIFIED radius, σ = −1 for a hole.
+    expect(lastPath()).toEqual({ q0Mm: 0, point0Mm: [6, 0, 0], dPointDValue: [-1, 0, 0] });
+  });
+
+  it("Radius on the SAME bore grows OUTWARD — the §7 drag-inversion counterexample", async () => {
+    planar = false;
+    build((req) => Promise.resolve(boreClosure(req)));
+    clientMock.classifyElement.mockResolvedValue(cylinder as never);
+    await arm([BORE]);
+    await switchType("Radius");
+
+    expect(debug().offsetDistanceType).toBe("Radius");
+    // Seeded from the kernel's own measurement, not a made-up default.
+    expect(debug().offsetDistance).toBe(6);
+    // dH/dR = +r̂ — the OPPOSITE of the bore's material-outward normal (−r̂, which
+    // the signed-Offset path above rides). Driving Radius by the material normal
+    // would run this drag backwards; σ only maps to the kernel's signed `d`.
+    expect(lastPath()).toEqual({ q0Mm: 0, point0Mm: [0, 0, 0], dPointDValue: [1, 0, 0] });
+    // The witness spans the centreline to the radial target and claims no more.
+    expect(lastWitnesses()).toEqual([
+      expect.objectContaining({ meaning: "targetConstruction", fromMm: [0, 0, 0], toMm: [6, 0, 0] }),
+    ]);
+  });
+
+  it("Diameter carries the ½ in its derivative, so the same drag moves half as far", async () => {
+    planar = false;
+    build((req) => Promise.resolve(boreClosure(req)));
+    clientMock.classifyElement.mockResolvedValue(cylinder as never);
+    await arm([BORE]);
+    await switchType("Diameter");
+
+    expect(debug().offsetDistance).toBe(12); // 2 × currentDims.radius
+    expect(lastPath()).toEqual({ q0Mm: 0, point0Mm: [0, 0, 0], dPointDValue: [0.5, 0, 0] });
+    // Ø is drawn as the supporting cylinder's own diameter construction.
+    expect(lastWitnesses()).toEqual([
+      expect.objectContaining({ fromMm: [-6, 0, 0], toMm: [6, 0, 0], meaning: "targetConstruction" }),
+    ]);
+  });
+
+  it("an absolute type whose classification REFUSES keeps a labelled proxy, not an arrow", async () => {
+    planar = false;
+    build((req) => Promise.resolve(boreClosure(req)));
+    clientMock.classifyElement.mockResolvedValue(null);
+    await arm([BORE]);
+    await switchType("Radius");
+
+    expect(engineMock.showValueHandlePath).not.toHaveBeenCalled();
+    expect(engineMock.showScreenValueHandle).toHaveBeenLastCalledWith([6, 0, 0], 6);
+    expect(debug().offsetAttachment).toBe("pick");
+    // The status line says what the control can actually do — never "drag the
+    // arrow" when there is no arrow (audit N3).
+    expect(hints.some((h) => h.includes("drag visible distance control or type"))).toBe(true);
+    expect(hints.some((h) => h.includes("drag the arrow"))).toBe(false);
+  });
+
+  it("Total draws the PREPARED reference thickness beside its target", async () => {
+    // Selected plane at z = 10, opposite at z = 6, prepared t0 = 4 ⇒ B = (0,0,6).
+    build((req) =>
+      Promise.resolve({
+        ...closureOf(req),
+        currentDims: { thickness: 4 },
+        oppositeFace: {
+          topoKey: "f:3",
+          picked: false,
+          anchor: { worldPoint: [0, 0, 6] as [number, number, number] },
+        },
+      }),
+    );
+    clientMock.classifyElement.mockImplementation((_b: string, elementId: string) =>
+      Promise.resolve((elementId === "el-f3" ? plane([0, 0, 6]) : plane([0, 0, 10])) as never),
+    );
+    await arm([FACE]);
+    await switchType("Total");
+
+    expect(debug().offsetDistanceType).toBe("Total");
+    expect(debug().offsetDistance).toBe(4); // seeded from currentDims.thickness
+    expect(lastPath()).toEqual({ q0Mm: 0, point0Mm: [0, 0, 6], dPointDValue: [0, 0, 1] });
+
+    toolChipStore.getState().onValue?.(6);
+    expect(lastWitnesses()).toEqual([
+      // P ↔ B is the 4 mm the PREPARE measured…
+      expect.objectContaining({ meaning: "measuredReference", fromMm: [0, 0, 10], toMm: [0, 0, 6] }),
+      // …and B ↔ H(T) is the 6 mm nobody has built yet.
+      expect.objectContaining({ meaning: "targetConstruction", fromMm: [0, 0, 6], toMm: [0, 0, 12] }),
+    ]);
+  });
+
+  it("a MULTI-face closure drags a shared PARAMETER, not a moving centroid", async () => {
+    const SECOND: EntityRef = { ...FACE, id: "body1#f:4", topoKey: "f:4", elementId: "el-face-4" };
+    build((req) => Promise.resolve(closureOf(req)));
+    await arm([FACE, SECOND]);
+
+    expect(debug().offsetFaceCount).toBe(2);
+    expect(debug().offsetAttachment).toBe("shared");
+    // A = mean(reference points), a = offsetAxisFor(normals). Both faces share the
+    // mocked frame, so the mean is that frame's own centre and normal.
+    expect(lastPath()).toEqual({ q0Mm: 0, point0Mm: [0, 0, 10], dPointDValue: [0, 0, 1] });
+    // No per-face motion is claimed: a V3 closure can contain rebuilt blends and
+    // fixed supports whose roles the frontend does not have.
+    expect(lastWitnesses()).toEqual([
+      expect.objectContaining({ meaning: "parameterConstruction" }),
+    ]);
+    expect(lastWitnesses()[0].label).toContain("shared by 2 faces");
+  });
+
+  it("draws NO L1 ghost for an absolute type — `distance` there is a position", async () => {
+    build((req) => Promise.resolve({ ...closureOf(req), currentDims: { radius: 6 } }));
+    await arm([FACE]);
+    expect(engineMock.showGhostPreviewMulti).toHaveBeenCalled(); // the signed Offset does
+    engineMock.showGhostPreviewMulti.mockClear();
+
+    await switchType("Radius");
+    toolChipStore.getState().onValue?.(9);
+    // Translating the face by 9 mm would draw a 9 mm move for a 3 mm change.
+    expect(engineMock.showGhostPreviewMulti).not.toHaveBeenCalled();
+  });
+
+  it("offers no Radius/Diameter on a planar closure, and draws no handle for one", async () => {
+    build((req) => Promise.resolve({ ...closureOf(req), currentDims: { thickness: 12 } }));
+    await arm([FACE]);
+    expect(toolChipStore.getState().distanceTypes).toEqual(["Offset", "Total"]);
+  });
+
+  it("a distance-type switch does not leave the previous type's handle on screen", async () => {
+    // Total IS offered here (opposite + prepared thickness), but neither face
+    // classifies, so it has no path — and the Offset arrow that was on screen for
+    // the previous type must not survive the switch.
+    build((req) =>
+      Promise.resolve({
+        ...closureOf(req),
+        currentDims: { thickness: 4 },
+        oppositeFace: { topoKey: "f:3", picked: false },
+      }),
+    );
+    await arm([FACE]);
+    expect(engineMock.showValueHandlePath).toHaveBeenCalledTimes(1);
+    engineMock.hideValueWitness.mockClear();
+
+    await switchType("Total");
+    expect(debug().offsetDistanceType).toBe("Total");
+    expect(engineMock.showValueHandlePath).toHaveBeenCalledTimes(1); // no new arrow
+    expect(engineMock.hideValueWitness).toHaveBeenCalled(); // the old claim is gone
+    expect(engineMock.showScreenValueHandle).toHaveBeenLastCalledWith([0, 0, 10], 4);
   });
 });

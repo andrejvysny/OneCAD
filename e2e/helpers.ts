@@ -1032,3 +1032,33 @@ export async function commitExtrudeAtHandle(page: Page): Promise<void> {
     }
   }).toPass({ timeout: 20_000, intervals: [200, 500, 1_000] });
 }
+
+/*
+ * The stable operation strip (spec §4.2). Operation identity, the mode
+ * readouts, the result summary and the ONE Done/Cancel pair live here — the
+ * floating label is the parameter only, so a spec that used to click the
+ * chip's `chip-confirm`/`chip-cancel` targets these instead.
+ */
+export function operationStrip(page: Page): Locator {
+  return page.getByTestId("model-operation-bar");
+}
+
+/** The strip's Done button (an assertion target; `confirmOperation` clicks it). */
+export function confirmControl(page: Page): Locator {
+  return page.getByTestId("model-operation-done");
+}
+
+/** The strip's Cancel button (an assertion target; `cancelOperation` clicks it). */
+export function cancelControl(page: Page): Locator {
+  return page.getByTestId("model-operation-cancel");
+}
+
+/** Confirm the armed model operation through the stable strip. */
+export async function confirmOperation(page: Page): Promise<void> {
+  await confirmControl(page).click();
+}
+
+/** Cancel the armed model operation through the stable strip. */
+export async function cancelOperation(page: Page): Promise<void> {
+  await cancelControl(page).click();
+}

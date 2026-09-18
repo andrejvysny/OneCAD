@@ -1,6 +1,6 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
-import { openEditorDebug, getFeatureLabels } from "./helpers";
+import { confirmOperation, getFeatureLabels, openEditorDebug } from "./helpers";
 import { seedSelection } from "./modelToolHelpers";
 
 const BODY = "body1";
@@ -35,7 +35,7 @@ test("circular pattern: select body → C → Apply commits a Circular Pattern r
   // the count reads off `value` rather than text content.
   await expect(page.getByTestId("pattern-count")).toHaveValue(/^[0-9]+$/);
 
-  await page.getByTestId("chip-confirm").click();
+  await confirmOperation(page);
 
   await expect.poll(async () => await getFeatureLabels(page)).toContain("Circular Pattern");
   const after = await documentBodyIds(page);

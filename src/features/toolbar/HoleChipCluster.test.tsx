@@ -14,6 +14,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, screen, act, fireEvent, within } from "@testing-library/react";
 import { ModelToolChips } from "./ModelToolChips";
 import { ActiveToolInspector } from "@/features/inspector/ActiveToolInspector";
+import { ModelOperationBar } from "./ModelOperationBar";
 import { toolChipStore, type HoleChipHandlers, type HoleChipOpts } from "@/stores/toolChipStore";
 import { setViewportEngine } from "@/viewport/engineBridge";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
@@ -68,7 +69,8 @@ function handlers(): HoleChipHandlers {
   };
 }
 
-const renderHoleUi = () => render(<><ModelToolChips /><ActiveToolInspector /></>);
+const renderHoleUi = () =>
+  render(<><ModelToolChips /><ModelOperationBar /><ActiveToolInspector /></>);
 
 describe("HoleChipCluster", () => {
   let h: HoleChipHandlers;
@@ -92,13 +94,16 @@ describe("HoleChipCluster", () => {
     // Through-all reads as a word, never as a blank field.
     expect(screen.getByTestId("chip-hole-depth")).toHaveValue("Thru");
     expect(screen.getByTestId("chip-hole-std")).toBeInTheDocument();
-    expect(screen.getByTestId("chip-confirm")).toBeInTheDocument();
+    expect(screen.getByTestId("model-operation-done")).toBeInTheDocument();
 
     expect(screen.queryByTestId("chip-hole-cb-diameter")).toBeNull();
     expect(screen.queryByTestId("chip-hole-cs-diameter")).toBeNull();
     expect(screen.queryByTestId("chip-hole-cs-90")).toBeNull();
-    expect(screen.getByTestId("chip-hole-badge")).toHaveTextContent("Hole");
-    const chip = within(screen.getByTestId("operation-hud"));
+    // Operation identity lives in the stable strip now (spec §4.2); the label
+    // keeps the diameter glyph beside the number.
+    expect(screen.getByTestId("model-operation-title")).toHaveTextContent("Hole");
+    expect(screen.getByTestId("chip-hole-prefix")).toHaveTextContent("⌀");
+    const chip = within(screen.getByTestId("operation-label"));
     expect(chip.getByLabelText("Hole diameter (mm)")).toHaveValue("6.6");
     expect(chip.queryByTestId("chip-hole-simple")).toBeNull();
   });
@@ -151,9 +156,9 @@ describe("HoleChipCluster", () => {
     expect(h.onHoleType).toHaveBeenCalledWith("counterbore");
     fireEvent.click(screen.getByTestId("chip-hole-cs-82"));
     expect(h.onCsAngle).toHaveBeenCalledWith(82);
-    fireEvent.click(screen.getByTestId("chip-confirm"));
+    fireEvent.click(screen.getByTestId("model-operation-done"));
     expect(h.onConfirm).toHaveBeenCalled();
-    fireEvent.click(screen.getByTestId("chip-cancel"));
+    fireEvent.click(screen.getByTestId("model-operation-cancel"));
     expect(h.onCancel).toHaveBeenCalled();
   });
 
@@ -266,12 +271,12 @@ describe("HoleChipCluster", () => {
     );
     const cbDepth = screen.getByTestId("chip-hole-cb-depth");
     fireEvent.change(cbDepth, { target: { value: "abc" } });
-    expect(screen.getByTestId("chip-confirm")).toBeDisabled();
+    expect(screen.getByTestId("model-operation-done")).toBeDisabled();
     fireEvent.change(screen.getByLabelText("Hole diameter (mm)"), { target: { value: "8" } });
-    expect(screen.getByTestId("chip-confirm")).toBeDisabled();
+    expect(screen.getByTestId("model-operation-done")).toBeDisabled();
     expect(toolChipStore.getState().rawInputErrors).toHaveProperty("hole-cb-depth");
     act(() => toolChipStore.setState({ holeType: "countersink" }));
-    expect(screen.getByTestId("chip-confirm")).toBeEnabled();
+    expect(screen.getByTestId("model-operation-done")).toBeEnabled();
     expect(toolChipStore.getState().rawInputErrors).not.toHaveProperty("hole-cb-depth");
   });
 });

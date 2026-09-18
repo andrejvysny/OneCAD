@@ -37,11 +37,10 @@ import * as THREE from "three";
 import { palette } from "./palette";
 import { RENDER_ORDER } from "./renderOrder";
 import {
-  classifyHandleMapping,
-  projectRejectedAxis,
-  type AxisProjection,
-  type HandleMapping,
-  type HandleStrategy,
+  classifyMapping,
+  handlePointAt,
+  type FrozenMapping,
+  type LinearHandlePath,
 } from "@/tools/preview/handleProjection";
 
 const GLYPH_HALF_PX = 15; // compact 30px glyph, centered on attachment
@@ -53,8 +52,6 @@ const HIT_WIDTH_PX = 30; // corridor width, across the glyph axis
 const HIT_LENGTH_PX = 40; // corridor length, along the glyph axis
 /** Relative change below which `setScale` is a no-op (and schedules no frame). */
 const SCALE_EPS = 1e-9;
-/** Up the screen, CSS px (+Y down): the proxy's increasing direction. */
-const PROXY_UP: readonly [number, number] = [0, -1];
 
 /** Which heads the arrow draws — and therefore what it can be grabbed by. */
 export type DragHandleMode = "forward" | "twoWay";
@@ -118,21 +115,20 @@ export class DragHandle {
   private hovered = false;
   private destructive = false;
   private mode: DragHandleMode = "forward";
-  /** World axis the arrow represents — `orient()` needs it every frame, and
-   *  `setAxis` is only called when the tool moves it. */
-  private readonly axis = new THREE.Vector3(0, 1, 0);
-  /** Screen-space proxy direction (`+Y` down), used when source geometry has
-   * no trustworthy world axis. Cleared by every geometric axis update. */
-  private screenProxyDirection: readonly [number, number] | null = null;
-  /** World edge tangent whose projection is REJECTED from the axis (edge ops),
-   *  or null. Replaced by every `setAxis`. */
-  private tangent: THREE.Vector3 | null = null;
-  /** Strategy frozen at grab, or null. Survives `setAxis` — the controller
-   *  re-issues that every drag frame — and is cleared only by an explicit
-   *  `freezeStrategy(null)` or `reset()`. */
-  private frozenStrategy: HandleStrategy | null = null;
+  /**
+   * The world path the attachment travels: `H(q) = point0 + dPointDValue·(q − q0)`.
+   * The handle is drawn AT `H(value)`, so a growing radius moves the arrow — an
+   * arrow that stays put while the value changes is attached to nothing.
+   */
+  private path: LinearHandlePath = { q0Mm: 0, point0Mm: [0, 0, 0], dPointDValue: [0, 1, 0] };
+  /** The value the attachment currently sits at. */
+  private value = 0;
+  /** The WHOLE mapping frozen at grab, or null. Survives `setAxis` — the
+   *  controller re-issues that every drag frame — and is cleared only by an
+   *  explicit `freeze(null)` or `reset()`. */
+  private frozen: FrozenMapping | null = null;
   /** The mapping `orient` last drew; null before the first `orient`. */
-  private lastMapping: HandleMapping | null = null;
+  private lastMapping: FrozenMapping | null = null;
   /** Last screen angle that was well defined, held through the degenerate case
    *  so an axis rotating INTO the camera does not spin the arrow on its way. */
   private screenAngle = 0;
@@ -181,83 +177,113 @@ export class DragHandle {
   /**
    * Position the handle at `origin`, pointing along `dir`, drawing `mode`'s heads.
    *
-   * A ZERO-LENGTH `dir` keeps the current orientation. `Vector3.normalize()` maps
-   * it to (0,0,0) and `setFromUnitVectors` then takes its degenerate branch, which
-   * produces an arbitrary 180° flip rather than a NaN — silent, and camera-
-   * dependent. The extrude arm reaches exactly that case at depth 0.
+   * The degenerate-value form of {@link setValuePath}: the value is 0 and the
+   * caller re-issues the origin itself, which is what extrude and offset do every
+   * frame. A ZERO-LENGTH `dir` keeps the current direction — `Vector3.normalize()`
+   * maps (0,0,0) to (0,0,0) and `setFromUnitVectors` then takes its degenerate
+   * branch, producing an arbitrary 180° flip rather than a NaN, silently and
+   * camera-dependently. The extrude arm reaches exactly that case at depth 0.
    *
-   * `tangent`, for an edge op, is the world edge tangent at `origin`: its
-   * projection is rejected from the axis's, so the glyph and the gesture share
-   * `handleProjection.projectRejectedAxis`. Omitting it clears any previous one.
-   * A frozen strategy is deliberately NOT cleared here.
+   * A frozen mapping is deliberately NOT cleared here.
    */
-  setAxis(
-    origin: THREE.Vector3,
-    dir: THREE.Vector3,
-    mode: DragHandleMode = "forward",
-    tangent: THREE.Vector3 | null = null,
-  ): void {
-    this.screenProxyDirection = null;
-    this.tangent = tangent ? tangent.clone() : null;
-    this.group.position.copy(origin);
+  setAxis(origin: THREE.Vector3, dir: THREE.Vector3, mode: DragHandleMode = "forward"): void {
     this._dir.copy(dir);
-    if (this._dir.lengthSq() > 1e-12) {
-      this._dir.normalize();
-      this.axis.copy(this._dir);
-      this.group.quaternion.copy(this._q.setFromUnitVectors(this._up, this._dir));
-    }
-    this.setMode(mode);
-    this.deps.invalidate();
+    const direction = this._dir.lengthSq() > 1e-12 ? this._dir.normalize() : this.pathDirection();
+    this.setValuePath(
+      { q0Mm: 0, point0Mm: [origin.x, origin.y, origin.z], dPointDValue: [direction.x, direction.y, direction.z] },
+      0,
+      mode,
+    );
   }
 
   /**
-   * Position/orient only, keeping the current mode (the historical entry point).
-   * The tangent is CLEARED, not kept: this handle is shared, the only caller is
-   * the extrude arm (no tangent), and keeping one would let a fillet's edge
-   * tangent leak into an extrude arrow armed without a `reset()`.
+   * Attach the handle to a parameter path and seat it at `valueMm`.
+   *
+   * `dPointDValue` is NOT normalized: its length is the semantic gain (Diameter's
+   * `r̂/2`), and `computeMapping` needs it to report CSS px per unit of the VALUE
+   * rather than per world unit.
    */
+  setValuePath(path: LinearHandlePath, valueMm: number, mode: DragHandleMode = "forward"): void {
+    this.path = path;
+    this.setMode(mode);
+    this.setValue(valueMm);
+  }
+
+  /**
+   * Move the attachment to `H(valueMm)`. The controller calls this on every drag
+   * frame and every typed value, which is what makes the arrow track the number.
+   */
+  setValue(valueMm: number): void {
+    this.value = Number.isFinite(valueMm) ? valueMm : this.path.q0Mm;
+    const p = handlePointAt(this.path, this.value);
+    this.group.position.set(p[0], p[1], p[2]);
+    const dir = this.pathDirection();
+    if (dir.lengthSq() > 1e-12) {
+      this.group.quaternion.copy(this._q.setFromUnitVectors(this._up, dir));
+    }
+    this.deps.invalidate();
+  }
+
+  /** The path's unit direction, reused rather than reallocated per frame. */
+  private pathDirection(): THREE.Vector3 {
+    const v = this.path.dPointDValue;
+    this._dir.set(v[0], v[1], v[2]);
+    return this._dir.lengthSq() > 1e-12 ? this._dir.normalize() : this._dir;
+  }
+
+  /** Position/orient only, keeping the current mode (the historical entry point). */
   setAnchor(origin: THREE.Vector3, dir: THREE.Vector3): void {
     this.setAxis(origin, dir, this.mode);
   }
 
-  /** Show an explicitly screen-space scalar proxy at a truthful attachment. */
-  setScreenProxy(origin: THREE.Vector3, direction: readonly [number, number] = [0, -1]): void {
-    const length = Math.hypot(direction[0], direction[1]);
-    if (!(length > 1e-6) || !Number.isFinite(length)) return;
-    this.group.position.copy(origin);
-    this.screenProxyDirection = [direction[0] / length, direction[1] / length];
-    this.setMode("twoWay");
-    this.deps.invalidate();
+  /**
+   * Show an explicitly screen-space scalar proxy at a truthful attachment.
+   *
+   * The path's derivative is ZERO, which is the honest statement: there is no
+   * world direction this value moves along, so the attachment does not travel
+   * and `classifyMapping` refuses a world mapping for it on its own.
+   */
+  setScreenProxy(origin: THREE.Vector3, valueMm = 0): void {
+    this.setValuePath(
+      { q0Mm: valueMm, point0Mm: [origin.x, origin.y, origin.z], dPointDValue: [0, 0, 0] },
+      valueMm,
+      "twoWay",
+    );
   }
 
   /**
-   * The mapping this handle offers under `camera` RIGHT NOW, ignoring any freeze:
-   * the axis (tangent-rejected when a tangent is set) classified by
-   * `handleProjection.classifyHandleMapping`, or the explicit screen proxy when
-   * one is set. Changes no handle state. `worldPerPx` must be measured at this
-   * handle's anchor (`screenScale.worldPerPixel(camera, worldAnchor(), height)`).
+   * The mapping this handle offers under `camera` RIGHT NOW, ignoring any freeze
+   * (`handleProjection.classifyMapping` at the path's CURRENT value). Changes no
+   * handle state. `worldPerPx` must be measured at this handle's own anchor
+   * (`screenScale.worldPerPixel(camera, worldAnchor(), height)`).
    */
   computeMapping(
     camera: THREE.Camera,
     viewportWidth: number,
     viewportHeight: number,
     worldPerPx: number,
-  ): HandleMapping {
-    if (this.screenProxyDirection !== null) return this.proxyMapping(worldPerPx);
-    return classifyHandleMapping(this.projectedAxis(camera, viewportWidth, viewportHeight, worldPerPx), worldPerPx);
+  ): FrozenMapping {
+    this._viewProj.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    const anchor = this.group.position;
+    return classifyMapping(
+      { q0Mm: this.value, point0Mm: [anchor.x, anchor.y, anchor.z], dPointDValue: this.path.dPointDValue },
+      { viewProj: this._viewProj.elements, viewportWidth, viewportHeight },
+      { worldPerPx },
+    );
   }
 
   /**
-   * Freeze the strategy `orient` draws — called at grab so glyph, pick and
-   * gesture cannot swap mapping under the user mid-drag. `null` unfreezes.
-   * An explicit screen proxy (`setScreenProxy`) always draws as a proxy.
+   * Freeze the WHOLE mapping `orient` draws — called at grab so glyph, pick and
+   * gesture share one direction, one gain and one valid interval for the entire
+   * gesture. `null` unfreezes. Freezing only a strategy name and re-deriving the
+   * projection per frame is what changed the gain under the user's hand.
    */
-  freezeStrategy(strategy: HandleStrategy | null): void {
-    this.frozenStrategy = strategy;
+  freeze(mapping: FrozenMapping | null): void {
+    this.frozen = mapping;
   }
 
   /** The mapping `orient` last drew, or null before the first `orient`. */
-  mapping(): HandleMapping | null {
+  mapping(): FrozenMapping | null {
     return this.lastMapping;
   }
 
@@ -266,89 +292,33 @@ export class DragHandle {
    * direction. Called every frame by the engine, before the render, with the
    * same per-anchor `worldPerPx` it just passed to `setScale`.
    *
-   * The screen direction is the TRUE projected derivative of the world axis at
-   * this handle's own anchor (`handleProjection.projectRejectedAxis`), not the
-   * axis rotated into camera space. Those two agree only under an orthographic
-   * camera: perspective divides by `w`, so a world axis projects to a different
-   * screen direction depending on where in the frustum it is anchored.
+   * The screen direction is the TRUE projected derivative of the path at this
+   * handle's own anchor (`handleProjection.classifyMapping`), not the axis
+   * rotated into camera space. Those two agree only under an orthographic
+   * camera: perspective divides by `w`, so a world direction projects to a
+   * different screen direction depending on where in the frustum it is anchored.
+   * Nothing is rejected from it — β = 0, see the `handleProjection` module doc.
    *
    * UNFROZEN, the glyph draws `computeMapping`: an axis too close to the view
    * ray to drag draws the vertical proxy rather than a stale angle, so an
    * arrow never looks like it drags along a direction whose drag maps to zero.
    *
-   * FROZEN `axis` keeps drawing the axis even ill-conditioned; when its
-   * projection refuses outright (end-on, anchor behind the camera plane) the
-   * last good angle is held, so the arrow stays a full-length, grabbable arrow
-   * and never spins. FROZEN `screenProxy` draws the proxy.
+   * FROZEN, it draws the frozen object VERBATIM for the whole gesture — the
+   * glyph cannot rotate or change gain under a hand that is already dragging.
+   * A `disabled` mapping has no direction, so the last angle is held.
    */
   orient(camera: THREE.Camera, viewportWidth: number, viewportHeight: number, worldPerPx: number): void {
-    const mapping = this.frozenStrategy === "axis" && this.screenProxyDirection === null
-      ? this.frozenAxisMapping(camera, viewportWidth, viewportHeight, worldPerPx)
-      : this.frozenStrategy === "screenProxy"
-        ? this.proxyMapping(worldPerPx)
-        : this.computeMapping(camera, viewportWidth, viewportHeight, worldPerPx);
-    // `direction` is CSS-pixel space (+Y DOWN); the roll below is applied in
-    // the camera's own frame (+Y UP), so the vertical component flips once,
-    // here, and nowhere else.
-    const [dx, dy] = mapping.direction;
-    this.screenAngle = Math.atan2(-dy, dx) - Math.PI / 2;
+    const mapping = this.frozen ?? this.computeMapping(camera, viewportWidth, viewportHeight, worldPerPx);
+    if (mapping.kind !== "disabled") {
+      // `direction` is CSS-pixel space (+Y DOWN); the roll below is applied in
+      // the camera's own frame (+Y UP), so the vertical component flips once,
+      // here, and nowhere else.
+      const [dx, dy] = mapping.direction;
+      this.screenAngle = Math.atan2(-dy, dx) - Math.PI / 2;
+    }
     this.lastMapping = mapping;
     this._roll.setFromAxisAngle(this._z, this.screenAngle);
     this.group.quaternion.copy(camera.quaternion).multiply(this._roll);
-  }
-
-  /** Exact (tangent-rejected) projection of the axis at the anchor, or null. */
-  private projectedAxis(
-    camera: THREE.Camera,
-    viewportWidth: number,
-    viewportHeight: number,
-    worldPerPx: number,
-  ): AxisProjection | null {
-    this._viewProj.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-    const anchor = this.group.position;
-    const tangent = this.tangent;
-    return projectRejectedAxis(
-      this._viewProj.elements,
-      [anchor.x, anchor.y, anchor.z],
-      [this.axis.x, this.axis.y, this.axis.z],
-      tangent ? [tangent.x, tangent.y, tangent.z] : null,
-      viewportWidth,
-      viewportHeight,
-      worldPerPx,
-    );
-  }
-
-  private proxyMapping(worldPerPx: number): HandleMapping {
-    return {
-      strategy: "screenProxy",
-      direction: this.screenProxyDirection ?? PROXY_UP,
-      pxPerWorld: null,
-      worldPerPx: Number.isFinite(worldPerPx) && worldPerPx > 0 ? worldPerPx : 0,
-    };
-  }
-
-  /**
-   * A frozen axis: the projection whatever its conditioning; on refusal the
-   * held angle with no gain (`pxPerWorld: null`). The held direction inverts
-   * `orient`'s roll: glyph axis (dx, dy) = (−sin a, −cos a).
-   */
-  private frozenAxisMapping(
-    camera: THREE.Camera,
-    viewportWidth: number,
-    viewportHeight: number,
-    worldPerPx: number,
-  ): HandleMapping {
-    const scale = Number.isFinite(worldPerPx) && worldPerPx > 0 ? worldPerPx : 0;
-    const projected = this.projectedAxis(camera, viewportWidth, viewportHeight, worldPerPx);
-    if (projected) {
-      return { strategy: "axis", direction: projected.direction, pxPerWorld: projected.pxPerWorld, worldPerPx: scale };
-    }
-    return {
-      strategy: "axis",
-      direction: [-Math.sin(this.screenAngle), -Math.cos(this.screenAngle)],
-      pxPerWorld: null,
-      worldPerPx: scale,
-    };
   }
 
   private setMode(mode: DragHandleMode): void {
@@ -433,8 +403,7 @@ export class DragHandle {
 
   /** Drop the extrude-specific state so a plain value tool inherits a clean arrow. */
   reset(): void {
-    this.frozenStrategy = null;
-    this.tangent = null;
+    this.frozen = null;
     this.setMode("forward");
     this.setDestructive(false);
     this.setHover(false);

@@ -83,6 +83,72 @@ export function edgeMidAndTangent(
   return { mid, tangent };
 }
 
+/**
+ * A representative attachment POINT on one edge's display polyline
+ * (docs/design/astra/modeling-handle-attachment.md §5): the point closest to
+ * `anchor` when the pick carried one, otherwise the polyline's ARC-LENGTH
+ * midpoint.
+ *
+ * Arc length, not the middle segment's midpoint and not the chord midpoint: on
+ * a curved rim sampled unevenly those land somewhere the edge does not run, and
+ * on a quarter-circle chain the chord midpoint is not even on the rim.
+ *
+ * This identifies a DISPLAY location and nothing else — it is mesh evidence, so
+ * it can never stand in for a topological reference.
+ */
+export function edgePolylinePoint(
+  view: BodyMeshView,
+  edgeOrdinal: number,
+  anchor: Vec3 | null,
+): Vec3 | null {
+  const edgeRanges = view.edgeRanges;
+  const edgePositions = view.edgePositions;
+  if (!view.hasEdges || !edgeRanges || !edgePositions) return null;
+  if (edgeOrdinal < 0 || edgeOrdinal >= view.edgeCount) return null;
+  const first = edgeRanges[edgeOrdinal * 2];
+  const count = edgeRanges[edgeOrdinal * 2 + 1];
+  if (count < 2) return null;
+  const at = (i: number): Vec3 => {
+    const o = (first + i) * 3;
+    return [edgePositions[o], edgePositions[o + 1], edgePositions[o + 2]];
+  };
+
+  if (anchor && anchor.every((v) => Number.isFinite(v))) {
+    let best = at(0);
+    let bestDistance = Infinity;
+    for (let i = 0; i + 1 < count; i++) {
+      const p0 = at(i);
+      const seg = sub(at(i + 1), p0);
+      const l2 = dot(seg, seg);
+      // A zero-length segment still contributes its own endpoint.
+      const t = l2 > 0 ? Math.min(1, Math.max(0, dot(sub(anchor, p0), seg) / l2)) : 0;
+      const q: Vec3 = [p0[0] + seg[0] * t, p0[1] + seg[1] * t, p0[2] + seg[2] * t];
+      const d = len(sub(anchor, q));
+      if (d < bestDistance) {
+        bestDistance = d;
+        best = q;
+      }
+    }
+    return best;
+  }
+
+  let total = 0;
+  for (let i = 0; i + 1 < count; i++) total += len(sub(at(i + 1), at(i)));
+  if (!(total > 0)) return at(0);
+  let walked = 0;
+  for (let i = 0; i + 1 < count; i++) {
+    const p0 = at(i);
+    const seg = sub(at(i + 1), p0);
+    const l = len(seg);
+    if (walked + l >= total / 2) {
+      const t = l > 0 ? (total / 2 - walked) / l : 0;
+      return [p0[0] + seg[0] * t, p0[1] + seg[1] * t, p0[2] + seg[2] * t];
+    }
+    walked += l;
+  }
+  return at(count - 1);
+}
+
 /** Per-face flat frame for the bisector membership test. */
 export interface FaceFrame {
   /** Face normal, read from the mesh's own NORMALS at the first vertex of
@@ -184,14 +250,28 @@ export function edgeOutward(
 ): { mid: Vec3; tangent: Vec3; outward: Vec3; source: OutwardSource } | null {
   const mt = edgeMidAndTangent(view, edgeOrdinal);
   if (!mt) return null;
-  const { mid, tangent } = mt;
+  const at = edgeOutwardAt(view, mt.mid, tol);
+  return at ? { mid: mt.mid, tangent: mt.tangent, outward: at.outward, source: at.source } : null;
+}
+
+/**
+ * The same T1→T2 tier ladder resolved at an ARBITRARY point of the body, so a
+ * representative attachment point that is not the edge's own midpoint still
+ * gets the outward direction LOCAL to it (derivation §5: never an averaged
+ * chain direction, never an off-contour mean).
+ */
+export function edgeOutwardAt(
+  view: BodyMeshView,
+  point: Vec3,
+  tol?: number,
+): { outward: Vec3; source: OutwardSource } | null {
   const effTol = tol ?? bboxDiagonal(view) * 1e-4;
 
-  const bisector = bisectorAt(faceFrames(view), mid, effTol);
-  if (bisector) return { mid, tangent, outward: bisector, source: "bisector" };
+  const bisector = bisectorAt(faceFrames(view), point, effTol);
+  if (bisector) return { outward: bisector, source: "bisector" };
 
-  const bbox = bboxOutward(view, mid);
-  if (bbox) return { mid, tangent, outward: bbox, source: "bbox" };
+  const bbox = bboxOutward(view, point);
+  if (bbox) return { outward: bbox, source: "bbox" };
 
   return null;
 }

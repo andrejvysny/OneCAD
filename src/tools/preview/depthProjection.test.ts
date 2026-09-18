@@ -25,15 +25,39 @@ describe("axisDepthFromRay", () => {
     expect(depth).toBeCloseTo(-4, 9);
   });
 
-  it("projects the ray origin onto the axis when the ray is parallel", () => {
-    // Ray runs down the axis from z=10 ⇒ closest param = the origin projection.
-    const depth = axisDepthFromRay([0, 0, 10], [0, 0, -1], ORIGIN, Z);
-    expect(depth).toBeCloseTo(10, 9);
-  });
-
   it("works for a non-origin axis point", () => {
     const depth = axisDepthFromRay([5, 0, 7], [-1, 0, 0], [0, 0, 2], Z);
     expect(depth).toBeCloseTo(5, 9); // 7 measured from z=2
+  });
+
+  /*
+   * H9 — THE PARALLEL BRANCH REFUSES (docs/design/astra/modeling-handle-attachment.md
+   * §3, the refusal shape H8 gave `handleProjection`). A ray that cannot be
+   * intersected with the axis has no depth to report, and projecting the ray
+   * ORIGIN onto the axis instead is a different quantity wearing the same name:
+   * it moves with the camera rather than with the pointer, so the caller jumps.
+   */
+  it("refuses a ray running along the axis instead of projecting its origin", () => {
+    expect(axisDepthFromRay([0, 0, 10], [0, 0, -1], ORIGIN, Z)).toBeNull();
+  });
+
+  it("refuses a NEAR-parallel ray whose closest approach is not certifiable", () => {
+    // sin∠ ≈ 1e-9: the denominator (≈1e-18) is far below its own rounding error.
+    expect(axisDepthFromRay([0, 0, 10], [1e-9, 0, -1], ORIGIN, Z)).toBeNull();
+    // …and the verdict is a property of the ANGLE, not of the vector's length.
+    expect(axisDepthFromRay([0, 0, 10], [1e-14, 0, -1e-5], ORIGIN, Z)).toBeNull();
+  });
+
+  /*
+   * THE GUARD IS SCALE-RELATIVE. The absolute `denom <= 1e-9` floor it replaces
+   * refused this perfectly well-conditioned ray purely because its direction
+   * vector is short — and then answered 3 (the ray origin's height) instead of
+   * the true closest approach at 8.
+   */
+  it("answers a well-conditioned ray whatever its direction vector's length", () => {
+    expect(axisDepthFromRay([5, 0, 3], [-1, 0, 1], ORIGIN, Z)).toBeCloseTo(8, 9);
+    expect(axisDepthFromRay([5, 0, 3], [-1e-5, 0, 1e-5], ORIGIN, Z)).toBeCloseTo(8, 9);
+    expect(axisDepthFromRay([5, 0, 3], [-1e-8, 0, 1e-8], ORIGIN, Z)).toBeCloseTo(8, 9);
   });
 });
 

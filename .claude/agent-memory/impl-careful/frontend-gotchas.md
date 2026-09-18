@@ -138,9 +138,9 @@ CLAUDE.md and none is derivable without running the suite.
   spec-only change can be tsc-green and still not compile. To check one, point an
   ad-hoc tsconfig at `e2e/**/*.ts` with `lib`/`target` ES2022 (the repo's ES2020
   makes every `.at(-1)` in the specs a TS2550) and `types: ["node"]`.
-- **The armed model tool is split across two hosts.** `ModelToolChips` (portalled,
-  `model-tool-chip`) carries ONLY the primary value input, the operation badge,
-  `chip-confirm`/`chip-cancel`; every secondary control — `chip-edgeop-*`,
+- **The armed model tool WAS split across two hosts** (H7 made it three — see the
+  end of this file). `ModelToolChips` (portalled, `model-tool-chip`) carries only
+  the primary value input; every secondary control — `chip-edgeop-*`,
   `chip-chamfer-*`, `chip-draft-input`, `chip-symmetric`, `chip-end-*`,
   `chip-bool-*`, `chip-offset-type-*`, `chip-mirror-fuse`, `chip-transform-*` —
   is rendered by `features/inspector/ActiveToolInspector.tsx` inside
@@ -199,8 +199,9 @@ CLAUDE.md and none is derivable without running the suite.
   `sketchGuideLines`.
 - The compact-chip/inspector split moved settings OUT of `model-tool-chip`:
   transform mode + axis + Copy + Align are in `active-tool-inspector`
-  (`TransformInspector`), and Extrude's boolean segments too — the chip keeps the
-  value, a `chip-*-badge` and ✓/✕. `chip-mode-readout` → `chip-mode-badge`.
+  (`TransformInspector`), and Extrude's boolean segments too. SUPERSEDED in part
+  by H7 — see the three-host note at the end of this file; the chip no longer
+  keeps a badge or ✓/✕ either.
 - The left history rail is a 220px `z-20` overlay over the canvas: any e2e click
   computed from a world point can land under it (and under the right inspector /
   top toolbar) and never reach the viewport, with NO error — the pick just
@@ -370,3 +371,67 @@ CLAUDE.md and none is derivable without running the suite.
 - A DOF that is exactly 2 higher than a sketch spec expects means the origin `Fixed`
   was not authored, which nearly always means the click missed the origin, not that
   snapping or persistence broke. Dump the committed entity's own coordinates first.
+- `DimensionInput`'s Escape branch calls `blur()` SYNCHRONOUSLY while `text` still
+  holds the abandoned edit, so a blur-commit field used to commit what Escape threw
+  away (N7). An `escaping` ref now guards `onBlur`; any new Escape path that blurs
+  must set it too.
+- Model-operation fields opt into an edit SESSION via `onEscapeRevert` (spec §9.2):
+  Escape restores the value captured at seed-mount / first focus / first change,
+  not the live-previewed `value` prop. The chip's dock/return reparent blurs and
+  refocuses in one commit, so the session only closes on a blur still true after
+  `setTimeout(0)`. Sketch consumers must never pass the prop.
+- EVERY confirm entry goes through `requestConfirm()` in
+  `src/features/toolbar/requestConfirm.ts` (fresh store read; refuses settled
+  `invalid`, `retainedCommitFailure`, `applying` — never `pending`): the label's
+  field Enter, the strip's Done, `ActiveToolInspector`'s edge-op and draft
+  fields, `HoleChipCluster` and `GearPropertiesPanel`. It is its own module
+  because five unrelated surfaces import it (H7).
+- In `ModelToolChips.test.tsx`, `trackingEngine()` is scoped inside the
+  "ModelToolChips anchor lifecycle" describe, whose `beforeEach` sets NO engine;
+  the file's LAST describe is "critical mode closure", not the M6b one.
+- An `invalidate()` fired INSIDE `ViewportEngine.renderFrame` never causes a second
+  render: `tick` sets `dirty = false` after `renderFrame` returns. Its only cost is
+  a re-armed rAF callback, so an idle/on-demand test must assert the test's
+  `rafCbs` is empty after a frame — a render-count assertion passes either way.
+- `DragHandle.orient` classifies axis vs vertical screen proxy per frame (unless a
+  strategy is frozen), so any arrow test at an oblique off-axis anchor can flip to
+  the proxy: the FOV-76 corner anchor in the overlay-bounds test puts world +X at
+  conditioning 0.077, just under `MIN_AXIS_CONDITIONING`.
+- **The armed model operation is split across THREE hosts now (H7).** The
+  floating `model-tool-chip` holds ONLY `operation-label` — a short parameter
+  prefix plus the `DimensionInput`; `ModelOperationBar` (`model-operation-bar`,
+  `Slots.ToolbarContextual`) owns the title, ≤2 mode readouts, `chip-result-summary`,
+  `tool-validation`, More and the ONE `model-operation-done`/`model-operation-cancel`
+  pair; `ActiveToolInspector` owns every secondary. `chip-confirm`/`chip-cancel`,
+  `chip-dock`, `chip-return` and `operation-hud` no longer exist. e2e reaches the
+  pair through `confirmOperation(page)`/`cancelOperation(page)` in `e2e/helpers.ts`.
+- A strip mode badge whose text equals the operation TITLE is dropped, so Shell,
+  Hole and Mirror have no badge — assert `model-operation-title` instead. The
+  legacy testids (`chip-mode-badge`, `chip-edgeop-badge`, `chip-revolve-badge`,
+  `chip-pattern-badge`, `chip-transform-badge`, `chip-mirror-badge`,
+  `chip-boolean-badge`, `chip-end-badge`) live on the strip's badges.
+- `mirror` and `booleanOp` render NO floating label (no parameter at the feature),
+  so `model-tool-chip` is an empty 0×0 host for them and Playwright reads it as
+  not visible. Read "armed" off `operationStrip(page)` for those two.
+- `toolStore.gestureLive` is the ONLY store-level begin/end signal for a model
+  value drag (`ModelToolController.beginGesture`/`endGesture`). Anything that has
+  to react to "something other than this field set the value" keys off it —
+  `DimensionInput`'s `redisplayToken` does, because the echo guard cannot tell a
+  drag that lands on the last previewed number from the field's own echo.
+- `DimensionInput` takes `variant="label"` (BORDERLESS 14 px tabular — the label
+  pill around it owns the chrome), `disabled` (inert while applying) and
+  `redisplayToken`. `variant="badge"` is the unchanged 11 px sketch chip.
+- `toolChipPlacementStore` now separates `placement` (the user's own choice,
+  outlives the operation) from `autoFallback` (TRANSIENT, this arm does not fit)
+  and `placing` (the explicit "Place label" gesture, the only time the grip
+  renders). An automatic fallback must never write `placement`, and a dock host
+  under a `hidden`/`inert` ancestor is refused — `InspectorPanel` renders the
+  dock target that way whenever the drawer is closed.
+- In `HtmlOverlayDriver.test.ts` a `getBoundingClientRect` stub MUST return
+  `{width, height}`. A `{w, h}` object type-casts fine, silently measures 0×0,
+  and the driver then writes no transform at all — the failure reads
+  "no pixel translate in " from `xyOf`, not "wrong position".
+- When another session is editing the same tree, attribute a gate by
+  `git worktree add --detach <scratch> HEAD`, copying ONLY your own changed files
+  in and symlinking the repo's `node_modules`. Never `git stash` the shared tree
+  to isolate — it reverts their in-flight files under them.

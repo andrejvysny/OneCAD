@@ -1,11 +1,12 @@
 import { test, expect } from "./fixtures";
 import {
+  confirmOperation,
+  datumOptions,
+  extrudeDebug,
+  findPlaneQuad,
+  getDatumNames,
   openEditorDebug,
   waitForCameraSettled,
-  findPlaneQuad,
-  datumOptions,
-  getDatumNames,
-  extrudeDebug,
 } from "./helpers";
 
 /*
@@ -62,7 +63,7 @@ test.describe("datum plane — create", () => {
     await input.blur();
     await expect.poll(async () => (await extrudeDebug(page))?.datumOffset).toBe(24);
 
-    await chip.getByTestId("chip-confirm").click();
+    await confirmOperation(page);
 
     await expect(datumOptions(page)).toHaveCount(1);
     await expect(datumOptions(page).first()).toContainText("Datum 1");

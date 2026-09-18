@@ -6,18 +6,13 @@
  * the radius, which drives (a) the live radius chip and (b) a thickened edge
  * highlight, with the exact rounded body arriving from the debounced L2.
  *
- * Mapping: the pointer's travel along the handle's screen axis, in world units
- * per pixel of that axis (`signedValueFromDrag`). The floor, and its rebase, are
- * the caller's (`depthProjection.flooredDrag` at `EDGE_OP_MIN_VALUE`).
+ * Mapping: the pointer's travel inverted through the gesture's FROZEN mapping
+ * (`handleProjection.sampleMapping`). The floor, and its rebase, are the
+ * caller's (`depthProjection.flooredDrag` at `EDGE_OP_MIN_VALUE`).
  */
 import { MM_SUFFIX, formatMillimetres } from "@/units/format";
-
-export interface RadiusDragOpts {
-  /** World units per screen pixel along the drag axis (from the camera). */
-  worldPerPx: number;
-  /** Extra gain on top of the 1:1 world mapping. Default 1. */
-  sensitivity?: number;
-}
+import { handlePointAt, type LinearHandlePath, type ValueWitness } from "./handleProjection";
+import type { Vec3 } from "./depthProjection";
 
 /**
  * Format a radius/depth as document text. W2-A routes it through the shared
@@ -57,33 +52,64 @@ export function radiusFromValueText(text: string, fallback = DEFAULT_FILLET_RADI
  */
 export const EDGE_OP_MIN_VALUE = 0.1;
 
-/** A 2D direction in canvas-pixel space. Not a THREE type — this module has
- *  no three.js dependency. */
-export interface ScreenAxis {
-  x: number;
-  y: number;
-}
-
-/** Screen convention for a proxy with no world axis (T3): up = positive. */
-export const SCREEN_UP_AXIS: ScreenAxis = { x: 0, y: -1 };
+/*
+ * H8 — the Fillet/Chamfer handle ATTACHMENT (derivation §5 "Fillet / Chamfer",
+ * §7 "False fillet measurement").
+ *
+ * A generic GEOMETRIC fillet attachment is not available from what the frontend
+ * has. For a certified convex right-angle corner the true blend midpoint moves
+ * `−(√2−1)·q·b` — 0.828427 mm INWARD at q = 2 mm — and on the corresponding
+ * concave corner that sign reverses. Neither is `+q·b`, and adjacent-face
+ * identities alone certify neither the blend section nor the convexity. Drawing
+ * the parameter handle as a fillet contact point would therefore visibly lie.
+ *
+ * So the handle is an explicit PARAMETER construction: one representative edge,
+ * one point on it, and a segment whose length IS the value being dragged.
+ */
 
 /**
- * Signed value after dragging `(dxPx, dyPx)` (RAW screen deltas — clientX −
- * downX, clientY − downY; no up-positive massaging) along `axis`. UNCLAMPED
- * and un-abs'd on purpose: the sign lives entirely in `axis` (e.g.
- * `SCREEN_UP_AXIS.y = -1` makes an upward drag positive), and the caller owns
- * the floor.
+ * The world path the edge op's handle travels: `H(q) = E + q·b`, `dH/dq = b`.
+ *
+ * `anchor` is the representative edge's display attachment point
+ * (`edgeDirection.edgePolylinePoint`) and `outward` its own locally resolved
+ * outward direction — never a chain mean, which cancels on a closed contour.
+ * Null for a degenerate or non-finite input, the module-wide refusal convention.
  */
-export function signedValueFromDrag(
-  startValue: number,
-  dxPx: number,
-  dyPx: number,
-  axis: ScreenAxis,
-  opts: RadiusDragOpts,
-): number {
-  const gain = opts.sensitivity ?? 1;
-  const proj = dxPx * axis.x + dyPx * axis.y;
-  return startValue + proj * opts.worldPerPx * gain;
+export function edgeParameterPath(anchor: Vec3, outward: Vec3): LinearHandlePath | null {
+  if (!anchor.every((v) => Number.isFinite(v))) return null;
+  if (!outward.every((v) => Number.isFinite(v))) return null;
+  const l = Math.hypot(outward[0], outward[1], outward[2]);
+  if (!(l > 0)) return null;
+  return {
+    q0Mm: 0,
+    point0Mm: [anchor[0], anchor[1], anchor[2]],
+    dPointDValue: [outward[0] / l, outward[1] / l, outward[2] / l],
+  };
+}
+
+/**
+ * The witness segment E → H(q) and the ONLY claim it may make.
+ *
+ * It measures the construction's length q. It does NOT measure the resulting
+ * fillet's radius from a centre, the chamfer's bevel width, or any displacement
+ * of the edge — hence `parameterConstruction` and the "parameter" wording. A
+ * chain says how many edges share the one value, because the handle sits on one
+ * representative and the op applies to all of them.
+ */
+export function edgeParameterWitness(
+  kind: "Fillet" | "Chamfer",
+  path: LinearHandlePath,
+  valueMm: number,
+  edgeCount: number,
+): ValueWitness {
+  const noun = kind === "Chamfer" ? "Chamfer distance parameter" : "Radius parameter";
+  const shared = edgeCount > 1 ? ` · shared by ${edgeCount} edges` : "";
+  return {
+    meaning: "parameterConstruction",
+    label: `${noun}${shared}`,
+    fromMm: path.point0Mm,
+    toMm: handlePointAt(path, valueMm),
+  };
 }
 
 /*

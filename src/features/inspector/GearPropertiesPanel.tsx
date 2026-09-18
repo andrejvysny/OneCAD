@@ -17,6 +17,7 @@ import { cn } from "@/ui/cn";
 import { createClient } from "@/ipc/client";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToolChipStore, toolChipStore } from "@/stores/toolChipStore";
+import { requestConfirm } from "@/features/toolbar/requestConfirm";
 import { formatLength, parseLength } from "@/units/format";
 import { getModelToolController } from "@/tools/modelTools/modelToolBridge";
 import {
@@ -175,7 +176,7 @@ export function GearPropertiesPanel() {
         <button
           type="button"
           data-testid="gear-properties-apply"
-          onClick={() => toolChipStore.getState().onConfirm?.()}
+          onClick={requestConfirm}
           className="flex-1 rounded-sm bg-accent px-2.5 py-1.5 text-[12px] font-medium text-on-accent hover:bg-accent-hover"
         >
           Apply

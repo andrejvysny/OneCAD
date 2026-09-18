@@ -1,6 +1,13 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
-import { openEditorDebug, getFeatureLabels, bodyOptions } from "./helpers";
+import {
+  bodyOptions,
+  cancelOperation,
+  confirmControl,
+  confirmOperation,
+  getFeatureLabels,
+  openEditorDebug,
+} from "./helpers";
 import {
   seedSelection,
   toolPhases,
@@ -270,7 +277,7 @@ test("a released drag stays ARMED and commits nothing", async ({ page }) => {
   await dragEdgeOpHandle(page, 0, -40);
 
   await expect.poll(async () => (await toolPhases(page))?.filletPhase).toBe("armed");
-  await expect(page.getByTestId("chip-confirm")).toBeVisible();
+  await expect(confirmControl(page)).toBeVisible();
   await expect(page.getByRole("button", { name: "Fillet / Chamfer", exact: true })).toHaveAttribute(
     "aria-pressed",
     "true",
@@ -283,7 +290,7 @@ test("the visible ✓ commits Chamfer after a flip", async ({ page }) => {
   const before = await getFeatureLabels(page);
 
   await dragEdgeOpHandle(page, 0, -40);
-  await page.getByTestId("chip-confirm").click();
+  await confirmOperation(page);
 
   await expect.poll(async () => (await getFeatureLabels(page)).length).toBe(before.length + 1);
   expect((await getFeatureLabels(page)).at(-1)).toBe("Chamfer");
@@ -292,14 +299,14 @@ test("the visible ✓ commits Chamfer after a flip", async ({ page }) => {
     "aria-pressed",
     "true",
   );
-  await expect(page.getByTestId("chip-confirm")).toHaveCount(0);
+  await expect(confirmControl(page)).toHaveCount(0);
 });
 
 test("the visible ✓ commits Fillet with no flip", async ({ page }) => {
   await armFillet(page);
   const before = await getFeatureLabels(page);
 
-  await page.getByTestId("chip-confirm").click();
+  await confirmOperation(page);
 
   await expect.poll(async () => (await getFeatureLabels(page)).length).toBe(before.length + 1);
   expect((await getFeatureLabels(page)).at(-1)).toBe("Fillet");
@@ -317,7 +324,7 @@ test("a committed chamfer drops the edge it ate; the next arm carries no stale h
   const before = await getFeatureLabels(page);
 
   await dragEdgeOpHandle(page, 0, -40);
-  await page.getByTestId("chip-confirm").click();
+  await confirmOperation(page);
   await expect.poll(async () => (await getFeatureLabels(page)).length).toBe(before.length + 1);
   expect((await getFeatureLabels(page)).at(-1)).toBe("Chamfer");
 
@@ -352,7 +359,7 @@ test("the commit's REGEN drops a bystander pick, and ⌘Z/⇧⌘Z leaves no stal
   await expect.poll(async () => await selectedRefIds(page)).toEqual(["body1#e:5", "body1#e:1"]);
 
   await dragEdgeOpHandle(page, 0, -40);
-  await page.getByTestId("chip-confirm").click();
+  await confirmOperation(page);
   await expect.poll(async () => (await getFeatureLabels(page)).length).toBe(before.length + 1);
 
   await expect.poll(async () => await selectedRefIds(page)).toEqual([]);
@@ -372,7 +379,7 @@ test("Enter commits the armed op; ✕ cancels it with no row", async ({ page }) 
   await armChamferViaSegment(page);
   const before = await getFeatureLabels(page);
 
-  await page.getByTestId("chip-cancel").click();
+  await cancelOperation(page);
   await expect.poll(async () => (await toolPhases(page))?.filletPhase).toBe("idle");
   expect(await getFeatureLabels(page)).toEqual(before); // ✕ writes nothing
 
@@ -394,7 +401,7 @@ test("a committed Fillet row re-edits its TYPE: dblclick → Chamfer segment →
   // (1) Commit a real Fillet — the seeded mock rows carry no stored params, so a
   // re-edit has to run against a feature this spec authored.
   await armFillet(page);
-  await page.getByTestId("chip-confirm").click();
+  await confirmOperation(page);
   await expect.poll(async () => (await getFeatureLabels(page)).at(-1)).toBe("Fillet");
   const rowCount = (await getFeatureLabels(page)).length;
   const { id } = await lastFeature(page);

@@ -106,3 +106,16 @@ nothing unless it is shown to fail without the fix.
   `RegenReport::diagnostics`, which a test can `eprintln!`) instead of inferring it.
 - `cargo test --workspace | awk '/^test result:/'` over-counts: a test NAMED
   `result::…` matches `^test result:`. Filter on `$4 ~ /^[0-9]+$/`.
+- zsh does NOT word-split an unquoted `$T`: a probe loop running `bunx vitest run $T` over a
+  space-separated file list matches nothing and prints nothing (looks like "all probes green").
+  Use an array `T=(a b)` and `"${T[@]}"`, and sanity-check one probe shows a FAIL.
+- To ATTRIBUTE a frontend failure in a worktree a concurrent agent is editing: `git worktree add
+  --detach <scratchpad>/wt <HEAD sha>`, symlink the repo's `node_modules` into it, `cp` ONLY your
+  own changed files over, and run the suite there. A clean full-suite number from that tree is
+  proof; the shared tree's failure list changes run to run as the other agent saves.
+- A vitest run redirected to a file keeps only its TAIL when read back through the task output;
+  redirect to a scratchpad file and grep it with `python3` (strip ANSI with
+  `re.sub(r'\x1b\[[0-9;]*m','',s)`) instead of relying on the captured stdout. `--reporter=basic`
+  does not exist in vitest 4 and fails at startup.
+- `npx` is permission-denied in this sandbox; use `bunx`. A `cmd >> file <<'EOF'` heredoc append is
+  also denied — write the fragment to the scratchpad and append it with `python3`.

@@ -1,15 +1,16 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import {
-  openEditorDebug,
-  waitForCameraSettled,
-  findPlaneQuad,
-  findDatumQuad,
-  datumOptions,
-  sketchOptions,
-  selectSketchTool,
   clickAt,
+  confirmOperation,
+  datumOptions,
   dofPill,
+  findDatumQuad,
+  findPlaneQuad,
+  openEditorDebug,
+  selectSketchTool,
+  sketchOptions,
+  waitForCameraSettled,
 } from "./helpers";
 
 /*
@@ -32,7 +33,7 @@ async function createDatum(page: Page): Promise<void> {
   await page.mouse.move(quad.x, quad.y);
   await page.mouse.down();
   await page.mouse.up();
-  await page.getByTestId("model-tool-chip").getByTestId("chip-confirm").click();
+  await confirmOperation(page);
   await expect(datumOptions(page)).toHaveCount(1);
 }
 

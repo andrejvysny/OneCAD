@@ -1,19 +1,22 @@
 import { test, expect } from "./fixtures";
 import {
+  CANVAS,
+  bodyOptions,
+  cancelOperation,
+  clickAt,
+  clickAtClient,
+  confirmControl,
+  confirmOperation,
+  dofPill,
+  enterSketchViaPlanePicker,
+  extrudeDebug,
+  findExtrudeHandle,
+  getSketchSnapshot,
   hideSeedSketches,
   openEditorDebug,
-  enterSketchViaPlanePicker,
-  waitForCameraSettled,
-  selectSketchTool,
-  clickAt,
-  dofPill,
-  bodyOptions,
-  findExtrudeHandle,
-  extrudeDebug,
-  getSketchSnapshot,
   planePointToClient,
-  clickAtClient,
-  CANVAS,
+  selectSketchTool,
+  waitForCameraSettled,
 } from "./helpers";
 
 /*
@@ -101,7 +104,7 @@ test("selected region → Extrude → release stays armed; visible ✓ commits a
 
   // Release did NOT commit — the tool is still armed (debug surface) with the chip.
   expect((await extrudeDebug(page))?.phase).toBe("armed");
-  await expect(page.getByTestId("chip-confirm")).toBeVisible();
+  await expect(confirmControl(page)).toBeVisible();
   await expect(page.getByRole("button", { name: "Extrude", exact: true })).toHaveAttribute(
     "aria-pressed",
     "true",
@@ -109,7 +112,7 @@ test("selected region → Extrude → release stays armed; visible ✓ commits a
   await expect(bodyOptions(page)).toHaveCount(bodiesBefore); // nothing committed yet
 
   // Explicit visible confirm.
-  await page.getByTestId("chip-confirm").click();
+  await confirmOperation(page);
   await expect(bodyOptions(page)).toHaveCount(bodiesBefore + 1);
   await expect(bodyOptions(page).last()).toHaveAttribute("aria-selected", "true");
 });
@@ -121,7 +124,7 @@ test("visible ✕ after release cancels the tool and creates no body", async ({ 
   await dragReleaseHandle(page);
   expect((await extrudeDebug(page))?.phase).toBe("armed");
 
-  await page.getByTestId("chip-cancel").click();
+  await cancelOperation(page);
   // Cancel returns to Select and discards the preview.
   await expect(page.getByRole("button", { name: "Extrude", exact: true })).not.toHaveAttribute(
     "aria-pressed",
@@ -238,7 +241,7 @@ test("exact-preview failure keeps the last preview and blocks confirmation", asy
   // reason is the failure hint already asserted above. The controller's
   // `Cannot confirm invalid preview: …` guard is the programmatic backstop
   // behind it, pinned in `ModelToolController.edgeShellPreview.test.ts`.
-  await expect(page.getByTestId("chip-confirm")).toBeDisabled();
+  await expect(confirmControl(page)).toBeDisabled();
   await expect(bodyOptions(page)).toHaveCount(bodiesBefore);
   expect((await extrudeDebug(page))?.phase).toBe("armed");
 });
@@ -268,7 +271,7 @@ test("Enter-commit waits for the final exact preview epoch (commit barrier)", as
 test("a committed Extrude's stored params carry profile.regionAnchor", async ({ page }) => {
   await armExtrude(page);
   const bodiesBefore = await bodyOptions(page).count();
-  await page.getByTestId("chip-confirm").click();
+  await confirmOperation(page);
   await expect(bodyOptions(page)).toHaveCount(bodiesBefore + 1);
 
   const featureId = await page.evaluate(() => {

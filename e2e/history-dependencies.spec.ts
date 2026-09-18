@@ -1,6 +1,6 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
-import { openEditorDebug, bodyOptions } from "./helpers";
+import { bodyOptions, confirmOperation, openEditorDebug } from "./helpers";
 import { seedSelection, toolPhases } from "./modelToolHelpers";
 
 /*
@@ -55,7 +55,7 @@ async function commitFillet(page: Page): Promise<string> {
   await seedSelection(page, [EDGE_REF]);
   await page.getByRole("button", { name: "Fillet / Chamfer", exact: true }).click();
   await expect.poll(async () => (await toolPhases(page))?.filletPhase).toBe("armed");
-  await page.getByTestId("chip-confirm").click();
+  await confirmOperation(page);
   await expect.poll(async () => (await featureIds(page)).length).toBe(before.length + 1);
   return (await featureIds(page)).at(-1)!;
 }

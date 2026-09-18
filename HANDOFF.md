@@ -1,3 +1,57 @@
+# HANDOFF — session 37 (2026-09-17/18) — modeling interaction: review fixes, hardening, spec completion A
+
+Session 37 · 2026-09-17/18 · plan `~/.claude/plans/analyze-this-report-and-bright-axolotl.md` · ledger `TODO.md` § SESSION 37 · design `docs/design/astra/modeling-handle-attachment.md`
+
+## Goal
+
+Close the external review of `9f573ecd` ("feat: unify modeling handles") against the acceptance spec "Unified Modeling Controls and Direct Manipulation": fix the correctness defects it found, then finish the spec scope it said was missing — one compact parameter label plus a stable operation strip, and honest handles with honest witnesses for Fillet/Chamfer, Shell and Offset.
+
+## Original plan
+
+Three commit boundaries (full text in the plan file):
+
+1. **Boundary 1 — hardening.** H0 red-test triage, H1 gesture ownership + cancellation, H2 numeric edit transaction, H3 Extrude/Offset mapping, H4 edge-op preview ordering, H5 edge-op mapping correctness. **Done and committed as `a988ecae`.**
+2. **Boundary 2 — spec completion A.** H6 Astra derive, H7 compact label + operation strip, H8 shared frozen mapping + edge-op attachment, H9 Shell retained-wall attachment, H10 Offset absolute dimensions. **All implemented, uncommitted; gate in progress.**
+3. **Boundary 3 — spec completion B.** Revolve angular handle, Linear/Circular pattern handles, Move gizmo on shared primitives, Hole/Datum/Gear per §8.9, lifecycle A17/A18. **Not started.**
+
+## Done so far (and why)
+
+**Verification first.** Every one of the review's findings was checked against source before any code moved: R01–R08 and §4.1–4.4 all held, and nine more defects surfaced (N1–N9). The review had also missed that CI for `9f573ecd` finished RED (chromium 277/5, webkit 279/3) — that commit was made with only focused vitest, its own browser attempt sandbox-blocked.
+
+**Boundary 1, committed as `a988ecae`.** One owner per value drag, with Escape / pointercancel / capture loss / window blur restoring the pre-grab value and keeping the tool armed, and teardown abandoning without restoring; the symmetric span clamping at zero with its sign kept; depth 0 as a no-effect state that blocks commit and sends no kernel preview; snapping only after deliberate movement; an end-on axis drawing and dragging one frozen vertical proxy; Fillet and Chamfer sharing one direction and both growing along the arrow; typed values below the minimum staying visible as invalid; and only the newest edge-op preview ever installing, with nothing able to change an operation while it commits.
+
+**Why the tangent rejection was deleted rather than tuned.** Boundary 1 had *fixed* the 45° glyph/drag divergence by gating the rejection on the tangent's own conditioning. The Astra derivation then proved the whole idea wrong: the point that moves travels along its plain projected derivative, so any rejection points the handle where it cannot go (β = 0.5 overstates response by 1.2×; full rejection at a 1° screen angle rotates ~89° and multiplies gain by 57.3). H8 deleted it and made the handle MOVE instead — which also closed the review's unfixed "the arrow does not move while dragging".
+
+**Dead ends and corrections worth keeping:**
+- A constant pixels→mm gain is wrong under perspective: the exact rational inverse gives 8.934710 mm where the constant gain claims 9.622504 mm on a 50 px drag. Freeze `g`, `k` and the valid interval at grab.
+- Conditioning is NOT a sine off-axis (singular values are 1 and `sqrt(1+(x/D)²+(y/D)²)`), so the old `Math.min(c,1)` clamp hid real sensitivity. τ = 0.08 survives, but as a usability budget on scalar sensitivity including Diameter's ½ factor.
+- A geometric fillet attachment is impossible from the evidence: a convex 90° blend midpoint moves `−(√2−1)q·b`, the opposite way from the handle, and the sign flips when concave. Hence a labelled parameter construction, enforced structurally (only one builder produces a witness, and it hard-codes `parameterConstruction`).
+- "Absolute offsets have no zero to drag from" was simply false — SCHEMA §7.3 already defines `d = σ(distance − R)`. Radius grows outward for inner and outer walls alike; using the material normal inverts an inner wall's drag.
+- Mesh adjacency is never BRep proof: at a 40 mm cube's 0.069282 mm tolerance an unrelated face 0.05 mm away passes the same test, so an ambiguous rim match is dropped rather than resolved.
+- Two subagents independently proved attribution by building an isolated worktree when the shared tree was being edited; treat any whole-tree number taken during concurrent edits as unattributable.
+
+**Process that paid off:** every package was red-first, every diff orchestrator-reviewed, and the risky ones (gesture ownership, preview ordering, the whole controller wiring) went to fresh-context adversarial reviewers who found 9, 8 and 13 real defects that the implementers' own tests had missed — including a Chamfer that could change mid-commit and a validation check that was skipped after an await.
+
+## How to resume
+
+1. Run the `handoff` skill with "resume", then re-read `CLAUDE.md` and `MEMORY.md`.
+2. Read `TODO.md` § SESSION 37 "Now (resume here)" — it lists the exact next actions in order.
+3. Check whether the webkit lane finished: `/private/tmp/claude-501/-Users-andrejvysny-workspace-OneCAD/5cfb5ae3-bade-4763-8e88-38905cb5c03d/scratchpad/gate-b2-webkit.log` (tail it; the last line is `EXIT=<n>` and the summary line above it reads `N passed`). If the scratchpad is gone, re-run `bun run e2e -- --project=webkit --retries=0` on a quiet machine — nothing else running, and check `uptime` first.
+4. Then, in order: run the Astra `break` (packet `381ad5e5411e` at `<scratchpad>/astra-break-handle-attachment-packet.md`, approval summary already printed, needs the user's go), fold its accepted findings in red-first, run the Boundary 2 native pass (needs the user away from the machine — it takes the real pointer), and commit Boundary 2.
+
+## Open questions
+
+- **Astra `break` run** — approval summary printed, awaiting the user's go. It is call 2 of ~3 for this boundary.
+- **Boundary 2 native pass** — needs the user's go, because it takes over the mouse and keyboard for 10–15 minutes.
+- **H7b live mode dropdowns** — the strip's two mode controls are currently readouts. The spec shows `Automatic: Cut ▾`; I judged the competing-editor rule to be about the typed value, not a discrete mode, so dropdowns are owed. Confirm before building.
+- **Boundary 3 scope** — whether to continue straight into it (Revolve, patterns, Move gizmo, Hole/Datum/Gear, lifecycle) or stop after Boundary 2.
+
+## Pointers
+
+- Tasks and full gate ledger → `TODO.md` § SESSION 37 · Snapshot → `CURRENT_STATE.md` · Plan → `~/.claude/plans/analyze-this-report-and-bright-axolotl.md` · Accepted derivation → `docs/design/astra/modeling-handle-attachment.md` · Review and spec → `~/Downloads/OneCAD-Modeling-{Implementation-Review-9f573ecd,Interaction-Unification-Spec}.md`
+
+---
+
 # HANDOFF — session 36 (2026-09-15) — unified modeling controls, Phase B started
 
 Session 36 · 2026-09-15 · plan `~/.claude/plans/analyze-this-plan-and-generic-sutherland.md`

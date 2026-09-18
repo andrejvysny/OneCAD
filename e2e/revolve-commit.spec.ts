@@ -1,17 +1,18 @@
 import { test, expect } from "./fixtures";
 import {
-  openEditorDebug,
-  enterSketchViaPlanePicker,
-  waitForCameraSettled,
-  selectSketchTool,
+  CANVAS,
+  bodyOptions,
+  cancelOperation,
   clickAt,
   clickAtClient,
   dofPill,
-  bodyOptions,
-  getSketchSnapshot,
-  planePointToClient,
+  enterSketchViaPlanePicker,
   extrudeDebug,
-  CANVAS,
+  getSketchSnapshot,
+  openEditorDebug,
+  planePointToClient,
+  selectSketchTool,
+  waitForCameraSettled,
 } from "./helpers";
 import { openRevolveOverflow, closeRevolveOverflow } from "./modelToolHelpers";
 
@@ -143,7 +144,7 @@ test("Revolve guidance: an empty-state banner before any pick, an axis-hint chip
   await expect(page.getByTestId("chip-revolve-axis-hint")).toHaveText("Pick an axis line");
 
   // ✕ backs all the way out to Select — there is no value yet to keep armed.
-  await page.getByTestId("chip-cancel").click();
+  await cancelOperation(page);
   await expect(page.getByRole("button", { name: "Select", exact: true })).toHaveAttribute(
     "aria-pressed",
     "true",

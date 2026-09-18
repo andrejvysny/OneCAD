@@ -1,6 +1,13 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
-import { openEditorDebug, getFeatureLabels, bodyOptions } from "./helpers";
+import {
+  bodyOptions,
+  confirmControl,
+  confirmOperation,
+  getFeatureLabels,
+  openEditorDebug,
+  operationStrip,
+} from "./helpers";
 import { seedSelection } from "./modelToolHelpers";
 
 const BODY = "body1";
@@ -19,18 +26,24 @@ async function documentBodyIds(page: Page): Promise<string[]> {
 }
 
 async function clickConfirmButton(page: Page): Promise<void> {
-  await expect(page.getByTestId("chip-confirm")).toBeVisible();
-  await page.getByTestId("chip-confirm").click();
+  await expect(confirmControl(page)).toBeVisible();
+  await confirmOperation(page);
 }
 
 /** The armed mirror's `fuseWithOriginal` toggle (WP6). */
 const fuseToggle = (page: Page) => page.getByTestId("chip-mirror-fuse");
 
-/** Select the body, press `M`, and wait for the armed mirror chip. */
+/*
+ * Select the body, press `M`, and wait for the armed mirror.
+ *
+ * Mirror has no parameter at the feature, so it renders NO floating label
+ * (spec §4.1): its whole authoring surface is the operation strip and the
+ * inspector, which is what "armed" is read off here.
+ */
 async function armMirror(page: Page): Promise<void> {
   await seedSelection(page, [{ kind: "body", id: BODY }]);
   await page.keyboard.press("m");
-  await expect(page.getByTestId("model-tool-chip")).toBeVisible();
+  await expect(operationStrip(page)).toBeVisible();
   await expect(fuseToggle(page)).toBeVisible();
 }
 
@@ -45,9 +58,9 @@ async function armMirror(page: Page): Promise<void> {
  * returned without arming anything.
  */
 async function commitAndSettle(page: Page): Promise<void> {
-  await expect(page.getByTestId("chip-confirm")).toBeVisible();
-  await page.getByTestId("chip-confirm").click();
-  await expect(page.getByTestId("model-tool-chip")).toBeHidden();
+  await expect(confirmControl(page)).toBeVisible();
+  await confirmOperation(page);
+  await expect(operationStrip(page)).toBeHidden();
   await expect
     .poll(async () =>
       page.evaluate(
@@ -102,8 +115,7 @@ test("mirror body: select body → M → YZ plane → Apply creates a mirrored c
   await seedSelection(page, [{ kind: "body", id: BODY }]);
   await page.keyboard.press("m");
 
-  const chip = page.getByTestId("model-tool-chip");
-  await expect(chip).toBeVisible();
+  await expect(operationStrip(page)).toBeVisible();
 
   await page.getByTestId("chip-mirror-plane-yz").click();
   await clickConfirmButton(page);
@@ -111,7 +123,7 @@ test("mirror body: select body → M → YZ plane → Apply creates a mirrored c
   await expect.poll(async () => await getFeatureLabels(page)).toContain("Mirror");
   const after = await documentBodyIds(page);
   expect(after).toContain(BODY);
-  await expect(page.getByTestId("model-tool-chip")).toBeHidden();
+  await expect(operationStrip(page)).toBeHidden();
 });
 
 /*

@@ -655,6 +655,58 @@ describe("HtmlOverlayDriver", () => {
     expect(xyOf(chip)[1]).toBeLessThan(200);
   });
 
+  /*
+   * H7 / spec §10.2: the COMPACT label must clear the glyph's pick corridor at
+   * every roll, not just the one the old 181 × 35 panel was measured at. The
+   * corridor is `ViewportEngine.getInteractionOverlayBounds("valueHandle")` —
+   * the 30 × 40 px rectangle rolled with the glyph, reported as its
+   * axis-aligned bounds — so its screen box grows and shrinks as the axis turns.
+   * (TODO.md SESSION 37 H7.)
+   */
+  const LABEL_SIZE = { w: 96, h: 30 };
+  /** The axis-aligned bounds of the 30 × 40 corridor at roll `deg`, centred on
+   *  the anchor — the same quantity the engine reports. */
+  function corridorBoxAt(deg: number, cx: number, cy: number) {
+    const t = (deg * Math.PI) / 180;
+    const halfX = (40 * Math.abs(Math.cos(t)) + 30 * Math.abs(Math.sin(t))) / 2;
+    const halfY = (40 * Math.abs(Math.sin(t)) + 30 * Math.abs(Math.cos(t))) / 2;
+    return { x: cx - halfX, y: cy - halfY, width: halfX * 2, height: halfY * 2 };
+  }
+
+  it("keeps the compact label clear of the glyph corridor at every roll", () => {
+    const cam = camAt(10);
+    for (const deg of [0, 15, 30, 45, 60, 75, 90, 120, 135, 150, 180]) {
+      const driver = new HtmlOverlayDriver();
+      const parent = document.createElement("div");
+      const label = document.createElement("div");
+      label.getBoundingClientRect = () =>
+        ({ width: LABEL_SIZE.w, height: LABEL_SIZE.h }) as DOMRect;
+      parent.appendChild(label);
+      driver.register("label", label, new THREE.Vector3(0, 0, 0), {
+        avoidKeepOut: true,
+        constrainToSafeRect: true,
+      });
+
+      const keepOut = corridorBoxAt(deg, 200, 200);
+      driver.update(cam, 400, 400, keepOut, { x: 0, y: 0, width: 400, height: 400 });
+
+      const [cx, cy] = xyOf(label);
+      const rect = {
+        x: cx - LABEL_SIZE.w / 2,
+        y: cy - LABEL_SIZE.h / 2,
+        width: LABEL_SIZE.w,
+        height: LABEL_SIZE.h,
+      };
+      const padded = {
+        x: keepOut.x - KEEP_OUT_PAD_PX,
+        y: keepOut.y - KEEP_OUT_PAD_PX,
+        width: keepOut.width + KEEP_OUT_PAD_PX * 2,
+        height: keepOut.height + KEEP_OUT_PAD_PX * 2,
+      };
+      expect(intersects(rect, padded), `roll ${deg}°: label ${JSON.stringify(rect)}`).toBe(false);
+    }
+  });
+
   it("does not displace a chip that never opted in", () => {
     const cam = camAt(10);
     const driver = new HtmlOverlayDriver();

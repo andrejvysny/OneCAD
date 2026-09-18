@@ -1,17 +1,18 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import {
-  openEditorDebug,
-  waitForCameraSettled,
-  findPlaneQuad,
-  datumOptions,
-  sketchOptions,
-  enterSketchViaPlanePicker,
-  selectSketchTool,
-  clickAt,
-  dofPill,
   bodyOptions,
+  clickAt,
+  confirmOperation,
+  datumOptions,
+  dofPill,
   dragExtrudeDepth,
+  enterSketchViaPlanePicker,
+  findPlaneQuad,
+  openEditorDebug,
+  selectSketchTool,
+  sketchOptions,
+  waitForCameraSettled,
 } from "./helpers";
 
 /*
@@ -43,7 +44,7 @@ async function createDatum(page: Page): Promise<void> {
   await page.mouse.move(quad.x, quad.y);
   await page.mouse.down();
   await page.mouse.up();
-  await page.getByTestId("model-tool-chip").getByTestId("chip-confirm").click();
+  await confirmOperation(page);
   await expect(datumOptions(page)).toHaveCount(1);
 }
 
@@ -94,7 +95,7 @@ async function buildSketchAndExtrude(page: Page): Promise<string> {
   // armed state leaves it at zero and nothing commits at all (UNIFY-UX,
   // `7d7c82a`).
   await dragExtrudeDepth(page);
-  await page.getByTestId("model-tool-chip").getByTestId("chip-confirm").click();
+  await confirmOperation(page);
   await expect(page.getByText(/^Drag the arrow to set depth/)).toHaveCount(0);
 
   return created;

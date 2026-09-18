@@ -1,6 +1,6 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
-import { openEditorDebug, getFeatureLabels, bodyOptions } from "./helpers";
+import { bodyOptions, confirmOperation, getFeatureLabels, openEditorDebug } from "./helpers";
 import { seedSelection } from "./modelToolHelpers";
 
 const BODY = "body1";
@@ -35,7 +35,7 @@ test("linear pattern: select body → P → Apply commits a Linear Pattern row",
   // the count reads off `value` rather than text content.
   await expect(page.getByTestId("pattern-count")).toHaveValue(/^[0-9]+$/);
 
-  await page.getByTestId("chip-confirm").click();
+  await confirmOperation(page);
 
   await expect.poll(async () => await getFeatureLabels(page)).toContain("Linear Pattern");
   const after = await documentBodyIds(page);
