@@ -1,38 +1,11 @@
----
-tracker:
-  kind: file
-  data_root: ~/.symphony
-  project_id: onecad
-workspace:
-  mode: single_dir
-  repo: /Users/andrejvysny/workspace/CAD/OneCAD-Tauri
-agent:
-  backend: claude-sdk
-  permission_mode: bypassPermissions
-  max_concurrent_agents: 5
-  max_concurrent_plans: 3
-server:
-  port: 4500
-projects:
-  - name: OneCAD
-    project_id: onecad
-    repo: /Users/andrejvysny/workspace/CAD/OneCAD-Tauri
-    identifier: ONECAD
-    config_dir: ~/.claude
-    dev_server:
-      start: npm run tauri dev
----
+# Agent task workflow
 
-You have been assigned issue {{ issue.identifier }}: "{{ issue.title }}".
+Use the private [ONECAD project](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/issues/) as the task tracker. Read the assigned Task, its parent, dependencies, acceptance criteria and relevant canonical Pages before implementation. Retain code-coupled contracts in Git and consult [Documentation index](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/pages/0bfe867d-215a-4cfb-a501-9f628976bc9d).
 
-<issue>
-Identifier: {{ issue.identifier }}
-Issue id (pass as task_id to the tracker tools): {{ issue.id }}
-Title: {{ issue.title }}
-{% if issue.priority %}Priority: {{ issue.priority }}
-{% endif %}{% if issue.labels.size > 0 %}Labels: {{ issue.labels | join: ", " }}
-{% endif %}Description:
-{% if issue.description %}{{ issue.description }}{% else %}(No description was provided. Treat the title as the specification; if it is too vague to implement safely, follow the blocked protocol.){% endif %}
-</issue>
+The former Symphony file-tracker configuration used an obsolete checkout path and npm command. It is preserved as historical provenance at [a6d8a2da](https://github.com/andrejvysny/OneCAD/blob/a6d8a2dacad7b1759cd22d0f3eb64992b9c411b0/WORKFLOW.md); it is not active project-management configuration. Do not recreate a local tracker or invent an unsupported Plane adapter.
 
-Implement this issue end to end: read it with tracker_get_task, move it to "In Progress" with a short plan comment, make the change, confirm the project's build/tests/lint pass, commit locally, then post an evidence-backed summary comment (with the verification output and commit SHA) and move the issue to "Human Review". Keep every change scoped to this issue.
+Implement only the authorized Task scope. Preserve unrelated work. Use Bun for this repository. Reproduce defects before fixing them; run proportionate checks and retain exact results. Do not claim native acceptance from mock browser tests.
+
+Record approved work and validation in the existing Task or canonical Page. Propose future work as Tasks and reusable knowledge in the global Wiki; obtain approval before new saves unless already authorized. Never auto-commit, push, pull or mark incomplete acceptance complete.
+
+Unresolved questions: none for this workflow. A live Symphony-to-Plane adapter remains outside this documentation migration and requires an explicit implementation Task if that runner is used.

@@ -29,8 +29,7 @@ and pinned by cross-track suites. There is **no JavaScript on the model kernel
 path** — the frontend only ever sees projection DTOs produced by Rust, and the
 C++ worker speaks frames over stdio.
 
-Modeling-correctness roadmap and live implementation delta:
-[`OneCAD-modeling-correctness-roadmap/README.md`](OneCAD-modeling-correctness-roadmap/README.md).
+Project roadmap and live status: [Plane Roadmap](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/pages/8a3f35a2-a9f0-40e0-aedb-783d58a89359) and [Tasks](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/issues/). Version-specific modeling contracts remain in [Git](docs/design/modeling-correctness/phase-0-safety-and-truth.md), indexed by the [Documentation index](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/pages/0bfe867d-215a-4cfb-a501-9f628976bc9d).
 
 **Note:** `package-lock.json` is stale. Use Bun (see [Development](#development)).
 
@@ -49,7 +48,7 @@ Modeling-correctness roadmap and live implementation delta:
 - **Parametric history** — edit dimensions anywhere in the timeline, roll back,
   reorder, insert at the cursor, promote snapshots; undo/redo with checkpoint
   acceleration and draft suppression.
-- **Everything has a kernel preview** — preview == commit proven per op.
+- **Kernel-backed previews** — current coverage and native acceptance are tracked in the [ONECAD Plane project](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/issues/).
 - **STEP import** — XCAF product names + per-face colors, first-class bodies,
   identity survives process death.
 - **Datum planes**, measure tool (area, length, distance), units
@@ -106,8 +105,8 @@ protocol/           SCHEMA.md (OCW1) and mesh_format.md (MESH1) normative contra
 corpus/             read-only legacy correctness oracle
 e2e/                Playwright specs (mock-client lane)
 docs/               DEBUGGING · PACKAGING · qa/ (release gates + triage) · postmortems
-CURRENT_STATE.md    session history — read before changing code
-TODO.md             gate records + follow-ups
+CURRENT_STATE.md    compatibility pointer to Plane project status
+TODO.md             compatibility pointer to Plane Tasks and historical gates
 ```
 
 ---
@@ -152,8 +151,7 @@ cannot produce a skipped pass.
 
 ## Contributing / process notes
 
-- Read `CURRENT_STATE.md` **before** changing code; record gate results and
-  follow-ups in `TODO.md` and preserve unrelated worktree changes.
+- Consult the private [ONECAD project](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/issues/) and relevant Tasks/Pages before substantial work. Plane owns project management and durable knowledge; protocols, APIs, architecture, installation, testing and release procedures remain in Git. Propose new Tasks/knowledge updates and obtain approval before saving unless already authorized. Preserve unrelated worktree changes.
 - Run the smallest relevant suite first, then the frontend, worker, and Rust gates.
 - Commit at a completed gate with a concise conventional message
   (`feat: description`, `fix: ...`, `docs: ...`). Do not auto-commit, push, or pull.

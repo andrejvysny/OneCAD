@@ -1,5 +1,7 @@
 # Manual release gates
 
+> Project execution status and unfinished obligations live in [ONECAD QA Tasks/Pages](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/pages/1a7c76b5-dee6-4f3e-9783-009ed437b665). This Git document retains technical acceptance procedures or historical triage evidence. Checkboxes define criteria, not a primary execution ledger; record approved outcomes in Plane. Historical `TODO.md`/`CURRENT_STATE.md` citations refer to [the pre-migration revision](https://github.com/andrejvysny/OneCAD/tree/a6d8a2dacad7b1759cd22d0f3eb64992b9c411b0).
+
 The complete list of checks that a human must still perform by hand. Everything
 else that used to live in `MANUAL_GATES_RUN.md` is either asserted by an
 automated test or tracked as a named gap — see `docs/qa/MANUAL_GATES_TRIAGE.md`

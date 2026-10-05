@@ -72,7 +72,7 @@ or Screen Recording grant, which is fine — only the input-posting helper verbs
 `AXIsProcessTrusted`, and every test that reaches one wraps it in the suite's own `tolerate()`.
 
 **User-run, not in CI** — these launch the real app and move the real cursor, so they need both TCC
-grants and a window server. Record them as owed in `TODO.md`:
+grants and a window server. Track these owed validations as Plane Tasks:
 ```
 bun tools/tauri-agent/scripts/smoke.ts          # live: launch, calibrate, screenshot, stop
 bun tools/tauri-agent/scripts/smoke-actions.ts  # live: click, hover, key, scroll, orbit drag

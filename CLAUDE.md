@@ -10,12 +10,11 @@ OneCAD — a parametric, history-based CAD application. A non-destructive migrat
 
 1. `protocol/SCHEMA.md` and `protocol/mesh_format.md` — normative wire contracts for both tracks.
 2. `docs/ARCHITECTURE.md` — architecture laws. `docs/adr/` (14 records) says why.
-3. `CURRENT_STATE.md` — current milestone, gate status, decisions D1–D5.
-4. `TODO.md` — reverse-chronological program and gate ledger. Not a backlog.
-5. This file.
-6. `OneCAD-modeling-correctness-roadmap/` — reviewed baseline and plan, **not** live-status authority. Within it, `04-live-implementation-delta.md` supersedes the baseline files.
+3. The private [ONECAD project](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/issues/) — [Project overview](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/pages/b6fea05e-2e7b-403f-b7ff-9adabd30636e), [Roadmap](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/pages/8a3f35a2-a9f0-40e0-aedb-783d58a89359), relevant Tasks and canonical Pages for current project status, decisions, risks and durable knowledge.
+4. This file and `AGENTS.md` — operational instructions.
+5. Version-specific technical requirements in `docs/design/`, including modeling correctness and September interaction contracts; historical assessments are evidence, not live-status authority.
 
-`CURRENT_STATE.md` (~2,000 lines) and `TODO.md` (~8,000 lines) are both huge. Read the head and the named section you need — never the whole file.
+`CURRENT_STATE.md`, `TODO.md`, `PLAN.md`, roadmap and handoff files now point to Plane. Do not recreate local task/status ledgers. Keep code-coupled documentation in Git and index exact revisions in Plane. Obtain approval before saving new future Tasks or Page/Wiki updates unless the current task already authorizes them.
 
 ---
 
@@ -35,7 +34,7 @@ Before running a command that changes system state, check that the evidence supp
 
 **Never report a gate you did not run.** Before reporting progress, audit each claim against a tool result from this session. Only report work you can point to evidence for; if something is not yet verified, say so explicitly. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.
 
-Numbers go in reports as measured counts (`ctest 136/136`, `cargo test --workspace 1305 passed / 0 failed`), never as "all green". A subagent's claim that a gate passed is **not** evidence — re-run it yourself on the main thread before it goes in `TODO.md`. This is the house rule that produced the `eba2614` gate record and it is not negotiable. An Astra derivation (`/codex-astra`) is evidence for a design, never for a gate.
+Numbers go in reports as measured counts (`ctest 136/136`, `cargo test --workspace 1305 passed / 0 failed`), never as "all green". A subagent's claim that a gate passed is **not** evidence — re-run it yourself on the main thread before recording it in the relevant Plane Task/Page. This is the house rule that produced the `eba2614` gate record and it is not negotiable. An Astra derivation (`/codex-astra`) is evidence for a design, never for a gate.
 
 Two specific traps that make a green run a lie:
 
@@ -46,7 +45,7 @@ Two specific traps that make a green run a lie:
 
 Pause for the user only when the work genuinely requires them: a destructive or irreversible action, a real scope change, a gate only a human can run, or input only they can provide. If you hit one, ask and end the turn rather than ending on a promise.
 
-Gates the user must run (record as owed in `TODO.md`, don't fake them): the autosave manual checklist, the merged-stack Tauri smoke, and "does the exported STEP open coloured in another CAD". (3MF is a RUST-side writer — `onecad-core/src/io/threemf.rs` + `src-tauri/src/export_threemf.rs`, W4 — while the worker exports STEP/STL/OBJ; "3MF opens in a slicer" is a real user-run gate, owed alongside the STEP one and only meaningful once WP-J makes the writers honest.)
+Gates the user must run (track as owed validation Tasks in Plane; do not fake them): the autosave manual checklist, the merged-stack Tauri smoke, and "does the exported STEP open coloured in another CAD". (3MF is a RUST-side writer — `onecad-core/src/io/threemf.rs` + `src-tauri/src/export_threemf.rs`, W4 — while the worker exports STEP/STL/OBJ; "3MF opens in a slicer" is a real user-run gate, owed alongside the STEP one and only meaningful once WP-J makes the writers honest.)
 
 Before ending a turn, check your last paragraph. If it is a plan, an analysis, a question, a list of next steps, or a promise about work you have not done, do that work now with tool calls.
 
@@ -89,7 +88,7 @@ Routing rule for a work package: if the deliverable is a formula, invariant, pre
 
 **Binding on `fable-orchestrator`.** Whenever the `fable-orchestrator` skill and its phases (`fable-explore`, `fable-plan`, `fable-plan-review`, `fable-run`) are in use on this repository, the loop above is the default workflow, not an option:
 
-- If the scope touches an Astra-first domain, `PLAN.md`'s **Design** section must cite an accepted derivation in `docs/design/astra/`, or record in one line why the package does not need one. A plan that invents an epsilon, a frame, a correspondence rule, or a scoring weight inline has skipped step 1.
+- If the scope touches an Astra-first domain, the code-coupled design document linked from its Plane Task must cite an accepted derivation in `docs/design/astra/`, or record in one line why the package does not need one. A plan that invents an epsilon, a frame, a correspondence rule, or a scoring weight inline has skipped step 1.
 - A mathematical or numerical unknown must not sit in **Open questions** when a `derive` would close it. Propose the run during planning; `fable-run` refuses to start while Open questions is non-empty anyway.
 - The **Run log** records the step-3 `break`, its verdict, and which findings were accepted or rejected with the reason. A kernel-, identity-, or numerically critical package is not finished until that entry exists.
 - Task tiering is unchanged: derived-design work goes to `impl-critical`, spec-exact work to `impl-standard`, and every diff is still orchestrator-reviewed.
@@ -313,7 +312,7 @@ Two traps:
 
 ### Architecture laws (Platform refactor, in progress)
 
-`docs/ARCHITECTURE.md` is normative; `docs/adr/` records why. The migration is incremental — these bind NEW code even where old code has not moved behind them yet. `TODO.md` tracks which waves have landed.
+`docs/ARCHITECTURE.md` is normative; `docs/adr/` records why. The migration is incremental — these bind NEW code even where old code has not moved behind them yet. Plane Tasks and the Roadmap track which waves have landed.
 
 - **Platform code MUST NOT depend on modeling implementation.** `src/platform/**` may not import `@/features`, `@/tools`, `@/modules`, or a modeling store.
 - **New UI SHOULD register through a contribution registry**, not by adding an import to the editor shell. The shell knows slots, not features.
@@ -385,7 +384,7 @@ Five lanes plus the oracle. The coverage manifest is **enforced, not aspirationa
 
 Conventions:
 
-- `*.golden.test.ts(x)` are literal frozen copies — changing one requires a recorded user-visible decision in `TODO.md`.
+- `*.golden.test.ts(x)` are literal frozen copies — changing one requires a recorded user-visible decision in the relevant Plane Task/Page.
 - `*.probe.test.ts` reads the production side of a contract. `*.diag.spec.ts` / `zzdebug.spec.ts` are scratch, not gated.
 - e2e specs import `test` from `e2e/fixtures.ts`, not raw `@playwright/test`, so console, `pageerror`, and `fe-logs.json` attach on failure.
 - Rust tests use the `real_worker()` helper pattern: assert the env, refuse a silent skip.
@@ -422,13 +421,13 @@ Use it before grepping: codebase questions → `graphify query "<question>"`; re
 
 Blast-radius hint — the highest-degree nodes are `EngineError`, `DocumentRuntime`, `ViewportEngine`, `ModelToolController`, `Sketch`, `OperationRecord`, `Envelope`, `Constraint`, `Session`, `ConstraintSolver`. Touching one is a cross-community change.
 
-**Limits — do not over-trust the graph.** ~1,574 edges dangle at un-extracted endpoints (OCCT, STL, Three.js), so **absence of an edge is not evidence of no coupling**. Extraction is per-language and cannot cross the stdio frame boundary, so Rust↔C++ coupling is largely invisible to it — `protocol/SCHEMA.md` stays normative there and the graph never overrides it. The graph describes structure, not intent; `CURRENT_STATE.md`, `TODO.md`, and this file remain authoritative for *why*.
+**Limits — do not over-trust the graph.** ~1,574 edges dangle at un-extracted endpoints (OCCT, STL, Three.js), so **absence of an edge is not evidence of no coupling**. Extraction is per-language and cannot cross the stdio frame boundary, so Rust↔C++ coupling is largely invisible to it — `protocol/SCHEMA.md` stays normative there and the graph never overrides it. The graph describes structure, not intent; canonical Plane Pages, relevant Tasks and this operational guide retain rationale authority beneath the normative contracts.
 
 ---
 
 ## Working conventions
 
-- Commits happen at gate boundaries only. `TODO.md` records the gate outcome and any flagged seams — update it as part of the work, not after.
+- Commits happen at gate boundaries only. Record approved gate outcomes and flagged seams in the relevant Plane Task/Page; do not revive a repository ledger.
 - Preserve unrelated worktree changes.
 - `docs/PACKAGING.md` covers bundling. Mac signing and notarization verification is still open and needs a physical Mac.
 - Known gaps worth knowing before planning: import is STEP-only (real, with XCAF colors — no IGES/STL import); Loft and Sweep are UNSUPPORTED at the worker (Shell, Patterns, and Mirror are live end-to-end); the exact L2 preview lane (`PreviewOp`) covers new-feature drafts only — re-edits are structurally L1-only because `PreviewOp` runs against the current head, and Shell has no L1 at all.

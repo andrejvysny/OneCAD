@@ -1,46 +1,17 @@
-# OneCAD Modeling Correctness Roadmap Bundle
+# OneCAD-modeling-correctness-roadmap/README.md — Plane pointer
 
-Reviewed baseline: `1c11d4958aeadea14dd8431ba78c41f14be12142`  
-Generated: 2026-08-10  
-Scope: baseline analysis and planning. Baseline files remain read-only; the
-live implementation delta records subsequent repository changes.
+Project management and durable project knowledge now live in the private [ONECAD project](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/issues/). This file is a compatibility pointer, not a task or status ledger.
 
-## Reading order
+- [Project overview](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/pages/b6fea05e-2e7b-403f-b7ff-9adabd30636e)
+- [Roadmap and unfinished Tasks](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/pages/8a3f35a2-a9f0-40e0-aedb-783d58a89359)
+- [Decisions and risks](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/pages/6b84f81b-3e32-49fa-9b31-5dfcd758de2c)
+- [Documentation index](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/pages/0bfe867d-215a-4cfb-a501-9f628976bc9d)
+- [Migration audit and source dispositions](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/pages/a0db33f3-7c7f-4bd6-bc1d-0c2c9ca549d1)
 
-1. `04-live-implementation-delta.md` — current repository evidence; supersedes baseline claims when they conflict.
-2. `00-current-state-assessment.md` — evidence-backed baseline review and highest-priority findings.
-3. `01-operation-correctness-matrix.md` — every supported operation and meaningful mode across test layers.
-4. `03-risk-register.md` — severity, likelihood, detectability and dependencies.
-5. `02-master-roadmap.md` — phased 3–6 month core and stretch sequencing.
-5. `phase-0-safety-and-truth.md`
-6. `phase-1-semantic-reference-integrity.md`
-7. `phase-2-exact-profile-geometry.md`
-8. `phase-3-publication-policy.md`
-9. `phase-4-vertical-evidence.md`
-10. `phase-5-robustness-breadth.md`
-11. `phase-6-required-cross-platform-gates.md`
+## Preserved source
 
-## Important scope notes
+The original is retained at [revision a6d8a2da](https://github.com/andrejvysny/OneCAD/blob/a6d8a2dacad7b1759cd22d0f3eb64992b9c411b0/OneCAD-modeling-correctness-roadmap/README.md), SHA-256 `88802460cbbd6c61a0b025de91229057f8fb1d2999114d0117fbae2d5943423b`. Full historical management content, completed work, gate rows and limitations are preserved in the following Pages; they are not current completion claims.
 
-- Phases 0–4 are the recommended committed 3–5 month core for one founder.
-- Phase 5 is the preferred robustness stretch when the core lands near the lower estimates.
-- Full completion including Phase 6 is more realistically 5–8 months without additional capacity.
-- Loft, Sweep, assemblies, FEM, TechDraw, CAM, addon kernel extensions and production advanced-Fillet rescue strategies are excluded.
-- The accepted ordinary-edit teleport residual remains unchanged.
-- Hole's documented split-host residual is not silently redefined; any new behavior must be versioned.
+- [Historical source part 1/1](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/pages/af3644bc-0f44-4ad9-a324-df702e081a23)
 
-## Evidence limitations
-
-The review used the connected GitHub repository and a read-only clone. The sandbox did not build OCCT, the worker, Rust, Bun, Playwright or Tauri. Runtime gates in the specifications are instructions for the provisioned developer Mac and trusted Linux CI; they are not claims that those gates passed here.
-
-## Source hierarchy
-
-For implementation status, use `04-live-implementation-delta.md`, then live
-repository state (`CURRENT_STATE.md`, `TODO.md`, source and gates). The remaining
-bundle files are a reviewed baseline and roadmap, not live-status authority.
-Phase 3 is partially implemented in the live worktree; its resolved Pattern V2
-lineage contract is recorded in the live delta and `protocol/SCHEMA.md`.
-
-## Highest-value first gate
-
-Begin with `MODEL-CORRECTNESS-P0` in `phase-0-safety-and-truth.md`: dirty Open, authoritative save/result truth, zero-solid Boolean refusal, circular-pattern preview parity, multi-session exact previews, actionable Boolean re-arm, and a curved-wall Draft red probe.
+Read relevant Plane context before substantial work. Propose future Tasks and knowledge updates there; obtain approval before new saves unless already authorized by the current task. Do not resume or duplicate historical checklists here.

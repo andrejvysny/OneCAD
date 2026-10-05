@@ -4,9 +4,7 @@ This document states the architectural laws of the OneCAD codebase. Folder names
 change; these rules do not. Where this document and a folder layout disagree,
 this document wins.
 
-The migration this describes is in progress. `TODO.md` records which waves have
-landed; a rule stated here is binding for new code even where old code has not
-yet been moved behind it.
+Current migration status and unfinished work live in the private [ONECAD Plane project](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/issues/). The rules stated here remain binding for new code even where old code has not yet been moved behind them; this document remains the technical architecture authority.
 
 ## 1. The one-sentence version
 
