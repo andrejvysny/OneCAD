@@ -1,5 +1,6 @@
 // SolverLane.cpp — see SolverLane.h. SCHEMA §7.4 solver-lane verb handlers.
 #include "protocol/SolverLane.h"
+#include "protocol/SketchTruth.h"
 
 #include <algorithm>
 #include <cctype>
@@ -170,14 +171,14 @@ std::unordered_map<sk::EntityID, std::pair<double, double>> collect_positions(
 // {handle: [x,y]} for points whose position moved beyond eps vs `prev`.
 json changed_positions(const std::unordered_map<sk::EntityID, std::pair<double, double>>& prev,
                        const std::unordered_map<sk::EntityID, std::pair<double, double>>& cur,
-                       const wire::WireIndex& index) {
+                       const wire::WireIndex& index, double epsilon = kPosEpsilon) {
     json out = json::object();
     for (const auto& [id, pos] : cur) {
         auto it = prev.find(id);
         const bool moved =
             it == prev.end() ||
-            std::abs(pos.first - it->second.first) > kPosEpsilon ||
-            std::abs(pos.second - it->second.second) > kPosEpsilon;
+            std::abs(pos.first - it->second.first) > epsilon ||
+            std::abs(pos.second - it->second.second) > epsilon;
         if (!moved) continue;
         const std::string handle = index.handle_for(id);
         if (!handle.empty()) out[handle] = json::array({pos.first, pos.second});
@@ -207,26 +208,50 @@ CurveMap collect_curves(const sk::Sketch& sketch) {
     return out;
 }
 
+// Translation canonicalizes arc angles before solving. Delta baselines must
+// retain the caller's scalars so storing that canonical pose cannot lose a change.
+CurveMap requested_curves(const json& args, const sk::Sketch& sketch,
+                          const wire::WireIndex& index) {
+    CurveMap out = collect_curves(sketch);
+    const auto raw_scalar = [](const json& entity, const char* key, double fallback) {
+        if (!entity.contains(key)) return fallback;
+        const json& scalar = entity.at(key);
+        return scalar.is_number() ? scalar.get<double>() : scalar.value("value", fallback);
+    };
+    for (const auto& entity : args.at("entities")) {
+        const auto wire_id = entity.value("id", std::string{});
+        const auto internal = index.wire_to_internal.find(wire_id);
+        if (internal == index.wire_to_internal.end()) continue;
+        auto curve = out.find(internal->second);
+        if (curve == out.end()) continue;
+        curve->second.radius = raw_scalar(entity, "radius", curve->second.radius);
+        curve->second.start_angle = raw_scalar(entity, "startAngle", curve->second.start_angle);
+        curve->second.end_angle = raw_scalar(entity, "endAngle", curve->second.end_angle);
+    }
+    return out;
+}
+
 // {wireEntityId: {changed members}} — the SCHEMA §7.4 `curves` channel, under
 // the same incremental discipline as changed_positions: CHANGED members only,
 // and an entity with nothing changed is omitted entirely. Emitted for EVERY
 // kind, not only `radius`: a Tangent propagates even a plain point drag into a
 // neighbouring curve's radius, and before this channel existed that change
 // reached the worker's store but never Rust (silent revert on the next upsert).
-json changed_curves(const CurveMap& prev, const CurveMap& cur, const wire::WireIndex& index) {
+json changed_curves(const CurveMap& prev, const CurveMap& cur, const wire::WireIndex& index,
+                    double position_epsilon = kPosEpsilon, double angle_epsilon = kAngleEpsilon) {
     json out = json::object();
     for (const auto& [id, params] : cur) {
         const auto it = prev.find(id);
         const bool fresh = it == prev.end();
         json members = json::object();
-        if (fresh || std::abs(params.radius - it->second.radius) > kPosEpsilon) {
+        if (fresh || std::abs(params.radius - it->second.radius) > position_epsilon) {
             members["radius"] = params.radius;
         }
         if (params.has_angles) {
-            if (fresh || std::abs(params.start_angle - it->second.start_angle) > kAngleEpsilon) {
+            if (fresh || std::abs(params.start_angle - it->second.start_angle) > angle_epsilon) {
                 members["startAngle"] = params.start_angle;
             }
-            if (fresh || std::abs(params.end_angle - it->second.end_angle) > kAngleEpsilon) {
+            if (fresh || std::abs(params.end_angle - it->second.end_angle) > angle_epsilon) {
                 members["endAngle"] = params.end_angle;
             }
         }
@@ -283,29 +308,6 @@ std::vector<std::string> map_conflicting(const wire::WireIndex& index,
         out.push_back(it != index.internal_constraint_to_wire.end() ? it->second : cid);
     }
     return out;
-}
-
-// SketchUpsert / gesture state ∈ UnderConstrained|FullyConstrained|OverConstrained|Conflicting
-// (SCHEMA §7.4). PlaneGCS distinguishes genuine conflicts (no solution) from
-// benign redundancy — extra constraints that remove no DOF (corpus g), e.g. a
-// duplicate dimension. Priority, highest first:
-//   Conflicting                    — genuine conflict (no solution exists)
-//   OverConstrained  (redundant && !conflicting) — solvable but carries a benign
-//                                     redundant constraint; a warning, not an error
-//   FullyConstrained (dof == 0)    — exactly determined, no redundancy
-//   UnderConstrained               — remaining DOF
-// OverConstrained deliberately outranks FullyConstrained: a solvable sketch with
-// one redundant dimension is DOF-preserving (its dof may still be 0), and the
-// warning must surface (Rust/dto + the dimension tool treat OverConstrained like
-// Conflicting for auto-reject). HISTORY: earlier revisions collapsed redundancy
-// into FullyConstrained and cited corpus g as a reason to hide OverConstrained;
-// that "documented deviation" is retired — the redundant system IS what §7.4
-// means by OverConstrained, so it is now surfaced.
-std::string upsert_state(int dof, bool conflicting, bool redundant) {
-    if (conflicting) return "Conflicting";
-    if (redundant) return "OverConstrained";
-    if (dof == 0) return "FullyConstrained";
-    return "UnderConstrained";
 }
 
 // SCHEMA §7.4 `entityStates` — {wireEntityId: underConstrained|fullyConstrained|
@@ -418,13 +420,18 @@ Envelope SolverLane::on_upsert(const Envelope& req) {
     if (sketch_id.empty()) return err(req, "OP_FAILED", "SketchUpsert: missing sketchId");
 
     wire::TranslateResult tr = wire::translate(args);
-    if (!tr.ok) return err(req, "OP_FAILED", "SketchUpsert: " + tr.error);
+    if (!tr.ok) return err(req, "OP_FAILED", "SketchUpsert: " + tr.error, translation_refusal(tr));
 
+    const auto requested_positions = collect_positions(*tr.sketch);
+    const auto curve_baseline = requested_curves(args, *tr.sketch, tr.index);
     const sk::SolveResult solve = tr.sketch->solve();
-    const int dof = tr.sketch->getDegreesOfFreedom();
-    const auto conflicting = tr.sketch->getConflictingConstraints();
-    const bool redundant = tr.sketch->hasRedundantConstraints();
-    const std::string state = upsert_state(dof, !conflicting.empty(), redundant);
+    if (!solve.truth.publishable()) {
+        return err(req, "OP_FAILED", "SketchUpsert: exact truth is unresolved",
+                   exact_refusal(solve.truth, tr.index));
+    }
+    const int dof = solve.truth.dof;
+    const auto& conflicting = solve.truth.conflicting;
+    const std::string state = exact_state_token(*solve.truth.state);
     // Read HERE, while the diagnosis the dof + redundancy queries above left
     // behind is still live (SCHEMA §7.4 additive `entityStates`).
     std::optional<json> states = entity_states(*tr.sketch, tr.index, conflicting);
@@ -441,8 +448,7 @@ Envelope SolverLane::on_upsert(const Envelope& req) {
         {"sketchRevision", revision},
         {"dof", dof},
         {"state", state},
-        // Per-constraint conflict ids (SCHEMA §7.4): the constraints PlaneGCS reports
-        // as mutually unsatisfiable, wire-mapped (empty when the sketch is solvable).
+        // Named retained-pose residual violations and genuine rank groups.
         {"conflicting", map_conflicting(tr.index, conflicting)},
         // SCHEMA §7.4 `maxResidual`, REPORTING ONLY — the largest per-constraint
         // residual the exact solve above left behind, each in its own dimension.
@@ -450,6 +456,16 @@ Envelope SolverLane::on_upsert(const Envelope& req) {
         // fixed above and nothing below re-reads it.
         {"maxResidual", solve.residual},
     };
+    result.update(exact_truth_fields(solve.truth, tr.index));
+    result["diagnostics"] = exact_truth_diagnostics(solve.truth, tr.index);
+    // Authoritative writeback must preserve even sub-preview-threshold changes.
+    // Failed solves retain the request in the store and publish no correction.
+    if (solve.success) {
+        result["positions"] = changed_positions(
+            requested_positions, collect_positions(*tr.sketch), tr.index, 0.0);
+        result["curves"] = changed_curves(
+            curve_baseline, collect_curves(*tr.sketch), tr.index, 0.0, 0.0);
+    }
     // Optional/additive: absent means "this worker has nothing to say about the
     // individual entities", never "they are all unconstrained".
     if (states) result["entityStates"] = std::move(*states);
@@ -471,7 +487,7 @@ Envelope SolverLane::on_begin(const Envelope& req) {
     }
 
     wire::TranslateResult tr = wire::translate(stored->wire_args);
-    if (!tr.ok) return err(req, "OP_FAILED", "BeginGesture: " + tr.error);
+    if (!tr.ok) return err(req, "OP_FAILED", "BeginGesture: " + tr.error, translation_refusal(tr));
 
     // --- SCHEMA §7.4 drag target ---------------------------------------------
     // The `drag` object declares WHAT the pointer grabbed:
@@ -565,27 +581,33 @@ Envelope SolverLane::on_begin(const Envelope& req) {
         }
     }
 
-    // Build + diagnose the GCS system ONCE. Capture the sketch's inherent
-    // redundancy HERE, before beginPointDrag() adds drag-fix constraints: a drag
-    // pins every non-dragged point, which makes the committed constraints look
-    // redundant against those pins, so the per-drag solve cannot tell inherent
-    // redundancy apart from drag-induced redundancy. The committed sketch's
-    // redundancy is fixed for the whole gesture (same as g.conflicting).
-    tr.sketch->solve();
-    const int dof = tr.sketch->getDegreesOfFreedom();
-    const auto conflicting_internal = tr.sketch->getConflictingConstraints();
-    const bool redundant = tr.sketch->hasRedundantConstraints();
+    double grab_x = 0, grab_y = 0;
+    if (kind == DragKind::Point && drag.contains("grab") &&
+        (!drag["grab"].is_array() || drag["grab"].size() != 2 || !read_grab(drag, grab_x, grab_y))) {
+        return err(req, "OP_FAILED", "BeginGesture: Point grab must be two finite coordinates");
+    }
+
+    // Capture committed truth before any scoped Point declaration or non-point
+    // temporary pins. Preview rank must never replace released sketch truth.
+    const auto input_positions = collect_positions(*tr.sketch);
+    const auto input_curves = requested_curves(stored->wire_args, *tr.sketch, tr.index);
+    const auto solve = tr.sketch->solve();
+    if (!solve.truth.admissible()) {
+        return err(req, "OP_FAILED", "BeginGesture: exact sketch is not admissible",
+                   exact_refusal(solve.truth, tr.index));
+    }
+    const int dof = solve.truth.dof;
+    const auto& conflicting_internal = solve.truth.conflicting;
+    const bool redundant = solve.truth.redundant;
     // §7.4 `entityStates`, captured HERE for the same reason `dof` and
     // `redundant` are: this is the last moment the diagnosis describes the
     // COMMITTED sketch. Every drag step below ends by invalidating it.
     std::optional<json> states = entity_states(*tr.sketch, tr.index, conflicting_internal);
 
-    // ONLY the Point kind opens a point drag: `beginPointDrag` pins every OTHER
-    // point, which is right for "one handle to one position" and wrong for all
-    // three new kinds (it over-determines an arc reshape and freezes the
-    // geometry a body drag has to carry). They pin per-kind in `run_step`.
+    // Point drives only its selected coordinates. Non-point kinds retain their
+    // separate pin contracts in run_step.
     if (kind == DragKind::Point) {
-        tr.sketch->beginPointDrag(drag_internal);  // drag-fix strategy + rollback snapshot
+        tr.sketch->beginPointDrag(drag_internal);
     }
 
     Gesture g;
@@ -607,6 +629,13 @@ Envelope SolverLane::on_begin(const Envelope& req) {
     // pose (the same pose `baseline` records) — SCHEMA §7.4: re-deriving them per
     // step would let the gesture drift under the cursor.
     g.has_grab = read_grab(drag, g.grab.first, g.grab.second);
+    if (kind == DragKind::Point && g.has_grab) {
+        const auto at = g.baseline.at(g.drag_point);
+        g.point_offset = {at.first-g.grab.first, at.second-g.grab.second};
+        if (!std::isfinite(g.point_offset.first) || !std::isfinite(g.point_offset.second)) {
+            return err(req, "OP_FAILED", "BeginGesture: Point offset is nonfinite");
+        }
+    }
     if (kind == DragKind::EntityBody) {
         for (const sk::EntityID& pid : g.body_points) {
             const auto it = g.baseline.find(pid);
@@ -634,10 +663,15 @@ Envelope SolverLane::on_begin(const Envelope& req) {
     g.baseline_curves = collect_curves(*tr.sketch);
     g.last_reported_curves = g.baseline_curves;
     g.sketch = std::move(tr.sketch);
+    g.accepted_pose.emplace(*g.sketch);
     g.index = std::move(tr.index);
-    gestures_[gesture_id] = std::move(g);
-
     json result = {{"gestureId", gesture_id}, {"ready", true}};
+    if (kind == DragKind::Point) {
+        result["positions"] = changed_positions(input_positions, g.baseline, g.index, 0.0);
+        result["curves"] = changed_curves(input_curves, g.baseline_curves, g.index, 0.0, 0.0);
+        if (g.has_grab) result["pointOffset"] = {g.point_offset.first, g.point_offset.second};
+    }
+    gestures_[gesture_id] = std::move(g);
     if (states) result["entityStates"] = std::move(*states);
     return Envelope::ok_response(req.id, std::move(result));
 }
@@ -646,7 +680,7 @@ Envelope SolverLane::on_begin(const Envelope& req) {
 //
 // The pin set is the whole design. There is no single set that serves all four
 // kinds, which is exactly why `Sketch::solveWithTargets` takes an EXPLICIT one:
-//   * Point      — `beginPointDrag`'s pin-everything strategy (unchanged).
+//   * Point      — selected X/Y drives within their structural scalar components.
 //   * ArcEnd     — everything except the arc's two endpoints.
 //   * Radius     — the curve's center only.
 //   * EntityBody — nothing at all.
@@ -660,7 +694,7 @@ sk::SolveResult SolverLane::run_step(Gesture& g, double tx, double ty) {
         case DragKind::Point:
             // Byte-identical to the pre-SP-2 lane: one point, one position,
             // `beginPointDrag`'s pins, `solveWithDrag`.
-            return sketch.solveWithDrag(g.drag_point, sk::Vec2d{tx, ty});
+            return sketch.solveWithDrag(g.drag_point, sk::Vec2d{tx+g.point_offset.first, ty+g.point_offset.second});
 
         case DragKind::ArcEnd: {
             // Pin every point EXCEPT the arc's own two endpoints. The CENTER is
@@ -796,6 +830,7 @@ Envelope SolverLane::on_drag(const Envelope& req) {
     g.last_reported = cur;
     g.last_reported_curves = cur_curves;
     g.last_success = r.success;
+    if (r.success) g.accepted_pose.emplace(*g.sketch);
 
     json result = {
         {"gestureId", gesture_id},
@@ -809,6 +844,11 @@ Envelope SolverLane::on_drag(const Envelope& req) {
         {"curves", std::move(curves)},
         {"solveMicros", solve_micros},
     };
+    if (g.kind == DragKind::Point && r.errorMessage == "branchBoundary") {
+        result["diagnostics"] = json::array({{{"code", "OP_FAILED"}, {"severity", "error"},
+            {"reasonCode", "branchBoundary"}, {"stage", "sketchSolve"},
+            {"message", "Point drag cannot continue across the Angle branch boundary"}}});
+    }
     return Envelope::ok_response(req.id, std::move(result));
 }
 
@@ -816,53 +856,35 @@ Envelope SolverLane::on_drag(const Envelope& req) {
 
 Envelope SolverLane::on_end(const Envelope& req) {
     const json& args = req.args;
+    if (args.contains("cancel") && (!args["cancel"].is_boolean() ||
+        (args["cancel"].get<bool>() && args.contains("commit")))) {
+        return err(req, "OP_FAILED", "EndGesture: cancel must be boolean and cannot accompany commit");
+    }
     const std::uint64_t gesture_id = u64(args, "gestureId");
 
     auto git = gestures_.find(gesture_id);
     if (git == gestures_.end()) {
         return err(req, "REF_UNRESOLVED", "EndGesture: unknown or ended gesture");
     }
+    if (args.value("cancel", false)) {
+        gestures_.erase(git);
+        return Envelope::ok_response(req.id, {{"gestureId", gesture_id}, {"cancelled", true}});
+    }
     Gesture g = std::move(git->second);
     gestures_.erase(git);
 
-    // Final EXACT solve: to the committed pointer-up target if provided, else a
-    // plain full solve. endPointDrag() rolls back to the drag-start pose on a
-    // failed gesture (rollback determinism, corpus g).
-    sk::SolveResult r;
-    bool did_final_drag = false;
-    if (args.contains("commit") && args["commit"].is_object() &&
-        args["commit"].contains("finalTarget")) {
-        const json ft = args["commit"]["finalTarget"];
-        if (ft.is_array() && ft.size() >= 2 && ft[0].is_number() && ft[1].is_number()) {
-            // Same per-kind dispatch the drag steps used — the committed pose
-            // must be produced by the same pin sets that produced the preview.
-            r = run_step(g, ft[0].get<double>(), ft[1].get<double>());
-            did_final_drag = true;
-        }
+    const auto final = finish_pose(g, args);
+    const auto& r = final.result;
+    if (!r.truth.publishable()) {
+        return err(req, "OP_FAILED", "EndGesture: retained exact truth is unresolved",
+                   exact_refusal(r.truth, g.index));
     }
-    // Only the Point kind ever opened a point drag (see on_begin), and
-    // endPointDrag() also owns the failed-gesture rollback — calling it for a
-    // kind that never began one would be a rollback of nothing at best.
-    if (g.kind == DragKind::Point) g.sketch->endPointDrag();
-    if (!did_final_drag) r = g.sketch->solve();
-
-    const int dof = g.dof;
+    const int dof = r.truth.dof;
     const auto cur = collect_positions(*g.sketch);
     const auto cur_curves = collect_curves(*g.sketch);
-
-    // Status precedence matches on_drag (SCHEMA §7.4): conflicting > redundant >
-    // success; partial otherwise. Redundancy is the gesture-fixed g.redundant.
-    std::string status;
-    if (!r.conflictingConstraints.empty() || !g.conflicting.empty()) status = "conflicting";
-    else if (r.success) status = g.redundant ? "redundant" : "success";
-    else status = "partial";
-
-    // Per-constraint conflict ids (SCHEMA §7.4), same precedence on_drag uses: the
-    // final drag solve's conflicts, else the gesture-fixed set diagnosed at
-    // BeginGesture (g.conflicting is already wire-mapped, empty when none).
-    std::vector<std::string> conflicting = !r.conflictingConstraints.empty()
-                                               ? map_conflicting(g.index, r.conflictingConstraints)
-                                               : g.conflicting;
+    const std::string status = *r.truth.state == sk::ExactState::Conflicting ? "conflicting" :
+                               final.refused ? "partial" :
+                               r.truth.redundant ? "redundant" : "success";
 
     // Commit into the session store: bump revision + write back solved positions.
     const std::uint64_t new_rev = g.sketch_revision + 1;
@@ -872,26 +894,20 @@ Envelope SolverLane::on_end(const Envelope& req) {
     }
 
     json result = {
-        {"gestureId", gesture_id},
-        {"status", status},
-        {"dof", dof},
-        {"conflicting", conflicting},
-        {"positions", changed_positions(g.baseline, cur, g.index)},
-        // Same additive §7.4 channel as SolveDrag, baselined at BeginGesture.
-        {"curves", changed_curves(g.baseline_curves, cur_curves, g.index)},
-        // SCHEMA §7.4 `maxResidual`, REPORTING ONLY. Measured from the SKETCH
-        // rather than from `r`: the `commit.finalTarget` branch above produced
-        // `r` through a DRAG entry, which by policy measures nothing, so
-        // `r.residual` is 0-as-unmeasured exactly half the time. Both branches
-        // leave the final pose in the sketch, and that pose is what §7.4 says to
-        // evaluate — so it is read once, here, after the final solve.
-        {"maxResidual", sk::maxConstraintResidual(*g.sketch, g.sketch->getAllConstraints())},
-        {"sketchRevision", new_rev},
+        {"gestureId", gesture_id}, {"status", status}, {"dof", dof},
+        {"state", exact_state_token(*r.truth.state)},
+        {"positions", changed_positions(g.baseline, cur, g.index, 0.0)},
+        {"curves", changed_curves(g.baseline_curves, cur_curves, g.index, 0.0, 0.0)},
+        {"maxResidual", r.residual}, {"sketchRevision", new_rev},
     };
-    // §7.4 `entityStates` is GESTURE-FIXED, exactly like `dof`: a drag adds no
-    // constraint, so the answer cannot have changed — and every drag step ends
-    // with `invalidatedDiagnosis()`, so re-deriving it here would read an empty
-    // dependent-parameter set and call the whole sketch fully constrained.
+    result.update(exact_truth_fields(r.truth, g.index));
+    json diagnostics = final.refusal;
+    for (const auto& diagnostic : exact_truth_diagnostics(r.truth, g.index)) {
+        if (diagnostics.size() == kMaxDiagnostics) break;
+        diagnostics.push_back(diagnostic);
+    }
+    result["diagnostics"] = std::move(diagnostics);
+    // This map is the explicit BeginGesture echo, independent of final diagnosis.
     if (g.entity_states) result["entityStates"] = *g.entity_states;
     return Envelope::ok_response(req.id, std::move(result));
 }
@@ -905,12 +921,11 @@ Envelope SolverLane::on_regions(const Envelope& req) {
     if (!stored) return err(req, "REF_UNRESOLVED", "SketchRegions: unknown sketch " + sketch_id);
 
     wire::TranslateResult tr = wire::translate(stored->wire_args);
-    if (!tr.ok) return err(req, "OP_FAILED", "SketchRegions: " + tr.error);
+    if (!tr.ok) return err(req, "OP_FAILED", "SketchRegions: " + tr.error, translation_refusal(tr));
     const sk::SolveResult solve = tr.sketch->solve();
-    if (!solve.success) {
-        const std::string detail =
-            solve.errorMessage.empty() ? "constraint solve did not converge" : solve.errorMessage;
-        return err(req, "OP_FAILED", "SketchRegions: solve failed: " + detail);
+    if (!solve.truth.admissible()) {
+        return err(req, "OP_FAILED", "SketchRegions: exact sketch is not admissible",
+                   exact_refusal(solve.truth, tr.index));
     }
 
     loop::LoopDetectorConfig detection_config = loop::makeRegionDetectionConfig();

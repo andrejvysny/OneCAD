@@ -477,6 +477,7 @@ fn build_manifest(document: &Document, meta: &SaveMeta, sections: &[Section]) ->
         global_schema_version: document.schema_version,
         app_version: meta.app_version.clone(),
         occt_fingerprint: meta.occt_fingerprint.clone(),
+        solver_policy_version: Some(crate::regen::engine::SOLVER_POLICY_VERSION),
         document_id: document.id,
         created: meta.created.clone(),
         modified: meta.modified.clone(),
@@ -920,11 +921,13 @@ impl ContainerReader {
 
         // Cache staleness: opsHash mismatch, or a migration changed the records.
         let recomputed = history_io::ops_hash(document.timeline.records());
-        let stale_caches = migrated.records_changed || recomputed != manifest.ops_hash;
+        let stale_caches = migrated.records_changed
+            || recomputed != manifest.ops_hash
+            || manifest.solver_policy_version != Some(crate::regen::engine::SOLVER_POLICY_VERSION);
         if stale_caches {
             diagnostics.push(Diagnostic::warning(
                 "stale-caches",
-                "container caches are stale (opsHash mismatch); ignoring geometry/mesh/checkpoint caches",
+                "container caches are stale (history or solver policy mismatch); ignoring geometry/mesh/checkpoint caches",
             ));
         }
 
@@ -1486,6 +1489,51 @@ mod tests {
             }
         }
         zip.finish().unwrap();
+    }
+
+    #[test]
+    fn legacy_solver_policy_discards_mesh_cache_but_keeps_authoritative_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("model.onecad");
+        let document = doc(1, 10.0);
+        let body = BodyId(Uuid::from_u128(0xB0));
+        let mut caches = ContainerCaches::none();
+        caches.meshes.push(MeshCache {
+            body,
+            lod: "coarse".into(),
+            bytes: Arc::new(b"MESH1....".to_vec()),
+        });
+        for legacy in [None, Some(1)] {
+            ContainerWriter::save(&path, &document, &caches, &meta()).unwrap();
+            let mut archive = ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+            let mut bytes = Vec::new();
+            archive
+                .by_name(MANIFEST_PATH)
+                .unwrap()
+                .read_to_end(&mut bytes)
+                .unwrap();
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if let Some(policy) = legacy {
+                value["solverPolicyVersion"] = policy.into();
+            } else {
+                value.as_object_mut().unwrap().remove("solverPolicyVersion");
+            }
+            drop(archive);
+            rewrite_entry(&path, MANIFEST_PATH, &serde_json::to_vec(&value).unwrap());
+            let loaded = ContainerReader::open(&path).unwrap();
+            assert!(loaded.outcome.stale_caches);
+            assert_eq!(
+                serde_json::to_value(loaded.document()).unwrap(),
+                serde_json::to_value(&document).unwrap()
+            );
+            assert_eq!(
+                loaded.read_cache(&mesh_cache_path(body, "coarse")).unwrap(),
+                CacheRead::Stale
+            );
+            ContainerWriter::save(&path, loaded.document(), &ContainerCaches::none(), &meta())
+                .unwrap();
+            assert!(!ContainerReader::open(&path).unwrap().outcome.stale_caches);
+        }
     }
 
     #[test]

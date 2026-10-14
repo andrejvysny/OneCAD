@@ -39,6 +39,7 @@
 #include "session/SketchStore.h"
 #include "sketch/Sketch.h"
 #include "sketch/WireSketch.h"
+#include "sketch/SketchPose.h"
 
 namespace onecad::protocol {
 
@@ -109,13 +110,22 @@ private:
         std::pair<double, double> grab{0.0, 0.0};
         bool has_grab = false;
         double radius_offset = 0.0;  // |grab − center| − radius, both at Begin
+        std::pair<double, double> point_offset{0.0, 0.0};
         CurveMap baseline_curves;       // curves at BeginGesture (EndGesture delta)
         CurveMap last_reported_curves;  // for incremental SolveDrag deltas
+        std::optional<core::sketch::SketchPose> accepted_pose;
     };
 
     // One drag step toward (tx, ty) for this gesture's kind. Shared by SolveDrag
     // and EndGesture's `commit.finalTarget` branch so the two can never diverge.
     core::sketch::SolveResult run_step(Gesture& g, double tx, double ty);
+
+    struct FinalGestureSolve {
+        core::sketch::SolveResult result;
+        nlohmann::json refusal = nlohmann::json::array();
+        bool refused = false;
+    };
+    FinalGestureSolve finish_pose(Gesture& gesture, const nlohmann::json& args);
 
     Envelope on_upsert(const Envelope& req);
     Envelope on_begin(const Envelope& req);

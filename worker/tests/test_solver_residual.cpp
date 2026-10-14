@@ -243,7 +243,7 @@ void test_the_production_wire_path_reports_the_same_verdict() {
 // The NUMBER lives here rather than in `protocol/fixtures/sketch_solve_residual.ndjson`
 // for the same reason the coordinates do: a nonzero residual is not a literal the
 // cross-track contract pins.
-void test_end_gesture_measures_on_the_committed_target_branch() {
+void test_conflicting_begin_is_refused_without_store_mutation() {
     onecad::session::SketchStore store;
     onecad::protocol::Dispatcher dispatcher;
     onecad::protocol::SolverLane lane(store);
@@ -270,38 +270,61 @@ void test_end_gesture_measures_on_the_committed_target_branch() {
           "lane: SketchUpsert measures the 10 mm the unsatisfied dimension is out by");
     check(up.result.value("state", std::string{}) == "Conflicting",
           "lane: reporting only — the state PlaneGCS reported is unchanged");
+    check(!up.result.contains("positions") && !up.result.contains("curves"),
+          "failed exact upsert must not publish geometry corrections");
 
     const Envelope begun = dispatcher.dispatch_once(Envelope::request(
         2, "BeginGesture",
         {{"sketchId", "cx"}, {"sketchRevision", 1}, {"gestureId", 73},
          {"drag", {{"pointId", "q2"}}}}));
-    check(begun.ok.value_or(false), "lane: BeginGesture on a conflicting sketch answers ok");
-    check(!begun.result.contains("maxResidual"),
-          "lane: BeginGesture does NOT carry maxResidual (§7.4: the two exact "
-          "solves only)");
+    check(!begun.ok.value_or(true), "lane: BeginGesture refuses conflicting exact truth");
+    check(begun.error.has_value() && begun.error->code == "OP_FAILED",
+          "lane: conflicting Begin returns OP_FAILED");
+    check(begun.error.has_value() && begun.error->detail.has_value() &&
+          begun.error->detail->contains("diagnostics") &&
+          !begun.error->detail->at("diagnostics").empty(),
+          "lane: conflicting Begin preserves typed refusal diagnostics");
+    check(store.snapshot("cx")->revision == 1,
+          "lane: refused Begin leaves retained sketch revision unchanged");
+    check(store.snapshot("cx")->wire_args.at("entities") == entities,
+          "lane: refused Begin leaves retained request pose unchanged");
+}
 
-    // The absences the NDJSON matcher cannot express (it is subset-only), asserted
-    // where the response object can be read directly. `SolveDrag` runs at pointer
-    // rate: measuring there would buy a number nobody reports.
-    const Envelope dragged = dispatcher.dispatch_once(Envelope::request(
-        3, "SolveDrag", {{"gestureId", 73}, {"seq", 1}, {"target", json::array({11.0, 0.0})}}));
-    check(dragged.ok.value_or(false), "lane: SolveDrag answers ok");
-    check(!dragged.result.contains("maxResidual"),
-          "lane: SolveDrag does NOT carry maxResidual — the per-frame lane never "
-          "measures");
-
-    const Envelope ended = dispatcher.dispatch_once(Envelope::request(
-        4, "EndGesture",
-        {{"gestureId", 73}, {"commit", {{"finalTarget", json::array({12.0, 0.0})}}}}));
-    check(ended.ok.value_or(false), "lane: EndGesture answers ok");
-    const double residual = ended.result.value("maxResidual", -1.0);
-    std::fprintf(stderr, "EndGesture(commit.finalTarget) maxResidual = %.9f\n", residual);
-    check(ended.result.contains("maxResidual"), "lane: EndGesture carries maxResidual");
-    check(std::isfinite(residual) && residual > 1e-4,
-          "lane: the committed-target branch MEASURES — a 0.0 here would be the "
-          "unmeasured drag-lane value passed off as a satisfied sketch");
-    check(ended.result.value("status", std::string{}) == "conflicting",
-          "lane: reporting only — the EndGesture status is unchanged");
+void test_numerically_successful_near_dimensions_are_residually_conflicting() {
+    sk::Sketch sketch;
+    const auto a = sketch.addPoint(0.0, 0.0);
+    const auto b = sketch.addPoint(10.0, 0.0);
+    cs::DistanceConstraint ten(a, b, 10.0);
+    cs::DistanceConstraint near(a, b, 10.001);
+    sk::SolverConfig config;
+    config.detectRedundant = false;  // Preserve numerical termination status for this probe.
+    sk::ConstraintSolver solver(config);
+    solver.addPoint(sketch.getEntityAs<sk::SketchPoint>(a));
+    solver.addPoint(sketch.getEntityAs<sk::SketchPoint>(b));
+    check(solver.addConstraint(&ten) && solver.addConstraint(&near), "near dimensions register");
+    const auto numerical = solver.solve(&sketch);
+    report("ONECAD-14 numerical Distance(10)+Distance(10.001)", numerical, sketch, a, b);
+    check(numerical.success, "near contradiction numerically succeeds (not a wire-only claim)");
+    check(numerical.status == sk::SolverResult::Status::Success ||
+          numerical.status == sk::SolverResult::Status::PartialSuccess,
+          "actual termination is Success or Converged, without redundant status override");
+    check(numerical.residual > 1e-4, "numerically successful pose violates physical length budget");
+    const json args = {{"sketchId", "near-dimensions"}, {"plane", {{"kind", "XY"}}},
+        {"entities", json::array({{{"id", "a"}, {"type", "Point"}, {"at", {0,0}}},
+            {{"id", "b"}, {"type", "Point"}, {"at", {10,0}}}})},
+        {"constraints", json::array({{{"id", "ten"}, {"type", "Distance"}, {"entities", {"a","b"}}, {"value",10}},
+            {{"id", "near"}, {"type", "Distance"}, {"entities", {"a","b"}}, {"value",10.001}}})}};
+    onecad::session::SketchStore store;
+    onecad::protocol::Dispatcher dispatcher;
+    onecad::protocol::SolverLane lane(store);
+    lane.register_verbs(dispatcher);
+    const auto reply = dispatcher.dispatch_once(Envelope::request(1, "SketchUpsert", args));
+    check(reply.ok.value_or(false), "finite residual-violating pose remains publishable");
+    std::fprintf(stderr, "ONECAD-14 near-dimensions reply: %s\n", reply.result.dump().c_str());
+    check(reply.result.value("state", std::string{}) == "Conflicting",
+          "numerical success does not hide an unsatisfied retained pose");
+    check(reply.result.contains("reasons") && reply.result.at("reasons").value("near", std::string{}) == "residualViolation",
+          "unsatisfied retained dimension has named residualViolation reason");
 }
 
 void test_a_satisfiable_distance_still_succeeds() {
@@ -339,8 +362,9 @@ int main() {
     test_contradictory_distances_are_not_a_successful_solve();
     test_an_unreadable_constraint_is_skipped_not_infinite();
     test_the_production_wire_path_reports_the_same_verdict();
-    test_end_gesture_measures_on_the_committed_target_branch();
+    test_conflicting_begin_is_refused_without_store_mutation();
     test_a_satisfiable_distance_still_succeeds();
+    test_numerically_successful_near_dimensions_are_residually_conflicting();
     if (g_failures == 0) {
         std::fprintf(stderr, "solver_residual: OK\n");
     }

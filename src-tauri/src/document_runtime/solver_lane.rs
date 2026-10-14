@@ -65,7 +65,8 @@
 //! may share a lane concurrently (today's behavior — the frontend fires
 //! `getSketchRegions` from both `sketchStaticSync` and the extrude/revolve arm
 //! paths, and making those mutually exclusive would be a new failure mode). A
-//! gesture is exclusive against everything.
+//! gesture is exclusive against everything. Authoritative upserts wait for
+//! existing region drives to release their claims, then acquire exclusively.
 //!
 //! # Seam (flagged, not fixed)
 //!
@@ -81,12 +82,15 @@
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use tokio::sync::Notify;
 
 use onecad_core::ids::SketchId;
 
 /// Who holds a sketch's solver lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaneOwner {
+    /// An authoritative upsert and its document adoption. Exclusive.
+    Upsert,
     /// An open drag gesture (`BeginGesture` … `EndGesture`). Exclusive.
     Gesture,
     /// An in-flight `getSketchRegions` read. Shared with other region queries.
@@ -98,6 +102,7 @@ impl LaneOwner {
     #[must_use]
     pub fn describe(self) -> &'static str {
         match self {
+            Self::Upsert => "a sketch upsert",
             Self::Gesture => "a drag gesture",
             Self::RegionQuery => "a region query",
         }
@@ -116,6 +121,7 @@ struct LaneState {
 #[derive(Debug, Default)]
 pub struct SolverLaneClaims {
     lanes: Mutex<HashMap<SketchId, LaneState>>,
+    released: Notify,
 }
 
 impl SolverLaneClaims {
@@ -152,6 +158,23 @@ impl SolverLaneClaims {
         })
     }
 
+    /// Authoritative writes wait for previously prepared region reads. The
+    /// runtime lock prevents new reads from preparing while this waits; their
+    /// unlocked drives release claims without reacquiring that lock.
+    pub async fn claim_upsert(self: &Arc<Self>, sketch: SketchId) -> Result<Claim, LaneOwner> {
+        loop {
+            let released = self.released.notified();
+            tokio::pin!(released);
+            // Register before checking occupancy: a release between the check
+            // and await must wake this waiter rather than strand it forever.
+            released.as_mut().enable();
+            match self.claim(sketch, LaneOwner::Upsert) {
+                Err(LaneOwner::RegionQuery) => released.await,
+                result => return result,
+            }
+        }
+    }
+
     /// The owner currently holding `sketch`'s lane, if any (diagnostics + tests).
     #[must_use]
     pub fn owner(&self, sketch: SketchId) -> Option<LaneOwner> {
@@ -167,14 +190,17 @@ impl SolverLaneClaims {
     }
 
     fn release(&self, sketch: SketchId) {
-        let mut lanes = self.lock();
-        if let Entry::Occupied(mut slot) = lanes.entry(sketch) {
-            let state = slot.get_mut();
-            state.holders -= 1;
-            if state.holders == 0 {
-                slot.remove();
+        {
+            let mut lanes = self.lock();
+            if let Entry::Occupied(mut slot) = lanes.entry(sketch) {
+                let state = slot.get_mut();
+                state.holders -= 1;
+                if state.holders == 0 {
+                    slot.remove();
+                }
             }
         }
+        self.released.notify_waiters();
     }
 }
 
@@ -257,5 +283,29 @@ mod tests {
         claims
             .claim(sid(4), LaneOwner::RegionQuery)
             .expect("a different sketch is untouched");
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_waiting_upsert_leaks_no_claim() {
+        use std::future::{poll_fn, Future};
+        use std::task::Poll;
+
+        let claims = SolverLaneClaims::new();
+        let region = claims.claim(sid(5), LaneOwner::RegionQuery).unwrap();
+        {
+            let upsert = claims.claim_upsert(sid(5));
+            tokio::pin!(upsert);
+            assert!(matches!(
+                poll_fn(|cx| Poll::Ready(upsert.as_mut().poll(cx))).await,
+                Poll::Pending
+            ));
+        }
+        assert_eq!(claims.owner(sid(5)), Some(LaneOwner::RegionQuery));
+        drop(region);
+        assert_eq!(claims.owner(sid(5)), None);
+        let upsert = claims.claim_upsert(sid(5)).await.unwrap();
+        assert_eq!(claims.owner(sid(5)), Some(LaneOwner::Upsert));
+        drop(upsert);
+        let _gesture = claims.claim(sid(5), LaneOwner::Gesture).unwrap();
     }
 }

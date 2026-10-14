@@ -1144,6 +1144,7 @@ mod tests {
                 descriptor_version: PolicyVersions::default().descriptor,
                 resolver_version: PolicyVersions::default().resolver,
                 quantization_version: PolicyVersions::default().quantization,
+                solver_policy_version: PolicyVersions::default().solver_policy,
                 signature_version: PolicyVersions::default().signature,
                 codec: "brep-bintools".into(),
                 size: 0,

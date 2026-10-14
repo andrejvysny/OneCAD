@@ -56,6 +56,7 @@ use crate::worker::{MeshProvider, SolverEngine};
 
 #[derive(Default)]
 struct FakeState {
+    sketch_revisions: HashMap<SketchId, u64>,
     prepared: HashMap<JobId, SnapshotId>,
     snapshot_counter: u64,
     /// Active gestures: `gestureId → (dragPoint id string, last target)`.
@@ -128,6 +129,10 @@ struct FakeBackend {
     /// terminal, no steps). `Some(2)` models a worker that dies inside the WP-D1
     /// isolation window, after the halted pass already published.
     hard_fail_from_plan: Option<usize>,
+    begin_override: Mutex<Option<BeginGestureDto>>,
+    drag_override: Mutex<Option<DragSolveDto>>,
+    cancel_fails: Mutex<bool>,
+    gesture_reply_epoch: Mutex<Option<(&'static str, Arc<FencingCell>)>>,
     state: Mutex<FakeState>,
 }
 
@@ -150,12 +155,24 @@ impl Default for FakeBackend {
             mate_resolved: Mutex::new(None),
             failing_steps: std::collections::BTreeSet::new(),
             hard_fail_from_plan: None,
+            begin_override: Mutex::new(None),
+            drag_override: Mutex::new(None),
+            cancel_fails: Mutex::new(false),
+            gesture_reply_epoch: Mutex::new(None),
             state: Mutex::new(FakeState::default()),
         }
     }
 }
 
 impl FakeBackend {
+    fn change_gesture_reply_epoch(&self, verb: &str) {
+        if let Some((phase, fencing)) = self.gesture_reply_epoch.lock().unwrap().as_ref() {
+            if *phase == verb {
+                fencing.set_epoch(2);
+            }
+        }
+    }
+
     fn new() -> Self {
         Self::default()
     }
@@ -604,9 +621,16 @@ impl SolverEngine for FakeBackend {
                 diagnostics: vec![],
             });
         }
+        let revision = {
+            let mut state = self.state.lock().unwrap();
+            let revision = state.sketch_revisions.entry(sketch.id).or_default();
+            *revision += 1;
+            *revision
+        };
         Ok(SketchUpsertDto {
+            truth: Default::default(),
             sketch_id: sketch.id.to_string(),
-            sketch_revision: 1,
+            sketch_revision: revision,
             dof: 0,
             status: SketchSolveStatus::FullyConstrained,
             conflicting: vec![],
@@ -629,9 +653,17 @@ impl SolverEngine for FakeBackend {
             .gestures
             .insert(gesture_id, (drag_point.to_string(), [0.0, 0.0]));
         state.last_gesture_target = Some(target);
+        self.change_gesture_reply_epoch("BeginGesture");
+        if let Some(mut receipt) = self.begin_override.lock().unwrap().clone() {
+            receipt.gesture_id = gesture_id;
+            return Ok(receipt);
+        }
         Ok(BeginGestureDto {
             gesture_id,
             ready: true,
+            point_offset: None,
+            positions: Default::default(),
+            curves: Default::default(),
             entity_states: Default::default(),
         })
     }
@@ -642,6 +674,10 @@ impl SolverEngine for FakeBackend {
         drag_point: EntityId,
         target: [f64; 2],
     ) -> Result<DragSolveDto, EngineError> {
+        self.change_gesture_reply_epoch("SolveDrag");
+        if let Some(receipt) = self.drag_override.lock().unwrap().clone() {
+            return Ok(receipt);
+        }
         let mut positions = std::collections::BTreeMap::new();
         if let Some(g) = self.state.lock().unwrap().gestures.get_mut(&gesture_id) {
             g.1 = target;
@@ -657,6 +693,7 @@ impl SolverEngine for FakeBackend {
             curves: self.echo_curves.lock().unwrap().clone(),
             solve_micros: 0,
             superseded: false,
+            diagnostics: None,
         })
     }
     async fn end_gesture(
@@ -672,12 +709,14 @@ impl SolverEngine for FakeBackend {
             .gestures
             .remove(&gesture_id)
             .unwrap_or_default();
+        self.change_gesture_reply_epoch("EndGesture");
         let pos = final_target.unwrap_or(last);
         let mut solved = std::collections::BTreeMap::new();
         if !drag_point.is_empty() {
             solved.insert(drag_point, pos);
         }
         Ok(SketchUpsertDto {
+            truth: Default::default(),
             sketch_id: sketch_id.to_string(),
             sketch_revision: 2,
             dof: 0,
@@ -688,6 +727,14 @@ impl SolverEngine for FakeBackend {
             entity_states: Default::default(),
         })
     }
+    async fn cancel_gesture(&self, gesture_id: u64) -> Result<(), EngineError> {
+        self.state.lock().unwrap().gestures.remove(&gesture_id);
+        if *self.cancel_fails.lock().unwrap() {
+            return Err(op_failed("fake cancellation failure"));
+        }
+        Ok(())
+    }
+
     async fn sketch_regions(&self, _sketch_id: &str) -> Result<FinishSketchDto, EngineError> {
         if self.regions_fail {
             return Err(EngineError::OpFailed {
@@ -6552,3 +6599,6 @@ async fn the_halted_steps_repair_set_is_restored_even_when_empty() {
     assert!(snap.repair_summary.steps.is_empty());
     assert!(report.needs_repair.is_empty());
 }
+
+#[path = "gesture_tests.rs"]
+mod gesture_tests;

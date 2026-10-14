@@ -1112,6 +1112,18 @@ add_test(
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/sketch_solve_residual.ndjson
 )
+add_test(
+    NAME canonical_sketch_upsert_writeback
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/sketch_upsert_writeback.ndjson
+)
+add_test(
+    NAME canonical_sketch_exact_truth
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/sketch_exact_truth.ndjson
+)
 # Kernel-hardening WP-A — ResolveRefs all-three-outcome coverage, moved from the
 # harness lane so the §9 `scoringVersion` (6) is pinned in BOTH lanes (§13).
 add_test(
@@ -1167,8 +1179,15 @@ add_test(NAME region_containment COMMAND test_region_containment)
 # the measured 10 mm / ~0, the +infinity skip, that `EndGesture` measures on its
 # `commit.finalTarget` branch too, and that `SolveDrag`/`BeginGesture` never do.
 add_executable(test_solver_residual test_solver_residual.cpp)
+add_executable(test_exact_truth test_exact_truth.cpp)
+target_link_libraries(test_exact_truth PRIVATE worker_core)
+target_compile_options(test_exact_truth PRIVATE -UNDEBUG)
+add_test(NAME exact_truth COMMAND test_exact_truth)
 target_link_libraries(test_solver_residual PRIVATE worker_core)
 add_test(NAME solver_residual COMMAND test_solver_residual)
+add_executable(test_sketch_upsert_writeback test_sketch_upsert_writeback.cpp)
+target_link_libraries(test_sketch_upsert_writeback PRIVATE worker_core)
+add_test(NAME sketch_upsert_writeback COMMAND test_sketch_upsert_writeback)
 
 # WP-F probe — an ASYMMETRIC chamfer must keep its long leg on the same PHYSICAL
 # face across an upstream edit. `reference_face` picks the adjacent face with the
@@ -1178,3 +1197,17 @@ add_test(NAME solver_residual COMMAND test_solver_residual)
 add_executable(test_chamfer_reference_face test_chamfer_reference_face.cpp)
 target_link_libraries(test_chamfer_reference_face PRIVATE worker_core)
 add_test(NAME chamfer_reference_face COMMAND test_chamfer_reference_face)
+
+add_executable(test_exact_consumers test_exact_consumers.cpp)
+target_link_libraries(test_exact_consumers PRIVATE worker_core)
+target_compile_options(test_exact_consumers PRIVATE -UNDEBUG)
+add_test(NAME exact_consumers COMMAND test_exact_consumers)
+
+add_executable(test_point_drag_truth test_point_drag_truth.cpp)
+target_link_libraries(test_point_drag_truth PRIVATE worker_core)
+target_compile_options(test_point_drag_truth PRIVATE -UNDEBUG)
+add_test(NAME point_drag_truth COMMAND test_point_drag_truth)
+
+add_test(NAME canonical_sketch_point_drag_truth COMMAND worker_harness
+    --worker $<TARGET_FILE:onecad-worker>
+    --fixture ${PROTOCOL_FIXTURES}/sketch_point_drag_truth.ndjson)

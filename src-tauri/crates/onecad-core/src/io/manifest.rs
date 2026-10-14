@@ -80,6 +80,10 @@ pub struct Manifest {
     /// The OCCT fingerprint the caches were produced under, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub occt_fingerprint: Option<String>,
+    /// Policy that produced the disposable geometry/mesh/checkpoint caches.
+    /// Missing on legacy documents; those caches degrade to replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solver_policy_version: Option<u32>,
     /// The stored document's identity (must match `document.json`'s `id`).
     pub document_id: DocumentId,
     /// RFC3339 creation timestamp (caller-supplied).
@@ -154,6 +158,7 @@ mod tests {
             global_schema_version: GLOBAL_SCHEMA_VERSION,
             app_version: "0.1.0".into(),
             occt_fingerprint: None,
+            solver_policy_version: Some(crate::regen::engine::SOLVER_POLICY_VERSION),
             document_id: DocumentId(Uuid::from_u128(1)),
             created: "2026-07-16T00:00:00Z".into(),
             modified: "2026-07-16T00:00:00Z".into(),

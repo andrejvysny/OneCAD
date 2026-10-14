@@ -386,6 +386,15 @@ pub fn run() {
         .plugin(tauri_plugin_wdio::init())
         .plugin(tauri_plugin_wdio_webdriver::init());
 
+    let mut context = tauri::generate_context!();
+    // tauri-utils 2.9.3 emits Vec<u8> for this array-valued configuration field.
+    if context.config().identifier == "com.andrejvysny.onecad.nativeqa" {
+        for window in &mut context.config_mut().app.windows {
+            window.data_store_identifier = Some([
+                164, 19, 209, 62, 77, 87, 74, 132, 156, 40, 98, 22, 35, 16, 19, 1,
+            ]);
+        }
+    }
     let app = builder
         .manage(AppState::default())
         .manage(ExitGuard::default())
@@ -563,6 +572,7 @@ pub fn run() {
             api::begin_gesture,
             api::solve_drag,
             api::end_gesture,
+            api::cancel_gesture,
             api::cancel_sketch,
             api::finish_sketch,
             api::promote_selection,
@@ -615,7 +625,7 @@ pub fn run() {
             #[cfg(feature = "tauri-e2e")]
             tauri_e2e::agent_status,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application");
 
     app.run(move |handle, event| {

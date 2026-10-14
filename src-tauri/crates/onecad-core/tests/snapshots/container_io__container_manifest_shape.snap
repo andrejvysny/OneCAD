@@ -29,5 +29,6 @@ expression: manifest
   "magic": "ONECAD",
   "modified": "2026-07-16T00:00:00Z",
   "occtFingerprint": "occt-7.9.3-fixed",
-  "opsHash": "[opsHash]"
+  "opsHash": "[opsHash]",
+  "solverPolicyVersion": 2
 }

@@ -54,6 +54,7 @@ fn compatible_envelope(step: usize, tl: &Timeline) -> CheckpointEnvelope {
         descriptor_version: 1,
         resolver_version: 1,
         quantization_version: 1,
+        solver_policy_version: onecad_core::regen::engine::SOLVER_POLICY_VERSION,
         signature_version: 1,
         codec: "brep-bintools".into(),
         size: 10,

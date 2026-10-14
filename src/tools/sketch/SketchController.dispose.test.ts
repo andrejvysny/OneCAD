@@ -63,6 +63,7 @@ function makeClientMock() {
         }),
     ),
     cancelSketch: vi.fn(() => Promise.resolve()),
+    cancelGesture: vi.fn(() => Promise.resolve()),
     deleteSketch: vi.fn(() => Promise.resolve()),
     beginGesture: vi.fn(() => Promise.resolve({ gestureId: 1, ready: true })),
     solveDrag: vi.fn((target: [number, number]) =>
@@ -170,6 +171,7 @@ describe("SketchController dispose parity", () => {
     expect(clientMock.beginGesture).toHaveBeenCalled();
 
     controller.dispose();
-    expect(clientMock.endGesture).toHaveBeenCalledTimes(1);
+    expect(clientMock.cancelGesture).toHaveBeenCalledTimes(1);
+    expect(clientMock.endGesture).not.toHaveBeenCalled();
   });
 });

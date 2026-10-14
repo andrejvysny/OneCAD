@@ -79,6 +79,13 @@ int main() {
               save.result["artifacts"].size() == 1,
           "checkpoint: one per-body artifact");
     check(save.result["artifacts"][0].value("codec", "") == "brep-bintools", "checkpoint: brep-bintools codec");
+    const auto& axes = save.result["artifacts"][0]["envelope"];
+    check(axes.value("solverPolicyVersion", 0) == 2, "checkpoint: actual solver policy 2");
+    check(axes.value("occtFingerprint", "") == "0a6a1dce34181289", "checkpoint: fingerprint unchanged");
+    for (const char* key : {"artifactSchemaVersion", "descriptorVersion", "resolverVersion",
+                            "quantizationVersion", "signatureVersion"}) {
+        check(axes.value(key, 0) == 1, std::string("checkpoint: unchanged axis ") + key);
+    }
     check(save.result["artifacts"][0].value("size", std::uint64_t{0}) > 0, "checkpoint: artifact blob non-empty");
     check(!save.out_bin.empty(), "checkpoint: BinTools bytes ride in the resp tail");
     const std::string ckpt_sig = save.result["signatures"].value("geometry", "");

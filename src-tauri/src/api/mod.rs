@@ -1912,18 +1912,24 @@ pub async fn enter_sketch(
     created_here: Option<bool>,
 ) -> Result<SketchSessionDto, ApiError> {
     let id = parse_sketch_id(&sketch_id)?;
-    let (session, projection) = {
+    let (session, outcome, projection) = {
         let mut guard = state.runtime.lock().await;
         let rt = guard
             .as_mut()
             .ok_or_else(|| ApiError::NoDocument("enterSketch".into()))?;
-        let session = rt.enter_sketch(id).await?;
+        let (session, outcome) = rt.enter_sketch_with_outcome(id).await?;
         if created_here.unwrap_or(false) {
             rt.mark_open_sketch_created(id);
         }
-        (session, rt.projection())
+        (session, outcome, rt.projection())
     };
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
+    if let Some(outcome) = outcome {
+        if let Some(sched) = state.scheduler.get() {
+            sched.handle(&outcome);
+        }
+        state.note_mutation();
+    }
     Ok(session)
 }
 
@@ -2111,6 +2117,16 @@ pub async fn begin_gesture(
         .as_mut()
         .ok_or_else(|| ApiError::NoDocument("beginGesture".into()))?;
     Ok(rt.begin_gesture(id, point, target).await?)
+}
+
+/// Discard active worker scratch without a document edit or solve event.
+#[tauri::command]
+pub async fn cancel_gesture(state: State<'_, AppState>) -> Result<(), ApiError> {
+    let mut guard = state.runtime.lock().await;
+    let rt = guard
+        .as_mut()
+        .ok_or_else(|| ApiError::NoDocument("cancelGesture".into()))?;
+    Ok(rt.cancel_gesture().await?)
 }
 
 /// One latest-wins incremental drag solve (`SolveDrag`; preview only).

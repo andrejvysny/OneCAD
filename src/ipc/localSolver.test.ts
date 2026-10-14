@@ -611,3 +611,37 @@ describe("localSolver drag gesture — per-kind echo (mock lane)", () => {
     expect(up.solvedCurves).toEqual({});
   });
 });
+
+describe("mock gesture lifecycle fences", () => {
+  it("a delayed End cannot consume the replacement gesture after cancel", async () => {
+    vi.useFakeTimers();
+    try {
+      const {lane}=makeLane();
+      const a=lane.beginGesture("A","a.Start"); await vi.advanceTimersByTimeAsync(0); await a;
+      const oldEnd=lane.endGesture([10,20]).catch((error: unknown)=>error);
+      await lane.cancelGesture();
+      const opening=lane.beginGesture("B","b.Start"); await vi.advanceTimersByTimeAsync(0);
+      const b=await opening;
+      await vi.advanceTimersByTimeAsync(30); expect(await oldEnd).toBeInstanceOf(Error);
+      const solving=lane.solveDrag([3,4]); await vi.advanceTimersByTimeAsync(0);
+      expect((await solving)?.gestureId).toBe(b.gestureId);
+      const ending=lane.endGesture([3,4]); await vi.advanceTimersByTimeAsync(30);
+      expect((await ending).solvedPositions).toEqual({"b.Start":[3,4]});
+    } finally {vi.useRealTimers();}
+  });
+
+  it("cancel fences pending Begin and late Solve preview", async () => {
+    vi.useFakeTimers();
+    try {
+      const {lane}=makeLane();
+      const opening=lane.beginGesture("A","a.Start").catch((error: unknown)=>error);
+      await lane.cancelGesture(); await vi.advanceTimersByTimeAsync(0);
+      expect(await opening).toBeInstanceOf(Error);
+      const a=lane.beginGesture("A","a.Start"); await vi.advanceTimersByTimeAsync(0); await a;
+      const late=lane.solveDrag([1,2]); await lane.cancelGesture();
+      const b=lane.beginGesture("B","b.Start"); await vi.advanceTimersByTimeAsync(0); await b;
+      expect(await late).toBeNull();
+      await lane.cancelGesture();
+    } finally {vi.useRealTimers();}
+  });
+});

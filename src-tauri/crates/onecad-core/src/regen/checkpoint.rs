@@ -68,6 +68,10 @@ pub struct CheckpointEnvelope {
     pub descriptor_version: u32,
     pub resolver_version: u32,
     pub quantization_version: u32,
+    /// Legacy persisted envelopes predate typed exact truth; never default them
+    /// to the running policy, which would bless an incompatible disposable cache.
+    #[serde(default = "legacy_solver_policy")]
+    pub solver_policy_version: u32,
     pub signature_version: u32,
     /// The codec that produced the bytes (e.g. `"brep-bintools"`).
     pub codec: String,
@@ -87,8 +91,13 @@ impl CheckpointEnvelope {
             && self.descriptor_version == ctx.policy_versions.descriptor
             && self.resolver_version == ctx.policy_versions.resolver
             && self.quantization_version == ctx.policy_versions.quantization
+            && self.solver_policy_version == ctx.policy_versions.solver_policy
             && self.signature_version == ctx.policy_versions.signature
     }
+}
+
+const fn legacy_solver_policy() -> u32 {
+    1
 }
 
 /// One stored artifact: the parsed envelope + the opaque bytes (SCHEMA §7.7 —
@@ -301,6 +310,7 @@ impl CheckpointStore for InMemoryCheckpointStore {
                 descriptor_version: 1,
                 resolver_version: 1,
                 quantization_version: 1,
+                solver_policy_version: crate::regen::engine::SOLVER_POLICY_VERSION,
                 signature_version: 1,
                 codec: String::new(),
                 size: 0,
@@ -352,6 +362,7 @@ mod tests {
             descriptor_version: desc,
             resolver_version: 1,
             quantization_version: 1,
+            solver_policy_version: crate::regen::engine::SOLVER_POLICY_VERSION,
             signature_version: 1,
             codec: "brep-bintools".into(),
             size: 10,
@@ -377,6 +388,21 @@ mod tests {
             !envelope("fp", 2).is_compatible(&ctx()),
             "descriptor version mismatch"
         );
+    }
+
+    #[test]
+    fn missing_legacy_solver_policy_is_one_and_replays() {
+        let mut value = serde_json::to_value(envelope("fp", 1)).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("solver_policy_version");
+        let legacy: CheckpointEnvelope = serde_json::from_value(value).unwrap();
+        assert_eq!(legacy.solver_policy_version, 1);
+        assert!(!legacy.is_compatible(&ctx()));
+        let mut wrong = envelope("fp", 1);
+        wrong.solver_policy_version = 1;
+        assert!(!wrong.is_compatible(&ctx()));
     }
 
     #[test]

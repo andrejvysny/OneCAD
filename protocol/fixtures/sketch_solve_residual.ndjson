@@ -1,3 +1,4 @@
+# Solver policy 2 supersedes the historical conflict-Begin admission below.
 # CANONICAL §7.4 fixture — `maxResidual`, REPORTING ONLY (kernel-hardening WP-B,
 # 2026-09-03). The largest per-constraint residual left by an exact solve, each
 # constraint measured in ITS OWN dimension (mm for a length-valued one, radians for
@@ -87,15 +88,6 @@
 {"send":{"v":1,"t":"req","id":6,"verb":"EndGesture","args":{"gestureId":91}}}
 {"expect":{"v":1,"t":"resp","id":6,"ok":true,"tolerance":{"abs":1e-4},"result":{"gestureId":91,"status":"success","dof":3,"conflicting":[],"sketchRevision":2,"maxResidual":0.0}}}
 
-# --- ROUND 4: a pointer-up that ends CONFLICTING still measures -----------------
-# The same contradictory sketch, gestured. `commit.finalTarget` sends the final
-# exact solve down `on_end`'s OTHER branch — the committed-target one — and the
-# field must still be measured there. That branch's solve result is produced by a
-# DRAG entry, which by policy measures nothing, so a lane sourcing the field from
-# it would report a satisfied-looking 0.0 on every committed pointer-up. `$any`
-# only pins presence here; that the value is 10 mm and not 0.0 is asserted in
-# test_solver_residual.cpp.
+# Solver policy 2 refuses Begin on conflicting exact truth before opening a gesture.
 {"send":{"v":1,"t":"req","id":7,"verb":"BeginGesture","args":{"sketchId":"cx","sketchRevision":1,"gestureId":92,"drag":{"pointId":"q2"}}}}
-{"expect":{"v":1,"t":"resp","id":7,"ok":true,"result":{"gestureId":92,"ready":true}}}
-{"send":{"v":1,"t":"req","id":8,"verb":"EndGesture","args":{"gestureId":92,"commit":{"finalTarget":[12.0,0.0]}}}}
-{"expect":{"v":1,"t":"resp","id":8,"ok":true,"result":{"gestureId":92,"status":"conflicting","conflicting":["$any","$any"],"sketchRevision":2,"maxResidual":"$any"}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":false,"error":{"code":"OP_FAILED","detail":{"diagnostics":[{"code":"OP_FAILED","severity":"error","reasonCode":"residualViolation"}]}}}}

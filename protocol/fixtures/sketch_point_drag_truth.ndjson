@@ -1,0 +1,45 @@
+# ONECAD-15: Point scalar isolation, solved grab offset, scratch-only cancellation,
+# released full truth, and path-aware Angle branch refusal with recovery.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"SketchUpsert","args":{"sketchId":"point-truth","plane":{"kind":"XY"},"entities":[{"id":"p0","type":"Point","at":[0,0]},{"id":"p1","type":"Point","at":[80,0]},{"id":"p2","type":"Point","at":[80,0]},{"id":"p3","type":"Point","at":[80,60]},{"id":"p4","type":"Point","at":[80,60]},{"id":"p5","type":"Point","at":[0,60]},{"id":"p6","type":"Point","at":[0,60]},{"id":"p7","type":"Point","at":[0,0]},{"id":"L0","type":"Line","p0Ref":"p0","p1Ref":"p1"},{"id":"L1","type":"Line","p0Ref":"p2","p1Ref":"p3"},{"id":"L2","type":"Line","p0Ref":"p4","p1Ref":"p5"},{"id":"L3","type":"Line","p0Ref":"p6","p1Ref":"p7"}],"constraints":[{"id":"w0","type":"Coincident","entities":["p1","p2"]},{"id":"d0","type":"Horizontal","entities":["L0"]},{"id":"w1","type":"Coincident","entities":["p3","p4"]},{"id":"d1","type":"Vertical","entities":["L1"]},{"id":"w2","type":"Coincident","entities":["p5","p6"]},{"id":"d2","type":"Horizontal","entities":["L2"]},{"id":"w3","type":"Coincident","entities":["p7","p0"]},{"id":"d3","type":"Vertical","entities":["L3"]}]}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sketchRevision":1,"state":"UnderConstrained","dof":4},"tolerance":{"abs":0.0001}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"BeginGesture","args":{"sketchId":"point-truth","sketchRevision":1,"gestureId":15,"drag":{"pointId":"p0","grab":[1,2]}}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"result":{"gestureId":15,"ready":true,"pointOffset":[-1,-2],"positions":{},"curves":{}},"tolerance":{"abs":0.0001}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"SolveDrag","args":{"gestureId":15,"seq":1,"target":[23,23]}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"result":{"status":"success","conflicting":[],"positions":{"p0":[22,21],"p1":[80,21],"p2":[80,21],"p5":[22,60],"p6":[22,60],"p7":[22,21]}},"tolerance":{"abs":0.0001}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"EndGesture","args":{"gestureId":15,"cancel":true,"commit":{}}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":false,"error":{"code":"OP_FAILED"}}}
+{"send":{"v":1,"t":"req","id":5,"verb":"EndGesture","args":{"gestureId":15,"cancel":true}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"gestureId":15,"cancelled":true},"tolerance":{"abs":0.0001}}}
+{"send":{"v":1,"t":"req","id":6,"verb":"BeginGesture","args":{"sketchId":"point-truth","sketchRevision":1,"gestureId":15,"drag":{"pointId":"p0","grab":[1,2]}}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"result":{"ready":true,"pointOffset":[-1,-2],"positions":{}},"tolerance":{"abs":0.0001}}}
+{"send":{"v":1,"t":"req","id":7,"verb":"SolveDrag","args":{"gestureId":15,"seq":1,"target":[23,23]}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"result":{"status":"success"},"tolerance":{"abs":0.0001}}}
+{"send":{"v":1,"t":"req","id":8,"verb":"EndGesture","args":{"gestureId":15}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"result":{"gestureId":15,"sketchRevision":2,"state":"UnderConstrained","dof":4,"positions":{"p0":[22,21],"p1":[80,21],"p2":[80,21],"p5":[22,60],"p6":[22,60],"p7":[22,21]}},"tolerance":{"abs":0.0001}}}
+# F1: axis-locked Angle operand must pass through its fixed partner: deterministic branchBoundary.
+{"send":{"v":1,"t":"req","id":9,"verb":"SketchUpsert","args":{"sketchId":"angle-branch-axis","plane":{"kind":"XY"},"entities":[{"id":"a","type":"Point","at":[0.0,0.0]},{"id":"b","type":"Point","at":[1.0,0.0]},{"id":"p","type":"Point","at":[0.0,0.0]},{"id":"q","type":"Point","at":[0.8660254037844387,0.49999999999999994]},{"id":"first","type":"Line","p0Ref":"a","p1Ref":"b"},{"id":"second","type":"Line","p0Ref":"p","p1Ref":"q"}],"constraints":[{"id":"fixed-a","type":"Fixed","entities":["a"]},{"id":"fixed-p","type":"Fixed","entities":["p"]},{"id":"axis","type":"Horizontal","entities":["first"]},{"id":"angle","type":"Angle","entities":["first","second"],"value":0.5235987755982988}]}}}
+{"expect":{"v":1,"t":"resp","id":9,"ok":true,"result":{"upserted":true,"state":"UnderConstrained","dof":2},"tolerance":{"abs":0.0001}}}
+{"send":{"v":1,"t":"req","id":10,"verb":"BeginGesture","args":{"sketchId":"angle-branch-axis","gestureId":16,"drag":{"pointId":"b"}}}}
+{"expect":{"v":1,"t":"resp","id":10,"ok":true,"result":{"ready":true},"tolerance":{"abs":0.0001}}}
+{"send":{"v":1,"t":"req","id":11,"verb":"SolveDrag","args":{"gestureId":16,"seq":1,"target":[-2.0,0.0]}}}
+{"expect":{"v":1,"t":"resp","id":11,"ok":true,"result":{"status":"partial","conflicting":[],"positions":{},"curves":{},"diagnostics":[{"severity":"error","code":"OP_FAILED","reasonCode":"branchBoundary"}]},"tolerance":{"abs":0.0001}}}
+{"send":{"v":1,"t":"req","id":12,"verb":"SolveDrag","args":{"gestureId":16,"seq":2,"target":[2.0,0.0]}}}
+{"expect":{"v":1,"t":"resp","id":12,"ok":true,"result":{"status":"success","conflicting":[],"positions":{"b":[2.0,0.0]}},"tolerance":{"abs":0.0001}}}
+{"send":{"v":1,"t":"req","id":13,"verb":"EndGesture","args":{"gestureId":16,"cancel":true}}}
+{"expect":{"v":1,"t":"resp","id":13,"ok":true,"result":{"cancelled":true},"tolerance":{"abs":0.0001}}}
+{"send":{"v":1,"t":"req","id":14,"verb":"BeginGesture","args":{"sketchId":"angle-branch-axis","gestureId":17,"drag":{"pointId":"b"}}}}
+{"expect":{"v":1,"t":"resp","id":14,"ok":true,"result":{"ready":true},"tolerance":{"abs":0.0001}}}
+{"send":{"v":1,"t":"req","id":15,"verb":"EndGesture","args":{"gestureId":17,"commit":{"finalTarget":[-2.0,0.0]}}}}
+{"expect":{"v":1,"t":"resp","id":15,"ok":true,"result":{"status":"partial","state":"UnderConstrained","dof":2,"conflicting":[],"positions":{},"curves":{},"diagnostics":[{"code":"OP_FAILED","severity":"error","reasonCode":"branchBoundary","evidence":{"restoredAcceptedPose":true}}]},"tolerance":{"abs":0.0001}}}
+# F2: both Angle vectors reverse via a path with clearance: accepted, committed, +30 deg retained.
+{"send":{"v":1,"t":"req","id":16,"verb":"SketchUpsert","args":{"sketchId":"angle-branch-around","plane":{"kind":"XY"},"entities":[{"id":"a","type":"Point","at":[0.0,0.0]},{"id":"b","type":"Point","at":[1.0,0.0]},{"id":"p","type":"Point","at":[0.0,0.0]},{"id":"q","type":"Point","at":[0.8660254037844387,0.49999999999999994]},{"id":"first","type":"Line","p0Ref":"a","p1Ref":"b"},{"id":"second","type":"Line","p0Ref":"p","p1Ref":"q"}],"constraints":[{"id":"fixed-a","type":"Fixed","entities":["a"]},{"id":"fixed-p","type":"Fixed","entities":["p"]},{"id":"angle","type":"Angle","entities":["first","second"],"value":0.5235987755982988}]}}}
+{"expect":{"v":1,"t":"resp","id":16,"ok":true,"result":{"upserted":true,"state":"UnderConstrained","dof":3},"tolerance":{"abs":0.0001}}}
+{"send":{"v":1,"t":"req","id":17,"verb":"BeginGesture","args":{"sketchId":"angle-branch-around","gestureId":18,"drag":{"pointId":"b"}}}}
+{"expect":{"v":1,"t":"resp","id":17,"ok":true,"result":{"ready":true},"tolerance":{"abs":0.0001}}}
+{"send":{"v":1,"t":"req","id":18,"verb":"SolveDrag","args":{"gestureId":18,"seq":1,"target":[0.0,1.0]}}}
+{"expect":{"v":1,"t":"resp","id":18,"ok":true,"result":{"status":"success","conflicting":[],"positions":{"b":[0.0,1.0]}},"tolerance":{"abs":0.0001}}}
+{"send":{"v":1,"t":"req","id":19,"verb":"SolveDrag","args":{"gestureId":18,"seq":2,"target":[-2.0,0.0]}}}
+{"expect":{"v":1,"t":"resp","id":19,"ok":true,"result":{"status":"success","conflicting":[],"positions":{"b":[-2.0,0.0]}},"tolerance":{"abs":0.0001}}}
+{"send":{"v":1,"t":"req","id":20,"verb":"EndGesture","args":{"gestureId":18,"commit":{"finalTarget":[-2.0,0.0]}}}}
+{"expect":{"v":1,"t":"resp","id":20,"ok":true,"result":{"status":"success","state":"UnderConstrained","dof":3,"conflicting":[],"diagnostics":[],"positions":{"b":[-2.0,0.0]}},"tolerance":{"abs":0.0001}}}

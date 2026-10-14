@@ -1735,6 +1735,49 @@ void System::declareDrivenParams(VEC_pD& params)
     pdrivenlist = params;
 }
 
+VEC_pD System::connectedUnknowns(const VEC_pD& seeds, const VEC_pD& unknowns) const
+{
+    const std::set<double*> allowed(unknowns.begin(), unknowns.end());
+    std::set<double*> reached;
+    VEC_pD pending;
+    for (double* seed : seeds) {
+        if (allowed.count(seed) && reached.insert(seed).second) pending.push_back(seed);
+    }
+    for (std::size_t i = 0; i < pending.size(); ++i) {
+        const auto neighbors = p2c.find(pending[i]);
+        if (neighbors == p2c.end()) continue;
+        for (const auto* constraint : neighbors->second) {
+            const auto params = c2p.find(const_cast<Constraint*>(constraint));
+            if (params == c2p.end()) continue;
+            for (double* param : params->second) {
+                if (allowed.count(param) && reached.insert(param).second) pending.push_back(param);
+            }
+        }
+    }
+    VEC_pD connected;
+    for (double* param : unknowns) {
+        if (reached.count(param)) connected.push_back(param);
+    }
+    return connected;
+}
+
+bool System::constraintTouchesDeclaredUnknown(const Constraint* constraint) const
+{
+    if (!scopedUnknowns) return true;
+    const auto params = c2p.find(const_cast<Constraint*>(constraint));
+    if (params == c2p.end()) return false;
+    return std::ranges::any_of(params->second, [this](double* param) { return pIndex.count(param) != 0; });
+}
+
+void System::setScopedUnknowns(bool enabled)
+{
+    if (scopedUnknowns == enabled) return;
+    scopedUnknowns = enabled;
+    clearSubSystems();
+    isInit = false;
+    invalidatedDiagnosis();
+}
+
 
 void System::initSolution(Algorithm alg)
 {
@@ -1767,14 +1810,9 @@ void System::initSolution(Algorithm alg)
     }
 
     std::vector<Constraint*> clistR;
-    if (!redundant.empty()) {
-        std::ranges::copy_if(clist, std::back_inserter(clistR), [this](auto constr) {
-            return this->redundant.count(constr) == 0;
-        });
-    }
-    else {
-        clistR = clist;
-    }
+    std::ranges::copy_if(clist, std::back_inserter(clistR), [this](auto constr) {
+        return redundant.count(constr) == 0 && constraintTouchesDeclaredUnknown(constr);
+    });
 
     // partitioning into decoupled components
     Graph g;
@@ -1930,6 +1968,7 @@ int System::solve(bool isFine, Algorithm alg, bool isRedundantsolving)
         for (std::set<Constraint*>::const_iterator constr = redundant.begin();
              constr != redundant.end();
              ++constr) {
+            if (!constraintTouchesDeclaredUnknown(*constr)) continue;
             // DeepSOIC: there used to be a comparison of signed error value to
             // convergence, which makes no sense. Potentially I fixed bug, and
             // chances are low I've broken anything.
@@ -4740,7 +4779,7 @@ void System::makeReducedJacobian(
     for (auto& constr : clist) {
         constr->revertParams();
         ++allcount;
-        if (constr->getTag() >= 0 && constr->isDriving()) {
+        if (constr->getTag() >= 0 && constr->isDriving() && constraintTouchesDeclaredUnknown(constr)) {
             jacobianconstraintcount++;
             for (int j = 0; j < int(pdiagnoselist.size()); j++) {
                 J(jacobianconstraintcount - 1, j) = constr->grad(pdiagnoselist[j]);
@@ -5573,8 +5612,8 @@ void System::identifyConflictingRedundantConstraints(
 
     std::vector<Constraint*> clistTmp;
     clistTmp.reserve(clist.size());
-    std::ranges::copy_if(clist, std::back_inserter(clistTmp), [&skipped](const auto& constr) {
-        return (constr->isDriving() && skipped.count(constr) == 0);
+    std::ranges::copy_if(clist, std::back_inserter(clistTmp), [this, &skipped](const auto& constr) {
+        return constr->isDriving() && skipped.count(constr) == 0 && constraintTouchesDeclaredUnknown(constr);
     });
 
     SubSystem* subSysTmp = new SubSystem(clistTmp, pdiagnoselist);
@@ -5671,7 +5710,7 @@ void System::identifyConflictingRedundantConstraints(
 
     // remove tags represented at least in one non-redundant constraint
     for (const auto& constr : clist) {
-        if (redundant.count(constr) == 0) {
+        if (constraintTouchesDeclaredUnknown(constr) && redundant.count(constr) == 0) {
             redundantTagsSet.erase(constr->getTag());
         }
     }

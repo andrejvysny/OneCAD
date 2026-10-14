@@ -37,6 +37,7 @@
 #include "session/BodyStore.h"
 #include "session/ScratchJob.h"
 #include "session/SketchStore.h"
+#include "util/PolicyVersions.h"
 
 namespace onecad::session {
 
@@ -97,6 +98,7 @@ struct CheckpointState {
     // reason the partition does — a restore that dropped it would let a tooth
     // face become bindable until the next publish.
     std::map<std::string, ops::GearBodyInfo> gear_bodies;
+    unsigned solver_policy_version = policy::kSolverPolicyVersion;
 };
 
 // Outcome of RestoreCheckpoint.

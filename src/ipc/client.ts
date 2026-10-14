@@ -455,6 +455,8 @@ export interface CadClient {
 
   /** Pointer-up: final exact solve committed as ONE undo command. */
   endGesture(finalTarget?: [number, number]): Promise<SketchUpsertResult>;
+  /** Discard scratch without mutation or history. */
+  cancelGesture(): Promise<void>;
 
   // ── Element identity (SCHEMA §7.5) — pick → promote ────────────────────────
 

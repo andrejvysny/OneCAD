@@ -245,8 +245,17 @@ add_library(worker_core STATIC
     src/sketch/SketchConstraint.cpp
     src/sketch/constraints/Constraints.cpp
     src/sketch/solver/ConstraintSolver.cpp
+    src/sketch/solver/ConstraintSolverPoint.cpp
+    src/sketch/solver/PointBranch.cpp
     src/sketch/solver/SolverAdapter.cpp
     src/sketch/Sketch.cpp
+    src/sketch/SketchExact.cpp
+    src/sketch/SketchPose.cpp
+    src/sketch/ResidualGate.cpp
+    src/sketch/ResidualGeometry.cpp
+    src/sketch/ResidualTangency.cpp
+    src/protocol/SketchTruth.cpp
+    src/protocol/SolverLaneExact.cpp
     src/sketch/ConstraintApplicability.cpp    # onecad::ui selection→constraint rules
     # --- W-WP3a: loop stack (W-WP2 copied, now compiled — needs sketch types) ---
     src/loop/AdjacencyGraph.cpp

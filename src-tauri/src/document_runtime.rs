@@ -295,6 +295,10 @@ struct ActiveGesture {
     sketch_id: SketchId,
     drag_point: EntityId,
     before: Sketch,
+    baseline: Sketch,
+    pending_solve: SketchUpsertDto,
+    fence: (DocumentRevision, WorkerEpoch),
+    geometry: String,
     /// Next `SolveDrag` seq (monotonic; latest-wins).
     next_seq: u64,
     /// The solver-lane claim for `sketch_id` (SP-0 D3). Acquired in
@@ -712,7 +716,8 @@ pub struct DocumentRuntime {
     job_seq: u64,
     /// Last solver-lane `(dof, status, geometry token)` per sketch.
     /// (replaces the `dof:0`/`Ok` placeholders). Empty until a sketch is solved.
-    sketch_solve: BTreeMap<SketchId, (u32, SketchSolveStatus, String)>,
+    sketch_solve: BTreeMap<SketchId, sketch_adoption::CachedSketchSolve>,
+    sketch_upsert_revisions: BTreeMap<SketchId, (WorkerEpoch, u64)>,
     /// The active drag gesture, if the pointer is down mid-drag.
     active_gesture: Option<ActiveGesture>,
     /// Per-sketch solver-lane claims (SP-0 D3) — the RAII fence between a drag
@@ -997,6 +1002,7 @@ impl DocumentRuntime {
             occt_fingerprint: "pending-r-wp11".to_string(),
             job_seq: 0,
             sketch_solve: BTreeMap::new(),
+            sketch_upsert_revisions: BTreeMap::new(),
             active_gesture: None,
             solver_lane: SolverLaneClaims::new(),
             sketch_session: None,
@@ -3624,16 +3630,16 @@ impl DocumentRuntime {
             let solve = self
                 .sketch_solve
                 .get(id)
-                .filter(|(_, _, solved_token)| solved_token == &geometry_token);
+                .filter(|solved| solved.token == geometry_token);
             sketches.insert(
                 id.to_string(),
                 SketchDto {
                     id: id.to_string(),
                     name: sk.name.clone(),
                     visible: doc.sketch_visible(*id),
-                    dof: solve.map(|(dof, _, _)| *dof),
-                    status: solve.map(|(_, status, _)| status.tree_status()),
-                    solve_geometry_token: solve.map(|(_, _, token)| token.clone()),
+                    dof: solve.map(|solved| solved.dof),
+                    status: solve.map(|solved| solved.status.tree_status()),
+                    solve_geometry_token: solve.map(|solved| solved.token.clone()),
                     geometry_token,
                     host_face: sketch_host_face(sk),
                 },
@@ -4056,6 +4062,17 @@ impl DocumentRuntime {
         &mut self,
         sketch_id: SketchId,
     ) -> Result<SketchSessionDto, EngineError> {
+        self.enter_sketch_with_outcome(sketch_id)
+            .await
+            .map(|(dto, _)| dto)
+    }
+
+    /// Entry can resolve legacy geometry; its mutation must reach regen/autosave.
+    pub async fn enter_sketch_with_outcome(
+        &mut self,
+        sketch_id: SketchId,
+    ) -> Result<(SketchSessionDto, Option<CommandOutcome>), EngineError> {
+        let _claim = self.claim_upsert_lane(sketch_id).await?;
         let sketch = self.sketch_or_err(sketch_id, "enterSketch")?;
         // B1 squash: remember the pre-session sketch + undo watermark so finish/cancel
         // can collapse every in-session granular edit into ONE net undoable command. If
@@ -4069,37 +4086,43 @@ impl DocumentRuntime {
             &self.sketch_session,
             Some(s) if s.sketch_id == sketch_id && s.undo_watermark <= self.session.undo_depth()
         );
-        let (plane, entities, constraints) = crate::worker::wire::sketch_wire(&sketch);
-        // The FALLIBLE solve happens BEFORE opening the session (finding 2c): a worker
-        // error must not leave a stale open session (`?` returns with the session
-        // untouched). Only after it succeeds do we open/keep the watermark.
-        let solved = self.solver.sketch_upsert(&sketch).await?;
-        self.record_solve(sketch_id, &solved);
+        // Capture before the solve correction, but install only after success:
+        // a failed entry must not replace a previously open session.
+        let undo_watermark = self.session.undo_depth();
+        let evicted_at_enter = self.session.evictions();
+        let (solved, after) = self.solve_sketch_candidate(&sketch).await?;
+        let outcome = self.commit_sketch_solve(sketch.clone(), after.clone(), Vec::new())?;
+        self.record_upsert(sketch_id, &solved);
         if !keep_existing {
             self.sketch_session = Some(SketchSession {
                 sketch_id,
                 prior: sketch.clone(),
-                undo_watermark: self.session.undo_depth(),
-                evicted_at_enter: self.session.evictions(),
+                undo_watermark,
+                evicted_at_enter,
                 created_this_visit: false,
             });
         }
-        Ok(SketchSessionDto {
-            sketch_id: sketch_id.to_string(),
-            plane,
-            entities,
-            constraints,
-            dof: solved.dof,
-            status: solved.status,
-            solve_current: true,
-            // Surface the entering solve's conflicting constraints (SCHEMA §7.4) so
-            // re-entering a conflicting sketch tints the offending constraints.
-            conflicting: solved.conflicting,
-            // Same projection for the per-entity state: entering a sketch colours
-            // its pinned-down entities without waiting for the next upsert.
-            entity_states: solved.entity_states,
-            projections: crate::sketch_projection::projections_dto(&sketch),
-        })
+        let (plane, entities, constraints) = crate::worker::wire::sketch_wire(&after);
+        Ok((
+            SketchSessionDto {
+                sketch_id: sketch_id.to_string(),
+                plane,
+                entities,
+                constraints,
+                dof: solved.dof,
+                status: solved.status,
+                truth: solved.truth,
+                solve_current: true,
+                // Surface the entering solve's conflicting constraints (SCHEMA §7.4) so
+                // re-entering a conflicting sketch tints the offending constraints.
+                conflicting: solved.conflicting,
+                // Same projection for the per-entity state: entering a sketch colours
+                // its pinned-down entities without waiting for the next upsert.
+                entity_states: solved.entity_states,
+                projections: crate::sketch_projection::projections_dto(&after),
+            },
+            outcome,
+        ))
     }
 
     pub fn mark_open_sketch_created(&mut self, sketch_id: SketchId) {
@@ -4126,23 +4149,20 @@ impl DocumentRuntime {
         let sketch = self.sketch_or_err(sketch_id, "getSketch")?;
         let (plane, entities, constraints) = crate::worker::wire::sketch_wire(&sketch);
         let token = sketch_geometry_token(&sketch);
-        let (dof, status, solve_current) = self
+        let solved = self
             .sketch_solve
             .get(&sketch_id)
-            .filter(|(_, _, cached)| cached == &token)
-            .map(|(dof, status, _)| (*dof, *status, true))
-            .unwrap_or((0, SketchSolveStatus::UnderConstrained, false));
+            .filter(|cached| cached.token == token);
         Ok(SketchSessionDto {
             sketch_id: sketch_id.to_string(),
             plane,
             entities,
             constraints,
-            dof,
-            status,
-            solve_current,
-            // A static read carries no live solve — the sketch_solve cache stores only
-            // (dof, status), so there is no conflicting-id evidence to surface here.
-            conflicting: Vec::new(),
+            dof: solved.map_or(0, |s| s.dof),
+            status: solved.map_or(SketchSolveStatus::UnderConstrained, |s| s.status),
+            solve_current: solved.is_some(),
+            truth: solved.map_or_else(Default::default, |s| s.truth.clone()),
+            conflicting: solved.map_or_else(Vec::new, |s| s.conflicting.clone()),
             // Likewise no per-entity evidence: empty means "nothing to say"
             // (SCHEMA §7.4), which is exactly true of a cache-backed read.
             entity_states: crate::dto::EntityStates::new(),
@@ -4202,8 +4222,7 @@ impl DocumentRuntime {
 
     /// Applies a batch of sketch edits authoritatively (one undoable
     /// [`EditCommand::SketchEdit`]) then re-solves on the worker for live dof/status
-    /// (SCHEMA §7.4). A non-drag upsert is an identity solve (no coordinate
-    /// write-back — the worker's `SketchUpsert` reports no positions).
+    /// (SCHEMA §7.4). Successful corrections share the triggering edit's history.
     ///
     /// # Errors
     /// [`EngineError`] on a read-only document, an invalid edit, or a worker failure.
@@ -4218,7 +4237,7 @@ impl DocumentRuntime {
     }
 
     /// [`sketch_upsert`](Self::sketch_upsert) plus the exact edit outcome the app
-    /// scheduler must consume. `None` means the upsert only refreshed the solve.
+    /// scheduler must consume. `None` means no authoritative geometry changed.
     pub async fn sketch_upsert_with_outcome(
         &mut self,
         sketch_id: SketchId,
@@ -4227,182 +4246,14 @@ impl DocumentRuntime {
         if self.read_only {
             return Err(op_failed("sketchUpsert: read-only document"));
         }
-        let outcome = if ops.is_empty() {
-            None
-        } else {
-            Some(
-                self.apply(EditCommand::SketchEdit {
-                    sketch: sketch_id,
-                    ops,
-                })
-                .map_err(|e| op_failed(format!("sketchUpsert edit: {e}")))?,
-            )
-        };
-        let sketch = self.sketch_or_err(sketch_id, "sketchUpsert")?;
-        let solved = self.solver.sketch_upsert(&sketch).await?;
-        self.record_solve(sketch_id, &solved);
-        Ok((solved, outcome))
-    }
-
-    /// Opens a drag gesture on `drag_point` (SCHEMA §7.4 `BeginGesture`). Snapshots
-    /// the pre-gesture sketch (the `before` memento) so pointer-up can commit **one**
-    /// undo command for the whole drag.
-    ///
-    /// `target` declares WHAT the pointer grabbed (point handle / arc endpoint /
-    /// radius / whole entity body). [`GestureTarget::point`](wire::GestureTarget::point)
-    /// is the plain point drag every pre-SP-2 caller means. `drag_point` stays the
-    /// gesture's `SolveDrag` handle for all kinds — the worker ignores `pointId`
-    /// off the point path, and the runtime needs a stable per-gesture id anyway.
-    ///
-    /// # Errors
-    /// [`EngineError`] on a read-only document, an unknown sketch, or a worker failure.
-    pub async fn begin_gesture(
-        &mut self,
-        sketch_id: SketchId,
-        drag_point: EntityId,
-        target: wire::GestureTarget,
-    ) -> Result<crate::dto::BeginGestureDto, EngineError> {
-        if self.read_only {
-            return Err(op_failed("beginGesture: read-only document"));
-        }
-        let sketch = self.sketch_or_err(sketch_id, "beginGesture")?;
-        // SP-0 D3: take the solver lane BEFORE the upsert below, so an in-flight
-        // region query (whose `drive()` runs with the runtime lock released) can
-        // never have this gesture opened underneath it. See [`solver_lane`] for
-        // what the collision corrupts.
-        let claim = self.claim_gesture_lane(sketch_id)?;
-        // Ensure the worker holds the current sketch (its BeginGesture reads it).
-        let solved = self.solver.sketch_upsert(&sketch).await?;
-        self.record_solve(sketch_id, &solved);
-        let gesture_id = self.next_gesture_id();
-        let ready = self
-            .solver
-            .begin_gesture(
-                &sketch_id.to_string(),
-                solved.sketch_revision,
-                gesture_id,
-                drag_point,
-                target,
-                // solverPolicyHash: reserved, always "" — see wire::begin_gesture_args.
-                "",
-            )
-            .await?;
-        // Assigning here drops any previously active gesture (possibly on another
-        // sketch), releasing its claim with it — the pre-D3 overwrite semantics,
-        // unchanged.
-        self.active_gesture = Some(ActiveGesture {
-            gesture_id,
-            sketch_id,
-            drag_point,
-            before: sketch,
-            next_seq: 1,
-            _claim: claim,
-        });
-        Ok(ready)
-    }
-
-    /// Takes `sketch_id`'s solver lane for a drag gesture (SP-0 D3).
-    ///
-    /// A contending REGION QUERY is refused: its unlocked `drive()` is exactly what
-    /// the claim exists to fence against. A contending GESTURE is the same sketch's
-    /// own already-open drag, which [`begin_gesture`](Self::begin_gesture) has
-    /// always silently REPLACED (its tail assignment overwrites unconditionally);
-    /// dropping the superseded record here frees the lane so that behavior is
-    /// preserved rather than turned into a new refusal.
-    fn claim_gesture_lane(&mut self, sketch_id: SketchId) -> Result<Claim, EngineError> {
-        match self.solver_lane.claim(sketch_id, LaneOwner::Gesture) {
-            Ok(claim) => Ok(claim),
-            Err(LaneOwner::Gesture) => {
-                drop(self.active_gesture.take());
-                self.solver_lane
-                    .claim(sketch_id, LaneOwner::Gesture)
-                    .map_err(|held| {
-                        op_failed(format!(
-                            "beginGesture: {} is in flight for sketch {sketch_id} — retry",
-                            held.describe()
-                        ))
-                    })
-            }
-            Err(LaneOwner::RegionQuery) => Err(op_failed(format!(
-                "beginGesture: a region query is in flight for sketch {sketch_id} — retry"
-            ))),
-        }
-    }
-
-    /// One incremental drag solve (SCHEMA §7.4 `SolveDrag`). Fired latest-wins: the
-    /// caller sends the newest `target` without awaiting each serially. The returned
-    /// positions are a **preview** (not committed) — only [`end_gesture`](Self::end_gesture)
-    /// mutates the document.
-    ///
-    /// # Errors
-    /// [`EngineError`] when no gesture is active or the worker fails.
-    pub async fn solve_drag(
-        &mut self,
-        target: [f64; 2],
-    ) -> Result<crate::dto::DragSolveDto, EngineError> {
-        let (gesture_id, drag_point, seq) = {
-            let g = self
-                .active_gesture
-                .as_mut()
-                .ok_or_else(|| op_failed("solveDrag: no active gesture"))?;
-            let seq = g.next_seq;
-            g.next_seq += 1;
-            (g.gesture_id, g.drag_point, seq)
-        };
-        self.solver
-            .solve_drag(gesture_id, seq, drag_point, target)
-            .await
-    }
-
-    /// Pointer-up final exact solve (SCHEMA §7.4 `EndGesture`): applies the solved
-    /// positions to the `before` memento and commits **one** [`EditCommand::SketchDragGesture`]
-    /// (single undo step for the whole drag). Returns the final dof/status/positions.
-    ///
-    /// # Errors
-    /// [`EngineError`] when no gesture is active, the commit is invalid, or the
-    /// worker fails.
-    pub async fn end_gesture(
-        &mut self,
-        final_target: Option<[f64; 2]>,
-    ) -> Result<SketchUpsertDto, EngineError> {
-        self.end_gesture_with_outcome(final_target)
-            .await
-            .map(|(solved, _)| solved)
-    }
-
-    /// [`end_gesture`](Self::end_gesture) plus the exact edit outcome the app
-    /// scheduler must consume.
-    pub async fn end_gesture_with_outcome(
-        &mut self,
-        final_target: Option<[f64; 2]>,
-    ) -> Result<(SketchUpsertDto, CommandOutcome), EngineError> {
-        let gesture = self
-            .active_gesture
-            .take()
-            .ok_or_else(|| op_failed("endGesture: no active gesture"))?;
-        let solved = self
-            .solver
-            .end_gesture(
-                &gesture.sketch_id.to_string(),
-                gesture.gesture_id,
-                final_target,
-            )
-            .await?;
-        let mut after = gesture.before.clone();
-        after.apply_solved_positions(&typed_positions(&solved.solved_positions));
-        // SP-2: `positions` is point-only. A radius drag moves no point at all, an
-        // arcEnd drag reshapes the arc, and a Tangent propagates even a plain point
-        // drag into a neighbouring radius — without this the worker's store and the
-        // document would silently disagree until the next upsert reverted it.
-        after.apply_solved_curves(&typed_curves(&solved.solved_curves));
-        let outcome = self
-            .apply(EditCommand::SketchDragGesture {
-                sketch: gesture.sketch_id,
-                before: gesture.before,
-                after,
-            })
-            .map_err(|e| op_failed(format!("endGesture commit: {e}")))?;
-        self.record_solve(gesture.sketch_id, &solved);
+        let _claim = self.claim_upsert_lane(sketch_id).await?;
+        let sketch = self
+            .session
+            .prepare_sketch_edit(sketch_id, &ops)
+            .map_err(|e| op_failed(format!("sketchUpsert edit: {e}")))?;
+        let (solved, after) = self.solve_sketch_candidate(&sketch).await?;
+        let outcome = self.commit_sketch_solve(sketch, after, ops)?;
+        self.record_upsert(sketch_id, &solved);
         Ok((solved, outcome))
     }
 
@@ -4451,11 +4302,9 @@ impl DocumentRuntime {
         }
         if matches!(self.active_gesture.as_ref(), Some(g) if g.sketch_id == sketch_id) {
             let g = self.active_gesture.take().expect("matched active gesture");
-            // Best-effort: end the worker gesture so it does not leak (no commit).
-            let _ = self
-                .solver
-                .end_gesture(&g.sketch_id.to_string(), g.gesture_id, None)
-                .await;
+            self.sketch_solve.remove(&g.sketch_id);
+            // Discard worker scratch; session squash handles already authored edits.
+            let _ = self.solver.cancel_gesture(g.gesture_id).await;
         }
         // B1 squash: the in-flight worker gesture is discarded, but any granular
         // sketch_upsert edits committed during the session collapse into one net
@@ -4552,9 +4401,6 @@ impl DocumentRuntime {
         &mut self,
         sketch_id: SketchId,
     ) -> Result<(FinishSketchDto, Option<CommandOutcome>), FinishSketchError> {
-        let sketch = self.sketch_or_err(sketch_id, "finishSketch")?;
-        let solved = self.solver.sketch_upsert(&sketch).await?;
-        self.record_solve(sketch_id, &solved);
         // The Enter/E finish handoff can land while a drag is still live (the
         // frontend's pointer-up cancel lost the race) — clear the dangling
         // gesture here too (cancel_sketch's take-once, scoped to this sketch)
@@ -4566,21 +4412,33 @@ impl DocumentRuntime {
             .is_some_and(|g| g.sketch_id == sketch_id)
         {
             if let Some(g) = self.active_gesture.take() {
-                let _ = self
-                    .solver
-                    .end_gesture(&g.sketch_id.to_string(), g.gesture_id, None)
-                    .await;
+                self.solver.cancel_gesture(g.gesture_id).await?;
             }
         }
+        let _claim = self.claim_upsert_lane(sketch_id).await?;
+        let sketch = self.sketch_or_err(sketch_id, "finishSketch")?;
+        let (solved, after) = self.solve_sketch_candidate(&sketch).await?;
+        let mut outcome = self.commit_sketch_solve(sketch, after, Vec::new())?;
+        self.record_upsert(sketch_id, &solved);
         // B1 squash: collapse every in-session granular edit into ONE net command.
         self.squash_sketch_session(sketch_id);
         // The regen plan resolves a modeling op's profile ONLY from a preceding
         // Sketch step, so the finished sketch must own an up-to-date timeline
         // record — without it every extrude off this sketch fails with "profile
         // sketch not found in plan" (the interactive flow authored none before).
-        let outcome = self
-            .upsert_sketch_record(sketch_id)
-            .map_err(|e| op_failed(format!("finishSketch: sketch record: {e}")))?;
+        match self.upsert_sketch_record(sketch_id) {
+            Ok(Some(record)) => match &mut outcome {
+                Some(adoption) => merge_outcome(adoption, &record),
+                None => outcome = Some(record),
+            },
+            Ok(None) => {}
+            Err(e) => {
+                return Err(FinishSketchError {
+                    error: op_failed(format!("finishSketch: sketch record: {e}")),
+                    committed: outcome.map(Box::new),
+                })
+            }
+        }
         // ORDER MATTERS — regions are computed AFTER the record is committed.
         // The regions call is the one step here that a worker can refuse, and it
         // used to run FIRST: a refusal returned early, leaving the timeline record
@@ -5741,7 +5599,13 @@ impl DocumentRuntime {
         if let Some(current) = self.session.document().sketch(sketch) {
             self.sketch_solve.insert(
                 sketch,
-                (solved.dof, solved.status, sketch_geometry_token(current)),
+                sketch_adoption::CachedSketchSolve {
+                    dof: solved.dof,
+                    status: solved.status,
+                    token: sketch_geometry_token(current),
+                    conflicting: solved.conflicting.clone(),
+                    truth: solved.truth.clone(),
+                },
             );
         }
     }
@@ -6986,7 +6850,9 @@ fn element_ref_input(op: &Operation, index: usize) -> Option<&ElementRef> {
     }
 }
 
+mod gestures;
 mod ordinal_tripwire;
+mod sketch_adoption;
 pub mod solver_lane;
 
 #[cfg(test)]

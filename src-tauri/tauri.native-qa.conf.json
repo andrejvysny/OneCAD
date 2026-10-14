@@ -1,0 +1,23 @@
+{
+  "productName": "OneCAD QA",
+  "identifier": "com.andrejvysny.onecad.nativeqa",
+  "bundle": {
+    "macOS": {
+      "infoPlist": "Info.native-qa.plist"
+    }
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "OneCAD QA",
+        "width": 1300,
+        "height": 864,
+        "minWidth": 1000,
+        "minHeight": 640,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ]
+  }
+}

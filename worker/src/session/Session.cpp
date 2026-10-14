@@ -552,6 +552,10 @@ RestoreOutcome Session::restore_checkpoint(std::uint64_t step, const std::string
         return out;
     }
     const CheckpointState& st = it->second;
+    if (st.solver_policy_version != policy::kSolverPolicyVersion) {
+        out.restored = false;
+        return out;
+    }
     out.stored_hash = st.history_prefix_hash;
     // Staleness: the checkpoint's stored hash must match the base the plan expects.
     if (!expected_hash.empty() && expected_hash != st.history_prefix_hash) {

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <initializer_list>
 
 #include "sketch/SketchArc.h"
 #include "sketch/SketchCircle.h"
@@ -18,6 +19,14 @@ namespace {
 
 namespace cs = onecad::core::sketch::constraints;
 using nlohmann::json;
+
+bool negative_radii(TranslateResult& result, const std::string& id,
+                    std::initializer_list<double> radii) {
+    if (std::none_of(radii.begin(), radii.end(), [](double radius) { return radius < 0.0; })) return false;
+    result.error = "entity '" + id + "' has a negative radius";
+    result.invalid_geometry_entity = id;
+    return true;
+}
 
 std::string lower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(),
@@ -257,6 +266,7 @@ TranslateResult translate(const json& args) {
                 result.error = "circle '" + id + "' missing center/radius";
                 return result;
             }
+            if (negative_radii(result, id, {radius})) return result;
             const sk::EntityID cp = sketch->addPoint(cx, cy, construction);
             lock(cp, locked);
             reg_handle(id + ".center", cp, true);
@@ -275,6 +285,7 @@ TranslateResult translate(const json& args) {
                 result.error = "arc '" + id + "' missing center/radius";
                 return result;
             }
+            if (negative_radii(result, id, {radius})) return result;
             double start_angle = 0.0, end_angle = 0.0;
             double sx, sy, ex, ey;
             if (e.contains("start") && e.contains("end") && read_vec2(e["start"], sx, sy) &&
@@ -326,6 +337,7 @@ TranslateResult translate(const json& args) {
                 result.error = "ellipse '" + id + "' missing center/majorR/minorR";
                 return result;
             }
+            if (negative_radii(result, id, {major, minor})) return result;
             double rotation = 0.0;
             scalar_field(e, {"rotation"}, rotation);  // optional, default 0
             const sk::EntityID cp = sketch->addPoint(cx, cy, construction);
@@ -461,8 +473,20 @@ TranslateResult translate(const json& args) {
             else if (a.empty() || b.empty()) fail = "VerticalDistance: unresolved points";
             else added = sketch->addVerticalDistance(a, b, value);
         } else if (type == "Angle") {
-            if (!scalar_field(c, {"value", "angleDeg", "angle"}, value)) fail = "Angle: missing value";
-            else added = sketch->addAngle(internal(ent(0)), internal(ent(1)), value);
+            const bool radians = c.contains("value");
+            if (!(radians ? read_scalar(c["value"], value) : scalar_field(c, {"angleDeg", "angle"}, value))) {
+                fail = "Angle: missing or malformed value";
+            }
+            else {
+                const auto first = internal(ent(0)), second = internal(ent(1));
+                if (!sketch->getEntityAs<sk::SketchLine>(first) || !sketch->getEntityAs<sk::SketchLine>(second)) {
+                    fail = "Angle: unresolved line operands";
+                } else if (radians) {
+                    added = sketch->addConstraint(std::make_unique<cs::AngleConstraint>(first, second, value));
+                } else {
+                    added = sketch->addAngle(first, second, value);
+                }
+            }
         } else if (type == "Radius") {
             if (!scalar_field(c, {"value", "radius"}, value)) fail = "Radius: missing value";
             else added = sketch->addRadius(internal(ent(0)), value);

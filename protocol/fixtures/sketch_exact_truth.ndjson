@@ -1,0 +1,18 @@
+# ONECAD-14 retained-pose typed truth. Numerical success remains independent.
+{"expect":{"v":1,"t":"hello","seq":0,"result":{"solverPolicyVersion":2}}}
+{"send":{"v":1,"t":"req","id":1,"verb":"SketchUpsert","args":{"sketchId":"near","plane":{"kind":"XY"},"entities":[{"id":"a","type":"Point","at":[0,0]},{"id":"b","type":"Point","at":[10,0]}],"constraints":[{"id":"ten","type":"Distance","entities":["a","b"],"value":10},{"id":"near","type":"Distance","entities":["a","b"],"value":10.001}]}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"state":"Conflicting","conflicting":["near"],"reasons":{"near":"residualViolation"},"unassessed":[],"violations":[{"constraintId":"near","dimension":"mm","tolerance":0.0001,"residual":"$any","normalized":"$any"}],"positions":{},"curves":{}}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"SketchRegions","args":{"sketchId":"near"}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":false,"error":{"code":"OP_FAILED","detail":{"diagnostics":[{"code":"OP_FAILED","severity":"error","reasonCode":"residualViolation","evidence":{"constraintId":"near","dimension":"mm"}}]}}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"BeginGesture","args":{"sketchId":"near","sketchRevision":1,"gestureId":1,"drag":{"pointId":"b"}}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":false,"error":{"code":"OP_FAILED","detail":{"diagnostics":[{"reasonCode":"residualViolation"}]}}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"SketchUpsert","args":{"sketchId":"under","plane":{"kind":"XY"},"entities":[{"id":"a","type":"Point","at":[0,0]},{"id":"b","type":"Point","at":[10,0]}],"constraints":[{"id":"ten","type":"Distance","entities":["a","b"],"value":10}]}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"state":"UnderConstrained","dof":3,"conflicting":[],"reasons":{},"unassessed":[],"violations":[],"normalizedMaxResidual":0}}}
+{"send":{"v":1,"t":"req","id":5,"verb":"SketchUpsert","args":{"sketchId":"over","plane":{"kind":"XY"},"entities":[{"id":"a","type":"Point","at":[0,0]},{"id":"b","type":"Point","at":[10,0]}],"constraints":[{"id":"ten","type":"Distance","entities":["a","b"],"value":10},{"id":"duplicate","type":"Distance","entities":["a","b"],"value":10}]}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"state":"OverConstrained","conflicting":[],"reasons":{},"unassessed":[],"violations":[],"normalizedMaxResidual":0}}}
+# Numerical success with a real curve correction remains retained despite residual conflict.
+{"send":{"v":1,"t":"req","id":6,"verb":"SketchUpsert","args":{"sketchId":"retained-correction","plane":{"kind":"XY"},"entities":[{"id":"a","type":"Point","at":[0,0]},{"id":"b","type":"Point","at":[10,0]},{"id":"circle","type":"Circle","center":[30,30],"radius":4}],"constraints":[{"id":"ten","type":"Distance","entities":["a","b"],"value":10},{"id":"near","type":"Distance","entities":["a","b"],"value":10.001},{"id":"radius","type":"Radius","entities":["circle"],"value":5}]}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"result":{"state":"Conflicting","curves":{"circle":{"radius":5}}}}}
+# Invalid authored curve geometry never replaces a stored accepted pose.
+{"send":{"v":1,"t":"req","id":7,"verb":"SketchUpsert","args":{"sketchId":"retained-correction","plane":{"kind":"XY"},"entities":[{"id":"circle","type":"Circle","center":[30,30],"radius":-1}],"constraints":[]}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":false,"error":{"code":"OP_FAILED","detail":{"diagnostics":[{"severity":"error","reasonCode":"internalCouplingFailure","evidence":{"entityIds":["circle"]}}]}}}}

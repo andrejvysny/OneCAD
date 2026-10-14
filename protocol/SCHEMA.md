@@ -393,7 +393,7 @@ Worker → Rust:
     "workerVersion": "0.1.0",
     "occt": { "version": "8.0.1", "fingerprint": "9a1c33f0e7b24d10" },
     "quantizationVersion": 1,
-    "solverPolicyVersion": 1,
+    "solverPolicyVersion": 2,
     "capabilities": [
       "op.sketch", "op.extrude", "op.revolve", "op.fillet", "op.chamfer",
       "op.boolean", "op.importStep", "solver.planegcs", "tessellate.mesh1",
@@ -552,7 +552,7 @@ failure/NeedsRepair preparing snapshot `m−1`, and ends with a terminal
   "baseCheckpoint": { "stepIndex": 2, "checkpointId": "ckpt_9" },  // optional
   "editedFrom": 4,                            // optional — step of the upstream content edit
   "checkpointFallbackReplay": true,           // optional — this replay stands in for a failed checkpoint plan
-  "policyVersions": { "quantizationVersion": 1, "solverPolicyVersion": 1,
+  "policyVersions": { "quantizationVersion": 1, "solverPolicyVersion": 2,
                       "descriptorVersion": 1, "resolverVersion": 1, "signatureVersion": 1 },
   "targetStep": 6,
   "artifacts": { "tessellate": { "lod": "coarse", "includeEdges": true } },
@@ -1386,7 +1386,10 @@ the full authoritative sketch so replay is deterministic.
     (parity with OneCAD-CPP `AngleConstraint`/PlaneGCS and Rust
     `Constraint::Angle`), distinct from op-param angles (`angleDeg`,
     `draftAngleDeg`) which are degrees. UI layers author/display degrees and
-    MUST convert at the wire boundary.
+    MUST convert at the wire boundary. When `value` is present it is radians,
+    unconditionally (the worker previously treated it as degrees). The legacy
+    aliases `angleDeg` and `angle`, read only when `value` is absent, stay
+    **degrees**; they are never reinterpreted as radians.
 - **`hostFace` (OPTIONAL, UX-2026-09-14 WP-1, 2026-09-15)** — the model FACE this
   sketch is glued to, as the SAME typed semantic reference shape Extrude's
   `targetFace` uses (identity + evidence + anchor, see **Semantic reference**
@@ -3092,6 +3095,9 @@ Upserts the authoritative sketch (plane + entities + constraints). Increments
   "state": "UnderConstrained",    // state ∈ UnderConstrained|FullyConstrained|OverConstrained|Conflicting
   "conflicting": [],              // constraint ids in conflict (non-empty iff state=Conflicting); absent ⇒ []
   "maxResidual": 0.0,             // largest |constraint residual| after the solve, each in its OWN dimension (mm or rad) — reporting only (WP-B); absent ⇒ unmeasured
+  "positions": { "e2": [10.0, 0.0] }, // optional exact point corrections relative to req.args
+  "curves": { "e7": { "radius": 5.0 } }, // optional exact Circle/Arc scalar corrections
+  "diagnostics": [],              // always present on success: exact-truth diagnostics (see "Typed exact truth"); [] when clean
   "entityStates": {               // PER-ENTITY state, keyed by WIRE entity id; optional, see below
     "e1": "fullyConstrained", "e2": "underConstrained", "e7": "conflicting" } }
 ```
@@ -3104,26 +3110,162 @@ absent field parses as `[]` (all parsers tolerate the missing/unknown key).
 `upserted` is `true` on every successful upsert (a failure is an error frame, not
 an `upserted: false`).
 
-**`maxResidual` (kernel-hardening WP-B, 2026-09-03; additive on `SketchUpsert`
-and `EndGesture`; REPORTING ONLY).** The largest per-constraint residual after
-the solve, each constraint measured in ITS OWN dimension — mm for a length-valued
-constraint (Distance, Radius, Diameter, Tangent), radians for an angle-valued one
-(Angle, Parallel, Perpendicular) — evaluated on the parameters the solve left in
-place. A single number therefore mixes dimensions: a reader displays it and never
-compares it across constraint kinds or against a tolerance of its own. A
-constraint whose entities cannot be read yields no residual and is skipped, never
-`+infinity`. It is computed on the `SketchUpsert` and `EndGesture` exact solves
-only — never on the per-frame `SolveDrag` lane — and it changes NO decision: the
-solve's success, `state`/`status` and `conflicting` are exactly what PlaneGCS
-reports (`GCS::SolveStatus`; a contradictory Distance 10 / Distance 20 pair
-already comes back `Diverged`, measured 2026-09-03). The field exists because
-PlaneGCS reports `Converged` for a solve whose step fell below its convergence
-criterion whether or not the residual is negligible, and the previous `residual`
-slot was never assigned; a future per-dimension gate (length residual ≤
-`SolverConfig::tolerance` = 1e-4 mm, angular residual ≤ a named angular
-tolerance) is a recorded follow-up that would land only with a reproduced
-local-minimum case and its own §14 entry. Absent ⇒ unmeasured (older workers);
-readers MUST NOT treat absence as zero.
+**Authoritative solved geometry (ONECAD-13; additive).** A successful exact solve
+reports `positions` and `curves` using the same shapes and entity keyspaces as
+`EndGesture`, but relative to the coordinates and curve scalars in this request.
+Every changed scalar is reported, including changes below the drag-preview
+thresholds. An omitted point, curve, or member is unchanged, never zero. Empty
+maps are legal when nothing changed. An existing compatible curve may carry only
+unknown members, which are ignored under §4. Ellipse parameters are not reported.
+The worker stores exactly this accepted pose. A failed solve retains the original
+request payload in its store and omits both correction fields; its diagnostic
+solver may have canonicalized the translated input. `upserted: true` acknowledges storage,
+not numerical convergence. Legacy workers may omit both fields.
+
+Rust adopts corrections atomically before publishing solve state. An authored
+edit and its correction occupy one undo entry and produce one combined outcome;
+a changed refresh owns a `Resolve sketch` entry, while an unchanged refresh
+creates no entry. Entry adopts after capturing its session watermark; finish
+adopts before minting/refreshing its Sketch record. BeginGesture and read-only
+region queries do not adopt. Authoritative upserts are exclusive against active
+gestures and region-query drives. A stale worker/document result or malformed,
+foreign, incompatible, non-finite, or lock-violating known correction is refused
+before document/history mutation. Unknown members follow §4 forward compatibility.
+Recognized synthesized `<curveId>.center` handles resolve to the existing core
+center point; Arc `.start`/`.end` handles are derived, never minted as points.
+Derived endpoints must agree with the accepted center/radius/angles within the
+approved internal arc-coupling positional budget, 1e-4 mm. Direct point versus
+center alias disagreement, a shared standalone point retained independently by
+the worker, or incompatible curve owners causes atomic refusal. This does not
+change translation's existing independent synthesized center semantics.
+BeginGesture retains a validated solved baseline without changing the document;
+EndGesture applies final deltas to that baseline and publishes cumulative Begin
+plus End corrections. Cancel discards the pending baseline. Preview drag policy is unchanged; exact retained-pose classification follows solver policy 2 below.
+
+**Typed exact truth (solver policy 2, ONECAD-14).** Every exact consumer uses one
+classification of the final retained pose, after numerical timeout/rollback and a
+fresh, non-mutating released-rank diagnosis. Numerical convergence stays separate
+from physical acceptance. Successful finite candidates with violated residuals
+remain retained and their exact geometry corrections remain emitted: a consumer
+must never display authored geometry while the worker retains a different pose.
+
+`SketchUpsert` and `EndGesture` add compatible fields:
+
+```json
+{"reasons":{"constraint-id":"residualViolation"},"unassessed":[],
+ "violations":[{"constraintId":"constraint-id","dimension":"mm","residual":0.001,
+                "tolerance":0.0001,"normalized":10.0,"component":"constraint"}],
+ "normalizedMaxResidual":10.0,
+ "diagnostics":[{"code":"OP_FAILED","severity":"error","reasonCode":"residualViolation",
+                 "stage":"sketchSolve","message":"…","evidence":{"…":"…"}}]}
+```
+
+A SUCCESSFUL `SketchUpsert` and a SUCCESSFUL `EndGesture` response both carry
+`result.diagnostics` (the exact-truth diagnostics of the final retained pose, cap
+64, `[]` when clean); on `EndGesture` a refused final target's refusal entries
+come first. Readers treat an absent array as `[]`.
+
+- `violations[].component` is `constraint` (the constraint's own residual) or
+  `endpointTangency` (angular residual at a welded Tangent endpoint, evidence
+  `dimension: "rad"`). The set is OPEN: Rust accepts any string (default `""`),
+  so readers MUST NOT reject an unknown component.
+- `conflicting` is the sorted union of actual residual violations and genuine
+  positive-tag public rank groups. `reasons` maps each member to `rankConflict` or
+  `residualViolation`; the latter wins when both apply. Internal tags 0 and -1
+  never become public culprits. Unknown additive members remain compatible.
+- `unassessed` contains constraints whose supported operands or exact residual
+  cannot be read. It never automatically adds a conflicting ID. Nonfinite,
+  missing, unsupported, undefined-direction or internal-integrity failures refuse
+  with `OP_FAILED` before store mutation. Numerical failure without a legitimate
+  residual/rank culprit also refuses; acceptable-looking DOF is insufficient.
+- Length-valued readers use mm: Coincident, Horizontal, Vertical, Fixed, Midpoint,
+  OnCurve, Tangent, Concentric, Equal, Distance, HorizontalDistance,
+  VerticalDistance, Radius, Diameter, Symmetric, HorizontalPoints, VerticalPoints.
+  Their inclusive budget is 0.0001 mm. Parallel, Perpendicular and Angle use rad
+  with inclusive budget `0.0001 / L`, where `L` is the maximum participating line
+  length in mm. Unrelated geometry never changes this local span.
+- Generic Tangent retains its center-to-supporting-line/curve-separation mm
+  reader. Structurally welded endpoint tangency also requires undirected tangent
+  alignment within `0.0001 / L` rad. Welding means shared endpoint IDs or closure
+  through Coincident / supported OnCurve(point,line,Start|End), never proximity.
+  Line–arc uses `L=max(lineLength,arcRadius)`; arc–arc uses `L=max(r1,r2)` because
+  `Ri*|sin(delta)| <= max(r1,r2)*|delta| <= 0.0001` bounds either arc. Using the
+  smaller radius would fail to bound the larger arc's endpoint displacement.
+  For example, radii 1 mm and 100 mm at delta 0.00009 rad pass a smaller-radius
+  angular budget but displace the larger-radius tangent by about 0.009 mm.
+- Arbitrary OnCurve on a line means its infinite supporting line; on an arc it
+  means the full circle. No new segment/sweep containment applies. Line–line
+  Distance retains its existing post-solve reader, which is unassessed if lines
+  remain nonparallel; its lowering is not redefined by this policy.
+- Internal arc endpoint coupling uses 0.0001 mm. Reference-locked and explicit
+  Fixed scalar integrity remains exact. Explicit Fixed targets are checked only
+  after solving, so an initially displaced point may still be corrected. On
+  numerical success only, finite Fixed targets normalize point coordinates
+  exactly, then captured immutable reference-owned point/curve scalars are
+  restored exactly. This eliminates numerical pin roundoff without changing
+  constants, unknown sets, or solver tolerances; free solved scalars are retained.
+  The candidate must pass finite and nonnegative-radius checks before either
+  normalization; all Fixed targets (including
+  duplicates), reference locks, arc coupling, residuals and fresh rank are checked
+  afterward. Inconsistent targets, integrity failure or unreadable residuals
+  restore the complete pre-solve pose and refuse. Finite residual violations
+  remain honestly Conflicting. Numerical failure never normalizes Fixed targets
+  or restores reference scalars to rescue a candidate.
+  Negative Circle/Arc radii and either negative Ellipse radius are invalid
+  authored or retained geometry; zero-radius semantics are unchanged. Invalid
+  authored radii refuse translation, and invalid solved radii restore the complete
+  pre-solve pose. Both refuse with OP_FAILED/internalCouplingFailure before store
+  mutation. Integrity failures do not fabricate a user constraint blame.
+- Violations carry finite nonnegative residual, positive tolerance, finite
+  `normalized=residual/tolerance > 1`, and dimension `mm` or `rad`. Readers
+  allow at most `8*f64::EPSILON*max(1,abs(residual/tolerance))` serialization
+  rounding in normalized evidence; this does not relax a geometry budget.
+  A provided normalized maximum must cover every reported violation.
+  `normalizedMaxResidual` is the maximum assessed normalized residual (zero for
+  no assessed constraints). No NaN/Infinity may reach JSON.
+- Refusals carry `detail.diagnostics` entries with `code`, `message`,
+  `severity:"error"`, `reasonCode`, and wire-ID/unassessed evidence. Diagnostics
+  cap at 64; each evidence object caps at 65536 encoded bytes. Top-level detail
+  fields alone cannot carry the evidence through Rust.
+
+  Solver-lane and sketch-consuming refusals carry `stage: "sketchSolve"` and this
+  closed `reasonCode` set (the `unassessed`/`violations` evidence above rides the
+  same carrier):
+
+  | `reasonCode` | Meaning |
+  |---|---|
+  | `residualViolation` | a constraint residual exceeds its acceptance budget (evidence: the violation object) |
+  | `rankConflict` | committed constraints form an incompatible positive-tag rank group |
+  | `unassessedConstraint` | exact residual evaluation is incomplete or a retained constraint residual is unreadable (evidence: `unassessed`) |
+  | `numericallyUnresolved` | released rank diagnosis unavailable, or the exact solve did not converge without a legitimate culprit |
+  | `branchBoundary` | a Point drag path cannot be proven to stay on the original Angle branch (no fabricated conflicting ids; the `SolveDrag` diagnostic carries no `evidence`) |
+  | `internalCouplingFailure` | invalid authored/solved geometry or broken internal coupling (evidence: `entityIds`) |
+
+  `BeginGesture` on a sketch whose typed truth is Conflicting, unassessed or
+  failed is refused (`OP_FAILED`) and installs no gesture; a later `SolveDrag` or
+  `EndGesture` naming that gestureId answers `REF_UNRESOLVED`. `Extrude`/`Revolve`
+  profile construction and the Revolve axis sketch refuse non-admissible exact
+  truth with the same diagnostics (`OP_FAILED`, `stage: "sketchSolve"`, `reasonCode`
+  from the set above) instead of a bare "solve failed" message. For the Revolve
+  axis sketch the LAST diagnostic's `message` is prefixed
+  `Revolve: axis sketch solve failed: ` so the step message names the axis sketch;
+  its `reasonCode`/`stage` are unchanged. Readers route on `reasonCode`, never on `message`.
+
+Valid UnderConstrained and benign OverConstrained poses are admitted by
+BeginGesture, SketchRegions, profile construction for Extrude/Revolve, and a
+separate Revolve axis sketch. Conflicting, unassessed and failed truth refuse.
+Released EndGesture always removes temporary drives and solves/reclassifies,
+including `commit.finalTarget`. A refused final target restores the last accepted
+pose and re-solves it. An honestly assessable retained pose returns a receipt with
+refusal diagnostics and cumulative geometry; unassessed retained truth returns
+`OP_FAILED`. End status precedence is conflicting, refused partial, redundant,
+success. Released `state`, DOF, conflicts and reasons are fresh; `entityStates`
+remains the BeginGesture echo. Preview drag mathematics is unchanged.
+
+**`maxResidual` (legacy reporting only).** The largest readable raw residual in
+each constraint's own units, evaluated on the final retained pose. It mixes units
+and skips unreadable constraints, so it never gates acceptance or supplies blame.
+Absent means unmeasured, never zero. `SolveDrag` does not measure it.
 
 ##### `entityStates` — the per-entity constrained state
 
@@ -3175,8 +3317,9 @@ the entities are unconstrained.
   it, and `entityStates` MUST NOT enter any hash, signature or fingerprint.
 
 The `state` is computed after a full solve, by descending priority:
-**`Conflicting`** (PlaneGCS reports genuinely conflicting constraints — no
-solution) → **`OverConstrained`** (solvable but PlaneGCS reports one or more
+**`Conflicting`** (actual retained-pose residual violations or genuine rank conflicts;
+published DOF is clamped to 0 for inconsistent negative-rank counts, never used
+to infer satisfaction) → **`OverConstrained`** (solvable but PlaneGCS reports one or more
 *benign, DOF-preserving redundant* constraints, e.g. a duplicate dimension;
 `!conflicting`) → **`FullyConstrained`** (`dof == 0`, no redundancy) →
 **`UnderConstrained`**. `OverConstrained` deliberately outranks
@@ -3199,14 +3342,16 @@ reports 4 phantom degrees of freedom per arc. (The PlaneGCS path needs no such
 fix-up — there the 4 parameters and 4 equations cancel in the diagnosis.)
 Consequences, all normative:
 * **Redundancy is unreported.** `OverConstrained` is a PlaneGCS notion; on the
-  naive path the state can only be `Conflicting` (never, since no solve
-  diagnoses), `FullyConstrained` (naive count == 0) or `UnderConstrained`. The
+  naive path still reports actual typed residual violations and genuine mapped
+  rank conflicts as `Conflicting`; without conflicts, it reports
+  `FullyConstrained` (naive count == 0) or `UnderConstrained`. The
   SAME redundant constraint pair that reports `OverConstrained` without an
   ellipse reports nothing with one.
 * **A redundant constraint still subtracts**, so the reported `dof` can read
   lower than the true remaining freedom (it is `max(count, 0)`).
-* **`OverConstrained` from a naive count** means `count < 0` only — i.e. more
-  constraint arity than entity DOF.
+* A clamped naive count does not certify redundancy or satisfaction. Only the
+  independent typed gate can admit the retained pose; partial-subset rank
+  redundancy never produces `OverConstrained` on this fallback path.
 No constraint may reference an ellipse *entity*: every curve-taking kind
 (`Radius`, `Diameter`, `Concentric`, `Tangent`, `Equal`, `OnCurve`) accepts only
 lines/arcs/circles, so an ellipse operand is an unsupported-constraint failure
@@ -3237,7 +3382,7 @@ The optional `drag` object is `{ "kind"?, "entity"?, "role"?, "grab"?,
 
 | `kind` | `entity` | `role` | `grab` | resolves to |
 |---|---|---|---|---|
-| `point` | any (or `pointId`) | `start`\|`end`\|`center`\|`p0`\|`p1` | ignored | one point handle |
+| `point` | any (or `pointId`) | `start`\|`end`\|`center`\|`p0`\|`p1` | optional | one point handle |
 | `arcEnd` | `Arc` | `start`\|`end`, REQUIRED | ignored | that endpoint (a real solver point, §7.3) |
 | `radius` | `Circle`\|`Arc` | ignored | optional | the curve's radius parameter |
 | `entityBody` | any owning ≥1 point | ignored | RECOMMENDED | every point the entity owns |
@@ -3265,8 +3410,19 @@ cannot drift as it is dragged:
   point to the cursor.
 * `radius` — the radial offset is `|grab − center| − radius`, both read at
   `BeginGesture`; absent ⇒ `0`.
-* `point`/`arcEnd` — `grab` is IGNORED: the handle teleports to the cursor,
-  byte-identical to the behaviour before the kinds existed.
+* `point` — with a finite two-coordinate `grab`, retain `o = solvedHandle − grab`
+  after the successful Begin exact solve. Return optional `pointOffset: [ox, oy]`;
+  each target is a cursor coordinate and drives `target + o`. Absence means zero
+  offset and preserves the legacy request form. Malformed Point grabs are refused.
+* `arcEnd` — `grab` is ignored; the handle follows the target.
+
+Point Begin responses additionally carry optional `positions` and `curves`,
+relative to the stored input pose, under the same changed-member rules as Upsert.
+Rust merges its pending Upsert and Begin corrections for preview, keeping the
+original complete undo/cancel memento. Begin never writes document geometry or
+history. The frontend snaps the desired handle `cursor + pointOffset`, then sends
+`snappedHandle − pointOffset`; a delayed Begin must resolve before pointer-up
+converts the latest raw cursor.
 
 #### SolveDrag
 Latest-wins incremental solve. Superseded in-flight drags may be dropped; only the
@@ -3293,12 +3449,12 @@ gesture's committed sketch reports conflicting constraints) → **`redundant`**
 constraints, as diagnosed at `BeginGesture`) → **`success`** (converged, no
 redundancy) → **`partial`** (did not converge). Redundancy is a fixed property
 of the committed sketch for the whole gesture; it is NOT re-derived per drag
-step (a drag pins the non-dragged points, which would spuriously flag the
-committed constraints as redundant). `EndGesture` uses the same precedence.
+step (non-point kinds retain their target-specific temporary pins; a Point
+step has only its selected X/Y drives). `EndGesture` instead uses the released exact-truth precedence above; a refused target is partial even when its restored pose has benign redundancy.
 
 **`SolveDrag` does NOT carry `entityStates`, and that is normative.** A worker
 MUST NOT emit it here and a consumer MUST hold the `BeginGesture` map for the
-duration of the gesture — the same gesture-fixed rule `dof`, `redundant` and
+duration of the preview gesture — the same preview-fixed rule `dof`, `redundant` and
 `conflicting` already follow, for a stronger reason. A drag adds no constraint,
 so the answer cannot have changed; the drag's temporary tag(−1) drives are
 excluded from the diagnosis Jacobian, so re-deriving buys nothing; a degenerate
@@ -3329,7 +3485,8 @@ Three degenerate guards are NORMATIVE for both verbs:
   (0.01 mm) before it reaches the solver, so a drag across the center can never
   produce a zero or negative radius. It saturates at the floor and recovers on
   the way back out — the gesture stays live rather than failing.
-* **Arc sweep floor.** An `arcEnd` step whose solved CCW arc EXTENT falls below
+* **Arc sweep floor.** An `arcEnd` step, or an affected arc in a Point scalar
+  component, whose solved CCW arc EXTENT falls below
   `MIN_ARC_SWEEP` (1e-3 rad) — or above `2π − MIN_ARC_SWEEP`, the same collapse
   approached from the other side once angles normalize — MUST be REFUSED: the worker restores the
   pre-step pose (positions AND curves), answers `status: "partial"`, and leaves
@@ -3341,6 +3498,34 @@ Three degenerate guards are NORMATIVE for both verbs:
   reporting the SOLVED positions — lagging the cursor is the CORRECT answer
   there, and only non-convergence is `partial`.
 
+Point steps declare only the structural components of the selected X/Y unknowns.
+The PlaneGCS parameter graph traverses unknown scalar parameters only; shared
+constants cannot connect otherwise independent geometry. Solve, Jacobian,
+diagnosis and solution application exclude inactive rows; unknown declaration
+order is preserved. All scratch drives/scoped diagnosis are discarded on every
+exit and full retained-pose diagnosis is restored. Group, ArcEnd, Radius and
+EntityBody keep their existing drive contracts.
+
+Point acceptance validates finite/nonnegative complete geometry before exact
+Fixed point-target normalization and restoration of captured immutable reference
+scalars, then verifies every Fixed target, immutable
+reference scalar and internal arc coupling. This is an integrity guard, not a
+new per-frame authored residual gate. A refused request restores the complete
+pre-request scalar pose, leaves the gesture open and reports no changed geometry.
+A subsequent accepted step and End retain the last accepted pose.
+
+For affected authored Angle constraints, the ordered line-vector cross product
+must keep its original sign across the whole linear pose path. The initial and
+minimum quadratic cross product must exceed `1e-4 mm * L`, with `L` the maximum
+of all participating start/end vector lengths. Endpoints and any interior
+quadratic minimum are checked. Bounded subdivision (depth 8 per at-most-10
+100 mm stepping intervals) may retry the solve; an ambiguous or unprovable path
+is refused as `partial` with an additive `diagnostics` entry carrying
+`code: "OP_FAILED"`, `severity: "error"`, `reasonCode: "branchBoundary"` and
+`stage: "sketchSolve"`. It never fabricates conflicting constraint IDs. Unrelated
+Angle components do not restrict a Point drag. Undefined/nonfinite arithmetic
+cannot certify a path.
+
 #### EndGesture
 Pointer-up: performs the final **exact** solve (Rust commits one undo command from
 its result).
@@ -3349,7 +3534,9 @@ its result).
 // req.args
 { "gestureId": 51 }
 // result
-{ "gestureId": 51, "status": "success", "dof": 0,
+{ "gestureId": 51, "status": "success", "state": "FullyConstrained", "dof": 0,
+  "reasons": {}, "unassessed": [], "violations": [], "normalizedMaxResidual": 0.0,
+  "diagnostics": [],   // always present: refusal diagnostics of a refused final target, then exact-truth diagnostics (cap 64)
   "conflicting": [],   // constraint ids in conflict (non-empty iff status=conflicting); absent ⇒ []
   "maxResidual": 0.0,  // own dimension (mm or rad), reporting only (WP-B), same rule as SketchUpsert; absent ⇒ unmeasured
   "positions": { /* final exact positions, changed since BeginGesture */ },
@@ -3358,18 +3545,34 @@ its result).
   "sketchRevision": 5 }
 ```
 
-`conflicting` follows the same precedence as `SolveDrag`: the final exact solve's
-conflicts, else the gesture-fixed set diagnosed at `BeginGesture`. Optional/additive
-(absent ⇒ `[]`). `curves` is the same additive channel `SolveDrag` defines above,
+Scratch cancellation uses the existing verb:
+
+```json
+// req.args; cancel:true is mutually exclusive with commit
+{ "gestureId": 51, "cancel": true }
+// result
+{ "gestureId": 51, "cancelled": true }
+```
+
+Validate the cancellation flag before taking the gesture. Cancellation disposes
+scratch without solving, updating the sketch store/revision or publishing geometry.
+An absent flag retains normal End semantics. Rust's separate `cancel_gesture`
+IPC returns unit, invalidates its sketch solve cache and releases the lane claim;
+no edit, history, solve/projection event or scheduler mutation is issued. The
+frontend restores the full pre-Begin session with `solveCurrent: false` on cancel
+or terminal failure. Worker epoch, document/session, active gesture and sequence
+fences reject late receipts. A read-only region query cannot overwrite live scratch.
+
+`conflicting` and typed `reasons` come only from fresh released exact truth; no
+stale BeginGesture conflict fallback applies. Optional legacy omission means
+`[]`. `curves` is the same additive channel `SolveDrag` defines above,
 baselined at `BeginGesture` (absent ⇒ `{}`).
 
-`entityStates` is the `BeginGesture` map, ECHOED — it is gesture-fixed, so it is
-present here exactly when it was present there and carries the same values. It is
-not re-derived: a drag adds no constraint, and by pointer-up the drag steps have
-invalidated the diagnosis it comes from, so a re-derivation would read an empty
-dependent-parameter set and report the whole sketch as fully constrained. A
-gesture that changes the constraint set does not exist; a caller that adds one
-issues a `SketchUpsert` and gets a fresh map from it.
+`entityStates` is the `BeginGesture` map, ECHOED: it is present here exactly when
+it was present there and carries the same values. Solver policy 2 refreshes the
+released exact rank/residual truth independently; that refresh never replaces
+this preview evidence map. A caller changing constraints issues `SketchUpsert`
+and receives a fresh map.
 
 #### SketchRegions
 Computes closed profile regions for a sketch (for extrude/revolve selection and
@@ -4512,30 +4715,49 @@ Rust-readable envelope. Blobs stream on the bulk lane.
 {
   "checkpointId": "ckpt_9",
   "stepIndex": 4,
+  "historyPrefixHash": "9c4d…",
   "artifacts": [
     {
+      "bodyId": "body_3",
+      "bin": "ckpt:body:body_3",
+      "codec": "brep-bintools",
       "envelope": {
         "artifactSchemaVersion": 1,
-        "bodyId": "body_3",
-        "step": 4,
-        "historyPrefixHash": "9c4d…",
-        "brepContentHash": "aa11…",
         "occtFingerprint": "9a1c33f0e7b24d10",
         "descriptorVersion": 1,
         "resolverVersion": 1,
         "quantizationVersion": 1,
-        "signatureVersion": 1,
-        "codec": "brep-bintools",
-        "size": 91234,
-        "contentHash": "bb22…"
+        "solverPolicyVersion": 2,
+        "signatureVersion": 1
       },
-      "streamId": 702
+      "size": 91234,
+      "contentHash": "bb22…"
     }
   ],
-  "elementMapPartition": { "streamId": 703, "format": "elementmap-json", "sha256": "…" },
+  "elementMapPartition": { "bin": "ckpt:partition", "format": "elementmap-json", "size": 2048, "sha256": "…" },
   "signatures": { "geometry": "…", "bodyLifecycle": "…", "referencedBinding": "…" }
 }
 ```
+
+Each artifact carries outer `bodyId`, `bin` (the `ckpt:body:<bodyId>` binary
+section name), `codec`, `size`, `contentHash`, plus an `envelope` containing
+exactly the seven version/fingerprint axes shown above (Rust adds `step`,
+`historyPrefixHash` and the B-rep content hash itself from the response). The
+`envelope` member is REQUIRED on every `artifacts[]` entry: Rust refuses a
+SaveCheckpoint artifact without it, or with any axis missing, a mismatching
+fingerprint, or a `size` that differs from the binary section. Canonical
+fixture: `restore_checkpoint_base.ndjson` pins the envelope axes (worker
+harness lane; the Rust parser's hard-fail is unit-tested in
+`src-tauri/src/worker/checkpoint_result.rs`, and the Rust fixture replay does not run this file). Rust reads the emitted axes, never stamps current versions onto old
+bytes. Missing solver policy in legacy persisted envelopes means policy 1, never
+the current policy 2. Retained C++ checkpoint metadata also checks solver policy
+before installing a restored base. Persisted mesh cache manifests record solver
+policy; missing or incompatible policy discards only disposable caches and
+replays authoritative JSON. The app requires a policy-2 worker handshake in both
+debug and release. Other additive result members remain tolerated when absent
+(`envelope` itself is not one of them; the legacy "missing solver policy means
+policy 1" rule above applies only to persisted envelopes read back from disk).
+Fingerprint, kernel, quantization and all other policy axes remain unchanged.
 
 Checkpoints are **disposable caches**: an envelope whose versions/fingerprint are
 incompatible is discarded + replayed; a checkpoint never blocks opening the
@@ -5465,6 +5687,41 @@ and back Invariant 5 and checkpoint drift detection.
 ---
 
 ## 14. Changelog
+
+- **2026-10-05 — §7.4/§7.7/§3 sketch exact truth, solver policy 2
+  (ONECAD-13/14/15; consolidated).** (1) ONECAD-13, additive: successful
+  `SketchUpsert` solves publish all changed point coordinates and Circle/Arc
+  scalars as `positions`/`curves`; failed solves omit corrections. Rust adopts them
+  as one undo entry on entry and finish (not on begin-gesture or region queries),
+  fenced by solver-lane and worker epoch. Fixture:
+  `sketch_upsert_writeback.ndjson`. (2) ONECAD-14: **`solverPolicyVersion` 1 -> 2**
+  (hello fixture `hello.ndjson` now pins 2; checkpoint envelopes and mesh-cache
+  manifests record it). Typed exact truth with retained pose, local physical
+  residual budgets, released-End diagnosis, new additive `reasons`/`unassessed`/
+  `violations`/`normalizedMaxResidual`, and new `reasonCode`s
+  `residualViolation`, `rankConflict`, `unassessedConstraint`,
+  `numericallyUnresolved`, `branchBoundary`, `internalCouplingFailure` with diagnostics `stage: "sketchSolve"`.
+  Successful `SketchUpsert` and `EndGesture` results now always carry
+  `diagnostics`. Classification changes: `BeginGesture` on a Conflicting/unassessed/failed sketch
+  is now REFUSED (`OP_FAILED`, no gesture installed; later `SolveDrag`/`EndGesture`
+  answer `REF_UNRESOLVED`) where it formerly opened a gesture; this flips
+  `sketch_solve_residual.ndjson` (old round 4 replaced by the refusal) and
+  `worker/tests/fixtures/sketch_conflicting.ndjson`. Extrude/Revolve profile and
+  Revolve axis sketches refuse non-admissible exact truth with these diagnostics.
+  Fixtures: `sketch_exact_truth.ndjson`, `sketch_solve_residual.ndjson`.
+  (3) ONECAD-15: `Angle.value` is radians on the wire (worker bug fix; legacy
+  `angleDeg`/`angle` aliases stay degrees), Point-only structural scalar isolation,
+  solved grab offsets, path-aware Angle branch refusals (`branchBoundary`), full
+  pre-request scalar rollback, explicit scratch cancellation over EndGesture.
+  Fixture: `sketch_point_drag_truth.ndjson` (axis-locked branch refusal,
+  clearance-path acceptance). (4) `SaveCheckpoint` `artifacts[].envelope`
+  (seven axes) is REQUIRED; Rust refuses without it; §7.7 example corrected to the
+  emitted shape; fixture `restore_checkpoint_base.ndjson` now asserts it.
+  `protocolVersion`/`kernelPolicyVersion` remain 1; fingerprint remains
+  `0a6a1dce34181289`. Cross-track sign-off recorded 2026-10-14 — protocol-auditor:
+  schema-vs-code review (read-only), `SIGN-OFF READY: yes` after every filed change
+  was applied; worker + Rust gates re-verified by the orchestrator (ctest 206/206,
+  `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` 1719 passed / 0 failed / 0 ignored).
 
 `protocolVersion` stays **1** for all entries below — these are pre-implementation
 contract refinements (no worker has shipped against the prior text), so they are

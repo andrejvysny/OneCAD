@@ -38,6 +38,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -70,6 +71,7 @@ struct WireIndex {
 };
 
 struct TranslateResult {
+    std::optional<std::string> invalid_geometry_entity;
     std::unique_ptr<sk::Sketch> sketch;
     WireIndex index;
     bool ok = false;

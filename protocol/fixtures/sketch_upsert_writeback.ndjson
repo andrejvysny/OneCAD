@@ -1,0 +1,30 @@
+# ONECAD-13: successful exact upserts report request-relative geometry corrections.
+# The pinned line has one skewed endpoint; the circle's radius starts below its
+# authored dimension. State policy and drag behavior are unchanged. Rust parses
+# these canonical envelopes; the stub has no solver lane. Absence on failed solves
+# is pinned directly by solver_residual because this matcher is subset-only.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"SketchUpsert","args":{"sketchId":"line","plane":{"kind":"XY"},"entities":[{"id":"a","type":"Point","at":[0,0]},{"id":"b","type":"Point","at":[10,1]},{"id":"L","type":"Line","p0Ref":"a","p1Ref":"b"}],"constraints":[{"id":"fixed","type":"Fixed","entities":["a"]},{"id":"horizontal","type":"Horizontal","entities":["L"]}]}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"tolerance":{"abs":1e-12},"result":{"upserted":true,"sketchId":"line","sketchRevision":1,"state":"UnderConstrained","positions":{"b":[10,0]},"curves":{}}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"SketchUpsert","args":{"sketchId":"circle","plane":{"kind":"XY"},"entities":[{"id":"center","type":"Point","at":[0,0]},{"id":"circle","type":"Circle","center":[0,0],"centerRef":"center","radius":4}],"constraints":[{"id":"radius","type":"Radius","entities":["circle"],"value":5}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"tolerance":{"abs":1e-12},"result":{"upserted":true,"sketchId":"circle","sketchRevision":1,"state":"UnderConstrained","positions":{},"curves":{"circle":{"radius":5}}}}}
+
+# Welded A-182-shaped skew rectangle: adopt H/V correction before adding redundancy.
+{"send":{"v":1,"t":"req","id":3,"verb":"SketchUpsert","args":{"sketchId":"rectangle","plane":{"kind":"XY"},"entities":[{"id":"p0","type":"Point","at":[0,0]},{"id":"p1","type":"Point","at":[80,1.1]},{"id":"L0","type":"Line","p0Ref":"p0","p1Ref":"p1"},{"id":"p2","type":"Point","at":[80,1.1]},{"id":"p3","type":"Point","at":[80.7,61]},{"id":"L1","type":"Line","p0Ref":"p2","p1Ref":"p3"},{"id":"p4","type":"Point","at":[80.7,61]},{"id":"p5","type":"Point","at":[0.5,60.5]},{"id":"L2","type":"Line","p0Ref":"p4","p1Ref":"p5"},{"id":"p6","type":"Point","at":[0.5,60.5]},{"id":"p7","type":"Point","at":[0,0]},{"id":"L3","type":"Line","p0Ref":"p6","p1Ref":"p7"}],"constraints":[{"id":"w0","type":"Coincident","entities":["p1","p2"]},{"id":"axis0","type":"Horizontal","entities":["L0"]},{"id":"w1","type":"Coincident","entities":["p3","p4"]},{"id":"axis1","type":"Vertical","entities":["L1"]},{"id":"w2","type":"Coincident","entities":["p5","p6"]},{"id":"axis2","type":"Horizontal","entities":["L2"]},{"id":"w3","type":"Coincident","entities":["p7","p0"]},{"id":"axis3","type":"Vertical","entities":["L3"]}]}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"tolerance":{"abs":1e-12},"result":{"upserted":true,"sketchId":"rectangle","sketchRevision":1,"dof":4,"state":"UnderConstrained","positions":{"p0":[0.5,0],"p1":[80,0],"p2":[80,0],"p3":[80,61],"p4":[80,61],"p5":[0.5,61],"p6":[0.5,61],"p7":[0.5,0]},"curves":{}}}}
+
+# Same adopted pose plus two implied Perpendicular constraints preserves OverConstrained.
+{"send":{"v":1,"t":"req","id":4,"verb":"SketchUpsert","args":{"sketchId":"rectangle","plane":{"kind":"XY"},"entities":[{"id":"p0","type":"Point","at":[0.5,0]},{"id":"p1","type":"Point","at":[80,0]},{"id":"L0","type":"Line","p0Ref":"p0","p1Ref":"p1"},{"id":"p2","type":"Point","at":[80,0]},{"id":"p3","type":"Point","at":[80,61]},{"id":"L1","type":"Line","p0Ref":"p2","p1Ref":"p3"},{"id":"p4","type":"Point","at":[80,61]},{"id":"p5","type":"Point","at":[0.5,61]},{"id":"L2","type":"Line","p0Ref":"p4","p1Ref":"p5"},{"id":"p6","type":"Point","at":[0.5,61]},{"id":"p7","type":"Point","at":[0.5,0]},{"id":"L3","type":"Line","p0Ref":"p6","p1Ref":"p7"}],"constraints":[{"id":"w0","type":"Coincident","entities":["p1","p2"]},{"id":"axis0","type":"Horizontal","entities":["L0"]},{"id":"w1","type":"Coincident","entities":["p3","p4"]},{"id":"axis1","type":"Vertical","entities":["L1"]},{"id":"w2","type":"Coincident","entities":["p5","p6"]},{"id":"axis2","type":"Horizontal","entities":["L2"]},{"id":"w3","type":"Coincident","entities":["p7","p0"]},{"id":"axis3","type":"Vertical","entities":["L3"]},{"id":"perp1","type":"Perpendicular","entities":["L0","L1"]},{"id":"perp2","type":"Perpendicular","entities":["L2","L3"]}]}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"tolerance":{"abs":1e-12},"result":{"upserted":true,"sketchId":"rectangle","sketchRevision":2,"dof":4,"state":"OverConstrained","conflicting":[],"positions":{},"curves":{}}}}
+
+# Exact point correction below the 1e-7 mm preview threshold.
+{"send":{"v":1,"t":"req","id":5,"verb":"SketchUpsert","args":{"sketchId":"tiny-line","plane":{"kind":"XY"},"entities":[{"id":"a","type":"Point","at":[0,0]},{"id":"b","type":"Point","at":[10,5e-8]},{"id":"L","type":"Line","p0Ref":"a","p1Ref":"b"}],"constraints":[{"id":"fixed","type":"Fixed","entities":["a"]},{"id":"horizontal","type":"Horizontal","entities":["L"]}]}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"tolerance":{"abs":1e-12},"result":{"positions":{"b":[10,0]}}}}
+
+# Exact radius correction below the 1e-7 mm preview threshold.
+{"send":{"v":1,"t":"req","id":6,"verb":"SketchUpsert","args":{"sketchId":"tiny-circle","plane":{"kind":"XY"},"entities":[{"id":"center","type":"Point","at":[0,0]},{"id":"circle","type":"Circle","center":[0,0],"centerRef":"center","radius":4}],"constraints":[{"id":"radius","type":"Radius","entities":["circle"],"value":4.00000005}]}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"tolerance":{"abs":1e-12},"result":{"curves":{"circle":{"radius":4.00000005}}}}}
+
+# Normalized arc scalars are exact corrections relative to the raw request.
+{"send":{"v":1,"t":"req","id":7,"verb":"SketchUpsert","args":{"sketchId":"raw-arc","plane":{"kind":"XY"},"entities":[{"id":"arc","type":"Arc","center":[0,0],"radius":5,"startAngle":-7,"endAngle":7}],"constraints":[]}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"tolerance":{"abs":1e-12},"result":{"curves":{"arc":{"startAngle":-0.7168146928204138,"endAngle":0.7168146928204138}}}}}

@@ -46,6 +46,7 @@ class SketchLine;
 class SketchArc;
 class SketchCircle;
 class SketchConstraint;
+struct SketchPose;
 
 /**
  * @brief Solver configuration options
@@ -266,15 +267,13 @@ public:
      * @brief Solve with a point being dragged
      * @param pointId Point being dragged by user
      * @param targetPos Target position
-     * @param pointIdsToFix If empty, fixes all non-dragged points. Otherwise fixes only points in this set.
      *
      * Per SPECIFICATION.md §5.13:
      * Implements rubber-band dragging with spring resistance
      *
      * Current implementation adds temporary coordinate constraints for the dragged point.
      */
-    SolverResult solveWithDrag(EntityID pointId, const Vec2d& targetPos,
-                               const std::unordered_set<EntityID>& pointIdsToFix = {});
+    SolverResult solveWithDrag(EntityID pointId, const Vec2d& targetPos, Sketch* context = nullptr);
 
     SolverResult solveWithGroupDrag(const std::unordered_map<EntityID, Vec2d>& targetPositions);
 
@@ -342,6 +341,7 @@ public:
      * Uses PlaneGCS redundancy analysis results (if available).
      */
     std::vector<ConstraintID> findRedundantConstraints() const;
+    std::vector<ConstraintID> findConflictingConstraints() const;
 
     /**
      * @brief Check if system is solvable
@@ -354,6 +354,7 @@ public:
      *         DOF, unlike a naive constraint count), or -1 when unavailable.
      */
     int diagnose();
+    int diagnoseRetainedPose();
 
     /// True when the last solve/diagnose found genuinely conflicting constraints.
     bool hasConflicting() const;
@@ -386,6 +387,7 @@ public:
     std::optional<std::unordered_set<EntityID>> entitiesWithFreeParams() const;
 
 private:
+    struct PointScope;
     struct DragSolveSnapshot {
         std::unordered_map<EntityID, Vec2d> pointPositions;
         struct ArcState {
@@ -425,6 +427,9 @@ private:
 
     /// Parameter pointers used for direct binding
     std::vector<double*> parameters_;
+    std::vector<double*> pointParameters_;
+    Sketch* pointContext_ = nullptr;
+    const SketchPose* pointPose_ = nullptr;
     std::vector<double*> drivenParameters_;
 
     /// Which entity each declared parameter BELONGS to — the inverse of
@@ -481,8 +486,11 @@ private:
 
     DragSolveSnapshot captureDragSolveSnapshot() const;
     void restoreDragSolveSnapshot(const DragSolveSnapshot& snapshot);
-    SolverResult solveWithDragSingleStep(EntityID pointId, const Vec2d& targetPos,
-                                         const std::unordered_set<EntityID>& pointIdsToFix);
+    SolverResult solveWithDragSingleStep(EntityID pointId, const Vec2d& targetPos);
+    SolverResult advancePointDrag(EntityID pointId, const Vec2d& targetPos, int depth);
+    bool pointBranchContinues(const DragSolveSnapshot& before) const;
+    bool pointCandidateValid();
+    void restorePointDragSnapshot(const DragSolveSnapshot& before);
     SolverResult solveWithGroupDragSingleStep(const std::unordered_map<EntityID, Vec2d>& targetPositions);
     SolverResult solveWithTargetsSingleStep(const DragTargets& targets);
 };

@@ -32,6 +32,7 @@
 #include "kernel/validation/GeometryPrecision.h"
 #include "modeling/BooleanMode.h"
 #include "ops/OpCommon.h"
+#include "protocol/SketchTruth.h"
 #include "ops/TopologyHistory.h"
 #include "sketch/Sketch.h"
 #include "sketch/SketchLine.h"
@@ -84,7 +85,8 @@ std::string input_body(const json& op, std::size_t index) {
 // Axis from a sketch line: map the line's 2D endpoints through the sketch plane
 // into world space (RegenerationEngine.cpp:1134-1172). Returns false + fills `err`.
 bool axis_from_sketch_line(const OpContext& ctx, const std::string& sketch_id,
-                           const std::string& line_id, gp_Ax1& axis_out, std::string& err) {
+                           const std::string& line_id, gp_Ax1& axis_out, std::string& err,
+                           std::vector<json>& diagnostics) {
     const json* sk_params = find_sketch(ctx, sketch_id, ctx.last_sketch_id ? *ctx.last_sketch_id : "");
     if (!sk_params) {
         err = "Revolve: axis sketch not found in plan";
@@ -93,6 +95,13 @@ bool axis_from_sketch_line(const OpContext& ctx, const std::string& sketch_id,
     wire::TranslateResult tr = wire::translate(*sk_params);
     if (!tr.ok) {
         err = "Revolve: axis sketch translate failed: " + tr.error;
+        const auto refusal = protocol::translation_refusal(tr);
+        if (refusal.contains("diagnostics")) {
+            for (const auto& diagnostic : refusal["diagnostics"]) {
+                if (diagnostics.size() >= 64) break;
+                diagnostics.push_back(diagnostic);
+            }
+        }
         return false;
     }
     // An unconverged solve leaves the seed positions in place, so the axis would be
@@ -100,10 +109,19 @@ bool axis_from_sketch_line(const OpContext& ctx, const std::string& sketch_id,
     // wrong-but-nonzero axis sails past the degenerate-length guard below. Same
     // discipline the profile already gets in OpCommon::build_profile_face.
     const core::sketch::SolveResult solve = tr.sketch->solve();
-    if (!solve.success) {
-        err = "Revolve: axis sketch solve failed: " +
-              (solve.errorMessage.empty() ? std::string("constraint solve did not converge")
-                                          : solve.errorMessage);
+    if (!solve.truth.admissible()) {
+        err = "Revolve: axis sketch exact truth is not admissible";
+        const std::size_t prior = diagnostics.size();
+        for (const auto& diagnostic : protocol::exact_truth_diagnostics(solve.truth, tr.index)) {
+            if (diagnostics.size() >= 64) break;
+            diagnostics.push_back(diagnostic);
+        }
+        // The step message reads diagnostics.back(); keep it naming the axis sketch
+        // while the diagnostic keeps its sketchSolve stage and reasonCode.
+        if (diagnostics.size() > prior) {
+            auto& last = diagnostics.back();
+            last["message"] = "Revolve: axis sketch solve failed: " + last.value("message", std::string{});
+        }
         return false;
     }
     auto it = tr.index.wire_to_internal.find(line_id);
@@ -302,7 +320,7 @@ OpOutcome revolve_impl(OpContext& ctx, const json& op, const std::string& op_id,
         const std::string kind = read_str(ax, "kind", "none");
         if (kind == "sketchLine") {
             axis_ok = axis_from_sketch_line(ctx, read_str(ax, "sketchId"), read_str(ax, "lineId"),
-                                            axis, aerr);
+                                            axis, aerr, profile_diagnostics);
         } else if (kind == "edge") {
             if (ax.contains("edgeRef")) {
                 json repair;

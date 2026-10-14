@@ -35,12 +35,11 @@ use onecad_core::ids::{
 use onecad_core::math::{Vec2, Vec3};
 use onecad_core::regen::{
     AcceptResult, AcquireRequest, BindElementIdsRequest, BodySelector, CheckpointArtifact,
-    CheckpointArtifacts, CheckpointEnvelope, Diagnostic, ElementMapDelta, ElementMapEntry,
-    EngineError, HistoryPrefixHash, Lod, OpFailureCode, OpenSessionRequest, PlanPrepared,
-    PlanRequest, PlanStepEvent, PlannedOp, PreparedMeshRef, RefResolution, ResolveOutcome,
-    ResolveRequest, RestoreRequest, SessionMode, Severity, Signature, SketchPlacement, StepResult,
-    StepSignatures, StepStatus, StoppedReason, TessellateRequest, WorkerElementEvidence,
-    WorkerHead, ARTIFACT_SCHEMA_VERSION,
+    CheckpointArtifacts, Diagnostic, ElementMapDelta, ElementMapEntry, EngineError,
+    HistoryPrefixHash, Lod, OpFailureCode, OpenSessionRequest, PlanPrepared, PlanRequest,
+    PlanStepEvent, PlannedOp, PreparedMeshRef, RefResolution, ResolveOutcome, ResolveRequest,
+    RestoreRequest, SessionMode, Severity, Signature, SketchPlacement, StepResult, StepSignatures,
+    StepStatus, StoppedReason, TessellateRequest, WorkerElementEvidence, WorkerHead,
 };
 use onecad_core::sketch::WorldPlane;
 use onecad_core::sketch::{
@@ -1242,7 +1241,7 @@ fn parse_signatures(v: Option<&Value>) -> StepSignatures {
     }
 }
 
-fn parse_diagnostics(v: Option<&Value>) -> Vec<Diagnostic> {
+pub(super) fn parse_diagnostics(v: Option<&Value>) -> Vec<Diagnostic> {
     let Some(array) = v.and_then(Value::as_array) else {
         if v.is_some_and(|value| !value.is_null()) {
             tracing::warn!("worker diagnostics ignored: expected array");
@@ -2215,8 +2214,8 @@ fn extract_bin_section(
 
 /// Parses a `SaveCheckpoint` resp + its binary tail into core
 /// [`CheckpointArtifacts`] (SCHEMA §7.7). Envelope version axes come from the
-/// current policy (`occt_fingerprint` + version 1s), so a later regen validates the
-/// checkpoint against the running worker's fingerprint (Invariant 7).
+/// emitted artifact envelope, including solver policy. The handshake fingerprint
+/// validates provenance; it never stamps the current policy onto old bytes.
 pub fn parse_save_checkpoint(
     result: &Value,
     sections: &[BinSection],
@@ -2237,30 +2236,14 @@ pub fn parse_save_checkpoint(
         for a in arr {
             let body = parse_body_id(a.get("bodyId").and_then(Value::as_str).unwrap_or(""))?;
             let bytes = extract_bin_section(a.get("bin"), sections, tail)?;
-            let content_hash = a
-                .get("contentHash")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let envelope = CheckpointEnvelope {
-                artifact_schema_version: ARTIFACT_SCHEMA_VERSION,
+            let envelope = super::checkpoint_result::parse_envelope(
+                a,
                 body,
                 step,
-                history_prefix_hash: history_prefix_hash.clone(),
-                brep_content_hash: content_hash.clone(),
-                occt_fingerprint: occt_fingerprint.to_string(),
-                descriptor_version: 1,
-                resolver_version: 1,
-                quantization_version: 1,
-                signature_version: 1,
-                codec: a
-                    .get("codec")
-                    .and_then(Value::as_str)
-                    .unwrap_or("brep-bintools")
-                    .to_string(),
-                size: bytes.len() as u64,
-                content_hash,
-            };
+                &history_prefix_hash,
+                bytes.len(),
+                occt_fingerprint,
+            )?;
             artifacts.push(CheckpointArtifact { envelope, bytes });
         }
     }
@@ -2497,7 +2480,7 @@ pub fn begin_gesture_args(
     solver_policy_hash: &str,
 ) -> Value {
     if target.kind == DragKind::Point {
-        return json!({
+        let mut args = json!({
             "sketchId": sketch_id,
             "sketchRevision": sketch_revision,
             "gestureId": gesture_id,
@@ -2505,6 +2488,10 @@ pub fn begin_gesture_args(
             "drag": { "pointId": drag_point.to_string() },
             "pointId": drag_point.to_string(),
         });
+        if let Some(grab) = target.grab {
+            args["drag"]["grab"] = json!(grab);
+        }
+        return args;
     }
     let mut drag = json!({
         "kind": target.kind.wire(),
@@ -2554,7 +2541,7 @@ pub fn sketch_regions_args(sketch_id: &str) -> Value {
 
 /// Parses a `SketchUpsert`/`EndGesture` solve result into a [`SketchUpsertDto`].
 /// `EndGesture` also carries a `positions` map (changed points since the gesture
-/// began); `SketchUpsert` carries none (identity solve).
+/// began); `SketchUpsert` carries exact corrections relative to the request.
 ///
 /// `SketchUpsert` reports the solve `state` (the four PascalCase tokens) directly;
 /// `EndGesture` reports a drag `status` (`success`|`partial`|`conflicting`) + `dof`
@@ -2581,6 +2568,7 @@ pub fn parse_sketch_upsert(sketch_id: &str, result: &Value) -> SketchUpsertDto {
         dof,
         status,
         // SketchUpsert + EndGesture both carry `conflicting` (SCHEMA §7.4); absent
+        truth: super::sketch_truth::parse(result).unwrap_or_default(),
         // (legacy worker) ⇒ empty, strict back/forward compat.
         conflicting: str_array(result.get("conflicting")),
         solved_positions: parse_positions(result.get("positions")),
@@ -2590,11 +2578,43 @@ pub fn parse_sketch_upsert(sketch_id: &str, result: &Value) -> SketchUpsertDto {
     }
 }
 
+/// Strict authoritative upsert boundary; legacy omitted corrections remain legal.
+pub fn parse_sketch_upsert_checked(
+    sketch: &Sketch,
+    result: &Value,
+) -> Result<SketchUpsertDto, String> {
+    super::sketch_result::validate_wire(sketch, result)?;
+    super::sketch_truth::parse(result)?;
+    let mut solved = parse_sketch_upsert(&sketch.id.to_string(), result);
+    solved.solved_curves.retain(|_, curve| {
+        curve.radius.is_some() || curve.start_angle.is_some() || curve.end_angle.is_some()
+    });
+    super::sketch_result::adopted(sketch, &solved)?;
+    Ok(solved)
+}
+
+/// End preserves the existing geometry channels, but exact truth cannot silently
+/// degrade to a legacy empty result when the worker sends malformed metadata.
+pub fn parse_sketch_upsert_truth_checked(
+    sketch_id: &str,
+    result: &Value,
+) -> Result<SketchUpsertDto, String> {
+    let truth = super::sketch_truth::parse(result)?;
+    let mut solved = parse_sketch_upsert(sketch_id, result);
+    solved.truth = truth;
+    Ok(solved)
+}
+
 /// Parses a `BeginGesture` result into a [`BeginGestureDto`]. `requested_gesture_id`
 /// is the id this client asked for, used only when the worker echoes none.
 #[must_use]
 pub fn parse_begin_gesture(requested_gesture_id: u64, result: &Value) -> BeginGestureDto {
     BeginGestureDto {
+        point_offset: result
+            .get("pointOffset")
+            .and_then(|v| serde_json::from_value(v.clone()).ok()),
+        positions: parse_positions(result.get("positions")),
+        curves: parse_curves(result.get("curves")),
         gesture_id: result
             .get("gestureId")
             .and_then(Value::as_u64)
@@ -2621,6 +2641,9 @@ pub fn parse_solve_drag(result: &Value) -> DragSolveDto {
         gesture_id: result.get("gestureId").and_then(Value::as_u64).unwrap_or(0),
         seq: result.get("seq").and_then(Value::as_u64).unwrap_or(0),
         superseded: status == "superseded",
+        diagnostics: result
+            .get("diagnostics")
+            .map(|value| parse_diagnostics(Some(value))),
         status,
         dof: parse_dof(result),
         conflicting: str_array(result.get("conflicting")),
@@ -6804,14 +6827,27 @@ mod solver_wire_tests {
         let other = GestureTarget {
             entity: eid(0x99),
             role: Some("start"),
-            grab: Some([1.0, 2.0]),
+            grab: None,
             ..GestureTarget::point(p)
         };
         assert_eq!(
             begin_gesture_args("sk_1", 4, 51, p, &other, ""),
             legacy,
-            "a point-kind target never adds keys — pointId wins"
+            "a point-kind target without grab preserves legacy bytes — pointId wins"
         );
+    }
+
+    #[test]
+    fn point_grab_is_additive_and_preserves_the_legacy_handle() {
+        let point = EntityId(Uuid::from_u128(0x10));
+        let target = GestureTarget {
+            grab: Some([1.0, 2.0]),
+            ..GestureTarget::point(point)
+        };
+        let args = begin_gesture_args("sk_1", 4, 51, point, &target, "");
+        assert_eq!(args["drag"]["grab"], json!([1.0, 2.0]));
+        assert_eq!(args["drag"]["pointId"], point.to_string());
+        assert!(!args["drag"].as_object().unwrap().contains_key("kind"));
     }
 
     #[test]

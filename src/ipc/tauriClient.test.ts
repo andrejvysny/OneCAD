@@ -2098,6 +2098,35 @@ describe("tauriClient conflicting-id mapping (backend uuid → frontend id)", ()
     expect(res?.conflicting).toEqual(["c1"]);
     expect(res?.conflicting).not.toContain(constraintUuid);
   });
+
+  it("releases the backend gesture when an upsert replaces the map during Begin", async () => {
+    const seen: string[] = [];
+    let releaseBegin: (() => void) | undefined;
+    mockIPC(
+      async (cmd, payload) => {
+        seen.push(cmd);
+        if (cmd === "enter_sketch")
+          return { sketchId: (payload as { sketchId: string }).sketchId, plane: XZ_PLANE, entities: [], constraints: [], dof: 4, status: "UnderConstrained", conflicting: [] };
+        if (cmd === "sketch_upsert")
+          return { sketchId: (payload as { sketchId: string }).sketchId, sketchRevision: 1, dof: 4, status: "UnderConstrained", conflicting: [], solvedPositions: {} };
+        if (cmd === "begin_gesture") {
+          await new Promise<void>((resolve) => { releaseBegin = resolve; });
+          return { gestureId: 9, ready: true };
+        }
+        return null;
+      },
+      { shouldMockEvents: true },
+    );
+    const client = createTauriClient();
+    await client.enterSketch({ newOnPlane: "XZ", sketchId: "sk" });
+    await client.sketchUpsert("sk", [{ id: "e1", type: "Line", p0: [0, 0], p1: [40, 0] }], []);
+    const begin = client.beginGesture("sk", "e1.Start");
+    await vi.waitFor(() => expect(releaseBegin).toBeDefined());
+    await client.sketchUpsert("sk", [{ id: "e1", type: "Line", p0: [0, 0], p1: [50, 0] }], []);
+    releaseBegin?.();
+    await expect(begin).rejects.toThrow("stale sketch gesture");
+    expect(seen.slice(seen.indexOf("begin_gesture"))).toContain("cancel_gesture");
+  });
 });
 
 describe("tauriClient scoped geometry reads", () => {
@@ -3455,6 +3484,27 @@ describe("tauriClient gesture targets + curves channel", () => {
     ).rejects.toThrow(/radius target ghost is not a mapped sketch entity/);
     // The command never fired — no half-open gesture was armed.
     expect(getBegin()).toBeUndefined();
+  });
+
+  it("cancelGesture uses unit IPC and fences a late SolveDrag reply", async () => {
+    let resolveDrag!: (value: unknown) => void;
+    const {client}=await sketchWithCurves(()=>new Promise((resolve)=>{resolveDrag=resolve;}));
+    await client.beginGesture("sk","e1.Start");
+    const pending=client.solveDrag([9,9]);
+    await Promise.resolve(); await client.cancelGesture();
+    resolveDrag({gestureId:7,seq:1,status:"partial",dof:3,conflicting:[],positions:{},solveMicros:0,
+      superseded:false,diagnostics:[{code:"OP_FAILED",severity:"error",message:"branch",reasonCode:"branchBoundary"}]});
+    expect(await pending).toBeNull();
+  });
+
+  it("SolveDrag preserves branchBoundary diagnostics without inventing conflicts", async () => {
+    const {client}=await sketchWithCurves(()=>({gestureId:7,seq:1,status:"partial",dof:3,
+      conflicting:[],positions:{},solveMicros:0,superseded:false,
+      diagnostics:[{code:"OP_FAILED",severity:"error",message:"branch",reasonCode:"branchBoundary"}]}));
+    await client.beginGesture("sk","e1.Start");
+    const reply=await client.solveDrag([9,9]);
+    expect(reply?.diagnostics?.[0].reasonCode).toBe("branchBoundary");
+    expect(reply?.conflicting).toEqual([]);
   });
 
   it("reverse-maps `curves` on BOTH solveDrag and endGesture", async () => {

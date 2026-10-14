@@ -598,7 +598,7 @@ mod tests {
                 fingerprint: "9a1c33f0e7b24d10".into(),
             },
             quantization_version: 1,
-            solver_policy_version: 1,
+            solver_policy_version: 2,
             capabilities: vec!["op.extrude".into()],
             limits: Some(HelloLimits {
                 chunk_size: 1048576,

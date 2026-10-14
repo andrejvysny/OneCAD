@@ -585,7 +585,7 @@ mod tests {
                     fingerprint: "0000000000000000".into(),
                 },
                 quantization_version: 1,
-                solver_policy_version: 1,
+                solver_policy_version: 2,
                 capabilities: vec![],
                 limits: None,
             },

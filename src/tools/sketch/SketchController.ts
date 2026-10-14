@@ -590,7 +590,12 @@ export class SketchController {
   private dragArmed: DragIntent | null = null;
   private dragStarting = false; // beginGesture in flight (first move past DRAG_PX)
   private dragging = false; // gesture open (solveDrag lane live)
-  private dragBase: SketchEntity[] = []; // pre-drag entities (latest-wins applies onto this)
+  private dragFinalizing = false;
+  private pendingDragTool: string | null = null;
+  private dragBase: SketchEntity[] = []; // post-Begin preview baseline
+  private dragBefore: SketchSession | null = null;
+  private dragGeneration = 0;
+  private dragPointOffset: [number, number] = [0, 0];
   private dragPlane: SketchPlane | null = null;
   private dragStatus: SketchSolveStatus = "UnderConstrained";
   private dragLastSeq = 0; // highest applied solveDrag seq (stale-drop)
@@ -608,7 +613,7 @@ export class SketchController {
   private solveScheduled = false;
   // A pointerup / Esc that arrived while beginGesture was still in flight — its end
   // is deferred here so a fast flick never double-commits the gesture.
-  private dragEndPending: { target?: [number, number]; restore: boolean } | null = null;
+  private dragEndPending: { sample?: { clientX: number; clientY: number; altKey: boolean }; restore: boolean } | null = null;
   /** Select-drag snapping is isolated from draw-tool latch state. */
   private dragSnapLatch: SnapLatch = emptyLatch();
   private dragSnapCache: SnapCandidateCache | null = null;
@@ -1321,6 +1326,7 @@ export class SketchController {
    */
   private teardownSession(opts: { restoreProjection: boolean }): SketchSession | null {
     this.sessionEpoch++;
+    this.pendingDragTool = null;
     sketchSelectionStore.getState().clear();
     this.endPlanePick();
     this.machine = null;
@@ -1635,13 +1641,23 @@ export class SketchController {
   }
 
   private selectMachine(tool: string): void {
+    if (this.pendingDragTool !== null || this.dragFinalizing) {
+      this.pendingDragTool = tool;
+      return;
+    }
+    if (this.selectActive && tool !== "select" && (this.dragStarting || this.dragging)) {
+      this.pendingDragTool = tool;
+      this.cancelSelectDrag();
+      return;
+    }
     if (this.planePicking) return; // no drawing tool while picking a plane
     // Leaving the dimension tool tears down any in-flight chip/pick.
     if (this.dimensionActive && tool !== "dimension") this.cancelDimension();
     // Leaving the select tool aborts any drag + clears the sketch selection (the
     // enter/exit clears cover mode changes; this covers a same-mode tool switch).
     if (this.selectActive && tool !== "select") {
-      this.resetDrag();
+      if (this.dragging) void this.finishDrag(undefined, true);
+      else this.resetDrag();
       // A tool switch mid-marquee (keyboard shortcut / toolbar click while the button
       // is still down) must drop the overlay AND give LMB orbit back — the flag is
       // shared with the armed draw tools, so a leak here silently kills orbit.
@@ -2448,8 +2464,7 @@ export class SketchController {
   private releaseActiveSketchGesture(): void {
     if (this.selectActive) {
       if (this.dragging || this.dragStarting) {
-        // Releasing into UI has no meaningful sketch-plane target. Cancel to the
-        // grab's zero-delta point instead of committing a chip's coordinates.
+        // Releasing into UI has no meaningful sketch-plane target; discard scratch.
         this.cancelSelectDrag();
       } else {
         if (this.marqueeActive || this.marqueeArmed) this.cancelMarquee();
@@ -3771,7 +3786,7 @@ export class SketchController {
   //   - a drag past DRAG_PX on an armed handle → beginGesture → solveDrag (fire-and-
   //     forget, latest-wins by seq) → endGesture (ONE undo) + the selection stays;
   //   - a drag past DRAG_PX from EMPTY space → marquee / box select (W2-D, below).
-  // Esc mid-drag ends the gesture at the ORIGINAL point + restores pre-drag geometry.
+  // Esc discards scratch and restores the complete pre-Begin memento.
 
   /** hitTest the current session at a client point (the same reach the dimension
    *  tool and the snap ladder use — see `pickTol`). */
@@ -3784,7 +3799,7 @@ export class SketchController {
   }
 
   private onSelectPointerDown = (e: PointerEvent): void => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || this.dragStarting || this.dragging || this.dragFinalizing) return;
     // Self-heal: a previous gesture whose release we never saw (shouldn't happen —
     // the window pointerup net covers it — but a stuck overlay is worse than a
     // redundant reset).
@@ -3928,9 +3943,10 @@ export class SketchController {
       return;
     }
     if (this.dragStarting) {
+      if (this.dragEndPending) return;
       // beginGesture still in flight: defer the commit until it resolves.
       this.dragEndPending = {
-        target: this.selectDragTarget(e.clientX, e.clientY, e.altKey),
+        sample: { clientX: e.clientX, clientY: e.clientY, altKey: e.altKey },
         restore: false,
       };
       return;
@@ -3964,8 +3980,12 @@ export class SketchController {
   private async beginSelectDrag(clientX: number, clientY: number, altKey: boolean): Promise<void> {
     const session = sketchStore.getState().session;
     const armed = this.dragArmed;
-    if (!session || !armed || this.dragStarting || this.dragging) return;
+    if (!session || !armed || this.dragStarting || this.dragging || this.dragFinalizing) return;
     this.dragStarting = true;
+    ++this.dragGeneration;
+    this.dragBefore = { ...structuredClone(session),
+      conflicting: [...sketchStore.getState().conflictingIds],
+      entityStates: { ...sketchStore.getState().entityStates } };
     this.dragBase = session.entities;
     this.dragPlane = session.plane;
     this.dragStatus = session.status;
@@ -3997,16 +4017,22 @@ export class SketchController {
         current.sessionGeneration !== sessionGeneration ||
         current.session?.sketchId !== session.sketchId
       ) {
-        // Only a tool switch inside the SAME live sketch leaves this gesture ours
-        // to close. Session/mode exits already close it through cancelSketch.
-        if (current.session?.sketchId === session.sketchId) {
-          void this.deps.client.endGesture().catch(() => {});
-        }
+        // Session exits own scratch teardown through cancelSketch.
         return;
       }
-      // §7.4: the per-entity map is GESTURE-FIXED — publish only after the fence.
-      current.setEntityStates(begun.entityStates ?? {});
-      this.deps.engine.setSketchEntityStates(begun.entityStates ?? {});
+      this.dragPointOffset = begun.pointOffset ?? [0, 0];
+      this.dragBase = applySketchSolveResult(this.dragBase, {
+        solvedPositions: begun.positions ?? {}, solvedCurves: begun.curves ?? {},
+      });
+      this.dragSnapEntities = this.dragBase.filter((entity) => entity.id !== armed.sel.entityId);
+      this.dragSnapCache = buildSnapCache(this.dragSnapEntities);
+      if (!this.dragEndPending?.restore) {
+        this.deps.engine.updateSketchSession(session.plane, this.dragBase, session.status,
+          session.constraints, { transient: true });
+        // The per-entity map stays fixed throughout the visible preview.
+        current.setEntityStates(begun.entityStates ?? {});
+        this.deps.engine.setSketchEntityStates(begun.entityStates ?? {});
+      }
     } catch (err) {
       const current = sketchStore.getState();
       if (
@@ -4015,8 +4041,10 @@ export class SketchController {
         current.session?.sketchId !== session.sketchId
       ) return;
       viewportStore.getState().setStatusHint(`Drag failed: ${sketchErr(err)}`, { severity: "error", sticky: true });
+      this.restoreDragBefore(this.dragBefore);
       this.resetDrag();
       this.deps.engine.setSketchDrawingActive(false);
+      this.resumePendingDragTool();
       return;
     }
     this.dragStarting = false;
@@ -4025,7 +4053,9 @@ export class SketchController {
     const pending = this.dragEndPending;
     if (pending) {
       this.dragEndPending = null;
-      void this.finishDrag(pending.target, pending.restore);
+      const sample = pending.sample;
+      const target = sample ? this.selectDragTarget(sample.clientX, sample.clientY, sample.altKey) : undefined;
+      void this.finishDrag(target, pending.restore);
       return;
     }
     const latest = this.dragLatestSample;
@@ -4062,10 +4092,12 @@ export class SketchController {
       this.clearTransientSnapFeedback();
       return [raw.x, raw.y];
     }
-    const metric = this.deps.engine.planeScreenMetric(raw);
+    const offset = armed.kind === "point" ? this.dragPointOffset : [0, 0];
+    const desired = { x: raw.x + offset[0], y: raw.y + offset[1] };
+    const metric = this.deps.engine.planeScreenMetric(desired);
     if (!metric) return [raw.x, raw.y];
     const settings = settingsStore.getState();
-    const { decision, latch } = computeSnapDecision(raw, this.dragSnapEntities, {
+    const { decision, latch } = computeSnapDecision(desired, this.dragSnapEntities, {
       gridStep: chooseGridStep(this.deps.engine.getCameraDistance()).minor,
       pixelWorld: this.deps.engine.planePixelWorld(),
       metric,
@@ -4085,18 +4117,25 @@ export class SketchController {
     this.dragSnapLatch = latch;
     this.dragRequestedSnap = decision.snapped;
     this.publishSnapFeedback(decision, settings.show.snappingHints);
-    return [decision.point.x, decision.point.y];
+    return [decision.point.x - offset[0], decision.point.y - offset[1]];
   }
 
   /** One incremental drag solve; drop null/stale-seq responses, else preview the delta. */
   private async fireSolve(target: [number, number], requestedSnap: boolean): Promise<void> {
+    const generation = this.dragGeneration;
+    const sessionGeneration = sketchStore.getState().sessionGeneration;
     let res;
     try {
       res = await this.deps.client.solveDrag(target);
-    } catch {
+    } catch (err) {
+      if (generation === this.dragGeneration && !this.sessionStale(sessionGeneration)) {
+        viewportStore.getState().setStatusHint(`Drag failed: ${sketchErr(err)}`, { severity: "error", sticky: true });
+        await this.finishDrag(undefined, true);
+      }
       return;
     }
-    if (!this.dragging || !shouldApplyDrag(this.dragLastSeq, res)) return;
+    if (generation !== this.dragGeneration || this.sessionStale(sessionGeneration) ||
+        !this.dragging || !shouldApplyDrag(this.dragLastSeq, res)) return;
     this.dragLastSeq = res!.seq;
     // Live conflict tint during the drag (store short-circuits when unchanged).
     sketchStore.getState().setConflicting(res!.conflicting ?? []);
@@ -4108,10 +4147,12 @@ export class SketchController {
         solvedCurves: this.dragCurves,
       });
       const origin = this.draggedPointCoord();
+      const desired: [number, number] = this.dragArmed?.kind === "point"
+        ? [target[0] + this.dragPointOffset[0], target[1] + this.dragPointOffset[1]] : target;
       const requestedMove = origin
-        ? Math.hypot(target[0] - origin[0], target[1] - origin[1]) > 1e-9
+        ? Math.hypot(desired[0] - origin[0], desired[1] - origin[1]) > 1e-9
         : false;
-      const actual = this.solvedDragTarget(moved, target);
+      const actual = this.solvedDragTarget(moved, desired);
       const solvedMoved = actual && origin
         ? Math.hypot(actual[0] - origin[0], actual[1] - origin[1]) > 1e-9
         : Object.keys(this.dragAccum).length > 0 || Object.keys(this.dragCurves).length > 0;
@@ -4125,7 +4166,7 @@ export class SketchController {
         viewportStore.getState().setStatusHint(null);
       }
       const snapUnsatisfied = requestedSnap && actual !== null &&
-        Math.hypot(actual[0] - target[0], actual[1] - target[1]) > 0.25 * this.deps.engine.planePixelWorld();
+        Math.hypot(actual[0] - desired[0], actual[1] - desired[1]) > 0.25 * this.deps.engine.planePixelWorld();
       if (snapUnsatisfied) {
         this.publishSnapFeedback(null, false);
         // B6 copy. The old wording ("Snap target not reached; the solver kept
@@ -4166,26 +4207,13 @@ export class SketchController {
     return entityPoints(entity).find((point) => point.position === armed.sel.point)?.coord ?? null;
   }
 
-  /** Esc mid-drag: end the gesture at the ORIGINAL position (no explicit cancel verb
-   *  on the wire — endGesture always commits ONE step) and restore pre-drag geometry. */
+  /** Esc discards the worker scratch; no final solve or edit is issued. */
   private cancelSelectDrag(): void {
-    const orig = this.draggedPointCoord();
-    if (this.dragging) {
-      void this.finishDrag(orig, true);
-    } else if (this.dragStarting) {
-      this.dragEndPending = { target: orig, restore: true };
-    }
+    if (this.dragging) void this.finishDrag(undefined, true);
+    else if (this.dragStarting) this.dragEndPending = { restore: true };
   }
 
-  /**
-   * The target that makes `endGesture` a NO-OP, per kind — the Esc restore point.
-   *
-   * `point`/`arcEnd` teleport their handle to the target, so the pre-drag coord of
-   * that handle is what puts it back. `entityBody`/`radius` are measured from
-   * `grab` (delta and radial offset respectively), so ending AT `grab` is the
-   * zero-delta answer — the handle's own coordinate would translate/resize the
-   * entity by however far the user had already dragged.
-   */
+  /** Post-Begin observable handle, used to judge solved movement. */
   private draggedPointCoord(): [number, number] | undefined {
     const armed = this.dragArmed;
     if (!armed) return undefined;
@@ -4197,66 +4225,77 @@ export class SketchController {
     return entityPoints(e).find((p) => p.position === sel.point)?.coord;
   }
 
-  /** Commit (or cancel-restore) the drag: endGesture → apply final positions to the
-   *  session + engine + DOF badge; the selection stays on the dragged entity. */
+  /** Finish commits one edit; cancellation or terminal failure restores the full memento. */
   private async finishDrag(finalTarget: [number, number] | undefined, restore: boolean): Promise<void> {
     const gen = sketchStore.getState().sessionGeneration;
-    const startSession = sketchStore.getState().session;
-    // Pre-drag snapshot for undo (the store still holds the pre-drag arrays — the drag
-    // preview only moved the engine, never setSession). A cancel (Esc) does NOT push.
-    const before: SketchSnapshot | null = startSession
-      ? { entities: startSession.entities, constraints: startSession.constraints }
-      : null;
+    const before = this.dragBefore;
     const sel = this.dragArmed?.sel ?? null;
-    const base = this.dragBase;
-    const plane = this.dragPlane;
+    this.dragFinalizing = true;
     this.resetDrag();
-    this.deps.engine.setSketchDrawingActive(false); // restore LMB orbit
-
+    const generation = this.dragGeneration;
+    this.deps.engine.setSketchDrawingActive(false);
     let result;
     try {
-      result = await this.deps.client.endGesture(finalTarget);
+      if (restore) await this.deps.client.cancelGesture();
+      else result = await this.deps.client.endGesture(finalTarget);
     } catch (err) {
-      viewportStore.getState().setStatusHint(`Drag failed: ${sketchErr(err)}`, { severity: "error", sticky: true });
+      if (generation === this.dragGeneration && !this.sessionStale(gen)) {
+        await this.deps.client.cancelGesture().catch(() => {});
+        if (generation === this.dragGeneration && !this.sessionStale(gen)) {
+          viewportStore.getState().setStatusHint(`Drag failed: ${sketchErr(err)}`, { severity: "error", sticky: true });
+        }
+      }
     }
-    if (this.sessionStale(gen)) return; // exited / superseded / disposed during await
-    const session = sketchStore.getState().session;
-    if (!session || !plane) return;
-
-    // On a cancel (Esc) restore the pre-drag geometry; else apply the committed delta.
-    // Both channels or neither: a radius/arcEnd gesture's whole result lives in
-    // `curves`, so dropping it here would commit an un-resized entity to the store
-    // while the worker's copy moved — the silent-revert class SP-2 exists to close.
-    const positions = restore ? {} : result?.solvedPositions ?? {};
-    const curves = restore ? {} : result?.solvedCurves ?? {};
-    const entities = applySketchSolveResult(base, { solvedPositions: positions, solvedCurves: curves });
-    const next: SketchSession = {
-      ...session,
-      entities,
-      dof: result?.dof ?? session.dof,
-      status: result?.status ?? session.status,
-    };
+    this.dragFinalizing = false;
+    if (generation !== this.dragGeneration || this.sessionStale(gen) || !before) {
+      this.pendingDragTool = null;
+      return;
+    }
+    if (!result) {
+      this.restoreDragBefore(before);
+      this.resumePendingDragTool();
+      return;
+    }
+    const entities = applySketchSolveResult(before.entities, result);
+    const next: SketchSession = { ...before, entities, dof: result.dof, status: result.status,
+      solveCurrent: true, conflicting: result.conflicting ?? [], entityStates: result.entityStates ?? {},
+      reasons: result.reasons, unassessed: result.unassessed, violations: result.violations,
+      normalizedMaxResidual: result.normalizedMaxResidual, diagnostics: result.diagnostics };
     sketchStore.getState().setSession(next);
-    // Unconditional: a failed endGesture reverts geometry to the pre-drag base, so a
-    // conflict set left over from fireSolve's live frames would tint constraints that
-    // are not conflicting in the DISPLAYED state.
-    sketchStore.getState().setConflicting(result?.conflicting ?? []);
-    // EndGesture echoes the BeginGesture map verbatim (§7.4), so this is a no-op
-    // by identity on the happy path; it matters when the gesture FAILED, where
-    // `{}` is the honest answer — the geometry reverted to the pre-drag base and
-    // no solve stands behind any per-entity claim.
-    const endStates = result?.entityStates ?? {};
-    sketchStore.getState().setEntityStates(endStates);
+    sketchStore.getState().setConflicting(next.conflicting ?? []);
+    sketchStore.getState().setEntityStates(next.entityStates ?? {});
     this.deps.engine.updateSketchSession(next.plane, entities, next.status, next.constraints, {
-      entityStates: endStates,
+      entityStates: next.entityStates,
     });
-    if (result) this.pushSolve(session.sketchId, result.dof, result.status);
+    this.pushSolve(next.sketchId, result.dof, result.status);
     if (sel) sketchSelectionStore.getState().set([sel]);
-    if (!restore && before) sketchStore.getState().pushUndoSnapshot(before, { kind: "drag" });
+    sketchStore.getState().pushUndoSnapshot({ entities: before.entities, constraints: before.constraints }, { kind: "drag" });
+    this.resumePendingDragTool();
+  }
+
+  private resumePendingDragTool(): void {
+    const tool = this.pendingDragTool;
+    this.pendingDragTool = null;
+    if (tool !== null && !this.disposed && sketchStore.getState().session) {
+      this.selectMachine(toolStore.getState().sketchTool ?? tool);
+    }
+  }
+
+  private restoreDragBefore(before: SketchSession | null): void {
+    if (!before) return;
+    const restored = { ...before, solveCurrent: false };
+    sketchStore.getState().setSession(restored);
+    sketchStore.getState().setConflicting(restored.conflicting ?? []);
+    sketchStore.getState().setEntityStates(restored.entityStates ?? {});
+    this.deps.engine.updateSketchSession(restored.plane, restored.entities, restored.status,
+      restored.constraints, { entityStates: restored.entityStates ?? {} });
   }
 
   /** Drop all in-flight drag state (idempotent). A pending solve rAF no-ops on `!dragging`. */
   private resetDrag(): void {
+    ++this.dragGeneration;
+    this.dragBefore = null;
+    this.dragPointOffset = [0, 0];
     this.dragArmed = null;
     this.dragStarting = false;
     this.dragging = false;
@@ -4586,6 +4625,7 @@ export class SketchController {
   };
 
   dispose(): void {
+    this.pendingDragTool = null;
     this.disposed = true; // set FIRST: guards every pending rAF + queued write-back
     this.sessionEpoch++;
     this.arcDragging = false;
@@ -4599,9 +4639,8 @@ export class SketchController {
     sketchSelectionStore.getState().clear();
     this.endSketchEditTool();
     if (this.dimensionActive) this.cancelDimension();
-    // An in-flight drag gesture must be closed on the wire (endGesture always commits
-    // ONE step; there is no cancel verb) so the worker doesn't leak an open gesture.
-    if (this.dragging || this.dragStarting) void this.deps.client.endGesture().catch(() => {});
+    // The runtime mutex orders this discard after any pending Begin request.
+    if (this.dragging || this.dragStarting) void this.deps.client.cancelGesture().catch(() => {});
     this.resetDrag();
     this.cancelMarquee();
     this.marqueeEl?.remove(); // belt-and-braces: an overlay with no live marquee

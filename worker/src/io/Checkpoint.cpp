@@ -13,6 +13,7 @@
 #include "session/BodyStore.h"
 #include "session/Signatures.h"
 #include "util/Hashing.h"
+#include "util/PolicyVersions.h"
 
 namespace onecad::io {
 
@@ -65,6 +66,14 @@ Envelope handle_save_checkpoint(session::Session& session, const Envelope& req) 
         artifacts.push_back(json{{"bodyId", bid},
                                  {"bin", section},
                                  {"codec", "brep-bintools"},
+                                 {"envelope", json{
+                                     {"artifactSchemaVersion", policy::kArtifactSchemaVersion},
+                                     {"occtFingerprint", policy::occt_fingerprint()},
+                                     {"descriptorVersion", policy::kDescriptorVersion},
+                                     {"resolverVersion", policy::kResolverVersion},
+                                     {"quantizationVersion", policy::kQuantizationVersion},
+                                     {"solverPolicyVersion", st.solver_policy_version},
+                                     {"signatureVersion", policy::kSignatureVersion}}},
                                  {"size", blob.size()},
                                  {"contentHash", hashing::sha256_hex(blob.data(), blob.size())}});
     }

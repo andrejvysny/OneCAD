@@ -418,7 +418,7 @@ SolverResult ConstraintSolver::solve(const Sketch* residualContext) {
 
     backupParameters();
 
-    gcsSystem_->declareUnknowns(parameters_);
+    gcsSystem_->declareUnknowns(pointParameters_.empty() ? parameters_ : pointParameters_);
     gcsSystem_->declareDrivenParams(drivenParameters_);
 
     GCS::Algorithm alg = toGcsAlgorithm(config_.algorithm);
@@ -438,15 +438,6 @@ SolverResult ConstraintSolver::solve(const Sketch* residualContext) {
     } else {
         gcsSystem_->undoSolution();
         restoreParameters();
-    }
-
-    // SCHEMA §7.4 `maxResidual` — measured HERE, after apply/undo, so it reads
-    // the parameters the solve actually LEFT IN PLACE: the applied solution on
-    // success, the restored pre-solve pose on failure. Read-only with respect to
-    // everything below: `success`, `status` and `conflicting` are exactly what
-    // PlaneGCS reported and no branch consults `result.residual`.
-    if (residualContext) {
-        result.residual = maxConstraintResidual(*residualContext, constraints_);
     }
 
     std::vector<int> conflictingTags;
@@ -490,55 +481,13 @@ SolverResult ConstraintSolver::solve(const Sketch* residualContext) {
         }
     }
 
+    // Reporting reads the retained pose, including timeout rollback. Numerical
+    // termination stays independent of the typed acceptance gate in Sketch.
+    if (residualContext) {
+        result.residual = maxConstraintResidual(*residualContext, constraints_);
+    }
+
     return result;
-}
-
-SolverResult ConstraintSolver::solveWithDrag(EntityID pointId, const Vec2d& targetPos,
-                                             const std::unordered_set<EntityID>& pointIdsToFix) {
-    auto draggedIt = pointsById_.find(pointId);
-    if (draggedIt == pointsById_.end() || !draggedIt->second) {
-        SolverResult result;
-        result.success = false;
-        result.status = SolverResult::Status::InvalidInput;
-        result.errorMessage = "Dragged point not found";
-        return result;
-    }
-
-    if (!gcsSystem_) {
-        SolverResult result;
-        result.success = false;
-        result.status = SolverResult::Status::InternalError;
-        result.errorMessage = "PlaneGCS system not available";
-        return result;
-    }
-
-    const Vec2d startPos{draggedIt->second->position().X(), draggedIt->second->position().Y()};
-    const double deltaX = targetPos.x - startPos.x;
-    const double deltaY = targetPos.y - startPos.y;
-    const double deltaMagnitude = std::sqrt((deltaX * deltaX) + (deltaY * deltaY));
-    const int substeps = computeDragSubsteps(deltaMagnitude);
-    if (substeps > 1) {
-    }
-
-    const ConstraintSolver::DragSolveSnapshot snapshot = captureDragSolveSnapshot();
-    SolverResult lastResult;
-    for (int step = 1; step <= substeps; ++step) {
-        const double t = static_cast<double>(step) / static_cast<double>(substeps);
-        const Vec2d intermediateTarget{
-            .x = startPos.x + (deltaX * t),
-            .y = startPos.y + (deltaY * t),
-        };
-        lastResult = solveWithDragSingleStep(pointId, intermediateTarget, pointIdsToFix);
-        if (!lastResult.success) {
-            restoreDragSolveSnapshot(snapshot);
-            if (lastResult.errorMessage.empty()) {
-                lastResult.errorMessage = "Drag rejected by constraints";
-            }
-            return lastResult;
-        }
-    }
-
-    return lastResult;
 }
 
 SolverResult ConstraintSolver::solveWithGroupDrag(
@@ -775,69 +724,6 @@ void ConstraintSolver::restoreDragSolveSnapshot(const ConstraintSolver::DragSolv
     }
 }
 
-SolverResult ConstraintSolver::solveWithDragSingleStep(
-    EntityID pointId,
-    const Vec2d& targetPos,
-    const std::unordered_set<EntityID>& pointIdsToFix) {
-    auto it = pointsById_.find(pointId);
-    if (it == pointsById_.end() || !it->second) {
-        SolverResult result;
-        result.success = false;
-        result.status = SolverResult::Status::InvalidInput;
-        result.errorMessage = "Dragged point not found";
-        return result;
-    }
-
-    if (!gcsSystem_) {
-        SolverResult result;
-        result.success = false;
-        result.status = SolverResult::Status::InternalError;
-        result.errorMessage = "PlaneGCS system not available";
-        return result;
-    }
-
-    constexpr int dragTag = -1;
-    gcsSystem_->clearByTag(dragTag);
-
-    struct FixedCoord {
-        double x;
-        double y;
-    };
-    std::unordered_map<EntityID, FixedCoord> fixedPositions;
-    const bool fixAllOtherPoints = pointIdsToFix.empty();
-    for (const auto& [id, point] : pointsById_) {
-        if (id == pointId || !point) {
-            continue;
-        }
-        if (!fixAllOtherPoints && pointIdsToFix.find(id) == pointIdsToFix.end()) {
-            continue;
-        }
-        fixedPositions[id] = {point->position().X(), point->position().Y()};
-    }
-    for (auto& [id, coord] : fixedPositions) {
-        auto pointIt = pointsById_.find(id);
-        if (pointIt == pointsById_.end() || !pointIt->second) {
-            continue;
-        }
-        GCS::Point gcsPoint = makePoint(pointIt->second);
-        gcsSystem_->addConstraintCoordinateX(gcsPoint, &coord.x, dragTag, true);
-        gcsSystem_->addConstraintCoordinateY(gcsPoint, &coord.y, dragTag, true);
-    }
-
-    double targetX = targetPos.x;
-    double targetY = targetPos.y;
-    GCS::Point dragPoint = makePoint(it->second);
-    gcsSystem_->addConstraintCoordinateX(dragPoint, &targetX, dragTag, true);
-    gcsSystem_->addConstraintCoordinateY(dragPoint, &targetY, dragTag, true);
-
-    SolverResult result = solve();
-
-    gcsSystem_->clearByTag(dragTag);
-    gcsSystem_->invalidatedDiagnosis();
-
-    return result;
-}
-
 SolverResult ConstraintSolver::solveWithGroupDragSingleStep(
     const std::unordered_map<EntityID, Vec2d>& targetPositions) {
     if (!gcsSystem_) {
@@ -1021,6 +907,19 @@ std::vector<ConstraintID> ConstraintSolver::findRedundantConstraints() const {
     return result;
 }
 
+std::vector<ConstraintID> ConstraintSolver::findConflictingConstraints() const {
+    std::vector<ConstraintID> result;
+    if (!gcsSystem_) return result;
+    std::vector<int> tags;
+    gcsSystem_->getConflicting(tags);
+    for (const int tag : tags) {
+        if (tag <= 0) continue;
+        const auto it = gcsTagToConstraint_.find(tag);
+        if (it != gcsTagToConstraint_.end()) result.push_back(it->second);
+    }
+    return result;
+}
+
 bool ConstraintSolver::isSolvable() const {
     if (!gcsSystem_) {
         return false;
@@ -1039,6 +938,22 @@ int ConstraintSolver::diagnose() {
 
 bool ConstraintSolver::hasConflicting() const {
     return gcsSystem_ && gcsSystem_->hasConflicting();
+}
+
+int ConstraintSolver::diagnoseRetainedPose() {
+    if (!gcsSystem_) return -1;
+    std::vector<std::pair<double*, double>> retained;
+    for (double* p : parameters_) retained.emplace_back(p, *p);
+    for (double* p : drivenParameters_) retained.emplace_back(p, *p);
+    gcsSystem_->declareUnknowns(parameters_);
+    gcsSystem_->declareDrivenParams(drivenParameters_);
+    // diagnose() resets to the initSolution reference. Refresh that reference
+    // from the retained pose, not the pre-solve candidate it used previously.
+    gcsSystem_->invalidatedDiagnosis();
+    gcsSystem_->initSolution(toGcsAlgorithm(config_.algorithm));
+    const int dof = gcsSystem_->dofsNumber();
+    for (const auto& [p, value] : retained) *p = value;
+    return dof;
 }
 
 bool ConstraintSolver::hasRedundant() const {

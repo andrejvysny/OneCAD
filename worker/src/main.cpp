@@ -47,6 +47,7 @@
 #include "tess/MeshHandle.h"
 #include "tess/Tessellate.h"
 #include "util/Hashing.h"
+#include "util/PolicyVersions.h"
 #include "util/LittleEndian.h"
 #include "util/Log.h"
 
@@ -62,7 +63,7 @@ using onecad::session::WorkerHead;
 constexpr int kProtocolVersion = 1;
 constexpr const char* kWorkerVersion = "0.1.0";
 constexpr int kQuantizationVersion = 1;
-constexpr int kSolverPolicyVersion = 1;
+constexpr auto kSolverPolicyVersion = onecad::policy::kSolverPolicyVersion;
 
 // Redirect OCCT's default messenger from std::cout to std::cerr. The default
 // printer writes to std::cout, which would corrupt our stdout frame stream, so

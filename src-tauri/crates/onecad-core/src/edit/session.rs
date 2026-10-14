@@ -202,6 +202,23 @@ impl DocumentSession {
         self.undo.evictions()
     }
 
+    /// Validates sketch edits on a copy before a fallible solver round-trip.
+    /// No document or history mutation occurs until the caller commits the result.
+    pub fn prepare_sketch_edit(
+        &self,
+        sketch: SketchId,
+        ops: &[SketchEditOp],
+    ) -> Result<Sketch, DomainError> {
+        let prior = self
+            .document
+            .sketch(sketch)
+            .ok_or_else(|| DomainError::Validation(format!("sketch {sketch} not found")))?;
+        if ops.is_empty() {
+            return Ok(prior.clone());
+        }
+        apply_sketch_ops(prior, ops)
+    }
+
     /// Applies a command: validates, mutates the document, captures a memento
     /// inverse, and records it on the open transaction (or as a singleton undo
     /// step). Returns the per-command [`CommandOutcome`].

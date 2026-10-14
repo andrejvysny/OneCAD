@@ -1,3 +1,5 @@
+import { frontendSketchTruth } from "./sketchTruth";
+import type { SketchTruth } from "./types";
 /*
  * tauriClient — the REAL CadClient over the Tauri command/event surface
  * (R-WP10/11/12).
@@ -207,6 +209,7 @@ const CMD = {
   beginGesture: "begin_gesture",
   solveDrag: "solve_drag",
   endGesture: "end_gesture",
+  cancelGesture: "cancel_gesture",
   promoteSelection: "promote_selection",
   faceSketchPlane: "face_sketch_plane",
   addSketchOnFace: "add_sketch_on_face",
@@ -309,7 +312,7 @@ interface DocumentProjectionDto extends DocumentProjectionWire {
   /** `FeatureDto` is field-identical to the frontend `FeatureRecord`. */
   features: FeatureRecord[];
 }
-interface SketchSessionDto {
+interface SketchSessionDto extends SketchTruth {
   sketchId: string;
   plane: SketchPlane;
   entities: unknown;
@@ -358,7 +361,7 @@ interface SketchOnFaceDto {
   hasClosedBoundary: boolean;
   projectedBoundaryVersion: number;
 }
-interface SketchUpsertDto {
+interface SketchUpsertDto extends SketchTruth {
   sketchId: string;
   sketchRevision: number;
   dof: number;
@@ -375,6 +378,9 @@ interface SketchUpsertDto {
 interface BeginGestureDto {
   gestureId: number;
   ready: boolean;
+  pointOffset?: [number, number];
+  positions?: Record<string, [number, number]>;
+  curves?: Record<string, CurveParams>;
   /** The GESTURE-FIXED per-entity map, keyed by backend ENTITY uuid (SCHEMA
    *  §7.4). `SolveDrag` carries none — `DragSolveDto` has no counterpart, and
    *  that omission is normative, not an oversight. */
@@ -389,6 +395,7 @@ interface GestureTargetArgs {
   grab?: [number, number];
 }
 interface DragSolveDto {
+  diagnostics?: OperationDiagnostic[];
   gestureId: number;
   seq: number;
   status: string;
@@ -1786,6 +1793,7 @@ export function createTauriClient(): CadClient {
       solveCurrent: dto.solveCurrent,
       // Map the entering solve's conflicting uuids → frontend ids (after seeding the
       // id-map so map.constraint is populated). Seeds the store's conflictingIds.
+      ...frontendSketchTruth(map, dto),
       conflicting: frontendConflictingIds(map, dto.conflicting),
       // Same seeding order dependency, on `map.entity` instead: the per-entity
       // map is keyed by wire ENTITY uuid, so re-keying it before
@@ -1817,6 +1825,7 @@ export function createTauriClient(): CadClient {
       dof: dto.dof,
       status: dto.status,
       // Map conflicting constraint uuids → frontend ids against the COMMITTED clone.
+      ...frontendSketchTruth(draft, dto),
       conflicting: frontendConflictingIds(draft, dto.conflicting),
       // F-WP9 fix: the worker keys solvedPositions by backend POINT-entity UUID;
       // reverse-map them to the frontend `entityId.point` keys the SketchController
@@ -1870,6 +1879,7 @@ export function createTauriClient(): CadClient {
       dof: dto.dof,
       status: dto.status,
       // No map ⇒ the wire ids ARE the ids the caller knows; pass them through.
+      ...frontendSketchTruth(map, dto),
       conflicting: map ? frontendConflictingIds(map, dto.conflicting) : (dto.conflicting ?? []),
       solvedPositions: map ? frontendSolvedPositions(map, dto.solvedPositions) : {},
       solvedCurves: map ? frontendSolvedCurves(map, dto.solvedCurves) : {},
@@ -1931,9 +1941,10 @@ export function createTauriClient(): CadClient {
       dof: dto.dof,
       status: dto.status,
       solveCurrent: dto.solveCurrent,
-      // A pure static read opens no session + seeds no id-map, so backend uuids can't
-      // be mapped; the display layer carries no conflict tint (backend returns []).
-      conflicting: [],
+      ...frontendSketchTruth(sketchMaps.get(sketchId), dto),
+      conflicting: sketchMaps.has(sketchId)
+        ? frontendConflictingIds(sketchMaps.get(sketchId)!, dto.conflicting)
+        : (dto.conflicting ?? []),
       // WP-P provenance survives the pure read: an ENTERED sketch re-keys through
       // its id-map, a never-entered one passes through (frontend id == backend uuid).
       projections: frontendProjections(sketchMaps.get(sketchId), dto.projections),
@@ -2013,6 +2024,8 @@ export function createTauriClient(): CadClient {
   // ── Sketch drag gesture (latest-wins) ─────────────────────────────────────
   let dragSketchId: string | null = null;
   let dragMaxSeq = 0;
+  let dragGeneration = 0;
+  let activeGestureId: number | null = null;
 
   /**
    * Marshal a frontend {@link GestureTarget} into the Rust command's
@@ -2051,8 +2064,10 @@ export function createTauriClient(): CadClient {
     // Marshal BEFORE arming the gesture state: an unmappable target must leave no
     // half-open drag behind for the next solveDrag/endGesture to reconcile against.
     const args = target ? wireGestureTarget(map, target) : undefined;
+    const generation = ++dragGeneration;
     dragSketchId = sketchId;
     dragMaxSeq = 0;
+    activeGestureId = null;
     const dto = await call<BeginGestureDto>(CMD.beginGesture, {
       sketchId: map.backendSketchId,
       dragPoint,
@@ -2060,11 +2075,26 @@ export function createTauriClient(): CadClient {
       // defaults to the plain point drag and the request stays pre-SP-2 identical.
       ...(args ? { target: args } : {}),
     });
+    if (generation !== dragGeneration) throw new Error("beginGesture: stale sketch gesture");
+    if (sketchMaps.get(sketchId) !== map) {
+      // An upsert committed a new id-map while Begin was in flight. Rust already
+      // holds the gesture and its exclusive lane claim, so release it here —
+      // otherwise every later upsert and undo is refused as "drag active".
+      ++dragGeneration;
+      dragSketchId = null;
+      await call<void>(CMD.cancelGesture, {}).catch((e: unknown) =>
+        logError("ipc", "beginGesture: stale cancel failed", { error: String(e) }));
+      throw new Error("beginGesture: stale sketch gesture");
+    }
+    activeGestureId = dto.gestureId;
     // The gesture-fixed §7.4 map, re-keyed to frontend ids. Read off the LIVE
     // map: BeginGesture mints nothing, so there is no clone to commit here.
     return {
       gestureId: dto.gestureId,
       ready: dto.ready,
+      ...(dto.pointOffset ? { pointOffset: dto.pointOffset } : {}),
+      positions: frontendSolvedPositions(map, dto.positions ?? {}),
+      curves: frontendSolvedCurves(map, dto.curves),
       entityStates: frontendEntityStates(map, dto.entityStates),
     };
   }
@@ -2072,8 +2102,14 @@ export function createTauriClient(): CadClient {
   async function solveDrag(target: [number, number]): Promise<DragSolveResult | null> {
     // Fire-and-forget: the caller does NOT await serially. Responses reconcile
     // latest-wins by seq — a stale/superseded seq is dropped (returns null).
+    const generation = dragGeneration;
+    const sketchId = dragSketchId;
+    const gestureId = activeGestureId;
+    const capturedMap = sketchId ? sketchMaps.get(sketchId) : undefined;
     const dto = await call<DragSolveDto>(CMD.solveDrag, { target });
-    if (dto.superseded || dto.seq <= dragMaxSeq) return null; // stale — drop
+    if (generation !== dragGeneration || sketchId !== dragSketchId ||
+        (sketchId !== null && sketchMaps.get(sketchId) !== capturedMap) ||
+        (gestureId !== null && dto.gestureId !== gestureId) || dto.superseded || dto.seq <= dragMaxSeq) return null; // stale — drop
     dragMaxSeq = dto.seq;
     // Reverse-map backend point UUIDs → frontend `entityId.point` keys, same as
     // endGesture — the drag PREVIEW consumes these per frame, and unmapped keys
@@ -2081,6 +2117,7 @@ export function createTauriClient(): CadClient {
     const map = dragSketchId ? sketchMaps.get(dragSketchId) : undefined;
     return {
       gestureId: dto.gestureId,
+      diagnostics: dto.diagnostics,
       seq: dto.seq,
       status: dto.status,
       dof: dto.dof,
@@ -2099,6 +2136,8 @@ export function createTauriClient(): CadClient {
 
   async function endGesture(finalTarget?: [number, number]): Promise<SketchUpsertResult> {
     const sketchId = dragSketchId;
+    ++dragGeneration;
+    activeGestureId = null;
     dragSketchId = null;
     dragMaxSeq = 0;
     const dto = await call<SketchUpsertDto>(CMD.endGesture, { finalTarget: finalTarget ?? null });
@@ -2109,6 +2148,7 @@ export function createTauriClient(): CadClient {
       dof: dto.dof,
       status: dto.status,
       // Map conflicting constraint uuids → frontend ids (unknown dropped).
+      ...frontendSketchTruth(map, dto),
       conflicting: map ? frontendConflictingIds(map, dto.conflicting) : [],
       // Reverse-map backend point UUIDs → frontend `entityId.point` keys (F-WP9).
       solvedPositions: map ? frontendSolvedPositions(map, dto.solvedPositions) : dto.solvedPositions,
@@ -2121,6 +2161,14 @@ export function createTauriClient(): CadClient {
       // other channel here — an unmappable end is unknown, not a guess.
       entityStates: map ? frontendEntityStates(map, dto.entityStates) : {},
     };
+  }
+
+  async function cancelGesture(): Promise<void> {
+    ++dragGeneration;
+    activeGestureId = null;
+    dragSketchId = null;
+    dragMaxSeq = 0;
+    await call<void>(CMD.cancelGesture, {});
   }
 
   // ── Topology repair (dry-run resolve + raw edit commands; M4b) ─────────────
@@ -3036,6 +3084,7 @@ export function createTauriClient(): CadClient {
     beginGesture,
     solveDrag,
     endGesture,
+    cancelGesture,
     promoteSelection,
     faceSketchPlane,
     elementInfo,

@@ -1266,122 +1266,14 @@ std::vector<Vec2d> Sketch::getPointFreeDirections(EntityID pointId) const {
 }
 
 SolveResult Sketch::solve() {
-    SolveResult result;
-
-    // The no-constraints fast path is only sound when nothing else couples the
-    // geometry — see hasInternalCouplings().
-    if (constraints_.empty() && !hasInternalCouplings()) {
-        lastConflictingConstraints_.clear();
-        result.success = true;
-        return result;
-    }
-
-    if (const auto unsupported = firstUnsupportedConstraint(*this)) {
-        lastConflictingConstraints_.clear();
-        result.success = false;
-        result.errorMessage = *unsupported;
-        WLOG_WARN("%s", "solve:unsupported-constraint");
-        return result;
-    }
-
-    if (!solver_ || solverDirty_) {
-        rebuildSolver();
-    }
-
-    if (!solver_) {
-        result.success = false;
-        result.errorMessage = "Solver not available";
-        return result;
-    }
-
-    // `this` is the residual context: the EXACT solve measures SCHEMA §7.4
-    // `maxResidual`. The three drag entries below deliberately do not — the
-    // per-frame lane pays for nothing it does not report.
-    SolverResult solverResult = solver_->solve(this);
-    result.success = solverResult.success;
-    result.iterations = solverResult.iterations;
-    result.residual = solverResult.residual;
-    result.conflictingConstraints = solverResult.conflictingConstraints;
-    lastConflictingConstraints_ = solverResult.conflictingConstraints;
-    result.errorMessage = solverResult.errorMessage;
-    return result;
+    return solveExact();
 }
 
 void Sketch::beginPointDrag(EntityID draggedPoint) {
-    activeDragFixedPoints_.clear();
-    isDraggingPoint_ = false;
-    dragStartPositions_.clear();
-    dragSessionHadFailure_ = false;
-
-    if (draggedPoint.empty() || !getEntityAs<SketchPoint>(draggedPoint)) {
-        return;
-    }
-
-    std::unordered_set<EntityID> allPointIds;
-    allPointIds.reserve(entities_.size());
-    for (const auto& entity : entities_) {
-        if (!entity) {
-            continue;
-        }
-        auto* point = dynamic_cast<SketchPoint*>(entity.get());
-        if (point) {
-            allPointIds.insert(point->id());
-        }
-    }
-
-    bool usedRectangleStrategy = false;
-    auto regionId = onecad::core::loop::getRegionIdContainingEntity(*this, draggedPoint);
-    if (regionId.has_value()) {
-        auto face = onecad::core::loop::resolveRegionFace(*this, *regionId);
-        if (face.has_value()) {
-            std::vector<EntityID> boundaryPointIds =
-                onecad::core::loop::getOrderedBoundaryPointIds(*this, face->outerLoop);
-            if (boundaryPointIds.size() == 4) {
-                auto pointIt = std::find(boundaryPointIds.begin(), boundaryPointIds.end(), draggedPoint);
-                if (pointIt != boundaryPointIds.end()) {
-                    size_t idx = static_cast<size_t>(std::distance(boundaryPointIds.begin(), pointIt));
-                    activeDragFixedPoints_.insert(boundaryPointIds[(idx + 2) % boundaryPointIds.size()]);
-                    usedRectangleStrategy = true;
-                }
-            }
-        }
-    }
-
-    if (!usedRectangleStrategy) {
-        for (const auto& pointId : allPointIds) {
-            if (pointId != draggedPoint) {
-                activeDragFixedPoints_.insert(pointId);
-            }
-        }
-    }
-
-    dragStartPositions_.reserve(allPointIds.size());
-    for (const auto& pointId : allPointIds) {
-        const auto* point = getEntityAs<SketchPoint>(pointId);
-        if (!point) {
-            continue;
-        }
-        dragStartPositions_[pointId] = Vec2d{point->position().X(), point->position().Y()};
-    }
-
-    isDraggingPoint_ = true;
+    isDraggingPoint_ = !draggedPoint.empty() && getEntityAs<SketchPoint>(draggedPoint);
 }
 
 void Sketch::endPointDrag() {
-    if (dragSessionHadFailure_) {
-        for (const auto& [pointId, startPos] : dragStartPositions_) {
-            auto* point = getEntityAs<SketchPoint>(pointId);
-            if (!point) {
-                continue;
-            }
-            point->setPosition(startPos.x, startPos.y);
-        }
-        invalidateSolver();
-    }
-
-    dragStartPositions_.clear();
-    dragSessionHadFailure_ = false;
-    activeDragFixedPoints_.clear();
     isDraggingPoint_ = false;
 }
 
@@ -1556,6 +1448,10 @@ void Sketch::endGroupDrag() {
 
 SolveResult Sketch::solveWithDrag(EntityID draggedPoint, const Vec2d& targetPos) {
     SolveResult result;
+    if (!std::isfinite(targetPos.x) || !std::isfinite(targetPos.y)) {
+        result.errorMessage = "Nonfinite point target";
+        return result;
+    }
 
     auto* point = getEntityAs<SketchPoint>(draggedPoint);
     if (!point) {
@@ -1580,9 +1476,6 @@ SolveResult Sketch::solveWithDrag(EntityID draggedPoint, const Vec2d& targetPos)
         result.success = false;
         result.errorMessage = *unsupported;
         WLOG_WARN("%s", "solveWithDrag:unsupported-constraint");
-        if (isDraggingPoint_) {
-            dragSessionHadFailure_ = true;
-        }
         return result;
     }
 
@@ -1596,21 +1489,13 @@ SolveResult Sketch::solveWithDrag(EntityID draggedPoint, const Vec2d& targetPos)
         return result;
     }
 
-    static const std::unordered_set<EntityID> kNoFixedPoints;
-    const std::unordered_set<EntityID>& pointIdsToFix =
-        isDraggingPoint_ ? activeDragFixedPoints_ : kNoFixedPoints;
-
-    SolverResult solverResult = solver_->solveWithDrag(draggedPoint, targetPos, pointIdsToFix);
+    SolverResult solverResult = solver_->solveWithDrag(draggedPoint, targetPos, this);
     result.success = solverResult.success;
     result.iterations = solverResult.iterations;
     result.residual = solverResult.residual;
     result.conflictingConstraints = solverResult.conflictingConstraints;
     lastConflictingConstraints_ = solverResult.conflictingConstraints;
     result.errorMessage = solverResult.errorMessage;
-
-    if (isDraggingPoint_ && !result.success) {
-        dragSessionHadFailure_ = true;
-    }
 
     return result;
 }

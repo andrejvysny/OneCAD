@@ -83,7 +83,7 @@ async fn hello_round_trip_and_lifecycle() {
     assert_eq!(hello.occt.version, "stub");
     assert_eq!(hello.occt.fingerprint.len(), 16); // $hex64
     assert_eq!(hello.quantization_version, 1);
-    assert_eq!(hello.solver_policy_version, 1);
+    assert_eq!(hello.solver_policy_version, 2);
     assert!(hello.capabilities.is_empty());
 
     // OpenSession echoes the fencing tokens (SCHEMA §7.1).

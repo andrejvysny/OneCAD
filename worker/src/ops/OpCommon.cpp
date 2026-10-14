@@ -1,5 +1,6 @@
 // OpCommon.cpp — see OpCommon.h. Ports from OneCAD-CPP RegenerationEngine.cpp.
 #include "ops/OpCommon.h"
+#include "protocol/SketchTruth.h"
 
 #include <algorithm>
 #include <array>
@@ -447,13 +448,21 @@ std::optional<TopoDS_Face> build_profile_face(
     wire::TranslateResult tr = wire::translate(sketch_params);
     if (!tr.ok) {
         err = "profile: " + tr.error;
+        const auto refusal = protocol::translation_refusal(tr);
+        if (diagnostics_out && refusal.contains("diagnostics")) {
+            for (const auto& diagnostic : refusal["diagnostics"]) diagnostics_out->push_back(diagnostic);
+        }
         return std::nullopt;
     }
     const sk::SolveResult solve = tr.sketch->solve();
-    if (!solve.success) {
-        err = "profile: solve failed: " +
-              (solve.errorMessage.empty() ? std::string("constraint solve did not converge")
-                                          : solve.errorMessage);
+    if (!solve.truth.admissible()) {
+        err = "profile: exact sketch is not admissible";
+        if (diagnostics_out) {
+            for (const auto& diagnostic : protocol::exact_truth_diagnostics(solve.truth, tr.index)) {
+                if (diagnostics_out->size() >= 64) break;
+                diagnostics_out->push_back(diagnostic);
+            }
+        }
         return std::nullopt;
     }
 

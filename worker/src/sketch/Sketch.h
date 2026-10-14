@@ -24,6 +24,7 @@
 #include "SketchCircle.h"
 #include "SketchEllipse.h"
 #include "SketchConstraint.h"
+#include "ExactTruth.h"
 
 #include <memory>
 #include <vector>
@@ -39,6 +40,7 @@ namespace onecad::core::sketch {
 
 // Forward declaration
 class ConstraintSolver;
+struct SketchPose;
 
 /**
  * @brief Sketch plane definition in 3D space
@@ -134,6 +136,8 @@ struct SolveResult {
     std::vector<EntityID> movedEntities;
     std::vector<ConstraintID> conflictingConstraints;
     std::string errorMessage;
+    // Populated only by the exact entry, after every timeout/rollback decision.
+    ExactTruth truth;
 };
 
 /**
@@ -513,7 +517,7 @@ public:
     SolveResult solveWithDrag(EntityID draggedPoint, const Vec2d& targetPos);
 
     /**
-     * @brief Start a point-drag session and compute point-fixing strategy.
+     * @brief Start a Point gesture; selected scalar components stay structurally free.
      */
     void beginPointDrag(EntityID draggedPoint);
 
@@ -758,6 +762,8 @@ public:
     size_t getConstraintCount() const { return constraints_.size(); }
 
 private:
+    SolveResult solveExact();
+    void finalizeExact(SolveResult& result, const SketchPose& before);
     SketchPlane plane_;
     std::optional<HostFaceAttachment> hostFaceAttachment_;
 
@@ -778,10 +784,7 @@ private:
     mutable bool dofDirty_ = true;
 
     // Active point-drag session state
-    std::unordered_set<EntityID> activeDragFixedPoints_;
     bool isDraggingPoint_ = false;
-    std::unordered_map<EntityID, Vec2d> dragStartPositions_;
-    bool dragSessionHadFailure_ = false;
 
     // Active group-drag session scaffold state
     std::unordered_set<EntityID> activeGroupDragPoints_;

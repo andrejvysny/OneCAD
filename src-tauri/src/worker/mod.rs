@@ -37,7 +37,11 @@ use onecad_core::regen::{
     WorkerHead,
 };
 
+mod checkpoint_result;
+pub(crate) mod gesture_result;
 pub mod manager;
+pub(crate) mod sketch_result;
+pub(crate) mod sketch_truth;
 pub mod wire;
 
 pub use manager::{RestartHook, SupervisorConfig, WorkerLifecycle, WorkerManager, WorkerState};
@@ -204,6 +208,9 @@ pub trait SolverEngine: Send + Sync {
         gesture_id: u64,
         final_target: Option<[f64; 2]>,
     ) -> Result<crate::dto::SketchUpsertDto, EngineError>;
+
+    /// Discard worker scratch without solving, revision changes or document edits.
+    async fn cancel_gesture(&self, gesture_id: u64) -> Result<(), EngineError>;
 
     /// `SketchRegions` (SCHEMA §7.4) — closed profile regions for extrude/preview.
     async fn sketch_regions(
@@ -1225,6 +1232,9 @@ impl SolverEngine for PendingBackend {
         _gesture_id: u64,
         _final_target: Option<[f64; 2]>,
     ) -> Result<crate::dto::SketchUpsertDto, EngineError> {
+        Err(Self::not_ready())
+    }
+    async fn cancel_gesture(&self, _gesture_id: u64) -> Result<(), EngineError> {
         Err(Self::not_ready())
     }
     async fn sketch_regions(

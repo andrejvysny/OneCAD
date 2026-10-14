@@ -17,6 +17,10 @@ use onecad_core::document::variables::{Scalar, VariableTable};
 use onecad_core::expr::Dimension;
 use onecad_core::history::StepState;
 use onecad_core::regen::resolve_variable_table;
+mod sketch_truth;
+pub use sketch_truth::{
+    SketchConflictReason, SketchResidualDimension, SketchResidualViolationDto, SketchTruthDto,
+};
 
 /// Whether a document is open (`src/stores/documentStore.ts` `DocStatus`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -884,6 +888,8 @@ pub struct SketchSessionDto {
     pub constraints: serde_json::Value,
     pub dof: u32,
     pub status: SketchSolveStatus,
+    #[serde(flatten)]
+    pub truth: SketchTruthDto,
     pub solve_current: bool,
     /// Constraint ids in conflict (SCHEMA §7.4; empty when the sketch is solvable).
     /// Threaded from the entering `SketchUpsert` solve so re-entering a conflicting
@@ -912,6 +918,8 @@ pub struct SketchUpsertDto {
     pub sketch_revision: u64,
     pub dof: u32,
     pub status: SketchSolveStatus,
+    #[serde(flatten)]
+    pub truth: SketchTruthDto,
     /// Constraint ids in conflict (SCHEMA §7.4; empty when the sketch is solvable).
     /// The worker `SketchUpsert`/`EndGesture` result carries these; absent ⇒ empty
     /// at the wire parse (`str_array`, strict back/forward compat). Always
@@ -954,11 +962,15 @@ pub struct CurveParamsDto {
 }
 
 /// A `BeginGesture` acknowledgement (SCHEMA §7.4).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BeginGestureDto {
     pub gesture_id: u64,
     pub ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub point_offset: Option<[f64; 2]>,
+    pub positions: std::collections::BTreeMap<String, [f64; 2]>,
+    pub curves: std::collections::BTreeMap<String, CurveParamsDto>,
     /// Per-entity constrained state for the COMMITTED sketch this gesture opened
     /// against (SCHEMA §7.4 `entityStates`). **Gesture-fixed**: `SolveDrag` never
     /// carries it and `EndGesture` echoes this exact map, so a consumer holds this
@@ -989,6 +1001,8 @@ pub struct DragSolveDto {
     pub solve_micros: u64,
     /// True when this `seq` was superseded by a newer drag (positions empty).
     pub superseded: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<Vec<onecad_core::regen::Diagnostic>>,
 }
 
 /// One closed profile region (`finishSketch`; `types.ts SketchRegion`).
@@ -2910,6 +2924,7 @@ mod tests {
     #[test]
     fn sketch_upsert_dto_serializes_conflicting_ids() {
         let dto = SketchUpsertDto {
+            truth: Default::default(),
             sketch_id: "sk_1".into(),
             sketch_revision: 3,
             dof: 0,
@@ -2932,6 +2947,7 @@ mod tests {
 
         // SketchSessionDto surfaces it too (session-enter surface).
         let session = SketchSessionDto {
+            truth: Default::default(),
             solve_current: true,
             sketch_id: "sk_1".into(),
             plane: serde_json::json!({}),
@@ -2957,6 +2973,7 @@ mod tests {
             ("e7".to_string(), EntityConstrainedState::Conflicting),
         ]);
         let dto = SketchUpsertDto {
+            truth: Default::default(),
             sketch_id: "sk_1".into(),
             sketch_revision: 3,
             dof: 2,
@@ -2989,6 +3006,9 @@ mod tests {
         let begin = BeginGestureDto {
             gesture_id: 51,
             ready: true,
+            point_offset: None,
+            positions: Default::default(),
+            curves: Default::default(),
             entity_states: states,
         };
         assert_eq!(
@@ -2996,6 +3016,7 @@ mod tests {
             serde_json::json!("conflicting")
         );
         let session = SketchSessionDto {
+            truth: Default::default(),
             solve_current: true,
             sketch_id: "sk_1".into(),
             plane: serde_json::json!({}),
@@ -3070,6 +3091,7 @@ mod tests {
         // Container-level: NEVER skipped (the `conflicting: []` precedent) — the
         // frontend always sees the key, empty when nothing moved.
         let dto = SketchUpsertDto {
+            truth: Default::default(),
             sketch_id: "sk_1".into(),
             sketch_revision: 3,
             dof: 0,
@@ -3093,6 +3115,7 @@ mod tests {
             curves: std::collections::BTreeMap::from([("e7".into(), only_radius)]),
             solve_micros: 0,
             superseded: false,
+            diagnostics: None,
         };
         assert_eq!(
             serde_json::to_value(&drag).unwrap()["curves"],

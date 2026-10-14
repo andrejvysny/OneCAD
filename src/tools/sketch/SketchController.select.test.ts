@@ -82,6 +82,7 @@ function makeClientMock() {
         }),
     ),
     cancelSketch: vi.fn(() => Promise.resolve()),
+    cancelGesture: vi.fn(() => Promise.resolve()),
     deleteSketch: vi.fn(() => Promise.resolve()),
     // Return type STATED, not inferred — same reason `solveDrag`/`endGesture`
     // state theirs: §7.4 added the optional `entityStates` map, and a
@@ -316,6 +317,22 @@ describe("SketchController select tool", () => {
     expect(clientMock.endGesture).toHaveBeenCalledWith([42, 3]);
   });
 
+  it("pointer-up waits for the Point offset before snapping the desired handle", async () => {
+    let resolveBegin!: (value: BeginGestureResult) => void;
+    clientMock.beginGesture.mockReturnValueOnce(new Promise((resolve) => { resolveBegin = resolve; }));
+    settingsStore.getState().setSnap("grid", true);
+    for (const key of ["sketchGuideLines", "sketchGuidePoints", "quadrant", "intersection", "onCurve"] as const) {
+      settingsStore.getState().setSnap(key, false);
+    }
+    mouse("pointerdown", 1, 1, 0, 1);
+    mouse("pointermove", 31, 1, 0, 1);
+    mouse("pointerup", 41, 1, 0, 0);
+    resolveBegin({ gestureId: 1, ready: true, pointOffset: [-1, -1] });
+    await flush();
+    expect(clientMock.solveDrag).not.toHaveBeenCalled();
+    expect(clientMock.endGesture).toHaveBeenCalledWith([41, 1]);
+  });
+
   it("Escape during delayed begin restores the original point after begin resolves", async () => {
     let resolveBegin!: (value: BeginGestureResult) => void;
     clientMock.beginGesture.mockReturnValueOnce(
@@ -328,8 +345,81 @@ describe("SketchController select tool", () => {
     await flush();
 
     expect(clientMock.solveDrag).not.toHaveBeenCalled();
-    expect(clientMock.endGesture).toHaveBeenCalledWith([0, 0]);
+    expect(clientMock.cancelGesture).toHaveBeenCalledTimes(1);
+    expect(clientMock.endGesture).not.toHaveBeenCalled();
     expect(sketchStore.getState().session!.entities[0].p0).toEqual([0, 0]);
+  });
+
+  it("Escape retains cancel precedence over pointer-up while Begin is pending", async () => {
+    let resolveBegin!: (value: BeginGestureResult) => void;
+    clientMock.beginGesture.mockReturnValueOnce(new Promise((resolve) => { resolveBegin=resolve; }));
+    mouse("pointerdown",0,0,0,1); mouse("pointermove",30,0,0,1);
+    window.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}));
+    mouse("pointerup",42,3,0,0);
+    resolveBegin({gestureId:1,ready:true,pointOffset:[2,3]}); await flush();
+    expect(clientMock.cancelGesture).toHaveBeenCalledTimes(1);
+    expect(clientMock.endGesture).not.toHaveBeenCalled();
+    expect(sketchStore.getState().undoStack).toHaveLength(0);
+  });
+
+  it("Escape restores full solve slices after Begin state and preview conflicts", async () => {
+    const before={...sketchStore.getState().session!,dof:7,status:"OverConstrained" as const};
+    sketchStore.getState().setSession(before);
+    sketchStore.getState().setConflicting(["original"]);
+    sketchStore.getState().setEntityStates({e1:"fullyConstrained"});
+    clientMock.beginGesture.mockResolvedValueOnce({gestureId:1,ready:true,entityStates:{e1:"underConstrained"},
+      positions:{"e1.Start":[1,2]}});
+    clientMock.solveDrag.mockResolvedValueOnce({gestureId:1,seq:1,status:"partial",dof:7,conflicting:["preview"],
+      positions:{},solveMicros:0,superseded:false});
+    mouse("pointerdown",0,0,0,1); mouse("pointermove",30,0,0,1); await flush();
+    expect(sketchStore.getState().conflictingIds).toEqual(["preview"]);
+    window.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true})); await flush();
+    expect(sketchStore.getState().session).toEqual({...before,conflicting:["original"],
+      entityStates:{e1:"fullyConstrained"},solveCurrent:false});
+    expect(sketchStore.getState().conflictingIds).toEqual(["original"]);
+    expect(sketchStore.getState().entityStates).toEqual({e1:"fullyConstrained"});
+    expect(sketchStore.getState().undoStack).toHaveLength(0);
+  });
+
+  it("a second pointer-down cannot replace a Begin awaiting its release", async () => {
+    let resolveBegin!: (value: BeginGestureResult) => void;
+    clientMock.beginGesture.mockReturnValueOnce(new Promise((resolve)=>{resolveBegin=resolve;}));
+    mouse("pointerdown",0,0,0,1); mouse("pointermove",30,0,0,1); mouse("pointerup",32,2,0,0);
+    mouse("pointerdown",40,0,0,1); mouse("pointermove",60,1,0,1); mouse("pointerup",61,1,0,0);
+    resolveBegin({gestureId:1,ready:true}); await flush();
+    expect(clientMock.beginGesture).toHaveBeenCalledTimes(1);
+    expect(clientMock.endGesture).toHaveBeenCalledWith([32,2]);
+    mouse("pointerdown",32,2,0,1); mouse("pointermove",50,20,0,1); await flush();
+    expect(clientMock.beginGesture).toHaveBeenCalledTimes(2);
+  });
+
+  it("finalization drains before another Begin and a failed End creates no history", async () => {
+    let rejectEnd!: (reason: Error) => void;
+    clientMock.endGesture.mockReturnValueOnce(new Promise((_resolve,reject)=>{rejectEnd=reject;}));
+    mouse("pointerdown",0,0,0,1); mouse("pointermove",30,0,0,1); await flush();
+    mouse("pointerup",32,2,0,0); mouse("pointerdown",0,0,0,1); mouse("pointermove",30,0,0,1);
+    expect(clientMock.beginGesture).toHaveBeenCalledTimes(1);
+    rejectEnd(new Error("old End failed")); await flush();
+    expect(clientMock.cancelGesture).toHaveBeenCalledTimes(1);
+    expect(sketchStore.getState().undoStack).toHaveLength(0);
+    expect(sketchStore.getState().session!.solveCurrent).toBe(false);
+    mouse("pointerdown",0,0,0,1); mouse("pointermove",30,0,0,1); await flush();
+    expect(clientMock.beginGesture).toHaveBeenCalledTimes(2);
+  });
+
+  it("End publishes fresh truth and clears preview solve slices", async () => {
+    sketchStore.getState().setSession({...sketchStore.getState().session!,reasons:{old:"residualViolation"},
+      unassessed:["old"],violations:[],normalizedMaxResidual:2,diagnostics:[{code:"OP_FAILED",severity:"error",message:"old"}]});
+    clientMock.beginGesture.mockResolvedValueOnce({gestureId:1,ready:true,entityStates:{e1:"underConstrained"}});
+    clientMock.solveDrag.mockResolvedValueOnce({gestureId:1,seq:1,status:"partial",dof:2,conflicting:["preview"],
+      positions:{},solveMicros:0,superseded:false});
+    mouse("pointerdown",0,0,0,1); mouse("pointermove",30,0,0,1); await flush();
+    mouse("pointerup",32,2,0,0); await flush();
+    expect(sketchStore.getState().conflictingIds).toEqual([]);
+    expect(sketchStore.getState().entityStates).toEqual({});
+    for (const key of ["reasons","unassessed","violations","normalizedMaxResidual","diagnostics"] as const) {
+      expect(sketchStore.getState().session![key]).toBeUndefined();
+    }
   });
 
   it("a tool switch during delayed begin neither publishes stale entity state nor leaks its gesture", async () => {
@@ -345,7 +435,36 @@ describe("SketchController select tool", () => {
 
     expect(sketchStore.getState().entityStates).toEqual({});
     expect(engineMock.setSketchEntityStates).not.toHaveBeenCalledWith({ e1: "conflicting" });
-    expect(clientMock.endGesture).toHaveBeenCalledTimes(1);
+    expect(clientMock.cancelGesture).toHaveBeenCalledTimes(1);
+    expect(clientMock.endGesture).not.toHaveBeenCalled();
+  });
+
+  it("switch-away/back drains pending Begin cancellation before replacement input", async () => {
+    let resolveBegin!: (value: BeginGestureResult) => void;
+    let resolveCancel!: () => void;
+    clientMock.beginGesture.mockReturnValueOnce(new Promise((resolve)=>{resolveBegin=resolve;}));
+    clientMock.cancelGesture.mockReturnValueOnce(new Promise<void>((resolve)=>{resolveCancel=resolve;}));
+    mouse("pointerdown",0,0,0,1); mouse("pointermove",30,0,0,1);
+    toolStore.getState().setTool("line"); toolStore.getState().setTool("select");
+    mouse("pointerdown",40,0,0,1); mouse("pointermove",60,0,0,1);
+    expect(clientMock.beginGesture).toHaveBeenCalledTimes(1);
+    resolveBegin({gestureId:1,ready:true}); await flush();
+    expect(clientMock.cancelGesture).toHaveBeenCalledTimes(1);
+    mouse("pointerdown",0,0,0,1); mouse("pointermove",30,0,0,1);
+    expect(clientMock.beginGesture).toHaveBeenCalledTimes(1);
+    resolveCancel(); await flush();
+    mouse("pointerdown",0,0,0,1); mouse("pointermove",30,0,0,1); await flush();
+    expect(clientMock.beginGesture).toHaveBeenCalledTimes(2);
+    expect(clientMock.endGesture).not.toHaveBeenCalled();
+  });
+
+  it("switching tools during an open drag discards scratch and restores preview geometry", async () => {
+    mouse("pointerdown",0,0,0,1); mouse("pointermove",30,0,0,1); await flush();
+    toolStore.getState().setTool("line"); await flush();
+    expect(clientMock.cancelGesture).toHaveBeenCalledTimes(1);
+    expect(clientMock.endGesture).not.toHaveBeenCalled();
+    expect(sketchStore.getState().session!.entities[0].p0).toEqual([0,0]);
+    expect(sketchStore.getState().undoStack).toHaveLength(0);
   });
 
   it("a mode exit during delayed begin leaves teardown ownership to cancelSketch", async () => {
@@ -383,6 +502,20 @@ describe("SketchController select tool", () => {
     mouse("pointermove", 31, 1, 0, 1);
     await flush();
     expect(clientMock.solveDrag).toHaveBeenLastCalledWith([30, 0]);
+  });
+
+  it("snaps the offset handle against candidates corrected by Begin", async () => {
+    const session=sketchStore.getState().session!;
+    sketchStore.getState().setSession({...session,entities:[...session.entities,
+      {id:"e2",type:"Line",p0:[80,10],p1:[80,40]}]});
+    settingsStore.setState((state)=>({snapTo:{...state.snapTo,grid:false,sketchGuideLines:false,
+      sketchGuidePoints:false,quadrant:false,intersection:false,onCurve:true}}));
+    clientMock.beginGesture.mockResolvedValueOnce({gestureId:1,ready:true,pointOffset:[-1,-1],
+      positions:{"e2.Start":[35,10],"e2.End":[35,40]}});
+    mouse("pointerdown",1,1,0,1); mouse("pointermove",35.5,20,0,1); await flush();
+    expect(clientMock.solveDrag).toHaveBeenLastCalledWith([36,20]);
+    mouse("pointerup",35.5,21,0,0); await flush();
+    expect(clientMock.endGesture).toHaveBeenLastCalledWith([36,21]);
   });
 
   it("excludes dragged geometry from on-curve candidates", async () => {
@@ -440,7 +573,8 @@ describe("SketchController select tool", () => {
     chromePointerUp(200, 200);
     await flush();
 
-    expect(clientMock.endGesture).toHaveBeenCalledWith([0, 0]);
+    expect(clientMock.cancelGesture).toHaveBeenCalledTimes(1);
+    expect(clientMock.endGesture).not.toHaveBeenCalled();
     expect(sketchStore.getState().session!.entities[0].p0).toEqual([0, 0]);
     expect(engineMock.setSketchDrawingActive).toHaveBeenLastCalledWith(false);
   });
@@ -546,7 +680,7 @@ describe("SketchController select tool", () => {
     expect(sketchSelectionStore.getState().hover).toBeNull();
   });
 
-  it("Esc mid-drag ends the gesture and restores pre-drag geometry", async () => {
+  it("Esc mid-drag discards scratch and restores pre-drag geometry", async () => {
     mouse("pointerdown", 0, 0, 0, 1);
     mouse("pointermove", 30, 0, 0, 1);
     await flush(); // dragging live, preview moved to [30,0]
@@ -554,8 +688,9 @@ describe("SketchController select tool", () => {
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     await flush();
 
-    // Ended at the ORIGINAL position (no explicit cancel verb on the wire).
-    expect(clientMock.endGesture).toHaveBeenCalledWith([0, 0]);
+    // Explicit cancellation never performs a final solve or commit.
+    expect(clientMock.cancelGesture).toHaveBeenCalledTimes(1);
+    expect(clientMock.endGesture).not.toHaveBeenCalled();
     // Geometry restored to pre-drag.
     expect(sketchStore.getState().session!.entities[0].p0).toEqual([0, 0]);
   });
@@ -791,15 +926,14 @@ describe("SketchController select tool — SP-2 gesture kinds", () => {
     expect(committed.find((e) => e.id === "c1")?.radius).toBe(42);
   });
 
-  it("Esc mid-radius-drag ends at the GRAB point, the zero-delta target", async () => {
+  it("Esc mid-radius-drag discards scratch without a final target", async () => {
     mouse("pointerdown", 20, 100, 0, 1);
     mouse("pointermove", 35, 100, 0, 1);
     await flush();
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     await flush();
 
-    // Not the handle's coordinate: a radius/entityBody gesture measures from `grab`,
-    // so ending anywhere else would commit however far the user had already dragged.
-    expect(clientMock.endGesture).toHaveBeenCalledWith([20, 100]);
+    expect(clientMock.cancelGesture).toHaveBeenCalledTimes(1);
+    expect(clientMock.endGesture).not.toHaveBeenCalled();
   });
 });

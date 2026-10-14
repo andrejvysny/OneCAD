@@ -836,6 +836,7 @@ fn valid_manifest_bytes() -> Vec<u8> {
         global_schema_version: GLOBAL_SCHEMA_VERSION,
         app_version: String::new(),
         occt_fingerprint: None,
+        solver_policy_version: Some(onecad_core::regen::engine::SOLVER_POLICY_VERSION),
         document_id: DocumentId(Uuid::from_u128(1)),
         created: String::new(),
         modified: String::new(),

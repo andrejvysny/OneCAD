@@ -4538,6 +4538,7 @@ export const mockClient: CadClient = {
   beginGesture: lane.beginGesture,
   solveDrag: lane.solveDrag,
   endGesture: lane.endGesture,
+  cancelGesture: lane.cancelGesture,
   projectToSketch: mockProjectToSketch,
   updateProjection: mockUpdateProjection,
   detachProjection: mockDetachProjection,

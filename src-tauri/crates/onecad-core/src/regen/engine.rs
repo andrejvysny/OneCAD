@@ -110,12 +110,15 @@ pub struct PolicyVersions {
     pub signature: u32,
 }
 
+/// Typed retained-pose residual truth (SCHEMA §7.4 / §13).
+pub const SOLVER_POLICY_VERSION: u32 = 2;
+
 impl Default for PolicyVersions {
-    /// All axes at `1` — the current shipping scheme (SCHEMA §6/§13).
+    /// Solver policy `2`; the remaining independent axes stay at `1`.
     fn default() -> Self {
         Self {
             quantization: 1,
-            solver_policy: 1,
+            solver_policy: SOLVER_POLICY_VERSION,
             descriptor: 1,
             resolver: 1,
             signature: 1,

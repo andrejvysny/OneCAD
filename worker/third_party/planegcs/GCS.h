@@ -142,6 +142,8 @@ private:
     bool hasUnknowns;   // if plist is filled with the unknown parameters
     bool hasDiagnosis;  // if dofs, conflictingTags, redundantTags are up to date
     bool isInit;        // if plists, clists, reductionmaps are up to date
+    bool scopedUnknowns = false;
+    bool constraintTouchesDeclaredUnknown(const Constraint* constraint) const;
 
     bool emptyDiagnoseMatrix;  // false only if there is at least one driving constraint.
 
@@ -585,6 +587,8 @@ public:
     void rescaleConstraint(int id, double coeff);
 
     void declareUnknowns(VEC_pD& params);
+    VEC_pD connectedUnknowns(const VEC_pD& seeds, const VEC_pD& unknowns) const;
+    void setScopedUnknowns(bool enabled);
     void declareDrivenParams(VEC_pD& params);
     void initSolution(Algorithm alg = DogLeg);
 

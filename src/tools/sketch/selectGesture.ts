@@ -39,10 +39,8 @@ function gestureRole(position: ConstraintPosition): GestureRole | undefined {
  * Kind for a NAMED point handle, or null when that handle is not draggable.
  *
  * One rule decides the two entries that are NOT plain point drags:
- *   - Arc Center → `entityBody`. A `point` drag pins every OTHER point, which for
- *     an arc includes its own endpoints — that over-determines radius+angles and
- *     a welded arc simply refuses to move. Translating an arc has to carry its
- *     endpoints, which is exactly what `entityBody` does.
+ *   - Arc Center → `entityBody`. Preserve the established whole-arc translation
+ *     gesture; Point structural isolation does not change that target contract.
  *   - Arc Start/End → `arcEnd`. These were NOT draggable before SP-2 (the comment
  *     said "derived from center + angles"); they are real solver points, and the
  *     `curves` channel is what finally carries the reshape back to the document.

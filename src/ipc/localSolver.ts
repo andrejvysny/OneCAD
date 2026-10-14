@@ -179,6 +179,7 @@ export interface LocalSolverLane {
   ): Promise<BeginGestureResult>;
   solveDrag(target: [number, number]): Promise<DragSolveResult | null>;
   endGesture(finalTarget?: [number, number]): Promise<SketchUpsertResult>;
+  cancelGesture(): Promise<void>;
   /** True if a lane session already exists for this sketch id (mock re-entry parity). */
   hasSession(sketchId: string): boolean;
   /** Read-only clone of a live lane session (always-visible static layer read), or null. */
@@ -236,6 +237,7 @@ interface MockGesture {
   grab: [number, number] | null;
   /** `radius`: `|grab − center| − radius`, captured at Begin (0 when `grab` absent). */
   radiusOffset: number;
+  pointOffset: [number, number];
   /** The GESTURE-FIXED per-entity state map (§7.4): diagnosed once at Begin and
    *  echoed verbatim by `endGesture`. A drag adds no constraint, so it cannot
    *  have changed; `solveDrag` never carries it. */
@@ -300,6 +302,11 @@ function openGesture(
     baseline,
     grab,
     radiusOffset,
+    pointOffset: kind === "point" && target?.grab
+      ? (() => {
+          const handle = entities.flatMap(ownedHandles).find(([key]) => key === dragPointId)?.[1];
+          return handle ? [handle[0]-target.grab[0], handle[1]-target.grab[1]] : [0,0];
+        })() : [0,0],
     entityStates: mockEntityStates(entities, constraints),
   };
 }
@@ -325,7 +332,8 @@ function echoGesture(
   entity: SketchEntity | undefined,
   target: [number, number],
 ): GestureEcho {
-  if (g.kind === "point") return { positions: { [g.dragPointId]: target }, curves: {} };
+  if (g.kind === "point") return { positions: { [g.dragPointId]:
+    [target[0]+g.pointOffset[0], target[1]+g.pointOffset[1]] }, curves: {} };
   if (g.kind === "entityBody") {
     if (!g.grab) return noEcho();
     const [dx, dy] = [target[0] - g.grab[0], target[1] - g.grab[1]];
@@ -365,6 +373,7 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
   // Drag-gesture state (kinematic echo — see the module header).
   let gestureSeq = 0;
   let activeGesture: MockGesture | null = null;
+  let gestureGeneration = 0;
 
   /** The gesture's grabbed entity, read LIVE from the session (never cached: an
    *  upsert mid-gesture would strand a stale copy). */
@@ -663,8 +672,12 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
       sketchId: string,
       opts?: { discard?: boolean },
     ): Promise<CancelSketchResult> {
+      const generation = gestureGeneration;
       await wait(0);
-      activeGesture = null;
+      if (generation === gestureGeneration && activeGesture?.sketchId === sketchId) {
+        ++gestureGeneration;
+        activeGesture = null;
+      }
       // Real backend discards scratch; the lane keeps the last committed session.
       if (!opts?.discard) return { discarded: false };
       // WP-U7 D-1: put the session back to its state at enter. No snapshot means
@@ -685,22 +698,28 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
       dragPointId: string,
       target?: GestureTarget,
     ): Promise<BeginGestureResult> {
+      const generation = ++gestureGeneration;
       await wait(0);
+      if (generation !== gestureGeneration) throw new Error("beginGesture: stale gesture");
       const session = sketchSessions.get(sketchId);
       const entities = session?.entities ?? [];
       activeGesture = openGesture(sketchId, dragPointId, entities, session?.constraints ?? [], target);
-      return { gestureId: ++gestureSeq, ready: true, entityStates: activeGesture.entityStates };
+      return { gestureId: ++gestureSeq, ready: true, entityStates: activeGesture.entityStates,
+        ...(target?.kind === "point" && target.grab ? { pointOffset: activeGesture.pointOffset } : {}) };
     },
 
     async solveDrag(target: [number, number]): Promise<DragSolveResult | null> {
-      await wait(0);
+      const generation = gestureGeneration;
       const g = activeGesture;
+      const gestureId = gestureSeq;
+      await wait(0);
+      if (generation !== gestureGeneration || g !== activeGesture) return null;
       if (!g) return null;
       const seq = g.nextSeq++;
       const session = sketchSessions.get(g.sketchId);
       const echo = echoGesture(g, gestureEntity(g), target);
       return {
-        gestureId: gestureSeq,
+        gestureId,
         seq,
         status: "success",
         dof: session?.dof ?? 0,
@@ -712,9 +731,17 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
       };
     },
 
+    async cancelGesture(): Promise<void> {
+      ++gestureGeneration;
+      activeGesture = null;
+    },
+
     async endGesture(finalTarget?: [number, number]): Promise<SketchUpsertResult> {
-      await wait(SKETCH_LATENCY_MS);
+      const generation = gestureGeneration;
       const g = activeGesture;
+      await wait(SKETCH_LATENCY_MS);
+      if (generation !== gestureGeneration || g !== activeGesture) throw new Error("endGesture: stale gesture");
+      ++gestureGeneration;
       activeGesture = null;
       const sketchId = g?.sketchId ?? "";
       const session = sketchId ? sketchSessions.get(sketchId) : undefined;
@@ -944,6 +971,8 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
     },
 
     resetSketches(): void {
+      ++gestureGeneration;
+      activeGesture = null;
       sketchSessions.clear();
       sketchPlanes.clear();
       sketchRevisions.clear();

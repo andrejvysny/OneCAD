@@ -930,6 +930,18 @@ impl WorkerManager {
         }
         self.shared.client().ok_or_else(not_connected)
     }
+
+    async fn gesture_request(&self, verb: &str, args: Value) -> Result<Value, EngineError> {
+        let epoch = self.epoch();
+        let client = self.client_or_err()?;
+        let response = client.request(verb, args).await.map_err(protocol_err)?;
+        if self.epoch() != epoch || !Arc::ptr_eq(&client, &self.client_or_err()?) {
+            return Err(protocol(
+                "Gesture response belongs to a replaced worker session",
+            ));
+        }
+        ok_result(response)
+    }
 }
 
 impl std::fmt::Debug for WorkerManager {
@@ -1206,10 +1218,21 @@ async fn spawn_and_connect(
             connected.map_err(|e| format!("handshake: {e}"))?
         }
     };
+    verify_solver_policy(client.hello().solver_policy_version)?;
     if let Some(expected) = &expected {
         bundled_manifest::verify_hello(expected, client.hello())?;
     }
     Ok((child, Arc::new(client)))
+}
+
+fn verify_solver_policy(actual: u32) -> Result<(), String> {
+    let expected = onecad_core::regen::engine::SOLVER_POLICY_VERSION;
+    if actual != expected {
+        return Err(format!(
+            "worker solver policy {actual} differs from supported policy {expected}"
+        ));
+    }
+    Ok(())
 }
 
 /// Largest single worker stderr line forwarded verbatim; the remainder of an
@@ -1647,12 +1670,24 @@ impl GeometryEngine for WorkerManager {
 #[async_trait]
 impl SolverEngine for WorkerManager {
     async fn sketch_upsert(&self, sketch: &Sketch) -> Result<SketchUpsertDto, EngineError> {
+        let epoch = self.epoch();
         let client = self.client_or_err()?;
         let resp = client
             .request("SketchUpsert", wire::sketch_upsert_args(sketch))
             .await
             .map_err(protocol_err)?;
-        ok_result(resp).map(|r| wire::parse_sketch_upsert(&sketch.id.to_string(), &r))
+        if self.epoch() != epoch {
+            return Err(EngineError::Protocol {
+                message: "SketchUpsert: worker restarted during solve".into(),
+            });
+        }
+        if !Arc::ptr_eq(&client, &self.client_or_err()?) {
+            return Err(EngineError::Protocol {
+                message: "SketchUpsert: worker connection changed during solve".into(),
+            });
+        }
+        wire::parse_sketch_upsert_checked(sketch, &ok_result(resp)?)
+            .map_err(|message| EngineError::Protocol { message })
     }
 
     async fn begin_gesture(
@@ -1664,7 +1699,6 @@ impl SolverEngine for WorkerManager {
         target: wire::GestureTarget,
         solver_policy_hash: &str,
     ) -> Result<BeginGestureDto, EngineError> {
-        let client = self.client_or_err()?;
         let args = wire::begin_gesture_args(
             sketch_id,
             sketch_revision,
@@ -1673,11 +1707,9 @@ impl SolverEngine for WorkerManager {
             &target,
             solver_policy_hash,
         );
-        let resp = client
-            .request("BeginGesture", args)
-            .await
-            .map_err(protocol_err)?;
-        ok_result(resp).map(|r| wire::parse_begin_gesture(gesture_id, &r))
+        let result = self.gesture_request("BeginGesture", args).await?;
+        super::gesture_result::begin(gesture_id, &result)
+            .map_err(|message| EngineError::Protocol { message })
     }
 
     async fn solve_drag(
@@ -1689,15 +1721,13 @@ impl SolverEngine for WorkerManager {
     ) -> Result<DragSolveDto, EngineError> {
         // Fired latest-wins: the client sends the newest seq without serial awaits;
         // a stale seq may resolve `superseded` (SCHEMA §7.4) — parsed, not an error.
-        let client = self.client_or_err()?;
-        let resp = client
-            .request(
+        let result = self
+            .gesture_request(
                 "SolveDrag",
                 wire::solve_drag_args(gesture_id, seq, drag_point, target),
             )
-            .await
-            .map_err(protocol_err)?;
-        ok_result(resp).map(|r| wire::parse_solve_drag(&r))
+            .await?;
+        Ok(wire::parse_solve_drag(&result))
     }
 
     async fn end_gesture(
@@ -1706,15 +1736,32 @@ impl SolverEngine for WorkerManager {
         gesture_id: u64,
         final_target: Option<[f64; 2]>,
     ) -> Result<SketchUpsertDto, EngineError> {
-        let client = self.client_or_err()?;
-        let resp = client
-            .request(
+        let result = self
+            .gesture_request(
                 "EndGesture",
                 wire::end_gesture_args(gesture_id, final_target),
             )
-            .await
-            .map_err(protocol_err)?;
-        ok_result(resp).map(|r| wire::parse_sketch_upsert(sketch_id, &r))
+            .await?;
+        if result.get("gestureId").and_then(Value::as_u64) != Some(gesture_id) {
+            return Err(protocol("EndGesture: invalid gesture receipt"));
+        }
+        wire::parse_sketch_upsert_truth_checked(sketch_id, &result)
+            .map_err(|message| EngineError::Protocol { message })
+    }
+
+    async fn cancel_gesture(&self, gesture_id: u64) -> Result<(), EngineError> {
+        let result = self
+            .gesture_request(
+                "EndGesture",
+                json!({"gestureId": gesture_id, "cancel": true}),
+            )
+            .await?;
+        if result.get("gestureId").and_then(Value::as_u64) != Some(gesture_id)
+            || result.get("cancelled").and_then(Value::as_bool) != Some(true)
+        {
+            return Err(protocol("EndGesture: invalid cancellation receipt"));
+        }
+        Ok(())
     }
 
     async fn sketch_regions(&self, sketch_id: &str) -> Result<FinishSketchDto, EngineError> {
@@ -3261,5 +3308,74 @@ mod poison_tests {
             .await
             .expect("the gate must release once the discard settles");
         settler.await.unwrap();
+    }
+
+    async fn send_mock_frame(io: &mut tokio::io::DuplexStream, frame: Value) {
+        use tokio::io::AsyncWriteExt;
+        let bytes =
+            onecad_protocol::framing::encode_frame(&serde_json::to_vec(&frame).unwrap(), &[])
+                .unwrap();
+        io.write_all(&bytes).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn app_handshake_refuses_legacy_solver_policy() {
+        for policy in [1, 2] {
+            let (client_io, mut server) = tokio::io::duplex(4096);
+            send_mock_frame(&mut server, json!({"v":1,"t":"hello","seq":0,"result":{
+                "protocolVersion":1,"workerVersion":"test","occt":{"version":"test","fingerprint":"0000000000000000"},
+                "quantizationVersion":1,"solverPolicyVersion":policy,"capabilities":[]}})).await;
+            let (reader, writer) = tokio::io::split(client_io);
+            let client = ProtocolClient::connect(reader, writer).await.unwrap();
+            assert_eq!(
+                verify_solver_policy(client.hello().solver_policy_version).is_ok(),
+                policy == 2
+            );
+        }
+    }
+
+    async fn read_mock_request(io: &mut tokio::io::DuplexStream) -> Value {
+        use tokio::io::AsyncReadExt;
+        let mut header = [0_u8; 12];
+        io.read_exact(&mut header).await.unwrap();
+        let len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+        let mut json = vec![0; len];
+        io.read_exact(&mut json).await.unwrap();
+        serde_json::from_slice(&json).unwrap()
+    }
+
+    #[tokio::test]
+    async fn delayed_upsert_reply_from_retired_manager_is_rejected_without_epoch_bump() {
+        use onecad_core::ids::SketchId;
+        use onecad_core::sketch::{Sketch, WorldPlane};
+        let shared = shared(1);
+        let manager = WorkerManager {
+            shared: shared.clone(),
+        };
+        let (client_io, mut server) = tokio::io::duplex(4096);
+        send_mock_frame(&mut server, json!({"v":1,"t":"hello","seq":0,"result":{
+            "protocolVersion":1,"workerVersion":"test","occt":{"version":"test","fingerprint":"0000000000000000"},
+            "quantizationVersion":1,"solverPolicyVersion":2,"capabilities":[]}})).await;
+        let (reader, writer) = tokio::io::split(client_io);
+        let client = Arc::new(ProtocolClient::connect(reader, writer).await.unwrap());
+        *shared.conn.write().unwrap() = Some(client);
+        let id = SketchId(uuid::Uuid::from_u128(0x13));
+        let request = {
+            let manager = manager.clone();
+            tokio::spawn(async move {
+                manager
+                    .sketch_upsert(&Sketch::on_world_plane(id, "test", WorldPlane::XY))
+                    .await
+            })
+        };
+        let sent = read_mock_request(&mut server).await;
+        assert_eq!(sent["verb"], "SketchUpsert");
+        let epoch = manager.epoch();
+        manager.retire();
+        assert_eq!(manager.epoch(), epoch);
+        send_mock_frame(&mut server, json!({"v":1,"t":"resp","id":sent["id"],"ok":true,
+            "documentRevision":0,"workerEpoch":1,"snapshotId":0,"seq":1,
+            "result":{"upserted":true,"sketchId":id.to_string(),"sketchRevision":1,"dof":0,"state":"FullyConstrained"}})).await;
+        assert!(request.await.unwrap().is_err());
     }
 }

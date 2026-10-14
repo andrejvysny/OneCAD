@@ -353,7 +353,7 @@ export interface DetachProjectionResult {
 }
 
 /** Full authoritative sketch, returned by `enterSketch`. */
-export interface SketchSession {
+export interface SketchSession extends SketchTruth {
   sketchId: string;
   plane: SketchPlane;
   entities: SketchEntity[];
@@ -417,7 +417,7 @@ export type EnterSketchTarget =
     };
 
 /** `sketchUpsert` result (SCHEMA §7.4 SketchUpsert result + solved coords). */
-export interface SketchUpsertResult {
+export interface SketchUpsertResult extends SketchTruth {
   sketchId: string;
   sketchRevision: number;
   dof: number;
@@ -440,6 +440,24 @@ export interface SketchUpsertResult {
   /** Per-entity constrained state after this solve (SCHEMA §7.4). Every solve
    *  write-back REPLACES the store's `entityStates` from it. Absent ⇒ `{}`. */
   entityStates?: SketchEntityStates;
+}
+
+export interface SketchResidualViolation {
+  constraintId: string;
+  dimension: "mm" | "rad";
+  residual: number;
+  tolerance: number;
+  normalized: number;
+  component?: string;
+}
+
+/** Exact truth for the retained pose; absent on legacy payloads and static reads. */
+export interface SketchTruth {
+  reasons?: Record<string, "rankConflict" | "residualViolation">;
+  unassessed?: string[];
+  violations?: SketchResidualViolation[];
+  normalizedMaxResidual?: number;
+  diagnostics?: OperationDiagnostic[];
 }
 
 /**
@@ -501,6 +519,11 @@ export interface FinishSketchResult {
 export interface BeginGestureResult {
   gestureId: number;
   ready: boolean;
+  /** Post-Begin solved handle minus pointer-down grab, Point only. */
+  pointOffset?: [number, number];
+  /** Preview corrections relative to the pre-Begin authored pose. */
+  positions?: Record<string, [number, number]>;
+  curves?: Record<string, CurveParams>;
   /**
    * Per-entity constrained state of the COMMITTED sketch this gesture opened
    * against (SCHEMA §7.4). GESTURE-FIXED: `solveDrag` never carries it and
@@ -532,8 +555,8 @@ export interface GestureTarget {
    * Pointer-down position in sketch-plane (u,v). The backend derives the per-kind
    * offset from it ONCE, at `beginGesture`, so a gesture cannot drift as it is
    * dragged: `entityBody` moves by `target − grab`, `radius` keeps the radial
-   * offset `|grab − center| − radius`. IGNORED by `point`/`arcEnd` (the handle
-   * teleports to the cursor).
+   * offset `|grab − center| − radius`. Point keeps its solved handle-to-grab
+   * offset; arcEnd ignores grab.
    */
   grab?: [number, number];
 }
@@ -560,6 +583,7 @@ export interface CurveParams {
  * latest-wins. `positions` are a PREVIEW (uncommitted), keyed by point entity id.
  */
 export interface DragSolveResult {
+  diagnostics?: OperationDiagnostic[];
   gestureId: number;
   seq: number;
   /** `success` | `partial` | `conflicting` | `redundant` | `superseded`. */
