@@ -463,6 +463,9 @@ describe("history-affordance command mapping", () => {
     expect(editCommandLabel(filletEdgeRebindCommand("r", 0, edgeElementRef("b", "e")))).toBe(
       "Repair reference",
     );
+    expect(
+      editCommandLabel(updateScalarParamsCommand("r", "Fillet", { radius: { value: 2 } }, { radius: { value: 3 } })),
+    ).toBe("Edit feature");
   });
 });
 

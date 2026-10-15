@@ -27,14 +27,14 @@ export function pickReadout(pick: MeasurePick, bodies?: Record<string, BodyMeta>
   if (pick.kind === "face") {
     const radius =
       pick.radius === null ? "" : ` · Radius ${formatLengthWithUnit(pick.radius)}`;
-    return `${kind} · Body ${body}${radius} · Area ${formatArea(pick.magnitude)}`;
+    return `${kind} · ${body}${radius} · Area ${formatArea(pick.magnitude)}`;
   }
   if (pick.kind === "edge") {
     const diameter =
       pick.radius === null ? "" : ` · Diameter Ø ${formatLengthWithUnit(pick.radius * 2)}`;
-    return `${kind} · Body ${body}${diameter} · Length ${formatLengthWithUnit(pick.magnitude)}`;
+    return `${kind} · ${body}${diameter} · Length ${formatLengthWithUnit(pick.magnitude)}`;
   }
-  return `${kind} · Body ${body} · Value ${formatUnitless(pick.magnitude)}`;
+  return `${kind} · ${body} · Value ${formatUnitless(pick.magnitude)}`;
 }
 
 export function deltaReadout(summary: MeasureSummary): string {

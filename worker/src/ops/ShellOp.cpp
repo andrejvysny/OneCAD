@@ -13,6 +13,8 @@
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
+#include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS_Shape.hxx>
 
 #include "elementmap/ElementMapPartition.h"
@@ -156,6 +158,19 @@ OpOutcome execute_shell(OpContext& ctx, const json& op, const std::string& op_id
             return OpOutcome::fail("OP_FAILED", "Shell operation failed");
         }
         result = builder->Shape();
+        // OCCT 8.0.1 reports IsDone/NoError yet returns the body unchanged when the
+        // open face is tangent-continuous to a fillet (ONECAD-243). A real shell
+        // always adds inner-wall faces, so no face growth means nothing was built.
+        TopTools_IndexedMapOfShape in_faces, out_faces;
+        TopExp::MapShapes(target_shape, TopAbs_FACE, in_faces);
+        TopExp::MapShapes(result, TopAbs_FACE, out_faces);
+        if (out_faces.Extent() <= in_faces.Extent()) {
+            return OpOutcome::fail(
+                "OP_FAILED",
+                "Shell left the body unchanged: the kernel could not offset the faces next "
+                "to the open face (a fillet tangent to it is the usual cause). Shell before "
+                "filleting, or open a different face.");
+        }
     } catch (const Standard_Failure& f) {
         return OpOutcome::fail("OP_FAILED",
                                std::string("Shell operation failed: ") +

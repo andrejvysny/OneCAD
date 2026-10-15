@@ -45,7 +45,7 @@ describe("bodyLabel", () => {
 describe("pickReadout body naming", () => {
   it("shows the resolved body name, not the UUID", () => {
     const readout = pickReadout(facePick("body_a1b2c3d4-uuid"), BODIES);
-    expect(readout).toBe("face · Body Body 1 · Area 4800 mm²");
+    expect(readout).toBe("face · Body 1 · Area 4800 mm²");
     expect(readout).not.toContain("body_a1b2c3d4-uuid");
   });
 });

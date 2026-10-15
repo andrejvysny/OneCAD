@@ -1522,8 +1522,9 @@ export function deleteDatumCommand(datumId: string): WireEditCommand {
 export function editCommandLabel(cmd: WireEditCommand): string {
   switch (cmd.cmd) {
     case "editOperationInput":
-    case "updateOperationParams":
       return "Repair reference";
+    case "updateOperationParams":
+      return "Edit feature";
     case "removeOperation":
       return "Delete feature";
     case "setRollback":

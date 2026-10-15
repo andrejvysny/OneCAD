@@ -140,7 +140,7 @@ describe("planePairLabel", () => {
 describe("pickReadout", () => {
   it("labels factual face and circular-edge values with their owner", () => {
     expect(pickReadout(facePick("face", [0, 0, 0], [0, 0, 1]))).toBe(
-      "face · Body body1 · Area 4800 mm²",
+      "face · body1 · Area 4800 mm²",
     );
     expect(
       pickReadout({
@@ -149,13 +149,13 @@ describe("pickReadout", () => {
         magnitude: 20.735,
         radius: 3.3,
       }),
-    ).toBe("edge · Body body1 · Diameter Ø 6.6 mm · Length 20.735 mm");
+    ).toBe("edge · body1 · Diameter Ø 6.6 mm · Length 20.735 mm");
   });
 
   it("uses an explicit unavailable owner for malformed identity, without inventing geometry", () => {
     expect(
       pickReadout({ ...facePick("vertex", [0, 0, 0], [0, 0, 1], ""), kind: "vertex", magnitude: 12 }),
-    ).toBe("vertex · Body body unavailable · Value 12");
+    ).toBe("vertex · body unavailable · Value 12");
   });
 });
 

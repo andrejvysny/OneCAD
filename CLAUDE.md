@@ -252,7 +252,7 @@ Data flow per operation: FE invoke → Tauri command → `DocumentRuntime` plan 
 | `src-tauri/` | Tauri 2 app crate `onecad` (lib `onecad_lib`): `src/api/`, `src/worker/`, `document_runtime.rs`, `dto.rs`, `error.rs`, `events.rs` |
 | `src-tauri/crates/` | Workspace members listed above |
 | `worker/` | C++20 OCCT sidecar: `src/ops/` (one file per op), `src/kernel/`, `src/protocol/` (Dispatcher), `src/session/`, `tests/`, `cmake/`, `third_party/` (vendored nlohmann json + PlaneGCS; OCCT is **not** vendored) |
-| `protocol/` | `SCHEMA.md` (OCW1, normative, ~278 KB — read sections), `mesh_format.md` (MESH1), `fixtures/` (executable NDJSON form of the spec) |
+| `protocol/` | `SCHEMA.md` (OCW1, normative, ~535 KB — read sections), `mesh_format.md` (MESH1), `fixtures/` (executable NDJSON form of the spec) |
 | `e2e/` | Playwright mock-client lane |
 | `e2e-tauri/` | WebdriverIO lane against the real bundled `.app` |
 | `corpus/` | Read-only oracle, frozen at `b4ddccc`; consumed by `corpus_executor.rs` + `scripts/verify-modeling-*.mjs` |
@@ -379,7 +379,7 @@ Five lanes plus the oracle. The coverage manifest is **enforced, not aspirationa
 | Frontend unit | Vitest 4 (jsdom), colocated `*.test.ts(x)` | Stores, controllers, viewport engine, IPC marshalling — against `mockClient` or `@tauri-apps/api/mocks` `mockIPC` (which exercises the real tauriClient) |
 | Playwright | `e2e/`, chromium + webkit | Real Vite app, real WebGL, **mock backend**; port 4177; `retries: 0` is policy |
 | Rust integration | `cargo test --workspace` | Real worker over OCW1 via `WorkerManager` / `DocumentRuntime` (`m2_gate.rs`, `corpus_executor.rs`), stub chaos drills (`worker_chaos.rs`), persistence/autosave; `tauri::test::mock_app` for command tests |
-| Worker CTest | `ctest --test-dir worker/build` | 176 targets (2026-09-04; count drifts upward — read it off `ctest -N`, never off this file): in-process `worker_core` exes, NDJSON harness fixtures (`worker_harness --worker … --fixture …`), `canonical_*` replay of Rust-authored `protocol/fixtures/` verbatim, `parity_*` gates vs `corpus/expected-values/` |
+| Worker CTest | `ctest --test-dir worker/build` | 206 targets (2026-10-14; count drifts upward — read it off `ctest -N`, never off this file): in-process `worker_core` exes, NDJSON harness fixtures (`worker_harness --worker … --fixture …`), `canonical_*` replay of Rust-authored `protocol/fixtures/` verbatim, `parity_*` gates vs `corpus/expected-values/` |
 | WDIO | `e2e-tauri/`, CI `tauri-composition` | Real bundled `.app`: real Tauri IPC and real worker; one composition spec (sketch→extrude→fillet→undo→save/reopen) |
 
 Conventions:

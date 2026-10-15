@@ -28,5 +28,5 @@ export function LibraryStatusSection() {
    * Naming the library makes the subject explicit, and "items" keeps it from
    * being mistaken for a count of placed instances.
    */
-  return <span className="text-ink-6">Library: {count} items</span>;
+  return <span className="text-ink-6">Library: {count} {count === 1 ? "item" : "items"}</span>;
 }

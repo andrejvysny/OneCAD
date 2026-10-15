@@ -2160,6 +2160,17 @@ describe("tauriClient scoped geometry reads", () => {
     expect((reads[0].payload as { snapshotId: number }).snapshotId).toBe(17);
     expect((reads[3].payload as { readFence?: unknown }).readFence).toBeUndefined();
   });
+
+  it("returns mass properties under the caller's bare body id, not the wire form", async () => {
+    mockIPC((cmd) =>
+      cmd === "query_mass_properties"
+        ? { bodyId: "body_a", volume: 8000, surfaceArea: 2800, centroid: [10, 20, 5] }
+        : null,
+    );
+    const reading = await createTauriClient().massProperties("a");
+    expect(reading.bodyId).toBe("a");
+    expect(reading.volume).toBe(8000);
+  });
 });
 
 // ── Promotion (pick → ElementId) ──────────────────────────────────────────────

@@ -235,9 +235,9 @@ export function DimensionInput({
   );
   const blurCheck = useRef<ReturnType<typeof setTimeout> | null>(null);
   /*
-   * Set around the Escape branch's own `blur()`: that blur fires synchronously
-   * while `text` still holds the abandoned edit, so a blur-commit field would
-   * otherwise commit exactly what Escape is throwing away.
+   * Set around the Escape and Enter branches' own `blur()`: that blur fires
+   * synchronously, so a blur-commit field would otherwise commit what Escape is
+   * throwing away, or re-commit what Enter just committed.
    */
   const escaping = useRef(false);
   const openSession = () => {
@@ -570,7 +570,13 @@ export function DimensionInput({
             if (commit()) {
               session.current = null;
               if (onConfirm) onConfirm();
-              else ref.current?.blur();
+              else {
+                // That blur fires synchronously, before the caller's store holds
+                // the committed value, so a blur-commit would apply the edit twice.
+                escaping.current = true;
+                ref.current?.blur();
+                escaping.current = false;
+              }
             }
           } else if (e.key === "Escape") {
             if (onCancel) {

@@ -668,3 +668,16 @@ describe("DimensionInput — Escape edit session (onEscapeRevert)", () => {
     expect(input().value).toBe("5");
   });
 });
+
+describe("DimensionInput — Enter commits exactly once", () => {
+  it("does not re-commit from the blur that Enter itself triggers", () => {
+    // The caller's store still holds the OLD value when that blur fires, so a
+    // second commit would land as a second document edit (and a second undo step).
+    const onCommit = vi.fn();
+    render(<DimensionInput value={2} onCommit={onCommit} />);
+    input().focus();
+    typeAndEnter("25");
+    expect(onCommit).toHaveBeenCalledTimes(1);
+    expect(onCommit).toHaveBeenCalledWith(25);
+  });
+});

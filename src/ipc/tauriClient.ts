@@ -2334,10 +2334,13 @@ export function createTauriClient(): CadClient {
     // Same `body_<uuid>` wire form promoteSelection uses (document-changed hands
     // the frontend a bare uuid).
     const wireBodyId = bodyId.startsWith("body_") ? bodyId : `body_${bodyId}`;
-    return call<MassProperties>(CMD.massProperties, {
+    const reading = await call<MassProperties>(CMD.massProperties, {
       bodyId: wireBodyId,
       ...(fence ? { readFence: fence } : {}),
     });
+    // The DTO echoes the wire form; callers match the reading against the id
+    // they asked with (the bare uuid), so hand that back.
+    return { ...reading, bodyId };
   }
 
   /**

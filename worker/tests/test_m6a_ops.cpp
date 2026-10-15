@@ -8,11 +8,13 @@
 #include <utility>
 #include <vector>
 
+#include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopoDS.hxx>
 #include <TopoDS_Shape.hxx>
 
 #include "elementmap/ElementMapPartition.h"
@@ -115,6 +117,49 @@ void test_shell_ladder() {
     check_near(vol(bodies.get("body_1")->geom), 4112.0, 1.0,
                "shell(ladder): 10000 − 16·16·23 = 4112");
     check(face_count(bodies.get("body_1")->geom) > 6, "shell(ladder): inner walls add faces");
+}
+
+// ── Shell over a filleted edge (ONECAD-243): the result must really be hollow. ──
+// Box 80×40×10 with its +Y/top edge filleted r=2, shelled through the top face.
+// t == r makes the fillet's inward offset degenerate (radius 0); t < r and t > r
+// do not. Whatever the kernel does, an Ok outcome that publishes the UNCHANGED
+// solid is a silent no-op: Ok must remove material, otherwise the op must refuse.
+void test_shell_over_fillet_never_silent_noop() {
+    for (const double t : {1.0, 2.0, 3.0}) {
+        const TopoDS_Shape box = BRepPrimAPI_MakeBox(80.0, 40.0, 10.0).Shape();
+        BRepFilletAPI_MakeFillet fillet(box);
+        const TopoDS_Shape top_edge_face = face_by_center(box, 40, 40, 5);  // +Y wall
+        TopTools_IndexedMapOfShape edges;
+        TopExp::MapShapes(top_edge_face, TopAbs_EDGE, edges);
+        for (int i = 1; i <= edges.Extent(); ++i) {
+            const km::ElementDescriptor d = em::ElementMapPartition::describe(edges(i));
+            if (std::abs(d.center.Z() - 10.0) < 1e-6) fillet.Add(2.0, TopoDS::Edge(edges(i)));
+        }
+        const TopoDS_Shape filleted = fillet.Shape();
+        const double before = vol(filleted);
+
+        BodyStore bodies;
+        bodies.create("body_1", "op0", filleted);
+        em::ElementMapPartition part;
+        const TopoDS_Shape top = face_by_center(filleted, 40, 19, 10);
+        json op = {{"opType", "Shell"}, {"opId", "opshf"},
+                   {"inputs", json::array({face_input("body_1", "el_top", top, 40, 19, 10)})},
+                   {"params", {{"thickness", t}, {"targetBodyId", "body_1"},
+                               {"openFaces", json::array({"el_top"})}}}};
+        Ctx c;
+        ops::OpContext ctx = c.make(bodies, part);
+        const ops::OpOutcome oc = ops::execute_shell(ctx, op, "opshf");
+        const std::string tag = "shell over fillet t=" + std::to_string(t);
+        if (oc.status == ops::OpOutcome::Status::Ok) {
+            const double after = vol(bodies.get("body_1")->geom);
+            check(after < before - 1000.0,
+                  tag + ": Ok must hollow the body (before " + std::to_string(before) +
+                      ", after " + std::to_string(after) + ")");
+        } else {
+            check(oc.status == ops::OpOutcome::Status::Failed,
+                  tag + ": a refused shell is a recoverable failure, not another status");
+        }
+    }
 }
 
 // ── Shell: partition-TRACKED open face (bare ref, no descriptor/anchor) — the
@@ -545,6 +590,7 @@ int main() {
     test_shell_ambiguous_needs_repair();
     test_shell_thickness_too_small();
     test_shell_authoring_resolution_boundary();
+    test_shell_over_fillet_never_silent_noop();
     test_linear_pattern();
     test_linear_pattern_compound();
     test_linear_pattern_v2_preserves_source();
