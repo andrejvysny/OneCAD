@@ -73,7 +73,13 @@ export async function processExecutable(pid: number, run: Runner): Promise<strin
   if (!Number.isInteger(pid) || pid <= 0) return null;
   const r = await run([PS, "-o", "comm=", "-p", String(pid)]);
   const exe = r.stdout.trim();
-  return r.code === 0 && exe.length > 0 ? exe : null;
+  if (r.code !== 0 || exe.length === 0) return null;
+  if (exe.startsWith("/")) return exe;
+  // `tauri dev` runs `target/debug/onecad` from src-tauri/, so comm is relative and carries
+  // no checkout path; the mapped text image (first `txt` entry) is the absolute executable.
+  const txt = await run([LSOF, "-a", "-p", String(pid), "-d", "txt", "-Fn"]);
+  const mapped = txt.stdout.split("\n").find((l) => l.startsWith("n/"));
+  return mapped === undefined ? exe : mapped.slice(1);
 }
 
 /** `ps -o comm=`, falling back to argv[0] of `command` so ownership never silently weakens. */

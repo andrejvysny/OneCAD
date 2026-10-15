@@ -76,6 +76,16 @@ describe("processExecutable", () => {
     const rec = recorder(() => ({ code: 1, stdout: "" }));
     expect(await processExecutable(77, rec.runner)).toBeNull();
   });
+
+  test("a relative comm (as `tauri dev` launches it) resolves to the mapped absolute image", async () => {
+    const rec = recorder((argv) =>
+      argv[0] === "/bin/ps"
+        ? { stdout: "target/debug/onecad\n" }
+        : { stdout: "p77\nftxt\nn/repo/src-tauri/target/debug/onecad\nftxt\nn/usr/lib/dyld\n" },
+    );
+    expect(await processExecutable(77, rec.runner)).toBe("/repo/src-tauri/target/debug/onecad");
+    expect(rec.calls[1]).toEqual(["/usr/sbin/lsof", "-a", "-p", "77", "-d", "txt", "-Fn"]);
+  });
 });
 
 describe("isOwnedExecutable", () => {

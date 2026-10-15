@@ -92,6 +92,10 @@ interface BridgeOpts {
   scripts?: string[];
   /** Makes the instrumentation install script reject, as a wedged bridge would. */
   instrumentError?: string;
+  /** Polls that see no `window.__TAURI__.core` (page still loading) before it appears. */
+  globalsMissingPolls?: number;
+  /** Records the order of globals polls and identity invokes. */
+  events?: string[];
 }
 
 /** What a `tauri-e2e` build of THIS checkout answers `agent_identity` with. */
@@ -121,15 +125,24 @@ function bridgeFor(opts: BridgeOpts = {}, root = ""): SessionBridge {
   };
   const rect = { x: 100, y: 40, width: 80, height: 24 };
   const scripts = opts.scripts ?? [];
+  const events = opts.events ?? [];
+  let globalsMissing = opts.globalsMissingPolls ?? 0;
   return {
     wedged: false,
     windowGeom: async () => geom,
     close: async () => undefined,
     invoke: (async () => {
+      events.push("invoke");
       if (opts.invokeError !== undefined) throw new AgentError("INTERNAL", `invoke:agent_identity: ${opts.invokeError}`);
       return "identity" in opts ? opts.identity : identityFor(root);
     }) as SessionBridge["invoke"],
     execute: (async (name: string) => {
+      if (name === "tauri.globalsReady") {
+        events.push("globals");
+        if (globalsMissing === 0) return true;
+        globalsMissing -= 1;
+        return false;
+      }
       if (name === "calibrate.pickProbe") {
         if (opts.noProbe === true) return { found: false, usedFallback: true, description: "", rect: null };
         return { found: true, usedFallback: false, description: "span[data-testid=\"document-title\"]", rect };
@@ -641,6 +654,17 @@ describe("SessionOrchestrator identity handshake", () => {
     const status = await session.start({ mode: "attach" });
     expect(status.identity?.cargoManifestDir).toBe(`${w.root}/src-tauri`);
     expect(status.identityWarning).toBeUndefined();
+  });
+
+  test("the handshake waits for window.__TAURI__.core instead of racing the page load", async () => {
+    const events: string[] = [];
+    const { session } = attachSession(() => ({ globalsMissingPolls: 3, events }));
+
+    const status = await session.start({ mode: "attach" });
+
+    expect(status.state).toBe("Ready");
+    expect(status.identityWarning).toBeUndefined();
+    expect(events.slice(0, 5)).toEqual(["globals", "globals", "globals", "globals", "invoke"]);
   });
 
   test("agentTesting:false is a hard APP_IDENTITY_MISMATCH", async () => {

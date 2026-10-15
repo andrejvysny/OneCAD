@@ -82,6 +82,8 @@ export type * from "./types.ts";
 const ATTACH_READY_TIMEOUT_MS = 60_000;
 const WINDOW_WAIT_MS = 30_000;
 const WINDOW_POLL_MS = 500;
+const TAURI_GLOBALS_WAIT_MS = 60_000;
+const TAURI_GLOBALS_POLL_MS = 250;
 const RECONNECT_TIMEOUT_MS = 60_000;
 const WATCHDOG_INTERVAL_MS = 2_000;
 /**
@@ -1054,7 +1056,40 @@ export class SessionOrchestrator {
     }
   }
 
+  /**
+   * The WebDriver plugin answers `/status` about 200 ms after the process starts, long before
+   * the webview has loaded the dev URL — so a page script run straight after it finds no
+   * `window.__TAURI__` and the identity invoke fails. Wait for the injected globals instead.
+   */
+  async #awaitTauriGlobals(bridge: SessionBridge): Promise<void> {
+    const deadline = Date.now() + TAURI_GLOBALS_WAIT_MS;
+    let last = "window.__TAURI__.core is undefined";
+    for (;;) {
+      try {
+        const ready = await bridge.execute<boolean>(
+          "tauri.globalsReady",
+          (() => (window as unknown as { __TAURI__?: { core?: unknown } }).__TAURI__?.core !== undefined) as never,
+          [],
+          { readOnly: true },
+        );
+        if (ready) return;
+      } catch (e) {
+        // A navigation in flight (first load, a Vite dependency reload) rejects the script.
+        last = e instanceof Error ? e.message : String(e);
+      }
+      if (Date.now() >= deadline) {
+        throw new AgentError(
+          "WEBDRIVER_UNAVAILABLE",
+          `the webview did not expose window.__TAURI__.core within ${TAURI_GLOBALS_WAIT_MS}ms (${last})`,
+          { details: { waitedMs: TAURI_GLOBALS_WAIT_MS, last } },
+        );
+      }
+      await this.#deps.sleep(TAURI_GLOBALS_POLL_MS);
+    }
+  }
+
   async #verifyIdentity(bridge: SessionBridge, pid: number): Promise<void> {
+    await this.#awaitTauriGlobals(bridge);
     this.identity = undefined;
     this.identityWarning = undefined;
     let reply: unknown;
