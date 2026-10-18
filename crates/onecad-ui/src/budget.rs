@@ -9,6 +9,13 @@ pub const MAX_SOURCE_BYTES: usize = 32 << 20;
 pub const MAX_PREPARED_BYTES: u64 = 64 << 20;
 pub const MAX_PROFILE_BYTES: usize = 16 << 20;
 pub const MAX_BODIES: usize = 256;
+// Authored records (16 MiB), projection metadata (2 MiB), and host containers (2 MiB).
+const DISPLAY_METADATA: usize = 20 << 20;
+pub const MAX_DISPLAY_SCENE_BYTES: usize =
+    DISPLAY_RESERVATION - MAX_PREPARED_BYTES as usize - MAX_PROFILE_BYTES - DISPLAY_METADATA;
+// PreviewResult retains its original mesh payload while checked scene/preparation are built.
+pub const MAX_PREVIEW_SCENE_BYTES: usize =
+    PREVIEW_RESERVATION - MAX_SOURCE_BYTES - MAX_PREPARED_BYTES as usize - (2 << 20);
 const HOST_BYTES: usize = 768 << 20;
 #[derive(Default)]
 pub struct HostBudget {
@@ -63,5 +70,52 @@ mod tests {
         drop(current);
         drop(preview);
         assert_eq!(budget.used.load(Ordering::Acquire), 0);
+    }
+    #[test]
+    fn nema_checked_scene_fits_display_reservation_with_bvh_storage() {
+        let directory =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spikes/fixtures/nema17");
+        let mut paths: Vec<_> = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "mesh1")
+            })
+            .collect();
+        paths.sort();
+        let bodies = paths
+            .into_iter()
+            .map(|path| {
+                onecad_scene::SceneBody::new(
+                    onecad_scene::BodyId::new(),
+                    1,
+                    Arc::from(std::fs::read(path).unwrap()),
+                    onecad_scene::MeshLimits::default(),
+                )
+                .unwrap()
+            })
+            .collect();
+        let scene = onecad_scene::SceneSnapshot::new(
+            onecad_scene::SceneIdentity {
+                session: 1,
+                scene: 1,
+            },
+            bodies,
+            onecad_scene::SceneLimits {
+                max_resident_bytes: MAX_DISPLAY_SCENE_BYTES,
+                max_bodies: MAX_BODIES,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(scene.bodies().len(), 67);
+        assert!(
+            scene.resident_bytes()
+                + MAX_PREPARED_BYTES as usize
+                + MAX_PROFILE_BYTES
+                + DISPLAY_METADATA
+                <= DISPLAY_RESERVATION
+        );
     }
 }

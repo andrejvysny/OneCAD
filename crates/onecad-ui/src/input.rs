@@ -3,7 +3,8 @@ use crate::{app::App, bridge::Command, menu};
 use onecad_interaction::Action;
 
 pub fn route(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
-    if app.sampled {
+    app.poll_device_failure();
+    if app.sampled && app.viewport_ready() {
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let finished = done.clone();
         app.gpu.queue.on_submitted_work_done(move || {
@@ -12,10 +13,10 @@ pub fn route(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
         app.sampling_done = done;
         app.sampled = false;
     }
-    if app.cad_needs_fence {
+    if app.cad_needs_fence && app.viewport_ready() {
         let context = ctx.clone();
         if let Err(error) = app.renderer.after_submit(move || context.request_repaint()) {
-            app.status = error.to_string();
+            app.fail_viewport(error.to_string());
         }
         app.cad_needs_fence = false;
     }
@@ -62,7 +63,7 @@ pub fn route(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     for command in commands {
         app.submit(command);
     }
-    if !text && app.sketch_active() {
+    if !text && app.sketch_active() && app.viewport_ready() {
         let keys: Vec<_> = raw
             .events
             .iter()

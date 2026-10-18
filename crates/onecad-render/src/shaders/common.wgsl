@@ -1,12 +1,12 @@
 // Shared frame uniform and helpers. Prepended to every viewport shader module.
-// World is Z-up, right-handed, millimetres. Captured projection uses depth 0 near, 1 far.
+// World is Z-up, right-handed, millimetres. GPU projection uses depth 1 near, 0 far; CPU captures remain unchanged.
 
 struct Frame {
     view_proj: mat4x4<f32>,
     view: mat4x4<f32>,
     inverse_projection: mat4x4<f32>,
     shadow_vp: mat4x4<f32>,  // contact-shadow height map: ortho, looking up from under the ground
-    proj: vec4<f32>,         // tan(fov_x/2), tan(fov_y/2), near, 0
+    proj: vec4<f32>,         // contact height span / soft range, reserved
     eye: vec4<f32>,
     viewport: vec4<f32>,     // width, height, 1/width, 1/height (px)
     env: vec4<f32>,          // cos(yaw), sin(yaw), environment intensity, exposure
@@ -28,6 +28,9 @@ struct Frame {
     ao: vec4<f32>,           // radius (mm), falloff mul, falloff add, final power
     flags: vec4<f32>,        // quality, AO, contact shadow, dither
     overlay: vec4<f32>,
+    section: vec4<f32>,
+    cap: vec4<f32>,
+    display: vec4<f32>, // opacity, SSAA factor, hidden edges, silhouettes
 };
 
 @group(0) @binding(0) var<uniform> u: Frame;
@@ -80,3 +83,6 @@ fn view_direction(p: vec3<f32>) -> vec3<f32> {
     let back = vec3<f32>(u.view[0].z, u.view[1].z, u.view[2].z);
     return select(back, normalize(u.eye.xyz - p), u.eye.w > 0.5);
 }
+
+fn sectioned() -> bool { return dot(u.section.xyz, u.section.xyz) > 0.0; }
+fn clipped(p: vec3<f32>) -> bool { return sectioned() && dot(u.section.xyz, p) > u.section.w; }

@@ -11,7 +11,7 @@ mod checked;
 mod view;
 
 pub use checked::{MeshDecodeError, MeshLimits};
-pub use view::{MeshFloats, MeshSpan, MeshView, MeshWords};
+pub use view::{CheckedMesh, MeshFloats, MeshSpan, MeshView, MeshWords};
 
 /// MESH1 magic as a little-endian `u32` (`0x4D455348`). On the wire the four
 /// bytes are `48 53 45 4D`; read back as an LE `u32` they equal this. Compare the

@@ -19,7 +19,7 @@ Direct topology-overlay adaptations use donor `crates/gpu/src/view.rs` (`highlig
 `src/{highlights,highlight_prepare,passes,pipelines}.rs` and
 `src/shaders/body.wgsl::fs_highlight`. Local changes resolve checked MESH1 IDs/spans without
 persistent triangle identities, enforce scene/body revisions, retain OneCAD colors/opacity
-and -1/-1 forward-depth face bias, use existing geometry and two bounded shared uniforms,
+and reversed-depth face bias, use existing geometry and two bounded shared uniforms,
 and preserve completion fences. No donor egui/vendor patch or full application was imported.
 `src/highlight_tests.rs` provides pure span/style/identity/range/budget/shader checks; no
 hardware capture or manual acceptance was run for the topology-overlay increment.
@@ -47,6 +47,19 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## Quality renderer unification adaptations
+
+The comparison adapter's donor remains pinned at
+`a228a5830eedf88856fd392b7db0ff5977f352d6`; provenance and unmodified source hashes live in
+`vendor/solidcraft-viewport/`. OneCAD-owned quality rendering reuses techniques from donor
+`crates/gpu/src/view.rs` and `assets/shaders/viewport.wgsl`: reversed float depth with
+24-bit stencil fallback, section clipping/stencil caps, blended transparency, and
+supersampled offscreen targets. Local destinations are `src/{options,frame,pipelines,
+passes,targets}.rs` and `src/shaders/`. Adaptations preserve OneCAD's indexed checked
+meshes, captured CPU cameras, quality lighting/AO/grid, bounded resource admission, and
+shared-device completion fences. No vendor source is forked. The SolidCraft MIT
+permission and copyright text above applies.
 
 ## XeGTAO (github.com/GameTechDev/XeGTAO)
 

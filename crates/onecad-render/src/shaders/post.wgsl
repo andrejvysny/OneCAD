@@ -27,7 +27,7 @@ fn fs_contact_occ(i: POut) -> @location(0) vec4<f32> {
     var acc = vec2<f32>(0.0);
     for (var y = 0; y < 4; y = y + 1) {
         for (var x = 0; x < 4; x = x + 1) {
-            let h = textureLoad(depth_in, base + vec2<i32>(x, y), 0);
+            let h = textureLoad(depth_in, base + vec2<i32>(x, y), 0) * u.proj.x;
             if (h < 1.0) {
                 let soft = 1.0 - h;
                 let tight = clamp(1.0 - h * u.contact.z, 0.0, 1.0);
@@ -92,7 +92,7 @@ fn fs_gtao(i: POut) -> @location(0) vec4<f32> {
     let pix = vec2<i32>(i.pos.xy);
     let size = vec2<i32>(textureDimensions(depth_in));
     let d0 = textureLoad(depth_in, pix, 0);
-    if (d0 >= 1.0) {
+    if (d0 <= 0.0) {
         return vec4<f32>(1.0);
     }
     let p = view_pos(i.pos.xy, d0);
@@ -156,7 +156,7 @@ fn fs_gtao(i: POut) -> @location(0) vec4<f32> {
 fn ao_blur(p: vec2<i32>, axis: vec2<i32>) -> vec4<f32> {
     let size = vec2<i32>(textureDimensions(tex_in));
     let d0 = textureLoad(depth_in, p, 0);
-    if (d0 >= 1.0) {
+    if (d0 <= 0.0) {
         return vec4<f32>(1.0);
     }
     let z0 = view_pos(vec2<f32>(p) + 0.5, d0).z;
@@ -167,7 +167,7 @@ fn ao_blur(p: vec2<i32>, axis: vec2<i32>) -> vec4<f32> {
         let d = textureLoad(depth_in, q, 0);
         let z = view_pos(vec2<f32>(q) + 0.5, d).z;
         let x = f32(k);
-        let w = exp(-x * x / 8.0) * exp(-abs(z - z0) / (0.01 * z0)) * select(0.0, 1.0, d < 1.0);
+        let w = exp(-x * x / 8.0) * exp(-abs(z - z0) / (0.01 * z0)) * select(0.0, 1.0, d > 0.0);
         acc += textureLoad(tex_in, q, 0).r * w;
         wsum += w;
     }

@@ -1,11 +1,17 @@
 //! Immutable CPU scene and synchronous picking authority, independent of UI/GPU.
 //!
 //! Math uses f64; this does not restore precision already lost in MESH1 f32 data.
-//! Brute-force picking is bounded by explicit scene limits. No acceleration
-//! structures, copied index arrays, or persistent triangle references are kept.
+//! Deterministic BVHs are built with immutable scenes; topology IDs remain
+//! snapshot-scoped and the brute-force picker remains a validation oracle.
+
+#![cfg_attr(
+    not(test),
+    deny(clippy::panic, clippy::unwrap_used, clippy::expect_used)
+)]
 
 mod camera;
 mod fit;
+mod index;
 mod picking;
 mod scene;
 

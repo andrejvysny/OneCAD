@@ -388,7 +388,7 @@ jobs:
         with:
           workspaces: .
       - name: fmt
-        run: cargo fmt --all --check
+        run: cargo fmt --check -p onecad -p onecad-app -p onecad-core -p onecad-protocol -p onecad-scene -p onecad-render -p onecad-interaction -p onecad-ui -p onecad-worker-stub -p onecad-regen -p onecad-kernelbench -p onecad-library -p onecad-library-ingest
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Full workspace tests

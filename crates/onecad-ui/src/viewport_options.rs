@@ -1,15 +1,14 @@
 //! Transient viewport settings, applied by the host after GPU work completes.
 
 use crate::app::App;
-use onecad_render::SolidCraftOptions;
+use onecad_render::RenderOptions;
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     ui.menu_button("Display", |ui| {
-        let mut options = app
+        let mut options = *app
             .pending_display_options
             .as_ref()
-            .unwrap_or_else(|| app.renderer.options())
-            .clone();
+            .unwrap_or_else(|| app.renderer.options());
         let mut changed = ui.checkbox(&mut options.outline, "Silhouettes").changed();
         changed |= ui
             .checkbox(&mut options.hidden_edges, "Hidden edges")
@@ -32,7 +31,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
-fn supersampling(ui: &mut egui::Ui, options: &mut SolidCraftOptions) -> bool {
+fn supersampling(ui: &mut egui::Ui, options: &mut RenderOptions) -> bool {
     let mut changed = false;
     egui::ComboBox::from_id_salt("viewport-ssaa")
         .selected_text(format!("SSAA {}×", options.ssaa))
@@ -46,7 +45,7 @@ fn supersampling(ui: &mut egui::Ui, options: &mut SolidCraftOptions) -> bool {
     changed
 }
 
-fn section(ui: &mut egui::Ui, app: &App, options: &mut SolidCraftOptions) -> bool {
+fn section(ui: &mut egui::Ui, app: &App, options: &mut RenderOptions) -> bool {
     let original = section_axis(options.section);
     let mut axis = original;
     egui::ComboBox::from_id_salt("viewport-section")

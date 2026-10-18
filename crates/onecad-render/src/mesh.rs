@@ -5,7 +5,8 @@ use crate::{
     RenderError,
 };
 use bytemuck::{Pod, Zeroable};
-use onecad_scene::{BodyId, SceneBody, SceneIdentity, SceneSnapshot};
+use onecad_scene::{BodyId, SceneBody, SceneIdentity};
+use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,7 +28,12 @@ pub(crate) struct Segment {
 }
 
 pub(crate) struct PreparedBody {
-    mesh_revision: u64,
+    pub(crate) mesh_revision: u64,
+    pub(crate) geometry: Arc<PreparedGeometry>,
+}
+
+pub(crate) struct PreparedGeometry {
+    pub(crate) source: Arc<[u8]>,
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     indices: Vec<u32>,
@@ -35,7 +41,9 @@ pub(crate) struct PreparedBody {
     silhouettes: Vec<crate::silhouette::SilEdge>,
 }
 
+#[derive(Clone)]
 pub(crate) struct GpuBody {
+    pub(crate) source: Arc<[u8]>,
     pub id: BodyId,
     pub mesh_revision: u64,
     pub style: BodyStyle,
@@ -51,40 +59,96 @@ pub(crate) struct GpuBody {
     pub frame_bind: wgpu::BindGroup,
 }
 
-pub(crate) fn estimate(scene: &SceneSnapshot, max_buffer: u64) -> Result<u64, RenderError> {
-    let mut total = 0;
-    for body in scene.bodies() {
-        let mesh = body.mesh()?;
-        let h = mesh.header();
-        if mesh.normals().is_none() {
-            return Err(RenderError::Mesh("normal section required"));
-        }
-        let mut segments = 0u64;
-        for i in 0..h.edge_count {
-            let range = mesh
-                .edge_range(i as usize)
-                .ok_or(RenderError::Mesh("edge range"))?;
-            segments = add(segments, u64::from(range.count.saturating_sub(1)))?;
-        }
-        let lengths = [
-            mul(u64::from(h.vertex_count), 12)?,
-            mul(u64::from(h.vertex_count), 12)?,
-            mul(u64::from(h.triangle_count), 12)?,
-            mul(segments, 24)?,
-            mul(u64::from(h.triangle_count), 144)?,
-        ];
-        if u64::from(h.triangle_count) * 3 > u64::from(u32::MAX) || segments > u64::from(u32::MAX) {
-            return Err(RenderError::Budget("draw count"));
-        }
-        for length in lengths {
+#[cfg(test)]
+pub(crate) fn estimate(
+    scene: &onecad_scene::SceneSnapshot,
+    max_buffer: u64,
+) -> Result<u64, RenderError> {
+    estimate_inner(scene, max_buffer, true)
+}
+
+pub(crate) fn body_estimate(
+    body: &SceneBody,
+    max_buffer: u64,
+    silhouettes: bool,
+) -> Result<u64, RenderError> {
+    let mesh = body.mesh()?;
+    let h = mesh.header();
+    if mesh.normals().is_none() {
+        return Err(RenderError::Mesh("normal section required"));
+    }
+    let mut segments = 0;
+    for i in 0..h.edge_count {
+        let range = mesh
+            .edge_range(i as usize)
+            .ok_or(RenderError::Mesh("edge range"))?;
+        segments = add(segments, u64::from(range.count.saturating_sub(1)))?;
+    }
+    if u64::from(h.triangle_count) * 3 > u64::from(u32::MAX) || segments > u64::from(u32::MAX) {
+        return Err(RenderError::Budget("draw count"));
+    }
+    let lengths = [
+        mul(u64::from(h.vertex_count), 12)?,
+        mul(u64::from(h.vertex_count), 12)?,
+        mul(u64::from(h.triangle_count), 12)?,
+        mul(segments, 24)?,
+        mul(
+            if silhouettes {
+                crate::silhouette::candidate_count(&mesh)? as u64
+            } else {
+                0
+            },
+            48,
+        )?,
+    ];
+    buffer_estimate(lengths, max_buffer)
+}
+
+fn buffer_estimate(lengths: [u64; 5], max_buffer: u64) -> Result<u64, RenderError> {
+    lengths
+        .into_iter()
+        .try_fold(std::mem::size_of::<FrameU>() as u64, |total, length| {
             if length.max(64) > max_buffer {
                 return Err(RenderError::Budget("device buffer size"));
             }
-            total = add(total, length.max(64))?;
-        }
-        total = add(total, std::mem::size_of::<FrameU>() as u64)?;
+            add(total, length.max(64))
+        })
+}
+
+#[cfg(test)]
+fn estimate_inner(
+    scene: &onecad_scene::SceneSnapshot,
+    max_buffer: u64,
+    silhouettes: bool,
+) -> Result<u64, RenderError> {
+    scene.bodies().iter().try_fold(0, |total, body| {
+        add(total, body_estimate(body, max_buffer, silhouettes)?)
+    })
+}
+
+impl PreparedGeometry {
+    pub(crate) fn gpu_bytes(&self, max_buffer: u64) -> Result<u64, RenderError> {
+        buffer_estimate(
+            [
+                self.positions.len() as u64 * 12,
+                self.normals.len() as u64 * 12,
+                self.indices.len() as u64 * 4,
+                self.segments.len() as u64 * 24,
+                self.silhouettes.len() as u64 * 48,
+            ],
+            max_buffer,
+        )
     }
-    Ok(total)
+
+    pub(crate) fn cpu_bytes(&self) -> u64 {
+        std::mem::size_of::<Self>() as u64
+            + 2 * std::mem::size_of::<usize>() as u64
+            + self.positions.capacity() as u64 * 12
+            + self.normals.capacity() as u64 * 12
+            + self.indices.capacity() as u64 * 4
+            + self.segments.capacity() as u64 * 24
+            + self.silhouettes.capacity() as u64 * 48
+    }
 }
 
 fn reserve<T>(count: usize) -> Result<Vec<T>, RenderError> {
@@ -141,11 +205,14 @@ impl PreparedBody {
         }
         Ok(Self {
             mesh_revision: body.mesh_revision(),
-            positions,
-            normals,
-            indices,
-            segments,
-            silhouettes: crate::silhouette::candidates(&mesh)?,
+            geometry: Arc::new(PreparedGeometry {
+                source: Arc::clone(body.bytes()),
+                positions,
+                normals,
+                indices,
+                segments,
+                silhouettes: crate::silhouette::candidates(&mesh)?,
+            }),
         })
     }
     pub(crate) fn upload(self, gpu: &Gpu, layout: &wgpu::BindGroupLayout, id: BodyId) -> GpuBody {
@@ -166,25 +233,38 @@ impl PreparedBody {
         });
         let frame_bind = gpu.bind("body frame", layout, &[uniform.as_entire_binding()]);
         GpuBody {
+            source: self.geometry.source.clone(),
             id,
             mesh_revision: self.mesh_revision,
             style: BodyStyle::default(),
-            index_count: self.indices.len() as u32,
-            segment_count: self.segments.len() as u32,
-            silhouette_count: self.silhouettes.len() as u32,
+            index_count: self.geometry.indices.len() as u32,
+            segment_count: self.geometry.segments.len() as u32,
+            silhouette_count: self.geometry.silhouettes.len() as u32,
             silhouettes: buffer(
                 "silhouettes",
-                bytemuck::cast_slice(&self.silhouettes),
+                bytemuck::cast_slice(&self.geometry.silhouettes),
                 vertex,
             ),
-            positions: buffer("positions", bytemuck::cast_slice(&self.positions), vertex),
-            normals: buffer("normals", bytemuck::cast_slice(&self.normals), vertex),
+            positions: buffer(
+                "positions",
+                bytemuck::cast_slice(&self.geometry.positions),
+                vertex,
+            ),
+            normals: buffer(
+                "normals",
+                bytemuck::cast_slice(&self.geometry.normals),
+                vertex,
+            ),
             indices: buffer(
                 "indices",
-                bytemuck::cast_slice(&self.indices),
+                bytemuck::cast_slice(&self.geometry.indices),
                 wgpu::BufferUsages::INDEX,
             ),
-            segments: buffer("edges", bytemuck::cast_slice(&self.segments), vertex),
+            segments: buffer(
+                "edges",
+                bytemuck::cast_slice(&self.geometry.segments),
+                vertex,
+            ),
             uniform,
             frame_bind,
         }
@@ -203,23 +283,16 @@ pub(crate) fn gpu_bytes(body: &GpuBody) -> u64 {
 #[cfg(test)]
 impl PreparedBody {
     pub(crate) fn first_position(&self) -> Option<[f32; 3]> {
-        self.positions.first().copied()
+        self.geometry.positions.first().copied()
     }
 }
 
-pub(crate) fn cpu_scratch_bytes(scene: &SceneSnapshot) -> Result<u64, RenderError> {
-    let mut scratch = 0;
-    for body in scene.bodies() {
-        scratch = add(
-            scratch,
-            crate::silhouette::scratch_bytes(u64::from(body.mesh()?.header().triangle_count))?,
-        )?;
+#[cfg(test)]
+impl PreparedBody {
+    pub(crate) fn silhouette_len_and_capacity(&self) -> (usize, usize) {
+        (
+            self.geometry.silhouettes.len(),
+            self.geometry.silhouettes.capacity(),
+        )
     }
-    add(
-        scratch,
-        mul(
-            scene.bodies().len() as u64,
-            std::mem::size_of::<PreparedBody>() as u64,
-        )?,
-    )
 }

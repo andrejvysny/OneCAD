@@ -9,6 +9,7 @@ description = "Bounded CAD render targets on a host-owned shared wgpu device"
 onecad-scene = { path = "../onecad-scene" }
 onecad-protocol = { workspace = true }
 thiserror = { workspace = true }
+pollster = "0.4"
 wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }
 bytemuck = { version = "1", features = ["derive"] }
 glam = { version = "0.30", features = ["bytemuck"] }
@@ -16,6 +17,5 @@ solidcraft-gpu = { path = "../../vendor/solidcraft-viewport/crates/gpu" }
 solidcraft-render = { path = "../../vendor/solidcraft-viewport/crates/render" }
 
 [dev-dependencies]
-pollster = "0.4"
 png = "0.18"
 naga = { version = "=30.0.1", features = ["wgsl-in"] }

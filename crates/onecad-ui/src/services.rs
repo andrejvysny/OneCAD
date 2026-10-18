@@ -244,13 +244,13 @@ pub async fn candidate(backend: &Backend, generation: u64, candidate: Candidate)
             let result = match preview(backend, &tag, *operation, sketch_id, snapshot).await {
                 Ok(result) => match preview_scene(&tag, &result) {
                     Ok(scene) => {
-                        match onecad_render::PreparedSolidCraftScene::new(
-                            &scene,
-                            backend
-                                .shared
-                                .budget
-                                .limit_cpu_prepared_bytes(crate::budget::MAX_PREPARED_BYTES),
-                        ) {
+                        match backend.shared.preparation_budget().and_then(|budget| {
+                            onecad_render::PreparedScene::new(
+                                &scene,
+                                budget.limit_cpu_prepared_bytes(crate::budget::MAX_PREPARED_BYTES),
+                            )
+                            .map_err(|error| error.to_string())
+                        }) {
                             Ok(scene) => {
                                 prepared = Some(scene);
                                 Ok(result)
@@ -337,8 +337,16 @@ fn preview_scene(
             .map_err(|error| error.to_string())
         })
         .collect::<Result<Vec<_>, String>>()?;
-    SceneSnapshot::new(tag.context.scene, bodies, SceneLimits::default())
-        .map_err(|error| error.to_string())
+    SceneSnapshot::new(
+        tag.context.scene,
+        bodies,
+        SceneLimits {
+            max_resident_bytes: crate::budget::MAX_PREVIEW_SCENE_BYTES,
+            max_bodies: crate::budget::MAX_BODIES,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| error.to_string())
 }
 
 pub(crate) fn current_worker_failed(state: &onecad_app::state::AppState) -> bool {

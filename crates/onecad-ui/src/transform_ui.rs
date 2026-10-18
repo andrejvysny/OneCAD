@@ -42,7 +42,8 @@ impl App {
         }) else {
             return;
         };
-        if !self.bridge.valid()
+        if !self.viewport_ready()
+            || !self.bridge.valid()
             || self.busy()
             || self.sketch_active()
             || crate::viewport_selection::sectioned(self)
@@ -81,7 +82,7 @@ fn parameters(app: &App) -> Option<(RecordId, TransformBodyParams)> {
         return None;
     }
     let tool = app.interaction.tool.as_ref()?;
-    if tool.phase != SessionPhase::Editing || !app.bridge.valid() {
+    if tool.phase != SessionPhase::Editing || !app.viewport_ready() || !app.bridge.valid() {
         return None;
     }
     let Operation::Known(KnownOperation::TransformBody(mut params)) = tool.record.op.clone() else {

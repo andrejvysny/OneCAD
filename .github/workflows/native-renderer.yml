@@ -1,0 +1,51 @@
+name: Native renderer
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  metal-renderer:
+    name: Metal renderer acceptance
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      ONECAD_RENDER_CAPTURE_DIR: ${{ runner.temp }}/onecad-render-quality-smoke
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check first-party formatting
+        run: >-
+          cargo fmt --check
+          -p onecad -p onecad-app -p onecad-core -p onecad-protocol
+          -p onecad-scene -p onecad-render -p onecad-interaction -p onecad-ui
+          -p onecad-worker-stub -p onecad-regen -p onecad-kernelbench
+          -p onecad-library -p onecad-library-ingest
+      - name: Verify pinned vendor source
+        working-directory: vendor/solidcraft-viewport
+        run: shasum -a 256 -c SOURCE_SHA256SUMS
+      - name: Check renderer and host
+        run: cargo clippy -p onecad-render -p onecad-ui --all-targets -- -D warnings
+      - name: CPU renderer and scene tests
+        run: cargo test -p onecad-render -p onecad-scene -p onecad-protocol
+      - name: Native host and interaction unit tests
+        run: cargo test -p onecad-ui -p onecad-interaction --lib
+      - name: Require real Metal acceptance
+        run: >-
+          cargo test -p onecad-render
+          -- --ignored --nocapture --test-threads=1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: metal-renderer-captures
+          path: ${{ runner.temp }}/onecad-render-quality-smoke
+          if-no-files-found: error
+          retention-days: 14

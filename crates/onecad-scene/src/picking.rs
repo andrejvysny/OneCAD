@@ -28,7 +28,7 @@ pub struct PickHit<'a> {
     pub depth: f64,
 }
 
-/// Synchronous bounded brute-force authority. Visibility uses positive camera
+/// Synchronous indexed authority. Visibility uses positive camera
 /// depth; the two-pixel slack is converted at the nearest face's actual depth.
 /// The capture must be the exact capture used by rendering/overlays.
 pub fn pick<'a>(
@@ -37,6 +37,26 @@ pub fn pick<'a>(
     capture: CaptureIdentity,
     logical: DVec2,
 ) -> Result<Option<PickHit<'a>>, SceneError> {
+    pick_impl(scene, view, capture, logical, true)
+}
+
+/// Independent traversal oracle for acceleration qualification.
+pub fn pick_brute_force<'a>(
+    scene: &'a SceneSnapshot,
+    view: &ViewSnapshot,
+    capture: CaptureIdentity,
+    logical: DVec2,
+) -> Result<Option<PickHit<'a>>, SceneError> {
+    pick_impl(scene, view, capture, logical, false)
+}
+
+fn pick_impl<'a>(
+    scene: &'a SceneSnapshot,
+    view: &ViewSnapshot,
+    capture: CaptureIdentity,
+    logical: DVec2,
+    indexed: bool,
+) -> Result<Option<PickHit<'a>>, SceneError> {
     if scene.identity() != view.identity().scene || capture != view.identity() {
         return Err(SceneError::CaptureMismatch);
     }
@@ -44,14 +64,97 @@ pub fn pick<'a>(
     let mut face: Option<PickHit<'a>> = None;
     for body in scene.bodies() {
         let mesh = body.mesh()?;
-        pick_faces(body, &mesh, view, ray, &mut face);
+        pick_body_faces(body, &mesh, view, ray, indexed, &mut face);
     }
     let mut edge: Option<PickHit<'a>> = None;
     for body in scene.bodies() {
         let mesh = body.mesh()?;
-        pick_edges(body, &mesh, view, ray, logical, face.as_ref(), &mut edge);
+        pick_body_edges(
+            body,
+            &mesh,
+            view,
+            ray,
+            logical,
+            indexed,
+            face.as_ref(),
+            &mut edge,
+        );
     }
     Ok(edge.or(face))
+}
+
+fn pick_body_faces<'a>(
+    body: &'a SceneBody,
+    mesh: &MeshView<'a>,
+    view: &ViewSnapshot,
+    ray: Ray,
+    indexed: bool,
+    face: &mut Option<PickHit<'a>>,
+) {
+    if let Some(index) = body.face_index().filter(|_| indexed) {
+        index.visit(
+            |bounds| crate::index::ray_bounds(ray, bounds),
+            |p| {
+                pick_faces(
+                    body,
+                    mesh,
+                    view,
+                    ray,
+                    face,
+                    std::iter::once((p.topology, p.element)),
+                );
+            },
+        );
+    } else {
+        let candidates = (0..mesh.header().face_count).flat_map(|face| {
+            mesh.face_range(face as usize)
+                .into_iter()
+                .flat_map(move |span| {
+                    (span.first..span.first + span.count).map(move |triangle| (face, triangle))
+                })
+        });
+        pick_faces(body, mesh, view, ray, face, candidates);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pick_body_edges<'a>(
+    body: &'a SceneBody,
+    mesh: &MeshView<'a>,
+    view: &ViewSnapshot,
+    ray: Ray,
+    logical: DVec2,
+    indexed: bool,
+    face: Option<&PickHit<'a>>,
+    edge: &mut Option<PickHit<'a>>,
+) {
+    if let Some(index) = body.edge_index().filter(|_| indexed) {
+        index.visit(
+            |bounds| crate::index::screen_bounds(view, logical, bounds),
+            |p| {
+                pick_edges(
+                    body,
+                    mesh,
+                    view,
+                    ray,
+                    logical,
+                    face,
+                    edge,
+                    std::iter::once((p.topology, p.element)),
+                );
+            },
+        );
+    } else {
+        let candidates = (0..mesh.header().edge_count).flat_map(|edge| {
+            mesh.edge_range(edge as usize)
+                .into_iter()
+                .flat_map(move |span| {
+                    (span.first..span.first + span.count.saturating_sub(1))
+                        .map(move |point| (edge, point))
+                })
+        });
+        pick_edges(body, mesh, view, ray, logical, face, edge, candidates);
+    }
 }
 
 fn pick_faces<'a>(
@@ -60,46 +163,42 @@ fn pick_faces<'a>(
     view: &ViewSnapshot,
     ray: Ray,
     best: &mut Option<PickHit<'a>>,
+    candidates: impl Iterator<Item = (u32, u32)>,
 ) {
-    for face in 0..mesh.header().face_count as usize {
-        let Some(span) = mesh.face_range(face) else {
+    for (face, triangle) in candidates {
+        let Some(indices) = mesh.triangle(triangle as usize) else {
             continue;
         };
-        for triangle in span.first..span.first + span.count {
-            let Some(indices) = mesh.triangle(triangle as usize) else {
-                continue;
-            };
-            let vertices = indices.map(|i| {
-                mesh.position(i as usize)
-                    .map(|p| DVec3::from_array(p.map(f64::from)))
-            });
-            let [Some(a), Some(b), Some(c)] = vertices else {
-                continue;
-            };
-            let Some((distance, normal)) = triangle_hit(ray, a, b, c) else {
-                continue;
-            };
-            let world = ray.origin + ray.direction * distance;
-            let depth = view.depth(world);
-            if depth < view.camera().near || depth > view.camera().far {
-                continue;
-            }
-            let Some(id) = mesh.face_id(face) else {
-                continue;
-            };
-            let hit = make_hit(
-                body,
-                mesh,
-                view,
-                PickKind::Face,
-                id,
-                world,
-                Some(normal),
-                distance,
-            );
-            if is_nearer(&hit, best.as_ref()) {
-                *best = Some(hit);
-            }
+        let vertices = indices.map(|i| {
+            mesh.position(i as usize)
+                .map(|p| DVec3::from_array(p.map(f64::from)))
+        });
+        let [Some(a), Some(b), Some(c)] = vertices else {
+            continue;
+        };
+        let Some((distance, normal)) = triangle_hit(ray, a, b, c) else {
+            continue;
+        };
+        let world = ray.origin + ray.direction * distance;
+        let depth = view.depth(world);
+        if depth < view.camera().near || depth > view.camera().far {
+            continue;
+        }
+        let Some(id) = mesh.face_id(face as usize) else {
+            continue;
+        };
+        let hit = make_hit(
+            body,
+            mesh,
+            view,
+            PickKind::Face,
+            id,
+            world,
+            Some(normal),
+            distance,
+        );
+        if is_nearer(&hit, best.as_ref()) {
+            *best = Some(hit);
         }
     }
 }
@@ -113,41 +212,37 @@ fn pick_edges<'a>(
     logical: DVec2,
     face: Option<&PickHit<'a>>,
     best: &mut Option<PickHit<'a>>,
+    candidates: impl Iterator<Item = (u32, u32)>,
 ) {
-    for edge in 0..mesh.header().edge_count as usize {
-        let Some(span) = mesh.edge_range(edge) else {
+    for (edge, point) in candidates {
+        let (Some(a), Some(b)) = (
+            mesh.edge_point(point as usize),
+            mesh.edge_point(point as usize + 1),
+        ) else {
             continue;
         };
-        for point in span.first..(span.first + span.count).saturating_sub(1) {
-            let (Some(a), Some(b)) = (
-                mesh.edge_point(point as usize),
-                mesh.edge_point(point as usize + 1),
-            ) else {
+        let Some(world) = closest_edge(
+            view,
+            logical,
+            DVec3::from_array(a.map(f64::from)),
+            DVec3::from_array(b.map(f64::from)),
+        ) else {
+            continue;
+        };
+        let depth = view.depth(world);
+        if let Some(front) = face {
+            let slack = EDGE_DEPTH_SLACK_LOGICAL_PIXELS * view.world_per_pixel(front.depth);
+            if depth > front.depth + slack {
                 continue;
-            };
-            let Some(world) = closest_edge(
-                view,
-                logical,
-                DVec3::from_array(a.map(f64::from)),
-                DVec3::from_array(b.map(f64::from)),
-            ) else {
-                continue;
-            };
-            let depth = view.depth(world);
-            if let Some(front) = face {
-                let slack = EDGE_DEPTH_SLACK_LOGICAL_PIXELS * view.world_per_pixel(front.depth);
-                if depth > front.depth + slack {
-                    continue;
-                }
             }
-            let Some(id) = mesh.edge_id(edge) else {
-                continue;
-            };
-            let distance = (world - ray.origin).dot(ray.direction);
-            let hit = make_hit(body, mesh, view, PickKind::Edge, id, world, None, distance);
-            if is_nearer(&hit, best.as_ref()) {
-                *best = Some(hit);
-            }
+        }
+        let Some(id) = mesh.edge_id(edge as usize) else {
+            continue;
+        };
+        let distance = (world - ray.origin).dot(ray.direction);
+        let hit = make_hit(body, mesh, view, PickKind::Edge, id, world, None, distance);
+        if is_nearer(&hit, best.as_ref()) {
+            *best = Some(hit);
         }
     }
 }
@@ -185,7 +280,18 @@ fn is_nearer(hit: &PickHit<'_>, best: Option<&PickHit<'_>>) -> bool {
         .total_cmp(&best.depth)
         .then_with(|| hit.body_id.cmp(&best.body_id))
         .then_with(|| hit.topology_id.cmp(best.topology_id))
+        .then_with(|| hit.world_position.x.total_cmp(&best.world_position.x))
+        .then_with(|| hit.world_position.y.total_cmp(&best.world_position.y))
+        .then_with(|| hit.world_position.z.total_cmp(&best.world_position.z))
+        .then_with(|| normal_order(hit.normal, best.normal))
         .is_lt()
+}
+
+fn normal_order(a: Option<DVec3>, b: Option<DVec3>) -> std::cmp::Ordering {
+    let (a, b) = (a.unwrap_or(DVec3::ZERO), b.unwrap_or(DVec3::ZERO));
+    a.x.total_cmp(&b.x)
+        .then_with(|| a.y.total_cmp(&b.y))
+        .then_with(|| a.z.total_cmp(&b.z))
 }
 
 fn triangle_hit(ray: Ray, a: DVec3, b: DVec3, c: DVec3) -> Option<(f64, DVec3)> {

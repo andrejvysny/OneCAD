@@ -25,16 +25,26 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 height: f64::from(rect.height()),
                 scale_factor: f64::from(ui.ctx().pixels_per_point()),
             };
-            if viewport.width <= 0.0 || viewport.height <= 0.0 {
+            if !app.viewport_ready() {
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "Viewport unavailable. Save or close the document to recover.",
+                    egui::FontId::proportional(16.0),
+                    app.theme.ink3,
+                );
+                return;
+            }
+            if physical_size(viewport).contains(&0) {
+                if let Err(error) = suspend(app, ui.ctx()) {
+                    app.fail_viewport(error);
+                }
                 return;
             }
             navigation(app, ui, &response, viewport, &display);
-            crate::viewport_selection::hover(app, ui, rect, viewport, &display);
             if let Err(error) = render(app, ui.ctx(), viewport, &display) {
-                app.status = format!("Viewport: {error}");
-                app.bridge
-                    .shared
-                    .invalidate(Some(format!("Viewport: {error}")));
+                app.fail_viewport(error);
+                return;
             }
             if let Some(texture) = app.texture {
                 ui.painter().image(
@@ -45,11 +55,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 );
                 app.sampled = true;
             }
-            let Some(view) = app.view.filter(|view| {
-                view.identity().scene == display.scene.identity() && view.viewport() == viewport
-            }) else {
+            let Some(view) = drawable_capture(app.view, display.scene.identity(), viewport) else {
                 return;
             };
+            crate::viewport_selection::hover(app, ui, rect, &view, &display);
             if app.sketch_active() {
                 if let Some(session) = app.sketch.session.as_ref() {
                     crate::sketch_view::paint(ui.painter(), rect, &view, session, &app.theme);
@@ -83,6 +92,21 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 );
             }
         });
+}
+
+fn drawable_capture(
+    view: Option<ViewSnapshot>,
+    scene: onecad_scene::SceneIdentity,
+    viewport: Viewport,
+) -> Option<ViewSnapshot> {
+    view.filter(|view| view.identity().scene == scene && view.viewport() == viewport)
+}
+
+fn physical_size(viewport: Viewport) -> [u32; 2] {
+    [
+        (viewport.width * viewport.scale_factor).round() as u32,
+        (viewport.height * viewport.scale_factor).round() as u32,
+    ]
 }
 
 fn navigation(
@@ -188,11 +212,15 @@ fn render(
     let needs_scene = app.renderer.scene_identity() != Some(display.scene.identity());
     // Poll even without new drawing: completion callbacks retire resources and acknowledge scenes.
     let renderer_idle = app.renderer.poll_idle().map_err(|e| e.to_string())?;
+    if let Ok(mut budget) = app.bridge.shared.budget.lock() {
+        *budget = app.renderer.preparation_budget();
+    }
     if !renderer_idle {
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
         return Ok(());
     }
     if !app.draw_dirty && !needs_scene && app.pending_preview.is_none() && !app.clear_preview {
+        crate::viewport_selection::upload(app, &display.scene, ctx)?;
         return Ok(());
     }
     if !app.sampling_done.load(Ordering::Acquire) {
@@ -216,11 +244,12 @@ fn render(
         let changed_section = options.section != app.renderer.options().section;
         match app.renderer.set_options(options) {
             Ok(()) if changed_section => {
+                replace_texture(app);
                 app.selected_body = None;
                 app.interaction.selection = None;
                 app.topology.select(None);
             }
-            Ok(()) => {}
+            Ok(()) => replace_texture(app),
             Err(error) => app.status = format!("Display: {error}"),
         }
     }
@@ -241,15 +270,10 @@ fn render(
             )
             .map_err(|e| e.to_string())?;
     }
-    let size = [
-        (viewport.width * viewport.scale_factor).round() as u32,
-        (viewport.height * viewport.scale_factor).round() as u32,
-    ];
+    let size = physical_size(viewport);
     if app.renderer.size() != size {
-        if let Some(texture) = app.texture.take() {
-            app.gpu.renderer.write().free_texture(&texture);
-        }
         app.renderer.resize(size).map_err(|e| e.to_string())?;
+        replace_texture(app);
     }
     app.view_number += 1;
     let view = ViewSnapshot::new(
@@ -267,7 +291,7 @@ fn render(
             },
         );
     }
-    crate::viewport_selection::upload(app, &display.scene)?;
+    crate::viewport_selection::upload(app, &display.scene, ctx)?;
     let mut encoder = app
         .gpu
         .device
@@ -303,7 +327,43 @@ fn render(
         ));
     }
     app.view = Some(view);
+    if let Ok(mut budget) = app.bridge.shared.budget.lock() {
+        *budget = app.renderer.preparation_budget();
+    }
     app.draw_dirty = false;
+    Ok(())
+}
+
+fn replace_texture(app: &mut App) {
+    let next = app.renderer.output_view().map(|view| {
+        app.gpu.renderer.write().register_native_texture(
+            &app.gpu.device,
+            view,
+            wgpu::FilterMode::Linear,
+        )
+    });
+    let previous = std::mem::replace(&mut app.texture, next);
+    if let Some(previous) = previous {
+        app.gpu.renderer.write().free_texture(&previous);
+    }
+}
+
+fn suspend(app: &mut App, ctx: &egui::Context) -> Result<(), String> {
+    if !app
+        .renderer
+        .poll_idle()
+        .map_err(|error| error.to_string())?
+        || !app.sampling_done.load(Ordering::Acquire)
+    {
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        return Ok(());
+    }
+    app.renderer
+        .resize([0, 0])
+        .map_err(|error| error.to_string())?;
+    replace_texture(app);
+    app.view = None;
+    app.draw_dirty = true;
     Ok(())
 }
 
@@ -405,3 +465,7 @@ fn profile_bounds(display: &crate::bridge::Display) -> Option<Bounds> {
             max: a.max.max(b.max),
         })
 }
+
+#[cfg(test)]
+#[path = "viewport_tests.rs"]
+mod tests;

@@ -65,15 +65,19 @@ fn frame_uses_captured_projection_and_scale_for_both_projections() {
         .unwrap();
         assert_eq!(
             frame.view_proj,
-            view.view_projection().as_mat4().to_cols_array_2d()
+            (frame::reversed_depth() * view.view_projection().as_mat4()).to_cols_array_2d()
         );
         assert_eq!(
             frame.inverse_projection,
-            view.projection_matrix()
+            (frame::reversed_depth() * view.projection_matrix().as_mat4())
                 .inverse()
-                .as_mat4()
                 .to_cols_array_2d()
         );
+        let gpu_projection = frame::reversed_depth() * view.projection_matrix().as_mat4();
+        for (distance, expected) in [(camera.near, 1.0), (camera.far, 0.0)] {
+            let clip = gpu_projection * glam::Vec4::new(0.0, 0.0, -distance as f32, 1.0);
+            assert!((clip.z / clip.w - expected).abs() < 1e-5);
+        }
         assert_eq!(frame.viewport, [600.0, 400.0, 1.0 / 600.0, 1.0 / 400.0]);
         assert_eq!(
             frame.eye[3],
@@ -99,6 +103,7 @@ fn headless_quality_shared_device_capture() {
     .unwrap();
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("onecad-render test host"),
+        required_features: required_device_features(adapter.features()),
         ..Default::default()
     }))
     .unwrap();
@@ -202,7 +207,7 @@ fn verify_replacement_and_stale_capture(
     drop(encoder);
     let identity = PreviewIdentity {
         base: scene.identity(),
-        generation: 1,
+        generation: renderer.latest_preview_generation.unwrap_or(0) + 1,
     };
     renderer.replace_preview(identity, scene).unwrap();
     assert_eq!(renderer.preview_identity(), Some(identity));
@@ -229,7 +234,7 @@ fn verify_replacement_and_stale_capture(
     queue.submit([]);
 }
 
-fn capture(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &Renderer, name: &str) {
+fn capture(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &Renderer, name: &str) -> Vec<u8> {
     let [width, height] = renderer.size();
     let stride = (width * 4).div_ceil(256) * 256;
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -279,7 +284,10 @@ fn capture(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &Renderer, name
     assert!(pixels
         .chunks_exact(4)
         .any(|pixel| pixel[..3] != pixels[..3]));
-    let directory = std::path::Path::new("/private/tmp/onecad-render-quality-smoke");
+    let output = std::env::var_os("ONECAD_RENDER_CAPTURE_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("onecad-render-quality-smoke"));
+    let directory = output.as_path();
     std::fs::create_dir_all(directory).unwrap();
     let file = std::fs::File::create(directory.join(format!("{name}.png"))).unwrap();
     let mut png = png::Encoder::new(file, width, height);
@@ -289,6 +297,7 @@ fn capture(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &Renderer, name
         .unwrap()
         .write_image_data(&pixels)
         .unwrap();
+    pixels
 }
 
 #[test]
@@ -442,3 +451,11 @@ fn selection_and_preview_styles_stay_distinct_from_committed_shading() {
         assert_eq!(committed.shadow_vp, preview.shadow_vp);
     }
 }
+
+mod quality_acceptance;
+
+mod analytic_fixture;
+
+mod section_regressions;
+
+mod nema_acceptance;

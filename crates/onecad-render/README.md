@@ -6,40 +6,26 @@ existing wgpu 30.0.1 `Device` and `Queue`; cloned handles refer to that same dev
 owns the surface, event loop, submission order, and UI composition. Recreate the renderer
 when the shared device is lost.
 
-## Full SolidCraft viewport
+## Canonical quality viewport
 
-The native host uses `SolidCraftViewport`, backed by the complete vendored
-SolidCraft `geom`, `render` and `gpu` source at
-`a228a5830eedf88856fd392b7db0ff5977f352d6` (0.16.0). See
-[vendor provenance](../../vendor/solidcraft-viewport/README.md) for source hashes,
-licenses and excluded engine-dependent tests. The original quality `Renderer`
-described below remains available; it is not the primary native viewport.
+The native host uses OneCAD's `Renderer`, preserving studio IBL, AO, contact shadows,
+analytic grid, and blended feature/silhouette lines. OneCAD-owned `RenderOptions` controls
+section plane/cap color, outline, hidden edges, opacity, and 1×/2× SSAA.
+Section caps use a winding stencil mask, then one fullscreen plane intersection for color,
+normal/AO depth and contact height. Fully retained overlapping bodies cancel in the mask.
+Active sections refuse scenes with more than 255 bodies before publication, bounding the
+eight-bit winding count. Contact maps cache committed geometry/visibility and section state;
+camera, theme, selection and preview changes do not regenerate them.
+`SolidCraftViewport` remains a comparison adapter. This does not establish application
+workflow or material-workspace parity.
 
-Prepare checked OneCAD meshes with `PreparedSolidCraftScene` on a service
-thread, using `SolidCraftPreparationBudget`. The adapter preserves captured
-camera matrices, scene/body/revision identity, preview generations and CPU
-picking authority. It renders into private 4x-MSAA color/depth targets and a
-single-sample output on the host's shared device. Poll completion before changing
-resources; submit before egui samples the output, then fence the final sampling
-submission. Retired geometry and highlight resources remain charged until their
-submission completes. Supersampling and accessibility-map cache high-water
-allocations remain charged while the donor retains them.
-
-The copied stack includes section/stencil, transparency, hidden edges, analysis,
-PBR, image and supersampling APIs. The native Display popup currently exposes
-only silhouettes, hidden edges, opacity, supersampling and section controls.
-Copying these APIs does not expose every donor tool or replace OCCT/PlaneGCS.
-
-The explicit hardware smoke test covers both projections, checked geometry,
-highlight/preview updates, section clipping, opacity, supersampling, resize and
-completion fences on a real shared device:
-
-```sh
-cargo test -p onecad-render headless_full_solidcraft_viewport_shared_device -- --ignored --nocapture
-```
-
-Captures are diagnostic, not accepted visual goldens. Native input and full
-frontend migration remain separate gates.
+Hosts and tests request `required_device_features(adapter.features())`, enabling
+`DEPTH32FLOAT_STENCIL8` when supported; otherwise the main pass uses `Depth24PlusStencil8`.
+The depth/normal prepass shares the selected depth/stencil format. GPU depth is reversed
+(near 1, far 0); captured CPU matrices remain unchanged. Frame uniforms convert projection and inverse
+together. The output attachment writes sRGB-encoded storage. `output_view()` exposes an
+`Rgba8Unorm` sampling view of that storage for egui's gamma-space composition; egui
+receives the stored gamma-encoded values without a second sRGB decode.
 
 ## Host integration
 
@@ -104,7 +90,7 @@ selection applies the existing accent tint at 0.45 and a 3-logical-pixel selecte
 following `src/viewport/engine/HighlightLayer.ts`. Separate preview faces use accent at 0.3,
 following `PreviewMesh.ts`. Snapshot-scoped face and edge selection/hover use separate
 flat alpha overlays, as described below. These subset styles do not cover cut tint,
-imported face colors, wire modes, section caps, sketches, annotations, or the full overlay
+imported face colors, wire modes, sketches, annotations, or the full overlay
 ladder. Renderer-only visibility was deliberately omitted: hiding must be represented by the
 same immutable scene used for CPU picking.
 
@@ -132,13 +118,12 @@ picking indexes are required. The host must refresh hover from its authoritative
 when the view changes; scene-scoped selected IDs remain valid while that scene is unchanged.
 
 Faces use unlit accent selection at 0.55 or cyan hover at 0.45, alpha blending, depth testing,
-no depth writes, and the existing OneCAD forward-depth polygon offset of -1/-1. Selected and
+no depth writes, and a reversed-depth polygon offset toward the eye. Selected and
 hovered edges use 3 logical pixels and ignore depth, matching `HighlightLayer.ts`. Whole-body
 selection stays at 0.45. The donor's -8 constant exists for separate CPU/GPU-plan geometry;
 identical shared committed buffers do not need that stronger offset. Face overlays precede
 feature lines; highlighted edges follow the separate translucent preview batch. Near/far
-clipping and camera matrices remain those of the captured view. Section clipping, cut-ghost
-and xray tool-body preview variants are not implemented in this slice.
+clipping and camera matrices remain those of the captured view. Cut-ghost and xray tool-body preview variants remain outside this increment.
 
 ## Resource bounds
 
@@ -165,32 +150,60 @@ The original spike remains unchanged. Adaptations originate from:
 | Source | New destination | Local changes |
 | --- | --- | --- |
 | `spikes/render-look/src/gpu.rs` | `src/gpu.rs` | Borrow shared host handles; remove adapter/device factory, polling wait and benchmark helpers. |
-| `spikes/render-look/src/render.rs`, `src/render/passes.rs` | `src/{pipelines,targets,passes}.rs` | Quality-only private target ladder; per-body selection/preview; sampled output; forward finite-depth capture; remove benchmark variants/readback/atomic compaction. |
+| `spikes/render-look/src/render.rs`, `src/render/passes.rs` | `src/{pipelines,targets,passes}.rs` | Quality-only private target ladder; per-body selection/preview; sampled output; reversed finite-depth capture; remove benchmark variants/readback/atomic compaction. |
 | `spikes/render-look/src/look.rs` | `src/frame.rs` | Consume immutable captured camera; exact physical target dimensions; both projection kinds; token selection/preview styles. |
 | `spikes/render-look/src/scene.rs` | `src/{mesh,silhouette,prepared}.rs` | Checked protocol mesh views; preflight caps; deterministic sorted geometric edge candidates; off-thread CPU preparation. |
 | `spikes/render-look/src/ibl.rs` | `src/ibl.rs` | Shared queue startup; asynchronous host completion fence instead of blocking wait. |
 | `spikes/render-look/src/shaders/*.wgsl` | `src/shaders/*.wgsl` | Preserve quality formulas; inverse-projection AO; captured finite near/far; orthographic lighting/silhouette directions; selected tint and preview shader. |
 
 The spike's upstream SolidCraft, XeGTAO, and Khronos derivations remain applicable. See
-`THIRD_PARTY_NOTICES.md` and the root `ATTRIBUTION.md`. Root attribution must cover the new
-shader paths, depth-bias pipeline, and geometric silhouette adaptation before distribution.
+`THIRD_PARTY_NOTICES.md` and the root `ATTRIBUTION.md`. Root attribution records the shader paths, depth-bias pipeline and silhouette adaptation.
 
 ## Validation and remaining gates
 
-`cargo test -p onecad-render` runs CPU preparation, budget, camera, and deterministic-candidate
-checks. The real-GPU test is explicit:
+`cargo test -p onecad-render` runs CPU preparation, budget, camera, topology-overlay,
+and deterministic-candidate checks. Hardware acceptance is explicit and fails when no
+real adapter exists:
 
 ```sh
-cargo test -p onecad-render headless_quality_shared_device_capture -- --ignored --nocapture
+cargo test -p onecad-render -- --ignored --nocapture --test-threads=1
 ```
 
-It requires a real adapter, captures both themes/projections under
-`/private/tmp/onecad-render-quality-smoke`, checks opaque/nonuniform output and wgpu validation,
-and exercises capture rejection, preview isolation/tombstones, zero-size resize, rejection
-without mutation, frame completion, and dropped-encoder recovery. Test readback is confined
-to `src/tests.rs`. Native eframe integration, complete mounting-plate workflow, performance,
-determinism tolerances, and accepted-image comparison remain separate gates. No images here
-are accepted goldens.
+`headless_quality_feature_acceptance` requires Metal and float-depth/stencil support,
+then creates separate devices with that feature enabled and disabled to exercise both
+main depth formats. Both themes/projections receive repeated byte-exact captures.
+Feature comparisons require at least 8 changed RGB pixels with channel difference
+strictly greater than 2/255. These thresholds are declared in source before capture;
+they are regression assertions, not accepted-image tolerances or goldens. Final
+composition must remain opaque even for translucent bodies and previews.
+
+Checks cover hidden edges, opacity, outline, section clipping/cap color, body/face
+selection, selected-over-hover precedence, preview, fractional DPI, 2× SSAA, suspension,
+stale captures, rejected replacement, completion fences, and abandoned encoders.
+The NEMA hardware test requires 67 checked bodies and 381,524 triangles under the
+64 MiB preparation cap, prints preparation duration and all admitted accounting fields,
+and captures both themes/projections twice. These are estimated payload charges, not
+measured process RSS or driver residency. The buffer-reuse hardware test requires
+unchanged geometry buffers across publication revision changes.
+
+Readback exists only in tests. Captures go to `ONECAD_RENDER_CAPTURE_DIR`, defaulting to
+`$TMPDIR/onecad-render-quality-smoke`; the Metal workflow uploads those artifacts.
+
+`.github/workflows/native-renderer.yml` runs explicit Metal tests, first-party formatting,
+and pinned vendor SHA-256 verification. Missing hardware fails the lane. Branch protection
+must separately require the `Metal renderer acceptance` job.
+
+A closed smooth single-face sphere supplies independent silhouette checks without
+feature-edge overlap. Its checked MESH1 fixture asserts outward winding and exactly
+two uses per undirected edge. Section regressions require one alpha contribution
+(linear RGB midpoint tolerance 0.015), a visible cap coplanar with the grid, and
+contact-map cut-plane depth within 0.001 of the captured shadow projection. A nested,
+fully retained sphere must not erase the outer sphere's cap or raise its contact height.
+
+No captures are accepted visual goldens. Broader analytic-fixture image qualification,
+fillet/NEMA visual review, native real-worker workflows, device-loss recovery,
+application latency/residency measurements, and 120/60 fps plus 1M/5M-triangle targets
+remain separate gates. Passing headless tests does not qualify them.
 
 ## Historical topology overlay increment (quality Renderer)
 
@@ -205,7 +218,7 @@ this adaptation uses its MIT option and retains its copyright/permission notice.
 
 | Exact donor path at that revision | Local destination | Reused behavior and local changes |
 | --- | --- | --- |
-| `crates/gpu/src/view.rs::highlight_depth`, `HIGHLIGHT_BIAS`, `Renderer::draw`, `GpuScene` | `src/pipelines.rs::highlight_depth`, `src/passes.rs::draw_highlights`, `src/highlights.rs` | Separate small highlight/preview batches; tested alpha face overlays without depth writes. Adapted to checked MESH1 spans and existing per-body buffers, immutable scene/body revision guards, OneCAD -1/-1 offset and depth-independent edge highlight semantics; bounded CPU metadata/two shared uniforms with existing submission fences. |
+| `crates/gpu/src/view.rs::highlight_depth`, `HIGHLIGHT_BIAS`, `Renderer::draw`, `GpuScene` | `src/pipelines.rs::highlight_depth`, `src/passes.rs::draw_highlights`, `src/highlights.rs` | Separate small highlight/preview batches; tested alpha face overlays without depth writes. Adapted to checked MESH1 spans and existing per-body buffers, immutable scene/body revision guards, OneCAD reversed-depth offset and depth-independent edge highlight semantics; bounded CPU metadata/two shared uniforms with existing submission fences. |
 | `assets/shaders/viewport.wgsl::shade` unlit selection branch | `src/shaders/body.wgsl::fs_highlight` | Flat overlay colors without PBR/tone mapping; explicit fragment entry and shared frame color replace donor zero-normal sentinel/per-vertex packed colors. |
 | `crates/gpu/src/view.rs::GpuScene::{trans,ghost,xray}`, `Renderer::draw` | `src/passes.rs` existing preview batch plus new highlight ordering | Retained committed/preview separation and alpha/no-depth-write preview ordering. Did not import ghost/xray semantics, section stencil, plan evaluation, or the whole donor renderer. |
 

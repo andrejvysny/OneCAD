@@ -1,4 +1,15 @@
 //! CAD rendering on the host's shared wgpu device; no UI-toolkit dependency.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable
+    )
+)]
 mod flight;
 mod frame;
 mod gpu;
@@ -7,6 +18,7 @@ mod highlights;
 mod ibl;
 mod limits;
 mod mesh;
+mod options;
 mod passes;
 mod pipelines;
 mod prepared;
@@ -18,7 +30,8 @@ pub use frame::{RenderStyle, SilhouetteMode, Theme};
 pub use highlights::{HighlightKind, HighlightTarget, PreparedHighlights};
 pub use limits::{MemoryEstimate, RenderLimits};
 pub use mesh::{BodyStyle, PreviewIdentity};
-pub use prepared::{PreparationBudget, PreparedScene};
+pub use options::{required_device_features, RenderOptions};
+pub use prepared::{PreparationBudget, PreparationCache, PreparedScene};
 pub use solidcraft_viewport::{
     PreparedSolidCraftScene, SolidCraftOptions, SolidCraftPreparationBudget, SolidCraftViewport,
 };
@@ -72,6 +85,8 @@ pub struct Renderer {
     flight: flight::Flight,
     latest_preview_generation: Option<u64>,
     highlights: Option<highlights::GpuHighlights>,
+    options: RenderOptions,
+    contact_dirty: bool,
 }
 
 impl Renderer {
@@ -84,7 +99,7 @@ impl Renderer {
         limits.validate_size(size, device)?;
         let estimate = limits.check(
             MemoryEstimate {
-                target_bytes: limits::target_bytes(size)?,
+                target_bytes: limits::quality_target_bytes(size, RenderOptions::default())?,
                 ibl_bytes: limits::ibl_bytes(),
                 geometry_bytes: std::mem::size_of::<FrameU>() as u64,
                 ..Default::default()
@@ -100,7 +115,17 @@ impl Renderer {
             ..Default::default()
         });
         let ibl = ibl::Ibl::build(&gpu, &sampler);
-        let targets = (!size.contains(&0)).then(|| Targets::new(&gpu, &pipelines, &ibl, size));
+        let targets = if size.contains(&0) {
+            None
+        } else {
+            Some(Targets::try_new(
+                &gpu,
+                &pipelines,
+                &ibl,
+                size,
+                RenderOptions::default(),
+            )?)
+        };
         let frame_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("CAD frame"),
             size: std::mem::size_of::<FrameU>() as u64,
@@ -133,6 +158,8 @@ impl Renderer {
             flight: flight::Flight::submitted(queue, || {}),
             latest_preview_generation: None,
             highlights: None,
+            options: RenderOptions::default(),
+            contact_dirty: true,
         })
     }
     pub fn output_view(&self) -> Option<&wgpu::TextureView> {
@@ -163,29 +190,7 @@ impl Renderer {
             return Ok(());
         }
         self.require_idle()?;
-        self.limits.validate_size(size, &self.device)?;
-        let next = MemoryEstimate {
-            target_bytes: limits::target_bytes(size)?,
-            cpu_prepared_bytes: 0,
-            upload_bytes: 0,
-            ..self.estimate
-        };
-        let estimate = self.limits.check(
-            next,
-            MemoryEstimate {
-                target_bytes: self.estimate.target_bytes,
-                ..Default::default()
-            },
-        )?;
-        let gpu = gpu::Gpu {
-            device: &self.device,
-            queue: &self.queue,
-        };
-        self.targets =
-            (!size.contains(&0)).then(|| Targets::new(&gpu, &self.pipelines, &self.ibl, size));
-        self.size = size;
-        self.estimate = estimate;
-        Ok(())
+        self.replace_targets(size, self.options)
     }
     /// Convenience CPU preparation for non-UI callers. Native hosts should prepare on a
     /// worker and use replace_prepared_scene to keep geometry packing off the UI thread.
@@ -195,11 +200,16 @@ impl Renderer {
         self.replace_prepared_scene(prepared)
     }
     pub fn replace_prepared_scene(&mut self, scene: PreparedScene) -> Result<(), RenderError> {
+        options::validate_section_bodies(self.options, scene.body_count())?;
         self.require_idle()?;
         let identity = scene.identity;
         let bounds = scene.bounds;
         let source = scene.source_bytes;
         let (bodies, estimate) = self.upload_prepared(scene, false)?;
+        self.contact_dirty |= self.committed.len() != bodies.len()
+            || self.committed.iter().zip(&bodies).any(|(old, new)| {
+                old.id != new.id || !std::sync::Arc::ptr_eq(&old.source, &new.source)
+            });
         self.committed = bodies;
         self.highlights = None;
         self.preview.clear();
@@ -301,36 +311,56 @@ impl Renderer {
             },
             MemoryEstimate::default(),
         )?;
-        let uniform = frame::uniform(
-            view,
-            self.committed_bounds,
-            style,
-            BodyStyle::default(),
-            false,
-        )?;
-        let selected = frame::uniform(
-            view,
-            self.committed_bounds,
-            style,
-            BodyStyle { selected: true },
-            false,
-        )?;
-        let preview_frame = frame::uniform(
-            view,
-            self.committed_bounds,
-            style,
-            BodyStyle::default(),
-            true,
-        )?;
+        let uniform = frame::with_options(
+            frame::uniform(
+                view,
+                self.committed_bounds,
+                style,
+                BodyStyle::default(),
+                false,
+            )?,
+            self.options,
+        );
+        let selected = frame::with_options(
+            frame::uniform(
+                view,
+                self.committed_bounds,
+                style,
+                BodyStyle { selected: true },
+                false,
+            )?,
+            self.options,
+        );
+        let preview_frame = frame::with_options(
+            frame::uniform(
+                view,
+                self.committed_bounds,
+                style,
+                BodyStyle::default(),
+                true,
+            )?,
+            self.options,
+        );
         let highlight_frames = if self.highlights.is_some() {
             Some([
-                frame::highlight_uniform(
-                    uniform,
-                    view,
-                    style,
-                    highlights::HighlightTone::Selected,
-                )?,
-                frame::highlight_uniform(uniform, view, style, highlights::HighlightTone::Hover)?,
+                frame::with_options(
+                    frame::highlight_uniform(
+                        uniform,
+                        view,
+                        style,
+                        highlights::HighlightTone::Selected,
+                    )?,
+                    self.options,
+                ),
+                frame::with_options(
+                    frame::highlight_uniform(
+                        uniform,
+                        view,
+                        style,
+                        highlights::HighlightTone::Hover,
+                    )?,
+                    self.options,
+                ),
             ])
         } else {
             None
@@ -357,6 +387,7 @@ impl Renderer {
             }
         }
         self.record(encoder, target, uniform.canvas);
+        self.contact_dirty = false;
         self.flight = flight::Flight::Encoded;
         Ok(true)
     }

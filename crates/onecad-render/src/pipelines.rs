@@ -1,7 +1,18 @@
 use crate::gpu::{self, depth_state, Gpu, Pipe};
 use crate::targets::{AO_FORMAT, HDR_FORMAT, OCC_FORMAT, OUTPUT_FORMAT, SAMPLES};
+mod section;
 
 pub(crate) struct Pipelines {
+    pub compose_layout: wgpu::BindGroupLayout,
+    pub compose: wgpu::RenderPipeline,
+    pub cap: wgpu::RenderPipeline,
+    pub pre_cap: wgpu::RenderPipeline,
+    pub height_cap: wgpu::RenderPipeline,
+    pub cap_mask: wgpu::RenderPipeline,
+    pub pre_cap_mask: wgpu::RenderPipeline,
+    pub height_cap_mask: wgpu::RenderPipeline,
+    pub body_depth: wgpu::RenderPipeline,
+    pub hidden: wgpu::RenderPipeline,
     pub frame_layout: wgpu::BindGroupLayout,
     pub body_layout: wgpu::BindGroupLayout,
     pub ground_layout: wgpu::BindGroupLayout,
@@ -83,10 +94,18 @@ impl Pipelines {
         let positions = [vertex(12, &POS, wgpu::VertexStepMode::Vertex)];
         let segments = [vertex(24, &SEG, wgpu::VertexStepMode::Instance)];
         let silhouettes = [vertex(48, &SIL, wgpu::VertexStepMode::Instance)];
-        let depth = |write, bias| depth_state(wgpu::CompareFunction::LessEqual, write, bias);
+        let format = crate::options::depth_format(gpu.device);
+        let depth = |write, bias| {
+            let mut state = depth_state(wgpu::CompareFunction::GreaterEqual, write, bias);
+            if let Some(state) = &mut state {
+                state.format = format;
+            }
+            state
+        };
+        let cap_state = || section::state(format, wgpu::CompareFunction::GreaterEqual, false);
         let bias = wgpu::DepthBiasState {
-            constant: 8,
-            slope_scale: 1.0,
+            constant: -8,
+            slope_scale: -1.0,
             clamp: 0.0,
         };
         let none = wgpu::DepthBiasState::default();
@@ -123,7 +142,138 @@ impl Pipelines {
                 false,
             )
         };
+        let compose_module = gpu.shader("composition", &[include_str!("shaders/compose.wgsl")]);
+        let compose_layout = gpu.layout(
+            "composition",
+            &[
+                gpu::tex_entry(0, gpu::FLOAT, gpu::D2),
+                gpu::sampler_entry(1),
+            ],
+        );
+        let compose_pl = gpu.pipeline_layout("composition", &[&compose_layout]);
+        let cap_pipe = |name, fs, format, samples| {
+            Pipe {
+                label: name,
+                layout: &body_pl,
+                module: &body,
+                vs: "vs_cap",
+                fs: Some(fs),
+                buffers: &[],
+                format: Some(format),
+                blend: if samples == SAMPLES {
+                    Some(wgpu::BlendState::ALPHA_BLENDING)
+                } else {
+                    None
+                },
+                depth: cap_state(),
+                samples,
+                cull: None,
+                strip: false,
+                a2c: false,
+            }
+            .build(gpu.device)
+        };
+        let mask_pipe = |name, vs, fs, buffers, color, samples| {
+            pipe(
+                name,
+                &body_pl,
+                &body,
+                vs,
+                Some(fs),
+                buffers,
+                color,
+                color.map(|_| wgpu::BlendState::ALPHA_BLENDING),
+                section::state(format, wgpu::CompareFunction::Always, true),
+                samples,
+                false,
+            )
+        };
         Self {
+            compose: pipe(
+                "composition",
+                &compose_pl,
+                &compose_module,
+                "vs_full",
+                Some("fs_compose"),
+                &[],
+                Some(OUTPUT_FORMAT),
+                None,
+                None,
+                1,
+                false,
+            ),
+            compose_layout,
+            cap: cap_pipe("section cap", "fs_cap", OUTPUT_FORMAT, SAMPLES),
+            pre_cap: cap_pipe("prepass section cap", "fs_pre_cap", HDR_FORMAT, 1),
+            cap_mask: mask_pipe(
+                "section winding",
+                "vs_mask",
+                "fs_depth",
+                &body_v,
+                Some(OUTPUT_FORMAT),
+                SAMPLES,
+            ),
+            pre_cap_mask: mask_pipe(
+                "prepass section winding",
+                "vs_mask",
+                "fs_depth",
+                &body_v,
+                Some(HDR_FORMAT),
+                1,
+            ),
+            height_cap_mask: mask_pipe(
+                "contact section winding",
+                "vs_height",
+                "fs_height",
+                &positions,
+                None,
+                1,
+            ),
+            height_cap: pipe(
+                "contact section cap",
+                &body_pl,
+                &body,
+                "vs_cap",
+                Some("fs_height_cap"),
+                &[],
+                None,
+                None,
+                section::state(format, wgpu::CompareFunction::LessEqual, false),
+                1,
+                false,
+            ),
+            body_depth: pipe(
+                "transparent depth",
+                &body_pl,
+                &body,
+                "vs_body",
+                Some("fs_depth"),
+                &body_v,
+                Some(OUTPUT_FORMAT),
+                Some(wgpu::BlendState::ALPHA_BLENDING),
+                depth(true, bias),
+                SAMPLES,
+                false,
+            ),
+            hidden: pipe(
+                "hidden edges",
+                &frame_pl,
+                &lines,
+                "vs_edge",
+                Some("fs_hidden"),
+                &segments,
+                Some(OUTPUT_FORMAT),
+                Some(wgpu::BlendState::ALPHA_BLENDING),
+                {
+                    let mut state = depth(false, none);
+                    if let Some(state) = &mut state {
+                        state.depth_compare = Some(wgpu::CompareFunction::Less);
+                    }
+                    state
+                },
+                SAMPLES,
+                true,
+            ),
             prepass: pipe(
                 "prepass",
                 &body_pl,
@@ -145,7 +295,7 @@ impl Pipelines {
                 Some("fs_body"),
                 &body_v,
                 Some(OUTPUT_FORMAT),
-                None,
+                Some(wgpu::BlendState::ALPHA_BLENDING),
                 depth(true, bias),
                 SAMPLES,
                 false,
@@ -172,7 +322,13 @@ impl Pipelines {
                 &body_v,
                 Some(OUTPUT_FORMAT),
                 Some(wgpu::BlendState::ALPHA_BLENDING),
-                highlight_depth(),
+                {
+                    let mut s = highlight_depth();
+                    if let Some(s) = &mut s {
+                        s.format = format;
+                    }
+                    s
+                },
                 SAMPLES,
                 false,
             ),
@@ -185,7 +341,13 @@ impl Pipelines {
                 &segments,
                 Some(OUTPUT_FORMAT),
                 Some(wgpu::BlendState::ALPHA_BLENDING),
-                highlight_line_depth(),
+                {
+                    let mut s = highlight_line_depth();
+                    if let Some(s) = &mut s {
+                        s.format = format;
+                    }
+                    s
+                },
                 SAMPLES,
                 true,
             ),
@@ -194,11 +356,11 @@ impl Pipelines {
                 &body_pl,
                 &body,
                 "vs_height",
-                None,
+                Some("fs_height"),
                 &positions,
                 None,
                 None,
-                depth(true, none),
+                section::height_depth(format),
                 1,
                 false,
             ),
@@ -256,15 +418,15 @@ impl Pipelines {
 }
 
 /// Adapted from SolidCraft view.rs::highlight_depth at 6bde126a5cabd1f5af0c68e6955bd0176fab805a.
-/// Forward depth makes negative bias pull toward the eye. Shared geometry needs OneCAD's
-/// existing -1/-1 offset, rather than the donor's -8 constant for separate GPU-plan meshes.
+/// Reversed depth makes positive bias pull toward the eye. Shared geometry uses a small
+/// one-step offset instead of the donor's larger separate-mesh offset.
 pub(crate) fn highlight_depth() -> Option<wgpu::DepthStencilState> {
     depth_state(
-        wgpu::CompareFunction::LessEqual,
+        wgpu::CompareFunction::GreaterEqual,
         false,
         wgpu::DepthBiasState {
-            constant: -1,
-            slope_scale: -1.0,
+            constant: 1,
+            slope_scale: 1.0,
             clamp: 0.0,
         },
     )

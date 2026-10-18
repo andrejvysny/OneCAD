@@ -34,7 +34,11 @@ impl Gpu<'_> {
             dimension: wgpu::TextureDimension::D2,
             format,
             usage,
-            view_formats: &[],
+            view_formats: if format == wgpu::TextureFormat::Rgba8UnormSrgb {
+                &[wgpu::TextureFormat::Rgba8Unorm]
+            } else {
+                &[]
+            },
         })
     }
 

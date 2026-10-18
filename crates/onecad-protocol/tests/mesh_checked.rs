@@ -3,6 +3,22 @@ use onecad_protocol::mesh::{
 };
 use std::path::Path;
 
+#[test]
+fn immutable_checked_owner_shares_bytes_and_header_without_revalidation() {
+    use onecad_protocol::mesh::CheckedMesh;
+    use std::sync::Arc;
+    let bytes: Arc<[u8]> = Arc::from(fixture());
+    let checked = CheckedMesh::decode(bytes.clone(), MeshLimits::default()).unwrap();
+    let cloned = checked.clone();
+    assert!(Arc::ptr_eq(checked.bytes(), &bytes));
+    assert!(Arc::ptr_eq(cloned.bytes(), &bytes));
+    let (first, second) = (checked.view(), cloned.view());
+    assert!(std::ptr::eq(first.header(), second.header()));
+    assert_eq!(first.face_id(0), Some("f:7"));
+    assert_eq!(first.triangle(0), second.triangle(0));
+    assert!(CheckedMesh::decode(Arc::from([0u8; 64]), MeshLimits::default()).is_err());
+}
+
 fn put(blob: &mut [u8], off: usize, value: u32) {
     blob[off..off + 4].copy_from_slice(&value.to_le_bytes());
 }

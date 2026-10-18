@@ -42,12 +42,12 @@ not establish physical trackpad, focus or native-input acceptance.
 
 ## Full viewport and manipulators
 
-The native host now composes `onecad-render::SolidCraftViewport`, backed by the
-complete locally copied SolidCraft geometry/render/GPU stack at
-`a228a5830eedf88856fd392b7db0ff5977f352d6` (0.16.0). The source refresh includes
-the newly pulled geometry additions; GPU, viewport shader, cube and triad source
-were unchanged relative to the earlier donor checkpoint. The original quality
-renderer remains available separately in `onecad-render`.
+The native host composes OneCAD's indexed quality `onecad-render::Renderer`.
+The locally copied SolidCraft geometry/render/GPU stack remains pinned at
+`a228a5830eedf88856fd392b7db0ff5977f352d6` (0.16.0), available through the
+comparison-only donor adapter. OneCAD-owned display options preserve section,
+hidden-edge, transparency and supersampling controls; attribution for adapted
+renderer techniques remains in `onecad-render/README.md`.
 
 `gizmo*.rs` adapts the complete transform triad from
 `crates/ui-egui/src/gizmo.rs`: axes, plane squares, rotation rings, center ball,

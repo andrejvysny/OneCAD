@@ -1,6 +1,44 @@
 //! Borrowed accessors are independent of host alignment and endianness.
 use super::checked::{section, validate};
 use super::{f32_le, u32_le, MeshDecodeError, MeshHeaderView, MeshLimits};
+use std::sync::Arc;
+
+/// Immutable ownership of bytes validated once at the trust boundary.
+#[derive(Debug, Clone)]
+pub struct CheckedMesh {
+    blob: Arc<[u8]>,
+    header: Arc<MeshHeaderView>,
+}
+
+impl CheckedMesh {
+    pub fn decode(blob: Arc<[u8]>, limits: MeshLimits) -> Result<Self, MeshDecodeError> {
+        let header = Arc::new(validate(&blob, limits)?);
+        Ok(Self { blob, header })
+    }
+
+    /// Constant-time borrowed view; shares the already checked section table.
+    pub fn view(&self) -> MeshView<'_> {
+        MeshView {
+            blob: &self.blob,
+            header: self.header.clone(),
+        }
+    }
+
+    pub fn bytes(&self) -> &Arc<[u8]> {
+        &self.blob
+    }
+
+    /// Recheck resource policy without rescanning validated geometry.
+    pub fn ensure_limits(&self, limits: MeshLimits) -> Result<(), MeshDecodeError> {
+        super::checked::preflight(&self.blob, limits)
+    }
+
+    pub fn metadata_bytes(&self) -> usize {
+        std::mem::size_of::<MeshHeaderView>()
+            + 2 * std::mem::size_of::<usize>()
+            + self.header.sections.capacity() * std::mem::size_of::<super::MeshSectionEntry>()
+    }
+}
 
 /// Fully checked MESH1 snapshot. Holds the original bytes without repacking.
 ///
@@ -9,14 +47,14 @@ use super::{f32_le, u32_le, MeshDecodeError, MeshHeaderView, MeshLimits};
 #[derive(Debug)]
 pub struct MeshView<'a> {
     blob: &'a [u8],
-    header: MeshHeaderView,
+    header: Arc<MeshHeaderView>,
 }
 
 impl<'a> MeshView<'a> {
     pub fn decode(blob: &'a [u8], limits: MeshLimits) -> Result<Self, MeshDecodeError> {
         Ok(Self {
             blob,
-            header: validate(blob, limits)?,
+            header: Arc::new(validate(blob, limits)?),
         })
     }
 

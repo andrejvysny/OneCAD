@@ -64,6 +64,7 @@ impl Renderer {
         if !matches!(self.flight, Flight::Encoded) {
             return Err(RenderError::SubmissionState);
         }
+        self.contact_dirty = true;
         self.queue.submit([]);
         self.flight = Flight::submitted(&self.queue, wake);
         Ok(())

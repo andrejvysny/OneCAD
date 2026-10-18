@@ -228,7 +228,7 @@ fn preparation_and_old_new_uniform_residency_obey_existing_caps() {
 }
 
 #[test]
-fn face_edge_styles_keep_onecad_opacity_and_forward_depth_rules() {
+fn face_edge_styles_keep_onecad_opacity_and_reversed_depth_rules() {
     let scene = scene();
     let view = onecad_scene::ViewSnapshot::new(
         scene.identity(),
@@ -260,9 +260,12 @@ fn face_edge_styles_keep_onecad_opacity_and_forward_depth_rules() {
     }
     let face = crate::pipelines::highlight_depth().unwrap();
     assert_eq!(face.depth_write_enabled, Some(false));
-    assert_eq!(face.depth_compare, Some(wgpu::CompareFunction::LessEqual));
-    assert_eq!(face.bias.constant, -1);
-    assert_eq!(face.bias.slope_scale, -1.0);
+    assert_eq!(
+        face.depth_compare,
+        Some(wgpu::CompareFunction::GreaterEqual)
+    );
+    assert_eq!(face.bias.constant, 1);
+    assert_eq!(face.bias.slope_scale, 1.0);
     let edge = crate::pipelines::highlight_line_depth().unwrap();
     assert_eq!(edge.depth_write_enabled, Some(false));
     assert_eq!(edge.depth_compare, Some(wgpu::CompareFunction::Always));

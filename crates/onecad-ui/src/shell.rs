@@ -61,8 +61,10 @@ fn title(app: &mut App, ui: &mut egui::Ui) {
         .resizable(false)
         .show(ui, |ui| {
             ui.horizontal_centered(|ui| {
-                let ready =
-                    app.bridge.valid() && !app.busy() && !crate::viewport_selection::sectioned(app);
+                let ready = app.viewport_ready()
+                    && app.bridge.valid()
+                    && !app.busy()
+                    && !crate::viewport_selection::sectioned(app);
                 if app.sketch_active() {
                     crate::sketch_ui::tools(app, ui);
                     return;
@@ -124,14 +126,22 @@ fn title(app: &mut App, ui: &mut egui::Ui) {
                 {
                     app.submit(Command::Redo);
                 }
-                if ui.button("Fit all").clicked() {
+                if ui
+                    .add_enabled(app.viewport_ready(), egui::Button::new("Fit all"))
+                    .clicked()
+                {
                     app.fit_pending = true;
                 }
-                if ui.button("Home view").clicked() {
+                if ui
+                    .add_enabled(app.viewport_ready(), egui::Button::new("Home view"))
+                    .clicked()
+                {
                     app.camera = onecad_scene::Camera::default();
                     app.fit_pending = true;
                 }
-                crate::viewport_options::show(app, ui);
+                ui.add_enabled_ui(app.viewport_ready(), |ui| {
+                    crate::viewport_options::show(app, ui)
+                });
             })
         });
 }
@@ -200,7 +210,10 @@ fn tree(app: &mut App, ui: &mut egui::Ui) {
             for body in display.projection.bodies.values() {
                 let id = body.id.parse().ok();
                 if ui
-                    .selectable_label(id == app.selected_body, &body.name)
+                    .add_enabled_ui(app.viewport_ready() && app.bridge.valid(), |ui| {
+                        ui.selectable_label(id == app.selected_body, &body.name)
+                    })
+                    .inner
                     .clicked()
                 {
                     app.selected_body = id;
@@ -217,7 +230,10 @@ fn tree(app: &mut App, ui: &mut egui::Ui) {
             for sketch in display.projection.sketches.values() {
                 if ui
                     .add_enabled(
-                        app.bridge.valid() && !app.busy() && !app.sketch_active(),
+                        app.viewport_ready()
+                            && app.bridge.valid()
+                            && !app.busy()
+                            && !app.sketch_active(),
                         egui::Button::new(&sketch.name),
                     )
                     .clicked()
@@ -246,6 +262,7 @@ fn tree(app: &mut App, ui: &mut egui::Ui) {
                     .records
                     .iter()
                     .any(|record| record.record_id.to_string() == feature.id)
+                    && app.viewport_ready()
                     && app.bridge.valid()
                     && !app.busy()
                     && !app.sketch_active();
@@ -362,7 +379,7 @@ fn inspector(app: &mut App, ui: &mut egui::Ui) {
                 PreviewStatus::Failed(message) => message,
                 PreviewStatus::UnavailableForEdit => "Geometry rebuilds when applied",
             });
-            let can_apply = app.bridge.valid()
+            let can_apply = app.viewport_ready() && app.bridge.valid()
                 && tool.phase == SessionPhase::Editing
                 && matches!(tool.draft_status, DraftStatus::Valid(_))
                 && matches!(

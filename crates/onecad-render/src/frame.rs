@@ -33,6 +33,9 @@ pub struct FrameU {
     pub ao: [f32; 4],
     pub flags: [f32; 4],
     pub overlay: [f32; 4],
+    pub section: [f32; 4],
+    pub cap: [f32; 4],
+    pub display: [f32; 4],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,7 +64,7 @@ impl Default for RenderStyle {
     }
 }
 
-fn token(theme: Theme, name: &str) -> Result<[f32; 3], RenderError> {
+fn resolve_token(theme: Theme, name: &str) -> Result<[f32; 3], RenderError> {
     let css = include_str!("../../../src/styles/tokens.css");
     let base = css
         .split_once("@theme {")
@@ -92,6 +95,72 @@ fn token(theme: Theme, name: &str) -> Result<[f32; 3], RenderError> {
     }))
 }
 
+fn token(theme: Theme, name: &str) -> Result<[f32; 3], RenderError> {
+    const NAMES: [&str; 8] = [
+        "--color-body-fill",
+        "--color-canvas",
+        "--color-viewport-grid-minor",
+        "--color-viewport-grid-major",
+        "--color-sel-text",
+        "--color-body-edge",
+        "--color-accent",
+        "--color-viewport-hover",
+    ];
+    type Palette = Result<Vec<[f32; 3]>, RenderError>;
+    static LIGHT: std::sync::OnceLock<Palette> = std::sync::OnceLock::new();
+    static DARK: std::sync::OnceLock<Palette> = std::sync::OnceLock::new();
+    let palette = if theme == Theme::Dark { &DARK } else { &LIGHT };
+    let colors = palette.get_or_init(|| {
+        NAMES
+            .iter()
+            .map(|name| resolve_token(theme, name))
+            .collect()
+    });
+    let index = NAMES
+        .iter()
+        .position(|candidate| *candidate == name)
+        .ok_or(RenderError::Mesh("missing color token"))?;
+    colors
+        .as_ref()
+        .map(|colors| colors[index])
+        .map_err(|_| RenderError::Mesh("invalid color palette"))
+}
+
+/// GPU depth is reversed independently of CPU picking/projection semantics.
+pub(crate) fn reversed_depth() -> Mat4 {
+    Mat4::from_cols(
+        glam::Vec4::X,
+        glam::Vec4::Y,
+        -glam::Vec4::Z,
+        glam::Vec4::new(0.0, 0.0, 1.0, 1.0),
+    )
+}
+
+pub(crate) fn with_options(mut frame: FrameU, options: crate::RenderOptions) -> FrameU {
+    let ratio = options.ssaa / frame.display[1];
+    frame.viewport[0] *= ratio;
+    frame.viewport[1] *= ratio;
+    frame.viewport[2] /= ratio;
+    frame.viewport[3] /= ratio;
+    frame.lines[0] *= ratio;
+    frame.lines[1] *= ratio;
+    frame.ground[1] *= ratio;
+    frame.ground[2] *= ratio;
+    frame.section = options.section;
+    frame.cap = options.cap;
+    frame.display = [
+        options.opacity,
+        options.ssaa,
+        f32::from(options.hidden_edges),
+        f32::from(options.outline),
+    ];
+    if !options.outline {
+        frame.material[2] = 0.0;
+        frame.edge[3] = 0.0;
+    }
+    frame
+}
+
 pub(crate) fn uniform(
     view: &ViewSnapshot,
     bounds: Option<Bounds>,
@@ -100,6 +169,7 @@ pub(crate) fn uniform(
     preview: bool,
 ) -> Result<FrameU, RenderError> {
     let mut frame = FrameU::zeroed();
+    frame.display = [1.0, 1.0, 0.0, 1.0];
     set_camera(&mut frame, view, style);
     set_lighting(&mut frame, style)?;
     set_ground(&mut frame, view, bounds, style)?;
@@ -123,12 +193,10 @@ fn set_camera(frame: &mut FrameU, view: &ViewSnapshot, style: RenderStyle) {
     let yaw = (camera.offset.y as f32).atan2(camera.offset.x as f32);
     let width = (vp.width * vp.scale_factor).round() as f32;
     let height = (vp.height * vp.scale_factor).round() as f32;
-    frame.view_proj = view.view_projection().as_mat4().to_cols_array_2d();
+    frame.view_proj = (reversed_depth() * view.view_projection().as_mat4()).to_cols_array_2d();
     frame.view = view.view_matrix().as_mat4().to_cols_array_2d();
-    frame.inverse_projection = view
-        .projection_matrix()
+    frame.inverse_projection = (reversed_depth() * view.projection_matrix().as_mat4())
         .inverse()
-        .as_mat4()
         .to_cols_array_2d();
     frame.eye = rgba(
         view.eye().as_vec3().to_array(),
@@ -185,10 +253,11 @@ fn set_ground(
     let minor = grid_step(view.camera().offset.length() as f32);
     let target = view.camera().target.as_vec3();
     let center = (target.truncate() / (minor * 10.0)).round() * (minor * 10.0);
-    let (matrix, rect, params) = contact_params(bounds);
+    let (matrix, rect, params, height_scale) = contact_params(bounds);
     frame.shadow_vp = matrix.to_cols_array_2d();
     frame.shadow_rect = rect;
     frame.contact = params;
+    frame.proj[0] = height_scale;
     frame.grid_minor = rgba(token(style.theme, "--color-viewport-grid-minor")?, 1.0);
     frame.grid_major = rgba(token(style.theme, "--color-viewport-grid-major")?, 1.0);
     frame.grid = [minor, center.x, center.y, 100.0 * minor];
@@ -267,7 +336,7 @@ fn grid_step(distance: f32) -> f32 {
     step * power
 }
 
-fn contact_params(bounds: Option<Bounds>) -> (Mat4, [f32; 4], [f32; 4]) {
+fn contact_params(bounds: Option<Bounds>) -> (Mat4, [f32; 4], [f32; 4], f32) {
     let (lo, hi) = bounds
         .map(|b| (b.min.as_vec3(), b.max.as_vec3()))
         .unwrap_or((Vec3::ZERO, Vec3::ONE));
@@ -277,13 +346,15 @@ fn contact_params(bounds: Option<Bounds>) -> (Mat4, [f32; 4], [f32; 4]) {
     let half = 0.85 * e;
     let z0 = 0.0f32.min(lo.z) - 1e-3 * e;
     let soft = 0.5 * e;
+    // Keep every wall in the stencil depth range, including walls above shadow reach.
+    let full_height = soft.max(hi.z - z0 + 1e-3 * e);
     let tight = 0.03 * e;
     let texel = 2.0 * half / 256.0;
     let matrix = Mat4::from_cols(
         glam::Vec4::new(1.0 / half, 0.0, 0.0, 0.0),
         glam::Vec4::new(0.0, 1.0 / half, 0.0, 0.0),
-        glam::Vec4::new(0.0, 0.0, 1.0 / soft, 0.0),
-        glam::Vec4::new(-center.x / half, -center.y / half, -z0 / soft, 1.0),
+        glam::Vec4::new(0.0, 0.0, 1.0 / full_height, 0.0),
+        glam::Vec4::new(-center.x / half, -center.y / half, -z0 / full_height, 1.0),
     );
     (
         matrix,
@@ -294,6 +365,7 @@ fn contact_params(bounds: Option<Bounds>) -> (Mat4, [f32; 4], [f32; 4]) {
             1.0 / (2.0 * half),
         ],
         [0.012 * e / texel, 0.12 * e / texel, soft / tight, 0.5],
+        full_height / soft,
     )
 }
 
@@ -317,6 +389,6 @@ pub(crate) fn highlight_uniform(
     };
     frame.overlay = rgba(token(style.theme, fill)?, alpha);
     frame.edge = rgba(token(style.theme, edge)?, 1.0);
-    frame.lines[0] = 3.0 * view.viewport().scale_factor as f32;
+    frame.lines[0] = 3.0 * view.viewport().scale_factor as f32 * frame.display[1];
     Ok(frame)
 }

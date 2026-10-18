@@ -1,4 +1,8 @@
 //! Native QA host over shared OneCAD application, interaction, scene and render services.
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
 mod app;
 mod bridge;
 mod budget;
@@ -52,6 +56,7 @@ pub fn run() -> Result<(), String> {
     let options = eframe::NativeOptions {
         viewport,
         renderer: eframe::Renderer::Wgpu,
+        wgpu_options: viewport_gpu_configuration(),
         ..Default::default()
     };
     eframe::run_native(
@@ -64,4 +69,18 @@ pub fn run() -> Result<(), String> {
         }),
     )
     .map_err(|error| error.to_string())
+}
+
+fn viewport_gpu_configuration() -> egui_wgpu::WgpuConfiguration {
+    let mut configuration = egui_wgpu::WgpuConfiguration::default();
+    if let egui_wgpu::WgpuSetup::CreateNew(setup) = &mut configuration.wgpu_setup {
+        let descriptor = setup.device_descriptor.clone();
+        setup.device_descriptor = std::sync::Arc::new(move |adapter| {
+            let mut descriptor = descriptor(adapter);
+            descriptor.required_features |=
+                onecad_render::required_device_features(adapter.features());
+            descriptor
+        });
+    }
+    configuration
 }

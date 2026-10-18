@@ -24,6 +24,18 @@ fn vs_body(@location(0) p: vec3<f32>, @location(1) n: vec3<f32>) -> VOut {
     return o;
 }
 
+@vertex
+fn vs_mask(@location(0) p: vec3<f32>, @location(1) n: vec3<f32>) -> VOut {
+    var o: VOut;
+    o.pos = u.view_proj * vec4<f32>(p, 1.0);
+    o.wp = p;
+    o.n = n;
+    // Wall crossings beyond near/far still cancel winding; only the reconstructed
+    // cap and ordinary geometry use the captured depth clip range.
+    o.pos.z = 0.5 * o.pos.w;
+    return o;
+}
+
 // The shading normal: MESH1 normals are outward (smoothed per face); a back-facing fragment
 // (seen through an open edge, or a reversed face) is shaded from its other side, like three's
 // DoubleSide.
@@ -34,6 +46,7 @@ fn shading_normal(i: VOut, front: bool) -> vec3<f32> {
 
 @fragment
 fn fs_prepass(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    if clipped(i.wp) { discard; }
     let n = shading_normal(i, front);
     return vec4<f32>((u.view * vec4<f32>(n, 0.0)).xyz, 1.0);
 }
@@ -88,6 +101,9 @@ fn fs_body(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32
     // Derivatives first, in uniform control flow.
     let ndv = dot(n, v);
     let fw = fwidth(ndv);
+    if clipped(i.wp) { discard; }
+    // Retained backfaces provide depth proxies; the cap colors the section once.
+    if sectioned() && !front { return vec4<f32>(0.0); }
     let nv = clamp(ndv, 1e-4, 1.0);
     let rough = u.body.w;
     let metal = u.material.x;
@@ -114,7 +130,7 @@ fn fs_body(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32
         let a = (1.0 - smoothstep(fw * 1.0, fw * 2.5, abs(ndv))) * u.edge.w;
         c = mix(c, u.edge.rgb, a);
     }
-    return vec4<f32>(mix(dither(c, i.pos.xy), u.overlay.rgb, u.overlay.a), 1.0);
+    return vec4<f32>(mix(dither(c, i.pos.xy), u.overlay.rgb, u.overlay.a), u.display.x);
 }
 
 // Today's look: MeshStandardMaterial(metalness 0, roughness 0.5) under a hemisphere light
@@ -141,12 +157,20 @@ fn fs_body_baseline(i: VOut, @builtin(front_facing) front: bool) -> @location(0)
 
 // Contact shadow: the lowest surface over each ground texel (ortho, looking up).
 @vertex
-fn vs_height(@location(0) p: vec3<f32>) -> @builtin(position) vec4<f32> {
-    return u.shadow_vp * vec4<f32>(p, 1.0);
+fn vs_height(@location(0) p: vec3<f32>) -> VOut {
+    var o: VOut;
+    o.pos = u.shadow_vp * vec4<f32>(p, 1.0);
+    o.wp = p;
+    o.n = vec3<f32>(0.0, 0.0, -1.0);
+    return o;
 }
+
+@fragment fn fs_height(i: VOut) { if clipped(i.wp) { discard; } }
+
 
 @fragment
 fn fs_preview(i: VOut) -> @location(0) vec4<f32> {
+    if clipped(i.wp) { discard; }
     return u.overlay;
 }
 
@@ -154,5 +178,75 @@ fn fs_preview(i: VOut) -> @location(0) vec4<f32> {
 // selection path at 6bde126a5cabd1f5af0c68e6955bd0176fab805a. Keep committed PBR separate.
 @fragment
 fn fs_highlight(i: VOut) -> @location(0) vec4<f32> {
+    if clipped(i.wp) { discard; }
     return u.overlay;
+}
+
+fn cap_color(i: VOut) -> vec4<f32> {
+    let hatch = fract((i.pos.x + i.pos.y) / (9.0 * u.display.y));
+    let c = mix(u.body.rgb, u.cap.rgb, 0.65);
+    return vec4<f32>(select(c, c * 0.6, hatch < 0.22), u.display.x * u.cap.a);
+}
+
+struct CutOut {
+    @location(0) color: vec4<f32>,
+    @builtin(frag_depth) depth: f32,
+};
+
+@vertex fn vs_cap(@builtin(vertex_index) vi: u32) -> VOut {
+    let p = vec2<f32>(f32((vi << 1u) & 2u), f32(vi & 2u));
+    var o: VOut;
+    o.pos = vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+    o.wp = vec3<f32>(0.0);
+    o.n = vec3<f32>(0.0);
+    return o;
+}
+
+fn section_depth(pixel: vec2<f32>) -> f32 {
+    let uv = pixel * u.viewport.zw;
+    let near_view = u.inverse_projection * vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 1.0, 1.0);
+    let rotation = mat3x3<f32>(u.view[0].xyz, u.view[1].xyz, u.view[2].xyz);
+    let near = u.eye.xyz + transpose(rotation) * (near_view.xyz / near_view.w);
+    let back = vec3<f32>(u.view[0].z, u.view[1].z, u.view[2].z);
+    let direction = select(-back, near - u.eye.xyz, u.eye.w > 0.5);
+    let denominator = dot(u.section.xyz, direction);
+    if abs(denominator) < 1e-12 { return -1.0; }
+    let distance = (u.section.w - dot(u.section.xyz, near)) / denominator;
+    if distance < 0.0 { return -1.0; }
+    let clip = u.view_proj * vec4<f32>(near + direction * distance, 1.0);
+    if clip.w <= 0.0 { return -1.0; }
+    return clip.z / clip.w;
+}
+
+@fragment fn fs_cap(i: VOut) -> CutOut {
+    let d = section_depth(i.pos.xy);
+    if !(d >= 0.0 && d <= 1.0) { discard; }
+    var o: CutOut;
+    o.color = cap_color(i);
+    // Keep a cap coincident with the ground ahead of the later grid draw.
+    o.depth = min(d + 1e-7, 1.0);
+    return o;
+}
+@fragment fn fs_pre_cap(i: VOut) -> CutOut {
+    let d = section_depth(i.pos.xy);
+    if !(d >= 0.0 && d <= 1.0) { discard; }
+    var o: CutOut;
+    o.color = vec4<f32>((u.view * vec4<f32>(normalize(u.section.xyz), 0.0)).xyz, 1.0);
+    o.depth = d;
+    return o;
+}
+
+@fragment fn fs_height_cap(i: VOut) -> @builtin(frag_depth) f32 {
+    if u.section.z >= 0.0 { discard; }
+    let uv = i.pos.xy / vec2<f32>(1024.0);
+    let xy = u.shadow_rect.xy + vec2<f32>(uv.x, 1.0 - uv.y) / u.shadow_rect.zw;
+    let z = (u.section.w - dot(u.section.xy, xy)) / u.section.z;
+    let clip = u.shadow_vp * vec4<f32>(xy, z, 1.0);
+    let depth = clip.z / clip.w;
+    if !(depth >= 0.0 && depth <= 1.0) { discard; }
+    return depth;
+}
+@fragment fn fs_depth(i: VOut) -> @location(0) vec4<f32> {
+    if clipped(i.wp) { discard; }
+    return vec4<f32>(0.0);
 }

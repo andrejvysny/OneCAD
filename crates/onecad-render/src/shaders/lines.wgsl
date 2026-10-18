@@ -26,8 +26,17 @@ fn culled() -> LOut {
 }
 
 fn expand(vi: u32, a: vec3<f32>, b: vec3<f32>, width: f32, rgb: vec3<f32>, alpha: f32) -> LOut {
-    var ca = u.view_proj * vec4<f32>(a, 1.0);
-    var cb = u.view_proj * vec4<f32>(b, 1.0);
+    var start = a;
+    var end = b;
+    if sectioned() {
+        let da = u.section.w - dot(u.section.xyz, start);
+        let db = u.section.w - dot(u.section.xyz, end);
+        if da < 0.0 && db < 0.0 { return culled(); }
+        if da < 0.0 { start = mix(start, end, da / (da - db)); }
+        else if db < 0.0 { end = mix(end, start, db / (db - da)); }
+    }
+    var ca = u.view_proj * vec4<f32>(start, 1.0);
+    var cb = u.view_proj * vec4<f32>(end, 1.0);
     // Clip against the captured finite near/far planes before screen-space expansion.
     for (var plane = 0; plane < 2; plane = plane + 1) {
         let za = select(ca.z, ca.w - ca.z, plane == 1);
@@ -146,4 +155,10 @@ fn vs_edge_culled(@builtin(vertex_index) vi: u32, @location(0) a: vec3<f32>, @lo
         return culled();
     }
     return o;
+}
+
+@fragment fn fs_hidden(i: LOut) -> @location(0) vec4<f32> {
+    let c = line_color(i);
+    let dash = select(0.0, 0.22, fract((i.pos.x + i.pos.y) / (8.0 * u.display.y)) < 0.5);
+    return vec4<f32>(c.rgb, c.a * dash);
 }

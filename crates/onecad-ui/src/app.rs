@@ -6,7 +6,7 @@ use crate::{
 };
 use onecad_core::ids::{BodyId, RecordId};
 use onecad_interaction::{Action, CommitStatus, DocumentContext, Effect, Interaction, RequestTag};
-use onecad_render::{PreparedSolidCraftScene as PreparedScene, SolidCraftViewport as Renderer};
+use onecad_render::{PreparedScene, Renderer};
 use onecad_scene::{Camera, ViewSnapshot};
 use std::sync::Arc;
 
@@ -24,9 +24,12 @@ pub struct App {
     pub navigation: crate::navigation::Navigation,
     pub transform_gizmo: crate::transform_ui::TransformGizmo,
     pub topology: crate::viewport_selection::Selection,
-    pub pending_display_options: Option<onecad_render::SolidCraftOptions>,
+    pub pending_display_options: Option<onecad_render::RenderOptions>,
+    /// Last drawable capture; `camera` may already contain pending navigation.
     pub view: Option<ViewSnapshot>,
     pub view_number: u64,
+    pub viewport_failure: Option<String>,
+    device_failure: Arc<std::sync::Mutex<Option<String>>>,
     pub fit_pending: bool,
     pub selected_body: Option<BodyId>,
     pub selected_feature: Option<RecordId>,
@@ -62,6 +65,17 @@ impl App {
         };
         let renderer =
             Renderer::new(&gpu.device, &gpu.queue, [0, 0], limits).map_err(|e| e.to_string())?;
+        let device_failure = Arc::new(std::sync::Mutex::new(None));
+        let failure = device_failure.clone();
+        let context = cc.egui_ctx.clone();
+        gpu.device.set_device_lost_callback(move |reason, message| {
+            if reason != wgpu::DeviceLostReason::Destroyed {
+                if let Ok(mut slot) = failure.lock() {
+                    *slot = Some(format!("GPU device lost ({reason:?}): {message}"));
+                }
+                context.request_repaint();
+            }
+        });
         let bridge = Bridge::start(paths, cc.egui_ctx.clone(), renderer.preparation_budget())?;
         let resolved = fonts::install(&cc.egui_ctx);
         eprintln!(
@@ -91,6 +105,8 @@ impl App {
             pending_display_options: None,
             view: None,
             view_number: 0,
+            viewport_failure: None,
+            device_failure,
             fit_pending: true,
             selected_body: None,
             selected_feature: None,
@@ -197,6 +213,7 @@ impl App {
     }
 
     pub fn poll(&mut self, ctx: &egui::Context) {
+        self.poll_device_failure();
         if let Some(display) = self.bridge.take_display()
             && self.bridge.shared.accept_display(&display)
         {
@@ -225,9 +242,37 @@ impl App {
             self.pending_preview = None;
             self.clear_preview = true;
             self.selected_body = None;
-            self.topology = Default::default();
+            self.topology.invalidate_pending();
             self.transform_gizmo = Default::default();
             self.draw_dirty = true;
+        }
+    }
+
+    pub fn viewport_ready(&self) -> bool {
+        self.viewport_failure.is_none()
+    }
+
+    pub fn fail_viewport(&mut self, error: String) {
+        self.status = format!("Viewport unavailable: {error}; Save remains available");
+        self.viewport_failure = Some(error);
+        self.view = None;
+        self.bridge.cancel_candidates();
+        self.dispatch(Action::Cancel);
+        self.interaction.selection = None;
+        self.selected_body = None;
+        self.topology.invalidate_pending();
+        self.transform_gizmo = Default::default();
+    }
+
+    pub fn poll_device_failure(&mut self) {
+        let failure = self
+            .device_failure
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        if let Some(error) = failure {
+            self.fail_viewport(error);
+            self.bridge.shared.recovery_flush.notify_one();
         }
     }
 
@@ -251,7 +296,7 @@ impl App {
         if changed {
             self.selected_body = None;
             self.selected_feature = None;
-            self.topology = Default::default();
+            self.topology.invalidate_pending();
             self.transform_gizmo = Default::default();
             self.fit_pending = true;
         }

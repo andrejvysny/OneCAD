@@ -63,7 +63,7 @@ impl App {
         }
     }
     pub fn new_sketch(&mut self) {
-        if crate::viewport_selection::sectioned(self) {
+        if !self.viewport_ready() || crate::viewport_selection::sectioned(self) {
             self.status = "Turn off section display before editing geometry".into();
             return;
         }
@@ -85,7 +85,7 @@ impl App {
         });
     }
     pub fn edit_sketch(&mut self, id: SketchId) {
-        if crate::viewport_selection::sectioned(self) {
+        if !self.viewport_ready() || crate::viewport_selection::sectioned(self) {
             self.status = "Turn off section display before editing geometry".into();
             return;
         }
@@ -104,7 +104,8 @@ pub fn tools(app: &mut App, ui: &mut egui::Ui) {
     if session.phase == SketchPhase::Closed {
         return;
     }
-    let active = session.phase == SketchPhase::Active && app.bridge.valid();
+    let can_finish = session.phase == SketchPhase::Active && app.bridge.valid();
+    let active = can_finish && app.viewport_ready();
     let selected = session.tool;
     for (tool, label) in [
         (SketchTool::Select, "Select"),
@@ -121,7 +122,7 @@ pub fn tools(app: &mut App, ui: &mut egui::Ui) {
     }
     if ui
         .add_enabled(
-            active || session_faulted(app),
+            can_finish || session_faulted(app),
             egui::Button::new("Finish sketch"),
         )
         .clicked()
@@ -130,7 +131,7 @@ pub fn tools(app: &mut App, ui: &mut egui::Ui) {
     }
     if ui
         .add_enabled(
-            active || session_faulted(app),
+            can_finish || session_faulted(app),
             egui::Button::new("Discard sketch edits"),
         )
         .clicked()
@@ -158,7 +159,7 @@ pub fn viewport(
     if session.phase == SketchPhase::Closed {
         return;
     }
-    if session.phase != SketchPhase::Active || !app.bridge.valid() {
+    if session.phase != SketchPhase::Active || (!app.viewport_ready() || !app.bridge.valid()) {
         return;
     }
     let Some(position) = response.hover_pos() else {

@@ -20,8 +20,8 @@ pub struct Display {
     pub context: onecad_app::api::PreviewContext,
     pub scene: Arc<SceneSnapshot>,
     pub profiles: Vec<Profile>,
-    pub prepared: Mutex<Option<onecad_render::PreparedSolidCraftScene>>,
-    pub _lease: crate::budget::Lease,
+    pub prepared: Mutex<Option<onecad_render::PreparedScene>>,
+    pub _lease: Arc<crate::budget::Lease>,
     pub records: Vec<OperationRecord>,
     pub render_receipt: Option<crate::render_receipt::RenderReceipt>,
 }
@@ -57,7 +57,7 @@ pub enum Candidate {
 
 pub struct CandidateDelivery {
     pub action: Action,
-    pub prepared: Option<onecad_render::PreparedSolidCraftScene>,
+    pub prepared: Option<onecad_render::PreparedScene>,
     pub lease: Option<crate::budget::Lease>,
 }
 
@@ -92,7 +92,8 @@ pub struct Shared {
     pub valid: std::sync::atomic::AtomicBool,
     pub stopping: std::sync::atomic::AtomicBool,
     pub shutdown: Notify,
-    pub budget: onecad_render::SolidCraftPreparationBudget,
+    pub recovery_flush: Notify,
+    pub budget: Mutex<onecad_render::PreparationBudget>,
     pub host_budget: Arc<crate::budget::HostBudget>,
     generation: std::sync::atomic::AtomicU64,
     notify: Notify,
@@ -100,6 +101,12 @@ pub struct Shared {
 }
 
 impl Shared {
+    pub fn preparation_budget(&self) -> Result<onecad_render::PreparationBudget, String> {
+        self.budget
+            .lock()
+            .map(|budget| *budget)
+            .map_err(|_| "renderer preparation budget poisoned".into())
+    }
     pub fn wake(&self) {
         self.context.request_repaint();
     }
@@ -170,7 +177,7 @@ impl Bridge {
     pub fn start(
         paths: QaPaths,
         context: egui::Context,
-        budget: onecad_render::SolidCraftPreparationBudget,
+        budget: onecad_render::PreparationBudget,
     ) -> Result<Self, String> {
         let (commands, receiver) = async_mpsc::channel(ADMISSION);
         let (sender, messages) = mpsc::channel();
@@ -182,11 +189,12 @@ impl Bridge {
             failure: Mutex::new(None),
             activity: Mutex::new(None),
             render_receipt: Mutex::new(None),
-            budget,
+            budget: Mutex::new(budget),
             host_budget: Arc::new(crate::budget::HostBudget::default()),
             valid: std::sync::atomic::AtomicBool::new(false),
             stopping: std::sync::atomic::AtomicBool::new(false),
             shutdown: Notify::new(),
+            recovery_flush: Notify::new(),
             generation: std::sync::atomic::AtomicU64::new(0),
             notify: Notify::new(),
             context,
@@ -350,6 +358,9 @@ pub(crate) struct Backend {
     pub events: Arc<EventMailbox>,
     pub shared: Arc<Shared>,
     pub scene_revision: u64,
+    pub previous_scene: Option<(Arc<SceneSnapshot>, Arc<crate::budget::Lease>)>,
+    pub preparation_cache: onecad_render::PreparationCache,
+    pub preparation_lease: Option<Arc<crate::budget::Lease>>,
 }
 
 async fn actor(
@@ -385,10 +396,23 @@ async fn actor(
         events: event_rx,
         shared: shared.clone(),
         scene_revision: 0,
+        previous_scene: None,
+        preparation_cache: Default::default(),
+        preparation_lease: None,
     };
     loop {
         tokio::select! {
             _=shared.shutdown.notified()=>{break;}
+            _=shared.recovery_flush.notified()=>{
+                if let Some(root) = onecad_app::autosave::autosave_root(&backend.host)
+                    && let Some(event) = onecad_app::autosave::autosave_current_reporting(
+                        &backend.state.runtime, &root, &backend.state.persistence,
+                    ).await
+                    && let Some(error) = event.error
+                {
+                    eprintln!("Viewport recovery checkpoint failed: {error}");
+                }
+            }
             envelope = receiver.recv() => {
                 let Some(envelope) = envelope else { break; };
                 services::execute(&mut backend,envelope.command,envelope.permit,&sender).await;

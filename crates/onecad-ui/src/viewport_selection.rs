@@ -1,7 +1,8 @@
 //! Transient topology highlights never become persistent authoring references.
 use crate::{app::App, bridge::Display};
 use onecad_render::{HighlightKind, HighlightTarget, PreparedHighlights};
-use onecad_scene::{BodyId, DVec2, PickHit, SceneIdentity, SceneSnapshot, ViewSnapshot, Viewport};
+use onecad_scene::{BodyId, DVec2, PickHit, SceneIdentity, SceneSnapshot, ViewSnapshot};
+use std::sync::{Arc, mpsc};
 
 #[derive(Clone, Debug, PartialEq)]
 struct Target {
@@ -37,16 +38,35 @@ pub struct Selection {
     selected: Option<Target>,
     hover: Option<Target>,
     dirty: bool,
+    sequence: u64,
+    pending: Option<mpsc::Receiver<Delivery>>,
+}
+struct Delivery {
+    sequence: u64,
+    scene: SceneIdentity,
+    result: Result<PreparedHighlights, String>,
 }
 impl Selection {
     pub fn select(&mut self, hit: Option<&PickHit<'_>>) {
         self.selected = hit.map(Target::from_hit);
-        self.dirty = true;
+        self.changed();
     }
     pub fn invalidate(&mut self, scene: SceneIdentity) {
         self.selected = self.selected.take().filter(|target| target.scene == scene);
         self.hover = self.hover.take().filter(|target| target.scene == scene);
+        self.changed();
+    }
+    fn changed(&mut self) {
+        self.sequence = self.sequence.wrapping_add(1);
         self.dirty = true;
+    }
+    pub fn invalidate_pending(&mut self) {
+        self.selected = None;
+        self.hover = None;
+        self.changed();
+    }
+    fn accepts(&self, sequence: u64, scene: SceneIdentity, current: SceneIdentity) -> bool {
+        self.sequence == sequence && scene == current
     }
 }
 
@@ -54,11 +74,12 @@ pub fn hover(
     app: &mut App,
     ui: &egui::Ui,
     rect: egui::Rect,
-    viewport: Viewport,
+    view: &ViewSnapshot,
     display: &Display,
 ) {
     let pointer = ui.input(|input| input.pointer.hover_pos());
-    let allowed = app.bridge.valid()
+    let allowed = app.viewport_ready()
+        && app.bridge.valid()
         && !sectioned(app)
         && !app.sketch_active()
         && !app.busy()
@@ -67,17 +88,10 @@ pub fn hover(
     let target = pointer
         .filter(|point| allowed && rect.contains(*point))
         .and_then(|point| {
-            let view = ViewSnapshot::new(
-                display.scene.identity(),
-                app.view_number + 1,
-                app.camera,
-                viewport,
-            )
-            .ok()?;
             let logical = point - rect.min;
             let hit = onecad_scene::pick(
                 &display.scene,
-                &view,
+                view,
                 view.identity(),
                 DVec2::new(f64::from(logical.x), f64::from(logical.y)),
             )
@@ -86,7 +100,7 @@ pub fn hover(
         });
     if target != app.topology.hover {
         app.topology.hover = target;
-        app.topology.dirty = true;
+        app.topology.changed();
         app.draw_dirty = true;
     }
 }
@@ -99,28 +113,84 @@ pub fn sectioned(app: &App) -> bool {
     options.section[..3].iter().any(|value| *value != 0.0)
 }
 
-pub fn upload(app: &mut App, scene: &SceneSnapshot) -> Result<(), String> {
-    if !app.topology.dirty {
-        return Ok(());
+pub fn upload(
+    app: &mut App,
+    scene: &Arc<SceneSnapshot>,
+    ctx: &egui::Context,
+) -> Result<(), String> {
+    if app.topology.dirty {
+        app.renderer
+            .clear_highlights()
+            .map_err(|error| error.to_string())?;
     }
-    let selected: Vec<_> = app
-        .topology
-        .selected
-        .as_ref()
-        .map(Target::borrowed)
-        .into_iter()
-        .collect();
-    let hover = app.topology.hover.as_ref().map(Target::borrowed);
-    let prepared = PreparedHighlights::new(
-        scene,
-        &selected,
-        hover,
-        app.renderer.highlight_preparation_budget(),
-    )
-    .map_err(|error| error.to_string())?;
-    app.renderer
-        .replace_highlights(prepared)
+    if let Some(receiver) = &app.topology.pending {
+        match receiver.try_recv() {
+            Ok(delivery) => {
+                app.topology.pending = None;
+                if app
+                    .topology
+                    .accepts(delivery.sequence, delivery.scene, scene.identity())
+                {
+                    app.renderer
+                        .replace_highlights(delivery.result?)
+                        .map_err(|error| error.to_string())?;
+                    app.draw_dirty = true;
+                    ctx.request_repaint();
+                }
+            }
+            Err(mpsc::TryRecvError::Empty) => return Ok(()),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                app.topology.pending = None;
+                return Err("highlight preparation worker stopped".into());
+            }
+        }
+    }
+    if app.topology.dirty {
+        start_preparation(app, scene.clone(), ctx.clone())?;
+    }
+    Ok(())
+}
+
+fn start_preparation(
+    app: &mut App,
+    scene: Arc<SceneSnapshot>,
+    ctx: egui::Context,
+) -> Result<(), String> {
+    let lease = app
+        .bridge
+        .shared
+        .host_budget
+        .reserve(scene.resident_bytes())?;
+    let sequence = app.topology.sequence;
+    let selected = app.topology.selected.clone();
+    let hover = app.topology.hover.clone();
+    let budget = app.renderer.preparation_budget();
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("viewport-highlights".into())
+        .spawn(move || {
+            let _lease = lease;
+            let targets: Vec<_> = selected
+                .as_ref()
+                .map(Target::borrowed)
+                .into_iter()
+                .collect();
+            let result = PreparedHighlights::new(
+                &scene,
+                &targets,
+                hover.as_ref().map(Target::borrowed),
+                budget,
+            )
+            .map_err(|error| error.to_string());
+            let _ = sender.send(Delivery {
+                sequence,
+                scene: scene.identity(),
+                result,
+            });
+            ctx.request_repaint();
+        })
         .map_err(|error| error.to_string())?;
+    app.topology.pending = Some(receiver);
     app.topology.dirty = false;
     Ok(())
 }
@@ -145,9 +215,35 @@ mod tests {
             selected: Some(target.clone()),
             hover: Some(target),
             dirty: false,
+            ..Default::default()
         };
         selection.invalidate(SceneIdentity { scene: 2, ..scene });
         assert!(selection.selected.is_none() && selection.hover.is_none());
         assert!(selection.dirty);
+    }
+    #[test]
+    fn old_highlights_rejected_after_selection_scene_or_session_change() {
+        let scene = SceneIdentity {
+            session: 1,
+            scene: 1,
+        };
+        let mut selection = Selection::default();
+        let sequence = selection.sequence;
+        assert!(selection.accepts(sequence, scene, scene));
+        selection.select(None);
+        assert!(!selection.accepts(sequence, scene, scene));
+        assert!(!selection.accepts(
+            selection.sequence,
+            scene,
+            SceneIdentity { scene: 2, ..scene }
+        ));
+        assert!(!selection.accepts(
+            selection.sequence,
+            scene,
+            SceneIdentity {
+                session: 2,
+                ..scene
+            }
+        ));
     }
 }
