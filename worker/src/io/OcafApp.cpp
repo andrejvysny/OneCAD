@@ -7,10 +7,12 @@
 #include <Standard_Failure.hxx>
 #include <Standard_Type.hxx>
 
+#include "capi/OcctLogPrinter.h"
+
 namespace onecad::io {
 
-std::mutex& ocaf_mutex() {
-    static std::mutex m;
+std::timed_mutex& ocaf_mutex() {
+    static std::timed_mutex m;
     return m;
 }
 
@@ -25,8 +27,7 @@ Handle(TDocStd_Application) ocaf_application() {
         Handle(Message_Messenger) messenger = app->MessageDriver();
         if (!messenger.IsNull()) {
             messenger->RemovePrinters(STANDARD_TYPE(Message_PrinterOStream));
-            messenger->AddPrinter(
-                new Message_PrinterOStream("cerr", Standard_False, Message_Info));
+            messenger->AddPrinter(onecad::capi::make_diagnostic_printer());
         }
     }
     return app;

@@ -27,7 +27,7 @@ import {
  * KERNEL geometry is pinned exactly, against analytic volumes, in
  * `worker/tests/test_hole_op.cpp` (through-all / blind / counterbore /
  * countersink, GProp on the real BRep at 1e-6 relative) and in
- * `src-tauri/tests/hole_ops.rs` (the same volumes via `QueryMassProperties`, plus
+ * `crates/onecad-app/tests/hole_ops.rs` (the same volumes via `QueryMassProperties`, plus
  * the re-edit, the point fence, and save→reopen). What THIS spec owns is the
  * chain the kernel never sees: face pick → planarity gate → chips → committed
  * record → history row → re-edit seed.

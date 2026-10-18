@@ -1,0 +1,132 @@
+{
+  "bodies": [
+    {
+      "bbox": {
+        "max": [
+          1.0000000116860974e-7,
+          40.0,
+          10.0
+        ],
+        "min": [
+          -30.0,
+          -1.0000000116860974e-7,
+          -1.0000000116860974e-7
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "00000000-0000-0000-0000-00000000f101",
+      "byteLen": 7628,
+      "edgeCount": 15,
+      "edgePointCount": 92,
+      "faceColors": [],
+      "faceCount": 7,
+      "file": "00000000-0000-0000-0000-00000000f101.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Body 1",
+      "sections": [
+        {
+          "byteLen": 2040,
+          "name": "POSITIONS",
+          "offset": 224,
+          "type": 1
+        },
+        {
+          "byteLen": 2040,
+          "name": "NORMALS",
+          "offset": 2264,
+          "type": 2
+        },
+        {
+          "byteLen": 1872,
+          "name": "INDICES",
+          "offset": 4304,
+          "type": 3
+        },
+        {
+          "byteLen": 56,
+          "name": "FACE_RANGES",
+          "offset": 6176,
+          "type": 4
+        },
+        {
+          "byteLen": 32,
+          "name": "FACE_ID_OFFS",
+          "offset": 6232,
+          "type": 5
+        },
+        {
+          "byteLen": 21,
+          "name": "FACE_ID_CHARS",
+          "offset": 6264,
+          "type": 6
+        },
+        {
+          "byteLen": 120,
+          "name": "EDGE_RANGES",
+          "offset": 6288,
+          "type": 7
+        },
+        {
+          "byteLen": 1104,
+          "name": "EDGE_POSITIONS",
+          "offset": 6408,
+          "type": 8
+        },
+        {
+          "byteLen": 64,
+          "name": "EDGE_ID_OFFS",
+          "offset": 7512,
+          "type": 9
+        },
+        {
+          "byteLen": 51,
+          "name": "EDGE_ID_CHARS",
+          "offset": 7576,
+          "type": 10
+        }
+      ],
+      "sha256": "cb909a52c0ca31c8170f384bb2375d6c3366493e2a1630b32f03eee604e0ef43",
+      "triangleCount": 156,
+      "vertexCount": 170,
+      "wireId": "body_00000000-0000-0000-0000-00000000f101"
+    }
+  ],
+  "bodyCount": 1,
+  "filletEdge": {
+    "anchor": [
+      0.0,
+      0.0,
+      5.0
+    ],
+    "elementId": "el_70136e9fdcef46909b73599f84789958",
+    "topoKeyOnExtrudeSnapshot": "e:1"
+  },
+  "fixture": "fillet-block",
+  "lod": "fine",
+  "mesh1Version": 1,
+  "meshFormat": "MESH1",
+  "params": {
+    "depth": 10.0,
+    "filletRadius": 3.0,
+    "height": 30.0,
+    "width": 40.0
+  },
+  "pipeline": "DocumentRuntime AddOperation x3 + promote_selection -> run_regen(ToEnd{from:0}) -> get_mesh(body, Lod::Fine)",
+  "sceneBbox": {
+    "max": [
+      1.0000000116860974e-7,
+      40.0,
+      10.0
+    ],
+    "min": [
+      -30.0,
+      -1.0000000116860974e-7,
+      -1.0000000116860974e-7
+    ]
+  },
+  "source": "parametric: Sketch(XY, constrained rect 40x30 at origin) -> Extrude(blind 10, NewBody) -> Fillet(r=3, one vertical edge)",
+  "units": "mm",
+  "upAxis": "+Z"
+}

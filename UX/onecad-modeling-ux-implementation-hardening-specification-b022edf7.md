@@ -85,9 +85,9 @@ The weakness is fragmentation: similar tools differ in focus, Enter, Escape, cli
 
 # Backend/cross-layer architecture
 
-- `src-tauri/crates/onecad-core/src/document/record.rs` — persisted typed operations, including Pattern `result_policy_version`.
-- `src-tauri/src/document_runtime.rs` — regen/session publication, Pattern V2 child membership/metadata, repair candidate body provenance.
-- `src-tauri/src/dto.rs` — projection types including exact `op_type`.
+- `crates/onecad-core/src/document/record.rs` — persisted typed operations, including Pattern `result_policy_version`.
+- `crates/onecad-app/src/document_runtime.rs` — regen/session publication, Pattern V2 child membership/metadata, repair candidate body provenance.
+- `crates/onecad-app/src/dto.rs` — projection types including exact `op_type`.
 - `src/ipc/types.ts` and `src/ipc/tauriCommandMap.ts` — TypeScript DTOs and wire lowering.
 - `protocol/SCHEMA.md` — normative wire contract and changelog authority.
 - `worker/src/kernel/validation/ShapeAudit.{h,cpp}` — publication evidence/policy/decision.
@@ -1033,8 +1033,8 @@ The program is complete only when all statements are true:
 - `src/features/repair/RepairPanel.tsx`
 - `src/stores/repairStore.ts`
 - `src/features/inspector/historyActions.ts`
-- `src-tauri/src/document_runtime.rs`
-- `src-tauri/crates/onecad-core/src/document/record.rs`
+- `crates/onecad-app/src/document_runtime.rs`
+- `crates/onecad-core/src/document/record.rs`
 - `worker/src/kernel/validation/ShapeAudit.{h,cpp}`
 - `worker/src/ops/OpCommon.{h,cpp}`
 - `protocol/SCHEMA.md`

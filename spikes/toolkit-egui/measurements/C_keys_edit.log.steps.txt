@@ -1,0 +1,99 @@
+tauri-agent-helper: ready v1.3.0 pid=77772
+tauri-agent-helper: ready v1.3.0 pid=77778
+tauri-agent-helper: ready v1.3.0 pid=77784
+[step] 0 ANSI-Z position (prints Y on QWERTZ) with Cmd uptime_ns=2385420795717500
+tauri-agent-helper: ready v1.3.0 pid=77788
+tauri-agent-helper: ready v1.3.0 pid=77793
+[keys] posted 6:c pid=77794 uptime_ns=2385421110167250
+tauri-agent-helper: ready v1.3.0 pid=77799
+[step] 1 Cmd+Z, field not focused uptime_ns=2385421553560791
+tauri-agent-helper: ready v1.3.0 pid=77802
+tauri-agent-helper: ready v1.3.0 pid=77807
+[keys] posted 16:c pid=77808 uptime_ns=2385421881578708
+tauri-agent-helper: ready v1.3.0 pid=77814
+[step] 2 click field, Cmd+A, type expression, Enter uptime_ns=2385422324717875
+tauri-agent-helper: ready v1.3.0 pid=77817
+tauri-agent-helper: ready v1.3.0 pid=77822
+tauri-agent-helper: ready v1.3.0 pid=77824
+tauri-agent-helper: ready v1.3.0 pid=77827
+tauri-agent-helper: ready v1.3.0 pid=77832
+tauri-agent-helper: ready v1.3.0 pid=77839
+tauri-agent-helper: ready v1.3.0 pid=77841
+tauri-agent-helper: ready v1.3.0 pid=77846
+[keys] posted 0:c pid=77847 uptime_ns=2385423555207625
+tauri-agent-helper: ready v1.3.0 pid=77852
+tauri-agent-helper: ready v1.3.0 pid=77854
+tauri-agent-helper: ready v1.3.0 pid=77859
+tauri-agent-helper: ready v1.3.0 pid=77861
+tauri-agent-helper: ready v1.3.0 pid=77868
+tauri-agent-helper: ready v1.3.0 pid=77870
+tauri-agent-helper: ready v1.3.0 pid=77875
+[keys] posted 36 pid=77876 uptime_ns=2385425171402916
+tauri-agent-helper: ready v1.3.0 pid=77881
+[step] 3 Cmd+Z, field not focused (document undo) uptime_ns=2385425605463833
+tauri-agent-helper: ready v1.3.0 pid=77884
+tauri-agent-helper: ready v1.3.0 pid=77889
+[keys] posted 16:c pid=77891 uptime_ns=2385425933731083
+tauri-agent-helper: ready v1.3.0 pid=77897
+[step] 4 Shift+Cmd+Z (document redo) uptime_ns=2385426373886833
+tauri-agent-helper: ready v1.3.0 pid=77900
+tauri-agent-helper: ready v1.3.0 pid=77905
+[keys] posted 16:cs pid=77906 uptime_ns=2385426751939291
+tauri-agent-helper: ready v1.3.0 pid=77911
+[step] 5 click field, type 9, then Cmd+Z (text undo) uptime_ns=2385427189728333
+tauri-agent-helper: ready v1.3.0 pid=77914
+tauri-agent-helper: ready v1.3.0 pid=77919
+tauri-agent-helper: ready v1.3.0 pid=77921
+tauri-agent-helper: ready v1.3.0 pid=77925
+tauri-agent-helper: ready v1.3.0 pid=77928
+tauri-agent-helper: ready v1.3.0 pid=77933
+tauri-agent-helper: ready v1.3.0 pid=77935
+tauri-agent-helper: ready v1.3.0 pid=77940
+[keys] posted 119 pid=77941 uptime_ns=2385428384219500
+tauri-agent-helper: ready v1.3.0 pid=77947
+tauri-agent-helper: ready v1.3.0 pid=77949
+tauri-agent-helper: ready v1.3.0 pid=77955
+tauri-agent-helper: ready v1.3.0 pid=77957
+tauri-agent-helper: ready v1.3.0 pid=77962
+tauri-agent-helper: ready v1.3.0 pid=77964
+tauri-agent-helper: ready v1.3.0 pid=77969
+[keys] posted 16:c pid=77970 uptime_ns=2385429752478000
+tauri-agent-helper: ready v1.3.0 pid=77980
+[step] 6 Cmd+A, Cmd+V pastes the seeded '2*21 mm', Enter commits uptime_ns=2385430170373833
+tauri-agent-helper: ready v1.3.0 pid=77983
+tauri-agent-helper: ready v1.3.0 pid=77989
+[keys] posted 0:c pid=77991 uptime_ns=2385430488834083
+tauri-agent-helper: ready v1.3.0 pid=77997
+tauri-agent-helper: ready v1.3.0 pid=77999
+tauri-agent-helper: ready v1.3.0 pid=78004
+[keys] posted 9:c pid=78005 uptime_ns=2385431223298791
+tauri-agent-helper: ready v1.3.0 pid=78014
+tauri-agent-helper: ready v1.3.0 pid=78016
+tauri-agent-helper: ready v1.3.0 pid=78026
+[keys] posted 36 pid=78027 uptime_ns=2385431928586000
+tauri-agent-helper: ready v1.3.0 pid=78032
+[step] 6b click field, Cmd+A, Cmd+C copies the field text to the pasteboard uptime_ns=2385432368161958
+tauri-agent-helper: ready v1.3.0 pid=78035
+tauri-agent-helper: ready v1.3.0 pid=78040
+tauri-agent-helper: ready v1.3.0 pid=78042
+tauri-agent-helper: ready v1.3.0 pid=78045
+tauri-agent-helper: ready v1.3.0 pid=78049
+tauri-agent-helper: ready v1.3.0 pid=78055
+tauri-agent-helper: ready v1.3.0 pid=78057
+tauri-agent-helper: ready v1.3.0 pid=78062
+[keys] posted 0:c pid=78063 uptime_ns=2385433624843666
+tauri-agent-helper: ready v1.3.0 pid=78069
+tauri-agent-helper: ready v1.3.0 pid=78072
+tauri-agent-helper: ready v1.3.0 pid=78077
+[keys] posted 8:c pid=78078 uptime_ns=2385434381526041
+tauri-agent-helper: ready v1.3.0 pid=78083
+[pasteboard] after copy: 42.00
+[step] 6c Cmd+Z after commit, field not focused (document undo to the previous width) uptime_ns=2385434825240958
+tauri-agent-helper: ready v1.3.0 pid=78087
+tauri-agent-helper: ready v1.3.0 pid=78103
+[keys] posted 53 pid=78104 uptime_ns=2385435085648958
+tauri-agent-helper: ready v1.3.0 pid=78109
+tauri-agent-helper: ready v1.3.0 pid=78112
+tauri-agent-helper: ready v1.3.0 pid=78117
+[keys] posted 16:c pid=78118 uptime_ns=2385435823705333
+tauri-agent-helper: ready v1.3.0 pid=78124

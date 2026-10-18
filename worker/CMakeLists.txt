@@ -301,6 +301,70 @@ endif()
 # ---------------------------------------------------------------------------
 add_executable(onecad-worker src/main.cpp)
 target_link_libraries(onecad-worker PRIVATE worker_core)
+# The verb table + dispatch loop, shared with onecad_worker_lib below (moved
+# out of main.cpp unchanged; P0.3, ONECAD-258).
+target_sources(onecad-worker PRIVATE src/capi/WorkerRuntime.cpp)
+
+# ---------------------------------------------------------------------------
+# onecad_worker_lib : the SAME worker as a static library behind a C ABI
+# (src/capi/onecad_worker.h) for in-process hosting (optional macOS dev/CI
+# host; the shipping host is the sidecar). P0.3 spike (Plane ONECAD-258); docs/design/native-ui/
+# inprocess-worker-spike.md. Recompiles worker_core's sources with
+# ONECAD_WORKER_LIBRARY (compiles out the `__crash` std::abort chaos hook), so
+# it never shares objects with the sidecar. EXCLUDE_FROM_ALL: the default build
+# and ctest are unchanged; build it with `--target onecad_worker_lib`.
+# ---------------------------------------------------------------------------
+get_target_property(_onecad_worker_core_sources worker_core SOURCES)
+add_library(onecad_worker_lib STATIC EXCLUDE_FROM_ALL
+    ${_onecad_worker_core_sources}
+    src/capi/WorkerRuntime.cpp
+    src/capi/onecad_worker.cpp
+)
+# Usage requirements are read off worker_core, never restated, so the two can
+# not drift. That relies on worker_core declaring them all PUBLIC; the check
+# below fails configure if a PRIVATE-only one appears. (Compile options are
+# directory-scoped add_compile_options, which this target inherits as well.)
+foreach(_onecad_prop IN ITEMS INCLUDE_DIRECTORIES COMPILE_DEFINITIONS LINK_LIBRARIES
+                              LINK_DIRECTORIES)
+    get_target_property(_onecad_private worker_core ${_onecad_prop})
+    get_target_property(_onecad_iface worker_core INTERFACE_${_onecad_prop})
+    if(NOT _onecad_private)
+        set(_onecad_private "")
+    endif()
+    if(NOT _onecad_iface)
+        set(_onecad_iface "")
+    endif()
+    if(NOT "${_onecad_private}" STREQUAL "${_onecad_iface}")
+        message(FATAL_ERROR "onecad_worker_lib: worker_core ${_onecad_prop} is not all PUBLIC; "
+                            "mirror the PRIVATE part into onecad_worker_lib")
+    endif()
+endforeach()
+target_include_directories(onecad_worker_lib PUBLIC
+    $<TARGET_PROPERTY:worker_core,INTERFACE_INCLUDE_DIRECTORIES>)
+target_compile_definitions(onecad_worker_lib
+    PUBLIC $<TARGET_PROPERTY:worker_core,INTERFACE_COMPILE_DEFINITIONS>
+    PRIVATE ONECAD_WORKER_LIBRARY=1
+)
+target_compile_options(onecad_worker_lib PUBLIC
+    $<TARGET_PROPERTY:worker_core,INTERFACE_COMPILE_OPTIONS>)
+target_link_libraries(onecad_worker_lib PUBLIC
+    $<TARGET_PROPERTY:worker_core,INTERFACE_LINK_LIBRARIES>)
+target_link_directories(onecad_worker_lib PUBLIC
+    $<TARGET_PROPERTY:worker_core,INTERFACE_LINK_DIRECTORIES>)
+set_target_properties(onecad_worker_lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
+# Link manifest for non-CMake hosts (the Rust spike's build.rs): one
+# `kind=value` per line, in link order. Static archives first, then the OCCT
+# shared libraries by absolute path, then their directory for the runtime rpath.
+set(_onecad_worker_link_lines
+    "static=$<TARGET_FILE:onecad_worker_lib>"
+    "static=$<TARGET_FILE:planegcs>")
+foreach(_occt_lib IN LISTS OpenCASCADE_LIBRARIES)
+    list(APPEND _onecad_worker_link_lines "dylib=$<TARGET_LINKER_FILE:${_occt_lib}>")
+endforeach()
+list(APPEND _onecad_worker_link_lines "rpath=${OpenCASCADE_LIBRARY_DIR}")
+list(JOIN _onecad_worker_link_lines "\n" _onecad_worker_link_content)
+file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/onecad_worker_lib.link"
+    CONTENT "${_onecad_worker_link_content}\n")
 
 # ---------------------------------------------------------------------------
 # Testing

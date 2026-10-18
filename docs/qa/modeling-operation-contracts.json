@@ -231,7 +231,7 @@
       "persistenceBehavior": "additive typed axis ref persists; legacy edgeId preserved for replay",
       "userRecoveryBehavior": "missing/deleted edge produces NeedsRepair, not OP_FAILED",
       "uiExposure": "hidden",
-      "notes": "P1B added the additive typed body-edge axis companion ref. It exists in core/worker but the UI authors only the sketchLine variant (src/ipc/types.ts AxisRef); exposing it is a UI decision. WP1.5 conditions exposure on the persistence/reopen/upstream-edit evidence, which now exists: worker/tests/test_wp6_ops.cpp (curved-edge and cross-body refusals) and src-tauri/tests/revolve_ops.rs (reopen + upstream edit, and consumed edge => NeedsRepair)."
+      "notes": "P1B added the additive typed body-edge axis companion ref. It exists in core/worker but the UI authors only the sketchLine variant (src/ipc/types.ts AxisRef); exposing it is a UI decision. WP1.5 conditions exposure on the persistence/reopen/upstream-edit evidence, which now exists: worker/tests/test_wp6_ops.cpp (curved-edge and cross-body refusals) and crates/onecad-app/tests/revolve_ops.rs (reopen + upstream edit, and consumed edge => NeedsRepair)."
     },
     {
       "operation": "Fillet",

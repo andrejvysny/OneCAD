@@ -1,9 +1,9 @@
 /*
  * Golden-fixture replay of `docs/qa/expressions.fixture.json` — the TS
- * mirror of onecad-core's expr engine (`src-tauri/crates/onecad-core/src/expr/**`)
+ * mirror of onecad-core's expr engine (`crates/onecad-core/src/expr/**`)
  * must evaluate every case identically to the Rust evaluator. The Rust side
  * asserts the SAME file, byte-for-byte, in
- * `src-tauri/crates/onecad-core/tests/expression_engine.rs`. Rust is the
+ * `crates/onecad-core/tests/expression_engine.rs`. Rust is the
  * sole hash authority (CLAUDE.md) — nothing this module computes reaches
  * geometry — so a last-ULP transcendental difference between the two
  * runtimes here is a checkpoint MISS to catch, never wrong geometry.

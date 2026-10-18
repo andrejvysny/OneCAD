@@ -189,7 +189,7 @@ for (const row of contracts.rows) {
 // A row whose operation is not a `KnownOperation` is a protocol verb or a
 // timeline lane, not something the worker dispatches by `op_type` — those are
 // out of scope for the dispatch check rather than failures.
-const recordRs = resolve(root, "src-tauri/crates/onecad-core/src/document/record.rs");
+const recordRs = resolve(root, "crates/onecad-core/src/document/record.rs");
 const knownContractOps = new Set();
 if (!existsSync(recordRs)) {
   fail("supportStatus: record.rs does not exist — this check went vacuous");

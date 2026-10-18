@@ -1,7 +1,7 @@
 # OneCAD Worker Protocol — Wire Contract (SCHEMA)
 
 Status: canonical. Protocol version `1`. Both the C++ sidecar (`worker/`) and the
-Rust core (`src-tauri/crates/onecad-protocol`) implement against this document
+Rust core (`crates/onecad-protocol`) implement against this document
 verbatim. Any change requires a fixture bump + cross-track sign-off (see
 [§13 Versioning](#13-versioningchange-policy)).
 
@@ -1678,7 +1678,7 @@ independent evidence channel consulted only after an exact-id miss; it is not a
 ladder, produces no score, and never overrides a matching id. Rust's core
 `ExtrudeParams`/`RevolveParams` hold a typed `profile { sketchId, regionId,
 regionIdentityVersion?, regionAnchor? }` object (`SketchRegionRef`); the wire
-layer FLATTENS it (`src-tauri/src/worker/wire.rs` `lift_profile_to_params` lifts
+layer FLATTENS it (`crates/onecad-app/src/worker/wire.rs` `lift_profile_to_params` lifts
 all four keys) and the worker reads the flat keys
 (`worker/src/ops/OpCommon.cpp` `build_profile_face`). Producers MUST send the
 flat form; a nested `params.profile` is not consumed by the worker.
@@ -1868,7 +1868,7 @@ version. `chainTangentEdges:false` means exact picks; authoring refuses
   body, frozen `intent.descriptor`, and an `anchor` — without the anchor two
   congruent faces tie and the ref is `NeedsRepair` on every replay). That evidence
   MUST is enforced at AUTHORING by `EditSession`'s edge-op validation
-  (`src-tauri/crates/onecad-core/src/edit/session.rs` `validate_edge_op_distances`
+  (`crates/onecad-core/src/edit/session.rs` `validate_edge_op_distances`
   / `validate_fillet_lockstep`, the same functions that refuse `distance2` on a
   Fillet); the worker accepts whatever evidence a ref carries and simply binds it
   through the ladder, so a fixture may send a bound `elementId` alone. The worker
@@ -4748,7 +4748,7 @@ SaveCheckpoint artifact without it, or with any axis missing, a mismatching
 fingerprint, or a `size` that differs from the binary section. Canonical
 fixture: `restore_checkpoint_base.ndjson` pins the envelope axes (worker
 harness lane; the Rust parser's hard-fail is unit-tested in
-`src-tauri/src/worker/checkpoint_result.rs`, and the Rust fixture replay does not run this file). Rust reads the emitted axes, never stamps current versions onto old
+`crates/onecad-app/src/worker/checkpoint_result.rs`, and the Rust fixture replay does not run this file). Rust reads the emitted axes, never stamps current versions onto old
 bytes. Missing solver policy in legacy persisted envelopes means policy 1, never
 the current policy 2. Retained C++ checkpoint metadata also checks solver policy
 before installing a restored base. Persisted mesh cache manifests record solver
@@ -6368,7 +6368,7 @@ sign-off) once fixtures exist.
   lanes: `canonical_chamfer_reference_face` (26 expectations),
   `canonical_chamfer_reference_face_legacy_needsrepair` (25) and the updated
   `canonical_chamfer_angle_distance` (30) under `worker_harness`, plus the Rust
-  real-worker lane (`src-tauri/tests/chamfer_reference.rs`, `chamfer_angle.rs`,
+  real-worker lane (`crates/onecad-app/tests/chamfer_reference.rs`, `chamfer_angle.rs`,
   `topology_rebind.rs`) and the worker probe `chamfer_reference_face`.
   `scripts/check-worker-stdout-hygiene.sh` clean; `onecad-protocol` and the Dispatcher
   untouched, so no frame, handshake, `protocolVersion` or worker-fingerprint axis
@@ -7147,9 +7147,9 @@ sign-off) once fixtures exist.
   rather than tied to one pick. Purely additive new verb; no existing wire
   form changes. Worker: `worker/src/session/ClassifyElement.h/.cpp`, dispatch
   in `worker/src/main.cpp`. Rust: `worker::wire::classify_element_args` /
-  `parse_classify_element` (`src-tauri/src/worker/wire.rs`), the
+  `parse_classify_element` (`crates/onecad-app/src/worker/wire.rs`), the
   `ElementQuery::classify_element(_by_topo_key)` trait methods
-  (`src-tauri/src/worker/mod.rs`), `WorkerManager` impl (`manager.rs`), the
+  (`crates/onecad-app/src/worker/mod.rs`), `WorkerManager` impl (`manager.rs`), the
   `#[tauri::command] classify_element` (`src-tauri/src/api/mod.rs`). No
   fixture yet — P0 gate is `src-tauri/tests/classify_latency.rs`'s p95
   measurement, not a wire-contract fixture; a fixture lands with WP-1.2 once

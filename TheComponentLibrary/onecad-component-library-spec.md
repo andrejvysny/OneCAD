@@ -135,7 +135,7 @@ Maps `id → version → package path`, and caches search metadata (name, catego
 
 ### 2.3 Blob storage
 
-Reuse the existing **content-addressed** pattern from `src-tauri/crates/onecad-core/src/io/imports.rs` (`ImportBlob`, `import_blob_path(sha256, codec)`). Geometry and STEP payloads are stored once under `blobs/<sha256>` and referenced by hash, deduplicated across components, integrity-checked on read. Do not invent a parallel store — generalize the import-blob machinery.
+Reuse the existing **content-addressed** pattern from `crates/onecad-core/src/io/imports.rs` (`ImportBlob`, `import_blob_path(sha256, codec)`). Geometry and STEP payloads are stored once under `blobs/<sha256>` and referenced by hash, deduplicated across components, integrity-checked on read. Do not invent a parallel store — generalize the import-blob machinery.
 
 ---
 
@@ -143,7 +143,7 @@ Reuse the existing **content-addressed** pattern from `src-tauri/crates/onecad-c
 
 Placed components are **first-class instances**, not copied bodies. This is the decision that aligns the library with the founding invariant. Add four operations. Each is a single atomic, undoable op; each publishes as a uniquely-named, editable history node (per the modeling-UX contract — no inert insertions).
 
-Follow the existing `*Params` idiom exactly (see `TransformBodyParams` / `ImportStepParams` in `src-tauri/crates/onecad-core/src/document/record.rs`): `#[serde(rename_all = "camelCase")]`, `#[serde(flatten)] extra: Extra` for forward-compat, a `validate()` checked at authoring, rich doc comments referencing SCHEMA §7.3.
+Follow the existing `*Params` idiom exactly (see `TransformBodyParams` / `ImportStepParams` in `crates/onecad-core/src/document/record.rs`): `#[serde(rename_all = "camelCase")]`, `#[serde(flatten)] extra: Extra` for forward-compat, a `validate()` checked at authoring, rich doc comments referencing SCHEMA §7.3.
 
 ### 3.1 `PlaceComponent`
 
@@ -221,13 +221,13 @@ Drop identity, keep the cached geometry as ordinary bodies. The honest "break li
 
 ### 3.5 Wire + schema obligations
 
-For each op: add the `KnownOperation` variant and params struct in `record.rs`; lower it in `src-tauri/src/worker/wire.rs` (`wire_op`, and `wire_op_inputs` — the `inputs[]` semantic-ref slot table must agree with `KnownOperation::inputs`; `mate.target` is a semantic ref and belongs in `inputs[]`); add a dispatch arm in `worker/src/session/PlanExecutor.cpp::run_single_op`; implement `worker/src/ops/ComponentOp.cpp/.h`; document the payload in SCHEMA §7.3 with a §14 changelog entry and a fixture bump. **Cross-track sign-off required.**
+For each op: add the `KnownOperation` variant and params struct in `record.rs`; lower it in `crates/onecad-app/src/worker/wire.rs` (`wire_op`, and `wire_op_inputs` — the `inputs[]` semantic-ref slot table must agree with `KnownOperation::inputs`; `mate.target` is a semantic ref and belongs in `inputs[]`); add a dispatch arm in `worker/src/session/PlanExecutor.cpp::run_single_op`; implement `worker/src/ops/ComponentOp.cpp/.h`; document the payload in SCHEMA §7.3 with a §14 changelog entry and a fixture bump. **Cross-track sign-off required.**
 
 ---
 
 ## 4. Storage layer — new Rust crate
 
-Create `src-tauri/crates/onecad-library`. Pure domain crate, no Tauri (mirroring `onecad-core`'s discipline). Responsibilities:
+Create `crates/onecad-library`. Pure domain crate, no Tauri (mirroring `onecad-core`'s discipline). Responsibilities:
 
 - **Package read/write**: parse/validate `component.toml`; enforce identity rules (namespaced id, semver, revision hash recomputed on write).
 - **Index management**: load/rebuild `library.json`; atomic writes; reconcile packages on disk against the index.
@@ -256,7 +256,7 @@ impl Library {
 
 ## 5. The placement solver (mate-like snapping)
 
-Target: full mate-like placement. The encouraging fact from reconnaissance: **OneCAD already owns most of the machinery.** `ElementRef`/`AnchorIntent` (`src-tauri/crates/onecad-core/src/document/refs.rs`) already carries a `localFrame` (origin + x/y/z basis) and `surface_uv` captured at selection, and the ladder already re-finds faces after upstream edits. A mate is structurally a pair of `ElementRef`s plus a transform constraint — build on the naming spine, not a parallel picking system.
+Target: full mate-like placement. The encouraging fact from reconnaissance: **OneCAD already owns most of the machinery.** `ElementRef`/`AnchorIntent` (`crates/onecad-core/src/document/refs.rs`) already carries a `localFrame` (origin + x/y/z basis) and `surface_uv` captured at selection, and the ladder already re-finds faces after upstream edits. A mate is structurally a pair of `ElementRef`s plus a transform constraint — build on the naming spine, not a parallel picking system.
 
 ### 5.1 Live preview
 

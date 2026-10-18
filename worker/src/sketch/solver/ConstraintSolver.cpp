@@ -1706,6 +1706,10 @@ void ConstraintSolver::configureSystem() {
     gcsSystem_->setMaxIterations(config_.maxIterations);
     gcsSystem_->setConvergenceRedundant(config_.tolerance);
     gcsSystem_->setMaxIterationsRedundant(config_.maxIterations);
+    // PlaneGCS diagnostics write to stdout, which carries only OCW1 frames in
+    // the sidecar. Disable them in every host; redundancy remains available in
+    // the structured solve result.
+    gcsSystem_->debugMode = GCS::NoDebug;
 }
 
 } // namespace onecad::core::sketch

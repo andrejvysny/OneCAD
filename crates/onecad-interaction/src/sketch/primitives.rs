@@ -1,0 +1,147 @@
+use super::*;
+use onecad_core::{
+    edit::SketchEditOp,
+    ids::EntityId,
+    math::Vec2,
+    sketch::{Constraint, SketchEntity},
+};
+use std::collections::BTreeSet;
+
+pub(crate) const MIN_SIZE: f64 = 1e-9;
+pub(crate) type PrimitiveBatch = (Vec<SketchEditOp>, AfterPrimitive);
+
+pub(crate) fn build_primitive(
+    session: &SketchSession,
+    point: Vec2,
+    ids: &PrimitiveIds,
+) -> Result<PrimitiveBatch, String> {
+    validate_ids(session, ids)?;
+    let draft = session.draft.as_ref().ok_or("No primitive anchor")?;
+    match session.tool {
+        SketchTool::Line => line(draft, point, ids),
+        SketchTool::Rectangle => rectangle(draft.anchor, point, ids),
+        SketchTool::Circle => circle(draft.anchor, point, ids),
+        SketchTool::Select => Err("Select does not author geometry".into()),
+    }
+}
+
+fn validate_ids(session: &SketchSession, ids: &PrimitiveIds) -> Result<(), String> {
+    let entities: BTreeSet<_> = ids.entities.iter().copied().collect();
+    let constraints: BTreeSet<_> = ids.constraints.iter().copied().collect();
+    if entities.len() != ids.entities.len()
+        || constraints.len() != ids.constraints.len()
+        || entities
+            .iter()
+            .any(|id| session.authoritative.contains_entity(*id))
+        || constraints
+            .iter()
+            .any(|id| session.authoritative.contains_constraint(*id))
+    {
+        return Err("Primitive ids must be fresh and unique".into());
+    }
+    Ok(())
+}
+
+fn line(draft: &SketchDraft, point: Vec2, ids: &PrimitiveIds) -> Result<PrimitiveBatch, String> {
+    let closing = draft.segments > 0 && distance(draft.first, point) < MIN_SIZE;
+    let endpoint = if closing { draft.first } else { point };
+    if !distance(draft.anchor, endpoint).is_finite() || distance(draft.anchor, endpoint) < MIN_SIZE
+    {
+        return Err("Degenerate line".into());
+    }
+    let first = draft.first_id.unwrap_or(ids.entities[0]);
+    let start = draft.anchor_id.unwrap_or(ids.entities[0]);
+    let end = if closing { first } else { ids.entities[1] };
+    let mut ops = Vec::with_capacity(3);
+    if draft.anchor_id.is_none() {
+        ops.push(add_point(start, draft.anchor));
+    }
+    if !closing {
+        ops.push(add_point(end, endpoint));
+    }
+    ops.push(add_entity(SketchEntity::line(
+        ids.entities[2],
+        start,
+        end,
+        false,
+    )));
+    let after = if closing {
+        AfterPrimitive::Reset
+    } else {
+        AfterPrimitive::ContinueLine {
+            first,
+            last: end,
+            segments: draft
+                .segments
+                .checked_add(1)
+                .ok_or("Line chain is too long")?,
+        }
+    };
+    Ok((ops, after))
+}
+
+fn rectangle(first: Vec2, opposite: Vec2, ids: &PrimitiveIds) -> Result<PrimitiveBatch, String> {
+    if !(first.x - opposite.x).is_finite()
+        || !(first.y - opposite.y).is_finite()
+        || (first.x - opposite.x).abs() < MIN_SIZE
+        || (first.y - opposite.y).abs() < MIN_SIZE
+    {
+        return Err("Degenerate rectangle".into());
+    }
+    let points = [
+        first,
+        Vec2::new_unchecked(opposite.x, first.y),
+        opposite,
+        Vec2::new_unchecked(first.x, opposite.y),
+    ];
+    let mut ops: Vec<_> = points
+        .into_iter()
+        .enumerate()
+        .map(|(i, p)| add_point(ids.entities[i], p))
+        .collect();
+    for i in 0..4 {
+        let line = ids.entities[i + 4];
+        ops.push(add_entity(SketchEntity::line(
+            line,
+            ids.entities[i],
+            ids.entities[(i + 1) % 4],
+            false,
+        )));
+        let constraint = if i % 2 == 0 {
+            Constraint::Horizontal {
+                id: ids.constraints[i],
+                line,
+            }
+        } else {
+            Constraint::Vertical {
+                id: ids.constraints[i],
+                line,
+            }
+        };
+        ops.push(SketchEditOp::AddConstraint { constraint });
+    }
+    Ok((ops, AfterPrimitive::Reset))
+}
+
+fn circle(center: Vec2, edge: Vec2, ids: &PrimitiveIds) -> Result<PrimitiveBatch, String> {
+    let radius = distance(center, edge);
+    if !radius.is_finite() || radius < MIN_SIZE {
+        return Err("Degenerate circle".into());
+    }
+    let circle = SketchEntity::circle(ids.entities[1], ids.entities[0], radius, false)
+        .ok_or("Invalid circle")?;
+    Ok((
+        vec![add_point(ids.entities[0], center), add_entity(circle)],
+        AfterPrimitive::Reset,
+    ))
+}
+
+fn add_point(id: EntityId, point: Vec2) -> SketchEditOp {
+    add_entity(SketchEntity::point(id, point, false, false))
+}
+fn add_entity(entity: SketchEntity) -> SketchEditOp {
+    SketchEditOp::AddEntity { entity }
+}
+pub(crate) fn distance(a: Vec2, b: Vec2) -> f64 {
+    (a.x - b.x).hypot(a.y - b.y)
+}

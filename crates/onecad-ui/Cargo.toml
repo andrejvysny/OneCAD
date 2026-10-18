@@ -1,0 +1,34 @@
+[package]
+name = "onecad-ui"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Isolated native OneCAD workflow host"
+
+[dependencies]
+onecad-app = { workspace = true }
+onecad-interaction = { workspace = true }
+onecad-core = { workspace = true }
+onecad-protocol = { workspace = true }
+onecad-scene = { workspace = true }
+onecad-render = { workspace = true }
+eframe = { version = "=0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "system_fonts", "wgpu"] }
+egui = "=0.37.0"
+egui-wgpu = "=0.37.0"
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }
+glam = "0.30"
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = "=0.21.2"
+arboard = { version = "3.6", default-features = false }
+objc2-core-text = { version = "0.3.2", default-features = false, features = ["std", "CTFont", "CTFontDescriptor"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFURL", "CFString", "CFCGTypes"] }
+
+[dev-dependencies]
+tempfile = "3"

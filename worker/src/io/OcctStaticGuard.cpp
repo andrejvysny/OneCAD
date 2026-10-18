@@ -7,7 +7,14 @@
 #include <Message_PrinterOStream.hxx>
 #include <Standard_Failure.hxx>
 
+#include "capi/OcctLogPrinter.h"
+
 namespace onecad::io {
+
+std::timed_mutex& occt_globals_mutex() {
+    static std::timed_mutex m;
+    return m;
+}
 
 bool InterfaceStaticGuard::remember(const char* name, Kind kind) {
     for (const Saved& s : saved_) {
@@ -81,14 +88,21 @@ InterfaceStaticGuard::~InterfaceStaticGuard() {
 }
 
 OcctMessengerGuard::OcctMessengerGuard() {
+#ifdef ONECAD_WORKER_LIBRARY
+    return;  // see the header: routed once at worker start
+#endif
     Handle(Message_Messenger) messenger = Message::DefaultMessenger();
     saved_ = messenger->Printers();  // deep-copies the handle sequence
     messenger->ChangePrinters().Clear();
-    // "cerr" is the name Message_PrinterOStream maps to std::cerr.
-    messenger->AddPrinter(new Message_PrinterOStream("cerr", Standard_False, Message_Info));
+    // The cerr printer in the sidecar; the Log.h bridge when a library-mode log
+    // sink is installed (capi/OcctLogPrinter.h).
+    messenger->AddPrinter(onecad::capi::make_diagnostic_printer());
 }
 
 OcctMessengerGuard::~OcctMessengerGuard() {
+#ifdef ONECAD_WORKER_LIBRARY
+    return;
+#endif
     Handle(Message_Messenger) messenger = Message::DefaultMessenger();
     messenger->ChangePrinters().Assign(saved_);
 }

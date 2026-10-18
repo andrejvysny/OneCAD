@@ -1,0 +1,52 @@
+[metric] main uptime_ns=2385350995168083
+[metric] scene_load dir=/Users/andrejvysny/workspace/OneCAD/spikes/toolkit-egui/../fixtures/nema17 bodies=67 tris=381524 bytes=12559300 ms=6.56
+[metric] app_new_enter since_main_ms=100.00 uptime_ns=2385351095166291
+[metric] icons parsed=112
+[metric] fonts ui=Some("/System/Library/Fonts/SFNS.ttf") mono=Some("/System/Library/Fonts/SFNSMono.ttf") ms=1.21
+[metric] adapter name="Apple M4 Pro" backend=Metal target_format=Bgra8Unorm
+[metric] gpu_upload bodies=67 tris=381524 edge_segments=69267 bytes=13761600 ms=3.85
+[metric] dimension_anchor a=Vec3(-22.927586, -27.542656, 31.589207) b=Vec3(22.927586, -27.542656, 31.589207) len_mm=45.855
+[metric] app_created since_main_ms=113.86 uptime_ns=2385351109030916
+[metric] first_frame_prepare since_main_ms=121.65 uptime_ns=2385351116818916
+[metric] rss after_first_frame resident_mb=134.2 phys_footprint_mb=65.0
+[metric] frame=2 viewport_rect=[[0.0 0.0] - [1521.0 921.0]] ppp=1
+[latency] x=746.0 y=490.0 prepare_ns=2385355290020500
+[latency] x=752.0 y=490.0 prepare_ns=2385355410348833
+[latency] x=758.0 y=490.0 prepare_ns=2385355532850583
+[latency] x=764.0 y=490.0 prepare_ns=2385355653514458
+[latency] x=770.0 y=490.0 prepare_ns=2385355774331208
+[latency] x=776.0 y=490.0 prepare_ns=2385355899140416
+[latency] x=782.0 y=490.0 prepare_ns=2385356019587916
+[latency] x=788.0 y=490.0 prepare_ns=2385356144409791
+[latency] x=794.0 y=490.0 prepare_ns=2385356267129375
+[latency] x=800.0 y=490.0 prepare_ns=2385356390911000
+[latency] x=806.0 y=490.0 prepare_ns=2385356514051541
+[latency] x=812.0 y=490.0 prepare_ns=2385356637894041
+[latency] x=818.0 y=490.0 prepare_ns=2385356762090000
+[latency] x=824.0 y=490.0 prepare_ns=2385356886786500
+[latency] x=830.0 y=490.0 prepare_ns=2385357009232958
+[latency] x=836.0 y=490.0 prepare_ns=2385357135536500
+[latency] x=842.0 y=490.0 prepare_ns=2385357264330833
+[latency] x=848.0 y=490.0 prepare_ns=2385357387067916
+[latency] x=854.0 y=490.0 prepare_ns=2385357511625958
+[latency] x=860.0 y=490.0 prepare_ns=2385357635628875
+[latency] x=866.0 y=490.0 prepare_ns=2385357769750666
+[latency] x=872.0 y=490.0 prepare_ns=2385357884352375
+[latency] x=878.0 y=490.0 prepare_ns=2385358018380541
+[latency] x=884.0 y=490.0 prepare_ns=2385358126467416
+[latency] x=890.0 y=490.0 prepare_ns=2385358251034000
+[latency] x=896.0 y=490.0 prepare_ns=2385358375608125
+[latency] x=902.0 y=490.0 prepare_ns=2385358500900708
+[latency] x=908.0 y=490.0 prepare_ns=2385358624334500
+[latency] x=914.0 y=490.0 prepare_ns=2385358745007000
+[latency] x=920.0 y=490.0 prepare_ns=2385358871571000
+[latency] x=926.0 y=490.0 prepare_ns=2385358995842375
+[latency] x=932.0 y=490.0 prepare_ns=2385359120641666
+[latency] x=938.0 y=490.0 prepare_ns=2385359245685875
+[latency] x=944.0 y=490.0 prepare_ns=2385359371833375
+[latency] x=950.0 y=490.0 prepare_ns=2385359494115291
+[latency] x=956.0 y=490.0 prepare_ns=2385359618066458
+[latency] x=962.0 y=490.0 prepare_ns=2385359744931333
+[latency] x=968.0 y=490.0 prepare_ns=2385359865168500
+[latency] x=974.0 y=490.0 prepare_ns=2385359987349333
+[latency] x=980.0 y=490.0 prepare_ns=2385360109166166

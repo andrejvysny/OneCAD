@@ -1,0 +1,6 @@
+egui_steps1-39_event_to_display_ms n=117 mean=24.77 p50=24.35 p95=34.11 p99=38.67 min=13.56 max=39.72
+egui_step0_event_to_display_ms n=3 mean=142.57 p50=139.60 p95=150.02 p99=150.02 min=138.09 max=150.02
+native_steps1-39_event_to_display_ms n=117 mean=22.20 p50=22.74 p95=31.00 p99=32.37 min=9.48 max=32.40
+native_step0_event_to_display_ms n=3 mean=30.30 p50=28.89 p95=34.22 p99=34.22 min=27.80 max=34.22
+egui_steps1-39_event_to_prepare_ms n=117 mean=3.05 p50=3.39 p95=4.11 p99=13.96 min=0.96 max=16.79
+egui_steps1-39_prepare_to_display_ms n=117 mean=21.72 p50=21.88 p95=30.68 p99=35.48 min=10.09 max=35.83

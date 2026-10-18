@@ -1,0 +1,78 @@
+[metric] main uptime_ns=2385437204601208
+[metric] scene_load dir=/Users/andrejvysny/workspace/OneCAD/spikes/toolkit-egui/../fixtures/nema17 bodies=67 tris=381524 bytes=12559300 ms=3.95
+[metric] app_new_enter since_main_ms=93.60 uptime_ns=2385437298198583
+[metric] icons parsed=112
+[metric] fonts ui=Some("/System/Library/Fonts/SFNS.ttf") mono=Some("/System/Library/Fonts/SFNSMono.ttf") ms=1.18
+[metric] adapter name="Apple M4 Pro" backend=Metal target_format=Bgra8Unorm
+[metric] gpu_upload bodies=67 tris=381524 edge_segments=69267 bytes=13761600 ms=3.86
+[metric] dimension_anchor a=Vec3(-22.927586, -27.542656, 31.589207) b=Vec3(22.927586, -27.542656, 31.589207) len_mm=45.855
+[metric] app_created since_main_ms=107.25 uptime_ns=2385437311856125
+[metric] first_frame_prepare since_main_ms=114.71 uptime_ns=2385437319309916
+[metric] rss after_first_frame resident_mb=134.0 phys_footprint_mb=64.8
+[metric] frame=2 viewport_rect=[[0.0 0.0] - [1521.0 921.0]] ppp=1
+[win] focused=false
+[win] focused=true
+[key] Escape cmd=false shift=false alt=false
+[ptr] Primary pressed=true x=597.0 y=560.0
+[ptr] Primary pressed=false x=597.0 y=560.0
+[metric] dimension_focus since_main_ms=3772.85 uptime_ns=2385440977454291
+[ptr] Primary pressed=false x=597.0 y=560.0
+[key] SuperLeft cmd=false shift=false alt=false
+[metric] menu_event SelectAll since_main_ms=4577.60 uptime_ns=2385441782199541
+[route] SelectAll -> text field
+[key] A cmd=true shift=false alt=false
+[ime] Preedit { text: "'", active_range_chars: Some(1..1) }
+[dim] text="'"
+[ime] Preedit { text: "", active_range_chars: None }
+[ime] Commit("é")
+[dim] text="é"
+[key] AltLeft cmd=false shift=false alt=false
+[key] E cmd=false shift=false alt=true
+[key] text "ę"
+[dim] text="éę"
+[key] E cmd=false shift=false alt=false
+[key] text "e"
+[dim] text="éęe"
+[key] Escape cmd=false shift=false alt=false
+[dim] cancel
+[ptr] Primary pressed=true x=597.0 y=560.0
+[ptr] Primary pressed=false x=597.0 y=560.0
+[metric] dimension_focus since_main_ms=9361.08 uptime_ns=2385446565680333
+[key] SuperLeft cmd=false shift=false alt=false
+[metric] menu_event SelectAll since_main_ms=10182.30 uptime_ns=2385447386899833
+[route] SelectAll -> text field
+[key] A cmd=true shift=false alt=false
+[key] Num1 cmd=false shift=false alt=false
+[key] text "1"
+[dim] text="1"
+[key] Num0 cmd=false shift=false alt=false
+[key] text "0"
+[dim] text="10"
+[key] Space cmd=false shift=false alt=false
+[key] text " "
+[dim] text="10 "
+[key] P cmd=false shift=false alt=false
+[key] text "p"
+[dim] text="10 p"
+[key] A cmd=false shift=false alt=false
+[key] text "a"
+[dim] text="10 pa"
+[key] R cmd=false shift=false alt=false
+[key] text "r"
+[dim] text="10 par"
+[key] S cmd=false shift=false alt=false
+[key] text "s"
+[dim] text="10 pars"
+[key] E cmd=false shift=false alt=false
+[key] text "e"
+[dim] text="10 parse"
+[key] C cmd=false shift=false alt=false
+[key] text "c"
+[dim] text="10 parsec"
+[key] S cmd=false shift=false alt=false
+[key] text "s"
+[dim] text="10 parsecs"
+[key] Enter cmd=false shift=false alt=false
+[dim] reject: unknown unit 'parsecs'
+[key] Escape cmd=false shift=false alt=false
+[dim] cancel

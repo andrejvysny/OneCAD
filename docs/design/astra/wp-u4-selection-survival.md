@@ -3,7 +3,7 @@ date: 2026-09-11
 mode: break
 model: gpt-6-astra
 effort: xhigh
-access: grounded: src/viewport/mesh/rebindPick.ts, src/viewport/mesh/meshSync.ts, src/ipc/promote.ts, src/viewport/ViewportRoot.tsx, src/viewport/engine/Picker.ts, src/viewport/engine/HighlightLayer.ts, src/tools/modelTools/ModelToolController.ts, src-tauri/src/document_runtime.rs, worker/src/session/ElementIdentity.cpp, worker/src/tess/Tessellate.cpp, src-tauri/tests/selection_promote.rs, protocol/SCHEMA.md (§7.5, §10). Transcript also shows one read outside the allowlist: worker/tests/test_wp6_ladder.cpp (a ladder unit test; no expected values, no contamination of a break — recorded, not re-run).
+access: grounded: src/viewport/mesh/rebindPick.ts, src/viewport/mesh/meshSync.ts, src/ipc/promote.ts, src/viewport/ViewportRoot.tsx, src/viewport/engine/Picker.ts, src/viewport/engine/HighlightLayer.ts, src/tools/modelTools/ModelToolController.ts, crates/onecad-app/src/document_runtime.rs, worker/src/session/ElementIdentity.cpp, worker/src/tess/Tessellate.cpp, src-tauri/tests/selection_promote.rs, protocol/SCHEMA.md (§7.5, §10). Transcript also shows one read outside the allowlist: worker/tests/test_wp6_ladder.cpp (a ladder unit test; no expected values, no contamination of a break — recorded, not re-run).
 packet: sha256 04fb9a7c75a3
 calls: 1 of ~3 for WP-U4; session 01a090eb-2976-73b3-948a-f54534bd970b recorded for followup
 verdict: defective — C/E treat a reused snapshot ordinal as identity confirmation, and asynchronous confirmation lacks sufficient snapshot and selection-instance fencing.

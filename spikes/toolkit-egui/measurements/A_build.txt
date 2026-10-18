@@ -1,0 +1,11 @@
+fmt: ok
+clippy warnings+errors: 0
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+    Finished `release` profile [optimized] target(s) in 0.09s
+release_bytes 11626224
+release_gzip9_bytes 4910294
+    Finished `release` profile [optimized] target(s) in 29.62s
+size_variant_bytes 6420336
+size_variant_gzip9_bytes 3130112
+0d6b6850a66b8577e016ea21fbb66c3b84e4bfd0ee45b4fa4092a3e8977fef09  target/release/toolkit-egui
+rustc 1.97.0 (2d8144b78 2026-07-07)

@@ -9,8 +9,7 @@ use tauri::State;
 use crate::state::AppState;
 use crate::worker::resolve_worker_path;
 
-const EMBEDDED_MANIFEST: &str =
-    include_str!(concat!(env!("OUT_DIR"), "/onecad-worker-manifest.json"));
+const EMBEDDED_MANIFEST: &str = onecad_app::worker::EMBEDDED_WORKER_MANIFEST;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

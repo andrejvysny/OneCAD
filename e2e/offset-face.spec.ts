@@ -26,7 +26,7 @@ import { seedSelection, toolPhases, expectArmed } from "./modelToolHelpers";
  * themselves (no G1 expansion — that needs OCCT) and publishes no candidate mesh,
  * so there is nothing honest to assert about geometry here. The real numbers are
  * pinned against the kernel by `worker/tests/test_offsetface.cpp` and
- * `src-tauri/tests/offset_face.rs`.
+ * `crates/onecad-app/tests/offset_face.rs`.
  */
 /**
  * A REAL face of the demo body, found through the engine's own `probePick`.

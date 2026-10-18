@@ -1,0 +1,33 @@
+[package]
+name = "onecad-regen"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+edition = "2021"
+description = "Headless regen replay + CI gate for OneCAD .onecad containers"
+
+[[bin]]
+name = "onecad-regen"
+path = "src/main.rs"
+
+[dependencies]
+# The CLI reuses the app crate's WorkerManager + DocumentRuntime verbatim (the
+# integration tests already consume `onecad_app` this way — checkpoints.rs /
+# worker_chaos.rs), so the headless replay is byte-for-byte the app's regen path.
+onecad-app = { workspace = true }
+onecad-core = { workspace = true }
+tokio = { workspace = true, features = [
+    "rt-multi-thread",
+    "macros",
+    "process",
+    "io-util",
+    "time",
+    "sync",
+] }
+serde_json = { workspace = true }
+# stderr-only diagnostics with a `RUST_LOG`-aware filter (stdout stays reserved
+# for the `--json` summary). No file layer: only the app writes `logs/dev.jsonl`.
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+uuid = { workspace = true }

@@ -1,0 +1,34 @@
+[package]
+name = "onecad-protocol"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+description = "OneCAD IPC protocol: OCW1 framing, message enums, MESH1 envelope, client"
+edition = "2021"
+
+[features]
+# The async client pulls the transport stack. Server-side (worker) users depend
+# on this crate without the feature and get only the framing + message types.
+client = ["dep:tokio", "dep:tokio-util", "dep:bytes"]
+# Diagnostics: routes the client's internal warnings through `tracing` instead of
+# `eprintln!`, and enables the `onecad_protocol::frames` tx/rx trace lane. Declared
+# EXPLICITLY (an implicit `dep:`-only feature of the same name is a Cargo error).
+tracing = ["dep:tracing"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# `rt`/`rt-multi-thread`/`macros`/`time` support the crate's own async tests
+# (`#[tokio::test]`, deadlines); `io-util`/`sync` are used by the client at run
+# time. All are pulled only with the `client` feature.
+tokio = { workspace = true, optional = true, features = [
+    "io-util",
+    "sync",
+    "time",
+    "rt",
+    "rt-multi-thread",
+    "macros",
+] }
+tokio-util = { workspace = true, optional = true, features = ["codec"] }
+bytes = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }

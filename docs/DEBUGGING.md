@@ -12,12 +12,12 @@ deep manual it points to.
 
 | Lane (`target`) | Producer | Source |
 |---|---|---|
-| Rust module path (e.g. `onecad_lib::document_runtime`, `onecad_lib::api`) | Every `tracing::info!/warn!/error!/debug!` call site with no explicit `target:` | `src-tauri/src/**/*.rs` |
+| Rust module path (e.g. `onecad_app::document_runtime`, `onecad_app::api`) | Every `tracing::info!/warn!/error!/debug!` call site with no explicit `target:` | `crates/onecad-app/src/**/*.rs` and `src-tauri/src/**/*.rs` |
 | `ipc::request::handler` (nested under a Rust module target) | Tauri's own `tracing` cargo feature — a free `debug_span!` around **every** `#[tauri::command]`, current + future, zero per-command code | tauri-macros wrapper (external; enabled by workspace `Cargo.toml`) |
-| `worker` | Forwarded C++ worker stderr, one JSONL event per line, level sniffed from the WLOG prefix | `src-tauri/src/worker/manager.rs` `forward_worker_stderr` (~line 604) |
+| `worker` | Forwarded C++ worker stderr, one JSONL event per line, level sniffed from the WLOG prefix | `crates/onecad-app/src/worker/manager.rs` `forward_worker_stderr` (~line 604) |
 | `fe` | Batched frontend log events re-emitted server-side | `src/debug/log.ts` (core) → `src/debug/logSink.ts` (batches, POSTs via `log_event`) → `src-tauri/src/api/mod.rs` `log_event`/`emit_fe_event` (~line 1474) |
-| `onecad_protocol::frames` | OCW1 tx/rx frame trace, debug-gated (off by default) | `src-tauri/crates/onecad-protocol/src/client.rs` `trace_tx`/`trace_rx`/`trace_rx_frame` (~line 59) |
-| `panic` | Rust panic hook, chained before the previous hook | `src-tauri/src/logging.rs` `install_panic_hook` |
+| `onecad_protocol::frames` | OCW1 tx/rx frame trace, debug-gated (off by default) | `crates/onecad-protocol/src/client.rs` `trace_tx`/`trace_rx`/`trace_rx_frame` (~line 59) |
+| `panic` | Rust panic hook, chained before the previous hook | `crates/onecad-app/src/logging.rs` `install_panic_hook` |
 
 The C++ worker itself never touches `dev.jsonl` — it only writes lines to its
 own stderr (`worker/src/util/Log.h`, `WLOG_*` macros), which the Rust parent
@@ -29,11 +29,11 @@ unknown-verb branch get `WLOG_ERROR` with the same `id`/elapsed shape.
 ## 2. Sink + session scoping
 
 `logs/dev.jsonl` (repo root, `.gitignore`d) is created (`std::fs::File::create`
-— truncating, not appending) at every `run()` — see `src-tauri/src/logging.rs`
+— truncating, not appending) at every `run()` — see `crates/onecad-app/src/logging.rs`
 `init()`/`open_sink()`. The **first line is always** a `session.start` event:
 
 ```json
-{"timestamp":"2026-08-02T18:03:10.481221Z","level":"INFO","target":"onecad_lib::logging","pid":41213,"version":"0.1.0","filter":"info,onecad_lib=debug,onecad=debug,fe=debug,worker=debug","dir":"/Users/you/OneCAD-Tauri/logs","message":"session.start"}
+{"timestamp":"2026-08-02T18:03:10.481221Z","level":"INFO","target":"onecad_app::logging","pid":41213,"version":"0.1.0","filter":"info,onecad_app=debug,onecad_lib=debug,onecad=debug,fe=debug,worker=debug","dir":"/Users/you/OneCAD-Tauri/logs","message":"session.start"}
 ```
 
 So "this run" is literally "the whole file" — grep never spans two sessions.
@@ -61,13 +61,13 @@ keeps lines short).
 ### 3a. A plain event line (regen postmortem, `document_runtime.rs::log_regen_outcome`)
 
 ```json
-{"timestamp":"2026-08-02T18:03:11.482201Z","level":"INFO","target":"onecad_lib::document_runtime","job":"1f2e3a9c-...-b7","rev":42,"srcRev":41,"snapshot":91,"base":"a3f9c1e08b2d","steps":3,"changed":2,"removed":0,"failedSteps":0,"needsRepair":0,"message":"regen: published","span":{"name":"regen.drive","job":"1f2e3a9c-...-b7","rev":42,"epoch":3,"base":"a3f9c1e08b2d","steps":3}}
+{"timestamp":"2026-08-02T18:03:11.482201Z","level":"INFO","target":"onecad_app::document_runtime","job":"1f2e3a9c-...-b7","rev":42,"srcRev":41,"snapshot":91,"base":"a3f9c1e08b2d","steps":3,"changed":2,"removed":0,"failedSteps":0,"needsRepair":0,"message":"regen: published","span":{"name":"regen.drive","job":"1f2e3a9c-...-b7","rev":42,"epoch":3,"base":"a3f9c1e08b2d","steps":3}}
 ```
 
 ### 3b. A span-close line (`FmtSpan::CLOSE`)
 
 ```json
-{"timestamp":"2026-08-02T18:03:11.483880Z","level":"INFO","target":"onecad_lib::document_runtime","message":"close","time.busy":"1.68ms","time.idle":"3.02µs","span":{"name":"regen.drive","job":"1f2e3a9c-...-b7","rev":42,"epoch":3,"base":"a3f9c1e08b2d","steps":3}}
+{"timestamp":"2026-08-02T18:03:11.483880Z","level":"INFO","target":"onecad_app::document_runtime","message":"close","time.busy":"1.68ms","time.idle":"3.02µs","span":{"name":"regen.drive","job":"1f2e3a9c-...-b7","rev":42,"epoch":3,"base":"a3f9c1e08b2d","steps":3}}
 ```
 
 **`time.busy`/`time.idle` are unit-suffixed STRINGS** (`"1.68ms"`, `"890µs"`,
@@ -135,7 +135,7 @@ grep, not the doc comment's aspiration:
 
 | Knob | Consumer | Default | Effect |
 |---|---|---|---|
-| `RUST_LOG` | app (`logging::env_filter`) + `onecad-regen` CLI | `info,onecad_lib=debug,onecad=debug,fe=debug,worker=debug` (`DEFAULT_FILTER`, `logging.rs`) | Standard `EnvFilter` syntax. The `fe=debug`/`worker=debug` directives are REQUIRED — both lanes emit at `debug`, so `RUST_LOG=info` alone silently drops them both (pinned by `logging.rs::tests::default_filter_keeps_the_synthetic_lanes_at_debug`) |
+| `RUST_LOG` | app (`logging::env_filter`) + `onecad-regen` CLI | `info,onecad_app=debug,onecad_lib=debug,onecad=debug,fe=debug,worker=debug` (`DEFAULT_FILTER`, `logging.rs`) | Standard `EnvFilter` syntax. The `fe=debug`/`worker=debug` directives are REQUIRED — both lanes emit at `debug`, so `RUST_LOG=info` alone silently drops them both (pinned by `logging.rs::tests::default_filter_keeps_the_synthetic_lanes_at_debug`) |
 | `RUST_LOG=…,onecad_protocol::frames=debug` | `onecad-protocol` `client.rs` | frames lane off by default | Turns on tx/rx per OCW1 frame (`id`, `verb`, `elapsed_ms`, `ok`, `binLen`); `=trace` additionally logs bulk `chunk` frames (a mesh transfer is thousands of them) |
 | `ONECAD_LOG_DIR` | app (`logging::log_dir`) | debug build: `<repo>/logs`; release: off | `off` (any case) kills the file lane even in a debug build; any other value is used as the directory verbatim (works in a packaged build too) |
 | `ONECAD_WORKER_LOG` | C++ worker (`Log.h::init_level_from_env`) | `info` | `error\|warn\|info\|debug`, case-insensitive, read once as the literal first statement of `main()` (so it covers `--selftest` too); an unrecognized value falls back to `info` plus one `WLOG_WARN` |
@@ -146,7 +146,7 @@ grep, not the doc comment's aspiration:
 ## 6. Correlation glossary
 
 - **`revision`** (`rev` in logs) — a Rust-owned, monotonically-advisory stamp on the document. **Not** a fencing token — decision D4 fences on `workerEpoch` + `expectedBaseHash` only, so a `rev` mismatch by itself proves nothing about whether a regen actually landed.
-- **`opId` / `recordId`** — the commit identity: `RecordId` (UUID-backed, `src-tauri/crates/onecad-core/src/ids.rs`). The wire DTO field is camelCase `recordId` (`src/ipc/types.ts`); the JSONL `regen: FAILED step` warn line shortens it to a bare `record` field (`document_runtime.rs::log_regen_outcome`, ~line 2016). A **successful** commit's `recordId` is NOT re-emitted in the outcome line (only counts: `changed`/`removed`) — trace a success via `job`/`rev`/timestamp windowing instead, or via the FE `ipc` line's `ctx.args` (top-level string/number args pass through; a nested command envelope collapses to `{key1,key2,…}` shape only — see `tauriClient.ts::summarizeValue`).
+- **`opId` / `recordId`** — the commit identity: `RecordId` (UUID-backed, `crates/onecad-core/src/ids.rs`). The wire DTO field is camelCase `recordId` (`src/ipc/types.ts`); the JSONL `regen: FAILED step` warn line shortens it to a bare `record` field (`document_runtime.rs::log_regen_outcome`, ~line 2016). A **successful** commit's `recordId` is NOT re-emitted in the outcome line (only counts: `changed`/`removed`) — trace a success via `job`/`rev`/timestamp windowing instead, or via the FE `ipc` line's `ctx.args` (top-level string/number args pass through; a nested command envelope collapses to `{key1,key2,…}` shape only — see `tauriClient.ts::summarizeValue`).
 - **`workerEpoch`** (`epoch` in logs) — bumped on every worker restart (`WorkerManager` `Shared.epoch`, `fetch_add` on the death path before respawn). It is BOTH a fencing input (with `expectedBaseHash`) AND the join key between a `regen.drive` span (carries `epoch`) and the `worker` lane's forwarded stderr lines (also carry `epoch`, since the forwarder task is spawned with the epoch read at spawn time).
 - **OCW1 `id`** — the frame-lane join key (field literally named `id`, not `reqId`, in `onecad_protocol::frames` tx/rx lines — `client.rs` `trace_tx`/`trace_rx`). Rust-assigned, monotonic per `ProtocolClient`. Frame lines do NOT carry `epoch` themselves; join them to a regen by enabling `frames=debug` together with the default filter — the tx/rx events happen to fall inside the `regen.drive` span's time window (the executor future is `.instrument(span)`-wrapped, `PreparedRegen::drive` ~line 2076) but are not literally nested `span` children in the JSON (no span context propagates across the stdio await boundary the same way).
 - **`sketchId` vs `backendSketchId`** — `sketchId` (as used in FE code, e.g. `sketchMaps.get(frontendId)`) is a frontend-LOCAL key; `backendSketchId` is the real, Rust-recognized `SketchId`, minted by the frontend (`mintUuid()`) and adopted VERBATIM by the backend (id-adoption rule — `tauriClient.ts::ensureBackendSketch`, ~line 745-780). Any Rust-side log line's `sketchId` field is always the backend one.
@@ -223,7 +223,7 @@ grep '"tag":"hint"' logs/dev.jsonl
 jq -c 'select(.tag=="snap") | {msg, accepted: .ctx.accepted, rejected: .ctx.rejected}' logs/dev.jsonl
 ```
 
-**Frame-level protocol debug** (run with `RUST_LOG=info,onecad_lib=debug,fe=debug,worker=debug,onecad_protocol::frames=debug`):
+**Frame-level protocol debug** (run with `RUST_LOG=info,onecad_app=debug,onecad_lib=debug,fe=debug,worker=debug,onecad_protocol::frames=debug`):
 ```bash
 jq -c 'select(.target=="onecad_protocol::frames")' logs/dev.jsonl
 grep '"target":"onecad_protocol::frames"' logs/dev.jsonl

@@ -1,7 +1,7 @@
 /**
  * Shared error type + engine caps for the expression module — mirrors
  * `ExprError` / `ExprErrorKind` / `MAX_SOURCE_LEN` / `MAX_DEPTH` in
- * `src-tauri/crates/onecad-core/src/expr/mod.rs`.
+ * `crates/onecad-core/src/expr/mod.rs`.
  *
  * Rust keeps these in `mod.rs` alongside its submodules; here they live in
  * their own leaf file (no imports) so `lexer.ts` / `parser.ts` /

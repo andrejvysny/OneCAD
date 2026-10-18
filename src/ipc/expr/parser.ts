@@ -1,6 +1,6 @@
 /**
  * Recursive-descent parser — turns the lexer's token stream into an `Expr`
- * tree. Mirrors `src-tauri/crates/onecad-core/src/expr/parser.rs`.
+ * tree. Mirrors `crates/onecad-core/src/expr/parser.rs`.
  *
  * ```text
  * expression = term ;

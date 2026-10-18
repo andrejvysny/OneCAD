@@ -81,9 +81,9 @@ describe("processExecutable", () => {
     const rec = recorder((argv) =>
       argv[0] === "/bin/ps"
         ? { stdout: "target/debug/onecad\n" }
-        : { stdout: "p77\nftxt\nn/repo/src-tauri/target/debug/onecad\nftxt\nn/usr/lib/dyld\n" },
+        : { stdout: "p77\nftxt\nn/repo/target/debug/onecad\nftxt\nn/usr/lib/dyld\n" },
     );
-    expect(await processExecutable(77, rec.runner)).toBe("/repo/src-tauri/target/debug/onecad");
+    expect(await processExecutable(77, rec.runner)).toBe("/repo/target/debug/onecad");
     expect(rec.calls[1]).toEqual(["/usr/sbin/lsof", "-a", "-p", "77", "-d", "txt", "-Fn"]);
   });
 });
@@ -91,12 +91,12 @@ describe("processExecutable", () => {
 describe("isOwnedExecutable", () => {
   test("accepts an executable path containing a space", () => {
     const root = "/Users/me/My Projects/OneCAD";
-    expect(isOwnedExecutable(`${root}/src-tauri/target/debug/onecad`, "target/debug/onecad", [root])).toBe(true);
+    expect(isOwnedExecutable(`${root}/target/debug/onecad`, "target/debug/onecad", [root])).toBe(true);
   });
 
   test("the pattern alone is not ownership — another checkout is refused", () => {
     expect(
-      isOwnedExecutable("/Users/other/OneCAD/src-tauri/target/debug/onecad", "target/debug/onecad", [
+      isOwnedExecutable("/Users/other/OneCAD/target/debug/onecad", "target/debug/onecad", [
         "/Users/me/OneCAD",
       ]),
     ).toBe(false);
@@ -118,10 +118,10 @@ describe("findSurvivors", () => {
   }
 
   const PROCS: Record<number, Proc> = {
-    10: { command: `${MINE}/src-tauri/target/debug/onecad`, comm: `${MINE}/src-tauri/target/debug/onecad` },
+    10: { command: `${MINE}/target/debug/onecad`, comm: `${MINE}/target/debug/onecad` },
     11: {
-      command: "/Users/other/OneCAD/src-tauri/target/debug/onecad",
-      comm: "/Users/other/OneCAD/src-tauri/target/debug/onecad",
+      command: "/Users/other/OneCAD/target/debug/onecad",
+      comm: "/Users/other/OneCAD/target/debug/onecad",
     },
     12: {
       command: `${MINE}/src-tauri/binaries/onecad-worker-aarch64-apple-darwin`,
@@ -130,8 +130,8 @@ describe("findSurvivors", () => {
     13: { command: `/bin/zsh -c grep -rn target/debug/onecad ${MINE}/src`, comm: "/bin/zsh" },
     14: { command: `/usr/bin/pgrep -f target/debug/onecad|onecad-worker- ${MINE}`, comm: "/usr/bin/pgrep" },
     15: {
-      command: `${SPACED}/src-tauri/target/debug/onecad --flag`,
-      comm: `${SPACED}/src-tauri/target/debug/onecad`,
+      command: `${SPACED}/target/debug/onecad --flag`,
+      comm: `${SPACED}/target/debug/onecad`,
     },
   };
 
@@ -165,7 +165,7 @@ describe("findSurvivors", () => {
 
   test("a checkout path containing a space is still owned, and reports its full command line", async () => {
     const found = await findSurvivors(PATTERNS, [SPACED], sweepRunner());
-    expect(found).toEqual([{ pid: 15, command: `${SPACED}/src-tauri/target/debug/onecad --flag` }]);
+    expect(found).toEqual([{ pid: 15, command: `${SPACED}/target/debug/onecad --flag` }]);
   });
 });
 

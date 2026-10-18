@@ -1,0 +1,17 @@
+[package]
+name = "onecad-interaction"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Pure native extrusion interaction state and effect intents"
+
+[dependencies]
+onecad-app = { workspace = true }
+onecad-core = { workspace = true }
+onecad-scene = { workspace = true }
+
+[dev-dependencies]
+uuid = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+tempfile = "3"
+async-trait = { workspace = true }

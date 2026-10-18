@@ -27,7 +27,7 @@ import {
  * (settling the epoch without faking a mesh it cannot honestly synthesize) — the
  * visible preview in this lane stays the L1 Rodrigues lathe. That preview mesh
  * ==  commit equivalence is proven against the REAL worker in
- * `src-tauri/tests/preview_revolve.rs`; what this spec proves is the lane
+ * `crates/onecad-app/tests/preview_revolve.rs`; what this spec proves is the lane
  * lifecycle the real client shares with the mock: open → epoch-advance → commit.
  *
  * Axis choice + camera projection follow `revolve-commit.spec.ts` verbatim (the

@@ -23,7 +23,7 @@ function appExecutable(path: string): string {
 }
 
 const appPath = appExecutable(
-  resolve(process.env.ONECAD_TAURI_E2E_APP ?? "src-tauri/target/release/bundle/macos/onecad.app"),
+  resolve(process.env.ONECAD_TAURI_E2E_APP ?? "target/release/bundle/macos/onecad.app"),
 );
 
 mkdirSync(resultsDir, { recursive: true });

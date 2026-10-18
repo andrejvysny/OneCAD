@@ -1,0 +1,129 @@
+# Native OneCAD host
+
+This macOS host uses the shared application services, interaction reducer, checked
+CPU scene and renderer. It implements the first prepared-profile workflow:
+viewport profile selection, new extrusion preview and commit, applicable typed numeric
+feature edits, new XY and existing sketch editing with line/rectangle/circle
+batches, finish/discard, body Move / Rotate, model undo/redo, save, and reopen of the saved copy. Build and automated
+tests do not establish native input, appearance, accessibility or workflow acceptance.
+
+Build from the workspace root:
+
+```sh
+CARGO_TARGET_DIR=/private/tmp/onecad-native-rust-check \
+CARGO_BUILD_JOBS=3 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo build -p onecad-ui
+```
+
+The host requires an explicitly isolated temporary profile and prepared `.onecad`
+fixture. Set the environment before launching the built binary; it never changes
+process environment after threads start. Example paths below are synthetic QA
+paths, not production document or application-data locations:
+
+```sh
+TMPDIR=/private/tmp/onecad-native-profile/temporary \
+ONECAD_LOG_DIR=/private/tmp/onecad-native-profile/logs \
+ONECAD_LIBRARY_ROOT=/private/tmp/onecad-native-profile/data/library \
+ONECAD_WORKER_PATH="$PWD/worker/build-native-migration/onecad-worker" \
+  /private/tmp/onecad-native-rust-check/debug/onecad-ui \
+  --qa-root /private/tmp/onecad-native-profile \
+  --open /private/tmp/onecad-273-qa/constrained-plate-80x50.onecad
+```
+
+The binary creates its dedicated directories before application startup. It
+rejects production roots, unmarked shared directories and symlink escapes, and
+holds an exclusive profile lock. The source fixture is copied to `documents/`.
+To reopen saved work, pass that copied path with `--open`; an existing copy is
+never overwritten from its original fixture. Settings, recents, autosave,
+recovery, library, temporary imports and logs stay in this profile. Shared data
+continuity remains outside this host's current scope.
+
+Only implemented controls are exposed. Select a worker-produced profile fill in
+the viewport, choose Extrude, enter a length or expression, wait for its real
+preview and choose Create. Select an editable history row and an applicable numeric field to edit its stored
+parameters. Existing-feature edits rebuild on Apply: PreviewOp appends a candidate
+at HEAD and cannot correctly preview replacement of an existing operation.
+Choose New sketch (XY), or select an existing sketch row, to enter sketch mode.
+Line, Rectangle and Circle emit typed batches through the shared solver. Select
+picks existing sketch entities; Finish keeps accepted edits and Discard uses the
+shared guarded session discard. Enter/Escape clear a transient draft before exit.
+Read-only refresh never opens another edit session. Snapping, entity dragging,
+constraint editing, sketch undo/redo and further sketch tools are not exposed.
+Focused text owns undo/redo and clipboard actions. Model history receives those
+commands outside sketch mode; active sketch mode blocks model history explicitly. Japanese IME and native menu/dialog behavior
+remain unverified. New/open dialogs, further modeling creation tools and full interaction parity
+are not implemented in this host.
+
+Camera input consumes ordered native events instead of smoothed scroll totals.
+Mouse wheels zoom, two-finger scroll pans, Shift plus two-finger scroll orbits,
+and pinch zooms at the cursor on the camera-facing target plane. Shift stays
+latched through the current trackpad gesture and its recent momentum phase.
+Explicit native source identity distinguishes a smooth mouse wheel from a
+trackpad; unknown point input needs a phased gesture to take the trackpad path.
+RMB and MMB drag pan; Shift+RMB drag orbits. Primary-button ownership and open
+popups block camera motion while input state still advances. Native device
+preference persistence and physical mouse/trackpad qualification remain open.
+
+Durable commands reserve one of eight permits before entering the service
+runtime and execute in FIFO order through regeneration. Accepted authoring and
+geometry completion are separate results. A failed fresh provisional operation
+uses only its backend-issued guarded rollback receipt; edits, NeedsRepair and
+unknown completions are retained. Preview drafts coalesce to one pending request
+and one worker request in flight. Cancellation invalidates completion delivery;
+it does not claim to interrupt an executing worker operation. Late results must
+match document, runtime, revision, worker head and gesture identity.
+
+Select a body and choose Move / Rotate to use the SolidCraft-derived transform
+gizmo. Axis stems, plane squares and the center move the draft; rotation rings
+rotate it with 5-degree snapping unless Alt, Control or Command is held. A drag
+updates the preview; Create commits one typed TransformBody operation. Cancel
+discards the provisional operation. The navigation cube exposes face/corner
+views, orbit, quarter turns, roll, home, fit and projection switching.
+
+Display exposes silhouettes, hidden edges, opacity, supersampling and section
+planes. Section clipping is view-only: topology selection is disabled while a
+section is active, and section changes are disabled during authoring. CPU picking
+does not invent selectable section geometry.
+
+The primary viewport uses the complete vendored SolidCraft rendering stack at
+`a228a5830eedf88856fd392b7db0ff5977f352d6` (0.16.0), adapted to checked OCCT
+meshes and OneCAD scene identities. The donor's geometry kernel and document
+model are not application dependencies. The host supplies eframe's shared wgpu device/queue to the CAD renderer and
+samples its output texture through egui, without CPU image readback. CPU mesh
+checking and preparation run on the service runtime. Resource replacement waits
+for both CAD completion and the previous frame's final egui sampling submission.
+CPU picking remains synchronous against the same captured camera and scene.
+The host polls device completion even while the previous egui sampling fence is
+pending; otherwise the callbacks needed to release that fence cannot advance.
+Render watchdog acknowledgements bind the captured document, runtime, revision,
+snapshot and body IDs. They are sent once after committed GPU work completes,
+never for a preview or failed submission; they do not certify OS presentation.
+
+The macOS accessibility-enabled host has a known close-time
+`NSRangeException` involving `WinitView` and `nextResponder`, matching
+[AccessKit issue 823](https://github.com/AccessKit/accesskit/issues/823).
+Do not treat successful save or worker shutdown as proof of clean window teardown.
+
+Conservative CPU handoff reservations cover retained current/pending/building
+scenes and preview payloads, capped at 768 MiB. Per capture, source meshes are
+capped at 32 MiB, prepared CPU payload at 64 MiB, and aggregate profile
+source/decoded/scratch estimates at 16 MiB. Retained authored records, including
+extension fields, have a conservative 16 MiB aggregate estimate with streamed
+size/depth checks; no document-sized JSON buffer is built. Each sketch snapshot
+and solver DTO has a 1 MiB streamed serialized-size cap. There are at most 256 bodies, 128
+sketches and 512 feature rows. These limits do not establish a total process RAM
+bound: application state, incoming DTO/record and protocol reply allocation before host validation,
+GPU-driver storage and toolkit resources have separate lifetimes and limits.
+Oversized or malformed payloads fail closed and disable stale picking/commit.
+
+Automated host tests require no GUI:
+
+```sh
+CARGO_TARGET_DIR=/private/tmp/onecad-native-rust-check \
+CARGO_BUILD_JOBS=3 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo test -p onecad-ui --lib
+```
+
+See [source provenance](SOURCE_PROVENANCE.md) for adapted local code and
+[the native workflow specification](../../docs/design/native-ui/native-workflow.md)
+for the real-worker fixture and remaining acceptance gaps.

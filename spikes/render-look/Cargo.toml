@@ -1,0 +1,20 @@
+[package]
+name = "render-look"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Phase 0 spike (ONECAD-259): headless wgpu render-look study of MESH1 fixtures"
+
+# Standalone: not a member of src-tauri's (or any future root) workspace.
+[workspace]
+
+[dependencies]
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+glam = { version = "0.30", features = ["bytemuck"] }
+png = "0.18"
+
+[profile.release]
+debug = 1

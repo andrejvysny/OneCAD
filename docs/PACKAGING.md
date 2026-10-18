@@ -159,6 +159,78 @@ The worker's rpath (`/opt/homebrew/lib` + `@executable_path/../Frameworks`) is
 already baked in by `worker/CMakeLists.txt`, so the in-tree dev binary finds
 Homebrew OCCT while the bundled binary finds `Contents/Frameworks/`.
 
+## 3.1 Local source and relink materials (ONECAD-256)
+
+The approved release direction keeps static PlaneGCS with corresponding source
+and relink materials. Before any distribution, including beta builds, the source
+must be available with the binary or a qualifying source offer must be in place.
+Mirror the exact pinned OCCT source archive with each release. Approval does not
+establish that publication or relinking has been validated; see
+[the licensing decision](design/native-ui/licensing.md) and
+[ADR-0016](adr/0016-kernel-hosting-macos.md).
+
+Prepare local materials after the final bundled worker and its manifest agree:
+
+```bash
+bun scripts/prepare-release-materials.ts \
+  --source "$PWD" \
+  --worker "$PWD/target/release/bundle/macos/onecad.app/Contents/MacOS/onecad-worker" \
+  --worker-manifest "$PWD/src-tauri/binaries/onecad-worker-manifest.json" \
+  --occt-prefix "$HOME/.onecad-occt/8.0.1" \
+  --occt-archive /absolute/path/to/cached/OCCT-V8_0_1.tar.gz \
+  --eigen-prefix /opt/homebrew/opt/eigen \
+  --boost-prefix /opt/homebrew/opt/boost \
+  --boost-license /absolute/path/to/reviewed/LICENSE_1_0.txt \
+  --output /absolute/path/outside/repository/release-materials
+
+bun scripts/verify-release-materials.ts \
+  --archive /absolute/path/outside/repository/release-materials/onecad-source-materials.tar.gz \
+  --worker "$PWD/target/release/bundle/macos/onecad.app/Contents/MacOS/onecad-worker"
+```
+
+Use the dependency prefixes actually selected for the worker build. The OCCT
+archive must already exist locally: the tool never downloads, builds, signs,
+installs or publishes. It verifies archive bytes against the checksum pinned in
+`scripts/build-pinned-occt.sh`, checks installed OCCT build metadata, and refuses
+missing source, licenses or dependency version evidence. The current Homebrew
+Boost installation may omit the full license text; provide a reviewed local
+copy rather than substituting a URL or a header notice. A missing cached OCCT
+archive or Boost license is a failing input gate.
+
+The new output directory contains an inspectable `materials/` tree,
+`onecad-source-materials.tar.gz`, and `SHA256SUMS`. The archive includes:
+
+- The complete tracked and untracked nonignored working-tree snapshot, including
+  dirty files, modified PlaneGCS, app source, BOLTS-derived tables, build scripts
+  and lockfiles. Deleted files remain absent. Git history and ignored files are
+  excluded; source symlinks, submodules and unexpanded Git LFS pointers fail closed.
+- Source revision, exact HEAD tags, dirty status, a NUL-delimited Git status file,
+  tracked binary patch, and a SHA-256 inventory of every captured file and its
+  executable mode. A tag describes HEAD only; a dirty snapshot is not tagged source.
+- Final worker SHA-256 and its manifest, the pinned OCCT archive and build
+  metadata, OCCT/PlaneGCS license materials, Eigen license texts, Boost license
+  text, and the Eigen/Boost versions read from supplied dependency prefixes.
+- `RELINK.md`, documenting the existing two-pass rebuild required when a modified
+  PlaneGCS changes the worker hash embedded in the app, and OCCT dylib replacement.
+
+Preparation refuses an existing output directory and detects source changes
+while capturing it. Verification checks archive paths, required files, inventory
+hashes, pinned OCCT policy, metadata and the supplied final worker bytes. These
+checks establish material self-consistency. They do not prove that the worker was
+built from the captured snapshot, that a clean/tagged/reproducible build exists,
+that relinking succeeds, that all transitive dependency licenses are covered, or
+that source has been offered at the binary's distribution location. Eigen/Boost
+header distributions and Cargo/npm caches are not included. These remain release
+review gates; the tools record them as unverified or incomplete. No binary
+redistribution is authorized by running these tools. `package-macos.sh` does not
+automatically invoke them.
+
+Fixture validation, without network or native builds:
+
+```bash
+bun test scripts/tests/release-materials.test.ts
+```
+
 ## 4. Signing — what this project actually does
 
 **The shipped path today is an AD-HOC signed bundle, and that is a decision, not

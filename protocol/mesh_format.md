@@ -287,31 +287,51 @@ const indices = new Uint32Array(buf, idx.off, (idx.len / 4) | 0);     // view, n
   producer ever violates alignment the view constructor throws — treat as a
   protocol error.
 
-### 6.2 Rust (validate header, forward verbatim)
+### 6.2 Rust (header validation and checked borrowed views)
 
-Rust **does not parse** the mesh body. It validates the header and forwards the
-blob unchanged into the `MeshCache` (keyed `(BodyId, Lod, generation)`) and then
-to the webview as a `tauri::ipc::Response` ArrayBuffer.
+`onecad_protocol::mesh::validate_mesh_blob` preserves the inexpensive, header-only
+forwarding API: it validates magic/version/reserved fields and section-table
+alignment, ordering, uniqueness and bounds. It does not validate section data.
+Existing forwarding consumers can retain this API without a wire-format change.
 
-Validation (cheap, header-only):
+Native consumers that read geometry use the additional checked API:
 
 ```rust
-fn validate_mesh1(buf: &[u8]) -> Result<(), ProtocolError> {
-    if buf.len() < 64 { return Err(ProtocolError::Framing("mesh < 64 bytes")); }
-    if u32::from_le_bytes(buf[0..4].try_into().unwrap()) != 0x4D45_5348 {
-        return Err(ProtocolError::Framing("bad MESH1 magic"));
-    }
-    if u16::from_le_bytes(buf[4..6].try_into().unwrap()) != 1 {
-        return Err(ProtocolError::Framing("unsupported MESH1 version"));
-    }
-    let section_count = u16::from_le_bytes(buf[0x1e..0x20].try_into().unwrap()) as usize;
-    let table_end = 0x40 + section_count * 16;
-    if buf.len() < table_end { return Err(ProtocolError::Framing("truncated section table")); }
-    // optional: check each (offset,byteLen) lies within buf and offset % 4 == 0
-    Ok(())
-}
+use onecad_protocol::mesh::{MeshLimits, MeshView};
+
+let mesh = MeshView::decode(blob, MeshLimits::default())?;
+let triangle = mesh.triangle(0); // Option<[u32; 3]>
+let face_id = mesh.face_id(0);   // Option<&str>, borrowed UTF-8
 ```
 
-Rust MUST NOT reinterpret, reorder, or re-encode sections — the buffer the worker
-produced is the buffer the webview receives (Invariant 5: parallelism/meshing
-never changes IDs or bytes for the same inputs).
+`MeshView::decode` validates the complete structure before exposing data:
+
+- Resource caps on blob bytes, section/count fields and combined ID bytes are
+  checked before header/table allocation. Defaults are 1 GiB, 128 sections,
+  32 million vertices/triangles/edge points, 4 million faces/edges and 64 MiB of
+  ID bytes. Callers can supply explicit `MeshLimits` for their use case.
+- Known LOD values, required sections, flag/section consistency, exact section
+  lengths and checked count arithmetic are enforced. Edge counts must be zero
+  when `HAS_EDGES` is clear. FACE_COLORS is validated strictly by this API.
+- Header and face bounding boxes must contain finite values and satisfy
+  `min <= max` on each axis. Positions, normals and edge points must be finite;
+  every triangle index must be below `vertexCount`.
+- Face ranges and edge ranges must be contiguous, ordered, bounded spans that
+  cover all triangles and edge points respectively. Empty spans are allowed.
+- ID offsets must start at zero, be monotonic and bounded, and end at the exact
+  character-section length. Each individual ID must be valid UTF-8; no additional
+  ID syntax or normalization is imposed.
+- Gaps and any trailing padding must contain zero bytes. The final section may
+  end without trailing padding; only section offsets require 4-byte alignment.
+  Unknown section types remain opaque and are skipped after the same
+  table/bounds/order/uniqueness/padding checks as known sections.
+
+The immutable view borrows the original bytes. Safe indexed accessors return
+`None` for out-of-range indices, including overflowing `usize` values. Scalar
+sequence views load little-endian values without alignment-dependent casts, so
+unaligned input slices are supported. Geometry remains Z-up, right-handed and
+unchanged; validation introduces no transforms or higher-precision coordinates.
+
+Rust MUST NOT reinterpret, reorder, or re-encode sections when forwarding — the
+buffer the worker produced is the buffer the consumer receives (Invariant 5:
+parallelism/meshing never changes IDs or bytes for the same inputs).

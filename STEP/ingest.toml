@@ -1,8 +1,8 @@
 # Vendor-STEP → component-library ingest recipe.
 #
-#   cd src-tauri
-#   cargo run --release -p onecad-library-ingest -- ../STEP/ingest.toml --inspect
-#   cargo run --release -p onecad-library-ingest -- ../STEP/ingest.toml --library-root <dir>
+# Run from the repository root:
+#   cargo run --release -p onecad-library-ingest -- STEP/ingest.toml --inspect
+#   cargo run --release -p onecad-library-ingest -- STEP/ingest.toml --library-root <dir>
 #
 # The STEP files themselves are gitignored (vendor downloads, 0.2–7 MB); only
 # this recipe is tracked, so the exact keep-lists below survive even where the

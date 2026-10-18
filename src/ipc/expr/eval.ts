@@ -1,7 +1,7 @@
 /**
  * Evaluator — walks an `Expr` tree against an `Env` and a call-site
  * `Dimension`, applying the dimension algebra in `dimension.ts`. Mirrors
- * `src-tauri/crates/onecad-core/src/expr/eval.rs`.
+ * `crates/onecad-core/src/expr/eval.rs`.
  *
  * Every recursive step returns through `finite`, so a `NaN`/`±Infinity` is
  * caught at the exact node that produced it (tight error span) rather than

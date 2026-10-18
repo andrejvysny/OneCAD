@@ -1,0 +1,66 @@
+tauri-agent-helper: ready v1.3.0 pid=78179
+tauri-agent-helper: ready v1.3.0 pid=78186
+tauri-agent-helper: ready v1.3.0 pid=78192
+[step] 7 Escape cancels uptime_ns=2385439923219041
+tauri-agent-helper: ready v1.3.0 pid=78195
+tauri-agent-helper: ready v1.3.0 pid=78200
+[keys] posted 53 pid=78201 uptime_ns=2385440191427333
+tauri-agent-helper: ready v1.3.0 pid=78206
+[step] 8 click field, Cmd+A, dead key (Slovak =, acute), shot while composing, then e uptime_ns=2385440619660208
+tauri-agent-helper: ready v1.3.0 pid=78209
+tauri-agent-helper: ready v1.3.0 pid=78214
+tauri-agent-helper: ready v1.3.0 pid=78216
+tauri-agent-helper: ready v1.3.0 pid=78219
+tauri-agent-helper: ready v1.3.0 pid=78222
+tauri-agent-helper: ready v1.3.0 pid=78227
+tauri-agent-helper: ready v1.3.0 pid=78229
+tauri-agent-helper: ready v1.3.0 pid=78234
+[keys] posted 0:c pid=78235 uptime_ns=2385441849885333
+tauri-agent-helper: ready v1.3.0 pid=78241
+tauri-agent-helper: ready v1.3.0 pid=78244
+tauri-agent-helper: ready v1.3.0 pid=78249
+[keys] posted 24 pid=78250 uptime_ns=2385442554880375
+tauri-agent-helper: ready v1.3.0 pid=78255
+[shot] /private/tmp/claude-501/-Users-andrejvysny-workspace/86a5ac20-8ab8-4291-b8a7-5a49a61bf02b/scratchpad/egui/final/C_keys_ime.log.composing.png
+tauri-agent-helper: ready v1.3.0 pid=78258
+tauri-agent-helper: ready v1.3.0 pid=78264
+[keys] posted 14 pid=78265 uptime_ns=2385443393804833
+tauri-agent-helper: ready v1.3.0 pid=78270
+[shot] /private/tmp/claude-501/-Users-andrejvysny-workspace/86a5ac20-8ab8-4291-b8a7-5a49a61bf02b/scratchpad/egui/final/C_keys_ime.log.composed.png
+[step] 9 Option+e dead key then e uptime_ns=2385443925062000
+tauri-agent-helper: ready v1.3.0 pid=78274
+tauri-agent-helper: ready v1.3.0 pid=78279
+[keys] posted 14:o pid=78280 uptime_ns=2385444250942833
+tauri-agent-helper: ready v1.3.0 pid=78285
+tauri-agent-helper: ready v1.3.0 pid=78287
+tauri-agent-helper: ready v1.3.0 pid=78292
+[keys] posted 14 pid=78293 uptime_ns=2385444957556125
+tauri-agent-helper: ready v1.3.0 pid=78298
+[step] 10 Escape uptime_ns=2385445395848250
+tauri-agent-helper: ready v1.3.0 pid=78301
+tauri-agent-helper: ready v1.3.0 pid=78306
+[keys] posted 53 pid=78307 uptime_ns=2385445668766250
+tauri-agent-helper: ready v1.3.0 pid=78312
+[step] 11 bad expression then Enter keeps focus uptime_ns=2385446146647458
+tauri-agent-helper: ready v1.3.0 pid=78315
+tauri-agent-helper: ready v1.3.0 pid=78320
+tauri-agent-helper: ready v1.3.0 pid=78322
+tauri-agent-helper: ready v1.3.0 pid=78325
+tauri-agent-helper: ready v1.3.0 pid=78328
+tauri-agent-helper: ready v1.3.0 pid=78333
+tauri-agent-helper: ready v1.3.0 pid=78335
+tauri-agent-helper: ready v1.3.0 pid=78340
+[keys] posted 0:c pid=78341 uptime_ns=2385447454698291
+tauri-agent-helper: ready v1.3.0 pid=78358
+tauri-agent-helper: ready v1.3.0 pid=78360
+tauri-agent-helper: ready v1.3.0 pid=78365
+tauri-agent-helper: ready v1.3.0 pid=78367
+tauri-agent-helper: ready v1.3.0 pid=78372
+tauri-agent-helper: ready v1.3.0 pid=78374
+tauri-agent-helper: ready v1.3.0 pid=78379
+[keys] posted 36 pid=78380 uptime_ns=2385449029886916
+tauri-agent-helper: ready v1.3.0 pid=78385
+tauri-agent-helper: ready v1.3.0 pid=78387
+tauri-agent-helper: ready v1.3.0 pid=78392
+[keys] posted 53 pid=78393 uptime_ns=2385449708666041
+tauri-agent-helper: ready v1.3.0 pid=78398

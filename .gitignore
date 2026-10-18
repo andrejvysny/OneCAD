@@ -12,9 +12,12 @@ dist
 dist-ssr
 *.local
 
-# Rust / Cargo (src-tauri workspace)
+# Rust / Cargo (root workspace; keep legacy outputs ignored)
+/target/
 src-tauri/target
 src-tauri/gen/schemas
+# Standalone migration investigations retain source and evidence, not Cargo outputs.
+spikes/*/target/
 
 # Bundled worker sidecar binaries (produced by scripts/build-worker.sh)
 src-tauri/binaries/

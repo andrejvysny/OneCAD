@@ -1,0 +1,5 @@
+4
+AXButton | close button | missing value | missing value
+AXButton | full screen button | missing value | missing value
+AXGroup | group | missing value | missing value
+AXButton | minimize button | missing value | missing value

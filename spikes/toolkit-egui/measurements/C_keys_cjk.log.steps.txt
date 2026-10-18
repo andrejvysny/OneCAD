@@ -1,0 +1,23 @@
+tauri-agent-helper: ready v1.3.0 pid=78428
+tauri-agent-helper: ready v1.3.0 pid=78433
+tauri-agent-helper: ready v1.3.0 pid=78439
+[step] 12 click field, Cmd+A, Cmd+V pastes CJK text (system-font fallback), shot, Escape uptime_ns=2385453850251958
+tauri-agent-helper: ready v1.3.0 pid=78443
+tauri-agent-helper: ready v1.3.0 pid=78448
+tauri-agent-helper: ready v1.3.0 pid=78450
+tauri-agent-helper: ready v1.3.0 pid=78453
+tauri-agent-helper: ready v1.3.0 pid=78456
+tauri-agent-helper: ready v1.3.0 pid=78461
+tauri-agent-helper: ready v1.3.0 pid=78463
+tauri-agent-helper: ready v1.3.0 pid=78468
+[keys] posted 0:c pid=78469 uptime_ns=2385455092088416
+tauri-agent-helper: ready v1.3.0 pid=78474
+tauri-agent-helper: ready v1.3.0 pid=78476
+tauri-agent-helper: ready v1.3.0 pid=78481
+[keys] posted 9:c pid=78482 uptime_ns=2385455839148916
+tauri-agent-helper: ready v1.3.0 pid=78487
+[shot] /private/tmp/claude-501/-Users-andrejvysny-workspace/86a5ac20-8ab8-4291-b8a7-5a49a61bf02b/scratchpad/egui/final/C_keys_cjk.log.cjk.png
+tauri-agent-helper: ready v1.3.0 pid=78490
+tauri-agent-helper: ready v1.3.0 pid=78495
+[keys] posted 53 pid=78496 uptime_ns=2385456685717750
+tauri-agent-helper: ready v1.3.0 pid=78501

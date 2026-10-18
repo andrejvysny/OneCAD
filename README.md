@@ -59,8 +59,9 @@ Project roadmap and live status: [Plane Roadmap](https://app.plane.so/andrejvysn
 
 ## Architecture
 
-All layers are deliberately decoupled. Pure domain crates live under
-`src-tauri/crates/`, and the OCCT kernel runs as an external C++20 sidecar.
+The root Cargo workspace owns `crates/` and the legacy `src-tauri/` adapter.
+`onecad-app` provides host-independent application services; `onecad-core` owns
+pure domain behavior. The OCCT kernel runs as an external C++20 sidecar.
 
 ```mermaid
 flowchart TB
@@ -98,8 +99,9 @@ flowchart TB
 
 ```
 src/                React 19 + Zustand + Three.js frontend (*.test.tsx colocated)
-src-tauri/          Tauri app + Rust workspace (crates = pure domain)
-src-tauri/crates/   onecad-core · onecad-regen · onecad-protocol · onecad-worker-stub
+Cargo.toml          Root Rust workspace; Cargo.lock pins its dependencies
+src-tauri/          Legacy Tauri adapter and integration tests
+crates/             onecad-app · onecad-core · onecad-regen · onecad-protocol · onecad-worker-stub
 worker/             C++20 OCCT sidecar + its CTest suite
 protocol/           SCHEMA.md (OCW1) and mesh_format.md (MESH1) normative contracts
 corpus/             read-only legacy correctness oracle
@@ -137,12 +139,15 @@ before any Cargo run that compiles the app.
 ```bash
 bash scripts/build-worker.sh Release
 ctest --test-dir worker/build --output-on-failure
-cd src-tauri
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-ONECAD_WORKER_PATH=$PWD/../worker/build/onecad-worker \
+ONECAD_WORKER_PATH=$PWD/worker/build/onecad-worker \
   ONECAD_REQUIRE_WORKER=1 cargo test --workspace
 ```
+
+Run these Cargo commands from the repository root. The legacy `src-tauri/`
+member retains integration tests (`cargo test -p onecad --test <name>`). Build
+outputs live under `target/`; sidecar staging stays in `src-tauri/binaries/`.
 
 `ONECAD_REQUIRE_WORKER=1` guarantees worker-backed gates — a missing binary
 cannot produce a skipped pass.

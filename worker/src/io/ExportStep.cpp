@@ -151,11 +151,27 @@ Envelope handle_export_step(session::Session& session, const Envelope& req) {
     // Same prologue as the read lane: register the norm + its knobs BEFORE the guard
     // snapshots them, and keep OCCT chatter off fd 1 (SCHEMA §2 — fd 1 carries OCW1
     // frames and nothing else).
+    // Process-global OCCT state is touched from here to the end of the call
+    // (OcctStaticGuard.h); declared first so the guards restore under it.
+    // Bounded: a wedged sibling in-process worker must not wedge this one; the
+    // refusal is retriable (nothing was opened or written).
+    const BoundedLock occt_globals(occt_globals_mutex(), nullptr);
+    if (!occt_globals.owns()) {
+        return Envelope::error_response(
+            req.id, protocol::ErrorInfo{"OP_FAILED",
+                                        occt_globals.busy_error("ExportStep", "occt_globals_mutex"),
+                                        /*retriable=*/true});
+    }
     STEPControl_Controller::Init();
     OcctMessengerGuard quiet;
     InterfaceStaticGuard knobs;
 
-    const std::lock_guard<std::mutex> lock(ocaf_mutex());
+    const BoundedLock lock(ocaf_mutex(), nullptr);
+    if (!lock.owns()) {
+        return Envelope::error_response(
+            req.id, protocol::ErrorInfo{"OP_FAILED", lock.busy_error("ExportStep", "ocaf_mutex"),
+                                        /*retriable=*/true});
+    }
     std::size_t transferred = 0;
     std::size_t named = 0;
     std::size_t coloured_faces = 0;

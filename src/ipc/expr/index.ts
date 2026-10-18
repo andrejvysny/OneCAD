@@ -1,6 +1,6 @@
 /**
  * TypeScript mirror of onecad-core's expression engine
- * (`src-tauri/crates/onecad-core/src/expr/mod.rs`), for the mock/local-only
+ * (`crates/onecad-core/src/expr/mod.rs`), for the mock/local-only
  * IPC lane. Semantics MUST match the Rust evaluator exactly: grammar,
  * dimension algebra, and error kinds. Parity is proven by
  * `docs/qa/expressions.fixture.json`, replayed by both `parity.test.ts`

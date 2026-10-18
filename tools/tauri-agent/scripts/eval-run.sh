@@ -47,5 +47,5 @@ for d in sorted(glob.glob(f"{root}/s-*")):
 print("done", out, "rc", rc, "turns", turns, "cost", cost, "seconds", end-start)
 PY
 # never leave the app running between evals
-pgrep -f 'target/debug/onecad|onecad-worker-' >/dev/null && { echo "SURVIVORS after $NAME/$VARIANT:"; pgrep -fl 'target/debug/onecad|onecad-worker-'; pkill -TERM -f 'workspace/OneCAD/src-tauri/target/debug/onecad'; sleep 2; pkill -KILL -f 'workspace/OneCAD/src-tauri/target/debug/onecad'; pkill -TERM -f 'workspace/OneCAD/node_modules/.bin/vite'; pkill -TERM -f 'workspace/OneCAD/node_modules/.bin/tauri dev'; }
+pgrep -f 'target/debug/onecad|onecad-worker-' >/dev/null && { echo "SURVIVORS after $NAME/$VARIANT:"; pgrep -fl 'target/debug/onecad|onecad-worker-'; pkill -TERM -f 'workspace/OneCAD/target/debug/onecad'; sleep 2; pkill -KILL -f 'workspace/OneCAD/target/debug/onecad'; pkill -TERM -f 'workspace/OneCAD/node_modules/.bin/vite'; pkill -TERM -f 'workspace/OneCAD/node_modules/.bin/tauri dev'; }
 exit 0

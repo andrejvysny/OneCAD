@@ -990,7 +990,7 @@ export interface IngestComponentsReport {
 
 // ── Topology repair (SCHEMA §9; M4b) — the `needs-repair` event + `resolveRefs` ─
 //
-// These MIRROR the Rust DTOs in `src-tauri/src/dto.rs` (camelCase serde):
+// These MIRROR the Rust DTOs in `crates/onecad-app/src/dto.rs` (camelCase serde):
 //   NeedsRepairItem  == NeedsRepairItemDto  (lean banner/badge summary)
 //   NeedsRepairEvent == NeedsRepairEvent    (`{revision, snapshotId, items}`; empty ⇒ cleared)
 //   ResolveCandidate == ResolveCandidateDto (one ranked candidate)

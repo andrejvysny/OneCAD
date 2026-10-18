@@ -1,0 +1,29 @@
+[metric] main uptime_ns=2385451092398625
+[metric] scene_load dir=/Users/andrejvysny/workspace/OneCAD/spikes/toolkit-egui/../fixtures/nema17 bodies=67 tris=381524 bytes=12559300 ms=4.04
+[metric] app_new_enter since_main_ms=92.45 uptime_ns=2385451184844875
+[metric] icons parsed=112
+[metric] fonts ui=Some("/System/Library/Fonts/SFNS.ttf") mono=Some("/System/Library/Fonts/SFNSMono.ttf") ms=1.17
+[metric] adapter name="Apple M4 Pro" backend=Metal target_format=Bgra8Unorm
+[metric] gpu_upload bodies=67 tris=381524 edge_segments=69267 bytes=13761600 ms=3.68
+[metric] dimension_anchor a=Vec3(-22.927586, -27.542656, 31.589207) b=Vec3(22.927586, -27.542656, 31.589207) len_mm=45.855
+[metric] app_created since_main_ms=105.77 uptime_ns=2385451198169375
+[metric] first_frame_prepare since_main_ms=113.03 uptime_ns=2385451205426375
+[metric] rss after_first_frame resident_mb=134.0 phys_footprint_mb=64.8
+[metric] frame=2 viewport_rect=[[0.0 0.0] - [1521.0 921.0]] ppp=1
+[win] focused=false
+[win] focused=true
+[ptr] Primary pressed=true x=597.0 y=560.0
+[ptr] Primary pressed=false x=597.0 y=560.0
+[metric] dimension_focus since_main_ms=3113.87 uptime_ns=2385454206268916
+[ptr] Primary pressed=false x=597.0 y=560.0
+[key] SuperLeft cmd=false shift=false alt=false
+[metric] menu_event SelectAll since_main_ms=3932.02 uptime_ns=2385455024422333
+[route] SelectAll -> text field
+[key] A cmd=true shift=false alt=false
+[key] SuperLeft cmd=false shift=false alt=false
+[metric] menu_event Paste since_main_ms=4682.42 uptime_ns=2385455774819541
+[route] Paste -> text field
+[key] paste "東京 10 mm\n"
+[dim] text="東京 10 mm "
+[key] Escape cmd=false shift=false alt=false
+[dim] cancel

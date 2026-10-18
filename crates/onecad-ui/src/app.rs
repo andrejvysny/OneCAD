@@ -1,0 +1,409 @@
+use crate::{
+    bridge::{Bridge, Candidate, Command, Display, Message},
+    fonts, menu,
+    qa::QaPaths,
+    theme,
+};
+use onecad_core::ids::{BodyId, RecordId};
+use onecad_interaction::{Action, CommitStatus, DocumentContext, Effect, Interaction, RequestTag};
+use onecad_render::{PreparedSolidCraftScene as PreparedScene, SolidCraftViewport as Renderer};
+use onecad_scene::{Camera, ViewSnapshot};
+use std::sync::Arc;
+
+pub struct App {
+    pub bridge: Bridge,
+    pub display: Option<Arc<Display>>,
+    pub interaction: Interaction,
+    pub sketch: onecad_interaction::sketch::SketchInteraction,
+    pub renderer: Renderer,
+    pub gpu: egui_wgpu::RenderState,
+    pub texture: Option<egui::TextureId>,
+    pub theme: theme::Theme,
+    pub dark: bool,
+    pub camera: Camera,
+    pub navigation: crate::navigation::Navigation,
+    pub transform_gizmo: crate::transform_ui::TransformGizmo,
+    pub topology: crate::viewport_selection::Selection,
+    pub pending_display_options: Option<onecad_render::SolidCraftOptions>,
+    pub view: Option<ViewSnapshot>,
+    pub view_number: u64,
+    pub fit_pending: bool,
+    pub selected_body: Option<BodyId>,
+    pub selected_feature: Option<RecordId>,
+    pub numeric_id: Option<egui::Id>,
+    pub composing: bool,
+    pub menu: Option<menu::NativeMenu>,
+    pub status: String,
+    pub close_prompt: bool,
+    pub close_after_save: bool,
+    pub may_close: bool,
+    pub stopping: bool,
+    pub authoring_dirty: bool,
+    pub gesture: u64,
+    pub pending_preview: Option<(RequestTag, PreparedScene, crate::budget::Lease)>,
+    pub clear_preview: bool,
+    pub draw_dirty: bool,
+    pub cad_needs_fence: bool,
+    pub sampled: bool,
+    pub sampling_done: Arc<std::sync::atomic::AtomicBool>,
+    received_preview: Option<(PreparedScene, crate::budget::Lease)>,
+}
+
+impl App {
+    pub fn new(cc: &eframe::CreationContext<'_>, paths: QaPaths) -> Result<Self, String> {
+        let gpu = cc
+            .wgpu_render_state
+            .clone()
+            .ok_or("native host requires wgpu")?;
+        let limits = onecad_render::RenderLimits {
+            max_cpu_prepared_bytes: crate::budget::MAX_PREPARED_BYTES,
+            max_upload_bytes: crate::budget::MAX_PREPARED_BYTES,
+            ..Default::default()
+        };
+        let renderer =
+            Renderer::new(&gpu.device, &gpu.queue, [0, 0], limits).map_err(|e| e.to_string())?;
+        let bridge = Bridge::start(paths, cc.egui_ctx.clone(), renderer.preparation_budget())?;
+        let resolved = fonts::install(&cc.egui_ctx);
+        eprintln!(
+            "native fonts: {:?} {:?}; icons: {}",
+            resolved.ui,
+            resolved.mono,
+            crate::icons::count()
+        );
+        let theme = theme::load(true)?;
+        theme::apply(&cc.egui_ctx, &theme, true);
+        let menu = Some(menu::install(&cc.egui_ctx)?);
+        bridge.submit(Command::Open)?;
+        Ok(Self {
+            bridge,
+            display: None,
+            interaction: Interaction::default(),
+            sketch: Default::default(),
+            renderer,
+            gpu,
+            texture: None,
+            theme,
+            dark: true,
+            camera: Camera::default(),
+            navigation: Default::default(),
+            transform_gizmo: Default::default(),
+            topology: Default::default(),
+            pending_display_options: None,
+            view: None,
+            view_number: 0,
+            fit_pending: true,
+            selected_body: None,
+            selected_feature: None,
+            numeric_id: None,
+            composing: false,
+            menu,
+            status: "Opening prepared fixture…".into(),
+            close_prompt: false,
+            close_after_save: false,
+            may_close: false,
+            stopping: false,
+            authoring_dirty: false,
+            gesture: 0,
+            pending_preview: None,
+            clear_preview: true,
+            received_preview: None,
+            draw_dirty: true,
+            cad_needs_fence: false,
+            sampled: false,
+            sampling_done: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        })
+    }
+
+    pub fn dispatch(&mut self, action: Action) {
+        for effect in self.interaction.dispatch(action) {
+            self.effect(effect);
+        }
+    }
+
+    fn effect(&mut self, effect: Effect) {
+        match effect {
+            Effect::EvaluateExpression {
+                tag,
+                expression,
+                site,
+            } => self.bridge.candidate(Candidate::Evaluate {
+                tag,
+                expression,
+                site,
+            }),
+            Effect::Preview {
+                tag,
+                operation,
+                sketch_id,
+                expected_snapshot,
+            } => self.bridge.candidate(Candidate::Preview {
+                tag,
+                operation,
+                sketch_id: sketch_id.map(|id| id.to_string()),
+                snapshot: expected_snapshot,
+            }),
+            Effect::ClearPreview { .. } => {
+                self.bridge.cancel_candidates();
+                self.pending_preview = None;
+                self.received_preview = None;
+                self.clear_preview = true;
+            }
+            Effect::PublishPreview { tag, .. } => {
+                if let Some((prepared, lease)) = self.received_preview.take() {
+                    self.pending_preview = Some((tag, prepared, lease));
+                }
+            }
+            Effect::ApplyOperation {
+                tag,
+                command,
+                hide_sketch,
+            } => {
+                self.bridge.cancel_candidates();
+                self.pending_preview = None;
+                self.clear_preview = true;
+                if let Err(message) = self.bridge.submit(Command::Apply {
+                    tag: tag.clone(),
+                    command,
+                    hide_sketch: hide_sketch.map(|id| id.to_string()),
+                }) {
+                    self.dispatch(Action::CommitRejected { tag, message });
+                }
+            }
+        }
+    }
+
+    pub fn submit(&mut self, command: Command) {
+        if matches!(command, Command::Save) && self.sketch_active() {
+            self.close_after_save = false;
+            self.status = "Finish or discard sketch edits before saving".into();
+            return;
+        }
+        if matches!(command, Command::Undo | Command::Redo) && self.sketch_active() {
+            self.status =
+                "Finish sketch before using model history; sketch undo is not implemented".into();
+            return;
+        }
+        if matches!(command, Command::Undo | Command::Redo) && !self.bridge.valid() {
+            self.status = "Geometry unavailable; history controls are disabled".into();
+            return;
+        }
+        if matches!(command, Command::Undo | Command::Redo) {
+            self.authoring_dirty = true;
+        }
+        if let Err(error) = self.bridge.submit(command) {
+            self.status = error;
+            self.close_after_save = false;
+        }
+    }
+
+    pub fn poll(&mut self, ctx: &egui::Context) {
+        if let Some(display) = self.bridge.take_display()
+            && self.bridge.shared.accept_display(&display)
+        {
+            self.adopt_display(display);
+        }
+        if let Some(delivery) = self.bridge.take_candidate() {
+            self.received_preview = delivery.prepared.zip(delivery.lease);
+            self.dispatch(delivery.action);
+            self.received_preview = None;
+        }
+        // Command permits bound accepted plus terminal messages to at most 16; drain fairly each frame.
+        while let Ok(message) = self.bridge.messages.try_recv() {
+            self.message(message, ctx);
+        }
+        let failure = self
+            .bridge
+            .shared
+            .failure
+            .lock()
+            .ok()
+            .and_then(|mut value| value.take());
+        if let Some(error) = failure {
+            self.status = error;
+            self.bridge.cancel_candidates();
+            self.interaction.selection = None;
+            self.pending_preview = None;
+            self.clear_preview = true;
+            self.selected_body = None;
+            self.topology = Default::default();
+            self.transform_gizmo = Default::default();
+            self.draw_dirty = true;
+        }
+    }
+
+    pub fn adopt_display(&mut self, display: Arc<Display>) {
+        self.authoring_dirty = display.projection.dirty;
+        let changed = self
+            .display
+            .as_ref()
+            .is_none_or(|old| old.context.runtime_session != display.context.runtime_session);
+        let context = DocumentContext {
+            document_id: display.context.document_id.clone(),
+            runtime_session: display.context.runtime_session.clone(),
+            revision: display.context.revision.0,
+            snapshot_id: display.context.snapshot_id,
+            scene: display.scene.identity(),
+        };
+        self.dispatch(Action::ContextChanged(Some(context.clone())));
+        self.sketch_dispatch(onecad_interaction::sketch::SketchAction::ContextChanged(
+            Some(context),
+        ));
+        if changed {
+            self.selected_body = None;
+            self.selected_feature = None;
+            self.topology = Default::default();
+            self.transform_gizmo = Default::default();
+            self.fit_pending = true;
+        }
+        self.display = Some(display);
+    }
+
+    fn message(&mut self, message: Message, ctx: &egui::Context) {
+        match message {
+            Message::Sketch { delivery, .. } => {
+                if let Some(display) = delivery.display.clone() {
+                    if self.bridge.shared.accept_display(&display) {
+                        self.adopt_display(display);
+                    } else {
+                        for action in delivery.stale_actions() {
+                            self.sketch_dispatch(action);
+                        }
+                        return;
+                    }
+                }
+                for action in delivery.actions {
+                    self.sketch_dispatch(action);
+                }
+                if let Some(error) = delivery.error {
+                    self.status = error;
+                }
+            }
+            Message::StartupFailed(error) => self.status = error,
+            Message::Stopped => {
+                self.may_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Message::Accepted {
+                tag,
+                revision,
+                rollback_token,
+            } => {
+                self.authoring_dirty = true;
+                self.dispatch(Action::CommitAccepted {
+                    tag,
+                    revision,
+                    rollback_token,
+                });
+                self.status = "Regenerating feature…".into();
+            }
+            Message::Terminal {
+                command,
+                tag,
+                result,
+                ..
+            } => match result {
+                Ok(outcome) => {
+                    let completion = outcome.completion;
+                    let target = tag.as_ref().map(|tag| tag.record_id.to_string());
+                    if let (Some(tag), Some(completion)) = (tag, completion.as_ref()) {
+                        self.dispatch(Action::RegenFinished {
+                            tag,
+                            completion: completion.clone(),
+                        });
+                    }
+                    if command == "Save" {
+                        self.authoring_dirty = false;
+                    }
+                    self.status = match completion {
+                        Some(ref result) if !result.failed_steps.is_empty() => {
+                            format!(
+                                "Feature failed: {}",
+                                result
+                                    .failed_steps
+                                    .iter()
+                                    .find(|step| Some(step.record_id.as_str()) == target.as_deref())
+                                    .unwrap_or(&result.failed_steps[0])
+                                    .message
+                            )
+                        }
+                        Some(ref result) if !result.repair_steps.is_empty() => {
+                            "Feature needs repair".into()
+                        }
+                        Some(ref result) if result.outcome == "failed" => result
+                            .message
+                            .clone()
+                            .unwrap_or("Regeneration failed".into()),
+                        Some(ref result)
+                            if !matches!(result.outcome.as_str(), "published" | "noop") =>
+                        {
+                            format!("Regeneration {}", result.outcome)
+                        }
+                        _ => format!("{command} complete"),
+                    };
+                    if let Some(rollback) = outcome.rollback {
+                        self.status = format!("{}; {}", self.status, rollback.explanation());
+                    }
+                    if self.interaction.tool.as_ref().is_some_and(|tool| {
+                        tool.phase == onecad_interaction::SessionPhase::Completed
+                    }) {
+                        self.dispatch(Action::Cancel);
+                    }
+                    if command == "Save" && self.close_after_save {
+                        self.stop();
+                    }
+                }
+                Err(error) => {
+                    if let Some(tag) = tag {
+                        if matches!(self.interaction.status, CommitStatus::Accepted { .. }) {
+                            self.dispatch(Action::CompletionUnavailable {
+                                tag,
+                                message: error.clone(),
+                            });
+                        } else {
+                            self.dispatch(Action::CommitRejected {
+                                tag,
+                                message: error.clone(),
+                            });
+                        }
+                    }
+                    if self.interaction.tool.as_ref().is_some_and(|tool| {
+                        tool.phase == onecad_interaction::SessionPhase::Completed
+                    }) {
+                        self.dispatch(Action::Cancel);
+                    }
+                    self.status = error;
+                    self.close_after_save = false;
+                }
+            },
+        }
+    }
+
+    pub fn stop(&mut self) {
+        self.stopping = true;
+        self.bridge.cancel_candidates();
+        self.bridge.request_shutdown();
+    }
+    pub fn busy(&self) -> bool {
+        matches!(
+            self.interaction.status,
+            CommitStatus::Pending(_) | CommitStatus::Accepted { .. }
+        ) || self.stopping
+    }
+}
+
+impl eframe::App for App {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        crate::input::route(self, ctx, raw);
+    }
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        self.poll(&ctx);
+        if ctx.input(|input| input.viewport().close_requested()) && !self.may_close {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.close_prompt = true;
+        }
+        crate::shell::show(self, ui);
+        crate::viewport::show(self, ui);
+        crate::shell::close_prompt(self, &ctx);
+    }
+}

@@ -1,0 +1,3 @@
+[quiet] keys_edit loadavg={ 2.01 2.56 2.82 } 18:53:59
+[quiet] keys_ime loadavg={ 1.58 2.43 2.77 } 18:54:18
+[quiet] keys_cjk loadavg={ 1.45 2.35 2.73 } 18:54:32

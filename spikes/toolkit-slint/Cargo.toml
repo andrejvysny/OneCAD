@@ -1,0 +1,40 @@
+[package]
+name = "toolkit-slint"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Phase 0 spike (ONECAD-257): Slint + wgpu viewport, chrome from tokens.css, dimension input, native menu (macOS only)"
+
+# Standalone: not a member of src-tauri's (or any future root) workspace.
+[workspace]
+
+[lib]
+name = "toolkit_slint"
+path = "src/lib.rs"
+crate-type = ["lib"]
+
+[[bin]]
+name = "toolkit-slint"
+path = "src/main.rs"
+
+[dependencies]
+slint = { version = "=1.18.1", default-features = false, features = ["std", "backend-winit", "accessibility", "compat-1-2", "unstable-wgpu-30", "unstable-winit-030"] }
+bytemuck = { version = "1", features = ["derive"] }
+glam = { version = "0.30", features = ["bytemuck"] }
+log = "0.4"
+# Same crate as slint::wgpu_30::wgpu; only here to switch on WGSL (femtovg enables it, skia does not).
+wgpu = { version = "30", default-features = false, features = ["wgsl"] }
+
+[features]
+default = ["femtovg"]
+# Slint renderer choice; both draw through wgpu so the viewport texture import works.
+femtovg = ["slint/renderer-femtovg-wgpu"]
+skia = ["slint/renderer-skia"]
+
+[build-dependencies]
+slint-build = "=1.18.1"
+
+[profile.release]
+debug = false
+strip = true

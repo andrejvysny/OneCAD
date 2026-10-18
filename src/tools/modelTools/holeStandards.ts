@@ -27,7 +27,7 @@
  *   DIFFERENT provenance than the rest of this row: hand-transcribed from the
  *   public numeric standard, not BOLTS data (same split
  *   `worker/src/ops/FastenerTables.cpp:9-11` and
- *   `src-tauri/crates/onecad-library/src/tables/iso4762.rs:20-24` both
+ *   `crates/onecad-library/src/tables/iso4762.rs:20-24` both
  *   document — THREE copies now, cross-referenced against each other in
  *   `holeStandards.test.ts` so a transcription error in any one is caught).
  *   `tapDrillMm = nominal − pitchMm` is Option B's drilled diameter for a

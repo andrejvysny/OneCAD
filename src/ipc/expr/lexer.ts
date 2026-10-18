@@ -1,6 +1,6 @@
 /**
  * Tokenizer — turns source text into a flat token stream with spans.
- * Mirrors `src-tauri/crates/onecad-core/src/expr/lexer.rs`.
+ * Mirrors `crates/onecad-core/src/expr/lexer.rs`.
  *
  * Unit adjacency (`2m` vs `2 m` vs `2*m`) is resolved HERE, once: a unit
  * suffix is recognised only when its alpha run immediately follows the

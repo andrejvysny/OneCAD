@@ -1,0 +1,34 @@
+[package]
+name = "onecad-app"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Host-independent OneCAD application services and worker runtime"
+
+[features]
+composition-test = []
+
+[dependencies]
+onecad-core = { workspace = true }
+onecad-library = { path = "../onecad-library" }
+onecad-protocol = { workspace = true, features = ["client", "tracing"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
+sha2 = { workspace = true }
+base64 = "0.22"
+toml = "0.8"
+trash = "5"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+zip = { workspace = true }

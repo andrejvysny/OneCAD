@@ -200,7 +200,7 @@ function crossCheck(label, names) {
   }
 }
 
-const knownOperations = [...read("src-tauri/crates/onecad-core/src/document/record.rs")
+const knownOperations = [...read("crates/onecad-core/src/document/record.rs")
   .matchAll(/^pub enum KnownOperation \{([\s\S]*?)^\}/gm)]
   .flatMap((block) => [...block[1].matchAll(/^\s{4}([A-Z][A-Za-z]*)\(/gm)].map((m) => m[1]));
 crossCheck("KnownOperation", knownOperations);
@@ -219,7 +219,7 @@ if (toolIds.length === 0) fail("frontend tool registrations: scanned zero tools"
 crossCheck("frontend tool registrations",
   [...new Set(toolIds.flatMap((tool) => toolOperations[tool] ?? []))]);
 
-const families = [...read("src-tauri/crates/onecad-kernelbench/src/case_v2.rs")
+const families = [...read("crates/onecad-kernelbench/src/case_v2.rs")
   .matchAll(/^pub enum OperationFamily \{([\s\S]*?)^\}/gm)]
   .flatMap((block) => [...block[1].matchAll(/^\s{4}([A-Z][A-Za-z]*),/gm)].map((m) => m[1]));
 crossCheck("kernelbench families", families);

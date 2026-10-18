@@ -72,7 +72,7 @@ describe("loadConfig", () => {
     });
     expect(d.launch).toEqual({
       dev: { command: ["bun", "run", "tauri:agent"], readyTimeoutMs: 600_000 },
-      bundled: { appPath: "src-tauri/target/release/bundle/macos/onecad.app" },
+      bundled: { appPath: "target/release/bundle/macos/onecad.app" },
     });
     expect(d.webdriver.port).toBe(4445);
     expect(d.devServer.port).toBe(1420);

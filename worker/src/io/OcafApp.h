@@ -34,8 +34,9 @@ namespace onecad::io {
 // The shared application: BinXCAF drivers bound, message driver on stderr.
 Handle(TDocStd_Application) ocaf_application();
 
-// Guards every use of the application's document session.
-std::mutex& ocaf_mutex();
+// Guards every use of the application's document session. Timed so callers can
+// take it with a deadline (OcctStaticGuard.h BoundedLock).
+std::timed_mutex& ocaf_mutex();
 
 // RAII close for a document opened on `ocaf_application()`. A document left open
 // stays registered in the application's SESSION and keeps its whole shape tree

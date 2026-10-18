@@ -289,6 +289,15 @@ StepReadResult read_step(const std::string& path, const StepReadPolicy& policy,
     // Registers the STEP norm AND its Interface_Static knobs. Must run before the
     // guard snapshots them, otherwise every knob reads as absent and the pinning
     // silently degrades to "whatever the process already held". Idempotent.
+    // Process-global OCCT state is touched from here to the end of the call
+    // (OcctStaticGuard.h); declared first so the guards restore under it.
+    // Bounded: a wedged sibling in-process worker must not wedge this one.
+    const BoundedLock occt_globals(occt_globals_mutex(), cancel);
+    if (occt_globals.cancelled()) return bail_cancelled();
+    if (!occt_globals.owns()) {
+        out.error = occt_globals.busy_error("StepRead", "occt_globals_mutex");
+        return out;
+    }
     STEPControl_Controller::Init();
 
     // Order matters: the messenger guard is outermost so OCCT chatter raised by

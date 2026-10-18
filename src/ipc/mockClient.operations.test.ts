@@ -434,7 +434,7 @@ describe("mockClient operations", () => {
     expect((await mockClient.getOperationParams(featureId)).angleDeg).toEqual({ value: 30 });
 
     // PINNED VERBATIM against core `session::CHAMFER_ANGLE_FLIP_REASON`
-    // (src-tauri/crates/onecad-core/src/edit/session.rs). A paraphrase here would
+    // (crates/onecad-core/src/edit/session.rs). A paraphrase here would
     // let the mock lane stay green on an edit the real backend refuses.
     await expect(
       mockClient.applyEditCommand(

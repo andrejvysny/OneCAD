@@ -154,6 +154,13 @@ target_link_libraries(test_solver_latest_wins PRIVATE worker_core)
 add_test(NAME solver_latest_wins
          COMMAND test_solver_latest_wins $<TARGET_FILE:onecad-worker>)
 
+# Redundant solves must keep stdout frame-only, even when stdio flushes at exit.
+add_executable(test_solver_stdout_hygiene test_solver_stdout_hygiene.cpp)
+target_link_libraries(test_solver_stdout_hygiene PRIVATE worker_core)
+add_test(NAME solver_stdout_hygiene
+         COMMAND test_solver_stdout_hygiene $<TARGET_FILE:onecad-worker>)
+set_tests_properties(solver_stdout_hygiene PROPERTIES TIMEOUT 30)
+
 # ---------------------------------------------------------------------------
 # W-WP4: session + transactional ExecutePlan (SCHEMA §7.1/§7.2), STUB ops.
 # ---------------------------------------------------------------------------

@@ -61,7 +61,7 @@ describe("holeStandards — ISO 261 pitch / tap-drill columns (WP-T1)", () => {
    * ISO 261 coarse-pitch series, hand-transcribed independently of
    * `HOLE_STANDARDS` and cross-referenced against BOTH other in-repo copies:
    * `worker/src/ops/FastenerTables.cpp` `iso4762_table()` and
-   * `src-tauri/crates/onecad-library/src/tables/iso4762.rs` `ISO4762_ROWS`
+   * `crates/onecad-library/src/tables/iso4762.rs` `ISO4762_ROWS`
    * (three-copy drift risk — a transcription error in any one is caught here).
    */
   const ISO_261_PITCH: Record<string, number> = {

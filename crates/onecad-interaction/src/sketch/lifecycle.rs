@@ -1,0 +1,268 @@
+use super::*;
+use crate::DocumentContext;
+use onecad_core::{edit::EditCommand, sketch::Sketch};
+
+impl SketchInteraction {
+    pub fn dispatch(&mut self, action: SketchAction) -> Vec<SketchEffect> {
+        match action {
+            SketchAction::ContextChanged(context) => self.context_changed(context),
+            SketchAction::Begin {
+                sketch,
+                create,
+                context,
+            } => self.begin_captured(*sketch, create, context),
+            SketchAction::Created { tag } => self.created(tag),
+            SketchAction::Entered {
+                tag,
+                snapshot,
+                solve,
+            } => self.entered(tag, snapshot, *solve),
+            SketchAction::Refreshed {
+                tag,
+                snapshot,
+                solve,
+            } => self.refreshed(tag, snapshot, *solve),
+            SketchAction::SetTool(tool) => {
+                self.set_tool(tool);
+                Vec::new()
+            }
+            SketchAction::Move(point) => {
+                self.moved(point);
+                Vec::new()
+            }
+            SketchAction::Click { point, ids } => self.clicked(point, ids),
+            SketchAction::Escape => self.escape(),
+            SketchAction::Enter => self.enter_key(),
+            SketchAction::Finish => self.exit(ExitIntent::Finish(FinishReason::Explicit)),
+            SketchAction::Discard => self.exit(ExitIntent::Discard),
+            SketchAction::Select { key, entities } => {
+                self.select(key, entities);
+                Vec::new()
+            }
+            SketchAction::AddConstraints { key, constraints } => {
+                self.add_constraints(key, constraints)
+            }
+            SketchAction::BatchAccepted { tag } => self.batch_accepted(tag),
+            SketchAction::Solved {
+                tag,
+                snapshot,
+                solve,
+            } => self.solved(tag, snapshot, *solve),
+            SketchAction::Failed { tag, message } => self.failed(tag, message),
+            SketchAction::Finished { tag, result } => self.finished(tag, result),
+            SketchAction::Discarded { tag, result } => self.discarded(tag, result),
+        }
+    }
+
+    fn begin_captured(
+        &mut self,
+        sketch: Sketch,
+        create: bool,
+        context: DocumentContext,
+    ) -> Vec<SketchEffect> {
+        if self.context.as_ref() != Some(&context) {
+            return Vec::new();
+        }
+        self.begin(sketch, create)
+    }
+
+    fn context_changed(&mut self, next: Option<DocumentContext>) -> Vec<SketchEffect> {
+        let same = self
+            .context
+            .as_ref()
+            .zip(next.as_ref())
+            .is_some_and(|(a, b)| a.same_runtime(b));
+        if same
+            && self
+                .context
+                .as_ref()
+                .zip(next.as_ref())
+                .is_some_and(|(a, b)| b.revision < a.revision)
+        {
+            return Vec::new();
+        }
+        let refresh = same
+            && self
+                .session
+                .as_ref()
+                .zip(next.as_ref())
+                .is_some_and(|(session, context)| {
+                    matches!(
+                        session.phase,
+                        SketchPhase::Active | SketchPhase::NeedsRefresh
+                    ) && (session.document.revision != context.revision
+                        || session.document.snapshot_id != context.snapshot_id)
+                });
+        if !same {
+            self.session = None;
+        } else if let (Some(session), Some(context)) = (&mut self.session, &next) {
+            session.document = context.clone();
+            if refresh {
+                session.phase = SketchPhase::NeedsRefresh;
+                session.draft = None;
+                session.preview = None;
+                session.selection.clear();
+                session.status =
+                    SketchStatus::Refused("Document changed; refresh sketch before editing".into());
+            }
+        }
+        self.context = next;
+        if refresh {
+            if let Some(tag) = self.next_request() {
+                return vec![SketchEffect::RefreshSketch { tag }];
+            }
+        }
+        Vec::new()
+    }
+
+    fn begin(&mut self, sketch: Sketch, create: bool) -> Vec<SketchEffect> {
+        if !super::geometry::valid_plane(sketch.effective_plane()) {
+            return Vec::new();
+        }
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.phase != SketchPhase::Closed)
+        {
+            return Vec::new();
+        }
+        let Some(document) = self.context.clone().filter(|context| {
+            !context.document_id.is_empty() && !context.runtime_session.is_empty()
+        }) else {
+            return Vec::new();
+        };
+        let Some(sequence) = self.sequence.checked_add(1) else {
+            return Vec::new();
+        };
+        self.sequence = sequence;
+        let key = SketchSessionKey {
+            document_id: document.document_id.clone(),
+            runtime_session: document.runtime_session.clone(),
+            sketch_id: sketch.id,
+            generation: sequence,
+        };
+        let tag = SketchTag {
+            key: key.clone(),
+            sequence,
+            document: document.clone(),
+        };
+        let effect = if create {
+            SketchEffect::CreateSketch {
+                tag: tag.clone(),
+                command: Box::new(EditCommand::AddSketch {
+                    sketch: sketch.clone(),
+                }),
+            }
+        } else {
+            SketchEffect::EnterSketch {
+                tag: tag.clone(),
+                created_here: false,
+            }
+        };
+        self.session = Some(SketchSession::starting(sketch, tag, create));
+        vec![effect]
+    }
+
+    pub(crate) fn next_request(&mut self) -> Option<SketchTag> {
+        let session = self.session.as_mut()?;
+        self.sequence = self.sequence.checked_add(1)?;
+        let tag = SketchTag {
+            key: session.key.clone(),
+            sequence: self.sequence,
+            document: session.document.clone(),
+        };
+        session.request = tag.clone();
+        Some(tag)
+    }
+
+    pub(crate) fn valid_tag(&self, tag: &SketchTag) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| session.request == *tag)
+            && self
+                .context
+                .as_ref()
+                .is_some_and(|context| context.same_runtime(&tag.document))
+    }
+
+    pub(crate) fn exit(&mut self, intent: ExitIntent) -> Vec<SketchEffect> {
+        let Some(session) = self.session.as_mut() else {
+            return Vec::new();
+        };
+        if matches!(
+            session.phase,
+            SketchPhase::Submitting | SketchPhase::Accepted
+        ) {
+            if !matches!(session.pending_exit, Some(ExitIntent::Discard)) {
+                session.pending_exit = Some(intent);
+            }
+            session.draft = None;
+            session.preview = None;
+            return Vec::new();
+        }
+        if !matches!(
+            session.phase,
+            SketchPhase::Active | SketchPhase::NeedsRefresh | SketchPhase::Faulted
+        ) {
+            return Vec::new();
+        }
+        let Some(tag) = self.next_request() else {
+            return Vec::new();
+        };
+        let Some(session) = self.session.as_mut() else {
+            return Vec::new();
+        };
+        session.draft = None;
+        session.preview = None;
+        session.selection.clear();
+        match intent {
+            ExitIntent::Finish(reason) => {
+                session.phase = SketchPhase::Finishing;
+                vec![SketchEffect::FinishSketch { tag, reason }]
+            }
+            ExitIntent::Discard => {
+                session.phase = SketchPhase::Discarding;
+                vec![SketchEffect::DiscardSketch { tag }]
+            }
+        }
+    }
+
+    fn enter_key(&mut self) -> Vec<SketchEffect> {
+        if self.clear_draft() {
+            return Vec::new();
+        }
+        self.exit(ExitIntent::Finish(FinishReason::Explicit))
+    }
+
+    fn escape(&mut self) -> Vec<SketchEffect> {
+        if self.clear_draft() {
+            return Vec::new();
+        }
+        let Some(session) = self.session.as_mut() else {
+            return Vec::new();
+        };
+        if session.tool != SketchTool::Select {
+            session.tool = SketchTool::Select;
+            return Vec::new();
+        }
+        if !session.selection.is_empty() {
+            session.selection.clear();
+            return Vec::new();
+        }
+        self.exit(ExitIntent::Finish(FinishReason::Escape))
+    }
+
+    pub(crate) fn clear_draft(&mut self) -> bool {
+        let Some(session) = self.session.as_mut() else {
+            return false;
+        };
+        let had_draft = session.draft.take().is_some();
+        session.preview = None;
+        if had_draft {
+            if let Some(batch) = &mut session.batch {
+                batch.after = AfterPrimitive::Reset;
+            }
+        }
+        had_draft
+    }
+}

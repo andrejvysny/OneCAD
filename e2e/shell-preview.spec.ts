@@ -21,7 +21,7 @@ import { seedSelection, toolPhases, dragInCanvas } from "./modelToolHelpers";
  *
  * GESTURE ONLY, same discipline as `filletChamfer.spec.ts`: the mock lane has no CSG and
  * publishes no candidate mesh, so there is nothing honest to assert about geometry
- * here. `src-tauri/tests/preview_edge_shell.rs shell_preview_matches_the_commit`
+ * here. `crates/onecad-app/tests/preview_edge_shell.rs shell_preview_matches_the_commit`
  * pins the real numbers (10000 → 2224, preview == commit) against the OCCT worker.
  */
 const FACE_REF = {
@@ -119,7 +119,7 @@ test("the visible ✓ commits the armed shell", async ({ page }) => {
  * no client handle on `window`, and a shell re-edit is thickness-only), and the
  * mock lane has no CSG, so the geometry of a two-face shell is pinned where it is
  * measurable: `worker/tests/test_m6a_ops.cpp test_shell_two_open_faces` and
- * `src-tauri/tests/preview_edge_shell.rs shell_removes_two_open_faces_in_one_op`
+ * `crates/onecad-app/tests/preview_edge_shell.rs shell_removes_two_open_faces_in_one_op`
  * both take the 20×20×25 box to the exact multi-face volume.
  */
 test("a two-face selection arms ONE shell over both and commits a single row", async ({ page }) => {

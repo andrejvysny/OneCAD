@@ -18,7 +18,7 @@ The manifest is the missing half: committed, per-record, and diffed.
 ## Use
 
 ```bash
-K=src-tauri/target/release/onecad-kernelbench
+K=target/release/onecad-kernelbench
 R=worker/build/onecad-kernelbench-runner
 
 ONECAD_KERNELBENCH_RUNNER=$R $K run --suite fillet/foundation --preset t0 --backend both --out-dir <dir>

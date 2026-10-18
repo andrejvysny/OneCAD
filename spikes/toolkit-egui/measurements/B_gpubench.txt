@@ -1,0 +1,4 @@
+[metric] gpu_bench size=1042x842 msaa=4 frames=300 submit_to_idle_ms mean=1.453 p50=1.346 p95=1.732 max=4.287 adapter="Apple M4 Pro"
+[metric] rss gpu_bench_end resident_mb=42.0 phys_footprint_mb=327.5
+[metric] gpu_bench size=2084x1684 msaa=4 frames=300 submit_to_idle_ms mean=1.581 p50=1.459 p95=2.537 max=4.881 adapter="Apple M4 Pro"
+[metric] rss gpu_bench_end resident_mb=42.0 phys_footprint_mb=429.8

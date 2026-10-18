@@ -2,6 +2,8 @@
 
 Status: accepted (2026-08-08)
 
+Superseded by: [ADR-0015](0015-native-rust-ui.md) (proposed 2026-10-17; takes effect only once accepted).
+
 ## Context
 
 `ViewportContribution` shipped with a `ViewportContext` carrying one method,

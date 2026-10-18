@@ -294,7 +294,7 @@ export function __setRegenTimeoutForTests(ms: number): void {
   regenTimeoutMs = ms;
 }
 
-// ── Wire DTOs (camelCase; mirror src-tauri/src/dto.rs) ────────────────────────
+// ── Wire DTOs (camelCase; mirror crates/onecad-app/src/dto.rs) ────────────────────────
 interface DocumentSnapshotDto {
   documentId: string;
   runtimeSession: string;

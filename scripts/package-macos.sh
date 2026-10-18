@@ -50,7 +50,8 @@ fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-APP="src-tauri/target/release/bundle/macos/onecad.app"
+TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | bun -e 'console.log(JSON.parse(await Bun.stdin.text()).target_directory)')"
+APP="$TARGET_DIR/release/bundle/macos/onecad.app"
 MANIFEST="src-tauri/binaries/onecad-worker-manifest.json"
 TRIPLE="$(rustc -Vv | sed -n 's/^host: //p')"
 STAGED="src-tauri/binaries/onecad-worker-$TRIPLE"

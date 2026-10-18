@@ -1,6 +1,6 @@
 /**
  * The VARIABLE GRAPH layer over the expression engine — mirrors
- * `src-tauri/crates/onecad-core/src/regen/variables.rs`
+ * `crates/onecad-core/src/regen/variables.rs`
  * (`resolve_variable_table` / `evaluate_at_site` / `rename_reference`).
  *
  * `eval.ts` evaluates one expression against one opaque `Env`. Everything that

@@ -5,7 +5,7 @@
  * cursor semantics have to be the CORE's semantics — a mock that "rolls back" by
  * bumping a revision (what `setRollback` used to do) makes every spec above it
  * vacuous. The two rules asserted here are transcribed from
- * `src-tauri/crates/onecad-core/src/history/timeline.rs`:
+ * `crates/onecad-core/src/history/timeline.rs`:
  *
  *   - `insert_at_cursor` (timeline.rs:174-185): `index = min(cursor, len)`; the
  *     record is inserted THERE, `cursor = index + 1`, and the inserted node plus

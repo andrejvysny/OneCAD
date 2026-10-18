@@ -1,0 +1,76 @@
+// Two-tone icon masters copied from src/icons/cppIcons.generated.ts and authored.ts (24x24 grid).
+// `p` = primary stroke, `a` = accent stroke, `f` = accent fill. Elements of one tone are joined.
+import { Tokens } from "tokens.slint";
+
+export struct IconDef {
+    p: string,
+    a: string,
+    f: string,
+}
+
+export global Icons {
+    out property <IconDef> select: { p: "M5 4 L5 18 L9 14.5 L11.5 20 L13.5 19 L11 13.5 L16 13.5 Z", a: "M5 4 L5 11" };
+    out property <IconDef> sketch: { p: "M16.5 3.5 a2.12 2.12 0 0 1 3 3 L7.5 18 L3.5 19 L4.5 15 Z M14.5 5.5 L17.5 8.5", a: "M4 20 H20", f: "M20 20 m-1.3 0 a1.3 1.3 0 1 0 2.6 0 a1.3 1.3 0 1 0 -2.6 0" };
+    out property <IconDef> plane: { p: "M4 10 L13 6 L20 11 L11 15 Z", a: "M12 10.5 V3", f: "M12 10.5 m-1.3 0 a1.3 1.3 0 1 0 2.6 0 a1.3 1.3 0 1 0 -2.6 0" };
+    out property <IconDef> extrude: { p: "M9 12 H17 V20 H9 Z M9 12 L12 9 H20 L17 12 M17 12 L20 9 V17 L17 20", a: "M4 20 V9 M1.8 11 L4 8.8 L6.2 11" };
+    out property <IconDef> revolve: { p: "M8 8 a5 1.8 0 1 0 10 0 a5 1.8 0 1 0 -10 0 M8 8 V17 M18 8 V17 M8 17 a5 1.8 0 0 0 10 0", a: "M13 3 V21 M4.6 5.4 a3.4 1.3 0 1 1 5.6 -0.9 M3.4 3 L4.4 5.6 L6.6 4.4" };
+    out property <IconDef> fillet: { p: "M5 4 V12 M12 19 H20", a: "M5 12 A7 7 0 0 0 12 19" };
+    out property <IconDef> chamfer: { p: "M5 4 V11 M13 19 H20", a: "M5 11 L13 19" };
+    out property <IconDef> shell: { p: "M6 12 H14 V20 H6 Z M6 12 L10 9 H18 L14 12 M18 9 V17 L14 20", a: "M7.4 11.6 L13.6 11.6 L16.6 9.4 L11 9.4 Z" };
+    out property <IconDef> boolean: { p: "M4 9 H15 V20 H4 Z M9 4 H20 V15 H9 Z", a: "M14.5 8 V12 M12.5 10 H16.5" };
+    out property <IconDef> pattern: { p: "M3 6 H7 V14 H3 Z M10 6 H14 V14 H10 Z M17 6 H21 V14 H17 Z", a: "M3 19 H20 M17 16.5 L20 19 L17 21.5" };
+    out property <IconDef> mirror: { p: "M4 7 L8.5 12 L4 17 Z M20 7 L15.5 12 L20 17 Z", a: "M12 3 V21" };
+    out property <IconDef> move: { p: "M12 3 V21 M3 12 H21", a: "M9 6 L12 3 L15 6 M9 18 L12 21 L15 18 M6 9 L3 12 L6 15 M18 9 L21 12 L18 15" };
+    out property <IconDef> measure: { p: "M14.5 3.5 L20.5 9.5 L10.5 19.5 L4.5 13.5 Z", a: "M10.5 7.5 L12.5 9.5 M8 10 L10 12 M5.5 12.5 L7.5 14.5" };
+    out property <IconDef> body: { p: "M6 11 H14 V20 H6 Z M6 11 L10 8 H18 L14 11 M18 8 V17 L14 20", f: "M6 11 L10 8 L18 8 L14 11 Z" };
+    out property <IconDef> eye: { p: "M2 12 C5 6.5 8.5 5 12 5 C15.5 5 19 6.5 22 12 C19 17.5 15.5 19 12 19 C8.5 19 5 17.5 2 12 Z", f: "M12 12 m-2.6 0 a2.6 2.6 0 1 0 5.2 0 a2.6 2.6 0 1 0 -5.2 0" };
+    out property <IconDef> eye-off: { p: "M6.5 6.7 C4.6 7.9 3.1 9.7 2 12 C5 17.5 8.5 19 12 19 C13.4 19 14.8 18.8 16.1 18.2 M3 3 L21 21" };
+    out property <IconDef> home: { p: "M3 11 L12 4 L21 11 M5 10 V20 H19 V10", a: "M10 20 V14 H14 V20" };
+    out property <IconDef> fit: { p: "M4 8 V4 H8 M16 4 H20 V8 M20 16 V20 H16 M8 20 H4 V16", a: "M9 9 H15 V15 H9 Z" };
+    out property <IconDef> iso: { p: "M6 10 H14 V19 H6 Z M6 10 L11 7 H19 L14 10 M19 7 V16 L14 19 M14 10 V19", f: "M14 10 m-1.5 0 a1.5 1.5 0 1 0 3 0 a1.5 1.5 0 1 0 -3 0" };
+    out property <IconDef> stack: { p: "M3 12 L12 17 L21 12 M3 16 L12 21 L21 16", a: "M12 3 L21 8 L12 13 L3 8 Z" };
+}
+
+export component Icon {
+    in property <IconDef> icon;
+    in property <length> size: 16px;
+    in property <brush> color: Tokens.ink-3;
+    in property <brush> accent: Tokens.icon-accent;
+    in property <length> stroke: 1.6px;
+    width: size;
+    height: size;
+    accessible-role: AccessibleRole.image;
+    if icon.p != "": Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: icon.p;
+        stroke: color;
+        stroke-width: stroke;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        fill: transparent;
+    }
+    if icon.a != "": Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: icon.a;
+        stroke: accent;
+        stroke-width: stroke;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        fill: transparent;
+    }
+    if icon.f != "": Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: icon.f;
+        fill: accent;
+        stroke: transparent;
+    }
+}

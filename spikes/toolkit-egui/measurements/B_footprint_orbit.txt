@@ -1,0 +1,13 @@
+toolkit-egui [76994]: 64-bit    Footprint: 401 MB (16384 bytes per page)
+======================================================================
+
+  Dirty      Clean  Reclaimable    Regions    Category
+    ---        ---          ---        ---    ---
+ 262 MB        0 B          0 B        150    Owned physical footprint (unmapped) (graphics)
+  55 MB        0 B          0 B        438    Owned physical footprint (unmapped)
+  40 MB        0 B      1152 KB         27    MALLOC_SMALL
+  17 MB        0 B          0 B          7    IOSurface
+  10 MB        0 B          0 B          2    MALLOC_LARGE
+6608 KB        0 B      5008 KB        153    IOAccelerator (graphics)
+1762 KB        0 B          0 B        868    __DATA_DIRTY
+1664 KB        0 B          0 B         38    untagged (VM_ALLOCATE)

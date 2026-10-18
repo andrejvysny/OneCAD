@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+exclude = ["vendor/solidcraft-viewport"]
+members = [
+    "src-tauri",
+    "crates/onecad-app",
+    "crates/onecad-scene",
+    "crates/onecad-render",
+    "crates/onecad-interaction",
+    "crates/onecad-ui",
+    "crates/onecad-core",
+    "crates/onecad-protocol",
+    "crates/onecad-worker-stub",
+    "crates/onecad-regen",
+    "crates/onecad-kernelbench",
+    "crates/onecad-library",
+    "crates/onecad-library-ingest",
+]
+
+# Shared dependency versions for every workspace member. Individual crates
+# opt into features via `{ workspace = true, features = [...] }`.
+[workspace.dependencies]
+onecad-app = { path = "crates/onecad-app" }
+onecad-scene = { path = "crates/onecad-scene" }
+onecad-render = { path = "crates/onecad-render" }
+onecad-interaction = { path = "crates/onecad-interaction" }
+onecad-ui = { path = "crates/onecad-ui" }
+onecad-core = { path = "crates/onecad-core" }
+onecad-protocol = { path = "crates/onecad-protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+tracing = "0.1"
+# Dev-observability (DEV-OBSERVABILITY wave R): `env-filter` makes `RUST_LOG`
+# live, `json` backs the `logs/dev.jsonl` lane; `tracing-appender` provides the
+# non-blocking writer + its flush guard.
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+async-trait = "0.1"
+tokio = { version = "1", default-features = false }
+tokio-util = { version = "0.7", default-features = false }
+bytes = "1"
+zip = "2"
+sha2 = "0.10"

@@ -1,0 +1,97 @@
+adapter: Apple M4 Pro (Metal)  timestamps: true
+ibl prefilter (one-time, incl. pipeline creation): 55.0 ms
+
+nema: 67 bodies, 381524 triangles, 289946 vertices, 2035 faces, 5077 edges (69267 segments), 339992 silhouette candidates; load+prep 86 ms
+  winding vs normals: 381503/381524 triangles agree
+  camera: eye Vec3(51.948956, -54.42581, 82.33801) target Vec3(0.1265297, -2.6033869, 30.51559) distance 89.8 mm, grid minor 5 mm
+  renderer setup (dark): 10 ms
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/baseline_nema_dark.png
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/quality_nema_dark.png
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/alt_a2c_nema_dark.png
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/alt_msaa_nema_dark.png
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/lines_nema_dark.png
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/compare_nema_dark.png
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/crop_nema_dark.png
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/silhouettes_nema_dark.png
+
+  timings at 2560x1600 (repeated: 40 per submit, median of 11; latency: 10 warm-up + 60 frames)
+  baseline frame (opaque lines, like today)
+    pass                    repeated  timestamp med
+    main (msaa 4x)          0.467 ms     -0.241 (60/60 neg)
+    sum of passes           0.467 ms
+    frame                   0.467 ms   (whole frame repeated 40x per submit)
+    submit → done           0.954 ms median, 1.065 ms p95 (one frame per submit)
+  baseline main pass, bodies only:  0.156 ms
+  baseline main pass, bodies + grid:  0.350 ms
+  baseline main pass, lines alpha-blended instead (previous spike):  0.844 ms
+  quality frame (camera move: contact map cached)
+    pass                    repeated  timestamp med
+    depth/normal prepass    0.099 ms      0.227 (0/60 neg)
+    gtao                    0.410 ms      0.531 (0/60 neg)
+    ao blur h               0.083 ms      0.609 (0/60 neg)
+    ao blur v               0.083 ms      0.684 (0/60 neg)
+    silhouette compaction   0.052 ms      (none: compute pass)
+    main (msaa 4x)          1.037 ms     -0.475 (60/60 neg)
+    sum of passes           1.764 ms
+    frame                   1.767 ms   (whole frame repeated 40x per submit)
+    submit → done           2.018 ms median, 2.388 ms p95 (one frame per submit)
+  quality frame + contact-map rebuild (geometry change)
+    pass                    repeated  timestamp med
+    contact height          0.094 ms      0.142 (0/60 neg)
+    contact occlusion       0.049 ms      0.136 (0/60 neg)
+    contact blur h          0.090 ms      0.630 (0/60 neg)
+    contact blur v          0.089 ms      0.754 (0/60 neg)
+    depth/normal prepass    0.099 ms      0.218 (0/60 neg)
+    gtao                    0.410 ms      0.542 (0/60 neg)
+    ao blur h               0.082 ms      0.641 (0/60 neg)
+    ao blur v               0.083 ms      0.763 (0/60 neg)
+    silhouette compaction   0.052 ms      (none: compute pass)
+    main (msaa 4x)          1.039 ms     -0.609 (60/60 neg)
+    sum of passes           2.087 ms
+    frame                   2.031 ms   (whole frame repeated 40x per submit)
+    submit → done           2.186 ms median, 2.510 ms p95 (one frame per submit)
+    visible silhouette segments this frame: 3621 of 339992 candidates
+  quality main pass, incremental (each row adds one part; repeated timing):
+    bodies (PBR + IBL + AO)                 0.162 ms
+    + ground (grid + contact shadow)        0.224 ms
+    + silhouette lines (compacted)          0.236 ms
+    + feature edges (= default look)        1.038 ms
+  alternatives (main pass with ground + edges on):
+    silhouettes culled in line VS           1.072 ms
+    lines via alpha-to-coverage             0.401 ms
+      quality frame, a2c lines              1.136 ms   (whole quality frame, contact map cached)
+    lines hard, MSAA only                   0.357 ms
+      quality frame, MSAA-only lines        1.092 ms   (whole quality frame, contact map cached)
+    fragment silhouettes (no lines)         1.020 ms
+  edge-cost experiments (main pass, all parts, default blended lines unless noted):
+    edge quads culled after vertex work     0.289 ms
+    edges opaque (no blend; wrong image)    0.298 ms
+    edges blended + discard uncovered       1.265 ms
+  feature-edge quads: 1.8 M px of quad area (visible + hidden), 48657 of 69267 segments shorter than 1 px on screen
+  renderer setup (light): 9 ms
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/baseline_nema_light.png
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/quality_nema_light.png
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/alt_a2c_nema_light.png
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/alt_msaa_nema_light.png
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/lines_nema_light.png
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/compare_nema_light.png
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/crop_nema_light.png
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/silhouettes_nema_light.png
+
+fillet: 1 bodies, 156 triangles, 170 vertices, 7 faces, 15 edges (77 segments), 35 silhouette candidates; load+prep 0 ms
+  winding vs normals: 156/156 triangles agree
+  camera: eye Vec3(12.112202, -7.1122017, 32.1122) target Vec3(-15.0, 20.0, 5.0) distance 47.0 mm, grid minor 2 mm
+  renderer setup (dark): 6 ms
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/baseline_fillet_dark.png
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/quality_fillet_dark.png
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/alt_a2c_fillet_dark.png
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/alt_msaa_fillet_dark.png
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/compare_fillet_dark.png
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/crop_fillet_dark.png
+  renderer setup (light): 6 ms
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/baseline_fillet_light.png
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/quality_fillet_light.png
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/alt_a2c_fillet_light.png
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/alt_msaa_fillet_light.png
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/compare_fillet_light.png
+  wrote /Users/andrejvysny/workspace/OneCAD/spikes/render-look/out/crop_fillet_light.png

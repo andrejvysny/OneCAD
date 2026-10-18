@@ -1,0 +1,86 @@
+// Floating dimension input anchored to a projected world point.
+import { Tokens } from "tokens.slint";
+import { Theme } from "panels.slint";
+
+export component DimensionChip inherits Rectangle {
+    in property <string> label: "Height";
+    in-out property <string> text <=> field.text;
+    in property <string> preview;
+    in property <bool> error;
+    out property <bool> focused: field.has-focus;
+    callback edited(string);
+    callback commit(string);
+    callback cancel();
+    callback key(string, bool, bool);
+
+    public function text-undo() { field.undo(); }
+    public function text-redo() { field.redo(); }
+    public function begin() { field.focus(); field.select-all(); }
+    public function end() { field.clear-focus(); }
+
+    width: row.preferred-width;
+    height: 30px;
+    background: Tokens.surface;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: root.error ? Tokens.danger-strong : field.has-focus ? Tokens.accent : Tokens.border-strong;
+    drop-shadow-blur: 10px;
+    drop-shadow-offset-y: 3px;
+    drop-shadow-color: Tokens.scrim;
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: root.label + " dimension";
+
+    TouchArea {
+        mouse-cursor: MouseCursor.text;
+        clicked => { root.begin(); }
+    }
+    row := HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 9px;
+        spacing: 8px;
+        Text {
+            text: root.label;
+            font-size: 11.5px;
+            font-weight: 600;
+            color: Tokens.ink-4;
+            vertical-alignment: center;
+        }
+        Rectangle {
+            width: 1px;
+            height: 14px;
+            y: 8px;
+            background: Tokens.border;
+        }
+        field := TextInput {
+            width: max(110px, self.preferred-width);
+            font-family: Theme.mono-font;
+            font-size: 12.5px;
+            color: Tokens.ink;
+            vertical-alignment: center;
+            single-line: true;
+            input-type: InputType.text;
+            selection-background-color: Tokens.sel-bg;
+            selection-foreground-color: Tokens.sel-text;
+            accessible-role: AccessibleRole.text-input;
+            accessible-label: root.label;
+            accessible-value: self.text;
+            edited => { root.edited(self.text); }
+            accepted => { root.commit(self.text); }
+            key-pressed(e) => {
+                root.key(e.text, e.modifiers.meta, e.modifiers.control);
+                if (e.text == Key.Escape) {
+                    root.cancel();
+                    return accept;
+                }
+                reject
+            }
+        }
+        Text {
+            text: root.preview;
+            font-family: Theme.mono-font;
+            font-size: 11.5px;
+            color: root.error ? Tokens.danger-strong : Tokens.ink-5;
+            vertical-alignment: center;
+        }
+    }
+}

@@ -65,7 +65,7 @@ export const AgentConfigSchema = z
           .default({}),
         bundled: z
           .object({
-            appPath: z.string().default("src-tauri/target/release/bundle/macos/onecad.app"),
+            appPath: z.string().default("target/release/bundle/macos/onecad.app"),
           })
           .default({}),
       })

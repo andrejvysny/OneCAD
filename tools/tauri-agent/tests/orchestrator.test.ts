@@ -105,7 +105,7 @@ function identityFor(root: string): AgentIdentity {
     agentTesting: true,
     bundleId: "com.andrejvysny.onecad",
     pid: APP_PID,
-    executable: `${root}/src-tauri/target/debug/onecad`,
+    executable: `${root}/target/debug/onecad`,
     cargoManifestDir: `${root}/src-tauri`,
     sessionNonce: "0123456789abcdef",
   };
@@ -312,7 +312,7 @@ describe("SessionOrchestrator.start", () => {
     const link = join(tempDir(), "link-to-checkout");
     symlinkSync(real, link);
     const w = world(link);
-    w.commands.set(APP_PID, `${link}/src-tauri/target/debug/onecad`);
+    w.commands.set(APP_PID, `${link}/target/debug/onecad`);
     // The app reports the path it was BUILT at — the real one, not the symlinked spelling.
     const session = makeSession(w, { identity: { ...identityFor(real), pid: APP_PID } });
 
@@ -339,9 +339,9 @@ describe("SessionOrchestrator.start", () => {
     const w = world(tempDir());
     const DEV_PID = 7777;
     // The developer's own dev app, already running from this same checkout.
-    w.commands.set(DEV_PID, `${w.root}/src-tauri/target/debug/onecad`);
+    w.commands.set(DEV_PID, `${w.root}/target/debug/onecad`);
     w.pgrep.set("target/debug/onecad", [DEV_PID]);
-    w.commands.set(APP_PID, `${w.root}/src-tauri/target/debug/onecad`);
+    w.commands.set(APP_PID, `${w.root}/target/debug/onecad`);
     const session = makeSession(w);
 
     await session.start({ mode: "launch", launch: "dev" });
@@ -361,7 +361,7 @@ describe("SessionOrchestrator.start", () => {
 
   test("stop({killApp:false}) on a LAUNCHED session really detaches: nothing is signalled", async () => {
     const w = world(tempDir());
-    w.commands.set(APP_PID, `${w.root}/src-tauri/target/debug/onecad`);
+    w.commands.set(APP_PID, `${w.root}/target/debug/onecad`);
     const session = makeSession(w);
     await session.start({ mode: "launch", launch: "dev" });
 
@@ -373,7 +373,7 @@ describe("SessionOrchestrator.start", () => {
 
   test("stop() on a launched session still kills it, so the normal path is unchanged", async () => {
     const w = world(tempDir());
-    w.commands.set(APP_PID, `${w.root}/src-tauri/target/debug/onecad`);
+    w.commands.set(APP_PID, `${w.root}/target/debug/onecad`);
     const session = makeSession(w);
     await session.start({ mode: "launch", launch: "dev" });
 
@@ -384,7 +384,7 @@ describe("SessionOrchestrator.start", () => {
 
   test("session_start instruments the page, so an action before any ui_snapshot is observable", async () => {
     const w = world(tempDir());
-    w.commands.set(APP_PID, `${w.root}/src-tauri/target/debug/onecad`);
+    w.commands.set(APP_PID, `${w.root}/target/debug/onecad`);
     const scripts: string[] = [];
     const session = makeSession(w, { scripts });
 
@@ -397,7 +397,7 @@ describe("SessionOrchestrator.start", () => {
 
   test("a failed install degrades the session with a warning instead of refusing to start", async () => {
     const w = world(tempDir());
-    w.commands.set(APP_PID, `${w.root}/src-tauri/target/debug/onecad`);
+    w.commands.set(APP_PID, `${w.root}/target/debug/onecad`);
     const session = makeSession(w, { instrumentError: "bridge said no" });
 
     const status = await session.start({ mode: "launch", launch: "dev" });
@@ -410,7 +410,7 @@ describe("SessionOrchestrator.start", () => {
 
   test("launch:dev reaches Ready and calibrates; the wheel probe is skipped without a viewport", async () => {
     const w = world(tempDir());
-    w.commands.set(APP_PID, `${w.root}/src-tauri/target/debug/onecad`);
+    w.commands.set(APP_PID, `${w.root}/target/debug/onecad`);
     const session = makeSession(w);
 
     const status = await session.start({ mode: "launch", launch: "dev" });
@@ -436,7 +436,7 @@ describe("SessionOrchestrator.start", () => {
   test("a non-ANSI/US layout produces the session-start warning; an ANSI one does not", async () => {
     const nonAnsi: KeyboardLayoutInfo = { inputSourceId: "com.apple.keylayout.German", isAnsiUs: false };
     const w = world(tempDir());
-    w.commands.set(APP_PID, `${w.root}/src-tauri/target/debug/onecad`);
+    w.commands.set(APP_PID, `${w.root}/target/debug/onecad`);
     const session = makeSession(w, {}, GRANTED, nonAnsi);
 
     const status = await session.start({ mode: "launch", launch: "dev" });
@@ -450,7 +450,7 @@ describe("SessionOrchestrator.start", () => {
   test("an occupied WebDriver port owned by our app attaches when reuseExisting is set", async () => {
     const w = world(tempDir());
     w.listeners.set(4445, [APP_PID]);
-    w.commands.set(APP_PID, `${w.root}/src-tauri/target/debug/onecad`);
+    w.commands.set(APP_PID, `${w.root}/target/debug/onecad`);
     const session = makeSession(w);
 
     const status = await session.start({ mode: "launch", launch: "dev", reuseExisting: true });
@@ -512,7 +512,7 @@ describe("SessionOrchestrator.start", () => {
 describe("SessionOrchestrator capture capability", () => {
   test("the grant present makes captures available and authoritative", async () => {
     const w = world(tempDir());
-    w.commands.set(APP_PID, `${w.root}/src-tauri/target/debug/onecad`);
+    w.commands.set(APP_PID, `${w.root}/target/debug/onecad`);
     const session = makeSession(w);
 
     const status = await session.start({ mode: "launch", launch: "dev" });
@@ -523,7 +523,7 @@ describe("SessionOrchestrator capture capability", () => {
 
   test("allowDegradedCapture starts the session and records that it cannot photograph", async () => {
     const w = world(tempDir());
-    w.commands.set(APP_PID, `${w.root}/src-tauri/target/debug/onecad`);
+    w.commands.set(APP_PID, `${w.root}/target/debug/onecad`);
     const session = makeSession(w, {}, { accessibility: true, screenRecording: false });
 
     const status = await session.start({ mode: "launch", launch: "dev", allowDegradedCapture: true });
@@ -540,7 +540,7 @@ describe("SessionOrchestrator capture capability", () => {
 
   test("without the grant and without the flag the session refuses to start at all", async () => {
     const w = world(tempDir());
-    w.commands.set(APP_PID, `${w.root}/src-tauri/target/debug/onecad`);
+    w.commands.set(APP_PID, `${w.root}/target/debug/onecad`);
     const session = makeSession(w, {}, { accessibility: true, screenRecording: false });
 
     await expect(session.start({ mode: "launch", launch: "dev" })).rejects.toMatchObject({
@@ -559,7 +559,7 @@ describe("SessionOrchestrator attach ownership", () => {
   function attachWorld(): World {
     const w = world(tempDir());
     w.listeners.set(4445, [APP_PID]);
-    w.commands.set(APP_PID, `${w.root}/src-tauri/target/debug/onecad`);
+    w.commands.set(APP_PID, `${w.root}/target/debug/onecad`);
     return w;
   }
 
@@ -610,7 +610,7 @@ describe("SessionOrchestrator attach ownership", () => {
     const w = world(tempDir());
     w.listeners.set(4445, [OTHER_PID]);
     // Same binary, same pattern — a different project root. Pattern-only ownership said yes.
-    w.commands.set(OTHER_PID, "/Users/someone-else/OneCAD/src-tauri/target/debug/onecad");
+    w.commands.set(OTHER_PID, "/Users/someone-else/OneCAD/target/debug/onecad");
     const session = makeSession(w);
 
     const err = (await session.start({ mode: "attach" }).catch((e: unknown) => e)) as {
@@ -645,7 +645,7 @@ describe("SessionOrchestrator identity handshake", () => {
   } {
     const w = world(tempDir());
     w.listeners.set(4445, [APP_PID]);
-    w.commands.set(APP_PID, `${w.root}/src-tauri/target/debug/onecad`);
+    w.commands.set(APP_PID, `${w.root}/target/debug/onecad`);
     return { w, session: makeSession(w, over(w.root)) };
   }
 
@@ -727,7 +727,7 @@ describe("SessionOrchestrator identity handshake", () => {
 describe("SessionOrchestrator start failure", () => {
   test("a calibration failure after launch tears the launched app down and ends Failed", async () => {
     const w = world(tempDir());
-    w.commands.set(APP_PID, `${w.root}/src-tauri/target/debug/onecad`);
+    w.commands.set(APP_PID, `${w.root}/target/debug/onecad`);
     w.pgrep.set("target/debug/onecad", [APP_PID]);
     const session = makeSession(w, { noProbe: true });
 
@@ -744,8 +744,8 @@ describe("SessionOrchestrator start failure", () => {
 describe("SessionOrchestrator.stop", () => {
   test("signals the launcher group, then kills only survivors owned by this project", async () => {
     const w = world(tempDir());
-    w.commands.set(APP_PID, `${w.root}/src-tauri/target/debug/onecad`);
-    w.commands.set(OTHER_PID, "/Users/someone-else/OneCAD/src-tauri/target/debug/onecad");
+    w.commands.set(APP_PID, `${w.root}/target/debug/onecad`);
+    w.commands.set(OTHER_PID, "/Users/someone-else/OneCAD/target/debug/onecad");
     const session = makeSession(w);
     await session.start({ mode: "launch", launch: "dev" });
     w.pgrep.set("target/debug/onecad", [APP_PID, OTHER_PID]);
@@ -765,7 +765,7 @@ describe("SessionOrchestrator.stop", () => {
 
   test("a launched session still SIGTERMs the app it started", async () => {
     const w = world(tempDir());
-    w.commands.set(APP_PID, `${w.root}/src-tauri/target/debug/onecad`);
+    w.commands.set(APP_PID, `${w.root}/target/debug/onecad`);
     const session = makeSession(w);
     const started = await session.start({ mode: "launch", launch: "dev" });
     expect(started.ownership).toEqual({ kind: "launched", pid: APP_PID });
@@ -779,7 +779,7 @@ describe("SessionOrchestrator.stop", () => {
 
   test("reports STOP_INCOMPLETE when a matching process refuses to die", async () => {
     const w = world(tempDir());
-    w.commands.set(APP_PID, `${w.root}/src-tauri/target/debug/onecad`);
+    w.commands.set(APP_PID, `${w.root}/target/debug/onecad`);
     w.stubborn.add(APP_PID);
     const session = makeSession(w);
     await session.start({ mode: "launch", launch: "dev" });
@@ -790,7 +790,7 @@ describe("SessionOrchestrator.stop", () => {
       details: { survivors: Array<{ pid: number; command: string }> };
     };
     expect(err.code).toBe("STOP_INCOMPLETE");
-    expect(err.details.survivors).toEqual([{ pid: APP_PID, command: `${w.root}/src-tauri/target/debug/onecad` }]);
+    expect(err.details.survivors).toEqual([{ pid: APP_PID, command: `${w.root}/target/debug/onecad` }]);
     // The session still resets, so a later session_start is not blocked by our own state.
     expect(session.status().state).toBe("Idle");
   });
@@ -815,7 +815,7 @@ describe("SessionOrchestrator.stop", () => {
 describe("interaction policy", () => {
   test("the DEFAULT session is unchanged: it focuses and runs both probes", async () => {
     const w = world(tempDir());
-    w.commands.set(APP_PID, `${w.root}/src-tauri/target/debug/onecad`);
+    w.commands.set(APP_PID, `${w.root}/target/debug/onecad`);
     const log: string[] = [];
     const session = makeSession(w, {}, GRANTED, ANSI_US_LAYOUT, log);
 
@@ -834,7 +834,7 @@ describe("interaction policy", () => {
 
   test("a background session starts Ready without focusing or posting a single event", async () => {
     const w = world(tempDir());
-    w.commands.set(APP_PID, `${w.root}/src-tauri/target/debug/onecad`);
+    w.commands.set(APP_PID, `${w.root}/target/debug/onecad`);
     const log: string[] = [];
     const session = makeSession(w, {}, GRANTED, ANSI_US_LAYOUT, log);
 
@@ -858,7 +858,7 @@ describe("interaction policy", () => {
 
   test("a background LAUNCH reports the one activation it could not avoid", async () => {
     const w = world(tempDir());
-    w.commands.set(APP_PID, `${w.root}/src-tauri/target/debug/onecad`);
+    w.commands.set(APP_PID, `${w.root}/target/debug/onecad`);
     const session = makeSession(w);
     const status = await session.start({ mode: "launch", launch: "dev", interaction: "background" });
     // Not a harness choice: tao's window_activation_hack makes every visible window key at
@@ -870,7 +870,7 @@ describe("interaction policy", () => {
   test("a background ATTACH steals nothing at all, because nothing is launched", async () => {
     const w = world(tempDir());
     w.listeners.set(4445, [APP_PID]);
-    w.commands.set(APP_PID, `${w.root}/src-tauri/target/debug/onecad`);
+    w.commands.set(APP_PID, `${w.root}/target/debug/onecad`);
     const log: string[] = [];
     const session = makeSession(w, {}, GRANTED, ANSI_US_LAYOUT, log);
 
@@ -884,7 +884,7 @@ describe("interaction policy", () => {
 
   test("config's interaction.default decides when session_start does not", async () => {
     const w = world(tempDir());
-    w.commands.set(APP_PID, `${w.root}/src-tauri/target/debug/onecad`);
+    w.commands.set(APP_PID, `${w.root}/target/debug/onecad`);
     const log: string[] = [];
     const session = makeSession(w, {}, GRANTED, ANSI_US_LAYOUT, log, {
       interaction: { default: "background" },
@@ -899,7 +899,7 @@ describe("interaction policy", () => {
 
   test("an explicit session_start argument beats the config default, in both directions", async () => {
     const w = world(tempDir());
-    w.commands.set(APP_PID, `${w.root}/src-tauri/target/debug/onecad`);
+    w.commands.set(APP_PID, `${w.root}/target/debug/onecad`);
     const log: string[] = [];
     const session = makeSession(w, {}, GRANTED, ANSI_US_LAYOUT, log, {
       interaction: { default: "background" },
@@ -944,7 +944,7 @@ describe("the refusing adapter is actually installed", () => {
     log: string[];
   }> {
     const w = world(tempDir());
-    w.commands.set(APP_PID, `${w.root}/src-tauri/target/debug/onecad`);
+    w.commands.set(APP_PID, `${w.root}/target/debug/onecad`);
     const log: string[] = [];
     const session = makeSession(w, {}, GRANTED, ANSI_US_LAYOUT, log);
     await session.start({ mode: "launch", launch: "dev", interaction: policy });
@@ -1022,7 +1022,7 @@ describe("the refusing adapter is actually installed", () => {
    */
   test("a background session survives its window leaving the active Space", async () => {
     const w = world(tempDir());
-    w.commands.set(APP_PID, `${w.root}/src-tauri/target/debug/onecad`);
+    w.commands.set(APP_PID, `${w.root}/target/debug/onecad`);
     const log: string[] = [];
     const session = makeSession(w, {}, GRANTED, ANSI_US_LAYOUT, log);
     await session.start({ mode: "launch", launch: "dev", interaction: "background" });

@@ -60,6 +60,45 @@ The C++ worker is the **geometry service implementation of `onecad.modeling`**,
 not a general OneCAD backend. A future module needing geometry consumes the
 modeling geometry service; it never speaks OCW1 itself.
 
+### Rust workspace and native host boundary
+
+The repository-root `Cargo.toml` and `Cargo.lock` own the Rust workspace.
+`src-tauri/` remains the legacy Tauri adapter and an integration-test member;
+its application services now live in `crates/onecad-app/`. This extraction is
+an implemented code boundary, not evidence that native UI acceptance gates pass.
+
+| Crate | Responsibility |
+|---|---|
+| `onecad-app` | Host-independent application services, authoritative document runtime, regeneration, worker supervision, persistence, import/export and library operations |
+| `onecad-scene` | Bounded immutable CPU scene, captured camera/viewport identity, synchronous picking and fit calculations |
+| `onecad-render` | Rendering on the native host's shared wgpu device and queue; consumes checked scene geometry |
+| `onecad-interaction` | Pure extrusion and existing-feature distance-edit transitions; emits tagged application effect intents without I/O |
+| `onecad-ui` | Native eframe host, presentation, platform integration and bounded execution of application effects |
+
+The native host implements a first workflow subset. It does not establish parity
+with the legacy editor. Both hosts use the same `onecad-app` mutation services;
+neither the scene, renderer nor interaction reducer owns a document mutation
+path. Accepted edits, regeneration completion, per-feature failures and repair
+states remain distinct. A failed accepted edit is not automatically removed;
+provisional rollback requires the application-owned guarded rollback token.
+
+Profile selections and disposable previews carry captured document, runtime,
+revision, snapshot, gesture and operation identities. The reducer rejects stale
+replies and reuses one operation id for a new feature's preview and commit.
+Existing-feature edits do not use the new-feature preview path: an authoritative
+rollback-prefix preview is required before that preview can be enabled.
+
+Native scene and rendering consumers use the checked MESH1 decoder in
+`onecad-protocol`; the legacy Tauri path continues forwarding validated bulk
+bytes to the React viewport. Both preserve Z-up coordinates and semantic
+topology identities.
+
+`scripts/check-rust-layers.mjs` enforces workspace dependency directions,
+including optional, build, development and target-specific dependencies. UI and
+platform toolkit dependencies belong to hosts; wgpu belongs to the rendering
+crate and host. Application, interaction, scene and pure domain code remain
+independent of Tauri and UI toolkits.
+
 ## 4. Ownership rules
 
 1. The Platform owns generic infrastructure.

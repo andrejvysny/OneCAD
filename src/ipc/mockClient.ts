@@ -1436,7 +1436,7 @@ function mutateOp(op: OperationOp): {
     // worse kernel. So the mock does what it does for every other body-MODIFYING
     // op (Shell, Fillet/Chamfer, Hole): re-emit the target untouched and record
     // the feature. The GEOMETRY is pinned against the real kernel by
-    // `worker/tests/test_offsetface.cpp` + `src-tauri/tests/offset_face.rs`; what
+    // `worker/tests/test_offsetface.cpp` + `crates/onecad-app/tests/offset_face.rs`; what
     // the mock lane owns is the UI chain — prepare → arm → drag → chip → commit.
     const bodyId = op.params.targetBodyId || op.inputs?.[0]?.primary.bodyId || "body1";
     const featureId = op.featureId ?? nextFeatureId();
@@ -1476,7 +1476,7 @@ function mutateOp(op: OperationOp): {
     // so the mock does what it does for every body-MODIFYING op (Shell,
     // Fillet/Chamfer): re-emit the host untouched and record the feature. The
     // GEOMETRY is pinned against the real kernel by `worker/tests/test_hole_op.cpp`
-    // and `src-tauri/tests/hole_ops.rs`; what the mock lane owns is the UI chain —
+    // and `crates/onecad-app/tests/hole_ops.rs`; what the mock lane owns is the UI chain —
     // face pick → chips → committed record → re-edit seed.
     const bodyId = op.params.targetBodyId || op.inputs?.[0]?.primary.bodyId || "body1";
     const featureId = op.featureId ?? nextFeatureId();
@@ -1907,7 +1907,7 @@ const MOCK_LIBRARY_FIXTURE: LibraryComponent = {
   },
   // WP-2.4: enough of a `[parameters]` table for the configurator to render
   // real controls in the mock/e2e lane — mirrors the real ISO 4762 package's
-  // shape (`src-tauri/src/library.rs`'s test fixture), not a distinct mock-only
+  // shape (`crates/onecad-app/src/library.rs`'s test fixture), not a distinct mock-only
   // schema.
   parameters: {
     thread: { role: "free", key: "M6", domain: ["M3", "M4", "M5", "M6", "M8"] },
@@ -1925,7 +1925,7 @@ const MOCK_LIBRARY_FIXTURE: LibraryComponent = {
 
 /**
  * The whole opt-in catalog. ONE entry, because the shipped seed catalog is one
- * package (`src-tauri/src/library_seed.rs::SEED_PACKAGES`) — the nine other
+ * package (`crates/onecad-app/src/library_seed.rs::SEED_PACKAGES`) — the nine other
  * families this list used to mirror went with their worker generators.
  *
  * MIRRORED, not invented: a mock catalog carrying a parameter shape the app
@@ -4113,7 +4113,7 @@ export const mockClient: CadClient = {
    * evaluate honestly, and it is the one the arm path fails closed on.
    *
    * Geometry is pinned against the kernel by `worker/tests/test_offsetface.cpp`
-   * and `src-tauri/tests/offset_face.rs`; what the mock owns is the UI chain.
+   * and `crates/onecad-app/tests/offset_face.rs`; what the mock owns is the UI chain.
    */
   async prepareOffsetFace(req: PrepareOffsetFaceRequest): Promise<PrepareOffsetFaceResult> {
     await wait(MESH_LATENCY_MS);

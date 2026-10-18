@@ -3,7 +3,7 @@
  * kinds (Fixed / OnCurve / Tangent / Concentric / Symmetric) that `toWireConstraint`
  * previously dropped at the null seam. Exact Rust-typed-doc JSON pinned (kind-tagged
  * camelCase; verified field-for-field against
- * `src-tauri/crates/onecad-core/src/sketch/constraint.rs`).
+ * `crates/onecad-core/src/sketch/constraint.rs`).
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { createIdMap, marshalUpsert } from "./sketchWireMap";

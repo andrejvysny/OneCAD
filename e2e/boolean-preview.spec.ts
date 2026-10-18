@@ -45,7 +45,7 @@ const BOOLEAN_LANE_TIMEOUT = 20_000;
  * tool body IS consumed), which `ViewportEngine.setPreviewReplacedBodyIds` hides
  * regardless of whether the mesh came from a real worker or nothing at all. That
  * preview-volume == commit-volume equivalence is proven against the REAL worker in
- * `src-tauri/tests/preview_boolean.rs`; these specs prove the lane LIFECYCLE the
+ * `crates/onecad-app/tests/preview_boolean.rs`; these specs prove the lane LIFECYCLE the
  * real client shares with the mock: arm → tool body hidden → Esc restores it, and
  * arm → Apply → the tool body is CONSUMED (one surviving body row).
  */

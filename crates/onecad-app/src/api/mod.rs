@@ -1,0 +1,5711 @@
+//! Host-independent application operations over the single-writer document runtime.
+//!
+//! Desktop adapters marshal typed commands and supply host events, paths, and dialogs.
+//! Regeneration and persistence preserve their prepare, unlocked I/O, and fenced commit phases.
+
+pub use crate::read::{
+    get_operation_record, get_sketch_plane, get_sketch_snapshot, preview_context, PreviewContext,
+};
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(debug_assertions)]
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex, OnceLock,
+    },
+    time::{Duration, Instant},
+};
+
+use crate::host::{AppEvent, HostContext};
+use serde::Deserialize;
+
+use onecad_core::document::modules::{ModuleId, ModuleState};
+use onecad_core::document::record::{MateSidedness, Operation};
+use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef, PrimaryRef};
+use onecad_core::document::variables::{Scalar, Unit, Variable, VariableTable};
+use onecad_core::edit::{EditCommand, SketchEditOp, VisibilityTarget};
+use onecad_core::expr::Dimension;
+use onecad_core::ids::{
+    BodyId, ConstraintId, DocumentId, ElementId, EntityId, RecordId, SketchId, SnapshotId, TopoKey,
+    VariableId,
+};
+use onecad_core::io::container::SaveMeta;
+use onecad_core::io::recovery::{scan_recoverable, RecoveryOffer, SessionMarker};
+use onecad_core::regen::{
+    is_bare_name, resolve_variable_table, RegenRequest, ResolveRef, ResolveRequest,
+};
+
+use crate::autosave;
+use crate::document_runtime::{DocumentRuntime, RegenReport, SaveCaches};
+use crate::dto::{dimension_name, variable_dtos, EvaluatedExpressionDto};
+use crate::dto::{
+    BeginGestureDto, CancelSketchDto, DocumentModuleDto, DocumentProjection, DocumentSnapshotDto,
+    DragSolveDto, FeatureDependenciesDto, FinishSketchDto, ModuleStateDto, PromotedElementDto,
+    RecentProjectDto, RecoveryInfoDto, ResolveRefDto, SaveOutcomeDto, SketchOnFaceDto,
+    SketchSessionDto, SketchUpsertDto, VariableDto,
+};
+use crate::error::ApiError;
+use crate::recents;
+use crate::sketch_projection;
+use crate::state::AppState;
+use crate::worker::{lod_from_str, wire};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Lifecycle
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Builds this document's backend and opens `path` over it, rolling the staged
+/// backend swap back if the container will not load
+/// ([`AppState::rollback_backend`]) — so a bad file leaves the CURRENTLY open
+/// document untouched, worker included.
+///
+/// On success the swap is left **staged**: the caller publishes the runtime and only
+/// then calls [`AppState::commit_backend`].
+///
+/// Shared by document open and recovery so every host retains the same
+/// backend rollback contract, including real-worker tests.
+pub fn open_runtime_over_new_backend(
+    state: &AppState,
+    path: &Path,
+) -> Result<DocumentRuntime, ApiError> {
+    let (engine, meshes, solver, query) = state.make_backend_with_query();
+    DocumentRuntime::open(path, engine, meshes, solver)
+        .map(|mut rt| {
+            rt.bind_geometry_read_query(query)
+                .expect("fresh runtime has no geometry-read provider");
+            rt
+        })
+        .map_err(|e| {
+            state.rollback_backend();
+            ApiError::from(e)
+        })
+}
+
+/// Async sibling of [`open_runtime_over_new_backend`] — the same swap + open +
+/// rollback-on-`Err` contract, but off the async executor thread.
+///
+/// `DocumentRuntime::open` does sync zip parsing (`ContainerReader::open`) plus
+/// import-blob materialization to temp files: blocking IO that, run directly on a
+/// `#[tauri::command]`'s task, stalls every OTHER in-flight async command sharing
+/// that worker thread with it (there is no `spawn_blocking` boundary today).
+/// [`tokio::task::spawn_blocking`] moves that work to the blocking pool instead.
+///
+/// Rollback fires on BOTH failure paths: `DocumentRuntime::open` returning `Err`
+/// (unchanged contract) and the blocking task itself not completing
+/// (`JoinError` — a panic) — either way [`AppState::make_backend`]'s staged swap
+/// must not be left dangling, or a surviving document loses its worker for
+/// nothing.
+pub async fn open_runtime_over_new_backend_blocking(
+    state: &AppState,
+    path: PathBuf,
+) -> Result<DocumentRuntime, ApiError> {
+    let (engine, meshes, solver, query) = state.make_backend_with_query();
+    match tokio::task::spawn_blocking(move || {
+        DocumentRuntime::open(&path, engine, meshes, solver).map(|mut rt| {
+            rt.bind_geometry_read_query(query)
+                .expect("fresh runtime has no geometry-read provider");
+            rt
+        })
+    })
+    .await
+    {
+        Ok(Ok(rt)) => Ok(rt),
+        Ok(Err(e)) => {
+            state.rollback_backend();
+            Err(ApiError::from(e))
+        }
+        Err(join_err) => {
+            state.rollback_backend();
+            Err(ApiError::Internal(format!(
+                "document open task did not complete: {join_err}"
+            )))
+        }
+    }
+}
+
+/// Fires the `from: 0` regen a freshly opened/imported/recovered document needs,
+/// gated on the backend's [`WorkerReadiness`](crate::worker::WorkerReadiness)
+/// rather than enqueued immediately.
+///
+/// **The cold-worker regen race**: an immediate request can beat a still-
+/// connecting worker — `execute_plan` on a not-yet-`Ready` worker fails fast
+/// ([`EngineError::NotConnected`](onecad_core::regen::EngineError::NotConnected))
+/// as `PlanEvent::Failed`, and a
+/// from-0 plan has **no retry**: the executor's checkpoint-retry path needs a
+/// prior successful attempt to fall back to, and there isn't one yet. With
+/// [`AppState::prewarm`] the wait below resolves near-instantly in the common
+/// case — it only pays real latency on a genuinely cold start.
+///
+/// Spawned rather than awaited so the command still returns immediately; on
+/// timeout the request still fires (best-effort), and a failure surfaces through
+/// the normal `regen-finished` event path instead of silently never running.
+///
+/// Production timeout is fixed at 8 s ([`schedule_initial_regen`]); the wait
+/// itself is factored out with an explicit `timeout` so a test can inject a
+/// short one instead of paying out the real window.
+///
+/// `enqueue_if_current` runs AFTER the wait: the gate can outlive its runtime
+/// — a close/open during the window retires the worker this readiness watches and
+/// installs a NEW runtime whose own gate is pending. The callback checks and
+/// enqueues while holding the runtime lock, so stale work cannot supersede current
+/// scheduler work; the tag also fences replacement before driver begin.
+fn spawn_gated_regen<C, Fut>(
+    readiness: std::sync::Arc<dyn crate::worker::WorkerReadiness>,
+    sched: crate::state::SharedScheduler,
+    timeout: std::time::Duration,
+    expected_runtime_session: String,
+    enqueue_if_current: C,
+) where
+    C: FnOnce(crate::state::SharedScheduler, String) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    tokio::spawn(async move {
+        let _ = readiness.wait_ready(timeout).await;
+        enqueue_if_current(sched, expected_runtime_session).await;
+    });
+}
+
+async fn enqueue_initial_regen_if_current(
+    runtime: std::sync::Arc<tokio::sync::Mutex<Option<DocumentRuntime>>>,
+    sched: crate::state::SharedScheduler,
+    expected_runtime_session: String,
+) {
+    let guard = runtime.lock().await;
+    if guard
+        .as_ref()
+        .is_some_and(|rt| rt.matches_runtime_session(&expected_runtime_session))
+    {
+        if let Some(handle) = sched.get() {
+            handle.request_for_runtime(
+                RegenRequest::RevertToEnd { from: 0 },
+                Some(expected_runtime_session),
+            );
+        }
+    }
+}
+
+/// Production entry point for [`spawn_gated_regen`] — the 8 s window is generous
+/// relative to [`AppState::prewarm`]'s near-instant common case, while still
+/// bounding how long a genuinely stuck cold start can silently withhold the
+/// document's first regen. The immutable runtime session is both the early
+/// staleness probe and the scheduler directive's begin-time ABA fence.
+pub(crate) async fn schedule_initial_regen(state: &AppState) {
+    let expected = match state.runtime.lock().await.as_ref() {
+        Some(rt) => rt.runtime_session(),
+        None => return, // no document — nothing to rebuild
+    };
+    let runtime = state.runtime.clone();
+    spawn_gated_regen(
+        state.readiness(),
+        state.scheduler.clone(),
+        std::time::Duration::from_secs(8),
+        expected.clone(),
+        move |sched, expected| enqueue_initial_regen_if_current(runtime, sched, expected),
+    );
+}
+
+/// Creates a blank document and opens it (`CadClient.newDocument`).
+pub async fn new_document(
+    state: &AppState,
+    app: HostContext,
+) -> Result<DocumentSnapshotDto, ApiError> {
+    let (engine, meshes, solver, query) = state.make_backend_with_query();
+    let (snapshot, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let mut runtime = DocumentRuntime::new_blank(engine, meshes, solver);
+        runtime
+            .bind_geometry_read_query(query)
+            .expect("fresh runtime has no geometry-read provider");
+        *guard = Some(runtime);
+        let rt = guard.as_ref().unwrap();
+        rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
+        state.bind_restart_owner(rt);
+        (snapshot_of(rt), rt.projection())
+    };
+    // The new runtime is published, so the previous document's worker is now
+    // unreachable — retire it (see `AppState::make_backend`'s two-phase contract).
+    // Nothing between the swap and here can fail, so there is no rollback arm.
+    state.commit_backend();
+    #[cfg(debug_assertions)]
+    render_watchdog_reconcile_projection(&projection, "new document");
+    let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    Ok(snapshot)
+}
+
+/// Opens an existing `.onecad` project (`CadClient.openDocument`).
+///
+/// ## The recovery guard
+///
+/// If an unresolved crash-recovery offer names this path, the file on disk is OLDER
+/// than work a previous session left behind, and opening it blind is destructive:
+/// the autosave layout is keyed by `documentId`, so the reopened stale file gets a
+/// runtime with the SAME id, and its first autosave overwrites the crash container
+/// and re-stamps the marker under this process. The offer then vanishes with no
+/// prompt and no undo — the recovery banner is on the same screen as the recents
+/// list, so this was one click away at all times.
+///
+/// So `on_recovery` is REQUIRED in that case, and its absence is
+/// [`ApiError::RecoveryPending`], not a silent open:
+///
+/// * `"restore"` — the caller should route to [`recover_document`] instead; refused
+///   here so there is exactly one restore path.
+/// * `"openSaved"` — an explicit discard. The recovery state is cleared FIRST, so
+///   the destruction is something the user chose rather than a side effect.
+///
+/// `None` on a path with no pending offer is the ordinary case and opens normally.
+#[tracing::instrument(skip_all, fields(path = %path), err(Display))]
+pub async fn open_document(
+    state: &AppState,
+    app: HostContext,
+    path: String,
+    on_recovery: Option<String>,
+) -> Result<DocumentSnapshotDto, ApiError> {
+    if let Some(offer) = state.pending_recovery_for_path(Path::new(&path)) {
+        match on_recovery.as_deref() {
+            None => {
+                return Err(ApiError::RecoveryPending(format!(
+                    "{path} has unsaved changes from a previous session \
+                     (autosaved {} ms) — restore them or open the saved version",
+                    offer.modified_ms
+                )))
+            }
+            Some("openSaved") => {
+                state.take_pending_recovery(offer.document_id);
+                if let Some(root) = autosave::autosave_root(&app) {
+                    autosave::clear_recovery_state(&root, offer.document_id);
+                }
+            }
+            Some("restore") => {
+                return Err(ApiError::InvalidCommand(
+                    "openDocument: use recoverDocument to restore an autosave".into(),
+                ))
+            }
+            Some(other) => {
+                return Err(ApiError::InvalidCommand(format!(
+                    "openDocument: unknown onRecovery {other:?}"
+                )))
+            }
+        }
+    }
+    let rt = open_runtime_over_new_backend_blocking(state, PathBuf::from(&path)).await?;
+    let (snapshot, projection) = {
+        let mut guard = state.runtime.lock().await;
+        *guard = Some(rt);
+        let rt = guard.as_ref().unwrap();
+        rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
+        state.bind_restart_owner(rt);
+        (snapshot_of(rt), rt.projection())
+    };
+    state.commit_backend();
+    #[cfg(debug_assertions)]
+    render_watchdog_reconcile_projection(&projection, "opened document");
+    let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    recents::record(&app, Path::new(&path));
+    // Rebuild geometry from the loaded (all-Dirty) timeline, once the worker can
+    // actually serve it (readiness-gated — see `schedule_initial_regen`).
+    schedule_initial_regen(state).await;
+    Ok(snapshot)
+}
+
+/// **Start-screen lane**: opens a NEW document whose first (and only) feature is an
+/// `ImportStep` of `path` (`CadClient.importStep`). The in-editor "Import STEP…"
+/// lane is [`insert_step`], which appends to the document already open.
+///
+/// Responds exactly like [`open_document`] — a [`DocumentSnapshotDto`] plus a
+/// `projection-updated` emit and a from-0 regen request — because the frontend
+/// treats it identically (`appStore.importStep` calls `enter(...)` on the result).
+///
+/// The probe runs BEFORE the new runtime is published, so an unreadable STEP file
+/// leaves the previous screen state untouched: no document is swapped in, and the
+/// error surfaces as the start screen's `importError`.
+///
+/// **`path` must come from [`step_file_dialog`], not `open_file_dialog`** — the
+/// latter filters `.onecad`, so a user could never select a `.step` through it.
+#[tracing::instrument(skip_all, fields(path = %path), err(Display))]
+pub async fn import_step(
+    state: &AppState,
+    app: HostContext,
+    path: String,
+) -> Result<DocumentSnapshotDto, ApiError> {
+    let (engine, meshes, solver, query) = state.make_backend_with_query();
+    // Worker round-trip FIRST, with no lock held and no runtime published (the
+    // R-WP11 rule); the backend was just built, so `state.step_import()` is this
+    // document's worker.
+    //
+    // `appStore.importStep` catches a failure here and leaves the user on their
+    // current document, so both fallible steps must roll the staged backend swap back
+    // — that document is still live and still needs its own worker.
+    let prepared = crate::imports::prepare_import(&*state.step_import(), Path::new(&path))
+        .await
+        .inspect_err(|_| state.rollback_backend())?;
+    let mut rt = DocumentRuntime::new_blank(engine, meshes, solver);
+    rt.bind_geometry_read_query(query)
+        .expect("fresh runtime has no geometry-read provider");
+    rt.add_import_record(&prepared, false)
+        .inspect_err(|_| state.rollback_backend())?;
+    let (snapshot, projection) = {
+        let mut guard = state.runtime.lock().await;
+        *guard = Some(rt);
+        let rt = guard.as_ref().unwrap();
+        rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
+        state.bind_restart_owner(rt);
+        (snapshot_of(rt), rt.projection())
+    };
+    state.commit_backend();
+    #[cfg(debug_assertions)]
+    render_watchdog_reconcile_projection(&projection, "imported document");
+    let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    schedule_initial_regen(state).await;
+    state.note_mutation();
+    Ok(snapshot)
+}
+
+/// **In-editor lane**: appends an `ImportStep` record to the OPEN document
+/// (`CadClient.insertStep`), inserted at the rollback cursor like every other
+/// authored feature.
+///
+/// Rust owns the `.step` dialog (the webview has zero fs capability), so this takes
+/// no arguments and resolves `Ok(None)` when the dialog is cancelled — the house
+/// shape the frontend's `insertStep` correlates against (a null projection cancels
+/// its regen awaiter). Otherwise it responds like `apply_edit_command`: the
+/// pre-regen [`DocumentProjection`], with the authoritative geometry arriving on
+/// the normal `document-changed` / `projection-updated` events.
+#[tracing::instrument(skip_all, err(Display))]
+pub async fn insert_step(
+    state: &AppState,
+    app: HostContext,
+) -> Result<Option<DocumentProjection>, ApiError> {
+    {
+        // Presence check only — the lock is NOT held across the probe below.
+        let guard = state.runtime.lock().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("insertStep".into()))?;
+    }
+    let Some(path) = pick_step_open(app.clone()).await else {
+        return Ok(None); // dialog cancelled
+    };
+    let prepared = crate::imports::prepare_import(&*state.step_import(), Path::new(&path)).await?;
+    let (outcome, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("insertStep".into()))?;
+        let outcome = rt.add_import_record(&prepared, true)?;
+        (outcome, rt.projection())
+    };
+    let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    if let Some(sched) = state.scheduler.get() {
+        sched.handle(&outcome);
+    }
+    state.note_mutation();
+    Ok(Some(projection))
+}
+
+/// Imports another `.onecad` project into the open document, or into a fresh blank
+/// document if none is open. Rust owns the dialog; `Ok(None)` means the user
+/// cancelled. Responds like [`open_document`] when a new document is created.
+#[tracing::instrument(skip_all, err(Display))]
+pub async fn import_project(
+    state: &AppState,
+    app: HostContext,
+) -> Result<Option<DocumentSnapshotDto>, ApiError> {
+    let Some(path) = pick_file(app.clone(), false).await else {
+        return Ok(None);
+    };
+    let (snapshot, projection, outcome) = {
+        let mut guard = state.runtime.lock().await;
+        let create_new = guard.is_none();
+        let outcome = if create_new {
+            let (engine, meshes, solver, query) = state.make_backend_with_query();
+            let mut rt = DocumentRuntime::new_blank(engine, meshes, solver);
+            rt.bind_geometry_read_query(query)
+                .expect("fresh runtime has no geometry-read provider");
+            let outcome = rt.import_project(Path::new(&path))?;
+            rt.adopt_current_epoch();
+            *guard = Some(rt);
+            state.bind_restart_owner(guard.as_ref().unwrap());
+            outcome
+        } else {
+            let rt = guard
+                .as_mut()
+                .ok_or_else(|| ApiError::NoDocument("importProject".into()))?;
+            rt.import_project(Path::new(&path))?
+        };
+        let rt = guard.as_ref().unwrap();
+        (snapshot_of(rt), rt.projection(), outcome)
+    };
+    let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    if let Some(sched) = state.scheduler.get() {
+        sched.handle(&outcome);
+    }
+    state.note_mutation();
+    Ok(Some(snapshot))
+}
+
+/// Saves the open document (`CadClient` save). `path` `None` reuses the last save
+/// path; an unsaved document with no path is an error (the frontend's Save action
+/// then falls back to Save As). Records the saved path in the recents store.
+///
+/// `preview_png` is an optional base64 PNG capture of the viewport, stored as the
+/// container's `preview.png` and served to the start screen by
+/// [`list_recents`](crate::api::list_recents). It is **entirely optional**: a
+/// frontend that does not send it (and Tauri passes `None` for an argument the
+/// caller omits entirely) keeps whatever thumbnail the document already had, and a
+/// malformed or oversized capture is dropped with a warning. A thumbnail never
+/// fails a save.
+///
+/// ## Off the single-writer lock (VF-B7 / plan F1a)
+///
+/// The two slow parts of a save — the worker `SaveCheckpoint` round-trip and the
+/// container write (JSON + deflate of every import blob) — used to run with the
+/// runtime lock held, stalling every edit for their whole duration. They now run
+/// unlocked, in five phases:
+///
+/// 1. locked: resolve the target path, admit a checkpoint
+///    ([`prepare_checkpoint`](DocumentRuntime::prepare_checkpoint)), clone the engine;
+/// 2. **unlocked**: `SaveCheckpoint`; re-lock briefly to
+///    [`adopt_checkpoint`](DocumentRuntime::adopt_checkpoint), whose fencing recheck
+///    discards artifacts an interleaved edit or worker restart invalidated;
+/// 3. locked: [`build_save_payload`](DocumentRuntime::build_save_payload) + the
+///    revision it describes;
+/// 4. **unlocked**, under the persistence lane: the container write, then the
+///    recovery-marker clear ([`autosave::write_save_payload`]);
+/// 5. locked: [`mark_saved`](DocumentRuntime::mark_saved) — adopt the path, and go
+///    clean only if no edit landed during the write.
+///
+/// Every re-lock re-checks the document identity: `close_document` / `open_document`
+/// can interleave now that the lock is dropped, and the tail of a save must never be
+/// applied to a different document.
+#[tracing::instrument(skip_all, fields(path = ?path), err(Display))]
+pub async fn save_document(
+    state: &AppState,
+    app: HostContext,
+    path: Option<String>,
+    preview_png: Option<String>,
+) -> Result<SaveOutcomeDto, ApiError> {
+    let preview_png = decode_preview_png(preview_png);
+    // ── 1. Locked: target path + checkpoint admission + engine handle. ──
+    let (target, document_id, ticket, engine) = {
+        let guard = state.runtime.lock().await;
+        let rt = guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("save".into()))?;
+        let target: PathBuf = match path {
+            Some(p) => PathBuf::from(p),
+            None => rt
+                .path()
+                .map(Path::to_path_buf)
+                .ok_or_else(|| ApiError::Io("no save path; provide one".into()))?,
+        };
+        (
+            target,
+            rt.document_uuid(),
+            rt.prepare_checkpoint(),
+            rt.engine_arc(),
+        )
+    };
+
+    // ── 2. Unlocked: the worker round-trip. Checkpoint policy (SCHEMA §7.7) — mint a
+    //    durable acceleration base of the current head so a later edit regens
+    //    incrementally. Best-effort: a worker failure just skips it (Invariant 7).
+    if let Some(ticket) = ticket {
+        if let Ok(artifacts) = engine.save_checkpoint(ticket.step()).await {
+            let mut guard = state.runtime.lock().await;
+            if let Some(rt) = guard
+                .as_mut()
+                .filter(|rt| rt.document_uuid() == document_id)
+            {
+                rt.adopt_checkpoint(ticket, artifacts);
+            }
+        }
+    }
+
+    // ── 3. Locked: snapshot the bytes-to-be + the revision they describe. ──
+    let (payload, revision) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .filter(|rt| rt.document_uuid() == document_id)
+            .ok_or_else(|| ApiError::NoDocument("save".into()))?;
+        let revision = rt.revision();
+        let caches = SaveCaches {
+            meshes: true,
+            preview_png,
+        };
+        (rt.build_save_payload(save_meta(), caches), revision)
+    };
+
+    // ── 4. Unlocked, persistence lane: write + clear the crash-recovery state. ──
+    let recovery_root = autosave::autosave_root(&app);
+    autosave::write_save_payload(
+        &state.persistence,
+        &target,
+        payload,
+        recovery_root.as_deref(),
+        document_id,
+    )
+    .await?;
+
+    // ── 5. Locked: adopt the path; go clean only if nothing was edited mid-write. ──
+    let outcome = {
+        let mut guard = state.runtime.lock().await;
+        match guard
+            .as_mut()
+            .filter(|rt| rt.document_uuid() == document_id)
+        {
+            Some(rt) => {
+                let clean = rt.mark_saved(&target, revision);
+                SaveOutcomeDto {
+                    document_id: rt.document_id(),
+                    saved_revision: revision.0,
+                    current_revision: rt.revision().0,
+                    clean,
+                    path: target.to_string_lossy().into_owned(),
+                    title: rt.title().to_string(),
+                }
+            }
+            None => {
+                tracing::warn!(
+                    "save: the document closed while its container was being written; \
+                     the file at {target:?} is complete but no live document adopts it"
+                );
+                return Err(ApiError::NoDocument(
+                    "save completed after document close".into(),
+                ));
+            }
+        }
+    };
+    recents::record(&app, &target);
+    Ok(outcome)
+}
+
+/// Hard cap on a decoded viewport capture (512 KiB). A start-screen card is a few
+/// hundred pixels; anything past this is not a thumbnail, and the container reader
+/// caps at 2 MiB anyway ([`MAX_PREVIEW_BYTES`]) — rejecting here means we never
+/// write a `preview.png` that our own reader would refuse.
+///
+/// [`MAX_PREVIEW_BYTES`]: onecad_core::io::container::MAX_PREVIEW_BYTES
+pub(crate) const MAX_PREVIEW_PNG_BYTES: usize = 512 * 1024;
+
+/// Decodes the frontend's base64 viewport capture for
+/// [`save_document`](crate::api::save_document).
+///
+/// Accepts either bare base64 or a full `data:image/png;base64,…` URL (what
+/// `canvas.toDataURL()` produces) — the standard alphabet contains no `,`, so the
+/// last comma can only be the data-URL separator.
+///
+/// **Every failure is `None` with a warning, never an error.** A save carries the
+/// user's work; a thumbnail is decoration. Refusing to persist a document because
+/// its screenshot was malformed would be an absurd trade.
+pub(crate) fn decode_preview_png(encoded: Option<String>) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+
+    let raw = encoded?;
+    if raw.is_empty() {
+        return None;
+    }
+    // Bound BEFORE decoding: base64 inflates 3 bytes into 4, so anything past
+    // 2× the byte cap cannot be under it and must not be allocated.
+    if raw.len() > MAX_PREVIEW_PNG_BYTES * 2 {
+        tracing::warn!(
+            encoded_len = raw.len(),
+            "save: preview capture is far over the {MAX_PREVIEW_PNG_BYTES}-byte cap — dropped"
+        );
+        return None;
+    }
+    let b64 = raw.rsplit_once(',').map_or(raw.as_str(), |(_, tail)| tail);
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(b64) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::warn!(error = %e, "save: preview capture is not valid base64 — dropped");
+            return None;
+        }
+    };
+    if bytes.len() > MAX_PREVIEW_PNG_BYTES {
+        tracing::warn!(
+            len = bytes.len(),
+            cap = MAX_PREVIEW_PNG_BYTES,
+            "save: preview capture is over the cap — dropped"
+        );
+        return None;
+    }
+    Some(bytes)
+}
+
+/// Exports every body at head to a STEP file (`CadClient.exportStep`). `path`
+/// `None` shows a native save dialog (`.step` filter); a cancel resolves to `None`.
+/// Returns the written path. Rust owns the dialog and the worker `ExportStep` verb
+/// (the webview has zero fs capability).
+///
+/// Schema is **AP242** (`"AP242DIS"`, the only AP242 value OCCT 8.0.1's
+/// `write.step.schema` enum knows — `"AP242IS"` is not one and the worker refuses
+/// it loudly). AP242 rather than the previous AP214IS because that is the schema
+/// modern consumers expect and the one the colour/name carriers below are at home
+/// in.
+///
+/// # What travels with the geometry (DI-5)
+///
+/// Body display names, the authored whole-body colour and the authored per-face
+/// colours, all from [`BodyMeta`](onecad_core::document::body::BodyMeta). Face
+/// colours are stored against a persistent `ElementId`, but the worker addresses
+/// faces by snapshot-scoped `TopoKey`, so each id is resolved through `QueryElement`
+/// against the CURRENT head first. An id that does not resolve — a face an edit
+/// consumed, or a re-bind the ladder honestly refused (DI-4) — is **omitted with a
+/// warning**, never mapped onto a plausible ordinal: a wrong colour on a real face
+/// looks entirely successful, which is the H5-B failure this stack refuses to make.
+///
+/// The runtime lock is taken only to snapshot the metadata; every worker round-trip
+/// below runs outside it (the R-WP11 rule).
+pub async fn export_step_file(
+    state: &AppState,
+    app: HostContext,
+    path: Option<String>,
+) -> Result<Option<String>, ApiError> {
+    let target = match path {
+        Some(p) => p,
+        None => match pick_step_save(app).await {
+            Some(p) => p,
+            None => return Ok(None), // dialog cancelled
+        },
+    };
+    let (bodies, snapshot, fence, mut attributes, pending) = {
+        let guard = state.runtime.lock().await;
+        let rt = guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("exportStep".into()))?;
+        let (attributes, pending) = crate::export::pending_step_attributes(rt);
+        (
+            rt.head_body_ids(),
+            rt.head_snapshot_id(),
+            crate::export::export_fence(rt),
+            attributes,
+            pending,
+        )
+    };
+    crate::export::resolve_face_colors(
+        &mut attributes,
+        pending,
+        snapshot,
+        state.element_query().as_ref(),
+    )
+    .await;
+
+    let exporter = state.exporter();
+    exporter
+        .export_step(&target, &bodies, "AP242DIS", &attributes, fence)
+        .await?;
+    Ok(Some(target))
+}
+
+/// Exports every body at head to a binary STL file (`CadClient.exportStl`). `path`
+/// `None` shows a native `.stl` save dialog; a cancel resolves to `None`. Meshed at
+/// the `fine` LOD (a mesh that leaves the app wants the best tessellation). Returns
+/// the written path. Rust owns the dialog + the worker `ExportStl` verb.
+pub async fn export_stl_file(
+    state: &AppState,
+    app: HostContext,
+    path: Option<String>,
+) -> Result<Option<String>, ApiError> {
+    let target = match path {
+        Some(p) => p,
+        None => match pick_mesh_save(app, "STL", &["stl"]).await {
+            Some(p) => p,
+            None => return Ok(None), // dialog cancelled
+        },
+    };
+    let (bodies, fence) = head_bodies(state).await?;
+    state
+        .exporter()
+        .export_stl(&target, &bodies, /*binary=*/ true, "fine", fence)
+        .await?;
+    Ok(Some(target))
+}
+
+/// Exports every body at head to an ASCII OBJ file (`CadClient.exportObj`). `path`
+/// `None` shows a native `.obj` save dialog; a cancel resolves to `None`. Meshed at
+/// the `fine` LOD. Returns the written path. Rust owns the dialog + the worker
+/// `ExportObj` verb.
+pub async fn export_obj_file(
+    state: &AppState,
+    app: HostContext,
+    path: Option<String>,
+) -> Result<Option<String>, ApiError> {
+    let target = match path {
+        Some(p) => p,
+        None => match pick_mesh_save(app, "OBJ", &["obj"]).await {
+            Some(p) => p,
+            None => return Ok(None), // dialog cancelled
+        },
+    };
+    let (bodies, fence) = head_bodies(state).await?;
+    state
+        .exporter()
+        .export_obj(&target, &bodies, "fine", fence)
+        .await?;
+    Ok(Some(target))
+}
+
+/// Exports every body at head to a 3MF file (`CadClient.export3mf`). `path`
+/// `None` shows a native save dialog (`.3mf` filter); a cancel resolves to
+/// `None`. Returns the written path.
+///
+/// Unlike STL/OBJ/STEP, this exporter is written **entirely on the Rust
+/// side** — OCCT has no 3MF writer, and the mesh bytes + colour data it needs
+/// are already on this side of the wire, so no worker verb or SCHEMA change
+/// is involved. Rust pulls each body's fine-LOD MESH1 blob via
+/// [`MeshProvider`](crate::worker::MeshProvider) (`export_threemf::build_bodies`),
+/// merges the two colour lanes — import-derived mesh `FACE_COLORS` and
+/// authored `BodyMeta.face_colors`/`color`, the same precedence
+/// [`export_step_file`] resolves for STEP's XCAF colours — and hands the
+/// result to the pure [`onecad_core::io::threemf`] writer.
+///
+/// The runtime lock is held only to snapshot metadata; every mesh fetch and
+/// the zip encode below run outside it (the same R-WP11 rule
+/// [`export_step_file`] documents).
+pub async fn export_3mf_file(
+    state: &AppState,
+    app: HostContext,
+    path: Option<String>,
+) -> Result<Option<String>, ApiError> {
+    let target = match path {
+        Some(p) => p,
+        None => match pick_mesh_save(app, "3MF", &["3mf"]).await {
+            Some(p) => p,
+            None => return Ok(None), // dialog cancelled
+        },
+    };
+    let (bodies, snapshot, meshes, mut attributes, pending) = {
+        let guard = state.runtime.lock().await;
+        let rt = guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("export3mf".into()))?;
+        let (attributes, pending) = crate::export::pending_step_attributes(rt);
+        (
+            rt.head_body_ids(),
+            rt.head_snapshot_id(),
+            rt.meshes_arc(),
+            attributes,
+            pending,
+        )
+    };
+    // Captured BEFORE resolution — the ElementId-keyed lane
+    // (`ids_have_element_ids()` bodies) needs the raw map, not the
+    // TopoKey-keyed one `resolve_face_colors` produces below.
+    let raw_face_colors = crate::export_threemf::raw_face_colors_by_body(&pending);
+    crate::export::resolve_face_colors(
+        &mut attributes,
+        pending,
+        snapshot,
+        state.element_query().as_ref(),
+    )
+    .await;
+
+    let threemf_bodies = crate::export_threemf::build_bodies(
+        &bodies,
+        meshes.as_ref(),
+        snapshot,
+        &attributes,
+        &raw_face_colors,
+    )
+    .await?;
+
+    let bytes = onecad_core::io::threemf::write_3mf(&threemf_bodies)?;
+    let write_target = target.clone();
+    match tokio::task::spawn_blocking(move || std::fs::write(&write_target, &bytes)).await {
+        Ok(result) => {
+            result.map_err(|e| ApiError::Io(format!("export3mf: write {target}: {e}")))?
+        }
+        Err(e) => {
+            return Err(ApiError::Io(format!(
+                "export3mf: write task did not complete: {e}"
+            )))
+        }
+    }
+    Ok(Some(target))
+}
+
+/// The body ids at head for an export command (locks the runtime briefly).
+/// The head's body ids plus the snapshot a §7.8 writer is fenced on (WP-H) —
+/// read together under ONE lock so the export cannot name a snapshot from a
+/// different head than the bodies it is writing.
+async fn head_bodies(state: &AppState) -> Result<(Vec<BodyId>, Option<SnapshotId>), ApiError> {
+    let guard = state.runtime.lock().await;
+    let rt = guard
+        .as_ref()
+        .ok_or_else(|| ApiError::NoDocument("export".into()))?;
+    Ok((rt.head_body_ids(), crate::export::export_fence(rt)))
+}
+
+/// Closes the open document, dropping its runtime + caches. Clears the document's
+/// crash-recovery state first (a clean close is not a crash).
+pub async fn close_document(state: &AppState, app: HostContext) -> Result<(), ApiError> {
+    let closed = {
+        let mut guard = state.runtime.lock().await;
+        let id = guard.as_ref().map(DocumentRuntime::document_uuid);
+        *guard = None;
+        state.clear_restart_owner();
+        id
+    };
+    if let (Some(id), Some(root)) = (closed, autosave::autosave_root(&app)) {
+        autosave::clear_recovery_state(&root, id);
+    }
+    // The closed document's worker can serve nothing now: retire it (this is the
+    // process leak — it used to live until the app quit) and pre-warm its
+    // replacement so the next open is instant. Exactly one sidecar stays alive.
+    state.rewarm();
+    #[cfg(debug_assertions)]
+    render_watchdog_reconcile_projection(&DocumentProjection::empty(), "document closed");
+    let _ = app.emit(AppEvent::ProjectionUpdated(
+        DocumentProjection::empty().clone(),
+    ));
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Crash recovery (autosave; `io::recovery`)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Scans for crash-recovery offers at startup (`CadClient.checkRecovery`): autosave
+/// containers no live session owns (per [`autosave::pid_alive`]), newest first.
+/// Stashes them for later [`recover_document`] decisions and returns their display
+/// info; an empty list when there is nothing to recover.
+///
+/// Returns **every** offer, not just the first. Several sessions can have crashed,
+/// and surfacing one at a time left the rest both invisible to the user and — since
+/// nothing else enumerates them — unswept on disk.
+pub async fn check_recovery(
+    state: &AppState,
+    app: HostContext,
+) -> Result<Vec<RecoveryInfoDto>, ApiError> {
+    let Some(root) = autosave::autosave_root(&app) else {
+        return Ok(Vec::new());
+    };
+    let offers = scan_recoverable(&root, autosave::pid_alive, SystemTime::now())
+        .map_err(|e| ApiError::Io(e.to_string()))?;
+    let dtos = offers.iter().map(recovery_info_dto).collect();
+    state.set_pending_recovery(offers);
+    Ok(dtos)
+}
+
+/// Acts on one pending crash-recovery offer (`CadClient.recoverDocument`).
+///
+/// `accept == true`: opens the autosave as the current document, re-targets its
+/// **real** save path (so a later Save writes the original file, not the autosave),
+/// restores its title, marks it dirty (unsaved recovered work), re-stamps the crash
+/// marker under this process, and returns the snapshot. `accept == false`: discards
+/// the autosave + marker. `None` when `document_id` names nothing pending.
+///
+/// ## The offer is consumed on SUCCESS, not on entry
+///
+/// A restore can fail — a truncated container, a version this build will not read.
+/// Taking the offer first meant such a failure left the banner on screen with
+/// nothing behind it: every later Restore and Discard returned `None`, and the
+/// container became an unreachable orphan. The offer is now removed only once the
+/// runtime is installed, so a failed restore is retryable and the work is still
+/// discardable.
+///
+/// ## Why the marker is re-stamped rather than removed
+///
+/// This used to `remove_marker`, reasoning that keeping the container covered a
+/// re-crash. It did not: discovery was marker-keyed, so the kept container was
+/// unreachable and the second crash recovered nothing (DI-1). Discovery is now
+/// container-keyed, which fixes that on its own — and writing a live marker on top
+/// keeps the normal path from producing orphans at all, and stops another window
+/// from being offered a document this process now has open.
+pub async fn recover_document(
+    state: &AppState,
+    app: HostContext,
+    document_id: String,
+    accept: bool,
+) -> Result<Option<DocumentSnapshotDto>, ApiError> {
+    let id = parse_document_id(&document_id)?;
+    let Some(offer) = state.peek_pending_recovery(id) else {
+        return Ok(None);
+    };
+    let root = autosave::autosave_root(&app);
+    if !accept {
+        state.take_pending_recovery(id);
+        if let Some(root) = &root {
+            autosave::clear_recovery_state(root, offer.document_id);
+        }
+        return Ok(None);
+    }
+    let opened_path = offer.marker.as_ref().and_then(|m| m.opened_path.clone());
+    let title = offer.marker.as_ref().and_then(|m| m.title.clone());
+    // Restore: open the autosave container as the live document. Anything below that
+    // fails leaves the offer pending, so the user can try again or discard.
+    let mut rt = open_runtime_over_new_backend_blocking(state, offer.autosave_path.clone()).await?;
+    rt.mark_recovered(opened_path, title);
+    let (snapshot, projection, opened_path_for_marker, title_for_marker) = {
+        let mut guard = state.runtime.lock().await;
+        *guard = Some(rt);
+        let rt = guard.as_ref().unwrap();
+        rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
+        state.bind_restart_owner(rt);
+        (
+            snapshot_of(rt),
+            rt.projection(),
+            rt.path().map(Path::to_path_buf),
+            Some(rt.title().to_string()),
+        )
+    };
+    state.commit_backend();
+    state.take_pending_recovery(id);
+    // Re-stamp the marker under THIS process: the container is still unsaved work,
+    // and it is now ours. Synthesized when the offer was an orphan, so a restore
+    // always leaves owner evidence behind — otherwise a second window would be
+    // offered the document this one just opened.
+    if let Some(root) = &root {
+        let marker = SessionMarker {
+            document_id: offer.document_id,
+            pid: std::process::id(),
+            opened_path: opened_path_for_marker,
+            last_autosave: offer
+                .marker
+                .as_ref()
+                .map(|m| m.last_autosave.clone())
+                .unwrap_or_default(),
+            title: title_for_marker,
+        };
+        let _ = onecad_core::io::recovery::write_marker(root, &marker);
+    }
+    #[cfg(debug_assertions)]
+    render_watchdog_reconcile_projection(&projection, "recovered document");
+    let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    // DI-2: the recovered work is unsaved and must be protected from the NEXT crash
+    // on its own merits. `mark_recovered` sets `dirty`, but the autosave loop is
+    // edge-triggered on this tick and never polls the flag — so without it the only
+    // protection was incidental, from whatever tick a published regen happened to
+    // produce. A recovery replay that fails, no-ops or is cancelled produced none.
+    state.note_mutation();
+    // Rebuild geometry from the recovered (all-Dirty) timeline, once the worker
+    // can actually serve it (readiness-gated — see `schedule_initial_regen`).
+    schedule_initial_regen(state).await;
+    Ok(Some(snapshot))
+}
+
+/// Maps a [`RecoveryOffer`] to the start-screen DTO. An orphan (no surviving
+/// marker) contributes neither a title nor an original path — the offer is still
+/// real, only its labelling degrades.
+fn recovery_info_dto(offer: &RecoveryOffer) -> RecoveryInfoDto {
+    RecoveryInfoDto {
+        document_id: offer.document_id.to_string(),
+        title: offer.marker.as_ref().and_then(|m| m.title.clone()),
+        original_path: offer
+            .marker
+            .as_ref()
+            .and_then(|m| m.opened_path.as_ref())
+            .map(|p| p.to_string_lossy().into_owned()),
+        autosave_path: offer.autosave_path.to_string_lossy().into_owned(),
+        modified_ms: offer.modified_ms,
+    }
+}
+
+/// Parses a `documentId` command argument, refusing anything that is not a UUID.
+fn parse_document_id(raw: &str) -> Result<DocumentId, ApiError> {
+    raw.parse::<uuid::Uuid>()
+        .map(DocumentId)
+        .map_err(|e| ApiError::InvalidCommand(format!("documentId {raw:?}: {e}")))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edits + queries
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A command result together with the projection and work it actually scheduled.
+/// An inner error can follow accepted authoring (notably a finish regions refusal).
+/// An outer error has no receipt; callers must not infer that no authoring occurred.
+#[derive(Debug)]
+pub struct CommandCompletion<T> {
+    pub result: Result<T, ApiError>,
+    pub projection: DocumentProjection,
+    pub regen_expected: bool,
+}
+
+fn schedule_command_outcome(state: &AppState, outcome: &onecad_core::edit::CommandOutcome) -> bool {
+    let Some(scheduler) = state.scheduler.get() else {
+        return false;
+    };
+    scheduler.handle(outcome);
+    outcome.regen != onecad_core::edit::RegenHint::None
+}
+
+/// Applies one [`EditCommand`] and enqueues the resulting regen. Returns the
+/// (pre-regen) projection; post-regen geometry arrives via `document-changed` +
+/// `projection-updated` events (projection stores are written only by events).
+#[tracing::instrument(skip_all, fields(cmd = tracing::field::Empty), err(Display))]
+pub async fn apply_edit_command(
+    state: &AppState,
+    app: HostContext,
+    command: EditCommand,
+) -> Result<DocumentProjection, ApiError> {
+    apply_edit_command_with_completion(state, app, command)
+        .await?
+        .result
+}
+
+/// Applies the existing edit path and retains its actual scheduling receipt.
+pub async fn apply_edit_command_with_completion(
+    state: &AppState,
+    app: HostContext,
+    command: EditCommand,
+) -> Result<CommandCompletion<DocumentProjection>, ApiError> {
+    let summary = edit_command_summary(&command);
+    // Recorded (not a span-attribute expression) so the digest is built ONCE.
+    tracing::Span::current().record("cmd", summary.as_str());
+    tracing::info!("apply_edit_command: {summary}");
+    let (outcome, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("apply".into()))?;
+        let outcome = rt.apply(command).inspect_err(|e| {
+            tracing::warn!("apply_edit_command: {summary} REJECTED: {e}");
+        })?;
+        (outcome, rt.projection())
+    };
+    tracing::info!(
+        "apply_edit_command: {summary} applied rev={} appliedOps={}/{}",
+        projection.revision,
+        projection.applied_ops,
+        projection.total_ops
+    );
+    #[cfg(debug_assertions)]
+    render_watchdog_reconcile_projection(&projection, "document edit");
+    let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    let regen_expected = schedule_command_outcome(state, &outcome);
+    state.note_mutation();
+    Ok(CommandCompletion {
+        result: Ok(projection.clone()),
+        projection,
+        regen_expected,
+    })
+}
+
+/// Automatic display effects coupled to a modeling feature commit.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationEffects {
+    #[serde(default)]
+    pub hide_sketch_ids: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyOperationResponse {
+    pub projection: DocumentProjection,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rollback_token: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RollbackFailedOperationResponse {
+    pub projection: DocumentProjection,
+    pub rolled_back: bool,
+    pub reason: &'static str,
+    /// Native callers wait only when this call actually requested regeneration.
+    /// This host orchestration detail does not change the legacy IPC response.
+    #[serde(skip)]
+    pub regen_expected: bool,
+}
+
+/// Applies a fresh operation and its automatic sketch hiding atomically. User
+/// visibility toggles continue through `apply_edit_command` as independent edits.
+#[tracing::instrument(skip_all, err(Display))]
+pub async fn apply_operation(
+    state: &AppState,
+    app: HostContext,
+    commands: Vec<EditCommand>,
+    effects: Option<OperationEffects>,
+) -> Result<ApplyOperationResponse, ApiError> {
+    if commands.is_empty() {
+        return Err(ApiError::InvalidCommand(
+            "apply_operation requires at least one addOperation".into(),
+        ));
+    }
+    let mut consumed = std::collections::BTreeSet::new();
+    let mut labels = Vec::new();
+    let mut record_ids = Vec::new();
+    let reedit = commands.len() == 1
+        && matches!(
+            commands.first(),
+            Some(EditCommand::UpdateOperationParams { .. })
+        );
+    for command in &commands {
+        match command {
+            EditCommand::AddOperation { record, .. } if !reedit => {
+                consumed.extend(record.op.derive_inputs().sketches);
+                labels.push(semantic_operation_label(record));
+                record_ids.push(record.record_id);
+            }
+            EditCommand::UpdateOperationParams { record, op } if reedit => {
+                labels.push(semantic_operation_type(op));
+                record_ids.push(*record);
+            }
+            _ => {
+                return Err(ApiError::InvalidCommand(
+                    "apply_operation accepts fresh addOperation commands or one updateOperationParams"
+                        .into(),
+                ));
+            }
+        }
+    }
+    let label = if labels.iter().all(|candidate| candidate == &labels[0]) {
+        labels[0].clone()
+    } else {
+        "Model features".to_string()
+    };
+    let mut commands = commands;
+    let mut hides = std::collections::BTreeSet::new();
+    let requested_hides = effects.unwrap_or_default().hide_sketch_ids;
+    if reedit && !requested_hides.is_empty() {
+        return Err(ApiError::InvalidCommand(
+            "automatic sketch hiding is only valid for fresh operations".into(),
+        ));
+    }
+    for raw in requested_hides {
+        let sketch = SketchId::from_str(&raw)
+            .map_err(|e| ApiError::InvalidCommand(format!("bad sketchId {raw:?}: {e}")))?;
+        if !consumed.contains(&sketch) {
+            return Err(ApiError::InvalidCommand(format!(
+                "cannot auto-hide sketch {raw}: it is not consumed by this operation"
+            )));
+        }
+        if !hides.insert(sketch) {
+            continue;
+        }
+        commands.push(EditCommand::SetVisibility {
+            target: VisibilityTarget::Sketch(sketch),
+            visible: false,
+        });
+    }
+    let (outcome, projection, rollback_token) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("applyOperation".into()))?;
+        let prior_undo_position = rt.undo_position();
+        let outcome = rt.apply_transaction(&label, commands)?;
+        let rollback_token = rt.arm_operation_rollback(record_ids, prior_undo_position);
+        (outcome, rt.projection(), rollback_token)
+    };
+    let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    if let Some(scheduler) = state.scheduler.get() {
+        scheduler.handle(&outcome);
+    }
+    state.note_mutation();
+    Ok(ApplyOperationResponse {
+        projection,
+        rollback_token,
+    })
+}
+
+/// Undoes a failed operation only when its backend-issued receipt still names
+/// the current runtime's exact undo top.
+#[tracing::instrument(skip(state, app), err(Display))]
+pub async fn rollback_failed_operation(
+    state: &AppState,
+    app: HostContext,
+    token: String,
+) -> Result<RollbackFailedOperationResponse, ApiError> {
+    let (attempt, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("rollbackFailedOperation".into()))?;
+        let attempt = rt.rollback_failed_operation(&token);
+        let projection = rt.projection();
+        (attempt, projection)
+    };
+    let mut regen_expected = false;
+    if attempt.rolled_back {
+        let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+        if let (Some(scheduler), Some(request)) = (
+            state.scheduler.get(),
+            attempt.revert.as_ref().and_then(|revert| revert.regen),
+        ) {
+            scheduler.request(request);
+            regen_expected = true;
+        }
+        state.note_mutation();
+    }
+    Ok(RollbackFailedOperationResponse {
+        projection,
+        rolled_back: attempt.rolled_back,
+        reason: attempt.reason,
+        regen_expected,
+    })
+}
+
+fn semantic_operation_label(record: &onecad_core::document::record::OperationRecord) -> String {
+    let authored = record.name.trim();
+    if !authored.is_empty() && authored != "Operation" && authored != "Add Operation" {
+        return authored.to_string();
+    }
+    semantic_operation_type(&record.op)
+}
+
+fn semantic_operation_type(op: &Operation) -> String {
+    serde_json::to_value(op)
+        .ok()
+        .and_then(|value| value.get("opType")?.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "Model feature".into())
+}
+
+/// The SCHEMA §9 `mateAxisReversed` repair (`CadClient.repairMateAxis`;
+/// kernel-hardening WP-I).
+///
+/// Its own command rather than a raw `apply_edit_command` because the panel sends
+/// evidence it read off the repair ITEM (`resolvedAxis`, `resolvedSidedness`) in
+/// wire form, and this is where those are parsed and refused — the same
+/// boundary-validation split every other component command uses.
+///
+/// `keep_world_direction` = the user chose "keep the component's direction"
+/// (`mate.flipped` is toggled to absorb the axis reversal); `false` = "follow the
+/// reversed axis". Both branches re-freeze `mate.targetAxis`, so the next regen is
+/// a fixed point.
+#[tracing::instrument(skip(state, app), err(Display))]
+pub async fn repair_mate_axis(
+    state: &AppState,
+    app: HostContext,
+    record_id: String,
+    keep_world_direction: bool,
+    resolved_axis: [f64; 3],
+    resolved_sidedness: Option<String>,
+) -> Result<DocumentProjection, ApiError> {
+    let record = RecordId::from_str(&record_id)
+        .map_err(|e| ApiError::InvalidCommand(format!("bad recordId {record_id:?}: {e}")))?;
+    let axis = onecad_core::math::Vec3::new(resolved_axis[0], resolved_axis[1], resolved_axis[2])
+        .ok_or_else(|| {
+        ApiError::InvalidCommand(format!(
+            "repairMateAxis: resolvedAxis {resolved_axis:?} has a non-finite component"
+        ))
+    })?;
+    let sidedness = match resolved_sidedness.as_deref() {
+        None => None,
+        Some("pin") => Some(MateSidedness::Pin),
+        Some("hole") => Some(MateSidedness::Hole),
+        Some(other) => {
+            return Err(ApiError::InvalidCommand(format!(
+                "repairMateAxis: resolvedSidedness must be `pin` or `hole` (got {other:?})"
+            )))
+        }
+    };
+    apply_edit_command(
+        state,
+        app,
+        EditCommand::RepairMateAxis {
+            record,
+            keep_world_direction,
+            resolved_axis: axis,
+            resolved_sidedness: sidedness,
+        },
+    )
+    .await
+}
+
+/// One-line `EditCommand` digest for tracing: the serde `cmd` tag plus the ids
+/// that identify the target (never the full payload — sketch ops are huge).
+fn edit_command_summary(command: &EditCommand) -> String {
+    match command {
+        EditCommand::AddOperation { record, at_cursor } => format!(
+            "addOperation name={} record={} atCursor={at_cursor}",
+            record.name, record.record_id
+        ),
+        EditCommand::UpdateOperationParams { record, .. } => {
+            format!("updateOperationParams record={record}")
+        }
+        EditCommand::RemoveOperation { record } => format!("removeOperation record={record}"),
+        other => serde_json::to_value(other)
+            .ok()
+            .and_then(|v| v.get("cmd").and_then(|c| c.as_str()).map(String::from))
+            .unwrap_or_else(|| "unknown".into()),
+    }
+}
+
+// ── Module-owned document state (ADR-0004) ───────────────────────────────────
+
+/// Reads one module's slice of the open document (`CadClient.getModuleState`).
+///
+/// Returns `None` when the module has no state here. The payload crosses this
+/// boundary untouched — the backend has no schema for it (ADR-0005).
+pub async fn get_module_state(
+    state: &AppState,
+    module_id: String,
+) -> Result<Option<ModuleStateDto>, ApiError> {
+    let module = parse_module_id(&module_id)?;
+    let guard = state.runtime.lock().await;
+    let rt = guard
+        .as_ref()
+        .ok_or_else(|| ApiError::NoDocument("get_module_state".into()))?;
+    Ok(rt.module_state(&module).map(|s| ModuleStateDto {
+        module_id,
+        schema_version: s.schema_version,
+        payload: s.payload,
+    }))
+}
+
+/// Writes or clears one module's slice (`CadClient.setModuleState`).
+///
+/// Goes through the ordinary transaction path, so a programmatic write is as
+/// undoable as a user edit — there is no separate mutation lane
+/// (docs/ARCHITECTURE.md §9).
+pub async fn set_module_state(
+    state: &AppState,
+    module_id: String,
+    schema_version: Option<u32>,
+    payload: Option<serde_json::Value>,
+) -> Result<(), ApiError> {
+    let module = parse_module_id(&module_id)?;
+    // Absent payload = clear. A `schemaVersion` without a payload is a caller
+    // bug, not a clear: refuse it rather than silently discarding their data.
+    let next = match (schema_version, payload) {
+        (Some(schema_version), Some(payload)) => Some(ModuleState::new(schema_version, payload)),
+        (None, None) => None,
+        _ => {
+            return Err(ApiError::InvalidCommand(
+                "set_module_state needs both schemaVersion and payload, or neither".into(),
+            ))
+        }
+    };
+    let mut guard = state.runtime.lock().await;
+    let rt = guard
+        .as_mut()
+        .ok_or_else(|| ApiError::NoDocument("set_module_state".into()))?;
+    rt.set_module_state(module, next)
+        .map_err(|e| ApiError::InvalidCommand(e.to_string()))?;
+    state.note_mutation();
+    Ok(())
+}
+
+/// Every module the open document carries state for (`CadClient.listDocumentModules`).
+///
+/// This is how the app can say "this project uses an addon you do not have"
+/// instead of silently ignoring that module's data (spec §43).
+pub async fn list_document_modules(state: &AppState) -> Result<Vec<DocumentModuleDto>, ApiError> {
+    let guard = state.runtime.lock().await;
+    let rt = guard
+        .as_ref()
+        .ok_or_else(|| ApiError::NoDocument("list_document_modules".into()))?;
+    Ok(rt
+        .document_modules()
+        .into_iter()
+        .map(|(id, schema_version)| DocumentModuleDto {
+            module_id: id.to_string(),
+            schema_version,
+        })
+        .collect())
+}
+
+fn parse_module_id(value: &str) -> Result<ModuleId, ApiError> {
+    ModuleId::parse(value).map_err(|e| ApiError::InvalidCommand(e.to_string()))
+}
+
+// ── Document variables (WP-VE.2) ─────────────────────────────────────────────
+//
+// Authoring for the table WP-VE.1 made drive regen. Every mutation goes through
+// `rt.apply(EditCommand::…)`, so it is undoable and schedules the same regen any
+// other edit does — there is no separate programmatic write path
+// (docs/ARCHITECTURE.md §9).
+
+/// The [`EditCommand`] an `upsert_variable(name, value)` lowers to, given the
+/// document's current table. Split out from the command so the validation +
+/// add-vs-set decision is testable without a Tauri `State`.
+fn upsert_variable_command(
+    current: &[Variable],
+    name: &str,
+    value: f64,
+) -> Result<EditCommand, ApiError> {
+    let name = name.trim();
+    if !is_bare_name(name) {
+        return Err(ApiError::InvalidCommand(format!(
+            "invalid variable name {name:?}: a name must match [A-Za-z_][A-Za-z0-9_]*"
+        )));
+    }
+    let value = Scalar::try_new(value)
+        .ok_or_else(|| ApiError::InvalidCommand("variable value must be finite".into()))?;
+    Ok(match current.iter().find(|v| v.name == name) {
+        Some(v) => EditCommand::SetVariable {
+            variable: v.id,
+            value,
+        },
+        None => EditCommand::AddVariable {
+            variable: Variable {
+                id: VariableId::new(),
+                name: name.to_string(),
+                value,
+                unit: Unit::Mm,
+            },
+        },
+    })
+}
+
+/// The [`EditCommand`] a `remove_variable(name)` lowers to. Unknown ⇒ refused.
+fn remove_variable_command(current: &[Variable], name: &str) -> Result<EditCommand, ApiError> {
+    let target = current
+        .iter()
+        .find(|v| v.name == name)
+        .ok_or_else(|| ApiError::InvalidCommand(format!("unknown variable {name:?}")))?;
+    Ok(EditCommand::RemoveVariable {
+        variable: target.id,
+    })
+}
+
+/// The open document's variables, in declaration order (`CadClient.listVariables`).
+pub async fn list_variables(state: &AppState) -> Result<Vec<VariableDto>, ApiError> {
+    let guard = state.runtime.lock().await;
+    let rt = guard
+        .as_ref()
+        .ok_or_else(|| ApiError::NoDocument("list_variables".into()))?;
+    Ok(variable_dtos(rt.variables_table()))
+}
+
+/// Creates or re-values a variable by NAME (`CadClient.upsertVariable`).
+///
+/// Name-keyed rather than id-keyed because a name is what an `expr` binds to —
+/// the id never appears in a document expression, so making the frontend carry
+/// one would only give it a second way to be stale.
+///
+/// Refuses a name no expression could ever reference, so the app cannot mint a
+/// variable that no binding can ever name. Sets a LITERAL value: an existing
+/// expression on that variable is replaced (`Scalar::try_new` carries no
+/// `expr`), which is how a user goes from `=w*2` back to a plain number.
+/// Existing name ⇒
+/// `SetVariable` (the id and declaration position are preserved); new ⇒
+/// `AddVariable`. Comparison is CASE-SENSITIVE, matching `VariableTable::get`.
+///
+/// Returns the (pre-regen) [`DocumentProjection`] — the SAME shape and the same
+/// emit + schedule + `note_mutation` tail [`apply_edit_command`] has, because a
+/// variable edit dirties `[0, len)` and IS an edit by every definition the rest
+/// of the app uses (W5). The variable table rides the projection's `variables`.
+/// A downstream regen that FAILS does not undo the save: the variable really was
+/// written, and the frontend reports both truths off the correlated terminal.
+#[tracing::instrument(skip_all, fields(name = %name), err(Display))]
+pub async fn upsert_variable(
+    state: &AppState,
+    app: HostContext,
+    name: String,
+    value: f64,
+) -> Result<DocumentProjection, ApiError> {
+    let (outcome, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("upsert_variable".into()))?;
+        // Read + apply under ONE guard: deciding add-vs-set from a table read that
+        // a concurrent edit could invalidate is how a "set" turns into a duplicate.
+        let command = upsert_variable_command(&rt.variables(), &name, value)?;
+        let outcome = rt.apply(command)?;
+        (outcome, rt.projection())
+    };
+    let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    if let Some(sched) = state.scheduler.get() {
+        sched.handle(&outcome);
+    }
+    state.note_mutation();
+    Ok(projection)
+}
+
+/// Removes a variable by name (`CadClient.removeVariable`).
+///
+/// An unknown name is REFUSED rather than treated as a no-op: the caller believes
+/// it deleted something, and a silent success would leave a variable on screen the
+/// user just asked to be rid of. Records still bound to it are not rewritten —
+/// they fail loudly at regen with an `EXPR_UNRESOLVED` diagnostic naming the
+/// field and the gone variable — records are never rewritten behind the user's
+/// back. Use `rename_variable` when the intent is to keep the bindings.
+///
+/// Returns the (pre-regen) [`DocumentProjection`], like [`upsert_variable`]: the
+/// removal STANDS even when the regen it schedules then fails on a record still
+/// bound to the gone name. That failure is reported, never healed by silently
+/// putting the variable back (W5).
+#[tracing::instrument(skip_all, fields(name = %name), err(Display))]
+pub async fn remove_variable(
+    state: &AppState,
+    app: HostContext,
+    name: String,
+) -> Result<DocumentProjection, ApiError> {
+    let (outcome, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("remove_variable".into()))?;
+        let command = remove_variable_command(&rt.variables(), &name)?;
+        let outcome = rt.apply(command)?;
+        (outcome, rt.projection())
+    };
+    let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    if let Some(sched) = state.scheduler.get() {
+        sched.handle(&outcome);
+    }
+    state.note_mutation();
+    Ok(projection)
+}
+
+/// The [`EditCommand`] an `upsert_variable_expr(name, text)` lowers to.
+///
+/// The expression-authoring twin of [`upsert_variable_command`]. Both are
+/// name-keyed and both are refused before anything is recorded; the difference
+/// is that this one must EVALUATE first, because the `Scalar` it writes carries
+/// both the expression AND the number it currently evaluates to (the cache every
+/// consumer reads until the next regen).
+///
+/// Evaluation runs against the table this edit WOULD produce, not the current
+/// one, so a self-reference (`w = w + 1`) and a cycle the edit closes are
+/// refused here rather than written and then discovered by every bound parameter
+/// at once.
+fn upsert_variable_expr_command(
+    current: &VariableTable,
+    name: &str,
+    text: &str,
+) -> Result<EditCommand, ApiError> {
+    let name = name.trim();
+    if !is_bare_name(name) {
+        return Err(ApiError::InvalidCommand(format!(
+            "invalid variable name {name:?}: a name must match [A-Za-z_][A-Za-z0-9_]*"
+        )));
+    }
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(ApiError::InvalidCommand(format!(
+            "variable {name:?}: an expression must not be empty"
+        )));
+    }
+    let existing = current.get(name).cloned();
+    let id = existing.as_ref().map_or_else(VariableId::new, |v| v.id);
+    let mut candidate = current.clone();
+    candidate.upsert(Variable {
+        id,
+        name: name.to_string(),
+        value: Scalar::with_expr(0.0, text),
+        unit: Unit::Mm,
+    });
+    let (values, errors) = resolve_variable_table(&candidate);
+    if let Some(e) = errors.iter().find(|e| e.name == name) {
+        return Err(ApiError::InvalidCommand(format!(
+            "variable {name:?}: {}",
+            e.message
+        )));
+    }
+    let resolved = values
+        .get(name)
+        .map(|v| v.number)
+        .ok_or_else(|| ApiError::Internal(format!("variable {name:?} resolved to nothing")))?;
+    let value = Scalar::with_expr(resolved, text);
+    Ok(match existing {
+        Some(v) => EditCommand::SetVariable {
+            variable: v.id,
+            value,
+        },
+        None => EditCommand::AddVariable {
+            variable: Variable {
+                id,
+                name: name.to_string(),
+                value,
+                unit: Unit::Mm,
+            },
+        },
+    })
+}
+
+/// Creates or re-binds a variable to an EXPRESSION by name
+/// (`CadClient.upsertVariableExpr`).
+///
+/// The sibling of [`upsert_variable`], which takes a literal `f64`. Two commands
+/// rather than one optional-expression command because the two authoring
+/// gestures have different failure modes: a number is either finite or not, an
+/// expression can fail eight ways and must say which. Both are append-only
+/// additions to the IPC surface; neither changes the other's shape.
+///
+/// Returns the (pre-regen) [`DocumentProjection`] with the same emit + schedule +
+/// `note_mutation` tail every mutating command has.
+#[tracing::instrument(skip_all, fields(name = %name), err(Display))]
+pub async fn upsert_variable_expr(
+    state: &AppState,
+    app: HostContext,
+    name: String,
+    text: String,
+) -> Result<DocumentProjection, ApiError> {
+    let (outcome, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("upsert_variable_expr".into()))?;
+        // Read + apply under ONE guard: deciding add-vs-set (and evaluating
+        // against the table) from a read a concurrent edit could invalidate is
+        // how a "set" turns into a duplicate.
+        let command = upsert_variable_expr_command(rt.variables_table(), &name, &text)?;
+        let outcome = rt.apply(command)?;
+        (outcome, rt.projection())
+    };
+    let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    if let Some(sched) = state.scheduler.get() {
+        sched.handle(&outcome);
+    }
+    state.note_mutation();
+    Ok(projection)
+}
+
+/// Renames a variable AND every expression that references it
+/// (`CadClient.renameVariable`).
+///
+/// NOT `remove` + `upsert`: that pair would leave every bound parameter pointing
+/// at a name that no longer exists for the duration, and the removal STANDS even
+/// if the re-add fails. This is one undoable transaction that rewrites the
+/// references token-wise through the expression parser, and is refused as a
+/// whole if any of them cannot be rewritten.
+#[tracing::instrument(skip_all, fields(name = %name, new_name = %new_name), err(Display))]
+pub async fn rename_variable(
+    state: &AppState,
+    app: HostContext,
+    name: String,
+    new_name: String,
+) -> Result<DocumentProjection, ApiError> {
+    let (outcome, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("rename_variable".into()))?;
+        let target = rt
+            .variables_table()
+            .get(&name)
+            .map(|v| v.id)
+            .ok_or_else(|| ApiError::InvalidCommand(format!("unknown variable {name:?}")))?;
+        let outcome = rt.apply(EditCommand::RenameVariable {
+            variable: target,
+            name: new_name.clone(),
+        })?;
+        (outcome, rt.projection())
+    };
+    let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    if let Some(sched) = state.scheduler.get() {
+        sched.handle(&outcome);
+    }
+    state.note_mutation();
+    Ok(projection)
+}
+
+/// Evaluates `expr` at `site` against the open document's variable table
+/// (`CadClient.evaluateExpression`) — the live preview behind an authoring
+/// field.
+///
+/// **Pure.** It records nothing, marks nothing dirty, schedules no regen and
+/// emits no event, which is what makes it safe to call on every keystroke.
+/// A failure is a populated `error` in the RESULT, not an `Err`: an
+/// in-progress expression is not an API misuse. The only `Err`s are "no document
+/// open" and an unknown `site`.
+pub async fn evaluate_expression(
+    state: &AppState,
+    expr: String,
+    site: String,
+) -> Result<EvaluatedExpressionDto, ApiError> {
+    let dim = match site.as_str() {
+        "length" => Dimension::Length,
+        "angle" => Dimension::Angle,
+        "scalar" => Dimension::Scalar,
+        other => {
+            return Err(ApiError::InvalidCommand(format!(
+                "unknown expression site {other:?}: expected \"length\", \"angle\" or \"scalar\""
+            )))
+        }
+    };
+    let guard = state.runtime.lock().await;
+    let rt = guard
+        .as_ref()
+        .ok_or_else(|| ApiError::NoDocument("evaluate_expression".into()))?;
+    Ok(
+        match onecad_core::regen::evaluate_expression(expr.trim(), dim, rt.variables_table()) {
+            Ok(value) => EvaluatedExpressionDto {
+                value: value.number,
+                dimension: dimension_name(value.dim).to_string(),
+                error: None,
+            },
+            Err((_, message)) => EvaluatedExpressionDto {
+                value: 0.0,
+                dimension: dimension_name(dim).to_string(),
+                error: Some(message),
+            },
+        },
+    )
+}
+
+/// Undoes the last committed edit (`CadClient.undo`).
+pub async fn undo(state: &AppState, app: HostContext) -> Result<DocumentProjection, ApiError> {
+    Ok(undo_with_outcome(state, app).await?.projection)
+}
+
+/// The history projection and whether this call requested regeneration.
+#[derive(Debug, Clone)]
+pub struct HistoryOutcome {
+    pub projection: DocumentProjection,
+    pub regen_expected: bool,
+}
+
+/// Undoes an edit and reports the actual scheduler request to typed hosts.
+///
+/// The follow-up regen is whatever [`DocumentRuntime::undo`] named — a
+/// [`RegenRequest::RevertToEnd`] over the reverted step's real dirty floor, not the
+/// blind full-history `ToEnd { from: 0 }` this used to enqueue (HISTORY-HARDEN H8).
+/// The request is minted by the runtime precisely so this lane cannot hand the H6a
+/// edit-scoped veto a `from > 0` that came from a revert.
+pub async fn undo_with_outcome(
+    state: &AppState,
+    app: HostContext,
+) -> Result<HistoryOutcome, ApiError> {
+    let (revert, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("undo".into()))?;
+        (rt.undo(), rt.projection())
+    };
+    let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    let mut regen_expected = false;
+    if let Some(revert) = revert {
+        if let (Some(sched), Some(request)) = (state.scheduler.get(), revert.regen) {
+            sched.request(request);
+            regen_expected = true;
+        }
+        state.note_mutation();
+    }
+    Ok(HistoryOutcome {
+        projection,
+        regen_expected,
+    })
+}
+
+/// Redoes the last undone edit (`CadClient.redo`). Same H8 dirty-floor lane as
+/// [`undo`].
+pub async fn redo(state: &AppState, app: HostContext) -> Result<DocumentProjection, ApiError> {
+    Ok(redo_with_outcome(state, app).await?.projection)
+}
+
+/// Redoes an edit and reports the actual scheduler request to typed hosts.
+pub async fn redo_with_outcome(
+    state: &AppState,
+    app: HostContext,
+) -> Result<HistoryOutcome, ApiError> {
+    let (revert, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("redo".into()))?;
+        (rt.redo()?, rt.projection())
+    };
+    let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    let mut regen_expected = false;
+    if let Some(revert) = revert {
+        if let (Some(sched), Some(request)) = (state.scheduler.get(), revert.regen) {
+            sched.request(request);
+            regen_expected = true;
+        }
+        state.note_mutation();
+    }
+    Ok(HistoryOutcome {
+        projection,
+        regen_expected,
+    })
+}
+
+/// The current document projection (empty when nothing is open).
+pub async fn get_projection(state: &AppState) -> Result<DocumentProjection, ApiError> {
+    let guard = state.runtime.lock().await;
+    Ok(guard
+        .as_ref()
+        .map_or_else(DocumentProjection::empty, DocumentRuntime::projection))
+}
+
+/// Fetches a body's MESH1 blob as a zero-copy `ArrayBuffer` (pull model).
+/// `generation` `None` ⇒ the latest snapshot. A miss yields an empty response.
+pub async fn get_mesh(
+    state: &AppState,
+    body_id: String,
+    lod: String,
+    generation: Option<u64>,
+    expected_runtime_session: Option<String>,
+) -> Result<Vec<u8>, ApiError> {
+    let body = BodyId::from_str(&body_id)
+        .map_err(|e| ApiError::InvalidCommand(format!("bad bodyId {body_id:?}: {e}")))?;
+    let lod = lod_from_str(&lod);
+    tracing::debug!(bodyId = %body_id, generation, "get_mesh: prepare");
+    let prepared = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("getMesh".into()))?;
+        if expected_runtime_session
+            .as_deref()
+            .is_some_and(|expected| !rt.matches_runtime_session(expected))
+        {
+            return Err(ApiError::StalePreview(
+                "mesh request belongs to a replaced document runtime".into(),
+            ));
+        }
+        rt.prepare_mesh_fetch(body, lod, generation)
+    };
+    let bytes = match prepared.drive().await {
+        Ok(bytes) => bytes,
+        Err(driven) => {
+            let mut guard = state.runtime.lock().await;
+            guard.as_mut().and_then(|rt| rt.adopt_mesh_fetch(driven))
+        }
+    };
+    tracing::debug!(bodyId = %body_id, generation, hit = bytes.is_some(), "get_mesh: complete");
+    // MESH1 travels verbatim; a miss is an empty buffer (frontend keeps its mesh).
+    let data = bytes.map(|a| a.as_ref().clone()).unwrap_or_default();
+    Ok(data)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sketch solver lane (SCHEMA §7.4) — mirrors the frontend `localSolver` seam
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Enters sketch mode: syncs the sketch to the worker solver lane and returns the
+/// live session + real dof/status (`CadClient.enterSketch`; the F-WP9 swap target).
+#[tracing::instrument(skip_all, fields(sketchId = %sketch_id), err(Display))]
+pub async fn enter_sketch(
+    state: &AppState,
+    app: HostContext,
+    sketch_id: String,
+    created_here: Option<bool>,
+) -> Result<SketchSessionDto, ApiError> {
+    enter_sketch_with_completion(state, app, sketch_id, created_here)
+        .await?
+        .result
+}
+
+/// Enters through the existing solver lane and retains any scheduled rebuild.
+pub async fn enter_sketch_with_completion(
+    state: &AppState,
+    app: HostContext,
+    sketch_id: String,
+    created_here: Option<bool>,
+) -> Result<CommandCompletion<SketchSessionDto>, ApiError> {
+    let id = parse_sketch_id(&sketch_id)?;
+    let (session, outcome, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("enterSketch".into()))?;
+        let (session, outcome) = rt.enter_sketch_with_outcome(id).await?;
+        if created_here.unwrap_or(false) {
+            rt.mark_open_sketch_created(id);
+        }
+        (session, outcome, rt.projection())
+    };
+    let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    let mut regen_expected = false;
+    if let Some(outcome) = outcome {
+        regen_expected = schedule_command_outcome(state, &outcome);
+        state.note_mutation();
+    }
+    Ok(CommandCompletion {
+        result: Ok(session),
+        projection,
+        regen_expected,
+    })
+}
+
+/// Reads a sketch's current geometry as a static snapshot — no solver call, no
+/// session state, no events (`CadClient.getSketch`; the model-mode display-layer
+/// read). Returns the same [`SketchSessionDto`] shape as [`enter_sketch`], with
+/// `dof`/`status` from the last solver-lane solve (or the "never solved" default).
+pub async fn get_sketch(state: &AppState, sketch_id: String) -> Result<SketchSessionDto, ApiError> {
+    let id = parse_sketch_id(&sketch_id)?;
+    let guard = state.runtime.lock().await;
+    let rt = guard
+        .as_ref()
+        .ok_or_else(|| ApiError::NoDocument("getSketch".into()))?;
+    Ok(rt.get_sketch(id)?)
+}
+
+/// `Some(recordId)` iff a new placement gesture on `bodyId` may **fold into** an
+/// existing `TransformBody` record instead of appending a new one
+/// (`CadClient.canFoldTransform`; SCHEMA §7.3 cumulative-placement rule).
+///
+/// A pure, read-only lineage query — no session state, no events. It lives in the
+/// core (not the frontend) because the frontend has no lineage: it sees a picked
+/// body and a flat history list, never "which record last touched this body".
+pub async fn can_fold_transform(
+    state: &AppState,
+    body_id: String,
+) -> Result<Option<String>, ApiError> {
+    let id = BodyId::from_str(&body_id)
+        .map_err(|e| ApiError::InvalidCommand(format!("bad bodyId `{body_id}`: {e}")))?;
+    let guard = state.runtime.lock().await;
+    let rt = guard
+        .as_ref()
+        .ok_or_else(|| ApiError::NoDocument("canFoldTransform".into()))?;
+    Ok(rt.can_fold_transform(id).map(|r| r.to_string()))
+}
+
+/// Rebuilds the closed regions of a persisted sketch without opening, finishing,
+/// squashing or otherwise mutating its edit session.
+pub async fn get_sketch_regions(
+    state: &AppState,
+    sketch_id: String,
+) -> Result<FinishSketchDto, ApiError> {
+    let id = parse_sketch_id(&sketch_id)?;
+    let prepared = {
+        let guard = state.runtime.lock().await;
+        let rt = guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("getSketchRegions".into()))?;
+        rt.prepare_sketch_regions(id)?
+    };
+    Ok(prepared.drive().await?)
+}
+
+/// Applies sketch edits (add/move/delete entities+constraints) then re-solves for
+/// live dof/status (`CadClient.sketchUpsert`).
+pub async fn sketch_upsert(
+    state: &AppState,
+    app: HostContext,
+    sketch_id: String,
+    ops: Vec<SketchEditOp>,
+) -> Result<SketchUpsertDto, ApiError> {
+    sketch_upsert_with_completion(state, app, sketch_id, ops)
+        .await?
+        .result
+}
+
+/// Solves and authors through the existing upsert lane, retaining scheduled work.
+pub async fn sketch_upsert_with_completion(
+    state: &AppState,
+    app: HostContext,
+    sketch_id: String,
+    ops: Vec<SketchEditOp>,
+) -> Result<CommandCompletion<SketchUpsertDto>, ApiError> {
+    let id = parse_sketch_id(&sketch_id)?;
+    let (result, outcome, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("sketchUpsert".into()))?;
+        let (result, outcome) = rt.sketch_upsert_with_outcome(id, ops).await?;
+        (result, outcome, rt.projection())
+    };
+    // KEYSPACE TRAP: `result.entity_states` here is keyed by BACKEND uuid. The
+    // command RETURN is re-keyed to frontend entity ids by the client
+    // (`frontendEntityStates`); this event is not. Today the frontend only parks
+    // the payload in a debug seam — a future subscriber must re-key it first.
+    let _ = app.emit(AppEvent::SketchSolved(result.clone()));
+    let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    let mut regen_expected = false;
+    if let Some(outcome) = outcome {
+        regen_expected = schedule_command_outcome(state, &outcome);
+        state.note_mutation();
+    }
+    Ok(CommandCompletion {
+        result: Ok(result),
+        projection,
+        regen_expected,
+    })
+}
+
+/// What the pointer grabbed (`BeginGesture.drag`; SCHEMA §7.4) — `{kind, entity,
+/// role?, grab?}`. Validated STRICTLY into a [`wire::GestureTarget`]: an unknown
+/// `kind` or `role`, or an unparseable `entity`, is refused here rather than
+/// forwarded, because §7.4 forbids degrading an unrecognized target to a point
+/// drag (it would move a handle the user never grabbed).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GestureTargetArgs {
+    pub kind: String,
+    pub entity: String,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub grab: Option<[f64; 2]>,
+}
+
+/// The five §7.4 `drag.role` tokens, case-folded. Mapping (rather than
+/// forwarding) the client string is what makes the role a `&'static str` on the
+/// wire — a typo fails at this boundary instead of becoming `REF_UNRESOLVED`
+/// three layers down.
+fn parse_gesture_role(role: &str) -> Option<&'static str> {
+    match role.to_ascii_lowercase().as_str() {
+        "start" => Some("start"),
+        "end" => Some("end"),
+        "center" => Some("center"),
+        "p0" => Some("p0"),
+        "p1" => Some("p1"),
+        _ => None,
+    }
+}
+
+impl GestureTargetArgs {
+    fn validate(self) -> Result<wire::GestureTarget, ApiError> {
+        let kind = wire::DragKind::parse(&self.kind).ok_or_else(|| {
+            ApiError::InvalidCommand(format!(
+                "beginGesture: unknown drag kind {:?} (point|arcEnd|radius|entityBody)",
+                self.kind
+            ))
+        })?;
+        let entity = EntityId::from_str(&self.entity).map_err(|e| {
+            ApiError::InvalidCommand(format!("beginGesture: bad entity {:?}: {e}", self.entity))
+        })?;
+        let role = match self.role.as_deref().filter(|r| !r.is_empty()) {
+            None => None,
+            Some(r) => Some(parse_gesture_role(r).ok_or_else(|| {
+                ApiError::InvalidCommand(format!(
+                    "beginGesture: unknown drag role {r:?} (start|end|center|p0|p1)"
+                ))
+            })?),
+        };
+        if kind == wire::DragKind::ArcEnd && !matches!(role, Some("start") | Some("end")) {
+            return Err(ApiError::InvalidCommand(
+                "beginGesture: arcEnd requires role start|end".into(),
+            ));
+        }
+        if let Some(grab) = self.grab {
+            if !grab.iter().all(|v| v.is_finite()) {
+                return Err(ApiError::InvalidCommand(format!(
+                    "beginGesture: non-finite grab {grab:?}"
+                )));
+            }
+        }
+        Ok(wire::GestureTarget {
+            kind,
+            entity,
+            role,
+            grab: self.grab,
+        })
+    }
+}
+
+/// Opens a drag gesture (`BeginGesture`; SCHEMA §7.4).
+///
+/// `target` is OPTIONAL and additive: absent ⇒ the plain point drag on
+/// `drag_point`, whose request stays byte-identical to the pre-SP-2 form, so every
+/// existing caller is unchanged.
+pub async fn begin_gesture(
+    state: &AppState,
+    sketch_id: String,
+    drag_point: String,
+    target: Option<GestureTargetArgs>,
+) -> Result<BeginGestureDto, ApiError> {
+    let id = parse_sketch_id(&sketch_id)?;
+    let point = EntityId::from_str(&drag_point)
+        .map_err(|e| ApiError::InvalidCommand(format!("bad dragPoint {drag_point:?}: {e}")))?;
+    let target = match target {
+        Some(t) => t.validate()?,
+        None => wire::GestureTarget::point(point),
+    };
+    let mut guard = state.runtime.lock().await;
+    let rt = guard
+        .as_mut()
+        .ok_or_else(|| ApiError::NoDocument("beginGesture".into()))?;
+    Ok(rt.begin_gesture(id, point, target).await?)
+}
+
+/// Discard active worker scratch without a document edit or solve event.
+pub async fn cancel_gesture(state: &AppState) -> Result<(), ApiError> {
+    let mut guard = state.runtime.lock().await;
+    let rt = guard
+        .as_mut()
+        .ok_or_else(|| ApiError::NoDocument("cancelGesture".into()))?;
+    Ok(rt.cancel_gesture().await?)
+}
+
+/// One latest-wins incremental drag solve (`SolveDrag`; preview only).
+pub async fn solve_drag(state: &AppState, target: [f64; 2]) -> Result<DragSolveDto, ApiError> {
+    let mut guard = state.runtime.lock().await;
+    let rt = guard
+        .as_mut()
+        .ok_or_else(|| ApiError::NoDocument("solveDrag".into()))?;
+    Ok(rt.solve_drag(target).await?)
+}
+
+/// Pointer-up: final exact solve committed as ONE undo command (`EndGesture`).
+pub async fn end_gesture(
+    state: &AppState,
+    app: HostContext,
+    final_target: Option<[f64; 2]>,
+) -> Result<SketchUpsertDto, ApiError> {
+    let (result, outcome, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("endGesture".into()))?;
+        let (result, outcome) = rt.end_gesture_with_outcome(final_target).await?;
+        (result, outcome, rt.projection())
+    };
+    // KEYSPACE TRAP: `entity_states` is backend-uuid-keyed here — see sketch_upsert.
+    let _ = app.emit(AppEvent::SketchSolved(result.clone()));
+    let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    if let Some(sched) = state.scheduler.get() {
+        sched.handle(&outcome);
+    }
+    state.note_mutation();
+    Ok(result)
+}
+
+/// Exits sketch mode / cancels an in-flight gesture without committing.
+///
+/// `discard` (absent ⇒ `false`) is WP-U7 D-1: the sketch chrome's **Cancel**
+/// asks for the session's edits to be REVERTED to the state at sketch entry,
+/// where Esc and Finish keep them. A discard that lands takes the same lane a
+/// [`undo`] does — projection event plus the revert's own regen request — because
+/// without that regen the viewport keeps showing the geometry just discarded.
+pub async fn cancel_sketch(
+    state: &AppState,
+    app: HostContext,
+    sketch_id: String,
+    discard: Option<bool>,
+) -> Result<CancelSketchDto, ApiError> {
+    cancel_sketch_with_completion(state, app, sketch_id, discard)
+        .await?
+        .result
+}
+
+/// Exits or discards through the existing session lane, retaining a revert request.
+pub async fn cancel_sketch_with_completion(
+    state: &AppState,
+    app: HostContext,
+    sketch_id: String,
+    discard: Option<bool>,
+) -> Result<CommandCompletion<CancelSketchDto>, ApiError> {
+    let id = parse_sketch_id(&sketch_id)?;
+    let discard = discard.unwrap_or(false);
+    tracing::info!(
+        "cancel_sketch: sketch={id} discard={discard} (squash exit — NO timeline record minted)"
+    );
+    let (outcome, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("cancelSketch".into()))?;
+        let outcome = rt.cancel_sketch(id, discard).await?;
+        // Only a real discard moved the document; a keep-exit stays silent (it
+        // always did, and the following finishSketch publishes anyway).
+        (outcome, rt.projection())
+    };
+    if outcome.discarded {
+        let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    }
+    let mut regen_expected = false;
+    if let Some(revert) = outcome.revert {
+        if let (Some(sched), Some(request)) = (state.scheduler.get(), revert.regen) {
+            sched.request(request);
+            regen_expected = true;
+        }
+    }
+    // Dirty the document only when a step actually moved (mirrors `api::undo`):
+    // a discard with nothing committed since entry changes no bytes and must not
+    // mark the document unsaved.
+    if outcome.discarded && outcome.revert.is_some() {
+        state.note_mutation();
+    }
+    Ok(CommandCompletion {
+        result: Ok(CancelSketchDto {
+            discarded: outcome.discarded,
+            kept_reason: outcome.kept_reason.map(str::to_owned),
+        }),
+        projection,
+        regen_expected,
+    })
+}
+
+/// Computes the closed profile regions for extrude/revolve selection + preview fill
+/// (`finishSketch` → `SketchRegions`).
+#[tracing::instrument(skip_all, fields(sketchId = %sketch_id), err(Display))]
+pub async fn finish_sketch(
+    state: &AppState,
+    app: HostContext,
+    sketch_id: String,
+) -> Result<FinishSketchDto, ApiError> {
+    finish_sketch_with_completion(state, app, sketch_id)
+        .await?
+        .result
+}
+
+/// Finishes through the existing record/regions path, retaining accepted authoring
+/// and its scheduled work even when the subsequent regions query fails.
+pub async fn finish_sketch_with_completion(
+    state: &AppState,
+    app: HostContext,
+    sketch_id: String,
+) -> Result<CommandCompletion<FinishSketchDto>, ApiError> {
+    let id = parse_sketch_id(&sketch_id)?;
+    let (dto, outcome, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("finishSketch".into()))?;
+        // A regions refusal after the record commit still carries the outcome:
+        // the record must reach the scheduler, the projection and autosave.
+        let (dto, outcome) = match rt.finish_sketch_with_outcome(id).await {
+            Ok((dto, outcome)) => (Ok(dto), outcome),
+            Err(e) => (Err(e.error), e.committed.map(|c| *c)),
+        };
+        (dto, outcome, rt.projection())
+    };
+    tracing::info!(
+        "finish_sketch: sketch={id} regions={} recordOutcome={}",
+        dto.as_ref().map(|d| d.regions.len()).unwrap_or(0),
+        outcome.is_some()
+    );
+    // The finish may have appended/refreshed the sketch's timeline record: the
+    // new feature row must reach the frontend and the regen scheduler must see
+    // the outcome, or the record stays an unregenerated draft.
+    let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    let mut regen_expected = false;
+    if let Some(outcome) = outcome {
+        regen_expected = schedule_command_outcome(state, &outcome);
+        state.note_mutation();
+    }
+    Ok(CommandCompletion {
+        result: dto.map_err(ApiError::from),
+        projection,
+        regen_expected,
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Element identity (SCHEMA §7.5) — pick → promote
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One pick to promote (`{topoKey, anchor?}`).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PickInput {
+    pub topo_key: String,
+    #[serde(default)]
+    pub anchor: Option<AnchorIntent>,
+}
+
+/// One ref to dry-run-resolve (`{refId, primary?, intent?, anchor?}`).
+#[derive(Debug, Deserialize)]
+pub struct ResolveRefInput {
+    #[serde(rename = "refId")]
+    pub ref_id: String,
+    #[serde(flatten)]
+    pub element: ElementRef,
+}
+
+/// Promotes snapshot-scoped TopoKey picks to persistent, Rust-minted `ElementId`s
+/// (`AcquireElementIds`; SCHEMA §7.5) — the pick→promote surface for M2.
+pub async fn promote_selection(
+    state: &AppState,
+    app: HostContext,
+    snapshot_id: u64,
+    body_id: String,
+    picks: Vec<PickInput>,
+    expected_runtime_session: Option<String>,
+) -> Result<Vec<PromotedElementDto>, ApiError> {
+    let body = wire::parse_body_id(&body_id).map_err(ApiError::InvalidCommand)?;
+    let picks: Vec<(TopoKey, Option<AnchorIntent>)> = picks
+        .into_iter()
+        .map(|p| (TopoKey::new(p.topo_key), p.anchor))
+        .collect();
+    let (ids, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("promoteSelection".into()))?;
+        if expected_runtime_session
+            .as_deref()
+            .is_some_and(|expected| !rt.matches_runtime_session(expected))
+        {
+            return Err(ApiError::StalePreview(
+                "selection belongs to a replaced document runtime".into(),
+            ));
+        }
+        let ids = rt
+            .promote_selection(SnapshotId(snapshot_id), body, picks)
+            .await?;
+        (ids, rt.projection())
+    };
+    let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    // A promotion writes `regen.elements`, which the save persists — so it owes the
+    // autosave loop a tick like any other mutating command.
+    if !ids.is_empty() {
+        state.note_mutation();
+    }
+    Ok(ids)
+}
+
+/// Drag-time preview: run ONE candidate op against a throwaway copy of the
+/// worker's head and return the resulting MESH1 blobs (SCHEMA §7.6 `PreviewOp`).
+///
+/// This replaces a client-side stand-in. The "exact" mesh shown during an extrude
+/// drag used to be synthesized in JavaScript by the same function the MOCK client
+/// uses, so a Cut preview never subtracted and Fillet/Shell/Revolve had no preview
+/// at all — the commit could produce something the preview had never shown.
+///
+/// Nothing is committed: the worker runs the op on a copy and drops it, so the
+/// head bodies, history hash, snapshot id, revision and epoch are untouched and
+/// the preview is invisible to fencing. The runtime lock is taken only to confirm
+/// a document is open, never across the worker round-trip.
+///
+/// `op` is the core `{opType, params}` shape used by AddOperation, optionally
+/// carrying a stable `opId` that commit reuses as its RecordId. Rust deserializes
+/// it to [`Operation`] and performs all worker-wire lowering; raw worker params
+/// are never accepted. `expected_snapshot_id` rejects stale drag candidates.
+pub async fn preview_op(
+    state: &AppState,
+    op: serde_json::Value,
+    sketch_id: Option<String>,
+    expected_snapshot_id: Option<u64>,
+    lod: Option<String>,
+) -> Result<crate::dto::PreviewResultDto, ApiError> {
+    {
+        let guard = state.runtime.lock().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("previewOp".into()))?;
+    }
+    let lod = match lod.as_deref() {
+        Some("fine") => onecad_core::regen::Lod::Fine,
+        Some("medium") => onecad_core::regen::Lod::Medium,
+        _ => onecad_core::regen::Lod::Coarse,
+    };
+    let (operation, op_id) = parse_preview_operation(op)?;
+    preview_operation(
+        state,
+        operation,
+        op_id,
+        sketch_id,
+        expected_snapshot_id.map(SnapshotId),
+        lod,
+    )
+    .await
+}
+
+/// Previews a typed candidate through the same worker path as desktop IPC.
+pub async fn preview_operation(
+    state: &AppState,
+    operation: Operation,
+    op_id: RecordId,
+    sketch_id: Option<String>,
+    expected_snapshot_id: Option<SnapshotId>,
+    lod: onecad_core::regen::Lod,
+) -> Result<crate::dto::PreviewResultDto, ApiError> {
+    {
+        let guard = state.runtime.lock().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("previewOp".into()))?;
+    }
+    if matches!(
+        operation,
+        Operation::Known(onecad_core::document::record::KnownOperation::FeaturePattern(_))
+    ) {
+        return Err(ApiError::InvalidCommand(
+            "FeaturePattern preview requires authoritative source expansion".into(),
+        ));
+    }
+    let op_id_log = op_id.to_string();
+    let result = state
+        .preview()
+        .preview_op(
+            operation,
+            op_id.to_string(),
+            sketch_id,
+            expected_snapshot_id,
+            lod,
+        )
+        .await;
+    match result {
+        Err(onecad_core::regen::EngineError::OpFailed {
+            code: onecad_core::regen::OpFailureCode::StalePreview,
+            message,
+            ..
+        }) => {
+            // `trace`, not `debug`: a stale candidate is the EXPECTED outcome of a
+            // drag frame that raced a publish — at debug it would drown the default
+            // filter's `onecad_lib=debug` lane once per frame.
+            tracing::trace!("preview_op: op={op_id_log} STALE: {message}");
+            Err(ApiError::StalePreview(message))
+        }
+        Err(error) => {
+            tracing::warn!("preview_op: op={op_id_log} FAILED: {error}");
+            Err(error.into())
+        }
+        Ok(preview) => Ok(preview),
+    }
+}
+
+fn parse_preview_operation(mut raw: serde_json::Value) -> Result<(Operation, RecordId), ApiError> {
+    let object = raw
+        .as_object_mut()
+        .ok_or_else(|| ApiError::InvalidCommand("preview operation must be an object".into()))?;
+    let op_id = match object.remove("opId") {
+        // Compatibility with W3 callers predating stable frontend preview ids.
+        // Keep the fallback deterministic across drag frames while preserving
+        // the body_<RecordId> identity shape required by NewBody lowering.
+        None => RecordId::from_uuid(uuid::Uuid::nil()),
+        Some(serde_json::Value::String(id)) => RecordId::from_str(&id)
+            .map_err(|e| ApiError::InvalidCommand(format!("bad preview opId {id:?}: {e}")))?,
+        Some(_) => {
+            return Err(ApiError::InvalidCommand(
+                "preview opId must be a RecordId string".into(),
+            ));
+        }
+    };
+    let operation = serde_json::from_value(raw)
+        .map_err(|e| ApiError::InvalidCommand(format!("bad preview operation: {e}")))?;
+    Ok((operation, op_id))
+}
+
+/// Resolve a picked FACE to the sketch plane a sketch placed on it would freeze
+/// (MODEL-OPS W2 sketch-on-face).
+///
+/// Rust owns identity, so the plane is derived HERE rather than from the
+/// frontend's tessellated triangle normal: `QueryElement` (SCHEMA §7.5) returns
+/// the kernel's own descriptor, and for a planar face its bounding-box centre
+/// lies on the plane, so `{center, normal}` defines it exactly. The in-plane axes
+/// come from the deterministic, lock-tested
+/// [`plane_from_point_normal`](onecad_core::sketch::plane_from_point_normal) rule —
+/// the frame is frozen with the sketch, so a non-deterministic basis would rotate
+/// existing sketches on reopen.
+///
+/// FAILS LOUDLY for a non-planar face rather than approximating one: a cylinder's
+/// descriptor normal is not a plane normal, and silently sketching on a made-up
+/// plane is exactly the class of "silent wrong bind" this codebase refuses.
+/// Worker IO runs OUTSIDE the runtime lock (the lock is taken only to read the
+/// head snapshot id).
+///
+/// `topo_key` walks the SAME two-rung read ladder `element_info` does (see its
+/// doc comment for the full rationale): a just-promoted face id has not yet
+/// been CONSUMED by any operation, so the worker's on-demand element-map
+/// partition has no entry for it and an ElementId-only lookup fails loudly —
+/// exactly the flow `SketchController.tryEnterOnSelectedFace` drives (select a
+/// face, sketch on it immediately). The topoKey rung resolves against the body
+/// shape directly, so it is tried FIRST; the elementId is the fallback.
+pub async fn face_sketch_plane(
+    state: &AppState,
+    snapshot_id: u64,
+    body_id: String,
+    element_id: String,
+    topo_key: Option<String>,
+) -> Result<crate::dto::SketchPlaneDto, ApiError> {
+    let body = wire::parse_body_id(&body_id).map_err(ApiError::InvalidCommand)?;
+    {
+        // Prepare the optional scoped ticket; the runtime lock is not held across
+        // worker IO and the ticket is revalidated afterward.
+        let guard = state.runtime.lock().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("faceSketchPlane".into()))?;
+    }
+    // The caller supplies the snapshot its pick was made against — the same
+    // contract `promoteSelection` uses, so a TopoKey/ElementId resolves against
+    // the exact snapshot the mesh was tessellated at (Invariant 4).
+    let snapshot = SnapshotId(snapshot_id);
+    let query = state.element_query();
+    let mut info = None;
+    if let Some(topo_key) = topo_key.as_deref().filter(|k| !k.is_empty()) {
+        info = query
+            .query_element_by_topo_key(snapshot, body, topo_key)
+            .await?;
+    }
+    if info.is_none() {
+        info = query.query_element(snapshot, body, &element_id).await?;
+    }
+    let info = info.ok_or_else(|| {
+        ApiError::InvalidCommand(format!(
+            "faceSketchPlane: element {element_id} is not present in the current snapshot"
+        ))
+    })?;
+
+    if info.kind != "face" {
+        return Err(ApiError::InvalidCommand(format!(
+            "faceSketchPlane: element {element_id} is a {}, not a face",
+            info.kind
+        )));
+    }
+    // `GeomAbs_Plane` is OCCT's FIRST surface-type enumerator, i.e. 0.
+    const GEOM_ABS_PLANE: i64 = 0;
+    if info.surface_type != GEOM_ABS_PLANE || !info.has_normal {
+        return Err(ApiError::InvalidCommand(
+            "faceSketchPlane: only a planar face can host a sketch".into(),
+        ));
+    }
+
+    let plane = onecad_core::sketch::plane_from_point_normal(
+        onecad_core::math::Vec3::new_unchecked(info.center[0], info.center[1], info.center[2]),
+        onecad_core::math::Vec3::new_unchecked(info.normal[0], info.normal[1], info.normal[2]),
+    );
+    Ok(plane.into())
+}
+
+/// The addressing rung that actually resolved a picked face, kept so the SECOND
+/// projection round-trip re-uses it verbatim instead of re-walking the ladder.
+///
+/// Re-laddering between the two calls would be a real hazard, not a nicety: the
+/// two rungs can resolve to DIFFERENT faces (a stale `topoKey` and a live
+/// `elementId` need not agree), and the handshake's whole premise is that both
+/// round-trips describe the same face.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ResolvedFaceAddress {
+    ElementId(String),
+    TopoKey(String),
+}
+
+impl ResolvedFaceAddress {
+    fn as_wire(&self) -> wire::FaceAddress<'_> {
+        match self {
+            Self::ElementId(id) => wire::FaceAddress::ElementId(id),
+            Self::TopoKey(key) => wire::FaceAddress::TopoKey(key),
+        }
+    }
+}
+
+/// Creates a sketch ON a picked planar face, seeded with that face's projected
+/// boundary as locked reference geometry (SKETCH-ON-FACE W1b; SCHEMA §7.6
+/// `ProjectFaceBoundary`).
+///
+/// This is the AUTHORING sibling of [`face_sketch_plane`], which stays the
+/// frontend's read-only pre-flight (does this face host a sketch, and where?).
+/// Here the backend additionally asks the kernel for the face's boundary and
+/// mints it into the new sketch as `referenceLocked` entities pinned by `Fixed`
+/// constraints — the geometry a user snaps a profile to.
+///
+/// # The two-round-trip plane handshake (SCHEMA §7.6)
+///
+/// 1. `frameOnly` — the kernel's own `gp_Pln` origin + orientation-corrected
+///    normal. This is why the verb exists rather than reusing `QueryElement`: a
+///    descriptor `center` is an axis-aligned **bbox** centre and sits OFF the
+///    plane for a tilted face, so a sketch built on it would extrude a sliver.
+/// 2. Rust builds the deterministic, lock-tested basis
+///    ([`plane_from_point_normal`](onecad_core::sketch::plane_from_point_normal)) —
+///    Rust owns the frame, and the frame is frozen with the sketch, so a
+///    non-deterministic basis would rotate stored sketches on reopen.
+/// 3. The real projection, in THAT basis, over `coplanarBody` scope so a face
+///    split into coplanar patches projects as one outline. Its echoed `exact` is
+///    compared against round-trip 1 as a **tripwire**: a mismatch means the head
+///    moved between the calls, and the command refuses rather than committing a
+///    sketch whose boundary belongs to a different face.
+///
+/// # Identity + ordering
+///
+/// * `sketch_id` is the FRONTEND-minted uuid and becomes the document `SketchId`
+///   **verbatim**. The frontend keys its projection store by that id, so minting
+///   a different one here would strand the store's entry.
+/// * `topo_key` walks the same two-rung read ladder [`face_sketch_plane`] and
+///   [`element_info`] do — topoKey FIRST, because a just-promoted, never-consumed
+///   `ElementId` is genuinely absent from the worker's on-demand element-map
+///   partition (see [`element_info`]'s doc comment).
+/// * Both worker round-trips run OUTSIDE the runtime lock; the lock is taken only
+///   for the presence check and for the single [`EditCommand::AddSketch`] apply.
+/// * An unresolvable face, a non-planar face, or a malformed response leaves the
+///   document **completely untouched** — nothing is applied until the projection
+///   has landed and translated.
+///
+/// A sketch created here has entities in the DOCUMENT immediately, but NOT a
+/// `Sketch` timeline record: the regen planner resolves an extrude's profile only
+/// from such a record, and minting one is `finish_sketch`'s job
+/// (EXTRUDE-COMMIT-FIX). Enter then finish before extruding off this sketch.
+#[tracing::instrument(
+    skip_all,
+    fields(sketchId = %sketch_id, bodyId = %body_id, snapshot = snapshot_id),
+    err(Display)
+)]
+pub async fn add_sketch_on_face(
+    state: &AppState,
+    snapshot_id: u64,
+    body_id: String,
+    element_id: String,
+    topo_key: Option<String>,
+    sketch_id: String,
+    name: String,
+) -> Result<SketchOnFaceDto, ApiError> {
+    let body = wire::parse_body_id(&body_id).map_err(ApiError::InvalidCommand)?;
+    // Adopted VERBATIM (see the doc comment): backend SketchId == frontend id.
+    let sketch_id = parse_sketch_id(&sketch_id)?;
+    let topo_key = topo_key.unwrap_or_default();
+    if element_id.is_empty() && topo_key.is_empty() {
+        return Err(ApiError::InvalidCommand(
+            "addSketchOnFace: one of elementId / topoKey is required".into(),
+        ));
+    }
+    {
+        // Presence check only — the runtime lock is NOT held across the worker
+        // round-trips below (the R-WP11 rule; a held lock makes fencing inert).
+        let guard = state.runtime.lock().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("addSketchOnFace".into()))?;
+    }
+    let snapshot = SnapshotId(snapshot_id);
+    let projector = state.face_projection();
+
+    // ── Round-trip 1: the kernel-exact frame, via the topoKey-first ladder ────
+    let mut resolved: Option<(ResolvedFaceAddress, onecad_core::sketch::FaceFrame)> = None;
+    if !topo_key.is_empty() {
+        let address = ResolvedFaceAddress::TopoKey(topo_key.clone());
+        if let Some(frame) = projector
+            .project_face_boundary_frame(snapshot, body, address.as_wire())
+            .await?
+        {
+            resolved = Some((address, frame));
+        }
+    }
+    if resolved.is_none() && !element_id.is_empty() {
+        let address = ResolvedFaceAddress::ElementId(element_id.clone());
+        if let Some(frame) = projector
+            .project_face_boundary_frame(snapshot, body, address.as_wire())
+            .await?
+        {
+            resolved = Some((address, frame));
+        }
+    }
+    let (address, frame) = resolved.ok_or_else(|| {
+        ApiError::InvalidCommand(format!(
+            "addSketchOnFace: face (elementId {element_id:?}, topoKey {topo_key:?}) on body \
+             {body_id} is not present in snapshot {snapshot_id}"
+        ))
+    })?;
+
+    // ── The frame Rust owns, frozen with the sketch ──────────────────────────
+    let plane = onecad_core::sketch::plane_from_point_normal(frame.origin, frame.normal);
+
+    // ── Round-trip 2: the real projection in that basis ──────────────────────
+    let payload = projector
+        .project_face_boundary(
+            snapshot,
+            body,
+            address.as_wire(),
+            &plane,
+            // A model face is routinely split into coplanar patches by unrelated
+            // features; projecting only the seed patch would seed a sketch with a
+            // partial outline that silently forms the wrong region.
+            wire::ProjectionScope::CoplanarBody,
+        )
+        .await?
+        .ok_or_else(|| {
+            ApiError::Internal(format!(
+                "addSketchOnFace: face on body {body_id} resolved for the frame query but \
+                 vanished before the projection — the head moved mid-handshake"
+            ))
+        })?;
+
+    // TRIPWIRE (SCHEMA §7.6): the echoed `exact` must still describe the frame the
+    // sketch's basis was built from. It is not a fence, so it cannot prevent a
+    // concurrent edit — it can only refuse to commit a boundary that no longer
+    // belongs to the plane it is expressed in.
+    const EXACT_EPS: f64 = 1e-9;
+    if !payload.exact.approx_eq(&frame, EXACT_EPS) {
+        return Err(ApiError::Internal(format!(
+            "addSketchOnFace: the projection echoed a different exact frame than the \
+             frameOnly query (frameOnly {:?}/{:?}, projection {:?}/{:?}) — refusing to commit a \
+             boundary expressed in a stale basis",
+            frame.origin, frame.normal, payload.exact.origin, payload.exact.normal
+        )));
+    }
+
+    // ── Translate + build (pure; no worker, no lock) ─────────────────────────
+    // `_projections` is always empty here: `ProjectFaceBoundary` carries no
+    // per-entity source (SCHEMA §7.6), so a sketch-on-face boundary is locked but
+    // NOT projection-tracked. Only `project_to_sketch` writes that map.
+    let (entities, constraints, _projections) = onecad_core::sketch::projected_sketch_content(
+        &payload.geometry,
+        &mut EntityId::new,
+        &mut ConstraintId::new,
+    );
+    let attachment = onecad_core::sketch::SketchAttachment::HostFace {
+        face: ElementRef {
+            // Only a real, non-empty ElementId is a binding; an empty string
+            // would be a fabricated identity the resolution ladder would chase.
+            primary: (!element_id.is_empty()).then(|| PrimaryRef {
+                body,
+                element: ElementId::new(element_id.clone()),
+                kind: ElementKind::Face,
+                extra: Default::default(),
+            }),
+            // No `intent`: the descriptor is worker-owned evidence and capturing
+            // it would cost a third round-trip this command has no other use for.
+            intent: None,
+            anchor: Some(AnchorIntent {
+                // SCHEMA §7.6 `exact.anchor`: a point the KERNEL classified IN/ON
+                // this face. Deliberately NOT the plane origin: that is a property
+                // of the surface, not of the face's boundary, and for an imported
+                // STEP body it routinely lies far outside the face it came from
+                // (measured 2026-09-15, `step_import_gate.rs` PHASE 4: (0,0,10) for
+                // a cap centred at (−5,215,10)). An anchor there contributes 0 to
+                // the resolution ladder's `anchor` feature, so the correct,
+                // unambiguous host binds at 0.75 and never clears the 0.85
+                // auto-bind bar — and re-picking freezes the same location again.
+                // `origin` remains the fallback for a face the worker could find no
+                // classifiable point on; the sketch's PLANE is unaffected either
+                // way and stays the kernel-exact frame built above.
+                world_point: frame.anchor.unwrap_or(frame.origin),
+                surface_uv: None,
+                local_frame: None,
+                adjacency_hint: None,
+                extra: Default::default(),
+            }),
+            extra: Default::default(),
+        },
+        projected_boundary_version: 1,
+    };
+    let mut sketch = onecad_core::sketch::Sketch::new(sketch_id, name, attachment);
+    sketch.plane = plane;
+    let (entity_count, constraint_count) = (entities.len(), constraints.len());
+    for entity in entities {
+        sketch
+            .add_entity(entity)
+            .map_err(|e| ApiError::Internal(format!("addSketchOnFace: projected entity: {e}")))?;
+    }
+    for constraint in constraints {
+        sketch.add_constraint(constraint).map_err(|e| {
+            ApiError::Internal(format!("addSketchOnFace: projected constraint: {e}"))
+        })?;
+    }
+
+    // ── The single locked write ──────────────────────────────────────────────
+    let (outcome, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("addSketchOnFace".into()))?;
+        let outcome = rt
+            .apply(EditCommand::AddSketch { sketch })
+            .inspect_err(|e| {
+                tracing::warn!("add_sketch_on_face: sketch={sketch_id} REJECTED: {e}")
+            })?;
+        (outcome, rt.projection())
+    };
+    tracing::info!(
+        "add_sketch_on_face: sketch={sketch_id} body={body_id} faces={} entities={entity_count} \
+         constraints={constraint_count} closed={}",
+        payload.face_count,
+        payload.has_closed_boundary
+    );
+    // The optional host slot keeps this operation usable in headless runtimes.
+    if let Some(app) = state.host.get() {
+        let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    }
+    if let Some(sched) = state.scheduler.get() {
+        sched.handle(&outcome);
+    }
+    state.note_mutation();
+
+    Ok(SketchOnFaceDto {
+        sketch_id: sketch_id.to_string(),
+        plane: plane.into(),
+        entity_count: entity_count.try_into().unwrap_or(u32::MAX),
+        constraint_count: constraint_count.try_into().unwrap_or(u32::MAX),
+        face_count: payload.face_count,
+        has_closed_boundary: payload.has_closed_boundary,
+        projected_boundary_version: 1,
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Body-edge projection into a sketch (SCHEMA §7.6 `ProjectToSketchPlane`, WP-P)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One source to project — a [`PickInput`] plus the body it belongs to.
+///
+/// There is no `kind` field on purpose: the kind is whatever the promotion says
+/// the picked sub-shape IS, and a caller-supplied one could only ever disagree
+/// with it. The wire carries the promoted kind, which the worker then CHECKS
+/// against the resolved shape and refuses per source on a mismatch.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectionSourceInput {
+    pub body_id: String,
+    pub topo_key: String,
+    /// The persistent Rust-minted id, when the pick already carries one.
+    ///
+    /// Present ⇒ the source is addressed by it and promotion is SKIPPED. A
+    /// `TopoKey` is a snapshot-scoped ordinal a regen hands to a different
+    /// sub-shape, so re-resolving one at the head can bind a source the user
+    /// never picked — and this command writes the `projectedHash` staleness
+    /// baseline, which would make such a bind permanently undetectable
+    /// (WP-U4 / D-5). NOT an OCW1 field: the wire already addresses a source by
+    /// `elementId`; this is the Tauri DTO catching up.
+    #[serde(default)]
+    pub element_id: Option<String>,
+    #[serde(default)]
+    pub anchor: Option<AnchorIntent>,
+}
+
+/// How one projection source is addressed: by the persistent id it already
+/// carries, or by the snapshot-scoped key that has to be promoted to get one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProjectionAddress {
+    Promoted(ElementId),
+    Pick(TopoKey),
+}
+
+fn refusal_dtos(refusals: Vec<wire::ProjectionRefusal>) -> Vec<crate::dto::ProjectionRefusalDto> {
+    refusals
+        .into_iter()
+        .map(|r| crate::dto::ProjectionRefusalDto {
+            body_id: r.body_id,
+            element_id: r.element_id,
+            topo_key: r.topo_key,
+            code: r.code,
+            message: r.message,
+        })
+        .collect()
+}
+
+/// Projects picked body edges (or a picked face's whole boundary) into an
+/// EXISTING sketch as locked reference geometry (WP-P; SCHEMA §7.6
+/// `ProjectToSketchPlane`).
+///
+/// The authoring sibling of [`add_sketch_on_face`], and deliberately unlike it in
+/// three ways:
+///
+/// * **It is FENCED, not tripwired.** `add_sketch_on_face` compares a second
+///   round-trip's echoed `exact` frame against the first; that works because a
+///   planar face has a cheap kernel-exact frame to echo, and for a batch of edges
+///   the answer IS the geometry, so comparing it against itself proves nothing.
+///   Here the snapshot fences the worker call AND
+///   [`DocumentRuntime::apply_sketch_edit_fenced`] fences the commit, so the
+///   promote → project → commit triple is atomic with respect to the head.
+/// * **It merges into a sketch that may already hold the user's profile**, inside
+///   ONE undo entry. A wrong new sketch is visible and deletable; a stale merge is
+///   not.
+/// * **The `projectedHash` it commits becomes the staleness baseline.** An
+///   advisory read would let a stale capture write a baseline that can never
+///   afterwards be detected as wrong — a permanently silent wrong bind, the H5-B
+///   class this migration exists to remove.
+///
+/// Picks are promoted through the existing [`promote_selection`] path first, so
+/// every source is addressed by its Rust-minted `ElementId` (Invariant 1) and is
+/// bound in the worker's partition before the projection asks for it.
+///
+/// Refused while a drag gesture is open on the sketch: the commit rewrites the
+/// sketch body, and `EndGesture` would then apply solved positions onto entities
+/// that no longer exist.
+#[tracing::instrument(
+    skip_all,
+    fields(sketchId = %sketch_id, snapshot = snapshot_id, sources = sources.len()),
+    err(Display)
+)]
+pub async fn project_to_sketch(
+    state: &AppState,
+    snapshot_id: u64,
+    sketch_id: String,
+    mode: String,
+    sources: Vec<ProjectionSourceInput>,
+) -> Result<crate::dto::ProjectToSketchDto, ApiError> {
+    let sketch = parse_sketch_id(&sketch_id)?;
+    let mode = wire::ProjectionMode::parse(&mode).ok_or_else(|| {
+        ApiError::InvalidCommand(format!(
+            "projectToSketch: unknown mode {mode:?} (edges|faceOutline)"
+        ))
+    })?;
+    if sources.is_empty() {
+        return Err(ApiError::InvalidCommand(
+            "projectToSketch: at least one source is required".into(),
+        ));
+    }
+    // De-duplicate on (body, address), preserving request order: a doubled pick
+    // would otherwise promote as a mismatched batch and project the same edge
+    // twice into the sketch.
+    let mut addressed: Vec<(BodyId, ProjectionAddress, Option<AnchorIntent>)> = Vec::new();
+    for source in sources {
+        let body = wire::parse_body_id(&source.body_id).map_err(ApiError::InvalidCommand)?;
+        let address = match source.element_id.filter(|id| !id.is_empty()) {
+            Some(id) => ProjectionAddress::Promoted(ElementId::new(id)),
+            None => {
+                if source.topo_key.is_empty() {
+                    return Err(ApiError::InvalidCommand(
+                        "projectToSketch: every source needs a topoKey or an elementId".into(),
+                    ));
+                }
+                ProjectionAddress::Pick(TopoKey::new(source.topo_key))
+            }
+        };
+        if addressed
+            .iter()
+            .any(|(b, a, _)| *b == body && *a == address)
+        {
+            continue;
+        }
+        addressed.push((body, address, source.anchor));
+    }
+    // Only the un-promoted sources go through `promote_selection`; a source that
+    // already names its ElementId is bound in the worker's partition already.
+    // Skipping the promotion also skips its stale-pick gate, which costs nothing:
+    // an ElementId is durable across snapshots (Invariant 1), so there is no
+    // older pick snapshot for it to be stale against — and the kernel query plus
+    // `apply_sketch_edit_fenced` below still fence the whole triple on the head.
+    let picks: Vec<(BodyId, TopoKey, Option<AnchorIntent>)> = addressed
+        .iter()
+        .filter_map(|(body, address, anchor)| match address {
+            ProjectionAddress::Pick(key) => Some((*body, key.clone(), anchor.clone())),
+            ProjectionAddress::Promoted(_) => None,
+        })
+        .collect();
+    let snapshot = SnapshotId(snapshot_id);
+
+    // ── Locked: presence, the gesture refusal, the plane, and the promotion ──
+    // The promotion is worker IO under the lock, exactly as `promote_selection`
+    // and `promote_prepared_edges` already do it; the PROJECTION below is not.
+    let (plane, already, promoted, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("projectToSketch".into()))?;
+        if rt.has_active_gesture(sketch) {
+            return Err(ApiError::OpFailed {
+                message: format!(
+                    "projectToSketch: sketch {sketch} has an active drag gesture — retry after \
+                     pointer-up"
+                ),
+                diagnostics: Vec::new(),
+            });
+        }
+        let existing = rt.sketch_snapshot(sketch, "projectToSketch")?;
+        let mut promoted = Vec::new();
+        for (body, group) in group_picks_by_body(&picks) {
+            promoted.extend(rt.promote_selection(snapshot, body, group).await?);
+        }
+        (
+            existing.plane,
+            existing.projections,
+            promoted,
+            rt.projection(),
+        )
+    };
+    // The optional host slot keeps this operation usable in headless runtimes.
+    if let Some(app) = state.host.get() {
+        let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    }
+
+    // A source addressed by its ElementId declares the kind the MODE requires:
+    // the worker refuses any other value anyway (`ProjectToSketchPlane` checks
+    // `sources[].kind` against the mode's required kind), and there is no
+    // promotion answer to read one off.
+    let mode_kind = match mode {
+        wire::ProjectionMode::FaceOutline => wire::ProjectionSourceKind::Face,
+        wire::ProjectionMode::Edges => wire::ProjectionSourceKind::Edge,
+    };
+    let mut wire_sources = Vec::with_capacity(addressed.len());
+    let mut minted_refusals: Vec<wire::ProjectionRefusal> = Vec::new();
+    for (body, address, _) in &addressed {
+        let body_wire = wire::body_id_wire(*body);
+        let (element_id, key, kind) = match address {
+            ProjectionAddress::Promoted(id) => (id.as_str().to_string(), "", mode_kind),
+            ProjectionAddress::Pick(key) => {
+                let hit = promoted
+                    .iter()
+                    .find(|p| p.body_id == body_wire && p.topo_key == key.as_str())
+                    .ok_or_else(|| {
+                        ApiError::Internal(format!(
+                            "projectToSketch: promotion returned no identity for {body_wire} {}",
+                            key.as_str()
+                        ))
+                    })?;
+                let kind = match hit.kind.as_str() {
+                    "face" => wire::ProjectionSourceKind::Face,
+                    _ => wire::ProjectionSourceKind::Edge,
+                };
+                (hit.element_id.clone(), key.as_str(), kind)
+            }
+        };
+        // A source this sketch has already projected is REFUSED, not projected
+        // again: a second coincident outline would give one source two provenance
+        // runs, and no later update could tell which rows belong to which
+        // (WP-P F15). Per-source, so the rest of the batch still lands.
+        if already
+            .values()
+            .any(|row| row.source_body == *body && row.source_element_id.as_str() == element_id)
+        {
+            minted_refusals.push(wire::ProjectionRefusal {
+                body_id: body_wire,
+                element_id: element_id.clone(),
+                topo_key: key.to_string(),
+                code: sketch_projection::ALREADY_PROJECTED.to_string(),
+                message: format!(
+                    "{element_id} is already projected into this sketch — update or detach the \
+                     existing geometry instead of projecting it a second time"
+                ),
+            });
+            continue;
+        }
+        wire_sources.push((*body, element_id, kind));
+    }
+    let wire_sources: Vec<wire::ProjectionSource<'_>> = wire_sources
+        .iter()
+        .map(|(body, element_id, kind)| wire::ProjectionSource {
+            body: *body,
+            address: wire::FaceAddress::ElementId(element_id.as_str()),
+            kind: *kind,
+        })
+        .collect();
+    if wire_sources.is_empty() {
+        // Every pick was already projected: there is nothing to ask the kernel,
+        // and an empty `sources` array is not a legal §7.6 request.
+        return Ok(crate::dto::ProjectToSketchDto {
+            sketch_id: sketch.to_string(),
+            snapshot_id,
+            entities: Vec::new(),
+            point_count: 0,
+            refusals: refusal_dtos(minted_refusals),
+        });
+    }
+
+    // ── Unlocked: the fenced kernel query ────────────────────────────────────
+    let result = state
+        .face_projection()
+        .project_to_sketch_plane(snapshot, sketch, &plane, mode, &wire_sources)
+        .await?;
+
+    // ── Pure translate (no worker, no lock) ──────────────────────────────────
+    let (entities, constraints, projections) = onecad_core::sketch::projected_sketch_content(
+        &result.geometry,
+        &mut EntityId::new,
+        &mut ConstraintId::new,
+    );
+    let point_count = result.geometry.points.len().try_into().unwrap_or(u32::MAX);
+    let type_by_id: HashMap<EntityId, &'static str> = entities
+        .iter()
+        .map(|e| (e.id(), sketch_projection::type_token(e)))
+        .collect();
+    let mut ops: Vec<SketchEditOp> = Vec::new();
+    for entity in entities {
+        ops.push(SketchEditOp::AddEntity { entity });
+    }
+    for constraint in constraints {
+        ops.push(SketchEditOp::AddConstraint { constraint });
+    }
+    let mut dtos = Vec::with_capacity(projections.len());
+    for (entity, source) in projections {
+        dtos.push(crate::dto::ProjectedEntityDto {
+            entity_id: entity.to_string(),
+            entity_type: type_by_id.get(&entity).copied().unwrap_or("Line").into(),
+            source_body_id: wire::body_id_wire(source.source_body),
+            source_element_id: source.source_element_id.as_str().to_string(),
+            projected_hash: source.projected_hash.clone(),
+        });
+        ops.push(SketchEditOp::SetEntityProjection {
+            entity,
+            source: Some(source),
+        });
+    }
+
+    // ── The single locked, FENCED write ──────────────────────────────────────
+    let (outcome, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("projectToSketch".into()))?;
+        let outcome = rt.apply_sketch_edit_fenced(snapshot, sketch, ops)?;
+        rt.clear_projection_staleness(sketch);
+        (outcome, rt.projection())
+    };
+    // The Rust-minted `alreadyProjected` refusals sit in the same list as the
+    // worker's: both answer "this ONE source did not come through, here is why".
+    let mut refusals = minted_refusals;
+    refusals.extend(result.refusals);
+    tracing::info!(
+        "project_to_sketch: sketch={sketch} entities={} points={point_count} refusals={}",
+        dtos.len(),
+        refusals.len()
+    );
+    // The optional host slot keeps this operation usable in headless runtimes.
+    if let Some(app) = state.host.get() {
+        let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    }
+    if let Some(sched) = state.scheduler.get() {
+        sched.handle(&outcome);
+    }
+    state.note_mutation();
+
+    Ok(crate::dto::ProjectToSketchDto {
+        sketch_id: sketch.to_string(),
+        snapshot_id,
+        entities: dtos,
+        point_count,
+        refusals: refusal_dtos(refusals),
+    })
+}
+
+/// One pick, resolved to its body (`promote_selection` batches per body).
+type BodyPick = (TopoKey, Option<AnchorIntent>);
+
+/// Groups picks by body, preserving first-seen body order.
+fn group_picks_by_body(
+    picks: &[(BodyId, TopoKey, Option<AnchorIntent>)],
+) -> Vec<(BodyId, Vec<BodyPick>)> {
+    let mut out: Vec<(BodyId, Vec<BodyPick>)> = Vec::new();
+    for (body, key, anchor) in picks {
+        match out.iter_mut().find(|(b, _)| b == body) {
+            Some((_, group)) => group.push((key.clone(), anchor.clone())),
+            None => out.push((*body, vec![(key.clone(), anchor.clone())])),
+        }
+    }
+    out
+}
+
+/// Re-runs the projection for a sketch's mapped sources and replaces the entities
+/// whose projected geometry actually MOVED, in one undoable edit (WP-P).
+///
+/// Matching is by `(source element, ordinal within that source's emission run)`,
+/// which SCHEMA §7.6 makes deterministic. That is what lets the update keep the
+/// existing `EntityId`s: a re-projection that merely moved a box wall leaves every
+/// user constraint hung off the projected line intact and every derived `regionId`
+/// unchanged. A row whose re-projection came back a DIFFERENT SHAPE (a different
+/// entity type, or gone entirely) is NOT guessed at — it is reported as a
+/// `topologyChanged` refusal and left stale for the user to detach or re-project.
+///
+/// Fenced on the current head: the sources are already-promoted `ElementId`s, so
+/// there is no older pick snapshot to be stale against, and a concurrent edit is
+/// caught by the same commit gate `project_to_sketch` uses.
+#[tracing::instrument(skip_all, fields(sketchId = %sketch_id), err(Display))]
+pub async fn update_projection(
+    state: &AppState,
+    sketch_id: String,
+) -> Result<crate::dto::ProjectToSketchDto, ApiError> {
+    let sketch_key = parse_sketch_id(&sketch_id)?;
+    let (sketch, snapshot, rebind) = {
+        let guard = state.runtime.lock().await;
+        let rt = guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("updateProjection".into()))?;
+        if rt.has_active_gesture(sketch_key) {
+            return Err(ApiError::OpFailed {
+                message: format!(
+                    "updateProjection: sketch {sketch_key} has an active drag gesture — retry \
+                     after pointer-up"
+                ),
+                diagnostics: Vec::new(),
+            });
+        }
+        let sketch = rt.sketch_snapshot(sketch_key, "updateProjection")?;
+        let snapshot = rt.head_snapshot_id().unwrap_or(SnapshotId(0));
+        (sketch, snapshot, rt.projection_rebind_ticket(sketch_key))
+    };
+    // ── Unlocked: the §7.5 re-bind ──────────────────────────────────────────
+    // The sources are snapshot-scoped in the WORKER even though the `ElementId`s
+    // are Rust-owned: a regen renumbers sub-shapes, so a source promoted two
+    // edits ago names nothing until the ladder re-binds it. Only an AutoBind
+    // binds; anything else stays absent and comes back as a per-source refusal
+    // rather than a guess. It is worker IO and mutates nothing here, so it runs
+    // with the runtime lock RELEASED (WP-P F7).
+    if let Some((engine, head, pending)) = rebind {
+        let (bound, unresolved) = DocumentRuntime::rebind_entries_with(&engine, head, &pending)
+            .await
+            .unwrap_or((0, pending.len()));
+        tracing::debug!("update_projection: rebind bound={bound} unresolved={unresolved}");
+    }
+    // The rows read here are the ones the plan is built against; the fenced
+    // commit below refuses if they moved (WP-P F12).
+    let committed_rows = sketch.projections.clone();
+    if sketch.projections.is_empty() {
+        return Ok(crate::dto::ProjectToSketchDto {
+            sketch_id,
+            snapshot_id: snapshot.0,
+            entities: Vec::new(),
+            point_count: 0,
+            refusals: Vec::new(),
+        });
+    }
+
+    // ── Unlocked: one call per MODE, since a face source is re-requested as
+    // `faceOutline` and an edge source as `edges` ───────────────────────────
+    let projector = state.face_projection();
+    let mut fresh = Vec::new();
+    for (mode, sources) in sketch_projection::projection_request_plan(&sketch) {
+        let wire_sources: Vec<wire::ProjectionSource<'_>> = sources
+            .iter()
+            .map(|(body, element)| wire::ProjectionSource {
+                body: *body,
+                address: wire::FaceAddress::ElementId(element.as_str()),
+                kind: match mode {
+                    wire::ProjectionMode::FaceOutline => wire::ProjectionSourceKind::Face,
+                    wire::ProjectionMode::Edges => wire::ProjectionSourceKind::Edge,
+                },
+            })
+            .collect();
+        let result = projector
+            .project_to_sketch_plane(snapshot, sketch_key, &sketch.plane, mode, &wire_sources)
+            .await?;
+        fresh.push((result.geometry, result.refusals));
+    }
+
+    // ── Pure: match by (source element, ordinal) and build the ops ───────────
+    let plan = sketch_projection::build_projection_update(&sketch, &fresh);
+    let mut refusals: Vec<wire::ProjectionRefusal> =
+        fresh.iter().flat_map(|(_, r)| r.iter().cloned()).collect();
+    refusals.extend(plan.refusals.iter().cloned());
+    let dtos: Vec<crate::dto::ProjectedEntityDto> = plan
+        .replaced
+        .iter()
+        .map(|r| crate::dto::ProjectedEntityDto {
+            entity_id: r.entity.to_string(),
+            entity_type: r.entity_type.to_string(),
+            source_body_id: r.source_body_id.clone(),
+            source_element_id: r.source_element_id.clone(),
+            projected_hash: r.projected_hash.clone(),
+        })
+        .collect();
+    if plan.ops.is_empty() {
+        return Ok(crate::dto::ProjectToSketchDto {
+            sketch_id,
+            snapshot_id: snapshot.0,
+            entities: dtos,
+            point_count: 0,
+            refusals: refusal_dtos(refusals),
+        });
+    }
+
+    let (outcome, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("updateProjection".into()))?;
+        // Read-modify-write on the provenance map: the plan names entity ids and
+        // ordinals read before the (unlocked) worker round-trips, and a concurrent
+        // `project_to_sketch` / `detach_projection` / undo would have renumbered
+        // them. The snapshot fence cannot see that — a sketch edit does not move
+        // the head — so the rows themselves are the fence (WP-P F12).
+        if rt
+            .sketch_snapshot(sketch_key, "updateProjection")?
+            .projections
+            != committed_rows
+        {
+            return Err(ApiError::OpFailed {
+                message: "updateProjection: projections changed while updating — retry".into(),
+                diagnostics: Vec::new(),
+            });
+        }
+        let outcome = rt.apply_sketch_edit_fenced(snapshot, sketch_key, plan.ops)?;
+        rt.clear_projection_staleness(sketch_key);
+        (outcome, rt.projection())
+    };
+    tracing::info!(
+        "update_projection: sketch={sketch_key} replaced={} refusals={}",
+        dtos.len(),
+        refusals.len()
+    );
+    // The optional host slot keeps this operation usable in headless runtimes.
+    if let Some(app) = state.host.get() {
+        let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    }
+    if let Some(sched) = state.scheduler.get() {
+        sched.handle(&outcome);
+    }
+    state.note_mutation();
+
+    Ok(crate::dto::ProjectToSketchDto {
+        sketch_id,
+        snapshot_id: snapshot.0,
+        entities: dtos,
+        point_count: 0,
+        refusals: refusal_dtos(refusals),
+    })
+}
+
+/// Detaches projected geometry: drops its provenance rows, releases the `Fixed`
+/// pins that hold it, and unlocks it — one undoable transaction (WP-P).
+///
+/// Afterwards the entities are ordinary editable sketch geometry that no longer
+/// tracks the model. `entity_ids` selects a subset; absent detaches everything the
+/// sketch has projected.
+///
+/// A projected POINT is released only when EVERY still-projected curve has let go
+/// of it: two projected lines meeting at a corner share one point, and freeing it
+/// while one of them is still reference-locked would leave locked geometry hanging
+/// off a movable vertex.
+#[tracing::instrument(skip_all, fields(sketchId = %sketch_id), err(Display))]
+pub async fn detach_projection(
+    state: &AppState,
+    sketch_id: String,
+    entity_ids: Option<Vec<String>>,
+) -> Result<crate::dto::DetachProjectionDto, ApiError> {
+    let sketch_key = parse_sketch_id(&sketch_id)?;
+    let sketch = {
+        let guard = state.runtime.lock().await;
+        let rt = guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("detachProjection".into()))?;
+        if rt.has_active_gesture(sketch_key) {
+            return Err(ApiError::OpFailed {
+                message: format!(
+                    "detachProjection: sketch {sketch_key} has an active drag gesture — retry \
+                     after pointer-up"
+                ),
+                diagnostics: Vec::new(),
+            });
+        }
+        rt.sketch_snapshot(sketch_key, "detachProjection")?
+    };
+
+    let targets: Vec<EntityId> = match entity_ids {
+        None => sketch.projections.keys().copied().collect(),
+        Some(ids) => {
+            let mut out = Vec::with_capacity(ids.len());
+            for id in ids {
+                let entity = EntityId::from_str(&id).map_err(|e| {
+                    ApiError::InvalidCommand(format!("detachProjection: bad entityId {id:?}: {e}"))
+                })?;
+                if !sketch.projections.contains_key(&entity) {
+                    return Err(ApiError::InvalidCommand(format!(
+                        "detachProjection: entity {entity} is not projected in sketch {sketch_key}"
+                    )));
+                }
+                // A repeated id is the caller's, not a second projection: counting
+                // it twice would make `remaining` underflow.
+                if !out.contains(&entity) {
+                    out.push(entity);
+                }
+            }
+            out
+        }
+    };
+    let (ops, freed_constraints) = sketch_projection::build_projection_detach(&sketch, &targets);
+    let remaining = sketch
+        .projections
+        .len()
+        .saturating_sub(targets.len())
+        .try_into()
+        .unwrap_or(u32::MAX);
+
+    let (outcome, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("detachProjection".into()))?;
+        let outcome = rt
+            .apply(EditCommand::SketchEdit {
+                sketch: sketch_key,
+                ops,
+            })
+            .map_err(|e| ApiError::InvalidCommand(format!("detachProjection: {e}")))?;
+        rt.clear_projection_staleness(sketch_key);
+        (outcome, rt.projection())
+    };
+    tracing::info!(
+        "detach_projection: sketch={sketch_key} entities={} pins={freed_constraints} \
+         remaining={remaining}",
+        targets.len()
+    );
+    // The optional host slot keeps this operation usable in headless runtimes.
+    if let Some(app) = state.host.get() {
+        let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    }
+    if let Some(sched) = state.scheduler.get() {
+        sched.handle(&outcome);
+    }
+    state.note_mutation();
+
+    Ok(crate::dto::DetachProjectionDto {
+        sketch_id,
+        entity_ids: targets.iter().map(ToString::to_string).collect(),
+        released_constraints: freed_constraints,
+        remaining,
+    })
+}
+
+/// Read one element's geometric evidence (`QueryElement`; SCHEMA §7.5) —
+/// MEASURE V1a's only backend verb.
+///
+/// A pure READ: it touches no history, mints nothing, and publishes nothing, so
+/// measuring can never enter the undo stack. `magnitude` is the kernel's EXACT
+/// quantity (face area / edge arc length — `BRepGProp`), not a value re-derived
+/// from the tessellation the viewport happens to be showing.
+///
+/// Returns `Ok(None)` — not an error — when the element is absent from the
+/// snapshot: a stale pick after an edit is an ordinary, expected outcome ("that
+/// edge is gone"), and the caller simply drops it. Everything else (no document,
+/// a malformed body id, a worker failure) still fails LOUDLY. Worker IO runs
+/// OUTSIDE the runtime lock; the lock is taken only for the presence check.
+///
+/// # The two-rung read ladder
+///
+/// A caller may hold an `elementId`, a `topoKey`, or both, and NEITHER alone
+/// answers every case:
+///
+/// * `elementId` is the durable identity, but the worker's element-map partition
+///   mints entries **on demand** — only when an OPERATION resolves the element as
+///   an input. `AcquireElementIds` returns evidence and RUST mints the id; the
+///   worker is never told. So a just-promoted, not-yet-used id is genuinely
+///   absent from the partition and this rung reports `None`.
+/// * `topoKey` resolves against the body shape itself, so it answers for a fresh
+///   pick — but it is snapshot-scoped ordinal evidence, and when a mesh carries
+///   minted ElementIds in its id table the frontend's `topoKey` field actually
+///   holds an ElementId (`Picker.ts`), which this rung cannot resolve.
+///
+/// So the topoKey is tried FIRST (the fresh-pick case, one round-trip) and the
+/// elementId is the fallback. Both rungs are exact lookups — neither guesses, so
+/// a miss on one can never bind the other to the wrong thing. Supplying neither
+/// is a caller bug and is rejected rather than silently answered `None`.
+pub async fn element_info(
+    state: &AppState,
+    snapshot_id: u64,
+    body_id: String,
+    element_id: String,
+    topo_key: Option<String>,
+    read_fence: Option<crate::dto::GeometryReadFenceDto>,
+) -> Result<Option<crate::dto::ElementInfoDto>, ApiError> {
+    let body = wire::parse_body_id(&body_id).map_err(ApiError::InvalidCommand)?;
+    let topo_key = topo_key.unwrap_or_default();
+    if element_id.is_empty() && topo_key.is_empty() {
+        return Err(ApiError::InvalidCommand(
+            "elementInfo: one of elementId / topoKey is required".into(),
+        ));
+    }
+    let ticket = {
+        // Prepare the optional scoped ticket; worker IO is unlocked and the
+        // exact runtime/head/provider ticket is revalidated afterward.
+        let guard = state.runtime.lock().await;
+        let rt = guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("elementInfo".into()))?;
+        read_fence
+            .as_ref()
+            .map(|fence| {
+                if fence.snapshot_id != snapshot_id {
+                    return Err("geometry read snapshot arguments disagree".to_string());
+                }
+                rt.prepare_geometry_read(
+                    &fence.document_id,
+                    &fence.runtime_session,
+                    SnapshotId(fence.snapshot_id),
+                )
+            })
+            .transpose()
+            .map_err(ApiError::StalePreview)?
+    };
+    // The caller supplies the snapshot its pick was made against — the same
+    // contract `promoteSelection` / `faceSketchPlane` use, so the lookup resolves
+    // against the exact snapshot the mesh was tessellated at (Invariant 4).
+    let snapshot = SnapshotId(snapshot_id);
+    let query = ticket
+        .as_ref()
+        .map_or_else(|| state.element_query(), |ticket| ticket.query.clone());
+    let result = if !topo_key.is_empty() {
+        if let Some(info) = query
+            .query_element_by_topo_key(snapshot, body, &topo_key)
+            .await?
+        {
+            Some(info)
+        } else if element_id.is_empty() {
+            None
+        } else {
+            query.query_element(snapshot, body, &element_id).await?
+        }
+    } else if element_id.is_empty() {
+        None
+    } else {
+        query.query_element(snapshot, body, &element_id).await?
+    };
+    if let Some(ticket) = &ticket {
+        let guard = state.runtime.lock().await;
+        if !guard
+            .as_ref()
+            .is_some_and(|rt| rt.geometry_read_is_current(ticket))
+        {
+            return Err(ApiError::StalePreview(
+                "document changed while geometry read was in flight".into(),
+            ));
+        }
+    }
+    Ok(result)
+}
+
+/// One body's exact mass properties (`QueryMassProperties`; SCHEMA §7.5; WP-C1).
+///
+/// A pure READ, like [`element_info`]: no history, no minting, nothing published.
+/// Scoped callers provide a runtime/head fence; legacy callers remain unscoped.
+/// Worker IO runs outside the runtime lock and is revalidated afterward.
+///
+/// No snapshot argument, deliberately. A `BodyId` is durable across snapshots
+/// (Invariant 1) while a `TopoKey` is not, so unlike [`element_info`] there is
+/// nothing here for a snapshot stamp to disambiguate — the answer is always
+/// "this body, as the head has it now", which is what a live measurement panel
+/// wants.
+///
+/// An unknown body fails LOUDLY (`REF_UNRESOLVED` from the worker) rather than
+/// resolving to `None`. A missing body is not the ordinary stale-pick outcome
+/// that `element_info` absorbs: there is no partial reading to fall back to, and
+/// a silent empty answer would look identical to a body with no volume.
+pub async fn query_mass_properties(
+    state: &AppState,
+    body_id: String,
+    read_fence: Option<crate::dto::GeometryReadFenceDto>,
+) -> Result<crate::dto::MassPropertiesDto, ApiError> {
+    let body = wire::parse_body_id(&body_id).map_err(ApiError::InvalidCommand)?;
+    let ticket = {
+        // Prepare the optional scoped ticket; worker IO stays unlocked.
+        let guard = state.runtime.lock().await;
+        let rt = guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("queryMassProperties".into()))?;
+        read_fence
+            .as_ref()
+            .map(|fence| {
+                rt.prepare_geometry_read(
+                    &fence.document_id,
+                    &fence.runtime_session,
+                    SnapshotId(fence.snapshot_id),
+                )
+            })
+            .transpose()
+            .map_err(ApiError::StalePreview)?
+    };
+    let query = ticket
+        .as_ref()
+        .map_or_else(|| state.element_query(), |ticket| ticket.query.clone());
+    let result = query
+        .query_mass_properties(body, body_id)
+        .await
+        .map_err(ApiError::from)?;
+    if let Some(ticket) = &ticket {
+        let guard = state.runtime.lock().await;
+        if !guard
+            .as_ref()
+            .is_some_and(|rt| rt.geometry_read_is_current(ticket))
+        {
+            return Err(ApiError::StalePreview(
+                "document changed while geometry read was in flight".into(),
+            ));
+        }
+    }
+    Ok(result)
+}
+
+/// Surface/curve classification of a picked face or edge (`ClassifyElement`;
+/// SCHEMA §7.5; Component Library WP-0.1) — the placement-solver's hover
+/// query: what kind of geometry is this, and what frame would a mate seat
+/// against (plane origin+normal, cylinder/circle axis+radius).
+///
+/// A pure READ, like [`query_mass_properties`]. Measurement callers provide an
+/// exact runtime/head fence; legacy hover callers remain current-head unscoped.
+///
+/// Same two-rung addressing as [`element_info`] (topoKey tried first, the
+/// fresh-pick case; elementId is the fallback), collapsed into `Ok(None)`
+/// rather than an error when neither rung resolves — a hover target that
+/// isn't classifiable geometry (a miss, an edge of an already-detached body)
+/// is an ordinary outcome for a continuously-polled query.
+pub async fn classify_element(
+    state: &AppState,
+    body_id: String,
+    element_id: String,
+    topo_key: Option<String>,
+    read_fence: Option<crate::dto::GeometryReadFenceDto>,
+) -> Result<Option<crate::dto::ClassifyElementDto>, ApiError> {
+    let body = wire::parse_body_id(&body_id).map_err(ApiError::InvalidCommand)?;
+    let topo_key = topo_key.unwrap_or_default();
+    if element_id.is_empty() && topo_key.is_empty() {
+        return Err(ApiError::InvalidCommand(
+            "classifyElement: one of elementId / topoKey is required".into(),
+        ));
+    }
+    let ticket = {
+        // Prepare the optional scoped ticket; worker IO stays unlocked.
+        let guard = state.runtime.lock().await;
+        let rt = guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("classifyElement".into()))?;
+        read_fence
+            .as_ref()
+            .map(|fence| {
+                rt.prepare_geometry_read(
+                    &fence.document_id,
+                    &fence.runtime_session,
+                    SnapshotId(fence.snapshot_id),
+                )
+            })
+            .transpose()
+            .map_err(ApiError::StalePreview)?
+    };
+    let query = ticket
+        .as_ref()
+        .map_or_else(|| state.element_query(), |ticket| ticket.query.clone());
+    let result = if !topo_key.is_empty() {
+        if let Some(info) = query.classify_element_by_topo_key(body, &topo_key).await? {
+            Some(info)
+        } else if element_id.is_empty() {
+            None
+        } else {
+            query.classify_element(body, &element_id).await?
+        }
+    } else if element_id.is_empty() {
+        None
+    } else {
+        query.classify_element(body, &element_id).await?
+    };
+    if let Some(ticket) = &ticket {
+        let guard = state.runtime.lock().await;
+        if !guard
+            .as_ref()
+            .is_some_and(|rt| rt.geometry_read_is_current(ticket))
+        {
+            return Err(ApiError::StalePreview(
+                "document changed while geometry read was in flight".into(),
+            ));
+        }
+    }
+    Ok(result)
+}
+
+/// Exact BRep solid and face counts (`QueryBodyTopology`; SCHEMA §7.5).
+pub async fn query_body_topology(
+    state: &AppState,
+    body_id: String,
+) -> Result<crate::dto::BodyTopologyDto, ApiError> {
+    let body = wire::parse_body_id(&body_id).map_err(ApiError::InvalidCommand)?;
+    {
+        let guard = state.runtime.lock().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("queryBodyTopology".into()))?;
+    }
+    state
+        .element_query()
+        .query_body_topology(body, body_id)
+        .await
+        .map_err(Into::into)
+}
+
+/// One picked face for [`prepare_offset_face`] — `{bodyId?, topoKey?, elementId?}`
+/// (SCHEMA §7.6 `pickedFaces[]`).
+///
+/// The two addressing rungs are mutually exclusive on the wire (the worker
+/// branches on the PRESENCE of `elementId`), so a pick carrying both is rejected
+/// here rather than letting a stale id shadow a good topoKey.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OffsetFacePickInput {
+    #[serde(default)]
+    pub body_id: Option<String>,
+    #[serde(default)]
+    pub topo_key: Option<String>,
+    #[serde(default)]
+    pub element_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeOpPickInput {
+    #[serde(default)]
+    pub body_id: Option<String>,
+    #[serde(default)]
+    pub topo_key: Option<String>,
+    #[serde(default)]
+    pub element_id: Option<String>,
+}
+
+/// The optional half of an `analyze_edge_op_range` request: the mm window and
+/// the build budget. One struct rather than three loose parameters because they
+/// are one decision — "how much of the range, and how hard may you look" — and
+/// every field is a HINT the worker clamps.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeOpRangeInput {
+    #[serde(default)]
+    pub min: Option<f64>,
+    #[serde(default)]
+    pub max: Option<f64>,
+    #[serde(default)]
+    pub probe_budget: Option<u32>,
+}
+
+fn edge_op_mode(value: &str) -> Result<wire::EdgeOpMode, ApiError> {
+    match value {
+        "Fillet" => Ok(wire::EdgeOpMode::Fillet),
+        "Chamfer" => Ok(wire::EdgeOpMode::Chamfer),
+        _ => Err(ApiError::InvalidCommand(
+            "prepareEdgeOp: unknown mode".into(),
+        )),
+    }
+}
+
+fn edge_op_bodies(picks: &[EdgeOpPickInput]) -> Result<Vec<Option<BodyId>>, ApiError> {
+    picks
+        .iter()
+        .enumerate()
+        .map(|(index, pick)| {
+            let element = pick.element_id.as_deref().filter(|value| !value.is_empty());
+            let topo = pick.topo_key.as_deref().filter(|value| !value.is_empty());
+            if element.is_some() == topo.is_some() {
+                return Err(ApiError::InvalidCommand(format!(
+                    "prepareEdgeOp: pick {index} must carry exactly one address"
+                )));
+            }
+            let body = pick
+                .body_id
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .map(wire::parse_body_id)
+                .transpose()
+                .map_err(ApiError::InvalidCommand)?;
+            if topo.is_some() && body.is_none() {
+                return Err(ApiError::InvalidCommand(format!(
+                    "prepareEdgeOp: pick {index} topoKey has no bodyId"
+                )));
+            }
+            Ok(body)
+        })
+        .collect()
+}
+
+fn attach_edge_identities(
+    prepared: &mut crate::dto::PrepareEdgeOpDto,
+    promoted: &[PromotedElementDto],
+) -> Result<(), ApiError> {
+    for edge in &mut prepared.edges {
+        let identity = promoted
+            .iter()
+            .find(|item| item.topo_key == edge.topo_key)
+            .filter(|item| item.kind == "edge")
+            .ok_or_else(|| {
+                ApiError::Internal("prepared edge promotion returned mismatched identity".into())
+            })?;
+        edge.element_id = Some(identity.element_id.clone());
+        edge.body_id = Some(identity.body_id.clone());
+        edge.kind = Some(identity.kind.clone());
+    }
+    Ok(())
+}
+
+fn wire_edge_op_picks<'a>(
+    picks: &'a [EdgeOpPickInput],
+    bodies: &'a [Option<BodyId>],
+) -> Vec<wire::EdgeOpPick<'a>> {
+    picks
+        .iter()
+        .zip(bodies)
+        .map(|(pick, body)| wire::EdgeOpPick {
+            body: *body,
+            address: match pick.element_id.as_deref().filter(|value| !value.is_empty()) {
+                Some(id) => wire::FaceAddress::ElementId(id),
+                None => wire::FaceAddress::TopoKey(pick.topo_key.as_deref().unwrap_or_default()),
+            },
+        })
+        .collect()
+}
+
+async fn promote_prepared_edges(
+    state: &AppState,
+    prepared: &mut crate::dto::PrepareEdgeOpDto,
+) -> Result<DocumentProjection, ApiError> {
+    let body = wire::parse_body_id(&prepared.target_body_id).map_err(ApiError::Internal)?;
+    let picks = prepared
+        .edges
+        .iter()
+        .map(|edge| (TopoKey::new(edge.topo_key.clone()), None))
+        .collect();
+    let mut guard = state.runtime.lock().await;
+    let runtime = guard
+        .as_mut()
+        .ok_or_else(|| ApiError::NoDocument("prepareEdgeOp".into()))?;
+    let promoted = runtime
+        .promote_selection(SnapshotId(prepared.snapshot_id), body, picks)
+        .await?;
+    attach_edge_identities(prepared, &promoted)?;
+    Ok(runtime.projection())
+}
+
+/// The read-only first half of the OffsetFace authoring transaction
+/// (`PrepareOffsetFace`; SCHEMA §7.6): the G1 tangent closure over the picked
+/// faces, the `Total` opposite candidate, and the `currentDims` that seed an
+/// absolute distance type.
+///
+/// A pure READ, like [`element_info`]: it neither fences nor prepares, accepts,
+/// discards — nor, critically, MINTS. The response carries snapshot-scoped
+/// TopoKeys and descriptor/anchor EVIDENCE only; Rust promotes that evidence and
+/// mints the `ElementId`s through [`promote_selection`] (Invariant 2), and the
+/// caller then authors the final params and runs one exact [`preview_op`] with
+/// them before committing. Worker IO runs OUTSIDE the runtime lock (the R-WP11
+/// rule); the lock is taken only for the document-presence check.
+///
+/// A REFUSAL (`crossBody`, `chainMismatch`, `unsupportedSurface`, …) comes back
+/// as a successful result carrying
+/// [`refusal`](crate::dto::PrepareOffsetFaceDto::refusal) — the tool needs to
+/// explain *why* it cannot offset, and an error would erase the reason.
+#[tracing::instrument(
+    skip_all,
+    fields(snapshot = snapshot_id, picks = picked_faces.len()),
+    err(Display)
+)]
+pub async fn prepare_offset_face(
+    state: &AppState,
+    snapshot_id: u64,
+    picked_faces: Vec<OffsetFacePickInput>,
+    chain_tangent_faces: bool,
+    distance_type: Option<String>,
+) -> Result<crate::dto::PrepareOffsetFaceDto, ApiError> {
+    if picked_faces.is_empty() {
+        return Err(ApiError::InvalidCommand(
+            "prepareOffsetFace: at least one picked face is required".into(),
+        ));
+    }
+    // Parsed through the CORE enum so the command can never send a spelling the
+    // op's own `distanceType` param would reject.
+    let distance_type: onecad_core::document::record::OffsetDistanceType =
+        match distance_type.as_deref() {
+            None => Default::default(),
+            Some(s) => {
+                serde_json::from_value(serde_json::Value::String(s.to_string())).map_err(|_| {
+                    ApiError::InvalidCommand(format!(
+                        "prepareOffsetFace: unknown distanceType {s:?} \
+                         (Offset | Total | Radius | Diameter)"
+                    ))
+                })?
+            }
+        };
+    // Bodies + address rungs are resolved BEFORE the round-trip so a malformed
+    // pick is a caller error, never a half-sent request.
+    let mut bodies: Vec<Option<BodyId>> = Vec::with_capacity(picked_faces.len());
+    for (i, p) in picked_faces.iter().enumerate() {
+        let element = p.element_id.as_deref().filter(|s| !s.is_empty());
+        let topo = p.topo_key.as_deref().filter(|s| !s.is_empty());
+        match (element, topo) {
+            (None, None) => {
+                return Err(ApiError::InvalidCommand(format!(
+                    "prepareOffsetFace: pick {i} carries neither elementId nor topoKey"
+                )))
+            }
+            (Some(_), Some(_)) => {
+                return Err(ApiError::InvalidCommand(format!(
+                    "prepareOffsetFace: pick {i} carries BOTH elementId and topoKey — the two \
+                     rungs are mutually exclusive (SCHEMA §7.6)"
+                )))
+            }
+            _ => {}
+        }
+        let body = match p.body_id.as_deref().filter(|s| !s.is_empty()) {
+            Some(b) => Some(wire::parse_body_id(b).map_err(ApiError::InvalidCommand)?),
+            // The `elementId` rung resolves its own body from the partition entry;
+            // the `topoKey` rung has nothing to resolve against without one.
+            None if topo.is_some() => {
+                return Err(ApiError::InvalidCommand(format!(
+                    "prepareOffsetFace: pick {i} addresses a topoKey but carries no bodyId"
+                )))
+            }
+            None => None,
+        };
+        bodies.push(body);
+    }
+    let picks: Vec<wire::OffsetFacePick<'_>> = picked_faces
+        .iter()
+        .zip(&bodies)
+        .map(|(p, body)| {
+            let address = match p.element_id.as_deref().filter(|s| !s.is_empty()) {
+                Some(id) => wire::FaceAddress::ElementId(id),
+                None => wire::FaceAddress::TopoKey(p.topo_key.as_deref().unwrap_or_default()),
+            };
+            wire::OffsetFacePick {
+                body: *body,
+                address,
+            }
+        })
+        .collect();
+    {
+        // Presence check only — the lock is NOT held across the worker round-trip.
+        let guard = state.runtime.lock().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("prepareOffsetFace".into()))?;
+    }
+    state
+        .face_projection()
+        .prepare_offset_face(
+            SnapshotId(snapshot_id),
+            &picks,
+            chain_tangent_faces,
+            distance_type,
+        )
+        .await
+        .map_err(Into::into)
+}
+
+pub async fn prepare_edge_op(
+    state: &AppState,
+    app: HostContext,
+    snapshot_id: u64,
+    mode: String,
+    picked_edges: Vec<EdgeOpPickInput>,
+    chain_tangent_edges: bool,
+) -> Result<crate::dto::PrepareEdgeOpDto, ApiError> {
+    if picked_edges.is_empty() {
+        return Err(ApiError::InvalidCommand(
+            "prepareEdgeOp: at least one picked edge is required".into(),
+        ));
+    }
+    let mode = edge_op_mode(&mode)?;
+    let bodies = edge_op_bodies(&picked_edges)?;
+    let picks = wire_edge_op_picks(&picked_edges, &bodies);
+    {
+        let guard = state.runtime.lock().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("prepareEdgeOp".into()))?;
+    }
+    let mut prepared = state
+        .face_projection()
+        .prepare_edge_op(SnapshotId(snapshot_id), mode, &picks, chain_tangent_edges)
+        .await
+        .map_err(ApiError::from)?;
+    if prepared.refusal.is_some() {
+        return Ok(prepared);
+    }
+    let projection = promote_prepared_edges(state, &mut prepared).await?;
+    let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    // Same reason as `promote_selection`: this promoted edges into the persisted
+    // element partition.
+    state.note_mutation();
+    Ok(prepared)
+}
+
+/// The measured feasible radius/distance range for an edge closure
+/// (`AnalyzeEdgeOpRange`; SCHEMA §7.6).
+///
+/// A pure READ, and unlike [`prepare_edge_op`] it is read all the way down: it
+/// promotes nothing, mints nothing, emits no `projection-updated`, and
+/// deliberately does **not** call `note_mutation()`. Marking the document dirty
+/// because the user hovered an edge and the UI asked what radius it takes would
+/// invent an unsaved change out of a question.
+///
+/// Worker IO runs OUTSIDE the runtime lock (the R-WP11 rule); the lock is taken
+/// only for the document-presence check.
+pub async fn analyze_edge_op_range(
+    state: &AppState,
+    snapshot_id: u64,
+    mode: String,
+    picked_edges: Vec<EdgeOpPickInput>,
+    chain_tangent_edges: bool,
+    range: Option<EdgeOpRangeInput>,
+) -> Result<crate::dto::EdgeOpRangeDto, ApiError> {
+    if picked_edges.is_empty() {
+        return Err(ApiError::InvalidCommand(
+            "analyzeEdgeOpRange: at least one picked edge is required".into(),
+        ));
+    }
+    let mode = edge_op_mode(&mode)?;
+    let bodies = edge_op_bodies(&picked_edges)?;
+    let picks = wire_edge_op_picks(&picked_edges, &bodies);
+    let range = range.unwrap_or_default();
+    {
+        let guard = state.runtime.lock().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("analyzeEdgeOpRange".into()))?;
+    }
+    state
+        .face_projection()
+        .analyze_edge_op_range(
+            SnapshotId(snapshot_id),
+            mode,
+            &picks,
+            chain_tangent_edges,
+            wire::EdgeOpRangeRequest {
+                min: range.min,
+                max: range.max,
+                probe_budget: range.probe_budget,
+            },
+        )
+        .await
+        .map_err(Into::into)
+}
+
+/// Dry-run ladder resolution for repair dialogs (`ResolveRefs`; SCHEMA §7.5) —
+/// binds nothing.
+pub async fn resolve_refs(
+    state: &AppState,
+    snapshot_id: u64,
+    refs: Vec<ResolveRefInput>,
+) -> Result<Vec<ResolveRefDto>, ApiError> {
+    let req = ResolveRequest {
+        snapshot_id: SnapshotId(snapshot_id),
+        refs: refs
+            .into_iter()
+            .map(|r| ResolveRef {
+                ref_id: r.ref_id,
+                element: r.element,
+            })
+            .collect(),
+    };
+    // The SCHEMA §9 `legacyReferenceFace` answer re-derives its candidates through
+    // `PrepareEdgeOp` (see `DocumentRuntime::resolve_refs_with`); that seam lives
+    // beside the runtime, not on it, so it is handed in here.
+    let faces = state.face_projection();
+    let elements = state.element_query();
+    let seams = crate::document_runtime::RepairSeams {
+        faces: faces.as_ref(),
+        elements: elements.as_ref(),
+    };
+    let results = {
+        let guard = state.runtime.lock().await;
+        let rt = guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("resolveRefs".into()))?;
+        let resolutions = rt.resolve_refs_with(req, Some(seams)).await?;
+        // `revision` stays RUST-OWNED (decision D4): the repair store keys candidates
+        // on `(revision, snapshotId)` from the same projection the `needs-repair`
+        // events carry, and the engine's own `documentRevision` is an advisory stamp
+        // that legitimately lags an un-regenerated edit. The SNAPSHOT, by contrast, is
+        // now the engine's echo — validated equal to the request in
+        // `wire::validate_resolve_refs_result`, so it is provenance rather than a
+        // value this layer re-asserts on the engine's behalf.
+        let revision = rt.projection().revision;
+        resolutions
+            .into_iter()
+            .map(|resolution| {
+                // The body a rebind promotes against comes from the RECORD's own
+                // inputs, which is what the frontend will bind through; the engine's
+                // echoed `body_id` is the pool it enumerated candidates from. They
+                // agree in practice, and the record is authoritative for the promote.
+                let body_id = rt.repair_candidate_body(&resolution.ref_id);
+                let echoed_snapshot = resolution.snapshot_id.0;
+                ResolveRefDto::from_resolution(resolution, echoed_snapshot, revision, body_id)
+            })
+            .collect()
+    };
+    Ok(results)
+}
+
+/// The stored params of an operation record (read-only; `CadClient.getOperationParams`)
+/// as the `EditCommand` `op.params` serde JSON. A parametric scalar re-edit (revolve
+/// angle / shell thickness / fillet radius) fetches these on arm and deep-merges the
+/// changed scalar on commit, so it preserves the op's non-scalar inputs (axis /
+/// openFaces / edges) the projection does not expose — a whole-params replace would
+/// otherwise silently clobber them.
+pub async fn get_operation_params(
+    state: &AppState,
+    record_id: String,
+) -> Result<serde_json::Value, ApiError> {
+    let record = RecordId::from_str(&record_id)
+        .map_err(|e| ApiError::InvalidCommand(format!("bad recordId {record_id:?}: {e}")))?;
+    let guard = state.runtime.lock().await;
+    let rt = guard
+        .as_ref()
+        .ok_or_else(|| ApiError::NoDocument("getOperationParams".into()))?;
+    rt.operation_params(record).ok_or_else(|| {
+        ApiError::InvalidCommand(format!(
+            "no params for record {record_id} (unknown or opaque)"
+        ))
+    })
+}
+
+/// A feature's upstream/downstream transitive closures (read-only; H10 dependency
+/// view — `CadClient.featureDependencies`). Consumed by the delete/suppress
+/// confirmations (dependent counts) and the inspector's "Depends on / Used by"
+/// section. A suppressed record is still a valid query target — suppression is a
+/// node flag on the graph, not removal from it.
+pub async fn feature_dependencies(
+    state: &AppState,
+    record_id: String,
+) -> Result<FeatureDependenciesDto, ApiError> {
+    let record = RecordId::from_str(&record_id)
+        .map_err(|e| ApiError::InvalidCommand(format!("bad recordId {record_id:?}: {e}")))?;
+    let guard = state.runtime.lock().await;
+    let rt = guard
+        .as_ref()
+        .ok_or_else(|| ApiError::NoDocument("featureDependencies".into()))?;
+    rt.feature_dependencies(record)
+        .ok_or_else(|| ApiError::InvalidCommand(format!("unknown record {record_id}")))
+}
+
+fn parse_sketch_id(s: &str) -> Result<SketchId, ApiError> {
+    SketchId::from_str(s).map_err(|e| ApiError::InvalidCommand(format!("bad sketchId {s:?}: {e}")))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Worker crash circuit
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Clears the worker crash-circuit breaker (SCHEMA §8 poison / F3) and returns how
+/// many poison keys were forgotten.
+///
+/// A poison key is `(historyPrefixHash-through-op, opRecordId, occtFingerprint)`, so
+/// the ordinary fix — editing the crashing op's parameters — already mints a new key
+/// and heals the circuit by itself. This exists for what the key cannot see: an
+/// input file repaired outside the document, or a worker rebuilt in place without a
+/// fingerprint bump. No document needs to be open (the circuit belongs to the
+/// worker, not the document).
+pub async fn clear_worker_circuit(state: &AppState) -> Result<usize, ApiError> {
+    Ok(state.circuit().clear_circuit())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Start screen + native dialogs (Rust-side; webview has zero fs/dialog cap)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Recent projects for the start screen, read from the persisted recents store at
+/// `<app_config_dir>/recents.json` (a missing file ⇒ empty). Written on every
+/// successful open/save by [`recents::record`].
+///
+/// Each card's `thumbnail` is that project's container `preview.png` as a `data:`
+/// URL. Those are up to ten small file reads, so they run in ONE `spawn_blocking`
+/// rather than on the async runtime — and if that task somehow fails, the listing
+/// still returns, just without pictures.
+pub async fn list_recents(
+    state: &AppState,
+    app: HostContext,
+) -> Result<Vec<RecentProjectDto>, ApiError> {
+    let entries = recents::list(&app);
+    let with_previews = entries.clone();
+    let mut list = match tokio::task::spawn_blocking(move || {
+        recents::with_thumbnails(with_previews)
+    })
+    .await
+    {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::warn!(error = %e, "recents: thumbnail read task failed — listing without previews");
+            entries
+        }
+    };
+    // A card whose file is older than an unresolved autosave has to say so: clicking
+    // it is exactly how that autosave gets destroyed, and the recovery banner above
+    // the list does not stop the click.
+    for entry in &mut list {
+        entry.has_recovery = state.has_pending_recovery_for_path(Path::new(&entry.path));
+    }
+    Ok(list)
+}
+
+/// Renames a recent project's `.onecad` file on disk and its `recents.json` entry
+/// (start-screen card menu). See [`recents::rename`] for the exact rules (name
+/// validation, collision refusal).
+#[tracing::instrument(skip_all, fields(path = %path, new_name = %new_name), err(Display))]
+pub async fn rename_recent_project(
+    app: HostContext,
+    path: String,
+    new_name: String,
+) -> Result<(), ApiError> {
+    recents::rename(&app, Path::new(&path), &new_name)?;
+    Ok(())
+}
+
+/// Moves a recent project's `.onecad` file to the OS trash and drops its
+/// `recents.json` entry (start-screen card menu). See [`recents::remove`].
+#[tracing::instrument(skip_all, fields(path = %path), err(Display))]
+pub async fn delete_recent_project(app: HostContext, path: String) -> Result<(), ApiError> {
+    recents::remove(&app, Path::new(&path))
+}
+
+/// Reveals a recent project's `.onecad` file in the OS file manager (start-screen
+/// card menu). See [`recents::reveal`].
+#[tracing::instrument(skip_all, fields(path = %path), err(Display))]
+pub async fn reveal_in_file_manager(path: String) -> Result<(), ApiError> {
+    recents::reveal(Path::new(&path))
+}
+
+/// Shows a native open dialog (Rust owns the dialog; `tauri-plugin-dialog` Rust
+/// API). Resolves to the chosen path or `None` if cancelled.
+pub async fn open_file_dialog(app: HostContext) -> Result<Option<String>, ApiError> {
+    Ok(pick_file(app, false).await)
+}
+
+/// Shows the unified start-screen import dialog (OneCAD + STEP/STP).
+pub async fn import_file_dialog(app: HostContext) -> Result<Option<String>, ApiError> {
+    Ok(pick_import_file(app).await)
+}
+
+/// Shows a native save dialog. Resolves to the chosen path or `None`.
+pub async fn save_file_dialog(app: HostContext) -> Result<Option<String>, ApiError> {
+    Ok(pick_file(app, true).await)
+}
+
+/// Shows a native **STEP** open dialog (`.step`/`.stp`) for the start-screen import
+/// lane, resolving to the chosen path or `None` on cancel.
+///
+/// A separate command from [`open_file_dialog`] on purpose: that one filters
+/// `.onecad`, and widening its filter would let the plain Open action offer files
+/// [`open_document`] cannot read. The start-screen `importStep` flow must pick its
+/// path HERE — see the note on [`import_step`]. (The in-editor lane needs no
+/// command: [`insert_step`] runs its own dialog.)
+pub async fn step_file_dialog(app: HostContext) -> Result<Option<String>, ApiError> {
+    Ok(pick_step_open(app).await)
+}
+
+/// Shows a native **multi-select** STEP open dialog for the "Import components…"
+/// lane, resolving to the chosen absolute paths (empty on cancel).
+///
+/// Rust owns every dialog in this app — the webview has no filesystem capability
+/// at all and `@tauri-apps/plugin-dialog`'s JS binding is not a dependency — so a
+/// batch ingest cannot pick its own files. This is the only multi-select picker;
+/// the singular pickers above deliberately stay singular.
+#[tracing::instrument(skip_all, err(Display))]
+pub async fn pick_component_files(app: HostContext) -> Result<Vec<String>, ApiError> {
+    let mut request = crate::host::FileDialog::new("STEP", &["step", "stp", "STEP", "STP"], false);
+    request.multiple = true;
+    Ok(app.dialogs.pick(request).await)
+}
+
+/// Bulk vendor-STEP → library-component ingest (`CadClient.ingestComponents`;
+/// Component Library WP-C2).
+///
+/// Every requested path becomes an **`embedded`** package: one solid, stored as
+/// baked geometry, keeping everything the STEP reader recovered except the
+/// fastener sub-products vendors ship inside an assembly. Re-ingesting a stick as
+/// a length-parametric **`profile`** is deliberately NOT available here — which
+/// solids are the extrusion, and what its default length is, are per-part human
+/// decisions, and those go through an `onecad-library-ingest` recipe.
+///
+/// **Runs on its own worker and its own scratch runtime**, so the open document is
+/// untouched: no record is authored in it, its session is never re-entered, and a
+/// file that fails to read costs it nothing. The worker is one session per
+/// process, so this is the only way to import without trampling the session the
+/// user is editing (same reasoning as the component re-bake lane).
+///
+/// Never partially fails: the answer always carries one row per requested path,
+/// each `ok` / `refused` / `failed` with its own reason.
+///
+/// Arguments are FLAT and camelCase on the wire (`{paths, libraryRoot, defaults}`),
+/// matching `tauriClient.ingestComponents` — the frontend's `IngestComponentsRequest`
+/// is a TS-side aggregate, not a single wire object.
+///
+/// # Errors
+/// [`ApiError::Internal`] when no library root resolves, and the environment
+/// errors from spawning the ingest worker.
+#[tracing::instrument(skip_all, fields(paths = paths.len()), err(Display))]
+pub async fn ingest_components(
+    app: HostContext,
+    paths: Vec<String>,
+    library_root: Option<String>,
+    defaults: crate::dto::IngestDefaultsDto,
+) -> Result<crate::dto::IngestComponentsReportDto, ApiError> {
+    let root = match library_root.as_deref() {
+        Some(p) => PathBuf::from(p),
+        None => crate::library::library_root(&app)
+            .ok_or_else(|| ApiError::Internal("ingestComponents: no app data dir".into()))?,
+    };
+    let defaults = crate::library_ingest::IngestDefaults {
+        vendor: defaults.vendor,
+        category: defaults.category,
+        tags: defaults.tags,
+        ..Default::default()
+    };
+    let plan = crate::library_ingest::plan_from_paths(&paths, &defaults);
+    let worker = crate::library_ingest::spawn_ingest_worker().await?;
+    Ok(crate::library_ingest::ingest_components_at(&worker.0, &root, &plan).await)
+}
+
+async fn pick_file(app: HostContext, save: bool) -> Option<String> {
+    app.dialogs
+        .pick(crate::host::FileDialog::new("OneCAD", &["onecad"], save))
+        .await
+        .into_iter()
+        .next()
+}
+
+async fn pick_import_file(app: HostContext) -> Option<String> {
+    app.dialogs
+        .pick(crate::host::FileDialog::new(
+            "OneCAD / STEP",
+            &["onecad", "step", "stp"],
+            false,
+        ))
+        .await
+        .into_iter()
+        .next()
+}
+
+async fn pick_step_save(app: HostContext) -> Option<String> {
+    app.dialogs
+        .pick(crate::host::FileDialog::new("STEP", &["step", "stp"], true))
+        .await
+        .into_iter()
+        .next()
+}
+
+async fn pick_step_open(app: HostContext) -> Option<String> {
+    app.dialogs
+        .pick(crate::host::FileDialog::new(
+            "STEP",
+            &["step", "stp"],
+            false,
+        ))
+        .await
+        .into_iter()
+        .next()
+}
+
+async fn pick_mesh_save(app: HostContext, label: &str, extensions: &[&str]) -> Option<String> {
+    app.dialogs
+        .pick(crate::host::FileDialog::new(label, extensions, true))
+        .await
+        .into_iter()
+        .next()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Frontend log bridge (DEV-OBSERVABILITY wave R/F)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One frontend log event, as batched by `src/debug/logSink.ts`. The shape is
+/// FROZEN with that module (camelCase over the wire, both sides land in one wave).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeLogEvent {
+    /// `Date.now()` at emit (epoch ms, fractional).
+    pub ts: f64,
+    /// `performance.now()` at emit (ms since page load) — the monotonic ordering key.
+    pub t_mono: f64,
+    /// Per-session monotonic sequence (gap ⇒ the ring dropped events).
+    pub seq: u64,
+    /// Reserved for a future non-`fe` producer; the target is always `fe` today.
+    pub lane: String,
+    /// `error` / `warn` / `info` / anything else ⇒ debug.
+    pub level: String,
+    /// Tag taxonomy (`ipc`, `hint`, `fsm`, `vp`, …).
+    pub tag: String,
+    pub msg: String,
+    #[serde(default)]
+    pub ctx: Option<serde_json::Value>,
+}
+
+/// Max serialized `ctx` bytes re-emitted per event — a frontend context object is
+/// capped at the source too, this is the belt-and-braces bound on the log line.
+const FE_CTX_CAP: usize = 2048;
+
+#[cfg(debug_assertions)]
+struct RenderExpectation {
+    document_id: String,
+    revision: u64,
+    snapshot_id: u64,
+    started: Instant,
+    bodies: std::collections::BTreeSet<String>,
+}
+
+#[cfg(debug_assertions)]
+static RENDER_EXPECTATIONS: OnceLock<Mutex<HashMap<u64, RenderExpectation>>> = OnceLock::new();
+#[cfg(debug_assertions)]
+static NEXT_RENDER_EXPECTATION: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(debug_assertions)]
+fn render_expectations() -> &'static Mutex<HashMap<u64, RenderExpectation>> {
+    RENDER_EXPECTATIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(debug_assertions)]
+fn render_watchdog_expect(
+    change: &crate::dto::DocumentChange,
+    projection: &DocumentProjection,
+) -> Option<u64> {
+    render_watchdog_reconcile_projection(projection, "authoritative publication projection");
+    let bodies = change
+        .changed_bodies
+        .iter()
+        .filter(|body| {
+            projection
+                .bodies
+                .get(&body.body_id)
+                .is_none_or(|meta| meta.visible)
+        })
+        .map(|body| body.body_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    if bodies.is_empty() {
+        return None;
+    }
+    Some(insert_render_expectation(
+        &projection.document_id,
+        change.revision,
+        change.snapshot_id,
+        bodies,
+    ))
+}
+
+#[cfg(debug_assertions)]
+fn render_watchdog_reconcile_projection(projection: &DocumentProjection, reason: &str) {
+    let mut guard = render_expectations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut retired = Vec::new();
+    for (expectation_id, pending) in guard.iter_mut() {
+        let before = pending.bodies.len();
+        if projection.document_id != pending.document_id {
+            pending.bodies.clear();
+        } else {
+            pending
+                .bodies
+                .retain(|body| projection.bodies.get(body).is_some_and(|meta| meta.visible));
+        }
+        if pending.bodies.len() != before {
+            retired.push((*expectation_id, before - pending.bodies.len()));
+        }
+    }
+    guard.retain(|_, pending| !pending.bodies.is_empty());
+    drop(guard);
+    for (expectation_id, bodies) in retired {
+        tracing::debug!(
+            expectationId = expectation_id,
+            retiredBodies = bodies,
+            reason,
+            "mesh render watchdog retired"
+        );
+    }
+}
+
+#[cfg(debug_assertions)]
+fn insert_render_expectation(
+    document_id: &str,
+    revision: u64,
+    snapshot_id: u64,
+    bodies: std::collections::BTreeSet<String>,
+) -> u64 {
+    let expectation_id = NEXT_RENDER_EXPECTATION.fetch_add(1, Ordering::Relaxed);
+    let mut guard = render_expectations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // One app window owns one active runtime. A publication for a different
+    // document retires expectations from the replaced runtime instead of
+    // reporting them as render stalls three seconds later.
+    guard.retain(|_, pending| pending.document_id == document_id);
+    for pending in guard
+        .values_mut()
+        .filter(|pending| pending.document_id == document_id)
+    {
+        pending.bodies.retain(|body| !bodies.contains(body));
+    }
+    guard.retain(|_, pending| !pending.bodies.is_empty());
+    guard.insert(
+        expectation_id,
+        RenderExpectation {
+            document_id: document_id.to_owned(),
+            revision,
+            snapshot_id,
+            started: Instant::now(),
+            bodies,
+        },
+    );
+    drop(guard);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let pending = render_expectations()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&expectation_id);
+        if let Some(pending) = pending {
+            tracing::error!(
+                expectationId = expectation_id,
+                documentId = %pending.document_id,
+                revision = pending.revision,
+                snapshotId = pending.snapshot_id,
+                elapsedMs = pending.started.elapsed().as_millis() as u64,
+                pendingBodies = ?pending.bodies,
+                pid = std::process::id(),
+                thread = ?std::thread::current().id(),
+                "mesh render watchdog timeout"
+            );
+        }
+    });
+    expectation_id
+}
+
+#[cfg(debug_assertions)]
+fn acknowledge_render(
+    expectation_id: u64,
+    document_id: &str,
+    revision: u64,
+    snapshot_id: u64,
+    body_id: &str,
+) {
+    let mut guard = render_expectations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(expected) = guard.get_mut(&expectation_id) else {
+        return;
+    };
+    if expected.document_id != document_id
+        || expected.revision != revision
+        || expected.snapshot_id != snapshot_id
+    {
+        return;
+    }
+    expected.bodies.remove(body_id);
+    if expected.bodies.is_empty() {
+        let elapsed = expected.started.elapsed().as_millis() as u64;
+        let snapshot_id = expected.snapshot_id;
+        guard.remove(&expectation_id);
+        tracing::debug!(
+            expectationId = expectation_id,
+            documentId = document_id,
+            revision,
+            snapshotId = snapshot_id,
+            elapsedMs = elapsed,
+            "mesh render watchdog acknowledged"
+        );
+    }
+}
+
+/// Outstanding render expectations, for the `tauri-agent` harness's idle probe.
+///
+/// The watchdog ledger is the only per-body record of "the kernel published this geometry but
+/// no frame carrying it has been acknowledged yet", which is exactly the question an automated
+/// run must answer before it photographs the viewport and calls an operation verified. It is
+/// written by [`render_watchdog_expect`] and retired by [`mesh_render_completed`]; until now
+/// nothing could read it.
+///
+/// Debug builds only, like the ledger itself. Returns the number of outstanding expectations
+/// and the union of the body ids they are still waiting on.
+#[cfg(debug_assertions)]
+pub fn pending_render_expectations() -> (usize, Vec<String>) {
+    let guard = render_expectations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut bodies = std::collections::BTreeSet::new();
+    for expectation in guard.values() {
+        bodies.extend(expectation.bodies.iter().cloned());
+    }
+    (guard.len(), bodies.into_iter().collect())
+}
+
+pub fn mesh_render_completed(
+    expectation_id: u64,
+    document_id: String,
+    revision: u64,
+    snapshot_id: u64,
+    body_id: String,
+) {
+    #[cfg(debug_assertions)]
+    acknowledge_render(
+        expectation_id,
+        &document_id,
+        revision,
+        snapshot_id,
+        &body_id,
+    );
+    #[cfg(not(debug_assertions))]
+    let _ = (expectation_id, document_id, revision, snapshot_id, body_id);
+}
+
+/// Re-emits batched frontend log events into the Rust `tracing` stream under target
+/// `fe`, so ONE `logs/dev.jsonl` carries both lanes in wall-clock order.
+///
+/// Deliberately infallible and NOT instrumented: it is the logging path, so it must
+/// never fail a caller, never recurse, and never add a span of its own to every
+/// batch. Malformed content is capped/stringified, never rejected.
+pub fn log_event(events: Vec<FeLogEvent>) {
+    for event in events {
+        let ctx = event
+            .ctx
+            .as_ref()
+            .map(|v| cap_str(v.to_string(), FE_CTX_CAP));
+        emit_fe_event(&event, ctx.as_deref());
+    }
+}
+
+/// Truncates `s` to at most `max` bytes on a char boundary, marking the cut.
+fn cap_str(mut s: String, max: usize) -> String {
+    if s.len() > max {
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s.truncate(end);
+        s.push('…');
+    }
+    s
+}
+
+fn emit_fe_event(event: &FeLogEvent, ctx: Option<&str>) {
+    // The level is runtime data but `tracing` levels are compile-time, so the four
+    // arms are spelled out (one macro body, four call sites).
+    macro_rules! fe {
+        ($level:ident) => {
+            tracing::$level!(
+                target: "fe",
+                seq = event.seq,
+                tag = %event.tag,
+                feTs = event.ts,
+                tMono = event.t_mono,
+                ctx = ctx,
+                "{}",
+                event.msg
+            )
+        };
+    }
+    match event.level.as_str() {
+        "error" => fe!(error),
+        "warn" => fe!(warn),
+        "info" => fe!(info),
+        _ => fe!(debug),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared helpers (also used by the shared application regen driver)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Emits the post-regen events: `document-changed` (pull-model body refs) when a
+/// snapshot published, the refreshed `projection-updated`, `regen-finished`
+/// (`{revision, outcome}`) at the end of **every** regen so the frontend
+/// correlation resolves promptly without the 8 s fallback (F-WP8 flag 3), and —
+/// on a **published** regen — `needs-repair` (`{revision, items}`) so the repair
+/// banner appears (items non-empty) or is dropped (items empty ⇒ repairs cleared;
+/// M4a). A superseded/failed/no-op regen leaves the live repair state unchanged, so
+/// no `needs-repair` is emitted for those.
+///
+/// **Not a logging site.** The `regen:` postmortem line + the per-failed-step warns
+/// live in [`DocumentRuntime::finish_regen`], which runs on EVERY regen path
+/// (including the inline `run_regen` used by tests and the headless CLI); logging
+/// here as well would double every line for the app lane only.
+pub fn emit_regen_events(app: &HostContext, report: &RegenReport, projection: &DocumentProjection) {
+    #[cfg(debug_assertions)]
+    if report
+        .document_change(&projection.document_id, &projection.runtime_session)
+        .is_none()
+    {
+        render_watchdog_reconcile_projection(projection, "authoritative no-op projection");
+    }
+    if let Some(change) =
+        report.document_change(&projection.document_id, &projection.runtime_session)
+    {
+        #[cfg(debug_assertions)]
+        let expectation_id = render_watchdog_expect(&change, projection);
+        #[cfg(not(debug_assertions))]
+        let expectation_id = None;
+        let _ = app.emit(AppEvent::DocumentChanged(
+            crate::host::DocumentChangedEvent {
+                change,
+                render_expectation_id: expectation_id,
+            },
+        ));
+    }
+    let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
+    let _ = app.emit(AppEvent::RegenFinished(crate::dto::RegenFinished {
+        runtime_session: report.runtime_session.clone(),
+        revision: report.revision,
+        source_revision: report.source_revision,
+        outcome: report.outcome_str().to_string(),
+        message: report.failure_message(),
+        diagnostics: report.diagnostics.clone(),
+        // Finding 1: a published-but-partially-failed regen carries per-record
+        // failure + created/modified-body maps so a correlated apply resolves its
+        // own commit precisely (never mistaking sibling republishes for success).
+        failed_steps: report.failed_steps.clone(),
+        affected_bodies: report.affected_bodies.clone(),
+        // Distinct, in first-seen order: several refs on one record can each
+        // need repair, but the awaiter asks a yes/no question about its op.
+        repair_steps: if report.published() {
+            let mut seen = std::collections::BTreeSet::new();
+            report
+                .needs_repair
+                .iter()
+                .filter(|item| seen.insert(item.op_id.clone()))
+                .map(|item| item.op_id.clone())
+                .collect()
+        } else {
+            Vec::new()
+        },
+    }));
+    if report.published() {
+        let _ = app.emit(AppEvent::NeedsRepair(crate::dto::NeedsRepairEvent {
+            runtime_session: report.runtime_session.clone(),
+            revision: report.revision,
+            snapshot_id: report.snapshot_id,
+            items: report.needs_repair.clone(),
+        }));
+    }
+}
+
+pub(crate) fn snapshot_of(rt: &DocumentRuntime) -> DocumentSnapshotDto {
+    DocumentSnapshotDto {
+        document_id: rt.document_id(),
+        runtime_session: rt.runtime_session(),
+        title: rt.title().to_string(),
+    }
+}
+
+/// Provenance metadata for a save. The pure core never reads the wall clock, so
+/// the app supplies the timestamps here.
+pub(crate) fn save_meta() -> SaveMeta {
+    let now = now_rfc3339();
+    SaveMeta {
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        occt_fingerprint: None,
+        created: now.clone(),
+        modified: now,
+    }
+}
+
+/// The current UTC time as an RFC-3339 string (`YYYY-MM-DDThh:mm:ssZ`).
+fn now_rfc3339() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    rfc3339_from_secs(secs)
+}
+
+/// An RFC-3339 string (`YYYY-MM-DDThh:mm:ssZ`) for `secs` since the Unix epoch,
+/// computed without a calendar dependency (Howard Hinnant's civil-date algorithm).
+/// Shared with the recents store (last-opened timestamps).
+pub(crate) fn rfc3339_from_secs(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let (y, mon, d) = civil_from_days(days);
+    format!("{y:04}-{mon:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
+/// `(year, month, day)` from a Unix day count (days since 1970-01-01).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static RENDER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn projection_with_body(document_id: &str, body: Option<(&str, bool)>) -> DocumentProjection {
+        let mut projection = DocumentProjection::empty();
+        projection.document_id = document_id.into();
+        if let Some((id, visible)) = body {
+            projection.bodies.insert(
+                id.into(),
+                crate::dto::BodyDto {
+                    id: id.into(),
+                    name: id.into(),
+                    visible,
+                    health: onecad_core::document::body::BodyHealth::Healthy,
+                    color: None,
+                    face_colors: Default::default(),
+                },
+            );
+        }
+        projection
+    }
+
+    #[tokio::test]
+    async fn render_watchdog_ack_requires_full_identity_and_clears_each_body() {
+        let _serial = RENDER_TEST_LOCK.lock().unwrap();
+        let expectation_id = 91_337;
+        render_expectations()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                expectation_id,
+                RenderExpectation {
+                    document_id: "doc-a".into(),
+                    revision: 7,
+                    snapshot_id: 44,
+                    started: Instant::now(),
+                    bodies: ["body-a".to_string(), "body-b".to_string()]
+                        .into_iter()
+                        .collect(),
+                },
+            );
+        acknowledge_render(expectation_id, "wrong-doc", 7, 44, "body-a");
+        acknowledge_render(expectation_id, "doc-a", 7, 44, "body-a");
+        assert_eq!(
+            render_expectations()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&expectation_id)
+                .expect("body-b remains")
+                .bodies,
+            ["body-b".to_string()].into_iter().collect()
+        );
+        acknowledge_render(expectation_id, "doc-a", 7, 44, "body-b");
+        assert!(!render_expectations()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&expectation_id));
+    }
+
+    #[tokio::test]
+    async fn newer_publication_supersedes_same_document_body_without_revision_collision() {
+        let _serial = RENDER_TEST_LOCK.lock().unwrap();
+        let replaced_runtime = insert_render_expectation(
+            "doc-old",
+            1,
+            9,
+            ["body-old".to_string()].into_iter().collect(),
+        );
+        let first = insert_render_expectation(
+            "doc-supersede",
+            1,
+            10,
+            ["body-a".to_string()].into_iter().collect(),
+        );
+        let second = insert_render_expectation(
+            "doc-supersede",
+            1,
+            11,
+            ["body-a".to_string()].into_iter().collect(),
+        );
+        let guard = render_expectations()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(!guard.contains_key(&replaced_runtime));
+        assert!(!guard.contains_key(&first));
+        assert!(guard.contains_key(&second));
+    }
+
+    #[tokio::test]
+    async fn removal_only_projection_retires_pending_body_without_acknowledging_it() {
+        let _serial = RENDER_TEST_LOCK.lock().unwrap();
+        let id = insert_render_expectation(
+            "doc-remove",
+            1,
+            10,
+            ["body-a".to_string()].into_iter().collect(),
+        );
+        render_watchdog_reconcile_projection(
+            &projection_with_body("doc-remove", None),
+            "test removal",
+        );
+        assert!(!render_expectations().lock().unwrap().contains_key(&id));
+    }
+
+    #[tokio::test]
+    async fn hidden_body_projection_retires_pending_body() {
+        let _serial = RENDER_TEST_LOCK.lock().unwrap();
+        let id = insert_render_expectation(
+            "doc-hidden",
+            1,
+            10,
+            ["body-a".to_string()].into_iter().collect(),
+        );
+        render_watchdog_reconcile_projection(
+            &projection_with_body("doc-hidden", Some(("body-a", false))),
+            "test hidden",
+        );
+        assert!(!render_expectations().lock().unwrap().contains_key(&id));
+    }
+
+    #[tokio::test]
+    async fn empty_replacement_projection_retires_prior_document_expectations() {
+        let _serial = RENDER_TEST_LOCK.lock().unwrap();
+        let id = insert_render_expectation(
+            "doc-old-empty",
+            1,
+            10,
+            ["body-a".to_string()].into_iter().collect(),
+        );
+        render_watchdog_reconcile_projection(&DocumentProjection::empty(), "test close");
+        assert!(!render_expectations().lock().unwrap().contains_key(&id));
+    }
+
+    #[test]
+    fn civil_from_days_epoch_and_a_known_date() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        // 2026-07-17 is day 20651 since the Unix epoch.
+        assert_eq!(civil_from_days(20_651), (2026, 7, 17));
+    }
+
+    #[test]
+    fn now_rfc3339_is_well_formed() {
+        let s = now_rfc3339();
+        assert_eq!(s.len(), 20, "YYYY-MM-DDThh:mm:ssZ");
+        assert!(s.ends_with('Z') && s.contains('T'));
+    }
+
+    #[test]
+    fn gesture_target_args_validate_strictly() {
+        let entity = EntityId(uuid::Uuid::from_u128(0x41));
+        let parse = |v: serde_json::Value| {
+            serde_json::from_value::<GestureTargetArgs>(v)
+                .expect("deserializes")
+                .validate()
+        };
+
+        // Full arcEnd target: kind + entity + role + grab all survive.
+        let ok = parse(serde_json::json!({
+            "kind": "arcEnd", "entity": entity.to_string(), "role": "End", "grab": [1.5, -2.0]
+        }))
+        .expect("valid arcEnd");
+        assert_eq!(
+            ok,
+            wire::GestureTarget {
+                kind: wire::DragKind::ArcEnd,
+                entity,
+                role: Some("end"), // case-folded onto the §7.4 token
+                grab: Some([1.5, -2.0]),
+            }
+        );
+        // Optional members really are optional.
+        let body = parse(serde_json::json!({ "kind": "entityBody", "entity": entity.to_string() }))
+            .expect("valid entityBody");
+        assert_eq!(body.role, None);
+        assert_eq!(body.grab, None);
+
+        // Every rejection: unknown kind (NEVER degraded to point), bad entity,
+        // unknown role, arcEnd without a usable role, non-finite grab.
+        for bad in [
+            serde_json::json!({ "kind": "scale", "entity": entity.to_string() }),
+            serde_json::json!({ "kind": "Point", "entity": entity.to_string() }),
+            serde_json::json!({ "kind": "radius", "entity": "not-a-uuid" }),
+            serde_json::json!({ "kind": "point", "entity": entity.to_string(), "role": "middle" }),
+            serde_json::json!({ "kind": "arcEnd", "entity": entity.to_string() }),
+            serde_json::json!({ "kind": "arcEnd", "entity": entity.to_string(), "role": "center" }),
+        ] {
+            let err = parse(bad.clone()).expect_err(&format!("{bad} must be refused"));
+            assert!(
+                matches!(err, ApiError::InvalidCommand(_)),
+                "{bad} → {err:?} should be an invalid-command error"
+            );
+        }
+
+        // A non-finite `grab` cannot even be spelled in JSON (it stringifies to
+        // null and fails at deserialization), so this guard is asserted against a
+        // directly-constructed value. It matters because the worker's `read_grab`
+        // treats a non-finite grab as ABSENT — which silently turns a body drag
+        // into an anchor teleport instead of failing.
+        let err = GestureTargetArgs {
+            kind: "entityBody".into(),
+            entity: entity.to_string(),
+            role: None,
+            grab: Some([f64::NAN, 0.0]),
+        }
+        .validate()
+        .expect_err("a non-finite grab is refused");
+        assert!(matches!(err, ApiError::InvalidCommand(_)), "{err:?}");
+    }
+
+    #[test]
+    fn preview_operation_is_typed_and_preserves_the_draft_id() {
+        let op_id = uuid::Uuid::from_u128(0xCAFE).to_string();
+        let sketch_id = uuid::Uuid::from_u128(0xBEEF).to_string();
+        let raw = serde_json::json!({
+            "opType": "Extrude",
+            "opId": op_id,
+            "params": {
+                "profile": { "sketchId": sketch_id, "regionId": "r_second" },
+                "distance": { "value": 5.0 },
+                "draftAngleDeg": { "value": 0.0 },
+                "extrudeMode": "Blind",
+                "booleanMode": "NewBody",
+                "twoDirections": false,
+                "extrudeMode2": "Blind",
+                "distance2": { "value": 0.0 }
+            }
+        });
+        let (operation, parsed_id) = parse_preview_operation(raw).unwrap();
+        assert_eq!(parsed_id.to_string(), op_id);
+        let Operation::Known(onecad_core::document::record::KnownOperation::Extrude(params)) =
+            operation
+        else {
+            panic!("expected typed Extrude");
+        };
+        assert_eq!(
+            params.profile.unwrap().region.as_str(),
+            "r_second",
+            "exact selected region survives typed deserialization"
+        );
+    }
+
+    #[test]
+    fn malformed_known_preview_operation_is_rejected() {
+        let raw = serde_json::json!({
+            "opType": "Extrude",
+            "params": { "distance": "five" }
+        });
+        assert!(matches!(
+            parse_preview_operation(raw),
+            Err(ApiError::InvalidCommand(_))
+        ));
+
+        let bad_id = serde_json::json!({ "opType": "FutureOp", "opId": "not-a-record-id" });
+        assert!(matches!(
+            parse_preview_operation(bad_id),
+            Err(ApiError::InvalidCommand(_))
+        ));
+    }
+
+    #[test]
+    fn preview_operation_without_id_uses_a_canonical_stable_fallback() {
+        let raw = serde_json::json!({ "opType": "FutureOp", "params": {} });
+        let (_, first) = parse_preview_operation(raw.clone()).unwrap();
+        let (_, second) = parse_preview_operation(raw).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(RecordId::from_str(&first.to_string()).unwrap(), first);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // `spawn_gated_regen` — the cold-worker regen race fix
+    // ─────────────────────────────────────────────────────────────────────
+    //
+    // Neither scripted readiness type touches a real worker: `Never` sleeps out
+    // the timeout and reports not-ready (mirrors `PendingBackend`); `Already`
+    // resolves instantly (mirrors an adopted, already-`Ready` `WorkerManager`
+    // under `AppState::prewarm`). The scheduler side is a REAL
+    // `onecad_core::regen::RegenScheduler` over a driver that just echoes the
+    // request onto a channel — enough to observe "the request fired", without
+    // a `DocumentRuntime` in the loop.
+
+    mod readiness_gate {
+        use std::sync::{Arc, OnceLock};
+        use std::time::Duration;
+
+        use tokio::sync::mpsc::unbounded_channel;
+
+        use onecad_core::regen::{Outcome, RegenDirective, RegenRequest, RegenScheduler};
+
+        use crate::state::SharedScheduler;
+        use crate::worker::WorkerReadiness;
+
+        use super::super::{enqueue_initial_regen_if_current, spawn_gated_regen};
+
+        fn blank_runtime() -> crate::document_runtime::DocumentRuntime {
+            let backend = Arc::new(crate::worker::PendingBackend);
+            crate::document_runtime::DocumentRuntime::new_blank(
+                backend.clone(),
+                backend.clone(),
+                backend,
+            )
+        }
+
+        fn reopened_same_document(
+            original: &mut crate::document_runtime::DocumentRuntime,
+            path: &std::path::Path,
+        ) -> crate::document_runtime::DocumentRuntime {
+            original.save(path, super::super::save_meta()).unwrap();
+            let backend = Arc::new(crate::worker::PendingBackend);
+            crate::document_runtime::DocumentRuntime::open(
+                path,
+                backend.clone(),
+                backend.clone(),
+                backend,
+            )
+            .unwrap()
+        }
+
+        /// Never reports ready; sleeps out the caller's timeout first so the
+        /// gate's "fire anyway on timeout" behavior is genuinely exercised
+        /// rather than racing a same-tick return.
+        struct Never;
+        #[async_trait::async_trait]
+        impl WorkerReadiness for Never {
+            async fn wait_ready(&self, timeout: Duration) -> bool {
+                tokio::time::sleep(timeout).await;
+                false
+            }
+        }
+
+        /// Readiness the test opens by hand, so the window BEFORE it resolves —
+        /// the one the cold-worker race lived in — is directly observable.
+        /// `notify_one` stores a permit, so releasing the latch before the gate
+        /// gets to await it is not a lost wakeup.
+        struct Latch(Arc<tokio::sync::Notify>);
+        #[async_trait::async_trait]
+        impl WorkerReadiness for Latch {
+            async fn wait_ready(&self, timeout: Duration) -> bool {
+                tokio::time::timeout(timeout, self.0.notified())
+                    .await
+                    .is_ok()
+            }
+        }
+
+        /// Reports ready immediately (the `AppState::prewarm` common case).
+        struct Already;
+        #[async_trait::async_trait]
+        impl WorkerReadiness for Already {
+            async fn wait_ready(&self, _timeout: Duration) -> bool {
+                true
+            }
+        }
+
+        /// A live `RegenScheduler` whose driver echoes every request's `request`
+        /// onto an unbounded channel and reports `NoOp` (no `DocumentRuntime`
+        /// needed to observe "the request fired").
+        fn recording_scheduler() -> (
+            SharedScheduler,
+            tokio::sync::mpsc::UnboundedReceiver<(RegenRequest, Option<String>)>,
+        ) {
+            let (tx, rx) = unbounded_channel();
+            let driver = move |directive: RegenDirective| {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send((directive.request, directive.runtime_session));
+                    Outcome::NoOp
+                }
+            };
+            let (scheduler, handle) = RegenScheduler::new(driver);
+            tokio::spawn(scheduler.run());
+            let shared: SharedScheduler = Arc::new(OnceLock::new());
+            shared.set(handle).expect("freshly-constructed OnceLock");
+            (shared, rx)
+        }
+
+        async fn enqueue_tagged(sched: SharedScheduler, session: String) {
+            if let Some(handle) = sched.get() {
+                handle.request_for_runtime(RegenRequest::RevertToEnd { from: 0 }, Some(session));
+            }
+        }
+
+        /// The load-bearing half of the fix: while the worker is still connecting,
+        /// NOTHING reaches the scheduler. Firing into that window is what produced
+        /// "worker not connected" on every open of a project with geometry — a
+        /// from-0 plan has no retry path, so that first failure was terminal.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn withholds_the_request_until_readiness_resolves() {
+            let (sched, mut rx) = recording_scheduler();
+            let latch = Arc::new(tokio::sync::Notify::new());
+            spawn_gated_regen(
+                Arc::new(Latch(latch.clone())),
+                sched.clone(),
+                Duration::from_secs(30),
+                "runtime-a".to_string(),
+                enqueue_tagged,
+            );
+
+            assert!(
+                tokio::time::timeout(Duration::from_millis(150), rx.recv())
+                    .await
+                    .is_err(),
+                "no regen request may reach the scheduler before readiness resolves"
+            );
+
+            latch.notify_one();
+            let (got, session) = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("the request fires as soon as readiness resolves")
+                .expect("scheduler channel stayed open");
+            assert!(
+                matches!(got, RegenRequest::RevertToEnd { from: 0 }),
+                "got {got:?}"
+            );
+            assert_eq!(session.as_deref(), Some("runtime-a"));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn fires_the_request_after_timeout_when_never_ready() {
+            let (sched, mut rx) = recording_scheduler();
+            // `sched` is kept alive here for the rest of the test — mirroring
+            // `AppState` retaining its OWN `SharedScheduler` reference in
+            // production. Moving the only strong reference into the spawned
+            // task would drop the `SchedulerHandle`'s sender the instant that
+            // task finishes, racing (and sometimes beating) the scheduler's own
+            // poll of the in-flight driver future.
+            spawn_gated_regen(
+                Arc::new(Never),
+                sched.clone(),
+                Duration::from_millis(20),
+                "runtime-a".to_string(),
+                enqueue_tagged,
+            );
+
+            let (got, session) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("the request must still fire once the timeout elapses")
+                .expect("scheduler channel stayed open");
+            assert!(
+                matches!(got, RegenRequest::RevertToEnd { from: 0 }),
+                "got {got:?}"
+            );
+            assert_eq!(session.as_deref(), Some("runtime-a"));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn fires_promptly_when_already_ready() {
+            let (sched, mut rx) = recording_scheduler();
+            // A generous timeout the fast path must never actually wait out.
+            // `sched` stays alive for the same reason as the sibling test above.
+            spawn_gated_regen(
+                Arc::new(Already),
+                sched.clone(),
+                Duration::from_secs(30),
+                "runtime-a".to_string(),
+                enqueue_tagged,
+            );
+
+            let (got, session) = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("an already-ready readiness must not wait anywhere near the timeout")
+                .expect("scheduler channel stayed open");
+            assert!(
+                matches!(got, RegenRequest::RevertToEnd { from: 0 }),
+                "got {got:?}"
+            );
+            assert_eq!(session.as_deref(), Some("runtime-a"));
+        }
+
+        /// A gate whose document was replaced while it waited must NOT fire:
+        /// the scheduler is global, so a stale from-0 request would land on the
+        /// NEW document — racing its own still-connecting worker (the exact
+        /// failure this gate exists to prevent) or superseding its active regen.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn skips_when_the_document_was_replaced_while_waiting() {
+            let (sched, mut rx) = recording_scheduler();
+            spawn_gated_regen(
+                Arc::new(Already),
+                sched.clone(),
+                Duration::from_secs(30),
+                "runtime-a".to_string(),
+                |_sched, _session| async {}, // the close/open-during-wait shape
+            );
+
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), rx.recv())
+                    .await
+                    .is_err(),
+                "a stale gate must never reach the scheduler"
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn same_document_runtime_replacement_is_stale() {
+            let (sched, mut rx) = recording_scheduler();
+            let temp = tempfile::tempdir().unwrap();
+            let mut old = blank_runtime();
+            let replacement = reopened_same_document(&mut old, &temp.path().join("same.onecad"));
+            assert_eq!(old.document_uuid(), replacement.document_uuid());
+            assert_ne!(old.runtime_session(), replacement.runtime_session());
+            let old_session = old.runtime_session();
+            let runtime = Arc::new(tokio::sync::Mutex::new(Some(old)));
+            *runtime.lock().await = Some(replacement);
+            spawn_gated_regen(
+                Arc::new(Already),
+                sched.clone(),
+                Duration::from_secs(30),
+                old_session,
+                move |sched, session| enqueue_initial_regen_if_current(runtime, sched, session),
+            );
+
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), rx.recv())
+                    .await
+                    .is_err(),
+                "the same document id in a new runtime must not revive the old gate"
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn stale_gate_does_not_supersede_current_runtime_request() {
+            let release = Arc::new(tokio::sync::Notify::new());
+            let (tx, mut rx) = unbounded_channel();
+            let driver_release = release.clone();
+            let driver = move |directive: RegenDirective| {
+                let release = driver_release.clone();
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send("started");
+                    tokio::select! {
+                        _ = release.notified() => {
+                            let _ = tx.send("completed");
+                            Outcome::NoOp
+                        }
+                        _ = directive.cancel.cancelled() => {
+                            let _ = tx.send("cancelled");
+                            Outcome::Cancelled
+                        }
+                    }
+                }
+            };
+            let (scheduler, handle) = RegenScheduler::new(driver);
+            tokio::spawn(scheduler.run());
+            let sched: SharedScheduler = Arc::new(OnceLock::new());
+            sched.set(handle).expect("fresh scheduler");
+            sched.get().unwrap().request_for_runtime(
+                RegenRequest::ToEnd { from: 7 },
+                Some("runtime-new".to_string()),
+            );
+            assert_eq!(rx.recv().await, Some("started"));
+
+            let old = blank_runtime();
+            let old_session = old.runtime_session();
+            let runtime = Arc::new(tokio::sync::Mutex::new(Some(old)));
+            *runtime.lock().await = Some(blank_runtime());
+            let callback_done = Arc::new(tokio::sync::Notify::new());
+            let done = callback_done.clone();
+            spawn_gated_regen(
+                Arc::new(Already),
+                sched.clone(),
+                Duration::from_secs(30),
+                old_session,
+                move |sched, session| async move {
+                    enqueue_initial_regen_if_current(runtime, sched, session).await;
+                    done.notify_one();
+                },
+            );
+            callback_done.notified().await;
+            release.notify_one();
+            let terminal = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("current request completes")
+                .expect("scheduler remains open");
+            assert_eq!(terminal, "completed", "stale gate cancelled current work");
+        }
+
+        /// `PendingBackend` — the production no-worker fallback — must itself
+        /// report not-ready immediately rather than hanging the caller's timeout
+        /// budget (it's a distinct behavior from `Never` above, which sleeps
+        /// deliberately to exercise the gate's timeout path).
+        #[tokio::test]
+        async fn pending_backend_reports_not_ready_without_waiting() {
+            let result = tokio::time::timeout(
+                Duration::from_millis(200),
+                crate::worker::PendingBackend.wait_ready(Duration::from_secs(30)),
+            )
+            .await;
+            assert_eq!(result, Ok(false), "PendingBackend never becomes ready");
+        }
+    }
+
+    // ── Document variables (WP-VE.2) ─────────────────────────────────────────
+
+    mod variables {
+        use super::*;
+        use onecad_core::document::variables::{Unit, Variable};
+        use onecad_core::ids::VariableId;
+
+        fn var(name: &str, value: f64) -> Variable {
+            Variable {
+                id: VariableId::new(),
+                name: name.to_string(),
+                value: Scalar::new(value),
+                unit: Unit::Mm,
+            }
+        }
+
+        #[test]
+        fn upsert_refuses_a_name_no_expression_could_ever_name() {
+            // Exactly the set `regen::variables::is_bare_name` rejects — an empty
+            // name, a leading digit, punctuation, and an arithmetic expression
+            // masquerading as a name.
+            for bad in ["", "   ", "2wide", "my-var", "w * 2", "wídth", "a b"] {
+                let err = upsert_variable_command(&[], bad, 1.0)
+                    .expect_err(&format!("{bad:?} must be refused"));
+                assert!(
+                    matches!(err, ApiError::InvalidCommand(_)),
+                    "{bad:?} → {err:?}"
+                );
+            }
+            // …and the set it accepts.
+            for good in ["w", "_w", "width2", "WIDTH", " width "] {
+                assert!(
+                    upsert_variable_command(&[], good, 1.0).is_ok(),
+                    "{good:?} must be accepted"
+                );
+            }
+        }
+
+        #[test]
+        fn upsert_refuses_a_non_finite_value() {
+            for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                assert!(matches!(
+                    upsert_variable_command(&[], "w", bad),
+                    Err(ApiError::InvalidCommand(_))
+                ));
+            }
+        }
+
+        /// A DUPLICATE name is a re-value, not a second variable — and it must
+        /// keep the SAME id, or every `expr` already bound to it would still
+        /// resolve while the timeline's undo entry pointed at a dead one.
+        #[test]
+        fn upsert_of_an_existing_name_sets_rather_than_adds() {
+            let existing = var("width", 10.0);
+            let id = existing.id;
+            match upsert_variable_command(&[existing], "width", 25.0).unwrap() {
+                EditCommand::SetVariable { variable, value } => {
+                    assert_eq!(variable, id);
+                    assert_eq!(value, Scalar::new(25.0));
+                }
+                other => panic!("expected SetVariable, got {other:?}"),
+            }
+        }
+
+        /// Case-SENSITIVE, matching `VariableTable::get`: `Width` and `width` are
+        /// two variables, because that is what an `expr` lookup would see.
+        #[test]
+        fn upsert_name_match_is_case_sensitive() {
+            let existing = vec![var("width", 10.0)];
+            assert!(matches!(
+                upsert_variable_command(&existing, "Width", 3.0).unwrap(),
+                EditCommand::AddVariable { .. }
+            ));
+        }
+
+        #[test]
+        fn remove_refuses_an_unknown_name() {
+            let err = remove_variable_command(&[var("width", 1.0)], "height")
+                .expect_err("unknown name must be refused, never a silent no-op");
+            assert!(matches!(err, ApiError::InvalidCommand(_)), "{err:?}");
+        }
+
+        /// The whole point of routing through `rt.apply(EditCommand::…)`: a
+        /// variable edit is UNDOABLE like any other edit. There is no separate
+        /// programmatic write path (docs/ARCHITECTURE.md §9), so if this ever
+        /// regresses the user loses the ability to take a variable edit back.
+        #[test]
+        fn variable_edits_are_undoable_through_the_runtime() {
+            use crate::worker::PendingBackend;
+            use std::sync::Arc;
+
+            let backend = Arc::new(PendingBackend);
+            let mut rt = crate::document_runtime::DocumentRuntime::new_blank(
+                backend.clone(),
+                backend.clone(),
+                backend,
+            );
+            let names = |rt: &crate::document_runtime::DocumentRuntime| {
+                rt.variables()
+                    .iter()
+                    .map(|v| (v.name.clone(), v.value.value))
+                    .collect::<Vec<_>>()
+            };
+            assert!(names(&rt).is_empty(), "a blank document has no variables");
+
+            rt.apply(upsert_variable_command(&rt.variables(), "width", 10.0).unwrap())
+                .unwrap();
+            rt.apply(upsert_variable_command(&rt.variables(), "height", 20.0).unwrap())
+                .unwrap();
+            assert_eq!(
+                names(&rt),
+                vec![("width".into(), 10.0), ("height".into(), 20.0)]
+            );
+
+            // Re-value: same id, same declaration position.
+            let width_id = rt.variables()[0].id;
+            rt.apply(upsert_variable_command(&rt.variables(), "width", 25.0).unwrap())
+                .unwrap();
+            assert_eq!(rt.variables()[0].id, width_id, "a re-value keeps the id");
+            assert_eq!(
+                names(&rt),
+                vec![("width".into(), 25.0), ("height".into(), 20.0)]
+            );
+
+            rt.apply(remove_variable_command(&rt.variables(), "height").unwrap())
+                .unwrap();
+            assert_eq!(names(&rt), vec![("width".into(), 25.0)]);
+
+            // …and every one of those four edits comes back, in order.
+            rt.undo();
+            assert_eq!(
+                names(&rt),
+                vec![("width".into(), 25.0), ("height".into(), 20.0)]
+            );
+            rt.undo();
+            assert_eq!(
+                names(&rt),
+                vec![("width".into(), 10.0), ("height".into(), 20.0)]
+            );
+            rt.undo();
+            assert_eq!(names(&rt), vec![("width".into(), 10.0)]);
+            rt.undo();
+            assert!(names(&rt).is_empty(), "undo returns to the blank table");
+        }
+
+        /// The projection reports the history DEPTHS and the top-of-stack LABELS
+        /// (WP-U1). Without them the frontend cannot enable an Undo row, cannot
+        /// name the step it is about to revert, and — worst — cannot tell an empty
+        /// stack apart from a revert the runtime refused, so it reports "nothing
+        /// to undo" for both.
+        #[test]
+        fn the_projection_reports_undo_and_redo_depth_with_labels() {
+            use crate::worker::PendingBackend;
+            use std::sync::Arc;
+
+            let backend = Arc::new(PendingBackend);
+            let mut rt = crate::document_runtime::DocumentRuntime::new_blank(
+                backend.clone(),
+                backend.clone(),
+                backend,
+            );
+            let p = rt.projection();
+            assert_eq!(p.undo_depth, 0, "a blank document has nothing to undo");
+            assert_eq!(p.redo_depth, 0);
+            assert_eq!(p.undo_label, None);
+            assert_eq!(p.redo_label, None);
+
+            rt.apply(upsert_variable_command(&rt.variables(), "width", 10.0).unwrap())
+                .unwrap();
+            let p = rt.projection();
+            assert_eq!(p.undo_depth, 1, "one committed edit ⇒ one undo step");
+            assert_eq!(p.redo_depth, 0);
+            assert!(p.undo_label.is_some(), "the step carries its Txn label");
+            let undone = p.undo_label.clone();
+
+            rt.undo();
+            let p = rt.projection();
+            assert_eq!(p.undo_depth, 0);
+            assert_eq!(p.redo_depth, 1, "the undone step is replayable");
+            assert_eq!(p.undo_label, None);
+            assert_eq!(
+                p.redo_label, undone,
+                "the redo row names the step that was undone"
+            );
+        }
+
+        #[test]
+        fn remove_targets_the_named_variable() {
+            let a = var("width", 1.0);
+            let b = var("height", 2.0);
+            let want = b.id;
+            match remove_variable_command(&[a, b], "height").unwrap() {
+                EditCommand::RemoveVariable { variable } => assert_eq!(variable, want),
+                other => panic!("expected RemoveVariable, got {other:?}"),
+            }
+        }
+
+        // ── Expression authoring ─────────────────────────────────────────────
+
+        fn table(vars: &[Variable]) -> VariableTable {
+            let mut t = VariableTable::new();
+            for v in vars {
+                t.upsert(v.clone());
+            }
+            t
+        }
+
+        /// The stored `Scalar` carries BOTH the text and the number it currently
+        /// evaluates to — the cache every consumer reads until the next regen.
+        #[test]
+        fn upsert_expr_stores_the_text_and_its_evaluated_value() {
+            let t = table(&[var("depth", 10.0)]);
+            match upsert_variable_expr_command(&t, "plate", "depth * 2 + 5mm").unwrap() {
+                EditCommand::AddVariable { variable } => {
+                    assert_eq!(variable.name, "plate");
+                    assert_eq!(variable.value.expr.as_deref(), Some("depth * 2 + 5mm"));
+                    assert_eq!(variable.value.value, 25.0);
+                }
+                other => panic!("expected AddVariable, got {other:?}"),
+            }
+        }
+
+        /// Evaluated against the table the edit WOULD produce, so the edit that
+        /// closes a cycle is refused before anything is written.
+        #[test]
+        fn upsert_expr_refuses_a_self_reference_and_a_cycle_it_would_close() {
+            let t = table(&[var("w", 1.0)]);
+            let err = upsert_variable_expr_command(&t, "w", "w + 1")
+                .expect_err("a self-reference must be refused");
+            assert!(matches!(err, ApiError::InvalidCommand(_)), "{err:?}");
+
+            // a = b already exists; closing it with b = a is the cycle.
+            let mut t = VariableTable::new();
+            t.upsert(Variable {
+                value: Scalar::with_expr(0.0, "b"),
+                ..var("a", 0.0)
+            });
+            t.upsert(var("b", 1.0));
+            let err = upsert_variable_expr_command(&t, "b", "a")
+                .expect_err("closing a cycle must be refused");
+            assert!(matches!(err, ApiError::InvalidCommand(_)), "{err:?}");
+        }
+
+        #[test]
+        fn upsert_expr_refuses_a_bad_name_a_bad_expression_and_an_empty_one() {
+            let t = table(&[var("w", 1.0)]);
+            for (name, text) in [
+                ("2wide", "w"),   // illegal name
+                ("x", ""),        // empty expression
+                ("x", "   "),     // whitespace-only
+                ("x", "w +"),     // parse failure
+                ("x", "nope"),    // undefined reference
+                ("x", "frob(w)"), // unknown function
+            ] {
+                let err = upsert_variable_expr_command(&t, name, text)
+                    .expect_err(&format!("({name:?}, {text:?}) must be refused"));
+                assert!(matches!(err, ApiError::InvalidCommand(_)), "{err:?}");
+            }
+        }
+
+        /// An existing name is a re-bind, keeping the id (and therefore every
+        /// binding already pointing at it).
+        #[test]
+        fn upsert_expr_of_an_existing_name_sets_rather_than_adds() {
+            let existing = var("width", 10.0);
+            let id = existing.id;
+            let t = table(&[existing, var("w", 4.0)]);
+            match upsert_variable_expr_command(&t, "width", "w * 3").unwrap() {
+                EditCommand::SetVariable { variable, value } => {
+                    assert_eq!(variable, id);
+                    assert_eq!(value, Scalar::with_expr(12.0, "w * 3"));
+                }
+                other => panic!("expected SetVariable, got {other:?}"),
+            }
+        }
+
+        /// A rename is one transaction that rewrites every reference — variables
+        /// AND op params — and is undoable as a unit.
+        #[test]
+        fn rename_rewrites_every_reference_and_undoes_as_one_step() {
+            use crate::worker::PendingBackend;
+            use onecad_core::document::record::{
+                BooleanMode, ExtrudeMode, ExtrudeParams, KnownOperation, Operation, OperationRecord,
+            };
+            use onecad_core::ids::RecordId;
+            use std::sync::Arc;
+            use uuid::Uuid;
+
+            let backend = Arc::new(PendingBackend);
+            let mut rt = crate::document_runtime::DocumentRuntime::new_blank(
+                backend.clone(),
+                backend.clone(),
+                backend,
+            );
+            rt.apply(upsert_variable_command(&rt.variables(), "depth", 10.0).unwrap())
+                .unwrap();
+            rt.apply(
+                upsert_variable_expr_command(rt.variables_table(), "plate", "depth * 2").unwrap(),
+            )
+            .unwrap();
+            let record = OperationRecord::new(
+                RecordId(Uuid::from_u128(0xE1)),
+                0,
+                "Extrude",
+                Operation::Known(KnownOperation::Extrude(ExtrudeParams {
+                    profile: None,
+                    distance: Scalar::with_expr(25.0, "depth * 2 + 5mm"),
+                    draft_angle_deg: Scalar::new(0.0),
+                    mode: ExtrudeMode::Blind,
+                    boolean_mode: BooleanMode::NewBody,
+                    target_body: None,
+                    target_face: None,
+                    two_directions: false,
+                    mode2: ExtrudeMode::Blind,
+                    distance2: Scalar::new(0.0),
+                    target_face2: None,
+                    extra: Default::default(),
+                })),
+            );
+            rt.apply(EditCommand::AddOperation {
+                record,
+                at_cursor: true,
+            })
+            .unwrap();
+
+            let depth_id = rt.variables_table().get("depth").unwrap().id;
+            rt.apply(EditCommand::RenameVariable {
+                variable: depth_id,
+                name: "d".into(),
+            })
+            .unwrap();
+
+            let exprs = |rt: &crate::document_runtime::DocumentRuntime| {
+                let vars: Vec<Option<String>> = rt
+                    .variables()
+                    .iter()
+                    .map(|v| v.value.expr.clone())
+                    .collect();
+                let params = rt.projection().features[0].primary_expr.clone();
+                (
+                    rt.variables()
+                        .iter()
+                        .map(|v| v.name.clone())
+                        .collect::<Vec<_>>(),
+                    vars,
+                    params,
+                )
+            };
+            let (names, vars, param) = exprs(&rt);
+            assert_eq!(names, vec!["d".to_string(), "plate".to_string()]);
+            assert_eq!(vars, vec![None, Some("d * 2".to_string())]);
+            assert_eq!(param.as_deref(), Some("d * 2 + 5mm"));
+
+            // ONE undo takes the rename AND both rewrites back.
+            rt.undo();
+            let (names, vars, param) = exprs(&rt);
+            assert_eq!(names, vec!["depth".to_string(), "plate".to_string()]);
+            assert_eq!(vars, vec![None, Some("depth * 2".to_string())]);
+            assert_eq!(param.as_deref(), Some("depth * 2 + 5mm"));
+        }
+    }
+}

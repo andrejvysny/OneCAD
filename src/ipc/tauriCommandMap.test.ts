@@ -1176,7 +1176,7 @@ describe("editCommandLabel for datums", () => {
 
 describe("inputPathFor mirrors the Rust wire_op_inputs slot table", () => {
   /*
-   * THE TWIN of `src-tauri/src/worker/wire.rs`
+   * THE TWIN of `crates/onecad-app/src/worker/wire.rs`
    * `wire_op_inputs_slot_order_is_the_repair_slot_table`. That test pins, per
    * opType, WHAT the k-th entry of the wire `inputs[]` array is; this one pins
    * which `InputPath` writes it. The two lists below are the same cases in the

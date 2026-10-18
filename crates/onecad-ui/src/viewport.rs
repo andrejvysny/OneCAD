@@ -1,0 +1,407 @@
+use crate::app::App;
+use onecad_interaction::{Action, ProfileSelection};
+use onecad_render::{BodyStyle, PreviewIdentity, RenderStyle, Theme};
+use onecad_scene::{Bounds, DVec2, ViewSnapshot, Viewport};
+use std::sync::atomic::Ordering;
+
+pub fn show(app: &mut App, ui: &mut egui::Ui) {
+    egui::CentralPanel::default()
+        .frame(egui::Frame::NONE)
+        .show(ui, |ui| {
+            let (rect, response) =
+                ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::Role::Image,
+                    true,
+                    "Model viewport; select a closed profile",
+                )
+            });
+            let Some(display) = app.display.clone() else {
+                return;
+            };
+            let viewport = Viewport {
+                width: f64::from(rect.width()),
+                height: f64::from(rect.height()),
+                scale_factor: f64::from(ui.ctx().pixels_per_point()),
+            };
+            if viewport.width <= 0.0 || viewport.height <= 0.0 {
+                return;
+            }
+            navigation(app, ui, &response, viewport, &display);
+            crate::viewport_selection::hover(app, ui, rect, viewport, &display);
+            if let Err(error) = render(app, ui.ctx(), viewport, &display) {
+                app.status = format!("Viewport: {error}");
+                app.bridge
+                    .shared
+                    .invalidate(Some(format!("Viewport: {error}")));
+            }
+            if let Some(texture) = app.texture {
+                ui.painter().image(
+                    texture,
+                    rect,
+                    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+                app.sampled = true;
+            }
+            let Some(view) = app.view.filter(|view| {
+                view.identity().scene == display.scene.identity() && view.viewport() == viewport
+            }) else {
+                return;
+            };
+            if app.sketch_active() {
+                if let Some(session) = app.sketch.session.as_ref() {
+                    crate::sketch_view::paint(ui.painter(), rect, &view, session, &app.theme);
+                }
+            } else {
+                paint_profiles(app, ui, rect, &view, &display);
+            }
+            let overlay_owns = crate::viewport_widgets::show(app, ui, rect, &view);
+            if app.sketch_active() {
+                if !overlay_owns {
+                    crate::sketch_ui::viewport(app, ui, rect, &response, &view);
+                }
+                return;
+            }
+            if response.clicked()
+                && !overlay_owns
+                && !crate::viewport_selection::sectioned(app)
+                && app.bridge.valid()
+                && !app.busy()
+                && app.interaction.tool.is_none()
+                && let Some(position) = response.interact_pointer_pos()
+            {
+                pick(
+                    app,
+                    &display,
+                    &view,
+                    DVec2::new(
+                        f64::from(position.x - rect.min.x),
+                        f64::from(position.y - rect.min.y),
+                    ),
+                );
+            }
+        });
+}
+
+fn navigation(
+    app: &mut App,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    viewport: Viewport,
+    display: &crate::bridge::Display,
+) {
+    if app.fit_pending {
+        let bounds = display.scene.bounds().or_else(|| profile_bounds(display));
+        if let Some(bounds) = bounds
+            && let Ok(fit) = onecad_scene::fit_camera(bounds, app.camera, viewport, None)
+        {
+            app.camera.target = fit.target;
+            app.camera.offset = app.camera.offset.normalize() * fit.distance;
+            app.draw_dirty = true;
+        }
+        app.fit_pending = false;
+    }
+    navigate_input(app, ui, response, viewport, display.scene.identity());
+    if app.view.is_none_or(|view| {
+        view.camera() != app.camera
+            || view.viewport() != viewport
+            || view.identity().scene != display.scene.identity()
+    }) {
+        app.draw_dirty = true;
+    }
+}
+
+fn navigate_input(
+    app: &mut App,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    viewport: Viewport,
+    scene: onecad_scene::SceneIdentity,
+) {
+    let cursor = ui.input(|input| input.pointer.hover_pos()).map(|position| {
+        let position = position - response.rect.min;
+        DVec2::new(f64::from(position.x), f64::from(position.y))
+    });
+    let allowed = ui.input(|input| input.focused && !input.pointer.primary_down())
+        && !crate::viewport_widgets::owns_pointer(app, ui, response.rect)
+        && !egui::Popup::is_any_open(ui.ctx())
+        && ui.is_enabled();
+    ui.input(|input| {
+        for event in &input.events {
+            let motion = app
+                .navigation
+                .event(event, input.time, viewport.height as f32);
+            if let Some(mut motion) = motion
+                && allowed
+                && response.hovered()
+            {
+                if let crate::navigation::Motion::Orbit(delta) = &mut motion
+                    && !cfg!(target_os = "macos")
+                {
+                    *delta = -*delta;
+                }
+                app.draw_dirty |= crate::camera_navigation::apply(
+                    &mut app.camera,
+                    viewport,
+                    scene,
+                    cursor,
+                    motion,
+                );
+            }
+        }
+    });
+    if allowed {
+        navigate_drag(app, ui, response, viewport, scene);
+    }
+}
+
+fn navigate_drag(
+    app: &mut App,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    viewport: Viewport,
+    scene: onecad_scene::SceneIdentity,
+) {
+    let secondary = response.dragged_by(egui::PointerButton::Secondary);
+    let middle = response.dragged_by(egui::PointerButton::Middle);
+    if !secondary && !middle {
+        return;
+    }
+    let delta = ui.input(|input| input.pointer.delta());
+    let motion = if secondary && !middle && ui.input(|input| input.modifiers.shift) {
+        crate::navigation::Motion::Orbit(delta)
+    } else {
+        crate::navigation::Motion::Pan(delta)
+    };
+    app.draw_dirty |=
+        crate::camera_navigation::apply(&mut app.camera, viewport, scene, None, motion);
+}
+
+fn render(
+    app: &mut App,
+    ctx: &egui::Context,
+    viewport: Viewport,
+    display: &crate::bridge::Display,
+) -> Result<(), String> {
+    let needs_scene = app.renderer.scene_identity() != Some(display.scene.identity());
+    // Poll even without new drawing: completion callbacks retire resources and acknowledge scenes.
+    let renderer_idle = app.renderer.poll_idle().map_err(|e| e.to_string())?;
+    if !renderer_idle {
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        return Ok(());
+    }
+    if !app.draw_dirty && !needs_scene && app.pending_preview.is_none() && !app.clear_preview {
+        return Ok(());
+    }
+    if !app.sampling_done.load(Ordering::Acquire) {
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        return Ok(());
+    }
+    if needs_scene {
+        let prepared = display
+            .prepared
+            .lock()
+            .map_err(|_| "scene handoff poisoned")?
+            .take()
+            .ok_or("prepared scene already consumed")?;
+        app.renderer
+            .replace_prepared_scene(prepared)
+            .map_err(|e| e.to_string())?;
+        app.clear_preview = true;
+        app.topology.invalidate(display.scene.identity());
+    }
+    if let Some(options) = app.pending_display_options.take() {
+        let changed_section = options.section != app.renderer.options().section;
+        match app.renderer.set_options(options) {
+            Ok(()) if changed_section => {
+                app.selected_body = None;
+                app.interaction.selection = None;
+                app.topology.select(None);
+            }
+            Ok(()) => {}
+            Err(error) => app.status = format!("Display: {error}"),
+        }
+    }
+    if app.clear_preview {
+        app.renderer.clear_preview().map_err(|e| e.to_string())?;
+        app.clear_preview = false;
+    }
+    if let Some((tag, prepared, _lease)) = app.pending_preview.take()
+        && tag.context.scene == display.scene.identity()
+    {
+        app.renderer
+            .replace_prepared_preview(
+                PreviewIdentity {
+                    base: tag.context.scene,
+                    generation: tag.sequence,
+                },
+                prepared,
+            )
+            .map_err(|e| e.to_string())?;
+    }
+    let size = [
+        (viewport.width * viewport.scale_factor).round() as u32,
+        (viewport.height * viewport.scale_factor).round() as u32,
+    ];
+    if app.renderer.size() != size {
+        if let Some(texture) = app.texture.take() {
+            app.gpu.renderer.write().free_texture(&texture);
+        }
+        app.renderer.resize(size).map_err(|e| e.to_string())?;
+    }
+    app.view_number += 1;
+    let view = ViewSnapshot::new(
+        display.scene.identity(),
+        app.view_number,
+        app.camera,
+        viewport,
+    )
+    .map_err(|e| e.to_string())?;
+    for body in display.scene.bodies() {
+        app.renderer.set_body_style(
+            body.body_id(),
+            BodyStyle {
+                selected: Some(body.body_id()) == app.selected_body,
+            },
+        );
+    }
+    crate::viewport_selection::upload(app, &display.scene)?;
+    let mut encoder = app
+        .gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("native CAD viewport"),
+        });
+    if app
+        .renderer
+        .encode(
+            &mut encoder,
+            &view,
+            RenderStyle {
+                theme: if app.dark { Theme::Dark } else { Theme::Light },
+                ..Default::default()
+            },
+        )
+        .map_err(|e| e.to_string())?
+    {
+        app.gpu.queue.submit([encoder.finish()]);
+        if app.renderer.preview_identity().is_none() {
+            app.bridge.render_submitted(&app.gpu.queue, display);
+        }
+        app.cad_needs_fence = true;
+        ctx.request_repaint();
+    }
+    if app.texture.is_none()
+        && let Some(view) = app.renderer.output_view()
+    {
+        app.texture = Some(app.gpu.renderer.write().register_native_texture(
+            &app.gpu.device,
+            view,
+            wgpu::FilterMode::Linear,
+        ));
+    }
+    app.view = Some(view);
+    app.draw_dirty = false;
+    Ok(())
+}
+
+fn paint_profiles(
+    app: &App,
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    view: &ViewSnapshot,
+    display: &crate::bridge::Display,
+) {
+    if app.renderer.preview_identity().is_some() {
+        return;
+    }
+    for profile in &display.profiles {
+        let selected = app.interaction.selection.as_ref().is_some_and(|selection| {
+            selection.profile.sketch == profile.reference.sketch
+                && selection.profile.region == profile.reference.region
+        });
+        let color = if selected {
+            app.theme.accent.linear_multiply(0.42)
+        } else {
+            app.theme.accent.linear_multiply(0.20)
+        };
+        for indices in &profile.triangles {
+            let projected: Option<Vec<_>> = indices
+                .iter()
+                .map(|index| {
+                    view.project(profile.vertices[*index as usize])
+                        .map(|point| {
+                            rect.min + egui::vec2(point.logical.x as f32, point.logical.y as f32)
+                        })
+                })
+                .collect();
+            if let Some(points) = projected {
+                ui.painter().add(egui::Shape::convex_polygon(
+                    points,
+                    color,
+                    egui::Stroke::new(1.0, app.theme.accent),
+                ));
+            }
+        }
+        for edge in &profile.boundary {
+            if let (Some(a), Some(b)) = (
+                view.project(profile.vertices[edge[0] as usize]),
+                view.project(profile.vertices[edge[1] as usize]),
+            ) {
+                let logical = |point: onecad_scene::ProjectedPoint| {
+                    rect.min + egui::vec2(point.logical.x as f32, point.logical.y as f32)
+                };
+                ui.painter().line_segment(
+                    [logical(a), logical(b)],
+                    egui::Stroke::new(1.2, app.theme.accent),
+                );
+            }
+        }
+    }
+}
+
+fn pick(app: &mut App, display: &crate::bridge::Display, view: &ViewSnapshot, logical: DVec2) {
+    let hit = display
+        .profiles
+        .iter()
+        .filter_map(|profile| profile.pick(view, logical).map(|hit| (profile, hit)))
+        .min_by(|a, b| a.1.1.total_cmp(&b.1.1));
+    let body = onecad_scene::pick(&display.scene, view, view.identity(), logical)
+        .ok()
+        .flatten();
+    if let Some((profile, (anchor, distance))) = hit
+        && body
+            .as_ref()
+            .is_none_or(|body| body.ray_distance >= distance - 1e-6)
+        && let Some(context) = app.interaction.context.clone()
+    {
+        let mut reference = profile.reference.clone();
+        reference.region_anchor = Some(anchor);
+        app.dispatch(Action::SelectProfile(Box::new(ProfileSelection {
+            profile: reference,
+            context,
+            capture: view.identity(),
+        })));
+        app.status = "Profile selected".into();
+        app.selected_body = None;
+        app.topology.select(None);
+        app.draw_dirty = true;
+        return;
+    }
+    app.selected_body = body.as_ref().map(|body| body.body_id);
+    app.topology.select(body.as_ref());
+    app.draw_dirty = true;
+}
+
+fn profile_bounds(display: &crate::bridge::Display) -> Option<Bounds> {
+    display
+        .profiles
+        .iter()
+        .map(|profile| profile.bounds)
+        .reduce(|a, b| Bounds {
+            min: a.min.min(b.min),
+            max: a.max.max(b.max),
+        })
+}

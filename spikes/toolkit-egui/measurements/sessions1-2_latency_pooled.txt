@@ -1,0 +1,6 @@
+session1 (18:13, pre-AX-label build)
+  egui_steps1-39_event_to_display_ms n=117 mean=23.50 p50=22.95 p95=35.45 p99=38.20 min=9.08 max=45.33
+  native_steps1-39_event_to_display_ms n=117 mean=18.17 p50=17.04 p95=33.30 p99=38.33 min=4.18 max=52.15
+session2 (18:41, 1521x921 build)
+  egui_steps1-39_event_to_display_ms n=117 mean=26.25 p50=26.37 p95=37.13 p99=40.39 min=13.63 max=43.47
+  native_steps1-39_event_to_display_ms n=117 mean=22.26 p50=22.13 p95=31.93 p99=34.78 min=7.88 max=42.02

@@ -7,7 +7,7 @@
   },
   "launch": {
     "dev": { "command": ["bun", "run", "tauri:agent"], "readyTimeoutMs": 600000 },
-    "bundled": { "appPath": "src-tauri/target/release/bundle/macos/onecad.app" }
+    "bundled": { "appPath": "target/release/bundle/macos/onecad.app" }
   },
   "webdriver": { "port": 4445 },
   "devServer": { "port": 1420 },

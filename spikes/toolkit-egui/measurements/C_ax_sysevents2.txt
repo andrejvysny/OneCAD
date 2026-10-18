@@ -1,0 +1,190 @@
+189
+AXGroup | group | missing value | missing value
+AXUnknown | unknown | missing value | missing value
+AXStaticText | text | missing value | OneCAD — NEMA
+AXStaticText | text | missing value | File
+AXStaticText | text | missing value | OneCAD — NEMA
+AXStaticText | text | missing value | •
+AXButton | button | Close document | missing value
+AXButton | button | Workspace: Design | missing value
+AXUnknown | unknown | missing value | missing value
+AXStaticText | text | missing value | Ready
+AXStaticText | text | missing value | DOF: —
+AXStaticText | text | missing value | mm
+AXStaticText | text | missing value | X     0.00   Y     0.00   Z    0.00
+AXStaticText | text | missing value | FOV 76°
+AXRadioButton | radio button | Persp | true
+AXRadioButton | radio button | Ortho | false
+AXUnknown | unknown | missing value | missing value
+AXStaticText | text | missing value | BODIES
+AXRow | outline row | Body 1 | false
+AXCheckBox | checkbox | Show Body 1 | true
+AXRow | outline row | Body 2 | false
+AXCheckBox | checkbox | Show Body 2 | true
+AXRow | outline row | Body 3 | false
+AXCheckBox | checkbox | Show Body 3 | true
+AXRow | outline row | Body 4 | false
+AXCheckBox | checkbox | Show Body 4 | true
+AXRow | outline row | Body 5 | false
+AXCheckBox | checkbox | Show Body 5 | true
+AXRow | outline row | Body 6 | false
+AXCheckBox | checkbox | Show Body 6 | true
+AXRow | outline row | Body 7 | false
+AXCheckBox | checkbox | Show Body 7 | true
+AXRow | outline row | Body 8 | false
+AXCheckBox | checkbox | Show Body 8 | true
+AXRow | outline row | Body 9 | false
+AXCheckBox | checkbox | Show Body 9 | true
+AXRow | outline row | Body 10 | false
+AXCheckBox | checkbox | Show Body 10 | true
+AXRow | outline row | Body 11 | false
+AXCheckBox | checkbox | Show Body 11 | true
+AXRow | outline row | Body 12 | false
+AXCheckBox | checkbox | Show Body 12 | true
+AXRow | outline row | Body 13 | false
+AXCheckBox | checkbox | Show Body 13 | true
+AXRow | outline row | Body 14 | false
+AXCheckBox | checkbox | Show Body 14 | true
+AXRow | outline row | Body 15 | false
+AXCheckBox | checkbox | Show Body 15 | true
+AXRow | outline row | Body 16 | false
+AXCheckBox | checkbox | Show Body 16 | true
+AXRow | outline row | Body 17 | false
+AXCheckBox | checkbox | Show Body 17 | true
+AXRow | outline row | Body 18 | false
+AXCheckBox | checkbox | Show Body 18 | true
+AXRow | outline row | Body 19 | false
+AXCheckBox | checkbox | Show Body 19 | true
+AXRow | outline row | Body 20 | false
+AXCheckBox | checkbox | Show Body 20 | true
+AXRow | outline row | Body 21 | false
+AXCheckBox | checkbox | Show Body 21 | true
+AXRow | outline row | Body 22 | false
+AXCheckBox | checkbox | Show Body 22 | true
+AXRow | outline row | Body 23 | false
+AXCheckBox | checkbox | Show Body 23 | true
+AXRow | outline row | Body 24 | false
+AXCheckBox | checkbox | Show Body 24 | true
+AXRow | outline row | Body 25 | false
+AXCheckBox | checkbox | Show Body 25 | true
+AXRow | outline row | Body 26 | false
+AXCheckBox | checkbox | Show Body 26 | true
+AXRow | outline row | Body 27 | false
+AXCheckBox | checkbox | Show Body 27 | true
+AXRow | outline row | Body 28 | false
+AXCheckBox | checkbox | Show Body 28 | true
+AXRow | outline row | Body 29 | false
+AXCheckBox | checkbox | Show Body 29 | true
+AXRow | outline row | Body 30 | false
+AXCheckBox | checkbox | Show Body 30 | true
+AXRow | outline row | Body 31 | false
+AXCheckBox | checkbox | Show Body 31 | true
+AXRow | outline row | Body 32 | false
+AXCheckBox | checkbox | Show Body 32 | true
+AXRow | outline row | Body 33 | false
+AXCheckBox | checkbox | Show Body 33 | true
+AXRow | outline row | Body 34 | false
+AXCheckBox | checkbox | Show Body 34 | true
+AXRow | outline row | Body 35 | false
+AXCheckBox | checkbox | Show Body 35 | true
+AXRow | outline row | Body 36 | false
+AXCheckBox | checkbox | Show Body 36 | true
+AXRow | outline row | Body 37 | false
+AXCheckBox | checkbox | Show Body 37 | true
+AXRow | outline row | Body 38 | false
+AXCheckBox | checkbox | Show Body 38 | true
+AXRow | outline row | Body 39 | false
+AXCheckBox | checkbox | Show Body 39 | true
+AXRow | outline row | Body 40 | false
+AXCheckBox | checkbox | Show Body 40 | true
+AXRow | outline row | Body 41 | false
+AXCheckBox | checkbox | Show Body 41 | true
+AXRow | outline row | Body 42 | false
+AXCheckBox | checkbox | Show Body 42 | true
+AXRow | outline row | Body 43 | false
+AXCheckBox | checkbox | Show Body 43 | true
+AXRow | outline row | Body 44 | false
+AXCheckBox | checkbox | Show Body 44 | true
+AXRow | outline row | Body 45 | false
+AXCheckBox | checkbox | Show Body 45 | true
+AXRow | outline row | Body 46 | false
+AXCheckBox | checkbox | Show Body 46 | true
+AXRow | outline row | Body 47 | false
+AXCheckBox | checkbox | Show Body 47 | true
+AXRow | outline row | Body 48 | false
+AXCheckBox | checkbox | Show Body 48 | true
+AXRow | outline row | Body 49 | false
+AXCheckBox | checkbox | Show Body 49 | true
+AXRow | outline row | Body 50 | false
+AXCheckBox | checkbox | Show Body 50 | true
+AXRow | outline row | Body 51 | false
+AXCheckBox | checkbox | Show Body 51 | true
+AXRow | outline row | Body 52 | false
+AXCheckBox | checkbox | Show Body 52 | true
+AXRow | outline row | Body 53 | false
+AXCheckBox | checkbox | Show Body 53 | true
+AXRow | outline row | Body 54 | false
+AXCheckBox | checkbox | Show Body 54 | true
+AXRow | outline row | Body 55 | false
+AXCheckBox | checkbox | Show Body 55 | true
+AXRow | outline row | Body 56 | false
+AXCheckBox | checkbox | Show Body 56 | true
+AXRow | outline row | Body 57 | false
+AXCheckBox | checkbox | Show Body 57 | true
+AXRow | outline row | Body 58 | false
+AXCheckBox | checkbox | Show Body 58 | true
+AXRow | outline row | Body 59 | false
+AXCheckBox | checkbox | Show Body 59 | true
+AXRow | outline row | Body 60 | false
+AXCheckBox | checkbox | Show Body 60 | true
+AXRow | outline row | Body 61 | false
+AXCheckBox | checkbox | Show Body 61 | true
+AXRow | outline row | Body 62 | false
+AXCheckBox | checkbox | Show Body 62 | true
+AXRow | outline row | Body 63 | false
+AXCheckBox | checkbox | Show Body 63 | true
+AXRow | outline row | Body 64 | false
+AXCheckBox | checkbox | Show Body 64 | true
+AXRow | outline row | Body 65 | false
+AXCheckBox | checkbox | Show Body 65 | true
+AXRow | outline row | Body 66 | false
+AXCheckBox | checkbox | Show Body 66 | true
+AXRow | outline row | Body 67 | false
+AXCheckBox | checkbox | Show Body 67 | true
+AXScrollBar | scroll bar | missing value | missing value
+AXStaticText | text | missing value | SKETCHES
+AXStaticText | text | missing value | DATUMS
+AXUnknown | unknown | missing value | missing value
+AXStaticText | text | missing value | Nothing selected
+AXStaticText | text | missing value | Select a body, sketch, face or edge to see its parameters and history.
+AXUnknown | unknown | missing value | missing value
+AXImage | image | 3D viewport | missing value
+AXButton | button | Display mode | missing value
+AXButton | button | Grid | missing value
+AXButton | button | Add view | missing value
+AXButton | button | Select (V) | missing value
+AXButton | button | New sketch (S) | missing value
+AXButton | button | Datum plane (D) | missing value
+AXButton | button | Extrude (E) | missing value
+AXButton | button | Revolve (R) | missing value
+AXButton | button | Fillet / Chamfer (F) | missing value
+AXButton | button | Combine (B) | missing value
+AXButton | button | Shell (K) | missing value
+AXButton | button | Offset face (⇧O) | missing value
+AXButton | button | Hole (⇧H) | missing value
+AXButton | button | Linear pattern (P) | missing value
+AXButton | button | Circular pattern (C) | missing value
+AXButton | button | Mirror (M) | missing value
+AXButton | button | Move (T) | missing value
+AXButton | button | Measure (?) | missing value
+AXButton | button | Home view | missing value
+AXButton | button | Fit all | missing value
+AXButton | button | Isolate | missing value
+AXButton | button | Display | missing value
+AXTextField | text field | Flange width (mm) | 45.86
+AXStaticText | text | missing value | mm
+AXButton | close button | missing value | missing value
+AXButton | full screen button | missing value | missing value
+AXGroup | group | missing value | missing value
+AXGroup | group | missing value | missing value
+AXButton | minimize button | missing value | missing value

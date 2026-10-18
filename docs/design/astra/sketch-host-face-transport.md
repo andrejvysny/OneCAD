@@ -3,7 +3,7 @@ date: 2026-09-15
 mode: derive
 model: gpt-6-astra
 effort: xhigh
-access: grounded: worker/src/ops/ComponentOp.cpp, worker/src/session/FaceProjection.cpp, worker/src/session/PlanExecutor.cpp, worker/src/session/ElementIdentity.cpp, worker/src/elementmap/Ladder.cpp, worker/src/ops/ExtrudeOp.cpp, worker/src/kernel/validation/GeometryPrecision.h, src-tauri/crates/onecad-core/src/sketch/plane.rs, src-tauri/crates/onecad-core/src/sketch/mod.rs, protocol/SCHEMA.md. Transcript audit: Astra also read worker/tests/{test_component_mate_reseat,test_wp6_ladder,test_cross_body_element_ref,test_feature_pattern}.cpp, worker/tests/fixtures/executeplan_shell.ndjson, src-tauri/tests/{component_ops,topology_rebind}.rs, protocol/fixtures/ and the legacy oracle Sketch.h under corpus (recorded, not re-run; none is corpus/expected-values and none carries the answer to this derivation)
+access: grounded: worker/src/ops/ComponentOp.cpp, worker/src/session/FaceProjection.cpp, worker/src/session/PlanExecutor.cpp, worker/src/session/ElementIdentity.cpp, worker/src/elementmap/Ladder.cpp, worker/src/ops/ExtrudeOp.cpp, worker/src/kernel/validation/GeometryPrecision.h, crates/onecad-core/src/sketch/plane.rs, crates/onecad-core/src/sketch/mod.rs, protocol/SCHEMA.md. Transcript audit: Astra also read worker/tests/{test_component_mate_reseat,test_wp6_ladder,test_cross_body_element_ref,test_feature_pattern}.cpp, worker/tests/fixtures/executeplan_shell.ndjson, src-tauri/tests/{component_ops,topology_rebind}.rs, protocol/fixtures/ and the legacy oracle Sketch.h under corpus (recorded, not re-run; none is corpus/expected-values and none carries the answer to this derivation)
 packet: sha256 e401dc316c07
 calls: 1 of ~3 for WP-1 (session 01a0a3ea-9d99-7863-8ff6-8087e5e2bc86 recorded for followup)
 verdict: n/a (derive)
@@ -34,7 +34,7 @@ Labels below: **[Proved]** mathematics; **[Numeric]** shown computation; **[Sour
 - **[Inference] Determinism:** use immutable `F0`, the same resolved input, fixed numerical policy, and fixed serialization. Never transport from the previously published frame.
 - **[Inference] Same face:** identity means accepted lineage or accepted semantic resolution—not similarity of normals. A world-normal reversal alone neither destroys identity nor determines the face’s complete rigid motion.
 
-**[Source]** The authored basis must be carried forward: Rust deliberately preserves even its non-standard named-plane bases. [plane.rs](/Users/andrejvysny/workspace/OneCAD/src-tauri/crates/onecad-core/src/sketch/plane.rs:35)
+**[Source]** The authored basis must be carried forward: Rust deliberately preserves even its non-standard named-plane bases. [plane.rs](/Users/andrejvysny/workspace/OneCAD/crates/onecad-core/src/sketch/plane.rs:35)
 
 ## 3. Predicates and epsilon derivation
 

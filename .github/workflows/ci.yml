@@ -60,6 +60,10 @@ jobs:
         run: bun run build
       - name: Test
         run: bun run test
+      - name: Rust dependency boundaries
+        run: |
+          bun scripts/check-rust-layers.mjs
+          bun test scripts/tests/check-rust-layers.test.mjs
       - name: Modeling evidence manifest
         run: |
           node scripts/verify-modeling-coverage.mjs
@@ -185,10 +189,10 @@ jobs:
         # `-p`, not `--workspace`: the app crate's build script requires a staged
         # sidecar (bundle.externalBin) and pulls in GTK/WebKitGTK on Linux.
         # `--workspace` is the macOS lane's job.
-        working-directory: src-tauri
+        working-directory: .
         run: cargo test -p onecad-kernelbench
       - name: T0 campaign, both backends
-        working-directory: src-tauri
+        working-directory: .
         env:
           ONECAD_KERNELBENCH_RUNNER: /home/github-runner/worker-build/8.0.1/onecad-kernelbench-runner
         run: |
@@ -347,7 +351,7 @@ jobs:
     runs-on: macos-14
     defaults:
       run:
-        working-directory: src-tauri
+        working-directory: .
     steps:
       - uses: actions/checkout@v4
       - name: Install worker dependencies
@@ -382,7 +386,7 @@ jobs:
         run: rustup component add rustfmt clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: .
       - name: fmt
         run: cargo fmt --all --check
       - name: clippy
@@ -399,13 +403,13 @@ jobs:
           set +e
           cargo run -p onecad-kernelbench -- run \
             --suite fillet/foundation --preset t0 --backend both \
-            --out-dir ../worker/build-8.0.1-rust/kernelbench-t0
+            --out-dir worker/build-8.0.1-rust/kernelbench-t0
           bench_exit=$?
           set -e
           report_exit=0
           cargo run -p onecad-kernelbench -- report \
-            ../worker/build-8.0.1-rust/kernelbench-t0/results.jsonl \
-            --json ../worker/build-8.0.1-rust/kernelbench-t0/summary.json || report_exit=$?
+            worker/build-8.0.1-rust/kernelbench-t0/results.jsonl \
+            --json worker/build-8.0.1-rust/kernelbench-t0/summary.json || report_exit=$?
           if [ "$bench_exit" -eq 0 ]; then
             exit "$report_exit"
           fi
@@ -550,7 +554,7 @@ jobs:
         # bundle; the two must not drift. Rationale: docs/PACKAGING.md § 0.
         run: |
           set -euo pipefail
-          seed="src-tauri/target/release/bundle/macos/onecad.app"
+          seed="target/release/bundle/macos/onecad.app"
           scripts/bundle-dylibs.sh "$seed"
           triple="$(rustc -Vv | sed -n 's/^host: //p')"
           staged="src-tauri/binaries/onecad-worker-$triple"
@@ -576,7 +580,7 @@ jobs:
       - name: Restore bundled dylibs without rewriting worker
         run: |
           set -euo pipefail
-          app="src-tauri/target/release/bundle/macos/onecad.app"
+          app="target/release/bundle/macos/onecad.app"
           mkdir -p "$app/Contents/Frameworks"
           cp -R "$RUNNER_TEMP/onecad-frameworks/." "$app/Contents/Frameworks/"
           codesign --force --sign - "$app"
@@ -586,7 +590,7 @@ jobs:
           results="$RUNNER_TEMP/tauri-composition-results"
           relocated="$RUNNER_TEMP/relocated-onecad"
           mkdir -p "$results" "$relocated"
-          mv src-tauri/target/release/bundle/macos/onecad.app "$relocated/onecad.app"
+          mv target/release/bundle/macos/onecad.app "$relocated/onecad.app"
           app="$relocated/onecad.app"
           worker="$app/Contents/MacOS/onecad-worker"
           expected="$(bun -e 'console.log(JSON.parse(await Bun.file(process.argv[1]).text()).binarySha256)' src-tauri/binaries/onecad-worker-manifest.json)"

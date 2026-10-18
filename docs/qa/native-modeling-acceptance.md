@@ -14,7 +14,7 @@ ONECAD_OCCT_ROOT="$HOME/.onecad-occt/8.0.1" scripts/build-worker.sh Release
 bun run tauri build --debug --bundles app --config src-tauri/tauri.native-qa.conf.json
 ```
 
-The resulting app is `src-tauri/target/debug/bundle/macos/OneCAD QA.app`.
+The resulting app is `target/debug/bundle/macos/OneCAD QA.app`.
 The configuration uses bundle identifier `com.andrejvysny.onecad.nativeqa`:
 app data, autosaves, recent-file history and the default library live under
 `~/Library/Application Support/com.andrejvysny.onecad.nativeqa`.

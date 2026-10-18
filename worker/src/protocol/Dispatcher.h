@@ -65,6 +65,32 @@ struct HandlerContext {
     // so a step reported Ok behind one would have Rust publish a lineage it never
     // received (SCHEMA §3.4 / §7.2). See PlanExecutor::execute_ops.
     std::function<bool()> last_emit_substituted;
+    // Crash-journal hook (in-process library only; empty in the sidecar and in
+    // every test): an ExecutePlan handler calls it synchronously, on the kernel
+    // thread, before each op's work starts. `position` is the op's index in
+    // `args.ops` (== its `prefixHashes` index), NOT its stepIndex: an
+    // incremental plan starts at stepIndex k > 0. See JournalHooks below.
+    std::function<void(std::uint64_t step_index, std::size_t position, const std::string& op_id)>
+        op_begin = {};
+};
+
+// Crash-journal hooks for an IN-PROCESS host (capi/onecad_worker.h, P0.3
+// ONECAD-258). In-process a crash inside OCCT kills the host, and frames still
+// in the socket buffer die with it, so the host cannot attribute the crash from
+// the frames it managed to read. These run synchronously on the kernel thread:
+// whatever the host records in them is on record before the work they name
+// starts. `job_begin` at dequeue, `job_end` after the handler returned (before
+// its terminal frame is written). Kernel lane only. Set before run().
+// `plan_op_begin` carries the op's own `prefixHashes[position]` (falling back to
+// `expectedBaseHash` when the array is short, like Rust's plan_op_keys), read
+// from THIS job's args, so the host can key the crash circuit
+// (prefixHash|opId|fingerprint) without pre-arming anything per plan.
+struct JournalHooks {
+    std::function<void(std::uint64_t req_id, const std::string& verb)> job_begin;
+    std::function<void(std::uint64_t req_id, std::uint64_t step_index, std::size_t position,
+                       const std::string& op_id, const std::string& prefix_hash)>
+        plan_op_begin;
+    std::function<void(std::uint64_t req_id, const std::string& verb)> job_end;
 };
 
 // A handler maps a request to its single terminal response. `bin` is the
@@ -101,6 +127,15 @@ public:
     // unsolicited first frame (SCHEMA §6, seq 0) before the reader loop starts.
     // Returns the process exit code (0/2).
     int run(int in_fd, int out_fd, const Envelope* hello = nullptr);
+
+    // Close the reader fd if no loop has closed it yet — exactly-once with the
+    // shutdown path's own close (same atomic exchange). Call only after run()
+    // returned. Used by the in-process library entry, which owns both fds
+    // (capi/onecad_worker.h); the sidecar never calls it.
+    void close_input();
+
+    // Install the in-process crash-journal hooks. Before run() only.
+    void set_journal_hooks(JournalHooks hooks) { journal_ = std::move(hooks); }
 
     // Execute a single request synchronously in-process, no threads/fds.
     // Used by --selftest. Returns the terminal response.
@@ -143,7 +178,8 @@ private:
                      std::function<bool()> substituted = {});
 
     // Close stdin once, from whichever loop first observes a shutdown, to
-    // unblock the blocking reader.
+    // unblock the blocking reader. In the in-process library it only
+    // shutdown(SHUT_RD)s a socket and leaves the close to close_input(): see .cpp.
     void close_reader_fd();
 
     void kernel_loop(int out_fd);
@@ -226,6 +262,9 @@ private:
     // ATOMIC because more than one loop can observe it: `exchange(-1)` makes the
     // close happen exactly once even if the kernel and status threads race.
     std::atomic<int> in_fd_{-1};
+
+    // Read-only once run() starts (set_journal_hooks is before-run only).
+    JournalHooks journal_;
 };
 
 }  // namespace onecad::protocol

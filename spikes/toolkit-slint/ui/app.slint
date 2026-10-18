@@ -1,0 +1,238 @@
+// OneCAD Slint toolkit spike: window chrome, native menu, viewport host.
+import { Tokens } from "tokens.slint";
+import { Icons, Icon } from "icons.slint";
+import { BodyTree, BodyRow, Inspector, FloatingToolbar, NavPill, StatusBar, ToolButton, Theme } from "panels.slint";
+import { DimensionChip } from "dimension.slint";
+
+export { Theme, BodyRow }
+
+export component AppWindow inherits Window {
+    title: "OneCAD — NEMA";
+    preferred-width: 1300px;
+    preferred-height: 864px;
+    min-width: 900px;
+    min-height: 600px;
+    background: Tokens.panel;
+    in property <string> ui-font;
+    default-font-family: root.ui-font;
+    in property <length> left-width: 220px;
+    in property <length> right-width: 258px;
+    // Profiling switch: hides the panels and floating toolbars (viewport + chip only).
+    in property <bool> show-chrome: true;
+
+    // Viewport texture and its requested size in physical pixels.
+    in property <image> viewport-image;
+    out property <int> vp-phys-width: vp.width / 1phx;
+    out property <int> vp-phys-height: vp.height / 1phx;
+    out property <length> vp-width: vp.width;
+    out property <length> vp-height: vp.height;
+    out property <length> vp-x: vp.absolute-position.x;
+    out property <length> vp-y: vp.absolute-position.y;
+
+    in property <[BodyRow]> bodies;
+    in property <string> sel-name;
+    in property <[{label: string, value: string}]> sel-props;
+    in property <[string]> dim-history;
+    in property <string> status: "Ready";
+    in property <bool> ortho;
+    in property <string> fov: "FOV 40°";
+    in property <string> cursor: "X      —  Y      —  Z   0.00 mm";
+    in property <bool> doc-dirty;
+
+    // Dimension chip anchored to a projected world point (viewport logical coordinates).
+    in property <bool> dim-visible: true;
+    in property <length> dim-x;
+    in property <length> dim-y;
+    in-out property <string> dim-text <=> chip.text;
+    in property <string> dim-preview;
+    in property <bool> dim-error;
+    out property <bool> dim-focused: chip.focused;
+
+    callback body-clicked(int);
+    callback body-toggle(int);
+    callback menu(string);
+    callback vp-down(int, length, length, bool);
+    callback vp-move(length, length);
+    callback vp-up();
+    callback vp-hover(length, length);
+    callback vp-scroll(length, length, length, length, bool, bool) -> bool;
+    callback vp-gesture(int, float, float, length, length);
+    callback dim-edited(string);
+    callback dim-commit(string);
+    callback dim-cancel();
+    callback dim-key(string, bool, bool);
+
+    public function dim-text-undo() { chip.text-undo(); }
+    public function dim-text-redo() { chip.text-redo(); }
+    public function dim-begin() { chip.begin(); }
+    public function dim-end() { chip.end(); }
+
+    MenuBar {
+        Menu {
+            title: "File";
+            MenuItem { title: "Open…"; shortcut: @keys(Control + O); enabled: false; }
+            MenuItem { title: "Save"; shortcut: @keys(Control + S); activated => { root.menu("save"); } }
+        }
+        Menu {
+            title: "Edit";
+            MenuItem { title: "Undo"; shortcut: @keys(Control + Z); activated => { root.menu("undo"); } }
+            MenuItem { title: "Redo"; shortcut: @keys(Control + Shift + Z); activated => { root.menu("redo"); } }
+            MenuSeparator { }
+            MenuItem { title: "Edit Dimension"; shortcut: @keys(Control + D); activated => { root.menu("edit-dim"); } }
+        }
+        Menu {
+            title: "View";
+            MenuItem { title: "Home View"; shortcut: @keys(Control + Shift + H); activated => { root.menu("home"); } }
+            MenuItem { title: "Fit All"; shortcut: @keys(Control + Shift + F); activated => { root.menu("fit"); } }
+            MenuItem { title: "Toggle Orthographic"; shortcut: @keys(Control + Shift + O); activated => { root.menu("ortho"); } }
+            MenuSeparator { }
+            MenuItem { title: "Run Orbit Benchmark"; shortcut: @keys(Control + Shift + B); activated => { root.menu("bench"); } }
+            MenuItem { title: "Report Metrics"; shortcut: @keys(Control + Shift + R); activated => { root.menu("report"); } }
+        }
+    }
+
+    VerticalLayout {
+        spacing: 0px;
+        // Custom title strip under the transparent native title bar (traffic lights stay native).
+        Rectangle {
+            height: 44px;
+            background: Tokens.titlebar;
+            accessible-role: AccessibleRole.window-title-bar;
+            HorizontalLayout {
+                padding-left: 86px;
+                spacing: 8px;
+                alignment: start;
+                Text {
+                    text: "File";
+                    font-size: 13px;
+                    color: Tokens.ink-3;
+                    vertical-alignment: center;
+                }
+                Rectangle { width: 10px; }
+                Text {
+                    text: "OneCAD — NEMA";
+                    font-size: 13px;
+                    font-weight: 600;
+                    color: Tokens.titlebar-text;
+                    vertical-alignment: center;
+                }
+                Rectangle {
+                    width: 7px;
+                    height: 7px;
+                    y: (parent.height - 7px) / 2;
+                    border-radius: 3.5px;
+                    background: root.doc-dirty ? Tokens.ink-5 : transparent;
+                }
+            }
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: Tokens.border;
+            }
+        }
+        HorizontalLayout {
+            spacing: 0px;
+            if root.show-chrome: BodyTree {
+                width: root.left-width;
+                bodies: root.bodies;
+                body-clicked(i) => { root.body-clicked(i); }
+                body-toggle(i) => { root.body-toggle(i); }
+            }
+            vp := Rectangle {
+                horizontal-stretch: 1;
+                background: Tokens.canvas;
+                accessible-role: AccessibleRole.image;
+                accessible-label: "3D viewport";
+                Image {
+                    width: 100%;
+                    height: 100%;
+                    source: root.viewport-image;
+                    image-fit: fill;
+                }
+                gesture := ScaleRotateGestureHandler {
+                    started => { root.vp-gesture(0, self.scale, self.rotation / 1deg, self.center.x, self.center.y); }
+                    updated => { root.vp-gesture(1, self.scale, self.rotation / 1deg, self.center.x, self.center.y); }
+                    ended => { root.vp-gesture(2, self.scale, self.rotation / 1deg, self.center.x, self.center.y); }
+                    cancelled => { root.vp-gesture(2, self.scale, self.rotation / 1deg, self.center.x, self.center.y); }
+                    touch := TouchArea {
+                        pointer-event(e) => {
+                            if (e.kind == PointerEventKind.down) {
+                                root.vp-down(e.button == PointerEventButton.left ? 0 : e.button == PointerEventButton.right ? 1 : 2,
+                                    self.mouse-x, self.mouse-y, e.modifiers.shift);
+                            } else if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
+                                root.vp-up();
+                            }
+                        }
+                        moved => { root.vp-move(self.mouse-x, self.mouse-y); }
+                        changed mouse-x => { root.vp-hover(self.mouse-x, self.mouse-y); }
+                        changed mouse-y => { root.vp-hover(self.mouse-x, self.mouse-y); }
+                        scroll-event(e) => {
+                            if (root.vp-scroll(e.delta-x, e.delta-y, self.mouse-x, self.mouse-y, e.modifiers.shift, e.modifiers.control)) {
+                                return accept;
+                            }
+                            reject
+                        }
+                    }
+                }
+                if root.show-chrome: FloatingToolbar {
+                    x: (parent.width - self.width) / 2;
+                    y: 13px;
+                }
+                if root.show-chrome: Rectangle {
+                    x: parent.width - 50px;
+                    y: 113px;
+                    width: 34px;
+                    height: side.preferred-height;
+                    side := VerticalLayout {
+                        spacing: 10px;
+                        alignment: start;
+                        ToolButton { icon: Icons.iso; label: "View cube"; }
+                        ToolButton { icon: Icons.stack; label: "Display mode"; active: true; }
+                        ToolButton { icon: Icons.fit; label: "Fit"; clicked => { root.menu("fit"); } }
+                    }
+                }
+                if root.show-chrome: NavPill {
+                    x: 9px;
+                    y: parent.height - self.height - 13px;
+                    home => { root.menu("home"); }
+                    fit => { root.menu("fit"); }
+                }
+                if root.dim-visible: Rectangle {
+                    // Leader dot exactly on the anchor, chip offset above-right of it.
+                    x: root.dim-x - 4px;
+                    y: root.dim-y - 4px;
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 4px;
+                    background: Tokens.accent;
+                    border-width: 1.5px;
+                    border-color: Tokens.overlay-halo;
+                }
+                chip := DimensionChip {
+                    visible: root.dim-visible;
+                    x: root.dim-x + 14px;
+                    y: root.dim-y - 46px;
+                    preview: root.dim-preview;
+                    error: root.dim-error;
+                    edited(t) => { root.dim-edited(t); }
+                    commit(t) => { root.dim-commit(t); }
+                    cancel => { root.dim-cancel(); }
+                    key(t, m, c) => { root.dim-key(t, m, c); }
+                }
+            }
+            if root.show-chrome: Inspector {
+                width: root.right-width;
+                name: root.sel-name;
+                props: root.sel-props;
+                history: root.dim-history;
+            }
+        }
+        if root.show-chrome: StatusBar {
+            status: root.status;
+            ortho: root.ortho;
+            fov: root.fov;
+            cursor: root.cursor;
+            set-ortho(o) => { root.menu(o ? "ortho-on" : "ortho-off"); }
+        }
+    }
+}

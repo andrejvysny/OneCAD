@@ -32,6 +32,8 @@
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 
+#include "util/Log.h"
+
 #include "elementmap/Scoring.h"
 
 namespace onecad::elementmap {
@@ -532,7 +534,7 @@ void ElementMapPartition::apply_history(const std::string& body_id,
                 if (std::getenv("ONECAD_LADDER_DEBUG")) {
                     std::string contrib;
                     for (const auto& [n, v] : sr.contributions) contrib += n + "=" + std::to_string(v) + " ";
-                    std::fprintf(stderr, "[ladder] %s image %zu kind=%d modified=%d score=%.4f {%s}\n",
+                    ::onecad::log::emit_raw(::onecad::log::Level::Debug, "[ladder] %s image %zu kind=%d modified=%d score=%.4f {%s}\n",
                                  id.c_str(), k, static_cast<int>(imgs[k].ShapeType()),
                                  successors[k].modified ? 1 : 0, score, contrib.c_str());
                 }

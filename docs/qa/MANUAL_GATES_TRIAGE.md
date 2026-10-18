@@ -55,7 +55,7 @@ down from ~112.
 | concave pocket / cylinder cap edge → auto OFF | K | GAP-K1 |
 | radius-too-large → ✓ blocked with named OCCT reason | K | COVERED (diagnostic) `worker/tests/test_fillet_diagnostics.cpp:37` |
 | …and the selected **edges are kept** after refusal | H | GAP-H1 |
-| fillet preview == commit | H | COVERED `src-tauri/tests/preview_edge_shell.rs:610,615` |
+| fillet preview == commit | H | COVERED `crates/onecad-app/tests/preview_edge_shell.rs:610,615` |
 | preview/commit diagnostics agree | K | COVERED `worker/tests/test_fillet_diagnostics.cpp:218` |
 | `h` = Home view (chamfer tool id dead) | F | GAP-F1 |
 | sketch fillet r=5 trims + rounds, no OverConstrained badge | F | COVERED `e2e/sketch-fillet.spec.ts:101` |
@@ -104,7 +104,7 @@ down from ~112.
 | edit sketch under ARMED extrude → tool cancels with hint | F | GAP-F8 |
 | stale region → named error | H | GAP-H6 |
 | reopen file → regions selectable + extrude works | H | GAP-H7 |
-| push/pull on a face-sketch grows host (Add) / pockets (Cut) | H | COVERED `src-tauri/tests/sketch_regions.rs:413` |
+| push/pull on a face-sketch grows host (Add) / pockets (Cut) | H | COVERED `crates/onecad-app/tests/sketch_regions.rs:413` |
 | tube test: rect + inner circle → preview TUBE; hole click ≠ region select | F | GAP-F9 |
 
 ## 4. Sketch (archived §0a, §0b, §7, §8, §13) → K + F
@@ -116,7 +116,7 @@ down from ~112.
 | arc start drag keeps the endpoint | K | COVERED `test_sketch_arc_endpoints.cpp:268` |
 | extend (⇧T) grows to exactly the crossing, keeps H/V | F | GAP-F11 |
 | direct manipulation: line translate / circle ring resize / arc endpoint | K | COVERED `worker/tests/test_sketch_drag_kinds.cpp:172`, `test_sketch_ellipse.cpp:80` |
-| …and it SURVIVES reopen (the silent-revert bug) | H | COVERED `src-tauri/tests/sketch_direct_manipulation.rs` |
+| …and it SURVIVES reopen (the silent-revert bug) | H | COVERED `crates/onecad-app/tests/sketch_direct_manipulation.rs` |
 | Esc mid-drag restores exact start positions | F | COVERED `e2e/sketch-drag.spec.ts:33` (partial) / GAP-F12 (Esc path) |
 | undo during a drag is REFUSED, not swallowed | F | GAP-F13 |
 | live dimension chips: zoom-adaptive rounding, type `50` Tab `30` | F | COVERED `e2e/live-dim-rect.spec.ts`, `e2e/live-dim-circle.spec.ts` |
@@ -124,13 +124,13 @@ down from ~112.
 | polar tracking locks exactly 45°, toggles off | F | GAP-F15 |
 | snap radius S/M/L survives reload | F | GAP-F16 |
 | endpoint snap beats rounding; hover hint then snap | F | COVERED `e2e/sketch-snap.spec.ts:34` |
-| conflict naming: second clashing dimension refused, names the existing one | K | COVERED `src-tauri/tests/sketch_conflicts.rs:81` |
+| conflict naming: second clashing dimension refused, names the existing one | K | COVERED `crates/onecad-app/tests/sketch_conflicts.rs:81` |
 | over-constrain rejection NAMES the clashing constraint | F | GAP-F17 |
 | concentric / equal auto-inference; ellipses never participate | K | GAP-K2 |
-| constraints tangent / equal / midpoint drop DOF | H | COVERED `src-tauri/tests/sketch_constraints.rs:140` |
+| constraints tangent / equal / midpoint drop DOF | H | COVERED `crates/onecad-app/tests/sketch_constraints.rs:140` |
 | trim hover red ghost, click removes the segment | F | COVERED `e2e/sketch-trim.spec.ts:71` |
 | offset ±3 both sides; inner collapse refused loudly | F | COVERED `e2e/sketch-offset.spec.ts:75` (offset) / GAP-F18 (collapse refusal) |
-| construction: X toggles dashed, kills region, works as revolve axis, persists | K+H | COVERED `worker/tests/test_sketch_construction.cpp:92`, `src-tauri/tests/sketch_construction.rs:161` |
+| construction: X toggles dashed, kills region, works as revolve axis, persists | K+H | COVERED `worker/tests/test_sketch_construction.cpp:92`, `crates/onecad-app/tests/sketch_construction.rs:161` |
 | tools P / ⇧R / S / G / O author entities | F | COVERED `e2e/live-dim-*.spec.ts`, `e2e/sketch-*.spec.ts` |
 | marquee window vs crossing, Shift adds, Esc cancels | F | COVERED `e2e/marquee.spec.ts:104,131` |
 | editing sketch A → dblclick B edits B; rapid A→B→A settles | F | GAP-F19 |
@@ -176,14 +176,14 @@ down from ~112.
 | gizmo arrows / quads / rings drag; ring re-types to Rotate | F | COVERED `e2e/transform-body.spec.ts:385,410,434` |
 | Alt-drag or [Copy] duplicates | F | COVERED `transform-body.spec.ts:470,492` |
 | translate is exact | K | COVERED `worker/tests/test_transform_body.cpp:130` |
-| second move FOLDS into the same row; dblclick re-edits | H | COVERED `src-tauri/tests/transform_body.rs` |
+| second move FOLDS into the same row; dblclick re-edits | H | COVERED `crates/onecad-app/tests/transform_body.rs` |
 | editing a transform under a downstream fillet ⇒ fillet NeedsRepair | H | GAP-H11 |
 | [Align] two-pick sets a face flush | F | GAP-F23 |
 | linear / circular pattern, mirror ±fuse | K+H | COVERED `worker/tests/test_m6a_ops.cpp:173,267,289`, `src-tauri/tests/breadth_ops.rs:499,544,586` |
 | shell ladder / hollow preview | K | COVERED `worker/tests/test_m6a_ops.cpp:84` |
-| boolean 3 modes preview == commit | H | COVERED `src-tauri/tests/preview_boolean.rs:495,511` |
+| boolean 3 modes preview == commit | H | COVERED `crates/onecad-app/tests/preview_boolean.rs:495,511` |
 | boolean commit two bodies → target | F | COVERED `e2e/boolean-preview.spec.ts:276` |
-| revolve preview == commit; Cut subtracts in BOTH | H | COVERED `src-tauri/tests/preview_revolve.rs:441,555` |
+| revolve preview == commit; Cut subtracts in BOTH | H | COVERED `crates/onecad-app/tests/preview_revolve.rs:441,555` |
 | revolve 360° volume (Pappus) | H | COVERED `revolve_ops.rs:564` |
 | revolve axis pick → drag → Enter commits | F | COVERED `e2e/revolve-preview.spec.ts:37`, `e2e/revolve-commit.spec.ts:33` |
 
@@ -193,7 +193,7 @@ down from ~112.
 | --- | --- | --- |
 | face click arms hole; Ø chip authors diameter | F | COVERED `e2e/hole.spec.ts:141,149,168` |
 | standards picker M6 → Ø6.4; counterbore; countersink | K+F | COVERED `worker/tests/test_hole_op.cpp:172,190`, `e2e/hole.spec.ts:208` |
-| through-all on a stepped part | K+H | COVERED `test_hole_op.cpp:143`, `src-tauri/tests/hole_ops.rs:521` |
+| through-all on a stepped part | K+H | COVERED `test_hole_op.cpp:143`, `crates/onecad-app/tests/hole_ops.rs:521` |
 | re-pick point while armed; re-edit type switch | F | COVERED `e2e/hole.spec.ts:187` |
 | datum create → offset ghost → quad + label + tree | F | COVERED `e2e/datum-create.spec.ts:24` |
 | sketch ON a datum → extrude lands 10 mm up | H | COVERED `src-tauri/tests/datum_planes.rs:208` |

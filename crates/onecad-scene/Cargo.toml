@@ -1,0 +1,12 @@
+[package]
+name = "onecad-scene"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Bounded immutable CPU scene, captured cameras and synchronous CAD picking"
+
+[dependencies]
+onecad-core = { workspace = true }
+onecad-protocol = { workspace = true }
+thiserror = { workspace = true }
+glam = "0.30"

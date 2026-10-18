@@ -75,6 +75,73 @@ inline void write_timestamp(char* buf, size_t n) {
     std::snprintf(buf, n, "%s.%03lld", date, static_cast<long long>(ms));
 }
 
+// Optional in-process sink (P0.3 in-process worker spike, ONECAD-258). When the
+// worker runs as a library (worker/src/capi/onecad_worker.h) the host installs a
+// callback and every line goes there INSTEAD of stderr — formatted message only,
+// no timestamp/level prefix, no trailing newline (the host adds its own). Unset
+// (the sidecar and every test binary) leaves emit() byte-identical to before.
+// PROCESS-GLOBAL: one sink per process; a second concurrent library worker that
+// installs its own replaces the first's (see capi/onecad_worker.cpp).
+using SinkFn = void (*)(int level, const char* msg, void* ctx);
+
+struct SinkSlot {
+    SinkFn fn = nullptr;
+    void* ctx = nullptr;
+};
+
+// Guarded by log_mutex(), like every emitted line.
+inline SinkSlot& sink_storage() {
+    static SinkSlot slot;
+    return slot;
+}
+
+inline void set_sink(SinkFn fn, void* ctx) {
+    std::lock_guard<std::mutex> guard(log_mutex());
+    sink_storage() = SinkSlot{fn, ctx};
+}
+
+inline bool sink_installed() {
+    std::lock_guard<std::mutex> guard(log_mutex());
+    return sink_storage().fn != nullptr;
+}
+
+inline void set_level(Level lvl) {
+    min_level_storage().store(static_cast<int>(lvl), std::memory_order_relaxed);
+}
+
+// Formats the message and hands it to the installed sink, one call per line
+// with blank lines dropped (so passthrough callers like emit_raw that carry
+// their own '\n' never produce blank host lines). Caller holds log_mutex() and
+// has checked that a sink is installed.
+inline void deliver_to_sink(Level lvl, const char* fmt, std::va_list ap) {
+    char stack_buf[1024];
+    std::va_list ap2;
+    va_copy(ap2, ap);
+    const int n = std::vsnprintf(stack_buf, sizeof(stack_buf), fmt, ap2);
+    va_end(ap2);
+    std::string heap;
+    const char* msg = stack_buf;
+    std::size_t len = n > 0 ? static_cast<std::size_t>(n) : 0;
+    if (n >= static_cast<int>(sizeof(stack_buf))) {
+        heap.resize(len + 1);
+        std::vsnprintf(heap.data(), heap.size(), fmt, ap);
+        msg = heap.c_str();
+    }
+    // One sink call per line, blank lines dropped: the ABI promises the host
+    // newline-free lines (OCCT messenger texts are often multi-line banners).
+    const SinkSlot slot = sink_storage();
+    std::string line;
+    for (std::size_t i = 0; i <= len; ++i) {
+        if (i == len || msg[i] == '\n') {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!line.empty()) slot.fn(static_cast<int>(lvl), line.c_str(), slot.ctx);
+            line.clear();
+        } else {
+            line.push_back(msg[i]);
+        }
+    }
+}
+
 // Single entry point. Always writes to stderr and flushes. printf-style; the
 // format(printf) attribute enables compile-time format checking and avoids the
 // -Wformat-security warning a non-literal fprintf passthrough would raise.
@@ -85,6 +152,13 @@ __attribute__((format(printf, 2, 3))) inline void emit(Level lvl, const char* fm
         return;
     }
     std::lock_guard<std::mutex> guard(log_mutex());
+    if (sink_storage().fn != nullptr) {
+        std::va_list ap;
+        va_start(ap, fmt);
+        deliver_to_sink(lvl, fmt, ap);
+        va_end(ap);
+        return;
+    }
     char ts[32];
     write_timestamp(ts, sizeof(ts));
     std::fprintf(stderr, "[%s] %-5s ", ts, level_name(lvl).data());
@@ -94,6 +168,21 @@ __attribute__((format(printf, 2, 3))) inline void emit(Level lvl, const char* fm
     va_end(ap);
     std::fputc('\n', stderr);
     std::fflush(stderr);
+}
+
+// Verbatim passthrough for legacy raw `fprintf(stderr, ...)` diagnostics: with
+// no sink installed it writes EXACTLY the bytes the old call wrote (no prefix,
+// no level filter); with a sink it routes the line there at `lvl`.
+__attribute__((format(printf, 2, 3))) inline void emit_raw(Level lvl, const char* fmt, ...) {
+    std::lock_guard<std::mutex> guard(log_mutex());
+    std::va_list ap;
+    va_start(ap, fmt);
+    if (sink_storage().fn != nullptr) {
+        deliver_to_sink(lvl, fmt, ap);
+    } else {
+        std::vfprintf(stderr, fmt, ap);
+    }
+    va_end(ap);
 }
 
 // Reads ONECAD_WORKER_LOG once (error|warn|info|debug, case-insensitive) and

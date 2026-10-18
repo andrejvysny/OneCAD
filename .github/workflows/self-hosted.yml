@@ -159,7 +159,7 @@ jobs:
           echo "tracked files  : $(git ls-files | wc -l)"
           for f in scripts/build-pinned-occt.sh scripts/occt-fingerprint.sh \
                    scripts/build-worker.sh worker/CMakeLists.txt \
-                   src-tauri/Cargo.toml bench/robustness/baselines/digests.json; do
+                   Cargo.toml Cargo.lock src-tauri/Cargo.toml bench/robustness/baselines/digests.json; do
             [ -e "$f" ] && echo "present: $f" || echo "MISSING: $f"
           done
 
@@ -431,11 +431,11 @@ jobs:
         # Deliberately -p, not --workspace: the app crate's build script requires
         # a staged sidecar (bundle.externalBin) and pulls in GTK/WebKitGTK on
         # Linux. Neither is needed to exercise the benchmark supervisor.
-        working-directory: src-tauri
+        working-directory: .
         run: cargo test -p onecad-kernelbench
 
       - name: T0 campaign, both backends
-        working-directory: src-tauri
+        working-directory: .
         env:
           ONECAD_KERNELBENCH_RUNNER: /home/github-runner/worker-build/8.0.1/onecad-kernelbench-runner
         run: |

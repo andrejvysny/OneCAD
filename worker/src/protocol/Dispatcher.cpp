@@ -1,6 +1,8 @@
 #include "protocol/Dispatcher.h"
 
+#include <cerrno>
 #include <chrono>
+#include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
 #include <utility>
@@ -144,6 +146,23 @@ std::optional<Dispatcher::Inflight> Dispatcher::inflight_snapshot() const {
     return out;
 }
 
+namespace {
+
+// The crash-circuit prefix token of ExecutePlan op `position`, by the same rule
+// as Rust's plan_op_keys (src-tauri/src/worker/manager.rs): prefixHashes[i],
+// else expectedBaseHash. In-process journal only (JournalHooks).
+std::string journal_prefix_hash(const nlohmann::json& args, std::size_t position) {
+    if (!args.is_object()) return {};
+    const auto ph = args.find("prefixHashes");
+    if (ph != args.end() && ph->is_array() && position < ph->size() && (*ph)[position].is_string()) {
+        return (*ph)[position].get<std::string>();
+    }
+    const auto base = args.find("expectedBaseHash");
+    return (base != args.end() && base->is_string()) ? base->get<std::string>() : std::string{};
+}
+
+}  // namespace
+
 Envelope Dispatcher::execute(const Job& job, const std::function<void(Envelope&)>& emit,
                              std::function<bool()> substituted) {
     const Envelope& req = job.env;
@@ -168,7 +187,16 @@ Envelope Dispatcher::execute(const Job& job, const std::function<void(Envelope&)
         },
         emit,
         std::move(substituted),
+        {},
     };
+    if (journal_.plan_op_begin) {
+        // `req` outlives the handler call that invokes this synchronously.
+        ctx.op_begin = [this, &req](std::uint64_t step_index, std::size_t position,
+                                    const std::string& op_id) {
+            journal_.plan_op_begin(req.id, step_index, position, op_id,
+                                   journal_prefix_hash(req.args, position));
+        };
+    }
 
     const auto started = std::chrono::steady_clock::now();
     auto elapsed_ms = [started] {
@@ -264,6 +292,7 @@ void Dispatcher::kernel_loop(int out_fd) {
         // terminal frame is written, so the status thread reports exactly the job
         // this lane is actually running.
         inflight_begin(job);
+        if (journal_.job_begin) journal_.job_begin(job.env.id, job.env.verb);
         // Per-job, kernel-thread-local: ASSIGNED (not or-ed) on every emit, so it
         // always describes the LAST frame this job streamed — which is what the
         // producer asks about immediately after streaming it (SCHEMA §3.4).
@@ -275,6 +304,7 @@ void Dispatcher::kernel_loop(int out_fd) {
                 last_emit_substituted = !stamp_and_write(out_fd, e);
             },
             [&last_emit_substituted] { return last_emit_substituted; });
+        if (journal_.job_end) journal_.job_end(job.env.id, job.env.verb);
         {
             std::lock_guard<std::mutex> lk(tokens_mu_);
             tokens_.erase(job.env.id);
@@ -313,7 +343,25 @@ void Dispatcher::solver_loop(int out_fd) {
 }
 
 void Dispatcher::close_reader_fd() {
+#ifdef ONECAD_WORKER_LIBRARY
+    // In-process the fd NUMBER must stay reserved while run() is live: the
+    // reader holds it by value and may be inside (or about to re-enter) read(),
+    // retrying on EINTR. A close() here would let another thread of the HOST
+    // reuse the number at once (a second worker's socketpair, a file), and the
+    // reader would then read someone else's stream. shutdown(SHUT_RD) wakes the
+    // blocked read with EOF instead; close_input() closes after run() returned.
+    const int live = in_fd_.load(std::memory_order_acquire);
+    if (live < 0) return;
+    if (::shutdown(live, SHUT_RD) == 0 || errno != ENOTSOCK) return;
+    // A pipe cannot be shut down: only close() can wake its reader, with the
+    // hazard above (documented in capi/onecad_worker.h: pass a socket).
+#endif
     // Exactly once, whichever loop gets here first (`exchange` on the atomic).
+    const int fd = in_fd_.exchange(-1, std::memory_order_acq_rel);
+    if (fd >= 0) ::close(fd);
+}
+
+void Dispatcher::close_input() {
     const int fd = in_fd_.exchange(-1, std::memory_order_acq_rel);
     if (fd >= 0) ::close(fd);
 }
@@ -404,9 +452,39 @@ int Dispatcher::run(int in_fd, int out_fd, const Envelope* hello) {
         stamp_and_write(out_fd, h);
     }
 
-    std::thread kernel(&Dispatcher::kernel_loop, this, out_fd);
-    std::thread solver(&Dispatcher::solver_loop, this, out_fd);
-    std::thread status(&Dispatcher::status_loop, this, out_fd);
+    // Stops and joins the lanes on EVERY exit from run(), an exception included
+    // (a failed std::thread ctor, bad_alloc in the reader): a joinable
+    // std::thread destroyed during unwinding is std::terminate, which in the
+    // in-process library aborts the HOST app (P0.3 ONECAD-258). The normal path
+    // calls stop_and_join() explicitly, exactly where it always joined.
+    struct Lanes {
+        Dispatcher& d;
+        std::thread kernel, solver, status;
+        void stop_and_join() {
+            {
+                std::lock_guard<std::mutex> lk(d.queue_mu_);
+                d.kernel_stop_ = true;
+            }
+            d.queue_cv_.notify_all();
+            {
+                std::lock_guard<std::mutex> lk(d.solver_mu_);
+                d.solver_stop_ = true;
+            }
+            d.solver_cv_.notify_all();
+            {
+                std::lock_guard<std::mutex> lk(d.status_mu_);
+                d.status_stop_ = true;
+            }
+            d.status_cv_.notify_all();
+            if (kernel.joinable()) kernel.join();
+            if (solver.joinable()) solver.join();
+            if (status.joinable()) status.join();
+        }
+        ~Lanes() { stop_and_join(); }
+    } lanes{*this, {}, {}, {}};
+    lanes.kernel = std::thread(&Dispatcher::kernel_loop, this, out_fd);
+    lanes.solver = std::thread(&Dispatcher::solver_loop, this, out_fd);
+    lanes.status = std::thread(&Dispatcher::status_loop, this, out_fd);
 
     int exit_code = 0;
     for (;;) {
@@ -496,24 +574,7 @@ int Dispatcher::run(int in_fd, int out_fd, const Envelope* hello) {
     }
 
     // Drain + join both lanes.
-    {
-        std::lock_guard<std::mutex> lk(queue_mu_);
-        kernel_stop_ = true;
-    }
-    queue_cv_.notify_all();
-    {
-        std::lock_guard<std::mutex> lk(solver_mu_);
-        solver_stop_ = true;
-    }
-    solver_cv_.notify_all();
-    {
-        std::lock_guard<std::mutex> lk(status_mu_);
-        status_stop_ = true;
-    }
-    status_cv_.notify_all();
-    if (kernel.joinable()) kernel.join();
-    if (solver.joinable()) solver.join();
-    if (status.joinable()) status.join();
+    lanes.stop_and_join();
 
     return exit_code;
 }

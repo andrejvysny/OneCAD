@@ -1,40 +1,7 @@
-[workspace]
-resolver = "2"
-members = [
-    "crates/onecad-core",
-    "crates/onecad-protocol",
-    "crates/onecad-worker-stub",
-    "crates/onecad-regen",
-    "crates/onecad-kernelbench",
-    "crates/onecad-library",
-    "crates/onecad-library-ingest",
-]
-
-# Shared dependency versions for every workspace member. Individual crates
-# opt into features via `{ workspace = true, features = [...] }`.
-[workspace.dependencies]
-onecad-core = { path = "crates/onecad-core" }
-onecad-protocol = { path = "crates/onecad-protocol" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "2"
-uuid = { version = "1", features = ["v4", "serde"] }
-tracing = "0.1"
-# Dev-observability (DEV-OBSERVABILITY wave R): `env-filter` makes `RUST_LOG`
-# live, `json` backs the `logs/dev.jsonl` lane; `tracing-appender` provides the
-# non-blocking writer + its flush guard.
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-tracing-appender = "0.2"
-async-trait = "0.1"
-tokio = { version = "1", default-features = false }
-tokio-util = { version = "0.7", default-features = false }
-bytes = "1"
-zip = "2"
-sha2 = "0.10"
-
 [package]
 name = "onecad"
 version = "0.1.0"
+license = "MIT OR Apache-2.0"
 description = "OneCAD parametric CAD application (Tauri shell + Rust core)"
 authors = ["Andrej Vysny <vysnyandrej@gmail.com>"]
 edition = "2021"
@@ -43,6 +10,7 @@ edition = "2021"
 # Test artifact only. Production builds never compile or register either WDIO
 # plugin, and the E2E-only capability is supplied by tauri.e2e.conf.json.
 tauri-e2e = [
+    "onecad-app/composition-test",
     "dep:tauri-plugin-wdio",
     "dep:tauri-plugin-wdio-webdriver",
 ]
@@ -59,8 +27,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+onecad-app = { workspace = true }
 onecad-core = { workspace = true }
-onecad-library = { path = "crates/onecad-library" }
+onecad-library = { path = "../crates/onecad-library" }
 onecad-protocol = { workspace = true, features = ["client", "tracing"] }
 # Do not enable Tauri's `tracing` feature. In tauri-runtime-wry 2.11.x it makes
 # background `eval_script` synchronous; `AppHandle::emit` then waits for the main

@@ -208,11 +208,26 @@ StepAttributes read_step_attributes(const std::string& path, const StepReadPolic
 
     // Same prologue as `read_step`: register the norm + its knobs BEFORE the guard
     // snapshots them, and keep OCCT chatter off fd 1.
+    // Process-global OCCT state is touched from here to the end of the call
+    // (OcctStaticGuard.h); declared first so the guards restore under it.
+    // Bounded: a wedged sibling in-process worker must not wedge this one.
+    const BoundedLock occt_globals(occt_globals_mutex(), cancel);
+    if (!occt_globals.owns()) {
+        out.error = occt_globals.cancelled()
+                        ? std::string("XcafRead: cancelled")
+                        : occt_globals.busy_error("XcafRead", "occt_globals_mutex");
+        return out;
+    }
     STEPControl_Controller::Init();
     OcctMessengerGuard quiet;
     InterfaceStaticGuard knobs;
 
-    const std::lock_guard<std::mutex> lock(ocaf_mutex());
+    const BoundedLock lock(ocaf_mutex(), cancel);
+    if (!lock.owns()) {
+        out.error = lock.cancelled() ? std::string("XcafRead: cancelled")
+                                     : lock.busy_error("XcafRead", "ocaf_mutex");
+        return out;
+    }
     Handle(TDocStd_Document) doc;
     try {
         knobs.set_cstr("xstep.cascade.unit", policy.target_unit);

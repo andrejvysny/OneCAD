@@ -10,7 +10,7 @@ BOLTS — fastener dimension tables
 -------------------------------------------------------------------------
 
 Components: ISO 4762 / DIN 912 socket-head cap screw dimensions
-            (src-tauri/crates/onecad-library/src/tables/iso4762.rs,
+            (crates/onecad-library/src/tables/iso4762.rs,
              worker/src/ops/FastenerTables.cpp::iso4762_table())
             data/hex_socket.blt, class "hexsocketheadcap"
             Retrieved 2026-08-12
@@ -49,6 +49,149 @@ Notes:      Dimension values (M2–M12 where the standard defines them)
             for as long as that table shipped; it no longer does.)
 
 -------------------------------------------------------------------------
+Open CASCADE Technology (OCCT) 8.0.1 — geometry kernel
+-------------------------------------------------------------------------
+
+OneCAD makes use of, and is based on facilities provided by, the Open
+CASCADE Technology software (https://dev.opencascade.org,
+https://github.com/Open-Cascade-SAS/OCCT).
+
+Components: OCCT 8.0.1 shared libraries (libTK*.8.0.dylib), dynamically
+            linked by the onecad-worker sidecar. In the macOS app bundle
+            they are copied into Contents/Frameworks/ by
+            scripts/bundle-dylibs.sh and loaded via @rpath.
+            Built from source by scripts/build-pinned-occt.sh.
+
+License:    GNU Lesser General Public License, version 2.1 (LGPL-2.1),
+            with the Open CASCADE exception, version 1.0.
+            Verified from the installed artifact:
+              <OCCT prefix>/share/doc/opencascade/LICENSE_LGPL_21.txt
+              <OCCT prefix>/share/doc/opencascade/OCCT_LGPL_EXCEPTION.txt
+            Full LGPL-2.1 text: https://www.gnu.org/licenses/lgpl-2.1.html
+
+Source:     Unmodified upstream tag V8_0_1, commit
+            b8f597c677811d1f9f4d8a97f5ae2825c0353a42
+            (https://github.com/Open-Cascade-SAS/OCCT/archive/refs/tags/
+            V8_0_1.tar.gz), built shared with the options recorded in
+            share/onecad/occt-build.cmake by scripts/build-pinned-occt.sh.
+
+Relinking:  Users may replace the bundled OCCT libraries with a
+            compatible modified build (same major.minor ABI, 8.0.x) by
+            swapping the files in Contents/Frameworks/ and re-signing.
+
+-------------------------------------------------------------------------
+PlaneGCS — 2D geometric constraint solver (from FreeCAD Sketcher)
+-------------------------------------------------------------------------
+
+Components: worker/third_party/planegcs (vendored, with local stub headers
+            and additive setters; see worker/third_party/planegcs/
+            VENDOR.txt). Built as a STATIC library (add_library(planegcs
+            STATIC ...)) and statically linked into onecad-worker.
+
+Source:     FreeCAD, https://github.com/FreeCAD/FreeCAD
+            commit 3f49f3f05958c4a8f4c5b470adfebbc1503b3f45,
+            path src/Mod/Sketcher/App/planegcs
+
+Copyright:  (c) 2011 Konstantinos Poulios and FreeCAD contributors
+
+License:    GNU Lesser General Public License, version 2.1 or later
+            (LGPL-2.1-or-later), per SPDX headers in the vendored files.
+            Full text: worker/third_party/planegcs/LICENSE
+
+Relinking:  Because PlaneGCS is statically linked, LGPL-2.1 §6 applies:
+            the complete corresponding source of onecad-worker (OneCAD's
+            own code, MIT OR Apache-2.0) and of the modified PlaneGCS is
+            published in this repository together with its CMake build,
+            so recipients can modify PlaneGCS and rebuild/relink the
+            worker. See docs/design/native-ui/licensing.md.
+
+-------------------------------------------------------------------------
+Eigen — C++ linear algebra (header-only)
+-------------------------------------------------------------------------
+
+Components: Eigen 5.0.1 headers, compiled into onecad-worker via PlaneGCS
+            (build-time dependency; Homebrew "eigen" on macOS).
+Source:     https://gitlab.com/libeigen/eigen
+License:    Mozilla Public License 2.0 (MPL-2.0); some files carry
+            BSD/Apache/MINPACK terms. Verified from the installed
+            COPYING.README / COPYING.MPL2 (/opt/homebrew/opt/eigen/).
+            Full text: https://www.mozilla.org/MPL/2.0/
+            Eigen source code is available at the URL above.
+
+-------------------------------------------------------------------------
+Boost — C++ libraries (headers only: Boost.Graph and dependencies)
+-------------------------------------------------------------------------
+
+Components: Boost 1.90 headers, compiled into onecad-worker via PlaneGCS
+            (build-time dependency; Homebrew "boost" on macOS).
+Source:     https://www.boost.org
+License:    Boost Software License 1.0 (BSL-1.0), per header notices
+            (e.g. boost/version.hpp). Full text:
+            https://www.boost.org/LICENSE_1_0.txt
+
+-------------------------------------------------------------------------
+nlohmann/json 3.12.0 — JSON for Modern C++
+-------------------------------------------------------------------------
+
+Components: worker/third_party/nlohmann/json.hpp, json_fwd.hpp (vendored,
+            see worker/third_party/nlohmann/VENDOR.txt)
+Source:     https://github.com/nlohmann/json
+Copyright:  (c) 2013-2025 Niels Lohmann <https://nlohmann.me>
+License:    MIT (SPDX header in json.hpp). Full text:
+            https://github.com/nlohmann/json/blob/v3.12.0/LICENSE.MIT
+
+-------------------------------------------------------------------------
+Frontend (current React/Three.js/Tauri app)
+-------------------------------------------------------------------------
+
+Versions and licenses verified from node_modules/<pkg>/package.json and
+LICENSE files, and the Rust crate metadata in Cargo.lock / crates.io:
+
+  three.js 0.185.1     MIT          Copyright (c) 2010-2026 three.js authors
+                                    https://github.com/mrdoob/three.js
+  React / React DOM    MIT          Copyright (c) Meta Platforms, Inc. and
+    19.2.7                          affiliates. https://github.com/facebook/react
+  Tauri 2.11.5 (Rust)  Apache-2.0 OR MIT   https://github.com/tauri-apps/tauri
+  @tauri-apps/api      Apache-2.0 OR MIT
+    2.11.1
+  zustand 5.0.14       MIT          https://github.com/pmndrs/zustand
+  tailwindcss 4.3.3    MIT          https://github.com/tailwindlabs/tailwindcss
+
+MIT license text: see LICENSE-MIT in this repository (substituting each
+project's copyright line). Apache-2.0 text: LICENSE-APACHE.
+
+The full transitive Rust (Cargo.lock) and npm dependency trees are not
+enumerated here; a generated license report is a follow-up.
+
+-------------------------------------------------------------------------
+rust-desktop-app — dependency-layer checker
+-------------------------------------------------------------------------
+
+Source: https://github.com/andrejvysny/rust-desktop-app
+Revision: 55535390c595a7ef9554a01f753184bbdab7b332
+Adapted from xtask/src/layers.rs. MIT license selected from MIT OR Apache-2.0.
+
+Copyright (c) 2026 ArtCraft Team and the WordCraft contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+-------------------------------------------------------------------------
 Not third-party — hand-transcribed public standards
 -------------------------------------------------------------------------
 
@@ -62,3 +205,33 @@ named standards, which are numeric facts rather than a licensed work:
 
 (ISO 7380-1 and ISO 7093-1 were hand-transcribed here too, and were removed
 along with their generators. Neither was BOLTS data to begin with.)
+
+-------------------------------------------------------------------------
+SolidCraft (selected native rendering and sketch geometry adaptations)
+Source: https://github.com/tangency-labs/solidcraft
+Revision: 6bde126a5cabd1f5af0c68e6955bd0176fab805a
+License: MIT OR Apache-2.0; MIT selected for these adaptations.
+Paths and local modifications: ATTRIBUTION.md.
+-------------------------------------------------------------------------
+
+MIT License
+
+Copyright (c) 2026 SolidCraft contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

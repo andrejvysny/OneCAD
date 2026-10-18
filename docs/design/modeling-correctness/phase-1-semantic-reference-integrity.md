@@ -81,8 +81,8 @@ Relevant source:
 
 - `worker/src/ops/FilletChamferOp.cpp:42-52,102-174`
 - `worker/src/elementmap/Ladder.cpp:333-367`
-- `src-tauri/crates/onecad-core/src/edit/session.rs:1655-1703`
-- `src-tauri/crates/onecad-core/src/document/record.rs:1145-1184,1750+`
+- `crates/onecad-core/src/edit/session.rs:1655-1703`
+- `crates/onecad-core/src/document/record.rs:1145-1184,1750+`
 
 ## Work package 1.2 — Fail closed on stale promotion
 
@@ -186,10 +186,10 @@ Rust models `AxisRef::Element.edge` as `ElementId`; protocol says Revolve inputs
 
 Evidence:
 
-- `src-tauri/crates/onecad-core/src/document/refs.rs:162-195`
+- `crates/onecad-core/src/document/refs.rs:162-195`
 - `protocol/SCHEMA.md:1061-1074`
 - `worker/src/ops/RevolveOp.cpp:112-132`
-- `src-tauri/src/worker/wire.rs:464-546`
+- `crates/onecad-app/src/worker/wire.rs:464-546`
 
 ### Decision
 

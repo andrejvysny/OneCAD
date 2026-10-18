@@ -1,6 +1,6 @@
 /**
  * Canonical units and the dimension algebra — mirrors
- * `src-tauri/crates/onecad-core/src/expr/dimension.rs`.
+ * `crates/onecad-core/src/expr/dimension.rs`.
  *
  * Every `Value` carries its number in the CANONICAL unit for its dimension:
  * millimetres for `"length"`, degrees for `"angle"`, unitless for

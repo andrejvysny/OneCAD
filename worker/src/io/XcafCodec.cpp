@@ -2,6 +2,7 @@
 #include "io/XcafCodec.h"
 
 #include "io/OcafApp.h"
+#include "io/OcctStaticGuard.h"
 
 #include <algorithm>
 #include <fstream>
@@ -152,7 +153,10 @@ Quantity_ColorRGBA unpack_srgb(PackedColor color) {
 std::string write_xcaf_document(const std::vector<TopoDS_Shape>& solids,
                                 const std::vector<SolidAttributes>& attrs,
                                 std::vector<std::uint8_t>& bytes_out) {
-    const std::lock_guard<std::mutex> lock(ocaf_mutex());
+    // Bounded (OcctStaticGuard.h): an in-process sibling wedged inside an XCAF
+    // call must not wedge this worker's kernel lane too.
+    const BoundedLock lock(ocaf_mutex(), nullptr);
+    if (!lock.owns()) return lock.busy_error("XcafCodec write", "ocaf_mutex");
     try {
         Handle(TDocStd_Document) doc;
         ocaf_application()->NewDocument(kStorageFormat, doc);
@@ -227,7 +231,11 @@ XcafReadResult read_xcaf_solids(const std::string& path) {
     out.error = magic_error(path, bytes);
     if (!out.error.empty()) return out;
 
-    const std::lock_guard<std::mutex> lock(ocaf_mutex());
+    const BoundedLock lock(ocaf_mutex(), nullptr);  // see write_xcaf_document
+    if (!lock.owns()) {
+        out.error = lock.busy_error("XcafCodec read", "ocaf_mutex");
+        return out;
+    }
     try {
         std::istringstream is(bytes, std::ios::in | std::ios::binary);
         Handle(TDocStd_Document) doc;

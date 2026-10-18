@@ -826,11 +826,20 @@ ExecResult execute_ops(ScratchJob& job, const json& ops, std::uint64_t job_id, s
                                              : exec_idx;
         const std::string op_id = get_str(op, "opId", "op_" + std::to_string(step_index));
 
+        // In-process crash journal (Dispatcher.h JournalHooks): on record before
+        // this op's work starts. Empty in the sidecar.
+        if (ctx.op_begin) ctx.op_begin(step_index, exec_idx, op_id);
+
         // --- test hooks (documented; harmless in production) ---
+#ifndef ONECAD_WORKER_LIBRARY
+        // Compiled out of the in-process library (capi/onecad_worker.h): there an
+        // abort kills the HOST app, so the drill would crash the caller, not a
+        // sidecar. A library-mode `__crash` op runs as an ordinary op.
         if (op_id.find("__crash") != std::string::npos) {
             WLOG_ERROR("ExecutePlan: __crash hook at op '%s' — aborting", op_id.c_str());
             std::abort();  // chaos drill: no terminal frame
         }
+#endif
         if (op_id.find("__slow") != std::string::npos) {
             for (int i = 0; i < 50; ++i) {  // ~500 ms in 10 ms cancellation slices
                 if (ctx.cancel.cancelled()) { res.status = ExecStatus::Cancelled; return res; }

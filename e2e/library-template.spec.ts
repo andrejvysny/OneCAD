@@ -84,7 +84,7 @@ test("the built-in starters show on the Templates row, and one starts a project"
 
   await page.getByRole("button", { name: "Templates" }).click();
   await expect(page.getByTestId("template-card")).toHaveCount(2);
-  // Mirrors `src-tauri/src/library_seed_templates.rs::SEED_TEMPLATES` — the
+  // Mirrors `crates/onecad-app/src/library_seed_templates.rs::SEED_TEMPLATES` — the
   // two the app actually ships, by name and by what they say they contain.
   const printedPart = page.getByTestId("template-card").filter({ hasText: "3D-Printed Part" });
   await expect(page.getByTestId("template-card").filter({ hasText: "Blank" })).toBeVisible();

@@ -1,0 +1,13 @@
+[tap] type=1 code=0 src=pid78453 uptime_ns=2385454205144708
+[tap] type=2 code=0 src=pid78453 uptime_ns=2385454205516541
+[tap] type=2 code=0 src=pid78456 uptime_ns=2385454318649333
+[tap] type=12 code=55 src=keys uptime_ns=2385454987141875
+[tap] type=10 code=0 src=keys uptime_ns=2385455022324541
+[tap] type=11 code=0 src=keys uptime_ns=2385455070699625
+[tap] type=12 code=55 src=keys uptime_ns=2385455092500375
+[tap] type=12 code=55 src=keys uptime_ns=2385455734784125
+[tap] type=10 code=9 src=keys uptime_ns=2385455773260375
+[tap] type=11 code=9 src=keys uptime_ns=2385455814594958
+[tap] type=12 code=55 src=keys uptime_ns=2385455839701583
+[tap] type=10 code=53 src=keys uptime_ns=2385456648673750
+[tap] type=11 code=53 src=keys uptime_ns=2385456688386458

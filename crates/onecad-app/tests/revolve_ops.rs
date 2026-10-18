@@ -1,0 +1,2109 @@
+//! MODEL-HARDEN W3 Revolve wire gate against the REAL C++ OCCT worker, driven
+//! through the app's [`DocumentRuntime`] exactly like `wire_contract.rs` /
+//! `breadth_ops.rs`.
+//!
+//! First-ever real-worker Rust integration coverage for Revolve — proves the whole
+//! Rust wire → worker dispatch → OCCT → adoption/mesh path for every Revolve shape:
+//! * `revolve_new_body_pappus_volume` — 360° NewBody, a 10×10 rect at radius 15 from
+//!   a sketch-line axis ⇒ exactly 1 body, Pappus volume 2π·15·100 ≈ 9424.78.
+//! * `revolve_partial_angle_half_volume` — the same profile at 180° ⇒ half the
+//!   Pappus volume, with the swept solid sitting on ONE side of the axis-normal
+//!   (a half-revolution's sign structure).
+//! * `revolve_cut_split_children_adopted` — a boolean-mode Revolve Cut whose result
+//!   is a two-solid compound mints deterministic split children `body_<opId>:<k>`,
+//!   both adopted (D1), parent consumed; exact 8000 / 8800 box arithmetic; ids +
+//!   volumes stable across a replay.
+//! * `revolve_stale_axis_fails_loud` — a nonexistent axis lineId ⇒ NO silent body,
+//!   NO panic: the revolve step's timeline state is `Error` and its projection
+//!   `FeatureDto` carries the worker's axis message (`statusMessage`, W0.5 contract).
+//! * `revolve_region_binding_explicit_and_fallback` — one revolve bound to an
+//!   explicit normative `regionId` (fetched from the solver lane, the exact source
+//!   `finish_sketch` reads) and one bound to `""` (first-region fallback) both
+//!   publish a body; a THIRD bound to a WRONG regionId is a deterministic OP_FAILED
+//!   whose message names the requested + available ids (proves the id reaches the
+//!   worker — an id-dropping marshalling regression would hide behind the fallback).
+//!
+//! REVOLVE-REGION-PARITY additions (the frontend seam the postmortem names, now for
+//! Revolve — see `docs/POSTMORTEM_EXTRUDE_COMMIT.md`):
+//! * `revolve_commit_after_pure_read_arm_mints_the_profile_record` — the EXACT new
+//!   frontend sequence through the PRODUCTION scheduler/driver: AddSketch →
+//!   `enter_sketch` → `sketch_upsert` → `cancel_sketch` (SketchController.exit's
+//!   teardown half) → `prepare_sketch_regions().drive()` (the PURE-READ arm, which
+//!   deliberately authors NO timeline record) → `finish_sketch` (the commit-boundary
+//!   guarantee `confirmRevolve` now issues) → typed Revolve commit ⇒ published body.
+//! * `revolve_commit_without_the_record_guarantee_fails_loud` — the regression
+//!   TRIPWIRE: the identical flow with the `finish_sketch` step REMOVED must fail
+//!   with the worker's `Revolve: profile sketch not found in plan`. Delete the
+//!   commit-boundary guarantee and this test goes green while the product breaks —
+//!   which is exactly how the extrude defect shipped.
+//! * `revolve_reedit_binds_the_stored_region_not_the_first` — a TWO-region sketch
+//!   whose revolve is bound to the second region by exact id, then re-edited via
+//!   `UpdateOperationParams` (the angle-only deep-merge the re-edit sends): the
+//!   published volume matches THAT region's Pappus solid, never the first region's.
+//!
+//! The revolve mesh-volume expectations for the CURVED solids (Pappus / half) are
+//! FINE-lod faceting bounds, NOT exactness assertions — BRep-exact volume lives in
+//! the worker ctest (`test_wp6_ops` / `test_revolve_split`, `ShapeMetrics`); the
+//! Rust-side mesh assertion proves the wire/adoption path, not tessellation
+//! accuracy. The split children are PLANAR boxes, so their mesh volume IS exact.
+//!
+//! Provenance: Pappus numbers cite `worker/tests/test_wp6_ops.cpp:165-201`; the
+//! Cut-split geometry + frame mapping + child volumes cite
+//! `worker/tests/test_revolve_split.cpp` (reused verbatim).
+//!
+//! Gated on `ONECAD_WORKER_PATH` (else the dev-tree fallback); a missing binary
+//! skips cleanly unless `ONECAD_REQUIRE_WORKER=1` (CI hard-fails).
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use uuid::Uuid;
+
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio::sync::{watch, Mutex};
+
+use onecad_core::document::body::split_child_uuid;
+use onecad_core::document::record::{
+    BooleanMode, ExtrudeMode, ExtrudeParams, FilletParams, KnownOperation, Operation,
+    OperationRecord, PlaneKind, RevolveParams, SketchOpParams, SketchPlaneRef,
+};
+use onecad_core::document::refs::{
+    AnchorIntent, AxisRef, ElementKind, ElementRef, PrimaryRef, SketchRegionRef,
+};
+use onecad_core::document::repair::RepairReason;
+use onecad_core::document::variables::Scalar;
+use onecad_core::edit::{EditCommand, InputPath, InputRef, SketchEditOp};
+use onecad_core::ids::{
+    BodyId, ConstraintId, ElementId, EntityId, RecordId, RegionId, SketchId, SnapshotId, TopoKey,
+};
+use onecad_core::io::container::SaveMeta;
+use onecad_core::math::{Vec2, Vec3};
+use onecad_core::regen::{
+    CancelToken, GeometryEngine, Lod, ModelSnapshot, Outcome, RegenRequest, RegenScheduler,
+    SchedulerHandle,
+};
+use onecad_core::sketch::{Constraint, CurvePosition, Sketch, SketchEntity, WorldPlane};
+
+use onecad_app::document_runtime::{DocumentRuntime, RegenReport};
+use onecad_app::dto::{DocumentChange, DocumentProjection, FeatureStatus, SketchRegionDto};
+use onecad_app::worker::manager::SupervisorConfig;
+use onecad_app::worker::wire::sketch_wire;
+use onecad_app::worker::{resolve_worker_path, MeshProvider, SolverEngine, WorkerManager};
+use onecad_app::{regen_driver_with_emitter, RegenEmitter};
+
+use onecad_protocol::mesh::{f32_le, u32_le, validate_mesh_blob, MeshHeaderView};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Harness (mirrors wire_contract.rs / breadth_ops.rs)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn real_worker() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("ONECAD_WORKER_PATH") {
+        let path = PathBuf::from(&p);
+        assert!(
+            path.is_file(),
+            "ONECAD_WORKER_PATH={p:?} is set but no worker binary exists there \
+             (misconfiguration — refusing to skip as green)"
+        );
+        return Some(path);
+    }
+    if let Some(path) = resolve_worker_path() {
+        return Some(path);
+    }
+    assert!(
+        std::env::var("ONECAD_REQUIRE_WORKER").as_deref() != Ok("1"),
+        "ONECAD_REQUIRE_WORKER=1 but no worker binary resolved (CI must hard-fail here)"
+    );
+    None
+}
+
+async fn spawn_worker(bin: PathBuf) -> WorkerManager {
+    let wm = WorkerManager::spawn(SupervisorConfig::production(bin));
+    assert!(
+        wm.wait_ready(Duration::from_secs(10)).await,
+        "real worker must connect + handshake + OpenSession"
+    );
+    wm
+}
+
+fn runtime_over(wm: &WorkerManager) -> DocumentRuntime {
+    let engine: Arc<dyn GeometryEngine> = Arc::new(wm.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
+    DocumentRuntime::new_blank(engine, meshes, solver)
+}
+
+fn add_op(rt: &mut DocumentRuntime, record: OperationRecord) {
+    rt.apply(EditCommand::AddOperation {
+        record,
+        at_cursor: true,
+    })
+    .expect("AddOperation");
+}
+
+/// A CLEAN replay: no record edit preceded it (first build, a record merely
+/// pushed onto the timeline, or save → reopen). `RevertToEnd` makes NO SCHEMA
+/// §7.2 `editedFrom` claim, so the §10 v6 post-edit descriptor-tie veto stays
+/// off — which is what a clean replay must get.
+async fn clean_regen(rt: &mut DocumentRuntime) -> RegenReport {
+    rt.run_regen(RegenRequest::RevertToEnd { from: 0 }, CancelToken::new())
+        .await
+}
+
+fn published<'a>(report: &'a RegenReport, what: &str) -> &'a Arc<ModelSnapshot> {
+    match &report.outcome {
+        Outcome::Published(s) => s,
+        other => panic!("{what}: expected Published, got {other:?}"),
+    }
+}
+
+fn body_of(rec: u128) -> BodyId {
+    BodyId(Uuid::from_u128(rec))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Production scheduler/driver wiring (verbatim from scheduler_commit.rs). The
+// REVOLVE-REGION-PARITY tests must cross the same apply → `RegenScheduler::handle`
+// → driver → publish chain the real app uses; driving `run_regen` directly would
+// skip exactly the seam the extrude postmortem's defect lived in.
+// ─────────────────────────────────────────────────────────────────────────────
+
+type Runtime = Arc<Mutex<Option<DocumentRuntime>>>;
+/// What the emitter captures per completion: `(outcome_str, document_change, projection)`.
+type Emit = (String, Option<DocumentChange>, DocumentProjection);
+
+async fn wire_with(runtime: Runtime) -> (Runtime, SchedulerHandle, UnboundedReceiver<Emit>) {
+    let (tx, rx) = unbounded_channel::<Emit>();
+    let emit: RegenEmitter = Arc::new(
+        move |report: &RegenReport, projection: &DocumentProjection| {
+            let _ = tx.send((
+                report.outcome_str().to_string(),
+                report.document_change(&projection.document_id, &projection.runtime_session),
+                projection.clone(),
+            ));
+        },
+    );
+    let autosave_tick = Arc::new(watch::channel(0u64).0);
+    let driver = regen_driver_with_emitter(runtime.clone(), emit, autosave_tick);
+    let (scheduler, sched) = RegenScheduler::new(driver);
+    tokio::spawn(scheduler.run());
+    (runtime, sched, rx)
+}
+
+/// Awaits the next emitter completion (15 s ceiling — a worker regen is well under).
+async fn recv(rx: &mut UnboundedReceiver<Emit>) -> Emit {
+    tokio::time::timeout(Duration::from_secs(15), rx.recv())
+        .await
+        .expect("regen completion emitted within 15s")
+        .expect("emitter channel stayed open")
+}
+
+/// The `SketchEditOp` batch a drawing session sends for `sketch`'s whole content —
+/// exactly what the frontend's incremental draw accumulates into `sketch_upsert`.
+fn sketch_edit_ops(sketch: &Sketch) -> Vec<SketchEditOp> {
+    sketch
+        .entities()
+        .iter()
+        .cloned()
+        .map(|entity| SketchEditOp::AddEntity { entity })
+        .chain(
+            sketch
+                .constraints()
+                .iter()
+                .cloned()
+                .map(|constraint| SketchEditOp::AddConstraint { constraint }),
+        )
+        .collect()
+}
+
+fn sketch_record_count(rt: &DocumentRuntime) -> usize {
+    rt.projection()
+        .features
+        .iter()
+        .filter(|f| f.op_type == "Sketch")
+        .count()
+}
+
+/// A region's fill area and area-weighted centroid `u`, both in sketch (u,v) space —
+/// the two Pappus inputs that identify WHICH region a revolve actually consumed.
+fn region_area_centroid_u(region: &SketchRegionDto) -> (f64, f64) {
+    let t = region.preview_triangles.as_ref().expect("region fill");
+    let point = |index: u32| {
+        let offset = index as usize * 2;
+        [t.positions[offset], t.positions[offset + 1]]
+    };
+    let mut area = 0.0f64;
+    let mut moment_u = 0.0f64;
+    for tri in t.indices.as_chunks::<3>().0 {
+        let [a, b, c] = [point(tri[0]), point(tri[1]), point(tri[2])];
+        let tri_area = ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs() * 0.5;
+        area += tri_area;
+        moment_u += tri_area * (a[0] + b[0] + c[0]) / 3.0;
+    }
+    (area, if area > 0.0 { moment_u / area } else { 0.0 })
+}
+
+/// Pappus volume of `region` swept `angle_deg` about the constant-`u` line `axis_u`.
+/// The XY plane maps `(u,v) → (-v, u, 0)`, so a constant-`u` axis is parallel to the
+/// world X-axis and every profile point's radius is exactly `u - axis_u`.
+fn pappus_volume(region: &SketchRegionDto, axis_u: f64, angle_deg: f64) -> f64 {
+    let (area, centroid_u) = region_area_centroid_u(region);
+    (angle_deg / 360.0) * 2.0 * std::f64::consts::PI * (centroid_u - axis_u) * area
+}
+
+// Fixed record ids.
+const SKETCH_A: u128 = 0xA00; // box A / profile sketch
+const EXTRUDE_A: u128 = 0xA01; // box A body producer
+const SKETCH_TOOL: u128 = 0xB00; // revolve tool sketch (Cut test)
+const REVOLVE: u128 = 0xB01; // the revolve op
+const REVOLVE_2: u128 = 0xB02; // a second revolve (region-binding test)
+const REVOLVE_3: u128 = 0xB03; // a third revolve — WRONG regionId (region-binding test)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sketch plane refs. The worker's `parse_plane` (WireSketch.cpp:107-110) uses its
+// OWN canonical frame for a NAMED plane kind and ignores the explicit axes — so
+// only `kind` is load-bearing on the wire. The axes below are the matching
+// canonical frames (documentation), verified against test_revolve_split.cpp:
+//   XY: toWorld(u,v) = (-v,  u, 0)   XZ: toWorld(u,v) = (0, u, v)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn xy_plane_ref() -> SketchPlaneRef {
+    SketchPlaneRef {
+        kind: PlaneKind::Xy,
+        origin: Vec3::new_unchecked(0.0, 0.0, 0.0),
+        x_axis: Vec3::new_unchecked(0.0, 1.0, 0.0),
+        y_axis: Vec3::new_unchecked(-1.0, 0.0, 0.0),
+        normal: Vec3::new_unchecked(0.0, 0.0, 1.0),
+        extra: Default::default(),
+    }
+}
+
+fn xz_plane_ref() -> SketchPlaneRef {
+    SketchPlaneRef {
+        kind: PlaneKind::Xz,
+        origin: Vec3::new_unchecked(0.0, 0.0, 0.0),
+        x_axis: Vec3::new_unchecked(0.0, 1.0, 0.0),
+        y_axis: Vec3::new_unchecked(0.0, 0.0, 1.0),
+        normal: Vec3::new_unchecked(1.0, 0.0, 0.0),
+        extra: Default::default(),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sketch + op record builders (rect_sketch verbatim from wire_contract.rs)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A fully-constrained (dof 0) rectangle at sketch-space `(x0, y0)`, size `w × h`,
+/// built the marshaller way (8 points, 4 lines, coincident corners, H/V, a Fixed
+/// anchor, H/V dimensions). Identical to `wire_contract::rect_sketch`.
+fn rect_sketch(sid: SketchId, base: u128, x0: f64, y0: f64, w: f64, h: f64) -> Sketch {
+    let e = |n: u128| EntityId(Uuid::from_u128(base + n));
+    let c = |n: u128| ConstraintId(Uuid::from_u128(base + 0x40 + n));
+    let (p0s, p0e) = (e(0), e(1));
+    let (p1s, p1e) = (e(2), e(3));
+    let (p2s, p2e) = (e(4), e(5));
+    let (p3s, p3e) = (e(6), e(7));
+    let (l0, l1, l2, l3) = (e(0x10), e(0x11), e(0x12), e(0x13));
+
+    let mut sk = Sketch::on_world_plane(sid, "Rect", WorldPlane::XY);
+    let pt = |sk: &mut Sketch, id: EntityId, x: f64, y: f64| {
+        sk.add_entity(SketchEntity::point(
+            id,
+            Vec2::new_unchecked(x, y),
+            false,
+            false,
+        ))
+        .unwrap();
+    };
+    pt(&mut sk, p0s, x0, y0);
+    pt(&mut sk, p0e, x0 + w, y0);
+    pt(&mut sk, p1s, x0 + w, y0);
+    pt(&mut sk, p1e, x0 + w, y0 + h);
+    pt(&mut sk, p2s, x0 + w, y0 + h);
+    pt(&mut sk, p2e, x0, y0 + h);
+    pt(&mut sk, p3s, x0, y0 + h);
+    pt(&mut sk, p3e, x0, y0);
+    sk.add_entity(SketchEntity::line(l0, p0s, p0e, false))
+        .unwrap();
+    sk.add_entity(SketchEntity::line(l1, p1s, p1e, false))
+        .unwrap();
+    sk.add_entity(SketchEntity::line(l2, p2s, p2e, false))
+        .unwrap();
+    sk.add_entity(SketchEntity::line(l3, p3s, p3e, false))
+        .unwrap();
+
+    let coincident = |sk: &mut Sketch, id, a, b| {
+        sk.add_constraint(Constraint::Coincident {
+            id,
+            point1: a,
+            point2: b,
+            point1_position: CurvePosition::Arbitrary,
+            point2_position: CurvePosition::Arbitrary,
+        })
+        .unwrap();
+    };
+    coincident(&mut sk, c(1), p0e, p1s);
+    coincident(&mut sk, c(2), p1e, p2s);
+    coincident(&mut sk, c(3), p2e, p3s);
+    coincident(&mut sk, c(4), p3e, p0s);
+    sk.add_constraint(Constraint::Horizontal { id: c(5), line: l0 })
+        .unwrap();
+    sk.add_constraint(Constraint::Horizontal { id: c(6), line: l2 })
+        .unwrap();
+    sk.add_constraint(Constraint::Vertical { id: c(7), line: l1 })
+        .unwrap();
+    sk.add_constraint(Constraint::Vertical { id: c(8), line: l3 })
+        .unwrap();
+    sk.add_constraint(Constraint::Fixed {
+        id: c(9),
+        point: p0s,
+        point_position: CurvePosition::Arbitrary,
+        at: Vec2::new_unchecked(x0, y0),
+    })
+    .unwrap();
+    sk.add_constraint(Constraint::HorizontalDistance {
+        id: c(10),
+        point1: p0s,
+        point1_position: CurvePosition::Arbitrary,
+        point2: p0e,
+        point2_position: CurvePosition::Arbitrary,
+        value: Scalar::new(w),
+    })
+    .unwrap();
+    sk.add_constraint(Constraint::VerticalDistance {
+        id: c(11),
+        point1: p1s,
+        point1_position: CurvePosition::Arbitrary,
+        point2: p1e,
+        point2_position: CurvePosition::Arbitrary,
+        value: Scalar::new(h),
+    })
+    .unwrap();
+    sk
+}
+
+/// A `rect_sketch` PLUS a separate, fully-fixed revolve axis line at constant
+/// sketch-`u` `ax_u`, spanning `v ∈ [ax_v0, ax_v1]`. The axis is a plain (open)
+/// line: it participates in NO closed loop, so region detection ignores it (proven
+/// in `test_revolve_split.cpp`, where `taxis` is likewise a plain line), yet it is
+/// still a resolvable `SketchLine` for the revolve axis. Returns `(sketch, axis
+/// line EntityId)` for `AxisRef::SketchLine`. `axis` is `(ax_u, ax_v0, ax_v1)` — a
+/// constant-`u` line spanning `v ∈ [ax_v0, ax_v1]`.
+fn rect_with_axis_sketch(
+    sid: SketchId,
+    base: u128,
+    x0: f64,
+    y0: f64,
+    w: f64,
+    h: f64,
+    axis: (f64, f64, f64),
+) -> (Sketch, EntityId) {
+    let (ax_u, ax_v0, ax_v1) = axis;
+    let mut sk = rect_sketch(sid, base, x0, y0, w, h);
+    let e = |n: u128| EntityId(Uuid::from_u128(base + n));
+    let c = |n: u128| ConstraintId(Uuid::from_u128(base + 0x40 + n));
+    let (a_s, a_e, a_line) = (e(0x20), e(0x21), e(0x22));
+    sk.add_entity(SketchEntity::point(
+        a_s,
+        Vec2::new_unchecked(ax_u, ax_v0),
+        false,
+        false,
+    ))
+    .unwrap();
+    sk.add_entity(SketchEntity::point(
+        a_e,
+        Vec2::new_unchecked(ax_u, ax_v1),
+        false,
+        false,
+    ))
+    .unwrap();
+    sk.add_entity(SketchEntity::line(a_line, a_s, a_e, false))
+        .unwrap();
+    // Pin both endpoints so the worker's solve places the axis deterministically.
+    sk.add_constraint(Constraint::Fixed {
+        id: c(0x20),
+        point: a_s,
+        point_position: CurvePosition::Arbitrary,
+        at: Vec2::new_unchecked(ax_u, ax_v0),
+    })
+    .unwrap();
+    sk.add_constraint(Constraint::Fixed {
+        id: c(0x21),
+        point: a_e,
+        point_position: CurvePosition::Arbitrary,
+        at: Vec2::new_unchecked(ax_u, ax_v1),
+    })
+    .unwrap();
+    (sk, a_line)
+}
+
+fn sketch_record(rec: u128, sk: &Sketch, plane: SketchPlaneRef) -> OperationRecord {
+    let (_plane, entities, constraints) = sketch_wire(sk);
+    let params = SketchOpParams {
+        sketch: sk.id,
+        plane,
+        entities: entities.as_array().cloned().unwrap_or_default(),
+        constraints: constraints.as_array().cloned().unwrap_or_default(),
+        host_face: None,
+        extra: Default::default(),
+    };
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "Sketch",
+        Operation::Known(KnownOperation::Sketch(params)),
+    )
+}
+
+fn extrude_record(rec: u128, sketch: SketchId, dist: f64) -> OperationRecord {
+    let params = ExtrudeParams {
+        profile: Some(SketchRegionRef {
+            sketch,
+            region: RegionId::new(""), // first-region fallback
+            region_identity_version: None,
+            region_anchor: None,
+            extra: Default::default(),
+        }),
+        distance: Scalar::new(dist),
+        draft_angle_deg: Scalar::new(0.0),
+        mode: ExtrudeMode::Blind,
+        boolean_mode: BooleanMode::NewBody,
+        target_body: None,
+        target_face: None,
+        two_directions: false,
+        mode2: ExtrudeMode::Blind,
+        distance2: Scalar::new(0.0),
+        target_face2: None,
+        extra: Default::default(),
+    };
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "Extrude",
+        Operation::Known(KnownOperation::Extrude(params)),
+    )
+}
+
+/// A Revolve op. `region` is `""` for the first-region fallback or a normative
+/// `regionId`; `axis_line` is the axis `SketchLine`'s lineId inside `sketch`.
+fn revolve_record(
+    rec: u128,
+    sketch: SketchId,
+    region: &str,
+    angle_deg: f64,
+    axis_line: EntityId,
+    boolean: BooleanMode,
+    target: Option<BodyId>,
+) -> OperationRecord {
+    let params = RevolveParams {
+        profile: Some(SketchRegionRef {
+            sketch,
+            region: RegionId::new(region),
+            region_identity_version: (!region.is_empty()).then_some(3),
+            region_anchor: None,
+            extra: Default::default(),
+        }),
+        angle_deg: Scalar::new(angle_deg),
+        axis: Some(AxisRef::SketchLine {
+            sketch,
+            line: axis_line,
+            extra: Default::default(),
+        }),
+        boolean_mode: boolean,
+        target_body: target,
+        extra: Default::default(),
+    };
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "Revolve",
+        Operation::Known(KnownOperation::Revolve(params)),
+    )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MESH1 geometry helpers (from wire_contract.rs)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SEC_POSITIONS: u32 = 1;
+const SEC_INDICES: u32 = 3;
+
+fn vertex(blob: &[u8], pbase: usize, i: usize) -> [f64; 3] {
+    let o = pbase + i * 12;
+    [
+        f32_le(blob, o) as f64,
+        f32_le(blob, o + 4) as f64,
+        f32_le(blob, o + 8) as f64,
+    ]
+}
+
+/// Signed volume via the divergence theorem — EXACT for a closed, planar-faced
+/// polyhedron; for a faceted CURVED solid it is the inscribed-mesh volume (an
+/// under-estimate of the true BRep volume).
+fn mesh_volume(view: &MeshHeaderView, blob: &[u8]) -> f64 {
+    let pos = view.section(SEC_POSITIONS).expect("POSITIONS");
+    let idx = view.section(SEC_INDICES).expect("INDICES");
+    let (pbase, ibase) = (pos.offset as usize, idx.offset as usize);
+    let mut vol6 = 0.0f64;
+    for t in 0..view.triangle_count as usize {
+        let o = ibase + t * 12;
+        let a = vertex(blob, pbase, u32_le(blob, o) as usize);
+        let b = vertex(blob, pbase, u32_le(blob, o + 4) as usize);
+        let c = vertex(blob, pbase, u32_le(blob, o + 8) as usize);
+        vol6 += a[0] * (b[1] * c[2] - b[2] * c[1])
+            + a[1] * (b[2] * c[0] - b[0] * c[2])
+            + a[2] * (b[0] * c[1] - b[1] * c[0]);
+    }
+    (vol6 / 6.0).abs()
+}
+
+fn bbox_dims(view: &MeshHeaderView) -> [f64; 3] {
+    [
+        f64::from(view.bbox_max[0] - view.bbox_min[0]),
+        f64::from(view.bbox_max[1] - view.bbox_min[1]),
+        f64::from(view.bbox_max[2] - view.bbox_min[2]),
+    ]
+}
+
+async fn body_mesh(rt: &mut DocumentRuntime, body: BodyId, lod: Lod) -> Arc<Vec<u8>> {
+    rt.get_mesh(body, lod, None).await.expect("fetch body mesh")
+}
+
+async fn mesh_vol(rt: &mut DocumentRuntime, body: BodyId, lod: Lod) -> f64 {
+    let mesh = body_mesh(rt, body, lod).await;
+    let view = validate_mesh_blob(&mesh).expect("child MESH1 validates");
+    mesh_volume(&view, &mesh)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. NewBody Pappus volume — 10×10 rect at radius 15, 360° ⇒ 2π·15·100 ≈ 9424.78.
+//    (Provenance: worker/tests/test_wp6_ops.cpp:165-199.)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revolve_new_body_pappus_volume() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    // XY plane toWorld(u,v)=(-v,u,0): rect u∈[10,20] v∈[0,10] → world x∈[-10,0],
+    // y∈[10,20], z=0 (area 100, centroid world-y = 15 ⇒ radius 15 from the u=0
+    // axis, which maps to the world X-axis). 360° ⇒ V = 2π·15·100 = 9424.78.
+    let sid = SketchId(Uuid::from_u128(0xA));
+    let (sk, axis) = rect_with_axis_sketch(sid, 0x1000, 10.0, 0.0, 10.0, 10.0, (0.0, -5.0, 15.0));
+    add_op(&mut rt, sketch_record(SKETCH_A, &sk, xy_plane_ref()));
+    add_op(
+        &mut rt,
+        revolve_record(REVOLVE, sid, "", 360.0, axis, BooleanMode::NewBody, None),
+    );
+
+    let rep = clean_regen(&mut rt).await;
+    let snap = published(&rep, "pappus revolve");
+    assert_eq!(
+        snap.bodies.len(),
+        1,
+        "360° NewBody revolve = exactly 1 body"
+    );
+
+    // FINE lod (0.5% linear / 0.2 rad angular, Tessellate.cpp:44). This asserts the
+    // wire/adoption path, NOT tessellation accuracy: a revolved (curved) solid's
+    // faceted mesh UNDER-estimates the true volume (inscribed facets). BRep-exact
+    // volume is ctest's job (test_wp6_ops, ShapeMetrics, ±30 on 9424.78). The bound
+    // below carries ≥2× headroom over the observed fine-mesh faceting deficit:
+    // observed vol 9409.161 ⇒ deficit 15.617 (0.17%), so 40.0 is ≈2.6× — tight
+    // enough to still fail a real regression (a 1% volume error = ~94 > 40).
+    const PAPPUS: f64 = 9424.778; // 2π·15·100
+    let vol = mesh_vol(&mut rt, body_of(REVOLVE), Lod::Fine).await;
+    eprintln!(
+        "pappus 360°: fine-mesh volume {vol:.3} vs BRep {PAPPUS:.3} (faceting deficit {:.3})",
+        PAPPUS - vol
+    );
+    assert!(
+        (vol - PAPPUS).abs() < 40.0,
+        "fine-mesh revolve volume within faceting tolerance of Pappus 9424.78, got {vol}"
+    );
+
+    wm.shutdown().await;
+    eprintln!("Revolve NewBody PASS: 1 body, fine-mesh volume {vol:.3} ≈ Pappus 9424.78");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2. Partial 180° ⇒ half the Pappus volume; the swept solid is ONE-SIDED along the
+//    axis-normal it sweeps into (a half-revolution's sign structure).
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revolve_partial_angle_half_volume() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    // Same profile as the Pappus test; 180° ⇒ V = π·15·100 = 4712.39. The profile
+    // sits in the world z=0 plane at world-y ∈ [10,20], revolved about the world
+    // X-axis: at angle θ a profile point (y₀, z=0) maps to (y₀·cosθ, y₀·sinθ). Over
+    // θ∈[0,180°] cosθ spans [-1,1] ⇒ Y is FULL/symmetric [±20]; sinθ ≥ 0 ⇒ Z is
+    // ONE-SIDED (only [0,20] or, if the axis direction flips the sweep, [-20,0]).
+    let sid = SketchId(Uuid::from_u128(0xA));
+    let (sk, axis) = rect_with_axis_sketch(sid, 0x1000, 10.0, 0.0, 10.0, 10.0, (0.0, -5.0, 15.0));
+    add_op(&mut rt, sketch_record(SKETCH_A, &sk, xy_plane_ref()));
+    add_op(
+        &mut rt,
+        revolve_record(REVOLVE, sid, "", 180.0, axis, BooleanMode::NewBody, None),
+    );
+
+    let rep = clean_regen(&mut rt).await;
+    let snap = published(&rep, "half revolve");
+    assert_eq!(
+        snap.bodies.len(),
+        1,
+        "180° NewBody revolve = exactly 1 body"
+    );
+
+    let mesh = body_mesh(&mut rt, body_of(REVOLVE), Lod::Fine).await;
+    let view = validate_mesh_blob(&mesh).expect("half-revolve MESH1 validates");
+    let vol = mesh_volume(&view, &mesh);
+    let dims = bbox_dims(&view);
+    let (ymin, ymax) = (f64::from(view.bbox_min[1]), f64::from(view.bbox_max[1]));
+    let (zmin, zmax) = (f64::from(view.bbox_min[2]), f64::from(view.bbox_max[2]));
+
+    // Half the Pappus volume, same fine-mesh faceting regime. Observed vol 4704.823
+    // ⇒ deficit 7.566 (0.16%), so 20.0 is ≈2.6× headroom (same regime as the 360°).
+    const HALF_PAPPUS: f64 = 4712.389; // π·15·100
+    eprintln!(
+        "half 180°: fine-mesh volume {vol:.3} vs BRep {HALF_PAPPUS:.3} (deficit {:.3}); \
+         bbox y[{ymin:.2},{ymax:.2}] z[{zmin:.2},{zmax:.2}] dims {dims:?}",
+        HALF_PAPPUS - vol
+    );
+    assert!(
+        (vol - HALF_PAPPUS).abs() < 20.0,
+        "fine-mesh half-revolve volume within faceting tolerance of π·15·100, got {vol}"
+    );
+
+    // Y is (nearly) symmetric about the axis: [-20, +20].
+    assert!(
+        (ymin + 20.0).abs() < 2.0 && (ymax - 20.0).abs() < 2.0,
+        "the profile-containing axis-normal (world Y) spans the full ±20, got [{ymin},{ymax}]"
+    );
+    // Z is ONE-SIDED: one bound sits on the profile plane (≈0), the other at ≈±20 —
+    // the swept solid never crosses to the opposite half of the axis-normal.
+    let z_one_sided = (zmin.abs() < 1.5 && (zmax - 20.0).abs() < 2.0)
+        || (zmax.abs() < 1.5 && (zmin + 20.0).abs() < 2.0);
+    assert!(
+        z_one_sided,
+        "a 180° sweep is one-sided along the swept axis-normal (world Z): one bound ≈0, \
+         the other ≈±20, got z[{zmin},{zmax}]"
+    );
+
+    wm.shutdown().await;
+    eprintln!("Revolve partial PASS: 180° volume {vol:.3} ≈ half-Pappus; bbox one-sided in Z");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3. Cut-split children adopted — a boolean-mode Revolve Cut that bisects a box
+//    mints deterministic split children body_<opId>:0/:1 (D1), both adopted, parent
+//    consumed. Exact box arithmetic 8000 / 8800; ids + volumes stable on replay.
+//    (Provenance: worker/tests/test_revolve_split.cpp — geometry reused verbatim.)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revolve_cut_split_children_adopted() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    // Box A (XY, rect u∈[0,40] v∈[0,20], Blind +Z 25): world x∈[-20,0], y∈[0,40],
+    // z∈[0,25], vol 20000.
+    let sa = SketchId(Uuid::from_u128(0xA));
+    add_op(
+        &mut rt,
+        sketch_record(
+            SKETCH_A,
+            &rect_sketch(sa, 0x1000, 0.0, 0.0, 40.0, 20.0),
+            xy_plane_ref(),
+        ),
+    );
+    add_op(&mut rt, extrude_record(EXTRUDE_A, sa, 25.0));
+
+    // Tool (XZ sketch, 360° revolve): profile rect u∈[-9,60] v∈[10,14]; axis line at
+    // u=-10 (outside the profile footprint, -10 < -9). r(x,y)=√(x²+(y+10)²); the
+    // profile spans r∈[1,70] ⇒ a 360° washer (z-slab z∈[10,14]) that fully covers
+    // box A's cross-section (box r∈[10,53.85] ⊂ [1,70]) ⇒ Cut splits A into two exact
+    // box children: bottom z∈[0,10] = 8000 (:0) and top z∈[14,25] = 8800 (:1).
+    let st = SketchId(Uuid::from_u128(0xB));
+    let (tool_sk, axis) =
+        rect_with_axis_sketch(st, 0x3000, -9.0, 10.0, 69.0, 4.0, (-10.0, 0.0, 20.0));
+    add_op(
+        &mut rt,
+        sketch_record(SKETCH_TOOL, &tool_sk, xz_plane_ref()),
+    );
+    add_op(
+        &mut rt,
+        revolve_record(
+            REVOLVE,
+            st,
+            "",
+            360.0,
+            axis,
+            BooleanMode::Cut,
+            Some(body_of(EXTRUDE_A)),
+        ),
+    );
+
+    // Deterministic split-child ids (D1): body_<revolveOpId>:0/:1 adopted as
+    // BodyId(split_child_uuid(revolveUuid, k)).
+    let child0 = BodyId(split_child_uuid(Uuid::from_u128(REVOLVE), 0));
+    let child1 = BodyId(split_child_uuid(Uuid::from_u128(REVOLVE), 1));
+
+    let rep = clean_regen(&mut rt).await;
+    let snap = published(&rep, "revolve cut split");
+    let head: std::collections::HashSet<BodyId> = snap.bodies.iter().map(|b| b.body).collect();
+    assert_eq!(
+        head.len(),
+        2,
+        "the Cut consumed box A into exactly two split children, got {head:?}"
+    );
+    assert!(
+        !head.contains(&body_of(EXTRUDE_A)),
+        "parent body (box A) removed from head"
+    );
+    assert!(
+        head.contains(&child0) && head.contains(&child1),
+        "head is exactly {{body_<op>:0, body_<op>:1}}, got {head:?}"
+    );
+
+    // Planar box children ⇒ mesh volume is EXACT (divergence theorem); tight bound.
+    // Volume-ascending ordering: :0 = bottom slab 8000, :1 = top slab 8800.
+    let v0 = mesh_vol(&mut rt, child0, Lod::Coarse).await;
+    let v1 = mesh_vol(&mut rt, child1, Lod::Coarse).await;
+    assert!(
+        (v0 - 8000.0).abs() < 1.0,
+        "child :0 = bottom slab 40·20·10 = 8000, got {v0}"
+    );
+    assert!(
+        (v1 - 8800.0).abs() < 1.0,
+        "child :1 = top slab 40·20·11 = 8800, got {v1}"
+    );
+
+    // Ids + volumes stable across a second from-0 regen (pure fn of opId + ordinal).
+    let rep2 = clean_regen(&mut rt).await;
+    let snap2 = published(&rep2, "revolve cut split replay");
+    let head2: std::collections::HashSet<BodyId> = snap2.bodies.iter().map(|b| b.body).collect();
+    assert_eq!(head, head2, "split child ids identical across a replay");
+    let v0b = mesh_vol(&mut rt, child0, Lod::Coarse).await;
+    let v1b = mesh_vol(&mut rt, child1, Lod::Coarse).await;
+    assert!(
+        (v0b - 8000.0).abs() < 1.0 && (v1b - 8800.0).abs() < 1.0,
+        "replay child volumes stable, got {v0b} / {v1b}"
+    );
+
+    wm.shutdown().await;
+    eprintln!(
+        "Revolve Cut-split PASS: parent consumed, children :0={v0} :1={v1}, ids + volumes stable"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4. Stale axis fails loud — a nonexistent axis lineId ⇒ NO silent body, NO panic:
+//    the revolve step is Error and its projection FeatureDto carries the worker's
+//    axis message (W0.5 statusMessage contract).
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revolve_stale_axis_fails_loud() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    // A valid profile (so the profile builds and the axis is the ONLY failure point:
+    // execute_revolve resolves the profile BEFORE the axis, RevolveOp.cpp:154-175),
+    // then a revolve whose axis references a lineId that does not exist in the sketch.
+    let sid = SketchId(Uuid::from_u128(0xA));
+    add_op(
+        &mut rt,
+        sketch_record(
+            SKETCH_A,
+            &rect_sketch(sid, 0x1000, 10.0, 0.0, 10.0, 10.0),
+            xy_plane_ref(),
+        ),
+    );
+    let bogus_axis = EntityId(Uuid::from_u128(0xDEAD_BEEF));
+    add_op(
+        &mut rt,
+        revolve_record(
+            REVOLVE,
+            sid,
+            "",
+            360.0,
+            bogus_axis,
+            BooleanMode::NewBody,
+            None,
+        ),
+    );
+
+    // A per-op failure is a Published snapshot with the failed step marked Error
+    // (executor.rs:668; PlanExecutor stoppedReason=opFailed, last_valid_step=m-1) —
+    // NOT an EngineFailed. No revolve body is created (a sketch mints none either).
+    let rep = clean_regen(&mut rt).await;
+    let snap = published(&rep, "stale axis revolve");
+    assert!(
+        snap.bodies.is_empty(),
+        "the failed revolve minted NO body (no silent body), got {:?}",
+        snap.bodies.iter().map(|b| b.body).collect::<Vec<_>>()
+    );
+
+    // The projection surfaces the failure: the revolve FeatureDto is Error and its
+    // statusMessage carries the worker's axis message
+    // (RevolveOp.cpp:86 "Revolve: axis line '<id>' not found in sketch").
+    let proj = rt.projection();
+    let rev_id = RecordId(Uuid::from_u128(REVOLVE)).to_string();
+    let feat = proj
+        .features
+        .iter()
+        .find(|f| f.id == rev_id)
+        .expect("the revolve feature is projected");
+    assert_eq!(
+        feat.status,
+        FeatureStatus::Error,
+        "the stale-axis revolve step is Error, got {:?}",
+        feat.status
+    );
+    let msg = feat
+        .status_message
+        .as_deref()
+        .expect("an errored feature carries a statusMessage (W0.5)");
+    eprintln!("stale-axis: revolve statusMessage = {msg:?}");
+    assert!(
+        msg.contains("not found in sketch"),
+        "statusMessage carries the worker's axis-not-found message, got {msg:?}"
+    );
+
+    wm.shutdown().await;
+    eprintln!("Revolve stale-axis PASS: 0 bodies, revolve step Error, statusMessage surfaced");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5. Region binding — an explicit normative regionId AND the "" first-region
+//    fallback both publish a body. The explicit id is fetched from the solver lane
+//    (SketchUpsert + SketchRegions), the exact source finish_sketch reads; a wrong
+//    non-empty id would fail loudly (strict M4a rule), so a publish proves the bind.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revolve_region_binding_explicit_and_fallback() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+
+    let sid = SketchId(Uuid::from_u128(0xA));
+    // The plan sketch (rect + axis). The rect's outer-loop member ids are the sole
+    // input to the normative FNV regionId (derive_region_id); the dangling axis line
+    // is not part of any loop, so a PLAIN rect (same rect line ids) yields the SAME
+    // regionId while sidestepping any solver-lane region-detection quirk on the open
+    // line. Fetch it via the solver lane — exactly what finish_sketch does.
+    let (plan_sk, axis) =
+        rect_with_axis_sketch(sid, 0x1000, 10.0, 0.0, 10.0, 10.0, (0.0, -5.0, 15.0));
+    let plain_rect = rect_sketch(sid, 0x1000, 10.0, 0.0, 10.0, 10.0);
+    let _ = SolverEngine::sketch_upsert(&wm, &plain_rect)
+        .await
+        .expect("upsert sketch to solver lane");
+    let regions = SolverEngine::sketch_regions(&wm, &sid.to_string())
+        .await
+        .expect("solver-lane sketch regions");
+    assert!(
+        !regions.regions.is_empty(),
+        "the rect yields ≥1 closed region"
+    );
+    let region_id = regions.regions[0].region_id.clone();
+    assert!(
+        region_id.starts_with("r_"),
+        "a normative FNV regionId (SCHEMA §7.4), got {region_id:?}"
+    );
+
+    let mut rt = runtime_over(&wm);
+    add_op(&mut rt, sketch_record(SKETCH_A, &plan_sk, xy_plane_ref()));
+    // Revolve 1: explicit, valid regionId. Revolve 2: "" first-region fallback.
+    add_op(
+        &mut rt,
+        revolve_record(
+            REVOLVE,
+            sid,
+            &region_id,
+            360.0,
+            axis,
+            BooleanMode::NewBody,
+            None,
+        ),
+    );
+    add_op(
+        &mut rt,
+        revolve_record(REVOLVE_2, sid, "", 360.0, axis, BooleanMode::NewBody, None),
+    );
+
+    let rep = clean_regen(&mut rt).await;
+    let snap = published(&rep, "revolve region binding");
+    let head: std::collections::HashSet<BodyId> = snap.bodies.iter().map(|b| b.body).collect();
+    assert_eq!(
+        head.len(),
+        2,
+        "the explicit-region revolve AND the fallback revolve both publish, got {head:?}"
+    );
+    assert!(
+        head.contains(&body_of(REVOLVE)) && head.contains(&body_of(REVOLVE_2)),
+        "both revolve bodies present, got {head:?}"
+    );
+
+    // Finding 7: a WRONG (non-empty, non-matching) regionId is a deterministic HARD
+    // FAILURE whose message names BOTH the requested id and the available ids — proof
+    // the regionId actually reaches the worker. Without this case the explicit-region
+    // test is indistinguishable from the "" fallback under an id-DROPPING marshalling
+    // regression (both would still publish a first-region body).
+    let bogus = "r_deadbeefdeadbeef";
+    add_op(
+        &mut rt,
+        revolve_record(
+            REVOLVE_3,
+            sid,
+            bogus,
+            360.0,
+            axis,
+            BooleanMode::NewBody,
+            None,
+        ),
+    );
+    let rep = clean_regen(&mut rt).await;
+    // A per-op failure still Publishes the valid prefix (the two good revolves); the
+    // wrong-region step is Error with NO body of its own (mirrors the stale-axis case).
+    let snap = published(&rep, "wrong-region revolve");
+    let head: std::collections::HashSet<BodyId> = snap.bodies.iter().map(|b| b.body).collect();
+    assert!(
+        !head.contains(&body_of(REVOLVE_3)),
+        "the wrong-region revolve minted NO body, got {head:?}"
+    );
+    let proj = rt.projection();
+    let rev3 = RecordId(Uuid::from_u128(REVOLVE_3)).to_string();
+    let feat = proj
+        .features
+        .iter()
+        .find(|f| f.id == rev3)
+        .expect("the wrong-region revolve feature is projected");
+    assert_eq!(
+        feat.status,
+        FeatureStatus::Error,
+        "a non-matching regionId is a deterministic OP_FAILED, got {:?}",
+        feat.status
+    );
+    let msg = feat
+        .status_message
+        .as_deref()
+        .expect("an errored feature carries a statusMessage (W0.5)");
+    assert!(
+        msg.contains(bogus),
+        "the message names the REQUESTED regionId (proves it reached the worker), got {msg:?}"
+    );
+    assert!(
+        msg.contains("available") && msg.contains(&region_id),
+        "the message names the AVAILABLE region ids, got {msg:?}"
+    );
+
+    wm.shutdown().await;
+    eprintln!(
+        "Revolve region-binding PASS: explicit regionId {region_id} + \"\" fallback both published; \
+         wrong regionId '{bogus}' ⇒ OP_FAILED naming requested + available — {msg}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 6. REVOLVE-REGION-PARITY: the interactive frontend sequence, end to end, through
+//    the PRODUCTION scheduler. Arming a revolve is now a PURE region read
+//    (`prepare_sketch_regions` — the backend of `getSketchRegions`), which by
+//    design authors no timeline record; the record is guaranteed at the COMMIT
+//    boundary instead (`confirmRevolve`'s `finishSketch`). This test walks that
+//    exact ladder and proves the revolve commits.
+//    (Provenance: docs/POSTMORTEM_EXTRUDE_COMMIT.md; shape mirrors
+//    scheduler_commit.rs::interactive_sketch_flow_mints_the_timeline_record_and_extrude_commits.)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The drawn content shared by the two interactive-flow tests: the Pappus fixture
+/// (10×10 rect at `u ∈ [10,20]`, `v ∈ [0,10]`) plus a dangling axis line at `u = 0`.
+/// Returns `(sketch, axis line id)`.
+fn interactive_profile(sid: SketchId) -> (Sketch, EntityId) {
+    rect_with_axis_sketch(sid, 0x1000, 10.0, 0.0, 10.0, 10.0, (0.0, -5.0, 15.0))
+}
+
+/// Runs AddSketch → enter → upsert → cancel (the `SketchController.exit` teardown
+/// half) → `prepare_sketch_regions().drive()` (the pure-read arm), asserting that
+/// NOTHING in that ladder minted a `Sketch` timeline record. Returns the armed
+/// region's normative id.
+async fn interactive_arm(runtime: &Runtime, sid: SketchId, drawn: &Sketch) -> String {
+    {
+        let mut guard = runtime.lock().await;
+        let rt = guard.as_mut().expect("document open");
+        rt.apply(EditCommand::AddSketch {
+            sketch: Sketch::on_world_plane(sid, "Sketch 1", WorldPlane::XY),
+        })
+        .expect("AddSketch");
+        rt.enter_sketch(sid).await.expect("enter_sketch");
+        rt.sketch_upsert(sid, sketch_edit_ops(drawn))
+            .await
+            .expect("sketch_upsert");
+        // SketchController.exit()'s FIRST half: worker-gesture teardown + squash.
+        rt.cancel_sketch(sid, false).await.expect("cancel_sketch");
+        assert_eq!(
+            sketch_record_count(rt),
+            0,
+            "AddSketch + upsert + cancel author NO Sketch timeline record (this is \
+             precisely why the commit boundary must guarantee one)"
+        );
+    }
+
+    // The arm: a PURE read driven with the runtime lock RELEASED (production shape).
+    let prepared = {
+        let guard = runtime.lock().await;
+        guard
+            .as_ref()
+            .expect("document open")
+            .prepare_sketch_regions(sid)
+            .expect("prepare_sketch_regions")
+    };
+    let regions = prepared.drive().await.expect("regions").regions;
+    assert_eq!(
+        regions.len(),
+        1,
+        "the rect derives exactly one closed region (the dangling axis line closes none), got {:?}",
+        regions.iter().map(|r| &r.region_id).collect::<Vec<_>>()
+    );
+    {
+        let guard = runtime.lock().await;
+        assert_eq!(
+            sketch_record_count(guard.as_ref().expect("document open")),
+            0,
+            "the PURE-READ arm must not author a Sketch record either"
+        );
+    }
+    regions[0].region_id.clone()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revolve_commit_after_pure_read_arm_mints_the_profile_record() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let (runtime, sched, mut rx) = wire_with(Arc::new(Mutex::new(Some(runtime_over(&wm))))).await;
+    let sid = SketchId(Uuid::from_u128(0xF0A));
+    let (drawn, axis) = interactive_profile(sid);
+
+    let region_id = interactive_arm(&runtime, sid, &drawn).await;
+
+    // The COMMIT-BOUNDARY GUARANTEE (`confirmRevolve` → `client.finishSketch`): the
+    // only step in the whole interactive ladder that mints the `Sketch` record.
+    let finish_outcome = {
+        let mut guard = runtime.lock().await;
+        let rt = guard.as_mut().expect("document open");
+        let (_dto, outcome) = rt
+            .finish_sketch_with_outcome(sid)
+            .await
+            .expect("finish_sketch");
+        assert_eq!(
+            sketch_record_count(rt),
+            1,
+            "the commit-boundary finish minted exactly ONE Sketch timeline record"
+        );
+        outcome.expect("the first finish appends the record ⇒ Some(outcome)")
+    };
+    sched.handle(&finish_outcome);
+    let (outcome_str, _, _) = recv(&mut rx).await;
+    assert_eq!(outcome_str, "published", "the sketch-only regen publishes");
+
+    // The commit: the exact frontend shape — a TYPED profile (sketchId + the
+    // normative regionId read at arm time) plus the picked axis line.
+    let revolve_outcome = {
+        let mut guard = runtime.lock().await;
+        let rt = guard.as_mut().expect("document open");
+        rt.apply(EditCommand::AddOperation {
+            record: revolve_record(
+                REVOLVE,
+                sid,
+                &region_id,
+                360.0,
+                axis,
+                BooleanMode::NewBody,
+                None,
+            ),
+            at_cursor: false, // the frontend commit shape
+        })
+        .expect("revolve commit")
+    };
+    sched.handle(&revolve_outcome);
+    let (outcome_str, change, proj) = recv(&mut rx).await;
+    assert_eq!(outcome_str, "published", "the revolve commit published");
+    let change = change.expect("a published regen carries a document_change");
+    assert_eq!(
+        change.changed_bodies.len(),
+        1,
+        "the revolve off the interactively drawn sketch produced its body, got {:?}",
+        change.changed_bodies
+    );
+    let rev_id = RecordId(Uuid::from_u128(REVOLVE)).to_string();
+    let feat = proj
+        .features
+        .iter()
+        .find(|f| f.id == rev_id)
+        .expect("the revolve feature is projected");
+    assert_eq!(
+        feat.status,
+        FeatureStatus::Ok,
+        "the revolve step succeeded, statusMessage={:?}",
+        feat.status_message
+    );
+
+    // The body is the RIGHT one: the Pappus solid of the armed region (same fixture
+    // and same fine-mesh faceting regime as `revolve_new_body_pappus_volume`).
+    let vol = {
+        let mut guard = runtime.lock().await;
+        let rt = guard.as_mut().expect("document open");
+        mesh_vol(rt, body_of(REVOLVE), Lod::Fine).await
+    };
+    const PAPPUS: f64 = 9424.778; // 2π·15·100
+    assert!(
+        (vol - PAPPUS).abs() < 40.0,
+        "the committed body is the armed region's Pappus solid, got {vol}"
+    );
+
+    sched.shutdown();
+    wm.shutdown().await;
+    eprintln!(
+        "REVOLVE-INTERACTIVE-FLOW PASS: pure-read arm authored no record; the commit-boundary \
+         finish minted it; the typed Revolve published 1 body (volume {vol:.3} ≈ Pappus)"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7. The regression TRIPWIRE for the test above: the SAME ladder with the
+//    commit-boundary `finish_sketch` REMOVED must fail loudly. Delete the
+//    guarantee from `confirmRevolve` and this test goes green while every real
+//    revolve silently does nothing — the exact failure mode the extrude
+//    postmortem documents.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revolve_commit_without_the_record_guarantee_fails_loud() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let (runtime, sched, mut rx) = wire_with(Arc::new(Mutex::new(Some(runtime_over(&wm))))).await;
+    let sid = SketchId(Uuid::from_u128(0xF0A));
+    let (drawn, axis) = interactive_profile(sid);
+
+    let region_id = interactive_arm(&runtime, sid, &drawn).await;
+    // ── NO finish_sketch here — that is the whole point of this test. ──
+
+    let revolve_outcome = {
+        let mut guard = runtime.lock().await;
+        let rt = guard.as_mut().expect("document open");
+        rt.apply(EditCommand::AddOperation {
+            record: revolve_record(
+                REVOLVE,
+                sid,
+                &region_id,
+                360.0,
+                axis,
+                BooleanMode::NewBody,
+                None,
+            ),
+            at_cursor: false,
+        })
+        .expect("revolve commit")
+    };
+    sched.handle(&revolve_outcome);
+    let (outcome_str, change, proj) = recv(&mut rx).await;
+
+    // A per-op failure still publishes the (empty) valid prefix — the failure is
+    // carried by the step, not by the regen outcome.
+    assert_eq!(outcome_str, "published");
+    assert!(
+        change.is_none_or(|c| c.changed_bodies.is_empty()),
+        "the recordless revolve minted NO body"
+    );
+    let rev_id = RecordId(Uuid::from_u128(REVOLVE)).to_string();
+    let feat = proj
+        .features
+        .iter()
+        .find(|f| f.id == rev_id)
+        .expect("the revolve feature is projected");
+    assert_eq!(
+        feat.status,
+        FeatureStatus::Error,
+        "a revolve whose profile sketch has no timeline record is a hard step failure"
+    );
+    let msg = feat
+        .status_message
+        .as_deref()
+        .expect("an errored feature carries a statusMessage (W0.5)");
+    assert!(
+        msg.contains("profile sketch not found in plan"),
+        "the tripwire message is the postmortem's, got {msg:?}"
+    );
+
+    sched.shutdown();
+    wm.shutdown().await;
+    eprintln!(
+        "REVOLVE-TRIPWIRE PASS: without the commit-boundary finish the revolve fails with {msg:?} \
+         (0 bodies) — this is what the guarantee prevents"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 8. Re-edit binds the STORED region, never the first. A two-region sketch whose
+//    revolve is bound to region index 1 by exact id survives an angle re-edit
+//    (`UpdateOperationParams`, the deep-merge the frontend sends): the published
+//    volume tracks THAT region's Pappus solid at the new angle. Before the FE fix
+//    a re-edit re-armed `regions[0]` and would have re-authored the wrong profile.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Two disjoint rects (`u ∈ [0,40] v ∈ [0,20]` and `u ∈ [60,70] v ∈ [0,10]`, areas
+/// 800 vs 100) plus a dangling axis line at `u = -10` — left of BOTH footprints, so
+/// it splits neither profile. Returns `(sketch, axis line id)`.
+fn two_region_with_axis_sketch(sid: SketchId) -> (Sketch, EntityId) {
+    let (mut sk, axis) =
+        rect_with_axis_sketch(sid, 0x5000, 0.0, 0.0, 40.0, 20.0, (-10.0, -5.0, 25.0));
+    let second = rect_sketch(sid, 0x6000, 60.0, 0.0, 10.0, 10.0);
+    for entity in second.entities().iter().cloned() {
+        sk.add_entity(entity).unwrap();
+    }
+    for constraint in second.constraints().iter().cloned() {
+        sk.add_constraint(constraint).unwrap();
+    }
+    (sk, axis)
+}
+
+const AXIS_U: f64 = -10.0;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revolve_reedit_binds_the_stored_region_not_the_first() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let sid = SketchId(Uuid::from_u128(0xE0A));
+    let (sk, axis) = two_region_with_axis_sketch(sid);
+
+    rt.apply(EditCommand::AddSketch { sketch: sk.clone() })
+        .expect("AddSketch");
+    add_op(&mut rt, sketch_record(SKETCH_A, &sk, xy_plane_ref()));
+
+    // The arm's region read (the exact source the frontend binds from).
+    let regions = rt
+        .prepare_sketch_regions(sid)
+        .expect("prepare_sketch_regions")
+        .drive()
+        .await
+        .expect("regions")
+        .regions;
+    assert_eq!(regions.len(), 2, "both disjoint cells are selectable");
+    let bound = &regions[1]; // NOT regions[0] — the old silent fallback
+    let other = &regions[0];
+
+    let want_360 = pappus_volume(bound, AXIS_U, 360.0);
+    let wrong_360 = pappus_volume(other, AXIS_U, 360.0);
+    assert!(
+        (want_360 - wrong_360).abs() > want_360.max(wrong_360) * 0.5,
+        "the fixture regions must sweep VERY different volumes for this test to \
+         discriminate ({want_360} vs {wrong_360})"
+    );
+
+    add_op(
+        &mut rt,
+        revolve_record(
+            REVOLVE,
+            sid,
+            &bound.region_id,
+            360.0,
+            axis,
+            BooleanMode::NewBody,
+            None,
+        ),
+    );
+    let report = clean_regen(&mut rt).await;
+    let snap = published(&report, "two-region revolve");
+    assert_eq!(snap.bodies.len(), 1, "one revolve body");
+    let vol = mesh_vol(&mut rt, body_of(REVOLVE), Lod::Fine).await;
+    eprintln!(
+        "bound region {} 360°: mesh {vol:.3} vs Pappus {want_360:.3} (the OTHER region \
+         would be {wrong_360:.3})",
+        bound.region_id
+    );
+    // Faceting deficit on a revolved solid is ~0.2%; 1.5% is ≈7× headroom yet far
+    // tighter than the ≥50% gap to the wrong region's volume.
+    assert!(
+        (vol - want_360).abs() < want_360 * 0.015,
+        "the bound region's Pappus solid ({want_360}), got {vol}"
+    );
+    assert!(
+        (vol - wrong_360).abs() > wrong_360 * 0.1,
+        "and emphatically NOT the first region's solid ({wrong_360}), got {vol}"
+    );
+
+    // The re-edit: an angle-only `UpdateOperationParams` carrying the SAME typed
+    // profile + axis (the frontend's deep-merge shape). The binding must survive.
+    let reedit = revolve_record(
+        REVOLVE,
+        sid,
+        &bound.region_id,
+        180.0,
+        axis,
+        BooleanMode::NewBody,
+        None,
+    );
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(REVOLVE)),
+        op: reedit.op,
+    })
+    .expect("angle re-edit");
+    // The edit lands ON the revolve — step 1 (0 sketch, 1 revolve).
+    let report = regen_from(&mut rt, 1).await;
+    let snap = published(&report, "two-region revolve re-edit");
+    assert_eq!(
+        snap.bodies.len(),
+        1,
+        "still one revolve body after the re-edit"
+    );
+
+    let want_180 = pappus_volume(bound, AXIS_U, 180.0);
+    let wrong_180 = pappus_volume(other, AXIS_U, 180.0);
+    let vol2 = mesh_vol(&mut rt, body_of(REVOLVE), Lod::Fine).await;
+    eprintln!(
+        "after the 180° re-edit: mesh {vol2:.3} vs Pappus {want_180:.3} (the OTHER region \
+         would be {wrong_180:.3})"
+    );
+    assert!(
+        (vol2 - want_180).abs() < want_180 * 0.015,
+        "the re-edited angle applied to the SAME bound region ({want_180}), got {vol2}"
+    );
+    assert!(
+        (vol2 - wrong_180).abs() > wrong_180 * 0.1,
+        "the re-edit did not silently re-bind to the first region ({wrong_180}), got {vol2}"
+    );
+
+    wm.shutdown().await;
+    eprintln!(
+        "REVOLVE-REEDIT-BINDING PASS: region {} held across a 360°→180° \
+         UpdateOperationParams ({vol:.3} → {vol2:.3})",
+        bound.region_id
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP1.5 — the TYPED BODY-EDGE AXIS, the half of `AxisRef` the UI does not author.
+//
+// The variant is implemented end to end (worker `RevolveOp.cpp:129-201`, core
+// `AxisRef::Element`, wire `wire_op_inputs`) and its contract row is recorded
+// `uiExposure:"hidden"`: exposing it is a UI decision, but the PERSISTENCE and
+// IDENTITY behaviour must be proven either way — WP1.5 conditions any future
+// exposure on exactly these tests.
+//
+// The two refusal cases (curved axis edge, foreign/cross-body binding) are
+// worker-level and live in `worker/tests/test_wp6_ops.cpp`; the two that need a
+// real document — save/reopen + upstream edit, and a CONSUMED edge — are here.
+//
+// Geometry, once, for both tests:
+//   * axis body — an XZ sketch `toWorld(u,v)=(0,u,v)` rect u∈[0,10] v∈[0,10]
+//     extruded 20 along its normal ⇒ a box with ONE edge lying on the world
+//     X-axis (y=0, z=0). That edge is the revolution axis.
+//   * profile — the Pappus rect of test 1: XY `toWorld(u,v)=(-v,u,0)`,
+//     u∈[10,20] v∈[0,10] ⇒ world x∈[-10,0], y∈[10,20], radius 15 from the
+//     X-axis, area 100 ⇒ 360° sweeps V = 2π·15·100 = 9424.78.
+// Revolving about a BODY EDGE therefore lands on the same number the sketch-line
+// axis produces — which is the point: the axis SOURCE must not change the result.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SKETCH_AXIS: u128 = 0xC00; // the sketch whose extrude owns the axis edge
+const EXTRUDE_AXIS: u128 = 0xC01; // the axis body producer
+const FILLET_AXIS: u128 = 0xC02; // consumes the axis edge (NeedsRepair test)
+const SKETCH_PROFILE: u128 = 0xC03; // the revolved profile
+const REVOLVE_TYPED: u128 = 0xC04; // the revolve driven by the body-edge axis
+
+const SEC_EDGE_RANGES: u32 = 7;
+const SEC_EDGE_POSITIONS: u32 = 8;
+const SEC_EDGE_ID_OFFS: u32 = 9;
+const SEC_EDGE_ID_CHARS: u32 = 10;
+
+/// MESH1 string table (`id-offs` + `id-chars`) — verbatim from `topology_rebind.rs`.
+fn id_table(
+    view: &MeshHeaderView,
+    blob: &[u8],
+    offs_ty: u32,
+    chars_ty: u32,
+    count: usize,
+) -> Vec<String> {
+    let offs = view.section(offs_ty).expect("id-offs");
+    let chars = view.section(chars_ty).expect("id-chars");
+    let (obase, cbase) = (offs.offset as usize, chars.offset as usize);
+    (0..count)
+        .map(|i| {
+            let lo = u32_le(blob, obase + i * 4) as usize;
+            let hi = u32_le(blob, obase + (i + 1) * 4) as usize;
+            String::from_utf8_lossy(&blob[cbase + lo..cbase + hi]).into_owned()
+        })
+        .collect()
+}
+
+/// The edge that LIES ON the world X-axis (every sampled point has |y|,|z| ≤ 1e-3)
+/// ⇒ `(topoKey, centroid anchor)`. Picked by geometry rather than by ordinal so the
+/// test does not depend on which direction the extrude ran, nor on OCCT's edge
+/// ordering — either would make a green run accidental.
+fn x_axis_edge_pick(view: &MeshHeaderView, blob: &[u8]) -> (String, Vec3) {
+    assert!(
+        view.has_edges(),
+        "MESH1 must carry edges to pick an axis edge"
+    );
+    let er = view.section(SEC_EDGE_RANGES).expect("EDGE_RANGES");
+    let ep = view.section(SEC_EDGE_POSITIONS).expect("EDGE_POSITIONS");
+    let keys = id_table(
+        view,
+        blob,
+        SEC_EDGE_ID_OFFS,
+        SEC_EDGE_ID_CHARS,
+        view.edge_count as usize,
+    );
+    let (erbase, epbase) = (er.offset as usize, ep.offset as usize);
+    for (i, key) in keys.iter().enumerate().take(view.edge_count as usize) {
+        let first = u32_le(blob, erbase + i * 8) as usize;
+        let count = u32_le(blob, erbase + i * 8 + 4) as usize;
+        if count < 2 {
+            continue;
+        }
+        let (mut on_axis, mut sx) = (true, 0.0f64);
+        for p in 0..count {
+            let o = epbase + (first + p) * 12;
+            let (x, y, z) = (
+                f32_le(blob, o) as f64,
+                f32_le(blob, o + 4) as f64,
+                f32_le(blob, o + 8) as f64,
+            );
+            on_axis &= y.abs() <= 1e-3 && z.abs() <= 1e-3;
+            sx += x;
+        }
+        if on_axis {
+            return (
+                key.clone(),
+                Vec3::new_unchecked(sx / count as f64, 0.0, 0.0),
+            );
+        }
+    }
+    panic!("the axis body has no edge on the world X-axis — the fixture geometry moved");
+}
+
+/// Promote the world-X-axis edge of `body` at `snap_id` to a stable [`ElementId`].
+async fn promote_x_axis_edge(
+    rt: &mut DocumentRuntime,
+    body: BodyId,
+    snap_id: SnapshotId,
+) -> (ElementId, Vec3) {
+    let mesh = body_mesh(rt, body, Lod::Coarse).await;
+    let view = validate_mesh_blob(&mesh).expect("MESH1 validates");
+    let (key, anchor) = x_axis_edge_pick(&view, &mesh);
+    let promoted = rt
+        .promote_selection(
+            snap_id,
+            body,
+            vec![(
+                TopoKey::new(&key),
+                Some(AnchorIntent {
+                    world_point: anchor,
+                    surface_uv: None,
+                    local_frame: None,
+                    adjacency_hint: None,
+                    extra: Default::default(),
+                }),
+            )],
+        )
+        .await
+        .expect("promote the axis edge");
+    (ElementId::new(promoted[0].element_id.clone()), anchor)
+}
+
+fn edge_ref_of(body: BodyId, edge_el: &ElementId, anchor: Vec3) -> ElementRef {
+    ElementRef {
+        primary: Some(PrimaryRef {
+            body,
+            element: edge_el.clone(),
+            kind: ElementKind::Edge,
+            extra: Default::default(),
+        }),
+        // Left absent deliberately: the single writer stamps `intent.descriptor`
+        // on the way out, exactly as it does for a Fillet edge ref.
+        intent: None,
+        anchor: Some(AnchorIntent {
+            world_point: anchor,
+            surface_uv: None,
+            local_frame: None,
+            adjacency_hint: None,
+            extra: Default::default(),
+        }),
+        extra: Default::default(),
+    }
+}
+
+/// A Revolve whose axis is `AxisRef::Element` — the typed companion plus the
+/// legacy `edgeId` mirror the additive contract requires.
+fn revolve_typed_axis_record(
+    rec: u128,
+    sketch: SketchId,
+    angle_deg: f64,
+    body: BodyId,
+    edge_el: ElementId,
+    anchor: Vec3,
+) -> OperationRecord {
+    let params = RevolveParams {
+        profile: Some(SketchRegionRef {
+            sketch,
+            region: RegionId::new(""),
+            region_identity_version: None,
+            region_anchor: None,
+            extra: Default::default(),
+        }),
+        angle_deg: Scalar::new(angle_deg),
+        axis: Some(AxisRef::Element {
+            body,
+            edge: edge_el.clone(),
+            edge_ref: Some(edge_ref_of(body, &edge_el, anchor)),
+            extra: Default::default(),
+        }),
+        boolean_mode: BooleanMode::NewBody,
+        target_body: None,
+        extra: Default::default(),
+    };
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "Revolve",
+        Operation::Known(KnownOperation::Revolve(params)),
+    )
+}
+
+fn fillet_record(rec: u128, body: BodyId, edge_el: ElementId, anchor: Vec3) -> OperationRecord {
+    let edge_ref = edge_ref_of(body, &edge_el, anchor);
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "Fillet",
+        Operation::Known(KnownOperation::Fillet(FilletParams {
+            radius: Scalar::new(2.0),
+            edge_ids: vec![edge_el],
+            edges: vec![edge_ref],
+            chain_tangent_edges: false,
+            tangent_closure_version: None,
+            extra: Default::default(),
+        })),
+    )
+}
+
+/// A closed, fully-constrained (dof-0) polygon through `pts` (CCW) — the marshaller
+/// shape `rect_sketch` uses, generalized. Verbatim from `topology_rebind::add_poly`.
+fn add_poly(sk: &mut Sketch, base: u128, pts: &[(f64, f64)]) {
+    let n = pts.len() as u128;
+    let e = |k: u128| EntityId(Uuid::from_u128(base + k));
+    let c = |k: u128| ConstraintId(Uuid::from_u128(base + 0x400 + k));
+    for i in 0..n {
+        let (x0, y0) = pts[i as usize];
+        let (x1, y1) = pts[((i + 1) % n) as usize];
+        sk.add_entity(SketchEntity::point(
+            e(2 * i),
+            Vec2::new_unchecked(x0, y0),
+            false,
+            false,
+        ))
+        .unwrap();
+        sk.add_entity(SketchEntity::point(
+            e(2 * i + 1),
+            Vec2::new_unchecked(x1, y1),
+            false,
+            false,
+        ))
+        .unwrap();
+        sk.add_entity(SketchEntity::line(
+            e(0x100 + i),
+            e(2 * i),
+            e(2 * i + 1),
+            false,
+        ))
+        .unwrap();
+    }
+    for i in 0..n {
+        sk.add_constraint(Constraint::Coincident {
+            id: c(i),
+            point1: e(2 * i + 1),
+            point2: e(2 * ((i + 1) % n)),
+            point1_position: CurvePosition::Arbitrary,
+            point2_position: CurvePosition::Arbitrary,
+        })
+        .unwrap();
+        sk.add_constraint(Constraint::Fixed {
+            id: c(0x100 + i),
+            point: e(2 * i),
+            point_position: CurvePosition::Arbitrary,
+            at: Vec2::new_unchecked(pts[i as usize].0, pts[i as usize].1),
+        })
+        .unwrap();
+    }
+}
+
+/// The axis body's sketch + extrude, appended to `rt`. Returns its `BodyId`.
+///
+/// The profile is an **L**, not a rectangle, and that is load-bearing: the axis edge
+/// is the L's REFLEX corner (270° of material), the only edge of the prism with that
+/// descriptor. A box would give four congruent parallel edges, and after an upstream
+/// edit the ladder would correctly refuse to pick among them on anchor evidence alone
+/// — a genuine `NeedsRepair`, but of the ambiguity class, which would prove nothing
+/// about whether the typed axis ref SURVIVES an edit.
+///
+/// XZ `toWorld(u,v) = (0,u,v)`, so the reflex corner at sketch (0,0) puts that edge
+/// exactly on the world X-axis; extruding along the plane normal runs it down +X.
+fn add_axis_body(rt: &mut DocumentRuntime, depth: f64) -> BodyId {
+    let sid = SketchId(Uuid::from_u128(SKETCH_AXIS));
+    let mut sk = Sketch::on_world_plane(sid, "AxisL", WorldPlane::XY);
+    add_poly(
+        &mut sk,
+        0x3000,
+        &[
+            (0.0, 0.0),
+            (10.0, 0.0),
+            (10.0, 10.0),
+            (-10.0, 10.0),
+            (-10.0, -10.0),
+            (0.0, -10.0),
+        ],
+    );
+    add_op(rt, sketch_record(SKETCH_AXIS, &sk, xz_plane_ref()));
+    add_op(rt, extrude_record(EXTRUDE_AXIS, sid, depth));
+    body_of(EXTRUDE_AXIS)
+}
+
+/// The Pappus profile sketch, appended to `rt`. Returns its `SketchId`.
+fn add_profile_sketch(rt: &mut DocumentRuntime) -> SketchId {
+    let sid = SketchId(Uuid::from_u128(SKETCH_PROFILE));
+    let sk = rect_sketch(sid, 0x4000, 10.0, 0.0, 10.0, 10.0);
+    add_op(rt, sketch_record(SKETCH_PROFILE, &sk, xy_plane_ref()));
+    sid
+}
+
+/// The EDIT lane: a real content edit landed at step `from`, and the plan says
+/// so (SCHEMA §7.2 `editedFrom`).
+async fn regen_from(rt: &mut DocumentRuntime, from: usize) -> RegenReport {
+    rt.run_regen(RegenRequest::ToEnd { from }, CancelToken::new())
+        .await
+}
+
+fn open_over(wm: &WorkerManager, path: &std::path::Path) -> DocumentRuntime {
+    let engine: Arc<dyn GeometryEngine> = Arc::new(wm.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
+    DocumentRuntime::open(path, engine, meshes, solver).expect("reopen saved container")
+}
+
+fn save_meta() -> SaveMeta {
+    SaveMeta {
+        app_version: "revolve-typed-axis".into(),
+        occt_fingerprint: None,
+        created: "2026-08-13T00:00:00Z".into(),
+        modified: "2026-08-13T00:00:00Z".into(),
+    }
+}
+
+const PAPPUS_360: f64 = 9424.778; // 2π·15·100
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP1.5 test 1 — promote a straight body edge, revolve about it, SAVE/REOPEN,
+// then edit the op UPSTREAM of the axis. The typed ref must survive all three:
+// a reopen replays it from `document.json`, and an upstream edit re-runs the
+// producing extrude, so the axis edge is a *different* OCCT edge afterwards and
+// only the semantic ref can still name it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revolve_typed_body_edge_axis_needs_one_repair_after_an_upstream_edit_that_leaves_a_congruent_twin(
+) {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("typed_axis.onecad");
+    let mut rt = runtime_over(&wm);
+
+    // (0) the axis body, and the promotion that turns its X-axis edge into identity.
+    let axis_body = add_axis_body(&mut rt, 20.0);
+    let base = clean_regen(&mut rt).await;
+    let base_snap = published(&base, "axis body");
+    let (edge_el, anchor) = promote_x_axis_edge(&mut rt, axis_body, base_snap.id).await;
+
+    // (1) revolve the Pappus profile about that edge.
+    let profile = add_profile_sketch(&mut rt);
+    add_op(
+        &mut rt,
+        revolve_typed_axis_record(
+            REVOLVE_TYPED,
+            profile,
+            360.0,
+            axis_body,
+            edge_el.clone(),
+            anchor,
+        ),
+    );
+    let first = clean_regen(&mut rt).await;
+    let snap = published(&first, "typed-axis revolve");
+    assert_eq!(
+        snap.repair_summary.needs_repair_count, 0,
+        "a freshly promoted axis edge resolves directly — no repair"
+    );
+    assert!(
+        snap.bodies.iter().any(|b| b.body == body_of(REVOLVE_TYPED)),
+        "the typed body-edge axis published a revolved body"
+    );
+    let vol = mesh_vol(&mut rt, body_of(REVOLVE_TYPED), Lod::Fine).await;
+    assert!(
+        (vol - PAPPUS_360).abs() < 40.0,
+        "revolving about the BODY EDGE lands on the same Pappus solid as the \
+         sketch-line axis ({PAPPUS_360}), got {vol}"
+    );
+
+    // Save the CLEAN pre-edit document — the reopen leg below replays exactly this.
+    rt.save(&path, save_meta())
+        .expect("save the typed-axis doc");
+
+    // (2) UPSTREAM EDIT on the LIVE session — deepen the extrude that owns the axis
+    //     edge, through the edit lane (`from = 1`, which is what stamps SCHEMA §7.2
+    //     `editedFrom`). The edge is rebuilt as a different OCCT edge, longer than
+    //     before; only the semantic ref can still name it.
+    //
+    //     SCHEMA §10 resolver v6 (decision D-3) answers this with ONE repair, not a
+    //     silent rebind. The box's four vertical-face edges are congruent twins: they
+    //     share every descriptor term (type, tangent, outwardness, length) and differ
+    //     ONLY in the anchor term, so the assigned candidate's DESCRIPTOR-only
+    //     separation from its best rival is exactly 0 — a descriptor tie. v6 refuses
+    //     to let a STALE anchor break that tie downstream of `editedFrom`, because the
+    //     geometry moved and exactness at the old world point no longer proves
+    //     continuity (`Ladder.cpp`, EDIT-SCOPED DESCRIPTOR-TIE VETO; v5's anchor-exact
+    //     carve-out is gone). The blended score and margin would BOTH clear the
+    //     0.85/0.10 auto-bind bar — the veto runs first, on purpose.
+    //
+    //     That is the H5-B class this migration exists to fix: a deterministic
+    //     NeedsRepair the user answers with one pick beats a plausible wrong axis.
+    //     The rest of this leg proves the pick is available and that it sticks.
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(EXTRUDE_AXIS)),
+        op: extrude_record(EXTRUDE_AXIS, SketchId(Uuid::from_u128(SKETCH_AXIS)), 24.0).op,
+    })
+    .expect("edit the axis body's extrude depth");
+    let edited = regen_from(&mut rt, 1).await;
+    let edited_snap = published(&edited, "post-upstream-edit revolve").clone();
+    let axis_slot = format!("{}.input0", RecordId(Uuid::from_u128(REVOLVE_TYPED)));
+    let items = rt.repair_items().to_vec();
+    let axis_item = items
+        .iter()
+        .find(|i| i.ref_id == axis_slot)
+        .unwrap_or_else(|| panic!("the REVOLVE's axis slot is what halts, got {items:?}"))
+        .clone();
+    let shape = |item: &onecad_core::document::repair::RepairItem| -> String {
+        item.candidates
+            .iter()
+            .map(|c| format!("{}@{:.4}/m{:.4}", c.topo_key.as_str(), c.score, c.margin))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    assert_eq!(
+        edited_snap.repair_summary.needs_repair_count,
+        1,
+        "v6 asks for exactly ONE repair — the axis — after an upstream edit that \
+         leaves the axis edge's congruent twins in place; candidates were [{}]",
+        shape(&axis_item)
+    );
+    assert_eq!(
+        axis_item.reason,
+        RepairReason::Ambiguous,
+        "a refused descriptor tie reports `ambiguous`; candidates were [{}]",
+        shape(&axis_item)
+    );
+    assert_eq!(
+        axis_item.scoring_version,
+        Some(6),
+        "the refusal must be attributable to resolver v6; candidates were [{}]",
+        shape(&axis_item)
+    );
+    assert!(
+        axis_item.candidates.len() >= 2,
+        "the tie needs its twins: the panel offers the user a choice, got [{}]",
+        shape(&axis_item)
+    );
+    // The twin that makes this a tie: same kind, same length, different anchor.
+    let winner = &axis_item.candidates[0];
+    let twin = &axis_item.candidates[1];
+    assert!(
+        winner.score > twin.score && winner.summary == twin.summary,
+        "the rival is a CONGRUENT twin — identical descriptor summary, separated \
+         only by the anchor; got [{}]",
+        shape(&axis_item)
+    );
+    assert!(
+        !edited_snap
+            .bodies
+            .iter()
+            .any(|b| b.body == body_of(REVOLVE_TYPED)),
+        "a refused axis publishes NO revolved body — a wrong-axis solid is worse \
+         than none"
+    );
+
+    // ── THE REPAIR: the user picks the top-ranked candidate, which IS the
+    //    lengthened axis edge (v6 refused it on principle, not on evidence). The
+    //    pick PROMOTES the TopoKey, so the axis resolves at rung 1 from here on.
+    let repaired_axis = {
+        let promoted = rt
+            .promote_selection(
+                SnapshotId(edited.snapshot_id),
+                axis_body,
+                vec![(
+                    winner.topo_key.clone(),
+                    Some(AnchorIntent {
+                        world_point: winner.world_pos,
+                        surface_uv: None,
+                        local_frame: None,
+                        adjacency_hint: None,
+                        extra: Default::default(),
+                    }),
+                )],
+            )
+            .await
+            .expect("promote the re-picked axis edge");
+        assert_eq!(promoted[0].kind, "edge");
+        ElementId::new(&promoted[0].element_id)
+    };
+    assert_ne!(
+        repaired_axis, edge_el,
+        "the re-pick mints a NEW id — the stale one is what v6 refused"
+    );
+    rt.apply(EditCommand::EditOperationInput {
+        record: RecordId(Uuid::from_u128(REVOLVE_TYPED)),
+        path: InputPath::RevolveAxis,
+        reference: InputRef::Element(edge_ref_of(axis_body, &repaired_axis, winner.world_pos)),
+    })
+    .expect("EditOperationInput{RevolveAxis} answers the §9 item");
+
+    // The repair lands ON the revolve — step 3 (0 sketch, 1 extrude, 2 profile
+    // sketch, 3 revolve), so that is the `editedFrom` this regen claims. Nothing is
+    // downstream of it, so v6's post-edit lane is not even consulted; the axis
+    // resolves at rung 1 from the id the re-pick just promoted.
+    let repaired = regen_from(&mut rt, 3).await;
+    let edited_snap = published(&repaired, "repaired-axis revolve");
+    assert_eq!(
+        edited_snap.repair_summary.needs_repair_count, 0,
+        "one pick closes the halt: the promoted axis resolves at rung 1, below \
+         v6's descriptor lane"
+    );
+    assert!(
+        edited_snap
+            .bodies
+            .iter()
+            .any(|b| b.body == body_of(REVOLVE_TYPED)),
+        "the repaired axis publishes the revolved body again"
+    );
+    // The record now NAMES the re-picked edge — not the id the ladder refused.
+    let stored = rt
+        .operation_params(RecordId(Uuid::from_u128(REVOLVE_TYPED)))
+        .expect("revolve params");
+    assert_eq!(
+        stored["axis"]["edgeId"],
+        serde_json::json!(repaired_axis.as_str()),
+        "the repaired axis is the one the record replays from: {}",
+        stored["axis"]
+    );
+    // THE PROOF: same axis LINE ⇒ same Pappus solid. The repair recovered the
+    // model, it did not quietly revolve about something else.
+    let edited_vol = mesh_vol(&mut rt, body_of(REVOLVE_TYPED), Lod::Fine).await;
+    assert!(
+        (edited_vol - vol).abs() < 1.0,
+        "the same axis line ⇒ the same revolved volume ({vol}) after the upstream edit \
+         and its repair, got {edited_vol}"
+    );
+
+    // (3) A LARGER upstream edit — the axis edge grows +100% — is deterministically
+    //     `NeedsRepair`, not a silent bind onto one of its congruent twins. Measured,
+    //     not assumed: a FILLET ref on this exact edge answers identically at both
+    //     sizes, so this is the shared ladder's descriptor-magnitude policy (auto-bind
+    //     needs score ≥0.85 AND margin ≥0.10) and not something specific to the axis.
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(EXTRUDE_AXIS)),
+        op: extrude_record(EXTRUDE_AXIS, SketchId(Uuid::from_u128(SKETCH_AXIS)), 48.0).op,
+    })
+    .expect("edit the axis body's extrude depth again");
+    let stretched = regen_from(&mut rt, 1).await;
+    let stretched_snap = published(&stretched, "oversized upstream edit");
+    assert!(
+        stretched_snap.repair_summary.needs_repair_count > 0,
+        "an edit that doubles the axis edge is refused, not guessed"
+    );
+    assert!(
+        !stretched_snap
+            .bodies
+            .iter()
+            .any(|b| b.body == body_of(REVOLVE_TYPED)),
+        "a refused axis publishes NO revolved body"
+    );
+
+    // (4) REOPEN the saved pre-edit container and replay it from zero: the typed
+    //     axis is persisted state, not session state.
+    let mut reopened = open_over(&wm, &path);
+    let replay = clean_regen(&mut reopened).await;
+    let replay_snap = published(&replay, "reopened typed-axis revolve");
+    assert_eq!(
+        replay_snap.repair_summary.needs_repair_count, 0,
+        "the typed axis ref replays clean after a reopen"
+    );
+    let replay_vol = mesh_vol(&mut reopened, body_of(REVOLVE_TYPED), Lod::Fine).await;
+    assert!(
+        (replay_vol - vol).abs() < 1.0,
+        "the reopened document revolves about the same axis ({vol}), got {replay_vol}"
+    );
+
+    wm.shutdown().await;
+    eprintln!(
+        "REVOLVE TYPED-AXIS PASS: {vol:.3} → upstream edit {edited_vol:.3} → reopen {replay_vol:.3}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP1.5 test 3 — the axis edge is CONSUMED (a fillet upstream rolls it away).
+// The contract row's `userRecoveryBehavior` is "missing/deleted edge produces
+// NeedsRepair, not OP_FAILED": the user is offered a re-pick, the timeline is not
+// broken, and — the part that matters — no OTHER edge is silently substituted.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revolve_typed_axis_consumed_edge_is_needs_repair_not_failure() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    let axis_body = add_axis_body(&mut rt, 20.0);
+    let base = clean_regen(&mut rt).await;
+    let base_snap = published(&base, "axis body");
+    let (edge_el, anchor) = promote_x_axis_edge(&mut rt, axis_body, base_snap.id).await;
+
+    // The fillet is inserted BEFORE the revolve, so by the time the revolve runs
+    // its axis edge no longer exists in the head.
+    add_op(
+        &mut rt,
+        fillet_record(FILLET_AXIS, axis_body, edge_el.clone(), anchor),
+    );
+    let profile = add_profile_sketch(&mut rt);
+    add_op(
+        &mut rt,
+        revolve_typed_axis_record(
+            REVOLVE_TYPED,
+            profile,
+            360.0,
+            axis_body,
+            edge_el.clone(),
+            anchor,
+        ),
+    );
+
+    let rep = clean_regen(&mut rt).await;
+    let snap = published(&rep, "revolve over a consumed axis edge");
+    assert!(
+        snap.repair_summary.needs_repair_count > 0,
+        "a consumed axis edge is NeedsRepair STATE — auto-binding a different edge \
+         here would silently revolve about the wrong axis"
+    );
+    assert!(
+        !rep.needs_repair.is_empty(),
+        "the report carries the repair item (non-vacuity: an empty list would satisfy \
+         nothing above)"
+    );
+    let refs: Vec<(String, String)> = rep
+        .needs_repair
+        .iter()
+        .map(|item| (item.op_id.clone(), item.ref_id.clone()))
+        .collect();
+    // The item must be the REVOLVE's, named by op id — the fillet in this same
+    // timeline also owns an `…​.input0` ref, so matching the slot alone would let
+    // the fillet's own repair item satisfy a revolve assertion.
+    let revolve_id = Uuid::from_u128(REVOLVE_TYPED).to_string();
+    assert!(
+        refs.iter()
+            .any(|(op, r)| *op == revolve_id && r == &format!("{revolve_id}.input0")),
+        "the REVOLVE's axis (input slot 0) is what needs repair, got {refs:?}"
+    );
+    assert!(
+        !snap.bodies.iter().any(|b| b.body == body_of(REVOLVE_TYPED)),
+        "NeedsRepair publishes NO revolved body — a wrong-axis solid is worse than none"
+    );
+    // The axis body itself survived: this is a repairable REFERENCE, not a broken doc.
+    assert!(
+        snap.bodies.iter().any(|b| b.body == axis_body),
+        "the filleted axis body is still published"
+    );
+
+    // NEGATIVE CONTROL, in the same process: the IDENTICAL document minus the
+    // fillet publishes cleanly. Without this the assertions above would also be
+    // satisfied by a fixture that simply cannot revolve — the fillet has to be
+    // what makes the difference, and this is the only way to show it.
+    let mut control = runtime_over(&wm);
+    let control_body = add_axis_body(&mut control, 20.0);
+    let control_base = clean_regen(&mut control).await;
+    let control_snap = published(&control_base, "control axis body");
+    let (control_el, control_anchor) =
+        promote_x_axis_edge(&mut control, control_body, control_snap.id).await;
+    let control_profile = add_profile_sketch(&mut control);
+    add_op(
+        &mut control,
+        revolve_typed_axis_record(
+            REVOLVE_TYPED,
+            control_profile,
+            360.0,
+            control_body,
+            control_el,
+            control_anchor,
+        ),
+    );
+    let control_rep = clean_regen(&mut control).await;
+    let control_out = published(&control_rep, "control revolve");
+    assert_eq!(
+        control_out.repair_summary.needs_repair_count, 0,
+        "the same document WITHOUT the fillet resolves its axis — the consumed edge          is what produced the repair above"
+    );
+    assert!(
+        control_out
+            .bodies
+            .iter()
+            .any(|b| b.body == body_of(REVOLVE_TYPED)),
+        "the control document publishes the revolved body"
+    );
+
+    wm.shutdown().await;
+    eprintln!("REVOLVE TYPED-AXIS CONSUMED PASS: NeedsRepair {refs:?}, no revolved body");
+}

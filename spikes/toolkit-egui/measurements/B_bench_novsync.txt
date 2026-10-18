@@ -1,0 +1,56 @@
+[metric] main uptime_ns=2385224798467625
+[metric] scene_load dir=/Users/andrejvysny/workspace/OneCAD/spikes/toolkit-egui/../fixtures/nema17 bodies=67 tris=381524 bytes=12559300 ms=4.10
+[metric] app_new_enter since_main_ms=96.98 uptime_ns=2385224895446625
+[metric] icons parsed=112
+[metric] fonts ui=Some("/System/Library/Fonts/SFNS.ttf") mono=Some("/System/Library/Fonts/SFNSMono.ttf") ms=1.25
+[metric] adapter name="Apple M4 Pro" backend=Metal target_format=Bgra8Unorm
+[metric] gpu_upload bodies=67 tris=381524 edge_segments=69267 bytes=13761600 ms=4.22
+[metric] dimension_anchor a=Vec3(-22.927586, -27.542656, 31.589207) b=Vec3(22.927586, -27.542656, 31.589207) len_mm=45.855
+[metric] app_created since_main_ms=112.05 uptime_ns=2385224910515791
+[metric] first_frame_prepare since_main_ms=120.33 uptime_ns=2385224918793458
+[metric] rss after_first_frame resident_mb=136.8 phys_footprint_mb=67.5
+[metric] frame=2 viewport_rect=[[0.0 0.0] - [1521.0 921.0]] ppp=1
+[metric] rss bench_start resident_mb=135.0 phys_footprint_mb=401.3
+[metric] orbit_bench frames=599 interval_ms mean=15.455 p50=16.650 p95=17.725 p99=18.791 max=25.246 fps=64.7
+[metric] orbit_bench ui_cpu_ms mean=0.986 p50=0.964 p95=1.911 max=2.534
+[metric] orbit_bench frame_cpu_ms mean=1.994 p50=2.150 p95=3.369 max=3.954
+[metric] rss bench_end resident_mb=136.7 phys_footprint_mb=400.3
+*** Terminating app due to uncaught exception 'NSRangeException', reason: 'Cannot remove an observer <_NSTouchBarFinderObservation 0x7d8da0680> for the key path "nextResponder" from <WinitView 0x7d6ff4900> because it is not registered as an observer.'
+*** First throw call stack:
+(
+	0   CoreFoundation                      0x00000001817b31f0 __exceptionPreprocess + 176
+	1   libobjc.A.dylib                     0x000000018122e91c objc_exception_throw + 88
+	2   Foundation                          0x0000000182f851d0 -[NSObject(NSKeyValueObserverRegistration) _removeObserver:forProperty:] + 636
+	3   Foundation                          0x0000000182f84f00 -[NSObject(NSKeyValueObserverRegistration) removeObserver:forKeyPath:] + 136
+	4   Foundation                          0x0000000182f84bd8 -[NSObject(NSKeyValueObserverRegistration) removeObserver:forKeyPath:context:] + 196
+	5   AppKit                              0x0000000186624474 -[_NSTouchBarFinderObservation invalidate] + 264
+	6   AppKit                              0x0000000186625724 ___NSTouchBarFinderSetNeedsUpdateOnMain_block_invoke_2 + 636
+	7   AppKit                              0x0000000185c1d364 NSDisplayCycleObserverInvoke + 168
+	8   AppKit                              0x0000000185c1cfe0 NSDisplayCycleFlush + 656
+	9   QuartzCore                          0x000000018b77ad9c _ZN2CA11Transaction19run_commit_handlersE18CATransactionPhase + 120
+	10  QuartzCore                          0x000000018b7793d8 _ZN2CA11Transaction6commitEv + 324
+	11  QuartzCore                          0x000000018b9772bc _ZN2CA11Transaction25flush_as_runloop_observerEb + 140
+	12  AppKit                              0x00000001864b40c8 stepTransactionFlush + 220
+	13  UpdateCycle                         0x00000002797012f4 _ZN2UC10DriverCore18continueProcessingEv + 84
+	14  CoreFoundation                      0x0000000181744344 __CFRUNLOOP_IS_CALLING_OUT_TO_AN_OBSERVER_CALLBACK_FUNCTION__ + 36
+	15  CoreFoundation                      0x0000000181744240 __CFRunLoopDoObservers + 648
+	16  CoreFoundation                      0x0000000181816234 _CFRunLoopRunSpecificWithOptions + 484
+	17  HIToolbox                           0x000000018e52f560 RunCurrentEventLoopInMode + 320
+	18  HIToolbox                           0x000000018e5328bc ReceiveNextEventCommon + 488
+	19  HIToolbox                           0x000000018e6bc14c _BlockUntilNextEventMatchingListInMode + 48
+	20  AppKit                              0x00000001862263d0 _DPSBlockUntilNextEventMatchingListInMode + 228
+	21  AppKit                              0x0000000185b7a084 _DPSNextEvent + 576
+	22  AppKit                              0x000000018670f96c -[NSApplication(NSEventRouting) _nextEventMatchingEventMask:untilDate:inMode:dequeue:] + 688
+	23  AppKit                              0x000000018670f678 -[NSApplication(NSEventRouting) nextEventMatchingMask:untilDate:inMode:dequeue:] + 72
+	24  AppKit                              0x0000000185b6d13c -[NSApplication run] + 368
+	25  toolkit-egui                        0x00000001028aa818 toolkit-egui + 485400
+	26  toolkit-egui                        0x00000001028b3c5c toolkit-egui + 523356
+	27  toolkit-egui                        0x0000000102d1b328 toolkit-egui + 5141288
+	28  toolkit-egui                        0x0000000102d447a8 toolkit-egui + 5310376
+	29  toolkit-egui                        0x0000000102d449a0 toolkit-egui + 5310880
+	30  toolkit-egui                        0x0000000102d449b8 toolkit-egui + 5310904
+	31  toolkit-egui                        0x0000000102cecb5c toolkit-egui + 4950876
+	32  toolkit-egui                        0x0000000102d4485c toolkit-egui + 5310556
+	33  dyld                                0x00000001812bc4e4 start + 6992
+)
+libc++abi: terminating due to uncaught exception of type NSException

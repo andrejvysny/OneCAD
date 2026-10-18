@@ -45,7 +45,7 @@ Two specific traps that make a green run a lie:
 
 Pause for the user only when the work genuinely requires them: a destructive or irreversible action, a real scope change, a gate only a human can run, or input only they can provide. If you hit one, ask and end the turn rather than ending on a promise.
 
-Gates the user must run (track as owed validation Tasks in Plane; do not fake them): the autosave manual checklist, the merged-stack Tauri smoke, and "does the exported STEP open coloured in another CAD". (3MF is a RUST-side writer — `onecad-core/src/io/threemf.rs` + `src-tauri/src/export_threemf.rs`, W4 — while the worker exports STEP/STL/OBJ; "3MF opens in a slicer" is a real user-run gate, owed alongside the STEP one and only meaningful once WP-J makes the writers honest.)
+Gates the user must run (track as owed validation Tasks in Plane; do not fake them): the autosave manual checklist, the merged-stack Tauri smoke, and "does the exported STEP open coloured in another CAD". (3MF is a RUST-side writer — `onecad-core/src/io/threemf.rs` + `crates/onecad-app/src/export_threemf.rs`, W4 — while the worker exports STEP/STL/OBJ; "3MF opens in a slicer" is a real user-run gate, owed alongside the STEP one and only meaningful once WP-J makes the writers honest.)
 
 Before ending a turn, check your last paragraph. If it is a plan, an analysis, a question, a list of next steps, or a promise about work you have not done, do that work now with tool calls.
 
@@ -163,16 +163,16 @@ cmake -S worker -B worker/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
 cmake --build worker/build --parallel 3
 ```
 
-### Rust (from `src-tauri/`)
+### Rust (from repository root)
 
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-ONECAD_WORKER_PATH=$PWD/../worker/build/onecad-worker ONECAD_REQUIRE_WORKER=1 cargo test --workspace
-cargo test --test m2_gate            # single integration test target
+ONECAD_WORKER_PATH=$PWD/worker/build/onecad-worker ONECAD_REQUIRE_WORKER=1 cargo test --workspace
+cargo test -p onecad --test m2_gate            # single integration test target
 ```
 
-`ONECAD_REQUIRE_WORKER=1` turns "no worker binary found" into a hard failure instead of a vacuously green skip. The worker-backed gates (`m2_gate`, `wire_contract`, `topology_rebind`, `real_worker_smoke`, `sketch_*`, `breadth_ops`, `checkpoints`, `worker_chaos`) must actually run. Without the env var, resolution falls back to `../worker/build/onecad-worker` (`worker::DEV_WORKER_PATH`).
+`ONECAD_REQUIRE_WORKER=1` turns "no worker binary found" into a hard failure instead of a vacuously green skip. The worker-backed gates (`m2_gate`, `wire_contract`, `topology_rebind`, `real_worker_smoke`, `sketch_*`, `breadth_ops`, `checkpoints`, `worker_chaos`) must actually run. Without the env var, resolution falls back to `worker/build/onecad-worker` under the repository root (`worker::DEV_WORKER_PATH`).
 
 ### Playwright e2e (mock lane, no Rust/C++)
 
@@ -227,16 +227,18 @@ Pick the cheapest rung that actually covers the change. Say which rung you ran.
 ```
 src/            React 19 + Three.js + zustand frontend
   ↕ tauri invoke (camelCase projection DTOs — the frontend never sees a wire envelope)
-src-tauri/src/  Tauri app crate: #[tauri::command] wrappers → DocumentRuntime → WorkerManager
+src-tauri/src/  Legacy Tauri adapter: commands, lifecycle and native host services
+  ↕ host service contracts (crates/onecad-app/src/host.rs)
+crates/onecad-app/   application services: DocumentRuntime → WorkerManager; no Tauri
   ↕ trait seams (GeometryEngine / MeshProvider)
-src-tauri/crates/onecad-core/   pure domain: document, history, regen, sketch, io. No Tauri.
+crates/onecad-core/   pure domain: document, history, regen, sketch, io. No Tauri.
   ↕ OCW1 frames over stdio (protocol/SCHEMA.md)
 worker/         C++20 sidecar: OCCT 8.0.1 kernel + vendored PlaneGCS solver
 ```
 
 Supporting crates: `onecad-protocol` (OCW1 codec, MESH1 validator, `ProtocolClient`), `onecad-worker-stub` (deterministic fake worker binary for chaos tests), `onecad-regen` (headless replay CLI, runs in CI), `onecad-kernelbench`, `onecad-library` (no tauri, no network I/O).
 
-Data flow per operation: FE invoke → Tauri command → `DocumentRuntime` plan → OCW1 `ExecutePlan` frame → worker regen → `document-changed` / `projection-updated` events → snapshot publish → Tessellate → MESH1 blob (Rust validates the header only and forwards bytes verbatim) → `MeshCache` keyed `(BodyId, Lod, generation)` → `ArrayBuffer` → zero-copy TS typed-array views → GPU buffers, **Z-up verbatim, never axis-swapped**.
+Legacy Tauri/React data flow per operation: FE invoke → Tauri command → `DocumentRuntime` plan → OCW1 `ExecutePlan` frame → worker regen → `document-changed` / `projection-updated` events → snapshot publish → Tessellate → MESH1 blob (Rust validates the header only and forwards bytes verbatim) → `MeshCache` keyed `(BodyId, Lod, generation)` → `ArrayBuffer` → zero-copy TS typed-array views → GPU buffers, **Z-up verbatim, never axis-swapped**. Native scene/render consumers use the checked `onecad-protocol::mesh::MeshView` decoder before geometry traversal or upload; shared application services remain the document authority.
 
 ### Key directories
 
@@ -249,8 +251,9 @@ Data flow per operation: FE invoke → Tauri command → `DocumentRuntime` plan 
 | `src/modules/` | Feature modules registering into the platform: `modeling/`, `library/` |
 | `src/features/`, `src/ui/`, `src/tools/` | Screen-level UI, shared primitives, interaction state machines (`SketchController.ts`, `modelToolMachine.ts`) |
 | `src/styles/` | `tokens.css` (Tailwind v4 `@theme`; sole hex source) + `globals.css` |
-| `src-tauri/` | Tauri 2 app crate `onecad` (lib `onecad_lib`): `src/api/`, `src/worker/`, `document_runtime.rs`, `dto.rs`, `error.rs`, `events.rs` |
-| `src-tauri/crates/` | Workspace members listed above |
+| `src-tauri/` | Legacy Tauri adapter `onecad` (`onecad_lib`): commands, lifecycle, native host services and integration tests |
+| `crates/onecad-app/` | Host-independent application services, DTOs, events, runtime and worker supervision |
+| `crates/` | Workspace members listed above |
 | `worker/` | C++20 OCCT sidecar: `src/ops/` (one file per op), `src/kernel/`, `src/protocol/` (Dispatcher), `src/session/`, `tests/`, `cmake/`, `third_party/` (vendored nlohmann json + PlaneGCS; OCCT is **not** vendored) |
 | `protocol/` | `SCHEMA.md` (OCW1, normative, ~535 KB — read sections), `mesh_format.md` (MESH1), `fixtures/` (executable NDJSON form of the spec) |
 | `e2e/` | Playwright mock-client lane |
@@ -339,7 +342,7 @@ Layer stack: Application Shell → OneCAD Platform (domain-neutral infra: docume
 - **`src/ipc/client.ts` — `CadClient` is the single seam to the backend.** Two impls: `mockClient` (in-memory, drives the whole UI with no backend) and `tauriClient`, selected at runtime by presence of `__TAURI_INTERNALS__` (prod builds compile-evict the mock via `evictMockClientInProd`). Keep additions to the interface append-only so both evolve together.
 - **`src/ipc/localSolver.ts`** — the sketch-solver and drag-preview lanes are *shared by both clients*. The mock runs the identical lane logic over a local identity solve; the tauri client routes the same calls to the worker's live gesture verbs (SCHEMA §7.4: `SketchUpsert` / `BeginGesture` / `SolveDrag` / `EndGesture` are fully wired). Only `commit` differs, injected as a dependency. Don't duplicate lane logic into either client.
 - **`src/ipc/angleUnits.ts`** — the UI angle domain is **degrees**, the wire domain is **radians**. Every deg↔rad conversion for a sketch dimension goes through this module; three marshalling sites depend on it agreeing. This was a past bug.
-- **IPC lockstep** (drift is a bug): `CMD` / `EVT` const maps in `src/ipc/tauriClient.ts` ↔ `src-tauri/src/api/mod.rs` fns ↔ `generate_handler!` in `lib.rs`; event names ↔ `src-tauri/src/events.rs`; camelCase DTO shapes `ipc/types.ts` ↔ `dto.rs`. Invoke paths are snake_case (Rust fn names); events are kebab-case.
+- **IPC lockstep** (drift is a bug): `CMD` / `EVT` const maps in `src/ipc/tauriClient.ts` ↔ `src-tauri/src/api/mod.rs` fns ↔ `generate_handler!` in `lib.rs`; event names ↔ `crates/onecad-app/src/events.rs`; camelCase DTO shapes `ipc/types.ts` ↔ `crates/onecad-app/src/dto.rs`. Invoke paths are snake_case (Rust fn names); events are kebab-case.
 - **Errors-as-values**: store actions do `set({status:"loading"})` → `await client.x()` → `set({status:"ready"|"error"})`; catch → `logError(…)` plus set status, and **never rethrow**. The status is the report. Rust errors arrive as `ApiError {kind, message, diagnostics?}` with kinds `noDocument | invalidCommand | opFailed | stalePreview | worker | io | internal`.
 - Styling: Tailwind v4 utilities over tokens (`className="bg-panel text-ink-3"`), composed with `cn()`. No CSS modules.
 - Logging: `logError` / `logWarn` / `logDebug` (`src/debug/log`), `trace` (`src/debug/trace`); DEV installs an error forwarder to Rust `log_event`. The logger is off under vitest.
@@ -351,7 +354,7 @@ Layer stack: Application Shell → OneCAD Platform (domain-neutral infra: docume
 - Clippy-clean with `-D warnings` — on the NEWEST stable, not just the local toolchain: CI installs `stable` unpinned, so a new release's lints go red there first (2026-09-02: 1.98's `chunks_exact_to_as_chunks`); before pushing, `rustup toolchain install <stable> -c clippy` and `cargo +<stable> clippy --workspace --all-targets -- -D warnings` on a scratch `CARGO_TARGET_DIR`. Prefer `&str` over `String` for params; `#[tracing::instrument]` on arg-identifying commands, never on drag-frequency ones.
 - `onecad-core` **must not depend on tauri**; `onecad-library` has no tauri and no network I/O. Shared versions live in `[workspace.dependencies]`; crates opt in with `{ workspace = true }`.
 - `ApiError` conversion is the choke point for `EngineError` → wire.
-- Release worker resolution is bundled-only (`<exe_dir>/onecad-worker`); debug uses `ONECAD_WORKER_PATH` → `../worker/build/onecad-worker` → bundled.
+- Release worker resolution is bundled-only (`<exe_dir>/onecad-worker`); debug uses `ONECAD_WORKER_PATH` → `worker/build/onecad-worker` (repository root) → bundled.
 
 ### C++ worker
 

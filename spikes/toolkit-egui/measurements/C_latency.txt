@@ -1,0 +1,3 @@
+[quiet] lat1 loadavg={ 3.90 2.91 2.96 } 18:52:33
+[quiet] lat2 loadavg={ 3.34 2.85 2.94 } 18:52:52
+[quiet] lat3 loadavg={ 2.75 2.75 2.90 } 18:53:12

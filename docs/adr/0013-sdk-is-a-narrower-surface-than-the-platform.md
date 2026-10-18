@@ -2,6 +2,8 @@
 
 Status: accepted (2026-08-09)
 
+Reshaped by: [ADR-0015](0015-native-rust-ui.md) and [ADR-0017](0017-external-addons-deferred.md) (proposed 2026-10-17): the TypeScript SDK retires with `src/`, the narrowing principle carries forward.
+
 ## Context
 
 `@/platform` was designed as the internal host API and is good at that job. It
