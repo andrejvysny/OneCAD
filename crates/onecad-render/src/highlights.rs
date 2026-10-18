@@ -87,6 +87,8 @@ impl HighlightDraw {
 pub struct PreparedHighlights {
     pub(crate) scene: SceneIdentity,
     pub(crate) draws: Vec<HighlightDraw>,
+    pub(crate) boundaries: Vec<[f32; 6]>,
+    pub(crate) boundary_draws: Vec<HighlightDraw>,
 }
 impl PreparedHighlights {
     pub(crate) fn validate_scene(
@@ -110,7 +112,7 @@ impl PreparedHighlights {
     }
     pub(crate) fn metadata_bytes(&self) -> Result<u64, RenderError> {
         mul(
-            self.draws.capacity() as u64,
+            (self.draws.capacity() + self.boundary_draws.capacity()) as u64,
             std::mem::size_of::<HighlightDraw>() as u64,
         )
     }
@@ -128,6 +130,8 @@ impl PreparedHighlights {
 
 pub(crate) struct GpuHighlights {
     pub draws: Vec<HighlightDraw>,
+    pub boundaries: wgpu::Buffer,
+    pub boundary_draws: Vec<HighlightDraw>,
     pub uniforms: [wgpu::Buffer; 2],
     pub binds: [wgpu::BindGroup; 2],
 }
@@ -136,6 +140,8 @@ impl GpuHighlights {
         gpu: &Gpu,
         layout: &wgpu::BindGroupLayout,
         draws: Vec<HighlightDraw>,
+        boundaries: Vec<[f32; 6]>,
+        boundary_draws: Vec<HighlightDraw>,
     ) -> Self {
         let uniforms = std::array::from_fn(|_| {
             gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -152,17 +158,29 @@ impl GpuHighlights {
                 &[uniforms[index].as_entire_binding()],
             )
         });
+        use wgpu::util::DeviceExt;
+        let data = bytemuck::cast_slice(&boundaries);
+        let boundaries = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("face highlight boundaries"),
+                contents: if data.is_empty() { &[0; 64] } else { data },
+                usage: wgpu::BufferUsages::VERTEX,
+            });
         Self {
             draws,
+            boundaries,
+            boundary_draws,
             uniforms,
             binds,
         }
     }
     pub(crate) fn gpu_bytes(&self) -> u64 {
-        self.uniforms.iter().map(wgpu::Buffer::size).sum()
+        self.uniforms.iter().map(wgpu::Buffer::size).sum::<u64>() + self.boundaries.size()
     }
     pub(crate) fn metadata_bytes(&self) -> u64 {
-        self.draws.capacity() as u64 * std::mem::size_of::<HighlightDraw>() as u64
+        (self.draws.capacity() + self.boundary_draws.capacity()) as u64
+            * std::mem::size_of::<HighlightDraw>() as u64
     }
 }
 
@@ -195,11 +213,22 @@ impl Renderer {
             0
         } else {
             2 * std::mem::size_of::<FrameU>() as u64
+                + (prepared.boundaries.len() as u64 * 24).max(64)
         };
         let mut estimate = highlight_budget(
             self.preparation_budget(),
             prepared.metadata_bytes()?,
             gpu_bytes,
+        )?;
+        estimate = self.limits.check(
+            MemoryEstimate {
+                cpu_prepared_bytes: add(
+                    estimate.cpu_prepared_bytes,
+                    mul(prepared.boundaries.capacity() as u64, 24)?,
+                )?,
+                ..estimate
+            },
+            MemoryEstimate::default(),
         )?;
         estimate.geometry_bytes -= self.highlight_gpu_bytes();
         estimate.resident_metadata_bytes -= self.highlight_metadata_bytes();
@@ -207,8 +236,15 @@ impl Renderer {
             device: &self.device,
             queue: &self.queue,
         };
-        self.highlights = (!prepared.is_empty())
-            .then(|| GpuHighlights::new(&gpu, &self.pipelines.frame_layout, prepared.draws));
+        self.highlights = (!prepared.is_empty()).then(|| {
+            GpuHighlights::new(
+                &gpu,
+                &self.pipelines.frame_layout,
+                prepared.draws,
+                prepared.boundaries,
+                prepared.boundary_draws,
+            )
+        });
         self.estimate = estimate;
         Ok(())
     }

@@ -72,9 +72,23 @@ mod tests {
         assert_eq!(budget.used.load(Ordering::Acquire), 0);
     }
     #[test]
+    fn canceled_contour_job_keeps_its_host_reservation_until_execution_retires() {
+        let budget = Arc::new(HostBudget::default());
+        let _current = budget.reserve(DISPLAY_RESERVATION).unwrap();
+        let _pending = budget.reserve(DISPLAY_RESERVATION).unwrap();
+        let _building = budget.reserve(DISPLAY_RESERVATION).unwrap();
+        let _preview = budget.reserve(PREVIEW_RESERVATION).unwrap();
+        let host = Arc::new(budget.reserve(MAX_PREPARED_BYTES as usize).unwrap());
+        let executing_job = host.clone();
+        drop(host);
+        assert!(budget.reserve(MAX_PREPARED_BYTES as usize).is_err());
+        drop(executing_job);
+        assert!(budget.reserve(MAX_PREPARED_BYTES as usize).is_ok());
+    }
+    #[test]
     fn nema_checked_scene_fits_display_reservation_with_bvh_storage() {
         let directory =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spikes/fixtures/nema17");
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/render/nema17");
         let mut paths: Vec<_> = std::fs::read_dir(directory)
             .unwrap()
             .map(|entry| entry.unwrap().path())

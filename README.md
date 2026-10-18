@@ -1,162 +1,71 @@
-<p align="center">
-  <img src="app-icon.png" alt="OneCAD icon" width="120" height="120" />
-</p>
+# OneCAD
 
-<h1 align="center">OneCAD</h1>
+OneCAD is a native Rust CAD application with a C++20 OCCT geometry worker.
+`onecad-render::Renderer` is the sole CAD rendering implementation; the native
+host and headless captures share it. Application services own document history,
+regeneration, persistence, import/export and worker supervision.
 
-<p align="center">
-  A parametric, history-based CAD application.
-  <br/>
-  React &middot; TypeScript &middot; Three.js &middot; Rust &middot; C++20 / OCCT
-</p>
+The React/Tauri application, Three.js renderers and comparison/prototype
+renderers have been retired. This consolidation does not establish production
+cutover, appearance acceptance or workflow parity with the retired editor.
+Historical screenshots are static evidence only.
 
-<p align="center">
-  <img alt="OneCAD editor screenshot" src="OneCAD.png" width="100%" />
-</p>
+## Development
 
----
+Use the repository-root Cargo workspace. Install pinned OCCT using
+`scripts/build-pinned-occt.sh`; then build and stage the worker:
 
-## About
-
-OneCAD is a **four-layer parametric CAD tool** built like a professional package:
-sketch, extrude, and edit past decisions with a full history timeline. It pairs a
-modern React + Three.js frontend with a pure-Rust recovery/regeneration core and
-a C++20 OpenCascade kernel sidecar.
-
-The engineering model is simple and strict: every wire message is defined once in
-`protocol/SCHEMA.md`, implemented verbatim by both the Rust core and the C++ worker,
-and pinned by cross-track suites. There is **no JavaScript on the model kernel
-path** — the frontend only ever sees projection DTOs produced by Rust, and the
-C++ worker speaks frames over stdio.
-
-Project roadmap and live status: [Plane Roadmap](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/pages/8a3f35a2-a9f0-40e0-aedb-783d58a89359) and [Tasks](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/issues/). Version-specific modeling contracts remain in [Git](docs/design/modeling-correctness/phase-0-safety-and-truth.md), indexed by the [Documentation index](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/pages/0bfe867d-215a-4cfb-a501-9f628976bc9d).
-
-**Note:** `package-lock.json` is stale. Use Bun (see [Development](#development)).
-
----
-
-## Features
-
-- **Sketching** — lines, circles, arcs, ellipses, points, rectangles, slots,
-  polygons; parametric constraints, snapping, construction geometry, marquee
-  select, real parametric trim, H/V-distance dimensions.
-- **Modeling** — extrude (Blind/Symmetric/ThroughAll/ToNext/ToFace, draft, mirror),
-  revolve, fillet & chamfer (unify edge tool, drag direction flips type),
-  shell, boolean (Add/Cut/Union), holes (ISO/DIN), patterns & mirror.
-- **Body transform** — move / rotate / copy via an interactive gizmo, fold/align,
-  with an edit-safety gate on transformed models.
-- **Parametric history** — edit dimensions anywhere in the timeline, roll back,
-  reorder, insert at the cursor, promote snapshots; undo/redo with checkpoint
-  acceleration and draft suppression.
-- **Kernel-backed previews** — current coverage and native acceptance are tracked in the [ONECAD Plane project](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/issues/).
-- **STEP import** — XCAF product names + per-face colors, first-class bodies,
-  identity survives process death.
-- **Datum planes**, measure tool (area, length, distance), units
-  (mm / cm / m / in), dark mode (light / dark / system), display modes with
-  studio shading, keyboard-driven tools and mui surface.
-
----
-
-## Architecture
-
-The root Cargo workspace owns `crates/` and the legacy `src-tauri/` adapter.
-`onecad-app` provides host-independent application services; `onecad-core` owns
-pure domain behavior. The OCCT kernel runs as an external C++20 sidecar.
-
-```mermaid
-flowchart TB
-    subgraph FE["Frontend — React 19 · Zustand · Three.js"]
-        UI[("App · tools / stores / viewport\nimperative Three.js, Z-up / right-handed")]
-    end
-
-    subgraph RUST["Backend — Tauri app + onecad-* crates"]
-        CORE["Rust core\nrecords · regen pipeline · resolution ladder\nrecovery · validation & protocols"]
-    end
-
-    subgraph CPP["Worker — C++20 sidecar · OpenCASCADE OCCT"]
-        SIDE["worker\nsolver · boundary rep · STEP/XCAF\nboolean · chamfer/fillet · shell · mass props"]
-    end
-
-    UI -->|"IPC (Tauri v2 · projection DTOs)"| CORE
-    CORE <-->|"OCW1 / MESH1 frames over stdio\n(stdout = frames · stderr = logs)"| SIDE
+```sh
+ONECAD_OCCT_ROOT="$HOME/.onecad-occt/8.0.1" scripts/build-worker.sh Release
+make run
 ```
 
-**Rules that hold the project together:**
+`make run` creates an isolated QA profile and, when needed, a synthetic constrained
+plate through shared application services. Host arguments and launch requirements
+are documented in [native host instructions](crates/onecad-ui/README.md).
 
-- **No JS on the kernel path.** Only Rust (`serde_json`) and C++ (`nlohmann::json`)
-  parse wire envelopes, so `u64` is safe; the frontend only receives DTOs.
-- **Do not rotate the root scene groups.** The viewport is imperative Three.js and
-  permanently Z-up / right-handed.
-- **Treat the protocol as normative.** Any wire change requires a linked Rust/C++
-  update, a fixture bump, and cross-track sign-off.
-- **Frontend colors live only in `src/styles/tokens.css`** — no raw hex literals in
-  TypeScript/TSX.
-- The worker writes **frames to stdout and logs to stderr only**.
-
----
-
-## Repository layout
-
-```
-src/                React 19 + Zustand + Three.js frontend (*.test.tsx colocated)
-Cargo.toml          Root Rust workspace; Cargo.lock pins its dependencies
-src-tauri/          Legacy Tauri adapter and integration tests
-crates/             onecad-app · onecad-core · onecad-regen · onecad-protocol · onecad-worker-stub
-worker/             C++20 OCCT sidecar + its CTest suite
-protocol/           SCHEMA.md (OCW1) and mesh_format.md (MESH1) normative contracts
-corpus/             read-only legacy correctness oracle
-e2e/                Playwright specs (mock-client lane)
-docs/               DEBUGGING · PACKAGING · qa/ (release gates + triage) · postmortems
-CURRENT_STATE.md    compatibility pointer to Plane project status
-TODO.md             compatibility pointer to Plane Tasks and historical gates
-```
-
----
-
-## Getting started
-
-Requires **Bun** (do not use `npm` — the lockfile is intentionally stale).
-
-```bash
-bun install
-bun run dev          # Vite on port 1420
-bun run tauri dev    # full desktop app (Tauri)
-```
-
-### Build / checks
-
-```bash
-bun run build        # TypeScript check + production bundle
-bun run test         # Vitest (frontend)
-bun run e2e          # Playwright (mock-client lane)
-```
-
-### Worker + Rust
-
-The worker is bundled by Tauri as an external sidecar, so **stage it first**
-before any Cargo run that compiles the app.
-
-```bash
-bash scripts/build-worker.sh Release
-ctest --test-dir worker/build --output-on-failure
+```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-ONECAD_WORKER_PATH=$PWD/worker/build/onecad-worker \
-  ONECAD_REQUIRE_WORKER=1 cargo test --workspace
+ONECAD_REQUIRE_WORKER=1 ONECAD_WORKER_PATH="$PWD/worker/build/onecad-worker" cargo test --workspace
+ctest --test-dir worker/build --output-on-failure
 ```
 
-Run these Cargo commands from the repository root. The legacy `src-tauri/`
-member retains integration tests (`cargo test -p onecad --test <name>`). Build
-outputs live under `target/`; sidecar staging stays in `src-tauri/binaries/`.
+Required Metal qualification runs the renderer's ignored GPU tests; missing GPU
+hardware must fail. CPU tests and successful captures alone do not establish
+appearance acceptance. See `.github/workflows/native-renderer.yml`.
 
-`ONECAD_REQUIRE_WORKER=1` guarantees worker-backed gates — a missing binary
-cannot produce a skipped pass.
+## Layout and contracts
 
----
+Shared application services live in `crates/onecad-app`; backend regression tests
+and STEP fixtures are under its `tests` directory. Native UI, interaction, scene
+and renderer crates preserve their separate responsibilities. The checked MESH1
+protocol preserves Z-up geometry and topology identities. Wire contracts are
+normative in [SCHEMA](protocol/SCHEMA.md) and [mesh format](protocol/mesh_format.md).
 
-## Contributing / process notes
+Theme/icon sources live in `assets/native`; renderer fixtures in `fixtures/render`.
+Fixture generation uses the real worker through shared application services:
 
-- Consult the private [ONECAD project](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/issues/) and relevant Tasks/Pages before substantial work. Plane owns project management and durable knowledge; protocols, APIs, architecture, installation, testing and release procedures remain in Git. Propose new Tasks/knowledge updates and obtain approval before saving unless already authorized. Preserve unrelated worktree changes.
-- Run the smallest relevant suite first, then the frontend, worker, and Rust gates.
-- Commit at a completed gate with a concise conventional message
-  (`feat: description`, `fix: ...`, `docs: ...`). Do not auto-commit, push, or pull.
+```sh
+cargo run -p onecad-mesh-fixture -- --worker "$PWD/worker/build/onecad-worker" --out "$PWD/fixtures/render"
+```
+
+Worker binaries and integrity manifests are staged in ignored
+`packaging/binaries`. [Native packaging](docs/PACKAGING.md) preserves binary hash,
+hello compatibility and OCCT fingerprint checks.
+
+Bun supports repository tooling only:
+
+```sh
+bun install --frozen-lockfile
+bun test scripts/tests
+bun scripts/check-rust-layers.mjs
+bun scripts/verify-modeling-coverage.mjs
+bun scripts/verify-modeling-contracts.mjs
+```
+
+Project status and durable decisions live in the existing private
+[ONECAD Plane project](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/issues/).
+Code-coupled documentation stays in Git. See [AGENTS.md](AGENTS.md),
+[architecture](docs/ARCHITECTURE.md), [debugging](docs/DEBUGGING.md),
+[attribution](ATTRIBUTION.md) and `THIRD_PARTY_NOTICES`.

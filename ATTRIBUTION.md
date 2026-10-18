@@ -2,6 +2,10 @@
 
 Code adapted from other projects. Append-only: one row per adapted file.
 
+The comparison vendor and rendering prototypes named in historical rows below
+are retired. Their attribution is retained as provenance for adapted native
+files; they are no longer build dependencies or executable rendering paths.
+
 All SolidCraft entries abbreviated as `6bde126a` refer to full revision
 `6bde126a5cabd1f5af0c68e6955bd0176fab805a`, verified in the local donor checkout.
 The canonical donor repository is `https://github.com/tangency-labs/solidcraft`;

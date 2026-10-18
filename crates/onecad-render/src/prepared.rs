@@ -99,6 +99,12 @@ impl PreparedScene {
         budget: PreparationBudget,
         cache: &mut PreparationCache,
     ) -> Result<Self, RenderError> {
+        let triangles = scene.bodies().iter().try_fold(0u64, |total, body| {
+            add(total, u64::from(body.mesh()?.header().triangle_count))
+        })?;
+        if triangles > 500_000 {
+            return Err(RenderError::Budget("triangle admission"));
+        }
         if scene.bodies().len() > budget.limits.max_bodies {
             return Err(RenderError::Budget("body count"));
         }
@@ -218,6 +224,7 @@ impl Renderer {
         scene: PreparedScene,
         preview: bool,
     ) -> Result<(Vec<GpuBody>, MemoryEstimate), RenderError> {
+        crate::options::validate_section_bodies(self.options, scene.bodies.len())?;
         let count = scene.bodies.len() + if preview { self.committed.len() } else { 0 };
         if count > self.limits.max_bodies {
             return Err(RenderError::Budget("body count"));
@@ -225,7 +232,10 @@ impl Renderer {
         let retained = if preview {
             add(
                 self.committed.iter().map(mesh::gpu_bytes).sum::<u64>(),
-                self.highlight_gpu_bytes(),
+                add(
+                    self.highlight_gpu_bytes(),
+                    self.section_contour_gpu_bytes(false),
+                )?,
             )?
         } else {
             0
@@ -255,7 +265,10 @@ impl Renderer {
             resident_metadata_bytes: add(
                 mul(count as u64, std::mem::size_of::<GpuBody>() as u64)?,
                 if preview {
-                    self.highlight_metadata_bytes()
+                    add(
+                        self.highlight_metadata_bytes(),
+                        self.section_contour_metadata_bytes(false),
+                    )?
                 } else {
                     0
                 },

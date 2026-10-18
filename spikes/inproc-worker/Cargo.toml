@@ -1,5 +1,5 @@
 # P0.3 in-process OCCT worker spike (Plane ONECAD-258). STANDALONE: the empty
-# [workspace] keeps it out of src-tauri's (and any future root) workspace, and
+# [workspace] keeps it out of the root workspace, and
 # it builds into its own ./target. Findings:
 # docs/design/native-ui/inprocess-worker-spike.md
 [package]
@@ -11,7 +11,7 @@ publish = false
 [workspace]
 
 [dependencies]
-onecad-protocol = { path = "../../src-tauri/crates/onecad-protocol", features = ["client"] }
+onecad-protocol = { path = "../../crates/onecad-protocol", features = ["client"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "process", "io-util", "sync"] }
 serde_json = "1"
 libc = "0.2"

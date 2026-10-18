@@ -4105,6 +4105,15 @@ Meshes label faces/edges with snapshot-scoped TopoKeys (`"f:22"`) and persistent
 `ElementId`s where already minted. Meshing parallelism never affects IDs
 (Invariant 5).
 
+`Tessellate` returns `OP_FAILED` with `detail.bodyId` when OCCT meshing fails or
+any nondegenerate face lacks a usable triangulation. A failed batch carries no
+mesh handles or binary tail, including meshes already prepared for earlier
+bodies in the batch. Consumers retain their last valid scene publication.
+Faces bounded exclusively by degenerate edges may retain zero-triangle topology
+rows; empty or surfaceless nondegenerate faces may not be silently omitted.
+The same failure in an optional ExecutePlan tessellation artifact follows the
+existing `ARTIFACT_TESSELLATE_FAILED` warning path and drops the entire artifact.
+
 - **`snapshotId` (OPTIONAL, kernel-hardening WP-H, 2026-09-05)** — on
   `Tessellate` and on the §7.8 writers `ExportGeometry`, `ExportStep`,
   `ExportStl`, `ExportObj`. Absent ⇒ the live head, byte-identical to every

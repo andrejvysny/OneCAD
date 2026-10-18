@@ -59,7 +59,8 @@ impl Renderer {
         target: &Targets,
         clear: [f32; 4],
     ) {
-        if self.contact_dirty {
+        let studio = self.options.display_mode.studio();
+        if studio && self.contact_dirty {
             self.height_pass(encoder, target);
             for (view, pipeline, bind) in [
                 (&target.occ, &self.pipelines.contact_occ, 0),
@@ -69,7 +70,7 @@ impl Renderer {
                 self.fullscreen(encoder, view, pipeline, &target.post_binds[bind]);
             }
         }
-        {
+        if studio {
             let mut pass = begin(
                 encoder,
                 "depth/normal",
@@ -89,12 +90,17 @@ impl Renderer {
                 pass.draw(0..3, 0..1);
             }
         }
-        for (view, pipeline, bind) in [
-            (&target.ao_raw, &self.pipelines.gtao, 3),
-            (&target.ao_tmp, &self.pipelines.ao_h, 4),
-            (&target.ao_final, &self.pipelines.ao_v, 5),
-        ] {
-            self.fullscreen(encoder, view, pipeline, &target.post_binds[bind]);
+        if studio {
+            for (view, pipeline, bind) in [
+                (&target.ao_raw, &self.pipelines.gtao, 3),
+                (&target.ao_tmp, &self.pipelines.ao_h, 4),
+                (&target.ao_final, &self.pipelines.ao_v, 5),
+            ] {
+                self.fullscreen(encoder, view, pipeline, &target.post_binds[bind]);
+            }
+        }
+        if self.options.display_mode == crate::DisplayMode::Xray {
+            self.xray_pass(encoder, target);
         }
         self.main_pass(encoder, target, clear);
         if self.options.ssaa != 1.0 {
@@ -172,61 +178,189 @@ impl Renderer {
             depth(&target.depth, 0.0, true),
         );
         pass.set_stencil_reference(0);
-        let transparent = self.options.opacity < 1.0
-            || (self.options.section[..3].iter().any(|v| *v != 0.0) && self.options.cap[3] < 1.0);
-        if transparent {
+        let wireframe = self.options.display_mode == crate::DisplayMode::Wireframe;
+        let xray = self.options.display_mode == crate::DisplayMode::Xray;
+        if xray || wireframe {
             self.draw_ground(&mut pass, target);
         }
         pass.set_bind_group(1, &target.body_bind, &[]);
-        if self.options.opacity < 1.0 {
-            pass.set_pipeline(&self.pipelines.body_depth);
+        if !wireframe {
+            pass.set_pipeline(if xray {
+                &self.pipelines.body_depth
+            } else {
+                &self.pipelines.body
+            });
             for body in &self.committed {
                 geometry(&mut pass, body);
             }
         }
-        pass.set_pipeline(&self.pipelines.body);
-        for body in self.committed.iter() {
-            geometry(&mut pass, body);
+        if xray {
+            pass.set_pipeline(&self.pipelines.oit_compose);
+            pass.set_bind_group(0, &self.frame_bind, &[]);
+            pass.set_bind_group(1, &target.oit_bind, &[]);
+            pass.draw(0..3, 0..1);
         }
-        if self.options.section[..3].iter().any(|v| *v != 0.0) {
+        pass.set_bind_group(1, &target.body_bind, &[]);
+        if !wireframe && self.options.section[..3].iter().any(|v| *v != 0.0) {
             self.section_mask(&mut pass, &self.pipelines.cap_mask, false);
-            pass.set_pipeline(&self.pipelines.cap);
+            pass.set_pipeline(if xray {
+                &self.pipelines.cap_depth
+            } else {
+                &self.pipelines.cap
+            });
             pass.set_bind_group(0, &self.frame_bind, &[]);
             pass.draw(0..3, 0..1);
         }
-        if !transparent {
+        if self.options.display_mode.studio() {
             self.draw_ground(&mut pass, target);
         }
         pass.set_bind_group(1, &target.body_bind, &[]);
-        self.draw_highlights(&mut pass, crate::HighlightKind::Face);
-        if self.options.hidden_edges {
+        if !wireframe {
+            self.draw_highlights(&mut pass, crate::HighlightKind::Face);
+        }
+        if xray {
             pass.set_pipeline(&self.pipelines.hidden);
-            for body in &self.committed {
+            for body in self.line_bodies() {
                 pass.set_bind_group(0, &body.frame_bind, &[]);
-                pass.set_vertex_buffer(0, body.segments.slice(..));
-                pass.draw(0..4, 0..body.segment_count);
+                pass.set_vertex_buffer(
+                    0,
+                    if wireframe {
+                        body.segments.slice(..)
+                    } else {
+                        body.feature_segments.slice(..)
+                    },
+                );
+                pass.draw(
+                    0..4,
+                    0..if wireframe {
+                        body.segment_count
+                    } else {
+                        body.feature_segment_count
+                    },
+                );
             }
         }
-        if self.options.outline {
-            pass.set_pipeline(&self.pipelines.silhouette);
-            for body in self.committed.iter() {
+        if xray {
+            pass.set_pipeline(&self.pipelines.hidden_silhouette);
+            for body in self.line_bodies() {
                 pass.set_bind_group(0, &body.frame_bind, &[]);
                 pass.set_vertex_buffer(0, body.silhouettes.slice(..));
                 pass.draw(0..4, 0..body.silhouette_count);
             }
         }
-        pass.set_pipeline(&self.pipelines.edge);
-        for body in self.committed.iter() {
-            pass.set_bind_group(0, &body.frame_bind, &[]);
-            pass.set_vertex_buffer(0, body.segments.slice(..));
-            pass.draw(0..4, 0..body.segment_count);
+        if self.options.display_mode != crate::DisplayMode::Shaded {
+            pass.set_pipeline(&self.pipelines.silhouette);
+            for body in self.line_bodies() {
+                pass.set_bind_group(0, &body.frame_bind, &[]);
+                pass.set_vertex_buffer(0, body.silhouettes.slice(..));
+                pass.draw(0..4, 0..body.silhouette_count);
+            }
         }
+        if self.options.display_mode != crate::DisplayMode::Shaded {
+            pass.set_pipeline(&self.pipelines.edge);
+            for body in self.line_bodies() {
+                pass.set_bind_group(0, &body.frame_bind, &[]);
+                pass.set_vertex_buffer(
+                    0,
+                    if wireframe {
+                        body.segments.slice(..)
+                    } else {
+                        body.feature_segments.slice(..)
+                    },
+                );
+                pass.draw(
+                    0..4,
+                    0..if wireframe {
+                        body.segment_count
+                    } else {
+                        body.feature_segment_count
+                    },
+                );
+            }
+        }
+        self.draw_section_contours(&mut pass);
         pass.set_pipeline(&self.pipelines.preview);
         pass.set_bind_group(1, &target.body_bind, &[]);
-        for body in self.preview.iter() {
-            geometry(&mut pass, body);
+        if wireframe {
+            pass.set_pipeline(&self.pipelines.edge);
+            for body in &self.preview {
+                pass.set_bind_group(0, &body.frame_bind, &[]);
+                pass.set_vertex_buffer(0, body.segments.slice(..));
+                pass.draw(0..4, 0..body.segment_count);
+            }
+            pass.set_pipeline(&self.pipelines.silhouette);
+            for body in &self.preview {
+                pass.set_bind_group(0, &body.frame_bind, &[]);
+                pass.set_vertex_buffer(0, body.silhouettes.slice(..));
+                pass.draw(0..4, 0..body.silhouette_count);
+            }
+        } else {
+            for body in &self.preview {
+                geometry(&mut pass, body);
+            }
+        }
+        if !wireframe {
+            self.draw_preview_cap(&mut pass);
         }
         self.draw_highlights(&mut pass, crate::HighlightKind::Edge);
+        if wireframe {
+            if let Some(highlights) = &self.highlights {
+                pass.set_pipeline(&self.pipelines.highlight_edge);
+                pass.set_vertex_buffer(0, highlights.boundaries.slice(..));
+                for draw in &highlights.boundary_draws {
+                    let tone = usize::from(draw.tone == crate::highlights::HighlightTone::Hover);
+                    pass.set_bind_group(0, &highlights.binds[tone], &[]);
+                    pass.draw(0..4, draw.first..draw.first + draw.count);
+                }
+            }
+        }
+    }
+    fn line_bodies(&self) -> impl Iterator<Item = &GpuBody> {
+        // Selection is an interaction overlay: its line color must not depend on publication order.
+        self.committed
+            .iter()
+            .filter(|body| !body.style.selected)
+            .chain(self.committed.iter().filter(|body| body.style.selected))
+    }
+    fn draw_preview_cap(&self, pass: &mut wgpu::RenderPass<'_>) {
+        let Some(preview) = self.preview.first() else {
+            return;
+        };
+        if self.options.section[..3].iter().all(|v| *v == 0.0) {
+            return;
+        }
+        pass.set_pipeline(&self.pipelines.preview_cap_clear);
+        pass.set_bind_group(0, &self.frame_bind, &[]);
+        pass.draw(0..3, 0..1);
+        pass.set_pipeline(&self.pipelines.cap_mask);
+        for body in &self.preview {
+            geometry(pass, body);
+        }
+        pass.set_pipeline(&self.pipelines.preview_cap);
+        pass.set_bind_group(0, &preview.frame_bind, &[]);
+        pass.draw(0..3, 0..1);
+    }
+    fn xray_pass(&self, encoder: &mut wgpu::CommandEncoder, target: &Targets) {
+        let mut pass = begin(
+            encoder,
+            "Xray all surface layers",
+            &[
+                color(&target.oit_accum, wgpu::Color::TRANSPARENT),
+                color(&target.oit_reveal, wgpu::Color::WHITE),
+            ],
+            depth(&target.pre_depth, 0.0, true),
+        );
+        pass.set_pipeline(&self.pipelines.oit);
+        pass.set_bind_group(1, &target.body_bind, &[]);
+        for body in &self.committed {
+            geometry(&mut pass, body);
+        }
+        if self.options.section[..3].iter().any(|v| *v != 0.0) {
+            self.section_mask(&mut pass, &self.pipelines.oit_mask, false);
+            pass.set_pipeline(&self.pipelines.oit_cap);
+            pass.set_bind_group(0, &self.frame_bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
     }
     fn draw_ground(&self, pass: &mut wgpu::RenderPass<'_>, target: &Targets) {
         pass.set_pipeline(&self.pipelines.ground);

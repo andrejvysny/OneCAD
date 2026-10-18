@@ -40,8 +40,8 @@ expect_coverage_failure \
 
 # THE acceptance test the roadmap asks for: rename a cited spec, CI goes red.
 expect_coverage_failure \
-  'const fs=require("node:fs"),p=process.argv[1],x=JSON.parse(fs.readFileSync(p));const r=x.rows.find(r=>r.playwrightTest);r.playwrightTest=r.playwrightTest.replace(/\.spec\.ts$/,".renamed.spec.ts");fs.writeFileSync(p,JSON.stringify(x))' \
-  "a cited Playwright spec that no longer exists"
+  'const fs=require("node:fs"),p=process.argv[1],x=JSON.parse(fs.readFileSync(p));const r=x.rows.find(r=>r.rustRealWorkerTest);r.rustRealWorkerTest="crates/onecad-app/tests/ghost.rs";fs.writeFileSync(p,JSON.stringify(x))' \
+  "a cited Rust suite that no longer exists"
 
 expect_coverage_failure \
   'const fs=require("node:fs"),p=process.argv[1],x=JSON.parse(fs.readFileSync(p));const r=x.rows.find(r=>r.cppTest);r.cppTest="worker/tests/test_ghost.cpp";fs.writeFileSync(p,JSON.stringify(x))' \
@@ -52,8 +52,8 @@ expect_coverage_failure \
   "a ciJob that is not a job in any workflow"
 
 expect_coverage_failure \
-  'const fs=require("node:fs"),p=process.argv[1],x=JSON.parse(fs.readFileSync(p));const r=x.rows.find(r=>r.playwrightTest&&r.ciJob.includes("e2e"));r.ciJob=r.ciJob.split(";").map(s=>s.trim()).filter(j=>!j.startsWith("e2e")).join("; ");fs.writeFileSync(p,JSON.stringify(x))' \
-  "an e2e spec cited by a row that names no e2e job"
+  'const fs=require("node:fs"),p=process.argv[1],x=JSON.parse(fs.readFileSync(p));const r=x.rows.find(r=>r.rustRealWorkerTest&&r.ciJob.includes("rust-8-0-1"));r.ciJob=r.ciJob.split(";").map(s=>s.trim()).filter(j=>j!=="rust-8-0-1").join("; ");fs.writeFileSync(p,JSON.stringify(x))' \
+  "a Rust suite cited by a row that names no Rust job"
 
 expect_coverage_failure \
   'const fs=require("node:fs"),p=process.argv[1],x=JSON.parse(fs.readFileSync(p));x.rows=x.rows.filter(r=>r.operation!=="Hole");fs.writeFileSync(p,JSON.stringify(x))' \
@@ -72,7 +72,7 @@ expect_coverage_failure \
   "a row missing uiExposure"
 
 expect_coverage_failure \
-  'const fs=require("node:fs"),p=process.argv[1],x=JSON.parse(fs.readFileSync(p));const r=x.rows.find(r=>r.uiExposure==="exposed"&&r.supportStatus==="supported");r.playwrightTest="";fs.writeFileSync(p,JSON.stringify(x))' \
+  'const fs=require("node:fs"),p=process.argv[1],x=JSON.parse(fs.readFileSync(p));const r=x.rows.find(r=>r.supportStatus==="supported");r.uiExposure="exposed";r.playwrightTest="";fs.writeFileSync(p,JSON.stringify(x))' \
   "an exposed supported row missing its browser lane"
 
 expect_coverage_failure \

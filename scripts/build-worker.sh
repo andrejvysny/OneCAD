@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the OneCAD C++ sidecar worker and stage it for Tauri bundling.
+# Build the OneCAD C++ sidecar worker and stage it for the native host.
 #
 # Usage: scripts/build-worker.sh [Debug|Release]   (default: Release)
 #
@@ -9,9 +9,8 @@
 #   ONECAD_OCCT_BUILD_ID      stable build artifact id (default: local)
 #   ONECAD_WORKER_BUILD_DIR   isolated worker build directory
 #
-# Produces src-tauri/binaries/onecad-worker-<rust-host-triple>, the name Tauri's
-# bundle.externalBin expects, plus a manifest binding that exact binary to its
-# hello compatibility axes. Run from anywhere; paths resolve to the repo root.
+# Produces packaging/binaries/onecad-worker-<rust-host-triple> plus a manifest
+# binding that binary to its hello compatibility axes. Paths use the repo root.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,9 +46,9 @@ fi
 echo "==> Building onecad-worker (${BUILD_TYPE}) for triple ${TRIPLE}"
 
 cmake -S "${ROOT_DIR}/worker" -B "${BUILD_DIR}" "${CMAKE_ARGS[@]}"
-cmake --build "${BUILD_DIR}" -j
+cmake --build "${BUILD_DIR}" --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-3}"
 
-DEST_DIR="${ROOT_DIR}/src-tauri/binaries"
+DEST_DIR="${ROOT_DIR}/packaging/binaries"
 mkdir -p "${DEST_DIR}"
 DEST="${DEST_DIR}/onecad-worker-${TRIPLE}"
 cp "${BUILD_DIR}/onecad-worker" "${DEST}"

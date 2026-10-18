@@ -36,6 +36,7 @@ mod transform_ui;
 mod viewport;
 mod viewport_options;
 mod viewport_selection;
+mod viewport_updates;
 mod viewport_widgets;
 
 pub fn run() -> Result<(), String> {

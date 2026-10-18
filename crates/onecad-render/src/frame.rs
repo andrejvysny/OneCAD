@@ -46,7 +46,6 @@ pub enum Theme {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SilhouetteMode {
-    Fragment,
     Geometric,
 }
 
@@ -65,7 +64,7 @@ impl Default for RenderStyle {
 }
 
 fn resolve_token(theme: Theme, name: &str) -> Result<[f32; 3], RenderError> {
-    let css = include_str!("../../../src/styles/tokens.css");
+    let css = include_str!("../../../assets/native/tokens.css");
     let base = css
         .split_once("@theme {")
         .ok_or(RenderError::Mesh("theme tokens"))?
@@ -96,13 +95,14 @@ fn resolve_token(theme: Theme, name: &str) -> Result<[f32; 3], RenderError> {
 }
 
 fn token(theme: Theme, name: &str) -> Result<[f32; 3], RenderError> {
-    const NAMES: [&str; 8] = [
+    const NAMES: [&str; 9] = [
         "--color-body-fill",
         "--color-canvas",
         "--color-viewport-grid-minor",
         "--color-viewport-grid-major",
         "--color-sel-text",
         "--color-body-edge",
+        "--color-body-edge-wire",
         "--color-accent",
         "--color-viewport-hover",
     ];
@@ -149,14 +149,24 @@ pub(crate) fn with_options(mut frame: FrameU, options: crate::RenderOptions) -> 
     frame.section = options.section;
     frame.cap = options.cap;
     frame.display = [
-        options.opacity,
+        if options.display_mode == crate::DisplayMode::Xray {
+            options.xray_opacity
+        } else {
+            1.0
+        },
         options.ssaa,
-        f32::from(options.hidden_edges),
-        f32::from(options.outline),
+        options.xray_hidden_edge_opacity,
+        f32::from(options.display_mode == crate::DisplayMode::Xray),
     ];
-    if !options.outline {
-        frame.material[2] = 0.0;
-        frame.edge[3] = 0.0;
+    frame.material[2] = 0.0;
+    frame.material[3] = f32::from(options.display_mode == crate::DisplayMode::Wireframe);
+    if options.display_mode == crate::DisplayMode::Wireframe && frame.overlay[3] == 0.0 {
+        frame.edge = frame.fill;
+    }
+    if !options.display_mode.studio() {
+        frame.flags[1] = 0.0;
+        frame.flags[2] = 0.0;
+        frame.contact[3] = 0.0;
     }
     frame
 }
@@ -229,16 +239,7 @@ fn set_camera(frame: &mut FrameU, view: &ViewSnapshot, style: RenderStyle) {
 
 fn set_lighting(frame: &mut FrameU, style: RenderStyle) -> Result<(), RenderError> {
     frame.body = rgba(token(style.theme, "--color-body-fill")?, 0.42);
-    frame.material = [
-        0.0,
-        0.04,
-        if style.silhouettes == SilhouetteMode::Fragment {
-            1.0
-        } else {
-            0.0
-        },
-        0.0,
-    ];
+    frame.material = [0.0, 0.04, 0.0, 0.0];
     frame.canvas = rgba(token(style.theme, "--color-canvas")?, 1.0);
     frame.flags = [1.0, 1.0, 1.0, 1.0];
     Ok(())
@@ -294,6 +295,7 @@ fn set_body_style(
     preview: bool,
 ) -> Result<(), RenderError> {
     let scale = view.viewport().scale_factor as f32;
+    frame.fill = rgba(token(style.theme, "--color-body-edge-wire")?, 1.0);
     frame.edge = rgba(
         token(
             style.theme,
@@ -316,6 +318,7 @@ fn set_body_style(
     }
     if preview {
         frame.overlay = rgba(token(style.theme, "--color-accent")?, 0.3);
+        frame.edge = rgba(token(style.theme, "--color-accent")?, 1.0);
     }
     Ok(())
 }

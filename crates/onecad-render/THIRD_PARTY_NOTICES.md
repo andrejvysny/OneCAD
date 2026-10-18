@@ -10,7 +10,7 @@ Donor: https://github.com/tangency-labs/solidcraft, inspected clean at full revi
 host integration belongs to `onecad-ui`.
 
 Existing spike-derived adaptations remain in `src/shaders/lines.wgsl` (`expand`),
-`src/shaders/body.wgsl` (`fs_body` fragment silhouettes) and `src/pipelines.rs`
+`src/silhouette.rs` (geometric silhouette candidates) and `src/pipelines.rs`
 (`FACE_BIAS`, depth conventions).
 
 Direct topology-overlay adaptations use donor `crates/gpu/src/view.rs` (`highlight_depth`,
@@ -50,15 +50,14 @@ SOFTWARE.
 
 ## Quality renderer unification adaptations
 
-The comparison adapter's donor remains pinned at
-`a228a5830eedf88856fd392b7db0ff5977f352d6`; provenance and unmodified source hashes live in
-`vendor/solidcraft-viewport/`. OneCAD-owned quality rendering reuses techniques from donor
+The retired comparison adapter used donor revision
+`a228a5830eedf88856fd392b7db0ff5977f352d6`. The adapter and vendor source are no longer executable dependencies. OneCAD-owned quality rendering reuses techniques from donor
 `crates/gpu/src/view.rs` and `assets/shaders/viewport.wgsl`: reversed float depth with
 24-bit stencil fallback, section clipping/stencil caps, blended transparency, and
 supersampled offscreen targets. Local destinations are `src/{options,frame,pipelines,
 passes,targets}.rs` and `src/shaders/`. Adaptations preserve OneCAD's indexed checked
 meshes, captured CPU cameras, quality lighting/AO/grid, bounded resource admission, and
-shared-device completion fences. No vendor source is forked. The SolidCraft MIT
+shared-device completion fences. No vendor dependency remains. The SolidCraft MIT
 permission and copyright text above applies.
 
 ## XeGTAO (github.com/GameTechDev/XeGTAO)

@@ -159,7 +159,7 @@ jobs:
           echo "tracked files  : $(git ls-files | wc -l)"
           for f in scripts/build-pinned-occt.sh scripts/occt-fingerprint.sh \
                    scripts/build-worker.sh worker/CMakeLists.txt \
-                   Cargo.toml Cargo.lock src-tauri/Cargo.toml bench/robustness/baselines/digests.json; do
+                   Cargo.toml Cargo.lock crates/onecad-ui/Cargo.toml bench/robustness/baselines/digests.json; do
             [ -e "$f" ] && echo "present: $f" || echo "MISSING: $f"
           done
 

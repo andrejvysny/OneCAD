@@ -1,5 +1,5 @@
 //! (b) Crash journal. In-process, a worker crash (SIGSEGV inside OCCT) kills the
-//! HOST app, so the existing in-memory poison circuit (src-tauri/src/worker/
+//! HOST app, so the existing in-memory poison circuit (crates/onecad-app/src/worker/
 //! manager.rs `record_crash` / `plan_op_keys`) dies with it and a reopen would
 //! crash-loop. Keys use the manager's scheme: `prefixHash | opId | fingerprint`.
 //!

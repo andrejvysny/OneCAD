@@ -22,19 +22,20 @@ mod options;
 mod passes;
 mod pipelines;
 mod prepared;
+mod section_contours;
+mod section_contours_gpu;
+mod section_contours_worker;
 mod silhouette;
-pub mod solidcraft_viewport;
 mod targets;
 
 pub use frame::{RenderStyle, SilhouetteMode, Theme};
 pub use highlights::{HighlightKind, HighlightTarget, PreparedHighlights};
 pub use limits::{MemoryEstimate, RenderLimits};
 pub use mesh::{BodyStyle, PreviewIdentity};
-pub use options::{required_device_features, RenderOptions};
+pub use options::{required_device_features, DisplayMode, RenderOptions};
 pub use prepared::{PreparationBudget, PreparationCache, PreparedScene};
-pub use solidcraft_viewport::{
-    PreparedSolidCraftScene, SolidCraftOptions, SolidCraftPreparationBudget, SolidCraftViewport,
-};
+pub use section_contours::{PreparedSectionContours, SectionContourKey};
+pub use section_contours_worker::SectionContourWorker;
 
 use frame::FrameU;
 use mesh::GpuBody;
@@ -85,6 +86,7 @@ pub struct Renderer {
     flight: flight::Flight,
     latest_preview_generation: Option<u64>,
     highlights: Option<highlights::GpuHighlights>,
+    section_contours: [Option<section_contours::GpuSectionContours>; 2],
     options: RenderOptions,
     contact_dirty: bool,
 }
@@ -158,6 +160,7 @@ impl Renderer {
             flight: flight::Flight::submitted(queue, || {}),
             latest_preview_generation: None,
             highlights: None,
+            section_contours: [None, None],
             options: RenderOptions::default(),
             contact_dirty: true,
         })
@@ -197,20 +200,43 @@ impl Renderer {
     pub fn replace_scene(&mut self, scene: &SceneSnapshot) -> Result<(), RenderError> {
         self.require_idle()?;
         let prepared = PreparedScene::new(scene, self.preparation_budget())?;
+        if self.options.section[..3].iter().any(|v| *v != 0.0) {
+            let contours = PreparedSectionContours::new(
+                scene,
+                self.preparation_budget(),
+                self.options.section,
+            )?;
+            return self.replace_prepared_scene_with_section_contours(prepared, contours);
+        }
         self.replace_prepared_scene(prepared)
     }
     pub fn replace_prepared_scene(&mut self, scene: PreparedScene) -> Result<(), RenderError> {
         options::validate_section_bodies(self.options, scene.body_count())?;
         self.require_idle()?;
+        if self.options.section[..3].iter().any(|v| *v != 0.0) && scene.body_count() != 0 {
+            return Err(RenderError::CaptureMismatch);
+        }
         let identity = scene.identity;
         let bounds = scene.bounds;
         let source = scene.source_bytes;
         let (bodies, estimate) = self.upload_prepared(scene, false)?;
+        self.publish_scene(bodies, estimate, identity, bounds, source);
+        Ok(())
+    }
+    fn publish_scene(
+        &mut self,
+        bodies: Vec<GpuBody>,
+        estimate: MemoryEstimate,
+        identity: SceneIdentity,
+        bounds: Option<onecad_scene::Bounds>,
+        source: u64,
+    ) {
         self.contact_dirty |= self.committed.len() != bodies.len()
             || self.committed.iter().zip(&bodies).any(|(old, new)| {
                 old.id != new.id || !std::sync::Arc::ptr_eq(&old.source, &new.source)
             });
         self.committed = bodies;
+        self.clear_section_contours();
         self.highlights = None;
         self.preview.clear();
         self.preview_identity = None;
@@ -220,7 +246,6 @@ impl Renderer {
         self.committed_source_bytes = source;
         self.preview_source_bytes = 0;
         self.estimate = estimate;
-        Ok(())
     }
     pub fn replace_preview(
         &mut self,
@@ -229,6 +254,16 @@ impl Renderer {
     ) -> Result<(), RenderError> {
         self.require_idle()?;
         let prepared = PreparedScene::new(scene, self.preparation_budget())?;
+        if self.options.section[..3].iter().any(|v| *v != 0.0) {
+            let contours = PreparedSectionContours::new(
+                scene,
+                self.preparation_budget(),
+                self.options.section,
+            )?
+            .with_preview(identity)?;
+            return self
+                .replace_prepared_preview_with_section_contours(identity, prepared, contours);
+        }
         self.replace_prepared_preview(identity, prepared)
     }
     pub fn replace_prepared_preview(
@@ -237,6 +272,9 @@ impl Renderer {
         scene: PreparedScene,
     ) -> Result<(), RenderError> {
         self.require_idle()?;
+        if self.options.section[..3].iter().any(|v| *v != 0.0) && scene.body_count() != 0 {
+            return Err(RenderError::CaptureMismatch);
+        }
         if Some(identity.base) != self.scene_identity
             || scene.identity != identity.base
             || self
@@ -247,25 +285,38 @@ impl Renderer {
         }
         let source = scene.source_bytes;
         let (bodies, estimate) = self.upload_prepared(scene, true)?;
+        self.publish_preview(bodies, estimate, identity, source);
+        Ok(())
+    }
+    fn publish_preview(
+        &mut self,
+        bodies: Vec<GpuBody>,
+        estimate: MemoryEstimate,
+        identity: PreviewIdentity,
+        source: u64,
+    ) {
         self.preview = bodies;
+        self.clear_preview_section_contours();
         self.preview_source_bytes = source;
         self.preview_identity = Some(identity);
         self.latest_preview_generation = Some(identity.generation);
         self.estimate = estimate;
-        Ok(())
     }
     pub fn clear_preview(&mut self) -> Result<(), RenderError> {
         self.require_idle()?;
         self.preview.clear();
+        self.clear_preview_section_contours();
         self.preview_identity = None;
         self.preview_source_bytes = 0;
         self.estimate.source_bytes = self.committed_source_bytes;
         self.estimate.resident_metadata_bytes = self.committed.len() as u64
             * std::mem::size_of::<GpuBody>() as u64
             + self.highlight_metadata_bytes();
+        self.estimate.resident_metadata_bytes += self.section_contour_metadata_bytes(false);
         self.estimate.geometry_bytes = self.committed.iter().map(mesh::gpu_bytes).sum::<u64>()
             + std::mem::size_of::<FrameU>() as u64
             + self.highlight_gpu_bytes();
+        self.estimate.geometry_bytes += self.section_contour_gpu_bytes(false);
         self.estimate.cpu_prepared_bytes = 0;
         self.estimate.upload_bytes = 0;
         Ok(())

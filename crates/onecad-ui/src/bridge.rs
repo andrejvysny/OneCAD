@@ -59,6 +59,7 @@ pub struct CandidateDelivery {
     pub action: Action,
     pub prepared: Option<onecad_render::PreparedScene>,
     pub lease: Option<crate::budget::Lease>,
+    pub scene: Option<Arc<SceneSnapshot>>,
 }
 
 pub enum Message {

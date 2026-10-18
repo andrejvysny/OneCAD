@@ -27,7 +27,7 @@ struct BodyMesh {
     std::string body_id;
     std::vector<std::uint8_t> blob;       // MESH1 bytes
     std::uint32_t triangle_count = 0;
-    bool ok = false;                      // false if the body produced no triangulation
+    bool ok = false;  // false on mesher failure or any missing nondegenerate face
 };
 
 // Raw triangle geometry for one body — the SAME positions/normals/indices

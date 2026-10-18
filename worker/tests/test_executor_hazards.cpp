@@ -23,6 +23,7 @@
 
 #include <BRep_Builder.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
@@ -293,11 +294,52 @@ void test_attach_tessellate_hook_is_a_warning() {
           per_step.dump().c_str());
 }
 
+void test_incomplete_body_artifact_is_a_warning() {
+    Session session;
+    session.open("partial-face-artifact", 0, 3, "determinism");
+    BRep_Builder builder;
+    TopoDS_Compound partial;
+    builder.MakeCompound(partial);
+    builder.Add(partial, BRepPrimAPI_MakeBox(2, 2, 2).Shape());
+    TopoDS_Face missing;
+    builder.MakeFace(missing);
+    builder.Add(partial, missing);
+    ScratchJob seed;
+    seed.job_id = 30;
+    seed.plan_document_revision = 0;
+    seed.prepared_snapshot_id = 1;
+    seed.history_prefix_hash = "partial-head";
+    seed.bodies.create("partial-body", "fixture", partial);
+    session.store_prepared(std::move(seed));
+    CHECK(session.accept_prepared(30, 0, 3).ok, "partial-body artifact fixture seeds");
+    CancelToken token;
+    HandlerContext context{token, [](int) {}, [](Envelope&) {}};
+    const auto response = onecad::session::handle_execute_plan(session,
+        Envelope::request(31, "ExecutePlan", {
+            {"jobId", 31}, {"documentRevision", 0}, {"workerEpoch", 3},
+            {"expectedBaseHash", "partial-head"}, {"prefixHashes", json::array({"h1"})},
+            {"targetStep", 1}, {"ops", json::array({rect_sketch("next", "sk", 3, 3)})},
+            {"artifacts", {{"tessellate", {{"lod", "fine"}, {"includeEdges", true}}}}}}), context);
+    CHECK(response.ok.value_or(false) && response.result.value("planPrepared", false),
+          "geometry publication failure preserves successful plan preparation");
+    CHECK(!response.result.contains("artifacts") && response.bin.empty() && response.out_bin.empty(),
+          "incomplete body never attaches a partial artifact");
+    bool warned = false;
+    for (const auto& step : response.result.value("perStepResults", json::array())) {
+        for (const auto& diagnostic : step.value("diagnostics", json::array())) {
+            warned = warned || (diagnostic.value("code", "") == "ARTIFACT_TESSELLATE_FAILED" &&
+                diagnostic.value("message", std::string()).find("partial-body") != std::string::npos);
+        }
+    }
+    CHECK(warned, "real incomplete geometry produces body-specific artifact diagnostic");
+}
+
 }  // namespace
 
 int main() {
     test_late_cancel_does_not_strand_scratch();
     test_attach_tessellate_hook_is_a_warning();
+    test_incomplete_body_artifact_is_a_warning();
     const bool a = test_attach_tessellate_failure_is_a_warning("unbounded-face",
                                                               unbounded_face_shape());
     const bool b = test_attach_tessellate_failure_is_a_warning("surfaceless-face",

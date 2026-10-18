@@ -111,6 +111,23 @@ impl<'a> MeshView<'a> {
         self.id(9, 10, edge)
     }
 
+    pub fn edge_class(&self, edge: usize) -> super::EdgeClass {
+        self.words(14)
+            .and_then(|classes| classes.get(edge))
+            .and_then(super::EdgeClass::from_u32)
+            .unwrap_or(super::EdgeClass::Unknown)
+    }
+
+    /// Zero-based incident face ordinals; legacy meshes return an empty sequence.
+    pub fn edge_incident_faces(&self, edge: usize) -> MeshWords<'a> {
+        let Some(span) = self.span(15, edge) else {
+            return MeshWords(&[]);
+        };
+        let start = span.first as usize * 4;
+        let end = start + span.count as usize * 4;
+        MeshWords(&self.data(16).expect("validated adjacency")[start..end])
+    }
+
     pub fn face_bbox(&self, face: usize) -> Option<([f32; 3], [f32; 3])> {
         let start = face.checked_mul(2)?;
         let values = self.face_bboxes()?;

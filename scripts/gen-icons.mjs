@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * Regenerate src/icons/cppIcons.generated.ts from the OneCAD-CPP icon masters.
+ * Regenerate assets/native/cppIcons.generated.ts from the OneCAD-CPP icon masters.
  *
  *   node scripts/gen-icons.mjs
  *   ONECAD_CPP_DIR=/path/to/OneCAD-CPP node scripts/gen-icons.mjs
@@ -23,7 +23,7 @@ import { fileURLToPath } from "node:url";
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CPP = process.env.ONECAD_CPP_DIR ?? resolve(REPO, "..", "OneCAD-CPP");
 const SRC_DIR = join(CPP, "resources", "icons");
-const OUT = join(REPO, "src", "icons", "cppIcons.generated.ts");
+const OUT = join(REPO, "assets", "native", "cppIcons.generated.ts");
 
 /** The two-tone ACCENT sentinel every master is authored against. */
 const ACCENT = "#2d7ff9";
@@ -210,7 +210,7 @@ writeFileSync(
  * GENERATED FILE — DO NOT EDIT.
  *
  * Source of truth: OneCAD-CPP \`resources/icons/*.svg\` (${files.length} masters) and
- * the spec they are drawn against, mirrored here as \`src/icons/DESIGN.md\`.
+ * the spec they are drawn against, mirrored here as \`assets/native/DESIGN.md\`.
  * Regenerate with:
  *
  *   node scripts/gen-icons.mjs

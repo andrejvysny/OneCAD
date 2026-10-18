@@ -15,6 +15,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 30
     env:
+      ONECAD_REQUIRE_GPU: "1"
       ONECAD_RENDER_CAPTURE_DIR: ${{ runner.temp }}/onecad-render-quality-smoke
     steps:
       - uses: actions/checkout@v4
@@ -25,13 +26,10 @@ jobs:
       - name: Check first-party formatting
         run: >-
           cargo fmt --check
-          -p onecad -p onecad-app -p onecad-core -p onecad-protocol
+          -p onecad-mesh-fixture -p onecad-app -p onecad-core -p onecad-protocol
           -p onecad-scene -p onecad-render -p onecad-interaction -p onecad-ui
           -p onecad-worker-stub -p onecad-regen -p onecad-kernelbench
           -p onecad-library -p onecad-library-ingest
-      - name: Verify pinned vendor source
-        working-directory: vendor/solidcraft-viewport
-        run: shasum -a 256 -c SOURCE_SHA256SUMS
       - name: Check renderer and host
         run: cargo clippy -p onecad-render -p onecad-ui --all-targets -- -D warnings
       - name: CPU renderer and scene tests

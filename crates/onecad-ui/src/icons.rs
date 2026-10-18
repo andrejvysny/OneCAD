@@ -1,13 +1,13 @@
-//! OneCAD's two-tone icons, read from the TS registry (`src/icons/cppIcons.generated.ts`,
-//! `src/icons/authored.ts`) and painted as egui strokes. Paths are SVG data on a 24-unit grid;
+//! OneCAD's two-tone icons, read from the TS registry (`assets/native/cppIcons.generated.ts`,
+//! `assets/native/authored.ts`) and painted as egui strokes. Paths are SVG data on a 24-unit grid;
 //! curves and arcs are flattened to polylines once at startup.
 
 use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, pos2};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-const CPP: &str = include_str!("../../../src/icons/cppIcons.generated.ts");
-const AUTHORED: &str = include_str!("../../../src/icons/authored.ts");
+const CPP: &str = include_str!("../../../assets/native/cppIcons.generated.ts");
+const AUTHORED: &str = include_str!("../../../assets/native/authored.ts");
 
 struct Element {
     subpaths: Vec<(Vec<Pos2>, bool)>,

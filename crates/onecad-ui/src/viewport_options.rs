@@ -4,19 +4,12 @@ use crate::app::App;
 use onecad_render::RenderOptions;
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
-    ui.menu_button("Display", |ui| {
+    display_menu(ui, |ui| {
         let mut options = *app
             .pending_display_options
             .as_ref()
             .unwrap_or_else(|| app.renderer.options());
-        let mut changed = ui.checkbox(&mut options.outline, "Silhouettes").changed();
-        changed |= ui
-            .checkbox(&mut options.hidden_edges, "Hidden edges")
-            .changed();
-        changed |= ui
-            .add(egui::Slider::new(&mut options.opacity, 0.15..=1.0).text("Opacity"))
-            .changed();
-        changed |= supersampling(ui, &mut options);
+        let mut changed = supersampling(ui, &mut options);
         changed |= ui
             .add_enabled_ui(
                 app.interaction.tool.is_none() && !app.sketch_active(),
@@ -31,30 +24,29 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
+fn display_menu<R>(
+    ui: &mut egui::Ui,
+    content: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<Option<R>> {
+    ui.menu_button("Display", content)
+}
+
 fn supersampling(ui: &mut egui::Ui, options: &mut RenderOptions) -> bool {
     let mut changed = false;
-    egui::ComboBox::from_id_salt("viewport-ssaa")
-        .selected_text(format!("SSAA {}×", options.ssaa))
-        .show_ui(ui, |ui| {
-            for factor in [1.0, 2.0] {
-                changed |= ui
-                    .selectable_value(&mut options.ssaa, factor, format!("{factor}×"))
-                    .changed();
-            }
-        });
+    ui.menu_button(format!("SSAA {}×", options.ssaa), |ui| {
+        for factor in [1.0, 2.0] {
+            changed |= ui
+                .selectable_value(&mut options.ssaa, factor, format!("{factor}×"))
+                .changed();
+        }
+    });
     changed
 }
 
 fn section(ui: &mut egui::Ui, app: &App, options: &mut RenderOptions) -> bool {
     let original = section_axis(options.section);
     let mut axis = original;
-    egui::ComboBox::from_id_salt("viewport-section")
-        .selected_text(format!("Section {}", section_label(axis)))
-        .show_ui(ui, |ui| {
-            for candidate in [None, Some(2), Some(1), Some(0)] {
-                ui.selectable_value(&mut axis, candidate, section_label(candidate));
-            }
-        });
+    section_axis_ui(ui, &mut axis);
     let mut changed = axis != original;
     if changed {
         options.section = [0.0; 4];
@@ -79,6 +71,16 @@ fn section(ui: &mut egui::Ui, app: &App, options: &mut RenderOptions) -> bool {
     changed
 }
 
+fn section_axis_ui(ui: &mut egui::Ui, axis: &mut Option<usize>) -> egui::Response {
+    // egui has one memory-backed popup per viewport; nested choices need submenu state.
+    ui.menu_button(format!("Section {}", section_label(*axis)), |ui| {
+        for candidate in [None, Some(2), Some(1), Some(0)] {
+            ui.selectable_value(axis, candidate, section_label(candidate));
+        }
+    })
+    .response
+}
+
 fn section_axis(section: [f32; 4]) -> Option<usize> {
     section[..3].iter().position(|normal| *normal != 0.0)
 }
@@ -101,4 +103,131 @@ fn center_offset(app: &App, axis: usize) -> f32 {
         .unwrap_or_default();
     let offset = center[axis] as f32;
     if offset.is_finite() { offset } else { 0.0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Harness {
+        options: RenderOptions,
+        axis: Option<usize>,
+        menu: egui::Rect,
+    }
+
+    impl Default for Harness {
+        fn default() -> Self {
+            Self {
+                options: RenderOptions::default(),
+                axis: None,
+                menu: egui::Rect::NOTHING,
+            }
+        }
+    }
+
+    impl Harness {
+        fn frame(&mut self, ctx: &egui::Context, events: Vec<egui::Event>) -> egui::FullOutput {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    self.menu = display_menu(ui, |ui| {
+                        supersampling(ui, &mut self.options);
+                        section_axis_ui(ui, &mut self.axis);
+                    })
+                    .response
+                    .rect;
+                },
+            );
+            output.textures_delta.clear();
+            output
+        }
+
+        fn click(&mut self, ctx: &egui::Context, position: egui::Pos2) -> egui::FullOutput {
+            self.frame(
+                ctx,
+                vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+            self.frame(
+                ctx,
+                vec![egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            )
+        }
+    }
+
+    fn text_position(output: &egui::FullOutput, label: &str) -> egui::Pos2 {
+        output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == label => {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing visible text {label:?}; labels {:?}",
+                    output
+                        .shapes
+                        .iter()
+                        .filter_map(|shape| match &shape.shape {
+                            egui::Shape::Text(text) => Some(text.galley.text()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                )
+            })
+    }
+
+    #[test]
+    fn nested_section_choice_remains_open_and_selects_plane() {
+        let ctx = egui::Context::default();
+        let mut host = Harness::default();
+        host.frame(&ctx, vec![]);
+        host.click(&ctx, host.menu.center());
+        let output = host.frame(&ctx, vec![]);
+        let combo = text_position(&output, "Section Off");
+        host.click(&ctx, combo);
+        let output = host.frame(&ctx, vec![]);
+        let plane = text_position(&output, "XY");
+        host.click(&ctx, plane);
+        host.frame(&ctx, vec![]);
+        assert_eq!(host.axis, Some(2));
+    }
+
+    #[test]
+    fn nested_supersampling_choice_remains_open_and_selects_factor() {
+        let ctx = egui::Context::default();
+        let mut host = Harness::default();
+        host.frame(&ctx, vec![]);
+        host.click(&ctx, host.menu.center());
+        let output = host.frame(&ctx, vec![]);
+        let combo = text_position(&output, "SSAA 1×");
+        host.click(&ctx, combo);
+        let output = host.frame(&ctx, vec![]);
+        let factor = text_position(&output, "2×");
+        host.click(&ctx, factor);
+        host.frame(&ctx, vec![]);
+        assert_eq!(host.options.ssaa, 2.0);
+    }
 }

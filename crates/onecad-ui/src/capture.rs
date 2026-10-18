@@ -41,7 +41,7 @@ pub async fn load_display(backend: &mut Backend) -> Result<Display, String> {
         let bytes = api::get_mesh(
             &backend.state,
             body.id.clone(),
-            "medium".into(),
+            "fine".into(),
             Some(context.snapshot_id.0),
             Some(context.runtime_session.clone()),
         )

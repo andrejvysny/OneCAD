@@ -193,6 +193,7 @@ pub async fn candidate(backend: &Backend, generation: u64, candidate: Candidate)
         return;
     }
     let mut prepared = None;
+    let mut retained_scene = None;
     let lease = if matches!(&candidate, Candidate::Preview { .. }) {
         match backend
             .shared
@@ -213,6 +214,7 @@ pub async fn candidate(backend: &Backend, generation: u64, candidate: Candidate)
                         },
                         prepared: None,
                         lease: None,
+                        scene: None,
                     },
                 );
                 return;
@@ -251,8 +253,9 @@ pub async fn candidate(backend: &Backend, generation: u64, candidate: Candidate)
                             )
                             .map_err(|error| error.to_string())
                         }) {
-                            Ok(scene) => {
-                                prepared = Some(scene);
+                            Ok(packed) => {
+                                prepared = Some(packed);
+                                retained_scene = Some(Arc::new(scene));
                                 Ok(result)
                             }
                             Err(error) => Err(error.to_string()),
@@ -271,6 +274,7 @@ pub async fn candidate(backend: &Backend, generation: u64, candidate: Candidate)
             action,
             prepared,
             lease,
+            scene: retained_scene,
         },
     );
 }

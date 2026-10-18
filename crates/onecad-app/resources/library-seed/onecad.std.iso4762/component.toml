@@ -11,7 +11,7 @@
 # `revision` is the package content hash over every file EXCEPT this manifest
 # (spec §2.1). A generator package carries no other file, so the hash is the
 # SHA-256 of nothing — the same value for every seed package here, correct
-# rather than coincidental, and pinned by a test in `src-tauri/src/library.rs`.
+# rather than coincidental, and pinned by a test in `crates/onecad-app/src/library.rs`.
 
 [identity]
 id = "onecad.std.iso4762"

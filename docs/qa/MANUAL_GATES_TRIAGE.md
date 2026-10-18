@@ -64,17 +64,17 @@ down from ~112.
 
 | Check | Dest | Status |
 | --- | --- | --- |
-| rollback TRUNCATES visible geometry | H | COVERED `src-tauri/tests/rollback_lane.rs:367` |
+| rollback TRUNCATES visible geometry | H | COVERED `crates/onecad-app/tests/rollback_lane.rs:367` |
 | roll into all-suppressed prefix clears | H | COVERED `rollback_lane.rs:441` |
 | roll to current row is a no-op | H | COVERED `rollback_lane.rs:507` |
 | grayed rows + marker + "N rolled back" banner; Roll to end | F | COVERED `e2e/history-rollback.spec.ts:46,84` |
 | insert at cursor lands at step k, not the tail | H+F | COVERED `rollback_lane.rs:601`, `e2e/history-insert-at-cursor.spec.ts:45` |
 | inline dimension edit of a PAST feature rebuilds downstream | F | COVERED `e2e/history-inline-dimension.spec.ts:171` |
 | row editor refuses while a tool is armed | F | COVERED `e2e/history-inline-dimension.spec.ts:213` |
-| suppress mid-chain → downstream follows; un-suppress restores | H+F | COVERED `src-tauri/tests/suppression.rs`, `e2e/history-suppress.spec.ts:44,81` |
-| suppression survives reopen | H | COVERED `src-tauri/tests/suppression.rs` |
+| suppress mid-chain → downstream follows; un-suppress restores | H+F | COVERED `crates/onecad-app/tests/suppression.rs`, `e2e/history-suppress.spec.ts:44,81` |
+| suppression survives reopen | H | COVERED `crates/onecad-app/tests/suppression.rs` |
 | delete-confirm names the dependent count; Depends on / Used by | F | COVERED `e2e/history-dependencies.spec.ts:88` |
-| undo on ~20-feature doc is checkpoint restore, not full replay | H | COVERED `src-tauri/tests/undo_checkpoint.rs:398,488,649` |
+| undo on ~20-feature doc is checkpoint restore, not full replay | H | COVERED `crates/onecad-app/tests/undo_checkpoint.rs:398,488,649` |
 | upstream edit → fillet loses edge → row warn-tinted, downstream gray, "Timeline stopped at …" | H+F | GAP-H2 |
 | banner Suppress-feature un-wedges the rebuild | F | GAP-F2 |
 | repair candidates show viewport crosshair on hover | M | manual (visual) |
@@ -144,10 +144,10 @@ down from ~112.
 
 | Check | Dest | Status |
 | --- | --- | --- |
-| open `Untitled.onecad` → body renders + fitView | H | COVERED `src-tauri/tests/open_render.rs:317` |
+| open `Untitled.onecad` → body renders + fitView | H | COVERED `crates/onecad-app/tests/open_render.rs:317` |
 | reopen ×2 round-trip | H | COVERED `open_render.rs:317` |
-| checkpoint incremental == from-zero; worker restart replays | H | COVERED `src-tauri/tests/checkpoints.rs:316,413` |
-| autosave debounce / no runtime lock / concurrent autosaves land | H | COVERED `src-tauri/tests/autosave_recovery.rs:81`, `persistence_lane.rs:181,234` |
+| checkpoint incremental == from-zero; worker restart replays | H | COVERED `crates/onecad-app/tests/checkpoints.rs:316,413` |
+| autosave debounce / no runtime lock / concurrent autosaves land | H | COVERED `crates/onecad-app/tests/autosave_recovery.rs:81`, `persistence_lane.rs:181,234` |
 | recovery round-trip reconstructs the document | H | COVERED `autosave_recovery.rs:209` |
 | Don't-Save-quit offers NO recovery next launch | H | COVERED `autosave_recovery.rs:174` |
 | dirty doc: ⌘W / ⌘Q / titlebar × / start screen all prompt | F+M | COVERED titlebar × `e2e/unsaved-guard.spec.ts:98,108,120,133`; ⌘W/⌘Q are native → **M** |
@@ -158,7 +158,7 @@ down from ~112.
 
 | Check | Dest | Status |
 | --- | --- | --- |
-| bodies render, names from products | H | COVERED `src-tauri/tests/step_import.rs:422` |
+| bodies render, names from products | H | COVERED `crates/onecad-app/tests/step_import.rs:422` |
 | colored faces show authored colors | F | COVERED `e2e/step-import.spec.ts:171` |
 | uncolored import is byte-identical | K | COVERED `worker/tests/test_xcaf_import.cpp:318` |
 | multi-solid / garbage file | K | COVERED `worker/tests/test_import_step.cpp:224,282` |
@@ -179,7 +179,7 @@ down from ~112.
 | second move FOLDS into the same row; dblclick re-edits | H | COVERED `crates/onecad-app/tests/transform_body.rs` |
 | editing a transform under a downstream fillet ⇒ fillet NeedsRepair | H | GAP-H11 |
 | [Align] two-pick sets a face flush | F | GAP-F23 |
-| linear / circular pattern, mirror ±fuse | K+H | COVERED `worker/tests/test_m6a_ops.cpp:173,267,289`, `src-tauri/tests/breadth_ops.rs:499,544,586` |
+| linear / circular pattern, mirror ±fuse | K+H | COVERED `worker/tests/test_m6a_ops.cpp:173,267,289`, `crates/onecad-app/tests/breadth_ops.rs:499,544,586` |
 | shell ladder / hollow preview | K | COVERED `worker/tests/test_m6a_ops.cpp:84` |
 | boolean 3 modes preview == commit | H | COVERED `crates/onecad-app/tests/preview_boolean.rs:495,511` |
 | boolean commit two bodies → target | F | COVERED `e2e/boolean-preview.spec.ts:276` |
@@ -196,7 +196,7 @@ down from ~112.
 | through-all on a stepped part | K+H | COVERED `test_hole_op.cpp:143`, `crates/onecad-app/tests/hole_ops.rs:521` |
 | re-pick point while armed; re-edit type switch | F | COVERED `e2e/hole.spec.ts:187` |
 | datum create → offset ghost → quad + label + tree | F | COVERED `e2e/datum-create.spec.ts:24` |
-| sketch ON a datum → extrude lands 10 mm up | H | COVERED `src-tauri/tests/datum_planes.rs:208` |
+| sketch ON a datum → extrude lands 10 mm up | H | COVERED `crates/onecad-app/tests/datum_planes.rs:208` |
 | delete-while-referenced rejected with a named hint | H | COVERED `datum_planes.rs:334` |
 | measure face area / edge length / volume / centroid | K+F | COVERED `worker/tests/test_mass_properties.cpp:100,156`, `e2e/measure.spec.ts:129,228` |
 | angle between two planar faces (60/120 form) | F | COVERED `e2e/measure.spec.ts:252` |
@@ -409,7 +409,7 @@ USER gate. This round classifies them with the same K/H/F/M codes.
 | Autosave crash recovery — 5 steps (`kill -9`, relaunch, Restore, Recent-card prompt, real name) | 1383 | **M** | STAYS MANUAL — native process death plus a relaunch; no lane can kill its own host. Moved verbatim into `MANUAL_RELEASE_GATES.md` § 4 |
 | Idle sketch chrome reads as ONE fused two-row pill | 1234 | **M** | STAYS MANUAL — visual composition of two chrome rows. Folded into `MANUAL_RELEASE_GATES.md` § 1 |
 | Sketch render parity — read-only length label, Distance chip takes over with no duplicate, origin-pin lock icon + Disconnect chip, endpoint highlight ring | 1435 | **M** + F | SPLIT. "A Distance constraint replaces the read-only label rather than duplicating it" is state, and belongs in vitest/Playwright — recorded as **GAP-F9**. The rest is "does it look right", folded into `MANUAL_RELEASE_GATES.md` § 1 |
-| Real-worker face-colour smoke (element ids minted through `promoteSelection`) | 7309 | H | COVERED `src-tauri/tests/face_color_reopen.rs` — the DI-4 rebind work asserts an authored colour survives a reopen against the real worker, including that a re-pick reuses the persisted id |
+| Real-worker face-colour smoke (element ids minted through `promoteSelection`) | 7309 | H | COVERED `crates/onecad-app/tests/face_color_reopen.rs` — the DI-4 rebind work asserts an authored colour survives a reopen against the real worker, including that a re-pick reuses the persisted id |
 | GitHub Settings → require approval for fork-PR workflows | 5589 | — | NOT A PRODUCT GATE. Repo administration, not a release check; stays a one-line USER action in `TODO.md` |
 | Fillet drag into an OCCT refusal — preview stays last-valid, commit blocked, diagnostic visible | 7340 | K + H | COVERED for the refusal + named reason (`worker/tests/test_fillet_diagnostics.cpp:37`); the "selected edges are kept" half is round 1's **GAP-H1**, still open. No new manual box |
 

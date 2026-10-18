@@ -1,5 +1,4 @@
-// Body faces: depth/normal prepass, the quality PBR shade, the baseline (today's three.js
-// MeshStandardMaterial lighting) shade, and the contact-shadow height pass.
+// Shared depth/normal, studio shading, transparency, and contact height entry points.
 
 @group(1) @binding(0) var ao_tex: texture_2d<f32>;
 @group(1) @binding(1) var irr_tex: texture_cube<f32>;
@@ -94,16 +93,14 @@ fn spec_occlusion(nv: f32, ao: f32, rough: f32) -> f32 {
     return clamp(pow(nv + ao, exp2(-16.0 * rough - 1.0)) - 1.0 + ao, 0.0, 1.0);
 }
 
-@fragment
-fn fs_body(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+fn shade_body(i: VOut, front: bool) -> vec4<f32> {
     let n = shading_normal(i, front);
     let v = view_direction(i.wp);
     // Derivatives first, in uniform control flow.
     let ndv = dot(n, v);
-    let fw = fwidth(ndv);
     if clipped(i.wp) { discard; }
     // Retained backfaces provide depth proxies; the cap colors the section once.
-    if sectioned() && !front { return vec4<f32>(0.0); }
+    if sectioned() && !front && u.display.w < 0.5 { return vec4<f32>(0.0); }
     let nv = clamp(ndv, 1e-4, 1.0);
     let rough = u.body.w;
     let metal = u.material.x;
@@ -123,36 +120,29 @@ fn fs_body(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32
     var c = (ibl_d + ibl_s) * u.env.z;
     c += direct(u.key, n, v, diff, f0, rough) * mix(1.0, ao, 0.35);
     c = pbr_neutral(c * u.env.w);
-    // Silhouettes of curved faces: where the smooth normal turns edge-on, a line about 2 px
-    // wide on the visible surface (depth-correct for free). Adapted from SolidCraft
-    // `assets/shaders/viewport.wgsl` fs_solid (MIT OR Apache-2.0); see ATTRIBUTION.md.
-    if (u.material.z > 0.5 && fw > 1e-6) {
-        let a = (1.0 - smoothstep(fw * 1.0, fw * 2.5, abs(ndv))) * u.edge.w;
-        c = mix(c, u.edge.rgb, a);
-    }
     return vec4<f32>(mix(dither(c, i.pos.xy), u.overlay.rgb, u.overlay.a), u.display.x);
 }
 
-// Today's look: MeshStandardMaterial(metalness 0, roughness 0.5) under a hemisphere light
-// (ground = canvas), a camera-relative key + fill pair and a weak prefiltered environment,
-// NeutralToneMapping at exposure 1. No AO, no shadows.
 @fragment
-fn fs_body_baseline(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
-    let n = shading_normal(i, front);
-    let v = view_direction(i.wp);
-    let nv = clamp(dot(n, v), 1e-4, 1.0);
-    let rough = u.body.w;
-    let f0 = vec3<f32>(u.material.y);
-    let diff = u.body.rgb;
-    var c = direct(u.key, n, v, diff, f0, rough) + direct(u.fill, n, v, diff, f0, rough);
-    let hemi = mix(u.hemi_ground.rgb, u.hemi_sky.rgb, 0.5 * n.z + 0.5) * u.hemi_sky.w;
-    c += hemi * diff / PI;
-    let irr = textureSampleLevel(irr_tex, lin, env_dir(n), 0.0).rgb;
-    let r = reflect(-v, n);
-    let pre = textureSampleLevel(spec_tex, lin, env_dir(r), rough * (SPEC_MIPS - 1.0)).rgb;
-    let lut = textureSampleLevel(lut_tex, lin, vec2<f32>(nv, rough), 0.0).rg;
-    c += (irr * diff + pre * (f0 * lut.x + lut.y)) * u.env.z;
-    return vec4<f32>(pbr_neutral(c * u.env.w), 1.0);
+fn fs_body(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    return shade_body(i, front);
+}
+
+struct Transparency {
+    @location(0) accumulation: vec4<f32>,
+    @location(1) revealage: f32,
+};
+
+// Constant bounded weight: each triangle contributes at most 1/16 to fp16.
+// At the 500,000 triangle admission ceiling the sum remains below 31,251.
+@fragment
+fn fs_xray(i: VOut, @builtin(front_facing) front: bool) -> Transparency {
+    let color = shade_body(i, front);
+    let alpha = u.display.x;
+    var out: Transparency;
+    out.accumulation = vec4<f32>(clamp(color.rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * alpha, alpha) * 0.0625;
+    out.revealage = alpha;
+    return out;
 }
 
 // Contact shadow: the lowest surface over each ground texel (ortho, looking up).
@@ -249,4 +239,41 @@ fn section_depth(pixel: vec2<f32>) -> f32 {
 @fragment fn fs_depth(i: VOut) -> @location(0) vec4<f32> {
     if clipped(i.wp) { discard; }
     return vec4<f32>(0.0);
+}
+
+@fragment fn fs_xray_mask(i: VOut) -> Transparency {
+    if clipped(i.wp) { discard; }
+    var out: Transparency;
+    out.accumulation = vec4<f32>(0.0);
+    out.revealage = 0.0;
+    return out;
+}
+@fragment fn fs_xray_cap(i: VOut) -> Transparency {
+    let depth = section_depth(i.pos.xy);
+    if !(depth >= 0.0 && depth <= 1.0) { discard; }
+    let color = cap_color(i);
+    var out: Transparency;
+    out.accumulation = vec4<f32>(clamp(color.rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * color.a, color.a) * 0.0625;
+    out.revealage = color.a;
+    return out;
+}
+@fragment fn fs_cap_depth(i: VOut) -> CutOut {
+    let depth = section_depth(i.pos.xy);
+    if !(depth >= 0.0 && depth <= 1.0) { discard; }
+    var out: CutOut;
+    out.color = vec4<f32>(0.0);
+    out.depth = depth;
+    return out;
+}
+
+@fragment fn fs_clear_mask() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0);
+}
+@fragment fn fs_preview_cap(i: VOut) -> CutOut {
+    let depth = section_depth(i.pos.xy);
+    if !(depth >= 0.0 && depth <= 1.0) { discard; }
+    var out: CutOut;
+    out.color = u.overlay;
+    out.depth = depth;
+    return out;
 }

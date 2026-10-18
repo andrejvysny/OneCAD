@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 fn fixture_scene(identity: SceneIdentity) -> SceneSnapshot {
     let bytes = include_bytes!(
-        "../../../spikes/fixtures/fillet-block/00000000-0000-0000-0000-00000000f101.mesh1"
+        "../../../fixtures/render/fillet-block/00000000-0000-0000-0000-00000000f101.mesh1"
     );
     let body = SceneBody::new(
         BodyId::new(),
@@ -459,3 +459,8 @@ mod analytic_fixture;
 mod section_regressions;
 
 mod nema_acceptance;
+
+mod display_modes;
+
+#[path = "tests/edge_modes.rs"]
+mod edge_modes;

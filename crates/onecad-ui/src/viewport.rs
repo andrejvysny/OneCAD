@@ -1,6 +1,6 @@
 use crate::app::App;
 use onecad_interaction::{Action, ProfileSelection};
-use onecad_render::{BodyStyle, PreviewIdentity, RenderStyle, Theme};
+use onecad_render::{BodyStyle, RenderStyle, Theme};
 use onecad_scene::{Bounds, DVec2, ViewSnapshot, Viewport};
 use std::sync::atomic::Ordering;
 
@@ -219,7 +219,12 @@ fn render(
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
         return Ok(());
     }
-    if !app.draw_dirty && !needs_scene && app.pending_preview.is_none() && !app.clear_preview {
+    if !app.draw_dirty
+        && !needs_scene
+        && app.pending_preview.is_none()
+        && !app.clear_preview
+        && app.pending_display_options.is_none()
+    {
         crate::viewport_selection::upload(app, &display.scene, ctx)?;
         return Ok(());
     }
@@ -227,48 +232,9 @@ fn render(
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
         return Ok(());
     }
-    if needs_scene {
-        let prepared = display
-            .prepared
-            .lock()
-            .map_err(|_| "scene handoff poisoned")?
-            .take()
-            .ok_or("prepared scene already consumed")?;
-        app.renderer
-            .replace_prepared_scene(prepared)
-            .map_err(|e| e.to_string())?;
-        app.clear_preview = true;
-        app.topology.invalidate(display.scene.identity());
-    }
-    if let Some(options) = app.pending_display_options.take() {
-        let changed_section = options.section != app.renderer.options().section;
-        match app.renderer.set_options(options) {
-            Ok(()) if changed_section => {
-                replace_texture(app);
-                app.selected_body = None;
-                app.interaction.selection = None;
-                app.topology.select(None);
-            }
-            Ok(()) => replace_texture(app),
-            Err(error) => app.status = format!("Display: {error}"),
-        }
-    }
-    if app.clear_preview {
-        app.renderer.clear_preview().map_err(|e| e.to_string())?;
-        app.clear_preview = false;
-    }
-    if let Some((tag, prepared, _lease)) = app.pending_preview.take()
-        && tag.context.scene == display.scene.identity()
-    {
-        app.renderer
-            .replace_prepared_preview(
-                PreviewIdentity {
-                    base: tag.context.scene,
-                    generation: tag.sequence,
-                },
-                prepared,
-            )
-            .map_err(|e| e.to_string())?;
+    if !crate::viewport_updates::apply(app, display)? {
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        return Ok(());
     }
     let size = physical_size(viewport);
     if app.renderer.size() != size {
@@ -334,7 +300,7 @@ fn render(
     Ok(())
 }
 
-fn replace_texture(app: &mut App) {
+pub(crate) fn replace_texture(app: &mut App) {
     let next = app.renderer.output_view().map(|view| {
         app.gpu.renderer.write().register_native_texture(
             &app.gpu.device,

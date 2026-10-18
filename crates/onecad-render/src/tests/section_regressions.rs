@@ -1,4 +1,7 @@
-use super::{quality_acceptance::render, *};
+use super::{
+    quality_acceptance::{render, section_options},
+    *,
+};
 
 pub(super) fn verify(renderer: &mut Renderer, device: &wgpu::Device, queue: &wgpu::Queue) {
     let scene = super::analytic_fixture::sphere_scene();
@@ -19,8 +22,8 @@ pub(super) fn verify(renderer: &mut Renderer, device: &wgpu::Device, queue: &wgp
         },
     )
     .unwrap();
-    verify_cap_alpha(renderer, device, queue, &view);
-    verify_cap_ground_tie(renderer, device, queue, &view);
+    verify_cap_alpha(renderer, device, queue, &scene, &view);
+    verify_cap_ground_tie(renderer, device, queue, &scene, &view);
     verify_contact_height(renderer, device, queue, &scene, &view);
     verify_nested_caps(renderer, device, queue);
     renderer.set_options(RenderOptions::default()).unwrap();
@@ -30,18 +33,21 @@ fn verify_cap_alpha(
     renderer: &mut Renderer,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    scene: &SceneSnapshot,
     view: &ViewSnapshot,
 ) {
     let mut samples = Vec::new();
     for alpha in [0.0, 0.5, 1.0] {
-        renderer
-            .set_options(RenderOptions {
+        section_options(
+            renderer,
+            scene,
+            RenderOptions {
                 section: [0.0, 0.0, 1.0, 10.0],
                 cap: [1.0, 0.0, 0.0, alpha],
-                outline: false,
+                display_mode: DisplayMode::Shaded,
                 ..Default::default()
-            })
-            .unwrap();
+            },
+        );
         let pixels = render(
             renderer,
             device,
@@ -91,12 +97,14 @@ fn verify_contact_height(
     scene: &SceneSnapshot,
     view: &ViewSnapshot,
 ) {
-    renderer
-        .set_options(RenderOptions {
+    section_options(
+        renderer,
+        scene,
+        RenderOptions {
             section: [0.0, 0.0, -1.0, 5.0],
             ..Default::default()
-        })
-        .unwrap();
+        },
+    );
     render(
         renderer,
         device,
@@ -164,18 +172,21 @@ fn verify_cap_ground_tie(
     renderer: &mut Renderer,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    scene: &SceneSnapshot,
     view: &ViewSnapshot,
 ) {
     let mut samples = Vec::new();
     for cap in [[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]] {
-        renderer
-            .set_options(RenderOptions {
+        section_options(
+            renderer,
+            scene,
+            RenderOptions {
                 section: [0.0, 0.0, 1.0, 0.0],
                 cap,
-                outline: false,
+                display_mode: DisplayMode::Shaded,
                 ..Default::default()
-            })
-            .unwrap();
+            },
+        );
         let pixels = render(
             renderer,
             device,
@@ -275,14 +286,16 @@ fn verify_nested_caps(renderer: &mut Renderer, device: &wgpu::Device, queue: &wg
             },
         )
         .unwrap();
-        renderer
-            .set_options(RenderOptions {
+        section_options(
+            renderer,
+            &scene,
+            RenderOptions {
                 section: [0.0, 0.0, -1.0, 5.0],
                 cap: [1.0, 0.0, 0.0, 1.0],
-                outline: false,
+                display_mode: DisplayMode::Shaded,
                 ..Default::default()
-            })
-            .unwrap();
+            },
+        );
         let pixels = render(
             renderer,
             device,

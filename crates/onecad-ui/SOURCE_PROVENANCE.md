@@ -11,8 +11,8 @@ clean tag, reproducible binary, native acceptance or third-party license review.
 
 The font adapter resolves system SF through CoreText at runtime; no system font
 file is redistributed. The icon adapter consumes the existing
-`src/icons/cppIcons.generated.ts` and `src/icons/authored.ts` registries. The theme
-adapter consumes the existing `src/styles/tokens.css` palette, with light/dark
+`assets/native/cppIcons.generated.ts` and `assets/native/authored.ts` registries. The theme
+adapter consumes the existing `assets/native/tokens.css` palette, with light/dark
 selection enabled. The menu adapter retains typed actions and duplicate-key
 routing, removes spike metrics, and routes Quit through application shutdown.
 
@@ -43,10 +43,12 @@ not establish physical trackpad, focus or native-input acceptance.
 ## Full viewport and manipulators
 
 The native host composes OneCAD's indexed quality `onecad-render::Renderer`.
-The locally copied SolidCraft geometry/render/GPU stack remains pinned at
-`a228a5830eedf88856fd392b7db0ff5977f352d6` (0.16.0), available through the
-comparison-only donor adapter. OneCAD-owned display options preserve section,
-hidden-edge, transparency and supersampling controls; attribution for adapted
+The comparison-only SolidCraft geometry/render/GPU adapter and rendering
+prototypes are retired. OneCAD-owned renderer modes define face and edge
+visibility; existing host controls retain section and supersampling settings.
+Section contour preparation uses the renderer's bounded latest-only worker;
+source scene and host reservations survive cancellation until execution ends.
+Attribution for adapted
 renderer techniques remains in `onecad-render/README.md`.
 
 `gizmo*.rs` adapts the complete transform triad from
@@ -70,4 +72,4 @@ navigation presets are not application dependencies.
 
 The MIT option and original notices cover these adaptations. Exact upstream
 paths are recorded in root `ATTRIBUTION.md`; copied source hashes and local
-manifest/test adjustments live in `vendor/solidcraft-viewport/`.
+source provenance remains in root `ATTRIBUTION.md` after vendor retirement.

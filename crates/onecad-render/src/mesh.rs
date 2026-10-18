@@ -38,6 +38,7 @@ pub(crate) struct PreparedGeometry {
     normals: Vec<[f32; 3]>,
     indices: Vec<u32>,
     segments: Vec<Segment>,
+    feature_segments: Vec<Segment>,
     silhouettes: Vec<crate::silhouette::SilEdge>,
 }
 
@@ -51,6 +52,8 @@ pub(crate) struct GpuBody {
     pub normals: wgpu::Buffer,
     pub indices: wgpu::Buffer,
     pub segments: wgpu::Buffer,
+    pub feature_segments: wgpu::Buffer,
+    pub feature_segment_count: u32,
     pub silhouettes: wgpu::Buffer,
     pub silhouette_count: u32,
     pub index_count: u32,
@@ -78,11 +81,15 @@ pub(crate) fn body_estimate(
         return Err(RenderError::Mesh("normal section required"));
     }
     let mut segments = 0;
+    let mut features = 0;
     for i in 0..h.edge_count {
         let range = mesh
             .edge_range(i as usize)
             .ok_or(RenderError::Mesh("edge range"))?;
         segments = add(segments, u64::from(range.count.saturating_sub(1)))?;
+        if clean_edge(mesh.edge_class(i as usize)) {
+            features = add(features, u64::from(range.count.saturating_sub(1)))?;
+        }
     }
     if u64::from(h.triangle_count) * 3 > u64::from(u32::MAX) || segments > u64::from(u32::MAX) {
         return Err(RenderError::Budget("draw count"));
@@ -92,6 +99,7 @@ pub(crate) fn body_estimate(
         mul(u64::from(h.vertex_count), 12)?,
         mul(u64::from(h.triangle_count), 12)?,
         mul(segments, 24)?,
+        mul(features, 24)?,
         mul(
             if silhouettes {
                 crate::silhouette::candidate_count(&mesh)? as u64
@@ -104,7 +112,7 @@ pub(crate) fn body_estimate(
     buffer_estimate(lengths, max_buffer)
 }
 
-fn buffer_estimate(lengths: [u64; 5], max_buffer: u64) -> Result<u64, RenderError> {
+fn buffer_estimate(lengths: [u64; 6], max_buffer: u64) -> Result<u64, RenderError> {
     lengths
         .into_iter()
         .try_fold(std::mem::size_of::<FrameU>() as u64, |total, length| {
@@ -134,6 +142,7 @@ impl PreparedGeometry {
                 self.normals.len() as u64 * 12,
                 self.indices.len() as u64 * 4,
                 self.segments.len() as u64 * 24,
+                self.feature_segments.len() as u64 * 24,
                 self.silhouettes.len() as u64 * 48,
             ],
             max_buffer,
@@ -147,6 +156,7 @@ impl PreparedGeometry {
             + self.normals.capacity() as u64 * 12
             + self.indices.capacity() as u64 * 4
             + self.segments.capacity() as u64 * 24
+            + self.feature_segments.capacity() as u64 * 24
             + self.silhouettes.capacity() as u64 * 48
     }
 }
@@ -175,6 +185,14 @@ impl PreparedBody {
                 .saturating_sub(1) as usize;
         }
         let mut segments = reserve(count)?;
+        let feature_count: usize = (0..h.edge_count as usize)
+            .filter(|i| clean_edge(mesh.edge_class(*i)))
+            .map(|i| {
+                mesh.edge_range(i)
+                    .map_or(0, |range| range.count.saturating_sub(1) as usize)
+            })
+            .sum();
+        let mut feature_segments = reserve(feature_count)?;
         for i in 0..h.vertex_count {
             positions.push(
                 mesh.position(i as usize)
@@ -193,14 +211,18 @@ impl PreparedBody {
                 .edge_range(i as usize)
                 .ok_or(RenderError::Mesh("edge range"))?;
             for j in 1..range.count {
-                segments.push(Segment {
+                let segment = Segment {
                     a: mesh
                         .edge_point((range.first + j - 1) as usize)
                         .ok_or(RenderError::Mesh("edge point"))?,
                     b: mesh
                         .edge_point((range.first + j) as usize)
                         .ok_or(RenderError::Mesh("edge point"))?,
-                });
+                };
+                segments.push(segment);
+                if clean_edge(mesh.edge_class(i as usize)) {
+                    feature_segments.push(segment);
+                }
             }
         }
         Ok(Self {
@@ -211,6 +233,7 @@ impl PreparedBody {
                 normals,
                 indices,
                 segments,
+                feature_segments,
                 silhouettes: crate::silhouette::candidates(&mesh)?,
             }),
         })
@@ -239,6 +262,12 @@ impl PreparedBody {
             style: BodyStyle::default(),
             index_count: self.geometry.indices.len() as u32,
             segment_count: self.geometry.segments.len() as u32,
+            feature_segment_count: self.geometry.feature_segments.len() as u32,
+            feature_segments: buffer(
+                "feature edges",
+                bytemuck::cast_slice(&self.geometry.feature_segments),
+                vertex,
+            ),
             silhouette_count: self.geometry.silhouettes.len() as u32,
             silhouettes: buffer(
                 "silhouettes",
@@ -276,6 +305,7 @@ pub(crate) fn gpu_bytes(body: &GpuBody) -> u64 {
         + body.normals.size()
         + body.indices.size()
         + body.segments.size()
+        + body.feature_segments.size()
         + body.uniform.size()
         + body.silhouettes.size()
 }
@@ -295,4 +325,12 @@ impl PreparedBody {
             self.geometry.silhouettes.capacity(),
         )
     }
+}
+
+fn clean_edge(class: onecad_protocol::mesh::EdgeClass) -> bool {
+    use onecad_protocol::mesh::EdgeClass;
+    !matches!(
+        class,
+        EdgeClass::Smooth | EdgeClass::Seam | EdgeClass::Degenerate
+    )
 }

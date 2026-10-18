@@ -20,6 +20,9 @@ enum SectionType : std::uint32_t {
     EDGE_ID_OFFS = 9,
     EDGE_ID_CHARS = 10,
     FACE_COLORS = 12,
+    EDGE_CLASSES = 14,
+    EDGE_FACE_RANGES = 15,
+    EDGE_FACES = 16,
 };
 
 void put_u16(std::vector<std::uint8_t>& b, std::size_t at, std::uint16_t v) {
@@ -150,6 +153,21 @@ std::vector<std::uint8_t> encode_mesh1(const Mesh1Input& in) {
             s.data.push_back(static_cast<std::uint8_t>(rgba & 0xff));          // a
         }
         sections.push_back(std::move(s));
+    }
+
+    if (in.has_edges && in.edge_classes.size() == E && in.edge_face_ranges.size() == E) {
+        Section classes{EDGE_CLASSES, {}};
+        Section ranges{EDGE_FACE_RANGES, {}};
+        Section faces{EDGE_FACES, {}};
+        for (const auto value : in.edge_classes) append_u32(classes.data, value);
+        for (const auto& range : in.edge_face_ranges) {
+            append_u32(ranges.data, range.first);
+            append_u32(ranges.data, range.second);
+        }
+        for (const auto value : in.edge_faces) append_u32(faces.data, value);
+        sections.push_back(std::move(classes));
+        sections.push_back(std::move(ranges));
+        sections.push_back(std::move(faces));
     }
 
     const std::uint16_t section_count = static_cast<std::uint16_t>(sections.size());

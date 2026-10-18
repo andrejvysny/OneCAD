@@ -17,7 +17,7 @@ fn headless_quality_feature_acceptance() {
     assert_eq!(adapter.get_info().backend, wgpu::Backend::Metal);
     let enabled = required_device_features(adapter.features());
     assert!(enabled.contains(wgpu::Features::DEPTH32FLOAT_STENCIL8));
-    for features in [wgpu::Features::empty(), enabled] {
+    for features in [wgpu::Features::FLOAT32_BLENDABLE, enabled] {
         run_depth_configuration(&adapter, features);
     }
 }
@@ -156,14 +156,15 @@ fn verify_features(
         (
             "hidden-edges",
             RenderOptions {
-                hidden_edges: true,
+                display_mode: DisplayMode::Xray,
                 ..Default::default()
             },
         ),
         (
             "opacity",
             RenderOptions {
-                opacity: 0.35,
+                display_mode: DisplayMode::Xray,
+                xray_opacity: 0.35,
                 ..Default::default()
             },
         ),
@@ -246,22 +247,26 @@ fn verify_section(
 ) {
     let bounds = scene.bounds().unwrap();
     let section = [0.0, 0.0, 1.0, ((bounds.min.z + bounds.max.z) * 0.5) as f32];
-    renderer
-        .set_options(RenderOptions {
+    section_options(
+        renderer,
+        scene,
+        RenderOptions {
             section,
             cap: [1.0, 0.0, 0.0, 1.0],
             ..Default::default()
-        })
-        .unwrap();
+        },
+    );
     let red = render(renderer, device, queue, view, style, "section-red");
     assert_feature_changed(baseline, &red, "section clipping");
-    renderer
-        .set_options(RenderOptions {
+    section_options(
+        renderer,
+        scene,
+        RenderOptions {
             section,
             cap: [0.0, 1.0, 0.0, 1.0],
             ..Default::default()
-        })
-        .unwrap();
+        },
+    );
     let green = render(renderer, device, queue, view, style, "section-green");
     assert_feature_changed(&red, &green, "section cap color");
     renderer.set_options(RenderOptions::default()).unwrap();
@@ -298,12 +303,13 @@ fn verify_analytic_outline(renderer: &mut Renderer, device: &wgpu::Device, queue
     for projection in [Projection::Perspective, Projection::Orthographic] {
         let view = fixture_view(&scene, projection, 1.0);
         for theme in [Theme::Dark, Theme::Light] {
-            for silhouettes in [SilhouetteMode::Geometric, SilhouetteMode::Fragment] {
+            {
+                let silhouettes = SilhouetteMode::Geometric;
                 let style = RenderStyle { theme, silhouettes };
                 let outlined = render(renderer, device, queue, &view, style, "sphere-outline");
                 renderer
                     .set_options(RenderOptions {
-                        outline: false,
+                        display_mode: DisplayMode::Shaded,
                         ..Default::default()
                     })
                     .unwrap();
@@ -320,11 +326,11 @@ fn verify_analytic_outline(renderer: &mut Renderer, device: &wgpu::Device, queue
 fn display_options_reject_invalid_values_before_allocation() {
     for options in [
         RenderOptions {
-            opacity: f32::NAN,
+            xray_opacity: f32::NAN,
             ..Default::default()
         },
         RenderOptions {
-            opacity: -0.1,
+            xray_opacity: -0.1,
             ..Default::default()
         },
         RenderOptions {
@@ -357,7 +363,7 @@ fn display_options_reject_invalid_values_before_allocation() {
     );
     assert_eq!(
         required_device_features(wgpu::Features::all()),
-        wgpu::Features::DEPTH32FLOAT_STENCIL8
+        wgpu::Features::DEPTH32FLOAT_STENCIL8 | wgpu::Features::FLOAT32_BLENDABLE
     );
 }
 
@@ -397,4 +403,18 @@ fn verify_sphere_hover(
     );
     assert_feature_changed(&baseline, &hover, "hover-only face overlay");
     renderer.clear_highlights().unwrap();
+}
+
+/// Tests prepare contours synchronously; the native host uses the bounded worker.
+pub(super) fn section_options(
+    renderer: &mut Renderer,
+    scene: &SceneSnapshot,
+    options: RenderOptions,
+) {
+    let contours =
+        PreparedSectionContours::new(scene, renderer.preparation_budget(), options.section)
+            .unwrap();
+    renderer
+        .set_options_with_section_contours(options, contours, None)
+        .unwrap();
 }

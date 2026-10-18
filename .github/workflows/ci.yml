@@ -1,30 +1,3 @@
-# CI — two lanes.
-#
-# SELF-HOSTED (Linux/x86_64, Proxmox LXC 107) carries the bulk of the work. Its
-# OCCT prefix and worker build tree are PERSISTENT, so the 40-90 min kernel build
-# is paid once rather than restored from cache on every run.
-#
-# macOS stays the SHIPPING gate and is deliberately not reducible to the Linux
-# lane: the packaging linkage smoke has no Linux equivalent (otool, a relocated
-# .app, bundle-dylibs.sh), webkit is the closest proxy for the WKWebView Tauri
-# actually ships on, and `cargo test --workspace` needs the staged sidecar the
-# app crate's build script demands.
-#
-# The kernelbench DIGEST gate runs only on the self-hosted runner, because that
-# is the only stable machine here. Measured the hard way: a darwin-arm64 baseline
-# recorded on a developer Mac did not reproduce on GitHub's macos-14 image (the
-# trig-heavy `valence4-*` family moved), so digests are a same-MACHINE tripwire,
-# not a same-platform one. What IS portable is behaviour, and the semantics gate
-# runs on both lanes.
-#
-# SECURITY — why every self-hosted job carries the same `if:`.
-# This repository is PUBLIC and the runner is a container on a private LAN. A
-# workflow triggered by a pull request FROM A FORK runs that fork's code on the
-# runner, so self-hosted jobs are gated to events whose code is already trusted:
-# a push to this repo, or a PR whose head branch lives in this repo. Fork PRs
-# still get the full GitHub-hosted lane (frontend, both e2e projects, and the
-# whole macOS gate). Do not remove those conditions, and do not add a
-# self-hosted job without one.
 name: CI
 
 on:
@@ -42,73 +15,28 @@ env:
   LINUX_WORKER_BUILD: /home/github-runner/worker-build/8.0.1
 
 jobs:
-  # ── Self-hosted lane (trusted events only) ─────────────────────────────────
-
-  # Frontend is GitHub-hosted for now, NOT because it needs macOS or a specific
-  # OS, but because `oven-sh/setup-bun` shells out to `unzip`, which the runner
-  # container does not have and cannot install without root. See the pending
-  # root installs listed above `e2e-chromium`.
-  frontend:
-    name: frontend
+  architecture:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - uses: oven-sh/setup-bun@v2
-      - name: Install
+      - name: Install tooling dependencies
         run: bun install --frozen-lockfile
-      - name: Build
-        run: bun run build
-      - name: Test
-        run: bun run test
+      - name: Tooling types
+        run: npx tsc --noEmit
+      - name: Tooling tests
+        run: bun test scripts/tests
       - name: Rust dependency boundaries
         run: |
           bun scripts/check-rust-layers.mjs
           bun test scripts/tests/check-rust-layers.test.mjs
-      - name: Modeling evidence manifest
+      - name: Modeling evidence
         run: |
-          node scripts/verify-modeling-coverage.mjs
+          bun scripts/verify-modeling-coverage.mjs
           scripts/tests/verify-modeling-coverage.test.sh
-          node scripts/verify-modeling-contracts.mjs
+          bun scripts/verify-modeling-contracts.mjs
 
-  # The tauri-agent harness (tools/tauri-agent) — the MCP server that drives the
-  # real app as a user. macOS-only by design, and macOS here is not incidental:
-  # the native input helper is Swift compiled with swiftc against Cocoa/Carbon,
-  # so there is nothing to typecheck or test on another runner.
-  #
-  # This lane is HEADLESS. A GitHub-hosted runner has no Accessibility or Screen
-  # Recording grant, and the harness is honest about that: only the seven
-  # input-POSTING helper verbs gate on AXIsProcessTrusted (move/down/up/keyDown/
-  # keyUp/press/type), and every test that reaches one wraps it in the suite's
-  # own `tolerate()`, which accepts NATIVE_INPUT_PERMISSION_DENIED as a pass.
-  # Everything else the suite touches — the build, --selftest, --version, cursor,
-  # permissions, windows, frontmost, release_all — needs no grant at all.
-  #
-  # TAURI_AGENT_REQUIRE_HELPER=1 is the load-bearing flag, mirroring
-  # ONECAD_REQUIRE_WORKER: without it the helper tests skip themselves when
-  # swiftc is missing and the job goes green having proved nothing.
-  #
-  # The three LIVE scripts (smoke.ts, smoke-actions.ts, phase0.ts) are NOT run
-  # here. They launch the real app and move the real cursor, which needs both TCC
-  # grants and a session with a window server. They stay user-run gates, recorded
-  # as owed in TODO.md.
-  tauri-agent:
-    name: tauri-agent
-    runs-on: macos-14
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-      - name: Install application dependencies
-        run: bun install --frozen-lockfile
-      - name: Typecheck the harness package
-        run: bunx tsc --noEmit -p tools/tauri-agent
-      - name: Swift toolchain
-        run: swiftc --version
-      - name: Harness tests (helper must really run, not skip)
-        env:
-          TAURI_AGENT_REQUIRE_HELPER: "1"
-        working-directory: tools/tauri-agent
-        run: bun test
 
   linux-worker:
     name: linux-worker
@@ -379,16 +307,16 @@ jobs:
             -DONECAD_WORKER_BUILD_DIR="$GITHUB_WORKSPACE/worker/build-8.0.1-rust"
           cmake --build worker/build-8.0.1-rust --parallel 3
           triple="$(rustc -Vv | sed -n 's/^host: //p')"
-          mkdir -p src-tauri/binaries
-          cp worker/build-8.0.1-rust/onecad-worker "src-tauri/binaries/onecad-worker-${triple}"
-          chmod +x "src-tauri/binaries/onecad-worker-${triple}"
+          mkdir -p packaging/binaries
+          cp worker/build-8.0.1-rust/onecad-worker "packaging/binaries/onecad-worker-${triple}"
+          chmod +x "packaging/binaries/onecad-worker-${triple}"
       - name: Install rustfmt and clippy
         run: rustup component add rustfmt clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: .
       - name: fmt
-        run: cargo fmt --check -p onecad -p onecad-app -p onecad-core -p onecad-protocol -p onecad-scene -p onecad-render -p onecad-interaction -p onecad-ui -p onecad-worker-stub -p onecad-regen -p onecad-kernelbench -p onecad-library -p onecad-library-ingest
+        run: cargo fmt --check -p onecad-mesh-fixture -p onecad-app -p onecad-core -p onecad-protocol -p onecad-scene -p onecad-render -p onecad-interaction -p onecad-ui -p onecad-worker-stub -p onecad-regen -p onecad-kernelbench -p onecad-library -p onecad-library-ingest
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Full workspace tests
@@ -436,206 +364,6 @@ jobs:
           path: worker/build-8.0.1-rust/kernelbench-t0
           if-no-files-found: warn
           retention-days: 14
-
-  e2e-webkit:
-    name: e2e-webkit
-    runs-on: macos-14
-    # WKWebView is what Tauri ships on macOS, so this half of the browser matrix
-    # is fidelity-critical and stays here.
-    #
-    # PENDING ROOT INSTALLS on the runner container (LXC 107). Once these land,
-    # `frontend` and `e2e-chromium` can both move to [self-hosted, Linux, X64]:
-    #   apt-get install -y --no-install-recommends unzip \
-    #     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
-    #     libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
-    #     libgbm1 libpango-1.0-0 libcairo2 libasound2 libatspi2.0-0 fonts-liberation
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-      - name: Install
-        run: bun install --frozen-lockfile
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/Library/Caches/ms-playwright
-          key: playwright-macos-14-${{ hashFiles('bun.lock') }}
-      - name: Install webkit
-        run: bunx playwright install webkit
-      - name: Run
-        run: bun run e2e -- --project=webkit
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: e2e-webkit-results
-          path: test-results
-          if-no-files-found: ignore
-          retention-days: 14
-
-  e2e-chromium:
-    name: e2e-chromium
-    # macOS, not ubuntu, and not arbitrarily: on ubuntu the two
-    # `boolean-preview` specs fail on a body pick that succeeds everywhere else
-    # ("Choose Union / Cut / Intersect" never appears). The suite raycasts real
-    # handle positions through SwiftShader, so a Linux GL difference is a
-    # plausible cause and a real finding — but it is its own investigation, and
-    # gating on an environment the suite has never been validated in would just
-    # be shipping a red check.
-    runs-on: macos-14
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-      - name: Install
-        run: bun install --frozen-lockfile
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/Library/Caches/ms-playwright
-          key: playwright-macos-14-${{ hashFiles('bun.lock') }}
-      - name: Install chromium
-        run: bunx playwright install chromium
-      - name: Run
-        run: bun run e2e -- --project=chromium
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: e2e-chromium-results
-          path: test-results
-          if-no-files-found: ignore
-          retention-days: 14
-
-  tauri-composition:
-    name: tauri-composition
-    needs: occt-8-0-1
-    runs-on: macos-14
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-      - name: Install application dependencies
-        run: bun install --frozen-lockfile
-      - name: Install worker dependencies
-        run: brew install boost eigen nlohmann-json ninja
-      - uses: actions/download-artifact@v4
-        with:
-          name: onecad-occt-8.0.1-macos-14
-          path: ${{ runner.temp }}/onecad-occt-artifact
-      - name: Extract OCCT artifact
-        run: |
-          mkdir -p "$RUNNER_TEMP/onecad-occt/8.0.1"
-          tar -xzf "$RUNNER_TEMP/onecad-occt-artifact/onecad-occt-8.0.1.tar.gz" \
-            -C "$RUNNER_TEMP/onecad-occt/8.0.1"
-      - name: Build and stage worker
-        env:
-          ONECAD_OCCT_ROOT: ${{ runner.temp }}/onecad-occt/8.0.1
-          ONECAD_OCCT_VERSION: 8.0.1
-          ONECAD_OCCT_BUILD_ID: ${{ env.OCCT_PRIMARY_BUILD_ID }}
-          ONECAD_WORKER_BUILD_DIR: ${{ github.workspace }}/worker/build-tauri-e2e
-        run: scripts/build-worker.sh Release
-      - name: Build seed Tauri test artifact
-        # NO `--` before the flags. `tauri build` is `[OPTIONS] [ARGS]...`, and
-        # everything after `--` is forwarded to `cargo build` — which accepts
-        # `--features` and `--config` (so they looked fine) and then rejects
-        # `--bundles` with "unexpected argument '--bundles' found". All three are
-        # tauri's OWN options; the separator was making cargo parse them. This lane
-        # had never executed on any machine, which is why a broken invocation
-        # survived here.
-        run: >-
-          bun run tauri build
-          --features tauri-e2e
-          --config src-tauri/tauri.e2e.conf.json
-          --bundles app
-      - name: Pre-stage self-contained bundled worker
-        # This seed/lockstep dance is the ONLY order that produces a bundle whose
-        # embedded manifest matches the sidecar that ships — bundle-dylibs.sh
-        # rewrites the sidecar, so a one-pass build always fails `verify_binary`.
-        # `scripts/package-macos.sh` is the same procedure for a real (non-e2e)
-        # bundle; the two must not drift. Rationale: docs/PACKAGING.md § 0.
-        run: |
-          set -euo pipefail
-          seed="target/release/bundle/macos/onecad.app"
-          scripts/bundle-dylibs.sh "$seed"
-          triple="$(rustc -Vv | sed -n 's/^host: //p')"
-          staged="src-tauri/binaries/onecad-worker-$triple"
-          cp "$seed/Contents/MacOS/onecad-worker" "$staged"
-          chmod +x "$staged"
-          cp -R "$seed/Contents/Frameworks" "$RUNNER_TEMP/onecad-frameworks"
-          bun -e '
-            const [binaryPath, manifestPath] = process.argv.slice(1);
-            const manifest = JSON.parse(await Bun.file(manifestPath).text());
-            const binary = new Uint8Array(await Bun.file(binaryPath).arrayBuffer());
-            manifest.binarySha256 = new Bun.CryptoHasher("sha256")
-              .update(binary)
-              .digest("hex");
-            await Bun.write(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-          ' "$staged" src-tauri/binaries/onecad-worker-manifest.json
-      - name: Build lockstep Tauri test artifact
-        # Same fix as the seed build above — see the comment there.
-        run: >-
-          bun run tauri build
-          --features tauri-e2e
-          --config src-tauri/tauri.e2e.conf.json
-          --bundles app
-      - name: Restore bundled dylibs without rewriting worker
-        run: |
-          set -euo pipefail
-          app="target/release/bundle/macos/onecad.app"
-          mkdir -p "$app/Contents/Frameworks"
-          cp -R "$RUNNER_TEMP/onecad-frameworks/." "$app/Contents/Frameworks/"
-          codesign --force --sign - "$app"
-      - name: Relocate and verify bundled worker
-        run: |
-          set -euo pipefail
-          results="$RUNNER_TEMP/tauri-composition-results"
-          relocated="$RUNNER_TEMP/relocated-onecad"
-          mkdir -p "$results" "$relocated"
-          mv target/release/bundle/macos/onecad.app "$relocated/onecad.app"
-          app="$relocated/onecad.app"
-          worker="$app/Contents/MacOS/onecad-worker"
-          expected="$(bun -e 'console.log(JSON.parse(await Bun.file(process.argv[1]).text()).binarySha256)' src-tauri/binaries/onecad-worker-manifest.json)"
-          actual="$(shasum -a 256 "$worker" | awk '{print $1}')"
-          test "$actual" = "$expected"
-          "$worker" --selftest 2>&1 | tee "$results/bundled-worker-selftest.log"
-          grep -F "fingerprint 0a6a1dce34181289" "$results/bundled-worker-selftest.log"
-          mv worker/build-tauri-e2e/onecad-worker worker/build-tauri-e2e/onecad-worker.hidden
-          triple="$(rustc -Vv | sed -n 's/^host: //p')"
-          mv "src-tauri/binaries/onecad-worker-$triple" \
-            "src-tauri/binaries/onecad-worker-$triple.hidden"
-          echo "ONECAD_TAURI_E2E_APP=$app" >>"$GITHUB_ENV"
-          echo "ONECAD_TAURI_E2E_RESULTS=$results" >>"$GITHUB_ENV"
-          echo "ONECAD_TAURI_E2E_DOCUMENT=$results/composition.onecad" >>"$GITHUB_ENV"
-      - name: Real Tauri composition
-        env:
-          ONECAD_WORKER_PATH: ""
-        run: |
-          set -o pipefail
-          bun run e2e:tauri 2>&1 | tee "$ONECAD_TAURI_E2E_RESULTS/wdio.log"
-      - name: Process cleanup
-        if: always()
-        run: |
-          sleep 2
-          if pgrep -fl 'relocated-onecad/onecad.app/Contents/MacOS/(onecad|onecad-worker)'; then
-            echo "Tauri app or worker survived the WDIO session" >&2
-            exit 1
-          fi
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: tauri-composition-results
-          path: |
-            ${{ runner.temp }}/tauri-composition-results
-            ${{ runner.temp }}/relocated-onecad/onecad.app
-          if-no-files-found: error
-          retention-days: 14
-
-  # ── Cross-version document compatibility ───────────────────────────────────
-  # The 7.9.3 WORKER characterization job is gone (it never compiled: four
-  # benchmark sites call `failure.what()`, absent from 7.9.3's Standard_Failure,
-  # and `continue-on-error` masked it on every run). These two remain because
-  # they answer a different question — a document written by the older kernel
-  # must still reopen under the shipping one — and they build only the
-  # `test_occt_persistence` target, which never touches the benchmark sources.
 
   persistence-producer-7-9-3:
     name: persistence-producer-7.9.3

@@ -6,7 +6,7 @@ use crate::{
 };
 use onecad_core::ids::{BodyId, RecordId};
 use onecad_interaction::{Action, CommitStatus, DocumentContext, Effect, Interaction, RequestTag};
-use onecad_render::{PreparedScene, Renderer};
+use onecad_render::Renderer;
 use onecad_scene::{Camera, ViewSnapshot};
 use std::sync::Arc;
 
@@ -43,13 +43,14 @@ pub struct App {
     pub stopping: bool,
     pub authoring_dirty: bool,
     pub gesture: u64,
-    pub pending_preview: Option<(RequestTag, PreparedScene, crate::budget::Lease)>,
+    pub pending_preview: Option<(RequestTag, crate::viewport_updates::Preview)>,
+    pub sections: crate::viewport_updates::Sections,
     pub clear_preview: bool,
     pub draw_dirty: bool,
     pub cad_needs_fence: bool,
     pub sampled: bool,
     pub sampling_done: Arc<std::sync::atomic::AtomicBool>,
-    received_preview: Option<(PreparedScene, crate::budget::Lease)>,
+    received_preview: Option<crate::viewport_updates::Preview>,
 }
 
 impl App {
@@ -121,6 +122,7 @@ impl App {
             authoring_dirty: false,
             gesture: 0,
             pending_preview: None,
+            sections: crate::viewport_updates::Sections::new()?,
             clear_preview: true,
             received_preview: None,
             draw_dirty: true,
@@ -160,13 +162,14 @@ impl App {
             }),
             Effect::ClearPreview { .. } => {
                 self.bridge.cancel_candidates();
+                self.sections.cancel_preview();
                 self.pending_preview = None;
                 self.received_preview = None;
                 self.clear_preview = true;
             }
             Effect::PublishPreview { tag, .. } => {
-                if let Some((prepared, lease)) = self.received_preview.take() {
-                    self.pending_preview = Some((tag, prepared, lease));
+                if let Some(preview) = self.received_preview.take() {
+                    self.pending_preview = Some((tag, preview));
                 }
             }
             Effect::ApplyOperation {
@@ -175,6 +178,7 @@ impl App {
                 hide_sketch,
             } => {
                 self.bridge.cancel_candidates();
+                self.sections.cancel_preview();
                 self.pending_preview = None;
                 self.clear_preview = true;
                 if let Err(message) = self.bridge.submit(Command::Apply {
@@ -220,7 +224,19 @@ impl App {
             self.adopt_display(display);
         }
         if let Some(delivery) = self.bridge.take_candidate() {
-            self.received_preview = delivery.prepared.zip(delivery.lease);
+            self.received_preview = delivery
+                .prepared
+                .zip(delivery.lease)
+                .zip(delivery.scene)
+                .map(
+                    |((prepared, lease), scene)| crate::viewport_updates::Preview {
+                        prepared,
+                        source: crate::viewport_updates::Source {
+                            scene,
+                            lease: Arc::new(lease),
+                        },
+                    },
+                );
             self.dispatch(delivery.action);
             self.received_preview = None;
         }
@@ -257,6 +273,7 @@ impl App {
         self.viewport_failure = Some(error);
         self.view = None;
         self.bridge.cancel_candidates();
+        self.sections.cancel();
         self.dispatch(Action::Cancel);
         self.interaction.selection = None;
         self.selected_body = None;

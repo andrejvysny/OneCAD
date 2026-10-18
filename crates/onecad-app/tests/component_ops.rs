@@ -1,0 +1,2431 @@
+//! Component Library WP-0.2 `PlaceComponent` integration gate against the REAL
+//! C++ OCCT worker, driven through the app's [`DocumentRuntime`] exactly like
+//! `hole_ops.rs`.
+//!
+//! Proves the op end to end (Rust core params → wire lowering → worker
+//! dispatch → OCCT → published body) with the EXACT kernel volume from
+//! `QueryMassProperties` (SCHEMA §7.5), not a mesh-chord approximation — the
+//! same discipline `hole_ops.rs` follows.
+//!
+//! * `place_component_generator_source_mints_one_body` — a `generator`-source
+//!   `PlaceComponent` (P0/WP-0.2's hardcoded M6 SHCS) mints exactly one NewBody
+//!   at the exact analytic volume.
+//! * `place_component_survives_save_and_a_fresh_worker_reopen` — save → reopen
+//!   on a FRESH worker replays to the same volume (P0's "zero library
+//!   dependency" framing starts here: nothing in this op reads a library root).
+//!
+//! Gated on `ONECAD_WORKER_PATH` (else the dev-tree fallback); a missing
+//! binary skips cleanly (`ONECAD_REQUIRE_WORKER=1` makes that a hard failure).
+
+use std::f64::consts::PI;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use uuid::Uuid;
+
+use onecad_core::document::record::{
+    ComponentMate, ComponentParamValue, ComponentSourceRef, DetachComponentParams, FrozenPlacement,
+    KnownOperation, LinearPatternParams, MateKind, Operation, OperationRecord,
+    PlaceComponentParams,
+};
+use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef, PrimaryRef};
+use onecad_core::document::variables::Scalar;
+use onecad_core::edit::EditCommand;
+use onecad_core::ids::{BodyId, ElementId, RecordId, TopoKey};
+use onecad_core::io::container::SaveMeta;
+use onecad_core::math::Vec3;
+use onecad_core::regen::{CancelToken, GeometryEngine, ModelSnapshot, Outcome, RegenRequest};
+
+use onecad_app::document_runtime::{DocumentRuntime, RegenReport};
+use onecad_app::worker::manager::SupervisorConfig;
+use onecad_app::worker::{
+    resolve_worker_path, ElementQuery, MeshProvider, SolverEngine, WorkerManager,
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Harness (mirrors hole_ops.rs)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn real_worker() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("ONECAD_WORKER_PATH") {
+        let path = PathBuf::from(&p);
+        assert!(
+            path.is_file(),
+            "ONECAD_WORKER_PATH={p:?} is set but no worker binary exists there \
+             (misconfiguration — refusing to skip as green)"
+        );
+        return Some(path);
+    }
+    if let Some(path) = resolve_worker_path() {
+        return Some(path);
+    }
+    assert!(
+        std::env::var("ONECAD_REQUIRE_WORKER").as_deref() != Ok("1"),
+        "ONECAD_REQUIRE_WORKER=1 but no worker binary resolved (CI must hard-fail here)"
+    );
+    None
+}
+
+async fn spawn_worker(bin: PathBuf) -> WorkerManager {
+    let wm = WorkerManager::spawn(SupervisorConfig::production(bin));
+    assert!(
+        wm.wait_ready(Duration::from_secs(10)).await,
+        "real worker must connect + handshake + OpenSession"
+    );
+    wm
+}
+
+fn runtime_over(wm: &WorkerManager) -> DocumentRuntime {
+    let engine: Arc<dyn GeometryEngine> = Arc::new(wm.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
+    DocumentRuntime::new_blank(engine, meshes, solver)
+}
+
+fn open_over(wm: &WorkerManager, path: &std::path::Path) -> DocumentRuntime {
+    let engine: Arc<dyn GeometryEngine> = Arc::new(wm.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
+    DocumentRuntime::open(path, engine, meshes, solver).expect("reopen the saved container")
+}
+
+fn add_op(rt: &mut DocumentRuntime, record: OperationRecord) {
+    rt.apply(EditCommand::AddOperation {
+        record,
+        at_cursor: true,
+    })
+    .expect("AddOperation");
+}
+
+async fn regen_all(rt: &mut DocumentRuntime) -> RegenReport {
+    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await
+}
+
+/// The record's exact `opType` string, read through `rt.projection()`
+/// (`DocumentRuntime` exposes no direct timeline accessor to test code).
+fn feature_op_type(rt: &DocumentRuntime, record: RecordId) -> String {
+    let id = record.to_string();
+    rt.projection()
+        .features
+        .into_iter()
+        .find(|f| f.id == id)
+        .unwrap_or_else(|| panic!("no feature for record {id}"))
+        .op_type
+}
+
+fn published<'a>(report: &'a RegenReport, what: &str) -> &'a Arc<ModelSnapshot> {
+    match &report.outcome {
+        Outcome::Published(s) => s,
+        other => panic!("{what}: expected Published, got {other:?}"),
+    }
+}
+
+fn save_meta() -> SaveMeta {
+    SaveMeta {
+        app_version: "0.1.0-test".into(),
+        occt_fingerprint: Some("occt-8.0.1".into()),
+        created: "2026-08-12T00:00:00Z".into(),
+        modified: "2026-08-12T00:00:00Z".into(),
+    }
+}
+
+/// Exact kernel volume of a body (`QueryMassProperties`, SCHEMA §7.5) — read
+/// from the BRep, never re-derived from the tessellation.
+async fn exact_volume(wm: &WorkerManager, body: BodyId) -> f64 {
+    ElementQuery::query_mass_properties(wm, body, "b".into())
+        .await
+        .expect("QueryMassProperties")
+        .volume
+}
+
+/// The hardcoded ISO 4762 M6x20 solid's exact analytic volume (see
+/// `worker/tests/test_component_ops.cpp` — the C++ side pins the same
+/// constant, so a divergence between the two shows up on both sides).
+fn m6_shcs_volume() -> f64 {
+    PI * 5.0 * 5.0 * 6.0 + PI * 3.0 * 3.0 * 20.0
+}
+
+fn place_component_record(rec: u128) -> OperationRecord {
+    let mut generator_params = std::collections::BTreeMap::new();
+    generator_params.insert(
+        "thread".to_string(),
+        ComponentParamValue::Text("M6".to_string()),
+    );
+    let op = Operation::Known(KnownOperation::PlaceComponent(PlaceComponentParams {
+        component_id: "onecad.std.iso4762".to_string(),
+        component_version: "1.0.0".to_string(),
+        component_revision: format!("sha256:{}", "0".repeat(64)),
+        params: generator_params,
+        source: ComponentSourceRef::Generator {
+            generator_id: "iso4762".to_string(),
+            generator_version: 1,
+            params: std::collections::BTreeMap::new(),
+            extra: Default::default(),
+        },
+        mate: None,
+        placement: FrozenPlacement {
+            translate: [Scalar::new(0.0), Scalar::new(0.0), Scalar::new(0.0)],
+            rotate: Default::default(),
+        },
+        extra: Default::default(),
+    }));
+    OperationRecord::new(RecordId(Uuid::from_u128(rec)), 0, "Place Component", op)
+}
+
+fn detach_component_op() -> Operation {
+    Operation::Known(KnownOperation::DetachComponent(DetachComponentParams {
+        source: ComponentSourceRef::Generator {
+            generator_id: "iso4762".to_string(),
+            generator_version: 1,
+            params: std::collections::BTreeMap::new(),
+            extra: Default::default(),
+        },
+        placement: FrozenPlacement {
+            translate: [Scalar::new(0.0), Scalar::new(0.0), Scalar::new(0.0)],
+            rotate: Default::default(),
+        },
+        extra: Default::default(),
+    }))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The gate
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn place_component_generator_source_mints_one_body() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    add_op(&mut rt, place_component_record(0xc1));
+    let report = regen_all(&mut rt).await;
+    let snap = published(&report, "place_component");
+    assert_eq!(
+        snap.bodies.len(),
+        1,
+        "PlaceComponent mints exactly one body"
+    );
+    let body = snap.bodies[0].body;
+
+    let vol = exact_volume(&wm, body).await;
+    assert!(
+        (vol - m6_shcs_volume()).abs() < 1.0,
+        "PlaceComponent volume: got {vol}, want {} (M6 SHCS head+shank)",
+        m6_shcs_volume()
+    );
+
+    wm.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn place_component_survives_save_and_a_fresh_worker_reopen() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm1 = spawn_worker(bin.clone()).await;
+    let mut rt = runtime_over(&wm1);
+    add_op(&mut rt, place_component_record(0xc2));
+    let report = regen_all(&mut rt).await;
+    let body_before = published(&report, "place_component").bodies[0].body;
+    let vol_before = exact_volume(&wm1, body_before).await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("component.onecad");
+    rt.save(&path, save_meta()).expect("save");
+    wm1.shutdown().await;
+
+    // A FRESH worker process — proves the op replays from the document alone,
+    // with no dependency on anything but the saved container (spec §0
+    // invariant #4: "geometry is always cached locally").
+    let wm2 = spawn_worker(bin).await;
+    let mut rt2 = open_over(&wm2, &path);
+    let report2 = regen_all(&mut rt2).await;
+    let snap2 = published(&report2, "reopen");
+    assert_eq!(
+        snap2.bodies.len(),
+        1,
+        "reopen still publishes exactly one body"
+    );
+    let body_after = snap2.bodies[0].body;
+    let vol_after = exact_volume(&wm2, body_after).await;
+    assert!(
+        (vol_after - vol_before).abs() < 1e-6,
+        "reopen volume {vol_after} != original {vol_before}"
+    );
+
+    wm2.shutdown().await;
+}
+
+/// WP-1.2: the sanctioned `PlaceComponent` → `DetachComponent` swap, end to
+/// end through the REAL worker — not just the Rust-core `op_type_edit_allowed`
+/// unit test. Same `RecordId`, same `BodyId`, same volume, before and after;
+/// only the op's identity provenance (component_id/version/revision/mate)
+/// disappears — spec §3.4's "inert provenance."
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn detach_component_preserves_body_and_volume_across_the_swap() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    let record_id = RecordId(Uuid::from_u128(0xc3));
+    add_op(&mut rt, place_component_record(0xc3));
+    let report1 = regen_all(&mut rt).await;
+    let snap1 = published(&report1, "place_component");
+    assert_eq!(snap1.bodies.len(), 1);
+    let body_before = snap1.bodies[0].body;
+    let vol_before = exact_volume(&wm, body_before).await;
+    assert_eq!(feature_op_type(&rt, record_id), "PlaceComponent");
+
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: record_id,
+        op: detach_component_op(),
+    })
+    .expect("the sanctioned PlaceComponent -> DetachComponent swap is accepted");
+    assert_eq!(
+        feature_op_type(&rt, record_id),
+        "DetachComponent",
+        "the record's op type actually changed"
+    );
+
+    let report2 = regen_all(&mut rt).await;
+    let snap2 = published(&report2, "detach_component");
+    assert_eq!(snap2.bodies.len(), 1, "still exactly one body after detach");
+    let body_after = snap2.bodies[0].body;
+    assert_eq!(
+        body_after, body_before,
+        "same BodyId across the swap (same RecordId)"
+    );
+
+    let vol_after = exact_volume(&wm, body_after).await;
+    assert!(
+        (vol_after - vol_before).abs() < 1e-6,
+        "detach volume {vol_after} != pre-detach volume {vol_before}"
+    );
+
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P3 WP-3.1: persistent mate re-seating on regen (spec §5.5), end to end
+// through the REAL worker + DocumentRuntime, not just the worker ctest matrix
+// (`worker/tests/test_component_mate_reseat.cpp`, which calls
+// `execute_place_component` directly and so cannot see the Rust-side wiring
+// this WP adds: `PlanStepEvent.mate_placement` parsing, `Scratch` buffering,
+// `Timeline::set_place_component_placement`, `sync_mate_placements`, and —
+// the REAL bug this test caught — `PlaceComponent`'s `mate` used to ride in
+// the wire `inputs[]`, which the worker's generic pre-flight resolves
+// BEFORE the op runs and treats a failure there as blocking, so an
+// unresolvable mate silently published NOTHING rather than the component at
+// its frozen `placement` (fixed: `wire.rs::wire_op_inputs` no longer emits
+// an input for `mate`; `ComponentOp.cpp::resolve_mate_reseat` owns
+// resolution entirely, in-process, non-blocking).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Classifies `body`'s faces (topo keys `f:1..=8`, generous for a fused
+/// two-cylinder SHCS) and returns the first cylindrical one near `radius_mm`
+/// — the SHCS's exact face ordering after the head/shank boolean fuse isn't
+/// guaranteed, so this searches rather than assumes an ordinal. Returns the
+/// topo key, the axis origin, AND a real point ON the surface (origin
+/// offset by `radius_mm` perpendicular to the axis) — the ladder's anchor
+/// scoring wants a point a real pick would land on, not the axis location
+/// (which sits `radius_mm` inside the material and under-scores the
+/// `anchor` feature contribution).
+async fn find_cylindrical_face(
+    wm: &WorkerManager,
+    body: BodyId,
+    radius_mm: f64,
+) -> (String, [f64; 3], [f64; 3]) {
+    for i in 1..=8 {
+        let key = format!("f:{i}");
+        let Some(dto) = ElementQuery::classify_element_by_topo_key(wm, body, &key)
+            .await
+            .expect("ClassifyElement")
+        else {
+            continue;
+        };
+        if dto.surface_type != "cylinder" {
+            continue;
+        }
+        let Some(frame) = &dto.frame else { continue };
+        if (frame.radius.unwrap_or(0.0) - radius_mm).abs() < 1e-6 {
+            let axis = frame.axis.unwrap_or([0.0, 0.0, 1.0]);
+            // Any unit vector perpendicular to `axis` — this SHCS's axis is
+            // always (0,0,±1), so (1,0,0) is never near-parallel to it.
+            let perp = if axis[0].abs() < 0.9 {
+                [1.0, 0.0, 0.0]
+            } else {
+                [0.0, 1.0, 0.0]
+            };
+            let surface_point = [
+                frame.origin[0] + perp[0] * radius_mm,
+                frame.origin[1] + perp[1] * radius_mm,
+                frame.origin[2] + perp[2] * radius_mm,
+            ];
+            return (key, frame.origin, surface_point);
+        }
+    }
+    panic!("no cylindrical face at radius {radius_mm}mm found on {body:?} within f:1..=8");
+}
+
+/// Promotes ONE snapshot-scoped `TopoKey` into a Rust-minted `ElementId`
+/// (`AcquireElementIds`), mirroring `offset_face.rs`'s own `promote` helper.
+async fn promote(
+    rt: &mut DocumentRuntime,
+    snapshot: onecad_core::ids::SnapshotId,
+    body: BodyId,
+    topo_key: &str,
+    anchor: &AnchorIntent,
+) -> ElementId {
+    let promoted = rt
+        .promote_selection(
+            snapshot,
+            body,
+            vec![(TopoKey::new(topo_key), Some(anchor.clone()))],
+        )
+        .await
+        .expect("AcquireElementIds promotes the shank face at the head snapshot");
+    ElementId::new(&promoted[0].element_id)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn place_component_mate_reseats_on_the_first_regen_when_authored_off_axis() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    // The TARGET: a plain, unmated PlaceComponent. Its shank (radius 3mm,
+    // the M6 shank) is a real cylindrical face this test mates against.
+    add_op(&mut rt, place_component_record(0xd1));
+    let report1 = regen_all(&mut rt).await;
+    let snap1 = published(&report1, "target place");
+    let target_body = snap1.bodies[0].body;
+    let snapshot = snap1.id;
+
+    let (shank_key, shank_origin, _shank_surface_point) =
+        find_cylindrical_face(&wm, target_body, 3.0).await;
+    // The ladder's anchor scoring is relative to the candidate face's own
+    // CENTROID, not the cylinder's axis-parametrization origin: `frame.
+    // origin` is the shank's BASE (z=-20, `place_component_record`'s
+    // `kDefaultLengthMm=20` shank running DOWN from the origin placement),
+    // but the trimmed face's real centroid sits at its midpoint (z=-10).
+    // Anchoring near the actual centroid — a real cursor pick would land
+    // near the middle of a long face far more often than exactly on its
+    // rim — is what a live gesture's anchor evidence would look like.
+    let shank_centroid_z = shank_origin[2] + 10.0; // length/2 of the M6 default shank
+    let anchor = AnchorIntent {
+        world_point: Vec3::new_unchecked(shank_origin[0] + 3.0, shank_origin[1], shank_centroid_z),
+        surface_uv: None,
+        local_frame: None,
+        adjacency_hint: None,
+        extra: Default::default(),
+    };
+    let element_id = promote(&mut rt, snapshot, target_body, &shank_key, &anchor).await;
+
+    // The MATED component: `concentric` to the shank, authored deliberately
+    // off-axis (translate.y shifted +5mm from the shank's actual axis) — the
+    // first regen must reseat it onto the real axis.
+    let mate_record = RecordId(Uuid::from_u128(0xd2));
+    let mut mated = place_component_record(0xd2);
+    let Operation::Known(KnownOperation::PlaceComponent(params)) = &mut mated.op else {
+        unreachable!()
+    };
+    params.mate = Some(ComponentMate {
+        self_attachment: "shankAxis".to_string(),
+        target: ElementRef {
+            primary: Some(PrimaryRef {
+                body: target_body,
+                element: element_id,
+                kind: ElementKind::Face,
+                extra: Default::default(),
+            }),
+            intent: None,
+            anchor: Some(anchor),
+            extra: Default::default(),
+        },
+        kind: MateKind::Concentric,
+        self_frame: None,
+        flipped: false,
+        target_axis: None,
+        target_sidedness: None,
+        extra: Default::default(),
+    });
+    params.placement.translate[0] = Scalar::new(shank_origin[0]);
+    params.placement.translate[1] = Scalar::new(shank_origin[1] + 5.0); // off-axis on purpose
+    params.placement.translate[2] = Scalar::new(shank_origin[2]);
+    add_op(&mut rt, mated);
+
+    let report2 = regen_all(&mut rt).await;
+    let snap2 = published(&report2, "mated place");
+    assert_eq!(snap2.bodies.len(), 2, "target body + reseated mated body");
+
+    // The RECORD's own `placement` was rewritten (the derived, no-undo
+    // writeback this WP adds — `sync_mate_placements`), not just the
+    // published geometry.
+    let params_after = rt
+        .operation_params(mate_record)
+        .expect("mated record still exists");
+    let translate = params_after["placement"]["translate"]
+        .as_array()
+        .expect("translate is an array");
+    let ty = translate[1]["value"]
+        .as_f64()
+        .or_else(|| translate[1].as_f64())
+        .expect("translate.y reads as a number");
+    assert!(
+        (ty - shank_origin[1]).abs() < 1e-3,
+        "record placement.translate.y was rewritten onto the shank axis: got {ty}, want {}",
+        shank_origin[1]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn place_component_with_an_unresolvable_mate_still_publishes_at_its_frozen_placement() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    // A mate whose target body was NEVER created — simulates "the plate was
+    // deleted." This is the exact scenario `wire.rs::wire_op_inputs`'s old
+    // shape got wrong: with `mate.target` in the wire `inputs[]`, the
+    // worker's pre-flight `resolve_input_refs` failed to resolve it and
+    // `run_single_op` never ran at all — NOTHING published. Spec §5.5:
+    // "never drop it, never silently move it."
+    let mut mated = place_component_record(0xd3);
+    let Operation::Known(KnownOperation::PlaceComponent(params)) = &mut mated.op else {
+        unreachable!()
+    };
+    params.mate = Some(ComponentMate {
+        self_attachment: "shankAxis".to_string(),
+        target: ElementRef {
+            primary: Some(PrimaryRef {
+                body: BodyId(Uuid::from_u128(0xdead)),
+                element: ElementId::new("el_never_existed"),
+                kind: ElementKind::Face,
+                extra: Default::default(),
+            }),
+            intent: None,
+            anchor: None,
+            extra: Default::default(),
+        },
+        kind: MateKind::Concentric,
+        self_frame: None,
+        flipped: false,
+        target_axis: None,
+        target_sidedness: None,
+        extra: Default::default(),
+    });
+    // A recognizable frozen placement — proves it's the FROZEN one that
+    // publishes, not some fallback/default.
+    params.placement.translate = [Scalar::new(11.0), Scalar::new(22.0), Scalar::new(33.0)];
+    add_op(&mut rt, mated);
+
+    let report = regen_all(&mut rt).await;
+    let snap = published(&report, "unresolvable-mate place");
+    assert_eq!(
+        snap.bodies.len(),
+        1,
+        "the component STILL PUBLISHES — a NeedsRepair mate never drops the body"
+    );
+
+    let vol = exact_volume(&wm, snap.bodies[0].body).await;
+    assert!(
+        (vol - m6_shcs_volume()).abs() < 1.0,
+        "published at the frozen M6 SHCS geometry, unaffected by the unresolvable mate"
+    );
+
+    assert!(
+        snap.repair_summary.needs_repair_count > 0,
+        "the unresolvable mate is flagged NeedsRepair, not silently ignored"
+    );
+
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP-3.2 — the blob-backed source kinds, end to end against the real worker
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Bakes a live body into the §7.3 replay form (SCHEMA §7.8 `ExportGeometry`)
+/// and returns `(bytes, sha256, format)` — the shape a component package's
+/// geometry pointer records, and the shape `stage_component_blob` wants.
+async fn bake_body(wm: &WorkerManager, body: BodyId) -> (Vec<u8>, String, u32) {
+    let dir = std::env::temp_dir().join(format!("onecad-bake-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("bake dir");
+    let path = dir.join("component.brep");
+    let baked = onecad_app::worker::manager::WorkerManager::export_geometry(
+        wm,
+        &path.to_string_lossy(),
+        &[body],
+        "brep",
+        false,
+        // Unfenced (SCHEMA §7.8): this bakes whatever is at head, exactly as it
+        // did before the WP-H fence existed.
+        None,
+    )
+    .await
+    .expect("ExportGeometry");
+    assert_eq!(baked.codec, "brep");
+    assert_eq!(baked.solid_count, 1, "a component is exactly one solid");
+    let bytes = std::fs::read(&path).expect("read baked bytes");
+    assert_eq!(bytes.len() as u64, baked.bytes_written);
+    let sha = onecad_app::imports::sha256_hex(&bytes);
+    let _ = std::fs::remove_dir_all(&dir);
+    (bytes, sha, baked.format)
+}
+
+fn document_component_record(
+    rec: u128,
+    document_sha256: String,
+    sha256: String,
+    brep_format: u32,
+) -> OperationRecord {
+    let op = Operation::Known(KnownOperation::PlaceComponent(PlaceComponentParams {
+        component_id: "acme.bracket".to_string(),
+        component_version: "1.0.0".to_string(),
+        component_revision: format!("sha256:{}", "0".repeat(64)),
+        params: std::collections::BTreeMap::new(),
+        source: ComponentSourceRef::Document {
+            document_sha256,
+            sha256,
+            codec: onecad_core::document::record::ImportSourceCodec::Brep,
+            brep_format: Some(brep_format),
+            params: std::collections::BTreeMap::new(),
+            extra: Default::default(),
+        },
+        mate: None,
+        placement: FrozenPlacement {
+            translate: [Scalar::new(0.0), Scalar::new(0.0), Scalar::new(0.0)],
+            rotate: Default::default(),
+        },
+        extra: Default::default(),
+    }));
+    OperationRecord::new(RecordId(Uuid::from_u128(rec)), 0, "Place Component", op)
+}
+
+/// **The spec §12 claim, automated.** A user-authored (`document`-source)
+/// component places as its baked solid, and that solid survives save → reopen
+/// on a FRESH worker with NO library anywhere — because the bytes were copied
+/// into the document itself at place time, refcounted at save, materialized at
+/// open, and read back by the worker through the wire-injected path.
+///
+/// Every link in that chain is load-bearing and silent when broken: miss the
+/// save-time refcount and the blob is dropped; miss the open-time
+/// materialization and the wire lowers an empty path. Both fail HERE, and
+/// nowhere else in the suite.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_baked_component_survives_save_and_reopen_with_no_library() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+
+    // 1. Model something real, and bake it — the same lane "Save as Component"
+    //    will use. The generator screw is the convenient source solid: its
+    //    volume is an exact analytic oracle both tracks already pin.
+    let wm1 = spawn_worker(bin.clone()).await;
+    let mut authoring = runtime_over(&wm1);
+    add_op(&mut authoring, place_component_record(0xd1));
+    let report = regen_all(&mut authoring).await;
+    let source_body = published(&report, "authoring").bodies[0].body;
+    let baked_volume = exact_volume(&wm1, source_body).await;
+    let (bytes, sha, format) = bake_body(&wm1, source_body).await;
+
+    // 2. Place it into a DIFFERENT document as a `document`-source component,
+    //    staging the bytes exactly as `library.rs::place_component_at` does.
+    let mut rt = runtime_over(&wm1);
+    rt.stage_component_blob(
+        &sha,
+        onecad_core::document::record::ImportSourceCodec::Brep,
+        &bytes,
+    )
+    .expect("stage the baked solid");
+    add_op(
+        &mut rt,
+        document_component_record(0xd2, "a".repeat(64), sha.clone(), format),
+    );
+    let report = regen_all(&mut rt).await;
+    let snap = published(&report, "place baked component");
+    assert_eq!(snap.bodies.len(), 1, "a baked component mints one body");
+    let vol = exact_volume(&wm1, snap.bodies[0].body).await;
+    assert!(
+        (vol - baked_volume).abs() < 1e-6,
+        "the placed solid IS the baked solid: got {vol}, want {baked_volume}"
+    );
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("baked.onecad");
+    rt.save(&path, save_meta()).expect("save");
+    wm1.shutdown().await;
+
+    // 3. Reopen on a fresh worker. There is no library root in this test at
+    //    all, and the authoring runtime is gone — the ONLY thing carrying the
+    //    geometry is the saved container.
+    let wm2 = spawn_worker(bin).await;
+    let mut rt2 = open_over(&wm2, &path);
+    assert!(
+        rt2.import_blob_shas().contains(&sha),
+        "the baked solid came back out of the container (the save-time refcount kept it)"
+    );
+    let report2 = regen_all(&mut rt2).await;
+    let snap2 = published(&report2, "reopen baked component");
+    assert_eq!(
+        snap2.bodies.len(),
+        1,
+        "reopen still publishes the component"
+    );
+    let vol2 = exact_volume(&wm2, snap2.bodies[0].body).await;
+    assert!(
+        (vol2 - baked_volume).abs() < 1e-6,
+        "reopened volume {vol2} != baked {baked_volume}"
+    );
+
+    wm2.shutdown().await;
+}
+
+/// A component whose blob is NOT in the document fails that ONE step, loudly,
+/// and leaves the rest of the document alone — the `io::imports` blast-radius
+/// rule. The dangerous alternative is publishing something else instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_component_with_no_cached_geometry_fails_only_its_own_step() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    // A healthy generator component FIRST, so there is something to lose.
+    add_op(&mut rt, place_component_record(0xd3));
+    add_op(
+        &mut rt,
+        document_component_record(0xd4, "a".repeat(64), "b".repeat(64), 4),
+    );
+    let report = regen_all(&mut rt).await;
+
+    // The plan early-stops AT the broken step and publishes everything before
+    // it (`StoppedReason` on the snapshot), so the healthy component is still
+    // there and the failure is recorded rather than swallowed.
+    let snap = published(&report, "blob-less component");
+    assert_eq!(
+        snap.bodies.len(),
+        1,
+        "the healthy component still published; only the blob-less one failed"
+    );
+    assert_ne!(
+        snap.stopped_reason,
+        onecad_core::regen::StoppedReason::Completed,
+        "the missing-geometry step must be reported, not silently skipped"
+    );
+
+    wm.shutdown().await;
+}
+
+/// Every SEEDED package (WP-A2) actually places through the real worker.
+///
+/// This is the pairing nothing else can check: a manifest names a
+/// `source.generator`, the worker registers a set of generator ids, and the two
+/// live in different languages in different directories. Before WP-A1 a
+/// mismatch was invisible (every id built a socket cap screw); now it is an
+/// `OP_FAILED`, and this test is what turns that from a runtime surprise into a
+/// build-time one. It also proves the shipped `thread` domains are sizes the
+/// generators accept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_seeded_component_places_through_the_real_worker() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    onecad_app::library_seed::seed_library(dir.path()).expect("seed");
+    let mut library = onecad_library::Library::open(dir.path()).expect("open seeded library");
+    library.reindex().expect("reindex");
+
+    let mut placements: Vec<(String, String, u32)> = Vec::new();
+    for (id, versions) in &library.index().components {
+        for entry in versions.values() {
+            let generator = entry
+                .generator_id
+                .clone()
+                .unwrap_or_else(|| panic!("{id}: a seeded package must be a generator source"));
+            placements.push((id.clone(), generator, entry.generator_version.unwrap_or(1)));
+        }
+    }
+    assert_eq!(
+        placements.len(),
+        onecad_app::library_seed::SEED_PACKAGES.len(),
+        "every seeded family must place, got {placements:?}"
+    );
+
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    for (i, (component_id, generator_id, generator_version)) in placements.iter().enumerate() {
+        // M6 is in every seeded FASTENER family's declared `thread` domain —
+        // the one size they all share, which is why it is the sweep's probe. A
+        // family not keyed by a thread at all would ignore it and build its own
+        // documented default, which is exactly what the library's preview lane
+        // (which sends no params whatsoever) relies on.
+        let mut generator_params = std::collections::BTreeMap::new();
+        generator_params.insert(
+            "thread".to_string(),
+            ComponentParamValue::Text("M6".to_string()),
+        );
+        let op = Operation::Known(KnownOperation::PlaceComponent(PlaceComponentParams {
+            component_id: component_id.clone(),
+            component_version: "1.0.0".to_string(),
+            component_revision: format!("sha256:{}", "0".repeat(64)),
+            params: generator_params.clone(),
+            source: ComponentSourceRef::Generator {
+                generator_id: generator_id.clone(),
+                generator_version: *generator_version,
+                params: generator_params,
+                extra: Default::default(),
+            },
+            mate: None,
+            // Spread them out so each is its own solid, never a coincident pile.
+            placement: FrozenPlacement {
+                translate: [
+                    Scalar::new(60.0 * i as f64),
+                    Scalar::new(0.0),
+                    Scalar::new(0.0),
+                ],
+                rotate: Default::default(),
+            },
+            extra: Default::default(),
+        }));
+        add_op(
+            &mut rt,
+            OperationRecord::new(
+                RecordId(Uuid::from_u128(0xe0 + i as u128)),
+                0,
+                "Place Component",
+                op,
+            ),
+        );
+    }
+
+    let report = regen_all(&mut rt).await;
+    let snap = published(&report, "seeded catalog");
+    assert_eq!(
+        snap.stopped_reason,
+        onecad_core::regen::StoppedReason::Completed,
+        "no seeded package may fail its step"
+    );
+    assert_eq!(
+        snap.bodies.len(),
+        placements.len(),
+        "every seeded component publishes exactly one body"
+    );
+    for body in &snap.bodies {
+        let vol = exact_volume(&wm, body.body).await;
+        assert!(vol > 0.0, "a seeded component published an empty solid");
+    }
+
+    wm.shutdown().await;
+}
+
+/// "Save as Component" end to end against the real worker (WP-B2, spec §7):
+/// author a body as a `document` package, then PLACE that package back into a
+/// fresh document and land the same solid.
+///
+/// This is the whole authoring claim in one test. The bake
+/// (`ExportGeometry`), the content-addressed blob, the manifest + revision, the
+/// index, and the placement path that reads all of it are separately tested;
+/// what only this can show is that they compose — an authored component is a
+/// placeable component, with the geometry the author actually saw.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_body_saved_as_a_component_places_back_as_the_same_solid() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let library_dir = tempfile::tempdir().expect("tempdir");
+    let wm = spawn_worker(bin).await;
+
+    // Something to author FROM: a generator component's own solid is a real
+    // published body, which is all "Save as Component" needs.
+    let runtime = tokio::sync::Mutex::new(Some(runtime_over(&wm)));
+    let body = {
+        let mut guard = runtime.lock().await;
+        let rt = guard.as_mut().unwrap();
+        add_op(rt, place_component_record(0xa1));
+        let report = regen_all(rt).await;
+        published(&report, "author source").bodies[0].body
+    };
+    let authored_volume = exact_volume(&wm, body).await;
+
+    let exporter: Arc<dyn onecad_app::export::GeometryExporter> = Arc::new(wm.clone());
+    let saved = onecad_app::library::save_as_component_at(
+        library_dir.path(),
+        &runtime,
+        exporter,
+        body.to_string(),
+        onecad_app::library::NewComponentSpec {
+            id: "acme.bracket".to_string(),
+            version: "1.0.0".to_string(),
+            name: "Bracket".to_string(),
+            category: vec!["mine".to_string()],
+            tags: vec!["authored".to_string()],
+            designation: None,
+            attachments: [(
+                "seat".to_string(),
+                onecad_app::library::AttachmentSpecInput {
+                    on: "face:seat".to_string(),
+                    accepts: vec!["plane".to_string()],
+                    frame: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            parameters: Default::default(),
+        },
+        None,
+        false,
+    )
+    .await
+    .expect("save as component");
+    assert_eq!(saved.source_kind, "document");
+    assert_eq!(saved.attachments.len(), 1);
+
+    // The library on disk now carries a package whose geometry is a blob, not a
+    // recipe — the authoring document is gone from the picture entirely.
+    let library = onecad_library::Library::open(library_dir.path()).expect("open library");
+    let (_v, entry) = library.get("acme.bracket", None).expect("indexed");
+    assert_eq!(entry.revision, saved.revision);
+
+    // Place it into a FRESH document. Resolution goes through the same lane a
+    // real placement uses, blob and all.
+    let resolved = library
+        .resolve_source(&onecad_library::resolve::ResolveRequest {
+            component_id: "acme.bracket",
+            component_version: "1.0.0",
+            component_revision: &saved.revision,
+        })
+        .expect("resolve the authored package");
+    let (sha256, bytes, codec, format) = match resolved {
+        onecad_library::resolve::ResolvedSource::Document { blob, .. } => {
+            (blob.sha256, blob.bytes, blob.codec, blob.format)
+        }
+        other => panic!("expected a document source, got {other:?}"),
+    };
+
+    let mut fresh = runtime_over(&wm);
+    fresh
+        .stage_component_blob(
+            &sha256,
+            onecad_core::document::record::ImportSourceCodec::from_extension(&codec).unwrap(),
+            &bytes,
+        )
+        .expect("stage the authored blob");
+    let op = Operation::Known(KnownOperation::PlaceComponent(PlaceComponentParams {
+        component_id: "acme.bracket".to_string(),
+        component_version: "1.0.0".to_string(),
+        component_revision: saved.revision.clone(),
+        params: Default::default(),
+        source: ComponentSourceRef::Document {
+            // The record's provenance pointer is the frozen document's own
+            // digest; this test does not read it back, so any well-formed
+            // digest stands in (`validate` requires bare 64-hex).
+            document_sha256: "0".repeat(64),
+            sha256,
+            codec: onecad_core::document::record::ImportSourceCodec::from_extension(&codec)
+                .unwrap(),
+            brep_format: format,
+            params: Default::default(),
+            extra: Default::default(),
+        },
+        mate: None,
+        placement: FrozenPlacement {
+            translate: [Scalar::new(0.0), Scalar::new(0.0), Scalar::new(0.0)],
+            rotate: Default::default(),
+        },
+        extra: Default::default(),
+    }));
+    add_op(
+        &mut fresh,
+        OperationRecord::new(RecordId(Uuid::from_u128(0xa2)), 0, "Place Component", op),
+    );
+    let report = regen_all(&mut fresh).await;
+    let snap = published(&report, "place the authored component");
+    assert_eq!(
+        snap.bodies.len(),
+        1,
+        "the authored package publishes one body"
+    );
+    let replaced_volume = exact_volume(&wm, snap.bodies[0].body).await;
+    assert!(
+        (replaced_volume - authored_volume).abs() < 1e-6,
+        "authored {authored_volume} vs placed {replaced_volume} — the bake must be the same solid"
+    );
+
+    wm.shutdown().await;
+}
+
+/// Union-at-bake (WP-F1.2, spec §9): a body that flattens to SEVERAL solids is
+/// refused with the machine-readable marker the dialog keys its offer on, and
+/// the very same save succeeds once the author opts into the fuse.
+///
+/// Both halves matter. Without the marker the dialog would have to match prose
+/// to know whether to offer the fuse; without the refusal a multi-solid
+/// component would reach someone else's machine, which is the failure spec §9
+/// exists to prevent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_multi_solid_body_is_refused_and_the_union_opt_in_saves_it() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let library_dir = tempfile::tempdir().expect("tempdir");
+    let wm = spawn_worker(bin).await;
+
+    // A V1 LinearPattern with `fuseResult:false` gathers source + instance into
+    // ONE compound body — the everyday way an author ends up holding something
+    // that is not one solid. Spacing 4mm keeps the two M6 screws OVERLAPPING
+    // (head radius 5), so the fuse can actually connect them.
+    let runtime = tokio::sync::Mutex::new(Some(runtime_over(&wm)));
+    let (pattern_body, source_volume) = {
+        let mut guard = runtime.lock().await;
+        let rt = guard.as_mut().unwrap();
+        add_op(rt, place_component_record(0xc1));
+        let report = regen_all(rt).await;
+        let source = published(&report, "pattern source").bodies[0].body;
+        add_op(
+            rt,
+            OperationRecord::new(
+                RecordId(Uuid::from_u128(0xc2)),
+                0,
+                "LinearPattern",
+                Operation::Known(KnownOperation::LinearPattern(LinearPatternParams {
+                    source_body: Some(source),
+                    direction: Vec3::new_unchecked(1.0, 0.0, 0.0),
+                    spacing: Scalar::new(4.0),
+                    count: 2,
+                    fuse_result: false,
+                    result_policy_version: None,
+                    extra: Default::default(),
+                })),
+            ),
+        );
+        let report = regen_all(rt).await;
+        let snap = published(&report, "linear pattern");
+        let pattern = snap
+            .bodies
+            .iter()
+            .map(|b| b.body)
+            .find(|b| *b != source)
+            .expect("the pattern publishes its own body");
+        (pattern, exact_volume(&wm, source).await)
+    };
+
+    let exporter: Arc<dyn onecad_app::export::GeometryExporter> = Arc::new(wm.clone());
+    let spec = || onecad_app::library::NewComponentSpec {
+        id: "acme.pair".to_string(),
+        version: "1.0.0".to_string(),
+        name: "Pair".to_string(),
+        category: vec!["mine".to_string()],
+        tags: vec![],
+        designation: None,
+        attachments: Default::default(),
+        parameters: Default::default(),
+    };
+
+    let refused = onecad_app::library::save_as_component_at(
+        library_dir.path(),
+        &runtime,
+        exporter.clone(),
+        pattern_body.to_string(),
+        spec(),
+        None,
+        false,
+    )
+    .await
+    .expect_err("a two-solid body must not become a component");
+    let message = refused.to_string();
+    assert!(
+        message.contains(onecad_app::library::MULTI_SOLID_REFUSAL),
+        "the refusal must carry the marker the dialog keys on, got {message:?}"
+    );
+
+    let saved = onecad_app::library::save_as_component_at(
+        library_dir.path(),
+        &runtime,
+        exporter,
+        pattern_body.to_string(),
+        spec(),
+        None,
+        true,
+    )
+    .await
+    .expect("the union opt-in saves the same body");
+    assert_eq!(saved.source_kind, "document");
+
+    // The package holds the FUSED pair: more than one screw, less than two
+    // (they overlap). Placing it back proves the bytes are one real solid.
+    let library = onecad_library::Library::open(library_dir.path()).expect("open library");
+    let resolved = library
+        .resolve_source(&onecad_library::resolve::ResolveRequest {
+            component_id: "acme.pair",
+            component_version: "1.0.0",
+            component_revision: &saved.revision,
+        })
+        .expect("resolve the fused package");
+    let (sha256, bytes, codec, format) = match resolved {
+        onecad_library::resolve::ResolvedSource::Document { blob, .. } => {
+            (blob.sha256, blob.bytes, blob.codec, blob.format)
+        }
+        other => panic!("expected a document source, got {other:?}"),
+    };
+    let mut fresh = runtime_over(&wm);
+    fresh
+        .stage_component_blob(
+            &sha256,
+            onecad_core::document::record::ImportSourceCodec::from_extension(&codec).unwrap(),
+            &bytes,
+        )
+        .expect("stage the fused blob");
+    let op = Operation::Known(KnownOperation::PlaceComponent(PlaceComponentParams {
+        component_id: "acme.pair".to_string(),
+        component_version: "1.0.0".to_string(),
+        component_revision: saved.revision.clone(),
+        params: Default::default(),
+        source: ComponentSourceRef::Document {
+            document_sha256: "0".repeat(64),
+            sha256,
+            codec: onecad_core::document::record::ImportSourceCodec::from_extension(&codec)
+                .unwrap(),
+            brep_format: format,
+            params: Default::default(),
+            extra: Default::default(),
+        },
+        mate: None,
+        placement: FrozenPlacement {
+            translate: [Scalar::new(0.0), Scalar::new(0.0), Scalar::new(0.0)],
+            rotate: Default::default(),
+        },
+        extra: Default::default(),
+    }));
+    add_op(
+        &mut fresh,
+        OperationRecord::new(RecordId(Uuid::from_u128(0xc3)), 0, "Place Component", op),
+    );
+    let report = regen_all(&mut fresh).await;
+    let snap = published(&report, "place the fused component");
+    assert_eq!(snap.bodies.len(), 1, "the fused package publishes one body");
+    let placed = exact_volume(&wm, snap.bodies[0].body).await;
+    assert!(
+        placed > source_volume && placed < 2.0 * source_volume,
+        "the fused pair ({placed}) must be more than one screw ({source_volume}) and less than \
+         two — the overlap is what makes it a single solid"
+    );
+
+    wm.shutdown().await;
+}
+
+/// Every seeded component MESHES for the library UI (WP-B6), with no document
+/// open — which is the case that matters, because the most useful place to
+/// browse a catalog is the start screen, before any project exists.
+///
+/// A preview is a `PlaceComponent` candidate against a throwaway copy of the
+/// worker's session head (SCHEMA §7.6), and an empty head is a perfectly good
+/// thing to place into. This drives the same command the cards call and asserts
+/// a real MESH1 with vertices comes back — a card that silently falls back to
+/// its icon for the whole catalog would otherwise look exactly like the
+/// pre-WP-B6 behaviour.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_seeded_component_meshes_for_the_library_ui() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    onecad_app::library_seed::seed_library(dir.path()).expect("seed");
+    let mut library = onecad_library::Library::open(dir.path()).expect("open");
+    library.reindex().expect("reindex");
+
+    let wm = spawn_worker(bin).await;
+    let preview: Arc<dyn onecad_app::worker::PreviewEngine> = Arc::new(wm.clone());
+
+    let ids: Vec<(String, String)> = library
+        .index()
+        .components
+        .iter()
+        .flat_map(|(id, versions)| versions.keys().map(move |v| (id.clone(), v.clone())))
+        .collect();
+    assert_eq!(
+        ids.len(),
+        onecad_app::library_seed::SEED_PACKAGES.len(),
+        "every shipped package must index and preview: {ids:?}"
+    );
+
+    for (id, version) in ids {
+        let result = onecad_app::library::component_preview_mesh_at(
+            dir.path(),
+            preview.clone(),
+            id.clone(),
+            version.clone(),
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{id}@{version} did not preview: {e:?}"));
+
+        assert_eq!(
+            result.bodies.len(),
+            1,
+            "{id}: a component previews as exactly one body"
+        );
+        // MESH1 magic + a non-zero vertex count: the bytes are a mesh the
+        // frontend's own parser will accept, not an empty success. The magic is
+        // the LE u32 0x4d455348, i.e. the bytes `HSEM` on the wire, and the
+        // vertex count sits at 0x08 (see `parseMeshPayload.ts`).
+        let mesh = &result.bodies[0].mesh;
+        assert!(mesh.len() > 64, "{id}: mesh is shorter than a MESH1 header");
+        assert_eq!(&mesh[0..4], b"HSEM", "{id}: not a MESH1 blob");
+        let vertex_count = u32::from_le_bytes([mesh[8], mesh[9], mesh[10], mesh[11]]);
+        assert!(vertex_count > 0, "{id}: meshed to zero vertices");
+    }
+
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP-F2b: the seeded project starters (spec §8)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Every seeded starter must OPEN and REGENERATE through the real worker — a
+/// template that lists on the start screen but cannot be instantiated is worse
+/// than no template at all. Both publish NOTHING, which is their honest content
+/// (`blank` is empty; the printed-part starter carries one datum and no
+/// geometry). A starter that DID carry geometry — the `nema17-mount` one did,
+/// until its NEMA 17 package left the catalog at SEED_VERSION 4 — needs its own
+/// case here, because that is the only place an authored `PlaceComponent`
+/// record meets the generator it names.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_seeded_geometry_free_starters_open_and_publish_nothing() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let library_dir = tempfile::tempdir().expect("tempdir");
+    onecad_app::library_seed::seed_library(library_dir.path()).expect("seed");
+    let wm = spawn_worker(bin).await;
+
+    for id in [
+        "onecad.std.template.blank",
+        "onecad.std.template.printed-part",
+    ] {
+        let entry = onecad_library::template::get(library_dir.path(), id)
+            .unwrap_or_else(|| panic!("{id} seeds"));
+        let mut rt = open_over(&wm, &entry.document_path);
+        let report = regen_all(&mut rt).await;
+        // `NoOp`, not an empty `Published`: a timeline with no step has nothing
+        // to publish. What matters here is that the container OPENED and the
+        // regen did not fail — the starter is honestly empty.
+        assert!(
+            matches!(report.outcome, Outcome::NoOp),
+            "{id}: a geometry-free starter regenerates to NoOp, got {:?}",
+            report.outcome
+        );
+    }
+
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP-C: `source.kind = "profile"` — a length-parametric extrusion, end to end
+//
+// The claim: vendor stock ships as ONE fixed length (a 500 mm aluminium stick)
+// and must still place at any length. Nothing else in the library can express
+// that — `embedded`/`document` are baked SOLIDS by definition and `generator`
+// has no blob at all — so this lane bakes a single canonical planar FACE and the
+// worker prisms it per instance.
+//
+// Every number below is exact and analytic: the profile is a 20×20 square minus
+// a Ø5 hole, so its area is `400 − π·2.5²` and a placement's volume is that
+// times its own `length`. The volumes come from `QueryMassProperties`
+// (`BRepGProp` over the real BRep), never from a mesh.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `400 − π·2.5²` — the 20×20 + Ø5 profile's exact area. `worker/tests/
+/// test_extract_prism_profile.cpp` pins the identical constant, so a divergence
+/// between the two tracks shows up on both sides.
+const PROFILE_AREA_MM2: f64 = 400.0 - std::f64::consts::PI * 2.5 * 2.5;
+const STOCK_LENGTH_MM: f64 = 500.0;
+const PLACED_LENGTH_MM: f64 = 120.0;
+const RE_LENGTHED_MM: f64 = 300.0;
+
+fn xy_plane_ref() -> onecad_core::document::record::SketchPlaneRef {
+    onecad_core::document::record::SketchPlaneRef {
+        kind: onecad_core::document::record::PlaneKind::Xy,
+        origin: Vec3::new_unchecked(0.0, 0.0, 0.0),
+        x_axis: Vec3::new_unchecked(0.0, 1.0, 0.0),
+        y_axis: Vec3::new_unchecked(-1.0, 0.0, 0.0),
+        normal: Vec3::new_unchecked(0.0, 0.0, 1.0),
+        extra: Default::default(),
+    }
+}
+
+/// A closed 20×20 square with a concentric Ø5 hole — the extrusion cross
+/// section a real aluminium profile has, in miniature.
+fn stock_profile_sketch(
+    sid: onecad_core::ids::SketchId,
+    base: u128,
+) -> onecad_core::sketch::Sketch {
+    use onecad_core::ids::EntityId;
+    use onecad_core::math::Vec2;
+    use onecad_core::sketch::{Sketch, SketchEntity, WorldPlane};
+
+    let e = |n: u128| EntityId(Uuid::from_u128(base + n));
+    let mut sk = Sketch::on_world_plane(sid, "Stock profile", WorldPlane::XY);
+    let point = |sk: &mut Sketch, id: EntityId, x: f64, y: f64| {
+        sk.add_entity(SketchEntity::point(
+            id,
+            Vec2::new_unchecked(x, y),
+            false,
+            false,
+        ))
+        .expect("point");
+    };
+    point(&mut sk, e(0), 0.0, 0.0);
+    point(&mut sk, e(1), 20.0, 0.0);
+    point(&mut sk, e(2), 20.0, 20.0);
+    point(&mut sk, e(3), 0.0, 20.0);
+    for (l, a, b) in [(0x10, 0, 1), (0x11, 1, 2), (0x12, 2, 3), (0x13, 3, 0)] {
+        sk.add_entity(SketchEntity::line(e(l), e(a), e(b), false))
+            .expect("line");
+    }
+    point(&mut sk, e(0x20), 10.0, 10.0);
+    sk.add_entity(SketchEntity::circle(e(0x21), e(0x20), 2.5, false).expect("finite radius"))
+        .expect("circle");
+    sk
+}
+
+fn stock_sketch_record(rec: u128, sk: &onecad_core::sketch::Sketch) -> OperationRecord {
+    let (_plane, entities, constraints) = onecad_app::worker::wire::sketch_wire(sk);
+    let op = Operation::Known(KnownOperation::Sketch(
+        onecad_core::document::record::SketchOpParams {
+            sketch: sk.id,
+            plane: xy_plane_ref(),
+            entities: entities.as_array().cloned().unwrap_or_default(),
+            constraints: constraints.as_array().cloned().unwrap_or_default(),
+            host_face: None,
+            extra: Default::default(),
+        },
+    ));
+    OperationRecord::new(RecordId(Uuid::from_u128(rec)), 0, "Sketch", op)
+}
+
+fn stock_extrude_record(
+    rec: u128,
+    sketch: onecad_core::ids::SketchId,
+    distance: f64,
+) -> OperationRecord {
+    use onecad_core::document::record::{BooleanMode, ExtrudeMode, ExtrudeParams};
+    let op = Operation::Known(KnownOperation::Extrude(ExtrudeParams {
+        profile: Some(onecad_core::document::refs::SketchRegionRef {
+            sketch,
+            region: onecad_core::ids::RegionId::new(""), // first-region fallback
+            region_identity_version: None,
+            region_anchor: None,
+            extra: Default::default(),
+        }),
+        distance: Scalar::new(distance),
+        draft_angle_deg: Scalar::new(0.0),
+        mode: ExtrudeMode::Blind,
+        boolean_mode: BooleanMode::NewBody,
+        target_body: None,
+        target_face: None,
+        two_directions: false,
+        mode2: ExtrudeMode::Blind,
+        distance2: Scalar::new(0.0),
+        target_face2: None,
+        extra: Default::default(),
+    }));
+    OperationRecord::new(RecordId(Uuid::from_u128(rec)), 0, "Extrude", op)
+}
+
+/// An `AppState` wired to the SAME `WorkerManager` for every facet (verbatim
+/// from `component_rebake.rs` — production's `real_worker_factory` minus the
+/// restart-hook wiring these tests never exercise).
+fn app_state_over(wm: &WorkerManager) -> onecad_app::state::AppState {
+    use onecad_app::worker::{
+        CircuitControl, FaceBoundaryProjection, PreviewEngine, StepImport, WorkerReadiness,
+    };
+    let wm = wm.clone();
+    onecad_app::state::AppState::new(Arc::new(move || {
+        let engine: Arc<dyn GeometryEngine> = Arc::new(wm.clone());
+        let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
+        let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
+        let exporter: Arc<dyn onecad_app::export::GeometryExporter> = Arc::new(wm.clone());
+        let elements: Arc<dyn ElementQuery> = Arc::new(wm.clone());
+        let preview: Arc<dyn PreviewEngine> = Arc::new(wm.clone());
+        let face_projection: Arc<dyn FaceBoundaryProjection> = Arc::new(wm.clone());
+        let step_import: Arc<dyn StepImport> = Arc::new(wm.clone());
+        let circuit: Arc<dyn CircuitControl> = Arc::new(wm.clone());
+        let readiness: Arc<dyn WorkerReadiness> = Arc::new(wm.clone());
+        (
+            engine,
+            meshes,
+            solver,
+            exporter,
+            elements,
+            preview,
+            face_projection,
+            step_import,
+            circuit,
+            readiness,
+        )
+    }))
+}
+
+async fn open_blank(app_state: &onecad_app::state::AppState) {
+    let (engine, meshes, solver) = app_state.make_backend();
+    *app_state.runtime.lock().await = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+}
+
+/// The `source` blob digest a placed record currently names — the number that
+/// MUST NOT move when only `params.length` is edited.
+async fn placed_source_sha(state: &onecad_app::state::AppState, record: &str) -> String {
+    use std::str::FromStr;
+    let guard = state.runtime.lock().await;
+    let rt = guard.as_ref().expect("open document");
+    let raw = rt
+        .operation_params(RecordId::from_str(record).expect("record id"))
+        .expect("params for the placed record");
+    let params: PlaceComponentParams = serde_json::from_value(raw).expect("a placed component");
+    params
+        .source
+        .blob_ref()
+        .expect("a profile source is blob-backed")
+        .sha256
+        .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_profile_component_extrudes_to_its_own_length_and_re_lengths_without_a_re_bake() {
+    use onecad_app::dto::PrismProfileAnswerDto;
+
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let library_dir = tempfile::tempdir().expect("tempdir");
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let wm = spawn_worker(bin).await;
+    let app_state = app_state_over(&wm);
+    open_blank(&app_state).await;
+
+    // ── 1. The vendor stick: one 500 mm extrusion of the 20×20 + Ø5 profile ──
+    const BASE: u128 = 0xC0FE00;
+    let sid = onecad_core::ids::SketchId(Uuid::from_u128(BASE + 2));
+    let stock_body = {
+        let mut guard = app_state.runtime.lock().await;
+        let rt = guard.as_mut().unwrap();
+        add_op(
+            rt,
+            stock_sketch_record(BASE, &stock_profile_sketch(sid, BASE + 0x1000)),
+        );
+        add_op(rt, stock_extrude_record(BASE + 1, sid, STOCK_LENGTH_MM));
+        let report = regen_all(rt).await;
+        let snap = published(&report, "the 500 mm stock");
+        assert_eq!(snap.bodies.len(), 1, "the stock document has one body");
+        snap.bodies[0].body
+    };
+    let stock_volume = exact_volume(&wm, stock_body).await;
+    let want_stock = PROFILE_AREA_MM2 * STOCK_LENGTH_MM;
+    assert!(
+        (stock_volume - want_stock).abs() <= 1e-6 * want_stock,
+        "the stock must be the square MINUS the hole: got {stock_volume}, want {want_stock} \
+         (if this is 400×500 the first-region fallback picked the wrong loop)"
+    );
+
+    // ── 2. ExtractPrismProfile: is it a prism, and bake its canonical face ──
+    let face_path = scratch.path().join("stock_profile.brep");
+    let answer = onecad_app::library::extract_prism_profile_at(
+        &app_state.runtime,
+        app_state.exporter(),
+        &stock_body.to_string(),
+        Some(&face_path.to_string_lossy()),
+    )
+    .await
+    .expect(
+        "ExtractPrismProfile must answer. An `unknown verb` / protocol error here means the \
+         C++ half of WP-C is NOT in the staged worker — rebuild the sidecar; this test must \
+         never be read as green without it",
+    );
+    let PrismProfileAnswerDto::Prism(prism) = answer else {
+        panic!("a plain prismatic extrusion must not refuse: {answer:?}");
+    };
+    assert!(
+        (prism.area_mm2 - PROFILE_AREA_MM2).abs() < 1e-9,
+        "areaMm2 {} != {PROFILE_AREA_MM2} (400 − π·2.5²)",
+        prism.area_mm2
+    );
+    assert!(
+        (prism.length_mm - STOCK_LENGTH_MM).abs() < 1e-9,
+        "lengthMm {} != {STOCK_LENGTH_MM} — this is the PLANE-TO-PLANE distance, not a bbox \
+         extent (a Bnd_Box is inflated by the shape's tolerance)",
+        prism.length_mm
+    );
+    assert!(
+        (prism.volume_ratio - 1.0).abs() < 1e-6,
+        "a true prism measures volumeRatio 1.0, got {}",
+        prism.volume_ratio
+    );
+    assert_eq!(prism.axis, [0.0, 0.0, 1.0], "the extrude ran along +Z");
+    let bake = prism
+        .bake
+        .expect("a path was supplied and the body is a prism, so the face must be written");
+    assert_eq!(
+        bake.codec, "brep",
+        "a face comes back only from the brep reader"
+    );
+    let face_bytes = std::fs::read(&face_path).expect("the worker wrote the canonical face");
+    assert_eq!(
+        face_bytes.len() as u64,
+        bake.bytes,
+        "the reported byte count must be the file that landed"
+    );
+
+    // ── 3. Author a `profile` package from those bytes ──
+    let mut library = onecad_library::Library::open(library_dir.path()).expect("open library");
+    let mut package_parameters = std::collections::BTreeMap::new();
+    package_parameters.insert(
+        "length".to_string(),
+        // The package's DECLARED default: the stick the vendor ships. An
+        // instance that overrides nothing places at exactly this length.
+        onecad_library::package::ParameterSpec::free_variable("length", STOCK_LENGTH_MM),
+    );
+    let saved = library
+        .save_embedded_component(onecad_library::EmbeddedComponentRequest {
+            package: onecad_library::ComponentPackage {
+                identity: onecad_library::package::Identity {
+                    id: "acme.extrusion.2020".to_string(),
+                    version: "1.0.0".to_string(),
+                    revision: format!("sha256:{}", "0".repeat(64)),
+                },
+                metadata: onecad_library::package::Metadata {
+                    name: "2020 extrusion".to_string(),
+                    unit: "mm".to_string(),
+                    ..Default::default()
+                },
+                // Overwritten by the save with the profile source it produces.
+                source: onecad_library::package::SourceSpec::Generator {
+                    generator: "ignored".to_string(),
+                    generator_version: 0,
+                },
+                parameters: package_parameters,
+                attachments: Default::default(),
+            },
+            kind: onecad_library::BlobComponentKind::Profile,
+            geometry: face_bytes,
+            geometry_codec: bake.codec.clone(),
+            geometry_format: Some(bake.format),
+            preview_png: None,
+        })
+        .expect("save the profile package");
+    assert_eq!(
+        saved.sha256, bake.sha256,
+        "the worker content-addressed the bytes it wrote; the store must key them by the \
+         SAME digest, or the placed record's sha256 would name nothing"
+    );
+    let (_v, entry) = library.get("acme.extrusion.2020", None).expect("indexed");
+    assert_eq!(entry.source_kind, "profile");
+
+    // ── 4. Place it at 120 mm — a length the vendor never shipped ──
+    open_blank(&app_state).await;
+
+    let state = &app_state;
+
+    let mut at_120 = std::collections::BTreeMap::new();
+    at_120.insert(
+        "length".to_string(),
+        ComponentParamValue::Number(PLACED_LENGTH_MM),
+    );
+    let (_outcome, projection) = onecad_app::library::place_component_at(
+        library_dir.path(),
+        state,
+        "acme.extrusion.2020".to_string(),
+        "1.0.0".to_string(),
+        [0.0, 0.0, 0.0],
+        None,
+        at_120,
+        None,
+    )
+    .await
+    .expect("place the profile component at 120 mm");
+    let record_id = projection.features[0].id.clone();
+
+    let placed_volume = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard.as_mut().unwrap();
+        let report = regen_all(rt).await;
+        let snap = published(&report, "place the profile at 120");
+        assert_eq!(snap.bodies.len(), 1, "a prism over one face is one solid");
+        exact_volume(&wm, snap.bodies[0].body).await
+    };
+    let want_120 = PROFILE_AREA_MM2 * PLACED_LENGTH_MM;
+    assert!(
+        (placed_volume - want_120).abs() <= 1e-6 * want_120,
+        "placed at 120 mm: got {placed_volume}, want {want_120}"
+    );
+    let sha_at_120 = placed_source_sha(state, &record_id).await;
+
+    // ── 5. Re-length to 300 mm: geometry moves, the blob does NOT ──
+    let mut at_300 = std::collections::BTreeMap::new();
+    at_300.insert(
+        "length".to_string(),
+        ComponentParamValue::Number(RE_LENGTHED_MM),
+    );
+    onecad_app::library::set_component_params_at(
+        library_dir.path(),
+        state,
+        record_id.clone(),
+        at_300,
+    )
+    .await
+    .expect("re-length the placed instance");
+
+    let re_lengthed_volume = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard.as_mut().unwrap();
+        let report = regen_all(rt).await;
+        let snap = published(&report, "re-length to 300");
+        assert_eq!(snap.bodies.len(), 1);
+        exact_volume(&wm, snap.bodies[0].body).await
+    };
+    let want_300 = PROFILE_AREA_MM2 * RE_LENGTHED_MM;
+    assert!(
+        (re_lengthed_volume - want_300).abs() <= 1e-6 * want_300,
+        "re-lengthed to 300 mm: got {re_lengthed_volume}, want {want_300} — a params edit on \
+         a profile source must MOVE geometry, not relabel it"
+    );
+    assert_eq!(
+        placed_source_sha(state, &record_id).await,
+        sha_at_120,
+        "a length edit re-prisms the SAME canonical face: no re-bake, so the blob digest must \
+         not move (that is the whole difference from a `document` source)"
+    );
+
+    wm.shutdown().await;
+}
+
+/// The `profile`-kind analogue of `a_baked_component_survives_save_and_reopen_with_no_library`:
+/// a length-parametric extrusion places, saves, and — with the temp LIBRARY ROOT DELETED
+/// entirely before reopen — still regenerates on a FRESH worker to the same volume. Spec §4's
+/// "geometry is always cached locally" claim covers `profile` exactly like `embedded`/
+/// `document`: the canonical face blob is copied into the placing document's own `imports/`
+/// section at place time (`blob_ref()` walks all three kinds uniformly), so nothing on this
+/// lane should depend on the library surviving past place time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_profile_component_survives_save_and_reopen_with_no_library() {
+    use onecad_app::dto::PrismProfileAnswerDto;
+
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let library_dir = tempfile::tempdir().expect("tempdir");
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let wm = spawn_worker(bin.clone()).await;
+    let app_state = app_state_over(&wm);
+    open_blank(&app_state).await;
+
+    // ── 1. The vendor stick, same profile as the extrude/re-length test ──
+    const BASE: u128 = 0xC0FE20;
+    let sid = onecad_core::ids::SketchId(Uuid::from_u128(BASE + 2));
+    let stock_body = {
+        let mut guard = app_state.runtime.lock().await;
+        let rt = guard.as_mut().unwrap();
+        add_op(
+            rt,
+            stock_sketch_record(BASE, &stock_profile_sketch(sid, BASE + 0x1000)),
+        );
+        add_op(rt, stock_extrude_record(BASE + 1, sid, STOCK_LENGTH_MM));
+        let report = regen_all(rt).await;
+        let snap = published(&report, "the 500 mm stock");
+        assert_eq!(snap.bodies.len(), 1, "the stock document has one body");
+        snap.bodies[0].body
+    };
+
+    // ── 2. ExtractPrismProfile + bake the canonical face ──
+    let face_path = scratch.path().join("stock_profile.brep");
+    let answer = onecad_app::library::extract_prism_profile_at(
+        &app_state.runtime,
+        app_state.exporter(),
+        &stock_body.to_string(),
+        Some(&face_path.to_string_lossy()),
+    )
+    .await
+    .expect(
+        "ExtractPrismProfile must answer. An `unknown verb` / protocol error here means the \
+         C++ half of WP-C is NOT in the staged worker — rebuild the sidecar; this test must \
+         never be read as green without it",
+    );
+    let PrismProfileAnswerDto::Prism(prism) = answer else {
+        panic!("a plain prismatic extrusion must not refuse: {answer:?}");
+    };
+    let bake = prism
+        .bake
+        .expect("a path was supplied and the body is a prism, so the face must be written");
+    let face_bytes = std::fs::read(&face_path).expect("the worker wrote the canonical face");
+    let sha = bake.sha256.clone();
+
+    // ── 3. Author a `profile` package from those bytes ──
+    let mut library = onecad_library::Library::open(library_dir.path()).expect("open library");
+    let mut package_parameters = std::collections::BTreeMap::new();
+    package_parameters.insert(
+        "length".to_string(),
+        onecad_library::package::ParameterSpec::free_variable("length", STOCK_LENGTH_MM),
+    );
+    library
+        .save_embedded_component(onecad_library::EmbeddedComponentRequest {
+            package: onecad_library::ComponentPackage {
+                identity: onecad_library::package::Identity {
+                    id: "acme.extrusion.reopen".to_string(),
+                    version: "1.0.0".to_string(),
+                    revision: format!("sha256:{}", "0".repeat(64)),
+                },
+                metadata: onecad_library::package::Metadata {
+                    name: "2020 extrusion (reopen, no library)".to_string(),
+                    unit: "mm".to_string(),
+                    ..Default::default()
+                },
+                source: onecad_library::package::SourceSpec::Generator {
+                    generator: "ignored".to_string(),
+                    generator_version: 0,
+                },
+                parameters: package_parameters,
+                attachments: Default::default(),
+            },
+            kind: onecad_library::BlobComponentKind::Profile,
+            geometry: face_bytes,
+            geometry_codec: bake.codec.clone(),
+            geometry_format: Some(bake.format),
+            preview_png: None,
+        })
+        .expect("save the profile package");
+
+    // ── 4. Place it at 120 mm into a FRESH document ──
+    open_blank(&app_state).await;
+
+    let state = &app_state;
+
+    let mut at_120 = std::collections::BTreeMap::new();
+    at_120.insert(
+        "length".to_string(),
+        ComponentParamValue::Number(PLACED_LENGTH_MM),
+    );
+    onecad_app::library::place_component_at(
+        library_dir.path(),
+        state,
+        "acme.extrusion.reopen".to_string(),
+        "1.0.0".to_string(),
+        [0.0, 0.0, 0.0],
+        None,
+        at_120,
+        None,
+    )
+    .await
+    .expect("place the profile component at 120 mm");
+
+    let want_120 = PROFILE_AREA_MM2 * PLACED_LENGTH_MM;
+    {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard.as_mut().unwrap();
+        let report = regen_all(rt).await;
+        let snap = published(&report, "place the profile at 120");
+        assert_eq!(snap.bodies.len(), 1, "a prism over one face is one solid");
+        let placed_volume = exact_volume(&wm, snap.bodies[0].body).await;
+        assert!(
+            (placed_volume - want_120).abs() <= 1e-6 * want_120,
+            "placed at 120 mm: got {placed_volume}, want {want_120}"
+        );
+    }
+
+    // ── 5. Save, then DELETE the library root entirely ──
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("profile_reopen.onecad");
+    {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard.as_mut().unwrap();
+        rt.save(&path, save_meta()).expect("save");
+    }
+    std::fs::remove_dir_all(library_dir.path()).expect("delete the library root entirely");
+    wm.shutdown().await;
+
+    // ── 6. Reopen on a FRESH worker. No library root exists anywhere — the
+    //    ONLY thing carrying the canonical face is the saved container.
+    let wm2 = spawn_worker(bin).await;
+    let mut rt2 = open_over(&wm2, &path);
+    assert!(
+        rt2.import_blob_shas().contains(&sha),
+        "the canonical face came back out of the container's imports/ section (the save-time \
+         refcount kept it, exactly like `embedded`/`document`)"
+    );
+    let report2 = regen_all(&mut rt2).await;
+    let snap2 = published(&report2, "reopen the profile component");
+    assert_eq!(
+        snap2.bodies.len(),
+        1,
+        "reopen still publishes the placed profile component"
+    );
+    let vol2 = exact_volume(&wm2, snap2.bodies[0].body).await;
+    assert!(
+        (vol2 - want_120).abs() <= 1e-6 * want_120,
+        "reopened volume {vol2} != placed {want_120} — a `profile` source must regen with no \
+         library reachable, exactly like a baked one"
+    );
+
+    wm2.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP-I I0(b) probe / design I1: a coincident-mated fastener follows its plate
+// when the plate's THICKNESS changes.
+//
+// `solve_mate_placement`'s coincident branch (`ComponentMateSolver.cpp:234-241`)
+// seats at `seat_anchor` — the component's own frozen placement — and never
+// reads `frame.origin`. So a target plane that moved along its own normal leaves
+// the screw exactly where it was: floating above the plate, or buried in it,
+// with no repair item and no visible complaint.
+//
+// The measurement is the SEAT, never the volume: the defect is a pure placement
+// error and every volume in this scenario is invariant under it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A closed 40×20 rectangle with no interior loop — the plate this probe
+/// thickens. Same shape as [`stock_profile_sketch`] minus its bore.
+fn plate_profile_sketch(
+    sid: onecad_core::ids::SketchId,
+    base: u128,
+) -> onecad_core::sketch::Sketch {
+    use onecad_core::ids::EntityId;
+    use onecad_core::math::Vec2;
+    use onecad_core::sketch::{Sketch, SketchEntity, WorldPlane};
+
+    let e = |n: u128| EntityId(Uuid::from_u128(base + n));
+    let mut sk = Sketch::on_world_plane(sid, "Plate profile", WorldPlane::XY);
+    let point = |sk: &mut Sketch, id: EntityId, x: f64, y: f64| {
+        sk.add_entity(SketchEntity::point(
+            id,
+            Vec2::new_unchecked(x, y),
+            false,
+            false,
+        ))
+        .expect("point");
+    };
+    point(&mut sk, e(0), 0.0, 0.0);
+    point(&mut sk, e(1), 40.0, 0.0);
+    point(&mut sk, e(2), 40.0, 20.0);
+    point(&mut sk, e(3), 0.0, 20.0);
+    for (l, a, b) in [(0x10, 0, 1), (0x11, 1, 2), (0x12, 2, 3), (0x13, 3, 0)] {
+        sk.add_entity(SketchEntity::line(e(l), e(a), e(b), false))
+            .expect("line");
+    }
+    sk
+}
+
+/// The plate's UPPER planar face: the one whose descriptor normal is along Z
+/// and whose bbox centre sits at the top of the extrusion. `ElementInfoDto::
+/// normal` is the un-oriented surface normal, so both caps report `(0,0,1)` and
+/// the height is what tells them apart. Returns `(topoKey, center)`; `center`
+/// lies ON the plane, which makes it a usable anchor for the promotion.
+async fn find_top_planar_face(
+    wm: &WorkerManager,
+    snapshot: onecad_core::ids::SnapshotId,
+    body: BodyId,
+    top_z: f64,
+) -> (String, [f64; 3]) {
+    for i in 1..=8 {
+        let key = format!("f:{i}");
+        let Some(info) = ElementQuery::query_element_by_topo_key(wm, snapshot, body, &key)
+            .await
+            .expect("QueryElement by topoKey")
+        else {
+            continue;
+        };
+        if !info.has_normal || info.normal[2].abs() < 0.999 {
+            continue;
+        }
+        if (info.center[2] - top_z).abs() < 1e-6 {
+            return (key, info.center);
+        }
+    }
+    panic!("no planar face with a Z normal at z={top_z} found on {body:?} within f:1..=8");
+}
+
+/// The `placement.translate.z` a record currently carries — the derived
+/// writeback `sync_mate_placements` performs when a mate re-seats, and the
+/// number this probe measures.
+fn record_translate_z(rt: &DocumentRuntime, record: RecordId) -> f64 {
+    let params = rt
+        .operation_params(record)
+        .expect("the mated record still exists");
+    let t = params["placement"]["translate"]
+        .as_array()
+        .expect("translate is an array");
+    t[2]["value"]
+        .as_f64()
+        .or_else(|| t[2].as_f64())
+        .expect("translate.z reads as a number")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn coincident_mated_screw_follows_plate_thickness_change() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    const BASE: u128 = 0xB10B00;
+    let sid = onecad_core::ids::SketchId(Uuid::from_u128(BASE + 2));
+    let extrude_record = RecordId(Uuid::from_u128(BASE + 1));
+    let mate_record = RecordId(Uuid::from_u128(BASE + 3));
+
+    // ── 1. A 5 mm plate. ────────────────────────────────────────────────────
+    add_op(
+        &mut rt,
+        stock_sketch_record(BASE, &plate_profile_sketch(sid, BASE + 0x1000)),
+    );
+    add_op(&mut rt, stock_extrude_record(BASE + 1, sid, 5.0));
+    let report1 = regen_all(&mut rt).await;
+    let snap1 = published(&report1, "the 5 mm plate");
+    assert_eq!(snap1.bodies.len(), 1, "the plate document has one body");
+    let plate_body = snap1.bodies[0].body;
+
+    let (top_key, top_center) = find_top_planar_face(&wm, snap1.id, plate_body, 5.0).await;
+    let anchor = AnchorIntent {
+        world_point: Vec3::new_unchecked(top_center[0], top_center[1], top_center[2]),
+        surface_uv: None,
+        local_frame: None,
+        adjacency_hint: None,
+        extra: Default::default(),
+    };
+    let element_id = promote(&mut rt, snap1.id, plate_body, &top_key, &anchor).await;
+
+    // ── 2. An ISO 4762 M6 seated ON that face, coincident. The frozen
+    //    placement IS the solved seat, so the first regen is a no-op and any
+    //    later move is attributable to the thickness edit alone. ─────────────
+    let mut mated = place_component_record(BASE + 3);
+    let Operation::Known(KnownOperation::PlaceComponent(params)) = &mut mated.op else {
+        unreachable!()
+    };
+    params.mate = Some(ComponentMate {
+        self_attachment: "shankAxis".to_string(),
+        target: ElementRef {
+            primary: Some(PrimaryRef {
+                body: plate_body,
+                element: element_id,
+                kind: ElementKind::Face,
+                extra: Default::default(),
+            }),
+            intent: None,
+            anchor: Some(anchor),
+            extra: Default::default(),
+        },
+        kind: MateKind::Coincident,
+        self_frame: None,
+        flipped: false,
+        target_axis: None,
+        target_sidedness: None,
+        extra: Default::default(),
+    });
+    params.placement.translate[0] = Scalar::new(top_center[0]);
+    params.placement.translate[1] = Scalar::new(top_center[1]);
+    params.placement.translate[2] = Scalar::new(5.0);
+    add_op(&mut rt, mated);
+
+    let report2 = regen_all(&mut rt).await;
+    let snap2 = published(&report2, "the mated screw on the 5 mm plate");
+    assert_eq!(snap2.bodies.len(), 2, "plate + mated screw");
+    assert_eq!(
+        snap2.repair_summary.needs_repair_count, 0,
+        "the freshly authored mate resolves cleanly"
+    );
+    let seated_z = record_translate_z(&rt, mate_record);
+    assert!(
+        (seated_z - 5.0).abs() < 1e-3,
+        "setup: the screw starts seated on the 5 mm plate's top face, got z={seated_z}"
+    );
+
+    // ── 3. Thicken the plate 5 → 8 mm. The top face moves +3 mm along its own
+    //    normal; the screw must move with it. ────────────────────────────────
+    let Operation::Known(KnownOperation::Extrude(mut thicker)) =
+        stock_extrude_record(BASE + 1, sid, 8.0).op
+    else {
+        unreachable!()
+    };
+    thicker.distance = Scalar::new(8.0);
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: extrude_record,
+        op: Operation::Known(KnownOperation::Extrude(thicker)),
+    })
+    .expect("UpdateOperationParams(Extrude 5 → 8)");
+
+    let report3 = regen_all(&mut rt).await;
+    let snap3 = published(&report3, "the mated screw on the 8 mm plate");
+    assert_eq!(snap3.bodies.len(), 2, "plate + mated screw after the edit");
+
+    let moved_z = record_translate_z(&rt, mate_record);
+    eprintln!(
+        "[I0-b] plate 5 → 8 mm | seat z before = {seated_z}, after = {moved_z}, want 8.0 \
+         (needsRepair = {})",
+        snap3.repair_summary.needs_repair_count
+    );
+    assert!(
+        (moved_z - 8.0).abs() < 1e-3,
+        "a coincident mate must follow its target plane along the plane's own normal: seat z = \
+         {moved_z}, want 8.0 (the plate's new top face); the screw is left {} mm off",
+        8.0 - moved_z
+    );
+
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP-I: the §7.2 `mateResolved` adoption, its fence, and the §9
+// `mateAxisReversed` repair — all on the REAL worker.
+//
+// The other real-worker mate tests are coincident or unresolvable, and neither
+// emits `mateResolved` (it rides only a resolved CYLINDRICAL target), so none of
+// this path had real-worker coverage: the adoption, the claim that the regen
+// right after it does not trip the fence, the op-built §9 item, and the repair
+// that makes the next regen a fixed point.
+//
+// The reversal lever is MEASURED, not assumed: extruding the same profile with a
+// NEGATIVE distance rebuilds the identical bore (same Ø, same axis line, same
+// volume) with its parametric axis pointing the other way — exactly the
+// "re-authored from the other side" signature §7.3 describes, and the test
+// asserts the reversal with `ClassifyElement` before it asserts anything else.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A 20×20 plate profile CENTRED on the sketch origin with a concentric Ø6
+/// bore — the M6 clearance hole this test mates a screw into. Centred so the
+/// bore's axis is the world Z axis, which makes the reversal a pure sign flip.
+fn bored_plate_sketch(sid: onecad_core::ids::SketchId, base: u128) -> onecad_core::sketch::Sketch {
+    use onecad_core::ids::EntityId;
+    use onecad_core::math::Vec2;
+    use onecad_core::sketch::{Sketch, SketchEntity, WorldPlane};
+
+    let e = |n: u128| EntityId(Uuid::from_u128(base + n));
+    let mut sk = Sketch::on_world_plane(sid, "Bored plate", WorldPlane::XY);
+    let point = |sk: &mut Sketch, id: EntityId, x: f64, y: f64| {
+        sk.add_entity(SketchEntity::point(
+            id,
+            Vec2::new_unchecked(x, y),
+            false,
+            false,
+        ))
+        .expect("point");
+    };
+    point(&mut sk, e(0), -10.0, -10.0);
+    point(&mut sk, e(1), 10.0, -10.0);
+    point(&mut sk, e(2), 10.0, 10.0);
+    point(&mut sk, e(3), -10.0, 10.0);
+    for (l, a, b) in [(0x10, 0, 1), (0x11, 1, 2), (0x12, 2, 3), (0x13, 3, 0)] {
+        sk.add_entity(SketchEntity::line(e(l), e(a), e(b), false))
+            .expect("line");
+    }
+    point(&mut sk, e(0x20), 0.0, 0.0);
+    sk.add_entity(SketchEntity::circle(e(0x21), e(0x20), 3.0, false).expect("finite radius"))
+        .expect("bore circle");
+    sk
+}
+
+/// The bore's CURRENT parametric axis, straight off `ClassifyElement` — the
+/// quantity the whole reversal story is about, so the test reads it rather than
+/// assuming what an extrude sign does.
+async fn bore_axis(wm: &WorkerManager, body: BodyId, key: &str) -> [f64; 3] {
+    ElementQuery::classify_element_by_topo_key(wm, body, key)
+        .await
+        .expect("ClassifyElement")
+        .and_then(|dto| dto.frame.and_then(|f| f.axis))
+        .unwrap_or_else(|| panic!("no cylinder axis on {body:?} {key}"))
+}
+
+/// How many `MATE_AXIS_ADOPTED` diagnostics the projection currently carries.
+fn adoption_notices(rt: &DocumentRuntime) -> usize {
+    rt.projection()
+        .features
+        .iter()
+        .flat_map(|f| f.diagnostics.iter())
+        .filter(|d| d.code == "MATE_AXIS_ADOPTED")
+        .count()
+}
+
+/// The world direction the component's own local +Z maps to, derived from the
+/// record's frozen `placement.rotate` (Rodrigues about the stored axis) — the
+/// ONE quantity a `keepWorldDirection` repair promises to preserve.
+fn mapped_local_z(rt: &DocumentRuntime, record: RecordId) -> [f64; 3] {
+    let params = rt.operation_params(record).expect("the record exists");
+    let rot = &params["placement"]["rotate"];
+    let num = |v: &serde_json::Value| v.as_f64().or_else(|| v["value"].as_f64()).unwrap_or(0.0);
+    let a = rot["axis"].as_array().expect("rotate.axis");
+    let (ax, ay, az) = (num(&a[0]), num(&a[1]), num(&a[2]));
+    let len = (ax * ax + ay * ay + az * az).sqrt();
+    let theta = num(&rot["angleDeg"]).to_radians();
+    if len < 1e-12 || theta.abs() < 1e-12 {
+        return [0.0, 0.0, 1.0];
+    }
+    let (kx, ky, kz) = (ax / len, ay / len, az / len);
+    // Rodrigues on v = (0,0,1): v cosθ + (k × v) sinθ + k (k·v)(1 − cosθ).
+    let (c, s) = (theta.cos(), theta.sin());
+    let cross = [ky - 0.0, -kx, 0.0]; // k × (0,0,1)
+    [
+        cross[0] * s + kx * kz * (1.0 - c),
+        cross[1] * s + ky * kz * (1.0 - c),
+        c + kz * kz * (1.0 - c),
+    ]
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_concentric_mate_adopts_its_axis_then_repairs_a_reversal() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    const BASE: u128 = 0xC0FFEE;
+    let sid = onecad_core::ids::SketchId(Uuid::from_u128(BASE + 2));
+    let extrude_record = RecordId(Uuid::from_u128(BASE + 1));
+    let mate_record = RecordId(Uuid::from_u128(BASE + 3));
+
+    // ── 1. A 5 mm plate with a Ø6 through-bore. ─────────────────────────────
+    add_op(
+        &mut rt,
+        stock_sketch_record(BASE, &bored_plate_sketch(sid, BASE + 0x1000)),
+    );
+    add_op(&mut rt, stock_extrude_record(BASE + 1, sid, 5.0));
+    let report1 = regen_all(&mut rt).await;
+    let snap1 = published(&report1, "the bored plate");
+    let plate = snap1.bodies[0].body;
+
+    let (bore_key, bore_origin, bore_surface_point) = find_cylindrical_face(&wm, plate, 3.0).await;
+    let axis_before = bore_axis(&wm, plate, &bore_key).await;
+    let anchor = AnchorIntent {
+        // A point a real pick would land on: on the bore wall, at mid-depth.
+        world_point: Vec3::new_unchecked(bore_surface_point[0], bore_surface_point[1], 2.5),
+        surface_uv: None,
+        local_frame: None,
+        adjacency_hint: None,
+        extra: Default::default(),
+    };
+    let element_id = promote(&mut rt, snap1.id, plate, &bore_key, &anchor).await;
+
+    // ── 2. An M6 SHCS, CONCENTRIC to that bore. ─────────────────────────────
+    let mut mated = place_component_record(BASE + 3);
+    let Operation::Known(KnownOperation::PlaceComponent(params)) = &mut mated.op else {
+        unreachable!()
+    };
+    params.mate = Some(ComponentMate {
+        self_attachment: "shankAxis".to_string(),
+        target: ElementRef {
+            primary: Some(PrimaryRef {
+                body: plate,
+                element: element_id,
+                kind: ElementKind::Face,
+                extra: Default::default(),
+            }),
+            intent: None,
+            anchor: Some(anchor),
+            extra: Default::default(),
+        },
+        kind: MateKind::Concentric,
+        self_frame: None,
+        flipped: false,
+        // Authored with NO frozen evidence — a document written before this
+        // build. The §7.2 writeback is what backfills it.
+        target_axis: None,
+        target_sidedness: None,
+        extra: Default::default(),
+    });
+    params.placement.translate[0] = Scalar::new(bore_origin[0]);
+    params.placement.translate[1] = Scalar::new(bore_origin[1]);
+    params.placement.translate[2] = Scalar::new(5.0);
+    add_op(&mut rt, mated);
+
+    let report2 = regen_all(&mut rt).await;
+    published(&report2, "the mated screw");
+    let adopted = rt.operation_params(mate_record).expect("mated record")["mate"]["targetAxis"]
+        .as_array()
+        .map(|a| {
+            [
+                a[0].as_f64().unwrap(),
+                a[1].as_f64().unwrap(),
+                a[2].as_f64().unwrap(),
+            ]
+        });
+    eprintln!("[I2b] bore axis measured = {axis_before:?}, adopted mate.targetAxis = {adopted:?}");
+    let adopted = adopted.expect(
+        "the first regen under this build ADOPTS the §7.2 mateResolved evidence onto a record \
+         that carried none",
+    );
+    assert!(
+        dot(adopted, axis_before) > 0.999,
+        "the adopted axis IS the target's measured parametric axis: {adopted:?} vs {axis_before:?}"
+    );
+    assert_eq!(
+        adoption_notices(&rt),
+        1,
+        "the adoption is reported once, as the MATE_AXIS_ADOPTED info diagnostic"
+    );
+    let z_before = mapped_local_z(&rt, mate_record);
+
+    // ── 3. The fence: a regen right after the adoption, with NO edit. The
+    //    adoption moved this op's planner hash, and it rode inside the same
+    //    finish_regen that recomputes the prefix hashes — so this must PUBLISH,
+    //    adopt nothing more, and leave every step Ok. ─────────────────────────
+    let report3 = regen_all(&mut rt).await;
+    assert!(
+        matches!(report3.outcome, Outcome::Published(_)),
+        "the regen right after an adoption must publish, never report Superseded: {:?}",
+        report3.outcome
+    );
+    let snap3 = published(&report3, "the re-regen after adoption");
+    assert!(
+        snap3
+            .step_states
+            .iter()
+            .all(|(_, st)| matches!(st, onecad_core::history::StepState::Valid)),
+        "every step stays Valid after the adoption: {:?}",
+        snap3.step_states
+    );
+    assert_eq!(
+        snap3.repair_summary.needs_repair_count, 0,
+        "and nothing needs repair"
+    );
+    assert_eq!(
+        adoption_notices(&rt),
+        0,
+        "the notice is ONE-SHOT: it rides the ADOPTING regen's projection only"
+    );
+    assert_eq!(
+        rt.operation_params(mate_record).expect("mated record")["mate"]["targetAxis"],
+        serde_json::json!(adopted),
+        "the SECOND regen adopts nothing — a record that carries a targetAxis is never rewritten"
+    );
+
+    // ── 4. Rebuild the bore from the other side. A NEGATIVE extrude distance
+    //    builds the identical bore (same Ø, same axis LINE, same volume) with
+    //    its parametric axis reversed — measured, not assumed. ───────────────
+    let Operation::Known(KnownOperation::Extrude(mut reversed)) =
+        stock_extrude_record(BASE + 1, sid, -5.0).op
+    else {
+        unreachable!()
+    };
+    reversed.distance = Scalar::new(-5.0);
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: extrude_record,
+        op: Operation::Known(KnownOperation::Extrude(reversed)),
+    })
+    .expect("UpdateOperationParams(Extrude +5 → −5)");
+
+    let report4 = regen_all(&mut rt).await;
+    let snap4 = published(&report4, "the reversed plate");
+    let plate4 = snap4
+        .bodies
+        .iter()
+        .map(|b| b.body)
+        .find(|b| *b == plate)
+        .expect("the plate keeps its identity across a parametric edit");
+    let (rev_key, _, _) = find_cylindrical_face(&wm, plate4, 3.0).await;
+    let axis_after = bore_axis(&wm, plate4, &rev_key).await;
+    eprintln!("[I2b] bore axis after the rebuild = {axis_after:?} (was {axis_before:?})");
+    assert!(
+        dot(axis_after, axis_before) < -0.999,
+        "setup: the rebuilt bore's parametric axis must be ANTI-PARALLEL to the frozen one, \
+         got {axis_after:?} vs {axis_before:?}"
+    );
+
+    // The step is Ok — the component publishes at its frozen placement — and
+    // the halt is reported as ONE op-built §9 item, never a silent 180° spin.
+    let items: Vec<_> = rt
+        .repair_items()
+        .iter()
+        .filter(|i| i.reason == onecad_core::document::repair::RepairReason::MateAxisReversed)
+        .cloned()
+        .collect();
+    eprintln!(
+        "[I2b] repair items = {} (mateAxisReversed = {}), needsRepair = {}",
+        rt.repair_items().len(),
+        items.len(),
+        snap4.repair_summary.needs_repair_count
+    );
+    assert_eq!(
+        items.len(),
+        1,
+        "exactly one mateAxisReversed item: {:?}",
+        rt.repair_items()
+    );
+    let item = &items[0];
+    assert_eq!(
+        item.ref_id,
+        format!("{mate_record}.input0"),
+        "the item addresses the mate's own op-input slot"
+    );
+    assert_eq!(
+        item.candidates.len(),
+        2,
+        "two candidates on the SAME face, told apart only by their label"
+    );
+    assert_eq!(
+        item.candidates
+            .iter()
+            .map(|c| c.label.clone().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec![
+            "Keep the component's direction".to_string(),
+            "Follow the reversed axis".to_string()
+        ],
+        "the two SCHEMA §9 labels, in order"
+    );
+    assert_eq!(
+        item.candidates[0].topo_key, item.candidates[1].topo_key,
+        "both candidates name the same resolved face"
+    );
+    let resolved = item.resolved_axis.expect("the item carries resolvedAxis");
+    let frozen = item.frozen_axis.expect("the item carries frozenAxis");
+    assert!(
+        dot(
+            [resolved.x, resolved.y, resolved.z],
+            [frozen.x, frozen.y, frozen.z]
+        ) < -0.5,
+        "resolvedAxis {resolved:?} is anti-parallel to frozenAxis {frozen:?}"
+    );
+
+    // ── 5. THE PANEL'S OWN PATH. `RepairPanel` never reads the runtime's
+    //    repair items directly — it re-fetches each row through `resolveRefs`
+    //    with the bare `refId`. That must answer from the stored item: the
+    //    ladder resolving cleanly is this item's PREMISE, so a forwarded refId
+    //    comes back `autoBind` with no candidates and the panel renders
+    //    "nothing to choose from" over a repair that is sitting right there.
+    let dto = {
+        let resolved_refs = rt
+            .resolve_refs(onecad_core::regen::ResolveRequest {
+                snapshot_id: snap4.id,
+                refs: vec![onecad_core::regen::ResolveRef {
+                    ref_id: item.ref_id.clone(),
+                    // Bare `refId`, exactly as the panel sends it.
+                    element: ElementRef {
+                        primary: None,
+                        intent: None,
+                        anchor: None,
+                        extra: Default::default(),
+                    },
+                }],
+            })
+            .await
+            .expect("resolveRefs answers the mate item");
+        assert_eq!(resolved_refs.len(), 1);
+        // Built exactly as the `resolve_refs` command builds it, `body_id`
+        // derivation included — the panel reads THIS shape, not the raw
+        // resolution.
+        let resolution = resolved_refs.into_iter().next().unwrap();
+        let body_id = rt.repair_candidate_body(&resolution.ref_id);
+        let echoed_snapshot = resolution.snapshot_id.0;
+        onecad_app::dto::ResolveRefDto::from_resolution(
+            resolution,
+            echoed_snapshot,
+            rt.projection().revision,
+            body_id,
+        )
+    };
+    eprintln!(
+        "[I2b] resolveRefs → outcome={:?} reason={:?} candidates={} labels={:?}          resolvedAxis={:?} resolvedSidedness={:?}",
+        dto.outcome,
+        dto.reason,
+        dto.candidates.len(),
+        dto.candidates
+            .iter()
+            .map(|c| c.label.clone())
+            .collect::<Vec<_>>(),
+        dto.resolved_axis,
+        dto.resolved_sidedness
+    );
+    assert_eq!(
+        dto.outcome, "needsRepair",
+        "never autoBind: the panel needs the choice"
+    );
+    assert_eq!(dto.reason.as_deref(), Some("mateAxisReversed"));
+    assert_eq!(
+        dto.candidates
+            .iter()
+            .map(|c| c.label.clone().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec![
+            "Keep the component's direction".to_string(),
+            "Follow the reversed axis".to_string()
+        ],
+        "both labelled choices reach the panel"
+    );
+    let panel_axis = dto
+        .resolved_axis
+        .expect("the panel gets resolvedAxis to echo back");
+    assert!(
+        dto.frozen_axis.is_some() && dto.body_id.is_some(),
+        "…plus frozenAxis to explain the change and the §7.5 bodyId echo: {dto:?}"
+    );
+
+    // ── 6. The repair, driven from the DTO the panel actually holds. ────────
+    rt.apply(EditCommand::RepairMateAxis {
+        record: mate_record,
+        keep_world_direction: true,
+        resolved_axis: Vec3::new(panel_axis[0], panel_axis[1], panel_axis[2])
+            .expect("a finite echoed axis"),
+        resolved_sidedness: match dto.resolved_sidedness.as_deref() {
+            Some("pin") => Some(onecad_core::document::record::MateSidedness::Pin),
+            Some("hole") => Some(onecad_core::document::record::MateSidedness::Hole),
+            _ => None,
+        },
+    })
+    .expect("RepairMateAxis applies as an ordinary validated edit");
+
+    let report5 = regen_all(&mut rt).await;
+    let snap5 = published(&report5, "the repaired mate");
+    eprintln!(
+        "[I2b] after repair: needsRepair = {}, items = {}",
+        snap5.repair_summary.needs_repair_count,
+        rt.repair_items().len()
+    );
+    assert_eq!(
+        snap5.repair_summary.needs_repair_count, 0,
+        "the repair makes the next regen a FIXED POINT — the item must not come back"
+    );
+    assert!(
+        rt.repair_items().is_empty(),
+        "and the live repair state is clear: {:?}",
+        rt.repair_items()
+    );
+    let z_after = mapped_local_z(&rt, mate_record);
+    eprintln!("[I2b] mapped local +Z: before = {z_before:?}, after repair = {z_after:?}");
+    assert!(
+        dot(z_after, z_before) > 0.999,
+        "keepWorldDirection means the component's mapped local +Z is UNCHANGED: {z_after:?} \
+         vs {z_before:?} before the reversal"
+    );
+
+    wm.shutdown().await;
+}

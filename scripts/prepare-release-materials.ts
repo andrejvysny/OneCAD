@@ -100,9 +100,9 @@ export ONECAD_OCCT_BUILD_ID="${buildId}"
 bun install --frozen-lockfile
 \`\`\`
 
-Modify worker/third_party/planegcs as needed, then run scripts/package-macos.sh
-without --install. Its two-pass procedure rebuilds the worker, bundles dylibs,
-re-stages the rewritten worker SHA-256, rebuilds the app with that manifest,
+Modify worker/third_party/planegcs as needed, then run scripts/package-macos.sh.
+Its native procedure builds the worker, bundles dylibs,
+re-stages the rewritten worker SHA-256, builds the host with that manifest,
 and verifies the bundled worker. The release app pins the worker SHA-256, so
 rebuilding the app is required after replacing or relinking that worker.
 Read docs/PACKAGING.md before running this locally; package-macos.sh performs
@@ -112,7 +112,7 @@ For a compatible modified OCCT build, replace OCCT dylibs under the rebuilt
 app's Contents/Frameworks and re-sign the changed dylibs and outer bundle
 ad hoc. The worker hash does not cover those dylibs. A notarized/hardened-runtime
 replacement procedure remains unverified. Do not re-sign the worker after the
-app embeds its hash; if worker bytes change, repeat the two-pass procedure.
+app embeds its hash; if worker bytes change, repeat the bundle, hash and host-build procedure.
 
 ## Before distribution
 

@@ -23,7 +23,7 @@ const fixture = (): PreparationOptions => {
   const boostPrefix = join(root, 'boost');
   mkdirSync(source);
   for (const name of requiredSource) save(source, name, `synthetic ${name}\n`);
-  for (const name of ['Cargo.toml', 'Cargo.lock', 'src/main.ts', 'src-tauri/src/lib.rs', 'worker/src/main.cpp']) {
+  for (const name of ['Cargo.toml', 'Cargo.lock', 'crates/onecad-app/src/lib.rs', 'crates/onecad-ui/src/lib.rs', 'crates/onecad-render/src/lib.rs', 'worker/src/main.cpp']) {
     save(source, name, `synthetic ${name}\n`);
   }
   save(source, '.gitignore', 'ignored-file\n');

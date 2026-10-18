@@ -1,0 +1,16 @@
+[package]
+name = "onecad-mesh-fixture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Generate checked MESH1 fixtures through shared application services and the OCCT worker"
+
+[dependencies]
+onecad-app = { workspace = true }
+onecad-core = { workspace = true }
+onecad-protocol = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }

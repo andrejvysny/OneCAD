@@ -9,11 +9,8 @@ enabled features. It does not compile crates or require a staged worker.
 The explicit package graph lives in `LAYERS` in the checker. Unregistered
 workspace packages and local dependencies outside that workspace fail closed.
 A local dependency's package name and path must both match the workspace
-member. The only external local exceptions are `onecad-render` normal dependencies
-on `solidcraft-gpu` and `solidcraft-render` at their exact vendored paths under
-`vendor/solidcraft-viewport/crates/`. Other consumers, paths, and dependency kinds
-remain forbidden. The vendored workspace is excluded from the application workspace;
-its pinned geometry/render/GPU sources contain no donor engine or document model.
+member. There are no exceptions for external local comparison renderers; the
+SolidCraft comparison vendor is retired.
 Dependency aliases are checked by actual package name.
 
 Core, protocol and library remain independent foundations. Application
@@ -23,8 +20,9 @@ scene, protocol and core. Render may use the wgpu family but cannot import a UI
 toolkit. Its development dependencies may also use the exact `naga` package to
 validate WGSL without creating a GPU device; normal and build dependencies may
 not use this exception. Scene, interaction and app cannot import GPU or UI toolkit families.
-The native UI composes these layers; the legacy Tauri host consumes app and
-the foundations. Headless replay and ingest consume app, never either UI host.
+The native UI composes these layers and is the only UI host. Headless replay
+and ingest consume app; the mesh-fixture utility consumes app, core and protocol.
+None imports the native UI.
 Kernelbench remains independent; the worker stub consumes protocol.
 
 Scene, interaction, render and UI packages are workspace members. Except for

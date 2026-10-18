@@ -1,8 +1,18 @@
 use crate::gpu::{self, depth_state, Gpu, Pipe};
 use crate::targets::{AO_FORMAT, HDR_FORMAT, OCC_FORMAT, OUTPUT_FORMAT, SAMPLES};
+mod preview;
 mod section;
+mod transparency;
 
 pub(crate) struct Pipelines {
+    pub preview_cap_clear: wgpu::RenderPipeline,
+    pub preview_cap: wgpu::RenderPipeline,
+    pub oit_cap: wgpu::RenderPipeline,
+    pub oit_mask: wgpu::RenderPipeline,
+    pub cap_depth: wgpu::RenderPipeline,
+    pub oit: wgpu::RenderPipeline,
+    pub oit_compose: wgpu::RenderPipeline,
+    pub oit_layout: wgpu::BindGroupLayout,
     pub compose_layout: wgpu::BindGroupLayout,
     pub compose: wgpu::RenderPipeline,
     pub cap: wgpu::RenderPipeline,
@@ -12,6 +22,7 @@ pub(crate) struct Pipelines {
     pub pre_cap_mask: wgpu::RenderPipeline,
     pub height_cap_mask: wgpu::RenderPipeline,
     pub body_depth: wgpu::RenderPipeline,
+    pub hidden_silhouette: wgpu::RenderPipeline,
     pub hidden: wgpu::RenderPipeline,
     pub frame_layout: wgpu::BindGroupLayout,
     pub body_layout: wgpu::BindGroupLayout,
@@ -188,7 +199,18 @@ impl Pipelines {
                 false,
             )
         };
+        let (oit, oit_compose, oit_layout, oit_mask, oit_cap) =
+            transparency::pipelines(gpu, &body_pl, &body, &body_v, &frame_layout, format);
+        let (preview_cap_clear, preview_cap) = preview::pipelines(gpu, &body_pl, &body, format);
         Self {
+            preview_cap_clear,
+            preview_cap,
+            oit_cap,
+            oit_mask,
+            cap_depth: cap_pipe("Xray cap depth", "fs_cap_depth", OUTPUT_FORMAT, SAMPLES),
+            oit,
+            oit_compose,
+            oit_layout,
             compose: pipe(
                 "composition",
                 &compose_pl,
@@ -254,6 +276,25 @@ impl Pipelines {
                 depth(true, bias),
                 SAMPLES,
                 false,
+            ),
+            hidden_silhouette: pipe(
+                "hidden silhouettes",
+                &frame_pl,
+                &lines,
+                "vs_sil",
+                Some("fs_hidden"),
+                &silhouettes,
+                Some(OUTPUT_FORMAT),
+                Some(wgpu::BlendState::ALPHA_BLENDING),
+                {
+                    let mut state = depth(false, none);
+                    if let Some(state) = &mut state {
+                        state.depth_compare = Some(wgpu::CompareFunction::Less);
+                    }
+                    state
+                },
+                SAMPLES,
+                true,
             ),
             hidden: pipe(
                 "hidden edges",

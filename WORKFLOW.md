@@ -4,7 +4,7 @@ Use the private [ONECAD project](https://app.plane.so/andrejvysny/projects/b7ff7
 
 The former Symphony file-tracker configuration used an obsolete checkout path and npm command. It is preserved as historical provenance at [a6d8a2da](https://github.com/andrejvysny/OneCAD/blob/a6d8a2dacad7b1759cd22d0f3eb64992b9c411b0/WORKFLOW.md); it is not active project-management configuration. Do not recreate a local tracker or invent an unsupported Plane adapter.
 
-Implement only the authorized Task scope. Preserve unrelated work. Use Bun for this repository. Reproduce defects before fixing them; run proportionate checks and retain exact results. Do not claim native acceptance from mock browser tests.
+Implement only the authorized Task scope. Preserve unrelated work. Use Cargo for the native workspace and Bun for repository tooling. Reproduce defects before fixing them; run proportionate checks and retain exact results. Do not claim native acceptance from mock browser tests.
 
 Record approved work and validation in the existing Task or canonical Page. Propose future work as Tasks and reusable knowledge in the global Wiki; obtain approval before new saves unless already authorized. Never auto-commit, push, pull or mark incomplete acceptance complete.
 

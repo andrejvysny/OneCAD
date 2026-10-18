@@ -25,6 +25,7 @@
 #include <gp_Vec.hxx>
 
 #include "tess/Mesh1.h"
+#include "tess/EdgeMetadata.h"
 
 namespace onecad::tess {
 
@@ -145,6 +146,16 @@ std::map<std::string, std::string> minted_ids(const elementmap::ElementMapPartit
     return out;
 }
 
+bool topology_only_face(const TopoDS_Face& face) {
+    TopTools_IndexedMapOfShape edges;
+    TopExp::MapShapes(face, TopAbs_EDGE, edges);
+    if (edges.IsEmpty()) return false;
+    for (int i = 1; i <= edges.Extent(); ++i) {
+        if (!BRep_Tool::Degenerated(TopoDS::Edge(edges(i)))) return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 BodyMesh tessellate_body(const TopoDS_Shape& shape, const std::string& body_id,
@@ -171,6 +182,7 @@ BodyMesh tessellate_body(const TopoDS_Shape& shape, const std::string& body_id,
     // independent regardless — Invariant 5).
     BRepMesh_IncrementalMesh mesher(shape, lin, Standard_False, ang, Standard_False);
     mesher.Perform();
+    if (!mesher.IsDone()) return out;
 
     const std::map<std::string, std::string> ids = minted_ids(partition, body_id);
     auto label = [&](char prefix, int index) {
@@ -196,6 +208,7 @@ BodyMesh tessellate_body(const TopoDS_Shape& shape, const std::string& body_id,
         Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, loc);
         const std::uint32_t first_tri = tri_cursor;
         if (tri.IsNull() || tri->NbNodes() < 3 || tri->NbTriangles() < 1) {
+            if (!topology_only_face(face)) return out;
             mi.face_ranges.emplace_back(first_tri, 0);  // face present, no triangles
             const auto lbl = label('f', fi);
             any_elementid = any_elementid || lbl.second;
@@ -262,8 +275,25 @@ BodyMesh tessellate_body(const TopoDS_Shape& shape, const std::string& body_id,
         mi.has_edges = true;
         TopTools_IndexedMapOfShape edges;
         TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+        std::vector<std::vector<TopoDS_Face>> incident_faces(edges.Extent());
+        std::vector<std::vector<std::uint32_t>> incident_ordinals(edges.Extent());
+        for (int fi = 1; fi <= faces.Extent(); ++fi) {
+            TopTools_IndexedMapOfShape face_edges;
+            TopExp::MapShapes(faces(fi), TopAbs_EDGE, face_edges);
+            for (int i = 1; i <= face_edges.Extent(); ++i) {
+                const int ei = edges.FindIndex(face_edges(i)) - 1;
+                if (ei < 0) continue;
+                incident_faces[ei].push_back(TopoDS::Face(faces(fi)));
+                incident_ordinals[ei].push_back(static_cast<std::uint32_t>(fi - 1));
+            }
+        }
         for (int ei = 1; ei <= edges.Extent(); ++ei) {
             const TopoDS_Edge edge = TopoDS::Edge(edges(ei));
+            mi.edge_classes.push_back(classify_edge(edge, incident_faces[ei - 1]));
+            const auto& ordinals = incident_ordinals[ei - 1];
+            mi.edge_face_ranges.emplace_back(static_cast<std::uint32_t>(mi.edge_faces.size()),
+                                              static_cast<std::uint32_t>(ordinals.size()));
+            mi.edge_faces.insert(mi.edge_faces.end(), ordinals.begin(), ordinals.end());
             const std::uint32_t first_point = static_cast<std::uint32_t>(mi.edge_positions.size() / 3);
             std::uint32_t point_count = 0;
             try {

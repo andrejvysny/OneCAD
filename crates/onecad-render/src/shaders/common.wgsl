@@ -30,7 +30,7 @@ struct Frame {
     overlay: vec4<f32>,
     section: vec4<f32>,
     cap: vec4<f32>,
-    display: vec4<f32>, // opacity, SSAA factor, hidden edges, silhouettes
+    display: vec4<f32>, // surface opacity, SSAA factor, hidden-edge opacity, Xray
 };
 
 @group(0) @binding(0) var<uniform> u: Frame;

@@ -1,0 +1,1434 @@
+//! M6a breadth-op integration gate against the REAL C++ OCCT worker, driven through
+//! the app's [`DocumentRuntime`] exactly like `wire_contract.rs`.
+//!
+//! Proves the four M6a ops end-to-end (Rust wire → worker dispatch → OCCT → mesh):
+//! * `linear_pattern_three_boxes` — 3× disjoint box ⇒ EXACT 30000 (fused compound).
+//! * `circular_pattern_three` — 3× box about a far Z-axis ⇒ EXACT 30000.
+//! * `mirror_body_fuse` — box + its mirror across x=0 merged ⇒ EXACT 20000.
+//! * `shell_box_open_top` — hollow a 20×20×25 box (t=2) ⇒ EXACT 4112 when the open
+//!   face resolves from its typed identity/evidence ref.
+//! * `linear_pattern_deterministic_across_processes` — two FRESH worker processes
+//!   yield the identical pattern body signature + volume (Invariant 5).
+//! * `pattern_tracks_upstream_extrude_edit` — editing the source extrude's depth
+//!   re-runs the pattern (30000 → 60000), proving the dependency graph feeds regen.
+//!
+//! Gated on `ONECAD_WORKER_PATH` (else dev-tree fallback); a missing binary skips
+//! cleanly unless `ONECAD_REQUIRE_WORKER=1`.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use uuid::Uuid;
+
+use onecad_core::document::body::split_child_uuid;
+use onecad_core::document::record::{
+    BooleanMode, CircularPatternParams, ExtrudeMode, ExtrudeParams, KnownOperation,
+    LinearPatternParams, MirrorBodyParams, Operation, OperationRecord, PlaneKind, ShellParams,
+    SketchOpParams, SketchPlaneRef,
+};
+use onecad_core::document::refs::{
+    AnchorIntent, ElementKind, ElementRef, PrimaryRef, SketchRegionRef,
+};
+use onecad_core::document::variables::Scalar;
+use onecad_core::edit::EditCommand;
+use onecad_core::ids::{BodyId, ConstraintId, ElementId, EntityId, RecordId, RegionId, SketchId};
+use onecad_core::io::container::SaveMeta;
+use onecad_core::math::{Vec2, Vec3};
+use onecad_core::regen::{CancelToken, GeometryEngine, Lod, ModelSnapshot, Outcome, RegenRequest};
+use onecad_core::sketch::{Constraint, CurvePosition, Sketch, SketchEntity, WorldPlane};
+
+use onecad_app::document_runtime::{DocumentRuntime, RegenReport};
+use onecad_app::worker::manager::SupervisorConfig;
+use onecad_app::worker::wire::sketch_wire;
+use onecad_app::worker::{resolve_worker_path, MeshProvider, SolverEngine, WorkerManager};
+
+use onecad_protocol::mesh::{f32_le, u32_le, validate_mesh_blob, MeshHeaderView};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Harness (mirrors wire_contract.rs)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn real_worker() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("ONECAD_WORKER_PATH") {
+        let path = PathBuf::from(&p);
+        assert!(
+            path.is_file(),
+            "ONECAD_WORKER_PATH={p:?} is set but no worker binary exists there"
+        );
+        return Some(path);
+    }
+    if let Some(path) = resolve_worker_path() {
+        return Some(path);
+    }
+    assert!(
+        std::env::var("ONECAD_REQUIRE_WORKER").as_deref() != Ok("1"),
+        "ONECAD_REQUIRE_WORKER=1 but no worker binary resolved (CI must hard-fail here)"
+    );
+    None
+}
+
+async fn spawn_worker(bin: PathBuf) -> WorkerManager {
+    let wm = WorkerManager::spawn(SupervisorConfig::production(bin));
+    assert!(
+        wm.wait_ready(Duration::from_secs(10)).await,
+        "real worker must connect + handshake + OpenSession"
+    );
+    wm
+}
+
+fn runtime_over(wm: &WorkerManager) -> DocumentRuntime {
+    let engine: Arc<dyn GeometryEngine> = Arc::new(wm.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
+    DocumentRuntime::new_blank(engine, meshes, solver)
+}
+
+fn add_op(rt: &mut DocumentRuntime, record: OperationRecord) {
+    rt.apply(EditCommand::AddOperation {
+        record,
+        at_cursor: true,
+    })
+    .expect("AddOperation");
+}
+
+/// A CLEAN replay: no record edit preceded it (first build, a record merely
+/// pushed onto the timeline, undo, or save → reopen). `RevertToEnd` makes NO
+/// SCHEMA §7.2 `editedFrom` claim, so the resolver's post-edit descriptor-tie
+/// veto (§10, resolver v6) stays off — which is what a clean replay must get.
+async fn clean_regen(rt: &mut DocumentRuntime) -> RegenReport {
+    rt.run_regen(RegenRequest::RevertToEnd { from: 0 }, CancelToken::new())
+        .await
+}
+
+/// The EDIT lane: a real content edit landed at step `from`, and the plan says
+/// so (SCHEMA §7.2 `editedFrom`).
+async fn regen_from(rt: &mut DocumentRuntime, from: usize) -> RegenReport {
+    rt.run_regen(RegenRequest::ToEnd { from }, CancelToken::new())
+        .await
+}
+
+fn published<'a>(report: &'a RegenReport, what: &str) -> &'a Arc<ModelSnapshot> {
+    match &report.outcome {
+        Outcome::Published(s) => s,
+        other => panic!("{what}: expected Published, got {other:?}"),
+    }
+}
+
+fn body_of(rec: u128) -> BodyId {
+    BodyId(Uuid::from_u128(rec))
+}
+
+// Fixed record ids.
+const SKETCH_A: u128 = 0xA00;
+const EXTRUDE_A: u128 = 0xA01;
+const SKETCH_COL: u128 = 0xB00;
+const EXTRUDE_COL: u128 = 0xB01;
+const OP_PATTERN: u128 = 0xC10;
+const OP_MIRROR: u128 = 0xC30;
+const OP_SHELL: u128 = 0xC40;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sketch + op record builders (rect_sketch verbatim from wire_contract.rs)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn xy_plane_ref() -> SketchPlaneRef {
+    SketchPlaneRef {
+        kind: PlaneKind::Xy,
+        origin: Vec3::new_unchecked(0.0, 0.0, 0.0),
+        x_axis: Vec3::new_unchecked(0.0, 1.0, 0.0),
+        y_axis: Vec3::new_unchecked(-1.0, 0.0, 0.0),
+        normal: Vec3::new_unchecked(0.0, 0.0, 1.0),
+        extra: Default::default(),
+    }
+}
+
+fn rect_sketch(sid: SketchId, base: u128, x0: f64, y0: f64, w: f64, h: f64) -> Sketch {
+    let e = |n: u128| EntityId(Uuid::from_u128(base + n));
+    let c = |n: u128| ConstraintId(Uuid::from_u128(base + 0x40 + n));
+    let (p0s, p0e) = (e(0), e(1));
+    let (p1s, p1e) = (e(2), e(3));
+    let (p2s, p2e) = (e(4), e(5));
+    let (p3s, p3e) = (e(6), e(7));
+    let (l0, l1, l2, l3) = (e(0x10), e(0x11), e(0x12), e(0x13));
+
+    let mut sk = Sketch::on_world_plane(sid, "Rect", WorldPlane::XY);
+    let pt = |sk: &mut Sketch, id: EntityId, x: f64, y: f64| {
+        sk.add_entity(SketchEntity::point(
+            id,
+            Vec2::new_unchecked(x, y),
+            false,
+            false,
+        ))
+        .unwrap();
+    };
+    pt(&mut sk, p0s, x0, y0);
+    pt(&mut sk, p0e, x0 + w, y0);
+    pt(&mut sk, p1s, x0 + w, y0);
+    pt(&mut sk, p1e, x0 + w, y0 + h);
+    pt(&mut sk, p2s, x0 + w, y0 + h);
+    pt(&mut sk, p2e, x0, y0 + h);
+    pt(&mut sk, p3s, x0, y0 + h);
+    pt(&mut sk, p3e, x0, y0);
+    sk.add_entity(SketchEntity::line(l0, p0s, p0e, false))
+        .unwrap();
+    sk.add_entity(SketchEntity::line(l1, p1s, p1e, false))
+        .unwrap();
+    sk.add_entity(SketchEntity::line(l2, p2s, p2e, false))
+        .unwrap();
+    sk.add_entity(SketchEntity::line(l3, p3s, p3e, false))
+        .unwrap();
+
+    let coincident = |sk: &mut Sketch, id, a, b| {
+        sk.add_constraint(Constraint::Coincident {
+            id,
+            point1: a,
+            point2: b,
+            point1_position: CurvePosition::Arbitrary,
+            point2_position: CurvePosition::Arbitrary,
+        })
+        .unwrap();
+    };
+    coincident(&mut sk, c(1), p0e, p1s);
+    coincident(&mut sk, c(2), p1e, p2s);
+    coincident(&mut sk, c(3), p2e, p3s);
+    coincident(&mut sk, c(4), p3e, p0s);
+    sk.add_constraint(Constraint::Horizontal { id: c(5), line: l0 })
+        .unwrap();
+    sk.add_constraint(Constraint::Horizontal { id: c(6), line: l2 })
+        .unwrap();
+    sk.add_constraint(Constraint::Vertical { id: c(7), line: l1 })
+        .unwrap();
+    sk.add_constraint(Constraint::Vertical { id: c(8), line: l3 })
+        .unwrap();
+    sk.add_constraint(Constraint::Fixed {
+        id: c(9),
+        point: p0s,
+        point_position: CurvePosition::Arbitrary,
+        at: Vec2::new_unchecked(x0, y0),
+    })
+    .unwrap();
+    sk.add_constraint(Constraint::HorizontalDistance {
+        id: c(10),
+        point1: p0s,
+        point1_position: CurvePosition::Arbitrary,
+        point2: p0e,
+        point2_position: CurvePosition::Arbitrary,
+        value: Scalar::new(w),
+    })
+    .unwrap();
+    sk.add_constraint(Constraint::VerticalDistance {
+        id: c(11),
+        point1: p1s,
+        point1_position: CurvePosition::Arbitrary,
+        point2: p1e,
+        point2_position: CurvePosition::Arbitrary,
+        value: Scalar::new(h),
+    })
+    .unwrap();
+    sk
+}
+
+fn sketch_record(rec: u128, sk: &Sketch) -> OperationRecord {
+    let (_plane, entities, constraints) = sketch_wire(sk);
+    let params = SketchOpParams {
+        sketch: sk.id,
+        plane: xy_plane_ref(),
+        entities: entities.as_array().cloned().unwrap_or_default(),
+        constraints: constraints.as_array().cloned().unwrap_or_default(),
+        host_face: None,
+        extra: Default::default(),
+    };
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "Sketch",
+        Operation::Known(KnownOperation::Sketch(params)),
+    )
+}
+
+fn extrude_op(sketch: SketchId, dist: f64) -> Operation {
+    Operation::Known(KnownOperation::Extrude(ExtrudeParams {
+        profile: Some(SketchRegionRef {
+            sketch,
+            region: RegionId::new(""), // first-region fallback
+            region_identity_version: None,
+            region_anchor: None,
+            extra: Default::default(),
+        }),
+        distance: Scalar::new(dist),
+        draft_angle_deg: Scalar::new(0.0),
+        mode: ExtrudeMode::Blind,
+        boolean_mode: BooleanMode::NewBody,
+        target_body: None,
+        target_face: None,
+        two_directions: false,
+        mode2: ExtrudeMode::Blind,
+        distance2: Scalar::new(0.0),
+        target_face2: None,
+        extra: Default::default(),
+    }))
+}
+
+fn extrude_record(rec: u128, sketch: SketchId, dist: f64) -> OperationRecord {
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "Extrude",
+        extrude_op(sketch, dist),
+    )
+}
+
+fn extrude_to_face_record(rec: u128, sketch: SketchId, face: ElementRef) -> OperationRecord {
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "Extrude",
+        Operation::Known(KnownOperation::Extrude(ExtrudeParams {
+            profile: Some(SketchRegionRef {
+                sketch,
+                region: RegionId::new(""),
+                region_identity_version: None,
+                region_anchor: None,
+                extra: Default::default(),
+            }),
+            distance: Scalar::new(1.0),
+            draft_angle_deg: Scalar::new(0.0),
+            mode: ExtrudeMode::ToFace,
+            boolean_mode: BooleanMode::NewBody,
+            target_body: None,
+            target_face: Some(face),
+            two_directions: false,
+            mode2: ExtrudeMode::Blind,
+            distance2: Scalar::new(0.0),
+            target_face2: None,
+            extra: Default::default(),
+        })),
+    )
+}
+
+fn linear_pattern_record(
+    rec: u128,
+    source: BodyId,
+    dir: Vec3,
+    spacing: f64,
+    count: u32,
+    fuse: bool,
+) -> OperationRecord {
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "LinearPattern",
+        Operation::Known(KnownOperation::LinearPattern(LinearPatternParams {
+            source_body: Some(source),
+            direction: dir,
+            spacing: Scalar::new(spacing),
+            count,
+            fuse_result: fuse,
+            result_policy_version: None,
+            extra: Default::default(),
+        })),
+    )
+}
+
+fn linear_pattern_v2_record(
+    rec: u128,
+    source: BodyId,
+    dir: Vec3,
+    spacing: f64,
+    count: u32,
+    fuse: bool,
+) -> OperationRecord {
+    let mut record = linear_pattern_record(rec, source, dir, spacing, count, fuse);
+    let Operation::Known(KnownOperation::LinearPattern(params)) = &mut record.op else {
+        unreachable!("linear_pattern_record constructs LinearPattern");
+    };
+    params.result_policy_version = Some(2);
+    record
+}
+
+/// Builds an already-persisted future-version record. New authoring must use
+/// `linear_pattern_v2_record`; this loader fixture proves we retain unknown u8
+/// values until the worker can refuse them explicitly.
+fn loaded_linear_pattern_v3_record(
+    rec: u128,
+    source: BodyId,
+    dir: Vec3,
+    spacing: f64,
+    count: u32,
+    fuse: bool,
+) -> OperationRecord {
+    let operation: Operation = serde_json::from_value(serde_json::json!({
+        "opType": "LinearPattern",
+        "params": {
+            "sourceBodyId": source.to_string(),
+            "direction": [dir.x, dir.y, dir.z],
+            "spacing": spacing,
+            "count": count,
+            "fuseResult": fuse,
+            "resultPolicyVersion": 3
+        }
+    }))
+    .expect("future Pattern JSON loads losslessly");
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "LinearPattern",
+        operation,
+    )
+}
+
+fn assert_legacy_linear_pattern_record(rt: &DocumentRuntime, record_id: u128) {
+    let params = rt
+        .operation_params(RecordId(Uuid::from_u128(record_id)))
+        .expect("pattern params persist");
+    assert_eq!(params.get("resultPolicyVersion"), None);
+}
+
+fn assert_v2_linear_pattern_record(rt: &DocumentRuntime, record_id: u128) {
+    let params = rt
+        .operation_params(RecordId(Uuid::from_u128(record_id)))
+        .expect("pattern params persist");
+    assert_eq!(
+        params.get("resultPolicyVersion"),
+        Some(&serde_json::json!(2)),
+        "absent V1 migrates to V2 on writable reopen"
+    );
+}
+
+fn assert_v3_linear_pattern_record(rt: &DocumentRuntime, record_id: u128) {
+    let params = rt
+        .operation_params(RecordId(Uuid::from_u128(record_id)))
+        .expect("future pattern params persist");
+    assert_eq!(
+        params.get("resultPolicyVersion"),
+        Some(&serde_json::json!(3)),
+        "future numeric policy version survives load/save/reopen"
+    );
+}
+
+fn circular_pattern_record(
+    rec: u128,
+    source: BodyId,
+    origin: Vec3,
+    axis: Vec3,
+    angle_deg: f64,
+    count: u32,
+    fuse: bool,
+) -> OperationRecord {
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "CircularPattern",
+        Operation::Known(KnownOperation::CircularPattern(CircularPatternParams {
+            source_body: Some(source),
+            axis_origin: origin,
+            axis_direction: axis,
+            angle_deg: Scalar::new(angle_deg),
+            count,
+            fuse_result: fuse,
+            result_policy_version: None,
+            extra: Default::default(),
+        })),
+    )
+}
+
+fn circular_pattern_v2_record(
+    rec: u128,
+    source: BodyId,
+    origin: Vec3,
+    axis: Vec3,
+    angle_deg: f64,
+    count: u32,
+    fuse: bool,
+) -> OperationRecord {
+    let mut record = circular_pattern_record(rec, source, origin, axis, angle_deg, count, fuse);
+    let Operation::Known(KnownOperation::CircularPattern(params)) = &mut record.op else {
+        unreachable!("circular_pattern_record constructs CircularPattern");
+    };
+    params.result_policy_version = Some(2);
+    record
+}
+
+fn mirror_record(
+    rec: u128,
+    source: BodyId,
+    point: Vec3,
+    normal: Vec3,
+    fuse: bool,
+) -> OperationRecord {
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "MirrorBody",
+        Operation::Known(KnownOperation::MirrorBody(MirrorBodyParams {
+            source_body: Some(source),
+            plane_point: point,
+            plane_normal: normal,
+            fuse_with_original: fuse,
+            extra: Default::default(),
+        })),
+    )
+}
+
+fn shell_record(
+    rec: u128,
+    body: BodyId,
+    faces: Vec<ElementRef>,
+    thickness: f64,
+) -> OperationRecord {
+    let open_faces = faces
+        .iter()
+        .map(|face| {
+            face.primary
+                .as_ref()
+                .expect("authored Shell face has a primary")
+                .element
+                .clone()
+        })
+        .collect();
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "Shell",
+        Operation::Known(KnownOperation::Shell(ShellParams {
+            thickness: Scalar::new(thickness),
+            open_faces,
+            faces,
+            target_body: Some(body),
+            extra: Default::default(),
+        })),
+    )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MESH1 geometry helpers (exact for planar-faced polyhedra) — from wire_contract.rs
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SEC_POSITIONS: u32 = 1;
+const SEC_INDICES: u32 = 3;
+const SEC_FACE_RANGES: u32 = 4;
+const SEC_FACE_ID_OFFS: u32 = 5;
+const SEC_FACE_ID_CHARS: u32 = 6;
+
+fn vertex(blob: &[u8], pbase: usize, i: usize) -> [f64; 3] {
+    let o = pbase + i * 12;
+    [
+        f32_le(blob, o) as f64,
+        f32_le(blob, o + 4) as f64,
+        f32_le(blob, o + 8) as f64,
+    ]
+}
+
+fn mesh_volume(view: &MeshHeaderView, blob: &[u8]) -> f64 {
+    let pos = view.section(SEC_POSITIONS).expect("POSITIONS");
+    let idx = view.section(SEC_INDICES).expect("INDICES");
+    let (pbase, ibase) = (pos.offset as usize, idx.offset as usize);
+    let mut vol6 = 0.0f64;
+    for t in 0..view.triangle_count as usize {
+        let o = ibase + t * 12;
+        let a = vertex(blob, pbase, u32_le(blob, o) as usize);
+        let b = vertex(blob, pbase, u32_le(blob, o + 4) as usize);
+        let c = vertex(blob, pbase, u32_le(blob, o + 8) as usize);
+        vol6 += a[0] * (b[1] * c[2] - b[2] * c[1])
+            + a[1] * (b[2] * c[0] - b[0] * c[2])
+            + a[2] * (b[0] * c[1] - b[1] * c[0]);
+    }
+    (vol6 / 6.0).abs()
+}
+
+/// The polar angle in degrees, in `[0, 360)`, of a body's centre about a Z-axis
+/// through `(axis_x, axis_y)`.
+///
+/// The centre is read off the MESH1 bbox, which is EXACT here: every instance is a
+/// rigid rotation of a box, a box is centrally symmetric, and the axis-aligned
+/// bounding box of a centrally symmetric set is centred on that same centre.
+fn polar_angle_deg(view: &MeshHeaderView, axis_x: f64, axis_y: f64) -> f64 {
+    let cx = f64::from(view.bbox_min[0] + view.bbox_max[0]) / 2.0;
+    let cy = f64::from(view.bbox_min[1] + view.bbox_max[1]) / 2.0;
+    let angle = (cy - axis_y).atan2(cx - axis_x).to_degrees();
+    if angle < 0.0 {
+        angle + 360.0
+    } else {
+        angle
+    }
+}
+
+fn bbox_dims(view: &MeshHeaderView) -> [f64; 3] {
+    [
+        f64::from(view.bbox_max[0] - view.bbox_min[0]),
+        f64::from(view.bbox_max[1] - view.bbox_min[1]),
+        f64::from(view.bbox_max[2] - view.bbox_min[2]),
+    ]
+}
+
+fn id_table(
+    view: &MeshHeaderView,
+    blob: &[u8],
+    offs_ty: u32,
+    chars_ty: u32,
+    count: usize,
+) -> Vec<String> {
+    let offs = view.section(offs_ty).expect("id-offs");
+    let chars = view.section(chars_ty).expect("id-chars");
+    let (obase, cbase) = (offs.offset as usize, chars.offset as usize);
+    (0..count)
+        .map(|i| {
+            let lo = u32_le(blob, obase + i * 4) as usize;
+            let hi = u32_le(blob, obase + (i + 1) * 4) as usize;
+            String::from_utf8_lossy(&blob[cbase + lo..cbase + hi]).into_owned()
+        })
+        .collect()
+}
+
+/// The face with the greatest average world-Z (the extrude cap): its `(TopoKey, centroid)`.
+fn top_face_pick(view: &MeshHeaderView, blob: &[u8]) -> (String, Vec3) {
+    let fr = view.section(SEC_FACE_RANGES).expect("FACE_RANGES");
+    let idx = view.section(SEC_INDICES).expect("INDICES");
+    let pos = view.section(SEC_POSITIONS).expect("POSITIONS");
+    let (frbase, ibase, pbase) = (fr.offset as usize, idx.offset as usize, pos.offset as usize);
+    let keys = id_table(
+        view,
+        blob,
+        SEC_FACE_ID_OFFS,
+        SEC_FACE_ID_CHARS,
+        view.face_count as usize,
+    );
+    let mut best: Option<(usize, f64, Vec3)> = None;
+    for f in 0..view.face_count as usize {
+        let first = u32_le(blob, frbase + f * 8) as usize;
+        let count = u32_le(blob, frbase + f * 8 + 4) as usize;
+        let (mut sx, mut sy, mut sz, mut n) = (0.0, 0.0, 0.0, 0.0f64);
+        for t in first..first + count {
+            let io = ibase + t * 12;
+            for k in 0..3 {
+                let v = vertex(blob, pbase, u32_le(blob, io + k * 4) as usize);
+                sx += v[0];
+                sy += v[1];
+                sz += v[2];
+                n += 1.0;
+            }
+        }
+        if n == 0.0 {
+            continue;
+        }
+        let centroid = Vec3::new_unchecked(sx / n, sy / n, sz / n);
+        if best.is_none_or(|(_, z, _)| centroid.z > z) {
+            best = Some((f, centroid.z, centroid));
+        }
+    }
+    let (idx_best, _, centroid) = best.expect("at least one face");
+    (keys[idx_best].clone(), centroid)
+}
+
+async fn body_mesh(rt: &mut DocumentRuntime, body: BodyId) -> Arc<Vec<u8>> {
+    rt.get_mesh(body, Lod::Coarse, None)
+        .await
+        .expect("fetch body mesh")
+}
+
+/// Builds box A (a 20×20 rect extruded `depth`), regenerates, and returns box A's id.
+async fn build_box_a(rt: &mut DocumentRuntime, depth: f64) -> BodyId {
+    let sa = SketchId(Uuid::from_u128(0xA));
+    add_op(
+        rt,
+        sketch_record(SKETCH_A, &rect_sketch(sa, 0x1000, 0.0, 0.0, 20.0, 20.0)),
+    );
+    add_op(rt, extrude_record(EXTRUDE_A, sa, depth));
+    let rep = clean_regen(rt).await;
+    let _ = published(&rep, "box A");
+    body_of(EXTRUDE_A)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LinearPattern — legacy non-fused compound, 3 disjoint boxes ⇒ EXACT 30000
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn linear_pattern_three_boxes() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let body_a = build_box_a(&mut rt, 25.0).await; // 20×20×25 = 10000
+
+    // Spacing 40 along world Y (box footprint spans 20) ⇒ 3 disjoint copies.
+    add_op(
+        &mut rt,
+        linear_pattern_record(
+            OP_PATTERN,
+            body_a,
+            Vec3::new_unchecked(0.0, 1.0, 0.0),
+            40.0,
+            3,
+            false,
+        ),
+    );
+    let rep = clean_regen(&mut rt).await;
+    let snap = published(&rep, "linear pattern");
+    assert_eq!(
+        snap.repair_summary.needs_repair_count, 0,
+        "pattern resolves the source body"
+    );
+    assert_eq!(snap.bodies.len(), 2, "box A + the pattern result body");
+
+    let mesh = body_mesh(&mut rt, body_of(OP_PATTERN)).await;
+    let view = validate_mesh_blob(&mesh).expect("pattern MESH1 validates");
+    let vol = mesh_volume(&view, &mesh);
+    assert!(
+        (vol - 30_000.0).abs() < 1.0,
+        "linear pattern = 3 × 10000 (disjoint) = 30000, got {vol}"
+    );
+    wm.shutdown().await;
+    eprintln!("LinearPattern PASS: legacy compound volume {vol} == 30000");
+}
+
+/// V1's historic aggregate result is intentionally unlike V2: even a fused,
+/// disconnected result mints `body_<opId>` and does not consume its source.
+/// Exercise a cold worker so a cache cannot hide a wrong persisted policy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn linear_pattern_v1_fused_disjoint_migrates_and_refuses_cold_reopen() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin.clone()).await;
+    let mut rt = runtime_over(&wm);
+    let source = build_box_a(&mut rt, 25.0).await;
+    add_op(
+        &mut rt,
+        linear_pattern_record(
+            OP_PATTERN,
+            source,
+            Vec3::new_unchecked(1.0, 0.0, 0.0),
+            40.0,
+            3,
+            true,
+        ),
+    );
+    let _ = published(&clean_regen(&mut rt).await, "V1 fused disjoint pattern");
+    let aggregate = body_of(OP_PATTERN);
+    assert!(rt.head_body_ids().contains(&source), "V1 preserves source");
+    assert!(
+        rt.head_body_ids().contains(&aggregate),
+        "V1 creates aggregate"
+    );
+    assert_legacy_linear_pattern_record(&rt, OP_PATTERN);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("v1-fused-disjoint.onecad");
+    rt.save(
+        &path,
+        SaveMeta {
+            app_version: "0.1.0-test".into(),
+            occt_fingerprint: None,
+            created: "2026-08-13T00:00:00Z".into(),
+            modified: "2026-08-13T00:00:00Z".into(),
+        },
+    )
+    .expect("save V1 fused disjoint pattern");
+    wm.shutdown().await;
+
+    let cold = spawn_worker(bin).await;
+    let engine: Arc<dyn GeometryEngine> = Arc::new(cold.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(cold.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(cold.clone());
+    let mut reopened = DocumentRuntime::open(&path, engine, meshes, solver).expect("cold reopen");
+    let _ = published(
+        &clean_regen(&mut reopened).await,
+        "cold V1 fused disjoint replay",
+    );
+    assert!(
+        reopened.head_body_ids().contains(&source),
+        "cold reopen keeps source"
+    );
+    assert!(
+        !reopened.head_body_ids().contains(&aggregate),
+        "V1 aggregate is retired during V2 migration"
+    );
+    assert_v2_linear_pattern_record(&reopened, OP_PATTERN);
+    cold.shutdown().await;
+}
+
+/// The no-fuse V1 aggregate has the same identity contract, independently of
+/// the fused/disjoint compatibility path above.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn linear_pattern_v1_nonfused_aggregate_migrates_to_v2_children() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin.clone()).await;
+    let mut rt = runtime_over(&wm);
+    let source = build_box_a(&mut rt, 25.0).await;
+    add_op(
+        &mut rt,
+        linear_pattern_record(
+            OP_PATTERN,
+            source,
+            Vec3::new_unchecked(0.0, 1.0, 0.0),
+            40.0,
+            3,
+            false,
+        ),
+    );
+    let _ = published(&clean_regen(&mut rt).await, "V1 non-fused pattern");
+    let aggregate = body_of(OP_PATTERN);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("v1-nonfused.onecad");
+    rt.save(
+        &path,
+        SaveMeta {
+            app_version: "0.1.0-test".into(),
+            occt_fingerprint: None,
+            created: "2026-08-13T00:00:00Z".into(),
+            modified: "2026-08-13T00:00:00Z".into(),
+        },
+    )
+    .expect("save V1 non-fused pattern");
+    wm.shutdown().await;
+
+    let cold = spawn_worker(bin).await;
+    let engine: Arc<dyn GeometryEngine> = Arc::new(cold.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(cold.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(cold.clone());
+    let mut reopened = DocumentRuntime::open(&path, engine, meshes, solver).expect("cold reopen");
+    let _ = published(
+        &clean_regen(&mut reopened).await,
+        "cold V1 non-fused replay",
+    );
+    assert!(
+        reopened.head_body_ids().contains(&source),
+        "cold reopen keeps source"
+    );
+    assert!(
+        !reopened.head_body_ids().contains(&aggregate),
+        "V1 aggregate is retired during V2 migration"
+    );
+    assert_v2_linear_pattern_record(&reopened, OP_PATTERN);
+    cold.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn linear_pattern_v3_load_save_reopen_refuses_execution() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin.clone()).await;
+    let mut rt = runtime_over(&wm);
+    let source = build_box_a(&mut rt, 25.0).await;
+    add_op(
+        &mut rt,
+        loaded_linear_pattern_v3_record(
+            OP_PATTERN,
+            source,
+            Vec3::new_unchecked(1.0, 0.0, 0.0),
+            40.0,
+            3,
+            false,
+        ),
+    );
+    assert_v3_linear_pattern_record(&rt, OP_PATTERN);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("v3-pattern.onecad");
+    rt.save(
+        &path,
+        SaveMeta {
+            app_version: "0.1.0-test".into(),
+            occt_fingerprint: None,
+            created: "2026-08-13T00:00:00Z".into(),
+            modified: "2026-08-13T00:00:00Z".into(),
+        },
+    )
+    .expect("save future pattern record before execution");
+    wm.shutdown().await;
+
+    let cold = spawn_worker(bin).await;
+    let engine: Arc<dyn GeometryEngine> = Arc::new(cold.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(cold.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(cold.clone());
+    let mut reopened =
+        DocumentRuntime::open(&path, engine, meshes, solver).expect("reopen V3 pattern");
+    assert_v3_linear_pattern_record(&reopened, OP_PATTERN);
+    let report = clean_regen(&mut reopened).await;
+    let snapshot = published(&report, "V3 refusal keeps valid prefix published");
+    assert!(
+        snapshot.bodies.iter().any(|body| body.body == source),
+        "refusal keeps source"
+    );
+    assert!(
+        !snapshot
+            .bodies
+            .iter()
+            .any(|body| body.body == body_of(OP_PATTERN)),
+        "refusal does not mint a result body"
+    );
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == "UNSUPPORTED_PATTERN_RESULT_POLICY_VERSION" }),
+        "worker reports stable unsupported-version diagnostic"
+    );
+    assert_v3_linear_pattern_record(&reopened, OP_PATTERN);
+    cold.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn linear_pattern_v2_preserves_source_and_child_ids() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let source = build_box_a(&mut rt, 25.0).await;
+    rt.apply(EditCommand::SetBodyColor {
+        body: source,
+        color: Some([12, 34, 56, 255]),
+    })
+    .expect("source color");
+    add_op(
+        &mut rt,
+        linear_pattern_v2_record(
+            OP_PATTERN,
+            source,
+            Vec3::new_unchecked(1.0, 0.0, 0.0),
+            40.0,
+            4,
+            false,
+        ),
+    );
+    let _ = published(&clean_regen(&mut rt).await, "v2 linear pattern");
+    let children: Vec<BodyId> = (0..3)
+        .map(|k| BodyId(split_child_uuid(Uuid::from_u128(OP_PATTERN), k)))
+        .collect();
+    let source_mesh = body_mesh(&mut rt, source).await;
+    let source_view = validate_mesh_blob(&source_mesh).expect("source MESH1 validates");
+    assert_eq!(
+        rt.head_body_ids().len(),
+        4,
+        "source plus count - 1 children"
+    );
+    assert!(
+        rt.head_body_ids().contains(&source),
+        "source BodyId survives"
+    );
+    for (k, child) in children.iter().copied().enumerate() {
+        assert!(rt.head_body_ids().contains(&child), "child {k} exists");
+        assert_eq!(
+            rt.body_meta(child).expect("child metadata").color,
+            Some([12, 34, 56, 255]),
+            "new child inherits source body color"
+        );
+        let mesh = body_mesh(&mut rt, child).await;
+        let view = validate_mesh_blob(&mesh).expect("child MESH1 validates");
+        assert!((mesh_volume(&view, &mesh) - 10_000.0).abs() < 1.0);
+        assert!(
+            (f64::from(view.bbox_min[0])
+                - (f64::from(source_view.bbox_min[0]) + 40.0 * (k + 1) as f64))
+                .abs()
+                < 0.5
+        );
+    }
+
+    add_op(
+        &mut rt,
+        mirror_record(
+            OP_MIRROR,
+            source,
+            Vec3::new_unchecked(0.0, 0.0, 0.0),
+            Vec3::new_unchecked(1.0, 0.0, 0.0),
+            false,
+        ),
+    );
+    let _ = published(&clean_regen(&mut rt).await, "downstream source mirror");
+    assert!(
+        rt.head_body_ids().contains(&source),
+        "downstream source ref remains live"
+    );
+
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(OP_PATTERN)),
+        op: linear_pattern_v2_record(
+            OP_PATTERN,
+            source,
+            Vec3::new_unchecked(1.0, 0.0, 0.0),
+            55.0,
+            2,
+            false,
+        )
+        .op,
+    })
+    .expect("reduce v2 pattern count");
+    // The edit lands ON the pattern — step 2 (0 sketch, 1 extrude, 2 pattern, 3 mirror).
+    let _ = published(&regen_from(&mut rt, 2).await, "reduced v2 linear pattern");
+    assert!(rt.head_body_ids().contains(&children[0]));
+    assert!(!rt.head_body_ids().contains(&children[1]));
+    assert!(!rt.head_body_ids().contains(&children[2]));
+    assert!(rt.head_body_ids().contains(&source));
+
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(OP_PATTERN)),
+        op: linear_pattern_v2_record(
+            OP_PATTERN,
+            source,
+            Vec3::new_unchecked(1.0, 0.0, 0.0),
+            55.0,
+            4,
+            false,
+        )
+        .op,
+    })
+    .expect("restore v2 pattern count");
+    let _ = published(&regen_from(&mut rt, 2).await, "restored v2 linear pattern");
+    for child in &children {
+        assert!(
+            rt.head_body_ids().contains(child),
+            "child id survives count re-edit"
+        );
+    }
+    let suppress = |suppressed| EditCommand::SetOperationSuppression {
+        record: RecordId(Uuid::from_u128(OP_PATTERN)),
+        suppressed,
+        cascade: false,
+    };
+    rt.apply(suppress(true)).expect("suppress v2 pattern only");
+    let _ = published(&regen_from(&mut rt, 2).await, "suppressed v2 pattern");
+    assert!(
+        rt.head_body_ids().contains(&source),
+        "suppression keeps source"
+    );
+    assert!(
+        rt.head_body_ids().contains(&body_of(OP_MIRROR)),
+        "source downstream remains live"
+    );
+    for child in &children {
+        assert!(
+            !rt.head_body_ids().contains(child),
+            "suppression removes only pattern child"
+        );
+    }
+    rt.undo().expect("undo pattern suppression");
+    let _ = published(&clean_regen(&mut rt).await, "undo v2 pattern suppression");
+    for child in &children {
+        assert!(
+            rt.head_body_ids().contains(child),
+            "undo restores deterministic child id"
+        );
+    }
+
+    rt.apply(suppress(true)).expect("suppress before save");
+    let _ = published(
+        &regen_from(&mut rt, 2).await,
+        "suppressed v2 pattern before save",
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("v2-pattern.onecad");
+    rt.save(
+        &path,
+        SaveMeta {
+            app_version: "0.1.0-test".into(),
+            occt_fingerprint: None,
+            created: "2026-08-11T00:00:00Z".into(),
+            modified: "2026-08-11T00:00:00Z".into(),
+        },
+    )
+    .expect("save suppressed v2 pattern");
+    let engine: Arc<dyn GeometryEngine> = Arc::new(wm.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
+    let mut reopened = DocumentRuntime::open(&path, engine, meshes, solver).expect("reopen");
+    assert!(
+        reopened.head_body_ids().contains(&source),
+        "reopen keeps source live"
+    );
+    for child in &children {
+        assert!(
+            !reopened.head_body_ids().contains(child),
+            "reopen hides stale suppressed child"
+        );
+    }
+    reopened
+        .apply(suppress(false))
+        .expect("unsuppress after reopen");
+    let _ = published(&regen_from(&mut reopened, 2).await, "reopened v2 pattern");
+    assert_eq!(
+        reopened.body_meta(source).expect("source metadata").color,
+        Some([12, 34, 56, 255]),
+        "source color survives save/reopen"
+    );
+    for child in children {
+        assert!(
+            reopened.head_body_ids().contains(&child),
+            "reopen recreates stable child id"
+        );
+        assert_eq!(
+            reopened.body_meta(child).expect("child metadata").color,
+            Some([12, 34, 56, 255]),
+            "recreated child inherits source color"
+        );
+    }
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CircularPattern — legacy non-fused compound, 3 boxes ⇒ EXACT 30000
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn circular_pattern_three() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let body_a = build_box_a(&mut rt, 25.0).await;
+
+    // 3 copies at 120° about a Z-axis 100 units away ⇒ well-separated (arc ≫ box).
+    add_op(
+        &mut rt,
+        circular_pattern_record(
+            OP_PATTERN,
+            body_a,
+            Vec3::new_unchecked(0.0, -100.0, 0.0),
+            Vec3::new_unchecked(0.0, 0.0, 1.0),
+            360.0,
+            3,
+            false,
+        ),
+    );
+    let rep = clean_regen(&mut rt).await;
+    let snap = published(&rep, "circular pattern");
+    assert_eq!(snap.repair_summary.needs_repair_count, 0);
+
+    let mesh = body_mesh(&mut rt, body_of(OP_PATTERN)).await;
+    let view = validate_mesh_blob(&mesh).expect("circular pattern MESH1 validates");
+    let vol = mesh_volume(&view, &mesh);
+    assert!(
+        (vol - 30_000.0).abs() < 2.0,
+        "circular pattern = 3 × 10000 (disjoint) = 30000, got {vol}"
+    );
+    wm.shutdown().await;
+    eprintln!("CircularPattern PASS: legacy compound volume {vol} == 30000");
+}
+
+/// The PARTIAL sweep (`angleDeg < 360`) through the Rust lane, measured.
+///
+/// SCHEMA §7.3 divides the sweep by `count`, NOT by `count - 1`: 180° over 3
+/// instances steps 60° and stops at 120°, it does not put the last copy at 180°.
+/// That rule was measurable only in C++ (`test_circular_pattern_partial_sweep`) and
+/// in the frontend preview unit test — the Rust lane ran 360° only, and
+/// `protocol/fixtures/circular_pattern_lineage.ndjson` says in as many words that
+/// an NDJSON exchange carries no geometry to pin it with. This closes that gap on
+/// the Rust side by measuring the copies the real worker actually produced.
+///
+/// V2 is what makes the measurement possible: a non-fused V2 pattern mints
+/// `count - 1` ordinal CHILD bodies, so each instance has its own mesh. The V1
+/// compound would hand back one blob with all three solids inside it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn circular_pattern_partial_sweep_steps_angle_over_count() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let source = build_box_a(&mut rt, 25.0).await;
+
+    // The axis is 100 units away on −Y, so a 60° step moves a copy ~115 units —
+    // far more than the box's ~28-unit plan diagonal, so the instances stay
+    // disjoint and each child's bbox is its own.
+    const AXIS_X: f64 = 0.0;
+    const AXIS_Y: f64 = -100.0;
+    add_op(
+        &mut rt,
+        circular_pattern_v2_record(
+            OP_PATTERN,
+            source,
+            Vec3::new_unchecked(AXIS_X, AXIS_Y, 0.0),
+            Vec3::new_unchecked(0.0, 0.0, 1.0),
+            180.0,
+            3,
+            false,
+        ),
+    );
+    let report = clean_regen(&mut rt).await;
+    let snap = published(&report, "partial-sweep circular pattern");
+    assert_eq!(snap.repair_summary.needs_repair_count, 0);
+
+    // V2 non-fused: the source is instance 0 and survives; children are instances 1..
+    let children: Vec<BodyId> = (0..2)
+        .map(|k| BodyId(split_child_uuid(Uuid::from_u128(OP_PATTERN), k)))
+        .collect();
+    assert_eq!(
+        rt.head_body_ids().len(),
+        3,
+        "source plus count - 1 children ({:?})",
+        rt.head_body_ids()
+    );
+    assert!(rt.head_body_ids().contains(&source), "source survives V2");
+
+    let mut angles = Vec::with_capacity(3);
+    for body in std::iter::once(source).chain(children.iter().copied()) {
+        assert!(rt.head_body_ids().contains(&body), "{body} is at the head");
+        let mesh = body_mesh(&mut rt, body).await;
+        let view = validate_mesh_blob(&mesh).expect("instance MESH1 validates");
+        let vol = mesh_volume(&view, &mesh);
+        assert!(
+            (vol - 10_000.0).abs() < 1.0,
+            "every instance is the whole 20×20×25 source, got {vol}"
+        );
+        angles.push(polar_angle_deg(&view, AXIS_X, AXIS_Y));
+    }
+    angles.sort_by(f64::total_cmp);
+
+    // 180 / 3 = 60. The two wrong rules this separates from: 180/(count−1) = 90,
+    // and the full-circle 360/3 = 120 the rest of the Rust lane runs.
+    let steps = [angles[1] - angles[0], angles[2] - angles[1]];
+    for (k, step) in steps.iter().enumerate() {
+        assert!(
+            (step - 60.0).abs() < 0.05,
+            "instance step {k} is 180 / 3 = 60°, not 90° or 120° — got {steps:?} from {angles:?}"
+        );
+    }
+    // …and the sweep genuinely STOPS short of 180: the terminal copy sits at 120.
+    assert!(
+        (angles[2] - angles[0] - 120.0).abs() < 0.05,
+        "the last instance is 120° from the source, not the terminal 180°, got {angles:?}"
+    );
+    eprintln!("CircularPattern partial-sweep PASS: polar angles {angles:?}, steps {steps:?}");
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MirrorBody — box + its mirror across x=0, fused ⇒ EXACT 20000
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mirror_body_fuse() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let body_a = build_box_a(&mut rt, 25.0).await; // world x[-20,0]
+
+    // Mirror across the x=0 plane → world x[0,20]; source+mirror touch at x=0, fuse
+    // into a single 40×20×25 box.
+    add_op(
+        &mut rt,
+        mirror_record(
+            OP_MIRROR,
+            body_a,
+            Vec3::new_unchecked(0.0, 0.0, 0.0),
+            Vec3::new_unchecked(1.0, 0.0, 0.0),
+            true,
+        ),
+    );
+    let rep = clean_regen(&mut rt).await;
+    let snap = published(&rep, "mirror");
+    assert_eq!(snap.repair_summary.needs_repair_count, 0);
+
+    let mesh = body_mesh(&mut rt, body_of(OP_MIRROR)).await;
+    let view = validate_mesh_blob(&mesh).expect("mirror MESH1 validates");
+    let vol = mesh_volume(&view, &mesh);
+    let dims = bbox_dims(&view);
+    assert!(
+        (vol - 20_000.0).abs() < 1.0,
+        "mirror(fuse) = 2 × 10000 merged across x=0 = 20000, got {vol}"
+    );
+    assert!(
+        (dims[0] - 40.0).abs() < 0.5,
+        "merged box spans 40 in world X, got {dims:?}"
+    );
+    wm.shutdown().await;
+    eprintln!("MirrorBody PASS: volume {vol} == 20000, x-span {}", dims[0]);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shell — hollow a 20×20×25 box, t=2 ⇒ EXACT 4112 (typed top-face ref)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shell_box_open_top() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let body_a = build_box_a(&mut rt, 25.0).await;
+
+    // The open (removed) face is box A's top cap. Keep its typed ref in ShellParams
+    // so identity plus anchor evidence reaches the shared resolver.
+    let mesh_a = body_mesh(&mut rt, body_a).await;
+    let view_a = validate_mesh_blob(&mesh_a).expect("box A MESH1 validates");
+    assert_eq!(view_a.face_count, 6, "box A has 6 faces");
+    let (_top_key, centroid) = top_face_pick(&view_a, &mesh_a);
+    assert!(centroid.z > 24.0, "top face at z≈25, got {}", centroid.z);
+
+    let open_face = ElementId::new("el_shell_top");
+    let anchor = AnchorIntent {
+        world_point: centroid,
+        surface_uv: None,
+        local_frame: None,
+        adjacency_hint: None,
+        extra: Default::default(),
+    };
+    let face_ref = ElementRef {
+        primary: Some(PrimaryRef {
+            body: body_a,
+            element: open_face.clone(),
+            kind: ElementKind::Face,
+            extra: Default::default(),
+        }),
+        intent: None,
+        anchor: Some(anchor),
+        extra: Default::default(),
+    };
+    // ToFace column (a small profile) — mints `el_shell_top` for box A's top face.
+    let scol = SketchId(Uuid::from_u128(0xC0));
+    add_op(
+        &mut rt,
+        sketch_record(SKETCH_COL, &rect_sketch(scol, 0x3000, 5.0, 5.0, 5.0, 5.0)),
+    );
+    add_op(
+        &mut rt,
+        extrude_to_face_record(EXTRUDE_COL, scol, face_ref.clone()),
+    );
+    // Shell box A, removing that typed top face.
+    add_op(&mut rt, shell_record(OP_SHELL, body_a, vec![face_ref], 2.0));
+
+    let rep = clean_regen(&mut rt).await;
+    let snap = published(&rep, "shell");
+
+    assert_eq!(snap.repair_summary.needs_repair_count, 0);
+    let mesh = body_mesh(&mut rt, body_a).await;
+    let view = validate_mesh_blob(&mesh).expect("shelled box MESH1 validates");
+    let vol = mesh_volume(&view, &mesh);
+    // 10000 − inner cavity 16×16×23 (5888) = 4112 (exact box arithmetic).
+    assert!(
+        (vol - 4112.0).abs() < 2.0,
+        "shell(20×20×25, t=2, top open) = 10000 − 5888 = 4112, got {vol}"
+    );
+    eprintln!("Shell PASS: APPLIED — hollow volume {vol} == 4112");
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Determinism — two FRESH worker processes yield the identical pattern signature
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn linear_pattern_deterministic_across_processes() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+
+    async fn run_once(bin: PathBuf) -> (String, f64) {
+        let wm = spawn_worker(bin).await;
+        let mut rt = runtime_over(&wm);
+        let body_a = build_box_a(&mut rt, 25.0).await;
+        add_op(
+            &mut rt,
+            linear_pattern_record(
+                OP_PATTERN,
+                body_a,
+                Vec3::new_unchecked(0.0, 1.0, 0.0),
+                40.0,
+                3,
+                false,
+            ),
+        );
+        let rep = clean_regen(&mut rt).await;
+        let snap = published(&rep, "determinism pattern");
+        let sig = snap
+            .bodies
+            .iter()
+            .find(|b| b.body == body_of(OP_PATTERN))
+            .expect("pattern body present")
+            .signature
+            .as_str()
+            .to_string();
+        let mesh = body_mesh(&mut rt, body_of(OP_PATTERN)).await;
+        let view = validate_mesh_blob(&mesh).expect("MESH1");
+        let vol = mesh_volume(&view, &mesh);
+        wm.shutdown().await;
+        (sig, vol)
+    }
+
+    let (sig1, vol1) = run_once(bin.clone()).await;
+    let (sig2, vol2) = run_once(bin).await;
+    assert_eq!(
+        sig1, sig2,
+        "pattern geometry signature is identical across fresh processes"
+    );
+    assert!(
+        (vol1 - vol2).abs() < 1e-6,
+        "pattern volume identical: {vol1} vs {vol2}"
+    );
+    assert!((vol1 - 30_000.0).abs() < 1.0, "and exact: {vol1}");
+    eprintln!("Determinism PASS: signature {sig1} stable across two worker processes");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Regen dependency — editing the source extrude re-runs the pattern (volumes scale)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pattern_tracks_upstream_extrude_edit() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let sa = SketchId(Uuid::from_u128(0xA));
+    let body_a = build_box_a(&mut rt, 25.0).await; // 10000
+
+    add_op(
+        &mut rt,
+        linear_pattern_record(
+            OP_PATTERN,
+            body_a,
+            Vec3::new_unchecked(0.0, 1.0, 0.0),
+            40.0,
+            3,
+            false,
+        ),
+    );
+    let rep0 = clean_regen(&mut rt).await;
+    let _ = published(&rep0, "pattern before edit");
+    let mesh0 = body_mesh(&mut rt, body_of(OP_PATTERN)).await;
+    let vol0 = mesh_volume(&validate_mesh_blob(&mesh0).unwrap(), &mesh0);
+    assert!(
+        (vol0 - 30_000.0).abs() < 1.0,
+        "before: 3 × 10000 = 30000, got {vol0}"
+    );
+
+    // Edit the SOURCE extrude depth 25 → 50 (box A doubles to 20000). The pattern
+    // depends on box A's producer, so regen MUST re-run it: 3 × 20000 = 60000.
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(EXTRUDE_A)),
+        op: extrude_op(sa, 50.0),
+    })
+    .expect("edit extrude depth");
+    // The edit lands ON the source extrude — step 1 (0 sketch, 1 extrude, 2 pattern).
+    let rep1 = regen_from(&mut rt, 1).await;
+    let _ = published(&rep1, "pattern after edit");
+    let mesh1 = body_mesh(&mut rt, body_of(OP_PATTERN)).await;
+    let vol1 = mesh_volume(&validate_mesh_blob(&mesh1).unwrap(), &mesh1);
+    assert!(
+        (vol1 - 60_000.0).abs() < 1.0,
+        "after upstream edit: pattern re-ran ⇒ 3 × 20000 = 60000, got {vol1}"
+    );
+    wm.shutdown().await;
+    eprintln!("Upstream-edit PASS: pattern volume {vol0} → {vol1} (source depth 25 → 50)");
+}

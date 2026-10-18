@@ -32,7 +32,7 @@
       "affectedVersions": "frozen corpus b4ddccc",
       "reproduction": "Run corpus_cases_are_classified_executed_or_unsupported with ONECAD_REQUIRE_WORKER=1.",
       "owner": "P4 corpus harness",
-      "mustNotWorsenTest": "src-tauri/tests/corpus_executor.rs",
+      "mustNotWorsenTest": "crates/onecad-app/tests/corpus_executor.rs",
       "reopeningTrigger": "Any silent skip, lost provenance, untyped expectation, or executable count below 9."
     },
     {

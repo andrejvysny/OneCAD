@@ -106,7 +106,8 @@ export const checkOcct = (root: string, metadata: z.infer<typeof occtSchema>, ar
 };
 export const requiredSource = [
   'LICENSE-MIT', 'LICENSE-APACHE', 'THIRD_PARTY_NOTICES', 'ATTRIBUTION.md',
-  'package.json', 'bun.lock', 'src-tauri/tauri.conf.json',
+  'package.json', 'bun.lock', 'crates/onecad-ui/Cargo.toml',
+  'assets/native/tokens.css', 'assets/native/cppIcons.generated.ts', 'assets/native/authored.ts',
   'worker/CMakeLists.txt', 'worker/cmake/Dependencies.cmake',
   'worker/third_party/planegcs/LICENSE', 'worker/third_party/planegcs/VENDOR.txt',
   'worker/third_party/planegcs/GCS.cpp', 'worker/third_party/planegcs/CMakeLists.txt',
@@ -117,9 +118,9 @@ export const requiredSource = [
 ];
 export const checkSource = (root: string): void => {
   requiredSource.forEach(name => requireFile(join(root, name)));
-  const cargoRoot = existsSync(join(root, 'Cargo.toml')) ? root : join(root, 'src-tauri');
+  const cargoRoot = root;
   ['Cargo.toml', 'Cargo.lock'].forEach(name => requireFile(join(cargoRoot, name)));
-  for (const directory of ['src', 'src-tauri/src', 'worker/src', 'worker/third_party/planegcs']) {
+  for (const directory of ['crates/onecad-app/src', 'crates/onecad-ui/src', 'crates/onecad-render/src', 'worker/src', 'worker/third_party/planegcs']) {
     if (!existsSync(join(root, directory)) || files(join(root, directory)).length === 0) {
       throw new Error(`missing source directory: ${directory}`);
     }

@@ -170,6 +170,14 @@ impl Pipe<'_> {
             blend: self.blend,
             write_mask,
         })];
+        self.build_targets(device, if self.format.is_some() { &targets } else { &[] })
+    }
+
+    pub fn build_targets(
+        &self,
+        device: &wgpu::Device,
+        targets: &[Option<wgpu::ColorTargetState>],
+    ) -> wgpu::RenderPipeline {
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(self.label),
             layout: Some(self.layout),
@@ -197,7 +205,7 @@ impl Pipe<'_> {
             fragment: self.fs.map(|fs| wgpu::FragmentState {
                 module: self.module,
                 entry_point: Some(fs),
-                targets: if self.format.is_some() { &targets } else { &[] },
+                targets,
                 compilation_options: Default::default(),
             }),
             multiview_mask: None,

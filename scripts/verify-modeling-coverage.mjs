@@ -49,26 +49,6 @@ const laneJobs = {
   kernelbenchSuite: ["linux-kernelbench", "s4-kernelbench"],
 };
 
-/**
- * Frontend tool id → the operation(s) it authors. A tool is a GESTURE, not an op:
- * `fillet` authors both Fillet and Chamfer, `mirror` authors MirrorBody, and
- * `select`/`measure`/`datum`/`sketch` author no timeline operation of their own
- * (Sketch is authored by the sketch lane, which has its own rows).
- */
-const toolOperations = {
-  extrude: ["Extrude"],
-  revolve: ["Revolve"],
-  fillet: ["Fillet", "Chamfer"],
-  boolean: ["Boolean"],
-  shell: ["Shell"],
-  offsetFace: ["OffsetFace"],
-  hole: ["Hole"],
-  linearPattern: ["LinearPattern"],
-  circularPattern: ["CircularPattern"],
-  mirror: ["MirrorBody"],
-  transform: ["TransformBody"],
-};
-
 function fail(message) {
   process.stderr.write(`modeling coverage: ${message}\n`);
   process.exitCode = 1;
@@ -212,12 +192,6 @@ crossCheck("worker dispatch", [...new Set(dispatched)]);
 const schemaOps = [...read("protocol/SCHEMA.md")
   .matchAll(/^\*\*([A-Za-z]+)\*\* \(`op\.[A-Za-z]+`\)/gm)].map((m) => m[1]);
 crossCheck("SCHEMA §7.3 op catalogue", [...new Set(schemaOps)]);
-
-const toolIds = [...read("src/modules/modeling/tools.ts")
-  .matchAll(/\{ tool: "([A-Za-z]+)", scope: "model"/g)].map((m) => m[1]);
-if (toolIds.length === 0) fail("frontend tool registrations: scanned zero tools");
-crossCheck("frontend tool registrations",
-  [...new Set(toolIds.flatMap((tool) => toolOperations[tool] ?? []))]);
 
 const families = [...read("crates/onecad-kernelbench/src/case_v2.rs")
   .matchAll(/^pub enum OperationFamily \{([\s\S]*?)^\}/gm)]

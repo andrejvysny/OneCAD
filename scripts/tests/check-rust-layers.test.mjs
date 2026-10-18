@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
 import { checkMetadata, LAYERS } from '../check-rust-layers.mjs';
 
 function fixture(from, dependencies = [], extra = []) {
@@ -15,17 +14,9 @@ function fixture(from, dependencies = [], extra = []) {
 const local = (name, fields = {}) => ({ name, path: `/fixture/${name}`, kind: null, ...fields });
 const external = (name, fields = {}) => ({ name, source: 'registry+https://github.com/rust-lang/crates.io-index', kind: null, ...fields });
 
-test('vendored viewport paths stay confined to the renderer', () => {
-  for (const [name, folder] of [['solidcraft-gpu', 'gpu'], ['solidcraft-render', 'render']]) {
-    const path = fileURLToPath(new URL(`../../vendor/solidcraft-viewport/crates/${folder}`, import.meta.url));
-    const dependency = { name, path, kind: null };
-    assert.deepEqual(checkMetadata(fixture('onecad-render', [dependency])), []);
-    for (const from of ['onecad-app', 'onecad-core', 'onecad-scene', 'onecad-ui']) {
-      assert.equal(checkMetadata(fixture(from, [dependency])).length, 1);
-    }
-    for (const fields of [{ path: '/outside/vendor' }, { kind: 'build' }, { kind: 'dev' }]) {
-      assert.equal(checkMetadata(fixture('onecad-render', [{ ...dependency, ...fields }])).length, 1);
-    }
+test('retired comparison renderer dependencies fail closed', () => {
+  for (const name of ['solidcraft-gpu', 'solidcraft-render']) {
+    assert.equal(checkMetadata(fixture('onecad-render', [local(name, { path: '/retired/vendor' })])).length, 1);
   }
 });
 
@@ -43,7 +34,7 @@ test('upward, concrete interaction and host dependencies fail across dependency 
   for (const [from, to] of [
     ['onecad-core', 'onecad-app'], ['onecad-app', 'onecad-interaction'],
     ['onecad-scene', 'onecad-render'], ['onecad-render', 'onecad-ui'],
-    ['onecad-regen', 'onecad'], ['onecad-library-ingest', 'onecad'],
+    ['onecad-regen', 'onecad-ui'], ['onecad-library-ingest', 'onecad-ui'],
   ]) {
     for (const kind of [null, 'dev', 'build']) {
       assert.match(checkMetadata(fixture(from, [local(to, { kind })], [to]))[0], /workspace dependency forbidden/);
@@ -52,7 +43,7 @@ test('upward, concrete interaction and host dependencies fail across dependency 
 });
 
 test('toolkit and GPU families fail in all pure layers, all declaration kinds', () => {
-  for (const from of Object.keys(LAYERS).filter((name) => !['onecad', 'onecad-ui'].includes(name))) {
+  for (const from of Object.keys(LAYERS).filter((name) => !['onecad-ui'].includes(name))) {
     for (const name of ['tauri', 'tauri-build', 'egui-wgpu', 'eframe', 'winit', 'objc2-app-kit', 'gtk4', 'slint', 'wgpu']) {
       if (from === 'onecad-render' && name === 'wgpu') continue;
       for (const kind of [null, 'dev', 'build']) {
@@ -83,7 +74,7 @@ test('render accepts wgpu without admitting toolkit or alternate GPU stacks', ()
 });
 
 test('composition hosts accept external UI and GPU dependencies', () => {
-  for (const from of ['onecad', 'onecad-ui']) {
+  for (const from of ['onecad-ui']) {
     assert.deepEqual(checkMetadata(fixture(from, [external('tauri-build'), external('egui'), external('wgpu')])), []);
   }
 });

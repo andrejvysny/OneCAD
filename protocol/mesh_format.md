@@ -112,6 +112,22 @@ A section `type` MUST appear at most once. Unknown `type` values MUST be skipped
 | 10 | `EDGE_ID_CHARS` | if `HAS_EDGES` | `offs[E]` | UTF-8 bytes of all edge ids concatenated (`"e:5"` or ElementId) |
 | 11 | `FACE_BBOXES` | optional | `24·F` | per face: f32 × 6 `{minX,minY,minZ,maxX,maxY,maxZ}` — pick accel |
 | 12 | `FACE_COLORS` | if `HAS_FACE_COLORS` | `4·F` | per face: u8 × 4 sRGB `{r,g,b,a}` — authored appearance (imported XCAF color; `a` currently 255). Faces with no authored color carry `{0,0,0,0}` (alpha 0 = "unset", renderer falls back to the body material). Added 2026-08-02 (WP-A W4.5); consumers written earlier skip it per the unknown-`type` rule |
+| 14 | `EDGE_CLASSES` | optional, requires `HAS_EDGES` | `4·E` | per edge: u32 classification code |
+| 15 | `EDGE_FACE_RANGES` | optional, paired with 16 | `8·E` | per edge: `{u32 firstIncident, u32 incidentCount}` into EDGE_FACES |
+| 16 | `EDGE_FACES` | optional, paired with 15 | `4·I` | u32 zero-based incident face ordinals |
+
+`EDGE_CLASSES` codes: 0 unknown, 1 boundary, 2 sharp, 3 smooth, 4 seam,
+5 degenerate, 6 non-manifold. Other codes are invalid. Workers classify from
+OCCT topology and continuity, using 0.001 rad angular tolerance when comparing
+adjacent surface normals. Missing classification means unknown; consumers must
+show such edges conservatively. Seams and degenerate edges retain topology rows
+and IDs. Classification never changes face or edge ordinals.
+
+Incident-face ranges form contiguous bounded full coverage of EDGE_FACES;
+each ordinal must be less than F. Incident faces are unique per edge and emitted
+in ascending face ordinal. Seams list their supporting face once. Missing
+adjacency means an empty sequence. Sections 14–16 do not add flags or change
+MESH1 version; old readers skip these sections, and old meshes remain valid.
 
 Notes:
 - Triangle → face lookup: binary-search FACE_RANGES for the triangle index (ranges

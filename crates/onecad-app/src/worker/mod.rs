@@ -59,19 +59,17 @@ pub const DEV_WORKER_PATH: &str = concat!(
 /// The `ONECAD_WORKER_PATH` override env var (development and tests only).
 pub const WORKER_PATH_ENV: &str = "ONECAD_WORKER_PATH";
 
-/// The sidecar binary's basename as Tauri drops it beside the main executable in
-/// a bundled app (`externalBin` strips the target triple at install time).
+/// The sidecar binary's basename beside the native host in a bundled app.
 pub const BUNDLED_WORKER_NAME: &str = "onecad-worker";
 
 /// Resolves the worker binary path (SCHEMA-agnostic packaging seam).
 ///
-/// Release builds accept only `<exe_dir>/onecad-worker`, where Tauri places the
-/// bundled `externalBin` sidecar. They deliberately ignore environment and
+/// Release builds accept only `<exe_dir>/onecad-worker`, where native packaging places the
+/// bundled sidecar. They deliberately ignore environment and
 /// dev-tree paths so a relocated app cannot silently pair with another worker.
 /// Debug and `cfg(test)` builds use `ONECAD_WORKER_PATH`, then the dev-tree
-/// worker, then the sidecar beside the executable. Tauri dev copies the staged
-/// `src-tauri/binaries/` sidecar beside the debug executable, and that copy can
-/// drift stale; the dev-tree build remains the debug source of truth.
+/// worker, then the sidecar beside the executable. A packaged copy can drift stale; the dev-tree build remains the debug
+/// source of truth.
 ///
 /// Returns `None` when no candidate exists on disk, so the app keeps the
 /// [`PendingBackend`] fallback rather than spawning a missing binary.

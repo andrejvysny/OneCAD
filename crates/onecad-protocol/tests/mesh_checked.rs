@@ -365,7 +365,7 @@ fn validate_fixture_directory(path: &Path) -> usize {
 
 #[test]
 fn worker_produced_repository_fixtures_decode() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spikes/fixtures");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/render");
     assert!(
         validate_fixture_directory(&root) >= 2,
         "worker fixtures must not silently disappear"
@@ -490,3 +490,6 @@ fn final_id_section_needs_no_optional_trailing_padding() {
     let view = decode(&blob).expect("unpadded final ID bytes remain wire compatible");
     assert_eq!(view.edge_id(0), Some("e:5"));
 }
+
+#[path = "support/edge_metadata.rs"]
+mod edge_metadata;

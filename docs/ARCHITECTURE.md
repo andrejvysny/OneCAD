@@ -63,9 +63,11 @@ modeling geometry service; it never speaks OCW1 itself.
 ### Rust workspace and native host boundary
 
 The repository-root `Cargo.toml` and `Cargo.lock` own the Rust workspace.
-`src-tauri/` remains the legacy Tauri adapter and an integration-test member;
-its application services now live in `crates/onecad-app/`. This extraction is
-an implemented code boundary, not evidence that native UI acceptance gates pass.
+`onecad-ui` is the native host and `onecad-render::Renderer` is the sole CAD
+renderer. The React/Tauri application, comparison renderer and executable
+rendering prototypes are retired. Shared services and all backend regression
+suites live in `crates/onecad-app/`. This consolidation is not evidence that
+native UI acceptance gates pass or retired-editor workflow parity is complete.
 
 | Crate | Responsibility |
 |---|---|
@@ -76,7 +78,7 @@ an implemented code boundary, not evidence that native UI acceptance gates pass.
 | `onecad-ui` | Native eframe host, presentation, platform integration and bounded execution of application effects |
 
 The native host implements a first workflow subset. It does not establish parity
-with the legacy editor. Both hosts use the same `onecad-app` mutation services;
+with the retired editor. The native host uses `onecad-app` mutation services;
 neither the scene, renderer nor interaction reducer owns a document mutation
 path. Accepted edits, regeneration completion, per-feature failures and repair
 states remain distinct. A failed accepted edit is not automatically removed;
@@ -89,9 +91,10 @@ Existing-feature edits do not use the new-feature preview path: an authoritative
 rollback-prefix preview is required before that preview can be enabled.
 
 Native scene and rendering consumers use the checked MESH1 decoder in
-`onecad-protocol`; the legacy Tauri path continues forwarding validated bulk
-bytes to the React viewport. Both preserve Z-up coordinates and semantic
-topology identities.
+`onecad-protocol`; native host and headless captures share the same renderer.
+Geometry retains Z-up coordinates and semantic topology identities. Theme and
+icons live in `assets/native`, rendering fixtures in `fixtures/render`, and the
+shared-service fixture generator in `crates/onecad-mesh-fixture`.
 
 `scripts/check-rust-layers.mjs` enforces workspace dependency directions,
 including optional, build, development and target-specific dependencies. UI and

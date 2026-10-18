@@ -1,9 +1,8 @@
 [workspace]
 resolver = "2"
-exclude = ["vendor/solidcraft-viewport"]
 members = [
-    "src-tauri",
     "crates/onecad-app",
+    "crates/onecad-mesh-fixture",
     "crates/onecad-scene",
     "crates/onecad-render",
     "crates/onecad-interaction",

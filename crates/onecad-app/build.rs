@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-const STAGED_MANIFEST: &str = "../../src-tauri/binaries/onecad-worker-manifest.json";
+const STAGED_MANIFEST: &str = "../../packaging/binaries/onecad-worker-manifest.json";
 const EMBEDDED_MANIFEST: &str = "onecad-worker-manifest.json";
 
 fn main() {

@@ -314,7 +314,7 @@ mod tests {
     fn recapture_preserves_both_bvh_allocations() {
         let bytes = Arc::from(
             include_bytes!(
-                "../../../spikes/fixtures/fillet-block/00000000-0000-0000-0000-00000000f101.mesh1"
+                "../../../fixtures/render/fillet-block/00000000-0000-0000-0000-00000000f101.mesh1"
             )
             .as_slice(),
         );

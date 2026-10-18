@@ -4,12 +4,28 @@ use crate::{
     pipelines::Pipelines,
 };
 pub const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+pub(crate) fn oit_formats(device: &wgpu::Device) -> [wgpu::TextureFormat; 2] {
+    if device
+        .features()
+        .contains(wgpu::Features::FLOAT32_BLENDABLE)
+    {
+        [
+            wgpu::TextureFormat::Rgba32Float,
+            wgpu::TextureFormat::R32Float,
+        ]
+    } else {
+        [HDR_FORMAT, AO_FORMAT]
+    }
+}
 pub(crate) const SAMPLES: u32 = 4;
 pub(crate) const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub(crate) const AO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
 pub(crate) const OCC_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
 
 pub(crate) struct Targets {
+    pub oit_accum: wgpu::TextureView,
+    pub oit_reveal: wgpu::TextureView,
+    pub oit_bind: wgpu::BindGroup,
     pub _output: wgpu::Texture,
     pub output_view: wgpu::TextureView,
     pub output_attachment: wgpu::TextureView,
@@ -150,7 +166,18 @@ impl Targets {
             &pipes.compose_layout,
             &[Tv(&resolved), Sampler(&sampler)],
         );
+        let formats = oit_formats(gpu.device);
+        let oit_accum = target("Xray accumulation", size, formats[0], 1, rt);
+        let oit_reveal = target("Xray revealage", size, formats[1], 1, rt);
+        let oit_bind = gpu.bind(
+            "Xray resolve",
+            &pipes.oit_layout,
+            &[Tv(&oit_accum), Tv(&oit_reveal)],
+        );
         Self {
+            oit_accum,
+            oit_reveal,
+            oit_bind,
             resolved,
             compose,
             _output: output,

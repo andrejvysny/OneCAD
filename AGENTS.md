@@ -1,165 +1,124 @@
 # Repository Guidelines
 
-## Project Overview
+## Scope and project context
 
-OneCAD is a four-layer parametric CAD application: a React 19 + Three.js frontend, a pure-Rust regeneration/recovery core, and a C++20 OCCT worker sidecar. The wire contract is normative — every message is defined once in `protocol/SCHEMA.md` (OCW1 framed stdio protocol) and `protocol/mesh_format.md` (MESH1 binary mesh format), implemented verbatim on both sides, and pinned by cross-track suites. There is **no JS on the kernel path**: the frontend only sees projection DTOs over Tauri IPC, and the worker carries OCW1 frames on stdout only (logs go to stderr).
+OneCAD is a native Rust desktop CAD application backed by a C++20 OCCT worker.
+Read applicable nested guides before editing. Keep changes inside this repository;
+the sibling SolidCraft checkout is independent. Preserve unrelated work. Never
+commit, push or pull without explicit authorization.
 
-Before substantial project work, consult the private [ONECAD project](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/issues/), its [Project overview](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/pages/b6fea05e-2e7b-403f-b7ff-9adabd30636e) and relevant Tasks/Pages. Plane is the source of truth for project management and durable project knowledge. `CURRENT_STATE.md`, `TODO.md`, `PLAN.md` and handoff files are compatibility pointers. Keep protocols, APIs, architecture, ADRs, installation, tests and release procedures in Git; use the [Documentation index](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/pages/0bfe867d-215a-4cfb-a501-9f628976bc9d). Do not recreate file-based backlogs or session ledgers. Propose future Tasks and Page/Wiki updates and obtain approval before saving unless already authorized. Preserve unrelated worktree changes; never auto-commit, push or pull.
+Use the existing [ONECAD Plane project](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/issues/)
+for project context and task tracking. Consult relevant work items and canonical
+Pages before substantial work. Plane stays read-only unless the user approves a
+specific save. Propose important findings, validation and follow-up work there;
+keep code-coupled protocols, build instructions and tests in Git. Do not create
+local task ledgers or duplicate canonical Pages.
 
-## Architecture & Data Flow
+## Architecture
 
-Strictly decoupled layers (normative: `docs/ARCHITECTURE.md`, plus ADRs in `docs/adr/`):
+The repository-root `Cargo.toml` and `Cargo.lock` own the workspace.
 
-1. **Frontend** `src/` — React 19 functional components, Zustand 5 vanilla stores, imperative Three.js viewport, Tailwind v4 design tokens. Zustand stores hold backend-authoritative projections; a mock client drives the UI with no backend in dev/e2e.
-2. **IPC** — Tauri v2 commands with camelCase projection DTOs. Frontend never sees raw OCW1 envelopes; Rust never sends kernel internals upward.
-3. **Rust application** `crates/onecad-app/` — host-independent services over a per-document single-writer `DocumentRuntime` (3-phase regen driver: locked begin → unlocked worker drive → locked commit, with fencing tokens and rollback checkpoints). `WorkerManager` supervises the C++ sidecar. The root Cargo workspace owns `crates/` and the legacy `src-tauri/` adapter (`onecad`), which retains Tauri commands, lifecycle and integration tests.
-4. **Worker** `worker/` — C++20 + OCCT 8.0.1 sidecar. `Session`/`PlanExecutor` handle transactional `ExecutePlan`; one file per kernel op under `src/ops/`. **No JS on this path.**
-
-Legacy Tauri/React data flow per operation: FE invoke → Tauri command → `DocumentRuntime` plan → OCW1 `ExecutePlan` frame → worker regen → `document-changed`/`projection-updated` events → snapshot publish → Tessellate → MESH1 blob (Rust validates header only, forwards bytes verbatim) → `MeshCache` keyed `(BodyId, Lod, generation)` → `ArrayBuffer` → zero-copy TS typed-array views → GPU buffers, **Z-up verbatim, never axis-swapped**. Native scene/render consumers use the checked `onecad-protocol::mesh::MeshView` decoder before geometry traversal or upload; shared application services remain the document authority.
-
-Platform architecture (in progress): Application Shell → OneCAD Platform (domain-neutral infra: documents/entities/transactions/commands/selection/workspaces/modules/events/resources/settings/persistence) → SDK (`@/platform` internal vs narrower `@onecad/sdk` public) → built-in modules (`onecad.modeling` first) → external addons. Forbidden edges: Platform→modeling impl, Addon→modeling internals, Addon→OCCT worker, module→module private state, SDK→app impl. The C++ worker is the geometry service implementation of `onecad.modeling` — no other module speaks OCW1. All mutation goes through transactions (programmatic == user path); events announce, never perform; deterministic `NeedsRepair` beats silent wrong bind. Fencing is `workerEpoch` + `expectedBaseHash` ONLY; `documentRevision` is advisory.
-
-## Key Directories
-
-| Path | Purpose |
+| Path | Responsibility |
 |---|---|
-| `src/stores/` | ~19 Zustand stores, one per domain slice (`documentStore`, `appStore`, `settingsStore`, `viewportStore`, `toolStore`, …) |
-| `src/ipc/` | `CadClient` seam: `client.ts` (interface + `createClient()`), `tauriClient.ts` (real IPC), `mockClient.ts` (in-memory kernel for dev/e2e), `types.ts` (wire DTOs) |
-| `src/viewport/` | Imperative Three.js engine (`ViewportEngine.ts`, `CameraRig.ts`), MESH1 parsing (`mesh/`), engine↔React bridge |
-| `src/platform/` | Contribution framework: `registry.ts`, `slots.ts`, `services.ts`, `events.ts`, `shortcuts.ts` |
-| `src/modules/` | Feature modules registering into the platform: `modeling/` (register.ts, tools.ts, ids.ts), `library/` |
-| `src/features/`, `src/ui/`, `src/tools/` | Screen-level UI, shared primitives, interaction state machines (`SketchController.ts`, `modelToolMachine.ts`) |
-| `src/styles/` | `tokens.css` (Tailwind v4 `@theme`; sole hex color source) + `globals.css` |
-| `src-tauri/` | Legacy Tauri 2 adapter `onecad` (lib `onecad_lib`): command wrappers, lifecycle, native menus/dialogs, and integration tests |
-| `crates/onecad-app/` | Host-independent application services: `DocumentRuntime`, worker supervision, DTOs, typed events, persistence, import/export, and library operations; embedded seeds in `resources/` |
-| `crates/` | Root workspace members: `onecad-app` (no Tauri), `onecad-core` (pure domain, **no tauri dep**), `onecad-protocol` (OCW1 framing), `onecad-worker-stub` (chaos drills), `onecad-regen` (headless replay CLI), `onecad-kernelbench`, `onecad-library` (no network/tauri) |
-| `worker/` | C++20 OCCT sidecar: `src/ops/` (one file per op), `src/kernel/`, `src/protocol/` (Dispatcher), `src/session/`, `tests/`, `cmake/`, `third_party/` (vendored nlohmann json + PlaneGCS; OCCT is NOT vendored) |
-| `protocol/` | `SCHEMA.md` (OCW1, normative, 264KB — read sections), `mesh_format.md` (MESH1), `fixtures/` (executable NDJSON form of the spec) |
-| `e2e/` | Playwright mock-client lane (real Vite app, real WebGL, mock backend) |
-| `e2e-tauri/` | WebdriverIO lane against the real bundled `.app` (real Tauri IPC + real worker) |
-| `corpus/` | Read-only correctness oracle: legacy OneCAD-CPP behavior frozen at commit b4ddcccc, consumed by `corpus_executor.rs` + `scripts/verify-modeling-*.mjs` |
-| `scripts/` | Build/stage/verify tooling (see Commands) |
-| `docs/` | `ARCHITECTURE.md` (laws), `DEBUGGING.md` (log lanes, env knobs), `PACKAGING.md`, `adr/` (14 records), `qa/` (machine-verified manifests) |
+| `crates/onecad-ui` | Native eframe host, platform integration and presentation |
+| `crates/onecad-interaction` | Pure interaction transitions and tagged service effects |
+| `crates/onecad-render` | Sole CAD renderer, shared native wgpu device and queue |
+| `crates/onecad-scene` | Bounded immutable geometry, captured views, picking |
+| `crates/onecad-app` | Shared document services, regeneration, worker lifecycle, persistence, import/export and library operations |
+| `crates/onecad-core` | Pure domain model and regeneration/recovery contracts |
+| `crates/onecad-protocol` | OCW1 transport and checked MESH1 decoding |
+| `crates/onecad-mesh-fixture` | Headless fixture generator using shared application services |
+| `worker` | C++20 OCCT sidecar and cross-track CTest suites |
+| `protocol` | Normative wire schemas and executable NDJSON fixtures |
+| `assets/native` | Native theme tokens and icon registries |
+| `fixtures/render` | Checked renderer fixtures and provenance |
+| `packaging/binaries` | Ignored staged sidecar and embedded integrity manifest |
+| `corpus` | Frozen legacy behavior oracle |
+| `scripts` | Worker, packaging, evidence and dependency-boundary tooling |
 
-## Development Commands
+The React/Tauri application, Three.js paths, component preview renderer,
+comparison renderer/vendor and egui/Slint/render-look prototypes are retired.
+Static historical captures and attribution may remain. Consolidation does not
+establish production readiness or workflow parity with the retired editor.
 
-Use Bun. `package-lock.json` is committed but stale and inconsistent — never touch it; `bun.lock` is the source of truth.
+Only `onecad-app` owns document mutations. The per-document single-writer
+`DocumentRuntime` keeps locked preparation, unlocked worker execution and fenced
+commit separate. Preserve latest-only preparation, stale-result fencing and
+rollback tokens. Worker compatibility, binary SHA-256 and OCCT fingerprint checks
+must never be bypassed. `workerEpoch` and `expectedBaseHash` are fencing axes;
+`documentRevision` is advisory.
 
-```bash
-bun install
-bun run dev          # Vite on port 1420 (strictPort — must be free; tauri dev needs it)
-bun run build        # tsc && vite build
-bun run test         # vitest run (jsdom, colocated src/**/*.{test,spec}.{ts,tsx})
-bun run test:watch
-bun run e2e          # playwright test (chromium+webkit; port 4177, NOT 1420)
-bun run e2e -- --project=chromium | --project=webkit
-bunx playwright install chromium webkit
-```
+## Commands
 
-**Stage the worker before any cargo command that compiles the app crate** — `bundle.externalBin` and `build.rs` hard-fail without the staged sidecar:
+Run Cargo from the repository root. Stage the worker before release builds:
 
-```bash
-scripts/build-worker.sh Release   # hygiene gate → cmake build → stage src-tauri/binaries/onecad-worker-<triple> + manifest
+```sh
+ONECAD_OCCT_ROOT="$HOME/.onecad-occt/8.0.1" scripts/build-worker.sh Release
 ctest --test-dir worker/build --output-on-failure
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-ONECAD_WORKER_PATH=$PWD/worker/build/onecad-worker ONECAD_REQUIRE_WORKER=1 cargo test --workspace
+ONECAD_REQUIRE_WORKER=1 ONECAD_WORKER_PATH="$PWD/worker/build/onecad-worker" cargo test --workspace
 ```
 
-Run Cargo from the repository root. `src-tauri/` remains a workspace member, so legacy commands there still resolve the root workspace. Select its integration tests from the root with `cargo test -p onecad --test <name>`. Build outputs now live under `target/`; sidecar staging remains `src-tauri/binaries/`.
+The worker build directory can be overridden with `ONECAD_WORKER_BUILD_DIR`.
+Pinned OCCT installation: `scripts/build-pinned-occt.sh`; packaging:
+`scripts/package-macos.sh`. The package script rewrites and signs worker dylibs
+before embedding its final hash. Never re-sign nested binaries with `--deep`.
 
-`ONECAD_REQUIRE_WORKER=1` makes a missing worker a hard failure (CI); unset locally = quiet skip — **don't trust a green `cargo test` without checking for skips**. Release Rust builds panic without the staged manifest (run `scripts/build-worker.sh Release` first). `tauri build` flags must NOT follow `--` (everything after `--` is forwarded to cargo).
+`make run` builds the worker, generates the constrained-plate QA document when
+needed and launches the native host with isolated paths. See `Makefile` and
+`crates/onecad-ui/README.md` for host arguments and environment requirements.
 
-Worker build (OCCT must exist first via `scripts/build-pinned-occt.sh`; env `ONECAD_OCCT_ROOT`):
+Generate renderer fixtures through shared services:
 
-```bash
-cmake -S worker -B worker/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DONECAD_OCCT_ROOT=<prefix> -DONECAD_OCCT_VERSION=8.0.1 \
-  -DONECAD_OCCT_BUILD_ID=onecad-occt-8.0.1-b8f597c67781-kp1 \
-  -DONECAD_WORKER_BUILD_DIR=worker/build     # must equal -B dir
-cmake --build worker/build --parallel 3
+```sh
+cargo run -p onecad-mesh-fixture -- --worker "$PWD/worker/build/onecad-worker" --out "$PWD/fixtures/render"
 ```
 
-Real-stack e2e (CI job `tauri-composition` only): `bun run tauri build --features tauri-e2e --config src-tauri/tauri.e2e.conf.json --bundles app` then `bun run e2e:tauri`.
+Bun is used only for repository tooling; no frontend application is built:
 
-QA verifiers (run by CI, fail on drift): `node scripts/verify-modeling-coverage.mjs`, `node scripts/verify-modeling-contracts.mjs`, `scripts/tests/verify-modeling-coverage.test.sh`, `scripts/check-worker-stdout-hygiene.sh`.
+```sh
+bun install --frozen-lockfile
+bun test scripts/tests
+bun scripts/check-rust-layers.mjs
+bun scripts/verify-modeling-coverage.mjs
+scripts/tests/verify-modeling-coverage.test.sh
+bun scripts/verify-modeling-contracts.mjs
+```
 
-## Code Conventions & Common Patterns
+## Required validation
 
-### TypeScript / Frontend
+`ONECAD_REQUIRE_WORKER=1` makes missing real-worker prerequisites fail. A green
+suite with quiet skips is not worker qualification. Backend regression suites
+and fixtures live in `crates/onecad-app/tests`, including the suites migrated
+from the retired Tauri package. Call shared services with `&AppState`; do not
+reintroduce a UI toolkit solely to construct test state.
 
-- Strict TS; functional components + hooks only; no `any`; no raw hex literals in TS/TSX (hex lives only in `src/styles/tokens.css` + icon SVG masters; `viewport/palette.ts` fallbacks use `rgb()` mirrors — keep in step by hand).
-- **Zustand store pattern** (copy `src/stores/appStore.ts`): vanilla `createStore<State>()((set, get) => ({...}))` + typed hook `useXxxStore<T>(selector)` in the same file; export the mechanical pair `xxxStore` / `useXxxStore`. Only `settingsStore` is persisted (`persist`, key `onecad.settings`, version 10 — bump + migrate on reserved-field removal). No `devtools` middleware. Cross-store access via direct imports + `store.getState()` or `.subscribe()`.
-- `documentStore` is backend-authoritative: written only by `applySnapshot`/`applyChange`/`applySaveOutcome` from events. Store→engine handoff goes through the module singleton `getViewportEngine()`, never through stores.
-- Styling: Tailwind v4 utilities over tokens (`className="bg-panel text-ink-3"`), composed with `cn()`. No CSS modules. Dark theme = `:root[data-theme="dark"]` redefining the same custom properties.
-- **IPC lockstep** (drift = bug): `CMD`/`EVT` const maps in `src/ipc/tauriClient.ts` ↔ `src-tauri/src/api/mod.rs` fns ↔ `generate_handler!` in lib.rs; event names ↔ `crates/onecad-app/src/events.rs`; camelCase DTO shapes `ipc/types.ts` ↔ `crates/onecad-app/src/dto.rs`. Invoke paths are snake_case (Rust fn names), events kebab-case.
-- **Errors-as-values**: store actions `set({status:"loading"})` → `await client.x()` → `set({status:"ready"|"error"})`; catch → `logError(...)` + set status, **never rethrow** ("the status is the report"). Rust errors arrive as `ApiError {kind, message, diagnostics?}` — kinds `noDocument | invalidCommand | opFailed | stalePreview | worker | io | internal`.
-- Logging: `logError/logWarn/logDebug` (`src/debug/log`), `trace` (`src/debug/trace`); DEV installs an error forwarder to Rust `log_event`. Logger is off under vitest.
-- E2E contract: `data-testid` probes (e.g. `data-testid="sketch-dof"`); canvas has no per-entity DOM — assert through store-driven chrome.
+Renderer CPU tests do not prove appearance. The native renderer workflow runs
+ignored Metal tests with `ONECAD_REQUIRE_GPU=1`; missing hardware must fail that
+qualification. Native host and headless captures use the same renderer. Preserve
+approved goldens and declared tolerances; do not regenerate them to hide defects.
+Reproduce native geometry failures and inspect actual logs before changing the
+owning operation layer. Report exact gate status and remaining acceptance gaps.
 
-### Viewport (imperative Three.js)
+## Code conventions
 
-- **HARD INVARIANT: Z-up, right-handed.** Both cameras `up = (0,0,1)` (`engine/CameraRig.ts`); grid = world XY at Z=0; MESH1 buffers uploaded verbatim. **Never rotate scene roots or axis-swap buffers** to fake Y-up.
-- Render loop is on-demand: `invalidate()` → one `requestAnimationFrame`; zero idle frames. `renderOrder.ts` is the single painter's ladder.
-- Every layer reading colors must expose `refreshColors()` and be registered in `ViewportEngine.applyTheme()` (negative-checked by `themeRefresh.test.ts`).
-- WebGPU is experimental (`settingsStore.experimentalWebGpu`); three's `lines/*` fat-edge path is WebGL-only.
-- StrictMode double-mount: engine `init()`/`dispose()` must stay idempotent.
+Match surrounding code and formatters. Prefer explicit, simple functions and
+concrete ownership. Keep new functions below 50 lines and files below 500 lines
+where practical; avoid unrelated splits of existing larger files. Comments
+explain why. Rust must pass Clippy with `-D warnings`; pure crates must not depend
+on UI/platform toolkits. Document safety invariants for every unsafe block.
 
-### Rust
+C++ uses C++20 and the worker's `.clang-format`. OCCT is checksum-pinned external
+source, not vendored. Worker stdout contains OCW1 frames only; use stderr logging.
+Run `scripts/check-worker-stdout-hygiene.sh` after worker edits.
 
-- Clippy-clean with `-D warnings`; `&str` over `String` for params; `#[tracing::instrument]` on arg-identifying commands, never on drag-frequency ones.
-- `onecad-core` **must not depend on tauri**; `onecad-library` no tauri + no network I/O. Shared versions in `[workspace.dependencies]`, crates opt in with `{ workspace = true }`.
-- `ApiError` conversion is the choke point for `EngineError` → wire.
-- Release worker resolution is bundled-only (`<exe_dir>/onecad-worker`); debug uses `ONECAD_WORKER_PATH` → `worker/build/onecad-worker` (repository root) → bundled.
+`protocol/SCHEMA.md` and `protocol/mesh_format.md` are normative. Changes require
+compatible Rust/C++ implementation and cross-track fixtures. MESH1 stays Z-up,
+right-handed, outward wound, with preserved topology identity and row ordinals.
+Use the checked decoder before geometry traversal or upload. Keep the
+500,000-triangle admission limit and existing resource caps.
 
-### C++ worker
-
-- C++20; `-Wall -Wextra`, no `-Werror`. Vendored code (planegcs) added before warning flags + SYSTEM includes.
-- **stdout carries OCW1 frames only** — logs via `WLOG_*` to stderr; OCCT cout printer redirected to stderr (`redirect_occt_to_stderr`). Gated by `scripts/check-worker-stdout-hygiene.sh`.
-- **Worker exit codes are protocol signals** — OCCT Draw/Test harness libs are filtered from the link.
-- OCCT is checksum-pinned external (8.0.1 primary, 7.9.3 for cross-version persistence), NOT vendored; provenance (build id/version/build dir) mismatch is a CMake FATAL.
-
-### Wire protocol changes
-
-`protocol/SCHEMA.md` is normative. Any change requires: compatible Rust (`onecad-protocol`) + C++ (Dispatcher/ops) updates, NDJSON fixture addition + cross-track sign-off (both `harness_*` in CTest and the Rust harness replay it), and `protocol/fixtures/` stays executable-by-both-lanes. Worker fingerprint `0a6a1dce34181289` must match across macOS/Linux (build id is part of the seed).
-
-## Important Files
-
-- `src/ipc/client.ts` + `tauriClient.ts` + `mockClient.ts` — the single frontend↔backend seam; `createClient()` picks impl on `window.__TAURI_INTERNALS__` (prod builds compile-evict the mock via `evictMockClientInProd`).
-- `src/main.tsx`, `src/App.tsx` — entry + start/editor split (DEV exposes `window.__stores`).
-- `src/stores/appStore.ts`, `documentStore.ts`, `settingsStore.ts` — store patterns to copy.
-- `src/viewport/ViewportRoot.tsx`, `engine/ViewportEngine.ts`, `engine/README.md` — viewport invariants.
-- `src/styles/tokens.css` — sole color source; `src/test/setup.ts`, `src/test/renderWithPlatform.tsx`, `src/test/contracts/` — test infra.
-- `src-tauri/src/lib.rs` — Tauri lifecycle and `generate_handler!`; `src-tauri/src/api/` — command wrappers.
-- `crates/onecad-app/src/` — application services; `worker/mod.rs` — binary resolution; `worker/manager.rs` — supervision/circuit breaker; `host.rs` — host service contracts.
-- `crates/onecad-protocol/src/framing.rs` — OCW1 framing (magic `OCW1`, 12-byte LE header, no-resync-after-bad-frame policy).
-- `protocol/SCHEMA.md`, `protocol/mesh_format.md`, `protocol/fixtures/*.ndjson`.
-- `docs/ARCHITECTURE.md` (laws), `docs/DEBUGGING.md` (log lanes + env knobs), `docs/qa/modeling-operation-{contracts,coverage}.json` (machine-verified manifests), `corpus/README.md`.
-- `vite.config.ts` (aliases `@`→`src/*`, `@onecad/sdk`→`src/sdk/index.ts`; vitest config; port 1420), `playwright.config.ts` (mock lane), `src-tauri/tauri.conf.json` + `tauri.e2e.conf.json`.
-
-## Runtime/Tooling Preferences
-
-- **Bun required** — package manager and script runner everywhere (CI: `bun install --frozen-lockfile`). `package-lock.json` is stale/inconsistent; never update or commit it.
-- Pinned exact: `three` 0.185.1 + `@types/three` 0.185.1; WDIO 9.29.1. Otherwise caret: React 19, Vite 7, Vitest 4, TS ~5.8, Playwright 1.61, zustand 5.
-- `tsconfig.json`: strict, `noUnusedLocals/Parameters`, `noFallthroughCasesInSwitch`, `moduleResolution: "bundler"`, `noEmit`; aliases live in both tsconfig paths and vite `resolve.alias`.
-- Dev-server port 1420 is Tauri's (strictPort, `TAURI_DEV_HOST` for device testing, HMR ws 1421); Playwright deliberately uses 4177.
-- `index.html` no-FOUC theme script intentionally duplicates `settingsStore`'s storage key — keep in sync.
-- Recommended VSCode: tauri-vscode + rust-analyzer. `opencode.json`: bash `ask` by default, `rm` denied.
-
-## Testing & QA
-
-Five lanes + the oracle; a coverage manifest is **enforced, not aspirational** (`verify-modeling-coverage.mjs` fails on any cited-but-missing test file, ciJob, or cross-registry mismatch):
-
-| Lane | Runner | What it covers |
-|---|---|---|
-| Frontend unit | Vitest 4 (jsdom), colocated `*.test.ts(x)` | Stores, controllers, viewport engine, IPC marshalling — against in-memory `mockClient` or `@tauri-apps/api/mocks` `mockIPC` (which exercises the real tauriClient) |
-| Playwright | `e2e/`, chromium + webkit | Real Vite app + real WebGL, **mock backend** (`mockClient` + `localSolver`); port 4177; **`retries: 0` is policy** — a red run is a defect, don't re-add retries without a named nondeterminism source |
-| Rust integration | `cargo test --workspace` | Real worker over OCW1 via `WorkerManager`/`DocumentRuntime` (`m2_gate.rs`, `corpus_executor.rs`), stub chaos drills (`worker_chaos.rs`), persistence/autosave; `tauri::test::mock_app` for command tests |
-| Worker CTest | `ctest --test-dir worker/build` | ~72+ targets: in-process `worker_core` exes, NDJSON harness fixtures (`worker_harness --worker … --fixture …`), `canonical_*` replay of Rust-authored `protocol/fixtures/` verbatim (cross-track interop), `parity_*` gates vs `corpus/expected-values/` |
-| WDIO | `e2e-tauri/`, CI `tauri-composition` | Real bundled `.app`: real Tauri IPC + real worker, one composition spec (sketch→extrude→fillet→undo→save/reopen) |
-
-Test conventions: golden contract tests (`*.golden.test.ts(x)`) are literal frozen copies — changing one requires a recorded user-visible decision in the relevant Plane Task/Page; `*.probe.test.ts` reads production side of a contract; `*.diag.spec.ts`/`zzdebug.spec.ts` are scratch, not gated. e2e specs use `e2e/fixtures.ts` (`test` from there, not raw `@playwright/test`) to attach console/pageerror/`fe-logs.json` on failure. Rust tests use the `real_worker()` helper pattern (env assert, refuse silent skip). Worker prototypes compile with `-UNDEBUG` so asserts stay live in Release.
-
-Determinism gates exist on purpose: edge-op NDJSON `cmp`, `test_executeplan_determinism`, corpus parity with terminator checks (Qt logs contain per-run UUIDs — compare termination + exit code, not bytes).
-
-Audited source checkpoint (2026-10-04): master `a6d8a2da`; Boundary 2 committed; PR #4 merged. Exact-head CI run [35318691458](https://github.com/andrejvysny/OneCAD/actions/runs/35318691458) passed frontend, Chromium, WebKit, macOS worker/Rust, fingerprint, helper and persistence lanes; Linux worker and packaged native composition were cancelled, Linux kernelbench skipped. Native acceptance remains unverified. Historical local failures and interrupted runs remain in Migration audit. Current milestone, PR #2/#5 conflicts, OpenPBR and viewport work live in Plane. No fresh CAD gates were run during the migration.
+Release worker resolution is bundled-only, beside the native executable. Debug
+uses `ONECAD_WORKER_PATH`, then `worker/build/onecad-worker`, then bundled worker.
+Do not silently pair a release host with an arbitrary development worker.

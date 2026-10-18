@@ -988,7 +988,9 @@ json attach_tessellate(const ScratchJob& job, const json& artifacts, Envelope& r
     for (const auto& [bid, rec] : job.bodies.all()) {
         tess::BodyMesh bm = tess::tessellate_body(rec.geom, bid, lod, include_edges, &job.partition,
                                                   &rec.face_colors);
-        if (!bm.ok) continue;
+        if (!bm.ok) {
+            throw std::runtime_error("incomplete triangulation for body " + bid);
+        }
         if (bm.blob.size() > protocol::kChunkSize ||
             resp.out_bin.size() + bm.blob.size() > protocol::kInitialBulkCredit) {
             continue;

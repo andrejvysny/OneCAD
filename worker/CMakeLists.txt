@@ -114,6 +114,7 @@ add_library(worker_core STATIC
     src/session/FeaturePatternIdentity.cpp
     src/session/FeaturePatternValidation.cpp
     src/session/PreviewOp.cpp
+    src/session/Tessellate.cpp
     # --- W-WP5: REAL OCCT ops + ElementMap V2 + tessellation ---
     src/elementmap/ElementMapPartition.cpp
     # --- WP3 C3: one history over a multi-stage chain (OffsetFace DirectModeler) ---

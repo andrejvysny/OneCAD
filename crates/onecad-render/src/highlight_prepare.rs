@@ -48,10 +48,13 @@ impl PreparedHighlights {
                 draws.push(draw);
             }
         }
-        Ok(Self {
+        Self {
             scene: scene.identity(),
             draws,
-        })
+            boundaries: Vec::new(),
+            boundary_draws: Vec::new(),
+        }
+        .with_boundaries(scene, budget)
     }
 }
 
@@ -156,4 +159,156 @@ pub(crate) fn edge_segments(mesh: &MeshView<'_>, edge: usize) -> Result<(u32, u3
             .ok_or(RenderError::Highlight("segment count overflow"))?;
     }
     Err(RenderError::Highlight("edge span"))
+}
+
+impl PreparedHighlights {
+    fn with_boundaries(
+        mut self,
+        scene: &SceneSnapshot,
+        budget: PreparationBudget,
+    ) -> Result<Self, RenderError> {
+        let (capacity, scratch, count) = boundary_capacity(scene, &self.draws)?;
+        let output_bytes = crate::limits::mul(capacity, 24)?;
+        let draw_bytes = crate::limits::mul(count, std::mem::size_of::<HighlightDraw>() as u64)?;
+        let metadata = crate::limits::add(
+            self.metadata_bytes()?,
+            crate::limits::add(output_bytes, crate::limits::add(scratch, draw_bytes)?)?,
+        )?;
+        let gpu = crate::limits::add(
+            output_bytes.max(64),
+            2 * std::mem::size_of::<crate::FrameU>() as u64,
+        )?;
+        highlight_budget(budget, metadata, gpu)?;
+        self.boundaries
+            .try_reserve_exact(capacity as usize)
+            .map_err(|_| RenderError::Budget("face boundaries"))?;
+        self.boundary_draws
+            .try_reserve_exact(count as usize)
+            .map_err(|_| RenderError::Budget("face boundary draws"))?;
+        for draw in self
+            .draws
+            .iter()
+            .filter(|draw| draw.kind == HighlightKind::Face)
+        {
+            let mesh = scene.bodies()[draw.body_index].mesh()?;
+            let first = self.boundaries.len() as u32;
+            if mesh.header().section(15).is_some() {
+                topology_boundaries(&mesh, draw, &mut self.boundaries)?;
+            } else {
+                legacy_boundaries(&mesh, draw, &mut self.boundaries)?;
+            }
+            let count = self.boundaries.len() as u32 - first;
+            if count != 0 {
+                self.boundary_draws.push(HighlightDraw {
+                    first,
+                    count,
+                    kind: HighlightKind::Edge,
+                    ..*draw
+                });
+            }
+        }
+        Ok(self)
+    }
+}
+
+fn incident(mesh: &MeshView<'_>, draw: &HighlightDraw, edge: usize) -> bool {
+    mesh.edge_incident_faces(edge).iter().any(|face| {
+        mesh.face_range(face as usize)
+            .is_some_and(|range| range.first * 3 == draw.first && range.count * 3 == draw.count)
+    })
+}
+fn boundary_capacity(
+    scene: &SceneSnapshot,
+    draws: &[HighlightDraw],
+) -> Result<(u64, u64, u64), RenderError> {
+    let (mut capacity, mut scratch, mut count) = (0, 0, 0);
+    for draw in draws.iter().filter(|draw| draw.kind == HighlightKind::Face) {
+        let mesh = scene.bodies()[draw.body_index].mesh()?;
+        count += 1;
+        let length = if mesh.header().section(15).is_some() {
+            (0..mesh.header().edge_count as usize)
+                .filter(|edge| incident(&mesh, draw, *edge))
+                .try_fold(0u64, |sum, edge| {
+                    crate::limits::add(
+                        sum,
+                        u64::from(
+                            mesh.edge_range(edge)
+                                .ok_or(RenderError::Highlight("edge span"))?
+                                .count
+                                .saturating_sub(1),
+                        ),
+                    )
+                })?
+        } else {
+            scratch = scratch.max(crate::limits::mul(u64::from(draw.count), 48)?);
+            u64::from(draw.count)
+        };
+        capacity = crate::limits::add(capacity, length)?;
+    }
+    if capacity > u64::from(u32::MAX) {
+        return Err(RenderError::Budget("face boundary count"));
+    }
+    Ok((capacity, scratch, count))
+}
+fn topology_boundaries(
+    mesh: &MeshView<'_>,
+    draw: &HighlightDraw,
+    output: &mut Vec<[f32; 6]>,
+) -> Result<(), RenderError> {
+    for edge in (0..mesh.header().edge_count as usize).filter(|edge| incident(mesh, draw, *edge)) {
+        let range = mesh
+            .edge_range(edge)
+            .ok_or(RenderError::Highlight("edge span"))?;
+        for index in 1..range.count {
+            let a = mesh
+                .edge_point((range.first + index - 1) as usize)
+                .ok_or(RenderError::Highlight("edge point"))?;
+            let b = mesh
+                .edge_point((range.first + index) as usize)
+                .ok_or(RenderError::Highlight("edge point"))?;
+            output.push([a[0], a[1], a[2], b[0], b[1], b[2]]);
+        }
+    }
+    Ok(())
+}
+fn legacy_boundaries(
+    mesh: &MeshView<'_>,
+    draw: &HighlightDraw,
+    output: &mut Vec<[f32; 6]>,
+) -> Result<(), RenderError> {
+    let mut edges = Vec::new();
+    edges
+        .try_reserve_exact(draw.count as usize)
+        .map_err(|_| RenderError::Budget("face boundary scratch"))?;
+    for triangle in draw.first / 3..(draw.first + draw.count) / 3 {
+        let indices = mesh
+            .triangle(triangle as usize)
+            .ok_or(RenderError::Highlight("face triangle"))?;
+        let [Some(a), Some(b), Some(c)] = indices.map(|index| mesh.position(index as usize)) else {
+            return Err(RenderError::Highlight("face position"));
+        };
+        for (a, b) in [(a, b), (b, c), (c, a)] {
+            let bits = |p: [f32; 3]| p.map(|x| if x == 0.0 { 0 } else { x.to_bits() });
+            let (ka, kb) = (bits(a), bits(b));
+            let (ka, kb, a, b) = if ka <= kb {
+                (ka, kb, a, b)
+            } else {
+                (kb, ka, b, a)
+            };
+            edges.push((
+                [ka[0], ka[1], ka[2], kb[0], kb[1], kb[2]],
+                [a[0], a[1], a[2], b[0], b[1], b[2]],
+            ));
+        }
+    }
+    edges.sort_unstable_by_key(|edge| edge.0);
+    let mut index = 0;
+    while index < edges.len() {
+        let end = edges[index..].partition_point(|edge| edge.0 == edges[index].0) + index;
+        if (end - index) % 2 == 1 {
+            output.push(edges[index].1);
+        }
+        index = end;
+    }
+    Ok(())
 }

@@ -1,11 +1,11 @@
-//! Colors come from OneCAD's `src/styles/tokens.css` (the sole color source), parsed at
+//! Colors come from OneCAD's `assets/native/tokens.css` (the sole color source), parsed at
 //! build time via `include_str!`: the `@theme` block (light, defaults) overridden by the
 //! `:root[data-theme="dark"]` block. No color literal lives in this crate.
 
 use egui::Color32;
 use std::collections::HashMap;
 
-const TOKENS_CSS: &str = include_str!("../../../src/styles/tokens.css");
+const TOKENS_CSS: &str = include_str!("../../../assets/native/tokens.css");
 
 /// Parse `#rrggbb` or `rgb(r g b / a)`.
 fn color(v: &str) -> Option<Color32> {

@@ -1,13 +1,29 @@
 use crate::{limits, RenderError, Renderer};
 
+/// Authoritative visibility contract for the shared native CAD renderer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DisplayMode {
+    Wireframe,
+    Shaded,
+    #[default]
+    ShadedEdges,
+    Xray,
+}
+
+impl DisplayMode {
+    pub(crate) fn studio(self) -> bool {
+        matches!(self, Self::Shaded | Self::ShadedEdges)
+    }
+}
+
 /// OneCAD display settings. Colors are linear RGB; section retains n·p <= d.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RenderOptions {
     pub section: [f32; 4],
     pub cap: [f32; 4],
-    pub outline: bool,
-    pub hidden_edges: bool,
-    pub opacity: f32,
+    pub display_mode: DisplayMode,
+    pub xray_opacity: f32,
+    pub xray_hidden_edge_opacity: f32,
     pub ssaa: f32,
 }
 
@@ -16,9 +32,9 @@ impl Default for RenderOptions {
         Self {
             section: [0.0; 4],
             cap: [0.7, 0.55, 0.3, 1.0],
-            outline: true,
-            hidden_edges: false,
-            opacity: 1.0,
+            display_mode: DisplayMode::ShadedEdges,
+            xray_opacity: 0.25,
+            xray_hidden_edge_opacity: 0.22,
             ssaa: 1.0,
         }
     }
@@ -28,8 +44,10 @@ impl RenderOptions {
     pub(crate) fn validate(self) -> Result<(), RenderError> {
         if !self.section.iter().chain(&self.cap).all(|v| v.is_finite())
             || !self.cap.iter().all(|v| (0.0..=1.0).contains(v))
-            || !self.opacity.is_finite()
-            || !(0.0..=1.0).contains(&self.opacity)
+            || !self.xray_opacity.is_finite()
+            || !self.xray_hidden_edge_opacity.is_finite()
+            || !(0.0..=1.0).contains(&self.xray_opacity)
+            || !(0.0..=1.0).contains(&self.xray_hidden_edge_opacity)
             || ![1.0, 2.0].contains(&self.ssaa)
         {
             return Err(RenderError::Mesh("invalid display options"));
@@ -52,7 +70,7 @@ impl RenderOptions {
 
 /// Host and headless tests must use the same optional depth capability negotiation.
 pub fn required_device_features(available: wgpu::Features) -> wgpu::Features {
-    available & wgpu::Features::DEPTH32FLOAT_STENCIL8
+    available & (wgpu::Features::DEPTH32FLOAT_STENCIL8 | wgpu::Features::FLOAT32_BLENDABLE)
 }
 
 pub(crate) fn depth_format(device: &wgpu::Device) -> wgpu::TextureFormat {
@@ -72,13 +90,41 @@ impl Renderer {
     }
 
     pub fn set_options(&mut self, options: RenderOptions) -> Result<(), RenderError> {
+        self.validate_options(options)?;
+        if options.section != self.options.section
+            && options.section[..3].iter().any(|v| *v != 0.0)
+            && !self.committed.is_empty()
+        {
+            return Err(RenderError::CaptureMismatch);
+        }
+        self.apply_options(options)
+    }
+    pub(crate) fn validate_options(&self, options: RenderOptions) -> Result<(), RenderError> {
         options.validate()?;
+        if options.display_mode == DisplayMode::Xray
+            && !self
+                .device
+                .features()
+                .contains(wgpu::Features::FLOAT32_BLENDABLE)
+        {
+            return Err(RenderError::Device(
+                "Xray requires FLOAT32_BLENDABLE for bounded order-independent accumulation".into(),
+            ));
+        }
         validate_section_bodies(options, self.committed.len())?;
+        validate_section_bodies(options, self.preview.len())?;
+        Ok(())
+    }
+    pub(crate) fn apply_options(&mut self, options: RenderOptions) -> Result<(), RenderError> {
         self.require_idle()?;
         if options.ssaa != self.options.ssaa {
             self.replace_targets(self.size, options)?;
         }
-        self.contact_dirty |= options.section != self.options.section;
+        self.contact_dirty |= options.section != self.options.section
+            || options.display_mode != self.options.display_mode;
+        if options.section != self.options.section {
+            self.clear_section_contours();
+        }
         self.options = options;
         Ok(())
     }

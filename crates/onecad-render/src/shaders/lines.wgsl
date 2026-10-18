@@ -1,10 +1,7 @@
 // Instanced screen-space wide lines. Each segment instance expands to a quad around its
 // projected endpoints (round caps, so polylines join without gaps); the fragment computes its
-// distance to the segment and covers the pixel analytically (box-filtered band), or hard for the
-// baseline and the MSAA-only variant (like three's LineMaterial: the quad is the line, the
-// rasteriser's per-sample coverage anti-aliases its sides, and only the round caps are cut at the
-// pixel centre). Lines are depth-tested against the faces, which are pushed back by their own
-// slope (FACE_BIAS), and never write depth.
+// distance to the segment and covers pixels analytically. Lines preserve reversed-Z
+// depth tests against faces and never write depth.
 //
 // Quad expansion and near-plane clipping adapted from SolidCraft `assets/shaders/viewport.wgsl`
 // `vs_line` (MIT OR Apache-2.0); see ATTRIBUTION.md.
@@ -93,18 +90,6 @@ fn vs_sil(
     return expand(vi, a, b, u.lines.y, u.edge.rgb, u.edge.w);
 }
 
-// Silhouette segments compacted by sil_cull.wgsl (drawn indirect).
-@vertex
-fn vs_silseg(@builtin(vertex_index) vi: u32, @location(0) a: vec3<f32>, @location(1) b: vec3<f32>) -> LOut {
-    return expand(vi, a, b, u.lines.y, u.edge.rgb, u.edge.w);
-}
-
-// Baseline grid: today's GridPlane LineSegments (per-line faded colour, 1 px).
-@vertex
-fn vs_grid(@builtin(vertex_index) vi: u32, @location(0) a: vec3<f32>, @location(1) b: vec3<f32>, @location(2) c: vec4<f32>) -> LOut {
-    return expand(vi, a, b, u.lines.w, c.rgb, 1.0);
-}
-
 fn line_color(i: LOut) -> vec4<f32> {
     let p = i.pos.xy;
     let a = i.seg.xy;
@@ -135,30 +120,7 @@ fn fs_line(i: LOut) -> @location(0) vec4<f32> {
     return line_color(i);
 }
 
-// Timing experiment only (bench): the same coverage, but uncovered fragments are discarded.
-@fragment
-fn fs_line_discard(i: LOut) -> @location(0) vec4<f32> {
-    let c = line_color(i);
-    if (c.a <= 0.0) {
-        discard;
-    }
-    return c;
-}
-
-// Timing experiment only (bench): the full edge vertex work, then the quad is culled. The
-// always-true test reads every output so the compiler cannot skip the expansion.
-@vertex
-fn vs_edge_culled(@builtin(vertex_index) vi: u32, @location(0) a: vec3<f32>, @location(1) b: vec3<f32>) -> LOut {
-    let o = expand(vi, a, b, u.lines.x, u.edge.rgb, 1.0);
-    let probe = abs(o.pos.x) + abs(o.pos.y) + abs(o.pos.z) + abs(o.pos.w) + abs(o.seg.x) + abs(o.seg.w) + abs(o.style.w);
-    if (probe < 3.0e38) {
-        return culled();
-    }
-    return o;
-}
-
 @fragment fn fs_hidden(i: LOut) -> @location(0) vec4<f32> {
     let c = line_color(i);
-    let dash = select(0.0, 0.22, fract((i.pos.x + i.pos.y) / (8.0 * u.display.y)) < 0.5);
-    return vec4<f32>(c.rgb, c.a * dash);
+    return vec4<f32>(c.rgb, c.a * u.display.z);
 }

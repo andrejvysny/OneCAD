@@ -1,0 +1,7471 @@
+{
+  "bodies": [
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -2.026434898376465,
+          19.909414291381836
+        ],
+        "min": [
+          27.80372428894043,
+          -2.249922513961792,
+          19.654001235961914
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "663f945b-31fb-062e-6cc3-52332da0440c",
+      "byteLen": 1804,
+      "edgeCount": 12,
+      "edgePointCount": 24,
+      "faceColors": [],
+      "faceCount": 6,
+      "file": "663f945b-31fb-062e-6cc3-52332da0440c.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 288,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 288,
+          "name": "NORMALS",
+          "offset": 560,
+          "type": 2
+        },
+        {
+          "byteLen": 144,
+          "name": "INDICES",
+          "offset": 848,
+          "type": 3
+        },
+        {
+          "byteLen": 48,
+          "name": "FACE_RANGES",
+          "offset": 992,
+          "type": 4
+        },
+        {
+          "byteLen": 28,
+          "name": "FACE_ID_OFFS",
+          "offset": 1040,
+          "type": 5
+        },
+        {
+          "byteLen": 18,
+          "name": "FACE_ID_CHARS",
+          "offset": 1068,
+          "type": 6
+        },
+        {
+          "byteLen": 96,
+          "name": "EDGE_RANGES",
+          "offset": 1088,
+          "type": 7
+        },
+        {
+          "byteLen": 288,
+          "name": "EDGE_POSITIONS",
+          "offset": 1184,
+          "type": 8
+        },
+        {
+          "byteLen": 52,
+          "name": "EDGE_ID_OFFS",
+          "offset": 1472,
+          "type": 9
+        },
+        {
+          "byteLen": 39,
+          "name": "EDGE_ID_CHARS",
+          "offset": 1524,
+          "type": 10
+        },
+        {
+          "byteLen": 48,
+          "name": "UNKNOWN",
+          "offset": 1564,
+          "type": 14
+        },
+        {
+          "byteLen": 96,
+          "name": "UNKNOWN",
+          "offset": 1612,
+          "type": 15
+        },
+        {
+          "byteLen": 96,
+          "name": "UNKNOWN",
+          "offset": 1708,
+          "type": 16
+        }
+      ],
+      "sha256": "d9f6ac80c4c64a1b26e5d14004e0248c00e73656e0dd09224de483f43856f21d",
+      "triangleCount": 12,
+      "vertexCount": 24,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:0"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -2.2515852451324463,
+          14.418343544006348
+        ],
+        "min": [
+          27.80372428894043,
+          -2.5069994926452637,
+          14.16292953491211
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "5906ef34-03e2-c52e-d76d-43be079c0553",
+      "byteLen": 1804,
+      "edgeCount": 12,
+      "edgePointCount": 24,
+      "faceColors": [],
+      "faceCount": 6,
+      "file": "5906ef34-03e2-c52e-d76d-43be079c0553.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 288,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 288,
+          "name": "NORMALS",
+          "offset": 560,
+          "type": 2
+        },
+        {
+          "byteLen": 144,
+          "name": "INDICES",
+          "offset": 848,
+          "type": 3
+        },
+        {
+          "byteLen": 48,
+          "name": "FACE_RANGES",
+          "offset": 992,
+          "type": 4
+        },
+        {
+          "byteLen": 28,
+          "name": "FACE_ID_OFFS",
+          "offset": 1040,
+          "type": 5
+        },
+        {
+          "byteLen": 18,
+          "name": "FACE_ID_CHARS",
+          "offset": 1068,
+          "type": 6
+        },
+        {
+          "byteLen": 96,
+          "name": "EDGE_RANGES",
+          "offset": 1088,
+          "type": 7
+        },
+        {
+          "byteLen": 288,
+          "name": "EDGE_POSITIONS",
+          "offset": 1184,
+          "type": 8
+        },
+        {
+          "byteLen": 52,
+          "name": "EDGE_ID_OFFS",
+          "offset": 1472,
+          "type": 9
+        },
+        {
+          "byteLen": 39,
+          "name": "EDGE_ID_CHARS",
+          "offset": 1524,
+          "type": 10
+        },
+        {
+          "byteLen": 48,
+          "name": "UNKNOWN",
+          "offset": 1564,
+          "type": 14
+        },
+        {
+          "byteLen": 96,
+          "name": "UNKNOWN",
+          "offset": 1612,
+          "type": 15
+        },
+        {
+          "byteLen": 96,
+          "name": "UNKNOWN",
+          "offset": 1708,
+          "type": 16
+        }
+      ],
+      "sha256": "591856eb7bd1e039e5d8964fffd25f4cb38c7861f543c75fbb814830d294381f",
+      "triangleCount": 12,
+      "vertexCount": 24,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:1"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -2.2515852451324463,
+          15.487890243530273
+        ],
+        "min": [
+          27.80372428894043,
+          -2.5069994926452637,
+          15.232476234436035
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "3a29eda9-5ce5-4e2e-1378-eafe13f01787",
+      "byteLen": 1804,
+      "edgeCount": 12,
+      "edgePointCount": 24,
+      "faceColors": [],
+      "faceCount": 6,
+      "file": "3a29eda9-5ce5-4e2e-1378-eafe13f01787.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 288,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 288,
+          "name": "NORMALS",
+          "offset": 560,
+          "type": 2
+        },
+        {
+          "byteLen": 144,
+          "name": "INDICES",
+          "offset": 848,
+          "type": 3
+        },
+        {
+          "byteLen": 48,
+          "name": "FACE_RANGES",
+          "offset": 992,
+          "type": 4
+        },
+        {
+          "byteLen": 28,
+          "name": "FACE_ID_OFFS",
+          "offset": 1040,
+          "type": 5
+        },
+        {
+          "byteLen": 18,
+          "name": "FACE_ID_CHARS",
+          "offset": 1068,
+          "type": 6
+        },
+        {
+          "byteLen": 96,
+          "name": "EDGE_RANGES",
+          "offset": 1088,
+          "type": 7
+        },
+        {
+          "byteLen": 288,
+          "name": "EDGE_POSITIONS",
+          "offset": 1184,
+          "type": 8
+        },
+        {
+          "byteLen": 52,
+          "name": "EDGE_ID_OFFS",
+          "offset": 1472,
+          "type": 9
+        },
+        {
+          "byteLen": 39,
+          "name": "EDGE_ID_CHARS",
+          "offset": 1524,
+          "type": 10
+        },
+        {
+          "byteLen": 48,
+          "name": "UNKNOWN",
+          "offset": 1564,
+          "type": 14
+        },
+        {
+          "byteLen": 96,
+          "name": "UNKNOWN",
+          "offset": 1612,
+          "type": 15
+        },
+        {
+          "byteLen": 96,
+          "name": "UNKNOWN",
+          "offset": 1708,
+          "type": 16
+        }
+      ],
+      "sha256": "540ff7f1cd0d0801e907df6ee70ff7eacc72edf6ab1c01b600c60126cfa33b04",
+      "triangleCount": 12,
+      "vertexCount": 24,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:2"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -1.6328377723693848,
+          10.502326011657715
+        ],
+        "min": [
+          27.80372428894043,
+          -1.8882521390914917,
+          10.246912002563477
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "8310dc62-a1bf-9ba6-0bf2-39add294dd53",
+      "byteLen": 1804,
+      "edgeCount": 12,
+      "edgePointCount": 24,
+      "faceColors": [],
+      "faceCount": 6,
+      "file": "8310dc62-a1bf-9ba6-0bf2-39add294dd53.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 288,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 288,
+          "name": "NORMALS",
+          "offset": 560,
+          "type": 2
+        },
+        {
+          "byteLen": 144,
+          "name": "INDICES",
+          "offset": 848,
+          "type": 3
+        },
+        {
+          "byteLen": 48,
+          "name": "FACE_RANGES",
+          "offset": 992,
+          "type": 4
+        },
+        {
+          "byteLen": 28,
+          "name": "FACE_ID_OFFS",
+          "offset": 1040,
+          "type": 5
+        },
+        {
+          "byteLen": 18,
+          "name": "FACE_ID_CHARS",
+          "offset": 1068,
+          "type": 6
+        },
+        {
+          "byteLen": 96,
+          "name": "EDGE_RANGES",
+          "offset": 1088,
+          "type": 7
+        },
+        {
+          "byteLen": 288,
+          "name": "EDGE_POSITIONS",
+          "offset": 1184,
+          "type": 8
+        },
+        {
+          "byteLen": 52,
+          "name": "EDGE_ID_OFFS",
+          "offset": 1472,
+          "type": 9
+        },
+        {
+          "byteLen": 39,
+          "name": "EDGE_ID_CHARS",
+          "offset": 1524,
+          "type": 10
+        },
+        {
+          "byteLen": 48,
+          "name": "UNKNOWN",
+          "offset": 1564,
+          "type": 14
+        },
+        {
+          "byteLen": 96,
+          "name": "UNKNOWN",
+          "offset": 1612,
+          "type": 15
+        },
+        {
+          "byteLen": 96,
+          "name": "UNKNOWN",
+          "offset": 1708,
+          "type": 16
+        }
+      ],
+      "sha256": "e450adc68c8e85b5bafaf5552303946dc91ddc337c3e0570501286c5253b4bad",
+      "triangleCount": 12,
+      "vertexCount": 24,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:3"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -1.6328377723693848,
+          11.57187271118164
+        ],
+        "min": [
+          27.80372428894043,
+          -1.8882521390914917,
+          11.316458702087402
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "64202d54-9479-0644-fb89-0fa6074495d5",
+      "byteLen": 1804,
+      "edgeCount": 12,
+      "edgePointCount": 24,
+      "faceColors": [],
+      "faceCount": 6,
+      "file": "64202d54-9479-0644-fb89-0fa6074495d5.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 288,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 288,
+          "name": "NORMALS",
+          "offset": 560,
+          "type": 2
+        },
+        {
+          "byteLen": 144,
+          "name": "INDICES",
+          "offset": 848,
+          "type": 3
+        },
+        {
+          "byteLen": 48,
+          "name": "FACE_RANGES",
+          "offset": 992,
+          "type": 4
+        },
+        {
+          "byteLen": 28,
+          "name": "FACE_ID_OFFS",
+          "offset": 1040,
+          "type": 5
+        },
+        {
+          "byteLen": 18,
+          "name": "FACE_ID_CHARS",
+          "offset": 1068,
+          "type": 6
+        },
+        {
+          "byteLen": 96,
+          "name": "EDGE_RANGES",
+          "offset": 1088,
+          "type": 7
+        },
+        {
+          "byteLen": 288,
+          "name": "EDGE_POSITIONS",
+          "offset": 1184,
+          "type": 8
+        },
+        {
+          "byteLen": 52,
+          "name": "EDGE_ID_OFFS",
+          "offset": 1472,
+          "type": 9
+        },
+        {
+          "byteLen": 39,
+          "name": "EDGE_ID_CHARS",
+          "offset": 1524,
+          "type": 10
+        },
+        {
+          "byteLen": 48,
+          "name": "UNKNOWN",
+          "offset": 1564,
+          "type": 14
+        },
+        {
+          "byteLen": 96,
+          "name": "UNKNOWN",
+          "offset": 1612,
+          "type": 15
+        },
+        {
+          "byteLen": 96,
+          "name": "UNKNOWN",
+          "offset": 1708,
+          "type": 16
+        }
+      ],
+      "sha256": "ab895980171a3c60480cd14c0323e5cae5366f7b44e0828fa6da3b7cf48fe011",
+      "triangleCount": 12,
+      "vertexCount": 24,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:4"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -2.995046377182007,
+          12.109307289123535
+        ],
+        "min": [
+          27.80372428894043,
+          -3.686793327331543,
+          11.417560577392578
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "b2fc077b-f7e4-61cf-b745-ad37948166b3",
+      "byteLen": 58488,
+      "edgeCount": 48,
+      "edgePointCount": 576,
+      "faceColors": [],
+      "faceCount": 18,
+      "file": "b2fc077b-f7e4-61cf-b745-ad37948166b3.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 16560,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 16560,
+          "name": "NORMALS",
+          "offset": 16832,
+          "type": 2
+        },
+        {
+          "byteLen": 16176,
+          "name": "INDICES",
+          "offset": 33392,
+          "type": 3
+        },
+        {
+          "byteLen": 144,
+          "name": "FACE_RANGES",
+          "offset": 49568,
+          "type": 4
+        },
+        {
+          "byteLen": 76,
+          "name": "FACE_ID_OFFS",
+          "offset": 49712,
+          "type": 5
+        },
+        {
+          "byteLen": 63,
+          "name": "FACE_ID_CHARS",
+          "offset": 49788,
+          "type": 6
+        },
+        {
+          "byteLen": 384,
+          "name": "EDGE_RANGES",
+          "offset": 49852,
+          "type": 7
+        },
+        {
+          "byteLen": 6912,
+          "name": "EDGE_POSITIONS",
+          "offset": 50236,
+          "type": 8
+        },
+        {
+          "byteLen": 196,
+          "name": "EDGE_ID_OFFS",
+          "offset": 57148,
+          "type": 9
+        },
+        {
+          "byteLen": 183,
+          "name": "EDGE_ID_CHARS",
+          "offset": 57344,
+          "type": 10
+        },
+        {
+          "byteLen": 192,
+          "name": "UNKNOWN",
+          "offset": 57528,
+          "type": 14
+        },
+        {
+          "byteLen": 384,
+          "name": "UNKNOWN",
+          "offset": 57720,
+          "type": 15
+        },
+        {
+          "byteLen": 384,
+          "name": "UNKNOWN",
+          "offset": 58104,
+          "type": 16
+        }
+      ],
+      "sha256": "925959c3daee4325a7220d2e7dfb8d9b4eb8c197efccf01b8992cb3443c7f665",
+      "triangleCount": 1348,
+      "vertexCount": 1380,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:5"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -2.026434898376465,
+          19.403907775878906
+        ],
+        "min": [
+          27.80372428894043,
+          -2.249922513961792,
+          18.078947067260742
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "89584bd4-a38f-2962-100f-25ec4e70c298",
+      "byteLen": 1804,
+      "edgeCount": 12,
+      "edgePointCount": 24,
+      "faceColors": [],
+      "faceCount": 6,
+      "file": "89584bd4-a38f-2962-100f-25ec4e70c298.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 288,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 288,
+          "name": "NORMALS",
+          "offset": 560,
+          "type": 2
+        },
+        {
+          "byteLen": 144,
+          "name": "INDICES",
+          "offset": 848,
+          "type": 3
+        },
+        {
+          "byteLen": 48,
+          "name": "FACE_RANGES",
+          "offset": 992,
+          "type": 4
+        },
+        {
+          "byteLen": 28,
+          "name": "FACE_ID_OFFS",
+          "offset": 1040,
+          "type": 5
+        },
+        {
+          "byteLen": 18,
+          "name": "FACE_ID_CHARS",
+          "offset": 1068,
+          "type": 6
+        },
+        {
+          "byteLen": 96,
+          "name": "EDGE_RANGES",
+          "offset": 1088,
+          "type": 7
+        },
+        {
+          "byteLen": 288,
+          "name": "EDGE_POSITIONS",
+          "offset": 1184,
+          "type": 8
+        },
+        {
+          "byteLen": 52,
+          "name": "EDGE_ID_OFFS",
+          "offset": 1472,
+          "type": 9
+        },
+        {
+          "byteLen": 39,
+          "name": "EDGE_ID_CHARS",
+          "offset": 1524,
+          "type": 10
+        },
+        {
+          "byteLen": 48,
+          "name": "UNKNOWN",
+          "offset": 1564,
+          "type": 14
+        },
+        {
+          "byteLen": 96,
+          "name": "UNKNOWN",
+          "offset": 1612,
+          "type": 15
+        },
+        {
+          "byteLen": 96,
+          "name": "UNKNOWN",
+          "offset": 1708,
+          "type": 16
+        }
+      ],
+      "sha256": "748f6a698332ede0eb274f49a955a63179545a172eb71736895f2c6f28c6aa8f",
+      "triangleCount": 12,
+      "vertexCount": 24,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:6"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -5.206806659698486,
+          23.34653091430664
+        ],
+        "min": [
+          27.80372428894043,
+          -5.925158977508545,
+          21.994964599609375
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "ec349dee-551a-1d63-cc1d-71982fa58afe",
+      "byteLen": 19764,
+      "edgeCount": 39,
+      "edgePointCount": 168,
+      "faceColors": [],
+      "faceCount": 15,
+      "file": "ec349dee-551a-1d63-cc1d-71982fa58afe.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 5400,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 5400,
+          "name": "NORMALS",
+          "offset": 5672,
+          "type": 2
+        },
+        {
+          "byteLen": 5040,
+          "name": "INDICES",
+          "offset": 11072,
+          "type": 3
+        },
+        {
+          "byteLen": 120,
+          "name": "FACE_RANGES",
+          "offset": 16112,
+          "type": 4
+        },
+        {
+          "byteLen": 64,
+          "name": "FACE_ID_OFFS",
+          "offset": 16232,
+          "type": 5
+        },
+        {
+          "byteLen": 51,
+          "name": "FACE_ID_CHARS",
+          "offset": 16296,
+          "type": 6
+        },
+        {
+          "byteLen": 312,
+          "name": "EDGE_RANGES",
+          "offset": 16348,
+          "type": 7
+        },
+        {
+          "byteLen": 2016,
+          "name": "EDGE_POSITIONS",
+          "offset": 16660,
+          "type": 8
+        },
+        {
+          "byteLen": 160,
+          "name": "EDGE_ID_OFFS",
+          "offset": 18676,
+          "type": 9
+        },
+        {
+          "byteLen": 147,
+          "name": "EDGE_ID_CHARS",
+          "offset": 18836,
+          "type": 10
+        },
+        {
+          "byteLen": 156,
+          "name": "UNKNOWN",
+          "offset": 18984,
+          "type": 14
+        },
+        {
+          "byteLen": 312,
+          "name": "UNKNOWN",
+          "offset": 19140,
+          "type": 15
+        },
+        {
+          "byteLen": 312,
+          "name": "UNKNOWN",
+          "offset": 19452,
+          "type": 16
+        }
+      ],
+      "sha256": "873c66a5891dbf751391e507ce7e00b50513774d6bae01f24d3bc2aa2b539efe",
+      "triangleCount": 420,
+      "vertexCount": 450,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:7"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          8.253983497619629,
+          19.430513381958008
+        ],
+        "min": [
+          27.80372428894043,
+          7.53563117980957,
+          18.078947067260742
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "f44b7846-d1a2-a037-3218-9838ef233c73",
+      "byteLen": 19764,
+      "edgeCount": 39,
+      "edgePointCount": 168,
+      "faceColors": [],
+      "faceCount": 15,
+      "file": "f44b7846-d1a2-a037-3218-9838ef233c73.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 5400,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 5400,
+          "name": "NORMALS",
+          "offset": 5672,
+          "type": 2
+        },
+        {
+          "byteLen": 5040,
+          "name": "INDICES",
+          "offset": 11072,
+          "type": 3
+        },
+        {
+          "byteLen": 120,
+          "name": "FACE_RANGES",
+          "offset": 16112,
+          "type": 4
+        },
+        {
+          "byteLen": 64,
+          "name": "FACE_ID_OFFS",
+          "offset": 16232,
+          "type": 5
+        },
+        {
+          "byteLen": 51,
+          "name": "FACE_ID_CHARS",
+          "offset": 16296,
+          "type": 6
+        },
+        {
+          "byteLen": 312,
+          "name": "EDGE_RANGES",
+          "offset": 16348,
+          "type": 7
+        },
+        {
+          "byteLen": 2016,
+          "name": "EDGE_POSITIONS",
+          "offset": 16660,
+          "type": 8
+        },
+        {
+          "byteLen": 160,
+          "name": "EDGE_ID_OFFS",
+          "offset": 18676,
+          "type": 9
+        },
+        {
+          "byteLen": 147,
+          "name": "EDGE_ID_CHARS",
+          "offset": 18836,
+          "type": 10
+        },
+        {
+          "byteLen": 156,
+          "name": "UNKNOWN",
+          "offset": 18984,
+          "type": 14
+        },
+        {
+          "byteLen": 312,
+          "name": "UNKNOWN",
+          "offset": 19140,
+          "type": 15
+        },
+        {
+          "byteLen": 312,
+          "name": "UNKNOWN",
+          "offset": 19452,
+          "type": 16
+        }
+      ],
+      "sha256": "068f599c8acc5d2acd3ea93866a050096cbcb038b13cbb154acb9f689355c2a0",
+      "triangleCount": 420,
+      "vertexCount": 450,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:8"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -3.624436140060425,
+          15.99339771270752
+        ],
+        "min": [
+          27.80372428894043,
+          -3.847923755645752,
+          14.16292953491211
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "20c133e5-c355-4135-e0bf-5be5f9bdad62",
+      "byteLen": 1804,
+      "edgeCount": 12,
+      "edgePointCount": 24,
+      "faceColors": [],
+      "faceCount": 6,
+      "file": "20c133e5-c355-4135-e0bf-5be5f9bdad62.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 288,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 288,
+          "name": "NORMALS",
+          "offset": 560,
+          "type": 2
+        },
+        {
+          "byteLen": 144,
+          "name": "INDICES",
+          "offset": 848,
+          "type": 3
+        },
+        {
+          "byteLen": 48,
+          "name": "FACE_RANGES",
+          "offset": 992,
+          "type": 4
+        },
+        {
+          "byteLen": 28,
+          "name": "FACE_ID_OFFS",
+          "offset": 1040,
+          "type": 5
+        },
+        {
+          "byteLen": 18,
+          "name": "FACE_ID_CHARS",
+          "offset": 1068,
+          "type": 6
+        },
+        {
+          "byteLen": 96,
+          "name": "EDGE_RANGES",
+          "offset": 1088,
+          "type": 7
+        },
+        {
+          "byteLen": 288,
+          "name": "EDGE_POSITIONS",
+          "offset": 1184,
+          "type": 8
+        },
+        {
+          "byteLen": 52,
+          "name": "EDGE_ID_OFFS",
+          "offset": 1472,
+          "type": 9
+        },
+        {
+          "byteLen": 39,
+          "name": "EDGE_ID_CHARS",
+          "offset": 1524,
+          "type": 10
+        },
+        {
+          "byteLen": 48,
+          "name": "UNKNOWN",
+          "offset": 1564,
+          "type": 14
+        },
+        {
+          "byteLen": 96,
+          "name": "UNKNOWN",
+          "offset": 1612,
+          "type": 15
+        },
+        {
+          "byteLen": 96,
+          "name": "UNKNOWN",
+          "offset": 1708,
+          "type": 16
+        }
+      ],
+      "sha256": "36238d173f6ea94c2998fdd7b4720f81d3f80e506b986bdc1073ca33d31a58f2",
+      "triangleCount": 12,
+      "vertexCount": 24,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:9"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -6.709027290344238,
+          19.866596221923828
+        ],
+        "min": [
+          27.80372428894043,
+          -7.352883815765381,
+          18.0629825592041
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "c5e7c42c-bab9-6c09-eb92-3b99b9fd0f6b",
+      "byteLen": 21976,
+      "edgeCount": 60,
+      "edgePointCount": 212,
+      "faceColors": [],
+      "faceCount": 22,
+      "file": "c5e7c42c-bab9-6c09-eb92-3b99b9fd0f6b.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 5724,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 5724,
+          "name": "NORMALS",
+          "offset": 5996,
+          "type": 2
+        },
+        {
+          "byteLen": 5208,
+          "name": "INDICES",
+          "offset": 11720,
+          "type": 3
+        },
+        {
+          "byteLen": 176,
+          "name": "FACE_RANGES",
+          "offset": 16928,
+          "type": 4
+        },
+        {
+          "byteLen": 92,
+          "name": "FACE_ID_OFFS",
+          "offset": 17104,
+          "type": 5
+        },
+        {
+          "byteLen": 79,
+          "name": "FACE_ID_CHARS",
+          "offset": 17196,
+          "type": 6
+        },
+        {
+          "byteLen": 480,
+          "name": "EDGE_RANGES",
+          "offset": 17276,
+          "type": 7
+        },
+        {
+          "byteLen": 2544,
+          "name": "EDGE_POSITIONS",
+          "offset": 17756,
+          "type": 8
+        },
+        {
+          "byteLen": 244,
+          "name": "EDGE_ID_OFFS",
+          "offset": 20300,
+          "type": 9
+        },
+        {
+          "byteLen": 231,
+          "name": "EDGE_ID_CHARS",
+          "offset": 20544,
+          "type": 10
+        },
+        {
+          "byteLen": 240,
+          "name": "UNKNOWN",
+          "offset": 20776,
+          "type": 14
+        },
+        {
+          "byteLen": 480,
+          "name": "UNKNOWN",
+          "offset": 21016,
+          "type": 15
+        },
+        {
+          "byteLen": 480,
+          "name": "UNKNOWN",
+          "offset": 21496,
+          "type": 16
+        }
+      ],
+      "sha256": "38eee2e05c8a70678d12f83bf5c8ad321e8c502711aa10a0b660a2e401cd6fe7",
+      "triangleCount": 434,
+      "vertexCount": 477,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:10"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          5.928650856018066,
+          19.866596221923828
+        ],
+        "min": [
+          27.80372428894043,
+          5.284794330596924,
+          18.0629825592041
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "02457017-14a6-b688-653e-3d598402bc1c",
+      "byteLen": 21976,
+      "edgeCount": 60,
+      "edgePointCount": 212,
+      "faceColors": [],
+      "faceCount": 22,
+      "file": "02457017-14a6-b688-653e-3d598402bc1c.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 5724,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 5724,
+          "name": "NORMALS",
+          "offset": 5996,
+          "type": 2
+        },
+        {
+          "byteLen": 5208,
+          "name": "INDICES",
+          "offset": 11720,
+          "type": 3
+        },
+        {
+          "byteLen": 176,
+          "name": "FACE_RANGES",
+          "offset": 16928,
+          "type": 4
+        },
+        {
+          "byteLen": 92,
+          "name": "FACE_ID_OFFS",
+          "offset": 17104,
+          "type": 5
+        },
+        {
+          "byteLen": 79,
+          "name": "FACE_ID_CHARS",
+          "offset": 17196,
+          "type": 6
+        },
+        {
+          "byteLen": 480,
+          "name": "EDGE_RANGES",
+          "offset": 17276,
+          "type": 7
+        },
+        {
+          "byteLen": 2544,
+          "name": "EDGE_POSITIONS",
+          "offset": 17756,
+          "type": 8
+        },
+        {
+          "byteLen": 244,
+          "name": "EDGE_ID_OFFS",
+          "offset": 20300,
+          "type": 9
+        },
+        {
+          "byteLen": 231,
+          "name": "EDGE_ID_CHARS",
+          "offset": 20544,
+          "type": 10
+        },
+        {
+          "byteLen": 240,
+          "name": "UNKNOWN",
+          "offset": 20776,
+          "type": 14
+        },
+        {
+          "byteLen": 480,
+          "name": "UNKNOWN",
+          "offset": 21016,
+          "type": 15
+        },
+        {
+          "byteLen": 480,
+          "name": "UNKNOWN",
+          "offset": 21496,
+          "type": 16
+        }
+      ],
+      "sha256": "23cec65c440c111ed1b407c22c9e979a7798d3526f874ed79434fb4621b663c4",
+      "triangleCount": 434,
+      "vertexCount": 477,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:11"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -0.36790600419044495,
+          16.004039764404297
+        ],
+        "min": [
+          27.80372428894043,
+          -1.0436893701553345,
+          14.16292953491211
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "8551047b-4295-eca4-68b1-0e83dbc1839f",
+      "byteLen": 7964,
+      "edgeCount": 27,
+      "edgePointCount": 82,
+      "faceColors": [],
+      "faceCount": 11,
+      "file": "8551047b-4295-eca4-68b1-0e83dbc1839f.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 1944,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 1944,
+          "name": "NORMALS",
+          "offset": 2216,
+          "type": 2
+        },
+        {
+          "byteLen": 1680,
+          "name": "INDICES",
+          "offset": 4160,
+          "type": 3
+        },
+        {
+          "byteLen": 88,
+          "name": "FACE_RANGES",
+          "offset": 5840,
+          "type": 4
+        },
+        {
+          "byteLen": 48,
+          "name": "FACE_ID_OFFS",
+          "offset": 5928,
+          "type": 5
+        },
+        {
+          "byteLen": 35,
+          "name": "FACE_ID_CHARS",
+          "offset": 5976,
+          "type": 6
+        },
+        {
+          "byteLen": 216,
+          "name": "EDGE_RANGES",
+          "offset": 6012,
+          "type": 7
+        },
+        {
+          "byteLen": 984,
+          "name": "EDGE_POSITIONS",
+          "offset": 6228,
+          "type": 8
+        },
+        {
+          "byteLen": 112,
+          "name": "EDGE_ID_OFFS",
+          "offset": 7212,
+          "type": 9
+        },
+        {
+          "byteLen": 99,
+          "name": "EDGE_ID_CHARS",
+          "offset": 7324,
+          "type": 10
+        },
+        {
+          "byteLen": 108,
+          "name": "UNKNOWN",
+          "offset": 7424,
+          "type": 14
+        },
+        {
+          "byteLen": 216,
+          "name": "UNKNOWN",
+          "offset": 7532,
+          "type": 15
+        },
+        {
+          "byteLen": 216,
+          "name": "UNKNOWN",
+          "offset": 7748,
+          "type": 16
+        }
+      ],
+      "sha256": "cd1a373fa1fa9bb3070e553d60591b3f9fffbac5739a161ee96133d0a4914f1c",
+      "triangleCount": 140,
+      "vertexCount": 162,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:12"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -9.987008094787598,
+          12.077380180358887
+        ],
+        "min": [
+          27.80372428894043,
+          -11.131051063537598,
+          10.246912002563477
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "46adaddc-5363-8a34-01d4-e76660c3f420",
+      "byteLen": 2576,
+      "edgeCount": 18,
+      "edgePointCount": 36,
+      "faceColors": [],
+      "faceCount": 8,
+      "file": "46adaddc-5363-8a34-01d4-e76660c3f420.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 432,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 432,
+          "name": "NORMALS",
+          "offset": 704,
+          "type": 2
+        },
+        {
+          "byteLen": 240,
+          "name": "INDICES",
+          "offset": 1136,
+          "type": 3
+        },
+        {
+          "byteLen": 64,
+          "name": "FACE_RANGES",
+          "offset": 1376,
+          "type": 4
+        },
+        {
+          "byteLen": 36,
+          "name": "FACE_ID_OFFS",
+          "offset": 1440,
+          "type": 5
+        },
+        {
+          "byteLen": 24,
+          "name": "FACE_ID_CHARS",
+          "offset": 1476,
+          "type": 6
+        },
+        {
+          "byteLen": 144,
+          "name": "EDGE_RANGES",
+          "offset": 1500,
+          "type": 7
+        },
+        {
+          "byteLen": 432,
+          "name": "EDGE_POSITIONS",
+          "offset": 1644,
+          "type": 8
+        },
+        {
+          "byteLen": 76,
+          "name": "EDGE_ID_OFFS",
+          "offset": 2076,
+          "type": 9
+        },
+        {
+          "byteLen": 63,
+          "name": "EDGE_ID_CHARS",
+          "offset": 2152,
+          "type": 10
+        },
+        {
+          "byteLen": 72,
+          "name": "UNKNOWN",
+          "offset": 2216,
+          "type": 14
+        },
+        {
+          "byteLen": 144,
+          "name": "UNKNOWN",
+          "offset": 2288,
+          "type": 15
+        },
+        {
+          "byteLen": 144,
+          "name": "UNKNOWN",
+          "offset": 2432,
+          "type": 16
+        }
+      ],
+      "sha256": "7e460a770f8543f0e1c2488066820451a0b4fb8998d35f2d7a97630339a10d5a",
+      "triangleCount": 20,
+      "vertexCount": 36,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:13"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          1.4040294885635376,
+          15.972112655639648
+        ],
+        "min": [
+          27.80372428894043,
+          0.22273898124694824,
+          14.16292953491211
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "a80c32d2-8d80-a4dc-1529-1f017d91d9f9",
+      "byteLen": 10588,
+      "edgeCount": 33,
+      "edgePointCount": 128,
+      "faceColors": [],
+      "faceCount": 13,
+      "file": "a80c32d2-8d80-a4dc-1529-1f017d91d9f9.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 2568,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 2568,
+          "name": "NORMALS",
+          "offset": 2840,
+          "type": 2
+        },
+        {
+          "byteLen": 2256,
+          "name": "INDICES",
+          "offset": 5408,
+          "type": 3
+        },
+        {
+          "byteLen": 104,
+          "name": "FACE_RANGES",
+          "offset": 7664,
+          "type": 4
+        },
+        {
+          "byteLen": 56,
+          "name": "FACE_ID_OFFS",
+          "offset": 7768,
+          "type": 5
+        },
+        {
+          "byteLen": 43,
+          "name": "FACE_ID_CHARS",
+          "offset": 7824,
+          "type": 6
+        },
+        {
+          "byteLen": 264,
+          "name": "EDGE_RANGES",
+          "offset": 7868,
+          "type": 7
+        },
+        {
+          "byteLen": 1536,
+          "name": "EDGE_POSITIONS",
+          "offset": 8132,
+          "type": 8
+        },
+        {
+          "byteLen": 136,
+          "name": "EDGE_ID_OFFS",
+          "offset": 9668,
+          "type": 9
+        },
+        {
+          "byteLen": 123,
+          "name": "EDGE_ID_CHARS",
+          "offset": 9804,
+          "type": 10
+        },
+        {
+          "byteLen": 132,
+          "name": "UNKNOWN",
+          "offset": 9928,
+          "type": 14
+        },
+        {
+          "byteLen": 264,
+          "name": "UNKNOWN",
+          "offset": 10060,
+          "type": 15
+        },
+        {
+          "byteLen": 264,
+          "name": "UNKNOWN",
+          "offset": 10324,
+          "type": 16
+        }
+      ],
+      "sha256": "68d85827e00d192fc460b134f3a1b959e0b25155a1832bdffcefb8dd4b312494",
+      "triangleCount": 188,
+      "vertexCount": 214,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:14"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -6.411210536956787,
+          12.077380180358887
+        ],
+        "min": [
+          27.80372428894043,
+          -7.853236198425293,
+          10.246912002563477
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "81a05f85-6240-68d9-007d-a8ee5127d693",
+      "byteLen": 3352,
+      "edgeCount": 24,
+      "edgePointCount": 48,
+      "faceColors": [],
+      "faceCount": 10,
+      "file": "81a05f85-6240-68d9-007d-a8ee5127d693.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 576,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 576,
+          "name": "NORMALS",
+          "offset": 848,
+          "type": 2
+        },
+        {
+          "byteLen": 336,
+          "name": "INDICES",
+          "offset": 1424,
+          "type": 3
+        },
+        {
+          "byteLen": 80,
+          "name": "FACE_RANGES",
+          "offset": 1760,
+          "type": 4
+        },
+        {
+          "byteLen": 44,
+          "name": "FACE_ID_OFFS",
+          "offset": 1840,
+          "type": 5
+        },
+        {
+          "byteLen": 31,
+          "name": "FACE_ID_CHARS",
+          "offset": 1884,
+          "type": 6
+        },
+        {
+          "byteLen": 192,
+          "name": "EDGE_RANGES",
+          "offset": 1916,
+          "type": 7
+        },
+        {
+          "byteLen": 576,
+          "name": "EDGE_POSITIONS",
+          "offset": 2108,
+          "type": 8
+        },
+        {
+          "byteLen": 100,
+          "name": "EDGE_ID_OFFS",
+          "offset": 2684,
+          "type": 9
+        },
+        {
+          "byteLen": 87,
+          "name": "EDGE_ID_CHARS",
+          "offset": 2784,
+          "type": 10
+        },
+        {
+          "byteLen": 96,
+          "name": "UNKNOWN",
+          "offset": 2872,
+          "type": 14
+        },
+        {
+          "byteLen": 192,
+          "name": "UNKNOWN",
+          "offset": 2968,
+          "type": 15
+        },
+        {
+          "byteLen": 192,
+          "name": "UNKNOWN",
+          "offset": 3160,
+          "type": 16
+        }
+      ],
+      "sha256": "1f67402d5229e61c8d53ef8254d79bbc8ee0f85f5e544de10d307339987ed2ac",
+      "triangleCount": 28,
+      "vertexCount": 48,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:15"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -2.572848320007324,
+          23.34653091430664
+        ],
+        "min": [
+          27.80372428894043,
+          -3.6477162837982178,
+          21.994964599609375
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "50499753-75b7-6182-7160-70fb155fce2c",
+      "byteLen": 30320,
+      "edgeCount": 54,
+      "edgePointCount": 276,
+      "faceColors": [],
+      "faceCount": 20,
+      "file": "50499753-75b7-6182-7160-70fb155fce2c.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 8316,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 8316,
+          "name": "NORMALS",
+          "offset": 8588,
+          "type": 2
+        },
+        {
+          "byteLen": 7848,
+          "name": "INDICES",
+          "offset": 16904,
+          "type": 3
+        },
+        {
+          "byteLen": 160,
+          "name": "FACE_RANGES",
+          "offset": 24752,
+          "type": 4
+        },
+        {
+          "byteLen": 84,
+          "name": "FACE_ID_OFFS",
+          "offset": 24912,
+          "type": 5
+        },
+        {
+          "byteLen": 71,
+          "name": "FACE_ID_CHARS",
+          "offset": 24996,
+          "type": 6
+        },
+        {
+          "byteLen": 432,
+          "name": "EDGE_RANGES",
+          "offset": 25068,
+          "type": 7
+        },
+        {
+          "byteLen": 3312,
+          "name": "EDGE_POSITIONS",
+          "offset": 25500,
+          "type": 8
+        },
+        {
+          "byteLen": 220,
+          "name": "EDGE_ID_OFFS",
+          "offset": 28812,
+          "type": 9
+        },
+        {
+          "byteLen": 207,
+          "name": "EDGE_ID_CHARS",
+          "offset": 29032,
+          "type": 10
+        },
+        {
+          "byteLen": 216,
+          "name": "UNKNOWN",
+          "offset": 29240,
+          "type": 14
+        },
+        {
+          "byteLen": 432,
+          "name": "UNKNOWN",
+          "offset": 29456,
+          "type": 15
+        },
+        {
+          "byteLen": 432,
+          "name": "UNKNOWN",
+          "offset": 29888,
+          "type": 16
+        }
+      ],
+      "sha256": "f99540d8577558d919798b7008d0c5e214f7e1fc7ea1eb5961cda01697de0d02",
+      "triangleCount": 654,
+      "vertexCount": 693,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:16"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -0.6110150218009949,
+          19.430513381958008
+        ],
+        "min": [
+          27.80372428894043,
+          -1.6858830451965332,
+          18.078947067260742
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "28638091-6b2d-7412-7e8e-f15335893fff",
+      "byteLen": 30320,
+      "edgeCount": 54,
+      "edgePointCount": 276,
+      "faceColors": [],
+      "faceCount": 20,
+      "file": "28638091-6b2d-7412-7e8e-f15335893fff.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 8316,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 8316,
+          "name": "NORMALS",
+          "offset": 8588,
+          "type": 2
+        },
+        {
+          "byteLen": 7848,
+          "name": "INDICES",
+          "offset": 16904,
+          "type": 3
+        },
+        {
+          "byteLen": 160,
+          "name": "FACE_RANGES",
+          "offset": 24752,
+          "type": 4
+        },
+        {
+          "byteLen": 84,
+          "name": "FACE_ID_OFFS",
+          "offset": 24912,
+          "type": 5
+        },
+        {
+          "byteLen": 71,
+          "name": "FACE_ID_CHARS",
+          "offset": 24996,
+          "type": 6
+        },
+        {
+          "byteLen": 432,
+          "name": "EDGE_RANGES",
+          "offset": 25068,
+          "type": 7
+        },
+        {
+          "byteLen": 3312,
+          "name": "EDGE_POSITIONS",
+          "offset": 25500,
+          "type": 8
+        },
+        {
+          "byteLen": 220,
+          "name": "EDGE_ID_OFFS",
+          "offset": 28812,
+          "type": 9
+        },
+        {
+          "byteLen": 207,
+          "name": "EDGE_ID_CHARS",
+          "offset": 29032,
+          "type": 10
+        },
+        {
+          "byteLen": 216,
+          "name": "UNKNOWN",
+          "offset": 29240,
+          "type": 14
+        },
+        {
+          "byteLen": 432,
+          "name": "UNKNOWN",
+          "offset": 29456,
+          "type": 15
+        },
+        {
+          "byteLen": 432,
+          "name": "UNKNOWN",
+          "offset": 29888,
+          "type": 16
+        }
+      ],
+      "sha256": "8a404e9f6d2d6ea259951d600a82bb832621166976f583d1c8392393e980a74b",
+      "triangleCount": 654,
+      "vertexCount": 693,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:17"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -6.950140953063965,
+          15.514495849609375
+        ],
+        "min": [
+          27.80372428894043,
+          -8.189964294433594,
+          14.136323928833008
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "60b74841-5ed1-386e-b91e-848490260354",
+      "byteLen": 58588,
+      "edgeCount": 51,
+      "edgePointCount": 510,
+      "faceColors": [],
+      "faceCount": 19,
+      "file": "60b74841-5ed1-386e-b91e-848490260354.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 16824,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 16824,
+          "name": "NORMALS",
+          "offset": 17096,
+          "type": 2
+        },
+        {
+          "byteLen": 16416,
+          "name": "INDICES",
+          "offset": 33920,
+          "type": 3
+        },
+        {
+          "byteLen": 152,
+          "name": "FACE_RANGES",
+          "offset": 50336,
+          "type": 4
+        },
+        {
+          "byteLen": 80,
+          "name": "FACE_ID_OFFS",
+          "offset": 50488,
+          "type": 5
+        },
+        {
+          "byteLen": 67,
+          "name": "FACE_ID_CHARS",
+          "offset": 50568,
+          "type": 6
+        },
+        {
+          "byteLen": 408,
+          "name": "EDGE_RANGES",
+          "offset": 50636,
+          "type": 7
+        },
+        {
+          "byteLen": 6120,
+          "name": "EDGE_POSITIONS",
+          "offset": 51044,
+          "type": 8
+        },
+        {
+          "byteLen": 208,
+          "name": "EDGE_ID_OFFS",
+          "offset": 57164,
+          "type": 9
+        },
+        {
+          "byteLen": 195,
+          "name": "EDGE_ID_CHARS",
+          "offset": 57372,
+          "type": 10
+        },
+        {
+          "byteLen": 204,
+          "name": "UNKNOWN",
+          "offset": 57568,
+          "type": 14
+        },
+        {
+          "byteLen": 408,
+          "name": "UNKNOWN",
+          "offset": 57772,
+          "type": 15
+        },
+        {
+          "byteLen": 408,
+          "name": "UNKNOWN",
+          "offset": 58180,
+          "type": 16
+        }
+      ],
+      "sha256": "2cfa2553fc3d73850a2dbbe959b9c19ab44d5741bc6d64eb148f8888097b2911",
+      "triangleCount": 1368,
+      "vertexCount": 1402,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:18"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          5.146445274353027,
+          19.430513381958008
+        ],
+        "min": [
+          27.80372428894043,
+          3.9066221714019775,
+          18.05234146118164
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "17d0a75f-c6a8-5214-2c11-9d3adbd21fce",
+      "byteLen": 58588,
+      "edgeCount": 51,
+      "edgePointCount": 510,
+      "faceColors": [],
+      "faceCount": 19,
+      "file": "17d0a75f-c6a8-5214-2c11-9d3adbd21fce.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 16824,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 16824,
+          "name": "NORMALS",
+          "offset": 17096,
+          "type": 2
+        },
+        {
+          "byteLen": 16416,
+          "name": "INDICES",
+          "offset": 33920,
+          "type": 3
+        },
+        {
+          "byteLen": 152,
+          "name": "FACE_RANGES",
+          "offset": 50336,
+          "type": 4
+        },
+        {
+          "byteLen": 80,
+          "name": "FACE_ID_OFFS",
+          "offset": 50488,
+          "type": 5
+        },
+        {
+          "byteLen": 67,
+          "name": "FACE_ID_CHARS",
+          "offset": 50568,
+          "type": 6
+        },
+        {
+          "byteLen": 408,
+          "name": "EDGE_RANGES",
+          "offset": 50636,
+          "type": 7
+        },
+        {
+          "byteLen": 6120,
+          "name": "EDGE_POSITIONS",
+          "offset": 51044,
+          "type": 8
+        },
+        {
+          "byteLen": 208,
+          "name": "EDGE_ID_OFFS",
+          "offset": 57164,
+          "type": 9
+        },
+        {
+          "byteLen": 195,
+          "name": "EDGE_ID_CHARS",
+          "offset": 57372,
+          "type": 10
+        },
+        {
+          "byteLen": 204,
+          "name": "UNKNOWN",
+          "offset": 57568,
+          "type": 14
+        },
+        {
+          "byteLen": 408,
+          "name": "UNKNOWN",
+          "offset": 57772,
+          "type": 15
+        },
+        {
+          "byteLen": 408,
+          "name": "UNKNOWN",
+          "offset": 58180,
+          "type": 16
+        }
+      ],
+      "sha256": "c960dc1fb80f8729670df5b736018eee2db4d8fbd662102f163152a500c13076",
+      "triangleCount": 1368,
+      "vertexCount": 1402,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:19"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          7.274896144866943,
+          19.430513381958008
+        ],
+        "min": [
+          27.80372428894043,
+          6.035073280334473,
+          18.05234146118164
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "e8a0854a-3b07-99cd-8134-4e9c7e900f5c",
+      "byteLen": 58588,
+      "edgeCount": 51,
+      "edgePointCount": 510,
+      "faceColors": [],
+      "faceCount": 19,
+      "file": "e8a0854a-3b07-99cd-8134-4e9c7e900f5c.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 16824,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 16824,
+          "name": "NORMALS",
+          "offset": 17096,
+          "type": 2
+        },
+        {
+          "byteLen": 16416,
+          "name": "INDICES",
+          "offset": 33920,
+          "type": 3
+        },
+        {
+          "byteLen": 152,
+          "name": "FACE_RANGES",
+          "offset": 50336,
+          "type": 4
+        },
+        {
+          "byteLen": 80,
+          "name": "FACE_ID_OFFS",
+          "offset": 50488,
+          "type": 5
+        },
+        {
+          "byteLen": 67,
+          "name": "FACE_ID_CHARS",
+          "offset": 50568,
+          "type": 6
+        },
+        {
+          "byteLen": 408,
+          "name": "EDGE_RANGES",
+          "offset": 50636,
+          "type": 7
+        },
+        {
+          "byteLen": 6120,
+          "name": "EDGE_POSITIONS",
+          "offset": 51044,
+          "type": 8
+        },
+        {
+          "byteLen": 208,
+          "name": "EDGE_ID_OFFS",
+          "offset": 57164,
+          "type": 9
+        },
+        {
+          "byteLen": 195,
+          "name": "EDGE_ID_CHARS",
+          "offset": 57372,
+          "type": 10
+        },
+        {
+          "byteLen": 204,
+          "name": "UNKNOWN",
+          "offset": 57568,
+          "type": 14
+        },
+        {
+          "byteLen": 408,
+          "name": "UNKNOWN",
+          "offset": 57772,
+          "type": 15
+        },
+        {
+          "byteLen": 408,
+          "name": "UNKNOWN",
+          "offset": 58180,
+          "type": 16
+        }
+      ],
+      "sha256": "72e348f1726deeaa13a28151696617c2ebbbcf5bd86f0b9d3a7b3c80f4edeecb",
+      "triangleCount": 1368,
+      "vertexCount": 1402,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:20"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          4.858937740325928,
+          12.077380180358887
+        ],
+        "min": [
+          27.80372428894043,
+          3.5925092697143555,
+          10.246912002563477
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "24d4356e-0629-a020-46c2-a291e5be90c2",
+      "byteLen": 5728,
+      "edgeCount": 42,
+      "edgePointCount": 84,
+      "faceColors": [],
+      "faceCount": 16,
+      "file": "24d4356e-0629-a020-46c2-a291e5be90c2.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 1008,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 1008,
+          "name": "NORMALS",
+          "offset": 1280,
+          "type": 2
+        },
+        {
+          "byteLen": 672,
+          "name": "INDICES",
+          "offset": 2288,
+          "type": 3
+        },
+        {
+          "byteLen": 128,
+          "name": "FACE_RANGES",
+          "offset": 2960,
+          "type": 4
+        },
+        {
+          "byteLen": 68,
+          "name": "FACE_ID_OFFS",
+          "offset": 3088,
+          "type": 5
+        },
+        {
+          "byteLen": 55,
+          "name": "FACE_ID_CHARS",
+          "offset": 3156,
+          "type": 6
+        },
+        {
+          "byteLen": 336,
+          "name": "EDGE_RANGES",
+          "offset": 3212,
+          "type": 7
+        },
+        {
+          "byteLen": 1008,
+          "name": "EDGE_POSITIONS",
+          "offset": 3548,
+          "type": 8
+        },
+        {
+          "byteLen": 172,
+          "name": "EDGE_ID_OFFS",
+          "offset": 4556,
+          "type": 9
+        },
+        {
+          "byteLen": 159,
+          "name": "EDGE_ID_CHARS",
+          "offset": 4728,
+          "type": 10
+        },
+        {
+          "byteLen": 168,
+          "name": "UNKNOWN",
+          "offset": 4888,
+          "type": 14
+        },
+        {
+          "byteLen": 336,
+          "name": "UNKNOWN",
+          "offset": 5056,
+          "type": 15
+        },
+        {
+          "byteLen": 336,
+          "name": "UNKNOWN",
+          "offset": 5392,
+          "type": 16
+        }
+      ],
+      "sha256": "1b7225df8dc4d474f9304ea6a7e6ef46eef60adbb60392151973bc9449d9f4ed",
+      "triangleCount": 56,
+      "vertexCount": 84,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:21"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          6.3686418533325195,
+          15.99339771270752
+        ],
+        "min": [
+          27.80372428894043,
+          5.102212905883789,
+          14.16292953491211
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "f9ab0180-666c-a93d-6909-eaac132436af",
+      "byteLen": 5728,
+      "edgeCount": 42,
+      "edgePointCount": 84,
+      "faceColors": [],
+      "faceCount": 16,
+      "file": "f9ab0180-666c-a93d-6909-eaac132436af.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 1008,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 1008,
+          "name": "NORMALS",
+          "offset": 1280,
+          "type": 2
+        },
+        {
+          "byteLen": 672,
+          "name": "INDICES",
+          "offset": 2288,
+          "type": 3
+        },
+        {
+          "byteLen": 128,
+          "name": "FACE_RANGES",
+          "offset": 2960,
+          "type": 4
+        },
+        {
+          "byteLen": 68,
+          "name": "FACE_ID_OFFS",
+          "offset": 3088,
+          "type": 5
+        },
+        {
+          "byteLen": 55,
+          "name": "FACE_ID_CHARS",
+          "offset": 3156,
+          "type": 6
+        },
+        {
+          "byteLen": 336,
+          "name": "EDGE_RANGES",
+          "offset": 3212,
+          "type": 7
+        },
+        {
+          "byteLen": 1008,
+          "name": "EDGE_POSITIONS",
+          "offset": 3548,
+          "type": 8
+        },
+        {
+          "byteLen": 172,
+          "name": "EDGE_ID_OFFS",
+          "offset": 4556,
+          "type": 9
+        },
+        {
+          "byteLen": 159,
+          "name": "EDGE_ID_CHARS",
+          "offset": 4728,
+          "type": 10
+        },
+        {
+          "byteLen": 168,
+          "name": "UNKNOWN",
+          "offset": 4888,
+          "type": 14
+        },
+        {
+          "byteLen": 336,
+          "name": "UNKNOWN",
+          "offset": 5056,
+          "type": 15
+        },
+        {
+          "byteLen": 336,
+          "name": "UNKNOWN",
+          "offset": 5392,
+          "type": 16
+        }
+      ],
+      "sha256": "be0ec44cfd9afa49dab3bb1420c75bef0337155a9418d36ee2f3a95f52932cbc",
+      "triangleCount": 56,
+      "vertexCount": 84,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:22"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -5.373424053192139,
+          19.430513381958008
+        ],
+        "min": [
+          27.80372428894043,
+          -6.591962814331055,
+          18.05234146118164
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "438747ba-e0c7-1a06-ef87-ed71a927ddd5",
+      "byteLen": 56200,
+      "edgeCount": 60,
+      "edgePointCount": 508,
+      "faceColors": [],
+      "faceCount": 22,
+      "file": "438747ba-e0c7-1a06-ef87-ed71a927ddd5.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 15936,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 15936,
+          "name": "NORMALS",
+          "offset": 16208,
+          "type": 2
+        },
+        {
+          "byteLen": 15456,
+          "name": "INDICES",
+          "offset": 32144,
+          "type": 3
+        },
+        {
+          "byteLen": 176,
+          "name": "FACE_RANGES",
+          "offset": 47600,
+          "type": 4
+        },
+        {
+          "byteLen": 92,
+          "name": "FACE_ID_OFFS",
+          "offset": 47776,
+          "type": 5
+        },
+        {
+          "byteLen": 79,
+          "name": "FACE_ID_CHARS",
+          "offset": 47868,
+          "type": 6
+        },
+        {
+          "byteLen": 480,
+          "name": "EDGE_RANGES",
+          "offset": 47948,
+          "type": 7
+        },
+        {
+          "byteLen": 6096,
+          "name": "EDGE_POSITIONS",
+          "offset": 48428,
+          "type": 8
+        },
+        {
+          "byteLen": 244,
+          "name": "EDGE_ID_OFFS",
+          "offset": 54524,
+          "type": 9
+        },
+        {
+          "byteLen": 231,
+          "name": "EDGE_ID_CHARS",
+          "offset": 54768,
+          "type": 10
+        },
+        {
+          "byteLen": 240,
+          "name": "UNKNOWN",
+          "offset": 55000,
+          "type": 14
+        },
+        {
+          "byteLen": 480,
+          "name": "UNKNOWN",
+          "offset": 55240,
+          "type": 15
+        },
+        {
+          "byteLen": 480,
+          "name": "UNKNOWN",
+          "offset": 55720,
+          "type": 16
+        }
+      ],
+      "sha256": "ea3b09e43b2872015c91fc22cb35cb02123d0c04e78697dc08c4346efba81497",
+      "triangleCount": 1288,
+      "vertexCount": 1328,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:23"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -4.119300842285156,
+          15.514495849609375
+        ],
+        "min": [
+          27.80372428894043,
+          -5.337839603424072,
+          14.136323928833008
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "98f6ed47-9d34-3511-26e0-c4d68abe89ca",
+      "byteLen": 56200,
+      "edgeCount": 60,
+      "edgePointCount": 508,
+      "faceColors": [],
+      "faceCount": 22,
+      "file": "98f6ed47-9d34-3511-26e0-c4d68abe89ca.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 15936,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 15936,
+          "name": "NORMALS",
+          "offset": 16208,
+          "type": 2
+        },
+        {
+          "byteLen": 15456,
+          "name": "INDICES",
+          "offset": 32144,
+          "type": 3
+        },
+        {
+          "byteLen": 176,
+          "name": "FACE_RANGES",
+          "offset": 47600,
+          "type": 4
+        },
+        {
+          "byteLen": 92,
+          "name": "FACE_ID_OFFS",
+          "offset": 47776,
+          "type": 5
+        },
+        {
+          "byteLen": 79,
+          "name": "FACE_ID_CHARS",
+          "offset": 47868,
+          "type": 6
+        },
+        {
+          "byteLen": 480,
+          "name": "EDGE_RANGES",
+          "offset": 47948,
+          "type": 7
+        },
+        {
+          "byteLen": 6096,
+          "name": "EDGE_POSITIONS",
+          "offset": 48428,
+          "type": 8
+        },
+        {
+          "byteLen": 244,
+          "name": "EDGE_ID_OFFS",
+          "offset": 54524,
+          "type": 9
+        },
+        {
+          "byteLen": 231,
+          "name": "EDGE_ID_CHARS",
+          "offset": 54768,
+          "type": 10
+        },
+        {
+          "byteLen": 240,
+          "name": "UNKNOWN",
+          "offset": 55000,
+          "type": 14
+        },
+        {
+          "byteLen": 480,
+          "name": "UNKNOWN",
+          "offset": 55240,
+          "type": 15
+        },
+        {
+          "byteLen": 480,
+          "name": "UNKNOWN",
+          "offset": 55720,
+          "type": 16
+        }
+      ],
+      "sha256": "eb459a9a28171a19945f8e78c86a792452bbea01b2b3f1e73e4618730675451b",
+      "triangleCount": 1288,
+      "vertexCount": 1328,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:24"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          6.446463108062744,
+          23.34653091430664
+        ],
+        "min": [
+          27.80372428894043,
+          5.227924823760986,
+          21.968358993530273
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "a7f9d97a-eaba-bc75-7a84-ee4550068bbc",
+      "byteLen": 56200,
+      "edgeCount": 60,
+      "edgePointCount": 508,
+      "faceColors": [],
+      "faceCount": 22,
+      "file": "a7f9d97a-eaba-bc75-7a84-ee4550068bbc.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 15936,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 15936,
+          "name": "NORMALS",
+          "offset": 16208,
+          "type": 2
+        },
+        {
+          "byteLen": 15456,
+          "name": "INDICES",
+          "offset": 32144,
+          "type": 3
+        },
+        {
+          "byteLen": 176,
+          "name": "FACE_RANGES",
+          "offset": 47600,
+          "type": 4
+        },
+        {
+          "byteLen": 92,
+          "name": "FACE_ID_OFFS",
+          "offset": 47776,
+          "type": 5
+        },
+        {
+          "byteLen": 79,
+          "name": "FACE_ID_CHARS",
+          "offset": 47868,
+          "type": 6
+        },
+        {
+          "byteLen": 480,
+          "name": "EDGE_RANGES",
+          "offset": 47948,
+          "type": 7
+        },
+        {
+          "byteLen": 6096,
+          "name": "EDGE_POSITIONS",
+          "offset": 48428,
+          "type": 8
+        },
+        {
+          "byteLen": 244,
+          "name": "EDGE_ID_OFFS",
+          "offset": 54524,
+          "type": 9
+        },
+        {
+          "byteLen": 231,
+          "name": "EDGE_ID_CHARS",
+          "offset": 54768,
+          "type": 10
+        },
+        {
+          "byteLen": 240,
+          "name": "UNKNOWN",
+          "offset": 55000,
+          "type": 14
+        },
+        {
+          "byteLen": 480,
+          "name": "UNKNOWN",
+          "offset": 55240,
+          "type": 15
+        },
+        {
+          "byteLen": 480,
+          "name": "UNKNOWN",
+          "offset": 55720,
+          "type": 16
+        }
+      ],
+      "sha256": "c61c25c4f2145a1fc696f253b024c9acd552e8949880c96cd5b97235a50a3b3b",
+      "triangleCount": 1288,
+      "vertexCount": 1328,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:25"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          10.636185646057129,
+          16.004039764404297
+        ],
+        "min": [
+          27.80372428894043,
+          9.438932418823242,
+          14.131002426147461
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "40e37e1f-11cc-f160-3e35-de8273ffeb6c",
+      "byteLen": 85232,
+      "edgeCount": 90,
+      "edgePointCount": 772,
+      "faceColors": [],
+      "faceCount": 32,
+      "file": "40e37e1f-11cc-f160-3e35-de8273ffeb6c.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 24240,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 24240,
+          "name": "NORMALS",
+          "offset": 24512,
+          "type": 2
+        },
+        {
+          "byteLen": 23472,
+          "name": "INDICES",
+          "offset": 48752,
+          "type": 3
+        },
+        {
+          "byteLen": 256,
+          "name": "FACE_RANGES",
+          "offset": 72224,
+          "type": 4
+        },
+        {
+          "byteLen": 132,
+          "name": "FACE_ID_OFFS",
+          "offset": 72480,
+          "type": 5
+        },
+        {
+          "byteLen": 119,
+          "name": "FACE_ID_CHARS",
+          "offset": 72612,
+          "type": 6
+        },
+        {
+          "byteLen": 720,
+          "name": "EDGE_RANGES",
+          "offset": 72732,
+          "type": 7
+        },
+        {
+          "byteLen": 9264,
+          "name": "EDGE_POSITIONS",
+          "offset": 73452,
+          "type": 8
+        },
+        {
+          "byteLen": 364,
+          "name": "EDGE_ID_OFFS",
+          "offset": 82716,
+          "type": 9
+        },
+        {
+          "byteLen": 351,
+          "name": "EDGE_ID_CHARS",
+          "offset": 83080,
+          "type": 10
+        },
+        {
+          "byteLen": 360,
+          "name": "UNKNOWN",
+          "offset": 83432,
+          "type": 14
+        },
+        {
+          "byteLen": 720,
+          "name": "UNKNOWN",
+          "offset": 83792,
+          "type": 15
+        },
+        {
+          "byteLen": 720,
+          "name": "UNKNOWN",
+          "offset": 84512,
+          "type": 16
+        }
+      ],
+      "sha256": "a76a7ed5c83f8e633487ee0623f6e899eae2d2aa7c1563323dd3fc0a339f4471",
+      "triangleCount": 1956,
+      "vertexCount": 2020,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:26"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -3.919093608856201,
+          23.34653091430664
+        ],
+        "min": [
+          27.80372428894043,
+          -5.1482744216918945,
+          21.968358993530273
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "7f0a5aee-8618-7075-d570-331d47803df5",
+      "byteLen": 79248,
+      "edgeCount": 111,
+      "edgePointCount": 676,
+      "faceColors": [],
+      "faceCount": 39,
+      "file": "7f0a5aee-8618-7075-d570-331d47803df5.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 22332,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 22332,
+          "name": "NORMALS",
+          "offset": 22604,
+          "type": 2
+        },
+        {
+          "byteLen": 21576,
+          "name": "INDICES",
+          "offset": 44936,
+          "type": 3
+        },
+        {
+          "byteLen": 312,
+          "name": "FACE_RANGES",
+          "offset": 66512,
+          "type": 4
+        },
+        {
+          "byteLen": 160,
+          "name": "FACE_ID_OFFS",
+          "offset": 66824,
+          "type": 5
+        },
+        {
+          "byteLen": 147,
+          "name": "FACE_ID_CHARS",
+          "offset": 66984,
+          "type": 6
+        },
+        {
+          "byteLen": 888,
+          "name": "EDGE_RANGES",
+          "offset": 67132,
+          "type": 7
+        },
+        {
+          "byteLen": 8112,
+          "name": "EDGE_POSITIONS",
+          "offset": 68020,
+          "type": 8
+        },
+        {
+          "byteLen": 448,
+          "name": "EDGE_ID_OFFS",
+          "offset": 76132,
+          "type": 9
+        },
+        {
+          "byteLen": 447,
+          "name": "EDGE_ID_CHARS",
+          "offset": 76580,
+          "type": 10
+        },
+        {
+          "byteLen": 444,
+          "name": "UNKNOWN",
+          "offset": 77028,
+          "type": 14
+        },
+        {
+          "byteLen": 888,
+          "name": "UNKNOWN",
+          "offset": 77472,
+          "type": 15
+        },
+        {
+          "byteLen": 888,
+          "name": "UNKNOWN",
+          "offset": 78360,
+          "type": 16
+        }
+      ],
+      "sha256": "ea266693f557fc919733d6dbdc31abd3cd5e20f09592a87d2b2d123e58e89773",
+      "triangleCount": 1798,
+      "vertexCount": 1861,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:27"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          2.897270917892456,
+          23.34653091430664
+        ],
+        "min": [
+          27.80372428894043,
+          1.6680902242660522,
+          21.968358993530273
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "5e971b2e-a69f-5ef4-07f0-dcea3debfe08",
+      "byteLen": 79248,
+      "edgeCount": 111,
+      "edgePointCount": 676,
+      "faceColors": [],
+      "faceCount": 39,
+      "file": "5e971b2e-a69f-5ef4-07f0-dcea3debfe08.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 22332,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 22332,
+          "name": "NORMALS",
+          "offset": 22604,
+          "type": 2
+        },
+        {
+          "byteLen": 21576,
+          "name": "INDICES",
+          "offset": 44936,
+          "type": 3
+        },
+        {
+          "byteLen": 312,
+          "name": "FACE_RANGES",
+          "offset": 66512,
+          "type": 4
+        },
+        {
+          "byteLen": 160,
+          "name": "FACE_ID_OFFS",
+          "offset": 66824,
+          "type": 5
+        },
+        {
+          "byteLen": 147,
+          "name": "FACE_ID_CHARS",
+          "offset": 66984,
+          "type": 6
+        },
+        {
+          "byteLen": 888,
+          "name": "EDGE_RANGES",
+          "offset": 67132,
+          "type": 7
+        },
+        {
+          "byteLen": 8112,
+          "name": "EDGE_POSITIONS",
+          "offset": 68020,
+          "type": 8
+        },
+        {
+          "byteLen": 448,
+          "name": "EDGE_ID_OFFS",
+          "offset": 76132,
+          "type": 9
+        },
+        {
+          "byteLen": 447,
+          "name": "EDGE_ID_CHARS",
+          "offset": 76580,
+          "type": 10
+        },
+        {
+          "byteLen": 444,
+          "name": "UNKNOWN",
+          "offset": 77028,
+          "type": 14
+        },
+        {
+          "byteLen": 888,
+          "name": "UNKNOWN",
+          "offset": 77472,
+          "type": 15
+        },
+        {
+          "byteLen": 888,
+          "name": "UNKNOWN",
+          "offset": 78360,
+          "type": 16
+        }
+      ],
+      "sha256": "0bef69d8394c4ed57e8599cb3630c3501994e7a1d3c33d7b7e9dc2f7640e2b98",
+      "triangleCount": 1798,
+      "vertexCount": 1861,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:28"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          0.5860724449157715,
+          12.088022232055664
+        ],
+        "min": [
+          27.80372428894043,
+          -0.6296391487121582,
+          10.246912002563477
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "ed085b17-69b2-8946-7c82-bffdd5f8baeb",
+      "byteLen": 46464,
+      "edgeCount": 66,
+      "edgePointCount": 444,
+      "faceColors": [],
+      "faceCount": 24,
+      "file": "ed085b17-69b2-8946-7c82-bffdd5f8baeb.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 12888,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 12888,
+          "name": "NORMALS",
+          "offset": 13160,
+          "type": 2
+        },
+        {
+          "byteLen": 12336,
+          "name": "INDICES",
+          "offset": 26048,
+          "type": 3
+        },
+        {
+          "byteLen": 192,
+          "name": "FACE_RANGES",
+          "offset": 38384,
+          "type": 4
+        },
+        {
+          "byteLen": 100,
+          "name": "FACE_ID_OFFS",
+          "offset": 38576,
+          "type": 5
+        },
+        {
+          "byteLen": 87,
+          "name": "FACE_ID_CHARS",
+          "offset": 38676,
+          "type": 6
+        },
+        {
+          "byteLen": 528,
+          "name": "EDGE_RANGES",
+          "offset": 38764,
+          "type": 7
+        },
+        {
+          "byteLen": 5328,
+          "name": "EDGE_POSITIONS",
+          "offset": 39292,
+          "type": 8
+        },
+        {
+          "byteLen": 268,
+          "name": "EDGE_ID_OFFS",
+          "offset": 44620,
+          "type": 9
+        },
+        {
+          "byteLen": 255,
+          "name": "EDGE_ID_CHARS",
+          "offset": 44888,
+          "type": 10
+        },
+        {
+          "byteLen": 264,
+          "name": "UNKNOWN",
+          "offset": 45144,
+          "type": 14
+        },
+        {
+          "byteLen": 528,
+          "name": "UNKNOWN",
+          "offset": 45408,
+          "type": 15
+        },
+        {
+          "byteLen": 528,
+          "name": "UNKNOWN",
+          "offset": 45936,
+          "type": 16
+        }
+      ],
+      "sha256": "ba781a78977917ba4bd9e444c72a3cd32b32ac55f822d3b5ea4cbe0d293677a9",
+      "triangleCount": 1028,
+      "vertexCount": 1074,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:29"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          3.4275546073913574,
+          12.088022232055664
+        ],
+        "min": [
+          27.80372428894043,
+          2.2118430137634277,
+          10.246912002563477
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "59db9680-3c60-13e7-3aea-17f23bc475ec",
+      "byteLen": 46512,
+      "edgeCount": 66,
+      "edgePointCount": 444,
+      "faceColors": [],
+      "faceCount": 24,
+      "file": "59db9680-3c60-13e7-3aea-17f23bc475ec.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 12900,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 12900,
+          "name": "NORMALS",
+          "offset": 13172,
+          "type": 2
+        },
+        {
+          "byteLen": 12360,
+          "name": "INDICES",
+          "offset": 26072,
+          "type": 3
+        },
+        {
+          "byteLen": 192,
+          "name": "FACE_RANGES",
+          "offset": 38432,
+          "type": 4
+        },
+        {
+          "byteLen": 100,
+          "name": "FACE_ID_OFFS",
+          "offset": 38624,
+          "type": 5
+        },
+        {
+          "byteLen": 87,
+          "name": "FACE_ID_CHARS",
+          "offset": 38724,
+          "type": 6
+        },
+        {
+          "byteLen": 528,
+          "name": "EDGE_RANGES",
+          "offset": 38812,
+          "type": 7
+        },
+        {
+          "byteLen": 5328,
+          "name": "EDGE_POSITIONS",
+          "offset": 39340,
+          "type": 8
+        },
+        {
+          "byteLen": 268,
+          "name": "EDGE_ID_OFFS",
+          "offset": 44668,
+          "type": 9
+        },
+        {
+          "byteLen": 255,
+          "name": "EDGE_ID_CHARS",
+          "offset": 44936,
+          "type": 10
+        },
+        {
+          "byteLen": 264,
+          "name": "UNKNOWN",
+          "offset": 45192,
+          "type": 14
+        },
+        {
+          "byteLen": 528,
+          "name": "UNKNOWN",
+          "offset": 45456,
+          "type": 15
+        },
+        {
+          "byteLen": 528,
+          "name": "UNKNOWN",
+          "offset": 45984,
+          "type": 16
+        }
+      ],
+      "sha256": "c81b0785a26ca5b781d12c5da82872154378929226672659ce415f60ed63f568",
+      "triangleCount": 1030,
+      "vertexCount": 1075,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:30"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          9.199481964111328,
+          16.004039764404297
+        ],
+        "min": [
+          27.80372428894043,
+          7.98376989364624,
+          14.16292953491211
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "e8bb0b12-de3c-9c3c-7cb2-28e35726be69",
+      "byteLen": 46560,
+      "edgeCount": 66,
+      "edgePointCount": 444,
+      "faceColors": [],
+      "faceCount": 24,
+      "file": "e8bb0b12-de3c-9c3c-7cb2-28e35726be69.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 12912,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 12912,
+          "name": "NORMALS",
+          "offset": 13184,
+          "type": 2
+        },
+        {
+          "byteLen": 12384,
+          "name": "INDICES",
+          "offset": 26096,
+          "type": 3
+        },
+        {
+          "byteLen": 192,
+          "name": "FACE_RANGES",
+          "offset": 38480,
+          "type": 4
+        },
+        {
+          "byteLen": 100,
+          "name": "FACE_ID_OFFS",
+          "offset": 38672,
+          "type": 5
+        },
+        {
+          "byteLen": 87,
+          "name": "FACE_ID_CHARS",
+          "offset": 38772,
+          "type": 6
+        },
+        {
+          "byteLen": 528,
+          "name": "EDGE_RANGES",
+          "offset": 38860,
+          "type": 7
+        },
+        {
+          "byteLen": 5328,
+          "name": "EDGE_POSITIONS",
+          "offset": 39388,
+          "type": 8
+        },
+        {
+          "byteLen": 268,
+          "name": "EDGE_ID_OFFS",
+          "offset": 44716,
+          "type": 9
+        },
+        {
+          "byteLen": 255,
+          "name": "EDGE_ID_CHARS",
+          "offset": 44984,
+          "type": 10
+        },
+        {
+          "byteLen": 264,
+          "name": "UNKNOWN",
+          "offset": 45240,
+          "type": 14
+        },
+        {
+          "byteLen": 528,
+          "name": "UNKNOWN",
+          "offset": 45504,
+          "type": 15
+        },
+        {
+          "byteLen": 528,
+          "name": "UNKNOWN",
+          "offset": 46032,
+          "type": 16
+        }
+      ],
+      "sha256": "e66e948a747fd20c3b8db8ea98c49d2f95f8fedbb23d33cc4ba887eb8f756a80",
+      "triangleCount": 1032,
+      "vertexCount": 1076,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:31"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -3.947361946105957,
+          19.430513381958008
+        ],
+        "min": [
+          27.80372428894043,
+          -5.102046966552734,
+          17.573440551757812
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "e6e753c5-37bf-4d93-fe83-982faa27b6c9",
+      "byteLen": 55564,
+      "edgeCount": 69,
+      "edgePointCount": 484,
+      "faceColors": [],
+      "faceCount": 25,
+      "file": "e6e753c5-37bf-4d93-fe83-982faa27b6c9.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 15720,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 15720,
+          "name": "NORMALS",
+          "offset": 15992,
+          "type": 2
+        },
+        {
+          "byteLen": 15168,
+          "name": "INDICES",
+          "offset": 31712,
+          "type": 3
+        },
+        {
+          "byteLen": 200,
+          "name": "FACE_RANGES",
+          "offset": 46880,
+          "type": 4
+        },
+        {
+          "byteLen": 104,
+          "name": "FACE_ID_OFFS",
+          "offset": 47080,
+          "type": 5
+        },
+        {
+          "byteLen": 91,
+          "name": "FACE_ID_CHARS",
+          "offset": 47184,
+          "type": 6
+        },
+        {
+          "byteLen": 552,
+          "name": "EDGE_RANGES",
+          "offset": 47276,
+          "type": 7
+        },
+        {
+          "byteLen": 5808,
+          "name": "EDGE_POSITIONS",
+          "offset": 47828,
+          "type": 8
+        },
+        {
+          "byteLen": 280,
+          "name": "EDGE_ID_OFFS",
+          "offset": 53636,
+          "type": 9
+        },
+        {
+          "byteLen": 267,
+          "name": "EDGE_ID_CHARS",
+          "offset": 53916,
+          "type": 10
+        },
+        {
+          "byteLen": 276,
+          "name": "UNKNOWN",
+          "offset": 54184,
+          "type": 14
+        },
+        {
+          "byteLen": 552,
+          "name": "UNKNOWN",
+          "offset": 54460,
+          "type": 15
+        },
+        {
+          "byteLen": 552,
+          "name": "UNKNOWN",
+          "offset": 55012,
+          "type": 16
+        }
+      ],
+      "sha256": "d03a2197c9f4631098628aeebe6c52f2bab2ed45ce42d313ba5a81a0772ad04f",
+      "triangleCount": 1264,
+      "vertexCount": 1310,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:32"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -2.526620864868164,
+          19.430513381958008
+        ],
+        "min": [
+          27.80372428894043,
+          -3.6813058853149414,
+          17.573440551757812
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "988d3034-b2bd-b6a9-9dd6-aaa0bda2e5fd",
+      "byteLen": 55564,
+      "edgeCount": 69,
+      "edgePointCount": 484,
+      "faceColors": [],
+      "faceCount": 25,
+      "file": "988d3034-b2bd-b6a9-9dd6-aaa0bda2e5fd.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 15720,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 15720,
+          "name": "NORMALS",
+          "offset": 15992,
+          "type": 2
+        },
+        {
+          "byteLen": 15168,
+          "name": "INDICES",
+          "offset": 31712,
+          "type": 3
+        },
+        {
+          "byteLen": 200,
+          "name": "FACE_RANGES",
+          "offset": 46880,
+          "type": 4
+        },
+        {
+          "byteLen": 104,
+          "name": "FACE_ID_OFFS",
+          "offset": 47080,
+          "type": 5
+        },
+        {
+          "byteLen": 91,
+          "name": "FACE_ID_CHARS",
+          "offset": 47184,
+          "type": 6
+        },
+        {
+          "byteLen": 552,
+          "name": "EDGE_RANGES",
+          "offset": 47276,
+          "type": 7
+        },
+        {
+          "byteLen": 5808,
+          "name": "EDGE_POSITIONS",
+          "offset": 47828,
+          "type": 8
+        },
+        {
+          "byteLen": 280,
+          "name": "EDGE_ID_OFFS",
+          "offset": 53636,
+          "type": 9
+        },
+        {
+          "byteLen": 267,
+          "name": "EDGE_ID_CHARS",
+          "offset": 53916,
+          "type": 10
+        },
+        {
+          "byteLen": 276,
+          "name": "UNKNOWN",
+          "offset": 54184,
+          "type": 14
+        },
+        {
+          "byteLen": 552,
+          "name": "UNKNOWN",
+          "offset": 54460,
+          "type": 15
+        },
+        {
+          "byteLen": 552,
+          "name": "UNKNOWN",
+          "offset": 55012,
+          "type": 16
+        }
+      ],
+      "sha256": "0c590ecd92ca6efe6efe304d3cb1f761266e814981efe899b8bb98060202cad9",
+      "triangleCount": 1264,
+      "vertexCount": 1310,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:33"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -5.614537715911865,
+          15.99339771270752
+        ],
+        "min": [
+          27.80372428894043,
+          -6.769222736358643,
+          14.136323928833008
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "3730cba4-d296-fca0-7a83-a2487e3c5db8",
+      "byteLen": 55368,
+      "edgeCount": 66,
+      "edgePointCount": 482,
+      "faceColors": [],
+      "faceCount": 24,
+      "file": "3730cba4-d296-fca0-7a83-a2487e3c5db8.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 15696,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 15696,
+          "name": "NORMALS",
+          "offset": 15968,
+          "type": 2
+        },
+        {
+          "byteLen": 15168,
+          "name": "INDICES",
+          "offset": 31664,
+          "type": 3
+        },
+        {
+          "byteLen": 192,
+          "name": "FACE_RANGES",
+          "offset": 46832,
+          "type": 4
+        },
+        {
+          "byteLen": 100,
+          "name": "FACE_ID_OFFS",
+          "offset": 47024,
+          "type": 5
+        },
+        {
+          "byteLen": 87,
+          "name": "FACE_ID_CHARS",
+          "offset": 47124,
+          "type": 6
+        },
+        {
+          "byteLen": 528,
+          "name": "EDGE_RANGES",
+          "offset": 47212,
+          "type": 7
+        },
+        {
+          "byteLen": 5784,
+          "name": "EDGE_POSITIONS",
+          "offset": 47740,
+          "type": 8
+        },
+        {
+          "byteLen": 268,
+          "name": "EDGE_ID_OFFS",
+          "offset": 53524,
+          "type": 9
+        },
+        {
+          "byteLen": 255,
+          "name": "EDGE_ID_CHARS",
+          "offset": 53792,
+          "type": 10
+        },
+        {
+          "byteLen": 264,
+          "name": "UNKNOWN",
+          "offset": 54048,
+          "type": 14
+        },
+        {
+          "byteLen": 528,
+          "name": "UNKNOWN",
+          "offset": 54312,
+          "type": 15
+        },
+        {
+          "byteLen": 528,
+          "name": "UNKNOWN",
+          "offset": 54840,
+          "type": 16
+        }
+      ],
+      "sha256": "c59b54747fc08d4321f999fd73aae8c54b8e07e7220fb3cf9cfbdf8a01233c7e",
+      "triangleCount": 1264,
+      "vertexCount": 1308,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:34"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -1.15742826461792,
+          23.82543182373047
+        ],
+        "min": [
+          27.80372428894043,
+          -2.3121132850646973,
+          21.968358993530273
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "611ab024-5bf4-a9ed-467e-4f0024a4da15",
+      "byteLen": 55368,
+      "edgeCount": 66,
+      "edgePointCount": 482,
+      "faceColors": [],
+      "faceCount": 24,
+      "file": "611ab024-5bf4-a9ed-467e-4f0024a4da15.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 15696,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 15696,
+          "name": "NORMALS",
+          "offset": 15968,
+          "type": 2
+        },
+        {
+          "byteLen": 15168,
+          "name": "INDICES",
+          "offset": 31664,
+          "type": 3
+        },
+        {
+          "byteLen": 192,
+          "name": "FACE_RANGES",
+          "offset": 46832,
+          "type": 4
+        },
+        {
+          "byteLen": 100,
+          "name": "FACE_ID_OFFS",
+          "offset": 47024,
+          "type": 5
+        },
+        {
+          "byteLen": 87,
+          "name": "FACE_ID_CHARS",
+          "offset": 47124,
+          "type": 6
+        },
+        {
+          "byteLen": 528,
+          "name": "EDGE_RANGES",
+          "offset": 47212,
+          "type": 7
+        },
+        {
+          "byteLen": 5784,
+          "name": "EDGE_POSITIONS",
+          "offset": 47740,
+          "type": 8
+        },
+        {
+          "byteLen": 268,
+          "name": "EDGE_ID_OFFS",
+          "offset": 53524,
+          "type": 9
+        },
+        {
+          "byteLen": 255,
+          "name": "EDGE_ID_CHARS",
+          "offset": 53792,
+          "type": 10
+        },
+        {
+          "byteLen": 264,
+          "name": "UNKNOWN",
+          "offset": 54048,
+          "type": 14
+        },
+        {
+          "byteLen": 528,
+          "name": "UNKNOWN",
+          "offset": 54312,
+          "type": 15
+        },
+        {
+          "byteLen": 528,
+          "name": "UNKNOWN",
+          "offset": 54840,
+          "type": 16
+        }
+      ],
+      "sha256": "01b81388cdceb10449f4fa7a87739535ddc9fa064f67a65021e427f283ae4d39",
+      "triangleCount": 1264,
+      "vertexCount": 1308,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:35"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          10.563186645507812,
+          12.056096076965332
+        ],
+        "min": [
+          27.80372428894043,
+          9.349969863891602,
+          10.214984893798828
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "c191ec1c-b439-5ce5-6f62-d5501088bcb5",
+      "byteLen": 52488,
+      "edgeCount": 66,
+      "edgePointCount": 486,
+      "faceColors": [],
+      "faceCount": 24,
+      "file": "c191ec1c-b439-5ce5-6f62-d5501088bcb5.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 14736,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 14736,
+          "name": "NORMALS",
+          "offset": 15008,
+          "type": 2
+        },
+        {
+          "byteLen": 14160,
+          "name": "INDICES",
+          "offset": 29744,
+          "type": 3
+        },
+        {
+          "byteLen": 192,
+          "name": "FACE_RANGES",
+          "offset": 43904,
+          "type": 4
+        },
+        {
+          "byteLen": 100,
+          "name": "FACE_ID_OFFS",
+          "offset": 44096,
+          "type": 5
+        },
+        {
+          "byteLen": 87,
+          "name": "FACE_ID_CHARS",
+          "offset": 44196,
+          "type": 6
+        },
+        {
+          "byteLen": 528,
+          "name": "EDGE_RANGES",
+          "offset": 44284,
+          "type": 7
+        },
+        {
+          "byteLen": 5832,
+          "name": "EDGE_POSITIONS",
+          "offset": 44812,
+          "type": 8
+        },
+        {
+          "byteLen": 268,
+          "name": "EDGE_ID_OFFS",
+          "offset": 50644,
+          "type": 9
+        },
+        {
+          "byteLen": 255,
+          "name": "EDGE_ID_CHARS",
+          "offset": 50912,
+          "type": 10
+        },
+        {
+          "byteLen": 264,
+          "name": "UNKNOWN",
+          "offset": 51168,
+          "type": 14
+        },
+        {
+          "byteLen": 528,
+          "name": "UNKNOWN",
+          "offset": 51432,
+          "type": 15
+        },
+        {
+          "byteLen": 528,
+          "name": "UNKNOWN",
+          "offset": 51960,
+          "type": 16
+        }
+      ],
+      "sha256": "c8628909959a4bf478cfeb41a139fd72247c5743232f429ed0d3161d0bf1a81a",
+      "triangleCount": 1180,
+      "vertexCount": 1228,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:36"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          2.0227768421173096,
+          12.088022232055664
+        ],
+        "min": [
+          27.80372428894043,
+          0.8255229592323303,
+          10.214984893798828
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "88fc82e4-93cd-6f7b-2c93-ba4526e59f45",
+      "byteLen": 60256,
+      "edgeCount": 60,
+      "edgePointCount": 510,
+      "faceColors": [],
+      "faceCount": 22,
+      "file": "88fc82e4-93cd-6f7b-2c93-ba4526e59f45.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 17280,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 17280,
+          "name": "NORMALS",
+          "offset": 17552,
+          "type": 2
+        },
+        {
+          "byteLen": 16800,
+          "name": "INDICES",
+          "offset": 34832,
+          "type": 3
+        },
+        {
+          "byteLen": 176,
+          "name": "FACE_RANGES",
+          "offset": 51632,
+          "type": 4
+        },
+        {
+          "byteLen": 92,
+          "name": "FACE_ID_OFFS",
+          "offset": 51808,
+          "type": 5
+        },
+        {
+          "byteLen": 79,
+          "name": "FACE_ID_CHARS",
+          "offset": 51900,
+          "type": 6
+        },
+        {
+          "byteLen": 480,
+          "name": "EDGE_RANGES",
+          "offset": 51980,
+          "type": 7
+        },
+        {
+          "byteLen": 6120,
+          "name": "EDGE_POSITIONS",
+          "offset": 52460,
+          "type": 8
+        },
+        {
+          "byteLen": 244,
+          "name": "EDGE_ID_OFFS",
+          "offset": 58580,
+          "type": 9
+        },
+        {
+          "byteLen": 231,
+          "name": "EDGE_ID_CHARS",
+          "offset": 58824,
+          "type": 10
+        },
+        {
+          "byteLen": 240,
+          "name": "UNKNOWN",
+          "offset": 59056,
+          "type": 14
+        },
+        {
+          "byteLen": 480,
+          "name": "UNKNOWN",
+          "offset": 59296,
+          "type": 15
+        },
+        {
+          "byteLen": 480,
+          "name": "UNKNOWN",
+          "offset": 59776,
+          "type": 16
+        }
+      ],
+      "sha256": "559e411b85ad004993c2deada23ef607f59541ad9782b0e0577d1d492a9bdc1d",
+      "triangleCount": 1400,
+      "vertexCount": 1440,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:37"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          6.285000324249268,
+          12.088022232055664
+        ],
+        "min": [
+          27.80372428894043,
+          5.0877461433410645,
+          10.214984893798828
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "2cc0162f-0287-cdc4-3cb5-e70bb2ec78de",
+      "byteLen": 60256,
+      "edgeCount": 60,
+      "edgePointCount": 510,
+      "faceColors": [],
+      "faceCount": 22,
+      "file": "2cc0162f-0287-cdc4-3cb5-e70bb2ec78de.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 17280,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 17280,
+          "name": "NORMALS",
+          "offset": 17552,
+          "type": 2
+        },
+        {
+          "byteLen": 16800,
+          "name": "INDICES",
+          "offset": 34832,
+          "type": 3
+        },
+        {
+          "byteLen": 176,
+          "name": "FACE_RANGES",
+          "offset": 51632,
+          "type": 4
+        },
+        {
+          "byteLen": 92,
+          "name": "FACE_ID_OFFS",
+          "offset": 51808,
+          "type": 5
+        },
+        {
+          "byteLen": 79,
+          "name": "FACE_ID_CHARS",
+          "offset": 51900,
+          "type": 6
+        },
+        {
+          "byteLen": 480,
+          "name": "EDGE_RANGES",
+          "offset": 51980,
+          "type": 7
+        },
+        {
+          "byteLen": 6120,
+          "name": "EDGE_POSITIONS",
+          "offset": 52460,
+          "type": 8
+        },
+        {
+          "byteLen": 244,
+          "name": "EDGE_ID_OFFS",
+          "offset": 58580,
+          "type": 9
+        },
+        {
+          "byteLen": 231,
+          "name": "EDGE_ID_CHARS",
+          "offset": 58824,
+          "type": 10
+        },
+        {
+          "byteLen": 240,
+          "name": "UNKNOWN",
+          "offset": 59056,
+          "type": 14
+        },
+        {
+          "byteLen": 480,
+          "name": "UNKNOWN",
+          "offset": 59296,
+          "type": 15
+        },
+        {
+          "byteLen": 480,
+          "name": "UNKNOWN",
+          "offset": 59776,
+          "type": 16
+        }
+      ],
+      "sha256": "db451806062109095ac6453cbf75a792cb4fc0f6a7c66ba9c067d2d82ee2fd18",
+      "triangleCount": 1400,
+      "vertexCount": 1440,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:38"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          7.794703960418701,
+          16.004039764404297
+        ],
+        "min": [
+          27.80372428894043,
+          6.597449779510498,
+          14.131002426147461
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "80bc9f4e-ccda-4bb0-4b65-8a3c87d6940a",
+      "byteLen": 60256,
+      "edgeCount": 60,
+      "edgePointCount": 510,
+      "faceColors": [],
+      "faceCount": 22,
+      "file": "80bc9f4e-ccda-4bb0-4b65-8a3c87d6940a.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 17280,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 17280,
+          "name": "NORMALS",
+          "offset": 17552,
+          "type": 2
+        },
+        {
+          "byteLen": 16800,
+          "name": "INDICES",
+          "offset": 34832,
+          "type": 3
+        },
+        {
+          "byteLen": 176,
+          "name": "FACE_RANGES",
+          "offset": 51632,
+          "type": 4
+        },
+        {
+          "byteLen": 92,
+          "name": "FACE_ID_OFFS",
+          "offset": 51808,
+          "type": 5
+        },
+        {
+          "byteLen": 79,
+          "name": "FACE_ID_CHARS",
+          "offset": 51900,
+          "type": 6
+        },
+        {
+          "byteLen": 480,
+          "name": "EDGE_RANGES",
+          "offset": 51980,
+          "type": 7
+        },
+        {
+          "byteLen": 6120,
+          "name": "EDGE_POSITIONS",
+          "offset": 52460,
+          "type": 8
+        },
+        {
+          "byteLen": 244,
+          "name": "EDGE_ID_OFFS",
+          "offset": 58580,
+          "type": 9
+        },
+        {
+          "byteLen": 231,
+          "name": "EDGE_ID_CHARS",
+          "offset": 58824,
+          "type": 10
+        },
+        {
+          "byteLen": 240,
+          "name": "UNKNOWN",
+          "offset": 59056,
+          "type": 14
+        },
+        {
+          "byteLen": 480,
+          "name": "UNKNOWN",
+          "offset": 59296,
+          "type": 15
+        },
+        {
+          "byteLen": 480,
+          "name": "UNKNOWN",
+          "offset": 59776,
+          "type": 16
+        }
+      ],
+      "sha256": "839b96734e53cacf496edb46d41c114640813a5242eed4b0411f9b32c9360a0a",
+      "triangleCount": 1400,
+      "vertexCount": 1440,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:39"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          9.126482009887695,
+          12.088022232055664
+        ],
+        "min": [
+          27.80372428894043,
+          7.92922830581665,
+          10.214984893798828
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "d14284a7-448b-84e0-8d10-91c930f45a19",
+      "byteLen": 60256,
+      "edgeCount": 60,
+      "edgePointCount": 510,
+      "faceColors": [],
+      "faceCount": 22,
+      "file": "d14284a7-448b-84e0-8d10-91c930f45a19.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 17280,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 17280,
+          "name": "NORMALS",
+          "offset": 17552,
+          "type": 2
+        },
+        {
+          "byteLen": 16800,
+          "name": "INDICES",
+          "offset": 34832,
+          "type": 3
+        },
+        {
+          "byteLen": 176,
+          "name": "FACE_RANGES",
+          "offset": 51632,
+          "type": 4
+        },
+        {
+          "byteLen": 92,
+          "name": "FACE_ID_OFFS",
+          "offset": 51808,
+          "type": 5
+        },
+        {
+          "byteLen": 79,
+          "name": "FACE_ID_CHARS",
+          "offset": 51900,
+          "type": 6
+        },
+        {
+          "byteLen": 480,
+          "name": "EDGE_RANGES",
+          "offset": 51980,
+          "type": 7
+        },
+        {
+          "byteLen": 6120,
+          "name": "EDGE_POSITIONS",
+          "offset": 52460,
+          "type": 8
+        },
+        {
+          "byteLen": 244,
+          "name": "EDGE_ID_OFFS",
+          "offset": 58580,
+          "type": 9
+        },
+        {
+          "byteLen": 231,
+          "name": "EDGE_ID_CHARS",
+          "offset": 58824,
+          "type": 10
+        },
+        {
+          "byteLen": 240,
+          "name": "UNKNOWN",
+          "offset": 59056,
+          "type": 14
+        },
+        {
+          "byteLen": 480,
+          "name": "UNKNOWN",
+          "offset": 59296,
+          "type": 15
+        },
+        {
+          "byteLen": 480,
+          "name": "UNKNOWN",
+          "offset": 59776,
+          "type": 16
+        }
+      ],
+      "sha256": "b989626dcf8ee386377ab0872692f81e0bdc264293e01eb89b6ab1facd25c6eb",
+      "triangleCount": 1400,
+      "vertexCount": 1440,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:40"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          7.7057414054870605,
+          12.088022232055664
+        ],
+        "min": [
+          27.80372428894043,
+          6.49784517288208,
+          10.214984893798828
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "c39d79ac-b849-c6ec-4da0-83a2492df3bb",
+      "byteLen": 84072,
+      "edgeCount": 84,
+      "edgePointCount": 736,
+      "faceColors": [],
+      "faceCount": 30,
+      "file": "c39d79ac-b849-c6ec-4da0-83a2492df3bb.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 24048,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 24048,
+          "name": "NORMALS",
+          "offset": 24320,
+          "type": 2
+        },
+        {
+          "byteLen": 23376,
+          "name": "INDICES",
+          "offset": 48368,
+          "type": 3
+        },
+        {
+          "byteLen": 240,
+          "name": "FACE_RANGES",
+          "offset": 71744,
+          "type": 4
+        },
+        {
+          "byteLen": 124,
+          "name": "FACE_ID_OFFS",
+          "offset": 71984,
+          "type": 5
+        },
+        {
+          "byteLen": 111,
+          "name": "FACE_ID_CHARS",
+          "offset": 72108,
+          "type": 6
+        },
+        {
+          "byteLen": 672,
+          "name": "EDGE_RANGES",
+          "offset": 72220,
+          "type": 7
+        },
+        {
+          "byteLen": 8832,
+          "name": "EDGE_POSITIONS",
+          "offset": 72892,
+          "type": 8
+        },
+        {
+          "byteLen": 340,
+          "name": "EDGE_ID_OFFS",
+          "offset": 81724,
+          "type": 9
+        },
+        {
+          "byteLen": 327,
+          "name": "EDGE_ID_CHARS",
+          "offset": 82064,
+          "type": 10
+        },
+        {
+          "byteLen": 336,
+          "name": "UNKNOWN",
+          "offset": 82392,
+          "type": 14
+        },
+        {
+          "byteLen": 672,
+          "name": "UNKNOWN",
+          "offset": 82728,
+          "type": 15
+        },
+        {
+          "byteLen": 672,
+          "name": "UNKNOWN",
+          "offset": 83400,
+          "type": 16
+        }
+      ],
+      "sha256": "778862310daabd365bff36e78b19384ca3cec5a2c2cc78622c401305ad4dacf7",
+      "triangleCount": 1948,
+      "vertexCount": 2004,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:41"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          0.8145483732223511,
+          19.430513381958008
+        ],
+        "min": [
+          27.80372428894043,
+          -0.35077881813049316,
+          17.54683494567871
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "dcc29e94-d420-aced-97a2-0a60ad35a350",
+      "byteLen": 83284,
+      "edgeCount": 87,
+      "edgePointCount": 716,
+      "faceColors": [],
+      "faceCount": 31,
+      "file": "dcc29e94-d420-aced-97a2-0a60ad35a350.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 23832,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 23832,
+          "name": "NORMALS",
+          "offset": 24104,
+          "type": 2
+        },
+        {
+          "byteLen": 23136,
+          "name": "INDICES",
+          "offset": 47936,
+          "type": 3
+        },
+        {
+          "byteLen": 248,
+          "name": "FACE_RANGES",
+          "offset": 71072,
+          "type": 4
+        },
+        {
+          "byteLen": 128,
+          "name": "FACE_ID_OFFS",
+          "offset": 71320,
+          "type": 5
+        },
+        {
+          "byteLen": 115,
+          "name": "FACE_ID_CHARS",
+          "offset": 71448,
+          "type": 6
+        },
+        {
+          "byteLen": 696,
+          "name": "EDGE_RANGES",
+          "offset": 71564,
+          "type": 7
+        },
+        {
+          "byteLen": 8592,
+          "name": "EDGE_POSITIONS",
+          "offset": 72260,
+          "type": 8
+        },
+        {
+          "byteLen": 352,
+          "name": "EDGE_ID_OFFS",
+          "offset": 80852,
+          "type": 9
+        },
+        {
+          "byteLen": 339,
+          "name": "EDGE_ID_CHARS",
+          "offset": 81204,
+          "type": 10
+        },
+        {
+          "byteLen": 348,
+          "name": "UNKNOWN",
+          "offset": 81544,
+          "type": 14
+        },
+        {
+          "byteLen": 696,
+          "name": "UNKNOWN",
+          "offset": 81892,
+          "type": 15
+        },
+        {
+          "byteLen": 696,
+          "name": "UNKNOWN",
+          "offset": 82588,
+          "type": 16
+        }
+      ],
+      "sha256": "f53dda3befbacd32e1c187d39a4a24eaa345fc481014841998f0e105eb2456e5",
+      "triangleCount": 1928,
+      "vertexCount": 1986,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:42"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          3.160001754760742,
+          15.99339771270752
+        ],
+        "min": [
+          27.80372428894043,
+          1.7286181449890137,
+          14.16292953491211
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "c6fae92e-faba-8fd9-e1a1-2ec2c7ee52d4",
+      "byteLen": 4904,
+      "edgeCount": 36,
+      "edgePointCount": 72,
+      "faceColors": [],
+      "faceCount": 14,
+      "file": "c6fae92e-faba-8fd9-e1a1-2ec2c7ee52d4.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 864,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 864,
+          "name": "NORMALS",
+          "offset": 1136,
+          "type": 2
+        },
+        {
+          "byteLen": 528,
+          "name": "INDICES",
+          "offset": 2000,
+          "type": 3
+        },
+        {
+          "byteLen": 112,
+          "name": "FACE_RANGES",
+          "offset": 2528,
+          "type": 4
+        },
+        {
+          "byteLen": 60,
+          "name": "FACE_ID_OFFS",
+          "offset": 2640,
+          "type": 5
+        },
+        {
+          "byteLen": 47,
+          "name": "FACE_ID_CHARS",
+          "offset": 2700,
+          "type": 6
+        },
+        {
+          "byteLen": 288,
+          "name": "EDGE_RANGES",
+          "offset": 2748,
+          "type": 7
+        },
+        {
+          "byteLen": 864,
+          "name": "EDGE_POSITIONS",
+          "offset": 3036,
+          "type": 8
+        },
+        {
+          "byteLen": 148,
+          "name": "EDGE_ID_OFFS",
+          "offset": 3900,
+          "type": 9
+        },
+        {
+          "byteLen": 135,
+          "name": "EDGE_ID_CHARS",
+          "offset": 4048,
+          "type": 10
+        },
+        {
+          "byteLen": 144,
+          "name": "UNKNOWN",
+          "offset": 4184,
+          "type": 14
+        },
+        {
+          "byteLen": 288,
+          "name": "UNKNOWN",
+          "offset": 4328,
+          "type": 15
+        },
+        {
+          "byteLen": 288,
+          "name": "UNKNOWN",
+          "offset": 4616,
+          "type": 16
+        }
+      ],
+      "sha256": "2881a99e7755964920e19ac293b01d88cdc02f46ff7d6c3821e90435b11f9ecb",
+      "triangleCount": 44,
+      "vertexCount": 72,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:43"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          4.965277194976807,
+          23.34653091430664
+        ],
+        "min": [
+          27.80372428894043,
+          3.166735887527466,
+          21.994964599609375
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "c03cecd1-30f3-18ca-d436-eca170b62cf9",
+      "byteLen": 57360,
+      "edgeCount": 84,
+      "edgePointCount": 482,
+      "faceColors": [],
+      "faceCount": 30,
+      "file": "c03cecd1-30f3-18ca-d436-eca170b62cf9.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 16176,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 16176,
+          "name": "NORMALS",
+          "offset": 16448,
+          "type": 2
+        },
+        {
+          "byteLen": 15456,
+          "name": "INDICES",
+          "offset": 32624,
+          "type": 3
+        },
+        {
+          "byteLen": 240,
+          "name": "FACE_RANGES",
+          "offset": 48080,
+          "type": 4
+        },
+        {
+          "byteLen": 124,
+          "name": "FACE_ID_OFFS",
+          "offset": 48320,
+          "type": 5
+        },
+        {
+          "byteLen": 111,
+          "name": "FACE_ID_CHARS",
+          "offset": 48444,
+          "type": 6
+        },
+        {
+          "byteLen": 672,
+          "name": "EDGE_RANGES",
+          "offset": 48556,
+          "type": 7
+        },
+        {
+          "byteLen": 5784,
+          "name": "EDGE_POSITIONS",
+          "offset": 49228,
+          "type": 8
+        },
+        {
+          "byteLen": 340,
+          "name": "EDGE_ID_OFFS",
+          "offset": 55012,
+          "type": 9
+        },
+        {
+          "byteLen": 327,
+          "name": "EDGE_ID_CHARS",
+          "offset": 55352,
+          "type": 10
+        },
+        {
+          "byteLen": 336,
+          "name": "UNKNOWN",
+          "offset": 55680,
+          "type": 14
+        },
+        {
+          "byteLen": 672,
+          "name": "UNKNOWN",
+          "offset": 56016,
+          "type": 15
+        },
+        {
+          "byteLen": 672,
+          "name": "UNKNOWN",
+          "offset": 56688,
+          "type": 16
+        }
+      ],
+      "sha256": "621c6cc410bbb432efb6eb3336b1bf5c05b06ec70c2a230295b539d4d59bcb70",
+      "triangleCount": 1288,
+      "vertexCount": 1348,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:44"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -7.533802032470703,
+          19.941341400146484
+        ],
+        "min": [
+          27.80372428894043,
+          -8.981148719787598,
+          18.047019958496094
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "922aeda5-bb21-b8c5-f46f-92ab0dee2d3c",
+      "byteLen": 85236,
+      "edgeCount": 105,
+      "edgePointCount": 708,
+      "faceColors": [],
+      "faceCount": 37,
+      "file": "922aeda5-bb21-b8c5-f46f-92ab0dee2d3c.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 24312,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 24312,
+          "name": "NORMALS",
+          "offset": 24584,
+          "type": 2
+        },
+        {
+          "byteLen": 23472,
+          "name": "INDICES",
+          "offset": 48896,
+          "type": 3
+        },
+        {
+          "byteLen": 296,
+          "name": "FACE_RANGES",
+          "offset": 72368,
+          "type": 4
+        },
+        {
+          "byteLen": 152,
+          "name": "FACE_ID_OFFS",
+          "offset": 72664,
+          "type": 5
+        },
+        {
+          "byteLen": 139,
+          "name": "FACE_ID_CHARS",
+          "offset": 72816,
+          "type": 6
+        },
+        {
+          "byteLen": 840,
+          "name": "EDGE_RANGES",
+          "offset": 72956,
+          "type": 7
+        },
+        {
+          "byteLen": 8496,
+          "name": "EDGE_POSITIONS",
+          "offset": 73796,
+          "type": 8
+        },
+        {
+          "byteLen": 424,
+          "name": "EDGE_ID_OFFS",
+          "offset": 82292,
+          "type": 9
+        },
+        {
+          "byteLen": 417,
+          "name": "EDGE_ID_CHARS",
+          "offset": 82716,
+          "type": 10
+        },
+        {
+          "byteLen": 420,
+          "name": "UNKNOWN",
+          "offset": 83136,
+          "type": 14
+        },
+        {
+          "byteLen": 840,
+          "name": "UNKNOWN",
+          "offset": 83556,
+          "type": 15
+        },
+        {
+          "byteLen": 840,
+          "name": "UNKNOWN",
+          "offset": 84396,
+          "type": 16
+        }
+      ],
+      "sha256": "3cd7f635bc126b1e4348aebaed36126bb87a29091696677d79207fa95d6d91f8",
+      "triangleCount": 1956,
+      "vertexCount": 2026,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:45"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          4.931937217712402,
+          16.02532386779785
+        ],
+        "min": [
+          27.80372428894043,
+          3.4845902919769287,
+          14.131002426147461
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "d7505776-efd7-826d-ee3a-aba82019a71d",
+      "byteLen": 85284,
+      "edgeCount": 105,
+      "edgePointCount": 708,
+      "faceColors": [],
+      "faceCount": 37,
+      "file": "d7505776-efd7-826d-ee3a-aba82019a71d.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 24324,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 24324,
+          "name": "NORMALS",
+          "offset": 24596,
+          "type": 2
+        },
+        {
+          "byteLen": 23496,
+          "name": "INDICES",
+          "offset": 48920,
+          "type": 3
+        },
+        {
+          "byteLen": 296,
+          "name": "FACE_RANGES",
+          "offset": 72416,
+          "type": 4
+        },
+        {
+          "byteLen": 152,
+          "name": "FACE_ID_OFFS",
+          "offset": 72712,
+          "type": 5
+        },
+        {
+          "byteLen": 139,
+          "name": "FACE_ID_CHARS",
+          "offset": 72864,
+          "type": 6
+        },
+        {
+          "byteLen": 840,
+          "name": "EDGE_RANGES",
+          "offset": 73004,
+          "type": 7
+        },
+        {
+          "byteLen": 8496,
+          "name": "EDGE_POSITIONS",
+          "offset": 73844,
+          "type": 8
+        },
+        {
+          "byteLen": 424,
+          "name": "EDGE_ID_OFFS",
+          "offset": 82340,
+          "type": 9
+        },
+        {
+          "byteLen": 417,
+          "name": "EDGE_ID_CHARS",
+          "offset": 82764,
+          "type": 10
+        },
+        {
+          "byteLen": 420,
+          "name": "UNKNOWN",
+          "offset": 83184,
+          "type": 14
+        },
+        {
+          "byteLen": 840,
+          "name": "UNKNOWN",
+          "offset": 83604,
+          "type": 15
+        },
+        {
+          "byteLen": 840,
+          "name": "UNKNOWN",
+          "offset": 84444,
+          "type": 16
+        }
+      ],
+      "sha256": "674fe1573972ac2b447a98a994e3e58861eb9a37fa9f21d38732498b74cd3960",
+      "triangleCount": 1958,
+      "vertexCount": 2027,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:46"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -8.028833389282227,
+          12.109307289123535
+        ],
+        "min": [
+          27.80372428894043,
+          -9.779484748840332,
+          10.214984893798828
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "df1aa9ce-1633-e325-bfa4-202b271e13bb",
+      "byteLen": 58288,
+      "edgeCount": 60,
+      "edgePointCount": 502,
+      "faceColors": [],
+      "faceCount": 22,
+      "file": "df1aa9ce-1633-e325-bfa4-202b271e13bb.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 16656,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 16656,
+          "name": "NORMALS",
+          "offset": 16928,
+          "type": 2
+        },
+        {
+          "byteLen": 16176,
+          "name": "INDICES",
+          "offset": 33584,
+          "type": 3
+        },
+        {
+          "byteLen": 176,
+          "name": "FACE_RANGES",
+          "offset": 49760,
+          "type": 4
+        },
+        {
+          "byteLen": 92,
+          "name": "FACE_ID_OFFS",
+          "offset": 49936,
+          "type": 5
+        },
+        {
+          "byteLen": 79,
+          "name": "FACE_ID_CHARS",
+          "offset": 50028,
+          "type": 6
+        },
+        {
+          "byteLen": 480,
+          "name": "EDGE_RANGES",
+          "offset": 50108,
+          "type": 7
+        },
+        {
+          "byteLen": 6024,
+          "name": "EDGE_POSITIONS",
+          "offset": 50588,
+          "type": 8
+        },
+        {
+          "byteLen": 244,
+          "name": "EDGE_ID_OFFS",
+          "offset": 56612,
+          "type": 9
+        },
+        {
+          "byteLen": 231,
+          "name": "EDGE_ID_CHARS",
+          "offset": 56856,
+          "type": 10
+        },
+        {
+          "byteLen": 240,
+          "name": "UNKNOWN",
+          "offset": 57088,
+          "type": 14
+        },
+        {
+          "byteLen": 480,
+          "name": "UNKNOWN",
+          "offset": 57328,
+          "type": 15
+        },
+        {
+          "byteLen": 480,
+          "name": "UNKNOWN",
+          "offset": 57808,
+          "type": 16
+        }
+      ],
+      "sha256": "85ef1861a39956291e239df9621717bae29e61d177a5def2fef53dcc9f71b94c",
+      "triangleCount": 1348,
+      "vertexCount": 1388,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:47"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -4.053950786590576,
+          12.077380180358887
+        ],
+        "min": [
+          27.80372428894043,
+          -5.49597692489624,
+          10.246912002563477
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "13a5ec40-bc6f-1873-88e6-eedf80f9a731",
+      "byteLen": 4128,
+      "edgeCount": 30,
+      "edgePointCount": 60,
+      "faceColors": [],
+      "faceCount": 12,
+      "file": "13a5ec40-bc6f-1873-88e6-eedf80f9a731.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 720,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 720,
+          "name": "NORMALS",
+          "offset": 992,
+          "type": 2
+        },
+        {
+          "byteLen": 432,
+          "name": "INDICES",
+          "offset": 1712,
+          "type": 3
+        },
+        {
+          "byteLen": 96,
+          "name": "FACE_RANGES",
+          "offset": 2144,
+          "type": 4
+        },
+        {
+          "byteLen": 52,
+          "name": "FACE_ID_OFFS",
+          "offset": 2240,
+          "type": 5
+        },
+        {
+          "byteLen": 39,
+          "name": "FACE_ID_CHARS",
+          "offset": 2292,
+          "type": 6
+        },
+        {
+          "byteLen": 240,
+          "name": "EDGE_RANGES",
+          "offset": 2332,
+          "type": 7
+        },
+        {
+          "byteLen": 720,
+          "name": "EDGE_POSITIONS",
+          "offset": 2572,
+          "type": 8
+        },
+        {
+          "byteLen": 124,
+          "name": "EDGE_ID_OFFS",
+          "offset": 3292,
+          "type": 9
+        },
+        {
+          "byteLen": 111,
+          "name": "EDGE_ID_CHARS",
+          "offset": 3416,
+          "type": 10
+        },
+        {
+          "byteLen": 120,
+          "name": "UNKNOWN",
+          "offset": 3528,
+          "type": 14
+        },
+        {
+          "byteLen": 240,
+          "name": "UNKNOWN",
+          "offset": 3648,
+          "type": 15
+        },
+        {
+          "byteLen": 240,
+          "name": "UNKNOWN",
+          "offset": 3888,
+          "type": 16
+        }
+      ],
+      "sha256": "8240a5c0e53ba4b88ad1db63ec46b670e038a389bb6d2c4f79187fe4c26c9521",
+      "triangleCount": 36,
+      "vertexCount": 60,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:48"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          1.3701072931289673,
+          23.82543182373047
+        ],
+        "min": [
+          27.80372428894043,
+          -0.07191846519708633,
+          21.994964599609375
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "cb9aaf96-7928-5459-6e3d-a3f0256e2573",
+      "byteLen": 4128,
+      "edgeCount": 30,
+      "edgePointCount": 60,
+      "faceColors": [],
+      "faceCount": 12,
+      "file": "cb9aaf96-7928-5459-6e3d-a3f0256e2573.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 720,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 720,
+          "name": "NORMALS",
+          "offset": 992,
+          "type": 2
+        },
+        {
+          "byteLen": 432,
+          "name": "INDICES",
+          "offset": 1712,
+          "type": 3
+        },
+        {
+          "byteLen": 96,
+          "name": "FACE_RANGES",
+          "offset": 2144,
+          "type": 4
+        },
+        {
+          "byteLen": 52,
+          "name": "FACE_ID_OFFS",
+          "offset": 2240,
+          "type": 5
+        },
+        {
+          "byteLen": 39,
+          "name": "FACE_ID_CHARS",
+          "offset": 2292,
+          "type": 6
+        },
+        {
+          "byteLen": 240,
+          "name": "EDGE_RANGES",
+          "offset": 2332,
+          "type": 7
+        },
+        {
+          "byteLen": 720,
+          "name": "EDGE_POSITIONS",
+          "offset": 2572,
+          "type": 8
+        },
+        {
+          "byteLen": 124,
+          "name": "EDGE_ID_OFFS",
+          "offset": 3292,
+          "type": 9
+        },
+        {
+          "byteLen": 111,
+          "name": "EDGE_ID_CHARS",
+          "offset": 3416,
+          "type": 10
+        },
+        {
+          "byteLen": 120,
+          "name": "UNKNOWN",
+          "offset": 3528,
+          "type": 14
+        },
+        {
+          "byteLen": 240,
+          "name": "UNKNOWN",
+          "offset": 3648,
+          "type": 15
+        },
+        {
+          "byteLen": 240,
+          "name": "UNKNOWN",
+          "offset": 3888,
+          "type": 16
+        }
+      ],
+      "sha256": "b74acd4f833529066e230a1511ed0e635c418a1e475c235e6f62091eee4d8b2d",
+      "triangleCount": 36,
+      "vertexCount": 60,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:49"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -6.228463172912598,
+          23.82543182373047
+        ],
+        "min": [
+          27.80372428894043,
+          -7.606635093688965,
+          21.994964599609375
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "969cb118-ff8b-d010-8ea8-2e5b6ef79c00",
+      "byteLen": 60932,
+      "edgeCount": 99,
+      "edgePointCount": 516,
+      "faceColors": [],
+      "faceCount": 35,
+      "file": "969cb118-ff8b-d010-8ea8-2e5b6ef79c00.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 17028,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 17028,
+          "name": "NORMALS",
+          "offset": 17300,
+          "type": 2
+        },
+        {
+          "byteLen": 16296,
+          "name": "INDICES",
+          "offset": 34328,
+          "type": 3
+        },
+        {
+          "byteLen": 280,
+          "name": "FACE_RANGES",
+          "offset": 50624,
+          "type": 4
+        },
+        {
+          "byteLen": 144,
+          "name": "FACE_ID_OFFS",
+          "offset": 50904,
+          "type": 5
+        },
+        {
+          "byteLen": 131,
+          "name": "FACE_ID_CHARS",
+          "offset": 51048,
+          "type": 6
+        },
+        {
+          "byteLen": 792,
+          "name": "EDGE_RANGES",
+          "offset": 51180,
+          "type": 7
+        },
+        {
+          "byteLen": 6192,
+          "name": "EDGE_POSITIONS",
+          "offset": 51972,
+          "type": 8
+        },
+        {
+          "byteLen": 400,
+          "name": "EDGE_ID_OFFS",
+          "offset": 58164,
+          "type": 9
+        },
+        {
+          "byteLen": 387,
+          "name": "EDGE_ID_CHARS",
+          "offset": 58564,
+          "type": 10
+        },
+        {
+          "byteLen": 396,
+          "name": "UNKNOWN",
+          "offset": 58952,
+          "type": 14
+        },
+        {
+          "byteLen": 792,
+          "name": "UNKNOWN",
+          "offset": 59348,
+          "type": 15
+        },
+        {
+          "byteLen": 792,
+          "name": "UNKNOWN",
+          "offset": 60140,
+          "type": 16
+        }
+      ],
+      "sha256": "79606d515e1d65530a01643be59f1e08b027c446162fe18bb6387721558dbadb",
+      "triangleCount": 1358,
+      "vertexCount": 1419,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:50"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          -8.466662406921387,
+          15.99339771270752
+        ],
+        "min": [
+          27.80372428894043,
+          -10.217313766479492,
+          14.16292953491211
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "ec21fd18-91b4-854a-f432-db23e74ea100",
+      "byteLen": 6500,
+      "edgeCount": 45,
+      "edgePointCount": 90,
+      "faceColors": [],
+      "faceCount": 17,
+      "file": "ec21fd18-91b4-854a-f432-db23e74ea100.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 1212,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 1212,
+          "name": "NORMALS",
+          "offset": 1484,
+          "type": 2
+        },
+        {
+          "byteLen": 840,
+          "name": "INDICES",
+          "offset": 2696,
+          "type": 3
+        },
+        {
+          "byteLen": 136,
+          "name": "FACE_RANGES",
+          "offset": 3536,
+          "type": 4
+        },
+        {
+          "byteLen": 72,
+          "name": "FACE_ID_OFFS",
+          "offset": 3672,
+          "type": 5
+        },
+        {
+          "byteLen": 59,
+          "name": "FACE_ID_CHARS",
+          "offset": 3744,
+          "type": 6
+        },
+        {
+          "byteLen": 360,
+          "name": "EDGE_RANGES",
+          "offset": 3804,
+          "type": 7
+        },
+        {
+          "byteLen": 1080,
+          "name": "EDGE_POSITIONS",
+          "offset": 4164,
+          "type": 8
+        },
+        {
+          "byteLen": 184,
+          "name": "EDGE_ID_OFFS",
+          "offset": 5244,
+          "type": 9
+        },
+        {
+          "byteLen": 171,
+          "name": "EDGE_ID_CHARS",
+          "offset": 5428,
+          "type": 10
+        },
+        {
+          "byteLen": 180,
+          "name": "UNKNOWN",
+          "offset": 5600,
+          "type": 14
+        },
+        {
+          "byteLen": 360,
+          "name": "UNKNOWN",
+          "offset": 5780,
+          "type": 15
+        },
+        {
+          "byteLen": 360,
+          "name": "UNKNOWN",
+          "offset": 6140,
+          "type": 16
+        }
+      ],
+      "sha256": "ce0db5ffc1cd74148dfab5d9ad61ba44944a6a1ebebdfcfb0f3c9385d79ff16d",
+      "triangleCount": 70,
+      "vertexCount": 101,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:51"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.868989944458008,
+          3.6299238204956055,
+          19.909414291381836
+        ],
+        "min": [
+          27.80372428894043,
+          1.8792725801467896,
+          18.078947067260742
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "d391847c-8690-bbab-db1c-9679637e562b",
+      "byteLen": 6404,
+      "edgeCount": 45,
+      "edgePointCount": 90,
+      "faceColors": [],
+      "faceCount": 17,
+      "file": "d391847c-8690-bbab-db1c-9679637e562b.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 1188,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 1188,
+          "name": "NORMALS",
+          "offset": 1460,
+          "type": 2
+        },
+        {
+          "byteLen": 792,
+          "name": "INDICES",
+          "offset": 2648,
+          "type": 3
+        },
+        {
+          "byteLen": 136,
+          "name": "FACE_RANGES",
+          "offset": 3440,
+          "type": 4
+        },
+        {
+          "byteLen": 72,
+          "name": "FACE_ID_OFFS",
+          "offset": 3576,
+          "type": 5
+        },
+        {
+          "byteLen": 59,
+          "name": "FACE_ID_CHARS",
+          "offset": 3648,
+          "type": 6
+        },
+        {
+          "byteLen": 360,
+          "name": "EDGE_RANGES",
+          "offset": 3708,
+          "type": 7
+        },
+        {
+          "byteLen": 1080,
+          "name": "EDGE_POSITIONS",
+          "offset": 4068,
+          "type": 8
+        },
+        {
+          "byteLen": 184,
+          "name": "EDGE_ID_OFFS",
+          "offset": 5148,
+          "type": 9
+        },
+        {
+          "byteLen": 171,
+          "name": "EDGE_ID_CHARS",
+          "offset": 5332,
+          "type": 10
+        },
+        {
+          "byteLen": 180,
+          "name": "UNKNOWN",
+          "offset": 5504,
+          "type": 14
+        },
+        {
+          "byteLen": 360,
+          "name": "UNKNOWN",
+          "offset": 5684,
+          "type": 15
+        },
+        {
+          "byteLen": 360,
+          "name": "UNKNOWN",
+          "offset": 6044,
+          "type": 16
+        }
+      ],
+      "sha256": "c67d2aba7ae3cb616fb980863d0592a584f261e39a7207378a1774687da51e24",
+      "triangleCount": 66,
+      "vertexCount": 99,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:52"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.673189163208008,
+          16.355899810791016,
+          26.56365203857422
+        ],
+        "min": [
+          27.54265594482422,
+          -16.277578353881836,
+          6.983564376831055
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "57a44590-e987-1dc8-52c7-66b34102fc71",
+      "byteLen": 29944,
+      "edgeCount": 24,
+      "edgePointCount": 296,
+      "faceColors": [],
+      "faceCount": 10,
+      "file": "57a44590-e987-1dc8-52c7-66b34102fc71.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 8448,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 8448,
+          "name": "NORMALS",
+          "offset": 8720,
+          "type": 2
+        },
+        {
+          "byteLen": 8208,
+          "name": "INDICES",
+          "offset": 17168,
+          "type": 3
+        },
+        {
+          "byteLen": 80,
+          "name": "FACE_RANGES",
+          "offset": 25376,
+          "type": 4
+        },
+        {
+          "byteLen": 44,
+          "name": "FACE_ID_OFFS",
+          "offset": 25456,
+          "type": 5
+        },
+        {
+          "byteLen": 31,
+          "name": "FACE_ID_CHARS",
+          "offset": 25500,
+          "type": 6
+        },
+        {
+          "byteLen": 192,
+          "name": "EDGE_RANGES",
+          "offset": 25532,
+          "type": 7
+        },
+        {
+          "byteLen": 3552,
+          "name": "EDGE_POSITIONS",
+          "offset": 25724,
+          "type": 8
+        },
+        {
+          "byteLen": 100,
+          "name": "EDGE_ID_OFFS",
+          "offset": 29276,
+          "type": 9
+        },
+        {
+          "byteLen": 87,
+          "name": "EDGE_ID_CHARS",
+          "offset": 29376,
+          "type": 10
+        },
+        {
+          "byteLen": 96,
+          "name": "UNKNOWN",
+          "offset": 29464,
+          "type": 14
+        },
+        {
+          "byteLen": 192,
+          "name": "UNKNOWN",
+          "offset": 29560,
+          "type": 15
+        },
+        {
+          "byteLen": 192,
+          "name": "UNKNOWN",
+          "offset": 29752,
+          "type": 16
+        }
+      ],
+      "sha256": "2a069b83b78e71632e7167c55b008bd92ab5f50925330bafc70c1d2d4deaf679",
+      "triangleCount": 684,
+      "vertexCount": 704,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:53"
+    },
+    {
+      "bbox": {
+        "max": [
+          -12.92286205291748,
+          26.563322067260742,
+          8.745772361755371
+        ],
+        "min": [
+          -23.887710571289062,
+          13.902205467224121,
+          0.46144571900367737
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "dddf5c6e-cd92-022f-2c0a-8fc38607ef2b",
+      "byteLen": 587436,
+      "edgeCount": 71,
+      "edgePointCount": 869,
+      "faceColors": [],
+      "faceCount": 27,
+      "file": "dddf5c6e-cd92-022f-2c0a-8fc38607ef2b.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 151284,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 151284,
+          "name": "NORMALS",
+          "offset": 151556,
+          "type": 2
+        },
+        {
+          "byteLen": 271212,
+          "name": "INDICES",
+          "offset": 302840,
+          "type": 3
+        },
+        {
+          "byteLen": 216,
+          "name": "FACE_RANGES",
+          "offset": 574052,
+          "type": 4
+        },
+        {
+          "byteLen": 112,
+          "name": "FACE_ID_OFFS",
+          "offset": 574268,
+          "type": 5
+        },
+        {
+          "byteLen": 99,
+          "name": "FACE_ID_CHARS",
+          "offset": 574380,
+          "type": 6
+        },
+        {
+          "byteLen": 568,
+          "name": "EDGE_RANGES",
+          "offset": 574480,
+          "type": 7
+        },
+        {
+          "byteLen": 10428,
+          "name": "EDGE_POSITIONS",
+          "offset": 575048,
+          "type": 8
+        },
+        {
+          "byteLen": 288,
+          "name": "EDGE_ID_OFFS",
+          "offset": 585476,
+          "type": 9
+        },
+        {
+          "byteLen": 275,
+          "name": "EDGE_ID_CHARS",
+          "offset": 585764,
+          "type": 10
+        },
+        {
+          "byteLen": 284,
+          "name": "UNKNOWN",
+          "offset": 586040,
+          "type": 14
+        },
+        {
+          "byteLen": 568,
+          "name": "UNKNOWN",
+          "offset": 586324,
+          "type": 15
+        },
+        {
+          "byteLen": 544,
+          "name": "UNKNOWN",
+          "offset": 586892,
+          "type": 16
+        }
+      ],
+      "sha256": "6a72161372bb5acf23a0e2822a864420501f193ba6f64895ce7a3d16f7f31cce",
+      "triangleCount": 22601,
+      "vertexCount": 12607,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:54"
+    },
+    {
+      "bbox": {
+        "max": [
+          -12.922860145568848,
+          -13.902202606201172,
+          8.745772361755371
+        ],
+        "min": [
+          -23.88770866394043,
+          -26.56332015991211,
+          0.46144571900367737
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "d7d66dad-35b9-ceb5-acc8-97353b109e18",
+      "byteLen": 611052,
+      "edgeCount": 71,
+      "edgePointCount": 869,
+      "faceColors": [],
+      "faceCount": 27,
+      "file": "d7d66dad-35b9-ceb5-acc8-97353b109e18.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 157188,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 157188,
+          "name": "NORMALS",
+          "offset": 157460,
+          "type": 2
+        },
+        {
+          "byteLen": 283020,
+          "name": "INDICES",
+          "offset": 314648,
+          "type": 3
+        },
+        {
+          "byteLen": 216,
+          "name": "FACE_RANGES",
+          "offset": 597668,
+          "type": 4
+        },
+        {
+          "byteLen": 112,
+          "name": "FACE_ID_OFFS",
+          "offset": 597884,
+          "type": 5
+        },
+        {
+          "byteLen": 99,
+          "name": "FACE_ID_CHARS",
+          "offset": 597996,
+          "type": 6
+        },
+        {
+          "byteLen": 568,
+          "name": "EDGE_RANGES",
+          "offset": 598096,
+          "type": 7
+        },
+        {
+          "byteLen": 10428,
+          "name": "EDGE_POSITIONS",
+          "offset": 598664,
+          "type": 8
+        },
+        {
+          "byteLen": 288,
+          "name": "EDGE_ID_OFFS",
+          "offset": 609092,
+          "type": 9
+        },
+        {
+          "byteLen": 275,
+          "name": "EDGE_ID_CHARS",
+          "offset": 609380,
+          "type": 10
+        },
+        {
+          "byteLen": 284,
+          "name": "UNKNOWN",
+          "offset": 609656,
+          "type": 14
+        },
+        {
+          "byteLen": 568,
+          "name": "UNKNOWN",
+          "offset": 609940,
+          "type": 15
+        },
+        {
+          "byteLen": 544,
+          "name": "UNKNOWN",
+          "offset": 610508,
+          "type": 16
+        }
+      ],
+      "sha256": "52cfe60002325f486f7c950d459a42c4e12630ac4dd7f740250f80d4aee77267",
+      "triangleCount": 23585,
+      "vertexCount": 13099,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:55"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.54265594482422,
+          -13.90219783782959,
+          8.745772361755371
+        ],
+        "min": [
+          16.57780647277832,
+          -26.56331443786621,
+          0.4614458978176117
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "c134c42b-379f-f824-10a6-584b832a647f",
+      "byteLen": 582204,
+      "edgeCount": 71,
+      "edgePointCount": 869,
+      "faceColors": [],
+      "faceCount": 27,
+      "file": "c134c42b-379f-f824-10a6-584b832a647f.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 149976,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 149976,
+          "name": "NORMALS",
+          "offset": 150248,
+          "type": 2
+        },
+        {
+          "byteLen": 268596,
+          "name": "INDICES",
+          "offset": 300224,
+          "type": 3
+        },
+        {
+          "byteLen": 216,
+          "name": "FACE_RANGES",
+          "offset": 568820,
+          "type": 4
+        },
+        {
+          "byteLen": 112,
+          "name": "FACE_ID_OFFS",
+          "offset": 569036,
+          "type": 5
+        },
+        {
+          "byteLen": 99,
+          "name": "FACE_ID_CHARS",
+          "offset": 569148,
+          "type": 6
+        },
+        {
+          "byteLen": 568,
+          "name": "EDGE_RANGES",
+          "offset": 569248,
+          "type": 7
+        },
+        {
+          "byteLen": 10428,
+          "name": "EDGE_POSITIONS",
+          "offset": 569816,
+          "type": 8
+        },
+        {
+          "byteLen": 288,
+          "name": "EDGE_ID_OFFS",
+          "offset": 580244,
+          "type": 9
+        },
+        {
+          "byteLen": 275,
+          "name": "EDGE_ID_CHARS",
+          "offset": 580532,
+          "type": 10
+        },
+        {
+          "byteLen": 284,
+          "name": "UNKNOWN",
+          "offset": 580808,
+          "type": 14
+        },
+        {
+          "byteLen": 568,
+          "name": "UNKNOWN",
+          "offset": 581092,
+          "type": 15
+        },
+        {
+          "byteLen": 544,
+          "name": "UNKNOWN",
+          "offset": 581660,
+          "type": 16
+        }
+      ],
+      "sha256": "64b52fa3061119e9151e06b7106ddfbe2be15bc7c7f1d6142ddb7a2d06f81b38",
+      "triangleCount": 22383,
+      "vertexCount": 12498,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:56"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.54265785217285,
+          26.563312530517578,
+          8.745772361755371
+        ],
+        "min": [
+          16.577808380126953,
+          13.902195930480957,
+          0.46144571900367737
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "d3802e8d-90ef-4d1a-259d-1a5488188876",
+      "byteLen": 591948,
+      "edgeCount": 71,
+      "edgePointCount": 869,
+      "faceColors": [],
+      "faceCount": 27,
+      "file": "d3802e8d-90ef-4d1a-259d-1a5488188876.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 152412,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 152412,
+          "name": "NORMALS",
+          "offset": 152684,
+          "type": 2
+        },
+        {
+          "byteLen": 273468,
+          "name": "INDICES",
+          "offset": 305096,
+          "type": 3
+        },
+        {
+          "byteLen": 216,
+          "name": "FACE_RANGES",
+          "offset": 578564,
+          "type": 4
+        },
+        {
+          "byteLen": 112,
+          "name": "FACE_ID_OFFS",
+          "offset": 578780,
+          "type": 5
+        },
+        {
+          "byteLen": 99,
+          "name": "FACE_ID_CHARS",
+          "offset": 578892,
+          "type": 6
+        },
+        {
+          "byteLen": 568,
+          "name": "EDGE_RANGES",
+          "offset": 578992,
+          "type": 7
+        },
+        {
+          "byteLen": 10428,
+          "name": "EDGE_POSITIONS",
+          "offset": 579560,
+          "type": 8
+        },
+        {
+          "byteLen": 288,
+          "name": "EDGE_ID_OFFS",
+          "offset": 589988,
+          "type": 9
+        },
+        {
+          "byteLen": 275,
+          "name": "EDGE_ID_CHARS",
+          "offset": 590276,
+          "type": 10
+        },
+        {
+          "byteLen": 284,
+          "name": "UNKNOWN",
+          "offset": 590552,
+          "type": 14
+        },
+        {
+          "byteLen": 568,
+          "name": "UNKNOWN",
+          "offset": 590836,
+          "type": 15
+        },
+        {
+          "byteLen": 544,
+          "name": "UNKNOWN",
+          "offset": 591404,
+          "type": 16
+        }
+      ],
+      "sha256": "1a186780373e3181befa6714094b57c544ce639b297e09b488acc533b0b701df",
+      "triangleCount": 22789,
+      "vertexCount": 12701,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:57"
+    },
+    {
+      "bbox": {
+        "max": [
+          10.645062446594238,
+          -19.710620880126953,
+          4.635721206665039
+        ],
+        "min": [
+          -10.651606559753418,
+          -32.76401138305664,
+          3.5708882808685303
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "b713fbde-7a7b-5755-e504-155dc92e62bd",
+      "byteLen": 1804,
+      "edgeCount": 12,
+      "edgePointCount": 24,
+      "faceColors": [],
+      "faceCount": 6,
+      "file": "b713fbde-7a7b-5755-e504-155dc92e62bd.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 288,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 288,
+          "name": "NORMALS",
+          "offset": 560,
+          "type": 2
+        },
+        {
+          "byteLen": 144,
+          "name": "INDICES",
+          "offset": 848,
+          "type": 3
+        },
+        {
+          "byteLen": 48,
+          "name": "FACE_RANGES",
+          "offset": 992,
+          "type": 4
+        },
+        {
+          "byteLen": 28,
+          "name": "FACE_ID_OFFS",
+          "offset": 1040,
+          "type": 5
+        },
+        {
+          "byteLen": 18,
+          "name": "FACE_ID_CHARS",
+          "offset": 1068,
+          "type": 6
+        },
+        {
+          "byteLen": 96,
+          "name": "EDGE_RANGES",
+          "offset": 1088,
+          "type": 7
+        },
+        {
+          "byteLen": 288,
+          "name": "EDGE_POSITIONS",
+          "offset": 1184,
+          "type": 8
+        },
+        {
+          "byteLen": 52,
+          "name": "EDGE_ID_OFFS",
+          "offset": 1472,
+          "type": 9
+        },
+        {
+          "byteLen": 39,
+          "name": "EDGE_ID_CHARS",
+          "offset": 1524,
+          "type": 10
+        },
+        {
+          "byteLen": 48,
+          "name": "UNKNOWN",
+          "offset": 1564,
+          "type": 14
+        },
+        {
+          "byteLen": 96,
+          "name": "UNKNOWN",
+          "offset": 1612,
+          "type": 15
+        },
+        {
+          "byteLen": 96,
+          "name": "UNKNOWN",
+          "offset": 1708,
+          "type": 16
+        }
+      ],
+      "sha256": "45c9c6eb3d0d2196b8d0bfce9eea795393ea0583660f7145383f856d24543178",
+      "triangleCount": 12,
+      "vertexCount": 24,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:58"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.615930557250977,
+          27.615930557250977,
+          21.18061637878418
+        ],
+        "min": [
+          -27.615930557250977,
+          -27.615930557250977,
+          11.740036010742188
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "497c2e12-44a2-6b43-e99d-c2ab082fe2c8",
+      "byteLen": 2554740,
+      "edgeCount": 512,
+      "edgePointCount": 5540,
+      "faceColors": [],
+      "faceCount": 242,
+      "file": "497c2e12-44a2-6b43-e99d-c2ab082fe2c8.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 660084,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 660084,
+          "name": "NORMALS",
+          "offset": 660356,
+          "type": 2
+        },
+        {
+          "byteLen": 1144968,
+          "name": "INDICES",
+          "offset": 1320440,
+          "type": 3
+        },
+        {
+          "byteLen": 1936,
+          "name": "FACE_RANGES",
+          "offset": 2465408,
+          "type": 4
+        },
+        {
+          "byteLen": 972,
+          "name": "FACE_ID_OFFS",
+          "offset": 2467344,
+          "type": 5
+        },
+        {
+          "byteLen": 1102,
+          "name": "FACE_ID_CHARS",
+          "offset": 2468316,
+          "type": 6
+        },
+        {
+          "byteLen": 4096,
+          "name": "EDGE_RANGES",
+          "offset": 2469420,
+          "type": 7
+        },
+        {
+          "byteLen": 66480,
+          "name": "EDGE_POSITIONS",
+          "offset": 2473516,
+          "type": 8
+        },
+        {
+          "byteLen": 2052,
+          "name": "EDGE_ID_OFFS",
+          "offset": 2539996,
+          "type": 9
+        },
+        {
+          "byteLen": 2452,
+          "name": "EDGE_ID_CHARS",
+          "offset": 2542048,
+          "type": 10
+        },
+        {
+          "byteLen": 2048,
+          "name": "UNKNOWN",
+          "offset": 2544500,
+          "type": 14
+        },
+        {
+          "byteLen": 4096,
+          "name": "UNKNOWN",
+          "offset": 2546548,
+          "type": 15
+        },
+        {
+          "byteLen": 4096,
+          "name": "UNKNOWN",
+          "offset": 2550644,
+          "type": 16
+        }
+      ],
+      "sha256": "a49cc45e6e976f97498e379025992e8bdfe54efb69b2b6a6374880a406b67a61",
+      "triangleCount": 95414,
+      "vertexCount": 55007,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:59"
+    },
+    {
+      "bbox": {
+        "max": [
+          9.137373924255371,
+          -20.428556442260742,
+          11.748052597045898
+        ],
+        "min": [
+          -9.137373924255371,
+          -32.76401138305664,
+          5.612957954406738
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "5588cfcb-7ec6-d268-a893-4f8569977b9d",
+      "byteLen": 125880,
+      "edgeCount": 413,
+      "edgePointCount": 1470,
+      "faceColors": [],
+      "faceCount": 153,
+      "file": "5588cfcb-7ec6-d268-a893-4f8569977b9d.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 31224,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 31224,
+          "name": "NORMALS",
+          "offset": 31496,
+          "type": 2
+        },
+        {
+          "byteLen": 27840,
+          "name": "INDICES",
+          "offset": 62720,
+          "type": 3
+        },
+        {
+          "byteLen": 1224,
+          "name": "FACE_RANGES",
+          "offset": 90560,
+          "type": 4
+        },
+        {
+          "byteLen": 616,
+          "name": "FACE_ID_OFFS",
+          "offset": 91784,
+          "type": 5
+        },
+        {
+          "byteLen": 657,
+          "name": "FACE_ID_CHARS",
+          "offset": 92400,
+          "type": 6
+        },
+        {
+          "byteLen": 3304,
+          "name": "EDGE_RANGES",
+          "offset": 93060,
+          "type": 7
+        },
+        {
+          "byteLen": 17640,
+          "name": "EDGE_POSITIONS",
+          "offset": 96364,
+          "type": 8
+        },
+        {
+          "byteLen": 1656,
+          "name": "EDGE_ID_OFFS",
+          "offset": 114004,
+          "type": 9
+        },
+        {
+          "byteLen": 1957,
+          "name": "EDGE_ID_CHARS",
+          "offset": 115660,
+          "type": 10
+        },
+        {
+          "byteLen": 1652,
+          "name": "UNKNOWN",
+          "offset": 117620,
+          "type": 14
+        },
+        {
+          "byteLen": 3304,
+          "name": "UNKNOWN",
+          "offset": 119272,
+          "type": 15
+        },
+        {
+          "byteLen": 3304,
+          "name": "UNKNOWN",
+          "offset": 122576,
+          "type": 16
+        }
+      ],
+      "sha256": "ff73d53c419629952bff6af6eca4789f0dd830f65801a331975ab1b13a3e01c2",
+      "triangleCount": 2320,
+      "vertexCount": 2602,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:60"
+    },
+    {
+      "bbox": {
+        "max": [
+          10.705727577209473,
+          -23.496103286743164,
+          11.719795227050781
+        ],
+        "min": [
+          -10.658611297607422,
+          -32.633480072021484,
+          4.648650646209717
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "378c2966-91b4-09c2-db01-d047a8180189",
+      "byteLen": 5152,
+      "edgeCount": 38,
+      "edgePointCount": 76,
+      "faceColors": [],
+      "faceCount": 16,
+      "file": "378c2966-91b4-09c2-db01-d047a8180189.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 912,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 912,
+          "name": "NORMALS",
+          "offset": 1184,
+          "type": 2
+        },
+        {
+          "byteLen": 528,
+          "name": "INDICES",
+          "offset": 2096,
+          "type": 3
+        },
+        {
+          "byteLen": 128,
+          "name": "FACE_RANGES",
+          "offset": 2624,
+          "type": 4
+        },
+        {
+          "byteLen": 68,
+          "name": "FACE_ID_OFFS",
+          "offset": 2752,
+          "type": 5
+        },
+        {
+          "byteLen": 55,
+          "name": "FACE_ID_CHARS",
+          "offset": 2820,
+          "type": 6
+        },
+        {
+          "byteLen": 304,
+          "name": "EDGE_RANGES",
+          "offset": 2876,
+          "type": 7
+        },
+        {
+          "byteLen": 912,
+          "name": "EDGE_POSITIONS",
+          "offset": 3180,
+          "type": 8
+        },
+        {
+          "byteLen": 156,
+          "name": "EDGE_ID_OFFS",
+          "offset": 4092,
+          "type": 9
+        },
+        {
+          "byteLen": 143,
+          "name": "EDGE_ID_CHARS",
+          "offset": 4248,
+          "type": 10
+        },
+        {
+          "byteLen": 152,
+          "name": "UNKNOWN",
+          "offset": 4392,
+          "type": 14
+        },
+        {
+          "byteLen": 304,
+          "name": "UNKNOWN",
+          "offset": 4544,
+          "type": 15
+        },
+        {
+          "byteLen": 304,
+          "name": "UNKNOWN",
+          "offset": 4848,
+          "type": 16
+        }
+      ],
+      "sha256": "4d2575916efabef846e8a386455da2a87f072193eb7b23ede31385d28bb2a330",
+      "triangleCount": 44,
+      "vertexCount": 76,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:61"
+    },
+    {
+      "bbox": {
+        "max": [
+          3.263347864151001,
+          5.652284145355225,
+          61.08987045288086
+        ],
+        "min": [
+          -6.526695728302002,
+          -5.652284145355225,
+          4.177084922790527
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "90f106a6-96eb-9f87-a0cd-51aa96e33c62",
+      "byteLen": 599888,
+      "edgeCount": 13,
+      "edgePointCount": 493,
+      "faceColors": [],
+      "faceCount": 7,
+      "file": "90f106a6-96eb-9f87-a0cd-51aa96e33c62.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 152916,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 152916,
+          "name": "NORMALS",
+          "offset": 153188,
+          "type": 2
+        },
+        {
+          "byteLen": 287304,
+          "name": "INDICES",
+          "offset": 306104,
+          "type": 3
+        },
+        {
+          "byteLen": 56,
+          "name": "FACE_RANGES",
+          "offset": 593408,
+          "type": 4
+        },
+        {
+          "byteLen": 32,
+          "name": "FACE_ID_OFFS",
+          "offset": 593464,
+          "type": 5
+        },
+        {
+          "byteLen": 21,
+          "name": "FACE_ID_CHARS",
+          "offset": 593496,
+          "type": 6
+        },
+        {
+          "byteLen": 104,
+          "name": "EDGE_RANGES",
+          "offset": 593520,
+          "type": 7
+        },
+        {
+          "byteLen": 5916,
+          "name": "EDGE_POSITIONS",
+          "offset": 593624,
+          "type": 8
+        },
+        {
+          "byteLen": 56,
+          "name": "EDGE_ID_OFFS",
+          "offset": 599540,
+          "type": 9
+        },
+        {
+          "byteLen": 43,
+          "name": "EDGE_ID_CHARS",
+          "offset": 599596,
+          "type": 10
+        },
+        {
+          "byteLen": 52,
+          "name": "UNKNOWN",
+          "offset": 599640,
+          "type": 14
+        },
+        {
+          "byteLen": 104,
+          "name": "UNKNOWN",
+          "offset": 599692,
+          "type": 15
+        },
+        {
+          "byteLen": 92,
+          "name": "UNKNOWN",
+          "offset": 599796,
+          "type": 16
+        }
+      ],
+      "sha256": "dcc84382fc802ec759dbcef5b001a109317682b44725f527d00d1a11c177171d",
+      "triangleCount": 23942,
+      "vertexCount": 12743,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:62"
+    },
+    {
+      "bbox": {
+        "max": [
+          10.442712783813477,
+          18.087303161621094,
+          30.02280044555664
+        ],
+        "min": [
+          -20.885425567626953,
+          -18.087316513061523,
+          23.496103286743164
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "03499be4-6db6-9f23-8ea7-d68663764aec",
+      "byteLen": 172296,
+      "edgeCount": 18,
+      "edgePointCount": 1440,
+      "faceColors": [],
+      "faceCount": 12,
+      "file": "03499be4-6db6-9f23-8ea7-d68663764aec.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 51360,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 51360,
+          "name": "NORMALS",
+          "offset": 51632,
+          "type": 2
+        },
+        {
+          "byteLen": 51216,
+          "name": "INDICES",
+          "offset": 102992,
+          "type": 3
+        },
+        {
+          "byteLen": 96,
+          "name": "FACE_RANGES",
+          "offset": 154208,
+          "type": 4
+        },
+        {
+          "byteLen": 52,
+          "name": "FACE_ID_OFFS",
+          "offset": 154304,
+          "type": 5
+        },
+        {
+          "byteLen": 39,
+          "name": "FACE_ID_CHARS",
+          "offset": 154356,
+          "type": 6
+        },
+        {
+          "byteLen": 144,
+          "name": "EDGE_RANGES",
+          "offset": 154396,
+          "type": 7
+        },
+        {
+          "byteLen": 17280,
+          "name": "EDGE_POSITIONS",
+          "offset": 154540,
+          "type": 8
+        },
+        {
+          "byteLen": 76,
+          "name": "EDGE_ID_OFFS",
+          "offset": 171820,
+          "type": 9
+        },
+        {
+          "byteLen": 63,
+          "name": "EDGE_ID_CHARS",
+          "offset": 171896,
+          "type": 10
+        },
+        {
+          "byteLen": 72,
+          "name": "UNKNOWN",
+          "offset": 171960,
+          "type": 14
+        },
+        {
+          "byteLen": 144,
+          "name": "UNKNOWN",
+          "offset": 172032,
+          "type": 15
+        },
+        {
+          "byteLen": 120,
+          "name": "UNKNOWN",
+          "offset": 172176,
+          "type": 16
+        }
+      ],
+      "sha256": "af21a86127e16afdd010e2e766b71beb08b16dcc77a33e501c7c785fd25ce8e2",
+      "triangleCount": 4268,
+      "vertexCount": 4280,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:63"
+    },
+    {
+      "bbox": {
+        "max": [
+          10.442712783813477,
+          18.087308883666992,
+          10.964848518371582
+        ],
+        "min": [
+          -20.885425567626953,
+          -18.087308883666992,
+          4.43815279006958
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "e8fc6681-e777-8010-435f-0252e70c6741",
+      "byteLen": 172296,
+      "edgeCount": 18,
+      "edgePointCount": 1440,
+      "faceColors": [],
+      "faceCount": 12,
+      "file": "e8fc6681-e777-8010-435f-0252e70c6741.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 51360,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 51360,
+          "name": "NORMALS",
+          "offset": 51632,
+          "type": 2
+        },
+        {
+          "byteLen": 51216,
+          "name": "INDICES",
+          "offset": 102992,
+          "type": 3
+        },
+        {
+          "byteLen": 96,
+          "name": "FACE_RANGES",
+          "offset": 154208,
+          "type": 4
+        },
+        {
+          "byteLen": 52,
+          "name": "FACE_ID_OFFS",
+          "offset": 154304,
+          "type": 5
+        },
+        {
+          "byteLen": 39,
+          "name": "FACE_ID_CHARS",
+          "offset": 154356,
+          "type": 6
+        },
+        {
+          "byteLen": 144,
+          "name": "EDGE_RANGES",
+          "offset": 154396,
+          "type": 7
+        },
+        {
+          "byteLen": 17280,
+          "name": "EDGE_POSITIONS",
+          "offset": 154540,
+          "type": 8
+        },
+        {
+          "byteLen": 76,
+          "name": "EDGE_ID_OFFS",
+          "offset": 171820,
+          "type": 9
+        },
+        {
+          "byteLen": 63,
+          "name": "EDGE_ID_CHARS",
+          "offset": 171896,
+          "type": 10
+        },
+        {
+          "byteLen": 72,
+          "name": "UNKNOWN",
+          "offset": 171960,
+          "type": 14
+        },
+        {
+          "byteLen": 144,
+          "name": "UNKNOWN",
+          "offset": 172032,
+          "type": 15
+        },
+        {
+          "byteLen": 120,
+          "name": "UNKNOWN",
+          "offset": 172176,
+          "type": 16
+        }
+      ],
+      "sha256": "f6bac5d859e1384efbc68c410259c49a573d8b3c09d9e64b9a82d02edb034ef8",
+      "triangleCount": 4268,
+      "vertexCount": 4280,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:64"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.601346969604492,
+          27.601346969604492,
+          14.156352996826172
+        ],
+        "min": [
+          -27.601346969604492,
+          -32.82270431518555,
+          -0.058690473437309265
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "7e92c354-4602-6699-6d12-5d973b6af493",
+      "byteLen": 1723780,
+      "edgeCount": 378,
+      "edgePointCount": 15550,
+      "faceColors": [],
+      "faceCount": 170,
+      "file": "7e92c354-4602-6699-6d12-5d973b6af493.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 502752,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 502752,
+          "name": "NORMALS",
+          "offset": 503024,
+          "type": 2
+        },
+        {
+          "byteLen": 514800,
+          "name": "INDICES",
+          "offset": 1005776,
+          "type": 3
+        },
+        {
+          "byteLen": 1360,
+          "name": "FACE_RANGES",
+          "offset": 1520576,
+          "type": 4
+        },
+        {
+          "byteLen": 684,
+          "name": "FACE_ID_OFFS",
+          "offset": 1521936,
+          "type": 5
+        },
+        {
+          "byteLen": 742,
+          "name": "FACE_ID_CHARS",
+          "offset": 1522620,
+          "type": 6
+        },
+        {
+          "byteLen": 3024,
+          "name": "EDGE_RANGES",
+          "offset": 1523364,
+          "type": 7
+        },
+        {
+          "byteLen": 186600,
+          "name": "EDGE_POSITIONS",
+          "offset": 1526388,
+          "type": 8
+        },
+        {
+          "byteLen": 1516,
+          "name": "EDGE_ID_OFFS",
+          "offset": 1712988,
+          "type": 9
+        },
+        {
+          "byteLen": 1782,
+          "name": "EDGE_ID_CHARS",
+          "offset": 1714504,
+          "type": 10
+        },
+        {
+          "byteLen": 1512,
+          "name": "UNKNOWN",
+          "offset": 1716288,
+          "type": 14
+        },
+        {
+          "byteLen": 3024,
+          "name": "UNKNOWN",
+          "offset": 1717800,
+          "type": 15
+        },
+        {
+          "byteLen": 2956,
+          "name": "UNKNOWN",
+          "offset": 1720824,
+          "type": 16
+        }
+      ],
+      "sha256": "d6d41d3751b185301a252062fc80f38d97167ee8aa2c0ea3c5a7d8382471cc32",
+      "triangleCount": 42900,
+      "vertexCount": 41896,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:65"
+    },
+    {
+      "bbox": {
+        "max": [
+          27.601346969604492,
+          27.601346969604492,
+          33.99750900268555
+        ],
+        "min": [
+          -27.601346969604492,
+          -27.601346969604492,
+          18.47712516784668
+        ]
+      },
+      "bodyColor": null,
+      "bodyId": "da33af91-225c-c269-9e2e-607168a30032",
+      "byteLen": 2870648,
+      "edgeCount": 514,
+      "edgePointCount": 26313,
+      "faceColors": [],
+      "faceCount": 242,
+      "file": "da33af91-225c-c269-9e2e-607168a30032.mesh1",
+      "flags": 3,
+      "lod": 2,
+      "mesh1Version": 1,
+      "name": "Open CASCADE STEP translator 7.6 1",
+      "sections": [
+        {
+          "byteLen": 840504,
+          "name": "POSITIONS",
+          "offset": 272,
+          "type": 1
+        },
+        {
+          "byteLen": 840504,
+          "name": "NORMALS",
+          "offset": 840776,
+          "type": 2
+        },
+        {
+          "byteLen": 850752,
+          "name": "INDICES",
+          "offset": 1681280,
+          "type": 3
+        },
+        {
+          "byteLen": 1936,
+          "name": "FACE_RANGES",
+          "offset": 2532032,
+          "type": 4
+        },
+        {
+          "byteLen": 972,
+          "name": "FACE_ID_OFFS",
+          "offset": 2533968,
+          "type": 5
+        },
+        {
+          "byteLen": 1102,
+          "name": "FACE_ID_CHARS",
+          "offset": 2534940,
+          "type": 6
+        },
+        {
+          "byteLen": 4112,
+          "name": "EDGE_RANGES",
+          "offset": 2536044,
+          "type": 7
+        },
+        {
+          "byteLen": 315756,
+          "name": "EDGE_POSITIONS",
+          "offset": 2540156,
+          "type": 8
+        },
+        {
+          "byteLen": 2060,
+          "name": "EDGE_ID_OFFS",
+          "offset": 2855912,
+          "type": 9
+        },
+        {
+          "byteLen": 2462,
+          "name": "EDGE_ID_CHARS",
+          "offset": 2857972,
+          "type": 10
+        },
+        {
+          "byteLen": 2056,
+          "name": "UNKNOWN",
+          "offset": 2860436,
+          "type": 14
+        },
+        {
+          "byteLen": 4112,
+          "name": "UNKNOWN",
+          "offset": 2862492,
+          "type": 15
+        },
+        {
+          "byteLen": 4044,
+          "name": "UNKNOWN",
+          "offset": 2866604,
+          "type": 16
+        }
+      ],
+      "sha256": "2143bdcac08941a4eb9a72deee4950bc9a538ed8204c411b1779df2cea6366ef",
+      "triangleCount": 70896,
+      "vertexCount": 70042,
+      "wireId": "body_7ccca580-4c2b-45a6-8767-e64ce73df632:66"
+    }
+  ],
+  "bodyCount": 67,
+  "fixture": "nema17",
+  "importDiagnostics": [
+    {
+      "code": "STEP_HEALED",
+      "message": "ShapeFix_Shape reported a fix; topology counts unchanged (tolerance-level touch-up)"
+    }
+  ],
+  "lod": "fine",
+  "mesh1Version": 1,
+  "meshFormat": "MESH1",
+  "pipeline": "prepare_import -> DocumentRuntime::add_import_record -> run_regen(ToEnd{from:0}) -> get_mesh(body, Lod::Fine)",
+  "sceneBbox": {
+    "max": [
+      27.868989944458008,
+      27.615930557250977,
+      61.08987045288086
+    ],
+    "min": [
+      -27.615930557250977,
+      -32.82270431518555,
+      -0.058690473437309265
+    ]
+  },
+  "source": "STEP/Nema17 Stepper Motor 17Hs4023.step",
+  "stepProductNames": [
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1",
+    "Open CASCADE STEP translator 7.6 1"
+  ],
+  "stepSolidCount": 67,
+  "units": "mm",
+  "upAxis": "+Z"
+}

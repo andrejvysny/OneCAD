@@ -13,8 +13,6 @@ pollster = "0.4"
 wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }
 bytemuck = { version = "1", features = ["derive"] }
 glam = { version = "0.30", features = ["bytemuck"] }
-solidcraft-gpu = { path = "../../vendor/solidcraft-viewport/crates/gpu" }
-solidcraft-render = { path = "../../vendor/solidcraft-viewport/crates/render" }
 
 [dev-dependencies]
 png = "0.18"

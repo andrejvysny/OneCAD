@@ -4,7 +4,7 @@
 //! dumb (plain arrays, no MESH1 knowledge — see its module docs). This module
 //! is the bridge: it pulls each body's fine-LOD MESH1 blob via [`MeshProvider`],
 //! reads the sections the picking/colour idiom in
-//! `src-tauri/tests/face_color_reopen.rs` already established, merges the two
+//! `crates/onecad-app/tests/face_color_reopen.rs` already established, merges the two
 //! colour sources per face, and hands the writer plain [`ThreeMfBody`] values.
 //!
 //! # Colour precedence (lowest first)

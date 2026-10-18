@@ -42,3 +42,30 @@ pub(super) fn height_depth(format: wgpu::TextureFormat) -> Option<wgpu::DepthSte
     }
     state
 }
+
+pub(super) fn clear(format: wgpu::TextureFormat) -> Option<wgpu::DepthStencilState> {
+    let mut depth = depth_state(wgpu::CompareFunction::Always, false, Default::default());
+    if let Some(depth) = &mut depth {
+        depth.format = format;
+        let face = wgpu::StencilFaceState {
+            compare: wgpu::CompareFunction::Always,
+            fail_op: wgpu::StencilOperation::Zero,
+            depth_fail_op: wgpu::StencilOperation::Zero,
+            pass_op: wgpu::StencilOperation::Zero,
+        };
+        depth.stencil = wgpu::StencilState {
+            front: face,
+            back: face,
+            read_mask: 255,
+            write_mask: 255,
+        };
+    }
+    depth
+}
+pub(super) fn preview(format: wgpu::TextureFormat) -> Option<wgpu::DepthStencilState> {
+    let mut depth = state(format, wgpu::CompareFunction::GreaterEqual, false);
+    if let Some(depth) = &mut depth {
+        depth.depth_write_enabled = Some(false);
+    }
+    depth
+}

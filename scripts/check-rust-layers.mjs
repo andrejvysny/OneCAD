@@ -16,19 +16,14 @@ export const LAYERS = Object.freeze({
     'onecad-app', 'onecad-scene', 'onecad-interaction', 'onecad-render',
     'onecad-core', 'onecad-protocol', 'onecad-library',
   ],
-  onecad: ['onecad-app', 'onecad-core', 'onecad-protocol', 'onecad-library'],
+  'onecad-mesh-fixture': ['onecad-app', 'onecad-core', 'onecad-protocol'],
   'onecad-regen': ['onecad-app', 'onecad-core'],
   'onecad-library-ingest': ['onecad-app'],
   'onecad-kernelbench': [],
   'onecad-worker-stub': ['onecad-protocol'],
 });
 
-const HOSTS = new Set(['onecad', 'onecad-ui']);
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const VENDORED_RENDER = new Map([
-  ['solidcraft-gpu', resolve(ROOT, 'vendor/solidcraft-viewport/crates/gpu')],
-  ['solidcraft-render', resolve(ROOT, 'vendor/solidcraft-viewport/crates/render')],
-]);
+const HOSTS = new Set(['onecad-ui']);
 const TOOLKITS = [
   'tauri', 'egui', 'eframe', 'epaint', 'emath', 'ecolor', 'winit', 'rfd',
   'bevy', 'arboard', 'muda', 'tray-icon', 'objc', 'objc2', 'cocoa', 'core-graphics',
@@ -78,8 +73,6 @@ function checkDependency(pkg, dep, packages) {
   const target = packages.find((entry) => entry.name === name);
   if (dep.path != null) {
     requireString(dep.path, 'dependency path');
-    if (pkg.name === 'onecad-render' && kind === 'normal'
-      && VENDORED_RENDER.get(name) === resolve(dep.path)) return null;
     if (!target || resolve(dep.path) !== resolve(dirname(target.manifest_path))) {
       return `${context}: local dependency is not a workspace member at its declared path`;
     }

@@ -36,6 +36,9 @@ struct Mesh1Input {
     std::vector<float> edge_positions;                   // 3·P (polyline points, grouped by edge)
     std::vector<std::pair<std::uint32_t, std::uint32_t>> edge_ranges;  // {firstPoint, pointCount}
     std::vector<std::string> edge_ids;                   // one per edge
+    std::vector<std::uint32_t> edge_classes;
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> edge_face_ranges;
+    std::vector<std::uint32_t> edge_faces;  // zero-based face ordinals
 
     float bbox_min[3] = {0, 0, 0};
     float bbox_max[3] = {0, 0, 0};

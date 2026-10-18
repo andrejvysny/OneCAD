@@ -13,6 +13,34 @@ mod view;
 pub use checked::{MeshDecodeError, MeshLimits};
 pub use view::{CheckedMesh, MeshFloats, MeshSpan, MeshView, MeshWords};
 
+/// Optional topology classification. Ordinals match MESH1 section 14.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum EdgeClass {
+    Unknown = 0,
+    Boundary = 1,
+    Sharp = 2,
+    Smooth = 3,
+    Seam = 4,
+    Degenerate = 5,
+    NonManifold = 6,
+}
+
+impl EdgeClass {
+    pub fn from_u32(value: u32) -> Option<Self> {
+        Some(match value {
+            0 => Self::Unknown,
+            1 => Self::Boundary,
+            2 => Self::Sharp,
+            3 => Self::Smooth,
+            4 => Self::Seam,
+            5 => Self::Degenerate,
+            6 => Self::NonManifold,
+            _ => return None,
+        })
+    }
+}
+
 /// MESH1 magic as a little-endian `u32` (`0x4D455348`). On the wire the four
 /// bytes are `48 53 45 4D`; read back as an LE `u32` they equal this. Compare the
 /// LE `u32` value (or the byte sequence), never the ASCII string `"MESH"` against

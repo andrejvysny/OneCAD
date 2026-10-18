@@ -8,7 +8,7 @@ mod budget_tests {
 
     #[test]
     fn nema_preparation_fits_host_budget_without_worst_case_reservations() {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../spikes/fixtures/nema17");
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/render/nema17");
         let mut paths: Vec<_> = std::fs::read_dir(path)
             .unwrap()
             .map(|entry| entry.unwrap().path())
@@ -109,7 +109,7 @@ mod reuse_tests {
         assert!(renderer.poll_idle().unwrap());
         let bytes: Arc<[u8]> = Arc::from(
             include_bytes!(
-                "../../../spikes/fixtures/fillet-block/00000000-0000-0000-0000-00000000f101.mesh1"
+                "../../../fixtures/render/fillet-block/00000000-0000-0000-0000-00000000f101.mesh1"
             )
             .as_slice(),
         );
@@ -162,7 +162,7 @@ mod reuse_tests {
 fn cache_reuses_cpu_arrays_across_publication_revisions_and_preserves_cache_on_refusal() {
     let bytes: Arc<[u8]> = Arc::from(
         include_bytes!(
-            "../../../spikes/fixtures/fillet-block/00000000-0000-0000-0000-00000000f101.mesh1"
+            "../../../fixtures/render/fillet-block/00000000-0000-0000-0000-00000000f101.mesh1"
         )
         .as_slice(),
     );

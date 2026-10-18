@@ -56,6 +56,12 @@ pub enum MeshDecodeError {
     BoundingBox(u32),
     #[error("MESH1 vertex index out of bounds")]
     VertexIndex,
+    #[error("MESH1 edge class is unknown")]
+    EdgeClass,
+    #[error("MESH1 incident face ordinal out of bounds")]
+    IncidentFace,
+    #[error("MESH1 incident faces must be unique ascending ordinals")]
+    IncidentFaceOrder,
     #[error("MESH1 section {0} ranges are not contiguous bounded full coverage")]
     Ranges(u32),
     #[error("MESH1 section {0} ID offsets are not bounded prefix sums")]
@@ -177,6 +183,7 @@ fn validate_lengths(h: &MeshHeaderView, limits: MeshLimits) -> Result<(), MeshDe
         }
     }
     validate_edge_lengths(h)?;
+    validate_metadata_lengths(h)?;
     let bytes = [6, 10]
         .iter()
         .filter_map(|&ty| h.section(ty))
@@ -186,6 +193,25 @@ fn validate_lengths(h: &MeshHeaderView, limits: MeshLimits) -> Result<(), MeshDe
         })?;
     if bytes > limits.max_id_bytes {
         return Err(MeshDecodeError::Limit("ID bytes"));
+    }
+    Ok(())
+}
+
+fn validate_metadata_lengths(h: &MeshHeaderView) -> Result<(), MeshDecodeError> {
+    for ty in [14, 15, 16] {
+        if h.section(ty).is_some() && !h.has_edges() {
+            return Err(MeshDecodeError::FlagMismatch(ty));
+        }
+    }
+    if h.section(14).is_some() {
+        length(h, 14, h.edge_count, 4)?;
+    }
+    if h.section(15).is_some() || h.section(16).is_some() {
+        length(h, 15, h.edge_count, 8)?;
+        let faces = h.section(16).ok_or(MeshDecodeError::MissingSection(16))?;
+        if faces.byte_len % 4 != 0 {
+            return Err(MeshDecodeError::Length(16));
+        }
     }
     Ok(())
 }
@@ -249,6 +275,40 @@ fn validate_geometry(blob: &[u8], h: &MeshHeaderView) -> Result<(), MeshDecodeEr
             7,
         )?;
         ids(blob, h, 9, 10)?;
+    }
+    validate_metadata(blob, h)?;
+    Ok(())
+}
+
+fn validate_metadata(blob: &[u8], h: &MeshHeaderView) -> Result<(), MeshDecodeError> {
+    if let Some(classes) = section(blob, h, 14) {
+        if classes
+            .chunks_exact(4)
+            .any(|v| super::EdgeClass::from_u32(u32_le(v, 0)).is_none())
+        {
+            return Err(MeshDecodeError::EdgeClass);
+        }
+    }
+    if let Some(adjacency) = section(blob, h, 16) {
+        let spans = section(blob, h, 15).expect("validated ranges");
+        ranges(spans, adjacency.len() as u32 / 4, 15)?;
+        if adjacency
+            .chunks_exact(4)
+            .any(|v| u32_le(v, 0) >= h.face_count)
+        {
+            return Err(MeshDecodeError::IncidentFace);
+        }
+        for pair in spans.chunks_exact(8) {
+            let start = u32_le(pair, 0) as usize * 4;
+            let end = start + u32_le(pair, 4) as usize * 4;
+            if adjacency[start..end]
+                .windows(8)
+                .step_by(4)
+                .any(|v| u32_le(v, 0) >= u32_le(v, 4))
+            {
+                return Err(MeshDecodeError::IncidentFaceOrder);
+            }
+        }
     }
     Ok(())
 }

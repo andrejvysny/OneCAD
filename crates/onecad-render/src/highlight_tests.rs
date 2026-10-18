@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 fn scene() -> onecad_scene::SceneSnapshot {
     let bytes = include_bytes!(
-        "../../../spikes/fixtures/fillet-block/00000000-0000-0000-0000-00000000f101.mesh1"
+        "../../../fixtures/render/fillet-block/00000000-0000-0000-0000-00000000f101.mesh1"
     );
     let body = SceneBody::new(
         onecad_scene::BodyId::new(),
@@ -289,4 +289,48 @@ fn highlight_shader_entry_validates_without_device_or_capture() {
         .entry_points
         .iter()
         .any(|entry| entry.name == "fs_highlight" && entry.stage == naga::ShaderStage::Fragment));
+}
+
+#[test]
+fn adjacency_boundaries_follow_topology_and_expansion_is_precharged() {
+    let bytes = include_bytes!("../../../fixtures/render/edge-policy/box.mesh1");
+    let body = SceneBody::new(
+        onecad_scene::BodyId::new(),
+        7,
+        Arc::from(bytes.as_slice()),
+        onecad_scene::MeshLimits::default(),
+    )
+    .unwrap();
+    let scene = onecad_scene::SceneSnapshot::new(
+        onecad_scene::SceneIdentity {
+            session: 4,
+            scene: 8,
+        },
+        vec![body],
+        SceneLimits::default(),
+    )
+    .unwrap();
+    let mesh = scene.bodies()[0].mesh().unwrap();
+    let face = target(&scene, mesh.face_id(0).unwrap(), HighlightKind::Face);
+    let expected: usize = (0..mesh.header().edge_count as usize)
+        .filter(|edge| mesh.edge_incident_faces(*edge).iter().any(|face| face == 0))
+        .map(|edge| mesh.edge_range(edge).unwrap().count.saturating_sub(1) as usize)
+        .sum();
+    let prepared = PreparedHighlights::new(&scene, &[face], None, budget()).unwrap();
+    assert_eq!(prepared.boundaries.len(), expected);
+    assert_eq!(prepared.boundary_draws.len(), 1);
+    assert_eq!(prepared.boundary_draws[0].count as usize, expected);
+    assert!(expected >= 4);
+    let input_metadata = std::mem::size_of::<HighlightDraw>() as u64;
+    let tight = PreparationBudget {
+        limits: RenderLimits {
+            max_cpu_prepared_bytes: input_metadata,
+            ..Default::default()
+        },
+        ..budget()
+    };
+    assert!(matches!(
+        PreparedHighlights::new(&scene, &[face], None, tight),
+        Err(RenderError::Budget("CPU preparation"))
+    ));
 }

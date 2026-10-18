@@ -96,15 +96,20 @@ updates the preview; Create commits one typed TransformBody operation. Cancel
 discards the provisional operation. The navigation cube exposes face/corner
 views, orbit, quarter turns, roll, home, fit and projection switching.
 
-Display exposes silhouettes, hidden edges, opacity, supersampling and section
+Display exposes supersampling and section
 planes. Section clipping is view-only: topology selection is disabled while a
 section is active, and section changes are disabled during authoring. CPU picking
 does not invent selectable section geometry.
 
 The primary viewport uses OneCAD's indexed quality `Renderer`. Its checked OCCT
 geometry, AO, studio lighting, contact shadows, grid and silhouette pipeline are
-application-owned. The vendored SolidCraft adapter remains comparison-only;
-its geometry kernel and document model are not application dependencies.
+application-owned. Native and headless captures use this same renderer; competing
+application and prototype renderers are retired. Native assets live in
+`assets/native`, and checked capture fixtures in `fixtures/render`.
+Committed geometry requests fine tessellation. The renderer owns four display
+styles: Wireframe, Shaded, ShadedEdges (the default), and Xray. The existing host
+does not expose a new mode control. Wireframe excludes surface fills and shadows;
+Xray uses weighted blended transparency without AO or contact shadows.
 The host supplies eframe's shared wgpu device/queue to the CAD renderer and
 samples its output texture through egui, without CPU image readback. CPU mesh
 checking and preparation run on the service runtime. Resource replacement waits
@@ -115,6 +120,14 @@ Topology highlight preparation runs off the UI thread, with one active job and
 one bounded delivery. Selection sequence and scene identity reject stale results.
 The host and headless renderer tests negotiate the same optional float-stencil
 capability, with a 24-bit stencil fallback.
+Section contours are prepared off-thread by one latest-only bounded worker. Scene,
+preview and plane keys reject stale results; source scene reservations remain
+alive while canceled jobs finish. Section changes publish options and contours
+together after GPU and sampling fences drain. Rejected changes retain the prior
+drawable frame. Synthetic contours and caps carry no selectable topology IDs.
+Committed and preview contour preparation execute sequentially. Each retained or
+executing request reserves an additional 64 MiB within the shared 768 MiB host
+cap; preview scratch is limited by retained committed contour storage.
 The host polls device completion even while the previous egui sampling fence is
 pending; otherwise the callbacks needed to release that fence cannot advance.
 Render watchdog acknowledgements bind the captured document, runtime, revision,

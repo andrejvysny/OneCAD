@@ -51,14 +51,7 @@ pub(crate) fn mul(a: u64, b: u64) -> Result<u64, RenderError> {
 
 #[cfg(test)]
 pub(crate) fn target_bytes(size: [u32; 2]) -> Result<u64, RenderError> {
-    if size.contains(&0) {
-        return Ok(0);
-    }
-    // RGBA8 resolved+MSAA4, Depth32 MSAA4+prepass, RGBA16 normal, 3 R16 AO.
-    add(
-        mul(mul(u64::from(size[0]), u64::from(size[1]))?, 54)?,
-        (1024 * 1024 * 8) + (256 * 256 * 4 * 3),
-    )
+    quality_target_bytes(size, crate::RenderOptions::default())
 }
 
 pub(crate) fn quality_target_bytes(
@@ -71,7 +64,7 @@ pub(crate) fn quality_target_bytes(
     let render = options.render_size(size)?;
     // 8 bytes per depth/stencil texel is conservative for both negotiated formats.
     let attachments = add(
-        mul(mul(u64::from(render[0]), u64::from(render[1]))?, 74)?,
+        mul(mul(u64::from(render[0]), u64::from(render[1]))?, 94)?,
         (1024 * 1024 * 8) + (256 * 256 * 4 * 3),
     )?;
     if options.ssaa == 1.0 {
@@ -171,7 +164,7 @@ mod tests {
     fn target_payload_counts_every_quality_attachment() {
         assert_eq!(
             target_bytes([100, 200]).unwrap(),
-            100 * 200 * 54 + 1024 * 1024 * 8 + 256 * 256 * 4 * 3
+            100 * 200 * 94 + 1024 * 1024 * 8 + 256 * 256 * 4 * 3
         );
         assert_eq!(target_bytes([0, u32::MAX]).unwrap(), 0);
         assert!(mul(u64::MAX, 2).is_err());
