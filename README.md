@@ -58,7 +58,7 @@ Bun supports repository tooling only:
 
 ```sh
 bun install --frozen-lockfile
-bun test scripts/tests
+bun test ./scripts/tests
 bun scripts/check-rust-layers.mjs
 bun scripts/verify-modeling-coverage.mjs
 bun scripts/verify-modeling-contracts.mjs

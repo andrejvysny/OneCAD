@@ -30,6 +30,6 @@ the renderer's development-only shader validator, all dependency kinds share
 the same rules. Toolkit/platform and GPU family checks
 apply to every non-host package; library also rejects network client families.
 
-Run `bun test scripts/tests/check-rust-layers.test.mjs` for fixture coverage.
+Run `bun test ./scripts/tests/check-rust-layers.test.mjs` for fixture coverage.
 The check enforces direct declarations, not the full third-party transitive
 dependency closure. New toolkit families require a corresponding checker rule.

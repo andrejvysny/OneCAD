@@ -13,7 +13,8 @@
 //   * Line    entity `l` (p0Ref/p1Ref) -> aliases "l.p0"/"l.p1"/... resolve to the
 //                                         referenced Point entities (whose primary
 //                                         handle stays the referenced point id)
-//   * Circle/Arc/Ellipse entity `c` -> "c.center"
+//   * Circle/Arc/Ellipse entity `c` -> "c.center"; optional centerRef aliases
+//     the referenced Point, whose primary handle remains its wire id.
 //   * Arc     entity `a`            -> "a.start" / "a.end" (W0b)
 // An Arc's endpoints are MINTED as real `SketchPoint`s at their derived
 // coordinates and coupled to center+radius+angle by internal PlaneGCS arc rules

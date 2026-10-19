@@ -14,15 +14,8 @@
 //! * an ellipse-bearing sketch arrives as an EMPTY map — the worker omits the whole
 //!   thing, and "empty" must mean *nothing to say*, never "all unconstrained".
 //!
-//! NOTE on the shapes below vs the fixture's. A core `Sketch` owns a circle's
-//! centre as a REAL point entity, so `wire::sketch_wire` renders it both inline
-//! (`center: [x,y]`, which the worker mints its own solver point from) and as a
-//! standalone `Point` in `entities[]`. The Rust-side sketch therefore carries two
-//! more free parameters than the fixture's inline-centre form and one more wire
-//! entity in the map. That duplication is the pre-existing, recorded "dup center
-//! points" finding (`TODO.md` FINDING 3 — worker-honours-`centerRef` is backlogged),
-//! not something `entityStates` introduces. The dof numbers asserted here are the
-//! MEASURED consequence of that projection, not a restatement of the fixture's.
+//! Typed curve centers share their authored Point through `centerRef` (solver
+//! policy 3). Per-entity state must reflect that shared solver identity.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -182,41 +175,7 @@ fn pinned_line_free_circle(sid: SketchId) -> Sketch {
     sk
 }
 
-/// The extra constraints that pin the circle down: its own radius, its inline
-/// solver centre (`Fixed` with the `center` role), and the standalone centre Point
-/// entity the core `Sketch` model owns.
-fn pin_the_circle(sk: &mut Sketch) {
-    sk.add_constraint(Constraint::Radius {
-        id: cid(0x310),
-        entity: eid(CIRCLE),
-        value: Scalar::new(5.0),
-    })
-    .unwrap();
-    sk.add_constraint(Constraint::Fixed {
-        id: cid(0x311),
-        point: eid(CIRCLE),
-        point_position: CurvePosition::Center,
-        at: Vec2::new_unchecked(20.0, 20.0),
-    })
-    .unwrap();
-    sk.add_constraint(Constraint::Fixed {
-        id: cid(0x312),
-        point: eid(CENTER),
-        point_position: CurvePosition::Arbitrary,
-        at: Vec2::new_unchecked(20.0, 20.0),
-    })
-    .unwrap();
-}
-
-/// DISCLOSURE PIN (adversarial review F1): the constraint set the FRONTEND can
-/// actually author for "fully constrain this circle" — `Radius` plus `Fixed` on
-/// the standalone centre Point entity. The worker mints its OWN inline centre for
-/// every wire Circle and treats `centerRef` as informational (`WireSketch.cpp:262`,
-/// the recorded dup-centre FINDING 3), so this shape leaves that minted centre
-/// free and the circle can NEVER reach `fullyConstrained` through the shipping
-/// app — the safe direction (under-report), but a payoff gap that must stay
-/// visible. `pin_the_circle` above reaches dof 0 only by ALSO fixing the inline
-/// centre via the `Center` role, a pair no frontend path produces.
+/// Radius plus Fixed on the authored center fully constrain the circle.
 fn pin_the_circle_the_frontend_way(sk: &mut Sketch) {
     sk.add_constraint(Constraint::Radius {
         id: cid(0x310),
@@ -234,7 +193,7 @@ fn pin_the_circle_the_frontend_way(sk: &mut Sketch) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_frontend_authorable_circle_pin_still_reads_under_constrained() {
+async fn an_authorable_circle_pin_reads_fully_constrained() {
     let Some(bin) = real_worker() else {
         eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
         return;
@@ -249,14 +208,9 @@ async fn a_frontend_authorable_circle_pin_still_reads_under_constrained() {
         "FE-SHAPE: dof={} states={:?}",
         solved.dof, solved.entity_states
     );
-    // The standalone Point IS pinned; the circle is NOT — its worker-minted
-    // inline centre (2 params) stays free. Under-report, never over-report.
     assert_eq!(state(&solved, CENTER), S::FullyConstrained);
-    assert_eq!(
-        state(&solved, CIRCLE),
-        S::UnderConstrained,
-        "the dup-centre gap: green must not appear for a circle the frontend pinned"
-    );
+    assert_eq!(state(&solved, CIRCLE), S::FullyConstrained);
+    assert_eq!(solved.dof, 0);
     assert_eq!(state(&solved, LINE), S::FullyConstrained);
 }
 
@@ -285,12 +239,8 @@ async fn sketch_upsert_reports_a_pinned_line_and_a_free_circle_in_one_sketch() {
         "ROUND 1: dof={} status={:?} states={:?}",
         solved.dof, solved.status, solved.entity_states
     );
-    // dof 5, not the fixture's 3: the core circle's centre is a REAL point entity,
-    // so the wire carries the standalone Point (2 free) ON TOP of the inline centre
-    // the worker mints (2 free) plus the radius (1). The count is a property of the
-    // Rust→wire projection; what matters here is the per-entity verdict below.
     assert_eq!(
-        solved.dof, 5,
+        solved.dof, 3,
         "the circle carries the whole remaining freedom"
     );
     assert_eq!(
@@ -310,14 +260,13 @@ async fn sketch_upsert_reports_a_pinned_line_and_a_free_circle_in_one_sketch() {
     assert_eq!(
         solved.entity_states.len(),
         5,
-        "keyed by WIRE entity id only — the worker's inline-minted centre has no \
-         wire id and must not appear: {:?}",
+        "keyed by authored wire entity id only: {:?}",
         solved.entity_states
     );
 
     // Fully constrain the circle too ⇒ every entity flips.
     let mut pinned = pinned_line_free_circle(sid);
-    pin_the_circle(&mut pinned);
+    pin_the_circle_the_frontend_way(&mut pinned);
     let extra: Vec<SketchEditOp> = pinned
         .constraints()
         .iter()
@@ -326,7 +275,7 @@ async fn sketch_upsert_reports_a_pinned_line_and_a_free_circle_in_one_sketch() {
             constraint: c.clone(),
         })
         .collect();
-    assert_eq!(extra.len(), 3);
+    assert_eq!(extra.len(), 2);
     let solved = rt.sketch_upsert(sid, extra).await.expect("sketch_upsert");
     eprintln!(
         "ROUND 2: dof={} status={:?} states={:?}",

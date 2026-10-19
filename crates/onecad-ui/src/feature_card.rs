@@ -2,7 +2,9 @@
 //! active model tool. Replaces the old Inspector form; dispatches the same actions.
 use crate::{app::App, layout::Chrome, tool_registry::ToolId};
 use egui::{Context, Order, Ui};
-use onecad_interaction::{Action, DraftStatus, ModelSession, PreviewStatus, SessionPhase};
+use onecad_interaction::{
+    Action, CommitStatus, DraftStatus, ModelSession, PreviewStatus, SessionPhase,
+};
 use onecad_widgets::{
     components::{
         inputs::NumberField,
@@ -25,14 +27,35 @@ pub fn preview_text(preview: &PreviewStatus) -> &str {
 /// Status-bar text for the running tool and whether the preview is ready (green dot).
 pub fn status_line(app: &App) -> Option<(&str, bool)> {
     let tool = app.interaction.tool.as_ref()?;
-    Some((
-        preview_text(&tool.preview),
-        matches!(tool.preview, PreviewStatus::Ready),
-    ))
+    tool_status(&app.interaction.status, &tool.preview, app.command_status)
+}
+
+fn tool_status<'a>(
+    status: &'a CommitStatus,
+    preview: &'a PreviewStatus,
+    command_status: bool,
+) -> Option<(&'a str, bool)> {
+    if command_status {
+        return None;
+    }
+    match status {
+        CommitStatus::Rejected(message) | CommitStatus::CompletionUnavailable { message, .. } => {
+            Some((message, false))
+        }
+        CommitStatus::Pending(_) => Some(("Submitting feature…", false)),
+        CommitStatus::Accepted { .. } => Some(("Regenerating feature…", false)),
+        _ => Some((
+            preview_text(preview),
+            matches!(preview, PreviewStatus::Ready),
+        )),
+    }
 }
 
 fn can_apply(app: &App, tool: &ModelSession) -> bool {
-    app.viewport_ready()
+    !app.busy()
+        && app.viewport_ready()
+        && app.resize_refusal.is_none()
+        && app.view.is_some()
         && app.bridge.valid()
         && tool.phase == SessionPhase::Editing
         && matches!(tool.draft_status, DraftStatus::Valid(_))
@@ -86,7 +109,7 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
         app.dispatch(Action::Confirm);
     }
     if (out.cancel || out.close) && editing {
-        app.dispatch(Action::Cancel);
+        crate::pill::cancel_tool(app);
     }
 }
 
@@ -116,14 +139,30 @@ fn card(
         Order::Middle,
     )
     .show(ctx, |ui| {
-        out = FeatureCard::new("feature-card", icon, title)
-            .width(chrome.feature_card.width())
-            .ok_enabled(apply)
-            .ok_label(ok_label)
-            .cancel_enabled(tool.phase == SessionPhase::Editing)
-            .show(ui, |rows| card_rows(app, rows, tool, &mut response));
+        card_scroll(ui, chrome.feature_card.height(), |ui| {
+            out = FeatureCard::new("feature-card", icon, title)
+                .width(chrome.feature_card.width())
+                .ok_enabled(apply)
+                .ok_label(ok_label)
+                .cancel_enabled(tool.phase == SessionPhase::Editing)
+                .show(ui, |rows| card_rows(app, rows, tool, &mut response));
+        });
     });
     (response, out)
+}
+
+fn card_scroll<R>(
+    ui: &mut Ui,
+    height: f32,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> egui::scroll_area::ScrollAreaOutput<R> {
+    // Area remembers the previous tool's height; the current chrome bounds own admission.
+    ui.set_max_height(height);
+    egui::ScrollArea::vertical()
+        .id_salt("feature-card-scroll")
+        .max_height(height)
+        .auto_shrink([false, true])
+        .show(ui, add)
 }
 
 fn card_rows(
@@ -169,11 +208,11 @@ fn number_field(app: &mut App, ui: &mut Ui, tool: &ModelSession) -> egui::Respon
     let response = ui.add(
         NumberField::new(salt, &mut draft)
             .unit(unit)
-            .width(170.0)
             .error(error)
             .enabled(editing)
             .keep_focus_on_enter(true)
-            .step_keys(!app.composing),
+            .step_keys(!app.composing)
+            .width(ui.available_width()),
     );
     app.numeric_id = Some(response.id);
     let label = format!("{} ({unit})", tool.parameter.label());
@@ -197,7 +236,7 @@ fn focus_keys(app: &mut App, response: &egui::Response, can_apply: bool) {
         && !app.composing
         && ctx.input(|input| input.key_pressed(egui::Key::Escape))
     {
-        app.dispatch(Action::Cancel);
+        crate::pill::cancel_tool(app);
         response.surrender_focus();
     }
 }
@@ -207,9 +246,133 @@ mod tests {
     use super::*;
 
     #[test]
+    fn floating_card_can_grow_after_switching_to_parameter_edit() {
+        for scale in [1.0, 2.0] {
+            let ctx = Context::default();
+            onecad_widgets::theme::install(
+                &ctx,
+                onecad_widgets::theme::load(false).unwrap(),
+                false,
+            );
+            ctx.set_pixels_per_point(scale);
+            for (index, (row_count, height)) in [
+                (1, 296.0),
+                (1, 296.0),
+                (1, 296.0),
+                (2, 296.0),
+                (2, 296.0),
+                (2, 296.0),
+                (2, 96.0),
+                (2, 96.0),
+                (2, 296.0),
+                (2, 296.0),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let mut frame = card_frame(&ctx, row_count, height);
+                frame.textures_delta.clear();
+                if height >= 296.0 {
+                    assert_card_footer_visible(&frame, index == 0);
+                }
+            }
+        }
+    }
+
+    fn card_frame(ctx: &Context, row_count: usize, height: f32) -> egui::FullOutput {
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 820.0),
+                )),
+                ..Default::default()
+            },
+            |_| {
+                frame::floating(
+                    egui::Id::unique("card-growth"),
+                    egui::pos2(120.0, 80.0),
+                    Order::Middle,
+                )
+                .show(ctx, |ui| {
+                    let scroll = card_scroll(ui, height, |ui| {
+                        FeatureCard::new("growth", "extrude", "Edit feature")
+                            .width(280.0)
+                            .ok_label("Apply ↵")
+                            .show(ui, |rows| {
+                                for index in 0..row_count {
+                                    rows.row(
+                                        if index == 0 { "Parameter" } else { "Distance" },
+                                        |ui| {
+                                            ui.add_sized(
+                                                egui::vec2(130.0, 30.0),
+                                                egui::Label::new("8.00 mm"),
+                                            );
+                                        },
+                                    );
+                                }
+                            });
+                    });
+                    assert!(scroll.inner_rect.height() <= height + 1.0);
+                    if height >= 296.0 {
+                        assert!(
+                            scroll.content_size.y <= scroll.inner_rect.height() + 1.0,
+                            "{} content clipped to {}",
+                            scroll.content_size.y,
+                            scroll.inner_rect.height()
+                        );
+                    } else {
+                        assert!(scroll.content_size.y > scroll.inner_rect.height());
+                    }
+                });
+            },
+        )
+    }
+
+    fn assert_card_footer_visible(frame: &egui::FullOutput, sizing_pass: bool) {
+        let mut footer_count = 0;
+        for shape in &frame.shapes {
+            if let egui::epaint::Shape::Text(text) = &shape.shape
+                && matches!(text.galley.job.text.as_str(), "Apply ↵" | "Cancel")
+            {
+                footer_count += 1;
+                let bounds = egui::Rect::from_min_size(text.pos, text.galley.size());
+                assert!(
+                    shape.clip_rect.contains_rect(bounds),
+                    "{bounds:?} outside {:?}",
+                    shape.clip_rect
+                );
+            }
+        }
+        // The initial Area sizing pass may emit no shapes.
+        assert!(footer_count == 2 || sizing_pass && footer_count == 0);
+    }
+
+    #[test]
     fn preview_text_variants() {
         assert_eq!(preview_text(&PreviewStatus::Empty), "");
         assert_eq!(preview_text(&PreviewStatus::Ready), "Preview ready");
         assert_eq!(preview_text(&PreviewStatus::Failed("boom".into())), "boom");
+    }
+
+    #[test]
+    fn rejected_authoring_and_save_status_override_ready_preview() {
+        for message in ["Create rejected", "Apply rejected"] {
+            let status = CommitStatus::Rejected(message.into());
+            assert_eq!(
+                tool_status(&status, &PreviewStatus::Ready, false),
+                Some((message, false))
+            );
+            assert_eq!(tool_status(&status, &PreviewStatus::Ready, true), None);
+        }
+        // Save lifecycle and errors are displayed from the host command status.
+        assert_eq!(
+            tool_status(&CommitStatus::Idle, &PreviewStatus::Ready, true),
+            None
+        );
+        assert_eq!(
+            tool_status(&CommitStatus::Idle, &PreviewStatus::Ready, false),
+            Some(("Preview ready", true))
+        );
     }
 }

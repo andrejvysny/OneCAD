@@ -42,6 +42,17 @@ impl SketchInteraction {
             SketchAction::AddConstraints { key, constraints } => {
                 self.add_constraints(key, constraints)
             }
+            SketchAction::History(direction) => self.history(direction),
+            SketchAction::HistoryResolved {
+                tag,
+                snapshot,
+                solve,
+                moved,
+                direction,
+            } => self.history_resolved(tag, snapshot, *solve, moved, direction),
+            SketchAction::ConstraintRefused { tag, message } => {
+                self.constraint_refused(tag, message)
+            }
             SketchAction::BatchAccepted { tag } => self.batch_accepted(tag),
             SketchAction::Solved {
                 tag,
@@ -225,6 +236,38 @@ impl SketchInteraction {
                 vec![SketchEffect::DiscardSketch { tag }]
             }
         }
+    }
+
+    fn history(&mut self, direction: onecad_core::edit::HistoryDirection) -> Vec<SketchEffect> {
+        if !self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.phase == SketchPhase::Active)
+        {
+            return Vec::new();
+        }
+        if self.clear_draft() {
+            return Vec::new();
+        }
+        let Some(edit_session) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.edit_session.clone())
+        else {
+            return self.refuse("Sketch history: edit session is unavailable");
+        };
+        let Some(tag) = self.next_request() else {
+            return Vec::new();
+        };
+        if let Some(session) = &mut self.session {
+            session.phase = SketchPhase::Submitting;
+            session.status = SketchStatus::Pending;
+        }
+        vec![SketchEffect::History {
+            tag,
+            edit_session,
+            direction,
+        }]
     }
 
     fn enter_key(&mut self) -> Vec<SketchEffect> {

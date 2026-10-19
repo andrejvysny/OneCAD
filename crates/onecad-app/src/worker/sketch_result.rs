@@ -105,7 +105,6 @@ pub(crate) fn adopted(sketch: &Sketch, result: &SketchUpsertDto) -> Result<Sketc
         handles::validate_endpoint(&after, id, start, position)?;
     }
     handles::validate_fixed(sketch, &after)?;
-    handles::validate_centers(sketch, &after, result)?;
     Ok(after)
 }
 

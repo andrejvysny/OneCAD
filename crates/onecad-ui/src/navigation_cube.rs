@@ -265,6 +265,7 @@ fn pointer_gesture(
     }
     if pressed
         && let Some(p) = position
+        && crate::viewport_widgets::allows_pointer(ui, ui.clip_rect(), p)
         && let Some(face) = hit(faces, p)
     {
         state = Some(Gesture {
@@ -373,8 +374,10 @@ pub fn show(
     let scale = outer.width() / SIZE;
     let center = outer.center();
     let faces = facets(view.basis(), center, HALF * f64::from(scale));
-    let over = ui.rect_contains_pointer(outer);
-    let enabled = ui.is_enabled() && !egui::Popup::is_any_open(ui.ctx());
+    let over = ui
+        .input(|input| input.pointer.hover_pos())
+        .is_some_and(|position| crate::viewport_widgets::allows_pointer(ui, outer, position));
+    let enabled = crate::viewport_widgets::gesture_allowed(ui);
     let (actions, dragging) = pointer_gesture(
         ui,
         ui.scope_id().with("cube gesture"),

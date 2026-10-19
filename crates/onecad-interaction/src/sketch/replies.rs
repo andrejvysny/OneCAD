@@ -64,7 +64,9 @@ impl SketchInteraction {
             return Vec::new();
         };
         session.plane = snapshot.sketch.effective_plane();
+        session.history = snapshot.history;
         session.authoritative = *snapshot.sketch;
+        session.edit_session = solve.edit_session.clone();
         session.status = SketchStatus::Entered(Box::new(solve));
         session.phase = SketchPhase::Active;
         Vec::new()
@@ -123,6 +125,7 @@ impl SketchInteraction {
         let Some(batch) = session.batch.take() else {
             return Vec::new();
         };
+        session.history = snapshot.history;
         session.authoritative = *snapshot.sketch;
         session
             .selection
@@ -138,6 +141,79 @@ impl SketchInteraction {
             .take()
             .map(|exit| self.exit(exit))
             .unwrap_or_default()
+    }
+
+    pub(crate) fn history_resolved(
+        &mut self,
+        tag: SketchTag,
+        snapshot: SketchSnapshot,
+        solve: SketchSessionDto,
+        moved: bool,
+        direction: onecad_core::edit::HistoryDirection,
+    ) -> Vec<SketchEffect> {
+        if !self.valid_tag(&tag)
+            || !self.phase_is(SketchPhase::Submitting)
+            || self.context.as_ref() != Some(&snapshot.document)
+            || snapshot.sketch.id != tag.key.sketch_id
+            || solve.sketch_id != tag.key.sketch_id.to_string()
+        {
+            return Vec::new();
+        }
+        let Some(session) = self
+            .session
+            .as_mut()
+            .filter(|session| session.batch.is_none())
+        else {
+            return Vec::new();
+        };
+        if session.edit_session != solve.edit_session
+            || snapshot.sketch.effective_plane() != session.plane
+        {
+            return self.failed(
+                tag,
+                "Sketch history: edit session or sketch plane changed".into(),
+            );
+        }
+        session.history = snapshot.history;
+        session.authoritative = *snapshot.sketch;
+        session
+            .selection
+            .retain(|id| session.authoritative.contains_entity(*id));
+        session.phase = SketchPhase::Active;
+        session.status = if moved {
+            SketchStatus::Entered(Box::new(solve))
+        } else {
+            SketchStatus::Refused(format!(
+                "No sketch edits to {}",
+                if direction == onecad_core::edit::HistoryDirection::Undo {
+                    "undo"
+                } else {
+                    "redo"
+                }
+            ))
+        };
+        session
+            .pending_exit
+            .take()
+            .map(|exit| self.exit(exit))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn constraint_refused(
+        &mut self,
+        tag: SketchTag,
+        message: String,
+    ) -> Vec<SketchEffect> {
+        if !self.valid_tag(&tag) || !self.phase_is(SketchPhase::Submitting) {
+            return Vec::new();
+        }
+        let pending = self.session.as_mut().and_then(|session| {
+            session.phase = SketchPhase::Active;
+            session.status = SketchStatus::Refused(message);
+            session.batch = None;
+            session.pending_exit.take()
+        });
+        pending.map(|exit| self.exit(exit)).unwrap_or_default()
     }
 
     pub(crate) fn failed(&mut self, tag: SketchTag, message: String) -> Vec<SketchEffect> {

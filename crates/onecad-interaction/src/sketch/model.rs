@@ -86,6 +86,7 @@ pub struct PrimitiveIds {
 
 #[derive(Clone, Debug)]
 pub struct SketchSnapshot {
+    pub history: Option<onecad_app::dto::SketchHistoryAvailability>,
     pub document: DocumentContext,
     pub sketch: Box<Sketch>,
 }
@@ -115,6 +116,8 @@ pub struct SketchSession {
     pub document: DocumentContext,
     pub plane: SketchPlane,
     pub authoritative: Sketch,
+    pub edit_session: Option<String>,
+    pub history: Option<onecad_app::dto::SketchHistoryAvailability>,
     pub tool: SketchTool,
     pub phase: SketchPhase,
     pub draft: Option<SketchDraft>,
@@ -135,6 +138,8 @@ impl SketchSession {
             document: tag.document.clone(),
             plane: sketch.effective_plane(),
             authoritative: sketch,
+            edit_session: None,
+            history: None,
             tool: SketchTool::Select,
             phase: if create {
                 SketchPhase::Creating
@@ -219,6 +224,18 @@ pub enum SketchAction {
         key: SketchSessionKey,
         constraints: Vec<Constraint>,
     },
+    History(onecad_core::edit::HistoryDirection),
+    HistoryResolved {
+        tag: SketchTag,
+        snapshot: SketchSnapshot,
+        solve: Box<SketchSessionDto>,
+        moved: bool,
+        direction: onecad_core::edit::HistoryDirection,
+    },
+    ConstraintRefused {
+        tag: SketchTag,
+        message: String,
+    },
     BatchAccepted {
         tag: SketchTag,
     },
@@ -258,6 +275,15 @@ pub enum SketchEffect {
     Upsert {
         tag: SketchTag,
         ops: Vec<SketchEditOp>,
+    },
+    History {
+        tag: SketchTag,
+        edit_session: String,
+        direction: onecad_core::edit::HistoryDirection,
+    },
+    AddConstraints {
+        tag: SketchTag,
+        constraints: Vec<Constraint>,
     },
     /// The host uses cancel_sketch(discard=false), then finish_sketch.
     FinishSketch {

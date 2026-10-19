@@ -225,6 +225,7 @@ pub struct RecentCard<'a> {
     meta: &'a str,
     thumbnail: Option<egui::TextureId>,
     width: f32,
+    metadata_only: bool,
 }
 
 const THUMB_H: f32 = 150.0;
@@ -237,7 +238,13 @@ impl<'a> RecentCard<'a> {
             meta,
             thumbnail: None,
             width: 200.0,
+            metadata_only: false,
         }
+    }
+    /// Show only real document metadata when no checked thumbnail is available.
+    pub fn metadata_only(mut self) -> Self {
+        self.metadata_only = true;
+        self
     }
     pub fn thumbnail(mut self, tex: Option<egui::TextureId>) -> Self {
         self.thumbnail = tex;
@@ -253,7 +260,14 @@ impl egui::Widget for RecentCard<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
         let l = look(ui.ctx());
         let t = &l.theme;
-        let size = vec2(self.width, THUMB_H + 1.0 + CAPTION_H);
+        let size = vec2(
+            self.width,
+            if self.metadata_only {
+                CAPTION_H
+            } else {
+                THUMB_H + 1.0 + CAPTION_H
+            },
+        );
         let (rect, r) = ui.allocate_exact_size(size, Sense::click());
         let cr = CornerRadius::same(RADIUS_LG);
         let hovered = r.hovered();
@@ -273,22 +287,27 @@ impl egui::Widget for RecentCard<'_> {
             Stroke::new(1.0, border),
             StrokeKind::Inside,
         );
-        let thumb = Rect::from_min_size(rect.min + vec2(1.0, 1.0), vec2(self.width - 2.0, THUMB_H));
-        let top = CornerRadius {
-            nw: RADIUS_LG - 1,
-            ne: RADIUS_LG - 1,
-            sw: 0,
-            se: 0,
-        };
-        paint_thumb(ui, thumb, top, self.thumbnail, &l);
-        let line_y = thumb.bottom();
-        let p = ui.painter();
-        p.hline(
-            thumb.x_range(),
-            line_y + 0.5,
-            Stroke::new(1.0, t.border_subtle),
-        );
-        self.paint_caption(p, Pos2::new(rect.left() + 12.0, line_y + 1.0 + 10.0), &l);
+        if self.metadata_only {
+            self.paint_caption(p, rect.min + vec2(12.0, 10.0), &l);
+        } else {
+            let thumb =
+                Rect::from_min_size(rect.min + vec2(1.0, 1.0), vec2(self.width - 2.0, THUMB_H));
+            let top = CornerRadius {
+                nw: RADIUS_LG - 1,
+                ne: RADIUS_LG - 1,
+                sw: 0,
+                se: 0,
+            };
+            paint_thumb(ui, thumb, top, self.thumbnail, &l);
+            let line_y = thumb.bottom();
+            let p = ui.painter();
+            p.hline(
+                thumb.x_range(),
+                line_y + 0.5,
+                Stroke::new(1.0, t.border_subtle),
+            );
+            self.paint_caption(p, Pos2::new(rect.left() + 12.0, line_y + 1.0 + 10.0), &l);
+        }
         if r.has_focus() {
             focus_ring(ui, rect, RADIUS_LG, &l);
         }
@@ -353,6 +372,51 @@ mod tests {
         };
         let mut out = ctx.run_ui(input, |ui| f(ui));
         out.textures_delta.clear();
+    }
+
+    #[test]
+    fn metadata_card_is_bounded_and_clickable_without_thumbnail() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, crate::theme::load(true).unwrap(), true);
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(320.0, 200.0))),
+            ..Default::default()
+        };
+        let mut bounds = Rect::NOTHING;
+        let mut first = ctx.run_ui(raw.clone(), |ui| {
+            bounds = ui
+                .add(
+                    RecentCard::new("Actual part", "Recovery available")
+                        .width(220.0)
+                        .metadata_only(),
+                )
+                .rect;
+        });
+        first.textures_delta.clear();
+        assert_eq!(bounds.size(), vec2(220.0, CAPTION_H));
+        let pos = bounds.center();
+        let mut click = raw;
+        click.events = vec![egui::Event::PointerMoved(pos)];
+        for pressed in [true, false] {
+            click.events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        let mut clicked = false;
+        let mut second = ctx.run_ui(click, |ui| {
+            clicked = ui
+                .add(
+                    RecentCard::new("Actual part", "Recovery available")
+                        .width(220.0)
+                        .metadata_only(),
+                )
+                .clicked();
+        });
+        second.textures_delta.clear();
+        assert!(clicked);
     }
 
     #[test]

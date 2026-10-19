@@ -3,6 +3,14 @@
 //! Desktop adapters marshal typed commands and supply host events, paths, and dialogs.
 //! Regeneration and persistence preserve their prepare, unlocked I/O, and fenced commit phases.
 
+mod import_readiness;
+mod replacement;
+mod sketch_constraints;
+mod sketch_history;
+pub use replacement::{discard_replaced_document, prepare_replacement_discard, ReplacementDiscard};
+pub use sketch_constraints::add_sketch_constraints_with_completion;
+pub use sketch_history::sketch_history_with_completion;
+
 pub use crate::read::{
     get_operation_record, get_sketch_plane, get_sketch_snapshot, preview_context, PreviewContext,
 };
@@ -240,7 +248,8 @@ pub async fn new_document(
 ///
 /// ## The recovery guard
 ///
-/// If an unresolved crash-recovery offer names this path, the file on disk is OLDER
+/// If an unresolved crash-recovery offer names this path or decoded document UUID,
+/// the file on disk is OLDER
 /// than work a previous session left behind, and opening it blind is destructive:
 /// the autosave layout is keyed by `documentId`, so the reopened stale file gets a
 /// runtime with the SAME id, and its first autosave overwrites the crash container
@@ -253,8 +262,8 @@ pub async fn new_document(
 ///
 /// * `"restore"` — the caller should route to [`recover_document`] instead; refused
 ///   here so there is exactly one restore path.
-/// * `"openSaved"` — an explicit discard. The recovery state is cleared FIRST, so
-///   the destruction is something the user chose rather than a side effect.
+/// * `"openSaved"` — an explicit discard after the saved document has opened
+///   successfully. A failed open preserves the pending offer and recovery copy.
 ///
 /// `None` on a path with no pending offer is the ordinary case and opens normally.
 #[tracing::instrument(skip_all, fields(path = %path), err(Display))]
@@ -265,33 +274,21 @@ pub async fn open_document(
     on_recovery: Option<String>,
 ) -> Result<DocumentSnapshotDto, ApiError> {
     if let Some(offer) = state.pending_recovery_for_path(Path::new(&path)) {
-        match on_recovery.as_deref() {
-            None => {
-                return Err(ApiError::RecoveryPending(format!(
-                    "{path} has unsaved changes from a previous session \
-                     (autosaved {} ms) — restore them or open the saved version",
-                    offer.modified_ms
-                )))
-            }
-            Some("openSaved") => {
-                state.take_pending_recovery(offer.document_id);
-                if let Some(root) = autosave::autosave_root(&app) {
-                    autosave::clear_recovery_state(&root, offer.document_id);
-                }
-            }
-            Some("restore") => {
-                return Err(ApiError::InvalidCommand(
-                    "openDocument: use recoverDocument to restore an autosave".into(),
-                ))
-            }
-            Some(other) => {
-                return Err(ApiError::InvalidCommand(format!(
-                    "openDocument: unknown onRecovery {other:?}"
-                )))
-            }
-        }
+        recovery_open_decision(&offer, &path, on_recovery.as_deref())?;
     }
     let rt = open_runtime_over_new_backend_blocking(state, PathBuf::from(&path)).await?;
+    // The decoded identity closes aliases, renamed copies and orphan-marker gaps.
+    // Refusal must also restore the prior document's staged worker services.
+    let discard_recovery = match state.peek_pending_recovery(rt.document_uuid()) {
+        Some(offer) => match recovery_open_decision(&offer, &path, on_recovery.as_deref()) {
+            Ok(document) => Some(document),
+            Err(error) => {
+                state.rollback_backend();
+                return Err(error);
+            }
+        },
+        None => None,
+    };
     let (snapshot, projection) = {
         let mut guard = state.runtime.lock().await;
         *guard = Some(rt);
@@ -301,6 +298,15 @@ pub async fn open_document(
         (snapshot_of(rt), rt.projection())
     };
     state.commit_backend();
+    if let Some(document_id) = discard_recovery {
+        // Failed opens must leave the sole recovery copy reachable. Dispose only
+        // after replacement succeeds, outside the runtime lock and in writer order.
+        let _lane = state.persistence.lock().await;
+        state.take_pending_recovery(document_id);
+        if let Some(root) = autosave::autosave_root(&app) {
+            autosave::clear_recovery_state(&root, document_id);
+        }
+    }
     #[cfg(debug_assertions)]
     render_watchdog_reconcile_projection(&projection, "opened document");
     let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
@@ -309,6 +315,27 @@ pub async fn open_document(
     // actually serve it (readiness-gated — see `schedule_initial_regen`).
     schedule_initial_regen(state).await;
     Ok(snapshot)
+}
+
+fn recovery_open_decision(
+    offer: &RecoveryOffer,
+    path: &str,
+    decision: Option<&str>,
+) -> Result<DocumentId, ApiError> {
+    match decision {
+        None => Err(ApiError::RecoveryPending(format!(
+            "{path} has unsaved changes from a previous session \
+             (autosaved {} ms) — restore them or open the saved version",
+            offer.modified_ms
+        ))),
+        Some("openSaved") => Ok(offer.document_id),
+        Some("restore") => Err(ApiError::InvalidCommand(
+            "openDocument: use recoverDocument to restore an autosave".into(),
+        )),
+        Some(other) => Err(ApiError::InvalidCommand(format!(
+            "openDocument: unknown onRecovery {other:?}"
+        ))),
+    }
 }
 
 /// **Start-screen lane**: opens a NEW document whose first (and only) feature is an
@@ -331,31 +358,29 @@ pub async fn import_step(
     app: HostContext,
     path: String,
 ) -> Result<DocumentSnapshotDto, ApiError> {
-    let (engine, meshes, solver, query) = state.make_backend_with_query();
+    let (staged, (engine, meshes, solver, query)) = import_readiness::ImportBackend::stage(state);
+    staged.wait_ready(std::time::Duration::from_secs(8)).await?;
     // Worker round-trip FIRST, with no lock held and no runtime published (the
-    // R-WP11 rule); the backend was just built, so `state.step_import()` is this
-    // document's worker.
+    // R-WP11 rule); the guard retains this stage's exact probe and readiness.
     //
     // `appStore.importStep` catches a failure here and leaves the user on their
     // current document, so both fallible steps must roll the staged backend swap back
     // — that document is still live and still needs its own worker.
-    let prepared = crate::imports::prepare_import(&*state.step_import(), Path::new(&path))
-        .await
-        .inspect_err(|_| state.rollback_backend())?;
+    let prepared = crate::imports::prepare_import(staged.probe(), Path::new(&path)).await?;
     let mut rt = DocumentRuntime::new_blank(engine, meshes, solver);
     rt.bind_geometry_read_query(query)
         .expect("fresh runtime has no geometry-read provider");
-    rt.add_import_record(&prepared, false)
-        .inspect_err(|_| state.rollback_backend())?;
+    rt.add_import_record(&prepared, false)?;
     let (snapshot, projection) = {
         let mut guard = state.runtime.lock().await;
-        *guard = Some(rt);
-        let rt = guard.as_ref().unwrap();
-        rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
-        state.bind_restart_owner(rt);
-        (snapshot_of(rt), rt.projection())
+        staged.publish(|| {
+            *guard = Some(rt);
+            let rt = guard.as_ref().unwrap();
+            rt.adopt_current_epoch();
+            state.bind_restart_owner(rt);
+            (snapshot_of(rt), rt.projection())
+        })?
     };
-    state.commit_backend();
     #[cfg(debug_assertions)]
     render_watchdog_reconcile_projection(&projection, "imported document");
     let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
@@ -842,27 +867,35 @@ async fn head_bodies(state: &AppState) -> Result<(Vec<BodyId>, Option<SnapshotId
 }
 
 /// Closes the open document, dropping its runtime + caches. Clears the document's
-/// crash-recovery state first (a clean close is not a crash).
+/// active crash-recovery state after queued writes drain. Unresolved offers stay protected.
 pub async fn close_document(state: &AppState, app: HostContext) -> Result<(), ApiError> {
     let closed = {
         let mut guard = state.runtime.lock().await;
         let id = guard.as_ref().map(DocumentRuntime::document_uuid);
         *guard = None;
+        state.invalidate_backend_stage();
         state.clear_restart_owner();
         id
     };
+    // Never await the writer lane while holding the runtime lock. Admitted
+    // autosaves finish before cleanup; queued old-session snapshots fail their fence.
+    let _lane = state.persistence.lock().await;
+    let current = state.runtime.lock().await;
     if let (Some(id), Some(root)) = (closed, autosave::autosave_root(&app)) {
-        autosave::clear_recovery_state(&root, id);
+        let reopened = current
+            .as_ref()
+            .is_some_and(|runtime| runtime.document_uuid() == id);
+        if !reopened && state.peek_pending_recovery(id).is_none() {
+            autosave::clear_recovery_state(&root, id);
+        }
     }
-    // The closed document's worker can serve nothing now: retire it (this is the
-    // process leak — it used to live until the app quit) and pre-warm its
-    // replacement so the next open is instant. Exactly one sidecar stays alive.
-    state.rewarm();
-    #[cfg(debug_assertions)]
-    render_watchdog_reconcile_projection(&DocumentProjection::empty(), "document closed");
-    let _ = app.emit(AppEvent::ProjectionUpdated(
-        DocumentProjection::empty().clone(),
-    ));
+    // A document opened while close waited owns its worker and projection now.
+    if current.is_none() {
+        state.rewarm();
+        #[cfg(debug_assertions)]
+        render_watchdog_reconcile_projection(&DocumentProjection::empty(), "document closed");
+        let _ = app.emit(AppEvent::ProjectionUpdated(DocumentProjection::empty()));
+    }
     Ok(())
 }
 
@@ -4754,6 +4787,9 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32; // [1, 12]
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
+
+#[cfg(test)]
+mod recovery_identity_tests;
 
 #[cfg(test)]
 mod tests {

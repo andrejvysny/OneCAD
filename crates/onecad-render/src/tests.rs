@@ -464,3 +464,5 @@ mod display_modes;
 
 #[path = "tests/edge_modes.rs"]
 mod edge_modes;
+
+mod resize_recovery;

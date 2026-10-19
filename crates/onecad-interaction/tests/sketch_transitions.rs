@@ -333,11 +333,33 @@ fn constraints_are_one_typed_batch_and_invalid_refs_are_explicit_refusals() {
         id: ids(4000).constraints[0],
         line: ids(2000).entities[2],
     };
-    let (_, ops) = upsert(state.dispatch(SketchAction::AddConstraints {
+    let effects = state.dispatch(SketchAction::AddConstraints {
         key,
-        constraints: vec![good],
-    }));
-    assert_eq!(ops.len(), 1);
+        constraints: vec![good.clone()],
+    });
+    let [SketchEffect::AddConstraints { tag, constraints }] = effects.as_slice() else {
+        panic!("strict constraint effect required")
+    };
+    assert_eq!(constraints, &[good]);
+    let tag = tag.clone();
+    let before = state.session.as_ref().unwrap().authoritative.clone();
+    let selection = state.session.as_ref().unwrap().selection.clone();
+    state.dispatch(SketchAction::ConstraintRefused {
+        tag: tag.clone(),
+        message: "Conflicting".into(),
+    });
+    let session = state.session.as_ref().unwrap();
+    assert_eq!(session.phase, SketchPhase::Active);
+    assert_eq!(session.authoritative, before);
+    assert_eq!(session.selection, selection);
+    assert!(matches!(&session.status, SketchStatus::Refused(message) if message == "Conflicting"));
+    state.dispatch(SketchAction::ConstraintRefused {
+        tag,
+        message: "stale".into(),
+    });
+    assert!(
+        matches!(&state.session.as_ref().unwrap().status, SketchStatus::Refused(message) if message == "Conflicting")
+    );
 }
 
 #[test]
@@ -426,6 +448,7 @@ fn create_then_enter_and_reenter_keep_entity_ids_but_change_session_generation()
     state.dispatch(SketchAction::Entered {
         tag: tag.clone(),
         snapshot: SketchSnapshot {
+            history: None,
             document: context(),
             sketch: Box::new(sketch.clone()),
         },
@@ -444,4 +467,81 @@ fn create_then_enter_and_reenter_keep_entity_ids_but_change_session_generation()
     assert!(state
         .dispatch(SketchAction::Created { tag: old })
         .is_empty());
+}
+
+#[test]
+fn sketch_history_cancels_only_transient_draft_before_requesting_authoritative_history() {
+    use onecad_core::edit::HistoryDirection;
+    let mut state = active(SketchPlane::xy(), SketchTool::Circle);
+    click(&mut state, 1.0, 2.0, 1000);
+    let before = state.session.as_ref().unwrap().authoritative.clone();
+    assert!(state
+        .dispatch(SketchAction::History(HistoryDirection::Undo))
+        .is_empty());
+    assert!(state.session.as_ref().unwrap().draft.is_none());
+    assert_eq!(state.session.as_ref().unwrap().authoritative, before);
+    let effects = state.dispatch(SketchAction::History(HistoryDirection::Undo));
+    assert!(
+        matches!(effects.as_slice(), [SketchEffect::History { edit_session, direction: HistoryDirection::Undo, .. }] if edit_session == "edit-visit")
+    );
+    assert_eq!(
+        state.session.as_ref().unwrap().phase,
+        SketchPhase::Submitting
+    );
+    assert!(state
+        .dispatch(SketchAction::History(HistoryDirection::Redo))
+        .is_empty());
+}
+
+#[test]
+fn sketch_history_reply_preserves_scope_and_empty_history_is_explicit() {
+    use onecad_core::edit::HistoryDirection;
+    let mut state = active(SketchPlane::xy(), SketchTool::Select);
+    let effect = state.dispatch(SketchAction::History(HistoryDirection::Undo));
+    let SketchEffect::History { tag, .. } = &effect[0] else {
+        panic!()
+    };
+    let tag = tag.clone();
+    let session = state.session.as_ref().unwrap();
+    let snapshot = SketchSnapshot {
+        history: Some(onecad_app::dto::SketchHistoryAvailability {
+            undo_depth: 0,
+            redo_depth: 0,
+        }),
+        document: session.document.clone(),
+        sketch: Box::new(session.authoritative.clone()),
+    };
+    state.dispatch(SketchAction::HistoryResolved {
+        tag: tag.clone(),
+        snapshot: snapshot.clone(),
+        solve: Box::new(enter_dto(tag.key.sketch_id)),
+        moved: false,
+        direction: HistoryDirection::Undo,
+    });
+    assert_eq!(state.session.as_ref().unwrap().phase, SketchPhase::Active);
+    assert!(
+        matches!(&state.session.as_ref().unwrap().status, SketchStatus::Refused(message) if message == "No sketch edits to undo")
+    );
+    state.dispatch(SketchAction::ContextChanged(None));
+    state.dispatch(SketchAction::ContextChanged(Some(context())));
+    let mut sketch = empty(SketchPlane::xy());
+    sketch.name = "New visit".into();
+    let effects = state.dispatch(SketchAction::Begin {
+        sketch: Box::new(sketch),
+        create: false,
+        context: context(),
+    });
+    assert!(!effects.is_empty());
+    state.dispatch(SketchAction::HistoryResolved {
+        tag,
+        snapshot,
+        solve: Box::new(enter_dto(SketchId(Uuid::from_u128(1)))),
+        moved: true,
+        direction: HistoryDirection::Undo,
+    });
+    assert_eq!(state.session.as_ref().unwrap().phase, SketchPhase::Entering);
+    assert_eq!(
+        state.session.as_ref().unwrap().authoritative.name,
+        "New visit"
+    );
 }

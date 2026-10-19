@@ -145,9 +145,11 @@ fn body_row(app: &mut App, ui: &mut Ui, id_text: &str, name: &str) {
     } else {
         RowState::Normal
     };
-    let enabled = app.viewport_ready() && app.bridge.valid();
+    let enabled = app.viewport_ready() && app.bridge.valid() && !app.busy();
     let row = TreeRow::new("body", name).state(state).enabled(enabled);
     if ui.add(row).clicked() {
+        crate::pill::cancel_tool(app);
+        app.dispatch(onecad_interaction::Action::ClearSelection);
         app.selected_body = id;
         app.topology.select(None);
         app.draw_dirty = true;

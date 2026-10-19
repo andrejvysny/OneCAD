@@ -22,6 +22,7 @@ mod options;
 mod passes;
 mod pipelines;
 mod prepared;
+mod resize;
 mod section_contours;
 mod section_contours_gpu;
 mod section_contours_worker;
@@ -51,6 +52,8 @@ pub enum RenderError {
     SubmissionState,
     #[error("GPU device polling failed: {0}")]
     Device(String),
+    #[error("GPU target allocation refused: {0}")]
+    Allocation(String),
     #[error("renderer resource budget exceeded: {0}")]
     Budget(&'static str),
     #[error("renderer capture does not match uploaded scene or viewport")]
@@ -72,6 +75,7 @@ pub struct Renderer {
     pipelines: Pipelines,
     ibl: ibl::Ibl,
     targets: Option<Targets>,
+    retained_output: Option<resize::RetainedOutput>,
     size: [u32; 2],
     committed: Vec<GpuBody>,
     preview: Vec<GpuBody>,
@@ -146,6 +150,7 @@ impl Renderer {
             pipelines,
             ibl,
             targets,
+            retained_output: None,
             size,
             committed: Vec::new(),
             preview: Vec::new(),
@@ -166,10 +171,16 @@ impl Renderer {
         })
     }
     pub fn output_view(&self) -> Option<&wgpu::TextureView> {
-        self.targets.as_ref().map(|target| &target.output_view)
+        self.targets
+            .as_ref()
+            .map(|target| &target.output_view)
+            .or_else(|| self.retained_output.as_ref().map(|output| &output.view))
     }
     pub fn size(&self) -> [u32; 2] {
         self.size
+    }
+    pub fn has_targets(&self) -> bool {
+        self.targets.is_some()
     }
     pub fn memory_estimate(&self) -> MemoryEstimate {
         self.estimate
@@ -189,7 +200,7 @@ impl Renderer {
         }
     }
     pub fn resize(&mut self, size: [u32; 2]) -> Result<(), RenderError> {
-        if self.size == size {
+        if self.size == size && (self.targets.is_some() || size.contains(&0)) {
             return Ok(());
         }
         self.require_idle()?;

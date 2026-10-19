@@ -30,5 +30,5 @@ expression: manifest
   "modified": "2026-07-16T00:00:00Z",
   "occtFingerprint": "occt-7.9.3-fixed",
   "opsHash": "[opsHash]",
-  "solverPolicyVersion": 2
+  "solverPolicyVersion": 3
 }

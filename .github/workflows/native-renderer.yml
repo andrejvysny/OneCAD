@@ -16,7 +16,6 @@ jobs:
     timeout-minutes: 30
     env:
       ONECAD_REQUIRE_GPU: "1"
-      ONECAD_RENDER_CAPTURE_DIR: ${{ runner.temp }}/onecad-render-quality-smoke
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -27,16 +26,18 @@ jobs:
         run: >-
           cargo fmt --check
           -p onecad-mesh-fixture -p onecad-app -p onecad-core -p onecad-protocol
-          -p onecad-scene -p onecad-render -p onecad-interaction -p onecad-ui
+          -p onecad-scene -p onecad-render -p onecad-interaction -p onecad-ui -p onecad-widgets
           -p onecad-worker-stub -p onecad-regen -p onecad-kernelbench
           -p onecad-library -p onecad-library-ingest
       - name: Check renderer and host
-        run: cargo clippy -p onecad-render -p onecad-ui --all-targets -- -D warnings
+        run: cargo clippy -p onecad-render -p onecad-ui -p onecad-widgets --all-targets -- -D warnings
       - name: CPU renderer and scene tests
         run: cargo test -p onecad-render -p onecad-scene -p onecad-protocol
       - name: Native host and interaction unit tests
-        run: cargo test -p onecad-ui -p onecad-interaction --lib
+        run: cargo test -p onecad-ui -p onecad-interaction -p onecad-widgets --lib
       - name: Require real Metal acceptance
+        env:
+          ONECAD_RENDER_CAPTURE_DIR: ${{ runner.temp }}/onecad-render-quality-smoke
         run: >-
           cargo test -p onecad-render
           -- --ignored --nocapture --test-threads=1

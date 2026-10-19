@@ -468,13 +468,13 @@ async fn an_ellipse_switches_the_sketch_onto_the_naive_dof_path() {
     );
 
     // Naive arithmetic, entity by entity: P0,P1 (4) + line (0) + the core centre
-    // Point (2) + the centre the worker mints from the inlined `center` (2) +
-    // ellipse shape (3) = 11, minus Fixed (2) and two Horizontals (1 each) = 7.
+    // Point (2) + ellipse shape (3) = 9, minus Fixed (2) and two Horizontals
+    // (1 each) = 5. The center is shared through centerRef.
     // The redundant Horizontal still subtracts here — that is exactly the
     // documented naive-count inaccuracy.
     assert_eq!(
-        solved.dof, 7,
-        "naive dof = 11 entity DOF − 4 constraint arity"
+        solved.dof, 5,
+        "naive dof = 9 entity DOF − 4 constraint arity"
     );
     // The contrast that proves the two paths are genuinely different: naive
     // counting on the BASELINE would give 4 − 4 = 0 (FullyConstrained), because

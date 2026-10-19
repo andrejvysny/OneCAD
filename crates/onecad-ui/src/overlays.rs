@@ -1,6 +1,6 @@
 //! Viewport overlays: nav pill (bottom-left) and the view-cluster buttons under the cube.
 use crate::{app::App, display_menu, layout::Chrome};
-use egui::{Align2, Context, Order, Rect, pos2, vec2};
+use egui::{Align2, Context, Order, Rect, vec2};
 use onecad_widgets::{
     components::{
         overlays::{NavButton, NavPill, SquareButton, ViewCluster},
@@ -10,8 +10,6 @@ use onecad_widgets::{
 };
 
 const NOT_YET: &str = "Not available yet";
-/// Edge of the navigation cube region the cluster must stay clear of.
-const CUBE_REGION: f32 = 164.0;
 const SQUARE: f32 = 36.0;
 
 fn nav_button<'a>(icon: &'a str, name: &'a str, enabled: bool) -> NavButton<'a> {
@@ -47,7 +45,7 @@ pub fn nav_pill(app: &mut App, ctx: &Context, chrome: &Chrome) {
     }
 }
 
-/// Buttons sit below the cube region so the Area never covers the cube's input.
+/// The shared layout reserves a separate region for cube controls and parameters.
 pub fn view_cluster(app: &mut App, ctx: &Context, chrome: &Chrome) {
     let ready = app.viewport_ready();
     let tip = |name| Tip::new(name);
@@ -72,22 +70,16 @@ pub fn view_cluster(app: &mut App, ctx: &Context, chrome: &Chrome) {
             tip: off("Snap"),
         },
     ];
-    let centre_x = chrome.view_cluster.x - CUBE_REGION / 2.0;
-    let top = chrome.view_cluster.y + CUBE_REGION + 4.0;
-    let pos = pos2(centre_x - SQUARE / 2.0, top - 8.0);
+    let pos = chrome.view_controls.min;
     let mut clicked = None;
     frame::floating(egui::Id::unique("view-cluster"), pos, Order::Middle).show(ctx, |ui| {
-        ui.horizontal(|ui| {
-            // Zero-width cube slot: buttons are centred on the slot's left edge.
-            ui.add_space(SQUARE / 2.0);
-            clicked = ViewCluster::new(&buttons)
-                .cube(0.0)
-                .show(ui, |_, _, _| {})
-                .clicked;
-        });
+        clicked = ViewCluster::new(&buttons)
+            .no_cube()
+            .show(ui, |_, _, _| {})
+            .clicked;
     });
     if clicked == Some(0) {
-        let anchor = Rect::from_min_size(pos2(centre_x - SQUARE / 2.0, top), vec2(SQUARE, SQUARE));
+        let anchor = Rect::from_min_size(pos, vec2(SQUARE, SQUARE));
         display_menu::toggle(app, anchor);
     }
     display_menu::popup_at(app, ctx);

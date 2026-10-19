@@ -1,0 +1,14 @@
+# ONECAD-251: solver policy 3 shares authored Point identity across curve centers.
+{"expect":{"v":1,"t":"hello","seq":0,"result":{"solverPolicyVersion":3}}}
+{"send":{"v":1,"t":"req","id":1,"verb":"SketchUpsert","args":{"sketchId":"Circle","entities":[{"id":"curve","type":"Circle","center":[10,20],"centerRef":"point","radius":3},{"id":"point","type":"Point","at":[10,20]}],"constraints":[]}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"upserted":true,"dof":3,"state":"UnderConstrained"}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"SketchUpsert","args":{"sketchId":"Arc","entities":[{"id":"curve","type":"Arc","center":[10,20],"centerRef":"point","radius":3,"startAngle":0,"endAngle":1},{"id":"point","type":"Point","at":[10,20]}],"constraints":[]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"result":{"upserted":true,"dof":5,"state":"UnderConstrained"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"SketchUpsert","args":{"sketchId":"Ellipse","entities":[{"id":"curve","type":"Ellipse","center":[10,20],"centerRef":"point","majorR":6,"minorR":3},{"id":"point","type":"Point","at":[10,20]}],"constraints":[]}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"result":{"upserted":true,"dof":5,"state":"UnderConstrained"}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"BeginGesture","args":{"sketchId":"Circle","sketchRevision":1,"gestureId":251,"drag":{"pointId":"point"}}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"gestureId":251}}}
+{"send":{"v":1,"t":"req","id":5,"verb":"SolveDrag","args":{"gestureId":251,"seq":1,"target":[15,25]}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"status":"success","positions":{"point":[15,25]}}}}
+{"send":{"v":1,"t":"req","id":6,"verb":"EndGesture","args":{"gestureId":251}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"result":{"dof":3}}}

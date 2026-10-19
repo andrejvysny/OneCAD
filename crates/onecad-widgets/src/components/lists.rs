@@ -267,20 +267,47 @@ impl Widget for PropertyRow<'_> {
         let (rect, response) =
             ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
         let p = ui.painter();
-        let g = galley(p, self.label, CONTROL, FontFamily::Proportional);
+        let label_width = LABEL_COL.min(rect.width() * 0.5);
+        let g = fitted(
+            p,
+            self.label,
+            FontId::proportional(CONTROL),
+            l.theme.ink4,
+            label_width,
+        );
         p.galley(
             pos2(rect.left(), rect.center().y - g.size().y / 2.0),
             g,
             l.theme.ink4,
         );
-        let v = galley(p, self.value, CONTROL, fonts::mono());
+        let value_rect = Rect::from_min_max(
+            pos2(
+                (rect.left() + label_width + 8.0).min(rect.right()),
+                rect.top(),
+            ),
+            rect.max,
+        );
+        let v = fitted(
+            p,
+            self.value,
+            FontId::new(CONTROL, fonts::mono()),
+            l.theme.ink2,
+            value_rect.width(),
+        );
         let pos = pos2(
             rect.right() - v.size().x,
             rect.center().y - v.size().y / 2.0,
         );
-        p.galley(pos, v, l.theme.ink2);
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, self.label));
-        response
+        p.with_clip_rect(value_rect.intersect(p.clip_rect()))
+            .galley(pos, v, l.theme.ink2);
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::Role::Label,
+                true,
+                format!("{}: {}", self.label, self.value),
+            )
+        });
+        response.on_hover_text(self.value)
     }
 }
 
@@ -302,6 +329,47 @@ pub fn property_row_with<R>(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui) 
 mod tests {
     use super::*;
     use crate::components::actions::common::headless;
+
+    #[test]
+    fn long_property_values_stay_in_their_column_at_both_display_scales() {
+        const VALUE: &str = "Synthetic constrained 80 x 50 mm plate profile";
+        for scale in [1.0, 2.0] {
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx, crate::theme::load(false).unwrap(), false);
+            ctx.set_pixels_per_point(scale);
+            for width in [160.0, 256.0, 280.0] {
+                for _ in 0..3 {
+                    let mut row = Rect::NOTHING;
+                    let mut frame = ctx.run_ui(egui::RawInput::default(), |ui| {
+                        ui.set_width(width);
+                        row = ui.add(PropertyRow::new("Sketch").value(VALUE)).rect;
+                        assert!(ui.min_rect().width() <= width + 1.0);
+                    });
+                    frame.textures_delta.clear();
+                    let mut saw_value = false;
+                    for shape in &frame.shapes {
+                        if let egui::epaint::Shape::Text(text) = &shape.shape {
+                            let bounds = Rect::from_min_size(text.pos, text.galley.size());
+                            assert!(bounds.left() >= row.left() - 1.0);
+                            assert!(bounds.right() <= row.right() + 1.0);
+                            if text.galley.job.text == VALUE {
+                                saw_value = true;
+                                assert!(text.galley.elided);
+                                assert!(
+                                    bounds.left() >= row.left() + LABEL_COL.min(width * 0.5) + 7.0
+                                );
+                                assert!(
+                                    shape.clip_rect.left()
+                                        >= row.left() + LABEL_COL.min(width * 0.5) + 8.0
+                                );
+                            }
+                        }
+                    }
+                    assert!(saw_value, "full value retained by text layout");
+                }
+            }
+        }
+    }
 
     #[test]
     fn every_component_renders_in_both_themes() {

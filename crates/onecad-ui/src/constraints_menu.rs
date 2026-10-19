@@ -1,5 +1,4 @@
-//! Sketch Constraints menu (README 04a): display-only list under the session strip.
-//! Every row is disabled until constraint authoring is wired; shortcuts are unbound.
+//! Sketch constraint applicability derives from the authoritative single selection.
 use crate::{app::App, layout::Chrome, ui_state::UiState};
 use egui::{Context, Order, Pos2, Rect, pos2};
 use onecad_widgets::{
@@ -30,7 +29,7 @@ const GEOMETRIC: [(&str, &str); 12] = [
 const DIMENSIONAL: [(&str, &str); 3] = [
     ("distance", "Distance"),
     ("angle", "Angle"),
-    ("radius", "Radius / diameter"),
+    ("radius", "Diameter"),
 ];
 
 pub fn toggle(state: &mut UiState) {
@@ -41,11 +40,40 @@ fn outside(menu: Rect, anchor: Option<Rect>, click: Pos2) -> bool {
     !menu.contains(click) && !anchor.is_some_and(|a| a.contains(click))
 }
 
-fn rows(ui: &mut egui::Ui, list: &[(&str, &str)]) {
-    for (icon, label) in list {
-        ui.add(MenuRow::new(Some(icon), label).enabled(false))
-            .on_hover_text(NOT_YET);
+fn tool(icon: &str) -> Option<crate::tool_registry::ToolId> {
+    use crate::tool_registry::ToolId;
+    match icon {
+        "horizontal" => Some(ToolId::Horizontal),
+        "vertical" => Some(ToolId::Vertical),
+        "fix" => Some(ToolId::Fix),
+        "distance" => Some(ToolId::Distance),
+        "radius" => Some(ToolId::Diameter),
+        _ => None,
     }
+}
+
+fn rows(
+    app: &App,
+    ui: &mut egui::Ui,
+    list: &[(&str, &str)],
+) -> Option<crate::tool_registry::ToolId> {
+    let mut clicked = None;
+    for (icon, label) in list {
+        let action = tool(icon);
+        let enabled =
+            action.is_some_and(|action| crate::constraint_authoring::available(app, action));
+        let response = ui.add(MenuRow::new(Some(icon), label).enabled(enabled));
+        if enabled && response.clicked() {
+            clicked = action;
+        } else if !enabled {
+            response.on_hover_text(if action.is_some() {
+                "Select one applicable sketch entity first"
+            } else {
+                NOT_YET
+            });
+        }
+    }
+    clicked
 }
 
 /// `anchor` is the Constraints pill button; the menu left-aligns to it.
@@ -64,18 +92,22 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome, anchor: Option<Rect>)
         .min(vp.right() - WIDTH - 10.0)
         .max(vp.left() + 10.0);
     let pos = pos2(x, vp.top() + BELOW_STRIP);
+    let mut clicked = None;
     let area =
         frame::floating(egui::Id::unique("constraints-menu"), pos, Order::Middle).show(ctx, |ui| {
             menu_frame(ctx).show(ui, |ui| {
                 ui.set_width(WIDTH - 14.0);
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.add(MenuSection::new("GEOMETRIC"));
-                rows(ui, &GEOMETRIC);
+                clicked = rows(app, ui, &GEOMETRIC);
                 menu_divider(ui);
                 ui.add(MenuSection::new("DIMENSIONAL"));
-                rows(ui, &DIMENSIONAL);
+                clicked = rows(app, ui, &DIMENSIONAL).or(clicked);
             });
         });
+    if let Some(tool) = clicked {
+        crate::constraint_authoring::activate(app, ctx, tool);
+    }
     let click = ctx.input(|i| {
         i.pointer
             .any_pressed()

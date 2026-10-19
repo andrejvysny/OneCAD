@@ -91,7 +91,7 @@ pub fn hover(
         && app.interaction.tool.is_none()
         && !crate::viewport_widgets::owns_pointer(app, ui, rect);
     let target = pointer
-        .filter(|point| allowed && rect.contains(*point))
+        .filter(|point| allowed && crate::viewport_widgets::allows_pointer(ui, rect, *point))
         .and_then(|point| {
             let logical = point - rect.min;
             let hit = onecad_scene::pick(

@@ -13,6 +13,7 @@ const MARKER_CONTENT: &str = "onecad-native-qa-v1\n";
 pub struct QaPaths {
     pub root: PathBuf,
     pub document: PathBuf,
+    pub open_on_start: bool,
     pub data: PathBuf,
     pub config: PathBuf,
     pub temporary: PathBuf,
@@ -33,10 +34,7 @@ impl QaPaths {
                 _ => return Err("only --qa-root and --open are supported, once each".into()),
             }
         }
-        Self::prepare(
-            &root.ok_or("--qa-root is required")?,
-            &document.ok_or("--open is required")?,
-        )
+        Self::prepare_optional(&root.ok_or("--qa-root is required")?, document.as_deref())
     }
 
     pub fn require_launch_environment(&self) -> Result<(), String> {
@@ -62,21 +60,32 @@ impl QaPaths {
         Ok(())
     }
 
+    #[cfg(test)]
     fn prepare(root: &Path, fixture: &Path) -> Result<Self, String> {
+        Self::prepare_optional(root, Some(fixture))
+    }
+
+    fn prepare_optional(root: &Path, fixture: Option<&Path>) -> Result<Self, String> {
         if fs::symlink_metadata(root).is_ok_and(|value| value.file_type().is_symlink()) {
             return Err("QA root must not be a symlink".into());
         }
         let root = canonical_candidate(root)?;
         require_temporary(&root)?;
-        let fixture = fs::canonicalize(fixture).map_err(|error| error.to_string())?;
-        require_temporary(&fixture)?;
-        if fixture.extension().and_then(|value| value.to_str()) != Some("onecad")
-            || !fixture.is_file()
-        {
-            return Err(
-                "--open must name a prepared .onecad fixture under temporary storage".into(),
-            );
-        }
+        let fixture = fixture
+            .map(|path| -> Result<PathBuf, String> {
+                let path = fs::canonicalize(path).map_err(|error| error.to_string())?;
+                require_temporary(&path)?;
+                if path.extension().and_then(|value| value.to_str()) != Some("onecad")
+                    || !path.is_file()
+                {
+                    return Err(
+                        "--open must name a prepared .onecad fixture under temporary storage"
+                            .into(),
+                    );
+                }
+                Ok(path)
+            })
+            .transpose()?;
         validate_existing_root(&root)?;
         fs::create_dir_all(&root).map_err(|error| error.to_string())?;
         let lock_path = root.join(".onecad-native-qa.lock");
@@ -105,13 +114,18 @@ impl QaPaths {
                 return Err("QA directory escapes the dedicated root".into());
             }
         }
-        let document = copy_fixture(&root, &fixture)?;
+        let open_on_start = fixture.is_some();
+        let document = match fixture {
+            Some(fixture) => copy_fixture(&root, &fixture)?,
+            None => root.join("documents/Untitled.onecad"),
+        };
         Ok(Self {
             data: root.join("data"),
             config: root.join("config"),
             temporary: root.join("temporary"),
             root,
             document,
+            open_on_start,
             _lock: lock,
         })
     }
@@ -183,6 +197,17 @@ fn require_temporary(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn root_without_fixture_prepares_blank_start_without_creating_document() {
+        let area = tempfile::tempdir().unwrap();
+        let root = area.path().join("qa");
+        let paths =
+            QaPaths::from_args([OsString::from("--qa-root"), root.into_os_string()].into_iter())
+                .unwrap();
+        assert!(!paths.open_on_start);
+        assert!(!paths.document.exists());
+        assert!(paths.root.join("documents").is_dir());
+    }
     #[test]
     fn explicit_isolation_and_reopen_preserve_saved_copy() {
         let area = tempfile::tempdir().unwrap();

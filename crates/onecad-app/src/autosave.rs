@@ -52,8 +52,9 @@
 //! Two writers off one lock need their own ordering, which is the `lane` parameter
 //! both take: a `tokio::sync::Mutex<()>` (`AppState::persistence`) serializing
 //! {container write + recovery-marker mutation}. **Lock order is runtime → release →
-//! lane, never nested** — no function in this module awaits the lane while holding
-//! the runtime lock.
+//! lane, never nested in that order** — no function awaits the lane while holding
+//! the runtime lock. After lane admission, a short runtime recheck fences stale
+//! autosaves; the runtime guard is released before container I/O.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -234,7 +235,7 @@ async fn attempt(
     //    a timer against a document the user is actively editing, and its container
     //    is only ever read by crash recovery — which regens from 0 regardless. The
     //    "paint at open" caches belong to an explicit save.
-    let (payload, doc_id, opened, title) = {
+    let (payload, doc_id, session, opened, title) = {
         let mut guard = runtime.lock().await;
         let Some(rt) = guard.as_mut() else {
             return AutosaveAttempt::Skipped; // no document open.
@@ -248,6 +249,7 @@ async fn attempt(
         (
             rt.build_save_payload(meta, SaveCaches::none()),
             doc_id,
+            rt.runtime_session(),
             opened,
             title,
         )
@@ -263,6 +265,15 @@ async fn attempt(
     // ── Persistence lane: container write + marker, serialized against an
     //    explicit save's write + recovery clearing (M2/M3). ──
     let _lane = lane.lock().await;
+    // A snapshot queued behind replacement cleanup must not resurrect discarded work.
+    if !runtime
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|runtime| runtime.matches_runtime_session(&session) && runtime.is_dirty())
+    {
+        return AutosaveAttempt::Skipped;
+    }
     let target = path.clone();
     match tokio::task::spawn_blocking(move || DocumentRuntime::write_payload(&target, &payload))
         .await

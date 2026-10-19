@@ -32,6 +32,14 @@ use crate::sketch::Sketch;
 
 use super::command::EditCommand;
 
+/// Direction of an authoritative history transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HistoryDirection {
+    Undo,
+    Redo,
+}
+
 /// Maximum retained undo steps (C++ `kMaxUndoDepth`, `CommandProcessor.cpp:79`).
 pub const UNDO_CAP: usize = 200;
 
@@ -329,6 +337,28 @@ impl UndoStack {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn sketch_history_depth(
+        &self,
+        direction: HistoryDirection,
+        id: SketchId,
+        max: usize,
+    ) -> usize {
+        let stack = match direction {
+            HistoryDirection::Undo => &self.undo,
+            HistoryDirection::Redo => &self.redo,
+        };
+        stack.iter().rev().take(max).take_while(|txn| txn.edits.iter().all(|edit| matches!(
+            &edit.forward, EditCommand::SketchEdit { sketch, .. } | EditCommand::SketchDragGesture { sketch, .. } if *sketch == id
+        ))).count()
+    }
+
+    pub(crate) fn history_txn(&self, direction: HistoryDirection) -> Option<&Txn> {
+        match direction {
+            HistoryDirection::Undo => self.undo.last(),
+            HistoryDirection::Redo => self.redo.last(),
+        }
     }
 
     /// Whether an undo step is available.

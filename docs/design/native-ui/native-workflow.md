@@ -208,3 +208,153 @@ command above when reviewing another worker/source revision. Native profile
 selection, numeric focus, Enter/Escape, drag/manipulator behavior, menu routing,
 undo/redo, real process quit/reopen, visual quality and unsupported-tool/error
 messaging require separate observation in the built native host.
+
+## Stabilized shell contracts
+
+The native shell uses separate tool cancellation and selection clearing. Cancel
+ends an editable transient draft without changing the authoritative document;
+idle Escape clears selection. The selection label's close button cancels and
+clears. Body and viewport selection clear conflicting profile/feature selection.
+History-edit cancellation retains the previously selected body. Until persistent
+face attachment is wired, the creation action explicitly says **Sketch (XY)**,
+including in face context; it does not claim to attach to that face.
+
+All egui text editors own text undo/redo and native editing menu actions. IME
+Enter/Escape protection runs before CAD routing, including composition commit
+and end frames. Panel shortcuts use the same text-focus policy. Outside text focus,
+active sketches use a typed session-scoped history operation; other contexts use
+model history. Title, File and native Edit menus share this routing. Sketch history
+uses bounded application-owned undo mementos, a unique edit-visit token and the
+visit's worker epoch. It refuses crossing the entry boundary, foreign transactions,
+stale completions and redo not owned by the visit. Undo/Redo cancels a transient
+draft before moving committed history. A failed candidate solve leaves document
+and both stacks unchanged; empty scoped history is explicit. No UI undo snapshots
+or direct UI document mutations are introduced.
+Command lifecycle/error status takes precedence over ready-preview status.
+Number stepping preserves authored fractional precision; expressions are not
+silently replaced by stepped numeric values.
+
+Camera, topology hover and authoring overlays share higher-layer pointer
+ownership. New viewport gestures cannot begin through chrome. Captured gizmo
+moves/releases can cross chrome; focus loss, Escape and popup opening end capture.
+History uses the authoritative applied cursor and actual suppressed/error states.
+Its rollback marker is display-only until typed structural mutation is exposed.
+
+Target replacement first tries the transactional old/new allocation. After both
+CAD and final host sampling fences drain, a budget/allocation refusal may retry
+by retiring intermediate attachments while retaining and charging the previous
+output texture. A failed retry keeps that image but invalidates its pick capture;
+the host offers Retry and retries changed dimensions. Save remains available.
+Device loss remains a separate unavailable state. Resource caps, including
+512 MiB GPU replacement residency and 500,000 admitted triangles, are unchanged.
+The required Metal regression covers the default 2x target, repeated resizes,
+refusal followed by a valid size, suspension/restoration and quality transitions.
+Hardware tests do not establish physical monitor or input acceptance.
+
+Startup discovers recovery before opening a saved UUID. Restore, Open saved
+(discard recovery), and Discard are explicit decisions. Failed saved-open must
+retain the pending offer, autosave and marker; destruction happens only after a
+validated replacement runtime is installed. One document opens per startup;
+other offers remain protected for a later launch. The isolated host does not
+implement production settings migration or cross-process project ownership.
+
+Focused regression sources are `onecad-interaction/tests/transitions.rs`,
+`onecad-ui/src/input/tests.rs`, `pointer_policy.rs`, `gizmo_tests.rs`,
+`inspector_history.rs`, `feature_card.rs`, `startup_recovery_tests.rs`,
+`onecad-widgets` input/card/icon tests and
+`onecad-render/src/tests/resize_recovery.rs` (all paths under `crates/` unless
+otherwise stated). The recovery tests simulate a dead owner and assert exact
+restored semantic values; they do not replace a physical crash/restart drill.
+
+## Frozen-reference reachability map
+
+The reference revision is `d76857c20ad777398689b517cccb3c71cc0d2356`.
+The following paths refer to source/tests at that revision. They establish
+specific migration contracts to inspect; test-file presence is not evidence of
+a fresh Tauri run. This map does not promote inert design-registry entries,
+placeholders or new operations into parity requirements. Rows marked unavailable
+must pass through the native application before migration can be qualified.
+
+| Reference behavior and source/test anchor | Native entry and application authority | Regression / acceptance boundary |
+| --- | --- | --- |
+| File menu and save/open/recents: `src/features/shell/fileActions.ts`, `fileActions.test.ts` | Native File menu/start screen, typed `document_flow::Request` and bounded `document_services`; `api::{new_document,open_document,save_document}` | `document_services_tests`, dirty-transition tests and persistence suites; real metadata recents replace examples. Physical dialogs, dirty transitions and process reopen remain unqualified. |
+| Dirty close and recovery: `src/features/shell/UnsavedChangesDialog.tsx`; prior backend recovery contracts | Native close prompt/startup recovery modal; `api::{check_recovery,recover_document,close_document}` | `startup_recovery_tests`, `autosave_recovery`, `recovery_hardening`; physical crash/restart and clean teardown unqualified. |
+| Scoped history: `src/features/shell/undoActions.ts`, `undoActions.test.ts`, `src/tools/sketch/sketchService.ts` | Shared native text/title/File/Edit-menu dispatcher; model `api::{undo_with_outcome,redo_with_outcome}` and fenced `api::sketch_history_with_completion` | Text editor/retained-input tests, sketch transition tests and real-worker `sketch_history` cover precision, entry boundary, empty history, redo ownership and edit visits. Physical sketch Undo/Redo, focus/IME and complete native workflow acceptance remain required. |
+| Sketch primitives, face entry, constraints and construction: `src/tools/sketch/SketchController.face.test.ts`, `SketchController.draw.test.ts`, `SketchController.construction.test.ts`, `src/features/sketch/ConstraintMenu.test.tsx` | Native XY Select/Line/Rectangle/Circle reducer; singleton Point Fixed, Line Horizontal/Vertical/length and Circle diameter through strict application constraint admission | `real_sketch_modeling`, `sketch_constraint_admission`, `sketch_center_refs` and UI/reducer tests. Face attachment, other constraints, existing-value editing, snapping and broader editing remain unavailable; physical native constraint/dimension acceptance is outstanding. |
+| Extrude preview, commit and re-edit: `src/tools/modelTools/ModelToolController.commit.test.ts`, `modelToolMachine.test.ts` | Profile pill and feature card; typed interaction effects; `api::apply_operation` | `transitions`, `native_plate_workflow`, provisional rollback tests; physical 6/8/6/8 mm input/save/reopen still required. |
+| Additional solid operations and history: `src/tools/modelTools/ModelToolController.filletFromFace.test.ts`, `ModelToolController.patternReedit.test.ts`, `src/features/inspector/historyActions.test.ts` | Existing application operation authority; most native creation/structural controls disabled | `fillet_blend_class`, `feature_pattern_integration`, `history_outcomes`; no native reachability or full-family acceptance claimed. |
+| Variables/expressions: `src/features/inspector/variableAuthoring.test.ts`, `src/ipc/mockClient.variables.test.ts` | Feature numeric expression evaluation; `api::{evaluate_expression,upsert_variable_expr,rename_variable}` | `variable_driven_ops`; native variables UI unavailable. Mock tests alone do not prove a working product flow. |
+| Measurement/section/display: `src/features/measure/MeasurePanel.test.tsx`, `src/features/shell/DisplayModePopover.test.tsx` | Native Display popover exposes canonical Shaded, Shaded + edges, Wireframe and capability-gated X-ray through fenced renderer options; section remains view-only; measurement unavailable | `viewport_options::tests` checks mode choice and unsupported X-ray; renderer CPU/required Metal suites cover their declared contracts. Physical appearance, display preferences and measurement workflow acceptance remain separate. X-ray is an existing native renderer capability, not a claim of frozen Tauri parity. |
+| Import/export: `src/features/shell/fileActions.ts` | Native File menu/start-screen import through typed document services; `api::{import_step,export_step_file,export_stl_file,export_obj_file,export_3mf_file}` | `document_services_tests`, `step_import`, `step_export_attributes`, `threemf_export`; opening a project copy is supported, merge-import remains unavailable. Backend pass does not qualify native dialogs or appearance continuity. |
+| Library browsing/placement and gears: `src/features/library/LibraryModal.test.tsx`, `ComponentDetailRail.test.tsx`, `src/tools/modelTools/gearMachine.test.ts` | Existing library and gear application services; native UI unavailable | `library_ingest`, `gear_ops`; native browsing/configuration/placement/generation acceptance required. |
+
+The native input acceptance sequence remains: foreground the isolated app; select
+its prepared profile through the viewport; preview/commit 6 mm; history-edit to
+8 mm; undo to 6 mm; redo to 8 mm; save; quit cleanly; reopen the saved QA copy.
+Record exact feature/profile/body IDs and typed parameters before/after each
+step, persistent refs, bounds/BRep semantics, history depths and dirty state.
+Repeat cancellation and failed provisional operations to verify unchanged prior
+state and intended undo grouping. Run the focus/IME/menu, chrome-crossing gesture,
+minimum-window/Retina resize and autosave/crash/restart/second-crash drills with
+actual macOS input. A blocked input tool is not a passed or failed modeling gate.
+
+### Qualifying documents captured from native input
+
+Save a QA checkpoint after each committed 6 mm, edited 8 mm, Undo 6 mm and
+Redo 8 mm state. Copy those saved containers into a separate capture directory as
+`committed-6.onecad`, `edited-8.onecad`, `undo-6.onecad` and `redo-8.onecad`.
+After a clean quit and real native reopen, save and copy `reopened-8.onecad`.
+Use one document throughout; do not regenerate missing checkpoints with a
+headless fixture or substitute captures from an earlier failing run. Record the
+host binary hash, source/diff identity, worker manifest and native logs beside
+the captures. Confirm Save reports a clean document before copying each file.
+
+Run the explicit semantic gate against those immutable captures:
+
+```sh
+ONECAD_NATIVE_CAPTURE_ROOT="/absolute/qa-captures" \
+ONECAD_REQUIRE_WORKER=1 \
+ONECAD_WORKER_PATH="$PWD/worker/build-native-stabilization/onecad-worker" \
+cargo test -p onecad-app --test native_capture_acceptance --offline -- --ignored --nocapture
+```
+
+Missing captures or worker prerequisites fail this gate. Each capture opens and
+regenerates through shared services in an isolated child process. The test checks
+document/feature/body identity, exact sketch and persistent profile references,
+6/8/6/8/8 mm parameters, clean saved state, BRep solid/face properties and checked
+MESH1 geometry. Source hashes must remain unchanged. Saved containers do not
+persist the live Undo stack: verify one history step per accepted action and the
+Undo/Redo depths separately from native adoption logs. This semantic test does
+not qualify text focus, gestures, IME, rendering or the input sequence itself.
+
+For clean shutdown, require the host's `Native host exited cleanly` log after
+`eframe::run_native` returns successfully and inspect stderr for AppKit exceptions.
+`open -W` exiting with status 0 alone is insufficient: Launch Services may return
+success even when teardown raises an Objective-C exception.
+
+### Scoped sketch history regression gates
+
+Run with the freshly built production worker, preserving explicit prerequisites:
+
+```sh
+ONECAD_REQUIRE_WORKER=1 \
+ONECAD_WORKER_PATH="$PWD/worker/build-native-stabilization/onecad-worker" \
+cargo test -p onecad-app --test sketch_history --no-fail-fast
+cargo test -p onecad-app --lib document_runtime::sketch_adoption::tests:: --no-fail-fast
+cargo test -p onecad-interaction --test sketch_transitions --no-fail-fast
+cargo test -p onecad-ui --lib input::tests --no-fail-fast
+```
+
+The real-worker gate verifies exact sketch/entity identity and authored precision
+across Undo/Redo, the entry boundary, explicit empty history, new-edit redo clearing
+and rejection of a prior visit. Unit gates additionally cover solver failure,
+conflicting/overconstrained replies, runtime/revision/worker fences and cancellation
+without a revision bump. Strict constraint candidates share the edit-visit fence,
+so Cancel or a new visit cannot accept a detached old candidate.
+
+Native acceptance remains separate: create two sketch edits, verify title/File/Edit
+menu and keyboard Undo/Redo each move exactly one step, cancel a transient draft
+with Undo before changing committed history, verify text Undo remains text-only,
+and confirm Finish/Discard retains intended model undo grouping. Repeat after a
+worker restart and ensure the old visit cannot mutate history. These automated
+gates do not establish physical macOS input, IME or displayed solver truth.

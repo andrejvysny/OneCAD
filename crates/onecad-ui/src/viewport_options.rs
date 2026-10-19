@@ -1,7 +1,7 @@
 //! Transient viewport settings, applied by the host after GPU work completes.
 
 use crate::app::App;
-use onecad_render::RenderOptions;
+use onecad_render::{DisplayMode, RenderOptions};
 
 /// Menu body; hosted by the title menu and by the floating chrome's popups.
 pub fn contents(app: &mut App, ui: &mut egui::Ui) {
@@ -9,7 +9,14 @@ pub fn contents(app: &mut App, ui: &mut egui::Ui) {
         .pending_display_options
         .as_ref()
         .unwrap_or_else(|| app.renderer.options());
-    let mut changed = supersampling(ui, &mut options);
+    let xray_supported = app
+        .gpu
+        .device
+        .features()
+        .contains(wgpu::Features::FLOAT32_BLENDABLE);
+    let mut changed = display_modes(ui, &mut options, xray_supported);
+    ui.separator();
+    changed |= supersampling(ui, &mut options);
     changed |= ui
         .add_enabled_ui(
             app.interaction.tool.is_none() && !app.sketch_active(),
@@ -21,6 +28,32 @@ pub fn contents(app: &mut App, ui: &mut egui::Ui) {
         app.draw_dirty = true;
         ui.ctx().request_repaint();
     }
+}
+
+fn display_modes(ui: &mut egui::Ui, options: &mut RenderOptions, xray_supported: bool) -> bool {
+    ui.label("Display mode");
+    let mut changed = false;
+    for (mode, label) in [
+        (DisplayMode::Shaded, "Shaded"),
+        (DisplayMode::ShadedEdges, "Shaded + edges"),
+        (DisplayMode::Wireframe, "Wireframe"),
+        (DisplayMode::Xray, "X-ray"),
+    ] {
+        let enabled = mode != DisplayMode::Xray || xray_supported;
+        let response = ui
+            .add_enabled_ui(enabled, |ui| {
+                ui.selectable_value(&mut options.display_mode, mode, label)
+            })
+            .inner
+            .on_disabled_hover_text(
+                "X-ray requires FLOAT32_BLENDABLE, unavailable on this GPU device.",
+            );
+        changed |= response.changed();
+        if response.clicked() {
+            ui.close();
+        }
+    }
+    changed
 }
 
 #[cfg(test)]
@@ -111,6 +144,7 @@ mod tests {
 
     struct Harness {
         options: RenderOptions,
+        xray_supported: bool,
         axis: Option<usize>,
         menu: egui::Rect,
     }
@@ -119,6 +153,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 options: RenderOptions::default(),
+                xray_supported: true,
                 axis: None,
                 menu: egui::Rect::NOTHING,
             }
@@ -138,6 +173,8 @@ mod tests {
                 },
                 |ui| {
                     self.menu = display_menu(ui, |ui| {
+                        display_modes(ui, &mut self.options, self.xray_supported);
+                        ui.separator();
                         supersampling(ui, &mut self.options);
                         section_axis_ui(ui, &mut self.axis);
                     })
@@ -197,6 +234,57 @@ mod tests {
                         .collect::<Vec<_>>()
                 )
             })
+    }
+
+    #[test]
+    fn display_choices_select_canonical_modes_and_preserve_pending_settings() {
+        for (mode, label) in [
+            (DisplayMode::Shaded, "Shaded"),
+            (DisplayMode::ShadedEdges, "Shaded + edges"),
+            (DisplayMode::Wireframe, "Wireframe"),
+            (DisplayMode::Xray, "X-ray"),
+        ] {
+            let ctx = egui::Context::default();
+            let mut host = Harness {
+                options: RenderOptions {
+                    display_mode: if mode == DisplayMode::Shaded {
+                        DisplayMode::Wireframe
+                    } else {
+                        DisplayMode::Shaded
+                    },
+                    ssaa: 2.0,
+                    section: [0.0, 0.0, 1.0, 5.0],
+                    ..RenderOptions::default()
+                },
+                ..Harness::default()
+            };
+            let expected = RenderOptions {
+                display_mode: mode,
+                ..host.options
+            };
+            host.frame(&ctx, vec![]);
+            host.click(&ctx, host.menu.center());
+            let output = host.frame(&ctx, vec![]);
+            host.click(&ctx, text_position(&output, label));
+            host.frame(&ctx, vec![]);
+            assert_eq!(host.options, expected);
+        }
+    }
+
+    #[test]
+    fn unsupported_xray_is_visible_but_cannot_change_options() {
+        let ctx = egui::Context::default();
+        let mut host = Harness {
+            xray_supported: false,
+            ..Harness::default()
+        };
+        let expected = host.options;
+        host.frame(&ctx, vec![]);
+        host.click(&ctx, host.menu.center());
+        let output = host.frame(&ctx, vec![]);
+        host.click(&ctx, text_position(&output, "X-ray"));
+        host.frame(&ctx, vec![]);
+        assert_eq!(host.options, expected);
     }
 
     #[test]

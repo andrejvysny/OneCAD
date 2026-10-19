@@ -104,7 +104,7 @@ fn preflight_ids(blob: &[u8], limits: MeshLimits) -> Result<(), MeshDecodeError>
         .into());
     }
     let mut bytes = 0usize;
-    for entry in blob[64..table_end].chunks_exact(16) {
+    for entry in blob[64..table_end].as_chunks::<16>().0.iter() {
         if matches!(u32_le(entry, 0), 6 | 10) {
             bytes = bytes
                 .checked_add(u32_le(entry, 12) as usize)
@@ -243,13 +243,15 @@ fn validate_geometry(blob: &[u8], h: &MeshHeaderView) -> Result<(), MeshDecodeEr
     for ty in [1, 2, 8, 11] {
         if let Some(data) = section(blob, h, ty) {
             if data
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .any(|word| !f32_le(word, 0).is_finite())
             {
                 return Err(MeshDecodeError::NonFinite(ty));
             }
             if ty == 11 {
-                for data in data.chunks_exact(24) {
+                for data in data.as_chunks::<24>().0.iter() {
                     bbox(data, ty)?;
                 }
             }
@@ -257,7 +259,9 @@ fn validate_geometry(blob: &[u8], h: &MeshHeaderView) -> Result<(), MeshDecodeEr
     }
     if section(blob, h, 3)
         .expect("validated section")
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .any(|word| u32_le(word, 0) >= h.vertex_count)
     {
         return Err(MeshDecodeError::VertexIndex);
@@ -283,7 +287,9 @@ fn validate_geometry(blob: &[u8], h: &MeshHeaderView) -> Result<(), MeshDecodeEr
 fn validate_metadata(blob: &[u8], h: &MeshHeaderView) -> Result<(), MeshDecodeError> {
     if let Some(classes) = section(blob, h, 14) {
         if classes
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|v| super::EdgeClass::from_u32(u32_le(v, 0)).is_none())
         {
             return Err(MeshDecodeError::EdgeClass);
@@ -293,12 +299,14 @@ fn validate_metadata(blob: &[u8], h: &MeshHeaderView) -> Result<(), MeshDecodeEr
         let spans = section(blob, h, 15).expect("validated ranges");
         ranges(spans, adjacency.len() as u32 / 4, 15)?;
         if adjacency
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|v| u32_le(v, 0) >= h.face_count)
         {
             return Err(MeshDecodeError::IncidentFace);
         }
-        for pair in spans.chunks_exact(8) {
+        for pair in spans.as_chunks::<8>().0.iter() {
             let start = u32_le(pair, 0) as usize * 4;
             let end = start + u32_le(pair, 4) as usize * 4;
             if adjacency[start..end]
@@ -315,7 +323,9 @@ fn validate_metadata(blob: &[u8], h: &MeshHeaderView) -> Result<(), MeshDecodeEr
 
 fn bbox(data: &[u8], ty: u32) -> Result<(), MeshDecodeError> {
     if data
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .any(|word| !f32_le(word, 0).is_finite())
     {
         return Err(MeshDecodeError::NonFinite(ty));
@@ -328,7 +338,7 @@ fn bbox(data: &[u8], ty: u32) -> Result<(), MeshDecodeError> {
 
 fn ranges(data: &[u8], total: u32, ty: u32) -> Result<(), MeshDecodeError> {
     let mut end = 0u32;
-    for pair in data.chunks_exact(8) {
+    for pair in data.as_chunks::<8>().0.iter() {
         let first = u32_le(pair, 0);
         let count = u32_le(pair, 4);
         if first != end {
@@ -357,7 +367,7 @@ fn ids(
     if u32_le(offsets, 0) != 0 {
         return Err(MeshDecodeError::IdOffsets(offs_ty));
     }
-    for word in offsets[4..].chunks_exact(4) {
+    for word in offsets[4..].as_chunks::<4>().0.iter() {
         let end = u32_le(word, 0) as usize;
         if end < start || end > chars.len() {
             return Err(MeshDecodeError::IdOffsets(offs_ty));

@@ -10,6 +10,9 @@ const EXPLORER_W: f32 = 248.0;
 const INSPECTOR_W: f32 = 288.0;
 const CARD_W: f32 = 280.0;
 const CARD_H: f32 = 320.0;
+const CUBE: f32 = 164.0;
+const CONTROL_W: f32 = 36.0;
+const CONTROLS_H: f32 = 124.0;
 const WORKSPACE: egui::Vec2 = vec2(196.0, 44.0);
 
 #[derive(Clone, Copy, Debug)]
@@ -31,6 +34,7 @@ pub struct Chrome {
     pub feature_card: Rect,
     /// Top-right corner of the navigation cube region.
     pub view_cluster: Pos2,
+    pub view_controls: Rect,
     /// Bottom-left corner of the nav pill.
     pub nav_pill: Pos2,
 }
@@ -71,6 +75,11 @@ pub fn chrome(screen: Rect, state: &UiState) -> Chrome {
         viewport.bottom(),
     );
     let open = state.inspector_open;
+    let view_cluster = if open {
+        pos2(r - 308.0, t + EDGE)
+    } else {
+        pos2(r - 14.0, t + 62.0)
+    };
     Chrome {
         titlebar,
         statusbar,
@@ -89,12 +98,40 @@ pub fn chrome(screen: Rect, state: &UiState) -> Chrome {
         ),
         pill_centre_x: pill_centre_x(viewport, state),
         feature_card: feature_card(viewport, open),
-        view_cluster: if open {
-            pos2(r - 308.0, t + EDGE)
-        } else {
-            pos2(r - 14.0, t + 62.0)
-        },
+        view_cluster,
+        view_controls: Rect::from_min_size(
+            pos2(
+                view_cluster.x - CUBE / 2.0 - CONTROL_W / 2.0,
+                view_cluster.y + CUBE + 4.0,
+            ),
+            vec2(CONTROL_W, CONTROLS_H),
+        ),
         nav_pill: pos2(l + if state.explorer_open { 268.0 } else { EDGE }, b - EDGE),
+    }
+}
+
+impl Chrome {
+    /// Move controls beside the cube while parameters occupy the space beneath it.
+    pub fn with_feature_card(mut self) -> Self {
+        if let Some(toggle) = self.inspector_toggle {
+            self.view_cluster = pos2(toggle.left() - 8.0, self.viewport.top() + EDGE);
+        }
+        self.view_controls = Rect::from_min_size(
+            pos2(
+                self.view_cluster.x - CUBE - 8.0 - CONTROL_W,
+                self.view_cluster.y + 20.0,
+            ),
+            vec2(CONTROL_W, CONTROLS_H),
+        );
+        let top = self.view_cluster.y + CUBE + 8.0;
+        self.feature_card = Rect::from_min_size(
+            pos2(self.feature_card.left(), top),
+            vec2(
+                CARD_W,
+                CARD_H.min((self.viewport.bottom() - EDGE - top).max(0.0)),
+            ),
+        );
+        self
     }
 }
 
@@ -152,6 +189,44 @@ mod tests {
         let c = chrome(screen(), &s).feature_card;
         assert_eq!(c.right(), 1270.0 - 8.0);
         assert_eq!(c.top(), 106.0);
+    }
+
+    #[test]
+    fn active_card_cube_and_controls_fit_all_panel_states_at_minimum_size() {
+        for size in [vec2(900.0, 560.0), vec2(1280.0, 820.0)] {
+            for explorer_open in [false, true] {
+                for inspector_open in [false, true] {
+                    let state = UiState {
+                        explorer_open,
+                        inspector_open,
+                        ..Default::default()
+                    };
+                    let chrome =
+                        chrome(Rect::from_min_size(Pos2::ZERO, size), &state).with_feature_card();
+                    let cube = Rect::from_min_size(
+                        chrome.view_cluster - vec2(CUBE, 0.0),
+                        vec2(CUBE, CUBE),
+                    );
+                    let regions = [chrome.feature_card, cube, chrome.view_controls];
+                    for (index, region) in regions.iter().enumerate() {
+                        assert!(chrome.viewport.contains_rect(*region));
+                        for other in &regions[index + 1..] {
+                            assert!(!region.intersect(*other).is_positive());
+                        }
+                        if explorer_open {
+                            assert!(!region.intersect(chrome.explorer).is_positive());
+                        }
+                        if inspector_open {
+                            assert!(!region.intersect(chrome.inspector).is_positive());
+                        }
+                        if let Some(toggle) = chrome.inspector_toggle {
+                            assert!(!region.intersect(toggle).is_positive());
+                        }
+                    }
+                    assert!(chrome.feature_card.height() >= 296.0);
+                }
+            }
+        }
     }
 
     #[test]

@@ -26,11 +26,11 @@ jobs:
       - name: Tooling types
         run: npx tsc --noEmit
       - name: Tooling tests
-        run: bun test scripts/tests
+        run: bun test ./scripts/tests
       - name: Rust dependency boundaries
         run: |
           bun scripts/check-rust-layers.mjs
-          bun test scripts/tests/check-rust-layers.test.mjs
+          bun test ./scripts/tests/check-rust-layers.test.mjs
       - name: Modeling evidence
         run: |
           bun scripts/verify-modeling-coverage.mjs
@@ -316,7 +316,7 @@ jobs:
         with:
           workspaces: .
       - name: fmt
-        run: cargo fmt --check -p onecad-mesh-fixture -p onecad-app -p onecad-core -p onecad-protocol -p onecad-scene -p onecad-render -p onecad-interaction -p onecad-ui -p onecad-worker-stub -p onecad-regen -p onecad-kernelbench -p onecad-library -p onecad-library-ingest
+        run: cargo fmt --check -p onecad-mesh-fixture -p onecad-app -p onecad-core -p onecad-protocol -p onecad-scene -p onecad-render -p onecad-interaction -p onecad-ui -p onecad-widgets -p onecad-worker-stub -p onecad-regen -p onecad-kernelbench -p onecad-library -p onecad-library-ingest
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Full workspace tests

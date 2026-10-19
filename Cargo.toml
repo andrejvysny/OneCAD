@@ -44,3 +44,10 @@ tokio-util = { version = "0.7", default-features = false }
 bytes = "1"
 zip = "2"
 sha2 = "0.10"
+
+# AccessKit #835 preserves AppKit KVO subclasses during native accessibility teardown.
+# Keep the adapter and its path dependencies on one source so their public types match.
+[patch.crates-io]
+accesskit = { git = "https://github.com/AccessKit/accesskit", rev = "64e9a47ddaac64c9082214f472fa6fcafbc86430" }
+accesskit_consumer = { git = "https://github.com/AccessKit/accesskit", rev = "64e9a47ddaac64c9082214f472fa6fcafbc86430" }
+accesskit_macos = { git = "https://github.com/AccessKit/accesskit", rev = "64e9a47ddaac64c9082214f472fa6fcafbc86430" }

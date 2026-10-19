@@ -115,6 +115,8 @@ pub enum CommitStatus {
 pub enum Action {
     ContextChanged(Option<DocumentContext>),
     SelectProfile(Box<ProfileSelection>),
+    /// Deselect authoring inputs without changing a tool or the document.
+    ClearSelection,
     BeginExtrude {
         record_id: RecordId,
         gesture: u64,

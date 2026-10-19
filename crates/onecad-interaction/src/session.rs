@@ -182,6 +182,7 @@ impl Interaction {
         ]
     }
 
+    /// Cancel the transient tool; selection and accepted document state stay intact.
     pub(crate) fn cancel(&mut self) -> Vec<Effect> {
         let Some(tool) = self.tool.as_ref() else {
             return Vec::new();

@@ -4,7 +4,7 @@
 
 namespace onecad::policy {
 
-inline constexpr unsigned kSolverPolicyVersion = 2;
+inline constexpr unsigned kSolverPolicyVersion = 3;
 inline constexpr unsigned kArtifactSchemaVersion = 1;
 inline constexpr unsigned kDescriptorVersion = 1;
 inline constexpr unsigned kResolverVersion = 1;

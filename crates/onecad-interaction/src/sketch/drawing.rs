@@ -176,13 +176,24 @@ impl SketchInteraction {
             return self
                 .refuse("Constraints require fresh unique ids and existing sketch entities");
         }
-        self.submit(
+        let effects = self.submit(
             constraints
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(|constraint| SketchEditOp::AddConstraint { constraint })
                 .collect(),
             AfterPrimitive::Preserve,
-        )
+        );
+        effects
+            .into_iter()
+            .map(|effect| match effect {
+                SketchEffect::Upsert { tag, .. } => SketchEffect::AddConstraints {
+                    tag,
+                    constraints: constraints.clone(),
+                },
+                other => other,
+            })
+            .collect()
     }
 
     pub(crate) fn refuse(&mut self, message: &str) -> Vec<SketchEffect> {

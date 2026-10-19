@@ -165,6 +165,7 @@ impl Renderer {
             )?)
         };
         self.targets = targets;
+        self.retained_output = None;
         self.size = size;
         self.estimate = estimate;
         self.contact_dirty = true;

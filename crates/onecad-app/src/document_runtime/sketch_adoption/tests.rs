@@ -6,7 +6,9 @@ use std::sync::Mutex;
 use crate::dto::{BeginGestureDto, DragSolveDto};
 use crate::worker::PendingBackend;
 use onecad_core::sketch::{SketchEntity, WorldPlane};
+mod constraints;
 mod epoch_backend;
+mod history;
 mod region_race;
 mod truth;
 use epoch_backend::EpochBackend;
@@ -23,6 +25,9 @@ enum Mode {
     ReplayedRevision,
     WorkerRestart,
     EndMalformedTruth,
+    OverConstrained,
+    Conflicting,
+    NonfiniteTruth,
 }
 
 struct Solver {
@@ -82,6 +87,9 @@ impl SolverEngine for Solver {
             Mode::StaleEpoch => self.fencing.lock().unwrap().as_ref().unwrap().set_epoch(2),
             Mode::WorkerRestart => self.backend.epoch.store(2, Ordering::SeqCst),
             Mode::ReplayedRevision => solved.sketch_revision = 1,
+            Mode::OverConstrained => solved.status = SketchSolveStatus::OverConstrained,
+            Mode::Conflicting => solved.status = SketchSolveStatus::Conflicting,
+            Mode::NonfiniteTruth => solved.truth.normalized_max_residual = Some(f64::NAN),
             Mode::Unchanged | Mode::EndMalformedTruth => {}
         }
         Ok(solved)

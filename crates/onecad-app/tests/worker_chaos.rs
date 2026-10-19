@@ -557,6 +557,72 @@ async fn poisoned_plan_fails_fast_and_a_different_plan_still_runs() {
 // Convergence drill: kill mid-plan N× → always converges, never partial
 // ─────────────────────────────────────────────────────────────────────────────
 
+async fn newer_ready_epoch(
+    lifecycle: &mut tokio::sync::broadcast::Receiver<WorkerLifecycle>,
+    failed: WorkerEpoch,
+) -> WorkerEpoch {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match lifecycle
+                .recv()
+                .await
+                .expect("worker lifecycle channel remains live")
+            {
+                WorkerLifecycle::Ready { epoch, .. } if epoch > failed.0 => {
+                    return WorkerEpoch(epoch)
+                }
+                WorkerLifecycle::Failed { reason } => {
+                    panic!("worker failed after {failed:?}: {reason}")
+                }
+                WorkerLifecycle::CircuitOpen { key } => {
+                    panic!("unexpected circuit after {failed:?}: {key}")
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("worker did not announce Ready newer than {failed:?} within 2s"))
+}
+
+#[tokio::test]
+async fn convergence_wait_requires_a_new_ready_epoch() {
+    use std::{
+        future::{poll_fn, Future},
+        task::Poll,
+    };
+    let (sender, mut receiver) = tokio::sync::broadcast::channel(8);
+    sender
+        .send(WorkerLifecycle::Ready {
+            epoch: 7,
+            fingerprint: "test".into(),
+        })
+        .unwrap();
+    let waiting = newer_ready_epoch(&mut receiver, WorkerEpoch(7));
+    tokio::pin!(waiting);
+    assert!(matches!(
+        poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx))).await,
+        Poll::Pending
+    ));
+    sender
+        .send(WorkerLifecycle::Restarting {
+            epoch: 8,
+            reason: "scripted death".into(),
+        })
+        .unwrap();
+    assert!(matches!(
+        poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx))).await,
+        Poll::Pending
+    ));
+    sender
+        .send(WorkerLifecycle::Ready {
+            epoch: 8,
+            fingerprint: "test".into(),
+        })
+        .unwrap();
+    assert_eq!(waiting.await, WorkerEpoch(8));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn convergence_drill_kill_mid_plan_repeatedly() {
     let Some(bin) = stub_binary() else {
@@ -583,21 +649,24 @@ async fn convergence_drill_kill_mid_plan_repeatedly() {
     );
     config.poison_threshold = iters + 100; // never trip the circuit during the drill.
     config.max_rapid_deaths = iters + 100; // never trip the F2 flap cap on the scripted crashes.
-                                           // Quiesce liveness pinging during the sub-second drill so a load-induced ping
-                                           // timeout can't SIGKILL an idle worker and inflate the crash count — the drill
-                                           // asserts an exact `crashes == iters`; death detection here rides child-exit.
+                                           // Quiesce liveness pinging so load cannot add idle-worker deaths; scripted
+                                           // death detection rides child-exit, and the persisted countdown proves kills.
     config.ping_interval = Duration::from_secs(30);
     let wm = WorkerManager::spawn(config);
+    let mut lifecycle = wm.subscribe();
+    assert!(
+        wm.wait_ready(Duration::from_secs(2)).await,
+        "initial worker ready"
+    );
     let tl = one_extrude_timeline();
 
     let mut crashes = 0u32;
     let mut published = false;
-    // Each crash restarts the worker; bound the loop generously.
-    for _ in 0..(iters + 20) {
-        if !wm.wait_ready(Duration::from_secs(2)).await {
-            continue; // mid-restart; retry.
-        }
-        match drive(&wm, &tl, 0, 1).await {
+    // Dispatch again only after a newer Ready event, not the dead epoch's level state.
+    for attempt in 0..(iters + 20) {
+        let epoch = wm.epoch();
+        let outcome = drive(&wm, &tl, 0, 1).await;
+        match outcome {
             Outcome::Published(snap) => {
                 assert_eq!(snap.bodies.len(), 1, "converged to the last-valid snapshot");
                 // F6: assert the surviving body's IDENTITY, not just the count — the
@@ -610,25 +679,36 @@ async fn convergence_drill_kill_mid_plan_repeatedly() {
                 published = true;
                 break;
             }
-            // `NotConnected` counts the same as `Crashed`: `wait_ready` above can be
-            // beaten by the scripted kill's own restart, and a dispatch landing in
-            // that window reports the absence of a connection rather than the death.
-            // Same cause, same "no partial publish" guarantee.
             Outcome::EngineFailed(
                 EngineError::Crashed { .. } | EngineError::NotConnected { .. },
-            ) => crashes += 1,
+            ) => {
+                crashes += 1;
+                eprintln!(
+                    "convergence attempt={attempt} failed_epoch={epoch:?} state={:?} remaining={}",
+                    wm.state(),
+                    std::fs::read_to_string(&counter).unwrap()
+                );
+                newer_ready_epoch(&mut lifecycle, epoch).await;
+            }
             other => panic!("partial/unexpected outcome mid-drill: {other:?}"),
         }
     }
-    assert!(published, "the document must converge after {iters} kills");
+    let remaining = std::fs::read_to_string(&counter).unwrap();
+    assert!(published, "document must converge after {iters} kills; failures={crashes}, remaining={remaining}, epoch={:?}, state={:?}", wm.epoch(), wm.state());
+    assert_eq!(
+        remaining.trim(),
+        "0",
+        "all scripted mid-plan kills must execute"
+    );
     // Atomicity ("never a partial publish") is enforced by the loop's match arm,
     // which panics on any outcome that is neither a publish nor a lost worker. The count is `>=`
-    // because a loaded machine can add a transient connection-loss kill or two on
-    // top of the `iters` scripted ones — the drill still converges either way.
+    // because a loaded machine can add a connection loss on top of the scripted
+    // deaths; the persisted countdown independently proves all scripted kills ran.
     assert!(
         crashes >= iters,
         "survived at least {iters} mid-plan kills (saw {crashes})"
     );
+    wm.shutdown().await;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

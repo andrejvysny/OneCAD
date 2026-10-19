@@ -3320,7 +3320,7 @@ mod poison_tests {
 
     #[tokio::test]
     async fn app_handshake_refuses_legacy_solver_policy() {
-        for policy in [1, 2] {
+        for policy in [1, 2, 3] {
             let (client_io, mut server) = tokio::io::duplex(4096);
             send_mock_frame(&mut server, json!({"v":1,"t":"hello","seq":0,"result":{
                 "protocolVersion":1,"workerVersion":"test","occt":{"version":"test","fingerprint":"0000000000000000"},
@@ -3329,7 +3329,7 @@ mod poison_tests {
             let client = ProtocolClient::connect(reader, writer).await.unwrap();
             assert_eq!(
                 verify_solver_policy(client.hello().solver_policy_version).is_ok(),
-                policy == 2
+                policy == 3
             );
         }
     }
@@ -3355,7 +3355,7 @@ mod poison_tests {
         let (client_io, mut server) = tokio::io::duplex(4096);
         send_mock_frame(&mut server, json!({"v":1,"t":"hello","seq":0,"result":{
             "protocolVersion":1,"workerVersion":"test","occt":{"version":"test","fingerprint":"0000000000000000"},
-            "quantizationVersion":1,"solverPolicyVersion":2,"capabilities":[]}})).await;
+            "quantizationVersion":1,"solverPolicyVersion":3,"capabilities":[]}})).await;
         let (reader, writer) = tokio::io::split(client_io);
         let client = Arc::new(ProtocolClient::connect(reader, writer).await.unwrap());
         *shared.conn.write().unwrap() = Some(client);

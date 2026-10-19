@@ -57,17 +57,26 @@ impl DocumentRuntime {
                 "SketchUpsert: solve belongs to a stale document or worker",
             ));
         }
+        let after = self.adopt_candidate_solve(candidate, &solved)?;
+        Ok((solved, after))
+    }
+
+    pub(super) fn adopt_candidate_solve(
+        &self,
+        candidate: &Sketch,
+        solved: &SketchUpsertDto,
+    ) -> Result<Sketch, EngineError> {
         if solved.sketch_revision == 0
             || self.sketch_upsert_revisions.get(&candidate.id).is_some_and(
                 |(prior_epoch, revision)| {
-                    *prior_epoch == epoch && solved.sketch_revision <= *revision
+                    *prior_epoch == self.engine.current_epoch()
+                        && solved.sketch_revision <= *revision
                 },
             )
         {
             return Err(op_failed("SketchUpsert: stale sketch revision"));
         }
-        let after = crate::worker::sketch_result::adopted(candidate, &solved).map_err(op_failed)?;
-        Ok((solved, after))
+        crate::worker::sketch_result::adopted(candidate, solved).map_err(op_failed)
     }
 
     pub(super) fn commit_sketch_solve(

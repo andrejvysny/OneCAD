@@ -1,7 +1,9 @@
 //! Chrome-only UI state: panel visibility, tabs and menus. Never touches the document.
 use egui::{Context, Key, Modifiers};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum InspectorTab {
     #[default]
     Properties,
@@ -9,7 +11,8 @@ pub enum InspectorTab {
 }
 
 /// View › Appearance choice; `System` follows the OS and defaults to dark when unknown.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Appearance {
     Light,
     #[default]
@@ -66,7 +69,7 @@ impl Default for UiState {
 
 /// Cmd+1 toggles the Explorer, Cmd+2 the Inspector; ignored while a text field has focus.
 pub fn shortcuts(state: &mut UiState, ctx: &Context) {
-    if ctx.text_edit_focused() {
+    if crate::input::text_owns_keyboard(ctx) {
         return;
     }
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Num1)) {

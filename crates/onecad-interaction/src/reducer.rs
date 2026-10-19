@@ -4,6 +4,10 @@ impl Interaction {
     pub fn dispatch(&mut self, action: Action) -> Vec<Effect> {
         match action {
             Action::ContextChanged(context) => self.change_context(context),
+            Action::ClearSelection => {
+                self.selection = None;
+                Vec::new()
+            }
             Action::SelectProfile(selection) => {
                 if self.context.as_ref() == Some(&selection.context)
                     && selection.capture.scene == selection.context.scene

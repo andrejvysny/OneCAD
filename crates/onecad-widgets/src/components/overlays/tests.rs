@@ -117,3 +117,50 @@ fn feature_card_has_requested_width() {
         assert!((used.width() - 280.0).abs() < 1.5, "{}", used.width());
     });
 }
+
+#[test]
+fn feature_card_respects_cancellation_availability() {
+    for enabled in [false, true] {
+        for close in [false, true] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx, theme::load(false).unwrap(), false);
+            let mut target = Pos2::ZERO;
+            let mut output = FeatureCardOutput::default();
+            for pressed in [None, Some(true), Some(false)] {
+                let events = pressed.map_or_else(Vec::new, |pressed| {
+                    vec![
+                        egui::Event::PointerMoved(target),
+                        egui::Event::PointerButton {
+                            pos: target,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ]
+                });
+                let input = egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))),
+                    events,
+                    ..Default::default()
+                };
+                let mut frame = ctx.run_ui(input, |ui| {
+                    target = ui.cursor().min + vec2(258.0, 22.0);
+                    output = FeatureCard::new("cancel", "extrude", "Extrude")
+                        .cancel_enabled(enabled)
+                        .show(ui, |_| {});
+                });
+                frame.textures_delta.clear();
+                if !close {
+                    for shape in frame.shapes {
+                        if let egui::epaint::Shape::Text(text) = shape.shape
+                            && text.galley.job.text == "Cancel"
+                        {
+                            target = text.pos + text.galley.size() / 2.0;
+                        }
+                    }
+                }
+            }
+            assert_eq!(output.close || output.cancel, enabled, "close={close}");
+        }
+    }
+}

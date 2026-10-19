@@ -173,12 +173,11 @@ fn curve_centers_and_derived_endpoints_adopt_without_minting_points() {
 }
 
 #[test]
-fn alias_disagreement_or_unreported_shared_center_is_rejected() {
+fn alias_disagreement_is_rejected() {
     let sketch = sketch();
     for positions in [
         json!({format!("{}.center", id(3)):[2.0,3.0], format!("{}.center", id(4)):[3.0,3.0]}),
         json!({id(1).to_string():[1.0,1.0], format!("{}.center", id(3)):[2.0,3.0]}),
-        json!({format!("{}.center", id(3)):[2.0,3.0]}),
     ] {
         let mut response = receipt(&sketch);
         response["positions"] = positions;
@@ -217,40 +216,24 @@ fn arc_endpoint_coupling_budget_is_pinned() {
 }
 
 #[test]
-fn synthesized_center_cannot_diverge_from_shared_raw_point() {
-    use onecad_core::sketch::{Constraint, CurvePosition};
-    for owner in 0..3 {
+fn canonical_or_alias_center_updates_every_shared_owner() {
+    for handle in [id(1).to_string(), format!("{}.center", id(3))] {
         let mut sketch = sketch();
-        match owner {
-            0 => sketch
-                .add_entity(SketchEntity::line(id(5), id(1), id(2), false))
-                .unwrap(),
-            1 => sketch
-                .add_entity(SketchEntity::ellipse(id(5), id(1), 4.0, 2.0, 0.0, false).unwrap())
-                .unwrap(),
-            _ => sketch
-                .add_constraint(Constraint::Coincident {
-                    id: onecad_core::ids::ConstraintId(Uuid::from_u128(12)),
-                    point1: id(1),
-                    point2: id(2),
-                    point1_position: CurvePosition::Arbitrary,
-                    point2_position: CurvePosition::Arbitrary,
-                })
-                .unwrap(),
-        }
+        sketch
+            .add_entity(SketchEntity::line(id(5), id(1), id(2), false))
+            .unwrap();
+        sketch
+            .add_entity(SketchEntity::ellipse(id(6), id(1), 4.0, 2.0, 0.0, false).unwrap())
+            .unwrap();
         let mut response = receipt(&sketch);
-        response["positions"] = json!({format!("{}.center", id(3)):[2.0,3.0],
-            format!("{}.center", id(4)):[2.0,3.0]});
-        assert!(parse_sketch_upsert_checked(&sketch, &response).is_err());
-        response["positions"][id(1).to_string()] = json!([2.0, 3.0]);
-        if owner == 1 {
-            assert!(
-                parse_sketch_upsert_checked(&sketch, &response).is_err(),
-                "Ellipse still retains its own synthetic center"
-            );
-            response["positions"][format!("{}.center", id(5))] = json!([2.0, 3.0]);
-        }
-        assert!(parse_sketch_upsert_checked(&sketch, &response).is_ok());
+        response["positions"] = json!({handle:[2.0,3.0]});
+        let solved = parse_sketch_upsert_checked(&sketch, &response).unwrap();
+        let after = adopted(&sketch, &solved).unwrap();
+        assert!(
+            matches!(after.get_entity(id(1)), Some(SketchEntity::Point { at, .. })
+            if at.x == 2.0 && at.y == 3.0)
+        );
+        assert_eq!(after.entities().len(), sketch.entities().len());
     }
 }
 

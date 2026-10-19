@@ -10,8 +10,12 @@ mod bridge;
 mod budget;
 mod camera_navigation;
 mod capture;
+mod constraint_authoring;
 mod constraints_menu;
+mod dialogs;
 mod display_menu;
+mod document_flow;
+mod document_services;
 mod event_mailbox;
 mod explorer;
 mod feature_card;
@@ -37,12 +41,14 @@ mod record_budget;
 mod render_receipt;
 mod services;
 mod session_strip;
+mod settings;
 mod shell;
 mod sketch_completion;
 mod sketch_services;
 mod sketch_ui;
 mod sketch_view;
 mod start_screen;
+mod startup_recovery;
 mod tool_registry;
 mod transform_ui;
 mod ui_state;
@@ -84,7 +90,9 @@ pub fn run() -> Result<(), String> {
                 .map_err(Into::into)
         }),
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    tracing::info!("Native host exited cleanly");
+    Ok(())
 }
 
 fn viewport_gpu_configuration() -> egui_wgpu::WgpuConfiguration {
@@ -100,3 +108,6 @@ fn viewport_gpu_configuration() -> egui_wgpu::WgpuConfiguration {
     }
     configuration
 }
+
+#[cfg(test)]
+mod app_logic_tests;

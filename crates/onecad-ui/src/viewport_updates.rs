@@ -303,13 +303,20 @@ fn apply_options(app: &mut App, display: &Display) -> Result<bool, String> {
             app.sections.preview.ready.take(),
         )
     } else {
-        app.renderer.set_options(options)
+        app.renderer.set_options(options).or_else(|error| {
+            if error.recoverable_target_refusal() && !changed_section {
+                app.renderer.set_options_reclaiming(options)
+            } else {
+                Err(error)
+            }
+        })
     };
     app.pending_display_options = None;
     app.sections.committed.cancel();
     app.sections.preview.cancel();
     match result {
         Ok(()) => {
+            app.resize_refusal = None;
             crate::viewport::replace_texture(app);
             if changed_section {
                 app.selected_body = None;
@@ -317,7 +324,13 @@ fn apply_options(app: &mut App, display: &Display) -> Result<bool, String> {
                 app.topology.select(None);
             }
         }
-        Err(error) => app.status = format!("Display: {error}"),
+        Err(error) => {
+            if !app.renderer.has_targets() && error.recoverable_target_refusal() {
+                app.resize_refusal = Some((app.renderer.size(), error.to_string()));
+                app.view = None;
+            }
+            app.status = format!("Display: {error}");
+        }
     }
     Ok(true)
 }

@@ -207,6 +207,31 @@ TranslateResult translate(const json& args) {
         reg_handle(id, pid, /*primary=*/true);
     }
 
+    auto center_point = [&](const json& e, double& x, double& y) -> sk::EntityID {
+        const std::string id = e["id"].get<std::string>();
+        sk::EntityID point;
+        if (e.contains("centerRef")) {
+            const auto& ref = e["centerRef"];
+            if (ref.is_string()) {
+                const auto it = idx.wire_to_internal.find(ref.get<std::string>());
+                if (it != idx.wire_to_internal.end() &&
+                    sketch->getEntityAs<sk::SketchPoint>(it->second)) point = it->second;
+            }
+            if (point.empty()) {
+                result.error = "entity '" + id + "' centerRef must reference a Point entity";
+                return {};
+            }
+            const auto* center = sketch->getEntityAs<sk::SketchPoint>(point);
+            x = center->x();
+            y = center->y();
+        } else {
+            point = sketch->addPoint(x, y, is_construction(e));
+        }
+        lock(point, is_reference_locked(e));
+        reg_handle(id + ".center", point, true);
+        return point;
+    };
+
     // Pass 2: Line / Arc / Circle / Ellipse entities.
     for (const json& e : entities) {
         const std::string type = e.value("type", std::string{});
@@ -267,9 +292,8 @@ TranslateResult translate(const json& args) {
                 return result;
             }
             if (negative_radii(result, id, {radius})) return result;
-            const sk::EntityID cp = sketch->addPoint(cx, cy, construction);
-            lock(cp, locked);
-            reg_handle(id + ".center", cp, true);
+            const sk::EntityID cp = center_point(e, cx, cy);
+            if (cp.empty()) return result;
             const sk::EntityID cid = sketch->addCircle(cp, radius, construction);
             if (cid.empty()) {
                 result.error = "circle '" + id + "' could not be created";
@@ -286,6 +310,8 @@ TranslateResult translate(const json& args) {
                 return result;
             }
             if (negative_radii(result, id, {radius})) return result;
+            const sk::EntityID cp = center_point(e, cx, cy);
+            if (cp.empty()) return result;
             double start_angle = 0.0, end_angle = 0.0;
             double sx, sy, ex, ey;
             if (e.contains("start") && e.contains("end") && read_vec2(e["start"], sx, sy) &&
@@ -296,9 +322,6 @@ TranslateResult translate(const json& args) {
                 scalar_field(e, {"startAngle"}, start_angle);
                 scalar_field(e, {"endAngle"}, end_angle);
             }
-            const sk::EntityID cp = sketch->addPoint(cx, cy, construction);
-            lock(cp, locked);
-            reg_handle(id + ".center", cp, true);
             // Mint the two ENDPOINT points at their derived coordinates and hand
             // them to the arc, which couples them via internal PlaneGCS arc rules
             // (W0b). This is what makes `<id>.start`/`<id>.end` real, addressable
@@ -326,9 +349,7 @@ TranslateResult translate(const json& args) {
             idx.wire_to_internal[id] = aid;
             idx.internal_edge_to_wire[aid] = id;
         } else if (type == "Ellipse") {
-            // Same shape as Circle: the center rides INLINE and the worker mints
-            // the Point itself (an inbound `centerRef` is informational — SCHEMA
-            // §7.3 — and deliberately ignored here). `addEllipse` NORMALIZES
+            // `addEllipse` NORMALIZES
             // (swaps radii + rotates pi/2 when minor > major); the raw wire values
             // go in unchanged and `apply_solved_positions` echoes what it settled on.
             double cx, cy, major, minor;
@@ -340,9 +361,8 @@ TranslateResult translate(const json& args) {
             if (negative_radii(result, id, {major, minor})) return result;
             double rotation = 0.0;
             scalar_field(e, {"rotation"}, rotation);  // optional, default 0
-            const sk::EntityID cp = sketch->addPoint(cx, cy, construction);
-            lock(cp, locked);
-            reg_handle(id + ".center", cp, true);
+            const sk::EntityID cp = center_point(e, cx, cy);
+            if (cp.empty()) return result;
             const sk::EntityID eid = sketch->addEllipse(cp, major, minor, rotation, construction);
             if (eid.empty()) {
                 result.error = "ellipse '" + id + "' could not be created";

@@ -5,10 +5,20 @@ use crate::{
 };
 use onecad_scene::{Camera, DVec3, Projection, ViewSnapshot};
 
+#[path = "pointer_policy.rs"]
+mod pointer_policy;
+pub use pointer_policy::{allows_pointer, gesture_allowed};
+
 /// Region the cube is laid out in: its top-right corner is the ViewCluster anchor, which
 /// moves with the Inspector.
 fn cube_host(app: &App, ui: &egui::Ui, rect: egui::Rect) -> egui::Rect {
-    let anchor = crate::layout::chrome(ui.ctx().content_rect(), &app.ui).view_cluster;
+    let chrome = crate::layout::chrome(ui.ctx().content_rect(), &app.ui);
+    let chrome = if app.interaction.tool.is_some() && !app.sketch_active() {
+        chrome.with_feature_card()
+    } else {
+        chrome
+    };
+    let anchor = chrome.view_cluster;
     egui::Rect::from_min_max(
         egui::pos2(rect.left(), anchor.y),
         egui::pos2(anchor.x, rect.bottom().max(anchor.y)),
@@ -22,11 +32,12 @@ pub fn owns_pointer(app: &App, ui: &egui::Ui, rect: egui::Rect) -> bool {
     let Some(pointer) = ui.input(|input| input.pointer.hover_pos()) else {
         return false;
     };
-    navigation_cube::rect(cube_host(app, ui, rect)).contains(pointer)
-        || app
-            .view
-            .as_ref()
-            .is_some_and(|view| crate::transform_ui::owns_pointer(app, view, rect, pointer))
+    allows_pointer(ui, rect, pointer)
+        && (navigation_cube::rect(cube_host(app, ui, rect)).contains(pointer)
+            || app
+                .view
+                .as_ref()
+                .is_some_and(|view| crate::transform_ui::owns_pointer(app, view, rect, pointer)))
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui, rect: egui::Rect, view: &ViewSnapshot) -> bool {

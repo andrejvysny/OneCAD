@@ -4610,9 +4610,7 @@ fn wire_entity(sketch: &Sketch, e: &SketchEntity) -> Option<Value> {
                 ..
             } => {
                 let c = point_pos(sketch, *center)?;
-                // `centerRef` carries the center point's uuid alongside the inlined coords
-                // so re-entry hydration can re-own the center Point (BUG-5). The worker
-                // ignores the extra key; the frontend consumes it (`sketchWireMap.ts`).
+                // Preserve shared solver identity; inline coordinates retain legacy compatibility.
                 json!({
                     "id": id.to_string(), "type": "Circle",
                     "center": c, "centerRef": center.to_string(),
@@ -4645,10 +4643,7 @@ fn wire_entity(sketch: &Sketch, e: &SketchEntity) -> Option<Value> {
                 ..
             } => {
                 let c = point_pos(sketch, *center)?;
-                // Same shape as Circle: inlined center coords + the informational
-                // `centerRef` uuid so re-entry hydration re-owns the center Point.
-                // `rotation` is RADIANS on the wire (core stores radians too — the
-                // UI converts at its own boundary via `angleUnits.ts`).
+                // The referenced Point owns center coordinates; rotation remains radians.
                 json!({
                     "id": id.to_string(), "type": "Ellipse",
                     "center": c, "centerRef": center.to_string(),
@@ -6556,8 +6551,7 @@ mod solver_wire_tests {
         assert_eq!(ci["type"], "Circle");
         assert_eq!(ci["center"], json!([10.0, 10.0]));
         assert_eq!(ci["radius"], json!(3.0));
-        // BUG-5: the center point uuid rides alongside the inlined coords so re-entry
-        // hydration can re-own the center Point (frontend `sketchWireMap.ts`).
+        // Both the solver and re-entry use the authored center Point identity.
         assert_eq!(ci["centerRef"], json!(c.to_string()));
 
         let cons = constraints.as_array().unwrap();
@@ -6575,7 +6569,7 @@ mod solver_wire_tests {
     }
 
     /// An ellipse renders exactly like a circle plus the three shape scalars —
-    /// inlined `center`, informational `centerRef`, `majorR`/`minorR`/`rotation`
+    /// inlined `center`, shared Point `centerRef`, `majorR`/`minorR`/`rotation`
     /// verbatim from the core fields (SCHEMA §7.3). Before W3 this entity was
     /// dropped on the floor, so an ellipse never reached the worker at all.
     #[test]

@@ -202,7 +202,7 @@ impl<'a> MeshFloats<'a> {
         ])
     }
     pub fn iter(self) -> impl ExactSizeIterator<Item = f32> + 'a {
-        self.0.chunks_exact(4).map(|word| f32_le(word, 0))
+        self.0.as_chunks::<4>().0.iter().map(|word| f32_le(word, 0))
     }
 }
 
@@ -230,6 +230,6 @@ impl<'a> MeshWords<'a> {
         ])
     }
     pub fn iter(self) -> impl ExactSizeIterator<Item = u32> + 'a {
-        self.0.chunks_exact(4).map(|word| u32_le(word, 0))
+        self.0.as_chunks::<4>().0.iter().map(|word| u32_le(word, 0))
     }
 }

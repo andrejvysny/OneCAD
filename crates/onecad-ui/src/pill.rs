@@ -90,6 +90,15 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
             "Select a body first",
         ),
         ToolId::Section => gate(app.viewport_ready(), "Viewport unavailable"),
+        ToolId::Horizontal
+        | ToolId::Vertical
+        | ToolId::Fix
+        | ToolId::Distance
+        | ToolId::Diameter
+        | ToolId::Dimension => gate(
+            crate::constraint_authoring::available(app, def.id),
+            "Select one applicable sketch entity first",
+        ),
         ToolId::Constraints => {
             let mut v = gate(sketch_ui::tools_enabled(app), "Sketch is not ready");
             if app.ui.constraints_open {
@@ -107,7 +116,7 @@ fn bound_shortcut(def: &ToolDef) -> Option<&'static str> {
     def.shortcut.filter(|_| BOUND.contains(&def.id))
 }
 
-fn activate(app: &mut App, id: ToolId) {
+fn activate(app: &mut App, ctx: &Context, id: ToolId) {
     let sketch_tool = match id {
         ToolId::Select if app.sketch_active() => Some(SketchTool::Select),
         ToolId::Line => Some(SketchTool::Line),
@@ -135,11 +144,40 @@ fn activate(app: &mut App, id: ToolId) {
         }
         ToolId::MoveRotate => app.begin_transform(),
         ToolId::Constraints => crate::constraints_menu::toggle(&mut app.ui),
+        ToolId::Horizontal
+        | ToolId::Vertical
+        | ToolId::Fix
+        | ToolId::Distance
+        | ToolId::Diameter
+        | ToolId::Dimension => crate::constraint_authoring::activate(app, ctx, id),
         _ => {}
     }
 }
 
-/// x button on the selection label: same effect as Escape.
+/// Canceling a draft keeps its selected input available for another tool.
+pub(crate) fn cancel_tool(app: &mut App) {
+    app.dispatch(Action::Cancel);
+    if app.interaction.tool.is_none() {
+        app.selected_feature = None;
+    }
+}
+
+pub(crate) fn cancel_or_deselect(app: &mut App) {
+    if app.interaction.tool.is_some() {
+        cancel_tool(app);
+    } else {
+        clear_selection(app, selection_kind(app));
+    }
+}
+
+pub(crate) fn select_feature(app: &mut App, id: onecad_core::ids::RecordId) {
+    app.dispatch(Action::ClearSelection);
+    app.topology.select(None);
+    app.selected_feature = Some(id);
+    app.draw_dirty = true;
+}
+
+/// The label's close button explicitly deselects as well as canceling a draft.
 fn clear_selection(app: &mut App, kind: SelectionKind) {
     if kind == SelectionKind::SketchEntity {
         if let Some(key) = app.sketch.session.as_ref().map(|s| s.key.clone()) {
@@ -150,9 +188,8 @@ fn clear_selection(app: &mut App, kind: SelectionKind) {
         }
         return;
     }
-    if app.interaction.tool.is_some() || app.interaction.selection.is_some() {
-        app.dispatch(Action::Cancel);
-    }
+    cancel_tool(app);
+    app.dispatch(Action::ClearSelection);
     app.selected_body = None;
     app.selected_feature = None;
     app.topology.select(None);
@@ -290,12 +327,13 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
             });
         });
     if let Some(id) = hits.clicked {
-        activate(app, id);
+        activate(app, ctx, id);
     }
     if clear {
         clear_selection(app, kind);
     }
     crate::constraints_menu::show(app, ctx, chrome, hits.constraints);
+    crate::constraint_authoring::show(app, ctx);
     if let Some(r) = hits.section {
         crate::display_menu::popup_for(app, ctx, &r);
     }

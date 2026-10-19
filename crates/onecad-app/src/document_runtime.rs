@@ -315,6 +315,10 @@ struct ActiveGesture {
 /// restore on undo of the squashed command; `undo_watermark` is the undo depth at
 /// entry — the steps committed since is what gets squashed.
 struct SketchSession {
+    token: Uuid,
+    history_redo: usize,
+    history_valid: bool,
+    history_epoch: WorkerEpoch,
     sketch_id: SketchId,
     prior: Sketch,
     undo_watermark: usize,
@@ -1516,6 +1520,9 @@ impl DocumentRuntime {
             return None;
         }
         let outcome = self.session.undo()?;
+        if let Some(session) = &mut self.sketch_session {
+            session.history_valid = false;
+        }
         let report = self.revert_report(outcome);
         self.after_mutation();
         self.drop_stale_sketch_session();
@@ -1533,6 +1540,9 @@ impl DocumentRuntime {
         let Some(outcome) = self.session.redo()? else {
             return Ok(None);
         };
+        if let Some(session) = &mut self.sketch_session {
+            session.history_valid = false;
+        }
         let report = self.revert_report(outcome);
         self.after_mutation();
         self.drop_stale_sketch_session();
@@ -1641,6 +1651,9 @@ impl DocumentRuntime {
     /// After any structural mutation: re-mirror the timeline (all Dirty pending
     /// regen), bump the fencing revision, and mark unsaved.
     fn after_mutation(&mut self) {
+        if let Some(session) = &mut self.sketch_session {
+            session.history_redo = 0;
+        }
         self.sync_regen_timeline();
         // Mirror the authoritative document's SEEDED repair gates (SCHEMA §7.3)
         // into the regen copy — that copy is what `begin_regen` reads for its
@@ -4084,7 +4097,7 @@ impl DocumentRuntime {
         // enter point): that watermark is stale, so fall through to a fresh session.
         let keep_existing = matches!(
             &self.sketch_session,
-            Some(s) if s.sketch_id == sketch_id && s.undo_watermark <= self.session.undo_depth()
+            Some(s) if s.sketch_id == sketch_id && s.undo_watermark <= self.session.undo_depth() && s.history_epoch == self.engine.current_epoch()
         );
         // Capture before the solve correction, but install only after success:
         // a failed entry must not replace a previously open session.
@@ -4095,6 +4108,10 @@ impl DocumentRuntime {
         self.record_upsert(sketch_id, &solved);
         if !keep_existing {
             self.sketch_session = Some(SketchSession {
+                token: Uuid::new_v4(),
+                history_redo: 0,
+                history_valid: true,
+                history_epoch: self.engine.current_epoch(),
                 sketch_id,
                 prior: sketch.clone(),
                 undo_watermark,
@@ -4105,6 +4122,10 @@ impl DocumentRuntime {
         let (plane, entities, constraints) = crate::worker::wire::sketch_wire(&after);
         Ok((
             SketchSessionDto {
+                edit_session: self
+                    .sketch_edit_token(sketch_id)
+                    .map(|token| token.to_string()),
+                history: self.sketch_history_availability(sketch_id),
                 sketch_id: sketch_id.to_string(),
                 plane,
                 entities,
@@ -4154,6 +4175,10 @@ impl DocumentRuntime {
             .get(&sketch_id)
             .filter(|cached| cached.token == token);
         Ok(SketchSessionDto {
+            edit_session: self
+                .sketch_edit_token(sketch_id)
+                .map(|token| token.to_string()),
+            history: self.sketch_history_availability(sketch_id),
             sketch_id: sketch_id.to_string(),
             plane,
             entities,
@@ -4436,7 +4461,7 @@ impl DocumentRuntime {
                 return Err(FinishSketchError {
                     error: op_failed(format!("finishSketch: sketch record: {e}")),
                     committed: outcome.map(Box::new),
-                })
+                });
             }
         }
         // ORDER MATTERS — regions are computed AFTER the record is committed.
@@ -4457,7 +4482,7 @@ impl DocumentRuntime {
                 return Err(FinishSketchError {
                     error: prefixed_engine_error("finishSketch", e),
                     committed: outcome.map(Box::new),
-                })
+                });
             }
         };
         Ok((regions, outcome))
@@ -5590,6 +5615,9 @@ impl DocumentRuntime {
             _ => return SessionSquash::NoSession("the sketch edit session had already closed"),
         }
         let session = self.sketch_session.take().expect("checked Some above");
+        if session.history_redo > 0 && session.history_redo == self.session.redo_depth() {
+            self.session.clear_redo();
+        }
         // Finding 3: an eviction past the undo cap since enter shifted the stack bottom,
         // so the depth-based watermark no longer addresses the session's steps. Refuse
         // the squash wholesale — the granular steps stay (safe, noisier stack). The core
@@ -6873,6 +6901,9 @@ fn element_ref_input(op: &Operation, index: usize) -> Option<&ElementRef> {
 mod gestures;
 mod ordinal_tripwire;
 mod sketch_adoption;
+mod sketch_constraints;
+mod sketch_history;
+pub use sketch_constraints::{DrivenSketchConstraints, PreparedSketchConstraints};
 pub mod solver_lane;
 
 #[cfg(test)]

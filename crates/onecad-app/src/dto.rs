@@ -882,6 +882,11 @@ pub struct ProjectedSourceDto {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SketchSessionDto {
+    /// Unique current edit visit; absent on a static read outside an edit session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<SketchHistoryAvailability>,
     pub sketch_id: String,
     pub plane: serde_json::Value,
     pub entities: serde_json::Value,
@@ -908,6 +913,41 @@ pub struct SketchSessionDto {
     /// unprojected. Filled by both `enter_sketch` and the static `get_sketch`.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub projections: std::collections::BTreeMap<String, ProjectedSourceDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchHistoryAvailability {
+    pub undo_depth: usize,
+    pub redo_depth: usize,
+}
+
+/// Fenced intent for one sketch-local history transition.
+#[derive(Debug, Clone)]
+pub struct SketchHistoryScope {
+    pub sketch_id: onecad_core::ids::SketchId,
+    pub edit_session: String,
+    pub runtime_session: String,
+    pub revision: u64,
+    pub snapshot_id: onecad_core::ids::SnapshotId,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchHistoryDto {
+    pub moved: bool,
+    pub direction: onecad_core::edit::HistoryDirection,
+    pub undo_depth: usize,
+    pub redo_depth: usize,
+}
+
+/// Admission of an explicit constraint batch. A refused solve describes only
+/// the candidate; it must never replace the authoritative sketch's cached truth.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchConstraintAdmission {
+    pub accepted: bool,
+    pub solve: SketchUpsertDto,
 }
 
 /// A re-solve result (`sketchUpsert`/`endGesture`; `types.ts SketchUpsertResult`).
@@ -2947,6 +2987,8 @@ mod tests {
 
         // SketchSessionDto surfaces it too (session-enter surface).
         let session = SketchSessionDto {
+            edit_session: None,
+            history: None,
             truth: Default::default(),
             solve_current: true,
             sketch_id: "sk_1".into(),
@@ -3016,6 +3058,8 @@ mod tests {
             serde_json::json!("conflicting")
         );
         let session = SketchSessionDto {
+            edit_session: None,
+            history: None,
             truth: Default::default(),
             solve_current: true,
             sketch_id: "sk_1".into(),

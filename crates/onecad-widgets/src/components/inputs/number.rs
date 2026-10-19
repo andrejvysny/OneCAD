@@ -43,6 +43,33 @@ pub fn step_value(v: f64, step: f64, shift: bool, up: bool) -> f64 {
     if up { v + amount } else { v - amount }
 }
 
+fn decimal_places(text: &str) -> usize {
+    let (mantissa, exponent) = text
+        .split_once(['e', 'E'])
+        .map_or((text, 0), |(value, exponent)| {
+            (value, exponent.parse::<i32>().unwrap_or(0))
+        });
+    let fraction = mantissa.split_once('.').map_or(0, |(_, digits)| {
+        digits.chars().filter(char::is_ascii_digit).count()
+    });
+    (fraction as i64 - i64::from(exponent)).clamp(0, 324) as usize
+}
+
+fn stepped_text(text: &str, step: f64, shift: bool, up: bool, decimals: usize) -> Option<String> {
+    let ParsedValue::Number(value) = parse_value(text) else {
+        return None;
+    };
+    let value = step_value(value, step, shift, up);
+    if !value.is_finite() {
+        return None;
+    }
+    // Display precision is a minimum, never a limit on the authored value.
+    let precision = decimals
+        .max(decimal_places(text.trim()))
+        .max(decimal_places(&step.to_string()));
+    Some(format!("{value:.precision$}"))
+}
+
 /// Width reserved for the vector degree sign.
 const DEGREE_W: f32 = 6.0;
 
@@ -130,9 +157,9 @@ impl<'a> NumberField<'a> {
         let mut changed = false;
         for (up, key) in [(true, Key::ArrowUp), (false, Key::ArrowDown)] {
             if ui.input_mut(|i| i.consume_key(mods, key))
-                && let ParsedValue::Number(v) = parse_value(self.text)
+                && let Some(text) = stepped_text(self.text, self.step, shift, up, self.decimals)
             {
-                *self.text = format!("{:.*}", self.decimals, step_value(v, self.step, shift, up));
+                *self.text = text;
                 changed = true;
             }
         }
@@ -224,7 +251,7 @@ impl Widget for NumberField<'_> {
             ui.painter().set(bg, shape);
             if let Some(msg) = self.error {
                 let rt = RichText::new(msg).size(11.0).color(t.danger_strong);
-                ui.add(egui::Label::new(rt).wrap_mode(egui::TextWrapMode::Extend));
+                ui.add_sized(vec2(self.width, 0.0), egui::Label::new(rt).wrap());
             }
             response
         })
@@ -261,5 +288,28 @@ mod tests {
         assert_eq!(step_value(14.0, 1.0, false, false), 13.0);
         assert_eq!(step_value(14.0, 0.5, true, true), 19.0);
         assert_eq!(step_value(0.0, 2.0, true, false), -20.0);
+    }
+
+    #[test]
+    fn stepping_preserves_authored_precision_and_modifiers() {
+        for initial in ["0.1234", "-0.1234", "1.234e-3"] {
+            for shift in [false, true] {
+                let mut text = initial.to_owned();
+                for _ in 0..10 {
+                    text = stepped_text(&text, 1.0, shift, true, 2).unwrap();
+                }
+                for _ in 0..10 {
+                    text = stepped_text(&text, 1.0, shift, false, 2).unwrap();
+                }
+                assert_eq!(parse_value(&text), parse_value(initial));
+            }
+        }
+        assert_eq!(
+            stepped_text("0.1234", 0.00001, false, true, 2).as_deref(),
+            Some("0.12341")
+        );
+        assert_eq!(stepped_text("=width / 2", 1.0, false, true, 2), None);
+        assert_eq!(stepped_text("bad", 1.0, false, true, 2), None);
+        assert_eq!(stepped_text("1e308", 1e308, false, true, 2), None);
     }
 }

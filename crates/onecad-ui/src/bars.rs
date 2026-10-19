@@ -1,29 +1,20 @@
 //! Title bar (document name, history, File menu) and status bar.
-use crate::{app::App, bridge::Command};
+use crate::{
+    app::App,
+    bridge::Command,
+    document_flow::{ExportFormat, Request},
+};
 use egui::{Context, Ui};
 use onecad_widgets::components::{
     lists::{MenuRow, menu_divider, menu_frame},
     shell::{StatusBar, TitleBar},
 };
 
-/// Model history is blocked while a sketch is active, as in the input router.
-fn ready(app: &App) -> bool {
-    !app.sketch_active()
-        && app.viewport_ready()
-        && app.bridge.valid()
-        && !app.busy()
-        && !crate::viewport_selection::sectioned(app)
-}
-
-fn depth(app: &App, f: impl Fn(&onecad_app::dto::DocumentProjection) -> usize) -> bool {
-    app.display.as_ref().is_some_and(|d| f(&d.projection) > 0)
-}
-
 pub fn title(app: &mut App, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
     let (can_undo, can_redo) = (
-        ready(app) && depth(app, |p| p.undo_depth),
-        ready(app) && depth(app, |p| p.redo_depth),
+        crate::input::history_available(app, false),
+        crate::input::history_available(app, true),
     );
     let (name, dirty) = app
         .display
@@ -46,10 +37,10 @@ pub fn title(app: &mut App, ui: &mut Ui) {
                 app.ui.start_open = true;
             }
             if out.undo {
-                app.submit(Command::Undo);
+                crate::input::submit_history(app, Command::Undo);
             }
             if out.redo {
-                app.submit(Command::Redo);
+                crate::input::submit_history(app, Command::Redo);
             }
             file_menu(app, &ctx, &out.file, (can_undo, can_redo));
         });
@@ -62,13 +53,18 @@ fn home_allowed(app: &App) -> bool {
         || app.transform_gizmo.gizmo.active())
 }
 
+pub(crate) fn replacement_allowed(app: &App) -> bool {
+    !app.busy() && !app.sketch_active() && app.interaction.tool.is_none()
+}
+
+pub(crate) fn save_allowed(app: &App) -> bool {
+    !app.busy() && !app.sketch_active() && app.display.is_some()
+}
+
 fn file_menu(app: &mut App, ctx: &Context, file: &egui::Response, (undo, redo): (bool, bool)) {
     egui::Popup::menu(file).frame(menu_frame(ctx)).show(|ui| {
         ui.set_min_width(180.0);
-        let save = MenuRow::new(Some("save"), "Save").shortcut(Some("⌘S"));
-        if ui.add(save).clicked() {
-            app.submit(Command::Save);
-        }
+        document_menu(app, ui);
         menu_divider(ui);
         let row = |icon, label, key, enabled| {
             MenuRow::new(Some(icon), label)
@@ -76,10 +72,10 @@ fn file_menu(app: &mut App, ctx: &Context, file: &egui::Response, (undo, redo): 
                 .enabled(enabled)
         };
         if ui.add(row("undo", "Undo", "⌘Z", undo)).clicked() {
-            app.submit(Command::Undo);
+            crate::input::submit_history(app, Command::Undo);
         }
         if ui.add(row("redo", "Redo", "⇧⌘Z", redo)).clicked() {
-            app.submit(Command::Redo);
+            crate::input::submit_history(app, Command::Redo);
         }
         menu_divider(ui);
         ui.add(
@@ -87,6 +83,60 @@ fn file_menu(app: &mut App, ctx: &Context, file: &egui::Response, (undo, redo): 
                 .shortcut(Some("⌘K"))
                 .enabled(false),
         );
+    });
+}
+
+fn document_menu(app: &mut App, ui: &mut Ui) {
+    let replace = replacement_allowed(app);
+    for (icon, label, shortcut, request, enabled) in [
+        ("body", "New part", "⌘N", Request::New, replace),
+        ("folder", "Open…", "⌘O", Request::Open(None), replace),
+        ("import", "Import…", "", Request::Import, replace),
+        (
+            "save",
+            "Save",
+            "⌘S",
+            Request::Save { save_as: false },
+            save_allowed(app),
+        ),
+        (
+            "save",
+            "Save As…",
+            "⇧⌘S",
+            Request::Save { save_as: true },
+            save_allowed(app),
+        ),
+    ] {
+        if ui
+            .add(
+                MenuRow::new(Some(icon), label)
+                    .shortcut(Some(shortcut))
+                    .enabled(enabled),
+            )
+            .clicked()
+        {
+            app.document_request(request);
+            ui.close();
+        }
+    }
+    ui.menu_button("Export", |ui| {
+        for (label, format) in [
+            ("STEP…", ExportFormat::Step),
+            ("STL…", ExportFormat::Stl),
+            ("OBJ…", ExportFormat::Obj),
+            ("3MF…", ExportFormat::ThreeMf),
+        ] {
+            if ui
+                .add_enabled(
+                    replacement_allowed(app) && app.display.is_some(),
+                    egui::Button::new(label),
+                )
+                .clicked()
+            {
+                app.document_request(Request::Export(format));
+                ui.close();
+            }
+        }
     });
 }
 

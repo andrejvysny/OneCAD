@@ -130,3 +130,15 @@ gate. Native application workflow parity, production cutover, device-loss recove
 Attribution for retained SolidCraft, XeGTAO and Khronos-derived techniques remains in
 `THIRD_PARTY_NOTICES.md` and repository `ATTRIBUTION.md`; retired comparison vendor code is
 not required to retain those permission notices.
+
+### Recoverable target admission
+
+The host may call `resize_reclaiming` or `set_options_reclaiming` only after both
+CAD and final host sampling fences drain. These methods preflight the replacement
+with the prior output texture still charged, then retire intermediate targets.
+Allocation failure retains that output image; `has_targets()` is false and no new
+capture may be used for picking or authoring until a later replacement succeeds.
+`output_view()` may therefore expose a retained image without drawable targets.
+Budget/allocation refusals are recoverable; device/validation errors are distinct.
+The native host retries changed dimensions or an explicit Retry action and keeps
+Save reachable. It never raises resource caps or silently reduces quality.

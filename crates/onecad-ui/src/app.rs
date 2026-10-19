@@ -11,7 +11,10 @@ use onecad_scene::{Camera, ViewSnapshot};
 use std::sync::Arc;
 
 pub struct App {
+    pub input_routing: crate::input::RoutingState,
     pub ui: crate::ui_state::UiState,
+    pub settings: crate::settings::Store,
+    pub documents: crate::document_flow::Flow,
     pub bridge: Bridge,
     pub display: Option<Arc<Display>>,
     pub interaction: Interaction,
@@ -30,6 +33,7 @@ pub struct App {
     pub view: Option<ViewSnapshot>,
     pub view_number: u64,
     pub viewport_failure: Option<String>,
+    pub resize_refusal: Option<([u32; 2], String)>,
     device_failure: Arc<std::sync::Mutex<Option<String>>>,
     pub fit_pending: bool,
     pub selected_body: Option<BodyId>,
@@ -38,8 +42,8 @@ pub struct App {
     pub composing: bool,
     pub menu: Option<menu::NativeMenu>,
     pub status: String,
+    pub command_status: bool,
     pub close_prompt: bool,
-    pub close_after_save: bool,
     pub may_close: bool,
     pub stopping: bool,
     pub authoring_dirty: bool,
@@ -78,6 +82,10 @@ impl App {
                 context.request_repaint();
             }
         });
+        let (settings, mut ui, settings_error) =
+            crate::settings::Store::load(&paths, cc.egui_ctx.clone());
+        ui.start_open = !paths.open_on_start;
+        let dark = ui.appearance.resolve_dark(cc.egui_ctx.system_theme());
         let bridge = Bridge::start(paths, cc.egui_ctx.clone(), renderer.preparation_budget())?;
         let resolved = fonts::install(&cc.egui_ctx);
         eprintln!(
@@ -86,12 +94,21 @@ impl App {
             resolved.mono,
             onecad_widgets::icon::names().len()
         );
-        let theme = theme::load(true)?;
-        theme::install(&cc.egui_ctx, theme.clone(), true);
-        let menu = Some(menu::install(&cc.egui_ctx)?);
+        let theme = theme::load(dark)?;
+        theme::install(&cc.egui_ctx, theme.clone(), dark);
+        let menu = cc
+            .winit_window()
+            .map(|_| menu::install(&cc.egui_ctx))
+            .transpose()?;
+        if let Some(menu) = &menu {
+            menu.set_appearance(ui.appearance);
+        }
         bridge.submit(Command::Open)?;
         Ok(Self {
-            ui: Default::default(),
+            input_routing: Default::default(),
+            ui,
+            settings,
+            documents: Default::default(),
             bridge,
             display: None,
             interaction: Interaction::default(),
@@ -100,7 +117,7 @@ impl App {
             gpu,
             texture: None,
             theme,
-            dark: true,
+            dark,
             camera: Camera::default(),
             navigation: Default::default(),
             transform_gizmo: Default::default(),
@@ -109,6 +126,7 @@ impl App {
             view: None,
             view_number: 0,
             viewport_failure: None,
+            resize_refusal: None,
             device_failure,
             fit_pending: true,
             selected_body: None,
@@ -116,9 +134,9 @@ impl App {
             numeric_id: None,
             composing: false,
             menu,
-            status: "Opening prepared fixture…".into(),
+            status: settings_error.unwrap_or_else(|| "Opening QA workspace…".into()),
+            command_status: false,
             close_prompt: false,
-            close_after_save: false,
             may_close: false,
             stopping: false,
             authoring_dirty: false,
@@ -135,8 +153,29 @@ impl App {
     }
 
     pub fn dispatch(&mut self, action: Action) {
+        if self.documents.blocks_authoring(&action) {
+            self.command_status = true;
+            self.status = "Finish the file action before editing the document".into();
+            return;
+        }
+        if matches!(
+            action,
+            Action::Confirm
+                | Action::DraftChanged(_)
+                | Action::BeginExtrude { .. }
+                | Action::BeginOperation { .. }
+                | Action::BeginEdit { .. }
+                | Action::BeginParameterEdit { .. }
+        ) {
+            self.command_status = false;
+        }
         for effect in self.interaction.dispatch(action) {
             self.effect(effect);
+        }
+        if self.interaction.tool.is_none()
+            && let Some(id) = self.numeric_id.take()
+        {
+            self.bridge.shared.release_text_focus(id);
         }
     }
 
@@ -195,11 +234,16 @@ impl App {
     }
 
     pub fn submit(&mut self, command: Command) {
-        if matches!(command, Command::Save) && self.sketch_active() {
-            self.close_after_save = false;
-            self.status = "Finish or discard sketch edits before saving".into();
+        tracing::info!(
+            command = crate::bridge::command_name(&command),
+            "Native model command requested"
+        );
+        if self.documents.running || self.documents.confirm.is_some() {
+            self.status = "Finish the file action before editing the document".into();
             return;
         }
+        self.command_status = true;
+        self.status = format!("{} pending…", crate::bridge::command_name(&command));
         if matches!(command, Command::Undo | Command::Redo) && self.sketch_active() {
             self.status =
                 "Finish sketch before using model history; sketch undo is not implemented".into();
@@ -214,7 +258,6 @@ impl App {
         }
         if let Err(error) = self.bridge.submit(command) {
             self.status = error;
-            self.close_after_save = false;
         }
     }
 
@@ -296,6 +339,13 @@ impl App {
     }
 
     pub fn adopt_display(&mut self, display: Arc<Display>) {
+        let projection = &display.projection;
+        tracing::info!(document_id = %projection.document_id,
+            runtime_session = %projection.runtime_session,
+            revision = projection.revision, undo_depth = projection.undo_depth,
+            redo_depth = projection.redo_depth, dirty = projection.dirty,
+            applied_ops = projection.applied_ops, bodies = projection.bodies.len(),
+            "Native document adopted");
         self.authoring_dirty = display.projection.dirty;
         let changed = self
             .display
@@ -324,6 +374,7 @@ impl App {
 
     fn message(&mut self, message: Message, ctx: &egui::Context) {
         match message {
+            Message::Document { result, .. } => self.document_finished(result),
             Message::Sketch { delivery, .. } => {
                 if let Some(display) = delivery.display.clone() {
                     if self.bridge.shared.accept_display(&display) {
@@ -352,6 +403,7 @@ impl App {
                 revision,
                 rollback_token,
             } => {
+                self.command_status = true;
                 self.authoring_dirty = true;
                 self.dispatch(Action::CommitAccepted {
                     tag,
@@ -365,80 +417,77 @@ impl App {
                 tag,
                 result,
                 ..
-            } => match result {
-                Ok(outcome) => {
-                    let completion = outcome.completion;
-                    let target = tag.as_ref().map(|tag| tag.record_id.to_string());
-                    if let (Some(tag), Some(completion)) = (tag, completion.as_ref()) {
-                        self.dispatch(Action::RegenFinished {
-                            tag,
-                            completion: completion.clone(),
-                        });
-                    }
-                    if command == "Save" {
-                        self.authoring_dirty = false;
-                    }
-                    self.status = match completion {
-                        Some(ref result) if !result.failed_steps.is_empty() => {
-                            format!(
-                                "Feature failed: {}",
-                                result
-                                    .failed_steps
-                                    .iter()
-                                    .find(|step| Some(step.record_id.as_str()) == target.as_deref())
-                                    .unwrap_or(&result.failed_steps[0])
-                                    .message
-                            )
-                        }
-                        Some(ref result) if !result.repair_steps.is_empty() => {
-                            "Feature needs repair".into()
-                        }
-                        Some(ref result) if result.outcome == "failed" => result
-                            .message
-                            .clone()
-                            .unwrap_or("Regeneration failed".into()),
-                        Some(ref result)
-                            if !matches!(result.outcome.as_str(), "published" | "noop") =>
-                        {
-                            format!("Regeneration {}", result.outcome)
-                        }
-                        _ => format!("{command} complete"),
-                    };
-                    if let Some(rollback) = outcome.rollback {
-                        self.status = format!("{}; {}", self.status, rollback.explanation());
-                    }
-                    if self.interaction.tool.as_ref().is_some_and(|tool| {
-                        tool.phase == onecad_interaction::SessionPhase::Completed
-                    }) {
-                        self.dispatch(Action::Cancel);
-                    }
-                    if command == "Save" && self.close_after_save {
-                        self.stop();
-                    }
-                }
-                Err(error) => {
-                    if let Some(tag) = tag {
-                        if matches!(self.interaction.status, CommitStatus::Accepted { .. }) {
-                            self.dispatch(Action::CompletionUnavailable {
+            } => {
+                self.command_status = true;
+                match result {
+                    Ok(outcome) => {
+                        let completion = outcome.completion;
+                        let target = tag.as_ref().map(|tag| tag.record_id.to_string());
+                        if let (Some(tag), Some(completion)) = (tag, completion.as_ref()) {
+                            self.dispatch(Action::RegenFinished {
                                 tag,
-                                message: error.clone(),
-                            });
-                        } else {
-                            self.dispatch(Action::CommitRejected {
-                                tag,
-                                message: error.clone(),
+                                completion: completion.clone(),
                             });
                         }
+                        self.status = match completion {
+                            Some(ref result) if !result.failed_steps.is_empty() => {
+                                format!(
+                                    "Feature failed: {}",
+                                    result
+                                        .failed_steps
+                                        .iter()
+                                        .find(|step| Some(step.record_id.as_str())
+                                            == target.as_deref())
+                                        .unwrap_or(&result.failed_steps[0])
+                                        .message
+                                )
+                            }
+                            Some(ref result) if !result.repair_steps.is_empty() => {
+                                "Feature needs repair".into()
+                            }
+                            Some(ref result) if result.outcome == "failed" => result
+                                .message
+                                .clone()
+                                .unwrap_or("Regeneration failed".into()),
+                            Some(ref result)
+                                if !matches!(result.outcome.as_str(), "published" | "noop") =>
+                            {
+                                format!("Regeneration {}", result.outcome)
+                            }
+                            _ => format!("{command} complete"),
+                        };
+                        if let Some(rollback) = outcome.rollback {
+                            self.status = format!("{}; {}", self.status, rollback.explanation());
+                        }
+                        if self.interaction.tool.as_ref().is_some_and(|tool| {
+                            tool.phase == onecad_interaction::SessionPhase::Completed
+                        }) {
+                            self.dispatch(Action::Cancel);
+                        }
                     }
-                    if self.interaction.tool.as_ref().is_some_and(|tool| {
-                        tool.phase == onecad_interaction::SessionPhase::Completed
-                    }) {
-                        self.dispatch(Action::Cancel);
+                    Err(error) => {
+                        if let Some(tag) = tag {
+                            if matches!(self.interaction.status, CommitStatus::Accepted { .. }) {
+                                self.dispatch(Action::CompletionUnavailable {
+                                    tag,
+                                    message: error.clone(),
+                                });
+                            } else {
+                                self.dispatch(Action::CommitRejected {
+                                    tag,
+                                    message: error.clone(),
+                                });
+                            }
+                        }
+                        if self.interaction.tool.as_ref().is_some_and(|tool| {
+                            tool.phase == onecad_interaction::SessionPhase::Completed
+                        }) {
+                            self.dispatch(Action::Cancel);
+                        }
+                        self.status = error;
                     }
-                    self.status = error;
-                    self.close_after_save = false;
                 }
-            },
+            }
         }
     }
 
@@ -452,6 +501,8 @@ impl App {
             self.interaction.status,
             CommitStatus::Pending(_) | CommitStatus::Accepted { .. }
         ) || self.stopping
+            || self.documents.running
+            || self.documents.confirm.is_some()
     }
 }
 
@@ -459,15 +510,28 @@ impl eframe::App for App {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         crate::input::route(self, ctx, raw);
     }
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
-        self.poll(&ctx);
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll(ctx);
         if ctx.input(|input| input.viewport().close_requested()) && !self.may_close {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.close_prompt = true;
         }
+        if crate::document_flow::prepare_close(self) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        if let Err(error) = self.settings.save_if_changed(&self.ui) {
+            self.status = format!("Settings: {error}");
+        }
+    }
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         if self.ui.appearance == crate::ui_state::Appearance::System {
             crate::appearance::sync(self, &ctx);
+        }
+        if crate::startup_recovery::show(self, &ctx) {
+            crate::shell::close_prompt(self, &ctx);
+            return;
         }
         crate::shell::show(self, ui);
         if self.ui.start_open {

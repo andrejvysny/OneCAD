@@ -21,6 +21,11 @@ impl App {
             .is_some_and(|session| session.phase != SketchPhase::Closed)
     }
     pub fn sketch_dispatch(&mut self, action: SketchAction) {
+        if self.documents.blocks_sketch_authoring(&action) {
+            self.command_status = true;
+            self.status = "Finish the file action before editing the sketch".into();
+            return;
+        }
         for effect in self.sketch.dispatch(action) {
             let tag = effect_tag(&effect).clone();
             if let Err(message) = self

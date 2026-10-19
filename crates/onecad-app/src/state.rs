@@ -240,6 +240,8 @@ pub struct AppState {
     /// The in-flight backend swap's displaced half — `Some` between
     /// [`make_backend`](AppState::make_backend) and its commit/rollback.
     displaced: StdMutex<Option<DisplacedBackend>>,
+    // Stage tokens prevent an abandoned import from disposing a newer replacement.
+    backend_swap: StdMutex<Arc<()>>,
 }
 
 impl AppState {
@@ -286,6 +288,7 @@ impl AppState {
             warm: Arc::new(StdMutex::new(None)),
             live: Arc::new(StdMutex::new(None)),
             displaced: StdMutex::new(None),
+            backend_swap: StdMutex::new(Arc::new(())),
             runtime: Arc::new(Mutex::new(None)),
             restart_owner: Arc::new(StdMutex::new(None)),
             persistence: Arc::new(Mutex::new(())),
@@ -333,13 +336,10 @@ impl AppState {
 
     /// The pending offer whose recorded on-disk path is `path`, if any.
     ///
-    /// The lookup behind `open_document`'s refusal. Paths are compared **as
-    /// recorded**, with no canonicalization: both sides originate from the same
-    /// value (the document's own save path, written into the marker by the autosave
-    /// and handed back by `recents`), so they agree byte-for-byte on every path the
-    /// UI can actually produce. A symlinked or otherwise aliased path would miss —
-    /// which is the safe direction, since the open then proceeds exactly as it did
-    /// before this guard existed.
+    /// Presentation lookup for recents and the early saved-path guard. Paths are
+    /// compared as recorded, so aliases and renamed copies may miss here.
+    /// `open_document` separately checks the bounded container's decoded document
+    /// UUID before publishing its runtime, including offers without a marker.
     #[must_use]
     pub fn pending_recovery_for_path(&self, path: &std::path::Path) -> Option<RecoveryOffer> {
         self.pending_recovery()
@@ -414,6 +414,19 @@ impl AppState {
     /// that exact factory result, immune to overlapping global-slot replacement.
     #[must_use]
     pub fn make_backend_with_query(&self) -> RuntimeBackend {
+        self.make_backend_with_owner().0
+    }
+
+    pub(crate) fn make_backend_with_owner(
+        &self,
+    ) -> (
+        RuntimeBackend,
+        Arc<()>,
+        Arc<dyn WorkerReadiness>,
+        Arc<dyn StepImport>,
+    ) {
+        let mut owner = self.backend_swap.lock().unwrap();
+        *owner = Arc::new(());
         let displaced = self.snapshot_backend();
         let (
             engine,
@@ -427,6 +440,8 @@ impl AppState {
             circuit,
             readiness,
         ) = (self.backend_factory)();
+        let readiness_gate = readiness.clone();
+        let import_probe = step_import.clone();
         if let Ok(mut slot) = self.exporter.write() {
             *slot = exporter;
         }
@@ -449,7 +464,12 @@ impl AppState {
             *slot = readiness;
         }
         *self.displaced.lock().unwrap() = Some(displaced);
-        (engine, meshes, solver, elements)
+        (
+            (engine, meshes, solver, elements),
+            owner.clone(),
+            readiness_gate,
+            import_probe,
+        )
     }
 
     /// Captures the current backend — worker plus all six side seams — so a failed
@@ -479,6 +499,27 @@ impl AppState {
     /// No-op when nothing is pending (so a double call, or a caller that never
     /// swapped, is harmless).
     pub fn commit_backend(&self) {
+        let mut owner = self.backend_swap.lock().unwrap();
+        self.commit_backend_inner();
+        *owner = Arc::new(());
+    }
+
+    pub(crate) fn commit_backend_if_current<T>(
+        &self,
+        expected: &Arc<()>,
+        publish: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let mut owner = self.backend_swap.lock().unwrap();
+        if !Arc::ptr_eq(&owner, expected) {
+            return None;
+        }
+        let result = publish();
+        self.commit_backend_inner();
+        *owner = Arc::new(());
+        Some(result)
+    }
+
+    fn commit_backend_inner(&self) {
         let Some(displaced) = self.displaced.lock().unwrap().take() else {
             return;
         };
@@ -504,6 +545,24 @@ impl AppState {
     ///
     /// No-op when nothing is pending.
     pub fn rollback_backend(&self) {
+        let mut owner = self.backend_swap.lock().unwrap();
+        self.rollback_backend_inner();
+        *owner = Arc::new(());
+    }
+
+    pub(crate) fn invalidate_backend_stage(&self) {
+        *self.backend_swap.lock().unwrap() = Arc::new(());
+    }
+
+    pub(crate) fn rollback_backend_if_current(&self, expected: &Arc<()>) {
+        let mut owner = self.backend_swap.lock().unwrap();
+        if Arc::ptr_eq(&owner, expected) {
+            self.rollback_backend_inner();
+            *owner = Arc::new(());
+        }
+    }
+
+    fn rollback_backend_inner(&self) {
         let Some(displaced) = self.displaced.lock().unwrap().take() else {
             return;
         };
@@ -613,6 +672,9 @@ impl AppState {
     /// nothing now) and pre-warms its replacement, so the next open is instant and
     /// exactly one sidecar is alive across the transition.
     pub fn rewarm(&self) {
+        let mut owner = self.backend_swap.lock().unwrap();
+        *owner = Arc::new(());
+        self.retire_displaced_backend();
         retire_slot(&self.live);
         self.prewarm();
     }
@@ -624,8 +686,19 @@ impl AppState {
     /// worker treats as "exit now". Blocking the quit on a wedged sidecar would buy
     /// nothing.
     pub fn retire_all(&self) {
+        let mut owner = self.backend_swap.lock().unwrap();
+        *owner = Arc::new(());
+        self.retire_displaced_backend();
         retire_slot(&self.warm);
         retire_slot(&self.live);
+    }
+
+    fn retire_displaced_backend(&self) {
+        if let Some(displaced) = self.displaced.lock().unwrap().take() {
+            if let Some(worker) = displaced.worker {
+                worker.retire();
+            }
+        }
     }
 
     /// The pre-warmed worker awaiting adoption, if any (introspection / tests).
@@ -661,6 +734,7 @@ impl Default for AppState {
             warm,
             live,
             displaced: StdMutex::new(None),
+            backend_swap: StdMutex::new(Arc::new(())),
             runtime,
             restart_owner,
             persistence: Arc::new(Mutex::new(())),

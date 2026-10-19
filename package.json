@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "bun test scripts/tests",
+    "test": "bun test ./scripts/tests",
     "check:layers": "bun scripts/check-rust-layers.mjs",
     "check:tooling": "npx tsc --noEmit"
   },

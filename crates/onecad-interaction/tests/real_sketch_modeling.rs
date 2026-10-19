@@ -125,6 +125,7 @@ async fn context(harness: &Harness) -> DocumentContext {
 
 async fn snapshot(harness: &Harness) -> SketchSnapshot {
     SketchSnapshot {
+        history: None,
         document: context(harness).await,
         sketch: Box::new(
             api::get_sketch_snapshot(&harness.state, sketch_id())
@@ -263,22 +264,39 @@ async fn submit(
     count: usize,
 ) -> onecad_app::dto::SketchUpsertDto {
     assert_eq!(effects.len(), 1);
-    let SketchEffect::Upsert { tag, ops } = effects.remove(0) else {
-        panic!("expected emitted upsert batch")
-    };
-    assert_eq!(ops.len(), count);
     assert_eq!(
         state.session.as_ref().unwrap().phase,
         SketchPhase::Submitting
     );
-    let solve = api::sketch_upsert(
-        &harness.state,
-        harness.host.clone(),
-        tag.key.sketch_id.to_string(),
-        ops,
-    )
-    .await
-    .unwrap();
+    let (tag, solve) = match effects.remove(0) {
+        SketchEffect::Upsert { tag, ops } => {
+            assert_eq!(ops.len(), count);
+            let solve = api::sketch_upsert(
+                &harness.state,
+                harness.host.clone(),
+                tag.key.sketch_id.to_string(),
+                ops,
+            )
+            .await
+            .unwrap();
+            (tag, solve)
+        }
+        SketchEffect::AddConstraints { tag, constraints } => {
+            assert_eq!(constraints.len(), count);
+            let receipt = api::add_sketch_constraints_with_completion(
+                &harness.state,
+                harness.host.clone(),
+                tag.key.sketch_id.to_string(),
+                constraints,
+            )
+            .await
+            .unwrap();
+            let admission = receipt.result.unwrap();
+            assert!(admission.accepted);
+            (tag, admission.solve)
+        }
+        _ => panic!("expected emitted sketch batch"),
+    };
     assert!(solve.conflicting.is_empty());
     state.dispatch(SketchAction::BatchAccepted { tag: tag.clone() });
     let snapshot = snapshot(harness).await;

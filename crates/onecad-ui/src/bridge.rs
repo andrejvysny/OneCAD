@@ -3,7 +3,7 @@ pub(crate) use crate::event_mailbox::{BackendEvent, EventMailbox};
 use crate::{profiles::Profile, qa::QaPaths, services};
 use onecad_app::{
     dto::DocumentProjection,
-    host::{AppEvent, DialogPort, EventSink, FileDialog, HostContext, HostPaths},
+    host::{AppEvent, EventSink, HostContext, HostPaths},
     state::AppState,
 };
 use onecad_core::{document::record::OperationRecord, edit::EditCommand, ids::RecordId};
@@ -29,6 +29,11 @@ pub struct Display {
 #[derive(Debug)]
 pub enum Command {
     Open,
+    Document(crate::document_flow::Request),
+    Recovery {
+        document_id: String,
+        choice: crate::startup_recovery::Choice,
+    },
     Sketch(Box<crate::sketch_services::Request>),
     Apply {
         tag: RequestTag,
@@ -37,7 +42,6 @@ pub enum Command {
     },
     Undo,
     Redo,
-    Save,
 }
 
 #[derive(Debug)]
@@ -63,6 +67,10 @@ pub struct CandidateDelivery {
 }
 
 pub enum Message {
+    Document {
+        result: Result<crate::document_flow::Outcome, String>,
+        _permit: OwnedSemaphorePermit,
+    },
     Sketch {
         delivery: Box<crate::sketch_services::Delivery>,
         _permit: OwnedSemaphorePermit,
@@ -84,6 +92,8 @@ pub enum Message {
 
 pub struct Shared {
     pub display: Mutex<Option<Arc<Display>>>,
+    pub recents: Mutex<Vec<onecad_app::dto::RecentProjectDto>>,
+    pub recovery: Mutex<crate::startup_recovery::State>,
     pub candidate: Mutex<Option<(u64, Candidate)>>,
     pub candidate_result: Mutex<Option<(u64, CandidateDelivery)>>,
     pub display_epoch: std::sync::atomic::AtomicU64,
@@ -102,6 +112,28 @@ pub struct Shared {
 }
 
 impl Shared {
+    pub(crate) fn new(context: egui::Context, budget: onecad_render::PreparationBudget) -> Self {
+        Self {
+            display: Mutex::new(None),
+            recents: Mutex::new(Vec::new()),
+            recovery: Mutex::new(Default::default()),
+            candidate: Mutex::new(None),
+            candidate_result: Mutex::new(None),
+            display_epoch: std::sync::atomic::AtomicU64::new(0),
+            failure: Mutex::new(None),
+            activity: Mutex::new(None),
+            render_receipt: Mutex::new(None),
+            budget: Mutex::new(budget),
+            host_budget: Arc::new(crate::budget::HostBudget::default()),
+            valid: std::sync::atomic::AtomicBool::new(false),
+            stopping: std::sync::atomic::AtomicBool::new(false),
+            shutdown: Notify::new(),
+            recovery_flush: Notify::new(),
+            generation: std::sync::atomic::AtomicU64::new(0),
+            notify: Notify::new(),
+            context,
+        }
+    }
     pub fn preparation_budget(&self) -> Result<onecad_render::PreparationBudget, String> {
         self.budget
             .lock()
@@ -110,6 +142,9 @@ impl Shared {
     }
     pub fn wake(&self) {
         self.context.request_repaint();
+    }
+    pub fn release_text_focus(&self, id: egui::Id) {
+        self.context.memory_mut(|memory| memory.surrender_focus(id));
     }
     pub fn is_current(&self, generation: u64) -> bool {
         self.generation.load(std::sync::atomic::Ordering::Acquire) == generation
@@ -182,24 +217,7 @@ impl Bridge {
     ) -> Result<Self, String> {
         let (commands, receiver) = async_mpsc::channel(ADMISSION);
         let (sender, messages) = mpsc::channel();
-        let shared = Arc::new(Shared {
-            display: Mutex::new(None),
-            candidate: Mutex::new(None),
-            candidate_result: Mutex::new(None),
-            display_epoch: std::sync::atomic::AtomicU64::new(0),
-            failure: Mutex::new(None),
-            activity: Mutex::new(None),
-            render_receipt: Mutex::new(None),
-            budget: Mutex::new(budget),
-            host_budget: Arc::new(crate::budget::HostBudget::default()),
-            valid: std::sync::atomic::AtomicBool::new(false),
-            stopping: std::sync::atomic::AtomicBool::new(false),
-            shutdown: Notify::new(),
-            recovery_flush: Notify::new(),
-            generation: std::sync::atomic::AtomicU64::new(0),
-            notify: Notify::new(),
-            context,
-        });
+        let shared = Arc::new(Shared::new(context, budget));
         let backend_shared = shared.clone();
         std::thread::Builder::new()
             .name("onecad-native-services".into())
@@ -344,20 +362,13 @@ impl EventSink for Sink {
         Ok(())
     }
 }
-struct NoDialogs;
-#[async_trait::async_trait]
-impl DialogPort for NoDialogs {
-    async fn pick(&self, _: FileDialog) -> Vec<String> {
-        Vec::new()
-    }
-}
-
 pub(crate) struct Backend {
     pub state: AppState,
     pub host: HostContext,
     pub paths: QaPaths,
     pub events: Arc<EventMailbox>,
     pub shared: Arc<Shared>,
+    pub startup_opened: bool,
     pub scene_revision: u64,
     pub previous_scene: Option<(Arc<SceneSnapshot>, Arc<crate::budget::Lease>)>,
     pub preparation_cache: onecad_render::PreparationCache,
@@ -382,7 +393,9 @@ async fn actor(
             shared: shared.clone(),
             failed: std::sync::atomic::AtomicBool::new(false),
         }),
-        dialogs: Arc::new(NoDialogs),
+        dialogs: Arc::new(crate::dialogs::NativeDialogs::new(
+            paths.root.join("documents"),
+        )),
     };
     let state = AppState::default();
     if let Err(error) = state.start(host.clone()) {
@@ -396,6 +409,7 @@ async fn actor(
         paths,
         events: event_rx,
         shared: shared.clone(),
+        startup_opened: false,
         scene_revision: 0,
         previous_scene: None,
         preparation_cache: Default::default(),
@@ -478,11 +492,12 @@ fn admit(
 pub fn command_name(command: &Command) -> &'static str {
     match command {
         Command::Open => "Open",
+        Command::Document(_) => "Document",
+        Command::Recovery { .. } => "Recovery",
         Command::Sketch(_) => "Sketch",
         Command::Apply { .. } => "Apply",
         Command::Undo => "Undo",
         Command::Redo => "Redo",
-        Command::Save => "Save",
     }
 }
 

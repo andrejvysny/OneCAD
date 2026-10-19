@@ -17,12 +17,54 @@ pub fn invalidate(shared: &crate::bridge::Shared, error: String) {
     shared.invalidate(Some(error));
 }
 
+pub(crate) async fn load_ready_display(
+    backend: &mut Backend,
+) -> Result<crate::bridge::Display, String> {
+    let stopping = backend
+        .shared
+        .stopping
+        .load(std::sync::atomic::Ordering::Acquire);
+    if stopping {
+        return Err("Host shutdown requested before document capture".into());
+    }
+    let readiness = backend.state.readiness();
+    await_capture_readiness(
+        readiness.as_ref(),
+        &backend.shared.shutdown,
+        std::time::Duration::from_secs(8),
+    )
+    .await?;
+    load_display(backend).await
+}
+
+async fn await_capture_readiness(
+    readiness: &dyn onecad_app::worker::WorkerReadiness,
+    shutdown: &tokio::sync::Notify,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    tokio::select! {
+        biased;
+        _ = shutdown.notified() => Err("Host shutdown requested during worker readiness".into()),
+        ready = tokio::time::timeout(timeout, readiness.wait_ready(timeout)) => {
+            if matches!(ready, Ok(true)) { Ok(()) }
+            else { Err(format!("Geometry worker did not become ready within {} s; document remains open", timeout.as_secs_f64())) }
+        }
+    }
+}
+
 pub async fn execute(
     backend: &mut Backend,
     command: Command,
     permit: OwnedSemaphorePermit,
     sender: &mpsc::Sender<Message>,
 ) {
+    let command = match command {
+        Command::Document(request) => {
+            crate::document_services::execute(backend, request, permit, sender).await;
+            return;
+        }
+        other => other,
+    };
     if let Command::Sketch(request) = command {
         crate::sketch_services::execute(backend, *request, permit, sender).await;
         return;
@@ -34,8 +76,9 @@ pub async fn execute(
     };
     let result = execute_command(backend, command, sender).await;
     backend.events.finish();
-    if name != "Quit" {
-        match load_display(backend).await {
+    crate::document_services::refresh_recents(backend);
+    if backend.startup_opened {
+        match load_ready_display(backend).await {
             Ok(display) => backend.shared.publish_display(display),
             Err(error) => invalidate(&backend.shared, format!("Scene refresh failed: {error}")),
         }
@@ -46,6 +89,9 @@ pub async fn execute(
         result,
         _permit: permit,
     });
+    if let Ok(mut recovery) = backend.shared.recovery.lock() {
+        recovery.busy = false;
+    }
     backend.shared.wake();
 }
 
@@ -54,12 +100,15 @@ async fn execute_command(
     command: Command,
     sender: &mpsc::Sender<Message>,
 ) -> Result<crate::outcome::CommandOutcome, String> {
+    if matches!(command, Command::Open) && crate::startup_recovery::discover(backend).await? {
+        return Ok(Default::default());
+    }
     let state = &backend.state;
     let host = backend.host.clone();
     let before = api::get_projection(state)
         .await
         .map_err(|e| e.to_string())?;
-    let expected = if matches!(&command, Command::Open) {
+    let expected = if matches!(&command, Command::Open | Command::Recovery { .. }) {
         crate::event_mailbox::Expected::Replacement {
             previous: before.runtime_session.clone(),
         }
@@ -71,16 +120,37 @@ async fn execute_command(
     };
     backend.events.begin(expected);
     let projection = match command {
+        Command::Document(_) => return Err("file command reached model dispatcher".into()),
         Command::Sketch(_) => return Err("sketch command reached model dispatcher".into()),
+        Command::Recovery {
+            document_id,
+            choice,
+        } => {
+            if !crate::startup_recovery::resolve(backend, &document_id, choice).await? {
+                return Ok(Default::default());
+            }
+            api::get_projection(&backend.state)
+                .await
+                .map_err(|e| e.to_string())?
+        }
         Command::Open => {
-            api::open_document(
-                state,
-                host,
-                backend.paths.document.to_string_lossy().into_owned(),
-                None,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+            if backend.paths.open_on_start {
+                api::open_document(
+                    state,
+                    host,
+                    backend.paths.document.to_string_lossy().into_owned(),
+                    None,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            } else {
+                api::new_document(state, host)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                backend.startup_opened = true;
+                return Ok(Default::default());
+            }
+            backend.startup_opened = true;
             api::get_projection(state)
                 .await
                 .map_err(|e| e.to_string())?
@@ -119,20 +189,6 @@ async fn execute_command(
                 }
                 outcome.projection
             }
-        }
-        Command::Save => {
-            let saved = api::save_document(
-                state,
-                host,
-                Some(backend.paths.document.to_string_lossy().into_owned()),
-                None,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-            if !saved.clean {
-                return Err("Save finished with newer unsaved edits; document stays open".into());
-            }
-            return Ok(Default::default());
         }
     };
     if projection.runtime_session == before.runtime_session
@@ -365,6 +421,36 @@ fn worker_state_failed(state: Option<onecad_app::worker::WorkerState>) -> bool {
 }
 #[cfg(test)]
 mod lifecycle_tests {
+    struct Waiting;
+    #[async_trait::async_trait]
+    impl onecad_app::worker::WorkerReadiness for Waiting {
+        async fn wait_ready(&self, _: std::time::Duration) -> bool {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_readiness_timeout_is_strict_and_shutdown_cancels_wait() {
+        let shutdown = tokio::sync::Notify::new();
+        let error = super::await_capture_readiness(
+            &Waiting,
+            &shutdown,
+            std::time::Duration::from_millis(10),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("did not become ready"));
+        shutdown.notify_one();
+        let error = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            super::await_capture_readiness(&Waiting, &shutdown, std::time::Duration::from_secs(8)),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(error, "Host shutdown requested during worker readiness");
+    }
+
     use super::*;
     use onecad_app::worker::WorkerState;
     #[test]

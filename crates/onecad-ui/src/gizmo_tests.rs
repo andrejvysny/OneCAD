@@ -399,3 +399,88 @@ fn disabled_or_popup_ui_cancels_active_drag_and_refuses_new_press() {
         }
     }
 }
+
+fn chrome_frame(
+    ctx: &egui::Context,
+    gizmo: &mut Gizmo,
+    events: Vec<egui::Event>,
+    focused: bool,
+) -> GizmoResponse {
+    let v = view(Projection::Orthographic, 1.0);
+    let center = screen(&v, DVec3::ZERO);
+    let theme = crate::theme::load(false).unwrap();
+    let mut response = GizmoResponse::default();
+    let mut output = ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(rect()),
+            focused,
+            events,
+            ..Default::default()
+        },
+        |ui| {
+            egui::Area::new(egui::Id::unique("gizmo covering panel"))
+                .fixed_pos(center - egui::vec2(40.0, 40.0))
+                .show(ui.ctx(), |ui| {
+                    ui.allocate_exact_size(egui::vec2(200.0, 120.0), egui::Sense::hover());
+                });
+            egui::CentralPanel::default().show(ui, |ui| {
+                response = gizmo.show(ui, &v, rect(), triad(), 0.0, &theme);
+            });
+        },
+    );
+    output.textures_delta.clear();
+    response
+}
+
+#[test]
+fn covering_chrome_refuses_gizmo_press_but_keeps_captured_release() {
+    let ctx = egui::Context::default();
+    let v = view(Projection::Orthographic, 1.0);
+    let start = screen(&v, DVec3::ZERO);
+    let mut gizmo = Gizmo::default();
+    chrome_frame(&ctx, &mut gizmo, Vec::new(), true);
+    let response = chrome_frame(
+        &ctx,
+        &mut gizmo,
+        vec![egui::Event::PointerMoved(start), press(start, true)],
+        true,
+    );
+    assert!(response.drag.is_none() && !response.owns_pointer && !gizmo.active());
+    gizmo.state = State::begin(&v, rect(), triad(), Handle::Ball, start);
+    let end = start + egui::vec2(20.0, 0.0);
+    let response = chrome_frame(
+        &ctx,
+        &mut gizmo,
+        vec![egui::Event::PointerMoved(end), press(end, false)],
+        true,
+    );
+    assert!(response.drag.unwrap().done && response.owns_pointer && !gizmo.active());
+}
+
+#[test]
+fn escape_and_focus_loss_end_gizmo_without_dispatching_further_delta() {
+    for focused in [false, true] {
+        let ctx = egui::Context::default();
+        let v = view(Projection::Orthographic, 1.0);
+        let start = screen(&v, DVec3::ZERO);
+        let mut gizmo = Gizmo {
+            state: State::begin(&v, rect(), triad(), Handle::Ball, start),
+        };
+        let response = chrome_frame(
+            &ctx,
+            &mut gizmo,
+            vec![
+                egui::Event::PointerMoved(start + egui::vec2(20.0, 0.0)),
+                egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Default::default(),
+                },
+            ],
+            focused,
+        );
+        assert!(response.drag.is_none() && !gizmo.active());
+    }
+}

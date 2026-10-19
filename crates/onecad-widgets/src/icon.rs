@@ -94,10 +94,16 @@ fn grey_out(img: &mut ColorImage) {
 }
 
 /// Rasterise to `px`×`px`; `None` when the icon is unknown or the SVG does not parse.
-pub(crate) fn rasterise(name: &str, dark: bool, px: u32, style: IconStyle) -> Option<ColorImage> {
+pub(crate) fn rasterise(
+    name: &str,
+    dark: bool,
+    logical_size: u32,
+    px: u32,
+    style: IconStyle,
+) -> Option<ColorImage> {
     use resvg::{tiny_skia, usvg};
     let reg = registry(dark)?;
-    let b = bucket(px);
+    let b = bucket(logical_size);
     if !reg.sizes.contains(&b) {
         return None;
     }
@@ -107,10 +113,10 @@ pub(crate) fn rasterise(name: &str, dark: bool, px: u32, style: IconStyle) -> Op
         .replace(&reg.gap, &hex(style.bg));
     let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).ok()?;
     let mut pixmap = tiny_skia::Pixmap::new(px, px)?;
-    let s = px as f32 / 24.0;
+    let size = tree.size();
     resvg::render(
         &tree,
-        tiny_skia::Transform::from_scale(s, s),
+        tiny_skia::Transform::from_scale(px as f32 / size.width(), px as f32 / size.height()),
         &mut pixmap.as_mut(),
     );
     let mut img = ColorImage::from_rgba_premultiplied([px as usize, px as usize], pixmap.data());
@@ -129,13 +135,14 @@ fn texture(
     ctx: &egui::Context,
     name: &str,
     dark: bool,
+    logical_size: u32,
     px: u32,
     style: IconStyle,
 ) -> Option<egui::TextureId> {
     let key: Key = (
         name.to_owned(),
         dark,
-        bucket(px),
+        bucket(logical_size),
         px,
         style.tint.to_array(),
         style.bg.to_array(),
@@ -149,7 +156,7 @@ fn texture(
     if let Some(t) = map.get(&key) {
         return Some(t.id());
     }
-    let img = rasterise(name, dark, px, style)?;
+    let img = rasterise(name, dark, logical_size, px, style)?;
     let handle = ctx.load_texture(format!("icon/{name}/{px}"), img, TextureOptions::LINEAR);
     let id = handle.id();
     map.insert(key, handle);
@@ -168,7 +175,8 @@ pub fn paint(
     let px = (rect.width() * painter.ctx().pixels_per_point())
         .round()
         .max(1.0) as u32;
-    match texture(painter.ctx(), name, dark, px, style) {
+    let logical_size = rect.width().round().max(1.0) as u32;
+    match texture(painter.ctx(), name, dark, logical_size, px, style) {
         Some(id) => {
             painter.image(
                 id,
@@ -304,9 +312,9 @@ mod tests {
 
     #[test]
     fn rasterises_extrude() {
-        let img = rasterise("extrude", false, 24, STYLE);
+        let img = rasterise("extrude", false, 24, 24, STYLE);
         assert!(img.is_some_and(|i| i.pixels.iter().any(|p| p.a() > 200)));
-        assert!(rasterise("nope", false, 24, STYLE).is_none());
+        assert!(rasterise("nope", false, 24, 24, STYLE).is_none());
     }
 
     #[test]
@@ -316,7 +324,51 @@ mod tests {
             grey: true,
             ..STYLE
         };
-        let img = rasterise("extrude", false, 24, s);
+        let img = rasterise("extrude", false, 24, 24, s);
         assert!(img.is_some_and(|i| i.pixels.iter().all(|p| p.r() == p.g() && p.g() == p.b())));
+    }
+
+    #[test]
+    fn icons_fill_consistent_bounds_at_both_display_scales() {
+        for dark in [false, true] {
+            for size in [14, 16, 18, 20, 24, 32] {
+                let bounds = |scale| {
+                    let px = size * scale;
+                    let image = rasterise("extrude", dark, size, px, STYLE).unwrap();
+                    let visible: Vec<_> = image
+                        .pixels
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, pixel)| pixel.a() > 32)
+                        .map(|(index, _)| {
+                            (
+                                (index as u32 % px) as f32 / px as f32,
+                                (index as u32 / px) as f32 / px as f32,
+                            )
+                        })
+                        .collect();
+                    let min_x = visible.iter().map(|p| p.0).fold(1.0, f32::min);
+                    let max_x = visible.iter().map(|p| p.0).fold(0.0, f32::max);
+                    let min_y = visible.iter().map(|p| p.1).fold(1.0, f32::min);
+                    let max_y = visible.iter().map(|p| p.1).fold(0.0, f32::max);
+                    [min_x, max_x, min_y, max_y]
+                };
+                let one = bounds(1);
+                let two = bounds(2);
+                assert!(one[1] - one[0] > 0.5 && one[3] - one[2] > 0.5);
+                for (a, b) in one.into_iter().zip(two) {
+                    assert!(
+                        (a - b).abs() <= 1.5 / size as f32,
+                        "size={size}: {a} vs {b}"
+                    );
+                }
+                assert_eq!(
+                    rasterise("extrude", dark, size, size * 2, STYLE)
+                        .unwrap()
+                        .size,
+                    [size as usize * 2; 2]
+                );
+            }
+        }
     }
 }

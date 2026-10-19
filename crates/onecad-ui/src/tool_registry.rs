@@ -59,6 +59,7 @@ pub enum ToolId {
     Midpoint,
     Fix,
     Distance,
+    Diameter,
     Construction,
     Delete,
     Revolve,
@@ -105,7 +106,7 @@ const MEASURE: ToolDef = t(ToolId::Measure, "measure", "Measure");
 const ISOLATE: ToolDef = t(ToolId::Isolate, "isolate", "Isolate");
 const HIDE: ToolDef = t(ToolId::Hide, "eyeOff", "Hide");
 const MORE: ToolDef = t(ToolId::More, "overflow", "More");
-const SKETCH: ToolDef = t(ToolId::Sketch, "sketch", "Sketch");
+const SKETCH: ToolDef = t(ToolId::Sketch, "sketch", "Sketch (XY)");
 const EXTRUDE: ToolDef = k(ToolId::Extrude, "extrude", "Extrude", "E");
 const MATERIAL: ToolDef = t(ToolId::Material, "material", "Material");
 
@@ -177,6 +178,7 @@ const SKETCH_ENTITY: Groups = &[
         k(ToolId::Midpoint, "midpoint", "Midpoint", "M"),
         k(ToolId::Fix, "fix", "Fix", "F"),
         k(ToolId::Distance, "distance", "Distance", "D"),
+        t(ToolId::Constraints, "coincident", "Constraints"),
     ],
     &[
         t(ToolId::Construction, "construction", "Construction"),
@@ -324,7 +326,7 @@ mod tests {
             labels(SelectionKind::None),
             vec![
                 vec!["Select"],
-                vec!["Sketch", "Datum plane", "Offset plane"],
+                vec!["Sketch (XY)", "Datum plane", "Offset plane"],
                 vec!["Generators", "Insert component", "Import"],
                 vec!["Measure", "Section"],
             ]
@@ -332,7 +334,14 @@ mod tests {
         assert_eq!(
             labels(SelectionKind::Face),
             vec![
-                vec!["Sketch", "Extrude", "Offset face", "Hole", "Draft", "Shell"],
+                vec![
+                    "Sketch (XY)",
+                    "Extrude",
+                    "Offset face",
+                    "Hole",
+                    "Draft",
+                    "Shell"
+                ],
                 vec!["Material", "Measure"],
                 vec!["Isolate", "Hide", "More"],
             ]
@@ -370,7 +379,8 @@ mod tests {
                     "Equal",
                     "Midpoint",
                     "Fix",
-                    "Distance"
+                    "Distance",
+                    "Constraints"
                 ],
                 vec!["Construction", "Delete"],
             ]

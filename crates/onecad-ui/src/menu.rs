@@ -1,6 +1,6 @@
 //! macOS native menu bar (muda) with key equivalents. Menu items with key equivalents are
 //! handled by AppKit before the key reaches winit, so egui never sees Cmd+Z: the app routes
-//! the menu action itself (text field first, then document history) — see `DimInput::route_edit`.
+//! the menu action itself (text field first, then document history) — see `input::route`.
 //! Cut/Copy/Paste/Select All are custom items for the same reason: muda's predefined items
 //! send `copy:` etc. to the first responder, which winit's view does not implement, and their
 //! key equivalents still swallow the keys, so egui's own Cmd+C/V/A handling never runs.
@@ -14,7 +14,12 @@ pub enum Action {
     Copy,
     Paste,
     SelectAll,
+    New,
+    Open,
+    Import,
     Save,
+    SaveAs,
+    Export(crate::document_flow::ExportFormat),
     Quit,
     Fit,
     Home,
@@ -33,6 +38,10 @@ mod imp {
         _menu: Menu,
         rx: Receiver<Action>,
         appearance: Choices,
+        history: [MenuItem; 2],
+        replacement: [MenuItem; 3],
+        saves: [MenuItem; 2],
+        exports: [MenuItem; 4],
     }
 
     fn item(text: &str, mods: Modifiers, code: Code) -> MenuItem {
@@ -69,7 +78,19 @@ mod imp {
         let cmd = Modifiers::META;
         let undo = item("Undo", cmd, Code::KeyZ);
         let redo = item("Redo", Modifiers::META | Modifiers::SHIFT, Code::KeyZ);
+        let new = item("New Part", cmd, Code::KeyN);
+        let open = item("Open…", cmd, Code::KeyO);
+        let import = MenuItem::new("Import…", true, None);
         let save = item("Save", cmd, Code::KeyS);
+        let save_as = item("Save As…", cmd | Modifiers::SHIFT, Code::KeyS);
+        let exports =
+            ["STEP…", "STL…", "OBJ…", "3MF…"].map(|label| MenuItem::new(label, true, None));
+        let export = Submenu::with_items(
+            "Export",
+            true,
+            &[&exports[0], &exports[1], &exports[2], &exports[3]],
+        )
+        .map_err(|error| error.to_string())?;
         let quit = item("Quit OneCAD", cmd, Code::KeyQ);
         let fit = item("Fit All", cmd, Code::Digit0);
         let cut = item("Cut", cmd, Code::KeyX);
@@ -94,7 +115,20 @@ mod imp {
             ],
         )
         .map_err(e)?;
-        let file = Submenu::with_items("File", true, &[&save]).map_err(e)?;
+        let file = Submenu::with_items(
+            "File",
+            true,
+            &[
+                &new,
+                &open,
+                &import,
+                &PredefinedMenuItem::separator(),
+                &save,
+                &save_as,
+                &export,
+            ],
+        )
+        .map_err(e)?;
         let edit = Submenu::with_items(
             "Edit",
             true,
@@ -144,7 +178,27 @@ mod imp {
             ),
             (undo.id().clone(), Action::Undo),
             (redo.id().clone(), Action::Redo),
+            (new.id().clone(), Action::New),
+            (open.id().clone(), Action::Open),
+            (import.id().clone(), Action::Import),
             (save.id().clone(), Action::Save),
+            (save_as.id().clone(), Action::SaveAs),
+            (
+                exports[0].id().clone(),
+                Action::Export(crate::document_flow::ExportFormat::Step),
+            ),
+            (
+                exports[1].id().clone(),
+                Action::Export(crate::document_flow::ExportFormat::Stl),
+            ),
+            (
+                exports[2].id().clone(),
+                Action::Export(crate::document_flow::ExportFormat::Obj),
+            ),
+            (
+                exports[3].id().clone(),
+                Action::Export(crate::document_flow::ExportFormat::ThreeMf),
+            ),
             (quit.id().clone(), Action::Quit),
             (fit.id().clone(), Action::Fit),
             (home.id().clone(), Action::Home),
@@ -167,10 +221,30 @@ mod imp {
             _menu: menu,
             rx,
             appearance: choices,
+            history: [undo, redo],
+            replacement: [new, open, import],
+            saves: [save, save_as],
+            exports,
         })
     }
 
     impl NativeMenu {
+        pub fn set_history_enabled(&self, undo: bool, redo: bool) {
+            self.history[0].set_enabled(undo);
+            self.history[1].set_enabled(redo);
+        }
+        pub fn set_document_enabled(&self, replace: bool, save: bool, export: bool) {
+            for item in &self.replacement {
+                item.set_enabled(replace);
+            }
+            for item in &self.saves {
+                item.set_enabled(save);
+            }
+            for item in &self.exports {
+                item.set_enabled(export);
+            }
+        }
+
         /// muda toggles a check item on click; restore the one-of-three invariant.
         pub fn set_appearance(&self, current: Appearance) {
             for (choice, item) in &self.appearance {
@@ -196,6 +270,8 @@ mod imp {
             Vec::new()
         }
         pub fn set_appearance(&self, _current: crate::ui_state::Appearance) {}
+        pub fn set_history_enabled(&self, _undo: bool, _redo: bool) {}
+        pub fn set_document_enabled(&self, _replace: bool, _save: bool, _export: bool) {}
     }
 }
 
@@ -238,13 +314,17 @@ impl Action {
                     Self::Copy => (egui::Key::C, false),
                     Self::Paste => (egui::Key::V, false),
                     Self::SelectAll => (egui::Key::A, false),
+                    Self::New => (egui::Key::N, false),
+                    Self::Open => (egui::Key::O, false),
                     Self::Save => (egui::Key::S, false),
+                    Self::SaveAs => (egui::Key::S, true),
                     Self::Quit => (egui::Key::Q, false),
                     Self::Fit => (egui::Key::Num0, false),
                     Self::Home => (egui::Key::H, true),
-                    Self::Appearance(_) => return false,
+                    Self::Appearance(_) | Self::Import | Self::Export(_) => return false,
                 };
                 *key == expected
+                    && modifiers.shift == shift
                     && modifiers.matches_logically(egui::Modifiers {
                         command: true,
                         shift,

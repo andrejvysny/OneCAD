@@ -56,6 +56,8 @@
 //! it would leave the sketch on the XY placeholder — a silent wrong frame, not a
 //! deferred resolution.
 
+mod sketch_history;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::document::body::{BodyMeta, BodyRegistry};
@@ -2873,7 +2875,7 @@ fn set_input(
         Operation::Opaque(_) => {
             return Err(DomainError::InvalidReference(
                 "cannot edit inputs of a frozen (opaque) op".into(),
-            ))
+            ));
         }
     };
     match (path, known) {
@@ -3003,7 +3005,7 @@ fn set_input(
         _ => {
             return Err(DomainError::InvalidReference(
                 "input path does not match the operation type / reference kind".into(),
-            ))
+            ));
         }
     }
     Ok(())

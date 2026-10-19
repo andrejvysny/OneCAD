@@ -11,6 +11,47 @@ mod support;
 use support::*;
 
 #[test]
+fn profile_deselection_prevents_creation_without_changing_document_context() {
+    let mut state = Interaction::default();
+    state.dispatch(Action::ContextChanged(Some(context())));
+    state.dispatch(Action::SelectProfile(Box::new(selection(context()))));
+    assert!(state.dispatch(Action::ClearSelection).is_empty());
+    assert!(state.selection.is_none());
+    assert_eq!(state.context, Some(context()));
+    assert!(state
+        .dispatch(Action::BeginExtrude {
+            record_id: RecordId::new(),
+            gesture: 10,
+            step_index: 3,
+        })
+        .is_empty());
+    assert!(state.tool.is_none());
+}
+
+#[test]
+fn canceling_tool_preserves_input_and_never_mutates_authoritative_document() {
+    let (mut state, tag) = started();
+    let selected = state.selection.clone();
+    let effects = state.dispatch(Action::Cancel);
+    assert!(matches!(effects.as_slice(), [Effect::ClearPreview { .. }]));
+    assert!(state.tool.is_none());
+    assert_eq!(state.selection, selected);
+    assert_eq!(state.context, Some(tag.context));
+    assert!(state.dispatch(Action::ClearSelection).is_empty());
+    assert!(state.selection.is_none());
+}
+
+#[test]
+fn deselection_does_not_cancel_or_repeat_an_admitted_commit() {
+    let (mut state, tag) = confirmed();
+    assert!(state.dispatch(Action::ClearSelection).is_empty());
+    assert!(state.selection.is_none());
+    assert_eq!(state.tool.as_ref().unwrap().phase, SessionPhase::Committing);
+    assert!(matches!(&state.status, CommitStatus::Pending(pending) if pending == &tag));
+    assert!(state.dispatch(Action::Confirm).is_empty());
+}
+
+#[test]
 fn exact_profile_and_record_identity_survive_expression_preview_and_commit() {
     let (mut state, _) = started();
     let tag = evaluation_tag(&state.dispatch(Action::DraftChanged("wall * 2".into())));

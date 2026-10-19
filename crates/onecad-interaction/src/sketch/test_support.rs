@@ -29,6 +29,8 @@ pub fn empty(plane: SketchPlane) -> Sketch {
 }
 pub fn enter_dto(id: SketchId) -> SketchSessionDto {
     SketchSessionDto {
+        edit_session: Some("edit-visit".into()),
+        history: None,
         sketch_id: id.to_string(),
         plane: Default::default(),
         entities: Default::default(),
@@ -70,6 +72,7 @@ pub fn active(plane: SketchPlane, tool: SketchTool) -> SketchInteraction {
     state.dispatch(SketchAction::Entered {
         tag: tag.clone(),
         snapshot: SketchSnapshot {
+            history: None,
             document: context(),
             sketch: Box::new(sketch.clone()),
         },
@@ -140,6 +143,7 @@ pub fn applied(state: &SketchInteraction, ops: &[SketchEditOp]) -> SketchSnapsho
         }
     }
     SketchSnapshot {
+        history: None,
         document: state.context.clone().unwrap(),
         sketch: Box::new(sketch),
     }

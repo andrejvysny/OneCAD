@@ -60,8 +60,11 @@ impl Targets {
         // Allocation scopes contain no submitted work; popping does not wait for GPU completion.
         let invalid = pollster::block_on(validation.pop());
         let allocation = pollster::block_on(scope.pop());
-        if let Some(error) = invalid.or(allocation) {
+        if let Some(error) = invalid {
             return Err(crate::RenderError::Device(error.to_string()));
+        }
+        if let Some(error) = allocation {
+            return Err(crate::RenderError::Allocation(error.to_string()));
         }
         Ok(targets)
     }

@@ -48,6 +48,8 @@ enum Reply {
     Created,
     Entered(Box<SketchSessionDto>, bool),
     Solved(Box<SketchUpsertDto>),
+    ConstraintRefused(String),
+    History(onecad_app::dto::SketchHistoryDto),
     Finished(Box<onecad_app::dto::FinishSketchDto>),
     Discarded(onecad_app::dto::CancelSketchDto),
 }
@@ -190,6 +192,46 @@ async fn execute_effect(
                 .map(Box::new)
                 .map(Reply::Solved)
         }
+        SketchEffect::History {
+            edit_session,
+            direction,
+            ..
+        } => {
+            let scope = onecad_app::dto::SketchHistoryScope {
+                sketch_id: tag.key.sketch_id,
+                edit_session,
+                runtime_session: tag.document.runtime_session.clone(),
+                revision: tag.document.revision,
+                snapshot_id: tag.document.snapshot_id,
+            };
+            let receipt =
+                api::sketch_history_with_completion(&backend.state, host, scope, direction)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            complete(backend, receipt).await.map(Reply::History)
+        }
+        SketchEffect::AddConstraints { constraints, .. } => {
+            let receipt =
+                api::add_sketch_constraints_with_completion(&backend.state, host, id, constraints)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            if receipt
+                .result
+                .as_ref()
+                .is_ok_and(|admission| admission.accepted)
+            {
+                actions.push(SketchAction::BatchAccepted { tag });
+            }
+            let admission = complete(backend, receipt).await?;
+            if admission.accepted {
+                Ok(Reply::Solved(Box::new(admission.solve)))
+            } else {
+                Ok(Reply::ConstraintRefused(format!(
+                    "Constraint refused: {:?}",
+                    admission.solve.status
+                )))
+            }
+        }
         SketchEffect::FinishSketch { .. } => finish(backend, id).await,
         SketchEffect::DiscardSketch { .. } => {
             let receipt = api::cancel_sketch_with_completion(&backend.state, host, id, Some(true))
@@ -258,15 +300,24 @@ async fn feedback(
         });
     }
     let tag = tag.ok_or("missing sketch request scope")?.clone();
+    if let Reply::ConstraintRefused(message) = reply {
+        return Ok(SketchAction::ConstraintRefused { tag, message });
+    }
     let snapshot = match &reply {
-        Reply::Entered(..) | Reply::Solved(..) => {
+        Reply::Entered(..) | Reply::Solved(..) | Reply::History(..) => {
             let sketch = api::get_sketch_snapshot(&backend.state, tag.key.sketch_id)
                 .await
                 .map_err(|e| e.to_string())?;
             check_context(&backend.state, &context).await?;
             crate::record_budget::check_payload(&sketch)?;
+            let history = api::get_sketch(&backend.state, tag.key.sketch_id.to_string())
+                .await
+                .map_err(|error| error.to_string())?
+                .history;
+            check_context(&backend.state, &context).await?;
             Some(SketchSnapshot {
-                document: context,
+                history,
+                document: context.clone(),
                 sketch: Box::new(sketch),
             })
         }
@@ -295,9 +346,24 @@ async fn feedback(
             snapshot: snapshot.ok_or("missing solved snapshot")?,
             solve,
         },
+        Reply::History(result) => {
+            let solve = api::get_sketch(&backend.state, tag.key.sketch_id.to_string())
+                .await
+                .map_err(|error| error.to_string())?;
+            check_context(&backend.state, &context).await?;
+            SketchAction::HistoryResolved {
+                tag,
+                snapshot: snapshot.ok_or("missing authoritative sketch history snapshot")?,
+                solve: Box::new(solve),
+                moved: result.moved,
+                direction: result.direction,
+            }
+        }
         Reply::Finished(result) => SketchAction::Finished { tag, result },
         Reply::Discarded(result) => SketchAction::Discarded { tag, result },
-        Reply::Begin(_) => return Err("unexpected sketch load reply".into()),
+        Reply::Begin(_) | Reply::ConstraintRefused(_) => {
+            return Err("unexpected sketch load reply".into());
+        }
     })
 }
 
@@ -307,6 +373,8 @@ pub fn effect_tag(effect: &SketchEffect) -> &SketchTag {
         | SketchEffect::EnterSketch { tag, .. }
         | SketchEffect::RefreshSketch { tag }
         | SketchEffect::Upsert { tag, .. }
+        | SketchEffect::AddConstraints { tag, .. }
+        | SketchEffect::History { tag, .. }
         | SketchEffect::FinishSketch { tag, .. }
         | SketchEffect::DiscardSketch { tag } => tag,
     }

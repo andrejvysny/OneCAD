@@ -31,6 +31,10 @@ add_executable(test_sketch_ellipse test_sketch_ellipse.cpp)
 target_link_libraries(test_sketch_ellipse PRIVATE worker_core)
 add_test(NAME sketch_ellipse COMMAND test_sketch_ellipse)
 
+add_executable(test_sketch_center_refs test_sketch_center_refs.cpp)
+target_link_libraries(test_sketch_center_refs PRIVATE worker_core)
+add_test(NAME sketch_center_refs COMMAND test_sketch_center_refs)
+
 # --- W0b: `referenceLocked` host-face geometry — the wire flag + child
 #     inheritance, region participation (the contrast with `construction`), the
 #     tag-0 solver pins, and the now-reachable edit guards. ---
@@ -1218,3 +1222,10 @@ add_test(NAME point_drag_truth COMMAND test_point_drag_truth)
 add_test(NAME canonical_sketch_point_drag_truth COMMAND worker_harness
     --worker $<TARGET_FILE:onecad-worker>
     --fixture ${PROTOCOL_FIXTURES}/sketch_point_drag_truth.ndjson)
+
+add_test(
+    NAME canonical_sketch_center_refs
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/sketch_center_refs.ndjson
+)

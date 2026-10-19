@@ -4,7 +4,7 @@ This macOS host uses the shared application services, interaction reducer, check
 CPU scene and renderer. It implements the first prepared-profile workflow:
 viewport profile selection, new extrusion preview and commit, applicable typed numeric
 feature edits, new XY and existing sketch editing with line/rectangle/circle
-batches, finish/discard, body Move / Rotate, model undo/redo, save, and reopen of the saved copy. Build and automated
+batches, scoped sketch undo/redo, finish/discard, body Move / Rotate, model undo/redo, save, and reopen of the saved copy. Build and automated
 tests do not establish native input, appearance, accessibility or workflow acceptance.
 
 From the workspace root, `make run` builds/stages the OCCT sidecar, creates a
@@ -31,8 +31,9 @@ CARGO_BUILD_JOBS=3 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
   cargo build -p onecad-ui
 ```
 
-The host requires an explicitly isolated temporary profile and prepared `.onecad`
-fixture. Set the environment before launching the built binary; it never changes
+The host requires an explicitly isolated temporary profile. Omit `--open` to
+start a blank document and Home screen, or provide a prepared `.onecad` fixture.
+Set the environment before launching the built binary; it never changes
 process environment after threads start. Example paths below are synthetic QA
 paths, not production document or application-data locations:
 
@@ -54,6 +55,50 @@ never overwritten from its original fixture. Settings, recents, autosave,
 recovery, library, temporary imports and logs stay in this profile. Shared data
 continuity remains outside this host's current scope.
 
+Startup discovers crash recovery before opening the prepared saved document. Each
+offer requires Restore, Open saved (which explicitly discards that recovery copy),
+or Discard recovery. Restoring or opening one document enters the editor; other
+offers stay protected for the next startup, rather than replacing unsaved recovered
+work with another document. Closing the host before a decision preserves pending offers.
+Restore keeps the recovered document dirty and uses the shared service's ownership
+marker and autosave mutation notification, so a second crash retains the recovered
+work. Saves stay under the isolated profile's `documents/`: an unavailable or
+out-of-profile original path uses `recovered-<document UUID>.onecad` instead.
+File actions use asynchronous native dialogs and typed requests on the bounded
+service actor. New/Open/Import ask how to handle dirty work before replacement;
+Save As and export stay within the QA `documents/` directory. External projects
+open as unique bounded copies, while STEP import uses shared application services.
+The File menu exports STEP, STL, OBJ and 3MF. Recents come from application metadata
+inside this profile; no example projects or synthetic thumbnails are shown.
+Cancellation and failed replacement preserve the current runtime. Save-before-close
+continues only after a clean save, and blocks further authoring while pending.
+Recovered documents with an out-of-profile path require Save As into QA storage.
+
+STEP import stages a production worker, waits at most 8 seconds for its handshake,
+and only then probes the source. The staged guard retains that exact worker's
+readiness and import interface. Timeout, probe failure, or cancellation restores
+prior services only while the guard still owns the stage. Publication and commit
+check that owner atomically; replacement, close, and shutdown invalidate it.
+An old import cannot publish over or roll back a newer owner. The native actor
+serializes file intents. Other application New/Open/Recover callers still share
+global displaced-backend bookkeeping: concurrent replacement through those APIs
+remains unqualified and is not production writer-ownership support.
+
+The ignored `typed_real_worker_import_export_roundtrip_preserves_document` host
+test checks STEP round-trip topology, mass and centroids, binary STL records, OBJ
+indices, and 3MF archive parts and mesh indices through typed file intents. It
+also checks export leaves document/history/dirty state unchanged and cancelled or
+failed import leaves the prior runtime and worker intact. Run it with
+`ONECAD_REQUIRE_WORKER=1 ONECAD_REQUIRE_GPU=1`, an explicit freshly staged
+`ONECAD_WORKER_PATH`, and `cargo test -p onecad-ui --lib typed_real_worker_import_export -- --include-ignored`.
+The macOS test uses Metal for the host's bounded preparation budget and
+`/usr/bin/unzip` to verify 3MF archive integrity. This service qualification does
+not establish native dialog, physical input, or production continuity acceptance.
+
+Recovery decisions and semantic restoration have deterministic service tests; the
+physical crash/restart, autosave, second-crash and clean-close drill remains a
+required native acceptance gate.
+
 Only implemented controls are exposed. Select a worker-produced profile fill in
 the viewport, choose Extrude, enter a length or expression, wait for its real
 preview and choose Create. Select an editable history row and an applicable numeric field to edit its stored
@@ -61,13 +106,29 @@ parameters. Existing-feature edits rebuild on Apply: PreviewOp appends a candida
 at HEAD and cannot correctly preview replacement of an existing operation.
 Choose New sketch (XY), or select an existing sketch row, to enter sketch mode.
 Line, Rectangle and Circle emit typed batches through the shared solver. Select
-picks existing sketch entities; Finish keeps accepted edits and Discard uses the
+picks existing sketch entities. The Constraints menu supports Fixed for a Point,
+Horizontal/Vertical for a Line, line length and circle diameter. Dimension opens
+a scoped editor seeded from authoritative geometry; numeric precision and source
+expressions are preserved. The application reevaluates expressions against current
+variables and rejects conflicting or overconstrained candidates before commit,
+leaving document history and authoritative solve truth unchanged. A rectangle can
+be constrained with one fixed corner and two edge lengths. Later variable changes
+driving existing sketch dimensions require separate parity qualification.
+Finish keeps accepted edits and Discard uses the
 shared guarded session discard. Enter/Escape clear a transient draft before exit.
 Read-only refresh never opens another edit session. Snapping, entity dragging,
-constraint editing, sketch undo/redo and further sketch tools are not exposed.
-Focused text owns undo/redo and clipboard actions. Model history receives those
-commands outside sketch mode; active sketch mode blocks model history explicitly. Japanese IME and native menu/dialog behavior
-remain unverified. New/open dialogs, further modeling creation tools and full interaction parity
+editing existing constraint values and further sketch tools are not exposed.
+Focused text owns undo/redo and clipboard actions. Outside text editing, the title
+bar, File menu, native Edit menu and keyboard share the same history dispatcher.
+An active sketch uses application-owned, session-scoped history; model history is
+used outside sketch mode. Undo or Redo first clears a transient sketch draft without
+changing the document. Another invocation moves one committed same-sketch step.
+History cannot cross the entry boundary, replay a foreign redo, or survive an edit
+visit, runtime, head, revision or worker-epoch change. A detached candidate is solved
+before the history move commits; errors and rejected solves preserve both stacks and
+authoritative geometry. Empty history is explicit. Finish/discard retains the existing
+session grouping and clears redo owned by the closed visit. No UI snapshot stack is
+created. Japanese IME and native menu/dialog behavior remain unverified. Further modeling creation tools and full interaction parity
 are not implemented in this host.
 
 Camera input consumes ordered native events instead of smoothed scroll totals.
@@ -89,6 +150,25 @@ and one worker request in flight. Cancellation invalidates completion delivery;
 it does not claim to interrupt an executing worker operation. Late results must
 match document, runtime, revision, worker head and gesture identity.
 
+Service completion, close-request interception and settings persistence run in
+`App::logic`, including when the window is hidden or occluded and eframe does not
+call `App::ui`. A dirty close cancels the native close and makes the confirmation
+visible; clean shutdown waits for the service actor's stopped message. The ignored
+`app_logic_tests::occluded_app_logic_delivers_new_and_protects_close_without_ui`
+regression drives the real host through logic-only ticks with a production worker
+and Metal. It checks document replacement delivery, dirty-close protection and
+shutdown progression without presentation; it does not establish physical input
+or clean AppKit teardown acceptance.
+
+Raw-input routing must process only fresh events. Eframe can prepend events that
+egui has not consumed between logic-only ticks. `input::RoutingState` tracks this
+retained prefix against the cumulative egui pass number, routes newly appended
+events once, and restores retained text/IME input for the next presentation pass.
+Do not route the retained prefix again: a text Undo or native-menu injection could
+otherwise become a model Undo after focus changes. The `input::tests` regressions
+cover retained text Undo, fresh Redo, native-menu injection, egui-pass advancement,
+IME commit and early-return preservation.
+
 Select a body and choose Move / Rotate to use the SolidCraft-derived transform
 gizmo. Axis stems, plane squares and the center move the draft; rotation rings
 rotate it with 5-degree snapping unless Alt, Control or Command is held. A drag
@@ -107,8 +187,11 @@ application-owned. Native and headless captures use this same renderer; competin
 application and prototype renderers are retired. Native assets live in
 `assets/native`, and checked capture fixtures in `fixtures/render`.
 Committed geometry requests fine tessellation. The renderer owns four display
-styles: Wireframe, Shaded, ShadedEdges (the default), and Xray. The existing host
-does not expose a new mode control. Wireframe excludes surface fills and shadows;
+styles: Wireframe, Shaded, ShadedEdges (the default), and Xray. The Display popover
+exposes these modes through the existing pending-options and GPU fence path.
+Xray is disabled with a capability reason when the shared device lacks
+`FLOAT32_BLENDABLE`; renderer validation remains strict.
+Wireframe excludes surface fills and shadows;
 Xray uses weighted blended transparency without AO or contact shadows.
 The host supplies eframe's shared wgpu device/queue to the CAD renderer and
 samples its output texture through egui, without CPU image readback. CPU mesh
@@ -142,10 +225,40 @@ outside this milestone. Resize publishes a new egui texture registration only
 after renderer allocation succeeds and final sampling drains; zero-sized views
 release targets only after those same fences drain.
 
-The macOS accessibility-enabled host has a known close-time
-`NSRangeException` involving `WinitView` and `nextResponder`, matching
+The workspace pins `accesskit`, `accesskit_consumer` and `accesskit_macos` to the
+official AccessKit repository at
+`64e9a47ddaac64c9082214f472fa6fcafbc86430`, the open, unmerged
+[AccessKit PR 835](https://github.com/AccessKit/accesskit/pull/835). This addresses
+the close-time `NSRangeException` involving `WinitView` and `nextResponder` in
 [AccessKit issue 823](https://github.com/AccessKit/accesskit/issues/823).
-Do not treat successful save or worker shutdown as proof of clean window teardown.
+AppKit observes the content view through a KVO subclass. The released adapter
+unconditionally restores the original view class during teardown, breaking that
+observation; AppKit later throws when removing its observer. The pinned patch
+preserves an intervening KVO subclass while releasing adapter handlers and keeping
+accessibility callbacks valid. Accessibility remains enabled.
+
+The pinned upstream main-thread integration suite passed all 8 tests, with 0
+failed, ignored or filtered tests. It covers observer removal after adapter drop,
+handler release and adapter reattachment. The already-observed-view rejection
+prints an expected, caught panic and passes. From the workspace root, derive the
+pinned dependency manifest with Cargo metadata and `jq`, then run:
+
+```sh
+ACCESSKIT_MANIFEST="$(cargo metadata --format-version 1 --locked | jq -r '.packages[] | select(.name == "accesskit_macos") | .manifest_path')"
+cargo test --manifest-path "$ACCESSKIT_MANIFEST" \
+  --test integration --locked --target-dir /private/tmp/onecad-accesskit-kvo-target
+```
+
+The recorded run used this command with the manifest expanded to
+`/Users/andrejvysny/.cargo/git/checkouts/accesskit-2bbcb442f90e9f12/64e9a47/adapters/macos/Cargo.toml`.
+The local evidence log is `/private/tmp/onecad-accesskit-kvo.log`. The run required
+macOS AppKit access outside the restricted runner; reproducing it requires the
+same pinned revision and AppKit access.
+Remove the workspace patch only after an upstream release contains this fix and
+that release passes the native Quit gate with accessibility enabled on the
+affected macOS/Touch Bar setup. The upstream integration result does not qualify
+the newly built OneCAD host's Quit path. Successful save or worker shutdown alone
+does not prove clean window teardown; final native acceptance remains pending.
 
 Conservative CPU handoff reservations cover retained current/pending/building
 scenes and preview payloads, capped at 768 MiB. Per capture, source meshes are
@@ -180,11 +293,12 @@ with application data. Chrome modules:
 - `feature_card.rs`: card for the running model tool (numeric field, Create / Apply,
   Cancel). Enter confirms and Escape cancels under the same predicates as before.
   The preview state appears in the status bar.
-- `session_strip.rs`, `constraints_menu.rs`: sketch session strip and the
-  display-only Constraints menu (all rows disabled; no constraint authoring yet).
-- `start_screen.rs`: Home screen opened from the title bar. Tiles are disabled,
-  recent cards other than the open document are static placeholders; "Back to
-  document" or Escape returns to the editor.
+- `session_strip.rs`, `constraints_menu.rs`, `constraint_authoring.rs`: sketch
+  session strip, applicability-driven constraint menu and scoped dimension editor.
+  Unsupported constraints remain disabled.
+- `start_screen.rs`: Home screen opened from the title bar, with New part and
+  Open or import actions and real QA-profile recents. Assembly creation remains
+  unavailable. "Back to document" or Escape returns to the editor.
 - `overlays.rs`, `display_menu.rs`, `bars.rs`: nav pill, view cluster, Display menu,
   title and status bars.
 - `appearance.rs`: applies View > Appearance.
@@ -192,6 +306,16 @@ with application data. Chrome modules:
 Cmd+1 toggles the Explorer and Cmd+2 the Inspector (ignored while a text field has
 focus). View > Appearance in the native menu offers Light, Dark and System; Dark is
 the default and System follows the OS theme, re-evaluated every frame.
+
+Appearance, panel visibility, Inspector tab and recent-card layout persist in
+`config/native-settings.json` inside the locked QA profile. These preferences load
+before the first presentation; System resolves against the current OS theme.
+Transient filters, menus, commands and document state are excluded. Writes run
+only after a preference changes, on one background writer using atomic durable
+replacement; shutdown drains the final change before releasing the profile lock.
+Corrupt, oversized, linked or unsupported-version settings remain untouched and
+disable preference writes for that session, with a startup warning. This format
+does not migrate production preferences or establish production data continuity.
 
 To preview components in isolation, run the widget gallery:
 

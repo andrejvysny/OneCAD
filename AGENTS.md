@@ -79,7 +79,7 @@ Bun is used only for repository tooling; no frontend application is built:
 
 ```sh
 bun install --frozen-lockfile
-bun test scripts/tests
+bun test ./scripts/tests
 bun scripts/check-rust-layers.mjs
 bun scripts/verify-modeling-coverage.mjs
 scripts/tests/verify-modeling-coverage.test.sh

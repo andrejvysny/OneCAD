@@ -55,6 +55,18 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 );
                 app.sampled = true;
             }
+            if let Some((_, error)) = &app.resize_refusal {
+                let message = format!("Viewport resize refused: {error}. Shrink the window or retry. Save remains available.");
+                ui.painter().text(rect.center(), egui::Align2::CENTER_BOTTOM, message,
+                    egui::FontId::proportional(13.0), app.theme.ink3);
+                let retry = egui::Rect::from_center_size(rect.center() + egui::vec2(0.0, 24.0), egui::vec2(120.0, 30.0));
+                if ui.put(retry, egui::Button::new("Retry viewport")).clicked() {
+                    app.resize_refusal = None;
+                    app.draw_dirty = true;
+                    ui.ctx().request_repaint();
+                }
+                return;
+            }
             let Some(view) = drawable_capture(app.view, display.scene.identity(), viewport) else {
                 return;
             };
@@ -68,7 +80,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
             let overlay_owns = crate::viewport_widgets::show(app, ui, rect, &view);
             if app.sketch_active() {
-                if !overlay_owns {
+                if !overlay_owns
+                    && ui
+                        .input(|input| input.pointer.hover_pos())
+                        .is_some_and(|position| {
+                            crate::viewport_widgets::allows_pointer(ui, rect, position)
+                        })
+                {
                     crate::sketch_ui::viewport(app, ui, rect, &response, &view);
                 }
                 return;
@@ -80,6 +98,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 && !app.busy()
                 && app.interaction.tool.is_none()
                 && let Some(position) = response.interact_pointer_pos()
+                && crate::viewport_widgets::allows_pointer(ui, rect, position)
             {
                 pick(
                     app,
@@ -149,8 +168,13 @@ fn navigate_input(
         DVec2::new(f64::from(position.x), f64::from(position.y))
     });
     // Floating chrome sits in higher layers; the camera must not react beneath it.
-    let over_chrome = cursor_over_chrome(ui);
-    let allowed = ui.input(|input| input.focused && !input.pointer.primary_down())
+    let over_chrome = ui
+        .input(|input| input.pointer.hover_pos())
+        .is_none_or(|position| {
+            !crate::viewport_widgets::allows_pointer(ui, response.rect, position)
+        });
+    let allowed = crate::viewport_widgets::gesture_allowed(ui)
+        && ui.input(|input| !input.pointer.primary_down())
         && !crate::viewport_widgets::owns_pointer(app, ui, response.rect)
         && !egui::Popup::is_any_open(ui.ctx())
         && ui.is_enabled();
@@ -183,12 +207,6 @@ fn navigate_input(
     if allowed && (response.dragged() || !over_chrome) {
         navigate_drag(app, ui, response, viewport, scene);
     }
-}
-
-fn cursor_over_chrome(ui: &egui::Ui) -> bool {
-    ui.input(|input| input.pointer.hover_pos())
-        .and_then(|position| ui.ctx().layer_id_at(position))
-        .is_some_and(|layer| layer != ui.layer_id())
 }
 
 fn navigate_drag(
@@ -247,9 +265,33 @@ fn render(
         return Ok(());
     }
     let size = physical_size(viewport);
-    if app.renderer.size() != size {
-        app.renderer.resize(size).map_err(|e| e.to_string())?;
-        replace_texture(app);
+    if app.renderer.size() != size || !app.renderer.has_targets() || app.resize_refusal.is_some() {
+        if app
+            .resize_refusal
+            .as_ref()
+            .is_some_and(|(rejected, _)| *rejected == size)
+        {
+            return Ok(());
+        }
+        let result = app.renderer.resize(size).or_else(|error| {
+            if error.recoverable_target_refusal() {
+                app.renderer.resize_reclaiming(size)
+            } else {
+                Err(error)
+            }
+        });
+        match result {
+            Ok(()) => {
+                app.resize_refusal = None;
+                replace_texture(app);
+            }
+            Err(error) if error.recoverable_target_refusal() => {
+                app.resize_refusal = Some((size, error.to_string()));
+                app.view = None;
+                return Ok(());
+            }
+            Err(error) => return Err(error.to_string()),
+        }
     }
     app.view_number += 1;
     let view = ViewSnapshot::new(
@@ -422,10 +464,13 @@ fn pick(app: &mut App, display: &crate::bridge::Display, view: &ViewSnapshot, lo
         })));
         app.status = "Profile selected".into();
         app.selected_body = None;
+        app.selected_feature = None;
         app.topology.select(None);
         app.draw_dirty = true;
         return;
     }
+    app.dispatch(Action::ClearSelection);
+    app.selected_feature = None;
     app.selected_body = body.as_ref().map(|body| body.body_id);
     app.topology.select(body.as_ref());
     app.draw_dirty = true;

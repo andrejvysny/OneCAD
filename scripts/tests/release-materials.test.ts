@@ -84,13 +84,17 @@ test('dirty snapshot includes staged, unstaged, untracked bytes and excludes del
   run(['git', '-C', options.source, 'add', 'worker/src/main.cpp']);
   save(options.source, 'worker/src/main.cpp', 'unstaged worker change\n');
   save(options.source, 'untracked source.txt', 'new untracked bytes\n');
-  rmSync(join(options.source, 'src/main.ts'));
-  save(options.source, 'src/replacement.ts', 'replacement source\n');
+  const deleted = 'crates/onecad-render/src/lib.rs';
+  expect(existsSync(join(options.source, deleted))).toBe(true);
+  rmSync(join(options.source, deleted));
+  save(options.source, 'crates/onecad-render/src/replacement.rs', 'replacement source\n');
   prepareMaterials(options);
   expect(metadata(options).source).toMatchObject({ dirty: true, exactTags: ['fixture-head'] });
   expect(readFileSync(join(options.output, 'materials/source/worker/src/main.cpp'), 'utf8')).toBe('unstaged worker change\n');
   expect(readFileSync(join(options.output, 'materials/source/untracked source.txt'), 'utf8')).toBe('new untracked bytes\n');
-  expect(existsSync(join(options.output, 'materials/source/src/main.ts'))).toBe(false);
+  expect(existsSync(join(options.output, 'materials/source', deleted))).toBe(false);
+  expect(readFileSync(join(options.output, 'materials/source/crates/onecad-render/src/replacement.rs'), 'utf8')).toBe('replacement source\n');
+  expect(readFileSync(join(options.output, 'materials/source-changes.patch'), 'utf8')).toContain(`deleted file mode 100644`);
   expect(readFileSync(join(options.output, 'materials/source-changes.patch'), 'utf8')).toContain('unstaged worker change');
 });
 

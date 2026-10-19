@@ -172,6 +172,7 @@ impl<'a> FeatureCard<'a> {
             p.galley(pos, g, t.ink5);
         }
         let x = IconButton::new("close", "Close", 24.0, 14.0)
+            .enabled(self.cancel_enabled)
             .gap_bg(t.surface)
             .tip(Some(Tip::new("Close")));
         ui.put(close, x).clicked()
@@ -184,7 +185,13 @@ impl<'a> FeatureCard<'a> {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
                     let w = (ui.available_width() - 8.0) / 2.0;
-                    out.cancel = ui.add(Button::new("Cancel").min_width(w)).clicked();
+                    out.cancel = ui
+                        .add(
+                            Button::new("Cancel")
+                                .enabled(self.cancel_enabled)
+                                .min_width(w),
+                        )
+                        .clicked();
                     let ok = Button::new(self.ok_label)
                         .kind(ButtonKind::Primary)
                         .enabled(self.ok_enabled)

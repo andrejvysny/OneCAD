@@ -393,7 +393,7 @@ Worker → Rust:
     "workerVersion": "0.1.0",
     "occt": { "version": "8.0.1", "fingerprint": "9a1c33f0e7b24d10" },
     "quantizationVersion": 1,
-    "solverPolicyVersion": 2,
+    "solverPolicyVersion": 3,
     "capabilities": [
       "op.sketch", "op.extrude", "op.revolve", "op.fillet", "op.chamfer",
       "op.boolean", "op.importStep", "solver.planegcs", "tessellate.mesh1",
@@ -552,7 +552,7 @@ failure/NeedsRepair preparing snapshot `m−1`, and ends with a terminal
   "baseCheckpoint": { "stepIndex": 2, "checkpointId": "ckpt_9" },  // optional
   "editedFrom": 4,                            // optional — step of the upstream content edit
   "checkpointFallbackReplay": true,           // optional — this replay stands in for a failed checkpoint plan
-  "policyVersions": { "quantizationVersion": 1, "solverPolicyVersion": 2,
+  "policyVersions": { "quantizationVersion": 1, "solverPolicyVersion": 3,
                       "descriptorVersion": 1, "resolverVersion": 1, "signatureVersion": 1 },
   "targetStep": 6,
   "artifacts": { "tessellate": { "lod": "coarse", "includeEdges": true } },
@@ -1291,9 +1291,13 @@ the full authoritative sketch so replay is deterministic.
     — the backend point-entity uuid of its center — alongside the inlined
     `center` coordinate. Producers of the return wire SHOULD emit it so re-entry
     hydration can re-own the center point (avoiding orphaned child Points);
-    readers MUST treat it as optional. It is informational on the *inbound*
-    solver-sync wire (the worker resolves the center from `center` coords and
-    ignores `centerRef`).
+    readers MUST treat it as optional. On inbound solver-sync wire, a present
+    `centerRef` MUST be a nonempty string referencing a `Point` entity in the
+    same sketch. It binds the curve to that Point, whose coordinates and primary
+    handle remain authoritative. Malformed, unresolved, or non-Point references
+    MUST fail translation; they MUST NOT fall back to inline coordinates.
+    Producers retain the finite inline `center` for legacy compatibility. When
+    `centerRef` is absent, the worker synthesizes the inline center as before.
 - `entities[].construction` (bool, **optional**, default `false`) — reference-only
   geometry (construction/centerline). Readers MUST default an absent field to
   `false`; producers SHOULD emit it explicitly. Construction entities are
@@ -4736,7 +4740,7 @@ Rust-readable envelope. Blobs stream on the bulk lane.
         "descriptorVersion": 1,
         "resolverVersion": 1,
         "quantizationVersion": 1,
-        "solverPolicyVersion": 2,
+        "solverPolicyVersion": 3,
         "signatureVersion": 1
       },
       "size": 91234,
@@ -5696,6 +5700,14 @@ and back Invariant 5 and checkpoint drift detection.
 ---
 
 ## 14. Changelog
+
+- **2026-10-19 — §7.3 shared curve-center identity, solver policy 3 (ONECAD-251).**
+  Circle, Arc, and Ellipse bind a present `centerRef` to its authored Point
+  instead of minting a second center. Invalid references fail closed; legacy
+  inline-only entities remain supported. Free typed circles report 3 DOF, arcs
+  5, and ellipses 5 (existing naive solver policy for ellipses). Policy 2 workers
+  are rejected by the application, and older checkpoint/cache solver axes force
+  replay. OCW1 and OCCT fingerprint axes remain unchanged.
 
 - **2026-10-05 — §7.4/§7.7/§3 sketch exact truth, solver policy 2
   (ONECAD-13/14/15; consolidated).** (1) ONECAD-13, additive: successful
@@ -7625,7 +7637,7 @@ sign-off) once fixtures exist.
     majorR, minorR, rotation?, construction? }` — center INLINE exactly like
     `Circle` (the reader mints the center `Point` and registers `<id>.center`,
     so it is draggable); `rotation` in **radians**, optional, default `0`;
-    `centerRef` extended to `Ellipse` on the return wire (informational inbound).
+    `centerRef` extended to `Ellipse` on the return wire (historically informational inbound; solver policy 3 binds Point identity).
   * **Normalization echo** (§7.3): a reader MAY enforce `majorR >= minorR` (the
     reference `Sketch::addEllipse` swaps and adds π/2 to `rotation`) and MUST
     then echo the normalized triple, so a producer never re-sends parameters the

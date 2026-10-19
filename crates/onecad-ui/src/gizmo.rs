@@ -79,26 +79,29 @@ impl Gizmo {
             Some(geometry) => geometry,
             None => return GizmoResponse::default(),
         };
-        let (pointer, events, modifiers, focused) = ui.input(|i| {
-            (
-                i.pointer.hover_pos(),
-                i.events.clone(),
-                i.modifiers,
-                i.focused,
-            )
-        });
-        if !focused || !ui.is_enabled() || egui::Popup::is_any_open(ui.ctx()) {
+        let (pointer, events, modifiers) =
+            ui.input(|i| (i.pointer.hover_pos(), i.events.clone(), i.modifiers));
+        if !crate::viewport_widgets::gesture_allowed(ui) {
             self.cancel();
             return GizmoResponse::default();
         }
         let hovered = pointer
-            .filter(|p| rect.contains(*p))
+            .filter(|p| crate::viewport_widgets::allows_pointer(ui, rect, *p))
             .and_then(|p| geometry.hit(p));
         let hot = self.state.as_ref().map(|s| s.handle).or(hovered);
         paint::draw(&ui.painter().with_clip_rect(rect), &geometry, hot, theme);
         if hot.is_some() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
         }
+        let events: Vec<_> = events
+            .into_iter()
+            .filter(|event| match event {
+                egui::Event::PointerButton {
+                    pos, pressed: true, ..
+                } => crate::viewport_widgets::allows_pointer(ui, rect, *pos),
+                _ => true,
+            })
+            .collect();
         let free = modifiers.alt || modifiers.ctrl || modifiers.command;
         self.process(
             &events,

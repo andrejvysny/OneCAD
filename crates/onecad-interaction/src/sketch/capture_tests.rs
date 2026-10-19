@@ -157,6 +157,7 @@ fn active_head_change_drops_draft_and_blocks_editing_until_fenced_refresh() {
     state.dispatch(SketchAction::Refreshed {
         tag: old.clone(),
         snapshot: SketchSnapshot {
+            history: None,
             document: next.clone(),
             sketch: Box::new(sketch.clone()),
         },
@@ -169,6 +170,7 @@ fn active_head_change_drops_draft_and_blocks_editing_until_fenced_refresh() {
     state.dispatch(SketchAction::Refreshed {
         tag: tag.clone(),
         snapshot: SketchSnapshot {
+            history: None,
             document: next,
             sketch: Box::new(sketch.clone()),
         },

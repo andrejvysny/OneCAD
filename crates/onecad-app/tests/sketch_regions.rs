@@ -805,14 +805,9 @@ async fn a_standalone_ellipse_publishes_one_region_matching_the_corpus_oracle() 
         .sketch_upsert(sid, edit_ops(&sk))
         .await
         .expect("an ellipse now survives wire translation");
-    // SCHEMA §7.4 deviation: the solver lane cannot represent an ellipse, so DOF
-    // is counted naively. 7 = the core centre Point (2, sent as its own wire
-    // `Point` entity) + the centre the worker mints from the inlined `center`
-    // (2) + the ellipse's own shape DOF (3). The double-minted centre is the
-    // EXISTING Circle/Arc behavior verbatim (`centerRef` exists precisely so the
-    // frontend can re-own the real one) — the ellipse does not introduce it.
+    // Ellipses retain naive counting: one shared center Point (2) plus shape (3).
     assert_eq!(
-        upsert.dof, 7,
+        upsert.dof, 5,
         "naive DOF for a free ellipse authored through core"
     );
 

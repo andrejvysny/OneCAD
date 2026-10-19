@@ -348,6 +348,55 @@ mod tests {
     use super::*;
     use crate::components::actions::common::headless;
     use crate::components::tooltip::Tip;
+
+    #[test]
+    fn number_error_wraps_inside_feature_card_at_both_display_scales() {
+        use crate::components::overlays::FeatureCard;
+
+        const ERROR: &str = "Distance cannot resolve because the referenced feature is unavailable. Select a valid persistent reference before applying this operation.";
+        for scale in [1.0, 2.0] {
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx, crate::theme::load(false).unwrap(), false);
+            ctx.set_pixels_per_point(scale);
+            let mut text = "0.1234".to_owned();
+            for _ in 0..4 {
+                let mut field_width = 0.0;
+                let mut frame = ctx.run_ui(egui::RawInput::default(), |ui| {
+                    FeatureCard::new("numeric-bounds", "extrude", "Extrude")
+                        .width(280.0)
+                        .show(ui, |rows| {
+                            rows.row("Extrusion distance", |ui| {
+                                field_width = ui.available_width();
+                                ui.add(
+                                    NumberField::new("distance", &mut text)
+                                        .width(field_width)
+                                        .error(Some(ERROR)),
+                                );
+                            });
+                        });
+                    assert!(ui.min_rect().width() <= 281.0, "{:?}", ui.min_rect());
+                });
+                frame.textures_delta.clear();
+                let error = frame
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::epaint::Shape::Text(text) if text.galley.job.text == ERROR => {
+                            Some(text)
+                        }
+                        _ => None,
+                    })
+                    .expect("error remains visible");
+                assert!(error.galley.rows.len() > 1);
+                assert!(
+                    error.galley.size().x <= field_width + 1.0,
+                    "scale={scale}: {} > {field_width}",
+                    error.galley.size().x
+                );
+            }
+        }
+    }
+
     #[test]
     fn every_component_renders_in_both_themes() {
         for dark in [false, true] {

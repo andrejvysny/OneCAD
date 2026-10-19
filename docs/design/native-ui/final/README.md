@@ -1,26 +1,39 @@
 # Handoff: OneCAD editor shell, selection-driven toolbar & core modeling flow
 
-Target repo: `andrejvysny/OneCAD` (branch `master`) — React 19 · Zustand · Tailwind v4 · Three.js · Tauri v2.
+Target repo: `andrejvysny/OneCAD` (branch `master`) — native Rust, egui/eframe,
+`onecad-widgets`, shared `onecad-render`, and the production OCCT/PlaneGCS worker.
 
-## Prompt for Claude Code
+## Native implementation guidance
 
-> Implement the OneCAD final design described in `design_handoff_onecad_shell/README.md` in this repo.
-> Open `OneCAD Final.dc.html` (screens) and `OneCAD Components.dc.html` (component sheet) in a browser as the visual reference; they are HTML design references, not code to copy.
-> Work in this order and stop for review after each step:
-> 1. Tokens — add any missing values from "Design tokens" to `src/styles/tokens.css` (both light and dark blocks; no raw hex in TSX — CI grep gate).
-> 2. Icons — port the colour-isometric icon set (`cad-icons.js`) into `src/icons/` as a typed renderer behind the existing `Icon` component; keep the `name` API; compact masters at ≤20px.
-> 3. Shell — floating Explorer + floating Inspector, workspace button, panel toggles (⌘1/⌘2), title bar changes.
-> 4. Selection-driven ToolPill — replace the fixed `FloatingToolbar` contents with registry-driven groups filtered by selection kind (see "ToolPill rules"). Respect ADR-0003 (host-owned slots), ADR-0010 (ToolHost owns activation, `canActivate` returns `ToolAvailability`).
-> 5. Feature card + value tag for Extrude and Fillet/Chamfer; History tab in the Inspector with rollback marker and inline value edit.
-> 6. Sketch mode: session strip, constraint list menu, selection-filtered constraints.
-> Keep existing tests green; add Vitest coverage for pill filtering and panel toggles, and Playwright specs for: select face → pill swaps; ⌘1/⌘2; extrude via card; rollback drag.
-> Read `docs/adr/0001`, `0003`, `0010`, `0012` and `src/features/shell/*` before starting. Do not touch the protocol, Rust core or worker.
+The shell and widget library are published in Git. Use the HTML screens and
+component sheet as visual references, not application code or evidence of working
+features. The former React/Zustand/Three.js/Tauri instructions are retired.
+
+- Keep presentation in `crates/onecad-widgets`; compose it with application data
+  in `crates/onecad-ui`. Use typed `onecad-interaction` actions and shared
+  `onecad-app` services for authoring. Only `onecad-app` mutates documents.
+- Native theme assets live in `assets/native`; baked SVG masters and the widget
+  texture cache implement logical-size master selection and physical rasterization.
+- `onecad-render` uses the host's shared wgpu device and queue. Mock scene scripts
+  do not replace real worker geometry, checked MESH1, or persistent references.
+- Run Rust widget/interaction/host tests and required real-worker tests. Native
+  macOS input, IME, Retina resize, rendering and shutdown need actual acceptance;
+  screenshots and backend success alone do not establish it.
+- Follow root `AGENTS.md`, the [native host guide](../../../../crates/onecad-ui/README.md)
+  and [workflow contract](../native-workflow.md). Plane owns implementation status
+  and future work. Disabled tools and illustrative workspaces in these mocks do
+  not establish working Tauri parity or authorize new feature scope.
 
 ## Overview
 OneCAD keeps one editor shell in every workspace (Design, Assembly, Simulation, Drawing, extension workspaces). The viewport is full-bleed; Explorer and Inspector float above it and can be fully hidden. There is **one toolbar pill** whose contents follow the selection: with nothing selected it shows only actions that need no selection; when something is selected it shows only the actions that apply to it, behind a removable selection label.
 
 ## About the design files
-The files in this folder are **design references created in HTML** — prototypes showing intended look and behaviour, not production code. Recreate them in the OneCAD React/Tailwind codebase using its existing patterns (`src/ui/*`, `src/features/*`, `TitleBarButton`, `Popover`, `Tooltip`, `MonoValue`, tokens). The `.dc.html` files open directly in a browser (they load `support.js`, `cad-icons.js`, `cad-scene.js` from the same folder). `cad-scene.js` draws a 2D diagram of a bracket for the mocks only — the real viewport stays Three.js.
+The files in this folder are **design references created in HTML** — prototypes
+showing intended look and behaviour, not production code. Recreate their intent
+with existing native widgets and theme tokens. The `.dc.html` files open directly
+in a browser (they load `support.js`, `cad-icons.js`, `cad-scene.js` from the same
+folder). `cad-scene.js` draws a 2D bracket diagram for the mocks only; the real
+viewport uses `onecad-render`.
 
 ## Fidelity
 **High-fidelity.** Colours, type, spacing, radii, shadows and states are final. Match them exactly using tokens.
@@ -121,7 +134,8 @@ The files in this folder are **design references created in HTML** — prototype
 - Transitions: panels slide 160 ms ease-out (translateX + opacity); pill content cross-fades 120 ms; no bounce.
 
 ## Design tokens
-All values exist or should be added in `src/styles/tokens.css` (light shown; author dark equivalents).
+Native values belong in `assets/native/tokens.css` and the widget theme tokens
+(light shown; author dark equivalents).
 - Accent `#2E6FE0`, hover `#2660C6`; selection bg `#E1EBFB`, text `#1D4FA8`, border `#CBDCF7`, soft sel `#EEF3FC`.
 - Meaning: created/preview `#F7A548` / stroke `#D97A16` / text `#B5600A` / running bg `#FDEBD6` border `#F0C79A`; sketch `#2D7FF9`; done/OK `#1F9D55` (text `#157347`); warn `#B26B10`; danger `#C23A33` (surface `#FDECEC`, border `#F4C9C9`).
 - Surfaces: floating `rgba(255,255,255,.97)`; titlebar `#F6F7F8`; statusbar `#FBFBFC`; viewport `#EEF0F3`; sketch viewport `#F4F7FC`; sketch chrome `#E9F1FD`; sketch toolbar `#F0F5FE`; well `#F0F2F5`; chip `#F4F5F7`.
