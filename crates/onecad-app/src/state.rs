@@ -151,6 +151,7 @@ pub type SharedHost = Arc<OnceLock<HostContext>>;
 
 /// Root application state handed to every command.
 pub struct AppState {
+    pub(crate) native_gestures: crate::document_runtime::native_gestures::control::Registry,
     /// The single open document (V1), or `None` when nothing is open. The regen
     /// driver and every command lock this one runtime (single writer).
     pub runtime: Arc<Mutex<Option<DocumentRuntime>>>,
@@ -290,6 +291,7 @@ impl AppState {
             displaced: StdMutex::new(None),
             backend_swap: StdMutex::new(Arc::new(())),
             runtime: Arc::new(Mutex::new(None)),
+            native_gestures: Arc::new(StdMutex::new(None)),
             restart_owner: Arc::new(StdMutex::new(None)),
             persistence: Arc::new(Mutex::new(())),
             scheduler: Arc::new(OnceLock::new()),
@@ -739,6 +741,7 @@ impl Default for AppState {
             restart_owner,
             persistence: Arc::new(Mutex::new(())),
             scheduler,
+            native_gestures: Arc::new(StdMutex::new(None)),
             host: app,
             autosave_tick: Arc::new(watch::channel(0u64).0),
             pending_recovery: StdMutex::new(BTreeMap::new()),

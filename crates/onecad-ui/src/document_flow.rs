@@ -21,6 +21,18 @@ pub enum Request {
 }
 
 impl Request {
+    fn diagnostic_action(&self) -> crate::diagnostics::FileAction {
+        use crate::diagnostics::FileAction;
+        match self {
+            Self::New => FileAction::New,
+            Self::Open(_) => FileAction::Open,
+            Self::Import => FileAction::Import,
+            Self::Save { .. } => FileAction::Save,
+            Self::Export(_) => FileAction::Export,
+            Self::DiscardAndReplace(request) => request.diagnostic_action(),
+        }
+    }
+
     pub fn replaces_document(&self) -> bool {
         match self {
             Self::DiscardAndReplace(request) => request.replaces_document(),
@@ -46,6 +58,8 @@ pub enum Pending {
 #[derive(Default)]
 pub struct Flow {
     pub running: bool,
+    pub(crate) recovery_sketch_save: bool,
+    pub(crate) diagnostic_action: Option<crate::diagnostics::FileAction>,
     pub confirm: Option<Pending>,
     pub after_save: Option<Pending>,
 }
@@ -61,14 +75,22 @@ impl Flow {
                 action,
                 SketchAction::Begin { .. }
                     | SketchAction::SetTool(_)
+                    | SketchAction::SetConstructionMode { .. }
                     | SketchAction::Move(_)
                     | SketchAction::Click { .. }
+                    | SketchAction::ClickInferred { .. }
+                    | SketchAction::CreateNumeric { .. }
+                    | SketchAction::PreviewNumeric { .. }
+                    | SketchAction::BeginPointNumeric { .. }
                     | SketchAction::Escape
                     | SketchAction::Enter
                     | SketchAction::Finish
                     | SketchAction::Discard
                     | SketchAction::Select { .. }
                     | SketchAction::AddConstraints { .. }
+                    | SketchAction::SetDimension { .. }
+                    | SketchAction::Repair { .. }
+                    | SketchAction::ReenterForRepair { .. }
                     | SketchAction::History(_)
             )
     }
@@ -102,20 +124,26 @@ impl Flow {
 impl crate::app::App {
     pub fn document_request(&mut self, request: Request) {
         self.sync_document_state();
+        let action = request.diagnostic_action();
         if self.busy() || self.stopping {
-            self.file_status("Wait for the current command before using file actions");
+            self.file_status(
+                action,
+                "Wait for the current command before using file actions",
+            );
             return;
         }
-        if self.sketch_active() || (request.replaces_document() && self.interaction.tool.is_some())
-        {
-            self.file_status("Finish or cancel the active tool before switching documents");
+        if tool_blocks_request(self, &request) {
+            self.file_status(
+                action,
+                "Finish or cancel the active tool before switching documents",
+            );
             return;
         }
         let recovery_ready = self.bridge.shared.recovery.lock().is_ok_and(|recovery| {
             recovery.opened || (recovery.checked && recovery.offers.is_empty())
         });
         if !recovery_ready {
-            self.file_status("Resolve startup recovery before using file actions");
+            self.file_status(action, "Resolve startup recovery before using file actions");
             return;
         }
         let pending = Pending::Document(request);
@@ -126,9 +154,14 @@ impl crate::app::App {
         }
     }
 
-    fn file_status(&mut self, message: &str) {
+    fn file_status(&mut self, action: crate::diagnostics::FileAction, message: &str) {
         self.command_status = true;
         self.status = message.into();
+        self.diagnostics.record(
+            crate::diagnostics::Source::File(action),
+            crate::diagnostics::State::Rejected,
+            message,
+        );
     }
 
     fn launch_document(&mut self, pending: Pending) {
@@ -136,9 +169,17 @@ impl crate::app::App {
             self.stop();
             return;
         };
+        self.documents.recovery_sketch_save =
+            matches!(request, Request::Save { .. }) && crate::bars::recovery_sketch_save(self);
         self.documents.running = true;
+        self.documents.diagnostic_action = Some(request.diagnostic_action());
         self.command_status = true;
         self.status = "File action pending…".into();
+        self.diagnostics.record(
+            crate::diagnostics::Source::File(request.diagnostic_action()),
+            crate::diagnostics::State::Pending,
+            &self.status,
+        );
         if let Err(error) = self
             .bridge
             .submit(crate::bridge::Command::Document(request))
@@ -146,12 +187,28 @@ impl crate::app::App {
             self.documents.running = false;
             self.documents.after_save = None;
             self.status = error;
+            if let Some(action) = self.documents.diagnostic_action.take() {
+                self.diagnostics.record(
+                    crate::diagnostics::Source::File(action),
+                    crate::diagnostics::State::Failed,
+                    &self.status,
+                );
+            }
         }
     }
 
     pub(crate) fn document_finished(&mut self, result: Result<Outcome, String>) {
+        let recovery_save = std::mem::take(&mut self.documents.recovery_sketch_save);
         tracing::info!(?result, "native file delivery");
         self.command_status = true;
+        let action = self.documents.diagnostic_action.take();
+        let diagnostic_state = match &result {
+            Err(_) => crate::diagnostics::State::Failed,
+            Ok(Outcome::Cancelled) => crate::diagnostics::State::Cancelled,
+            Ok(Outcome::Replaced { warning: Some(_) }) => crate::diagnostics::State::Warning,
+            Ok(Outcome::Saved(saved)) if !saved.clean => crate::diagnostics::State::Warning,
+            _ => crate::diagnostics::State::Succeeded,
+        };
         let next = self.documents.complete(&result);
         match result {
             Ok(Outcome::Cancelled) => self.status = "File action cancelled".into(),
@@ -163,16 +220,30 @@ impl crate::app::App {
             Ok(Outcome::Saved(saved)) => {
                 if saved.clean {
                     self.authoring_dirty = false;
-                    self.status = format!("Saved {}", saved.title);
-                    if let Some(next) = next {
-                        self.launch_document(next);
-                    }
+                    self.status = if recovery_save {
+                        format!(
+                            "Saved accepted sketch recovery for {}. Finish the sketch to regenerate its features.",
+                            saved.title
+                        )
+                    } else {
+                        format!("Saved {}", saved.title)
+                    };
                 } else {
                     self.status = format!("Saved {} — newer changes remain unsaved", saved.title);
                 }
             }
             Ok(Outcome::Exported(path)) => self.status = format!("Exported {}", path.display()),
             Err(error) => self.status = error,
+        }
+        if let Some(action) = action {
+            self.diagnostics.record(
+                crate::diagnostics::Source::File(action),
+                diagnostic_state,
+                &self.status,
+            );
+        }
+        if let Some(next) = next {
+            self.launch_document(next);
         }
     }
 }
@@ -183,6 +254,13 @@ pub(crate) fn needs_confirmation(pending: &Pending, dirty: bool) -> bool {
             Pending::Quit => true,
             Pending::Document(request) => request.replaces_document(),
         }
+}
+
+pub(crate) fn tool_blocks_request(app: &crate::app::App, request: &Request) -> bool {
+    let recovery_save =
+        matches!(request, Request::Save { .. }) && crate::bars::recovery_sketch_save(app);
+    app.sketch_active() && !recovery_save
+        || request.replaces_document() && app.interaction.tool.is_some()
 }
 
 /// Runs without presentation so hidden windows still drain work and protect dirty close.

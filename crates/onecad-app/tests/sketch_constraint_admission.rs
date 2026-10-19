@@ -15,6 +15,11 @@ use onecad_core::{
 };
 use uuid::Uuid;
 
+#[path = "sketch_constraint_admission/primitive.rs"]
+mod primitive;
+#[path = "sketch_constraint_admission/repair.rs"]
+mod repair;
+
 fn entity(id: u128) -> EntityId {
     EntityId(Uuid::from_u128(id))
 }
@@ -240,5 +245,150 @@ async fn generic_upsert_still_retains_explicit_conflicting_edits() {
         4
     );
     assert_eq!(runtime.undo_depth(), depth + 1);
+    worker.shutdown().await;
+}
+
+#[tokio::test]
+async fn edited_dimension_keeps_identity_expression_binding_and_solved_geometry() {
+    use onecad_core::{
+        document::variables::{Unit, Variable},
+        ids::VariableId,
+    };
+    let Some((worker, mut runtime, sid)) = setup(true).await else {
+        return;
+    };
+    runtime
+        .apply(EditCommand::AddVariable {
+            variable: Variable {
+                id: VariableId::new(),
+                name: "width".into(),
+                value: Scalar::new(15.0),
+                unit: Unit::Mm,
+            },
+        })
+        .unwrap();
+    let original = runtime.sketch_snapshot(sid, "test").unwrap();
+    for (value, expected) in [
+        (
+            Scalar::with_expr(999.0, "width * 2"),
+            Scalar::with_expr(30.0, "width * 2"),
+        ),
+        (Scalar::new(22.0), Scalar::new(22.0)),
+        (
+            Scalar::with_expr(0.0, "width + 5mm"),
+            Scalar::with_expr(20.0, "width + 5mm"),
+        ),
+    ] {
+        let depth = runtime.undo_depth();
+        let (admission, outcome) = runtime
+            .set_sketch_dimension_with_outcome(sid, constraint(3), value)
+            .await
+            .unwrap();
+        assert!(admission.accepted && outcome.is_some());
+        assert_eq!(admission.solve.status, SketchSolveStatus::FullyConstrained);
+        assert_eq!(runtime.undo_depth(), depth + 1);
+        let after = runtime.sketch_snapshot(sid, "test").unwrap();
+        let mut intended = distance(3, expected.value);
+        if let Constraint::Distance { value, .. } = &mut intended {
+            *value = expected.clone();
+        }
+        assert_eq!(after.get_constraint(constraint(3)), Some(&intended));
+        assert_eq!(
+            after
+                .constraints()
+                .iter()
+                .map(Constraint::id)
+                .collect::<Vec<_>>(),
+            original
+                .constraints()
+                .iter()
+                .map(Constraint::id)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            matches!(after.get_entity(entity(2)), Some(SketchEntity::Point {at,..}) if (at.x-expected.value).abs()<1e-8 && at.y.abs()<1e-8)
+        );
+    }
+    let before = runtime.sketch_snapshot(sid, "test").unwrap();
+    let state = (
+        runtime.undo_depth(),
+        runtime.redo_depth(),
+        runtime.revision(),
+    );
+    let (_, outcome) = runtime
+        .set_sketch_dimension_with_outcome(
+            sid,
+            constraint(3),
+            Scalar::with_expr(0.0, "width + 5mm"),
+        )
+        .await
+        .unwrap();
+    assert!(outcome.is_none());
+    assert_eq!(runtime.sketch_snapshot(sid, "test").unwrap(), before);
+    assert_eq!(
+        (
+            runtime.undo_depth(),
+            runtime.redo_depth(),
+            runtime.revision()
+        ),
+        state
+    );
+    worker.shutdown().await;
+}
+
+#[tokio::test]
+async fn impossible_triangle_dimension_edit_preserves_clean_document_and_solver_cache() {
+    let Some((worker, mut runtime, sid)) = setup(true).await else {
+        return;
+    };
+    runtime
+        .sketch_upsert(
+            sid,
+            vec![SketchEditOp::AddEntity {
+                entity: SketchEntity::point(entity(4), Vec2::new(5.0, 6.0).unwrap(), false, false),
+            }],
+        )
+        .await
+        .unwrap();
+    let sides = [(4, 1), (5, 2)]
+        .into_iter()
+        .map(|(id, endpoint)| Constraint::Distance {
+            id: constraint(id),
+            entity1: entity(endpoint),
+            entity1_position: CurvePosition::Arbitrary,
+            entity2: entity(4),
+            entity2_position: CurvePosition::Arbitrary,
+            value: Scalar::new(61_f64.sqrt()),
+        })
+        .collect();
+    let (accepted, _) = runtime
+        .add_sketch_constraints_with_outcome(sid, sides)
+        .await
+        .unwrap();
+    assert!(accepted.accepted);
+    assert_eq!(accepted.solve.status, SketchSolveStatus::FullyConstrained);
+    let directory = tempfile::tempdir().unwrap();
+    assert!(runtime.mark_saved(
+        &directory.path().join("triangle.onecad"),
+        runtime.revision()
+    ));
+    let before = runtime.sketch_snapshot(sid, "test").unwrap();
+    let projection = runtime.projection();
+    let cached = serde_json::to_value(runtime.get_sketch(sid).unwrap()).unwrap();
+    let history = (runtime.undo_depth(), runtime.redo_depth());
+    let (admission, outcome) = runtime
+        .set_sketch_dimension_with_outcome(sid, constraint(3), Scalar::new(30.0))
+        .await
+        .unwrap();
+    assert!(!admission.accepted && outcome.is_none());
+    assert_eq!(admission.solve.status, SketchSolveStatus::Conflicting);
+    assert_eq!(runtime.sketch_snapshot(sid, "test").unwrap(), before);
+    assert_eq!(runtime.projection(), projection);
+    assert_eq!(
+        serde_json::to_value(runtime.get_sketch(sid).unwrap()).unwrap(),
+        cached
+    );
+    assert_eq!((runtime.undo_depth(), runtime.redo_depth()), history);
+    assert!(!runtime.is_dirty());
     worker.shutdown().await;
 }

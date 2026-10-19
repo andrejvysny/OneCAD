@@ -51,6 +51,10 @@ enum Reply {
     ConstraintRefused(String),
     History(onecad_app::dto::SketchHistoryDto),
     Finished(Box<onecad_app::dto::FinishSketchDto>),
+    FinishRefused {
+        message: String,
+        diagnostics: Vec<onecad_core::regen::Diagnostic>,
+    },
     Discarded(onecad_app::dto::CancelSketchDto),
 }
 
@@ -182,16 +186,14 @@ async fn execute_effect(
             Ok(Reply::Entered(Box::new(solve), true))
         }
         SketchEffect::Upsert { ops, .. } => {
-            let receipt = api::sketch_upsert_with_completion(&backend.state, host, id, ops)
-                .await
-                .map_err(|e| e.to_string())?;
-            if receipt.result.is_ok() {
-                actions.push(SketchAction::BatchAccepted { tag });
-            }
-            complete(backend, receipt)
-                .await
-                .map(Box::new)
-                .map(Reply::Solved)
+            let receipt =
+                match api::author_sketch_primitive_with_completion(&backend.state, host, id, ops)
+                    .await
+                {
+                    Ok(receipt) => receipt,
+                    Err(error) => return candidate_refusal(error),
+                };
+            admission_reply(backend, receipt, tag, actions).await
         }
         SketchEffect::History {
             edit_session,
@@ -212,26 +214,43 @@ async fn execute_effect(
             complete(backend, receipt).await.map(Reply::History)
         }
         SketchEffect::AddConstraints { constraints, .. } => {
-            let receipt =
-                api::add_sketch_constraints_with_completion(&backend.state, host, id, constraints)
-                    .await
-                    .map_err(|error| error.to_string())?;
-            if receipt
-                .result
-                .as_ref()
-                .is_ok_and(|admission| admission.accepted)
+            let receipt = match api::add_sketch_constraints_with_completion(
+                &backend.state,
+                host,
+                id,
+                constraints,
+            )
+            .await
             {
-                actions.push(SketchAction::BatchAccepted { tag });
-            }
-            let admission = complete(backend, receipt).await?;
-            if admission.accepted {
-                Ok(Reply::Solved(Box::new(admission.solve)))
-            } else {
-                Ok(Reply::ConstraintRefused(format!(
-                    "Constraint refused: {:?}",
-                    admission.solve.status
-                )))
-            }
+                Ok(receipt) => receipt,
+                Err(error) => return candidate_refusal(error),
+            };
+            admission_reply(backend, receipt, tag, actions).await
+        }
+        SketchEffect::SetDimension {
+            constraint, value, ..
+        } => {
+            let receipt = match api::set_sketch_dimension_with_completion(
+                &backend.state,
+                host,
+                id,
+                constraint,
+                value,
+            )
+            .await
+            {
+                Ok(receipt) => receipt,
+                Err(error) => return candidate_refusal(error),
+            };
+            admission_reply(backend, receipt, tag, actions).await
+        }
+        SketchEffect::Repair { ops, .. } => {
+            let receipt =
+                match api::repair_sketch_with_completion(&backend.state, host, id, ops).await {
+                    Ok(receipt) => receipt,
+                    Err(error) => return candidate_refusal(error),
+                };
+            admission_reply(backend, receipt, tag, actions).await
         }
         SketchEffect::FinishSketch { .. } => finish(backend, id).await,
         SketchEffect::DiscardSketch { .. } => {
@@ -240,6 +259,39 @@ async fn execute_effect(
                 .map_err(|e| e.to_string())?;
             complete(backend, receipt).await.map(Reply::Discarded)
         }
+    }
+}
+fn candidate_refusal(error: onecad_app::error::ApiError) -> Result<Reply, String> {
+    match error {
+        onecad_app::error::ApiError::InvalidCommand(_)
+        | onecad_app::error::ApiError::OpFailed { .. } => {
+            Ok(Reply::ConstraintRefused(error.to_string()))
+        }
+        _ => Err(error.to_string()),
+    }
+}
+
+async fn admission_reply(
+    backend: &mut Backend,
+    receipt: api::CommandCompletion<onecad_app::dto::SketchConstraintAdmission>,
+    tag: SketchTag,
+    actions: &mut Vec<SketchAction>,
+) -> Result<Reply, String> {
+    if receipt
+        .result
+        .as_ref()
+        .is_ok_and(|admission| admission.accepted)
+    {
+        actions.push(SketchAction::BatchAccepted { tag });
+    }
+    let admission = complete(backend, receipt).await?;
+    if admission.accepted {
+        Ok(Reply::Solved(Box::new(admission.solve)))
+    } else {
+        Ok(Reply::ConstraintRefused(format!(
+            "Constraint refused: {:?}",
+            admission.solve.status
+        )))
     }
 }
 async fn finish(backend: &mut Backend, id: String) -> Result<Reply, String> {
@@ -259,14 +311,37 @@ async fn finish(backend: &mut Backend, id: String) -> Result<Reply, String> {
         session: before.runtime_session,
         revision: before.revision + 1,
     });
-    let receipt = api::finish_sketch_with_completion(&backend.state, backend.host.clone(), id)
-        .await
-        .map_err(|e| e.to_string())?;
-    complete(backend, receipt)
-        .await
-        .map(Box::new)
-        .map(Reply::Finished)
+    let receipt =
+        match api::finish_sketch_with_completion(&backend.state, backend.host.clone(), id).await {
+            Ok(receipt) => receipt,
+            Err(error) => return finish_error(error),
+        };
+    let diagnostics = match &receipt.result {
+        Err(onecad_app::error::ApiError::OpFailed { diagnostics, .. }) => diagnostics.clone(),
+        _ => Vec::new(),
+    };
+    match complete(backend, receipt).await {
+        Ok(result) => Ok(Reply::Finished(Box::new(result))),
+        Err(message) if !diagnostics.is_empty() => Ok(Reply::FinishRefused {
+            message,
+            diagnostics,
+        }),
+        Err(message) => Err(message),
+    }
 }
+fn finish_error(error: onecad_app::error::ApiError) -> Result<Reply, String> {
+    match error {
+        onecad_app::error::ApiError::OpFailed {
+            diagnostics,
+            message,
+        } => Ok(Reply::FinishRefused {
+            message: format!("operation failed: {message}"),
+            diagnostics,
+        }),
+        error => Err(error.to_string()),
+    }
+}
+
 async fn complete<T: serde::Serialize>(
     backend: &mut Backend,
     receipt: api::CommandCompletion<T>,
@@ -361,6 +436,14 @@ async fn feedback(
             }
         }
         Reply::Finished(result) => SketchAction::Finished { tag, result },
+        Reply::FinishRefused {
+            message,
+            diagnostics,
+        } => SketchAction::FinishRefused {
+            tag,
+            message,
+            diagnostics,
+        },
         Reply::Discarded(result) => SketchAction::Discarded { tag, result },
         Reply::Begin(_) | Reply::ConstraintRefused(_) => {
             return Err("unexpected sketch load reply".into());
@@ -375,6 +458,8 @@ pub fn effect_tag(effect: &SketchEffect) -> &SketchTag {
         | SketchEffect::RefreshSketch { tag }
         | SketchEffect::Upsert { tag, .. }
         | SketchEffect::AddConstraints { tag, .. }
+        | SketchEffect::SetDimension { tag, .. }
+        | SketchEffect::Repair { tag, .. }
         | SketchEffect::History { tag, .. }
         | SketchEffect::FinishSketch { tag, .. }
         | SketchEffect::DiscardSketch { tag } => tag,

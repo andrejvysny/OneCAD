@@ -733,6 +733,7 @@ pub struct DocumentRuntime {
     sketch_upsert_revisions: BTreeMap<SketchId, (WorkerEpoch, u64)>,
     /// The active drag gesture, if the pointer is down mid-drag.
     active_gesture: Option<ActiveGesture>,
+    pub(crate) native_gesture: Option<native_gestures::NativeGestureOwner>,
     /// Per-sketch solver-lane claims (SP-0 D3) — the RAII fence between a drag
     /// gesture and a region query on the SAME sketch. See [`solver_lane`].
     solver_lane: Arc<SolverLaneClaims>,
@@ -1017,6 +1018,7 @@ impl DocumentRuntime {
             sketch_solve: BTreeMap::new(),
             sketch_upsert_revisions: BTreeMap::new(),
             active_gesture: None,
+            native_gesture: None,
             solver_lane: SolverLaneClaims::new(),
             sketch_session: None,
             gesture_seq: 0,
@@ -1287,7 +1289,7 @@ impl DocumentRuntime {
         if self.read_only {
             return Err(DomainError::ReadOnly);
         }
-        if self.active_gesture.is_some() {
+        if self.active_gesture.is_some() || self.native_gesture.is_some() {
             return Err(DomainError::Validation(
                 "cannot commit a feature during a sketch drag".into(),
             ));
@@ -1588,6 +1590,10 @@ impl DocumentRuntime {
     /// here without over-reaching into the edit layer. A gesture is a momentary
     /// pointer-down state; refusing for its duration costs nothing.
     fn revert_blocked_by_gesture(&self, what: &str) -> bool {
+        if self.native_gesture.is_some() {
+            tracing::warn!("{what}: refused while a native gesture owns the document");
+            return true;
+        }
         let Some(g) = self.active_gesture.as_ref() else {
             return false;
         };
@@ -5603,6 +5609,10 @@ impl DocumentRuntime {
         self.active_gesture
             .as_ref()
             .is_some_and(|g| g.sketch_id == sketch)
+            || self
+                .native_gesture
+                .as_ref()
+                .is_some_and(|g| g.sketch == sketch)
     }
 
     fn sketch_or_err(&self, id: SketchId, verb: &str) -> Result<Sketch, EngineError> {
@@ -6914,6 +6924,7 @@ fn element_ref_input(op: &Operation, index: usize) -> Option<&ElementRef> {
 }
 
 mod gestures;
+pub(crate) mod native_gestures;
 mod ordinal_tripwire;
 mod sketch_adoption;
 mod sketch_constraints;

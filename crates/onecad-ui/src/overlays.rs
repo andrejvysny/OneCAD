@@ -68,9 +68,9 @@ pub fn view_cluster(app: &mut App, ctx: &Context, chrome: &Chrome) {
         },
         SquareButton {
             icon: "snap",
-            on: false,
-            enabled: false,
-            tip: off("Snap"),
+            on: app.ui.sketch_snap,
+            enabled: crate::sketch_ui::tools_enabled(app),
+            tip: tip("Snap"),
         },
     ];
     let pos = chrome.view_controls.min;
@@ -84,6 +84,9 @@ pub fn view_cluster(app: &mut App, ctx: &Context, chrome: &Chrome) {
     if clicked == Some(0) {
         let anchor = Rect::from_min_size(pos, vec2(SQUARE, SQUARE));
         display_menu::toggle(app, anchor);
+    }
+    if clicked == Some(2) {
+        app.ui.sketch_snap = !app.ui.sketch_snap;
     }
     display_menu::popup_at(app, ctx);
 }

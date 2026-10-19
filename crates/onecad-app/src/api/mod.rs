@@ -7,10 +7,18 @@ mod document_state;
 mod import_readiness;
 mod replacement;
 mod sketch_constraints;
+mod sketch_gestures;
+pub use sketch_gestures::{
+    begin_native_gesture, cancel_native_gesture, end_native_gesture_with_completion,
+    ready_native_gesture, update_native_gesture, NativeGestureHandle,
+};
 mod sketch_history;
 pub use document_state::get_document_state;
 pub use replacement::{discard_replaced_document, prepare_replacement_discard, ReplacementDiscard};
-pub use sketch_constraints::add_sketch_constraints_with_completion;
+pub use sketch_constraints::{
+    add_sketch_constraints_with_completion, author_sketch_primitive_with_completion,
+    repair_sketch_with_completion, set_sketch_dimension_with_completion,
+};
 pub use sketch_history::sketch_history_with_completion;
 
 pub use crate::read::{

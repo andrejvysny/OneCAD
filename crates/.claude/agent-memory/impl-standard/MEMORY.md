@@ -1,0 +1,3 @@
+- onecad-widgets clippy: builder named `sub` needs `#[allow(clippy::should_implement_trait)]`; egui 0.37: use `Id::unique(src)`, `ui.scope_id()` (Id::new/ui.id deprecated).
+- onecad-ui facade pages take `&mut UiState` (not `&mut App`) so headless render tests can run without wgpu; `App::new` needs GPU.
+- macOS sed needs `-i ''`; prefer python for multi-line edits. `rustfmt --edition 2024 <mod root>` also formats its child modules.

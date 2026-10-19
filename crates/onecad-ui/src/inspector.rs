@@ -41,12 +41,56 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
                     ui.add_space(10.0);
                     match app.ui.inspector_tab {
                         InspectorTab::Properties => {
-                            crate::inspector_props::properties(app, ui, chrome.inspector)
+                            sketch_options(app, ui);
+                            crate::inspector_props::properties(app, ui, chrome.inspector);
+                            crate::constraint_authoring::dimension_list(app, ui);
+                            crate::profile_diagnostics::show(app, ui);
                         }
                         InspectorTab::History => crate::inspector_history::history(app, ui),
                     }
                 });
         });
+}
+
+fn sketch_options(app: &mut App, ui: &mut Ui) {
+    if !app.sketch_active() {
+        return;
+    }
+    crate::sketch_methods::show(app, ui);
+    construction_mode(app, ui);
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut app.ui.sketch_snap, "Snap");
+        ui.add_enabled_ui(app.ui.sketch_snap, |ui| {
+            ui.checkbox(&mut app.ui.sketch_grid_snap, "1 mm grid snap");
+        });
+    });
+    let numeric = crate::sketch_numeric::availability(app);
+    if ui
+        .add_enabled(numeric.is_ok(), egui::Button::new("Numeric input · Tab"))
+        .on_disabled_hover_text(numeric.err().unwrap_or_default())
+        .clicked()
+    {
+        crate::sketch_numeric::open(app, ui.ctx());
+    }
+}
+
+fn construction_mode(app: &mut App, ui: &mut Ui) {
+    let Some(session) = app.sketch.session.as_ref() else {
+        return;
+    };
+    let key = session.key.clone();
+    let mut construction = session.construction;
+    if ui
+        .add_enabled(
+            crate::sketch_ui::tools_enabled(app),
+            egui::Checkbox::new(&mut construction, "Construction geometry"),
+        )
+        .changed()
+    {
+        app.sketch_dispatch(
+            onecad_interaction::sketch::SketchAction::SetConstructionMode { key, construction },
+        );
+    }
 }
 
 fn header(app: &mut App, ui: &mut Ui) {

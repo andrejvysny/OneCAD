@@ -43,7 +43,7 @@ pub fn dialog(app: &mut App, ctx: &Context) {
             ui.set_width(WIDTH);
             contents(app, ui)
         });
-    if modal.inner || modal.should_close() {
+    if modal.inner || modal.backdrop_response.clicked() {
         app.ui.shell_facade.customize_open = false;
     }
 }

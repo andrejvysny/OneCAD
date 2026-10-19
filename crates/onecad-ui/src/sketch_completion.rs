@@ -36,7 +36,7 @@ fn suffix(original: Option<&str>) -> String {
 fn bounded(text: &str) -> String {
     text.chars().take(2048).collect()
 }
-fn completion_error(completion: &RegenFinished) -> Option<String> {
+pub(crate) fn completion_error(completion: &RegenFinished) -> Option<String> {
     let mut errors = Vec::new();
     if !matches!(completion.outcome.as_str(), "published" | "noop") {
         errors.push(format!(

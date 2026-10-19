@@ -15,6 +15,7 @@
 //! gated by the `sketch_freeze` snapshots (like `schema_freeze`).
 
 pub mod constraint;
+mod endpoint_tangency;
 pub mod entity;
 pub mod plane;
 pub mod projection;
@@ -257,6 +258,14 @@ pub enum SketchError {
         constraint: ConstraintId,
         /// The missing referenced entity.
         missing: EntityId,
+    },
+    /// Endpoint tangency requires legal owners, roles and a structural weld.
+    #[error("constraint {constraint}: {reason}")]
+    InvalidEndpointTangency {
+        /// The rejected constraint.
+        constraint: ConstraintId,
+        /// Stable validation reason.
+        reason: &'static str,
     },
     /// A geometry-mutating edit named locked host-face reference geometry.
     ///
@@ -549,6 +558,7 @@ impl Sketch {
                 });
             }
         }
+        self.validate_endpoint_tangency(&constraint)?;
         let index = self.constraints.len();
         self.constraints.push(constraint);
         self.constraint_index.insert(id, index);

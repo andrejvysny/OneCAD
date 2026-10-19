@@ -37,7 +37,7 @@ pub fn popover(app: &mut App, ctx: &Context, chrome: &Chrome) {
                 .interact_pos()
                 .is_some_and(|p| !area.response.rect.contains(p) && !pill.contains(p))
     });
-    if outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+    if outside {
         app.ui.shell_facade.layers_open = false;
     }
 }

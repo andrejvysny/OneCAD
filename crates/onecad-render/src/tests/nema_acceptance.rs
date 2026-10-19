@@ -72,7 +72,9 @@ fn headless_quality_nema_admission_capture() {
                     })
                     .unwrap();
                 let started = std::time::Instant::now();
-                let name = format!("NEMA-{projection:?}-{theme:?}-{display_mode:?}");
+                let configuration =
+                    capture_artifacts::configuration_name(projection, theme, display_mode);
+                let name = format!("nema-{configuration}");
                 let first = render(&mut renderer, &device, &queue, &view, style, &name);
                 let frame_time = measured_frame(&mut renderer, &device, &queue, &view, style);
                 let second = render(&mut renderer, &device, &queue, &view, style, &name);

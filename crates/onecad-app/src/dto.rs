@@ -3604,3 +3604,45 @@ mod tests {
         assert!(v.get("has_normal").is_none());
     }
 }
+
+/// Host capture identity is opaque to application authority; hosts fence its full source tuple.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NativeGestureSource {
+    pub capture: u64,
+    pub generation: u64,
+}
+
+/// Expected native document and edit visit, captured before gesture admission.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NativeGestureScope {
+    pub document_id: onecad_core::ids::DocumentId,
+    pub runtime_session: String,
+    pub sketch_id: onecad_core::ids::SketchId,
+    pub edit_visit: uuid::Uuid,
+    pub document_revision: onecad_core::ids::DocumentRevision,
+    pub worker_epoch: onecad_core::ids::WorkerEpoch,
+    pub snapshot: Option<onecad_core::ids::SnapshotId>,
+    pub source: NativeGestureSource,
+    pub expected_base_hash: onecad_core::regen::HistoryPrefixHash,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct NativeGestureReceipt<T> {
+    pub scope: NativeGestureScope,
+    pub gesture_id: u64,
+    pub value: T,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct NativeGestureEnd {
+    pub solve: SketchUpsertDto,
+    pub moved: bool,
+    pub cleanup_error: Option<String>,
+}
+
+/// Fully checked detached geometry, suitable for painting without reapplying raw deltas.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct NativeGesturePreview<T> {
+    pub solve: T,
+    pub sketch: onecad_core::sketch::Sketch,
+}

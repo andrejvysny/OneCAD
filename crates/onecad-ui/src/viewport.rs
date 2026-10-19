@@ -68,19 +68,30 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 return;
             }
             let Some(view) = drawable_capture(app.view, display.scene.identity(), viewport) else {
+                app.cancel_sketch_gesture();
                 return;
             };
+            app.sync_sketch_gesture();
             crate::viewport_selection::hover(app, ui, rect, &view, &display);
             if app.sketch_active() {
                 if let Some(session) = app.sketch.session.as_ref() {
-                    crate::sketch_view::paint(ui.painter(), rect, &view, session, &app.theme);
+                    crate::sketch_view::paint(ui.painter(), rect, &view, session, app.sketch_gesture.preview(), &app.theme);
                 }
             } else {
                 paint_profiles(app, ui, rect, &view, &display);
             }
+            if crate::input::overlay_owns_keyboard(app, ui.ctx()) {
+                app.cancel_sketch_gesture();
+                return;
+            }
             let overlay_owns = crate::viewport_widgets::show(app, ui, rect, &view);
             if app.sketch_active() {
-                if !overlay_owns
+                let dimension_owns = !app.sketch_gesture.busy() && crate::sketch_dimensions::show(app, ui, rect, &view);
+                if app.sketch_gesture.busy() {
+                    crate::sketch_gestures::viewport(app, ui, rect, &response, &view);
+                    return;
+                }
+                if !overlay_owns && !dimension_owns
                     && ui
                         .input(|input| input.pointer.hover_pos())
                         .is_some_and(|position| {
@@ -173,7 +184,9 @@ fn navigate_input(
         .is_none_or(|position| {
             !crate::viewport_widgets::allows_pointer(ui, response.rect, position)
         });
-    let allowed = crate::viewport_widgets::gesture_allowed(ui)
+    let allowed = !crate::input::overlay_owns_keyboard(app, ui.ctx())
+        && !crate::sketch_dimensions::owns_pointer(app, ui)
+        && crate::viewport_widgets::gesture_allowed(ui)
         && ui.input(|input| !input.pointer.primary_down())
         && !crate::viewport_widgets::owns_pointer(app, ui, response.rect)
         && !egui::Popup::is_any_open(ui.ctx())
@@ -293,14 +306,22 @@ fn render(
             Err(error) => return Err(error.to_string()),
         }
     }
-    app.view_number += 1;
-    let view = ViewSnapshot::new(
-        display.scene.identity(),
-        app.view_number,
-        app.camera,
-        viewport,
-    )
-    .map_err(|e| e.to_string())?;
+    let presentation = crate::viewport_capture::Presentation {
+        options: *app.renderer.options(),
+        dark: app.dark,
+        preview: app.renderer.preview_identity(),
+    };
+    let view = crate::viewport_capture::next(
+        app.view,
+        app.view_presentation,
+        crate::viewport_capture::Request {
+            scene: display.scene.identity(),
+            camera: app.camera,
+            viewport,
+            presentation,
+        },
+        &mut app.view_number,
+    )?;
     for body in display.scene.bodies() {
         app.renderer.set_body_style(
             body.body_id(),
@@ -345,6 +366,7 @@ fn render(
         ));
     }
     app.view = Some(view);
+    app.view_presentation = Some(presentation);
     if let Ok(mut budget) = app.bridge.shared.budget.lock() {
         *budget = app.renderer.preparation_budget();
     }

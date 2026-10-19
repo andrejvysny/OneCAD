@@ -1669,9 +1669,14 @@ impl GeometryEngine for WorkerManager {
 
 #[async_trait]
 impl SolverEngine for WorkerManager {
+    fn bind_native_gesture(&self) -> Result<Arc<dyn super::NativeGestureWorker>, EngineError> {
+        native_gestures::bind(self)
+    }
+
     async fn sketch_upsert(&self, sketch: &Sketch) -> Result<SketchUpsertDto, EngineError> {
         let epoch = self.epoch();
         let client = self.client_or_err()?;
+        super::endpoint_tangency::sketch(sketch, &client.hello().capabilities)?;
         let resp = client
             .request("SketchUpsert", wire::sketch_upsert_args(sketch))
             .await
@@ -1838,6 +1843,11 @@ async fn stream_plan(shared: Arc<Shared>, request: PlanRequest, tx: mpsc::Sender
             .await;
         return;
     };
+
+    if let Err(error) = super::endpoint_tangency::plan(&request, &client.hello().capabilities) {
+        let _ = tx.send(PlanEvent::Failed(error)).await;
+        return;
+    }
 
     // SCHEMA §7.2: a worker holds at most one prepared job. If the regen this plan
     // replaces was ABANDONED (its future dropped), its `DiscardPrepared` is in a
@@ -3379,3 +3389,5 @@ mod poison_tests {
         assert!(request.await.unwrap().is_err());
     }
 }
+
+mod native_gestures;

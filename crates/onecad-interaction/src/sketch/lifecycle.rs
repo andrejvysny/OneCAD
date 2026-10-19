@@ -26,22 +26,86 @@ impl SketchInteraction {
                 self.set_tool(tool);
                 Vec::new()
             }
+            SketchAction::SetConstructionMode { key, construction } => {
+                if let Some(session) = self
+                    .session
+                    .as_mut()
+                    .filter(|session| session.key == key && session.phase == SketchPhase::Active)
+                {
+                    session.construction = construction;
+                }
+                Vec::new()
+            }
             SketchAction::Move(point) => {
                 self.moved(point);
                 Vec::new()
             }
             SketchAction::Click { point, ids } => self.clicked(point, ids),
+            SketchAction::ClickInferred { point, ids, snap } => {
+                self.clicked_inferred(point, ids, snap.map(|snap| *snap))
+            }
+            SketchAction::BeginPointNumeric { key } => {
+                self.begin_point_numeric(key);
+                Vec::new()
+            }
+            SketchAction::PreviewNumeric {
+                key,
+                capture,
+                dimensions,
+            } => {
+                self.preview_numeric(key, capture, *dimensions);
+                Vec::new()
+            }
+            SketchAction::CreateNumeric {
+                key,
+                capture,
+                ids,
+                dimensions,
+            } => self.create_numeric(key, capture, ids, *dimensions),
             SketchAction::Escape => self.escape(),
             SketchAction::Enter => self.enter_key(),
             SketchAction::Finish => self.exit(ExitIntent::Finish(FinishReason::Explicit)),
             SketchAction::Discard => self.exit(ExitIntent::Discard),
-            SketchAction::Select { key, entities } => {
-                self.select(key, entities);
+            SketchAction::AcceptView {
+                key,
+                document,
+                capture,
+            } => {
+                self.accept_view(key, document, capture);
+                Vec::new()
+            }
+            SketchAction::SelectionDrag {
+                key,
+                document,
+                capture,
+                active,
+            } => {
+                if self.selection_scope(&key, &document, capture) {
+                    if let Some(session) = self.session.as_mut() {
+                        session.selection_dragging = active;
+                    }
+                }
+                Vec::new()
+            }
+            SketchAction::Select {
+                key,
+                document,
+                capture,
+                targets,
+                mode,
+            } => {
+                self.select(key, document, capture, targets, mode);
                 Vec::new()
             }
             SketchAction::AddConstraints { key, constraints } => {
                 self.add_constraints(key, constraints)
             }
+            SketchAction::SetDimension {
+                key,
+                constraint,
+                value,
+            } => self.set_dimension(key, constraint, value),
+            SketchAction::Repair { key, ops } => self.repair(key, ops),
             SketchAction::History(direction) => self.history(direction),
             SketchAction::HistoryResolved {
                 tag,
@@ -60,6 +124,10 @@ impl SketchInteraction {
                 solve,
             } => self.solved(tag, snapshot, *solve),
             SketchAction::Failed { tag, message } => self.failed(tag, message),
+            SketchAction::FinishRefused { tag, message, .. } => self.finish_refused(tag, message),
+            SketchAction::ReenterForRepair { key, document } => {
+                self.reenter_for_repair(key, document)
+            }
             SketchAction::Finished { tag, result } => self.finished(tag, result),
             SketchAction::Discarded { tag, result } => self.discarded(tag, result),
         }
@@ -113,6 +181,8 @@ impl SketchInteraction {
                 session.draft = None;
                 session.preview = None;
                 session.selection.clear();
+                session.accepted_capture = None;
+                session.selection_dragging = false;
                 session.status =
                     SketchStatus::Refused("Document changed; refresh sketch before editing".into());
             }
@@ -172,6 +242,31 @@ impl SketchInteraction {
         };
         self.session = Some(SketchSession::starting(sketch, tag, create));
         vec![effect]
+    }
+
+    fn reenter_for_repair(
+        &mut self,
+        key: SketchSessionKey,
+        document: DocumentContext,
+    ) -> Vec<SketchEffect> {
+        if self.context.as_ref() != Some(&document) {
+            return Vec::new();
+        }
+        let Some(session) = self.session.as_mut().filter(|session| {
+            session.key == key
+                && session.document == document
+                && session.phase == SketchPhase::Faulted
+                && session.repair_reentry
+                && session.batch.is_none()
+        }) else {
+            return Vec::new();
+        };
+        if self.sequence.checked_add(1).is_none() || !super::geometry::valid_plane(session.plane) {
+            return Vec::new();
+        }
+        let sketch = session.authoritative.clone();
+        session.phase = SketchPhase::Closed;
+        self.begin(sketch, false)
     }
 
     pub(crate) fn next_request(&mut self) -> Option<SketchTag> {
@@ -284,6 +379,10 @@ impl SketchInteraction {
         let Some(session) = self.session.as_mut() else {
             return Vec::new();
         };
+        if session.selection_dragging {
+            session.selection_dragging = false;
+            return Vec::new();
+        }
         if session.tool != SketchTool::Select {
             session.tool = SketchTool::Select;
             return Vec::new();

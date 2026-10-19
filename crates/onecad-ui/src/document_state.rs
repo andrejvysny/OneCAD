@@ -94,6 +94,8 @@ impl crate::app::App {
             && serial != self.document_state_serial
         {
             self.document_state_serial = serial;
+            self.diagnostics
+                .runtime(&state.runtime_session, &self.status);
             self.document_state = Some(state);
             self.authoring_dirty = false;
         }

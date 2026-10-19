@@ -28,6 +28,8 @@ enum Mode {
     OverConstrained,
     Conflicting,
     NonfiniteTruth,
+    Unassessed,
+    Pending,
 }
 
 struct Solver {
@@ -64,7 +66,8 @@ impl SolverEngine for Solver {
     async fn sketch_upsert(&self, sketch: &Sketch) -> Result<SketchUpsertDto, EngineError> {
         let revision = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         let mut solved = response(sketch.id, revision);
-        match *self.mode.lock().unwrap() {
+        let mode = *self.mode.lock().unwrap();
+        match mode {
             Mode::Correct => {
                 solved
                     .solved_positions
@@ -90,6 +93,8 @@ impl SolverEngine for Solver {
             Mode::OverConstrained => solved.status = SketchSolveStatus::OverConstrained,
             Mode::Conflicting => solved.status = SketchSolveStatus::Conflicting,
             Mode::NonfiniteTruth => solved.truth.normalized_max_residual = Some(f64::NAN),
+            Mode::Unassessed => solved.truth.unassessed.push("unassessed".into()),
+            Mode::Pending => std::future::pending::<()>().await,
             Mode::Unchanged | Mode::EndMalformedTruth => {}
         }
         Ok(solved)

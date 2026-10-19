@@ -4737,6 +4737,16 @@ fn wire_constraint(c: &Constraint) -> Value {
         Constraint::Tangent {
             entity1, entity2, ..
         } => json!({ "id": cid(c), "type": "Tangent", "entities": [s(entity1), s(entity2)] }),
+        Constraint::TangentAtPoint {
+            entity1,
+            entity2,
+            entity1_position,
+            entity2_position,
+            ..
+        } => json!({
+            "id": cid(c), "type": "TangentAtPoint", "entities": [s(entity1), s(entity2)],
+            "positions": [curve_position_str(*entity1_position), curve_position_str(*entity2_position)],
+        }),
         Constraint::Concentric {
             entity1, entity2, ..
         } => json!({ "id": cid(c), "type": "Concentric", "entities": [s(entity1), s(entity2)] }),

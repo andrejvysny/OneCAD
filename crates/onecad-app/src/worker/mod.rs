@@ -38,6 +38,7 @@ use onecad_core::regen::{
 };
 
 mod checkpoint_result;
+mod endpoint_tangency;
 pub(crate) mod gesture_result;
 pub mod manager;
 pub(crate) mod sketch_result;
@@ -174,6 +175,13 @@ pub trait MeshProvider: Send + Sync {
 /// drops that response's positions.
 #[async_trait]
 pub trait SolverEngine: Send + Sync {
+    /// Native gestures require a concrete connection lease. Never fall back to manager-current RPCs.
+    fn bind_native_gesture(&self) -> Result<Arc<dyn NativeGestureWorker>, EngineError> {
+        Err(EngineError::Protocol {
+            message: "Backend has no bound native gesture connection".into(),
+        })
+    }
+
     /// `SketchUpsert` (SCHEMA §7.4) — sync the authoritative sketch + report dof/state.
     async fn sketch_upsert(
         &self,
@@ -222,6 +230,16 @@ pub trait SolverEngine: Send + Sync {
         &self,
         sketch_id: &str,
     ) -> Result<crate::dto::FinishSketchDto, EngineError>;
+}
+
+/// A connection-scoped solver used only while one native driver owns its lane.
+#[async_trait]
+pub trait NativeGestureWorker: SolverEngine {
+    async fn gesture_worker_head(&self) -> Result<WorkerHead, EngineError>;
+    fn is_current(&self) -> bool;
+    /// Retire only the captured connection, or prove it was already replaced.
+    /// False means cleanup remains uncertain and the caller must retain its lane.
+    async fn quarantine(&self) -> bool;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

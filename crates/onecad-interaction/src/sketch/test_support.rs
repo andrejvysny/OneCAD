@@ -79,6 +79,12 @@ pub fn active(plane: SketchPlane, tool: SketchTool) -> SketchInteraction {
         solve: Box::new(enter_dto(sketch.id)),
     });
     state.dispatch(SketchAction::SetTool(tool));
+    let session = state.session.as_ref().unwrap();
+    state.dispatch(SketchAction::AcceptView {
+        key: session.key.clone(),
+        document: session.document.clone(),
+        capture: view(&state).identity(),
+    });
     state
 }
 pub fn view(state: &SketchInteraction) -> ViewSnapshot {

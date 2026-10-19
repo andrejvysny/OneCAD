@@ -37,6 +37,7 @@ namespace GCS {
 }
 
 namespace onecad::core::sketch {
+namespace constraints { class TangentAtPointConstraint; }
 
 // Forward declarations
 class Sketch;
@@ -446,6 +447,7 @@ private:
     /// These are deliberately NOT in `parameters_`: they are constants, not
     /// unknowns.
     std::deque<double> pinValues_;
+    std::deque<double> tangentAngles_;
 
     int nextEntityTag_ = 1;
     int nextConstraintTag_ = 1;
@@ -471,6 +473,7 @@ private:
      * @brief Translate OneCAD constraint to PlaneGCS constraint
      */
     bool translateConstraint(SketchConstraint* constraint, int tagId);
+    bool translateEndpointTangency(constraints::TangentAtPointConstraint*, int tag);
 
     /**
      * @brief Couple an endpoint-bearing arc's start/end points to its
@@ -526,6 +529,7 @@ inline int getConstraintDOFReduction(ConstraintType type) {
         case ConstraintType::Parallel:      return 1;
         case ConstraintType::Perpendicular: return 1;
         case ConstraintType::Tangent:       return 1;
+        case ConstraintType::TangentAtPoint: return 1;
         case ConstraintType::Concentric:    return 2;
         case ConstraintType::Equal:         return 1;
         case ConstraintType::Distance:      return 1;

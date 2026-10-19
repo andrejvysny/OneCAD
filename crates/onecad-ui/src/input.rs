@@ -1,10 +1,25 @@
 //! Text owns editing shortcuts; model history is only used without text focus.
 use crate::{app::App, bridge::Command, document_flow::Request, menu};
 
+mod overlay;
+
+pub(crate) fn overlay_owns_keyboard(app: &App, ctx: &egui::Context) -> bool {
+    app.input_routing.overlay_blocked
+        || app.documents.confirm.is_some()
+        || crate::constraint_authoring::editor_open(ctx)
+        || crate::sketch_numeric::editor_open(ctx)
+        || ui_owns_keyboard(&app.ui, ctx)
+}
+
+pub(crate) fn ui_owns_keyboard(ui: &crate::ui_state::UiState, ctx: &egui::Context) -> bool {
+    overlay::owner(ui, false, egui::Popup::is_any_open(ctx)).is_some()
+}
+
 #[derive(Default)]
 pub(crate) struct RoutingState {
     pass: u64,
     retained: usize,
+    overlay_blocked: bool,
 }
 
 fn route_events(
@@ -47,15 +62,20 @@ fn history_shortcut(event: &egui::Event, text: bool, focused: bool) -> Option<Co
 
 pub fn route(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     let mut state = std::mem::take(&mut app.input_routing);
-    route_events(&mut state, ctx.cumulative_pass_nr(), raw, |raw| {
-        route_fresh(app, ctx, raw)
-    });
+    let pass = ctx.cumulative_pass_nr();
+    let owned = app.documents.confirm.is_some()
+        || crate::constraint_authoring::editor_open(ctx)
+        || crate::sketch_numeric::editor_open(ctx)
+        || ui_owns_keyboard(&app.ui, ctx);
+    state.overlay_blocked = owned || state.pass == pass && state.overlay_blocked;
+    route_events(&mut state, pass, raw, |raw| route_fresh(app, ctx, raw));
     app.input_routing = state;
 }
 
 fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     app.poll_device_failure();
     app.sync_document_state();
+    crate::sketch_gestures::route_raw(app, ctx, raw);
     if app.sampled && app.viewport_ready() {
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let finished = done.clone();
@@ -72,22 +92,38 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
         }
         app.cad_needs_fence = false;
     }
+    let owner = overlay::owner(
+        &app.ui,
+        app.documents.confirm.is_some()
+            || crate::constraint_authoring::editor_open(ctx)
+            || crate::sketch_numeric::editor_open(ctx),
+        egui::Popup::is_any_open(ctx),
+    );
     if let Some(menu) = &app.menu {
         let text = text_owns_keyboard(ctx);
         menu.set_history_enabled(
-            text || history_available(app, false),
-            text || history_available(app, true),
+            text || owner.is_none() && history_available(app, false),
+            text || owner.is_none() && history_available(app, true),
         );
         menu.set_document_enabled(
-            crate::bars::replacement_allowed(app),
-            crate::bars::save_allowed(app),
-            crate::bars::export_allowed(app),
+            owner.is_none() && crate::bars::replacement_allowed(app),
+            owner.is_none() && crate::bars::save_allowed(app),
+            owner.is_none() && crate::bars::export_allowed(app),
         );
     }
     let actions = app.menu.as_ref().map_or_else(Vec::new, |menu| menu.drain());
     menu::remove_duplicate_events(&actions, &mut raw.events);
     let text = text_owns_keyboard(ctx);
     protect_composition(&mut app.composing, raw, text);
+    if let Some(owner) = owner {
+        for action in actions {
+            if overlay::text_menu(action, text, raw.focused) {
+                route_menu(app, ctx, &mut raw.events, action, text);
+            }
+        }
+        overlay::dismiss(&mut app.ui, owner, raw, text);
+        return;
+    }
     for action in actions {
         route_menu(app, ctx, &mut raw.events, action, text);
     }
@@ -131,11 +167,28 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     if app.documents.confirm.is_some() {
         return;
     }
+    if !text && raw.focused && crate::sketch_numeric::route(app, ctx, raw) {
+        return;
+    }
     if raw.focused {
         crate::editor_facade::keys(app, raw, text);
     }
-    if !text && raw.focused {
-        close_constraints_on_escape(app, raw);
+    if !text && raw.focused && app.sketch_active() {
+        let delete = raw.events.iter().any(|event| matches!(event,
+            egui::Event::Key { key: egui::Key::Delete | egui::Key::Backspace, pressed: true, modifiers, .. }
+                if !modifiers.command && !modifiers.alt && !modifiers.ctrl));
+        if delete {
+            crate::sketch_repair::delete_selected(app);
+            raw.events.retain(|event| {
+                !matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::Delete | egui::Key::Backspace,
+                        ..
+                    }
+                )
+            });
+        }
     }
     if !text && raw.focused && app.sketch_active() && app.viewport_ready() {
         let keys: Vec<_> = raw
@@ -176,27 +229,6 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
         })
     {
         crate::pill::cancel_or_deselect(app);
-    }
-}
-
-/// Escape closes an open Constraints menu and is consumed so the sketch does not also see it.
-fn close_constraints_on_escape(app: &mut App, raw: &mut egui::RawInput) {
-    if !app.ui.constraints_open {
-        return;
-    }
-    let is_escape = |event: &egui::Event| {
-        matches!(
-            event,
-            egui::Event::Key {
-                key: egui::Key::Escape,
-                pressed: true,
-                ..
-            }
-        )
-    };
-    if raw.events.iter().any(is_escape) {
-        raw.events.retain(|event| !is_escape(event));
-        app.ui.constraints_open = false;
     }
 }
 
@@ -355,5 +387,7 @@ pub(crate) fn protect_composition(composing: &mut bool, raw: &mut egui::RawInput
     }
 }
 
+#[cfg(test)]
+mod overlay_tests;
 #[cfg(test)]
 mod tests;

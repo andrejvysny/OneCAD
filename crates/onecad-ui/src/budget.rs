@@ -9,7 +9,7 @@ pub const MAX_SOURCE_BYTES: usize = 32 << 20;
 pub const MAX_PREPARED_BYTES: u64 = 64 << 20;
 pub const MAX_PROFILE_BYTES: usize = 16 << 20;
 pub const MAX_BODIES: usize = 256;
-// Authored records (16 MiB), projection metadata (2 MiB), and host containers (2 MiB).
+// Authored records (16 MiB), projection metadata (2 MiB), and host containers including profile refusals (2 MiB).
 const DISPLAY_METADATA: usize = 20 << 20;
 pub const MAX_DISPLAY_SCENE_BYTES: usize =
     DISPLAY_RESERVATION - MAX_PREPARED_BYTES as usize - MAX_PROFILE_BYTES - DISPLAY_METADATA;

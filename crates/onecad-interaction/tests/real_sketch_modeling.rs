@@ -192,7 +192,7 @@ fn ids(seed: u128) -> PrimitiveIds {
     }
 }
 
-fn captured(state: &SketchInteraction, point: Vec2) -> CapturedSketchPoint {
+fn captured(state: &mut SketchInteraction, point: Vec2) -> CapturedSketchPoint {
     let session = state.session.as_ref().unwrap();
     let view = ViewSnapshot::new(
         session.document.scene,
@@ -215,7 +215,13 @@ fn captured(state: &SketchInteraction, point: Vec2) -> CapturedSketchPoint {
         .project(DVec3::new(world.x, world.y, world.z))
         .unwrap()
         .logical;
-    capture_sketch_pointer(session, &view, logical).unwrap()
+    let point = capture_sketch_pointer(session, &view, logical).unwrap();
+    state.dispatch(SketchAction::AcceptView {
+        key: session.key.clone(),
+        document: session.document.clone(),
+        capture: view.identity(),
+    });
+    point
 }
 
 async fn rectangle(harness: &Harness, state: &mut SketchInteraction) -> PrimitiveIds {

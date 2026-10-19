@@ -3499,9 +3499,7 @@ fn rebuild_sketch(
     for e in entities {
         s.add_entity(e).map_err(sketch_err)?;
     }
-    for c in constraints {
-        s.add_constraint(c).map_err(sketch_err)?;
-    }
+    s.add_constraints(constraints).map_err(sketch_err)?;
     // A cascade-removed entity takes its provenance row with it: the map must
     // never name an entity the sketch does not have (WP-P).
     s.projections = projections

@@ -397,7 +397,8 @@ Worker → Rust:
     "capabilities": [
       "op.sketch", "op.extrude", "op.revolve", "op.fillet", "op.chamfer",
       "op.boolean", "op.importStep", "solver.planegcs", "tessellate.mesh1",
-      "io.step", "io.step.import", "io.stl", "io.obj", "checkpoint.v1"
+      "io.step", "io.step.import", "io.stl", "io.obj", "checkpoint.v1",
+      "constraint.tangentAtPoint"
     ],
     "limits": { "chunkSize": 1048576, "initialBulkCredit": 8388608 }
   }
@@ -1354,13 +1355,55 @@ the full authoritative sketch so replay is deterministic.
     positions directly would add two redundant equations and become singular on a
     180° arc) — and skips any point an explicit `Fixed` constraint already holds.
     An `Ellipse` is not registered with PlaneGCS at all, so it carries no pins.
-- `constraints[].type` ∈ the 20 kinds — the 18 ported verbatim from OneCAD-CPP
+- `constraints[].type` ∈ the 21 kinds — the 18 ported verbatim from OneCAD-CPP
   `SketchTypes.h ConstraintType` (`Coincident`, `Horizontal`, `Vertical`,
   `Fixed`, `Midpoint`, `OnCurve`, `Parallel`, `Perpendicular`, `Tangent`,
   `Concentric`, `Equal`, `Distance`, `HorizontalDistance`, `VerticalDistance`,
   `Angle`, `Radius`, `Diameter`, `Symmetric`) plus the two POINT-PAIR axis
   alignments added by the snap-engine hardening program: `HorizontalPoints`,
-  `VerticalPoints`.
+  `VerticalPoints`, plus explicit endpoint `TangentAtPoint`.
+  - **`TangentAtPoint`.** Two owning curves and two REQUIRED endpoint roles:
+
+    ```json
+    {"id":"tangentA","type":"TangentAtPoint","entities":["lineA","arcB"],
+     "positions":["End","Start"]}
+    ```
+
+    Each owner MUST be a Line or Arc; Line–Line, Line–Arc and Arc–Arc are
+    supported. Both positions MUST be `Start` or `End`. Circle, partial/missing
+    positions, center/arbitrary roles and unresolved owners refuse loudly.
+    The endpoints MUST be structurally welded: a direct `Coincident` between
+    their resolved references, or the same authored Point for line endpoints.
+    Line endpoint references canonicalize to their actual Point identity;
+    Arc endpoints retain owner plus role. Weld order in the constraint array
+    does not matter. Coordinate proximity and transitive coincidence do not
+    establish this explicit relationship. The separate weld contributes two
+    equations; `TangentAtPoint` contributes **one** authored angular equation.
+
+    Lowering uses one fixed `AngleViaPoint` row. The target is selected once
+    from the actual curve normals at the welded point: aligned ⇒ 0, opposed ⇒ π.
+    The fixed target remains outside solver unknowns. Arcs supply complete
+    center/radius/angles/start/end geometry. Zero directions, invalid radii or
+    arc extents, unresolved endpoints, missing welds, ambiguous seeds and
+    post-solve angular/weld failures refuse before accepted store mutation,
+    including during drag. Named reasons are `TANGENT_ENDPOINT_UNRESOLVED`,
+    `TANGENT_ENDPOINT_NOT_WELDED`, `TANGENT_DEGENERATE_OPERAND`,
+    `TANGENT_BRANCH_AMBIGUOUS`, and `TANGENT_RESIDUAL_EXCEEDED`.
+
+    Residuals use **radians**, with inclusive local budget `0.0001 / L`:
+    `L=max(line lengths, arc radii)` over the two operands. The weld retains
+    its own 0.0001 mm budget. Internal ArcRules retain tag 0; this angular row
+    uses the authored constraint ID/tag for diagnostics and rank reporting.
+
+    **Compatibility.** The distinct kind prevents old readers from silently
+    interpreting endpoint tangency as entity-level `Tangent`. Workers advertise
+    `constraint.tangentAtPoint` in Hello capabilities; Rust requires it before
+    endpoint-bearing SketchUpsert or ExecutePlan dispatch, including captured
+    gesture worker clients. Unknown kinds MUST fail closed. Existing 20 kinds,
+    generic `Tangent`, their serialized bytes and solver policy 3 stay unchanged.
+    Persistence stores both roles without defaults and preserves exact IDs.
+    Replay fixture: `fixtures/sketch_tangent_endpoint.ndjson`.
+
   - **`HorizontalPoints` / `VerticalPoints`.** Two `entities`, both POINT slots
     (so both accept the owner+role `positions` form an arc endpoint needs), no
     `value`. `HorizontalPoints` asserts the two points share a **y**;
@@ -3188,6 +3231,10 @@ come first. Readers treat an absent array as `[]`.
   Their inclusive budget is 0.0001 mm. Parallel, Perpendicular and Angle use rad
   with inclusive budget `0.0001 / L`, where `L` is the maximum participating line
   length in mm. Unrelated geometry never changes this local span.
+- Explicit `TangentAtPoint` uses radians and its fixed normal branch, with
+  inclusive local budget `0.0001 / max(participating line lengths, arc radii)`.
+  It requires the direct structural endpoint weld described in §7.3; it is never
+  interpreted as a generic entity tangent or an inferred frontend DOF count.
 - Generic Tangent retains its center-to-supporting-line/curve-separation mm
   reader. Structurally welded endpoint tangency also requires undirected tangent
   alignment within `0.0001 / L` rad. Welding means shared endpoint IDs or closure
@@ -5700,6 +5747,17 @@ and back Invariant 5 and checkpoint drift detection.
 ---
 
 ## 14. Changelog
+
+- **2026-10-19 — §7.3/§7.4 explicit endpoint tangency (ONECAD-18).** Adds the
+  distinct 21st kind `TangentAtPoint`, required owner-aligned Start/End roles,
+  direct structural weld validation, one fixed-branch angular equation and a
+  local radians residual gate. The required Hello capability is
+  `constraint.tangentAtPoint`; absent support refuses before dispatch. Legacy
+  Tangent semantics/bytes and solver policy 3 remain unchanged. New replay
+  `sketch_tangent_endpoint.ndjson` covers T1 rank 9→8→7→6 with Radius, T5 equal-cap
+  rank 9→8→7→6→5, welded endpoint drag and missing-weld/missing-role refusal.
+  Scalar edits/history/persistence retain the authored constraint IDs and roles;
+  this addition does not establish Fillet/Slot native authoring qualification.
 
 - **2026-10-19 — §7.3 shared curve-center identity, solver policy 3 (ONECAD-251).**
   Circle, Arc, and Ellipse bind a present `centerRef` to its authored Point

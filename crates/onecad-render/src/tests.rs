@@ -163,7 +163,8 @@ fn headless_quality_shared_device_capture() {
                 &device,
                 &queue,
                 &renderer,
-                &format!("{projection:?}-{theme:?}"),
+                &capture_artifacts::configuration_name(projection, theme, DisplayMode::ShadedEdges),
+                &format!("view: {view:#?}\nstyle: {theme:?}"),
             );
         }
     }
@@ -234,7 +235,13 @@ fn verify_replacement_and_stale_capture(
     queue.submit([]);
 }
 
-fn capture(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &Renderer, name: &str) -> Vec<u8> {
+fn capture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    renderer: &Renderer,
+    name: &str,
+    configuration: &str,
+) -> Vec<u8> {
     let [width, height] = renderer.size();
     let stride = (width * 4).div_ceil(256) * 256;
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -290,19 +297,18 @@ fn capture(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &Renderer, name
         .0
         .iter()
         .any(|pixel| pixel[..3] != pixels[..3]));
-    let output = std::env::var_os("ONECAD_RENDER_CAPTURE_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("onecad-render-quality-smoke"));
-    let directory = output.as_path();
-    std::fs::create_dir_all(directory).unwrap();
-    let file = std::fs::File::create(directory.join(format!("{name}.png"))).unwrap();
-    let mut png = png::Encoder::new(file, width, height);
-    png.set_color(png::ColorType::Rgba);
-    png.set_depth(png::BitDepth::Eight);
-    png.write_header()
-        .unwrap()
-        .write_image_data(&pixels)
-        .unwrap();
+    capture_artifacts::write(
+        width,
+        height,
+        &pixels,
+        name,
+        &format!(
+            "{configuration}\nfeatures: {:#?}\nadapter: {:#?}\noptions: {:#?}",
+            device.features(),
+            device.adapter_info(),
+            renderer.options(),
+        ),
+    );
     pixels
 }
 
@@ -472,3 +478,5 @@ mod display_modes;
 mod edge_modes;
 
 mod resize_recovery;
+
+mod capture_artifacts;

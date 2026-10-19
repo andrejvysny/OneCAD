@@ -14,6 +14,7 @@
 #define ONECAD_CORE_SKETCH_CONSTRAINTS_H
 
 #include "../SketchConstraint.h"
+#include <optional>
 #include "../SketchTypes.h"
 
 #include <gp_Pnt2d.hxx>
@@ -310,6 +311,30 @@ private:
     PerpendicularConstraint() = default;
     EntityID m_line1;
     EntityID m_line2;
+};
+
+/// Distinct endpoint relationship; the supporting-curve Tangent retains its legacy equation.
+class TangentAtPointConstraint : public SketchConstraint {
+public:
+    TangentAtPointConstraint(const EntityID&, const EntityID&, CurvePosition, CurvePosition);
+    ConstraintType type() const override { return ConstraintType::TangentAtPoint; }
+    std::string typeName() const override { return "TangentAtPoint"; }
+    std::string toString() const override { return "Tangent at point"; }
+    int degreesRemoved() const override { return 1; }
+    std::vector<EntityID> referencedEntities() const override;
+    bool isSatisfied(const Sketch&, double) const override;
+    double getError(const Sketch&) const override;
+    gp_Pnt2d getIconPosition(const Sketch&) const override;
+    const EntityID& entity1() const { return m_entity1; }
+    const EntityID& entity2() const { return m_entity2; }
+    CurvePosition position1() const { return m_position1; }
+    CurvePosition position2() const { return m_position2; }
+    std::optional<double> branch() const { return m_branch; }
+    void freezeBranch(double angle) { if (!m_branch) m_branch = angle; }
+private:
+    EntityID m_entity1, m_entity2;
+    CurvePosition m_position1, m_position2;
+    std::optional<double> m_branch;
 };
 
 /**

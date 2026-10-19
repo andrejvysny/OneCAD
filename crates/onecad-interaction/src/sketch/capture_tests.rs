@@ -178,5 +178,13 @@ fn active_head_change_drops_draft_and_blocks_editing_until_fenced_refresh() {
     });
     assert_eq!(state.session.as_ref().unwrap().phase, SketchPhase::Active);
     assert!(click(&mut state, 30.0, 20.0, 3000).is_empty());
+    assert!(state.session.as_ref().unwrap().draft.is_none());
+    let session = state.session.as_ref().unwrap();
+    state.dispatch(SketchAction::AcceptView {
+        key: session.key.clone(),
+        document: session.document.clone(),
+        capture: view(&state).identity(),
+    });
+    assert!(click(&mut state, 30.0, 20.0, 4000).is_empty());
     assert!(state.session.as_ref().unwrap().draft.is_some());
 }

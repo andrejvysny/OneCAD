@@ -5,13 +5,11 @@ use crate::{
     sketch_services::{Request, effect_tag},
 };
 use onecad_core::{
-    ids::{ConstraintId, EntityId, SketchId},
+    ids::SketchId,
     sketch::{Sketch, SketchAttachment, WorldPlane},
 };
-use onecad_interaction::sketch::{
-    PrimitiveIds, SketchAction, SketchPhase, SketchStatus, SketchTool,
-};
-use onecad_scene::{DVec2, ViewSnapshot};
+use onecad_interaction::sketch::{SketchAction, SketchPhase, SketchStatus, SketchTool};
+use onecad_scene::ViewSnapshot;
 
 impl App {
     pub fn sketch_active(&self) -> bool {
@@ -21,10 +19,34 @@ impl App {
             .is_some_and(|session| session.phase != SketchPhase::Closed)
     }
     pub fn sketch_dispatch(&mut self, action: SketchAction) {
+        if matches!(action, SketchAction::Escape)
+            && let Some(armed) = self.armed_sketch_gesture.as_mut()
+        {
+            armed.cancel();
+            return;
+        }
+        if matches!(
+            action,
+            SketchAction::SetTool(_)
+                | SketchAction::Finish
+                | SketchAction::Discard
+                | SketchAction::History(_)
+        ) {
+            self.armed_sketch_gesture = None;
+        }
+        let Some(action) = self.defer_for_sketch_gesture(action) else {
+            return;
+        };
         if self.documents.blocks_sketch_authoring(&action) {
             self.command_status = true;
             self.status = "Finish the file action before editing the sketch".into();
             return;
+        }
+        if let Some(report) = crate::profile_diagnostics::Report::observe(&self.sketch, &action) {
+            self.diagnostics.sketch_visit(report.key());
+            self.diagnostics.profile = Some(report);
+            self.ui.inspector_open = true;
+            self.ui.inspector_tab = crate::ui_state::InspectorTab::Properties;
         }
         for effect in self.sketch.dispatch(action) {
             let tag = effect_tag(&effect).clone();
@@ -35,27 +57,25 @@ impl App {
                 self.sketch_dispatch(SketchAction::Failed { tag, message });
             }
         }
+        self.sync_sketch_gesture();
+        self.replay_gesture_followup();
         if let Some(session) = &self.sketch.session {
+            if self
+                .document_state
+                .as_ref()
+                .is_some_and(|state| state.runtime_session != session.document.runtime_session)
+            {
+                return;
+            }
+            self.diagnostics.sketch_visit(&session.key);
             self.status = match &session.status {
                 SketchStatus::Starting => "Opening sketch…".into(),
-                SketchStatus::Entered(solve) => {
-                    format!(
-                        "{}: {} DOF; {:?}",
-                        if solve.solve_current {
-                            "Sketch"
-                        } else {
-                            "Cached sketch solve"
-                        },
-                        solve.dof,
-                        solve.status
-                    )
+                SketchStatus::Entered(_) | SketchStatus::Solved(_) => {
+                    crate::sketch_feedback::summary(&session.status).label
                 }
                 SketchStatus::Pending => "Solving sketch…".into(),
                 SketchStatus::Accepted => {
                     "Sketch batch accepted; waiting for solved snapshot".into()
-                }
-                SketchStatus::Solved(solve) => {
-                    format!("Sketch: {} DOF; {:?}", solve.dof, solve.status)
                 }
                 SketchStatus::Refused(message) | SketchStatus::Failed { message, .. } => {
                     message.clone()
@@ -65,6 +85,43 @@ impl App {
                 }
                 SketchStatus::Discarded(_) => "Sketch edits discarded".into(),
             };
+            use crate::diagnostics::{Source, State};
+            let state = match &session.status {
+                SketchStatus::Starting | SketchStatus::Pending | SketchStatus::Accepted => {
+                    State::Pending
+                }
+                SketchStatus::Refused(_) => State::Rejected,
+                SketchStatus::Failed { .. } => State::Failed,
+                SketchStatus::Finished {
+                    kept_reason: Some(_),
+                    ..
+                } => State::Warning,
+                SketchStatus::Discarded(_) => State::Cancelled,
+                SketchStatus::Entered(_) | SketchStatus::Solved(_)
+                    if matches!(
+                        crate::sketch_feedback::summary(&session.status).assessment,
+                        crate::sketch_feedback::Assessment::Unavailable
+                            | crate::sketch_feedback::Assessment::Conflicting
+                    ) =>
+                {
+                    State::Warning
+                }
+                _ => State::Succeeded,
+            };
+            self.diagnostics.record(Source::Sketch, state, &self.status);
+        }
+        if !self
+            .diagnostics
+            .profile
+            .as_ref()
+            .is_some_and(|report| report.is_current(&self.sketch))
+            && let Some(display) = self.display.as_ref()
+            && let Some(report) =
+                crate::profile_diagnostics::Report::from_display(&self.sketch, display)
+        {
+            self.diagnostics.profile = Some(report);
+            self.ui.inspector_open = true;
+            self.ui.inspector_tab = crate::ui_state::InspectorTab::Properties;
         }
     }
     pub fn new_sketch(&mut self) {
@@ -104,7 +161,7 @@ impl App {
 
 /// Sketch tools are clickable only on an active, bridge-valid session.
 pub fn tools_enabled(app: &App) -> bool {
-    app.viewport_ready() && can_finish(app)
+    app.viewport_ready() && !app.busy() && !app.sketch_gesture.busy() && can_finish(app)
 }
 fn can_finish(app: &App) -> bool {
     app.sketch
@@ -139,44 +196,43 @@ pub fn viewport(
     if session.phase != SketchPhase::Active || (!app.viewport_ready() || !app.bridge.valid()) {
         return;
     }
-    let Some(position) = response.hover_pos() else {
+    let key = session.key.clone();
+    let document = session.document.clone();
+    app.sketch_dispatch(SketchAction::AcceptView {
+        key,
+        document,
+        capture: view.identity(),
+    });
+    let Some(session) = app.sketch.session.as_ref() else {
         return;
     };
     if session.tool == SketchTool::Select {
-        if response.clicked() {
-            let entities = crate::sketch_view::pick_entity(
-                rect,
-                view,
-                session,
-                position,
-                crate::sketch_view::DEFAULT_PICK_RADIUS,
-            )
-            .into_iter()
-            .collect();
-            app.sketch_dispatch(SketchAction::Select {
-                key: session.key.clone(),
-                entities,
-            });
+        if crate::sketch_gestures::viewport(app, ui, rect, response, view) {
+            return;
+        }
+        let Some(session) = app.sketch.session.as_ref() else {
+            return;
+        };
+        match crate::sketch_view::selection_input(ui, rect, response, view, session) {
+            Ok(Some(action)) => app.sketch_dispatch(action),
+            Ok(None) => {}
+            Err(message) => {
+                app.sketch_dispatch(SketchAction::SelectionDrag {
+                    key: session.key.clone(),
+                    document: session.document.clone(),
+                    capture: view.identity(),
+                    active: false,
+                });
+                app.status = message.clone();
+                app.command_status = true;
+                app.diagnostics.record(
+                    crate::diagnostics::Source::Sketch,
+                    crate::diagnostics::State::Rejected,
+                    &message,
+                );
+            }
         }
         return;
     }
-    let logical = DVec2::new(
-        f64::from(position.x - rect.min.x),
-        f64::from(position.y - rect.min.y),
-    );
-    let Ok(point) = onecad_interaction::sketch::capture_sketch_pointer(session, view, logical)
-    else {
-        return;
-    };
-    if response.clicked() {
-        app.sketch_dispatch(SketchAction::Click {
-            point,
-            ids: PrimitiveIds {
-                entities: std::array::from_fn(|_| EntityId::new()),
-                constraints: std::array::from_fn(|_| ConstraintId::new()),
-            },
-        });
-    } else if ui.input(|input| input.pointer.delta() != egui::Vec2::ZERO) {
-        app.sketch_dispatch(SketchAction::Move(point));
-    }
+    crate::sketch_creation::viewport(app, ui, rect, response, view);
 }

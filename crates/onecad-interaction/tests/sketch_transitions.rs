@@ -369,15 +369,28 @@ fn scoped_selection_and_text_undo_do_not_escape_sketch_session() {
     let (tag, snapshot) = primitive(&mut state, 3.0, 4.0, 2000);
     complete(&mut state, tag, snapshot);
     let key = state.session.as_ref().unwrap().key.clone();
+    let document = state.session.as_ref().unwrap().document.clone();
+    let capture = view(&state).identity();
+    state.dispatch(SketchAction::AcceptView {
+        key: key.clone(),
+        document: document.clone(),
+        capture,
+    });
     state.dispatch(SketchAction::Select {
         key: key.clone(),
-        entities: vec![ids(2000).entities[1]],
+        document: document.clone(),
+        capture,
+        targets: vec![SketchTarget::Entity(ids(2000).entities[1])],
+        mode: SelectionMode::Replace,
     });
     let mut stale = key;
     stale.generation += 1;
     state.dispatch(SketchAction::Select {
         key: stale,
-        entities: vec![],
+        document,
+        capture,
+        targets: vec![],
+        mode: SelectionMode::Replace,
     });
     assert_eq!(state.session.as_ref().unwrap().selection.len(), 1);
     assert_eq!(state.text_undo_route(true), UndoRoute::Text);

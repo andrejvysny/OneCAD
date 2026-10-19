@@ -1229,3 +1229,11 @@ add_test(
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/sketch_center_refs.ndjson
 )
+
+add_executable(test_tangent_at_point test_tangent_at_point.cpp)
+target_link_libraries(test_tangent_at_point PRIVATE worker_core)
+add_test(NAME tangent_at_point COMMAND test_tangent_at_point)
+
+add_test(NAME canonical_sketch_tangent_endpoint COMMAND worker_harness
+    --worker $<TARGET_FILE:onecad-worker>
+    --fixture ${PROTOCOL_FIXTURES}/sketch_tangent_endpoint.ndjson)

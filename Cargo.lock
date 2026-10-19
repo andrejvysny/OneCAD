@@ -2758,6 +2758,7 @@ dependencies = [
  "onecad-app",
  "onecad-core",
  "onecad-scene",
+ "serde_json",
  "tempfile",
  "tokio",
  "uuid",

@@ -1,10 +1,6 @@
 //! Fenced application reads and CPU preparation happen off the native event loop.
-use crate::{
-    bridge::{Backend, Display, record_id},
-    profiles::{ProfileBudget, decode_profiles_budgeted},
-};
+use crate::bridge::{Backend, Display, record_id};
 use onecad_app::api;
-use onecad_core::ids::SketchId;
 use onecad_scene::{MeshLimits, SceneBody, SceneIdentity, SceneLimits, SceneSnapshot};
 use std::{
     collections::hash_map::DefaultHasher,
@@ -72,23 +68,7 @@ pub async fn load_display(backend: &mut Backend) -> Result<Display, String> {
             .map_err(|e| e.to_string())?,
         );
     }
-    let mut profiles = Vec::new();
-    let mut profile_budget = ProfileBudget::default();
-    for sketch in projection.sketches.values().filter(|sketch| sketch.visible) {
-        let id: SketchId = sketch.id.parse().map_err(|e| format!("sketch id: {e}"))?;
-        let plane = api::get_sketch_plane(&backend.state, id)
-            .await
-            .map_err(|e| e.to_string())?;
-        let regions = api::get_sketch_regions(&backend.state, sketch.id.clone())
-            .await
-            .map_err(|e| e.to_string())?;
-        profiles.extend(decode_profiles_budgeted(
-            id,
-            plane,
-            regions,
-            &mut profile_budget,
-        )?);
-    }
+    let (profiles, profile_failures) = crate::profile_capture::load(backend, &projection).await?;
     let mut records = Vec::new();
     let mut record_budget = crate::record_budget::RecordBudget::default();
     for feature in &projection.features {
@@ -180,6 +160,7 @@ pub async fn load_display(backend: &mut Backend) -> Result<Display, String> {
         context,
         scene,
         profiles,
+        profile_failures,
         records,
         render_receipt,
         prepared: std::sync::Mutex::new(Some(prepared)),

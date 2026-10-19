@@ -123,6 +123,10 @@ json exact_refusal(const sk::ExactTruth& truth, const wire::WireIndex& index) {
 }
 
 json translation_refusal(const wire::TranslateResult& result) {
+    if (result.error.starts_with("TANGENT_")) {
+        const auto end = result.error.find_first_of(": ");
+        return json{{"diagnostics",json::array({diagnostic(result.error.substr(0,end),result.error,json::object())})}};
+    }
     if (!result.invalid_geometry_entity) return json::object();
     return json{{"diagnostics", json::array({diagnostic("internalCouplingFailure", result.error,
         json{{"entityIds", json::array({*result.invalid_geometry_entity})}})})}};

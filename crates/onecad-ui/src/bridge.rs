@@ -20,6 +20,7 @@ pub struct Display {
     pub context: onecad_app::api::PreviewContext,
     pub scene: Arc<SceneSnapshot>,
     pub profiles: Vec<Profile>,
+    pub profile_failures: Vec<crate::profile_capture::Failure>,
     pub prepared: Mutex<Option<onecad_render::PreparedScene>>,
     pub _lease: Arc<crate::budget::Lease>,
     pub records: Vec<OperationRecord>,
@@ -28,6 +29,10 @@ pub struct Display {
 
 #[derive(Debug)]
 pub enum Command {
+    #[cfg(test)]
+    InspectSketch(Box<crate::gesture_services::testing::InspectionRequest>),
+    #[cfg(test)]
+    InspectBody(Box<crate::body_inspection_tests_support::Request>),
     Open,
     Document(crate::document_flow::Request),
     Recovery {
@@ -67,6 +72,10 @@ pub struct CandidateDelivery {
 }
 
 pub enum Message {
+    Gesture {
+        delivery: Box<crate::gesture_services::Delivery>,
+        _permit: Option<OwnedSemaphorePermit>,
+    },
     Document {
         result: Result<crate::document_flow::Outcome, String>,
         _permit: OwnedSemaphorePermit,
@@ -91,6 +100,15 @@ pub enum Message {
 }
 
 pub struct Shared {
+    #[cfg(test)]
+    pub fail_next_gesture_capture: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    pub gesture_end_arrived: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    pub gesture_cancel_observed: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    pub gesture_end_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    pub gesture_events: Arc<Mutex<Option<Arc<EventMailbox>>>>,
     pub display: Mutex<Option<Arc<Display>>>,
     pub document_state: Mutex<crate::document_state::Slot>,
     pub discard_on_shutdown: Mutex<Option<String>>,
@@ -116,6 +134,15 @@ pub struct Shared {
 impl Shared {
     pub(crate) fn new(context: egui::Context, budget: onecad_render::PreparationBudget) -> Self {
         Self {
+            #[cfg(test)]
+            fail_next_gesture_capture: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            gesture_end_arrived: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            gesture_cancel_observed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            gesture_end_gate: Mutex::new(None),
+            gesture_events: Arc::new(Mutex::new(None)),
             display: Mutex::new(None),
             document_state: Mutex::new(Default::default()),
             discard_on_shutdown: Mutex::new(None),
@@ -207,6 +234,8 @@ struct Envelope {
 }
 
 pub struct Bridge {
+    gestures: async_mpsc::Sender<crate::gesture_services::Request>,
+    gesture_permit: Arc<Semaphore>,
     commands: async_mpsc::Sender<Envelope>,
     permits: Arc<Semaphore>,
     pub shared: Arc<Shared>,
@@ -220,6 +249,7 @@ impl Bridge {
         budget: onecad_render::PreparationBudget,
     ) -> Result<Self, String> {
         let (commands, receiver) = async_mpsc::channel(ADMISSION);
+        let (gestures, gesture_receiver) = async_mpsc::channel(crate::gesture_services::CAPACITY);
         let (sender, messages) = mpsc::channel();
         let shared = Arc::new(Shared::new(context, budget));
         let backend_shared = shared.clone();
@@ -231,7 +261,13 @@ impl Bridge {
                     .enable_all()
                     .build()
                 {
-                    Ok(runtime) => runtime.block_on(actor(paths, backend_shared, receiver, sender)),
+                    Ok(runtime) => runtime.block_on(actor(
+                        paths,
+                        backend_shared,
+                        receiver,
+                        gesture_receiver,
+                        sender,
+                    )),
                     Err(error) => {
                         let _ = sender.send(Message::StartupFailed(format!(
                             "native service runtime: {error}"
@@ -241,6 +277,8 @@ impl Bridge {
             })
             .map_err(|error| error.to_string())?;
         Ok(Self {
+            gestures,
+            gesture_permit: Arc::new(Semaphore::new(1)),
             commands,
             permits: Arc::new(Semaphore::new(ADMISSION)),
             shared,
@@ -257,6 +295,40 @@ impl Bridge {
             return Err("Native host is shutting down".into());
         }
         admit(&self.commands, &self.permits, command)
+    }
+
+    pub fn submit_gesture(
+        &self,
+        effect: onecad_interaction::sketch::gesture::GestureEffect,
+        expected: onecad_app::api::PreviewContext,
+    ) -> Result<(), String> {
+        if self
+            .shared
+            .stopping
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err("Native host is shutting down".into());
+        }
+        let permit = if matches!(
+            effect,
+            onecad_interaction::sketch::gesture::GestureEffect::Begin { .. }
+        ) {
+            Some(
+                self.gesture_permit
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| "Another native gesture owns admission".to_string())?,
+            )
+        } else {
+            None
+        };
+        self.gestures
+            .try_send(crate::gesture_services::Request {
+                effect,
+                expected,
+                permit,
+            })
+            .map_err(|_| "Native gesture input queue is full or closed".into())
     }
 
     pub fn candidate(&self, candidate: Candidate) {
@@ -330,6 +402,7 @@ impl EventSink for Sink {
         use std::sync::atomic::Ordering;
         let summary = match event {
             AppEvent::RegenFinished(result) => {
+                crate::gesture_services::observe(&self.shared, BackendEvent::Regen(result.clone()));
                 self.events
                     .emit(BackendEvent::Regen(result))
                     .map_err(|e| e.to_string())?;
@@ -340,6 +413,7 @@ impl EventSink for Sink {
                     self.shared.invalidate(None);
                 }
                 if status.state == "failed" && !self.failed.swap(true, Ordering::AcqRel) {
+                    crate::gesture_services::observe(&self.shared, BackendEvent::WorkerFailed);
                     self.events
                         .emit(BackendEvent::WorkerFailed)
                         .map_err(|e| e.to_string())?;
@@ -376,7 +450,7 @@ impl EventSink for Sink {
     }
 }
 pub(crate) struct Backend {
-    pub state: AppState,
+    pub state: Arc<AppState>,
     pub host: HostContext,
     pub paths: QaPaths,
     pub events: Arc<EventMailbox>,
@@ -392,6 +466,7 @@ async fn actor(
     paths: QaPaths,
     shared: Arc<Shared>,
     mut receiver: async_mpsc::Receiver<Envelope>,
+    mut gesture_receiver: async_mpsc::Receiver<crate::gesture_services::Request>,
     sender: mpsc::Sender<Message>,
 ) {
     let events = Arc::new(EventMailbox::default());
@@ -410,7 +485,7 @@ async fn actor(
             paths.root.join("documents"),
         )),
     };
-    let state = AppState::default();
+    let state = Arc::new(AppState::default());
     if let Err(error) = state.start(host.clone()) {
         let _ = sender.send(Message::StartupFailed(error.into()));
         shared.wake();
@@ -428,9 +503,17 @@ async fn actor(
         preparation_cache: Default::default(),
         preparation_lease: None,
     };
+    let mut gestures = crate::gesture_services::Service::new();
     loop {
+        let gesture_ending = gestures.ending();
         tokio::select! {
             _=shared.shutdown.notified()=>{break;}
+            request = gesture_receiver.recv() => {
+                if let Some(request) = request { gestures.submit(&backend, request, &sender).await; shared.wake(); }
+            }
+            result = gestures.next() => {
+                if let Some(result) = result { gestures.receive(&mut backend, result, &sender).await; shared.wake(); }
+            }
             _=shared.recovery_flush.notified()=>{
                 if let Some(root) = onecad_app::autosave::autosave_root(&backend.host)
                     && let Some(event) = onecad_app::autosave::autosave_current_reporting(
@@ -446,7 +529,7 @@ async fn actor(
                 services::execute(&mut backend,envelope.command,envelope.permit,&sender).await;
                 if shared.stopping.load(std::sync::atomic::Ordering::Acquire) { break; }
             }
-            event = backend.events.next() => {
+            event = backend.events.next(), if !gesture_ending => {
                 match event {
                     BackendEvent::Regen(_)=>match services::load_display(&mut backend).await {
                         Ok(display)=>shared.publish_display(display),
@@ -468,6 +551,8 @@ async fn actor(
             }
         }
     }
+    gestures.shutdown().await;
+    gesture_receiver.close();
     receiver.close();
     while let Ok(envelope) = receiver.try_recv() {
         let name = command_name(&envelope.command);
@@ -517,6 +602,10 @@ fn admit(
 
 pub fn command_name(command: &Command) -> &'static str {
     match command {
+        #[cfg(test)]
+        Command::InspectBody(_) => "InspectBody",
+        #[cfg(test)]
+        Command::InspectSketch(_) => "InspectSketch",
         Command::Open => "Open",
         Command::Document(_) => "Document",
         Command::Recovery { .. } => "Recovery",

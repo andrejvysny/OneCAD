@@ -21,6 +21,10 @@ pub struct App {
     pub document_state_serial: u64,
     pub interaction: Interaction,
     pub sketch: onecad_interaction::sketch::SketchInteraction,
+    pub sketch_gesture: onecad_interaction::sketch::gesture::SketchGestureInteraction,
+    pub(crate) gesture_followup: Option<crate::sketch_gestures::Followup>,
+    pub(crate) gesture_expected: Option<onecad_app::api::PreviewContext>,
+    pub(crate) armed_sketch_gesture: Option<crate::sketch_gestures::Armed>,
     pub renderer: Renderer,
     pub gpu: egui_wgpu::RenderState,
     pub texture: Option<egui::TextureId>,
@@ -34,6 +38,7 @@ pub struct App {
     /// Last drawable capture; `camera` may already contain pending navigation.
     pub view: Option<ViewSnapshot>,
     pub view_number: u64,
+    pub(crate) view_presentation: Option<crate::viewport_capture::Presentation>,
     pub viewport_failure: Option<String>,
     pub resize_refusal: Option<([u32; 2], String)>,
     device_failure: Arc<std::sync::Mutex<Option<String>>>,
@@ -44,6 +49,7 @@ pub struct App {
     pub composing: bool,
     pub menu: Option<menu::NativeMenu>,
     pub status: String,
+    pub diagnostics: crate::diagnostics::Diagnostics,
     pub command_status: bool,
     pub close_prompt: bool,
     pub may_close: bool,
@@ -117,6 +123,10 @@ impl App {
             document_state_serial: 0,
             interaction: Interaction::default(),
             sketch: Default::default(),
+            sketch_gesture: Default::default(),
+            gesture_followup: None,
+            gesture_expected: None,
+            armed_sketch_gesture: None,
             renderer,
             gpu,
             texture: None,
@@ -129,6 +139,7 @@ impl App {
             pending_display_options: None,
             view: None,
             view_number: 0,
+            view_presentation: None,
             viewport_failure: None,
             resize_refusal: None,
             device_failure,
@@ -139,6 +150,7 @@ impl App {
             composing: false,
             menu,
             status: settings_error.unwrap_or_else(|| "Opening QA workspace…".into()),
+            diagnostics: Default::default(),
             command_status: false,
             close_prompt: false,
             may_close: false,
@@ -175,6 +187,14 @@ impl App {
         }
         for effect in self.interaction.dispatch(action) {
             self.effect(effect);
+        }
+        if self.document_state.as_ref().is_none_or(|state| {
+            self.interaction
+                .context
+                .as_ref()
+                .is_some_and(|context| context.runtime_session == state.runtime_session)
+        }) {
+            self.diagnostics.model(&self.interaction.status);
         }
         if self.interaction.tool.is_none()
             && let Some(id) = self.numeric_id.take()
@@ -305,6 +325,11 @@ impl App {
             .and_then(|mut value| value.take());
         if let Some(error) = failure {
             self.status = error;
+            self.diagnostics.record(
+                crate::diagnostics::Source::Worker,
+                crate::diagnostics::State::Failed,
+                &self.status,
+            );
             self.bridge.cancel_candidates();
             self.interaction.selection = None;
             self.pending_preview = None;
@@ -321,7 +346,13 @@ impl App {
     }
 
     pub fn fail_viewport(&mut self, error: String) {
+        self.cancel_sketch_gesture();
         self.status = format!("Viewport unavailable: {error}; Save remains available");
+        self.diagnostics.record(
+            crate::diagnostics::Source::Viewport,
+            crate::diagnostics::State::Failed,
+            &self.status,
+        );
         self.viewport_failure = Some(error);
         self.view = None;
         self.bridge.cancel_candidates();
@@ -368,6 +399,7 @@ impl App {
         self.sketch_dispatch(onecad_interaction::sketch::SketchAction::ContextChanged(
             Some(context),
         ));
+        self.sync_sketch_gesture();
         if changed {
             self.selected_body = None;
             self.selected_feature = None;
@@ -375,13 +407,51 @@ impl App {
             self.transform_gizmo = Default::default();
             self.fit_pending = true;
         }
+        self.diagnostics
+            .runtime(&display.context.runtime_session, &self.status);
+        crate::profile_diagnostics::record_display_failures(&mut self.diagnostics, &display);
         self.display = Some(display);
     }
 
-    fn message(&mut self, message: Message, ctx: &egui::Context) {
+    fn model_delivery_current(&self, tag: &RequestTag) -> bool {
+        if self
+            .document_state
+            .as_ref()
+            .is_some_and(|state| state.runtime_session != tag.context.runtime_session)
+        {
+            return false;
+        }
+        if let Some(tool) = &self.interaction.tool {
+            return tool.tag == *tag;
+        }
+        match &self.interaction.status {
+            CommitStatus::Pending(current)
+            | CommitStatus::Accepted { tag: current, .. }
+            | CommitStatus::Completed { tag: current, .. }
+            | CommitStatus::CompletionUnavailable { tag: current, .. } => current == tag,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn message(&mut self, message: Message, ctx: &egui::Context) {
         match message {
             Message::Document { result, .. } => self.document_finished(result),
+            Message::Gesture { delivery, .. } => self.gesture_delivery(*delivery),
             Message::Sketch { delivery, .. } => {
+                let current = delivery.tag.as_ref().is_none_or(|tag| {
+                    self.document_state
+                        .as_ref()
+                        .is_none_or(|state| state.runtime_session == tag.document.runtime_session)
+                        && self.sketch.session.as_ref().is_some_and(|session| {
+                            session.request == *tag
+                                && !matches!(
+                                    session.phase,
+                                    onecad_interaction::sketch::SketchPhase::Active
+                                        | onecad_interaction::sketch::SketchPhase::Closed
+                                        | onecad_interaction::sketch::SketchPhase::Faulted
+                                )
+                        })
+                });
                 if let Some(display) = delivery.display.clone() {
                     if self.bridge.shared.accept_display(&display) {
                         self.adopt_display(display);
@@ -395,11 +465,18 @@ impl App {
                 for action in delivery.actions {
                     self.sketch_dispatch(action);
                 }
-                if let Some(error) = delivery.error {
+                if let Some(error) = delivery.error.filter(|_| current) {
                     self.status = error;
                 }
             }
-            Message::StartupFailed(error) => self.status = error,
+            Message::StartupFailed(error) => {
+                self.status = error;
+                self.diagnostics.record(
+                    crate::diagnostics::Source::Worker,
+                    crate::diagnostics::State::Failed,
+                    &self.status,
+                );
+            }
             Message::Stopped => {
                 self.may_close = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -409,13 +486,18 @@ impl App {
                 revision,
                 rollback_token,
             } => {
-                self.command_status = true;
+                let current = self.model_delivery_current(&tag);
+                if current {
+                    self.command_status = true;
+                }
                 self.dispatch(Action::CommitAccepted {
                     tag,
                     revision,
                     rollback_token,
                 });
-                self.status = "Regenerating feature…".into();
+                if current {
+                    self.status = "Regenerating feature…".into();
+                }
             }
             Message::Terminal {
                 command,
@@ -423,7 +505,12 @@ impl App {
                 result,
                 ..
             } => {
-                self.command_status = true;
+                let current = tag
+                    .as_ref()
+                    .is_none_or(|tag| self.model_delivery_current(tag));
+                if current {
+                    self.command_status = true;
+                }
                 match result {
                     Ok(outcome) => {
                         let completion = outcome.completion;
@@ -434,7 +521,7 @@ impl App {
                                 completion: completion.clone(),
                             });
                         }
-                        self.status = match completion {
+                        let mut status = match completion {
                             Some(ref result) if !result.failed_steps.is_empty() => {
                                 format!(
                                     "Feature failed: {}",
@@ -462,7 +549,10 @@ impl App {
                             _ => format!("{command} complete"),
                         };
                         if let Some(rollback) = outcome.rollback {
-                            self.status = format!("{}; {}", self.status, rollback.explanation());
+                            status = format!("{}; {}", status, rollback.explanation());
+                        }
+                        if current {
+                            self.status = status;
                         }
                         if self.interaction.tool.as_ref().is_some_and(|tool| {
                             tool.phase == onecad_interaction::SessionPhase::Completed
@@ -489,7 +579,9 @@ impl App {
                         }) {
                             self.dispatch(Action::Cancel);
                         }
-                        self.status = error;
+                        if current {
+                            self.status = error;
+                        }
                     }
                 }
             }

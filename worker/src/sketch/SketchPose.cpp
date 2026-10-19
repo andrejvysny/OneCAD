@@ -1,6 +1,7 @@
 #include "SketchPose.h"
 
 #include "ResidualGeometry.h"
+#include "EndpointTangency.h"
 #include "Sketch.h"
 #include "constraints/Constraints.h"
 
@@ -174,7 +175,23 @@ std::vector<ExactIssue> SketchPose::integrity(const Sketch& sketch, bool check_c
             issues.push_back({"internalCouplingFailure", "Reference-locked curve parameters moved", {id}});
         }
     }
-    if (check_coupling) check_fixed_targets(sketch, issues);
+    if (check_coupling) {
+        check_fixed_targets(sketch, issues);
+        for (const auto& constraint : sketch.getAllConstraints()) {
+            const auto* tangent = dynamic_cast<const constraints::TangentAtPointConstraint*>(constraint.get());
+            if (!tangent) continue;
+            auto error = validateEndpointTangency(sketch,*tangent);
+            if (error.empty()) {
+                const auto a = tangentEndpoint(sketch,tangent->entity1(),tangent->position1());
+                const auto b = tangentEndpoint(sketch,tangent->entity2(),tangent->position2());
+                if (a->at.Distance(b->at) > kExactLengthToleranceMm ||
+                    tangent->getError(sketch) > kExactLengthToleranceMm/std::max(a->span,b->span)) {
+                    error = "TANGENT_RESIDUAL_EXCEEDED";
+                }
+            }
+            if (!error.empty()) issues.push_back({error,error,tangent->referencedEntities()});
+        }
+    }
     return issues;
 }
 

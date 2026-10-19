@@ -7,7 +7,6 @@ use crate::{
     tool_registry::{SelectionKind, selection_kind},
 };
 use egui::{CornerRadius, Rect, RichText, Sense, Ui, pos2, vec2};
-use onecad_interaction::sketch::SketchStatus;
 use onecad_widgets::{
     components::lists::{PropertyRow, SectionLabel},
     fonts,
@@ -35,14 +34,6 @@ fn body_section(name: String) -> (&'static str, Vec<(&'static str, String)>) {
     ("BODY", rows)
 }
 
-fn sketch_dof(app: &App) -> Option<u32> {
-    match &app.sketch.session.as_ref()?.status {
-        SketchStatus::Entered(solve) => Some(solve.dof),
-        SketchStatus::Solved(solve) => Some(solve.dof),
-        _ => None,
-    }
-}
-
 fn region_sketch(app: &App) -> Option<String> {
     let id = app
         .interaction
@@ -66,7 +57,11 @@ fn sketch_block(app: &App) -> Block {
         .session
         .as_ref()
         .map_or_else(String::new, |s| s.authoritative.name.clone());
-    let dof = sketch_dof(app).map(|n| format!("{n} DOF"));
+    let dof = app
+        .sketch
+        .session
+        .as_ref()
+        .map(|session| crate::sketch_feedback::summary(&session.status).label);
     let mut rows = vec![("Name", name.clone())];
     rows.push(("Solve", dof.clone().unwrap_or_else(|| DASH.to_owned())));
     Block {

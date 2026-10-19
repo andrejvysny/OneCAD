@@ -58,6 +58,14 @@ fn sketch_view(app: &App, tool: SketchTool) -> View {
     view
 }
 
+fn arc_tool(app: &App) -> SketchTool {
+    if app.ui.arc_three_point {
+        SketchTool::ThreePointArc
+    } else {
+        SketchTool::Arc
+    }
+}
+
 fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
     if running == Some(def.id) {
         return View {
@@ -75,8 +83,18 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
             reason: None,
         },
         ToolId::Line => sketch_view(app, SketchTool::Line),
-        ToolId::Rectangle => sketch_view(app, SketchTool::Rectangle),
+        ToolId::Rectangle => sketch_view(
+            app,
+            if app.ui.rectangle_centered {
+                SketchTool::CenterRectangle
+            } else {
+                SketchTool::Rectangle
+            },
+        ),
+        ToolId::Point => sketch_view(app, SketchTool::Point),
         ToolId::Circle => sketch_view(app, SketchTool::Circle),
+        ToolId::Arc => sketch_view(app, arc_tool(app)),
+        ToolId::Slot => sketch_view(app, SketchTool::Slot),
         ToolId::Sketch => gate(
             model_ready(app) && idle,
             "Finish the current operation first",
@@ -92,13 +110,31 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
         ToolId::Section => gate(app.viewport_ready(), "Viewport unavailable"),
         ToolId::Horizontal
         | ToolId::Vertical
+        | ToolId::Parallel
+        | ToolId::Perpendicular
+        | ToolId::Equal
+        | ToolId::Midpoint
         | ToolId::Fix
         | ToolId::Distance
         | ToolId::Diameter
         | ToolId::Dimension => gate(
             crate::constraint_authoring::available(app, def.id),
-            "Select one applicable sketch entity first",
+            "Choose applicable operands or edit the existing relation; see Constraints for details",
         ),
+        ToolId::Construction | ToolId::Delete if app.sketch_active() => {
+            let allowed = crate::sketch_repair::availability(app, def.id == ToolId::Delete);
+            let mut state = gate(allowed.is_ok(), allowed.err().unwrap_or(""));
+            if def.id == ToolId::Construction
+                && app
+                    .sketch
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.construction)
+            {
+                state.state = ToolState::SketchActive;
+            }
+            state
+        }
         ToolId::InsertComponent | ToolId::MakeComponent => gate(true, NOT_YET),
         ToolId::Flange | ToolId::Dogbone => extension_view(app, def.id),
         ToolId::CheckGeometry if app.ui.editor_facade.topology_failed => {
@@ -134,8 +170,15 @@ fn activate(app: &mut App, ctx: &Context, id: ToolId) {
     let sketch_tool = match id {
         ToolId::Select if app.sketch_active() => Some(SketchTool::Select),
         ToolId::Line => Some(SketchTool::Line),
-        ToolId::Rectangle => Some(SketchTool::Rectangle),
+        ToolId::Rectangle => Some(if app.ui.rectangle_centered {
+            SketchTool::CenterRectangle
+        } else {
+            SketchTool::Rectangle
+        }),
+        ToolId::Point => Some(SketchTool::Point),
         ToolId::Circle => Some(SketchTool::Circle),
+        ToolId::Arc => Some(arc_tool(app)),
+        ToolId::Slot => Some(SketchTool::Slot),
         _ => None,
     };
     if let Some(tool) = sketch_tool {
@@ -143,6 +186,8 @@ fn activate(app: &mut App, ctx: &Context, id: ToolId) {
         return;
     }
     match id {
+        ToolId::Construction => crate::sketch_repair::toggle_construction(app),
+        ToolId::Delete if app.sketch_active() => crate::sketch_repair::delete_selected(app),
         ToolId::Sketch => app.new_sketch(),
         ToolId::Extrude => {
             app.gesture += 1;
@@ -165,6 +210,10 @@ fn activate(app: &mut App, ctx: &Context, id: ToolId) {
         ToolId::Constraints => crate::constraints_menu::toggle(&mut app.ui),
         ToolId::Horizontal
         | ToolId::Vertical
+        | ToolId::Parallel
+        | ToolId::Perpendicular
+        | ToolId::Equal
+        | ToolId::Midpoint
         | ToolId::Fix
         | ToolId::Distance
         | ToolId::Diameter
@@ -199,10 +248,15 @@ pub(crate) fn select_feature(app: &mut App, id: onecad_core::ids::RecordId) {
 /// The label's close button explicitly deselects as well as canceling a draft.
 fn clear_selection(app: &mut App, kind: SelectionKind) {
     if kind == SelectionKind::SketchEntity {
-        if let Some(key) = app.sketch.session.as_ref().map(|s| s.key.clone()) {
+        if let Some(session) = app.sketch.session.as_ref()
+            && let Some(capture) = session.accepted_capture
+        {
             app.sketch_dispatch(SketchAction::Select {
-                key,
-                entities: Default::default(),
+                key: session.key.clone(),
+                document: session.document.clone(),
+                capture,
+                targets: Default::default(),
+                mode: onecad_interaction::sketch::SelectionMode::Replace,
             });
         }
         return;
@@ -258,10 +312,31 @@ pub(crate) fn selection_label(
             Some((label, "feature".into(), model))
         }
         SelectionKind::SketchEntity => {
-            let n = app.sketch.session.as_ref().map_or(0, |s| s.selection.len());
+            let session = app.sketch.session.as_ref()?;
+            let points = session
+                .selection
+                .iter()
+                .filter(|target| {
+                    matches!(
+                        target,
+                        onecad_interaction::sketch::SketchTarget::Point { .. }
+                    )
+                })
+                .count();
+            let entities = session.selection.len() - points;
+            let label = if let [target] = session.selection.as_slice() {
+                crate::sketch_view::target_name(*target, &session.authoritative)
+            } else {
+                match (points, entities) {
+                    (_, 0) => "Points",
+                    (0, _) => "Entities",
+                    _ => "Sketch targets",
+                }
+                .into()
+            };
             Some((
-                "Entity".into(),
-                format!("{n} selected"),
+                label,
+                format!("{} selected", session.selection.len()),
                 SelectionVariant::Sketch,
             ))
         }
@@ -364,6 +439,7 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
     }
     crate::constraints_menu::show(app, ctx, chrome, hits.constraints);
     crate::constraint_authoring::show(app, ctx);
+    crate::sketch_view::show_target_chooser(app, ctx);
     if let Some(r) = hits.section {
         crate::display_menu::popup_for(app, ctx, &r);
     }

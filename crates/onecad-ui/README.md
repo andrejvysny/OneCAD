@@ -116,19 +116,63 @@ preview and choose Create. Select an editable history row and an applicable nume
 parameters. Existing-feature edits rebuild on Apply: PreviewOp appends a candidate
 at HEAD and cannot correctly preview replacement of an existing operation.
 Choose New sketch (XY), or select an existing sketch row, to enter sketch mode.
-Line, Rectangle and Circle emit typed batches through the shared solver. Select
-picks existing sketch entities. The Constraints menu supports Fixed for a Point,
-Horizontal/Vertical for a Line, line length and circle diameter. Dimension opens
-a scoped editor seeded from authoritative geometry; numeric precision and source
-expressions are preserved. The application reevaluates expressions against current
-variables and rejects conflicting or overconstrained candidates before commit,
-leaving document history and authoritative solve truth unchanged. A rectangle can
-be constrained with one fixed corner and two edge lengths. Later variable changes
-driving existing sketch dimensions require separate parity qualification.
-Finish keeps accepted edits and Discard uses the
-shared guarded session discard. Enter/Escape clear a transient draft before exit.
-Read-only refresh never opens another edit session. Snapping, entity dragging,
-editing existing constraint values and further sketch tools are not exposed.
+Point, Line, Rectangle and Circle emit typed batches through the shared solver.
+Rectangle exposes Corner and Center methods in the sketch inspector. Center
+Rectangle retains its center through a construction diagonal and a solver midpoint
+constraint; both helpers stay outside the material profile. Selection
+keeps whole entities separate from endpoint, center and arc-point roles. Shift or
+Command toggles ordered operands. A rightward marquee encloses; a leftward marquee
+crosses. Ambiguous overlapping targets open an explicit chooser. Picking and
+highlighting use the accepted captured view; stale targets cannot change selection.
+
+The Constraints menu checks operands for Coincident, line Horizontal/Vertical,
+Parallel, Perpendicular, Tangent, Concentric, Equal, Midpoint, Symmetric, OnCurve,
+Fixed, point Horizontal/Vertical alignment and six dimension types. Distance
+supports point-point, point-line and parallel line-line operands. Signed horizontal
+and vertical distances and angles retain their signs. Angle fields use degrees;
+the internal contract uses radians. Radius and Diameter require supported circular
+curves. Incompatible operands show the refusal reason.
+
+Dimension badges and inspector Edit open the existing constraint ID with its
+referenced roles intact. Literal input removes an expression binding; expressions
+bind or rebind through application resolution against current document variables.
+Rejected constraint/dimension candidates preserve geometry and history. Badge
+positions can be dragged, hidden and reset during the visit; this presentation
+state is not document geometry or persisted placement.
+
+Snap uses logical-pixel tolerances and a visible winning relation. Endpoint,
+midpoint, center, origin, quadrant, analytic intersection, OnCurve and reference
+guides persist supported constraints. Quadrants include both OnCurve and point
+alignment. Polar and grid are placement guides; their labels do not claim a
+persisted relation. Ellipse snapping currently exposes its center only. Inspector
+options control snapping and optional 1 mm grid placement. Alt temporarily suppresses
+optional snapping. Tab after an anchor opens numeric Line length, full Rectangle
+width/height or Circle diameter. Point supports Tab before a pointer anchor and
+accepts signed X/Y coordinates, including zero, from the sketch origin. Its numeric
+batch includes an explicit fixed construction origin and signed distances. Tab moves
+between fields, Enter creates one constrained batch and Escape cancels the draft;
+blur never commits. Application authority resolves authored expressions. Line
+continuation reanchors to the accepted solved endpoint.
+
+Select supports solver-backed point/line-endpoint, line-body, circle/arc radius
+and arc endpoint/center gestures; ellipse interaction is center-only. The host
+paints checked transient previews and commits one accepted drag edit. Escape or
+capture/focus loss cancels the gesture. See the [native gesture contract](../../docs/design/native-sketch-gestures.md)
+for fencing, bounded cleanup, no-op history and validation boundaries.
+
+Construction mode marks new primitives, and selected whole entities can toggle
+construction. Construction participates in solving but not material profiles.
+Entity/constraint deletion uses the application repair admission path; locked
+projections remain protected. Unhealthy sketches can remove constraints and repair
+without passing the healthy-candidate creation gate. Missing, cached or invalid
+solver truth never displays as fully constrained; missing point reporting remains
+neutral instead of inheriting a whole-curve DOF claim.
+
+Finish keeps accepted edits and Discard uses guarded session discard. Enter/Escape
+clear a transient draft before exit. Read-only refresh never opens another edit
+session. Entity dragging and further sketch primitives remain unimplemented.
+Automated host evidence and physical workflow acceptance are separate; see the
+[recurring host gate](../../docs/native-host-ci-gate.md).
 Focused text owns undo/redo and clipboard actions. Outside text editing, the title
 bar, File menu, native Edit menu and keyboard share the same history dispatcher.
 An active sketch uses application-owned, session-scoped history; model history is
@@ -214,6 +258,9 @@ checking and preparation run on the service runtime. Resource replacement waits
 for both CAD completion and the previous frame's final egui sampling submission.
 CPU picking remains synchronous against the last drawable camera and scene;
 pending navigation does not change hover, click, profile or gizmo captures.
+An unchanged redraw retains the capture identity so marquee and snap hysteresis
+survive repaint. Scene, camera, viewport, display options (including Wireframe),
+theme or preview changes create a new capture and invalidate pending picks.
 Topology highlight preparation runs off the UI thread, with one active job and
 one bounded delivery. Selection sequence and scene identity reject stale results.
 The host and headless renderer tests negotiate the same optional float-stencil
@@ -294,7 +341,7 @@ presentation components live in the `onecad-widgets` crate (design tokens, baked
 icons, fonts and egui widgets, no OneCAD dependencies); this crate only composes them
 with application data. Chrome modules:
 
-- `layout.rs`: pure geometry of the floating chrome (title and status bars, Explorer,
+- `layout.rs`: pure geometry of the floating chrome (title bar, Explorer,
   Inspector, tool pill, feature card, view cluster, nav pill) with unit tests.
 - `shell.rs`: orchestrates the bars, panels and overlays each frame.
 - `explorer.rs`: Bodies / Sketches / Datums tree, workspace menu; the sketch being
@@ -307,7 +354,7 @@ with application data. Chrome modules:
   backing action are disabled with the reason "Not available yet".
 - `feature_card.rs`: card for the running model tool (numeric field, Create / Apply,
   Cancel). Enter confirms and Escape cancels under the same predicates as before.
-  The preview state appears in the status bar.
+  Preview refusal/failure appears inline and in the bounded Activity window.
 - `session_strip.rs`, `constraints_menu.rs`, `constraint_authoring.rs`: sketch
   session strip, applicability-driven constraint menu and scoped dimension editor.
   Unsupported constraints remain disabled.
@@ -315,7 +362,7 @@ with application data. Chrome modules:
   Open or import actions and real QA-profile recents. Assembly creation remains
   unavailable. "Back to document" or Escape returns to the editor.
 - `overlays.rs`, `display_menu.rs`, `bars.rs`: nav pill, view cluster, Display menu,
-  title and status bars.
+  title bar and floating controls; the editor has no bottom status bar.
 - `appearance.rs`: applies View > Appearance.
 
 Cmd+1 toggles the Explorer and Cmd+2 the Inspector (ignored while a text field has

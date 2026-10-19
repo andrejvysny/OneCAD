@@ -146,6 +146,61 @@ fn card_rows(
             *response = Some(number_field(app, ui, tool));
         });
     }
+    if let Some(message) = apply_feedback(app, tool) {
+        rows.row("Status", |ui| {
+            ui.add(egui::Label::new(message).wrap().selectable(true));
+        });
+    }
+}
+
+fn apply_feedback(app: &App, tool: &ModelSession) -> Option<String> {
+    if !app.viewport_ready() {
+        return Some(format!(
+            "Viewport unavailable: {}",
+            app.viewport_failure.as_deref().unwrap_or("unknown error")
+        ));
+    }
+    if let Some((_, reason)) = &app.resize_refusal {
+        return Some(format!("Viewport unavailable: {reason}"));
+    }
+    if !app.bridge.valid() {
+        return Some("Worker geometry unavailable; Create and Apply are disabled".into());
+    }
+    if app.view.is_none() {
+        return Some("Waiting for an accepted viewport capture".into());
+    }
+    if app.busy() && tool.phase == SessionPhase::Editing {
+        return Some("Wait for the current command before applying".into());
+    }
+    preview_feedback(&tool.draft_status, &tool.preview, tool.phase)
+}
+
+fn preview_feedback(
+    draft: &DraftStatus,
+    preview: &PreviewStatus,
+    phase: SessionPhase,
+) -> Option<String> {
+    match phase {
+        SessionPhase::Committing => return Some("Submitting feature…".into()),
+        SessionPhase::Accepted => return Some("Feature accepted; regenerating geometry…".into()),
+        SessionPhase::Completed => return Some("Feature command completed".into()),
+        SessionPhase::Editing => {}
+    }
+    match draft {
+        DraftStatus::Pending => return Some("Evaluating expression…".into()),
+        DraftStatus::Invalid(error) => return Some(format!("Invalid value: {error}")),
+        DraftStatus::Valid(_) => {}
+    }
+    match preview {
+        PreviewStatus::Empty => Some("Waiting for a preview".into()),
+        PreviewStatus::Pending => Some("Building preview…".into()),
+        PreviewStatus::Failed(error) => Some(format!("Preview failed: {error}")),
+        PreviewStatus::NeedsRepair => Some("Preview needs repair; Create is disabled".into()),
+        PreviewStatus::UnavailableForEdit => {
+            Some("Edit preview unavailable. Apply regenerates the feature.".into())
+        }
+        PreviewStatus::Ready => None,
+    }
 }
 
 fn number_field(app: &mut App, ui: &mut Ui, tool: &ModelSession) -> egui::Response {
@@ -185,6 +240,9 @@ fn number_field(app: &mut App, ui: &mut Ui, tool: &ModelSession) -> egui::Respon
 
 fn focus_keys(app: &mut App, response: &egui::Response, can_apply: bool) {
     let ctx = response.ctx.clone();
+    if crate::input::overlay_owns_keyboard(app, &ctx) {
+        return;
+    }
     if response.has_focus()
         && !app.composing
         && ctx.input(|input| input.key_pressed(egui::Key::Enter))
@@ -204,6 +262,38 @@ fn focus_keys(app: &mut App, response: &egui::Response, can_apply: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_blocked_preview_state_explains_why_create_is_disabled() {
+        let valid = DraftStatus::Valid(onecad_core::document::variables::Scalar::new(6.0));
+        for (preview, expected) in [
+            (PreviewStatus::Empty, "Waiting for a preview"),
+            (PreviewStatus::Pending, "Building preview…"),
+            (
+                PreviewStatus::NeedsRepair,
+                "Preview needs repair; Create is disabled",
+            ),
+            (
+                PreviewStatus::Failed("worker disconnected".into()),
+                "Preview failed: worker disconnected",
+            ),
+        ] {
+            assert_eq!(
+                preview_feedback(&valid, &preview, SessionPhase::Editing).as_deref(),
+                Some(expected)
+            );
+        }
+        assert!(preview_feedback(&valid, &PreviewStatus::Ready, SessionPhase::Editing).is_none());
+        assert_eq!(
+            preview_feedback(
+                &DraftStatus::Invalid("unknown variable".into()),
+                &PreviewStatus::Ready,
+                SessionPhase::Editing
+            )
+            .as_deref(),
+            Some("Invalid value: unknown variable")
+        );
+    }
 
     #[test]
     fn floating_card_can_grow_after_switching_to_parameter_edit() {

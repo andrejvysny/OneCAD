@@ -5,7 +5,10 @@ use crate::{
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
-    crate::ui_state::shortcuts(&mut app.ui, &ctx);
+    crate::sketch_repair::set_constraint_hover(app, &ctx, None);
+    if !crate::input::overlay_owns_keyboard(app, &ctx) {
+        crate::ui_state::shortcuts(&mut app.ui, &ctx);
+    }
     let chrome = layout::chrome(ctx.content_rect(), &app.ui);
     let chrome = if app.interaction.tool.is_some() && !app.sketch_active() {
         chrome.with_feature_card()
@@ -27,6 +30,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     overlays::nav_pill(app, &ctx, &chrome);
     overlays::view_cluster(app, &ctx, &chrome);
+    crate::sketch_numeric::show(app, &ctx);
+    crate::diagnostics::show(app, &ctx, &chrome);
 }
 
 pub fn close_prompt(app: &mut App, ctx: &egui::Context) {

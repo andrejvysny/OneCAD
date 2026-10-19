@@ -129,7 +129,7 @@ impl SketchInteraction {
         session.authoritative = *snapshot.sketch;
         session
             .selection
-            .retain(|id| session.authoritative.contains_entity(*id));
+            .retain(|target| target.is_valid(&session.authoritative));
         session.preview = None;
         if let Err(message) = apply_after(session, batch.after) {
             return self.failed(tag, message);
@@ -178,7 +178,7 @@ impl SketchInteraction {
         session.authoritative = *snapshot.sketch;
         session
             .selection
-            .retain(|id| session.authoritative.contains_entity(*id));
+            .retain(|target| target.is_valid(&session.authoritative));
         session.phase = SketchPhase::Active;
         session.status = if moved {
             SketchStatus::Entered(Box::new(solve))
@@ -236,6 +236,19 @@ impl SketchInteraction {
         session.preview = None;
         session.batch = None;
         Vec::new()
+    }
+
+    pub(crate) fn finish_refused(&mut self, tag: SketchTag, message: String) -> Vec<SketchEffect> {
+        if !self.valid_tag(&tag) || !self.phase_is(SketchPhase::Finishing) {
+            return Vec::new();
+        }
+        let effects = self.failed(tag, message);
+        if let Some(session) = self.session.as_mut() {
+            session.repair_reentry = true;
+            session.edit_session = None;
+            session.history = None;
+        }
+        effects
     }
 
     pub(crate) fn finished(
@@ -326,6 +339,8 @@ fn apply_after(session: &mut SketchSession, after: AfterPrimitive) -> Result<(),
                 anchor_id: Some(last),
                 cursor: b,
                 segments,
+                anchor_snap: None,
+                secondary: None,
             });
         }
         AfterPrimitive::Preserve => {

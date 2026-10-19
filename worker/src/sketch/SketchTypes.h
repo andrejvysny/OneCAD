@@ -69,7 +69,8 @@ enum class ConstraintType {
     // coordinate" and are what a frontend alignment guide actually asserts —
     // the two points need not be the ends of any one line.
     HorizontalPoints,
-    VerticalPoints
+    VerticalPoints,
+    TangentAtPoint
 };
 
 /**

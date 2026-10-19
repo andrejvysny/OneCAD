@@ -20,6 +20,7 @@ pub fn paint(
     rect: Rect,
     view: &ViewSnapshot,
     session: &SketchSession,
+    preview: Option<&Sketch>,
     theme: &Theme,
 ) {
     if session.document.scene != view.identity().scene
@@ -31,105 +32,89 @@ pub fn paint(
     {
         return;
     }
+    let transient = preview.is_some();
+    let geometry = preview.unwrap_or(&session.authoritative);
     let painter = painter.with_clip_rect(rect);
-    for entity in session.authoritative.entities() {
-        let color = if session.selection.contains(&entity.id()) {
-            theme.accent
-        } else if entity.is_reference_locked() || entity.is_construction() {
-            theme.ink5
-        } else {
-            theme.ink2
-        };
+    for entity in geometry.entities() {
+        let color =
+            if session
+                .selection
+                .contains(&onecad_interaction::sketch::SketchTarget::Entity(
+                    entity.id(),
+                ))
+            {
+                theme.accent
+            } else if entity.is_reference_locked() || entity.is_construction() {
+                theme.ink5
+            } else if transient {
+                theme.dof_neutral
+            } else {
+                match crate::sketch_feedback::entity(&session.status, entity.id()) {
+                    Some(onecad_app::dto::EntityConstrainedState::FullyConstrained) => theme.dof_ok,
+                    Some(onecad_app::dto::EntityConstrainedState::UnderConstrained) => {
+                        theme.created_text
+                    }
+                    Some(onecad_app::dto::EntityConstrainedState::Conflicting) => {
+                        theme.danger_strong
+                    }
+                    None => theme.dof_neutral,
+                }
+            };
         if let SketchEntity::Point { at, .. } = entity {
             if let Some(screen) = project(rect, view, session.plane, *at) {
                 painter.circle_filled(screen, 2.5, color);
             }
-        } else if let Some(points) =
-            entity_points(&session.authoritative, entity, rect, view, session.plane)
-        {
+        } else if let Some(points) = entity_points(geometry, entity, rect, view, session.plane) {
             paint_path(&painter, rect, view, session.plane, &points, color);
+        }
+    }
+    paint_hover(&painter, rect, view, session, geometry, theme);
+    for target in &session.selection {
+        if let Some(at) = target.point_coordinates(geometry)
+            && let Some(screen) = project(rect, view, session.plane, at)
+        {
+            painter.circle_filled(screen, 4.0, theme.accent);
+            painter.circle_stroke(screen, 6.0, Stroke::new(1.0, theme.accent));
         }
     }
     if let Some(draft) = &session.preview {
         let points = draft_points(draft, rect, view, session.plane);
+        if let [point] = points.as_slice()
+            && let Some(screen) = project(rect, view, session.plane, *point)
+        {
+            painter.circle_stroke(screen, 4.0, Stroke::new(1.5, theme.accent));
+        }
         paint_path(&painter, rect, view, session.plane, &points, theme.accent);
     }
 }
 
-pub fn pick_entity(
+fn paint_hover(
+    painter: &Painter,
     rect: Rect,
     view: &ViewSnapshot,
     session: &SketchSession,
-    position: Pos2,
-    radius_px: f32,
-) -> Option<EntityId> {
-    if session.document.scene != view.identity().scene || session.phase != SketchPhase::Active {
-        return None;
-    }
-    pick_sketch(
-        &session.authoritative,
-        session.plane,
-        rect,
-        view,
-        position,
-        radius_px,
-    )
-}
-
-fn pick_sketch(
-    sketch: &Sketch,
-    plane: SketchPlane,
-    rect: Rect,
-    view: &ViewSnapshot,
-    position: Pos2,
-    radius: f32,
-) -> Option<EntityId> {
-    if !matches_rect(rect, view) || !rect.contains(position) || !radius.is_finite() || radius <= 0.0
-    {
-        return None;
-    }
-    let mut handles = None;
-    let mut curves = None;
-    for entity in sketch.entities() {
-        if let SketchEntity::Point { at, .. } = entity {
-            if let Some(point) = project(rect, view, plane, *at) {
-                nearer(&mut handles, entity.id(), point.distance(position), radius);
+    geometry: &Sketch,
+    theme: &Theme,
+) {
+    use onecad_interaction::sketch::SketchTarget;
+    let color = theme.accent.gamma_multiply(0.55);
+    for target in crate::sketch_repair::hover_targets(painter.ctx(), session) {
+        if let Some(at) = target.point_coordinates(geometry) {
+            if let Some(screen) = project(rect, view, session.plane, at) {
+                painter.circle_stroke(screen, 7.0, Stroke::new(2.0, color));
             }
-            continue;
-        }
-        let Some(points) = entity_points(sketch, entity, rect, view, plane) else {
-            continue;
-        };
-        if matches!(entity, SketchEntity::Arc { .. }) {
-            for point in points.first().into_iter().chain(points.last()) {
-                if let Some(screen) = project(rect, view, plane, *point) {
-                    nearer(&mut handles, entity.id(), screen.distance(position), radius);
+        } else if let SketchTarget::Entity(id) = target
+            && let Some(entity) = geometry.get_entity(id)
+        {
+            if let SketchEntity::Point { at, .. } = entity {
+                if let Some(screen) = project(rect, view, session.plane, *at) {
+                    painter.circle_stroke(screen, 7.0, Stroke::new(2.0, color));
                 }
+            } else if let Some(points) = entity_points(geometry, entity, rect, view, session.plane)
+            {
+                paint_path(painter, rect, view, session.plane, &points, color);
             }
         }
-        for pair in points.windows(2) {
-            if let (Some(a), Some(b)) = (
-                project(rect, view, plane, pair[0]),
-                project(rect, view, plane, pair[1]),
-            ) {
-                nearer(
-                    &mut curves,
-                    entity.id(),
-                    segment_distance(position, a, b),
-                    radius,
-                );
-            }
-        }
-    }
-    handles.or(curves).map(|(id, _)| id)
-}
-
-fn nearer(best: &mut Option<(EntityId, f32)>, id: EntityId, distance: f32, radius: f32) {
-    if distance.is_finite()
-        && distance <= radius
-        && best.is_none_or(|(_, current)| distance < current)
-    {
-        *best = Some((id, distance));
     }
 }
 
@@ -228,6 +213,7 @@ fn draft_points(
     plane: SketchPlane,
 ) -> Vec<Vec2> {
     match draft {
+        DraftPrimitive::Point { at } => vec![*at],
         DraftPrimitive::Line { start, end } => vec![*start, *end],
         DraftPrimitive::Rectangle {
             first: a,
@@ -242,7 +228,38 @@ fn draft_points(
         DraftPrimitive::Circle { center, radius } => Curve::circle(*center, *radius)
             .sample(rect, view, plane)
             .unwrap_or_default(),
+        DraftPrimitive::Arc { arc } => {
+            Curve::arc(arc.center, arc.radius, arc.start_angle, arc.end_angle)
+                .sample(rect, view, plane)
+                .unwrap_or_default()
+        }
+        DraftPrimitive::Slot {
+            center_start,
+            center_end,
+            radius,
+        } => {
+            slot_points(*center_start, *center_end, *radius, rect, view, plane).unwrap_or_default()
+        }
     }
+}
+
+fn slot_points(
+    start: Vec2,
+    end: Vec2,
+    radius: f64,
+    rect: Rect,
+    view: &ViewSnapshot,
+    plane: SketchPlane,
+) -> Option<Vec<Vec2>> {
+    let length = (end.x - start.x).hypot(end.y - start.y);
+    if !length.is_finite() || length <= 0.0 || !radius.is_finite() || radius <= 0.0 {
+        return None;
+    }
+    let angle = (end.y - start.y).atan2(end.x - start.x) + PI * 0.5;
+    let mut points = Curve::arc(start, radius, angle, angle + PI).sample(rect, view, plane)?;
+    points.extend(Curve::arc(end, radius, angle + PI, angle + TAU).sample(rect, view, plane)?);
+    points.push(*points.first()?);
+    Some(points)
 }
 
 struct Curve {
@@ -367,7 +384,10 @@ mod tests {
         let position = project(rect, &view, sketch.plane, Vec2::new(0.0, 0.0).unwrap()).unwrap();
         assert_eq!(
             pick_sketch(&sketch, sketch.plane, rect, &view, position, 8.0),
-            Some(id(4))
+            PickResult::Unique(onecad_interaction::sketch::SketchTarget::Point {
+                entity: id(4),
+                role: onecad_core::sketch::CurvePosition::Arbitrary
+            })
         );
     }
 
@@ -404,7 +424,7 @@ mod tests {
                     edge + outward * 7.9,
                     8.0
                 ),
-                Some(circle)
+                PickResult::Unique(onecad_interaction::sketch::SketchTarget::Entity(circle))
             );
             assert_eq!(
                 pick_sketch(
@@ -415,7 +435,7 @@ mod tests {
                     edge + outward * 8.1,
                     8.0
                 ),
-                None
+                PickResult::None
             );
         }
     }
@@ -429,3 +449,13 @@ mod tests {
         assert!(!matches_rect(rect.expand(1.0), &view));
     }
 }
+
+mod selection;
+#[cfg(test)]
+use selection::pick_sketch;
+pub use selection::{PickResult, marquee_targets, pick_entity};
+mod selection_input;
+pub use selection_input::selection_input;
+
+mod target_chooser;
+pub use target_chooser::{show_target_chooser, target_name};

@@ -14,6 +14,7 @@ std::optional<ResidualDimension> dimension(ConstraintType type) {
         case ConstraintType::Parallel:
         case ConstraintType::Perpendicular:
         case ConstraintType::Angle:
+        case ConstraintType::TangentAtPoint:
             return ResidualDimension::Angle;
         case ConstraintType::Coincident:
         case ConstraintType::Horizontal:

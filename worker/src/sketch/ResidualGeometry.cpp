@@ -1,6 +1,7 @@
 #include "ResidualGeometry.h"
 
 #include "Sketch.h"
+#include "EndpointTangency.h"
 #include "constraints/Constraints.h"
 
 #include <algorithm>
@@ -75,6 +76,12 @@ bool finiteOperands(const Sketch& sketch, const SketchConstraint& constraint) {
 }
 
 std::optional<double> angularSpan(const Sketch& sketch, const SketchConstraint& constraint) {
+    if (const auto* c = dynamic_cast<const constraints::TangentAtPointConstraint*>(&constraint)) {
+        const auto a = tangentEndpoint(sketch,c->entity1(),c->position1());
+        const auto b = tangentEndpoint(sketch,c->entity2(),c->position2());
+        if (!a || !b || a->span <= 0.0 || b->span <= 0.0) return std::nullopt;
+        return std::max(a->span,b->span);
+    }
     double span = 0.0;
     for (const auto& id : constraint.referencedEntities()) {
         const auto* line = sketch.getEntityAs<SketchLine>(id);

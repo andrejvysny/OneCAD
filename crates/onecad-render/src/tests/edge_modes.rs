@@ -318,8 +318,9 @@ fn verify_combinations(
             for projection in [Projection::Perspective, Projection::Orthographic] {
                 let view = view(scene, projection);
                 for theme in [Theme::Dark, Theme::Light] {
-                    let name =
-                        format!("mode-section-preview-{mode:?}-{projection:?}-{theme:?}-{ssaa}");
+                    let configuration =
+                        capture_artifacts::configuration_name(projection, theme, mode);
+                    let name = format!("mode-section-preview-{configuration}-{ssaa}");
                     let pixels = render(
                         renderer,
                         device,

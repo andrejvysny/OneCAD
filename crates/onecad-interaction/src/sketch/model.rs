@@ -7,7 +7,6 @@ use onecad_core::{
     sketch::{Constraint, Sketch, SketchPlane},
 };
 use onecad_scene::CaptureIdentity;
-use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SketchSessionKey {
@@ -34,9 +33,14 @@ pub struct CapturedSketchPoint {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SketchTool {
     Select,
+    Point,
     Line,
     Rectangle,
+    CenterRectangle,
     Circle,
+    Arc,
+    ThreePointArc,
+    Slot,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,9 +66,35 @@ pub enum FinishReason {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DraftPrimitive {
-    Line { start: Vec2, end: Vec2 },
-    Rectangle { first: Vec2, opposite: Vec2 },
-    Circle { center: Vec2, radius: f64 },
+    Point {
+        at: Vec2,
+    },
+    Line {
+        start: Vec2,
+        end: Vec2,
+    },
+    Rectangle {
+        first: Vec2,
+        opposite: Vec2,
+    },
+    Circle {
+        center: Vec2,
+        radius: f64,
+    },
+    Arc {
+        arc: super::arc_geometry::AnalyticArc,
+    },
+    Slot {
+        center_start: Vec2,
+        center_end: Vec2,
+        radius: f64,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct PrimitiveAnchor {
+    pub point: Vec2,
+    pub snap: Option<super::inference::AcceptedSnap>,
 }
 
 #[derive(Clone, Debug)]
@@ -75,13 +105,15 @@ pub struct SketchDraft {
     pub anchor_id: Option<EntityId>,
     pub cursor: Vec2,
     pub segments: usize,
+    pub anchor_snap: Option<super::inference::AcceptedSnap>,
+    pub secondary: Option<PrimitiveAnchor>,
 }
 
 /// The host supplies fresh ids; moving a preview never allocates identities.
 #[derive(Clone, Debug)]
 pub struct PrimitiveIds {
-    pub entities: [EntityId; 8],
-    pub constraints: [ConstraintId; 4],
+    pub entities: [EntityId; 16],
+    pub constraints: [ConstraintId; 32],
 }
 
 #[derive(Clone, Debug)]
@@ -119,10 +151,14 @@ pub struct SketchSession {
     pub edit_session: Option<String>,
     pub history: Option<onecad_app::dto::SketchHistoryAvailability>,
     pub tool: SketchTool,
+    pub construction: bool,
     pub phase: SketchPhase,
     pub draft: Option<SketchDraft>,
     pub preview: Option<DraftPrimitive>,
-    pub selection: BTreeSet<EntityId>,
+    pub selection: Vec<super::SketchTarget>,
+    pub accepted_capture: Option<CaptureIdentity>,
+    pub selection_dragging: bool,
+    pub repair_reentry: bool,
     pub status: SketchStatus,
     pub request: SketchTag,
     pub(crate) batch: Option<PendingBatch>,
@@ -141,6 +177,7 @@ impl SketchSession {
             edit_session: None,
             history: None,
             tool: SketchTool::Select,
+            construction: false,
             phase: if create {
                 SketchPhase::Creating
             } else {
@@ -149,6 +186,9 @@ impl SketchSession {
             draft: None,
             preview: None,
             selection: Default::default(),
+            accepted_capture: None,
+            selection_dragging: false,
+            repair_reentry: false,
             status: SketchStatus::Starting,
             request: tag,
             batch: None,
@@ -207,22 +247,68 @@ pub enum SketchAction {
         solve: Box<SketchSessionDto>,
     },
     SetTool(SketchTool),
+    SetConstructionMode {
+        key: SketchSessionKey,
+        construction: bool,
+    },
     Move(CapturedSketchPoint),
     Click {
         point: CapturedSketchPoint,
         ids: PrimitiveIds,
     },
+    ClickInferred {
+        point: CapturedSketchPoint,
+        ids: PrimitiveIds,
+        snap: Option<Box<super::inference::AcceptedSnap>>,
+    },
+    BeginPointNumeric {
+        key: SketchSessionKey,
+    },
+    PreviewNumeric {
+        key: SketchSessionKey,
+        capture: CaptureIdentity,
+        dimensions: Box<super::CreationDimensions>,
+    },
+    CreateNumeric {
+        key: SketchSessionKey,
+        capture: CaptureIdentity,
+        ids: PrimitiveIds,
+        dimensions: Box<super::CreationDimensions>,
+    },
     Escape,
     Enter,
     Finish,
     Discard,
+    AcceptView {
+        key: SketchSessionKey,
+        document: DocumentContext,
+        capture: CaptureIdentity,
+    },
+    SelectionDrag {
+        key: SketchSessionKey,
+        document: DocumentContext,
+        capture: CaptureIdentity,
+        active: bool,
+    },
     Select {
         key: SketchSessionKey,
-        entities: Vec<EntityId>,
+        document: DocumentContext,
+        capture: CaptureIdentity,
+        targets: Vec<super::SketchTarget>,
+        mode: super::SelectionMode,
     },
     AddConstraints {
         key: SketchSessionKey,
         constraints: Vec<Constraint>,
+    },
+    SetDimension {
+        key: SketchSessionKey,
+        constraint: ConstraintId,
+        value: onecad_core::document::variables::Scalar,
+    },
+    Repair {
+        key: SketchSessionKey,
+        ops: Vec<SketchEditOp>,
     },
     History(onecad_core::edit::HistoryDirection),
     HistoryResolved {
@@ -247,6 +333,15 @@ pub enum SketchAction {
     Failed {
         tag: SketchTag,
         message: String,
+    },
+    ReenterForRepair {
+        key: SketchSessionKey,
+        document: DocumentContext,
+    },
+    FinishRefused {
+        tag: SketchTag,
+        message: String,
+        diagnostics: Vec<onecad_core::regen::Diagnostic>,
     },
     Finished {
         tag: SketchTag,
@@ -284,6 +379,15 @@ pub enum SketchEffect {
     AddConstraints {
         tag: SketchTag,
         constraints: Vec<Constraint>,
+    },
+    SetDimension {
+        tag: SketchTag,
+        constraint: ConstraintId,
+        value: onecad_core::document::variables::Scalar,
+    },
+    Repair {
+        tag: SketchTag,
+        ops: Vec<SketchEditOp>,
     },
     /// The host uses cancel_sketch(discard=false), then finish_sketch.
     FinishSketch {

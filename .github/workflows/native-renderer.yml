@@ -5,9 +5,15 @@ on:
     branches: [master]
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: '23 4 * * 1'
 
 permissions:
   contents: read
+
+concurrency:
+  group: native-metal-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   metal-renderer:
@@ -21,6 +27,9 @@ jobs:
       - name: Install repository Rust toolchain
         run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+      - name: Capture verifier regressions
+        run: bun test scripts/tests/verify-render-captures.test.mjs
       - name: Check first-party formatting
         run: >-
           cargo fmt --check
@@ -40,10 +49,77 @@ jobs:
         run: >-
           cargo test -p onecad-render
           -- --ignored --nocapture --test-threads=1
+      - name: Verify capture manifest and complete configuration evidence
+        run: bun scripts/verify-render-captures.mjs "$RUNNER_TEMP/onecad-render-quality-smoke" > "$RUNNER_TEMP/onecad-render-quality-smoke/manifest.json"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: metal-renderer-captures
           path: ${{ runner.temp }}/onecad-render-quality-smoke
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/download-artifact@v4
+        with:
+          name: metal-renderer-captures
+          path: ${{ runner.temp }}/onecad-render-downloaded
+      - name: Verify downloaded images and metadata match uploaded manifest
+        run: |
+          set -euo pipefail
+          bun scripts/verify-render-captures.mjs "$RUNNER_TEMP/onecad-render-downloaded" > "$RUNNER_TEMP/onecad-render-downloaded-manifest.json"
+          cmp "$RUNNER_TEMP/onecad-render-quality-smoke/manifest.json" "$RUNNER_TEMP/onecad-render-downloaded/manifest.json"
+          cmp "$RUNNER_TEMP/onecad-render-downloaded/manifest.json" "$RUNNER_TEMP/onecad-render-downloaded-manifest.json"
+
+  native-host-lifecycle:
+    name: Native host lifecycle (production worker and Metal)
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      ONECAD_OCCT_ROOT: ${{ runner.temp }}/onecad-occt/8.0.1
+      ONECAD_OCCT_VERSION: 8.0.1
+      ONECAD_OCCT_BUILD_ID: onecad-occt-8.0.1-b8f597c67781-kp1
+      ONECAD_WORKER_BUILD_DIR: ${{ github.workspace }}/worker/build-native-host-ci
+      ONECAD_WORKER_PATH: ${{ github.workspace }}/worker/build-native-host-ci/onecad-worker
+      ONECAD_REQUIRE_WORKER: '1'
+      ONECAD_REQUIRE_GPU: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install repository Rust toolchain
+        run: rustup show active-toolchain
+      - uses: oven-sh/setup-bun@v2
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/onecad-occt/8.0.1
+          key: occt-macos-15-8.0.1-b8f597c67781-${{ env.ONECAD_OCCT_BUILD_ID }}-${{ hashFiles('scripts/build-pinned-occt.sh', 'scripts/occt-fingerprint.sh') }}
+      - name: Install production worker dependencies
+        run: brew install boost eigen nlohmann-json ninja
+      - name: Build pinned OCCT
+        run: >-
+          scripts/build-pinned-occt.sh --version 8.0.1
+          --prefix "$ONECAD_OCCT_ROOT"
+          --build-dir "$RUNNER_TEMP/onecad-occt-build/8.0.1"
+          --build-id "$ONECAD_OCCT_BUILD_ID"
+      - name: Build and stage production worker with compatibility manifest
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/onecad-native-host-gate"
+          scripts/build-worker.sh Release 2>&1 | tee "$RUNNER_TEMP/onecad-native-host-gate/worker-build.log"
+          cp "$ONECAD_OCCT_ROOT/share/onecad/occt-build.json" "$RUNNER_TEMP/onecad-native-host-gate/occt-build.json"
+      - name: Gate verifier regressions
+        run: bun test scripts/tests/native-host-gate.test.mjs
+      - name: Require all native lifecycle tests and missing-worker rejection
+        run: bun scripts/native-host-gate.mjs "$RUNNER_TEMP/onecad-native-host-gate"
+      - name: Require complete nonempty gate evidence
+        if: success()
+        run: |
+          set -euo pipefail
+          for file in acceptance.json lifecycle.log inventory.log missing-worker.log source.log toolchain.log worker-selftest.log worker-manifest.json occt-build.json worker-build.log; do
+            test -s "$RUNNER_TEMP/onecad-native-host-gate/$file"
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-host-lifecycle-evidence
+          path: ${{ runner.temp }}/onecad-native-host-gate
           if-no-files-found: error
           retention-days: 14

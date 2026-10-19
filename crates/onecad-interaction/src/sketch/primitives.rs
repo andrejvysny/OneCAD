@@ -16,16 +16,41 @@ pub(crate) fn build_primitive(
     ids: &PrimitiveIds,
 ) -> Result<PrimitiveBatch, String> {
     validate_ids(session, ids)?;
+    if session.tool == SketchTool::Point {
+        let entity = SketchEntity::point(ids.entities[0], point, session.construction, false);
+        if !point.is_finite() {
+            return Err("Point coordinates must be finite".into());
+        }
+        return Ok((vec![add_entity(entity)], AfterPrimitive::Reset));
+    }
     let draft = session.draft.as_ref().ok_or("No primitive anchor")?;
-    match session.tool {
+    let (mut ops, after) = match session.tool {
         SketchTool::Line => line(draft, point, ids),
         SketchTool::Rectangle => rectangle(draft.anchor, point, ids),
+        SketchTool::CenterRectangle => super::center_rectangle::build(draft.anchor, point, ids),
         SketchTool::Circle => circle(draft.anchor, point, ids),
-        SketchTool::Select => Err("Select does not author geometry".into()),
+        SketchTool::Arc | SketchTool::ThreePointArc | SketchTool::Slot => {
+            super::staged_creation::build(session.tool, draft, point, ids)
+        }
+        SketchTool::Select | SketchTool::Point => Err("Select does not author geometry".into()),
+    }?;
+    if session.construction {
+        for op in &mut ops {
+            if let SketchEditOp::AddEntity { entity } = op {
+                match entity {
+                    SketchEntity::Point { construction, .. }
+                    | SketchEntity::Line { construction, .. }
+                    | SketchEntity::Circle { construction, .. }
+                    | SketchEntity::Arc { construction, .. }
+                    | SketchEntity::Ellipse { construction, .. } => *construction = true,
+                }
+            }
+        }
     }
+    Ok((ops, after))
 }
 
-fn validate_ids(session: &SketchSession, ids: &PrimitiveIds) -> Result<(), String> {
+pub(super) fn validate_ids(session: &SketchSession, ids: &PrimitiveIds) -> Result<(), String> {
     let entities: BTreeSet<_> = ids.entities.iter().copied().collect();
     let constraints: BTreeSet<_> = ids.constraints.iter().copied().collect();
     if entities.len() != ids.entities.len()
@@ -80,7 +105,11 @@ fn line(draft: &SketchDraft, point: Vec2, ids: &PrimitiveIds) -> Result<Primitiv
     Ok((ops, after))
 }
 
-fn rectangle(first: Vec2, opposite: Vec2, ids: &PrimitiveIds) -> Result<PrimitiveBatch, String> {
+pub(super) fn rectangle(
+    first: Vec2,
+    opposite: Vec2,
+    ids: &PrimitiveIds,
+) -> Result<PrimitiveBatch, String> {
     if !(first.x - opposite.x).is_finite()
         || !(first.y - opposite.y).is_finite()
         || (first.x - opposite.x).abs() < MIN_SIZE

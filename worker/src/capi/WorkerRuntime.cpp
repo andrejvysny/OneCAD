@@ -108,7 +108,7 @@ nlohmann::json make_hello_result_impl() {
                                 "op.boolean", "op.hole", "op.shell", "op.linearPattern",
                                 "op.circularPattern", "op.mirrorBody", "op.transformBody",
                                 "op.offsetFace", "op.importStep", "op.placeComponent",
-                                "op.detachComponent", "solver.planegcs", "tessellate.mesh1",
+                                "op.detachComponent", "solver.planegcs", "constraint.tangentAtPoint", "tessellate.mesh1",
                                 "io.step", "io.step.import", "io.geometry.export",
                                 "query.classifyElement", "query.bodyTopology"})},
         {"limits",

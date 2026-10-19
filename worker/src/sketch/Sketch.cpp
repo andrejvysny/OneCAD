@@ -1,5 +1,6 @@
 // Ported from OneCAD-CPP src/core/sketch/Sketch.cpp @ b4ddcccc (2026-07-16)
 #include "Sketch.h"
+#include "EndpointTangency.h"
 #include "constraints/Constraints.h"
 #include "solver/ConstraintSolver.h"
 #include "solver/SolverAdapter.h"
@@ -671,6 +672,13 @@ ConstraintSupportResult Sketch::validateConstraintSupport(const SketchConstraint
                 return unsupportedConstraint("Perpendicular requires two lines");
             }
             return {};
+        }
+
+        case ConstraintType::TangentAtPoint: {
+            const auto* endpoint = dynamic_cast<const TangentAtPointConstraint*>(&constraint);
+            if (!endpoint) return unsupportedConstraint("TANGENT_ENDPOINT_UNRESOLVED");
+            const auto error = validateEndpointTangency(*this,*endpoint);
+            return error.empty() ? ConstraintSupportResult{} : unsupportedConstraint(error);
         }
 
         case ConstraintType::Tangent: {

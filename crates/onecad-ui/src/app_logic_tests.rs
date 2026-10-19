@@ -68,6 +68,16 @@ async fn occluded_app_logic_delivers_new_and_protects_close_without_ui() {
 }
 
 async fn create_app(root: &std::path::Path) -> (App, egui::Context) {
+    assert_eq!(std::env::var("ONECAD_REQUIRE_WORKER").as_deref(), Ok("1"));
+    assert_eq!(std::env::var("ONECAD_REQUIRE_GPU").as_deref(), Ok("1"));
+    let worker = std::env::var_os("ONECAD_WORKER_PATH")
+        .map(std::path::PathBuf::from)
+        .expect("native host gate requires explicit ONECAD_WORKER_PATH");
+    assert!(
+        worker.is_file(),
+        "native host gate requires existing worker"
+    );
+    assert_eq!(onecad_app::worker::resolve_worker_path(), Some(worker));
     let context = egui::Context::default();
     let configuration = crate::viewport_gpu_configuration();
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
@@ -75,6 +85,9 @@ async fn create_app(root: &std::path::Path) -> (App, egui::Context) {
         egui_wgpu::RenderState::create(&configuration, &instance, None, Default::default())
             .await
             .unwrap();
+    let adapter = render.adapter.get_info();
+    eprintln!("Native host gate adapter: {adapter:?}");
+    assert_eq!(adapter.backend, wgpu::Backend::Metal);
     let mut creation = eframe::CreationContext::_new_kittest(context.clone());
     creation.wgpu_render_state = Some(render);
     let paths =
@@ -129,3 +142,32 @@ fn has_command(
 
 #[path = "document_lifecycle_tests.rs"]
 mod document_lifecycle_tests;
+
+#[path = "overlay_routing_tests.rs"]
+mod overlay_routing_tests;
+
+#[path = "diagnostic_delivery_tests.rs"]
+mod diagnostic_delivery_tests;
+
+#[path = "dimension_delivery_tests.rs"]
+mod dimension_delivery_tests;
+
+#[path = "plate_delivery_tests.rs"]
+mod plate_delivery_tests;
+
+#[path = "numeric_delivery_tests.rs"]
+mod numeric_delivery_tests;
+
+#[path = "profile_delivery_tests.rs"]
+mod profile_delivery_tests;
+
+#[path = "selection_delivery_tests.rs"]
+mod selection_delivery_tests;
+
+#[path = "gesture_delivery_tests.rs"]
+mod gesture_delivery_tests;
+#[path = "point_center_delivery_tests.rs"]
+mod point_center_delivery_tests;
+
+#[path = "arc_gesture_delivery_tests.rs"]
+mod arc_gesture_delivery_tests;

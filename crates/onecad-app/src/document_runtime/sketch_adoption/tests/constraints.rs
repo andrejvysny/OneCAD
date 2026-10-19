@@ -1,6 +1,13 @@
 use super::*;
 use onecad_core::sketch::{Constraint, CurvePosition};
 
+#[path = "dimensions.rs"]
+mod dimensions;
+#[path = "primitives.rs"]
+mod primitives;
+#[path = "repairs.rs"]
+mod repairs;
+
 fn fixed() -> Constraint {
     Constraint::Fixed {
         id: onecad_core::ids::ConstraintId(Uuid::from_u128(900)),

@@ -54,6 +54,10 @@ pub struct UiState {
     pub display_menu: Option<egui::Rect>,
     /// Sketch Constraints menu (display-only rows).
     pub constraints_open: bool,
+    pub rectangle_centered: bool,
+    pub arc_three_point: bool,
+    pub sketch_snap: bool,
+    pub sketch_grid_snap: bool,
     pub appearance: Appearance,
     /// Target darkness whose theme failed to load; not retried until another succeeds.
     pub theme_failed: Option<bool>,
@@ -77,6 +81,10 @@ impl Default for UiState {
             explorer_filter: String::new(),
             display_menu: None,
             constraints_open: false,
+            rectangle_centered: false,
+            arc_three_point: false,
+            sketch_snap: true,
+            sketch_grid_snap: false,
             appearance: Appearance::default(),
             theme_failed: None,
             recent_view: 0,
@@ -91,7 +99,7 @@ impl Default for UiState {
 
 /// Cmd+1 toggles the Explorer, Cmd+2 the Inspector; ignored while a text field has focus.
 pub fn shortcuts(state: &mut UiState, ctx: &Context) {
-    if crate::input::text_owns_keyboard(ctx) {
+    if crate::input::text_owns_keyboard(ctx) || crate::input::ui_owns_keyboard(state, ctx) {
         return;
     }
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Num1)) {

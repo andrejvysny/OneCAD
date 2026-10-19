@@ -40,8 +40,14 @@ pub fn parse_value(bytes: &[u8]) -> IoResult<Value> {
 /// # Errors
 /// [`IoError::Corrupt`] if the value does not match the document schema.
 pub fn document_from_value(value: Value) -> IoResult<Document> {
-    serde_json::from_value(value)
-        .map_err(|e| IoError::Corrupt(format!("document.json decode: {e}")))
+    let document: Document = serde_json::from_value(value)
+        .map_err(|e| IoError::Corrupt(format!("document.json decode: {e}")))?;
+    for sketch in document.sketches.values() {
+        sketch
+            .validate_endpoint_tangencies()
+            .map_err(|e| IoError::Corrupt(format!("sketch {}: {e}", sketch.id)))?;
+    }
+    Ok(document)
 }
 
 #[cfg(test)]

@@ -66,7 +66,20 @@ pub(crate) fn replacement_allowed(app: &App) -> bool {
 }
 
 pub(crate) fn save_allowed(app: &App) -> bool {
-    !app.busy() && !app.sketch_active() && app.document_open()
+    !app.busy() && (!app.sketch_active() || recovery_sketch_save(app)) && app.document_open()
+}
+
+pub(crate) fn recovery_sketch_save(app: &App) -> bool {
+    !app.bridge.valid()
+        && !app.sketch_gesture.busy()
+        && app.sketch.session.as_ref().is_some_and(|session| {
+            session.phase == onecad_interaction::sketch::SketchPhase::NeedsRefresh
+                && session.accepted_capture.is_none()
+                && app
+                    .document_state
+                    .as_ref()
+                    .is_some_and(|state| state.runtime_session == session.key.runtime_session)
+        })
 }
 
 pub(crate) fn export_allowed(app: &App) -> bool {

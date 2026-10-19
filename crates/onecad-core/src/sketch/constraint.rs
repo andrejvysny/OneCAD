@@ -1,4 +1,4 @@
-//! Sketch constraints — 20 kinds: the 18 ported field-for-field from OneCAD-CPP
+//! Sketch constraints — 21 kinds: the 18 ported field-for-field from OneCAD-CPP
 //! (`SketchTypes.h ConstraintType` + the `constraints/Constraints.h` classes +
 //! `Sketch.h` add* helpers).
 //!
@@ -74,7 +74,7 @@ impl CurvePosition {
     }
 }
 
-/// A geometric or dimensional constraint (20 kinds; C++ `ConstraintType`).
+/// A geometric or dimensional constraint (21 kinds; C++ `ConstraintType`).
 ///
 /// Internally tagged on `"kind"`. Every variant carries a [`ConstraintId`]
 /// (`id`); [`Constraint::entities`] returns the referenced entity ids.
@@ -192,6 +192,20 @@ pub enum Constraint {
         entity1: EntityId,
         /// Second entity.
         entity2: EntityId,
+    },
+    /// Tangency at two structurally welded line/arc endpoints.
+    /// Unlike entity-level `Tangent`, this contributes one angular equation.
+    TangentAtPoint {
+        /// Constraint identity.
+        id: ConstraintId,
+        /// First owning line or arc.
+        entity1: EntityId,
+        /// Second owning line or arc.
+        entity2: EntityId,
+        /// Required Start/End role on the first owner.
+        entity1_position: CurvePosition,
+        /// Required Start/End role on the second owner.
+        entity2_position: CurvePosition,
     },
     /// Two arcs/circles share a center (C++ `ConcentricConstraint`).
     Concentric {
@@ -367,6 +381,7 @@ impl Constraint {
             | Self::Parallel { id, .. }
             | Self::Perpendicular { id, .. }
             | Self::Tangent { id, .. }
+            | Self::TangentAtPoint { id, .. }
             | Self::Concentric { id, .. }
             | Self::Equal { id, .. }
             | Self::Distance { id, .. }
@@ -400,6 +415,9 @@ impl Constraint {
             | Self::Perpendicular { line1, line2, .. }
             | Self::Angle { line1, line2, .. } => vec![line1, line2],
             Self::Tangent {
+                entity1, entity2, ..
+            }
+            | Self::TangentAtPoint {
                 entity1, entity2, ..
             }
             | Self::Concentric {
@@ -541,6 +559,16 @@ mod tests {
                 vec![e1, e2],
             ),
             (
+                Constraint::TangentAtPoint {
+                    id: cid(21),
+                    entity1: e1,
+                    entity2: e2,
+                    entity1_position: CurvePosition::Start,
+                    entity2_position: CurvePosition::End,
+                },
+                vec![e1, e2],
+            ),
+            (
                 Constraint::Concentric {
                     id: cid(10),
                     entity1: e1,
@@ -646,7 +674,7 @@ mod tests {
                 vec![p1, p2],
             ),
         ];
-        assert_eq!(cases.len(), 20, "all 20 constraint kinds covered");
+        assert_eq!(cases.len(), 21, "all 21 constraint kinds covered");
         for (c, want) in cases {
             assert_eq!(c.entities(), want, "entities() mismatch for {:?}", c.id());
         }

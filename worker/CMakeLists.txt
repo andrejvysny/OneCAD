@@ -245,6 +245,9 @@ add_library(worker_core STATIC
     src/sketch/SketchEllipse.cpp
     src/sketch/SketchConstraint.cpp
     src/sketch/constraints/Constraints.cpp
+    src/sketch/constraints/TangentAtPoint.cpp
+    src/sketch/EndpointTangency.cpp
+    src/sketch/solver/EndpointTangency.cpp
     src/sketch/solver/ConstraintSolver.cpp
     src/sketch/solver/ConstraintSolverPoint.cpp
     src/sketch/solver/PointBranch.cpp

@@ -179,6 +179,7 @@ void ConstraintSolver::clear() {
     paramOwner_.clear();
     drivenParameters_.clear();
     pinValues_.clear();
+    tangentAngles_.clear();
     nextEntityTag_ = 1;
     nextConstraintTag_ = 1;
 
@@ -1073,6 +1074,9 @@ void ConstraintSolver::restoreParameters() {
 }
 
 bool ConstraintSolver::translateConstraint(SketchConstraint* constraint, int tagId) {
+    if (auto* endpoint = dynamic_cast<constraints::TangentAtPointConstraint*>(constraint)) {
+        return translateEndpointTangency(endpoint,tagId);
+    }
     if (!constraint || !gcsSystem_) {
         return false;
     }

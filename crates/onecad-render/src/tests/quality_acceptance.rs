@@ -46,7 +46,14 @@ fn run_depth_configuration(adapter: &wgpu::Adapter, features: wgpu::Features) {
                 theme,
                 ..Default::default()
             };
-            let prefix = format!("{features:?}-{projection:?}-{theme:?}");
+            let depth = if features.contains(wgpu::Features::DEPTH32FLOAT_STENCIL8) {
+                "stencil"
+            } else {
+                "fallback"
+            };
+            let configuration =
+                capture_artifacts::configuration_name(projection, theme, DisplayMode::ShadedEdges);
+            let prefix = format!("{depth}-{configuration}");
             let baseline = render(&mut renderer, &device, &queue, &view, style, &prefix);
             let repeated = render(&mut renderer, &device, &queue, &view, style, &prefix);
             assert_eq!(
@@ -118,9 +125,13 @@ pub(super) fn render(
     assert!(renderer.encode(&mut encoder, view, style).unwrap());
     queue.submit([encoder.finish()]);
     renderer.after_submit(|| {}).unwrap();
-    static CAPTURE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let sequence = CAPTURE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let pixels = capture(device, queue, renderer, &format!("{sequence:04}-{name}"));
+    let pixels = capture(
+        device,
+        queue,
+        renderer,
+        name,
+        &format!("view: {view:#?}\nstyle: {style:#?}"),
+    );
     idle(device, renderer);
     pixels
 }

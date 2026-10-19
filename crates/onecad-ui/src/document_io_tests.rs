@@ -114,7 +114,7 @@ async fn backend(root: &Path) -> (Backend, Arc<Events>) {
             picks: Mutex::new(Vec::new()),
         }),
     };
-    let state = AppState::default();
+    let state = Arc::new(AppState::default());
     state.start(host.clone()).unwrap();
     api::new_document(&state, host.clone()).await.unwrap();
     assert!(

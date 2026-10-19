@@ -1,5 +1,6 @@
 // WireSketch.cpp — see WireSketch.h. Wire (SCHEMA §7.3/§7.4) -> ported Sketch.
 #include "sketch/WireSketch.h"
+#include "util/Log.h"
 
 #include <algorithm>
 #include <cctype>
@@ -7,6 +8,7 @@
 #include <initializer_list>
 
 #include "sketch/SketchArc.h"
+#include "sketch/EndpointTangency.h"
 #include "sketch/SketchCircle.h"
 #include "sketch/SketchEllipse.h"
 #include "sketch/SketchLine.h"
@@ -382,7 +384,11 @@ TranslateResult translate(const json& args) {
         result.error = "constraints must be an array";
         return result;
     }
-    for (const json& c : constraints) {
+    // Structural welds are declarations, independent of wire constraint order.
+    json ordered = json::array();
+    for (const auto& c : constraints) if (c.value("type",std::string{}) != "TangentAtPoint") ordered.push_back(c);
+    for (const auto& c : constraints) if (c.value("type",std::string{}) == "TangentAtPoint") ordered.push_back(c);
+    for (const json& c : ordered) {
         const std::string type = c.value("type", std::string{});
         const json ents = c.value("entities", json::array());
         const json poss = c.value("positions", json::array());
@@ -457,6 +463,16 @@ TranslateResult translate(const json& args) {
             added = sketch->addParallel(internal(ent(0)), internal(ent(1)));
         } else if (type == "Perpendicular") {
             added = sketch->addPerpendicular(internal(ent(0)), internal(ent(1)));
+        } else if (type == "TangentAtPoint") {
+            const auto role = [&](std::size_t i) { return pos(i) == "start" ? sk::CurvePosition::Start : sk::CurvePosition::End; };
+            if (!ents.is_array() || ents.size() != 2 || !poss.is_array() || poss.size() != 2 ||
+                (pos(0) != "start" && pos(0) != "end") || (pos(1) != "start" && pos(1) != "end")) {
+                fail = "TANGENT_ENDPOINT_UNRESOLVED: two explicit Start/End roles required";
+            } else {
+                auto endpoint = std::make_unique<cs::TangentAtPointConstraint>(internal(ent(0)),internal(ent(1)),role(0),role(1));
+                fail = sk::validateEndpointTangency(*sketch,*endpoint);
+                if (fail.empty()) added = sketch->addConstraint(std::move(endpoint));
+            }
         } else if (type == "Tangent") {
             const sk::EntityID a = internal(ent(0)), b = internal(ent(1));
             if (a.empty() || b.empty()) fail = "Tangent: unresolved refs";
@@ -524,6 +540,7 @@ TranslateResult translate(const json& args) {
         }
 
         if (!fail.empty()) {
+            if (type == "TangentAtPoint") WLOG_WARN("TangentAtPoint: %s",fail.c_str());
             result.error = fail;
             return result;
         }
