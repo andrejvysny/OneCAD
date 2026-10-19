@@ -17,6 +17,8 @@ pub struct App {
     pub documents: crate::document_flow::Flow,
     pub bridge: Bridge,
     pub display: Option<Arc<Display>>,
+    pub document_state: Option<onecad_app::dto::DocumentState>,
+    pub document_state_serial: u64,
     pub interaction: Interaction,
     pub sketch: onecad_interaction::sketch::SketchInteraction,
     pub renderer: Renderer,
@@ -111,6 +113,8 @@ impl App {
             documents: Default::default(),
             bridge,
             display: None,
+            document_state: None,
+            document_state_serial: 0,
             interaction: Interaction::default(),
             sketch: Default::default(),
             renderer,
@@ -253,16 +257,17 @@ impl App {
             self.status = "Geometry unavailable; history controls are disabled".into();
             return;
         }
-        if matches!(command, Command::Undo | Command::Redo) {
-            self.authoring_dirty = true;
-        }
-        if let Err(error) = self.bridge.submit(command) {
-            self.status = error;
+        let history = matches!(command, Command::Undo | Command::Redo);
+        match self.bridge.submit(command) {
+            Ok(()) if history => self.authoring_dirty = true,
+            Ok(()) => {}
+            Err(error) => self.status = error,
         }
     }
 
     pub fn poll(&mut self, ctx: &egui::Context) {
         self.poll_device_failure();
+        self.sync_document_state();
         if let Some(display) = self.bridge.take_display()
             && self.bridge.shared.accept_display(&display)
         {
@@ -287,8 +292,10 @@ impl App {
         }
         // Command permits bound accepted plus terminal messages to at most 16; drain fairly each frame.
         while let Ok(message) = self.bridge.messages.try_recv() {
+            self.sync_document_state();
             self.message(message, ctx);
         }
+        self.sync_document_state();
         let failure = self
             .bridge
             .shared
@@ -346,7 +353,6 @@ impl App {
             redo_depth = projection.redo_depth, dirty = projection.dirty,
             applied_ops = projection.applied_ops, bodies = projection.bodies.len(),
             "Native document adopted");
-        self.authoring_dirty = display.projection.dirty;
         let changed = self
             .display
             .as_ref()
@@ -404,7 +410,6 @@ impl App {
                 rollback_token,
             } => {
                 self.command_status = true;
-                self.authoring_dirty = true;
                 self.dispatch(Action::CommitAccepted {
                     tag,
                     revision,
@@ -491,6 +496,20 @@ impl App {
         }
     }
 
+    pub fn stop_discard(&mut self) {
+        self.sync_document_state();
+        let session = self
+            .document_state
+            .as_ref()
+            .map(|state| state.runtime_session.clone());
+        self.stopping = true;
+        self.bridge.cancel_candidates();
+        if let Some(session) = session.filter(|session| !session.is_empty()) {
+            self.bridge.request_discard_shutdown(&session);
+        } else {
+            self.bridge.request_shutdown();
+        }
+    }
     pub fn stop(&mut self) {
         self.stopping = true;
         self.bridge.cancel_candidates();
@@ -503,6 +522,12 @@ impl App {
         ) || self.stopping
             || self.documents.running
             || self.documents.confirm.is_some()
+            || self
+                .bridge
+                .shared
+                .recovery
+                .lock()
+                .is_ok_and(|recovery| recovery.busy)
     }
 }
 

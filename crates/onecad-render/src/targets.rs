@@ -54,18 +54,15 @@ impl Targets {
         size: [u32; 2],
         options: crate::RenderOptions,
     ) -> Result<Self, crate::RenderError> {
+        #[cfg(test)]
+        tests::fail_if_injected()?;
         let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let validation = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let targets = Self::new(gpu, pipes, ibl, size, options);
         // Allocation scopes contain no submitted work; popping does not wait for GPU completion.
         let invalid = pollster::block_on(validation.pop());
         let allocation = pollster::block_on(scope.pop());
-        if let Some(error) = invalid {
-            return Err(crate::RenderError::Device(error.to_string()));
-        }
-        if let Some(error) = allocation {
-            return Err(crate::RenderError::Allocation(error.to_string()));
-        }
+        classify_scope_errors(allocation, invalid)?;
         Ok(targets)
     }
     fn new(
@@ -201,5 +198,83 @@ impl Targets {
             ground_bind,
             post_binds,
         }
+    }
+}
+
+fn classify_scope_errors(
+    allocation: Option<wgpu::Error>,
+    invalid: Option<wgpu::Error>,
+) -> Result<(), crate::RenderError> {
+    // Failed allocations can invalidate dependent views and bind groups in the same batch.
+    if let Some(error) = allocation {
+        return Err(crate::RenderError::Allocation(error.to_string()));
+    }
+    if let Some(error) = invalid {
+        return Err(crate::RenderError::Device(error.to_string()));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    thread_local! {
+        static FAIL_NEXT_ALLOCATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    pub(crate) fn fail_next_allocation() {
+        FAIL_NEXT_ALLOCATION.with(|failure| assert!(!failure.replace(true)));
+    }
+
+    pub(super) fn fail_if_injected() -> Result<(), crate::RenderError> {
+        if FAIL_NEXT_ALLOCATION.with(|failure| failure.replace(false)) {
+            return classify_scope_errors(Some(allocation_error()), Some(validation_error()));
+        }
+        Ok(())
+    }
+
+    fn allocation_error() -> wgpu::Error {
+        wgpu::Error::OutOfMemory {
+            source: Box::new(std::io::Error::other("target allocation refused")),
+        }
+    }
+
+    fn validation_error() -> wgpu::Error {
+        wgpu::Error::Validation {
+            source: Box::new(std::io::Error::other("invalid target")),
+            description: "invalid dependent texture view".into(),
+        }
+    }
+
+    #[test]
+    fn allocation_scope_error_takes_precedence_over_dependent_validation() {
+        let error =
+            classify_scope_errors(Some(allocation_error()), Some(validation_error())).unwrap_err();
+        assert!(
+            matches!(&error, crate::RenderError::Allocation(message) if message == "Out of Memory")
+        );
+        assert!(error.recoverable_target_refusal());
+    }
+
+    #[test]
+    fn validation_only_scope_error_remains_device_failure() {
+        let error = classify_scope_errors(None, Some(validation_error())).unwrap_err();
+        assert!(
+            matches!(&error, crate::RenderError::Device(message) if message == "invalid dependent texture view")
+        );
+        assert!(!error.recoverable_target_refusal());
+    }
+
+    #[test]
+    fn allocation_only_scope_error_is_recoverable() {
+        let error = classify_scope_errors(Some(allocation_error()), None).unwrap_err();
+        assert!(matches!(error, crate::RenderError::Allocation(_)));
+        assert!(error.recoverable_target_refusal());
+    }
+
+    #[test]
+    fn successful_scopes_do_not_refuse_targets() {
+        assert!(classify_scope_errors(None, None).is_ok());
     }
 }

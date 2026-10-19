@@ -423,9 +423,8 @@ impl UndoStack {
         self.redo.last().map(|t| t.label.as_str())
     }
 
-    /// The monotonic count of committed steps evicted past [`UNDO_CAP`]. The
-    /// sketch-session squash records this at enter and REFUSES the squash if it has
-    /// moved since (the bottom shifted out, so the depth watermark is stale).
+    /// The monotonic count of committed steps evicted past [`UNDO_CAP`].
+    /// Consumers use its delta to adjust retained history boundaries.
     #[must_use]
     pub fn evictions(&self) -> u64 {
         self.evicted

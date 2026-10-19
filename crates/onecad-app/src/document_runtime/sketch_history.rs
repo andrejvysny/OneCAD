@@ -43,7 +43,7 @@ impl DocumentRuntime {
             session.sketch_id == id
                 && session.history_valid
                 && session.history_epoch == self.engine.current_epoch()
-                && session.evicted_at_enter == self.session.evictions()
+                && self.session.undo_depth() >= session.retained_watermark(self.session.evictions())
         })?;
         Some(crate::dto::SketchHistoryAvailability {
             undo_depth: self.session.sketch_history_depth(
@@ -51,7 +51,7 @@ impl DocumentRuntime {
                 id,
                 self.session
                     .undo_depth()
-                    .saturating_sub(session.undo_watermark),
+                    .saturating_sub(session.retained_watermark(self.session.evictions())),
             ),
             redo_depth: self.session.sketch_history_depth(
                 HistoryDirection::Redo,
@@ -80,8 +80,7 @@ impl DocumentRuntime {
             || self.revision().0 != scope.revision
             || self.head_snapshot_id().unwrap_or(SnapshotId(0)) != scope.snapshot_id
             || self.fencing.get().1 != self.engine.current_epoch()
-            || session.evicted_at_enter != self.session.evictions()
-            || self.session.undo_depth() < session.undo_watermark
+            || self.session.undo_depth() < session.retained_watermark(self.session.evictions())
         {
             return Err(op_failed(
                 "Sketch history: document, worker or history boundary changed",
@@ -97,7 +96,9 @@ impl DocumentRuntime {
     ) -> Result<Option<PreparedSketchHistory>, EngineError> {
         let session = self.check_sketch_history(&scope)?;
         let empty = match direction {
-            HistoryDirection::Undo => self.session.undo_depth() == session.undo_watermark,
+            HistoryDirection::Undo => {
+                self.session.undo_depth() == session.retained_watermark(self.session.evictions())
+            }
             HistoryDirection::Redo => session.history_redo == 0 || self.session.redo_depth() == 0,
         };
         if empty {
@@ -133,7 +134,7 @@ impl DocumentRuntime {
             undo_depth: self
                 .session
                 .undo_depth()
-                .saturating_sub(session.undo_watermark),
+                .saturating_sub(session.retained_watermark(self.session.evictions())),
             redo_depth: session.history_redo,
         })
     }

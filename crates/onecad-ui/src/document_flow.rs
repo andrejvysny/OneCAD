@@ -101,6 +101,7 @@ impl Flow {
 
 impl crate::app::App {
     pub fn document_request(&mut self, request: Request) {
+        self.sync_document_state();
         if self.busy() || self.stopping {
             self.file_status("Wait for the current command before using file actions");
             return;
@@ -123,14 +124,6 @@ impl crate::app::App {
         } else {
             self.launch_document(pending);
         }
-    }
-
-    fn document_dirty(&self) -> bool {
-        self.authoring_dirty
-            || self
-                .display
-                .as_ref()
-                .is_some_and(|display| display.projection.dirty)
     }
 
     fn file_status(&mut self, message: &str) {
@@ -164,10 +157,6 @@ impl crate::app::App {
             Ok(Outcome::Cancelled) => self.status = "File action cancelled".into(),
             Ok(Outcome::Replaced { warning }) => {
                 self.ui.start_open = false;
-                self.authoring_dirty = self
-                    .display
-                    .as_ref()
-                    .is_some_and(|display| display.projection.dirty);
                 self.status = warning.unwrap_or_else(|| "Document opened".into());
                 self.draw_dirty = true;
             }
@@ -188,7 +177,7 @@ impl crate::app::App {
     }
 }
 
-fn needs_confirmation(pending: &Pending, dirty: bool) -> bool {
+pub(crate) fn needs_confirmation(pending: &Pending, dirty: bool) -> bool {
     dirty
         && match pending {
             Pending::Quit => true,
@@ -198,6 +187,7 @@ fn needs_confirmation(pending: &Pending, dirty: bool) -> bool {
 
 /// Runs without presentation so hidden windows still drain work and protect dirty close.
 pub fn prepare_close(app: &mut crate::app::App) -> bool {
+    app.sync_document_state();
     if !app.close_prompt || app.busy() {
         return false;
     }
@@ -237,6 +227,10 @@ pub fn close_prompt(app: &mut crate::app::App, ctx: &egui::Context) {
     if choice.is_none() && response.should_close() {
         choice = Some(2);
     }
+    apply_close_choice(app, choice);
+}
+
+pub(crate) fn apply_close_choice(app: &mut crate::app::App, choice: Option<u8>) {
     match choice {
         Some(0) => {
             app.documents.after_save = app.documents.confirm.take();
@@ -248,7 +242,10 @@ pub fn close_prompt(app: &mut crate::app::App, ctx: &egui::Context) {
                     Pending::Document(request) => {
                         Pending::Document(Request::DiscardAndReplace(Box::new(request)))
                     }
-                    Pending::Quit => Pending::Quit,
+                    Pending::Quit => {
+                        app.stop_discard();
+                        return;
+                    }
                 };
                 app.launch_document(pending);
             }

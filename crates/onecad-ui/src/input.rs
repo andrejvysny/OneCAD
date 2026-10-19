@@ -55,6 +55,7 @@ pub fn route(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
 
 fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     app.poll_device_failure();
+    app.sync_document_state();
     if app.sampled && app.viewport_ready() {
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let finished = done.clone();
@@ -80,7 +81,7 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
         menu.set_document_enabled(
             crate::bars::replacement_allowed(app),
             crate::bars::save_allowed(app),
-            crate::bars::replacement_allowed(app) && app.display.is_some(),
+            crate::bars::export_allowed(app),
         );
     }
     let actions = app.menu.as_ref().map_or_else(Vec::new, |menu| menu.drain());

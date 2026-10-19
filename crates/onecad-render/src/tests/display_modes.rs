@@ -227,7 +227,7 @@ fn headless_four_display_modes_and_internal_xray_layers() {
                 RenderStyle::default(),
                 "xray-endpoint",
             );
-            assert!(pixels.chunks_exact(4).all(|p| p[3] == 255));
+            assert!(pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
         }
         high_overdraw(&mut renderer, &device, &queue, &view);
         preview_caps(&mut renderer, &device, &queue);
@@ -282,7 +282,7 @@ fn high_overdraw(
     full_image_tolerance(&images[0], &images[1]);
     assert!(images
         .iter()
-        .flat_map(|image| image.chunks_exact(4))
+        .flat_map(|image| image.as_chunks::<4>().0)
         .all(|pixel| pixel[3] == 255));
 }
 

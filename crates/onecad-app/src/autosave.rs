@@ -30,11 +30,13 @@
 //!
 //! ## Recovery lifecycle
 //!
-//! * a clean [`save_document`](crate::api::save_document) /
+//! * a clean [`save_document`](crate::api::save_document) or clean
 //!   [`close_document`](crate::api::close_document) calls [`clear_recovery_state`]
 //!   (remove the marker + delete the stale autosave);
+//! * dirty close preserves the container and releases marker ownership with
+//!   `pid = 0`; only an explicit discard authorizes cleanup of dirty work;
 //! * the next launch scans the autosave directory for CONTAINERS no live session
-//!   owns — a marker whose `pid` is no longer alive (per [`pid_alive`]), or no
+//!   owns — a released marker, a dead `pid` (per [`pid_alive`]), or no
 //!   marker at all — and offers them
 //!   ([`check_recovery`](crate::api::check_recovery)). Discovery is keyed to the
 //!   container, not the marker, so losing a marker costs a label rather than the
@@ -364,8 +366,8 @@ pub async fn write_save_payload(
     Ok(())
 }
 
-/// Clears a document's crash marker + stale autosave (a clean save/close, or a
-/// recovery decision). Best-effort: a missing marker/file is not an error.
+/// Clears a document's crash marker + stale autosave after a clean save/close or
+/// explicit discard. Best-effort: a missing marker/file is not an error.
 pub fn clear_recovery_state(app_data: &Path, document_id: DocumentId) {
     if let Err(e) = remove_marker(app_data, document_id) {
         tracing::warn!("clear recovery: remove marker failed: {e}");

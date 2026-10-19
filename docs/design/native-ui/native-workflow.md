@@ -258,6 +258,18 @@ validated replacement runtime is installed. One document opens per startup;
 other offers remain protected for a later launch. The isolated host does not
 implement production settings migration or cross-process project ownership.
 
+Lifecycle metadata uses `api::get_document_state` and a bounded latest-state slot
+independent of the renderable display. Capture refusal cannot clear dirty state
+or remove Save access. Ordinary dirty close retains recovery; explicit close
+discard checks the runtime session under the same lock that removes it. Recovery
+containers never expire by age. Released owners retain their labels with PID zero.
+Allocation recovery prioritizes the root out-of-memory error over dependent
+validation errors; validation-only failures remain device errors. Renderer
+regressions inject both errors and verify retained pixels and retry on real Metal;
+they do not reproduce hardware OOM or establish egui sampling-fence acceptance.
+Wireframe uses edge-only picking for clicks and hover; invisible face interiors
+cannot select bodies or occlude profiles. Shaded mode keeps face occlusion.
+
 Focused regression sources are `onecad-interaction/tests/transitions.rs`,
 `onecad-ui/src/input/tests.rs`, `pointer_policy.rs`, `gizmo_tests.rs`,
 `inspector_history.rs`, `feature_card.rs`, `startup_recovery_tests.rs`,
@@ -340,6 +352,9 @@ Run with the freshly built production worker, preserving explicit prerequisites:
 ONECAD_REQUIRE_WORKER=1 \
 ONECAD_WORKER_PATH="$PWD/worker/build-native-stabilization/onecad-worker" \
 cargo test -p onecad-app --test sketch_history --no-fail-fast
+ONECAD_REQUIRE_WORKER=1 \
+ONECAD_WORKER_PATH="$PWD/worker/build-native-stabilization/onecad-worker" \
+cargo test -p onecad-app --test sketch_history_solid --no-fail-fast
 cargo test -p onecad-app --lib document_runtime::sketch_adoption::tests:: --no-fail-fast
 cargo test -p onecad-interaction --test sketch_transitions --no-fail-fast
 cargo test -p onecad-ui --lib input::tests --no-fail-fast
@@ -351,6 +366,17 @@ and rejection of a prior visit. Unit gates additionally cover solver failure,
 conflicting/overconstrained replies, runtime/revision/worker fences and cancellation
 without a revision bump. Strict constraint candidates share the edit-visit fence,
 so Cancel or a new visit cannot accept a detached old candidate.
+
+`sketch_history_solid` starts with an already-full 200-entry model history and a
+fully constrained sketch driving an extrusion. It checks dimension expressions,
+solver-moved coordinates, local Undo/Redo, partial Undo followed by Finish,
+Discard, retained identities and fresh-process save/reopen equivalence. Active
+visits qualify solved sketch state and replay completion; solid volume and mesh
+are checked after Finish/Discard refresh the timeline sketch record. Prefix
+eviction preserves the visit boundary. A visit that evicts its own edits keeps
+bounded local history, but Discard conservatively reports `history was trimmed`
+and preserves changes; Finish retains granular steps rather than squashing an
+incomplete visit.
 
 Native acceptance remains separate: create two sketch edits, verify title/File/Edit
 menu and keyboard Undo/Redo each move exactly one step, cancel a transient draft

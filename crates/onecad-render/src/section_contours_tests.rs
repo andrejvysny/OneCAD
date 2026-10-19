@@ -58,9 +58,8 @@ fn triangle_cuts_preserve_plane_and_reversed_order() {
     assert_eq!(result[0].segment[5], 0.0);
     let oblique = collect(points, [1.0, 2.0, 3.0, 0.0]);
     assert_eq!(oblique.len(), 1);
-    for point in oblique[0].segment.chunks_exact(3) {
-        let point: [f32; 3] = point.try_into().unwrap();
-        assert!(distance(point, [1.0, 2.0, 3.0, 0.0]).abs() < 1e-6);
+    for point in oblique[0].segment.as_chunks::<3>().0 {
+        assert!(distance(*point, [1.0, 2.0, 3.0, 0.0]).abs() < 1e-6);
     }
     assert!(collect([[0.0, 0.0, 0.0], [1.0, 0.0, 1.0], [0.0, 1.0, 1.0]], plane).is_empty());
     assert!(collect([[0.0; 3], [0.0; 3], [1.0; 3]], plane).is_empty());

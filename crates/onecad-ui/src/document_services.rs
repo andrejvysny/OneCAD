@@ -20,6 +20,7 @@ pub async fn execute(
     tracing::info!(?request, "Native document request started");
     let mut result = run(backend, request).await;
     backend.events.finish();
+    crate::document_state::refresh(backend).await;
     if backend.startup_opened {
         match crate::services::load_ready_display(backend).await {
             Ok(captured) => {

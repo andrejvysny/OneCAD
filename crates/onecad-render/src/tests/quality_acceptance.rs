@@ -128,8 +128,10 @@ pub(super) fn render(
 fn assert_feature_changed(before: &[u8], after: &[u8], feature: &str) {
     assert_eq!(before.len(), after.len());
     let changed = before
-        .chunks_exact(4)
-        .zip(after.chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(after.as_chunks::<4>().0)
         .filter(|(a, b)| {
             a[..3]
                 .iter()

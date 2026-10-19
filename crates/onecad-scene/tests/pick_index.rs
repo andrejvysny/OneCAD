@@ -40,13 +40,24 @@ fn indexed_and_brute_force_match_across_bvh_splits_clips_roll_and_dpi() {
                         ((i * 137) % 800) as f64 + 0.3,
                         ((i * 179) % 600) as f64 + 0.7,
                     );
-                    let indexed = pick(&scene, &view, view.identity(), cursor).unwrap();
-                    let brute = pick_brute_force(&scene, &view, view.identity(), cursor).unwrap();
-                    assert_eq!(
-                        indexed.map(signature),
-                        brute.map(signature),
-                        "{projection:?} {scale} {roll} {cursor:?}"
-                    );
+                    for policy in [PickPolicy::FacesAndEdges, PickPolicy::EdgesOnly] {
+                        let indexed =
+                            pick_with_policy(&scene, &view, view.identity(), cursor, policy)
+                                .unwrap();
+                        let brute = pick_brute_force_with_policy(
+                            &scene,
+                            &view,
+                            view.identity(),
+                            cursor,
+                            policy,
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            indexed.map(signature),
+                            brute.map(signature),
+                            "{projection:?} {scale} {roll} {cursor:?} {policy:?}"
+                        );
+                    }
                 }
             }
         }

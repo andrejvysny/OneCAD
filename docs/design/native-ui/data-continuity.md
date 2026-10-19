@@ -7,6 +7,15 @@ All `file:line` citations are against the working tree at the revision above. Ob
 
 Path shorthand: a bare `lib.rs`, `autosave.rs`, `recents.rs`, `library.rs` or `api/mod.rs` means the file under `src-tauri/src/`. Crate paths such as `tauri-2.11.5/…`, `tauri-utils-2.9.3/…`, `dirs-6.0.0/…` and `dirs-sys-0.5.0/…` are under `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/`; those versions match `src-tauri/Cargo.lock`.
 
+The inventory below preserves the frozen Tauri observations. Current native
+recovery differs: `crates/onecad-core/src/io/recovery.rs` never expires recovery
+containers by age. A dirty close releases its marker with `pid = 0`, retaining
+title, original path and container; discovery does not probe PID zero. Shared
+application close preserves dirty recovery unless an explicit discard names the
+current runtime session. See the [native host contract](../../../crates/onecad-ui/README.md)
+for lifecycle metadata and capture-failure behavior. These changes do not qualify
+production paths, cross-process writer ownership or physical crash/restart drills.
+
 ## 1. Inventory: what exists today
 
 ### 1.1 Bundle identifier

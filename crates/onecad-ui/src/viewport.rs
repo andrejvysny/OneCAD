@@ -446,13 +446,17 @@ fn pick(app: &mut App, display: &crate::bridge::Display, view: &ViewSnapshot, lo
         .iter()
         .filter_map(|profile| profile.pick(view, logical).map(|hit| (profile, hit)))
         .min_by(|a, b| a.1.1.total_cmp(&b.1.1));
-    let body = onecad_scene::pick(&display.scene, view, view.identity(), logical)
-        .ok()
-        .flatten();
+    let body = onecad_scene::pick_with_policy(
+        &display.scene,
+        view,
+        view.identity(),
+        logical,
+        pick_policy(app.renderer.options().display_mode),
+    )
+    .ok()
+    .flatten();
     if let Some((profile, (anchor, distance))) = hit
-        && body
-            .as_ref()
-            .is_none_or(|body| body.ray_distance >= distance - 1e-6)
+        && profile_visible(body.as_ref(), distance)
         && let Some(context) = app.interaction.context.clone()
     {
         let mut reference = profile.reference.clone();
@@ -474,6 +478,17 @@ fn pick(app: &mut App, display: &crate::bridge::Display, view: &ViewSnapshot, lo
     app.selected_body = body.as_ref().map(|body| body.body_id);
     app.topology.select(body.as_ref());
     app.draw_dirty = true;
+}
+
+pub(crate) fn pick_policy(mode: onecad_render::DisplayMode) -> onecad_scene::PickPolicy {
+    match mode {
+        onecad_render::DisplayMode::Wireframe => onecad_scene::PickPolicy::EdgesOnly,
+        _ => onecad_scene::PickPolicy::FacesAndEdges,
+    }
+}
+
+fn profile_visible(body: Option<&onecad_scene::PickHit<'_>>, distance: f64) -> bool {
+    body.is_none_or(|body| body.ray_distance >= distance - 1e-6)
 }
 
 fn profile_bounds(display: &crate::bridge::Display) -> Option<Bounds> {

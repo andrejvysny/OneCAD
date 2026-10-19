@@ -317,6 +317,21 @@ pub struct DatumDto {
     pub resolved_valid: bool,
 }
 
+/// Bounded document lifecycle metadata, independent of geometry and projections.
+/// Empty identities mean that no document is open. `path` is display metadata;
+/// saves must use the runtime's complete backend path.
+/// Title and path use UTF-8-safe truncation at 4096 and 32768 bytes respectively.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentState {
+    pub document_id: String,
+    pub runtime_session: String,
+    pub revision: u64,
+    pub dirty: bool,
+    pub title: String,
+    pub path: Option<String>,
+}
+
 /// The full document projection (`documentStore.ts` `DocumentProjection`).
 ///
 /// `bodies`/`sketches`/`datums` serialize as JSON objects keyed by id (the

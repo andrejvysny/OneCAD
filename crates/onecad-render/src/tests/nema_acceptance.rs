@@ -79,8 +79,10 @@ fn headless_quality_nema_admission_capture() {
                 assert_eq!(first, second, "NEMA same-device repeated capture");
                 if display_mode == DisplayMode::Shaded {
                     let coverage = first
-                        .chunks_exact(4)
-                        .zip(blank.chunks_exact(4))
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .zip(blank.as_chunks::<4>().0)
                         .filter(|(a, b)| {
                             a[..3].iter().zip(&b[..3]).any(|(a, b)| a.abs_diff(*b) > 8)
                         })

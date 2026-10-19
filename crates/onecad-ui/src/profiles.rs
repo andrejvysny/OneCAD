@@ -144,17 +144,15 @@ fn decode_profile(
     }
     let uv: Vec<_> = fill
         .positions
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| DVec2::new(p[0], p[1]))
         .collect();
     if uv.is_empty() || uv.iter().any(|p| !p.is_finite()) {
         return Err("invalid worker profile positions".into());
     }
-    let triangles: Vec<[u32; 3]> = fill
-        .indices
-        .chunks_exact(3)
-        .map(|i| [i[0], i[1], i[2]])
-        .collect();
+    let triangles = fill.indices.as_chunks::<3>().0.to_vec();
     validate_triangles(&uv, &triangles)?;
     let boundary = boundary_edges(&triangles)?;
     let (origin, x, y) = (

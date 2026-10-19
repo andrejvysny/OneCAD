@@ -28,7 +28,7 @@ pub struct Lease {
 impl HostBudget {
     pub fn reserve(self: &Arc<Self>, bytes: usize) -> Result<Lease, String> {
         self.used
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 used.checked_add(bytes).filter(|next| *next <= HOST_BYTES)
             })
             .map_err(|_| {

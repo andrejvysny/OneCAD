@@ -73,6 +73,7 @@ pub async fn execute(
         Err(error) => Err(error),
     };
     backend.events.finish();
+    crate::document_state::refresh(backend).await;
     let mut display = None;
     let mut error = None;
     match result {

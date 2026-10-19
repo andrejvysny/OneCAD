@@ -16,12 +16,11 @@ pub fn title(app: &mut App, ui: &mut Ui) {
         crate::input::history_available(app, false),
         crate::input::history_available(app, true),
     );
-    let (name, dirty) = app
-        .display
+    let name = app
+        .document_state
         .as_ref()
-        .map_or(("OneCAD".to_owned(), false), |d| {
-            (d.projection.title.clone(), d.projection.dirty)
-        });
+        .map_or_else(|| "OneCAD".to_owned(), |state| state.title.clone());
+    let dirty = app.document_dirty();
     egui::Panel::top("title")
         .exact_size(44.0)
         .frame(egui::Frame::NONE)
@@ -58,7 +57,11 @@ pub(crate) fn replacement_allowed(app: &App) -> bool {
 }
 
 pub(crate) fn save_allowed(app: &App) -> bool {
-    !app.busy() && !app.sketch_active() && app.display.is_some()
+    !app.busy() && !app.sketch_active() && app.document_open()
+}
+
+pub(crate) fn export_allowed(app: &App) -> bool {
+    replacement_allowed(app) && app.bridge.valid() && app.display.is_some()
 }
 
 fn file_menu(app: &mut App, ctx: &Context, file: &egui::Response, (undo, redo): (bool, bool)) {
@@ -127,10 +130,7 @@ fn document_menu(app: &mut App, ui: &mut Ui) {
             ("3MF…", ExportFormat::ThreeMf),
         ] {
             if ui
-                .add_enabled(
-                    replacement_allowed(app) && app.display.is_some(),
-                    egui::Button::new(label),
-                )
+                .add_enabled(export_allowed(app), egui::Button::new(label))
                 .clicked()
             {
                 app.document_request(Request::Export(format));

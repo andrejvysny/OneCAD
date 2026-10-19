@@ -16,6 +16,7 @@ mod dialogs;
 mod display_menu;
 mod document_flow;
 mod document_services;
+mod document_state;
 mod event_mailbox;
 mod explorer;
 mod feature_card;

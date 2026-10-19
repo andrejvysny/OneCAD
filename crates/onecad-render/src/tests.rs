@@ -280,9 +280,15 @@ fn capture(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &Renderer, name
         .chunks(stride as usize)
         .flat_map(|row| row[..width as usize * 4].iter().copied())
         .collect();
-    assert!(pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
     assert!(pixels
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .all(|pixel| pixel[3] == 255));
+    assert!(pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
         .any(|pixel| pixel[..3] != pixels[..3]));
     let output = std::env::var_os("ONECAD_RENDER_CAPTURE_DIR")
         .map(std::path::PathBuf::from)

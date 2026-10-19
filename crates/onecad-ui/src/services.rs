@@ -76,6 +76,7 @@ pub async fn execute(
     };
     let result = execute_command(backend, command, sender).await;
     backend.events.finish();
+    crate::document_state::refresh(backend).await;
     crate::document_services::refresh_recents(backend);
     if backend.startup_opened {
         match load_ready_display(backend).await {

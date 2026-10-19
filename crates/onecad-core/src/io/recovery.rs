@@ -19,8 +19,7 @@
 //! owner means skip, a dead owner means offer, and no marker at all still means
 //! offer — as an unlabelled orphan. Keying discovery to the marker instead made a
 //! container unreachable the moment its marker was consumed or lost, however recent
-//! and however large the work in it. Containers unclaimed past [`ORPHAN_TTL`] are
-//! swept.
+//! and however large the work in it. Recovery containers never expire by age.
 //!
 //! ## The autosave writer is the app's job
 //!
@@ -39,7 +38,7 @@
 //! simply defers recovery to a later launch — never a false "safe to discard".
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -51,16 +50,6 @@ use super::{IoError, IoResult};
 /// (~2 min; V1/V2 plan). The app scheduler owns the cadence and debounces below
 /// this; `autosave::AUTOSAVE_MAX_AGE` is the ceiling built from this constant.
 pub const AUTOSAVE_INTERVAL_SECS: u64 = 120;
-
-/// How long an unclaimed autosave container stays on offer before
-/// [`scan_recoverable`] deletes it.
-///
-/// Recovery state is otherwise only ever removed by a deliberate act — a save, a
-/// clean close, or the user pressing Discard. A container whose owner died and whom
-/// nobody came back for has no such act coming, so without a TTL the autosave
-/// directory grows for the life of the install. 30 days is long enough that "I was
-/// on holiday" is not a data-loss event.
-pub const ORPHAN_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// The `.onecad` container extension (autosave files and real documents share it).
 pub const CONTAINER_EXT: &str = "onecad";
@@ -92,6 +81,7 @@ pub struct SessionMarker {
     /// The document this session is editing.
     pub document_id: DocumentId,
     /// The owning process id (checked for liveness on the next launch).
+    /// Zero releases ownership while preserving recovery metadata after dirty close.
     pub pid: u32,
     /// The document's real on-disk path, if it has been saved (RFC3339-free — a
     /// filesystem path). `None` for an unsaved (autosave-only) document.
@@ -160,8 +150,18 @@ pub fn remove_marker(app_data: &Path, document_id: DocumentId) -> IoResult<()> {
     }
 }
 
+/// Releases a closed document's live ownership without losing recovery labels.
+/// An absent or unreadable marker remains an orphan; the container is untouched.
+pub fn release_marker(app_data: &Path, document_id: DocumentId) -> IoResult<()> {
+    if let Some(mut marker) = read_marker(app_data, document_id) {
+        marker.pid = 0;
+        write_marker(app_data, &marker)?;
+    }
+    Ok(())
+}
+
 /// Scans the autosave directory for containers **no live session owns**, newest
-/// first, sweeping any that have gone stale past [`ORPHAN_TTL`].
+/// first. Age alone never deletes recovery work.
 ///
 /// ## Why this iterates containers, not markers
 ///
@@ -177,22 +177,20 @@ pub fn remove_marker(app_data: &Path, document_id: DocumentId) -> IoResult<()> {
 /// * **marker present, owner alive** ⇒ skipped. A running session owns it, and
 ///   offering a document that is open in another window would be a lie.
 /// * **marker present, owner dead** ⇒ offered, fully labelled.
+/// * **marker present, pid zero** ⇒ offered after dirty close, fully labelled.
 /// * **no marker** ⇒ offered as an orphan (`marker: None`), labelled by mtime only.
-/// * **older than [`ORPHAN_TTL`]** ⇒ deleted, with its marker, and not offered.
 ///
-/// A missing autosave directory yields an empty list. Foreign files, unparseable
-/// names and unreadable markers are skipped, never fatal.
+/// A missing autosave directory yields an empty list. Foreign files and unparseable
+/// names are skipped. Unreadable markers degrade to orphan offers, never deletion.
 ///
-/// `now` is injected for the same reason `pid_alive` is: this module does not read
-/// the wall clock, so a TTL test can age a container without touching the
-/// filesystem's own timestamps.
+/// `now` remains accepted for callers that inject their lifecycle clock.
 ///
 /// # Errors
 /// [`IoError::Io`] if the directory exists but cannot be read.
 pub fn scan_recoverable(
     app_data: &Path,
     pid_alive: impl Fn(u32) -> bool,
-    now: SystemTime,
+    _now: SystemTime,
 ) -> IoResult<Vec<RecoveryOffer>> {
     let dir = autosave_dir(app_data);
     let entries = match std::fs::read_dir(&dir) {
@@ -219,19 +217,14 @@ pub fn scan_recoverable(
         };
 
         let marker = read_marker(app_data, document_id);
-        if marker.as_ref().is_some_and(|m| pid_alive(m.pid)) {
+        if marker
+            .as_ref()
+            .is_some_and(|m| m.pid != 0 && pid_alive(m.pid))
+        {
             continue; // a live session owns this container.
         }
 
         let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-        if is_expired(modified, now) {
-            // Sweep. This is the only place recovery state is deleted without the
-            // user saying so, which is why it needs a real age and not merely a
-            // failed stat: `is_expired` answers false for an unreadable or
-            // future-dated mtime.
-            sweep_expired(app_data, document_id, &path);
-            continue;
-        }
         offers.push(RecoveryOffer {
             document_id,
             autosave_path: path,
@@ -257,25 +250,6 @@ fn read_marker(app_data: &Path, document_id: DocumentId) -> Option<SessionMarker
     serde_json::from_slice::<SessionMarker>(&bytes).ok()
 }
 
-/// Whether a container's mtime puts it past [`ORPHAN_TTL`] as of `now`.
-///
-/// Deliberately conservative — `false` unless the age is both readable and sane. A
-/// missing mtime, or one in the future (a clock jump, a restored backup, a file
-/// copied off another machine), must never be read as "old enough to delete".
-fn is_expired(modified: Option<SystemTime>, now: SystemTime) -> bool {
-    modified
-        .and_then(|t| now.duration_since(t).ok())
-        .is_some_and(|age| age > ORPHAN_TTL)
-}
-
-/// Deletes an expired container and its marker. Best-effort; a failure is logged by
-/// the caller's absence of an offer, not by an error (a sweep that cannot run must
-/// not fail the scan and hide every other offer).
-fn sweep_expired(app_data: &Path, document_id: DocumentId, container: &Path) {
-    let _ = std::fs::remove_file(container);
-    let _ = remove_marker(app_data, document_id);
-}
-
 /// A `SystemTime` as Unix-epoch milliseconds (`0` before the epoch).
 fn unix_millis(t: SystemTime) -> u64 {
     t.duration_since(UNIX_EPOCH)
@@ -286,6 +260,7 @@ fn unix_millis(t: SystemTime) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use uuid::Uuid;
 
     fn marker(app_data: &Path, id: DocumentId, pid: u32) -> SessionMarker {
@@ -453,38 +428,38 @@ mod tests {
     }
 
     #[test]
-    fn scan_sweeps_containers_past_the_ttl() {
+    fn scan_preserves_old_dead_owner_and_markerless_containers() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let fresh = DocumentId(Uuid::from_u128(0xF1));
         let expired = DocumentId(Uuid::from_u128(0xE2));
 
-        // Ageing runs off the injected clock, so the filesystem's own timestamps stay
-        // untouched. `now` is TTL+100 ms past `base`: `expired` is written at ~`base`
-        // and lands just over the line, `fresh` is written 300 ms later and lands
-        // 200 ms inside it.
+        // Inject a clock beyond the former 30-day expiry without changing mtimes.
         let base = SystemTime::now();
         write_marker(root, &marker(root, expired, 1000)).unwrap();
         std::fs::write(autosave_path(root, expired), b"x").unwrap();
         std::thread::sleep(Duration::from_millis(300));
         write_marker(root, &marker(root, fresh, 1000)).unwrap();
         std::fs::write(autosave_path(root, fresh), b"x").unwrap();
-        let now = base + ORPHAN_TTL + Duration::from_millis(100);
+        let now = base + Duration::from_secs(31 * 24 * 60 * 60);
 
         let offers = scan_recoverable(root, |_| false, now).unwrap();
-        assert_eq!(offers.len(), 1);
+        assert_eq!(offers.len(), 2);
         assert_eq!(offers[0].document_id, fresh);
         assert!(
-            !autosave_path(root, expired).exists() && !marker_path(root, expired).exists(),
-            "an expired container is swept with its marker"
+            autosave_path(root, expired).exists() && marker_path(root, expired).exists(),
+            "age alone must not discard recovery work"
         );
         assert!(
             autosave_path(root, fresh).exists(),
             "a fresh one is untouched"
         );
+        remove_marker(root, expired).unwrap();
+        let offers = scan_recoverable(root, |_| false, now).unwrap();
+        assert!(offers.iter().any(|offer| offer.document_id == expired));
     }
 
-    /// The sweep must not fire on an mtime it cannot trust. A container dated in the
+    /// Discovery must preserve a container dated in the
     /// FUTURE relative to the clock — a clock jump backwards, a restored backup, a
     /// copy off another machine — yields no age at all from `duration_since`, and
     /// reading that as "old" would delete live work.
@@ -501,6 +476,45 @@ mod tests {
         let offers = scan_recoverable(root, |_| false, now).unwrap();
         assert_eq!(offers.len(), 1, "still offered");
         assert!(autosave_path(root, id).exists(), "and not deleted");
+    }
+
+    #[test]
+    fn released_owner_retains_labels_without_probing_pid_zero() {
+        let area = tempfile::tempdir().unwrap();
+        let id = DocumentId(Uuid::from_u128(0xC105E));
+        let original = marker(area.path(), id, std::process::id());
+        write_marker(area.path(), &original).unwrap();
+        std::fs::write(autosave_path(area.path(), id), b"unsaved work").unwrap();
+        release_marker(area.path(), id).unwrap();
+        let offers = scan_recoverable(
+            area.path(),
+            |pid| {
+                assert_ne!(pid, 0, "zero means released, not a process group");
+                true
+            },
+            SystemTime::now(),
+        )
+        .unwrap();
+        assert_eq!(offers.len(), 1);
+        let released = offers[0].marker.as_ref().unwrap();
+        assert_eq!(released.pid, 0);
+        assert_eq!(released.opened_path, original.opened_path);
+        assert_eq!(released.title, original.title);
+        assert_eq!(released.last_autosave, original.last_autosave);
+    }
+
+    #[test]
+    fn corrupt_marker_keeps_container_recoverable() {
+        let area = tempfile::tempdir().unwrap();
+        let id = DocumentId(Uuid::from_u128(0xBAD));
+        std::fs::create_dir_all(autosave_dir(area.path())).unwrap();
+        std::fs::write(autosave_path(area.path(), id), b"unsaved work").unwrap();
+        std::fs::write(marker_path(area.path(), id), b"corrupt").unwrap();
+        release_marker(area.path(), id).unwrap();
+        let offers = scan_recoverable(area.path(), |_| true, SystemTime::now()).unwrap();
+        assert_eq!(offers.len(), 1);
+        assert!(offers[0].marker.is_none());
+        assert!(autosave_path(area.path(), id).exists());
     }
 
     #[test]

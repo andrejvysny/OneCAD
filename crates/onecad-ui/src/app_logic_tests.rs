@@ -126,3 +126,6 @@ fn has_command(
 ) -> bool {
     output.viewport_commands.values().flatten().any(predicate)
 }
+
+#[path = "document_lifecycle_tests.rs"]
+mod document_lifecycle_tests;

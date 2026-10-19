@@ -11,6 +11,114 @@ async fn dirty_active(root: &Path) -> (AppState, HostContext, DocumentId) {
 }
 
 #[tokio::test]
+async fn recovered_unsaved_close_remains_discoverable() {
+    let area = tempfile::tempdir().unwrap();
+    let (state, host, id) = dirty_active(area.path()).await;
+    assert!(state.runtime.lock().await.as_ref().unwrap().is_dirty());
+    close_document(&state, host.clone()).await.unwrap();
+    assert!(autosave_path(area.path(), id).exists());
+    let offers = check_recovery(&state, host).await.unwrap();
+    assert_eq!(offers.len(), 1);
+    assert_eq!(offers[0].document_id, id.to_string());
+    assert_eq!(offers[0].title.as_deref(), Some("Recovery"));
+    assert_eq!(
+        offers[0].original_path,
+        Some(
+            area.path()
+                .join("original.onecad")
+                .to_string_lossy()
+                .into_owned()
+        )
+    );
+}
+
+#[tokio::test]
+async fn stale_discard_close_preserves_active_runtime_and_recovery() {
+    let area = tempfile::tempdir().unwrap();
+    let (state, host, id) = dirty_active(area.path()).await;
+    let before = get_document_state(&state).await.unwrap();
+    assert!(matches!(
+        discard_and_close_document(&state, host.clone(), "stale-session").await,
+        Err(ApiError::InvalidCommand(_))
+    ));
+    assert_eq!(get_document_state(&state).await.unwrap(), before);
+    assert!(autosave_path(area.path(), id).exists());
+    assert!(marker_path(area.path(), id).exists());
+    discard_and_close_document(&state, host, &before.runtime_session)
+        .await
+        .unwrap();
+    assert!(!autosave_path(area.path(), id).exists());
+    assert!(!marker_path(area.path(), id).exists());
+}
+
+#[tokio::test]
+async fn discard_close_refuses_old_session_after_reopening_same_document() {
+    let area = tempfile::tempdir().unwrap();
+    let (state, host, id) = dirty_active(area.path()).await;
+    let old = get_document_state(&state).await.unwrap();
+    open_document(
+        &state,
+        host.clone(),
+        area.path()
+            .join("original.onecad")
+            .to_string_lossy()
+            .into_owned(),
+        None,
+    )
+    .await
+    .unwrap();
+    let reopened = get_document_state(&state).await.unwrap();
+    assert_eq!(old.document_id, reopened.document_id);
+    assert_ne!(old.runtime_session, reopened.runtime_session);
+    assert!(
+        discard_and_close_document(&state, host, &old.runtime_session)
+            .await
+            .is_err()
+    );
+    assert_eq!(get_document_state(&state).await.unwrap(), reopened);
+    assert!(autosave_path(area.path(), id).exists());
+    assert!(marker_path(area.path(), id).exists());
+}
+
+#[tokio::test]
+async fn failed_save_keeps_dirty_recovery_until_explicit_discard() {
+    let area = tempfile::tempdir().unwrap();
+    let (state, host, id) = dirty_active(area.path()).await;
+    let bytes = std::fs::read(autosave_path(area.path(), id)).unwrap();
+    assert!(save_document(
+        &state,
+        host.clone(),
+        Some(area.path().to_string_lossy().into_owned()),
+        None
+    )
+    .await
+    .is_err());
+    assert!(get_document_state(&state).await.unwrap().dirty);
+    assert_eq!(
+        std::fs::read(autosave_path(area.path(), id)).unwrap(),
+        bytes
+    );
+    assert!(marker_path(area.path(), id).exists());
+    close_document(&state, host.clone()).await.unwrap();
+    assert_eq!(check_recovery(&state, host).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn successful_save_cleans_recovery_and_clean_close_removes_stale_copy() {
+    let area = tempfile::tempdir().unwrap();
+    let (state, host, id) = dirty_active(area.path()).await;
+    let outcome = save_document(&state, host.clone(), None, None)
+        .await
+        .unwrap();
+    assert!(outcome.clean);
+    assert!(!autosave_path(area.path(), id).exists());
+    assert!(!marker_path(area.path(), id).exists());
+    std::fs::copy(&outcome.path, autosave_path(area.path(), id)).unwrap();
+    close_document(&state, host).await.unwrap();
+    assert!(!autosave_path(area.path(), id).exists());
+}
+
+#[tokio::test]
 async fn explicit_discard_removes_prior_recovery_only_after_replacement() {
     let area = tempfile::tempdir().unwrap();
     let (state, host, id) = dirty_active(area.path()).await;
@@ -153,7 +261,8 @@ async fn close_fences_queued_autosave_and_preserves_unresolved_offers() {
             .await
             .is_pending()
     );
-    let close = close_document(&state, host.clone());
+    let session = get_document_state(&state).await.unwrap().runtime_session;
+    let close = discard_and_close_document(&state, host.clone(), &session);
     tokio::pin!(close);
     assert!(
         std::future::poll_fn(|cx| Poll::Ready(close.as_mut().poll(cx)))
@@ -209,7 +318,8 @@ async fn admitted_autosave_close_race() {
         state.persistence.try_lock().is_err(),
         "autosave must own the lane before close"
     );
-    let close = close_document(&state, host);
+    let session = get_document_state(&state).await.unwrap().runtime_session;
+    let close = discard_and_close_document(&state, host, &session);
     tokio::pin!(close);
     assert!(
         std::future::poll_fn(|cx| Poll::Ready(close.as_mut().poll(cx)))

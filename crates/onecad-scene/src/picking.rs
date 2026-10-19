@@ -12,6 +12,15 @@ pub enum PickKind {
     Edge,
 }
 
+/// Geometry eligible for picking and occlusion in the captured view.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PickPolicy {
+    #[default]
+    FacesAndEdges,
+    /// Faces neither receive hits nor hide edges.
+    EdgesOnly,
+}
+
 /// Snapshot-scoped topology identity and anchor; never a persistent triangle ID.
 #[derive(Clone, Copy, Debug)]
 pub struct PickHit<'a> {
@@ -37,7 +46,17 @@ pub fn pick<'a>(
     capture: CaptureIdentity,
     logical: DVec2,
 ) -> Result<Option<PickHit<'a>>, SceneError> {
-    pick_impl(scene, view, capture, logical, true)
+    pick_with_policy(scene, view, capture, logical, PickPolicy::default())
+}
+
+pub fn pick_with_policy<'a>(
+    scene: &'a SceneSnapshot,
+    view: &ViewSnapshot,
+    capture: CaptureIdentity,
+    logical: DVec2,
+    policy: PickPolicy,
+) -> Result<Option<PickHit<'a>>, SceneError> {
+    pick_impl(scene, view, capture, logical, policy, true)
 }
 
 /// Independent traversal oracle for acceleration qualification.
@@ -47,7 +66,17 @@ pub fn pick_brute_force<'a>(
     capture: CaptureIdentity,
     logical: DVec2,
 ) -> Result<Option<PickHit<'a>>, SceneError> {
-    pick_impl(scene, view, capture, logical, false)
+    pick_brute_force_with_policy(scene, view, capture, logical, PickPolicy::default())
+}
+
+pub fn pick_brute_force_with_policy<'a>(
+    scene: &'a SceneSnapshot,
+    view: &ViewSnapshot,
+    capture: CaptureIdentity,
+    logical: DVec2,
+    policy: PickPolicy,
+) -> Result<Option<PickHit<'a>>, SceneError> {
+    pick_impl(scene, view, capture, logical, policy, false)
 }
 
 fn pick_impl<'a>(
@@ -55,6 +84,7 @@ fn pick_impl<'a>(
     view: &ViewSnapshot,
     capture: CaptureIdentity,
     logical: DVec2,
+    policy: PickPolicy,
     indexed: bool,
 ) -> Result<Option<PickHit<'a>>, SceneError> {
     if scene.identity() != view.identity().scene || capture != view.identity() {
@@ -62,9 +92,11 @@ fn pick_impl<'a>(
     }
     let ray = view.ray(logical)?;
     let mut face: Option<PickHit<'a>> = None;
-    for body in scene.bodies() {
-        let mesh = body.mesh()?;
-        pick_body_faces(body, &mesh, view, ray, indexed, &mut face);
+    if policy == PickPolicy::FacesAndEdges {
+        for body in scene.bodies() {
+            let mesh = body.mesh()?;
+            pick_body_faces(body, &mesh, view, ray, indexed, &mut face);
+        }
     }
     let mut edge: Option<PickHit<'a>> = None;
     for body in scene.bodies() {

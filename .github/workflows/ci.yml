@@ -19,7 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install repository Rust toolchain
+        run: rustup show active-toolchain
       - uses: oven-sh/setup-bun@v2
       - name: Install tooling dependencies
         run: bun install --frozen-lockfile
@@ -108,11 +109,13 @@ jobs:
       - name: Rust toolchain (userland; the runner has no sudo)
         run: |
           set -euo pipefail
-          if ! command -v cargo >/dev/null 2>&1 && [ ! -x "$HOME/.cargo/bin/cargo" ]; then
+          if ! command -v rustup >/dev/null 2>&1 && [ ! -x "$HOME/.cargo/bin/rustup" ]; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-              | sh -s -- -y --profile minimal --default-toolchain stable
+              | sh -s -- -y --profile minimal --default-toolchain none
           fi
+          export PATH="$HOME/.cargo/bin:$PATH"
           echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
+          rustup show active-toolchain
       - name: Kernelbench unit + supervisor tests
         # `-p`, not `--workspace`: the app crate's build script requires a staged
         # sidecar (bundle.externalBin) and pulls in GTK/WebKitGTK on Linux.
@@ -282,6 +285,8 @@ jobs:
         working-directory: .
     steps:
       - uses: actions/checkout@v4
+      - name: Install repository Rust toolchain
+        run: rustup show active-toolchain
       - name: Install worker dependencies
         working-directory: .
         run: brew install boost eigen nlohmann-json ninja
@@ -310,8 +315,6 @@ jobs:
           mkdir -p packaging/binaries
           cp worker/build-8.0.1-rust/onecad-worker "packaging/binaries/onecad-worker-${triple}"
           chmod +x "packaging/binaries/onecad-worker-${triple}"
-      - name: Install rustfmt and clippy
-        run: rustup component add rustfmt clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: .

@@ -9,6 +9,53 @@ const FACE: [[f32; 3]; 3] = [
 const CENTER: DVec2 = DVec2::new(400.0, 300.0);
 
 #[test]
+fn wireframe_does_not_pick_invisible_face_interiors() {
+    let s = scene(&FACE, &[[0, 1, 2]], &[]);
+    let v = view(Projection::Perspective, 1.0);
+    for picker in [pick_with_policy, pick_brute_force_with_policy] {
+        assert!(picker(&s, &v, v.identity(), CENTER, PickPolicy::EdgesOnly)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            picker(&s, &v, v.identity(), CENTER, PickPolicy::FacesAndEdges)
+                .unwrap()
+                .unwrap()
+                .kind,
+            PickKind::Face
+        );
+    }
+}
+
+#[test]
+fn wireframe_edges_remain_pickable_in_front_of_and_behind_faces() {
+    for projection in [Projection::Perspective, Projection::Orthographic] {
+        let v = view(projection, 1.0);
+        for y in [-1.0, 1.0] {
+            let s = scene(&FACE, &[[0, 1, 2]], &[vec![[-1.0, y, 0.0], [1.0, y, 0.0]]]);
+            for picker in [pick_with_policy, pick_brute_force_with_policy] {
+                let hit = picker(&s, &v, v.identity(), CENTER, PickPolicy::EdgesOnly)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(hit.kind, PickKind::Edge);
+                assert_eq!(hit.topology_id, "e:0");
+                assert!((hit.world_position.y - f64::from(y)).abs() < 1e-12);
+                assert_eq!(
+                    picker(&s, &v, v.identity(), CENTER, PickPolicy::FacesAndEdges)
+                        .unwrap()
+                        .unwrap()
+                        .kind,
+                    if y < 0.0 {
+                        PickKind::Edge
+                    } else {
+                        PickKind::Face
+                    }
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn ray_triangle_resolves_snapshot_scoped_face_identity() {
     let s = scene(&FACE, &[[0, 1, 2]], &[]);
     let v = view(Projection::Perspective, 1.0);

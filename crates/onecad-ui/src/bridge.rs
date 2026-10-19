@@ -92,6 +92,8 @@ pub enum Message {
 
 pub struct Shared {
     pub display: Mutex<Option<Arc<Display>>>,
+    pub document_state: Mutex<crate::document_state::Slot>,
+    pub discard_on_shutdown: Mutex<Option<String>>,
     pub recents: Mutex<Vec<onecad_app::dto::RecentProjectDto>>,
     pub recovery: Mutex<crate::startup_recovery::State>,
     pub candidate: Mutex<Option<(u64, Candidate)>>,
@@ -115,6 +117,8 @@ impl Shared {
     pub(crate) fn new(context: egui::Context, budget: onecad_render::PreparationBudget) -> Self {
         Self {
             display: Mutex::new(None),
+            document_state: Mutex::new(Default::default()),
+            discard_on_shutdown: Mutex::new(None),
             recents: Mutex::new(Vec::new()),
             recovery: Mutex::new(Default::default()),
             candidate: Mutex::new(None),
@@ -273,6 +277,12 @@ impl Bridge {
             .store(true, std::sync::atomic::Ordering::Release);
         self.shared.shutdown.notify_one();
     }
+    pub fn request_discard_shutdown(&self, runtime_session: &str) {
+        if let Ok(mut intent) = self.shared.discard_on_shutdown.lock() {
+            *intent = Some(runtime_session.to_owned());
+        }
+        self.request_shutdown();
+    }
     pub fn valid(&self) -> bool {
         self.shared.valid.load(std::sync::atomic::Ordering::Acquire)
     }
@@ -339,6 +349,9 @@ impl EventSink for Sink {
                 format!("Geometry worker: {}", status.state)
             }
             AppEvent::ProjectionUpdated(projection) => {
+                if let Ok(mut slot) = self.shared.document_state.lock() {
+                    slot.observe(&projection);
+                }
                 self.events
                     .observe_projection(&projection.runtime_session, projection.revision);
                 self.shared.invalidate(None);
@@ -469,7 +482,20 @@ async fn actor(
             _permit: envelope.permit,
         });
     }
-    let _ = onecad_app::api::close_document(&backend.state, backend.host.clone()).await;
+    let discard = shared
+        .discard_on_shutdown
+        .lock()
+        .ok()
+        .and_then(|mut intent| intent.take());
+    let closed = if let Some(session) = discard {
+        onecad_app::api::discard_and_close_document(&backend.state, backend.host.clone(), &session)
+            .await
+    } else {
+        onecad_app::api::close_document(&backend.state, backend.host.clone()).await
+    };
+    if let Err(error) = closed {
+        eprintln!("Document close failed; recovery retained: {error}");
+    }
     backend.state.retire_all();
     let _ = sender.send(Message::Stopped);
     shared.wake();

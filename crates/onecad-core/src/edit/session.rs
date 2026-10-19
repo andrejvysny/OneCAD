@@ -195,10 +195,9 @@ impl DocumentSession {
         self.undo.clear_redo();
     }
 
-    /// The monotonic count of undo steps evicted past the cap since open. The
-    /// sketch-session squash records this at enter and refuses the squash if it
-    /// has moved (an eviction shifted the stack bottom, invalidating the
-    /// depth-based watermark).
+    /// The monotonic count of undo steps evicted past the cap since open.
+    /// Subtracting prefix evictions from an entry depth locates its retained
+    /// boundary; evictions beyond that depth mean visit entries were lost.
     #[must_use]
     pub fn evictions(&self) -> u64 {
         self.undo.evictions()

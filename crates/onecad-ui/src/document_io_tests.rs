@@ -280,10 +280,12 @@ fn assert_stl(path: &Path) {
     let count = u32::from_le_bytes(bytes[80..84].try_into().unwrap()) as usize;
     assert!(count >= 24);
     assert_eq!(bytes.len(), 84 + count * 50);
-    for triangle in bytes[84..].chunks_exact(50) {
+    for triangle in bytes[84..].as_chunks::<50>().0 {
         let points: Vec<_> = triangle[12..48]
-            .chunks_exact(4)
-            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| f32::from_le_bytes(*bytes))
             .collect();
         assert!(points.iter().all(|value| value.is_finite()));
         assert_ne!(&points[0..3], &points[3..6]);
@@ -397,3 +399,6 @@ fn attribute<'a>(attributes: &'a str, key: &str) -> &'a str {
         .unwrap()
         .0
 }
+
+#[path = "document_import_lifecycle_tests.rs"]
+mod document_import_lifecycle_tests;

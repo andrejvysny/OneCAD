@@ -74,6 +74,17 @@ Cancellation and failed replacement preserve the current runtime. Save-before-cl
 continues only after a clean save, and blocks further authoring while pending.
 Recovered documents with an out-of-profile path require Save As into QA storage.
 
+Document identity, runtime session, revision, dirty state, title and path travel
+through a bounded lifecycle slot independently of scene capture. Restore, import
+and Save refresh this state before attempting geometry capture. A failed capture
+therefore keeps Save available and dirty replacement/Quit prompts active, even
+without a display. Title and path are bounded presentation copies; Save uses the
+runtime's complete path. An ordinary dirty close preserves existing recovery and
+releases its marker ownership without dropping labels. Only a clean durable Save
+or explicit session-fenced Discard permits cleanup of dirty recovery. Discovery
+never deletes recovery containers because of age. Ordinary close does not force
+a fresh autosave; the existing autosave cadence still bounds captured changes.
+
 STEP import stages a production worker, waits at most 8 seconds for its handshake,
 and only then probes the source. The staged guard retains that exact worker's
 readiness and import interface. Timeout, probe failure, or cancellation restores
@@ -128,7 +139,11 @@ visit, runtime, head, revision or worker-epoch change. A detached candidate is s
 before the history move commits; errors and rejected solves preserve both stacks and
 authoritative geometry. Empty history is explicit. Finish/discard retains the existing
 session grouping and clears redo owned by the closed visit. No UI snapshot stack is
-created. Japanese IME and native menu/dialog behavior remain unverified. Further modeling creation tools and full interaction parity
+created. Evicting older model transactions shifts the visit boundary; the newest
+200 retained sketch edits remain undoable. If a visit's own edits have been
+evicted, Discard conservatively keeps the changes and reports that history was
+trimmed; Finish keeps the retained granular history instead of a net undo step.
+Japanese IME and native menu/dialog behavior remain unverified. Further modeling creation tools and full interaction parity
 are not implemented in this host.
 
 Camera input consumes ordered native events instead of smoothed scroll totals.

@@ -4472,15 +4472,12 @@ async fn undo_below_watermark_drops_the_sketch_session() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MODEL-HARDEN finding 3 — UNDO_CAP eviction invalidates the depth watermark
+// Prefix eviction shifts the retained sketch-visit boundary.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn eviction_during_session_refuses_the_squash() {
-    // Watermark 150, then 60 session edits ⇒ the stack overflows UNDO_CAP (200) and
-    // evicts the bottom 10. The depth-based `count = 200 − 150 = 50` no longer
-    // addresses the 60 session steps, so a squash would strand the earliest 10 below
-    // the net-inverse. The eviction guard refuses the squash entirely.
+async fn prefix_eviction_during_session_preserves_the_squash_boundary() {
+    // Ten old model steps roll out; all sixty visit edits remain retained.
     let mut rt = runtime_with(Arc::new(FakeBackend::new()));
     let (sk, _p) = sketch_with_point();
     let sid = sk.id;
@@ -4510,13 +4507,13 @@ async fn eviction_during_session_refuses_the_squash() {
     rt.finish_sketch(sid).await.unwrap();
     assert_eq!(
         rt.session.undo_depth(),
-        200,
-        "the eviction guard REFUSED the squash — the granular steps stay (no collapse)"
+        142,
+        "140 retained model steps + net sketch edit + minted sketch record"
     );
     assert!(rt.sketch_session.is_none(), "the session is consumed");
     // Undo stays monotonic (each pop reverts exactly one step).
     assert!(rt.undo().is_some());
-    assert_eq!(rt.session.undo_depth(), 199);
+    assert_eq!(rt.session.undo_depth(), 141);
 }
 
 #[tokio::test]
@@ -4688,10 +4685,8 @@ async fn cancel_sketch_discard_refused_when_the_session_is_interleaved() {
 }
 
 #[tokio::test]
-async fn cancel_sketch_discard_refused_after_an_eviction() {
-    // Same guard the squash already has (finding 3): once the stack bottom shifts
-    // out past UNDO_CAP the depth watermark no longer addresses the session, so
-    // the discard refuses wholesale rather than reverting the wrong step.
+async fn cancel_sketch_discard_after_prefix_eviction_restores_the_entry_sketch() {
+    // Evicting only old model steps leaves the entire visit available to discard.
     let mut rt = runtime_with(Arc::new(FakeBackend::new()));
     let (sk, _p) = sketch_with_point();
     let sid = sk.id;
@@ -4704,10 +4699,14 @@ async fn cancel_sketch_discard_refused_after_an_eviction() {
     assert_eq!(rt.session.evictions(), 10, "the bottom 10 steps evicted");
 
     let outcome = rt.cancel_sketch(sid, true).await.unwrap();
-    assert!(!outcome.discarded);
-    assert_eq!(outcome.kept_reason, Some("history was trimmed"));
-    assert_eq!(entity_count(&rt, sid), 61, "the session geometry stays");
-    assert_eq!(rt.session.undo_depth(), 200, "no step was reverted");
+    assert!(outcome.discarded);
+    assert_eq!(outcome.kept_reason, None);
+    assert_eq!(entity_count(&rt, sid), 1, "the entry geometry is restored");
+    assert_eq!(
+        rt.session.undo_depth(),
+        140,
+        "only retained model steps remain"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -322,12 +322,21 @@ struct SketchSession {
     sketch_id: SketchId,
     prior: Sketch,
     undo_watermark: usize,
-    /// The undo-stack eviction count at enter (finding 3). If it moves before
-    /// finish/cancel, the depth-based `undo_watermark` no longer addresses the
-    /// session's steps (the stack bottom shifted out past the cap), so the squash is
-    /// refused wholesale — the granular steps stay (safe, noisier stack).
+    /// Prefix evictions shift the retained visit boundary toward zero. Once they
+    /// pass the entry depth, some visit edits are lost and consolidation must stop.
     evicted_at_enter: u64,
     created_this_visit: bool,
+}
+
+impl SketchSession {
+    fn evicted_since_enter(&self, evictions: u64) -> usize {
+        usize::try_from(evictions.saturating_sub(self.evicted_at_enter)).unwrap_or(usize::MAX)
+    }
+
+    fn retained_watermark(&self, evictions: u64) -> usize {
+        self.undo_watermark
+            .saturating_sub(self.evicted_since_enter(evictions))
+    }
 }
 
 /// Immutable input for a read-only sketch-region query. Prepared under the
@@ -1642,7 +1651,7 @@ impl DocumentRuntime {
     /// every depth-shrinking runtime mutation (undo/redo).
     fn drop_stale_sketch_session(&mut self) {
         if let Some(s) = &self.sketch_session {
-            if s.undo_watermark > self.session.undo_depth() {
+            if s.retained_watermark(self.session.evictions()) > self.session.undo_depth() {
                 self.sketch_session = None;
             }
         }
@@ -4097,7 +4106,7 @@ impl DocumentRuntime {
         // enter point): that watermark is stale, so fall through to a fresh session.
         let keep_existing = matches!(
             &self.sketch_session,
-            Some(s) if s.sketch_id == sketch_id && s.undo_watermark <= self.session.undo_depth() && s.history_epoch == self.engine.current_epoch()
+            Some(s) if s.sketch_id == sketch_id && s.history_valid && s.retained_watermark(self.session.evictions()) <= self.session.undo_depth() && s.history_epoch == self.engine.current_epoch()
         );
         // Capture before the solve correction, but install only after success:
         // a failed entry must not replace a previously open session.
@@ -4308,7 +4317,12 @@ impl DocumentRuntime {
             .sketch_session
             .as_ref()
             .filter(|session| session.sketch_id == sketch_id)
-            .map(|session| (session.created_this_visit, session.undo_watermark));
+            .map(|session| {
+                (
+                    session.created_this_visit,
+                    session.retained_watermark(self.session.evictions()),
+                )
+            });
         if discard && self.read_only {
             return Ok(CancelSketchOutcome::kept(Some("the document is read-only")));
         }
@@ -5618,19 +5632,20 @@ impl DocumentRuntime {
         if session.history_redo > 0 && session.history_redo == self.session.redo_depth() {
             self.session.clear_redo();
         }
-        // Finding 3: an eviction past the undo cap since enter shifted the stack bottom,
-        // so the depth-based watermark no longer addresses the session's steps. Refuse
-        // the squash wholesale — the granular steps stay (safe, noisier stack). The core
-        // squash's contiguity guard can't catch this: the newest `count` may still all be
-        // sketch edits, but `count` now under-counts the session and would strand its
-        // earliest edits below the net-inverse.
-        if self.session.evictions() != session.evicted_at_enter {
+        if !session.history_valid {
+            return SessionSquash::Refused("the history boundary changed");
+        }
+        // Old model steps may roll out without losing any visit edits. If visit
+        // edits themselves rolled out, the retained tail cannot prove contiguity
+        // over the full entry snapshot, so keep it unchanged.
+        let evictions = self.session.evictions();
+        if session.evicted_since_enter(evictions) > session.undo_watermark {
             return SessionSquash::Refused("history was trimmed");
         }
         let count = self
             .session
             .undo_depth()
-            .saturating_sub(session.undo_watermark);
+            .saturating_sub(session.retained_watermark(evictions));
         match self
             .session
             .squash_sketch_session(sketch_id, session.prior, count)

@@ -3,10 +3,12 @@
 //! Desktop adapters marshal typed commands and supply host events, paths, and dialogs.
 //! Regeneration and persistence preserve their prepare, unlocked I/O, and fenced commit phases.
 
+mod document_state;
 mod import_readiness;
 mod replacement;
 mod sketch_constraints;
 mod sketch_history;
+pub use document_state::get_document_state;
 pub use replacement::{discard_replaced_document, prepare_replacement_discard, ReplacementDiscard};
 pub use sketch_constraints::add_sketch_constraints_with_completion;
 pub use sketch_history::sketch_history_with_completion;
@@ -866,29 +868,55 @@ async fn head_bodies(state: &AppState) -> Result<(Vec<BodyId>, Option<SnapshotId
     Ok((rt.head_body_ids(), crate::export::export_fence(rt)))
 }
 
-/// Closes the open document, dropping its runtime + caches. Clears the document's
-/// active crash-recovery state after queued writes drain. Unresolved offers stay protected.
+/// Closes the document, retaining dirty recovery work after queued writes drain.
+/// Clean documents discard stale recovery state. Unresolved offers stay protected.
 pub async fn close_document(state: &AppState, app: HostContext) -> Result<(), ApiError> {
+    close_document_inner(state, app, None).await
+}
+
+/// Explicitly discards the runtime named by the user's close decision.
+/// Session validation and runtime removal share one lock to reject stale consent.
+pub async fn discard_and_close_document(
+    state: &AppState,
+    app: HostContext,
+    expected_runtime_session: &str,
+) -> Result<(), ApiError> {
+    close_document_inner(state, app, Some(expected_runtime_session)).await
+}
+
+async fn close_document_inner(
+    state: &AppState,
+    app: HostContext,
+    discard_session: Option<&str>,
+) -> Result<(), ApiError> {
     let closed = {
         let mut guard = state.runtime.lock().await;
-        let id = guard.as_ref().map(DocumentRuntime::document_uuid);
+        if discard_session.is_some_and(|expected| {
+            !guard
+                .as_ref()
+                .is_some_and(|rt| rt.matches_runtime_session(expected))
+        }) {
+            return Err(ApiError::InvalidCommand(
+                "discard close belongs to a stale runtime".into(),
+            ));
+        }
+        let closed = guard.as_ref().map(|rt| (rt.document_uuid(), rt.is_dirty()));
         *guard = None;
         state.invalidate_backend_stage();
         state.clear_restart_owner();
-        id
+        closed
     };
     // Never await the writer lane while holding the runtime lock. Admitted
     // autosaves finish before cleanup; queued old-session snapshots fail their fence.
     let _lane = state.persistence.lock().await;
     let current = state.runtime.lock().await;
-    if let (Some(id), Some(root)) = (closed, autosave::autosave_root(&app)) {
-        let reopened = current
-            .as_ref()
-            .is_some_and(|runtime| runtime.document_uuid() == id);
-        if !reopened && state.peek_pending_recovery(id).is_none() {
-            autosave::clear_recovery_state(&root, id);
-        }
-    }
+    reconcile_closed_recovery(
+        state,
+        &app,
+        closed,
+        current.as_ref(),
+        discard_session.is_some(),
+    );
     // A document opened while close waited owns its worker and projection now.
     if current.is_none() {
         state.rewarm();
@@ -897,6 +925,30 @@ pub async fn close_document(state: &AppState, app: HostContext) -> Result<(), Ap
         let _ = app.emit(AppEvent::ProjectionUpdated(DocumentProjection::empty()));
     }
     Ok(())
+}
+
+fn reconcile_closed_recovery(
+    state: &AppState,
+    app: &HostContext,
+    closed: Option<(DocumentId, bool)>,
+    current: Option<&DocumentRuntime>,
+    discard: bool,
+) {
+    let (Some((id, dirty)), Some(root)) = (closed, autosave::autosave_root(app)) else {
+        return;
+    };
+    if current.is_some_and(|runtime| runtime.document_uuid() == id)
+        || state.peek_pending_recovery(id).is_some()
+    {
+        return;
+    }
+    if dirty && !discard {
+        if let Err(error) = onecad_core::io::recovery::release_marker(&root, id) {
+            tracing::warn!(%error, "close: release recovery owner failed");
+        }
+    } else {
+        autosave::clear_recovery_state(&root, id);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

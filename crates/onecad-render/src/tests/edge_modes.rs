@@ -43,8 +43,10 @@ fn view(scene: &SceneSnapshot, projection: Projection) -> ViewSnapshot {
 }
 
 fn changed(a: &[u8], b: &[u8]) -> usize {
-    a.chunks_exact(4)
-        .zip(b.chunks_exact(4))
+    a.as_chunks::<4>()
+        .0
+        .iter()
+        .zip(b.as_chunks::<4>().0)
         .filter(|(a, b)| a[..3].iter().zip(&b[..3]).any(|(a, b)| a.abs_diff(*b) > 2))
         .count()
 }
@@ -329,7 +331,7 @@ fn verify_combinations(
                         },
                         &name,
                     );
-                    assert!(pixels.chunks_exact(4).all(|p| p[3] == 255));
+                    assert!(pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
                 }
             }
             renderer.clear_preview().unwrap();
