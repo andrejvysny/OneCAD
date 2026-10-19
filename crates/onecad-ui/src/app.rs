@@ -564,6 +564,7 @@ impl eframe::App for App {
         } else {
             crate::viewport::show(self, ui);
         }
+        crate::component_wizard::show(self, &ctx);
         crate::shell::close_prompt(self, &ctx);
     }
 }

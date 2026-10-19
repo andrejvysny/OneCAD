@@ -1,11 +1,11 @@
-//! Explorer: panel toggle, workspace switcher and the Bodies / Sketches / Datums tree.
+//! Explorer: panel toggle and the Bodies / Sketches / Datums tree.
 use crate::{app::App, layout::Chrome};
 use egui::{Context, Margin, Order, Ui};
 use onecad_widgets::{
     components::{
         inputs::SearchField,
-        lists::{RowState, SectionLabel, TreeRow, menu_frame},
-        shell::{FloatingPanel, PanelToggle, Side, WorkspaceButton, WorkspaceItem, workspace_menu},
+        lists::{RowState, SectionLabel, TreeRow},
+        shell::{FloatingPanel, PanelToggle, Side},
         tooltip::Tip,
     },
     frame,
@@ -17,7 +17,6 @@ fn matches(filter: &str, name: &str) -> bool {
 
 pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
     toggle(app, ctx, chrome);
-    workspace(app, ctx, chrome);
     let rect = chrome.explorer;
     let open = app.ui.explorer_open;
     FloatingPanel::new(egui::Id::unique("explorer"), Side::Left)
@@ -28,7 +27,13 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
                 .inner_margin(Margin::symmetric(6, 8))
                 .show(ui, |ui| {
                     ui.set_min_size(ui.available_size());
-                    tree(app, ui);
+                    crate::editor_facade::mode_switch(&mut app.ui.editor_facade, ui);
+                    if app.ui.editor_facade.library_mode {
+                        crate::editor_facade::library_list(app, ui);
+                    } else {
+                        tree(app, ui);
+                    }
+                    crate::editor_facade::footer(app, ui, rect);
                 });
         });
 }
@@ -48,43 +53,6 @@ fn toggle(app: &mut App, ctx: &Context, chrome: &Chrome) {
             app.ui.explorer_open = !app.ui.explorer_open;
         }
     });
-}
-
-fn workspace(app: &mut App, ctx: &Context, chrome: &Chrome) {
-    let mut response = None;
-    frame::floating(
-        egui::Id::unique("workspace-button"),
-        chrome.workspace_button.min,
-        Order::Middle,
-    )
-    .show(ctx, |ui| {
-        let button =
-            WorkspaceButton::new("Design", "Workspace", "body").open(app.ui.workspace_menu_open);
-        response = Some(ui.add(button));
-    });
-    let Some(response) = response else {
-        return;
-    };
-    let item = |label, icon, enabled, active| WorkspaceItem {
-        label,
-        icon,
-        shortcut: None,
-        enabled,
-        active,
-    };
-    let items = [
-        item("Design", "body", true, true),
-        item("Assembly", "component", false, false),
-        item("Simulation", "study", false, false),
-        item("Drawing", "viewFront", false, false),
-    ];
-    egui::Popup::menu(&response)
-        .frame(menu_frame(ctx))
-        .show(|ui| {
-            workspace_menu(ui, &items, &[]);
-        });
-    let id = egui::Popup::default_response_id(&response);
-    app.ui.workspace_menu_open = egui::Popup::is_id_open(ctx, id);
 }
 
 fn tree(app: &mut App, ui: &mut Ui) {
@@ -124,16 +92,6 @@ fn tree(app: &mut App, ui: &mut Ui) {
                 }
             }
         });
-    let muted = app.theme.ink5;
-    ui.add_space(10.0);
-    ui.horizontal(|ui| {
-        ui.add_space(10.0);
-        ui.label(
-            egui::RichText::new("No extensions active")
-                .size(12.0)
-                .color(muted),
-        );
-    });
 }
 
 fn body_row(app: &mut App, ui: &mut Ui, id_text: &str, name: &str) {

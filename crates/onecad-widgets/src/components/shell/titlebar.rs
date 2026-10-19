@@ -3,7 +3,7 @@
 
 use egui::{Color32, CornerRadius, FontId, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2, vec2};
 
-use super::IconButton;
+use super::{IconButton, WorkspaceButton};
 use crate::components::actions::common::fitted;
 use crate::components::tooltip::Tip;
 use crate::fonts;
@@ -17,6 +17,14 @@ const BTN: f32 = 28.0;
 /// Upper bound for the "File ▾" button, used only to reserve the left cluster.
 const FILE_W: f32 = 64.0;
 
+/// Workspace switcher shown after Home; the host owns its popover.
+#[derive(Clone, Copy)]
+pub struct WorkspaceSpec<'a> {
+    pub name: &'a str,
+    pub icon: &'a str,
+    pub open: bool,
+}
+
 pub struct TitleBar<'a> {
     doc_name: &'a str,
     dirty: bool,
@@ -25,10 +33,13 @@ pub struct TitleBar<'a> {
     can_redo: bool,
     home_blocked: Option<&'a str>,
     drag_window: bool,
+    workspace: Option<WorkspaceSpec<'a>>,
 }
 
 pub struct TitleBarOutput {
     pub home: bool,
+    /// Anchor for the host's workspace popover; `None` when no workspace was given.
+    pub workspace: Option<Response>,
     /// Anchor for the host's File popover.
     pub file: Response,
     pub undo: bool,
@@ -47,6 +58,7 @@ impl<'a> TitleBar<'a> {
             can_redo: true,
             home_blocked: None,
             drag_window: true,
+            workspace: None,
         }
     }
     pub fn dirty(mut self, dirty: bool) -> Self {
@@ -73,6 +85,12 @@ impl<'a> TitleBar<'a> {
         self
     }
 
+    /// Show the workspace button after Home (`None` hides it).
+    pub fn workspace(mut self, spec: Option<WorkspaceSpec<'a>>) -> Self {
+        self.workspace = spec;
+        self
+    }
+
     pub fn drag_window(mut self, v: bool) -> Self {
         self.drag_window = v;
         self
@@ -90,7 +108,10 @@ impl<'a> TitleBar<'a> {
         p.rect_filled(rect, 0.0, t.titlebar);
         let y = rect.bottom() - 0.5;
         p.hline(rect.x_range(), y, Stroke::new(1.0, t.border));
-        self.paint_centre(ui, rect, &l);
+        let ws_w = self
+            .workspace
+            .map(|w| WorkspaceButton::compact_width(ui.painter(), w.name));
+        self.paint_centre(ui, rect, &l, ws_w);
         let cy = rect.center().y;
         let mut x = rect.left() + TRAFFIC_INSET;
         let home_rect = Rect::from_min_size(Pos2::new(x, cy - BTN / 2.0), Vec2::splat(BTN));
@@ -100,10 +121,20 @@ impl<'a> TitleBar<'a> {
             .tip(Some(Tip::new("Home").reason(self.home_blocked)));
         let home = ui.put(home_rect, home).clicked();
         x += BTN + 4.0;
+        let workspace = self.workspace.zip(ws_w).map(|(spec, w)| {
+            let r = Rect::from_min_size(Pos2::new(x, cy - 15.0), vec2(w, 30.0));
+            let b = WorkspaceButton::compact(spec.name, spec.icon).open(spec.open);
+            x += w + 8.0;
+            let line = Rect::from_center_size(Pos2::new(x + 0.5, cy), vec2(1.0, 18.0));
+            ui.painter().rect_filled(line, 0.0, t.border_strong);
+            x += 1.0 + 8.0;
+            ui.put(r, b)
+        });
         let file = file_button(ui, Pos2::new(x, cy - BTN / 2.0), &l);
         let (search, undo, redo) = self.right_cluster(ui, rect, &l);
         TitleBarOutput {
             home,
+            workspace,
             file,
             undo,
             redo,
@@ -112,17 +143,18 @@ impl<'a> TitleBar<'a> {
     }
 
     /// Room for the centred name: symmetric about the bar centre, between the clusters.
-    fn centre_width(rect: Rect) -> f32 {
-        let left = rect.left() + TRAFFIC_INSET + BTN + 4.0 + FILE_W + 8.0;
+    fn centre_width(rect: Rect, ws_w: Option<f32>) -> f32 {
+        let ws = ws_w.map_or(0.0, |w| w + 8.0 + 1.0 + 8.0);
+        let left = rect.left() + TRAFFIC_INSET + BTN + 4.0 + ws + FILE_W + 8.0;
         let right = rect.right() - 12.0 - SEARCH_W - 8.0 - 2.0 * (BTN + 4.0) - 4.0;
         let c = rect.center().x;
         2.0 * (c - left).min(right - c).max(0.0)
     }
 
-    fn paint_centre(&self, ui: &Ui, rect: Rect, l: &Look) {
+    fn paint_centre(&self, ui: &Ui, rect: Rect, l: &Look, ws_w: Option<f32>) {
         let t = &l.theme;
         let p = ui.painter();
-        let avail = Self::centre_width(rect);
+        let avail = Self::centre_width(rect, ws_w);
         let suffix = self.suffix.map(|s| {
             let font = FontId::proportional(12.0);
             fitted(p, &format!("— {s}"), font, t.ink5, avail * 0.4)

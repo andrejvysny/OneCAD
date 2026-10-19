@@ -30,7 +30,13 @@ fn every_shell_component_renders_light_and_dark() {
                 .dirty(true)
                 .suffix(Some("Workshop"))
                 .can_redo(false)
+                .workspace(Some(WorkspaceSpec {
+                    name: "Design",
+                    icon: "body",
+                    open: true,
+                }))
                 .show(ui);
+            assert!(out.workspace.is_some());
             assert!(!out.home && !out.search && !out.undo && !out.redo);
             ui.add(PanelToggle::new(Side::Left).open(true));
             ui.add(
@@ -39,10 +45,12 @@ fn every_shell_component_renders_light_and_dark() {
                     .tip(Tip::new("Inspector")),
             );
             ui.add(WorkspaceButton::new("Design", "Workspace · ⌃1", "body").open(true));
+            ui.add(WorkspaceButton::compact("Design", "body").open(true));
             let items = [WorkspaceItem {
                 label: "Design",
                 icon: "body",
                 shortcut: Some("⌃1"),
+                subtitle: None,
                 enabled: true,
                 active: true,
             }];

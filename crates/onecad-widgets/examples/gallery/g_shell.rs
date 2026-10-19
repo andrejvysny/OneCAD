@@ -3,7 +3,7 @@
 use egui::{CornerRadius, Id, RichText, Sense, Ui, UiBuilder, vec2};
 use onecad_widgets::components::shell::{
     FloatingPanel, PanelToggle, Side, StatusBar, StatusItem, TitleBar, WorkspaceButton,
-    WorkspaceItem, workspace_menu,
+    WorkspaceItem, WorkspaceSpec, workspace_menu,
 };
 use onecad_widgets::components::tooltip::Tip;
 use onecad_widgets::frame;
@@ -71,7 +71,7 @@ fn title_bar(ui: &mut Ui, t: &Theme) {
         t,
         "TitleBar",
         "c-titlebar",
-        "Drag region. Home, File, centred document name + dirty dot, undo/redo, command search.",
+        "Drag region. Home, workspace button, File, centred document name + dirty dot, undo/redo, command search.",
     );
     stage(ui, t, vec2(840.0, 108.0), |ui| {
         ui.set_width(808.0);
@@ -79,6 +79,11 @@ fn title_bar(ui: &mut Ui, t: &Theme) {
             .dirty(true)
             .suffix(Some("Workshop"))
             .can_redo(false)
+            .workspace(Some(WorkspaceSpec {
+                name: "Design",
+                icon: "body",
+                open: false,
+            }))
             .drag_window(false)
             .show(ui);
         let hits = [
@@ -264,6 +269,7 @@ fn workspace_popover(ui: &mut Ui, t: &Theme) {
             label,
             icon,
             shortcut: Some(key),
+            subtitle: None,
             enabled: true,
             active: i == active,
         })
@@ -272,6 +278,7 @@ fn workspace_popover(ui: &mut Ui, t: &Theme) {
         label: "Generative",
         icon: "extension",
         shortcut: None,
+        subtitle: None,
         enabled: true,
         active: false,
     }];

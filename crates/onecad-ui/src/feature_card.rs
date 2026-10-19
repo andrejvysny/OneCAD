@@ -2,9 +2,7 @@
 //! active model tool. Replaces the old Inspector form; dispatches the same actions.
 use crate::{app::App, layout::Chrome, tool_registry::ToolId};
 use egui::{Context, Order, Ui};
-use onecad_interaction::{
-    Action, CommitStatus, DraftStatus, ModelSession, PreviewStatus, SessionPhase,
-};
+use onecad_interaction::{Action, DraftStatus, ModelSession, PreviewStatus, SessionPhase};
 use onecad_widgets::{
     components::{
         inputs::NumberField,
@@ -12,44 +10,6 @@ use onecad_widgets::{
     },
     frame,
 };
-
-pub fn preview_text(preview: &PreviewStatus) -> &str {
-    match preview {
-        PreviewStatus::Empty => "",
-        PreviewStatus::Pending => "Computing preview…",
-        PreviewStatus::Ready => "Preview ready",
-        PreviewStatus::NeedsRepair => "Preview needs repair",
-        PreviewStatus::Failed(message) => message,
-        PreviewStatus::UnavailableForEdit => "Geometry rebuilds when applied",
-    }
-}
-
-/// Status-bar text for the running tool and whether the preview is ready (green dot).
-pub fn status_line(app: &App) -> Option<(&str, bool)> {
-    let tool = app.interaction.tool.as_ref()?;
-    tool_status(&app.interaction.status, &tool.preview, app.command_status)
-}
-
-fn tool_status<'a>(
-    status: &'a CommitStatus,
-    preview: &'a PreviewStatus,
-    command_status: bool,
-) -> Option<(&'a str, bool)> {
-    if command_status {
-        return None;
-    }
-    match status {
-        CommitStatus::Rejected(message) | CommitStatus::CompletionUnavailable { message, .. } => {
-            Some((message, false))
-        }
-        CommitStatus::Pending(_) => Some(("Submitting feature…", false)),
-        CommitStatus::Accepted { .. } => Some(("Regenerating feature…", false)),
-        _ => Some((
-            preview_text(preview),
-            matches!(preview, PreviewStatus::Ready),
-        )),
-    }
-}
 
 fn can_apply(app: &App, tool: &ModelSession) -> bool {
     !app.busy()
@@ -346,33 +306,5 @@ mod tests {
         }
         // The initial Area sizing pass may emit no shapes.
         assert!(footer_count == 2 || sizing_pass && footer_count == 0);
-    }
-
-    #[test]
-    fn preview_text_variants() {
-        assert_eq!(preview_text(&PreviewStatus::Empty), "");
-        assert_eq!(preview_text(&PreviewStatus::Ready), "Preview ready");
-        assert_eq!(preview_text(&PreviewStatus::Failed("boom".into())), "boom");
-    }
-
-    #[test]
-    fn rejected_authoring_and_save_status_override_ready_preview() {
-        for message in ["Create rejected", "Apply rejected"] {
-            let status = CommitStatus::Rejected(message.into());
-            assert_eq!(
-                tool_status(&status, &PreviewStatus::Ready, false),
-                Some((message, false))
-            );
-            assert_eq!(tool_status(&status, &PreviewStatus::Ready, true), None);
-        }
-        // Save lifecycle and errors are displayed from the host command status.
-        assert_eq!(
-            tool_status(&CommitStatus::Idle, &PreviewStatus::Ready, true),
-            None
-        );
-        assert_eq!(
-            tool_status(&CommitStatus::Idle, &PreviewStatus::Ready, false),
-            Some(("Preview ready", true))
-        );
     }
 }

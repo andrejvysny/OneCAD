@@ -30,6 +30,18 @@ impl Appearance {
     }
 }
 
+/// Full-window page shown while the Start screen is open.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StartPage {
+    #[default]
+    Home,
+    Library,
+    ComponentDetail,
+    StandardPart,
+    Extensions,
+    ExtensionDetail,
+}
+
 #[derive(Clone, Debug)]
 pub struct UiState {
     pub explorer_open: bool,
@@ -47,6 +59,11 @@ pub struct UiState {
     pub theme_failed: Option<bool>,
     /// Start screen Recent layout: 0 Grid, 1 List.
     pub recent_view: usize,
+    pub start_page: StartPage,
+    pub library: crate::library_pages::LibraryUi,
+    pub extensions: crate::extension_pages::ExtensionsUi,
+    pub shell_facade: crate::workspace_ui::ShellFacade,
+    pub editor_facade: crate::editor_facade::EditorFacade,
 }
 
 impl Default for UiState {
@@ -63,6 +80,11 @@ impl Default for UiState {
             appearance: Appearance::default(),
             theme_failed: None,
             recent_view: 0,
+            start_page: StartPage::default(),
+            library: Default::default(),
+            extensions: Default::default(),
+            shell_facade: Default::default(),
+            editor_facade: Default::default(),
         }
     }
 }

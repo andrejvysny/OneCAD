@@ -1,4 +1,4 @@
-//! Title bar (document name, history, File menu) and status bar.
+//! Title bar (workspace switcher, document name, history, File menu).
 use crate::{
     app::App,
     bridge::Command,
@@ -7,7 +7,7 @@ use crate::{
 use egui::{Context, Ui};
 use onecad_widgets::components::{
     lists::{MenuRow, menu_divider, menu_frame},
-    shell::{StatusBar, TitleBar},
+    shell::{TitleBar, WorkspaceSpec},
 };
 
 pub fn title(app: &mut App, ui: &mut Ui) {
@@ -21,6 +21,11 @@ pub fn title(app: &mut App, ui: &mut Ui) {
         .as_ref()
         .map_or_else(|| "OneCAD".to_owned(), |state| state.title.clone());
     let dirty = app.document_dirty();
+    let workspace = (!app.ui.start_open).then_some(WorkspaceSpec {
+        name: "Design",
+        icon: "body",
+        open: app.ui.workspace_menu_open,
+    });
     egui::Panel::top("title")
         .exact_size(44.0)
         .frame(egui::Frame::NONE)
@@ -30,6 +35,7 @@ pub fn title(app: &mut App, ui: &mut Ui) {
                 .dirty(dirty)
                 .can_undo(can_undo)
                 .can_redo(can_redo)
+                .workspace(workspace)
                 .home_blocked((!home_allowed(app)).then_some("Finish the current command first"))
                 .show(ui);
             if out.home && home_allowed(app) {
@@ -42,10 +48,13 @@ pub fn title(app: &mut App, ui: &mut Ui) {
                 crate::input::submit_history(app, Command::Redo);
             }
             file_menu(app, &ctx, &out.file, (can_undo, can_redo));
+            if let Some(anchor) = &out.workspace {
+                crate::workspace_ui::workspace_menu(app, &ctx, anchor);
+            }
         });
 }
 
-fn home_allowed(app: &App) -> bool {
+pub(crate) fn home_allowed(app: &App) -> bool {
     !(app.sketch_active()
         || app.interaction.tool.is_some()
         || app.busy()
@@ -138,32 +147,4 @@ fn document_menu(app: &mut App, ui: &mut Ui) {
             }
         }
     });
-}
-
-pub fn status(app: &App, ui: &mut Ui) {
-    let (text, dot) = match crate::feature_card::status_line(app) {
-        Some((text, ready)) => (
-            text,
-            Some(if ready {
-                app.theme.dof_ok
-            } else {
-                app.theme.ink5
-            }),
-        ),
-        None => (app.status.as_str(), None),
-    };
-    let persp = app.camera.projection != onecad_scene::Projection::Orthographic;
-    egui::Panel::bottom("status")
-        .exact_size(28.0)
-        .frame(egui::Frame::NONE)
-        .resizable(false)
-        .show(ui, |ui| {
-            StatusBar::new()
-                .sketch(app.sketch_active())
-                .dot(dot)
-                .text(text)
-                .projection(Some(persp))
-                .unit(Some("mm"))
-                .show(ui);
-        });
 }

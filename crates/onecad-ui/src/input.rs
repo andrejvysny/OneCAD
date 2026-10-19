@@ -131,6 +131,9 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     if app.documents.confirm.is_some() {
         return;
     }
+    if raw.focused {
+        crate::editor_facade::keys(app, raw, text);
+    }
     if !text && raw.focused {
         close_constraints_on_escape(app, raw);
     }

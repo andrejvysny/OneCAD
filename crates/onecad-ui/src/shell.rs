@@ -1,4 +1,4 @@
-//! Editor chrome orchestrator: title/status bars plus the floating panels and overlays.
+//! Editor chrome orchestrator: title bar plus the floating panels and overlays.
 use crate::{
     app::App, bars, explorer, feature_card, inspector, layout, overlays, pill, session_strip,
 };
@@ -16,10 +16,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if app.ui.start_open {
         return;
     }
-    bars::status(app, ui);
+    crate::workspace_ui::customize_dialog(app, &ctx);
     explorer::show(app, &ctx, &chrome);
     inspector::show(app, &ctx, &chrome);
     pill::show(app, &ctx, &chrome);
+    crate::editor_facade::overlays(app, &ctx, &chrome);
     feature_card::show(app, &ctx, &chrome);
     if app.sketch_active() {
         session_strip::show(app, &ctx, &chrome);

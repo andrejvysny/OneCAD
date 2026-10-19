@@ -3,7 +3,6 @@ use crate::ui_state::UiState;
 use egui::{Pos2, Rect, pos2, vec2};
 
 const TITLEBAR: f32 = 44.0;
-const STATUSBAR: f32 = 28.0;
 const EDGE: f32 = 10.0;
 const TOGGLE: f32 = 44.0;
 const EXPLORER_W: f32 = 248.0;
@@ -13,18 +12,14 @@ const CARD_H: f32 = 320.0;
 const CUBE: f32 = 164.0;
 const CONTROL_W: f32 = 36.0;
 const CONTROLS_H: f32 = 124.0;
-const WORKSPACE: egui::Vec2 = vec2(196.0, 44.0);
 
 #[derive(Clone, Copy, Debug)]
 pub struct Chrome {
     // The bars are egui panels; their rects document the geometry and feed the tests.
     #[allow(dead_code)]
     pub titlebar: Rect,
-    #[allow(dead_code)]
-    pub statusbar: Rect,
     pub viewport: Rect,
     pub explorer_toggle: Rect,
-    pub workspace_button: Rect,
     pub explorer: Rect,
     /// Only present while the Inspector is closed.
     pub inspector_toggle: Option<Rect>,
@@ -65,9 +60,7 @@ fn pill_centre_x(viewport: Rect, state: &UiState) -> f32 {
 
 pub fn chrome(screen: Rect, state: &UiState) -> Chrome {
     let titlebar = Rect::from_min_size(screen.min, vec2(screen.width(), TITLEBAR));
-    let statusbar =
-        Rect::from_min_max(pos2(screen.left(), screen.bottom() - STATUSBAR), screen.max);
-    let viewport = Rect::from_min_max(titlebar.left_bottom(), statusbar.right_top());
+    let viewport = Rect::from_min_max(titlebar.left_bottom(), screen.max);
     let (l, t, r, b) = (
         viewport.left(),
         viewport.top(),
@@ -82,10 +75,8 @@ pub fn chrome(screen: Rect, state: &UiState) -> Chrome {
     };
     Chrome {
         titlebar,
-        statusbar,
         viewport,
         explorer_toggle: Rect::from_min_size(pos2(l + EDGE, t + EDGE), vec2(TOGGLE, TOGGLE)),
-        workspace_button: Rect::from_min_size(pos2(l + 62.0, t + EDGE), WORKSPACE),
         explorer: Rect::from_min_max(
             pos2(l + EDGE, t + 62.0),
             pos2(l + EDGE + EXPLORER_W, b - EDGE),
@@ -147,9 +138,10 @@ mod tests {
     fn bars_and_viewport() {
         let c = chrome(screen(), &UiState::default());
         assert_eq!(c.titlebar.height(), 44.0);
-        assert_eq!(c.statusbar.height(), 28.0);
         assert_eq!(c.viewport.top(), 44.0);
-        assert_eq!(c.viewport.bottom(), 772.0);
+        assert_eq!(c.viewport.bottom(), 800.0);
+        assert_eq!(c.explorer.bottom(), 790.0);
+        assert_eq!(c.inspector.bottom(), 790.0);
         assert_eq!(c.explorer.min, pos2(10.0, 106.0));
         assert_eq!(c.explorer.width(), 248.0);
         assert_eq!(c.inspector.width(), 288.0);
@@ -232,7 +224,7 @@ mod tests {
     #[test]
     fn nav_pill_follows_explorer() {
         let mut s = UiState::default();
-        assert_eq!(chrome(screen(), &s).nav_pill, pos2(268.0, 762.0));
+        assert_eq!(chrome(screen(), &s).nav_pill, pos2(268.0, 790.0));
         s.explorer_open = false;
         assert_eq!(chrome(screen(), &s).nav_pill.x, 10.0);
     }

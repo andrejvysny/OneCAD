@@ -2,6 +2,8 @@
 
 use crate::app::App;
 use onecad_render::{DisplayMode, RenderOptions};
+use onecad_scene::Projection;
+use onecad_widgets::components::lists::{SectionLabel, Segment, SegmentedControl};
 
 /// Menu body; hosted by the title menu and by the floating chrome's popups.
 pub fn contents(app: &mut App, ui: &mut egui::Ui) {
@@ -23,6 +25,7 @@ pub fn contents(app: &mut App, ui: &mut egui::Ui) {
             |ui| section(ui, app, &mut options),
         )
         .inner;
+    projection(app, ui);
     if changed {
         app.pending_display_options = Some(options);
         app.draw_dirty = true;
@@ -30,8 +33,35 @@ pub fn contents(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
+/// Same camera setting as the view cube's projection toggle.
+fn projection(app: &mut App, ui: &mut egui::Ui) {
+    ui.separator();
+    ui.add(SectionLabel::new("Projection"));
+    let mut index = usize::from(app.camera.projection == Projection::Orthographic);
+    let segments = [
+        Segment {
+            label: "Perspective",
+            icon: None,
+        },
+        Segment {
+            label: "Orthographic",
+            icon: None,
+        },
+    ];
+    let before = index;
+    ui.add(SegmentedControl::new("display-projection", &mut index, &segments).width(220.0));
+    if index != before {
+        app.camera.projection = if index == 1 {
+            Projection::Orthographic
+        } else {
+            Projection::Perspective
+        };
+        app.draw_dirty = true;
+    }
+}
+
 fn display_modes(ui: &mut egui::Ui, options: &mut RenderOptions, xray_supported: bool) -> bool {
-    ui.label("Display mode");
+    ui.add(SectionLabel::new("Render style"));
     let mut changed = false;
     for (mode, label) in [
         (DisplayMode::Shaded, "Shaded"),

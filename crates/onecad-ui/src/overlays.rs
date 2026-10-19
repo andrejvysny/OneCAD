@@ -12,24 +12,25 @@ use onecad_widgets::{
 const NOT_YET: &str = "Not available yet";
 const SQUARE: f32 = 36.0;
 
-fn nav_button<'a>(icon: &'a str, name: &'a str, enabled: bool) -> NavButton<'a> {
+fn nav_button<'a>(icon: &'a str, name: &'a str, enabled: bool, active: bool) -> NavButton<'a> {
     let reason = (!enabled).then_some(NOT_YET);
     NavButton {
         icon,
         enabled,
-        active: false,
+        active,
         tip: Tip::new(name).reason(reason),
     }
 }
 
 pub fn nav_pill(app: &mut App, ctx: &Context, chrome: &Chrome) {
     let ready = app.viewport_ready();
+    let layers_open = app.ui.shell_facade.layers_open;
     let buttons = [
-        nav_button("home", "Home view", ready),
-        nav_button("fit", "Fit all", ready),
-        nav_button("isolate", "Isolate", false),
-        nav_button("section", "Section", false),
-        nav_button("layers", "Layers", false),
+        nav_button("home", "Home view", ready, false),
+        nav_button("fit", "Fit all", ready, false),
+        nav_button("isolate", "Isolate", false, false),
+        nav_button("section", "Section", false, false),
+        nav_button("layers", "Layers", true, layers_open),
     ];
     let mut clicked = None;
     frame::floating(egui::Id::unique("nav-pill"), chrome.nav_pill, Order::Middle)
@@ -41,8 +42,10 @@ pub fn nav_pill(app: &mut App, ctx: &Context, chrome: &Chrome) {
             app.fit_pending = true;
         }
         Some(1) => app.fit_pending = true,
+        Some(4) => app.ui.shell_facade.layers_open = !layers_open,
         _ => {}
     }
+    crate::workspace_ui::layers_popover(app, ctx, chrome);
 }
 
 /// The shared layout reserves a separate region for cube controls and parameters.

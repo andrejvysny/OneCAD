@@ -42,3 +42,36 @@ fn three_tiles_fit_minimum_window_with_narrow_fallback() {
     assert_eq!(tile_columns(400.0), 2);
     assert_eq!(tile_columns(300.0), 1);
 }
+
+#[test]
+fn sidebar_navigation_routes_pages() {
+    let mut state = crate::ui_state::UiState::default();
+    navigate(&mut state, Nav::Library);
+    assert_eq!(state.start_page, StartPage::Library);
+    assert!(library_active(state.start_page));
+    navigate(&mut state, Nav::Sub(0));
+    assert_eq!(
+        (state.start_page, state.library.source),
+        (StartPage::Library, 1)
+    );
+    assert!(sub_active(&state, 0) && !sub_active(&state, 1));
+    navigate(&mut state, Nav::Sub(1));
+    assert_eq!(state.library.source, 2);
+    assert!(sub_active(&state, 1));
+    navigate(&mut state, Nav::Sub(2));
+    assert_eq!(state.start_page, StartPage::StandardPart);
+    assert!(sub_active(&state, 2) && library_active(state.start_page));
+    navigate(&mut state, Nav::Extensions);
+    assert_eq!(state.start_page, StartPage::Extensions);
+    assert!(!library_active(state.start_page));
+    navigate(&mut state, Nav::Home);
+    assert_eq!(state.start_page, StartPage::Home);
+}
+
+#[test]
+fn component_library_resets_source_tab() {
+    let mut state = crate::ui_state::UiState::default();
+    state.library.source = 3;
+    navigate(&mut state, Nav::Library);
+    assert_eq!(state.library.source, 0);
+}

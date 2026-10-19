@@ -72,6 +72,10 @@ pub enum ToolId {
     Suppress,
     Duplicate,
     MoveRotate,
+    MakeComponent,
+    Flange,
+    Dogbone,
+    CheckGeometry,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -80,6 +84,8 @@ pub struct ToolDef {
     pub icon: &'static str,
     pub label: &'static str,
     pub shortcut: Option<&'static str>,
+    /// (extension, publisher) for tools an extension contributes.
+    pub source: Option<(&'static str, &'static str)>,
 }
 
 type Groups = &'static [&'static [ToolDef]];
@@ -90,6 +96,7 @@ const fn t(id: ToolId, icon: &'static str, label: &'static str) -> ToolDef {
         icon,
         label,
         shortcut: None,
+        source: None,
     }
 }
 const fn k(id: ToolId, icon: &'static str, label: &'static str, key: &'static str) -> ToolDef {
@@ -98,6 +105,22 @@ const fn k(id: ToolId, icon: &'static str, label: &'static str, key: &'static st
         icon,
         label,
         shortcut: Some(key),
+        source: None,
+    }
+}
+const fn x(
+    id: ToolId,
+    icon: &'static str,
+    label: &'static str,
+    extension: &'static str,
+    publisher: &'static str,
+) -> ToolDef {
+    ToolDef {
+        id,
+        icon,
+        label,
+        shortcut: None,
+        source: Some((extension, publisher)),
     }
 }
 
@@ -200,6 +223,14 @@ const EDGE: Groups = &[
     &[
         t(ToolId::Fillet, "fillet", "Fillet"),
         t(ToolId::Chamfer, "chamfer", "Chamfer"),
+        x(ToolId::Flange, "extrude", "Flange", "Sheet Metal", "OneCAD"),
+        x(
+            ToolId::Dogbone,
+            "hole",
+            "Dogbone — corner relief for a ⌀6 tool",
+            "CNC Prep",
+            "Millhouse",
+        ),
     ],
     &[MEASURE, ISOLATE, MORE],
 ];
@@ -219,8 +250,16 @@ const BODY: Groups = &[
         k(ToolId::MoveRotate, "move", "Move / Rotate", "M"),
         MATERIAL,
         MEASURE,
+        x(
+            ToolId::CheckGeometry,
+            "needsRepair",
+            "Check geometry",
+            "Topology Check",
+            "OneCAD",
+        ),
     ],
     &[ISOLATE, HIDE, MORE],
+    &[t(ToolId::MakeComponent, "component", "Make component")],
 ];
 
 /// Tool groups for a selection kind, in README order.
@@ -399,7 +438,12 @@ mod tests {
         assert_eq!(
             labels(SelectionKind::Edge),
             vec![
-                vec!["Fillet", "Chamfer"],
+                vec![
+                    "Fillet",
+                    "Chamfer",
+                    "Flange",
+                    "Dogbone — corner relief for a ⌀6 tool"
+                ],
                 vec!["Measure", "Isolate", "More"]
             ]
         );
@@ -413,8 +457,26 @@ mod tests {
         assert_eq!(
             labels(SelectionKind::Body),
             vec![
-                vec!["Move / Rotate", "Material", "Measure"],
-                vec!["Isolate", "Hide", "More"]
+                vec!["Move / Rotate", "Material", "Measure", "Check geometry"],
+                vec!["Isolate", "Hide", "More"],
+                vec!["Make component"]
+            ]
+        );
+    }
+
+    #[test]
+    fn extension_tools_name_their_source() {
+        let sources: Vec<_> = ALL
+            .iter()
+            .flat_map(|k| pill_tools(*k).iter().flat_map(|g| g.iter()))
+            .filter_map(|d| d.source)
+            .collect();
+        assert_eq!(
+            sources,
+            vec![
+                ("Sheet Metal", "OneCAD"),
+                ("CNC Prep", "Millhouse"),
+                ("Topology Check", "OneCAD")
             ]
         );
     }

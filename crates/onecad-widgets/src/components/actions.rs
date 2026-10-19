@@ -1,6 +1,9 @@
 //! Actions (g01): ToolButton (c-toolbtn), ToolPill (c-pill), SelectionLabel (c-sellabel).
 
+pub mod badge;
 pub(crate) mod common;
+
+pub use badge::puzzle;
 
 use egui::{
     Color32, CornerRadius, Frame, InnerResponse, Margin, Rect, Response, Sense, Stroke, Ui, Vec2,
@@ -29,6 +32,7 @@ pub struct ToolButton<'a> {
     icon: &'a str,
     state: ToolState,
     enabled: bool,
+    extension: bool,
     tip: Option<Tip<'a>>,
 }
 
@@ -38,6 +42,7 @@ impl<'a> ToolButton<'a> {
             icon,
             state: ToolState::Default,
             enabled: true,
+            extension: false,
             tip: None,
         }
     }
@@ -47,6 +52,11 @@ impl<'a> ToolButton<'a> {
     }
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
+        self
+    }
+    /// Contributed by an extension: paints the accent puzzle badge.
+    pub fn extension(mut self, extension: bool) -> Self {
+        self.extension = extension;
         self
     }
     pub fn tip(mut self, tip: Tip<'a>) -> Self {
@@ -103,6 +113,11 @@ impl Widget for ToolButton<'_> {
         );
         if !vector {
             icon::paint(p, icon_rect, self.icon, l.dark, style, op);
+        }
+        if self.extension {
+            let halo = l.theme.floating.gamma_multiply(op);
+            let at = rect.right_bottom() - vec2(9.0, 9.0);
+            badge::puzzle(p, at, 14.0, l.theme.accent.gamma_multiply(op), Some(halo));
         }
         let label = self.tip.map_or(self.icon, |t| t.name);
         response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, self.enabled, label));
@@ -311,6 +326,8 @@ mod tests {
             assert!(!off.sense.senses_click());
             let on = ui.add(ToolButton::new("extrude"));
             assert!(on.sense.senses_click());
+            let ext = ui.add(ToolButton::new("extrude").extension(true));
+            assert!(ext.sense.senses_click());
         });
     }
 }

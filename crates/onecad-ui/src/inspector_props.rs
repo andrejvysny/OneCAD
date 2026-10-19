@@ -178,6 +178,7 @@ pub fn properties(app: &mut App, ui: &mut Ui, panel: Rect) {
         }
         ui.add_space(4.0);
     }
+    crate::inspector_ext::sheet_metal(app, ui);
     hint(app, ui, panel);
 }
 

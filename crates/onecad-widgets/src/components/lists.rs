@@ -4,10 +4,12 @@
 mod history;
 mod menu;
 mod segmented;
+mod tabs;
 
 pub use history::{HistoryOutput, HistoryRow, HistoryState, RollbackMarker};
 pub use menu::{MenuRow, MenuSection, menu_divider, menu_frame};
 pub use segmented::{Segment, SegmentedControl};
+pub use tabs::{Tab, TabBar};
 
 use egui::text::{LayoutJob, TextFormat};
 use egui::{

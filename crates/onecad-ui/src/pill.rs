@@ -99,6 +99,12 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
             crate::constraint_authoring::available(app, def.id),
             "Select one applicable sketch entity first",
         ),
+        ToolId::InsertComponent | ToolId::MakeComponent => gate(true, NOT_YET),
+        ToolId::Flange | ToolId::Dogbone => extension_view(app, def.id),
+        ToolId::CheckGeometry if app.ui.editor_facade.topology_failed => {
+            gate(false, "Topology Check stopped responding")
+        }
+        ToolId::CheckGeometry => gate(true, NOT_YET),
         ToolId::Constraints => {
             let mut v = gate(sketch_ui::tools_enabled(app), "Sketch is not ready");
             if app.ui.constraints_open {
@@ -108,6 +114,14 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
         }
         _ => gate(false, NOT_YET),
     }
+}
+
+fn extension_view(app: &App, id: ToolId) -> View {
+    let mut view = gate(true, NOT_YET);
+    if app.ui.editor_facade.active_tool == Some(id) {
+        view.state = ToolState::Active;
+    }
+    view
 }
 
 /// Registry shortcuts are design data; show one only once the app binds it (none yet).
@@ -143,6 +157,11 @@ fn activate(app: &mut App, ctx: &Context, id: ToolId) {
             });
         }
         ToolId::MoveRotate => app.begin_transform(),
+        ToolId::InsertComponent => crate::editor_facade::show_library(app),
+        ToolId::MakeComponent => crate::component_wizard::open(&mut app.ui),
+        ToolId::Flange | ToolId::Dogbone | ToolId::CheckGeometry => {
+            app.ui.editor_facade.press_extension_tool(id);
+        }
         ToolId::Constraints => crate::constraints_menu::toggle(&mut app.ui),
         ToolId::Horizontal
         | ToolId::Vertical
@@ -280,10 +299,17 @@ fn draw_groups(
             pill_divider(ui);
         }
         for (def, v) in group.iter().zip(&views[gi]) {
+            let source = def
+                .source
+                .map(|(ext, publisher)| format!("{ext} · {publisher}"));
             let tip = Tip::new(def.label)
                 .shortcut(bound_shortcut(def))
-                .reason(v.reason);
-            let button = ToolButton::new(def.icon).state(v.state).enabled(v.enabled);
+                .reason(v.reason)
+                .source(source.as_deref());
+            let button = ToolButton::new(def.icon)
+                .state(v.state)
+                .enabled(v.enabled)
+                .extension(def.source.is_some());
             let r = ui.add(button.tip(tip));
             if def.id == ToolId::Constraints {
                 hits.constraints = Some(r.rect);
@@ -299,6 +325,10 @@ fn draw_groups(
 }
 
 pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
+    if app.ui.editor_facade.placing.is_some() {
+        crate::editor_facade::placement_pill(app, ctx, chrome);
+        return;
+    }
     let kind = selection_kind(app);
     let running = running_tool(app);
     let groups = pill_tools(kind);

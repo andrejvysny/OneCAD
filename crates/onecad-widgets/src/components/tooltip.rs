@@ -3,6 +3,7 @@
 
 use egui::{Margin, Response, RichText};
 
+use crate::components::actions::puzzle;
 use crate::fonts;
 use crate::metrics::{Elevation, RADIUS_SM, shadow};
 use crate::theme::look;
@@ -13,6 +14,8 @@ pub struct Tip<'a> {
     pub name: &'a str,
     pub shortcut: Option<&'a str>,
     pub reason: Option<&'a str>,
+    /// Second line naming the extension that contributes the control, e.g. "CNC Prep · Millhouse".
+    pub source: Option<&'a str>,
 }
 
 impl<'a> Tip<'a> {
@@ -32,6 +35,10 @@ impl<'a> Tip<'a> {
         self.reason = reason;
         self
     }
+    pub fn source(mut self, source: Option<&'a str>) -> Self {
+        self.source = source;
+        self
+    }
 }
 
 /// Attach the design tooltip to `response`, for enabled and disabled widgets alike.
@@ -49,6 +56,7 @@ pub fn attach(response: Response, tip: Tip<'_>) -> Response {
     };
     tooltip.popup = tooltip.popup.frame(frame).width(320.0);
     tooltip.show(|ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             let text = match tip.reason {
@@ -65,6 +73,15 @@ pub fn attach(response: Response, tip: Tip<'_>) -> Response {
                 );
             }
         });
+        if let Some(source) = tip.source {
+            let muted = l.theme.tooltip_text.gamma_multiply(0.7);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 5.0;
+                let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                puzzle(ui.painter(), r.center(), 10.0, muted, None);
+                ui.label(RichText::new(source).size(11.0).color(muted));
+            });
+        }
     });
     response
 }

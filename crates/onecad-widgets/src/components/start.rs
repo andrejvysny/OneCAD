@@ -35,6 +35,8 @@ pub struct SidebarNavItem<'a> {
     label: &'a str,
     active: bool,
     enabled: bool,
+    badge: Option<&'a str>,
+    sub: bool,
 }
 
 impl<'a> SidebarNavItem<'a> {
@@ -44,7 +46,21 @@ impl<'a> SidebarNavItem<'a> {
             label,
             active: false,
             enabled: true,
+            badge: None,
+            sub: false,
         }
+    }
+    /// Accent count circle at the row's right edge.
+    pub fn badge(mut self, badge: Option<&'a str>) -> Self {
+        self.badge = badge;
+        self
+    }
+    /// Indented child row: h28, no icon, label aligned with the parent label.
+    // Builder name fixed by the design API; it is not `std::ops::Sub`.
+    #[allow(clippy::should_implement_trait)]
+    pub fn sub(mut self, sub: bool) -> Self {
+        self.sub = sub;
+        self
     }
     pub fn active(mut self, active: bool) -> Self {
         self.active = active;
@@ -60,8 +76,9 @@ impl egui::Widget for SidebarNavItem<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
         let l = look(ui.ctx());
         let t = &l.theme;
+        let height = if self.sub { 28.0 } else { 32.0 };
         let (rect, r) =
-            ui.allocate_exact_size(vec2(ui.available_width(), 32.0), sense(self.enabled));
+            ui.allocate_exact_size(vec2(ui.available_width(), height), sense(self.enabled));
         let opacity = if self.enabled { 1.0 } else { 0.4 };
         let fill = if self.active {
             t.sel_bg
@@ -87,7 +104,9 @@ impl egui::Widget for SidebarNavItem<'_> {
             bg: gap,
             grey: !self.enabled,
         };
-        icon::paint(p, glyph, self.icon, l.dark, style, opacity);
+        if !self.sub {
+            icon::paint(p, glyph, self.icon, l.dark, style, opacity);
+        }
         let g = p.layout_no_wrap(
             self.label.to_owned(),
             FontId::new(metrics::BODY, family),
@@ -95,6 +114,20 @@ impl egui::Widget for SidebarNavItem<'_> {
         );
         let pos = Pos2::new(glyph.right() + 10.0, rect.center().y - g.size().y / 2.0);
         p.galley(pos, g, ink.gamma_multiply(opacity));
+        if let Some(badge) = self.badge {
+            let circle = Rect::from_center_size(
+                Pos2::new(rect.right() - 10.0 - 9.0, rect.center().y),
+                Vec2::splat(18.0),
+            );
+            p.circle_filled(circle.center(), 9.0, t.accent.gamma_multiply(opacity));
+            p.text(
+                circle.center(),
+                egui::Align2::CENTER_CENTER,
+                badge,
+                FontId::new(metrics::SECTION, fonts::semibold()),
+                t.on_accent,
+            );
+        }
         if r.has_focus() {
             focus_ring(ui, rect, RADIUS_SM, &l);
         }
