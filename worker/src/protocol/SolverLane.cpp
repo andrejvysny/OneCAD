@@ -666,10 +666,12 @@ Envelope SolverLane::on_begin(const Envelope& req) {
     g.accepted_pose.emplace(*g.sketch);
     g.index = std::move(tr.index);
     json result = {{"gestureId", gesture_id}, {"ready", true}};
-    if (kind == DragKind::Point) {
-        result["positions"] = changed_positions(input_positions, g.baseline, g.index, 0.0);
-        result["curves"] = changed_curves(input_curves, g.baseline_curves, g.index, 0.0, 0.0);
-        if (g.has_grab) result["pointOffset"] = {g.point_offset.first, g.point_offset.second};
+    // Every kind reports its Begin correction: End deltas are relative to this
+    // re-solved baseline, so an omitted correction would split Rust from the store.
+    result["positions"] = changed_positions(input_positions, g.baseline, g.index, 0.0);
+    result["curves"] = changed_curves(input_curves, g.baseline_curves, g.index, 0.0, 0.0);
+    if (kind == DragKind::Point && g.has_grab) {
+        result["pointOffset"] = {g.point_offset.first, g.point_offset.second};
     }
     gestures_[gesture_id] = std::move(g);
     if (states) result["entityStates"] = std::move(*states);

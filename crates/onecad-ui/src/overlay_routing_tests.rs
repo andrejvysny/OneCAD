@@ -45,6 +45,8 @@ async fn overlays_preserve_sketch_draft_selection_and_history_through_raw_replay
             segments: 0,
             anchor_snap: None,
             secondary: None,
+            preceding: None,
+            tangent_arc: false,
         });
         app.ui.shell_facade.customize_open = customize;
         app.ui.shell_facade.layers_open = !customize;

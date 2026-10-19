@@ -3467,8 +3467,11 @@ cannot drift as it is dragged:
   offset and preserves the legacy request form. Malformed Point grabs are refused.
 * `arcEnd` — `grab` is ignored; the handle follows the target.
 
-Point Begin responses additionally carry optional `positions` and `curves`,
-relative to the stored input pose, under the same changed-member rules as Upsert.
+Begin responses of every kind additionally carry optional `positions` and
+`curves`, relative to the stored input pose, under the same changed-member rules
+as Upsert (Point-only before 2026-10-19; absent ⇒ `{}`). End deltas are relative
+to that re-solved Begin pose, so omitting a non-Point Begin correction would
+leave Rust and the worker store on different poses.
 Rust merges its pending Upsert and Begin corrections for preview, keeping the
 original complete undo/cancel memento. Begin never writes document geometry or
 history. The frontend snaps the desired handle `cursor + pointOffset`, then sends
@@ -5747,6 +5750,12 @@ and back Invariant 5 and checkpoint drift detection.
 ---
 
 ## 14. Changelog
+
+- **2026-10-19 — §7.4 Begin corrections for every drag kind (ONECAD-239/289),
+  additive.** `BeginGesture` now returns the optional `positions`/`curves`
+  correction channels for `arcEnd`, `radius` and `entityBody`, not only `point`.
+  `pointOffset` stays Point-only. Older consumers ignore the members; an absent
+  member still means `{}`. Solver mathematics and End semantics are unchanged.
 
 - **2026-10-19 — §7.3/§7.4 explicit endpoint tangency (ONECAD-18).** Adds the
   distinct 21st kind `TangentAtPoint`, required owner-aligned Start/End roles,

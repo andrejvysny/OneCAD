@@ -327,20 +327,22 @@ fn apply_after(session: &mut SketchSession, after: AfterPrimitive) -> Result<(),
         AfterPrimitive::ContinueLine {
             first,
             last,
+            preceding,
             segments,
         } => {
             let a = point(&session.authoritative, first).ok_or("Solved chain start is missing")?;
-            let b =
-                point(&session.authoritative, last).ok_or("Solved chain endpoint is missing")?;
+            let b = super::tangent_continuation::anchor(&session.authoritative, last, preceding)?;
             session.draft = Some(SketchDraft {
                 first: a,
                 anchor: b,
                 first_id: Some(first),
-                anchor_id: Some(last),
+                anchor_id: last,
                 cursor: b,
                 segments,
                 anchor_snap: None,
                 secondary: None,
+                preceding: Some(preceding),
+                tangent_arc: false,
             });
         }
         AfterPrimitive::Preserve => {
@@ -352,6 +354,12 @@ fn apply_after(session: &mut SketchSession, after: AfterPrimitive) -> Result<(),
                 if let Some(id) = draft.anchor_id {
                     draft.anchor = point(&session.authoritative, id)
                         .ok_or("Solved chain endpoint is missing")?;
+                } else if let Some(preceding) = draft.preceding {
+                    draft.anchor = super::tangent_continuation::anchor(
+                        &session.authoritative,
+                        None,
+                        preceding,
+                    )?;
                 }
                 draft.cursor = draft.anchor;
             }

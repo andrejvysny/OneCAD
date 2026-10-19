@@ -9,6 +9,8 @@ use onecad_core::{
 };
 use onecad_scene::CaptureIdentity;
 
+const TANGENT_NUMERIC: &str = "Numeric tangent arc radius is not supported";
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum CreationDimensions {
     Point { x: Scalar, y: Scalar },
@@ -162,6 +164,9 @@ impl SketchInteraction {
         let Some(draft) = session.draft.as_ref() else {
             return self.refuse("Place a primitive anchor before numeric creation");
         };
+        if session.tool == SketchTool::Line && draft.tangent_arc {
+            return self.refuse(TANGENT_NUMERIC);
+        }
         let batch = dimensions.endpoint_for_draft(draft).and_then(|endpoint| {
             let batch = super::staged_numeric::build(&dimensions, session, endpoint, &ids)?;
             let (mut ops, after) = if session.tool == SketchTool::Point {
@@ -304,6 +309,11 @@ impl SketchInteraction {
         }
         if session.tool != dimensions.tool() {
             self.refuse("Numeric dimensions do not match the active sketch tool");
+            return;
+        }
+        if session.tool == SketchTool::Line && session.draft.as_ref().is_some_and(|d| d.tangent_arc)
+        {
+            self.refuse(TANGENT_NUMERIC);
             return;
         }
         let preview = session

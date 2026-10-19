@@ -5,6 +5,25 @@ use onecad_interaction::sketch::{SketchAction, SketchTool};
 pub(crate) fn show(app: &mut App, ui: &mut egui::Ui) {
     rectangle(app, ui);
     arc(app, ui);
+    tangent_arc(app, ui);
+}
+
+fn tangent_arc(app: &mut App, ui: &mut egui::Ui) {
+    let Some((key, mut enabled)) = app.sketch.session.as_ref().and_then(|session| {
+        let draft = session.draft.as_ref()?;
+        (session.tool == SketchTool::Line && draft.preceding.is_some())
+            .then(|| (session.key.clone(), draft.tangent_arc))
+    }) else {
+        return;
+    };
+    let before = enabled;
+    ui.add_enabled_ui(crate::sketch_ui::tools_enabled(app), |ui| {
+        ui.checkbox(&mut enabled, "Tangent arc");
+    });
+    if enabled != before {
+        app.sketch_dispatch(SketchAction::SetTangentArc { key, enabled });
+    }
+    ui.small("Click to place an arc tangent to the previous segment.");
 }
 
 fn rectangle(app: &mut App, ui: &mut egui::Ui) {

@@ -26,6 +26,7 @@ struct Driver {
     target: wire::GestureTarget,
     scratch: bool,
     store_ahead: bool,
+    updated: bool,
 }
 
 pub(crate) fn spawn(
@@ -44,6 +45,7 @@ pub(crate) fn spawn(
         target,
         scratch: false,
         store_ahead: false,
+        updated: false,
     };
     // Exactly one slot is reserved before this task starts. Caller futures never own this task.
     tokio::spawn(driver.run());
@@ -166,11 +168,12 @@ impl Driver {
     }
 
     async fn update(
-        &self,
+        &mut self,
         preview: &mut Sketch,
         pending: &SketchUpsertDto,
         update: UpdateRequest,
     ) -> Result<(), ApiError> {
+        self.updated = true;
         let result = self.solve_update(preview, pending, &update).await;
         let guard = self.runtime.lock().await;
         let result = result.and_then(|checked| {
@@ -232,6 +235,14 @@ impl Driver {
         end: &EndRequest,
     ) -> Result<EndCompletion, ApiError> {
         self.check().await?;
+        if validation::unchanged_intent(
+            &self.prepared.before,
+            self.target,
+            end.target,
+            self.updated,
+        ) {
+            return self.finish_unchanged(pending, &end.host).await;
+        }
         self.store_ahead = true;
         let solved = bounded(self.prepared.worker.end_gesture(
             &self.prepared.scope.sketch_id.to_string(),
@@ -265,6 +276,42 @@ impl Driver {
             result: Ok(self.control.receipt(NativeGestureEnd {
                 solve,
                 moved,
+                cleanup_error: None,
+            })),
+            projection,
+            regen_expected,
+        })
+    }
+
+    // Identical final intent discards worker scratch without a final solve or store write.
+    async fn finish_unchanged(
+        &mut self,
+        pending: SketchUpsertDto,
+        host: &crate::host::HostContext,
+    ) -> Result<EndCompletion, ApiError> {
+        bounded(self.prepared.worker.cancel_gesture(self.control.id)).await?;
+        self.scratch = false;
+        self.check().await?;
+        let (solve, projection) = {
+            let mut guard = self.runtime.lock().await;
+            if self.control.cancelled() {
+                return Err(refused("Native gesture cancelled"));
+            }
+            let runtime = guard
+                .as_mut()
+                .ok_or_else(|| ApiError::NoDocument("nativeGesture".into()))?;
+            let solve = runtime.release_unchanged_native_gesture(
+                &self.prepared,
+                self.control.id,
+                pending,
+            )?;
+            (solve, runtime.projection())
+        };
+        let regen_expected = self.publish(host, &solve, &projection, None);
+        Ok(CommandCompletion {
+            result: Ok(self.control.receipt(NativeGestureEnd {
+                solve,
+                moved: false,
                 cleanup_error: None,
             })),
             projection,

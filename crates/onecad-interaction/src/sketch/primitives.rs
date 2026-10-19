@@ -3,7 +3,7 @@ use onecad_core::{
     edit::SketchEditOp,
     ids::EntityId,
     math::Vec2,
-    sketch::{Constraint, SketchEntity},
+    sketch::{Constraint, CurvePosition, SketchEntity},
 };
 use std::collections::BTreeSet;
 
@@ -25,7 +25,7 @@ pub(crate) fn build_primitive(
     }
     let draft = session.draft.as_ref().ok_or("No primitive anchor")?;
     let (mut ops, after) = match session.tool {
-        SketchTool::Line => line(draft, point, ids),
+        SketchTool::Line => line(session, draft, point, ids),
         SketchTool::Rectangle => rectangle(draft.anchor, point, ids),
         SketchTool::CenterRectangle => super::center_rectangle::build(draft.anchor, point, ids),
         SketchTool::Circle => circle(draft.anchor, point, ids),
@@ -67,7 +67,15 @@ pub(super) fn validate_ids(session: &SketchSession, ids: &PrimitiveIds) -> Resul
     Ok(())
 }
 
-fn line(draft: &SketchDraft, point: Vec2, ids: &PrimitiveIds) -> Result<PrimitiveBatch, String> {
+fn line(
+    session: &SketchSession,
+    draft: &SketchDraft,
+    point: Vec2,
+    ids: &PrimitiveIds,
+) -> Result<PrimitiveBatch, String> {
+    if draft.tangent_arc {
+        return super::tangent_continuation::build(&session.authoritative, draft, point, ids);
+    }
     let closing = draft.segments > 0 && distance(draft.first, point) < MIN_SIZE;
     let endpoint = if closing { draft.first } else { point };
     if !distance(draft.anchor, endpoint).is_finite() || distance(draft.anchor, endpoint) < MIN_SIZE
@@ -77,7 +85,7 @@ fn line(draft: &SketchDraft, point: Vec2, ids: &PrimitiveIds) -> Result<Primitiv
     let first = draft.first_id.unwrap_or(ids.entities[0]);
     let start = draft.anchor_id.unwrap_or(ids.entities[0]);
     let end = if closing { first } else { ids.entities[1] };
-    let mut ops = Vec::with_capacity(3);
+    let mut ops = Vec::with_capacity(4);
     if draft.anchor_id.is_none() {
         ops.push(add_point(start, draft.anchor));
     }
@@ -90,12 +98,17 @@ fn line(draft: &SketchDraft, point: Vec2, ids: &PrimitiveIds) -> Result<Primitiv
         end,
         false,
     )));
+    push_arc_weld(&mut ops, draft, start, ids);
     let after = if closing {
         AfterPrimitive::Reset
     } else {
         AfterPrimitive::ContinueLine {
             first,
-            last: end,
+            last: Some(end),
+            preceding: ChainCurve {
+                entity: ids.entities[2],
+                role: CurvePosition::End,
+            },
             segments: draft
                 .segments
                 .checked_add(1)
@@ -103,6 +116,25 @@ fn line(draft: &SketchDraft, point: Vec2, ids: &PrimitiveIds) -> Result<Primitiv
         }
     };
     Ok((ops, after))
+}
+
+fn push_arc_weld(
+    ops: &mut Vec<SketchEditOp>,
+    draft: &SketchDraft,
+    start: EntityId,
+    ids: &PrimitiveIds,
+) {
+    if let (None, Some(preceding)) = (draft.anchor_id, draft.preceding) {
+        ops.push(SketchEditOp::AddConstraint {
+            constraint: Constraint::Coincident {
+                id: ids.constraints[0],
+                point1: start,
+                point1_position: CurvePosition::Arbitrary,
+                point2: preceding.entity,
+                point2_position: preceding.role,
+            },
+        });
+    }
 }
 
 pub(super) fn rectangle(

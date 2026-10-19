@@ -108,6 +108,11 @@ pub(crate) fn adopted(sketch: &Sketch, result: &SketchUpsertDto) -> Result<Sketc
     Ok(after)
 }
 
+/// The derived Arc endpoint position the accepted document geometry defines.
+pub(crate) fn arc_endpoint(sketch: &Sketch, id: EntityId, start: bool) -> Result<Vec2, String> {
+    handles::endpoint(sketch, id, start)
+}
+
 fn apply_positions(
     after: &mut Sketch,
     result: &SketchUpsertDto,

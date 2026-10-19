@@ -40,23 +40,45 @@ pub(super) fn append(
         append_anchor(session, current, anchor, &mut next_id, &mut ops)?;
     }
     if let Some(snap) = snap.filter(|snap| snap.intent != SnapIntent::GeometryOnly) {
-        let endpoint = endpoint(session.tool, point, ids, &mut next_id, &mut ops);
-        if let Some(endpoint) = endpoint {
-            let constraints = persist_snap(
-                &session.authoritative,
-                &snap,
-                current,
-                endpoint,
-                &mut next_id,
-            )?;
-            ops.extend(
-                constraints
-                    .into_iter()
-                    .map(|constraint| SketchEditOp::AddConstraint { constraint }),
-            );
-        }
+        let constraints =
+            snap_constraints(session, &snap, current, point, ids, &mut ops, &mut next_id)?;
+        ops.extend(
+            constraints
+                .into_iter()
+                .map(|constraint| SketchEditOp::AddConstraint { constraint }),
+        );
     }
     Ok((ops, after))
+}
+
+fn snap_constraints(
+    session: &SketchSession,
+    snap: &AcceptedSnap,
+    current: super::inference::SnapSource,
+    point: onecad_core::math::Vec2,
+    ids: &PrimitiveIds,
+    ops: &mut Vec<SketchEditOp>,
+    next_id: &mut impl FnMut() -> onecad_core::ids::ConstraintId,
+) -> Result<Vec<Constraint>, String> {
+    if tangent_arc(session) {
+        return super::tangent_continuation::persist_final(
+            session,
+            snap,
+            current,
+            point,
+            ids,
+            ops.as_slice(),
+            next_id,
+        );
+    }
+    let Some(endpoint) = endpoint(session.tool, point, ids, next_id, ops) else {
+        return Ok(Vec::new());
+    };
+    persist_snap(&session.authoritative, snap, current, endpoint, next_id).map_err(String::from)
+}
+
+fn tangent_arc(session: &SketchSession) -> bool {
+    session.tool == SketchTool::Line && session.draft.as_ref().is_some_and(|d| d.tangent_arc)
 }
 
 fn append_anchor(

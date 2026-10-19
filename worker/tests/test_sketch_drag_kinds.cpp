@@ -385,6 +385,10 @@ void test_radius_tracks_the_cursor_with_a_stable_grab_offset() {
     Envelope b = lane.begin("rd", rev, 6,
                             {{"kind", "radius"}, {"entity", "c1"}, {"grab", {5.0, 0.0}}});
     check(b.ok.value_or(false), "radius BeginGesture on a free circle is ready");
+    check(b.result.contains("positions") && b.result["positions"].is_object() &&
+              b.result.contains("curves") && b.result["curves"].is_object() &&
+              !b.result.contains("pointOffset"),
+          "non-Point Begin reports its correction channels without a pointOffset");
     Envelope d = lane.drag(6, 1, 12.0, 0.0);
     check(d.ok.value_or(false) && d.result.value("status", std::string{}) == "success",
           "the free radius drag succeeds");

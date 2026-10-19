@@ -73,8 +73,8 @@ jobs:
     name: Native host lifecycle (production worker and Metal)
     runs-on: macos-15
     timeout-minutes: 90
+    # Job-level env cannot read the runner context; ONECAD_OCCT_ROOT is set in the first step.
     env:
-      ONECAD_OCCT_ROOT: ${{ runner.temp }}/onecad-occt/8.0.1
       ONECAD_OCCT_VERSION: 8.0.1
       ONECAD_OCCT_BUILD_ID: onecad-occt-8.0.1-b8f597c67781-kp1
       ONECAD_WORKER_BUILD_DIR: ${{ github.workspace }}/worker/build-native-host-ci
@@ -82,6 +82,8 @@ jobs:
       ONECAD_REQUIRE_WORKER: '1'
       ONECAD_REQUIRE_GPU: '1'
     steps:
+      - name: Set pinned OCCT root
+        run: echo "ONECAD_OCCT_ROOT=$RUNNER_TEMP/onecad-occt/8.0.1" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - name: Install repository Rust toolchain
         run: rustup show active-toolchain

@@ -12,3 +12,5 @@
 - [onecad-ui floating chrome](onecad-ui-floating-chrome.md) — 4a popups, cube host rect, consume_key test input, pill centre rule
 - [Gallery screenshot via egui callback](widgets-screenshot-via-egui-callback.md) — ScreenshotCallback recipe, allocate_ui_with_layout shrink gotcha, src/glyph.rs vector glyphs
 - [onecad-ui 4b integration](onecad-ui-4b-integration.md) — FeatureCard fixed labels, NumberField focus on Enter, Appearance/system theme, screenshot driving limits
+- [Interaction real_* tests need worker](interaction-real-tests-need-worker.md) — 4 env-only failures w/o ONECAD_WORKER_PATH; use --no-fail-fast
+- [real_arc_slot suite gotchas](real-arc-slot-suite-gotchas.md) — redo ulp drift, free-arc edit nondeterminism, #[path] mods, weld counts

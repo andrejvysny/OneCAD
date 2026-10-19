@@ -97,6 +97,13 @@ pub struct PrimitiveAnchor {
     pub snap: Option<super::inference::AcceptedSnap>,
 }
 
+/// A chain curve whose `role` endpoint is the chain anchor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ChainCurve {
+    pub entity: EntityId,
+    pub role: onecad_core::sketch::CurvePosition,
+}
+
 #[derive(Clone, Debug)]
 pub struct SketchDraft {
     pub first: Vec2,
@@ -107,6 +114,8 @@ pub struct SketchDraft {
     pub segments: usize,
     pub anchor_snap: Option<super::inference::AcceptedSnap>,
     pub secondary: Option<PrimitiveAnchor>,
+    pub preceding: Option<ChainCurve>,
+    pub tangent_arc: bool,
 }
 
 /// The host supplies fresh ids; moving a preview never allocates identities.
@@ -210,7 +219,8 @@ pub(crate) enum AfterPrimitive {
     Reset,
     ContinueLine {
         first: EntityId,
-        last: EntityId,
+        last: Option<EntityId>,
+        preceding: ChainCurve,
         segments: usize,
     },
     Preserve,
@@ -250,6 +260,10 @@ pub enum SketchAction {
     SetConstructionMode {
         key: SketchSessionKey,
         construction: bool,
+    },
+    SetTangentArc {
+        key: SketchSessionKey,
+        enabled: bool,
     },
     Move(CapturedSketchPoint),
     Click {

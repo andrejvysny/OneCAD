@@ -36,6 +36,10 @@ impl SketchInteraction {
                 }
                 Vec::new()
             }
+            SketchAction::SetTangentArc { key, enabled } => {
+                self.set_tangent_arc(key, enabled);
+                Vec::new()
+            }
             SketchAction::Move(point) => {
                 self.moved(point);
                 Vec::new()

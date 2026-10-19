@@ -174,6 +174,22 @@ impl DocumentRuntime {
         self.record_upsert(prepared.scope.sketch_id, &solved);
         Ok((solved, outcome))
     }
+
+    /// Releases an End whose final intent equals Begin. Like Cancel, it adopts no
+    /// re-solve correction and records no worker revision; the worker store keeps a
+    /// solved cache of the unchanged accepted sketch.
+    pub(crate) fn release_unchanged_native_gesture(
+        &mut self,
+        prepared: &PreparedNativeGesture,
+        id: u64,
+        mut pending: SketchUpsertDto,
+    ) -> Result<SketchUpsertDto, EngineError> {
+        self.validate_native_gesture(prepared, id)?;
+        self.native_gesture.take();
+        pending.solved_positions.clear();
+        pending.solved_curves.clear();
+        Ok(pending)
+    }
 }
 
 #[cfg(test)]

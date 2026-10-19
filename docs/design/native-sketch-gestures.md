@@ -48,7 +48,21 @@ cancel the owning gesture. Stale receipts cannot recreate a cancelled preview.
 
 End adopts checked analytic geometry against the Begin baseline. Equal before and
 after sketches produce no transaction, revision, dirty/autosave change or
-regeneration. A changed accepted pose creates exactly one sketch drag edit.
+regeneration.
+
+An End whose final intent reproduces the accepted pose is a proven no-op: it
+discards worker scratch, adopts no Upsert/Begin/End re-solve correction and
+returns `moved = false`. Intent is per kind against accepted document geometry:
+Point, Radius and EntityBody keep their Begin grab offset, so a final target equal
+to `grab` is unchanged; without `grab`, Point/EntityBody compare the anchor point
+and Radius compares the exact target distance with the radius. ArcEnd ignores
+`grab` and is unchanged only when the target equals the accepted derived endpoint;
+an off-handle release therefore still moves the endpoint. An End without a target
+is unchanged only when no Update ran. Returning to the initial intent after moving
+away is also unchanged, so solver branch history cannot become a document edit.
+Every other target, including sub-micron movement, takes the normal solve path.
+Begin returns its re-solve correction for every kind, keeping End deltas and
+the worker store on one pose. A changed accepted pose creates exactly one sketch drag edit.
 Native local Undo/Redo uses the existing edit-visit history contract.
 
 ## Cleanup and failure

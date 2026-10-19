@@ -46,6 +46,9 @@ impl SketchInteraction {
         };
         draft.cursor = point.point;
         session.preview = match session.tool {
+            SketchTool::Line if draft.tangent_arc => {
+                super::tangent_continuation::preview(&session.authoritative, draft, point.point)
+            }
             SketchTool::Line => Some(DraftPrimitive::Line {
                 start: draft.anchor,
                 end: point.point,
@@ -112,6 +115,8 @@ impl SketchInteraction {
                 segments: 0,
                 anchor_snap: snap,
                 secondary: None,
+                preceding: None,
+                tangent_arc: false,
             });
             return Vec::new();
         };
@@ -243,6 +248,8 @@ fn point_draft(cursor: onecad_core::math::Vec2) -> SketchDraft {
         segments: 0,
         anchor_snap: None,
         secondary: None,
+        preceding: None,
+        tangent_arc: false,
     }
 }
 
