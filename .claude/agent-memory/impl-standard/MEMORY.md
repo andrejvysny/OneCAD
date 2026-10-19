@@ -7,3 +7,8 @@
 - [ToolChip confirm gate requires context](toolchip-confirm-gate-requires-context.md) — chip-confirm tests need setContext + seeded documentStore.bodies, else they hit the missing-target fallback, not the real gate
 - [tauri-agent keyboard fidelity (WP-H)](tauri-agent-keyboard-fidelity.md) — deliveryFor can't express posted+retrySafe; SessionStatus needs status() touched despite "only inside #preflight()"; layout() kept optional so fakeEnv.ts stays untouched
 - [FP-S13 setMode default blast radius](fp-s13-setmode-default-blast-radius.md) — toolStore's sketch bare-entry default (Line→Select) breaks 10 files/69 tests in src/tools/sketch/** that assume the old default; out-of-scope fix owed there
+- [onecad-widgets headless/API gotchas](widgets-headless-test-gotchas.md) — textures_delta.clear, Id::unique, PLACEHOLDER galleys, anim time
+- [Gallery screenshot recipe](widgets-gallery-screenshot-recipe.md) — env-filter main.rs patch + screencapture -R; stage sizing slack
+- [onecad-ui floating chrome](onecad-ui-floating-chrome.md) — 4a popups, cube host rect, consume_key test input, pill centre rule
+- [Gallery screenshot via egui callback](widgets-screenshot-via-egui-callback.md) — ScreenshotCallback recipe, allocate_ui_with_layout shrink gotcha, src/glyph.rs vector glyphs
+- [onecad-ui 4b integration](onecad-ui-4b-integration.md) — FeatureCard fixed labels, NumberField focus on Enter, Appearance/system theme, screenshot driving limits

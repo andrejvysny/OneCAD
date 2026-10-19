@@ -281,6 +281,20 @@
   /* ---- Fonts ---- */
   --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, Menlo, monospace;
+
+  /* ---- OneCAD Final shell (docs/design/native-ui/final/README.md) ---- */
+  --color-floating: rgb(255 255 255 / 0.97);
+  --color-sel-soft: #eef3fc;
+  --color-sel-border: #cbdcf7;
+  --color-created-fill: #f7a548;
+  --color-created-stroke: #d97a16;
+  --color-created-text: #b5600a;
+  --color-running-bg: #fdebd6;
+  --color-running-border: #f0c79a;
+  --color-ok-text: #157347;
+  --color-expression: #7a3fd0;
+  /* Shadow base; alpha is applied in Rust (onecad-widgets metrics). */
+  --color-shadow: rgb(0 0 0 / 1);
 }
 
 /*
@@ -468,6 +482,19 @@
   /* Inverted (see the light block): on a dark canvas a white outline glows and
      the arrow loses its edge, so the halo goes near-black. */
   --color-overlay-halo: #11141a;
+
+  /* ---- OneCAD Final shell (docs/design/native-ui/final/README.md) ---- */
+  --color-floating: rgb(42 46 52 / 0.97);
+  --color-sel-soft: #1a2740;
+  --color-sel-border: #33445f;
+  --color-created-fill: #f5a03e;
+  --color-created-stroke: #e08a2a;
+  --color-created-text: #f0a24a;
+  --color-running-bg: #3d2a14;
+  --color-running-border: #6b4a22;
+  --color-ok-text: #43c17a;
+  --color-expression: #b48cf5;
+  --color-shadow: rgb(0 0 0 / 1);
 }
 
 /*

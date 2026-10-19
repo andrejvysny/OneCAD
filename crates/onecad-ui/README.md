@@ -159,6 +159,46 @@ bound: application state, incoming DTO/record and protocol reply allocation befo
 GPU-driver storage and toolkit resources have separate lifetimes and limits.
 Oversized or malformed payloads fail closed and disable stale picking/commit.
 
+## Editor chrome
+
+The window follows the OneCAD Final design (`docs/design/native-ui/final/`). The
+presentation components live in the `onecad-widgets` crate (design tokens, baked
+icons, fonts and egui widgets, no OneCAD dependencies); this crate only composes them
+with application data. Chrome modules:
+
+- `layout.rs`: pure geometry of the floating chrome (title and status bars, Explorer,
+  Inspector, tool pill, feature card, view cluster, nav pill) with unit tests.
+- `shell.rs`: orchestrates the bars, panels and overlays each frame.
+- `explorer.rs`: Bodies / Sketches / Datums tree, workspace menu; the sketch being
+  edited lists child rows (line, circle, arc and constraint counts) from the live
+  session.
+- `inspector.rs`, `inspector_props.rs`, `inspector_history.rs`: Properties (title
+  block and rows from existing projection data; unavailable values show a dash) and
+  History (feature rows, rollback marker, info box).
+- `pill.rs`, `tool_registry.rs`: selection-dependent tool pill. Tools without a
+  backing action are disabled with the reason "Not available yet".
+- `feature_card.rs`: card for the running model tool (numeric field, Create / Apply,
+  Cancel). Enter confirms and Escape cancels under the same predicates as before.
+  The preview state appears in the status bar.
+- `session_strip.rs`, `constraints_menu.rs`: sketch session strip and the
+  display-only Constraints menu (all rows disabled; no constraint authoring yet).
+- `start_screen.rs`: Home screen opened from the title bar. Tiles are disabled,
+  recent cards other than the open document are static placeholders; "Back to
+  document" or Escape returns to the editor.
+- `overlays.rs`, `display_menu.rs`, `bars.rs`: nav pill, view cluster, Display menu,
+  title and status bars.
+- `appearance.rs`: applies View > Appearance.
+
+Cmd+1 toggles the Explorer and Cmd+2 the Inspector (ignored while a text field has
+focus). View > Appearance in the native menu offers Light, Dark and System; Dark is
+the default and System follows the OS theme, re-evaluated every frame.
+
+To preview components in isolation, run the widget gallery:
+
+```sh
+cargo run -p onecad-widgets --example gallery
+```
+
 Automated host tests require no GUI:
 
 ```sh

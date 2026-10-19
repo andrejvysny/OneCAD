@@ -13,6 +13,7 @@ onecad-core = { workspace = true }
 onecad-protocol = { workspace = true }
 onecad-scene = { workspace = true }
 onecad-render = { workspace = true }
+onecad-widgets = { workspace = true }
 eframe = { version = "=0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "system_fonts", "wgpu"] }
 egui = "=0.37.0"
 egui-wgpu = "=0.37.0"
@@ -27,8 +28,6 @@ uuid = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = "=0.21.2"
 arboard = { version = "3.6", default-features = false }
-objc2-core-text = { version = "0.3.2", default-features = false, features = ["std", "CTFont", "CTFontDescriptor"] }
-objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFURL", "CFString", "CFCGTypes"] }
 
 [dev-dependencies]
 tempfile = "3"

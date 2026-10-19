@@ -67,6 +67,8 @@ macro_rules! theme {
         #[derive(Clone, Debug)]
         pub struct Theme { $(pub $field: Color32,)* }
         impl Theme {
+            /// Every field set to `c`; the no-panic fallback when tokens fail to parse.
+            pub fn filled(c: Color32) -> Self { Theme { $($field: c,)* } }
             pub fn from_tokens(map: &HashMap<String, Color32>) -> Result<Self, String> {
                 Ok(Theme { $($field: *map.get($token).ok_or(concat!("missing token --", $token))?,)* })
             }
@@ -116,10 +118,71 @@ theme! {
     body_fill = "color-body-fill",
     body_edge = "color-body-edge",
     viewport_hover = "color-viewport-hover",
+    floating = "color-floating",
+    sel_soft = "color-sel-soft",
+    sel_border = "color-sel-border",
+    created_fill = "color-created-fill",
+    created_stroke = "color-created-stroke",
+    created_text = "color-created-text",
+    running_bg = "color-running-bg",
+    running_border = "color-running-border",
+    ok_text = "color-ok-text",
+    expression = "color-expression",
+    shadow = "color-shadow",
+    warn = "color-warn",
+    warn_surface = "color-warn-surface",
+    warn_border = "color-warn-border",
+    danger_surface = "color-danger-surface",
+    danger_border = "color-danger-border",
+    danger_strong = "color-danger-strong",
+    dof_ok = "color-dof-ok",
+    canvas_sketch = "color-canvas-sketch",
+    sketch_chrome = "color-sketch-chrome",
+    sketch_chrome_border = "color-sketch-chrome-border",
+    toolbar_sketch = "color-toolbar-sketch",
+    card_hover_border = "color-card-hover-border",
+    toggle_off = "color-toggle-off",
+    chip2 = "color-chip-2",
+    sketch_under = "color-sketch-under",
+    sketch_done = "color-sketch-done",
+    sketch_sel = "color-sketch-sel",
+    traffic_min = "color-traffic-min",
+    traffic_max = "color-traffic-max",
 }
 
 pub fn load(dark: bool) -> Result<Theme, String> {
     Theme::from_tokens(&tokens(dark))
+}
+
+/// Current theme stored in the egui context so components need no theme parameter.
+#[derive(Clone)]
+pub struct Look {
+    pub theme: std::sync::Arc<Theme>,
+    pub dark: bool,
+}
+
+const LOOK_ID: &str = "onecad_look";
+
+/// Apply the theme to egui visuals and remember it for [`look`].
+pub fn install(ctx: &egui::Context, theme: Theme, dark: bool) {
+    apply(ctx, &theme, dark);
+    let look = Look {
+        theme: std::sync::Arc::new(theme),
+        dark,
+    };
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique(LOOK_ID), look));
+}
+
+/// The installed look; falls back to the light theme when none is installed.
+pub fn look(ctx: &egui::Context) -> Look {
+    if let Some(l) = ctx.data(|d| d.get_temp::<Look>(egui::Id::unique(LOOK_ID))) {
+        return l;
+    }
+    let theme = load(false).unwrap_or_else(|_| Theme::filled(Color32::MAGENTA));
+    Look {
+        theme: std::sync::Arc::new(theme),
+        dark: false,
+    }
 }
 
 /// Map the tokens onto egui's widget visuals.
@@ -161,11 +224,33 @@ pub fn apply(ctx: &egui::Context, t: &Theme, dark: bool) {
         }
         v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, t.border);
         s.spacing.item_spacing = egui::vec2(6.0, 4.0);
+        s.interaction.tooltip_delay = 0.4;
     });
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn install_then_look_roundtrips() {
+        let ctx = egui::Context::default();
+        let dark = super::load(true).unwrap();
+        let panel = dark.panel;
+        super::install(&ctx, dark, true);
+        let l = super::look(&ctx);
+        assert!(l.dark);
+        assert_eq!(l.theme.panel, panel);
+    }
+
+    #[test]
+    fn new_tokens_resolve() {
+        let t = super::load(true).unwrap();
+        assert_eq!(t.sel_soft, egui::Color32::from_rgb(0x1a, 0x27, 0x40));
+        assert_eq!(
+            super::load(false).unwrap().expression,
+            egui::Color32::from_rgb(0x7a, 0x3f, 0xd0)
+        );
+    }
+
     #[test]
     fn dark_tokens_override_light() {
         let light = super::tokens(false);

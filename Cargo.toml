@@ -7,6 +7,7 @@ members = [
     "crates/onecad-render",
     "crates/onecad-interaction",
     "crates/onecad-ui",
+    "crates/onecad-widgets",
     "crates/onecad-core",
     "crates/onecad-protocol",
     "crates/onecad-worker-stub",
@@ -24,6 +25,7 @@ onecad-scene = { path = "crates/onecad-scene" }
 onecad-render = { path = "crates/onecad-render" }
 onecad-interaction = { path = "crates/onecad-interaction" }
 onecad-ui = { path = "crates/onecad-ui" }
+onecad-widgets = { path = "crates/onecad-widgets" }
 onecad-core = { path = "crates/onecad-core" }
 onecad-protocol = { path = "crates/onecad-protocol" }
 serde = { version = "1", features = ["derive"] }

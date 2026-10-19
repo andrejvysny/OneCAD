@@ -18,22 +18,51 @@ pub enum Action {
     Quit,
     Fit,
     Home,
+    Appearance(crate::ui_state::Appearance),
 }
 
 #[cfg(target_os = "macos")]
 mod imp {
     use super::Action;
+    use crate::ui_state::Appearance;
     use muda::accelerator::{Accelerator, Code, Modifiers};
-    use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
+    use muda::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
     use std::sync::mpsc::{Receiver, channel};
 
     pub struct NativeMenu {
         _menu: Menu,
         rx: Receiver<Action>,
+        appearance: Choices,
     }
 
     fn item(text: &str, mods: Modifiers, code: Code) -> MenuItem {
         MenuItem::new(text, true, Some(Accelerator::new(mods, code)))
+    }
+
+    type Choices = [(Appearance, CheckMenuItem); 3];
+
+    /// View › Appearance: Light / Dark / System, Dark checked (the default).
+    fn appearance_submenu() -> Result<(Submenu, Choices), muda::Error> {
+        let choices = [
+            (
+                Appearance::Light,
+                CheckMenuItem::new("Light", true, false, None),
+            ),
+            (
+                Appearance::Dark,
+                CheckMenuItem::new("Dark", true, true, None),
+            ),
+            (
+                Appearance::System,
+                CheckMenuItem::new("System", true, false, None),
+            ),
+        ];
+        let submenu = Submenu::with_items(
+            "Appearance",
+            true,
+            &[&choices[0].1, &choices[1].1, &choices[2].1],
+        )?;
+        Ok((submenu, choices))
     }
 
     pub fn install(ctx: &egui::Context) -> Result<NativeMenu, String> {
@@ -80,7 +109,13 @@ mod imp {
             ],
         )
         .map_err(e)?;
-        let view = Submenu::with_items("View", true, &[&fit, &home]).map_err(e)?;
+        let (appearance, choices) = appearance_submenu().map_err(e)?;
+        let view = Submenu::with_items(
+            "View",
+            true,
+            &[&fit, &home, &PredefinedMenuItem::separator(), &appearance],
+        )
+        .map_err(e)?;
         let window = Submenu::with_items(
             "Window",
             true,
@@ -95,6 +130,18 @@ mod imp {
         window.set_as_windows_menu_for_nsapp();
 
         let ids = [
+            (
+                choices[0].1.id().clone(),
+                Action::Appearance(Appearance::Light),
+            ),
+            (
+                choices[1].1.id().clone(),
+                Action::Appearance(Appearance::Dark),
+            ),
+            (
+                choices[2].1.id().clone(),
+                Action::Appearance(Appearance::System),
+            ),
             (undo.id().clone(), Action::Undo),
             (redo.id().clone(), Action::Redo),
             (save.id().clone(), Action::Save),
@@ -116,10 +163,21 @@ mod imp {
                 ctx.request_repaint();
             }
         }));
-        Ok(NativeMenu { _menu: menu, rx })
+        Ok(NativeMenu {
+            _menu: menu,
+            rx,
+            appearance: choices,
+        })
     }
 
     impl NativeMenu {
+        /// muda toggles a check item on click; restore the one-of-three invariant.
+        pub fn set_appearance(&self, current: Appearance) {
+            for (choice, item) in &self.appearance {
+                item.set_checked(*choice == current);
+            }
+        }
+
         pub fn drain(&self) -> Vec<Action> {
             self.rx.try_iter().collect()
         }
@@ -137,6 +195,7 @@ mod imp {
         pub fn drain(&self) -> Vec<Action> {
             Vec::new()
         }
+        pub fn set_appearance(&self, _current: crate::ui_state::Appearance) {}
     }
 }
 
@@ -183,6 +242,7 @@ impl Action {
                     Self::Quit => (egui::Key::Q, false),
                     Self::Fit => (egui::Key::Num0, false),
                     Self::Home => (egui::Key::H, true),
+                    Self::Appearance(_) => return false,
                 };
                 *key == expected
                     && modifiers.matches_logically(egui::Modifiers {

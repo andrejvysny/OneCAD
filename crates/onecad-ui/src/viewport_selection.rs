@@ -47,6 +47,11 @@ struct Delivery {
     result: Result<PreparedHighlights, String>,
 }
 impl Selection {
+    pub fn selected_kind(&self) -> Option<(HighlightKind, BodyId)> {
+        self.selected
+            .as_ref()
+            .map(|target| (target.kind, target.body_id))
+    }
     pub fn select(&mut self, hit: Option<&PickHit<'_>>) {
         self.selected = hit.map(Target::from_hit);
         self.changed();

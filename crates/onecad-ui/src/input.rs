@@ -63,6 +63,7 @@ pub fn route(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     for command in commands {
         app.submit(command);
     }
+    close_constraints_on_escape(app, raw);
     if !text && app.sketch_active() && app.viewport_ready() {
         let keys: Vec<_> = raw
             .events
@@ -105,9 +106,30 @@ pub fn route(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     protect_composition(app, raw, text);
 }
 
+/// Escape closes an open Constraints menu and is consumed so the sketch does not also see it.
+fn close_constraints_on_escape(app: &mut App, raw: &mut egui::RawInput) {
+    if !app.ui.constraints_open {
+        return;
+    }
+    let is_escape = |event: &egui::Event| {
+        matches!(
+            event,
+            egui::Event::Key {
+                key: egui::Key::Escape,
+                pressed: true,
+                ..
+            }
+        )
+    };
+    if raw.events.iter().any(is_escape) {
+        raw.events.retain(|event| !is_escape(event));
+        app.ui.constraints_open = false;
+    }
+}
+
 fn route_menu(
     app: &mut App,
-    _ctx: &egui::Context,
+    ctx: &egui::Context,
     events: &mut Vec<egui::Event>,
     action: menu::Action,
     text: bool,
@@ -124,6 +146,13 @@ fn route_menu(
         menu::Action::Home => {
             app.camera = onecad_scene::Camera::default();
             app.fit_pending = true;
+        }
+        menu::Action::Appearance(choice) => {
+            app.ui.appearance = choice;
+            crate::appearance::sync(app, ctx);
+            if let Some(menu) = &app.menu {
+                menu.set_appearance(choice);
+            }
         }
         menu::Action::Cut if text => events.push(egui::Event::Cut),
         menu::Action::Copy if text => events.push(egui::Event::Copy),

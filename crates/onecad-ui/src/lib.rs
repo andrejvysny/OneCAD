@@ -4,21 +4,31 @@
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
 mod app;
+mod appearance;
+mod bars;
 mod bridge;
 mod budget;
 mod camera_navigation;
 mod capture;
+mod constraints_menu;
+mod display_menu;
 mod event_mailbox;
-mod fonts;
+mod explorer;
+mod feature_card;
 mod gizmo;
 mod handoff;
-mod icons;
 mod input;
+mod inspector;
+mod inspector_history;
+mod inspector_props;
+mod layout;
 mod menu;
 mod navigation;
 mod navigation_cube;
 mod outcome;
+mod overlays;
 mod parameter_ui;
+mod pill;
 mod profiles;
 mod projection_budget;
 mod provisional;
@@ -26,18 +36,23 @@ mod qa;
 mod record_budget;
 mod render_receipt;
 mod services;
+mod session_strip;
 mod shell;
 mod sketch_completion;
 mod sketch_services;
 mod sketch_ui;
 mod sketch_view;
-mod theme;
+mod start_screen;
+mod tool_registry;
 mod transform_ui;
+mod ui_state;
 mod viewport;
 mod viewport_options;
 mod viewport_selection;
 mod viewport_updates;
 mod viewport_widgets;
+
+use onecad_widgets::{fonts, theme};
 
 pub fn run() -> Result<(), String> {
     let paths = qa::QaPaths::from_args(std::env::args_os().skip(1))?;

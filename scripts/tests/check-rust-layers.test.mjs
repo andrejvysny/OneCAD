@@ -43,7 +43,7 @@ test('upward, concrete interaction and host dependencies fail across dependency 
 });
 
 test('toolkit and GPU families fail in all pure layers, all declaration kinds', () => {
-  for (const from of Object.keys(LAYERS).filter((name) => !['onecad-ui'].includes(name))) {
+  for (const from of Object.keys(LAYERS).filter((name) => !['onecad-ui', 'onecad-widgets'].includes(name))) {
     for (const name of ['tauri', 'tauri-build', 'egui-wgpu', 'eframe', 'winit', 'objc2-app-kit', 'gtk4', 'slint', 'wgpu']) {
       if (from === 'onecad-render' && name === 'wgpu') continue;
       for (const kind of [null, 'dev', 'build']) {
@@ -74,7 +74,7 @@ test('render accepts wgpu without admitting toolkit or alternate GPU stacks', ()
 });
 
 test('composition hosts accept external UI and GPU dependencies', () => {
-  for (const from of ['onecad-ui']) {
+  for (const from of ['onecad-ui', 'onecad-widgets']) {
     assert.deepEqual(checkMetadata(fixture(from, [external('tauri-build'), external('egui'), external('wgpu')])), []);
   }
 });

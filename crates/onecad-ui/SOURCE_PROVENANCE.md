@@ -4,17 +4,24 @@ This crate adapts local OneCAD spike code rather than adding the spike as a
 runtime dependency. These are source-content fingerprints, not claims of a
 clean tag, reproducible binary, native acceptance or third-party license review.
 
-- `fonts.rs`: adapted from `spikes/toolkit-egui/src/fonts.rs`. Source SHA-256: `88a10beb02432ff420ebf27b2803ecde9f7e58ae5dced263cb48cbdffcf3ccbf`.
-- `icons.rs`: adapted from `spikes/toolkit-egui/src/icons.rs`. Source SHA-256: `87b3cc669ef58d89b96939661a2eeea3a7711072fec174a48cef553aeae00feb`.
-- `theme.rs`: adapted from `spikes/toolkit-egui/src/theme.rs`. Source SHA-256: `9f2bf47e2a49e974aac6d7ef2a5ce464d0676ad70c08b497b7336ed118c58087`.
+- `fonts.rs` (now `onecad-widgets/src/fonts.rs`): originally adapted from `spikes/toolkit-egui/src/fonts.rs`. Source SHA-256: `88a10beb02432ff420ebf27b2803ecde9f7e58ae5dced263cb48cbdffcf3ccbf`.
+- `theme.rs` (now `onecad-widgets/src/theme.rs`): originally adapted from `spikes/toolkit-egui/src/theme.rs`. Source SHA-256: `9f2bf47e2a49e974aac6d7ef2a5ce464d0676ad70c08b497b7336ed118c58087`.
 - `menu.rs`: adapted from `spikes/toolkit-egui/src/menu.rs`. Source SHA-256: `569f271f8356c3a8bdce608f3b7fe9910d9d1a1c1e0890a00f8864884723d955`.
 
-The font adapter resolves system SF through CoreText at runtime; no system font
-file is redistributed. The icon adapter consumes the existing
-`assets/native/cppIcons.generated.ts` and `assets/native/authored.ts` registries. The theme
-adapter consumes the existing `assets/native/tokens.css` palette, with light/dark
-selection enabled. The menu adapter retains typed actions and duplicate-key
+Fonts, theme tokens and icons are no longer local to this crate; `onecad-widgets`
+provides them. The old `icons.rs` painter was removed, and nothing in Rust reads
+`assets/native/cppIcons.generated.ts` or `assets/native/authored.ts` any more (the
+files remain). The menu adapter retains typed actions and duplicate-key
 routing, removes spike metrics, and routes Quit through application shutdown.
+
+## Native UI design source
+
+The editor chrome, start screen and components follow `docs/design/native-ui/final/`
+(`README.md`, `OneCAD Final.dc.html`, `OneCAD Components.dc.html`). Icons are baked
+from the design's `cad-icons.js` (colour isometric set, light and dark palettes) by
+`scripts/bake-cad-icons.ts` into `crates/onecad-widgets/assets/icons/`, and are
+rasterised at runtime with the `resvg` crate (a `onecad-widgets` dependency).
+`onecad-widgets` has its own gallery example for visual comparison.
 
 Layout measurements (220 px tree, 259 px inspector, 44 px title, 34 px status)
 and input ownership derive from the spike and existing OneCAD shell. The spike's

@@ -1,0 +1,23 @@
+[package]
+name = "onecad-widgets"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "OneCAD native design tokens, icons and UI components"
+
+[dependencies]
+egui = "=0.37.0"
+resvg = { version = "0.48", default-features = false }
+serde_json = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-text = { version = "0.3.2", default-features = false, features = ["std", "CTFont", "CTFontDescriptor"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFURL", "CFString", "CFCGTypes"] }
+
+[dev-dependencies]
+eframe = { version = "=0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "system_fonts", "wgpu"] }
+
+[[example]]
+name = "gallery"
+path = "examples/gallery/main.rs"

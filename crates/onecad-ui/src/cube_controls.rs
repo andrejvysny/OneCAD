@@ -153,19 +153,18 @@ fn home_fit_projection(
         CubeAction::Home,
         output,
     );
-    // OneCAD owns the home icon; navigation geometry and layout come from the donor.
-    crate::icons::paint(
-        painter,
-        home.shrink(4.0 * scale),
-        "home",
-        if hot {
-            palette.accent
-        } else {
-            palette.cube_text
-        },
-        palette.accent,
-        1.5,
-    );
+    let tint = if hot {
+        palette.accent
+    } else {
+        palette.cube_text
+    };
+    let style = onecad_widgets::icon::IconStyle {
+        tint,
+        bg: palette.cube_face,
+        grey: false,
+    };
+    let dark = onecad_widgets::theme::look(ui.ctx()).dark;
+    onecad_widgets::icon::paint(painter, home.shrink(4.0 * scale), "home", dark, style, 1.0);
 }
 
 fn fit_projection(

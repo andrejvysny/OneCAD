@@ -3,27 +3,27 @@
 use crate::app::App;
 use onecad_render::RenderOptions;
 
-pub fn show(app: &mut App, ui: &mut egui::Ui) {
-    display_menu(ui, |ui| {
-        let mut options = *app
-            .pending_display_options
-            .as_ref()
-            .unwrap_or_else(|| app.renderer.options());
-        let mut changed = supersampling(ui, &mut options);
-        changed |= ui
-            .add_enabled_ui(
-                app.interaction.tool.is_none() && !app.sketch_active(),
-                |ui| section(ui, app, &mut options),
-            )
-            .inner;
-        if changed {
-            app.pending_display_options = Some(options);
-            app.draw_dirty = true;
-            ui.ctx().request_repaint();
-        }
-    });
+/// Menu body; hosted by the title menu and by the floating chrome's popups.
+pub fn contents(app: &mut App, ui: &mut egui::Ui) {
+    let mut options = *app
+        .pending_display_options
+        .as_ref()
+        .unwrap_or_else(|| app.renderer.options());
+    let mut changed = supersampling(ui, &mut options);
+    changed |= ui
+        .add_enabled_ui(
+            app.interaction.tool.is_none() && !app.sketch_active(),
+            |ui| section(ui, app, &mut options),
+        )
+        .inner;
+    if changed {
+        app.pending_display_options = Some(options);
+        app.draw_dirty = true;
+        ui.ctx().request_repaint();
+    }
 }
 
+#[cfg(test)]
 fn display_menu<R>(
     ui: &mut egui::Ui,
     content: impl FnOnce(&mut egui::Ui) -> R,

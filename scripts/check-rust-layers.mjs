@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 export const LAYERS = Object.freeze({
   'onecad-core': [],
+  'onecad-widgets': [],
   'onecad-protocol': [],
   'onecad-library': [],
   'onecad-app': ['onecad-core', 'onecad-protocol', 'onecad-library'],
@@ -14,7 +15,7 @@ export const LAYERS = Object.freeze({
   'onecad-render': ['onecad-scene', 'onecad-protocol', 'onecad-core'],
   'onecad-ui': [
     'onecad-app', 'onecad-scene', 'onecad-interaction', 'onecad-render',
-    'onecad-core', 'onecad-protocol', 'onecad-library',
+    'onecad-core', 'onecad-protocol', 'onecad-library', 'onecad-widgets',
   ],
   'onecad-mesh-fixture': ['onecad-app', 'onecad-core', 'onecad-protocol'],
   'onecad-regen': ['onecad-app', 'onecad-core'],
@@ -23,7 +24,7 @@ export const LAYERS = Object.freeze({
   'onecad-worker-stub': ['onecad-protocol'],
 });
 
-const HOSTS = new Set(['onecad-ui']);
+const HOSTS = new Set(['onecad-ui', 'onecad-widgets']);
 const TOOLKITS = [
   'tauri', 'egui', 'eframe', 'epaint', 'emath', 'ecolor', 'winit', 'rfd',
   'bevy', 'arboard', 'muda', 'tray-icon', 'objc', 'objc2', 'cocoa', 'core-graphics',

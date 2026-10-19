@@ -97,47 +97,19 @@ impl App {
     }
 }
 
-pub fn tools(app: &mut App, ui: &mut egui::Ui) {
-    let Some(session) = app.sketch.session.as_ref() else {
-        return;
-    };
-    if session.phase == SketchPhase::Closed {
-        return;
-    }
-    let can_finish = session.phase == SketchPhase::Active && app.bridge.valid();
-    let active = can_finish && app.viewport_ready();
-    let selected = session.tool;
-    for (tool, label) in [
-        (SketchTool::Select, "Select"),
-        (SketchTool::Line, "Line"),
-        (SketchTool::Rectangle, "Rectangle"),
-        (SketchTool::Circle, "Circle"),
-    ] {
-        if ui
-            .add_enabled(active, egui::Button::new(label).selected(selected == tool))
-            .clicked()
-        {
-            app.sketch_dispatch(SketchAction::SetTool(tool));
-        }
-    }
-    if ui
-        .add_enabled(
-            can_finish || session_faulted(app),
-            egui::Button::new("Finish sketch"),
-        )
-        .clicked()
-    {
-        app.sketch_dispatch(SketchAction::Finish);
-    }
-    if ui
-        .add_enabled(
-            can_finish || session_faulted(app),
-            egui::Button::new("Discard sketch edits"),
-        )
-        .clicked()
-    {
-        app.sketch_dispatch(SketchAction::Discard);
-    }
+/// Sketch tools are clickable only on an active, bridge-valid session.
+pub fn tools_enabled(app: &App) -> bool {
+    app.viewport_ready() && can_finish(app)
+}
+fn can_finish(app: &App) -> bool {
+    app.sketch
+        .session
+        .as_ref()
+        .is_some_and(|session| session.phase == SketchPhase::Active && app.bridge.valid())
+}
+/// Finish and Discard stay available on a faulted session so it can be left.
+pub fn can_exit(app: &App) -> bool {
+    can_finish(app) || session_faulted(app)
 }
 fn session_faulted(app: &App) -> bool {
     app.sketch

@@ -11,6 +11,7 @@ use onecad_scene::{Camera, ViewSnapshot};
 use std::sync::Arc;
 
 pub struct App {
+    pub ui: crate::ui_state::UiState,
     pub bridge: Bridge,
     pub display: Option<Arc<Display>>,
     pub interaction: Interaction,
@@ -83,13 +84,14 @@ impl App {
             "native fonts: {:?} {:?}; icons: {}",
             resolved.ui,
             resolved.mono,
-            crate::icons::count()
+            onecad_widgets::icon::names().len()
         );
         let theme = theme::load(true)?;
-        theme::apply(&cc.egui_ctx, &theme, true);
+        theme::install(&cc.egui_ctx, theme.clone(), true);
         let menu = Some(menu::install(&cc.egui_ctx)?);
         bridge.submit(Command::Open)?;
         Ok(Self {
+            ui: Default::default(),
             bridge,
             display: None,
             interaction: Interaction::default(),
@@ -464,8 +466,15 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.close_prompt = true;
         }
+        if self.ui.appearance == crate::ui_state::Appearance::System {
+            crate::appearance::sync(self, &ctx);
+        }
         crate::shell::show(self, ui);
-        crate::viewport::show(self, ui);
+        if self.ui.start_open {
+            crate::start_screen::show(self, ui);
+        } else {
+            crate::viewport::show(self, ui);
+        }
         crate::shell::close_prompt(self, &ctx);
     }
 }

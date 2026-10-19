@@ -148,6 +148,8 @@ fn navigate_input(
         let position = position - response.rect.min;
         DVec2::new(f64::from(position.x), f64::from(position.y))
     });
+    // Floating chrome sits in higher layers; the camera must not react beneath it.
+    let over_chrome = cursor_over_chrome(ui);
     let allowed = ui.input(|input| input.focused && !input.pointer.primary_down())
         && !crate::viewport_widgets::owns_pointer(app, ui, response.rect)
         && !egui::Popup::is_any_open(ui.ctx())
@@ -159,6 +161,7 @@ fn navigate_input(
                 .event(event, input.time, viewport.height as f32);
             if let Some(mut motion) = motion
                 && allowed
+                && !over_chrome
                 && response.hovered()
             {
                 if let crate::navigation::Motion::Orbit(delta) = &mut motion
@@ -176,9 +179,16 @@ fn navigate_input(
             }
         }
     });
-    if allowed {
+    // A drag that started on the viewport keeps running over chrome.
+    if allowed && (response.dragged() || !over_chrome) {
         navigate_drag(app, ui, response, viewport, scene);
     }
+}
+
+fn cursor_over_chrome(ui: &egui::Ui) -> bool {
+    ui.input(|input| input.pointer.hover_pos())
+        .and_then(|position| ui.ctx().layer_id_at(position))
+        .is_some_and(|layer| layer != ui.layer_id())
 }
 
 fn navigate_drag(

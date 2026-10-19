@@ -1,0 +1,1 @@
+- [Gallery screens notes](gallery-screens-notes.md) — stage layout, screenshot recipe, README-vs-mock offsets

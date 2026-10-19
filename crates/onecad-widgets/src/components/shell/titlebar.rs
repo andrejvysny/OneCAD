@@ -1,0 +1,276 @@
+//! TitleBar (c-titlebar): h44 drag region with Home, File, centred document name,
+//! undo/redo and a command-search look.
+
+use egui::{Color32, CornerRadius, FontId, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2, vec2};
+
+use super::IconButton;
+use crate::components::actions::common::fitted;
+use crate::components::tooltip::Tip;
+use crate::fonts;
+use crate::glyph;
+use crate::metrics::{H_TITLEBAR, RADIUS_SM};
+use crate::theme::{Look, look};
+
+const TRAFFIC_INSET: f32 = 72.0;
+const SEARCH_W: f32 = 220.0;
+const BTN: f32 = 28.0;
+/// Upper bound for the "File ▾" button, used only to reserve the left cluster.
+const FILE_W: f32 = 64.0;
+
+pub struct TitleBar<'a> {
+    doc_name: &'a str,
+    dirty: bool,
+    suffix: Option<&'a str>,
+    can_undo: bool,
+    can_redo: bool,
+    home_blocked: Option<&'a str>,
+    drag_window: bool,
+}
+
+pub struct TitleBarOutput {
+    pub home: bool,
+    /// Anchor for the host's File popover.
+    pub file: Response,
+    pub undo: bool,
+    pub redo: bool,
+    /// Command search clicked; the host decides what opens.
+    pub search: bool,
+}
+
+impl<'a> TitleBar<'a> {
+    pub fn new(doc_name: &'a str) -> Self {
+        Self {
+            doc_name,
+            dirty: false,
+            suffix: None,
+            can_undo: true,
+            can_redo: true,
+            home_blocked: None,
+            drag_window: true,
+        }
+    }
+    pub fn dirty(mut self, dirty: bool) -> Self {
+        self.dirty = dirty;
+        self
+    }
+    pub fn suffix(mut self, suffix: Option<&'a str>) -> Self {
+        self.suffix = suffix;
+        self
+    }
+    pub fn can_undo(mut self, v: bool) -> Self {
+        self.can_undo = v;
+        self
+    }
+    pub fn can_redo(mut self, v: bool) -> Self {
+        self.can_redo = v;
+        self
+    }
+
+    /// Whether the empty bar drags / maximises the OS window (default `true`).
+    /// Disable Home, showing `reason` in its tooltip.
+    pub fn home_blocked(mut self, reason: Option<&'a str>) -> Self {
+        self.home_blocked = reason;
+        self
+    }
+
+    pub fn drag_window(mut self, v: bool) -> Self {
+        self.drag_window = v;
+        self
+    }
+
+    pub fn show(self, ui: &mut Ui) -> TitleBarOutput {
+        let l = look(ui.ctx());
+        let t = &l.theme;
+        let size = vec2(ui.available_width(), H_TITLEBAR);
+        let (rect, bg) = ui.allocate_exact_size(size, Sense::click_and_drag());
+        if self.drag_window {
+            window_drag(ui, &bg);
+        }
+        let p = ui.painter();
+        p.rect_filled(rect, 0.0, t.titlebar);
+        let y = rect.bottom() - 0.5;
+        p.hline(rect.x_range(), y, Stroke::new(1.0, t.border));
+        self.paint_centre(ui, rect, &l);
+        let cy = rect.center().y;
+        let mut x = rect.left() + TRAFFIC_INSET;
+        let home_rect = Rect::from_min_size(Pos2::new(x, cy - BTN / 2.0), Vec2::splat(BTN));
+        let home = IconButton::new("home", "Home", BTN, 16.0)
+            .enabled(self.home_blocked.is_none())
+            .gap_bg(t.titlebar)
+            .tip(Some(Tip::new("Home").reason(self.home_blocked)));
+        let home = ui.put(home_rect, home).clicked();
+        x += BTN + 4.0;
+        let file = file_button(ui, Pos2::new(x, cy - BTN / 2.0), &l);
+        let (search, undo, redo) = self.right_cluster(ui, rect, &l);
+        TitleBarOutput {
+            home,
+            file,
+            undo,
+            redo,
+            search,
+        }
+    }
+
+    /// Room for the centred name: symmetric about the bar centre, between the clusters.
+    fn centre_width(rect: Rect) -> f32 {
+        let left = rect.left() + TRAFFIC_INSET + BTN + 4.0 + FILE_W + 8.0;
+        let right = rect.right() - 12.0 - SEARCH_W - 8.0 - 2.0 * (BTN + 4.0) - 4.0;
+        let c = rect.center().x;
+        2.0 * (c - left).min(right - c).max(0.0)
+    }
+
+    fn paint_centre(&self, ui: &Ui, rect: Rect, l: &Look) {
+        let t = &l.theme;
+        let p = ui.painter();
+        let avail = Self::centre_width(rect);
+        let suffix = self.suffix.map(|s| {
+            let font = FontId::proportional(12.0);
+            fitted(p, &format!("— {s}"), font, t.ink5, avail * 0.4)
+        });
+        let dot_w = if self.dirty { 7.0 + 6.0 } else { 0.0 };
+        let suffix_w = suffix.as_ref().map_or(0.0, |g| g.size().x + 6.0);
+        let font = FontId::new(13.0, fonts::semibold());
+        let name_max = (avail - dot_w - suffix_w - 6.0).max(0.0);
+        let name = fitted(p, self.doc_name, font, t.titlebar_text, name_max);
+        let total = name.size().x + 6.0 + dot_w + suffix_w;
+        let mut x = rect.center().x - total / 2.0;
+        let cy = rect.center().y;
+        let w = name.size().x;
+        p.galley(
+            Pos2::new(x, cy - name.size().y / 2.0),
+            name,
+            t.titlebar_text,
+        );
+        x += w + 6.0;
+        if self.dirty {
+            p.circle_filled(Pos2::new(x + 3.5, cy), 3.5, t.ink5);
+            x += 7.0 + 6.0;
+        }
+        if let Some(g) = suffix {
+            p.galley(Pos2::new(x, cy - g.size().y / 2.0), g, t.ink5);
+        }
+    }
+
+    /// Returns (search, undo, redo) clicks.
+    fn right_cluster(&self, ui: &mut Ui, rect: Rect, l: &Look) -> (bool, bool, bool) {
+        let t = &l.theme;
+        let cy = rect.center().y;
+        let mut right = rect.right() - 12.0;
+        let search = Rect::from_min_size(
+            Pos2::new(right - SEARCH_W, cy - BTN / 2.0),
+            vec2(SEARCH_W, BTN),
+        );
+        let search = search_look(ui, search, l).clicked();
+        right -= SEARCH_W + 8.0;
+        let specs = [
+            ("redo", "Redo", self.can_redo, Some("⌘⇧Z")),
+            ("undo", "Undo", self.can_undo, Some("⌘Z")),
+        ];
+        let mut hit = [false; 2];
+        for (i, (icon, label, enabled, key)) in specs.into_iter().enumerate() {
+            let r = Rect::from_min_size(Pos2::new(right - BTN, cy - BTN / 2.0), Vec2::splat(BTN));
+            let b = IconButton::new(icon, label, BTN, 16.0)
+                .enabled(enabled)
+                .gap_bg(t.titlebar)
+                .tip(Some(Tip::new(label).shortcut(key)));
+            hit[i] = ui.put(r, b).clicked();
+            right -= BTN + 4.0;
+        }
+        (search, hit[1], hit[0])
+    }
+}
+
+/// Empty bar area drags the window; double-click toggles maximise.
+fn window_drag(ui: &Ui, bg: &Response) {
+    if bg.drag_started() {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
+    if bg.double_clicked() {
+        let maxed = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::Maximized(!maxed));
+    }
+}
+
+/// "File ▾" text button: h28, title-bar ink, hover fill.
+fn file_button(ui: &mut Ui, pos: Pos2, l: &Look) -> Response {
+    let t = &l.theme;
+    let galley = ui.painter().layout_no_wrap(
+        "File".to_owned(),
+        FontId::proportional(12.5),
+        t.titlebar_text,
+    );
+    let w = 8.0 + galley.size().x + 4.0 + 10.0 + 8.0;
+    let rect = Rect::from_min_size(pos, vec2(w, BTN));
+    let r = ui.interact(rect, ui.scope_id().with("titlebar-file"), Sense::click());
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "File"));
+    let p = ui.painter();
+    if r.hovered() || r.has_focus() {
+        p.rect_filled(rect, CornerRadius::same(RADIUS_SM), t.hover);
+    }
+    if r.has_focus() {
+        let (fw, c) = crate::metrics::focus_ring(t);
+        p.rect_stroke(
+            rect.expand(fw * 0.5),
+            CornerRadius::same(RADIUS_SM + 2),
+            Stroke::new(fw, c),
+            egui::StrokeKind::Outside,
+        );
+    }
+    let cy = rect.center().y;
+    let gx = rect.left() + 8.0;
+    let gw = galley.size().x;
+    p.galley(
+        Pos2::new(gx, cy - galley.size().y / 2.0),
+        galley,
+        t.titlebar_text,
+    );
+    let chevron = Rect::from_center_size(Pos2::new(gx + gw + 4.0 + 5.0, cy), Vec2::splat(10.0));
+    glyph::chevron_down(p, chevron.center(), 12.0, t.ink4);
+    r
+}
+
+/// 220×28 command-search look: chip fill, search icon, hint text, "⌘K" chip.
+fn search_look(ui: &mut Ui, rect: Rect, l: &Look) -> Response {
+    let t = &l.theme;
+    let id = ui.scope_id().with("titlebar-search");
+    let r = ui.interact(rect, id, Sense::click());
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Search commands"));
+    let p = ui.painter();
+    let fill = if r.hovered() { t.hover } else { t.chip };
+    p.rect(
+        rect,
+        CornerRadius::same(RADIUS_SM),
+        fill,
+        Stroke::new(1.0, t.border_strong),
+        egui::StrokeKind::Inside,
+    );
+    if r.has_focus() {
+        let (fw, c) = crate::metrics::focus_ring(t);
+        p.rect_stroke(
+            rect.expand(fw * 0.5),
+            CornerRadius::same(RADIUS_SM + 2),
+            Stroke::new(fw, c),
+            egui::StrokeKind::Outside,
+        );
+    }
+    let cy = rect.center().y;
+    let glyph_box =
+        Rect::from_center_size(Pos2::new(rect.left() + 8.0 + 7.0, cy), Vec2::splat(14.0));
+    glyph::search(p, glyph_box.center(), 13.0, t.ink5);
+    let hint = p.layout_no_wrap(
+        "Search commands".to_owned(),
+        FontId::proportional(12.0),
+        t.ink5,
+    );
+    let hh = hint.size().y;
+    p.galley(Pos2::new(rect.left() + 30.0, cy - hh / 2.0), hint, t.ink5);
+    let key = p.layout_no_wrap("⌘K".to_owned(), FontId::new(11.0, fonts::mono()), t.ink5);
+    let kr = Rect::from_center_size(
+        Pos2::new(rect.right() - 8.0 - (key.size().x + 10.0) / 2.0, cy),
+        vec2(key.size().x + 10.0, 18.0),
+    );
+    p.rect_filled(kr, CornerRadius::same(4), t.chip2);
+    p.galley(kr.center() - key.size() / 2.0, key, Color32::PLACEHOLDER);
+    r
+}

@@ -120,3 +120,7 @@ pub fn medium() -> FontFamily {
 pub fn semibold() -> FontFamily {
     FontFamily::Name(SEMIBOLD.into())
 }
+
+pub fn mono() -> FontFamily {
+    FontFamily::Monospace
+}
