@@ -11,12 +11,12 @@ worker with build ID `onecad-occt-8.0.1-b8f597c67781-kp1`:
 
 ```sh
 ONECAD_WORKER_PATH="$PWD/worker/build/onecad-worker" \
-  bun scripts/native-host-gate.mjs /private/tmp/onecad-native-host-gate
+  cargo xtask native-host-gate /private/tmp/onecad-native-host-gate
 ```
 
 The gate sets `ONECAD_REQUIRE_WORKER=1` and `ONECAD_REQUIRE_GPU=1`. It requires
 the exact ignored `app_logic_tests` inventory declared in
-`scripts/native-host-gate.mjs`: thirty cases covering occluded delivery (one),
+`xtask/src/evidence/host_names.rs`: thirty-eight cases covering occluded delivery (one),
 document lifecycle (three), overlays (one), diagnostics (three), existing
 dimensions (one), the synthetic From-New plate workflow (one), and numeric/IME
 routing (one), invalid-profile Finish refusal with repair re-entry (one), and
@@ -31,6 +31,7 @@ Slot full-width creation and construction/history (one), clockwise/counterclockw
 tangent Arc H/V snapping with endpoint roles (one), and tangent chain keyboard,
 drag, existing-endpoint seeding, cancellation and numeric Radius (one), and
 exactly-once drag release with accepted chain closure/profile publication (one).
+Eight batched-input regression cases cover ordered modifier delivery and pointer/camera cancellation.
 It first verifies the Cargo test inventory, then executes all cases
 serially with `--ignored --nocapture --test-threads=1`. Every expected test must
 execute exactly once and pass. Missing, duplicate, unexpected, skipped, and

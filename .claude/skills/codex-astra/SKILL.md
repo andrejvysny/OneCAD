@@ -96,7 +96,7 @@ State the chosen mode in the approval summary.
 - **Prompt-only** — the default for anything that is not a kernel question. Astra reasons over the
   packet alone. Run from the session scratchpad directory with `--skip-git-repo-check`.
 - **Repository-grounded** — the default for a *kernel* question: one about `worker/src/kernel/**`,
-  `worker/src/ops/**`, a named `protocol/SCHEMA.md` section, `src-tauri/crates/onecad-kernelbench`,
+  `worker/src/ops/**`, a named `protocol/SCHEMA.md` section, `crates/onecad-kernelbench`,
   or a kernelbench result set. Add `-C "<REPO_ROOT>"`, drop `--skip-git-repo-check`, keep
   `-s read-only`.
   - Name **at most 12** paths in the packet's `<repo_paths>` block, one clause each on why it is

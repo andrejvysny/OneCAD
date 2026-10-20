@@ -1,6 +1,6 @@
 # 0017 — External addons are deferred; modules, slots and ordering continue as Rust traits
 
-- Status: Accepted direction; ONECAD-261 remains blocked by ONECAD-256/257/259. Implementation and verification remain open.
+- Status: Accepted direction. Current delivery and qualification status belongs in Plane; this record does not establish gate completion.
 - Date: 2026-10-17
 - Plane: ONECAD-261 (P0.6), program ONECAD-255
 - Scope: the macOS desktop app. The iPad/iOS target was dropped from scope by the user on 2026-10-17.
@@ -21,9 +21,9 @@ and `src/sdk/`:
   (0010–0012);
 - a narrower `@onecad/sdk` (0013).
 
-No external addon has ever been loaded. The addon loader does not exist, the
-reference addon is a test fixture deliberately left out of `bootstrap.ts`
-(0013), and nothing outside the repo builds against the SDK.
+At the time of this decision, no external addon had been loaded. The former
+reference addon was a test fixture, excluded from the web composition root.
+The native host does not expose that retired TypeScript SDK.
 
 ADR-0015 records the accepted native Rust/egui direction, with gates open. Every part of that platform written
 in TypeScript (React components in slots, Three.js objects in
@@ -80,9 +80,9 @@ it:
 
 ## Consequences
 
-- `src/sdk/`, `ExtensionContext`, `src/addons/reference/` and their
-  `architecture.test.ts` rules retire with `src/` at cutover. The Rust layering
-  check (`cargo xtask layers`, in the plan) takes over the "may not import"
+- The TypeScript SDK, reference addon and associated architecture tests are
+  retired. The Rust layering
+  check (`cargo xtask check-rust-layers`) takes over the "may not import"
   role.
 - Without an external consumer, the Rust registry can change shape freely
   between phases. Behavioral parity includes keymap, modelingInteraction, toolbar, shell,

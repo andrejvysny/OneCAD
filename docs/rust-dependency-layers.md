@@ -1,12 +1,12 @@
 # Rust dependency layers
 
-`bun scripts/check-rust-layers.mjs` enforces ADR-0015 using
+`cargo xtask check-rust-layers` enforces ADR-0015 using
 `cargo metadata --format-version 1 --no-deps` at the repository root. It reads
 every dependency declaration, including build, dev, optional, renamed and
 target-specific dependencies, without filtering for the current target or
 enabled features. It does not compile crates or require a staged worker.
 
-The explicit package graph lives in `LAYERS` in the checker. Unregistered
+The explicit package graph lives in the Rust xtask checker. Unregistered
 workspace packages and local dependencies outside that workspace fail closed.
 A local dependency's package name and path must both match the workspace
 member. There are no exceptions for external local comparison renderers; the
@@ -30,6 +30,10 @@ the renderer's development-only shader validator, all dependency kinds share
 the same rules. Toolkit/platform and GPU family checks
 apply to every non-host package; library also rejects network client families.
 
-Run `bun test ./scripts/tests/check-rust-layers.test.mjs` for fixture coverage.
+Run `cargo test -p xtask` for fixture and negative-control coverage.
 The check enforces direct declarations, not the full third-party transitive
 dependency closure. New toolkit families require a corresponding checker rule.
+
+Tauri, Wry and WebKit package families are forbidden throughout the workspace,
+including the native host and all dependency kinds. Renaming a dependency does
+not change its package identity or bypass this boundary.

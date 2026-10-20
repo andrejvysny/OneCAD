@@ -1,2 +1,0 @@
-frames_after_3s=13 frames_after_8s=13 idle_frames_in_5s=0
-frames_for_5_line_events=28 frames_for_5_pixel_events=23

@@ -4,7 +4,7 @@ The native host is `onecad-ui`; `onecad-render::Renderer` is its CAD renderer.
 The Tauri/React application and Tauri bundler are retired. Producing a native
 bundle does not establish production cutover or workflow parity.
 
-Run on macOS with Rust, Bun, CMake and pinned OCCT installed:
+Run on macOS with Rust, CMake and pinned OCCT installed:
 
 ```sh
 ONECAD_OCCT_ROOT="$HOME/.onecad-occt/8.0.1" scripts/package-macos.sh
@@ -47,7 +47,7 @@ QA environment and native workflow validation; see `crates/onecad-ui/README.md`.
 Do not infer that from `--selftest`, CPU tests or successful packaging alone.
 
 Release source/relink materials are prepared by
-`scripts/prepare-release-materials.ts` and verified by
-`scripts/verify-release-materials.ts`. Their source inventory includes the
+`cargo xtask prepare-release-materials` and verified by
+`cargo xtask verify-release-materials`. Their source inventory includes the
 native crates and assets; they do not attest production readiness or publish
 anything automatically.

@@ -34,11 +34,12 @@ The repository-root `Cargo.toml` and `Cargo.lock` own the workspace.
 | `fixtures/render` | Checked renderer fixtures and provenance |
 | `packaging/binaries` | Ignored staged sidecar and embedded integrity manifest |
 | `corpus` | Frozen legacy behavior oracle |
-| `scripts` | Worker, packaging, evidence and dependency-boundary tooling |
+| `xtask` | Rust repository automation and strict evidence validators |
+| `scripts` | CMake, worker and packaging shell entry points |
 
 The React/Tauri application, Three.js paths, component preview renderer,
 comparison renderer/vendor and egui/Slint/render-look prototypes are retired.
-Static historical captures and attribution may remain. Consolidation does not
+Purposeful fixtures, approved goldens and required attribution remain. Consolidation does not
 establish production readiness or workflow parity with the retired editor.
 
 Only `onecad-app` owns document mutations. The per-document single-writer
@@ -75,15 +76,13 @@ Generate renderer fixtures through shared services:
 cargo run -p onecad-mesh-fixture -- --worker "$PWD/worker/build/onecad-worker" --out "$PWD/fixtures/render"
 ```
 
-Bun is used only for repository tooling; no frontend application is built:
+Repository automation runs through the Rust `xtask` package:
 
 ```sh
-bun install --frozen-lockfile
-bun test ./scripts/tests
-bun scripts/check-rust-layers.mjs
-bun scripts/verify-modeling-coverage.mjs
-scripts/tests/verify-modeling-coverage.test.sh
-bun scripts/verify-modeling-contracts.mjs
+cargo test -p xtask
+cargo xtask check-rust-layers
+cargo xtask verify-modeling-coverage
+cargo xtask verify-modeling-contracts
 ```
 
 ## Required validation

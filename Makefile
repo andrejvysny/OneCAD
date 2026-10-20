@@ -29,3 +29,17 @@ fixture: worker
 		ONECAD_NATIVE_PLATE_FIXTURE="$(FIXTURE)" \
 		cargo test -p onecad-app --test native_plate_workflow synthetic_plate_native_workflow -- --nocapture; \
 	fi
+
+.PHONY: check-tooling test-tooling package
+check-tooling:
+	cargo xtask check-rust-layers
+	cargo xtask verify-modeling-coverage
+	cargo xtask verify-modeling-contracts
+	cargo xtask check-hygiene
+	cargo xtask bake-cad-icons --check
+
+test-tooling:
+	cargo test -p xtask
+
+package:
+	./scripts/package-macos.sh

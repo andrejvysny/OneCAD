@@ -54,14 +54,13 @@ Worker binaries and integrity manifests are staged in ignored
 `packaging/binaries`. [Native packaging](docs/PACKAGING.md) preserves binary hash,
 hello compatibility and OCCT fingerprint checks.
 
-Bun supports repository tooling only:
+Repository automation runs through the Rust `xtask` package:
 
 ```sh
-bun install --frozen-lockfile
-bun test ./scripts/tests
-bun scripts/check-rust-layers.mjs
-bun scripts/verify-modeling-coverage.mjs
-bun scripts/verify-modeling-contracts.mjs
+cargo test -p xtask
+cargo xtask check-rust-layers
+cargo xtask verify-modeling-coverage
+cargo xtask verify-modeling-contracts
 ```
 
 Project status and durable decisions live in the existing private

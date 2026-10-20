@@ -11,15 +11,15 @@ clean tag, reproducible binary, native acceptance or third-party license review.
 Fonts, theme tokens and icons are no longer local to this crate; `onecad-widgets`
 provides them. The old `icons.rs` painter was removed, and nothing in Rust reads
 `assets/native/cppIcons.generated.ts` or `assets/native/authored.ts` any more (the
-files remain). The menu adapter retains typed actions and duplicate-key
+files were removed during native tooling cleanup). The menu adapter retains typed actions and duplicate-key
 routing, removes spike metrics, and routes Quit through application shutdown.
 
 ## Native UI design source
 
-The editor chrome, start screen and components follow `docs/design/native-ui/final/`
-(`README.md`, `OneCAD Final.dc.html`, `OneCAD Components.dc.html`). Icons are baked
-from the design's `cad-icons.js` (colour isometric set, light and dark palettes) by
-`scripts/bake-cad-icons.ts` into `crates/onecad-widgets/assets/icons/`, and are
+The editor chrome, start screen and components follow the design references at
+[the reviewed source](https://github.com/andrejvysny/OneCAD/tree/ed9ed33f6f394897612e0a40edee015edd775ef8/docs/design/native-ui/final). Icons are baked
+from native `assets/native/cad-icons.json` geometry (colour isometric set, light and dark palettes) by
+`cargo xtask bake-cad-icons` into `crates/onecad-widgets/assets/icons/`, and are
 rasterised at runtime with the `resvg` crate (a `onecad-widgets` dependency).
 `onecad-widgets` has its own gallery example for visual comparison.
 

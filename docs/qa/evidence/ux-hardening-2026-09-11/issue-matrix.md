@@ -1,5 +1,8 @@
 # UX hardening issue matrix — 2026-09-11 baseline
 
+This is a historical Tauri-era matrix, not a current work ledger. Current ownership
+and outcomes are in Plane.
+
 Status means **as of this baseline**, not a claim about the current dirty
 worktree: **implemented earlier** is the engineering claim in Addendum D;
 **unverified** needs an independent native pass; **open** is observed, deferred,
@@ -124,22 +127,22 @@ Mounted layout covers 1024/1156/1440, Inspector 420, wrapped toolbars and corner
 
 | Gate | Result | Boundary |
 |---|---:|---|
-| Full CTest | 196/196 | [durable log](full-ctest.log); source `/tmp/onecad-ux-full-ctest.log` |
-| Frozen-source full Vitest | 332 files; 5880 passed, 78 skipped; 5958 total; 31.36s | [durable log](full-vitest-final.log); source `/tmp/onecad-ux-full-vitest-final.log`; nine prior stale-contract/async failures fixed tests-only |
+| Full CTest | 196/196 | durable log (`full-ctest.log`: historical evidence unavailable); source `/tmp/onecad-ux-full-ctest.log` |
+| Frozen-source full Vitest | 332 files; 5880 passed, 78 skipped; 5958 total; 31.36s | durable log (`full-vitest-final.log`: historical evidence unavailable); source `/tmp/onecad-ux-full-vitest-final.log`; nine prior stale-contract/async failures fixed tests-only |
 | Main TypeScript | passed | `npx tsc` |
 | Final clippy | running at checkpoint | Do not claim |
 
 Native GUI was not relaunched; full browser and full Rust workspace remain owed. Latest subscriber-failure isolation is included in full unit. General pattern breadth/UI, typed-target and D-camera remain open. Allocation: Luna simple tasks/docs, Sol complex work, Astra final review. No percentage increase claimed.
 
-Main passed cargo fmt check and workspace clippy with `-D warnings` (49.21s; [durable log](final-clippy.log); source `/tmp/onecad-ux-final-clippy.log`). Full worker-required cargo workspace tests are still running; result pending.
+Main passed cargo fmt check and workspace clippy with `-D warnings` (49.21s; durable log (`final-clippy.log`: historical evidence unavailable); source `/tmp/onecad-ux-final-clippy.log`). Full worker-required cargo workspace tests are still running; result pending.
 
-Worker-required full workspace recorded **475 pass / 1 fail** in the first `lib` target; see [durable RED log](final-cargo-workspace-red.log). Focused DTO unit suite passed **22/22** after moving the runtime-session assertion to the projection DTO test.
+Worker-required full workspace recorded **475 pass / 1 fail** in the first `lib` target; see durable RED log (`final-cargo-workspace-red.log`: historical evidence unavailable). Focused DTO unit suite passed **22/22** after moving the runtime-session assertion to the projection DTO test.
 
-Final worker-required Rust rerun exited 0: **1646 passed / 0 failed / 0 ignored / 0 filtered** across exactly 100 result lines, with no missing-worker skips ([durable log](final-cargo-workspace-rerun.log); source `/tmp/onecad-ux-final-cargo-workspace-rerun.log`). Earlier RED is preserved. Post-DTO fmt/clippy rerun is not newly claimed; full browser/native and remaining implementation gates remain open.
+Final worker-required Rust rerun exited 0: **1646 passed / 0 failed / 0 ignored / 0 filtered** across exactly 100 result lines, with no missing-worker skips (durable log (`final-cargo-workspace-rerun.log`: historical evidence unavailable); source `/tmp/onecad-ux-final-cargo-workspace-rerun.log`). Earlier RED is preserved. Post-DTO fmt/clippy rerun is not newly claimed; full browser/native and remaining implementation gates remain open.
 
-Post-DTO fmt check and warning-free workspace clippy passed in **44.48s** ([durable log](final-clippy-after-dto.log); source `/tmp/onecad-ux-final-clippy-after-dto.log`). Final build remains in progress; result pending.
+Post-DTO fmt check and warning-free workspace clippy passed in **44.48s** (durable log (`final-clippy-after-dto.log`: historical evidence unavailable); source `/tmp/onecad-ux-final-clippy-after-dto.log`). Final build remains in progress; result pending.
 
-Final `bun run build` passed (tsc + Vite, 2.03s) with the existing >500kB chunk warning ([durable log](final-build.log); source `/tmp/onecad-ux-final-build.log`). Native remained closed.
+Final `bun run build` passed (tsc + Vite, 2.03s) with the existing >500kB chunk warning (durable log (`final-build.log`: historical evidence unavailable); source `/tmp/onecad-ux-final-build.log`). Native remained closed.
 
 ## CURRENT RESUMPTION CHECKPOINT — 2026-09-12 (append-only)
 

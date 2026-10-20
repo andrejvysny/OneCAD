@@ -2,7 +2,7 @@
 
 Status: accepted (2026-08-09)
 
-Reshaped by: [ADR-0015](0015-native-rust-ui.md) and [ADR-0017](0017-external-addons-deferred.md) (proposed 2026-10-17): the TypeScript SDK retires with `src/`, the narrowing principle carries forward.
+Reshaped by: [ADR-0015](0015-native-rust-ui.md) and [ADR-0017](0017-external-addons-deferred.md) (accepted native direction, 2026-10-17): the TypeScript SDK is retired; the narrowing principle carries forward.
 
 ## Context
 

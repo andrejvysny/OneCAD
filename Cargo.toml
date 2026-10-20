@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "xtask",
     "crates/onecad-app",
     "crates/onecad-mesh-fixture",
     "crates/onecad-scene",
