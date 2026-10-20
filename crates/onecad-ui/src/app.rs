@@ -169,9 +169,21 @@ impl App {
     }
 
     pub fn dispatch(&mut self, action: Action) {
+        if self.bridge.shared.input_trace.enabled() {
+            crate::input_trace::app(
+                self,
+                "model.dispatch",
+                crate::input_trace::actions::model(&action),
+            );
+        }
         if self.documents.blocks_authoring(&action) {
             self.command_status = true;
             self.status = "Finish the file action before editing the document".into();
+            crate::input_trace::app(
+                self,
+                "model.refused",
+                serde_json::json!({"reason": self.status}),
+            );
             return;
         }
         if matches!(
@@ -195,6 +207,17 @@ impl App {
                 .is_some_and(|context| context.runtime_session == state.runtime_session)
         }) {
             self.diagnostics.model(&self.interaction.status);
+        }
+        if let CommitStatus::Rejected(reason)
+        | CommitStatus::CompletionUnavailable {
+            message: reason, ..
+        } = &self.interaction.status
+        {
+            crate::input_trace::app(
+                self,
+                "model.refused",
+                serde_json::json!({"reason": crate::input_trace::bounded_id(reason)}),
+            );
         }
         if self.interaction.tool.is_none()
             && let Some(id) = self.numeric_id.take()
@@ -377,6 +400,10 @@ impl App {
     }
 
     pub fn adopt_display(&mut self, display: Arc<Display>) {
+        self.bridge
+            .shared
+            .input_trace
+            .capture("host.capture_adopt", &display);
         let projection = &display.projection;
         tracing::info!(document_id = %projection.document_id,
             runtime_session = %projection.runtime_session,
@@ -434,6 +461,13 @@ impl App {
     }
 
     pub(crate) fn message(&mut self, message: Message, ctx: &egui::Context) {
+        if self.bridge.shared.input_trace.enabled() {
+            crate::input_trace::app(
+                self,
+                "service.delivery_received",
+                crate::input_trace::actions::message(&message),
+            );
+        }
         match message {
             Message::Document { result, .. } => self.document_finished(result),
             Message::Gesture { delivery, .. } => self.gesture_delivery(*delivery),
@@ -628,6 +662,11 @@ impl eframe::App for App {
         crate::input::route(self, ctx, raw);
     }
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        crate::input_trace::app(
+            self,
+            "host.logic",
+            serde_json::json!({"pass": ctx.cumulative_pass_nr()}),
+        );
         self.poll(ctx);
         if ctx.input(|input| input.viewport().close_requested()) && !self.may_close {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -643,6 +682,11 @@ impl eframe::App for App {
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        crate::input_trace::app(
+            self,
+            "host.ui",
+            serde_json::json!({"pass": ctx.cumulative_pass_nr(), "frame": ctx.cumulative_frame_nr()}),
+        );
         if self.ui.appearance == crate::ui_state::Appearance::System {
             crate::appearance::sync(self, &ctx);
         }

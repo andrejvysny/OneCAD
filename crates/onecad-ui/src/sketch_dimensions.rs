@@ -131,6 +131,10 @@ fn exclusions(app: &App, ui: &Ui, rect: Rect) -> Vec<Rect> {
 }
 
 pub fn owns_pointer(app: &App, ui: &Ui) -> bool {
+    owns_position(app, ui, ui.input(|input| input.pointer.hover_pos()))
+}
+
+pub(crate) fn owns_position(app: &App, ui: &Ui, position: Option<egui::Pos2>) -> bool {
     let Some(session) = app.sketch.session.as_ref() else {
         return false;
     };
@@ -145,13 +149,12 @@ pub fn owns_pointer(app: &App, ui: &Ui) -> bool {
         return false;
     };
     cache.drag.is_some()
-        || ui
-            .input(|input| input.pointer.hover_pos())
-            .is_some_and(|at| {
-                cache.entries.iter().any(|entry| {
-                    !entry.hidden && entry.last_rect.is_some_and(|rect| rect.contains(at))
-                })
-            })
+        || position.is_some_and(|at| {
+            cache
+                .entries
+                .iter()
+                .any(|entry| !entry.hidden && entry.last_rect.is_some_and(|rect| rect.contains(at)))
+        })
 }
 
 fn cancel_drag(ctx: &egui::Context) {

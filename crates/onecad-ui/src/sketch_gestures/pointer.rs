@@ -12,6 +12,8 @@ pub(crate) struct Armed {
     scope: GestureScope,
     target: ArmedTarget,
     grab: Vec2,
+    press: Pos2,
+    moved: bool,
 }
 
 impl Armed {
@@ -26,6 +28,25 @@ enum ArmedTarget {
     Refused(String),
     Stale,
     Cancelled,
+}
+
+pub(crate) fn delivered_inside(app: &App, ui: &Ui, rect: Rect) -> bool {
+    if !app
+        .sketch
+        .session
+        .as_ref()
+        .is_some_and(|session| session.tool == SketchTool::Select)
+    {
+        return false;
+    }
+    let position = ui.input(|input| {
+        press(input).map(|(position, _)| position).or_else(|| {
+            app.armed_sketch_gesture
+                .as_ref()
+                .and_then(|_| release_position(input))
+        })
+    });
+    position.is_some_and(|position| crate::viewport_widgets::allows_pointer(ui, rect, position))
 }
 
 pub(crate) fn viewport(
@@ -58,13 +79,29 @@ pub(crate) fn viewport(
         }
         armed
     });
-    if ui.input(|input| input.pointer.button_pressed(PointerButton::Primary)) {
+    let pressed = ui.input(|input| input.pointer.button_pressed(PointerButton::Primary));
+    if pressed {
         armed = arm(app, ui, rect, response, view, scope);
     }
-    let Some(armed) = armed else {
+    let Some(mut armed) = armed else {
         return false;
     };
-    if response.drag_started_by(PointerButton::Primary) {
+    let max_click_dist = ui
+        .ctx()
+        .options(|options| options.input_options.max_click_dist);
+    let motion = ui.input(|input| sample(input, armed.press, pressed, max_click_dist));
+    if motion.conflict {
+        crate::input_trace::app(
+            app,
+            "gesture.refused",
+            serde_json::json!({"reason": "Multiple primary presses in one input batch"}),
+        );
+        app.cancel_sketch_gesture();
+        return true;
+    }
+    armed.moved |= motion.moved;
+    let released = ui.input(|input| input.pointer.button_released(PointerButton::Primary));
+    if response.drag_started_by(PointerButton::Primary) || released && armed.moved {
         match &armed.target {
             ArmedTarget::Drag(target) => {
                 app.gesture_dispatch(GestureAction::Begin {
@@ -75,6 +112,11 @@ pub(crate) fn viewport(
                 return move_active(app, ui, rect, response, view);
             }
             ArmedTarget::Refused(message) => {
+                crate::input_trace::app(
+                    app,
+                    "gesture.refused",
+                    serde_json::json!({"reason": crate::input_trace::bounded_id(message)}),
+                );
                 app.status = message.clone();
                 app.diagnostics.record(
                     crate::diagnostics::Source::Sketch,
@@ -85,6 +127,11 @@ pub(crate) fn viewport(
             ArmedTarget::Stale => {
                 app.status =
                     "Gesture start belongs to an obsolete captured view; press again".into();
+                crate::input_trace::app(
+                    app,
+                    "gesture.refused",
+                    serde_json::json!({"reason": app.status}),
+                );
             }
             ArmedTarget::Cancelled => {}
         }
@@ -104,10 +151,14 @@ fn arm(
     view: &ViewSnapshot,
     scope: GestureScope,
 ) -> Option<Armed> {
-    let position = response
-        .interact_pointer_pos()
-        .filter(|position| rect.contains(*position))?;
-    if ui.input(|input| input.modifiers.shift || input.modifiers.command) {
+    let (position, modifiers) = ui.input(press).filter(|(position, _)| {
+        model_position(app, ui, rect, *position)
+            && ui
+                .ctx()
+                .layer_id_at(*position)
+                .is_none_or(|layer| layer == response.layer_id)
+    })?;
+    if modifiers.shift || modifiers.command {
         return None;
     }
     let session = app.sketch.session.as_ref()?;
@@ -128,6 +179,8 @@ fn arm(
                 scope,
                 target,
                 grab,
+                press: position,
+                moved: false,
             })
         }
         crate::sketch_view::PickResult::Ambiguous(_) => Some(Armed {
@@ -137,6 +190,8 @@ fn arm(
                     .into(),
             ),
             grab,
+            press: position,
+            moved: false,
         }),
         crate::sketch_view::PickResult::None => None,
     }
@@ -155,15 +210,21 @@ fn move_active(
     if !app.sketch_gesture.active() {
         return true;
     }
-    let position = ui.input(|input| input.pointer.hover_pos());
+    let release = ui.input(release_position);
+    let position = release.or_else(|| ui.input(|input| input.pointer.hover_pos()));
     let Some(point) = position
-        .filter(|position| rect.contains(*position))
+        .filter(|position| {
+            rect.contains(*position)
+                && (release.is_none() || model_position(app, ui, rect, *position))
+        })
         .and_then(|position| point(app, rect, view, position))
     else {
         app.cancel_sketch_gesture();
         return true;
     };
-    if response.drag_stopped_by(PointerButton::Primary) {
+    if response.drag_stopped_by(PointerButton::Primary)
+        || ui.input(|input| input.pointer.button_released(PointerButton::Primary))
+    {
         app.gesture_dispatch(GestureAction::End { tag, point });
     } else if ui.input(|input| input.pointer.primary_down()) {
         app.gesture_dispatch(GestureAction::Move { tag, point });
@@ -171,6 +232,79 @@ fn move_active(
         app.cancel_sketch_gesture();
     }
     true
+}
+
+fn model_position(app: &App, ui: &Ui, rect: Rect, position: Pos2) -> bool {
+    crate::viewport_widgets::allows_pointer(ui, rect, position)
+        && !crate::viewport_widgets::owns_position(app, ui, rect, position)
+        && !crate::sketch_dimensions::owns_position(app, ui, Some(position))
+}
+
+fn press(input: &egui::InputState) -> Option<(Pos2, egui::Modifiers)> {
+    input.raw.events.iter().find_map(|event| match event {
+        egui::Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers,
+        } => Some((*pos, *modifiers)),
+        _ => None,
+    })
+}
+
+#[derive(Default)]
+struct Motion {
+    moved: bool,
+    conflict: bool,
+}
+
+fn sample(input: &egui::InputState, press: Pos2, new_press: bool, max_click_dist: f32) -> Motion {
+    let mut motion = Motion::default();
+    let mut tracking = !new_press;
+    let mut started = !new_press;
+    // Respect the press/release boundaries that egui's final pointer state loses.
+    for event in &input.raw.events {
+        match event {
+            egui::Event::PointerButton {
+                button: PointerButton::Primary,
+                pressed: true,
+                ..
+            } => {
+                if started {
+                    motion.conflict = true;
+                    break;
+                }
+                started = true;
+                tracking = true;
+            }
+            egui::Event::PointerMoved(position) if tracking => {
+                motion.moved |= press.distance(*position) > max_click_dist;
+            }
+            egui::Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed: false,
+                ..
+            } if tracking => {
+                motion.moved |= press.distance(*pos) > max_click_dist;
+                tracking = false;
+            }
+            _ => {}
+        }
+    }
+    motion
+}
+
+fn release_position(input: &egui::InputState) -> Option<Pos2> {
+    input.raw.events.iter().find_map(|event| match event {
+        egui::Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed: false,
+            ..
+        } => Some(*pos),
+        _ => None,
+    })
 }
 
 fn point(app: &App, rect: Rect, view: &ViewSnapshot, position: Pos2) -> Option<Vec2> {

@@ -19,6 +19,18 @@ impl App {
             .is_some_and(|session| session.phase != SketchPhase::Closed)
     }
     pub fn sketch_dispatch(&mut self, action: SketchAction) {
+        if self.bridge.shared.input_trace.enabled()
+            && !matches!(
+                action,
+                SketchAction::AcceptView { .. } | SketchAction::Move(_)
+            )
+        {
+            crate::input_trace::app(
+                self,
+                "sketch.dispatch",
+                crate::input_trace::actions::sketch(&action),
+            );
+        }
         if matches!(action, SketchAction::Escape)
             && let Some(armed) = self.armed_sketch_gesture.as_mut()
         {
@@ -40,6 +52,11 @@ impl App {
         if self.documents.blocks_sketch_authoring(&action) {
             self.command_status = true;
             self.status = "Finish the file action before editing the sketch".into();
+            crate::input_trace::app(
+                self,
+                "sketch.refused",
+                serde_json::json!({"reason": self.status}),
+            );
             return;
         }
         if let Some(report) = crate::profile_diagnostics::Report::observe(&self.sketch, &action) {
@@ -109,6 +126,16 @@ impl App {
                 _ => State::Succeeded,
             };
             self.diagnostics.record(Source::Sketch, state, &self.status);
+            if matches!(
+                session.status,
+                SketchStatus::Refused(_) | SketchStatus::Failed { .. }
+            ) {
+                crate::input_trace::app(
+                    self,
+                    "sketch.refused",
+                    serde_json::json!({"reason": crate::input_trace::bounded_id(&self.status)}),
+                );
+            }
         }
         if !self
             .diagnostics

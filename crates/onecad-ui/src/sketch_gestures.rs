@@ -13,6 +13,13 @@ pub(crate) struct Followup {
 
 impl App {
     pub(crate) fn gesture_dispatch(&mut self, action: GestureAction) {
+        if self.bridge.shared.input_trace.enabled() && !matches!(action, GestureAction::Sync) {
+            crate::input_trace::app(
+                self,
+                "gesture.dispatch",
+                crate::input_trace::actions::gesture(&action),
+            );
+        }
         let before = self.sketch_gesture.error().map(str::to_owned);
         let effects = self.sketch_gesture.dispatch(action, &self.sketch);
         for effect in effects {
@@ -162,6 +169,11 @@ impl App {
             );
         }
         self.replay_gesture_followup();
+        crate::input_trace::app(
+            self,
+            "gesture.delivered",
+            serde_json::json!({"accepted": delivery.accepted, "moved": delivery.moved, "revision": delivery.accepted_revision}),
+        );
     }
 
     pub(crate) fn replay_gesture_followup(&mut self) {
@@ -223,4 +235,4 @@ pub(crate) fn route_raw(app: &mut App, ctx: &egui::Context, raw: &egui::RawInput
     }
 }
 
-pub(crate) use pointer::{Armed, viewport};
+pub(crate) use pointer::{Armed, delivered_inside, viewport};

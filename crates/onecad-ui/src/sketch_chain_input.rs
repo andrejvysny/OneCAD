@@ -48,6 +48,13 @@ fn drag_threshold(press: Pos2, position: Pos2) -> bool {
     (position.x - press.x).abs() > 4.0 || (position.y - press.y).abs() > 4.0
 }
 
+pub(crate) fn pointer_owned(ctx: &egui::Context) -> bool {
+    ctx.data(|data| {
+        data.get_temp::<Capture>(cache_id())
+            .is_some_and(|capture| !capture.cancelled)
+    })
+}
+
 pub(crate) fn cancel(app: &mut App, ctx: &egui::Context) {
     let capture = ctx.data(|data| data.get_temp::<Capture>(cache_id()));
     if let Some(mut capture) = capture {

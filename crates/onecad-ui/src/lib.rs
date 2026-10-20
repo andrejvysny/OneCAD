@@ -30,6 +30,7 @@ mod gesture_services;
 mod gizmo;
 mod handoff;
 mod input;
+mod input_trace;
 mod inspector;
 mod inspector_ext;
 mod inspector_history;

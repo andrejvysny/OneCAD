@@ -32,6 +32,15 @@ pub fn owns_pointer(app: &App, ui: &egui::Ui, rect: egui::Rect) -> bool {
     let Some(pointer) = ui.input(|input| input.pointer.hover_pos()) else {
         return false;
     };
+    owns_position(app, ui, rect, pointer)
+}
+
+pub(crate) fn owns_position(
+    app: &App,
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    pointer: egui::Pos2,
+) -> bool {
     allows_pointer(ui, rect, pointer)
         && (navigation_cube::rect(cube_host(app, ui, rect)).contains(pointer)
             || app

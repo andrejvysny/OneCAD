@@ -54,6 +54,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     egui::Color32::WHITE,
                 );
                 app.sampled = true;
+                crate::input_trace::app(app, "viewport.image_queued", serde_json::json!({"pass": ui.ctx().cumulative_pass_nr(), "frame": ui.ctx().cumulative_frame_nr()}));
             }
             if let Some((_, error)) = &app.resize_refusal {
                 let message = format!("Viewport resize refused: {error}. Shrink the window or retry. Save remains available.");
@@ -93,11 +94,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     return;
                 }
                 if !overlay_owns && !dimension_owns
-                    && ui
-                        .input(|input| input.pointer.hover_pos())
-                        .is_some_and(|position| {
+                    && (crate::sketch_gestures::delivered_inside(app, ui, rect)
+                        || ui.input(|input| input.pointer.hover_pos()).is_some_and(|position| {
                             crate::viewport_widgets::allows_pointer(ui, rect, position)
-                        })
+                        }))
                 {
                     crate::sketch_ui::viewport(app, ui, rect, &response, &view);
                 } else {
@@ -353,6 +353,12 @@ fn render(
         .map_err(|e| e.to_string())?
     {
         app.gpu.queue.submit([encoder.finish()]);
+        app.bridge.shared.input_trace.gpu_submitted(
+            &app.gpu.queue,
+            display,
+            &view,
+            app.renderer.preview_identity().is_some(),
+        );
         if app.renderer.preview_identity().is_none() {
             app.bridge.render_submitted(&app.gpu.queue, display);
         }

@@ -75,6 +75,7 @@ pub fn route(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
 fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     app.poll_device_failure();
     app.sync_document_state();
+    crate::input_trace::input(app, ctx, raw);
     crate::sketch_gestures::route_raw(app, ctx, raw);
     crate::sketch_creation::chain_input::route_raw(app, ctx, raw);
     if app.sampled && app.viewport_ready() {
@@ -123,6 +124,13 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     protect_composition(&mut app.composing, raw, text);
     if let Some(owner) = owner {
         for action in actions {
+            if app.bridge.shared.input_trace.enabled() {
+                crate::input_trace::app(
+                    app,
+                    "menu.route",
+                    serde_json::json!({"action": format!("{action:?}"), "text_focus": text, "focused": raw.focused, "overlay": true, "allowed": overlay::text_menu(action, text, raw.focused)}),
+                );
+            }
             if overlay::text_menu(action, text, raw.focused) {
                 route_menu(app, ctx, &mut raw.events, action, text);
             }
@@ -131,6 +139,13 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
         return;
     }
     for action in actions {
+        if app.bridge.shared.input_trace.enabled() {
+            crate::input_trace::app(
+                app,
+                "menu.route",
+                serde_json::json!({"action": format!("{action:?}"), "text_focus": text, "focused": raw.focused, "overlay": false}),
+            );
+        }
         route_menu(app, ctx, &mut raw.events, action, text);
     }
     let mut commands = Vec::new();

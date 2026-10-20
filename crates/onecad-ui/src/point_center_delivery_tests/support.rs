@@ -40,10 +40,14 @@ impl Host {
     }
 
     pub(crate) fn ui(&mut self, events: Vec<egui::Event>) {
+        self.ui_focused(events, true);
+    }
+
+    pub(crate) fn ui_focused(&mut self, events: Vec<egui::Event>, focused: bool) {
         let mut raw = egui::RawInput {
             screen_rect: Some(self.screen()),
             events,
-            focused: true,
+            focused,
             ..Default::default()
         };
         crate::input::route(&mut self.app, &self.context, &mut raw);

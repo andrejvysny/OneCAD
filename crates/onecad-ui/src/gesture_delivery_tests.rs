@@ -273,3 +273,6 @@ fn assert_point(sketch: &Sketch, expected: [f64; 2]) {
     // Native logical positions round through f32 before the plane projection.
     assert!(sketch.entities().iter().any(|entity| matches!(entity, SketchEntity::Point {at,..} if (at.x-expected[0]).abs()<1e-4 && (at.y-expected[1]).abs()<1e-4)), "missing point {expected:?}");
 }
+
+#[path = "gesture_delivery_batch_tests.rs"]
+mod batch_delivery;

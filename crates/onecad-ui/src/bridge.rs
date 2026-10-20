@@ -100,6 +100,7 @@ pub enum Message {
 }
 
 pub struct Shared {
+    pub(crate) input_trace: Arc<crate::input_trace::Trace>,
     #[cfg(test)]
     pub fail_next_gesture_capture: std::sync::atomic::AtomicBool,
     #[cfg(test)]
@@ -128,12 +129,13 @@ pub struct Shared {
     pub host_budget: Arc<crate::budget::HostBudget>,
     generation: std::sync::atomic::AtomicU64,
     notify: Notify,
-    context: egui::Context,
+    pub(crate) context: egui::Context,
 }
 
 impl Shared {
     pub(crate) fn new(context: egui::Context, budget: onecad_render::PreparationBudget) -> Self {
         Self {
+            input_trace: crate::input_trace::Trace::from_environment(&context),
             #[cfg(test)]
             fail_next_gesture_capture: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -172,6 +174,8 @@ impl Shared {
             .map_err(|_| "renderer preparation budget poisoned".into())
     }
     pub fn wake(&self) {
+        self.input_trace
+            .record("service.wake", serde_json::Value::Null);
         self.context.request_repaint();
     }
     pub fn release_text_focus(&self, id: egui::Id) {
@@ -181,6 +185,7 @@ impl Shared {
         self.generation.load(std::sync::atomic::Ordering::Acquire) == generation
     }
     pub fn publish_display(&self, display: Display) {
+        self.input_trace.capture("service.capture", &display);
         let epoch = display.epoch;
         crate::handoff::with_current(
             &self.display,
@@ -512,7 +517,11 @@ async fn actor(
                 if let Some(request) = request { gestures.submit(&backend, request, &sender).await; shared.wake(); }
             }
             result = gestures.next() => {
-                if let Some(result) = result { gestures.receive(&mut backend, result, &sender).await; shared.wake(); }
+                if let Some(result) = result {
+                    gestures.receive(&mut backend, result, &sender).await;
+                    shared.input_trace.record("service.gesture_finished", serde_json::Value::Null);
+                    shared.wake();
+                }
             }
             _=shared.recovery_flush.notified()=>{
                 if let Some(root) = onecad_app::autosave::autosave_root(&backend.host)
@@ -526,7 +535,10 @@ async fn actor(
             }
             envelope = receiver.recv() => {
                 let Some(envelope) = envelope else { break; };
+                let name = command_name(&envelope.command);
+                shared.input_trace.record("service.command_started", serde_json::json!({"command": name}));
                 services::execute(&mut backend,envelope.command,envelope.permit,&sender).await;
+                shared.input_trace.record("service.command_finished", serde_json::json!({"command": name}));
                 if shared.stopping.load(std::sync::atomic::Ordering::Acquire) { break; }
             }
             event = backend.events.next(), if !gesture_ending => {

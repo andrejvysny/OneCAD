@@ -421,3 +421,58 @@ CARGO_BUILD_JOBS=3 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 \
 See [source provenance](SOURCE_PROVENANCE.md) for adapted local code and
 [the native workflow specification](../../docs/design/native-ui/native-workflow.md)
 for the real-worker fixture and remaining acceptance gaps.
+
+## Native input diagnostics
+
+Set `ONECAD_INPUT_TRACE=1` before launch to enable bounded input evidence in the
+existing `ONECAD_LOG_DIR/dev.jsonl` logger. The default is disabled. Keep the
+isolated QA profile and its log directory for each run. Filter JSONL records by
+`target == "onecad_input"`; their message is `native.input_trace`. The `context`
+and `detail` fields contain JSON strings that can be decoded separately.
+
+Each record carries a process-local increasing `sequence` and monotonic
+`elapsed_us` since trace initialization. The trace writes at most 16,384 normal
+records plus one `trace.limit` record per host launch. It records at most 64
+ordered events per fresh input batch, with an explicit omitted count; detail
+payloads are limited to 2,048 bytes and identity strings to 128 UTF-8 bytes.
+These caps apply to this diagnostic stream, not to other application logs.
+Text, clipboard, IME, image and accessibility payload contents are omitted.
+Ordinary typing keys are redacted; control and command shortcut keys remain
+visible. Text events report byte counts only.
+
+The evidence includes fresh input before dispatch, batch focus and scale,
+logical pointer coordinates, native menu routing and text focus, accepted
+capture document/runtime/revision/scene/view identities, sketch phases,
+pointer ownership snapshots, dispatched actions, bounded refusals, service
+completion/delivery/wakes, actual repaint requests and UI/logic pass numbers.
+Repaint observation preserves eframe's integration callback and does not add
+continuous redraw or change click timing. An `unclaimed` pointer snapshot means
+that no tracked host owner is currently captured; event-specific overlay and
+focus fields still determine whether a new gesture is allowed.
+
+`viewport.gpu_submit` and `viewport.gpu_complete` identify submitted and completed
+CAD render work. `viewport.image_queued` means the captured image was added to an
+egui UI pass. Neither event proves that macOS physically presented that frame.
+Asynchronous records retain explicit result identities in `detail`; their
+`context` is the most recently observed host state. Its `scene` identifies the
+accepted display; `view_scene` identifies the captured image and can differ while
+new geometry waits for rendering. Use screenshots and document
+inspection to establish visible and persisted results.
+
+The ordinary Select-tool drag regression covers press/move/release in one UI
+frame, press and move together with release in the next frame, and separate
+frames. Raw event sampling preserves the original press and exact release,
+ignores motion outside those boundaries, and refuses multiple primary press
+cycles in one batch before starting a drag. Focus loss, PointerGone, Escape,
+overlays, release over chrome followed by a return to the viewport, stale
+captures and service-driven completion without more pointer input have dedicated
+checks. This is synthetic host qualification, not physical
+input or full modeling workflow acceptance:
+
+```sh
+ONECAD_REQUIRE_WORKER=1 ONECAD_REQUIRE_GPU=1 \
+ONECAD_WORKER_PATH="$PWD/worker/build-native/onecad-worker" \
+  cargo test -p onecad-ui app_logic_tests::gesture_delivery_tests \
+  -- --ignored --test-threads=1
+cargo test -p onecad-ui input_trace
+```
