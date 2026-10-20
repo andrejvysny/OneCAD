@@ -244,3 +244,72 @@ fn ellipse_exposes_only_its_supported_center_reference() {
     );
     assert!(curves::Curve::from_entity(&sketch, sketch.get_entity(ellipse).unwrap()).is_none());
 }
+
+#[test]
+fn creation_adapter_preserves_arc_chain_anchor_roles_for_horizontal_and_vertical_guides() {
+    use onecad_core::sketch::CurvePosition;
+    use onecad_interaction::sketch::inference::PointAlignment;
+    use onecad_interaction::sketch::{ChainCurve, SketchDraft};
+
+    for role in [CurvePosition::Start, CurvePosition::End] {
+        let mut sketch = sketch();
+        let center = add_point(&mut sketch, 4.0, 7.0);
+        let arc = EntityId::new();
+        sketch
+            .add_entity(SketchEntity::arc(arc, center, 10.0, 0.3, 1.7, false).unwrap())
+            .unwrap();
+        let reference = SketchTarget::Point { entity: arc, role };
+        let anchor = reference.point_coordinates(&sketch).unwrap();
+        let mut draft = SketchDraft {
+            first: anchor,
+            anchor,
+            first_id: None,
+            first_target: None,
+            anchor_id: None,
+            cursor: anchor,
+            segments: 1,
+            anchor_snap: None,
+            secondary: None,
+            preceding: Some(ChainCurve { entity: arc, role }),
+            tangent_arc: false,
+        };
+        let view = view(2.0, 100.0);
+        for (dx, dy, kind, alignment) in [
+            (
+                25.0,
+                0.0,
+                SnapKind::HorizontalGuide,
+                PointAlignment::Horizontal,
+            ),
+            (0.0, 25.0, SnapKind::VerticalGuide, PointAlignment::Vertical),
+        ] {
+            let mut request = request(&sketch, &view);
+            request.pointer =
+                project(&request, Vec2::new(anchor.x + dx, anchor.y + dy).unwrap()).unwrap();
+            request.anchor = Some((anchor, None));
+            assert!(
+                resolve_snap(&request).is_none(),
+                "anonymous adapter anchor reproduces ambiguous guide"
+            );
+            request.anchor = Some(crate::sketch_creation::snap_anchor(&draft));
+            let snap =
+                resolve_snap(&request).expect("adapter must retain persistent endpoint identity");
+            assert_eq!(snap.kind, kind);
+            assert_eq!(
+                snap.intent,
+                SnapIntent::Guide {
+                    reference,
+                    alignment
+                }
+            );
+        }
+        draft.anchor_id = Some(center);
+        assert_eq!(
+            crate::sketch_creation::snap_anchor(&draft).1,
+            Some(SketchTarget::Point {
+                entity: center,
+                role: CurvePosition::Arbitrary
+            })
+        );
+    }
+}

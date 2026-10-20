@@ -76,6 +76,7 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     app.poll_device_failure();
     app.sync_document_state();
     crate::sketch_gestures::route_raw(app, ctx, raw);
+    crate::sketch_creation::chain_input::route_raw(app, ctx, raw);
     if app.sampled && app.viewport_ready() {
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let finished = done.clone();
@@ -114,6 +115,11 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     let actions = app.menu.as_ref().map_or_else(Vec::new, |menu| menu.drain());
     menu::remove_duplicate_events(&actions, &mut raw.events);
     let text = text_owns_keyboard(ctx);
+    let composition = app.composing
+        || raw
+            .events
+            .iter()
+            .any(|event| matches!(event, egui::Event::Ime(_)));
     protect_composition(&mut app.composing, raw, text);
     if let Some(owner) = owner {
         for action in actions {
@@ -167,7 +173,10 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     if app.documents.confirm.is_some() {
         return;
     }
-    if !text && raw.focused && crate::sketch_numeric::route(app, ctx, raw) {
+    if !text && raw.focused && !composition && app.sketch_active() && app.viewport_ready() {
+        sketch_arc_keys(app, ctx, &mut raw.events);
+    }
+    if !text && !composition && raw.focused && crate::sketch_numeric::route(app, ctx, raw) {
         return;
     }
     if raw.focused {
@@ -391,3 +400,75 @@ pub(crate) fn protect_composition(composing: &mut bool, raw: &mut egui::RawInput
 mod overlay_tests;
 #[cfg(test)]
 mod tests;
+
+fn arc_key(event: &egui::Event) -> Option<bool> {
+    match event {
+        egui::Event::Key {
+            key: egui::Key::A,
+            pressed: true,
+            repeat: false,
+            modifiers,
+            ..
+        } if !modifiers.command && !modifiers.ctrl && !modifiers.alt && !modifiers.mac_cmd => {
+            Some(modifiers.shift)
+        }
+        _ => None,
+    }
+}
+
+fn sketch_arc_keys(app: &mut App, ctx: &egui::Context, events: &mut Vec<egui::Event>) {
+    events.retain(|event| {
+        let Some(three_point) = arc_key(event) else {
+            return true;
+        };
+        if !three_point
+            && let Some(session) = app
+                .sketch
+                .session
+                .as_ref()
+                .filter(|session| session.can_tangent_arc())
+        {
+            let key = session.key.clone();
+            let enabled = !session
+                .draft
+                .as_ref()
+                .is_some_and(|draft| draft.tangent_arc);
+            app.sketch_dispatch(onecad_interaction::sketch::SketchAction::SetTangentArc {
+                key,
+                enabled,
+            });
+        } else {
+            app.ui.arc_three_point = three_point;
+            crate::pill::activate(app, ctx, crate::tool_registry::ToolId::Arc);
+        }
+        false
+    });
+}
+
+#[cfg(test)]
+mod arc_key_tests {
+    use super::*;
+    fn key(modifiers: egui::Modifiers, repeat: bool) -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::A,
+            physical_key: None,
+            pressed: true,
+            repeat,
+            modifiers,
+        }
+    }
+    #[test]
+    fn arc_keys_keep_modifiers_and_repeat_distinct() {
+        assert_eq!(arc_key(&key(egui::Modifiers::NONE, false)), Some(false));
+        assert_eq!(arc_key(&key(egui::Modifiers::SHIFT, false)), Some(true));
+        for modifiers in [
+            egui::Modifiers::ALT,
+            egui::Modifiers::CTRL,
+            egui::Modifiers::COMMAND,
+            egui::Modifiers::MAC_CMD,
+        ] {
+            assert_eq!(arc_key(&key(modifiers, false)), None);
+        }
+        assert_eq!(arc_key(&key(egui::Modifiers::NONE, true)), None);
+    }
+}

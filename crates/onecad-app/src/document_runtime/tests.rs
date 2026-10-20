@@ -6623,3 +6623,6 @@ async fn the_halted_steps_repair_set_is_restored_even_when_empty() {
 
 #[path = "gesture_tests.rs"]
 mod gesture_tests;
+
+#[path = "tests/finish_history.rs"]
+mod finish_history;

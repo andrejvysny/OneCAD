@@ -171,3 +171,6 @@ mod point_center_delivery_tests;
 
 #[path = "arc_gesture_delivery_tests.rs"]
 mod arc_gesture_delivery_tests;
+
+#[path = "arc_slot_delivery_tests.rs"]
+mod arc_slot_delivery_tests;

@@ -81,6 +81,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 paint_profiles(app, ui, rect, &view, &display);
             }
             if crate::input::overlay_owns_keyboard(app, ui.ctx()) {
+                crate::sketch_creation::chain_input::cancel(app, ui.ctx());
                 app.cancel_sketch_gesture();
                 return;
             }
@@ -99,6 +100,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         })
                 {
                     crate::sketch_ui::viewport(app, ui, rect, &response, &view);
+                } else {
+                    crate::sketch_creation::chain_input::cancel(app, ui.ctx());
                 }
                 return;
             }

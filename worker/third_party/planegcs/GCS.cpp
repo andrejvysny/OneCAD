@@ -4572,18 +4572,25 @@ int System::solve(SubSystem* subsysA, SubSystem* subsysB, bool /*isFine*/, bool 
     int xsizeB = subsysB->pSize();
     int csizeA = subsysA->cSize();
 
-    VEC_pD plistAB(xsizeA + xsizeB);
+    VEC_pD plistAB;
+    plistAB.reserve(xsizeA + xsizeB);
     {
         VEC_pD plistA, plistB;
         subsysA->getParamList(plistA);
         subsysB->getParamList(plistB);
 
-        std::sort(plistA.begin(), plistA.end());
-        std::sort(plistB.begin(), plistB.end());
-
-        VEC_pD::const_iterator it;
-        it = std::set_union(plistA.begin(), plistA.end(), plistB.begin(), plistB.end(), plistAB.begin());
-        plistAB.resize(it - plistAB.begin());
+        SET_pD remaining(plistA.begin(), plistA.end());
+        remaining.insert(plistB.begin(), plistB.end());
+        const auto append = [&](const VEC_pD& parameters) {
+            for (double* parameter : parameters) {
+                if (remaining.erase(parameter)) plistAB.push_back(parameter);
+            }
+        };
+        // Keep declared columns across the priority split. Direct subsystem
+        // callers can supply parameters outside the system's declared list.
+        append(plist);
+        append(plistA);
+        append(plistB);
     }
     int xsize = plistAB.size();
 

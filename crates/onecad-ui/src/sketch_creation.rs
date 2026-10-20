@@ -14,6 +14,9 @@ use onecad_interaction::sketch::{
 };
 use onecad_scene::{DVec2, DVec3, ViewSnapshot};
 
+#[path = "sketch_chain_input.rs"]
+pub(crate) mod chain_input;
+
 pub(crate) fn viewport(
     app: &mut App,
     ui: &Ui,
@@ -21,6 +24,9 @@ pub(crate) fn viewport(
     response: &egui::Response,
     view: &ViewSnapshot,
 ) {
+    if chain_input::viewport(app, ui, rect, response, view) {
+        return;
+    }
     let Some(session) = app.sketch.session.as_ref() else {
         return;
     };
@@ -74,15 +80,7 @@ fn winning_snap(
                 view,
                 rect,
                 pointer: position,
-                anchor: session.draft.as_ref().map(|draft| {
-                    (
-                        draft.anchor,
-                        draft.anchor_id.map(|entity| SketchTarget::Point {
-                            entity,
-                            role: CurvePosition::Arbitrary,
-                        }),
-                    )
-                }),
+                anchor: session.draft.as_ref().map(snap_anchor),
                 previous: previous.as_ref(),
                 generation: session.request.sequence,
                 settings: SnapSettings {
@@ -99,6 +97,24 @@ fn winning_snap(
         }
     });
     snap
+}
+
+pub(crate) fn snap_anchor(
+    draft: &onecad_interaction::sketch::SketchDraft,
+) -> (onecad_core::math::Vec2, Option<SketchTarget>) {
+    let reference = draft
+        .anchor_id
+        .map(|entity| SketchTarget::Point {
+            entity,
+            role: CurvePosition::Arbitrary,
+        })
+        .or_else(|| {
+            draft.preceding.map(|curve| SketchTarget::Point {
+                entity: curve.entity,
+                role: curve.role,
+            })
+        });
+    (draft.anchor, reference)
 }
 
 fn optional_snaps(enabled: bool, modifiers: egui::Modifiers) -> bool {

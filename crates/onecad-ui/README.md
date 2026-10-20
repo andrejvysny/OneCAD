@@ -154,6 +154,27 @@ between fields, Enter creates one constrained batch and Escape cancels the draft
 blur never commits. Application authority resolves authored expressions. Line
 continuation reanchors to the accepted solved endpoint.
 
+Arc offers center/start/end and start/end/through methods; Slot places two
+centerline endpoints followed by full width. Tab after two anchors opens Arc
+Radius and signed Sweep, three-point Arc Radius, or Slot full Width. The signed
+center-arc sweep controls geometry only; Radius and Slot Diameter persist as
+driving constraints. Numeric three-point radius retains both placed endpoints,
+the selected center side and minor/major branch. Values below half the chord,
+nonpositive/nonfinite radii and degenerate candidates refuse without a document
+edit. Numeric expressions bind through application-owned constraint admission.
+
+An armed Line chain with a known solved outgoing tangent supports the Tangent
+arc checkbox or plain A. Shift+A activates three-point Arc. Primary drag beyond
+4 logical pixels on either axis promotes the eligible chain to tangent Arc;
+an ordinary click remains Line. Release recomputes snapping and submits one
+batch; Escape, capture/focus loss, stale context or release over interactive UI
+cancels. A unique existing Line/Arc endpoint can seed continuation; ambiguous
+junctions never choose a preceding curve. Arc endpoints retain entity plus
+Start/End role without synthetic endpoint points. Tangent Arc numeric input
+exposes one Radius field, preserves the pointer bend side and sweep, and authors
+Radius together with the structural weld and TangentAtPoint. Every accepted
+primitive reanchors from solved geometry and has one local Undo entry.
+
 Select supports solver-backed point/line-endpoint, line-body, circle/arc radius
 and arc endpoint/center gestures; ellipse interaction is center-only. The host
 paints checked transient previews and commits one accepted drag edit. Escape or
@@ -170,7 +191,7 @@ neutral instead of inheriting a whole-curve DOF claim.
 
 Finish keeps accepted edits and Discard uses guarded session discard. Enter/Escape
 clear a transient draft before exit. Read-only refresh never opens another edit
-session. Entity dragging and further sketch primitives remain unimplemented.
+session.
 Automated host evidence and physical workflow acceptance are separate; see the
 [recurring host gate](../../docs/native-host-ci-gate.md).
 Focused text owns undo/redo and clipboard actions. Outside text editing, the title
@@ -182,8 +203,12 @@ History cannot cross the entry boundary, replay a foreign redo, or survive an ed
 visit, runtime, head, revision or worker-epoch change. A detached candidate is solved
 before the history move commits; errors and rejected solves preserve both stacks and
 authoritative geometry. Empty history is explicit. Finish/discard retains the existing
-session grouping and clears redo owned by the closed visit. No UI snapshot stack is
-created. Evicting older model transactions shifts the visit boundary; the newest
+session grouping and clears redo owned by the closed visit. Refreshing an existing
+sketch timeline record belongs to the same model Undo step as the finished net
+sketch edit: one Undo restores both the live sketch and its regeneration record.
+An edit-free Finish adds no history. Initial sketch-record creation retains its
+existing history contract. No UI snapshot stack is created. Evicting older model
+transactions shifts the visit boundary; the newest
 200 retained sketch edits remain undoable. If a visit's own edits have been
 evicted, Discard conservatively keeps the changes and reports that history was
 trimmed; Finish keeps the retained granular history instead of a net undo step.

@@ -105,9 +105,9 @@ pub(super) fn build(
     let preceding = draft
         .preceding
         .ok_or("Tangent arc needs a preceding chain curve")?;
-    let first = draft
-        .first_id
-        .ok_or("Tangent arc needs an existing chain")?;
+    if draft.first_id.is_none() && draft.first_target.is_none() {
+        return Err("Tangent arc needs an existing chain".into());
+    }
     let arc = candidate(sketch, draft, point)?;
     let mut ops = super::staged_creation::arc_ops(arc, ids)?;
     let (point1, point1_position) = match draft.anchor_id {
@@ -137,8 +137,27 @@ pub(super) fn build(
         .segments
         .checked_add(1)
         .ok_or("Line chain is too long")?;
+    let closing = draft.segments > 0
+        && super::primitives::distance(draft.first, point) < super::primitives::MIN_SIZE;
+    if closing {
+        let target = chain_start(draft).ok_or("Chain start is missing")?;
+        let SketchTarget::Point { entity, role } = target else {
+            return Err(NOT_CURVE.into());
+        };
+        ops.push(SketchEditOp::AddConstraint {
+            constraint: Constraint::Coincident {
+                id: ids.constraints[2],
+                point1: arc_id,
+                point1_position: arc.travel_end_role,
+                point2: entity,
+                point2_position: role,
+            },
+        });
+        return Ok((ops, AfterPrimitive::Reset));
+    }
     let after = AfterPrimitive::ContinueLine {
-        first,
+        first: draft.first_id,
+        first_target: draft.first_target,
         last: None,
         preceding: ChainCurve {
             entity: arc_id,
@@ -192,18 +211,17 @@ impl SketchInteraction {
         else {
             return;
         };
-        let eligible = session.tool == SketchTool::Line
-            && session
-                .draft
-                .as_ref()
-                .is_some_and(|draft| draft.preceding.is_some());
-        if !eligible {
-            if enabled {
-                self.refuse("Tangent arc needs a preceding chain curve");
-            }
+        if session.tool != SketchTool::Line {
             return;
         }
-        let draft = session.draft.as_mut().expect("eligible draft");
+        let eligible = session.can_tangent_arc();
+        if !eligible && enabled {
+            self.refuse("Tangent arc needs a preceding chain curve");
+            return;
+        }
+        let Some(draft) = session.draft.as_mut() else {
+            return;
+        };
         draft.tangent_arc = enabled;
         let cursor = draft.cursor;
         session.preview = if enabled {
@@ -214,5 +232,106 @@ impl SketchInteraction {
                 end: cursor,
             })
         };
+    }
+}
+
+pub(super) fn target_point(sketch: &Sketch, target: SketchTarget) -> Result<Vec2, String> {
+    target
+        .point_coordinates(sketch)
+        .ok_or_else(|| "Chain endpoint is missing".into())
+}
+
+pub(super) fn chain_start(draft: &SketchDraft) -> Option<SketchTarget> {
+    draft
+        .first_id
+        .map(|entity| SketchTarget::Point {
+            entity,
+            role: CurvePosition::Arbitrary,
+        })
+        .or(draft.first_target)
+}
+
+/// Only an accepted endpoint snap may seed a fresh chain; junctions never guess.
+pub(super) fn seed(session: &mut SketchSession) {
+    if session.tool != SketchTool::Line {
+        return;
+    }
+    let Some(draft) = session.draft.as_mut() else {
+        return;
+    };
+    if !matches!(
+        draft.anchor_snap.map(|snap| snap.intent),
+        Some(super::inference::SnapIntent::Coincident(_))
+    ) {
+        return;
+    }
+    let Some(curve) = unique_endpoint(&session.authoritative, draft.anchor) else {
+        return;
+    };
+    let point_id = match session.authoritative.get_entity(curve.entity) {
+        Some(SketchEntity::Line { start, end, .. }) => {
+            Some(if curve.role == CurvePosition::Start {
+                *start
+            } else {
+                *end
+            })
+        }
+        _ => None,
+    };
+    let Some(point) = (SketchTarget::Point {
+        entity: curve.entity,
+        role: curve.role,
+    })
+    .point_coordinates(&session.authoritative) else {
+        return;
+    };
+    draft.first = point;
+    draft.anchor = point;
+    draft.cursor = point;
+    draft.preceding = Some(curve);
+    draft.anchor_id = point_id;
+    draft.first_id = point_id;
+    draft.first_target = point_id.is_none().then_some(SketchTarget::Point {
+        entity: curve.entity,
+        role: curve.role,
+    });
+    draft.anchor_snap = None;
+}
+
+// The frozen endpoint tangent search uses a 1e-6 world-space tolerance floor.
+fn unique_endpoint(sketch: &Sketch, point: Vec2) -> Option<ChainCurve> {
+    let mut matching = sketch
+        .entities()
+        .iter()
+        .filter(|entity| matches!(entity, SketchEntity::Line { .. } | SketchEntity::Arc { .. }))
+        .flat_map(|entity| {
+            [CurvePosition::Start, CurvePosition::End].map(|role| ChainCurve {
+                entity: entity.id(),
+                role,
+            })
+        })
+        .filter(|curve| {
+            SketchTarget::Point {
+                entity: curve.entity,
+                role: curve.role,
+            }
+            .point_coordinates(sketch)
+            .is_some_and(|at| super::primitives::distance(at, point) <= 1e-6)
+                && outgoing(sketch, *curve).is_ok()
+        });
+    let curve = matching.next()?;
+    matching.next().is_none().then_some(curve)
+}
+
+impl SketchSession {
+    pub fn can_tangent_arc(&self) -> bool {
+        self.phase == SketchPhase::Active
+            && self.tool == SketchTool::Line
+            && self.draft.as_ref().is_some_and(|draft| {
+                draft.preceding.is_some_and(|curve| {
+                    outgoing(&self.authoritative, curve).is_ok()
+                        && anchor(&self.authoritative, draft.anchor_id, curve).is_ok()
+                })
+            })
     }
 }

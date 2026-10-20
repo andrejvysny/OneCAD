@@ -56,6 +56,49 @@ impl DocumentSession {
         Ok(Some(candidate))
     }
 
+    /// Keeps an existing sketch record refresh in the finished sketch's net edit.
+    /// Refuses to append across an interleaved command or caller-owned transaction.
+    pub fn refresh_finished_sketch_record(
+        &mut self,
+        sketch: SketchId,
+        record: RecordId,
+        op: Operation,
+    ) -> Result<Option<CommandOutcome>, DomainError> {
+        let owns_sketch = |op: &Operation| {
+            matches!(op,
+            Operation::Known(KnownOperation::Sketch(params)) if params.sketch == sketch)
+        };
+        let valid_record = self
+            .document
+            .timeline
+            .index_of(record)
+            .and_then(|index| self.document.timeline.record(index))
+            .is_some_and(|record| owns_sketch(&record.op));
+        if !valid_record || !owns_sketch(&op) {
+            return Err(DomainError::Validation(
+                "finished sketch record does not match sketch".into(),
+            ));
+        }
+        let eligible = !self.transaction_open()
+            && self
+                .undo
+                .history_txn(HistoryDirection::Undo)
+                .is_some_and(|txn| {
+                    txn.edits.len() == 1
+                        && matches!(txn.edits[0].forward,
+                EditCommand::SketchEdit { sketch: id, .. } if id == sketch)
+                });
+        if !eligible {
+            return Ok(None);
+        }
+        let forward = EditCommand::UpdateOperationParams { record, op };
+        let (outcome, inverse) = self.apply_forward(&forward)?;
+        if !matches!(inverse, Inverse::Noop) {
+            self.undo.append_latest(AppliedEdit { forward, inverse });
+        }
+        Ok(Some(outcome))
+    }
+
     /// The application has validated a fresh solver result for the prepared target.
     /// Updating its derived coordinates belongs to this history move, not another edit.
     pub fn commit_sketch_history(
@@ -102,3 +145,7 @@ fn restore(candidate: &mut Sketch, inverse: &Inverse) -> Result<(), DomainError>
         )),
     }
 }
+
+#[cfg(test)]
+#[path = "sketch_history/finish_tests.rs"]
+mod finish_tests;

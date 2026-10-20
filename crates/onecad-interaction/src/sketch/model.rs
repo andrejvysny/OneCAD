@@ -1,3 +1,4 @@
+use super::SketchTarget;
 use crate::DocumentContext;
 use onecad_app::dto::{CancelSketchDto, FinishSketchDto, SketchSessionDto, SketchUpsertDto};
 use onecad_core::{
@@ -104,11 +105,30 @@ pub struct ChainCurve {
     pub role: onecad_core::sketch::CurvePosition,
 }
 
+/// Numeric commands must retain the active method, including a Line's arc mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NumericCreationMethod {
+    Tool(SketchTool),
+    TangentArc,
+}
+
+impl SketchSession {
+    pub fn numeric_method(&self) -> NumericCreationMethod {
+        if self.tool == SketchTool::Line && self.draft.as_ref().is_some_and(|d| d.tangent_arc) {
+            NumericCreationMethod::TangentArc
+        } else {
+            NumericCreationMethod::Tool(self.tool)
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SketchDraft {
     pub first: Vec2,
     pub anchor: Vec2,
     pub first_id: Option<EntityId>,
+    /// An existing curve endpoint starts a chain without inventing a point entity.
+    pub first_target: Option<SketchTarget>,
     pub anchor_id: Option<EntityId>,
     pub cursor: Vec2,
     pub segments: usize,
@@ -218,7 +238,8 @@ pub(crate) enum ExitIntent {
 pub(crate) enum AfterPrimitive {
     Reset,
     ContinueLine {
-        first: EntityId,
+        first: Option<EntityId>,
+        first_target: Option<SketchTarget>,
         last: Option<EntityId>,
         preceding: ChainCurve,
         segments: usize,

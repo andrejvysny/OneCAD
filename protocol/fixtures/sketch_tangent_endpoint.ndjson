@@ -1,5 +1,5 @@
 # ONECAD-18: explicit endpoint tangency; independent authored rows, no legacy Tangent rewrite.
-{"expect":{"v":1,"t":"hello","seq":0,"result":{"solverPolicyVersion":3}}}
+{"expect":{"v":1,"t":"hello","seq":0,"result":{"solverPolicyVersion":4}}}
 # T1: 9 DOF; tangent rows remain independent of endpoint welds.
 {"send":{"v":1,"t":"req","id":1,"verb":"SketchUpsert","args":{"sketchId":"T1","plane":{"kind":"XY"},"entities":[{"id":"p0","type":"Point","at":[0,20]},{"id":"p1","type":"Point","at":[0,5]},{"id":"p2","type":"Point","at":[5,0]},{"id":"p3","type":"Point","at":[20,0]},{"id":"legA","type":"Line","p0Ref":"p0","p1Ref":"p1"},{"id":"legB","type":"Line","p0Ref":"p2","p1Ref":"p3"},{"id":"arc","type":"Arc","center":[5,5],"radius":5,"startAngle":3.141592653589793,"endAngle":4.71238898038469}],"constraints":[{"id":"wA","type":"Coincident","entities":["legA","arc"],"positions":["End","Start"]},{"id":"wB","type":"Coincident","entities":["legB","arc"],"positions":["Start","End"]}]}}}
 {"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"upserted":true,"dof":9,"state":"UnderConstrained","conflicting":[]}}}

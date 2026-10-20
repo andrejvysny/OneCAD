@@ -110,11 +110,11 @@ pub struct PolicyVersions {
     pub signature: u32,
 }
 
-/// Shared curve-center identity and retained-pose residual truth (SCHEMA §7.3/§7.4).
-pub const SOLVER_POLICY_VERSION: u32 = 3;
+/// Stable semantic solver parameter ordering and canonical reduced-alias seeds.
+pub const SOLVER_POLICY_VERSION: u32 = 4;
 
 impl Default for PolicyVersions {
-    /// Solver policy `3`; the remaining independent axes stay at `1`.
+    /// Solver policy `4`; the remaining independent axes stay at `1`.
     fn default() -> Self {
         Self {
             quantization: 1,

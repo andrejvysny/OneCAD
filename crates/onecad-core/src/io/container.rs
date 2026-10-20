@@ -1426,7 +1426,7 @@ mod tests {
             lod: "coarse".into(),
             bytes: Arc::new(b"MESH1....".to_vec()),
         });
-        for legacy in [None, Some(1)] {
+        for legacy in [None, Some(1), Some(2), Some(3)] {
             ContainerWriter::save(&path, &document, &caches, &meta()).unwrap();
             let mut archive = ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
             let mut bytes = Vec::new();

@@ -326,16 +326,26 @@ fn apply_after(session: &mut SketchSession, after: AfterPrimitive) -> Result<(),
         AfterPrimitive::Reset => session.draft = None,
         AfterPrimitive::ContinueLine {
             first,
+            first_target,
             last,
             preceding,
             segments,
         } => {
-            let a = point(&session.authoritative, first).ok_or("Solved chain start is missing")?;
+            let a = match (first, first_target) {
+                (Some(id), _) => {
+                    point(&session.authoritative, id).ok_or("Solved chain start is missing")?
+                }
+                (_, Some(target)) => {
+                    super::tangent_continuation::target_point(&session.authoritative, target)?
+                }
+                _ => return Err("Solved chain start is missing".into()),
+            };
             let b = super::tangent_continuation::anchor(&session.authoritative, last, preceding)?;
             session.draft = Some(SketchDraft {
                 first: a,
                 anchor: b,
-                first_id: Some(first),
+                first_id: first,
+                first_target,
                 anchor_id: last,
                 cursor: b,
                 segments,
@@ -346,24 +356,36 @@ fn apply_after(session: &mut SketchSession, after: AfterPrimitive) -> Result<(),
             });
         }
         AfterPrimitive::Preserve => {
-            if let Some(draft) = &mut session.draft {
-                if let Some(id) = draft.first_id {
-                    draft.first =
-                        point(&session.authoritative, id).ok_or("Solved chain start is missing")?;
-                }
-                if let Some(id) = draft.anchor_id {
-                    draft.anchor = point(&session.authoritative, id)
-                        .ok_or("Solved chain endpoint is missing")?;
-                } else if let Some(preceding) = draft.preceding {
-                    draft.anchor = super::tangent_continuation::anchor(
-                        &session.authoritative,
-                        None,
-                        preceding,
-                    )?;
-                }
-                draft.cursor = draft.anchor;
+            if refresh_draft(session).is_err() {
+                session.draft = None;
+                session.preview = None;
             }
         }
+    }
+    Ok(())
+}
+
+fn refresh_draft(session: &mut SketchSession) -> Result<(), String> {
+    if let Some(draft) = &mut session.draft {
+        if let Some(id) = draft.first_id {
+            draft.first =
+                point(&session.authoritative, id).ok_or("Solved chain start is missing")?;
+        }
+        if let Some(target) = draft.first_target {
+            draft.first =
+                super::tangent_continuation::target_point(&session.authoritative, target)?;
+        }
+        if let Some(preceding) = draft.preceding {
+            super::tangent_continuation::outgoing(&session.authoritative, preceding)?;
+        }
+        if let Some(id) = draft.anchor_id {
+            draft.anchor =
+                point(&session.authoritative, id).ok_or("Solved chain endpoint is missing")?;
+        } else if let Some(preceding) = draft.preceding {
+            draft.anchor =
+                super::tangent_continuation::anchor(&session.authoritative, None, preceding)?;
+        }
+        draft.cursor = draft.anchor;
     }
     Ok(())
 }

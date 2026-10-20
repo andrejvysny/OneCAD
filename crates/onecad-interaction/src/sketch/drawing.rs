@@ -110,6 +110,7 @@ impl SketchInteraction {
                 first: point.point,
                 anchor: point.point,
                 first_id: None,
+                first_target: None,
                 anchor_id: None,
                 cursor: point.point,
                 segments: 0,
@@ -118,6 +119,7 @@ impl SketchInteraction {
                 preceding: None,
                 tangent_arc: false,
             });
+            super::tangent_continuation::seed(session);
             return Vec::new();
         };
         if super::staged_creation::is_staged(session.tool) && draft.secondary.is_none() {
@@ -244,6 +246,7 @@ fn point_draft(cursor: onecad_core::math::Vec2) -> SketchDraft {
         anchor: origin,
         cursor,
         first_id: None,
+        first_target: None,
         anchor_id: None,
         segments: 0,
         anchor_snap: None,

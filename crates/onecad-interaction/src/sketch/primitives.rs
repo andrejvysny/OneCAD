@@ -73,6 +73,10 @@ fn line(
     point: Vec2,
     ids: &PrimitiveIds,
 ) -> Result<PrimitiveBatch, String> {
+    if let Some(preceding) = draft.preceding {
+        super::tangent_continuation::outgoing(&session.authoritative, preceding)?;
+        super::tangent_continuation::anchor(&session.authoritative, draft.anchor_id, preceding)?;
+    }
     if draft.tangent_arc {
         return super::tangent_continuation::build(&session.authoritative, draft, point, ids);
     }
@@ -82,15 +86,35 @@ fn line(
     {
         return Err("Degenerate line".into());
     }
-    let first = draft.first_id.unwrap_or(ids.entities[0]);
+    let first = draft
+        .first_id
+        .or_else(|| draft.first_target.is_none().then_some(ids.entities[0]));
     let start = draft.anchor_id.unwrap_or(ids.entities[0]);
-    let end = if closing { first } else { ids.entities[1] };
+    let end = if closing {
+        first.unwrap_or(ids.entities[1])
+    } else {
+        ids.entities[1]
+    };
     let mut ops = Vec::with_capacity(4);
     if draft.anchor_id.is_none() {
         ops.push(add_point(start, draft.anchor));
     }
-    if !closing {
+    if !closing || first.is_none() {
         ops.push(add_point(end, endpoint));
+    }
+    if closing && first.is_none() {
+        let Some(SketchTarget::Point { entity, role }) = draft.first_target else {
+            return Err("Chain start is missing".into());
+        };
+        ops.push(SketchEditOp::AddConstraint {
+            constraint: Constraint::Coincident {
+                id: ids.constraints[2],
+                point1: end,
+                point1_position: CurvePosition::Arbitrary,
+                point2: entity,
+                point2_position: role,
+            },
+        });
     }
     ops.push(add_entity(SketchEntity::line(
         ids.entities[2],
@@ -104,6 +128,7 @@ fn line(
     } else {
         AfterPrimitive::ContinueLine {
             first,
+            first_target: draft.first_target,
             last: Some(end),
             preceding: ChainCurve {
                 entity: ids.entities[2],

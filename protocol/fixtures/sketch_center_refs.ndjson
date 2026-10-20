@@ -1,5 +1,5 @@
-# ONECAD-251: solver policy 3 shares authored Point identity across curve centers.
-{"expect":{"v":1,"t":"hello","seq":0,"result":{"solverPolicyVersion":3}}}
+# ONECAD-251: shared curve-center Point identity (introduced in policy 3; current policy 4).
+{"expect":{"v":1,"t":"hello","seq":0,"result":{"solverPolicyVersion":4}}}
 {"send":{"v":1,"t":"req","id":1,"verb":"SketchUpsert","args":{"sketchId":"Circle","entities":[{"id":"curve","type":"Circle","center":[10,20],"centerRef":"point","radius":3},{"id":"point","type":"Point","at":[10,20]}],"constraints":[]}}}
 {"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"upserted":true,"dof":3,"state":"UnderConstrained"}}}
 {"send":{"v":1,"t":"req","id":2,"verb":"SketchUpsert","args":{"sketchId":"Arc","entities":[{"id":"curve","type":"Arc","center":[10,20],"centerRef":"point","radius":3,"startAngle":0,"endAngle":1},{"id":"point","type":"Point","at":[10,20]}],"constraints":[]}}}

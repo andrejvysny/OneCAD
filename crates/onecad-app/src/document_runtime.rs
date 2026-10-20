@@ -740,6 +740,8 @@ pub struct DocumentRuntime {
     /// The open sketch-edit session watermark (B1 squash), set on `enter_sketch`
     /// and consumed on `finish_sketch`/`cancel_sketch`. `None` outside a session.
     sketch_session: Option<SketchSession>,
+    /// Cancel-with-keep hands its net edit to an immediately following native Finish.
+    pending_sketch_finish: Option<(SketchId, u64)>,
     /// Monotonic gesture id allocator (SCHEMA §7.4 `gestureId`).
     gesture_seq: u64,
     /// Rust-owned promotion cache `(snapshot, body, topoKey) → `[`PromotionEntry`]
@@ -1021,6 +1023,7 @@ impl DocumentRuntime {
             native_gesture: None,
             solver_lane: SolverLaneClaims::new(),
             sketch_session: None,
+            pending_sketch_finish: None,
             gesture_seq: 0,
             promoted: HashMap::new(),
             rebind_attempted: false,
@@ -1666,6 +1669,7 @@ impl DocumentRuntime {
     /// After any structural mutation: re-mirror the timeline (all Dirty pending
     /// regen), bump the fencing revision, and mark unsaved.
     fn after_mutation(&mut self) {
+        self.pending_sketch_finish = None;
         if let Some(session) = &mut self.sketch_session {
             session.history_redo = 0;
         }
@@ -4102,6 +4106,7 @@ impl DocumentRuntime {
     ) -> Result<(SketchSessionDto, Option<CommandOutcome>), EngineError> {
         let _claim = self.claim_upsert_lane(sketch_id).await?;
         let sketch = self.sketch_or_err(sketch_id, "enterSketch")?;
+        self.pending_sketch_finish = None;
         // B1 squash: remember the pre-session sketch + undo watermark so finish/cancel
         // can collapse every in-session granular edit into ONE net undoable command. If
         // a session for the SAME sketch is already open (a double-enter / a model-mode
@@ -4357,6 +4362,8 @@ impl DocumentRuntime {
         // with a single undo.
         let squash = self.squash_sketch_session(sketch_id);
         if !discard {
+            self.pending_sketch_finish =
+                (squash == SessionSquash::NetStep).then_some((sketch_id, self.undo_position()));
             tracing::info!("cancel_sketch: sketch={sketch_id} squashed (no timeline record)");
             return Ok(CancelSketchOutcome::kept(None));
         }
@@ -4462,16 +4469,19 @@ impl DocumentRuntime {
         }
         let _claim = self.claim_upsert_lane(sketch_id).await?;
         let sketch = self.sketch_or_err(sketch_id, "finishSketch")?;
+        let pending = self.pending_sketch_finish.take();
         let (solved, after) = self.solve_sketch_candidate(&sketch).await?;
         let mut outcome = self.commit_sketch_solve(sketch, after, Vec::new())?;
         self.record_upsert(sketch_id, &solved);
         // B1 squash: collapse every in-session granular edit into ONE net command.
-        self.squash_sketch_session(sketch_id);
+        let squash = self.squash_sketch_session(sketch_id);
         // The regen plan resolves a modeling op's profile ONLY from a preceding
         // Sketch step, so the finished sketch must own an up-to-date timeline
         // record — without it every extrude off this sketch fails with "profile
         // sketch not found in plan" (the interactive flow authored none before).
-        match self.upsert_sketch_record(sketch_id) {
+        let append_to_sketch_edit =
+            squash == SessionSquash::NetStep || pending == Some((sketch_id, self.undo_position()));
+        match self.upsert_sketch_record(sketch_id, append_to_sketch_edit) {
             Ok(Some(record)) => match &mut outcome {
                 Some(adoption) => merge_outcome(adoption, &record),
                 None => outcome = Some(record),
@@ -4514,6 +4524,7 @@ impl DocumentRuntime {
     fn upsert_sketch_record(
         &mut self,
         sketch_id: SketchId,
+        append_to_sketch_edit: bool,
     ) -> Result<Option<CommandOutcome>, DomainError> {
         let Some(sketch) = self.session.document().sketch(sketch_id).cloned() else {
             return Ok(None);
@@ -4570,6 +4581,22 @@ impl DocumentRuntime {
             }
             Some((record, old)) if old != op => {
                 tracing::info!("sketch record: REFRESH sketch={sketch_id} record={record}");
+                if append_to_sketch_edit {
+                    if self.read_only {
+                        return Err(DomainError::ReadOnly);
+                    }
+                    if let Some(outcome) = self.session.refresh_finished_sketch_record(
+                        sketch_id,
+                        record,
+                        op.clone(),
+                    )? {
+                        if let Some(dirty) = outcome.dirty {
+                            self.checkpoints.invalidate_from(dirty.from);
+                        }
+                        self.after_mutation();
+                        return Ok(Some(outcome));
+                    }
+                }
                 self.apply(EditCommand::UpdateOperationParams { record, op })
                     .map(Some)
             }

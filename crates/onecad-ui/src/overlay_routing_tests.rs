@@ -40,6 +40,7 @@ async fn overlays_preserve_sketch_draft_selection_and_history_through_raw_replay
             first: Vec2::new(0.0, 0.0).unwrap(),
             anchor: Vec2::new(0.0, 0.0).unwrap(),
             first_id: None,
+            first_target: None,
             anchor_id: None,
             cursor: Vec2::new(10.0, 0.0).unwrap(),
             segments: 0,

@@ -48,6 +48,10 @@ add_executable(test_sketch_arc_endpoints test_sketch_arc_endpoints.cpp)
 target_link_libraries(test_sketch_arc_endpoints PRIVATE worker_core)
 add_test(NAME sketch_arc_endpoints COMMAND test_sketch_arc_endpoints)
 
+add_executable(test_solver_parameter_order test_solver_parameter_order.cpp)
+target_link_libraries(test_solver_parameter_order PRIVATE worker_core)
+add_test(NAME solver_parameter_order COMMAND test_solver_parameter_order)
+
 # --- SCHEMA §7.4 `entityStates`: the PER-ENTITY constrained state. The ownership
 #     union (a Line owns no parameter, an Arc is pinned down by nine), the
 #     conflict projection, the reference-lock pins, the ellipse OMISSION (the

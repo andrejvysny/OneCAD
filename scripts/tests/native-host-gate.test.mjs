@@ -8,7 +8,7 @@ const accepted = records.join('') + summary;
 const inventory = hostTests.map(name => `${name}: test\n`).join('');
 
 test('inventory and execution require every declared host test exactly once', () => {
-  expect(count).toBe(25);
+  expect(count).toBe(30);
   expect(() => verifyHostInventory(inventory)).not.toThrow();
   expect(() => verifyHostOutput(accepted)).not.toThrow();
   for (const output of [inventory + `${hostTests[0]}: test\n`, inventory.replace(hostTests[0], hostTests[1]), inventory.replace(hostTests[0], 'unknown')]) {

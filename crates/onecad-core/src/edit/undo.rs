@@ -477,6 +477,17 @@ impl UndoStack {
         run
     }
 
+    /// Appends a validated finish-time record refresh to its preflighted sketch
+    /// transaction without transiently overflowing the bounded undo stack.
+    pub(crate) fn append_latest(&mut self, edit: AppliedEdit) {
+        self.undo
+            .last_mut()
+            .expect("latest transaction preflighted")
+            .edits
+            .push(edit);
+        self.redo.clear();
+    }
+
     /// Pops the newest undo transaction (the session applies its inverses).
     pub fn pop_for_undo(&mut self) -> Option<Txn> {
         self.undo.pop()

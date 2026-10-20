@@ -341,7 +341,7 @@ fn numeric_line_is_refused_in_tangent_mode() {
     assert!(effects.is_empty());
     assert_eq!(
         refusal(&state),
-        "Numeric tangent arc radius is not supported"
+        "Numeric dimensions do not match the active sketch method"
     );
     state.session.as_mut().unwrap().status = SketchStatus::Accepted;
     let before = sess(&state).preview.clone();
@@ -352,7 +352,7 @@ fn numeric_line_is_refused_in_tangent_mode() {
     });
     assert_eq!(
         refusal(&state),
-        "Numeric tangent arc radius is not supported"
+        "Numeric dimensions do not match the active sketch method"
     );
     assert_eq!(sess(&state).preview, before);
 }
@@ -429,5 +429,238 @@ fn persistent_final_snap_maps_to_arc_travel_end_role() {
         });
         assert!(mapped, "snap must land on arc role {role:?}");
         assert_eq!(constraints(&ops).len(), 3);
+    }
+}
+
+fn snap_click(
+    state: &mut SketchInteraction,
+    xy: Xy,
+    target: SketchTarget,
+    seed: u128,
+) -> Vec<SketchEffect> {
+    let point = point(state, xy[0], xy[1]);
+    let snap = AcceptedSnap {
+        source: source_for(
+            &sess(state).authoritative,
+            point.capture,
+            sess(state).request.sequence,
+        ),
+        point: point.point,
+        kind: SnapKind::Endpoint,
+        intent: SnapIntent::Coincident(target),
+    };
+    state.dispatch(SketchAction::ClickInferred {
+        point,
+        ids: ids(seed),
+        snap: Some(Box::new(snap)),
+    })
+}
+
+#[test]
+fn unique_existing_line_endpoint_seeds_tangent_without_new_point() {
+    for (xy, role, point_id) in [
+        ([10.0, 0.0], End, ids(1000).entities[1]),
+        ([0.0, 0.0], Start, ids(1000).entities[0]),
+    ] {
+        let mut state = after_line();
+        state.dispatch(SketchAction::SetTool(SketchTool::Line));
+        let line = ids(1000).entities[2];
+        assert!(snap_click(
+            &mut state,
+            xy,
+            SketchTarget::Point {
+                entity: point_id,
+                role: Arbitrary
+            },
+            9000
+        )
+        .is_empty());
+        assert!(sess(&state).can_tangent_arc());
+        set_tangent(&mut state, true);
+        let (_, ops) = upsert(click_xy(&mut state, [5.0, 5.0], 2000));
+        let arc = arc_of(&ops);
+        assert_eq!(ops.len(), 4);
+        assert_weld(
+            &ops,
+            (line, role),
+            &arc,
+            if role == End { Start } else { End },
+            (point_id, Arbitrary),
+        );
+    }
+}
+
+#[test]
+fn unique_existing_arc_endpoint_keeps_curve_role_through_chain_and_closure() {
+    let mut state = after_line();
+    set_tangent(&mut state, true);
+    let arc = arc_of(&commit(&mut state, [15.0, 5.0], 2000));
+    state.dispatch(SketchAction::SetTool(SketchTool::Line));
+    let target = SketchTarget::Point {
+        entity: arc.id,
+        role: End,
+    };
+    assert!(snap_click(&mut state, [15.0, 5.0], target, 9000).is_empty());
+    assert!(sess(&state).can_tangent_arc());
+    assert_eq!(
+        sess(&state).draft.as_ref().unwrap().first_target,
+        Some(target)
+    );
+    set_tangent(&mut state, true);
+    let second = arc_of(&commit(&mut state, [20.0, 10.0], 3000));
+    assert!(sess(&state).draft.as_ref().unwrap().first_id.is_none());
+    let (tag, ops) = upsert(snap_click(&mut state, [15.0, 5.0], target, 4000));
+    assert_eq!(
+        ops.iter()
+            .filter(|op| matches!(
+                op,
+                SketchEditOp::AddEntity {
+                    entity: SketchEntity::Point { .. }
+                }
+            ))
+            .count(),
+        2
+    );
+    assert!(constraints(&ops).iter().any(|constraint| matches!(constraint, Constraint::Coincident { point1, point1_position: Arbitrary, point2, point2_position: End, .. } if *point1 == ids(4000).entities[1] && *point2 == arc.id)));
+    assert!(constraints(&ops).iter().any(|constraint| matches!(constraint, Constraint::Coincident { point2, point2_position, .. } if *point2 == second.id && *point2_position == Start)));
+    complete_ops(&mut state, ops, tag);
+    assert!(sess(&state).draft.is_none());
+}
+
+#[test]
+fn tangent_arc_closure_welds_travel_end_once_and_completes_chain() {
+    let mut state = after_line();
+    set_tangent(&mut state, true);
+    commit(&mut state, [15.0, 5.0], 2000);
+    set_tangent(&mut state, true);
+    let target = SketchTarget::Point {
+        entity: ids(1000).entities[0],
+        role: Arbitrary,
+    };
+    let (tag, ops) = upsert(snap_click(&mut state, [0.0, 0.0], target, 3000));
+    let arc = arc_of(&ops);
+    assert_eq!(constraints(&ops).len(), 3);
+    assert!(constraints(&ops).iter().any(|constraint| matches!(constraint, Constraint::Coincident { point1, point1_position, point2, point2_position: Arbitrary, .. } if *point1 == arc.id && *point1_position == End && *point2 == ids(1000).entities[0])));
+    complete_ops(&mut state, ops, tag);
+    assert!(sess(&state).draft.is_none());
+}
+
+#[test]
+fn junction_seed_does_not_guess_preceding_curve() {
+    let mut state = after_line();
+    commit(&mut state, [20.0, 0.0], 2000);
+    state.dispatch(SketchAction::SetTool(SketchTool::Line));
+    let target = SketchTarget::Point {
+        entity: ids(1000).entities[1],
+        role: Arbitrary,
+    };
+    snap_click(&mut state, [10.0, 0.0], target, 9000);
+    assert!(!sess(&state).can_tangent_arc());
+    set_tangent(&mut state, true);
+    assert_eq!(refusal(&state), "Tangent arc needs a preceding chain curve");
+}
+
+#[test]
+fn removed_or_repaired_preceding_curve_refuses_without_partial_batch() {
+    for replacement in [false, true] {
+        let mut state = after_line();
+        set_tangent(&mut state, true);
+        let session = state.session.as_mut().unwrap();
+        session.authoritative.remove_entity(ids(1000).entities[2]);
+        if replacement {
+            session
+                .authoritative
+                .add_entity(SketchEntity::point(
+                    ids(1000).entities[2],
+                    onecad_core::math::Vec2::new(10.0, 0.0).unwrap(),
+                    false,
+                    false,
+                ))
+                .unwrap();
+        }
+        let before = sess(&state).authoritative.clone();
+        assert!(!sess(&state).can_tangent_arc());
+        assert!(click_xy(&mut state, [15.0, 5.0], 2000).is_empty());
+        assert_eq!(sess(&state).authoritative, before);
+        assert_eq!(sess(&state).phase, SketchPhase::Active);
+    }
+}
+
+#[test]
+fn accepted_preserve_snapshot_invalidates_missing_or_repaired_chain_without_fault() {
+    for replacement in [false, true] {
+        let mut state = after_line();
+        set_tangent(&mut state, true);
+        let constraint = Constraint::Fixed {
+            id: ids(8000).constraints[0],
+            point: ids(1000).entities[0],
+            point_position: Arbitrary,
+            at: onecad_core::math::Vec2::new(0.0, 0.0).unwrap(),
+        };
+        let key = sess(&state).key.clone();
+        let effects = state.dispatch(SketchAction::AddConstraints {
+            key,
+            constraints: vec![constraint.clone()],
+        });
+        let [SketchEffect::AddConstraints { tag, .. }] = effects.as_slice() else {
+            panic!("expected constraint batch");
+        };
+        let mut snapshot = applied(&state, &[SketchEditOp::AddConstraint { constraint }]);
+        snapshot.sketch.remove_entity(ids(1000).entities[2]);
+        if replacement {
+            snapshot
+                .sketch
+                .add_entity(SketchEntity::point(
+                    ids(1000).entities[2],
+                    onecad_core::math::Vec2::new(10.0, 0.0).unwrap(),
+                    false,
+                    false,
+                ))
+                .unwrap();
+        }
+        complete(&mut state, tag.clone(), snapshot);
+        assert_eq!(sess(&state).phase, SketchPhase::Active);
+        assert!(sess(&state).draft.is_none());
+        assert!(sess(&state).preview.is_none());
+        assert!(!sess(&state).can_tangent_arc());
+        let before = sess(&state).authoritative.clone();
+        assert!(click_xy(&mut state, [15.0, 5.0], 9000).is_empty());
+        assert_eq!(sess(&state).authoritative, before);
+        assert!(sess(&state).draft.as_ref().unwrap().preceding.is_none());
+    }
+}
+
+#[test]
+fn standalone_arc_seed_uses_both_solved_endpoint_roles_not_chord() {
+    for (at, role, end, tangent) in [
+        ([10.0, 0.0], Start, [15.0, -5.0], [0.0, -1.0]),
+        ([0.0, 10.0], End, [-5.0, 15.0], [-1.0, 0.0]),
+    ] {
+        let mut state = active(SketchPlane::xy(), SketchTool::Arc);
+        click_xy(&mut state, [0.0, 0.0], 500);
+        click_xy(&mut state, [10.0, 0.0], 600);
+        let arc = arc_of(&commit(&mut state, [0.0, 10.0], 1000));
+        state.dispatch(SketchAction::SetTool(SketchTool::Line));
+        let target = SketchTarget::Point {
+            entity: arc.id,
+            role,
+        };
+        snap_click(&mut state, at, target, 9000);
+        assert!(sess(&state).can_tangent_arc());
+        let draft = sess(&state).draft.as_ref().unwrap();
+        assert_eq!(draft.first_target, Some(target));
+        assert!(draft.anchor_id.is_none() && draft.first_id.is_none());
+        set_tangent(&mut state, true);
+        let (_, ops) = upsert(click_xy(&mut state, end, 2000));
+        let next = arc_of(&ops);
+        assert_eq!(ops.len(), 4);
+        let start_role = if close(next.at(next.start), at) {
+            Start
+        } else {
+            End
+        };
+        assert_weld(&ops, (arc.id, role), &next, start_role, (arc.id, role));
+        let actual = next.leaving(start_role);
+        assert!(dot(actual, tangent) > 0.0 && cross(actual, tangent).abs() < 1e-9);
     }
 }

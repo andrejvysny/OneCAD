@@ -155,7 +155,7 @@ mod tests {
                 "protocolVersion": 1,
                 "workerVersion": "0.1.0",
                 "quantizationVersion": 1,
-                "solverPolicyVersion": 3,
+                "solverPolicyVersion": 4,
                 "occt": {{ "version": "8.0.1", "fingerprint": "0a6a1dce34181289" }}
             }}"#
         ))
@@ -171,7 +171,7 @@ mod tests {
                 fingerprint: "0a6a1dce34181289".into(),
             },
             quantization_version: 1,
-            solver_policy_version: 3,
+            solver_policy_version: 4,
             capabilities: Vec::new(),
             limits: Some(HelloLimits {
                 chunk_size: 1_048_576,
@@ -185,14 +185,14 @@ mod tests {
         assert!(parse_manifest("null").is_err());
         assert!(parse_manifest(
             r#"{"manifestVersion":2,"binarySha256":"00","protocolVersion":1,
-            "workerVersion":"x","quantizationVersion":1,"solverPolicyVersion":3,
+            "workerVersion":"x","quantizationVersion":1,"solverPolicyVersion":4,
             "occt":{"version":"x","fingerprint":"00"}}"#
         )
         .unwrap_err()
         .contains("unsupported worker manifest version"));
         assert!(parse_manifest(
             r#"{"manifestVersion":1,"binarySha256":"00","protocolVersion":1,
-            "workerVersion":"x","quantizationVersion":1,"solverPolicyVersion":3,
+            "workerVersion":"x","quantizationVersion":1,"solverPolicyVersion":4,
             "occt":{"version":"x","fingerprint":"0000000000000000"}}"#
         )
         .unwrap_err()

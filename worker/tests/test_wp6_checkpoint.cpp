@@ -80,7 +80,7 @@ int main() {
           "checkpoint: one per-body artifact");
     check(save.result["artifacts"][0].value("codec", "") == "brep-bintools", "checkpoint: brep-bintools codec");
     const auto& axes = save.result["artifacts"][0]["envelope"];
-    check(axes.value("solverPolicyVersion", 0) == 3, "checkpoint: actual solver policy 3");
+    check(axes.value("solverPolicyVersion", 0) == 4, "checkpoint: actual solver policy 4");
     check(axes.value("occtFingerprint", "") == "0a6a1dce34181289", "checkpoint: fingerprint unchanged");
     for (const char* key : {"artifactSchemaVersion", "descriptorVersion", "resolverVersion",
                             "quantizationVersion", "signatureVersion"}) {

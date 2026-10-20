@@ -1843,7 +1843,7 @@ fn write_hello<W: Write>(writer: &mut W, seq: u64) -> Result<(), ProtocolError> 
                 fingerprint: "0000000000000000".into(),
             },
             quantization_version: 1,
-            solver_policy_version: 3,
+            solver_policy_version: 4,
             capabilities: vec![],
             // SCHEMA §6 + the hello fixture require a `limits` object.
             limits: Some(HelloLimits {

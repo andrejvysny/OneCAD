@@ -19,3 +19,16 @@ Local adjustments:
   - `void System::setConvergenceRedundant(double tol)` (default 1e-10)
   - `void System::setMaxIterationsRedundant(int maxIterIn)` (default 100)
   These are additive; use the setters in OneCAD (prefer over direct field mutation).
+- Solver policy 4 preserves semantic parameter order instead of raw allocation order:
+  - SubSystem.cpp intersects unknowns with constraint membership in declaration order,
+    retaining first-occurrence deduplication.
+  - SubSystem.cpp initializes each reduced value once from its selected representative;
+    unequal aliases no longer compete through pointer-map iteration order.
+  - GCS.cpp merges primary/auxiliary subsystem columns in declared system order, with
+    stable subsystem-order fallback for direct callers outside the declared list.
+  Rationale: identical free-Arc radius edits selected different valid poses when only
+  storage addresses changed. The algorithm, tolerances, reduction graph and constraints
+  are unchanged. test_solver_parameter_order covers free/control Arc layouts, unequal
+  aliases and dual-priority solves; the Rust solver_repeatability harness captures exact
+  production-worker requests and same/fresh-process results. This is a local solver patch;
+  the separately installed, pinned OCCT source and its fingerprint remain unchanged.

@@ -5,22 +5,126 @@ use super::{
 };
 use onecad_core::{math::Vec2, sketch::CurvePosition};
 
+pub(super) fn session_endpoint(
+    dimensions: &CreationDimensions,
+    session: &SketchSession,
+) -> Result<Vec2, String> {
+    let draft = session.draft.as_ref().ok_or("No primitive anchor")?;
+    if matches!(dimensions, CreationDimensions::TangentArc { .. }) {
+        return session_arc(dimensions, session).map(travel_end);
+    }
+    endpoint(dimensions, draft)
+}
+
+fn travel_end(arc: arc_geometry::AnalyticArc) -> Vec2 {
+    let angle = if arc.clockwise {
+        arc.start_angle
+    } else {
+        arc.end_angle
+    };
+    Vec2::new_unchecked(
+        arc.center.x + arc.radius * angle.cos(),
+        arc.center.y + arc.radius * angle.sin(),
+    )
+}
+
+pub(super) fn session_arc(
+    dimensions: &CreationDimensions,
+    session: &SketchSession,
+) -> Result<arc_geometry::AnalyticArc, String> {
+    let draft = session.draft.as_ref().ok_or("No primitive anchor")?;
+    let CreationDimensions::TangentArc { radius } = dimensions else {
+        return draft_arc(dimensions, draft);
+    };
+    valid_radius(radius.value)?;
+    let preceding = draft
+        .preceding
+        .ok_or("Tangent arc needs a preceding chain curve")?;
+    let tangent = super::tangent_continuation::outgoing(&session.authoritative, preceding)?;
+    let accepted =
+        super::tangent_continuation::anchor(&session.authoritative, draft.anchor_id, preceding)?;
+    if super::primitives::distance(accepted, draft.anchor) >= MIN_SIZE {
+        return Err("Tangent arc anchor no longer matches the solved endpoint".into());
+    }
+    let pointer = arc_geometry::tangent_to(accepted, tangent, draft.cursor)
+        .map_err(|error| error.to_string())?;
+    let scale = radius.value / pointer.radius;
+    let end = Vec2::new(
+        accepted.x + (draft.cursor.x - accepted.x) * scale,
+        accepted.y + (draft.cursor.y - accepted.y) * scale,
+    )
+    .ok_or("Numeric arc coordinates exceed finite precision")?;
+    arc_geometry::tangent_to(accepted, tangent, end).map_err(|error| error.to_string())
+}
+
+pub(super) fn draft_arc(
+    dimensions: &CreationDimensions,
+    draft: &SketchDraft,
+) -> Result<arc_geometry::AnalyticArc, String> {
+    match dimensions {
+        CreationDimensions::Arc { radius, sweep } => arc(draft, radius.value, *sweep),
+        CreationDimensions::ThreePointArc { radius } => three_point(draft, radius.value),
+        _ => Err("Numeric method does not describe an arc".into()),
+    }
+}
+
+fn valid_radius(radius: f64) -> Result<(), String> {
+    if !radius.is_finite() || radius < MIN_SIZE {
+        Err("Arc radius must be finite and at least 1e-9".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn three_point(draft: &SketchDraft, radius: f64) -> Result<arc_geometry::AnalyticArc, String> {
+    valid_radius(radius)?;
+    let end = draft
+        .secondary
+        .as_ref()
+        .ok_or("Place both arc endpoints first")?
+        .point;
+    let selected = arc_geometry::through_points(draft.anchor, end, draft.cursor)
+        .map_err(|error| error.to_string())?;
+    let dx = end.x - draft.anchor.x;
+    let dy = end.y - draft.anchor.y;
+    let chord = dx.hypot(dy);
+    let half = chord * 0.5;
+    if radius < half {
+        return Err("Arc radius must be at least half the endpoint chord".into());
+    }
+    let midpoint = Vec2::new(draft.anchor.x + dx * 0.5, draft.anchor.y + dy * 0.5)
+        .ok_or("Numeric arc coordinates exceed finite precision")?;
+    let (nx, ny) = (-dy / chord, dx / chord);
+    let side = (selected.center.x - midpoint.x) * nx + (selected.center.y - midpoint.y) * ny;
+    // Factored form avoids overflow in radius squared and cancellation at half-chord.
+    let height = radius * ((1.0 - half / radius) * (1.0 + half / radius)).sqrt();
+    let offset = if side < 0.0 { -height } else { height };
+    let center = Vec2::new(midpoint.x + nx * offset, midpoint.y + ny * offset)
+        .ok_or("Numeric arc coordinates exceed finite precision")?;
+    let mut result = if selected.clockwise {
+        arc_geometry::center_start_end(center, end, draft.anchor)
+    } else {
+        arc_geometry::center_start_end(center, draft.anchor, end)
+    }
+    .map_err(|error| error.to_string())?;
+    if selected.clockwise {
+        result.clockwise = true;
+        result.travel_start_role = CurvePosition::End;
+        result.travel_end_role = CurvePosition::Start;
+        result.exit_tangent =
+            Vec2::new_unchecked(result.start_angle.sin(), -result.start_angle.cos());
+    }
+    Ok(result)
+}
+
 pub(super) fn endpoint(
     dimensions: &CreationDimensions,
     draft: &SketchDraft,
 ) -> Result<Vec2, String> {
     match dimensions {
-        CreationDimensions::Arc { radius, sweep } => arc(draft, radius.value, *sweep).map(|arc| {
-            let angle = if arc.clockwise {
-                arc.start_angle
-            } else {
-                arc.end_angle
-            };
-            Vec2::new_unchecked(
-                arc.center.x + arc.radius * angle.cos(),
-                arc.center.y + arc.radius * angle.sin(),
-            )
-        }),
+        CreationDimensions::Arc { .. } | CreationDimensions::ThreePointArc { .. } => {
+            draft_arc(dimensions, draft).map(travel_end)
+        }
         CreationDimensions::Slot { width } => slot_endpoint(draft, width.value),
         _ => dimensions.endpoint(draft.anchor, draft.cursor),
     }
@@ -91,10 +195,12 @@ pub(super) fn build(
     endpoint: Vec2,
     ids: &PrimitiveIds,
 ) -> Result<PrimitiveBatch, String> {
-    if let CreationDimensions::Arc { radius, sweep } = dimensions {
+    if matches!(
+        dimensions,
+        CreationDimensions::Arc { .. } | CreationDimensions::ThreePointArc { .. }
+    ) {
         super::primitives::validate_ids(session, ids)?;
-        let draft = session.draft.as_ref().ok_or("No primitive anchor")?;
-        let arc = arc(draft, radius.value, *sweep)?;
+        let arc = session_arc(dimensions, session)?;
         let mut ops = super::staged_creation::arc_ops(arc, ids)?;
         if session.construction {
             for op in &mut ops {

@@ -9,7 +9,7 @@ use onecad_core::{
 };
 use onecad_scene::CaptureIdentity;
 
-const TANGENT_NUMERIC: &str = "Numeric tangent arc radius is not supported";
+const METHOD_MISMATCH: &str = "Numeric dimensions do not match the active sketch method";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum CreationDimensions {
@@ -20,6 +20,8 @@ pub enum CreationDimensions {
     Circle { diameter: Scalar },
     Arc { radius: Scalar, sweep: f64 },
     Slot { width: Scalar },
+    TangentArc { radius: Scalar },
+    ThreePointArc { radius: Scalar },
 }
 
 impl CreationDimensions {
@@ -40,8 +42,11 @@ impl CreationDimensions {
             Self::Circle { diameter } => {
                 directional(anchor, cursor, positive(diameter)? * 0.5, true)?
             }
-            Self::Arc { .. } | Self::Slot { .. } => {
-                return Err("Numeric arc and slot creation require two anchors".into())
+            Self::Arc { .. }
+            | Self::Slot { .. }
+            | Self::TangentArc { .. }
+            | Self::ThreePointArc { .. } => {
+                return Err("Numeric arc and slot creation require two anchors".into());
             }
             Self::Rectangle { width, height } => Vec2::new(
                 anchor.x + signed(positive(width)?, cursor.x - anchor.x),
@@ -57,8 +62,8 @@ impl CreationDimensions {
     }
 
     pub fn preview(&self, draft: &SketchDraft) -> Result<DraftPrimitive, String> {
-        if let Self::Arc { radius, sweep } = self {
-            return super::staged_numeric::arc(draft, radius.value, *sweep)
+        if let Self::Arc { .. } | Self::ThreePointArc { .. } = self {
+            return super::staged_numeric::draft_arc(self, draft)
                 .map(|arc| DraftPrimitive::Arc { arc });
         }
         let endpoint = self.endpoint_for_draft(draft)?;
@@ -81,12 +86,24 @@ impl CreationDimensions {
                 radius: super::primitives::distance(draft.anchor, endpoint),
             }),
             Self::Slot { .. } => super::staged_creation::preview(SketchTool::Slot, draft, endpoint),
-            Self::Arc { .. } => unreachable!("arc preview returned above"),
+            Self::Arc { .. } | Self::ThreePointArc { .. } => {
+                unreachable!("arc preview returned above")
+            }
+            Self::TangentArc { .. } => Err("Tangent arc preview requires the solved sketch".into()),
         }
     }
 
-    fn tool(&self) -> SketchTool {
-        match self {
+    pub fn preview_for_session(&self, session: &SketchSession) -> Result<DraftPrimitive, String> {
+        let draft = session.draft.as_ref().ok_or("No primitive anchor")?;
+        if matches!(self, Self::TangentArc { .. }) {
+            return super::staged_numeric::session_arc(self, session)
+                .map(|arc| DraftPrimitive::Arc { arc });
+        }
+        self.preview(draft)
+    }
+
+    fn method(&self) -> NumericCreationMethod {
+        NumericCreationMethod::Tool(match self {
             Self::Point { .. } => SketchTool::Point,
             Self::CenterRectangle { .. } => SketchTool::CenterRectangle,
             Self::Line { .. } => SketchTool::Line,
@@ -94,7 +111,9 @@ impl CreationDimensions {
             Self::Circle { .. } => SketchTool::Circle,
             Self::Arc { .. } => SketchTool::Arc,
             Self::Slot { .. } => SketchTool::Slot,
-        }
+            Self::ThreePointArc { .. } => SketchTool::ThreePointArc,
+            Self::TangentArc { .. } => return NumericCreationMethod::TangentArc,
+        })
     }
 }
 
@@ -158,25 +177,23 @@ impl SketchInteraction {
         if !self.selection_scope(&key, &session.document, capture) {
             return Vec::new();
         }
-        if session.tool != dimensions.tool() {
-            return self.refuse("Numeric dimensions do not match the active sketch tool");
+        if session.numeric_method() != dimensions.method() {
+            return self.refuse(METHOD_MISMATCH);
         }
-        let Some(draft) = session.draft.as_ref() else {
+        let Some(_) = session.draft.as_ref() else {
             return self.refuse("Place a primitive anchor before numeric creation");
         };
-        if session.tool == SketchTool::Line && draft.tangent_arc {
-            return self.refuse(TANGENT_NUMERIC);
-        }
-        let batch = dimensions.endpoint_for_draft(draft).and_then(|endpoint| {
-            let batch = super::staged_numeric::build(&dimensions, session, endpoint, &ids)?;
-            let (mut ops, after) = if session.tool == SketchTool::Point {
-                batch
-            } else {
-                super::inferred_creation::append(session, capture, endpoint, &ids, None, batch)?
-            };
-            append_dimensions(&mut ops, &ids, &dimensions)?;
-            Ok((ops, after))
-        });
+        let batch =
+            super::staged_numeric::session_endpoint(&dimensions, session).and_then(|endpoint| {
+                let batch = super::staged_numeric::build(&dimensions, session, endpoint, &ids)?;
+                let (mut ops, after) = if session.tool == SketchTool::Point {
+                    batch
+                } else {
+                    super::inferred_creation::append(session, capture, endpoint, &ids, None, batch)?
+                };
+                append_dimensions(&mut ops, &ids, &dimensions)?;
+                Ok((ops, after))
+            });
         match batch {
             Ok((ops, after)) => self.submit(ops, after),
             Err(message) => self.refuse(&message),
@@ -218,7 +235,9 @@ fn append_dimensions(
                 height.clone(),
             ),
         ],
-        CreationDimensions::Arc { radius, .. } => vec![Constraint::Radius {
+        CreationDimensions::Arc { radius, .. }
+        | CreationDimensions::TangentArc { radius }
+        | CreationDimensions::ThreePointArc { radius } => vec![Constraint::Radius {
             id: ids.constraints[8],
             entity: ids.entities[1],
             value: radius.clone(),
@@ -307,20 +326,11 @@ impl SketchInteraction {
         if !self.selection_scope(&key, &session.document, capture) {
             return;
         }
-        if session.tool != dimensions.tool() {
-            self.refuse("Numeric dimensions do not match the active sketch tool");
+        if session.numeric_method() != dimensions.method() {
+            self.refuse(METHOD_MISMATCH);
             return;
         }
-        if session.tool == SketchTool::Line && session.draft.as_ref().is_some_and(|d| d.tangent_arc)
-        {
-            self.refuse(TANGENT_NUMERIC);
-            return;
-        }
-        let preview = session
-            .draft
-            .as_ref()
-            .ok_or_else(|| "Place primitive anchors before numeric creation".to_owned())
-            .and_then(|draft| dimensions.preview(draft));
+        let preview = dimensions.preview_for_session(session);
         match preview {
             Ok(preview) => {
                 self.session.as_mut().expect("validated session").preview = Some(preview)

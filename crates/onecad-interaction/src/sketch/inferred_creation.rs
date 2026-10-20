@@ -42,11 +42,11 @@ pub(super) fn append(
     if let Some(snap) = snap.filter(|snap| snap.intent != SnapIntent::GeometryOnly) {
         let constraints =
             snap_constraints(session, &snap, current, point, ids, &mut ops, &mut next_id)?;
-        ops.extend(
-            constraints
-                .into_iter()
-                .map(|constraint| SketchEditOp::AddConstraint { constraint }),
-        );
+        for constraint in constraints {
+            if !ops.iter().any(|op| matches!(op, SketchEditOp::AddConstraint { constraint: existing } if same_weld(existing, &constraint))) {
+                ops.push(SketchEditOp::AddConstraint { constraint });
+            }
+        }
     }
     Ok((ops, after))
 }
@@ -146,5 +146,29 @@ fn endpoint(
             Some(id)
         }
         SketchTool::Select | SketchTool::Arc | SketchTool::ThreePointArc | SketchTool::Slot => None,
+    }
+}
+
+fn same_weld(first: &Constraint, second: &Constraint) -> bool {
+    match (first, second) {
+        (
+            Constraint::Coincident {
+                point1: a,
+                point1_position: ar,
+                point2: b,
+                point2_position: br,
+                ..
+            },
+            Constraint::Coincident {
+                point1: c,
+                point1_position: cr,
+                point2: d,
+                point2_position: dr,
+                ..
+            },
+        ) => {
+            (a == c && ar == cr && b == d && br == dr) || (a == d && ar == dr && b == c && br == cr)
+        }
+        _ => false,
     }
 }

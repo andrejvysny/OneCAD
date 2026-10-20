@@ -1,5 +1,5 @@
 # ONECAD-14 retained-pose typed truth. Numerical success remains independent.
-{"expect":{"v":1,"t":"hello","seq":0,"result":{"solverPolicyVersion":3}}}
+{"expect":{"v":1,"t":"hello","seq":0,"result":{"solverPolicyVersion":4}}}
 {"send":{"v":1,"t":"req","id":1,"verb":"SketchUpsert","args":{"sketchId":"near","plane":{"kind":"XY"},"entities":[{"id":"a","type":"Point","at":[0,0]},{"id":"b","type":"Point","at":[10,0]}],"constraints":[{"id":"ten","type":"Distance","entities":["a","b"],"value":10},{"id":"near","type":"Distance","entities":["a","b"],"value":10.001}]}}}
 {"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"state":"Conflicting","conflicting":["near"],"reasons":{"near":"residualViolation"},"unassessed":[],"violations":[{"constraintId":"near","dimension":"mm","tolerance":0.0001,"residual":"$any","normalized":"$any"}],"positions":{},"curves":{}}}}
 {"send":{"v":1,"t":"req","id":2,"verb":"SketchRegions","args":{"sketchId":"near"}}}

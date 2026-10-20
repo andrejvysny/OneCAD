@@ -1,5 +1,7 @@
 //! Native Arc, Slot and Line->tangent-arc authoring through the real application
 //! services and production PlaneGCS/OCCT worker. Service evidence, not native input.
+#[path = "real_arc_slot/dimensioned.rs"]
+mod dimensioned;
 #[path = "real_arc_slot/flows.rs"]
 mod flows;
 #[path = "real_arc_slot/geom.rs"]
@@ -7,6 +9,8 @@ mod geom;
 #[allow(dead_code)]
 #[path = "../../onecad-app/tests/native_plate_support/host.rs"]
 mod host;
+#[path = "real_arc_slot/solid.rs"]
+mod solid;
 #[allow(dead_code)]
 #[path = "real_point_center/support.rs"]
 mod support;
@@ -319,9 +323,11 @@ async fn finish_extrude_save(
     assert!(solve.solve_current);
     close_visit(harness).await;
     let before = harness.projection().await;
+    solid::assert_profile(&regions, &saved);
     let after = commit(harness, extrude(&regions, 4.0)).await;
     assert_eq!(after.undo_depth, before.undo_depth + 1);
     assert_eq!(after.bodies.len(), 1, "extrusion committed a body");
+    solid::assert_solid(harness, &after, &saved, name).await;
     record_and_save(harness, root, name).await;
 }
 
@@ -330,7 +336,11 @@ async fn record_and_save(harness: &Harness, root: &Path, name: &str) {
     let solve = api::get_sketch(&harness.state, sketch_id().to_string())
         .await
         .unwrap();
-    let record = serde_json::json!({ "sketch": sketch(harness).await, "dof": solve.dof });
+    let projection = harness.projection().await;
+    let record = serde_json::json!({
+        "sketch": sketch(harness).await, "dof": solve.dof,
+        "bodies": projection.bodies.keys().collect::<Vec<_>>()
+    });
     std::fs::write(root.join(format!("{name}.json")), record.to_string()).unwrap();
     let path = root.join(format!("{name}.onecad"));
     let done = api::save_document(
@@ -357,11 +367,22 @@ async fn reopen(root: &Path, name: &str, features: usize, radius: f64, check: fn
     .await
     .unwrap();
     ready(&harness).await;
-    let projection = harness.projection().await;
+    let projection = harness.settled(&harness.projection().await).await;
     assert!(!projection.dirty);
     assert_eq!(projection.features.len(), features);
     let record: serde_json::Value =
         serde_json::from_slice(&std::fs::read(root.join(format!("{name}.json"))).unwrap()).unwrap();
+    let expected_bodies: Vec<String> = serde_json::from_value(record["bodies"].clone()).unwrap();
+    assert_eq!(
+        projection.bodies.keys().cloned().collect::<Vec<_>>(),
+        expected_bodies
+    );
+    let saved: Sketch = serde_json::from_value(record["sketch"].clone()).unwrap();
+    if features == 2 {
+        solid::assert_solid(&harness, &projection, &saved, name).await;
+    } else {
+        assert!(projection.bodies.is_empty(), "open Arcs remain sketch-only");
+    }
     let state = begin(&harness, false).await;
     let reopened = state.session.as_ref().unwrap().authoritative.clone();
     assert!(geom::json_close(
@@ -370,6 +391,12 @@ async fn reopen(root: &Path, name: &str, features: usize, radius: f64, check: fn
         1e-9
     ));
     check(&reopened, radius);
+    if features == 2 {
+        let regions = api::get_sketch_regions(&harness.state, sketch_id().to_string())
+            .await
+            .unwrap();
+        solid::assert_profile(&regions, &reopened);
+    }
     let solve = api::get_sketch(&harness.state, sketch_id().to_string())
         .await
         .unwrap();

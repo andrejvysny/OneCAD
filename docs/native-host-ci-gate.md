@@ -16,7 +16,7 @@ ONECAD_WORKER_PATH="$PWD/worker/build/onecad-worker" \
 
 The gate sets `ONECAD_REQUIRE_WORKER=1` and `ONECAD_REQUIRE_GPU=1`. It requires
 the exact ignored `app_logic_tests` inventory declared in
-`scripts/native-host-gate.mjs`: twenty-five cases covering occluded delivery (one),
+`scripts/native-host-gate.mjs`: thirty cases covering occluded delivery (one),
 document lifecycle (three), overlays (one), diagnostics (three), existing
 dimensions (one), the synthetic From-New plate workflow (one), and numeric/IME
 routing (one), invalid-profile Finish refusal with repair re-entry (one), and
@@ -26,7 +26,11 @@ numeric creation and history (one), and numeric refusal after viewport failure
 (one), point/radius/body gesture history and cancellation (three), pre-threshold
 camera and Escape ownership (two), stationary-pointer service repaint delivery
 (one), and prepared-arc center/endpoint gestures plus accepted-End capture failure
-recovery (three).
+recovery (three), Arc method numeric creation/refusal (one), expression-driven
+Slot full-width creation and construction/history (one), clockwise/counterclockwise
+tangent Arc H/V snapping with endpoint roles (one), and tangent chain keyboard,
+drag, existing-endpoint seeding, cancellation and numeric Radius (one), and
+exactly-once drag release with accepted chain closure/profile publication (one).
 It first verifies the Cargo test inventory, then executes all cases
 serially with `--ignored --nocapture --test-threads=1`. Every expected test must
 execute exactly once and pass. Missing, duplicate, unexpected, skipped, and

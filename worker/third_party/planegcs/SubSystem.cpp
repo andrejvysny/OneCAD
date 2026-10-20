@@ -60,7 +60,7 @@ void SubSystem::initialize(VEC_pD& params, MAP_pD_pD& reductionmap)
     // relevant for the constraints listed in clist
     VEC_pD tmpplist;
     {
-        SET_pD s1(params.begin(), params.end());
+        SET_pD seen;
         SET_pD s2;
         for (std::vector<Constraint*>::iterator constr = clist.begin(); constr != clist.end();
              ++constr) {
@@ -68,7 +68,12 @@ void SubSystem::initialize(VEC_pD& params, MAP_pD_pD& reductionmap)
             VEC_pD constr_params = (*constr)->params();
             s2.insert(constr_params.begin(), constr_params.end());
         }
-        std::set_intersection(s1.begin(), s1.end(), s2.begin(), s2.end(), std::back_inserter(tmpplist));
+        // Column order must follow declared semantics, not allocation addresses.
+        for (double* parameter : params) {
+            if (s2.count(parameter) && seen.insert(parameter).second) {
+                tmpplist.push_back(parameter);
+            }
+        }
     }
 
     plist.clear();
@@ -137,8 +142,10 @@ void SubSystem::initialize(VEC_pD& params, MAP_pD_pD& reductionmap)
 void SubSystem::redirectParams()
 {
     // copying values to pvals
-    for (MAP_pD_pD::const_iterator p = pmap.begin(); p != pmap.end(); ++p) {
-        *(p->second) = *(p->first);
+    // Reduced aliases can initially disagree; only the chosen representative
+    // initializes their shared slot, independent of the aliases' addresses.
+    for (int index = 0; index < psize; ++index) {
+        pvals[index] = *plist[index];
     }
 
     // redirect constraints to point to pvals

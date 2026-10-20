@@ -166,7 +166,7 @@ fn bound_shortcut(def: &ToolDef) -> Option<&'static str> {
     def.shortcut.filter(|_| BOUND.contains(&def.id))
 }
 
-fn activate(app: &mut App, ctx: &Context, id: ToolId) {
+pub(crate) fn activate(app: &mut App, ctx: &Context, id: ToolId) {
     let sketch_tool = match id {
         ToolId::Select if app.sketch_active() => Some(SketchTool::Select),
         ToolId::Line => Some(SketchTool::Line),

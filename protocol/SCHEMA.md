@@ -393,7 +393,7 @@ Worker → Rust:
     "workerVersion": "0.1.0",
     "occt": { "version": "8.0.1", "fingerprint": "9a1c33f0e7b24d10" },
     "quantizationVersion": 1,
-    "solverPolicyVersion": 3,
+    "solverPolicyVersion": 4,
     "capabilities": [
       "op.sketch", "op.extrude", "op.revolve", "op.fillet", "op.chamfer",
       "op.boolean", "op.importStep", "solver.planegcs", "tessellate.mesh1",
@@ -553,7 +553,7 @@ failure/NeedsRepair preparing snapshot `m−1`, and ends with a terminal
   "baseCheckpoint": { "stepIndex": 2, "checkpointId": "ckpt_9" },  // optional
   "editedFrom": 4,                            // optional — step of the upstream content edit
   "checkpointFallbackReplay": true,           // optional — this replay stands in for a failed checkpoint plan
-  "policyVersions": { "quantizationVersion": 1, "solverPolicyVersion": 3,
+  "policyVersions": { "quantizationVersion": 1, "solverPolicyVersion": 4,
                       "descriptorVersion": 1, "resolverVersion": 1, "signatureVersion": 1 },
   "targetStep": 6,
   "artifacts": { "tessellate": { "lod": "coarse", "includeEdges": true } },
@@ -1400,7 +1400,7 @@ the full authoritative sketch so replay is deterministic.
     `constraint.tangentAtPoint` in Hello capabilities; Rust requires it before
     endpoint-bearing SketchUpsert or ExecutePlan dispatch, including captured
     gesture worker clients. Unknown kinds MUST fail closed. Existing 20 kinds,
-    generic `Tangent`, their serialized bytes and solver policy 3 stay unchanged.
+    generic `Tangent` and its serialized bytes stay unchanged by this constraint.
     Persistence stores both roles without defaults and preserves exact IDs.
     Replay fixture: `fixtures/sketch_tangent_endpoint.ndjson`.
 
@@ -4790,7 +4790,7 @@ Rust-readable envelope. Blobs stream on the bulk lane.
         "descriptorVersion": 1,
         "resolverVersion": 1,
         "quantizationVersion": 1,
-        "solverPolicyVersion": 3,
+        "solverPolicyVersion": 4,
         "signatureVersion": 1
       },
       "size": 91234,
@@ -5750,6 +5750,19 @@ and back Invariant 5 and checkpoint drift detection.
 ---
 
 ## 14. Changelog
+
+- **2026-10-20 — §7.4 stable solver parameter ordering, solver policy 4 (ONECAD-305).**
+  PlaneGCS subsystem columns and dual-priority parameter unions retain declared
+  semantic order rather than storage-address order. Reduced aliases initialize
+  each solver value once from its canonical representative, avoiding an
+  address-dependent last writer when coincident coordinates differ by roundoff.
+  DogLeg, its linear solver, convergence budgets and constraint semantics remain
+  unchanged. The same-build replay regression retains both the free Arc and a
+  constrained control; cross-host tolerance and a preferred displacement policy
+  for underconstrained edits remain separate contracts. `solverPolicyVersion`
+  advances from `3` to `4`, invalidating prior cached solver-policy artifacts;
+  the application rejects a mismatched worker. OCCT fingerprint and the other
+  policy axes are unchanged.
 
 - **2026-10-19 — §7.4 Begin corrections for every drag kind (ONECAD-239/289),
   additive.** `BeginGesture` now returns the optional `positions`/`curves`

@@ -564,3 +564,6 @@ async fn interleaved_session_keeps_edits_granular_and_op_survives() {
 
     wm.shutdown().await;
 }
+
+#[path = "sketch_squash/refresh.rs"]
+mod refresh;

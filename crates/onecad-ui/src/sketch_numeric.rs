@@ -5,8 +5,8 @@ use onecad_core::{document::variables::Scalar, math::Vec2};
 use onecad_interaction::{
     DocumentContext,
     sketch::{
-        CreationDimensions, PrimitiveIds, SketchAction, SketchDraft, SketchPhase, SketchSessionKey,
-        SketchTool,
+        CreationDimensions, NumericCreationMethod, PrimitiveIds, SketchAction, SketchDraft,
+        SketchPhase, SketchSessionKey, SketchTool,
     },
 };
 
@@ -15,6 +15,7 @@ struct Draft {
     key: SketchSessionKey,
     document: DocumentContext,
     tool: SketchTool,
+    method: NumericCreationMethod,
     anchor: Vec2,
     cursor: Vec2,
     secondary: Option<Vec2>,
@@ -51,8 +52,10 @@ pub(crate) fn open(app: &mut App, ctx: &Context) -> bool {
     let Some(draft) = &session.draft else {
         return false;
     };
-    if session.tool == SketchTool::ThreePointArc
-        || matches!(session.tool, SketchTool::Arc | SketchTool::Slot) && draft.secondary.is_none()
+    if matches!(
+        session.tool,
+        SketchTool::Arc | SketchTool::ThreePointArc | SketchTool::Slot
+    ) && draft.secondary.is_none()
     {
         return false;
     }
@@ -63,10 +66,11 @@ pub(crate) fn open(app: &mut App, ctx: &Context) -> bool {
                 key: session.key.clone(),
                 document: session.document.clone(),
                 tool: session.tool,
+                method: session.numeric_method(),
                 anchor: draft.anchor,
                 cursor: draft.cursor,
                 secondary: draft.secondary.as_ref().map(|anchor| anchor.point),
-                fields: initial_fields(session.tool, draft),
+                fields: initial_fields(session),
                 focus: true,
             },
         )
@@ -81,11 +85,8 @@ pub(crate) fn availability(app: &App) -> Result<(), &'static str> {
     let session = app.sketch.session.as_ref().ok_or("Open a sketch first")?;
     match session.tool {
         SketchTool::Select => Err("Choose a creation tool"),
-        SketchTool::ThreePointArc => {
-            Err("Three-point arc numeric radius is unavailable; place the through point")
-        }
         SketchTool::Point => Ok(()),
-        SketchTool::Arc | SketchTool::Slot
+        SketchTool::Arc | SketchTool::ThreePointArc | SketchTool::Slot
             if session
                 .draft
                 .as_ref()
@@ -98,7 +99,14 @@ pub(crate) fn availability(app: &App) -> Result<(), &'static str> {
     }
 }
 
-fn initial_fields(tool: SketchTool, draft: &SketchDraft) -> Vec<String> {
+fn initial_fields(session: &onecad_interaction::sketch::SketchSession) -> Vec<String> {
+    let tool = session.tool;
+    let Some(draft) = session.draft.as_ref() else {
+        return Vec::new();
+    };
+    if session.numeric_method() == NumericCreationMethod::TangentArc {
+        return vec![tangent_radius(session).to_string()];
+    }
     let (anchor, cursor) = (draft.anchor, draft.cursor);
     let delta = Vec2::new_unchecked(cursor.x - anchor.x, cursor.y - anchor.y);
     let values = match tool {
@@ -109,7 +117,8 @@ fn initial_fields(tool: SketchTool, draft: &SketchDraft) -> Vec<String> {
         SketchTool::Circle => vec![2.0 * delta.x.hypot(delta.y)],
         SketchTool::Arc => arc_values(draft),
         SketchTool::Slot => slot_values(draft),
-        SketchTool::Select | SketchTool::ThreePointArc => Vec::new(),
+        SketchTool::ThreePointArc => vec![three_point_radius(draft)],
+        SketchTool::Select => Vec::new(),
     };
     values
         .into_iter()
@@ -122,6 +131,33 @@ fn initial_fields(tool: SketchTool, draft: &SketchDraft) -> Vec<String> {
             .to_string()
         })
         .collect()
+}
+
+fn tangent_radius(session: &onecad_interaction::sketch::SketchSession) -> f64 {
+    let valid = CreationDimensions::TangentArc {
+        radius: Scalar::new(1.0),
+    }
+    .preview_for_session(session)
+    .is_ok();
+    match session.preview.as_ref() {
+        Some(onecad_interaction::sketch::DraftPrimitive::Arc { arc }) if valid => arc.radius,
+        _ => 1.0,
+    }
+}
+
+fn three_point_radius(draft: &SketchDraft) -> f64 {
+    draft
+        .secondary
+        .as_ref()
+        .and_then(|second| {
+            onecad_interaction::sketch::arc_geometry::through_points(
+                draft.anchor,
+                second.point,
+                draft.cursor,
+            )
+            .ok()
+        })
+        .map_or(1.0, |arc| arc.radius)
 }
 
 fn arc_values(draft: &SketchDraft) -> Vec<f64> {
@@ -183,6 +219,11 @@ fn dimensions(draft: &Draft, app: &App) -> Result<CreationDimensions, String> {
             }
         })
         .collect::<Result<_, _>>()?;
+    if draft.method == NumericCreationMethod::TangentArc {
+        return Ok(CreationDimensions::TangentArc {
+            radius: values[0].clone(),
+        });
+    }
     Ok(match draft.tool {
         SketchTool::Point => CreationDimensions::Point {
             x: values[0].clone(),
@@ -209,11 +250,9 @@ fn dimensions(draft: &Draft, app: &App) -> Result<CreationDimensions, String> {
         SketchTool::Slot => CreationDimensions::Slot {
             width: values[0].clone(),
         },
-        SketchTool::ThreePointArc => {
-            return Err(
-                "Three-point arc numeric radius is unavailable; place the through point".into(),
-            );
-        }
+        SketchTool::ThreePointArc => CreationDimensions::ThreePointArc {
+            radius: values[0].clone(),
+        },
         SketchTool::Select => return Err("Choose a creation tool".into()),
     })
 }
@@ -224,6 +263,7 @@ fn current(draft: &Draft, app: &App) -> bool {
             session.key == draft.key
                 && session.document == draft.document
                 && session.tool == draft.tool
+                && session.numeric_method() == draft.method
                 && session.phase == SketchPhase::Active
                 && session.draft.as_ref().is_some_and(|current| {
                     current.anchor == draft.anchor
@@ -252,6 +292,7 @@ pub(crate) fn show(app: &mut App, ctx: &Context) {
         return;
     };
     if !current(&draft, app) {
+        log_invalidated(&draft, app);
         return;
     }
     let (apply, cancel) = editor(app, ctx, &mut draft);
@@ -263,6 +304,28 @@ pub(crate) fn show(app: &mut App, ctx: &Context) {
     } else {
         ctx.data_mut(|data| data.insert_temp(id(), draft));
     }
+}
+
+fn log_invalidated(draft: &Draft, app: &App) {
+    let session = app.sketch.session.as_ref();
+    tracing::debug!(
+        ready = ready(app),
+        captured_key = ?draft.key,
+        current_key = ?session.map(|session| &session.key),
+        captured_document = ?draft.document,
+        current_document = ?session.map(|session| &session.document),
+        captured_method = ?draft.method,
+        current_method = ?session.map(|session| session.numeric_method()),
+        captured_geometry = ?(draft.anchor, draft.cursor, draft.secondary),
+        current_geometry = ?session.and_then(|session| session.draft.as_ref()).map(|draft| (
+            draft.anchor,
+            draft.cursor,
+            draft.secondary.as_ref().map(|anchor| anchor.point),
+        )),
+        capture = ?app.view.map(|view| view.identity()),
+        accepted_capture = ?session.and_then(|session| session.accepted_capture),
+        "numeric creation editor invalidated"
+    );
 }
 
 fn editor(app: &App, ctx: &Context, draft: &mut Draft) -> (bool, bool) {
@@ -277,7 +340,9 @@ fn editor(app: &App, ctx: &Context, draft: &mut Draft) -> (bool, bool) {
         if draft.tool == SketchTool::Arc {
             ui.small("Sweep uses degrees. Its sign sets travel direction; sweep is geometry only. Radius expressions remain bound.");
         }
-        let labels: &[&str] = match draft.tool {
+        let labels: &[&str] = if draft.method == NumericCreationMethod::TangentArc {
+            &["Radius"]
+        } else { match draft.tool {
             SketchTool::Point => &["X", "Y"],
             SketchTool::CenterRectangle => &["Width", "Height"],
             SketchTool::Line => &["Length"],
@@ -285,8 +350,9 @@ fn editor(app: &App, ctx: &Context, draft: &mut Draft) -> (bool, bool) {
             SketchTool::Circle => &["Diameter"],
             SketchTool::Arc => &["Radius", "Sweep (degrees)"],
             SketchTool::Slot => &["Width"],
-            SketchTool::Select | SketchTool::ThreePointArc => &[],
-        };
+            SketchTool::ThreePointArc => &["Radius"],
+            SketchTool::Select => &[],
+        }};
         for (index, (text, label)) in draft.fields.iter_mut().zip(labels).enumerate() {
             ui.label(*label);
             let field = ui.add(
@@ -297,7 +363,11 @@ fn editor(app: &App, ctx: &Context, draft: &mut Draft) -> (bool, bool) {
             }
         }
         draft.focus = false;
-        let parsed = dimensions(draft, app);
+        let parsed = dimensions(draft, app).and_then(|dimensions| {
+            let session = app.sketch.session.as_ref().ok_or("Open a sketch first")?;
+            dimensions.preview_for_session(session)?;
+            Ok(dimensions)
+        });
         if let Err(error) = &parsed {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
@@ -308,7 +378,26 @@ fn editor(app: &App, ctx: &Context, draft: &mut Draft) -> (bool, bool) {
             cancel = ui.button("Cancel").clicked();
         });
     });
-    (apply, cancel || modal.should_close())
+    let close = modal.should_close();
+    if cancel || close {
+        ui_cancel_trace(ctx, cancel, close);
+    }
+    (apply, cancel || close)
+}
+
+fn ui_cancel_trace(ctx: &Context, cancel: bool, close: bool) {
+    ctx.input(|input| {
+        tracing::debug!(
+            cancel_button = cancel,
+            modal_close = close,
+            focused = input.focused,
+            escape = input.key_pressed(Key::Escape),
+            pointer_pressed = input.pointer.any_pressed(),
+            pointer_released = input.pointer.any_released(),
+            pointer = ?input.pointer.interact_pos(),
+            "numeric creation editor cancelled"
+        );
+    });
 }
 
 fn preview(app: &mut App, draft: &Draft) {
