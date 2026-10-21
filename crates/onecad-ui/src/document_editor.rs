@@ -168,15 +168,9 @@ impl DocumentEditor {
         }
     }
 
-    /// A whole-body item with no face or edge item beside it.
+    /// A whole-body item with no face or edge of this body beside it.
     pub fn whole_body_selected(&self, id: BodyId) -> bool {
-        self.selection.contains(&SelectionItem::Body(id))
-            && !self.selection.items().iter().any(|item| {
-                matches!(
-                    item,
-                    SelectionItem::Face(_) | SelectionItem::Edge(_) | SelectionItem::Vertex(_)
-                )
-            })
+        self.selection.body_tinted(id)
     }
 
     /// Document title for window/tab chrome; "Untitled" before a document exists.

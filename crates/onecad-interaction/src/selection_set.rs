@@ -210,6 +210,15 @@ impl SelectionSet {
             .then_some(first)
     }
 
+    /// Whole-body item with no face or edge of this body beside it. Vertex
+    /// items draw no highlight, so they must not suppress the body tint.
+    pub fn body_tinted(&self, id: BodyId) -> bool {
+        self.contains(&SelectionItem::Body(id))
+            && !self.items.iter().any(|item| {
+                matches!(item, SelectionItem::Face(t) | SelectionItem::Edge(t) if t.body == id)
+            })
+    }
+
     pub fn of_kind(&self, kind: SelectionKind) -> impl Iterator<Item = &SelectionItem> {
         self.items.iter().filter(move |item| item.kind() == kind)
     }
