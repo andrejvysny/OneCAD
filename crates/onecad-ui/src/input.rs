@@ -351,7 +351,7 @@ fn route_menu(
             }
         }
         menu::Action::Paste if text => {
-            #[cfg(target_os = "macos")]
+            #[cfg(all(target_os = "macos", feature = "desktop"))]
             if let Ok(text) =
                 arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text())
             {

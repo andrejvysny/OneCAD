@@ -55,7 +55,7 @@ pub async fn execute(
 }
 
 pub fn refresh_recents(backend: &Backend) {
-    let root = backend.paths.root.join("documents");
+    let root = backend.paths.documents.clone();
     let mut entries = onecad_app::recents::list(&backend.host);
     entries.retain(|entry| {
         Path::new(&entry.path)
@@ -246,7 +246,7 @@ async fn open(backend: &mut Backend, source: &Path, import: bool) -> Result<Outc
     let path = if step {
         source.to_owned()
     } else {
-        copy_for_open(&backend.paths.root.join("documents"), source)?
+        copy_for_open(&backend.paths.documents, source)?
     };
     match replace_from_path(backend, &path, step).await {
         Err(onecad_app::error::ApiError::AlreadyOpen { host, .. })
@@ -321,7 +321,7 @@ async fn save(backend: &Backend, save_as: bool) -> Result<Outcome, String> {
     save_to_qa(
         &backend.state,
         backend.host.clone(),
-        &backend.paths.root.join("documents"),
+        &backend.paths.documents,
         save_as,
     )
     .await
@@ -383,7 +383,7 @@ async fn export(backend: &Backend, format: ExportFormat) -> Result<Outcome, Stri
     let Some(path) = paths.first() else {
         return Ok(Outcome::Cancelled);
     };
-    let path = confined_target(&backend.paths.root.join("documents"), Path::new(path))?;
+    let path = confined_target(&backend.paths.documents, Path::new(path))?;
     validate_export_extension(format, &path)?;
     let target = Some(path.to_string_lossy().into_owned());
     let result = match format {

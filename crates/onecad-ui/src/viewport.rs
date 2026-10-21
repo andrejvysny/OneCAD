@@ -244,7 +244,7 @@ fn navigate_input(
                 && response.hovered()
             {
                 if let crate::navigation::Motion::Orbit(delta) = &mut motion
-                    && !cfg!(target_os = "macos")
+                    && !cfg!(any(target_os = "macos", target_os = "ios"))
                 {
                     *delta = -*delta;
                 }

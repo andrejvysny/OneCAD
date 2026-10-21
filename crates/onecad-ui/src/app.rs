@@ -4,9 +4,13 @@ use crate::{
     qa::QaPaths,
     theme,
 };
+use onecad_app::host::DialogPort;
 use onecad_interaction::{Action, CommitStatus, DocumentContext, Effect, RequestTag};
 use onecad_render::Renderer;
 use std::sync::Arc;
+
+type MenuInstall<'a> =
+    Box<dyn FnOnce(&egui::Context) -> Result<Option<menu::NativeMenu>, String> + 'a>;
 
 pub struct App {
     pub doc: crate::document_editor::DocumentEditor,
@@ -40,14 +44,49 @@ pub struct App {
     pub cad_needs_fence: bool,
     pub sampled: bool,
     pub sampling_done: Arc<std::sync::atomic::AtomicBool>,
+    /// Files exported since the host last asked (`host::Editor::take_exported`).
+    #[cfg(not(feature = "desktop"))]
+    pub(crate) exported: Vec<std::path::PathBuf>,
 }
 
 impl App {
+    #[cfg(feature = "desktop")]
     pub fn new(cc: &eframe::CreationContext<'_>, paths: QaPaths) -> Result<Self, String> {
         let gpu = cc
             .wgpu_render_state
             .clone()
             .ok_or("native host requires wgpu")?;
+        let dialogs = Arc::new(crate::dialogs::NativeDialogs::new(paths.documents.clone()));
+        let menu: MenuInstall<'_> =
+            Box::new(|ctx| cc.winit_window().map(|_| menu::install(ctx)).transpose());
+        Self::build(&cc.egui_ctx, gpu, paths, dialogs, menu)
+    }
+
+    /// For hosts that own the egui context, GPU device and file dialogs and drive
+    /// [`App::frame`] themselves (the iPadOS bridge). Without a native menu bar the
+    /// File actions queue through [`menu::host_menu`].
+    pub fn new_with(
+        ctx: &egui::Context,
+        gpu: egui_wgpu::RenderState,
+        paths: QaPaths,
+        dialogs: Arc<dyn DialogPort>,
+    ) -> Result<Self, String> {
+        Self::build(
+            ctx,
+            gpu,
+            paths,
+            dialogs,
+            Box::new(|_| Ok(menu::host_menu())),
+        )
+    }
+
+    fn build(
+        ctx: &egui::Context,
+        gpu: egui_wgpu::RenderState,
+        paths: QaPaths,
+        dialogs: Arc<dyn DialogPort>,
+        install_menu: MenuInstall<'_>,
+    ) -> Result<Self, String> {
         let limits = onecad_render::RenderLimits {
             max_cpu_prepared_bytes: crate::budget::MAX_PREPARED_BYTES,
             max_upload_bytes: crate::budget::MAX_PREPARED_BYTES,
@@ -57,7 +96,7 @@ impl App {
             Renderer::new(&gpu.device, &gpu.queue, [0, 0], limits).map_err(|e| e.to_string())?;
         let device_failure = Arc::new(std::sync::Mutex::new(None));
         let failure = device_failure.clone();
-        let context = cc.egui_ctx.clone();
+        let context = ctx.clone();
         gpu.device.set_device_lost_callback(move |reason, message| {
             if reason != wgpu::DeviceLostReason::Destroyed {
                 if let Ok(mut slot) = failure.lock() {
@@ -66,17 +105,17 @@ impl App {
                 context.request_repaint();
             }
         });
-        let (settings, mut ui, settings_error) =
-            crate::settings::Store::load(&paths, cc.egui_ctx.clone());
+        let (settings, mut ui, settings_error) = crate::settings::Store::load(&paths, ctx.clone());
         ui.start_open = !paths.open_on_start;
-        let dark = ui.appearance.resolve_dark(cc.egui_ctx.system_theme());
+        let dark = ui.appearance.resolve_dark(ctx.system_theme());
         let tabs = crate::documents::Tabs::new(
             crate::service_runtime::ServiceRuntime::start()?,
             paths,
+            dialogs,
             renderer.preparation_budget(),
         );
-        let bridge = tabs.bridge(cc.egui_ctx.clone(), true)?;
-        let resolved = fonts::install(&cc.egui_ctx);
+        let bridge = tabs.bridge(ctx.clone(), true)?;
+        let resolved = fonts::install(ctx);
         eprintln!(
             "native fonts: {:?} {:?}; icons: {}",
             resolved.ui,
@@ -84,11 +123,8 @@ impl App {
             onecad_widgets::icon::names().len()
         );
         let theme = theme::load(dark)?;
-        theme::install(&cc.egui_ctx, theme.clone(), dark);
-        let menu = cc
-            .winit_window()
-            .map(|_| menu::install(&cc.egui_ctx))
-            .transpose()?;
+        theme::install(ctx, theme.clone(), dark);
+        let menu = install_menu(ctx)?;
         if let Some(menu) = &menu {
             menu.set_appearance(ui.appearance);
         }
@@ -124,6 +160,8 @@ impl App {
             cad_needs_fence: false,
             sampled: false,
             sampling_done: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            #[cfg(not(feature = "desktop"))]
+            exported: Vec::new(),
         })
     }
 
@@ -699,11 +737,23 @@ impl App {
     }
 }
 
-impl eframe::App for App {
-    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+impl App {
+    /// One host frame in eframe's order: route raw input first (this also fences the
+    /// previous frame's CAD sampling), then run the pass with logic before ui. The
+    /// caller must submit and present this output before the next call.
+    pub fn frame(&mut self, ctx: &egui::Context, mut raw: egui::RawInput) -> egui::FullOutput {
+        self.raw_input_hook(ctx, &mut raw);
+        ctx.run_ui(raw, |ui| {
+            self.logic(ui.ctx());
+            self.ui(ui);
+        })
+    }
+
+    pub fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         crate::input::route(self, ctx, raw);
     }
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+
+    pub fn logic(&mut self, ctx: &egui::Context) {
         crate::input_trace::app(
             self,
             "host.logic",
@@ -722,7 +772,7 @@ impl eframe::App for App {
             self.doc.status = format!("Settings: {error}");
         }
     }
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    pub fn ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         crate::input_trace::app(
             self,
@@ -747,5 +797,18 @@ impl eframe::App for App {
         crate::component_wizard::show(self, &ctx);
         crate::tab_switcher::show(self, &ctx);
         crate::shell::close_prompt(self, &ctx);
+    }
+}
+
+#[cfg(feature = "desktop")]
+impl eframe::App for App {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        App::raw_input_hook(self, ctx, raw);
+    }
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        App::logic(self, ctx);
+    }
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        App::ui(self, ui);
     }
 }

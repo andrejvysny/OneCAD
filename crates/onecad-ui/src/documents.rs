@@ -74,6 +74,7 @@ struct Settled {
 pub struct Tabs {
     runtime: Arc<ServiceRuntime>,
     paths: QaPaths,
+    dialogs: Arc<dyn onecad_app::host::DialogPort>,
     budget: onecad_render::PreparationBudget,
     /// Open documents other than the active one, in tab order around it.
     pub(crate) parked: Vec<DocumentEditor>,
@@ -93,11 +94,13 @@ impl Tabs {
     pub fn new(
         runtime: Arc<ServiceRuntime>,
         paths: QaPaths,
+        dialogs: Arc<dyn onecad_app::host::DialogPort>,
         budget: onecad_render::PreparationBudget,
     ) -> Self {
         Self {
             runtime,
             paths,
+            dialogs,
             budget,
             parked: Vec::new(),
             closing: Vec::new(),
@@ -112,7 +115,13 @@ impl Tabs {
         let mut paths = self.paths.clone();
         // Only the first window bridge may open the launch document.
         paths.open_on_start &= startup;
-        let bridge = Bridge::start_on(self.runtime.clone(), paths, context, self.budget)?;
+        let bridge = Bridge::start_on(
+            self.runtime.clone(),
+            paths,
+            self.dialogs.clone(),
+            context,
+            self.budget,
+        )?;
         if !startup && let Ok(mut recovery) = bridge.shared.recovery.lock() {
             // Crash recovery is discovered once per window, by the startup bridge.
             recovery.checked = true;
@@ -334,6 +343,27 @@ impl App {
     fn release_thumbnail(&mut self, thumbnail: Option<Thumbnail>) {
         if let Some(thumbnail) = thumbnail {
             self.gpu.renderer.write().free_texture(&thumbnail.texture);
+        }
+    }
+
+    /// Memory pressure: drops the ⌃Tab switcher frames kept for parked tabs; they
+    /// are captured again the next time each tab is left.
+    pub fn release_parked_thumbnails(&mut self) {
+        let thumbnails: Vec<_> = self
+            .tabs
+            .parked
+            .iter_mut()
+            .map(|doc| doc.thumbnail.take())
+            .collect();
+        for thumbnail in thumbnails {
+            self.release_thumbnail(thumbnail);
+        }
+    }
+
+    /// Asks every open document's autosave to write its pending recovery now.
+    pub fn request_recovery_flush(&self) {
+        for doc in std::iter::once(&self.doc).chain(&self.tabs.parked) {
+            doc.bridge.shared.recovery_flush.notify_one();
         }
     }
 

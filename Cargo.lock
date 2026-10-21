@@ -2887,6 +2887,7 @@ dependencies = [
  "onecad-render",
  "onecad-scene",
  "onecad-widgets",
+ "png",
  "rfd",
  "serde",
  "serde_json",

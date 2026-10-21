@@ -1,4 +1,6 @@
 //! Native QA host over shared OneCAD application, interaction, scene and render services.
+//! With the default `desktop` feature it runs under eframe; without it another host
+//! (the iPadOS bridge) drives the same editor through [`host::Editor`].
 #![cfg_attr(
     not(test),
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
@@ -16,6 +18,7 @@ mod component_wizard;
 mod constraint_authoring;
 mod constraints_menu;
 mod diagnostics;
+#[cfg(feature = "desktop")]
 mod dialogs;
 mod dimension_chip;
 mod display_menu;
@@ -35,6 +38,7 @@ mod feature_card;
 mod gesture_services;
 mod gizmo;
 mod handoff;
+pub mod host;
 mod input;
 mod input_trace;
 mod inspector;
@@ -85,6 +89,8 @@ mod startup_recovery;
 mod support_view;
 mod tab_switcher;
 mod tool_registry;
+#[cfg(not(feature = "desktop"))]
+mod touch_menu;
 mod transform_ui;
 mod ui_state;
 mod viewport;
@@ -95,8 +101,11 @@ mod viewport_updates;
 mod viewport_widgets;
 mod workspace_ui;
 
+pub use qa::{HostLayout, QaPaths};
+
 use onecad_widgets::{fonts, theme};
 
+#[cfg(feature = "desktop")]
 pub fn run() -> Result<(), String> {
     let paths = qa::QaPaths::from_args(std::env::args_os().skip(1))?;
     paths.require_launch_environment()?;
@@ -137,6 +146,7 @@ pub fn run() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(feature = "desktop")]
 fn viewport_gpu_configuration() -> egui_wgpu::WgpuConfiguration {
     let mut configuration = egui_wgpu::WgpuConfiguration::default();
     if let egui_wgpu::WgpuSetup::CreateNew(setup) = &mut configuration.wgpu_setup {
@@ -151,6 +161,6 @@ fn viewport_gpu_configuration() -> egui_wgpu::WgpuConfiguration {
     configuration
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 mod app_logic_tests;
 mod sketch_candidates;
