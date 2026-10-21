@@ -85,6 +85,7 @@ pub struct PanelToggle<'a> {
     dot: bool,
     compact: bool,
     tip: Option<Tip<'a>>,
+    icon: Option<&'a str>,
 }
 
 impl<'a> PanelToggle<'a> {
@@ -95,6 +96,7 @@ impl<'a> PanelToggle<'a> {
             dot: false,
             compact: false,
             tip: None,
+            icon: None,
         }
     }
     pub fn open(mut self, open: bool) -> Self {
@@ -108,6 +110,11 @@ impl<'a> PanelToggle<'a> {
     }
     pub fn compact(mut self, compact: bool) -> Self {
         self.compact = compact;
+        self
+    }
+    /// Replaces the default panel glyph, e.g. when the toggle names what the panel holds.
+    pub fn icon(mut self, name: &'a str) -> Self {
+        self.icon = Some(name);
         self
     }
     pub fn tip(mut self, tip: Tip<'a>) -> Self {
@@ -164,12 +171,12 @@ impl egui::Widget for PanelToggle<'_> {
 impl PanelToggle<'_> {
     fn paint_glyph(&self, p: &egui::Painter, rect: Rect, fill: Color32, tint: Color32, l: &Look) {
         let t = &l.theme;
-        let name = match (self.side, self.open) {
+        let name = self.icon.unwrap_or(match (self.side, self.open) {
             (Side::Left, false) => "panelLeft",
             (Side::Left, true) => "panelLeftOpen",
             (Side::Right, false) => "panelRight",
             (Side::Right, true) => "panelRightOpen",
-        };
+        });
         let glyph_px = if self.compact { 18.0 } else { 20.0 };
         let glyph = Rect::from_center_size(rect.center(), Vec2::splat(glyph_px));
         let style = IconStyle {

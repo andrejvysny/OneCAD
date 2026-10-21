@@ -1,5 +1,5 @@
 //! TitleBar (c-titlebar): h44 drag region with Home, File, centred document name,
-//! undo/redo and a command-search look.
+//! undo/redo and a command-search look; `bare` keeps only Home, Undo and Redo.
 
 use egui::{Color32, CornerRadius, FontId, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2, vec2};
 
@@ -35,14 +35,15 @@ pub struct TitleBar<'a> {
     search_blocked: Option<&'a str>,
     drag_window: bool,
     workspace: Option<WorkspaceSpec<'a>>,
+    bare: bool,
 }
 
 pub struct TitleBarOutput {
     pub home: bool,
     /// Anchor for the host's workspace popover; `None` when no workspace was given.
     pub workspace: Option<Response>,
-    /// Anchor for the host's File popover.
-    pub file: Response,
+    /// Anchor for the host's File popover; `None` in the bare bar.
+    pub file: Option<Response>,
     pub undo: bool,
     pub redo: bool,
     /// Command search clicked; the host decides what opens.
@@ -61,6 +62,7 @@ impl<'a> TitleBar<'a> {
             search_blocked: None,
             drag_window: true,
             workspace: None,
+            bare: false,
         }
     }
     pub fn dirty(mut self, dirty: bool) -> Self {
@@ -99,6 +101,12 @@ impl<'a> TitleBar<'a> {
         self
     }
 
+    /// Only Home, Undo and Redo after the traffic lights: no File, name or search.
+    pub fn bare(mut self, v: bool) -> Self {
+        self.bare = v;
+        self
+    }
+
     pub fn drag_window(mut self, v: bool) -> Self {
         self.drag_window = v;
         self
@@ -119,7 +127,9 @@ impl<'a> TitleBar<'a> {
         let ws_w = self
             .workspace
             .map(|w| WorkspaceButton::compact_width(ui.painter(), w.name));
-        self.paint_centre(ui, rect, &l, ws_w);
+        if !self.bare {
+            self.paint_centre(ui, rect, &l, ws_w);
+        }
         let cy = rect.center().y;
         let mut x = rect.left() + TRAFFIC_INSET;
         let home_rect = Rect::from_min_size(Pos2::new(x, cy - BTN / 2.0), Vec2::splat(BTN));
@@ -138,7 +148,18 @@ impl<'a> TitleBar<'a> {
             x += 1.0 + 8.0;
             ui.put(r, b)
         });
-        let file = file_button(ui, Pos2::new(x, cy - BTN / 2.0), &l);
+        if self.bare {
+            let (undo, redo) = self.history_buttons(ui, Pos2::new(x, cy - BTN / 2.0), &l);
+            return TitleBarOutput {
+                home,
+                workspace,
+                file: None,
+                undo,
+                redo,
+                search: false,
+            };
+        }
+        let file = Some(file_button(ui, Pos2::new(x, cy - BTN / 2.0), &l));
         let (search, undo, redo) = self.right_cluster(ui, rect, &l);
         TitleBarOutput {
             home,
@@ -189,6 +210,24 @@ impl<'a> TitleBar<'a> {
         if let Some(g) = suffix {
             p.galley(Pos2::new(x, cy - g.size().y / 2.0), g, t.ink5);
         }
+    }
+
+    /// Undo then Redo, left to right from `pos`; returns (undo, redo) clicks.
+    fn history_buttons(&self, ui: &mut Ui, pos: Pos2, l: &Look) -> (bool, bool) {
+        let specs = [
+            ("undo", "Undo", self.can_undo, "⌘Z"),
+            ("redo", "Redo", self.can_redo, "⌘⇧Z"),
+        ];
+        let mut hit = [false; 2];
+        for (i, (icon, label, enabled, key)) in specs.into_iter().enumerate() {
+            let r = Rect::from_min_size(pos + vec2(i as f32 * (BTN + 4.0), 0.0), Vec2::splat(BTN));
+            let b = IconButton::new(icon, label, BTN, 16.0)
+                .enabled(enabled)
+                .gap_bg(l.theme.titlebar)
+                .tip(Some(Tip::new(label).shortcut(Some(key))));
+            hit[i] = ui.put(r, b).clicked();
+        }
+        (hit[0], hit[1])
     }
 
     /// Returns (search, undo, redo) clicks.

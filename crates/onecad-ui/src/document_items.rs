@@ -5,6 +5,7 @@ use crate::{
     diagnostics::{Source, State},
 };
 use onecad_app::api::{DeleteTarget, DeletionPlan, PreviewContext};
+use onecad_widgets::components::overlays::{Dialog, DialogIntent, affected_list, undo_hint};
 
 mod service;
 pub(crate) use service::execute;
@@ -205,31 +206,30 @@ pub(crate) fn show(app: &mut App, ctx: &egui::Context) {
         );
         return;
     }
-    let mut confirm = false;
-    let mut cancel = false;
-    let response = egui::Modal::new(egui::Id::unique("delete-document-item")).show(ctx, |ui| {
-        ui.set_max_width(420.0);
-        ui.heading("Delete selected item?");
-        ui.label("The following items will be removed together. Undo restores this deletion.");
-        egui::ScrollArea::vertical()
-            .max_height(220.0)
-            .show(ui, |ui| {
-                for (kind, items) in [
-                    ("Body", &plan.bodies),
-                    ("Sketch", &plan.sketches),
-                    ("Feature", &plan.records),
-                ] {
-                    for item in items {
-                        ui.label(format!("{kind}: {}", item.name));
-                    }
-                }
-            });
-        ui.horizontal(|ui| {
-            cancel = ui.button("Cancel").clicked();
-            confirm = ui.button("Delete").clicked();
+    let rows: Vec<(&str, &str, &str)> = [
+        ("body", "body", &plan.bodies),
+        ("sketch", "sketch", &plan.sketches),
+        ("extrude", "feature", &plan.records),
+    ]
+    .into_iter()
+    .flat_map(|(icon, kind, items)| {
+        items
+            .iter()
+            .map(move |item| (icon, item.name.as_str(), kind))
+    })
+    .collect();
+    let out = Dialog::new(DialogIntent::Destroy, "Delete selected item?")
+        .icon("delete")
+        .body("The following items will be removed together.")
+        .primary("Delete", true)
+        .secondary("Cancel", true)
+        .focus_secondary(true)
+        .show(ctx, egui::Id::unique("delete-document-item"), |ui| {
+            affected_list(ui, &rows);
+            undo_hint(ui, "Undo restores this deletion.");
         });
-    });
-    if cancel || response.should_close() {
+    let (confirm, cancel) = (out.primary, out.secondary);
+    if cancel || out.dismissed {
         app.items.confirmation = None;
         report(app, State::Cancelled, "Delete cancelled".into());
     } else if confirm {
@@ -250,15 +250,17 @@ pub(crate) fn show(app: &mut App, ctx: &egui::Context) {
 }
 
 fn planning(app: &mut App, ctx: &egui::Context) {
-    let mut cancelled = false;
-    let response = egui::Modal::new(egui::Id::unique("delete-item-planning")).show(ctx, |ui| {
-        ui.horizontal(|ui| {
-            ui.spinner();
-            ui.label("Checking item dependencies…");
+    let out = Dialog::new(DialogIntent::Input, "Delete selected item?")
+        .secondary("Cancel", true)
+        .show(ctx, egui::Id::unique("delete-item-planning"), |ui| {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.add_space(8.0);
+                ui.label("Checking item dependencies…");
+            });
         });
-        cancelled = ui.button("Cancel").clicked();
-    });
-    if cancelled || response.should_close() {
+    let cancelled = out.secondary;
+    if cancelled || out.dismissed {
         reset(app);
         report(app, State::Cancelled, "Delete cancelled".into());
     }

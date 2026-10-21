@@ -46,13 +46,13 @@ struct CubePalette {
 }
 
 impl CubePalette {
-    fn new(theme: &Theme, active: bool) -> Self {
+    fn new(theme: &Theme, _active: bool) -> Self {
         Self {
             accent: theme.accent,
             accent_soft: theme.sel_bg,
-            cube_face: if active { theme.surface } else { theme.panel },
+            cube_face: theme.surface,
             cube_hover: theme.sel_bg,
-            cube_border: theme.border_strong,
+            cube_border: theme.border,
             cube_text: theme.ink2,
             triad: [theme.axis_x, theme.axis_y, theme.axis_z],
         }
@@ -335,12 +335,15 @@ fn face_widgets(
     }
 }
 
+/// Axes are drawn under the cube, which hides whatever lies behind it, then the parts in
+/// front of the cube are drawn again on top.
 fn world_triad(
     painter: &egui::Painter,
     basis: CameraBasis,
     center: Pos2,
     scale: f32,
     palette: CubePalette,
+    over: bool,
 ) {
     let half = HALF * f64::from(scale);
     let [x, y, z] = [DVec3::X, DVec3::Y, DVec3::Z];
@@ -353,15 +356,22 @@ fn world_triad(
     ] {
         let edge_end = center + project(basis, corner + axis * 2.0, half);
         let tip = origin + project(basis, axis, 2.0 * half * 1.25);
-        // The axis runs along a cube edge; that part shows only when an adjacent face does.
-        let edge_visible = [x, y, z]
+        // An edge shows when an adjacent face does; the stub past the cube shows over the cube
+        // only when the face it leaves from faces the viewer.
+        let edge_front = [x, y, z]
             .into_iter()
             .filter(|other| *other != axis)
             .any(|other| (-other).dot(basis.back) > 1e-5);
-        let start = if edge_visible { origin } else { edge_end };
-        painter.line_segment([start, tip], Stroke::new(1.5, color));
+        let stub_front = axis.dot(basis.back) > 1e-5;
+        let stroke = Stroke::new(1.5, color);
+        if !over || edge_front {
+            painter.line_segment([origin, edge_end], stroke);
+        }
+        if !over || stub_front {
+            painter.line_segment([edge_end, tip], stroke);
+        }
         let along = tip - origin;
-        if along.length() < 2.0 {
+        if along.length() < 2.0 || over != stub_front {
             continue;
         }
         painter.text(
@@ -415,8 +425,9 @@ pub fn show(
     };
     let palette = CubePalette::new(theme, over || dragging);
     let painter = ui.painter_at(outer);
+    world_triad(&painter, view.basis(), center, scale, palette, false);
     painter::paint_cube(&painter, &faces, hovered, palette, true, scale);
-    world_triad(&painter, view.basis(), center, scale, palette);
+    world_triad(&painter, view.basis(), center, scale, palette, true);
     ui.add_enabled_ui(enabled, |ui| face_widgets(ui, &faces, hovered, &mut output));
     ui.add_enabled_ui(enabled, |ui| {
         controls::show(ui, &painter, center, scale, view, palette, &mut output)

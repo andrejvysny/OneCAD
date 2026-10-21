@@ -15,12 +15,19 @@ async fn world_planes_and_face_entry_preserve_native_frame_and_discard() {
     let (mut app, context) = create_app(area.path()).await;
     let mut frame = eframe::Frame::_new_kittest();
     pump_until(&mut app, &context, &mut frame, |app| app.display.is_some()).await;
-    for plane in [WorldPlane::XY, WorldPlane::XZ, WorldPlane::YZ] {
+    for (plane, modeling) in [
+        (WorldPlane::XY, onecad_scene::Projection::Perspective),
+        (WorldPlane::XZ, onecad_scene::Projection::Orthographic),
+        (WorldPlane::YZ, onecad_scene::Projection::Perspective),
+    ] {
+        app.camera.projection = modeling;
         app.new_sketch_on_plane(plane);
         active(&mut app, &context, &mut frame).await;
         assert_eq!(app.sketch.session.as_ref().unwrap().plane, plane.plane());
         assert_camera(&app);
         discard(&mut app, &context, &mut frame).await;
+        // Leaving the sketch restores the projection chosen for modeling.
+        assert_eq!(app.camera.projection, modeling);
         assert!(app.display.as_ref().unwrap().projection.sketches.is_empty());
     }
     make_host(&mut app, &context, &mut frame).await;

@@ -1,14 +1,16 @@
-//! Explorer: panel toggle and the Bodies / Sketches / Datums tree.
+//! Explorer: panel toggle, workspace selector and the Bodies / Sketches / Datums tree.
 use crate::{app::App, layout::Chrome};
-use egui::{Context, Margin, Order, Ui};
+use egui::{Context, Margin, Order, Sense, Ui};
 use onecad_widgets::{
     components::{
         inputs::SearchField,
         lists::{RowState, SectionLabel, TreeRow},
-        shell::{FloatingPanel, PanelToggle, Side},
+        shell::{FloatingPanel, PanelToggle, Side, WorkspaceSelector},
         tooltip::Tip,
     },
     frame,
+    metrics::{Elevation, RADIUS_XL},
+    theme::look,
 };
 
 fn matches(filter: &str, name: &str) -> bool {
@@ -44,31 +46,81 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
 
 fn toggle(app: &mut App, ctx: &Context, chrome: &Chrome) {
     let tip = Tip::new("Explorer").shortcut(Some("⌘1"));
-    frame::floating(
-        egui::Id::unique("explorer-toggle"),
-        chrome.explorer_toggle.min,
-        Order::Middle,
-    )
-    .show(ctx, |ui| {
-        let button = PanelToggle::new(Side::Left).compact(true).tip(tip);
-        if ui.add(button).clicked() {
-            app.ui.explorer_open = !app.ui.explorer_open;
-        }
+    let l = look(ctx);
+    let chip =
+        frame::surface(&l.theme, l.dark, RADIUS_XL, Elevation::Pill).inner_margin(Margin::same(3));
+    // The collapsed toggle lands exactly where the open header draws it, using both
+    // measurements from earlier frames; the layout rect is only the first-frame fallback.
+    let measured = ctx.data(|data| {
+        Some((
+            data.get_temp::<egui::Pos2>(open_toggle_id())?,
+            data.get_temp::<egui::Vec2>(chip_inset_id())?,
+        ))
+    });
+    let origin = measured.map_or(chrome.explorer_toggle.min, |(toggle, inset)| toggle - inset);
+    frame::floating(egui::Id::unique("explorer-toggle"), origin, Order::Middle).show(ctx, |ui| {
+        let chip_origin = ui.max_rect().min;
+        chip.show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.horizontal(|ui| {
+                let button = PanelToggle::new(Side::Left)
+                    .icon("layers")
+                    .compact(true)
+                    .tip(tip);
+                let toggle_resp = ui.add(button);
+                let inset = toggle_resp.rect.min - chip_origin;
+                ctx.data_mut(|data| data.insert_temp(chip_inset_id(), inset));
+                if toggle_resp.clicked() {
+                    app.ui.explorer_open = !app.ui.explorer_open;
+                }
+                if app.ui.start_open {
+                    return;
+                }
+                let (line, _) = ui.allocate_exact_size(egui::vec2(1.0, 18.0), Sense::hover());
+                ui.painter().rect_filled(line, 0.0, l.theme.border_strong);
+                let selector = WorkspaceSelector::new("Design", "body")
+                    .compact(true)
+                    .open(app.ui.workspace_menu_open);
+                let response = ui.add(selector);
+                let bounds = toggle_resp.rect.union(response.rect);
+                crate::workspace_ui::workspace_menu(app, ctx, &response, bounds);
+            });
+        });
     });
 }
 
+fn open_toggle_id() -> egui::Id {
+    egui::Id::unique("explorer-open-toggle")
+}
+
+fn chip_inset_id() -> egui::Id {
+    egui::Id::unique("explorer-chip-toggle-inset")
+}
+
 fn header(app: &mut App, ui: &mut Ui) {
+    let ctx = ui.ctx().clone();
     ui.horizontal(|ui| {
-        ui.strong("Explorer");
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let toggle = PanelToggle::new(Side::Left)
-                .open(true)
-                .compact(true)
-                .tip(Tip::new("Hide explorer").shortcut(Some("⌘1")));
-            if ui.add(toggle).clicked() {
-                app.ui.explorer_open = false;
-            }
-        });
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let toggle = PanelToggle::new(Side::Left)
+            .icon("layers")
+            .open(true)
+            .compact(true)
+            .tip(Tip::new("Hide explorer").shortcut(Some("⌘1")));
+        let toggle_resp = ui.add(toggle);
+        // Closing slides the panel away; only the settled open position is a valid target.
+        if app.ui.explorer_open {
+            ctx.data_mut(|data| data.insert_temp(open_toggle_id(), toggle_resp.rect.min));
+        }
+        if toggle_resp.clicked() {
+            app.ui.explorer_open = false;
+        }
+        if !app.ui.start_open {
+            let selector =
+                WorkspaceSelector::new("Design", "body").open(app.ui.workspace_menu_open);
+            let response = ui.add(selector);
+            let bounds = toggle_resp.rect.union(response.rect);
+            crate::workspace_ui::workspace_menu(app, &ctx, &response, bounds);
+        }
     });
 }
 

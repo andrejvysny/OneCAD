@@ -14,7 +14,12 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
     if let Some(rect) = chrome.inspector_toggle {
         let dot =
             crate::tool_registry::selection_kind(app) != crate::tool_registry::SelectionKind::None;
-        let tip = Tip::new("Inspector").shortcut(Some("⌘2"));
+        let tip = Tip::new(if app.ui.inspector_open {
+            "Hide properties"
+        } else {
+            "Show properties"
+        })
+        .shortcut(Some("⌘2"));
         frame::floating(
             egui::Id::unique("inspector-toggle"),
             rect.min,
@@ -24,13 +29,15 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
             if ui
                 .add(
                     PanelToggle::new(Side::Right)
+                        .open(app.ui.inspector_open)
+                        .icon("settings")
                         .compact(true)
-                        .dot(dot)
+                        .dot(dot && !app.ui.inspector_open)
                         .tip(tip),
                 )
                 .clicked()
             {
-                app.ui.inspector_open = true;
+                app.ui.inspector_open = !app.ui.inspector_open;
             }
         });
     }
@@ -124,15 +131,5 @@ fn header(app: &mut App, ui: &mut Ui) {
         } else {
             InspectorTab::Properties
         };
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let tip = Tip::new("Hide inspector").shortcut(Some("⌘2"));
-            let toggle = PanelToggle::new(Side::Right)
-                .open(true)
-                .compact(true)
-                .tip(tip);
-            if ui.add(toggle).clicked() {
-                app.ui.inspector_open = false;
-            }
-        });
     });
 }

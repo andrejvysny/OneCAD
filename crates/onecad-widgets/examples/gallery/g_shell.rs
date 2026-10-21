@@ -88,7 +88,7 @@ fn title_bar(ui: &mut Ui, t: &Theme) {
             .show(ui);
         let hits = [
             (out.home, "Home"),
-            (out.file.clicked(), "File"),
+            (out.file.as_ref().is_some_and(|f| f.clicked()), "File"),
             (out.undo, "Undo"),
             (out.search, "Search"),
         ];

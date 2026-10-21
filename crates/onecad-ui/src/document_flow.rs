@@ -1,5 +1,6 @@
 //! Native file intents stay separate from document mutation and dirty-close decisions.
 use onecad_app::dto::SaveOutcomeDto;
+use onecad_widgets::components::overlays::{Dialog, DialogIntent};
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -291,28 +292,22 @@ pub fn close_prompt(app: &mut crate::app::App, ctx: &egui::Context) {
     if app.documents.confirm.is_none() {
         return;
     }
-    let mut choice = None;
-    let response = egui::Modal::new(egui::Id::unique("document-transition")).show(ctx, |ui| {
-        ui.heading("Save changes before continuing?");
-        ui.label("Save the current document, discard its unsaved changes, or keep editing.");
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(!app.sketch_active(), egui::Button::new("Save"))
-                .clicked()
-            {
-                choice = Some(0);
-            }
-            if ui.button("Discard").clicked() {
-                choice = Some(1);
-            }
-            if ui.button("Cancel").clicked() {
-                choice = Some(2);
-            }
-        });
-    });
-    if choice.is_none() && response.should_close() {
-        choice = Some(2);
-    }
+    let out = Dialog::new(DialogIntent::Decide, "Save changes before continuing?")
+        .icon("save")
+        .body("Save the current document, discard its unsaved changes, or keep editing.")
+        .primary("Save", !app.sketch_active())
+        .secondary("Cancel", true)
+        .tertiary("Discard")
+        .show(ctx, egui::Id::unique("document-transition"), |_| {});
+    let choice = if out.primary {
+        Some(0)
+    } else if out.tertiary {
+        Some(1)
+    } else if out.secondary || out.dismissed {
+        Some(2)
+    } else {
+        None
+    };
     apply_close_choice(app, choice);
 }
 

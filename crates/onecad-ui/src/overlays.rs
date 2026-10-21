@@ -15,6 +15,7 @@ fn nav_button<'a>(icon: &'a str, name: &'a str, enabled: bool, active: bool) -> 
     let reason = (!enabled).then_some(match icon {
         "isolate" => "Temporary body isolation is not available yet",
         "layers" => "Layer visibility controls are not available yet",
+        "section" => "Section views are not available yet",
         _ => "Viewport unavailable",
     });
     NavButton {
@@ -32,7 +33,8 @@ pub fn nav_pill(app: &mut App, ctx: &Context, chrome: &Chrome) {
         nav_button("home", "Home view", ready, false),
         nav_button("fit", "Fit all", ready, false),
         nav_button("isolate", "Isolate", false, false),
-        nav_button("section", "Section / display settings", ready, false),
+        // Display settings live in the view cluster; section views are not built yet.
+        nav_button("section", "Section view", false, false),
         nav_button(
             "layers",
             "Layers",
@@ -50,10 +52,6 @@ pub fn nav_pill(app: &mut App, ctx: &Context, chrome: &Chrome) {
             app.fit_pending = true;
         }
         Some(1) => app.fit_pending = true,
-        Some(3) => display_menu::toggle(
-            app,
-            Rect::from_min_size(chrome.nav_pill, vec2(SQUARE, SQUARE)),
-        ),
         Some(4) => app.ui.shell_facade.layers_open = !layers_open,
         _ => {}
     }

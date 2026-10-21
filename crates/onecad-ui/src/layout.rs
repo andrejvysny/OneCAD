@@ -1,10 +1,12 @@
 //! Pure geometry of the floating editor chrome (docs/design/native-ui/final/README.md).
 use crate::ui_state::UiState;
-use egui::{Pos2, Rect, pos2, vec2};
+use egui::{Pos2, Rect, Vec2, pos2, vec2};
 
 const TITLEBAR: f32 = 44.0;
 const EDGE: f32 = 10.0;
 const TOGGLE: f32 = 32.0;
+/// Collapsed explorer chip: toggle | divider | workspace selector, in a 3px padded card.
+const EXPLORER_CHIP: Vec2 = vec2(97.0, 40.0);
 const EXPLORER_W: f32 = 248.0;
 const INSPECTOR_W: f32 = 288.0;
 const CARD_W: f32 = 280.0;
@@ -24,6 +26,7 @@ pub struct Chrome {
     pub explorer: Rect,
     /// Only present while the Inspector is closed.
     pub inspector_toggle: Option<Rect>,
+    pub inspector_open: bool,
     pub inspector: Rect,
     pub pill_centre_x: f32,
     /// Running-feature card: left of the Inspector (or the viewport edge), under the pill row.
@@ -68,7 +71,7 @@ pub fn chrome(screen: Rect, state: &UiState) -> Chrome {
     let view_cluster = if open {
         pos2(r - 308.0, t + EDGE)
     } else {
-        pos2(r - 14.0, t + 62.0)
+        pos2(r - 14.0, t + EDGE)
     };
     let view_controls = Rect::from_min_size(
         pos2(
@@ -80,20 +83,21 @@ pub fn chrome(screen: Rect, state: &UiState) -> Chrome {
     Chrome {
         titlebar,
         viewport,
-        explorer_toggle: Rect::from_min_size(pos2(l + EDGE, t + EDGE), vec2(TOGGLE, TOGGLE)),
+        explorer_toggle: Rect::from_min_size(pos2(l + EDGE, t + EDGE), EXPLORER_CHIP),
         toolbar_left: l
             + EDGE
             + if state.explorer_open {
                 EXPLORER_W
             } else {
-                TOGGLE
+                EXPLORER_CHIP.x
             }
             + EDGE,
         explorer: Rect::from_min_max(
             pos2(l + EDGE, t + EDGE),
             pos2(l + EDGE + EXPLORER_W, b - EDGE),
         ),
-        inspector_toggle: (!open).then(|| collapsed_inspector_toggle(view_controls)),
+        inspector_toggle: Some(collapsed_inspector_toggle(view_controls)),
+        inspector_open: open,
         inspector: Rect::from_min_max(
             pos2(r - EDGE - INSPECTOR_W, t + EDGE),
             pos2(r - EDGE, b - EDGE),
@@ -109,7 +113,7 @@ pub fn chrome(screen: Rect, state: &UiState) -> Chrome {
 impl Chrome {
     /// Move controls beside the cube while parameters occupy the space beneath it.
     pub fn with_feature_card(mut self) -> Self {
-        if self.inspector_toggle.is_some() {
+        if !self.inspector_open {
             self.view_cluster = pos2(self.viewport.right() - 14.0, self.viewport.top() + EDGE);
         }
         self.view_controls = Rect::from_min_size(
@@ -175,10 +179,13 @@ mod tests {
         let mut s = UiState::default();
         let c = chrome(screen(), &s);
         assert_eq!(c.view_cluster, pos2(1280.0 - 308.0, 54.0));
-        assert!(c.inspector_toggle.is_none());
+        // The one inspector toggle stays under the view controls whether the panel is open.
+        let open_toggle = c.inspector_toggle.unwrap();
+        assert_eq!(open_toggle.center().x, c.view_controls.center().x);
+        assert!(!open_toggle.intersects(c.inspector));
         s.inspector_open = false;
         let c = chrome(screen(), &s);
-        assert_eq!(c.view_cluster, pos2(1266.0, 106.0));
+        assert_eq!(c.view_cluster, pos2(1266.0, 54.0));
         let toggle = c.inspector_toggle.unwrap();
         assert_eq!(toggle.center().x, c.view_controls.center().x);
         assert_eq!(toggle.top(), c.view_controls.bottom() + 8.0);
@@ -233,6 +240,17 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn collapsed_chip_clears_toolbar() {
+        let s = UiState {
+            explorer_open: false,
+            ..Default::default()
+        };
+        let c = chrome(screen(), &s);
+        assert_eq!(c.explorer_toggle.size(), EXPLORER_CHIP);
+        assert_eq!(c.toolbar_left, c.explorer_toggle.right() + EDGE);
     }
 
     #[test]

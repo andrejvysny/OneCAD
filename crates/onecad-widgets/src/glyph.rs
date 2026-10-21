@@ -32,6 +32,10 @@ pub(crate) fn chevron_down(p: &Painter, c: Pos2, size: f32, col: Color32) {
     poly(p, c, size, &[(-0.3, -0.13), (0.0, 0.17), (0.3, -0.13)], col);
 }
 
+pub(crate) fn chevron_up(p: &Painter, c: Pos2, size: f32, col: Color32) {
+    poly(p, c, size, &[(-0.3, 0.13), (0.0, -0.17), (0.3, 0.13)], col);
+}
+
 pub(crate) fn chevron_right(p: &Painter, c: Pos2, size: f32, col: Color32) {
     poly(p, c, size, &[(-0.13, -0.3), (0.17, 0.0), (-0.13, 0.3)], col);
 }

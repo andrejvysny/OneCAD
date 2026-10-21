@@ -133,3 +133,20 @@ fn invalid_views_and_projection_clipping_fail_safely() {
     assert!(v.project(DVec3::new(0.0, 100_001.0, 0.0)).is_none());
     assert!(v.ray(DVec2::new(f64::NAN, 2.0)).is_err());
 }
+
+#[test]
+fn ortho_keeps_geometry_beyond_the_offset_eye_inside_the_clip_range() {
+    let o = view(Projection::Orthographic, 1.0);
+    let target = o.project(DVec3::ZERO).unwrap();
+    // Farther toward the viewer than the offset length: perspective would clip it.
+    let near_viewer = DVec3::new(0.0, -50.0, 0.0);
+    let projected = o
+        .project(near_viewer)
+        .expect("orthographic views have no near cut");
+    assert!((projected.logical - target.logical).length() < 1e-9);
+    let clip = o.view_projection() * near_viewer.extend(1.0);
+    assert!(clip.z / clip.w > 0.0 && clip.z / clip.w < 1.0);
+    assert!(view(Projection::Perspective, 1.0)
+        .project(near_viewer)
+        .is_none());
+}

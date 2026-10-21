@@ -253,7 +253,7 @@ pub fn workspace_menu_with(
     out
 }
 
-fn hinted(r: Response, enabled: bool, hint: Option<&str>) -> Response {
+pub(super) fn hinted(r: Response, enabled: bool, hint: Option<&str>) -> Response {
     match hint {
         Some(h) if !enabled => r.on_hover_text(h),
         _ => r,
@@ -280,7 +280,7 @@ fn item_rows(ui: &mut Ui, items: &[WorkspaceItem], hint: Option<&str>) -> Option
     picked
 }
 
-fn divider(ui: &mut Ui) {
+pub(super) fn divider(ui: &mut Ui) {
     let t = look(ui.ctx()).theme;
     ui.add_space(4.0);
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
@@ -347,7 +347,7 @@ fn row(
     response
 }
 
-fn focus_ring(p: &Painter, rect: Rect, t: &Theme) {
+pub(super) fn focus_ring(p: &Painter, rect: Rect, t: &Theme) {
     let (w, c) = metrics::focus_ring(t);
     p.rect_stroke(
         rect.expand(w * 0.5),

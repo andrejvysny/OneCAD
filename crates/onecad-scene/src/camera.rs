@@ -93,7 +93,7 @@ impl ViewSnapshot {
     ) -> Result<Self, SceneError> {
         validate(camera, viewport)?;
         let basis = camera.basis()?;
-        let eye = camera.target + camera.offset;
+        let eye = eye_position(camera, basis);
         let world = DMat4::from_cols(
             basis.right.extend(0.0),
             basis.up.extend(0.0),
@@ -157,7 +157,7 @@ impl ViewSnapshot {
         self.projection_matrix * self.view_matrix
     }
     pub fn eye(&self) -> DVec3 {
-        self.camera().target + self.camera().offset
+        eye_position(self.camera(), self.basis)
     }
     pub fn depth(&self, point: DVec3) -> f64 {
         (self.eye() - point).dot(self.basis.back)
@@ -222,6 +222,20 @@ impl ViewSnapshot {
                 direction: -self.basis.back,
             },
         })
+    }
+}
+
+/// An orthographic view has no physical eye: its apparent size comes from the offset length
+/// alone. Placing the projection eye far back keeps geometry between the target and the
+/// viewer inside the clip range instead of cutting it at a near plane beside the target.
+const ORTHOGRAPHIC_EYE_DISTANCE: f64 = CAMERA_FAR * 0.5;
+
+fn eye_position(camera: Camera, basis: CameraBasis) -> DVec3 {
+    match camera.projection {
+        Projection::Perspective => camera.target + camera.offset,
+        Projection::Orthographic => {
+            camera.target + basis.back * camera.offset.length().max(ORTHOGRAPHIC_EYE_DISTANCE)
+        }
     }
 }
 

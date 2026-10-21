@@ -23,6 +23,7 @@ impl App {
             action,
             SketchAction::Begin { .. } | SketchAction::BeginCreated { .. }
         );
+        let was_active = self.sketch_active();
         if matches!(action, SketchAction::BeginCreated { .. }) {
             self.ui.sketch_entry = Default::default();
         }
@@ -79,7 +80,16 @@ impl App {
             }
         }
         if align_entry && let Some(session) = &self.sketch.session {
+            self.modeling_projection
+                .get_or_insert(self.camera.projection);
             crate::sketch_entry::align_camera(&mut self.camera, session.plane);
+            self.draw_dirty = true;
+        }
+        if was_active
+            && !self.sketch_active()
+            && let Some(projection) = self.modeling_projection.take()
+        {
+            self.camera.projection = projection;
             self.draw_dirty = true;
         }
         self.sync_sketch_gesture();

@@ -3,11 +3,11 @@
 mod customize;
 mod layers;
 
-use crate::{app::App, bars, ui_state::StartPage};
-use egui::{Context, Response};
+use crate::app::App;
+use egui::{Context, Rect, Response};
 use onecad_widgets::components::{
     lists::menu_frame,
-    shell::{WorkspaceItem, workspace_menu_with},
+    shell::{WorkspaceItem, workspace_menu_compact},
 };
 
 pub use customize::dialog as customize_dialog;
@@ -51,109 +51,54 @@ impl ShellFacade {
     }
 }
 
-/// "Get more workspaces…": opens the Extensions page of the Start screen.
-fn open_extensions(ui: &mut crate::ui_state::UiState) {
-    ui.start_open = true;
-    ui.start_page = StartPage::Extensions;
-}
-
-fn item<'a>(
-    label: &'a str,
-    icon: &'a str,
-    key: &'a str,
-    subtitle: Option<&'a str>,
-    live: bool,
-) -> WorkspaceItem<'a> {
+fn item<'a>(label: &'a str, icon: &'a str, key: &'a str, live: bool) -> WorkspaceItem<'a> {
     WorkspaceItem {
         label,
         icon,
         shortcut: Some(key),
-        subtitle,
+        subtitle: None,
         enabled: live,
         active: label == "Design",
     }
 }
 
-/// Workspace popover anchored under the title-bar button (19c).
-pub fn workspace_menu(app: &mut App, ctx: &Context, anchor: &Response) {
+/// Compact workspace popover below `bounds` (explorer header row or collapsed chip).
+/// `anchor` owns the open/close toggle; the card matches `bounds` width (min 200).
+pub fn workspace_menu(app: &mut App, ctx: &Context, anchor: &Response, bounds: Rect) {
     let live = crate::editor_facade::PREVIEW_FACADES;
     let items = [
-        item(
-            "Design",
-            "body",
-            "⌃1",
-            Some("Sketch, model and edit bodies"),
-            true,
-        ),
-        item(
-            "Assembly",
-            "component",
-            "⌃2",
-            Some("Place components, mates"),
-            false,
-        ),
-        item(
-            "Simulation",
-            "study",
-            "⌃3",
-            Some("Loads, constraints, studies"),
-            false,
-        ),
-        item(
-            "Drawing",
-            "viewFront",
-            "⌃4",
-            Some("2D sheets and dimensions"),
-            false,
-        ),
+        item("Design", "body", "⌃1", true),
+        item("Assembly", "component", "⌃2", false),
+        item("Simulation", "study", "⌃3", false),
+        item("Drawing", "viewFront", "⌃4", false),
     ];
-    let ext = [item(
-        "CNC",
-        "panelLeft",
-        "⌃5",
-        Some("Stock, setups, tool reach · CNC Prep"),
-        live,
-    )];
-    let more_ok = live && bars::home_allowed(app);
+    let ext = [item("CNC", "panelLeft", "⌃5", live)];
     let hint =
         (!live).then_some("Native workspace integration is unavailable (ONECAD-301 / ONECAD-92)");
-    let (mut customize, mut more) = (false, false);
-    egui::Popup::menu(anchor).frame(menu_frame(ctx)).show(|ui| {
-        // Rows fill available width; without a cap the popup inherits the title bar's width.
-        ui.set_max_width(300.0);
-        let out = workspace_menu_with(
-            ui,
-            &items,
-            &ext,
-            ("Customize Design workspace…", live),
-            ("Get more workspaces…", more_ok),
-            hint,
-        );
-        customize = out.customize && live;
-        more = out.manage && more_ok;
-    });
+    let width = bounds.width().max(200.0);
+    let frame = menu_frame(ctx).corner_radius(egui::CornerRadius::same(10));
+    let mut customize = false;
+    egui::Popup::menu(anchor)
+        .anchor(bounds)
+        .gap(4.0)
+        .width(width)
+        .frame(frame)
+        .show(|ui| {
+            // Frame margin is 6 per side.
+            ui.set_width(width - 12.0);
+            let out = workspace_menu_compact(ui, &items, &ext, ("Customize…", live), hint);
+            customize = out.customize && live;
+        });
     let id = egui::Popup::default_response_id(anchor);
     app.ui.workspace_menu_open = egui::Popup::is_id_open(ctx, id);
     if customize {
         app.ui.shell_facade.customize_open = true;
-    }
-    if more {
-        open_extensions(&mut app.ui);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui_state::UiState;
-
-    #[test]
-    fn get_more_workspaces_opens_extensions_page() {
-        let mut ui = UiState::default();
-        open_extensions(&mut ui);
-        assert!(ui.start_open);
-        assert_eq!(ui.start_page, StartPage::Extensions);
-    }
 
     #[test]
     fn reset_turns_every_extension_on() {

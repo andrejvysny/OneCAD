@@ -84,7 +84,7 @@ fn facet_fill(face: &Facet, highlighted: bool, t: CubePalette) -> Color32 {
         return t.cube_hover;
     }
     let base = t.cube_face;
-    let shade = (0.72 + 0.28 * face.depth.min(1.0)) as f32;
+    let shade = (0.94 + 0.06 * face.depth.clamp(0.0, 1.0)) as f32;
     Color32::from_rgb(
         (f32::from(base.r()) * shade) as u8,
         (f32::from(base.g()) * shade) as u8,
@@ -94,18 +94,116 @@ fn facet_fill(face: &Facet, highlighted: bool, t: CubePalette) -> Color32 {
 
 type CubeEdge = (Pos2, Pos2, usize, bool);
 
+fn cross(o: Pos2, a: Pos2, b: Pos2) -> f32 {
+    (a - o).x * (b - o).y - (a - o).y * (b - o).x
+}
+
+/// Monotone chain; interior lies where `cross(h[i], h[i + 1], p) > 0`.
+fn convex_hull(points: &[Pos2]) -> Vec<Pos2> {
+    let mut pts = points.to_vec();
+    pts.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    pts.dedup_by(|a, b| a.distance_sq(*b) < 1e-6);
+    if pts.len() < 3 {
+        return pts;
+    }
+    let mut hull: Vec<Pos2> = Vec::with_capacity(pts.len() * 2);
+    for pass in [pts.clone(), pts.into_iter().rev().collect()] {
+        let start = hull.len();
+        for p in pass {
+            while hull.len() >= start + 2
+                && cross(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0.0
+            {
+                hull.pop();
+            }
+            hull.push(p);
+        }
+        hull.pop();
+    }
+    hull
+}
+
+fn round_corners(hull: &[Pos2], radius: f32) -> Vec<Pos2> {
+    let n = hull.len();
+    if n < 3 {
+        return hull.to_vec();
+    }
+    let mut out = Vec::with_capacity(n * 5);
+    for (i, &v) in hull.iter().enumerate() {
+        let (prev, next) = (hull[(i + n - 1) % n], hull[(i + 1) % n]);
+        let r = radius.min(0.45 * v.distance(prev).min(v.distance(next)));
+        let a = v + (prev - v).normalized() * r;
+        let b = v + (next - v).normalized() * r;
+        for k in 0..=4u8 {
+            let s = f32::from(k) / 4.0;
+            let w = 1.0 - s;
+            out.push(pos2(
+                w * w * a.x + 2.0 * w * s * v.x + s * s * b.x,
+                w * w * a.y + 2.0 * w * s * v.y + s * s * b.y,
+            ));
+        }
+    }
+    out
+}
+
+/// Sutherland–Hodgman against a convex polygon oriented like `convex_hull`.
+fn clip_convex(subject: &[Pos2], clip: &[Pos2]) -> Vec<Pos2> {
+    let mut out = subject.to_vec();
+    for (i, &a) in clip.iter().enumerate() {
+        let b = clip[(i + 1) % clip.len()];
+        let input = std::mem::take(&mut out);
+        let Some(&last) = input.last() else {
+            break;
+        };
+        let mut s = last;
+        for &e in &input {
+            let (ds, de) = (cross(a, b, s), cross(a, b, e));
+            if (ds >= 0.0) != (de >= 0.0) {
+                out.push(s + (e - s) * (ds / (ds - de)));
+            }
+            if de >= 0.0 {
+                out.push(e);
+            }
+            s = e;
+        }
+    }
+    out
+}
+
+fn clip_segment(a: Pos2, b: Pos2, clip: &[Pos2]) -> Option<(Pos2, Pos2)> {
+    let (mut t0, mut t1) = (0.0_f32, 1.0_f32);
+    for (i, &p) in clip.iter().enumerate() {
+        let q = clip[(i + 1) % clip.len()];
+        let (da, db) = (cross(p, q, a), cross(p, q, b));
+        if da < 0.0 && db < 0.0 {
+            return None;
+        }
+        if da < 0.0 {
+            t0 = t0.max(da / (da - db));
+        } else if db < 0.0 {
+            t1 = t1.min(da / (da - db));
+        }
+    }
+    (t0 < t1).then(|| (a + (b - a) * t0, a + (b - a) * t1))
+}
+
 fn append_face(
     mesh: &mut egui::Mesh,
     edges: &mut Vec<CubeEdge>,
     face: &Facet,
     highlighted: bool,
     t: CubePalette,
+    clip: &[Pos2],
 ) {
-    let centre = mesh.vertices.len() as u32;
     let fill = facet_fill(face, highlighted, t);
-    mesh.colored_vertex(face.centre, fill);
-    for &p in &face.points {
-        mesh.colored_vertex(p, fill);
+    let clipped = clip_convex(&face.points, clip);
+    if clipped.len() >= 3 {
+        let base = mesh.vertices.len() as u32;
+        for &p in &clipped {
+            mesh.colored_vertex(p, fill);
+        }
+        for j in 1..clipped.len() as u32 - 1 {
+            mesh.add_triangle(base, base + j, base + j + 1);
+        }
     }
     for (j, (&a, &b)) in face
         .points
@@ -114,11 +212,6 @@ fn append_face(
         .take(face.points.len())
         .enumerate()
     {
-        mesh.add_triangle(
-            centre,
-            centre + 1 + j as u32,
-            centre + 1 + ((j + 1) % face.points.len()) as u32,
-        );
         // Picking subdivisions have no visible seams; merge their shared boundaries.
         let outer = face.outer_edges.get(j).copied().unwrap_or(false);
         if !highlighted && !outer {
@@ -148,6 +241,11 @@ pub(super) fn paint_cube(
     let mut fill_mesh = egui::Mesh::default();
     let mut edges = Vec::new();
     let direction = hovered.and_then(|i| faces.get(i)).map(|f| f.direction);
+    let all: Vec<Pos2> = faces
+        .iter()
+        .flat_map(|f| f.points.iter().copied())
+        .collect();
+    let silhouette = round_corners(&convex_hull(&all), 5.0 * scale);
     for face in faces {
         append_face(
             &mut fill_mesh,
@@ -155,24 +253,25 @@ pub(super) fn paint_cube(
             face,
             direction == Some(face.direction),
             t,
+            &silhouette,
         );
     }
     painter.add(Shape::mesh(fill_mesh));
+    if silhouette.len() >= 3 {
+        painter.add(Shape::closed_line(
+            silhouette.clone(),
+            Stroke::new(1.0, t.cube_border),
+        ));
+    }
     for (a, b, highlights, outer) in edges {
-        if !outer && highlights != 1 {
+        // Hover outlines the face, including its silhouette side; seams between its picking
+        // regions (highlighted twice) stay hidden.
+        if highlights == 0 || (!outer && highlights != 1) {
             continue;
         }
-        painter.line_segment(
-            [a, b],
-            Stroke::new(
-                1.0,
-                if highlights > 0 {
-                    t.accent
-                } else {
-                    t.cube_border
-                },
-            ),
-        );
+        if let Some((a, b)) = clip_segment(a, b, &silhouette) {
+            painter.line_segment([a, b], Stroke::new(1.0, t.accent));
+        }
     }
     if labels {
         for face in faces {
@@ -237,5 +336,42 @@ pub(super) fn curved_arrow(
             hover,
             t,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn area(points: &[Pos2]) -> f32 {
+        let n = points.len();
+        (0..n)
+            .map(|i| cross(Pos2::ZERO, points[i], points[(i + 1) % n]))
+            .sum::<f32>()
+            .abs()
+            / 2.0
+    }
+
+    #[test]
+    fn rounded_hull_trims_square_corners() {
+        let square = [
+            pos2(0.0, 0.0),
+            pos2(100.0, 0.0),
+            pos2(100.0, 100.0),
+            pos2(0.0, 100.0),
+        ];
+        let hull = convex_hull(&square);
+        assert_eq!(hull.len(), 4);
+        let rounded = round_corners(&hull, 5.0);
+        let clipped = clip_convex(&square, &rounded);
+        assert!(clipped.len() >= 16);
+        let a = area(&clipped);
+        assert!(a < 10_000.0 && a > 9_950.0, "area {a}");
+        for p in &clipped {
+            assert!((-1e-3..=100.001).contains(&p.x) && (-1e-3..=100.001).contains(&p.y));
+            assert!(p.distance(pos2(0.0, 0.0)) > 1.0);
+        }
+        assert!(clip_segment(pos2(-10.0, 50.0), pos2(110.0, 50.0), &rounded).is_some());
+        assert!(clip_segment(pos2(-10.0, -1.0), pos2(-1.0, -10.0), &rounded).is_none());
     }
 }

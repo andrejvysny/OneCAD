@@ -117,3 +117,78 @@ fn closed_floating_panel_renders_nothing_after_animation() {
     assert!(show(&ctx, 1.0, false).is_none(), "fully closed");
     assert!(show(&ctx, 1.1, true).is_some(), "reopens");
 }
+
+#[test]
+fn bare_titlebar_has_no_file_and_keeps_height() {
+    for dark in [false, true] {
+        let ctx = ctx_for(dark);
+        frame(&ctx, 0.0, |ui| {
+            let r = ui
+                .scope(|ui| {
+                    let out = TitleBar::new("Doc").dirty(true).bare(true).show(ui);
+                    assert!(out.file.is_none() && out.workspace.is_none());
+                    assert!(!out.home && !out.undo && !out.redo && !out.search);
+                })
+                .response;
+            assert_eq!(r.rect.height(), 44.0);
+        });
+    }
+}
+
+#[test]
+fn workspace_selector_paints_in_both_themes() {
+    for dark in [false, true] {
+        let ctx = ctx_for(dark);
+        frame(&ctx, 0.0, |ui| {
+            for open in [false, true] {
+                let r = ui.add(WorkspaceSelector::new("Design", "body").open(open));
+                assert_eq!(r.rect.height(), 36.0);
+                let r = ui.add(WorkspaceSelector::new("Design", "body").compact(true));
+                assert_eq!(
+                    r.rect.size(),
+                    vec2(WorkspaceSelector::COMPACT_W, WorkspaceSelector::COMPACT_H)
+                );
+            }
+        });
+    }
+}
+
+#[test]
+fn compact_workspace_menu_rows_are_34_with_active_check() {
+    use super::{WorkspaceItem, workspace_menu_compact};
+    for dark in [false, true] {
+        let ctx = ctx_for(dark);
+        let mk = |label, active, enabled| WorkspaceItem {
+            label,
+            icon: "body",
+            shortcut: Some("⌃1"),
+            subtitle: None,
+            enabled,
+            active,
+        };
+        let items = [mk("Design", true, true), mk("Assembly", false, false)];
+        let ext = [mk("CNC", false, true)];
+        frame(&ctx, 0.0, |ui| {
+            let top = ui.cursor().top();
+            let out = workspace_menu_compact(ui, &items, &ext, ("Customize…", true), Some("hint"));
+            assert!(out.picked.is_none() && out.picked_extension.is_none() && !out.customize);
+            // 3 rows + footer at 34 each, 2 dividers at 9 each.
+            let h = ui.min_rect().bottom() - top;
+            assert_eq!(h, 4.0 * 34.0 + 2.0 * 9.0);
+        });
+        let shapes = |active: bool| {
+            let items = [mk("Design", active, true)];
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 400.0))),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                workspace_menu_compact(ui, &items, &[], ("Customize…", true), None);
+            });
+            out.textures_delta.clear();
+            out.shapes.len()
+        };
+        // The active row paints the check polyline on top of the inactive shapes.
+        assert!(shapes(true) > shapes(false));
+    }
+}

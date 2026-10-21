@@ -135,7 +135,6 @@ const DIMENSIONS: &[ToolDef] = &[
 ];
 const UTILITIES: &[ToolDef] = &[
     t(ToolId::Import, "import", "Import…"),
-    t(ToolId::Section, "section", "Section / display settings"),
     t(ToolId::More, "overflow", "More tools"),
 ];
 const MORE: &[ToolDef] = &[t(ToolId::More, "overflow", "More tools")];

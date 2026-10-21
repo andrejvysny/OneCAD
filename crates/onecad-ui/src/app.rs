@@ -37,6 +37,8 @@ pub struct App {
     pub navigation: crate::navigation::Navigation,
     pub transform_gizmo: crate::transform_ui::TransformGizmo,
     pub(crate) extrude_handle: crate::extrude_handle::ExtrudeHandle,
+    /// Projection chosen for modeling, restored when a sketch (always orthographic) closes.
+    pub(crate) modeling_projection: Option<onecad_scene::Projection>,
     pub topology: crate::viewport_selection::Selection,
     pub pending_display_options: Option<onecad_render::RenderOptions>,
     /// Last drawable capture; `camera` may already contain pending navigation.
@@ -141,6 +143,7 @@ impl App {
             navigation: Default::default(),
             transform_gizmo: Default::default(),
             extrude_handle: Default::default(),
+            modeling_projection: None,
             topology: Default::default(),
             pending_display_options: None,
             view: None,

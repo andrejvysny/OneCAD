@@ -59,12 +59,13 @@ fn named_patch_picking_uses_frozen_plane_coordinates_and_refuses_off_patch() {
         )
         .unwrap();
         let extent = camera.offset.length() * 0.22;
+        let (sx, sy) = picking::facing(&view, plane);
         for (factor, expected) in [(0.6, true), (0.01, false), (1.2, false)] {
             let point = plane
                 .plane()
                 .to_world(onecad_core::math::Vec2::new_unchecked(
-                    factor * extent,
-                    factor * extent,
+                    sx * factor * extent,
+                    sy * factor * extent,
                 ));
             let projected = view.project(DVec3::new(point.x, point.y, point.z)).unwrap();
             assert_eq!(

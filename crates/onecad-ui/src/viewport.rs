@@ -114,6 +114,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 }
                 crate::sketch_creation::chain_input::cancel(app, ui.ctx());
                 app.cancel_sketch_gesture();
+                // Menus and dialogs own input, but the cube and handles stay visible beneath them.
+                ui.add_enabled_ui(false, |ui| {
+                    crate::viewport_widgets::show(app, ui, rect, &view);
+                });
                 return;
             }
             let overlay_owns = crate::viewport_widgets::show(app, ui, rect, &view);

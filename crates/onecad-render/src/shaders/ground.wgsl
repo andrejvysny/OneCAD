@@ -40,6 +40,12 @@ fn grid_cov(g: vec2<f32>, step: f32, width: f32) -> vec2<f32> {
     return vec2<f32>(max(cov.x, cov.y), max(fw.x, fw.y));
 }
 
+// Minor lines share the major lines' radial fade; they leave early only where cells shrink
+// below ~2 px and would alias into a flat tone.
+fn minor_lod(cells_per_pixel: f32) -> f32 {
+    return 1.0 - smoothstep(0.4, 0.7, cells_per_pixel);
+}
+
 @fragment
 fn fs_ground(i: GOut) -> @location(0) vec4<f32> {
     if (i.support == 1u) {
@@ -50,7 +56,7 @@ fn fs_ground(i: GOut) -> @location(0) vec4<f32> {
         let major = grid_cov(local, u.grid.x * 10.0, u.ground.z);
         let radius = length(local - vec2<f32>(u.support_x.w, u.support_y.w)) / u.grid.w;
         let fade = pow(clamp(1.0 - radius, 0.0, 1.0), 2.0);
-        let coverage = max(minor.x * (1.0 - smoothstep(0.08, 0.2, minor.y)), major.x) * fade;
+        let coverage = max(minor.x * minor_lod(minor.y), major.x) * fade;
         return vec4<f32>(mix(u.grid_minor.rgb, u.grid_major.rgb, major.x), coverage);
     }
     let g = i.wp.xy;
@@ -58,8 +64,7 @@ fn fs_ground(i: GOut) -> @location(0) vec4<f32> {
     let major = grid_cov(g, u.grid.x * 10.0, u.ground.z);
     let r = length(g - u.grid.yz) / u.grid.w;
     let fade = pow(clamp(1.0 - r, 0.0, 1.0), 2.0);
-    // Minor lines leave before they crowd into a tone (cells under ~8 px).
-    let lod = 1.0 - smoothstep(0.08, 0.2, minor.y);
+    let lod = minor_lod(minor.y);
     var c = u.canvas.rgb;
     if (u.support_origin.w == 0.0) {
         c = mix(c, u.grid_minor.rgb, minor.x * fade * lod);

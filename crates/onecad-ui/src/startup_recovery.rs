@@ -1,6 +1,7 @@
 //! Startup decisions precede opening any saved UUID and remain explicit.
 use crate::bridge::{Backend, Command};
 use onecad_app::{api, dto::RecoveryInfoDto};
+use onecad_widgets::components::overlays::{Dialog, DialogIntent};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug)]
@@ -186,20 +187,41 @@ pub fn show(app: &mut crate::app::App, ctx: &egui::Context) -> bool {
     let offer = recovery.offers.first().cloned();
     let busy = recovery.busy;
     drop(recovery);
-    let mut choice = None;
-    egui::Modal::new(egui::Id::unique("startup-recovery")).show(ctx, |ui| {
-        ui.heading("Recover unsaved work");
-        let Some(offer) = &offer else { ui.label("Checking crash recovery…"); return; };
-        ui.label(offer.title.as_deref().unwrap_or("Recovered document"));
-        if let Some(path) = &offer.original_path { ui.label(path); }
-        ui.label("Restore keeps recovered changes unsaved. Open saved and Discard permanently remove this recovery copy.");
-        ui.add_enabled_ui(!busy, |ui| {
-            if ui.button("Restore").clicked() { choice = Some(Choice::Restore); }
-            if ui.add_enabled(offer.original_path.is_some(), egui::Button::new("Open saved — discard recovery")).clicked() { choice = Some(Choice::OpenSaved); }
-            if ui.button("Discard recovery").clicked() { choice = Some(Choice::Discard); }
-        });
-        ui.label(&app.status);
+    let title = offer.as_ref().map_or("Checking crash recovery…", |offer| {
+        offer.title.as_deref().unwrap_or("Recovered document")
     });
+    let body = "Restore keeps recovered changes unsaved. Open saved and Discard permanently remove this recovery copy.";
+    let open_saved = offer.as_ref().is_some_and(|o| o.original_path.is_some());
+    let mut dialog = Dialog::new(DialogIntent::Decide, "Recover unsaved work")
+        .icon("unsaved")
+        .body(body)
+        .primary("Restore", offer.is_some())
+        .secondary("Open saved", open_saved)
+        .tertiary("Discard recovery")
+        .disabled(busy || offer.is_none());
+    if offer.is_none() {
+        dialog = dialog.body("Checking crash recovery…");
+    }
+    let out = dialog.show(ctx, egui::Id::unique("startup-recovery"), |ui| {
+        if let Some(path) = offer.as_ref().and_then(|o| o.original_path.as_deref()) {
+            ui.label(format!("{title} — {path}"));
+        } else if offer.is_some() {
+            ui.label(title);
+        }
+        if !app.status.is_empty() {
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(&app.status).small());
+        }
+    });
+    let choice = if out.primary {
+        Some(Choice::Restore)
+    } else if out.secondary {
+        Some(Choice::OpenSaved)
+    } else if out.tertiary {
+        Some(Choice::Discard)
+    } else {
+        None
+    };
     if let (Some(offer), Some(choice)) = (offer, choice) {
         if let Ok(mut recovery) = app.bridge.shared.recovery.lock() {
             recovery.busy = true;
