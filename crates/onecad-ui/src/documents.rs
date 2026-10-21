@@ -14,6 +14,9 @@ use crate::{app::App, bridge::Bridge, qa::QaPaths, service_runtime::ServiceRunti
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod save_all;
+pub(crate) use save_all::Finished as SaveAllFinished;
+
 pub type TabId = u64;
 
 static NEXT_TAB: AtomicU64 = AtomicU64::new(1);
@@ -61,6 +64,13 @@ pub struct TabSummary {
     pub failed: bool,
 }
 
+/// A background New/Open/Import that ended without a document, reported in the
+/// active tab once its own tab has closed.
+struct Settled {
+    tab: TabId,
+    diagnostic: Option<(crate::diagnostics::FileAction, crate::diagnostics::State)>,
+}
+
 pub struct Tabs {
     runtime: Arc<ServiceRuntime>,
     paths: QaPaths,
@@ -71,6 +81,12 @@ pub struct Tabs {
     closing: Vec<DocumentEditor>,
     /// Monotonic activation counter (most-recent-first order).
     activations: u64,
+    /// Parked provisional tabs whose New/Open/Import ended without a document.
+    settled: Vec<Settled>,
+    /// Tabs parked with a tool's evaluation and preview dropped; re-issued once
+    /// shown and free of a file action.
+    stranded: Vec<TabId>,
+    pub(crate) save_all: save_all::SaveAll,
 }
 
 impl Tabs {
@@ -86,6 +102,9 @@ impl Tabs {
             parked: Vec::new(),
             closing: Vec::new(),
             activations: 0,
+            settled: Vec::new(),
+            stranded: Vec::new(),
+            save_all: Default::default(),
         }
     }
 
@@ -187,7 +206,7 @@ impl App {
         self.activate_tab(order[target]);
     }
 
-    fn tab_order(&self) -> Vec<TabId> {
+    pub(crate) fn tab_order(&self) -> Vec<TabId> {
         let mut order: Vec<TabId> = self.tabs.parked.iter().map(|doc| doc.tab).collect();
         order.insert(self.active_index(), self.doc.tab);
         order
@@ -256,6 +275,23 @@ impl App {
         for index in 0..self.tabs.closing.len() {
             self.with_parked(index, ctx, true);
         }
+        for settled in std::mem::take(&mut self.tabs.settled) {
+            if let Some(index) = self
+                .tabs
+                .parked
+                .iter()
+                .position(|doc| doc.tab == settled.tab)
+            {
+                let doc = self.tabs.parked.remove(index);
+                doc.bridge.request_shutdown();
+                self.report_settled(&doc.status, settled.diagnostic);
+                self.tabs.closing.push(doc);
+            }
+        }
+        self.tabs
+            .stranded
+            .retain(|tab| self.doc.tab == *tab || self.tabs.parked.iter().any(|d| d.tab == *tab));
+        self.republish_stranded();
         let (stopped, closing): (Vec<_>, Vec<_>) = std::mem::take(&mut self.tabs.closing)
             .into_iter()
             .partition(|doc| doc.stopped);
@@ -298,6 +334,46 @@ impl App {
     fn release_thumbnail(&mut self, thumbnail: Option<Thumbnail>) {
         if let Some(thumbnail) = thumbnail {
             self.gpu.renderer.write().free_texture(&thumbnail.texture);
+        }
+    }
+
+    /// The background tab is gone, so its outcome is the active tab's to show,
+    /// named by its request. An already-open answer keeps the user where they are.
+    fn report_settled(
+        &mut self,
+        status: &str,
+        diagnostic: Option<(crate::diagnostics::FileAction, crate::diagnostics::State)>,
+    ) {
+        use crate::diagnostics::FileAction;
+        let request = match diagnostic.map(|(action, _)| action) {
+            Some(FileAction::New) => "New document",
+            Some(FileAction::Import) => "Import",
+            _ => "Open",
+        };
+        self.doc.command_status = true;
+        self.doc.status = format!("{request} (background tab): {status}");
+        if let Some((action, state)) = diagnostic {
+            self.doc.diagnostics.record(
+                crate::diagnostics::Source::File(action),
+                state,
+                &self.doc.status,
+            );
+        }
+    }
+
+    /// Re-issues the active tool's draft dropped when its tab was parked. Held
+    /// while a file action or decision blocks authoring (as a draft change is),
+    /// and retried every frame until it is not.
+    fn republish_stranded(&mut self) {
+        let action = onecad_interaction::Action::Republish;
+        if self.parked || self.doc.documents.blocks_authoring(&action) {
+            return;
+        }
+        let tab = self.doc.tab;
+        let before = self.tabs.stranded.len();
+        self.tabs.stranded.retain(|stranded| *stranded != tab);
+        if self.tabs.stranded.len() != before {
+            self.dispatch(action);
         }
     }
 
@@ -357,6 +433,9 @@ impl App {
     /// gestures and previews are cancelled; tools, sketch mode and selection stay.
     fn deactivate(&mut self) {
         self.capture_thumbnail();
+        if self.doc.interaction.tool.is_some() && !self.tabs.stranded.contains(&self.doc.tab) {
+            self.tabs.stranded.push(self.doc.tab);
+        }
         self.cancel_sketch_gesture();
         self.doc.bridge.cancel_candidates();
         self.doc.sections.cancel();
@@ -401,6 +480,11 @@ impl App {
             let _ = self.close_active_tab(close.as_deref());
             return;
         }
+        // Parking dropped the tool's evaluation and preview; its context is the
+        // retained display's, so the re-issued draft previews against this scene.
+        // Not held for `awaiting_scene`: preview upload is fenced on the scene's
+        // identity, and an occluded window never clears that flag.
+        self.republish_stranded();
         self.ui.start_open = self.doc.document_state.is_none() && self.doc.display.is_none();
         self.context().request_repaint();
     }
@@ -430,12 +514,27 @@ impl App {
 
     /// Closes a tab opened for a New/Open/Import that produced no document, and
     /// returns to `focus`'s tab (an already-open document) or the tab it came from.
-    pub(crate) fn settle_provisional_tab(&mut self, focus: Option<onecad_app::process::HostId>) {
+    pub(crate) fn settle_provisional_tab(
+        &mut self,
+        focus: Option<onecad_app::process::HostId>,
+        diagnostic: Option<(crate::diagnostics::FileAction, crate::diagnostics::State)>,
+    ) {
         let Some(origin) = self.doc.origin else {
             return;
         };
-        // Only the active editor may be swapped out; a parked one keeps its tab.
-        if self.parked || self.document_open() {
+        if self.document_open() {
+            return;
+        }
+        if self.parked {
+            // The user left before it answered. With no document it has no tab
+            // to return to, so its host closes once the parked drain ends
+            // (a parked editor cannot be swapped out mid-drain) and its outcome
+            // is reported where the user is; an already-open file is not focused.
+            self.doc.origin = None;
+            self.tabs.settled.push(Settled {
+                tab: self.doc.tab,
+                diagnostic,
+            });
             return;
         }
         let status = std::mem::take(&mut self.doc.status);
@@ -517,45 +616,6 @@ impl App {
             .collect();
         docs.sort_by_key(|doc| std::cmp::Reverse(doc.last_active));
         docs.into_iter().map(|doc| doc.tab).collect()
-    }
-
-    /// ⌥⌘S: every document with a file saves in place, in the background; the
-    /// first one never saved is shown and asks for a location (one dialog at a
-    /// time, so the user is never handed a stack of them).
-    pub fn save_all(&mut self) {
-        let unsaved = |doc: &DocumentEditor| {
-            doc.authoring_dirty || doc.document_state.as_ref().is_some_and(|s| s.dirty)
-        };
-        let has_file = |doc: &DocumentEditor| {
-            doc.document_state
-                .as_ref()
-                .is_some_and(|s| s.path.is_some())
-        };
-        let mut untitled = (unsaved(&self.doc) && !has_file(&self.doc)).then_some(self.doc.tab);
-        for index in 0..self.tabs.parked.len() {
-            let doc = &self.tabs.parked[index];
-            if !unsaved(doc) {
-                continue;
-            }
-            if !has_file(doc) {
-                untitled.get_or_insert(doc.tab);
-                continue;
-            }
-            std::mem::swap(&mut self.doc, &mut self.tabs.parked[index]);
-            self.parked = true;
-            self.document_request(crate::document_flow::Request::Save { save_as: false });
-            self.parked = false;
-            std::mem::swap(&mut self.doc, &mut self.tabs.parked[index]);
-        }
-        if unsaved(&self.doc) && has_file(&self.doc) {
-            self.document_request(crate::document_flow::Request::Save { save_as: false });
-        }
-        if let Some(tab) = untitled {
-            self.show_tab(tab);
-            if self.doc.tab == tab {
-                self.document_request(crate::document_flow::Request::Save { save_as: false });
-            }
-        }
     }
 
     /// Asks the backend what the close prompt should list for the active document.

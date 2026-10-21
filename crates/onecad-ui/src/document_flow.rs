@@ -121,6 +121,7 @@ impl Flow {
                 action,
                 Action::Confirm
                     | Action::DraftChanged(_)
+                    | Action::Republish
                     | Action::TransformDraftChanged { .. }
                     | Action::BeginExtrude { .. }
                     | Action::BeginOperation { .. }
@@ -269,14 +270,23 @@ impl crate::app::App {
             _ => crate::diagnostics::State::Succeeded,
         };
         let next = self.doc.documents.complete(&result);
+        let diagnostic = action.map(|action| (action, diagnostic_state));
+        // A close-after-save below may show another tab; Save All follows this one.
+        let tab = self.doc.tab;
+        let save_all = match &result {
+            Ok(Outcome::Cancelled) => Some(crate::documents::SaveAllFinished::Cancelled),
+            Ok(Outcome::Saved(_)) => Some(crate::documents::SaveAllFinished::Saved),
+            Err(_) => Some(crate::documents::SaveAllFinished::Failed),
+            _ => None,
+        };
         match result {
             Ok(Outcome::Cancelled) => {
                 self.doc.status = "File action cancelled".into();
-                self.settle_provisional_tab(None);
+                self.settle_provisional_tab(None, diagnostic);
             }
             Ok(Outcome::AlreadyOpen { host }) => {
                 self.doc.status = "That document is already open".into();
-                self.settle_provisional_tab(Some(host));
+                self.settle_provisional_tab(Some(host), diagnostic);
             }
             Ok(Outcome::Replaced { warning }) => {
                 if !self.parked {
@@ -309,7 +319,7 @@ impl crate::app::App {
             Ok(Outcome::Exported(path)) => self.doc.status = format!("Exported {}", path.display()),
             Err(error) => {
                 self.doc.status = error;
-                self.settle_provisional_tab(None);
+                self.settle_provisional_tab(None, diagnostic);
             }
         }
         if let Some(action) = action {
@@ -321,6 +331,9 @@ impl crate::app::App {
         }
         if let Some(next) = next {
             self.launch_document(next);
+        }
+        if let Some(finished) = save_all {
+            self.save_all_finished(tab, finished);
         }
     }
 }
@@ -515,6 +528,7 @@ mod tests {
             };
             assert!(flow.blocks_authoring(&Action::Confirm));
             assert!(flow.blocks_authoring(&Action::DraftChanged("8".into())));
+            assert!(flow.blocks_authoring(&Action::Republish));
             assert!(!flow.blocks_authoring(&Action::Cancel));
             assert!(!flow.blocks_authoring(&Action::ContextChanged(None)));
             flow.complete(&saved(true));

@@ -147,6 +147,20 @@ impl Interaction {
         ]
     }
 
+    /// Only an editing tool with a draft has anything to re-evaluate; a commit in
+    /// flight is not a candidate and is never re-sent.
+    pub(crate) fn republish(&mut self) -> Vec<Effect> {
+        let Some(tool) = self
+            .tool
+            .as_ref()
+            .filter(|tool| tool.phase == SessionPhase::Editing && !tool.draft.is_empty())
+        else {
+            return Vec::new();
+        };
+        let draft = tool.draft.clone();
+        self.change_draft(draft)
+    }
+
     pub(crate) fn confirm(&mut self) -> Vec<Effect> {
         let Some(tool) = self
             .tool

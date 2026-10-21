@@ -29,60 +29,88 @@ impl State {
     }
 }
 
-/// Handles ⌃Tab, ⇧⌃Tab, W, Escape and the release of Control.
-pub fn route(app: &mut App, raw: &mut egui::RawInput) {
-    let mut commit = false;
-    let mut cancel = false;
-    let mut close = false;
-    let mut released = false;
-    raw.events.retain(|event| {
-        if let egui::Event::ModifiersChanged(modifiers) = event {
-            released |= !modifiers.ctrl;
-            return true;
+/// Handles one event at its position in the frame: ⌃Tab opens or steps, W closes
+/// the highlighted document, Escape abandons, and Control's release switches —
+/// only if the switcher is open at that point, so a later ⌃Tab in the same frame
+/// opens it again. Returns whether the event was consumed.
+pub(crate) fn event(app: &mut App, event: &egui::Event) -> bool {
+    if let egui::Event::ModifiersChanged(modifiers) = event {
+        if !modifiers.ctrl
+            && let Some(state) = app.switcher.take()
+        {
+            go(app, state.order[state.selected]);
         }
-        let egui::Event::Key {
-            key,
-            pressed: true,
-            modifiers,
-            ..
-        } = event
-        else {
-            return true;
-        };
-        match key {
-            egui::Key::Tab if modifiers.ctrl && !modifiers.alt => {
-                match &mut app.switcher {
-                    Some(state) => state.step(modifiers.shift),
-                    None => app.switcher = open(app, modifiers.shift),
+        return false;
+    }
+    let egui::Event::Key {
+        key,
+        pressed: true,
+        modifiers,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    match key {
+        egui::Key::Tab if modifiers.ctrl && !modifiers.alt => {
+            match &mut app.switcher {
+                Some(state) => state.step(modifiers.shift),
+                None => app.switcher = open(app, modifiers.shift),
+            }
+            true
+        }
+        egui::Key::W if app.switcher.is_some() => {
+            close_selected(app);
+            true
+        }
+        egui::Key::Escape if app.switcher.is_some() => {
+            app.switcher = None;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The frame's events without the Escapes the switcher will consume, for routers
+/// that run before it (`None` when there are none). Mirrors the open/closed
+/// transitions of [`event`], without effects.
+pub(crate) fn without_own_escape(app: &App, events: &[egui::Event]) -> Option<Vec<egui::Event>> {
+    let mut open = app.switcher.is_some();
+    let mut own = Vec::new();
+    for (index, event) in events.iter().enumerate() {
+        match event {
+            egui::Event::ModifiersChanged(modifiers) if !modifiers.ctrl => open = false,
+            egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } => match key {
+                egui::Key::Tab if modifiers.ctrl && !modifiers.alt => open |= !app.busy(),
+                egui::Key::W if open => open = false,
+                egui::Key::Escape if open => {
+                    own.push(index);
+                    open = false;
                 }
-                false
-            }
-            egui::Key::W if app.switcher.is_some() => {
-                close = true;
-                false
-            }
-            egui::Key::Escape if app.switcher.is_some() => {
-                cancel = true;
-                false
-            }
-            _ => true,
+                _ => {}
+            },
+            _ => {}
         }
-    });
-    // Losing focus mid-switch must not leave the switcher waiting for a release
-    // that will never be delivered to this window.
-    if app.switcher.is_some() && !raw.focused {
-        cancel = true;
     }
-    if app.switcher.is_some() && released && !cancel {
-        commit = true;
-    }
-    if close {
-        close_selected(app);
-    } else if cancel {
-        app.switcher = None;
-    } else if commit && let Some(state) = app.switcher.take() {
-        go(app, state.order[state.selected]);
-    }
+    (!own.is_empty()).then(|| {
+        events
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !own.contains(index))
+            .map(|(_, event)| event.clone())
+            .collect()
+    })
+}
+
+/// The switcher's events alone, in frame order.
+#[cfg(test)]
+pub fn route(app: &mut App, raw: &mut egui::RawInput) {
+    crate::input::ordered::route(app, raw, false, false, false);
 }
 
 /// Selecting a card with the pointer switches at once.
@@ -118,7 +146,20 @@ fn open(app: &App, back: bool) -> Option<State> {
     Some(state)
 }
 
+/// Switching parks the active document, which must not be mid-command (as for
+/// ⌘⇧[ and the tab strip); the switcher is already dropped by then.
+fn refuse_busy(app: &mut App) -> bool {
+    if app.busy() {
+        app.doc.status = "Wait for the current command before switching documents".into();
+        return true;
+    }
+    false
+}
+
 fn go(app: &mut App, target: Target) {
+    if refuse_busy(app) {
+        return;
+    }
     match target {
         Target::Tab(tab) => app.show_tab(tab),
         Target::Home => app.open_home(),
@@ -131,6 +172,9 @@ fn close_selected(app: &mut App) {
     let Some(state) = app.switcher.take() else {
         return;
     };
+    if refuse_busy(app) {
+        return;
+    }
     if let Target::Tab(tab) = state.order[state.selected] {
         app.show_tab(tab);
         if app.doc.tab == tab {

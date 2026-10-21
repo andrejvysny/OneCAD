@@ -59,6 +59,13 @@ pub(super) const HOST_TESTS: &[&str] = &[
     "app_logic_tests::sketch_entry_delivery_tests::face_entry_context_replacement_cancels_and_releases_after_delivery",
     "app_logic_tests::sketch_entry_delivery_tests::face_entry_submit_failure_releases_ownership_without_sketch",
     "app_logic_tests::sketch_entry_delivery_tests::face_entry_ownership_stays_with_its_tab_when_another_document_opens",
+    "app_logic_tests::document_tab_delivery_tests::a_draft_left_mid_preview_republishes_on_return_and_confirms_once",
+    "app_logic_tests::document_tab_delivery_tests::ctrl_release_commits_at_its_position_and_a_later_ctrl_tab_reopens",
+    "app_logic_tests::document_tab_delivery_tests::same_frame_shortcuts_reach_the_document_active_at_their_position",
+    "app_logic_tests::document_tab_delivery_tests::save_all_saves_titled_in_place_and_continues_through_every_untitled",
+    "app_logic_tests::document_tab_delivery_tests::save_all_stops_at_a_cancelled_dialog_reports_failures_and_busy_documents",
+    "app_logic_tests::document_tab_delivery_tests::a_provisional_tab_answered_in_the_background_closes_its_host",
+    "app_logic_tests::document_tab_delivery_tests::save_all_moves_on_after_a_saved_dialog_even_when_that_document_closes",
 ];
 /// Ignored service and bridge cases outside `app_logic_tests`; they do not
 /// emit adapter evidence, so the gate runs them as a separate exact selection.

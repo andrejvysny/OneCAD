@@ -163,6 +163,9 @@ pub enum Action {
     },
     Confirm,
     Cancel,
+    /// The host dropped the tool's in-flight evaluation and preview (its document
+    /// tab was parked); re-issue the unchanged draft under a fresh sequence.
+    Republish,
     CommitAccepted {
         tag: RequestTag,
         revision: u64,

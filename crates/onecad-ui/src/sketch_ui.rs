@@ -72,8 +72,11 @@ impl App {
         {
             self.doc.diagnostics.sketch_visit(report.key());
             self.doc.diagnostics.profile = Some(report);
-            self.ui.inspector_open = true;
-            self.ui.inspector_tab = crate::ui_state::InspectorTab::Properties;
+            // The inspector is window chrome: a background document never opens it.
+            if !self.parked {
+                self.ui.inspector_open = true;
+                self.ui.inspector_tab = crate::ui_state::InspectorTab::Properties;
+            }
         }
         for effect in self.doc.sketch.dispatch(action) {
             let tag = effect_tag(&effect).clone();
