@@ -15,6 +15,26 @@ use std::f64::consts::{PI, TAU};
 pub const DEFAULT_PICK_RADIUS: f32 = 8.0;
 const MAX_CURVE_SEGMENTS: usize = 512;
 
+pub(crate) fn paint_selected(
+    painter: &Painter,
+    rect: Rect,
+    view: &ViewSnapshot,
+    sketch: &Sketch,
+    color: Color32,
+) {
+    let plane = sketch.effective_plane();
+    let painter = painter.with_clip_rect(rect);
+    for entity in sketch.entities() {
+        if let SketchEntity::Point { at, .. } = entity {
+            if let Some(screen) = project(rect, view, plane, *at) {
+                painter.circle_filled(screen, 3.0, color);
+            }
+        } else if let Some(points) = entity_points(sketch, entity, rect, view, plane) {
+            paint_path(&painter, rect, view, plane, &points, color);
+        }
+    }
+}
+
 pub fn paint(
     painter: &Painter,
     rect: Rect,

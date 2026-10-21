@@ -14,6 +14,11 @@ use tokio::sync::OwnedSemaphorePermit;
 
 #[derive(Debug)]
 pub enum Request {
+    SelectionPreview {
+        expected: api::PreviewContext,
+        id: SketchId,
+        sender: mpsc::Sender<Result<onecad_core::sketch::Sketch, String>>,
+    },
     FacePreview {
         context: DocumentContext,
         body: onecad_core::ids::BodyId,
@@ -82,6 +87,17 @@ pub async fn execute(
     permit: OwnedSemaphorePermit,
     sender: &mpsc::Sender<Message>,
 ) {
+    if let Request::SelectionPreview {
+        expected,
+        id,
+        sender,
+    } = &request
+    {
+        let result = selection_preview(&backend.state, expected, *id).await;
+        let _ = sender.send(result);
+        backend.shared.wake();
+        return;
+    }
     if let Request::FacePreview {
         context,
         body,
@@ -165,6 +181,7 @@ async fn run(
 ) -> Result<Reply, String> {
     let state = &backend.state;
     match request {
+        Request::SelectionPreview { .. } => Err("Sketch preview is read-only".into()),
         Request::FacePreview { .. } => Err("Face preview is read-only".into()),
         Request::FaceEntry {
             id,
@@ -230,6 +247,31 @@ async fn run(
             execute_effect(backend, effect, actions, control).await
         }
     }
+}
+
+async fn selection_preview(
+    state: &onecad_app::state::AppState,
+    expected: &api::PreviewContext,
+    id: SketchId,
+) -> Result<onecad_core::sketch::Sketch, String> {
+    if &api::preview_context(state)
+        .await
+        .map_err(|error| error.to_string())?
+        != expected
+    {
+        return Err("Sketch selection belongs to an obsolete document or worker head".into());
+    }
+    let sketch = api::get_sketch_snapshot(state, id)
+        .await
+        .map_err(|error| error.to_string())?;
+    if &api::preview_context(state)
+        .await
+        .map_err(|error| error.to_string())?
+        != expected
+    {
+        return Err("Document changed while reading selected sketch".into());
+    }
+    Ok(sketch)
 }
 
 async fn preview_face(

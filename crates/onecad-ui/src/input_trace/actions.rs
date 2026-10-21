@@ -130,6 +130,9 @@ pub(crate) fn message(message: &crate::bridge::Message) -> Value {
             "error": delivery.error.as_deref().map(bounded_id)})
         }
         Message::Document { result, .. } => json!({"type": "Document", "ok": result.is_ok()}),
+        Message::Items {
+            sequence, result, ..
+        } => json!({"type": "Items", "sequence": sequence, "ok": result.is_ok()}),
         Message::StartupFailed(error) => {
             json!({"type": "StartupFailed", "error": bounded_id(error)})
         }

@@ -59,6 +59,10 @@ pub async fn execute(
     sender: &mpsc::Sender<Message>,
 ) {
     let command = match command {
+        Command::Items(request) => {
+            crate::document_items::execute(backend, request, permit, sender).await;
+            return;
+        }
         #[cfg(test)]
         Command::InspectSketch(request) => {
             crate::gesture_services::testing::inspect(&backend.state, *request).await;
@@ -138,6 +142,7 @@ async fn execute_command(
         #[cfg(test)]
         Command::InspectBody(_) => return Err("inspection reached model dispatcher".into()),
         Command::Document(_) => return Err("file command reached model dispatcher".into()),
+        Command::Items(_) => return Err("item command reached model dispatcher".into()),
         Command::Sketch(_) => return Err("sketch command reached model dispatcher".into()),
         Command::Recovery {
             document_id,

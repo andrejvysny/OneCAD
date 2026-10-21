@@ -522,8 +522,25 @@ cargo test -p onecad-ui input_trace
 ```
 
 New profiles default to Light appearance; saved appearance choices take precedence.
+Explorer single-click selects the same body or sketch shown in the viewport.
+Viewport single-click selects one face or edge; double-click selects its whole
+body. Selecting a hidden sketch shows a transient outline without changing saved
+visibility or starting a sketch edit.
+
+Right-click a body or sketch in Explorer for Delete (and Edit sketch for sketches).
+Delete and Backspace open the same dependency confirmation for a selected body or
+sketch outside active tools. Text fields retain their editing keys; selecting one
+face never implicitly deletes its body. The confirmation lists producing features,
+dependent sketches/features and collateral outputs. Deletion is one atomic Undo
+step and preserves unrelated branches. Cancel changes nothing. Unresolved or
+opaque producer lineage refuses deletion rather than guessing dependencies.
+
+World axes and active-support axes extend as positive rays from their exact origin,
+clipped to the viewport and camera frustum. Labels retain the stored plane/user-axis
+mapping; arbitrary face directions are local axes.
+
 The main toolbar centers in the window and stays inside the space reserved between
-sidebars and view controls; long tool lists scroll horizontally. Explorer and
+sidebars and view controls; narrow layouts keep active tools and a More overflow. Explorer and
 Inspector use 32 px toggles both inside their headers and when collapsed. The
 collapsed Inspector toggle sits below the viewport controls, centered in their
 column. The

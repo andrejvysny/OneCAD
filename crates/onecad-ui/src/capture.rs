@@ -38,7 +38,10 @@ pub async fn load_display(backend: &mut Backend) -> Result<Display, String> {
             &backend.state,
             body.id.clone(),
             "fine".into(),
-            Some(context.snapshot_id.0),
+            // Worker snapshot IDs restart after a session reset; they are not
+            // model publication generations. The surrounding context checks fence
+            // this current-mesh read before and after the complete capture.
+            None,
             Some(context.runtime_session.clone()),
         )
         .await

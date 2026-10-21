@@ -122,17 +122,19 @@ fn body_row(app: &mut App, ui: &mut Ui, id_text: &str, name: &str) {
     };
     let enabled = app.viewport_ready() && app.bridge.valid() && !app.busy();
     let row = TreeRow::new("body", name).state(state).enabled(enabled);
-    if ui.add(row).clicked() {
+    let response = ui.add(row);
+    if response.clicked() || response.secondary_clicked() {
         if let Some(id) = id
             && crate::extrude_ui::select_target(app, id)
         {
             return;
         }
-        crate::pill::cancel_tool(app);
-        app.dispatch(onecad_interaction::Action::ClearSelection);
-        app.selected_body = id;
-        app.topology.select(None);
-        app.draw_dirty = true;
+        if let Some(id) = id {
+            crate::item_selection::body(app, id);
+        }
+    }
+    if let Some(id) = id {
+        response.context_menu(|ui| delete_menu(app, ui, onecad_app::api::DeleteTarget::Body(id)));
     }
 }
 
@@ -161,23 +163,44 @@ fn sketch_row(app: &mut App, ui: &mut Ui, sketch: &onecad_app::dto::SketchDto) {
         })
         .enabled(can_edit || editing);
     let response = ui.add(row);
-    if (response.clicked() || response.double_clicked())
+    if (response.clicked() || response.double_clicked() || response.secondary_clicked())
         && can_edit
         && let Ok(id) = sketch.id.parse()
     {
-        app.dispatch(onecad_interaction::Action::ClearSelection);
-        app.selected_body = None;
-        app.topology.select(None);
-        app.ui.selected_sketch = Some(id);
-        app.selected_feature = None;
-        app.ui.inspector_open = true;
-        app.ui.inspector_tab = crate::ui_state::InspectorTab::Properties;
+        crate::item_selection::sketch(app, id);
         if response.double_clicked() {
             app.edit_sketch(id);
         }
     }
+    if let Ok(id) = sketch.id.parse() {
+        response.context_menu(|ui| {
+            if ui
+                .add_enabled(can_edit, egui::Button::new("Edit sketch"))
+                .clicked()
+            {
+                app.edit_sketch(id);
+                ui.close();
+            }
+            delete_menu(app, ui, onecad_app::api::DeleteTarget::Sketch(id));
+        });
+    }
     if editing {
         sketch_children(app, ui);
+    }
+}
+
+fn delete_menu(app: &mut App, ui: &mut Ui, target: onecad_app::api::DeleteTarget) {
+    let reason = crate::document_items::unavailable(app);
+    let response = ui.add_enabled(
+        reason.is_none(),
+        egui::Button::new("Delete").shortcut_text("Delete / Backspace"),
+    );
+    if response.clicked() {
+        crate::document_items::request(app, target);
+        ui.close();
+    }
+    if let Some(reason) = reason {
+        response.on_disabled_hover_text(reason);
     }
 }
 

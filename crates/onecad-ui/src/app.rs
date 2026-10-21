@@ -15,6 +15,8 @@ pub struct App {
     pub ui: crate::ui_state::UiState,
     pub settings: crate::settings::Store,
     pub documents: crate::document_flow::Flow,
+    pub(crate) items: crate::document_items::Flow,
+    pub(crate) selection_preview: crate::item_selection::Preview,
     pub bridge: Bridge,
     pub display: Option<Arc<Display>>,
     pub document_state: Option<onecad_app::dto::DocumentState>,
@@ -158,6 +160,8 @@ impl App {
             may_close: false,
             stopping: false,
             authoring_dirty: false,
+            items: Default::default(),
+            selection_preview: Default::default(),
             gesture: 0,
             pending_preview: None,
             sections: crate::viewport_updates::Sections::new()?,
@@ -433,6 +437,7 @@ impl App {
         ));
         self.sync_sketch_gesture();
         if changed {
+            crate::document_items::reset(self);
             self.ui.selected_sketch = None;
             self.selected_body = None;
             self.selected_feature = None;
@@ -443,7 +448,9 @@ impl App {
         self.diagnostics
             .runtime(&display.context.runtime_session, &self.status);
         crate::profile_diagnostics::record_display_failures(&mut self.diagnostics, &display);
+        crate::item_selection::reconcile(self, &display);
         self.display = Some(display);
+        crate::item_selection::refresh(self);
     }
 
     fn model_delivery_current(&self, tag: &RequestTag) -> bool {
@@ -475,6 +482,9 @@ impl App {
             );
         }
         match message {
+            Message::Items {
+                sequence, result, ..
+            } => crate::document_items::receive(self, sequence, result),
             Message::Document { result, .. } => self.document_finished(result),
             Message::Gesture { delivery, .. } => self.gesture_delivery(*delivery),
             Message::Sketch { delivery, .. } => {
@@ -655,10 +665,12 @@ impl App {
         self.bridge.request_shutdown();
     }
     pub fn busy(&self) -> bool {
-        matches!(
-            self.interaction.status,
-            CommitStatus::Pending(_) | CommitStatus::Accepted { .. }
-        ) || self.stopping
+        self.items.blocks()
+            || matches!(
+                self.interaction.status,
+                CommitStatus::Pending(_) | CommitStatus::Accepted { .. }
+            )
+            || self.stopping
             || self.documents.running
             || self.documents.confirm.is_some()
             || self

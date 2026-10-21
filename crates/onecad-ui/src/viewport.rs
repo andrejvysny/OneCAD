@@ -89,6 +89,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 }
             } else {
                 paint_profiles(app, ui, rect, &view, &display);
+                crate::item_selection::paint(app, ui, rect, &view);
             }
             if crate::sketch_numeric::editor_open(ui.ctx()) {
                 crate::sketch_numeric::viewport(app, ui, rect, &view);
@@ -122,7 +123,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 }
                 return;
             }
-            if response.clicked()
+            if (response.clicked() || response.double_clicked())
                 && !overlay_owns
                 && !crate::viewport_selection::sectioned(app)
                 && app.bridge.valid()
@@ -139,6 +140,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         f64::from(position.x - rect.min.x),
                         f64::from(position.y - rect.min.y),
                     ),
+                    response.double_clicked(),
                 );
             }
         });
@@ -357,7 +359,7 @@ fn render(
         app.renderer.set_body_style(
             body.body_id(),
             BodyStyle {
-                selected: Some(body.body_id()) == app.selected_body,
+                selected: crate::item_selection::whole_body_selected(app, body.body_id()),
             },
         );
     }
@@ -515,7 +517,13 @@ fn profile_fill(
     mesh
 }
 
-fn pick(app: &mut App, display: &crate::bridge::Display, view: &ViewSnapshot, logical: DVec2) {
+pub(crate) fn pick(
+    app: &mut App,
+    display: &crate::bridge::Display,
+    view: &ViewSnapshot,
+    logical: DVec2,
+    whole_body: bool,
+) {
     let hit = display
         .profiles
         .iter()
@@ -530,7 +538,8 @@ fn pick(app: &mut App, display: &crate::bridge::Display, view: &ViewSnapshot, lo
     )
     .ok()
     .flatten();
-    if let Some((profile, (anchor, distance))) = hit
+    if !whole_body
+        && let Some((profile, (anchor, distance))) = hit
         && profile_visible(body.as_ref(), distance)
         && let Some(context) = app.interaction.context.clone()
     {
@@ -542,6 +551,7 @@ fn pick(app: &mut App, display: &crate::bridge::Display, view: &ViewSnapshot, lo
             capture: view.identity(),
         })));
         app.status = "Profile selected".into();
+        app.ui.selected_sketch = Some(profile.reference.sketch);
         app.selected_body = None;
         app.selected_feature = None;
         app.topology.select(None);
@@ -552,6 +562,9 @@ fn pick(app: &mut App, display: &crate::bridge::Display, view: &ViewSnapshot, lo
     app.selected_feature = None;
     app.selected_body = body.as_ref().map(|body| body.body_id);
     app.topology.select(body.as_ref());
+    if whole_body {
+        app.topology.select(None);
+    }
     app.draw_dirty = true;
 }
 

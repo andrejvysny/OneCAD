@@ -1302,9 +1302,13 @@ impl DocumentRuntime {
                 "cannot nest a feature transaction".into(),
             ));
         }
+        let body_cleanup = self.transaction_body_cleanup(&commands)?;
         let mut hydrated = Vec::with_capacity(commands.len());
         for command in commands {
-            self.reject_timeline_body_delete(&command)?;
+            if !matches!(&command, EditCommand::DeleteBody { body } if body_cleanup.contains(body))
+            {
+                self.reject_timeline_body_delete(&command)?;
+            }
             hydrated.push(self.hydrate_ref_intents(command));
         }
         self.session.begin_transaction(label);
@@ -1319,6 +1323,10 @@ impl DocumentRuntime {
         };
         if let Some(dirty) = outcome.dirty {
             self.checkpoints.invalidate_from(dirty.from);
+        }
+        // Removed producer rows must not be re-adopted or persisted as phantom bodies.
+        for body in body_cleanup {
+            self.regen.bodies.remove(body);
         }
         self.after_mutation();
         Ok(outcome)
@@ -1948,14 +1956,10 @@ impl DocumentRuntime {
     /// applied end ("nothing new to do") or a checkpoint-based plan whose restored base
     /// still holds the geometry — or a document with no geometry to clear at all.
     ///
-    /// The publish is Rust-side, with **no worker round-trip**: there is nothing for the
-    /// worker to compute, an ops-empty `ExecutePlan` is not part of the wire contract
-    /// (SCHEMA §7.2 — and the executor short-circuits `start_step().is_none()` to
-    /// `NoOp`), and the worker's stale head is harmless because the next non-empty regen
-    /// from this state replays from an empty base (`start_step == 0`) or restores from
-    /// immutable checkpoint artifacts. The result still travels the normal
-    /// [`finish_regen`](Self::finish_regen) accept path, so revision/fencing, the
-    /// `document-changed` delta and the projection all stay consistent.
+    /// An empty `ExecutePlan` is outside the wire contract. The unlocked clear drive
+    /// instead resets and reopens the existing worker session, validating its empty
+    /// head and adopting the advanced epoch. The normal fenced finish publishes the
+    /// empty snapshot. This also keeps read contexts usable before the next feature.
     fn prepare_clear_regen(&self, plan: &RegenPlan) -> Option<PreparedRegen> {
         let target = self.fully_suppressed_target(plan)?;
         // Only meaningful if there IS geometry to drop. A never-regenerated blank
@@ -1973,7 +1977,11 @@ impl DocumentRuntime {
         }
         let (plan_rev, epoch) = self.fencing.get();
         Some(PreparedRegen {
-            work: PreparedWork::Clear { target },
+            work: PreparedWork::Clear {
+                target,
+                document_id: self.session.document().id,
+                engine: self.engine.clone(),
+            },
             scratch: self.clone_regen_session(),
             fencing: self.fencing.clone(),
             publisher: self.publisher.clone(),
@@ -1990,8 +1998,7 @@ impl DocumentRuntime {
             job: None,
             base_hash_prefix: String::new(),
             step_count: 0,
-            // No worker round-trip ⇒ no inline artifacts. A CLEAR publishes NO
-            // geometry, so there is nothing to cache either way.
+            // Session reset returns no tessellation artifacts.
             mesh_sink: MeshSink::default(),
             // Stamped by the caller once the whole phase-1 compile is done; no worker
             // runs on this path, so the clock stays at zero.
@@ -6004,11 +6011,13 @@ enum PreparedWork {
         plan_req: Box<PlanRequest>,
         engine: Box<AdoptingEngine>,
     },
-    /// Publish an EMPTY result Rust-side (TRUST F2): every op the request covers is
-    /// suppressed (or nothing is applied), so the target geometry is "no bodies" and
-    /// there is nothing for the worker to compute. `target` is the number of leading
-    /// timeline steps the clear spans (for the published `step_states`).
-    Clear { target: usize },
+    /// Reset the worker session and publish an empty result with an advanced epoch.
+    /// `target` counts the leading steps covered by the clear.
+    Clear {
+        target: usize,
+        document_id: DocumentId,
+        engine: Arc<dyn GeometryEngine>,
+    },
 }
 
 impl PreparedRegen {
@@ -6024,7 +6033,7 @@ impl PreparedRegen {
             fencing,
             publisher,
             instance,
-            expected,
+            mut expected,
             lod,
             prior,
             executed,
@@ -6062,8 +6071,25 @@ impl PreparedRegen {
                     .instrument(span.clone())
                     .await
             }
-            PreparedWork::Clear { target } => {
-                span.in_scope(|| drive_clear(&mut scratch, &publisher, &cancel, target))
+            PreparedWork::Clear {
+                target,
+                document_id,
+                engine,
+            } => {
+                match deletion::clear_worker_head(
+                    engine.as_ref(),
+                    document_id,
+                    &fencing,
+                    &cancel,
+                    &mut expected,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        span.in_scope(|| drive_clear(&mut scratch, &publisher, &cancel, target))
+                    }
+                    Err(outcome) => outcome,
+                }
             }
         };
         // The phase split (measurement only — see `RegenTimings`). Read AFTER the
@@ -6140,9 +6166,7 @@ fn drive_clear(
         .filter_map(|s| scratch.timeline.state(s).map(|st| (s, st.clone())))
         .collect();
     let snapshot = publisher.publish(|generation| ModelSnapshot {
-        // No `AcceptPrepared` happened, so there is no worker snapshot id. `0` is the
-        // same "nothing to address" value `noop_report` uses; with zero bodies there is
-        // nothing to promote or fetch a mesh for.
+        // ResetSession/OpenSession established an empty head in a fresh epoch.
         id: SnapshotId(0),
         generation,
         step_index: None,
@@ -6950,6 +6974,7 @@ fn element_ref_input(op: &Operation, index: usize) -> Option<&ElementRef> {
     }
 }
 
+pub mod deletion;
 mod face_entry;
 mod gestures;
 pub use face_entry::FaceEntryTicket;

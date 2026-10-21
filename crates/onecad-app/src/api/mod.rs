@@ -3,7 +3,11 @@
 //! Desktop adapters marshal typed commands and supply host events, paths, and dialogs.
 //! Regeneration and persistence preserve their prepare, unlocked I/O, and fenced commit phases.
 
+mod document_items;
 mod document_state;
+pub use document_items::{
+    delete_document_item, plan_delete_document_item, DeleteTarget, DeletionItem, DeletionPlan,
+};
 mod import_readiness;
 mod replacement;
 mod sketch_constraints;

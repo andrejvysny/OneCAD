@@ -1,4 +1,6 @@
 //! Presentation uses the same immutable support frame as sketch projection.
+mod rays;
+
 use crate::app::App;
 use onecad_core::sketch::SketchPlane;
 use onecad_scene::{DVec3, ViewSnapshot};
@@ -40,64 +42,87 @@ fn frame(plane: SketchPlane) -> onecad_render::GridFrame {
 const USER_AXES: [DVec3; 3] = [DVec3::Y, DVec3::NEG_X, DVec3::Z];
 
 pub(crate) fn axes(app: &App, painter: &egui::Painter, rect: egui::Rect, view: &ViewSnapshot) {
+    let (origin, directions) = axis_directions(app);
+    let painter = painter.with_clip_rect(rect);
+    for (axis, label, color) in directions {
+        if let Some(ray) = rays::project_ray(view, origin, axis) {
+            paint_axis(&painter, rect, ray, label, color);
+        }
+    }
+}
+
+fn axis_directions(app: &App) -> (DVec3, Vec<(DVec3, &'static str, egui::Color32)>) {
     let colors = [app.theme.axis_x, app.theme.axis_y, app.theme.axis_z];
-    let length = (view.camera().offset.length() * 0.16).clamp(0.01, 1.0e8);
-    let (origin, directions) = if let Some(support) = grid(app) {
-        let named = support.origin == DVec3::ZERO
-            && [SketchPlane::xy(), SketchPlane::xz(), SketchPlane::yz()]
-                .iter()
-                .any(|plane| frame(*plane) == support);
-        let directions = [support.x_axis, support.y_axis]
-            .into_iter()
-            .enumerate()
-            .map(|(index, axis)| {
-                let world = USER_AXES
-                    .iter()
-                    .position(|direction| axis.dot(*direction) > 1.0 - 1e-10);
-                let (label, color) = if named {
-                    let world = world.unwrap_or(index);
-                    (["X", "Y", "Z"][world], colors[world])
-                } else {
-                    (["local X", "local Y"][index], colors[index])
-                };
-                (axis, label, color)
-            })
-            .collect::<Vec<_>>();
-        (support.origin, directions)
-    } else {
-        (
+    let Some(support) = grid(app) else {
+        return (
             DVec3::ZERO,
             USER_AXES
                 .into_iter()
                 .enumerate()
                 .map(|(index, axis)| (axis, ["X", "Y", "Z"][index], colors[index]))
                 .collect(),
-        )
+        );
     };
-    let painter = painter.with_clip_rect(rect);
-    for (axis, label, color) in directions {
-        if let (Some(start), Some(end)) =
-            (view.project(origin), view.project(origin + axis * length))
-        {
-            let point = |p: onecad_scene::ProjectedPoint| {
-                rect.min + egui::vec2(p.logical.x as f32, p.logical.y as f32)
+    let named = support.origin == DVec3::ZERO
+        && [SketchPlane::xy(), SketchPlane::xz(), SketchPlane::yz()]
+            .iter()
+            .any(|plane| frame(*plane) == support);
+    let directions = [support.x_axis, support.y_axis]
+        .into_iter()
+        .enumerate()
+        .map(|(index, axis)| {
+            let (label, color) = if named {
+                let world = USER_AXES
+                    .iter()
+                    .position(|direction| axis.dot(*direction) > 1.0 - 1e-10)
+                    .unwrap_or(index);
+                (["X", "Y", "Z"][world], colors[world])
+            } else {
+                (["local X", "local Y"][index], colors[index])
             };
-            let start = point(start);
-            let end = point(end);
-            if start.distance(end) < 8.0 {
-                continue;
-            }
-            painter.arrow(start, end - start, egui::Stroke::new(1.5, color));
-            painter.text(
-                end + egui::vec2(4.0, -4.0),
-                egui::Align2::LEFT_BOTTOM,
-                label,
-                egui::FontId::proportional(12.0),
-                color,
-            );
-            painter.circle_filled(start, 2.5, color);
-        }
+            (axis, label, color)
+        })
+        .collect();
+    (support.origin, directions)
+}
+
+fn paint_axis(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ray: rays::ProjectedRay,
+    label: &str,
+    color: egui::Color32,
+) {
+    let point = |p: onecad_scene::DVec2| rect.min + egui::vec2(p.x as f32, p.y as f32);
+    let (start, end) = (point(ray.start), point(ray.end));
+    painter.line_segment(
+        [start, end],
+        egui::Stroke::new(1.25, color.linear_multiply(0.75)),
+    );
+    if let Some(origin) = ray.origin {
+        painter.circle_filled(point(origin), 2.5, color);
     }
+    let delta = end - start;
+    let length = delta.length();
+    let label_position = if length >= 8.0 {
+        let direction = delta / length;
+        let cue_start = start + direction * 28.0_f32.min(length * 0.2);
+        let cue = direction * 18.0_f32.min(length * 0.2);
+        painter.arrow(cue_start, cue, egui::Stroke::new(1.5, color));
+        cue_start + cue + direction.rot90() * 12.0
+    } else {
+        start + egui::vec2(14.0, -14.0)
+    };
+    let galley = painter.layout_no_wrap(label.into(), egui::FontId::proportional(12.0), color);
+    if rect.width() < galley.size().x + 8.0 || rect.height() < galley.size().y + 8.0 {
+        return;
+    }
+    let half = galley.size() * 0.5;
+    let position = label_position.clamp(
+        rect.min + half + egui::vec2(4.0, 4.0),
+        rect.max - half - egui::vec2(4.0, 4.0),
+    );
+    painter.galley(position - half, galley, color);
 }
 
 #[cfg(test)]

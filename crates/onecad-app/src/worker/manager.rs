@@ -1436,10 +1436,18 @@ impl GeometryEngine for WorkerManager {
     async fn open_session(&self, req: OpenSessionRequest) -> Result<WorkerHead, EngineError> {
         let client = self.client_or_err()?;
         let epoch = req.worker_epoch;
+        if self.epoch() != epoch {
+            return Err(protocol("OpenSession belongs to a replaced worker epoch"));
+        }
         let resp = client
             .request("OpenSession", wire::open_session_args(&req))
             .await
             .map_err(protocol_err)?;
+        if self.epoch() != epoch || !Arc::ptr_eq(&client, &self.client_or_err()?) {
+            return Err(protocol(
+                "OpenSession response belongs to a replaced worker session",
+            ));
+        }
         ok_result(resp).map(|r| wire::parse_open_session(&r, epoch))
     }
 
@@ -1463,18 +1471,32 @@ impl GeometryEngine for WorkerManager {
         worker_epoch: WorkerEpoch,
     ) -> Result<WorkerEpoch, EngineError> {
         let client = self.client_or_err()?;
+        if self.epoch() != worker_epoch {
+            return Err(protocol("ResetSession belongs to a replaced worker epoch"));
+        }
         let args = json!({ "documentId": document_id.to_string(), "workerEpoch": worker_epoch.0 });
         let resp = client
             .request("ResetSession", args)
             .await
             .map_err(protocol_err)?;
-        ok_result(resp).map(|r| {
-            WorkerEpoch(
-                r.get("workerEpoch")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(worker_epoch.0 + 1),
-            )
-        })
+        let result = ok_result(resp)?;
+        let epoch = result
+            .get("workerEpoch")
+            .and_then(Value::as_u64)
+            .filter(|epoch| *epoch > worker_epoch.0)
+            .ok_or_else(|| protocol("ResetSession did not advance workerEpoch"))?;
+        if !Arc::ptr_eq(&client, &self.client_or_err()?)
+            || self
+                .shared
+                .epoch
+                .compare_exchange(worker_epoch.0, epoch, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+        {
+            return Err(protocol(
+                "ResetSession response belongs to a replaced worker session",
+            ));
+        }
+        Ok(WorkerEpoch(epoch))
     }
 
     async fn accept_prepared(

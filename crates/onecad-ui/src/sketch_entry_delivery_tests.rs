@@ -101,7 +101,7 @@ fn assert_camera(app: &App) {
     assert!((basis.back - vector(plane.normal)).length() < 1e-12);
 }
 
-async fn make_host(app: &mut App, ctx: &egui::Context, frame: &mut eframe::Frame) {
+pub(super) async fn make_host(app: &mut App, ctx: &egui::Context, frame: &mut eframe::Frame) {
     app.new_sketch_on_plane(WorldPlane::XZ);
     active(app, ctx, frame).await;
     app.sketch_dispatch(SketchAction::SetTool(SketchTool::Rectangle));

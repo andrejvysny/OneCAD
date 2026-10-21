@@ -17,6 +17,7 @@ executable tests, not a claim that an unrun gate passed.
 | Dimension; Horizontal, Vertical, Fix | Sketch pill | `constraint_authoring::activate` | Existing typed operand applicability; ONECAD-286 / 285 | Constraint authoring and dimension delivery suites | Not qualified |
 | Constraints; Parallel, Perpendicular, Equal, Midpoint, Distance, Diameter and remaining relations | Full Constraints menu | `activate_relation` / existing `SketchAction` mutations | Existing typed operand applicability; ONECAD-286 | `constraints_menu`, constraint authoring suites | Not qualified |
 | Construction, Delete | Selected sketch pill | `sketch_repair` | Existing repair/selection checks; ONECAD-314 | Repair suites, pill layout | Not qualified |
+| Delete body/sketch | Explorer context menu; Delete / Backspace | `plan_delete_document_item` / `delete_document_item` | Idle real document; confirms authoritative producer/dependency closure; text owns editing keys | `document_item_deletion`, `item_delivery_tests`; strict host inventory | Native CGEvent menu/key/history/save/reopen checked; physical input open |
 | Polygon, Ellipse | Sketch overflow, disabled | No native creation route | ONECAD-292 | Registry icon/disposition checks | No |
 | Trim, Extend | Sketch overflow, disabled | No native modification route | ONECAD-293 | Registry disposition checks | No |
 | Sketch Fillet, Offset, Mirror | Sketch overflow, disabled | No native modification route | ONECAD-294 | Registry disposition checks | No |

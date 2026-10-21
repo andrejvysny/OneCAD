@@ -35,6 +35,7 @@ pub enum Command {
     InspectBody(Box<crate::body_inspection_tests_support::Request>),
     Open,
     Document(crate::document_flow::Request),
+    Items(crate::document_items::Request),
     Recovery {
         document_id: String,
         choice: crate::startup_recovery::Choice,
@@ -72,6 +73,11 @@ pub struct CandidateDelivery {
 }
 
 pub enum Message {
+    Items {
+        sequence: u64,
+        result: Result<crate::document_items::Reply, String>,
+        _permit: Option<OwnedSemaphorePermit>,
+    },
     Gesture {
         delivery: Box<crate::gesture_services::Delivery>,
         _permit: Option<OwnedSemaphorePermit>,
@@ -620,6 +626,7 @@ pub fn command_name(command: &Command) -> &'static str {
         Command::InspectSketch(_) => "InspectSketch",
         Command::Open => "Open",
         Command::Document(_) => "Document",
+        Command::Items(_) => "Delete",
         Command::Recovery { .. } => "Recovery",
         Command::Sketch(_) => "Sketch",
         Command::Apply { .. } => "Apply",

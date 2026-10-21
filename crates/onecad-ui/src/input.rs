@@ -6,6 +6,7 @@ mod overlay;
 pub(crate) fn overlay_owns_keyboard(app: &App, ctx: &egui::Context) -> bool {
     app.input_routing.overlay_blocks(ctx.cumulative_pass_nr())
         || app.documents.confirm.is_some()
+        || app.items.blocks()
         || crate::constraint_authoring::editor_open(ctx)
         || crate::sketch_numeric::editor_open(ctx)
         || ui_owns_keyboard(&app.ui, ctx)
@@ -17,6 +18,7 @@ pub(crate) fn ui_owns_keyboard(ui: &crate::ui_state::UiState, ctx: &egui::Contex
 
 pub(crate) fn navigation_blocked(app: &App, ctx: &egui::Context) -> bool {
     let document = app.documents.confirm.is_some()
+        || app.items.blocks()
         || crate::constraint_authoring::editor_open(ctx)
         || crate::sketch_numeric::editor_open(ctx);
     overlay::navigation_blocked(&app.ui, document, egui::Popup::is_any_open(ctx))
@@ -77,6 +79,7 @@ pub fn route(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     let mut state = std::mem::take(&mut app.input_routing);
     let pass = ctx.cumulative_pass_nr();
     let owned = app.documents.confirm.is_some()
+        || app.items.blocks()
         || crate::constraint_authoring::editor_open(ctx)
         || crate::sketch_numeric::editor_open(ctx)
         || ui_owns_keyboard(&app.ui, ctx);
@@ -110,6 +113,7 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     let owner = overlay::owner(
         &app.ui,
         app.documents.confirm.is_some()
+            || app.items.blocks()
             || crate::constraint_authoring::editor_open(ctx)
             || crate::sketch_numeric::editor_open(ctx),
         egui::Popup::is_any_open(ctx),
@@ -217,6 +221,23 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
                 if !modifiers.command && !modifiers.alt && !modifiers.ctrl));
         if delete {
             crate::sketch_repair::delete_selected(app);
+            raw.events.retain(|event| {
+                !matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::Delete | egui::Key::Backspace,
+                        ..
+                    }
+                )
+            });
+        }
+    }
+    if !text && !composition && raw.focused && !app.sketch_active() {
+        let delete = raw.events.iter().any(|event| matches!(event,
+            egui::Event::Key { key: egui::Key::Delete | egui::Key::Backspace, pressed: true, repeat: false, modifiers, .. }
+            if modifiers.is_none()));
+        if delete && let Some(target) = crate::document_items::selected(app) {
+            crate::document_items::request(app, target);
             raw.events.retain(|event| {
                 !matches!(
                     event,

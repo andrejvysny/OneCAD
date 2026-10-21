@@ -1,4 +1,5 @@
 pub(super) const HOST_TESTS: &[&str] = &[
+    "app_logic_tests::item_delivery_tests::sidebar_viewport_selection_and_delete_share_authority_and_history",
     "app_logic_tests::occluded_app_logic_delivers_new_and_protects_close_without_ui",
     "app_logic_tests::document_lifecycle_tests::recovered_document_remains_saveable_and_protected_after_capture_refusal",
     "app_logic_tests::document_lifecycle_tests::late_clean_display_cannot_replace_authoritative_dirty_lifecycle",
