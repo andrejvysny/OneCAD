@@ -1,5 +1,11 @@
 # Native UX hardening evidence — 2026-09-11
 
+> Historical Tauri-era diagnostic samples, retained as frozen failure provenance.
+> Current outcomes and owners are in the existing Plane QA Page. These samples
+> do not qualify the native Rust application. The former review is available at
+> [the reviewed source](https://github.com/andrejvysny/OneCAD/blob/ed9ed33f6f394897612e0a40edee015edd775ef8/OneCAD-UX-Review-2026-09-11.md).
+
+
 This directory preserves the native-stall evidence cited by Addendum E of
 `OneCAD-UX-Review-2026-09-11.md`. The source files were copied byte-for-byte
 from `/private/tmp` before further rebuilds or relaunches could truncate them.

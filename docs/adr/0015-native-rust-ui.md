@@ -1,16 +1,23 @@
 # 0015 — The desktop UI is native Rust on wgpu; the toolkit is egui
 
-- Status: Accepted direction; native qualification and remaining appearance verification open. ONECAD-261 remains blocked by ONECAD-256, ONECAD-257 and ONECAD-259; this record does not finalize that gate.
+- Status: Accepted direction. Current delivery and qualification status belongs in Plane; this record does not establish gate completion.
 - Date: 2026-10-17
 - Sequencing update (2026-10-18): the user authorized implementation and testing of extraction and native integration ahead of the outstanding prerequisites. Acceptance, shared-data use, cutover and publication remain gated; this does not close ONECAD-256/257/259/261.
-- Supersedes: ADR-0009 (native target; current webview remains governed until cutover)
+- Supersedes: ADR-0009 (native target)
 - Reshapes: ADR-0013 (native target)
 - Plane: ONECAD-261 (P0.6), program ONECAD-255
 - Scope: the macOS desktop app. The iPad/iOS target was dropped from scope by the user on 2026-10-17.
 
-## Context
+## Current implementation and historical context
 
-The frontend is React 19, Three.js and zustand in a Tauri v2 webview. The
+The repository now has one native Rust host and renderer; the former web editor
+is retired. See [current architecture](../ARCHITECTURE.md) and the
+[canonical migration audit](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/pages/a0db33f3-7c7f-4bd6-bc1d-0c2c9ca549d1).
+The following spike measurements and sequencing constraints describe the recorded
+2026-10-17/18 decision, not current gate results. Cleanup authorization permits
+retiring unused setup without establishing parity or production-data continuity.
+
+The former frontend used React 19, Three.js and zustand in a Tauri v2 webview. The
 migration plan lists the webview's recorded defects: the `eval_script` /
 webview-registry deadlock, the `performKeyEquivalent` versus menu clash that
 lost undos, no tooltips, trackpad versus mouse guessed from wheel events, the
@@ -47,7 +54,7 @@ cannot be compared directly.
 | Criterion | egui 0.37.0 | Slint 1.18.1 (femtovg-wgpu) |
 |---|---|---|
 | **License** | egui, eframe, egui-wgpu and wgpu are `MIT OR Apache-2.0`; winit is `Apache-2.0`. No runtime conditions. | Usable only under Royalty-free 2.0, which is not OSI open source. It requires the `AboutSlint` widget or a badge, forbids distributing Slint alone, forbids exposing Slint's APIs from the app, and excludes embedded use. Forks inherit these terms. GPLv3 is ruled out (`licensing.md` §4, D3). |
-| **Look vs `OneCAD.png`** | 10 chrome fills and 4 panel borders are pixel-identical; the accent is within 1/255; text starts within 1 px. Glyphs and icon strokes are slightly heavier than CoreText. SF needed `opsz` pinned to 17. | Layout, tokens and spacing match, judged from crops; no per-region pixel diff was made. Text is set tighter than CoreText, and Skia's text is heavier still. Some controls are styled differently, and there is no view cube. |
+| **Historical look vs [`OneCAD.png`](https://github.com/andrejvysny/OneCAD/blob/ed9ed33f6f394897612e0a40edee015edd775ef8/OneCAD.png)** | 10 chrome fills and 4 panel borders are pixel-identical; the accent is within 1/255; text starts within 1 px. Glyphs and icon strokes are slightly heavier than CoreText. SF needed `opsz` pinned to 17. | Layout, tokens and spacing match, judged from crops; no per-region pixel diff was made. Text is set tighter than CoreText, and Skia's text is heavier still. Some controls are styled differently, and there is no view cube. |
 | **Fonts** | System SF read via CoreText and handed to egui; no `tnum`, so values use SF Mono. | System SF found by fontique. `.SF NS Mono` resolves to the italic file. The `SLINT_FONT_PATH` fix rebinds the generic sans families to SF Mono (found by the reviewer). No `tnum`. |
 | **AX tree (tauri-agent helper)** | 189 nodes on the first query. All 67 tree rows are `AXRow` with selected state, including rows scrolled out of view. Every painter-drawn widget needs an explicit `widget_info`. | 197 nodes, but only the 25 on-screen rows of 67 appear (reviewer). Rows arrive as `AXStaticText`, with no selected state. 72 of 73 icon images are unlabelled. |
 | **AX via System Events** | The first query sees only 4 elements; the second sees all of them. | The first query sees only the title-bar buttons; a retry is needed. |
@@ -79,10 +86,9 @@ determinism or golden images.
    comparative investigation evidence; no automatic fallback or toolkit
    reselection is authorized. Preserve the current visual language, layout,
    shortcuts and workflow behavior. Keep bundle id `com.andrejvysny.onecad`.
-   Side-by-side operation and eventual removal of Tauri, `src/` and JS tooling
-   require verified parity and data continuity; this ADR does not authorize
-   immediate deletion. The located `data-continuity.md` specification is input
-   to ONECAD-274; its implementation and tests remain open.
+   The original decision deferred removal pending separate authorization. The
+   subsequent cleanup scope retires unused Tauri and JS setup while preserving
+   behavior; it does not implement or establish production-data continuity.
 2. **Use core/protocol/app/scene/interaction/render/ui boundaries.**
    `onecad-core` remains pure domain; `onecad-protocol` owns transport and checked
    MESH1 decoding below the scene boundary. `onecad-app` owns application
@@ -103,8 +109,9 @@ determinism or golden images.
    decoding belongs in `onecad-protocol`, including section bounds, typed data
    and cross-section references required by `protocol/mesh_format.md`; the
    spike's minimal reader is not the production contract. Preserve OCW1/MESH1
-   wire bytes, IDs, snapshot scope and Z-up coordinates. Current Rust forwarding
-   and header validation are the baseline, not evidence of this full decoder.
+   wire bytes, IDs, snapshot scope and Z-up coordinates. The native workspace
+   now uses the checked decoder; its tests, not the spike reader, provide
+   implementation evidence.
 5. **Use synchronous CPU picking.** Preserve the eight-logical-pixel edge-pick
    aperture and two-logical-pixel depth slack evaluated at the hit depth.
    Rendering, picking and overlays consume the same captured camera, projection,
@@ -117,8 +124,9 @@ determinism or golden images.
    `TouchPhase` classification. The historical measurements above do not close
    these gates. Quality lighting/grid in both themes were approved on 2026-10-18; the
    delegated line choice is blended analytic for continuity. This does not approve
-   egui text weight or establish native visual parity. Golden images remain
-   unfrozen pending a verified determinism/tolerance policy. The user approved
+   egui text weight or establish native visual parity. The historical decision
+   did not freeze goldens; preserve the current checked renderer goldens and
+   their declared tolerances. The user approved
    licensing decisions D1/D4/D5 on 2026-10-18; packaging implementation, release
    compliance and publication remain unverified.
 
@@ -140,14 +148,15 @@ determinism or golden images.
   keymap, modelingInteraction, toolbar order, shell layout/mount semantics,
   inspector sections and tree/menu behavior. Rust contract fixtures and probes
   may replace DOM-specific representations; the behaviors do not retire.
-- **Golden images remain unfrozen after the appearance decision.** Historical blended quality
+- **The original appearance decision did not freeze goldens.** Historical blended quality
   images were not bit-reproducible (atomic silhouette append); the reviewer
   reported up to 6 levels on one pixel of `quality_nema_dark`. Choose
   deterministic compaction or justified tolerances; no tolerance or
-  golden is accepted by this record.
+  golden is accepted by this record. Current checked goldens and tolerances
+  are maintained with the renderer fixtures and must not be changed to hide defects.
 - **Native packaging must stay non-sandboxed.** A sandbox would redirect
-  `~/Library/Application Support` and block the one-time WKWebView settings
-  import (`data-continuity.md`, reviewer finding).
+  `~/Library/Application Support`. The historical review also identified an
+  effect on a proposed WKWebView settings import; cleanup does not add that import.
 - **egui accessibility and field ownership require explicit handling.** Every
   custom-painted widget needs `widget_info`; viewport drags use CAD interaction
   state. Reset `TextEdit` undo state when the app rewrites a field.
@@ -156,8 +165,7 @@ determinism or golden images.
 
 A full UI rewrite: about 115k LOC of TypeScript production code, about 108k LOC
 of tests, and the 38.7k-LOC `src/tools/` interaction layer, which is ported per
-tool family against written specs. That is the plan's Phases 1.5 to 6. Until
-cutover, two UIs share one backend.
+tool family against written specs. That is the plan's Phases 1.5 to 6. The former web UI has since been retired; only the native host is supported.
 
 Neither toolkit reproduces CoreText typography. `tnum` and SF's tracking table
 are out of reach without patching the text stack, so values use SF Mono, as
@@ -167,11 +175,10 @@ Not measured by either spike, and still owed: 120 Hz pacing, a true cold start,
 real trackpad pinch, and a Metal clear-colour latency baseline to separate the
 toolkit's cost from drawable presentation.
 
-## Open verification and approvals
+## Verification ownership
 
-ONECAD-261 remains blocked by ONECAD-256/257/259. D1/D4/D5 and quality
-lighting/grid decisions were approved on 2026-10-18, with blended analytic lines
-chosen under delegated authority. Licensing/packaging implementation, native-input
-proof, egui text/visual parity, golden qualification, ONECAD-274 continuity
-implementation and publication remain unverified. These decisions and historical
-review results do not close the gates.
+Current qualification, licensing, continuity and publication outcomes belong in
+canonical Plane records. Historical approvals and measurements in this ADR do
+not close those gates. Required worker/GPU prerequisites, current fixture
+manifests and exact CI inventories define executable checks; native input and
+physical display acceptance remain separate.

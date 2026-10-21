@@ -1,11 +1,14 @@
 # Architecture Decision Records
 
-One file per decision that is expensive to reverse. Each records the context, the
-decision, and what it costs — not a tutorial.
+These records retain code-coupled architectural rationale and historical
+provenance. [Current architecture](../ARCHITECTURE.md) describes the native Rust
+implementation. Project decisions, status and research are maintained in the
+[canonical Plane documentation](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/pages/0bfe867d-215a-4cfb-a501-9f628976bc9d).
 
-These exist because most of this codebase is written with AI assistance, and a
-coding agent infers architecture from folder names unless the law is written
-down. `docs/ARCHITECTURE.md` states the laws; these records say why.
+ADRs 0001–0014 describe the former TypeScript implementation. Preserve applicable
+data and ownership invariants; references to React, DOM, Three.js or a public
+TypeScript SDK do not describe an active native runtime. ADRs 0015–0017 reconcile
+the native direction. Accepted direction does not imply qualification or delivery.
 
 | ADR | Decision |
 |---|---|
@@ -17,11 +20,14 @@ down. `docs/ARCHITECTURE.md` states the laws; these records say why.
 | [0006](0006-registration-ownership.md) | Every registration has an owner and an owner-scoped teardown |
 | [0007](0007-deterministic-contribution-order.md) | Contribution order is explicit, never load-order |
 | [0008](0008-branded-ids-unions-retained.md) | Namespaced branded IDs, with the internal unions retained |
-| [0009](0009-viewport-context-is-threejs-shaped.md) | The viewport contract is Three.js-shaped in v1 |
+| [0009](0009-viewport-context-is-threejs-shaped.md) | Historical Three.js viewport contract; superseded by 0015 |
 | [0010](0010-tool-activation-is-host-owned.md) | Tool activation and availability are host-owned, module-reported |
 | [0011](0011-shortcuts-module-ruleset-then-registry.md) | Shortcuts: the module ruleset resolves first, the registry second |
 | [0012](0012-tree-rows-are-provider-scoped.md) | Tree rows are provider-scoped, and row actions are commands |
-| [0013](0013-sdk-is-a-narrower-surface-than-the-platform.md) | `@onecad/sdk` is a narrower surface than `@/platform` |
+| [0013](0013-sdk-is-a-narrower-surface-than-the-platform.md) | Historical TypeScript SDK; narrowing principle retained by 0015/0017 |
 | [0014](0014-render-module-openpbr.md) | Render is its own module, targets the Visualization placeholder, adopts OpenPBR |
+| [0015](0015-native-rust-ui.md) | Accepted native Rust/egui/wgpu direction; qualification remains separate |
+| [0016](0016-kernel-hosting-macos.md) | Accepted production sidecar direction; optional in-process experiment retained |
+| [0017](0017-external-addons-deferred.md) | External addons deferred; native boundaries do not expose toolkit types |
 
 Status values: `Proposed`, `Accepted`, `Superseded by NNNN`.

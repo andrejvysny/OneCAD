@@ -173,9 +173,9 @@ Not every validator is recipe-agnostic. `cylindricalRadius` counts EVERY
 cylindrical face in the output against the requested radius, so a cylindrical
 support reads as a blend of the wrong radius, and `g1BoundaryTangency` only
 recognises plane↔cylinder tangency pairs. Both are emitted only for all-planar
-pairs. Their general replacements are expressible in case-v2 but not implemented
-in the runner; an unimplemented validator reports `notApplicable`, which fails a
-required check rather than passing it.
+pairs. Their general replacements, `supportTangency` and `crossSectionProfile`,
+are implemented and covered by the runner validator fixtures. Missing evidence
+reports `notApplicable`, which fails a required check rather than passing it.
 
 Cases and artifact paths use restricted identifiers. A selector records its
 generator provenance, topology role, recipe-local anchors, surface descriptors,

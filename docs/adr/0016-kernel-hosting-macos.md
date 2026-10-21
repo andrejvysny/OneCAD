@@ -1,6 +1,6 @@
 # 0016 — The OCCT worker stays a sidecar process on macOS
 
-- Status: Accepted hosting direction; packaging implementation and verification open. ONECAD-261 remains blocked by ONECAD-256/257/259; no gate completion is claimed.
+- Status: Accepted direction. Current delivery and qualification status belongs in Plane; this record does not establish gate completion.
 - Date: 2026-10-17
 - Plane: ONECAD-261 (P0.6), program ONECAD-255. Evidence: ONECAD-258 (in-process spike) and ONECAD-256 (licensing).
 - Scope: the macOS desktop app. The iPad/iOS target, which was the only reason an in-process host would be required, was dropped from scope by the user on 2026-10-17.
@@ -116,8 +116,8 @@ it:
   from unpinned Homebrew, so record their versions per release.
 - **Notices.** `Contents/Resources/licenses/` holds the LGPL-2.1 text, the OCCT
   exception, the OCCT and PlaneGCS copyright lines, and `THIRD_PARTY_NOTICES`.
-  The About screen names Open CASCADE Technology (the exception's "prominent
-  notice") and PlaneGCS.
+  The About screen must name Open CASCADE Technology (the exception's "prominent
+  notice") and PlaneGCS; inspect the actual packaged host to verify this.
 - **BOLTS** fastener data (LGPL-2.1+) is compiled into the app binary
   (`onecad-library` tables) as well as the worker. The same tagged-source
   compliance must name the app binary too, or the data must be recorded as
@@ -135,8 +135,8 @@ it:
   start, not per op, and prewarm already hides it for the document worker.
 - The preserved library target remains experimental; its historical spike
   results do not establish current required-app or CI acceptance.
-- `docs/PACKAGING.md`'s open item still applies: Mac signing and notarization
-  are unverified.
+- Mac signing and notarization require evidence from the actual artifact under
+  `docs/PACKAGING.md`; this ADR does not establish their qualification.
 
 ## Cost
 

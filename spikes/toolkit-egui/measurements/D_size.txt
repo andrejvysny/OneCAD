@@ -1,5 +1,0 @@
-size_variant_bytes 6420336
-size_variant_gzip9 3130051
-release_bytes 11626224
-release_gzip9_bytes 4910636
-4a4eabe4541c3651d29822e2748e714cb4973c61697b494467d9669b559d8287  /Users/andrejvysny/workspace/OneCAD/spikes/toolkit-egui/target/release/toolkit-egui

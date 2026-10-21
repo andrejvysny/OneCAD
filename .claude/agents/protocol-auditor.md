@@ -28,7 +28,7 @@ You own the wire contract. `protocol/SCHEMA.md` and `protocol/mesh_format.md` ar
 - Every body-bearing param renders `body_<uuid>` at the wire layer; core serde is frozen. `intent` subtrees round-trip verbatim and are never rewritten.
 - Fencing is `workerEpoch` plus `expectedBaseHash` only (decision D4).
 - NewBody BodyIds are worker-minted `body_<opId>` (decision D1); Rust adopts them at `AcceptPrepared`, validating format and uniqueness, and rejects the prepared plan on collision rather than publishing it.
-- Rust validates the MESH1 header only and forwards the bytes verbatim, Z-up, never axis-swapped.
+- Rust validates the complete MESH1 buffer through the checked decoder and preserves the bytes, Z-up, never axis-swapped.
 - The worker fingerprint `0a6a1dce34181289` must match across macOS and Linux; the build id is part of the seed. A fingerprint move needs an explicit decision, not a silent update.
 - Worker exit codes are protocol signals.
 

@@ -53,9 +53,7 @@ e2e-tauri/results/
 # graphify knowledge graph (rebuild locally: /graphify .)
 graphify-out/
 
-# Agent tooling and scratch inputs — not project source.
-# `.opencode/` alone is ~61 MB; TODO.md had recorded these as wanting an ignore
-# entry rather than a commit, and this is that entry.
+# Agent tooling and scratch inputs are not project source.
 .agents/
 .opencode/
 skills-lock.json
@@ -71,9 +69,7 @@ STEP/*
 # Local-only gear cross-check harness run artifacts (scripts/gear-crosscheck).
 __pycache__/
 
-# Claude Code: agent definitions under .claude/agents/ ARE project source (the
-# four subagent roles CLAUDE.md's operating mode names). Machine-local settings
-# and session checkpoints are not.
+# Agent definitions are project source; machine-local state is not.
 .claude/settings.local.json
 .claude/RESUME.md
 
@@ -81,3 +77,14 @@ __pycache__/
 .tauri-agent/
 # skill-creator eval workspace (transcripts, screenshots)
 .claude/skills/onecad-agent-test-workspace/
+
+# Retired setup and duplicated management ledgers are rejected by cargo xtask check-hygiene.
+/src-tauri/
+/tools/tauri-agent/
+/PLAN.md
+/TODO.md
+/HANDOFF.md
+/CURRENT_STATE.md
+/package.json
+/bun.lock
+/tsconfig.json

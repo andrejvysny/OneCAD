@@ -22,7 +22,7 @@ K=target/release/onecad-kernelbench
 R=worker/build/onecad-kernelbench-runner
 
 ONECAD_KERNELBENCH_RUNNER=$R $K run --suite fillet/foundation --preset t0 --backend both --out-dir <dir>
-node scripts/kernelbench-manifest.mjs compare <dir> fillet/foundation:t0 bench/robustness/baselines/digests.json
+cargo xtask kernelbench-manifest compare <dir> fillet/foundation:t0 bench/robustness/baselines/digests.json
 ```
 
 `record` replaces one suite's rows in place (so a removed case does not linger) and
@@ -31,7 +31,7 @@ missing and unexpected row.
 
 **Re-recording is a decision, not a chore.** A moved digest means the geometry or
 the case definition changed; establish *why* before overwriting, and say so in the
-`TODO.md` gate entry. Overwriting to make a gate green destroys the only evidence
+existing Plane benchmark work item. Overwriting to make a gate green destroys the only evidence
 that the change was unintended.
 
 ## What is pinned today
@@ -145,8 +145,8 @@ are excluded — they describe the machine, not the kernel.
 Recording a new platform:
 
 ```bash
-node scripts/kernelbench-manifest.mjs record          <out-dir> <suite:preset> bench/robustness/baselines/digests.json
-node scripts/kernelbench-manifest.mjs semantic-record <out-dir> <suite:preset> bench/robustness/baselines/semantics.json
+cargo xtask kernelbench-manifest record          <out-dir> <suite:preset> bench/robustness/baselines/digests.json
+cargo xtask kernelbench-manifest semantic-record <out-dir> <suite:preset> bench/robustness/baselines/semantics.json
 ```
 
 `ONECAD_BENCH_PLATFORM` overrides the detected platform, for recording from an

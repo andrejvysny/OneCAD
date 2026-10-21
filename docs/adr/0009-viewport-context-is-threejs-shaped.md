@@ -1,8 +1,8 @@
 # ADR-0009 — The viewport contract is Three.js-shaped in v1
 
-Status: accepted (2026-08-08)
+Status: Superseded by ADR-0015 for the native application (accepted originally 2026-08-08)
 
-Superseded by: [ADR-0015](0015-native-rust-ui.md) (proposed 2026-10-17; takes effect only once accepted).
+Superseded by: [ADR-0015](0015-native-rust-ui.md) (accepted native direction, 2026-10-17).
 
 ## Context
 

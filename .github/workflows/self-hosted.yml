@@ -116,7 +116,7 @@ jobs:
           echo
           echo "=== toolchain (presence + version; nothing is installed) ==="
           for tool in git curl tar cmake ninja make gcc g++ pkg-config \
-                      rustc cargo rustup node bun python3 sqlite3 jq sudo; do
+                      rustc cargo rustup python3 sqlite3 jq sudo; do
             if command -v "$tool" >/dev/null 2>&1; then
               printf '%-12s PRESENT  %s\n' "$tool" "$(command -v "$tool")"
               printf '%-12s          %s\n' '' "$("$tool" --version 2>&1 | head -1)"
@@ -406,9 +406,6 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
 
       - name: Require the S3 runner binary
         run: |
@@ -430,9 +427,8 @@ jobs:
           rustup show active-toolchain
 
       - name: Kernelbench unit + supervisor tests
-        # Deliberately -p, not --workspace: the app crate's build script requires
-        # a staged sidecar (bundle.externalBin) and pulls in GTK/WebKitGTK on
-        # Linux. Neither is needed to exercise the benchmark supervisor.
+        # Keep this lane focused on the portable benchmark supervisor.
+        # The full native desktop workspace runs in the macOS lane.
         working-directory: .
         run: cargo test -p onecad-kernelbench
 
@@ -451,13 +447,13 @@ jobs:
             --json "$KERNELBENCH_OUT/t0/summary.json"
 
       - name: Digest baseline — same-host regression gate
-        # Digests are platform-keyed (see scripts/kernelbench-manifest.mjs for
+        # Digests are platform-keyed (see xtask/src/evidence for
         # the measurement that forced it: translation is bit-exact across hosts,
         # anything through trig is not). This compares linux-x64 rows against
         # linux-x64 rows, so a difference IS a regression and reds the job.
         run: |
           set -euo pipefail
-          node scripts/kernelbench-manifest.mjs compare \
+          cargo xtask kernelbench-manifest compare \
             "$KERNELBENCH_OUT/t0" "fillet/foundation:t0" \
             bench/robustness/baselines/digests.json \
             2>&1 | tee digest-compare.txt
@@ -470,7 +466,7 @@ jobs:
         # NOT platform-keyed — both hosts are asserted against the same row.
         run: |
           set -euo pipefail
-          node scripts/kernelbench-manifest.mjs semantic-compare \
+          cargo xtask kernelbench-manifest semantic-compare \
             "$KERNELBENCH_OUT/t0" "fillet/foundation:t0" \
             bench/robustness/baselines/semantics.json \
             2>&1 | tee semantic-compare.txt

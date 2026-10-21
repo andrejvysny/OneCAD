@@ -14,7 +14,7 @@ if [[ $# -gt 1 ]]; then
 fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
-TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | bun -e 'console.log(JSON.parse(await Bun.stdin.text()).target_directory)')"
+TARGET_DIR="$(cargo run --quiet -p xtask -- target-directory)"
 APP="${1:-$TARGET_DIR/release/bundle/macos/onecad.app}"
 TRIPLE="$(rustc -Vv | sed -n 's/^host: //p')"
 STAGED="packaging/binaries/onecad-worker-$TRIPLE"
@@ -26,13 +26,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$STAGED" "$APP/Contents/MacOS/onecad-worker"
 scripts/bundle-dylibs.sh "$APP"
 cp "$APP/Contents/MacOS/onecad-worker" "$STAGED"
-bun -e '
-const [binaryPath, manifestPath] = process.argv.slice(1);
-const manifest = JSON.parse(await Bun.file(manifestPath).text());
-const binary = new Uint8Array(await Bun.file(binaryPath).arrayBuffer());
-manifest.binarySha256 = new Bun.CryptoHasher("sha256").update(binary).digest("hex");
-await Bun.write(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-' "$STAGED" "$MANIFEST"
+cargo run --quiet -p xtask -- rehash-worker-manifest "$STAGED" "$MANIFEST"
 cargo build --release -p onecad-ui
 cp "$TARGET_DIR/release/onecad-ui" "$APP/Contents/MacOS/onecad"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
@@ -52,7 +46,7 @@ PLIST
 codesign --force --sign - "$APP/Contents/MacOS/onecad"
 codesign --force --sign - "$APP"
 codesign --verify --strict --verbose=2 "$APP"
-expected="$(bun -e 'console.log(JSON.parse(await Bun.file(process.argv[1]).text()).binarySha256)' "$MANIFEST")"
+expected="$(cargo run --quiet -p xtask -- manifest-hash "$MANIFEST")"
 actual="$(shasum -a 256 "$APP/Contents/MacOS/onecad-worker" | awk '{print $1}')"
 if [[ "$actual" != "$expected" ]]; then
     echo "bundled worker SHA-256 $actual != manifest $expected" >&2

@@ -5,6 +5,13 @@ metadata:
   type: project
 ---
 
+> Historical retired-stack notes, retained for technical provenance. Former
+> Tauri/web paths and commands below are not active build or testing guidance.
+> Follow the root [AGENTS.md](../../../AGENTS.md) and
+> [Rust tooling guide](../../../xtask/README.md). Current project knowledge and
+> work ownership belong in the existing Plane project; this file is not authority.
+
+
 Durable facts for anyone touching `src-tauri/src/menu.rs`, `events.rs`, or a
 `tauriClient` event listener. Learned building the native menu (WP-U1 / D-3).
 

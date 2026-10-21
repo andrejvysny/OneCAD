@@ -1,5 +1,12 @@
 # Postmortem: Extrude ✓ silently did nothing (EXTRUDE-COMMIT-FIX, 2026-07-30 → 2026-07-31)
 
+> Historical failure analysis retained because current `onecad-app` Revolve
+> regression tests cite this rationale. Former frontend paths and diagnostic
+> commands below describe the retired stack. Current native debugging is in
+> [DEBUGGING.md](DEBUGGING.md); current QA outcomes and future work belong in
+> the existing Plane project. This report is not current acceptance evidence.
+
+
 ## Symptom
 
 Sketch → Extrude → arm + drag preview all worked; clicking ✓ (or Enter / click-away)

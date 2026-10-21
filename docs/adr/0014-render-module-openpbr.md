@@ -48,11 +48,11 @@ implementation detail borrowed from one renderer.
    `onecad.render.workspace.*` and the shell placeholder retires (the
    transition `workspaceIds.ts` already describes for Simulation/Drawing), or
    whether the shell hands the existing workspace off some other way.
-   Concretely: `docs/RENDER_MODULE.md` documents this as an open question, not
+   Concretely: [historical Render draft](https://github.com/andrejvysny/OneCAD/blob/ed9ed33f6f394897612e0a40edee015edd775ef8/docs/RENDER_MODULE.md) documents this as an open question, not
    as settled.
 
 3. **OpenPBR is the schema baseline for the module's future material data
-   model**, not a bespoke shading model. `docs/RENDER_MODULE.md` sketches the
+   model**, not a bespoke shading model. [historical Render draft](https://github.com/andrejvysny/OneCAD/blob/ed9ed33f6f394897612e0a40edee015edd775ef8/docs/RENDER_MODULE.md) sketches the
    mapping; it is explicitly draft and will need re-verification against
    whatever OpenPBR revision is current when implementation actually starts.
 

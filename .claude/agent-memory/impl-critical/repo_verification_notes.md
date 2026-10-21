@@ -5,6 +5,13 @@ metadata:
   type: project
 ---
 
+> Historical retired-stack notes, retained for technical provenance. Former
+> Tauri/web paths and commands below are not active build or testing guidance.
+> Follow the root [AGENTS.md](../../../AGENTS.md) and
+> [Rust tooling guide](../../../xtask/README.md). Current project knowledge and
+> work ownership belong in the existing Plane project; this file is not authority.
+
+
 Verification habits that paid off in this repo.
 
 **Why:** the house rule is "never report a gate you did not run", and a new regression test is worth

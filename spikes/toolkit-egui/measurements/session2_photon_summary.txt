@@ -1,9 +1,0 @@
-[quiet] lat1 loadavg={ 1.67 2.86 3.45 } 18:41:24
-egui1 [photon] frames=230 posts=40 matched=40 event_to_display_ms mean=28.16 p50=26.31 p95=38.04 min=13.63 max=138.01
-native1 [photon] frames=152 posts=40 matched=40 event_to_display_ms mean=22.56 p50=21.57 p95=30.21 min=9.70 max=32.22
-[quiet] lat2 loadavg={ 1.53 2.77 3.41 } 18:41:44
-egui2 [photon] frames=232 posts=40 matched=40 event_to_display_ms mean=30.16 p50=27.02 p95=38.21 min=16.61 max=149.89
-native2 [photon] frames=155 posts=40 matched=40 event_to_display_ms mean=21.39 p50=22.04 p95=31.27 min=7.88 max=32.34
-[quiet] lat3 loadavg={ 2.40 2.88 3.43 } 18:42:03
-egui3 [photon] frames=230 posts=40 matched=40 event_to_display_ms mean=29.35 p50=26.47 p95=37.13 min=16.13 max=147.43
-native3 [photon] frames=190 posts=40 matched=40 event_to_display_ms mean=23.14 p50=23.15 p95=33.25 min=8.82 max=42.02

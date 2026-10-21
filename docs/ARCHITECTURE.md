@@ -1,250 +1,126 @@
 # OneCAD architecture
 
-This document states the architectural laws of the OneCAD codebase. Folder names
-change; these rules do not. Where this document and a folder layout disagree,
-this document wins.
+OneCAD is a native Rust desktop application using egui/eframe and wgpu, with a
+C++20 OCCT/PlaneGCS geometry sidecar. The root `Cargo.toml` and `Cargo.lock` own
+the workspace. This document describes current code boundaries and invariants;
+project status, research and future decisions live in the existing
+[ONECAD Plane project](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/issues/).
+The [documentation index](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/pages/0bfe867d-215a-4cfb-a501-9f628976bc9d)
+and [migration audit](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/pages/a0db33f3-7c7f-4bd6-bc1d-0c2c9ca549d1)
+identify canonical project knowledge. Historical ADRs record design provenance;
+they do not prove native qualification or define an active TypeScript SDK.
 
-Current migration status and unfinished work live in the private [ONECAD Plane project](https://app.plane.so/andrejvysny/projects/b7ff7739-7b47-449c-93e7-81f8d74aeaee/issues/). The rules stated here remain binding for new code even where old code has not yet been moved behind them; this document remains the technical architecture authority.
-
-## 1. The one-sentence version
-
-> The OneCAD Platform owns composition and application infrastructure; modules own
-> domain behavior and data; workspaces decide how capabilities are presented;
-> addons package extensions; and all interaction across those boundaries happens
-> through explicit, namespaced, versionable contracts.
-
-Modeling is not a synonym for OneCAD. Modeling is the first privileged built-in
-module running on the Platform.
-
-## 2. Terminology
-
-These four words are not interchangeable.
-
-| Term | Owns | Example |
-|---|---|---|
-| **Platform** | Domain-neutral infrastructure: documents, entities, transactions, commands, selection, workspaces, modules, events, resources, settings, persistence | `onecad.platform` |
-| **Module** | One domain capability, its state, and its contributions | `onecad.modeling` |
-| **Workspace** | A presentation/composition configuration — which capabilities are prominent for a kind of work | `onecad.workspace.design` |
-| **Addon** | An installable, distributable package, which may contribute modules, workspaces, or contributions directly | `com.example.foo` |
-
-A module is not automatically a workspace. A workspace may combine capabilities
-from several modules. An addon may extend the default workspace instead of
-creating one.
-
-The Platform must not understand Extrude, Fillet, Sketch, BRep, FEM, drawing
-views, or CAM operations. That is a feature, not a gap.
-
-## 3. Layering
-
-```
-Application Shell
-       ↓
-OneCAD Platform
-       ↓
-Stable contracts / SDK
-       ↑
-Built-in modules
-       ↑
-External addons
-```
-
-Forbidden edges, in both the TypeScript and Rust trees:
-
-- Platform → modeling implementation
-- Addon → modeling internals
-- Addon → OCCT worker
-- Any module → another module's private state
-- SDK → application implementation
-
-The C++ worker is the **geometry service implementation of `onecad.modeling`**,
-not a general OneCAD backend. A future module needing geometry consumes the
-modeling geometry service; it never speaks OCW1 itself.
-
-### Rust workspace and native host boundary
-
-The repository-root `Cargo.toml` and `Cargo.lock` own the Rust workspace.
-`onecad-ui` is the native host and `onecad-render::Renderer` is the sole CAD
-renderer. The React/Tauri application, comparison renderer and executable
-rendering prototypes are retired. Shared services and all backend regression
-suites live in `crates/onecad-app/`. This consolidation is not evidence that
-native UI acceptance gates pass or retired-editor workflow parity is complete.
+## Workspace boundaries
 
 | Crate | Responsibility |
 |---|---|
-| `onecad-app` | Host-independent application services, authoritative document runtime, regeneration, worker supervision, persistence, import/export and library operations |
-| `onecad-scene` | Bounded immutable CPU scene, captured camera/viewport identity, synchronous picking and fit calculations |
-| `onecad-render` | Rendering on the native host's shared wgpu device and queue; consumes checked scene geometry |
-| `onecad-interaction` | Pure extrusion and existing-feature distance-edit transitions; emits tagged application effect intents without I/O |
-| `onecad-ui` | Native eframe host, presentation, platform integration and bounded execution of application effects |
+| `onecad-core` | Pure domain model, document/history types, expressions and recovery contracts |
+| `onecad-protocol` | OCW1 transport and checked MESH1 decoding |
+| `onecad-library` | Library domain data and operations |
+| `onecad-app` | Shared application services, authoritative document runtime, regeneration, worker supervision, persistence, import/export and library operations |
+| `onecad-scene` | Bounded immutable CPU geometry, captured camera/viewport identity, synchronous picking and fit calculations |
+| `onecad-interaction` | Pure interaction transitions and tagged application effects |
+| `onecad-render` | Sole CAD renderer, using the host's shared wgpu device and queue |
+| `onecad-widgets` | Presentation widgets, native theme, fonts and baked icons |
+| `onecad-ui` | Native eframe host, platform integration, presentation and bounded execution of application effects |
+| `onecad-mesh-fixture` | Headless fixture generation through shared application services |
+| `onecad-regen`, `onecad-library-ingest` | Headless consumers of application services |
+| `onecad-kernelbench` | Bounded kernel benchmark supervision, separate from the product worker protocol |
+| `onecad-worker-stub` | Protocol test worker |
+| `xtask` | Build support, repository checks, generated assets and strict evidence validation |
 
-The native host implements a first workflow subset. It does not establish parity
-with the retired editor. The native host uses `onecad-app` mutation services;
-neither the scene, renderer nor interaction reducer owns a document mutation
-path. Accepted edits, regeneration completion, per-feature failures and repair
-states remain distinct. A failed accepted edit is not automatically removed;
-provisional rollback requires the application-owned guarded rollback token.
+`cargo xtask check-rust-layers` enforces the direct dependency graph across
+normal, development, build, optional, renamed and target-specific declarations.
+See [dependency layers](rust-dependency-layers.md). `onecad-app` must not depend
+on concrete UI, rendering, scene or interaction implementations. Scene and
+interaction remain independent of GPU and UI toolkits. Rendering remains
+independent of UI toolkits. Tauri, Wry and WebKit dependencies are forbidden
+throughout the workspace, including the host.
 
-Profile selections and disposable previews carry captured document, runtime,
-revision, snapshot, gesture and operation identities. The reducer rejects stale
-replies and reuses one operation id for a new feature's preview and commit.
-Existing-feature edits do not use the new-feature preview path: an authoritative
-rollback-prefix preview is required before that preview can be enabled.
+## Document and history authority
 
-Native scene and rendering consumers use the checked MESH1 decoder in
-`onecad-protocol`; native host and headless captures share the same renderer.
-Geometry retains Z-up coordinates and semantic topology identities. Theme and
-icons live in `assets/native`, rendering fixtures in `fixtures/render`, and the
-shared-service fixture generator in `crates/onecad-mesh-fixture`.
+Only `onecad-app` owns document mutations. The per-document single-writer
+`DocumentRuntime` separates locked preparation, unlocked worker execution and
+fenced commit. Preserve latest-only preparation, stale-result fencing and
+application-issued rollback tokens. `workerEpoch` and `expectedBaseHash` fence
+results; `documentRevision` is advisory.
 
-`scripts/check-rust-layers.mjs` enforces workspace dependency directions,
-including optional, build, development and target-specific dependencies. UI and
-platform toolkit dependencies belong to hosts; wgpu belongs to the rendering
-crate and host. Application, interaction, scene and pure domain code remain
-independent of Tauri and UI toolkits.
+The native host and automation call the same application services. Neither
+scene construction, rendering nor an interaction reducer provides an alternate
+document mutation path. Authoring acceptance, regeneration completion,
+per-feature failure and `NeedsRepair` are distinct. A failed accepted edit is
+not automatically removed: provisional rollback requires its guarded token.
+Deterministic `NeedsRepair` takes precedence over a silent incorrect binding.
 
-## 4. Ownership rules
+Profile selections and previews carry captured document, runtime, revision,
+snapshot, gesture and operation identities. Stale replies are rejected. New
+feature preview and commit share one operation id. An existing-feature preview
+requires an authoritative rollback-prefix preview rather than borrowing the
+new-feature path.
 
-1. The Platform owns generic infrastructure.
-2. A module owns its domain state; **only** the owning module mutates it.
-3. Foreign modules interact through public services and commands.
-4. Addons never reach into private implementation packages.
-5. UI composition happens through registries — never through direct imports into
-   the shell.
-6. Unknown module state is preserved across load/save.
-7. Kernel and history-operation extension is **closed** in addon v1.
+Persistence belongs to application services and the core I/O contracts. Archive
+entry, size, path and decompression limits apply throughout the container.
+Unknown module-owned state is preserved according to the existing serialization
+contracts. This architecture does not authorize file-format or production-data
+migration. Settings and document state remain separate.
 
-## 5. Identity
+## Geometry worker
 
-Every registered thing carries a namespaced id and a declared owner:
+Production, normal development and required worker CI use the C++20 sidecar.
+OCCT is pinned external source; PlaneGCS remains part of the worker. The
+optional in-process library experiment is nondefault and does not replace the
+sidecar's crash and wedge isolation. Its source/build contract and limitations
+remain in the [in-process investigation](design/native-ui/inprocess-worker-spike.md).
 
-```
-onecad.platform.document.opened
-onecad.modeling.tool.extrude
-com.example.foo.command.inspect
-```
+Worker stdout contains OCW1 frames only; diagnostics use stderr. Preserve
+compatibility checks, worker binary SHA-256, OCCT fingerprint checks, resource
+caps and solver stdout protection. Release worker resolution is bundled-only,
+beside the executable. Debug resolution uses `ONECAD_WORKER_PATH`, then
+`worker/build/onecad-worker`, then the bundled worker. Packaging rewrites and
+signs nested binaries before recording their final hashes.
 
-Rules:
+[OCW1](../protocol/SCHEMA.md) and [MESH1](../protocol/mesh_format.md) are normative.
+Changes require compatible Rust/C++ implementations and cross-track fixtures.
+Checked decoding precedes traversal or upload. Preserve topology identity,
+row ordinals, outward winding, right-handed Z-up coordinates and the
+500,000-triangle admission limit.
 
-- IDs are reverse-domain and stable forever. Display names are never identifiers.
-- A third-party contribution id **must** begin with its addon id. An addon cannot
-  register `onecad.*`.
-- Duplicate registration is a deterministic failure, never last-one-wins.
-- Platform `EntityId` and modeling `ElementId` are different concepts with
-  different guarantees and are not collapsed into one abstraction.
+## Rendering and input
 
-## 6. Contribution model
+`onecad-render::Renderer` is the sole CAD renderer used by the native host and
+headless captures. The host supplies the shared native wgpu device and queue;
+the renderer owns its render targets and internal resources. Native integration
+samples the output texture without CPU image readback. Resource replacement
+waits for CAD completion and final egui sampling fences.
 
-Modules contribute; the shell discovers. Contribution kinds: commands, tools,
-panels, inspector sections, viewport layers, workspace contributions, services,
-settings, document state, resources.
+Picking is synchronous against the last drawable camera and scene. Pending
+navigation must not change the captured basis for hover, click, profile or gizmo
+queries. Scene, camera, viewport, display options, theme and preview changes
+invalidate captured picks. Off-thread preparation and asynchronous effects
+remain bounded and reject stale identities. View-only clipping must not invent
+selectable topology.
 
-- **Command** = an action with identity, availability and metadata. One command
-  feeds toolbar, context menu, palette, shortcut and automation.
-- **Tool** = an interaction lifecycle (a mode/state machine). A tool may invoke
-  commands. `Command = action, Tool = interaction`.
-- **Panel/inspector/viewport contributions** are React components plus metadata,
-  placed into a fixed set of host-owned slots. No raw DOM access, no arbitrary
-  layout replacement.
-- Every registration is owned, and disposing an owner's scope tears down all of
-  its registrations and subscriptions.
-- Ordering is explicit (`group`, `priority`) and deterministic. It must never
-  depend on module load order.
-- A contribution's own predicate (`canActivate`, `canRender`) is read during the
-  host's render, so the OWNER announces when its answer changed (`subscribe`).
-  A host must never watch a module's state on that module's behalf.
-- A host must survive open-ended fields it did not mint: an unknown `icon`
-  renders a placeholder, it does not throw inside a row.
-- Contributions are addressed by (owner, id). Ids are namespaced, and where an
-  id is provider-local (tree rows) the HOST composes the pair — it must not
-  resolve one id space globally.
+Native input routing processes fresh events once and preserves retained
+text/IME events for presentation. Native menu, text focus and model history
+remain separate routing concerns. Host automation, control and MCP interfaces
+remain native application capabilities. Repository cleanup must not change
+input semantics, interaction behavior, chrome, display styles or theme values.
 
-## 6a. Two API surfaces
+Theme data remains in `assets/native/tokens.css`; its CSS syntax is a static
+input, not a web application runtime. Baked icon data and native application
+icons live under `assets/native`. Checked renderer fixtures and provenance live
+under `fixtures/render`.
 
-`@/platform` is the INTERNAL host API: `createPlatform`, the registries,
-`ModuleScope`, the React host components. Built-in modules, compiled into the app
-and versioned with it, use it.
+## Qualification and maintenance
 
-`@onecad/sdk` is the PUBLIC extension API, and it is deliberately narrower.
-Addons receive an `ExtensionContext` — registration plus the few services an
-extension legitimately needs — and never the platform, another owner's scope, the
-IPC client, a store or the renderer. Whatever an addon can reach is what OneCAD
-must keep working forever; the host's composition root is not on that list
-(ADR-0013). `react`, `react-dom` and `three` are host-provided, never bundled by
-an addon.
+See [native host instructions](../crates/onecad-ui/README.md),
+[packaging](PACKAGING.md), [debugging](DEBUGGING.md) and
+[manual release procedures](qa/MANUAL_RELEASE_GATES.md).
+Required worker tests use `ONECAD_REQUIRE_WORKER=1`; required Metal tests use
+`ONECAD_REQUIRE_GPU=1`. Missing prerequisites fail qualification. Exact required
+test inventories, zero skipped required tests, artifact identities, relative
+paths, hashes and negative controls remain strict gates.
 
-## 7. Viewport
-
-Viewport ownership is centralized. The host owns the renderer, canvas, camera,
-navigation, frame lifecycle, selection integration, resource disposal and render
-scheduling. Modules contribute layers.
-
-Rendering is **on demand**: contributions call `invalidate()`; they never run
-their own `requestAnimationFrame` loop. Idle means zero frames.
-
-The world is Z-up, right-handed. Mesh vertex buffers are uploaded verbatim.
-
-## 8. Documents and persistence
-
-One project is one `.onecad` file. Inside it:
-
-- Platform-owned: project identity, metadata, module registry, resource index.
-- Module-owned: modeling state, addon state, each with its own schema version.
-
-Laws:
-
-- **If OneCAD cannot interpret module-owned state, it must preserve it verbatim
-  across load and save.** A missing addon is not a reason to destroy its data.
-- Foreign fields are never embedded inside another module's private state.
-  An addon annotates a body from its own namespace, keyed by entity id.
-- A document records the modules/addons it uses, so a missing one can be
-  reported rather than silently ignored.
-- Application settings and document state are different storage. Neither
-  substitutes for the other.
-- Cache data and authoritative data stay distinguishable; a module must not be
-  able to put essential project state in a cache namespace.
-- Archive guards (entry count, uncompressed size, path traversal, decompression
-  limits) apply to every section, including module and addon data. Generalizing
-  storage must never become a way around them.
-
-Version numbers that are independent and must not be conflated: application
-version, Platform API version, addon RPC version, container format version,
-per-module state schema version, addon package version.
-
-## 9. Transactions
-
-All document mutation goes through transactions. Programmatic changes made by a
-module or addon use the **same** command/transaction layer as user-triggered
-changes — there is no separate mutation path — so automation stays undoable,
-redoable, observable and serializable.
-
-## 10. Events
-
-Events announce state changes; they are not an alternative API for performing
-them. `onecad.modeling.history.changed` is an event. "Please extrude this body"
-is not.
-
-## 11. Typing policy
-
-Dynamic serialization belongs at genuine extension and wire boundaries only.
-
-```
-inside a module      strongly typed
-platform contracts   strongly typed interfaces / DTOs
-RPC boundary         serialized DTOs
-unknown module state opaque JSON
-```
-
-`KnownOperation` stays a strongly typed enum. Modules existing is not a reason to
-weaken it into a string-keyed map. Public DTOs are designed from use cases, not
-by mirroring internal structs.
-
-## 12. Extension points that are intentionally closed
-
-Open: commands, tools, panels, inspector, viewport layers, workspaces, services,
-settings, document state, resources, integrations, libraries.
-
-Closed in v1: kernel algorithms, history operation types, topological naming,
-regeneration internals, worker commands, serialization internals.
-
-Deterministic `NeedsRepair` beats a silent wrong bind, everywhere. Nothing in the
-extension architecture may weaken that.
+CPU tests do not prove appearance. GPU submission or completion does not prove
+OS presentation. Cleanup, compilation and synthetic host tests do not establish
+From-New modeling, physical input, IME, display, product or release acceptance.
