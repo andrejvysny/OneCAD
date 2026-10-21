@@ -3,8 +3,10 @@ import UIKit
 
 @MainActor
 protocol CanvasSurfaceDelegate: AnyObject {
-    /// Size, scale or safe area changed while in a window (attach or resize).
-    func canvasSurfaceDidChange(_ view: MetalCanvasView)
+    /// Layout pass while in a window. `geometryChanged` is true when size,
+    /// scale or safe area differ from the last report (resize needed); the
+    /// call also happens unchanged so a pending attach can be retried.
+    func canvasSurfaceDidChange(_ view: MetalCanvasView, geometryChanged: Bool)
     /// The view left its window; the layer must be released by Rust now.
     func canvasSurfaceWillDetach(_ view: MetalCanvasView)
 }
@@ -26,10 +28,10 @@ final class MetalCanvasView: UIView {
 
     weak var surfaceDelegate: CanvasSurfaceDelegate?
     weak var inputSink: CanvasInputSink?
-    /// Bumped on every bounds or scale change; stamps input batches.
+    /// Bumped on every surface geometry change (size, scale, safe area): the
+    /// header ties it to every surface resize. Stamps input batches.
     private(set) var viewGeneration: UInt64 = 1
-    private var lastPixelSize = CGSize.zero
-    private var lastScale: CGFloat = 0
+    private var lastGeometry: SurfaceGeometry?
 
     var metalLayer: CAMetalLayer {
         // layerClass guarantees the type.
@@ -64,19 +66,27 @@ final class MetalCanvasView: UIView {
         let scale = displayScale
         let pixels = CGSize(width: (bounds.width * scale).rounded(),
                             height: (bounds.height * scale).rounded())
-        metalLayer.contentsScale = scale
-        metalLayer.drawableSize = pixels
-        if pixels != lastPixelSize || scale != lastScale {
-            lastPixelSize = pixels
-            lastScale = scale
-            viewGeneration &+= 1
-        }
-        if window != nil { surfaceDelegate?.canvasSurfaceDidChange(self) }
+        if metalLayer.contentsScale != scale { metalLayer.contentsScale = scale }
+        if metalLayer.drawableSize != pixels { metalLayer.drawableSize = pixels }
+        reportGeometry()
     }
 
     override func safeAreaInsetsDidChange() {
         super.safeAreaInsetsDidChange()
-        if window != nil { surfaceDelegate?.canvasSurfaceDidChange(self) }
+        reportGeometry()
+    }
+
+    /// Unchanged layout passes (e.g. the key-input proxy moving with the
+    /// caret) report `geometryChanged: false` and must not resize.
+    private func reportGeometry() {
+        guard window != nil else { return }
+        let geometry = SurfaceGeometry(bounds: bounds.size, scale: displayScale, safeArea: safeAreaInsets)
+        let changed = geometry != lastGeometry
+        if changed {
+            lastGeometry = geometry
+            viewGeneration &+= 1
+        }
+        surfaceDelegate?.canvasSurfaceDidChange(self, geometryChanged: changed)
     }
 
     override func willMove(toWindow newWindow: UIWindow?) {
@@ -87,7 +97,9 @@ final class MetalCanvasView: UIView {
     override func didMoveToWindow() {
         super.didMoveToWindow()
         // Re-attach on the next layout pass even when the bounds are unchanged.
-        if window != nil { setNeedsLayout() }
+        guard window != nil else { return }
+        lastGeometry = nil
+        setNeedsLayout()
     }
 
     /// Nil while the view has no drawable area.
@@ -98,7 +110,7 @@ final class MetalCanvasView: UIView {
         guard width >= 1, height >= 1 else { return nil }
         var desc = onecad_ios_surface_desc()
         desc.struct_size = UInt32(MemoryLayout<onecad_ios_surface_desc>.size)
-        // The view retains its layer for as long as the surface is attached.
+        // RustBridge.attachSurface also retains this layer until detach/destroy.
         desc.ca_metal_layer = Unmanaged.passUnretained(metalLayer).toOpaque()
         desc.width_px = UInt32(width)
         desc.height_px = UInt32(height)
@@ -133,6 +145,10 @@ final class MetalCanvasView: UIView {
         inputSink?.estimatedPropertiesUpdated(touches, in: self)
     }
 
+    // While the KeyInputProxy subview is first responder, the same UIPress
+    // also bubbles up here after the proxy saw it; TextInputController
+    // dedupes by press identity, so both paths may forward.
+
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         inputSink?.presses(presses, pressed: true)
         super.pressesBegan(presses, with: event)
@@ -147,4 +163,11 @@ final class MetalCanvasView: UIView {
         inputSink?.presses(presses, pressed: false)
         super.pressesCancelled(presses, with: event)
     }
+}
+
+/// What a surface resize reports; equality decides whether one is needed.
+private struct SurfaceGeometry: Equatable {
+    let bounds: CGSize
+    let scale: CGFloat
+    let safeArea: UIEdgeInsets
 }

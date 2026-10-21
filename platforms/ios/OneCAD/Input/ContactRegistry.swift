@@ -11,6 +11,9 @@ import UIKit
 struct ContactRegistry {
     private var live: [ObjectIdentifier: UInt64] = [:]
     private var pendingEstimation: [Int: UInt64] = [:]
+    /// Updates that never arrive (e.g. a cancelled Pencil stroke) would
+    /// otherwise keep their entries until the next reset.
+    private static let maxPendingEstimations = 512
     private var rollReporting: Set<UInt64> = []
     private var nextID: UInt64 = 1
 
@@ -47,6 +50,11 @@ struct ContactRegistry {
     mutating func noteEstimation(index: Int, contact: UInt64, expectsUpdate: Bool) {
         if expectsUpdate {
             pendingEstimation[index] = contact
+            // Indices increase per touch, so the smallest is the oldest.
+            if pendingEstimation.count > Self.maxPendingEstimations,
+               let oldest = pendingEstimation.keys.min() {
+                pendingEstimation.removeValue(forKey: oldest)
+            }
         } else {
             pendingEstimation.removeValue(forKey: index)
         }

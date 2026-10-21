@@ -77,7 +77,9 @@ final class PencilController: NSObject, UIPencilInteractionDelegate {
 
     func pencilInteraction(_ interaction: UIPencilInteraction,
                            didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze) {
-        capabilities.observe(ONECAD_IOS_CAP_SQUEEZE | ONECAD_IOS_CAP_PENCIL_CONNECTED)
+        // Squeeze exists only on Apple Pencil Pro, which has a haptic engine
+        // that UIFeedbackGenerator drives; iPads themselves have none.
+        capabilities.observe(ONECAD_IOS_CAP_SQUEEZE | ONECAD_IOS_CAP_PENCIL_CONNECTED | ONECAD_IOS_CAP_HAPTICS)
         var event = makeEvent(action: ONECAD_IOS_PENCIL_SQUEEZE,
                               preferred: UIPencilInteraction.preferredSqueezeAction,
                               pose: squeeze.hoverPose, timestamp: squeeze.timestamp)

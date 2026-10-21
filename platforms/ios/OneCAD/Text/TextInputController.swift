@@ -11,8 +11,14 @@ final class TextInputController: KeyInputProxyDelegate {
     /// Rust still has a focused field but the user dismissed the keyboard;
     /// it is not re-shown until Rust ends and restarts text input.
     private var dismissedByUser = false
+    /// Presses whose began was handled, mapped to whether it reached Rust.
+    /// One UIPress arrives twice (proxy, then bubbled to the canvas) and its
+    /// end must follow its begin's decision, so identity is the key.
+    private var livePresses: [ObjectIdentifier: Bool] = [:]
     var onInput: (() -> Void)?
     var onCapabilities: ((UInt32) -> Void)?
+    /// Keyboard overlap in canvas points, for the safe-area/resize update.
+    var onKeyboardOverlap: ((CGFloat) -> Void)?
 
     init(bridge: RustBridge, canvas: UIView) {
         self.bridge = bridge
@@ -73,6 +79,7 @@ final class TextInputController: KeyInputProxyDelegate {
 
     private func report(overlap: CGFloat) {
         bridge.setKeyboardOverlap(Float(overlap))
+        onKeyboardOverlap?(overlap)
         onInput?()
     }
 
@@ -83,6 +90,7 @@ final class TextInputController: KeyInputProxyDelegate {
         for press in presses {
             guard let key = press.key else { continue }
             sawKeyboard = true
+            guard let submit = pressDecision(press, key: key, pressed: pressed), submit else { continue }
             var event = onecad_ios_key_event()
             event.hid_usage = UInt32(truncatingIfNeeded: key.keyCode.rawValue)
             event.modifiers = Self.modifiers(key.modifierFlags)
@@ -93,6 +101,35 @@ final class TextInputController: KeyInputProxyDelegate {
         }
         if sawKeyboard { onCapabilities?(ONECAD_IOS_CAP_HARDWARE_KEYBOARD) }
         onInput?()
+    }
+
+    /// Nil for a duplicate delivery (bubbled press, or an end whose begin was
+    /// never seen); otherwise whether this edge goes to `key_submit`.
+    private func pressDecision(_ press: UIPress, key: UIKey, pressed: Bool) -> Bool? {
+        let id = ObjectIdentifier(press)
+        if !pressed { return livePresses.removeValue(forKey: id) }
+        guard livePresses[id] == nil else { return nil }
+        let submit = !(proxy.isFirstResponder && Self.isTextChannelKey(key))
+        livePresses[id] = submit
+        return submit
+    }
+
+    /// One-channel rule (docs/ios/BUILD.md, "Keyboard channels"): while the
+    /// proxy is first responder, UIKit's text system already turns these keys
+    /// into insertText("\n" / "\t") and deleteBackward, with system key repeat,
+    /// exactly as the software keyboard does. Sending them as key events too
+    /// would apply each twice. ⌘/⌃ chords produce no text, so they stay keys.
+    static func isTextChannelKey(_ key: UIKey) -> Bool {
+        guard key.modifierFlags.isDisjoint(with: [.command, .control]) else { return false }
+        switch key.keyCode {
+        case .keyboardReturnOrEnter, .keypadEnter, .keyboardDeleteOrBackspace, .keyboardTab: return true
+        default: return false
+        }
+    }
+
+    /// Scene inactive: ends whose begins were seen may never arrive.
+    func resetPresses() {
+        livePresses.removeAll()
     }
 
     static func modifiers(_ flags: UIKeyModifierFlags) -> UInt32 {
@@ -126,10 +163,22 @@ final class TextInputController: KeyInputProxyDelegate {
     }
 
     func proxyDidResignWithoutRequest() {
+        // Host UI (save-name alert, picker) took focus: not a user dismissal,
+        // and the canvas must not steal it back. The coordinator's completion
+        // restores canvas focus; the next frame re-shows the keyboard if
+        // Rust's field is still focused.
+        guard !isHostUIPresented else { return }
         dismissedByUser = true
         // Deferred: UIKit is still inside the proxy's resign transition.
         DispatchQueue.main.async { [weak self] in
-            MainActor.assumeIsolated { _ = self?.canvas?.becomeFirstResponder() }
+            MainActor.assumeIsolated {
+                guard let self, !self.isHostUIPresented else { return }
+                _ = self.canvas?.becomeFirstResponder()
+            }
         }
+    }
+
+    private var isHostUIPresented: Bool {
+        canvas?.window?.rootViewController?.presentedViewController != nil
     }
 }

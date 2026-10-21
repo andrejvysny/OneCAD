@@ -5,22 +5,12 @@ import Foundation
 extension RustBridge {
     static let maxSamplesPerBatch = 4096
 
-    // MARK: Surface
-
-    @discardableResult
-    func attachSurface(_ desc: onecad_ios_surface_desc) -> onecad_ios_status {
-        var desc = desc
-        return call("surface_attach") { onecad_ios_surface_attach($0, &desc) }
-    }
+    // MARK: Surface (attach/detach own the layer reference, see RustBridge)
 
     @discardableResult
     func resizeSurface(_ desc: onecad_ios_surface_desc) -> onecad_ios_status {
         var desc = desc
         return call("surface_resize") { onecad_ios_surface_resize($0, &desc) }
-    }
-
-    func detachSurface() {
-        _ = call("surface_detach") { onecad_ios_surface_detach($0) }
     }
 
     // MARK: Frame
@@ -104,8 +94,10 @@ extension RustBridge {
 
     // MARK: Lifecycle
 
+    /// Exempt from the terminal latch: DID_ENTER_BACKGROUND / WILL_TERMINATE
+    /// drive the autosave flush, which still matters in relaunch-required.
     func lifecycle(_ event: onecad_ios_lifecycle_event) {
-        _ = call("lifecycle") { onecad_ios_lifecycle($0, event.rawValue) }
+        _ = call("lifecycle", allowWhenTerminal: true) { onecad_ios_lifecycle($0, event.rawValue) }
     }
 
     // MARK: Documents

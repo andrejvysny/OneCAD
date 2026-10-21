@@ -67,6 +67,7 @@ final class CanvasViewController: UIViewController {
         let text = TextInputController(bridge: bridge, canvas: canvas)
         text.onInput = { [weak self] in self?.requestFrame() }
         text.onCapabilities = { [weak self] in self?.capabilities?.observe($0) }
+        text.onKeyboardOverlap = { [weak self] in self?.applyKeyboardOverlap($0) }
         textInput = text
         let a11y = AccessibilityBridge(container: canvas, bridge: bridge)
         a11y.onActivate = { [weak self] in self?.requestFrame() }
@@ -94,9 +95,20 @@ final class CanvasViewController: UIViewController {
         // Contacts captured in the old geometry cannot continue in the new one.
         cancelContacts(reason: ONECAD_IOS_CANCEL_ORIENTATION)
         coordinator.animate(alongsideTransition: nil) { [weak self] _ in
-            self?.accessibility?.refreshFrames()
             self?.requestFrame()
         }
+    }
+
+    /// Keyboard -> safe area: the part of the keyboard below the system safe
+    /// area becomes additional bottom inset, so the canvas's
+    /// safeAreaInsetsDidChange drives a surface resize with the new insets
+    /// (header: resize covers "keyboard"), alongside `keyboard_frame`.
+    private func applyKeyboardOverlap(_ overlap: CGFloat) {
+        var extra = additionalSafeAreaInsets
+        let systemBottom = view.safeAreaInsets.bottom - extra.bottom
+        extra.bottom = max(0, overlap - systemBottom)
+        guard extra != additionalSafeAreaInsets else { return }
+        additionalSafeAreaInsets = extra
     }
 
     @objc private func hoverChanged(_ recognizer: UIHoverGestureRecognizer) {
@@ -145,26 +157,24 @@ final class CanvasViewController: UIViewController {
         }
     }
 
-    // MARK: Scene lifecycle (forwarded by SceneDelegate)
+    // MARK: Scene lifecycle (SceneDelegate sends the lifecycle events itself,
+    // so they still reach Rust after this controller is gone)
 
     func sceneWillResignActive() {
         cancelContacts(reason: ONECAD_IOS_CANCEL_SCENE_INACTIVE)
-        bridge.lifecycle(ONECAD_IOS_WILL_RESIGN_ACTIVE)
+        textInput?.resetPresses()
     }
 
     func sceneDidEnterBackground() {
         // No Metal work is allowed in the background.
         frameLoop?.setSuspended(true)
-        bridge.lifecycle(ONECAD_IOS_DID_ENTER_BACKGROUND)
     }
 
     func sceneWillEnterForeground() {
-        bridge.lifecycle(ONECAD_IOS_WILL_ENTER_FOREGROUND)
         frameLoop?.setSuspended(false)
     }
 
     func sceneDidBecomeActive() {
-        bridge.lifecycle(ONECAD_IOS_DID_BECOME_ACTIVE)
         capabilities?.publish()
         requestFrame()
     }
@@ -186,14 +196,15 @@ final class CanvasViewController: UIViewController {
 // MARK: - Surface
 
 extension CanvasViewController: CanvasSurfaceDelegate {
-    func canvasSurfaceDidChange(_ view: MetalCanvasView) {
+    func canvasSurfaceDidChange(_ view: MetalCanvasView, geometryChanged: Bool) {
         guard bridge.isUsable, let desc = view.surfaceDescriptor() else { return }
-        if surfaceAttached {
+        if !surfaceAttached {
+            surfaceAttached = bridge.attachSurface(desc, layer: view.metalLayer) == ONECAD_IOS_OK
+        } else if geometryChanged {
             bridge.resizeSurface(desc)
         } else {
-            surfaceAttached = bridge.attachSurface(desc) == ONECAD_IOS_OK
+            return
         }
-        accessibility?.refreshFrames()
         requestFrame()
     }
 

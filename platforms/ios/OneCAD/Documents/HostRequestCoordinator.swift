@@ -1,9 +1,11 @@
 import UIKit
 import UniformTypeIdentifiers
 
-/// Drains Rust's host-request queue and serves requests one at a time with
-/// native UI. Every request is completed exactly once; an empty path list
-/// means cancelled (or "done" for requests that produce no file).
+/// Serves Rust's host requests one at a time with native UI, popping the next
+/// one only when the previous is completed, so the backlog stays in Rust's
+/// bounded (64) queue rather than an unbounded host copy. Every request is
+/// completed exactly once; an empty path list means cancelled (or "done" for
+/// requests that produce no file).
 @MainActor
 final class HostRequestCoordinator: NSObject, UIDocumentPickerDelegate {
     static let documentType = UTType(exportedAs: "com.onecad.document")
@@ -13,7 +15,6 @@ final class HostRequestCoordinator: NSObject, UIDocumentPickerDelegate {
 
     private let bridge: RustBridge
     private weak var presenter: UIViewController?
-    private var pending: [HostRequest] = []
     private var active: HostRequest?
     var onCompleted: (() -> Void)?
 
@@ -22,16 +23,14 @@ final class HostRequestCoordinator: NSObject, UIDocumentPickerDelegate {
         self.presenter = presenter
     }
 
-    /// Called when a frame reports HOST_REQUESTS. Requests are copied out
-    /// immediately because Rust's pointers die on the next pop.
+    /// Called when a frame reports HOST_REQUESTS. Popped requests are copied
+    /// out (HostRequest) because Rust's pointers die on the next pop.
     func drain() {
-        while let request = bridge.nextHostRequest() { pending.append(request) }
         serveNext()
     }
 
     private func serveNext() {
-        guard active == nil, !pending.isEmpty else { return }
-        let request = pending.removeFirst()
+        guard active == nil, let request = bridge.nextHostRequest() else { return }
         active = request
         switch request.kind {
         case ONECAD_IOS_REQ_OPEN_DOCUMENT.rawValue: presentOpenPicker(request)
@@ -92,12 +91,30 @@ final class HostRequestCoordinator: NSObject, UIDocumentPickerDelegate {
     }
 
     private func present(_ picker: UIDocumentPickerViewController) {
-        guard let host = presentingController else {
+        picker.delegate = self
+        withReadyPresenter { $0.present(picker, animated: true) }
+    }
+
+    /// UIKit silently refuses to present from a controller that is off window
+    /// or mid-transition, which would leave the request active forever and
+    /// block every later one (haptics, copy). A running transition is waited
+    /// out; no on-window presenter completes the request as cancelled.
+    /// (Refusal cannot be detected after the fact: the document picker's
+    /// presentation is delayed, so `presentingViewController` stays nil for a
+    /// while even when it succeeds.)
+    private func withReadyPresenter(_ body: @escaping (UIViewController) -> Void) {
+        guard let host = presentingController, host.viewIfLoaded?.window != nil else {
+            bridgeLog.error("no on-window presenter for host request; completing as cancelled")
             complete(paths: [])
             return
         }
-        picker.delegate = self
-        host.present(picker, animated: true)
+        if let coordinator = host.transitionCoordinator,
+           coordinator.animate(alongsideTransition: nil, completion: { [weak self] _ in
+               self?.withReadyPresenter(body)
+           }) {
+            return
+        }
+        body(host)
     }
 
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
@@ -108,9 +125,25 @@ final class HostRequestCoordinator: NSObject, UIDocumentPickerDelegate {
             return
         }
         Task { [weak self] in
-            let paths = await DocumentInbox.importCopies(of: urls)
-            self?.complete(paths: paths)
+            let result = await DocumentInbox.importCopies(of: urls)
+            self?.finishImport(result)
         }
+    }
+
+    /// The ABI has no failure completion (empty = cancelled), so a failed copy
+    /// is told apart natively: the alert is shown first and the request is
+    /// completed when it is dismissed, keeping requests strictly serial.
+    private func finishImport(_ result: DocumentInbox.Result) {
+        guard !result.failedNames.isEmpty else {
+            complete(paths: result.paths)
+            return
+        }
+        let alert = ImportFailureAlert.make(failedNames: result.failedNames) { [weak self] in
+            self?.complete(paths: result.paths)
+        }
+        // If no presenter is ready this completes as cancelled, which also
+        // drops the successful paths; the failure is still logged.
+        withReadyPresenter { $0.present(alert, animated: true) }
     }
 
     func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
@@ -120,13 +153,10 @@ final class HostRequestCoordinator: NSObject, UIDocumentPickerDelegate {
     // MARK: Save
 
     private func presentSavePrompt(_ request: HostRequest) {
-        guard let host = presentingController else {
-            complete(paths: [])
-            return
-        }
-        SaveNamePrompt.present(on: host, title: request.label, suggestedName: request.suggestedName) {
-            [weak self] path in
-            self?.complete(paths: path.map { [$0] } ?? [])
+        withReadyPresenter { [weak self] host in
+            SaveNamePrompt.present(on: host, title: request.label, suggestedName: request.suggestedName) { path in
+                self?.complete(paths: path.map { [$0] } ?? [])
+            }
         }
     }
 

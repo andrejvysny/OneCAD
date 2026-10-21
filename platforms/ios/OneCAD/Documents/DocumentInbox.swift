@@ -23,18 +23,27 @@ enum DocumentInbox {
         return parent.path == inbox.resolvingSymlinksInPath().standardizedFileURL.path
     }
 
-    /// Copies each URL into the inbox and returns the sandbox paths that
-    /// succeeded. Failures are logged and skipped, never partially written.
-    static func importCopies(of urls: [URL]) async -> [String] {
+    /// Sandbox paths that were imported, and the file names that failed.
+    /// Failures are kept apart so the host can tell them from a cancel.
+    struct Result: Sendable {
+        var paths: [String] = []
+        var failedNames: [String] = []
+    }
+
+    /// Copies each URL into the inbox. Failures are logged and never leave a
+    /// partially written file behind.
+    static func importCopies(of urls: [URL]) async -> Result {
         await Task.detached(priority: .userInitiated) {
-            urls.compactMap { url -> String? in
+            var result = Result()
+            for url in urls {
                 do {
-                    return try importCopy(of: url).path
+                    result.paths.append(try importCopy(of: url).path)
                 } catch {
                     inboxLog.error("import of \(url.lastPathComponent, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
-                    return nil
+                    result.failedNames.append(url.lastPathComponent)
                 }
             }
+            return result
         }.value
     }
 
@@ -44,33 +53,34 @@ enum DocumentInbox {
         if isInInbox(source) { return source }
         let scoped = source.startAccessingSecurityScopedResource()
         defer { if scoped { source.stopAccessingSecurityScopedResource() } }
-        let destination = try uniqueDestination(for: source.lastPathComponent)
+        let inbox = try inboxDirectory()
         var coordinationError: NSError?
-        var copyError: Error?
+        var outcome: Swift.Result<URL, Error> = .failure(CocoaError(.fileReadUnknown))
         NSFileCoordinator(filePresenter: nil).coordinate(
             readingItemAt: source, options: [.withoutChanges], error: &coordinationError
         ) { readable in
-            do {
-                try FileManager.default.copyItem(at: readable, to: destination)
-            } catch {
-                copyError = error
-            }
+            outcome = Swift.Result { try copyOrReuse(readable, named: source.lastPathComponent, in: inbox) }
         }
-        if let error = coordinationError ?? copyError { throw error }
-        return destination
+        if let coordinationError { throw coordinationError }
+        return try outcome.get()
     }
 
-    private static func uniqueDestination(for fileName: String) throws -> URL {
-        let inbox = try inboxDirectory()
+    /// Reopening the same file reuses an identical earlier copy ("name",
+    /// "name 2", ...) instead of adding another, so repeated imports of one
+    /// file do not grow the inbox. A changed file gets the next free name.
+    private static func copyOrReuse(_ readable: URL, named fileName: String, in inbox: URL) throws -> URL {
+        let fm = FileManager.default
         let base = (fileName as NSString).deletingPathExtension
         let ext = (fileName as NSString).pathExtension
         var candidate = inbox.appending(path: fileName)
         var counter = 2
-        while FileManager.default.fileExists(atPath: candidate.path) {
+        while fm.fileExists(atPath: candidate.path) {
+            if fm.contentsEqual(atPath: readable.path, andPath: candidate.path) { return candidate }
             let name = ext.isEmpty ? "\(base) \(counter)" : "\(base) \(counter).\(ext)"
             candidate = inbox.appending(path: name)
             counter += 1
         }
+        try fm.copyItem(at: readable, to: candidate)
         return candidate
     }
 }

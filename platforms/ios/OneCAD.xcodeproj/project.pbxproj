@@ -25,6 +25,7 @@
 		8C4F6A9DEB9EBCFED712014E /* KeyInputProxy+TextInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE2DC86614E04510234744A8 /* KeyInputProxy+TextInput.swift */; };
 		911E6EE8C1089E85EC22B72C /* TouchSampleBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92B9E16789CE50F6584D00F8 /* TouchSampleBuilder.swift */; };
 		9515D5355BA1339BB7B171C3 /* RustBridge+Calls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F5236FA35EA92C24105116A /* RustBridge+Calls.swift */; };
+		A092E0A18F28E2C922893332 /* ImportFailureAlert.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4903C6E556533285E91746B3 /* ImportFailureAlert.swift */; };
 		BB77B95C47BDCB3E936A8332 /* SaveNamePrompt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66A4F5D5F5C0F04D0A1154A2 /* SaveNamePrompt.swift */; };
 		BF0525A721F55B8278E77B8E /* TextInputController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65CD96C1F39D7C8F7E4F6D1C /* TextInputController.swift */; };
 		D197216A777619480F76E947 /* libonecad_ios.a in Frameworks */ = {isa = PBXBuildFile; fileRef = DFCC5ED7DB7ECA348C086793 /* libonecad_ios.a */; };
@@ -64,6 +65,7 @@
 		436124834EE926976B75C4AC /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		47F47CBD179A10B963741C03 /* NavigationGestures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationGestures.swift; sourceTree = "<group>"; };
 		48C2713B68BAC0958CFF6F19 /* libonecad_worker_bundle.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libonecad_worker_bundle.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		4903C6E556533285E91746B3 /* ImportFailureAlert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportFailureAlert.swift; sourceTree = "<group>"; };
 		65CD96C1F39D7C8F7E4F6D1C /* TextInputController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextInputController.swift; sourceTree = "<group>"; };
 		66A4F5D5F5C0F04D0A1154A2 /* SaveNamePrompt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SaveNamePrompt.swift; sourceTree = "<group>"; };
 		69DB9BE4B5F647E3A2C44E2B /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
@@ -164,6 +166,7 @@
 			children = (
 				1641281E136736F811AD28DC /* DocumentInbox.swift */,
 				B895F357F1C733D2ADF98089 /* HostRequestCoordinator.swift */,
+				4903C6E556533285E91746B3 /* ImportFailureAlert.swift */,
 				66A4F5D5F5C0F04D0A1154A2 /* SaveNamePrompt.swift */,
 			);
 			path = Documents;
@@ -383,6 +386,7 @@
 				82E9166A50AA25F467848BDD /* FatalErrorViewController.swift in Sources */,
 				0892F14119D93DB02CBE4439 /* FrameLoop.swift in Sources */,
 				29BF588E3B6BE57BAAA6198F /* HostRequestCoordinator.swift in Sources */,
+				A092E0A18F28E2C922893332 /* ImportFailureAlert.swift in Sources */,
 				8C4F6A9DEB9EBCFED712014E /* KeyInputProxy+TextInput.swift in Sources */,
 				5C7525FC9D16298AD0DC82E5 /* KeyInputProxy.swift in Sources */,
 				7243F96ADC1AFCFB7FF72BD5 /* MetalCanvasView.swift in Sources */,

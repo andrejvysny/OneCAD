@@ -4,13 +4,26 @@ import UIKit
 /// snapshots so VoiceOver focus and XCUITest references stay stable.
 final class CanvasAccessibilityElement: UIAccessibilityElement {
     let nodeID: UInt64
-    /// Frame in canvas coordinates; screen coordinates are derived from it.
+    /// Frame in canvas coordinates, as given by the Rust snapshot.
     var localFrame = CGRect.zero
     var activate: ((UInt64) -> Bool)?
 
     init(container: UIView, nodeID: UInt64) {
         self.nodeID = nodeID
         super.init(accessibilityContainer: container)
+    }
+
+    /// Screen frame computed on every query rather than cached, so it stays
+    /// right when the window moves (Stage Manager, split view, rotation)
+    /// without a layout pass in the canvas.
+    override var accessibilityFrame: CGRect {
+        get {
+            guard let container = accessibilityContainer as? UIView else { return .zero }
+            return UIAccessibility.convertToScreenCoordinates(localFrame, in: container)
+        }
+        // Frames come only from the snapshot (localFrame); a screen-space
+        // value assigned here would be stale on the next window move.
+        set {}
     }
 
     override func accessibilityActivate() -> Bool {
@@ -46,17 +59,7 @@ final class AccessibilityBridge {
         elements = next
         order = nextOrder
         container.accessibilityElements = nextOrder.compactMap { next[$0] }
-        refreshFrames()
         if structureChanged { UIAccessibility.post(notification: .layoutChanged, argument: nil) }
-    }
-
-    /// Screen coordinates go stale when the canvas moves (rotation, split view).
-    func refreshFrames() {
-        guard let container else { return }
-        for element in elements.values {
-            element.accessibilityFrame = UIAccessibility.convertToScreenCoordinates(
-                element.localFrame, in: container)
-        }
     }
 
     private func makeElement(_ id: UInt64, in container: UIView) -> CanvasAccessibilityElement {
