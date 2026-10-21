@@ -7,6 +7,9 @@ description = "Host-independent OneCAD application services and worker runtime"
 
 [features]
 composition-test = []
+# TEMPORARY stub (UI host lane): the kernel lane owns this feature and its
+# `onecad-embedded-worker` wiring; integration replaces this line.
+embedded-kernel = []
 
 [dependencies]
 onecad-core = { workspace = true }
@@ -24,6 +27,9 @@ async-trait = { workspace = true }
 sha2 = { workspace = true }
 base64 = "0.22"
 toml = "0.8"
+
+# trash 5 has no iOS backend; iPadOS refuses trash moves instead (recents.rs).
+[target.'cfg(not(target_os = "ios"))'.dependencies]
 trash = "5"
 
 [target.'cfg(unix)'.dependencies]

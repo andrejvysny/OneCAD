@@ -238,13 +238,27 @@ pub fn rename(app: &HostContext, old_path: &Path, new_name: &str) -> Result<Path
 
 fn remove_at(recents_path: &Path, path: &Path) -> Result<(), ApiError> {
     let _lane = recents_lane();
-    trash::delete(path).map_err(|e| ApiError::Io(e.to_string()))?;
+    move_to_trash(path)?;
 
     let target = path.to_string_lossy().into_owned();
     let mut entries = load_at(recents_path);
     entries.retain(|e| e.path != target);
     store_at(recents_path, &entries);
     Ok(())
+}
+
+#[cfg(not(target_os = "ios"))]
+fn move_to_trash(path: &Path) -> Result<(), ApiError> {
+    trash::delete(path).map_err(|e| ApiError::Io(e.to_string()))
+}
+
+/// iPadOS apps have no programmatic trash; a permanent delete would break the
+/// recoverable-removal promise below, so the move is refused.
+#[cfg(target_os = "ios")]
+fn move_to_trash(_path: &Path) -> Result<(), ApiError> {
+    Err(ApiError::Io(
+        "moving documents to the trash is not available on iPadOS".into(),
+    ))
 }
 
 /// Moves a project's `.onecad` file to the OS trash (recoverable, unlike a
