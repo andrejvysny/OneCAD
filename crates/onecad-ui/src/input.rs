@@ -131,26 +131,29 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
         }
         app.cad_needs_fence = false;
     }
-    let owner = overlay::owner(
-        &app.ui,
-        app.doc.sketch_entry.open,
-        app.doc.documents.confirm.is_some()
-            || app.doc.items.blocks()
-            || crate::constraint_authoring::editor_open(ctx)
-            || crate::sketch_numeric::editor_open(ctx),
-        egui::Popup::is_any_open(ctx),
-    );
+    let blocked = app.doc.documents.confirm.is_some()
+        || app.doc.items.blocks()
+        || crate::constraint_authoring::editor_open(ctx)
+        || crate::sketch_numeric::editor_open(ctx);
+    let popup = egui::Popup::is_any_open(ctx);
+    let owner = overlay::owner(&app.ui, app.doc.sketch_entry.open, blocked, popup);
+    // The in-app File menu is itself a popup: enable its rows as if it were closed.
+    let menu_owner = if cfg!(feature = "desktop") {
+        owner
+    } else {
+        overlay::owner(&app.ui, app.doc.sketch_entry.open, blocked, false)
+    };
     if let Some(menu) = &app.menu {
         let text = text_owns_keyboard(ctx);
         menu.set_history_enabled(
-            text || owner.is_none() && history_available(app, false),
-            text || owner.is_none() && history_available(app, true),
+            text || menu_owner.is_none() && history_available(app, false),
+            text || menu_owner.is_none() && history_available(app, true),
         );
         menu.set_document_enabled(
-            owner.is_none() && crate::bars::replacement_allowed(app),
-            owner.is_none() && crate::bars::insert_allowed(app),
-            owner.is_none() && crate::bars::save_allowed(app),
-            owner.is_none() && crate::bars::export_allowed(app),
+            menu_owner.is_none() && crate::bars::replacement_allowed(app),
+            menu_owner.is_none() && crate::bars::insert_allowed(app),
+            menu_owner.is_none() && crate::bars::save_allowed(app),
+            menu_owner.is_none() && crate::bars::export_allowed(app),
         );
         if let Ok(recents) = app.doc.bridge.shared.recents.lock() {
             let names: Vec<String> = recents.iter().map(|recent| recent.name.clone()).collect();
