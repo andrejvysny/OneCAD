@@ -1,5 +1,6 @@
 use super::*;
-use crate::tool_registry::{SelectionKind as PillKind, model_kind, pill_tools};
+use crate::item_selection::model_kind;
+use crate::tool_registry::{SelectionKind as PillKind, pill_tools};
 use onecad_core::ids::{BodyId, RecordId};
 use onecad_interaction::selection_set::{OperandRole, OperandStage, SelectionSet};
 use onecad_scene::SceneIdentity;
@@ -112,6 +113,52 @@ fn modifier_gestures_build_multi_selection_and_mixed_kinds_offer_no_scoped_tools
     assert_eq!(model_kind(&set), PillKind::Feature);
     set.clear();
     assert_eq!(model_kind(&set), PillKind::None);
+    let vertex = SelectionItem::Vertex(TopologyRef {
+        scene: SCENE,
+        body,
+        id: topology_id("v:1"),
+    });
+    set.apply(SelectionMode::Replace, [vertex]).unwrap();
+    assert_eq!(model_kind(&set), PillKind::None, "no tool takes a vertex");
+}
+
+/// Runs one frame with a fixed-rect row and returns the row mode it reports.
+fn row_frame(ctx: &egui::Context, events: Vec<egui::Event>) -> (bool, SelectionMode) {
+    let mut out = (false, SelectionMode::Replace);
+    let input = egui::RawInput {
+        events,
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| {
+        let response = ui.add_sized([200.0, 40.0], egui::Button::new("row"));
+        out = (response.clicked(), row_mode(ui, &response));
+    });
+    output.textures_delta.clear();
+    out
+}
+
+#[test]
+fn row_mode_comes_from_the_press_even_when_the_release_frame_differs() {
+    let ctx = egui::Context::default();
+    let _ = row_frame(&ctx, Vec::new());
+    let at = egui::pos2(20.0, 20.0);
+    let (clicked, _) = row_frame(
+        &ctx,
+        vec![
+            egui::Event::PointerMoved(at),
+            press(at, true, egui::Modifiers::COMMAND),
+        ],
+    );
+    assert!(!clicked);
+    let (clicked, mode) = row_frame(
+        &ctx,
+        vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::SHIFT),
+            press(at, false, egui::Modifiers::NONE),
+        ],
+    );
+    assert!(clicked, "the release completes the row click");
+    assert_eq!(mode, SelectionMode::Toggle, "press modifiers decide");
 }
 
 #[test]

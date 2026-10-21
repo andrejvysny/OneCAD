@@ -3,7 +3,6 @@
 //! (docs/design/native-ui/final/README.md, retired from the tree in 79eb923).
 use crate::app::App;
 use onecad_core::document::record::{KnownOperation, Operation};
-use onecad_interaction::selection_set::{SelectionKind as ItemKind, SelectionSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectionKind {
@@ -370,24 +369,7 @@ pub fn selection_kind(app: &App) -> SelectionKind {
     if app.doc.interaction.selection.is_some() {
         return SelectionKind::Region;
     }
-    model_kind(&app.doc.selection)
-}
-
-/// Tools follow one homogeneous kind; a mixed set offers no single-kind tools.
-pub(crate) fn model_kind(selection: &SelectionSet) -> SelectionKind {
-    if selection.is_empty() {
-        return SelectionKind::None;
-    }
-    match selection.single_kind() {
-        Some(ItemKind::Face) => SelectionKind::Face,
-        Some(ItemKind::Edge) => SelectionKind::Edge,
-        Some(ItemKind::Body) => SelectionKind::Body,
-        Some(ItemKind::Feature) => SelectionKind::Feature,
-        Some(ItemKind::Profile) => SelectionKind::Region,
-        // A sketch row keeps the idle tool set; the Inspector shows its block.
-        Some(ItemKind::Sketch) => SelectionKind::None,
-        Some(ItemKind::Vertex | ItemKind::Datum) | None => SelectionKind::Mixed,
-    }
+    crate::item_selection::model_kind(&app.doc.selection)
 }
 
 #[cfg(test)]

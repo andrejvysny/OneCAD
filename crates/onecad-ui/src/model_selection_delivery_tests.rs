@@ -167,6 +167,12 @@ async fn modifier_clicks_build_face_and_edge_sets_and_escape_clears() {
     click(&mut host, b.0, shift | command);
     assert!(host.app.doc.selection.is_empty(), "Shift+Cmd subtracts B");
 
+    // Seed {b, a}: on `a`, Add keeps the set, Toggle drops `a`, Replace drops `b`,
+    // so only the press modifiers (Shift) leave it unchanged.
+    click(&mut host, b.0, egui::Modifiers::NONE);
+    click(&mut host, a.0, shift);
+    let seeded = [b.1.clone(), a.1.clone()];
+    assert_eq!(labels(&host), seeded);
     // One batch: Shift press, modifier change, plain release. The press decides.
     for _ in 0..24 {
         host.ui(vec![]);
@@ -177,15 +183,27 @@ async fn modifier_clicks_build_face_and_edge_sets_and_escape_clears() {
         egui::Event::ModifiersChanged(command),
         press(a.0, false, egui::Modifiers::NONE),
     ]);
-    assert_eq!(labels(&host), std::slice::from_ref(&a.1));
-    click(&mut host, b.0, shift);
+    assert_eq!(labels(&host), seeded, "one batch: Shift press is Add");
+    // Press and release in separate frames: the stored press mode decides.
+    for _ in 0..24 {
+        host.ui(vec![]);
+    }
+    host.ui(vec![
+        egui::Event::PointerMoved(a.0),
+        press(a.0, true, shift),
+    ]);
+    host.ui(vec![
+        egui::Event::ModifiersChanged(command),
+        press(a.0, false, egui::Modifiers::NONE),
+    ]);
+    assert_eq!(labels(&host), seeded, "split frames: Shift press is Add");
     click(&mut host, edges[0].0, shift);
     click(&mut host, edges[1].0, shift);
     assert_eq!(
         labels(&host),
         [
-            a.1.clone(),
             b.1.clone(),
+            a.1.clone(),
             edges[0].1.clone(),
             edges[1].1.clone()
         ]
@@ -236,7 +254,15 @@ async fn explorer_rows_and_viewport_share_one_selection() {
     );
     assert!(!host.app.doc.whole_body_selected(body));
     assert_eq!(host.app.doc.selected_body(), Some(body));
-    click(&mut host, row, egui::Modifiers::COMMAND);
+    // Cmd on the press only: the row mode comes from the press, not the release.
+    for _ in 0..24 {
+        host.ui(vec![]);
+    }
+    host.ui(vec![
+        egui::Event::PointerMoved(row),
+        press(row, true, egui::Modifiers::COMMAND),
+    ]);
+    host.ui(vec![press(row, false, egui::Modifiers::NONE)]);
     assert!(
         matches!(host.app.doc.selection.items(), [SelectionItem::Face(_)]),
         "Cmd on the row toggles the body off"

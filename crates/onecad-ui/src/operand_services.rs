@@ -77,7 +77,11 @@ async fn scope(
         || scope.revision.0 != context.revision
         || scope.snapshot_id != context.snapshot_id
     {
-        return Err("operands belong to an obsolete document/session/revision/head".into());
+        return Err(format!(
+            "operands belong to an obsolete head: requested {}, current {}",
+            describe_request(context),
+            describe_scope(&scope)
+        ));
     }
     Ok(scope)
 }
@@ -90,6 +94,32 @@ async fn current<T>(
     let value = result?;
     match api::preview_context(state).await {
         Ok(now) if now == *scope => Ok(value),
-        _ => Err("stale".into()),
+        Ok(now) => Err(format!(
+            "staged operands went stale: staged under {}, current {}",
+            describe_scope(scope),
+            describe_scope(&now)
+        )),
+        Err(error) => Err(format!(
+            "staged operands went stale: staged under {}, current head unavailable: {error}",
+            describe_scope(scope)
+        )),
     }
+}
+
+fn describe_request(context: &DocumentContext) -> String {
+    format!(
+        "document {} session {} revision {} snapshot {}",
+        context.document_id, context.runtime_session, context.revision, context.snapshot_id.0
+    )
+}
+
+fn describe_scope(scope: &PreviewContext) -> String {
+    format!(
+        "document {} session {} revision {} snapshot {} epoch {}",
+        scope.document_id,
+        scope.runtime_session,
+        scope.revision.0,
+        scope.snapshot_id.0,
+        scope.worker_epoch.0
+    )
 }

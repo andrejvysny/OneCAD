@@ -42,14 +42,28 @@ pub(crate) fn press_mode(events: &[egui::Event], rect: egui::Rect) -> Option<Sel
     })
 }
 
-/// A tree row clicks on release: the mode comes from that pointer event.
-pub(crate) fn row_mode(ui: &egui::Ui) -> SelectionMode {
-    ui.input(|input| {
-        let event = input.events.iter().rev().find_map(|event| match event {
-            egui::Event::PointerButton { modifiers, .. } => Some(*modifiers),
+/// A tree row clicks on release, possibly frames after its press: the mode is
+/// recorded from the press on the row (any button, for the context-menu click)
+/// and read when the click completes. Call every frame the row is shown.
+pub(crate) fn row_mode(ui: &egui::Ui, response: &egui::Response) -> SelectionMode {
+    let press = ui.input(|input| {
+        input.events.iter().rev().find_map(|event| match event {
+            egui::Event::PointerButton {
+                pos,
+                pressed: true,
+                modifiers,
+                ..
+            } if response.rect.contains(*pos) => Some(mode_for(*modifiers)),
             _ => None,
-        });
-        mode_for(event.unwrap_or(input.modifiers))
+        })
+    });
+    let id = response.id.with("row-press-mode");
+    ui.ctx().data_mut(|data| {
+        if let Some(mode) = press {
+            data.insert_temp(id, mode);
+        }
+        data.get_temp::<SelectionMode>(id)
+            .unwrap_or(SelectionMode::Replace)
     })
 }
 

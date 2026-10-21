@@ -175,6 +175,7 @@ fn body_row(app: &mut App, ui: &mut Ui, id_text: &str, name: &str) {
     let enabled = app.viewport_ready() && app.doc.bridge.valid() && !app.busy();
     let row = TreeRow::new("body", name).state(state).enabled(enabled);
     let response = ui.add(row);
+    let mode = crate::model_pick::row_mode(ui, &response);
     if response.clicked() || response.secondary_clicked() {
         if let Some(id) = id
             && crate::extrude_ui::select_target(app, id)
@@ -182,7 +183,6 @@ fn body_row(app: &mut App, ui: &mut Ui, id_text: &str, name: &str) {
             return;
         }
         if let Some(id) = id {
-            let mode = crate::model_pick::row_mode(ui);
             crate::item_selection::body(app, id, mode);
         }
     }

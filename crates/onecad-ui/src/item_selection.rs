@@ -1,5 +1,5 @@
 //! Tree and viewport selections share identities; hidden-sketch previews stay transient.
-use crate::{app::App, bridge::Display};
+use crate::{app::App, bridge::Display, tool_registry::SelectionKind};
 use onecad_app::api::PreviewContext;
 use onecad_core::{
     ids::{BodyId, SketchId},
@@ -7,7 +7,7 @@ use onecad_core::{
 };
 use onecad_interaction::{
     Action,
-    selection_set::{SelectionItem, SelectionMode},
+    selection_set::{SelectionItem, SelectionKind as ItemKind, SelectionMode, SelectionSet},
 };
 use std::sync::mpsc;
 
@@ -33,6 +33,34 @@ pub(crate) fn apply(app: &mut App, mode: SelectionMode, items: Vec<SelectionItem
         Ok(false) => {}
         Err(_) => app.doc.status = "Too many items selected; selection unchanged".into(),
     }
+}
+
+/// Tools follow one homogeneous kind; a mixed set offers no single-kind tools.
+/// No tool takes a vertex or datum, so those select without a tool set.
+pub(crate) fn model_kind(selection: &SelectionSet) -> SelectionKind {
+    if selection.is_empty() {
+        return SelectionKind::None;
+    }
+    match selection.single_kind() {
+        Some(ItemKind::Face) => SelectionKind::Face,
+        Some(ItemKind::Edge) => SelectionKind::Edge,
+        Some(ItemKind::Body) => SelectionKind::Body,
+        Some(ItemKind::Feature) => SelectionKind::Feature,
+        Some(ItemKind::Profile) => SelectionKind::Region,
+        // A sketch row keeps the idle tool set; the Inspector shows its block.
+        Some(ItemKind::Sketch | ItemKind::Vertex | ItemKind::Datum) => SelectionKind::None,
+        None => SelectionKind::Mixed,
+    }
+}
+
+/// Profiles in the shared selection; Extrude takes exactly one.
+pub(crate) fn profile_count(app: &App) -> usize {
+    app.doc
+        .selection
+        .items()
+        .iter()
+        .filter(|item| matches!(item, SelectionItem::Profile(_)))
+        .count()
 }
 
 pub(crate) fn clear(app: &mut App) {
