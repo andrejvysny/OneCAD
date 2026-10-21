@@ -272,3 +272,9 @@ mod parameter_delivery_tests;
 
 #[path = "model_selection_delivery_tests.rs"]
 mod model_selection_delivery_tests;
+
+#[path = "sketch_selection_delivery_tests.rs"]
+mod sketch_selection_delivery_tests;
+
+#[path = "sketch_finish_delivery_tests.rs"]
+mod sketch_finish_delivery_tests;

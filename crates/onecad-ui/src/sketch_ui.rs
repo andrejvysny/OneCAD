@@ -122,9 +122,10 @@ impl App {
                 SketchStatus::Refused(message) | SketchStatus::Failed { message, .. } => {
                     message.clone()
                 }
-                SketchStatus::Finished { kept_reason, .. } => {
-                    kept_reason.clone().unwrap_or("Sketch finished".into())
-                }
+                SketchStatus::Finished {
+                    kept_reason,
+                    result,
+                } => crate::sketch_feedback::finished(kept_reason.as_deref(), result).0,
                 SketchStatus::Discarded(_) => "Sketch edits discarded".into(),
             };
             use crate::diagnostics::{Source, State};
@@ -135,9 +136,9 @@ impl App {
                 SketchStatus::Refused(_) => State::Rejected,
                 SketchStatus::Failed { .. } => State::Failed,
                 SketchStatus::Finished {
-                    kept_reason: Some(_),
-                    ..
-                } => State::Warning,
+                    kept_reason,
+                    result,
+                } => crate::sketch_feedback::finished(kept_reason.as_deref(), result).1,
                 SketchStatus::Discarded(_) => State::Cancelled,
                 SketchStatus::Entered(_) | SketchStatus::Solved(_)
                     if matches!(
