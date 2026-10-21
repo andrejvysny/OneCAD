@@ -41,6 +41,7 @@
 #include "session/PrepareEdgeOp.h"
 #include "session/PlanExecutor.h"
 #include "session/PreviewOp.h"
+#include "session/PreviewPlan.h"
 #include "session/Session.h"
 #include "session/Tessellate.h"
 #include "tess/MeshHandle.h"
@@ -111,7 +112,8 @@ nlohmann::json make_hello_result_impl() {
                                 "op.offsetFace", "op.importStep", "op.placeComponent",
                                 "op.detachComponent", "solver.planegcs", "constraint.tangentAtPoint", "tessellate.mesh1",
                                 "io.step", "io.step.import", "io.geometry.export",
-                                "query.classifyElement", "query.bodyTopology"})},
+                                "query.classifyElement", "query.bodyTopology",
+                                "plan.preview"})},
         {"limits",
          {{"chunkSize", onecad::protocol::kChunkSize},
           {"initialBulkCredit", onecad::protocol::kInitialBulkCredit}}},
@@ -255,6 +257,13 @@ void register_verbs(Dispatcher& dispatcher, SolverLane& solver_lane, Session& se
         "PreviewOp",
         [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext& ctx) {
             return onecad::session::handle_preview_op(session, r, ctx.cancel);
+        });
+    // ONECAD-369: full-replay edit preview. Kernel lane; touches no session slot
+    // (no scratch, no restored base, no snapshot id) — see session/PreviewPlan.h.
+    dispatcher.register_verb(
+        "PreviewPlan",
+        [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext& ctx) {
+            return onecad::session::handle_preview_plan(session, r, ctx);
         });
     dispatcher.register_verb(
         "Tessellate",

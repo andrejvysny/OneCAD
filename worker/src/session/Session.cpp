@@ -475,9 +475,11 @@ std::uint64_t Session::current_snapshot_id() const {
 }
 
 std::optional<PublishedStateSnapshot> Session::published_state_at(
-    std::optional<std::uint64_t> expected_snapshot_id, std::uint64_t* head_snapshot_id) const {
+    std::optional<std::uint64_t> expected_snapshot_id, std::uint64_t* head_snapshot_id,
+    std::uint64_t* head_worker_epoch) const {
     std::lock_guard<std::mutex> lk(mu_);
     if (head_snapshot_id) *head_snapshot_id = snapshot_id_;
+    if (head_worker_epoch) *head_worker_epoch = worker_epoch_;
     if (expected_snapshot_id && snapshot_id_ != *expected_snapshot_id) return std::nullopt;
     return PublishedStateSnapshot{snapshot_id_, bodies_, partition_, topology_owners_};
 }

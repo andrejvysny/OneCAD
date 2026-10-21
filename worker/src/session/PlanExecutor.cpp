@@ -437,13 +437,6 @@ OpDeterminism read_determinism(const json& op) {
     return d;
 }
 
-enum class ExecStatus { Completed, Cancelled };
-
-struct ExecResult {
-    ExecStatus status = ExecStatus::Completed;
-    std::optional<std::size_t> last_ok_exec_idx;  // execution-order index for prefixHashes
-};
-
 // Dispatch one op to its real executor. Sketch materializes into the plan; Extrude
 // / Boolean run OCCT; other verbs are UNSUPPORTED this WP.
 ops::OpOutcome run_single_op(ScratchJob& job, const json& op, const std::string& op_id,
@@ -830,12 +823,9 @@ json candidate_diagnostics(const CandidateResult& candidate) {
     return diagnostics;
 }
 
-namespace {
-
-// Drive the ordered op slice into `job`, streaming one planStep per executed step
-// and stopping at the first failure / NeedsRepair (SCHEMA §7.2).
-ExecResult execute_ops(ScratchJob& job, const json& ops, std::uint64_t job_id, std::uint64_t req_id,
-                       HandlerContext& ctx) {
+ExecResult execute_plan_ops(ScratchJob& job, const json& ops, std::uint64_t job_id,
+                            std::uint64_t req_id, HandlerContext& ctx,
+                            ops::ValidationMode validation_mode) {
     std::string last_sketch_id;
     ExecResult res;
     std::optional<std::uint64_t> last_ok_step;
@@ -892,7 +882,8 @@ ExecResult execute_ops(ScratchJob& job, const json& ops, std::uint64_t job_id, s
             candidate.needs_repair.push_back(make_needs_repair(op, op_id));
             candidate.ref_bindings = collect_ref_bindings(op, op_id);
         } else {
-            candidate = execute_candidate_op(job, op, op_id, last_sketch_id, ctx.cancel);
+            candidate = execute_candidate_op(job, op, op_id, last_sketch_id, ctx.cancel,
+                                             validation_mode);
         }
 
         if (candidate.status == CandidateResult::Status::Cancelled) {
@@ -979,6 +970,24 @@ ExecResult execute_ops(ScratchJob& job, const json& ops, std::uint64_t job_id, s
     job.last_valid_step = last_ok_step;
     return res;
 }
+
+json per_step_json(const ScratchJob& job) {
+    json per_step = json::array();
+    for (const StepResult& ps : job.per_step) {
+        json e = {{"stepIndex", ps.step_index}, {"status", ps.status}};
+        if (!ps.body_ids.empty()) e["bodyIds"] = ps.body_ids;
+        if (ps.ref_count.has_value()) e["refCount"] = *ps.ref_count;
+        // Surface a failed op's recoverable message (§8) so Rust can report WHY —
+        // a failed step emits no planStep event, so its diagnostic would otherwise be
+        // worker-local. Additive (readers ignore unknown keys; §4).
+        if (!ps.message.empty()) e["message"] = ps.message;
+        if (!ps.diagnostics.empty()) e["diagnostics"] = ps.diagnostics;
+        per_step.push_back(std::move(e));
+    }
+    return per_step;
+}
+
+namespace {
 
 // Inline tessellation artifact on ExecutePlan (SCHEMA §7.2 artifacts.tessellate):
 // tessellate every prepared body into a MESH1 blob attached to the terminal resp's
@@ -1146,7 +1155,8 @@ Envelope handle_execute_plan(Session& session, const Envelope& req, HandlerConte
         job.from_zero_replay = args["checkpointFallbackReplay"].get<bool>();
     }
 
-    const ExecResult exec = execute_ops(job, ops, job_id, req.id, ctx);
+    const ExecResult exec = execute_plan_ops(job, ops, job_id, req.id, ctx,
+                                             ops::ValidationMode::CommitAuthoritative);
     if (exec.status == ExecStatus::Cancelled) {
         // The scratch was never stored, so the session head is unchanged and
         // hasScratch stays false (SCHEMA §8 CANCELLED: session intact).
@@ -1186,18 +1196,7 @@ Envelope handle_execute_plan(Session& session, const Envelope& req, HandlerConte
         tess = json();
     }
 
-    json per_step = json::array();
-    for (const StepResult& ps : job.per_step) {
-        json e = {{"stepIndex", ps.step_index}, {"status", ps.status}};
-        if (!ps.body_ids.empty()) e["bodyIds"] = ps.body_ids;
-        if (ps.ref_count.has_value()) e["refCount"] = *ps.ref_count;
-        // Surface a failed op's recoverable message (§8) so Rust can report WHY —
-        // a failed step emits no planStep event, so its diagnostic would otherwise be
-        // worker-local. Additive (readers ignore unknown keys; §4).
-        if (!ps.message.empty()) e["message"] = ps.message;
-        if (!ps.diagnostics.empty()) e["diagnostics"] = ps.diagnostics;
-        per_step.push_back(std::move(e));
-    }
+    json per_step = per_step_json(job);
     json last_valid = job.last_valid_step.has_value() ? json(*job.last_valid_step) : json(nullptr);
     json result = {
         {"planPrepared", true},

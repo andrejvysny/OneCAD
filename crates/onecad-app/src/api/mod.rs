@@ -5,9 +5,11 @@
 
 mod document_items;
 mod document_state;
+mod edit_preview;
 pub use document_items::{
     delete_document_item, plan_delete_document_item, DeleteTarget, DeletionItem, DeletionPlan,
 };
+pub use edit_preview::{preview_existing_edit, EditPreview, EditPreviewOutcome};
 mod import_readiness;
 mod projection_parts;
 use projection_parts::{

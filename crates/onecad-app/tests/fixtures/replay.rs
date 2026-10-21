@@ -1,7 +1,9 @@
 use std::path::Path;
 use std::process::Stdio;
 
-use onecad_protocol::client::ProtocolClient;
+use std::collections::VecDeque;
+
+use onecad_protocol::client::{ProtocolClient, WorkerEvent};
 use serde_json::Value;
 
 fn matches(expected: &Value, actual: &Value, tolerance: f64) {
@@ -83,6 +85,9 @@ pub async fn replay(worker: &Path, fixture: &Path) {
     let source = std::fs::read_to_string(fixture).unwrap();
     let mut last = serde_json::json!({"v":1,"t":"hello","seq":0,"result":client.hello()});
     let mut sketch = String::new();
+    // Frames not yet matched: a streaming verb's `event`s, then its `resp`. One
+    // `expect` consumes one frame, as in the C++ harness.
+    let mut frames: VecDeque<Value> = VecDeque::new();
     for line in source
         .lines()
         .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
@@ -93,6 +98,7 @@ pub async fn replay(worker: &Path, fixture: &Path) {
             if let Some(id) = send["args"]["sketchId"].as_str() {
                 sketch = id.to_string();
             }
+            let mut events = client.subscribe();
             let response = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
                 client.request(verb, send["args"].clone()),
@@ -100,9 +106,20 @@ pub async fn replay(worker: &Path, fixture: &Path) {
             .await
             .unwrap()
             .unwrap();
+            frames.clear();
+            while let Ok(event) = events.try_recv() {
+                if let WorkerEvent::Event(frame) = event {
+                    if frame.id == response.id {
+                        let mut value = serde_json::to_value(frame).unwrap();
+                        value["t"] = serde_json::json!("event");
+                        frames.push_back(value);
+                    }
+                }
+            }
             last = serde_json::to_value(response).unwrap();
             last["v"] = serde_json::json!(1);
             last["t"] = serde_json::json!("resp");
+            frames.push_back(last.clone());
             if last["ok"] == true && verb == "BeginGesture" {
                 let parsed = onecad_app::worker::wire::parse_begin_gesture(
                     send["args"]["gestureId"].as_u64().unwrap(),
@@ -135,7 +152,8 @@ pub async fn replay(worker: &Path, fixture: &Path) {
             }
         } else if let Some(expect) = round.get("expect") {
             let tolerance = expect["tolerance"]["abs"].as_f64().unwrap_or(0.0);
-            matches(expect, &last, tolerance);
+            let frame = frames.pop_front().unwrap_or_else(|| last.clone());
+            matches(expect, &frame, tolerance);
         }
     }
     child.kill().await.unwrap();

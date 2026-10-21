@@ -55,6 +55,13 @@ pub enum ApiError {
     },
     /// The open-document cap is reached.
     TooManyDocuments(String),
+    /// The worker or document cannot serve this request (a capability the worker
+    /// does not advertise, an over-budget preview). Recoverable: the caller falls
+    /// back (an edit preview degrades to "Apply regenerates the feature").
+    Unsupported(String),
+    /// The request was cancelled before it completed (superseded, abandoned, or
+    /// preempted by a publishing regen). Not a failure of the request itself.
+    Cancelled(String),
     /// A generic internal failure.
     Internal(String),
 }
@@ -72,6 +79,8 @@ impl std::fmt::Display for ApiError {
             Self::AlreadyOpen { message, .. } => write!(f, "already open: {message}"),
             Self::DuplicateDocument { message, .. } => write!(f, "duplicate document: {message}"),
             Self::TooManyDocuments(m) => write!(f, "too many documents: {m}"),
+            Self::Unsupported(m) => write!(f, "unsupported: {m}"),
+            Self::Cancelled(m) => write!(f, "cancelled: {m}"),
             Self::Internal(m) => write!(f, "internal error: {m}"),
         }
     }
@@ -98,6 +107,8 @@ impl Serialize for ApiError {
             Self::AlreadyOpen { message, .. } => ("alreadyOpen", message, None),
             Self::DuplicateDocument { message, .. } => ("duplicateDocument", message, None),
             Self::TooManyDocuments(message) => ("tooManyDocuments", message, None),
+            Self::Unsupported(message) => ("unsupported", message, None),
+            Self::Cancelled(message) => ("cancelled", message, None),
             Self::Internal(message) => ("internal", message, None),
         };
         let include_diagnostics = diagnostics.is_some_and(|items| !items.is_empty());

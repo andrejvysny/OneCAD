@@ -83,6 +83,23 @@ CandidateResult execute_candidate_op(
 // retain order; the terminal failure diagnostic is last.
 nlohmann::json candidate_diagnostics(const CandidateResult& candidate);
 
+enum class ExecStatus { Completed, Cancelled };
+
+struct ExecResult {
+    ExecStatus status = ExecStatus::Completed;
+    std::optional<std::size_t> last_ok_exec_idx;  // execution-order index for prefixHashes
+};
+
+// Drive the ordered op slice into `job`, streaming one planStep per executed step
+// and stopping at the first failure / NeedsRepair (SCHEMA §7.2). ExecutePlan runs
+// it at `CommitAuthoritative`; PreviewPlan at `PreviewInteractive` (§7.6).
+ExecResult execute_plan_ops(ScratchJob& job, const nlohmann::json& ops, std::uint64_t job_id,
+                            std::uint64_t req_id, protocol::HandlerContext& ctx,
+                            ops::ValidationMode validation_mode);
+
+// The §7.2 `perStepResults` array for `job.per_step`.
+nlohmann::json per_step_json(const ScratchJob& job);
+
 // ExecutePlan (kernel lane): fence → execute into scratch (streaming planStep
 // events via ctx.emit) → terminal PlanPrepared / PROTOCOL_ERROR / CANCELLED.
 protocol::Envelope handle_execute_plan(Session& session, const protocol::Envelope& req,

@@ -1649,7 +1649,7 @@ pub(super) fn verify_mesh(
     Ok(())
 }
 
-fn parse_per_step(v: Option<&Value>) -> Result<Vec<StepResult>, String> {
+pub(super) fn parse_per_step(v: Option<&Value>) -> Result<Vec<StepResult>, String> {
     let arr = v
         .and_then(Value::as_array)
         .ok_or("PlanPrepared missing or invalid perStepResults")?;
