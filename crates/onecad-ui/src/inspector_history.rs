@@ -63,7 +63,6 @@ fn feature_row(
         && let Ok(id) = feature.id.parse()
     {
         crate::pill::select_feature(app, id);
-        app.doc.selected_sketch = None;
         app.ui.inspector_open = true;
         if response.double_clicked() {
             edit_selected_feature(app);
@@ -71,7 +70,7 @@ fn feature_row(
     }
     if app
         .doc
-        .selected_feature
+        .selected_feature()
         .is_some_and(|id| id.to_string() == feature.id)
     {
         ui.label(format!("{} · {}", feature.op_type, feature.value_text));
@@ -87,7 +86,7 @@ pub(crate) fn edit_selected_feature(app: &mut App) {
     if !app.viewport_ready() || !app.doc.bridge.valid() || app.busy() || app.sketch_active() {
         return;
     }
-    let Some(record) = app.doc.selected_feature.and_then(|id| {
+    let Some(record) = app.doc.selected_feature().and_then(|id| {
         app.doc
             .display
             .as_ref()?
@@ -123,13 +122,13 @@ pub(crate) fn edit_selected_feature(app: &mut App) {
 }
 
 pub(crate) fn edit_button(app: &mut App, ui: &mut Ui) {
-    if app.doc.selected_feature.is_none()
+    if app.doc.selected_feature().is_none()
         || app.doc.interaction.tool.is_some()
         || app.sketch_active()
     {
         return;
     }
-    let editable = app.doc.selected_feature.is_some_and(|id| {
+    let editable = app.doc.selected_feature().is_some_and(|id| {
         app.doc
             .display
             .as_ref()
@@ -164,7 +163,7 @@ fn info_box(app: &App, ui: &mut Ui) {
 fn row_state(app: &App, feature: &onecad_app::dto::FeatureDto, rolled_back: bool) -> HistoryState {
     let selected = app
         .doc
-        .selected_feature
+        .selected_feature()
         .as_ref()
         .map(|id| id.to_string())
         .as_deref()

@@ -9,21 +9,21 @@ use crate::{
 use egui::{Align2, Context, Order};
 use onecad_interaction::{
     Action,
+    selection_set::{SelectionItem, SelectionMode},
     sketch::{SketchAction, SketchTool},
 };
 use onecad_widgets::{
     components::{
-        actions::{
-            PillAccent, PillMode, SelectionLabel, SelectionVariant, ToolButton, ToolState,
-            pill_divider,
-        },
+        actions::{PillAccent, PillMode, SelectionLabel, ToolButton, ToolState, pill_divider},
         tooltip::Tip,
     },
     frame,
 };
 
 mod catalog;
+mod label;
 mod layout;
+pub(crate) use label::{body_name, selection_label};
 use layout::{bounded_pill, toolbar_rect};
 
 pub(crate) fn center_x(ctx: &Context, chrome: &Chrome) -> f32 {
@@ -120,11 +120,15 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
         ToolId::Extrude => model_view(
             app,
             app.doc.interaction.selection.is_some(),
-            "Select a closed sketch profile first",
+            if crate::item_selection::profile_count(app) > 1 {
+                "Extrude takes one profile; select a single region"
+            } else {
+                "Select a closed sketch profile first"
+            },
         ),
         ToolId::Edit => model_view(
             app,
-            app.doc.selected_feature.is_some_and(|id| {
+            app.doc.selected_feature().is_some_and(|id| {
                 app.doc
                     .display
                     .as_ref()
@@ -137,9 +141,11 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
             }),
             "Select an editable feature first",
         ),
-        ToolId::MoveRotate => {
-            model_view(app, app.doc.selected_body.is_some(), "Select a body first")
-        }
+        ToolId::MoveRotate => model_view(
+            app,
+            app.doc.selected_body().is_some(),
+            "Select a body first",
+        ),
         ToolId::Import => gate(
             crate::bars::replacement_allowed(app),
             "Finish the current operation first",
@@ -288,7 +294,7 @@ pub(crate) fn activate(app: &mut App, ctx: &Context, id: ToolId) {
 pub(crate) fn cancel_tool(app: &mut App) {
     app.dispatch(Action::Cancel);
     if app.doc.interaction.tool.is_none() {
-        app.doc.selected_feature = None;
+        crate::item_selection::retain(app, |item| !matches!(item, SelectionItem::Feature(_)));
     }
 }
 
@@ -301,10 +307,11 @@ pub(crate) fn cancel_or_deselect(app: &mut App) {
 }
 
 pub(crate) fn select_feature(app: &mut App, id: onecad_core::ids::RecordId) {
-    app.dispatch(Action::ClearSelection);
-    app.doc.topology.select(None);
-    app.doc.selected_feature = Some(id);
-    app.draw_dirty = true;
+    crate::item_selection::apply(
+        app,
+        SelectionMode::Replace,
+        vec![SelectionItem::Feature(id)],
+    );
 }
 
 /// The label's close button explicitly deselects as well as canceling a draft.
@@ -324,93 +331,7 @@ fn clear_selection(app: &mut App, kind: SelectionKind) {
         return;
     }
     cancel_tool(app);
-    app.dispatch(Action::ClearSelection);
-    app.doc.selected_body = None;
-    app.doc.selected_feature = None;
-    app.doc.topology.select(None);
-    app.draw_dirty = true;
-}
-
-pub(crate) fn body_name(app: &App, id: onecad_core::ids::BodyId) -> String {
-    app.doc
-        .display
-        .as_ref()
-        .and_then(|d| {
-            d.projection
-                .bodies
-                .values()
-                .find(|b| b.id.parse().ok() == Some(id))
-                .map(|b| b.name.clone())
-        })
-        .unwrap_or_default()
-}
-
-pub(crate) fn selection_label(
-    app: &App,
-    kind: SelectionKind,
-) -> Option<(String, String, SelectionVariant)> {
-    let model = SelectionVariant::Model;
-    if let Some(tool) = &app.doc.interaction.tool
-        && tool.editing_existing
-    {
-        return Some((tool.record.name.clone(), "feature".into(), model));
-    }
-    match kind {
-        SelectionKind::Face | SelectionKind::Edge => {
-            let (_, body) = app.doc.topology.selected_kind()?;
-            let name = if kind == SelectionKind::Face {
-                "Face"
-            } else {
-                "Edge"
-            };
-            Some((name.into(), body_name(app, body), model))
-        }
-        SelectionKind::Body => Some(("Body".into(), body_name(app, app.doc.selected_body?), model)),
-        SelectionKind::Region => Some(("Region".into(), "profile".into(), model)),
-        SelectionKind::Feature => {
-            let id = app.doc.selected_feature?.to_string();
-            let label = app
-                .doc
-                .display
-                .as_ref()?
-                .projection
-                .features
-                .iter()
-                .find(|f| f.id == id)
-                .map_or_else(|| "Feature".into(), |f| f.label.clone());
-            Some((label, "feature".into(), model))
-        }
-        SelectionKind::SketchEntity => {
-            let session = app.doc.sketch.session.as_ref()?;
-            let points = session
-                .selection
-                .iter()
-                .filter(|target| {
-                    matches!(
-                        target,
-                        onecad_interaction::sketch::SketchTarget::Point { .. }
-                    )
-                })
-                .count();
-            let entities = session.selection.len() - points;
-            let label = if let [target] = session.selection.as_slice() {
-                crate::sketch_view::target_name(*target, &session.authoritative)
-            } else {
-                match (points, entities) {
-                    (_, 0) => "Points",
-                    (0, _) => "Entities",
-                    _ => "Sketch targets",
-                }
-                .into()
-            };
-            Some((
-                label,
-                format!("{} selected", session.selection.len()),
-                SelectionVariant::Sketch,
-            ))
-        }
-        SelectionKind::None | SelectionKind::SketchIdle => None,
-    }
+    crate::item_selection::clear(app);
 }
 
 fn accent(app: &App, kind: SelectionKind) -> PillAccent {

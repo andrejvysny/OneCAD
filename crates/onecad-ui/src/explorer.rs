@@ -167,7 +167,7 @@ fn body_row(app: &mut App, ui: &mut Ui, id_text: &str, name: &str) {
     let id = id_text.parse().ok();
     let state = if app.sketch_active() {
         RowState::Reference
-    } else if id.is_some() && id == app.doc.selected_body {
+    } else if id.is_some_and(|id| row_selected(app, id)) {
         RowState::Selected
     } else {
         RowState::Normal
@@ -175,6 +175,7 @@ fn body_row(app: &mut App, ui: &mut Ui, id_text: &str, name: &str) {
     let enabled = app.viewport_ready() && app.doc.bridge.valid() && !app.busy();
     let row = TreeRow::new("body", name).state(state).enabled(enabled);
     let response = ui.add(row);
+    let mode = crate::model_pick::row_mode(ui, &response);
     if response.clicked() || response.secondary_clicked() {
         if let Some(id) = id
             && crate::extrude_ui::select_target(app, id)
@@ -182,12 +183,28 @@ fn body_row(app: &mut App, ui: &mut Ui, id_text: &str, name: &str) {
             return;
         }
         if let Some(id) = id {
-            crate::item_selection::body(app, id);
+            crate::item_selection::body(app, id, mode);
         }
     }
     if let Some(id) = id {
         response.context_menu(|ui| delete_menu(app, ui, onecad_app::api::DeleteTarget::Body(id)));
     }
+}
+
+/// The row of a body in the shared selection, a staged operand, or Extrude's target.
+fn row_selected(app: &App, id: onecad_core::ids::BodyId) -> bool {
+    let item = onecad_interaction::selection_set::SelectionItem::Body(id);
+    let staged = app.doc.operand_staging.as_ref().is_some_and(|staging| {
+        crate::model_pick::staging(app)
+            && staging
+                .operands
+                .stages()
+                .iter()
+                .any(|stage| stage.items.contains(&item))
+    });
+    staged
+        || app.doc.selection.contains(&item)
+        || crate::item_selection::whole_body_selected(app, id)
 }
 
 fn sketch_row(app: &mut App, ui: &mut Ui, sketch: &onecad_app::dto::SketchDto) {
@@ -207,7 +224,7 @@ fn sketch_row(app: &mut App, ui: &mut Ui, sketch: &onecad_app::dto::SketchDto) {
             RowState::Editing
         } else if app
             .doc
-            .selected_sketch
+            .selected_sketch()
             .is_some_and(|id| id.to_string() == sketch.id)
         {
             RowState::Selected
@@ -291,7 +308,7 @@ pub(crate) fn selected_sketch_edit_button(app: &mut App, ui: &mut Ui) {
     if app.sketch_active() || app.doc.interaction.tool.is_some() {
         return;
     }
-    let Some(sketch) = app.doc.selected_sketch.and_then(|id| {
+    let Some(sketch) = app.doc.selected_sketch().and_then(|id| {
         app.doc
             .display
             .as_ref()?

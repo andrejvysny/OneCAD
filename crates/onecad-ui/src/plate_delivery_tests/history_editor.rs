@@ -12,7 +12,7 @@ pub(super) async fn check(host: &mut Harness) {
         .find(|record| matches!(record.op, Operation::Known(KnownOperation::Extrude(_))))
         .unwrap()
         .record_id;
-    host.app.doc.selected_feature = Some(record);
+    crate::pill::select_feature(&mut host.app, record);
     crate::inspector_history::edit_selected_feature(&mut host.app);
     assert_eq!(
         host.app.ui.inspector_tab,

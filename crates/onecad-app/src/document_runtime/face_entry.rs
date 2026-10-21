@@ -93,6 +93,7 @@ impl DocumentRuntime {
             // Reuse the existing fenced rebind lane at the next published regen.
             // Preparation never installs worker bindings on cancellation.
             self.rebind_attempted = false;
+            self.staged.remove(&id);
             self.regen.elements.insert(
                 id.clone(),
                 ElementEntry::new(evidence.body, evidence.kind)

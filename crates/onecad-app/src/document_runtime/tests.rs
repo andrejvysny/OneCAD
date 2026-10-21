@@ -129,6 +129,9 @@ struct FakeBackend {
     /// terminal, no steps). `Some(2)` models a worker that dies inside the WP-D1
     /// isolation window, after the halted pass already published.
     hard_fail_from_plan: Option<usize>,
+    /// The `elementMapDelta` every executed step echoes. Empty by default; a
+    /// leak-guard test scripts a worker that folds a staged id into the partition.
+    step_delta: Mutex<ElementMapDelta>,
     begin_override: Mutex<Option<BeginGestureDto>>,
     drag_override: Mutex<Option<DragSolveDto>>,
     cancel_fails: Mutex<bool>,
@@ -155,6 +158,7 @@ impl Default for FakeBackend {
             mate_resolved: Mutex::new(None),
             failing_steps: std::collections::BTreeSet::new(),
             hard_fail_from_plan: None,
+            step_delta: Mutex::new(ElementMapDelta::default()),
             begin_override: Mutex::new(None),
             drag_override: Mutex::new(None),
             cancel_fails: Mutex::new(false),
@@ -380,7 +384,7 @@ impl GeometryEngine for FakeBackend {
                     body_events,
                     body_rank_keys: Default::default(),
                     body_health: Default::default(),
-                    element_map_delta: ElementMapDelta::default(),
+                    element_map_delta: self.step_delta.lock().unwrap().clone(),
                     needs_repair: vec![],
                     signatures: sigs(step),
                     diagnostics: vec![],
@@ -6626,3 +6630,6 @@ mod gesture_tests;
 
 #[path = "tests/finish_history.rs"]
 mod finish_history;
+
+#[path = "tests/staged_elements.rs"]
+mod staged_elements;

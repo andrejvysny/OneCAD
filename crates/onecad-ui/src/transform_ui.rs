@@ -30,7 +30,7 @@ pub struct TransformGizmo {
 impl App {
     pub fn begin_transform(&mut self) {
         let Some((body, context, step, center)) = self.doc.display.as_ref().and_then(|display| {
-            let body = self.doc.selected_body?;
+            let body = self.doc.selected_body()?;
             let bounds = display
                 .scene
                 .bodies()

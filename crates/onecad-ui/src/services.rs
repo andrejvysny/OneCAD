@@ -63,6 +63,10 @@ pub async fn execute(
             crate::document_items::execute(backend, request, permit, sender).await;
             return;
         }
+        Command::Operands(request) => {
+            crate::operand_services::execute(backend, *request, permit).await;
+            return;
+        }
         #[cfg(test)]
         Command::InspectSketch(request) => {
             crate::gesture_services::testing::inspect(&backend.state, *request).await;
@@ -209,6 +213,7 @@ async fn execute_command(
         Command::Document(_) => return Err("file command reached model dispatcher".into()),
         Command::Items(_) => return Err("item command reached model dispatcher".into()),
         Command::Sketch(_) => return Err("sketch command reached model dispatcher".into()),
+        Command::Operands(_) => return Err("operand command reached model dispatcher".into()),
         Command::Prepare(_) | Command::DescribeChanges => {
             return Err("display command reached model dispatcher".into());
         }

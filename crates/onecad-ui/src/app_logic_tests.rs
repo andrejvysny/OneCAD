@@ -269,3 +269,6 @@ mod extrude_handle_delivery_tests;
 
 #[path = "parameter_delivery_tests.rs"]
 mod parameter_delivery_tests;
+
+#[path = "model_selection_delivery_tests.rs"]
+mod model_selection_delivery_tests;

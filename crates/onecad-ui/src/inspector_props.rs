@@ -89,7 +89,7 @@ fn sketch_block(app: &App) -> Block {
 }
 
 fn feature_block(app: &App) -> Option<Block> {
-    let id = app.doc.selected_feature?.to_string();
+    let id = app.doc.selected_feature()?.to_string();
     let feature = app
         .doc
         .display
@@ -127,7 +127,7 @@ fn block(app: &App) -> Block {
         SelectionKind::Body => body_block(app),
         SelectionKind::Region => region_block(app),
         SelectionKind::Feature => feature_block(app).unwrap_or_else(none_block),
-        SelectionKind::None => none_block(),
+        SelectionKind::None | SelectionKind::Mixed => none_block(),
     }
 }
 
@@ -150,11 +150,11 @@ fn face_edge_block(kind: SelectionKind, body: Option<String>) -> Block {
 fn body_block(app: &App) -> Block {
     let name = app
         .doc
-        .selected_body
+        .selected_body()
         .map(|id| body_name(app, id))
         .unwrap_or_default();
     let mut section = body_section(name.clone());
-    if let Some(body) = app.doc.selected_body.and_then(|id| {
+    if let Some(body) = app.doc.selected_body().and_then(|id| {
         app.doc
             .display
             .as_ref()?
@@ -251,7 +251,7 @@ fn hint(app: &App, ui: &mut Ui) {
 }
 
 fn selected_sketch_block(app: &App) -> Option<Block> {
-    let id = app.doc.selected_sketch?.to_string();
+    let id = app.doc.selected_sketch()?.to_string();
     let sketch = app
         .doc
         .display

@@ -92,7 +92,7 @@ impl App {
                 .doc
                 .display
                 .as_ref()
-                .and_then(|display| self.doc.topology.selected_face(display.scene.identity()))
+                .and_then(|display| self.doc.selected_face(display.scene.identity()))
             {
                 self.doc.sketch_entry.plane = None;
                 self.doc.sketch_entry.candidate = None;
@@ -347,7 +347,7 @@ fn instruction_row(app: &mut App, ui: &mut egui::Ui) {
             .doc
             .display
             .as_ref()
-            .and_then(|display| app.doc.topology.selected_face(display.scene.identity()))
+            .and_then(|display| app.doc.selected_face(display.scene.identity()))
         && ui.small_button("Selected face").clicked()
     {
         app.new_sketch_on_face(body, identity);

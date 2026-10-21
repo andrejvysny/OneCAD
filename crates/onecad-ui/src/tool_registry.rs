@@ -3,7 +3,6 @@
 //! (docs/design/native-ui/final/README.md, retired from the tree in 79eb923).
 use crate::app::App;
 use onecad_core::document::record::{KnownOperation, Operation};
-use onecad_render::HighlightKind;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectionKind {
@@ -15,6 +14,8 @@ pub enum SelectionKind {
     SketchIdle,
     SketchEntity,
     Feature,
+    /// Several kinds at once: only tools that need no selection apply.
+    Mixed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -271,6 +272,7 @@ pub fn pill_tools(kind: SelectionKind) -> &'static [&'static [ToolDef]] {
         SelectionKind::SketchIdle => SKETCH_IDLE,
         SelectionKind::SketchEntity => SKETCH_ENTITY,
         SelectionKind::Feature => FEATURE,
+        SelectionKind::Mixed => NONE,
     }
 }
 
@@ -367,25 +369,14 @@ pub fn selection_kind(app: &App) -> SelectionKind {
     if app.doc.interaction.selection.is_some() {
         return SelectionKind::Region;
     }
-    match app.doc.topology.selected_kind() {
-        Some((HighlightKind::Face, _)) => return SelectionKind::Face,
-        Some((HighlightKind::Edge, _)) => return SelectionKind::Edge,
-        None => {}
-    }
-    if app.doc.selected_feature.is_some() {
-        SelectionKind::Feature
-    } else if app.doc.selected_body.is_some() {
-        SelectionKind::Body
-    } else {
-        SelectionKind::None
-    }
+    crate::item_selection::model_kind(&app.doc.selection)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ALL: [SelectionKind; 8] = [
+    const ALL: [SelectionKind; 9] = [
         SelectionKind::None,
         SelectionKind::Face,
         SelectionKind::Edge,
@@ -394,6 +385,7 @@ mod tests {
         SelectionKind::SketchIdle,
         SelectionKind::SketchEntity,
         SelectionKind::Feature,
+        SelectionKind::Mixed,
     ];
 
     #[test]

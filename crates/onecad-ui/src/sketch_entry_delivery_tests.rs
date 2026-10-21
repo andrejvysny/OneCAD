@@ -49,9 +49,12 @@ async fn world_planes_and_face_entry_preserve_native_frame_and_discard() {
     let body = &display.scene.bodies()[0];
     let identity = body.mesh().unwrap().face_id(0).unwrap().to_owned();
     // A preselected face starts the sketch directly, without the support chooser.
-    app.doc
-        .topology
-        .select_face_for_test(display.scene.identity(), body.body_id(), &identity);
+    crate::model_pick::select_face_for_test(
+        &mut app,
+        display.scene.identity(),
+        body.body_id(),
+        &identity,
+    );
     app.choose_sketch_support();
     assert!(app.doc.sketch_entry.pending.is_some());
     assert!(crate::support_view::grid(&app).is_none());
@@ -233,9 +236,12 @@ fn select_host_face(app: &mut App) {
     let display = app.doc.display.clone().unwrap();
     let body = &display.scene.bodies()[0];
     let identity = body.mesh().unwrap().face_id(0).unwrap().to_owned();
-    app.doc
-        .topology
-        .select_face_for_test(display.scene.identity(), body.body_id(), &identity);
+    crate::model_pick::select_face_for_test(
+        app,
+        display.scene.identity(),
+        body.body_id(),
+        &identity,
+    );
 }
 
 fn sketch_count(app: &App) -> usize {
