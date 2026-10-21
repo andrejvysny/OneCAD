@@ -58,6 +58,9 @@ use crate::expr::Dimension;
 use crate::ids::{BodyId, ElementId, RecordId, SketchId};
 use crate::math::Vec3;
 
+mod boolean;
+pub use boolean::{BooleanParams, BOOLEAN_MAX_TOOLS};
+
 /// The record-schema version stamped on freshly authored records.
 pub const RECORD_SCHEMA_VERSION: u32 = 1;
 
@@ -797,10 +800,13 @@ impl Operation {
                 }
             }
 
-            // Boolean: target + tool bodies. Parity: DependencyGraph.cpp:306-309.
+            // Boolean: target, then every tool in authored order (retained
+            // tools are inputs too). Parity: DependencyGraph.cpp:306-309.
             KnownOperation::Boolean(p) => {
                 inputs.push_body(p.target_body);
-                inputs.push_body(p.tool_body);
+                for tool in &p.tools {
+                    inputs.push_body(*tool);
+                }
             }
 
             // Linear/Circular pattern: source body. Parity:
@@ -1745,20 +1751,6 @@ impl ShellParams {
         }
         Ok(())
     }
-}
-
-/// Standalone boolean parameters (OneCAD-CPP `BooleanParams`
-/// `OperationRecord.h:127-132`; SCHEMA §7.3).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BooleanParams {
-    pub operation: BooleanOp,
-    #[serde(rename = "targetBodyId")]
-    pub target_body: BodyId,
-    #[serde(rename = "toolBodyId")]
-    pub tool_body: BodyId,
-    #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
-    pub extra: Extra,
 }
 
 /// Linear pattern parameters (OneCAD-CPP `LinearPatternParams`

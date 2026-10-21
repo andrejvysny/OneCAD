@@ -985,12 +985,11 @@ async fn fuse_kept(
     // bodies per part is what pushed the worker past its ping budget.
     let mut fuse_from: Option<usize> = None;
     for tool in kept.iter().filter(|k| k.body != target.body) {
-        let op = Operation::Known(KnownOperation::Boolean(BooleanParams {
-            operation: BooleanOp::Union,
-            target_body: target.body,
-            tool_body: tool.body,
-            extra: Default::default(),
-        }));
+        let op = Operation::Known(KnownOperation::Boolean(BooleanParams::single(
+            BooleanOp::Union,
+            target.body,
+            tool.body,
+        )));
         let outcome = rt
             .apply(EditCommand::AddOperation {
                 record: OperationRecord::new(RecordId::new(), 0, "Fuse", op),

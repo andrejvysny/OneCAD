@@ -321,15 +321,19 @@ fn operation_strategy() -> impl Strategy<Value = Operation> {
             Just(BooleanOp::Intersect)
         ],
         body_id(),
-        body_id(),
+        proptest::collection::btree_set(body_id(), 1..4),
+        any::<bool>(),
     )
-        .prop_map(|(operation, target, tool)| {
-            Operation::Known(KnownOperation::Boolean(BooleanParams {
+        .prop_filter("tools exclude the target", |(_, target, tools, _)| {
+            !tools.contains(target)
+        })
+        .prop_map(|(operation, target, tools, keep)| {
+            Operation::Known(KnownOperation::Boolean(BooleanParams::new(
                 operation,
-                target_body: target,
-                tool_body: tool,
-                extra: Default::default(),
-            }))
+                target,
+                tools.into_iter().collect(),
+                keep,
+            )))
         });
 
     let linear = (

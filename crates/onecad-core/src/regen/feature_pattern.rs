@@ -423,7 +423,15 @@ fn validate_lineage(selected: &[&OperationRecord]) -> Result<(), String> {
             ));
         }
         if let Operation::Known(KnownOperation::Boolean(params)) = &record.op {
-            if !internal.contains(&params.tool_body) {
+            // The worker remaps only `targetBodyId`; a tool set it cannot
+            // instantiate per pattern copy is refused rather than mis-wired.
+            if params.uses_tools_array() {
+                return Err(format!(
+                    "FeaturePattern Boolean source {} uses multiple or retained tools (unsupported)",
+                    record.record_id
+                ));
+            }
+            if !internal.contains(&params.tools[0]) {
                 return Err(format!(
                     "FeaturePattern Boolean source {} consumes an external tool body",
                     record.record_id

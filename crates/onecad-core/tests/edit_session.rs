@@ -149,12 +149,11 @@ fn extrude_cut(id: RecordId, target: BodyId, out: BodyId) -> OperationRecord {
 }
 
 fn boolean(id: RecordId, target: BodyId, tool: BodyId, out: BodyId) -> OperationRecord {
-    let op = Operation::Known(KnownOperation::Boolean(BooleanParams {
-        operation: BooleanOp::Union,
-        target_body: target,
-        tool_body: tool,
-        extra: Default::default(),
-    }));
+    let op = Operation::Known(KnownOperation::Boolean(BooleanParams::single(
+        BooleanOp::Union,
+        target,
+        tool,
+    )));
     record(id, "Boolean", op, vec![out])
 }
 
@@ -484,6 +483,7 @@ fn edit_operation_input_all_paths() {
     doc.timeline = Timeline::from_records(vec![
         extrude_newbody(rid(1), 25.0, BX()),
         extrude_newbody(rid(2), 10.0, BY()),
+        extrude_newbody(rid(6), 5.0, bid(0xD)),
         boolean(rid(3), BX(), BY(), BX()),
         fillet(rid(4), BX(), "el_e1", BX()),
         revolve(rid(5), bid(3)),
@@ -510,18 +510,19 @@ fn edit_operation_input_all_paths() {
             InputRef::Element(edge_ref(BX(), "el_edited")),
         ),
         (
-            // swap target BX -> BY (produced before R3, so not time-travel)
+            // swap target BX -> BD (produced before R3, so not time-travel;
+            // never the tool — a Boolean role may not alias another)
             "boolean target",
             rid(3),
             InputPath::BooleanTarget,
-            InputRef::Body(BY()),
+            InputRef::Body(bid(0xD)),
         ),
         (
-            // swap tool BY -> BX
+            // swap tool BY -> BD
             "boolean tool",
             rid(3),
-            InputPath::BooleanTool,
-            InputRef::Body(BX()),
+            InputPath::BooleanTool { index: 0 },
+            InputRef::Body(bid(0xD)),
         ),
         (
             "revolve axis",
@@ -543,6 +544,76 @@ fn edit_operation_input_all_paths() {
         assert!(sess.undo().is_some());
         assert_eq!(json(sess.document()), initial, "{name} undo restored");
     }
+}
+
+#[test]
+fn boolean_tool_paths_and_tool_set_validation() {
+    // `{"path":"booleanTool"}` is index 0 both ways: legacy commands unchanged.
+    let legacy: InputPath =
+        serde_json::from_value(serde_json::json!({"path":"booleanTool"})).unwrap();
+    assert_eq!(legacy, InputPath::BooleanTool { index: 0 });
+    assert_eq!(
+        serde_json::to_value(&legacy).unwrap(),
+        serde_json::json!({"path":"booleanTool"})
+    );
+    let second = InputPath::BooleanTool { index: 1 };
+    assert_eq!(
+        serde_json::to_value(&second).unwrap(),
+        serde_json::json!({"path":"booleanTool","index":1})
+    );
+
+    let multi = |id: RecordId, tools: Vec<BodyId>| {
+        let op = Operation::Known(KnownOperation::Boolean(BooleanParams::new(
+            BooleanOp::Cut,
+            BX(),
+            tools,
+            true,
+        )));
+        record(id, "Boolean", op, vec![BX()])
+    };
+    let mut doc = Document::new(DocumentId(u(0x362)));
+    doc.timeline = Timeline::from_records(vec![
+        extrude_newbody(rid(1), 25.0, BX()),
+        extrude_newbody(rid(2), 10.0, BY()),
+        extrude_newbody(rid(6), 5.0, bid(0xD)),
+        multi(rid(3), vec![BY(), bid(0xD)]),
+    ]);
+    let rebind = |path: InputPath, body: BodyId| {
+        let mut sess = DocumentSession::new(doc.clone());
+        sess.apply(EditCommand::EditOperationInput {
+            record: rid(3),
+            path,
+            reference: InputRef::Body(body),
+        })
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    };
+    let err = rebind(InputPath::BooleanTool { index: 2 }, bid(0xD)).unwrap_err();
+    assert!(err.contains("index 2 out of range (2 tools)"), "{err}");
+    let err = rebind(InputPath::BooleanTool { index: 1 }, BY()).unwrap_err();
+    assert!(err.contains("duplicate"), "{err}");
+    let err = rebind(InputPath::BooleanTarget, BY()).unwrap_err();
+    assert!(err.contains("is the target"), "{err}");
+    rebind(InputPath::BooleanTool { index: 1 }, BX()).unwrap_err();
+
+    // Add and replace refuse an in-memory tool set the file format would reject.
+    let mut sess = DocumentSession::new(doc.clone());
+    for tools in [vec![], vec![BY(), BY()], vec![BX()]] {
+        let err = sess
+            .apply(EditCommand::AddOperation {
+                record: multi(rid(9), tools.clone()),
+                at_cursor: true,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("Boolean"), "{tools:?}: {err}");
+    }
+    let err = sess
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(3),
+            op: multi(rid(3), vec![BY(), BX()]).op,
+        })
+        .unwrap_err();
+    assert!(err.to_string().contains("is the target"), "{err}");
 }
 
 #[test]

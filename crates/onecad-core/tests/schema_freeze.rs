@@ -437,7 +437,8 @@ fn schema_7_3_boolean_payload_parses() {
     match serde_json::from_value::<Operation>(json).unwrap() {
         Operation::Known(KnownOperation::Boolean(p)) => {
             assert_eq!(p.target_body, body_a());
-            assert_eq!(p.tool_body, body_b());
+            assert_eq!(p.tools, vec![body_b()]);
+            assert!(!p.keep_tools);
         }
         other => panic!("expected Boolean, got {other:?}"),
     }

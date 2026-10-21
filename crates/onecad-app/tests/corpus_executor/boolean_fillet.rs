@@ -141,12 +141,7 @@ async fn run_standalone_boolean(wm: &WorkerManager, epoch: WorkerEpoch) -> Resul
         RecordId(Uuid::from_u128(0xC206)),
         4,
         "Boolean",
-        Operation::Known(KnownOperation::Boolean(BooleanParams {
-            operation: BooleanOp::Union,
-            target_body: target,
-            tool_body: tool,
-            extra: Default::default(),
-        })),
+        Operation::Known(KnownOperation::Boolean(BooleanParams::single(BooleanOp::Union, target, tool))),
     );
     let timeline = timeline([
         sketch_record_for(0xC202, &a),

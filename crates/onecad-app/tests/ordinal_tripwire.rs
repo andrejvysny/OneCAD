@@ -294,12 +294,11 @@ fn cut_record(rec: u128, target: BodyId, tool: BodyId) -> OperationRecord {
         RecordId(Uuid::from_u128(rec)),
         0,
         "Boolean",
-        Operation::Known(KnownOperation::Boolean(BooleanParams {
-            operation: BooleanOp::Cut,
-            target_body: target,
-            tool_body: tool,
-            extra: Default::default(),
-        })),
+        Operation::Known(KnownOperation::Boolean(BooleanParams::single(
+            BooleanOp::Cut,
+            target,
+            tool,
+        ))),
     )
 }
 

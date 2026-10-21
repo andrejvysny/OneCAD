@@ -198,6 +198,11 @@ json instantiate(json source, const gp_Trsf& trsf, const std::string& pattern,
         pattern, source.value("sourceRecordId", std::string()), instance);
     if (source.contains("params") && source["params"].is_object()) {
         json& p = source["params"];
+        // Only `targetBodyId` is remapped per instance; a tool set cannot be.
+        if (source.value("opType", std::string()) == "Boolean" &&
+            (p.contains("toolBodyIds") || p.contains("keepTools")))
+            throw std::runtime_error(
+                "FeaturePattern Boolean source uses multiple or retained tools");
         if (source.value("opType", std::string()) == "Sketch") {
             const std::string old_sketch = p.value("sketchId", std::string());
             const std::string new_sketch = "sk_" + source["opId"].get<std::string>();

@@ -321,12 +321,9 @@ fn boolean_record(rec: u128, op: BooleanOp, target: BodyId, tool: BodyId) -> Ope
         RecordId(Uuid::from_u128(rec)),
         0,
         "Boolean",
-        Operation::Known(KnownOperation::Boolean(BooleanParams {
-            operation: op,
-            target_body: target,
-            tool_body: tool,
-            extra: Default::default(),
-        })),
+        Operation::Known(KnownOperation::Boolean(BooleanParams::single(
+            op, target, tool,
+        ))),
     )
 }
 
