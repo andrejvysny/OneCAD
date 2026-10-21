@@ -31,6 +31,10 @@ pub enum Request {
         body: onecad_core::ids::BodyId,
         identity: String,
         control: onecad_app::sketch_candidate::SketchCandidateControl,
+        /// The UI entry owns the request while this, or its delivery's clone, lives.
+        lease: Arc<()>,
+        #[cfg(test)]
+        admission_gate: Option<Arc<tokio::sync::Semaphore>>,
     },
     Load {
         id: SketchId,
@@ -47,6 +51,8 @@ pub struct Delivery {
     pub display: Option<Arc<Display>>,
     pub actions: Vec<SketchAction>,
     pub error: Option<String>,
+    /// A FaceEntry's lease; dropped only after the UI applied this delivery.
+    pub _lease: Option<Arc<()>>,
 }
 impl Delivery {
     pub fn stale_actions(self) -> Vec<SketchAction> {
@@ -115,6 +121,10 @@ pub async fn execute(
         Request::Candidate { effect, .. } => Some(effect_tag(effect).clone()),
         _ => None,
     };
+    let lease = match &request {
+        Request::FaceEntry { lease, .. } => Some(lease.clone()),
+        _ => None,
+    };
     let mut actions = Vec::new();
     let result = match run(backend, request, &mut actions).await {
         Ok(reply) => api::preview_context(&backend.state)
@@ -168,6 +178,7 @@ pub async fn execute(
             display,
             actions,
             error,
+            _lease: lease,
         }),
         _permit: permit,
     });
@@ -189,6 +200,9 @@ async fn run(
             body,
             identity,
             control,
+            #[cfg(test)]
+            admission_gate,
+            ..
         } => {
             check_context(state, &context).await?;
             let scope = api::preview_context(state)
@@ -222,6 +236,11 @@ async fn run(
             .await
             .map_err(|e| e.to_string())?;
             crate::record_budget::check_payload(prepared.sketch())?;
+            #[cfg(test)]
+            if let Some(gate) = admission_gate {
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_secs(10), gate.acquire()).await;
+            }
             api::commit_sketch_on_face_controlled(state, prepared, control)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -729,6 +748,7 @@ mod stale_tests {
             display: None,
             actions: vec![SketchAction::BatchAccepted { tag: old }],
             error: None,
+            _lease: None,
         };
         for action in delivery.stale_actions() {
             interaction.dispatch(action);

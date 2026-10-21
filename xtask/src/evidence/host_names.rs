@@ -54,6 +54,11 @@ pub(super) const HOST_TESTS: &[&str] = &[
     "app_logic_tests::document_tabs_tests::an_unpreparable_switch_falls_back_instead_of_blanking_forever",
     "app_logic_tests::document_tabs_tests::ctrl_tab_walks_most_recent_first_and_switches_on_release",
     "app_logic_tests::document_tabs_tests::new_tab_shows_home_and_the_close_prompt_asks_what_changed",
+    "app_logic_tests::sketch_entry_delivery_tests::face_entry_cancel_before_admission_leaves_document_unchanged",
+    "app_logic_tests::sketch_entry_delivery_tests::face_entry_admission_wins_over_late_cancel_and_opens_once",
+    "app_logic_tests::sketch_entry_delivery_tests::face_entry_context_replacement_cancels_and_releases_after_delivery",
+    "app_logic_tests::sketch_entry_delivery_tests::face_entry_submit_failure_releases_ownership_without_sketch",
+    "app_logic_tests::sketch_entry_delivery_tests::face_entry_ownership_stays_with_its_tab_when_another_document_opens",
 ];
 /// Ignored service and bridge cases outside `app_logic_tests`; they do not
 /// emit adapter evidence, so the gate runs them as a separate exact selection.

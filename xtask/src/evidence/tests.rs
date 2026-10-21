@@ -45,7 +45,7 @@ fn accepted() -> String {
 }
 #[test]
 fn host_inventory_requires_exact_current_names() {
-    assert_eq!(HOST_TESTS.len(), 55);
+    assert_eq!(HOST_TESTS.len(), 60);
     let inventory = HOST_TESTS
         .iter()
         .map(|name| format!("{name}: test\n"))
