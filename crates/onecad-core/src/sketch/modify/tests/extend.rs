@@ -338,3 +338,74 @@ fn an_arc_pick_half_way_round_its_gap_or_at_its_centre_is_ambiguous() {
         ModifyRefusal::AmbiguousPick(arc)
     );
 }
+
+#[test]
+fn a_tangent_arc_end_on_a_transversal_crossing_does_not_mask_it() {
+    // The arc starts at (10,0) tangent to y=0, exactly where the wall crosses.
+    let mut b = B::new();
+    let (l, _, e) = b.line((0.0, 0.0), (5.0, 0.0));
+    let (wall, _, _) = b.line((10.0, -5.0), (10.0, 5.0));
+    b.arc((10.0, 1.0), 1.0, -FRAC_PI_2, 0.0);
+    let grown = extend(&b.s, l, 4.5, 0.0).unwrap();
+    let after = apply(&b.s, &grown.plan);
+    check_accounting(&b.s, &after, &grown.plan, l, &[e]);
+    assert!(near(grown.tip, 10.0, 0.0));
+    assert_eq!(
+        grown.plan.added_constraints[0].reason,
+        AddReason::ExtendWeld { boundary: wall }
+    );
+    assert!(matches!(
+        after.get_constraint(grown.plan.added_constraints[0].id),
+        Some(Constraint::OnCurve { curve, .. }) if *curve == wall
+    ));
+
+    // Same masking when the extended entity is an arc.
+    let mut b = B::new();
+    let (arc, _) = b.arc((0.0, 0.0), 5.0, 0.0, FRAC_PI_2);
+    let (line, _, _) = b.line((-10.0, 0.0), (0.0, 0.0));
+    b.arc((-6.0, 0.0), 1.0, 0.0, FRAC_PI_2);
+    let grown = extend(&b.s, arc, 0.5, 5.0).unwrap();
+    let after = apply(&b.s, &grown.plan);
+    let (_, a1) = arc_angles(&after, arc);
+    assert!((a1 - PI).abs() < 1e-9, "{a1}");
+    assert_eq!(
+        grown.plan.added_constraints[0].reason,
+        AddReason::ExtendWeld { boundary: line }
+    );
+}
+
+#[test]
+fn a_tangent_arc_end_alone_still_refuses() {
+    let mut b = B::new();
+    let (l, _, _) = b.line((0.0, 0.0), (5.0, 0.0));
+    b.arc((10.0, 1.0), 1.0, -FRAC_PI_2, 0.0);
+    let mut ids = SeqIds::new();
+    let request = ExtendRequest {
+        entity: l,
+        pick: v(4.5, 0.0),
+    };
+    assert_eq!(
+        plan_extend(&b.s, &request, &mut ids).unwrap_err(),
+        ModifyRefusal::TangentHit(l)
+    );
+    assert_eq!(ids.drawn, 0);
+}
+
+#[test]
+fn a_transversal_end_point_wins_the_weld_over_a_tangent_arc_end() {
+    let mut b = B::new();
+    let (l, _, e) = b.line((0.0, 0.0), (5.0, 0.0));
+    let (wall, foot, _) = b.line((10.0, 0.0), (10.0, 5.0));
+    b.arc((10.0, 1.0), 1.0, -FRAC_PI_2, 0.0);
+    let grown = extend(&b.s, l, 4.5, 0.0).unwrap();
+    let after = apply(&b.s, &grown.plan);
+    check_accounting(&b.s, &after, &grown.plan, l, &[e]);
+    assert_eq!(
+        grown.plan.added_constraints[0].reason,
+        AddReason::ExtendWeld { boundary: wall }
+    );
+    assert!(matches!(
+        after.get_constraint(grown.plan.added_constraints[0].id),
+        Some(Constraint::Coincident { point1, point2, .. }) if (*point1, *point2) == (e, foot)
+    ));
+}

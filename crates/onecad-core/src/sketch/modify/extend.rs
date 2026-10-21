@@ -353,11 +353,13 @@ fn nearest(
         .map(|c| c.param)
         .min_by(f64::total_cmp)
         .ok_or(ModifyRefusal::NoBoundaryHit(id))?;
-    let hit = representative(ahead.iter().filter(|c| c.param - min <= tol));
-    if hit.tangent {
+    let cluster: Vec<&Crossing> = ahead.iter().filter(|c| c.param - min <= tol).collect();
+    if cluster.iter().all(|c| c.tangent) {
         return Err(ModifyRefusal::TangentHit(id));
     }
-    Ok(hit)
+    // A tangent touch (e.g. an arc ending there) does not stop the extension,
+    // so it must not outrank a transversal crossing as the weld target.
+    Ok(representative(cluster.into_iter().filter(|c| !c.tangent)))
 }
 
 fn with_angles(entity: &SketchEntity, start_angle: f64, end_angle: f64) -> SketchEntity {
