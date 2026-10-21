@@ -33,7 +33,8 @@ executable tests, not a claim that an unrun gate passed.
 | Measure | Model overflow, disabled | Native measurement absent | ONECAD-245 | Registry disposition checks | No |
 | Isolate, Hide body | Nav / model overflow, disabled | Temporary/persistent native visibility absent | ONECAD-320 | Registry disposition checks | No |
 | Roll back, Suppress, Duplicate | Model overflow, disabled | No connected native history route | ONECAD-321 | Registry disposition checks | No |
-| Import | File menu, native menu, model pill | Existing `document_request(Request::Import)` | Existing replacement/confirmation policy; ONECAD-314 | File lifecycle tests | Not qualified |
+| Import | File menu, native menu, model pill | Existing `document_request(Request::Import)`; opens the file as a new document tab | Existing replacement/confirmation policy; ONECAD-314 | File lifecycle tests | Not qualified |
+| Insert STEP | Native File menu, after Import | `document_request(Request::InsertStep)` → `api::insert_step`; adds an `ImportStep` record at the rollback cursor of the active document, no new tab | Open document, idle editor (no sketch, tool or busy command); refuses if the document changes before commit; owner pending, related ONECAD-428 / 314 | `step_insert` real-worker suite; `document_io_tests` insert routing | Not qualified |
 | Section | Nav, model pill, Display / More settings | Existing `viewport_options::contents` section controls | Live viewport; section mutation disabled during sketch/model tool; ONECAD-314 | Display popup interaction tests | Not qualified |
 | Home view, Fit | Nav and native bindings | Existing camera / fit request | Live viewport | Existing input/camera suites | Not qualified |
 | Snap | View cluster | Existing `sketch_snap` transient preference | Ready sketch | Existing snapping suites | Not qualified |

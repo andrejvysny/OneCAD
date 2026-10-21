@@ -87,6 +87,48 @@ async fn typed_real_worker_import_export_roundtrip_preserves_document() {
     backend.state.retire_all();
 }
 
+#[tokio::test]
+#[ignore = "requires production worker and Metal; run with ONECAD_REQUIRE_WORKER=1 ONECAD_REQUIRE_GPU=1"]
+async fn insert_step_routes_into_the_active_document_without_replacing_it() {
+    assert_eq!(std::env::var("ONECAD_REQUIRE_WORKER").as_deref(), Ok("1"));
+    let area = tempfile::tempdir().unwrap();
+    let (mut backend, events) = backend(area.path()).await;
+    let before = api::get_projection(&backend.state).await.unwrap();
+    let count = events.publications.load(Ordering::Relaxed);
+    choose(&mut backend, None);
+    assert!(matches!(
+        intent(&mut backend, Request::InsertStep).await.unwrap(),
+        Outcome::Cancelled
+    ));
+    assert_eq!(api::get_projection(&backend.state).await.unwrap(), before);
+    assert_eq!(events.publications.load(Ordering::Relaxed), count);
+    let source = backend.paths.root.join("documents/inserted.step");
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../onecad-app/tests/fixtures/colored_boxes.step"),
+        &source,
+    )
+    .unwrap();
+    choose(&mut backend, Some(&source));
+    let outcome = intent(&mut backend, Request::InsertStep).await.unwrap();
+    assert!(
+        matches!(outcome, Outcome::Inserted { warning: None }),
+        "{outcome:?}"
+    );
+    let after = api::get_projection(&backend.state).await.unwrap();
+    assert_eq!(after.runtime_session, before.runtime_session);
+    assert_eq!(after.document_id, before.document_id);
+    assert_eq!(after.undo_depth, before.undo_depth + 1);
+    assert_eq!(after.features.len(), before.features.len() + 1);
+    assert_eq!(after.features.last().unwrap().op_type, "ImportStep");
+    assert_eq!(after.bodies.len(), 2);
+    assert!(after.dirty);
+    api::close_document(&backend.state, backend.host.clone())
+        .await
+        .unwrap();
+    backend.state.retire_all();
+}
+
 async fn backend(root: &Path) -> (Backend, Arc<Events>) {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = instance.request_adapter(&Default::default()).await.unwrap();

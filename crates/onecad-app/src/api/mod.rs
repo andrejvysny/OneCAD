@@ -438,27 +438,43 @@ pub async fn import_step(
 /// its regen awaiter). Otherwise it responds like `apply_edit_command`: the
 /// pre-regen [`DocumentProjection`], with the authoritative geometry arriving on
 /// the normal `document-changed` / `projection-updated` events.
+///
+/// The dialog, readiness wait and probe all run unlocked, so the runtime identity is
+/// captured first and re-checked under the authoring lock: a document replaced or
+/// closed meanwhile refuses the insert instead of receiving it.
 #[tracing::instrument(skip_all, err(Display))]
 pub async fn insert_step(
     state: &AppState,
     app: HostContext,
 ) -> Result<Option<DocumentProjection>, ApiError> {
-    {
-        // Presence check only — the lock is NOT held across the probe below.
+    let session = {
         let guard = state.runtime.lock().await;
         guard
             .as_ref()
-            .ok_or_else(|| ApiError::NoDocument("insertStep".into()))?;
-    }
+            .ok_or_else(|| ApiError::NoDocument("insertStep".into()))?
+            .runtime_session()
+    };
     let Some(path) = pick_step_open(app.clone()).await else {
         return Ok(None); // dialog cancelled
     };
+    import_readiness::wait_ready(
+        state.readiness().as_ref(),
+        std::time::Duration::from_secs(8),
+    )
+    .await?;
     let prepared = crate::imports::prepare_import(&*state.step_import(), Path::new(&path)).await?;
     let (outcome, projection) = {
         let mut guard = state.runtime.lock().await;
         let rt = guard
             .as_mut()
-            .ok_or_else(|| ApiError::NoDocument("insertStep".into()))?;
+            .filter(|rt| rt.matches_runtime_session(&session))
+            .ok_or_else(|| {
+                ApiError::InvalidCommand(
+                    "insertStep: the document changed while the STEP file was read; \
+                     nothing was inserted"
+                        .into(),
+                )
+            })?;
         let outcome = rt.add_import_record(&prepared, true)?;
         (outcome, rt.projection())
     };

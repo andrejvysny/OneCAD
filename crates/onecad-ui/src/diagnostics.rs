@@ -6,6 +6,7 @@ pub enum FileAction {
     New,
     Open,
     Import,
+    InsertStep,
     Save,
     Export,
 }
@@ -223,6 +224,7 @@ impl Source {
             Self::File(FileAction::New) => "New document",
             Self::File(FileAction::Open) => "Open",
             Self::File(FileAction::Import) => "Import",
+            Self::File(FileAction::InsertStep) => "Insert STEP",
             Self::File(FileAction::Save) => "Save",
             Self::File(FileAction::Export) => "Export",
             Self::Worker => "Modeling worker",

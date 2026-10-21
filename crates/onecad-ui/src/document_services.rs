@@ -34,7 +34,9 @@ pub async fn execute(
                     &backend.shared,
                     format!("Scene refresh failed: {error}"),
                 );
-                if let Ok(Outcome::Replaced { warning }) = &mut result {
+                if let Ok(Outcome::Replaced { warning } | Outcome::Inserted { warning }) =
+                    &mut result
+                {
                     *warning = Some(match warning.take() {
                         Some(previous) => format!("{previous}; {error}"),
                         None => error,
@@ -166,7 +168,47 @@ async fn run_intent(backend: &mut Backend, request: Request) -> Result<Outcome, 
             };
             open(backend, Path::new(&path), true).await
         }
+        Request::InsertStep => insert_step(backend).await,
     }
+}
+
+/// Mutates the active document through the application lane; its regen is awaited
+/// like any edit so the display capture that follows sees the inserted bodies.
+async fn insert_step(backend: &mut Backend) -> Result<Outcome, String> {
+    let before = api::get_projection(&backend.state)
+        .await
+        .map_err(|e| e.to_string())?;
+    if before.runtime_session.is_empty() {
+        return Err("Open a document before inserting a STEP file".into());
+    }
+    backend.events.begin(crate::event_mailbox::Expected::Known {
+        session: before.runtime_session,
+        revision: before.revision + 1,
+    });
+    let Some(projection) = api::insert_step(&backend.state, backend.host.clone())
+        .await
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(Outcome::Cancelled);
+    };
+    backend
+        .events
+        .retarget(&projection.runtime_session, projection.revision);
+    let warning = match crate::services::wait_regen(
+        backend,
+        &projection.runtime_session,
+        projection.revision,
+    )
+    .await
+    {
+        Ok(completion) if matches!(completion.outcome.as_str(), "published" | "noop") => None,
+        Ok(completion) => Some(format!(
+            "STEP file inserted; regeneration {}",
+            completion.outcome
+        )),
+        Err(error) => Some(format!("STEP file inserted; geometry unavailable: {error}")),
+    };
+    Ok(Outcome::Inserted { warning })
 }
 
 async fn open(backend: &mut Backend, source: &Path, import: bool) -> Result<Outcome, String> {

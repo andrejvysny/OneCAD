@@ -26,13 +26,7 @@ impl<'a> ImportBackend<'a> {
     }
 
     pub(super) async fn wait_ready(&self, timeout: Duration) -> Result<(), ApiError> {
-        match tokio::time::timeout(timeout, self.readiness.wait_ready(timeout)).await {
-            Ok(true) => Ok(()),
-            _ => Err(ApiError::Worker(format!(
-                "STEP import worker did not become ready within {} s",
-                timeout.as_secs_f64()
-            ))),
-        }
+        wait_ready(self.readiness.as_ref(), timeout).await
     }
 
     pub(super) fn probe(&self) -> &dyn crate::worker::StepImport {
@@ -48,6 +42,20 @@ impl<'a> ImportBackend<'a> {
             })?;
         self.committed = true;
         Ok(result)
+    }
+}
+
+/// A STEP probe needs a handshaken worker; both import lanes bound that wait.
+pub(super) async fn wait_ready(
+    readiness: &dyn crate::worker::WorkerReadiness,
+    timeout: Duration,
+) -> Result<(), ApiError> {
+    match tokio::time::timeout(timeout, readiness.wait_ready(timeout)).await {
+        Ok(true) => Ok(()),
+        _ => Err(ApiError::Worker(format!(
+            "STEP import worker did not become ready within {} s",
+            timeout.as_secs_f64()
+        ))),
     }
 }
 

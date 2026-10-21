@@ -23,6 +23,7 @@ pub enum Action {
     CloseTab,
     SaveAll,
     Import,
+    InsertStep,
     Save,
     SaveAs,
     Export(crate::document_flow::ExportFormat),
@@ -50,6 +51,7 @@ mod imp {
         appearance: Choices,
         history: [MenuItem; 2],
         replacement: [MenuItem; 3],
+        insert_step: MenuItem,
         saves: [MenuItem; 3],
         exports: [MenuItem; 4],
         recent: Submenu,
@@ -97,6 +99,7 @@ mod imp {
         let recent = Submenu::new("Open Recent", true);
         let close_tab = item("Close Tab", cmd, Code::KeyW);
         let import = item("Import…", cmd | Modifiers::SHIFT, Code::KeyI);
+        let insert_step = MenuItem::new("Insert STEP…", true, None);
         let save = item("Save", cmd, Code::KeyS);
         let save_as = item("Save As…", cmd | Modifiers::SHIFT, Code::KeyS);
         let save_all = item("Save All", cmd | Modifiers::ALT, Code::KeyS);
@@ -147,6 +150,7 @@ mod imp {
                 &save_all,
                 &PredefinedMenuItem::separator(),
                 &import,
+                &insert_step,
                 &export,
             ],
         )
@@ -206,6 +210,7 @@ mod imp {
             (close_tab.id().clone(), Action::CloseTab),
             (save_all.id().clone(), Action::SaveAll),
             (import.id().clone(), Action::Import),
+            (insert_step.id().clone(), Action::InsertStep),
             (save.id().clone(), Action::Save),
             (save_as.id().clone(), Action::SaveAs),
             (
@@ -254,6 +259,7 @@ mod imp {
             appearance: choices,
             history: [undo, redo],
             replacement: [new, open, import],
+            insert_step,
             saves: [save, save_as, save_all],
             exports,
             recent,
@@ -267,10 +273,11 @@ mod imp {
             self.history[0].set_enabled(undo);
             self.history[1].set_enabled(redo);
         }
-        pub fn set_document_enabled(&self, replace: bool, save: bool, export: bool) {
+        pub fn set_document_enabled(&self, replace: bool, insert: bool, save: bool, export: bool) {
             for item in &self.replacement {
                 item.set_enabled(replace);
             }
+            self.insert_step.set_enabled(insert);
             for item in &self.saves {
                 item.set_enabled(save);
             }
@@ -331,7 +338,14 @@ mod imp {
         }
         pub fn set_appearance(&self, _current: crate::ui_state::Appearance) {}
         pub fn set_history_enabled(&self, _undo: bool, _redo: bool) {}
-        pub fn set_document_enabled(&self, _replace: bool, _save: bool, _export: bool) {}
+        pub fn set_document_enabled(
+            &self,
+            _replace: bool,
+            _insert: bool,
+            _save: bool,
+            _export: bool,
+        ) {
+        }
         pub fn set_recents(&self, _names: &[String]) {}
     }
 }
@@ -386,7 +400,11 @@ impl Action {
                     Self::Fit => (egui::Key::Num0, false),
                     Self::Home => (egui::Key::H, true),
                     // Save All carries Option, which the shift-only comparison cannot express.
-                    Self::Appearance(_) | Self::Export(_) | Self::OpenRecent(_) | Self::SaveAll => {
+                    Self::Appearance(_)
+                    | Self::Export(_)
+                    | Self::OpenRecent(_)
+                    | Self::SaveAll
+                    | Self::InsertStep => {
                         return false;
                     }
                 };
