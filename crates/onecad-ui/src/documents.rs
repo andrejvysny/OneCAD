@@ -14,6 +14,9 @@ use crate::{app::App, bridge::Bridge, qa::QaPaths, service_runtime::ServiceRunti
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod save_all;
+pub(crate) use save_all::Finished as SaveAllFinished;
+
 pub type TabId = u64;
 
 static NEXT_TAB: AtomicU64 = AtomicU64::new(1);
@@ -71,6 +74,9 @@ pub struct Tabs {
     closing: Vec<DocumentEditor>,
     /// Monotonic activation counter (most-recent-first order).
     activations: u64,
+    /// Parked provisional tabs whose New/Open/Import ended without a document.
+    settled: Vec<TabId>,
+    pub(crate) save_all: save_all::SaveAll,
 }
 
 impl Tabs {
@@ -86,6 +92,8 @@ impl Tabs {
             parked: Vec::new(),
             closing: Vec::new(),
             activations: 0,
+            settled: Vec::new(),
+            save_all: Default::default(),
         }
     }
 
@@ -187,7 +195,7 @@ impl App {
         self.activate_tab(order[target]);
     }
 
-    fn tab_order(&self) -> Vec<TabId> {
+    pub(crate) fn tab_order(&self) -> Vec<TabId> {
         let mut order: Vec<TabId> = self.tabs.parked.iter().map(|doc| doc.tab).collect();
         order.insert(self.active_index(), self.doc.tab);
         order
@@ -255,6 +263,13 @@ impl App {
         }
         for index in 0..self.tabs.closing.len() {
             self.with_parked(index, ctx, true);
+        }
+        for tab in std::mem::take(&mut self.tabs.settled) {
+            if let Some(index) = self.tabs.parked.iter().position(|doc| doc.tab == tab) {
+                let settled = self.tabs.parked.remove(index);
+                settled.bridge.request_shutdown();
+                self.tabs.closing.push(settled);
+            }
         }
         let (stopped, closing): (Vec<_>, Vec<_>) = std::mem::take(&mut self.tabs.closing)
             .into_iter()
@@ -401,6 +416,11 @@ impl App {
             let _ = self.close_active_tab(close.as_deref());
             return;
         }
+        // Parking dropped the tool's evaluation and preview; its context is the
+        // retained display's, so the re-issued draft previews against this scene.
+        if self.doc.interaction.tool.is_some() {
+            self.dispatch(onecad_interaction::Action::Republish);
+        }
         self.ui.start_open = self.doc.document_state.is_none() && self.doc.display.is_none();
         self.context().request_repaint();
     }
@@ -434,8 +454,15 @@ impl App {
         let Some(origin) = self.doc.origin else {
             return;
         };
-        // Only the active editor may be swapped out; a parked one keeps its tab.
-        if self.parked || self.document_open() {
+        if self.document_open() {
+            return;
+        }
+        if self.parked {
+            // The user left before it answered. With no document it has no tab
+            // to return to, so its host closes once the parked drain ends
+            // (a parked editor cannot be swapped out mid-drain).
+            self.doc.origin = None;
+            self.tabs.settled.push(self.doc.tab);
             return;
         }
         let status = std::mem::take(&mut self.doc.status);
@@ -517,45 +544,6 @@ impl App {
             .collect();
         docs.sort_by_key(|doc| std::cmp::Reverse(doc.last_active));
         docs.into_iter().map(|doc| doc.tab).collect()
-    }
-
-    /// ⌥⌘S: every document with a file saves in place, in the background; the
-    /// first one never saved is shown and asks for a location (one dialog at a
-    /// time, so the user is never handed a stack of them).
-    pub fn save_all(&mut self) {
-        let unsaved = |doc: &DocumentEditor| {
-            doc.authoring_dirty || doc.document_state.as_ref().is_some_and(|s| s.dirty)
-        };
-        let has_file = |doc: &DocumentEditor| {
-            doc.document_state
-                .as_ref()
-                .is_some_and(|s| s.path.is_some())
-        };
-        let mut untitled = (unsaved(&self.doc) && !has_file(&self.doc)).then_some(self.doc.tab);
-        for index in 0..self.tabs.parked.len() {
-            let doc = &self.tabs.parked[index];
-            if !unsaved(doc) {
-                continue;
-            }
-            if !has_file(doc) {
-                untitled.get_or_insert(doc.tab);
-                continue;
-            }
-            std::mem::swap(&mut self.doc, &mut self.tabs.parked[index]);
-            self.parked = true;
-            self.document_request(crate::document_flow::Request::Save { save_as: false });
-            self.parked = false;
-            std::mem::swap(&mut self.doc, &mut self.tabs.parked[index]);
-        }
-        if unsaved(&self.doc) && has_file(&self.doc) {
-            self.document_request(crate::document_flow::Request::Save { save_as: false });
-        }
-        if let Some(tab) = untitled {
-            self.show_tab(tab);
-            if self.doc.tab == tab {
-                self.document_request(crate::document_flow::Request::Save { save_as: false });
-            }
-        }
     }
 
     /// Asks the backend what the close prompt should list for the active document.

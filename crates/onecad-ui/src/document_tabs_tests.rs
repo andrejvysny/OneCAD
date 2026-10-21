@@ -1,7 +1,7 @@
 //! Several open documents in one window: each tab is its own document host.
 use super::*;
 
-async fn two_tabs(root: &std::path::Path) -> (App, egui::Context, eframe::Frame) {
+pub(super) async fn two_tabs(root: &std::path::Path) -> (App, egui::Context, eframe::Frame) {
     let (mut app, context) = create_app(root).await;
     let mut frame = eframe::Frame::_new_kittest();
     pump_until(&mut app, &context, &mut frame, |app| {
@@ -294,7 +294,7 @@ async fn an_unpreparable_switch_falls_back_instead_of_blanking_forever() {
     pump_until(&mut app, &context, &mut frame, |app| app.may_close).await;
 }
 
-fn ctrl_tab(shift: bool) -> egui::Event {
+pub(super) fn ctrl_tab(shift: bool) -> egui::Event {
     egui::Event::Key {
         key: egui::Key::Tab,
         physical_key: None,
@@ -308,7 +308,7 @@ fn ctrl_tab(shift: bool) -> egui::Event {
     }
 }
 
-fn raw(events: Vec<egui::Event>) -> egui::RawInput {
+pub(super) fn raw(events: Vec<egui::Event>) -> egui::RawInput {
     egui::RawInput {
         events,
         focused: true,

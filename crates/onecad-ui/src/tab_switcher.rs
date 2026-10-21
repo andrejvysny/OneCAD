@@ -29,60 +29,52 @@ impl State {
     }
 }
 
-/// Handles ⌃Tab, ⇧⌃Tab, W, Escape and the release of Control.
+/// Handles one event at its position in the frame: ⌃Tab opens or steps, W closes
+/// the highlighted document, Escape abandons, and Control's release switches —
+/// only if the switcher is open at that point, so a later ⌃Tab in the same frame
+/// opens it again. Returns whether the event was consumed.
+pub(crate) fn event(app: &mut App, event: &egui::Event) -> bool {
+    if let egui::Event::ModifiersChanged(modifiers) = event {
+        if !modifiers.ctrl
+            && let Some(state) = app.switcher.take()
+        {
+            go(app, state.order[state.selected]);
+        }
+        return false;
+    }
+    let egui::Event::Key {
+        key,
+        pressed: true,
+        modifiers,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    match key {
+        egui::Key::Tab if modifiers.ctrl && !modifiers.alt => {
+            match &mut app.switcher {
+                Some(state) => state.step(modifiers.shift),
+                None => app.switcher = open(app, modifiers.shift),
+            }
+            true
+        }
+        egui::Key::W if app.switcher.is_some() => {
+            close_selected(app);
+            true
+        }
+        egui::Key::Escape if app.switcher.is_some() => {
+            app.switcher = None;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The switcher's events alone, in frame order.
+#[cfg(test)]
 pub fn route(app: &mut App, raw: &mut egui::RawInput) {
-    let mut commit = false;
-    let mut cancel = false;
-    let mut close = false;
-    let mut released = false;
-    raw.events.retain(|event| {
-        if let egui::Event::ModifiersChanged(modifiers) = event {
-            released |= !modifiers.ctrl;
-            return true;
-        }
-        let egui::Event::Key {
-            key,
-            pressed: true,
-            modifiers,
-            ..
-        } = event
-        else {
-            return true;
-        };
-        match key {
-            egui::Key::Tab if modifiers.ctrl && !modifiers.alt => {
-                match &mut app.switcher {
-                    Some(state) => state.step(modifiers.shift),
-                    None => app.switcher = open(app, modifiers.shift),
-                }
-                false
-            }
-            egui::Key::W if app.switcher.is_some() => {
-                close = true;
-                false
-            }
-            egui::Key::Escape if app.switcher.is_some() => {
-                cancel = true;
-                false
-            }
-            _ => true,
-        }
-    });
-    // Losing focus mid-switch must not leave the switcher waiting for a release
-    // that will never be delivered to this window.
-    if app.switcher.is_some() && !raw.focused {
-        cancel = true;
-    }
-    if app.switcher.is_some() && released && !cancel {
-        commit = true;
-    }
-    if close {
-        close_selected(app);
-    } else if cancel {
-        app.switcher = None;
-    } else if commit && let Some(state) = app.switcher.take() {
-        go(app, state.order[state.selected]);
-    }
+    crate::input::ordered::route(app, raw, false, false, false);
 }
 
 /// Selecting a card with the pointer switches at once.

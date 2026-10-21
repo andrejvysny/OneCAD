@@ -398,8 +398,9 @@ fn recent_cards(app: &mut App, ui: &mut Ui) {
             for recent in row {
                 let metadata = recent_metadata(recent);
                 let open_tab = app.tab_for_path(std::path::Path::new(&recent.path));
+                // Switching parks the active document, which must not be mid-command.
                 let response = ui.add_enabled(
-                    enabled || open_tab.is_some(),
+                    enabled || open_tab.is_some() && !app.busy(),
                     RecentCard::new(&recent.name, &metadata)
                         .width(width)
                         .metadata_only()

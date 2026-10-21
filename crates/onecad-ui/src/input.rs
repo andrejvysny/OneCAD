@@ -1,6 +1,7 @@
 //! Text owns editing shortcuts; model history is only used without text focus.
 use crate::{app::App, bridge::Command, document_flow::Request, menu};
 
+pub(crate) mod ordered;
 mod overlay;
 
 pub(crate) fn overlay_owns_keyboard(app: &App, ctx: &egui::Context) -> bool {
@@ -101,7 +102,6 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     app.poll_device_failure();
     app.sync_document_state();
     crate::input_trace::input(app, ctx, raw);
-    crate::tab_switcher::route(app, raw);
     crate::sketch_gestures::route_raw(app, ctx, raw);
     crate::sketch_creation::chain_input::route_raw(app, ctx, raw);
     if app.sampled && app.viewport_ready() {
@@ -153,7 +153,6 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
             .events
             .iter()
             .any(|event| matches!(event, egui::Event::Ime(_)));
-    protect_composition(&mut app.composing, raw, text);
     if let Some(owner) = owner {
         for action in actions {
             if app.doc.bridge.shared.input_trace.enabled() {
@@ -167,6 +166,8 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
                 route_menu(app, ctx, &mut raw.events, action, text);
             }
         }
+        ordered::route(app, raw, false, text, composition);
+        protect_composition(&mut app.composing, raw, text);
         overlay::dismiss(&mut app.ui, &mut app.doc.sketch_entry, owner, raw, text);
         return;
     }
@@ -180,60 +181,11 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
         }
         route_menu(app, ctx, &mut raw.events, action, text);
     }
-    let mut commands = Vec::new();
-    let mut documents = Vec::new();
-    let mut tab_actions = Vec::new();
-    raw.events.retain(|event| {
-        if let Some(command) = history_shortcut(event, text || composition, raw.focused) {
-            commands.push(command);
-            return false;
-        }
-        if let egui::Event::Key {
-            key,
-            pressed: true,
-            modifiers,
-            repeat,
-            ..
-        } = event
-            && modifiers.command
-            && !composition
-        {
-            match key {
-                _ if raw.focused && document_shortcut(*key, *modifiers).is_some() => {
-                    if let Some(request) = document_shortcut(*key, *modifiers) {
-                        documents.push(request);
-                    }
-                    return false;
-                }
-                _ if raw.focused && tab_shortcut(*key, *modifiers).is_some() => {
-                    // A held Cmd+W must close one document, not every clean one.
-                    if !repeat {
-                        tab_actions.extend(tab_shortcut(*key, *modifiers));
-                    }
-                    return false;
-                }
-                egui::Key::Q => {
-                    app.close_prompt = true;
-                    return false;
-                }
-                _ => {}
-            }
-        }
-        true
-    });
-    for request in documents {
-        app.document_request(request);
-    }
-    for command in commands {
-        submit_history(app, command);
-    }
-    // Last: a same-frame Save or Undo belongs to the document it was typed in.
-    for action in tab_actions {
-        match action {
-            TabShortcut::Close => app.request_close_tab(),
-            TabShortcut::Cycle(step) => app.cycle_tab(step),
-        }
-    }
+    // Native menu actions arrive on their own queue, unordered against raw
+    // events, so they go first; raw shortcuts and tab switches then apply in
+    // event order, each to the document active at its position.
+    ordered::route(app, raw, true, text, composition);
+    protect_composition(&mut app.composing, raw, text);
     if app.doc.documents.confirm.is_some() {
         return;
     }

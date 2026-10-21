@@ -22,6 +22,7 @@ pub(crate) fn model(action: &Action) -> Value {
         Action::PreviewFinished { .. } => "PreviewFinished",
         Action::Confirm => "Confirm",
         Action::Cancel => "Cancel",
+        Action::Republish => "Republish",
         Action::CommitAccepted { .. } => "CommitAccepted",
         Action::CommitRejected { .. } => "CommitRejected",
         Action::CompletionUnavailable { .. } => "CompletionUnavailable",

@@ -252,6 +252,12 @@ impl crate::app::App {
             _ => crate::diagnostics::State::Succeeded,
         };
         let next = self.doc.documents.complete(&result);
+        let save_all = match &result {
+            Ok(Outcome::Cancelled) => Some(crate::documents::SaveAllFinished::Cancelled),
+            Ok(Outcome::Saved(_)) => Some(crate::documents::SaveAllFinished::Saved),
+            Err(_) => Some(crate::documents::SaveAllFinished::Failed),
+            _ => None,
+        };
         match result {
             Ok(Outcome::Cancelled) => {
                 self.doc.status = "File action cancelled".into();
@@ -300,6 +306,9 @@ impl crate::app::App {
         }
         if let Some(next) = next {
             self.launch_document(next);
+        }
+        if let Some(finished) = save_all {
+            self.save_all_finished(finished);
         }
     }
 }

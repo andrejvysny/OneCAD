@@ -68,6 +68,7 @@ impl Interaction {
             Action::PreviewFinished { tag, result } => self.preview_finished(tag, result),
             Action::Confirm => self.confirm(),
             Action::Cancel => self.cancel(),
+            Action::Republish => self.republish(),
             Action::CommitAccepted {
                 tag,
                 revision,
