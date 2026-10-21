@@ -17,6 +17,7 @@
 pub mod constraint;
 mod endpoint_tangency;
 pub mod entity;
+pub mod modify;
 pub mod plane;
 pub mod projection;
 

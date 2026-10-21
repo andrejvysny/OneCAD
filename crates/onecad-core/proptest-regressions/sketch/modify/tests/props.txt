@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f31630b9ddd722f698859b8bbc02fab2f35c0c48c345427e1bc2da9771952703 # shrinks to sc = Scene { kind: Line, a: (0.0, 0.0), b: (0.0, 4.940731383233123), segments: [((0.0, 0.0), (0.0, 0.0))], circles: [], flags: [false, false, false, false, false, false], pick: 0.47624936038247173, feet: [(0.5889040707175074, 0.0, LineEnd)] }
