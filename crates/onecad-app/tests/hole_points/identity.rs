@@ -69,15 +69,14 @@ async fn place(rt: &mut DocumentRuntime, list: &[(HolePointId, f64)]) -> usize {
         .needs_repair_count
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_chamfer_on_one_hole_never_moves_to_a_sibling() {
-    let Some(bin) = real_worker() else {
-        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
-        return;
-    };
-    let wm = spawn_worker(bin).await;
-    let mut rt = runtime_over(&wm);
-    let plate = build_plate(&mut rt, SKETCH_A, EXTRUDE_A, 0.0).await;
+/// Three Ø4 holes at y = 10/30/50 on plate A plus a Chamfer on hole 2's top
+/// rim, promoted exactly the way a viewport pick does. Returns the plate and
+/// the hole point ids.
+async fn seed_rim_chamfer(
+    rt: &mut DocumentRuntime,
+    wm: &WorkerManager,
+) -> (BodyId, Vec<HolePointId>) {
+    let plate = build_plate(rt, SKETCH_A, EXTRUDE_A, 0.0).await;
     let params = holes(
         plate,
         top(-10.0, 30.0),
@@ -85,12 +84,12 @@ async fn a_chamfer_on_one_hole_never_moves_to_a_sibling() {
         4.0,
     );
     let ids: Vec<HolePointId> = params.placements().iter().map(|p| p.id.unwrap()).collect();
-    add_op(&mut rt, hole_record(HOLE_A, params));
-    let report = clean_regen(&mut rt).await;
+    add_op(rt, hole_record(HOLE_A, params));
+    let report = clean_regen(rt).await;
     published(&report, "three holes");
 
     // Promote hole 2's top rim exactly the way a viewport pick does.
-    let rim_key = circles(&wm, plate)
+    let rim_key = circles(wm, plate)
         .await
         .into_iter()
         .find(|(c, r, _)| c.approx_eq(&top(-10.0, 50.0), 1e-6) && (r - RIM).abs() < 1e-6)
@@ -106,8 +105,8 @@ async fn a_chamfer_on_one_hole_never_moves_to_a_sibling() {
         .await
         .expect("promote hole 2 rim");
     let edge = ElementId::new(&promoted[0].element_id);
-    add_op(&mut rt, chamfer_record(plate, &edge, rim_at));
-    let snap = clean_regen(&mut rt).await;
+    add_op(rt, chamfer_record(plate, &edge, rim_at));
+    let snap = clean_regen(rt).await;
     assert_eq!(
         published(&snap, "chamfer")
             .repair_summary
@@ -116,28 +115,46 @@ async fn a_chamfer_on_one_hole_never_moves_to_a_sibling() {
     );
 
     // The frozen intent names the producer record and hole 2's point id.
-    let Some(Operation::Known(KnownOperation::Chamfer(chamfer))) = rt
-        .operation_record(RecordId(Uuid::from_u128(CHAMFER)))
-        .map(|r| r.op)
-    else {
-        panic!("stored chamfer");
-    };
-    let descriptor = &chamfer.edges[0]
-        .intent
-        .as_ref()
-        .expect("stamped intent")
-        .descriptor;
     assert_eq!(
-        descriptor["originSlot"],
+        stored_origin_slot(rt),
         serde_json::json!({
             "recordId": RecordId(Uuid::from_u128(HOLE_A)).to_string(),
             "slot": ids[2].to_string(),
         })
     );
     assert_eq!(
-        chamfered_rims(&wm, plate, &[10.0, 30.0, 50.0]).await,
+        chamfered_rims(wm, plate, &[10.0, 30.0, 50.0]).await,
         [false, false, true]
     );
+
+    (plate, ids)
+}
+
+/// The frozen `intent.descriptor.originSlot` of the stored Chamfer's edge ref.
+fn stored_origin_slot(rt: &DocumentRuntime) -> serde_json::Value {
+    let Some(Operation::Known(KnownOperation::Chamfer(chamfer))) = rt
+        .operation_record(RecordId(Uuid::from_u128(CHAMFER)))
+        .map(|r| r.op)
+    else {
+        panic!("stored chamfer");
+    };
+    chamfer.edges[0]
+        .intent
+        .as_ref()
+        .expect("stamped intent")
+        .descriptor["originSlot"]
+        .clone()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chamfer_on_one_hole_never_moves_to_a_sibling() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let (plate, ids) = seed_rim_chamfer(&mut rt, &wm).await;
 
     // (a) move points[0]: the chamfer stays on hole 2.
     assert_eq!(
@@ -176,6 +193,60 @@ async fn a_chamfer_on_one_hole_never_moves_to_a_sibling() {
     assert!(
         has_circle(&found, top(-10.0, 15.0), RIM),
         "the sibling rim is untouched"
+    );
+    wm.shutdown().await;
+}
+
+/// Identity after save → fresh worker → reopen: the rebuilt topology ledger
+/// plus `rebind_persisted_elements` (ResolveRefs with `originSlot`) must keep
+/// the Chamfer on hole 2, and a later point edit must still never hand it to
+/// a sibling.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slotted_chamfer_keeps_its_hole_after_reopen_on_a_fresh_worker() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let doc = tmp.path().join("slotted-chamfer.onecad");
+    let (plate, ids, slot) = {
+        let wm = spawn_worker(bin.clone()).await;
+        let mut rt = runtime_over(&wm);
+        let (plate, ids) = seed_rim_chamfer(&mut rt, &wm).await;
+        let slot = stored_origin_slot(&rt);
+        rt.save(&doc, save_meta()).expect("save");
+        wm.shutdown().await;
+        (plate, ids, slot)
+    };
+
+    let wm = spawn_worker(bin).await;
+    let mut rt = open_over(&wm, &doc);
+    let snap = clean_regen(&mut rt).await;
+    assert_eq!(
+        published(&snap, "reopen").repair_summary.needs_repair_count,
+        0
+    );
+    assert_eq!(feature_row(&rt, CHAMFER).status, FeatureStatus::Ok);
+    assert_eq!(stored_origin_slot(&rt), slot, "originSlot frozen verbatim");
+    assert_eq!(
+        chamfered_rims(&wm, plate, &[10.0, 30.0, 50.0]).await,
+        [false, false, true],
+        "reopen: the chamfer is on hole 2"
+    );
+    // A point edit on the reopened document: still hole 2, never a sibling.
+    assert_eq!(
+        place(&mut rt, &[(ids[0], 15.0), (ids[1], 30.0), (ids[2], 50.0)]).await,
+        0
+    );
+    assert_eq!(
+        chamfered_rims(&wm, plate, &[15.0, 30.0, 50.0]).await,
+        [false, false, true],
+        "reopen + edit: the chamfer stays on hole 2"
+    );
+    assert_eq!(
+        stored_origin_slot(&rt),
+        slot,
+        "originSlot unchanged by the edit"
     );
     wm.shutdown().await;
 }

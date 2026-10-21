@@ -10,7 +10,8 @@
 //! * `identity` — a Chamfer on one hole's rim, promoted through the real
 //!   `AcquireElementIds` path, stays on THAT hole across sibling moves and
 //!   removals, follows its own hole, and goes NeedsRepair when its hole is
-//!   removed — never a sibling.
+//!   removed — never a sibling; the same holds after save → fresh worker →
+//!   reopen.
 //!
 //! Gated on `ONECAD_WORKER_PATH` (else the dev-tree fallback); a missing binary
 //! skips cleanly unless `ONECAD_REQUIRE_WORKER=1`.
