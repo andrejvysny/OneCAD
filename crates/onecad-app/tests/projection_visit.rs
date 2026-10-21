@@ -16,8 +16,11 @@
 mod support;
 
 use onecad_app::api;
+use onecad_app::document_runtime::DocumentRuntime;
+use onecad_app::dto::EntityConstrainedState;
 use onecad_core::edit::{EditCommand, HistoryDirection, SketchEditOp};
-use onecad_core::ids::EntityId;
+use onecad_core::ids::{EntityId, SnapshotId};
+use onecad_core::io::container::SaveMeta;
 use onecad_core::math::Vec2;
 use onecad_core::sketch::{Sketch, SketchEntity};
 use support::{fixed_pins, fixture, max_u, point_uvs, Fixture};
@@ -65,6 +68,17 @@ async fn project_in_visit_resyncs_the_solver_and_follows_visit_and_document_hist
     assert_eq!(solve.sketch_id, fx.proj.to_string());
     assert_eq!(solve.dof, 0, "every projected point is pinned");
     let projected = fx.snapshot_sketch().await;
+    // Entry upserted an EMPTY sketch: only the resynced worker store can report
+    // a state for each projected entity.
+    for entity in projected.entities() {
+        let id = entity.id().to_string();
+        assert_eq!(
+            solve.entity_states.get(&id),
+            Some(&EntityConstrainedState::FullyConstrained),
+            "{id} reached the solver lane: {:?}",
+            solve.entity_states
+        );
+    }
     assert_eq!(
         projected.projections.len(),
         4,
@@ -119,52 +133,8 @@ async fn update_in_visit_refreshes_stale_rows_in_place() {
     let frozen = fx.snapshot_sketch().await;
     let head = fx.widen().await;
     assert_ne!(head, fx.snapshot, "the upstream edit moved the head");
-    let projector = fx.state.face_projection();
-    onecad_app::sketch_projection::refresh_projection_staleness(
-        &fx.state.runtime,
-        &projector,
-        &onecad_core::regen::CancelToken::new(),
-    )
-    .await;
-    let stale = {
-        let guard = fx.state.runtime.lock().await;
-        guard.as_ref().unwrap().projection_stale_entities(fx.proj)
-    };
-    assert_eq!(stale.len(), 3, "the u = 0 wall did not move");
     assert_eq!(fx.snapshot_sketch().await, frozen, "a projection is frozen");
-
-    fx.enter().await;
-    let receipt =
-        api::update_projection_with_completion(&fx.state, fx.host.clone(), fx.proj.to_string())
-            .await
-            .expect("updateProjection in the visit")
-            .result
-            .expect("receipt");
-    assert!(receipt.value.refusals.is_empty(), "{:?}", receipt.value);
-    assert_eq!(
-        receipt.value.snapshot_id, head.0,
-        "answered on the new head"
-    );
-    let replaced: Vec<EntityId> = receipt
-        .value
-        .entities
-        .iter()
-        .map(|e| e.entity_id.parse().unwrap())
-        .collect();
-    assert_eq!(replaced.len(), 3);
-    assert!(replaced.iter().all(|id| stale.contains(id)), "ids kept");
-    assert!(receipt.solve.is_some(), "the refresh resyncs SketchUpsert");
-    let refreshed = fx.snapshot_sketch().await;
-    assert!(
-        (max_u(&refreshed) - 44.0).abs() < 1e-6,
-        "follows the widened cap"
-    );
-    assert_eq!(locked(&refreshed), 8, "an update keeps the lock");
-    {
-        let guard = fx.state.runtime.lock().await;
-        let rt = guard.as_ref().unwrap();
-        assert!(rt.projection_stale_entities(fx.proj).is_empty(), "cleared");
-    }
+    let refreshed = refresh_in_visit(&fx, head).await;
 
     assert!(fx.history(HistoryDirection::Undo).await);
     assert_eq!(
@@ -333,6 +303,10 @@ async fn lane_head_and_visit_fences_refuse_loudly() {
         "{error}"
     );
 
+    drop(guard);
+    fx.enter().await;
+    let mut guard = fx.state.runtime.lock().await;
+    let rt = guard.as_mut().unwrap();
     let visit = rt.claim_projection_visit(fx.proj, None, "t").await.unwrap();
     rt.apply(EditCommand::SketchEdit {
         sketch: fx.base,
@@ -349,6 +323,138 @@ async fn lane_head_and_visit_fences_refuse_loudly() {
     );
     assert_eq!(fx.sketch(rt), before, "every refusal committed nothing");
     drop(guard);
+    fx.worker.shutdown().await;
+}
+
+/// Marks the rows the widened head moved stale, then refreshes them in a new
+/// visit: same entity ids, the widened geometry, the lock kept, stale cleared.
+async fn refresh_in_visit(fx: &Fixture, head: SnapshotId) -> Sketch {
+    let projector = fx.state.face_projection();
+    onecad_app::sketch_projection::refresh_projection_staleness(
+        &fx.state.runtime,
+        &projector,
+        &onecad_core::regen::CancelToken::new(),
+    )
+    .await;
+    let stale = {
+        let guard = fx.state.runtime.lock().await;
+        guard.as_ref().unwrap().projection_stale_entities(fx.proj)
+    };
+    assert_eq!(stale.len(), 3, "the u = 0 wall did not move");
+
+    fx.enter().await;
+    let receipt =
+        api::update_projection_with_completion(&fx.state, fx.host.clone(), fx.proj.to_string())
+            .await
+            .expect("updateProjection in the visit")
+            .result
+            .expect("receipt");
+    assert!(receipt.value.refusals.is_empty(), "{:?}", receipt.value);
+    assert_eq!(
+        receipt.value.snapshot_id, head.0,
+        "answered on the new head"
+    );
+    let replaced: Vec<EntityId> = receipt
+        .value
+        .entities
+        .iter()
+        .map(|e| e.entity_id.parse().unwrap())
+        .collect();
+    assert_eq!(replaced.len(), 3);
+    assert!(replaced.iter().all(|id| stale.contains(id)), "ids kept");
+    assert!(receipt.solve.is_some(), "the refresh resyncs SketchUpsert");
+    let refreshed = fx.snapshot_sketch().await;
+    assert!(
+        (max_u(&refreshed) - 44.0).abs() < 1e-6,
+        "follows the widened cap"
+    );
+    assert_eq!(locked(&refreshed), 8, "an update keeps the lock");
+    let guard = fx.state.runtime.lock().await;
+    let rt = guard.as_ref().unwrap();
+    assert!(rt.projection_stale_entities(fx.proj).is_empty(), "cleared");
+    refreshed
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_head_published_between_claim_and_commit_refuses() {
+    let Some(fx) = fixture(false).await else {
+        return;
+    };
+    let probe = || {
+        vec![SketchEditOp::AddEntity {
+            entity: SketchEntity::point(
+                EntityId::new(),
+                Vec2::new_unchecked(5.0, 5.0),
+                false,
+                false,
+            ),
+        }]
+    };
+    {
+        let guard = fx.state.runtime.lock().await;
+        let rt = guard.as_ref().unwrap();
+        let error = rt
+            .claim_projection_visit(fx.proj, Some(fx.snapshot), "t")
+            .await
+            .err()
+            .expect("no visit, no claim");
+        assert!(error.to_string().contains("no open edit visit"), "{error}");
+    }
+    fx.enter().await;
+    let before = fx.snapshot_sketch().await;
+    let mut guard = fx.state.runtime.lock().await;
+    let rt = guard.as_mut().unwrap();
+    let visit = rt
+        .claim_projection_visit(fx.proj, Some(fx.snapshot), "t")
+        .await
+        .unwrap();
+    let revision = rt.revision();
+    let head = support::published(rt).await;
+    assert_ne!(head, fx.snapshot, "a regen published a new head");
+    assert_eq!(rt.revision(), revision, "the revision fence cannot see it");
+    let error = rt
+        .commit_projection_visit(visit, probe(), "t")
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("changed while projecting"),
+        "{error}"
+    );
+    assert_eq!(fx.sketch(rt), before, "the refusal committed nothing");
+    drop(guard);
+    fx.worker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn in_visit_provenance_survives_save_and_reopen() {
+    let Some(fx) = fixture(false).await else {
+        return;
+    };
+    fx.enter().await;
+    project(&fx).await.result.expect("projected");
+    assert_eq!(fx.finish().await, 1);
+    let projected = fx.snapshot_sketch().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("projected.onecad");
+    {
+        let mut guard = fx.state.runtime.lock().await;
+        let rt = guard.as_mut().unwrap();
+        rt.save(&path, SaveMeta::default()).expect("save");
+    }
+    let (engine, meshes, solver) = fx.state.make_backend();
+    let mut reopened = DocumentRuntime::open(&path, engine, meshes, solver).expect("reopen");
+    support::published(&mut reopened).await;
+    assert_eq!(
+        fx.sketch(&reopened),
+        projected,
+        "ids, provenance and projectedHash round-trip"
+    );
+    *fx.state.runtime.lock().await = Some(reopened);
+
+    let head = fx.widen().await;
+    // The update matches the reopened rows by (source element, ordinal).
+    refresh_in_visit(&fx, head).await;
+    assert_eq!(fx.finish().await, 1);
     fx.worker.shutdown().await;
 }
 

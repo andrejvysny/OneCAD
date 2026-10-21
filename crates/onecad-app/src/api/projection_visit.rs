@@ -12,6 +12,7 @@
 use super::*;
 use crate::document_runtime::ProjectionVisit;
 use crate::dto::{DetachProjectionDto, ProjectToSketchDto, SketchProjectionReceipt};
+use onecad_core::edit::CommandOutcome;
 
 type ProjectionCompletion<T> = CommandCompletion<SketchProjectionReceipt<T>>;
 
@@ -29,7 +30,7 @@ pub async fn project_to_sketch_with_completion(
     let sketch = parse_sketch_id(&sketch_id)?;
     let (mode, addressed) = parse_projection_request(&mode, sources)?;
     let snapshot = SnapshotId(snapshot_id);
-    let (visit, promoted) = {
+    let (visit, promoted, projection) = {
         let mut guard = state.runtime.lock().await;
         let rt = guard
             .as_mut()
@@ -38,8 +39,13 @@ pub async fn project_to_sketch_with_completion(
             .claim_projection_visit(sketch, Some(snapshot), VERB)
             .await?;
         let promoted = promote_projection_picks(rt, snapshot, &addressed).await?;
-        (visit, promoted)
+        (visit, promoted, rt.projection())
     };
+    // Promotion dirties the document on its own; the host must see that even
+    // when the kernel query or the commit fence refuses below.
+    if !promoted.is_empty() {
+        let _ = app.emit(AppEvent::ProjectionUpdated(projection));
+    }
     let (planned, mut refusals) =
         plan_projection_sources(mode, &addressed, &promoted, &visit.sketch().projections)?;
     let mut value = ProjectToSketchDto {
@@ -113,29 +119,33 @@ pub async fn detach_projection_with_completion(
 ) -> Result<ProjectionCompletion<DetachProjectionDto>, ApiError> {
     const VERB: &str = "detachProjection";
     let sketch = parse_sketch_id(&sketch_id)?;
-    let visit = {
-        let guard = state.runtime.lock().await;
+    // One lock scope: the plan is pure, and an unlocked window would only let
+    // an unrelated regen publish or edit refuse a detach that reads neither.
+    let (solve, outcome, projection, value) = {
+        let mut guard = state.runtime.lock().await;
         let rt = guard
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| ApiError::NoDocument(VERB.into()))?;
-        rt.claim_projection_visit(sketch, None, VERB).await?
+        let visit = rt.claim_projection_visit(sketch, None, VERB).await?;
+        let targets = detach_targets(visit.sketch(), entity_ids)?;
+        let (ops, released) = sketch_projection::build_projection_detach(visit.sketch(), &targets);
+        let remaining = visit
+            .sketch()
+            .projections
+            .len()
+            .saturating_sub(targets.len())
+            .try_into()
+            .unwrap_or(u32::MAX);
+        let value = DetachProjectionDto {
+            sketch_id,
+            entity_ids: targets.iter().map(ToString::to_string).collect(),
+            released_constraints: released,
+            remaining,
+        };
+        let (solve, outcome) = commit_or_release(rt, visit, ops, VERB).await?;
+        (solve, outcome, rt.projection(), value)
     };
-    let targets = detach_targets(visit.sketch(), entity_ids)?;
-    let (ops, released) = sketch_projection::build_projection_detach(visit.sketch(), &targets);
-    let remaining = visit
-        .sketch()
-        .projections
-        .len()
-        .saturating_sub(targets.len())
-        .try_into()
-        .unwrap_or(u32::MAX);
-    let value = DetachProjectionDto {
-        sketch_id,
-        entity_ids: targets.iter().map(ToString::to_string).collect(),
-        released_constraints: released,
-        remaining,
-    };
-    complete_projection_visit(state, app, visit, ops, value, VERB).await
+    finish_projection_visit(state, app, solve, outcome, projection, value, VERB)
 }
 
 /// The fenced commit + resync, or a plain lane release when nothing changed.
@@ -152,14 +162,36 @@ async fn complete_projection_visit<T>(
         let rt = guard
             .as_mut()
             .ok_or_else(|| ApiError::NoDocument(verb.into()))?;
-        if ops.is_empty() {
-            drop(visit);
-            (None, None, rt.projection())
-        } else {
-            let (solve, outcome) = rt.commit_projection_visit(visit, ops, verb).await?;
-            (Some(solve), outcome, rt.projection())
-        }
+        let (solve, outcome) = commit_or_release(rt, visit, ops, verb).await?;
+        (solve, outcome, rt.projection())
     };
+    finish_projection_visit(state, app, solve, outcome, projection, value, verb)
+}
+
+async fn commit_or_release(
+    rt: &mut DocumentRuntime,
+    visit: ProjectionVisit,
+    ops: Vec<SketchEditOp>,
+    verb: &str,
+) -> Result<(Option<SketchUpsertDto>, Option<CommandOutcome>), ApiError> {
+    if ops.is_empty() {
+        drop(visit);
+        return Ok((None, None));
+    }
+    let (solve, outcome) = rt.commit_projection_visit(visit, ops, verb).await?;
+    Ok((Some(solve), outcome))
+}
+
+/// Events, regen scheduling and the receipt, after the runtime lock is gone.
+fn finish_projection_visit<T>(
+    state: &AppState,
+    app: HostContext,
+    solve: Option<SketchUpsertDto>,
+    outcome: Option<CommandOutcome>,
+    projection: DocumentProjection,
+    value: T,
+    verb: &str,
+) -> Result<ProjectionCompletion<T>, ApiError> {
     tracing::info!(
         "{verb}: committed={} regen={}",
         solve.is_some(),

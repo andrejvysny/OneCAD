@@ -14,7 +14,7 @@ pub struct ProjectionVisit {
     instance: Uuid,
     fencing: (DocumentRevision, WorkerEpoch),
     head: Option<SnapshotId>,
-    session: Option<Uuid>,
+    session: Uuid,
     _claim: Claim,
 }
 
@@ -37,9 +37,15 @@ impl DocumentRuntime {
     /// snapshot the caller's picks were taken against; a superseded one is
     /// refused here, and the head fence carries that verdict to the commit.
     ///
+    /// In-visit only: the commit is a visit step that Finish squashes. Outside
+    /// `sketch`'s own visit it would land between another visit's steps and
+    /// make that visit's Finish refuse as interleaved; the headless
+    /// projection services own the no-visit path.
+    ///
     /// # Errors
-    /// A loud refusal on a read-only document, an open drag, an in-flight
-    /// upsert, an unadopted worker epoch, a stale pick or an unknown sketch.
+    /// A loud refusal on a read-only document, no open edit visit on `sketch`,
+    /// an open drag, an in-flight upsert, an unadopted worker epoch, a stale
+    /// pick or an unknown sketch.
     pub async fn claim_projection_visit(
         &self,
         sketch: SketchId,
@@ -49,6 +55,11 @@ impl DocumentRuntime {
         if self.read_only {
             return Err(op_failed(format!("{verb}: read-only document")));
         }
+        let Some(session) = self.sketch_edit_token(sketch) else {
+            return Err(op_failed(format!(
+                "{verb}: sketch {sketch} has no open edit visit — enter the sketch first"
+            )));
+        };
         if self.has_active_gesture(sketch) {
             return Err(op_failed(format!(
                 "{verb}: sketch {sketch} has an active drag gesture — retry after pointer-up"
@@ -69,7 +80,7 @@ impl DocumentRuntime {
             instance: self.instance,
             fencing,
             head: self.head_snapshot_id(),
-            session: self.sketch_edit_token(sketch),
+            session,
             _claim: claim,
         })
     }
@@ -96,7 +107,7 @@ impl DocumentRuntime {
             || self.fencing.get() != visit.fencing
             || self.engine.current_epoch() != visit.fencing.1
             || self.head_snapshot_id() != visit.head
-            || self.sketch_edit_token(id) != visit.session
+            || self.sketch_edit_token(id) != Some(visit.session)
             || self.sketch_or_err(id, verb)? != visit.before
         {
             return Err(op_failed(format!(
