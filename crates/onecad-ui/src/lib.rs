@@ -49,6 +49,7 @@ mod navigation;
 mod navigation_cube;
 mod outcome;
 mod overlays;
+mod parameter_drag;
 mod parameter_ui;
 mod pill;
 mod profile_capture;

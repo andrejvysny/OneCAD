@@ -1,6 +1,10 @@
-use crate::NumericParameter;
+use crate::{parameter_set::DragOrigin, NumericParameter, ParameterKey, ParameterSet, Readiness};
 use onecad_core::{
-    document::{record::OperationRecord, refs::SketchRegionRef, variables::Scalar},
+    document::{
+        record::{Operation, OperationRecord},
+        refs::SketchRegionRef,
+        variables::Scalar,
+    },
     edit::EditCommand,
     ids::{RecordId, SketchId, SnapshotId},
 };
@@ -67,13 +71,43 @@ pub enum SessionPhase {
 #[derive(Clone, Debug)]
 pub struct ModelSession {
     pub tag: RequestTag,
+    /// Base operation: choices and placement live here; Valid fields override its slots.
     pub record: OperationRecord,
     pub editing_existing: bool,
-    pub parameter: NumericParameter,
+    pub params: ParameterSet,
+    /// Projection of the focused field, written only by the reducer. Undefined
+    /// (`""`/Pending) without focus; gate on `params.readiness()`.
     pub draft: String,
     pub draft_status: DraftStatus,
     pub preview: PreviewStatus,
     pub phase: SessionPhase,
+    /// Operation at begin; an unchanged existing edit closes without a command.
+    pub(crate) origin: Box<Operation>,
+    pub(crate) drag: Option<Box<DragOrigin>>,
+}
+
+impl ModelSession {
+    /// Focused scalar parameter.
+    pub fn parameter(&self) -> Option<NumericParameter> {
+        self.params.focus().map(ParameterKey::parameter)
+    }
+    /// Evaluated value of `key`; None while pending or invalid.
+    pub fn value(&self, key: impl Into<ParameterKey>) -> Option<f64> {
+        self.params.value(key.into())
+    }
+    /// Base with the evaluated field overrides, as placement handles see it.
+    pub fn effective_op(&self) -> Operation {
+        self.params.overlay(&self.record.op)
+    }
+    pub fn dragging(&self) -> bool {
+        self.drag.is_some()
+    }
+    pub fn ready(&self) -> bool {
+        self.phase == SessionPhase::Editing
+            && self.params.readiness() == Readiness::Ready
+            && (self.preview == PreviewStatus::Ready
+                || self.editing_existing && self.preview == PreviewStatus::UnavailableForEdit)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,7 +159,8 @@ pub enum Action {
     /// The host supplies a fresh record identity and complete promoted inputs.
     BeginOperation {
         record: Box<OperationRecord>,
-        parameter: NumericParameter,
+        fields: Vec<ParameterKey>,
+        focus: Option<ParameterKey>,
         gesture: u64,
         context: DocumentContext,
     },
@@ -140,7 +175,16 @@ pub enum Action {
         gesture: u64,
         context: DocumentContext,
     },
+    /// Typed text for the focused field.
     DraftChanged(String),
+    /// Typed text for one declared field; an open drag is committed first.
+    ParameterChanged {
+        key: ParameterKey,
+        text: String,
+    },
+    /// Moves the projected draft only; nothing is re-evaluated.
+    FocusParameter(ParameterKey),
+    ParameterDrag(DragPhase),
     ExtrudeModeChanged(onecad_core::document::record::BooleanMode),
     /// Host admits only visible, healthy bodies from this accepted document context.
     ExtrudeTargetChanged {
@@ -183,6 +227,21 @@ pub enum Action {
         tag: RequestTag,
         completion: Box<RegenFinished>,
     },
+}
+
+/// Pointer drags author drafts under a reducer-owned snapshot; only Confirm authors history.
+#[derive(Debug)]
+pub enum DragPhase {
+    /// Snapshot the session; an already open drag is committed first.
+    Begin,
+    /// Drag-sourced text; never commits the open drag.
+    Update {
+        key: ParameterKey,
+        text: String,
+    },
+    Commit,
+    /// Restore the snapshot exactly, expressions included.
+    Cancel,
 }
 
 #[derive(Debug)]

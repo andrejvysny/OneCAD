@@ -188,17 +188,40 @@ impl NumericParameter {
             Self::TransformRotationAngle => "TransformBody.rotate.angleDeg",
         }
     }
+    /// Widget identity salt; the Extrude distance keeps its established id.
+    pub fn salt(self) -> &'static str {
+        match self {
+            Self::ExtrudeDistance => "extrude-distance",
+            other => other.field_name(),
+        }
+    }
     pub(crate) fn current_scalar(self, operation: &Operation) -> Result<Scalar, String> {
         let mut copy = operation.clone();
         Ok(self.slot(&mut copy)?.clone())
     }
+    /// Present slot whatever the mode; absent optional slots are not registered.
+    pub(crate) fn registered_scalar(self, operation: &Operation) -> Result<Scalar, String> {
+        let mut copy = operation.clone();
+        Ok(self.registered_slot(&mut copy)?.clone())
+    }
+    pub(crate) fn is_active(self, operation: &Operation) -> bool {
+        matches!(operation, Operation::Known(known) if self.active(known))
+    }
+    /// Writes an already validated value into the active slot.
+    pub(crate) fn write(self, operation: &mut Operation, scalar: Scalar) -> Result<(), String> {
+        *self.slot(operation)? = scalar;
+        Ok(())
+    }
     fn slot(self, operation: &mut Operation) -> Result<&mut Scalar, String> {
+        if !self.is_active(operation) {
+            return Err(self.unsupported());
+        }
+        self.registered_slot(operation)
+    }
+    fn registered_slot(self, operation: &mut Operation) -> Result<&mut Scalar, String> {
         let Operation::Known(known) = operation else {
             return Err(self.unsupported());
         };
-        if !self.active(known) {
-            return Err(self.unsupported());
-        }
         let mut matching = known
             .scalars_mut()
             .into_iter()
@@ -211,7 +234,7 @@ impl NumericParameter {
         }
         Ok(scalar)
     }
-    fn unsupported(self) -> String {
+    pub(crate) fn unsupported(self) -> String {
         format!(
             "{} is not available for this operation or mode",
             self.label()
@@ -246,7 +269,7 @@ impl NumericParameter {
             _ => true,
         }
     }
-    fn validate_value(self, operation: &Operation, value: f64) -> Result<(), String> {
+    pub(crate) fn validate_value(self, operation: &Operation, value: f64) -> Result<(), String> {
         if !value.is_finite() {
             return Err("Enter a finite value".into());
         }
@@ -283,7 +306,7 @@ impl NumericParameter {
 // circular clampCircularAngle [1,360], and holeMachine dim 0.01 mm. Reject rather
 // than clamp, preserving the expression. Shell's 0.1 floor is drag-only: its
 // typed path has no such floor and keeps authoritative worker failure behavior.
-fn validate_operation(operation: &Operation) -> Result<(), String> {
+pub(crate) fn validate_operation(operation: &Operation) -> Result<(), String> {
     match operation {
         Operation::Known(KnownOperation::Extrude(p)) => p.validate(),
         Operation::Known(KnownOperation::Revolve(p)) => p.validate(),

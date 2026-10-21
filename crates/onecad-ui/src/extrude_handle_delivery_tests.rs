@@ -160,14 +160,18 @@ async fn handle_pointer_gone_focus_loss_and_escape_restore_without_history() {
             !host.app.doc.extrude_handle.active(),
             "condition {condition}"
         );
-        if condition < 2 {
-            valid(&mut host, AUTHORED, 12.0).await;
-        } else {
-            // KNOWN GAP (ONECAD-324, input.rs/pill.rs owner): the brief wants Escape
-            // to cancel only the drag and restore AUTHORED, but input.rs routes it to
-            // pill::cancel_or_deselect first, which ends the whole session. Pinned
-            // as observed so the fix is noticed; not the intended outcome.
-            assert!(host.app.doc.interaction.tool.is_none());
+        // Escape included: the first one cancels only the drag.
+        assert!(
+            host.app.doc.interaction.tool.is_some(),
+            "condition {condition}"
+        );
+        valid(&mut host, AUTHORED, 12.0).await;
+        if condition == 2 {
+            host.ui(vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+            assert!(
+                host.app.doc.interaction.tool.is_none(),
+                "the second Escape cancels the tool"
+            );
         }
         assert_eq!(undo_depth(&host), undo, "condition {condition}");
     }
@@ -267,30 +271,212 @@ async fn handle_release_over_chrome_ends_drag_at_last_motion() {
         egui::Event::PointerMoved(card),
     ]);
     let dragged = draft(&host);
-    host.ui(vec![button(card, false)]);
+    let value: f64 = dragged.parse().unwrap();
+    // Off the axis and away from the last motion: tracking it would change the value.
+    let chrome = crate::layout::chrome(host.screen(), &host.app.ui).feature_card;
+    let release = card + egui::vec2(0.0, -chrome.height() / 4.0);
+    assert!(chrome.contains(release));
+    let (last, off) = (axis.along(&host, card), axis.along(&host, release));
+    assert!((off - last).abs() > 1.0, "release probe {last} vs {off}");
+    host.ui(vec![button(release, false)]);
     assert!(!host.app.doc.extrude_handle.active());
     assert_eq!(draft(&host), dragged, "release adds no motion of its own");
-    valid(&mut host, &dragged, dragged.parse().unwrap()).await;
+    valid(&mut host, &dragged, value).await;
+    assert_draft(&host, &dragged, value);
     confirm(&mut host).await;
     assert_eq!(undo_depth(&host), undo + 1);
     host.stop().await;
 }
 
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic native input is not physical acceptance"]
+async fn handle_redrag_after_equal_value_release_keeps_expression() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut host, axis) = extruding(root.path(), AUTHORED, 12.0).await;
+    let undo = undo_depth(&host);
+    let (tip, far) = (axis.at(&host, 12.0), axis.at(&host, 20.0));
+    host.ui(vec![
+        egui::Event::PointerMoved(tip),
+        button(tip, true),
+        egui::Event::PointerMoved(far),
+    ]);
+    assert_eq!(draft(&host), "20");
+    // Release back at the authored value restores it; the re-press starts there.
+    host.ui(vec![
+        egui::Event::PointerMoved(tip),
+        button(tip, false),
+        button(tip, true),
+        egui::Event::PointerMoved(far),
+    ]);
+    assert!(host.app.doc.extrude_handle.active());
+    assert_eq!(draft(&host), "20");
+    host.ui(vec![egui::Event::PointerMoved(tip), button(tip, false)]);
+    assert!(!host.app.doc.extrude_handle.active());
+    valid(&mut host, AUTHORED, 12.0).await;
+    assert_eq!(undo_depth(&host), undo);
+    host.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic native input is not physical acceptance"]
+async fn handle_press_after_pointer_loss_hits_the_restored_tip_only() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut host, axis) = extruding(root.path(), AUTHORED, 12.0).await;
+    let undo = undo_depth(&host);
+    let tip = axis.at(&host, 12.0);
+    let (lost, further) = (axis.at(&host, 26.0), axis.at(&host, 30.0));
+    host.ui(vec![
+        egui::Event::PointerMoved(tip),
+        button(tip, true),
+        egui::Event::PointerMoved(lost),
+    ]);
+    assert_eq!(draft(&host), "26");
+    // The loss restores 12, so a press where the dragged tip was claims nothing.
+    host.ui(vec![
+        egui::Event::PointerGone,
+        egui::Event::PointerMoved(lost),
+        button(lost, true),
+        egui::Event::PointerMoved(further),
+    ]);
+    assert!(!host.app.doc.extrude_handle.active());
+    host.ui(vec![egui::Event::PointerMoved(tip), button(tip, false)]);
+    assert!(!host.app.doc.extrude_handle.active());
+    valid(&mut host, AUTHORED, 12.0).await;
+    assert_eq!(undo_depth(&host), undo);
+    host.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic native input is not physical acceptance"]
+async fn handle_tab_switch_mid_drag_restores_authored_value() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut host, axis) = extruding(root.path(), AUTHORED, 12.0).await;
+    let undo = undo_depth(&host);
+    let (tip, far) = (axis.at(&host, 12.0), axis.at(&host, 20.0));
+    host.ui(vec![
+        egui::Event::PointerMoved(tip),
+        button(tip, true),
+        egui::Event::PointerMoved(far),
+    ]);
+    assert_eq!(draft(&host), "20");
+    let tab = host.app.doc.tab;
+    host.app.open_tab().unwrap();
+    host.app.activate_tab(tab);
+    assert!(!host.app.doc.extrude_handle.active());
+    assert_eq!(draft(&host), AUTHORED, "deactivation restored the draft");
+    host.ui(vec![button(far, false)]);
+    valid(&mut host, AUTHORED, 12.0).await;
+    assert_eq!(undo_depth(&host), undo);
+    confirm(&mut host).await;
+    assert_eq!(undo_depth(&host), undo + 1);
+    host.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic native input is not physical acceptance"]
+async fn handle_release_then_escape_in_one_batch_reaches_the_tool() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut host, axis) = extruding(root.path(), AUTHORED, 12.0).await;
+    let undo = undo_depth(&host);
+    let (tip, far) = (axis.at(&host, 12.0), axis.at(&host, 20.0));
+    host.ui(vec![
+        egui::Event::PointerMoved(tip),
+        button(tip, true),
+        egui::Event::PointerMoved(far),
+    ]);
+    assert_eq!(draft(&host), "20");
+    // The release ends the capture first, so this Escape belongs to the tool.
+    host.ui(vec![
+        button(far, false),
+        key(egui::Key::Escape, egui::Modifiers::NONE),
+    ]);
+    assert!(!host.app.doc.extrude_handle.active());
+    assert!(
+        host.app.doc.interaction.tool.is_none(),
+        "an Escape after the release is not swallowed as a drag cancel"
+    );
+    assert_eq!(undo_depth(&host), undo);
+    host.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic native input is not physical acceptance"]
+async fn handle_camera_change_mid_drag_restores_authored_value() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut host, axis) = extruding(root.path(), AUTHORED, 12.0).await;
+    let undo = undo_depth(&host);
+    let (tip, far) = (axis.at(&host, 12.0), axis.at(&host, 20.0));
+    host.ui(vec![
+        egui::Event::PointerMoved(tip),
+        button(tip, true),
+        egui::Event::PointerMoved(far),
+    ]);
+    assert_eq!(draft(&host), "20");
+    host.app.doc.camera.offset *= 1.25;
+    host.redraw();
+    assert!(!host.app.doc.extrude_handle.active());
+    assert_eq!(
+        draft(&host),
+        AUTHORED,
+        "a view change ends the drag as lost"
+    );
+    host.ui(vec![button(far, false)]);
+    valid(&mut host, AUTHORED, 12.0).await;
+    assert_eq!(undo_depth(&host), undo);
+    host.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic native input is not physical acceptance"]
+async fn handle_drag_begun_while_file_action_runs_still_restores_on_escape() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut host, axis) = extruding(root.path(), AUTHORED, 12.0).await;
+    let undo = undo_depth(&host);
+    let tip = axis.at(&host, 12.0);
+    host.app.doc.documents.running = true;
+    host.ui(vec![
+        egui::Event::PointerMoved(tip),
+        button(tip, true),
+        egui::Event::PointerMoved(axis.at(&host, 20.0)),
+    ]);
+    assert!(host.app.doc.extrude_handle.active());
+    assert_eq!(draft(&host), AUTHORED, "authoring is refused while it runs");
+    host.app.doc.documents.running = false;
+    host.ui(vec![egui::Event::PointerMoved(axis.at(&host, 25.0))]);
+    assert_eq!(draft(&host), "25");
+    assert!(
+        host.app.doc.interaction.tool.as_ref().unwrap().dragging(),
+        "the first accepted Begin opened the reducer drag"
+    );
+    host.ui(vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    assert!(!host.app.doc.extrude_handle.active());
+    assert!(host.app.doc.interaction.tool.is_some());
+    valid(&mut host, AUTHORED, 12.0).await;
+    assert_eq!(undo_depth(&host), undo);
+    host.stop().await;
+}
+
 /// World axis of the extrude handle for screen projections.
-struct Axis {
+pub(super) struct Axis {
     base: DVec3,
     normal: DVec3,
 }
 
 impl Axis {
-    fn at(&self, host: &Host, distance: f64) -> egui::Pos2 {
+    pub(super) fn at(&self, host: &Host, distance: f64) -> egui::Pos2 {
         let view = host.app.doc.view.unwrap();
         let rect = crate::layout::chrome(host.screen(), &host.app.ui).viewport;
         crate::gizmo::project(&view, rect, self.base + self.normal * distance).unwrap()
     }
+
+    fn along(&self, host: &Host, pos: egui::Pos2) -> f64 {
+        let view = host.app.doc.view.unwrap();
+        let rect = crate::layout::chrome(host.screen(), &host.app.ui).viewport;
+        crate::gizmo::along(&view, rect, pos, self.base, self.normal).unwrap()
+    }
 }
 
-async fn extruding(root: &std::path::Path, draft: &str, value: f64) -> (Host, Axis) {
+pub(super) async fn extruding(root: &std::path::Path, draft: &str, value: f64) -> (Host, Axis) {
     let mut host = Host::new(root).await;
     host.control("Rectangle");
     host.xy(0.0, 0.0);
@@ -354,7 +540,7 @@ async fn extruding(root: &std::path::Path, draft: &str, value: f64) -> (Host, Ax
     (host, axis)
 }
 
-async fn valid(host: &mut Host, text: &str, value: f64) {
+pub(super) async fn valid(host: &mut Host, text: &str, value: f64) {
     pump_until(&mut host.app, &host.context, &mut host.frame, |app| {
         app.doc.interaction.tool.as_ref().is_some_and(|tool| {
             tool.draft == text
@@ -366,7 +552,7 @@ async fn valid(host: &mut Host, text: &str, value: f64) {
     host.redraw();
 }
 
-async fn confirm(host: &mut Host) {
+pub(super) async fn confirm(host: &mut Host) {
     host.app.dispatch(Action::Confirm);
     pump_until(&mut host.app, &host.context, &mut host.frame, |app| {
         matches!(
@@ -380,7 +566,7 @@ async fn confirm(host: &mut Host) {
     .await;
 }
 
-fn draft(host: &Host) -> String {
+pub(super) fn draft(host: &Host) -> String {
     host.app
         .doc
         .interaction
@@ -405,6 +591,6 @@ fn assert_draft(host: &Host, text: &str, value: f64) {
     );
 }
 
-fn undo_depth(host: &Host) -> usize {
+pub(super) fn undo_depth(host: &Host) -> usize {
     host.app.doc.display.as_ref().unwrap().projection.undo_depth
 }

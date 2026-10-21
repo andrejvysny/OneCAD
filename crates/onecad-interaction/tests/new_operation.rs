@@ -57,7 +57,8 @@ fn begin_new(
 ) -> Vec<Effect> {
     state.dispatch(Action::BeginOperation {
         record: Box::new(record),
-        parameter,
+        fields: vec![parameter.into()],
+        focus: Some(parameter.into()),
         gesture: 100,
         context: context(),
     })
@@ -243,7 +244,8 @@ fn stale_context_cancellation_and_old_preview_result_do_not_restart_new_feature(
     assert!(state
         .dispatch(Action::BeginOperation {
             record: Box::new(before.clone()),
-            parameter,
+            fields: vec![parameter.into()],
+            focus: Some(parameter.into()),
             gesture: 100,
             context: stale
         })

@@ -43,7 +43,8 @@ fn begin(record: OperationRecord, context: DocumentContext) -> Interaction {
     state.dispatch(Action::ContextChanged(Some(context.clone())));
     state.dispatch(Action::BeginOperation {
         record: Box::new(record),
-        parameter: NumericParameter::TransformTranslation(ParameterAxis::X),
+        fields: vec![NumericParameter::TransformTranslation(ParameterAxis::X).into()],
+        focus: Some(NumericParameter::TransformTranslation(ParameterAxis::X).into()),
         gesture: 12,
         context,
     });

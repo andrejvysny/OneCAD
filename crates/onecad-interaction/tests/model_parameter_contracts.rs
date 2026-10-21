@@ -26,7 +26,8 @@ fn typed_authoring_bounds_refuse_without_clamping_or_committing() {
                     .any(|d| d.parameter == parameter)
             })
             .unwrap();
-        let (mut state, tag) = begin(before.clone(), parameter);
+        let (mut state, _) = begin(before.clone(), parameter);
+        let tag = typed(&mut state, &value.to_string());
         evaluate(&mut state, tag, parameter.site(), value);
         assert!(
             matches!(
@@ -106,7 +107,8 @@ fn optional_and_mode_inactive_parameters_are_explicitly_unsupported() {
 #[test]
 fn core_candidate_validation_rejects_cross_field_hole_and_transform_limits() {
     let hole = record(KnownOperation::Hole(hole(BodyId::new())));
-    let (mut state, tag) = begin(hole.clone(), NumericParameter::HoleThreadPitch);
+    let (mut state, _) = begin(hole.clone(), NumericParameter::HoleThreadPitch);
+    let tag = typed(&mut state, "6");
     evaluate(&mut state, tag, "length", 6.0);
     assert!(matches!(
         state.tool.as_ref().unwrap().draft_status,
@@ -117,7 +119,8 @@ fn core_candidate_validation_rejects_cross_field_hole_and_transform_limits() {
         .into_iter()
         .find(|op| matches!(op,KnownOperation::Hole(p) if p.hole_type==HoleType::Counterbore))
         .unwrap();
-    let (mut state, tag) = begin(record(op), NumericParameter::HoleDiameter);
+    let (mut state, _) = begin(record(op), NumericParameter::HoleDiameter);
+    let tag = typed(&mut state, "10");
     evaluate(&mut state, tag, "length", 10.0);
     assert!(matches!(
         state.tool.as_ref().unwrap().draft_status,
@@ -172,7 +175,8 @@ fn second_extrude_leg_preserves_first_leg_and_disables_unproven_draft_mode() {
     };
     assert_eq!(p.distance.value, 10.0);
     assert_eq!(p.distance2.value, 12.0);
-    let (mut state, tag) = begin(before, NumericParameter::ExtrudeSecondDistance);
+    let (mut state, _) = begin(before, NumericParameter::ExtrudeSecondDistance);
+    let tag = typed(&mut state, "-3");
     evaluate(&mut state, tag, "length", -3.0);
     assert!(matches!(
         state.tool.unwrap().draft_status,
@@ -201,10 +205,11 @@ fn inactive_draft_and_through_all_hole_depth_never_appear_as_edit_controls() {
 #[test]
 fn draft_angle_and_rotation_axis_use_their_own_validation_sites() {
     let (initial, _) = support::started();
-    let (mut state, tag) = begin(
+    let (mut state, _) = begin(
         initial.tool.unwrap().record,
         NumericParameter::ExtrudeDraftAngle,
     );
+    let tag = typed(&mut state, "90");
     evaluate(&mut state, tag, "angle", 90.0);
     assert!(matches!(
         state.tool.unwrap().draft_status,
@@ -217,7 +222,8 @@ fn draft_angle_and_rotation_axis_use_their_own_validation_sites() {
     if let KnownOperation::TransformBody(p) = &mut op {
         p.rotate.axis = onecad_core::math::Vec3::new_unchecked(0.0, 0.0, 0.0);
     }
-    let (mut state, tag) = begin(record(op), NumericParameter::TransformRotationAngle);
+    let (mut state, _) = begin(record(op), NumericParameter::TransformRotationAngle);
+    let tag = typed(&mut state, "45");
     evaluate(&mut state, tag, "angle", 45.0);
     assert!(matches!(
         state.tool.unwrap().draft_status,

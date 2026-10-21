@@ -186,6 +186,17 @@ pub fn begin(record: OperationRecord, parameter: NumericParameter) -> (Interacti
         .unwrap();
     (state, tag)
 }
+/// Types `text` into the focused field; untouched authored text never authors a change.
+pub fn typed(state: &mut Interaction, text: &str) -> RequestTag {
+    state
+        .dispatch(Action::DraftChanged(text.into()))
+        .into_iter()
+        .find_map(|e| match e {
+            Effect::EvaluateExpression { tag, .. } => Some(tag),
+            _ => None,
+        })
+        .unwrap()
+}
 pub fn evaluate(
     state: &mut Interaction,
     tag: RequestTag,
@@ -262,7 +273,8 @@ pub fn accepted_filleted_edit(defer: bool) -> (Interaction, RequestTag, RegenFin
         .into_iter()
         .find(|op| matches!(op, KnownOperation::Fillet(_)))
         .unwrap();
-    let (mut state, tag) = begin(record(op), NumericParameter::FilletRadius);
+    let (mut state, _) = begin(record(op), NumericParameter::FilletRadius);
+    let tag = typed(&mut state, "4");
     evaluate(&mut state, tag.clone(), "length", 4.0);
     assert_eq!(
         state

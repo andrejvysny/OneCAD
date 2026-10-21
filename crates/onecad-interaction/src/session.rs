@@ -43,16 +43,18 @@ impl Interaction {
             "Extrude",
             Operation::Known(KnownOperation::Extrude(params)),
         );
-        self.begin_operation(record, NumericParameter::ExtrudeDistance, gesture)
+        let distance = ParameterKey::from(NumericParameter::ExtrudeDistance);
+        self.begin_operation(record, vec![distance], Some(distance), gesture)
     }
 
     pub(crate) fn begin_operation(
         &mut self,
         record: OperationRecord,
-        parameter: NumericParameter,
+        fields: Vec<ParameterKey>,
+        focus: Option<ParameterKey>,
         gesture: u64,
     ) -> Vec<Effect> {
-        self.start(record, parameter, gesture, false)
+        self.start(record, &fields, focus, gesture, false)
     }
 
     pub(crate) fn begin_edit(&mut self, record: OperationRecord, gesture: u64) -> Vec<Effect> {
@@ -65,13 +67,15 @@ impl Interaction {
         parameter: NumericParameter,
         gesture: u64,
     ) -> Vec<Effect> {
-        self.start(record, parameter, gesture, true)
+        let fields = declared_keys(&record.op);
+        self.start(record, &fields, Some(parameter.into()), gesture, true)
     }
 
     fn start(
         &mut self,
         record: OperationRecord,
-        parameter: NumericParameter,
+        fields: &[ParameterKey],
+        focus: Option<ParameterKey>,
         gesture: u64,
         editing_existing: bool,
     ) -> Vec<Effect> {
@@ -86,8 +90,8 @@ impl Interaction {
         let Some(context) = self.context.clone() else {
             return Vec::new();
         };
-        let draft = match initial_draft(&record, parameter, &context, editing_existing) {
-            Ok(draft) => draft,
+        let params = match declare(&record, fields, focus, &context, editing_existing) {
+            Ok(params) => params,
             Err(message) => {
                 let effects = self.cancel();
                 self.status = CommitStatus::Rejected(message);
@@ -95,103 +99,86 @@ impl Interaction {
             }
         };
         let mut effects = self.cancel();
-        self.tool = Some(ModelSession {
+        let mut tool = ModelSession {
             tag: RequestTag {
                 context,
                 record_id: record.record_id,
                 gesture,
                 sequence: self.sequence,
             },
+            origin: Box::new(record.op.clone()),
             record,
             editing_existing,
-            parameter,
+            params,
             draft: String::new(),
             draft_status: DraftStatus::Pending,
             preview: PreviewStatus::Empty,
             phase: SessionPhase::Editing,
-        });
+            drag: None,
+        };
+        if let Some(field) = focus.and_then(|key| tool.params.field_mut(key)) {
+            field.status = FieldStatus::Pending;
+        }
+        self.tool = Some(tool);
         self.status = CommitStatus::Idle;
         self.deferred_completion = None;
-        effects.extend(self.change_draft(draft));
+        effects.extend(self.changed(focus));
         effects
     }
 
+    /// Typed text for the focused field.
     pub(crate) fn change_draft(&mut self, draft: String) -> Vec<Effect> {
-        let Some(tool) = self
-            .tool
-            .as_mut()
-            .filter(|tool| tool.phase == SessionPhase::Editing)
-        else {
+        let Some(key) = self.tool.as_ref().and_then(|tool| tool.params.focus()) else {
             return Vec::new();
         };
-        let Some(sequence) = self.sequence.checked_add(1) else {
-            tool.draft_status = DraftStatus::Invalid("Interaction sequence exhausted".into());
-            return vec![Effect::ClearPreview {
-                gesture: tool.tag.gesture,
-            }];
-        };
-        self.sequence = sequence;
-        tool.tag.sequence = sequence;
-        tool.draft = draft.clone();
-        tool.draft_status = DraftStatus::Pending;
-        tool.preview = PreviewStatus::Empty;
-        vec![
-            Effect::ClearPreview {
-                gesture: tool.tag.gesture,
-            },
-            Effect::EvaluateExpression {
-                tag: tool.tag.clone(),
-                expression: draft,
-                site: tool.parameter.site(),
-            },
-        ]
+        self.change_parameter(key, draft)
     }
 
     /// Only an editing tool with a draft has anything to re-evaluate; a commit in
     /// flight is not a candidate and is never re-sent.
     pub(crate) fn republish(&mut self) -> Vec<Effect> {
-        let Some(tool) = self
+        if self
             .tool
             .as_ref()
-            .filter(|tool| tool.phase == SessionPhase::Editing && !tool.draft.is_empty())
-        else {
+            .filter(|tool| tool.phase == SessionPhase::Editing)
+            .is_none_or(|tool| tool.draft.is_empty())
+        {
             return Vec::new();
-        };
-        let draft = tool.draft.clone();
-        self.change_draft(draft)
+        }
+        self.refresh()
     }
 
     pub(crate) fn confirm(&mut self) -> Vec<Effect> {
-        let Some(tool) = self
-            .tool
-            .as_mut()
-            .filter(|tool| tool.phase == SessionPhase::Editing)
-        else {
+        let Some(tool) = self.tool.as_mut().filter(|tool| tool.ready()) else {
             return Vec::new();
         };
-        let DraftStatus::Valid(scalar) = &tool.draft_status else {
-            return Vec::new();
+        let operation = match tool.params.candidate(&tool.record.op) {
+            Ok(operation) => operation,
+            Err(error) => {
+                tool.params.op_error = Some(error);
+                return Vec::new();
+            }
         };
-        if !tool.editing_existing && tool.preview != PreviewStatus::Ready {
-            return Vec::new();
-        }
-        let mut operation = tool.record.op.clone();
-        if let Err(message) = tool.parameter.apply(&mut operation, scalar.clone()) {
-            tool.draft_status = DraftStatus::Invalid(message);
-            return Vec::new();
-        }
         if let Err(message) = crate::extrude::validate_target(&operation) {
             tool.preview = PreviewStatus::Failed(message);
             return Vec::new();
         }
+        let clear = Effect::ClearPreview {
+            gesture: tool.tag.gesture,
+        };
+        if tool.editing_existing && operation == *tool.origin {
+            // Nothing changed: no command, no history entry, no revision.
+            self.tool = None;
+            self.status = CommitStatus::Idle;
+            return vec![clear];
+        }
+        tool.drag = None;
         tool.record.op = operation;
         let (command, hide_sketch) = commit_command(tool);
         tool.phase = SessionPhase::Committing;
         self.status = CommitStatus::Pending(tool.tag.clone());
         vec![
-            Effect::ClearPreview {
-                gesture: tool.tag.gesture,
-            },
+            clear,
             Effect::ApplyOperation {
                 tag: tool.tag.clone(),
                 command: Box::new(command),
@@ -215,20 +202,20 @@ impl Interaction {
     }
 }
 
-fn initial_draft(
+fn declare(
     record: &OperationRecord,
-    parameter: NumericParameter,
+    fields: &[ParameterKey],
+    focus: Option<ParameterKey>,
     context: &DocumentContext,
     editing_existing: bool,
-) -> Result<String, String> {
+) -> Result<ParameterSet, String> {
     if context.document_id.is_empty() || context.runtime_session.is_empty() {
         return Err("Document context is incomplete".into());
     }
     if !editing_existing {
-        validate_creation(record, parameter)?;
+        validate_creation(record, fields)?;
     }
-    let scalar = parameter.current_scalar(&record.op)?;
-    Ok(scalar.expr.unwrap_or_else(|| scalar.value.to_string()))
+    ParameterSet::declare(&record.op, fields, focus)
 }
 
 fn commit_command(tool: &ModelSession) -> (EditCommand, Option<onecad_core::ids::SketchId>) {
@@ -259,7 +246,7 @@ pub(crate) fn profile_sketch(operation: &Operation) -> Option<onecad_core::ids::
     }
 }
 
-fn validate_creation(record: &OperationRecord, parameter: NumericParameter) -> Result<(), String> {
+fn validate_creation(record: &OperationRecord, fields: &[ParameterKey]) -> Result<(), String> {
     let Operation::Known(operation) = &record.op else {
         return Err("Unknown operations cannot start native authoring".into());
     };
@@ -272,9 +259,12 @@ fn validate_creation(record: &OperationRecord, parameter: NumericParameter) -> R
         return Err("New TransformBody inputs must match its target bodies".into());
     }
     validate_bindings(operation)?;
-    let scalar = parameter.current_scalar(&record.op)?;
-    let mut candidate = record.op.clone();
-    parameter.apply(&mut candidate, scalar)?;
+    for key in fields {
+        let parameter = key.parameter();
+        let scalar = parameter.current_scalar(&record.op)?;
+        let mut candidate = record.op.clone();
+        parameter.apply(&mut candidate, scalar)?;
+    }
     let mut checked = operation.clone();
     if checked
         .scalars_mut()

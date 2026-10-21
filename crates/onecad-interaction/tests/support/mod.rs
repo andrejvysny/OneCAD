@@ -133,10 +133,12 @@ pub fn editing() -> (Interaction, RequestTag) {
         params.draft_angle_deg.value = 2.5;
     }
     state.dispatch(Action::Cancel);
-    let tag = evaluation_tag(&state.dispatch(Action::BeginEdit {
+    evaluation_tag(&state.dispatch(Action::BeginEdit {
         record: Box::new(record),
         gesture: 10,
         context: context(),
     }));
+    // Untouched authored text is a no-op edit; a real change authors a command.
+    let tag = evaluation_tag(&state.dispatch(Action::DraftChanged("8".into())));
     (state, tag)
 }

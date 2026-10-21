@@ -40,6 +40,10 @@ pub struct Triad {
 #[derive(Default)]
 pub struct GizmoResponse {
     pub drag: Option<Drag>,
+    /// A capture released earlier in the same batch, before `drag` was pressed.
+    pub finished: Option<Drag>,
+    /// A capture ended without a release (pointer, focus, view or chrome loss).
+    pub cancelled: bool,
     pub owns_pointer: bool,
 }
 #[derive(Default)]
@@ -77,15 +81,19 @@ impl Gizmo {
         step: f64,
         theme: &Theme,
     ) -> GizmoResponse {
+        let lost = GizmoResponse {
+            cancelled: self.active(),
+            ..Default::default()
+        };
         let geometry = match self.geometry(view, rect, triad, step) {
             Some(geometry) => geometry,
-            None => return GizmoResponse::default(),
+            None => return lost,
         };
         let (pointer, events, modifiers) =
             ui.input(|i| (i.pointer.hover_pos(), i.events.clone(), i.modifiers));
         if !crate::viewport_widgets::gesture_allowed(ui) {
             self.cancel();
-            return GizmoResponse::default();
+            return lost;
         }
         let hovered = pointer
             .filter(|p| crate::viewport_widgets::allows_pointer(ui, rect, *p))
@@ -146,8 +154,12 @@ impl Gizmo {
                 event,
                 egui::Event::PointerGone | egui::Event::WindowFocused(false)
             ) {
+                // A capture released earlier in this batch keeps its release.
+                response.cancelled = self.active();
                 self.cancel();
-                response.drag = None;
+                if !response.drag.is_some_and(|drag| drag.done) {
+                    response.drag = None;
+                }
                 break;
             }
             self.event(event, frame, &mut response);
@@ -171,6 +183,10 @@ impl Gizmo {
                 ..
             } => {
                 if *pressed && self.state.is_none() && rect.contains(*pos) {
+                    // Keep an earlier release in this batch; it ends its own capture.
+                    if out.drag.is_some_and(|drag| drag.done) {
+                        out.finished = out.drag.take();
+                    }
                     self.state = geometry
                         .hit(*pos)
                         .and_then(|h| State::begin(view, rect, triad, h, *pos));

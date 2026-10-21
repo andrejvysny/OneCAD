@@ -201,6 +201,7 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     // event order, each to the document active at its position.
     ordered::route(app, raw, true, text, composition);
     protect_composition(&mut app.composing, raw, text);
+    crate::parameter_drag::route_escape(app, raw, composition);
     if app.doc.documents.confirm.is_some() {
         return;
     }

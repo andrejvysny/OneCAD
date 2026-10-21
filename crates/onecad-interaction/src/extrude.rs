@@ -1,5 +1,5 @@
 //! Extrusion controls replace one correlated candidate while retaining its exact profile.
-use crate::{DocumentContext, Effect, Interaction, NumericParameter, SessionPhase};
+use crate::{DocumentContext, Effect, Interaction, NumericParameter, ParameterKey, SessionPhase};
 use onecad_core::{
     document::record::{BooleanMode, ExtrudeParams, KnownOperation, Operation},
     ids::BodyId,
@@ -45,23 +45,32 @@ impl Interaction {
         if self.editable_extrude().is_none() {
             return Vec::new();
         }
-        let Some(tool) = self.tool.as_ref() else {
+        let Some(text) = self
+            .tool
+            .as_ref()
+            .and_then(|tool| tool.params.field(DISTANCE))
+            .map(|field| field.text.clone())
+        else {
             return Vec::new();
         };
         // Resolve the negated expression through the same application expression service.
-        let draft = format!("-({})", tool.draft);
-        self.change_draft(draft)
+        self.change_parameter(DISTANCE, format!("-({text})"))
     }
 
+    /// Choice-like controls commit an open drag before replacing the base.
     fn editable_extrude(&mut self) -> Option<&mut ExtrudeParams> {
         let tool = self.tool.as_mut()?;
         if tool.phase != SessionPhase::Editing
             || tool.editing_existing
-            || tool.parameter != NumericParameter::ExtrudeDistance
+            || !tool
+                .params
+                .field(DISTANCE)
+                .is_some_and(|field| field.active)
             || self.context.as_ref() != Some(&tool.tag.context)
         {
             return None;
         }
+        tool.drag = None;
         match &mut tool.record.op {
             Operation::Known(KnownOperation::Extrude(params)) => Some(params),
             _ => None,
@@ -73,10 +82,11 @@ impl Interaction {
             return Vec::new();
         };
         tool.record.inputs = tool.record.op.derive_inputs();
-        let draft = tool.draft.clone();
-        self.change_draft(draft)
+        self.refresh()
     }
 }
+
+const DISTANCE: ParameterKey = ParameterKey::Scalar(NumericParameter::ExtrudeDistance);
 
 pub(crate) fn validate_target(operation: &Operation) -> Result<(), String> {
     if let Operation::Known(KnownOperation::Extrude(params)) = operation {

@@ -2,7 +2,9 @@
 //! active model tool. Replaces the old Inspector form; dispatches the same actions.
 use crate::{app::App, layout::Chrome};
 use egui::{Context, Order, Ui};
-use onecad_interaction::{Action, DraftStatus, ModelSession, PreviewStatus, SessionPhase};
+use onecad_interaction::{
+    Action, ModelSession, ParameterKey, PreviewStatus, Readiness, SessionPhase,
+};
 use onecad_widgets::{
     components::{
         inputs::NumberField,
@@ -17,12 +19,7 @@ fn can_apply(app: &App, tool: &ModelSession) -> bool {
         && app.resize_refusal.is_none()
         && app.doc.view.is_some()
         && app.doc.bridge.valid()
-        && tool.phase == SessionPhase::Editing
-        && matches!(tool.draft_status, DraftStatus::Valid(_))
-        && matches!(
-            tool.preview,
-            PreviewStatus::Ready | PreviewStatus::UnavailableForEdit
-        )
+        && tool.ready()
 }
 
 fn icon(app: &App) -> &'static str {
@@ -31,22 +28,11 @@ fn icon(app: &App) -> &'static str {
     })
 }
 
-fn choices(app: &App, tool: &ModelSession) -> usize {
+fn choices(tool: &ModelSession) -> usize {
     if !tool.editing_existing || tool.phase != SessionPhase::Editing {
         return 0;
     }
-    app.doc
-        .display
-        .as_ref()
-        .and_then(|display| {
-            display
-                .records
-                .iter()
-                .find(|record| record.record_id == tool.tag.record_id)
-        })
-        .map_or(0, |record| {
-            onecad_interaction::numeric_parameters(&record.op).len()
-        })
+    tool.params.active().count()
 }
 
 pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
@@ -87,15 +73,17 @@ pub(crate) fn history_editor(app: &mut App, ui: &mut Ui, record_id: &str) {
         ui.group(|ui| {
             ui.set_width(ui.available_width());
             ui.strong(format!("Edit {}", tool.record.name));
-            if choices(app, &tool) > 1 {
+            if choices(&tool) > 1 {
                 ui.label("Parameter");
                 crate::parameter_ui::selector(app, ui, &tool);
             }
             let current = app.doc.interaction.tool.clone().unwrap_or(tool.clone());
             let apply = can_apply(app, &current);
-            ui.label(current.parameter.label());
-            let response = number_field(app, ui, &current);
-            focus_keys(app, &response, apply);
+            if let Some(key) = current.params.focus() {
+                ui.label(key.label());
+                let response = number_field(app, ui, &current, key);
+                focus_keys(app, &response, apply);
+            }
             if let Some(message) = apply_feedback(app, &current) {
                 ui.add(egui::Label::new(message).wrap().selectable(true));
             }
@@ -183,7 +171,7 @@ fn card_rows(
     response: &mut Option<egui::Response>,
 ) {
     crate::extrude_ui::rows(app, rows, tool);
-    if choices(app, tool) > 1 {
+    if choices(tool) > 1 {
         rows.row("Parameter", |ui| {
             crate::parameter_ui::selector(app, ui, tool);
         });
@@ -195,9 +183,15 @@ fn card_rows(
         .as_ref()
         .is_some_and(|now| now.tag == tool.tag);
     if current {
-        rows.row(tool.parameter.label(), |ui| {
-            *response = Some(number_field(app, ui, tool));
-        });
+        // One row per active declared field; the keyboard follows the focused one.
+        for key in tool.params.active().map(|field| field.key) {
+            rows.row(key.label(), |ui| {
+                let field = number_field(app, ui, tool, key);
+                if field.has_focus() || response.is_none() && tool.params.focus() == Some(key) {
+                    *response = Some(field);
+                }
+            });
+        }
     }
     if let Some(message) = apply_feedback(app, tool) {
         rows.row("Status", |ui| {
@@ -225,11 +219,11 @@ fn apply_feedback(app: &App, tool: &ModelSession) -> Option<String> {
     if app.busy() && tool.phase == SessionPhase::Editing {
         return Some("Wait for the current command before applying".into());
     }
-    preview_feedback(&tool.draft_status, &tool.preview, tool.phase)
+    preview_feedback(&tool.params.readiness(), &tool.preview, tool.phase)
 }
 
 fn preview_feedback(
-    draft: &DraftStatus,
+    readiness: &Readiness,
     preview: &PreviewStatus,
     phase: SessionPhase,
 ) -> Option<String> {
@@ -239,10 +233,10 @@ fn preview_feedback(
         SessionPhase::Completed => return Some("Feature command completed".into()),
         SessionPhase::Editing => {}
     }
-    match draft {
-        DraftStatus::Pending => return Some("Evaluating expression…".into()),
-        DraftStatus::Invalid(error) => return Some(format!("Invalid value: {error}")),
-        DraftStatus::Valid(_) => {}
+    match readiness {
+        Readiness::Pending => return Some("Evaluating expression…".into()),
+        Readiness::Invalid { message, .. } => return Some(format!("Invalid value: {message}")),
+        Readiness::Ready => {}
     }
     match preview {
         PreviewStatus::Empty => Some("Waiting for a preview".into()),
@@ -256,23 +250,21 @@ fn preview_feedback(
     }
 }
 
-fn number_field(app: &mut App, ui: &mut Ui, tool: &ModelSession) -> egui::Response {
-    let unit = if tool.parameter.site() == "angle" {
-        "deg"
-    } else {
-        "mm"
-    };
+fn number_field(
+    app: &mut App,
+    ui: &mut Ui,
+    tool: &ModelSession,
+    key: ParameterKey,
+) -> egui::Response {
+    let unit = if key.site() == "angle" { "deg" } else { "mm" };
     let editing = tool.phase == SessionPhase::Editing;
-    let mut draft = tool.draft.clone();
-    let error = match &tool.draft_status {
-        DraftStatus::Invalid(error) => Some(error.as_str()),
-        _ => None,
-    };
-    let salt = (
-        "extrude-distance",
-        tool.tag.record_id.to_string(),
-        tool.tag.gesture,
-    );
+    let mut draft = tool
+        .params
+        .field(key)
+        .map(|field| field.text.clone())
+        .unwrap_or_default();
+    let error = tool.params.error(key);
+    let salt = (key.salt(), tool.tag.record_id.to_string(), tool.tag.gesture);
     let response = ui.add(
         NumberField::new(salt, &mut draft)
             .unit(unit)
@@ -282,11 +274,17 @@ fn number_field(app: &mut App, ui: &mut Ui, tool: &ModelSession) -> egui::Respon
             .step_keys(!app.composing)
             .width(ui.available_width()),
     );
-    app.doc.numeric_id = Some(response.id);
-    let label = format!("{} ({unit})", tool.parameter.label());
+    let focused = tool.params.focus() == Some(key);
+    if focused || response.has_focus() {
+        app.doc.numeric_id = Some(response.id);
+    }
+    let label = format!("{} ({unit})", key.label());
     response.widget_info(|| egui::WidgetInfo::text_edit(editing, "", &draft, &label));
+    if response.gained_focus() && !focused {
+        app.dispatch(Action::FocusParameter(key));
+    }
     if response.changed() {
-        app.dispatch(Action::DraftChanged(draft));
+        app.dispatch(Action::ParameterChanged { key, text: draft });
     }
     response
 }
@@ -318,7 +316,7 @@ mod tests {
 
     #[test]
     fn every_blocked_preview_state_explains_why_create_is_disabled() {
-        let valid = DraftStatus::Valid(onecad_core::document::variables::Scalar::new(6.0));
+        let valid = Readiness::Ready;
         for (preview, expected) in [
             (PreviewStatus::Empty, "Waiting for a preview"),
             (PreviewStatus::Pending, "Building preview…"),
@@ -339,7 +337,10 @@ mod tests {
         assert!(preview_feedback(&valid, &PreviewStatus::Ready, SessionPhase::Editing).is_none());
         assert_eq!(
             preview_feedback(
-                &DraftStatus::Invalid("unknown variable".into()),
+                &Readiness::Invalid {
+                    key: None,
+                    message: "unknown variable".into()
+                },
                 &PreviewStatus::Ready,
                 SessionPhase::Editing
             )
@@ -369,6 +370,9 @@ mod tests {
                 (2, 96.0),
                 (2, 296.0),
                 (2, 296.0),
+                // One row per declared field: a selector plus three fields keeps the footer.
+                (4, 296.0),
+                (4, 296.0),
             ]
             .into_iter()
             .enumerate()

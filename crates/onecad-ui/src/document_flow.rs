@@ -121,6 +121,11 @@ impl Flow {
                 action,
                 Action::Confirm
                     | Action::DraftChanged(_)
+                    | Action::ParameterChanged { .. }
+                    | Action::ParameterDrag(
+                        onecad_interaction::DragPhase::Begin
+                            | onecad_interaction::DragPhase::Update { .. }
+                    )
                     | Action::Republish
                     | Action::TransformDraftChanged { .. }
                     | Action::BeginExtrude { .. }
