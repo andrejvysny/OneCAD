@@ -1,5 +1,19 @@
 use super::*;
 
+const POLAR_MIN_RADIUS: f32 = 24.0;
+/// Matches the renderer, which fades minor grid lines once cells shrink below ~8 px.
+const MIN_VISIBLE_GRID_CELL: f32 = 8.0;
+
+fn visible_step(request: &SnapRequest<'_>, raw: Vec2, minor: f64) -> f64 {
+    let cell = Vec2::new(raw.x + minor, raw.y)
+        .and_then(|next| Some(project(request, raw)?.distance(project(request, next)?)));
+    if cell.is_some_and(|cell| cell < MIN_VISIBLE_GRID_CELL) {
+        minor * 10.0
+    } else {
+        minor
+    }
+}
+
 pub(super) fn guides_and_grid(collector: &mut Collector<'_, '_>) -> Option<()> {
     let request = collector.request;
     let logical = onecad_scene::DVec2::new(
@@ -16,6 +30,7 @@ pub(super) fn guides_and_grid(collector: &mut Collector<'_, '_>) -> Option<()> {
         .grid_step
         .filter(|step| step.is_finite() && *step > 0.0)
     {
+        let step = visible_step(request, raw, step);
         collector.push(
             Vec2::new((raw.x / step).round() * step, (raw.y / step).round() * step)?,
             SnapKind::Grid,
@@ -34,12 +49,11 @@ pub(super) fn guides_and_grid(collector: &mut Collector<'_, '_>) -> Option<()> {
         };
         for role in roles {
             let reference = target(entity.id(), *role);
-            add_guides(
-                collector,
-                raw,
-                reference.point_coordinates(request.sketch)?,
-                Some(reference),
-            )?;
+            let at = reference.point_coordinates(request.sketch)?;
+            if project(request, at).is_none_or(|screen| !request.rect.contains(screen)) {
+                continue;
+            }
+            add_guides(collector, raw, at, Some(reference))?;
         }
     }
     if let (Some(horizontal), Some(vertical)) = (
@@ -99,17 +113,13 @@ fn add_guides(
 }
 
 fn best_guide(collector: &Collector<'_, '_>, kind: SnapKind) -> Option<AcceptedSnap> {
-    let best = collector
+    let sketch = collector.request.sketch;
+    collector
         .candidates
         .iter()
         .filter(|candidate| candidate.snap.kind == kind)
-        .min_by(|a, b| a.distance.total_cmp(&b.distance))?;
-    (!collector.candidates.iter().any(|candidate| {
-        candidate.snap.kind == kind
-            && candidate.snap.intent != best.snap.intent
-            && (candidate.distance - best.distance).abs() < 1e-8
-    }))
-    .then_some(best.snap)
+        .min_by(|a, b| super::super::ranked(a, b, a.distance, b.distance, sketch))
+        .map(|best| best.snap)
 }
 
 fn polar(collector: &mut Collector<'_, '_>, raw: Vec2, anchor: Vec2) -> Option<()> {
@@ -119,6 +129,13 @@ fn polar(collector: &mut Collector<'_, '_>, raw: Vec2, anchor: Vec2) -> Option<(
         .polar_step_degrees
         .filter(|step| step.is_finite() && (1.0..=180.0).contains(step))
     {
+        // Near the anchor every direction lies within the aperture of some polar step.
+        let request = collector.request;
+        if let (Some(from), Some(to)) = (project(request, anchor), project(request, raw))
+            && from.distance(to) < POLAR_MIN_RADIUS
+        {
+            return Some(());
+        }
         let delta = vector(raw) - vector(anchor);
         let radians = step.to_radians();
         let angle = (delta.y.atan2(delta.x) / radians).round() * radians;

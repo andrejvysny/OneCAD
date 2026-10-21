@@ -3,6 +3,7 @@ use super::{
     cache::{Cache, Drag, Placement, place},
     geometry::Witness,
 };
+use crate::sketch_numeric::format::{format_angle_degrees, format_measure};
 use crate::theme::Theme;
 use egui::{FontId, Pos2, Rect, Sense, Stroke, Ui};
 use onecad_core::{
@@ -57,6 +58,11 @@ pub fn label(constraint: &Constraint) -> Option<(String, String)> {
     if !number.is_finite() {
         return None;
     }
+    let number = if matches!(constraint, Constraint::Angle { .. }) {
+        format_angle_degrees(number)
+    } else {
+        format_measure(number)
+    };
     let value = format!("{prefix}{number} {unit}");
     let text = scalar.expr.as_ref().map_or_else(
         || value.clone(),

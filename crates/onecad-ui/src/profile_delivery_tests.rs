@@ -5,14 +5,13 @@ use onecad_core::{
     math::Vec2,
 };
 use onecad_interaction::sketch::{
-    CapturedSketchPoint, PrimitiveIds, SelectionMode, SketchAction, SketchPhase, SketchTarget,
-    SketchTool,
+    CapturedSketchPoint, PrimitiveIds, SketchAction, SketchPhase, SketchTool,
 };
 use onecad_scene::{ViewSnapshot, Viewport};
 
 #[tokio::test]
 #[ignore = "requires production worker and Metal; synthetic adapters do not qualify physical input"]
-async fn finish_refusal_reenters_fresh_service_visit_for_repair() {
+async fn finish_with_invalid_profile_closes_sketch_and_reports_overlap() {
     let area = tempfile::tempdir().unwrap();
     let (mut app, context) = create_app(area.path()).await;
     let mut frame = eframe::Frame::_new_kittest();
@@ -30,7 +29,7 @@ async fn finish_refusal_reenters_fresh_service_visit_for_repair() {
         [80.0, 50.0],
     )
     .await;
-    let line = primitive(
+    primitive(
         &mut app,
         &context,
         &mut frame,
@@ -52,24 +51,10 @@ async fn finish_refusal_reenters_fresh_service_visit_for_repair() {
             .has_reason("SKETCH_PROFILE_OVERLAPPING_CURVES")
     );
     app.sketch_dispatch(SketchAction::SetTool(SketchTool::Select));
-    let visit = app.sketch.session.as_ref().unwrap().key.clone();
-    let edit_session = app.sketch.session.as_ref().unwrap().edit_session.clone();
-    let count = app
-        .sketch
-        .session
-        .as_ref()
-        .unwrap()
-        .authoritative
-        .entities()
-        .len();
+    // An invalid profile no longer traps the user in sketch mode: the record is
+    // already committed, so Finish closes the sketch and keeps the refusal visible.
     app.sketch_dispatch(SketchAction::Finish);
-    pump_until(&mut app, &context, &mut frame, |app| {
-        app.sketch
-            .session
-            .as_ref()
-            .is_some_and(|session| session.phase == SketchPhase::Faulted && session.repair_reentry)
-    })
-    .await;
+    pump_until(&mut app, &context, &mut frame, |app| !app.sketch_active()).await;
     assert!(app.bridge.valid());
     assert!(
         app.diagnostics
@@ -78,36 +63,11 @@ async fn finish_refusal_reenters_fresh_service_visit_for_repair() {
             .unwrap()
             .has_reason("SKETCH_PROFILE_OVERLAPPING_CURVES")
     );
-    let session = app.sketch.session.as_ref().unwrap();
-    assert_eq!(session.key, visit);
-    assert!(session.history.is_none() && session.edit_session.is_none());
-    app.sketch_dispatch(SketchAction::ReenterForRepair {
-        key: session.key.clone(),
-        document: session.document.clone(),
-    });
-    wait_active(&mut app, &context, &mut frame).await;
-    let session = app.sketch.session.as_ref().unwrap();
-    assert_ne!(session.key.generation, visit.generation);
-    assert_ne!(session.edit_session, edit_session);
-    assert!(session.edit_session.is_some() && !session.repair_reentry);
-    assert_eq!(session.authoritative.entities().len(), count);
-    assert!(session.authoritative.contains_entity(line));
-    select(&mut app, line);
-    crate::sketch_repair::delete_selected(&mut app);
-    pump_until(&mut app, &context, &mut frame, |app| {
-        app.sketch.session.as_ref().is_some_and(|session| {
-            session.phase == SketchPhase::Active && !session.authoritative.contains_entity(line)
-        })
-    })
-    .await;
-    assert!(app.bridge.valid());
-    assert!(!app.display.as_ref().unwrap().profiles.is_empty());
-    app.sketch_dispatch(SketchAction::Finish);
-    pump_until(&mut app, &context, &mut frame, |app| !app.sketch_active()).await;
-    assert_eq!(app.display.as_ref().unwrap().profiles.len(), 1);
+    assert!(app.display.as_ref().unwrap().profiles.is_empty());
+    assert_eq!(app.display.as_ref().unwrap().projection.sketches.len(), 1);
     assert!(
         app.document_dirty(),
-        "accepted pre-refusal geometry remains authored"
+        "the closed sketch keeps its authored geometry"
     );
     app.stop_discard();
     pump_until(&mut app, &context, &mut frame, |app| app.may_close).await;
@@ -188,17 +148,4 @@ async fn primitive(
     })
     .await;
     entity
-}
-
-fn select(app: &mut App, entity: EntityId) {
-    app.sketch_dispatch(SketchAction::SetTool(SketchTool::Select));
-    let view = capture(app);
-    let session = app.sketch.session.as_ref().unwrap();
-    app.sketch_dispatch(SketchAction::Select {
-        key: session.key.clone(),
-        document: session.document.clone(),
-        capture: view.identity(),
-        targets: vec![SketchTarget::Entity(entity)],
-        mode: SelectionMode::Replace,
-    });
 }

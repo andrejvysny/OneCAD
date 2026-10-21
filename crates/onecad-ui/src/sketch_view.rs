@@ -2,7 +2,7 @@
 //! This module never changes a sketch, runs a solver, or allocates entity ids.
 
 use crate::theme::Theme;
-use egui::{Color32, Painter, Pos2, Rect, Stroke};
+use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke};
 use onecad_core::{
     ids::EntityId,
     math::Vec2,
@@ -30,113 +30,14 @@ pub(crate) fn paint_selected(
                 painter.circle_filled(screen, 3.0, color);
             }
         } else if let Some(points) = entity_points(sketch, entity, rect, view, plane) {
-            paint_path(&painter, rect, view, plane, &points, color);
-        }
-    }
-}
-
-pub fn paint(
-    painter: &Painter,
-    rect: Rect,
-    view: &ViewSnapshot,
-    session: &SketchSession,
-    preview: Option<&Sketch>,
-    theme: &Theme,
-) {
-    if session.document.scene != view.identity().scene
-        || !matches_rect(rect, view)
-        || matches!(
-            session.phase,
-            SketchPhase::Closed | SketchPhase::NeedsRefresh
-        )
-    {
-        return;
-    }
-    let transient = preview.is_some();
-    let geometry = preview.unwrap_or(&session.authoritative);
-    let painter = painter.with_clip_rect(rect);
-    for entity in geometry.entities() {
-        let color =
-            if session
-                .selection
-                .contains(&onecad_interaction::sketch::SketchTarget::Entity(
-                    entity.id(),
-                ))
-            {
-                theme.accent
-            } else if entity.is_reference_locked() || entity.is_construction() {
-                theme.ink5
-            } else if transient {
-                theme.dof_neutral
-            } else {
-                match crate::sketch_feedback::entity(&session.status, entity.id()) {
-                    Some(onecad_app::dto::EntityConstrainedState::FullyConstrained) => theme.dof_ok,
-                    Some(onecad_app::dto::EntityConstrainedState::UnderConstrained) => {
-                        theme.created_text
-                    }
-                    Some(onecad_app::dto::EntityConstrainedState::Conflicting) => {
-                        theme.danger_strong
-                    }
-                    None => theme.dof_neutral,
-                }
-            };
-        if let SketchEntity::Point { at, .. } = entity {
-            if let Some(screen) = project(rect, view, session.plane, *at) {
-                painter.circle_filled(screen, 2.5, color);
-            }
-        } else if let Some(points) = entity_points(geometry, entity, rect, view, session.plane) {
-            paint_path(&painter, rect, view, session.plane, &points, color);
-        }
-    }
-    paint_hover(&painter, rect, view, session, geometry, theme);
-    for target in &session.selection {
-        if let Some(at) = target.point_coordinates(geometry)
-            && let Some(screen) = project(rect, view, session.plane, at)
-        {
-            painter.circle_filled(screen, 4.0, theme.accent);
-            painter.circle_stroke(screen, 6.0, Stroke::new(1.0, theme.accent));
-        }
-    }
-    crate::sketch_creation::paint_anchors(&painter, rect, view, session, theme);
-    if let Some(draft) = &session.preview
-        && !matches!(draft, DraftPrimitive::Point { .. })
-    {
-        let points = draft_points(draft, rect, view, session.plane);
-        if let [point] = points.as_slice()
-            && let Some(screen) = project(rect, view, session.plane, *point)
-        {
-            painter.circle_stroke(screen, 4.0, Stroke::new(1.5, theme.accent));
-        }
-        paint_path(&painter, rect, view, session.plane, &points, theme.accent);
-    }
-}
-
-fn paint_hover(
-    painter: &Painter,
-    rect: Rect,
-    view: &ViewSnapshot,
-    session: &SketchSession,
-    geometry: &Sketch,
-    theme: &Theme,
-) {
-    use onecad_interaction::sketch::SketchTarget;
-    let color = theme.accent.gamma_multiply(0.55);
-    for target in crate::sketch_repair::hover_targets(painter.ctx(), session) {
-        if let Some(at) = target.point_coordinates(geometry) {
-            if let Some(screen) = project(rect, view, session.plane, at) {
-                painter.circle_stroke(screen, 7.0, Stroke::new(2.0, color));
-            }
-        } else if let SketchTarget::Entity(id) = target
-            && let Some(entity) = geometry.get_entity(id)
-        {
-            if let SketchEntity::Point { at, .. } = entity {
-                if let Some(screen) = project(rect, view, session.plane, *at) {
-                    painter.circle_stroke(screen, 7.0, Stroke::new(2.0, color));
-                }
-            } else if let Some(points) = entity_points(geometry, entity, rect, view, session.plane)
-            {
-                paint_path(painter, rect, view, session.plane, &points, color);
-            }
+            paint_path(
+                &painter,
+                rect,
+                view,
+                plane,
+                &points,
+                Stroke::new(1.5, color),
+            );
         }
     }
 }
@@ -171,14 +72,14 @@ fn paint_path(
     view: &ViewSnapshot,
     plane: SketchPlane,
     points: &[Vec2],
-    color: Color32,
+    stroke: Stroke,
 ) {
     for pair in points.windows(2) {
         if let (Some(a), Some(b)) = (
             project(rect, view, plane, pair[0]),
             project(rect, view, plane, pair[1]),
         ) {
-            painter.line_segment([a, b], Stroke::new(1.5, color));
+            painter.line_segment([a, b], stroke);
         }
     }
 }
@@ -473,6 +374,9 @@ mod tests {
     }
 }
 
+mod paint;
+pub(crate) use paint::hover_target;
+pub use paint::paint;
 mod selection;
 #[cfg(test)]
 use selection::pick_sketch;

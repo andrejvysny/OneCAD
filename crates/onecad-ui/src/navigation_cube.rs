@@ -342,19 +342,32 @@ fn world_triad(
     scale: f32,
     palette: CubePalette,
 ) {
-    let origin = center + vec2(-60.0, 52.0) * scale;
+    let half = HALF * f64::from(scale);
+    let corner = DVec3::splat(-1.0);
+    let origin = center + project(basis, corner, half);
     for (axis, color, label) in [
         (DVec3::X, palette.triad[0], "X"),
         (DVec3::Y, palette.triad[1], "Y"),
         (DVec3::Z, palette.triad[2], "Z"),
     ] {
-        let tip = origin + project(basis, axis, 17.0 * f64::from(scale));
-        painter.line_segment([origin, tip], Stroke::new(1.5, color));
+        let edge_end = center + project(basis, corner + axis * 2.0, half);
+        let tip = origin + project(basis, axis, 2.0 * half * 1.25);
+        // The axis runs along a cube edge; that part shows only when an adjacent face does.
+        let edge_visible = [DVec3::X, DVec3::Y, DVec3::Z]
+            .into_iter()
+            .filter(|other| *other != axis)
+            .any(|other| (-other).dot(basis.back) > 1e-5);
+        let start = if edge_visible { origin } else { edge_end };
+        painter.line_segment([start, tip], Stroke::new(1.5, color));
+        let along = tip - origin;
+        if along.length() < 2.0 {
+            continue;
+        }
         painter.text(
-            tip,
+            tip + along.normalized() * 8.0 * scale,
             Align2::CENTER_CENTER,
             label,
-            FontId::proportional(8.0),
+            FontId::proportional(10.0 * scale),
             color,
         );
     }
@@ -402,10 +415,10 @@ pub fn show(
     let palette = CubePalette::new(theme, over || dragging);
     let painter = ui.painter_at(outer);
     painter::paint_cube(&painter, &faces, hovered, palette, true, scale);
+    world_triad(&painter, view.basis(), center, scale, palette);
     ui.add_enabled_ui(enabled, |ui| face_widgets(ui, &faces, hovered, &mut output));
     ui.add_enabled_ui(enabled, |ui| {
         controls::show(ui, &painter, center, scale, view, palette, &mut output)
     });
-    world_triad(&painter, view.basis(), center, scale, palette);
     output
 }

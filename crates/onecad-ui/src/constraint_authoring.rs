@@ -39,6 +39,8 @@ struct Draft {
     constraint: Constraint,
     editing: bool,
     text: String,
+    /// The seed text is rounded for display, so only typed text may change the value.
+    edited: bool,
     focus: bool,
     position: Option<egui::Pos2>,
     viewport: Option<egui::Rect>,
@@ -168,6 +170,7 @@ fn open_editor(
                 },
                 constraint: constraint.clone(),
                 editing,
+                edited: false,
                 text,
                 focus: true,
                 position,
@@ -265,12 +268,13 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         let Some(relation) = Relation::from_constraint(&draft.constraint) else {
             return;
         };
-        if let Ok(value) = dimensions::scalar(&draft.text, relation, variables) {
-            if draft.editing
-                && (draft.constraint.value() == Some(&value)
-                    || dimensions::text(&draft.constraint)
-                        .is_some_and(|text| text == draft.text.trim()))
-            {
+        let value = if draft.edited {
+            dimensions::scalar(&draft.text, relation, variables).ok()
+        } else {
+            draft.constraint.value().cloned()
+        };
+        if let Some(value) = value {
+            if draft.editing && draft.constraint.value() == Some(&value) {
                 return;
             }
             let action = if draft.editing {

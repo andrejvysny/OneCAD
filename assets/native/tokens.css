@@ -66,6 +66,15 @@
   --color-dof-neutral: #2d7ff9;
   --color-dof-ok: #1f9d55;
 
+  /* ---- Sketch inference feedback (snap guides, guide points, snap halo).
+     Purple, distinct from --color-accent and selection so inference cues
+     never read as selected/placed geometry; matches Shapr3D guidelines. ---- */
+  --color-sketch-inference: #8b5cf6;
+
+  /* ---- Sketch geometry state: under-constrained and unassessed/preview. ---- */
+  --color-sketch-underconstrained: #b5600a;
+  --color-sketch-neutral: #5b6370;
+
   /* ---- Canvas (viewport backgrounds) ---- */
   --color-canvas: #eaecef;
   --color-canvas-model: #eef0f3;
@@ -342,6 +351,15 @@
   /* ---- DOF / constraint status text ---- */
   --color-dof-neutral: #5aa2ff;
   --color-dof-ok: #43c17a;
+
+  /* ---- Sketch inference feedback (snap guides, guide points, snap halo).
+     Purple, distinct from --color-accent and selection so inference cues
+     never read as selected/placed geometry; matches Shapr3D guidelines. ---- */
+  --color-sketch-inference: #a78bfa;
+
+  /* ---- Sketch geometry state: under-constrained and unassessed/preview. ---- */
+  --color-sketch-underconstrained: #f0a24a;
+  --color-sketch-neutral: #c3c8d0;
 
   /* ---- Canvas (viewport backgrounds) ---- */
   /* NOTE: --color-canvas is also the renderer clear color AND the fill PMREM

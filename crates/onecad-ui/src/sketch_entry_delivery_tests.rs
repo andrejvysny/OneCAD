@@ -27,16 +27,14 @@ async fn world_planes_and_face_entry_preserve_native_frame_and_discard() {
     let display = app.display.clone().unwrap();
     let body = &display.scene.bodies()[0];
     let identity = body.mesh().unwrap().face_id(0).unwrap().to_owned();
-    app.submit(crate::bridge::Command::Sketch(Box::new(
-        crate::sketch_services::Request::FaceEntry {
-            id: onecad_core::ids::SketchId::new(),
-            context: crate::sketch_services::document_context(&display),
-            body: body.body_id(),
-            identity,
-            control: Default::default(),
-        },
-    )));
+    // A preselected face starts the sketch directly, without the support chooser.
+    app.topology
+        .select_face_for_test(display.scene.identity(), body.body_id(), &identity);
+    app.choose_sketch_support();
+    assert!(app.ui.sketch_entry.pending.is_some());
+    assert!(crate::support_view::grid(&app).is_none());
     active(&mut app, &context, &mut frame).await;
+    assert!(!app.ui.sketch_entry.open);
     let sketch = &app.sketch.session.as_ref().unwrap().authoritative;
     assert!(sketch.host_face().unwrap().primary.is_some());
     assert!(!sketch.entities().is_empty());

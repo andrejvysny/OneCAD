@@ -1,5 +1,6 @@
 //! UI values use degrees; the sketch wire stores radians. Expressions remain application-resolved.
 use super::{operands, relation::Relation};
+use crate::sketch_numeric::format::{format_angle_degrees, format_measure};
 use onecad_app::dto::VariableDto;
 use onecad_core::{
     document::variables::Scalar,
@@ -40,7 +41,7 @@ pub fn scalar(text: &str, relation: Relation, variables: &[VariableDto]) -> Resu
     let mut value = match evaluated {
         Ok(value) => value,
         Err(error) if error.kind == ExprErrorKind::UndefinedVariable => {
-            return Ok(Scalar::with_expr(0.0, expression));
+            return Err(error.message);
         }
         Err(error) => return Err(error.to_string()),
     };
@@ -66,9 +67,9 @@ pub fn text(constraint: &Constraint) -> Option<String> {
     let scalar = constraint.value()?;
     Some(scalar.expr.clone().unwrap_or_else(|| {
         if matches!(constraint, Constraint::Angle { .. }) {
-            scalar.value.to_degrees().to_string()
+            format_angle_degrees(scalar.value.to_degrees())
         } else {
-            scalar.value.to_string()
+            format_measure(scalar.value)
         }
     }))
 }

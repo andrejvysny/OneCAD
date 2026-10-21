@@ -66,7 +66,13 @@ pub(super) fn editor(
             });
         });
     ctx.data_mut(|data| data.insert_temp(editor_id().with("bounds"), response.response.rect));
-    crate::dimension_chip::witness(ctx, id.with("witness"), anchor, response.response.rect);
+    crate::dimension_chip::witness(
+        ctx,
+        id.with("witness"),
+        anchor,
+        response.response.rect,
+        safe,
+    );
     result
 }
 
@@ -110,6 +116,7 @@ fn field(
     }
     if response.changed() {
         draft.error = None;
+        draft.edited = true;
     }
     let parsed = dimensions::scalar(&draft.text, relation, variables);
     crate::dimension_chip::error(ui, draft.error.as_ref().or_else(|| parsed.as_ref().err()));

@@ -494,6 +494,15 @@ async fn finish(backend: &mut Backend, id: String) -> Result<Reply, String> {
     };
     match complete(backend, receipt).await {
         Ok(result) => Ok(Reply::Finished(Box::new(result))),
+        // The runtime commits the sketch record before deriving regions, so an
+        // invalid profile must not trap the user in sketch mode: close and warn.
+        Err(_) if profile_refusal(&diagnostics) => Ok(Reply::Finished(Box::new(
+            onecad_app::dto::FinishSketchDto {
+                region_identity_version: 0,
+                regions: Vec::new(),
+                diagnostics,
+            },
+        ))),
         Err(message) if !diagnostics.is_empty() => Ok(Reply::FinishRefused {
             message,
             diagnostics,
@@ -501,6 +510,13 @@ async fn finish(backend: &mut Backend, id: String) -> Result<Reply, String> {
         Err(message) => Err(message),
     }
 }
+fn profile_refusal(diagnostics: &[onecad_core::regen::Diagnostic]) -> bool {
+    !diagnostics.is_empty()
+        && diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.stage.as_deref() == Some("profile"))
+}
+
 fn finish_error(error: onecad_app::error::ApiError) -> Result<Reply, String> {
     match error {
         onecad_app::error::ApiError::OpFailed {

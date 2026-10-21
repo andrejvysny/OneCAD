@@ -193,14 +193,57 @@ fn analytic_intersections_filter_segments_arcs_tangencies_and_coincident_curves(
 }
 
 #[test]
-fn equally_close_distinct_references_do_not_use_entity_id_as_a_tiebreaker() {
+fn equally_close_distinct_references_resolve_by_sketch_order_not_entity_id() {
     let mut sketch = sketch();
-    add_point(&mut sketch, 10.0, 20.0);
+    let first = add_point(&mut sketch, 10.0, 20.0);
     add_point(&mut sketch, 10.0, 20.0);
     let view = view(1.0, 100.0);
     let mut request = request(&sketch, &view);
     request.pointer = project(&request, Vec2::new(10.0, 20.0).unwrap()).unwrap();
-    assert!(resolve_snap(&request).is_none());
+    let snap = resolve_snap(&request).expect("coincident targets must still snap");
+    assert_eq!(snap.kind, SnapKind::Endpoint);
+    assert_eq!(
+        snap.intent,
+        SnapIntent::Coincident(SketchTarget::Point {
+            entity: first,
+            role: onecad_core::sketch::CurvePosition::Arbitrary
+        })
+    );
+}
+
+#[test]
+fn aligned_points_prefer_the_nearest_guide_reference() {
+    let mut sketch = sketch();
+    add_point(&mut sketch, 0.0, 20.0);
+    let near = add_point(&mut sketch, 30.0, 20.0);
+    let view = view(1.0, 100.0);
+    let mut request = request(&sketch, &view);
+    request.pointer = project(&request, Vec2::new(45.0, 20.0).unwrap()).unwrap();
+    let snap = resolve_snap(&request).expect("shared alignment must still guide");
+    assert_eq!(snap.kind, SnapKind::HorizontalGuide);
+    assert!(matches!(
+        snap.intent,
+        SnapIntent::Guide {
+            reference: SketchTarget::Point { entity, .. },
+            ..
+        } if entity == near
+    ));
+}
+
+#[test]
+fn polar_waits_until_the_pointer_leaves_the_anchor() {
+    let sketch = sketch();
+    let view = view(1.0, 100.0);
+    let mut request = request(&sketch, &view);
+    request.settings.polar_step_degrees = Some(15.0);
+    let anchor = Vec2::new(20.0, 30.0).unwrap();
+    request.anchor = Some((anchor, None));
+    let origin = project(&request, anchor).unwrap();
+    request.pointer = origin + egui::vec2(12.0, 5.0);
+    assert_ne!(
+        resolve_snap(&request).map(|snap| snap.kind),
+        Some(SnapKind::Polar)
+    );
 }
 
 #[test]
@@ -287,9 +330,13 @@ fn creation_adapter_preserves_arc_chain_anchor_roles_for_horizontal_and_vertical
             request.pointer =
                 project(&request, Vec2::new(anchor.x + dx, anchor.y + dy).unwrap()).unwrap();
             request.anchor = Some((anchor, None));
-            assert!(
-                resolve_snap(&request).is_none(),
-                "anonymous adapter anchor reproduces ambiguous guide"
+            assert_eq!(
+                resolve_snap(&request).map(|snap| snap.intent),
+                Some(SnapIntent::Guide {
+                    reference,
+                    alignment
+                }),
+                "a referenced guide outranks the anonymous anchor guide at the same place"
             );
             request.anchor = Some(crate::sketch_creation::snap_anchor(&draft));
             let snap =
@@ -312,4 +359,56 @@ fn creation_adapter_preserves_arc_chain_anchor_roles_for_horizontal_and_vertical
             })
         );
     }
+}
+
+#[test]
+fn grid_snap_coarsens_when_minor_cells_fall_below_visibility() {
+    let sketch = sketch();
+    let view = view(1.0, 100.0);
+    let mut request = request(&sketch, &view);
+    let origin = project(&request, Vec2::new(0.0, 0.0).unwrap()).unwrap();
+    let cell = project(&request, Vec2::new(1.0, 0.0).unwrap()).unwrap();
+    let px_per_unit = origin.distance(cell);
+    // A minor step smaller than the visible threshold must snap to the major step.
+    request.settings.grid_step = Some(f64::from(4.0 / px_per_unit));
+    let major = request.settings.grid_step.unwrap() * 10.0;
+    request.pointer = project(&request, Vec2::new(major * 3.0 + 0.01, major).unwrap()).unwrap();
+    let snap = resolve_snap(&request).unwrap();
+    assert_eq!(snap.kind, SnapKind::Grid);
+    assert!((snap.point.x - major * 3.0).abs() < 1e-9);
+    assert!((snap.point.y - major).abs() < 1e-9);
+}
+
+#[test]
+fn creation_anchor_welded_to_existing_point_references_it_for_guides() {
+    use onecad_core::sketch::CurvePosition;
+    use onecad_interaction::sketch::SketchDraft;
+
+    let mut sketch = sketch();
+    let corner = add_point(&mut sketch, 10.0, 20.0);
+    let view = view(1.0, 100.0);
+    let target = SketchTarget::Point {
+        entity: corner,
+        role: CurvePosition::Arbitrary,
+    };
+    let anchor = Vec2::new(10.0, 20.0).unwrap();
+    let draft = SketchDraft {
+        first: anchor,
+        anchor,
+        first_id: None,
+        first_target: None,
+        anchor_id: None,
+        cursor: anchor,
+        segments: 0,
+        anchor_snap: Some(AcceptedSnap {
+            source: snap_source(&sketch, &view, 1),
+            kind: SnapKind::Endpoint,
+            point: anchor,
+            intent: SnapIntent::Coincident(target),
+        }),
+        secondary: None,
+        preceding: None,
+        tangent_arc: false,
+    };
+    assert_eq!(crate::sketch_creation::snap_anchor(&draft).1, Some(target));
 }

@@ -44,24 +44,17 @@ const USER_AXES: [DVec3; 3] = [DVec3::Y, DVec3::NEG_X, DVec3::Z];
 pub(crate) fn axes(app: &App, painter: &egui::Painter, rect: egui::Rect, view: &ViewSnapshot) {
     let (origin, directions) = axis_directions(app);
     let painter = painter.with_clip_rect(rect);
-    for (axis, label, color) in directions {
+    for (axis, color) in directions {
         if let Some(ray) = rays::project_ray(view, origin, axis) {
-            paint_axis(&painter, rect, ray, label, color);
+            paint_axis(&painter, rect, ray, color);
         }
     }
 }
 
-fn axis_directions(app: &App) -> (DVec3, Vec<(DVec3, &'static str, egui::Color32)>) {
+fn axis_directions(app: &App) -> (DVec3, Vec<(DVec3, egui::Color32)>) {
     let colors = [app.theme.axis_x, app.theme.axis_y, app.theme.axis_z];
     let Some(support) = grid(app) else {
-        return (
-            DVec3::ZERO,
-            USER_AXES
-                .into_iter()
-                .enumerate()
-                .map(|(index, axis)| (axis, ["X", "Y", "Z"][index], colors[index]))
-                .collect(),
-        );
+        return (DVec3::ZERO, USER_AXES.into_iter().zip(colors).collect());
     };
     let named = support.origin == DVec3::ZERO
         && [SketchPlane::xy(), SketchPlane::xz(), SketchPlane::yz()]
@@ -71,16 +64,16 @@ fn axis_directions(app: &App) -> (DVec3, Vec<(DVec3, &'static str, egui::Color32
         .into_iter()
         .enumerate()
         .map(|(index, axis)| {
-            let (label, color) = if named {
+            let color = if named {
                 let world = USER_AXES
                     .iter()
                     .position(|direction| axis.dot(*direction) > 1.0 - 1e-10)
                     .unwrap_or(index);
-                (["X", "Y", "Z"][world], colors[world])
+                colors[world]
             } else {
-                (["local X", "local Y"][index], colors[index])
+                colors[index]
             };
-            (axis, label, color)
+            (axis, color)
         })
         .collect();
     (support.origin, directions)
@@ -90,39 +83,16 @@ fn paint_axis(
     painter: &egui::Painter,
     rect: egui::Rect,
     ray: rays::ProjectedRay,
-    label: &str,
     color: egui::Color32,
 ) {
     let point = |p: onecad_scene::DVec2| rect.min + egui::vec2(p.x as f32, p.y as f32);
-    let (start, end) = (point(ray.start), point(ray.end));
     painter.line_segment(
-        [start, end],
+        [point(ray.start), point(ray.end)],
         egui::Stroke::new(1.25, color.linear_multiply(0.75)),
     );
     if let Some(origin) = ray.origin {
         painter.circle_filled(point(origin), 2.5, color);
     }
-    let delta = end - start;
-    let length = delta.length();
-    let label_position = if length >= 8.0 {
-        let direction = delta / length;
-        let cue_start = start + direction * 28.0_f32.min(length * 0.2);
-        let cue = direction * 18.0_f32.min(length * 0.2);
-        painter.arrow(cue_start, cue, egui::Stroke::new(1.5, color));
-        cue_start + cue + direction.rot90() * 12.0
-    } else {
-        start + egui::vec2(14.0, -14.0)
-    };
-    let galley = painter.layout_no_wrap(label.into(), egui::FontId::proportional(12.0), color);
-    if rect.width() < galley.size().x + 8.0 || rect.height() < galley.size().y + 8.0 {
-        return;
-    }
-    let half = galley.size() * 0.5;
-    let position = label_position.clamp(
-        rect.min + half + egui::vec2(4.0, 4.0),
-        rect.max - half - egui::vec2(4.0, 4.0),
-    );
-    painter.galley(position - half, galley, color);
 }
 
 #[cfg(test)]

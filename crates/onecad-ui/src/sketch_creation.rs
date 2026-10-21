@@ -119,7 +119,11 @@ fn winning_snap(
                 previous: previous.as_ref().map(|previous| &previous.snap),
                 generation: session.request.sequence,
                 settings: SnapSettings {
-                    grid_step: app.ui.sketch_grid_snap.then_some(1.0),
+                    grid_step: app.ui.sketch_grid_snap.then(|| {
+                        f64::from(onecad_render::grid_step(
+                            view.camera().offset.length() as f32
+                        ))
+                    }),
                     ..Default::default()
                 },
             })
@@ -156,6 +160,13 @@ pub(crate) fn snap_anchor(
                 entity: curve.entity,
                 role: curve.role,
             })
+        })
+        .or_else(|| match draft.anchor_snap.map(|snap| snap.intent) {
+            // A first click welded onto existing geometry aligns later points to that geometry.
+            Some(onecad_interaction::sketch::inference::SnapIntent::Coincident(target)) => {
+                Some(target)
+            }
+            _ => None,
         });
     (draft.anchor, reference)
 }

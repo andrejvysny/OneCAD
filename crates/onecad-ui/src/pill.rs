@@ -418,6 +418,7 @@ struct Hits {
     section: Option<egui::Response>,
     constraints: Option<egui::Rect>,
     more: Option<egui::Response>,
+    drawn: Vec<ToolId>,
     #[cfg(test)]
     tools: Vec<(ToolId, egui::Rect)>,
 }
@@ -446,6 +447,7 @@ fn draw_groups(
                 .enabled(v.enabled)
                 .extension(def.source.is_some());
             let r = ui.add(button.tip(tip));
+            hits.drawn.push(def.id);
             #[cfg(test)]
             hits.tools.push((def.id, r.rect));
             if def.id == ToolId::Constraints {
@@ -526,7 +528,8 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
                 hits = draw_groups(ui, groups, &views, running);
             });
         });
-    hits.clicked = catalog::show(app, chrome, hits.more.as_ref(), running).or(hits.clicked);
+    hits.clicked =
+        catalog::show(app, chrome, hits.more.as_ref(), running, &hits.drawn).or(hits.clicked);
     if let Some(id) = hits.clicked {
         activate(app, ctx, id);
     }

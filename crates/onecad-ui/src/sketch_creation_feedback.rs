@@ -1,6 +1,6 @@
 //! Placement feedback uses the captured candidate and winning inference only.
 use crate::theme::Theme;
-use egui::{Align2, FontId, Painter, Pos2, Rect, Stroke};
+use egui::{Color32, Painter, Pos2, Rect, Stroke};
 use onecad_core::{math::Vec2, sketch::SketchPlane};
 use onecad_interaction::sketch::{
     SketchDraft, SketchPhase, SketchSession,
@@ -26,7 +26,7 @@ pub(super) fn candidate(
     if let Some(position) = project(rect, view, session.plane, point) {
         let painter = painter.with_clip_rect(rect);
         painter.circle_filled(position, 4.5, theme.surface);
-        painter.circle_filled(position, 3.0, theme.accent);
+        painter.circle_filled(position, 2.5, theme.ink3);
     }
 }
 
@@ -97,28 +97,56 @@ pub(super) fn snap(
         return;
     }
     let painter = painter.with_clip_rect(rect);
+    let color = theme.sketch_inference;
+    let guide = Stroke::new(1.25, color);
+    let anchor_ray = snap.intent == SnapIntent::GeometryOnly;
     for source in guide_sources(session, &snap) {
-        if let Some(start) = project(rect, view, session.plane, source) {
-            painter.line_segment(
-                [start, position],
-                Stroke::new(1.0, theme.accent.gamma_multiply(0.8)),
-            );
-            painter.circle_stroke(start, 3.0, Stroke::new(1.0, theme.accent));
+        let Some(start) = project(rect, view, session.plane, source) else {
+            continue;
+        };
+        if anchor_ray {
+            if let Some(line) = ray_to_rect(start, position, rect) {
+                painter.line_segment(line, guide);
+            }
+        } else {
+            painter.line_segment([start, position], guide);
+            painter.circle_filled(start, 3.0, color);
         }
     }
-    marker(&painter, position, snap.kind, theme);
-    let label = if snap.intent == SnapIntent::GeometryOnly {
-        format!("{} guide", snap.kind.label())
-    } else {
-        format!("{} constraint", snap.kind.label())
+    painter.circle_filled(position, 10.0, color.gamma_multiply(0.35));
+    if matches!(
+        snap.kind,
+        SnapKind::Endpoint
+            | SnapKind::Midpoint
+            | SnapKind::Center
+            | SnapKind::Origin
+            | SnapKind::Quadrant
+            | SnapKind::Intersection
+    ) {
+        marker(&painter, position, snap.kind, color);
+    }
+    painter.circle_stroke(position, 4.0, Stroke::new(1.5, Color32::WHITE));
+    painter.circle_filled(position, 2.5, color);
+}
+
+/// Ray from `origin` through `through`, clipped to the viewport rect edge.
+fn ray_to_rect(origin: Pos2, through: Pos2, rect: Rect) -> Option<[Pos2; 2]> {
+    let dir = through - origin;
+    if dir.length() < 1.0 || !rect.contains(origin) {
+        return None;
+    }
+    let axis = |o: f32, d: f32, lo: f32, hi: f32| {
+        if d > 0.0 {
+            (hi - o) / d
+        } else if d < 0.0 {
+            (lo - o) / d
+        } else {
+            f32::INFINITY
+        }
     };
-    painter.text(
-        position + egui::vec2(10.0, -12.0),
-        Align2::LEFT_BOTTOM,
-        label,
-        FontId::proportional(12.0),
-        theme.accent,
-    );
+    let t = axis(origin.x, dir.x, rect.min.x, rect.max.x)
+        .min(axis(origin.y, dir.y, rect.min.y, rect.max.y));
+    t.is_finite().then(|| [origin, origin + dir * t.max(1.0)])
 }
 
 fn guide_sources(session: &SketchSession, snap: &AcceptedSnap) -> Vec<Vec2> {
@@ -155,47 +183,47 @@ fn guide_sources(session: &SketchSession, snap: &AcceptedSnap) -> Vec<Vec2> {
     }
 }
 
-fn marker(painter: &Painter, at: Pos2, kind: SnapKind, theme: &Theme) {
-    let stroke = Stroke::new(1.5, theme.accent);
-    let rect = Rect::from_center_size(at, egui::vec2(12.0, 12.0));
+fn marker(painter: &Painter, at: Pos2, kind: SnapKind, color: Color32) {
+    let stroke = Stroke::new(1.25, color);
+    let rect = Rect::from_center_size(at, egui::vec2(8.4, 8.4));
     match kind {
         SnapKind::Endpoint => {
             painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
         }
-        SnapKind::Midpoint => polygon(painter, at, &[(0.0, -7.0), (6.0, 5.0), (-6.0, 5.0)], stroke),
+        SnapKind::Midpoint => polygon(painter, at, &[(0.0, -4.9), (4.2, 3.5), (-4.2, 3.5)], stroke),
         SnapKind::Quadrant => polygon(
             painter,
             at,
-            &[(0.0, -7.0), (7.0, 0.0), (0.0, 7.0), (-7.0, 0.0)],
+            &[(0.0, -4.9), (4.9, 0.0), (0.0, 4.9), (-4.9, 0.0)],
             stroke,
         ),
         SnapKind::Intersection => {
             for sign in [-1.0, 1.0] {
                 painter.line_segment(
                     [
-                        at + egui::vec2(-5.0, -5.0 * sign),
-                        at + egui::vec2(5.0, 5.0 * sign),
+                        at + egui::vec2(-3.5, -3.5 * sign),
+                        at + egui::vec2(3.5, 3.5 * sign),
                     ],
                     stroke,
                 );
             }
         }
         SnapKind::Center | SnapKind::Origin => {
-            painter.circle_stroke(at, 6.0, stroke);
+            painter.circle_stroke(at, 4.2, stroke);
             painter.line_segment(
-                [at - egui::vec2(8.0, 0.0), at + egui::vec2(8.0, 0.0)],
+                [at - egui::vec2(5.6, 0.0), at + egui::vec2(5.6, 0.0)],
                 stroke,
             );
             painter.line_segment(
-                [at - egui::vec2(0.0, 8.0), at + egui::vec2(0.0, 8.0)],
+                [at - egui::vec2(0.0, 5.6), at + egui::vec2(0.0, 5.6)],
                 stroke,
             );
         }
         SnapKind::OnCurve => {
-            painter.circle_stroke(at, 5.0, stroke);
+            painter.circle_stroke(at, 3.5, stroke);
         }
         _ => {
-            painter.circle_stroke(at, 6.0, stroke);
+            painter.circle_stroke(at, 4.2, stroke);
         }
     }
 }

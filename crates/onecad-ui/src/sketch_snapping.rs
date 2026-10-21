@@ -79,7 +79,7 @@ fn arbitrate(
     let best = candidates
         .iter()
         .filter(|c| c.distance <= request.settings.tolerance)
-        .min_by(|a, b| a.score().total_cmp(&b.score()));
+        .min_by(|a, b| ranked(a, b, a.score(), b.score(), request.sketch));
     if let Some(previous) = request
         .previous
         .filter(|previous| previous.source == source)
@@ -91,13 +91,21 @@ fn arbitrate(
     {
         return Some(retained.snap);
     }
-    let best = best?;
-    if candidates.iter().any(|candidate| {
-        candidate.snap != best.snap && (candidate.score() - best.score()).abs() < 1e-8
-    }) {
-        return None;
+    best.map(|best| best.snap)
+}
+
+fn ranked(
+    a: &Candidate,
+    b: &Candidate,
+    a_value: f64,
+    b_value: f64,
+    sketch: &Sketch,
+) -> std::cmp::Ordering {
+    if (a_value - b_value).abs() < 1e-8 {
+        a.tiebreak(b, sketch)
+    } else {
+        a_value.total_cmp(&b_value)
     }
-    Some(best.snap)
 }
 
 fn project(request: &SnapRequest<'_>, point: Vec2) -> Option<Pos2> {

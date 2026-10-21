@@ -251,7 +251,7 @@ fn selected_endpoint_has_handle_highlight_without_curve_highlight_in_both_themes
                 ..Default::default()
             },
             |ui| {
-                paint(ui.painter(), rect, &view, &session, None, &theme);
+                paint(ui.painter(), rect, &view, &session, None, None, &theme);
             },
         );
         output.textures_delta.clear();
@@ -264,6 +264,6 @@ fn selected_endpoint_has_handle_highlight_without_curve_highlight_in_both_themes
                 _ => None,
             })
             .collect();
-        assert_eq!(lines, vec![theme.dof_neutral]);
+        assert_eq!(lines, vec![theme.sketch_neutral]);
     }
 }

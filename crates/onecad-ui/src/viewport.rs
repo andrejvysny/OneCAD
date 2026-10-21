@@ -85,7 +85,20 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             crate::viewport_selection::hover(app, ui, rect, &view, &display);
             if app.sketch_active() {
                 if let Some(session) = app.sketch.session.as_ref() {
-                    crate::sketch_view::paint(ui.painter(), rect, &view, session, app.sketch_gesture.preview(), &app.theme);
+                    let preview = app.sketch_gesture.preview();
+                    let pointer = ui.input(|input| input.pointer.hover_pos());
+                    let hover = pointer
+                        .filter(|point| {
+                            preview.is_none()
+                                && !app.sketch_gesture.busy()
+                                && crate::viewport_widgets::allows_pointer(ui, rect, *point)
+                                && !crate::viewport_widgets::owns_pointer(app, ui, rect)
+                        })
+                        .and_then(|point| crate::sketch_view::hover_target(rect, &view, session, Some(point)));
+                    if hover.is_some() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    crate::sketch_view::paint(ui.painter(), rect, &view, session, preview, hover, &app.theme);
                 }
             } else {
                 paint_profiles(app, ui, rect, &view, &display);

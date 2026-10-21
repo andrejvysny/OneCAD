@@ -351,7 +351,8 @@ fn set_body_style(
     Ok(())
 }
 
-fn grid_step(distance: f32) -> f32 {
+/// Minor grid spacing drawn for a camera distance; sketch grid snapping shares it.
+pub fn grid_step(distance: f32) -> f32 {
     let v = (distance.max(1.0) / 25.0).max(1e-6);
     let power = 10.0f32.powf(v.log10().floor());
     let n = v / power;

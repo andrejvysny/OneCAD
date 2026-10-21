@@ -1,4 +1,5 @@
 //! Shared compact numeric surfaces; placement and measurements are presentation-only.
+pub(crate) mod annotation;
 use egui::{Pos2, Rect, Vec2};
 
 pub(crate) const WIDTH: f32 = 194.0;
@@ -52,6 +53,21 @@ pub(crate) fn frame(style: &egui::Style) -> egui::Frame {
     egui::Frame::popup(style).inner_margin(6.0)
 }
 
+/// Small boxed value; the focused one carries the accent border.
+pub(crate) fn value_frame(ui: &egui::Ui, focused: bool) -> egui::Frame {
+    let visuals = ui.visuals();
+    let stroke = if focused {
+        egui::Stroke::new(1.5, visuals.selection.stroke.color)
+    } else {
+        egui::Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color)
+    };
+    egui::Frame::new()
+        .fill(visuals.window_fill)
+        .stroke(stroke)
+        .corner_radius(4.0)
+        .inner_margin(egui::Margin::symmetric(4, 1))
+}
+
 pub(crate) fn error(ui: &mut egui::Ui, error: Option<&String>) {
     if let Some(error) = error {
         ui.add(
@@ -66,9 +82,11 @@ pub(crate) fn error(ui: &mut egui::Ui, error: Option<&String>) {
     }
 }
 
-pub(crate) fn witness(ctx: &egui::Context, id: egui::Id, anchor: Pos2, bounds: Rect) {
+/// Clipped to `clip` so the leader never draws across surrounding chrome.
+pub(crate) fn witness(ctx: &egui::Context, id: egui::Id, anchor: Pos2, bounds: Rect, clip: Rect) {
     let endpoint = bounds.clamp(anchor);
     ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, id))
+        .with_clip_rect(clip)
         .line_segment(
             [anchor, endpoint],
             egui::Stroke::new(1.0, ctx.global_style().visuals.weak_text_color()),

@@ -73,7 +73,7 @@ fn sketch_options(app: &mut App, ui: &mut Ui) {
     ui.horizontal(|ui| {
         ui.checkbox(&mut app.ui.sketch_snap, "Snap");
         ui.add_enabled_ui(app.ui.sketch_snap, |ui| {
-            ui.checkbox(&mut app.ui.sketch_grid_snap, "1 mm grid snap");
+            ui.checkbox(&mut app.ui.sketch_grid_snap, "Snap to grid");
         });
     });
     let numeric = crate::sketch_numeric::availability(app);

@@ -1,6 +1,8 @@
 //! Creation chips retain authored input independently from measured pointer hints.
+mod callouts;
 mod editor;
 mod fields;
+pub(crate) mod format;
 mod pointer;
 use crate::app::App;
 use egui::{Context, Key};
@@ -17,6 +19,8 @@ use onecad_interaction::{
 struct FieldDraft {
     field: CreationField,
     text: String,
+    /// Full-precision seed; untouched fields commit this, not the rounded text.
+    measured: f64,
     authored: bool,
 }
 
@@ -34,7 +38,6 @@ struct Draft {
     focus: Option<usize>,
     engaged: bool,
     placement_anchor: Vec2,
-    position: Option<egui::Pos2>,
     submission: Option<u64>,
     error: Option<String>,
 }
@@ -61,7 +64,8 @@ fn project(app: &App, ctx: &Context, point: Vec2) -> Option<egui::Pos2> {
         .view
         .as_ref()?
         .project(onecad_scene::DVec3::new(world.x, world.y, world.z))?;
-    Some(rect.min + egui::vec2(screen.logical.x as f32, screen.logical.y as f32))
+    let position = rect.min + egui::vec2(screen.logical.x as f32, screen.logical.y as f32);
+    position.is_finite().then_some(position)
 }
 
 pub(crate) fn editor_open(ctx: &Context) -> bool {
@@ -122,16 +126,16 @@ pub(crate) fn open(app: &mut App, ctx: &Context) -> bool {
             .iter()
             .copied()
             .zip(measured)
-            .map(|(field, text)| FieldDraft {
+            .map(|(field, (text, measured))| FieldDraft {
                 field,
                 text,
+                measured,
                 authored: false,
             })
             .collect(),
         focus: Some(0),
         engaged: true,
         placement_anchor: draft.cursor,
-        position: None,
         submission: None,
         error: None,
     };
@@ -273,9 +277,10 @@ pub(crate) fn show(app: &mut App, ctx: &Context) {
         }
         if draft.submission.is_none() {
             let measured = fields::initial_fields(session);
-            for (field, value) in draft.fields.iter_mut().zip(measured) {
+            for (field, (text, value)) in draft.fields.iter_mut().zip(measured) {
                 if !field.authored {
-                    field.text = value
+                    field.text = text;
+                    field.measured = value;
                 }
             }
         }
@@ -382,20 +387,11 @@ pub(crate) fn viewport(
     rect: egui::Rect,
     view: &onecad_scene::ViewSnapshot,
 ) {
-    let Some(mut draft) = ui.ctx().data(|data| data.get_temp::<Draft>(id())) else {
+    let Some(draft) = ui.ctx().data(|data| data.get_temp::<Draft>(id())) else {
         return;
     };
     if !current(&draft, app) || draft.submission.is_some() {
         return;
-    }
-    if draft.position.is_none() {
-        draft.position = app.sketch.session.as_ref().and_then(|session| {
-            let point = session.plane.to_world(session.draft.as_ref()?.cursor);
-            let screen = view.project(onecad_scene::DVec3::new(point.x, point.y, point.z))?;
-            Some(rect.min + egui::vec2(screen.logical.x as f32, screen.logical.y as f32))
-        });
-        ui.ctx()
-            .data_mut(|data| data.insert_temp(id(), draft.clone()));
     }
     let Some(session) = app.sketch.session.as_ref() else {
         return;

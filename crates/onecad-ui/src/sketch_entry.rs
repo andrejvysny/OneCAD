@@ -54,6 +54,16 @@ impl App {
         if self.viewport_ready() && !self.busy() && !self.sketch_active() {
             self.ui.sketch_entry.open = true;
             self.ui.sketch_entry.context = self.interaction.context.clone();
+            // A face selected beforehand already names the support; skip the chooser.
+            if let Some((body, identity)) = self
+                .display
+                .as_ref()
+                .and_then(|display| self.topology.selected_face(display.scene.identity()))
+            {
+                self.ui.sketch_entry.plane = None;
+                self.ui.sketch_entry.candidate = None;
+                self.new_sketch_on_face(body, identity);
+            }
         }
     }
 
@@ -262,6 +272,9 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     }
     if app.ui.sketch_entry.context != app.interaction.context {
         app.ui.sketch_entry.dismiss();
+        return;
+    }
+    if app.ui.sketch_entry.pending.is_some() && app.ui.sketch_entry.message.is_none() {
         return;
     }
     egui::Area::new(egui::Id::unique("sketch-support"))

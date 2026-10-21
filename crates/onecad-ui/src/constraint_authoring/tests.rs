@@ -233,10 +233,14 @@ fn site_specific_scalar_rules_bind_unbind_and_convert_angles_once() {
     assert!(dimensions::scalar("1mm", Relation::Angle, &[]).is_err());
     assert!(dimensions::scalar("1deg", Relation::Distance, &[]).is_err());
     assert_eq!(
-        dimensions::scalar("=width * 2", Relation::Distance, &[])
-            .unwrap()
-            .expr
-            .as_deref(),
+        dimensions::scalar(
+            "=width * 2",
+            Relation::Distance,
+            &[length_variable("width")]
+        )
+        .unwrap()
+        .expr
+        .as_deref(),
         Some("width * 2")
     );
     assert!(dimensions::scalar("NaN", Relation::Distance, &[]).is_err());
@@ -281,7 +285,12 @@ fn editing_existing_dimension_keeps_identity_and_roles_and_shows_expression() {
     ));
     dimensions::set_value(
         &mut constraint,
-        dimensions::scalar("new_width", Relation::HorizontalDistance, &[]).unwrap(),
+        dimensions::scalar(
+            "new_width",
+            Relation::HorizontalDistance,
+            &[length_variable("new_width")],
+        )
+        .unwrap(),
     );
     assert_eq!(
         constraint.value().unwrap().expr.as_deref(),
@@ -307,6 +316,18 @@ fn duplicate_relations_are_named_without_new_geometry_or_identity() {
     assert!(operands::already_applied(&f.sketch, &reversed));
     assert_eq!(f.sketch.constraints().len(), 1);
     assert_eq!(f.sketch.constraints()[0].id(), id);
+}
+
+fn length_variable(name: &str) -> VariableDto {
+    VariableDto {
+        id: name.into(),
+        name: name.into(),
+        value: 10.0,
+        expr: None,
+        resolved_value: 10.0,
+        dimension: "length".into(),
+        error: None,
+    }
 }
 
 fn draft() -> Draft {
@@ -340,6 +361,7 @@ fn draft() -> Draft {
         constraint,
         editing: true,
         text: "6".into(),
+        edited: true,
         focus: true,
         position: None,
         viewport: None,
@@ -425,6 +447,8 @@ fn expression_preview_uses_resolved_units_and_preserves_source_for_authority() {
             .as_deref(),
         Some("2")
     );
+    let error = dimensions::scalar("missing * 2", Relation::Distance, &[]).unwrap_err();
+    assert!(error.contains("undefined variable"), "{error}");
 }
 
 #[test]

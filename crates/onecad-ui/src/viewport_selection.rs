@@ -53,6 +53,21 @@ impl Selection {
             .filter(|target| target.scene == scene && target.kind == HighlightKind::Face)
             .map(|target| (target.body_id, target.topology_id.clone()))
     }
+    #[cfg(test)]
+    pub(crate) fn select_face_for_test(
+        &mut self,
+        scene: SceneIdentity,
+        body_id: BodyId,
+        face: &str,
+    ) {
+        self.selected = Some(Target {
+            scene,
+            body_id,
+            mesh_revision: 0,
+            kind: HighlightKind::Face,
+            topology_id: face.into(),
+        });
+    }
     pub fn selected_kind(&self) -> Option<(HighlightKind, BodyId)> {
         self.selected
             .as_ref()

@@ -88,7 +88,7 @@ impl Default for UiState {
             rectangle_centered: false,
             arc_three_point: false,
             sketch_snap: true,
-            sketch_grid_snap: false,
+            sketch_grid_snap: true,
             appearance: Appearance::default(),
             theme_failed: None,
             recent_view: 0,
