@@ -52,21 +52,12 @@ pub async fn resolve(backend: &mut Backend, id: &str, choice: Choice) -> Result<
     apply_choice(backend, &offer, choice).await?;
     remove_offer(backend, id)?;
     if !backend.startup_opened && !has_offers(backend)? {
-        if backend.paths.open_on_start {
-            api::open_document(
-                &backend.state,
-                backend.host.clone(),
-                backend.paths.document.to_string_lossy().into_owned(),
-                None,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-        } else {
-            api::new_document(&backend.state, backend.host.clone())
-                .await
-                .map_err(|e| e.to_string())?;
-        }
-        backend.startup_opened = true;
+        backend.startup_opened = crate::services::open_requested_startup(
+            &backend.state,
+            backend.host.clone(),
+            &backend.paths,
+        )
+        .await?;
     }
     if backend.startup_opened {
         backend

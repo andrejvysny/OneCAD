@@ -262,6 +262,7 @@ fn deliver(
         point.point = snap.point;
         super::paint(app, ui, rect, view, snap);
     }
+    super::feedback::candidate(ui.painter(), rect, view, session, point.point, &app.theme);
     if released {
         let key = point.key.clone();
         app.sketch_dispatch(SketchAction::ClickInferred {

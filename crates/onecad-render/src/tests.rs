@@ -480,3 +480,19 @@ mod edge_modes;
 mod resize_recovery;
 
 mod capture_artifacts;
+#[test]
+fn support_grid_shader_validates_without_gpu() {
+    let source = [
+        include_str!("shaders/common.wgsl"),
+        include_str!("shaders/ground.wgsl"),
+    ]
+    .join("\n");
+    let module = naga::front::wgsl::parse_str(&source).unwrap();
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap();
+}
+mod support_grid;

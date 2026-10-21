@@ -9,11 +9,14 @@ use onecad_widgets::{
     frame,
 };
 
-const NOT_YET: &str = "Not available yet";
 const SQUARE: f32 = 36.0;
 
 fn nav_button<'a>(icon: &'a str, name: &'a str, enabled: bool, active: bool) -> NavButton<'a> {
-    let reason = (!enabled).then_some(NOT_YET);
+    let reason = (!enabled).then_some(match icon {
+        "isolate" => "Temporary body isolation is not available yet",
+        "layers" => "Layer visibility controls are not available yet",
+        _ => "Viewport unavailable",
+    });
     NavButton {
         icon,
         enabled,
@@ -29,7 +32,7 @@ pub fn nav_pill(app: &mut App, ctx: &Context, chrome: &Chrome) {
         nav_button("home", "Home view", ready, false),
         nav_button("fit", "Fit all", ready, false),
         nav_button("isolate", "Isolate", false, false),
-        nav_button("section", "Section", false, false),
+        nav_button("section", "Section / display settings", ready, false),
         nav_button(
             "layers",
             "Layers",
@@ -47,6 +50,10 @@ pub fn nav_pill(app: &mut App, ctx: &Context, chrome: &Chrome) {
             app.fit_pending = true;
         }
         Some(1) => app.fit_pending = true,
+        Some(3) => display_menu::toggle(
+            app,
+            Rect::from_min_size(chrome.nav_pill, vec2(SQUARE, SQUARE)),
+        ),
         Some(4) => app.ui.shell_facade.layers_open = !layers_open,
         _ => {}
     }
@@ -57,7 +64,6 @@ pub fn nav_pill(app: &mut App, ctx: &Context, chrome: &Chrome) {
 pub fn view_cluster(app: &mut App, ctx: &Context, chrome: &Chrome) {
     let ready = app.viewport_ready();
     let tip = |name| Tip::new(name);
-    let off = |name| Tip::new(name).reason(Some(NOT_YET));
     let buttons = [
         SquareButton {
             icon: "shaded",
@@ -67,9 +73,9 @@ pub fn view_cluster(app: &mut App, ctx: &Context, chrome: &Chrome) {
         },
         SquareButton {
             icon: "grid",
-            on: true,
-            enabled: false,
-            tip: off("Grid"),
+            on: crate::support_view::grid_visible(ctx),
+            enabled: ready,
+            tip: tip("Grid"),
         },
         SquareButton {
             icon: "snap",
@@ -89,6 +95,10 @@ pub fn view_cluster(app: &mut App, ctx: &Context, chrome: &Chrome) {
     if clicked == Some(0) {
         let anchor = Rect::from_min_size(pos, vec2(SQUARE, SQUARE));
         display_menu::toggle(app, anchor);
+    }
+    if clicked == Some(1) {
+        crate::support_view::set_grid_visible(ctx, !crate::support_view::grid_visible(ctx));
+        app.draw_dirty = true;
     }
     if clicked == Some(2) {
         app.ui.sketch_snap = !app.ui.sketch_snap;

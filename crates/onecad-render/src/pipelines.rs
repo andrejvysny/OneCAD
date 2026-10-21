@@ -413,7 +413,7 @@ impl Pipelines {
                 Some("fs_ground"),
                 &[],
                 Some(OUTPUT_FORMAT),
-                None,
+                Some(wgpu::BlendState::ALPHA_BLENDING),
                 depth(false, none),
                 SAMPLES,
                 false,

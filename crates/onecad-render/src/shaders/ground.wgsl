@@ -8,6 +8,7 @@
 struct GOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) wp: vec3<f32>,
+    @location(1) @interpolate(flat) support: u32,
 };
 
 @vertex
@@ -15,10 +16,16 @@ fn vs_ground(@builtin(vertex_index) vi: u32) -> GOut {
     var xs = array<f32, 6>(-1.0, 1.0, 1.0, -1.0, 1.0, -1.0);
     var ys = array<f32, 6>(-1.0, -1.0, 1.0, -1.0, 1.0, 1.0);
     let r = u.grid.w;
-    let p = vec3<f32>(u.grid.y + xs[vi] * r, u.grid.z + ys[vi] * r, u.ground.x);
+    let index = vi % 6u;
+    var p = vec3<f32>(u.grid.y + xs[index] * r, u.grid.z + ys[index] * r, u.ground.x);
+    if (vi >= 6u) {
+        p = u.support_origin.xyz + u.support_x.xyz * (u.support_x.w + xs[index] * r)
+            + u.support_y.xyz * (u.support_y.w + ys[index] * r);
+    }
     var o: GOut;
     o.pos = u.view_proj * vec4<f32>(p, 1.0);
     o.wp = p;
+    o.support = vi / 6u;
     return o;
 }
 
@@ -35,6 +42,17 @@ fn grid_cov(g: vec2<f32>, step: f32, width: f32) -> vec2<f32> {
 
 @fragment
 fn fs_ground(i: GOut) -> @location(0) vec4<f32> {
+    if (i.support == 1u) {
+        if (u.support_origin.w < 0.5) { discard; }
+        let relative = i.wp - u.support_origin.xyz;
+        let local = vec2<f32>(dot(relative, u.support_x.xyz), dot(relative, u.support_y.xyz));
+        let minor = grid_cov(local, u.grid.x, u.ground.y);
+        let major = grid_cov(local, u.grid.x * 10.0, u.ground.z);
+        let radius = length(local - vec2<f32>(u.support_x.w, u.support_y.w)) / u.grid.w;
+        let fade = pow(clamp(1.0 - radius, 0.0, 1.0), 2.0);
+        let coverage = max(minor.x * (1.0 - smoothstep(0.08, 0.2, minor.y)), major.x) * fade;
+        return vec4<f32>(mix(u.grid_minor.rgb, u.grid_major.rgb, major.x), coverage);
+    }
     let g = i.wp.xy;
     let minor = grid_cov(g, u.grid.x, u.ground.y);
     let major = grid_cov(g, u.grid.x * 10.0, u.ground.z);
@@ -43,8 +61,10 @@ fn fs_ground(i: GOut) -> @location(0) vec4<f32> {
     // Minor lines leave before they crowd into a tone (cells under ~8 px).
     let lod = 1.0 - smoothstep(0.08, 0.2, minor.y);
     var c = u.canvas.rgb;
-    c = mix(c, u.grid_minor.rgb, minor.x * fade * lod);
-    c = mix(c, u.grid_major.rgb, major.x * fade);
+    if (u.support_origin.w == 0.0) {
+        c = mix(c, u.grid_minor.rgb, minor.x * fade * lod);
+        c = mix(c, u.grid_major.rgb, major.x * fade);
+    }
     if (u.flags.z > 0.5) {
         let uv = vec2<f32>((g.x - u.shadow_rect.x) * u.shadow_rect.z, 1.0 - (g.y - u.shadow_rect.y) * u.shadow_rect.w);
         let s = textureSampleLevel(shadow_tex, lin, uv, 0.0).rg;

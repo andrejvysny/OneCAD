@@ -17,20 +17,6 @@ fn strip_frame(
         &UiState::default(),
     );
     let bounds = strip_rect(ctx, &chrome, true, true);
-    let actions = [
-        StripAction {
-            label: "Discard sketch edits",
-            kind: ButtonKind::Secondary,
-            enabled: true,
-            tip: None,
-        },
-        StripAction {
-            label: "Finish sketch",
-            kind: ButtonKind::Primary,
-            enabled: true,
-            tip: None,
-        },
-    ];
     let title = if long {
         "A deliberately long sketch name that cannot fit in the minimum window"
     } else {
@@ -42,30 +28,46 @@ fn strip_frame(
         "10 DOF"
     };
     let mut result = None;
-    let mut output =
-        ctx.run_ui(
-            RawInput {
-                screen_rect: Some(chrome.viewport.union(chrome.titlebar)),
-                events,
-                ..Default::default()
-            },
-            |_| {
-                let area =
-                    frame::floating(egui::Id::unique("session-strip"), bounds.min, Order::Middle)
-                        .show(ctx, |ui| {
-                            let scroll = bounded_strip(ui, bounds.width(), |ui| {
-                                SessionStrip::new(StripVariant::Sketch)
-                                    .icon(Some("sketch"))
-                                    .title(title)
-                                    .status(Some((status, egui::Color32::GRAY, None)))
-                                    .actions(&actions)
-                                    .show(ui)
-                            });
-                            result = Some((scroll.inner_rect, scroll.inner));
-                        });
-                assert!(bounds.expand(1.0).contains_rect(area.response.rect));
-            },
-        );
+    let mut output = ctx.run_ui(
+        RawInput {
+            screen_rect: Some(chrome.viewport.union(chrome.titlebar)),
+            events,
+            ..Default::default()
+        },
+        |_| {
+            let area = frame::floating(
+                egui::Id::unique("session-strip"),
+                bounds.min,
+                Order::Middle,
+            )
+            .show(ctx, |ui| {
+                let scroll = bounded_strip(ui, bounds.width(), |ui| {
+                    strip_contents(ui, bounds.width(), title, status, egui::Color32::GRAY, true)
+                });
+                result = Some((scroll.inner_rect, scroll.inner));
+            });
+            assert!(bounds.expand(1.0).contains_rect(area.response.rect));
+        },
+    );
+    let actions: Vec<_> = output
+        .shapes
+        .iter()
+        .filter_map(|shape| match &shape.shape {
+            egui::Shape::Text(text)
+                if matches!(
+                    text.galley.text(),
+                    "Discard" | "Discard sketch edits" | "Finish" | "Finish sketch"
+                ) =>
+            {
+                Some((
+                    text.galley.text().to_owned(),
+                    Rect::from_min_size(text.pos, text.galley.size()),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+    ctx.data_mut(|data| data.insert_temp(egui::Id::unique("strip-test-actions"), actions));
     output.textures_delta.clear();
     result.unwrap()
 }
@@ -92,9 +94,16 @@ fn check_actions(size: Vec2, dark: bool, scale: f32) {
     onecad_widgets::theme::install(&ctx, onecad_widgets::theme::load(dark).unwrap(), dark);
     let _ = frame(&ctx, size, vec![]);
     let (viewport, _) = frame(&ctx, size, vec![]);
-    for (expected, inset) in [(0, 190.0), (1, 50.0)] {
-        let pos = pos2(viewport.right() - inset, viewport.center().y);
-        assert!(viewport.contains(pos));
+    let buttons: Vec<(String, Rect)> = ctx
+        .data(|data| data.get_temp(egui::Id::unique("strip-test-actions")))
+        .unwrap();
+    assert_eq!(buttons.len(), 2);
+    for (expected, (_, rect)) in buttons.into_iter().enumerate() {
+        let pos = rect.center();
+        assert!(
+            viewport.contains_rect(rect),
+            "{size:?}: {rect:?} outside {viewport:?}"
+        );
         for pressed in [true, false] {
             let (_, clicked) = frame(
                 &ctx,
@@ -152,6 +161,7 @@ fn strip_avoids_side_panels_cube_controls_and_navigation() {
                 assert!(!bounds.intersects(cube));
                 assert!(chrome.viewport.contains_rect(bounds));
                 assert!(bounds.bottom() < chrome.nav_pill.y - 38.0);
+                assert_eq!(bounds.top(), chrome.viewport.top() + 62.0);
             }
         }
     }
@@ -176,6 +186,6 @@ fn short_strip_centers_below_toolbar_after_content_measurement() {
             lane.right() - actual.width() / 2.0,
         );
         assert!((actual.center().x - expected).abs() < 1.0);
-        assert!(actual.width() < lane.width());
+        assert!(actual.width() <= lane.width());
     }
 }

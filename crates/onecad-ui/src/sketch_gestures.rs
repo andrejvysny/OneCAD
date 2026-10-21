@@ -232,6 +232,7 @@ pub(crate) fn route_raw(app: &mut App, ctx: &egui::Context, raw: &egui::RawInput
         || crate::input::ui_owns_keyboard(&app.ui, ctx)
     {
         app.cancel_sketch_gesture();
+        crate::sketch_view::cancel_selection_pointer(ctx);
     }
 }
 

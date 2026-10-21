@@ -77,7 +77,10 @@ pub fn paint(
             painter.circle_stroke(screen, 6.0, Stroke::new(1.0, theme.accent));
         }
     }
-    if let Some(draft) = &session.preview {
+    crate::sketch_creation::paint_anchors(&painter, rect, view, session, theme);
+    if let Some(draft) = &session.preview
+        && !matches!(draft, DraftPrimitive::Point { .. })
+    {
         let points = draft_points(draft, rect, view, session.plane);
         if let [point] = points.as_slice()
             && let Some(screen) = project(rect, view, session.plane, *point)
@@ -455,6 +458,7 @@ mod selection;
 use selection::pick_sketch;
 pub use selection::{PickResult, marquee_targets, pick_entity};
 mod selection_input;
+pub(crate) use selection_input::cancel_pointer as cancel_selection_pointer;
 pub use selection_input::selection_input;
 
 mod target_chooser;

@@ -36,6 +36,17 @@ pub struct FrameU {
     pub section: [f32; 4],
     pub cap: [f32; 4],
     pub display: [f32; 4],
+    pub support_origin: [f32; 4],
+    pub support_x: [f32; 4],
+    pub support_y: [f32; 4],
+}
+
+/// Transient grid placement, independent of the world-ground contact shadow.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GridFrame {
+    pub origin: onecad_scene::DVec3,
+    pub x_axis: onecad_scene::DVec3,
+    pub y_axis: onecad_scene::DVec3,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,12 +64,16 @@ pub enum SilhouetteMode {
 pub struct RenderStyle {
     pub theme: Theme,
     pub silhouettes: SilhouetteMode,
+    pub support_grid: Option<GridFrame>,
+    pub grid_visible: bool,
 }
 impl Default for RenderStyle {
     fn default() -> Self {
         Self {
             theme: Theme::Dark,
             silhouettes: SilhouetteMode::Geometric,
+            support_grid: None,
+            grid_visible: true,
         }
     }
 }
@@ -262,6 +277,19 @@ fn set_ground(
     frame.grid_minor = rgba(token(style.theme, "--color-viewport-grid-minor")?, 1.0);
     frame.grid_major = rgba(token(style.theme, "--color-viewport-grid-major")?, 1.0);
     frame.grid = [minor, center.x, center.y, 100.0 * minor];
+    if let Some(support) = style.support_grid {
+        let target = view.camera().target - support.origin;
+        let center_x = (target.dot(support.x_axis) / f64::from(minor * 10.0)).round()
+            * f64::from(minor * 10.0);
+        let center_y = (target.dot(support.y_axis) / f64::from(minor * 10.0)).round()
+            * f64::from(minor * 10.0);
+        frame.support_origin = support.origin.as_vec3().extend(1.0).to_array();
+        frame.support_x = support.x_axis.as_vec3().extend(center_x as f32).to_array();
+        frame.support_y = support.y_axis.as_vec3().extend(center_y as f32).to_array();
+    }
+    if !style.grid_visible {
+        frame.support_origin[3] = -1.0;
+    }
     frame.ground = [
         0.0,
         1.0,

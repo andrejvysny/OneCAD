@@ -71,6 +71,14 @@ async fn occluded_app_logic_delivers_new_and_protects_close_without_ui() {
 }
 
 async fn create_app(root: &std::path::Path) -> (App, egui::Context) {
+    let (app, context) = create_home_app(root).await;
+    app.bridge
+        .submit(crate::bridge::Command::Document(Request::New))
+        .unwrap();
+    (app, context)
+}
+
+async fn create_home_app(root: &std::path::Path) -> (App, egui::Context) {
     assert_eq!(std::env::var("ONECAD_REQUIRE_WORKER").as_deref(), Ok("1"));
     assert_eq!(std::env::var("ONECAD_REQUIRE_GPU").as_deref(), Ok("1"));
     let worker = std::env::var_os("ONECAD_WORKER_PATH")
@@ -180,3 +188,42 @@ mod arc_slot_delivery_tests;
 
 #[path = "sketch_entry_delivery_tests.rs"]
 mod sketch_entry_delivery_tests;
+#[path = "sketch_plane_choice_tests.rs"]
+mod sketch_plane_choice_tests;
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; run with ONECAD_REQUIRE_WORKER=1 ONECAD_REQUIRE_GPU=1"]
+async fn home_without_document_and_empty_new_share_back_and_escape_predicate() {
+    let area = tempfile::tempdir().unwrap();
+    let (mut app, context) = create_home_app(area.path()).await;
+    let mut frame = eframe::Frame::_new_kittest();
+    pump_until(&mut app, &context, &mut frame, |app| {
+        app.bridge.shared.recovery.lock().unwrap().checked
+    })
+    .await;
+    assert!(app.ui.start_open);
+    assert!(!app.document_open());
+    assert!(!app.document_dirty());
+    crate::start_screen::leave(&mut app);
+    assert!(app.ui.start_open);
+    assert!(!crate::bars::save_allowed(&app));
+    assert!(!crate::bars::export_allowed(&app));
+    app.document_request(Request::New);
+    pump_until(&mut app, &context, &mut frame, |app| !app.documents.running).await;
+    assert!(app.document_open());
+    assert!(app.document_state.as_ref().unwrap().path.is_none());
+    let session = app.document_state.as_ref().unwrap().runtime_session.clone();
+    app.ui.start_open = true;
+    crate::start_screen::leave(&mut app);
+    assert!(!app.ui.start_open);
+    assert_eq!(
+        app.document_state.as_ref().unwrap().runtime_session,
+        session
+    );
+    assert!(crate::bars::save_allowed(&app));
+    app.stop();
+    pump_until(&mut app, &context, &mut frame, |app| app.may_close).await;
+}
+
+#[path = "capability_delivery_tests.rs"]
+mod capability_delivery_tests;

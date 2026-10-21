@@ -1,6 +1,86 @@
 use super::*;
 
 #[test]
+fn acute_profile_fill_preserves_exact_vertices_without_stroke_joins() {
+    let points = [
+        Some(egui::pos2(100.0, 100.0)),
+        Some(egui::pos2(500.0, 100.0)),
+        Some(egui::pos2(100.01, 100.001)),
+        Some(egui::pos2(100.0, 300.0)),
+    ];
+    let triangles = [[0, 1, 2], [0, 2, 3]];
+    let mesh = profile_fill(&points, &triangles, egui::Color32::LIGHT_BLUE);
+    assert_eq!(mesh.indices, [0, 1, 2, 0, 2, 3]);
+    assert_eq!(mesh.vertices.len(), points.len());
+    for (vertex, point) in mesh.vertices.iter().zip(points) {
+        assert_eq!(Some(vertex.pos), point);
+    }
+    let context = egui::Context::default();
+    let mut output = context.run_ui(Default::default(), |_| {});
+    output.textures_delta.clear();
+    let primitives = context.tessellate(
+        vec![egui::epaint::ClippedShape {
+            clip_rect: egui::Rect::EVERYTHING,
+            shape: egui::Shape::mesh(mesh),
+            transform_after_tessellation: Default::default(),
+        }],
+        1.0,
+    );
+    let egui::epaint::Primitive::Mesh(tessellated) = &primitives[0].primitive else {
+        panic!("fill mesh expected")
+    };
+    assert!(tessellated.vertices.iter().all(|vertex| {
+        vertex.pos.x >= 100.0
+            && vertex.pos.x <= 500.0
+            && vertex.pos.y >= 100.0
+            && vertex.pos.y <= 300.0
+    }));
+}
+
+#[test]
+fn outlined_acute_triangles_reproduce_finish_spike_mechanism() {
+    let context = egui::Context::default();
+    let mut output = context.run_ui(Default::default(), |_| {});
+    output.textures_delta.clear();
+    let old = egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(100.0, 100.0),
+            egui::pos2(500.0, 100.0),
+            egui::pos2(100.01, 100.001),
+        ],
+        egui::Color32::LIGHT_BLUE,
+        egui::Stroke::new(1.0, egui::Color32::BLUE),
+    );
+    let primitives = context.tessellate(
+        vec![egui::epaint::ClippedShape {
+            clip_rect: egui::Rect::EVERYTHING,
+            shape: old,
+            transform_after_tessellation: Default::default(),
+        }],
+        1.0,
+    );
+    let egui::epaint::Primitive::Mesh(mesh) = &primitives[0].primitive else {
+        panic!("triangle expected")
+    };
+    assert!(
+        mesh.vertices
+            .iter()
+            .any(|vertex| vertex.pos.x.abs() > 1000.0 || vertex.pos.y.abs() > 1000.0),
+        "acute filled path stroke must reproduce the unbounded miter spike"
+    );
+}
+
+#[test]
+fn clipped_profile_triangles_never_reference_unprojected_vertices() {
+    let mesh = profile_fill(
+        &[Some(egui::pos2(0.0, 0.0)), None, Some(egui::pos2(1.0, 1.0))],
+        &[[0, 1, 2]],
+        egui::Color32::WHITE,
+    );
+    assert!(mesh.indices.is_empty());
+}
+
+#[test]
 fn profile_behind_body_interior_is_selectable_only_in_wireframe() {
     use onecad_render::DisplayMode;
     let (scene, view, profile) = box_and_hidden_profile();

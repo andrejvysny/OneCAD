@@ -366,7 +366,7 @@ impl Renderer {
         pass.set_pipeline(&self.pipelines.ground);
         pass.set_bind_group(0, &self.frame_bind, &[]);
         pass.set_bind_group(1, &target.ground_bind, &[]);
-        pass.draw(0..6, 0..1);
+        pass.draw(0..12, 0..1);
     }
     fn section_mask(
         &self,

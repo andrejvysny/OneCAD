@@ -22,6 +22,7 @@ use onecad_widgets::{
     frame,
 };
 
+mod catalog;
 mod layout;
 use layout::{bounded_pill, toolbar_rect};
 
@@ -30,8 +31,6 @@ pub(crate) fn center_x(ctx: &Context, chrome: &Chrome) -> f32 {
 }
 
 type Groups<'a> = &'a [&'a [ToolDef]];
-
-const NOT_YET: &str = "Not available yet";
 
 #[derive(Clone, Copy)]
 struct View {
@@ -49,6 +48,9 @@ fn gate(ok: bool, reason: &'static str) -> View {
 }
 
 fn model_view(app: &App, eligible: bool, reason: &'static str) -> View {
+    if !app.document_open() {
+        return gate(false, "Create or open a document first");
+    }
     if app.interaction.tool.is_some() || app.busy() {
         return gate(false, "Finish the current operation first");
     }
@@ -130,6 +132,11 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
             "Select an editable feature first",
         ),
         ToolId::MoveRotate => model_view(app, app.selected_body.is_some(), "Select a body first"),
+        ToolId::Import => gate(
+            crate::bars::replacement_allowed(app),
+            "Finish the current operation first",
+        ),
+        ToolId::More => gate(true, ""),
         ToolId::Section => gate(app.viewport_ready(), "Viewport unavailable"),
         ToolId::Horizontal
         | ToolId::Vertical
@@ -158,12 +165,20 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
             }
             state
         }
-        ToolId::InsertComponent | ToolId::MakeComponent => gate(true, NOT_YET),
-        ToolId::Flange | ToolId::Dogbone => extension_view(app, def.id),
-        ToolId::CheckGeometry if app.ui.editor_facade.topology_failed => {
-            gate(false, "Topology Check stopped responding")
+        ToolId::InsertComponent | ToolId::MakeComponent
+            if crate::editor_facade::PREVIEW_FACADES =>
+        {
+            gate(true, "")
         }
-        ToolId::CheckGeometry => gate(true, NOT_YET),
+        ToolId::Flange | ToolId::Dogbone | ToolId::CheckGeometry
+            if crate::editor_facade::PREVIEW_FACADES =>
+        {
+            let mut state = gate(true, "");
+            if app.ui.editor_facade.active_tool == Some(def.id) {
+                state.state = ToolState::Active;
+            }
+            state
+        }
         ToolId::Constraints => {
             let mut v = gate(sketch_ui::tools_enabled(app), "Sketch is not ready");
             if app.ui.constraints_open {
@@ -171,16 +186,11 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
             }
             v
         }
-        _ => gate(false, NOT_YET),
+        _ => {
+            let reason = crate::tool_registry::unavailable_reason(def.id);
+            gate(false, reason.split(" (ONECAD-").next().unwrap_or(reason))
+        }
     }
-}
-
-fn extension_view(app: &App, id: ToolId) -> View {
-    let mut view = gate(true, NOT_YET);
-    if app.ui.editor_facade.active_tool == Some(id) {
-        view.state = ToolState::Active;
-    }
-    view
 }
 
 /// Registry shortcuts are design data; show one only once the app binds it (none yet).
@@ -190,6 +200,16 @@ fn bound_shortcut(def: &ToolDef) -> Option<&'static str> {
 }
 
 pub(crate) fn activate(app: &mut App, ctx: &Context, id: ToolId) {
+    let definition = ToolDef {
+        id,
+        icon: "select",
+        label: "",
+        shortcut: None,
+        source: None,
+    };
+    if !view(app, &definition, None).enabled {
+        return;
+    }
     let sketch_tool = match id {
         ToolId::Select if app.sketch_active() => Some(SketchTool::Select),
         ToolId::Line => Some(SketchTool::Line),
@@ -226,10 +246,18 @@ pub(crate) fn activate(app: &mut App, ctx: &Context, id: ToolId) {
         }
         ToolId::Edit => crate::inspector_history::edit_selected_feature(app),
         ToolId::MoveRotate => app.begin_transform(),
-        ToolId::InsertComponent => crate::editor_facade::show_library(app),
-        ToolId::MakeComponent => crate::component_wizard::open(&mut app.ui),
-        ToolId::Flange | ToolId::Dogbone | ToolId::CheckGeometry => {
-            app.ui.editor_facade.press_extension_tool(id);
+        ToolId::Import => app.document_request(crate::document_flow::Request::Import),
+        ToolId::Section => crate::display_menu::toggle(app, ctx.content_rect().shrink(48.0)),
+        ToolId::InsertComponent if crate::editor_facade::PREVIEW_FACADES => {
+            crate::editor_facade::show_library(app)
+        }
+        ToolId::MakeComponent if crate::editor_facade::PREVIEW_FACADES => {
+            crate::component_wizard::open(&mut app.ui)
+        }
+        ToolId::Flange | ToolId::Dogbone | ToolId::CheckGeometry
+            if crate::editor_facade::PREVIEW_FACADES =>
+        {
+            app.ui.editor_facade.press_extension_tool(id)
         }
         ToolId::Constraints => crate::constraints_menu::toggle(&mut app.ui),
         ToolId::Horizontal
@@ -389,6 +417,7 @@ struct Hits {
     clicked: Option<ToolId>,
     section: Option<egui::Response>,
     constraints: Option<egui::Rect>,
+    more: Option<egui::Response>,
     #[cfg(test)]
     tools: Vec<(ToolId, egui::Rect)>,
 }
@@ -422,7 +451,9 @@ fn draw_groups(
             if def.id == ToolId::Constraints {
                 hits.constraints = Some(r.rect);
             }
-            if def.id == ToolId::Section {
+            if def.id == ToolId::More {
+                hits.more = Some(r);
+            } else if def.id == ToolId::Section {
                 hits.section = Some(r);
             } else if r.clicked() && running != Some(def.id) {
                 hits.clicked = Some(def.id);
@@ -446,11 +477,35 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
     } else {
         pill_tools(kind)
     };
+    let label = selection_label(app, kind);
+    let mut bounds = toolbar_rect(ctx, chrome);
+    let lane = layout::toolbar_bounds(chrome);
+    let active = groups
+        .iter()
+        .flat_map(|group| group.iter())
+        .find(|def| {
+            matches!(
+                view(app, def, running).state,
+                ToolState::SketchActive | ToolState::Running
+            )
+        })
+        .map(|def| def.id);
+    let compact = layout::compact_tools(groups, active, lane.width(), label.is_some());
+    let mode_key = egui::Id::unique("tool-pill-compact");
+    if ctx.data(|data| data.get_temp::<bool>(mode_key)) != Some(compact.is_some()) {
+        bounds = lane;
+        ctx.data_mut(|data| data.insert_temp(mode_key, compact.is_some()));
+    }
+    let compact_groups = [compact.as_deref().unwrap_or_default()];
+    let groups = if compact.is_some() {
+        &compact_groups[..]
+    } else {
+        groups
+    };
     let views: Vec<Vec<View>> = groups
         .iter()
         .map(|g| g.iter().map(|d| view(app, d, running)).collect())
         .collect();
-    let label = selection_label(app, kind);
     let mode = if app.sketch_active() {
         PillMode::Sketch
     } else {
@@ -458,25 +513,33 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
     };
     let accent = accent(app, kind);
     let (mut hits, mut clear) = (Hits::default(), false);
-    let bounds = toolbar_rect(ctx, chrome);
     frame::floating(egui::Id::unique("tool-pill"), bounds.min, Order::Middle)
         .pivot(Align2::LEFT_TOP)
         .show(ctx, |ui| {
-            bounded_pill(ui, bounds.width(), None, mode, accent, |ui| {
-                if let Some((k, c, v)) = &label {
+            bounded_pill(ui, lane.width(), None, mode, accent, |ui| {
+                if compact.is_none()
+                    && let Some((k, c, v)) = &label
+                {
                     clear = SelectionLabel::new(k, c).variant(*v).show(ui).clear;
                     pill_divider(ui);
                 }
                 hits = draw_groups(ui, groups, &views, running);
             });
         });
+    hits.clicked = catalog::show(app, chrome, hits.more.as_ref(), running).or(hits.clicked);
     if let Some(id) = hits.clicked {
         activate(app, ctx, id);
     }
     if clear {
         clear_selection(app, kind);
     }
-    crate::constraints_menu::show(app, ctx, chrome, hits.constraints);
+    crate::constraints_menu::show(
+        app,
+        ctx,
+        chrome,
+        hits.constraints
+            .or_else(|| hits.more.as_ref().map(|response| response.rect)),
+    );
     crate::constraint_authoring::show(app, ctx);
     crate::sketch_view::show_target_chooser(app, ctx);
     if let Some(r) = hits.section {

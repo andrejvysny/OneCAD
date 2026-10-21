@@ -32,6 +32,8 @@ struct Draft {
     sequence: u64,
     fields: Vec<FieldDraft>,
     focus: Option<usize>,
+    engaged: bool,
+    placement_anchor: Vec2,
     position: Option<egui::Pos2>,
     submission: Option<u64>,
     error: Option<String>,
@@ -51,29 +53,40 @@ fn viewport_bounds(ctx: &Context) -> egui::Rect {
         .intersect(ctx.content_rect())
 }
 
-fn seed_position(app: &App, ctx: &Context) -> Option<egui::Pos2> {
+fn project(app: &App, ctx: &Context, point: Vec2) -> Option<egui::Pos2> {
     let rect = viewport_bounds(ctx);
     let session = app.sketch.session.as_ref()?;
-    let world = session.plane.to_world(session.draft.as_ref()?.cursor);
+    let world = session.plane.to_world(point);
     let screen = app
         .view
         .as_ref()?
         .project(onecad_scene::DVec3::new(world.x, world.y, world.z))?;
-    Some(
-        rect.min
-            + egui::vec2(
-                screen.logical.x as f32 + 16.0,
-                screen.logical.y as f32 + 16.0,
-            ),
-    )
+    Some(rect.min + egui::vec2(screen.logical.x as f32, screen.logical.y as f32))
 }
 
 pub(crate) fn editor_open(ctx: &Context) -> bool {
-    ctx.data(|data| data.get_temp::<Draft>(id()).is_some())
+    ctx.data(|data| {
+        data.get_temp::<Draft>(id())
+            .is_some_and(|draft| draft.engaged)
+    })
 }
 
 pub(crate) fn open(app: &mut App, ctx: &Context) -> bool {
-    if editor_open(ctx) {
+    if let Some(mut draft) = ctx
+        .data(|data| data.get_temp::<Draft>(id()))
+        .filter(|draft| current(draft, app))
+    {
+        if !draft.engaged {
+            draft.engaged = true;
+            draft.focus = Some(0);
+            draft.placement_anchor = app
+                .sketch
+                .session
+                .as_ref()
+                .and_then(|session| session.draft.as_ref())
+                .map_or(draft.anchor, |draft| draft.cursor);
+            ctx.data_mut(|data| data.insert_temp(id(), draft));
+        }
         return true;
     }
     if availability(app).is_err() {
@@ -116,7 +129,9 @@ pub(crate) fn open(app: &mut App, ctx: &Context) -> bool {
             })
             .collect(),
         focus: Some(0),
-        position: seed_position(app, ctx),
+        engaged: true,
+        placement_anchor: draft.cursor,
+        position: None,
         submission: None,
         error: None,
     };
@@ -215,6 +230,26 @@ fn ready(app: &App) -> bool {
 }
 
 pub(crate) fn show(app: &mut App, ctx: &Context) {
+    let stored = ctx.data(|data| data.get_temp::<Draft>(id()));
+    if stored.as_ref().is_some_and(|draft| !current(draft, app)) {
+        ctx.data_mut(|data| data.remove::<Draft>(id()));
+    }
+    if ctx.data(|data| data.get_temp::<Draft>(id()).is_none())
+        && app
+            .sketch
+            .session
+            .as_ref()
+            .is_some_and(|session| session.tool != SketchTool::Point)
+        && open(app, ctx)
+    {
+        ctx.data_mut(|data| {
+            if let Some(mut draft) = data.get_temp::<Draft>(id()) {
+                draft.engaged = false;
+                draft.focus = None;
+                data.insert_temp(id(), draft);
+            }
+        });
+    }
     let Some(mut draft) = ctx.data_mut(|data| {
         let draft = data.get_temp::<Draft>(id());
         data.remove::<Draft>(id());
@@ -250,7 +285,7 @@ pub(crate) fn show(app: &mut App, ctx: &Context) {
         cancel_editor(app, &draft);
         return;
     }
-    if draft.submission.is_none() {
+    if draft.submission.is_none() && draft.engaged {
         preview(app, &draft);
         if apply {
             commit(app, &mut draft)
@@ -357,13 +392,7 @@ pub(crate) fn viewport(
         draft.position = app.sketch.session.as_ref().and_then(|session| {
             let point = session.plane.to_world(session.draft.as_ref()?.cursor);
             let screen = view.project(onecad_scene::DVec3::new(point.x, point.y, point.z))?;
-            Some(
-                rect.min
-                    + egui::vec2(
-                        screen.logical.x as f32 + 16.0,
-                        screen.logical.y as f32 + 16.0,
-                    ),
-            )
+            Some(rect.min + egui::vec2(screen.logical.x as f32, screen.logical.y as f32))
         });
         ui.ctx()
             .data_mut(|data| data.insert_temp(id(), draft.clone()));

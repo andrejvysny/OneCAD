@@ -32,6 +32,7 @@ pub struct TitleBar<'a> {
     can_undo: bool,
     can_redo: bool,
     home_blocked: Option<&'a str>,
+    search_blocked: Option<&'a str>,
     drag_window: bool,
     workspace: Option<WorkspaceSpec<'a>>,
 }
@@ -57,6 +58,7 @@ impl<'a> TitleBar<'a> {
             can_undo: true,
             can_redo: true,
             home_blocked: None,
+            search_blocked: None,
             drag_window: true,
             workspace: None,
         }
@@ -82,6 +84,12 @@ impl<'a> TitleBar<'a> {
     /// Disable Home, showing `reason` in its tooltip.
     pub fn home_blocked(mut self, reason: Option<&'a str>) -> Self {
         self.home_blocked = reason;
+        self
+    }
+
+    /// Unavailable search remains discoverable without advertising an unbound shortcut.
+    pub fn search_blocked(mut self, reason: Option<&'a str>) -> Self {
+        self.search_blocked = reason;
         self
     }
 
@@ -192,7 +200,16 @@ impl<'a> TitleBar<'a> {
             Pos2::new(right - SEARCH_W, cy - BTN / 2.0),
             vec2(SEARCH_W, BTN),
         );
-        let search = search_look(ui, search, l).clicked();
+        let search = ui
+            .add_enabled_ui(self.search_blocked.is_none(), |ui| {
+                search_look(ui, search, l, self.search_blocked.is_none())
+            })
+            .inner;
+        let search = if let Some(reason) = self.search_blocked {
+            search.on_disabled_hover_text(reason).clicked()
+        } else {
+            search.clicked()
+        };
         right -= SEARCH_W + 8.0;
         let specs = [
             ("redo", "Redo", self.can_redo, Some("⌘⇧Z")),
@@ -263,11 +280,13 @@ fn file_button(ui: &mut Ui, pos: Pos2, l: &Look) -> Response {
 }
 
 /// 220×28 command-search look: chip fill, search icon, hint text, "⌘K" chip.
-fn search_look(ui: &mut Ui, rect: Rect, l: &Look) -> Response {
+fn search_look(ui: &mut Ui, rect: Rect, l: &Look, shortcut: bool) -> Response {
     let t = &l.theme;
     let id = ui.scope_id().with("titlebar-search");
     let r = ui.interact(rect, id, Sense::click());
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Search commands"));
+    r.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), "Search commands")
+    });
     let p = ui.painter();
     let fill = if r.hovered() { t.hover } else { t.chip };
     p.rect(
@@ -297,6 +316,9 @@ fn search_look(ui: &mut Ui, rect: Rect, l: &Look) -> Response {
     );
     let hh = hint.size().y;
     p.galley(Pos2::new(rect.left() + 30.0, cy - hh / 2.0), hint, t.ink5);
+    if !shortcut {
+        return r;
+    }
     let key = p.layout_no_wrap("⌘K".to_owned(), FontId::new(11.0, fonts::mono()), t.ink5);
     let kr = Rect::from_center_size(
         Pos2::new(rect.right() - 8.0 - (key.size().x + 10.0) / 2.0, cy),

@@ -81,7 +81,10 @@ fn page(app: &mut App, ui: &mut Ui, area: Rect) {
     });
 }
 
-fn leave(app: &mut App) {
+pub(crate) fn leave(app: &mut App) {
+    if !app.document_open() {
+        return;
+    }
     app.ui.start_open = false;
     app.ui.start_page = StartPage::Home;
     app.draw_dirty = true;
@@ -157,6 +160,14 @@ fn sidebar(app: &mut App, ui: &mut Ui, area: Rect) {
     );
     ui.scope_builder(UiBuilder::new().max_rect(bottom), |ui| {
         if !crate::editor_facade::PREVIEW_FACADES {
+            ui.add(SidebarNavItem::new("extension", "Extensions").enabled(false))
+                .on_disabled_hover_text(
+                    "Native extension discovery and execution are not available yet",
+                );
+            ui.add(SidebarNavItem::new("settings", "Settings").enabled(false))
+                .on_disabled_hover_text(
+                    "Native settings page is not available yet; use the appearance menu",
+                );
             return;
         }
         ui.spacing_mut().item_spacing.y = 2.0;
@@ -191,6 +202,19 @@ fn top_items(app: &App, ui: &mut Ui) -> Option<Nav> {
     ];
     for (icon, label, target) in items {
         if !crate::editor_facade::PREVIEW_FACADES && target != Some(Nav::Home) {
+            let reason = match label {
+                "Recent" => {
+                    "Recent documents are available in Home; a separate native page is not available yet"
+                }
+                "Starred" => "Native document starring is not available yet",
+                "Templates" => "Native template creation is not available yet",
+                "Component library" => {
+                    "Native component library browsing and placement are not available yet"
+                }
+                _ => "Native destination is not available yet",
+            };
+            ui.add(SidebarNavItem::new(icon, label).enabled(false))
+                .on_disabled_hover_text(reason);
             continue;
         }
         let active = match target {
@@ -248,13 +272,15 @@ fn heading(app: &App, ui: &mut Ui, text: &str) {
 
 fn main_column(app: &mut App, ui: &mut Ui) {
     ui.spacing_mut().item_spacing = vec2(14.5, 0.0);
-    let back = Button::new("Back to document")
-        .kind(ButtonKind::Secondary)
-        .icon(Some("home"));
-    if ui.add(back).clicked() {
-        leave(app);
+    if app.document_open() {
+        let back = Button::new("Back to document")
+            .kind(ButtonKind::Secondary)
+            .icon(Some("home"));
+        if ui.add(back).clicked() {
+            leave(app);
+        }
+        ui.add_space(20.0);
     }
-    ui.add_space(20.0);
     tiles(app, ui);
     ui.add_space(28.0);
     recent_header(app, ui);

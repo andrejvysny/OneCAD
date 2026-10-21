@@ -26,7 +26,14 @@ fn input_frame(
 ) -> Capture {
     let chrome = crate::layout::chrome(screen, &UiState::default());
     let bounds = toolbar_rect(ctx, &chrome);
-    let groups = pill_tools(kind);
+    let original = pill_tools(kind);
+    let compact = compact_tools(original, None, toolbar_bounds(&chrome).width(), true);
+    let compact_groups = [compact.as_deref().unwrap_or_default()];
+    let groups = if compact.is_some() {
+        &compact_groups[..]
+    } else {
+        original
+    };
     let views: Vec<_> = groups
         .iter()
         .map(|group| group.iter().map(|_| gate(true, "")).collect())
@@ -52,7 +59,9 @@ fn input_frame(
                     PillMode::Sketch,
                     PillAccent::SketchSelection,
                     |ui| {
-                        SelectionLabel::new("Sketch entities", "12 selected").show(ui);
+                        if compact.is_none() {
+                            SelectionLabel::new("Sketch entities", "12 selected").show(ui);
+                        }
                         draw_groups(ui, groups, &views, None)
                     },
                 );
@@ -171,17 +180,57 @@ fn check_layout(size: Vec2, dark: bool, scale: f32, kind: SelectionKind) {
                 ],
             );
             if !pressed {
-                assert_eq!(click.hits.clicked, Some(*tool));
+                if *tool == ToolId::More {
+                    assert!(click.hits.more.is_some_and(|response| response.clicked()));
+                } else if *tool == ToolId::Section {
+                    assert!(
+                        click
+                            .hits
+                            .section
+                            .is_some_and(|response| response.clicked())
+                    );
+                } else {
+                    assert_eq!(click.hits.clicked, Some(*tool));
+                }
             }
         }
         last = Some(*tool);
     }
     assert_eq!(
         last,
-        Some(if kind == SelectionKind::SketchEntity {
-            ToolId::Delete
-        } else {
-            ToolId::Constraints
-        })
+        Some(
+            if compact_tools(pill_tools(kind), None, bounds.width(), true).is_some() {
+                ToolId::More
+            } else if kind == SelectionKind::SketchEntity {
+                ToolId::Delete
+            } else {
+                ToolId::More
+            }
+        )
     );
+}
+
+#[test]
+fn minimum_window_pins_select_active_point_and_overflow_without_scrolling() {
+    for active in [
+        ToolId::Select,
+        ToolId::Line,
+        ToolId::Rectangle,
+        ToolId::Circle,
+        ToolId::Arc,
+        ToolId::Slot,
+        ToolId::Point,
+        ToolId::Dimension,
+    ] {
+        let groups = pill_tools(SelectionKind::SketchEntity);
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 560.0));
+        let chrome = crate::layout::chrome(screen, &UiState::default());
+        let bounds = toolbar_bounds(&chrome);
+        let tools = compact_tools(groups, Some(active), bounds.width(), true).unwrap();
+        assert!(tools.iter().any(|tool| tool.id == ToolId::Select));
+        assert!(tools.iter().any(|tool| tool.id == active));
+        assert!(tools.iter().any(|tool| tool.id == ToolId::Point));
+        assert_eq!(tools.last().unwrap().id, ToolId::More);
+        assert!(tools.len() as f32 * 36.0 + 8.0 <= bounds.width());
+    }
 }

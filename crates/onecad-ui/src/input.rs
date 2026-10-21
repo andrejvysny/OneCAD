@@ -15,6 +15,13 @@ pub(crate) fn ui_owns_keyboard(ui: &crate::ui_state::UiState, ctx: &egui::Contex
     overlay::owner(ui, false, egui::Popup::is_any_open(ctx)).is_some()
 }
 
+pub(crate) fn navigation_blocked(app: &App, ctx: &egui::Context) -> bool {
+    let document = app.documents.confirm.is_some()
+        || crate::constraint_authoring::editor_open(ctx)
+        || crate::sketch_numeric::editor_open(ctx);
+    overlay::navigation_blocked(&app.ui, document, egui::Popup::is_any_open(ctx))
+}
+
 #[derive(Default)]
 pub(crate) struct RoutingState {
     pass: u64,

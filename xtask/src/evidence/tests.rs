@@ -41,7 +41,7 @@ fn accepted() -> String {
 }
 #[test]
 fn host_inventory_requires_exact_current_names() {
-    assert_eq!(HOST_TESTS.len(), 40);
+    assert_eq!(HOST_TESTS.len(), 44);
     let inventory = HOST_TESTS
         .iter()
         .map(|name| format!("{name}: test\n"))
@@ -63,8 +63,8 @@ fn host_zero_skips_wrong_failed_duplicate_missing_and_nonmetal_fail_closed() {
     for output in [
         "test result: ok. 0 passed; 0 failed; 0 ignored;".into(),
         accepted.replace(
-            "40 passed; 0 failed; 0 ignored;",
-            "39 passed; 0 failed; 1 ignored;",
+            &format!("{} passed; 0 failed; 0 ignored;", HOST_TESTS.len()),
+            &format!("{} passed; 0 failed; 1 ignored;", HOST_TESTS.len() - 1),
         ),
         accepted.replace(HOST_TESTS[0], "unrelated_test"),
         accepted.replacen("\nok\n", "\nFAILED\n", 1),

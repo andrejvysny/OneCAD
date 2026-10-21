@@ -77,6 +77,25 @@ fn item<'a>(
 /// Workspace popover anchored under the title-bar button (19c).
 pub fn workspace_menu(app: &mut App, ctx: &Context, anchor: &Response) {
     if !crate::editor_facade::PREVIEW_FACADES {
+        egui::Popup::menu(anchor).frame(menu_frame(ctx)).show(|ui| {
+            ui.set_max_width(250.0);
+            ui.label("Design");
+            for label in [
+                "Assembly",
+                "Simulation",
+                "Drawing",
+                "CNC",
+                "Customize workspace…",
+                "Get more workspaces…",
+            ] {
+                ui.add_enabled(false, egui::Button::new(label))
+                    .on_disabled_hover_text(
+                        "Native workspace integration is unavailable (ONECAD-301 / ONECAD-92)",
+                    );
+            }
+        });
+        let id = egui::Popup::default_response_id(anchor);
+        app.ui.workspace_menu_open = egui::Popup::is_id_open(ctx, id);
         return;
     }
     let items = [

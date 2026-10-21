@@ -91,6 +91,7 @@ pub(crate) fn viewport(
         .options(|options| options.input_options.max_click_dist);
     let motion = ui.input(|input| sample(input, armed.press, pressed, max_click_dist));
     if motion.conflict {
+        crate::sketch_view::cancel_selection_pointer(ui.ctx());
         crate::input_trace::app(
             app,
             "gesture.refused",
@@ -101,7 +102,9 @@ pub(crate) fn viewport(
     }
     armed.moved |= motion.moved;
     let released = ui.input(|input| input.pointer.button_released(PointerButton::Primary));
-    if response.drag_started_by(PointerButton::Primary) || released && armed.moved {
+    let drag_started = response.drag_started_by(PointerButton::Primary) || released && armed.moved;
+    if drag_started {
+        crate::sketch_view::cancel_selection_pointer(ui.ctx());
         match &armed.target {
             ArmedTarget::Drag(target) => {
                 app.gesture_dispatch(GestureAction::Begin {
@@ -136,11 +139,17 @@ pub(crate) fn viewport(
             ArmedTarget::Cancelled => {}
         }
     }
+    let consumed = drag_started
+        || armed.moved
+        || matches!(armed.target, ArmedTarget::Stale | ArmedTarget::Cancelled);
+    if consumed {
+        crate::sketch_view::cancel_selection_pointer(ui.ctx());
+    }
     if ui.input(|input| input.pointer.primary_down()) {
         app.armed_sketch_gesture = Some(armed);
-        return true;
     }
-    matches!(armed.target, ArmedTarget::Stale | ArmedTarget::Cancelled)
+    // Selection must capture the press until movement actually claims the gesture.
+    consumed
 }
 
 fn arm(

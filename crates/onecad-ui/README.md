@@ -50,7 +50,9 @@ CARGO_BUILD_JOBS=3 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 ```
 
 The host requires an explicitly isolated temporary profile. Omit `--open` to
-start a blank document and Home screen, or provide a prepared `.onecad` fixture.
+start Home without a document, or provide a prepared `.onecad` fixture. New part
+creates a real empty unsaved document; Back to document and Escape share that
+document-presence predicate independently of viewport success.
 Set the environment before launching the built binary; it never changes
 process environment after threads start. Example paths below are synthetic QA
 paths, not production document or application-data locations:
@@ -128,7 +130,9 @@ Recovery decisions and semantic restoration have deterministic service tests; th
 physical crash/restart, autosave, second-crash and clean-close drill remains a
 required native acceptance gate.
 
-Only implemented controls are exposed. Select a worker-produced profile fill in
+Implemented controls are enabled in valid contexts; planned entries remain
+discoverable with specific unavailable reasons. See the
+[control inventory](../../docs/design/native-ui/capabilities.md). Select a worker-produced profile fill in
 the viewport, choose Extrude, enter a length or expression, wait for its real
 preview and choose Create. New Body is the default. Add and Cut require an explicit
 visible, healthy target body from the feature card or body tree; choosing a target
@@ -137,8 +141,10 @@ the prior preview. Flip negates the same signed distance expression through the
 application resolver. Select an editable history row and an applicable numeric field to edit its stored
 parameters. Existing-feature edits rebuild on Apply: PreviewOp appends a candidate
 at HEAD and cannot correctly preview replacement of an existing operation.
-Choose Sketch, then XY, XZ, YZ or Selected planar face. The face option requires
-a checked viewport face selection. One click selects an existing sketch row;
+Choose Sketch, then click a translucent XY/XZ/YZ patch or a planar face in the
+viewport. Hover previews the exact support grid without changing the camera or
+document. Cancel clears transient choice; navigation remains available. Face
+frames resolve through the worker before existing fenced admission. One click selects an existing sketch row;
 double-click or Properties Edit enters it. Camera, picking and rendering use the
 same effective sketch frame, preserving the persisted named-plane conventions.
 Face entry queries OCCT's exact frame and projected boundary without holding the
@@ -524,7 +530,9 @@ column. The
 navigation cube occupies 104 px. Saved feature parameters expand inline beneath
 their History row, with the same expression validation, Apply and Cancel actions.
 New feature creation retains its floating parameter card. Application diagnostics
-remain recorded without an Activity overlay.
+appear through a compact Activity affordance on Home and in the editor. Expand
+details for attributed, selectable and copyable outcomes; accepted/regenerating
+is distinct from completed. Unavailable command search advertises no shortcut.
 
 The Display popover uses a compact 280 px width, render-style icons and an active
 row highlight/checkmark. Projection fills the popover width. X-ray, SSAA and

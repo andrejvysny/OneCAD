@@ -276,3 +276,45 @@ fn multiple_primary_cycles_refuse_instead_of_selecting_last_input() {
             .is_none()
     );
 }
+
+#[test]
+fn shift_up_after_same_batch_click_does_not_replace_existing_selection() {
+    let (mut session, rect, view) = session();
+    let first = add_point(&mut session, -20.0, 0.0);
+    let second = add_point(&mut session, 20.0, 0.0);
+    session.selection = vec![SketchTarget::Point {
+        entity: first,
+        role: CurvePosition::Arbitrary,
+    }];
+    let ctx = egui::Context::default();
+    frame(&ctx, &session, rect, &view, vec![], egui::Modifiers::NONE);
+    let position = at(&session, rect, &view, 20.0, 0.0);
+    let action = frame(
+        &ctx,
+        &session,
+        rect,
+        &view,
+        vec![
+            egui::Event::PointerMoved(position),
+            button(position, true, egui::Modifiers::SHIFT),
+            button(position, false, egui::Modifiers::SHIFT),
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+        ],
+        egui::Modifiers::SHIFT,
+    )
+    .unwrap();
+    let expected = SketchTarget::Point {
+        entity: second,
+        role: CurvePosition::Arbitrary,
+    };
+    assert!(
+        matches!(action, SketchAction::Select { mode: SelectionMode::Toggle, targets, .. } if targets == vec![expected])
+    );
+    assert_eq!(
+        session.selection,
+        vec![SketchTarget::Point {
+            entity: first,
+            role: CurvePosition::Arbitrary
+        }]
+    );
+}

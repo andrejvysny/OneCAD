@@ -70,14 +70,14 @@ pub(super) fn numeric_one(host: &mut Host, text: &str) {
     assert!(
         host.widgets
             .iter()
-            .any(|(label, _)| label == "Radius" || label == "Width"),
+            .any(|(label, _)| label == "R mm" || label == "Width mm"),
         "numeric controls: {:?}",
         host.widgets
             .iter()
             .map(|(label, _)| label)
             .collect::<Vec<_>>()
     );
-    assert!(!host.widgets.iter().any(|(label, _)| label == "Length"));
+    assert!(!host.widgets.iter().any(|(label, _)| label == "Length mm"));
     let before = host.sketch().clone();
     let depth = undo_depth(host);
     host.replace(text);

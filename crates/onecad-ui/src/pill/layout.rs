@@ -53,3 +53,46 @@ pub(super) fn bounded_pill<R>(
 
 #[cfg(test)]
 mod tests;
+
+/// Reserve a fixed overflow button instead of hiding commands in a horizontal scroller.
+pub(super) fn compact_tools(
+    groups: &[&[crate::tool_registry::ToolDef]],
+    active: Option<crate::tool_registry::ToolId>,
+    width: f32,
+    selection: bool,
+) -> Option<Vec<crate::tool_registry::ToolDef>> {
+    use crate::tool_registry::ToolId;
+    let tools: Vec<_> = groups
+        .iter()
+        .flat_map(|group| group.iter().copied())
+        .collect();
+    let required = tools.len() as f32 * 36.0
+        + groups.len() as f32 * 14.0
+        + if selection { 180.0 } else { 8.0 };
+    if required <= width || tools.len() <= 1 {
+        return None;
+    }
+    let mut shown = Vec::new();
+    if let Some(select) = tools.iter().find(|tool| tool.id == ToolId::Select) {
+        shown.push(*select);
+    }
+    let preferred = active.filter(|id| *id != ToolId::Select).or_else(|| {
+        tools
+            .iter()
+            .find(|tool| !matches!(tool.id, ToolId::Select | ToolId::More))
+            .map(|tool| tool.id)
+    });
+    if let Some(tool) = tools.iter().find(|tool| Some(tool.id) == preferred) {
+        shown.push(*tool);
+    }
+    if width >= 158.0
+        && let Some(point) = tools.iter().find(|tool| tool.id == ToolId::Point)
+        && !shown.iter().any(|tool| tool.id == ToolId::Point)
+    {
+        shown.push(*point);
+    }
+    if let Some(more) = tools.iter().find(|tool| tool.id == ToolId::More) {
+        shown.push(*more);
+    }
+    Some(shown)
+}

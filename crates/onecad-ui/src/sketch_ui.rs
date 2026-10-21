@@ -221,12 +221,15 @@ pub fn viewport(
     view: &ViewSnapshot,
 ) {
     let Some(session) = app.sketch.session.as_ref() else {
+        crate::sketch_creation::clear_candidate(ui.ctx());
         return;
     };
     if session.phase == SketchPhase::Closed {
+        crate::sketch_creation::clear_candidate(ui.ctx());
         return;
     }
     if session.phase != SketchPhase::Active || (!app.viewport_ready() || !app.bridge.valid()) {
+        crate::sketch_creation::clear_candidate(ui.ctx());
         return;
     }
     let key = session.key.clone();
@@ -240,6 +243,7 @@ pub fn viewport(
         return;
     };
     if session.tool == SketchTool::Select {
+        crate::sketch_creation::clear_candidate(ui.ctx());
         if crate::sketch_gestures::viewport(app, ui, rect, response, view) {
             return;
         }

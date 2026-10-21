@@ -220,4 +220,53 @@ mod tests {
         assert!(!egui::Popup::is_id_open(&ctx, id()));
         assert_eq!(session.selection, vec![target]);
     }
+    #[test]
+    fn batched_shift_click_keeps_toggle_mode_for_overlapping_chooser() {
+        let (mut session, rect, view) = session();
+        add_point(&mut session, 0.0, 0.0);
+        add_point(&mut session, 0.0, 0.0);
+        let ctx = egui::Context::default();
+        let position = rect.center();
+        let button = |pressed| egui::Event::PointerButton {
+            pos: position,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::SHIFT,
+        };
+        for events in [
+            vec![],
+            vec![
+                egui::Event::ModifiersChanged(egui::Modifiers::SHIFT),
+                egui::Event::PointerMoved(position),
+                button(true),
+                button(false),
+                egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            ],
+        ] {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(rect.expand(100.0)),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let response = ui.interact(
+                        rect,
+                        egui::Id::unique("chooser-canvas"),
+                        egui::Sense::click_and_drag(),
+                    );
+                    assert!(
+                        crate::sketch_view::selection_input(ui, rect, &response, &view, &session)
+                            .unwrap()
+                            .is_none()
+                    );
+                },
+            );
+            output.textures_delta.clear();
+        }
+        let choice = ctx.data(|data| data.get_temp::<Choice>(id())).unwrap();
+        assert_eq!(choice.mode, SelectionMode::Toggle);
+        assert_eq!(choice.targets.len(), 2);
+        assert!(valid(&choice, &session, Some(view)));
+    }
 }

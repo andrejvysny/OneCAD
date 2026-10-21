@@ -151,23 +151,10 @@ async fn execute_command(
                 .map_err(|e| e.to_string())?
         }
         Command::Open => {
-            if backend.paths.open_on_start {
-                api::open_document(
-                    state,
-                    host,
-                    backend.paths.document.to_string_lossy().into_owned(),
-                    None,
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-            } else {
-                api::new_document(state, host)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                backend.startup_opened = true;
+            backend.startup_opened = open_requested_startup(state, host, &backend.paths).await?;
+            if !backend.startup_opened {
                 return Ok(Default::default());
             }
-            backend.startup_opened = true;
             api::get_projection(state)
                 .await
                 .map_err(|e| e.to_string())?
@@ -222,6 +209,25 @@ async fn execute_command(
             completion: Some(Box::new(completion)),
             rollback: None,
         })
+}
+
+pub(crate) async fn open_requested_startup(
+    state: &onecad_app::state::AppState,
+    host: onecad_app::host::HostContext,
+    paths: &crate::qa::QaPaths,
+) -> Result<bool, String> {
+    if !paths.open_on_start {
+        return Ok(false);
+    }
+    api::open_document(
+        state,
+        host,
+        paths.document.to_string_lossy().into_owned(),
+        None,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    Ok(true)
 }
 
 pub(crate) async fn wait_regen(

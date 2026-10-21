@@ -147,6 +147,13 @@ impl crate::app::App {
             self.file_status(action, "Resolve startup recovery before using file actions");
             return;
         }
+        if matches!(request, Request::Save { .. } | Request::Export(_)) && !self.document_open() {
+            self.file_status(
+                action,
+                "Create or open a document before saving or exporting",
+            );
+            return;
+        }
         let pending = Pending::Document(request);
         if needs_confirmation(&pending, self.document_dirty()) {
             self.documents.confirm = Some(pending);

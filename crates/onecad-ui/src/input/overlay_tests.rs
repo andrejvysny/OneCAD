@@ -1,6 +1,19 @@
 use super::{overlay::*, *};
 use crate::ui_state::UiState;
 
+#[test]
+fn support_chooser_keeps_navigation_but_not_document_or_popup_input() {
+    let mut ui = UiState::default();
+    ui.sketch_entry.open = true;
+    assert_eq!(owner(&ui, false, false), Some(Owner::SketchEntry));
+    assert!(!overlay::navigation_blocked(&ui, false, false));
+    assert!(overlay::navigation_blocked(&ui, true, false));
+    assert!(overlay::navigation_blocked(&ui, false, true));
+    ui.sketch_entry.open = false;
+    ui.constraints_open = true;
+    assert!(overlay::navigation_blocked(&ui, false, false));
+}
+
 fn escape() -> egui::Event {
     egui::Event::Key {
         key: egui::Key::Escape,

@@ -15,82 +15,95 @@ fn label(field: CreationField) -> &'static str {
     match field {
         CreationField::X => "X",
         CreationField::Y => "Y",
-        CreationField::Length => "Length",
-        CreationField::Width => "Width",
-        CreationField::Height => "Height",
-        CreationField::Diameter => "Diameter",
-        CreationField::Radius => "Radius",
-        CreationField::Sweep => "Sweep (degrees)",
+        CreationField::Length => "Length mm",
+        CreationField::Width => "Width mm",
+        CreationField::Height => "Height mm",
+        CreationField::Diameter => "Ø mm",
+        CreationField::Radius => "R mm",
+        CreationField::Sweep => "Sweep °",
     }
 }
 
 pub(super) fn show(app: &App, ctx: &Context, draft: &mut Draft) -> (bool, bool) {
-    let bounds = viewport_bounds(ctx).shrink(8.0);
-    let width = 250.0_f32.min(bounds.width());
-    let height = if draft.fields.len() > 1 { 230.0 } else { 190.0 };
-    let position = draft
-        .position
-        .unwrap_or(bounds.center() - egui::vec2(width * 0.5, height * 0.5));
-    let position = egui::pos2(
-        position
-            .x
-            .clamp(bounds.left(), (bounds.right() - width).max(bounds.left())),
-        position
-            .y
-            .clamp(bounds.top(), (bounds.bottom() - height).max(bounds.top())),
-    );
+    let bounds = crate::dimension_chip::usable(ctx, &app.ui).intersect(viewport_bounds(ctx));
+    let point = if draft.engaged {
+        draft.placement_anchor
+    } else {
+        app.sketch
+            .session
+            .as_ref()
+            .and_then(|session| session.draft.as_ref())
+            .map_or(draft.anchor, |draft| draft.cursor)
+    };
+    if !draft.engaged {
+        draft.placement_anchor = point;
+    }
+    let anchor = project(app, ctx, point).unwrap_or(bounds.center());
+    let height = 12.0 + draft.fields.len() as f32 * 26.0 + if draft.engaged { 52.0 } else { 0.0 };
+    let size = egui::vec2(crate::dimension_chip::WIDTH.min(bounds.width()), height);
+    let hovering = draft.position.is_some_and(|position| {
+        ctx.input(|input| input.pointer.hover_pos())
+            .is_some_and(|at| egui::Rect::from_min_size(position, size).contains(at))
+    });
+    let position = if !draft.engaged && hovering {
+        draft
+            .position
+            .unwrap_or_else(|| crate::dimension_chip::place(anchor, size, bounds))
+    } else {
+        crate::dimension_chip::place(anchor, size, bounds)
+    };
     draft.position = Some(position);
     let mut result = (false, false);
-    egui::Area::new(id())
+    let response = egui::Area::new(id())
         .order(egui::Order::Foreground)
         .fixed_pos(position)
+        .default_size(size)
         .constrain_to(bounds)
+        .movable(false)
         .show(ctx, |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_width(width - 16.0);
-                egui::ScrollArea::vertical()
-                    .max_height(bounds.height().min(300.0))
-                    .show(ui, |ui| {
-                        result = contents(app, ui, draft);
-                    });
+            crate::dimension_chip::frame(ui.style()).show(ui, |ui| {
+                ui.set_width((size.x - 12.0).max(1.0));
+                result = contents(app, ui, draft);
             });
         });
+    crate::dimension_chip::witness(ctx, id().with("witness"), anchor, response.response.rect);
     result
 }
 
 fn contents(app: &App, ui: &mut egui::Ui, draft: &mut Draft) -> (bool, bool) {
     let pending = draft.submission.is_some();
-    ui.strong("Create precisely");
-    ui.small("Only changed fields become dimensions.");
-    ui.small("Tab changes fields. Enter creates. Escape cancels.");
-    if draft.tool == SketchTool::Arc {
-        ui.small("Sweep sets geometry only.");
-    }
     edit_fields(ui, draft, pending);
+    if !draft.engaged {
+        return (false, false);
+    }
     let parsed = fields::dimensions(draft, app).and_then(|dimensions| {
         let session = app.sketch.session.as_ref().ok_or("Open a sketch first")?;
         dimensions.preview_for_session(session)?;
         Ok(dimensions)
     });
-    if let Some(error) = draft.error.as_ref().or_else(|| parsed.as_ref().err()) {
-        ui.colored_label(ui.visuals().error_fg_color, error);
-    }
-    if pending {
-        ui.label("Creating…");
-    }
+    crate::dimension_chip::error(ui, draft.error.as_ref().or_else(|| parsed.as_ref().err()));
     let ready = !pending && parsed.is_ok() && !app.composing;
     let enter = ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Enter));
     let cancel = ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Escape));
     let mut result = (ready && enter, cancel && !app.composing);
     ui.horizontal(|ui| {
-        result.0 |= ui.add_enabled(ready, egui::Button::new("Create")).clicked();
-        result.1 |= ui.button("Cancel").clicked();
+        if pending {
+            ui.spinner();
+            ui.small("Creating…");
+        } else {
+            result.0 |= ui
+                .add_enabled(ready, egui::Button::new("Create").small())
+                .clicked();
+        }
+        result.1 |= ui.small_button("Cancel").clicked();
     });
     result
 }
 
 fn edit_fields(ui: &mut egui::Ui, draft: &mut Draft, pending: bool) {
-    cycle(ui, draft, pending);
+    if draft.engaged {
+        cycle(ui, draft, pending);
+    }
     let ids: Vec<_> = draft
         .fields
         .iter()
@@ -103,11 +116,14 @@ fn edit_fields(ui: &mut egui::Ui, draft: &mut Draft, pending: bool) {
                 !pending,
                 egui::TextEdit::singleline(&mut field.text)
                     .id(ids[index])
-                    .desired_width(135.0)
+                    .desired_width(ui.available_width().clamp(24.0, 104.0))
                     .char_limit(onecad_core::expr::MAX_SOURCE_LEN),
             );
             if draft.focus == Some(index) && !pending {
                 response.request_focus()
+            }
+            if response.has_focus() || response.clicked() {
+                draft.engaged = true;
             }
             if response.changed() {
                 field.authored = true;
@@ -184,6 +200,8 @@ mod tests {
                 },
             ],
             focus: Some(0),
+            engaged: true,
+            placement_anchor: Vec2::new_unchecked(80.0, 50.0),
             position: None,
             submission: None,
             error: None,
@@ -250,6 +268,40 @@ mod tests {
         assert!(draft.fields[0].authored);
         assert!(!draft.fields[1].authored);
         assert!(draft.error.is_none());
+    }
+
+    #[test]
+    fn measurements_stay_unfocused_and_do_not_author_fields() {
+        let ctx = Context::default();
+        let mut draft = draft();
+        draft.engaged = false;
+        draft.focus = None;
+        frame(&ctx, &mut draft, vec![]);
+        assert!(!draft.engaged);
+        assert!(ctx.memory(|memory| memory.focused()).is_none());
+        assert!(draft.fields.iter().all(|field| !field.authored));
+        ctx.data_mut(|data| data.insert_temp(id(), draft));
+        assert!(!editor_open(&ctx));
+    }
+
+    #[test]
+    fn pending_fields_cannot_change_authorship_or_focus() {
+        let ctx = Context::default();
+        let mut draft = draft();
+        draft.focus = None;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events: vec![
+                    egui::Event::Text("123".into()),
+                    key(Key::Tab, egui::Modifiers::NONE),
+                ],
+                ..Default::default()
+            },
+            |ui| edit_fields(ui, &mut draft, true),
+        );
+        output.textures_delta.clear();
+        assert!(draft.fields.iter().all(|field| !field.authored));
+        assert!(draft.focus.is_none());
     }
 
     #[test]

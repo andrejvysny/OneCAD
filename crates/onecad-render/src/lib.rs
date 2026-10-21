@@ -29,7 +29,7 @@ mod section_contours_worker;
 mod silhouette;
 mod targets;
 
-pub use frame::{RenderStyle, SilhouetteMode, Theme};
+pub use frame::{GridFrame, RenderStyle, SilhouetteMode, Theme};
 pub use highlights::{HighlightKind, HighlightTarget, PreparedHighlights};
 pub use limits::{MemoryEstimate, RenderLimits};
 pub use mesh::{BodyStyle, PreviewIdentity};

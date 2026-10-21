@@ -90,6 +90,13 @@ fn press_id() -> egui::Id {
     egui::Id::unique("sketch-selection-primary-press")
 }
 
+pub(crate) fn cancel_pointer(ctx: &egui::Context) {
+    ctx.data_mut(|data| {
+        data.remove::<Marquee>(press_id());
+        data.remove::<Marquee>(cache_id());
+    });
+}
+
 fn primary_transitions(ui: &egui::Ui) -> Vec<(Pos2, bool, egui::Modifiers)> {
     ui.input(|input| {
         input

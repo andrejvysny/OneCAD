@@ -22,6 +22,12 @@ rollback.
 
 ## Dimension editors and primitive authorship
 
+Creation measurements appear as unfocused compact geometry-adjacent chips.
+Click or Tab engages numeric editing; Tab and Shift+Tab cycle fields. Existing
+dimension edits use the same placement primitive while retaining their original
+constraint identity. Chips clamp outside the Explorer, Inspector and session
+controls; short witness lines preserve association during view changes.
+
 An existing dimension editor uses the original constraint identity and application
 candidate admission. Its text identity is the sketch visit plus constraint, not
 the current camera capture. Placement remains presentation state and clamps to
@@ -51,6 +57,17 @@ completion. Closing an editor cannot make a late reply reopen it.
 
 ## Support planes and identity
 
+Sketch starts a nonmodal viewport support chooser. Labelled translucent principal
+patches and directly picked planar faces compete by captured ray depth. Hover
+resolution is transient and bounded; only the current candidate and capture may
+publish a frame. Navigation remains available, and acceptance aligns the camera
+once through the existing entry path. Curved or stale faces never fall back to XY.
+
+The analytic grid uses the hovered or active effective support frame. World-ground
+contact shadows remain on world XY. Displayed user X is geometric +Y, user Y is
+geometric -X, and user Z is geometric +Z. Saved plane bases remain unchanged;
+arbitrary supports show local axes. Grid visibility is presentation state.
+
 World-plane entry preserves the persisted XY, XZ and YZ conventions. Face entry
 uses checked topology evidence, the worker's exact planar frame and locked
 projected boundaries. It must not substitute a world plane for unresolved support.
@@ -79,6 +96,15 @@ semantics: appending a preview at the current head is not a valid replacement
 preview.
 
 ## Qualification
+
+Finished regions use one indexed fill mesh and separately stroked true contours,
+including hole contours. Individual triangulation edges are never stroked.
+`viewport::tests` reproduces the former acute-triangle stroke-join spikes and
+checks bounded fill output. `sketch_finish_stability` reconstructs a polygon,
+rectangle with inner circle and separate circle, recording final solver receipts
+and checking geometry, regions, history and fresh-process persistence on principal
+and translated oblique stored frames. This synthetic fixture is not the original
+user document or proof of planar-face admission.
 
 Pure transitions, real-worker geometry and persistence, Metal rendering,
 automated native-host input and physical input are separate evidence classes.

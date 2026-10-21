@@ -21,18 +21,18 @@ pub fn title(app: &mut App, ui: &mut Ui) {
         .as_ref()
         .map_or_else(|| "OneCAD".to_owned(), |state| state.title.clone());
     let dirty = app.document_dirty();
-    let workspace =
-        (crate::editor_facade::PREVIEW_FACADES && !app.ui.start_open).then_some(WorkspaceSpec {
-            name: "Design",
-            icon: "body",
-            open: app.ui.workspace_menu_open,
-        });
+    let workspace = (!app.ui.start_open).then_some(WorkspaceSpec {
+        name: "Design",
+        icon: "body",
+        open: app.ui.workspace_menu_open,
+    });
     egui::Panel::top("title")
         .exact_size(44.0)
         .frame(egui::Frame::NONE)
         .resizable(false)
         .show(ui, |ui| {
             let out = TitleBar::new(&name)
+                .search_blocked(Some("Native command search is not connected (ONECAD-277)"))
                 .dirty(dirty)
                 .can_undo(can_undo)
                 .can_redo(can_redo)
@@ -104,11 +104,8 @@ fn file_menu(app: &mut App, ctx: &Context, file: &egui::Response, (undo, redo): 
             crate::input::submit_history(app, Command::Redo);
         }
         menu_divider(ui);
-        ui.add(
-            MenuRow::new(Some("search"), "Search commands")
-                .shortcut(Some("⌘K"))
-                .enabled(false),
-        );
+        ui.add(MenuRow::new(Some("search"), "Search commands").enabled(false))
+            .on_disabled_hover_text("Native command search is not connected (ONECAD-277)");
     });
 }
 

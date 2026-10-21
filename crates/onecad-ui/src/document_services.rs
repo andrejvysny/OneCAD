@@ -123,6 +123,15 @@ async fn finish_discard(
 }
 
 async fn run_intent(backend: &mut Backend, request: Request) -> Result<Outcome, String> {
+    if matches!(request, Request::Save { .. } | Request::Export(_))
+        && api::get_document_state(&backend.state)
+            .await
+            .map_err(|error| error.to_string())?
+            .runtime_session
+            .is_empty()
+    {
+        return Err("Create or open a document before saving or exporting".into());
+    }
     match request {
         Request::DiscardAndReplace(_) => Err("Nested discard replacement is unsupported".into()),
         Request::Save { save_as } => save(backend, save_as).await,

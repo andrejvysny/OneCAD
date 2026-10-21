@@ -254,3 +254,71 @@ async fn viewport_release_over_chrome_refuses_even_after_pointer_returns() {
     }
     host.stop().await;
 }
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic native input is not physical acceptance"]
+async fn ordinary_split_frame_click_selects_line_and_circle_without_drag_or_edit() {
+    let root = tempfile::tempdir().unwrap();
+    let mut host = Host::new(root.path()).await;
+    rectangle(&mut host).await;
+    let before = host.sketch().clone();
+    let history = host.app.sketch.session.as_ref().unwrap().history.clone();
+    let line_position = host.project(40.0, 0.0);
+    host.ui(vec![
+        egui::Event::PointerMoved(line_position),
+        button(line_position, true),
+    ]);
+    host.ui(vec![button(line_position, false)]);
+    let session = host.app.sketch.session.as_ref().unwrap();
+    assert!(
+        matches!(session.selection.as_slice(), [onecad_interaction::sketch::SketchTarget::Entity(id)]
+        if matches!(session.authoritative.get_entity(*id), Some(SketchEntity::Line { .. }))),
+        "ordinary line click must select; selected={:?}; status={}",
+        session.selection,
+        host.app.status
+    );
+    assert!(!host.app.sketch_gesture.busy());
+    assert_eq!(host.sketch(), &before);
+    assert_eq!(host.app.sketch.session.as_ref().unwrap().history, history);
+    host.control("Circle");
+    host.xy(40.0, 30.0);
+    host.xy(50.0, 30.0);
+    host.count(10).await;
+    host.control("Select");
+    host.redraw();
+    let before = host.sketch().clone();
+    let history = host.app.sketch.session.as_ref().unwrap().history.clone();
+    let circle_position = host.project(50.0, 30.0);
+    host.ui(vec![
+        egui::Event::PointerMoved(circle_position),
+        button(circle_position, true),
+    ]);
+    host.ui(vec![button(circle_position, false)]);
+    let session = host.app.sketch.session.as_ref().unwrap();
+    assert!(
+        matches!(session.selection.as_slice(), [onecad_interaction::sketch::SketchTarget::Entity(id)]
+        if matches!(session.authoritative.get_entity(*id), Some(SketchEntity::Circle { .. }))),
+        "ordinary circle click must select; selected={:?}; status={}",
+        session.selection,
+        host.app.status
+    );
+    assert!(!host.app.sketch_gesture.busy());
+    assert_eq!(host.sketch(), &before);
+    assert_eq!(host.app.sketch.session.as_ref().unwrap().history, history);
+    host.ui(vec![button(circle_position, true)]);
+    host.ui(vec![egui::Event::PointerGone]);
+    host.ui(vec![button(circle_position, false)]);
+    host.ui(vec![
+        egui::Event::PointerMoved(line_position),
+        button(line_position, true),
+    ]);
+    host.ui(vec![button(line_position, false)]);
+    let session = host.app.sketch.session.as_ref().unwrap();
+    assert!(
+        matches!(session.selection.as_slice(), [onecad_interaction::sketch::SketchTarget::Entity(id)]
+        if matches!(session.authoritative.get_entity(*id), Some(SketchEntity::Line { .. })))
+    );
+    assert_eq!(host.sketch(), &before);
+    assert_eq!(host.app.sketch.session.as_ref().unwrap().history, history);
+    host.stop().await;
+}

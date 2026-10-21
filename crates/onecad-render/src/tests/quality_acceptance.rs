@@ -318,7 +318,11 @@ fn verify_analytic_outline(renderer: &mut Renderer, device: &wgpu::Device, queue
         for theme in [Theme::Dark, Theme::Light] {
             {
                 let silhouettes = SilhouetteMode::Geometric;
-                let style = RenderStyle { theme, silhouettes };
+                let style = RenderStyle {
+                    theme,
+                    silhouettes,
+                    ..Default::default()
+                };
                 let outlined = render(renderer, device, queue, &view, style, "sphere-outline");
                 renderer
                     .set_options(RenderOptions {

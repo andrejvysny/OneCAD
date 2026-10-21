@@ -31,6 +31,9 @@ struct Frame {
     section: vec4<f32>,
     cap: vec4<f32>,
     display: vec4<f32>, // surface opacity, SSAA factor, hidden-edge opacity, Xray
+    support_origin: vec4<f32>, // xyz, enabled
+    support_x: vec4<f32>, // xyz axis, local fade centre x
+    support_y: vec4<f32>, // xyz axis, local fade centre y
 };
 
 @group(0) @binding(0) var<uniform> u: Frame;

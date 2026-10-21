@@ -20,6 +20,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 )
             });
             let Some(display) = app.display.clone() else {
+                crate::sketch_creation::clear_candidate(ui.ctx());
                 return;
             };
             let viewport = Viewport {
@@ -71,10 +72,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 return;
             }
             let Some(view) = drawable_capture(app.view, display.scene.identity(), viewport) else {
+                crate::sketch_creation::clear_candidate(ui.ctx());
                 app.cancel_sketch_gesture();
                 return;
             };
             app.sync_sketch_gesture();
+            crate::support_view::axes(app, ui.painter(), rect, &view);
+            if crate::sketch_entry::viewport(app, ui, rect, &response, &view, &display) {
+                crate::viewport_widgets::show(app, ui, rect, &view);
+                return;
+            }
             crate::viewport_selection::hover(app, ui, rect, &view, &display);
             if app.sketch_active() {
                 if let Some(session) = app.sketch.session.as_ref() {
@@ -87,6 +94,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 crate::sketch_numeric::viewport(app, ui, rect, &view);
             }
             if crate::input::overlay_owns_keyboard(app, ui.ctx()) {
+                crate::sketch_creation::clear_candidate(ui.ctx());
                 if crate::constraint_authoring::editor_open(ui.ctx()) {
                     crate::sketch_dimensions::show(app, ui, rect, &view);
                 }
@@ -109,6 +117,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 {
                     crate::sketch_ui::viewport(app, ui, rect, &response, &view);
                 } else {
+                    crate::sketch_creation::clear_candidate(ui.ctx());
                     crate::sketch_creation::chain_input::cancel(app, ui.ctx());
                 }
                 return;
@@ -195,7 +204,7 @@ fn navigate_input(
         .is_none_or(|position| {
             !crate::viewport_widgets::allows_pointer(ui, response.rect, position)
         });
-    let allowed = !crate::input::overlay_owns_keyboard(app, ui.ctx())
+    let allowed = !crate::input::navigation_blocked(app, ui.ctx())
         && !crate::sketch_dimensions::owns_pointer(app, ui)
         && crate::viewport_widgets::gesture_allowed(ui)
         && ui.input(|input| !input.pointer.primary_down())
@@ -261,6 +270,17 @@ fn render(
     viewport: Viewport,
     display: &crate::bridge::Display,
 ) -> Result<(), String> {
+    let support_grid = crate::support_view::grid(app);
+    let grid_visible = crate::support_view::grid_visible(ctx);
+    let grid_id = egui::Id::unique("viewport-support-grid");
+    ctx.data_mut(|data| {
+        if data.get_temp::<(Option<onecad_render::GridFrame>, bool)>(grid_id)
+            != Some((support_grid, grid_visible))
+        {
+            app.draw_dirty = true;
+            data.insert_temp(grid_id, (support_grid, grid_visible));
+        }
+    });
     let needs_scene = app.renderer.scene_identity() != Some(display.scene.identity());
     // Poll even without new drawing: completion callbacks retire resources and acknowledge scenes.
     let renderer_idle = app.renderer.poll_idle().map_err(|e| e.to_string())?;
@@ -355,6 +375,8 @@ fn render(
             &view,
             RenderStyle {
                 theme: if app.dark { Theme::Dark } else { Theme::Light },
+                support_grid,
+                grid_visible,
                 ..Default::default()
             },
         )
@@ -444,24 +466,17 @@ fn paint_profiles(
         } else {
             app.theme.accent.linear_multiply(0.20)
         };
-        for indices in &profile.triangles {
-            let projected: Option<Vec<_>> = indices
-                .iter()
-                .map(|index| {
-                    view.project(profile.vertices[*index as usize])
-                        .map(|point| {
-                            rect.min + egui::vec2(point.logical.x as f32, point.logical.y as f32)
-                        })
+        let projected: Vec<_> = profile
+            .vertices
+            .iter()
+            .map(|vertex| {
+                view.project(*vertex).map(|point| {
+                    rect.min + egui::vec2(point.logical.x as f32, point.logical.y as f32)
                 })
-                .collect();
-            if let Some(points) = projected {
-                ui.painter().add(egui::Shape::convex_polygon(
-                    points,
-                    color,
-                    egui::Stroke::new(1.0, app.theme.accent),
-                ));
-            }
-        }
+            })
+            .collect();
+        ui.painter()
+            .add(profile_fill(&projected, &profile.triangles, color));
         for edge in &profile.boundary {
             if let (Some(a), Some(b)) = (
                 view.project(profile.vertices[edge[0] as usize]),
@@ -477,6 +492,27 @@ fn paint_profiles(
             }
         }
     }
+}
+
+fn profile_fill(
+    points: &[Option<egui::Pos2>],
+    triangles: &[[u32; 3]],
+    color: egui::Color32,
+) -> egui::Mesh {
+    // Independent stroked triangles introduce internal edges and acute-join spikes.
+    let mut mesh = egui::Mesh::default();
+    for point in points {
+        mesh.colored_vertex(point.unwrap_or(egui::Pos2::ZERO), color);
+    }
+    for triangle in triangles {
+        if triangle
+            .iter()
+            .all(|index| points.get(*index as usize).is_some_and(Option::is_some))
+        {
+            mesh.add_triangle(triangle[0], triangle[1], triangle[2]);
+        }
+    }
+    mesh
 }
 
 fn pick(app: &mut App, display: &crate::bridge::Display, view: &ViewSnapshot, logical: DVec2) {

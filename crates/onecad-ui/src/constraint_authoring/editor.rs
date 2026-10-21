@@ -41,17 +41,12 @@ pub(super) fn editor(
         .viewport
         .unwrap_or_else(|| ctx.content_rect())
         .shrink(8.0);
-    let size = egui::vec2(300.0_f32.min(safe.width()), 164.0_f32.min(safe.height()));
-    let position = draft.position.unwrap_or_else(|| safe.center() - size * 0.5);
-    let position = egui::pos2(
-        position
-            .x
-            .clamp(safe.left(), (safe.right() - size.x).max(safe.left())),
-        position
-            .y
-            .clamp(safe.top(), (safe.bottom() - size.y).max(safe.top())),
+    let size = egui::vec2(
+        crate::dimension_chip::WIDTH.min(safe.width()),
+        104.0_f32.min(safe.height()),
     );
-    draft.position = Some(position);
+    let anchor = draft.position.unwrap_or_else(|| safe.center());
+    let position = crate::dimension_chip::place(anchor, size, safe);
     let mut result = (false, false);
     let id = editor_id().with((
         &draft.key.runtime_session,
@@ -59,16 +54,19 @@ pub(super) fn editor(
         draft.key.generation,
         draft.constraint.id(),
     ));
-    egui::Area::new(id)
+    let response = egui::Area::new(id)
         .order(egui::Order::Foreground)
         .fixed_pos(position)
+        .default_size(size)
         .movable(false)
         .show(ctx, |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_width((size.x - 16.0).max(1.0));
+            crate::dimension_chip::frame(ui.style()).show(ui, |ui| {
+                ui.set_width((size.x - 12.0).max(1.0));
                 result = field(ui, draft, relation, variables);
             });
         });
+    ctx.data_mut(|data| data.insert_temp(editor_id().with("bounds"), response.response.rect));
+    crate::dimension_chip::witness(ctx, id.with("witness"), anchor, response.response.rect);
     result
 }
 
@@ -79,21 +77,33 @@ fn field(
     variables: &[VariableDto],
 ) -> (bool, bool) {
     let pending = draft.pending.is_some();
-    ui.strong(format!(
-        "{} ({})",
-        relation.label(),
-        if relation == Relation::Angle {
-            "°"
-        } else {
-            "mm"
-        }
-    ));
-    let response = ui.add_enabled(
-        !pending,
-        egui::TextEdit::singleline(&mut draft.text)
-            .desired_width(ui.available_width())
-            .char_limit(onecad_core::expr::MAX_SOURCE_LEN),
-    );
+    let unit = if relation == Relation::Angle {
+        "°"
+    } else {
+        "mm"
+    };
+    let response = ui
+        .horizontal(|ui| {
+            ui.label(format!(
+                "{} {unit}",
+                match relation {
+                    Relation::Diameter => "Ø",
+                    Relation::Radius => "R",
+                    Relation::HorizontalDistance => "H",
+                    Relation::VerticalDistance => "V",
+                    Relation::Angle => "Angle",
+                    _ => "Distance",
+                }
+            ))
+            .on_hover_text(relation.label());
+            ui.add_enabled(
+                !pending,
+                egui::TextEdit::singleline(&mut draft.text)
+                    .desired_width(ui.available_width().clamp(24.0, 110.0))
+                    .char_limit(onecad_core::expr::MAX_SOURCE_LEN),
+            )
+        })
+        .inner;
     if draft.focus && !pending {
         response.request_focus();
         draft.focus = false;
@@ -102,11 +112,11 @@ fn field(
         draft.error = None;
     }
     let parsed = dimensions::scalar(&draft.text, relation, variables);
-    if let Some(error) = draft.error.as_ref().or_else(|| parsed.as_ref().err()) {
-        ui.colored_label(ui.visuals().error_fg_color, error);
-    }
-    if pending {
-        ui.label("Applying dimension…");
+    crate::dimension_chip::error(ui, draft.error.as_ref().or_else(|| parsed.as_ref().err()));
+    let backwards = ui.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
+    let forwards = ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+    if (backwards || forwards) && !pending {
+        response.request_focus();
     }
     let enter = !pending
         && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
@@ -115,10 +125,16 @@ fn field(
     let mut cancel = escape;
     ui.horizontal(|ui| {
         apply = ui
-            .add_enabled(!pending && parsed.is_ok(), egui::Button::new("Apply"))
+            .add_enabled(
+                !pending && parsed.is_ok(),
+                egui::Button::new("Apply").small(),
+            )
             .clicked();
+        if pending {
+            ui.spinner();
+        }
         cancel |= ui
-            .button(if pending { "Dismiss" } else { "Cancel" })
+            .small_button(if pending { "Dismiss" } else { "Cancel" })
             .clicked();
     });
     (parsed.is_ok() && (apply || enter), cancel)

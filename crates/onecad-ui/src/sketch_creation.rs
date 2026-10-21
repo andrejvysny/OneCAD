@@ -3,19 +3,42 @@ use crate::{
     app::App,
     sketch_snapping::{SnapRequest, SnapSettings, resolve_snap},
 };
-use egui::{Align2, FontId, Rect, Stroke, Ui};
+use egui::{Rect, Ui};
 use onecad_core::{
     ids::{ConstraintId, EntityId},
     sketch::CurvePosition,
 };
 use onecad_interaction::sketch::{
-    PrimitiveIds, SketchAction, SketchTarget,
-    inference::{AcceptedSnap, SnapIntent},
+    PrimitiveIds, SketchAction, SketchSession, SketchSessionKey, SketchTarget, SketchTool,
+    inference::AcceptedSnap,
 };
-use onecad_scene::{DVec2, DVec3, ViewSnapshot};
+use onecad_scene::{DVec2, ViewSnapshot};
 
 #[path = "sketch_chain_input.rs"]
 pub(crate) mod chain_input;
+#[path = "sketch_creation_feedback.rs"]
+mod feedback;
+pub(crate) use feedback::anchors as paint_anchors;
+
+#[derive(Clone)]
+struct CachedSnap {
+    snap: AcceptedSnap,
+    key: SketchSessionKey,
+    tool: SketchTool,
+    draft_generation: u64,
+}
+
+impl CachedSnap {
+    fn current(&self, session: &SketchSession) -> bool {
+        self.key == session.key
+            && self.tool == session.tool
+            && self.draft_generation == session.draft_generation
+    }
+}
+
+pub(crate) fn clear_candidate(ctx: &egui::Context) {
+    ctx.data_mut(|data| data.remove::<CachedSnap>(egui::Id::unique("sketch-winning-snap")));
+}
 
 pub(crate) fn viewport(
     app: &mut App,
@@ -30,7 +53,11 @@ pub(crate) fn viewport(
     let Some(session) = app.sketch.session.as_ref() else {
         return;
     };
-    let Some(position) = response.hover_pos() else {
+    let Some(position) = response
+        .hover_pos()
+        .filter(|position| crate::viewport_widgets::allows_pointer(ui, rect, *position))
+    else {
+        clear_candidate(ui.ctx());
         return;
     };
     let logical = DVec2::new(
@@ -39,6 +66,7 @@ pub(crate) fn viewport(
     );
     let Ok(mut point) = onecad_interaction::sketch::capture_sketch_pointer(session, view, logical)
     else {
+        clear_candidate(ui.ctx());
         return;
     };
     let snap = winning_snap(app, ui, rect, view, position);
@@ -46,12 +74,16 @@ pub(crate) fn viewport(
         point.point = snap.point;
         paint(app, ui, rect, view, snap);
     }
+    feedback::candidate(ui.painter(), rect, view, session, point.point, &app.theme);
     if response.clicked() {
         app.sketch_dispatch(SketchAction::ClickInferred {
             point,
             ids: fresh_ids(),
             snap: snap.map(Box::new),
         });
+        if let Some(session) = app.sketch.session.as_ref() {
+            paint_anchors(ui.painter(), rect, view, session, &app.theme);
+        }
     } else if ui.input(|input| input.pointer.delta() != egui::Vec2::ZERO)
         || session
             .draft
@@ -71,7 +103,10 @@ fn winning_snap(
 ) -> Option<AcceptedSnap> {
     let session = app.sketch.session.as_ref()?;
     let cache = egui::Id::unique("sketch-winning-snap");
-    let previous = ui.ctx().data(|data| data.get_temp::<AcceptedSnap>(cache));
+    let previous = ui
+        .ctx()
+        .data(|data| data.get_temp::<CachedSnap>(cache))
+        .filter(|previous| previous.current(session));
     let snap = optional_snaps(app.ui.sketch_snap, ui.input(|input| input.modifiers))
         .then(|| {
             resolve_snap(&SnapRequest {
@@ -81,7 +116,7 @@ fn winning_snap(
                 rect,
                 pointer: position,
                 anchor: session.draft.as_ref().map(snap_anchor),
-                previous: previous.as_ref(),
+                previous: previous.as_ref().map(|previous| &previous.snap),
                 generation: session.request.sequence,
                 settings: SnapSettings {
                     grid_step: app.ui.sketch_grid_snap.then_some(1.0),
@@ -91,9 +126,17 @@ fn winning_snap(
         })
         .flatten();
     ui.ctx().data_mut(|data| {
-        data.remove::<AcceptedSnap>(cache);
+        data.remove::<CachedSnap>(cache);
         if let Some(snap) = snap {
-            data.insert_temp(cache, snap);
+            data.insert_temp(
+                cache,
+                CachedSnap {
+                    snap,
+                    key: session.key.clone(),
+                    tool: session.tool,
+                    draft_generation: session.draft_generation,
+                },
+            );
         }
     });
     snap
@@ -129,28 +172,9 @@ fn fresh_ids() -> PrimitiveIds {
 }
 
 fn paint(app: &App, ui: &Ui, rect: Rect, view: &ViewSnapshot, snap: AcceptedSnap) {
-    let Some(session) = app.sketch.session.as_ref() else {
-        return;
-    };
-    let world = session.plane.to_world(snap.point);
-    let Some(screen) = view.project(DVec3::new(world.x, world.y, world.z)) else {
-        return;
-    };
-    let position = rect.min + egui::vec2(screen.logical.x as f32, screen.logical.y as f32);
-    let painter = ui.painter().with_clip_rect(rect);
-    painter.circle_stroke(position, 6.0, Stroke::new(1.5, app.theme.accent));
-    let label = if snap.intent == SnapIntent::GeometryOnly {
-        format!("{} guide", snap.kind.label())
-    } else {
-        format!("{} constraint", snap.kind.label())
-    };
-    painter.text(
-        position + egui::vec2(10.0, -12.0),
-        Align2::LEFT_BOTTOM,
-        label,
-        FontId::proportional(12.0),
-        app.theme.accent,
-    );
+    if let Some(session) = app.sketch.session.as_ref() {
+        feedback::snap(ui.painter(), rect, view, session, snap, &app.theme);
+    }
 }
 
 #[cfg(test)]

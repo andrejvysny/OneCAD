@@ -158,6 +158,16 @@ pub(crate) fn label_position(
         .map(|rect| rect.min)
 }
 
+pub(crate) fn anchor_position(
+    session: &SketchSession,
+    constraint: &onecad_core::sketch::Constraint,
+    rect: Rect,
+    view: &ViewSnapshot,
+) -> Option<egui::Pos2> {
+    let witness = geometry::witness(&session.authoritative, constraint)?;
+    paint::project(rect, view, session.plane, witness.anchor)
+}
+
 fn exclusions(app: &App, ui: &Ui, rect: Rect) -> Vec<Rect> {
     let layers = ui.ctx().memory(|memory| memory.areas().visible_layer_ids());
     let mut result: Vec<_> = layers

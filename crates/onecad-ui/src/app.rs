@@ -552,6 +552,9 @@ impl App {
                 if current {
                     self.command_status = true;
                 }
+                if matches!(command, "Open" | "Recovery") {
+                    self.ui.start_open = !self.document_open();
+                }
                 match result {
                     Ok(outcome) => {
                         let completion = outcome.completion;
@@ -586,6 +589,9 @@ impl App {
                                 if !matches!(result.outcome.as_str(), "published" | "noop") =>
                             {
                                 format!("Regeneration {}", result.outcome)
+                            }
+                            _ if command == "Open" && !self.document_open() => {
+                                "Create a part or open a document".into()
                             }
                             _ => format!("{command} complete"),
                         };

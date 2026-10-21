@@ -14,6 +14,12 @@ use tokio::sync::OwnedSemaphorePermit;
 
 #[derive(Debug)]
 pub enum Request {
+    FacePreview {
+        context: DocumentContext,
+        body: onecad_core::ids::BodyId,
+        identity: String,
+        sender: mpsc::Sender<Result<onecad_core::sketch::SketchPlane, String>>,
+    },
     FaceEntry {
         id: SketchId,
         context: DocumentContext,
@@ -76,6 +82,18 @@ pub async fn execute(
     permit: OwnedSemaphorePermit,
     sender: &mpsc::Sender<Message>,
 ) {
+    if let Request::FacePreview {
+        context,
+        body,
+        identity,
+        sender,
+    } = &request
+    {
+        let result = preview_face(&backend.state, context, *body, identity).await;
+        let _ = sender.send(result);
+        backend.shared.wake();
+        return;
+    }
     let tag = match &request {
         Request::Effect(effect) => Some(effect_tag(effect).clone()),
         Request::Candidate { effect, .. } => Some(effect_tag(effect).clone()),
@@ -147,6 +165,7 @@ async fn run(
 ) -> Result<Reply, String> {
     let state = &backend.state;
     match request {
+        Request::FacePreview { .. } => Err("Face preview is read-only".into()),
         Request::FaceEntry {
             id,
             context,
@@ -211,6 +230,43 @@ async fn run(
             execute_effect(backend, effect, actions, control).await
         }
     }
+}
+
+async fn preview_face(
+    state: &onecad_app::state::AppState,
+    context: &DocumentContext,
+    body: onecad_core::ids::BodyId,
+    identity: &str,
+) -> Result<onecad_core::sketch::SketchPlane, String> {
+    check_context(state, context).await?;
+    let scope = api::preview_context(state)
+        .await
+        .map_err(|error| error.to_string())?;
+    let address = if onecad_core::ids::TopoKey::new(identity.to_owned()).is_valid() {
+        onecad_app::worker::wire::FaceAddress::TopoKey(identity)
+    } else {
+        onecad_app::worker::wire::FaceAddress::ElementId(identity)
+    };
+    let frame = state
+        .face_projection()
+        .project_face_boundary_frame(context.snapshot_id, body, address)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or("Face is unresolved or is not planar; choose another support")?;
+    check_context(state, context).await?;
+    if api::preview_context(state)
+        .await
+        .map_err(|error| error.to_string())?
+        != scope
+    {
+        return Err(
+            "Sketch support belongs to an obsolete worker head; select the face again".into(),
+        );
+    }
+    Ok(onecad_core::sketch::plane_from_point_normal(
+        frame.origin,
+        frame.normal,
+    ))
 }
 
 async fn execute_effect(

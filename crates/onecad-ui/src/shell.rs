@@ -22,6 +22,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         chrome
     };
     bars::title(app, ui);
+    app.diagnostics.observe(&app.status);
+    app.diagnostics.show(&ctx);
     if app.ui.start_open {
         return;
     }

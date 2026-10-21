@@ -296,3 +296,79 @@ async fn discard_finalization_preserves_cancelled_or_failed_replacement() {
 
 #[path = "document_io_tests.rs"]
 mod document_io_tests;
+
+#[path = "home_lifecycle_tests.rs"]
+mod home_lifecycle_tests;
+
+#[tokio::test]
+async fn ordinary_startup_and_recovery_fallback_leave_no_document_but_new_is_real() {
+    let area = tempfile::tempdir().unwrap();
+    let (state, host) = test_document(area.path()).await;
+    api::close_document(&state, host.clone()).await.unwrap();
+    let paths = crate::qa::QaPaths::from_args(
+        ["--qa-root".into(), area.path().join("qa").into_os_string()].into_iter(),
+    )
+    .unwrap();
+    for _ in 0..2 {
+        assert!(
+            !crate::services::open_requested_startup(&state, host.clone(), &paths)
+                .await
+                .unwrap()
+        );
+        assert!(state.runtime.lock().await.is_none());
+        let absent = api::get_document_state(&state).await.unwrap();
+        assert!(absent.runtime_session.is_empty());
+        assert!(!absent.dirty);
+    }
+    api::new_document(&state, host.clone()).await.unwrap();
+    let created = api::get_document_state(&state).await.unwrap();
+    assert!(!created.runtime_session.is_empty());
+    assert!(created.path.is_none());
+    assert!(
+        api::get_projection(&state)
+            .await
+            .unwrap()
+            .features
+            .is_empty()
+    );
+    assert!(api::open_file_dialog(host.clone()).await.unwrap().is_none());
+    assert!(api::import_file_dialog(host).await.unwrap().is_none());
+    assert_eq!(api::get_document_state(&state).await.unwrap(), created);
+}
+
+#[tokio::test]
+async fn prepared_startup_path_opens_exact_saved_document() {
+    let area = tempfile::tempdir().unwrap();
+    let (state, host) = test_document(area.path()).await;
+    let original = api::get_document_state(&state).await.unwrap();
+    let saved = area.path().join("documents/prepared.onecad");
+    api::save_document(
+        &state,
+        host.clone(),
+        Some(saved.to_string_lossy().into_owned()),
+        None,
+    )
+    .await
+    .unwrap();
+    api::close_document(&state, host.clone()).await.unwrap();
+    let paths = crate::qa::QaPaths::from_args(
+        [
+            "--qa-root".into(),
+            area.path().join("qa").into_os_string(),
+            "--open".into(),
+            saved.into_os_string(),
+        ]
+        .into_iter(),
+    )
+    .unwrap();
+    assert!(
+        crate::services::open_requested_startup(&state, host, &paths)
+            .await
+            .unwrap()
+    );
+    let opened = api::get_document_state(&state).await.unwrap();
+    assert_eq!(opened.document_id, original.document_id);
+    assert_ne!(opened.runtime_session, original.runtime_session);
+    assert!(!opened.runtime_session.is_empty());
+    assert_eq!(opened.path.as_deref(), paths.document.to_str());
+}

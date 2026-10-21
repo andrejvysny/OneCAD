@@ -18,33 +18,22 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
     let title = session.authoritative.name.clone();
     let feedback = crate::sketch_feedback::summary(&session.status);
     let exit = sketch_ui::can_exit(app);
-    let actions = [
-        StripAction {
-            label: "Discard sketch edits",
-            kind: ButtonKind::Secondary,
-            enabled: exit,
-            tip: Some(Tip::new("Discard sketch edits")),
-        },
-        StripAction {
-            label: "Finish sketch",
-            kind: ButtonKind::Primary,
-            enabled: exit,
-            tip: None,
-        },
-    ];
     let color = crate::sketch_feedback::color(feedback.assessment, &app.theme);
-    let bounds = strip_rect(ctx, chrome, app.ui.explorer_open, app.ui.inspector_open);
+    let lane = strip_bounds(chrome, app.ui.explorer_open, app.ui.inspector_open);
+    let mode_key = egui::Id::unique("session-strip-compact");
+    let compact = lane.width() < 600.0;
+    let bounds = if ctx.data(|data| data.get_temp::<bool>(mode_key)) == Some(compact) {
+        strip_rect(ctx, chrome, app.ui.explorer_open, app.ui.inspector_open)
+    } else {
+        ctx.data_mut(|data| data.insert_temp(mode_key, compact));
+        lane
+    };
     let mut clicked = None;
     frame::floating(egui::Id::unique("session-strip"), bounds.min, Order::Middle)
         .pivot(Align2::LEFT_TOP)
         .show(ctx, |ui| {
-            clicked = bounded_strip(ui, bounds.width(), |ui| {
-                SessionStrip::new(StripVariant::Sketch)
-                    .icon(Some("sketch"))
-                    .title(&title)
-                    .status(Some((&feedback.label, color, None)))
-                    .actions(&actions)
-                    .show(ui)
+            clicked = bounded_strip(ui, lane.width(), |ui| {
+                strip_contents(ui, lane.width(), &title, &feedback.label, color, exit)
             })
             .inner;
         });
@@ -52,6 +41,45 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
         Some(0) => app.sketch_dispatch(SketchAction::Discard),
         Some(1) => app.sketch_dispatch(SketchAction::Finish),
         _ => {}
+    }
+}
+
+fn strip_contents(
+    ui: &mut egui::Ui,
+    width: f32,
+    title: &str,
+    status: &str,
+    color: egui::Color32,
+    enabled: bool,
+) -> Option<usize> {
+    let compact = width < 600.0;
+    let actions = [
+        StripAction {
+            label: if compact {
+                "Discard"
+            } else {
+                "Discard sketch edits"
+            },
+            kind: ButtonKind::Secondary,
+            enabled,
+            tip: Some(Tip::new("Discard sketch edits")),
+        },
+        StripAction {
+            label: if compact { "Finish" } else { "Finish sketch" },
+            kind: ButtonKind::Primary,
+            enabled,
+            tip: Some(Tip::new("Finish sketch").reason(Some(status))),
+        },
+    ];
+    let strip = SessionStrip::new(StripVariant::Sketch).actions(&actions);
+    if compact {
+        strip.show(ui)
+    } else {
+        strip
+            .icon(Some("sketch"))
+            .title(title)
+            .status(Some((status, color, None)))
+            .show(ui)
     }
 }
 
@@ -67,15 +95,10 @@ fn strip_bounds(chrome: &Chrome, explorer: bool, inspector: bool) -> Rect {
         chrome.viewport.right() - 10.0
     };
     let upper_right = right.min(chrome.view_cluster.x - crate::layout::CUBE - 10.0);
-    let (top, right) = if upper_right - left >= 320.0 {
-        (chrome.viewport.top() + 62.0, upper_right)
-    } else {
-        (
-            (chrome.view_cluster.y + crate::layout::CUBE).max(chrome.view_controls.bottom()) + 10.0,
-            right,
-        )
-    };
-    Rect::from_min_size(pos2(left, top), vec2(right - left, 48.0))
+    Rect::from_min_size(
+        pos2(left, chrome.viewport.top() + 62.0),
+        vec2((upper_right - left).max(120.0), 48.0),
+    )
 }
 
 fn strip_rect(ctx: &Context, chrome: &Chrome, explorer: bool, inspector: bool) -> Rect {

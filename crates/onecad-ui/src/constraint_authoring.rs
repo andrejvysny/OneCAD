@@ -210,11 +210,10 @@ pub(crate) fn active_constraint(ctx: &egui::Context) -> Option<ConstraintId> {
 }
 
 pub(crate) fn editor_bounds(ctx: &egui::Context) -> Option<egui::Rect> {
-    let draft = ctx.data(|data| data.get_temp::<Draft>(editor_id()))?;
-    Some(egui::Rect::from_min_size(
-        draft.position?,
-        egui::vec2(300.0, 164.0),
-    ))
+    if !editor_open(ctx) {
+        return None;
+    }
+    ctx.data(|data| data.get_temp(editor_id().with("bounds")))
 }
 
 pub(crate) fn editor_open(ctx: &egui::Context) -> bool {
@@ -249,7 +248,12 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         .display
         .as_ref()
         .map_or(&[][..], |display| display.projection.variables.as_slice());
-    draft.viewport = Some(crate::layout::chrome(ctx.content_rect(), &app.ui).viewport);
+    let viewport = crate::layout::chrome(ctx.content_rect(), &app.ui).viewport;
+    draft.viewport = Some(crate::dimension_chip::usable(ctx, &app.ui));
+    if let Some(view) = app.view.as_ref() {
+        draft.position =
+            crate::sketch_dimensions::anchor_position(session, &draft.constraint, viewport, view);
+    }
     let (apply, cancel) = editor(ctx, &mut draft, variables);
     if cancel {
         if let Some(tag) = &draft.pending {

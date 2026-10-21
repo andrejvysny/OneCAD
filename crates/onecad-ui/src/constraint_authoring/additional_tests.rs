@@ -154,14 +154,14 @@ fn replaced_submission_cannot_restore_dimension_editor() {
 fn dimension_chip_position_stays_fixed_and_clamps_on_resize() {
     let ctx = egui::Context::default();
     let mut draft = draft();
-    draft.position = Some(egui::pos2(700.0, 400.0));
+    let anchor = egui::pos2(700.0, 400.0);
+    draft.position = Some(anchor);
+    let mut previous = None;
     for width in [1280.0, 1280.0, 900.0] {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 560.0));
         let mut output = ctx.run_ui(
             egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(width, 560.0),
-                )),
+                screen_rect: Some(screen),
                 ..Default::default()
             },
             |ui| {
@@ -169,11 +169,19 @@ fn dimension_chip_position_stays_fixed_and_clamps_on_resize() {
             },
         );
         output.textures_delta.clear();
-        assert_eq!(
-            draft.position.unwrap().x,
-            if width == 900.0 { 592.0 } else { 700.0 }
-        );
-        assert_eq!(draft.position.unwrap().y, 388.0);
+        let bounds = ctx
+            .data(|data| data.get_temp::<egui::Rect>(editor_id().with("bounds")))
+            .unwrap();
+        assert!(screen.shrink(8.0).contains_rect(bounds));
+        assert_eq!(draft.position, Some(anchor));
+        if width == 1280.0 {
+            if let Some(previous) = previous {
+                assert_eq!(bounds.min, previous);
+            }
+            previous = Some(bounds.min);
+        } else {
+            assert!(bounds.right() <= 892.0);
+        }
     }
 }
 
@@ -247,8 +255,11 @@ fn dimension_editor_stays_reachable_in_both_themes_at_supported_sizes_and_scale(
                 },
             );
             output.textures_delta.clear();
-            let bounds =
-                egui::Rect::from_min_size(draft.position.unwrap(), egui::vec2(300.0, 164.0));
+            let bounds = ctx
+                .data(|data| data.get_temp::<egui::Rect>(editor_id().with("bounds")))
+                .unwrap();
+            assert!(bounds.width() <= crate::dimension_chip::WIDTH + 2.0);
+            assert!(bounds.height() <= 104.0);
             assert!(
                 viewport.contains_rect(bounds),
                 "dark={dark} size={width}x{height} scale={scale}"

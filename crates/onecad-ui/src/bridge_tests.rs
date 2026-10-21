@@ -81,7 +81,7 @@ fn actual_admission_keeps_capacity_reserved_until_terminal_delivery() {
 
 #[tokio::test]
 #[ignore = "requires production worker and Metal; run with ONECAD_REQUIRE_WORKER=1 ONECAD_REQUIRE_GPU=1"]
-async fn production_actor_captures_blank_start_and_repeated_new_documents() {
+async fn production_actor_preserves_no_document_start_and_captures_explicit_new_documents() {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = instance.request_adapter(&Default::default()).await.unwrap();
     let (device, queue) = adapter
@@ -106,18 +106,23 @@ async fn production_actor_captures_blank_start_and_repeated_new_documents() {
     .unwrap();
     bridge.submit(Command::Open).unwrap();
     wait_actor_terminal(&bridge, false).await;
-    let initial = bridge
-        .take_display()
-        .expect("blank startup must publish a usable captured document");
-    assert!(
-        bridge.valid(),
-        "{:?}",
-        bridge.shared.failure.lock().unwrap()
-    );
-    assert!(initial.projection.features.is_empty());
-    let mut previous = initial.projection.runtime_session.clone();
-    drop(initial);
-    for _ in 0..3 {
+    assert!(bridge.take_display().is_none());
+    assert!(!bridge.valid());
+    assert!(bridge.shared.failure.lock().unwrap().is_none());
+    let (_, absent) = bridge
+        .shared
+        .document_state
+        .lock()
+        .unwrap()
+        .latest()
+        .unwrap();
+    assert!(absent.runtime_session.is_empty());
+    assert!(absent.document_id.is_empty());
+    assert!(!absent.dirty);
+    assert!(absent.path.is_none());
+    assert!(bridge.shared.recovery.lock().unwrap().checked);
+    let mut previous = None;
+    for _ in 0..4 {
         bridge
             .submit(Command::Document(crate::document_flow::Request::New))
             .unwrap();
@@ -125,7 +130,8 @@ async fn production_actor_captures_blank_start_and_repeated_new_documents() {
         let display = bridge
             .take_display()
             .expect("New must capture its replacement, not retain the old frame");
-        assert_ne!(display.projection.runtime_session, previous);
+        assert!(!display.projection.runtime_session.is_empty());
+        assert_ne!(Some(&display.projection.runtime_session), previous.as_ref());
         assert!(display.projection.features.is_empty());
         assert!(display.projection.bodies.is_empty());
         assert!(
@@ -133,7 +139,19 @@ async fn production_actor_captures_blank_start_and_repeated_new_documents() {
             "{:?}",
             bridge.shared.failure.lock().unwrap()
         );
-        previous = display.projection.runtime_session.clone();
+        let (_, lifecycle) = bridge
+            .shared
+            .document_state
+            .lock()
+            .unwrap()
+            .latest()
+            .unwrap();
+        assert_eq!(
+            lifecycle.runtime_session,
+            display.projection.runtime_session
+        );
+        assert!(lifecycle.path.is_none());
+        previous = Some(display.projection.runtime_session.clone());
     }
     bridge.request_shutdown();
     tokio::time::timeout(std::time::Duration::from_secs(15), async {

@@ -35,6 +35,10 @@ pub(super) fn owner(ui: &UiState, document: bool, popup: bool) -> Option<Owner> 
     }
 }
 
+pub(super) fn navigation_blocked(ui: &UiState, document: bool, popup: bool) -> bool {
+    document || popup || owner(ui, false, false).is_some_and(|owner| owner != Owner::SketchEntry)
+}
+
 pub(super) fn dismiss(ui: &mut UiState, owner: Owner, raw: &mut egui::RawInput, text: bool) {
     if !raw.focused || text || matches!(owner, Owner::Document | Owner::Popup) {
         return;

@@ -427,5 +427,47 @@ fn expression_preview_uses_resolved_units_and_preserves_source_for_authority() {
     );
 }
 
+#[test]
+fn compact_editor_does_not_commit_on_blur_or_tab() {
+    let ctx = egui::Context::default();
+    let mut draft = draft();
+    for events in [
+        vec![],
+        vec![egui::Event::Key {
+            key: egui::Key::Tab,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::SHIFT,
+        }],
+        vec![egui::Event::PointerButton {
+            pos: egui::pos2(10.0, 10.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    ] {
+        let mut result = (true, true);
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 560.0),
+                )),
+                focused: true,
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                result = editor(ui.ctx(), &mut draft, &[]);
+            },
+        );
+        output.textures_delta.clear();
+        assert_eq!(result, (false, false));
+        assert_eq!(draft.text, "6");
+        assert!(draft.pending.is_none());
+    }
+}
+
 #[path = "additional_tests.rs"]
 mod additional_tests;
