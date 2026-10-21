@@ -218,7 +218,7 @@ json acquire_ids(const PublishedStateSnapshot& state, const std::string& body_id
         // SCHEMA §7.3 Hole (ONECAD-361): an element one point of a multi-point
         // Hole created carries its producer slot, so the ref Rust freezes from
         // this evidence can never be scored against a congruent sibling hole.
-        const OriginClaim origin = state.topology_owners.lookup(body_id, sub);
+        const OriginClaim origin = state.topology_owners->lookup(body_id, sub);
         if (origin.state == OriginState::Known && !origin.slot.empty()) {
             descriptor["originSlot"] = {{"recordId", origin.producer_record_id},
                                         {"slot", origin.slot}};
@@ -330,7 +330,7 @@ json ladder_resolution(const PublishedStateSnapshot& state, const json& ref,
     // `resolve_input_refs`), so a repair dialog never offers a sibling hole.
     em::CandidateFilter filter;
     if (!ladder_ref.origin_slot.empty()) {
-        filter = origin_slot_filter(state.topology_owners, body_id, ladder_ref.origin_record_id,
+        filter = origin_slot_filter(*state.topology_owners, body_id, ladder_ref.origin_record_id,
                                     ladder_ref.origin_slot);
     }
     const auto results = em::resolve_descriptor_stage(body, body_id, {ladder_ref}, {}, filter);
