@@ -44,4 +44,9 @@ pub(super) const HOST_TESTS: &[&str] = &[
     "app_logic_tests::capability_delivery_tests::restored_controls_use_real_context_and_do_not_enable_mock_actions",
     "app_logic_tests::sketch_plane_choice_tests::viewport_world_patches_hover_cancel_and_click_without_stray_sketches",
     "app_logic_tests::gesture_delivery_tests::batch_delivery::ordinary_split_frame_click_selects_line_and_circle_without_drag_or_edit",
+    "app_logic_tests::extrude_handle_delivery_tests::handle_click_and_sub_threshold_keep_authored_expression",
+    "app_logic_tests::extrude_handle_delivery_tests::handle_batched_drag_uses_release_before_later_hover",
+    "app_logic_tests::extrude_handle_delivery_tests::handle_press_move_then_move_release_next_frame_keeps_final_value",
+    "app_logic_tests::extrude_handle_delivery_tests::handle_release_at_authored_value_restores_expression_and_precision",
+    "app_logic_tests::extrude_handle_delivery_tests::handle_pointer_gone_focus_loss_and_escape_restore_without_history",
 ];

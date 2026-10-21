@@ -20,14 +20,36 @@ pub(crate) struct ExtrudeHandle {
     record: Option<RecordId>,
     last_valid: Option<f64>,
     drag: Option<Drag>,
+    /// Pass in which `show` consumed this frame's events; `settle` defers to it.
+    shown_pass: Option<u64>,
 }
 
 struct Drag {
+    press: Pos2,
     t0: f64,
     d0: f64,
     d: f64,
+    /// Evaluated draft at press; a release that displays the same value keeps `original`.
+    evaluated: Option<f64>,
     original: String,
     sent: String,
+    /// Pointer travel crossed the click slop; nothing is authored before this.
+    moved: bool,
+    free: bool,
+}
+
+/// Per-drag constants for feeding events.
+struct Rule {
+    slop: f32,
+    step: f64,
+    two_directions: bool,
+}
+
+#[derive(Debug, PartialEq)]
+enum Fed {
+    Tracking,
+    Released,
+    Lost,
 }
 
 impl ExtrudeHandle {
@@ -172,20 +194,28 @@ pub(crate) fn owns_pointer(app: &App, view: &ViewSnapshot, rect: Rect, pointer: 
 }
 
 /// Ends or cancels a capture whose release/focus events never reached `show`
-/// (viewport early returns). Runs before the viewport is drawn.
+/// (viewport early returns). Runs after the viewport and only when `show` did
+/// not consume this pass's events, so it never preempts an in-batch release.
 pub(crate) fn settle(app: &mut App, ctx: &egui::Context) {
-    if !app.doc.extrude_handle.active() {
+    if !app.doc.extrude_handle.active()
+        || app.doc.extrude_handle.shown_pass == Some(ctx.cumulative_pass_nr())
+    {
         return;
     }
     let (focused, down) = ctx.input(|i| (i.focused, i.pointer.primary_down()));
-    let drag = app.doc.extrude_handle.drag.take();
     if !focused || app.doc.interaction.tool.is_none() {
-        cancel(app, drag);
+        abandon(app);
     } else if !down {
-        app.doc.extrude_handle.last_valid = drag.map(|d| d.d);
-    } else {
-        app.doc.extrude_handle.drag = drag;
+        let drag = app.doc.extrude_handle.drag.take();
+        finish(app, drag);
     }
+}
+
+/// Cancels any handle drag and restores the authored draft exactly. For callers
+/// that take the document away from the pointer (tab deactivation).
+pub(crate) fn abandon(app: &mut App) {
+    let drag = app.doc.extrude_handle.drag.take();
+    cancel(app, drag);
 }
 
 pub(crate) fn show(app: &mut App, ui: &mut egui::Ui, view: &ViewSnapshot, rect: Rect) -> bool {
@@ -201,6 +231,7 @@ pub(crate) fn show(app: &mut App, ui: &mut egui::Ui, view: &ViewSnapshot, rect: 
             ..Default::default()
         };
     }
+    app.doc.extrude_handle.shown_pass = Some(ui.ctx().cumulative_pass_nr());
     if app.doc.extrude_handle.drag.is_none()
         && let Some(value) = target.evaluated
     {
@@ -216,8 +247,7 @@ pub(crate) fn show(app: &mut App, ui: &mut egui::Ui, view: &ViewSnapshot, rect: 
         cancel(app, drag);
         return false;
     };
-    let (pointer, events, modifiers) =
-        ui.input(|i| (i.pointer.hover_pos(), i.events.clone(), i.modifiers));
+    let (pointer, events) = ui.input(|i| (i.pointer.hover_pos(), i.events.clone()));
     if !crate::viewport_widgets::gesture_allowed(ui) {
         cancel(app, drag);
         return false;
@@ -226,51 +256,42 @@ pub(crate) fn show(app: &mut App, ui: &mut egui::Ui, view: &ViewSnapshot, rect: 
         crate::viewport_widgets::allows_pointer(ui, rect, p)
             && claims(view, rect, &target, shown, p)
     });
-    let step = crate::transform_ui::snap_step(view.world_per_pixel(view.depth(target.base)));
-    let mut released = false;
-    for event in events {
-        match event {
-            egui::Event::PointerGone | egui::Event::WindowFocused(false) => {
-                cancel(app, drag.take());
-            }
-            egui::Event::PointerButton {
+    let rule = Rule {
+        slop: ui.ctx().options(|o| o.input_options.max_click_dist),
+        step: crate::transform_ui::snap_step(view.world_per_pixel(view.depth(target.base))),
+        two_directions: target.two_directions,
+    };
+    let axis = |pos| along(view, rect, pos, target.base, target.normal);
+    let mut shown = shown;
+    // Delivery order decides: a release ends the drag at that event, so later
+    // motion in the same batch can never move the value.
+    for event in &events {
+        let Some(active) = drag.as_mut() else {
+            if let egui::Event::PointerButton {
                 pos,
                 button: egui::PointerButton::Primary,
                 pressed: true,
-                ..
-            } if drag.is_none()
-                && crate::viewport_widgets::allows_pointer(ui, rect, pos)
-                && claims(view, rect, &target, shown, pos) =>
+                modifiers,
+            } = event
+                && crate::viewport_widgets::allows_pointer(ui, rect, *pos)
+                && claims(view, rect, &target, shown, *pos)
             {
-                drag = along(view, rect, pos, target.base, target.normal).map(|t0| Drag {
-                    t0,
-                    d0: shown,
-                    d: shown,
-                    original: target.draft.clone(),
-                    sent: target.draft.clone(),
-                });
+                drag = axis(*pos).map(|t0| Drag::start(*pos, t0, shown, &target, modifiers.alt));
             }
-            egui::Event::PointerMoved(pos)
-            | egui::Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                ..
-            } if drag.is_some() => {
-                if let Some(active) = drag.as_mut() {
-                    update(view, rect, &target, active, pos, step, modifiers.alt);
-                }
-                released |= matches!(event, egui::Event::PointerButton { .. });
+            continue;
+        };
+        match active.feed(event, &axis, &rule) {
+            Fed::Tracking => {}
+            Fed::Released => {
+                finish(app, drag.take());
+                shown = app.doc.extrude_handle.last_valid.unwrap_or(shown);
             }
-            _ => {}
+            Fed::Lost => cancel(app, drag.take()),
         }
     }
     // One draft change per frame keeps the evaluate/preview pipeline from flooding.
     if let Some(active) = drag.as_mut() {
         flush(app, active);
-    }
-    if released {
-        app.doc.extrude_handle.last_valid = drag.take().map(|d| d.d);
     }
     let dragging = drag.is_some();
     app.doc.extrude_handle.drag = drag;
@@ -292,32 +313,91 @@ pub(crate) fn show(app: &mut App, ui: &mut egui::Ui, view: &ViewSnapshot, rect: 
     hot
 }
 
-fn update(
-    view: &ViewSnapshot,
-    rect: Rect,
-    target: &Target,
-    drag: &mut Drag,
-    pos: Pos2,
-    step: f64,
-    free: bool,
-) {
-    let Some(t) = along(view, rect, pos, target.base, target.normal) else {
-        return;
-    };
-    // A negative start with two directions (invalid anyway) clamps to the floor on first move.
-    drag.d = next_distance(
-        drag.d0,
-        t - drag.t0,
-        drag.d,
-        step,
-        free,
-        target.two_directions,
-    );
-}
-
 impl Drag {
-    fn pending(&self) -> Option<String> {
+    fn start(press: Pos2, t0: f64, shown: f64, target: &Target, free: bool) -> Self {
+        Self {
+            press,
+            t0,
+            d0: shown,
+            d: shown,
+            evaluated: target.evaluated,
+            original: target.draft.clone(),
+            sent: target.draft.clone(),
+            moved: false,
+            free,
+        }
+    }
+
+    /// Applies one event in delivery order, reading modifiers from the event stream.
+    fn feed(
+        &mut self,
+        event: &egui::Event,
+        axis: &dyn Fn(Pos2) -> Option<f64>,
+        rule: &Rule,
+    ) -> Fed {
+        match event {
+            egui::Event::PointerGone | egui::Event::WindowFocused(false) => Fed::Lost,
+            egui::Event::Key {
+                key: egui::Key::Escape,
+                pressed: true,
+                ..
+            } => Fed::Lost,
+            egui::Event::ModifiersChanged(modifiers) => {
+                self.free = modifiers.alt;
+                Fed::Tracking
+            }
+            egui::Event::PointerMoved(pos) => {
+                self.track(*pos, axis, rule);
+                Fed::Tracking
+            }
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers,
+            } => {
+                self.free = modifiers.alt;
+                self.track(*pos, axis, rule);
+                Fed::Released
+            }
+            _ => Fed::Tracking,
+        }
+    }
+
+    fn track(&mut self, pos: Pos2, axis: &dyn Fn(Pos2) -> Option<f64>, rule: &Rule) {
+        self.moved |= self.press.distance(pos) > rule.slop;
+        if !self.moved {
+            return;
+        }
+        let Some(t) = axis(pos) else {
+            return;
+        };
+        // A negative start with two directions (invalid anyway) clamps to the floor on first move.
+        self.d = next_distance(
+            self.d0,
+            t - self.t0,
+            self.d,
+            rule.step,
+            self.free,
+            rule.two_directions,
+        );
+    }
+
+    /// Draft text for the dragged value; the authored text survives when the
+    /// value reads the same at display precision.
+    fn text(&self) -> String {
         let text = crate::sketch_numeric::format::format_measure(self.d);
+        let same = self
+            .evaluated
+            .is_some_and(|value| crate::sketch_numeric::format::format_measure(value) == text);
+        if same { self.original.clone() } else { text }
+    }
+
+    fn pending(&self) -> Option<String> {
+        if !self.moved {
+            return None;
+        }
+        let text = self.text();
         (text != self.sent).then_some(text)
     }
     fn restore(&self) -> Option<String> {
@@ -331,6 +411,17 @@ fn flush(app: &mut App, drag: &mut Drag) {
         app.dispatch(Action::DraftChanged(text));
         app.draw_dirty = true;
     }
+}
+
+/// Release: author the final value once, or nothing when the pointer never moved.
+fn finish(app: &mut App, drag: Option<Drag>) {
+    let Some(mut drag) = drag else {
+        return;
+    };
+    if drag.moved {
+        app.doc.extrude_handle.last_valid = Some(drag.d);
+    }
+    flush(app, &mut drag);
 }
 
 fn cancel(app: &mut App, drag: Option<Drag>) {

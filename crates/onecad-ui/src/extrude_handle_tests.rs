@@ -241,11 +241,15 @@ fn axis_parallel_to_view_never_claims_the_pointer() {
 
 fn drag(d: f64, sent: &str, original: &str) -> Drag {
     Drag {
+        press: egui::pos2(100.0, 100.0),
         t0: 0.0,
         d0: 10.0,
         d,
+        evaluated: Some(10.0),
         original: original.into(),
         sent: sent.into(),
+        moved: true,
+        free: false,
     }
 }
 
@@ -265,4 +269,158 @@ fn many_moves_yield_one_change_with_the_final_text() {
 fn target_loss_restores_original_draft_only_when_changed() {
     assert_eq!(drag(13.5, "13.5", "10").restore().as_deref(), Some("10"));
     assert_eq!(drag(10.0, "10", "10").restore(), None);
+}
+
+const RULE: Rule = Rule {
+    slop: 6.0,
+    step: 1.0,
+    two_directions: false,
+};
+const PRESS: Pos2 = egui::pos2(100.0, 100.0);
+
+/// Ten screen pixels upward along the axis read as one unit of distance.
+fn axis(pos: Pos2) -> Option<f64> {
+    Some(f64::from(PRESS.y - pos.y) / 10.0)
+}
+
+fn pressed(draft: &str, value: f64) -> Drag {
+    let target = Target {
+        evaluated: Some(value),
+        draft: draft.into(),
+        ..target_z()
+    };
+    Drag::start(PRESS, axis(PRESS).unwrap(), value, &target, false)
+}
+
+fn moved(pos: Pos2) -> egui::Event {
+    egui::Event::PointerMoved(pos)
+}
+
+fn released(pos: Pos2, alt: bool) -> egui::Event {
+    egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers {
+            alt,
+            ..Default::default()
+        },
+    }
+}
+
+#[test]
+fn click_and_sub_threshold_motion_author_nothing() {
+    for draft in ["6 * 2", "12.3456"] {
+        let mut drag = pressed(draft, 12.0);
+        assert_eq!(drag.pending(), None, "press never flushes");
+        assert_eq!(
+            drag.feed(&released(PRESS, false), &axis, &RULE),
+            Fed::Released
+        );
+        assert_eq!((drag.moved, drag.pending()), (false, None));
+
+        let mut drag = pressed(draft, 12.0);
+        let nudge = PRESS + egui::vec2(3.0, -4.0);
+        assert_eq!(drag.feed(&moved(nudge), &axis, &RULE), Fed::Tracking);
+        assert_eq!(
+            drag.feed(&released(nudge, false), &axis, &RULE),
+            Fed::Released
+        );
+        assert_eq!((drag.moved, drag.d, drag.pending()), (false, 12.0, None));
+        assert_eq!(drag.restore(), None);
+    }
+}
+
+#[test]
+fn accepted_motion_authors_and_return_restores_the_expression() {
+    let mut drag = pressed("6 * 2", 12.0);
+    drag.feed(&moved(egui::pos2(100.0, 50.0)), &axis, &RULE);
+    assert!(drag.moved);
+    assert_eq!(drag.pending().as_deref(), Some("17"));
+    drag.sent = "17".into();
+    // Back at the press point the value reads 12 again: author the expression, not "12".
+    drag.feed(&moved(PRESS), &axis, &RULE);
+    assert_eq!(drag.pending().as_deref(), Some("6 * 2"));
+}
+
+#[test]
+fn equal_value_release_keeps_authored_text_and_full_precision() {
+    // Sideways travel crosses the slop without moving along the axis.
+    let mut drag = pressed("6 * 2", 12.0);
+    let side = PRESS + egui::vec2(10.0, 0.0);
+    assert_eq!(
+        drag.feed(&released(side, false), &axis, &RULE),
+        Fed::Released
+    );
+    assert!(drag.moved);
+    assert_eq!(drag.pending(), None);
+
+    let mut drag = pressed("12.3456", 12.3456);
+    drag.feed(&released(side, true), &axis, &RULE);
+    assert_eq!(drag.pending(), None, "12.35 reads as the authored value");
+    let mut drag = pressed("12.3456", 12.3456);
+    drag.feed(&released(side, false), &axis, &RULE);
+    assert_eq!(
+        drag.pending().as_deref(),
+        Some("12"),
+        "snapping changes the value"
+    );
+}
+
+#[test]
+fn modifiers_are_read_per_event() {
+    let mut drag = pressed("12.3456", 12.3456);
+    let alt = egui::Modifiers {
+        alt: true,
+        ..Default::default()
+    };
+    drag.feed(&egui::Event::ModifiersChanged(alt), &axis, &RULE);
+    drag.feed(&moved(egui::pos2(100.0, 75.0)), &axis, &RULE);
+    close(drag.d, 14.8456);
+    drag.feed(
+        &egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+        &axis,
+        &RULE,
+    );
+    drag.feed(&moved(egui::pos2(100.0, 75.0)), &axis, &RULE);
+    close(drag.d, 15.0);
+}
+
+#[test]
+fn loss_events_cancel_and_restore_the_original_exactly() {
+    let escape = egui::Event::Key {
+        key: egui::Key::Escape,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    };
+    for event in [
+        egui::Event::PointerGone,
+        egui::Event::WindowFocused(false),
+        escape,
+    ] {
+        let mut drag = pressed("6 * 2", 12.0);
+        drag.feed(&moved(egui::pos2(100.0, 50.0)), &axis, &RULE);
+        drag.sent = drag.pending().unwrap();
+        assert_eq!(drag.feed(&event, &axis, &RULE), Fed::Lost);
+        assert_eq!(drag.restore().as_deref(), Some("6 * 2"));
+    }
+}
+
+#[test]
+fn release_position_ends_the_drag_and_frames_carry_motion() {
+    // Frame N: press and move; frame N+1: final move and release.
+    let mut drag = pressed("6 * 2", 12.0);
+    drag.feed(&moved(egui::pos2(100.0, 60.0)), &axis, &RULE);
+    close(drag.d, 16.0);
+    drag.sent = drag.pending().unwrap();
+    drag.feed(&moved(egui::pos2(100.0, 30.0)), &axis, &RULE);
+    let end = egui::pos2(100.0, 20.0);
+    assert_eq!(
+        drag.feed(&released(end, false), &axis, &RULE),
+        Fed::Released
+    );
+    close(drag.d, 20.0);
+    assert_eq!(drag.pending().as_deref(), Some("20"));
 }
