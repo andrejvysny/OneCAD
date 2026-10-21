@@ -2716,6 +2716,7 @@ dependencies = [
  "base64",
  "libc",
  "onecad-core",
+ "onecad-embedded-worker",
  "onecad-library",
  "onecad-protocol",
  "serde",
@@ -2753,6 +2754,9 @@ dependencies = [
 [[package]]
 name = "onecad-embedded-worker"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "onecad-interaction"
