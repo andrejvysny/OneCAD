@@ -9,7 +9,7 @@ use std::sync::Arc;
 pub const MEDIUM: &str = "sf-medium";
 pub const SEMIBOLD: &str = "sf-semibold";
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn ui_font_path(kind: objc2_core_text::CTFontUIFontType) -> Option<PathBuf> {
     use objc2_core_foundation::CFURL;
     use objc2_core_text::{CTFont, kCTFontURLAttribute};
@@ -24,7 +24,7 @@ fn ui_font_path(kind: objc2_core_text::CTFontUIFontType) -> Option<PathBuf> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 fn ui_font_path(_kind: ()) -> Option<PathBuf> {
     None
 }
@@ -35,7 +35,7 @@ pub struct Resolved {
 }
 
 pub fn resolve() -> Resolved {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     let (ui, fixed) = {
         use objc2_core_text::CTFontUIFontType;
         (
@@ -43,7 +43,7 @@ pub fn resolve() -> Resolved {
             ui_font_path(CTFontUIFontType::UserFixedPitch),
         )
     };
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     let (ui, fixed) = (ui_font_path(()), None);
     // CoreText has no UI-font type for SF Mono (AppKit's monospacedSystemFont); prefer the
     // system SF Mono file when the user fixed-pitch font is something else.
