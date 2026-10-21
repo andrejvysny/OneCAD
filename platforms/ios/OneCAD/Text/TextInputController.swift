@@ -26,6 +26,8 @@ final class TextInputController: KeyInputProxyDelegate {
                            name: UIResponder.keyboardWillHideNotification, object: nil)
     }
 
+    var isEditing: Bool { proxy.isFirstResponder }
+
     func apply(_ result: onecad_ios_frame_result) {
         let active = result.flags & ONECAD_IOS_FRAME_TEXT_INPUT_ACTIVE != 0
         guard active else {

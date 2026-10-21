@@ -72,7 +72,10 @@ final class CanvasViewController: UIViewController {
         a11y.onActivate = { [weak self] in self?.requestFrame() }
         accessibility = a11y
         let requests = HostRequestCoordinator(bridge: bridge, presenter: self)
-        requests.onCompleted = { [weak self] in self?.requestFrame() }
+        requests.onCompleted = { [weak self] in
+            self?.restoreKeyFocus()
+            self?.requestFrame()
+        }
         hostRequests = requests
     }
 
@@ -102,6 +105,13 @@ final class CanvasViewController: UIViewController {
 
     func requestFrame() {
         frameLoop?.requestFrame()
+    }
+
+    /// Pickers and alerts take first responder; hardware keys must reach the
+    /// canvas again afterwards unless a text field owns the keyboard.
+    private func restoreKeyFocus() {
+        guard textInput?.isEditing != true, !canvas.isFirstResponder else { return }
+        canvas.becomeFirstResponder()
     }
 
     private func cancelContacts(reason: UInt32) {
