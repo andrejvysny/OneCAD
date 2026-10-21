@@ -36,6 +36,7 @@ pub struct App {
     pub camera: Camera,
     pub navigation: crate::navigation::Navigation,
     pub transform_gizmo: crate::transform_ui::TransformGizmo,
+    pub(crate) extrude_handle: crate::extrude_handle::ExtrudeHandle,
     pub topology: crate::viewport_selection::Selection,
     pub pending_display_options: Option<onecad_render::RenderOptions>,
     /// Last drawable capture; `camera` may already contain pending navigation.
@@ -139,6 +140,7 @@ impl App {
             camera: Camera::default(),
             navigation: Default::default(),
             transform_gizmo: Default::default(),
+            extrude_handle: Default::default(),
             topology: Default::default(),
             pending_display_options: None,
             view: None,
@@ -719,6 +721,7 @@ impl eframe::App for App {
             crate::shell::close_prompt(self, &ctx);
             return;
         }
+        crate::extrude_handle::settle(self, &ctx);
         crate::shell::show(self, ui);
         if self.ui.start_open {
             crate::start_screen::show(self, ui);

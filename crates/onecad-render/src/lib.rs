@@ -393,7 +393,7 @@ impl Renderer {
             )?,
             self.options,
         );
-        let preview_frame = frame::with_options(
+        let mut preview_frame = frame::with_options(
             frame::uniform(
                 view,
                 self.committed_bounds,
@@ -403,6 +403,7 @@ impl Renderer {
             )?,
             self.options,
         );
+        preview_frame.display[2] = frame::PREVIEW_HIDDEN_EDGE_ALPHA;
         let highlight_frames = if self.highlights.is_some() {
             Some([
                 frame::with_options(

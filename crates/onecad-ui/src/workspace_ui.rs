@@ -76,42 +76,60 @@ fn item<'a>(
 
 /// Workspace popover anchored under the title-bar button (19c).
 pub fn workspace_menu(app: &mut App, ctx: &Context, anchor: &Response) {
-    if !crate::editor_facade::PREVIEW_FACADES {
-        egui::Popup::menu(anchor).frame(menu_frame(ctx)).show(|ui| {
-            ui.set_max_width(250.0);
-            ui.label("Design");
-            for label in [
-                "Assembly",
-                "Simulation",
-                "Drawing",
-                "CNC",
-                "Customize workspace…",
-                "Get more workspaces…",
-            ] {
-                ui.add_enabled(false, egui::Button::new(label))
-                    .on_disabled_hover_text(
-                        "Native workspace integration is unavailable (ONECAD-301 / ONECAD-92)",
-                    );
-            }
-        });
-        let id = egui::Popup::default_response_id(anchor);
-        app.ui.workspace_menu_open = egui::Popup::is_id_open(ctx, id);
-        return;
-    }
+    let live = crate::editor_facade::PREVIEW_FACADES;
     let items = [
-        item("Design", "body", "⌃1", None, true),
-        item("Assembly", "component", "⌃2", None, false),
-        item("Simulation", "study", "⌃3", None, false),
-        item("Drawing", "viewFront", "⌃4", None, false),
+        item(
+            "Design",
+            "body",
+            "⌃1",
+            Some("Sketch, model and edit bodies"),
+            true,
+        ),
+        item(
+            "Assembly",
+            "component",
+            "⌃2",
+            Some("Place components, mates"),
+            false,
+        ),
+        item(
+            "Simulation",
+            "study",
+            "⌃3",
+            Some("Loads, constraints, studies"),
+            false,
+        ),
+        item(
+            "Drawing",
+            "viewFront",
+            "⌃4",
+            Some("2D sheets and dimensions"),
+            false,
+        ),
     ];
-    let ext = [item("CNC", "panelLeft", "⌃5", Some("CNC Prep"), true)];
-    let more_ok = bars::home_allowed(app);
+    let ext = [item(
+        "CNC",
+        "panelLeft",
+        "⌃5",
+        Some("Stock, setups, tool reach · CNC Prep"),
+        live,
+    )];
+    let more_ok = live && bars::home_allowed(app);
+    let hint =
+        (!live).then_some("Native workspace integration is unavailable (ONECAD-301 / ONECAD-92)");
     let (mut customize, mut more) = (false, false);
     egui::Popup::menu(anchor).frame(menu_frame(ctx)).show(|ui| {
         // Rows fill available width; without a cap the popup inherits the title bar's width.
-        ui.set_max_width(232.0);
-        let out = workspace_menu_with(ui, &items, &ext, "Get more workspaces…", more_ok);
-        customize = out.customize;
+        ui.set_max_width(300.0);
+        let out = workspace_menu_with(
+            ui,
+            &items,
+            &ext,
+            ("Customize Design workspace…", live),
+            ("Get more workspaces…", more_ok),
+            hint,
+        );
+        customize = out.customize && live;
         more = out.manage && more_ok;
     });
     let id = egui::Popup::default_response_id(anchor);

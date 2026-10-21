@@ -181,7 +181,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, view: &ViewSnapshot, rect: egui::R
     response.owns_pointer
 }
 
-fn snap_step(world_per_pixel: f64) -> f64 {
+pub(crate) fn snap_step(world_per_pixel: f64) -> f64 {
     let desired = world_per_pixel * 10.0;
     if !desired.is_finite() || desired <= 0.0 {
         return 1.0;

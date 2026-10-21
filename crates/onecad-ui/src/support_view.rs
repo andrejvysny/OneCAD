@@ -38,9 +38,6 @@ fn frame(plane: SketchPlane) -> onecad_render::GridFrame {
     }
 }
 
-// These are user axes, not the kernel's conventional geometric axes.
-const USER_AXES: [DVec3; 3] = [DVec3::Y, DVec3::NEG_X, DVec3::Z];
-
 pub(crate) fn axes(app: &App, painter: &egui::Painter, rect: egui::Rect, view: &ViewSnapshot) {
     let (origin, directions) = axis_directions(app);
     let painter = painter.with_clip_rect(rect);
@@ -52,31 +49,36 @@ pub(crate) fn axes(app: &App, painter: &egui::Painter, rect: egui::Rect, view: &
 }
 
 fn axis_directions(app: &App) -> (DVec3, Vec<(DVec3, egui::Color32)>) {
-    let colors = [app.theme.axis_x, app.theme.axis_y, app.theme.axis_z];
+    // Axes follow the kernel's world frame, matching the navigation cube.
+    let world = [DVec3::X, DVec3::Y, DVec3::Z].into_iter().zip([
+        app.theme.axis_x,
+        app.theme.axis_y,
+        app.theme.axis_z,
+    ]);
     let Some(support) = grid(app) else {
-        return (DVec3::ZERO, USER_AXES.into_iter().zip(colors).collect());
+        return (DVec3::ZERO, world.collect());
     };
     let named = support.origin == DVec3::ZERO
         && [SketchPlane::xy(), SketchPlane::xz(), SketchPlane::yz()]
             .iter()
             .any(|plane| frame(*plane) == support);
-    let directions = [support.x_axis, support.y_axis]
-        .into_iter()
-        .enumerate()
-        .map(|(index, axis)| {
-            let color = if named {
-                let world = USER_AXES
-                    .iter()
-                    .position(|direction| axis.dot(*direction) > 1.0 - 1e-10)
-                    .unwrap_or(index);
-                colors[world]
-            } else {
-                colors[index]
-            };
-            (axis, color)
-        })
-        .collect();
-    (support.origin, directions)
+    if named {
+        let normal = support.x_axis.cross(support.y_axis);
+        return (
+            support.origin,
+            world
+                .filter(|(axis, _)| axis.dot(normal).abs() < 1e-10)
+                .collect(),
+        );
+    }
+    let colors = [app.theme.axis_x, app.theme.axis_y];
+    (
+        support.origin,
+        [support.x_axis, support.y_axis]
+            .into_iter()
+            .zip(colors)
+            .collect(),
+    )
 }
 
 fn paint_axis(
@@ -98,6 +100,8 @@ fn paint_axis(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The frozen sketch-plane bases map principal planes onto these world directions.
+    const USER_AXES: [DVec3; 3] = [DVec3::Y, DVec3::NEG_X, DVec3::Z];
     #[test]
     fn user_axes_match_frozen_principal_bases() {
         for (plane, indices) in [

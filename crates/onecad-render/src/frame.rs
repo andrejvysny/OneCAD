@@ -315,6 +315,11 @@ fn set_ground(
     Ok(())
 }
 
+/// Ghost face opacity of modeling-operation previews.
+pub(crate) const PREVIEW_FACE_ALPHA: f32 = 0.18;
+/// Occluded preview edges stay faint, like Fusion's ghost edges.
+pub(crate) const PREVIEW_HIDDEN_EDGE_ALPHA: f32 = 0.3;
+
 fn set_body_style(
     frame: &mut FrameU,
     view: &ViewSnapshot,
@@ -345,8 +350,10 @@ fn set_body_style(
         frame.overlay = rgba(token(style.theme, "--color-accent")?, 0.45);
     }
     if preview {
-        frame.overlay = rgba(token(style.theme, "--color-accent")?, 0.3);
+        frame.overlay = rgba(token(style.theme, "--color-accent")?, PREVIEW_FACE_ALPHA);
         frame.edge = rgba(token(style.theme, "--color-accent")?, 1.0);
+        frame.lines[0] = 1.5 * scale;
+        frame.lines[1] = 1.5 * scale;
     }
     Ok(())
 }

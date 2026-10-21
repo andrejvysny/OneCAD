@@ -19,7 +19,7 @@ fn valid_rect(view: &ViewSnapshot, rect: Rect) -> bool {
         && (f64::from(rect.width()) - view.viewport().width).abs() < 0.01
         && (f64::from(rect.height()) - view.viewport().height).abs() < 0.01
 }
-pub(super) fn project(view: &ViewSnapshot, rect: Rect, point: DVec3) -> Option<Pos2> {
+pub(crate) fn project(view: &ViewSnapshot, rect: Rect, point: DVec3) -> Option<Pos2> {
     let point = view.project(point)?.logical;
     let result = rect.min + egui::vec2(point.x as f32, point.y as f32);
     result.is_finite().then_some(result)
@@ -44,7 +44,7 @@ pub(super) fn on_plane(
     let point = ray.origin + ray.direction * t;
     (t >= 0.0 && point.is_finite() && view.project(point).is_some()).then_some(point)
 }
-pub(super) fn along(
+pub(crate) fn along(
     view: &ViewSnapshot,
     rect: Rect,
     pos: Pos2,

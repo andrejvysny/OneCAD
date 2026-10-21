@@ -197,6 +197,8 @@ fn pointer_owner(app: &App) -> &'static str {
         "text_editor"
     } else if app.transform_gizmo.gizmo.active() {
         "transform_gizmo"
+    } else if app.extrude_handle.active() {
+        "extrude_handle"
     } else if app.sketch_gesture.busy() {
         "sketch_drag"
     } else if app.armed_sketch_gesture.is_some() {

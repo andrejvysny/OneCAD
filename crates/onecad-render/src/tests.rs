@@ -455,7 +455,7 @@ fn selection_and_preview_styles_stay_distinct_from_committed_shading() {
         let preview = frame::uniform(&view, None, style, BodyStyle::default(), true).unwrap();
         assert_eq!(committed.overlay, [0.0; 4]);
         assert_eq!(selected.overlay[3], 0.45);
-        assert_eq!(preview.overlay[3], 0.3);
+        assert_eq!(preview.overlay[3], 0.18);
         assert_eq!(selected.lines[0], 6.0);
         assert_ne!(selected.edge, committed.edge);
         assert_eq!(committed.material[2], 0.0);

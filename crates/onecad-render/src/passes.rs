@@ -298,6 +298,7 @@ impl Renderer {
             for body in &self.preview {
                 geometry(&mut pass, body);
             }
+            self.draw_preview_edges(&mut pass);
         }
         if !wireframe {
             self.draw_preview_cap(&mut pass);
@@ -312,6 +313,27 @@ impl Renderer {
                     pass.set_bind_group(0, &highlights.binds[tone], &[]);
                     pass.draw(0..4, draw.first..draw.first + draw.count);
                 }
+            }
+        }
+    }
+    /// Feature edges and silhouettes of the preview: solid where visible, faint where occluded
+    /// by committed geometry. Preview faces write no depth, so back edges show through the ghost.
+    fn draw_preview_edges(&self, pass: &mut wgpu::RenderPass<'_>) {
+        for (edges, silhouettes) in [
+            (&self.pipelines.hidden, &self.pipelines.hidden_silhouette),
+            (&self.pipelines.edge, &self.pipelines.silhouette),
+        ] {
+            pass.set_pipeline(edges);
+            for body in &self.preview {
+                pass.set_bind_group(0, &body.frame_bind, &[]);
+                pass.set_vertex_buffer(0, body.feature_segments.slice(..));
+                pass.draw(0..4, 0..body.feature_segment_count);
+            }
+            pass.set_pipeline(silhouettes);
+            for body in &self.preview {
+                pass.set_bind_group(0, &body.frame_bind, &[]);
+                pass.set_vertex_buffer(0, body.silhouettes.slice(..));
+                pass.draw(0..4, 0..body.silhouette_count);
             }
         }
     }

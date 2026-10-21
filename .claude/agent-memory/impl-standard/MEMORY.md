@@ -13,3 +13,4 @@
 - [onecad-ui 4b integration](onecad-ui-4b-integration.md) — FeatureCard fixed labels, NumberField focus on Enter, Appearance/system theme, screenshot driving limits
 - [Interaction real_* tests need worker](interaction-real-tests-need-worker.md) — 4 env-only failures w/o ONECAD_WORKER_PATH; use --no-fail-fast
 - [real_arc_slot suite gotchas](real-arc-slot-suite-gotchas.md) — redo ulp drift, free-arc edit nondeterminism, #[path] mods, weld counts
+- [Extrude handle drag](extrude-handle-viewport-drag.md) — gate, sign convention, gizmo re-exports, flaky ignored test, fmt scope

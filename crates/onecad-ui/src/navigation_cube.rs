@@ -343,17 +343,18 @@ fn world_triad(
     palette: CubePalette,
 ) {
     let half = HALF * f64::from(scale);
-    let corner = DVec3::splat(-1.0);
+    let [x, y, z] = [DVec3::X, DVec3::Y, DVec3::Z];
+    let corner = -(x + y + z);
     let origin = center + project(basis, corner, half);
     for (axis, color, label) in [
-        (DVec3::X, palette.triad[0], "X"),
-        (DVec3::Y, palette.triad[1], "Y"),
-        (DVec3::Z, palette.triad[2], "Z"),
+        (x, palette.triad[0], "X"),
+        (y, palette.triad[1], "Y"),
+        (z, palette.triad[2], "Z"),
     ] {
         let edge_end = center + project(basis, corner + axis * 2.0, half);
         let tip = origin + project(basis, axis, 2.0 * half * 1.25);
         // The axis runs along a cube edge; that part shows only when an adjacent face does.
-        let edge_visible = [DVec3::X, DVec3::Y, DVec3::Z]
+        let edge_visible = [x, y, z]
             .into_iter()
             .filter(|other| *other != axis)
             .any(|other| (-other).dot(basis.back) > 1e-5);

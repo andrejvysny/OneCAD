@@ -9,6 +9,8 @@ mod geometry;
 #[path = "gizmo_paint.rs"]
 mod paint;
 use geometry::{Geometry, State};
+pub(crate) use geometry::{along, project};
+pub(crate) use paint::arrow;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Handle {

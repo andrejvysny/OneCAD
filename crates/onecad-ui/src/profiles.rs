@@ -17,6 +17,7 @@ pub struct Profile {
     pub boundary: Vec<[u32; 2]>,
     pub bounds: Bounds,
     plane: SketchPlane,
+    centroid: DVec3,
 }
 
 #[derive(Default)]
@@ -167,6 +168,8 @@ fn decode_profile(
     let max = vertices
         .iter()
         .fold(DVec3::splat(f64::NEG_INFINITY), |a, p| a.max(*p));
+    let bounds = Bounds::new(min, max).map_err(|e| e.to_string())?;
+    let centroid = area_centroid(&uv, &triangles, plane, &bounds);
     Ok(Profile {
         reference: SketchRegionRef {
             sketch,
@@ -179,9 +182,32 @@ fn decode_profile(
         uv,
         triangles,
         boundary,
-        bounds: Bounds::new(min, max).map_err(|e| e.to_string())?,
+        bounds,
         plane,
+        centroid,
     })
+}
+
+/// Area centroid of the filled region (holes excluded by the worker fill); bounds center
+/// when the fill has no usable area.
+fn area_centroid(
+    uv: &[DVec2],
+    triangles: &[[u32; 3]],
+    plane: SketchPlane,
+    bounds: &Bounds,
+) -> DVec3 {
+    let (mut area, mut moment) = (0.0, DVec2::ZERO);
+    for triangle in triangles {
+        let [a, b, c] = triangle.map(|i| uv[i as usize]);
+        let weight = (b - a).perp_dot(c - a) * 0.5;
+        area += weight;
+        moment += (a + b + c) / 3.0 * weight;
+    }
+    if !area.is_finite() || area.abs() < 1e-12 {
+        return (bounds.min + bounds.max) * 0.5;
+    }
+    let uv = moment / area;
+    vector(plane.origin) + vector(plane.x_axis) * uv.x + vector(plane.y_axis) * uv.y
 }
 
 fn validate_triangles(uv: &[DVec2], triangles: &[[u32; 3]]) -> Result<(), String> {
@@ -213,6 +239,12 @@ fn boundary_edges(triangles: &[[u32; 3]]) -> Result<Vec<[u32; 2]>, String> {
         .collect())
 }
 impl Profile {
+    pub(crate) fn plane(&self) -> SketchPlane {
+        self.plane
+    }
+    pub(crate) fn centroid(&self) -> DVec3 {
+        self.centroid
+    }
     pub fn pick(&self, view: &ViewSnapshot, logical: DVec2) -> Option<([f64; 2], f64)> {
         let ray = view.ray(logical).ok()?;
         let point = onecad_interaction::sketch::intersect_sketch_plane(self.plane, ray)?;

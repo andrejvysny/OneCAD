@@ -207,34 +207,61 @@ pub fn workspace_menu(
     items: &[WorkspaceItem],
     extensions: &[WorkspaceItem],
 ) -> WorkspaceMenuOutput {
-    workspace_menu_with(ui, items, extensions, "Manage extensions…", true)
+    workspace_menu_with(
+        ui,
+        items,
+        extensions,
+        ("Customize workspace…", true),
+        ("Manage extensions…", true),
+        None,
+    )
 }
 
-/// Like [`workspace_menu`] but the last row reads `last_label` (reported as `manage`).
+/// Like [`workspace_menu`] with caller-provided footer rows as `(label, enabled)`:
+/// `customize` (reported as `customize`) and `last` (reported as `manage`).
+/// `disabled_hint` is shown when hovering any disabled row.
 pub fn workspace_menu_with(
     ui: &mut Ui,
     items: &[WorkspaceItem],
     extensions: &[WorkspaceItem],
-    last_label: &str,
-    last_enabled: bool,
+    customize: (&str, bool),
+    last: (&str, bool),
+    disabled_hint: Option<&str>,
 ) -> WorkspaceMenuOutput {
     let mut out = WorkspaceMenuOutput::default();
     ui.set_min_width(208.0);
     ui.spacing_mut().item_spacing.y = 0.0;
-    out.picked = item_rows(ui, items);
+    section_label(ui, "Workspaces", 8.0);
+    out.picked = item_rows(ui, items, disabled_hint);
     if !extensions.is_empty() {
-        divider(ui);
         section_label(ui, "From extensions", 8.0);
-        out.picked_extension = item_rows(ui, extensions);
+        out.picked_extension = item_rows(ui, extensions, disabled_hint);
     }
     divider(ui);
-    out.customize = row(ui, None, "Customize workspace…", None, None, true, false).clicked();
-    out.manage = row(ui, None, last_label, None, None, last_enabled, false).clicked();
+    let r = row(
+        ui,
+        Some("gear"),
+        customize.0,
+        None,
+        None,
+        customize.1,
+        false,
+    );
+    out.customize = hinted(r, customize.1, disabled_hint).clicked();
+    let r = row(ui, Some("extension"), last.0, None, None, last.1, false);
+    out.manage = hinted(r, last.1, disabled_hint).clicked();
     out
 }
 
+fn hinted(r: Response, enabled: bool, hint: Option<&str>) -> Response {
+    match hint {
+        Some(h) if !enabled => r.on_hover_text(h),
+        _ => r,
+    }
+}
+
 /// Index of the clicked item, if any.
-fn item_rows(ui: &mut Ui, items: &[WorkspaceItem]) -> Option<usize> {
+fn item_rows(ui: &mut Ui, items: &[WorkspaceItem], hint: Option<&str>) -> Option<usize> {
     let mut picked = None;
     for (i, it) in items.iter().enumerate() {
         let r = row(
@@ -246,7 +273,7 @@ fn item_rows(ui: &mut Ui, items: &[WorkspaceItem]) -> Option<usize> {
             it.enabled,
             it.active,
         );
-        if r.clicked() {
+        if hinted(r, it.enabled, hint).clicked() {
             picked = Some(i);
         }
     }
@@ -280,7 +307,7 @@ fn row(
     let (rect, response) = ui.allocate_exact_size(
         vec2(
             ui.available_width(),
-            if subtitle.is_some() { 38.0 } else { 30.0 },
+            if subtitle.is_some() { 46.0 } else { 30.0 },
         ),
         sense,
     );
@@ -292,21 +319,29 @@ fn row(
     } else {
         Color32::TRANSPARENT
     };
-    let text = if active { t.sel_text } else { t.ink2 };
+    let text = if active {
+        t.sel_text
+    } else if subtitle.is_some() {
+        t.ink
+    } else {
+        t.ink2
+    };
     let p = ui.painter();
     p.rect_filled(rect, CornerRadius::same(RADIUS_SM), fill);
     if response.has_focus() {
         focus_ring(p, rect, t);
     }
-    let x = rect.left() + 8.0 + row_icon(p, rect, icon_name, (text, fill, enabled), &l);
+    let advance = match (icon_name, subtitle) {
+        (Some(name), Some(_)) => row_tile(p, rect, name, enabled, &l),
+        _ => row_icon(p, rect, icon_name, (text, fill, enabled), &l),
+    };
     row_text(
         p,
         rect,
-        x,
+        rect.left() + 8.0 + advance,
         (label, subtitle),
         shortcut,
-        text.gamma_multiply(opacity),
-        t.ink6.gamma_multiply(opacity),
+        [text, t.ink5, t.ink6].map(|c| c.gamma_multiply(opacity)),
     );
     response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, enabled, active, label));
     response
@@ -352,24 +387,53 @@ fn row_icon(
     30.0
 }
 
-/// Label at `x` and right-aligned mono shortcut.
+/// 32px icon tile (r6, sel_soft, border_subtle); returns the x advance it consumed.
+fn row_tile(p: &Painter, rect: Rect, name: &str, enabled: bool, l: &Look) -> f32 {
+    let t = &l.theme;
+    let opacity = if enabled { 1.0 } else { 0.4 };
+    let tile = Rect::from_min_size(
+        Pos2::new(rect.left() + 7.0, rect.center().y - 16.0),
+        Vec2::splat(32.0),
+    );
+    p.rect(
+        tile,
+        CornerRadius::same(RADIUS_SM),
+        t.sel_soft.gamma_multiply(opacity),
+        Stroke::new(1.0, t.border_subtle.gamma_multiply(opacity)),
+        StrokeKind::Inside,
+    );
+    let style = IconStyle {
+        tint: t.ink4,
+        bg: t.sel_soft,
+        grey: !enabled,
+    };
+    let glyph = Rect::from_center_size(tile.center(), Vec2::splat(20.0));
+    icon::paint(p, glyph, name, l.dark, style, opacity);
+    41.0
+}
+
+/// Label at `x` and right-aligned mono shortcut; `[label, subtitle, shortcut]` colours.
 fn row_text(
     p: &Painter,
     rect: Rect,
     x: f32,
     (label, subtitle): (&str, Option<&str>),
     key: Option<&str>,
-    c: Color32,
-    kc: Color32,
+    [c, sc, kc]: [Color32; 3],
 ) {
-    let g = p.layout_no_wrap(label.to_owned(), FontId::proportional(metrics::CONTROL), c);
-    let sub = subtitle.map(|s| p.layout_no_wrap(s.to_owned(), FontId::proportional(11.0), kc));
+    let font = if subtitle.is_some() {
+        FontId::new(13.0, fonts::semibold())
+    } else {
+        FontId::proportional(13.0)
+    };
+    let g = p.layout_no_wrap(label.to_owned(), font, c);
+    let sub = subtitle.map(|s| p.layout_no_wrap(s.to_owned(), FontId::proportional(11.0), sc));
     let block = g.size().y + sub.as_ref().map_or(0.0, |s| 1.0 + s.size().y);
     let top = rect.center().y - block / 2.0;
     let gh = g.size().y;
     p.galley(Pos2::new(x, top), g, c);
     if let Some(sub) = sub {
-        p.galley(Pos2::new(x, top + gh + 1.0), sub, kc);
+        p.galley(Pos2::new(x, top + gh + 1.0), sub, sc);
     }
     if let Some(key) = key {
         let g = p.layout_no_wrap(key.to_owned(), FontId::new(11.0, fonts::mono()), kc);

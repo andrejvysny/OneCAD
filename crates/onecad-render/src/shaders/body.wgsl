@@ -161,7 +161,9 @@ fn vs_height(@location(0) p: vec3<f32>) -> VOut {
 @fragment
 fn fs_preview(i: VOut) -> @location(0) vec4<f32> {
     if clipped(i.wp) { discard; }
-    return u.overlay;
+    // Ghost faces stay translucent but shade by facing ratio so the preview reads as 3D.
+    let facing = abs(dot(normalize(i.n), view_direction(i.wp)));
+    return vec4<f32>(u.overlay.rgb * (0.7 + 0.3 * facing), u.overlay.a);
 }
 
 // Flat alpha overlays follow SolidCraft assets/shaders/viewport.wgsl::shade's unlit

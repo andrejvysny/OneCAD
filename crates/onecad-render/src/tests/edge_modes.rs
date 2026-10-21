@@ -105,8 +105,82 @@ fn headless_classified_edges_and_mode_combinations() {
     renderer.replace_scene(&scene).unwrap();
     verify_wire_interactions(&mut renderer, &device, &queue, &scene);
     verify_combinations(&mut renderer, &device, &queue, &scene);
+    verify_preview_edges(&mut renderer, &device, &queue, &scene);
     idle(&device, &mut renderer);
     assert!(pollster::block_on(errors.pop()).is_none());
+}
+
+/// Ghost preview faces (0.18 alpha, blended in linear light) move a pixel by under 150 levels;
+/// opaque preview edges move pixels more, so strongly changed pixels can only be edges.
+fn verify_preview_edges(
+    renderer: &mut Renderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    scene: &SceneSnapshot,
+) {
+    let strong = |a: &[u8], b: &[u8]| {
+        a.as_chunks::<4>()
+            .0
+            .iter()
+            .zip(b.as_chunks::<4>().0)
+            .filter(|(a, b)| {
+                a[..3]
+                    .iter()
+                    .zip(&b[..3])
+                    .any(|(a, b)| a.abs_diff(*b) > 150)
+            })
+            .count()
+    };
+    let empty = SceneSnapshot::new(scene.identity(), Vec::new(), SceneLimits::default()).unwrap();
+    renderer.replace_scene(&empty).unwrap();
+    let view = view(scene, Projection::Orthographic);
+    for mode in [
+        DisplayMode::Shaded,
+        DisplayMode::ShadedEdges,
+        DisplayMode::Xray,
+    ] {
+        renderer
+            .set_options(RenderOptions {
+                display_mode: mode,
+                ..Default::default()
+            })
+            .unwrap();
+        let blank = render(
+            renderer,
+            device,
+            queue,
+            &view,
+            RenderStyle::default(),
+            "preview-edges-blank",
+        );
+        renderer
+            .replace_preview(
+                PreviewIdentity {
+                    base: empty.identity(),
+                    generation: renderer.latest_preview_generation.unwrap_or(0) + 1,
+                },
+                scene,
+            )
+            .unwrap();
+        let ghost = render(
+            renderer,
+            device,
+            queue,
+            &view,
+            RenderStyle::default(),
+            "preview-edges",
+        );
+        let edge_pixels = strong(&blank, &ghost);
+        assert!(
+            edge_pixels > 100,
+            "{mode:?}: preview edges must be drawn, got {edge_pixels}"
+        );
+        assert!(
+            edge_pixels < 6000,
+            "{mode:?}: edges only, got {edge_pixels}"
+        );
+        renderer.clear_preview().unwrap();
+    }
 }
 
 fn verify_edge_filters(renderer: &mut Renderer) {

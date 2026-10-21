@@ -62,7 +62,7 @@ fn ball(painter: &egui::Painter, geometry: &Geometry, active: Option<Handle>, th
         );
     }
 }
-fn arrow(painter: &egui::Painter, a: Pos2, b: Pos2, color: Color32, hot: bool) {
+pub(crate) fn arrow(painter: &egui::Painter, a: Pos2, b: Pos2, color: Color32, hot: bool) {
     let v = b - a;
     let length = v.length();
     if length < 1.0 {

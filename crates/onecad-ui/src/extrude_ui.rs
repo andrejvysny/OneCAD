@@ -10,7 +10,7 @@ use onecad_core::{
 use onecad_interaction::{Action, ModelSession, SessionPhase};
 use onecad_widgets::components::overlays::FeatureCardRows;
 
-fn params(tool: &ModelSession) -> Option<&onecad_core::document::record::ExtrudeParams> {
+pub(crate) fn params(tool: &ModelSession) -> Option<&onecad_core::document::record::ExtrudeParams> {
     if tool.editing_existing || tool.phase != SessionPhase::Editing {
         return None;
     }

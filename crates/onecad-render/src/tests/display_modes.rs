@@ -351,8 +351,8 @@ fn preview_caps(renderer: &mut Renderer, device: &wgpu::Device, queue: &wgpu::Qu
     };
     let i = (120 * 320 + 160) * 4;
     for channel in 0..3 {
-        // One retained back wall and exactly one cap, each at preview opacity 0.3.
-        let expected = linear(blank[i + channel]) * 0.49 + frame.overlay[channel] * 0.51;
+        // One retained back wall and exactly one cap, each at preview opacity 0.18 (wall faces the eye at the probe pixel, so unshaded).
+        let expected = linear(blank[i + channel]) * 0.6724 + frame.overlay[channel] * 0.3276;
         assert!(
             (linear(filled[i + channel]) - expected).abs() < 0.015,
             "preview cap must composite once: channel {channel}, got {} expected {expected}",

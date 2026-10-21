@@ -27,6 +27,7 @@ mod editor_facade;
 mod event_mailbox;
 mod explorer;
 mod extension_pages;
+mod extrude_handle;
 mod extrude_ui;
 mod feature_card;
 mod gesture_services;
