@@ -486,3 +486,7 @@ impl Action {
         }
     }
 }
+
+#[cfg(all(test, not(feature = "desktop")))]
+#[path = "menu_host_tests.rs"]
+mod host_menu_tests;

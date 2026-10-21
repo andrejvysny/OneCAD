@@ -5,6 +5,8 @@
     not(test),
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
+// Test helpers serve suites that need the eframe/kittest harness (`desktop`).
+#![cfg_attr(all(test, not(feature = "desktop")), allow(dead_code))]
 mod app;
 mod appearance;
 mod bars;

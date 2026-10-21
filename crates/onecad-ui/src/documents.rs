@@ -111,6 +111,11 @@ impl Tabs {
         }
     }
 
+    /// The service runtime every bridge of this window shares.
+    pub(crate) fn runtime(&self) -> &Arc<ServiceRuntime> {
+        &self.runtime
+    }
+
     pub fn bridge(&self, context: egui::Context, startup: bool) -> Result<Bridge, String> {
         let mut paths = self.paths.clone();
         // Only the first window bridge may open the launch document.
@@ -361,10 +366,19 @@ impl App {
     }
 
     /// Asks every open document's autosave to write its pending recovery now.
-    pub fn request_recovery_flush(&self) {
-        for doc in std::iter::once(&self.doc).chain(&self.tabs.parked) {
-            doc.bridge.shared.recovery_flush.notify_one();
-        }
+    /// Returns each bridge with its finished-flush count before the request.
+    pub fn request_recovery_flush(&self) -> Vec<(Arc<crate::bridge::Shared>, u64)> {
+        std::iter::once(&self.doc)
+            .chain(&self.tabs.parked)
+            .map(|doc| {
+                let shared = doc.bridge.shared.clone();
+                let before = shared
+                    .recovery_flushes
+                    .load(std::sync::atomic::Ordering::Acquire);
+                shared.recovery_flush.notify_one();
+                (shared, before)
+            })
+            .collect()
     }
 
     /// The background tab is gone, so its outcome is the active tab's to show,

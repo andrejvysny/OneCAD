@@ -23,6 +23,8 @@ pub struct ServiceRuntime {
     services: Arc<ProcessServices>,
     actors: Mutex<Actors>,
     stop: Mutex<Option<oneshot::Sender<Actors>>>,
+    /// Disconnects when the runtime thread has exited (its sender is dropped).
+    exit: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
 }
 
 impl ServiceRuntime {
@@ -31,9 +33,11 @@ impl ServiceRuntime {
         let (stop_tx, stop_rx) = oneshot::channel::<Actors>();
         let services = Arc::new(ProcessServices::new());
         let drained = services.clone();
+        let (exit_tx, exit_rx) = std::sync::mpsc::channel::<()>();
         std::thread::Builder::new()
             .name("onecad-native-services".into())
             .spawn(move || {
+                let _exit = exit_tx;
                 let runtime = match tokio::runtime::Builder::new_multi_thread()
                     // Shared by up to `MAX_OPEN_DOCUMENTS` hosts; CPU-heavy scene
                     // preparation runs on the blocking pool, not these threads.
@@ -71,7 +75,14 @@ impl ServiceRuntime {
             services,
             actors: Mutex::new(Vec::new()),
             stop: Mutex::new(Some(stop_tx)),
+            exit: Mutex::new(Some(exit_rx)),
         }))
+    }
+
+    /// The runtime thread's exit, observed once the last holder drops the runtime
+    /// (`recv` reports disconnection when the thread has finished). Taken once.
+    pub fn take_exit(&self) -> Option<std::sync::mpsc::Receiver<()>> {
+        self.exit.lock().ok().and_then(|mut exit| exit.take())
     }
 
     pub fn services(&self) -> &Arc<ProcessServices> {

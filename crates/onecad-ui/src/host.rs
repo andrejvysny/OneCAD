@@ -30,9 +30,10 @@ impl Editor {
         self.app.poll(ctx);
     }
 
-    /// Asks every open document's autosave to write its pending recovery now.
-    pub fn flush_recovery(&self) {
-        self.app.request_recovery_flush();
+    /// Asks every open document's autosave to write its pending recovery now;
+    /// the returned flush reports when every one has finished.
+    pub fn flush_recovery(&self) -> RecoveryFlush {
+        RecoveryFlush(self.app.request_recovery_flush())
     }
 
     /// Memory pressure: drops caches that are rebuilt on demand.
@@ -48,6 +49,14 @@ impl Editor {
     /// Every document host has stopped after [`Editor::stop`].
     pub fn stopped(&self) -> bool {
         self.app.may_close
+    }
+
+    /// Drops the editor. Its service runtime thread then finishes its actors and
+    /// stops; the returned exit observes that (`None` if already taken).
+    pub fn close(self) -> Option<RuntimeExit> {
+        let exit = self.app.tabs.runtime().take_exit().map(RuntimeExit);
+        drop(self);
+        exit
     }
 
     /// Files written by Export since the last call, for the host to publish.
@@ -72,5 +81,44 @@ impl Editor {
     /// A dimension or numeric-expression editor owns the keyboard.
     pub fn numeric_entry(&self, ctx: &egui::Context) -> bool {
         crate::sketch_numeric::editor_open(ctx) || crate::constraint_authoring::editor_open(ctx)
+    }
+}
+
+/// Cancels a touch contact whose press egui has already seen, without leaving
+/// the active tool: egui forgets the press and any drag, so no release, click or
+/// drag-stop follows. Call it between frames; the next frame should carry
+/// `PointerGone`, which the editor's canvas gestures treat as a cancellation.
+pub fn cancel_contact(ctx: &egui::Context) {
+    ctx.input_mut_for(egui::ViewportId::ROOT, |input| {
+        input.pointer = Default::default();
+    });
+    ctx.stop_dragging();
+}
+
+/// Recovery flushes requested by [`Editor::flush_recovery`].
+pub struct RecoveryFlush(Vec<(Arc<crate::bridge::Shared>, u64)>);
+
+impl RecoveryFlush {
+    /// Every document's actor has finished a flush since the request.
+    pub fn done(&self) -> bool {
+        self.0.iter().all(|(shared, before)| {
+            shared
+                .recovery_flushes
+                .load(std::sync::atomic::Ordering::Acquire)
+                > *before
+        })
+    }
+}
+
+/// The editor's service runtime thread, observed after [`Editor::close`].
+pub struct RuntimeExit(std::sync::mpsc::Receiver<()>);
+
+impl RuntimeExit {
+    /// Waits at most `timeout`; `true` once the runtime thread has exited.
+    pub fn wait(&self, timeout: std::time::Duration) -> bool {
+        matches!(
+            self.0.recv_timeout(timeout),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        )
     }
 }

@@ -26,7 +26,9 @@ onecad-scene = { workspace = true }
 onecad-render = { workspace = true }
 onecad-widgets = { workspace = true }
 eframe = { version = "=0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "system_fonts", "wgpu"], optional = true }
-egui = "=0.37.0"
+# egui's bundled fonts are the fallback behind the CoreText SF fonts (eframe also
+# enables them on desktop, so its feature set is unchanged).
+egui = { version = "=0.37.0", features = ["default_fonts"] }
 # Defaults (GL/Vulkan/WebGL backends) arrive only through eframe on desktop; the
 # Metal backend comes from the `wgpu` dependency below.
 egui-wgpu = { version = "=0.37.0", default-features = false }

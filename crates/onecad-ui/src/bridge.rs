@@ -151,6 +151,8 @@ pub struct Shared {
     pub stopping: std::sync::atomic::AtomicBool,
     pub shutdown: Notify,
     pub recovery_flush: Notify,
+    /// Recovery flushes this actor has finished (a host awaits one after asking).
+    pub recovery_flushes: std::sync::atomic::AtomicU64,
     pub budget: Mutex<onecad_render::PreparationBudget>,
     pub host_budget: Arc<crate::budget::HostBudget>,
     /// The document host's process identity, set once its actor has started.
@@ -191,6 +193,7 @@ impl Shared {
             stopping: std::sync::atomic::AtomicBool::new(false),
             shutdown: Notify::new(),
             recovery_flush: Notify::new(),
+            recovery_flushes: std::sync::atomic::AtomicU64::new(0),
             generation: std::sync::atomic::AtomicU64::new(0),
             notify: Notify::new(),
             context,
@@ -567,6 +570,7 @@ async fn actor(
                 {
                     eprintln!("Viewport recovery checkpoint failed: {error}");
                 }
+                shared.recovery_flushes.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             }
             envelope = receiver.recv() => {
                 let Some(envelope) = envelope else { break; };
