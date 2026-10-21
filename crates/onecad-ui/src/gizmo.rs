@@ -154,9 +154,12 @@ impl Gizmo {
                 event,
                 egui::Event::PointerGone | egui::Event::WindowFocused(false)
             ) {
+                // A capture released earlier in this batch keeps its release.
                 response.cancelled = self.active();
                 self.cancel();
-                response.drag = None;
+                if !response.drag.is_some_and(|drag| drag.done) {
+                    response.drag = None;
+                }
                 break;
             }
             self.event(event, frame, &mut response);

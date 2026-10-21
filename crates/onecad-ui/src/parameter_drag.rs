@@ -31,10 +31,18 @@ impl Lifecycle {
     }
 
     /// Opens the reducer drag on the first authored value, then authors `update`.
+    /// Begun only once the reducer holds the snapshot: a refused Begin (file
+    /// action running) retries on the next value, so no update ever lands
+    /// without an original to restore.
     pub(crate) fn author(&mut self, app: &mut App, update: Action) {
         if !self.begun {
             app.dispatch(Action::ParameterDrag(DragPhase::Begin));
-            self.begun = true;
+            self.begun = app
+                .doc
+                .interaction
+                .tool
+                .as_ref()
+                .is_some_and(|tool| tool.dragging());
         }
         app.dispatch(update);
         app.draw_dirty = true;
@@ -76,7 +84,9 @@ pub(crate) fn abandon(app: &mut App, outcome: Outcome) {
 }
 
 /// Raw stage: the first Escape during a capture cancels only the drag and is
-/// consumed; a later Escape reaches the tool.
+/// consumed; a later Escape reaches the tool. An Escape delivered after the
+/// capture's release or loss in the same batch belongs to the tool: the
+/// viewport ends the capture at that earlier event.
 pub(crate) fn route_escape(app: &mut App, raw: &mut egui::RawInput, composition: bool) {
     if composition || !active(app) {
         return;
@@ -93,8 +103,23 @@ pub(crate) fn route_escape(app: &mut App, raw: &mut egui::RawInput, composition:
     }) else {
         return;
     };
+    if raw.events[..index].iter().any(ends_capture) {
+        return;
+    }
     raw.events.remove(index);
     abandon(app, Outcome::Cancel);
+}
+
+fn ends_capture(event: &egui::Event) -> bool {
+    matches!(
+        event,
+        egui::Event::PointerButton {
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            ..
+        } | egui::Event::PointerGone
+            | egui::Event::WindowFocused(false)
+    )
 }
 
 #[cfg(test)]

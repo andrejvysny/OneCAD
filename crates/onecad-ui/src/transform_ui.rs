@@ -160,10 +160,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, view: &ViewSnapshot, rect: egui::R
         apply(app, drag, &params);
         ui.ctx().request_repaint();
     }
-    if response.cancelled {
+    // A capture that ended without a release that reached `apply` never keeps
+    // its placement; once released, the lifecycle has already ended.
+    if response.cancelled || !app.doc.transform_gizmo.gizmo.active() {
         abandon(app, Outcome::Lost);
-    } else if !app.doc.transform_gizmo.gizmo.active() {
-        app.doc.transform_gizmo.baseline = None;
     }
     response.owns_pointer
 }

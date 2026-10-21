@@ -81,6 +81,11 @@ pub(super) const HOST_TESTS: &[&str] = &[
     "app_logic_tests::parameter_delivery_tests::gizmo_pointer_loss_escape_and_tab_switch_restore_placement",
     "app_logic_tests::parameter_delivery_tests::gizmo_drags_then_one_apply_add_one_history_entry",
     "app_logic_tests::parameter_delivery_tests::reedit_two_fields_is_one_apply_and_one_undo_and_unchanged_apply_is_none",
+    "app_logic_tests::extrude_handle_delivery_tests::handle_release_then_escape_in_one_batch_reaches_the_tool",
+    "app_logic_tests::extrude_handle_delivery_tests::handle_camera_change_mid_drag_restores_authored_value",
+    "app_logic_tests::extrude_handle_delivery_tests::handle_drag_begun_while_file_action_runs_still_restores_on_escape",
+    "app_logic_tests::parameter_delivery_tests::gizmo_release_then_pointer_loss_in_one_batch_survives_a_tab_switch",
+    "app_logic_tests::parameter_delivery_tests::gizmo_camera_change_mid_drag_restores_placement",
 ];
 /// Ignored service and bridge cases outside `app_logic_tests`; they do not
 /// emit adapter evidence, so the gate runs them as a separate exact selection.

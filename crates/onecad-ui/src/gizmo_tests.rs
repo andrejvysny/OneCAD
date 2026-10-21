@@ -527,4 +527,26 @@ fn pointer_loss_reports_cancel_and_an_earlier_release_survives_a_new_press() {
     let finished = response.finished.unwrap();
     assert!(finished.done && translation(finished).length() > 0.0);
     assert!(response.drag.unwrap().started && gizmo.active());
+    gizmo.cancel();
+    // A loss after the release in the same batch keeps the release, at its position.
+    let released = end + egui::vec2(30.0, 0.0);
+    let response = gizmo.process(
+        &[
+            press(start, true),
+            egui::Event::PointerMoved(end),
+            press(released, false),
+            egui::Event::PointerGone,
+        ],
+        &frame,
+    );
+    let drag = response.drag.unwrap();
+    assert!(drag.done && !response.cancelled && !gizmo.active());
+    let moved_only = Gizmo::default()
+        .process(
+            &[press(start, true), egui::Event::PointerMoved(end)],
+            &frame,
+        )
+        .drag
+        .unwrap();
+    assert!(translation(drag).length() > translation(moved_only).length());
 }

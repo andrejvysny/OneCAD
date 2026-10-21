@@ -372,6 +372,90 @@ async fn handle_tab_switch_mid_drag_restores_authored_value() {
     host.stop().await;
 }
 
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic native input is not physical acceptance"]
+async fn handle_release_then_escape_in_one_batch_reaches_the_tool() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut host, axis) = extruding(root.path(), AUTHORED, 12.0).await;
+    let undo = undo_depth(&host);
+    let (tip, far) = (axis.at(&host, 12.0), axis.at(&host, 20.0));
+    host.ui(vec![
+        egui::Event::PointerMoved(tip),
+        button(tip, true),
+        egui::Event::PointerMoved(far),
+    ]);
+    assert_eq!(draft(&host), "20");
+    // The release ends the capture first, so this Escape belongs to the tool.
+    host.ui(vec![
+        button(far, false),
+        key(egui::Key::Escape, egui::Modifiers::NONE),
+    ]);
+    assert!(!host.app.doc.extrude_handle.active());
+    assert!(
+        host.app.doc.interaction.tool.is_none(),
+        "an Escape after the release is not swallowed as a drag cancel"
+    );
+    assert_eq!(undo_depth(&host), undo);
+    host.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic native input is not physical acceptance"]
+async fn handle_camera_change_mid_drag_restores_authored_value() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut host, axis) = extruding(root.path(), AUTHORED, 12.0).await;
+    let undo = undo_depth(&host);
+    let (tip, far) = (axis.at(&host, 12.0), axis.at(&host, 20.0));
+    host.ui(vec![
+        egui::Event::PointerMoved(tip),
+        button(tip, true),
+        egui::Event::PointerMoved(far),
+    ]);
+    assert_eq!(draft(&host), "20");
+    host.app.doc.camera.offset *= 1.25;
+    host.redraw();
+    assert!(!host.app.doc.extrude_handle.active());
+    assert_eq!(
+        draft(&host),
+        AUTHORED,
+        "a view change ends the drag as lost"
+    );
+    host.ui(vec![button(far, false)]);
+    valid(&mut host, AUTHORED, 12.0).await;
+    assert_eq!(undo_depth(&host), undo);
+    host.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic native input is not physical acceptance"]
+async fn handle_drag_begun_while_file_action_runs_still_restores_on_escape() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut host, axis) = extruding(root.path(), AUTHORED, 12.0).await;
+    let undo = undo_depth(&host);
+    let tip = axis.at(&host, 12.0);
+    host.app.doc.documents.running = true;
+    host.ui(vec![
+        egui::Event::PointerMoved(tip),
+        button(tip, true),
+        egui::Event::PointerMoved(axis.at(&host, 20.0)),
+    ]);
+    assert!(host.app.doc.extrude_handle.active());
+    assert_eq!(draft(&host), AUTHORED, "authoring is refused while it runs");
+    host.app.doc.documents.running = false;
+    host.ui(vec![egui::Event::PointerMoved(axis.at(&host, 25.0))]);
+    assert_eq!(draft(&host), "25");
+    assert!(
+        host.app.doc.interaction.tool.as_ref().unwrap().dragging(),
+        "the first accepted Begin opened the reducer drag"
+    );
+    host.ui(vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    assert!(!host.app.doc.extrude_handle.active());
+    assert!(host.app.doc.interaction.tool.is_some());
+    valid(&mut host, AUTHORED, 12.0).await;
+    assert_eq!(undo_depth(&host), undo);
+    host.stop().await;
+}
+
 /// World axis of the extrude handle for screen projections.
 pub(super) struct Axis {
     base: DVec3,

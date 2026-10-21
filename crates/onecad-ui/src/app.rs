@@ -150,6 +150,7 @@ impl App {
             Action::Confirm
                 | Action::DraftChanged(_)
                 | Action::ParameterChanged { .. }
+                | Action::ParameterDrag(onecad_interaction::DragPhase::Update { .. })
                 | Action::BeginExtrude { .. }
                 | Action::BeginOperation { .. }
                 | Action::BeginEdit { .. }
@@ -322,6 +323,7 @@ impl App {
             self.doc.clear_preview = true;
             self.doc.selected_body = None;
             self.doc.topology.invalidate_pending();
+            crate::parameter_drag::abandon(self, crate::parameter_drag::Outcome::Lost);
             self.doc.transform_gizmo = Default::default();
             self.draw_dirty = true;
         }
@@ -344,6 +346,7 @@ impl App {
         self.doc.view = None;
         self.doc.bridge.cancel_candidates();
         self.doc.sections.cancel();
+        crate::parameter_drag::abandon(self, crate::parameter_drag::Outcome::Lost);
         self.dispatch(Action::Cancel);
         self.doc.interaction.selection = None;
         self.doc.selected_body = None;
@@ -399,6 +402,7 @@ impl App {
             self.doc.selected_body = None;
             self.doc.selected_feature = None;
             self.doc.topology.invalidate_pending();
+            crate::parameter_drag::abandon(self, crate::parameter_drag::Outcome::Lost);
             self.doc.transform_gizmo = Default::default();
             self.doc.fit_pending = true;
         }

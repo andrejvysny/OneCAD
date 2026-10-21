@@ -151,6 +151,64 @@ async fn gizmo_drags_then_one_apply_add_one_history_entry() {
     host.stop().await;
 }
 
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic native input is not physical acceptance"]
+async fn gizmo_release_then_pointer_loss_in_one_batch_survives_a_tab_switch() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut host, ball) = moving(root.path()).await;
+    let undo = undo_depth(&host);
+    grab(&mut host, ball);
+    let dragged = translation(&host);
+    let end = ball + egui::vec2(120.0, 0.0);
+    host.ui(vec![
+        egui::Event::PointerMoved(end),
+        button(end, false),
+        egui::Event::PointerGone,
+    ]);
+    assert!(!gizmo_active(&host));
+    assert!(
+        !host.app.doc.interaction.tool.as_ref().unwrap().dragging(),
+        "the release closed the reducer drag"
+    );
+    let released = translation(&host);
+    let length = |t: [f64; 3]| t.iter().map(|v| v * v).sum::<f64>().sqrt();
+    assert!(
+        length(released) > length(dragged) + 1e-6,
+        "the release-frame motion is kept: {released:?} vs {dragged:?}"
+    );
+    let tab = host.app.doc.tab;
+    host.app.open_tab().unwrap();
+    host.app.activate_tab(tab);
+    assert_eq!(translation(&host), released, "a released placement stays");
+    placed(&mut host).await;
+    assert_eq!(translation(&host), released);
+    assert_eq!(undo_depth(&host), undo);
+    host.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic native input is not physical acceptance"]
+async fn gizmo_camera_change_mid_drag_restores_placement() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut host, ball) = moving(root.path()).await;
+    let undo = undo_depth(&host);
+    grab(&mut host, ball);
+    host.app.doc.camera.offset *= 1.25;
+    host.redraw();
+    assert!(!gizmo_active(&host));
+    assert_eq!(
+        translation(&host),
+        [0.0; 3],
+        "a view change ends the drag as lost"
+    );
+    assert_eq!(draft(&host), "0");
+    host.ui(vec![button(ball, false)]);
+    placed(&mut host).await;
+    assert_eq!(translation(&host), [0.0; 3]);
+    assert_eq!(undo_depth(&host), undo);
+    host.stop().await;
+}
+
 fn extrude_record(host: &Host) -> OperationRecord {
     host.app
         .doc
@@ -169,6 +227,31 @@ fn extrude_scalars(record: &OperationRecord) -> (Scalar, Scalar) {
         panic!("Extrude")
     };
     (params.distance.clone(), params.draft_angle_deg.clone())
+}
+
+/// The selector shows the focused label; the field caption below it does too,
+/// so pick the one nearest a "Parameter" caption.
+fn selector(host: &Host, focused: &str) -> egui::Pos2 {
+    let captions: Vec<_> = host
+        .widgets
+        .iter()
+        .filter(|(name, _)| name == "Parameter")
+        .map(|(_, rect)| rect.center())
+        .collect();
+    host.widgets
+        .iter()
+        .filter(|(name, _)| name == focused)
+        .map(|(_, rect)| rect.center())
+        .min_by(|a, b| {
+            let gap = |p: &egui::Pos2| {
+                captions
+                    .iter()
+                    .map(|c| c.distance(*p))
+                    .fold(f32::INFINITY, f32::min)
+            };
+            gap(a).total_cmp(&gap(b))
+        })
+        .expect("parameter selector")
 }
 
 async fn edit(host: &mut Host, record: RecordId) {
@@ -218,9 +301,22 @@ async fn reedit_two_fields_is_one_apply_and_one_undo_and_unchanged_apply_is_none
     edit(&mut host, before.record_id).await;
     host.app.dispatch(Action::DraftChanged("15".into()));
     evaluated(&mut host, "15", 15.0).await;
-    host.app.dispatch(Action::FocusParameter(
-        NumericParameter::ExtrudeDraftAngle.into(),
-    ));
+    // Switch through the selector, as a user does.
+    host.ui(vec![]);
+    let selector = selector(&host, NumericParameter::ExtrudeDistance.label());
+    host.click(selector);
+    host.control(NumericParameter::ExtrudeDraftAngle.label());
+    assert_eq!(
+        host.app
+            .doc
+            .interaction
+            .tool
+            .as_ref()
+            .unwrap()
+            .params
+            .focus(),
+        Some(NumericParameter::ExtrudeDraftAngle.into())
+    );
     assert_eq!(
         draft(&host),
         "0",
