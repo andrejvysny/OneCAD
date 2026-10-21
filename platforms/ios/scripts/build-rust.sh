@@ -47,7 +47,10 @@ rust_target() {
 
 check_archs() {
     local arch
-    for arch in ${ARCHS:-arm64}; do
+    # Xcode leaves ARCHS empty when every requested arch is excluded (e.g.
+    # ARCHS=x86_64 with the project's EXCLUDED_ARCHS); treat that as refused.
+    [[ -n "${ARCHS:-}" ]] || die "ARCHS is empty: no supported architecture left for ${PLATFORM_NAME}; OneCAD iPad builds arm64 only (no x86_64 simulator)"
+    for arch in ${ARCHS}; do
         if [[ "$arch" != "arm64" ]]; then
             die "unsupported architecture '${arch}': OneCAD iPad builds arm64 only (no x86_64 simulator); use an Apple-silicon simulator or generic iOS device destination"
         fi
@@ -73,7 +76,11 @@ worker_dir() {
 # The worker bundle is produced by the kernel lane's scripts/build-ios-worker.sh.
 ensure_worker() {
     local dir="$1" worker_config="$2"
-    [[ -f "${dir}/${WORKER_LIB}" ]] && return 0
+    if [[ -f "${dir}/${WORKER_LIB}" ]]; then
+        # Only built when missing: kernel/OCCT changes need a manual rebuild.
+        echo "note: using existing ${dir}/${WORKER_LIB}; delete it or rerun scripts/build-ios-worker.sh after kernel changes"
+        return 0
+    fi
     local builder="${REPO_ROOT}/scripts/build-ios-worker.sh"
     if [[ ! -x "$builder" ]]; then
         die "missing ${dir}/${WORKER_LIB} and ${builder} does not exist; build the embedded worker for ${PLATFORM_NAME}/${worker_config} first (see docs/ios/BUILD.md)"

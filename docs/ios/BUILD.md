@@ -99,13 +99,16 @@ The app target's first phase, **Build Rust (onecad-ios)**, runs
 
 1. Maps `PLATFORM_NAME` to the Rust target: `iphonesimulator` →
    `aarch64-apple-ios-sim`, `iphoneos` → `aarch64-apple-ios`. Any other
-   platform, or any architecture other than arm64 in `ARCHS`, fails.
+   platform, any architecture other than arm64 in `ARCHS`, or an empty
+   `ARCHS` (every requested arch excluded, e.g. `ARCHS=x86_64`), fails.
 2. Maps `CONFIGURATION`: Release → `--release`; Debug and Acceptance → dev
    profile; Acceptance adds `--features onecad-ios/test-hooks`. Unknown
    configurations fail.
 3. Ensures `target/ios-worker/<platform>-<Release|Debug>[-test-hooks]/libonecad_worker_bundle.a`
    exists, invoking `scripts/build-ios-worker.sh --platform <platform>
    --config <Release|Debug> --out <dir> [--test-hooks]` when it does not.
+   An existing bundle is reused as is (the phase prints a note): after kernel
+   or OCCT changes, delete it or rerun `scripts/build-ios-worker.sh`.
 4. Runs `cargo build --locked -p onecad-ios --target <triple>` from the
    repository root with `CARGO_TARGET_DIR=target/ios-xcode/<platform>-<configuration>`
    (one directory per SDK and configuration) and
@@ -130,6 +133,37 @@ by the project) skips cargo and the worker and stages `libonecad_ios.a` and
 `libonecad_worker_bundle.a` from `<dir>`, with a build warning. It exists only
 to compile and link the Swift host without the Rust lanes; such a build proves
 nothing about runtime behavior.
+
+## Host conventions the Rust side relies on
+
+Behavior of the UIKit host that `onecad_ios.h` leaves open:
+
+- **Keyboard channels.** While the hidden key-input proxy is first responder
+  (`TEXT_INPUT_ACTIVE`), Return, keypad Enter, Backspace and Tab without
+  ⌘/⌃ arrive only on the text channel, from hardware and software keyboards
+  alike: `text_insert("\n")`, `text_insert("\t")` and
+  `text_delete_backward`, including the system's key repeat. Their
+  `key_submit` events are not sent. Rust maps `"\n"` to Enter, `"\t"` to Tab
+  and delete-backward to Backspace. All other keys, ⌘/⌃ chords and the
+  modifier keys themselves stay on `key_submit`, also while text input is
+  active, and printable keys additionally produce `text_insert` (like a
+  desktop key event plus text event). Each UIPress is submitted at most once
+  per edge, and its key-up follows its key-down's channel. `repeat` is always 0.
+- **Host requests** are popped one at a time; the next is popped only after
+  the previous is completed, so the backlog stays in Rust's queue. An
+  OPEN_DOCUMENT copy that fails shows a native alert
+  (`onecad.import.failed`) before the request is completed with the paths
+  that did succeed (empty if none); re-importing an unchanged file reuses its
+  earlier `Documents/Inbox` copy.
+- **Terminal state.** After the first `ERR_PANIC`/`ERR_TERMINAL` the host
+  stops calling Rust except `surface_detach`, `lifecycle` (so backgrounding
+  still flushes autosave) and `destroy`, and swaps in the relaunch-required
+  view on the next main-queue turn. The host keeps the attached
+  `CAMetalLayer` alive until `surface_detach` returns OK or `destroy` returns.
+- **Keyboard and safe area.** Keyboard frame changes send `keyboard_frame`
+  and add the keyboard's overlap below the system safe area to the canvas
+  safe area, which produces a `surface_resize`. `view_generation` bumps on
+  every size, scale or safe-area change.
 
 ## Signing
 

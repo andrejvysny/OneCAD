@@ -51,6 +51,7 @@ follows its role (button, static text or other).
 | `onecad.error.relaunchRequired` | Native | Full-screen error after `ERR_TERMINAL`/`ERR_PANIC` | `LaunchTests` (must be absent) |
 | `onecad.error.title`, `onecad.error.message`, `onecad.error.hint` | Native | Labels inside either error view | — |
 | `onecad.save.name` | Native | Name field of the SAVE_DOCUMENT prompt | planned document tests |
+| `onecad.import.failed` | Native | Alert when an OPEN_DOCUMENT/"Open in" copy into `Documents/Inbox` fails | planned document tests |
 | `onecad.keyInputProxy` | Native | Hidden first responder for the keyboard; not an accessibility element | — |
 | `onecad.viewport` | Snapshot (egui viewport, role CANVAS) | 3D viewport region | planned |
 | `onecad.menu.file` | Snapshot (egui "File" menu button) | In-app File menu | `LaunchTests`, `OrientationTests` |
