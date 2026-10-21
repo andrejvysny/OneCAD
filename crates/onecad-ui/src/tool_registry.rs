@@ -1,5 +1,6 @@
 //! Data-driven ToolPill contents: which tools show for which selection kind.
-//! Groups and order follow docs/design/native-ui/final/README.md.
+//! Groups and order follow the final native design reviewed at ed9ed33
+//! (docs/design/native-ui/final/README.md, retired from the tree in 79eb923).
 use crate::app::App;
 use onecad_core::document::record::{KnownOperation, Operation};
 use onecad_render::HighlightKind;
@@ -226,9 +227,9 @@ pub fn unavailable_reason(id: ToolId) -> &'static str {
         }
         ToolId::Project => "Native projection workflow is planned (ONECAD-296)",
         ToolId::Spline => "Native spline creation is planned (ONECAD-298)",
-        ToolId::Revolve => "Native revolve operand and preview flow is planned (ONECAD-315)",
+        ToolId::Revolve => "Native revolve operand and preview flow is planned (ONECAD-220)",
         ToolId::Fillet => {
-            "Native fillet creation flow is incomplete (ONECAD-220); saved features remain editable"
+            "Native fillet creation flow is planned (ONECAD-316); saved features remain editable"
         }
         ToolId::Chamfer => {
             "Native chamfer creation flow is planned (ONECAD-316); saved features remain editable"
@@ -237,12 +238,11 @@ pub fn unavailable_reason(id: ToolId) -> &'static str {
         ToolId::Hole => "Native hole creation flow is planned (ONECAD-318)",
         ToolId::OffsetFace => "Native offset-face creation flow is planned (ONECAD-319)",
         ToolId::Boolean => "Native target/tool selection and preview are planned (ONECAD-253)",
-        ToolId::LinearPattern | ToolId::CircularPattern => {
-            "Native body-pattern creation/preview guard is incomplete (ONECAD-221)"
+        ToolId::LinearPattern => "Native linear body-pattern creation flow is planned (ONECAD-221)",
+        ToolId::CircularPattern => {
+            "Native circular body-pattern creation flow is planned (ONECAD-222)"
         }
-        ToolId::FeaturePattern => {
-            "Native feature-pattern expansion is planned (ONECAD-222 / ONECAD-29)"
-        }
+        ToolId::FeaturePattern => "Native feature-pattern expansion is planned (ONECAD-29)",
         ToolId::Isolate | ToolId::Hide => {
             "Native temporary/persistent body visibility is planned (ONECAD-320)"
         }
