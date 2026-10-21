@@ -1,6 +1,8 @@
 #pragma once
 
 #include <algorithm>
+#include <functional>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -18,7 +20,23 @@ enum class OriginState { Known, Ambiguous, Unknown };
 struct OriginClaim {
     OriginState state = OriginState::Unknown;
     std::string producer_record_id;
+    // Sub-feature slot inside the producer (SCHEMA §7.3 Hole `points[].id`,
+    // ONECAD-361). Empty = the producer made no per-slot claim. A slot never
+    // makes a claim Ambiguous: rows that agree on the producer but not on the
+    // slot keep the producer and drop the slot, so producer-level consumers
+    // (FeaturePattern) see exactly what they saw before slots existed.
+    std::string slot;
 };
+
+// Merge two rows of ONE shape: producer disagreement is Ambiguous; slot
+// disagreement only clears the slot.
+inline OriginClaim merge_origin(const OriginClaim& a, const OriginClaim& b) {
+    if (a.state != b.state || a.producer_record_id != b.producer_record_id)
+        return {OriginState::Ambiguous, {}, {}};
+    OriginClaim merged = a;
+    if (merged.slot != b.slot) merged.slot.clear();
+    return merged;
+}
 
 struct OwnedShape {
     std::string body_id;
@@ -37,9 +55,9 @@ public:
             if (!found) {
                 result = entry.claim;
                 found = true;
-            } else if (result.state != entry.claim.state ||
-                       result.producer_record_id != entry.claim.producer_record_id) {
-                return {OriginState::Ambiguous, {}};
+            } else {
+                result = merge_origin(result, entry.claim);
+                if (result.state == OriginState::Ambiguous) return result;
             }
         }
         return result;
@@ -68,9 +86,8 @@ public:
                 continue;
             }
             OriginClaim& current = claims.ChangeFromIndex(index);
-            if (current.state != entry.claim.state ||
-                current.producer_record_id != entry.claim.producer_record_id)
-                current = {OriginState::Ambiguous, {}};
+            if (current.state != OriginState::Ambiguous)
+                current = merge_origin(current, entry.claim);
         }
         return claims;
     }
@@ -108,7 +125,9 @@ private:
 
 struct TopologySurvivor { TopoDS_Shape before; TopoDS_Shape after; };
 struct TopologySuccessor { std::vector<TopoDS_Shape> before; TopoDS_Shape after; };
-struct TopologyBirth { TopoDS_Shape after; };
+// `slot` names the producer sub-feature that created the shape (Hole point id);
+// empty when the operation makes no per-slot claim.
+struct TopologyBirth { TopoDS_Shape after; std::string slot = {}; };
 struct TopologyConflict { TopoDS_Shape after; };
 
 enum class HistoryCoverage { Proven, Unproven };
@@ -132,32 +151,26 @@ inline OriginClaim inherit_origin(const TopologyOwnerLedger& prior,
                                   const std::vector<TopoDS_Shape>& sources) {
     bool any_unknown = false;
     bool found_known = false;
-    std::string producer;
+    OriginClaim known;
     for (const TopoDS_Shape& source : sources) {
         const OriginClaim claim = prior.lookup(body_id, source);
-        if (claim.state == OriginState::Ambiguous) return {OriginState::Ambiguous, {}};
+        if (claim.state == OriginState::Ambiguous) return {OriginState::Ambiguous, {}, {}};
         if (claim.state == OriginState::Unknown) {
             any_unknown = true;
             continue;
         }
-        if (found_known && producer != claim.producer_record_id)
-            return {OriginState::Ambiguous, {}};
+        known = found_known ? merge_origin(known, claim) : claim;
+        if (known.state == OriginState::Ambiguous) return known;
         found_known = true;
-        producer = claim.producer_record_id;
     }
     if (any_unknown || !found_known) return {};
-    return {OriginState::Known, std::move(producer)};
+    return known;
 }
 
 inline void add_origin(TopologyOwnerLedger& ledger, const std::string& body_id,
                        const TopoDS_Shape& shape, OriginClaim claim) {
     if (shape.IsNull()) return;
-    const bool classified = ledger.contains(body_id, shape);
-    const OriginClaim prior = ledger.lookup(body_id, shape);
-    if (classified &&
-        (prior.state != claim.state || prior.producer_record_id != claim.producer_record_id)) {
-        claim = {OriginState::Ambiguous, {}};
-    }
+    if (ledger.contains(body_id, shape)) claim = merge_origin(ledger.lookup(body_id, shape), claim);
     ledger.add({body_id, shape, std::move(claim)});
 }
 
@@ -188,13 +201,32 @@ inline void apply_topology_history(TopologyOwnerLedger& ledger, const std::strin
                        inherit_origin(prior, history.body_id, successor.before));
         }
         for (const TopologyBirth& birth : history.births) {
-            add_origin(classified, history.body_id, birth.after, {OriginState::Known, op_id});
+            add_origin(classified, history.body_id, birth.after,
+                       {OriginState::Known, op_id, birth.slot});
         }
         for (const TopologyConflict& conflict : history.conflicts) {
-            add_origin(classified, history.body_id, conflict.after, {OriginState::Ambiguous, {}});
+            add_origin(classified, history.body_id, conflict.after,
+                       {OriginState::Ambiguous, {}, {}});
         }
         for (const OwnedShape& entry : classified.entries()) ledger.add(entry);
     }
+}
+
+// Ladder admissibility for a ref whose frozen descriptor names a producer slot
+// (SCHEMA §7.3 Hole `originSlot`): only shapes of `body_id` whose live claim is
+// Known with exactly that producer and slot are candidates. A sibling slot, an
+// Unknown or Ambiguous shape is never admitted, so a ref can bind its own hole
+// or go NeedsRepair, never a congruent sibling.
+inline std::function<bool(const TopoDS_Shape&)> origin_slot_filter(
+    const TopologyOwnerLedger& ledger, const std::string& body_id,
+    const std::string& producer_record_id, const std::string& slot) {
+    auto claims = std::make_shared<TopologyOwnerLedger::EffectiveClaims>(
+        ledger.effective_claims(body_id));
+    return [claims, producer_record_id, slot](const TopoDS_Shape& candidate) {
+        const OriginClaim* claim = claims->Seek(candidate);
+        return claim != nullptr && claim->state == OriginState::Known &&
+               claim->producer_record_id == producer_record_id && claim->slot == slot;
+    };
 }
 
 }  // namespace onecad::session

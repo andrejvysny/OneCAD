@@ -27,6 +27,7 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -131,6 +132,10 @@ struct PublishedStateSnapshot {
     std::uint64_t snapshot_id = 0;
     BodyStore bodies;
     elementmap::ElementMapPartition partition;
+    // Read by AcquireElementIds (`originSlot` evidence) and ResolveRefs (the
+    // slot-narrowed candidate pool), ONECAD-361. Shared with the head, never
+    // copied: the head replaces it wholesale on accept/open/reset.
+    std::shared_ptr<const TopologyOwnerLedger> topology_owners;
 };
 
 struct ElementBindingInput {
@@ -268,7 +273,10 @@ private:
     BodyStore bodies_;                          // live published bodies (real TopoDS_Shape)
     elementmap::ElementMapPartition partition_; // live published element-map partition
     ResolvedInputEvidenceLedger input_evidence_;
-    TopologyOwnerLedger topology_owners_;
+    // Immutable once published (copy-on-accept), so a published-state snapshot
+    // shares it instead of deep-copying every TopoDS_Shape under the mutex.
+    std::shared_ptr<const TopologyOwnerLedger> topology_owners_ =
+        std::make_shared<const TopologyOwnerLedger>();
     // SCHEMA §7.3 gear referenceability (WP-I): body id → gear info for every
     // live gear body, rebuilt at each AcceptPrepared from the ACCEPTED plan.
     // `BindElementIds` consults it to refuse a tooth face by name.

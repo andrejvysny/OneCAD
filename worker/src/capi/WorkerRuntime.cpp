@@ -105,7 +105,8 @@ nlohmann::json make_hello_result_impl() {
         // three and left half-true.
         {"capabilities",
          nlohmann::json::array({"op.sketch", "op.extrude", "op.revolve", "op.fillet", "op.chamfer",
-                                "op.boolean", "op.hole", "op.shell", "op.linearPattern",
+                                "op.boolean", "op.hole", "op.hole.points", "op.shell",
+                                "op.linearPattern",
                                 "op.circularPattern", "op.mirrorBody", "op.transformBody",
                                 "op.offsetFace", "op.importStep", "op.placeComponent",
                                 "op.detachComponent", "solver.planegcs", "constraint.tangentAtPoint", "tessellate.mesh1",

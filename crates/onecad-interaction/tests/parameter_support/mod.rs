@@ -65,6 +65,7 @@ pub fn hole(body: BodyId) -> HoleParams {
         target_body: body,
         face: primary(body, ElementKind::Face, "el_face"),
         point: Vec3::new_unchecked(3.0, 4.0, 5.0),
+        points: None,
         hole_type: HoleType::Simple,
         diameter: Scalar::new(5.0),
         depth: Some(Scalar::new(10.0)),

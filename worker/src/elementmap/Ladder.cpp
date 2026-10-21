@@ -190,7 +190,8 @@ std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_
                                                        const std::string& body_id,
                                                        const std::vector<LadderRef>& refs,
                                                        const LadderEditContext& edit,
-                                                       const CandidateFilter& admissible) {
+                                                       const CandidateFilter& admissible,
+                                                       const std::vector<CandidateFilter>& ref_admissible) {
     (void)body_id;  // evidence label only
     std::vector<LadderResolution> out(refs.size());
     const double body_diag = body_diagonal(body_shape);
@@ -203,6 +204,22 @@ std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_
         const CandidatePool pool = enumerate_candidates(body_shape, kind, admissible);
         const int c = static_cast<int>(pool.shapes.size());
         const int n = static_cast<int>(idxs.size());
+
+        // Per-ref admissibility (ONECAD-361 `originSlot`): a (ref, candidate)
+        // pair the ref's filter rejects is never scored, ranked or counted as a
+        // rival, and costs the same as a dummy column. The pool itself stays
+        // shared, so the distinct assignment below still spans EVERY ref of the
+        // kind — two refs can never both bind one shape.
+        std::vector<std::vector<char>> admitted(n, std::vector<char>(std::max(c, 0), 1));
+        std::vector<int> admitted_count(n, c);
+        for (int i = 0; i < n; ++i) {
+            if (idxs[i] >= ref_admissible.size() || !ref_admissible[idxs[i]]) continue;
+            for (int j = 0; j < c; ++j) {
+                if (ref_admissible[idxs[i]](pool.shapes[j])) continue;
+                admitted[i][j] = 0;
+                --admitted_count[i];
+            }
+        }
 
         // Score matrix + kept per-candidate evidence, per ref of this kind.
         std::vector<std::vector<double>> score(n, std::vector<double>(std::max(c, 1), 0.0));
@@ -228,6 +245,7 @@ std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_
                                                  pool.descriptors[j].center);
             }
             for (int j = 0; j < c; ++j) {
+                if (!admitted[i][j]) continue;
                 AnchorEvidence anchor = r.anchor;
                 if (anchor.has_world_point) anchor.shape_distance = dists[j];
                 const ScoreResult s = score_candidate(r.descriptor, r.has_descriptor, anchor,
@@ -246,7 +264,8 @@ std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_
             const int cols = std::max(n, c);
             std::vector<std::vector<double>> cost(n, std::vector<double>(cols, 1.0));
             for (int i = 0; i < n; ++i)
-                for (int j = 0; j < c; ++j) cost[i][j] = 1.0 - score[i][j];
+                for (int j = 0; j < c; ++j)
+                    if (admitted[i][j]) cost[i][j] = 1.0 - score[i][j];
             assignment = min_cost_assignment(cost);
         }
 
@@ -261,20 +280,23 @@ std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_
             res.ladder_level = "descriptor";
 
             // Ranked candidate evidence (real candidates only, desc by score).
-            std::vector<int> order(c);
-            std::iota(order.begin(), order.end(), 0);
+            const int ca = admitted_count[i];
+            std::vector<int> order;
+            order.reserve(static_cast<std::size_t>(ca));
+            for (int j = 0; j < c; ++j)
+                if (admitted[i][j]) order.push_back(j);
             std::sort(order.begin(), order.end(), [&](int a, int b) {
                 if (score[i][a] != score[i][b]) return score[i][a] > score[i][b];
                 return a < b;  // deterministic tie-break
             });
-            const int keep = std::min(c, 5);
+            const int keep = std::min(ca, 5);
             for (int k = 0; k < keep; ++k) {
                 const int j = order[k];
                 LadderCandidate cand;
                 cand.topo_key = pool.topo_keys[j];
                 cand.shape = pool.shapes[j];
                 cand.score = score[i][j];
-                cand.margin = (k + 1 < c) ? (score[i][j] - score[i][order[k + 1]]) : score[i][j];
+                cand.margin = (k + 1 < ca) ? (score[i][j] - score[i][order[k + 1]]) : score[i][j];
                 cand.world_pos = pool.descriptors[j].center;
                 cand.summary = candidate_summary(kind, pool.descriptors[j]);
                 cand.contributions = contribs[i][j];
@@ -282,7 +304,9 @@ std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_
             }
 
             const int aj = assignment.empty() ? -1 : assignment[i];
-            if (c == 0 || aj < 0 || aj >= c) {
+            // A ref landing on a dummy or a non-admitted column has no real
+            // candidate left to it.
+            if (c == 0 || aj < 0 || aj >= c || !admitted[i][aj]) {
                 res.outcome = LadderOutcome::NeedsRepair;
                 res.reason = "no-candidates";
                 continue;
@@ -290,7 +314,7 @@ std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_
             const double assigned = score[i][aj];
             double runner_up = 0.0;
             for (int j = 0; j < c; ++j)
-                if (j != aj) runner_up = std::max(runner_up, score[i][j]);
+                if (j != aj && admitted[i][j]) runner_up = std::max(runner_up, score[i][j]);
             const double margin = assigned - runner_up;
 
             // EDIT-SCOPED DESCRIPTOR-TIE VETO (SCHEMA §10, resolverVersion 2).
@@ -324,11 +348,11 @@ std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_
             // `RegenRequest::RevertToEnd` for open/import/new/restart); claiming one
             // there would refuse every anchor-only ref in the document.
             bool anchor_decided_a_tie = false;
-            if (edit.post_upstream_edit && c >= 2 && anchor_scored[i]) {
+            if (edit.post_upstream_edit && ca >= 2 && anchor_scored[i]) {
                 bool has_rival = false;
                 double desc_rival = 0.0;
                 for (int j = 0; j < c; ++j) {
-                    if (j == aj) continue;
+                    if (j == aj || !admitted[i][j]) continue;
                     if (!has_rival || desc_score[i][j] > desc_rival) {
                         desc_rival = desc_score[i][j];
                         has_rival = true;
@@ -343,11 +367,11 @@ std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_
             // tie. V5 also admits an exact, separated, descriptor-nonworse winner,
             // but only on a clean replay; edit/fallback behavior is unchanged.
             bool anchor_decisive = false;
-            if (!anchor_decided_a_tie && c >= 2 && anchor_scored[i] &&
+            if (!anchor_decided_a_tie && ca >= 2 && anchor_scored[i] &&
                 assigned >= kAutoBindMinScore && margin < kAutoBindMinMargin) {
                 int runner = -1;
                 for (int j = 0; j < c; ++j) {
-                    if (j == aj) continue;
+                    if (j == aj || !admitted[i][j]) continue;
                     if (runner < 0 || score[i][j] > score[i][runner]) runner = j;
                 }
                 const bool descriptor_tie =
@@ -356,7 +380,7 @@ std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_
                 const double winner_d = shape_dists[i][aj];
                 double rival_d = -1.0;
                 for (int j = 0; j < c; ++j) {
-                    if (j == aj) continue;
+                    if (j == aj || !admitted[i][j]) continue;
                     if (rival_d < 0.0 || shape_dists[i][j] < rival_d) rival_d = shape_dists[i][j];
                 }
                 // "ON the winner" means on it: within the 0.01 mm separation floor, NOT
@@ -368,9 +392,9 @@ std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_
                 const bool rivals_far =
                     rival_d >= kAnchorDecisiveRatio * std::max(winner_d, kAnchorMinSeparationMm);
                 std::vector<double> rival_descriptor_scores;
-                rival_descriptor_scores.reserve(static_cast<std::size_t>(c - 1));
+                rival_descriptor_scores.reserve(static_cast<std::size_t>(ca - 1));
                 for (int j = 0; j < c; ++j) {
-                    if (j != aj) rival_descriptor_scores.push_back(desc_score[i][j]);
+                    if (j != aj && admitted[i][j]) rival_descriptor_scores.push_back(desc_score[i][j]);
                 }
                 const bool clean_reinforcement = clean_replay_anchor_reinforcement(
                     edit, desc_score[i][aj], rival_descriptor_scores, winner_d, rival_d);
@@ -418,8 +442,15 @@ LadderRef ladder_ref_from_input(const nlohmann::json& input, const std::string& 
         if (r.kind == km::ElementKind::Unknown && intent.contains("kind") && intent["kind"].is_string())
             r.kind = ElementMapPartition::kind_from_name(intent["kind"].get<std::string>());
         if (intent.contains("descriptor") && intent["descriptor"].is_object()) {
-            r.descriptor = ElementMapPartition::descriptor_from_json(intent["descriptor"]);
+            const nlohmann::json& descriptor = intent["descriptor"];
+            r.descriptor = ElementMapPartition::descriptor_from_json(descriptor);
             r.has_descriptor = true;
+            const nlohmann::json origin = descriptor.value("originSlot", nlohmann::json());
+            if (origin.is_object() && origin.value("recordId", nlohmann::json()).is_string() &&
+                origin.value("slot", nlohmann::json()).is_string()) {
+                r.origin_record_id = origin["recordId"].get<std::string>();
+                r.origin_slot = origin["slot"].get<std::string>();
+            }
         }
     }
     // Anchor (world point narrows a descriptor tie / is the sole evidence otherwise).

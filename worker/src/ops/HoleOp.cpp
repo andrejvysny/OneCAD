@@ -8,15 +8,9 @@
 #include <string>
 #include <vector>
 
-#include <BRepAdaptor_Surface.hxx>
-#include <BRepClass_FaceClassifier.hxx>
-#include <BRepCheck_Analyzer.hxx>
-#include <BRep_Tool.hxx>
-#include <GeomAPI_ProjectPointOnSurf.hxx>
-#include <Geom_Surface.hxx>
-#include <Standard_Failure.hxx>
-#include <TopAbs_State.hxx>
+#include <BRep_Builder.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 #include <gp_Dir.hxx>
@@ -28,6 +22,7 @@
 #include "kernel/validation/GeometryPrecision.h"
 #include "modeling/BooleanMode.h"
 #include "ops/ComponentGenerators.h"
+#include "ops/HolePoints.h"
 #include "ops/HoleTool.h"
 #include "ops/OpCommon.h"
 
@@ -38,29 +33,111 @@ namespace em = onecad::elementmap;
 
 namespace {
 
-// The dimension floor now comes from the precision context —
-// `GeometryPrecisionContext::authoring_resolution()`. The value is unchanged
-// (1e-3 mm, RegenerationEngine.cpp:61 kMinValue); it is no longer restated here.
-// SCHEMA §7.3: the frozen `point` is re-projected onto the resolved face and the
-// op "fails loudly past 1e-3 mm".
-constexpr double kPointPlaneFence = 1e-3;
-// Face-boundary classification tolerance (BooleanOperation.cpp:116 precedent).
-constexpr double kClassifyTol = 1e-7;
+// The dimension floor comes from the precision context —
+// `GeometryPrecisionContext::authoring_resolution()` (1e-3 mm). The point fence
+// and face classification live in HolePoints.cpp (`place_hole_point`).
 constexpr int kResultPolicyVersion2 = 2;
+// ONECAD-361: V3 = ordered `points` + V2 single-solid publication.
+constexpr int kResultPolicyVersion3 = 3;
 
-enum class HoleResultPolicy { Legacy, V2 };
+enum class HoleResultPolicy { Legacy, V2, V3 };
 
 bool read_result_policy(const json& params, HoleResultPolicy& policy,
                         std::string& error) {
     policy = HoleResultPolicy::Legacy;
     if (!params.contains("resultPolicyVersion")) return true;
     const json& value = params["resultPolicyVersion"];
-    if (!value.is_number_integer() || value.get<int>() != kResultPolicyVersion2) {
+    const int version = value.is_number_integer() ? value.get<int>() : 0;
+    if (version != kResultPolicyVersion2 && version != kResultPolicyVersion3) {
         error = "UNSUPPORTED_HOLE_RESULT_POLICY_VERSION";
         return false;
     }
-    policy = HoleResultPolicy::V2;
+    policy = version == kResultPolicyVersion3 ? HoleResultPolicy::V3 : HoleResultPolicy::V2;
     return true;
+}
+
+// ONECAD-361 preflight. V3 reads geometry ONLY from `points`; a legacy/V2
+// record carrying `points` is refused rather than silently drilling `point`.
+std::optional<OpOutcome> read_points_preflight(const json& params, HoleResultPolicy policy,
+                                               std::vector<HolePointSpec>& points) {
+    if (policy == HoleResultPolicy::V3) return read_hole_points(params, points);
+    if (params.contains("points")) {
+        return hole_point_refusal("HOLE_POINTS_REQUIRE_V3",
+                                  "Hole points require resultPolicyVersion 3", json::object());
+    }
+    return std::nullopt;
+}
+
+// Legacy/V2 single `point`, read at the same rung as before ONECAD-361 so its
+// failure precedence and messages are unchanged.
+std::optional<OpOutcome> read_legacy_point(const json& params,
+                                           std::vector<HolePointSpec>& points) {
+    if (!params.contains("point") || !params["point"].is_array() || params["point"].size() != 3) {
+        return OpOutcome::fail("OP_FAILED", "Hole point must be a [x, y, z] world point");
+    }
+    for (const json& c : params["point"]) {
+        if (!c.is_number()) return OpOutcome::fail("OP_FAILED", "Hole point must be numeric");
+    }
+    points.push_back({"", gp_Pnt(params["point"][0].get<double>(),
+                                 params["point"][1].get<double>(),
+                                 params["point"][2].get<double>())});
+    return std::nullopt;
+}
+
+// Re-project every point (index order), then the V3 spacing rule — all before
+// any tool exists, so one bad point refuses the whole feature.
+std::optional<OpOutcome> place_points(const TopoDS_Face& face,
+                                      const std::vector<HolePointSpec>& points, bool v3,
+                                      double tool_radius, std::vector<gp_Pnt>& origins) {
+    for (std::size_t k = 0; k < points.size(); ++k) {
+        gp_Pnt origin;
+        const char* reason_code = nullptr;
+        const std::string reason = place_hole_point(face, points[k].frozen, origin, reason_code);
+        if (!reason.empty()) {
+            if (!v3) return OpOutcome::fail("OP_FAILED", reason);
+            return hole_point_refusal(reason_code,
+                                      reason + " (points[" + std::to_string(k) + "])",
+                                      {{"pointIndex", k}});
+        }
+        origins.push_back(origin);
+    }
+    if (v3) return check_hole_spacing(origins, tool_radius);
+    return std::nullopt;
+}
+
+// One tool per origin (through-all measured per point), compounded in point
+// order when there is more than one. A single tool is passed as-is, so the
+// legacy path builds bit-identically.
+std::optional<OpOutcome> build_tools(OpContext& ctx, const std::vector<gp_Pnt>& origins,
+                                     const gp_Dir& axis, const HoleDims& dims,
+                                     const TopoDS_Shape& host, bool v3, TopoDS_Shape& tool) {
+    std::vector<TopoDS_Shape> tools;
+    for (std::size_t k = 0; k < origins.size(); ++k) {
+        // A COPY: through-all overwrites `depth`, which must not leak to the next point.
+        HoleDims d = dims;
+        // THROUGH-ALL: bound the drill by the host's own extent (clamped = through).
+        // A blind depth that already overshoots the extent is FINE (SCHEMA §7.3).
+        if (d.depth <= 0.0) d.depth = through_all_length(origins[k], axis, host);
+        if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
+        std::string tool_err;
+        TopoDS_Shape one = build_hole_tool(origins[k], axis, d, tool_err);
+        if (one.IsNull()) {
+            const std::string message = tool_err.empty() ? "Hole tool solid is null" : tool_err;
+            if (!v3) return OpOutcome::fail("OP_FAILED", message);
+            return hole_point_refusal("HOLE_TOOL_FAILED", message, {{"pointIndex", k}});
+        }
+        tools.push_back(std::move(one));
+    }
+    if (tools.size() == 1) {
+        tool = tools.front();
+        return std::nullopt;
+    }
+    TopoDS_Compound compound;
+    BRep_Builder builder;
+    builder.MakeCompound(compound);
+    for (const TopoDS_Shape& one : tools) builder.Add(compound, one);
+    tool = compound;
+    return std::nullopt;
 }
 
 // SCHEMA §7.3: `csAngleDeg ∈ {82, 90, 100, 120}`. Re-checked here because the
@@ -263,6 +340,11 @@ OpOutcome execute_hole(OpContext& ctx, const json& op, const std::string& op_id)
     if (std::optional<OpOutcome> refusal = read_thread_detail(params)) {
         return std::move(*refusal);
     }
+    std::vector<HolePointSpec> points;
+    if (auto refusal = read_points_preflight(params, result_policy, points)) {
+        return std::move(*refusal);
+    }
+    const bool v3 = result_policy == HoleResultPolicy::V3;
 
     if (std::vector<json> repairs = operation_ref_ownership_repairs(op, op_id); !repairs.empty()) {
         OpOutcome out;
@@ -309,60 +391,24 @@ OpOutcome execute_hole(OpContext& ctx, const json& op, const std::string& op_id)
         return OpOutcome::fail("OP_FAILED", "Hole face is not planar (a hole needs a planar seat)");
     }
 
-    // --- re-project the frozen point onto the face, then fence it ---
-    if (!params.contains("point") || !params["point"].is_array() || params["point"].size() != 3) {
-        return OpOutcome::fail("OP_FAILED", "Hole point must be a [x, y, z] world point");
+    // --- re-project the frozen point(s) onto the face, then fence them ---
+    if (!v3) {
+        if (auto failure = read_legacy_point(params, points)) return std::move(*failure);
     }
-    for (const json& c : params["point"]) {
-        if (!c.is_number()) return OpOutcome::fail("OP_FAILED", "Hole point must be numeric");
-    }
-    const gp_Pnt frozen(params["point"][0].get<double>(), params["point"][1].get<double>(),
-                        params["point"][2].get<double>());
-
-    gp_Pnt origin;
-    try {
-        const Handle(Geom_Surface) surf = BRep_Tool::Surface(face);
-        GeomAPI_ProjectPointOnSurf proj(frozen, surf);
-        if (!proj.IsDone() || proj.NbPoints() < 1) {
-            return OpOutcome::fail("OP_FAILED", "Hole point could not be projected onto the face");
-        }
-        if (proj.LowerDistance() > kPointPlaneFence) {
-            return OpOutcome::fail("OP_FAILED",
-                                   "Hole point is off the resolved face plane (fence 1e-3 mm)");
-        }
-        origin = proj.NearestPoint();
-        Standard_Real u = 0.0, v = 0.0;
-        proj.LowerDistanceParameters(u, v);
-        // Re-projecting onto the PLANE is not enough: the point must land inside
-        // the face's boundary, else the drill would start beside the material.
-        BRepClass_FaceClassifier classifier(face, gp_Pnt2d(u, v), kClassifyTol);
-        if (classifier.State() == TopAbs_OUT) {
-            return OpOutcome::fail("OP_FAILED",
-                                   "Hole point lies outside the resolved face boundary");
-        }
-    } catch (const Standard_Failure& f) {
-        return OpOutcome::fail("OP_FAILED",
-                               std::string("Hole point could not be resolved on the face: ") +
-                                   (f.GetMessageString() ? f.GetMessageString() : "OCCT"));
+    const double tool_radius = hole_tool_radius(dims);
+    std::vector<gp_Pnt> origins;
+    if (auto failure = place_points(face, points, v3, tool_radius, origins)) {
+        return std::move(*failure);
     }
 
     // SCHEMA §7.3: axis = the face's INWARD normal at `point`.
     const gp_Dir axis = outward.Reversed();
-
-    // THROUGH-ALL: bound the drill by the host's own extent (clamped = through).
-    // A blind depth that already overshoots the extent is FINE (SCHEMA §7.3) —
-    // it simply becomes a through hole; nothing here clamps it back.
-    if (dims.depth <= 0.0) {
-        dims.depth = through_all_length(origin, axis, target_shape);
-    }
-
     if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
 
-    // --- tool solid (drill + the conditional cb cylinder / cs cone), fused ---
-    std::string tool_err;
-    const TopoDS_Shape tool = build_hole_tool(origin, axis, dims, tool_err);
-    if (tool.IsNull()) {
-        return OpOutcome::fail("OP_FAILED", tool_err.empty() ? "Hole tool solid is null" : tool_err);
+    // --- tool solid(s) (drill + the conditional cb cylinder / cs cone), fused ---
+    TopoDS_Shape tool;
+    if (auto failure = build_tools(ctx, origins, axis, dims, target_shape, v3, tool)) {
+        return std::move(*failure);
     }
 
     // --- ONE cut against the host, builder kept alive for history ---
@@ -376,7 +422,7 @@ OpOutcome execute_hole(OpContext& ctx, const json& op, const std::string& op_id)
     const kernel::validation::PublicationTier validation_tier =
         result_validation_tier(ctx, kernel::validation::PublicationTier::TierB);
     kernel::validation::PublicationPolicy policy;
-    if (result_policy == HoleResultPolicy::V2) {
+    if (result_policy != HoleResultPolicy::Legacy) {
         policy = kernel::validation::single_solid_policy("Hole", validation_tier);
     } else {
         policy.name = "Hole legacy";
@@ -400,10 +446,10 @@ OpOutcome execute_hole(OpContext& ctx, const json& op, const std::string& op_id)
         if (solid_count == 0) {
             return OpOutcome::fail("OP_FAILED", "Hole removed the entire host body");
         }
-        if (result_policy == HoleResultPolicy::V2 && solid_count > 1) {
-            const std::string message =
-                "Hole V2 would disconnect the host into " +
-                std::to_string(solid_count) + " solids";
+        if (result_policy != HoleResultPolicy::Legacy && solid_count > 1) {
+            const std::string message = std::string(v3 ? "Hole V3" : "Hole V2") +
+                                        " would disconnect the host into " +
+                                        std::to_string(solid_count) + " solids";
             OpOutcome failure = OpOutcome::fail("OP_FAILED", message);
             failure.diagnostics.push_back({{"severity", "error"},
                                            {"code", "HOLE_DISJOINT_RESULT"},
@@ -429,6 +475,11 @@ OpOutcome execute_hole(OpContext& ctx, const json& op, const std::string& op_id)
     if (builder) {
         out.topology_history.push_back(modified_body_history(
             target_id, target_shape, br.shape, *builder, referenceable_topology(tool)));
+        // ONECAD-361: each born element is claimed by the point that drilled it.
+        if (v3) {
+            attribute_hole_births(out.topology_history.back(), origins, axis, tool_radius,
+                                  points);
+        }
     }
     return out;
 }

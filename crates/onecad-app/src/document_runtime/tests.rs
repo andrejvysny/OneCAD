@@ -919,6 +919,7 @@ fn hole_record_at(seed: u128, body: BodyId, face: &str, anchor: Vec3) -> Operati
             extra: Default::default(),
         },
         point: anchor,
+        points: None,
         hole_type: HoleType::Simple,
         diameter: Scalar::new(6.0),
         depth: None,

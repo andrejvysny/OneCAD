@@ -46,6 +46,12 @@ struct LadderRef {
     AnchorEvidence anchor;
     nlohmann::json anchor_json;  // echo for the NeedsRepair payload
     std::string ui_label;
+    // Frozen `intent.descriptor.originSlot` (SCHEMA §7.3 Hole, ONECAD-361): the
+    // producer record and sub-feature slot the element was born in. Both empty =
+    // no slot claim. Callers holding a topology ledger narrow the candidate pool
+    // with it; the ladder itself never reads them.
+    std::string origin_record_id;
+    std::string origin_slot;
 };
 
 // One scored candidate sub-shape (evidence for the NeedsRepair payload).
@@ -127,6 +133,12 @@ struct LadderResolution {
 // refused tooth faces leave the pool before scoring, which is what keeps
 // "a stored ref on a tooth flank halts" a LADDER outcome. An empty function
 // (the default) admits everything and is byte-identical to the pre-WP-I pool.
+//
+// `ref_admissible` (OPTIONAL, ONECAD-361) is indexed like `refs`: entry `i`, when
+// set, narrows ref `i` alone (SCHEMA §7.3 Hole `originSlot`). The pool and the
+// min-cost distinct assignment stay shared across all refs of a kind, so mixing
+// narrowed and unnarrowed refs never lets two refs bind one shape. A missing or
+// empty entry admits the whole pool.
 using CandidateFilter = std::function<bool(const TopoDS_Shape&)>;
 
 // Resolver-v5 clean-replay refinement for the below-margin anchor decision.
@@ -140,7 +152,8 @@ std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_
                                                        const std::string& body_id,
                                                        const std::vector<LadderRef>& refs,
                                                        const LadderEditContext& edit = {},
-                                                       const CandidateFilter& admissible = {});
+                                                       const CandidateFilter& admissible = {},
+                                                       const std::vector<CandidateFilter>& ref_admissible = {});
 
 // The one-line human summary the ladder puts on every `candidates[]` entry
 // ("planar face, area~800mm2"). Exposed so an OP-BUILT §9 item (the Chamfer

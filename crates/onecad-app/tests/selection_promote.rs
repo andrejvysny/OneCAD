@@ -475,6 +475,7 @@ fn hole_record(
             target_body: body,
             face: anchored_ref(body, face, ElementKind::Face, face_at),
             point: at,
+            points: None,
             hole_type: HoleType::Simple,
             diameter: Scalar::new(diameter),
             depth: None, // through-all

@@ -240,8 +240,29 @@ void resolve_input_refs(ScratchJob& job, const json& op, const std::string& op_i
                                                        adjacency.get());
             };
         }
+        // ONECAD-361: a ref frozen with an `originSlot` (one hole of a multi-point
+        // Hole) scores only against the shapes the live ledger attributes to that
+        // same producer slot. Refs without one keep the whole pool, so a plan
+        // that carries no slot claim resolves exactly as before. ONE ladder call
+        // per body keeps the distinct assignment joint across slotted and
+        // unslotted refs (two refs never bind one shape) and keeps input order.
+        std::vector<em::CandidateFilter> slot_filters(refs.size());
+        std::map<std::pair<std::string, std::string>, em::CandidateFilter> by_origin;
+        for (std::size_t k = 0; k < refs.size(); ++k) {
+            if (refs[k].origin_slot.empty()) continue;
+            const std::pair<std::string, std::string> origin{refs[k].origin_record_id,
+                                                             refs[k].origin_slot};
+            auto it = by_origin.find(origin);
+            if (it == by_origin.end()) {
+                it = by_origin
+                         .emplace(origin, origin_slot_filter(job.topology_owners, bid,
+                                                             origin.first, origin.second))
+                         .first;
+            }
+            slot_filters[k] = it->second;
+        }
         const std::vector<em::LadderResolution> resolutions =
-            em::resolve_descriptor_stage(rec->geom, bid, refs, edit, admissible);
+            em::resolve_descriptor_stage(rec->geom, bid, refs, edit, admissible, slot_filters);
         for (std::size_t k = 0; k < resolutions.size(); ++k) {
             const em::LadderResolution& res = resolutions[k];
             if (res.outcome == em::LadderOutcome::AutoBind && !res.bound_shape.IsNull()) {

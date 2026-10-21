@@ -81,6 +81,7 @@ mod tests {
                     extra: Extra::new(),
                 },
                 point: Vec3::new(0.0, 0.0, 0.0).unwrap(),
+                points: None,
                 hole_type: HoleType::Simple,
                 diameter: Scalar::new(diameter),
                 depth: None,

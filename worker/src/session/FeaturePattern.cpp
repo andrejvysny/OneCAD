@@ -142,9 +142,26 @@ void transform_sketch_plane(json& params, const gp_Trsf& trsf) {
         if (plane.contains(key)) transform_vector(plane[key], trsf);
 }
 
+// ONECAD-361: a ref frozen on one hole of a multi-point Hole names its producer
+// record in `intent.descriptor.originSlot`. Inside an instance that producer
+// ran under its virtual opId, so the claim must name that id too; a producer
+// outside the selected sources keeps its own.
+void rewrite_origin_slot(json& descriptor, const std::string& pattern, int instance,
+                         const std::set<std::string>& selected_ids) {
+    if (!descriptor.is_object() || !descriptor.contains("originSlot") ||
+        !descriptor["originSlot"].is_object())
+        return;
+    json& origin = descriptor["originSlot"];
+    if (!origin.contains("recordId") || !origin["recordId"].is_string()) return;
+    const std::string producer = origin["recordId"].get<std::string>();
+    if (selected_ids.contains(producer))
+        origin["recordId"] = feature_pattern_virtual_id(pattern, producer, instance);
+}
+
 void rewrite_ref(json& ref, const gp_Trsf& trsf, const std::string& pattern,
                  int instance, bool shared_host_face,
                  const ScratchJob& job,
+                 const std::set<std::string>& selected_ids,
                  std::unordered_map<std::string, std::string>& ids,
                  std::set<std::string>& generated_ids) {
     if (!ref.is_object()) return;
@@ -162,8 +179,10 @@ void rewrite_ref(json& ref, const gp_Trsf& trsf, const std::string& pattern,
     }
     if (!shared_host_face && ref.contains("anchor")) transform_anchor(ref["anchor"], trsf);
     if (!shared_host_face && ref.contains("intent") && ref["intent"].is_object() &&
-        ref["intent"].contains("descriptor"))
+        ref["intent"].contains("descriptor")) {
         transform_descriptor(ref["intent"]["descriptor"], trsf);
+        rewrite_origin_slot(ref["intent"]["descriptor"], pattern, instance, selected_ids);
+    }
 }
 
 json instantiate(json source, const gp_Trsf& trsf, const std::string& pattern,
@@ -198,11 +217,16 @@ json instantiate(json source, const gp_Trsf& trsf, const std::string& pattern,
             body_ids.contains(p["targetBodyId"].get<std::string>()))
             p["targetBodyId"] = body_ids.at(p["targetBodyId"].get<std::string>());
         if (p.contains("point")) transform_point(p["point"], trsf);
+        // ONECAD-361: the same transform as `point`, so `point == points[0].at`
+        // survives bit-for-bit.
+        if (p.contains("points") && p["points"].is_array())
+            for (json& q : p["points"])
+                if (q.is_object() && q.contains("at")) transform_point(q["at"], trsf);
         if (p.contains("face")) rewrite_ref(
             p["face"], trsf, pattern, instance,
             feature_pattern_retained_host_support(
                 job, source, p["face"], selected_ids, designated_host),
-            job, ids, generated_ids);
+            job, selected_ids, ids, generated_ids);
     }
     if (source.contains("inputs") && source["inputs"].is_array()) {
         for (json& input : source["inputs"]) {
@@ -221,7 +245,7 @@ json instantiate(json source, const gp_Trsf& trsf, const std::string& pattern,
             rewrite_ref(input, trsf, pattern, instance,
                         feature_pattern_retained_host_support(
                                 job, source, input, selected_ids, designated_host),
-                        job, ids, generated_ids);
+                        job, selected_ids, ids, generated_ids);
         }
     }
     json& params = source["params"];

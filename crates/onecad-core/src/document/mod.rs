@@ -24,6 +24,7 @@
 pub mod body;
 pub mod datum;
 pub mod element_index;
+pub mod hole_placement;
 pub mod modules;
 pub mod record;
 pub mod refs;

@@ -1,0 +1,80 @@
+# CANONICAL §7.3 fixture — `Hole.points` (ONECAD-361, `resultPolicyVersion: 3`).
+#
+# WHAT IS PINNED HERE. No measured geometry number appears (`signatures.geometry`
+# is `$hex64`); the analytic volumes, per-point through-all, the slot-narrowed
+# ladder and FeaturePattern live in worker/tests/test_hole_points.cpp, which can
+# measure a solid. This file pins the protocol shape a Rust or UI reader branches
+# on:
+#   ROUND 1  — a 3-point V3 Hole yields the SAME planStep payload shape a single
+#              hole does: one `modified` event, nothing minted. DISCARDED.
+#   ROUND 2  — `points[1]` outside the face refuses the WHOLE feature with
+#              reasonCode HOLE_POINT_OUTSIDE_FACE + evidence.pointIndex 1.
+#   ROUND 3  — coincident points: HOLE_POINTS_COINCIDENT (pointIndex/otherPointIndex).
+#   ROUND 4  — `points` beside resultPolicyVersion 2: HOLE_POINTS_REQUIRE_V3.
+#   ROUND 5  — `point` != `points[0].at`: HOLE_POINT_MISMATCH.
+#   ROUND 6  — ROUND 1 again, ACCEPTED.
+#   ROUND 7  — AcquireElementIds on hole `hp_c`'s top rim returns its producer
+#              slot in `descriptor.originSlot` — the evidence Rust freezes into
+#              the ref intent so a later point edit can never bind a sibling.
+# Every refusal is top-level OP_FAILED at stage `preflight`; the head after the
+# refusal rounds is the head before them, field for field.
+#
+# The Rust lane for this file is parse-only (onecad-protocol messages.rs); the
+# executable cross-track coverage is this CTest plus the real-worker
+# crates/onecad-app/tests/hole_points.rs.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_hole_points","documentRevision":0,"workerEpoch":5,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+# The subject: a 30x10 sketch (world x in [-10,0], y in [0,30]) extruded 10 mm.
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":100,"documentRevision":1,"workerEpoch":5,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"targetStep":1,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk1","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[30,0]},{"id":"e2","type":"Line","p0":[30,0],"p1":[30,10]},{"id":"e3","type":"Line","p0":[30,10],"p1":[0,10]},{"id":"e4","type":"Line","p0":[0,10],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"inputs":[{"primary":{"bodyId":"","elementId":"sk1.region.r0","kind":"face"}}],"params":{"sketchId":"sk1","distance":10.0,"extrudeMode":"Blind","booleanMode":"NewBody"}}]}}}
+{"expect":{"v":1,"t":"event","event":"planStep","id":2,"stepIndex":0,"jobId":100,"payload":{"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"event","event":"planStep","id":2,"stepIndex":1,"jobId":100,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":100,"result":{"planPrepared":true,"lastValidStep":1,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":100,"documentRevision":1,"workerEpoch":5}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":100,"result":{"accepted":true,"snapshotId":1,"documentRevision":1}}}
+# The top face (topoKey f:6 for this shape), bound to a durable id.
+{"send":{"v":1,"t":"req","id":4,"verb":"BindElementIds","args":{"snapshotId":1,"bindings":[{"bodyId":"body_op1","topoKey":"f:6","elementId":"el_top","kind":"face"}]}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"bound":[{"bodyId":"body_op1","topoKey":"f:6","elementId":"el_top","kind":"face"}]}}}
+{"send":{"v":1,"t":"req","id":5,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"documentRevision":1,"workerEpoch":5,"snapshotId":1,"hasScratch":false,"historyPrefixHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+# ROUND 1 — three Ø4 blind holes, ONE step, the single-hole payload shape. DISCARDED.
+{"send":{"v":1,"t":"req","id":6,"verb":"ExecutePlan","args":{"jobId":101,"documentRevision":2,"workerEpoch":5,"expectedBaseHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Hole","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}}],"params":{"targetBodyId":"body_op1","face":{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}},"point":[-5.0,5.0,10.0],"points":[{"id":"hp_a","at":[-5.0,5.0,10.0]},{"id":"hp_b","at":[-5.0,15.0,10.0]},{"id":"hp_c","at":[-5.0,25.0,10.0]}],"holeType":"simple","diameter":4.0,"depth":8.0,"resultPolicyVersion":3}}]}}}
+{"expect":{"v":1,"t":"event","event":"planStep","id":6,"stepIndex":2,"jobId":101,"payload":{"bodyEvents":[{"kind":"modified","bodyId":"body_op1"}],"needsRepair":[],"signatures":{"geometry":"$hex64"}}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"jobId":101,"result":{"planPrepared":true,"lastValidStep":2,"stoppedReason":"completed","perStepResults":[{"stepIndex":2,"status":"ok","bodyIds":["body_op1"]}],"historyPrefixHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
+{"send":{"v":1,"t":"req","id":7,"verb":"DiscardPrepared","args":{"jobId":101}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"jobId":101,"result":{"discarded":true}}}
+# ROUND 2 — points[1] is on the plane but outside the face: the WHOLE feature refuses.
+{"send":{"v":1,"t":"req","id":8,"verb":"ExecutePlan","args":{"jobId":102,"documentRevision":2,"workerEpoch":5,"expectedBaseHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Hole","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}}],"params":{"targetBodyId":"body_op1","face":{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}},"point":[-5.0,5.0,10.0],"points":[{"id":"hp_a","at":[-5.0,5.0,10.0]},{"id":"hp_b","at":[-5.0,45.0,10.0]},{"id":"hp_c","at":[-5.0,25.0,10.0]}],"holeType":"simple","diameter":4.0,"depth":8.0,"resultPolicyVersion":3}}]}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"jobId":102,"result":{"planPrepared":true,"lastValidStep":null,"stoppedReason":"opFailed","perStepResults":[{"stepIndex":2,"status":"opFailed","diagnostics":[{"severity":"error","code":"OP_FAILED","reasonCode":"HOLE_POINT_OUTSIDE_FACE","stage":"preflight","evidence":{"pointIndex":1}}]}],"historyPrefixHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+{"send":{"v":1,"t":"req","id":9,"verb":"DiscardPrepared","args":{"jobId":102}}}
+{"expect":{"v":1,"t":"resp","id":9,"ok":true,"jobId":102,"result":{"discarded":true}}}
+# ROUND 3 — two placements 0.0005 mm apart coincide.
+{"send":{"v":1,"t":"req","id":10,"verb":"ExecutePlan","args":{"jobId":103,"documentRevision":2,"workerEpoch":5,"expectedBaseHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Hole","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}}],"params":{"targetBodyId":"body_op1","face":{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}},"point":[-5.0,5.0,10.0],"points":[{"id":"hp_a","at":[-5.0,5.0,10.0]},{"id":"hp_b","at":[-5.0,5.0005,10.0]}],"holeType":"simple","diameter":4.0,"depth":8.0,"resultPolicyVersion":3}}]}}}
+{"expect":{"v":1,"t":"resp","id":10,"ok":true,"jobId":103,"result":{"planPrepared":true,"lastValidStep":null,"stoppedReason":"opFailed","perStepResults":[{"stepIndex":2,"status":"opFailed","diagnostics":[{"severity":"error","code":"OP_FAILED","reasonCode":"HOLE_POINTS_COINCIDENT","stage":"preflight","evidence":{"pointIndex":0,"otherPointIndex":1}}]}]}}}
+{"send":{"v":1,"t":"req","id":11,"verb":"DiscardPrepared","args":{"jobId":103}}}
+{"expect":{"v":1,"t":"resp","id":11,"ok":true,"jobId":103,"result":{"discarded":true}}}
+# ROUND 4 — `points` beside resultPolicyVersion 2 is refused, never ignored.
+{"send":{"v":1,"t":"req","id":12,"verb":"ExecutePlan","args":{"jobId":104,"documentRevision":2,"workerEpoch":5,"expectedBaseHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Hole","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}}],"params":{"targetBodyId":"body_op1","face":{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}},"point":[-5.0,5.0,10.0],"points":[{"id":"hp_a","at":[-5.0,5.0,10.0]},{"id":"hp_b","at":[-5.0,15.0,10.0]}],"holeType":"simple","diameter":4.0,"depth":8.0,"resultPolicyVersion":2}}]}}}
+{"expect":{"v":1,"t":"resp","id":12,"ok":true,"jobId":104,"result":{"planPrepared":true,"lastValidStep":null,"stoppedReason":"opFailed","perStepResults":[{"stepIndex":2,"status":"opFailed","diagnostics":[{"severity":"error","code":"OP_FAILED","reasonCode":"HOLE_POINTS_REQUIRE_V3","stage":"preflight"}]}]}}}
+{"send":{"v":1,"t":"req","id":13,"verb":"DiscardPrepared","args":{"jobId":104}}}
+{"expect":{"v":1,"t":"resp","id":13,"ok":true,"jobId":104,"result":{"discarded":true}}}
+# ROUND 5 — the legacy `point` mirror disagrees with points[0].
+{"send":{"v":1,"t":"req","id":14,"verb":"ExecutePlan","args":{"jobId":105,"documentRevision":2,"workerEpoch":5,"expectedBaseHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Hole","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}}],"params":{"targetBodyId":"body_op1","face":{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}},"point":[-5.0,6.0,10.0],"points":[{"id":"hp_a","at":[-5.0,5.0,10.0]},{"id":"hp_b","at":[-5.0,15.0,10.0]}],"holeType":"simple","diameter":4.0,"depth":8.0,"resultPolicyVersion":3}}]}}}
+{"expect":{"v":1,"t":"resp","id":14,"ok":true,"jobId":105,"result":{"planPrepared":true,"lastValidStep":null,"stoppedReason":"opFailed","perStepResults":[{"stepIndex":2,"status":"opFailed","diagnostics":[{"severity":"error","code":"OP_FAILED","reasonCode":"HOLE_POINT_MISMATCH","stage":"preflight","evidence":{"pointIndex":0}}]}]}}}
+{"send":{"v":1,"t":"req","id":15,"verb":"DiscardPrepared","args":{"jobId":105}}}
+{"expect":{"v":1,"t":"resp","id":15,"ok":true,"jobId":105,"result":{"discarded":true}}}
+# Four refusals later the head is exactly the one before them.
+{"send":{"v":1,"t":"req","id":16,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":16,"ok":true,"result":{"documentRevision":1,"workerEpoch":5,"snapshotId":1,"hasScratch":false,"historyPrefixHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+# ROUND 6 — ROUND 1 again, ACCEPTED.
+{"send":{"v":1,"t":"req","id":17,"verb":"ExecutePlan","args":{"jobId":106,"documentRevision":2,"workerEpoch":5,"expectedBaseHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Hole","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}}],"params":{"targetBodyId":"body_op1","face":{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}},"point":[-5.0,5.0,10.0],"points":[{"id":"hp_a","at":[-5.0,5.0,10.0]},{"id":"hp_b","at":[-5.0,15.0,10.0]},{"id":"hp_c","at":[-5.0,25.0,10.0]}],"holeType":"simple","diameter":4.0,"depth":8.0,"resultPolicyVersion":3}}]}}}
+{"expect":{"v":1,"t":"event","event":"planStep","id":17,"stepIndex":2,"jobId":106,"payload":{"bodyEvents":[{"kind":"modified","bodyId":"body_op1"}],"needsRepair":[],"signatures":{"geometry":"$hex64"}}}}
+{"expect":{"v":1,"t":"resp","id":17,"ok":true,"jobId":106,"result":{"planPrepared":true,"lastValidStep":2,"stoppedReason":"completed","perStepResults":[{"stepIndex":2,"status":"ok","bodyIds":["body_op1"]}],"historyPrefixHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
+{"send":{"v":1,"t":"req","id":18,"verb":"AcceptPrepared","args":{"jobId":106,"documentRevision":2,"workerEpoch":5}}}
+{"expect":{"v":1,"t":"resp","id":18,"ok":true,"jobId":106,"result":{"accepted":true,"snapshotId":"$any","documentRevision":2}}}
+# ROUND 7 — a pick ON hole hp_c's top rim (45 degrees round from its centre
+# (-5,25,10), r=2) carries that hole's producer slot.
+{"send":{"v":1,"t":"req","id":19,"verb":"AcquireElementIds","args":{"bodyId":"body_op1","picks":[{"kind":"edge","anchor":{"worldPoint":[-3.585786437626905,26.414213562373096,10.0]}}]}}}
+{"expect":{"v":1,"t":"resp","id":19,"ok":true,"result":{"ids":[{"kind":"edge","bodyId":"body_op1","descriptor":{"originSlot":{"recordId":"op2","slot":"hp_c"}}}]}}}
+{"send":{"v":1,"t":"req","id":20,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":20,"ok":true,"result":{"goodbye":true}}}

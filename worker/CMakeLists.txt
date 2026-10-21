@@ -166,6 +166,7 @@ add_library(worker_core STATIC
     # --- WP-C T3: machined hole (simple / counterbore / countersink, SCHEMA §7.3) ---
     src/ops/HoleTool.cpp
     src/ops/HoleOp.cpp
+    src/ops/HolePoints.cpp
     # --- COMPONENT-LIBRARY WP-0.2: placed-component op family (`PlaceComponent`,
     #     SCHEMA §7.3) ---
     src/ops/ComponentOp.cpp

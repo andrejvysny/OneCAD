@@ -477,6 +477,11 @@ add_test(NAME pattern_v2_plan COMMAND test_pattern_v2_plan)
 add_executable(test_hole_op test_hole_op.cpp)
 target_link_libraries(test_hole_op PRIVATE worker_core)
 add_test(NAME hole_op COMMAND test_hole_op)
+# ONECAD-361: ordered multi-point Hole (`resultPolicyVersion: 3`) — analytic
+# volumes, preflight refusals, per-point ledger slots, slot-narrowed ladder.
+add_executable(test_hole_points test_hole_points.cpp)
+target_link_libraries(test_hole_points PRIVATE worker_core)
+add_test(NAME hole_points COMMAND test_hole_points)
 
 add_executable(test_feature_pattern test_feature_pattern.cpp)
 target_link_libraries(test_feature_pattern PRIVATE worker_core)
@@ -840,6 +845,16 @@ add_test(
     COMMAND worker_harness
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/hole_threaded.ndjson
+)
+# SCHEMA §7.3 `Hole.points` (ONECAD-361): a V3 multi-point Hole keeps the
+# single-hole planStep shape, its preflight refusals carry reasonCode +
+# evidence.pointIndex without moving the head, and AcquireElementIds reports a
+# hole-born element's producer slot as `descriptor.originSlot`.
+add_test(
+    NAME canonical_hole_points
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/hole_points.ndjson
 )
 add_test(
     NAME canonical_feature_pattern_malformed
