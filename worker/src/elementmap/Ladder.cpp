@@ -418,8 +418,15 @@ LadderRef ladder_ref_from_input(const nlohmann::json& input, const std::string& 
         if (r.kind == km::ElementKind::Unknown && intent.contains("kind") && intent["kind"].is_string())
             r.kind = ElementMapPartition::kind_from_name(intent["kind"].get<std::string>());
         if (intent.contains("descriptor") && intent["descriptor"].is_object()) {
-            r.descriptor = ElementMapPartition::descriptor_from_json(intent["descriptor"]);
+            const nlohmann::json& descriptor = intent["descriptor"];
+            r.descriptor = ElementMapPartition::descriptor_from_json(descriptor);
             r.has_descriptor = true;
+            const nlohmann::json origin = descriptor.value("originSlot", nlohmann::json());
+            if (origin.is_object() && origin.value("recordId", nlohmann::json()).is_string() &&
+                origin.value("slot", nlohmann::json()).is_string()) {
+                r.origin_record_id = origin["recordId"].get<std::string>();
+                r.origin_slot = origin["slot"].get<std::string>();
+            }
         }
     }
     // Anchor (world point narrows a descriptor tie / is the sole evidence otherwise).

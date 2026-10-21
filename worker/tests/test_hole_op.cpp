@@ -400,7 +400,7 @@ void test_result_policy_versions() {
         BodyStore bodies;
         em::ElementMapPartition part;
         const ops::OpOutcome outcome = run_hole_on_host(
-            bodies, part, host, json{{"resultPolicyVersion", 3}});
+            bodies, part, host, json{{"resultPolicyVersion", 4}});
         check(outcome.status == ops::OpOutcome::Status::Failed &&
                   outcome.error_code == "OP_FAILED" &&
                   !outcome.diagnostics.empty() &&

@@ -213,12 +213,21 @@ json acquire_ids(const PublishedStateSnapshot& state, const std::string& body_id
             "directHit=%s elementId=%s outcome=resolved",
             static_cast<unsigned long long>(state.snapshot_id), body_id.c_str(), topo.c_str(),
             kind_name.c_str(), held ? "true" : "false", held ? held->element_id.c_str() : "");
+        json descriptor = em::ElementMapPartition::descriptor_to_json(
+            em::ElementMapPartition::describe(sub, body->geom));
+        // SCHEMA §7.3 Hole (ONECAD-361): an element one point of a multi-point
+        // Hole created carries its producer slot, so the ref Rust freezes from
+        // this evidence can never be scored against a congruent sibling hole.
+        const OriginClaim origin = state.topology_owners.lookup(body_id, sub);
+        if (origin.state == OriginState::Known && !origin.slot.empty()) {
+            descriptor["originSlot"] = {{"recordId", origin.producer_record_id},
+                                        {"slot", origin.slot}};
+        }
         json entry = {{"topoKey", topo},
                       {"kind", kind_name},
                       {"bodyId", body_id},
                       {"elementId", held ? held->element_id : ""},
-                      {"descriptor", em::ElementMapPartition::descriptor_to_json(
-                                           em::ElementMapPartition::describe(sub, body->geom))}};
+                      {"descriptor", std::move(descriptor)}};
         if (pick.contains("anchor")) entry["anchor"] = pick["anchor"];
         ids.push_back(std::move(entry));
     }
@@ -317,7 +326,14 @@ json ladder_resolution(const PublishedStateSnapshot& state, const json& ref,
                        const std::string& body_id, const TopoDS_Shape& body) {
     em::LadderRef ladder_ref = em::ladder_ref_from_input(ref, ref_id);
     if (ladder_ref.element_id.empty()) ladder_ref.element_id = element_id;
-    const auto results = em::resolve_descriptor_stage(body, body_id, {ladder_ref});
+    // The dry run narrows by `originSlot` exactly as regen does (PlanExecutor
+    // `resolve_input_refs`), so a repair dialog never offers a sibling hole.
+    em::CandidateFilter filter;
+    if (!ladder_ref.origin_slot.empty()) {
+        filter = origin_slot_filter(state.topology_owners, body_id, ladder_ref.origin_record_id,
+                                    ladder_ref.origin_slot);
+    }
+    const auto results = em::resolve_descriptor_stage(body, body_id, {ladder_ref}, {}, filter);
     const em::LadderResolution* result = results.empty() ? nullptr : &results[0];
     WLOG_DEBUG(
         "ref_identity verb=ResolveRefs refId=%s elementId=%s body=%s lane=descriptor "

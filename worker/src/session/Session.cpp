@@ -478,7 +478,7 @@ std::optional<PublishedStateSnapshot> Session::published_state_at(
     std::lock_guard<std::mutex> lk(mu_);
     if (head_snapshot_id) *head_snapshot_id = snapshot_id_;
     if (expected_snapshot_id && snapshot_id_ != *expected_snapshot_id) return std::nullopt;
-    return PublishedStateSnapshot{snapshot_id_, bodies_, partition_};
+    return PublishedStateSnapshot{snapshot_id_, bodies_, partition_, topology_owners_};
 }
 
 BindElementsOutcome Session::bind_element_ids(

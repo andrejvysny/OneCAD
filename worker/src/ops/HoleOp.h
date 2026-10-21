@@ -30,6 +30,10 @@
 //      Absent `resultPolicyVersion` preserves the legacy split-host residual;
 //      literal V2 requires exactly one connected solid and returns
 //      `HOLE_DISJOINT_RESULT` otherwise. Future/malformed versions refuse by name.
+//   8. V3 (ONECAD-361, `HolePoints.h`): ordered `points[{id, at}]` replace step
+//      4's single point. Every point is pre-flighted before any tool exists, the
+//      disjoint tools are cut as ONE compound, and each born element's ledger
+//      claim carries the id of the point that drilled it.
 //
 // The op is preview-capable for free: `PreviewOp` and `ExecutePlan` share
 // `PlanExecutor::execute_candidate_op`, so preview == commit by construction.

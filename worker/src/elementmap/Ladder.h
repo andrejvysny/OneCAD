@@ -46,6 +46,12 @@ struct LadderRef {
     AnchorEvidence anchor;
     nlohmann::json anchor_json;  // echo for the NeedsRepair payload
     std::string ui_label;
+    // Frozen `intent.descriptor.originSlot` (SCHEMA §7.3 Hole, ONECAD-361): the
+    // producer record and sub-feature slot the element was born in. Both empty =
+    // no slot claim. Callers holding a topology ledger narrow the candidate pool
+    // with it; the ladder itself never reads them.
+    std::string origin_record_id;
+    std::string origin_slot;
 };
 
 // One scored candidate sub-shape (evidence for the NeedsRepair payload).

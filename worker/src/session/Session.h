@@ -131,6 +131,9 @@ struct PublishedStateSnapshot {
     std::uint64_t snapshot_id = 0;
     BodyStore bodies;
     elementmap::ElementMapPartition partition;
+    // Read by AcquireElementIds (`originSlot` evidence) and ResolveRefs (the
+    // slot-narrowed candidate pool), ONECAD-361.
+    TopologyOwnerLedger topology_owners;
 };
 
 struct ElementBindingInput {

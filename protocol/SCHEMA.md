@@ -2157,8 +2157,9 @@ countersink, parametric as ONE feature. Added 2026-08-03 (WP-C T3).
   authoring. Absence preserves the frozen split-host residual. V2 requires the
   modified host to remain exactly one connected solid; a severing cut returns
   top-level `OP_FAILED` plus diagnostic `HOLE_DISJOINT_RESULT`, with no lifecycle
-  event. Any other present version similarly carries diagnostic
-  `UNSUPPORTED_HOLE_RESULT_POLICY_VERSION`; it is never read as legacy.
+  event. `3` is V2 publication plus ordered `points` (below). Any other present
+  version similarly carries diagnostic `UNSUPPORTED_HOLE_RESULT_POLICY_VERSION`;
+  it is never read as legacy.
 - Failures recoverable `OP_FAILED`: non-planar resolved face, point off face,
   drill deeper than through-all extent is fine (clamped = through), cb/cs
   invariant violations, OCCT boolean failure — all name the reason.
@@ -2211,7 +2212,86 @@ countersink, parametric as ONE feature. Added 2026-08-03 (WP-C T3).
     `error.code` taxonomy is closed and does not grow.
   - Export is unchanged: a cosmetic thread is annotation, so STEP/STL/3MF carry
     the drilled geometry and nothing else. `resultPolicyVersion` is untouched —
-    it governs solid-count publication only.
+    it governs solid-count publication at `2`; at `3` it also enables `points`.
+- `points` (OPTIONAL; ONECAD-361, added 2026-10-21) — ordered multi-hole
+  placement on the ONE shared host face. Every hole uses the record's params;
+  holes on different faces are separate Hole features.
+
+  ```json
+  "point": [-5.0, 5.0, 10.0],
+  "points": [ { "id": "6f1c…", "at": [-5.0, 5.0, 10.0] },
+              { "id": "a03e…", "at": [-5.0, 15.0, 10.0] } ],
+  "resultPolicyVersion": 3
+  ```
+
+  - `points` present ⇔ `resultPolicyVersion: 3`; absent on every legacy/V2
+    record, which stay byte-identical. Hole `k` is `points[k]`. `id` is
+    Rust-minted (UUID v4), opaque to the worker, never reassigned to another
+    placement of the record; removing a point shifts indices, never ids.
+    `point` MUST equal `points[0].at` bit-for-bit and exists for older readers;
+    the worker reads V3 geometry only from `points`.
+  - Shape refusals (preflight, before any body is resolved): `points` beside
+    version 2 or no version → `HOLE_POINTS_REQUIRE_V3` (never ignored); V3
+    without a `points` array, or an entry that is not `{id: string of 1..=64
+    bytes, at: [x, y, z] numbers}` → `HOLE_POINTS_MALFORMED`; size outside
+    1..=64 → `HOLE_POINTS_COUNT`; a repeated `id` → `HOLE_POINT_ID_DUPLICATE`;
+    a present `point` ≠ `points[0].at` (exact compare) → `HOLE_POINT_MISMATCH`.
+  - Per point, in index order, the `point` fence above: projection failure →
+    `HOLE_POINT_UNPROJECTABLE`; more than 1e-3 mm off the face plane →
+    `HOLE_POINT_OFF_FACE`; classifier OUT → `HOLE_POINT_OUTSIDE_FACE` (ON is
+    allowed). Evidence `{pointIndex}`.
+  - Spacing on the PROJECTED origins, pairs `i<j` in lexicographic order:
+    `d < 1e-3` → `HOLE_POINTS_COINCIDENT`; `d < 2·toolRadius + 1e-3` →
+    `HOLE_POINTS_OVERLAP`; evidence `{pointIndex, otherPointIndex, distanceMm,
+    minDistanceMm}`. `toolRadius` is the widest radius of one hole's cutting
+    tool: `max(diameter/2, cbDiameter/2` for a counterbore`, csDiameter/2 +
+    kFaceOvershoot·tan(csAngleDeg/2)` for a countersink`)` with
+    `kFaceOvershoot = 0.01` mm, because the countersink frustum starts that far
+    outside the face. Rust authoring refuses with the same radius on the 3D
+    distance between frozen points and a `3e-3` mm gap, so a pair Rust accepts
+    is never refused by the worker's in-plane check. An expression-driven
+    dimension edit that bypasses authoring validation is caught here.
+  - All-or-nothing: every point passes the rules above before any tool exists.
+    Then one tool per point (through-all measured per point), the disjoint
+    tools compounded in `points` order, ONE Cut, ONE `modified` event, nothing
+    minted — the success payload is the single-hole shape. V3 publication is
+    V2's: exactly one connected solid over the whole result, else
+    `HOLE_DISJOINT_RESULT`. A per-point tool build failure is
+    `HOLE_TOOL_FAILED` with `{pointIndex}`.
+  - Refusal shape: every V3 refusal above is top-level `OP_FAILED` with the
+    diagnostic `{severity:"error", code:"OP_FAILED", message, stage:"preflight",
+    reasonCode, evidence}` — no body event, predecessor untouched, §8 taxonomy
+    unchanged. The pre-existing Hole diagnostics put their specific value in
+    `code` (`UNSUPPORTED_HOLE_RESULT_POLICY_VERSION`, `HOLE_DISJOINT_RESULT`);
+    consumers MUST read both `code` and `reasonCode`. Legacy/V2 point failures
+    keep their exact messages and carry no diagnostic.
+  - Per-hole identity. Each element the cut creates is attributed to the point
+    whose tool contains it (its centroid lies within `toolRadius` of exactly
+    that point's axis; the spacing rule makes this unique), and the worker's
+    topology-owner ledger (FeaturePattern, above) records it as a Known claim
+    `{producer: opId, slot: points[k].id}`. A shape whose sources agree on the
+    producer but not the slot keeps the producer with no slot. `AcquireElementIds`
+    (§7.5) adds `descriptor.originSlot: {recordId, slot}` for an element whose
+    live claim is Known with a slot; Rust freezes that descriptor verbatim into
+    the ref's `intent`. A ref whose `intent.descriptor.originSlot` is present is
+    resolved (generic input resolution and `ResolveRefs`, §10 descriptor stage)
+    ONLY against shapes whose live claim is Known with exactly that producer and
+    slot: it binds its own hole or goes NeedsRepair `no-candidates`, never a
+    congruent sibling. Refs without `originSlot` resolve exactly as before.
+    Older workers ignore the member (descriptors parse leniently).
+  - FeaturePattern transforms every `points[k].at` with the transform it
+    applies to `point`, so `point == points[0].at` survives; an `originSlot`
+    whose `recordId` is a selected source is rewritten to the instance's
+    virtual opId.
+  - Capability `op.hole.points` (Hello). There is no Rust plan/preview gate: an
+    older worker refuses version 3 with `UNSUPPORTED_HOLE_RESULT_POLICY_VERSION`
+    and can never drill only `point`.
+  - Rust's canonical writer keeps one placement on a record without ids in the
+    legacy shape (version untouched) and writes V3 for two or more placements
+    or for any count on a record that already carries ids (a 1-point V3 record
+    keeps its id). Upgrading a legacy record therefore also switches it to
+    single-solid publication: a hole set that would split the host is refused
+    with `HOLE_DISJOINT_RESULT` instead of keeping the legacy residual.
 
 **Gear** (`op.gear`) — a fully parametric generated gear body. No sketch, no
 host body: the op MINTS a new body from a typed parameter block and a
@@ -8227,3 +8307,27 @@ sign-off) once fixtures exist.
   algorithm (sorted 16-byte member UUIDs + winding byte, rendered `"r_%016x"`) so
   the C++ worker and Rust core produce identical region ids; reference impl is
   onecad-core `sketch/mod.rs::derive_region_id`.
+
+- **2026-10-21 — §7.3 Hole ordered multi-point placement, `resultPolicyVersion: 3`
+  (ONECAD-361).** Adds `points: [{id, at}]` (1..=64, shared host face, shared
+  params), the V3 preflight reasonCodes (`HOLE_POINTS_REQUIRE_V3`,
+  `HOLE_POINTS_MALFORMED`, `HOLE_POINTS_COUNT`, `HOLE_POINT_ID_DUPLICATE`,
+  `HOLE_POINT_MISMATCH`, `HOLE_POINT_UNPROJECTABLE`, `HOLE_POINT_OFF_FACE`,
+  `HOLE_POINT_OUTSIDE_FACE`, `HOLE_POINTS_COINCIDENT`, `HOLE_POINTS_OVERLAP`,
+  `HOLE_TOOL_FAILED`; all under `OP_FAILED`, §8 unchanged), one compound cut
+  with one `modified` event, per-point ledger slots, `AcquireElementIds`
+  `descriptor.originSlot`, the slot-narrowed descriptor stage, FeaturePattern
+  point transform, and Hello capability `op.hole.points`. Legacy and V2 bytes
+  are unchanged (`points` is skip-serialized, no migration, planner hash and
+  existing fixtures unchanged; `hole_threaded.ndjson` untouched). Old workers
+  refuse V3 by name; old Rust opens V3 (`point` is present), round-trips
+  `points` through its flattened `Extra`, and refuses to re-author it. No Rust
+  dispatch gate. OCCT fingerprint `0a6a1dce34181289` and `kernelPolicyVersion`
+  1 are unchanged (capabilities are not part of the seed); no policy axis
+  moves. New fixture `hole_points.ndjson` runs as CTest
+  `canonical_hole_points`; its Rust lane is parse-only (`onecad-protocol`
+  messages.rs) plus the real-worker `crates/onecad-app/tests/hole_points.rs`.
+  Known gap handed to ONECAD-369: a re-edit PREVIEW carries no `editedFrom`
+  (PlanExecutor preview path), so preview may bind an anchor-decided ref that
+  the commit refuses post-edit; refs carrying `originSlot` are narrowed the
+  same way on both paths. Cross-track sign-off (protocol-auditor): pending.
