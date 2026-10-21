@@ -1,7 +1,37 @@
-use super::{captures::hash, host_names::HOST_TESTS, process, Result};
+use super::{
+    captures::hash,
+    host_names::{HOST_TESTS, SERVICE_TESTS},
+    process, Result,
+};
 use regex::Regex;
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, fs, path::Path};
+
+/// One explicitly filtered `--ignored` cargo invocation with its own exact inventory.
+pub(super) struct Selection {
+    inventory_log: &'static str,
+    run_log: &'static str,
+    filters: &'static [&'static str],
+    pub(super) tests: &'static [&'static str],
+    metal_evidence: bool,
+}
+pub(super) const LIFECYCLE: Selection = Selection {
+    inventory_log: "inventory",
+    run_log: "lifecycle",
+    filters: &["app_logic_tests::"],
+    tests: HOST_TESTS,
+    metal_evidence: true,
+};
+pub(super) const SERVICES: Selection = Selection {
+    inventory_log: "service-inventory",
+    run_log: "service-lifecycle",
+    filters: &[
+        "document_services::tests::home_lifecycle_tests::",
+        "bridge::tests::",
+    ],
+    tests: SERVICE_TESTS,
+    metal_evidence: false,
+};
 
 fn exact(names: &[&str], expected: &[&str]) -> Result<()> {
     let mut names = names.to_vec();
@@ -15,12 +45,12 @@ fn exact(names: &[&str], expected: &[&str]) -> Result<()> {
     }
     Ok(())
 }
-pub(super) fn inventory(output: &str) -> Result<()> {
+pub(super) fn inventory(output: &str, selection: &Selection) -> Result<()> {
     let names: Vec<_> = output
         .lines()
         .filter_map(|line| line.strip_suffix(": test"))
         .collect();
-    exact(&names, HOST_TESTS)
+    exact(&names, selection.tests)
 }
 fn records(output: &str) -> Result<Vec<(&str, &str)>> {
     let starts = Regex::new(r"(?m)^test (\S+) \.\.\. ")?;
@@ -42,11 +72,12 @@ fn records(output: &str) -> Result<Vec<(&str, &str)>> {
         })
         .collect())
 }
-pub(super) fn verify(output: &str) -> Result<()> {
+pub(super) fn verify(output: &str, selection: &Selection) -> Result<()> {
+    let tests = selection.tests;
     let records = records(output)?;
     exact(
         &records.iter().map(|record| record.0).collect::<Vec<_>>(),
-        HOST_TESTS,
+        tests,
     )?;
     let passed = Regex::new(r"(?:\.\.\. |\n)ok$")?;
     for (name, text) in records {
@@ -59,20 +90,21 @@ pub(super) fn verify(output: &str) -> Result<()> {
     let summaries: Vec<_> = summary.captures_iter(output).collect();
     if summaries.len() != 1
         || &summaries[0][1] != "ok"
-        || summaries[0][2].parse::<usize>()? != HOST_TESTS.len()
+        || summaries[0][2].parse::<usize>()? != tests.len()
         || &summaries[0][3] != "0"
         || &summaries[0][4] != "0"
     {
         return Err(format!(
             "native host gate must run exactly {} tests with no skips",
-            HOST_TESTS.len()
+            tests.len()
         )
         .into());
     }
-    if Regex::new(r"Native host gate adapter: .*backend: Metal")?
-        .find_iter(output)
-        .count()
-        < HOST_TESTS.len()
+    if selection.metal_evidence
+        && Regex::new(r"Native host gate adapter: .*backend: Metal")?
+            .find_iter(output)
+            .count()
+            < tests.len()
     {
         return Err("required Metal adapter evidence missing".into());
     }
@@ -128,6 +160,8 @@ pub(super) fn run(args: &[String]) -> Result<()> {
         serde_json::to_string_pretty(&json!({
             "classification":"automated native-host lifecycle with production OCCT worker and Metal; no physical input or AppKit teardown qualification",
             "source":source,"workerSha256":digest,"tests":HOST_TESTS,"testCount":HOST_TESTS.len(),
+            "serviceTests":SERVICE_TESTS,"serviceTestCount":SERVICE_TESTS.len(),
+            "serviceAdapterEvidence":"service tests emit no adapter record; Metal provenance comes from the lifecycle selection",
             "inventoryVerified":true,"executedExactlyOnce":true,"missingWorkerRejected":true
         }))?,
     )?;
@@ -178,22 +212,45 @@ fn worker(directory: &Path, environment: &BTreeMap<String, String>) -> Result<(S
     }
     Ok((path, digest))
 }
-fn run_tests(directory: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
+fn selection_args<'a>(selection: &Selection, extra: &[&'a str]) -> Vec<&'a str> {
     let mut args = vec![
         "test",
         "--locked",
         "-p",
         "onecad-ui",
         "--lib",
-        "app_logic_tests::",
         "--",
         "--ignored",
     ];
-    args.push("--list");
-    inventory(&process::run(directory, "inventory", "cargo", &args, environment, true)?.text)?;
-    args.pop();
-    args.extend(["--nocapture", "--test-threads=1"]);
-    verify(&process::run(directory, "lifecycle", "cargo", &args, environment, true)?.text)?;
+    args.extend(selection.filters);
+    args.extend(extra);
+    args
+}
+fn run_tests(directory: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
+    for selection in [&LIFECYCLE, &SERVICES] {
+        let args = selection_args(selection, &["--list"]);
+        let output = process::run(
+            directory,
+            selection.inventory_log,
+            "cargo",
+            &args,
+            environment,
+            true,
+        )?;
+        inventory(&output.text, selection)?;
+    }
+    for selection in [&LIFECYCLE, &SERVICES] {
+        let args = selection_args(selection, &["--nocapture", "--test-threads=1"]);
+        let output = process::run(
+            directory,
+            selection.run_log,
+            "cargo",
+            &args,
+            environment,
+            true,
+        )?;
+        verify(&output.text, selection)?;
+    }
     let mut environment = environment.clone();
     environment.insert(
         "ONECAD_WORKER_PATH".into(),

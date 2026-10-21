@@ -14,13 +14,16 @@ ONECAD_WORKER_PATH="$PWD/worker/build/onecad-worker" \
   cargo xtask native-host-gate /private/tmp/onecad-native-host-gate
 ```
 
-The gate sets `ONECAD_REQUIRE_WORKER=1` and `ONECAD_REQUIRE_GPU=1`. It requires
-the exact ignored `app_logic_tests` inventory declared in
-`xtask/src/evidence/host_names.rs`: forty cases covering occluded delivery (one),
+The gate sets `ONECAD_REQUIRE_WORKER=1` and `ONECAD_REQUIRE_GPU=1`. It runs two
+explicitly filtered selections, each with its own exact inventory declared in
+`xtask/src/evidence/host_names.rs`, which is the authoritative list.
+
+The lifecycle selection (`app_logic_tests::`, `HOST_TESTS`) has fifty-five cases
+covering occluded delivery (one),
 document lifecycle (three), overlays (one), diagnostics (three), existing
 dimensions (one), the synthetic From-New plate workflow (one), and numeric/IME
-routing (one), invalid-profile Finish refusal with repair re-entry (one), and
-marquee preservation across redraw with camera-change cancellation (one), Point
+routing (one), invalid-profile Finish closing the sketch and reporting the
+overlap (one), and marquee preservation across redraw with camera-change cancellation (one), Point
 numeric/repeated construction placement (one), Center Rectangle method/full-size
 numeric creation and history (one), and numeric refusal after viewport failure
 (one), point/radius/body gesture history and cancellation (three), pre-threshold
@@ -31,16 +34,31 @@ Slot full-width creation and construction/history (one), clockwise/counterclockw
 tangent Arc H/V snapping with endpoint roles (one), and tangent chain keyboard,
 drag, existing-endpoint seeding, cancellation and numeric Radius (one), and
 exactly-once drag release with accepted chain closure/profile publication (one).
-Eight batched-input regression cases cover ordered modifier delivery and pointer/camera cancellation.
-Two additional cases cover initially unselected sketch/history row selection,
-double-click and explicit Edit, plus world-plane and checked planar-face entry,
-frame alignment and whole-visit discard.
-It first verifies the Cargo test inventory, then executes all cases
-serially with `--ignored --nocapture --test-threads=1`. Every expected test must
-execute exactly once and pass. Missing, duplicate, unexpected, skipped, and
-zero-test executions fail the gate. New ignored host tests require an explicit
-inventory update. The required Metal evidence count follows the inventory size;
-repeated application setup within one test may emit additional adapter records.
+Nine batched-input regression cases cover ordered modifier delivery,
+pointer/camera cancellation and ordinary split-frame clicks.
+Further cases cover initially unselected sketch/history row selection,
+double-click and explicit Edit, world-plane and checked planar-face entry,
+frame alignment and whole-visit discard, viewport world-plane choice, Home
+without a document, and restored-control capability context. Ten document tab
+cases cover second live tabs, re-preparation on switch, tab close, per-document
+crash restore, quit prompts, background close decisions, tab ordering and
+Ctrl+Tab cycling, unpreparable-switch fallback, and the new-tab Home and close
+prompt.
+
+The service selection (`document_services::tests::home_lifecycle_tests::` and
+`bridge::tests::`, `SERVICE_TESTS`) has four cases: three no-document Home
+lifecycle cases and the production bridge actor no-document start and explicit
+New capture. These cases emit no adapter record, so Metal provenance for the run
+comes from the lifecycle selection.
+
+The gate first verifies both Cargo test inventories, then executes each
+selection serially with `--ignored --nocapture --test-threads=1`. Every expected
+test must execute exactly once and pass. Missing, duplicate, unexpected, skipped,
+and zero-test executions fail the gate. New ignored host tests require an
+explicit inventory update. Other ignored `onecad-ui` tests outside both filters
+are not gate members. The required lifecycle Metal evidence count follows the
+lifecycle inventory size; repeated application setup within one test may emit
+additional adapter records.
 The shared test setup
 requires an explicit existing worker and a Metal adapter. An additional execution
 with a missing worker must fail in the selected test with the expected prerequisite
