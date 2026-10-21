@@ -2228,14 +2228,18 @@ countersink, parametric as ONE feature. Added 2026-08-03 (WP-C T3).
     record, which stay byte-identical. Hole `k` is `points[k]`. `id` is
     Rust-minted (UUID v4), opaque to the worker, never reassigned to another
     placement of the record; removing a point shifts indices, never ids.
-    `point` MUST equal `points[0].at` bit-for-bit and exists for older readers;
-    the worker reads V3 geometry only from `points`.
+    `point` MUST equal `points[0].at` exactly (per-component numeric equality,
+    so `-0.0` equals `0.0`) and exists for older readers; the worker reads V3
+    geometry only from `points`.
   - Shape refusals (preflight, before any body is resolved): `points` beside
-    version 2 or no version → `HOLE_POINTS_REQUIRE_V3` (never ignored); V3
-    without a `points` array, or an entry that is not `{id: string of 1..=64
-    bytes, at: [x, y, z] numbers}` → `HOLE_POINTS_MALFORMED`; size outside
-    1..=64 → `HOLE_POINTS_COUNT`; a repeated `id` → `HOLE_POINT_ID_DUPLICATE`;
-    a present `point` ≠ `points[0].at` (exact compare) → `HOLE_POINT_MISMATCH`.
+    version 2 or no version → `HOLE_POINTS_REQUIRE_V3`, evidence `{}` (never
+    ignored); V3 without a `points` array → `HOLE_POINTS_MALFORMED`, evidence
+    `{}`; an entry that is not `{id: string of 1..=64 bytes, at: [x, y, z]
+    numbers}` → `HOLE_POINTS_MALFORMED`, evidence `{pointIndex}`; size outside
+    1..=64 → `HOLE_POINTS_COUNT`, evidence `{count}`; a repeated `id` →
+    `HOLE_POINT_ID_DUPLICATE`, evidence `{pointIndex}` (the later entry); a
+    present `point` ≠ `points[0].at` (numeric compare) → `HOLE_POINT_MISMATCH`,
+    evidence `{pointIndex: 0}`.
   - Per point, in index order, the `point` fence above: projection failure →
     `HOLE_POINT_UNPROJECTABLE`; more than 1e-3 mm off the face plane →
     `HOLE_POINT_OFF_FACE`; classifier OUT → `HOLE_POINT_OUTSIDE_FACE` (ON is
@@ -2257,7 +2261,9 @@ countersink, parametric as ONE feature. Added 2026-08-03 (WP-C T3).
     minted — the success payload is the single-hole shape. V3 publication is
     V2's: exactly one connected solid over the whole result, else
     `HOLE_DISJOINT_RESULT`. A per-point tool build failure is
-    `HOLE_TOOL_FAILED` with `{pointIndex}`.
+    `HOLE_TOOL_FAILED` with `{pointIndex}`; it is raised after the placement
+    and spacing rules, before the Cut, and also reports `stage:"preflight"`
+    (no body has changed yet).
   - Refusal shape: every V3 refusal above is top-level `OP_FAILED` with the
     diagnostic `{severity:"error", code:"OP_FAILED", message, stage:"preflight",
     reasonCode, evidence}` — no body event, predecessor untouched, §8 taxonomy
@@ -2273,12 +2279,19 @@ countersink, parametric as ONE feature. Added 2026-08-03 (WP-C T3).
     producer but not the slot keeps the producer with no slot. `AcquireElementIds`
     (§7.5) adds `descriptor.originSlot: {recordId, slot}` for an element whose
     live claim is Known with a slot; Rust freezes that descriptor verbatim into
-    the ref's `intent`. A ref whose `intent.descriptor.originSlot` is present is
-    resolved (generic input resolution and `ResolveRefs`, §10 descriptor stage)
-    ONLY against shapes whose live claim is Known with exactly that producer and
-    slot: it binds its own hole or goes NeedsRepair `no-candidates`, never a
-    congruent sibling. Refs without `originSlot` resolve exactly as before.
-    Older workers ignore the member (descriptors parse leniently).
+    the ref's `intent`. In generic input resolution and `ResolveRefs` (the §10
+    descriptor stage those two paths run), a ref whose
+    `intent.descriptor.originSlot` is present is scored ONLY against shapes
+    whose live claim is Known with exactly that producer and slot: on those
+    paths it binds its own hole or goes NeedsRepair (`no-candidates` when its
+    hole is gone), never a congruent sibling. The step's min-cost assignment
+    still spans slotted and unslotted refs together, so two refs never bind one
+    shape. The op-internal ladders (Hole host face, Fillet/Chamfer intent-only
+    fallback, sketch host reseat, Shell, OffsetFace, Extrude `ToFace`, Revolve,
+    Gear, Component) do NOT narrow by slot; a ref reaching only those, or a ref
+    without `originSlot`, has no per-hole guarantee beyond the ordinary §10
+    gates. Refs without `originSlot` resolve exactly as before. Older workers
+    ignore the member (descriptors parse leniently).
   - FeaturePattern transforms every `points[k].at` with the transform it
     applies to `point`, so `point == points[0].at` survives; an `originSlot`
     whose `recordId` is a selected source is rewritten to the instance's
@@ -3991,6 +4004,13 @@ head before a promotion command returns the id to the frontend. When Rust alread
 holds an id for the same stable element, it supplies that id to the bind step
 (Invariant 1: an ElementId never changes because geometry changed).
 
+`descriptor.originSlot` (OPTIONAL, added 2026-10-21, ONECAD-361) is
+`{recordId, slot}`, present only when the element's live topology-owner claim
+is Known and carries a slot (today: an element one point of a §7.3 V3 Hole
+created; `slot` is that point's `id`). Rust stores the descriptor verbatim in
+the ref's `intent`; the member is evidence that narrows the §10 candidate pool,
+never identity. Absent ⇒ no slot claim.
+
 #### BindElementIds
 
 Internal Rust→worker completion of ID-on-demand promotion. It installs
@@ -5629,6 +5649,17 @@ Higher = better match. Policy:
 - For a set of referenced elements, use **min-cost assignment** over the
   **referenced-only** candidate sets (greedy is a documented counterexample —
   never greedy).
+- **`originSlot` pool narrowing (ONECAD-361).** In generic input resolution and
+  `ResolveRefs` only, a ref whose `intent.descriptor.originSlot` is present
+  ([§7.5](#acquireelementids), §7.3 Hole) admits only candidates whose live
+  topology-owner claim is Known with exactly that producer `recordId` and
+  `slot`. A non-admitted (ref, candidate) pair is never scored, ranked or
+  counted as a rival, and costs what an empty assignment column costs; the
+  min-cost assignment still spans every referenced ref of the step, slotted or
+  not, so two refs never bind one shape. A ref left without an admitted
+  candidate halts `no-candidates`. Op-internal ladders do not narrow by slot.
+  Refs without the member score exactly as before, so `resolverVersion` stays
+  `6`.
 - **Lineage semantics for split/merge are explicit: no forced 1:1.** A split may
   map one prior element to several successors; a merge, several to one. The
   assignment respects declared lineage rather than forcing bijection.
@@ -5830,6 +5861,33 @@ and back Invariant 5 and checkpoint drift detection.
 ---
 
 ## 14. Changelog
+
+- **2026-10-21 — §7.3 Hole ordered multi-point placement, `resultPolicyVersion: 3`
+  (ONECAD-361).** Adds `points: [{id, at}]` (1..=64, shared host face, shared
+  params), the V3 preflight reasonCodes (`HOLE_POINTS_REQUIRE_V3`,
+  `HOLE_POINTS_MALFORMED`, `HOLE_POINTS_COUNT`, `HOLE_POINT_ID_DUPLICATE`,
+  `HOLE_POINT_MISMATCH`, `HOLE_POINT_UNPROJECTABLE`, `HOLE_POINT_OFF_FACE`,
+  `HOLE_POINT_OUTSIDE_FACE`, `HOLE_POINTS_COINCIDENT`, `HOLE_POINTS_OVERLAP`,
+  `HOLE_TOOL_FAILED`; all under `OP_FAILED`, §8 unchanged), one compound cut
+  with one `modified` event, per-point ledger slots, `AcquireElementIds`
+  `descriptor.originSlot` (§7.5), the slot-narrowed descriptor stage (§10;
+  generic input resolution and `ResolveRefs` only, joint assignment kept),
+  FeaturePattern point transform, and Hello capability `op.hole.points`. Legacy and V2 bytes
+  are unchanged (`points` is skip-serialized, no migration, planner hash and
+  existing fixtures unchanged; `hole_threaded.ndjson` untouched). Old workers
+  refuse V3 by name; old Rust opens V3 (`point` is present), round-trips
+  `points` through its flattened `Extra`, and refuses to re-author it. No Rust
+  dispatch gate. OCCT fingerprint `0a6a1dce34181289` and `kernelPolicyVersion`
+  1 are unchanged (capabilities are not part of the seed); no policy axis
+  moves. `resolverVersion` stays `6`: slot narrowing applies only to refs that
+  carry the new `originSlot` member, so every existing ref scores and binds
+  exactly as before. New fixture `hole_points.ndjson` runs as CTest
+  `canonical_hole_points`; its Rust lane is parse-only (`onecad-protocol`
+  messages.rs) plus the real-worker `crates/onecad-app/tests/hole_points.rs`.
+  Known gap handed to ONECAD-369: a re-edit PREVIEW carries no `editedFrom`
+  (PlanExecutor preview path), so preview may bind an anchor-decided ref that
+  the commit refuses post-edit; refs carrying `originSlot` are narrowed the
+  same way on both paths. Cross-track sign-off (protocol-auditor): pending.
 
 - **2026-10-20 — §7.4 stable solver parameter ordering, solver policy 4 (ONECAD-305).**
   PlaneGCS subsystem columns and dual-priority parameter unions retain declared
@@ -8307,27 +8365,3 @@ sign-off) once fixtures exist.
   algorithm (sorted 16-byte member UUIDs + winding byte, rendered `"r_%016x"`) so
   the C++ worker and Rust core produce identical region ids; reference impl is
   onecad-core `sketch/mod.rs::derive_region_id`.
-
-- **2026-10-21 — §7.3 Hole ordered multi-point placement, `resultPolicyVersion: 3`
-  (ONECAD-361).** Adds `points: [{id, at}]` (1..=64, shared host face, shared
-  params), the V3 preflight reasonCodes (`HOLE_POINTS_REQUIRE_V3`,
-  `HOLE_POINTS_MALFORMED`, `HOLE_POINTS_COUNT`, `HOLE_POINT_ID_DUPLICATE`,
-  `HOLE_POINT_MISMATCH`, `HOLE_POINT_UNPROJECTABLE`, `HOLE_POINT_OFF_FACE`,
-  `HOLE_POINT_OUTSIDE_FACE`, `HOLE_POINTS_COINCIDENT`, `HOLE_POINTS_OVERLAP`,
-  `HOLE_TOOL_FAILED`; all under `OP_FAILED`, §8 unchanged), one compound cut
-  with one `modified` event, per-point ledger slots, `AcquireElementIds`
-  `descriptor.originSlot`, the slot-narrowed descriptor stage, FeaturePattern
-  point transform, and Hello capability `op.hole.points`. Legacy and V2 bytes
-  are unchanged (`points` is skip-serialized, no migration, planner hash and
-  existing fixtures unchanged; `hole_threaded.ndjson` untouched). Old workers
-  refuse V3 by name; old Rust opens V3 (`point` is present), round-trips
-  `points` through its flattened `Extra`, and refuses to re-author it. No Rust
-  dispatch gate. OCCT fingerprint `0a6a1dce34181289` and `kernelPolicyVersion`
-  1 are unchanged (capabilities are not part of the seed); no policy axis
-  moves. New fixture `hole_points.ndjson` runs as CTest
-  `canonical_hole_points`; its Rust lane is parse-only (`onecad-protocol`
-  messages.rs) plus the real-worker `crates/onecad-app/tests/hole_points.rs`.
-  Known gap handed to ONECAD-369: a re-edit PREVIEW carries no `editedFrom`
-  (PlanExecutor preview path), so preview may bind an anchor-decided ref that
-  the commit refuses post-edit; refs carrying `originSlot` are narrowed the
-  same way on both paths. Cross-track sign-off (protocol-auditor): pending.
