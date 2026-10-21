@@ -15,8 +15,8 @@ fn can_apply(app: &App, tool: &ModelSession) -> bool {
     !app.busy()
         && app.viewport_ready()
         && app.resize_refusal.is_none()
-        && app.view.is_some()
-        && app.bridge.valid()
+        && app.doc.view.is_some()
+        && app.doc.bridge.valid()
         && tool.phase == SessionPhase::Editing
         && matches!(tool.draft_status, DraftStatus::Valid(_))
         && matches!(
@@ -26,7 +26,7 @@ fn can_apply(app: &App, tool: &ModelSession) -> bool {
 }
 
 fn icon(app: &App) -> &'static str {
-    app.interaction.tool.as_ref().map_or("body", |tool| {
+    app.doc.interaction.tool.as_ref().map_or("body", |tool| {
         crate::tool_registry::operation_icon(tool.record.op.op_type())
     })
 }
@@ -35,7 +35,8 @@ fn choices(app: &App, tool: &ModelSession) -> usize {
     if !tool.editing_existing || tool.phase != SessionPhase::Editing {
         return 0;
     }
-    app.display
+    app.doc
+        .display
         .as_ref()
         .and_then(|display| {
             display
@@ -49,8 +50,8 @@ fn choices(app: &App, tool: &ModelSession) -> usize {
 }
 
 pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
-    let Some(tool) = app.interaction.tool.clone() else {
-        if let Some(id) = app.numeric_id.take() {
+    let Some(tool) = app.doc.interaction.tool.clone() else {
+        if let Some(id) = app.doc.numeric_id.take() {
             ctx.memory_mut(|memory| memory.surrender_focus(id));
         }
         return;
@@ -74,6 +75,7 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
 
 pub(crate) fn history_editor(app: &mut App, ui: &mut Ui, record_id: &str) {
     let Some(tool) = app
+        .doc
         .interaction
         .tool
         .clone()
@@ -89,7 +91,7 @@ pub(crate) fn history_editor(app: &mut App, ui: &mut Ui, record_id: &str) {
                 ui.label("Parameter");
                 crate::parameter_ui::selector(app, ui, &tool);
             }
-            let current = app.interaction.tool.clone().unwrap_or(tool.clone());
+            let current = app.doc.interaction.tool.clone().unwrap_or(tool.clone());
             let apply = can_apply(app, &current);
             ui.label(current.parameter.label());
             let response = number_field(app, ui, &current);
@@ -187,6 +189,7 @@ fn card_rows(
         });
     }
     let current = app
+        .doc
         .interaction
         .tool
         .as_ref()
@@ -213,10 +216,10 @@ fn apply_feedback(app: &App, tool: &ModelSession) -> Option<String> {
     if let Some((_, reason)) = &app.resize_refusal {
         return Some(format!("Viewport unavailable: {reason}"));
     }
-    if !app.bridge.valid() {
+    if !app.doc.bridge.valid() {
         return Some("Worker geometry unavailable; Create and Apply are disabled".into());
     }
-    if app.view.is_none() {
+    if app.doc.view.is_none() {
         return Some("Waiting for an accepted viewport capture".into());
     }
     if app.busy() && tool.phase == SessionPhase::Editing {
@@ -279,7 +282,7 @@ fn number_field(app: &mut App, ui: &mut Ui, tool: &ModelSession) -> egui::Respon
             .step_keys(!app.composing)
             .width(ui.available_width()),
     );
-    app.numeric_id = Some(response.id);
+    app.doc.numeric_id = Some(response.id);
     let label = format!("{} ({unit})", tool.parameter.label());
     response.widget_info(|| egui::WidgetInfo::text_edit(editing, "", &draft, &label));
     if response.changed() {

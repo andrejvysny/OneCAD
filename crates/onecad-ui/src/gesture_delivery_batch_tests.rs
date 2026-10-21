@@ -17,7 +17,7 @@ async fn viewport_multiple_primary_cycles_do_not_start_drag() {
         button(start, true),
         button(start, false),
     ]);
-    assert!(!host.app.sketch_gesture.busy());
+    assert!(!host.app.doc.sketch_gesture.busy());
     assert_eq!(host.sketch(), &before);
     host.stop().await;
 }
@@ -36,7 +36,7 @@ async fn viewport_click_ignores_motion_before_press() {
         button(start, false),
     ]);
     assert!(
-        !host.app.sketch_gesture.busy(),
+        !host.app.doc.sketch_gesture.busy(),
         "ordinary click must not begin drag"
     );
     host.stop().await;
@@ -71,6 +71,7 @@ async fn viewport_corner_press_and_move_batched_release_next_frame_commits_once(
     rectangle(&mut host).await;
     let undo = host
         .app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -89,9 +90,10 @@ async fn viewport_corner_press_and_move_batched_release_next_frame_commits_once(
     host.ui(vec![button(end, false)]);
     settled(&mut host).await;
     assert_rectangle(host.sketch(), [22.0, 21.0]);
-    assert_eq!(host.app.sketch_gesture.moved(), Some(true));
+    assert_eq!(host.app.doc.sketch_gesture.moved(), Some(true));
     assert_eq!(
         host.app
+            .doc
             .sketch
             .session
             .as_ref()
@@ -112,13 +114,21 @@ async fn viewport_drag_focus_loss_pointer_gone_escape_and_overlay_preserve_autho
     let mut host = Host::new(root.path()).await;
     rectangle(&mut host).await;
     let accepted = host.sketch().clone();
-    let history = host.app.sketch.session.as_ref().unwrap().history.clone();
+    let history = host
+        .app
+        .doc
+        .sketch
+        .session
+        .as_ref()
+        .unwrap()
+        .history
+        .clone();
     for condition in 0..4 {
         let start = host.project(0.0, 0.0);
         let end = host.project(22.0, 21.0);
         host.ui(vec![egui::Event::PointerMoved(start), button(start, true)]);
         host.ui(vec![egui::Event::PointerMoved(end)]);
-        assert!(host.app.sketch_gesture.busy());
+        assert!(host.app.doc.sketch_gesture.busy());
         match condition {
             0 => host.ui_focused(vec![egui::Event::WindowFocused(false)], false),
             1 => host.ui(vec![egui::Event::PointerGone]),
@@ -136,7 +146,10 @@ async fn viewport_drag_focus_loss_pointer_gone_escape_and_overlay_preserve_autho
             &accepted,
             "cancellation condition {condition}"
         );
-        assert_eq!(host.app.sketch.session.as_ref().unwrap().history, history);
+        assert_eq!(
+            host.app.doc.sketch.session.as_ref().unwrap().history,
+            history
+        );
     }
     host.stop().await;
 }
@@ -166,7 +179,7 @@ async fn stationary_batched_release_completes_on_service_repaint_wakes() {
         loop {
             wakes.notified().await;
             logic_tick(&mut host.app, &host.context, &mut host.frame, false);
-            if !host.app.sketch_gesture.busy() && active(&host.app) {
+            if !host.app.doc.sketch_gesture.busy() && active(&host.app) {
                 break;
             }
         }
@@ -174,7 +187,7 @@ async fn stationary_batched_release_completes_on_service_repaint_wakes() {
     .await
     .expect("batched release must complete on service wakes without more input");
     assert_rectangle(host.sketch(), [22.0, 21.0]);
-    assert_eq!(host.app.sketch_gesture.moved(), Some(true));
+    assert_eq!(host.app.doc.sketch_gesture.moved(), Some(true));
     host.stop().await;
 }
 
@@ -186,6 +199,7 @@ async fn viewport_corner_drag_batched_in_one_frame_commits_one_edit() {
     rectangle(&mut host).await;
     let undo = host
         .app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -204,9 +218,10 @@ async fn viewport_corner_drag_batched_in_one_frame_commits_one_edit() {
     ]);
     settled(&mut host).await;
     assert_rectangle(host.sketch(), [22.0, 21.0]);
-    assert_eq!(host.app.sketch_gesture.moved(), Some(true));
+    assert_eq!(host.app.doc.sketch_gesture.moved(), Some(true));
     assert_eq!(
         host.app
+            .doc
             .sketch
             .session
             .as_ref()
@@ -227,7 +242,15 @@ async fn viewport_release_over_chrome_refuses_even_after_pointer_returns() {
     let mut host = Host::new(root.path()).await;
     rectangle(&mut host).await;
     let before = host.sketch().clone();
-    let history = host.app.sketch.session.as_ref().unwrap().history.clone();
+    let history = host
+        .app
+        .doc
+        .sketch
+        .session
+        .as_ref()
+        .unwrap()
+        .history
+        .clone();
     let chrome = crate::layout::chrome(host.screen(), &host.app.ui);
     let cube_host = egui::Rect::from_min_max(
         egui::pos2(chrome.viewport.left(), chrome.view_cluster.y),
@@ -243,14 +266,17 @@ async fn viewport_release_over_chrome_refuses_even_after_pointer_returns() {
         let start = host.project(0.0, 0.0);
         host.ui(vec![button(start, true)]);
         host.ui(vec![egui::Event::PointerMoved(host.project(22.0, 21.0))]);
-        assert!(host.app.sketch_gesture.busy());
+        assert!(host.app.doc.sketch_gesture.busy());
         host.ui(vec![
             button(release, false),
             egui::Event::PointerMoved(start),
         ]);
         settled(&mut host).await;
         assert_eq!(host.sketch(), &before, "release over chrome at {release:?}");
-        assert_eq!(host.app.sketch.session.as_ref().unwrap().history, history);
+        assert_eq!(
+            host.app.doc.sketch.session.as_ref().unwrap().history,
+            history
+        );
     }
     host.stop().await;
 }
@@ -262,24 +288,35 @@ async fn ordinary_split_frame_click_selects_line_and_circle_without_drag_or_edit
     let mut host = Host::new(root.path()).await;
     rectangle(&mut host).await;
     let before = host.sketch().clone();
-    let history = host.app.sketch.session.as_ref().unwrap().history.clone();
+    let history = host
+        .app
+        .doc
+        .sketch
+        .session
+        .as_ref()
+        .unwrap()
+        .history
+        .clone();
     let line_position = host.project(40.0, 0.0);
     host.ui(vec![
         egui::Event::PointerMoved(line_position),
         button(line_position, true),
     ]);
     host.ui(vec![button(line_position, false)]);
-    let session = host.app.sketch.session.as_ref().unwrap();
+    let session = host.app.doc.sketch.session.as_ref().unwrap();
     assert!(
         matches!(session.selection.as_slice(), [onecad_interaction::sketch::SketchTarget::Entity(id)]
         if matches!(session.authoritative.get_entity(*id), Some(SketchEntity::Line { .. }))),
         "ordinary line click must select; selected={:?}; status={}",
         session.selection,
-        host.app.status
+        host.app.doc.status
     );
-    assert!(!host.app.sketch_gesture.busy());
+    assert!(!host.app.doc.sketch_gesture.busy());
     assert_eq!(host.sketch(), &before);
-    assert_eq!(host.app.sketch.session.as_ref().unwrap().history, history);
+    assert_eq!(
+        host.app.doc.sketch.session.as_ref().unwrap().history,
+        history
+    );
     host.control("Circle");
     host.xy(40.0, 30.0);
     host.xy(50.0, 30.0);
@@ -287,24 +324,35 @@ async fn ordinary_split_frame_click_selects_line_and_circle_without_drag_or_edit
     host.control("Select");
     host.redraw();
     let before = host.sketch().clone();
-    let history = host.app.sketch.session.as_ref().unwrap().history.clone();
+    let history = host
+        .app
+        .doc
+        .sketch
+        .session
+        .as_ref()
+        .unwrap()
+        .history
+        .clone();
     let circle_position = host.project(50.0, 30.0);
     host.ui(vec![
         egui::Event::PointerMoved(circle_position),
         button(circle_position, true),
     ]);
     host.ui(vec![button(circle_position, false)]);
-    let session = host.app.sketch.session.as_ref().unwrap();
+    let session = host.app.doc.sketch.session.as_ref().unwrap();
     assert!(
         matches!(session.selection.as_slice(), [onecad_interaction::sketch::SketchTarget::Entity(id)]
         if matches!(session.authoritative.get_entity(*id), Some(SketchEntity::Circle { .. }))),
         "ordinary circle click must select; selected={:?}; status={}",
         session.selection,
-        host.app.status
+        host.app.doc.status
     );
-    assert!(!host.app.sketch_gesture.busy());
+    assert!(!host.app.doc.sketch_gesture.busy());
     assert_eq!(host.sketch(), &before);
-    assert_eq!(host.app.sketch.session.as_ref().unwrap().history, history);
+    assert_eq!(
+        host.app.doc.sketch.session.as_ref().unwrap().history,
+        history
+    );
     host.ui(vec![button(circle_position, true)]);
     host.ui(vec![egui::Event::PointerGone]);
     host.ui(vec![button(circle_position, false)]);
@@ -313,12 +361,15 @@ async fn ordinary_split_frame_click_selects_line_and_circle_without_drag_or_edit
         button(line_position, true),
     ]);
     host.ui(vec![button(line_position, false)]);
-    let session = host.app.sketch.session.as_ref().unwrap();
+    let session = host.app.doc.sketch.session.as_ref().unwrap();
     assert!(
         matches!(session.selection.as_slice(), [onecad_interaction::sketch::SketchTarget::Entity(id)]
         if matches!(session.authoritative.get_entity(*id), Some(SketchEntity::Line { .. })))
     );
     assert_eq!(host.sketch(), &before);
-    assert_eq!(host.app.sketch.session.as_ref().unwrap().history, history);
+    assert_eq!(
+        host.app.doc.sketch.session.as_ref().unwrap().history,
+        history
+    );
     host.stop().await;
 }

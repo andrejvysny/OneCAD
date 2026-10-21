@@ -25,19 +25,19 @@ impl Preview {
 pub(crate) fn body(app: &mut App, id: BodyId) {
     crate::pill::cancel_tool(app);
     app.dispatch(Action::ClearSelection);
-    app.selected_body = Some(id);
-    app.selected_feature = None;
-    app.topology.select(None);
-    app.selection_preview = Preview::default();
+    app.doc.selected_body = Some(id);
+    app.doc.selected_feature = None;
+    app.doc.topology.select(None);
+    app.doc.selection_preview = Preview::default();
     app.draw_dirty = true;
 }
 
 pub(crate) fn sketch(app: &mut App, id: SketchId) {
     app.dispatch(Action::ClearSelection);
-    app.selected_body = None;
-    app.selected_feature = None;
-    app.topology.select(None);
-    app.ui.selected_sketch = Some(id);
+    app.doc.selected_body = None;
+    app.doc.selected_feature = None;
+    app.doc.topology.select(None);
+    app.doc.selected_sketch = Some(id);
     app.ui.inspector_open = true;
     app.ui.inspector_tab = crate::ui_state::InspectorTab::Properties;
     request_preview(app, id);
@@ -45,8 +45,10 @@ pub(crate) fn sketch(app: &mut App, id: SketchId) {
 }
 
 fn request_preview(app: &mut App, id: SketchId) {
-    app.selection_preview = Preview::default();
-    let Some(display) = &app.display else { return };
+    app.doc.selection_preview = Preview::default();
+    let Some(display) = &app.doc.display else {
+        return;
+    };
     let expected = display.context.clone();
     let (sender, receiver) = mpsc::channel();
     let request = crate::sketch_services::Request::SelectionPreview {
@@ -55,33 +57,36 @@ fn request_preview(app: &mut App, id: SketchId) {
         sender,
     };
     match app
+        .doc
         .bridge
         .submit(crate::bridge::Command::Sketch(Box::new(request)))
     {
         Ok(()) => {
-            app.selection_preview = Preview {
+            app.doc.selection_preview = Preview {
                 expected: Some(expected),
                 pending: Some(receiver),
                 sketch: None,
             }
         }
-        Err(error) => app.status = error,
+        Err(error) => app.doc.status = error,
     }
 }
 
 pub(crate) fn reconcile(app: &mut App, display: &Display) {
-    app.selected_body = app
+    app.doc.selected_body = app
+        .doc
         .selected_body
         .filter(|id| display.projection.bodies.contains_key(&id.to_string()));
-    app.ui.selected_sketch = app
-        .ui
+    app.doc.selected_sketch = app
+        .doc
         .selected_sketch
         .filter(|id| display.projection.sketches.contains_key(&id.to_string()));
-    app.selected_feature = app
+    app.doc.selected_feature = app
+        .doc
         .selected_feature
         .filter(|id| display.records.iter().any(|record| record.record_id == *id));
-    if app.selection_preview.expected.as_ref() != Some(&display.context) {
-        app.selection_preview = Preview::default();
+    if app.doc.selection_preview.expected.as_ref() != Some(&display.context) {
+        app.doc.selection_preview = Preview::default();
     }
 }
 
@@ -91,41 +96,41 @@ pub(crate) fn paint(
     rect: egui::Rect,
     view: &onecad_scene::ViewSnapshot,
 ) {
-    let current = app
-        .display
-        .as_ref()
-        .is_some_and(|display| app.selection_preview.expected.as_ref() == Some(&display.context));
-    if !current || app.ui.selected_sketch.is_none() {
-        app.selection_preview = Preview::default();
+    let current = app.doc.display.as_ref().is_some_and(|display| {
+        app.doc.selection_preview.expected.as_ref() == Some(&display.context)
+    });
+    if !current || app.doc.selected_sketch.is_none() {
+        app.doc.selection_preview = Preview::default();
         return;
     }
     let reply = app
+        .doc
         .selection_preview
         .pending
         .as_ref()
         .and_then(|receiver| receiver.try_recv().ok());
     if let Some(reply) = reply {
-        app.selection_preview.pending = None;
+        app.doc.selection_preview.pending = None;
         match reply {
-            Ok(sketch) if Some(sketch.id) == app.ui.selected_sketch => {
-                app.selection_preview.sketch = Some(sketch)
+            Ok(sketch) if Some(sketch.id) == app.doc.selected_sketch => {
+                app.doc.selection_preview.sketch = Some(sketch)
             }
             Ok(_) => {}
-            Err(error) => app.status = format!("Sketch preview unavailable: {error}"),
+            Err(error) => app.doc.status = format!("Sketch preview unavailable: {error}"),
         }
     }
-    if let Some(sketch) = &app.selection_preview.sketch {
+    if let Some(sketch) = &app.doc.selection_preview.sketch {
         crate::sketch_view::paint_selected(ui.painter(), rect, view, sketch, app.theme.accent);
     }
 }
 
 pub(crate) fn whole_body_selected(app: &App, id: BodyId) -> bool {
-    app.selected_body == Some(id) && app.topology.selected_kind().is_none()
+    app.doc.selected_body == Some(id) && app.doc.topology.selected_kind().is_none()
 }
 
 pub(crate) fn refresh(app: &mut App) {
-    if let Some(id) = app.ui.selected_sketch
-        && app.selection_preview.expected.is_none()
+    if let Some(id) = app.doc.selected_sketch
+        && app.doc.selection_preview.expected.is_none()
         && !app.sketch_active()
     {
         request_preview(app, id);

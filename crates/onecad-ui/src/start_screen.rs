@@ -5,7 +5,6 @@ use egui::{CornerRadius, Rect, RichText, Stroke, Ui, UiBuilder, pos2, vec2};
 use onecad_app::dto::RecentProjectDto;
 use onecad_widgets::{
     components::{
-        button::{Button, ButtonKind},
         lists::{Segment, SegmentedControl},
         start::{ActionTile, RecentCard, SidebarNavItem},
     },
@@ -272,15 +271,8 @@ fn heading(app: &App, ui: &mut Ui, text: &str) {
 
 fn main_column(app: &mut App, ui: &mut Ui) {
     ui.spacing_mut().item_spacing = vec2(14.5, 0.0);
-    if app.document_open() {
-        let back = Button::new("Back to document")
-            .kind(ButtonKind::Secondary)
-            .icon(Some("home"));
-        if ui.add(back).clicked() {
-            leave(app);
-        }
-        ui.add_space(20.0);
-    }
+    // Documents stay reachable through their tabs and Escape; Home has no
+    // separate way back.
     tiles(app, ui);
     ui.add_space(28.0);
     recent_header(app, ui);
@@ -306,14 +298,14 @@ fn tile_specs() -> [Tile; 2] {
             primary: true,
             icon: "body",
             title: "New part",
-            subtitle: "Sketch and model a single part",
+            subtitle: "Opens in a new tab · ⌘N",
             request: Some(Request::New),
         },
         Tile {
             primary: false,
             icon: "import",
             title: "Open or import",
-            subtitle: ".onecad and STEP",
+            subtitle: ".onecad and STEP · ⌘O",
             request: Some(Request::Import),
         },
     ]
@@ -382,6 +374,7 @@ fn recent_metadata(recent: &RecentProjectDto) -> String {
 
 fn recent_cards(app: &mut App, ui: &mut Ui) {
     let recents = app
+        .doc
         .bridge
         .shared
         .recents
@@ -404,17 +397,25 @@ fn recent_cards(app: &mut App, ui: &mut Ui) {
             ui.spacing_mut().item_spacing.x = 16.0;
             for recent in row {
                 let metadata = recent_metadata(recent);
+                let open_tab = app.tab_for_path(std::path::Path::new(&recent.path));
                 let response = ui.add_enabled(
-                    enabled,
+                    enabled || open_tab.is_some(),
                     RecentCard::new(&recent.name, &metadata)
                         .width(width)
-                        .metadata_only(),
+                        .metadata_only()
+                        .open(open_tab.is_some()),
                 );
                 if response
                     .on_hover_text(format!("{}\n{}", recent.path, metadata))
                     .clicked()
                 {
-                    app.document_request(Request::Open(Some(recent.path.clone().into())));
+                    // An open file switches to its tab instead of opening again.
+                    match open_tab {
+                        Some(tab) => app.show_tab(tab),
+                        None => {
+                            app.document_request(Request::Open(Some(recent.path.clone().into())))
+                        }
+                    }
                 }
             }
         });

@@ -19,7 +19,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     "Model viewport; select a closed profile",
                 )
             });
-            let Some(display) = app.display.clone() else {
+            let Some(display) = app.doc.display.clone() else {
                 crate::sketch_creation::clear_candidate(ui.ctx());
                 return;
             };
@@ -49,7 +49,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 app.fail_viewport(error);
                 return;
             }
-            if let Some(texture) = app.texture {
+            // A switched-in document never shows the previous document's image.
+            if let Some(texture) = app.texture.filter(|_| !app.doc.awaiting_scene) {
                 ui.painter().image(
                     texture,
                     rect,
@@ -71,7 +72,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 }
                 return;
             }
-            let Some(view) = drawable_capture(app.view, display.scene.identity(), viewport) else {
+            let Some(view) = drawable_capture(app.doc.view, display.scene.identity(), viewport) else {
                 crate::sketch_creation::clear_candidate(ui.ctx());
                 app.cancel_sketch_gesture();
                 return;
@@ -84,13 +85,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
             crate::viewport_selection::hover(app, ui, rect, &view, &display);
             if app.sketch_active() {
-                if let Some(session) = app.sketch.session.as_ref() {
-                    let preview = app.sketch_gesture.preview();
+                if let Some(session) = app.doc.sketch.session.as_ref() {
+                    let preview = app.doc.sketch_gesture.preview();
                     let pointer = ui.input(|input| input.pointer.hover_pos());
                     let hover = pointer
                         .filter(|point| {
                             preview.is_none()
-                                && !app.sketch_gesture.busy()
+                                && !app.doc.sketch_gesture.busy()
                                 && crate::viewport_widgets::allows_pointer(ui, rect, *point)
                                 && !crate::viewport_widgets::owns_pointer(app, ui, rect)
                         })
@@ -122,8 +123,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
             let overlay_owns = crate::viewport_widgets::show(app, ui, rect, &view);
             if app.sketch_active() {
-                let dimension_owns = !app.sketch_gesture.busy() && crate::sketch_dimensions::show(app, ui, rect, &view);
-                if app.sketch_gesture.busy() {
+                let dimension_owns = !app.doc.sketch_gesture.busy() && crate::sketch_dimensions::show(app, ui, rect, &view);
+                if app.doc.sketch_gesture.busy() {
                     crate::sketch_gestures::viewport(app, ui, rect, &response, &view);
                     return;
                 }
@@ -143,9 +144,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             if (response.clicked() || response.double_clicked())
                 && !overlay_owns
                 && !crate::viewport_selection::sectioned(app)
-                && app.bridge.valid()
+                && app.doc.bridge.valid()
                 && !app.busy()
-                && app.interaction.tool.is_none()
+                && app.doc.interaction.tool.is_none()
                 && let Some(position) = response.interact_pointer_pos()
                 && crate::viewport_widgets::allows_pointer(ui, rect, position)
             {
@@ -185,20 +186,20 @@ fn navigation(
     viewport: Viewport,
     display: &crate::bridge::Display,
 ) {
-    if app.fit_pending {
+    if app.doc.fit_pending {
         let bounds = display.scene.bounds().or_else(|| profile_bounds(display));
         if let Some(bounds) = bounds
-            && let Ok(fit) = onecad_scene::fit_camera(bounds, app.camera, viewport, None)
+            && let Ok(fit) = onecad_scene::fit_camera(bounds, app.doc.camera, viewport, None)
         {
-            app.camera.target = fit.target;
-            app.camera.offset = app.camera.offset.normalize() * fit.distance;
+            app.doc.camera.target = fit.target;
+            app.doc.camera.offset = app.doc.camera.offset.normalize() * fit.distance;
             app.draw_dirty = true;
         }
-        app.fit_pending = false;
+        app.doc.fit_pending = false;
     }
     navigate_input(app, ui, response, viewport, display.scene.identity());
-    if app.view.is_none_or(|view| {
-        view.camera() != app.camera
+    if app.doc.view.is_none_or(|view| {
+        view.camera() != app.doc.camera
             || view.viewport() != viewport
             || view.identity().scene != display.scene.identity()
     }) {
@@ -233,6 +234,7 @@ fn navigate_input(
     ui.input(|input| {
         for event in &input.events {
             let motion = app
+                .doc
                 .navigation
                 .event(event, input.time, viewport.height as f32);
             if let Some(mut motion) = motion
@@ -246,7 +248,7 @@ fn navigate_input(
                     *delta = -*delta;
                 }
                 app.draw_dirty |= crate::camera_navigation::apply(
-                    &mut app.camera,
+                    &mut app.doc.camera,
                     viewport,
                     scene,
                     cursor,
@@ -280,7 +282,7 @@ fn navigate_drag(
         crate::navigation::Motion::Pan(delta)
     };
     app.draw_dirty |=
-        crate::camera_navigation::apply(&mut app.camera, viewport, scene, None, motion);
+        crate::camera_navigation::apply(&mut app.doc.camera, viewport, scene, None, motion);
 }
 
 fn render(
@@ -303,7 +305,16 @@ fn render(
     let needs_scene = app.renderer.scene_identity() != Some(display.scene.identity());
     // Poll even without new drawing: completion callbacks retire resources and acknowledge scenes.
     let renderer_idle = app.renderer.poll_idle().map_err(|e| e.to_string())?;
-    if let Ok(mut budget) = app.bridge.shared.budget.lock() {
+    if app.doc.awaiting_scene {
+        if !needs_scene {
+            app.doc.awaiting_scene = false;
+        } else if display.prepared.lock().map_or(true, |p| p.is_none()) {
+            // Switched-in document: its re-prepared scene is on its way, and its
+            // arrival (or failure) wakes the UI; nothing to draw until then.
+            return Ok(());
+        }
+    }
+    if let Ok(mut budget) = app.doc.bridge.shared.budget.lock() {
         *budget = app.renderer.preparation_budget();
     }
     if !renderer_idle {
@@ -312,8 +323,8 @@ fn render(
     }
     if !app.draw_dirty
         && !needs_scene
-        && app.pending_preview.is_none()
-        && !app.clear_preview
+        && app.doc.pending_preview.is_none()
+        && !app.doc.clear_preview
         && app.pending_display_options.is_none()
     {
         crate::viewport_selection::upload(app, &display.scene, ctx)?;
@@ -350,7 +361,7 @@ fn render(
             }
             Err(error) if error.recoverable_target_refusal() => {
                 app.resize_refusal = Some((size, error.to_string()));
-                app.view = None;
+                app.doc.view = None;
                 return Ok(());
             }
             Err(error) => return Err(error.to_string()),
@@ -362,11 +373,11 @@ fn render(
         preview: app.renderer.preview_identity(),
     };
     let view = crate::viewport_capture::next(
-        app.view,
-        app.view_presentation,
+        app.doc.view,
+        app.doc.view_presentation,
         crate::viewport_capture::Request {
             scene: display.scene.identity(),
-            camera: app.camera,
+            camera: app.doc.camera,
             viewport,
             presentation,
         },
@@ -402,14 +413,14 @@ fn render(
         .map_err(|e| e.to_string())?
     {
         app.gpu.queue.submit([encoder.finish()]);
-        app.bridge.shared.input_trace.gpu_submitted(
+        app.doc.bridge.shared.input_trace.gpu_submitted(
             &app.gpu.queue,
             display,
             &view,
             app.renderer.preview_identity().is_some(),
         );
         if app.renderer.preview_identity().is_none() {
-            app.bridge.render_submitted(&app.gpu.queue, display);
+            app.doc.bridge.render_submitted(&app.gpu.queue, display);
         }
         app.cad_needs_fence = true;
         ctx.request_repaint();
@@ -423,9 +434,9 @@ fn render(
             wgpu::FilterMode::Linear,
         ));
     }
-    app.view = Some(view);
-    app.view_presentation = Some(presentation);
-    if let Ok(mut budget) = app.bridge.shared.budget.lock() {
+    app.doc.view = Some(view);
+    app.doc.view_presentation = Some(presentation);
+    if let Ok(mut budget) = app.doc.bridge.shared.budget.lock() {
         *budget = app.renderer.preparation_budget();
     }
     app.draw_dirty = false;
@@ -460,7 +471,7 @@ fn suspend(app: &mut App, ctx: &egui::Context) -> Result<(), String> {
         .resize([0, 0])
         .map_err(|error| error.to_string())?;
     replace_texture(app);
-    app.view = None;
+    app.doc.view = None;
     app.draw_dirty = true;
     Ok(())
 }
@@ -476,10 +487,15 @@ fn paint_profiles(
         return;
     }
     for profile in &display.profiles {
-        let selected = app.interaction.selection.as_ref().is_some_and(|selection| {
-            selection.profile.sketch == profile.reference.sketch
-                && selection.profile.region == profile.reference.region
-        });
+        let selected = app
+            .doc
+            .interaction
+            .selection
+            .as_ref()
+            .is_some_and(|selection| {
+                selection.profile.sketch == profile.reference.sketch
+                    && selection.profile.region == profile.reference.region
+            });
         let color = if selected {
             app.theme.accent.linear_multiply(0.42)
         } else {
@@ -558,7 +574,7 @@ pub(crate) fn pick(
     if !whole_body
         && let Some((profile, (anchor, distance))) = hit
         && profile_visible(body.as_ref(), distance)
-        && let Some(context) = app.interaction.context.clone()
+        && let Some(context) = app.doc.interaction.context.clone()
     {
         let mut reference = profile.reference.clone();
         reference.region_anchor = Some(anchor);
@@ -567,20 +583,20 @@ pub(crate) fn pick(
             context,
             capture: view.identity(),
         })));
-        app.status = "Profile selected".into();
-        app.ui.selected_sketch = Some(profile.reference.sketch);
-        app.selected_body = None;
-        app.selected_feature = None;
-        app.topology.select(None);
+        app.doc.status = "Profile selected".into();
+        app.doc.selected_sketch = Some(profile.reference.sketch);
+        app.doc.selected_body = None;
+        app.doc.selected_feature = None;
+        app.doc.topology.select(None);
         app.draw_dirty = true;
         return;
     }
     app.dispatch(Action::ClearSelection);
-    app.selected_feature = None;
-    app.selected_body = body.as_ref().map(|body| body.body_id);
-    app.topology.select(body.as_ref());
+    app.doc.selected_feature = None;
+    app.doc.selected_body = body.as_ref().map(|body| body.body_id);
+    app.doc.topology.select(body.as_ref());
     if whole_body {
-        app.topology.select(None);
+        app.doc.topology.select(None);
     }
     app.draw_dirty = true;
 }

@@ -37,7 +37,9 @@ impl CachedSnap {
 }
 
 pub(crate) fn clear_candidate(ctx: &egui::Context) {
-    ctx.data_mut(|data| data.remove::<CachedSnap>(egui::Id::unique("sketch-winning-snap")));
+    ctx.data_mut(|data| {
+        data.remove::<CachedSnap>(crate::documents::scoped_id("sketch-winning-snap"))
+    });
 }
 
 pub(crate) fn viewport(
@@ -50,7 +52,7 @@ pub(crate) fn viewport(
     if chain_input::viewport(app, ui, rect, response, view) {
         return;
     }
-    let Some(session) = app.sketch.session.as_ref() else {
+    let Some(session) = app.doc.sketch.session.as_ref() else {
         return;
     };
     let Some(position) = response
@@ -81,7 +83,7 @@ pub(crate) fn viewport(
             ids: fresh_ids(),
             snap: snap.map(Box::new),
         });
-        if let Some(session) = app.sketch.session.as_ref() {
+        if let Some(session) = app.doc.sketch.session.as_ref() {
             paint_anchors(ui.painter(), rect, view, session, &app.theme);
         }
     } else if ui.input(|input| input.pointer.delta() != egui::Vec2::ZERO)
@@ -101,8 +103,8 @@ fn winning_snap(
     view: &ViewSnapshot,
     position: egui::Pos2,
 ) -> Option<AcceptedSnap> {
-    let session = app.sketch.session.as_ref()?;
-    let cache = egui::Id::unique("sketch-winning-snap");
+    let session = app.doc.sketch.session.as_ref()?;
+    let cache = crate::documents::scoped_id("sketch-winning-snap");
     let previous = ui
         .ctx()
         .data(|data| data.get_temp::<CachedSnap>(cache))
@@ -183,7 +185,7 @@ fn fresh_ids() -> PrimitiveIds {
 }
 
 fn paint(app: &App, ui: &Ui, rect: Rect, view: &ViewSnapshot, snap: AcceptedSnap) {
-    if let Some(session) = app.sketch.session.as_ref() {
+    if let Some(session) = app.doc.sketch.session.as_ref() {
         feedback::snap(ui.painter(), rect, view, session, snap, &app.theme);
     }
 }

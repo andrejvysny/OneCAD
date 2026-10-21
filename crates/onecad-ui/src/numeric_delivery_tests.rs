@@ -29,7 +29,7 @@ fn numeric_frame(app: &mut App, context: &egui::Context, events: Vec<egui::Event
     };
     crate::input::route(app, context, &mut raw);
     let mut output = context.run_ui(raw, |ui| {
-        if let Some(view) = app.view {
+        if let Some(view) = app.doc.view {
             crate::sketch_numeric::viewport(app, ui, ui.max_rect(), &view);
         }
         crate::sketch_numeric::show(app, context);
@@ -69,17 +69,17 @@ fn draft_rectangle(app: &mut App, anchor: [f64; 2]) {
     app.sketch_dispatch(SketchAction::SetTool(SketchTool::Rectangle));
     let capture = accept_capture(app);
     click(app, capture, anchor[0], anchor[1], ids());
-    let session = app.sketch.session.as_ref().unwrap();
+    let session = app.doc.sketch.session.as_ref().unwrap();
     app.sketch_dispatch(SketchAction::Move(CapturedSketchPoint {
         key: session.key.clone(),
         capture,
         point: Vec2::new(anchor[0] + 10.0, anchor[1] + 10.0).unwrap(),
     }));
-    assert!(app.sketch.session.as_ref().unwrap().draft.is_some());
+    assert!(app.doc.sketch.session.as_ref().unwrap().draft.is_some());
 }
 
 fn assert_rectangle(app: &App, width: f64, height: f64) {
-    let sketch = &app.sketch.session.as_ref().unwrap().authoritative;
+    let sketch = &app.doc.sketch.session.as_ref().unwrap().authoritative;
     assert_eq!(sketch.entities().len(), 8);
     assert_eq!(sketch.constraints().len(), 6);
     let points: Vec<_> = sketch
@@ -127,19 +127,34 @@ async fn routed_tab_numeric_fields_enter_once_and_ime_cancel_preserve_authority(
     let area = tempfile::tempdir().unwrap();
     let (mut app, context) = create_app(area.path()).await;
     let mut frame = eframe::Frame::_new_kittest();
-    pump_until(&mut app, &context, &mut frame, |app| app.display.is_some()).await;
+    pump_until(&mut app, &context, &mut frame, |app| {
+        app.doc.display.is_some()
+    })
+    .await;
     app.document_request(Request::New);
-    pump_until(&mut app, &context, &mut frame, |app| !app.documents.running).await;
+    pump_until(&mut app, &context, &mut frame, |app| {
+        !app.doc.documents.running
+    })
+    .await;
     app.new_sketch();
     pump_until(&mut app, &context, &mut frame, |app| {
-        app.sketch
+        app.doc
+            .sketch
             .session
             .as_ref()
             .is_some_and(|session| session.phase == SketchPhase::Active)
     })
     .await;
-    let before = app.sketch.session.as_ref().unwrap().authoritative.clone();
+    let before = app
+        .doc
+        .sketch
+        .session
+        .as_ref()
+        .unwrap()
+        .authoritative
+        .clone();
     let history = app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -147,7 +162,7 @@ async fn routed_tab_numeric_fields_enter_once_and_ime_cancel_preserve_authority(
         .history
         .clone()
         .unwrap();
-    let revision = app.sketch.session.as_ref().unwrap().document.revision;
+    let revision = app.doc.sketch.session.as_ref().unwrap().document.revision;
     draft_rectangle(&mut app, [0.0, 0.0]);
     numeric_frame(&mut app, &context, vec![key(egui::Key::Tab)]);
     assert!(
@@ -158,9 +173,12 @@ async fn routed_tab_numeric_fields_enter_once_and_ime_cancel_preserve_authority(
     numeric_frame(&mut app, &context, vec![key(egui::Key::Tab)]);
     replace_field(&mut app, &context, "50");
     refresh_stationary_capture(&mut app, &context);
-    assert_eq!(app.sketch.session.as_ref().unwrap().authoritative, before);
     assert_eq!(
-        app.sketch.session.as_ref().unwrap().document.revision,
+        app.doc.sketch.session.as_ref().unwrap().authoritative,
+        before
+    );
+    assert_eq!(
+        app.doc.sketch.session.as_ref().unwrap().document.revision,
         revision
     );
     numeric_frame(&mut app, &context, vec![key(egui::Key::Enter)]);
@@ -169,7 +187,7 @@ async fn routed_tab_numeric_fields_enter_once_and_ime_cancel_preserve_authority(
     numeric_frame(&mut app, &context, vec![key(egui::Key::Enter)]);
     assert!(crate::sketch_numeric::editor_open(&context));
     pump_until(&mut app, &context, &mut frame, |app| {
-        app.sketch.session.as_ref().is_some_and(|session| {
+        app.doc.sketch.session.as_ref().is_some_and(|session| {
             session.phase == SketchPhase::Active && session.authoritative.entities().len() == 8
         })
     })
@@ -178,7 +196,8 @@ async fn routed_tab_numeric_fields_enter_once_and_ime_cancel_preserve_authority(
     assert!(!crate::sketch_numeric::editor_open(&context));
     assert_rectangle(&app, 80.0, 50.0);
     assert_eq!(
-        app.sketch
+        app.doc
+            .sketch
             .session
             .as_ref()
             .unwrap()
@@ -198,7 +217,7 @@ async fn routed_tab_numeric_fields_enter_once_and_ime_cancel_preserve_authority(
 
 fn refresh_stationary_capture(app: &mut App, context: &egui::Context) {
     assert!(context.text_edit_focused());
-    let before = app.view.unwrap();
+    let before = app.doc.view.unwrap();
     let mut viewport = before.viewport();
     viewport.width += 24.0;
     let resized = onecad_scene::ViewSnapshot::new(
@@ -208,28 +227,35 @@ fn refresh_stationary_capture(app: &mut App, context: &egui::Context) {
         viewport,
     )
     .unwrap();
-    let session = app.sketch.session.as_ref().unwrap();
+    let session = app.doc.sketch.session.as_ref().unwrap();
     let generation = session.draft_generation;
     let cursor = session.draft.as_ref().unwrap().cursor;
     assert_ne!(session.accepted_capture, Some(resized.identity()));
     app.view_number = resized.identity().view;
-    app.view = Some(resized);
+    app.doc.view = Some(resized);
     numeric_frame(app, context, vec![]);
     assert!(
         context.text_edit_focused(),
         "resize must preserve numeric text focus"
     );
     assert!(crate::sketch_numeric::editor_open(context));
-    let session = app.sketch.session.as_ref().unwrap();
+    let session = app.doc.sketch.session.as_ref().unwrap();
     assert_eq!(session.accepted_capture, Some(resized.identity()));
     assert_eq!(session.draft_generation, generation);
     assert_eq!(session.draft.as_ref().unwrap().cursor, cursor);
 }
 
 fn cancel_during_ime(app: &mut App, context: &egui::Context) {
-    let accepted = app.sketch.session.as_ref().unwrap().authoritative.clone();
-    let history = app.sketch.session.as_ref().unwrap().history.clone();
-    let revision = app.sketch.session.as_ref().unwrap().document.revision;
+    let accepted = app
+        .doc
+        .sketch
+        .session
+        .as_ref()
+        .unwrap()
+        .authoritative
+        .clone();
+    let history = app.doc.sketch.session.as_ref().unwrap().history.clone();
+    let revision = app.doc.sketch.session.as_ref().unwrap().document.revision;
     draft_rectangle(app, [100.0, 0.0]);
     numeric_frame(app, context, vec![key(egui::Key::Tab)]);
     assert!(crate::sketch_numeric::editor_open(context));
@@ -245,7 +271,7 @@ fn cancel_during_ime(app: &mut App, context: &egui::Context) {
         ],
     );
     assert!(crate::sketch_numeric::editor_open(context));
-    assert!(app.sketch.session.as_ref().unwrap().draft.is_some());
+    assert!(app.doc.sketch.session.as_ref().unwrap().draft.is_some());
     numeric_frame(
         app,
         context,
@@ -255,10 +281,10 @@ fn cancel_during_ime(app: &mut App, context: &egui::Context) {
         ],
     );
     assert!(crate::sketch_numeric::editor_open(context));
-    assert!(app.sketch.session.as_ref().unwrap().draft.is_some());
+    assert!(app.doc.sketch.session.as_ref().unwrap().draft.is_some());
     numeric_frame(app, context, vec![key(egui::Key::Escape)]);
     assert!(!crate::sketch_numeric::editor_open(context));
-    let session = app.sketch.session.as_ref().unwrap();
+    let session = app.doc.sketch.session.as_ref().unwrap();
     assert_eq!(session.phase, SketchPhase::Active);
     assert!(
         session.draft.is_some(),

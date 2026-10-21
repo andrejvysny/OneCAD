@@ -105,11 +105,11 @@ pub fn hover(
 ) {
     let pointer = ui.input(|input| input.pointer.hover_pos());
     let allowed = app.viewport_ready()
-        && app.bridge.valid()
+        && app.doc.bridge.valid()
         && !sectioned(app)
         && !app.sketch_active()
         && !app.busy()
-        && app.interaction.tool.is_none()
+        && app.doc.interaction.tool.is_none()
         && !crate::viewport_widgets::owns_pointer(app, ui, rect);
     let target = pointer
         .filter(|point| allowed && crate::viewport_widgets::allows_pointer(ui, rect, *point))
@@ -125,9 +125,9 @@ pub fn hover(
             .ok()??;
             Some(Target::from_hit(&hit))
         });
-    if target != app.topology.hover {
-        app.topology.hover = target;
-        app.topology.changed();
+    if target != app.doc.topology.hover {
+        app.doc.topology.hover = target;
+        app.doc.topology.changed();
         app.draw_dirty = true;
     }
 }
@@ -145,16 +145,17 @@ pub fn upload(
     scene: &Arc<SceneSnapshot>,
     ctx: &egui::Context,
 ) -> Result<(), String> {
-    if app.topology.dirty {
+    if app.doc.topology.dirty {
         app.renderer
             .clear_highlights()
             .map_err(|error| error.to_string())?;
     }
-    if let Some(receiver) = &app.topology.pending {
+    if let Some(receiver) = &app.doc.topology.pending {
         match receiver.try_recv() {
             Ok(delivery) => {
-                app.topology.pending = None;
+                app.doc.topology.pending = None;
                 if app
+                    .doc
                     .topology
                     .accepts(delivery.sequence, delivery.scene, scene.identity())
                 {
@@ -167,12 +168,12 @@ pub fn upload(
             }
             Err(mpsc::TryRecvError::Empty) => return Ok(()),
             Err(mpsc::TryRecvError::Disconnected) => {
-                app.topology.pending = None;
+                app.doc.topology.pending = None;
                 return Err("highlight preparation worker stopped".into());
             }
         }
     }
-    if app.topology.dirty {
+    if app.doc.topology.dirty {
         start_preparation(app, scene.clone(), ctx.clone())?;
     }
     Ok(())
@@ -184,13 +185,14 @@ fn start_preparation(
     ctx: egui::Context,
 ) -> Result<(), String> {
     let lease = app
+        .doc
         .bridge
         .shared
         .host_budget
         .reserve(scene.resident_bytes())?;
-    let sequence = app.topology.sequence;
-    let selected = app.topology.selected.clone();
-    let hover = app.topology.hover.clone();
+    let sequence = app.doc.topology.sequence;
+    let selected = app.doc.topology.selected.clone();
+    let hover = app.doc.topology.hover.clone();
     let budget = app.renderer.preparation_budget();
     let (sender, receiver) = mpsc::sync_channel(1);
     std::thread::Builder::new()
@@ -217,8 +219,8 @@ fn start_preparation(
             ctx.request_repaint();
         })
         .map_err(|error| error.to_string())?;
-    app.topology.pending = Some(receiver);
-    app.topology.dirty = false;
+    app.doc.topology.pending = Some(receiver);
+    app.doc.topology.dirty = false;
     Ok(())
 }
 

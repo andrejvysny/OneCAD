@@ -51,13 +51,13 @@ fn model_view(app: &App, eligible: bool, reason: &'static str) -> View {
     if !app.document_open() {
         return gate(false, "Create or open a document first");
     }
-    if app.interaction.tool.is_some() || app.busy() {
+    if app.doc.interaction.tool.is_some() || app.busy() {
         return gate(false, "Finish the current operation first");
     }
     if !app.viewport_ready() {
         return gate(false, "Viewport unavailable");
     }
-    if !app.bridge.valid() {
+    if !app.doc.bridge.valid() {
         return gate(false, "Worker unavailable");
     }
     if crate::viewport_selection::sectioned(app) {
@@ -67,7 +67,12 @@ fn model_view(app: &App, eligible: bool, reason: &'static str) -> View {
 }
 
 fn sketch_view(app: &App, tool: SketchTool) -> View {
-    let selected = app.sketch.session.as_ref().is_some_and(|s| s.tool == tool);
+    let selected = app
+        .doc
+        .sketch
+        .session
+        .as_ref()
+        .is_some_and(|s| s.tool == tool);
     let mut view = gate(sketch_ui::tools_enabled(app), "Sketch is not ready");
     if selected {
         view.state = ToolState::SketchActive;
@@ -114,13 +119,14 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
         ToolId::Sketch => model_view(app, true, "Finish the current operation first"),
         ToolId::Extrude => model_view(
             app,
-            app.interaction.selection.is_some(),
+            app.doc.interaction.selection.is_some(),
             "Select a closed sketch profile first",
         ),
         ToolId::Edit => model_view(
             app,
-            app.selected_feature.is_some_and(|id| {
-                app.display
+            app.doc.selected_feature.is_some_and(|id| {
+                app.doc
+                    .display
                     .as_ref()
                     .and_then(|display| {
                         display.records.iter().find(|record| record.record_id == id)
@@ -131,7 +137,9 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
             }),
             "Select an editable feature first",
         ),
-        ToolId::MoveRotate => model_view(app, app.selected_body.is_some(), "Select a body first"),
+        ToolId::MoveRotate => {
+            model_view(app, app.doc.selected_body.is_some(), "Select a body first")
+        }
         ToolId::Import => gate(
             crate::bars::replacement_allowed(app),
             "Finish the current operation first",
@@ -156,6 +164,7 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
             let mut state = gate(allowed.is_ok(), allowed.err().unwrap_or(""));
             if def.id == ToolId::Construction
                 && app
+                    .doc
                     .sketch
                     .session
                     .as_ref()
@@ -233,14 +242,15 @@ pub(crate) fn activate(app: &mut App, ctx: &Context, id: ToolId) {
         ToolId::Delete if app.sketch_active() => crate::sketch_repair::delete_selected(app),
         ToolId::Sketch => app.choose_sketch_support(),
         ToolId::Extrude => {
-            app.gesture += 1;
+            app.doc.gesture += 1;
             let step = app
+                .doc
                 .display
                 .as_ref()
                 .map_or(0, |display| display.projection.applied_ops as u32);
             app.dispatch(Action::BeginExtrude {
                 record_id: onecad_core::ids::RecordId::new(),
-                gesture: app.gesture,
+                gesture: app.doc.gesture,
                 step_index: step,
             });
         }
@@ -277,13 +287,13 @@ pub(crate) fn activate(app: &mut App, ctx: &Context, id: ToolId) {
 /// Canceling a draft keeps its selected input available for another tool.
 pub(crate) fn cancel_tool(app: &mut App) {
     app.dispatch(Action::Cancel);
-    if app.interaction.tool.is_none() {
-        app.selected_feature = None;
+    if app.doc.interaction.tool.is_none() {
+        app.doc.selected_feature = None;
     }
 }
 
 pub(crate) fn cancel_or_deselect(app: &mut App) {
-    if app.interaction.tool.is_some() {
+    if app.doc.interaction.tool.is_some() {
         cancel_tool(app);
     } else {
         clear_selection(app, selection_kind(app));
@@ -292,15 +302,15 @@ pub(crate) fn cancel_or_deselect(app: &mut App) {
 
 pub(crate) fn select_feature(app: &mut App, id: onecad_core::ids::RecordId) {
     app.dispatch(Action::ClearSelection);
-    app.topology.select(None);
-    app.selected_feature = Some(id);
+    app.doc.topology.select(None);
+    app.doc.selected_feature = Some(id);
     app.draw_dirty = true;
 }
 
 /// The label's close button explicitly deselects as well as canceling a draft.
 fn clear_selection(app: &mut App, kind: SelectionKind) {
     if kind == SelectionKind::SketchEntity {
-        if let Some(session) = app.sketch.session.as_ref()
+        if let Some(session) = app.doc.sketch.session.as_ref()
             && let Some(capture) = session.accepted_capture
         {
             app.sketch_dispatch(SketchAction::Select {
@@ -315,14 +325,15 @@ fn clear_selection(app: &mut App, kind: SelectionKind) {
     }
     cancel_tool(app);
     app.dispatch(Action::ClearSelection);
-    app.selected_body = None;
-    app.selected_feature = None;
-    app.topology.select(None);
+    app.doc.selected_body = None;
+    app.doc.selected_feature = None;
+    app.doc.topology.select(None);
     app.draw_dirty = true;
 }
 
 pub(crate) fn body_name(app: &App, id: onecad_core::ids::BodyId) -> String {
-    app.display
+    app.doc
+        .display
         .as_ref()
         .and_then(|d| {
             d.projection
@@ -339,14 +350,14 @@ pub(crate) fn selection_label(
     kind: SelectionKind,
 ) -> Option<(String, String, SelectionVariant)> {
     let model = SelectionVariant::Model;
-    if let Some(tool) = &app.interaction.tool
+    if let Some(tool) = &app.doc.interaction.tool
         && tool.editing_existing
     {
         return Some((tool.record.name.clone(), "feature".into(), model));
     }
     match kind {
         SelectionKind::Face | SelectionKind::Edge => {
-            let (_, body) = app.topology.selected_kind()?;
+            let (_, body) = app.doc.topology.selected_kind()?;
             let name = if kind == SelectionKind::Face {
                 "Face"
             } else {
@@ -354,11 +365,12 @@ pub(crate) fn selection_label(
             };
             Some((name.into(), body_name(app, body), model))
         }
-        SelectionKind::Body => Some(("Body".into(), body_name(app, app.selected_body?), model)),
+        SelectionKind::Body => Some(("Body".into(), body_name(app, app.doc.selected_body?), model)),
         SelectionKind::Region => Some(("Region".into(), "profile".into(), model)),
         SelectionKind::Feature => {
-            let id = app.selected_feature?.to_string();
+            let id = app.doc.selected_feature?.to_string();
             let label = app
+                .doc
                 .display
                 .as_ref()?
                 .projection
@@ -369,7 +381,7 @@ pub(crate) fn selection_label(
             Some((label, "feature".into(), model))
         }
         SelectionKind::SketchEntity => {
-            let session = app.sketch.session.as_ref()?;
+            let session = app.doc.sketch.session.as_ref()?;
             let points = session
                 .selection
                 .iter()
@@ -402,7 +414,7 @@ pub(crate) fn selection_label(
 }
 
 fn accent(app: &App, kind: SelectionKind) -> PillAccent {
-    if app.interaction.tool.is_some() {
+    if app.doc.interaction.tool.is_some() {
         return PillAccent::Running;
     }
     match kind {

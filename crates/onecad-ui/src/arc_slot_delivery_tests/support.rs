@@ -7,6 +7,7 @@ pub(super) fn pointer(host: &mut Host, x: f64, y: f64) {
 
 pub(super) fn undo_depth(host: &Host) -> usize {
     host.app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -19,6 +20,7 @@ pub(super) fn undo_depth(host: &Host) -> usize {
 
 pub(super) fn tangent_mode(host: &Host) -> bool {
     host.app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -89,19 +91,48 @@ pub(super) fn numeric_one(host: &mut Host, text: &str) {
 
 pub(super) fn refusal(host: &mut Host, text: &str) {
     let accepted = host.sketch().clone();
-    let history = host.app.sketch.session.as_ref().unwrap().history.clone();
+    let history = host
+        .app
+        .doc
+        .sketch
+        .session
+        .as_ref()
+        .unwrap()
+        .history
+        .clone();
     host.ui(vec![key(egui::Key::Tab, egui::Modifiers::NONE)]);
     assert!(crate::sketch_numeric::editor_open(&host.context));
     host.replace(text);
     host.ui(vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
     assert_eq!(host.sketch(), &accepted);
-    assert_eq!(host.app.sketch.session.as_ref().unwrap().history, history);
+    assert_eq!(
+        host.app.doc.sketch.session.as_ref().unwrap().history,
+        history
+    );
     assert!(crate::sketch_numeric::editor_open(&host.context));
     host.ui(vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
     assert!(!crate::sketch_numeric::editor_open(&host.context));
-    assert!(host.app.sketch.session.as_ref().unwrap().draft.is_some());
+    assert!(
+        host.app
+            .doc
+            .sketch
+            .session
+            .as_ref()
+            .unwrap()
+            .draft
+            .is_some()
+    );
     host.ui(vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
-    assert!(host.app.sketch.session.as_ref().unwrap().draft.is_none());
+    assert!(
+        host.app
+            .doc
+            .sketch
+            .session
+            .as_ref()
+            .unwrap()
+            .draft
+            .is_none()
+    );
     assert_eq!(host.sketch(), &accepted);
 }
 
@@ -171,12 +202,25 @@ pub(super) fn assert_numeric_keyboard_ownership(host: &mut Host) {
     host.ui(vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
     assert!(!crate::sketch_numeric::editor_open(&host.context));
     assert!(
-        host.app.sketch.session.as_ref().unwrap().can_tangent_arc(),
+        host.app
+            .doc
+            .sketch
+            .session
+            .as_ref()
+            .unwrap()
+            .can_tangent_arc(),
         "first Escape closes numeric editing while preserving the solved chain"
     );
     host.ui(vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
     assert!(
-        host.app.sketch.session.as_ref().unwrap().draft.is_none(),
+        host.app
+            .doc
+            .sketch
+            .session
+            .as_ref()
+            .unwrap()
+            .draft
+            .is_none(),
         "second Escape cancels the primitive before endpoint reseeding"
     );
 }
@@ -184,6 +228,7 @@ pub(super) fn assert_numeric_keyboard_ownership(host: &mut Host) {
 pub(super) async fn arc_to_arc_and_stale_capture(host: &mut Host) {
     let draft = host
         .app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -224,6 +269,7 @@ pub(super) async fn arc_to_arc_and_stale_capture(host: &mut Host) {
     host.redraw();
     let anchor = host
         .app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -252,6 +298,7 @@ pub(super) async fn batched_drag_release(root: &std::path::Path, single_frame: b
     host.redraw();
     let draft = host
         .app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -335,7 +382,7 @@ pub(super) fn assert_native_arc_endpoint_seeding(host: &mut Host) {
         host.control("Line");
         let at = endpoint(&accepted, arc, role);
         host.xy(at.x, at.y);
-        let session = host.app.sketch.session.as_ref().unwrap();
+        let session = host.app.doc.sketch.session.as_ref().unwrap();
         let draft = session.draft.as_ref().unwrap();
         let curve = draft
             .preceding
@@ -350,7 +397,16 @@ pub(super) fn assert_native_arc_endpoint_seeding(host: &mut Host) {
         host.ui(vec![key(egui::Key::A, egui::Modifiers::NONE)]);
         assert!(tangent_mode(host));
         host.ui(vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
-        assert!(host.app.sketch.session.as_ref().unwrap().draft.is_none());
+        assert!(
+            host.app
+                .doc
+                .sketch
+                .session
+                .as_ref()
+                .unwrap()
+                .draft
+                .is_none()
+        );
         assert_eq!(host.sketch(), &accepted);
         assert_eq!(undo_depth(host), depth);
     }

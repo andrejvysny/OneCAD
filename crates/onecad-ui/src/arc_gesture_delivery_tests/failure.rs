@@ -4,13 +4,14 @@ use std::sync::atomic::Ordering;
 pub(super) async fn accepted_capture_failure(mut host: Host, ids: ArcIds) {
     let before = host.sketch().clone();
     let depth = undo_depth(&host);
-    let model_depth = host.app.display.as_ref().unwrap().projection.undo_depth;
-    let old_key = host.app.sketch.session.as_ref().unwrap().key.clone();
-    let old_capture = host.app.view.unwrap().identity();
-    let old_revision = host.app.document_state.as_ref().unwrap().revision;
+    let model_depth = host.app.doc.display.as_ref().unwrap().projection.undo_depth;
+    let old_key = host.app.doc.sketch.session.as_ref().unwrap().key.clone();
+    let old_capture = host.app.doc.view.unwrap().identity();
+    let old_revision = host.app.doc.document_state.as_ref().unwrap().revision;
     let (release, gate) = tokio::sync::oneshot::channel();
-    *host.app.bridge.shared.gesture_end_gate.lock().unwrap() = Some(gate);
+    *host.app.doc.bridge.shared.gesture_end_gate.lock().unwrap() = Some(gate);
     host.app
+        .doc
         .bridge
         .shared
         .fail_next_gesture_capture
@@ -18,7 +19,7 @@ pub(super) async fn accepted_capture_failure(mut host: Host, ids: ArcIds) {
     // Keep recovery captures refused through the real bounded handoff budget as well.
     let mut reservations = Vec::new();
     for _ in 0..12 {
-        match host.app.bridge.shared.host_budget.reserve(64 << 20) {
+        match host.app.doc.bridge.shared.host_budget.reserve(64 << 20) {
             Ok(lease) => reservations.push(lease),
             Err(_) => break,
         }
@@ -32,7 +33,8 @@ pub(super) async fn accepted_capture_failure(mut host: Host, ids: ArcIds) {
         Some(CurvePosition::Center),
     );
     pump_until(&mut host.app, &host.context, &mut host.frame, |app| {
-        app.bridge
+        app.doc
+            .bridge
             .shared
             .gesture_end_arrived
             .load(Ordering::Acquire)
@@ -40,33 +42,35 @@ pub(super) async fn accepted_capture_failure(mut host: Host, ids: ArcIds) {
     .await;
     host.ui(vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
     pump_until(&mut host.app, &host.context, &mut host.frame, |app| {
-        app.bridge
+        app.doc
+            .bridge
             .shared
             .gesture_cancel_observed
             .load(Ordering::Acquire)
     })
     .await;
     assert_eq!(
-        host.app.sketch_gesture.phase(),
+        host.app.doc.sketch_gesture.phase(),
         Some(GesturePhase::Cancelling)
     );
     assert!(
-        host.app.sketch_gesture.busy(),
+        host.app.doc.sketch_gesture.busy(),
         "Cancel ack must not release UI ownership before accepted End delivery"
     );
     release.send(()).unwrap();
     pump_until(&mut host.app, &host.context, &mut host.frame, |app| {
-        !app.sketch_gesture.busy()
+        !app.doc.sketch_gesture.busy()
     })
     .await;
     assert!(host.app.document_dirty());
-    assert!(host.app.document_state.as_ref().unwrap().revision > old_revision);
+    assert!(host.app.doc.document_state.as_ref().unwrap().revision > old_revision);
     assert!(
-        !host.app.bridge.valid(),
+        !host.app.doc.bridge.valid(),
         "failed capture must not authorize the old scene"
     );
     assert!(
         host.app
+            .doc
             .sketch
             .session
             .as_ref()
@@ -110,7 +114,7 @@ pub(super) async fn accepted_capture_failure(mut host: Host, ids: ArcIds) {
     assert!(
         crate::bars::save_allowed(&host.app),
         "accepted state must remain saveable: {}",
-        host.app.status
+        host.app.doc.status
     );
     for request in [
         Request::Save { save_as: false },
@@ -132,11 +136,12 @@ pub(super) async fn accepted_capture_failure(mut host: Host, ids: ArcIds) {
 }
 
 async fn inspect(host: &Host, sketch: SketchId) -> crate::gesture_services::testing::Inspection {
-    let mut expected = host.app.display.as_ref().unwrap().context.clone();
+    let mut expected = host.app.doc.display.as_ref().unwrap().context.clone();
     expected.revision =
-        onecad_core::ids::DocumentRevision(host.app.document_state.as_ref().unwrap().revision);
+        onecad_core::ids::DocumentRevision(host.app.doc.document_state.as_ref().unwrap().revision);
     let (reply, receive) = tokio::sync::oneshot::channel();
     host.app
+        .doc
         .bridge
         .submit(crate::bridge::Command::InspectSketch(Box::new(
             crate::gesture_services::testing::InspectionRequest {

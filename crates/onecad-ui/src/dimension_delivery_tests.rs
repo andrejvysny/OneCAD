@@ -14,7 +14,7 @@ use onecad_scene::{Camera, DVec3, Projection, ViewSnapshot, Viewport};
 
 pub(super) fn accept_capture(app: &mut App) -> onecad_scene::CaptureIdentity {
     app.view_number += 1;
-    let session = app.sketch.session.as_ref().unwrap();
+    let session = app.doc.sketch.session.as_ref().unwrap();
     let view = ViewSnapshot::new(
         session.document.scene,
         app.view_number,
@@ -31,7 +31,7 @@ pub(super) fn accept_capture(app: &mut App) -> onecad_scene::CaptureIdentity {
     )
     .unwrap();
     let capture = view.identity();
-    app.view = Some(view);
+    app.doc.view = Some(view);
     app.sketch_dispatch(SketchAction::AcceptView {
         key: session.key.clone(),
         document: session.document.clone(),
@@ -47,7 +47,7 @@ pub(super) fn click(
     y: f64,
     ids: PrimitiveIds,
 ) {
-    let session = app.sketch.session.as_ref().unwrap();
+    let session = app.doc.sketch.session.as_ref().unwrap();
     app.sketch_dispatch(SketchAction::Click {
         point: CapturedSketchPoint {
             key: session.key.clone(),
@@ -120,6 +120,7 @@ fn submit_modal(app: &mut App, context: &egui::Context, value: &str) {
 
 fn radius(app: &App, id: EntityId) -> f64 {
     match app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -139,10 +140,14 @@ async fn circle_dimension_modal_edits_existing_id_and_real_solver_radius() {
     let area = tempfile::tempdir().unwrap();
     let (mut app, context) = create_app(area.path()).await;
     let mut frame = eframe::Frame::_new_kittest();
-    pump_until(&mut app, &context, &mut frame, |app| app.display.is_some()).await;
+    pump_until(&mut app, &context, &mut frame, |app| {
+        app.doc.display.is_some()
+    })
+    .await;
     app.new_sketch();
     pump_until(&mut app, &context, &mut frame, |app| {
-        app.sketch
+        app.doc
+            .sketch
             .session
             .as_ref()
             .is_some_and(|session| session.phase == SketchPhase::Active)
@@ -155,14 +160,14 @@ async fn circle_dimension_modal_edits_existing_id_and_real_solver_radius() {
     let circle = second.entities[1];
     click(&mut app, capture, 12.5, 0.0, second);
     pump_until(&mut app, &context, &mut frame, |app| {
-        app.sketch.session.as_ref().is_some_and(|session| {
+        app.doc.sketch.session.as_ref().is_some_and(|session| {
             session.phase == SketchPhase::Active && session.authoritative.contains_entity(circle)
         })
     })
     .await;
     app.sketch_dispatch(SketchAction::SetTool(SketchTool::Select));
     let capture = accept_capture(&mut app);
-    let session = app.sketch.session.as_ref().unwrap();
+    let session = app.doc.sketch.session.as_ref().unwrap();
     app.sketch_dispatch(SketchAction::Select {
         key: session.key.clone(),
         document: session.document.clone(),
@@ -174,16 +179,16 @@ async fn circle_dimension_modal_edits_existing_id_and_real_solver_radius() {
     assert!(
         constraint_authoring::editor_open(&context),
         "dimension activation: status={} busy={} selection={:?} phase={:?} tool={:?} draft={}",
-        app.status,
+        app.doc.status,
         app.busy(),
-        app.sketch.session.as_ref().unwrap().selection,
-        app.sketch.session.as_ref().unwrap().phase,
-        app.sketch.session.as_ref().unwrap().tool,
-        app.sketch.session.as_ref().unwrap().draft.is_some()
+        app.doc.sketch.session.as_ref().unwrap().selection,
+        app.doc.sketch.session.as_ref().unwrap().phase,
+        app.doc.sketch.session.as_ref().unwrap().tool,
+        app.doc.sketch.session.as_ref().unwrap().draft.is_some()
     );
     submit_modal(&mut app, &context, "25");
     pump_until(&mut app, &context, &mut frame, |app| {
-        app.sketch.session.as_ref().is_some_and(|session| {
+        app.doc.sketch.session.as_ref().is_some_and(|session| {
             session.phase == SketchPhase::Active
                 && session
                     .authoritative
@@ -194,6 +199,7 @@ async fn circle_dimension_modal_edits_existing_id_and_real_solver_radius() {
     })
     .await;
     let constraint = app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -209,7 +215,7 @@ async fn circle_dimension_modal_edits_existing_id_and_real_solver_radius() {
     assert!(constraint_authoring::editor_open(&context));
     submit_modal(&mut app, &context, "30");
     pump_until(&mut app, &context, &mut frame, |app| {
-        app.sketch.session.as_ref().is_some_and(|session| {
+        app.doc.sketch.session.as_ref().is_some_and(|session| {
             session.phase == SketchPhase::Active
                 && session
                     .authoritative
@@ -221,7 +227,8 @@ async fn circle_dimension_modal_edits_existing_id_and_real_solver_radius() {
     .await;
     assert!((radius(&app, circle) - 15.0).abs() < 1e-8);
     assert_eq!(
-        app.sketch
+        app.doc
+            .sketch
             .session
             .as_ref()
             .unwrap()
@@ -230,12 +237,12 @@ async fn circle_dimension_modal_edits_existing_id_and_real_solver_radius() {
             .len(),
         1
     );
-    let before = app.sketch.session.as_ref().unwrap();
+    let before = app.doc.sketch.session.as_ref().unwrap();
     let request = before.request.clone();
     let document = before.document.clone();
     open_badge_editor(&mut app, &context, &mut frame, constraint).await;
     submit_modal(&mut app, &context, "30");
-    let after = app.sketch.session.as_ref().unwrap();
+    let after = app.doc.sketch.session.as_ref().unwrap();
     assert_eq!(
         after.request, request,
         "unchanged confirmation must not submit a mutation"
@@ -282,9 +289,10 @@ async fn open_badge_editor(
         logic_tick(app, context, frame, false);
         editor_frame(app, context, frame, vec![]);
         let ready = app
+            .doc
             .view
             .as_ref()
-            .zip(app.sketch.session.as_ref())
+            .zip(app.doc.sketch.session.as_ref())
             .is_some_and(|(view, session)| {
                 view.identity().scene == session.document.scene
                     && session.accepted_capture == Some(view.identity())
@@ -316,9 +324,9 @@ async fn open_badge_editor(
     assert!(
         constraint_authoring::editor_open(context),
         "badge click must open existing dimension editor; status={} phase={:?} tool={:?} current_rect={:?} clicked={:?}",
-        app.status,
-        app.sketch.session.as_ref().unwrap().phase,
-        app.sketch.session.as_ref().unwrap().tool,
+        app.doc.status,
+        app.doc.sketch.session.as_ref().unwrap().phase,
+        app.doc.sketch.session.as_ref().unwrap().tool,
         crate::sketch_dimensions::badge_rect(context, constraint),
         position
     );

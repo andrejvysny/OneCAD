@@ -13,16 +13,19 @@ impl Host {
         let (mut app, context) = create_app(root).await;
         context.enable_accesskit();
         let mut frame = eframe::Frame::_new_kittest();
-        pump_until(&mut app, &context, &mut frame, |app| app.display.is_some()).await;
+        pump_until(&mut app, &context, &mut frame, |app| {
+            app.doc.display.is_some()
+        })
+        .await;
         app.new_sketch();
         pump_until(&mut app, &context, &mut frame, active).await;
         app.ui.start_open = false;
         app.ui.explorer_open = false;
         app.ui.inspector_open = false;
         app.ui.sketch_snap = false;
-        app.fit_pending = false;
-        let plane = app.sketch.session.as_ref().unwrap().plane;
-        app.camera = Camera {
+        app.doc.fit_pending = false;
+        let plane = app.doc.sketch.session.as_ref().unwrap().plane;
+        app.doc.camera = Camera {
             target: DVec3::new(plane.origin.x, plane.origin.y, plane.origin.z),
             offset: DVec3::new(plane.normal.x, plane.normal.y, plane.normal.z) * 120.0,
             projection: Projection::Orthographic,
@@ -88,12 +91,12 @@ impl Host {
         self.app.draw_dirty = true;
         for _ in 0..200 {
             self.ui(vec![]);
-            if !self.app.draw_dirty && self.app.view.is_some() {
+            if !self.app.draw_dirty && self.app.doc.view.is_some() {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        panic!("native redraw failed: {}", self.app.status);
+        panic!("native redraw failed: {}", self.app.doc.status);
     }
 
     pub(crate) fn rect(&self, label: &str) -> egui::Rect {
@@ -136,10 +139,11 @@ impl Host {
     }
 
     pub(crate) fn project(&self, x: f64, y: f64) -> egui::Pos2 {
-        let plane = self.app.sketch.session.as_ref().unwrap().plane;
+        let plane = self.app.doc.sketch.session.as_ref().unwrap().plane;
         let world = plane.to_world(Vec2::new(x, y).unwrap());
         let screen = self
             .app
+            .doc
             .view
             .unwrap()
             .project(DVec3::new(world.x, world.y, world.z))
@@ -182,6 +186,7 @@ impl Host {
         pump_until(&mut self.app, &self.context, &mut self.frame, |app| {
             active(app)
                 && app
+                    .doc
                     .sketch
                     .session
                     .as_ref()
@@ -200,7 +205,7 @@ impl Host {
     }
 
     pub(crate) fn sketch(&self) -> &Sketch {
-        &self.app.sketch.session.as_ref().unwrap().authoritative
+        &self.app.doc.sketch.session.as_ref().unwrap().authoritative
     }
 
     pub(crate) async fn history(&mut self, redo: bool, count: usize) {
@@ -228,7 +233,8 @@ impl Host {
 }
 
 pub(crate) fn active(app: &App) -> bool {
-    app.sketch
+    app.doc
+        .sketch
         .session
         .as_ref()
         .is_some_and(|session| session.phase == SketchPhase::Active)

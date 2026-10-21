@@ -40,7 +40,12 @@ fn accessible_name(field: CreationField) -> &'static str {
 
 fn validated(app: &App, draft: &Draft) -> Result<(), String> {
     let dimensions = fields::dimensions(draft, app)?;
-    let session = app.sketch.session.as_ref().ok_or("Open a sketch first")?;
+    let session = app
+        .doc
+        .sketch
+        .session
+        .as_ref()
+        .ok_or("Open a sketch first")?;
     dimensions.preview_for_session(session)?;
     Ok(())
 }
@@ -49,6 +54,7 @@ pub(super) fn show(app: &App, ctx: &Context, draft: &mut Draft) -> (bool, bool) 
     let bounds = crate::dimension_chip::usable(ctx, &app.ui).intersect(viewport_bounds(ctx));
     if !draft.engaged {
         draft.placement_anchor = app
+            .doc
             .sketch
             .session
             .as_ref()

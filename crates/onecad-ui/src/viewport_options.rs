@@ -27,7 +27,7 @@ pub fn contents(app: &mut App, ui: &mut egui::Ui) {
             changed |= supersampling(ui, &mut options);
             changed |= ui
                 .add_enabled_ui(
-                    app.interaction.tool.is_none() && !app.sketch_active(),
+                    app.doc.interaction.tool.is_none() && !app.sketch_active(),
                     |ui| section(ui, app, &mut options),
                 )
                 .inner;
@@ -43,7 +43,7 @@ pub fn contents(app: &mut App, ui: &mut egui::Ui) {
 fn projection(app: &mut App, ui: &mut egui::Ui) {
     ui.separator();
     ui.add(SectionLabel::new("Projection"));
-    let mut index = usize::from(app.camera.projection == Projection::Orthographic);
+    let mut index = usize::from(app.doc.camera.projection == Projection::Orthographic);
     let segments = [
         Segment {
             label: "Perspective",
@@ -61,7 +61,7 @@ fn projection(app: &mut App, ui: &mut egui::Ui) {
             .width(ui.available_width()),
     );
     if index != before {
-        app.camera.projection = if index == 1 {
+        app.doc.camera.projection = if index == 1 {
             Projection::Orthographic
         } else {
             Projection::Perspective
@@ -188,6 +188,7 @@ fn section_label(axis: Option<usize>) -> &'static str {
 
 fn center_offset(app: &App, axis: usize) -> f32 {
     let center = app
+        .doc
         .display
         .as_ref()
         .and_then(|display| display.scene.bounds())

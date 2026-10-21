@@ -19,12 +19,12 @@ pub(crate) fn set_grid_visible(ctx: &egui::Context, visible: bool) {
 
 pub(crate) fn grid(app: &App) -> Option<onecad_render::GridFrame> {
     let plane = if app.sketch_active() {
-        app.sketch.session.as_ref().map(|session| session.plane)
+        app.doc.sketch.session.as_ref().map(|session| session.plane)
     } else {
-        app.ui
+        app.doc
             .sketch_entry
             .plane
-            .filter(|_| app.ui.sketch_entry.open)
+            .filter(|_| app.doc.sketch_entry.open)
     }?;
     Some(frame(plane))
 }

@@ -49,11 +49,11 @@ struct Draft {
 }
 
 fn editor_id() -> egui::Id {
-    egui::Id::unique("sketch-dimension-editor")
+    crate::documents::scoped_id("sketch-dimension-editor")
 }
 
 fn ready(app: &App) -> Option<&SketchSession> {
-    app.sketch.session.as_ref().filter(|session| {
+    app.doc.sketch.session.as_ref().filter(|session| {
         !app.busy()
             && crate::sketch_ui::tools_enabled(app)
             && session.tool == SketchTool::Select
@@ -111,11 +111,11 @@ pub fn activate(app: &mut App, ctx: &egui::Context, tool: ToolId) {
 
 pub fn activate_relation(app: &mut App, ctx: &egui::Context, relation: Relation) {
     if let Err(error) = applicability(app, relation) {
-        app.status = error;
-        app.diagnostics.record(
+        app.doc.status = error;
+        app.doc.diagnostics.record(
             crate::diagnostics::Source::Sketch,
             crate::diagnostics::State::Rejected,
-            &app.status,
+            &app.doc.status,
         );
         return;
     }
@@ -125,7 +125,7 @@ pub fn activate_relation(app: &mut App, ctx: &egui::Context, relation: Relation)
         &session.authoritative,
         &session.selection,
     )) else {
-        app.status = "Dimension measurement is not finite".into();
+        app.doc.status = "Dimension measurement is not finite".into();
         return;
     };
     let Ok(constraint) = operands::create(
@@ -231,7 +231,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     }) else {
         return;
     };
-    let Some(session) = app.sketch.session.as_ref() else {
+    let Some(session) = app.doc.sketch.session.as_ref() else {
         return;
     };
     if draft.key != session.key {
@@ -248,12 +248,13 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     }
     crate::sketch_repair::set_constraint_hover(app, ctx, Some(draft.constraint.id()));
     let variables = app
+        .doc
         .display
         .as_ref()
         .map_or(&[][..], |display| display.projection.variables.as_slice());
     let viewport = crate::layout::chrome(ctx.content_rect(), &app.ui).viewport;
     draft.viewport = Some(crate::dimension_chip::usable(ctx, &app.ui));
-    if let Some(view) = app.view.as_ref() {
+    if let Some(view) = app.doc.view.as_ref() {
         draft.position =
             crate::sketch_dimensions::anchor_position(session, &draft.constraint, viewport, view);
     }
@@ -292,7 +293,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 }
             };
             app.sketch_dispatch(action);
-            if let Some(session) = app.sketch.session.as_ref() {
+            if let Some(session) = app.doc.sketch.session.as_ref() {
                 draft.pending = Some(session.request.clone());
                 draft.error = None;
             }
@@ -305,7 +306,7 @@ pub fn dimension_list(app: &mut App, ui: &mut egui::Ui) {
     if !app.sketch_active() {
         return;
     }
-    let Some(session) = app.sketch.session.as_ref() else {
+    let Some(session) = app.doc.sketch.session.as_ref() else {
         return;
     };
     let constraints: Vec<_> = session

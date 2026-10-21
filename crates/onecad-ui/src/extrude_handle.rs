@@ -53,16 +53,17 @@ pub(crate) fn distance_params(tool: &ModelSession) -> Option<&ExtrudeParams> {
 
 fn target(app: &App) -> Option<Target> {
     if !app.viewport_ready()
-        || !app.bridge.valid()
+        || !app.doc.bridge.valid()
         || app.sketch_active()
         || crate::viewport_selection::sectioned(app)
     {
         return None;
     }
-    let tool = app.interaction.tool.as_ref()?;
+    let tool = app.doc.interaction.tool.as_ref()?;
     let params = distance_params(tool)?;
     let wanted = params.profile.as_ref()?;
     let profile = app
+        .doc
         .display
         .as_ref()?
         .profiles
@@ -158,9 +159,10 @@ fn claims(view: &ViewSnapshot, rect: Rect, target: &Target, distance: f64, point
 }
 
 pub(crate) fn owns_pointer(app: &App, view: &ViewSnapshot, rect: Rect, pointer: Pos2) -> bool {
-    app.extrude_handle.active()
+    app.doc.extrude_handle.active()
         || target(app).is_some_and(|t| {
             let d = app
+                .doc
                 .extrude_handle
                 .last_valid
                 .or(t.evaluated)
@@ -172,43 +174,43 @@ pub(crate) fn owns_pointer(app: &App, view: &ViewSnapshot, rect: Rect, pointer: 
 /// Ends or cancels a capture whose release/focus events never reached `show`
 /// (viewport early returns). Runs before the viewport is drawn.
 pub(crate) fn settle(app: &mut App, ctx: &egui::Context) {
-    if !app.extrude_handle.active() {
+    if !app.doc.extrude_handle.active() {
         return;
     }
     let (focused, down) = ctx.input(|i| (i.focused, i.pointer.primary_down()));
-    let drag = app.extrude_handle.drag.take();
-    if !focused || app.interaction.tool.is_none() {
+    let drag = app.doc.extrude_handle.drag.take();
+    if !focused || app.doc.interaction.tool.is_none() {
         cancel(app, drag);
     } else if !down {
-        app.extrude_handle.last_valid = drag.map(|d| d.d);
+        app.doc.extrude_handle.last_valid = drag.map(|d| d.d);
     } else {
-        app.extrude_handle.drag = drag;
+        app.doc.extrude_handle.drag = drag;
     }
 }
 
 pub(crate) fn show(app: &mut App, ui: &mut egui::Ui, view: &ViewSnapshot, rect: Rect) -> bool {
     let Some(target) = target(app) else {
-        let drag = app.extrude_handle.drag.take();
+        let drag = app.doc.extrude_handle.drag.take();
         cancel(app, drag);
-        app.extrude_handle = ExtrudeHandle::default();
+        app.doc.extrude_handle = ExtrudeHandle::default();
         return false;
     };
-    if app.extrude_handle.record != Some(target.record) {
-        app.extrude_handle = ExtrudeHandle {
+    if app.doc.extrude_handle.record != Some(target.record) {
+        app.doc.extrude_handle = ExtrudeHandle {
             record: Some(target.record),
             ..Default::default()
         };
     }
-    if app.extrude_handle.drag.is_none()
+    if app.doc.extrude_handle.drag.is_none()
         && let Some(value) = target.evaluated
     {
-        app.extrude_handle.last_valid = Some(value);
+        app.doc.extrude_handle.last_valid = Some(value);
     }
-    let mut drag = app.extrude_handle.drag.take();
+    let mut drag = app.doc.extrude_handle.drag.take();
     let shown = drag
         .as_ref()
         .map(|drag| drag.d)
-        .or(app.extrude_handle.last_valid)
+        .or(app.doc.extrude_handle.last_valid)
         .unwrap_or(target.fallback);
     let Some((base_px, tip_px)) = points(view, rect, &target, shown) else {
         cancel(app, drag);
@@ -268,12 +270,13 @@ pub(crate) fn show(app: &mut App, ui: &mut egui::Ui, view: &ViewSnapshot, rect: 
         flush(app, active);
     }
     if released {
-        app.extrude_handle.last_valid = drag.take().map(|d| d.d);
+        app.doc.extrude_handle.last_valid = drag.take().map(|d| d.d);
     }
     let dragging = drag.is_some();
-    app.extrude_handle.drag = drag;
+    app.doc.extrude_handle.drag = drag;
     let hot = hovered || dragging;
     let shown = app
+        .doc
         .extrude_handle
         .drag
         .as_ref()
@@ -331,9 +334,9 @@ fn flush(app: &mut App, drag: &mut Drag) {
 }
 
 fn cancel(app: &mut App, drag: Option<Drag>) {
-    app.extrude_handle.drag = None;
+    app.doc.extrude_handle.drag = None;
     if let Some(text) = drag.and_then(|d| d.restore())
-        && app.interaction.tool.is_some()
+        && app.doc.interaction.tool.is_some()
     {
         app.dispatch(Action::DraftChanged(text));
         app.draw_dirty = true;

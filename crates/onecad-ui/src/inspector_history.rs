@@ -19,7 +19,7 @@ pub fn feature_icon(op_type: &str) -> &'static str {
 }
 
 pub fn history(app: &mut App, ui: &mut Ui) {
-    let Some(display) = app.display.clone() else {
+    let Some(display) = app.doc.display.clone() else {
         ui.label("Opening document…");
         return;
     };
@@ -52,7 +52,7 @@ fn feature_row(
     feature: &onecad_app::dto::FeatureDto,
 ) {
     let selectable =
-        app.viewport_ready() && app.bridge.valid() && !app.busy() && !app.sketch_active();
+        app.viewport_ready() && app.doc.bridge.valid() && !app.busy() && !app.sketch_active();
     let state = row_state(app, feature, index >= display.projection.applied_ops);
     let row = HistoryRow::new(index + 1, feature_icon(&feature.op_type), &feature.label)
         .meta(Some(&feature.value_text))
@@ -63,13 +63,14 @@ fn feature_row(
         && let Ok(id) = feature.id.parse()
     {
         crate::pill::select_feature(app, id);
-        app.ui.selected_sketch = None;
+        app.doc.selected_sketch = None;
         app.ui.inspector_open = true;
         if response.double_clicked() {
             edit_selected_feature(app);
         }
     }
     if app
+        .doc
         .selected_feature
         .is_some_and(|id| id.to_string() == feature.id)
     {
@@ -83,11 +84,12 @@ fn feature_row(
 }
 
 pub(crate) fn edit_selected_feature(app: &mut App) {
-    if !app.viewport_ready() || !app.bridge.valid() || app.busy() || app.sketch_active() {
+    if !app.viewport_ready() || !app.doc.bridge.valid() || app.busy() || app.sketch_active() {
         return;
     }
-    let Some(record) = app.selected_feature.and_then(|id| {
-        app.display
+    let Some(record) = app.doc.selected_feature.and_then(|id| {
+        app.doc
+            .display
             .as_ref()?
             .records
             .iter()
@@ -100,7 +102,7 @@ pub(crate) fn edit_selected_feature(app: &mut App) {
         app.edit_sketch(params.sketch);
         return;
     }
-    let Some(context) = app.interaction.context.clone() else {
+    let Some(context) = app.doc.interaction.context.clone() else {
         return;
     };
     let Some(first) = onecad_interaction::numeric_parameters(&record.op)
@@ -111,21 +113,25 @@ pub(crate) fn edit_selected_feature(app: &mut App) {
     };
     app.ui.inspector_open = true;
     app.ui.inspector_tab = crate::ui_state::InspectorTab::History;
-    app.gesture += 1;
+    app.doc.gesture += 1;
     app.dispatch(Action::BeginParameterEdit {
         parameter: first.parameter,
         record: Box::new(record),
-        gesture: app.gesture,
+        gesture: app.doc.gesture,
         context,
     });
 }
 
 pub(crate) fn edit_button(app: &mut App, ui: &mut Ui) {
-    if app.selected_feature.is_none() || app.interaction.tool.is_some() || app.sketch_active() {
+    if app.doc.selected_feature.is_none()
+        || app.doc.interaction.tool.is_some()
+        || app.sketch_active()
+    {
         return;
     }
-    let editable = app.selected_feature.is_some_and(|id| {
-        app.display
+    let editable = app.doc.selected_feature.is_some_and(|id| {
+        app.doc
+            .display
             .as_ref()
             .and_then(|display| display.records.iter().find(|record| record.record_id == id))
             .is_some_and(|record| {
@@ -133,7 +139,7 @@ pub(crate) fn edit_button(app: &mut App, ui: &mut Ui) {
                     || !onecad_interaction::numeric_parameters(&record.op).is_empty()
             })
     }) && app.viewport_ready()
-        && app.bridge.valid()
+        && app.doc.bridge.valid()
         && !app.busy();
     if ui
         .add_enabled(editable, egui::Button::new("Edit feature"))
@@ -157,6 +163,7 @@ fn info_box(app: &App, ui: &mut Ui) {
 
 fn row_state(app: &App, feature: &onecad_app::dto::FeatureDto, rolled_back: bool) -> HistoryState {
     let selected = app
+        .doc
         .selected_feature
         .as_ref()
         .map(|id| id.to_string())

@@ -4,14 +4,12 @@ use crate::ui_state::UiState;
 #[test]
 fn support_chooser_keeps_navigation_but_not_document_or_popup_input() {
     let mut ui = UiState::default();
-    ui.sketch_entry.open = true;
-    assert_eq!(owner(&ui, false, false), Some(Owner::SketchEntry));
-    assert!(!overlay::navigation_blocked(&ui, false, false));
-    assert!(overlay::navigation_blocked(&ui, true, false));
-    assert!(overlay::navigation_blocked(&ui, false, true));
-    ui.sketch_entry.open = false;
+    assert_eq!(owner(&ui, true, false, false), Some(Owner::SketchEntry));
+    assert!(!overlay::navigation_blocked(&ui, true, false, false));
+    assert!(overlay::navigation_blocked(&ui, true, true, false));
+    assert!(overlay::navigation_blocked(&ui, true, false, true));
     ui.constraints_open = true;
-    assert!(overlay::navigation_blocked(&ui, false, false));
+    assert!(overlay::navigation_blocked(&ui, false, false, false));
 }
 
 fn escape() -> egui::Event {
@@ -36,19 +34,25 @@ fn one_escape_dismisses_only_highest_owner_before_retained_input_replay() {
         ..Default::default()
     };
     route_events(&mut state, 7, &mut raw, |raw| {
-        assert_eq!(owner(&ui, false, false), Some(Owner::Customize));
-        dismiss(&mut ui, Owner::Customize, raw, false);
+        assert_eq!(owner(&ui, false, false, false), Some(Owner::Customize));
+        dismiss(
+            &mut ui,
+            &mut Default::default(),
+            Owner::Customize,
+            raw,
+            false,
+        );
     });
     assert!(!ui.shell_facade.customize_open);
     assert!(ui.shell_facade.layers_open && ui.constraints_open);
     assert!(raw.events.is_empty());
     route_events(&mut state, 7, &mut raw, |raw| {
-        dismiss(&mut ui, Owner::Layers, raw, false)
+        dismiss(&mut ui, &mut Default::default(), Owner::Layers, raw, false)
     });
     assert!(ui.shell_facade.layers_open);
     raw.events.push(escape());
     route_events(&mut state, 7, &mut raw, |raw| {
-        dismiss(&mut ui, Owner::Layers, raw, false)
+        dismiss(&mut ui, &mut Default::default(), Owner::Layers, raw, false)
     });
     assert!(!ui.shell_facade.layers_open);
     assert!(ui.constraints_open);
@@ -73,11 +77,11 @@ fn modal_ownership_blocks_native_model_actions_but_keeps_text_history() {
     }
     let mut ui = UiState::default();
     ui.shell_facade.customize_open = true;
-    assert_eq!(owner(&ui, true, true), Some(Owner::Document));
-    assert_eq!(owner(&ui, false, true), Some(Owner::Popup));
+    assert_eq!(owner(&ui, false, true, true), Some(Owner::Document));
+    assert_eq!(owner(&ui, false, false, true), Some(Owner::Popup));
     ui.shell_facade.customize_open = false;
     ui.shell_facade.layers_open = true;
-    assert_eq!(owner(&ui, false, true), Some(Owner::Popup));
+    assert_eq!(owner(&ui, false, false, true), Some(Owner::Popup));
 }
 
 #[test]
@@ -99,7 +103,13 @@ fn composition_text_focus_and_lost_focus_do_not_dismiss_overlay() {
                 .push(egui::Event::Ime(egui::ImeEvent::Commit("確定".into())));
             protect_composition(&mut false, &mut raw, text);
         }
-        dismiss(&mut ui, Owner::Customize, &mut raw, text);
+        dismiss(
+            &mut ui,
+            &mut Default::default(),
+            Owner::Customize,
+            &mut raw,
+            text,
+        );
         assert!(ui.shell_facade.customize_open);
     }
 }
@@ -116,7 +126,13 @@ fn placement_enter_is_consumed_without_reaching_document_commands() {
         events: vec![enter],
         ..Default::default()
     };
-    dismiss(&mut ui, Owner::Placement, &mut raw, false);
+    dismiss(
+        &mut ui,
+        &mut Default::default(),
+        Owner::Placement,
+        &mut raw,
+        false,
+    );
     assert!(ui.editor_facade.placing.is_none());
     assert!(raw.events.is_empty());
 }

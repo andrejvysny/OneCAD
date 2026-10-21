@@ -17,6 +17,9 @@ pub struct State {
     pub offers: Vec<RecoveryInfoDto>,
     pub busy: bool,
     pub opened: bool,
+    /// The user set the remaining offers aside; they stay pending on disk and in
+    /// the process offer set, and are offered again at the next launch.
+    pub deferred: bool,
 }
 
 impl State {
@@ -30,6 +33,20 @@ impl State {
             .iter()
             .find(|offer| offer.document_id == id)
             .ok_or_else(|| "Recovery offer is no longer pending".into())
+    }
+
+    /// An offer to discard: allowed even when this host already has a document,
+    /// since discarding replaces nothing.
+    fn discardable(&self, id: &str) -> Result<&RecoveryInfoDto, String> {
+        self.offers
+            .iter()
+            .find(|offer| offer.document_id == id)
+            .ok_or_else(|| "Recovery offer is no longer pending".into())
+    }
+
+    /// Whether file actions may proceed (recovery resolved, opened or set aside).
+    pub fn ready(&self) -> bool {
+        self.opened || self.deferred || (self.checked && self.offers.is_empty())
     }
 }
 
@@ -48,7 +65,10 @@ pub async fn discover(backend: &Backend) -> Result<bool, String> {
 pub async fn resolve(backend: &mut Backend, id: &str, choice: Choice) -> Result<bool, String> {
     let offer = {
         let recovery = backend.shared.recovery.lock().map_err(|e| e.to_string())?;
-        recovery.offer(id)?.clone()
+        match choice {
+            Choice::Discard => recovery.discardable(id)?.clone(),
+            Choice::Restore | Choice::OpenSaved => recovery.offer(id)?.clone(),
+        }
     };
     apply_choice(backend, &offer, choice).await?;
     remove_offer(backend, id)?;
@@ -178,12 +198,13 @@ fn destination(root: &Path, offer: &RecoveryInfoDto) -> Result<PathBuf, String> 
 }
 
 pub fn show(app: &mut crate::app::App, ctx: &egui::Context) -> bool {
-    let Ok(recovery) = app.bridge.shared.recovery.lock() else {
+    let Ok(recovery) = app.doc.bridge.shared.recovery.lock() else {
         return true;
     };
-    if recovery.opened || (recovery.checked && recovery.offers.is_empty()) {
+    if recovery.deferred || (recovery.checked && recovery.offers.is_empty()) {
         return false;
     }
+    let document_open = recovery.opened;
     let offer = recovery.offers.first().cloned();
     let busy = recovery.busy;
     drop(recovery);
@@ -208,9 +229,9 @@ pub fn show(app: &mut crate::app::App, ctx: &egui::Context) -> bool {
         } else if offer.is_some() {
             ui.label(title);
         }
-        if !app.status.is_empty() {
+        if !app.doc.status.is_empty() {
             ui.add_space(6.0);
-            ui.label(egui::RichText::new(&app.status).small());
+            ui.label(egui::RichText::new(&app.doc.status).small());
         }
     });
     let choice = if out.primary {
@@ -222,21 +243,73 @@ pub fn show(app: &mut crate::app::App, ctx: &egui::Context) -> bool {
     } else {
         None
     };
+    if out.dismissed && choice.is_none() {
+        if let Ok(mut recovery) = app.doc.bridge.shared.recovery.lock() {
+            recovery.deferred = true;
+        }
+        return true;
+    }
     if let (Some(offer), Some(choice)) = (offer, choice) {
-        if let Ok(mut recovery) = app.bridge.shared.recovery.lock() {
+        // A host with an open document never replaces it: restoring another
+        // document opens a tab of its own, which takes over the remaining offers.
+        if document_open
+            && !matches!(choice, Choice::Discard)
+            && let Err(error) = hand_offers_to_new_tab(app)
+        {
+            app.doc.status = error;
+            return true;
+        }
+        if let Ok(mut recovery) = app.doc.bridge.shared.recovery.lock() {
             recovery.busy = true;
         }
-        if let Err(error) = app.bridge.submit(Command::Recovery {
+        if let Err(error) = app.doc.bridge.submit(Command::Recovery {
             document_id: offer.document_id,
             choice,
         }) {
-            app.status = error;
-            if let Ok(mut recovery) = app.bridge.shared.recovery.lock() {
+            app.doc.status = error;
+            if let Ok(mut recovery) = app.doc.bridge.shared.recovery.lock() {
                 recovery.busy = false;
             }
         }
     }
     true
+}
+
+#[cfg(test)]
+pub(crate) fn tests_hand_offers(app: &mut crate::app::App) -> Result<(), String> {
+    hand_offers_to_new_tab(app)
+}
+
+fn hand_offers_to_new_tab(app: &mut crate::app::App) -> Result<(), String> {
+    if app.busy() {
+        return Err("Wait for the current command before restoring another document".into());
+    }
+    let offers = std::mem::take(
+        &mut app
+            .doc
+            .bridge
+            .shared
+            .recovery
+            .lock()
+            .map_err(|e| e.to_string())?
+            .offers,
+    );
+    if let Err(error) = app.open_tab() {
+        if let Ok(mut recovery) = app.doc.bridge.shared.recovery.lock() {
+            recovery.offers = offers;
+        }
+        return Err(error);
+    }
+    let mut recovery = app
+        .doc
+        .bridge
+        .shared
+        .recovery
+        .lock()
+        .map_err(|e| e.to_string())?;
+    recovery.checked = true;
+    recovery.offers = offers;
+    Ok(())
 }
 
 #[cfg(test)]

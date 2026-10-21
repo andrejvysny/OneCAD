@@ -32,13 +32,14 @@ fn body_section(name: String) -> (&'static str, Vec<(&'static str, String)>) {
 
 fn region_sketch(app: &App) -> Option<String> {
     let id = app
+        .doc
         .interaction
         .selection
         .as_ref()?
         .profile
         .sketch
         .to_string();
-    let display = app.display.as_ref()?;
+    let display = app.doc.display.as_ref()?;
     display
         .projection
         .sketches
@@ -49,11 +50,13 @@ fn region_sketch(app: &App) -> Option<String> {
 
 fn sketch_block(app: &App) -> Block {
     let name = app
+        .doc
         .sketch
         .session
         .as_ref()
         .map_or_else(String::new, |s| s.authoritative.name.clone());
     let dof = app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -63,7 +66,7 @@ fn sketch_block(app: &App) -> Block {
         "Solve",
         dof.clone().unwrap_or_else(|| UNAVAILABLE.to_owned()),
     ));
-    if let Some(session) = &app.sketch.session {
+    if let Some(session) = &app.doc.sketch.session {
         rows.push((
             "Entities",
             session.authoritative.entities().len().to_string(),
@@ -86,8 +89,9 @@ fn sketch_block(app: &App) -> Block {
 }
 
 fn feature_block(app: &App) -> Option<Block> {
-    let id = app.selected_feature?.to_string();
+    let id = app.doc.selected_feature?.to_string();
     let feature = app
+        .doc
         .display
         .as_ref()?
         .projection
@@ -145,12 +149,14 @@ fn face_edge_block(kind: SelectionKind, body: Option<String>) -> Block {
 
 fn body_block(app: &App) -> Block {
     let name = app
+        .doc
         .selected_body
         .map(|id| body_name(app, id))
         .unwrap_or_default();
     let mut section = body_section(name.clone());
-    if let Some(body) = app.selected_body.and_then(|id| {
-        app.display
+    if let Some(body) = app.doc.selected_body.and_then(|id| {
+        app.doc
+            .display
             .as_ref()?
             .projection
             .bodies
@@ -245,8 +251,9 @@ fn hint(app: &App, ui: &mut Ui) {
 }
 
 fn selected_sketch_block(app: &App) -> Option<Block> {
-    let id = app.ui.selected_sketch?.to_string();
+    let id = app.doc.selected_sketch?.to_string();
     let sketch = app
+        .doc
         .display
         .as_ref()?
         .projection

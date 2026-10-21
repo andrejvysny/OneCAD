@@ -10,11 +10,14 @@ async fn viewport_world_patches_hover_cancel_and_click_without_stray_sketches() 
     let area = tempfile::tempdir().unwrap();
     let (mut app, context) = create_app(area.path()).await;
     let mut frame = eframe::Frame::_new_kittest();
-    pump_until(&mut app, &context, &mut frame, |app| app.display.is_some()).await;
+    pump_until(&mut app, &context, &mut frame, |app| {
+        app.doc.display.is_some()
+    })
+    .await;
     for plane in [WorldPlane::XY, WorldPlane::XZ, WorldPlane::YZ] {
         let (view, point) = patch_view(&mut app, plane);
-        let before = serde_json::to_value(&app.display.as_ref().unwrap().projection).unwrap();
-        let dirty = app.authoring_dirty;
+        let before = serde_json::to_value(&app.doc.display.as_ref().unwrap().projection).unwrap();
+        let dirty = app.doc.authoring_dirty;
         app.choose_sketch_support();
         chooser_frame(
             &mut app,
@@ -22,17 +25,17 @@ async fn viewport_world_patches_hover_cancel_and_click_without_stray_sketches() 
             view,
             vec![egui::Event::PointerMoved(point)],
         );
-        assert_eq!(app.ui.sketch_entry.plane, Some(plane.plane()));
+        assert_eq!(app.doc.sketch_entry.plane, Some(plane.plane()));
         assert_eq!(
-            serde_json::to_value(&app.display.as_ref().unwrap().projection).unwrap(),
+            serde_json::to_value(&app.doc.display.as_ref().unwrap().projection).unwrap(),
             before
         );
-        assert_eq!(app.authoring_dirty, dirty);
+        assert_eq!(app.doc.authoring_dirty, dirty);
         chooser_frame(&mut app, &context, view, vec![escape()]);
-        assert!(!app.ui.sketch_entry.open);
-        assert!(app.ui.sketch_entry.plane.is_none() && !app.sketch_active());
+        assert!(!app.doc.sketch_entry.open);
+        assert!(app.doc.sketch_entry.plane.is_none() && !app.sketch_active());
         assert_eq!(
-            serde_json::to_value(&app.display.as_ref().unwrap().projection).unwrap(),
+            serde_json::to_value(&app.doc.display.as_ref().unwrap().projection).unwrap(),
             before
         );
         app.choose_sketch_support();
@@ -44,28 +47,43 @@ async fn viewport_world_patches_hover_cancel_and_click_without_stray_sketches() 
         );
         chooser_frame(&mut app, &context, view, vec![button(point, false)]);
         pump_until(&mut app, &context, &mut frame, |app| {
-            app.sketch
+            app.doc
+                .sketch
                 .session
                 .as_ref()
                 .is_some_and(|session| session.phase == SketchPhase::Active)
         })
         .await;
-        assert_eq!(app.sketch.session.as_ref().unwrap().plane, plane.plane());
-        assert_eq!(app.display.as_ref().unwrap().projection.sketches.len(), 1);
+        assert_eq!(
+            app.doc.sketch.session.as_ref().unwrap().plane,
+            plane.plane()
+        );
+        assert_eq!(
+            app.doc.display.as_ref().unwrap().projection.sketches.len(),
+            1
+        );
         app.sketch_dispatch(SketchAction::Discard);
         pump_until(&mut app, &context, &mut frame, |app| !app.sketch_active()).await;
-        assert!(app.display.as_ref().unwrap().projection.sketches.is_empty());
+        assert!(
+            app.doc
+                .display
+                .as_ref()
+                .unwrap()
+                .projection
+                .sketches
+                .is_empty()
+        );
     }
     app.stop_discard();
     pump_until(&mut app, &context, &mut frame, |app| app.may_close).await;
 }
 
 fn patch_view(app: &mut App, plane: WorldPlane) -> (ViewSnapshot, egui::Pos2) {
-    crate::sketch_entry::align_camera(&mut app.camera, plane.plane());
+    crate::sketch_entry::align_camera(&mut app.doc.camera, plane.plane());
     let view = ViewSnapshot::new(
-        app.display.as_ref().unwrap().scene.identity(),
+        app.doc.display.as_ref().unwrap().scene.identity(),
         500,
-        app.camera,
+        app.doc.camera,
         Viewport {
             width: 900.0,
             height: 560.0,
@@ -73,7 +91,7 @@ fn patch_view(app: &mut App, plane: WorldPlane) -> (ViewSnapshot, egui::Pos2) {
         },
     )
     .unwrap();
-    let extent = (app.camera.offset.length() * 0.22).clamp(1.0, 1.0e6);
+    let extent = (app.doc.camera.offset.length() * 0.22).clamp(1.0, 1.0e6);
     let point = plane
         .plane()
         .to_world(Vec2::new_unchecked(extent * 0.6, extent * 0.6));
@@ -98,7 +116,7 @@ fn chooser_frame(
         ..Default::default()
     };
     crate::input::route(app, context, &mut input);
-    let display = app.display.clone().unwrap();
+    let display = app.doc.display.clone().unwrap();
     let mut output = context.run_ui(input, |ui| {
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
         crate::sketch_entry::viewport(app, ui, rect, &response, &view, &display);

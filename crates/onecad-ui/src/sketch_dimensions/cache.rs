@@ -88,7 +88,7 @@ impl Cache {
 }
 
 pub fn cache_id() -> egui::Id {
-    egui::Id::unique("sketch-dimension-placement")
+    crate::documents::scoped_id("sketch-dimension-placement")
 }
 
 pub fn place(

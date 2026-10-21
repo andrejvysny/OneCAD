@@ -1,9 +1,10 @@
 //! Bounded admission precedes application scheduling; durable results retain their permit.
 pub(crate) use crate::event_mailbox::{BackendEvent, EventMailbox};
-use crate::{profiles::Profile, qa::QaPaths, services};
+use crate::{profiles::Profile, qa::QaPaths, service_runtime::ServiceRuntime, services};
 use onecad_app::{
     dto::DocumentProjection,
     host::{AppEvent, EventSink, HostContext, HostPaths},
+    process::ProcessServices,
     state::AppState,
 };
 use onecad_core::{document::record::OperationRecord, edit::EditCommand, ids::RecordId};
@@ -48,6 +49,12 @@ pub enum Command {
     },
     Undo,
     Redo,
+    /// Re-prepares an already-captured scene for upload, keeping its identity, so
+    /// a document switched back into the viewport is drawn without a new capture
+    /// (a new identity would reset the document's active tool and selection).
+    Prepare(Arc<SceneSnapshot>),
+    /// The steps since the last save, for the close prompt.
+    DescribeChanges,
 }
 
 #[derive(Debug)]
@@ -92,6 +99,16 @@ pub enum Message {
     },
     StartupFailed(String),
     Stopped,
+    Changes {
+        runtime_session: String,
+        changes: onecad_app::document_runtime::UnsavedChanges,
+        _permit: OwnedSemaphorePermit,
+    },
+    Prepared {
+        identity: onecad_scene::SceneIdentity,
+        result: Result<onecad_render::PreparedScene, String>,
+        _permit: OwnedSemaphorePermit,
+    },
     Accepted {
         tag: RequestTag,
         revision: u64,
@@ -133,6 +150,8 @@ pub struct Shared {
     pub recovery_flush: Notify,
     pub budget: Mutex<onecad_render::PreparationBudget>,
     pub host_budget: Arc<crate::budget::HostBudget>,
+    /// The document host's process identity, set once its actor has started.
+    pub host: std::sync::atomic::AtomicU64,
     generation: std::sync::atomic::AtomicU64,
     notify: Notify,
     pub(crate) context: egui::Context,
@@ -164,6 +183,7 @@ impl Shared {
             render_receipt: Mutex::new(None),
             budget: Mutex::new(budget),
             host_budget: Arc::new(crate::budget::HostBudget::default()),
+            host: std::sync::atomic::AtomicU64::new(0),
             valid: std::sync::atomic::AtomicBool::new(false),
             stopping: std::sync::atomic::AtomicBool::new(false),
             shutdown: Notify::new(),
@@ -251,10 +271,25 @@ pub struct Bridge {
     permits: Arc<Semaphore>,
     pub shared: Arc<Shared>,
     pub messages: mpsc::Receiver<Message>,
+    // Last field: the runtime must outlive the channels above when the bridge drops.
+    _runtime: Arc<ServiceRuntime>,
 }
 
 impl Bridge {
+    /// A bridge on its own private service runtime (isolated tests).
+    #[cfg(test)]
     pub fn start(
+        paths: QaPaths,
+        context: egui::Context,
+        budget: onecad_render::PreparationBudget,
+    ) -> Result<Self, String> {
+        Self::start_on(ServiceRuntime::start()?, paths, context, budget)
+    }
+
+    /// A bridge whose document host shares `runtime` and its process services with
+    /// every other bridge started on it.
+    pub fn start_on(
+        runtime: Arc<ServiceRuntime>,
         paths: QaPaths,
         context: egui::Context,
         budget: onecad_render::PreparationBudget,
@@ -263,30 +298,14 @@ impl Bridge {
         let (gestures, gesture_receiver) = async_mpsc::channel(crate::gesture_services::CAPACITY);
         let (sender, messages) = mpsc::channel();
         let shared = Arc::new(Shared::new(context, budget));
-        let backend_shared = shared.clone();
-        std::thread::Builder::new()
-            .name("onecad-native-services".into())
-            .spawn(move || {
-                match tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(2)
-                    .enable_all()
-                    .build()
-                {
-                    Ok(runtime) => runtime.block_on(actor(
-                        paths,
-                        backend_shared,
-                        receiver,
-                        gesture_receiver,
-                        sender,
-                    )),
-                    Err(error) => {
-                        let _ = sender.send(Message::StartupFailed(format!(
-                            "native service runtime: {error}"
-                        )));
-                    }
-                }
-            })
-            .map_err(|error| error.to_string())?;
+        runtime.spawn_actor(actor(
+            paths,
+            runtime.services().clone(),
+            shared.clone(),
+            receiver,
+            gesture_receiver,
+            sender,
+        ));
         Ok(Self {
             gestures,
             gesture_permit: Arc::new(Semaphore::new(1)),
@@ -294,6 +313,7 @@ impl Bridge {
             permits: Arc::new(Semaphore::new(ADMISSION)),
             shared,
             messages,
+            _runtime: runtime,
         })
     }
 
@@ -475,6 +495,7 @@ pub(crate) struct Backend {
 
 async fn actor(
     paths: QaPaths,
+    services: Arc<ProcessServices>,
     shared: Arc<Shared>,
     mut receiver: async_mpsc::Receiver<Envelope>,
     mut gesture_receiver: async_mpsc::Receiver<crate::gesture_services::Request>,
@@ -496,7 +517,10 @@ async fn actor(
             paths.root.join("documents"),
         )),
     };
-    let state = Arc::new(AppState::default());
+    let state = Arc::new(AppState::with_services(services));
+    shared
+        .host
+        .store(state.host_id(), std::sync::atomic::Ordering::Release);
     if let Err(error) = state.start(host.clone()) {
         let _ = sender.send(Message::StartupFailed(error.into()));
         shared.wake();
@@ -563,7 +587,7 @@ async fn actor(
                     // Keep one worker preview until completion; cancellation invalidates its delivery.
                     tokio::select! {
                         _=services::candidate(&backend,generation,candidate)=>{},
-                        _=shared.shutdown.notified()=>{backend.state.retire_all();break;}
+                        _=shared.shutdown.notified()=>{backend.state.retire_host_workers();break;}
                     }
                 }
             }
@@ -590,16 +614,12 @@ async fn actor(
         .lock()
         .ok()
         .and_then(|mut intent| intent.take());
-    let closed = if let Some(session) = discard {
-        onecad_app::api::discard_and_close_document(&backend.state, backend.host.clone(), &session)
-            .await
-    } else {
-        onecad_app::api::close_document(&backend.state, backend.host.clone()).await
-    };
+    let closed =
+        onecad_app::api::shutdown_host(&backend.state, backend.host.clone(), discard.as_deref())
+            .await;
     if let Err(error) = closed {
         eprintln!("Document close failed; recovery retained: {error}");
     }
-    backend.state.retire_all();
     let _ = sender.send(Message::Stopped);
     shared.wake();
 }
@@ -632,6 +652,8 @@ pub fn command_name(command: &Command) -> &'static str {
         Command::Apply { .. } => "Apply",
         Command::Undo => "Undo",
         Command::Redo => "Redo",
+        Command::Prepare(_) => "Prepare",
+        Command::DescribeChanges => "DescribeChanges",
     }
 }
 

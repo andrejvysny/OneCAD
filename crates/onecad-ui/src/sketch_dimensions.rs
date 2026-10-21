@@ -21,13 +21,13 @@ fn current(session: &SketchSession, rect: Rect, view: &ViewSnapshot) -> bool {
 }
 
 fn prepare_capture(app: &mut App, rect: Rect, view: &ViewSnapshot) -> bool {
-    if app.view.as_ref().map(ViewSnapshot::identity) != Some(view.identity())
+    if app.doc.view.as_ref().map(ViewSnapshot::identity) != Some(view.identity())
         || !app.viewport_ready()
-        || !app.bridge.valid()
+        || !app.doc.bridge.valid()
     {
         return false;
     }
-    let Some(session) = app.sketch.session.as_ref() else {
+    let Some(session) = app.doc.sketch.session.as_ref() else {
         return false;
     };
     if session.phase != SketchPhase::Active
@@ -36,7 +36,7 @@ fn prepare_capture(app: &mut App, rect: Rect, view: &ViewSnapshot) -> bool {
     {
         return false;
     }
-    if app.document_state.as_ref().is_some_and(|state| {
+    if app.doc.document_state.as_ref().is_some_and(|state| {
         state.runtime_session != session.document.runtime_session
             || state.revision != session.document.revision
     }) {
@@ -47,7 +47,8 @@ fn prepare_capture(app: &mut App, rect: Rect, view: &ViewSnapshot) -> bool {
         document: session.document.clone(),
         capture: view.identity(),
     });
-    app.sketch
+    app.doc
+        .sketch
         .session
         .as_ref()
         .is_some_and(|session| current(session, rect, view))
@@ -58,7 +59,7 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect, view: &ViewSnapshot) -> bool
         cancel_drag(ui.ctx());
         return false;
     }
-    let Some(session) = app.sketch.session.as_ref() else {
+    let Some(session) = app.doc.sketch.session.as_ref() else {
         return false;
     };
     let previous = ui.ctx().data_mut(|data| {
@@ -107,7 +108,7 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect, view: &ViewSnapshot) -> bool
         crate::sketch_repair::set_constraint_hover(app, ui.ctx(), Some(id));
     }
     let edit = output.edit.filter(|_| {
-        app.sketch.session.as_ref().is_some_and(|session| {
+        app.doc.sketch.session.as_ref().is_some_and(|session| {
             cache.current(session, view.identity()) && current(session, rect, view)
         })
     });
@@ -197,10 +198,10 @@ pub fn owns_pointer(app: &App, ui: &Ui) -> bool {
 }
 
 pub(crate) fn owns_position(app: &App, ui: &Ui, position: Option<egui::Pos2>) -> bool {
-    let Some(session) = app.sketch.session.as_ref() else {
+    let Some(session) = app.doc.sketch.session.as_ref() else {
         return false;
     };
-    let Some(view) = app.view.as_ref() else {
+    let Some(view) = app.doc.view.as_ref() else {
         return false;
     };
     let Some(cache) = ui
@@ -232,7 +233,7 @@ fn cancel_drag(ctx: &egui::Context) {
 }
 
 pub fn show_all(app: &App, ctx: &egui::Context) {
-    let Some(session) = app.sketch.session.as_ref() else {
+    let Some(session) = app.doc.sketch.session.as_ref() else {
         return;
     };
     ctx.data_mut(|data| {

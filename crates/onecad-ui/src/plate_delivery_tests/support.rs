@@ -11,8 +11,12 @@ impl Harness {
     pub async fn new(root: &std::path::Path) -> Self {
         let (mut app, context) = create_app(root).await;
         let mut frame = eframe::Frame::_new_kittest();
-        pump_until(&mut app, &context, &mut frame, |app| app.display.is_some()).await;
+        pump_until(&mut app, &context, &mut frame, |app| {
+            app.doc.display.is_some()
+        })
+        .await;
         let original = app
+            .doc
             .display
             .as_ref()
             .unwrap()
@@ -20,12 +24,23 @@ impl Harness {
             .runtime_session
             .clone();
         app.document_request(Request::New);
-        pump_until(&mut app, &context, &mut frame, |app| !app.documents.running).await;
+        pump_until(&mut app, &context, &mut frame, |app| {
+            !app.doc.documents.running
+        })
+        .await;
         assert_ne!(
-            app.display.as_ref().unwrap().context.runtime_session,
+            app.doc.display.as_ref().unwrap().context.runtime_session,
             original
         );
-        assert!(app.display.as_ref().unwrap().projection.features.is_empty());
+        assert!(
+            app.doc
+                .display
+                .as_ref()
+                .unwrap()
+                .projection
+                .features
+                .is_empty()
+        );
         app.new_sketch();
         let mut harness = Self {
             app,
@@ -34,7 +49,8 @@ impl Harness {
         };
         harness
             .wait(|app| {
-                app.sketch
+                app.doc
+                    .sketch
                     .session
                     .as_ref()
                     .is_some_and(|session| session.phase == SketchPhase::Active)
@@ -48,7 +64,7 @@ impl Harness {
     }
 
     pub fn capture(&mut self) -> ViewSnapshot {
-        let session = self.app.sketch.session.as_ref().unwrap();
+        let session = self.app.doc.sketch.session.as_ref().unwrap();
         let center = session.plane.to_world(Vec2::new(45.0, 25.0).unwrap());
         self.app.view_number += 1;
         let view = ViewSnapshot::new(
@@ -73,7 +89,13 @@ impl Harness {
             capture: view.identity(),
         });
         assert_eq!(
-            self.app.sketch.session.as_ref().unwrap().accepted_capture,
+            self.app
+                .doc
+                .sketch
+                .session
+                .as_ref()
+                .unwrap()
+                .accepted_capture,
             Some(view.identity())
         );
         view
@@ -83,7 +105,7 @@ impl Harness {
         self.app
             .sketch_dispatch(SketchAction::SetTool(SketchTool::Select));
         let view = self.capture();
-        let session = self.app.sketch.session.as_ref().unwrap();
+        let session = self.app.doc.sketch.session.as_ref().unwrap();
         self.app.sketch_dispatch(SketchAction::Select {
             key: session.key.clone(),
             document: session.document.clone(),
@@ -91,11 +113,14 @@ impl Harness {
             targets: targets.clone(),
             mode: SelectionMode::Replace,
         });
-        assert_eq!(self.app.sketch.session.as_ref().unwrap().selection, targets);
+        assert_eq!(
+            self.app.doc.sketch.session.as_ref().unwrap().selection,
+            targets
+        );
     }
 
     fn click(&mut self, view: &ViewSnapshot, xy: [f64; 2], ids: PrimitiveIds) {
-        let session = self.app.sketch.session.as_ref().unwrap();
+        let session = self.app.doc.sketch.session.as_ref().unwrap();
         self.app.sketch_dispatch(SketchAction::Click {
             point: CapturedSketchPoint {
                 key: session.key.clone(),
@@ -123,7 +148,7 @@ impl Harness {
             _ => created.entities[1],
         };
         self.wait(|app| {
-            app.sketch.session.as_ref().is_some_and(|session| {
+            app.doc.sketch.session.as_ref().is_some_and(|session| {
                 session.phase == SketchPhase::Active
                     && session.authoritative.contains_entity(expected)
             })
@@ -151,7 +176,7 @@ impl Harness {
             constraint_authoring::applicability(&self.app, relation).is_ok(),
             "{}: {}",
             relation.label(),
-            self.app.status
+            self.app.doc.status
         );
         constraint_authoring::activate_relation(&mut self.app, &self.context, relation);
         if let Some(value) = value {
@@ -159,7 +184,7 @@ impl Harness {
             self.modal(value);
         }
         self.wait(|app| {
-            app.sketch.session.as_ref().is_some_and(|session| {
+            app.doc.sketch.session.as_ref().is_some_and(|session| {
                 session.phase == SketchPhase::Active
                     && session.authoritative.constraints().len() == before.len() + 1
             })
@@ -200,7 +225,7 @@ impl Harness {
     }
 
     pub fn sketch(&self) -> &Sketch {
-        &self.app.sketch.session.as_ref().unwrap().authoritative
+        &self.app.doc.sketch.session.as_ref().unwrap().authoritative
     }
 
     pub async fn edit_width(&mut self, id: ConstraintId, width: &str) {
@@ -209,7 +234,7 @@ impl Harness {
         self.modal(width);
         let width: f64 = width.parse().unwrap();
         self.wait(|app| {
-            app.sketch.session.as_ref().is_some_and(|session| {
+            app.doc.sketch.session.as_ref().is_some_and(|session| {
                 session.phase == SketchPhase::Active
                     && session
                         .authoritative
@@ -222,10 +247,18 @@ impl Harness {
     }
 
     pub async fn sketch_history(&mut self, direction: HistoryDirection) {
-        let previous = self.app.sketch.session.as_ref().unwrap().document.revision;
+        let previous = self
+            .app
+            .doc
+            .sketch
+            .session
+            .as_ref()
+            .unwrap()
+            .document
+            .revision;
         self.app.sketch_dispatch(SketchAction::History(direction));
         self.wait(|app| {
-            app.sketch.session.as_ref().is_some_and(|session| {
+            app.doc.sketch.session.as_ref().is_some_and(|session| {
                 session.phase == SketchPhase::Active && session.document.revision > previous
             })
         })

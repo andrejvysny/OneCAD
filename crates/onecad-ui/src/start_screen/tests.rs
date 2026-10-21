@@ -6,7 +6,7 @@ fn home_actions_have_real_intents() {
     assert_eq!(specs[0].request, Some(Request::New));
     assert_eq!(specs.len(), 2);
     assert_eq!(specs[1].title, "Open or import");
-    assert_eq!(specs[1].subtitle, ".onecad and STEP");
+    assert_eq!(specs[1].subtitle, ".onecad and STEP · ⌘O");
     assert_eq!(specs[1].request, Some(Request::Import));
 }
 

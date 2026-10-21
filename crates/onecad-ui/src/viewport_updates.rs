@@ -155,7 +155,7 @@ pub(crate) fn apply(app: &mut App, display: &Display) -> Result<bool, String> {
     {
         apply_options(app, display)?;
     }
-    if app.sections.rejected_scene == Some(display.scene.identity()) {
+    if app.doc.sections.rejected_scene == Some(display.scene.identity()) {
         return Ok(false);
     }
     if app.renderer.scene_identity() != Some(display.scene.identity())
@@ -163,13 +163,13 @@ pub(crate) fn apply(app: &mut App, display: &Display) -> Result<bool, String> {
     {
         return Ok(false);
     }
-    if app.clear_preview {
+    if app.doc.clear_preview {
         app.renderer
             .clear_preview()
             .map_err(|error| error.to_string())?;
-        app.sections.preview.cancel();
-        app.sections.retained_preview = None;
-        app.clear_preview = false;
+        app.doc.sections.preview.cancel();
+        app.doc.sections.retained_preview = None;
+        app.doc.clear_preview = false;
     }
     if !replace_preview(app, display)? {
         return Ok(false);
@@ -180,17 +180,17 @@ pub(crate) fn apply(app: &mut App, display: &Display) -> Result<bool, String> {
 fn replace_scene(app: &mut App, display: &Display) -> Result<bool, String> {
     let section = app.renderer.options().section;
     let contours = if sectioned(section) {
-        match app.sections.committed.prepare(
+        match app.doc.sections.committed.prepare(
             committed_source(display),
             None,
             app.renderer.preparation_budget(),
             section,
-            &app.bridge.shared.host_budget,
+            &app.doc.bridge.shared.host_budget,
         ) {
-            Ok(true) => app.sections.committed.ready.take(),
+            Ok(true) => app.doc.sections.committed.ready.take(),
             Ok(false) => return Ok(false),
             Err(error) => {
-                app.status = format!("Section: {error}");
+                app.doc.status = format!("Section: {error}");
                 return Ok(false);
             }
         }
@@ -210,24 +210,24 @@ fn replace_scene(app: &mut App, display: &Display) -> Result<bool, String> {
         None => app.renderer.replace_prepared_scene(prepared),
     };
     if let Err(error) = result {
-        app.status = format!("Scene display: {error}");
-        app.sections.rejected_scene = Some(display.scene.identity());
+        app.doc.status = format!("Scene display: {error}");
+        app.doc.sections.rejected_scene = Some(display.scene.identity());
         return Ok(false);
     }
-    app.sections.committed.cancel();
-    app.sections.preview.cancel();
-    app.clear_preview = true;
-    app.topology.invalidate(display.scene.identity());
+    app.doc.sections.committed.cancel();
+    app.doc.sections.preview.cancel();
+    app.doc.clear_preview = true;
+    app.doc.topology.invalidate(display.scene.identity());
     Ok(true)
 }
 
 fn replace_preview(app: &mut App, display: &Display) -> Result<bool, String> {
-    let Some((tag, preview)) = app.pending_preview.as_ref() else {
+    let Some((tag, preview)) = app.doc.pending_preview.as_ref() else {
         return Ok(true);
     };
     if tag.context.scene != display.scene.identity() {
-        app.pending_preview = None;
-        app.sections.preview.cancel();
+        app.doc.pending_preview = None;
+        app.doc.sections.preview.cancel();
         return Ok(true);
     }
     let identity = PreviewIdentity {
@@ -236,24 +236,24 @@ fn replace_preview(app: &mut App, display: &Display) -> Result<bool, String> {
     };
     let section = app.renderer.options().section;
     let contours = if sectioned(section) {
-        match app.sections.preview.prepare(
+        match app.doc.sections.preview.prepare(
             preview.source.clone(),
             Some(identity),
             app.renderer.preparation_budget(),
             section,
-            &app.bridge.shared.host_budget,
+            &app.doc.bridge.shared.host_budget,
         ) {
-            Ok(true) => app.sections.preview.ready.take(),
+            Ok(true) => app.doc.sections.preview.ready.take(),
             Ok(false) => return Ok(false),
             Err(error) => {
-                app.status = format!("Preview section: {error}");
+                app.doc.status = format!("Preview section: {error}");
                 return Ok(false);
             }
         }
     } else {
         None
     };
-    let Some((_, preview)) = app.pending_preview.take() else {
+    let Some((_, preview)) = app.doc.pending_preview.take() else {
         return Ok(true);
     };
     let result = match contours {
@@ -267,10 +267,10 @@ fn replace_preview(app: &mut App, display: &Display) -> Result<bool, String> {
             .replace_prepared_preview(identity, preview.prepared),
     };
     match result {
-        Ok(()) => app.sections.retained_preview = Some((identity, preview.source)),
-        Err(error) => app.status = format!("Preview display: {error}"),
+        Ok(()) => app.doc.sections.retained_preview = Some((identity, preview.source)),
+        Err(error) => app.doc.status = format!("Preview display: {error}"),
     }
-    app.sections.preview.cancel();
+    app.doc.sections.preview.cancel();
     Ok(true)
 }
 
@@ -284,14 +284,15 @@ fn apply_options(app: &mut App, display: &Display) -> Result<bool, String> {
             Ok(true) => {}
             Ok(false) => return Ok(false),
             Err(error) => {
-                app.status = format!("Display: {error}");
+                app.doc.status = format!("Display: {error}");
                 app.pending_display_options = None;
-                app.sections.committed.cancel();
-                app.sections.preview.cancel();
+                app.doc.sections.committed.cancel();
+                app.doc.sections.preview.cancel();
                 return Ok(true);
             }
         }
         let contours = app
+            .doc
             .sections
             .committed
             .ready
@@ -300,7 +301,7 @@ fn apply_options(app: &mut App, display: &Display) -> Result<bool, String> {
         app.renderer.set_options_with_section_contours(
             options,
             contours,
-            app.sections.preview.ready.take(),
+            app.doc.sections.preview.ready.take(),
         )
     } else {
         app.renderer.set_options(options).or_else(|error| {
@@ -312,24 +313,24 @@ fn apply_options(app: &mut App, display: &Display) -> Result<bool, String> {
         })
     };
     app.pending_display_options = None;
-    app.sections.committed.cancel();
-    app.sections.preview.cancel();
+    app.doc.sections.committed.cancel();
+    app.doc.sections.preview.cancel();
     match result {
         Ok(()) => {
             app.resize_refusal = None;
             crate::viewport::replace_texture(app);
             if changed_section {
-                app.selected_body = None;
-                app.interaction.selection = None;
-                app.topology.select(None);
+                app.doc.selected_body = None;
+                app.doc.interaction.selection = None;
+                app.doc.topology.select(None);
             }
         }
         Err(error) => {
             if !app.renderer.has_targets() && error.recoverable_target_refusal() {
                 app.resize_refusal = Some((app.renderer.size(), error.to_string()));
-                app.view = None;
+                app.doc.view = None;
             }
-            app.status = format!("Display: {error}");
+            app.doc.status = format!("Display: {error}");
         }
     }
     Ok(true)
@@ -340,17 +341,18 @@ fn prepare_options(app: &mut App, display: &Display, section: [f32; 4]) -> Resul
         .renderer
         .preparation_budget()
         .limit_cpu_prepared_bytes(crate::budget::MAX_PREPARED_BYTES);
-    let committed = app.sections.committed.prepare(
+    let committed = app.doc.sections.committed.prepare(
         committed_source(display),
         None,
         budget,
         section,
-        &app.bridge.shared.host_budget,
+        &app.doc.bridge.shared.host_budget,
     )?;
     if !committed {
         return Ok(false);
     }
     let retained = app
+        .doc
         .sections
         .committed
         .ready
@@ -358,13 +360,13 @@ fn prepare_options(app: &mut App, display: &Display, section: [f32; 4]) -> Resul
         .map_or(0, |ready| ready.cpu_bytes());
     let budget =
         budget.limit_cpu_prepared_bytes(crate::budget::MAX_PREPARED_BYTES.saturating_sub(retained));
-    let preview = match &app.sections.retained_preview {
-        Some((identity, source)) => app.sections.preview.prepare(
+    let preview = match &app.doc.sections.retained_preview {
+        Some((identity, source)) => app.doc.sections.preview.prepare(
             source.clone(),
             Some(*identity),
             budget,
             section,
-            &app.bridge.shared.host_budget,
+            &app.doc.bridge.shared.host_budget,
         )?,
         None => true,
     };

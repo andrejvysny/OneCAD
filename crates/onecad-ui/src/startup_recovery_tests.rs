@@ -246,9 +246,36 @@ async fn entered_editor_defers_other_offers_and_recovery_save_paths_stay_isolate
         offers: vec![offer.clone()],
         busy: false,
         opened: true,
+        deferred: false,
     };
     assert!(deferred.offer(&id.to_string()).is_err());
+    assert!(
+        deferred.discardable(&id.to_string()).is_ok(),
+        "discarding replaces nothing, so an open document never blocks it"
+    );
     assert_eq!(deferred.offers.len(), 1);
+    assert!(
+        deferred.ready(),
+        "an open document's file actions are not blocked"
+    );
+    let set_aside = State {
+        checked: true,
+        offers: vec![offer.clone()],
+        deferred: true,
+        ..Default::default()
+    };
+    assert!(
+        set_aside.ready(),
+        "deferred offers never block file actions"
+    );
+    assert!(
+        !State {
+            checked: true,
+            offers: vec![offer.clone()],
+            ..Default::default()
+        }
+        .ready()
+    );
     deferred.opened = false;
     assert!(deferred.offer(&id.to_string()).is_ok());
     let orphan = RecoveryInfoDto {

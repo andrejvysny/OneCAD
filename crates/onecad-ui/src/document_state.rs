@@ -84,6 +84,7 @@ pub(crate) async fn refresh(backend: &crate::bridge::Backend) {
 impl crate::app::App {
     pub(crate) fn sync_document_state(&mut self) {
         let latest = self
+            .doc
             .bridge
             .shared
             .document_state
@@ -91,26 +92,29 @@ impl crate::app::App {
             .ok()
             .and_then(|slot| slot.latest());
         if let Some((serial, state)) = latest
-            && serial != self.document_state_serial
+            && serial != self.doc.document_state_serial
         {
-            self.document_state_serial = serial;
-            self.diagnostics
-                .runtime(&state.runtime_session, &self.status);
-            self.document_state = (!state.runtime_session.is_empty()).then_some(state);
-            self.authoring_dirty = false;
+            self.doc.document_state_serial = serial;
+            self.doc
+                .diagnostics
+                .runtime(&state.runtime_session, &self.doc.status);
+            self.doc.document_state = (!state.runtime_session.is_empty()).then_some(state);
+            self.doc.authoring_dirty = false;
         }
     }
 
     pub(crate) fn document_dirty(&self) -> bool {
-        self.authoring_dirty
+        self.doc.authoring_dirty
             || self
+                .doc
                 .document_state
                 .as_ref()
                 .is_some_and(|state| state.dirty)
     }
 
     pub(crate) fn document_open(&self) -> bool {
-        self.document_state
+        self.doc
+            .document_state
             .as_ref()
             .is_some_and(|state| !state.runtime_session.is_empty())
     }

@@ -21,6 +21,7 @@ impl Drop for Pending {
 impl App {
     pub(crate) fn cancel_sketch_candidate(&mut self, tag: &SketchTag) {
         if let Some(pending) = self
+            .doc
             .sketch_candidate
             .as_ref()
             .filter(|pending| pending.tag == *tag)
@@ -31,11 +32,12 @@ impl App {
 
     pub(crate) fn finish_sketch_candidate(&mut self, tag: Option<&SketchTag>) {
         if self
+            .doc
             .sketch_candidate
             .as_ref()
             .is_some_and(|pending| Some(&pending.tag) == tag)
         {
-            self.sketch_candidate = None;
+            self.doc.sketch_candidate = None;
         }
     }
 
@@ -47,7 +49,7 @@ impl App {
                 | SketchEffect::AddConstraints { .. }
         ) {
             let control = SketchCandidateControl::default();
-            self.sketch_candidate = Some(Pending {
+            self.doc.sketch_candidate = Some(Pending {
                 tag: effect_tag(&effect).clone(),
                 control: control.clone(),
             });
@@ -55,9 +57,9 @@ impl App {
         } else {
             Request::Effect(effect)
         };
-        let result = self.bridge.submit(Command::Sketch(Box::new(request)));
+        let result = self.doc.bridge.submit(Command::Sketch(Box::new(request)));
         if result.is_err() {
-            self.sketch_candidate = None;
+            self.doc.sketch_candidate = None;
         }
         result
     }

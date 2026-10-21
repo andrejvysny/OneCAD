@@ -84,7 +84,8 @@ async fn from_new_plate_constraints_edit_repair_history_finish_and_extrude() {
     assert_profiles(&host, &plate);
     host.app.edit_sketch(sketch_id);
     host.wait(|app| {
-        app.sketch
+        app.doc
+            .sketch
             .session
             .as_ref()
             .is_some_and(|session| session.phase == SketchPhase::Active)
@@ -93,6 +94,7 @@ async fn from_new_plate_constraints_edit_repair_history_finish_and_extrude() {
     assert_plate(&host, &plate, 90.0);
     assert!(
         host.app
+            .doc
             .sketch
             .session
             .as_ref()
@@ -110,7 +112,7 @@ async fn from_new_plate_constraints_edit_repair_history_finish_and_extrude() {
     assert_stale_brep_reads_refused(&host).await;
     downstream_width_edits(&mut host, &plate).await;
     assert!(host.app.document_dirty());
-    assert!(host.app.document_state.as_ref().unwrap().path.is_none());
+    assert!(host.app.doc.document_state.as_ref().unwrap().path.is_none());
     eprintln!(
         "AUTOMATED ONLY: From-New constrained plate, width edit, repair, history, Finish, re-entry, Extrude, downstream width regeneration. Physical input, Save dialog, clean Quit and fresh reopen remain unqualified."
     );
@@ -130,7 +132,7 @@ async fn create_plate(host: &mut Harness) -> Plate {
         .await;
     host.select(vec![]);
     crate::sketch_repair::toggle_construction(&mut host.app);
-    assert!(host.app.sketch.session.as_ref().unwrap().construction);
+    assert!(host.app.doc.sketch.session.as_ref().unwrap().construction);
     let centerline = host
         .primitive(SketchTool::Line, [0.0, 25.0], [80.0, 25.0])
         .await;
@@ -230,13 +232,13 @@ async fn remove_and_repair(host: &mut Harness, plate: &Plate) {
     let id = plate.diameters[1];
     crate::sketch_repair::remove_constraint(&mut host.app, id);
     host.wait(|app| {
-        app.sketch.session.as_ref().is_some_and(|session| {
+        app.doc.sketch.session.as_ref().is_some_and(|session| {
             session.phase == SketchPhase::Active && !session.authoritative.contains_constraint(id)
         })
     })
     .await;
     assert_eq!(
-        crate::sketch_feedback::summary(&host.app.sketch.session.as_ref().unwrap().status)
+        crate::sketch_feedback::summary(&host.app.doc.sketch.session.as_ref().unwrap().status)
             .assessment,
         crate::sketch_feedback::Assessment::UnderConstrained
     );
@@ -244,6 +246,7 @@ async fn remove_and_repair(host: &mut Harness, plate: &Plate) {
     assert_plate(host, plate, 90.0);
     assert!(
         host.app
+            .doc
             .sketch
             .session
             .as_ref()
@@ -255,7 +258,8 @@ async fn remove_and_repair(host: &mut Harness, plate: &Plate) {
 }
 
 async fn extrude(host: &mut Harness) {
-    let SketchStatus::Finished { result, .. } = &host.app.sketch.session.as_ref().unwrap().status
+    let SketchStatus::Finished { result, .. } =
+        &host.app.doc.sketch.session.as_ref().unwrap().status
     else {
         panic!("Finish result")
     };
@@ -265,13 +269,13 @@ async fn extrude(host: &mut Harness) {
         .find(|region| region.holes.len() == 2)
         .unwrap()
         .region_id;
-    let display = host.app.display.as_ref().unwrap();
+    let display = host.app.doc.display.as_ref().unwrap();
     let profile = display
         .profiles
         .iter()
         .find(|profile| profile.reference.region.to_string() == *material_region)
         .unwrap();
-    let context = host.app.interaction.context.clone().unwrap();
+    let context = host.app.doc.interaction.context.clone().unwrap();
     let view = ViewSnapshot::new(
         context.scene,
         host.app.view_number + 1,
@@ -314,7 +318,7 @@ async fn extrude(host: &mut Harness) {
     });
     host.app.dispatch(Action::DraftChanged("4".into()));
     host.wait(|app| {
-        app.interaction.tool.as_ref().is_some_and(|tool| {
+        app.doc.interaction.tool.as_ref().is_some_and(|tool| {
             matches!(&tool.draft_status, DraftStatus::Valid(value) if value.value == 4.0)
                 && tool.preview == PreviewStatus::Ready
         })
@@ -323,7 +327,7 @@ async fn extrude(host: &mut Harness) {
     host.app.dispatch(Action::Confirm);
     host.wait(|app| {
         matches!(
-            &app.interaction.status,
+            &app.doc.interaction.status,
             CommitStatus::Completed {
                 outcome: FeatureOutcome::Published,
                 ..
@@ -331,7 +335,7 @@ async fn extrude(host: &mut Harness) {
         )
     })
     .await;
-    let display = host.app.display.as_ref().unwrap();
+    let display = host.app.doc.display.as_ref().unwrap();
     assert_mesh_bounds(&host.app, 90.0);
     assert_eq!(display.scene.bodies().len(), 1);
     let operation = display
@@ -347,14 +351,16 @@ async fn extrude(host: &mut Harness) {
 async fn model_history(host: &mut Harness) {
     crate::input::submit_history(&mut host.app, Command::Undo);
     host.wait(|app| {
-        app.display
+        app.doc
+            .display
             .as_ref()
             .is_some_and(|display| display.scene.bodies().is_empty())
     })
     .await;
     crate::input::submit_history(&mut host.app, Command::Redo);
     host.wait(|app| {
-        app.display
+        app.doc
+            .display
             .as_ref()
             .is_some_and(|display| display.scene.bodies().len() == 1)
     })
@@ -364,7 +370,7 @@ async fn model_history(host: &mut Harness) {
 
 async fn downstream_width_edits(host: &mut Harness, plate: &Plate) {
     let sketch_id = host.sketch().id;
-    let display = host.app.display.as_ref().unwrap();
+    let display = host.app.doc.display.as_ref().unwrap();
     let body_id = display.scene.bodies()[0].body_id();
     let feature_ids: Vec<_> = display
         .projection
@@ -381,7 +387,8 @@ async fn downstream_width_edits(host: &mut Harness, plate: &Plate) {
     for (text, width) in [("80", 80.0), ("90", 90.0)] {
         host.app.edit_sketch(sketch_id);
         host.wait(|app| {
-            app.sketch
+            app.doc
+                .sketch
                 .session
                 .as_ref()
                 .is_some_and(|session| session.phase == SketchPhase::Active)
@@ -393,7 +400,7 @@ async fn downstream_width_edits(host: &mut Harness, plate: &Plate) {
         assert_finished_profile(host, plate);
         assert_mesh_bounds(&host.app, width);
         assert_brep(host, width).await;
-        let display = host.app.display.as_ref().unwrap();
+        let display = host.app.doc.display.as_ref().unwrap();
         assert_eq!(display.scene.bodies()[0].body_id(), body_id);
         assert_eq!(
             display

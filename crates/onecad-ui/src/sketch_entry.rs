@@ -52,27 +52,28 @@ impl Entry {
 impl App {
     pub fn choose_sketch_support(&mut self) {
         if self.viewport_ready() && !self.busy() && !self.sketch_active() {
-            self.ui.sketch_entry.open = true;
-            self.ui.sketch_entry.context = self.interaction.context.clone();
+            self.doc.sketch_entry.open = true;
+            self.doc.sketch_entry.context = self.doc.interaction.context.clone();
             // A face selected beforehand already names the support; skip the chooser.
             if let Some((body, identity)) = self
+                .doc
                 .display
                 .as_ref()
-                .and_then(|display| self.topology.selected_face(display.scene.identity()))
+                .and_then(|display| self.doc.topology.selected_face(display.scene.identity()))
             {
-                self.ui.sketch_entry.plane = None;
-                self.ui.sketch_entry.candidate = None;
+                self.doc.sketch_entry.plane = None;
+                self.doc.sketch_entry.candidate = None;
                 self.new_sketch_on_face(body, identity);
             }
         }
     }
 
     fn new_sketch_on_face(&mut self, body: onecad_core::ids::BodyId, identity: String) {
-        let Some(context) = self.interaction.context.clone() else {
+        let Some(context) = self.doc.interaction.context.clone() else {
             return;
         };
         let control = SketchCandidateControl::default();
-        self.ui.sketch_entry.pending = Some(control.clone());
+        self.doc.sketch_entry.pending = Some(control.clone());
         self.submit(Command::Sketch(Box::new(Request::FaceEntry {
             id: SketchId::new(),
             context,
@@ -91,14 +92,14 @@ pub(crate) fn viewport(
     view: &onecad_scene::ViewSnapshot,
     display: &crate::bridge::Display,
 ) -> bool {
-    if !app.ui.sketch_entry.open {
+    if !app.doc.sketch_entry.open {
         return false;
     }
-    if app.ui.sketch_entry.pending.is_some() {
+    if app.doc.sketch_entry.pending.is_some() {
         return true;
     }
     let candidate = pointer_candidate(app, ui, rect, response, view, display);
-    let entry = &mut app.ui.sketch_entry;
+    let entry = &mut app.doc.sketch_entry;
     app.draw_dirty |= update_candidate(entry, candidate, view.identity());
     let previous_plane = entry.plane;
     poll_preview(entry, view.identity());
@@ -141,11 +142,11 @@ fn pointer_candidate(
     {
         candidate =
             picking::candidate_at(ui.painter(), rect, view, display, Some(logical(point)), app);
-        app.ui.sketch_entry.accept = candidate
+        app.doc.sketch_entry.accept = candidate
             .clone()
             .map(|candidate| (candidate, view.identity()));
     }
-    retain_clicked(&mut app.ui.sketch_entry, candidate, view.identity())
+    retain_clicked(&mut app.doc.sketch_entry, candidate, view.identity())
 }
 
 fn retain_clicked(
@@ -191,10 +192,10 @@ fn update_candidate(
 }
 
 fn admit_clicked(app: &mut App) {
-    if app.ui.sketch_entry.accept.is_none() || app.busy() {
+    if app.doc.sketch_entry.accept.is_none() || app.busy() {
         return;
     }
-    let entry = &mut app.ui.sketch_entry;
+    let entry = &mut app.doc.sketch_entry;
     match entry.candidate.clone() {
         Some(Candidate::Named(plane)) => {
             entry.open = false;
@@ -232,7 +233,7 @@ fn poll_preview(entry: &mut Entry, capture: CaptureIdentity) {
 }
 
 fn start_preview(app: &mut App, capture: CaptureIdentity) {
-    let entry = &mut app.ui.sketch_entry;
+    let entry = &mut app.doc.sketch_entry;
     if entry.query.is_some() || entry.plane.is_some() || entry.message.is_some() {
         return;
     }
@@ -249,7 +250,7 @@ fn start_preview(app: &mut App, capture: CaptureIdentity) {
         identity: identity.clone(),
         sender,
     };
-    match app.bridge.submit(Command::Sketch(Box::new(request))) {
+    match app.doc.bridge.submit(Command::Sketch(Box::new(request))) {
         Ok(()) => {
             entry.query = Some(Preview {
                 candidate: Candidate::Face(body, identity),
@@ -262,19 +263,19 @@ fn start_preview(app: &mut App, capture: CaptureIdentity) {
 }
 
 pub fn show(app: &mut App, ctx: &egui::Context) {
-    if !app.ui.sketch_entry.open {
+    if !app.doc.sketch_entry.open {
         return;
     }
-    if app.ui.sketch_entry.pending.is_some() && !app.busy() {
-        app.ui.sketch_entry.pending = None;
-        app.ui.sketch_entry.open = false;
+    if app.doc.sketch_entry.pending.is_some() && !app.busy() {
+        app.doc.sketch_entry.pending = None;
+        app.doc.sketch_entry.open = false;
         return;
     }
-    if app.ui.sketch_entry.context != app.interaction.context {
-        app.ui.sketch_entry.dismiss();
+    if app.doc.sketch_entry.context != app.doc.interaction.context {
+        app.doc.sketch_entry.dismiss();
         return;
     }
-    if app.ui.sketch_entry.pending.is_some() && app.ui.sketch_entry.message.is_none() {
+    if app.doc.sketch_entry.pending.is_some() && app.doc.sketch_entry.message.is_none() {
         return;
     }
     egui::Area::new(egui::Id::unique("sketch-support"))
@@ -283,7 +284,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.horizontal(|ui| instruction_row(app, ui));
-                if let Some(message) = &app.ui.sketch_entry.message {
+                if let Some(message) = &app.doc.sketch_entry.message {
                     ui.small(message);
                 }
             });
@@ -291,7 +292,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
 }
 
 fn instruction_row(app: &mut App, ui: &mut egui::Ui) {
-    let entry = &app.ui.sketch_entry;
+    let entry = &app.doc.sketch_entry;
     ui.label(if entry.pending.is_some() {
         "Opening sketch…"
     } else if entry.query.is_some() {
@@ -299,17 +300,18 @@ fn instruction_row(app: &mut App, ui: &mut egui::Ui) {
     } else {
         "Choose XY, XZ, YZ or a planar face"
     });
-    if app.ui.sketch_entry.pending.is_none()
+    if app.doc.sketch_entry.pending.is_none()
         && let Some((body, identity)) = app
+            .doc
             .display
             .as_ref()
-            .and_then(|display| app.topology.selected_face(display.scene.identity()))
+            .and_then(|display| app.doc.topology.selected_face(display.scene.identity()))
         && ui.small_button("Selected face").clicked()
     {
         app.new_sketch_on_face(body, identity);
     }
     if ui.button("Cancel").clicked() {
-        app.ui.sketch_entry.dismiss();
+        app.doc.sketch_entry.dismiss();
     }
 }
 

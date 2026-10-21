@@ -36,11 +36,18 @@ async fn point_tab_before_pointer_signed_zero_and_repeated_construction_clicks()
     host.redraw();
     host.control("Point");
     assert_eq!(
-        host.app.sketch.session.as_ref().unwrap().tool,
+        host.app.doc.sketch.session.as_ref().unwrap().tool,
         SketchTool::Point
     );
     assert!(
-        host.app.sketch.session.as_ref().unwrap().draft.is_none(),
+        host.app
+            .doc
+            .sketch
+            .session
+            .as_ref()
+            .unwrap()
+            .draft
+            .is_none(),
         "Tab must work before a viewport pointer"
     );
     host.numeric("-12.5", "0");
@@ -61,12 +68,12 @@ async fn point_tab_before_pointer_signed_zero_and_repeated_construction_clicks()
         );
     }
     assert_eq!(
-        host.app.sketch.session.as_ref().unwrap().tool,
+        host.app.doc.sketch.session.as_ref().unwrap().tool,
         SketchTool::Point
     );
     host.control("Inspector");
     host.control("Construction geometry");
-    assert!(host.app.sketch.session.as_ref().unwrap().construction);
+    assert!(host.app.doc.sketch.session.as_ref().unwrap().construction);
     host.xy(50.0, 35.0);
     host.count(5).await;
     let accepted = host.sketch().clone();
@@ -172,7 +179,7 @@ async fn rectangle_method_chooser_center_numeric_full_dimensions_and_history() {
     let mut host = Host::new(area.path()).await;
     host.control("Rectangle");
     assert_eq!(
-        host.app.sketch.session.as_ref().unwrap().tool,
+        host.app.doc.sketch.session.as_ref().unwrap().tool,
         SketchTool::Rectangle
     );
     host.app.ui.inspector_open = true;
@@ -196,7 +203,7 @@ async fn rectangle_method_chooser_center_numeric_full_dimensions_and_history() {
     ] {
         host.control(from);
         host.control(to);
-        assert_eq!(host.app.sketch.session.as_ref().unwrap().tool, tool);
+        assert_eq!(host.app.doc.sketch.session.as_ref().unwrap().tool, tool);
     }
     host.xy(0.0, 0.0);
     host.numeric("80", "50");
@@ -338,7 +345,7 @@ async fn numeric_modal_refuses_enter_and_reopen_after_viewport_failure() {
     assert!(crate::sketch_numeric::editor_open(&host.context));
     host.replace("-1");
     let accepted = host.sketch().clone();
-    let session = host.app.sketch.session.as_ref().unwrap();
+    let session = host.app.doc.sketch.session.as_ref().unwrap();
     let history = session.history.clone();
     let revision = session.document.revision;
     host.app
@@ -350,7 +357,7 @@ async fn numeric_modal_refuses_enter_and_reopen_after_viewport_failure() {
     }
     host.ui(vec![key(egui::Key::Tab, egui::Modifiers::NONE)]);
     assert!(!crate::sketch_numeric::editor_open(&host.context));
-    let session = host.app.sketch.session.as_ref().unwrap();
+    let session = host.app.doc.sketch.session.as_ref().unwrap();
     assert_eq!(&session.authoritative, &accepted);
     assert_eq!(session.history, history);
     assert_eq!(session.document.revision, revision);

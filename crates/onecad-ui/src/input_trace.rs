@@ -140,46 +140,50 @@ fn display_identity(display: &Display) -> Value {
 }
 
 pub(crate) fn app(app: &App, kind: &'static str, detail: Value) {
-    let trace = &app.bridge.shared.input_trace;
+    let trace = &app.doc.bridge.shared.input_trace;
     let Some(state) = &trace.state else {
         return;
     };
     let mut context = app
+        .doc
         .display
         .as_ref()
         .map_or(Value::Null, |display| display_identity(display));
     if let Value::Object(fields) = &mut context {
         fields.insert(
             "view".into(),
-            app.view
+            app.doc
+                .view
                 .map(|view| json!(view.identity().view))
                 .unwrap_or(Value::Null),
         );
         fields.insert(
             "view_scene".into(),
-            app.view
+            app.doc
+                .view
                 .map(|view| json!(view.identity().scene.scene))
                 .unwrap_or(Value::Null),
         );
         fields.insert(
             "view_scene_session".into(),
-            app.view
+            app.doc
+                .view
                 .map(|view| json!(view.identity().scene.session))
                 .unwrap_or(Value::Null),
         );
         fields.insert("pointer_owner".into(), json!(pointer_owner(app)));
-        if let Some(tool) = &app.interaction.tool {
+        if let Some(tool) = &app.doc.interaction.tool {
             fields.insert("model_gesture".into(), json!(tool.tag.gesture));
             fields.insert("model_sequence".into(), json!(tool.tag.sequence));
             fields.insert("model_phase".into(), json!(format!("{:?}", tool.phase)));
         }
-        if let Some(session) = &app.sketch.session {
+        if let Some(session) = &app.doc.sketch.session {
             fields.insert("sketch".into(), json!(session.key.sketch_id.to_string()));
             fields.insert("sketch_generation".into(), json!(session.key.generation));
             fields.insert("sketch_phase".into(), json!(format!("{:?}", session.phase)));
             fields.insert(
                 "gesture_phase".into(),
-                json!(format!("{:?}", app.sketch_gesture.phase())),
+                json!(format!("{:?}", app.doc.sketch_gesture.phase())),
             );
         }
     }
@@ -190,20 +194,21 @@ pub(crate) fn app(app: &App, kind: &'static str, detail: Value) {
 }
 
 fn pointer_owner(app: &App) -> &'static str {
-    let context = &app.bridge.shared.context;
+    let context = &app.doc.bridge.shared.context;
     if crate::input::overlay_owns_keyboard(app, context) {
         "overlay"
     } else if context.text_edit_focused() {
         "text_editor"
-    } else if app.transform_gizmo.gizmo.active() {
+    } else if app.doc.transform_gizmo.gizmo.active() {
         "transform_gizmo"
-    } else if app.extrude_handle.active() {
+    } else if app.doc.extrude_handle.active() {
         "extrude_handle"
-    } else if app.sketch_gesture.busy() {
+    } else if app.doc.sketch_gesture.busy() {
         "sketch_drag"
-    } else if app.armed_sketch_gesture.is_some() {
+    } else if app.doc.armed_sketch_gesture.is_some() {
         "sketch_armed"
     } else if app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -220,7 +225,7 @@ fn pointer_owner(app: &App) -> &'static str {
 }
 
 pub(crate) fn input(app: &App, ctx: &egui::Context, raw: &egui::RawInput) {
-    if !app.bridge.shared.input_trace.enabled() {
+    if !app.doc.bridge.shared.input_trace.enabled() {
         return;
     }
     self::app(
@@ -232,13 +237,13 @@ pub(crate) fn input(app: &App, ctx: &egui::Context, raw: &egui::RawInput) {
         "text_focus": ctx.text_edit_focused()}),
     );
     for (index, event) in raw.events.iter().take(MAX_EVENTS_PER_BATCH).enumerate() {
-        app.bridge.shared.input_trace.record(
+        app.doc.bridge.shared.input_trace.record(
             "input.event",
             json!({"index": index, "event": event_detail(event)}),
         );
     }
     if raw.events.len() > MAX_EVENTS_PER_BATCH {
-        app.bridge.shared.input_trace.record(
+        app.doc.bridge.shared.input_trace.record(
             "input.omitted",
             json!({"count": raw.events.len() - MAX_EVENTS_PER_BATCH}),
         );

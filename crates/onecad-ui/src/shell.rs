@@ -7,10 +7,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     crate::sketch_repair::set_constraint_hover(app, &ctx, None);
     if !crate::input::overlay_owns_keyboard(app, &ctx) {
-        crate::ui_state::shortcuts(&mut app.ui, &ctx);
+        crate::ui_state::shortcuts(&mut app.ui, app.doc.sketch_entry.open, &ctx);
     }
     let chrome = layout::chrome(ctx.content_rect(), &app.ui);
     let chrome = if app
+        .doc
         .interaction
         .tool
         .as_ref()
@@ -22,8 +23,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         chrome
     };
     bars::title(app, ui);
-    app.diagnostics.observe(&app.status);
-    app.diagnostics.show(&ctx);
+    app.doc.diagnostics.observe(&app.doc.status);
+    app.doc.diagnostics.show(&ctx);
     crate::document_items::show(app, &ctx);
     if app.ui.start_open {
         return;
@@ -40,7 +41,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     overlays::nav_pill(app, &ctx, &chrome);
     overlays::view_cluster(app, &ctx, &chrome);
     crate::sketch_numeric::show(app, &ctx);
-    app.diagnostics.observe(&app.status);
+    app.doc.diagnostics.observe(&app.doc.status);
 }
 
 pub fn close_prompt(app: &mut App, ctx: &egui::Context) {

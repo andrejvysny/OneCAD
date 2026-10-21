@@ -13,10 +13,10 @@ pub(super) enum Owner {
     Placement,
 }
 
-pub(super) fn owner(ui: &UiState, document: bool, popup: bool) -> Option<Owner> {
+pub(super) fn owner(ui: &UiState, entry_open: bool, document: bool, popup: bool) -> Option<Owner> {
     if document {
         Some(Owner::Document)
-    } else if ui.sketch_entry.open {
+    } else if entry_open {
         Some(Owner::SketchEntry)
     } else if popup {
         Some(Owner::Popup)
@@ -35,11 +35,24 @@ pub(super) fn owner(ui: &UiState, document: bool, popup: bool) -> Option<Owner> 
     }
 }
 
-pub(super) fn navigation_blocked(ui: &UiState, document: bool, popup: bool) -> bool {
-    document || popup || owner(ui, false, false).is_some_and(|owner| owner != Owner::SketchEntry)
+pub(super) fn navigation_blocked(
+    ui: &UiState,
+    entry_open: bool,
+    document: bool,
+    popup: bool,
+) -> bool {
+    document
+        || popup
+        || owner(ui, entry_open, false, false).is_some_and(|owner| owner != Owner::SketchEntry)
 }
 
-pub(super) fn dismiss(ui: &mut UiState, owner: Owner, raw: &mut egui::RawInput, text: bool) {
+pub(super) fn dismiss(
+    ui: &mut UiState,
+    entry: &mut crate::sketch_entry::Entry,
+    owner: Owner,
+    raw: &mut egui::RawInput,
+    text: bool,
+) {
     if !raw.focused || text || matches!(owner, Owner::Document | Owner::Popup) {
         return;
     }
@@ -64,7 +77,7 @@ pub(super) fn dismiss(ui: &mut UiState, owner: Owner, raw: &mut egui::RawInput, 
         return;
     }
     match owner {
-        Owner::SketchEntry => ui.sketch_entry.dismiss(),
+        Owner::SketchEntry => entry.dismiss(),
         Owner::Customize => ui.shell_facade.customize_open = false,
         Owner::Layers => ui.shell_facade.layers_open = false,
         Owner::Extensions => ui.editor_facade.popover_open = false,

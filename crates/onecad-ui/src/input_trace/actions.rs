@@ -137,6 +137,8 @@ pub(crate) fn message(message: &crate::bridge::Message) -> Value {
             json!({"type": "StartupFailed", "error": bounded_id(error)})
         }
         Message::Stopped => json!({"type": "Stopped"}),
+        Message::Prepared { result, .. } => json!({"type": "Prepared", "ok": result.is_ok()}),
+        Message::Changes { changes, .. } => json!({"type": "Changes", "count": changes.count}),
         Message::Accepted { revision, tag, .. } => {
             json!({"type": "Accepted", "revision": revision, "gesture": tag.gesture, "sequence": tag.sequence, "runtime_session": bounded_id(&tag.context.runtime_session)})
         }

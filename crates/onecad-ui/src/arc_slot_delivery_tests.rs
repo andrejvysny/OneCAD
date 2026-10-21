@@ -31,7 +31,7 @@ async fn numeric_center_and_three_point_arcs_preview_history_and_refusal() {
     assert_eq!(host.sketch(), &accepted);
     host.ui(vec![key(egui::Key::A, egui::Modifiers::SHIFT)]);
     assert_eq!(
-        host.app.sketch.session.as_ref().unwrap().tool,
+        host.app.doc.sketch.session.as_ref().unwrap().tool,
         SketchTool::ThreePointArc
     );
     host.xy(5.0, 0.0);
@@ -43,6 +43,7 @@ async fn numeric_center_and_three_point_arcs_preview_history_and_refusal() {
     pointer(&mut host, 15.0, 8.0);
     let draft = host
         .app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -87,7 +88,7 @@ async fn numeric_slot_full_width_expression_construction_and_local_history() {
                 if (value.value - 6.0).abs() < 1e-5 && value.expr.is_some()
             ))
     );
-    assert_eq!(host.app.display.as_ref().unwrap().profiles.len(), 1);
+    assert_eq!(host.app.doc.display.as_ref().unwrap().profiles.len(), 1);
     let accepted = host.sketch().clone();
     host.history(false, 0).await;
     host.history(true, 10).await;
@@ -107,7 +108,7 @@ async fn numeric_slot_full_width_expression_construction_and_local_history() {
             .filter(|entity| !accepted.contains_entity(entity.id()))
             .all(SketchEntity::is_construction)
     );
-    assert_eq!(host.app.display.as_ref().unwrap().profiles.len(), 1);
+    assert_eq!(host.app.doc.display.as_ref().unwrap().profiles.len(), 1);
     host.stop().await;
 }
 
@@ -131,6 +132,7 @@ async fn tangent_arc_clockwise_counterclockwise_native_hv_snap_roles() {
         host.count(count + 2).await;
         let curve = host
             .app
+            .doc
             .sketch
             .session
             .as_ref()
@@ -186,7 +188,15 @@ async fn tangent_chain_keyboard_drag_seed_cancel_and_numeric_radius() {
         .id();
     let end = endpoint(host.sketch(), line, CurvePosition::End);
     host.xy(end.x, end.y);
-    assert!(host.app.sketch.session.as_ref().unwrap().can_tangent_arc());
+    assert!(
+        host.app
+            .doc
+            .sketch
+            .session
+            .as_ref()
+            .unwrap()
+            .can_tangent_arc()
+    );
     let to = host.project(end.x + 10.0, end.y + 10.0);
     let from = host.project(end.x, end.y);
     host.ui(vec![egui::Event::PointerMoved(from), button(from, true)]);
@@ -218,6 +228,7 @@ async fn tangent_chain_drag_release_once_and_accepted_closure_profile() {
     host.count(3).await;
     let anchor = host
         .app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -239,6 +250,7 @@ async fn tangent_chain_drag_release_once_and_accepted_closure_profile() {
     assert!(!tangent_mode(&host));
     let end = host
         .app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -252,6 +264,7 @@ async fn tangent_chain_drag_release_once_and_accepted_closure_profile() {
     host.app.ui.sketch_snap = true;
     let draft = host
         .app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -264,13 +277,22 @@ async fn tangent_chain_drag_release_once_and_accepted_closure_profile() {
     host.ui(vec![key(egui::Key::A, egui::Modifiers::NONE)]);
     host.xy(first.x, first.y);
     host.count(10).await;
-    assert!(host.app.sketch.session.as_ref().unwrap().draft.is_none());
+    assert!(
+        host.app
+            .doc
+            .sketch
+            .session
+            .as_ref()
+            .unwrap()
+            .draft
+            .is_none()
+    );
     assert_eq!(undo_depth(&host), depth + 3);
     let arc = latest_arc(host.sketch());
     assert_eq!(host.sketch().constraints().iter().filter(|constraint| matches!(constraint,
         Constraint::Coincident { point1, point1_position: CurvePosition::End, point2, point2_position: CurvePosition::Arbitrary, .. }
         if *point1 == arc && *point2 == first_id)).count(), 1);
-    assert_eq!(host.app.display.as_ref().unwrap().profiles.len(), 1);
+    assert_eq!(host.app.doc.display.as_ref().unwrap().profiles.len(), 1);
     host.stop().await;
     batched_drag_release(&area.path().join("batched-release"), false).await;
     batched_drag_release(&area.path().join("single-frame"), true).await;

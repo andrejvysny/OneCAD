@@ -57,7 +57,7 @@ async fn prepared_arc(root: &std::path::Path) -> (Host, ArcIds) {
             .unwrap(),
         )
         .unwrap();
-    let context = host.app.interaction.context.clone().unwrap();
+    let context = host.app.doc.interaction.context.clone().unwrap();
     host.app.sketch_dispatch(SketchAction::Begin {
         sketch: Box::new(sketch),
         create: true,
@@ -99,7 +99,7 @@ async fn prepared_arc_center_drag_translates_circle_and_preserves_local_history(
         Some([0.0, std::f64::consts::FRAC_PI_2]),
     );
     assert_eq!(undo_depth(&host), depth + 1);
-    assert_eq!(host.app.sketch_gesture.moved(), Some(true));
+    assert_eq!(host.app.doc.sketch_gesture.moved(), Some(true));
     let translated = host.sketch().clone();
     history(&mut host, false, &before).await;
     history(&mut host, true, &translated).await;
@@ -206,12 +206,12 @@ fn begin_drag(
     host.ui(vec![egui::Event::PointerMoved(start), button(start, true)]);
     host.ui(vec![egui::Event::PointerMoved(end)]);
     assert!(
-        host.app.sketch_gesture.busy(),
+        host.app.doc.sketch_gesture.busy(),
         "gesture did not start: {} / {:?}",
-        host.app.status,
-        host.app.sketch_gesture.error()
+        host.app.doc.status,
+        host.app.doc.sketch_gesture.error()
     );
-    let intent = host.app.sketch_gesture.intent().unwrap();
+    let intent = host.app.doc.sketch_gesture.intent().unwrap();
     assert_eq!(intent.kind, kind);
     assert_eq!(intent.role, role);
     if let Some(role) = role {
@@ -230,7 +230,7 @@ fn drag(
 ) {
     begin_drag(host, from, to, kind, role);
     assert_eq!(
-        host.app.sketch_gesture.phase(),
+        host.app.doc.sketch_gesture.phase(),
         Some(GesturePhase::PendingBegin),
         "this early release intentionally precedes worker readiness"
     );
@@ -239,20 +239,21 @@ fn drag(
 
 async fn settled(host: &mut Host) {
     pump_until(&mut host.app, &host.context, &mut host.frame, |app| {
-        !app.sketch_gesture.busy() && active(app) && app.bridge.valid()
+        !app.doc.sketch_gesture.busy() && active(app) && app.doc.bridge.valid()
     })
     .await;
     assert!(
-        host.app.sketch_gesture.error().is_none(),
+        host.app.doc.sketch_gesture.error().is_none(),
         "{} / {:?}",
-        host.app.status,
-        host.app.sketch_gesture.error()
+        host.app.doc.status,
+        host.app.doc.sketch_gesture.error()
     );
     host.redraw();
 }
 
 fn undo_depth(host: &Host) -> usize {
     host.app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -277,6 +278,7 @@ async fn history(host: &mut Host, redo: bool, expected: &Sketch) {
     pump_until(&mut host.app, &host.context, &mut host.frame, |app| {
         active(app)
             && app
+                .doc
                 .sketch
                 .session
                 .as_ref()

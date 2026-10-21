@@ -132,7 +132,7 @@ fn tree(app: &mut App, ui: &mut Ui) {
             .placeholder("Filter")
             .width(width),
     );
-    let Some(display) = app.display.clone() else {
+    let Some(display) = app.doc.display.clone() else {
         ui.label("Opening document…");
         return;
     };
@@ -167,12 +167,12 @@ fn body_row(app: &mut App, ui: &mut Ui, id_text: &str, name: &str) {
     let id = id_text.parse().ok();
     let state = if app.sketch_active() {
         RowState::Reference
-    } else if id.is_some() && id == app.selected_body {
+    } else if id.is_some() && id == app.doc.selected_body {
         RowState::Selected
     } else {
         RowState::Normal
     };
-    let enabled = app.viewport_ready() && app.bridge.valid() && !app.busy();
+    let enabled = app.viewport_ready() && app.doc.bridge.valid() && !app.busy();
     let row = TreeRow::new("body", name).state(state).enabled(enabled);
     let response = ui.add(row);
     if response.clicked() || response.secondary_clicked() {
@@ -192,20 +192,21 @@ fn body_row(app: &mut App, ui: &mut Ui, id_text: &str, name: &str) {
 
 fn sketch_row(app: &mut App, ui: &mut Ui, sketch: &onecad_app::dto::SketchDto) {
     let editing = app
+        .doc
         .sketch
         .session
         .as_ref()
         .is_some_and(|s| s.authoritative.id.to_string() == sketch.id)
         && app.sketch_active();
     let can_edit =
-        app.viewport_ready() && app.bridge.valid() && !app.busy() && !app.sketch_active();
+        app.viewport_ready() && app.doc.bridge.valid() && !app.busy() && !app.sketch_active();
     let meta = sketch.dof.map(|dof| format!("{dof} DOF"));
     let row = TreeRow::new("sketch", &sketch.name)
         .meta(meta.as_deref())
         .state(if editing {
             RowState::Editing
         } else if app
-            .ui
+            .doc
             .selected_sketch
             .is_some_and(|id| id.to_string() == sketch.id)
         {
@@ -259,7 +260,7 @@ fn delete_menu(app: &mut App, ui: &mut Ui, target: onecad_app::api::DeleteTarget
 /// Counts from the live sketch session; no extra queries.
 fn sketch_children(app: &App, ui: &mut Ui) {
     use onecad_core::sketch::SketchEntity;
-    let Some(session) = app.sketch.session.as_ref() else {
+    let Some(session) = app.doc.sketch.session.as_ref() else {
         return;
     };
     let (mut lines, mut circles, mut arcs) = (0usize, 0usize, 0usize);
@@ -287,11 +288,12 @@ fn sketch_children(app: &App, ui: &mut Ui) {
 }
 
 pub(crate) fn selected_sketch_edit_button(app: &mut App, ui: &mut Ui) {
-    if app.sketch_active() || app.interaction.tool.is_some() {
+    if app.sketch_active() || app.doc.interaction.tool.is_some() {
         return;
     }
-    let Some(sketch) = app.ui.selected_sketch.and_then(|id| {
-        app.display
+    let Some(sketch) = app.doc.selected_sketch.and_then(|id| {
+        app.doc
+            .display
             .as_ref()?
             .projection
             .sketches
@@ -301,7 +303,7 @@ pub(crate) fn selected_sketch_edit_button(app: &mut App, ui: &mut Ui) {
     }) else {
         return;
     };
-    let can_edit = app.viewport_ready() && app.bridge.valid() && !app.busy();
+    let can_edit = app.viewport_ready() && app.doc.bridge.valid() && !app.busy();
     if ui
         .add_enabled(can_edit, egui::Button::new("Edit sketch"))
         .clicked()

@@ -3,6 +3,7 @@ use super::*;
 pub(super) async fn check(host: &mut Harness) {
     let record = host
         .app
+        .doc
         .display
         .as_ref()
         .unwrap()
@@ -11,14 +12,14 @@ pub(super) async fn check(host: &mut Harness) {
         .find(|record| matches!(record.op, Operation::Known(KnownOperation::Extrude(_))))
         .unwrap()
         .record_id;
-    host.app.selected_feature = Some(record);
+    host.app.doc.selected_feature = Some(record);
     crate::inspector_history::edit_selected_feature(&mut host.app);
     assert_eq!(
         host.app.ui.inspector_tab,
         crate::ui_state::InspectorTab::History
     );
     host.wait(|app| {
-        app.interaction.tool.as_ref().is_some_and(|tool| {
+        app.doc.interaction.tool.as_ref().is_some_and(|tool| {
             matches!(tool.draft_status, DraftStatus::Valid(_))
                 && tool.preview == PreviewStatus::UnavailableForEdit
         })
@@ -28,7 +29,8 @@ pub(super) async fn check(host: &mut Harness) {
     host.app
         .dispatch(Action::DraftChanged("missing_variable".into()));
     host.wait(|app| {
-        app.interaction
+        app.doc
+            .interaction
             .tool
             .as_ref()
             .is_some_and(|tool| matches!(tool.draft_status, DraftStatus::Invalid(_)))
@@ -36,11 +38,11 @@ pub(super) async fn check(host: &mut Harness) {
     .await;
     assert_editor(host);
     assert_eq!(
-        host.app.interaction.tool.as_ref().unwrap().draft,
+        host.app.doc.interaction.tool.as_ref().unwrap().draft,
         "missing_variable"
     );
     crate::pill::cancel_tool(&mut host.app);
-    assert!(host.app.interaction.tool.is_none());
+    assert!(host.app.doc.interaction.tool.is_none());
     assert_mesh_bounds(&host.app, 90.0);
 }
 

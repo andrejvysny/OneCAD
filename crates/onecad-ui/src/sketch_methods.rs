@@ -9,7 +9,7 @@ pub(crate) fn show(app: &mut App, ui: &mut egui::Ui) {
 }
 
 fn tangent_arc(app: &mut App, ui: &mut egui::Ui) {
-    let Some((key, mut enabled)) = app.sketch.session.as_ref().and_then(|session| {
+    let Some((key, mut enabled)) = app.doc.sketch.session.as_ref().and_then(|session| {
         let draft = session.draft.as_ref()?;
         (session.tool == SketchTool::Line && draft.preceding.is_some())
             .then(|| (session.key.clone(), draft.tangent_arc))
@@ -28,6 +28,7 @@ fn tangent_arc(app: &mut App, ui: &mut egui::Ui) {
 
 fn rectangle(app: &mut App, ui: &mut egui::Ui) {
     let Some(tool) = app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -57,6 +58,7 @@ fn rectangle(app: &mut App, ui: &mut egui::Ui) {
         };
         app.sketch_dispatch(SketchAction::SetTool(selected));
         if app
+            .doc
             .sketch
             .session
             .as_ref()
@@ -69,6 +71,7 @@ fn rectangle(app: &mut App, ui: &mut egui::Ui) {
 
 fn arc(app: &mut App, ui: &mut egui::Ui) {
     let Some(tool) = app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -98,6 +101,7 @@ fn arc(app: &mut App, ui: &mut egui::Ui) {
         };
         app.sketch_dispatch(SketchAction::SetTool(selected));
         if app
+            .doc
             .sketch
             .session
             .as_ref()

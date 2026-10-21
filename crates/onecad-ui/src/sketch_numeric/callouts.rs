@@ -32,7 +32,7 @@ pub(super) fn build(app: &App, ctx: &Context, draft: &Draft, bounds: egui::Rect)
 }
 
 fn graphics(app: &App, ctx: &Context, draft: &Draft) -> Vec<Option<Graphic>> {
-    let Some(session) = app.sketch.session.as_ref() else {
+    let Some(session) = app.doc.sketch.session.as_ref() else {
         return Vec::new();
     };
     let Some(live) = session.draft.as_ref() else {

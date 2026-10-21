@@ -100,6 +100,7 @@ fn slot_values(draft: &SketchDraft) -> Vec<f64> {
 
 pub(super) fn dimensions(draft: &Draft, app: &App) -> Result<CreationDimensions, String> {
     let variables = app
+        .doc
         .display
         .as_ref()
         .map_or(&[][..], |display| display.projection.variables.as_slice());

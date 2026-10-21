@@ -11,7 +11,7 @@ pub fn sync(app: &mut App, ctx: &egui::Context) {
         Ok(loaded) => loaded,
         Err(error) => {
             app.ui.theme_failed = Some(dark);
-            app.status = format!("Theme failed to load: {error}");
+            app.doc.status = format!("Theme failed to load: {error}");
             return;
         }
     };

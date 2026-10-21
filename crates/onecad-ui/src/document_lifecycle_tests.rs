@@ -18,6 +18,10 @@ use std::{
 };
 
 fn recovered_fixture(root: &Path) -> (String, PathBuf) {
+    recovered_fixture_named(root, "Saved metadata")
+}
+
+pub(super) fn recovered_fixture_named(root: &Path, name: &str) -> (String, PathBuf) {
     let paths =
         QaPaths::from_args(["--qa-root".into(), root.join("qa").into_os_string()].into_iter())
             .unwrap();
@@ -31,7 +35,7 @@ fn recovered_fixture(root: &Path) -> (String, PathBuf) {
             unit: Unit::Mm,
         });
     }
-    let destination = paths.root.join("documents/Saved metadata.onecad");
+    let destination = paths.root.join(format!("documents/{name}.onecad"));
     let autosave = recovery::autosave_path(&paths.data, id);
     fs::create_dir_all(autosave.parent().unwrap()).unwrap();
     ContainerWriter::save(
@@ -69,50 +73,56 @@ async fn recovered_document_remains_saveable_and_protected_after_capture_refusal
     let (mut app, context) = create_app(area.path()).await;
     let mut frame = eframe::Frame::_new_kittest();
     pump_until(&mut app, &context, &mut frame, |app| {
-        app.bridge.shared.recovery.lock().unwrap().offers.len() == 1
+        app.doc.bridge.shared.recovery.lock().unwrap().offers.len() == 1
     })
     .await;
-    app.bridge.shared.recovery.lock().unwrap().busy = true;
+    app.doc.bridge.shared.recovery.lock().unwrap().busy = true;
     logic_tick(&mut app, &context, &mut frame, true);
     assert!(app.close_prompt);
     assert!(!app.stopping);
-    assert!(app.documents.confirm.is_none());
-    app.bridge
+    assert!(app.doc.documents.confirm.is_none());
+    app.doc
+        .bridge
         .submit(Command::Recovery {
             document_id: id.clone(),
             choice: crate::startup_recovery::Choice::Restore,
         })
         .unwrap();
     pump_until(&mut app, &context, &mut frame, |app| {
-        app.document_state
+        app.doc
+            .document_state
             .as_ref()
             .is_some_and(|state| state.document_id == id)
             && app
+                .doc
                 .status
                 .contains("Native scene object count budget exceeded")
     })
     .await;
-    assert!(matches!(app.documents.confirm, Some(Pending::Quit)));
+    assert!(matches!(app.doc.documents.confirm, Some(Pending::Quit)));
     apply_close_choice(&mut app, Some(2));
-    assert!(app.display.is_none());
-    assert!(!app.bridge.valid());
+    assert!(app.doc.display.is_none());
+    assert!(!app.doc.bridge.valid());
     assert!(crate::bars::save_allowed(&app));
     assert!(app.document_dirty());
     assert_eq!(
-        app.document_state.as_ref().unwrap().title,
+        app.doc.document_state.as_ref().unwrap().title,
         "Recovered metadata"
     );
     assert_eq!(
-        app.document_state.as_ref().unwrap().path.as_deref(),
+        app.doc.document_state.as_ref().unwrap().path.as_deref(),
         destination.to_str()
     );
     check_prompts_and_failed_save(&mut app, &context, &mut frame, &destination).await;
     app.document_request(Request::Save { save_as: false });
-    pump_until(&mut app, &context, &mut frame, |app| !app.documents.running).await;
+    pump_until(&mut app, &context, &mut frame, |app| {
+        !app.doc.documents.running
+    })
+    .await;
     assert!(!app.document_dirty());
-    assert!(app.display.is_none());
-    assert!(!app.bridge.valid());
-    let state = app.document_state.as_ref().unwrap();
+    assert!(app.doc.display.is_none());
+    assert!(!app.doc.bridge.valid());
+    let state = app.doc.document_state.as_ref().unwrap();
     assert_eq!(state.title, "Saved metadata");
     assert_eq!(state.path.as_deref(), destination.to_str());
     assert!(destination.is_file());
@@ -127,27 +137,29 @@ async fn check_prompts_and_failed_save(
     destination: &Path,
 ) {
     logic_tick(app, context, frame, true);
-    assert!(matches!(app.documents.confirm, Some(Pending::Quit)));
+    assert!(matches!(app.doc.documents.confirm, Some(Pending::Quit)));
     apply_close_choice(app, Some(2));
-    assert!(app.documents.confirm.is_none());
+    assert!(app.doc.documents.confirm.is_none());
     assert!(!app.stopping);
-    app.document_request(Request::New);
-    assert!(matches!(
-        app.documents.confirm,
-        Some(Pending::Document(Request::New))
-    ));
+    // Opening never replaces a document now (it gets its own tab); closing this
+    // one is the transition that must ask first.
+    let tab = app.doc.tab;
+    app.request_close_tab();
+    assert!(matches!(app.doc.documents.confirm, Some(Pending::CloseTab)));
     apply_close_choice(app, Some(2));
+    assert!(app.doc.documents.confirm.is_none());
+    assert_eq!(app.doc.tab, tab, "cancel keeps the document open");
     fs::remove_file(destination).unwrap();
     fs::create_dir(destination).unwrap();
     app.document_request(Request::Save { save_as: false });
-    pump_until(app, context, frame, |app| !app.documents.running).await;
+    pump_until(app, context, frame, |app| !app.doc.documents.running).await;
     assert!(app.document_dirty());
     assert_eq!(
-        app.document_state.as_ref().unwrap().title,
+        app.doc.document_state.as_ref().unwrap().title,
         "Recovered metadata"
     );
     assert_eq!(
-        app.document_state.as_ref().unwrap().path.as_deref(),
+        app.doc.document_state.as_ref().unwrap().path.as_deref(),
         destination.to_str()
     );
     fs::remove_dir(destination).unwrap();
@@ -159,9 +171,13 @@ async fn late_clean_display_cannot_replace_authoritative_dirty_lifecycle() {
     let area = tempfile::tempdir().unwrap();
     let (mut app, context) = create_app(area.path()).await;
     let mut frame = eframe::Frame::_new_kittest();
-    pump_until(&mut app, &context, &mut frame, |app| app.display.is_some()).await;
-    let old = app.display.clone().unwrap();
-    app.bridge
+    pump_until(&mut app, &context, &mut frame, |app| {
+        app.doc.display.is_some()
+    })
+    .await;
+    let old = app.doc.display.clone().unwrap();
+    app.doc
+        .bridge
         .shared
         .document_state
         .lock()
@@ -178,16 +194,16 @@ async fn late_clean_display_cannot_replace_authoritative_dirty_lifecycle() {
     app.adopt_display(old);
     assert!(app.document_dirty());
     assert_eq!(
-        app.document_state.as_ref().unwrap().title,
+        app.doc.document_state.as_ref().unwrap().title,
         "Unsaved replacement"
     );
     assert_eq!(
-        app.document_state.as_ref().unwrap().path.as_deref(),
+        app.doc.document_state.as_ref().unwrap().path.as_deref(),
         Some("/replacement.onecad")
     );
     assert!(crate::bars::save_allowed(&app));
     logic_tick(&mut app, &context, &mut frame, true);
-    assert!(matches!(app.documents.confirm, Some(Pending::Quit)));
+    assert!(matches!(app.doc.documents.confirm, Some(Pending::Quit)));
     apply_close_choice(&mut app, Some(2));
     app.stop();
     pump_until(&mut app, &context, &mut frame, |app| app.may_close).await;
@@ -203,20 +219,23 @@ async fn discard_quit_cleans_recovery_while_normal_stop_retains_dirty_recovery()
         let (mut app, context) = create_app(area.path()).await;
         let mut frame = eframe::Frame::_new_kittest();
         pump_until(&mut app, &context, &mut frame, |app| {
-            app.bridge.shared.recovery.lock().unwrap().offers.len() == 1
+            app.doc.bridge.shared.recovery.lock().unwrap().offers.len() == 1
         })
         .await;
-        app.bridge
+        app.doc
+            .bridge
             .submit(Command::Recovery {
                 document_id: id.clone(),
                 choice: crate::startup_recovery::Choice::Restore,
             })
             .unwrap();
         pump_until(&mut app, &context, &mut frame, |app| {
-            app.document_state
+            app.doc
+                .document_state
                 .as_ref()
                 .is_some_and(|state| state.document_id == id)
                 && app
+                    .doc
                     .status
                     .contains("Native scene object count budget exceeded")
         })
@@ -224,7 +243,7 @@ async fn discard_quit_cleans_recovery_while_normal_stop_retains_dirty_recovery()
         assert!(autosave.is_file());
         if discard {
             logic_tick(&mut app, &context, &mut frame, true);
-            assert!(matches!(app.documents.confirm, Some(Pending::Quit)));
+            assert!(matches!(app.doc.documents.confirm, Some(Pending::Quit)));
             apply_close_choice(&mut app, Some(1));
         } else {
             app.stop();

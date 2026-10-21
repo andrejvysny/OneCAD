@@ -19,6 +19,7 @@ async fn viewport_corner_drag_early_release_commits_one_edit_and_local_history()
     let before = host.sketch().clone();
     let undo = host
         .app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -31,14 +32,14 @@ async fn viewport_corner_drag_early_release_commits_one_edit_and_local_history()
     settled(&mut host).await;
     eprintln!(
         "corner gesture status={} error={:?} moved={:?} entities={:?}",
-        host.app.status,
-        host.app.sketch_gesture.error(),
-        host.app.sketch_gesture.moved(),
+        host.app.doc.status,
+        host.app.doc.sketch_gesture.error(),
+        host.app.doc.sketch_gesture.moved(),
         host.sketch().entities()
     );
     assert_rectangle(host.sketch(), [22.0, 21.0]);
-    let session = host.app.sketch.session.as_ref().unwrap();
-    assert_eq!(host.app.sketch_gesture.moved(), Some(true));
+    let session = host.app.doc.sketch.session.as_ref().unwrap();
+    assert_eq!(host.app.doc.sketch_gesture.moved(), Some(true));
     assert_eq!(session.history.as_ref().unwrap().undo_depth, undo + 1);
     match &session.status {
         SketchStatus::Entered(solve) => assert_eq!(solve.dof, 4),
@@ -76,9 +77,9 @@ async fn viewport_radius_drag_and_escape_preserve_curve_identity_and_authority()
     let accepted = host.sketch().clone();
     eprintln!(
         "radius gesture status={} error={:?} moved={:?} entities={:?}",
-        host.app.status,
-        host.app.sketch_gesture.error(),
-        host.app.sketch_gesture.moved(),
+        host.app.doc.status,
+        host.app.doc.sketch_gesture.error(),
+        host.app.doc.sketch_gesture.moved(),
         accepted.entities()
     );
     assert!(
@@ -88,7 +89,11 @@ async fn viewport_radius_drag_and_escape_preserve_curve_identity_and_authority()
     let start = host.project(15.0, 0.0);
     host.ui(vec![egui::Event::PointerMoved(start), button(start, true)]);
     host.ui(vec![egui::Event::PointerMoved(host.project(20.0, 0.0))]);
-    assert!(host.app.sketch_gesture.busy(), "{}", host.app.status);
+    assert!(
+        host.app.doc.sketch_gesture.busy(),
+        "{}",
+        host.app.doc.status
+    );
     host.ui(vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
     host.ui(vec![button(host.project(20.0, 0.0), false)]);
     settled(&mut host).await;
@@ -109,18 +114,38 @@ async fn viewport_line_body_drag_and_camera_change_cancel_without_edit() {
         assert_point(host.sketch(), expected);
     }
     let accepted = host.sketch().clone();
-    let history = host.app.sketch.session.as_ref().unwrap().history.clone();
+    let history = host
+        .app
+        .doc
+        .sketch
+        .session
+        .as_ref()
+        .unwrap()
+        .history
+        .clone();
     let start = host.project(5.0, 5.0);
     host.ui(vec![egui::Event::PointerMoved(start), button(start, true)]);
     host.ui(vec![egui::Event::PointerMoved(host.project(10.0, 10.0))]);
-    assert!(host.app.sketch_gesture.busy());
-    host.app.camera.target.x += 1.0;
+    assert!(host.app.doc.sketch_gesture.busy());
+    host.app.doc.camera.target.x += 1.0;
     host.redraw();
     host.ui(vec![button(host.project(10.0, 10.0), false)]);
     settled(&mut host).await;
     assert_eq!(host.sketch(), &accepted);
-    assert_eq!(host.app.sketch.session.as_ref().unwrap().history, history);
-    assert!(!host.app.sketch.session.as_ref().unwrap().selection_dragging);
+    assert_eq!(
+        host.app.doc.sketch.session.as_ref().unwrap().history,
+        history
+    );
+    assert!(
+        !host
+            .app
+            .doc
+            .sketch
+            .session
+            .as_ref()
+            .unwrap()
+            .selection_dragging
+    );
     host.stop().await;
 }
 
@@ -133,13 +158,22 @@ async fn viewport_camera_change_before_drag_threshold_rejects_stale_start() {
     let accepted = host.sketch().clone();
     let start = host.project(0.0, 0.0);
     host.ui(vec![egui::Event::PointerMoved(start), button(start, true)]);
-    host.app.camera.target.x += 1.0;
+    host.app.doc.camera.target.x += 1.0;
     host.redraw();
     let end = host.project(22.0, 21.0);
     host.ui(vec![egui::Event::PointerMoved(end)]);
     host.ui(vec![button(end, false)]);
-    assert!(!host.app.sketch_gesture.busy());
-    assert!(!host.app.sketch.session.as_ref().unwrap().selection_dragging);
+    assert!(!host.app.doc.sketch_gesture.busy());
+    assert!(
+        !host
+            .app
+            .doc
+            .sketch
+            .session
+            .as_ref()
+            .unwrap()
+            .selection_dragging
+    );
     assert_eq!(host.sketch(), &accepted);
     host.stop().await;
 }
@@ -151,18 +185,30 @@ async fn viewport_escape_before_drag_threshold_cancels_only_pointer_owner() {
     let mut host = Host::new(root.path()).await;
     rectangle(&mut host).await;
     let accepted = host.sketch().clone();
-    let history = host.app.sketch.session.as_ref().unwrap().history.clone();
+    let history = host
+        .app
+        .doc
+        .sketch
+        .session
+        .as_ref()
+        .unwrap()
+        .history
+        .clone();
     let start = host.project(0.0, 0.0);
     host.ui(vec![egui::Event::PointerMoved(start), button(start, true)]);
-    assert!(host.app.armed_sketch_gesture.is_some());
+    assert!(host.app.doc.armed_sketch_gesture.is_some());
     host.ui(vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
     host.ui(vec![button(start, false)]);
     assert!(active(&host.app));
-    assert!(!host.app.sketch_gesture.busy());
+    assert!(!host.app.doc.sketch_gesture.busy());
     assert_eq!(host.sketch(), &accepted);
-    assert_eq!(host.app.sketch.session.as_ref().unwrap().history, history);
+    assert_eq!(
+        host.app.doc.sketch.session.as_ref().unwrap().history,
+        history
+    );
     assert!(
         host.app
+            .doc
             .sketch
             .session
             .as_ref()
@@ -191,7 +237,7 @@ async fn stationary_pointer_release_completes_on_service_repaint_wakes() {
         loop {
             wakes.notified().await;
             logic_tick(&mut host.app, &host.context, &mut host.frame, false);
-            if !host.app.sketch_gesture.busy() && active(&host.app) {
+            if !host.app.doc.sketch_gesture.busy() && active(&host.app) {
                 break;
             }
         }
@@ -199,15 +245,15 @@ async fn stationary_pointer_release_completes_on_service_repaint_wakes() {
     .await
     .expect("stationary gesture must wake reactive native logic without more pointer input");
     assert_rectangle(host.sketch(), [22.0, 21.0]);
-    assert_eq!(host.app.sketch_gesture.moved(), Some(true));
+    assert_eq!(host.app.doc.sketch_gesture.moved(), Some(true));
     host.stop().await;
 }
 
 async fn rectangle(host: &mut Host) {
-    let plane = host.app.sketch.session.as_ref().unwrap().plane;
+    let plane = host.app.doc.sketch.session.as_ref().unwrap().plane;
     let center = plane.to_world(Vec2::new(40.0, 30.0).unwrap());
-    host.app.camera.target = DVec3::new(center.x, center.y, center.z);
-    host.app.camera.offset = DVec3::new(plane.normal.x, plane.normal.y, plane.normal.z) * 180.0;
+    host.app.doc.camera.target = DVec3::new(center.x, center.y, center.z);
+    host.app.doc.camera.offset = DVec3::new(plane.normal.x, plane.normal.y, plane.normal.z) * 180.0;
     host.redraw();
     host.control("Rectangle");
     host.xy(0.0, 0.0);
@@ -222,13 +268,17 @@ fn drag(host: &mut Host, from: [f64; 2], to: [f64; 2]) {
     let end = host.project(to[0], to[1]);
     host.ui(vec![egui::Event::PointerMoved(start), button(start, true)]);
     host.ui(vec![egui::Event::PointerMoved(end)]);
-    assert!(host.app.sketch_gesture.busy(), "{}", host.app.status);
+    assert!(
+        host.app.doc.sketch_gesture.busy(),
+        "{}",
+        host.app.doc.status
+    );
     host.ui(vec![button(end, false)]);
 }
 
 async fn settled(host: &mut Host) {
     pump_until(&mut host.app, &host.context, &mut host.frame, |app| {
-        !app.sketch_gesture.busy() && active(app) && app.bridge.valid()
+        !app.doc.sketch_gesture.busy() && active(app) && app.doc.bridge.valid()
     })
     .await;
     host.redraw();
@@ -248,6 +298,7 @@ async fn history(host: &mut Host, redo: bool, expected: &Sketch) {
     pump_until(&mut host.app, &host.context, &mut host.frame, |app| {
         active(app)
             && app
+                .doc
                 .sketch
                 .session
                 .as_ref()

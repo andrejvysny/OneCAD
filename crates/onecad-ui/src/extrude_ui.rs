@@ -21,7 +21,8 @@ pub(crate) fn params(tool: &ModelSession) -> Option<&onecad_core::document::reco
 }
 
 pub(crate) fn choosing_target(app: &App) -> bool {
-    app.interaction
+    app.doc
+        .interaction
         .tool
         .as_ref()
         .and_then(params)
@@ -29,7 +30,7 @@ pub(crate) fn choosing_target(app: &App) -> bool {
 }
 
 fn targets(app: &App) -> Vec<(BodyId, String)> {
-    let Some(display) = &app.display else {
+    let Some(display) = &app.doc.display else {
         return Vec::new();
     };
     display
@@ -56,13 +57,13 @@ pub(crate) fn select_target(app: &mut App, body: BodyId) -> bool {
         return false;
     }
     if targets(app).iter().any(|(id, _)| *id == body)
-        && let Some(context) = app.interaction.context.clone()
+        && let Some(context) = app.doc.interaction.context.clone()
     {
         app.dispatch(Action::ExtrudeTargetChanged {
             body: Some(body),
             context,
         });
-        app.selected_body = Some(body);
+        app.doc.selected_body = Some(body);
         app.draw_dirty = true;
     }
     true
@@ -85,7 +86,7 @@ pub(crate) fn rows(app: &mut App, rows: &mut FeatureCardRows, tool: &ModelSessio
     if mode != params.boolean_mode {
         app.dispatch(Action::ExtrudeModeChanged(mode));
         if mode == BooleanMode::NewBody {
-            app.selected_body = None;
+            app.doc.selected_body = None;
             app.draw_dirty = true;
         }
         return;
@@ -130,13 +131,13 @@ fn target_row(app: &mut App, rows: &mut FeatureCardRows, target: Option<BodyId>)
         }
     });
     if selected != target
-        && let Some(context) = app.interaction.context.clone()
+        && let Some(context) = app.doc.interaction.context.clone()
     {
         app.dispatch(Action::ExtrudeTargetChanged {
             body: selected,
             context,
         });
-        app.selected_body = selected;
+        app.doc.selected_body = selected;
         app.draw_dirty = true;
     }
 }

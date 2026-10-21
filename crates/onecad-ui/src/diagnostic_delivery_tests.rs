@@ -15,7 +15,10 @@ async fn file_failure_callbacks_remain_visible_until_retry_or_document_replaceme
     let area = tempfile::tempdir().unwrap();
     let (mut app, context) = create_app(area.path()).await;
     let mut frame = eframe::Frame::_new_kittest();
-    pump_until(&mut app, &context, &mut frame, |app| app.display.is_some()).await;
+    pump_until(&mut app, &context, &mut frame, |app| {
+        app.doc.display.is_some()
+    })
+    .await;
     let destination = area.path().join("qa/documents/Diagnostics.onecad");
     ContainerWriter::save(
         &destination,
@@ -25,47 +28,73 @@ async fn file_failure_callbacks_remain_visible_until_retry_or_document_replaceme
     )
     .unwrap();
     app.document_request(Request::Open(Some(destination.clone())));
-    pump_until(&mut app, &context, &mut frame, |app| !app.documents.running).await;
-    assert!(app.status.contains("opened"), "{}", app.status);
-    let before = app.document_state.as_ref().unwrap().runtime_session.clone();
+    pump_until(&mut app, &context, &mut frame, |app| {
+        !app.doc.documents.running
+    })
+    .await;
+    assert!(app.doc.status.contains("opened"), "{}", app.doc.status);
+    let before = app
+        .doc
+        .document_state
+        .as_ref()
+        .unwrap()
+        .runtime_session
+        .clone();
     std::fs::remove_file(&destination).unwrap();
     std::fs::create_dir(&destination).unwrap();
     app.document_request(Request::Save { save_as: false });
-    pump_until(&mut app, &context, &mut frame, |app| !app.documents.running).await;
+    pump_until(&mut app, &context, &mut frame, |app| {
+        !app.doc.documents.running
+    })
+    .await;
     assert!(
-        app.diagnostics
+        app.doc
+            .diagnostics
             .contains(Source::File(FileAction::Save), State::Failed, "")
     );
     std::fs::remove_dir(&destination).unwrap();
     app.document_request(Request::Open(Some(area.path().join("missing.onecad"))));
-    pump_until(&mut app, &context, &mut frame, |app| !app.documents.running).await;
-    assert!(app.diagnostics.contains(
+    pump_until(&mut app, &context, &mut frame, |app| {
+        !app.doc.documents.running
+    })
+    .await;
+    assert!(app.doc.diagnostics.contains(
         Source::File(FileAction::Open),
         State::Failed,
         "No such file"
     ));
     // Export uses an OS dialog. Inject its failure at the real application delivery callback.
-    app.documents.running = true;
-    app.documents.diagnostic_action = Some(FileAction::Export);
+    app.doc.documents.running = true;
+    app.doc.documents.diagnostic_action = Some(FileAction::Export);
     app.document_finished(Err("Export destination is read-only".into()));
-    app.status = "Profile selected".into();
+    app.doc.status = "Profile selected".into();
+    assert!(app.doc.diagnostics.contains(
+        Source::File(FileAction::Export),
+        State::Failed,
+        "read-only"
+    ));
     assert!(
-        app.diagnostics
-            .contains(Source::File(FileAction::Export), State::Failed, "read-only")
-    );
-    assert!(
-        app.diagnostics
+        app.doc
+            .diagnostics
             .contains(Source::File(FileAction::Save), State::Failed, "")
     );
     app.document_request(Request::New);
-    pump_until(&mut app, &context, &mut frame, |app| !app.documents.running).await;
-    assert_ne!(app.document_state.as_ref().unwrap().runtime_session, before);
+    pump_until(&mut app, &context, &mut frame, |app| {
+        !app.doc.documents.running
+    })
+    .await;
+    assert_ne!(
+        app.doc.document_state.as_ref().unwrap().runtime_session,
+        before
+    );
     assert!(
-        !app.diagnostics
+        !app.doc
+            .diagnostics
             .contains(Source::File(FileAction::Save), State::Failed, "")
     );
     assert!(
-        !app.diagnostics
+        !app.doc
+            .diagnostics
             .contains(Source::File(FileAction::Export), State::Failed, "")
     );
     app.stop();
@@ -78,17 +107,21 @@ async fn rejected_sketch_mutation_and_worker_failure_reach_editor_diagnostics() 
     let area = tempfile::tempdir().unwrap();
     let (mut app, context) = create_app(area.path()).await;
     let mut frame = eframe::Frame::_new_kittest();
-    pump_until(&mut app, &context, &mut frame, |app| app.display.is_some()).await;
+    pump_until(&mut app, &context, &mut frame, |app| {
+        app.doc.display.is_some()
+    })
+    .await;
     app.new_sketch();
     pump_until(&mut app, &context, &mut frame, |app| {
-        app.sketch
+        app.doc
+            .sketch
             .session
             .as_ref()
             .is_some_and(|session| session.phase == SketchPhase::Active)
     })
     .await;
-    let key = app.sketch.session.as_ref().unwrap().key.clone();
-    let mut stale = app.sketch.session.as_ref().unwrap().request.clone();
+    let key = app.doc.sketch.session.as_ref().unwrap().key.clone();
+    let mut stale = app.doc.sketch.session.as_ref().unwrap().request.clone();
     stale.sequence += 1;
     let permit = std::sync::Arc::new(tokio::sync::Semaphore::new(1))
         .acquire_owned()
@@ -109,9 +142,10 @@ async fn rejected_sketch_mutation_and_worker_failure_reach_editor_diagnostics() 
         },
         &context,
     );
-    assert!(!app.status.contains("Stale sketch failure"));
+    assert!(!app.doc.status.contains("Stale sketch failure"));
     assert!(
-        !app.diagnostics
+        !app.doc
+            .diagnostics
             .contains(Source::Sketch, State::Failed, "Stale sketch failure")
     );
     app.sketch_dispatch(SketchAction::AddConstraints {
@@ -122,7 +156,7 @@ async fn rejected_sketch_mutation_and_worker_failure_reach_editor_diagnostics() 
         }],
     });
     pump_until(&mut app, &context, &mut frame, |app| {
-        app.sketch.session.as_ref().is_some_and(|session| {
+        app.doc.sketch.session.as_ref().is_some_and(|session| {
             matches!(
                 session.status,
                 SketchStatus::Refused(_) | SketchStatus::Failed { .. }
@@ -131,12 +165,17 @@ async fn rejected_sketch_mutation_and_worker_failure_reach_editor_diagnostics() 
     })
     .await;
     assert!(
-        app.diagnostics
+        app.doc
+            .diagnostics
             .contains(Source::Sketch, State::Rejected, "")
-            || app.diagnostics.contains(Source::Sketch, State::Failed, "")
+            || app
+                .doc
+                .diagnostics
+                .contains(Source::Sketch, State::Failed, "")
     );
     assert!(
-        app.sketch
+        app.doc
+            .sketch
             .session
             .as_ref()
             .unwrap()
@@ -147,9 +186,9 @@ async fn rejected_sketch_mutation_and_worker_failure_reach_editor_diagnostics() 
     app.sketch_dispatch(SketchAction::Discard);
     pump_until(&mut app, &context, &mut frame, |app| !app.sketch_active()).await;
     // Exercise the authoritative worker-failure delivery slot without killing a process.
-    *app.bridge.shared.failure.lock().unwrap() = Some("Worker transport disconnected".into());
+    *app.doc.bridge.shared.failure.lock().unwrap() = Some("Worker transport disconnected".into());
     logic_tick(&mut app, &context, &mut frame, false);
-    assert!(app.diagnostics.contains(
+    assert!(app.doc.diagnostics.contains(
         Source::Worker,
         State::Failed,
         "Worker transport disconnected"
@@ -164,17 +203,20 @@ async fn stale_same_runtime_model_terminal_does_not_replace_current_diagnostic()
     let area = tempfile::tempdir().unwrap();
     let (mut app, context) = create_app(area.path()).await;
     let mut frame = eframe::Frame::_new_kittest();
-    pump_until(&mut app, &context, &mut frame, |app| app.display.is_some()).await;
+    pump_until(&mut app, &context, &mut frame, |app| {
+        app.doc.display.is_some()
+    })
+    .await;
     let tag = onecad_interaction::RequestTag {
-        context: app.interaction.context.clone().unwrap(),
+        context: app.doc.interaction.context.clone().unwrap(),
         record_id: onecad_core::ids::RecordId::new(),
         gesture: 1,
         sequence: 2,
     };
-    app.interaction.status = onecad_interaction::CommitStatus::Pending(tag.clone());
+    app.doc.interaction.status = onecad_interaction::CommitStatus::Pending(tag.clone());
     let mut stale = tag;
     stale.sequence -= 1;
-    app.status = "Current feature pending".into();
+    app.doc.status = "Current feature pending".into();
     let permit = std::sync::Arc::new(tokio::sync::Semaphore::new(1))
         .acquire_owned()
         .await
@@ -188,12 +230,13 @@ async fn stale_same_runtime_model_terminal_does_not_replace_current_diagnostic()
         },
         &context,
     );
-    assert_eq!(app.status, "Current feature pending");
+    assert_eq!(app.doc.status, "Current feature pending");
     assert!(
-        !app.diagnostics
+        !app.doc
+            .diagnostics
             .contains(Source::Model, State::Rejected, "Stale model failure")
     );
-    app.interaction.status = onecad_interaction::CommitStatus::Idle;
+    app.doc.interaction.status = onecad_interaction::CommitStatus::Idle;
     app.stop();
     pump_until(&mut app, &context, &mut frame, |app| app.may_close).await;
 }

@@ -44,14 +44,12 @@ pub enum StartPage {
 
 #[derive(Clone, Debug)]
 pub struct UiState {
-    pub sketch_entry: crate::sketch_entry::Entry,
     pub explorer_open: bool,
     pub inspector_open: bool,
     pub inspector_tab: InspectorTab,
     pub workspace_menu_open: bool,
     pub start_open: bool,
     pub explorer_filter: String,
-    pub selected_sketch: Option<onecad_core::ids::SketchId>,
     /// Anchor of the open Display menu; `None` while closed.
     pub display_menu: Option<egui::Rect>,
     /// Sketch Constraints menu (display-only rows).
@@ -75,14 +73,12 @@ pub struct UiState {
 impl Default for UiState {
     fn default() -> Self {
         Self {
-            sketch_entry: Default::default(),
             explorer_open: true,
             inspector_open: true,
             inspector_tab: InspectorTab::default(),
             workspace_menu_open: false,
             start_open: false,
             explorer_filter: String::new(),
-            selected_sketch: None,
             display_menu: None,
             constraints_open: false,
             rectangle_centered: false,
@@ -102,8 +98,10 @@ impl Default for UiState {
 }
 
 /// Cmd+1 toggles the Explorer, Cmd+2 the Inspector; ignored while a text field has focus.
-pub fn shortcuts(state: &mut UiState, ctx: &Context) {
-    if crate::input::text_owns_keyboard(ctx) || crate::input::ui_owns_keyboard(state, ctx) {
+pub fn shortcuts(state: &mut UiState, entry_open: bool, ctx: &Context) {
+    if crate::input::text_owns_keyboard(ctx)
+        || crate::input::ui_owns_keyboard(state, entry_open, ctx)
+    {
         return;
     }
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Num1)) {
@@ -131,7 +129,7 @@ mod tests {
     }
 
     fn run(ctx: &Context, state: &mut UiState, raw: egui::RawInput) {
-        let mut out = ctx.run_ui(raw, |ui| shortcuts(state, ui.ctx()));
+        let mut out = ctx.run_ui(raw, |ui| shortcuts(state, false, ui.ctx()));
         out.textures_delta.clear();
     }
 

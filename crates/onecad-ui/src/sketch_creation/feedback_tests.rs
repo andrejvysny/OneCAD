@@ -282,7 +282,9 @@ fn hysteresis_cache_does_not_cross_tool_draft_or_visit_ownership() {
     session.key.generation += 1;
     assert!(!cached.current(session));
     let ctx = egui::Context::default();
-    ctx.data_mut(|data| data.insert_temp(egui::Id::unique("sketch-winning-snap"), cached));
+    ctx.data_mut(|data| {
+        data.insert_temp(crate::documents::scoped_id("sketch-winning-snap"), cached)
+    });
     crate::sketch_creation::clear_candidate(&ctx);
     assert!(
         ctx.data(

@@ -94,7 +94,7 @@ fn sketch_options(app: &mut App, ui: &mut Ui) {
 }
 
 fn construction_mode(app: &mut App, ui: &mut Ui) {
-    let Some(session) = app.sketch.session.as_ref() else {
+    let Some(session) = app.doc.sketch.session.as_ref() else {
         return;
     };
     let key = session.key.clone();

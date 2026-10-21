@@ -14,35 +14,50 @@ async fn world_planes_and_face_entry_preserve_native_frame_and_discard() {
     let area = tempfile::tempdir().unwrap();
     let (mut app, context) = create_app(area.path()).await;
     let mut frame = eframe::Frame::_new_kittest();
-    pump_until(&mut app, &context, &mut frame, |app| app.display.is_some()).await;
+    pump_until(&mut app, &context, &mut frame, |app| {
+        app.doc.display.is_some()
+    })
+    .await;
     for (plane, modeling) in [
         (WorldPlane::XY, onecad_scene::Projection::Perspective),
         (WorldPlane::XZ, onecad_scene::Projection::Orthographic),
         (WorldPlane::YZ, onecad_scene::Projection::Perspective),
     ] {
-        app.camera.projection = modeling;
+        app.doc.camera.projection = modeling;
         app.new_sketch_on_plane(plane);
         active(&mut app, &context, &mut frame).await;
-        assert_eq!(app.sketch.session.as_ref().unwrap().plane, plane.plane());
+        assert_eq!(
+            app.doc.sketch.session.as_ref().unwrap().plane,
+            plane.plane()
+        );
         assert_camera(&app);
         discard(&mut app, &context, &mut frame).await;
         // Leaving the sketch restores the projection chosen for modeling.
-        assert_eq!(app.camera.projection, modeling);
-        assert!(app.display.as_ref().unwrap().projection.sketches.is_empty());
+        assert_eq!(app.doc.camera.projection, modeling);
+        assert!(
+            app.doc
+                .display
+                .as_ref()
+                .unwrap()
+                .projection
+                .sketches
+                .is_empty()
+        );
     }
     make_host(&mut app, &context, &mut frame).await;
-    let display = app.display.clone().unwrap();
+    let display = app.doc.display.clone().unwrap();
     let body = &display.scene.bodies()[0];
     let identity = body.mesh().unwrap().face_id(0).unwrap().to_owned();
     // A preselected face starts the sketch directly, without the support chooser.
-    app.topology
+    app.doc
+        .topology
         .select_face_for_test(display.scene.identity(), body.body_id(), &identity);
     app.choose_sketch_support();
-    assert!(app.ui.sketch_entry.pending.is_some());
+    assert!(app.doc.sketch_entry.pending.is_some());
     assert!(crate::support_view::grid(&app).is_none());
     active(&mut app, &context, &mut frame).await;
-    assert!(!app.ui.sketch_entry.open);
-    let sketch = &app.sketch.session.as_ref().unwrap().authoritative;
+    assert!(!app.doc.sketch_entry.open);
+    let sketch = &app.doc.sketch.session.as_ref().unwrap().authoritative;
     assert!(sketch.host_face().unwrap().primary.is_some());
     assert!(!sketch.entities().is_empty());
     assert!(
@@ -53,15 +68,19 @@ async fn world_planes_and_face_entry_preserve_native_frame_and_discard() {
     );
     assert_camera(&app);
     discard(&mut app, &context, &mut frame).await;
-    assert_eq!(app.display.as_ref().unwrap().projection.sketches.len(), 1);
-    assert_eq!(app.display.as_ref().unwrap().scene.bodies().len(), 1);
+    assert_eq!(
+        app.doc.display.as_ref().unwrap().projection.sketches.len(),
+        1
+    );
+    assert_eq!(app.doc.display.as_ref().unwrap().scene.bodies().len(), 1);
     app.stop_discard();
     pump_until(&mut app, &context, &mut frame, |app| app.may_close).await;
 }
 
 async fn active(app: &mut App, ctx: &egui::Context, frame: &mut eframe::Frame) {
     pump_until(app, ctx, frame, |app| {
-        app.sketch
+        app.doc
+            .sketch
             .session
             .as_ref()
             .is_some_and(|session| session.phase == SketchPhase::Active)
@@ -76,11 +95,11 @@ async fn discard(app: &mut App, ctx: &egui::Context, frame: &mut eframe::Frame) 
 
 fn capture(app: &mut App) -> ViewSnapshot {
     app.view_number += 1;
-    let session = app.sketch.session.as_ref().unwrap();
+    let session = app.doc.sketch.session.as_ref().unwrap();
     let view = ViewSnapshot::new(
         session.document.scene,
         app.view_number,
-        app.camera,
+        app.doc.camera,
         Viewport {
             width: 900.0,
             height: 560.0,
@@ -93,14 +112,14 @@ fn capture(app: &mut App) -> ViewSnapshot {
         document: session.document.clone(),
         capture: view.identity(),
     });
-    app.view = Some(view);
+    app.doc.view = Some(view);
     view
 }
 
 fn assert_camera(app: &App) {
-    let plane = app.sketch.session.as_ref().unwrap().plane;
+    let plane = app.doc.sketch.session.as_ref().unwrap().plane;
     let vector = |v: onecad_core::math::Vec3| onecad_scene::DVec3::new(v.x, v.y, v.z);
-    let basis = app.camera.basis().unwrap();
+    let basis = app.doc.camera.basis().unwrap();
     assert!((basis.right - vector(plane.x_axis)).length() < 1e-12);
     assert!((basis.up - vector(plane.y_axis)).length() < 1e-12);
     assert!((basis.back - vector(plane.normal)).length() < 1e-12);
@@ -115,7 +134,7 @@ pub(super) async fn make_host(app: &mut App, ctx: &egui::Context, frame: &mut ef
     let rectangle = ids();
     click(app, view.identity(), 40.0, 30.0, rectangle.clone());
     pump_until(app, ctx, frame, |app| {
-        app.sketch.session.as_ref().is_some_and(|session| {
+        app.doc.sketch.session.as_ref().is_some_and(|session| {
             session.phase == SketchPhase::Active
                 && session.authoritative.contains_entity(rectangle.entities[7])
         })
@@ -127,12 +146,12 @@ pub(super) async fn make_host(app: &mut App, ctx: &egui::Context, frame: &mut ef
 }
 
 async fn extrude(app: &mut App, ctx: &egui::Context, frame: &mut eframe::Frame) {
-    let display = app.display.clone().unwrap();
+    let display = app.doc.display.clone().unwrap();
     let context = crate::sketch_services::document_context(&display);
     let view = ViewSnapshot::new(
         context.scene,
         app.view_number + 1,
-        app.camera,
+        app.doc.camera,
         Viewport {
             width: 900.0,
             height: 560.0,
@@ -152,7 +171,7 @@ async fn extrude(app: &mut App, ctx: &egui::Context, frame: &mut eframe::Frame) 
     });
     app.dispatch(Action::DraftChanged("5".into()));
     pump_until(app, ctx, frame, |app| {
-        app.interaction.tool.as_ref().is_some_and(|tool| {
+        app.doc.interaction.tool.as_ref().is_some_and(|tool| {
             matches!(&tool.draft_status, DraftStatus::Valid(value) if value.value == 5.0)
                 && tool.preview == PreviewStatus::Ready
         })
@@ -161,7 +180,7 @@ async fn extrude(app: &mut App, ctx: &egui::Context, frame: &mut eframe::Frame) 
     app.dispatch(Action::Confirm);
     pump_until(app, ctx, frame, |app| {
         matches!(
-            app.interaction.status,
+            app.doc.interaction.status,
             CommitStatus::Completed {
                 outcome: FeatureOutcome::Published,
                 ..

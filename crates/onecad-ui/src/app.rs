@@ -1,75 +1,45 @@
 use crate::{
-    bridge::{Bridge, Candidate, Command, Display, Message},
+    bridge::{Candidate, Command, Display, Message},
     fonts, menu,
     qa::QaPaths,
     theme,
 };
-use onecad_core::ids::{BodyId, RecordId};
-use onecad_interaction::{Action, CommitStatus, DocumentContext, Effect, Interaction, RequestTag};
+use onecad_interaction::{Action, CommitStatus, DocumentContext, Effect, RequestTag};
 use onecad_render::Renderer;
-use onecad_scene::{Camera, ViewSnapshot};
 use std::sync::Arc;
 
 pub struct App {
+    pub doc: crate::document_editor::DocumentEditor,
+    /// True while a background document's messages are applied through this App: suppresses process-level effects (window close, start-screen switching) that belong to the active document only.
+    pub parked: bool,
+    /// Every other open document, parked behind the active one.
+    pub(crate) tabs: crate::documents::Tabs,
+    /// Where each document tab was last painted, to anchor its close prompt.
+    pub(crate) tab_rects: Vec<(crate::documents::TabId, egui::Rect)>,
+    /// The ⌃Tab switcher while Control is held.
+    pub(crate) switcher: Option<crate::tab_switcher::State>,
     pub input_routing: crate::input::RoutingState,
     pub ui: crate::ui_state::UiState,
     pub settings: crate::settings::Store,
-    pub documents: crate::document_flow::Flow,
-    pub(crate) items: crate::document_items::Flow,
-    pub(crate) selection_preview: crate::item_selection::Preview,
-    pub bridge: Bridge,
-    pub display: Option<Arc<Display>>,
-    pub document_state: Option<onecad_app::dto::DocumentState>,
-    pub document_state_serial: u64,
-    pub interaction: Interaction,
-    pub sketch: onecad_interaction::sketch::SketchInteraction,
-    pub(crate) sketch_candidate: Option<crate::sketch_candidates::Pending>,
-    pub sketch_gesture: onecad_interaction::sketch::gesture::SketchGestureInteraction,
-    pub(crate) gesture_followup: Option<crate::sketch_gestures::Followup>,
-    pub(crate) gesture_expected: Option<onecad_app::api::PreviewContext>,
-    pub(crate) armed_sketch_gesture: Option<crate::sketch_gestures::Armed>,
     pub renderer: Renderer,
     pub gpu: egui_wgpu::RenderState,
     pub texture: Option<egui::TextureId>,
     pub theme: theme::Theme,
     pub dark: bool,
-    pub camera: Camera,
-    pub navigation: crate::navigation::Navigation,
-    pub transform_gizmo: crate::transform_ui::TransformGizmo,
-    pub(crate) extrude_handle: crate::extrude_handle::ExtrudeHandle,
-    /// Projection chosen for modeling, restored when a sketch (always orthographic) closes.
-    pub(crate) modeling_projection: Option<onecad_scene::Projection>,
-    pub topology: crate::viewport_selection::Selection,
     pub pending_display_options: Option<onecad_render::RenderOptions>,
-    /// Last drawable capture; `camera` may already contain pending navigation.
-    pub view: Option<ViewSnapshot>,
     pub view_number: u64,
-    pub(crate) view_presentation: Option<crate::viewport_capture::Presentation>,
     pub viewport_failure: Option<String>,
     pub resize_refusal: Option<([u32; 2], String)>,
     device_failure: Arc<std::sync::Mutex<Option<String>>>,
-    pub fit_pending: bool,
-    pub selected_body: Option<BodyId>,
-    pub selected_feature: Option<RecordId>,
-    pub numeric_id: Option<egui::Id>,
     pub composing: bool,
     pub menu: Option<menu::NativeMenu>,
-    pub status: String,
-    pub diagnostics: crate::diagnostics::Diagnostics,
-    pub command_status: bool,
     pub close_prompt: bool,
     pub may_close: bool,
     pub stopping: bool,
-    pub authoring_dirty: bool,
-    pub gesture: u64,
-    pub pending_preview: Option<(RequestTag, crate::viewport_updates::Preview)>,
-    pub sections: crate::viewport_updates::Sections,
-    pub clear_preview: bool,
     pub draw_dirty: bool,
     pub cad_needs_fence: bool,
     pub sampled: bool,
     pub sampling_done: Arc<std::sync::atomic::AtomicBool>,
-    received_preview: Option<crate::viewport_updates::Preview>,
 }
 
 impl App {
@@ -100,7 +70,12 @@ impl App {
             crate::settings::Store::load(&paths, cc.egui_ctx.clone());
         ui.start_open = !paths.open_on_start;
         let dark = ui.appearance.resolve_dark(cc.egui_ctx.system_theme());
-        let bridge = Bridge::start(paths, cc.egui_ctx.clone(), renderer.preparation_budget())?;
+        let tabs = crate::documents::Tabs::new(
+            crate::service_runtime::ServiceRuntime::start()?,
+            paths,
+            renderer.preparation_budget(),
+        );
+        let bridge = tabs.bridge(cc.egui_ctx.clone(), true)?;
         let resolved = fonts::install(&cc.egui_ctx);
         eprintln!(
             "native fonts: {:?} {:?}; icons: {}",
@@ -119,59 +94,32 @@ impl App {
         }
         bridge.submit(Command::Open)?;
         Ok(Self {
+            doc: crate::document_editor::DocumentEditor::new(
+                bridge,
+                settings_error.unwrap_or_else(|| "Opening QA workspace…".into()),
+            )?,
+            parked: false,
+            tabs,
+            switcher: None,
+            tab_rects: Vec::new(),
             input_routing: Default::default(),
             ui,
             settings,
-            documents: Default::default(),
-            bridge,
-            display: None,
-            document_state: None,
-            document_state_serial: 0,
-            interaction: Interaction::default(),
-            sketch: Default::default(),
-            sketch_candidate: None,
-            sketch_gesture: Default::default(),
-            gesture_followup: None,
-            gesture_expected: None,
-            armed_sketch_gesture: None,
             renderer,
             gpu,
             texture: None,
             theme,
             dark,
-            camera: Camera::default(),
-            navigation: Default::default(),
-            transform_gizmo: Default::default(),
-            extrude_handle: Default::default(),
-            modeling_projection: None,
-            topology: Default::default(),
             pending_display_options: None,
-            view: None,
             view_number: 0,
-            view_presentation: None,
             viewport_failure: None,
             resize_refusal: None,
             device_failure,
-            fit_pending: true,
-            selected_body: None,
-            selected_feature: None,
-            numeric_id: None,
             composing: false,
             menu,
-            status: settings_error.unwrap_or_else(|| "Opening QA workspace…".into()),
-            diagnostics: Default::default(),
-            command_status: false,
             close_prompt: false,
             may_close: false,
             stopping: false,
-            authoring_dirty: false,
-            items: Default::default(),
-            selection_preview: Default::default(),
-            gesture: 0,
-            pending_preview: None,
-            sections: crate::viewport_updates::Sections::new()?,
-            clear_preview: true,
-            received_preview: None,
             draw_dirty: true,
             cad_needs_fence: false,
             sampled: false,
@@ -180,20 +128,20 @@ impl App {
     }
 
     pub fn dispatch(&mut self, action: Action) {
-        if self.bridge.shared.input_trace.enabled() {
+        if self.doc.bridge.shared.input_trace.enabled() {
             crate::input_trace::app(
                 self,
                 "model.dispatch",
                 crate::input_trace::actions::model(&action),
             );
         }
-        if self.documents.blocks_authoring(&action) {
-            self.command_status = true;
-            self.status = "Finish the file action before editing the document".into();
+        if self.doc.documents.blocks_authoring(&action) {
+            self.doc.command_status = true;
+            self.doc.status = "Finish the file action before editing the document".into();
             crate::input_trace::app(
                 self,
                 "model.refused",
-                serde_json::json!({"reason": self.status}),
+                serde_json::json!({"reason": self.doc.status}),
             );
             return;
         }
@@ -206,26 +154,27 @@ impl App {
                 | Action::BeginEdit { .. }
                 | Action::BeginParameterEdit { .. }
         ) {
-            self.command_status = false;
+            self.doc.command_status = false;
         }
         if matches!(action, Action::ClearSelection | Action::SelectProfile(_)) {
-            self.ui.selected_sketch = None;
+            self.doc.selected_sketch = None;
         }
-        for effect in self.interaction.dispatch(action) {
+        for effect in self.doc.interaction.dispatch(action) {
             self.effect(effect);
         }
-        if self.document_state.as_ref().is_none_or(|state| {
-            self.interaction
+        if self.doc.document_state.as_ref().is_none_or(|state| {
+            self.doc
+                .interaction
                 .context
                 .as_ref()
                 .is_some_and(|context| context.runtime_session == state.runtime_session)
         }) {
-            self.diagnostics.model(&self.interaction.status);
+            self.doc.diagnostics.model(&self.doc.interaction.status);
         }
         if let CommitStatus::Rejected(reason)
         | CommitStatus::CompletionUnavailable {
             message: reason, ..
-        } = &self.interaction.status
+        } = &self.doc.interaction.status
         {
             crate::input_trace::app(
                 self,
@@ -233,10 +182,10 @@ impl App {
                 serde_json::json!({"reason": crate::input_trace::bounded_id(reason)}),
             );
         }
-        if self.interaction.tool.is_none()
-            && let Some(id) = self.numeric_id.take()
+        if self.doc.interaction.tool.is_none()
+            && let Some(id) = self.doc.numeric_id.take()
         {
-            self.bridge.shared.release_text_focus(id);
+            self.doc.bridge.shared.release_text_focus(id);
         }
     }
 
@@ -246,7 +195,7 @@ impl App {
                 tag,
                 expression,
                 site,
-            } => self.bridge.candidate(Candidate::Evaluate {
+            } => self.doc.bridge.candidate(Candidate::Evaluate {
                 tag,
                 expression,
                 site,
@@ -256,22 +205,22 @@ impl App {
                 operation,
                 sketch_id,
                 expected_snapshot,
-            } => self.bridge.candidate(Candidate::Preview {
+            } => self.doc.bridge.candidate(Candidate::Preview {
                 tag,
                 operation,
                 sketch_id: sketch_id.map(|id| id.to_string()),
                 snapshot: expected_snapshot,
             }),
             Effect::ClearPreview { .. } => {
-                self.bridge.cancel_candidates();
-                self.sections.cancel_preview();
-                self.pending_preview = None;
-                self.received_preview = None;
-                self.clear_preview = true;
+                self.doc.bridge.cancel_candidates();
+                self.doc.sections.cancel_preview();
+                self.doc.pending_preview = None;
+                self.doc.received_preview = None;
+                self.doc.clear_preview = true;
             }
             Effect::PublishPreview { tag, .. } => {
-                if let Some(preview) = self.received_preview.take() {
-                    self.pending_preview = Some((tag, preview));
+                if let Some(preview) = self.doc.received_preview.take() {
+                    self.doc.pending_preview = Some((tag, preview));
                 }
             }
             Effect::ApplyOperation {
@@ -279,11 +228,11 @@ impl App {
                 command,
                 hide_sketch,
             } => {
-                self.bridge.cancel_candidates();
-                self.sections.cancel_preview();
-                self.pending_preview = None;
-                self.clear_preview = true;
-                if let Err(message) = self.bridge.submit(Command::Apply {
+                self.doc.bridge.cancel_candidates();
+                self.doc.sections.cancel_preview();
+                self.doc.pending_preview = None;
+                self.doc.clear_preview = true;
+                if let Err(message) = self.doc.bridge.submit(Command::Apply {
                     tag: tag.clone(),
                     command,
                     hide_sketch: hide_sketch.map(|id| id.to_string()),
@@ -299,39 +248,40 @@ impl App {
             command = crate::bridge::command_name(&command),
             "Native model command requested"
         );
-        if self.documents.running || self.documents.confirm.is_some() {
-            self.status = "Finish the file action before editing the document".into();
+        if self.doc.documents.running || self.doc.documents.confirm.is_some() {
+            self.doc.status = "Finish the file action before editing the document".into();
             return;
         }
-        self.command_status = true;
-        self.status = format!("{} pending…", crate::bridge::command_name(&command));
+        self.doc.command_status = true;
+        self.doc.status = format!("{} pending…", crate::bridge::command_name(&command));
         if matches!(command, Command::Undo | Command::Redo) && self.sketch_active() {
-            self.status =
+            self.doc.status =
                 "Finish sketch before using model history; sketch undo is not implemented".into();
             return;
         }
-        if matches!(command, Command::Undo | Command::Redo) && !self.bridge.valid() {
-            self.status = "Geometry unavailable; history controls are disabled".into();
+        if matches!(command, Command::Undo | Command::Redo) && !self.doc.bridge.valid() {
+            self.doc.status = "Geometry unavailable; history controls are disabled".into();
             return;
         }
         let history = matches!(command, Command::Undo | Command::Redo);
-        match self.bridge.submit(command) {
-            Ok(()) if history => self.authoring_dirty = true,
+        match self.doc.bridge.submit(command) {
+            Ok(()) if history => self.doc.authoring_dirty = true,
             Ok(()) => {}
-            Err(error) => self.status = error,
+            Err(error) => self.doc.status = error,
         }
     }
 
     pub fn poll(&mut self, ctx: &egui::Context) {
+        crate::documents::set_current_tab(self.doc.tab);
         self.poll_device_failure();
         self.sync_document_state();
-        if let Some(display) = self.bridge.take_display()
-            && self.bridge.shared.accept_display(&display)
+        if let Some(display) = self.doc.bridge.take_display()
+            && self.doc.bridge.shared.accept_display(&display)
         {
             self.adopt_display(display);
         }
-        if let Some(delivery) = self.bridge.take_candidate() {
-            self.received_preview = delivery
+        if let Some(delivery) = self.doc.bridge.take_candidate() {
+            self.doc.received_preview = delivery
                 .prepared
                 .zip(delivery.lease)
                 .zip(delivery.scene)
@@ -345,15 +295,13 @@ impl App {
                     },
                 );
             self.dispatch(delivery.action);
-            self.received_preview = None;
+            self.doc.received_preview = None;
         }
         // Command permits bound accepted plus terminal messages to at most 16; drain fairly each frame.
-        while let Ok(message) = self.bridge.messages.try_recv() {
-            self.sync_document_state();
-            self.message(message, ctx);
-        }
+        self.drain_messages(ctx);
         self.sync_document_state();
         let failure = self
+            .doc
             .bridge
             .shared
             .failure
@@ -361,21 +309,22 @@ impl App {
             .ok()
             .and_then(|mut value| value.take());
         if let Some(error) = failure {
-            self.status = error;
-            self.diagnostics.record(
+            self.doc.status = error;
+            self.doc.diagnostics.record(
                 crate::diagnostics::Source::Worker,
                 crate::diagnostics::State::Failed,
-                &self.status,
+                &self.doc.status,
             );
-            self.bridge.cancel_candidates();
-            self.interaction.selection = None;
-            self.pending_preview = None;
-            self.clear_preview = true;
-            self.selected_body = None;
-            self.topology.invalidate_pending();
-            self.transform_gizmo = Default::default();
+            self.doc.bridge.cancel_candidates();
+            self.doc.interaction.selection = None;
+            self.doc.pending_preview = None;
+            self.doc.clear_preview = true;
+            self.doc.selected_body = None;
+            self.doc.topology.invalidate_pending();
+            self.doc.transform_gizmo = Default::default();
             self.draw_dirty = true;
         }
+        self.drain_parked(ctx);
     }
 
     pub fn viewport_ready(&self) -> bool {
@@ -384,21 +333,21 @@ impl App {
 
     pub fn fail_viewport(&mut self, error: String) {
         self.cancel_sketch_gesture();
-        self.status = format!("Viewport unavailable: {error}; Save remains available");
-        self.diagnostics.record(
+        self.doc.status = format!("Viewport unavailable: {error}; Save remains available");
+        self.doc.diagnostics.record(
             crate::diagnostics::Source::Viewport,
             crate::diagnostics::State::Failed,
-            &self.status,
+            &self.doc.status,
         );
         self.viewport_failure = Some(error);
-        self.view = None;
-        self.bridge.cancel_candidates();
-        self.sections.cancel();
+        self.doc.view = None;
+        self.doc.bridge.cancel_candidates();
+        self.doc.sections.cancel();
         self.dispatch(Action::Cancel);
-        self.interaction.selection = None;
-        self.selected_body = None;
-        self.topology.invalidate_pending();
-        self.transform_gizmo = Default::default();
+        self.doc.interaction.selection = None;
+        self.doc.selected_body = None;
+        self.doc.topology.invalidate_pending();
+        self.doc.transform_gizmo = Default::default();
     }
 
     pub fn poll_device_failure(&mut self) {
@@ -409,12 +358,13 @@ impl App {
             .and_then(|mut slot| slot.take());
         if let Some(error) = failure {
             self.fail_viewport(error);
-            self.bridge.shared.recovery_flush.notify_one();
+            self.doc.bridge.shared.recovery_flush.notify_one();
         }
     }
 
     pub fn adopt_display(&mut self, display: Arc<Display>) {
-        self.bridge
+        self.doc
+            .bridge
             .shared
             .input_trace
             .capture("host.capture_adopt", &display);
@@ -426,6 +376,7 @@ impl App {
             applied_ops = projection.applied_ops, bodies = projection.bodies.len(),
             "Native document adopted");
         let changed = self
+            .doc
             .display
             .as_ref()
             .is_none_or(|old| old.context.runtime_session != display.context.runtime_session);
@@ -443,33 +394,35 @@ impl App {
         self.sync_sketch_gesture();
         if changed {
             crate::document_items::reset(self);
-            self.ui.selected_sketch = None;
-            self.selected_body = None;
-            self.selected_feature = None;
-            self.topology.invalidate_pending();
-            self.transform_gizmo = Default::default();
-            self.fit_pending = true;
+            self.doc.selected_sketch = None;
+            self.doc.selected_body = None;
+            self.doc.selected_feature = None;
+            self.doc.topology.invalidate_pending();
+            self.doc.transform_gizmo = Default::default();
+            self.doc.fit_pending = true;
         }
-        self.diagnostics
-            .runtime(&display.context.runtime_session, &self.status);
-        crate::profile_diagnostics::record_display_failures(&mut self.diagnostics, &display);
+        self.doc
+            .diagnostics
+            .runtime(&display.context.runtime_session, &self.doc.status);
+        crate::profile_diagnostics::record_display_failures(&mut self.doc.diagnostics, &display);
         crate::item_selection::reconcile(self, &display);
-        self.display = Some(display);
+        self.doc.display = Some(display);
         crate::item_selection::refresh(self);
     }
 
     fn model_delivery_current(&self, tag: &RequestTag) -> bool {
         if self
+            .doc
             .document_state
             .as_ref()
             .is_some_and(|state| state.runtime_session != tag.context.runtime_session)
         {
             return false;
         }
-        if let Some(tool) = &self.interaction.tool {
+        if let Some(tool) = &self.doc.interaction.tool {
             return tool.tag == *tag;
         }
-        match &self.interaction.status {
+        match &self.doc.interaction.status {
             CommitStatus::Pending(current)
             | CommitStatus::Accepted { tag: current, .. }
             | CommitStatus::Completed { tag: current, .. }
@@ -479,7 +432,7 @@ impl App {
     }
 
     pub(crate) fn message(&mut self, message: Message, ctx: &egui::Context) {
-        if self.bridge.shared.input_trace.enabled() {
+        if self.doc.bridge.shared.input_trace.enabled() {
             crate::input_trace::app(
                 self,
                 "service.delivery_received",
@@ -494,11 +447,11 @@ impl App {
             Message::Gesture { delivery, .. } => self.gesture_delivery(*delivery),
             Message::Sketch { delivery, .. } => {
                 self.finish_sketch_candidate(delivery.tag.as_ref());
-                let current = delivery.tag.as_ref().is_none_or(|tag| {
-                    self.document_state
-                        .as_ref()
-                        .is_none_or(|state| state.runtime_session == tag.document.runtime_session)
-                        && self.sketch.session.as_ref().is_some_and(|session| {
+                let current =
+                    delivery.tag.as_ref().is_none_or(|tag| {
+                        self.doc.document_state.as_ref().is_none_or(|state| {
+                            state.runtime_session == tag.document.runtime_session
+                        }) && self.doc.sketch.session.as_ref().is_some_and(|session| {
                             session.request == *tag
                                 && !matches!(
                                     session.phase,
@@ -507,9 +460,9 @@ impl App {
                                         | onecad_interaction::sketch::SketchPhase::Faulted
                                 )
                         })
-                });
+                    });
                 if let Some(display) = delivery.display.clone() {
-                    if self.bridge.shared.accept_display(&display) {
+                    if self.doc.bridge.shared.accept_display(&display) {
                         self.adopt_display(display);
                     } else {
                         for action in delivery.stale_actions() {
@@ -522,20 +475,39 @@ impl App {
                     self.sketch_dispatch(action);
                 }
                 if let Some(error) = delivery.error.filter(|_| current) {
-                    self.status = error;
+                    self.doc.status = error;
                 }
             }
             Message::StartupFailed(error) => {
-                self.status = error;
-                self.diagnostics.record(
+                self.doc.status = error;
+                self.doc.diagnostics.record(
                     crate::diagnostics::Source::Worker,
                     crate::diagnostics::State::Failed,
-                    &self.status,
+                    &self.doc.status,
                 );
             }
             Message::Stopped => {
-                self.may_close = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                self.doc.stopped = true;
+                // A closed tab stops alone; the window closes once every host stopped.
+                if self.stopping && self.all_tabs_stopped() {
+                    self.may_close = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+            Message::Prepared {
+                identity, result, ..
+            } => self.adopt_prepared(identity, result),
+            Message::Changes {
+                runtime_session,
+                changes,
+                ..
+            } => {
+                let current = self
+                    .doc
+                    .document_state
+                    .as_ref()
+                    .is_some_and(|state| state.runtime_session == runtime_session);
+                self.doc.close_changes = current.then_some(changes);
             }
             Message::Accepted {
                 tag,
@@ -544,7 +516,7 @@ impl App {
             } => {
                 let current = self.model_delivery_current(&tag);
                 if current {
-                    self.command_status = true;
+                    self.doc.command_status = true;
                 }
                 self.dispatch(Action::CommitAccepted {
                     tag,
@@ -552,7 +524,7 @@ impl App {
                     rollback_token,
                 });
                 if current {
-                    self.status = "Regenerating feature…".into();
+                    self.doc.status = "Regenerating feature…".into();
                 }
             }
             Message::Terminal {
@@ -565,9 +537,9 @@ impl App {
                     .as_ref()
                     .is_none_or(|tag| self.model_delivery_current(tag));
                 if current {
-                    self.command_status = true;
+                    self.doc.command_status = true;
                 }
-                if matches!(command, "Open" | "Recovery") {
+                if matches!(command, "Open" | "Recovery") && !self.parked {
                     self.ui.start_open = !self.document_open();
                 }
                 match result {
@@ -614,9 +586,9 @@ impl App {
                             status = format!("{}; {}", status, rollback.explanation());
                         }
                         if current {
-                            self.status = status;
+                            self.doc.status = status;
                         }
-                        if self.interaction.tool.as_ref().is_some_and(|tool| {
+                        if self.doc.interaction.tool.as_ref().is_some_and(|tool| {
                             tool.phase == onecad_interaction::SessionPhase::Completed
                         }) {
                             self.dispatch(Action::Cancel);
@@ -624,7 +596,8 @@ impl App {
                     }
                     Err(error) => {
                         if let Some(tag) = tag {
-                            if matches!(self.interaction.status, CommitStatus::Accepted { .. }) {
+                            if matches!(self.doc.interaction.status, CommitStatus::Accepted { .. })
+                            {
                                 self.dispatch(Action::CompletionUnavailable {
                                     tag,
                                     message: error.clone(),
@@ -636,13 +609,13 @@ impl App {
                                 });
                             }
                         }
-                        if self.interaction.tool.as_ref().is_some_and(|tool| {
+                        if self.doc.interaction.tool.as_ref().is_some_and(|tool| {
                             tool.phase == onecad_interaction::SessionPhase::Completed
                         }) {
                             self.dispatch(Action::Cancel);
                         }
                         if current {
-                            self.status = error;
+                            self.doc.status = error;
                         }
                     }
                 }
@@ -653,32 +626,67 @@ impl App {
     pub fn stop_discard(&mut self) {
         self.sync_document_state();
         let session = self
+            .doc
             .document_state
             .as_ref()
             .map(|state| state.runtime_session.clone());
         self.stopping = true;
-        self.bridge.cancel_candidates();
+        self.doc.bridge.cancel_candidates();
         if let Some(session) = session.filter(|session| !session.is_empty()) {
-            self.bridge.request_discard_shutdown(&session);
+            self.doc.bridge.request_discard_shutdown(&session);
         } else {
-            self.bridge.request_shutdown();
+            self.doc.bridge.request_shutdown();
         }
+        self.stop_all_tabs();
     }
     pub fn stop(&mut self) {
         self.stopping = true;
-        self.bridge.cancel_candidates();
-        self.bridge.request_shutdown();
+        self.doc.bridge.cancel_candidates();
+        self.doc.bridge.request_shutdown();
+        self.stop_all_tabs();
+    }
+
+    /// A re-prepared scene for the current display (tab activation).
+    fn adopt_prepared(
+        &mut self,
+        identity: onecad_scene::SceneIdentity,
+        result: Result<onecad_render::PreparedScene, String>,
+    ) {
+        // Only the reply the editor is waiting for: a duplicate or superseded one
+        // must not park a second prepared scene in an already-drawn display.
+        if self.doc.prepare_in_flight != Some(identity) {
+            return;
+        }
+        self.doc.prepare_in_flight = None;
+        let Some(display) = self
+            .doc
+            .display
+            .as_ref()
+            .filter(|display| display.scene.identity() == identity)
+        else {
+            return; // A newer display superseded the scene this was prepared for.
+        };
+        match result {
+            Ok(prepared) => {
+                if let Ok(mut slot) = display.prepared.lock() {
+                    slot.get_or_insert(prepared);
+                }
+                self.draw_dirty = true;
+            }
+            Err(error) => self.display_unavailable(error),
+        }
     }
     pub fn busy(&self) -> bool {
-        self.items.blocks()
+        self.doc.items.blocks()
             || matches!(
-                self.interaction.status,
+                self.doc.interaction.status,
                 CommitStatus::Pending(_) | CommitStatus::Accepted { .. }
             )
             || self.stopping
-            || self.documents.running
-            || self.documents.confirm.is_some()
+            || self.doc.documents.running
+            || self.doc.documents.confirm.is_some()
             || self
+                .doc
                 .bridge
                 .shared
                 .recovery
@@ -707,7 +715,7 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
         if let Err(error) = self.settings.save_if_changed(&self.ui) {
-            self.status = format!("Settings: {error}");
+            self.doc.status = format!("Settings: {error}");
         }
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -732,6 +740,7 @@ impl eframe::App for App {
             crate::viewport::show(self, ui);
         }
         crate::component_wizard::show(self, &ctx);
+        crate::tab_switcher::show(self, &ctx);
         crate::shell::close_prompt(self, &ctx);
     }
 }

@@ -45,14 +45,22 @@ impl Request {
 #[derive(Debug)]
 pub enum Outcome {
     Cancelled,
-    Replaced { warning: Option<String> },
+    Replaced {
+        warning: Option<String>,
+    },
     Saved(SaveOutcomeDto),
     Exported(PathBuf),
+    /// The file (or a copy with its identity) is open in another document host.
+    AlreadyOpen {
+        host: onecad_app::process::HostId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Pending {
     Document(Request),
+    /// Close the active document's tab.
+    CloseTab,
     Quit,
 }
 
@@ -141,9 +149,13 @@ impl crate::app::App {
             );
             return;
         }
-        let recovery_ready = self.bridge.shared.recovery.lock().is_ok_and(|recovery| {
-            recovery.opened || (recovery.checked && recovery.offers.is_empty())
-        });
+        let recovery_ready = self
+            .doc
+            .bridge
+            .shared
+            .recovery
+            .lock()
+            .is_ok_and(|recovery| recovery.ready());
         if !recovery_ready {
             self.file_status(action, "Resolve startup recovery before using file actions");
             return;
@@ -155,18 +167,29 @@ impl crate::app::App {
             );
             return;
         }
+        if request.replaces_document() && self.document_open() {
+            // Opening never replaces an open document: it gets a tab of its own.
+            let origin = self.doc.tab;
+            if let Err(error) = self.open_tab() {
+                self.file_status(action, &error);
+                return;
+            }
+            self.doc.origin = Some(origin);
+            self.launch_document(Pending::Document(request));
+            return;
+        }
         let pending = Pending::Document(request);
         if needs_confirmation(&pending, self.document_dirty()) {
-            self.documents.confirm = Some(pending);
+            self.doc.documents.confirm = Some(pending);
         } else {
             self.launch_document(pending);
         }
     }
 
     fn file_status(&mut self, action: crate::diagnostics::FileAction, message: &str) {
-        self.command_status = true;
-        self.status = message.into();
-        self.diagnostics.record(
+        self.doc.command_status = true;
+        self.doc.status = message.into();
+        self.doc.diagnostics.record(
             crate::diagnostics::Source::File(action),
             crate::diagnostics::State::Rejected,
             message,
@@ -174,43 +197,53 @@ impl crate::app::App {
     }
 
     fn launch_document(&mut self, pending: Pending) {
-        let Pending::Document(request) = pending else {
-            self.stop();
-            return;
+        let request = match pending {
+            Pending::Document(request) => request,
+            Pending::CloseTab => {
+                self.close_tab_now(None);
+                return;
+            }
+            // Re-evaluated: the next document needing a decision is prompted,
+            // or every host stops once none does.
+            Pending::Quit => {
+                self.close_prompt = true;
+                return;
+            }
         };
-        self.documents.recovery_sketch_save =
+        self.doc.documents.recovery_sketch_save =
             matches!(request, Request::Save { .. }) && crate::bars::recovery_sketch_save(self);
-        self.documents.running = true;
-        self.documents.diagnostic_action = Some(request.diagnostic_action());
-        self.command_status = true;
-        self.status = "File action pending…".into();
-        self.diagnostics.record(
+        self.doc.documents.running = true;
+        self.doc.documents.diagnostic_action = Some(request.diagnostic_action());
+        self.doc.command_status = true;
+        self.doc.status = "File action pending…".into();
+        self.doc.diagnostics.record(
             crate::diagnostics::Source::File(request.diagnostic_action()),
             crate::diagnostics::State::Pending,
-            &self.status,
+            &self.doc.status,
         );
         if let Err(error) = self
+            .doc
             .bridge
             .submit(crate::bridge::Command::Document(request))
         {
-            self.documents.running = false;
-            self.documents.after_save = None;
-            self.status = error;
-            if let Some(action) = self.documents.diagnostic_action.take() {
-                self.diagnostics.record(
+            self.doc.documents.running = false;
+            self.doc.documents.after_save = None;
+            self.doc.status = error;
+            if let Some(action) = self.doc.documents.diagnostic_action.take() {
+                self.doc.diagnostics.record(
                     crate::diagnostics::Source::File(action),
                     crate::diagnostics::State::Failed,
-                    &self.status,
+                    &self.doc.status,
                 );
             }
         }
     }
 
     pub(crate) fn document_finished(&mut self, result: Result<Outcome, String>) {
-        let recovery_save = std::mem::take(&mut self.documents.recovery_sketch_save);
+        let recovery_save = std::mem::take(&mut self.doc.documents.recovery_sketch_save);
         tracing::info!(?result, "native file delivery");
-        self.command_status = true;
-        let action = self.documents.diagnostic_action.take();
+        self.doc.command_status = true;
+        let action = self.doc.documents.diagnostic_action.take();
         let diagnostic_state = match &result {
             Err(_) => crate::diagnostics::State::Failed,
             Ok(Outcome::Cancelled) => crate::diagnostics::State::Cancelled,
@@ -218,18 +251,28 @@ impl crate::app::App {
             Ok(Outcome::Saved(saved)) if !saved.clean => crate::diagnostics::State::Warning,
             _ => crate::diagnostics::State::Succeeded,
         };
-        let next = self.documents.complete(&result);
+        let next = self.doc.documents.complete(&result);
         match result {
-            Ok(Outcome::Cancelled) => self.status = "File action cancelled".into(),
+            Ok(Outcome::Cancelled) => {
+                self.doc.status = "File action cancelled".into();
+                self.settle_provisional_tab(None);
+            }
+            Ok(Outcome::AlreadyOpen { host }) => {
+                self.doc.status = "That document is already open".into();
+                self.settle_provisional_tab(Some(host));
+            }
             Ok(Outcome::Replaced { warning }) => {
-                self.ui.start_open = false;
-                self.status = warning.unwrap_or_else(|| "Document opened".into());
+                if !self.parked {
+                    self.ui.start_open = false;
+                }
+                self.doc.status = warning.unwrap_or_else(|| "Document opened".into());
+                self.doc.origin = None;
                 self.draw_dirty = true;
             }
             Ok(Outcome::Saved(saved)) => {
                 if saved.clean {
-                    self.authoring_dirty = false;
-                    self.status = if recovery_save {
+                    self.doc.authoring_dirty = false;
+                    self.doc.status = if recovery_save {
                         format!(
                             "Saved accepted sketch recovery for {}. Finish the sketch to regenerate its features.",
                             saved.title
@@ -238,17 +281,21 @@ impl crate::app::App {
                         format!("Saved {}", saved.title)
                     };
                 } else {
-                    self.status = format!("Saved {} — newer changes remain unsaved", saved.title);
+                    self.doc.status =
+                        format!("Saved {} — newer changes remain unsaved", saved.title);
                 }
             }
-            Ok(Outcome::Exported(path)) => self.status = format!("Exported {}", path.display()),
-            Err(error) => self.status = error,
+            Ok(Outcome::Exported(path)) => self.doc.status = format!("Exported {}", path.display()),
+            Err(error) => {
+                self.doc.status = error;
+                self.settle_provisional_tab(None);
+            }
         }
         if let Some(action) = action {
-            self.diagnostics.record(
+            self.doc.diagnostics.record(
                 crate::diagnostics::Source::File(action),
                 diagnostic_state,
-                &self.status,
+                &self.doc.status,
             );
         }
         if let Some(next) = next {
@@ -260,16 +307,49 @@ impl crate::app::App {
 pub(crate) fn needs_confirmation(pending: &Pending, dirty: bool) -> bool {
     dirty
         && match pending {
-            Pending::Quit => true,
+            Pending::Quit | Pending::CloseTab => true,
             Pending::Document(request) => request.replaces_document(),
         }
+}
+
+/// The runtime session the user's discard decision names.
+fn discard_session(app: &crate::app::App) -> Option<String> {
+    app.doc
+        .document_state
+        .as_ref()
+        .map(|state| state.runtime_session.clone())
+        .filter(|session| !session.is_empty())
+}
+
+impl crate::app::App {
+    /// Closes the active tab, asking first when it holds unsaved work, an open
+    /// sketch or an active tool.
+    pub fn request_close_tab(&mut self) {
+        self.sync_document_state();
+        if self.busy() {
+            self.doc.status = "Wait for the current command before closing".into();
+            return;
+        }
+        if self.doc.needs_close_decision() {
+            self.doc.documents.confirm = Some(Pending::CloseTab);
+            self.describe_changes();
+        } else {
+            self.close_tab_now(None);
+        }
+    }
+
+    fn close_tab_now(&mut self, discard: Option<&str>) {
+        if let Err(error) = self.close_active_tab(discard) {
+            self.doc.status = format!("Close document: {error}");
+        }
+    }
 }
 
 pub(crate) fn tool_blocks_request(app: &crate::app::App, request: &Request) -> bool {
     let recovery_save =
         matches!(request, Request::Save { .. }) && crate::bars::recovery_sketch_save(app);
     app.sketch_active() && !recovery_save
-        || request.replaces_document() && app.interaction.tool.is_some()
+        || request.replaces_document() && app.doc.interaction.tool.is_some()
 }
 
 /// Runs without presentation so hidden windows still drain work and protect dirty close.
@@ -279,17 +359,30 @@ pub fn prepare_close(app: &mut crate::app::App) -> bool {
         return false;
     }
     app.close_prompt = false;
-    if app.document_dirty() || app.sketch_active() || app.interaction.tool.is_some() {
-        app.documents.confirm = Some(Pending::Quit);
-        true
-    } else {
-        app.stop();
-        false
+    if !app.doc.needs_close_decision() {
+        // Quit decides document by document: bring the next undecided one forward.
+        let Some(tab) = app
+            .tabs
+            .parked
+            .iter()
+            .find(|doc| doc.needs_close_decision())
+            .map(|doc| doc.tab)
+        else {
+            app.stop();
+            return false;
+        };
+        app.activate_tab(tab);
     }
+    app.doc.documents.confirm = Some(Pending::Quit);
+    app.describe_changes();
+    true
 }
 
 pub fn close_prompt(app: &mut crate::app::App, ctx: &egui::Context) {
-    if app.documents.confirm.is_none() {
+    if app.doc.documents.confirm.is_none() {
+        return;
+    }
+    if tab_close_prompt(app, ctx) {
         return;
     }
     let out = Dialog::new(DialogIntent::Decide, "Save changes before continuing?")
@@ -311,17 +404,67 @@ pub fn close_prompt(app: &mut crate::app::App, ctx: &egui::Context) {
     apply_close_choice(app, choice);
 }
 
+/// Closing (or quitting with) a document that has a visible tab asks on the tab
+/// itself, listing what would be lost. Returns `false` when there is no tab to
+/// anchor to, and the window-wide dialog asks instead.
+fn tab_close_prompt(app: &mut crate::app::App, ctx: &egui::Context) -> bool {
+    if !matches!(
+        app.doc.documents.confirm,
+        Some(Pending::CloseTab | Pending::Quit)
+    ) || app.ui.start_open
+    {
+        return false;
+    }
+    let Some(anchor) = app
+        .tab_rects
+        .iter()
+        .find(|(tab, _)| *tab == app.doc.tab)
+        .map(|(_, rect)| *rect)
+    else {
+        return false;
+    };
+    let title = app.doc.editor_title();
+    let body = crate::documents::changes_text(app.doc.close_changes.as_ref());
+    let out = onecad_widgets::components::overlays::TabClosePopover::new(&title, anchor)
+        .body(Some(&body))
+        .saving(app.doc.documents.running || app.sketch_active())
+        .show(ctx, egui::Id::unique("document-tab-close"));
+    let choice = if out.save {
+        Some(0)
+    } else if out.discard {
+        Some(1)
+    } else if out.cancel {
+        Some(2)
+    } else {
+        None
+    };
+    apply_close_choice(app, choice);
+    true
+}
+
 pub(crate) fn apply_close_choice(app: &mut crate::app::App, choice: Option<u8>) {
     match choice {
         Some(0) => {
-            app.documents.after_save = app.documents.confirm.take();
+            app.doc.documents.after_save = app.doc.documents.confirm.take();
             app.launch_document(Pending::Document(Request::Save { save_as: false }));
         }
         Some(1) => {
-            if let Some(pending) = app.documents.confirm.take() {
+            if let Some(pending) = app.doc.documents.confirm.take() {
                 let pending = match pending {
                     Pending::Document(request) => {
                         Pending::Document(Request::DiscardAndReplace(Box::new(request)))
+                    }
+                    Pending::CloseTab => {
+                        app.close_tab_now(discard_session(app).as_deref());
+                        return;
+                    }
+                    Pending::Quit
+                        if app.tabs.parked.iter().any(|doc| doc.needs_close_decision()) =>
+                    {
+                        // Discard this one; the quit continues with the next document.
+                        app.close_tab_now(discard_session(app).as_deref());
+                        app.close_prompt = true;
+                        return;
                     }
                     Pending::Quit => {
                         app.stop_discard();
@@ -331,7 +474,7 @@ pub(crate) fn apply_close_choice(app: &mut crate::app::App, choice: Option<u8>) 
                 app.launch_document(pending);
             }
         }
-        Some(2) => app.documents.confirm = None,
+        Some(2) => app.doc.documents.confirm = None,
         _ => {}
     }
 }

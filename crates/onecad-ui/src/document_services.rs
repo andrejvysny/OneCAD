@@ -73,10 +73,11 @@ pub fn refresh_recents(backend: &Backend) {
 }
 
 async fn run(backend: &mut Backend, request: Request) -> Result<Outcome, String> {
-    let recovery_ready =
-        backend.shared.recovery.lock().is_ok_and(|recovery| {
-            recovery.opened || (recovery.checked && recovery.offers.is_empty())
-        });
+    let recovery_ready = backend
+        .shared
+        .recovery
+        .lock()
+        .is_ok_and(|recovery| recovery.ready());
     if !recovery_ready {
         return Err("Resolve startup recovery before using file actions".into());
     }
@@ -182,6 +183,16 @@ async fn open(backend: &mut Backend, source: &Path, import: bool) -> Result<Outc
     if backend.state.has_pending_recovery_for_path(source) {
         return Err("Resolve pending recovery before opening this document".into());
     }
+    // The isolated QA copy gets a fresh path, so ownership is decided on the source.
+    if let Some(host) = backend
+        .state
+        .services()
+        .reservations()
+        .path_owner(source)
+        .filter(|host| *host != backend.state.host_id())
+    {
+        return Ok(Outcome::AlreadyOpen { host });
+    }
     let before = api::get_projection(&backend.state)
         .await
         .map_err(|e| e.to_string())?;
@@ -195,12 +206,32 @@ async fn open(backend: &mut Backend, source: &Path, import: bool) -> Result<Outc
     } else {
         copy_for_open(&backend.paths.root.join("documents"), source)?
     };
-    replace_from_path(backend, &path, step).await?;
+    match replace_from_path(backend, &path, step).await {
+        Err(onecad_app::error::ApiError::AlreadyOpen { host, .. })
+        | Err(onecad_app::error::ApiError::DuplicateDocument { host, .. }) => {
+            return Ok(Outcome::AlreadyOpen { host });
+        }
+        Err(error) => return Err(error.to_string()),
+        Ok(()) => {}
+    }
+    if path != source {
+        // The source is what the user opened: it stays owned while the copy is open.
+        backend.state.add_claim(
+            backend
+                .state
+                .claim_path(source)
+                .map_err(|e| e.to_string())?,
+        );
+    }
     backend.startup_opened = true;
     replacement_outcome(backend).await
 }
 
-async fn replace_from_path(backend: &Backend, path: &Path, step: bool) -> Result<(), String> {
+async fn replace_from_path(
+    backend: &Backend,
+    path: &Path,
+    step: bool,
+) -> Result<(), onecad_app::error::ApiError> {
     if step {
         api::import_step(
             &backend.state,
@@ -216,8 +247,7 @@ async fn replace_from_path(backend: &Backend, path: &Path, step: bool) -> Result
             None,
         )
         .await
-    }
-    .map_err(|e| e.to_string())?;
+    }?;
     Ok(())
 }
 

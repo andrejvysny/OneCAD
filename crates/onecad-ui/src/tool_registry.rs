@@ -276,7 +276,7 @@ pub fn pill_tools(kind: SelectionKind) -> &'static [&'static [ToolDef]] {
 
 /// The running model tool, including saved-feature parameter edits.
 pub fn running_tool(app: &App) -> Option<ToolId> {
-    let tool = app.interaction.tool.as_ref()?;
+    let tool = app.doc.interaction.tool.as_ref()?;
     match tool.record.op {
         Operation::Known(KnownOperation::Extrude(_)) => Some(ToolId::Extrude),
         Operation::Known(KnownOperation::TransformBody(_)) => Some(ToolId::MoveRotate),
@@ -316,7 +316,7 @@ pub fn operation_icon(op_type: &str) -> &'static str {
 }
 
 pub fn running_definition(app: &App) -> Option<ToolDef> {
-    let op = &app.interaction.tool.as_ref()?.record.op;
+    let op = &app.doc.interaction.tool.as_ref()?.record.op;
     let label = match op.op_type() {
         "Sketch" => "Sketch",
         "Extrude" => "Extrude",
@@ -346,6 +346,7 @@ pub fn running_definition(app: &App) -> Option<ToolDef> {
 pub fn selection_kind(app: &App) -> SelectionKind {
     if app.sketch_active() {
         let entity = app
+            .doc
             .sketch
             .session
             .as_ref()
@@ -363,17 +364,17 @@ pub fn selection_kind(app: &App) -> SelectionKind {
             SelectionKind::Region
         };
     }
-    if app.interaction.selection.is_some() {
+    if app.doc.interaction.selection.is_some() {
         return SelectionKind::Region;
     }
-    match app.topology.selected_kind() {
+    match app.doc.topology.selected_kind() {
         Some((HighlightKind::Face, _)) => return SelectionKind::Face,
         Some((HighlightKind::Edge, _)) => return SelectionKind::Edge,
         None => {}
     }
-    if app.selected_feature.is_some() {
+    if app.doc.selected_feature.is_some() {
         SelectionKind::Feature
-    } else if app.selected_body.is_some() {
+    } else if app.doc.selected_body.is_some() {
         SelectionKind::Body
     } else {
         SelectionKind::None

@@ -43,7 +43,7 @@ struct Draft {
 }
 
 fn id() -> egui::Id {
-    egui::Id::unique("sketch-numeric-creation")
+    crate::documents::scoped_id("sketch-numeric-creation")
 }
 
 pub(crate) fn capture_viewport(ctx: &Context, rect: egui::Rect) {
@@ -58,9 +58,10 @@ fn viewport_bounds(ctx: &Context) -> egui::Rect {
 
 fn project(app: &App, ctx: &Context, point: Vec2) -> Option<egui::Pos2> {
     let rect = viewport_bounds(ctx);
-    let session = app.sketch.session.as_ref()?;
+    let session = app.doc.sketch.session.as_ref()?;
     let world = session.plane.to_world(point);
     let screen = app
+        .doc
         .view
         .as_ref()?
         .project(onecad_scene::DVec3::new(world.x, world.y, world.z))?;
@@ -84,6 +85,7 @@ pub(crate) fn open(app: &mut App, ctx: &Context) -> bool {
             draft.engaged = true;
             draft.focus = Some(0);
             draft.placement_anchor = app
+                .doc
                 .sketch
                 .session
                 .as_ref()
@@ -97,6 +99,7 @@ pub(crate) fn open(app: &mut App, ctx: &Context) -> bool {
         return false;
     }
     let seed = app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -105,7 +108,7 @@ pub(crate) fn open(app: &mut App, ctx: &Context) -> bool {
     if let Some(key) = seed {
         app.sketch_dispatch(SketchAction::BeginPointNumeric { key });
     }
-    let Some(session) = app.sketch.session.as_ref() else {
+    let Some(session) = app.doc.sketch.session.as_ref() else {
         return false;
     };
     let Some(draft) = &session.draft else {
@@ -164,7 +167,12 @@ pub(crate) fn availability(app: &App) -> Result<(), &'static str> {
     if !ready(app) {
         return Err("Sketch is not ready for numeric creation");
     }
-    let session = app.sketch.session.as_ref().ok_or("Open a sketch first")?;
+    let session = app
+        .doc
+        .sketch
+        .session
+        .as_ref()
+        .ok_or("Open a sketch first")?;
     match session.tool {
         SketchTool::Select => Err("Choose a creation tool"),
         SketchTool::Point => Ok(()),
@@ -196,15 +204,15 @@ pub(crate) fn route(app: &mut App, ctx: &Context, raw: &mut egui::RawInput) -> b
 }
 
 fn current(draft: &Draft, app: &App) -> bool {
-    if !app.viewport_ready() || !app.bridge.valid() {
+    if !app.viewport_ready() || !app.doc.bridge.valid() {
         return false;
     }
-    app.sketch.session.as_ref().is_some_and(|session| {
+    app.doc.sketch.session.as_ref().is_some_and(|session| {
         session.key == draft.key
             && session.draft_generation == draft.generation
             && session.tool == draft.tool
             && session.numeric_method() == draft.method
-            && app.sketch.context.as_ref() == Some(&session.document)
+            && app.doc.sketch.context.as_ref() == Some(&session.document)
             && session.draft.as_ref().is_some_and(|current| {
                 (draft.tool == SketchTool::Point || current.anchor == draft.anchor)
                     && current.secondary.as_ref().map(|anchor| anchor.point) == draft.secondary
@@ -225,8 +233,8 @@ fn current(draft: &Draft, app: &App) -> bool {
 
 fn ready(app: &App) -> bool {
     crate::sketch_ui::tools_enabled(app)
-        && app.sketch.session.as_ref().is_some_and(|session| {
-            app.view.as_ref().is_some_and(|view| {
+        && app.doc.sketch.session.as_ref().is_some_and(|session| {
+            app.doc.view.as_ref().is_some_and(|view| {
                 session.accepted_capture == Some(view.identity())
                     && session.document.scene == view.identity().scene
             })
@@ -240,6 +248,7 @@ pub(crate) fn show(app: &mut App, ctx: &Context) {
     }
     if ctx.data(|data| data.get_temp::<Draft>(id()).is_none())
         && app
+            .doc
             .sketch
             .session
             .as_ref()
@@ -264,7 +273,7 @@ pub(crate) fn show(app: &mut App, ctx: &Context) {
     if !current(&draft, app) {
         return;
     }
-    if let Some(session) = app.sketch.session.as_ref() {
+    if let Some(session) = app.doc.sketch.session.as_ref() {
         if draft.submission.is_some() && session.phase == SketchPhase::Active {
             if let SketchStatus::Refused(message) = &session.status {
                 draft.error = Some(message.clone());
@@ -302,6 +311,7 @@ pub(crate) fn show(app: &mut App, ctx: &Context) {
 fn cancel_editor(app: &mut App, draft: &Draft) {
     if draft.submission.is_some() {
         if let Some(tag) = app
+            .doc
             .sketch
             .session
             .as_ref()
@@ -310,7 +320,7 @@ fn cancel_editor(app: &mut App, draft: &Draft) {
             app.cancel_sketch_candidate(&tag);
         }
         app.sketch_dispatch(SketchAction::Escape);
-    } else if let Some(point) = app.sketch.session.as_ref().and_then(|session| {
+    } else if let Some(point) = app.doc.sketch.session.as_ref().and_then(|session| {
         Some(onecad_interaction::sketch::CapturedSketchPoint {
             key: session.key.clone(),
             capture: session.accepted_capture?,
@@ -326,6 +336,7 @@ fn preview(app: &mut App, draft: &Draft) {
         return;
     };
     let Some(capture) = app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -348,6 +359,7 @@ fn commit(app: &mut App, draft: &mut Draft) {
         return;
     };
     let Some(capture) = app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -371,7 +383,7 @@ fn commit(app: &mut App, draft: &mut Draft) {
             .map(|field| field.field)
             .collect(),
     });
-    if let Some(session) = app.sketch.session.as_ref() {
+    if let Some(session) = app.doc.sketch.session.as_ref() {
         if session.phase == SketchPhase::Submitting {
             draft.submission = Some(session.request.sequence);
         } else if let SketchStatus::Refused(message) = &session.status {
@@ -393,7 +405,7 @@ pub(crate) fn viewport(
     if !current(&draft, app) || draft.submission.is_some() {
         return;
     }
-    let Some(session) = app.sketch.session.as_ref() else {
+    let Some(session) = app.doc.sketch.session.as_ref() else {
         return;
     };
     let key = session.key.clone();
@@ -404,13 +416,13 @@ pub(crate) fn viewport(
         capture: view.identity(),
     });
     let blocked = app.composing
-        || app.documents.confirm.is_some()
+        || app.doc.documents.confirm.is_some()
         || crate::constraint_authoring::editor_open(ui.ctx())
-        || crate::input::ui_owns_keyboard(&app.ui, ui.ctx());
+        || crate::input::ui_owns_keyboard(&app.ui, app.doc.sketch_entry.open, ui.ctx());
     let Some(position) = pointer::canvas_position(ui, rect, blocked) else {
         return;
     };
-    let Some(session) = app.sketch.session.as_ref() else {
+    let Some(session) = app.doc.sketch.session.as_ref() else {
         return;
     };
     let logical = onecad_scene::DVec2::new(

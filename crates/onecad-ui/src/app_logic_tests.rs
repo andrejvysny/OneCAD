@@ -18,8 +18,12 @@ async fn occluded_app_logic_delivers_new_and_protects_close_without_ui() {
     let area = tempfile::tempdir().unwrap();
     let (mut app, context) = create_app(area.path()).await;
     let mut frame = eframe::Frame::_new_kittest();
-    pump_until(&mut app, &context, &mut frame, |app| app.display.is_some()).await;
+    pump_until(&mut app, &context, &mut frame, |app| {
+        app.doc.display.is_some()
+    })
+    .await;
     let initial = app
+        .doc
         .display
         .as_ref()
         .unwrap()
@@ -27,46 +31,59 @@ async fn occluded_app_logic_delivers_new_and_protects_close_without_ui() {
         .runtime_session
         .clone();
     app.document_request(Request::New);
-    assert!(app.documents.running);
-    pump_until(&mut app, &context, &mut frame, |app| !app.documents.running).await;
+    assert!(app.doc.documents.running);
+    pump_until(&mut app, &context, &mut frame, |app| {
+        !app.doc.documents.running
+    })
+    .await;
     assert_ne!(
-        app.display.as_ref().unwrap().context.runtime_session,
+        app.doc.display.as_ref().unwrap().context.runtime_session,
         initial
     );
-    assert!(app.display.as_ref().unwrap().projection.features.is_empty());
-    assert!(app.bridge.valid());
+    assert!(
+        app.doc
+            .display
+            .as_ref()
+            .unwrap()
+            .projection
+            .features
+            .is_empty()
+    );
+    assert!(app.doc.bridge.valid());
     assert!(!app.ui.start_open);
 
-    app.authoring_dirty = true;
+    app.doc.authoring_dirty = true;
     let output = logic_tick(&mut app, &context, &mut frame, true);
     assert!(has_command(&output, |command| matches!(
         command,
         egui::ViewportCommand::CancelClose
     )));
-    assert!(matches!(app.documents.confirm, Some(Pending::Quit)));
+    assert!(matches!(app.doc.documents.confirm, Some(Pending::Quit)));
     assert!(!app.stopping);
     assert!(!app.may_close);
     let session = app
+        .doc
         .display
         .as_ref()
         .unwrap()
         .context
         .runtime_session
         .clone();
-    app.documents.confirm = None;
+    app.doc.documents.confirm = None;
     logic_tick(&mut app, &context, &mut frame, false);
     assert_eq!(
-        app.display.as_ref().unwrap().context.runtime_session,
+        app.doc.display.as_ref().unwrap().context.runtime_session,
         session
     );
     assert!(!app.stopping);
 
-    app.authoring_dirty = false;
+    app.doc.authoring_dirty = false;
     logic_tick(&mut app, &context, &mut frame, true);
     assert!(app.stopping);
     pump_until(&mut app, &context, &mut frame, |app| app.may_close).await;
     assert!(
-        app.bridge
+        app.doc
+            .bridge
             .shared
             .stopping
             .load(std::sync::atomic::Ordering::Acquire)
@@ -75,7 +92,8 @@ async fn occluded_app_logic_delivers_new_and_protects_close_without_ui() {
 
 async fn create_app(root: &std::path::Path) -> (App, egui::Context) {
     let (app, context) = create_home_app(root).await;
-    app.bridge
+    app.doc
+        .bridge
         .submit(crate::bridge::Command::Document(Request::New))
         .unwrap();
     (app, context)
@@ -144,7 +162,7 @@ async fn pump_until(
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("occluded logic did not progress: {}", app.status));
+    .unwrap_or_else(|_| panic!("occluded logic did not progress: {}", app.doc.status));
 }
 
 fn has_command(
@@ -156,6 +174,9 @@ fn has_command(
 
 #[path = "document_lifecycle_tests.rs"]
 mod document_lifecycle_tests;
+
+#[path = "document_tabs_tests.rs"]
+mod document_tabs_tests;
 
 #[path = "overlay_routing_tests.rs"]
 mod overlay_routing_tests;
@@ -201,7 +222,7 @@ async fn home_without_document_and_empty_new_share_back_and_escape_predicate() {
     let (mut app, context) = create_home_app(area.path()).await;
     let mut frame = eframe::Frame::_new_kittest();
     pump_until(&mut app, &context, &mut frame, |app| {
-        app.bridge.shared.recovery.lock().unwrap().checked
+        app.doc.bridge.shared.recovery.lock().unwrap().checked
     })
     .await;
     assert!(app.ui.start_open);
@@ -212,15 +233,24 @@ async fn home_without_document_and_empty_new_share_back_and_escape_predicate() {
     assert!(!crate::bars::save_allowed(&app));
     assert!(!crate::bars::export_allowed(&app));
     app.document_request(Request::New);
-    pump_until(&mut app, &context, &mut frame, |app| !app.documents.running).await;
+    pump_until(&mut app, &context, &mut frame, |app| {
+        !app.doc.documents.running
+    })
+    .await;
     assert!(app.document_open());
-    assert!(app.document_state.as_ref().unwrap().path.is_none());
-    let session = app.document_state.as_ref().unwrap().runtime_session.clone();
+    assert!(app.doc.document_state.as_ref().unwrap().path.is_none());
+    let session = app
+        .doc
+        .document_state
+        .as_ref()
+        .unwrap()
+        .runtime_session
+        .clone();
     app.ui.start_open = true;
     crate::start_screen::leave(&mut app);
     assert!(!app.ui.start_open);
     assert_eq!(
-        app.document_state.as_ref().unwrap().runtime_session,
+        app.doc.document_state.as_ref().unwrap().runtime_session,
         session
     );
     assert!(crate::bars::save_allowed(&app));

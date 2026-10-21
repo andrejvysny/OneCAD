@@ -48,10 +48,10 @@ pub fn nav_pill(app: &mut App, ctx: &Context, chrome: &Chrome) {
         .show(ctx, |ui| clicked = NavPill::new(&buttons).show(ui));
     match clicked {
         Some(0) => {
-            app.camera = onecad_scene::Camera::default();
-            app.fit_pending = true;
+            app.doc.camera = onecad_scene::Camera::default();
+            app.doc.fit_pending = true;
         }
-        Some(1) => app.fit_pending = true,
+        Some(1) => app.doc.fit_pending = true,
         Some(4) => app.ui.shell_facade.layers_open = !layers_open,
         _ => {}
     }

@@ -17,7 +17,7 @@ struct Choice {
 }
 
 fn id() -> egui::Id {
-    egui::Id::unique("sketch-target-choice")
+    crate::documents::scoped_id("sketch-target-choice")
 }
 
 pub(super) fn open(
@@ -61,10 +61,11 @@ pub fn show_target_chooser(app: &mut App, ctx: &egui::Context) {
         return;
     };
     let Some(session) = app
+        .doc
         .sketch
         .session
         .as_ref()
-        .filter(|session| valid(&choice, session, app.view))
+        .filter(|session| valid(&choice, session, app.doc.view))
     else {
         close(ctx);
         return;

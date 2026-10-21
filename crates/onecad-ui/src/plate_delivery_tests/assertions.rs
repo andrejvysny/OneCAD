@@ -50,7 +50,7 @@ pub(super) fn assert_plate(host: &Harness, plate: &Plate, width: f64) {
     }
     assert_intent(sketch, plate);
     assert_eq!(
-        crate::sketch_feedback::summary(&host.app.sketch.session.as_ref().unwrap().status)
+        crate::sketch_feedback::summary(&host.app.doc.sketch.session.as_ref().unwrap().status)
             .assessment,
         crate::sketch_feedback::Assessment::Healthy
     );
@@ -125,7 +125,8 @@ fn assert_intent(sketch: &Sketch, plate: &Plate) {
 }
 
 pub(super) fn assert_finished_profile(host: &Harness, plate: &Plate) -> String {
-    let SketchStatus::Finished { result, .. } = &host.app.sketch.session.as_ref().unwrap().status
+    let SketchStatus::Finished { result, .. } =
+        &host.app.doc.sketch.session.as_ref().unwrap().status
     else {
         panic!("Finish result expected")
     };
@@ -162,6 +163,7 @@ pub(super) fn assert_profiles(host: &Harness, plate: &Plate) {
     let region_id = assert_finished_profile(host, plate);
     assert!(
         host.app
+            .doc
             .display
             .as_ref()
             .unwrap()
@@ -172,7 +174,7 @@ pub(super) fn assert_profiles(host: &Harness, plate: &Plate) {
 }
 
 pub(super) fn assert_mesh_bounds(app: &App, width: f64) {
-    let bodies = app.display.as_ref().unwrap().scene.bodies();
+    let bodies = app.doc.display.as_ref().unwrap().scene.bodies();
     assert_eq!(bodies.len(), 1);
     let mesh = bodies[0].mesh().unwrap();
     let mut lower = DVec3::splat(f64::INFINITY);
@@ -195,7 +197,7 @@ pub(super) fn assert_mesh_bounds(app: &App, width: f64) {
 }
 
 pub(super) async fn assert_brep(host: &Harness, width: f64) {
-    let display = host.app.display.as_ref().unwrap();
+    let display = host.app.doc.display.as_ref().unwrap();
     let body_id = onecad_app::worker::wire::body_id_wire(display.scene.bodies()[0].body_id());
     let reading = read_brep(host, display.context.clone()).await.unwrap();
     assert_eq!(reading.topology.body_id, body_id);
@@ -223,9 +225,9 @@ async fn read_brep(
     host: &Harness,
     expected: onecad_app::api::PreviewContext,
 ) -> Result<crate::body_inspection_tests_support::Reading, String> {
-    let body_id = host.app.display.as_ref().unwrap().scene.bodies()[0].body_id();
+    let body_id = host.app.doc.display.as_ref().unwrap().scene.bodies()[0].body_id();
     let (reply, receive) = tokio::sync::oneshot::channel();
-    host.app.bridge.submit(Command::InspectBody(Box::new(
+    host.app.doc.bridge.submit(Command::InspectBody(Box::new(
         crate::body_inspection_tests_support::Request {
             expected,
             body_id,
@@ -239,7 +241,7 @@ async fn read_brep(
 }
 
 pub(super) async fn assert_stale_brep_reads_refused(host: &Harness) {
-    let current = &host.app.display.as_ref().unwrap().context;
+    let current = &host.app.doc.display.as_ref().unwrap().context;
     let mut other_document = current.clone();
     other_document.runtime_session.push_str("-obsolete");
     let mut other_revision = current.clone();

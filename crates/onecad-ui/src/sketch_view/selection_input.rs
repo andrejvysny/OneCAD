@@ -15,7 +15,7 @@ struct Marquee {
 }
 
 fn cache_id() -> egui::Id {
-    egui::Id::unique("sketch-selection-marquee")
+    crate::documents::scoped_id("sketch-selection-marquee")
 }
 
 pub fn selection_input(
@@ -87,7 +87,7 @@ fn begin_drag(
 }
 
 fn press_id() -> egui::Id {
-    egui::Id::unique("sketch-selection-primary-press")
+    crate::documents::scoped_id("sketch-selection-primary-press")
 }
 
 pub(crate) fn cancel_pointer(ctx: &egui::Context) {

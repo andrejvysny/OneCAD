@@ -15,7 +15,13 @@ pub enum Action {
     Paste,
     SelectAll,
     New,
+    /// Home in focus, to start or open the next document.
+    NewTab,
     Open,
+    /// Index into the recents list the menu was last built from.
+    OpenRecent(u8),
+    CloseTab,
+    SaveAll,
     Import,
     Save,
     SaveAs,
@@ -31,8 +37,12 @@ mod imp {
     use super::Action;
     use crate::ui_state::Appearance;
     use muda::accelerator::{Accelerator, Code, Modifiers};
-    use muda::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
+    use muda::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
     use std::sync::mpsc::{Receiver, channel};
+    use std::sync::{Arc, Mutex};
+
+    /// Menu item ids and their actions; Open Recent's entries are rebuilt in place.
+    type Routes = Arc<Mutex<Vec<(MenuId, Action)>>>;
 
     pub struct NativeMenu {
         _menu: Menu,
@@ -40,8 +50,11 @@ mod imp {
         appearance: Choices,
         history: [MenuItem; 2],
         replacement: [MenuItem; 3],
-        saves: [MenuItem; 2],
+        saves: [MenuItem; 3],
         exports: [MenuItem; 4],
+        recent: Submenu,
+        recent_items: Mutex<(Vec<String>, Vec<MenuItem>)>,
+        routes: Routes,
     }
 
     fn item(text: &str, mods: Modifiers, code: Code) -> MenuItem {
@@ -79,10 +92,14 @@ mod imp {
         let undo = item("Undo", cmd, Code::KeyZ);
         let redo = item("Redo", Modifiers::META | Modifiers::SHIFT, Code::KeyZ);
         let new = item("New Part", cmd, Code::KeyN);
+        let new_tab = item("New Tab", cmd, Code::KeyT);
         let open = item("Open…", cmd, Code::KeyO);
-        let import = MenuItem::new("Import…", true, None);
+        let recent = Submenu::new("Open Recent", true);
+        let close_tab = item("Close Tab", cmd, Code::KeyW);
+        let import = item("Import…", cmd | Modifiers::SHIFT, Code::KeyI);
         let save = item("Save", cmd, Code::KeyS);
         let save_as = item("Save As…", cmd | Modifiers::SHIFT, Code::KeyS);
+        let save_all = item("Save All", cmd | Modifiers::ALT, Code::KeyS);
         let exports =
             ["STEP…", "STL…", "OBJ…", "3MF…"].map(|label| MenuItem::new(label, true, None));
         let export = Submenu::with_items(
@@ -120,11 +137,16 @@ mod imp {
             true,
             &[
                 &new,
+                &new_tab,
                 &open,
-                &import,
+                &recent,
                 &PredefinedMenuItem::separator(),
+                &close_tab,
                 &save,
                 &save_as,
+                &save_all,
+                &PredefinedMenuItem::separator(),
+                &import,
                 &export,
             ],
         )
@@ -179,7 +201,10 @@ mod imp {
             (undo.id().clone(), Action::Undo),
             (redo.id().clone(), Action::Redo),
             (new.id().clone(), Action::New),
+            (new_tab.id().clone(), Action::NewTab),
             (open.id().clone(), Action::Open),
+            (close_tab.id().clone(), Action::CloseTab),
+            (save_all.id().clone(), Action::SaveAll),
             (import.id().clone(), Action::Import),
             (save.id().clone(), Action::Save),
             (save_as.id().clone(), Action::SaveAs),
@@ -207,13 +232,19 @@ mod imp {
             (paste.id().clone(), Action::Paste),
             (select_all.id().clone(), Action::SelectAll),
         ];
+        let routes: Routes = Arc::new(Mutex::new(ids.to_vec()));
         let (tx, rx) = channel();
         let ctx = ctx.clone();
+        let handler_routes = routes.clone();
         // Menu events arrive outside winit's event stream; wake egui so the action is handled
         // on the next frame (rendering is on-demand, nothing else would repaint).
         MenuEvent::set_event_handler(Some(move |ev: MenuEvent| {
-            if let Some((_, a)) = ids.iter().find(|(id, _)| *id == ev.id) {
-                let _ = tx.send(*a);
+            let action = handler_routes
+                .lock()
+                .ok()
+                .and_then(|routes| routes.iter().find(|(id, _)| *id == ev.id).map(|(_, a)| *a));
+            if let Some(action) = action {
+                let _ = tx.send(action);
                 ctx.request_repaint();
             }
         }));
@@ -223,8 +254,11 @@ mod imp {
             appearance: choices,
             history: [undo, redo],
             replacement: [new, open, import],
-            saves: [save, save_as],
+            saves: [save, save_as, save_all],
             exports,
+            recent,
+            recent_items: Mutex::new((Vec::new(), Vec::new())),
+            routes,
         })
     }
 
@@ -243,6 +277,32 @@ mod imp {
             for item in &self.exports {
                 item.set_enabled(export);
             }
+        }
+
+        /// Rebuilds File › Open Recent when the recents list changed.
+        pub fn set_recents(&self, names: &[String]) {
+            let Ok(mut current) = self.recent_items.lock() else {
+                return;
+            };
+            if current.0 == names {
+                return;
+            }
+            let Ok(mut routes) = self.routes.lock() else {
+                return;
+            };
+            for item in current.1.drain(..) {
+                routes.retain(|(id, _)| id != item.id());
+                let _ = self.recent.remove(&item);
+            }
+            for (index, name) in names.iter().take(usize::from(u8::MAX)).enumerate() {
+                let item = MenuItem::new(name, true, None);
+                if self.recent.append(&item).is_ok() {
+                    routes.push((item.id().clone(), Action::OpenRecent(index as u8)));
+                    current.1.push(item);
+                }
+            }
+            self.recent.set_enabled(!names.is_empty());
+            current.0 = names.to_vec();
         }
 
         /// muda toggles a check item on click; restore the one-of-three invariant.
@@ -272,6 +332,7 @@ mod imp {
         pub fn set_appearance(&self, _current: crate::ui_state::Appearance) {}
         pub fn set_history_enabled(&self, _undo: bool, _redo: bool) {}
         pub fn set_document_enabled(&self, _replace: bool, _save: bool, _export: bool) {}
+        pub fn set_recents(&self, _names: &[String]) {}
     }
 }
 
@@ -315,13 +376,19 @@ impl Action {
                     Self::Paste => (egui::Key::V, false),
                     Self::SelectAll => (egui::Key::A, false),
                     Self::New => (egui::Key::N, false),
+                    Self::NewTab => (egui::Key::T, false),
                     Self::Open => (egui::Key::O, false),
+                    Self::CloseTab => (egui::Key::W, false),
+                    Self::Import => (egui::Key::I, true),
                     Self::Save => (egui::Key::S, false),
                     Self::SaveAs => (egui::Key::S, true),
                     Self::Quit => (egui::Key::Q, false),
                     Self::Fit => (egui::Key::Num0, false),
                     Self::Home => (egui::Key::H, true),
-                    Self::Appearance(_) | Self::Import | Self::Export(_) => return false,
+                    // Save All carries Option, which the shift-only comparison cannot express.
+                    Self::Appearance(_) | Self::Export(_) | Self::OpenRecent(_) | Self::SaveAll => {
+                        return false;
+                    }
                 };
                 *key == expected
                     && modifiers.shift == shift

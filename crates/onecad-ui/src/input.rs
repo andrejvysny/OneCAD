@@ -5,23 +5,32 @@ mod overlay;
 
 pub(crate) fn overlay_owns_keyboard(app: &App, ctx: &egui::Context) -> bool {
     app.input_routing.overlay_blocks(ctx.cumulative_pass_nr())
-        || app.documents.confirm.is_some()
-        || app.items.blocks()
+        || app.doc.documents.confirm.is_some()
+        || app.doc.items.blocks()
         || crate::constraint_authoring::editor_open(ctx)
         || crate::sketch_numeric::editor_open(ctx)
-        || ui_owns_keyboard(&app.ui, ctx)
+        || ui_owns_keyboard(&app.ui, app.doc.sketch_entry.open, ctx)
 }
 
-pub(crate) fn ui_owns_keyboard(ui: &crate::ui_state::UiState, ctx: &egui::Context) -> bool {
-    overlay::owner(ui, false, egui::Popup::is_any_open(ctx)).is_some()
+pub(crate) fn ui_owns_keyboard(
+    ui: &crate::ui_state::UiState,
+    entry_open: bool,
+    ctx: &egui::Context,
+) -> bool {
+    overlay::owner(ui, entry_open, false, egui::Popup::is_any_open(ctx)).is_some()
 }
 
 pub(crate) fn navigation_blocked(app: &App, ctx: &egui::Context) -> bool {
-    let document = app.documents.confirm.is_some()
-        || app.items.blocks()
+    let document = app.doc.documents.confirm.is_some()
+        || app.doc.items.blocks()
         || crate::constraint_authoring::editor_open(ctx)
         || crate::sketch_numeric::editor_open(ctx);
-    overlay::navigation_blocked(&app.ui, document, egui::Popup::is_any_open(ctx))
+    overlay::navigation_blocked(
+        &app.ui,
+        app.doc.sketch_entry.open,
+        document,
+        egui::Popup::is_any_open(ctx),
+    )
 }
 
 #[derive(Default)]
@@ -78,11 +87,11 @@ fn history_shortcut(event: &egui::Event, text: bool, focused: bool) -> Option<Co
 pub fn route(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     let mut state = std::mem::take(&mut app.input_routing);
     let pass = ctx.cumulative_pass_nr();
-    let owned = app.documents.confirm.is_some()
-        || app.items.blocks()
+    let owned = app.doc.documents.confirm.is_some()
+        || app.doc.items.blocks()
         || crate::constraint_authoring::editor_open(ctx)
         || crate::sketch_numeric::editor_open(ctx)
-        || ui_owns_keyboard(&app.ui, ctx);
+        || ui_owns_keyboard(&app.ui, app.doc.sketch_entry.open, ctx);
     state.overlay_blocked = owned || state.overlay_blocks(pass);
     route_events(&mut state, pass, raw, |raw| route_fresh(app, ctx, raw));
     app.input_routing = state;
@@ -92,6 +101,7 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     app.poll_device_failure();
     app.sync_document_state();
     crate::input_trace::input(app, ctx, raw);
+    crate::tab_switcher::route(app, raw);
     crate::sketch_gestures::route_raw(app, ctx, raw);
     crate::sketch_creation::chain_input::route_raw(app, ctx, raw);
     if app.sampled && app.viewport_ready() {
@@ -112,8 +122,9 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     }
     let owner = overlay::owner(
         &app.ui,
-        app.documents.confirm.is_some()
-            || app.items.blocks()
+        app.doc.sketch_entry.open,
+        app.doc.documents.confirm.is_some()
+            || app.doc.items.blocks()
             || crate::constraint_authoring::editor_open(ctx)
             || crate::sketch_numeric::editor_open(ctx),
         egui::Popup::is_any_open(ctx),
@@ -129,6 +140,10 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
             owner.is_none() && crate::bars::save_allowed(app),
             owner.is_none() && crate::bars::export_allowed(app),
         );
+        if let Ok(recents) = app.doc.bridge.shared.recents.lock() {
+            let names: Vec<String> = recents.iter().map(|recent| recent.name.clone()).collect();
+            menu.set_recents(&names);
+        }
     }
     let actions = app.menu.as_ref().map_or_else(Vec::new, |menu| menu.drain());
     menu::remove_duplicate_events(&actions, &mut raw.events);
@@ -141,7 +156,7 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     protect_composition(&mut app.composing, raw, text);
     if let Some(owner) = owner {
         for action in actions {
-            if app.bridge.shared.input_trace.enabled() {
+            if app.doc.bridge.shared.input_trace.enabled() {
                 crate::input_trace::app(
                     app,
                     "menu.route",
@@ -152,11 +167,11 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
                 route_menu(app, ctx, &mut raw.events, action, text);
             }
         }
-        overlay::dismiss(&mut app.ui, owner, raw, text);
+        overlay::dismiss(&mut app.ui, &mut app.doc.sketch_entry, owner, raw, text);
         return;
     }
     for action in actions {
-        if app.bridge.shared.input_trace.enabled() {
+        if app.doc.bridge.shared.input_trace.enabled() {
             crate::input_trace::app(
                 app,
                 "menu.route",
@@ -167,6 +182,7 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     }
     let mut commands = Vec::new();
     let mut documents = Vec::new();
+    let mut tab_actions = Vec::new();
     raw.events.retain(|event| {
         if let Some(command) = history_shortcut(event, text || composition, raw.focused) {
             commands.push(command);
@@ -176,6 +192,7 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
             key,
             pressed: true,
             modifiers,
+            repeat,
             ..
         } = event
             && modifiers.command
@@ -185,6 +202,13 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
                 _ if raw.focused && document_shortcut(*key, *modifiers).is_some() => {
                     if let Some(request) = document_shortcut(*key, *modifiers) {
                         documents.push(request);
+                    }
+                    return false;
+                }
+                _ if raw.focused && tab_shortcut(*key, *modifiers).is_some() => {
+                    // A held Cmd+W must close one document, not every clean one.
+                    if !repeat {
+                        tab_actions.extend(tab_shortcut(*key, *modifiers));
                     }
                     return false;
                 }
@@ -203,7 +227,14 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     for command in commands {
         submit_history(app, command);
     }
-    if app.documents.confirm.is_some() {
+    // Last: a same-frame Save or Undo belongs to the document it was typed in.
+    for action in tab_actions {
+        match action {
+            TabShortcut::Close => app.request_close_tab(),
+            TabShortcut::Cycle(step) => app.cycle_tab(step),
+        }
+    }
+    if app.doc.documents.confirm.is_some() {
         return;
     }
     if !text && raw.focused && !composition && app.sketch_active() && app.viewport_ready() {
@@ -312,16 +343,36 @@ fn route_menu(
         menu::Action::Undo => submit_history(app, Command::Undo),
         menu::Action::Redo => submit_history(app, Command::Redo),
         menu::Action::New => app.document_request(Request::New),
+        menu::Action::NewTab => app.open_home(),
         menu::Action::Open => app.document_request(Request::Open(None)),
+        menu::Action::OpenRecent(index) => {
+            let path = app
+                .doc
+                .bridge
+                .shared
+                .recents
+                .lock()
+                .ok()
+                .and_then(|recents| {
+                    recents
+                        .get(usize::from(index))
+                        .map(|recent| recent.path.clone())
+                });
+            if let Some(path) = path {
+                app.document_request(Request::Open(Some(path.into())));
+            }
+        }
+        menu::Action::CloseTab => app.request_close_tab(),
+        menu::Action::SaveAll => app.save_all(),
         menu::Action::Import => app.document_request(Request::Import),
         menu::Action::Save => app.document_request(Request::Save { save_as: false }),
         menu::Action::SaveAs => app.document_request(Request::Save { save_as: true }),
         menu::Action::Export(format) => app.document_request(Request::Export(format)),
         menu::Action::Quit => app.close_prompt = true,
-        menu::Action::Fit => app.fit_pending = true,
+        menu::Action::Fit => app.doc.fit_pending = true,
         menu::Action::Home => {
-            app.camera = onecad_scene::Camera::default();
-            app.fit_pending = true;
+            app.doc.camera = onecad_scene::Camera::default();
+            app.doc.fit_pending = true;
         }
         menu::Action::Appearance(choice) => {
             app.ui.appearance = choice;
@@ -339,6 +390,30 @@ fn route_menu(
             }
         }
         _ => {}
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TabShortcut {
+    Close,
+    Cycle(isize),
+}
+
+/// Cmd+W closes the active document's tab; Cmd+Shift+] / [ cycles open documents.
+fn tab_shortcut(key: egui::Key, modifiers: egui::Modifiers) -> Option<TabShortcut> {
+    if !modifiers.command || modifiers.alt {
+        return None;
+    }
+    match key {
+        egui::Key::W if !modifiers.shift => Some(TabShortcut::Close),
+        // macOS reports Cmd+Shift+] as the shifted character, `}`.
+        egui::Key::CloseBracket | egui::Key::CloseCurlyBracket if modifiers.shift => {
+            Some(TabShortcut::Cycle(1))
+        }
+        egui::Key::OpenBracket | egui::Key::OpenCurlyBracket if modifiers.shift => {
+            Some(TabShortcut::Cycle(-1))
+        }
+        _ => None,
     }
 }
 
@@ -362,7 +437,7 @@ pub(crate) fn history_available(app: &App, redo: bool) -> bool {
     }
     if app.sketch_active() {
         return crate::sketch_ui::tools_enabled(app)
-            && app.sketch.session.as_ref().is_some_and(|session| {
+            && app.doc.sketch.session.as_ref().is_some_and(|session| {
                 session.draft.is_some()
                     || session.history.as_ref().is_some_and(|history| {
                         if redo {
@@ -374,9 +449,9 @@ pub(crate) fn history_available(app: &App, redo: bool) -> bool {
             });
     }
     app.viewport_ready()
-        && app.bridge.valid()
+        && app.doc.bridge.valid()
         && !crate::viewport_selection::sectioned(app)
-        && app.display.as_ref().is_some_and(|display| {
+        && app.doc.display.as_ref().is_some_and(|display| {
             if redo {
                 display.projection.redo_depth > 0
             } else {
@@ -480,6 +555,7 @@ fn sketch_arc_keys(app: &mut App, ctx: &egui::Context, events: &mut Vec<egui::Ev
         };
         if !three_point
             && let Some(session) = app
+                .doc
                 .sketch
                 .session
                 .as_ref()
@@ -527,5 +603,40 @@ mod arc_key_tests {
             assert_eq!(arc_key(&key(modifiers, false)), None);
         }
         assert_eq!(arc_key(&key(egui::Modifiers::NONE, true)), None);
+    }
+}
+
+#[cfg(test)]
+mod tab_shortcut_tests {
+    use super::*;
+
+    fn command(shift: bool) -> egui::Modifiers {
+        egui::Modifiers {
+            command: true,
+            mac_cmd: true,
+            shift,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn tab_shortcuts_match_what_macos_reports() {
+        assert_eq!(
+            tab_shortcut(egui::Key::W, command(false)),
+            Some(TabShortcut::Close)
+        );
+        assert_eq!(tab_shortcut(egui::Key::W, command(true)), None);
+        for (key, step) in [
+            (egui::Key::CloseCurlyBracket, 1),
+            (egui::Key::CloseBracket, 1),
+            (egui::Key::OpenCurlyBracket, -1),
+            (egui::Key::OpenBracket, -1),
+        ] {
+            assert_eq!(
+                tab_shortcut(key, command(true)),
+                Some(TabShortcut::Cycle(step))
+            );
+        }
+        assert_eq!(tab_shortcut(egui::Key::W, egui::Modifiers::NONE), None);
     }
 }

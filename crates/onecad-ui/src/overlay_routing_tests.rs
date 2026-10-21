@@ -19,18 +19,22 @@ async fn overlays_preserve_sketch_draft_selection_and_history_through_raw_replay
     let area = tempfile::tempdir().unwrap();
     let (mut app, context) = create_app(area.path()).await;
     let mut frame = eframe::Frame::_new_kittest();
-    pump_until(&mut app, &context, &mut frame, |app| app.display.is_some()).await;
+    pump_until(&mut app, &context, &mut frame, |app| {
+        app.doc.display.is_some()
+    })
+    .await;
     assert_display_popover(&mut app, &context, &mut frame);
     app.new_sketch();
     pump_until(&mut app, &context, &mut frame, |app| {
-        app.sketch
+        app.doc
+            .sketch
             .session
             .as_ref()
             .is_some_and(|session| session.phase == SketchPhase::Active)
     })
     .await;
     for customize in [true, false] {
-        let session = app.sketch.session.as_mut().unwrap();
+        let session = app.doc.sketch.session.as_mut().unwrap();
         session.tool = SketchTool::Line;
         session
             .selection
@@ -59,8 +63,8 @@ async fn overlays_preserve_sketch_draft_selection_and_history_through_raw_replay
 }
 
 fn assert_owned_input(app: &mut App, context: &egui::Context) {
-    let before = format!("{:?}", app.sketch.session);
-    let document = app.document_state.clone();
+    let before = format!("{:?}", app.doc.sketch.session);
+    let document = app.doc.document_state.clone();
     let mut raw = egui::RawInput {
         events: vec![key(egui::Key::Enter), key(egui::Key::Delete)],
         ..Default::default()
@@ -68,18 +72,29 @@ fn assert_owned_input(app: &mut App, context: &egui::Context) {
     crate::menu::push_command(&mut raw.events, egui::Key::Z, false);
     crate::menu::push_command(&mut raw.events, egui::Key::S, false);
     app.raw_input_hook(context, &mut raw);
-    assert_eq!(format!("{:?}", app.sketch.session), before);
-    assert!(!app.documents.running);
+    assert_eq!(format!("{:?}", app.doc.sketch.session), before);
+    assert!(!app.doc.documents.running);
     raw.events.push(key(egui::Key::Escape));
     app.raw_input_hook(context, &mut raw);
     assert!(!app.ui.shell_facade.customize_open && !app.ui.shell_facade.layers_open);
     app.raw_input_hook(context, &mut raw);
-    assert_eq!(format!("{:?}", app.sketch.session), before);
-    assert_eq!(format!("{:?}", app.document_state), format!("{document:?}"));
+    assert_eq!(format!("{:?}", app.doc.sketch.session), before);
+    assert_eq!(
+        format!("{:?}", app.doc.document_state),
+        format!("{document:?}")
+    );
     raw.events.push(key(egui::Key::Escape));
     app.raw_input_hook(context, &mut raw);
-    assert!(app.sketch.session.as_ref().unwrap().draft.is_none());
-    assert!(!app.sketch.session.as_ref().unwrap().selection.is_empty());
+    assert!(app.doc.sketch.session.as_ref().unwrap().draft.is_none());
+    assert!(
+        !app.doc
+            .sketch
+            .session
+            .as_ref()
+            .unwrap()
+            .selection
+            .is_empty()
+    );
 }
 
 fn assert_display_popover(app: &mut App, context: &egui::Context, host: &mut eframe::Frame) {

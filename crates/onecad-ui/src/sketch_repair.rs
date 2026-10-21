@@ -19,10 +19,10 @@ pub(crate) fn set_constraint_hover(
     ctx: &egui::Context,
     constraint: Option<ConstraintId>,
 ) {
-    let id = egui::Id::unique("sketch-constraint-hover");
+    let id = crate::documents::scoped_id("sketch-constraint-hover");
     ctx.data_mut(|data| {
         data.remove::<Hover>(id);
-        if let (Some(session), Some(constraint)) = (app.sketch.session.as_ref(), constraint) {
+        if let (Some(session), Some(constraint)) = (app.doc.sketch.session.as_ref(), constraint) {
             data.insert_temp(
                 id,
                 Hover {
@@ -39,8 +39,9 @@ pub(crate) fn hover_targets(
     ctx: &egui::Context,
     session: &onecad_interaction::sketch::SketchSession,
 ) -> Vec<SketchTarget> {
-    let hover =
-        ctx.data(|data| data.get_temp::<Hover>(egui::Id::unique("sketch-constraint-hover")));
+    let hover = ctx.data(|data| {
+        data.get_temp::<Hover>(crate::documents::scoped_id("sketch-constraint-hover"))
+    });
     let Some(hover) =
         hover.filter(|hover| hover.key == session.key && hover.document == session.document)
     else {
@@ -61,6 +62,7 @@ pub(crate) fn ready(app: &App) -> bool {
     !app.busy()
         && crate::sketch_ui::tools_enabled(app)
         && app
+            .doc
             .sketch
             .session
             .as_ref()
@@ -68,7 +70,7 @@ pub(crate) fn ready(app: &App) -> bool {
 }
 
 fn entities(app: &App) -> Result<Vec<EntityId>, &'static str> {
-    let session = app.sketch.session.as_ref().ok_or("No active sketch")?;
+    let session = app.doc.sketch.session.as_ref().ok_or("No active sketch")?;
     let mut ids = Vec::new();
     for target in &session.selection {
         let id = match *target {
@@ -117,7 +119,7 @@ pub(crate) fn toggle_construction(app: &mut App) {
     let Ok(ids) = entities(app) else {
         return;
     };
-    let Some(session) = app.sketch.session.as_ref() else {
+    let Some(session) = app.doc.sketch.session.as_ref() else {
         return;
     };
     let key = session.key.clone();
@@ -151,7 +153,7 @@ pub(crate) fn delete_selected(app: &mut App) {
     let Ok(ids) = entities(app) else {
         return;
     };
-    let Some(session) = app.sketch.session.as_ref() else {
+    let Some(session) = app.doc.sketch.session.as_ref() else {
         return;
     };
     let key = session.key.clone();
@@ -167,6 +169,7 @@ pub(crate) fn remove_constraint(app: &mut App, constraint: ConstraintId) {
         return;
     }
     let Some(session) = app
+        .doc
         .sketch
         .session
         .as_ref()

@@ -32,6 +32,7 @@ enum ArmedTarget {
 
 pub(crate) fn delivered_inside(app: &App, ui: &Ui, rect: Rect) -> bool {
     if !app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -41,7 +42,8 @@ pub(crate) fn delivered_inside(app: &App, ui: &Ui, rect: Rect) -> bool {
     }
     let position = ui.input(|input| {
         press(input).map(|(position, _)| position).or_else(|| {
-            app.armed_sketch_gesture
+            app.doc
+                .armed_sketch_gesture
                 .as_ref()
                 .and_then(|_| release_position(input))
         })
@@ -57,22 +59,23 @@ pub(crate) fn viewport(
     view: &ViewSnapshot,
 ) -> bool {
     app.sync_sketch_gesture();
-    if app.sketch_gesture.busy() {
+    if app.doc.sketch_gesture.busy() {
         return move_active(app, ui, rect, response, view);
     }
     let Some(session) = app
+        .doc
         .sketch
         .session
         .as_ref()
         .filter(|session| session.tool == SketchTool::Select)
     else {
-        app.armed_sketch_gesture = None;
+        app.doc.armed_sketch_gesture = None;
         return false;
     };
     let Ok(scope) = GestureScope::from_session(session) else {
         return false;
     };
-    let mut armed = app.armed_sketch_gesture.take().map(|mut armed| {
+    let mut armed = app.doc.armed_sketch_gesture.take().map(|mut armed| {
         if armed.scope != scope {
             armed.scope = scope.clone();
             armed.target = ArmedTarget::Stale;
@@ -120,20 +123,20 @@ pub(crate) fn viewport(
                     "gesture.refused",
                     serde_json::json!({"reason": crate::input_trace::bounded_id(message)}),
                 );
-                app.status = message.clone();
-                app.diagnostics.record(
+                app.doc.status = message.clone();
+                app.doc.diagnostics.record(
                     crate::diagnostics::Source::Sketch,
                     crate::diagnostics::State::Rejected,
                     message,
                 );
             }
             ArmedTarget::Stale => {
-                app.status =
+                app.doc.status =
                     "Gesture start belongs to an obsolete captured view; press again".into();
                 crate::input_trace::app(
                     app,
                     "gesture.refused",
-                    serde_json::json!({"reason": app.status}),
+                    serde_json::json!({"reason": app.doc.status}),
                 );
             }
             ArmedTarget::Cancelled => {}
@@ -146,7 +149,7 @@ pub(crate) fn viewport(
         crate::sketch_view::cancel_selection_pointer(ui.ctx());
     }
     if ui.input(|input| input.pointer.primary_down()) {
-        app.armed_sketch_gesture = Some(armed);
+        app.doc.armed_sketch_gesture = Some(armed);
     }
     // Selection must capture the press until movement actually claims the gesture.
     consumed
@@ -170,7 +173,7 @@ fn arm(
     if modifiers.shift || modifiers.command {
         return None;
     }
-    let session = app.sketch.session.as_ref()?;
+    let session = app.doc.sketch.session.as_ref()?;
     let grab = point(app, rect, view, position)?;
     match crate::sketch_view::pick_entity(
         rect,
@@ -213,10 +216,10 @@ fn move_active(
     response: &Response,
     view: &ViewSnapshot,
 ) -> bool {
-    let Some(tag) = app.sketch_gesture.tag().cloned() else {
+    let Some(tag) = app.doc.sketch_gesture.tag().cloned() else {
         return false;
     };
-    if !app.sketch_gesture.active() {
+    if !app.doc.sketch_gesture.active() {
         return true;
     }
     let release = ui.input(release_position);
@@ -317,7 +320,7 @@ fn release_position(input: &egui::InputState) -> Option<Pos2> {
 }
 
 fn point(app: &App, rect: Rect, view: &ViewSnapshot, position: Pos2) -> Option<Vec2> {
-    let session = app.sketch.session.as_ref()?;
+    let session = app.doc.sketch.session.as_ref()?;
     capture_sketch_pointer(
         session,
         view,

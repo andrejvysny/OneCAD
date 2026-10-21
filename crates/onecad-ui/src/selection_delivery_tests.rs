@@ -11,36 +11,47 @@ async fn marquee_survives_redraw_and_cancels_when_camera_changes() {
     let area = tempfile::tempdir().unwrap();
     let (mut app, context) = create_app(area.path()).await;
     let mut frame = eframe::Frame::_new_kittest();
-    pump_until(&mut app, &context, &mut frame, |app| app.display.is_some()).await;
+    pump_until(&mut app, &context, &mut frame, |app| {
+        app.doc.display.is_some()
+    })
+    .await;
     let rectangle = create_rectangle(&mut app, &context, &mut frame).await;
     prepare_view(&mut app);
     for _ in 0..3 {
         editor_frame(&mut app, &context, &mut frame, vec![]);
     }
     let (start, end) = window(&app);
-    let capture = app.view.unwrap().identity();
+    let capture = app.doc.view.unwrap().identity();
     begin_drag(&mut app, &context, &mut frame, start);
     redraw_at(&mut app, &context, &mut frame, end);
-    assert!(app.sketch.session.as_ref().unwrap().selection_dragging);
-    assert_eq!(app.view.unwrap().identity(), capture);
+    assert!(app.doc.sketch.session.as_ref().unwrap().selection_dragging);
+    assert_eq!(app.doc.view.unwrap().identity(), capture);
     assert_eq!(
-        app.sketch.session.as_ref().unwrap().accepted_capture,
+        app.doc.sketch.session.as_ref().unwrap().accepted_capture,
         Some(capture)
     );
     editor_frame(&mut app, &context, &mut frame, vec![button(end, false)]);
-    let selected = &app.sketch.session.as_ref().unwrap().selection;
+    let selected = &app.doc.sketch.session.as_ref().unwrap().selection;
     assert_eq!(selected.len(), 4, "window must select four whole lines");
     for id in &rectangle.entities[4..8] {
         assert!(selected.contains(&SketchTarget::Entity(*id)));
     }
     clear_with_pointer(&mut app, &context, &mut frame, start);
     begin_drag(&mut app, &context, &mut frame, start);
-    app.camera.target.x += 1.0;
+    app.doc.camera.target.x += 1.0;
     redraw_at(&mut app, &context, &mut frame, end);
-    assert_ne!(app.view.unwrap().identity(), capture);
-    assert!(!app.sketch.session.as_ref().unwrap().selection_dragging);
+    assert_ne!(app.doc.view.unwrap().identity(), capture);
+    assert!(!app.doc.sketch.session.as_ref().unwrap().selection_dragging);
     editor_frame(&mut app, &context, &mut frame, vec![button(end, false)]);
-    assert!(app.sketch.session.as_ref().unwrap().selection.is_empty());
+    assert!(
+        app.doc
+            .sketch
+            .session
+            .as_ref()
+            .unwrap()
+            .selection
+            .is_empty()
+    );
     app.sketch_dispatch(SketchAction::Discard);
     pump_until(&mut app, &context, &mut frame, |app| !app.sketch_active()).await;
     app.stop_discard();
@@ -54,7 +65,8 @@ async fn create_rectangle(
 ) -> onecad_interaction::sketch::PrimitiveIds {
     app.new_sketch();
     pump_until(app, context, frame, |app| {
-        app.sketch
+        app.doc
+            .sketch
             .session
             .as_ref()
             .is_some_and(|session| session.phase == SketchPhase::Active)
@@ -66,7 +78,7 @@ async fn create_rectangle(
     let rectangle = ids();
     click(app, capture, 10.0, 5.0, rectangle.clone());
     pump_until(app, context, frame, |app| {
-        app.sketch.session.as_ref().is_some_and(|session| {
+        app.doc.sketch.session.as_ref().is_some_and(|session| {
             session.phase == SketchPhase::Active
                 && session.authoritative.contains_entity(rectangle.entities[7])
         })
@@ -80,10 +92,10 @@ fn prepare_view(app: &mut App) {
     app.ui.start_open = false;
     app.ui.explorer_open = false;
     app.ui.inspector_open = false;
-    app.fit_pending = false;
-    let plane = app.sketch.session.as_ref().unwrap().plane;
+    app.doc.fit_pending = false;
+    let plane = app.doc.sketch.session.as_ref().unwrap().plane;
     let target = plane.to_world(Vec2::new(0.0, 0.0).unwrap());
-    app.camera = Camera {
+    app.doc.camera = Camera {
         target: DVec3::new(target.x, target.y, target.z),
         offset: DVec3::new(plane.normal.x, plane.normal.y, plane.normal.z) * 100.0,
         projection: Projection::Orthographic,
@@ -95,8 +107,8 @@ fn prepare_view(app: &mut App) {
 fn window(app: &App) -> (egui::Pos2, egui::Pos2) {
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 820.0));
     let rect = crate::layout::chrome(screen, &app.ui).viewport;
-    let view = app.view.unwrap();
-    let plane = app.sketch.session.as_ref().unwrap().plane;
+    let view = app.doc.view.unwrap();
+    let plane = app.doc.sketch.session.as_ref().unwrap().plane;
     let mut bounds = egui::Rect::NOTHING;
     for (x, y) in [(-10.0, -5.0), (10.0, -5.0), (10.0, 5.0), (-10.0, 5.0)] {
         let world = plane.to_world(Vec2::new(x, y).unwrap());
@@ -122,9 +134,9 @@ fn begin_drag(
     );
     redraw_at(app, context, frame, start + egui::vec2(12.0, 12.0));
     assert!(
-        app.sketch.session.as_ref().unwrap().selection_dragging,
+        app.doc.sketch.session.as_ref().unwrap().selection_dragging,
         "native viewport must own marquee drag: {}",
-        app.status
+        app.doc.status
     );
 }
 
@@ -148,7 +160,7 @@ fn redraw_at(
         std::thread::sleep(std::time::Duration::from_millis(5));
         editor_frame(app, context, frame, vec![]);
     }
-    panic!("forced GPU redraw did not complete: {}", app.status);
+    panic!("forced GPU redraw did not complete: {}", app.doc.status);
 }
 
 fn clear_with_pointer(
@@ -164,7 +176,15 @@ fn clear_with_pointer(
         vec![egui::Event::PointerMoved(position), button(position, true)],
     );
     editor_frame(app, context, frame, vec![button(position, false)]);
-    assert!(app.sketch.session.as_ref().unwrap().selection.is_empty());
+    assert!(
+        app.doc
+            .sketch
+            .session
+            .as_ref()
+            .unwrap()
+            .selection
+            .is_empty()
+    );
 }
 
 fn button(pos: egui::Pos2, pressed: bool) -> egui::Event {

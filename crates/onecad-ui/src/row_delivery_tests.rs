@@ -16,6 +16,7 @@ async fn unselected_rows_single_select_double_click_and_explicit_edit_share_entr
     finish(&mut host).await;
     let sketch = host
         .app
+        .doc
         .display
         .as_ref()
         .unwrap()
@@ -36,8 +37,8 @@ async fn unselected_rows_single_select_double_click_and_explicit_edit_share_entr
 }
 
 fn select_and_edit(host: &mut Host, name: &str, history: bool, explicit: bool) {
-    host.app.ui.selected_sketch = None;
-    host.app.selected_feature = None;
+    host.app.doc.selected_sketch = None;
+    host.app.doc.selected_feature = None;
     host.app.ui.explorer_open = !history;
     host.app.ui.inspector_open = true;
     host.app.ui.inspector_tab = if history {
@@ -55,13 +56,13 @@ fn select_and_edit(host: &mut Host, name: &str, history: bool, explicit: bool) {
     assert!(!host.app.sketch_active(), "single click must select only");
     assert!(
         if history {
-            host.app.selected_feature.is_some()
+            host.app.doc.selected_feature.is_some()
         } else {
-            host.app.ui.selected_sketch.is_some()
+            host.app.doc.selected_sketch.is_some()
         },
         "history={history} tab={:?} position={position:?} status={}",
         host.app.ui.inspector_tab,
-        host.app.status
+        host.app.doc.status
     );
     if explicit {
         host.control("Edit sketch");

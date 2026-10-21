@@ -25,8 +25,8 @@ pub struct TransformGizmo {
 
 impl App {
     pub fn begin_transform(&mut self) {
-        let Some((body, context, step, center)) = self.display.as_ref().and_then(|display| {
-            let body = self.selected_body?;
+        let Some((body, context, step, center)) = self.doc.display.as_ref().and_then(|display| {
+            let body = self.doc.selected_body?;
             let bounds = display
                 .scene
                 .bodies()
@@ -35,7 +35,7 @@ impl App {
                 .bounds();
             Some((
                 body,
-                self.interaction.context.clone()?,
+                self.doc.interaction.context.clone()?,
                 display.projection.applied_ops as u32,
                 (bounds.min + bounds.max) * 0.5,
             ))
@@ -43,15 +43,15 @@ impl App {
             return;
         };
         if !self.viewport_ready()
-            || !self.bridge.valid()
+            || !self.doc.bridge.valid()
             || self.busy()
             || self.sketch_active()
             || crate::viewport_selection::sectioned(self)
         {
             return;
         }
-        self.gesture += 1;
-        self.transform_gizmo = TransformGizmo::default();
+        self.doc.gesture += 1;
+        self.doc.transform_gizmo = TransformGizmo::default();
         let params = TransformBodyParams {
             targets: vec![body],
             translate: [Scalar::new(0.0), Scalar::new(0.0), Scalar::new(0.0)],
@@ -71,7 +71,7 @@ impl App {
         self.dispatch(Action::BeginOperation {
             record: Box::new(record),
             parameter: NumericParameter::TransformTranslation(ParameterAxis::X),
-            gesture: self.gesture,
+            gesture: self.doc.gesture,
             context,
         });
     }
@@ -81,8 +81,8 @@ fn parameters(app: &App) -> Option<(RecordId, TransformBodyParams)> {
     if crate::viewport_selection::sectioned(app) {
         return None;
     }
-    let tool = app.interaction.tool.as_ref()?;
-    if tool.phase != SessionPhase::Editing || !app.viewport_ready() || !app.bridge.valid() {
+    let tool = app.doc.interaction.tool.as_ref()?;
+    if tool.phase != SessionPhase::Editing || !app.viewport_ready() || !app.doc.bridge.valid() {
         return None;
     }
     let Operation::Known(KnownOperation::TransformBody(mut params)) = tool.record.op.clone() else {
@@ -102,7 +102,7 @@ fn parameters(app: &App) -> Option<(RecordId, TransformBodyParams)> {
             _ => return None,
         }
     }
-    let display = app.display.as_ref()?;
+    let display = app.doc.display.as_ref()?;
     if params.targets.iter().any(|id| {
         !display
             .scene
@@ -118,10 +118,13 @@ fn parameters(app: &App) -> Option<(RecordId, TransformBodyParams)> {
 pub fn triad(app: &App) -> Option<Triad> {
     let (id, current) = parameters(app)?;
     let params = app
+        .doc
         .transform_gizmo
         .baseline
         .as_ref()
-        .filter(|_| app.transform_gizmo.gizmo.active() && app.transform_gizmo.record == Some(id))
+        .filter(|_| {
+            app.doc.transform_gizmo.gizmo.active() && app.doc.transform_gizmo.record == Some(id)
+        })
         .unwrap_or(&current);
     Some(Triad {
         center: DVec3::new(
@@ -135,17 +138,17 @@ pub fn triad(app: &App) -> Option<Triad> {
 }
 
 pub fn owns_pointer(app: &App, view: &ViewSnapshot, rect: egui::Rect, pointer: egui::Pos2) -> bool {
-    app.transform_gizmo.gizmo.active()
+    app.doc.transform_gizmo.gizmo.active()
         || triad(app).is_some_and(|triad| Gizmo::contains_pointer(view, rect, triad, pointer))
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui, view: &ViewSnapshot, rect: egui::Rect) -> bool {
     let Some((record, params)) = parameters(app) else {
-        app.transform_gizmo = TransformGizmo::default();
+        app.doc.transform_gizmo = TransformGizmo::default();
         return false;
     };
-    if app.transform_gizmo.record != Some(record) {
-        app.transform_gizmo = TransformGizmo {
+    if app.doc.transform_gizmo.record != Some(record) {
+        app.doc.transform_gizmo = TransformGizmo {
             record: Some(record),
             ..Default::default()
         };
@@ -155,14 +158,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, view: &ViewSnapshot, rect: egui::R
     };
     let step = snap_step(view.world_per_pixel(view.depth(triad.center)));
     let response = app
+        .doc
         .transform_gizmo
         .gizmo
         .show(ui, view, rect, triad, step, &app.theme);
     if let Some(drag) = response.drag {
         if drag.started {
-            app.transform_gizmo.baseline = Some(params);
+            app.doc.transform_gizmo.baseline = Some(params);
         }
-        if let Some(base) = &app.transform_gizmo.baseline
+        if let Some(base) = &app.doc.transform_gizmo.baseline
             && let Some((translate, axis, angle_degrees)) = changed(base, drag.change)
         {
             app.dispatch(Action::TransformDraftChanged {
@@ -173,10 +177,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, view: &ViewSnapshot, rect: egui::R
             ui.ctx().request_repaint();
         }
         if drag.done {
-            app.transform_gizmo.baseline = None;
+            app.doc.transform_gizmo.baseline = None;
         }
-    } else if !app.transform_gizmo.gizmo.active() {
-        app.transform_gizmo.baseline = None;
+    } else if !app.doc.transform_gizmo.gizmo.active() {
+        app.doc.transform_gizmo.baseline = None;
     }
     response.owns_pointer
 }

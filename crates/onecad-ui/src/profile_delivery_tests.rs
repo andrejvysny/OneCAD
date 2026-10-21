@@ -15,9 +15,15 @@ async fn finish_with_invalid_profile_closes_sketch_and_reports_overlap() {
     let area = tempfile::tempdir().unwrap();
     let (mut app, context) = create_app(area.path()).await;
     let mut frame = eframe::Frame::_new_kittest();
-    pump_until(&mut app, &context, &mut frame, |app| app.display.is_some()).await;
+    pump_until(&mut app, &context, &mut frame, |app| {
+        app.doc.display.is_some()
+    })
+    .await;
     app.document_request(Request::New);
-    pump_until(&mut app, &context, &mut frame, |app| !app.documents.running).await;
+    pump_until(&mut app, &context, &mut frame, |app| {
+        !app.doc.documents.running
+    })
+    .await;
     app.new_sketch();
     wait_active(&mut app, &context, &mut frame).await;
     primitive(
@@ -39,12 +45,13 @@ async fn finish_with_invalid_profile_closes_sketch_and_reports_overlap() {
     )
     .await;
     assert!(
-        app.bridge.valid(),
+        app.doc.bridge.valid(),
         "recoverable profile refusal must not invalidate sketch rendering"
     );
-    assert!(app.display.as_ref().unwrap().profiles.is_empty());
+    assert!(app.doc.display.as_ref().unwrap().profiles.is_empty());
     assert!(
-        app.diagnostics
+        app.doc
+            .diagnostics
             .profile
             .as_ref()
             .unwrap()
@@ -55,16 +62,20 @@ async fn finish_with_invalid_profile_closes_sketch_and_reports_overlap() {
     // already committed, so Finish closes the sketch and keeps the refusal visible.
     app.sketch_dispatch(SketchAction::Finish);
     pump_until(&mut app, &context, &mut frame, |app| !app.sketch_active()).await;
-    assert!(app.bridge.valid());
+    assert!(app.doc.bridge.valid());
     assert!(
-        app.diagnostics
+        app.doc
+            .diagnostics
             .profile
             .as_ref()
             .unwrap()
             .has_reason("SKETCH_PROFILE_OVERLAPPING_CURVES")
     );
-    assert!(app.display.as_ref().unwrap().profiles.is_empty());
-    assert_eq!(app.display.as_ref().unwrap().projection.sketches.len(), 1);
+    assert!(app.doc.display.as_ref().unwrap().profiles.is_empty());
+    assert_eq!(
+        app.doc.display.as_ref().unwrap().projection.sketches.len(),
+        1
+    );
     assert!(
         app.document_dirty(),
         "the closed sketch keeps its authored geometry"
@@ -75,7 +86,8 @@ async fn finish_with_invalid_profile_closes_sketch_and_reports_overlap() {
 
 async fn wait_active(app: &mut App, context: &egui::Context, frame: &mut eframe::Frame) {
     pump_until(app, context, frame, |app| {
-        app.sketch
+        app.doc
+            .sketch
             .session
             .as_ref()
             .is_some_and(|session| session.phase == SketchPhase::Active)
@@ -91,7 +103,7 @@ fn ids() -> PrimitiveIds {
 }
 
 fn capture(app: &mut App) -> ViewSnapshot {
-    let session = app.sketch.session.as_ref().unwrap();
+    let session = app.doc.sketch.session.as_ref().unwrap();
     app.view_number += 1;
     let view = ViewSnapshot::new(
         session.document.scene,
@@ -115,7 +127,7 @@ fn capture(app: &mut App) -> ViewSnapshot {
 fn click(app: &mut App, view: &ViewSnapshot, xy: [f64; 2], ids: PrimitiveIds) {
     app.sketch_dispatch(SketchAction::Click {
         point: CapturedSketchPoint {
-            key: app.sketch.session.as_ref().unwrap().key.clone(),
+            key: app.doc.sketch.session.as_ref().unwrap().key.clone(),
             capture: view.identity(),
             point: Vec2::new(xy[0], xy[1]).unwrap(),
         },
@@ -142,7 +154,7 @@ async fn primitive(
     };
     click(app, &view, end, final_ids);
     pump_until(app, context, frame, |app| {
-        app.sketch.session.as_ref().is_some_and(|session| {
+        app.doc.sketch.session.as_ref().is_some_and(|session| {
             session.phase == SketchPhase::Active && session.authoritative.contains_entity(entity)
         })
     })

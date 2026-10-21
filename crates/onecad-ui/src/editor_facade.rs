@@ -86,7 +86,7 @@ impl EditorFacade {
 
 /// Placement hijacks the pill, so it must not start over a sketch or a running tool.
 pub fn placement_allowed(app: &App) -> bool {
-    !app.sketch_active() && app.interaction.tool.is_none()
+    !app.sketch_active() && app.doc.interaction.tool.is_none()
 }
 
 /// Opens a Start-screen page; ignored while a command is in progress like the Home button.

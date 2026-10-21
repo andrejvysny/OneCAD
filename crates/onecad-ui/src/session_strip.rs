@@ -12,7 +12,7 @@ use onecad_widgets::{
 };
 
 pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
-    let Some(session) = app.sketch.session.as_ref() else {
+    let Some(session) = app.doc.sketch.session.as_ref() else {
         return;
     };
     let title = session.authoritative.name.clone();

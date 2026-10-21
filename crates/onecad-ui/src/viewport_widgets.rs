@@ -14,6 +14,7 @@ pub use pointer_policy::{allows_pointer, gesture_allowed};
 fn cube_host(app: &App, ui: &egui::Ui, rect: egui::Rect) -> egui::Rect {
     let chrome = crate::layout::chrome(ui.ctx().content_rect(), &app.ui);
     let chrome = if app
+        .doc
         .interaction
         .tool
         .as_ref()
@@ -32,7 +33,7 @@ fn cube_host(app: &App, ui: &egui::Ui, rect: egui::Rect) -> egui::Rect {
 }
 
 pub fn owns_pointer(app: &App, ui: &egui::Ui, rect: egui::Rect) -> bool {
-    if app.transform_gizmo.gizmo.active() || app.extrude_handle.active() {
+    if app.doc.transform_gizmo.gizmo.active() || app.doc.extrude_handle.active() {
         return true;
     }
     let Some(pointer) = ui.input(|input| input.pointer.hover_pos()) else {
@@ -49,7 +50,7 @@ pub(crate) fn owns_position(
 ) -> bool {
     allows_pointer(ui, rect, pointer)
         && (navigation_cube::rect(cube_host(app, ui, rect)).contains(pointer)
-            || app.view.as_ref().is_some_and(|view| {
+            || app.doc.view.as_ref().is_some_and(|view| {
                 crate::transform_ui::owns_pointer(app, view, rect, pointer)
                     || crate::extrude_handle::owns_pointer(app, view, rect, pointer)
             }))
@@ -58,7 +59,7 @@ pub(crate) fn owns_position(
 pub fn show(app: &mut App, ui: &mut egui::Ui, rect: egui::Rect, view: &ViewSnapshot) -> bool {
     let cube = ui
         .add_enabled_ui(
-            !app.transform_gizmo.gizmo.active() && !app.extrude_handle.active(),
+            !app.doc.transform_gizmo.gizmo.active() && !app.doc.extrude_handle.active(),
             |ui| navigation_cube::show(ui, cube_host(app, ui, rect), view, &app.theme),
         )
         .inner;
@@ -84,31 +85,33 @@ fn apply_cube(app: &mut App, view: &ViewSnapshot, action: CubeAction) {
     match action {
         CubeAction::SetDirection(direction) => {
             if let Some(direction) = direction.try_normalize() {
-                app.camera.offset = direction * app.camera.offset.length();
-                app.camera.roll_radians = 0.0;
+                app.doc.camera.offset = direction * app.doc.camera.offset.length();
+                app.doc.camera.roll_radians = 0.0;
             }
         }
         CubeAction::Orbit(delta) => {
             crate::camera_navigation::apply(
-                &mut app.camera,
+                &mut app.doc.camera,
                 view.viewport(),
                 view.identity().scene,
                 None,
                 crate::navigation::Motion::Orbit(delta),
             );
         }
-        CubeAction::QuarterOrbit { axis, radians } => rotate_camera(&mut app.camera, axis, radians),
+        CubeAction::QuarterOrbit { axis, radians } => {
+            rotate_camera(&mut app.doc.camera, axis, radians)
+        }
         CubeAction::Roll(angle) => {
-            app.camera.roll_radians =
-                (app.camera.roll_radians + angle).rem_euclid(std::f64::consts::TAU);
+            app.doc.camera.roll_radians =
+                (app.doc.camera.roll_radians + angle).rem_euclid(std::f64::consts::TAU);
         }
         CubeAction::Home => {
-            app.camera = Camera::default();
-            app.fit_pending = true;
+            app.doc.camera = Camera::default();
+            app.doc.fit_pending = true;
         }
-        CubeAction::Fit => app.fit_pending = true,
+        CubeAction::Fit => app.doc.fit_pending = true,
         CubeAction::ToggleProjection => {
-            app.camera.projection = if app.camera.projection == Projection::Perspective {
+            app.doc.camera.projection = if app.doc.camera.projection == Projection::Perspective {
                 Projection::Orthographic
             } else {
                 Projection::Perspective

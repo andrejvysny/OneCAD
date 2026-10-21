@@ -21,7 +21,7 @@ struct Capture {
 }
 
 fn cache_id() -> egui::Id {
-    egui::Id::unique("sketch-tangent-chain-drag")
+    crate::documents::scoped_id("sketch-tangent-chain-drag")
 }
 
 impl Capture {
@@ -61,6 +61,7 @@ pub(crate) fn cancel(app: &mut App, ctx: &egui::Context) {
         if capture.promoted
             && !capture.cancelled
             && app
+                .doc
                 .sketch
                 .session
                 .as_ref()
@@ -120,11 +121,13 @@ pub(super) fn viewport(
         return false;
     };
     let current = app
+        .doc
         .sketch
         .session
         .as_ref()
         .is_some_and(|session| capture.current(session, view.identity()));
     let owns_draft = app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -193,6 +196,7 @@ fn arm(
     view: &ViewSnapshot,
 ) -> Option<Capture> {
     let session = app
+        .doc
         .sketch
         .session
         .as_ref()
@@ -246,7 +250,7 @@ fn deliver(
     position: Pos2,
     released: bool,
 ) {
-    let Some(session) = app.sketch.session.as_ref() else {
+    let Some(session) = app.doc.sketch.session.as_ref() else {
         return;
     };
     let logical = DVec2::new(

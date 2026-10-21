@@ -77,6 +77,41 @@ pub async fn execute(
             crate::document_services::execute(backend, request, permit, sender).await;
             return;
         }
+        Command::DescribeChanges => {
+            let changes = api::unsaved_changes(&backend.state)
+                .await
+                .unwrap_or_default();
+            let runtime_session = api::get_document_state(&backend.state)
+                .await
+                .map(|state| state.runtime_session)
+                .unwrap_or_default();
+            let _ = sender.send(Message::Changes {
+                runtime_session,
+                changes,
+                _permit: permit,
+            });
+            backend.shared.wake();
+            return;
+        }
+        Command::Prepare(scene) => {
+            let result = prepare(backend, scene.clone()).await;
+            if result.is_err() {
+                // The retained capture cannot be drawn: publish a fresh one instead.
+                match load_ready_display(backend).await {
+                    Ok(display) => backend.shared.publish_display(display),
+                    Err(error) => {
+                        invalidate(&backend.shared, format!("Scene refresh failed: {error}"))
+                    }
+                }
+            }
+            let _ = sender.send(Message::Prepared {
+                identity: scene.identity(),
+                result,
+                _permit: permit,
+            });
+            backend.shared.wake();
+            return;
+        }
         other => other,
     };
     if let Command::Sketch(request) = command {
@@ -108,6 +143,36 @@ pub async fn execute(
         recovery.busy = false;
     }
     backend.shared.wake();
+}
+
+/// CPU preparation of an already-captured scene, under the same budgets as a
+/// capture. Runs on the blocking pool: every document host shares the service
+/// runtime, so a large preparation must not stall the others' actors.
+async fn prepare(
+    backend: &mut Backend,
+    scene: Arc<SceneSnapshot>,
+) -> Result<onecad_render::PreparedScene, String> {
+    let budget = backend
+        .shared
+        .preparation_budget()?
+        .limit_cpu_prepared_bytes(crate::budget::MAX_PREPARED_BYTES);
+    let mut cache = std::mem::take(&mut backend.preparation_cache);
+    let (prepared, cache) = tokio::task::spawn_blocking(move || {
+        let prepared = onecad_render::PreparedScene::new_cached(&scene, budget, &mut cache)
+            .map_err(|e| e.to_string());
+        (prepared, cache)
+    })
+    .await
+    .map_err(|error| format!("scene preparation stopped: {error}"))?;
+    backend.preparation_cache = cache;
+    let prepared = prepared?;
+    if prepared.cpu_bytes() > crate::budget::MAX_PREPARED_BYTES
+        || backend.preparation_cache.source_bytes() > crate::budget::MAX_SOURCE_BYTES as u64
+        || backend.preparation_cache.cpu_bytes() > crate::budget::MAX_PREPARED_BYTES
+    {
+        return Err("Native CPU preparation budget exceeded".into());
+    }
+    Ok(prepared)
 }
 
 async fn execute_command(
@@ -144,6 +209,9 @@ async fn execute_command(
         Command::Document(_) => return Err("file command reached model dispatcher".into()),
         Command::Items(_) => return Err("item command reached model dispatcher".into()),
         Command::Sketch(_) => return Err("sketch command reached model dispatcher".into()),
+        Command::Prepare(_) | Command::DescribeChanges => {
+            return Err("display command reached model dispatcher".into());
+        }
         Command::Recovery {
             document_id,
             choice,
@@ -243,7 +311,7 @@ pub(crate) async fn wait_regen(
     loop {
         tokio::select! {
             _=backend.shared.shutdown.notified()=>{
-                backend.state.retire_all();
+                backend.state.retire_host_workers();
                 return Err("Host shutdown requested; accepted authoring history was preserved".into());
             }
             event=backend.events.next()=>match event {

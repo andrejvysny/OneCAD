@@ -6,7 +6,7 @@ pub fn selector(app: &mut App, ui: &mut egui::Ui, tool: &ModelSession) {
     if !tool.editing_existing || tool.phase != SessionPhase::Editing {
         return;
     }
-    let Some(display) = app.display.clone() else {
+    let Some(display) = app.doc.display.clone() else {
         return;
     };
     let Some(record) = display
@@ -25,13 +25,13 @@ pub fn selector(app: &mut App, ui: &mut egui::Ui, tool: &ModelSession) {
             }
         });
     if parameter != tool.parameter
-        && let Some(context) = app.interaction.context.clone()
+        && let Some(context) = app.doc.interaction.context.clone()
     {
-        app.gesture += 1;
+        app.doc.gesture += 1;
         app.dispatch(Action::BeginParameterEdit {
             record: Box::new(record.clone()),
             parameter,
-            gesture: app.gesture,
+            gesture: app.doc.gesture,
             context,
         });
     }

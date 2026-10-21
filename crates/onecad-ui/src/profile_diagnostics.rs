@@ -253,19 +253,19 @@ enum Choice {
 }
 
 pub(crate) fn show(app: &mut App, ui: &mut egui::Ui) {
-    let Some(report) = app.diagnostics.profile.as_ref() else {
+    let Some(report) = app.doc.diagnostics.profile.as_ref() else {
         return;
     };
-    let Some(session) = report.current(&app.sketch) else {
+    let Some(session) = report.current(&app.doc.sketch) else {
         return;
     };
-    let available = !app.busy() && app.bridge.valid() && app.viewport_ready();
-    let choice = contents(ui, report, session, app.view, available);
+    let available = !app.busy() && app.doc.bridge.valid() && app.viewport_ready();
+    let choice = contents(ui, report, session, app.doc.view, available);
     let sketch = report.source.key.sketch_id;
     match choice {
         Some(Choice::Reenter) => app.edit_sketch(sketch),
         Some(Choice::Repair) => {
-            if let Some(session) = app.sketch.session.as_ref() {
+            if let Some(session) = app.doc.sketch.session.as_ref() {
                 app.sketch_dispatch(SketchAction::ReenterForRepair {
                     key: session.key.clone(),
                     document: session.document.clone(),
