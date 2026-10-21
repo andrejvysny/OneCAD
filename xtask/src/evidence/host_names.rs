@@ -75,6 +75,11 @@ pub(super) const HOST_TESTS: &[&str] = &[
     "app_logic_tests::extrude_handle_delivery_tests::handle_cancelled_second_press_keeps_the_first_drag",
     "app_logic_tests::extrude_handle_delivery_tests::handle_three_drags_then_confirm_add_one_history_entry",
     "app_logic_tests::extrude_handle_delivery_tests::handle_release_over_chrome_ends_drag_at_last_motion",
+    "app_logic_tests::sketch_selection_delivery_tests::arc_roles_line_ends_symmetric_axis_marquee_and_undo_prune",
+    "app_logic_tests::sketch_selection_delivery_tests::tabs::selection_does_not_cross_sketch_visits_or_document_tabs",
+    "app_logic_tests::sketch_finish_delivery_tests::refused_finish_reenters_for_chooser_repair_and_model_history_restores_region",
+    "app_logic_tests::sketch_finish_delivery_tests::no_op_finish_discards_and_partial_undo_keep_model_history_and_region",
+    "app_logic_tests::sketch_finish_delivery_tests::reopen::finished_sketch_saves_in_place_and_reopens_with_same_region_and_identities",
 ];
 /// Ignored service and bridge cases outside `app_logic_tests`; they do not
 /// emit adapter evidence, so the gate runs them as a separate exact selection.
