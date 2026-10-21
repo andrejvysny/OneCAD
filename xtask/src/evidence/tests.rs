@@ -1,4 +1,8 @@
-use super::{captures, host, host_names::HOST_TESTS, kernelbench};
+use super::{
+    captures, host,
+    host_names::{HOST_TESTS, SERVICE_TESTS},
+    kernelbench,
+};
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -41,19 +45,19 @@ fn accepted() -> String {
 }
 #[test]
 fn host_inventory_requires_exact_current_names() {
-    assert_eq!(HOST_TESTS.len(), 45);
+    assert_eq!(HOST_TESTS.len(), 55);
     let inventory = HOST_TESTS
         .iter()
         .map(|name| format!("{name}: test\n"))
         .collect::<String>();
-    host::inventory(&inventory).unwrap();
-    host::verify(&accepted()).unwrap();
+    host::inventory(&inventory, &host::LIFECYCLE).unwrap();
+    host::verify(&accepted(), &host::LIFECYCLE).unwrap();
     for output in [
         inventory.clone() + &format!("{}: test\n", HOST_TESTS[0]),
         inventory.replace(HOST_TESTS[0], HOST_TESTS[1]),
         inventory.replace(HOST_TESTS[0], "unknown"),
     ] {
-        assert!(host::inventory(&output).is_err());
+        assert!(host::inventory(&output, &host::LIFECYCLE).is_err());
     }
 }
 #[test]
@@ -75,7 +79,7 @@ fn host_zero_skips_wrong_failed_duplicate_missing_and_nonmetal_fail_closed() {
         accepted.clone() + &summary(),
     ] {
         assert!(
-            host::verify(&output).is_err(),
+            host::verify(&output, &host::LIFECYCLE).is_err(),
             "incorrect acceptance: {output}"
         );
     }
@@ -89,7 +93,49 @@ fn host_separate_stderr_and_extra_adapter_setup_valid() {
         + &summary();
     let stderr =
         "Native host gate adapter: AdapterInfo { backend: Metal }\n".repeat(HOST_TESTS.len() + 2);
-    host::verify(&(stdout + &stderr)).unwrap();
+    host::verify(&(stdout + &stderr), &host::LIFECYCLE).unwrap();
+}
+#[test]
+fn host_service_selection_requires_its_own_exact_inventory_and_count() {
+    assert_eq!(SERVICE_TESTS.len(), 4);
+    let services = &host::SERVICES;
+    let inventory = SERVICE_TESTS
+        .iter()
+        .map(|name| format!("{name}: test\n"))
+        .collect::<String>();
+    host::inventory(&inventory, services).unwrap();
+    for output in [
+        inventory.clone() + &format!("{}: test\n", SERVICE_TESTS[0]),
+        inventory.clone() + &format!("{}: test\n", HOST_TESTS[0]),
+        inventory.replace(SERVICE_TESTS[0], "unknown"),
+        inventory.replace(&format!("{}: test\n", SERVICE_TESTS[3]), ""),
+    ] {
+        assert!(host::inventory(&output, services).is_err());
+    }
+    let summary =
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 58 filtered out; finished in 1s\n";
+    // Service tests emit no adapter record, so none is required here.
+    let passed = SERVICE_TESTS
+        .iter()
+        .map(|name| format!("test {name} ... ok\n"))
+        .collect::<String>()
+        + summary;
+    host::verify(&passed, services).unwrap();
+    for output in [
+        "test result: ok. 0 passed; 0 failed; 0 ignored;".into(),
+        passed.replacen("... ok\n", "... FAILED\n", 1),
+        passed.replace(
+            "4 passed; 0 failed; 0 ignored;",
+            "3 passed; 0 failed; 1 ignored;",
+        ),
+        passed.replace(&format!("test {} ... ok\n", SERVICE_TESTS[3]), ""),
+        passed.clone() + summary,
+        accepted() + &passed,
+    ] {
+        assert!(host::verify(&output, services).is_err());
+    }
+    assert!(host::verify(&passed, &host::LIFECYCLE).is_err());
+    assert!(host::verify(&accepted(), services).is_err());
 }
 #[test]
 fn host_missing_worker_requires_selected_test_and_decisive_failure() {

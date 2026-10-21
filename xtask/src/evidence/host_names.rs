@@ -16,7 +16,7 @@ pub(super) const HOST_TESTS: &[&str] = &[
     "app_logic_tests::arc_slot_delivery_tests::tangent_arc_clockwise_counterclockwise_native_hv_snap_roles",
     "app_logic_tests::arc_slot_delivery_tests::tangent_chain_keyboard_drag_seed_cancel_and_numeric_radius",
     "app_logic_tests::arc_slot_delivery_tests::tangent_chain_drag_release_once_and_accepted_closure_profile",
-    "app_logic_tests::profile_delivery_tests::finish_refusal_reenters_fresh_service_visit_for_repair",
+    "app_logic_tests::profile_delivery_tests::finish_with_invalid_profile_closes_sketch_and_reports_overlap",
     "app_logic_tests::selection_delivery_tests::marquee_survives_redraw_and_cancels_when_camera_changes",
     "app_logic_tests::point_center_delivery_tests::point_tab_before_pointer_signed_zero_and_repeated_construction_clicks",
     "app_logic_tests::point_center_delivery_tests::rectangle_method_chooser_center_numeric_full_dimensions_and_history",
@@ -44,4 +44,22 @@ pub(super) const HOST_TESTS: &[&str] = &[
     "app_logic_tests::capability_delivery_tests::restored_controls_use_real_context_and_do_not_enable_mock_actions",
     "app_logic_tests::sketch_plane_choice_tests::viewport_world_patches_hover_cancel_and_click_without_stray_sketches",
     "app_logic_tests::gesture_delivery_tests::batch_delivery::ordinary_split_frame_click_selects_line_and_circle_without_drag_or_edit",
+    "app_logic_tests::document_tabs_tests::new_while_a_document_is_open_opens_a_second_live_tab",
+    "app_logic_tests::document_tabs_tests::switching_back_re_prepares_the_same_scene_without_a_new_capture",
+    "app_logic_tests::document_tabs_tests::closing_a_tab_stops_only_its_host_and_activates_a_neighbour",
+    "app_logic_tests::document_tabs_tests::each_restored_crash_document_gets_its_own_tab",
+    "app_logic_tests::document_tabs_tests::quit_asks_about_every_document_with_unsaved_work",
+    "app_logic_tests::document_tabs_tests::a_close_decided_in_the_background_waits_for_its_tab",
+    "app_logic_tests::document_tabs_tests::tabs_keep_opening_order_and_cycle_through_it",
+    "app_logic_tests::document_tabs_tests::an_unpreparable_switch_falls_back_instead_of_blanking_forever",
+    "app_logic_tests::document_tabs_tests::ctrl_tab_walks_most_recent_first_and_switches_on_release",
+    "app_logic_tests::document_tabs_tests::new_tab_shows_home_and_the_close_prompt_asks_what_changed",
+];
+/// Ignored service and bridge cases outside `app_logic_tests`; they do not
+/// emit adapter evidence, so the gate runs them as a separate exact selection.
+pub(super) const SERVICE_TESTS: &[&str] = &[
+    "document_services::tests::home_lifecycle_tests::startup_and_cancelled_failed_file_actions_leave_no_document",
+    "document_services::tests::home_lifecycle_tests::explicit_new_establishes_one_empty_unsaved_session_and_failure_preserves_it",
+    "document_services::tests::home_lifecycle_tests::discarding_last_recovery_offer_without_startup_path_leaves_home_empty",
+    "bridge::tests::production_actor_preserves_no_document_start_and_captures_explicit_new_documents",
 ];

@@ -113,7 +113,7 @@ jobs:
         if: success()
         run: |
           set -euo pipefail
-          for file in acceptance.json lifecycle.log inventory.log missing-worker.log source.log toolchain.log worker-selftest.log worker-manifest.json occt-build.json worker-build.log; do
+          for file in acceptance.json lifecycle.log inventory.log service-lifecycle.log service-inventory.log missing-worker.log source.log toolchain.log worker-selftest.log worker-manifest.json occt-build.json worker-build.log; do
             test -s "$RUNNER_TEMP/onecad-native-host-gate/$file"
           done
       - uses: actions/upload-artifact@v4
