@@ -198,6 +198,22 @@ fn a_circle_touched_once_is_deleted_whole_with_its_center() {
 }
 
 #[test]
+fn a_small_circle_on_an_ellipse_is_cut_not_deleted_whole() {
+    // Both crossings fall inside one 0.5 deg ellipse seed interval.
+    let phi = 0.25f64.to_radians();
+    let (cx, cy, r) = (100.0 * phi.cos(), 50.0 * phi.sin(), 0.1);
+    let mut b = B::new();
+    b.ellipse((0.0, 0.0), 100.0, 50.0, 0.0);
+    let (c, center) = b.circle((cx, cy), r);
+    let plan = trim(&b.s, c, cx - r, cy).unwrap();
+    let after = apply(&b.s, &plan);
+    check_accounting(&b.s, &after, &plan, c, &[]);
+    assert_eq!(plan.pieces.len(), 1, "the outer arc survives");
+    assert_eq!(plan.removed_entities, vec![c]);
+    assert!(after.contains_entity(center));
+}
+
+#[test]
 fn a_split_arc_keeps_its_id_on_the_start_piece_and_moves_end_roles() {
     let mut b = B::new();
     let (arc, _) = b.arc((0.0, 0.0), 5.0, 0.0, PI);

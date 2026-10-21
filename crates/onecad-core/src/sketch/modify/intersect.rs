@@ -7,8 +7,9 @@
 //!
 //! Line/circle pairs are closed-form and flag a tangential touch, so an extend
 //! can refuse to land on one. A circle against an ellipse is a quartic; it is
-//! solved by sampling the ellipse and bisecting sign changes, which finds every
-//! transversal crossing but cannot see a pure tangential touch (no sign change).
+//! solved by subdividing the ellipse until a derivative bound proves each
+//! piece has no root, exactly one (bisected), or is narrower than a fraction
+//! of [`COINCIDENT_MM`], where an extremum within it is flagged a touch.
 //!
 //! A boundary on the target's OWN carrier (a collinear line, an arc of the same
 //! circle) meets it along a stretch rather than at points. Its drawn end
@@ -33,10 +34,14 @@ pub(super) struct Hit {
     pub overlap: bool,
 }
 
-/// Ellipse samples for the circle/ellipse root search; fine enough that two
-/// crossings of any sketch-scale ellipse never share one sample interval.
+/// Seed intervals for the circle/ellipse root search. Each is subdivided as
+/// far as needed, so this only sets where the search starts.
 const ELLIPSE_SAMPLES: usize = 720;
 const BISECTIONS: usize = 64;
+/// Subdivision caps: only a coincident or osculating pair, where `f` stays
+/// near zero over a stretch, reaches them; the search then stays bounded.
+const MAX_DEPTH: u32 = 48;
+const NODE_BUDGET: usize = 1 << 14;
 
 /// All intersections of `target`'s carrier with `other`'s carrier. `target` is
 /// a line, arc or circle (an arc contributes its full circle).
@@ -226,42 +231,191 @@ fn circle_ellipse(cc: Pt, r: f64, ellipse: &Curve) -> Vec<Hit> {
     else {
         return Vec::new();
     };
-    let at = |phi: f64| ellipse_point(c, major, minor, rot, phi);
-    let f = |phi: f64| {
-        let d = at(phi).dist(cc);
-        d * d - r * r
+    let reach = major.max(minor);
+    let far = c.dist(cc) + reach;
+    let mut search = CircleEllipse {
+        c,
+        major,
+        minor,
+        rot,
+        cc,
+        r,
+        f2: 2.0 * reach * (reach + far),
+        band: COINCIDENT_MM * (2.0 * r + COINCIDENT_MM),
+        noise: 64.0 * f64::EPSILON * (far * far + r * r),
+        leaf: COINCIDENT_MM / (4.0 * reach),
+        nodes: 0,
+        roots: Vec::new(),
     };
     let step = TAU / ELLIPSE_SAMPLES as f64;
-    let mut hits = Vec::new();
+    let seeds: Vec<Sample> = (0..ELLIPSE_SAMPLES)
+        .map(|i| search.sample(i as f64 * step))
+        .collect();
     for i in 0..ELLIPSE_SAMPLES {
-        let (mut lo, mut hi) = (i as f64 * step, (i + 1) as f64 * step);
-        let (flo, fhi) = (f(lo), f(hi));
-        if flo == 0.0 {
-            hits.push(at(lo));
-            continue;
-        }
-        if flo * fhi >= 0.0 {
-            continue;
-        }
-        for _ in 0..BISECTIONS {
-            let mid = 0.5 * (lo + hi);
-            if f(mid) * flo > 0.0 {
-                lo = mid;
-            } else {
-                hi = mid;
-            }
-        }
-        hits.push(at(0.5 * (lo + hi)));
+        // The last interval ends on the first seed's values, so a root or
+        // extremum at φ = 0 is seen exactly once.
+        let mut hi = seeds[(i + 1) % ELLIPSE_SAMPLES];
+        hi.phi = (i + 1) as f64 * step;
+        search.visit(seeds[i], hi, 0);
     }
-    hits.into_iter()
-        .map(|p| Hit {
-            p,
-            tangent: false,
-            overlap: false,
-        })
-        .collect()
+    search.merged_hits()
 }
 
+/// `f` and `f'` at one ellipse angle; neighbouring intervals share it.
+#[derive(Clone, Copy)]
+struct Sample {
+    phi: f64,
+    f: f64,
+    df: f64,
+}
+
+/// Root search for `f(φ) = |E(φ) − cc|² − r²`, a degree-2 trigonometric
+/// polynomial with up to four roots, any two of which may be arbitrarily close.
+struct CircleEllipse {
+    c: Pt,
+    major: f64,
+    minor: f64,
+    rot: f64,
+    cc: Pt,
+    r: f64,
+    /// `≥ max|f''|`: `f'' = 2(|E'|² + (E − cc)·E'')`, `|E'|, |E − c| ≤ reach`.
+    f2: f64,
+    /// `|f|` bound of a point within [`COINCIDENT_MM`] of the circle.
+    band: f64,
+    /// `|f|` indistinguishable from zero after rounding.
+    noise: f64,
+    /// Interval width below which subdivision stops.
+    leaf: f64,
+    nodes: usize,
+    /// `(φ, tangent)` in increasing φ.
+    roots: Vec<(f64, bool)>,
+}
+
+impl CircleEllipse {
+    fn point(&self, phi: f64) -> Pt {
+        ellipse_point(self.c, self.major, self.minor, self.rot, phi)
+    }
+
+    fn f(&self, phi: f64) -> f64 {
+        let d = self.point(phi).dist(self.cc);
+        d * d - self.r * self.r
+    }
+
+    fn df(&self, phi: f64) -> f64 {
+        let (sin, cos) = self.rot.sin_cos();
+        let (x, y) = (-self.major * phi.sin(), self.minor * phi.cos());
+        let tangent = Pt::new(x * cos - y * sin, x * sin + y * cos);
+        2.0 * (self.point(phi) - self.cc).dot(tangent)
+    }
+
+    fn sample(&self, phi: f64) -> Sample {
+        Sample {
+            phi,
+            f: self.f(phi),
+            df: self.df(phi),
+        }
+    }
+
+    fn visit(&mut self, lo: Sample, hi: Sample, depth: u32) {
+        self.nodes += 1;
+        let h = 0.5 * (hi.phi - lo.phi);
+        let m = self.sample(lo.phi + h);
+        if m.df.abs() > self.f2 * h {
+            // f' cannot vanish here: f is monotone, so one root at most.
+            self.crossing(lo, hi);
+            return;
+        }
+        if m.f.abs() - m.df.abs() * h - 0.5 * self.f2 * h * h > self.band {
+            return; // Taylor bound: no root and no touch anywhere in [lo, hi].
+        }
+        if 2.0 * h <= self.leaf || depth >= MAX_DEPTH || self.nodes >= NODE_BUDGET {
+            self.leaf_roots(lo, hi);
+            return;
+        }
+        self.visit(lo, m, depth + 1);
+        self.visit(m, hi, depth + 1);
+    }
+
+    /// Records the root a sign change brackets. Zero counts as positive, so
+    /// an exact zero is one crossing when f passes through it and none (or a
+    /// pair, merged later) when f only touches it.
+    fn crossing(&mut self, lo: Sample, hi: Sample) -> bool {
+        let up = lo.f >= 0.0;
+        if up == (hi.f >= 0.0) {
+            return false;
+        }
+        let phi = bisect(|x| self.f(x) >= 0.0, up, lo.phi, hi.phi);
+        self.roots.push((phi, false));
+        true
+    }
+
+    /// A leaf may still hold an extremum of f: two roots either side of it,
+    /// or a touch when it approaches zero without crossing. An extremum past
+    /// zero between roots outside the leaf is neither.
+    fn leaf_roots(&mut self, lo: Sample, hi: Sample) {
+        if self.crossing(lo, hi) {
+            return;
+        }
+        let rising = hi.df >= 0.0;
+        if (lo.df >= 0.0) == rising {
+            return;
+        }
+        let ext = self.sample(bisect(|x| self.df(x) >= 0.0, !rising, lo.phi, hi.phi));
+        if (ext.f >= 0.0) != (lo.f >= 0.0) {
+            self.crossing(lo, ext);
+            self.crossing(ext, hi);
+            return;
+        }
+        // A minimum at or above zero, or a maximum below it.
+        let touches = rising == (ext.f >= 0.0);
+        if touches && (self.point(ext.phi).dist(self.cc) - self.r).abs() <= COINCIDENT_MM {
+            self.roots.push((ext.phi, true));
+        }
+    }
+
+    /// Collapses each run of roots chained around the ring to one hit: a
+    /// crossing when the run crosses an odd number of times, else a touch.
+    /// Neighbours chain within [`COINCIDENT_MM`], or when f between them is
+    /// rounding noise: where the curves agree to rounding over a stretch (an
+    /// osculating or coincident pair) the sign of f flickers.
+    fn merged_hits(&self) -> Vec<Hit> {
+        let n = self.roots.len();
+        let chained = |i: usize| {
+            let (a, b) = (self.roots[(i + n - 1) % n].0, self.roots[i].0);
+            let mid = 0.5 * (a + b + if b < a { TAU } else { 0.0 });
+            self.point(a).dist(self.point(b)) <= COINCIDENT_MM || self.f(mid).abs() <= self.noise
+        };
+        let start = (0..n).find(|&i| !chained(i)).unwrap_or(0);
+        let mut runs: Vec<Vec<(f64, bool)>> = Vec::new();
+        for k in 0..n {
+            let i = (start + k) % n;
+            if k == 0 || !chained(i) {
+                runs.push(Vec::new());
+            }
+            runs.last_mut().expect("pushed above").push(self.roots[i]);
+        }
+        runs.into_iter()
+            .map(|run| Hit {
+                p: self.point(run[run.len() / 2].0),
+                tangent: run.iter().filter(|(_, tangent)| !tangent).count() % 2 == 0,
+                overlap: false,
+            })
+            .collect()
+    }
+}
+
+/// Where `pred` flips from `up` in `[lo, hi]`, bisected to float resolution.
+fn bisect(pred: impl Fn(f64) -> bool, up: bool, mut lo: f64, mut hi: f64) -> f64 {
+    for _ in 0..BISECTIONS {
+        let mid = 0.5 * (lo + hi);
+        if pred(mid) == up {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,5 +532,78 @@ mod tests {
         assert!(hits
             .iter()
             .all(|h| on_ellipse(h.p) && (h.p.dist(Pt::new(1.0, 2.0)) - 4.5).abs() < 1e-9));
+    }
+
+    fn origin_ellipse(major: f64, minor: f64) -> Curve {
+        Curve::Ellipse {
+            c: Pt::new(0.0, 0.0),
+            major,
+            minor,
+            rot: 0.0,
+        }
+    }
+
+    /// Every hit lies on both carriers, and each expected point has a hit.
+    fn assert_hits(hits: &[Hit], circle: (Pt, f64), (major, minor): (f64, f64), expect: &[Pt]) {
+        let on_ellipse =
+            |p: Pt| (to_unit(p, Pt::new(0.0, 0.0), major, minor, 0.0).len() - 1.0).abs();
+        for h in hits {
+            assert!(!h.tangent && !h.overlap, "{h:?}");
+            assert!((h.p.dist(circle.0) - circle.1).abs() < 1e-9, "{h:?}");
+            assert!(on_ellipse(h.p) < 1e-9, "{h:?}");
+        }
+        for e in expect {
+            assert!(
+                hits.iter().any(|h| h.p.dist(*e) < 1e-6),
+                "{e:?} missing from {hits:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_small_circle_centred_on_an_ellipse_crosses_it_twice() {
+        // Centred mid-way through one 0.5 deg seed interval: both crossings
+        // fall inside it and the seed samples share a sign.
+        for (major, minor, r) in [(100.0, 50.0, 0.1), (1000.0, 500.0, 2.0)] {
+            let c = ellipse_point(Pt::new(0.0, 0.0), major, minor, 0.0, 0.25f64.to_radians());
+            let hits = carrier_hits(&Curve::Circle { c, r }, &origin_ellipse(major, minor));
+            assert_eq!(hits.len(), 2, "{major}x{minor} r={r}: {hits:?}");
+            assert_hits(&hits, (c, r), (major, minor), &[]);
+        }
+    }
+
+    #[test]
+    fn a_near_tangent_circle_crosses_twice_inside_one_seed_interval() {
+        // Crossings 0.3 deg apart, the circle bulging outward from the
+        // ellipse between them; 0 and 0.5 deg both lie outside it.
+        let at = |deg: f64| ellipse_point(Pt::new(0.0, 0.0), 100.0, 50.0, 0.0, deg.to_radians());
+        let (p1, p2, r) = (at(0.1), at(0.4), 30.0);
+        let chord = p2 - p1;
+        let outward = Pt::new(chord.y, -chord.x) * (1.0 / chord.len());
+        let offset = (r * r - chord.dot(chord) / 4.0).sqrt();
+        let c = (p1 + p2) * 0.5 + outward * offset;
+        let hits = carrier_hits(&Curve::Circle { c, r }, &origin_ellipse(100.0, 50.0));
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert_hits(&hits, (c, r), (100.0, 50.0), &[p1, p2]);
+    }
+
+    #[test]
+    fn a_circle_touching_an_ellipse_is_one_tangent_hit() {
+        let phi = 0.25f64.to_radians();
+        let touch = ellipse_point(Pt::new(0.0, 0.0), 100.0, 50.0, 0.0, phi);
+        let normal = Pt::new(touch.x / 1e4, touch.y / 2.5e3);
+        let off_seed = touch + normal * (10.0 / normal.len());
+        let cases = [
+            (off_seed, 10.0, touch, 1e-6),
+            (Pt::new(110.0, 0.0), 10.0, Pt::new(100.0, 0.0), 1e-6),
+            // Osculating at the vertex: the curves agree to rounding along a
+            // stretch, and the flickering sign of f still yields one touch.
+            (Pt::new(75.0, 0.0), 25.0, Pt::new(100.0, 0.0), 1e-2),
+        ];
+        for (c, r, at, tol) in cases {
+            let hits = carrier_hits(&Curve::Circle { c, r }, &origin_ellipse(100.0, 50.0));
+            assert_eq!(hits.len(), 1, "{c:?} r={r}: {hits:?}");
+            assert!(hits[0].tangent && hits[0].p.dist(at) < tol, "{hits:?}");
+        }
     }
 }
