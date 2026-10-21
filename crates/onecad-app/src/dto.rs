@@ -757,6 +757,18 @@ pub struct RecoveryInfoDto {
 pub struct WorkerStatusDto {
     pub state: String,
     pub epoch: u64,
+    /// Why the worker failed (`state == "failed"`). An abandoned in-process
+    /// worker's reason contains `relaunch-required`: the UI's terminal state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// In-process crash-journal writes that failed so far (best effort; the ops
+    /// ran). Omitted when zero.
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub journal_write_failures: u64,
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 /// One changed body in a `document-changed` event (`types.ts` `BodyMeshRef`).

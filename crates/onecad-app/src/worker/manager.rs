@@ -34,7 +34,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -66,10 +65,9 @@ use onecad_core::sketch::Sketch;
 
 use crate::dto::{BeginGestureDto, DragSolveDto, FinishSketchDto, SketchUpsertDto};
 
+use super::host::{KillOutcome, PoisonSeed, WorkerHost, WorkerInstance};
+use super::identity::verify_hello_axes;
 use super::{wire, MeshProvider, SolverEngine};
-
-#[path = "manifest.rs"]
-mod bundled_manifest;
 
 /// Lifecycle state surfaced to the app (drives the worker-status banner).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +99,9 @@ pub enum WorkerLifecycle {
     /// A plan-key's crash circuit tripped (poison): that plan now fails fast without
     /// dispatch, but the worker stays alive so other plans still run (F3).
     CircuitOpen { key: String },
+    /// The in-process crash journal failed to record `failures` writes so far
+    /// (best effort: the ops ran anyway). Surfaced in worker status.
+    JournalDegraded { epoch: u64, failures: u64 },
 }
 
 /// The restart hook: called with the freshly-bumped epoch after every restart, so
@@ -111,8 +112,10 @@ pub type RestartHook = Arc<dyn Fn(WorkerEpoch) + Send + Sync>;
 /// Tunable supervision policy (production defaults; tests inject fast values).
 #[derive(Debug, Clone)]
 pub struct SupervisorConfig {
+    /// The sidecar binary ([`WorkerManager::spawn`]). Unused by the in-process
+    /// backend, which supervises a library run instead (`WorkerBackend`).
     pub binary: PathBuf,
-    /// Extra environment for the spawn (chaos-hook drills set these).
+    /// Extra environment for the spawn (chaos-hook drills set these). Sidecar only.
     pub envs: Vec<(String, String)>,
     pub ping_interval: Duration,
     pub ping_timeout: Duration,
@@ -189,6 +192,13 @@ impl SupervisorConfig {
 struct Shared {
     manager_id: u64,
     config: SupervisorConfig,
+    /// How instances start, end and stop (sidecar process / in-process run).
+    host: Arc<dyn WorkerHost>,
+    /// The reason of the terminal `Failed` transition, once there is one (an
+    /// abandoned in-process worker's says `relaunch-required`).
+    failure_reason: Mutex<Option<String>>,
+    /// The journal-failure count last announced (`JournalDegraded`).
+    journal_failures_reported: AtomicU64,
     /// The current connection; `None` while (re)starting or Failed.
     conn: RwLock<Option<Arc<ProtocolClient>>>,
     epoch: AtomicU64,
@@ -445,8 +455,52 @@ impl Shared {
                     "worker crash circuit open (poison) — this plan now fails fast"
                 );
             }
+            WorkerLifecycle::JournalDegraded { epoch, failures } => {
+                tracing::warn!(epoch, failures, "kernel crash journal writes are failing");
+            }
         }
         let _ = self.lifecycle.send(ev);
+    }
+
+    /// The terminal failure: state, reason (kept for status queries) and event.
+    fn fail(&self, reason: String) {
+        self.set_state(WorkerState::Failed);
+        *self.failure_reason.lock().unwrap() = Some(reason.clone());
+        self.emit(WorkerLifecycle::Failed { reason });
+    }
+
+    /// Announces a grown journal-failure count once (checked on every ping).
+    fn report_journal_failures(&self) {
+        let failures = self.host.journal_write_failures();
+        if failures
+            > self
+                .journal_failures_reported
+                .swap(failures, Ordering::SeqCst)
+        {
+            let epoch = self.epoch.load(Ordering::SeqCst);
+            self.emit(WorkerLifecycle::JournalDegraded { epoch, failures });
+        }
+    }
+
+    /// Seeds persisted circuit entries (the in-process journal's strikes from
+    /// earlier launches). An open seed fails its plan fast exactly like a key
+    /// that crashed `poison_threshold` times in this process.
+    fn seed_poison(&self, seeds: Vec<PoisonSeed>) {
+        let mut p = self.poison.lock().unwrap();
+        for seed in seeds {
+            p.clock += 1;
+            let clock = p.clock;
+            let entry = p.entries.entry(seed.key.clone()).or_default();
+            entry.count = entry.count.max(seed.strikes);
+            entry.last_message = seed.message;
+            entry.touched = clock;
+            if seed.open {
+                tracing::error!(key = %seed.key, strikes = seed.strikes,
+                    "kernel journal: suspected interruption repeated — circuit open until cleared");
+                p.open.insert(seed.key);
+            }
+        }
+        p.evict_over_cap();
     }
 
     /// Records a same-key crash + its message; returns `true` if the circuit just
@@ -502,6 +556,9 @@ impl Shared {
         let cleared = p.entries.len();
         p.entries.clear();
         p.open.clear();
+        // Persisted strikes too, or the next launch would re-open what the user
+        // just cleared.
+        self.host.poison_cleared();
         cleared
     }
 
@@ -513,6 +570,7 @@ impl Shared {
             p.entries.remove(key);
             p.open.remove(key);
         }
+        self.host.poison_healed(keys);
     }
 
     /// The first of a plan's candidate op keys with an open circuit, and that key's
@@ -554,15 +612,27 @@ impl WorkerManager {
         self.shared.manager_id
     }
 
-    /// Spawns the supervisor for `config` (returns immediately; the connection is
-    /// established asynchronously). Call [`wait_ready`](Self::wait_ready) to await
-    /// the first successful handshake.
+    /// Spawns the supervisor for `config` over the sidecar binary
+    /// `config.binary` (returns immediately; the connection is established
+    /// asynchronously). Call [`wait_ready`](Self::wait_ready) to await the first
+    /// successful handshake.
+    #[cfg(feature = "sidecar")]
     #[must_use]
     pub fn spawn(config: SupervisorConfig) -> Self {
+        let host = super::sidecar::SidecarHost::new(config.binary.clone(), config.envs.clone());
+        Self::spawn_with_host(config, Arc::new(host))
+    }
+
+    /// Spawns the supervisor for `config` over `host` (sidecar or in-process).
+    #[must_use]
+    pub(crate) fn spawn_with_host(config: SupervisorConfig, host: Arc<dyn WorkerHost>) -> Self {
         let (lifecycle, _) = broadcast::channel(64);
         let shared = Arc::new(Shared {
             manager_id: NEXT_MANAGER_ID.fetch_add(1, Ordering::Relaxed),
             config,
+            host,
+            failure_reason: Mutex::new(None),
+            journal_failures_reported: AtomicU64::new(0),
             conn: RwLock::new(None),
             epoch: AtomicU64::new(1),
             state: Mutex::new(WorkerState::Starting),
@@ -597,6 +667,19 @@ impl WorkerManager {
     #[must_use]
     pub fn hello(&self) -> Option<HelloResult> {
         self.shared.hello.lock().unwrap().clone()
+    }
+
+    /// Why the manager reached [`WorkerState::Failed`], once it has. An abandoned
+    /// in-process worker's reason contains `relaunch-required`.
+    #[must_use]
+    pub fn failure_reason(&self) -> Option<String> {
+        self.shared.failure_reason.lock().unwrap().clone()
+    }
+
+    /// Crash-journal writes that failed so far (in-process backend; 0 otherwise).
+    #[must_use]
+    pub fn journal_write_failures(&self) -> u64 {
+        self.shared.host.journal_write_failures()
     }
 
     /// Subscribe to lifecycle transitions (for the worker-status banner).
@@ -924,7 +1007,7 @@ impl WorkerManager {
         Arc::ptr_eq(&self.shared, &other.shared)
     }
 
-    fn client_or_err(&self) -> Result<Arc<ProtocolClient>, EngineError> {
+    pub(super) fn client_or_err(&self) -> Result<Arc<ProtocolClient>, EngineError> {
         if self.shared.is_retired() {
             return Err(retired_err());
         }
@@ -975,6 +1058,11 @@ enum Death {
     },
     /// [`WorkerManager::retire`] latched — terminal, NOT a restart trigger.
     Retired,
+    /// A hung or wedged IN-PROCESS worker that did not return once its socket
+    /// was closed: its thread is left behind (no safe way to stop a thread
+    /// inside OCCT). Terminal — `Failed` with `relaunch-required`, no restart
+    /// and no new thread (docs/ios/ARCHITECTURE.md "In-process failure policy").
+    Abandoned { reason: String },
 }
 
 /// How long a retired worker gets to honour its graceful `Shutdown` before it is
@@ -987,18 +1075,6 @@ const RETIRE_GRACE: Duration = Duration::from_millis(500);
 /// `cancel` the id rather than drop the slot — an abandoned request leaves the
 /// worker building an answer nobody will read.
 const ANALYZE_EDGE_OP_RANGE_LIVENESS: Duration = Duration::from_secs(10);
-
-/// Reaps `child`: waits up to `grace` for the self-exit the graceful `Shutdown`
-/// should produce, then `SIGKILL`s. Always returns with the child reaped, so
-/// `kill_on_drop` stays a backstop rather than the mechanism.
-async fn terminate_child(child: &mut tokio::process::Child, grace: Duration) {
-    if tokio::time::timeout(grace, child.wait()).await.is_ok() {
-        return;
-    }
-    tracing::warn!("retired worker ignored Shutdown within the grace window — SIGKILL");
-    let _ = child.start_kill();
-    let _ = child.wait().await;
-}
 
 /// The supervision loop: (re)connect, run until death, restart with backoff. A
 /// unified `flap_strikes` counter spans failed *starts* and **rapid deaths**
@@ -1027,11 +1103,11 @@ async fn supervise_loop(shared: &Shared) {
             return;
         }
         match spawn_and_connect(shared).await {
-            Ok((mut child, client)) => {
+            Ok((mut instance, client)) => {
                 if shared.is_retired() {
                     // Retired mid-handshake: never publish this connection and never
-                    // count it as a life. Reap the child we just spawned and stop.
-                    terminate_child(&mut child, RETIRE_GRACE).await;
+                    // count it as a life. Reap the instance we just started and stop.
+                    instance.terminate(RETIRE_GRACE).await;
                     return;
                 }
                 *shared.conn.write().unwrap() = Some(client.clone());
@@ -1040,6 +1116,9 @@ async fn supervise_loop(shared: &Shared) {
                 // unreachable ones now rather than carrying them for the process
                 // lifetime (memory bound).
                 shared.note_fingerprint(&client.hello().occt.fingerprint);
+                // Persisted strikes (in-process journal) seed BEFORE the first job,
+                // so a plan that crashed the previous launch fails fast here.
+                shared.seed_poison(shared.host.poison_seeds(&client.hello().occt.fingerprint));
                 if shared.config.auto_open_session {
                     let _ = auto_open_session(shared, &client).await;
                 }
@@ -1055,7 +1134,7 @@ async fn supervise_loop(shared: &Shared) {
                 }
                 let ready_at = tokio::time::Instant::now();
 
-                let death = run_until_death(shared, &client, child).await;
+                let death = run_until_death(shared, &client, &mut instance).await;
                 let alive = ready_at.elapsed();
 
                 if matches!(death, Death::Retired) {
@@ -1069,6 +1148,15 @@ async fn supervise_loop(shared: &Shared) {
                 // Torn down: drop the connection and bump the epoch (fencing).
                 *shared.conn.write().unwrap() = None;
                 let new_epoch = shared.epoch.fetch_add(1, Ordering::SeqCst) + 1;
+                if let Death::Abandoned { reason } = &death {
+                    // Terminal: abandoned ONCE. A replacement would be a second
+                    // thread beside one that may still hold the OCCT STEP locks.
+                    shared.fail(format!(
+                        "relaunch-required: in-process worker abandoned ({reason}); \
+                         kernel work stops until the app is relaunched"
+                    ));
+                    return;
+                }
                 let reason: String = match &death {
                     Death::Exited => "worker exited/crashed".into(),
                     Death::PingTimeout => "worker hung (ping timeout) → SIGKILL".into(),
@@ -1084,7 +1172,7 @@ async fn supervise_loop(shared: &Shared) {
                         "worker wedged (inflight {verb} {age_ms}ms, {since_progress_ms}ms since \
                          progress) → SIGKILL"
                     ),
-                    Death::Retired => unreachable!("handled above"),
+                    Death::Retired | Death::Abandoned { .. } => unreachable!("handled above"),
                 };
                 shared.set_state(WorkerState::Restarting);
                 shared.emit(WorkerLifecycle::Restarting {
@@ -1101,12 +1189,9 @@ async fn supervise_loop(shared: &Shared) {
                 if alive < shared.config.healthy_threshold {
                     flap_strikes += 1;
                     if flap_strikes > shared.config.max_rapid_deaths {
-                        shared.set_state(WorkerState::Failed);
-                        shared.emit(WorkerLifecycle::Failed {
-                            reason: format!(
-                                "rapid-death budget exhausted after {flap_strikes} flaps ({reason})"
-                            ),
-                        });
+                        shared.fail(format!(
+                            "rapid-death budget exhausted after {flap_strikes} flaps ({reason})"
+                        ));
                         return;
                     }
                     // Back off like a start failure so a connect-die loop can't spin.
@@ -1142,10 +1227,9 @@ async fn supervise_loop(shared: &Shared) {
                     reason: format!("start failed: {reason}"),
                 });
                 if flap_strikes > shared.config.max_rapid_deaths {
-                    shared.set_state(WorkerState::Failed);
-                    shared.emit(WorkerLifecycle::Failed {
-                        reason: format!("backoff exhausted after {flap_strikes} tries: {reason}"),
-                    });
+                    shared.fail(format!(
+                        "backoff exhausted after {flap_strikes} tries: {reason}"
+                    ));
                     return;
                 }
                 let idx = (flap_strikes as usize - 1).min(shared.config.backoff.len() - 1);
@@ -1173,56 +1257,31 @@ fn fire_restart_hook(shared: &Shared, epoch: WorkerEpoch) {
     }
 }
 
-/// Spawns the child and completes the OCW1 handshake. `Err(reason)` on spawn or
-/// handshake failure (bad magic, EOF before hello) — a restart trigger.
+/// Starts one worker instance on the host and completes the shared OCW1
+/// handshake. `Err(reason)` on launch or handshake failure (bad magic, EOF
+/// before hello, identity mismatch) — a restart trigger. On every error path
+/// the instance is dropped, which stops it (`kill_on_drop` / socket shutdown).
 async fn spawn_and_connect(
     shared: &Shared,
-) -> Result<(tokio::process::Child, Arc<ProtocolClient>), String> {
-    let expected = bundled_manifest::embedded_release_manifest()?;
-    if let Some(expected) = &expected {
-        bundled_manifest::verify_binary(&shared.config.binary, expected)?;
-    }
-
-    let mut cmd = tokio::process::Command::new(&shared.config.binary);
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    for (k, v) in &shared.config.envs {
-        cmd.env(k, v);
-    }
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("spawn {:?}: {e}", shared.config.binary))?;
-    // HARD INVARIANT: the stderr pipe is now OURS, and `Log.h` flushes every line —
-    // an unread pipe fills its buffer and BLOCKS the worker mid-op. The forwarder is
-    // therefore spawned unconditionally, before anything that can fail or await
-    // (`?` below drops `child`, and `kill_on_drop` then ends the forwarder at EOF).
-    // The epoch is read at spawn time: the supervisor's `fetch_add` happens on the
-    // death path, before the respawn, so this is the epoch the worker runs under.
-    // (The failed-*start* branch does not bump, so N consecutive failed spawns share
-    // one epoch — cosmetic, and there is no worker output to attribute anyway.)
+) -> Result<(Box<dyn WorkerInstance>, Arc<ProtocolClient>), String> {
     let epoch = shared.epoch.load(Ordering::SeqCst);
-    if let Some(stderr) = child.stderr.take() {
-        tokio::spawn(forward_worker_stderr(stderr, epoch));
-    }
-    let stdout = child.stdout.take().ok_or("child stdout missing")?;
-    let stdin = child.stdin.take().ok_or("child stdin missing")?;
+    let launched = shared.host.launch(epoch).await?;
+    let instance = launched.instance;
     // A worker that never sends its hello would park this await forever, so the
     // handshake is one of the three places retirement MUST be observable. On
-    // cancellation `child` drops here and `kill_on_drop` reaps it.
+    // cancellation `instance` drops here and stops the worker.
     let client = tokio::select! {
         biased;
         () = shared.retired() => return Err("retired during handshake".into()),
-        connected = ProtocolClient::connect(stdout, stdin) => {
+        connected = ProtocolClient::connect(launched.reader, launched.writer) => {
             connected.map_err(|e| format!("handshake: {e}"))?
         }
     };
     verify_solver_policy(client.hello().solver_policy_version)?;
-    if let Some(expected) = &expected {
-        bundled_manifest::verify_hello(expected, client.hello())?;
+    if let Some(expected) = &launched.expected {
+        verify_hello_axes(expected, client.hello())?;
     }
-    Ok((child, Arc::new(client)))
+    Ok((instance, Arc::new(client)))
 }
 
 fn verify_solver_policy(actual: u32) -> Result<(), String> {
@@ -1233,81 +1292,6 @@ fn verify_solver_policy(actual: u32) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-/// Largest single worker stderr line forwarded verbatim; the remainder of an
-/// over-long line is dropped with a marker (a runaway `WLOG` must not blow up the
-/// JSONL sink).
-const MAX_WORKER_LINE: usize = 8 * 1024;
-
-/// Forwards the C++ worker's stderr into the `tracing` stream under target
-/// `worker`, one event per line, at the level its `WLOG` prefix declares.
-///
-/// This task is detached (it outlives nothing but the pipe), so worker events carry
-/// **no span context** — join them to a regen through the frame trace's `reqId`, or
-/// through `epoch`. It self-terminates at EOF: it is the sole owner of the pipe, so
-/// when the child dies the read resolves `Ok(0)`.
-async fn forward_worker_stderr(stderr: tokio::process::ChildStderr, epoch: u64) {
-    use tokio::io::AsyncBufReadExt;
-
-    let mut reader = tokio::io::BufReader::new(stderr);
-    let mut buf: Vec<u8> = Vec::with_capacity(512);
-    loop {
-        buf.clear();
-        match reader.read_until(b'\n', &mut buf).await {
-            Ok(0) => {
-                tracing::debug!(target: "worker", epoch, "worker stderr closed (EOF)");
-                return;
-            }
-            Ok(_) => {
-                let truncated = buf.len() > MAX_WORKER_LINE;
-                if truncated {
-                    buf.truncate(MAX_WORKER_LINE);
-                }
-                let line = String::from_utf8_lossy(&buf);
-                let line = line.trim_end_matches(['\n', '\r']);
-                if line.is_empty() {
-                    continue;
-                }
-                let line = if truncated {
-                    format!("{line} …[truncated]")
-                } else {
-                    line.to_string()
-                };
-                match sniff_worker_level(&line) {
-                    WorkerLine::Error => tracing::error!(target: "worker", epoch, "{line}"),
-                    WorkerLine::Warn => tracing::warn!(target: "worker", epoch, "{line}"),
-                    WorkerLine::Info => tracing::info!(target: "worker", epoch, "{line}"),
-                    WorkerLine::Debug => tracing::debug!(target: "worker", epoch, "{line}"),
-                }
-            }
-            Err(e) => {
-                tracing::debug!(target: "worker", epoch, "worker stderr read error: {e}");
-                return;
-            }
-        }
-    }
-}
-
-/// The level a forwarded worker line claims.
-enum WorkerLine {
-    Error,
-    Warn,
-    Info,
-    Debug,
-}
-
-/// Sniffs the `WLOG` prefix `[<timestamp>] <LEVEL>  <message>` (`Log.h`). Anything
-/// else (a raw `fprintf(stderr,…)`, an OCCT message, the test stub's own lines)
-/// is INFO — never silently dropped.
-fn sniff_worker_level(line: &str) -> WorkerLine {
-    let rest = line.split_once("] ").map_or(line, |(_, rest)| rest);
-    match rest.split_whitespace().next().unwrap_or_default() {
-        "ERROR" => WorkerLine::Error,
-        "WARN" => WorkerLine::Warn,
-        "DEBUG" => WorkerLine::Debug,
-        _ => WorkerLine::Info,
-    }
 }
 
 async fn auto_open_session(shared: &Shared, client: &ProtocolClient) -> Result<(), ProtocolError> {
@@ -1342,12 +1326,14 @@ fn wedged_inflight(
     (Duration::from_millis(inflight.since_progress_ms) > deadline).then_some(inflight)
 }
 
-/// Runs while the worker lives: ping on an interval, watch for exit; `SIGKILL` on
-/// `max_missed_pings` (SCHEMA §8 hung worker) or on a wedged op (§8, WP-H).
+/// Runs while the worker lives: ping on an interval, watch for exit; stop it on
+/// `max_missed_pings` (SCHEMA §8 hung worker) or on a wedged op (§8, WP-H). A
+/// sidecar is `SIGKILL`ed; an in-process run that does not return once its
+/// socket is closed is abandoned ([`Death::Abandoned`]).
 async fn run_until_death(
     shared: &Shared,
     client: &ProtocolClient,
-    mut child: tokio::process::Child,
+    instance: &mut Box<dyn WorkerInstance>,
 ) -> Death {
     let mut missed = 0u32;
     let mut ticker = tokio::time::interval(shared.config.ping_interval);
@@ -1356,64 +1342,101 @@ async fn run_until_death(
     loop {
         tokio::select! {
             // `biased` so retirement WINS a tie. Without it a retire that races the
-            // child's own exit could resolve as `Exited` and bump the epoch.
+            // worker's own exit could resolve as `Exited` and bump the epoch.
             biased;
             () = shared.retired() => {
-                terminate_child(&mut child, RETIRE_GRACE).await;
+                instance.terminate(RETIRE_GRACE).await;
                 return Death::Retired;
             }
             _ = ticker.tick() => {
-                let ping = client.request_timeout("GetWorkerHead", json!({}), shared.config.ping_timeout);
-                // The ping is awaited INSIDE this arm, so it must carry its own
-                // cancellation: a wedged worker parks it for the whole `ping_timeout`
-                // (5 s in production) and the outer select never gets polled again.
-                let pinged = tokio::select! {
-                    biased;
-                    () = shared.retired() => {
-                        terminate_child(&mut child, RETIRE_GRACE).await;
-                        return Death::Retired;
-                    }
-                    pinged = ping => pinged,
-                };
-                match pinged {
-                    Ok(resp) if resp.ok => {
-                        missed = 0;
-                        // SCHEMA §8 wedged op (WP-H). The WORKER's `inflight` is
-                        // authoritative — it is measured from the dequeue and from the
-                        // last non-terminal frame IT emitted, which is the only clock
-                        // that knows about bulk-credit waits and about frames Rust has
-                        // not drained yet — so it is READ here, never re-derived. An
-                        // answered ping means the PROCESS is fine; this is the separate
-                        // question of whether the op it is running still moves.
-                        if let Some(wedged) = wedged_inflight(shared, resp.result.as_ref()) {
-                            tracing::error!(
-                                verb = %wedged.verb,
-                                ageMs = wedged.age_ms,
-                                sinceProgressMs = wedged.since_progress_ms,
-                                "worker wedged past its op deadline — SIGKILL"
-                            );
-                            let _ = child.start_kill();
-                            let _ = child.wait().await;
-                            return Death::Wedged {
-                                verb: wedged.verb,
-                                age_ms: wedged.age_ms,
-                                since_progress_ms: wedged.since_progress_ms,
-                            };
-                        }
-                    }
-                    _ => {
-                        missed += 1;
-                        tracing::debug!(missed, max = shared.config.max_missed_pings, "worker ping missed");
-                        if missed >= shared.config.max_missed_pings {
-                            let _ = child.start_kill();
-                            let _ = child.wait().await;
-                            return Death::PingTimeout;
-                        }
-                    }
+                shared.report_journal_failures();
+                if let Some(death) = ping_once(shared, client, instance, &mut missed).await {
+                    return death;
                 }
             }
-            _ = child.wait() => return Death::Exited,
+            () = instance.exited() => return Death::Exited,
         }
+    }
+}
+
+/// One liveness ping and its §8 decision; `Some(death)` ends the run loop.
+async fn ping_once(
+    shared: &Shared,
+    client: &ProtocolClient,
+    instance: &mut Box<dyn WorkerInstance>,
+    missed: &mut u32,
+) -> Option<Death> {
+    let ping = client.request_timeout("GetWorkerHead", json!({}), shared.config.ping_timeout);
+    // The ping is awaited INSIDE the ticker arm, so it must carry its own
+    // cancellation: a wedged worker parks it for the whole `ping_timeout` (5 s in
+    // production) and the outer select never gets polled again.
+    let pinged = tokio::select! {
+        biased;
+        () = shared.retired() => {
+            instance.terminate(RETIRE_GRACE).await;
+            return Some(Death::Retired);
+        }
+        pinged = ping => pinged,
+    };
+    match pinged {
+        Ok(resp) if resp.ok => {
+            *missed = 0;
+            // SCHEMA §8 wedged op (WP-H). The WORKER's `inflight` is authoritative
+            // — it is measured from the dequeue and from the last non-terminal frame
+            // IT emitted, which is the only clock that knows about bulk-credit waits
+            // and about frames Rust has not drained yet — so it is READ here, never
+            // re-derived. An answered ping means the worker is fine; this is the
+            // separate question of whether the op it is running still moves.
+            let wedged = wedged_inflight(shared, resp.result.as_ref())?;
+            tracing::error!(
+                verb = %wedged.verb,
+                ageMs = wedged.age_ms,
+                sinceProgressMs = wedged.since_progress_ms,
+                "worker wedged past its op deadline — SIGKILL"
+            );
+            let outcome = instance.force_kill().await;
+            Some(after_kill(
+                outcome,
+                Death::Wedged {
+                    verb: wedged.verb,
+                    age_ms: wedged.age_ms,
+                    since_progress_ms: wedged.since_progress_ms,
+                },
+            ))
+        }
+        _ => {
+            *missed += 1;
+            tracing::debug!(
+                missed = *missed,
+                max = shared.config.max_missed_pings,
+                "worker ping missed"
+            );
+            if *missed < shared.config.max_missed_pings {
+                return None;
+            }
+            let outcome = instance.force_kill().await;
+            Some(after_kill(outcome, Death::PingTimeout))
+        }
+    }
+}
+
+/// A reaped worker died as `death`; one the host could not stop was abandoned.
+fn after_kill(outcome: KillOutcome, death: Death) -> Death {
+    match (outcome, death) {
+        (KillOutcome::Reaped, death) => death,
+        (
+            KillOutcome::Abandoned,
+            Death::Wedged {
+                verb,
+                since_progress_ms,
+                ..
+            },
+        ) => Death::Abandoned {
+            reason: format!("wedged in {verb}, {since_progress_ms}ms since progress"),
+        },
+        (KillOutcome::Abandoned, _) => Death::Abandoned {
+            reason: "unresponsive (ping timeout)".into(),
+        },
     }
 }
 
@@ -3087,6 +3110,9 @@ mod poison_tests {
                 poison_threshold,
                 auto_open_session: false,
             },
+            host: Arc::new(crate::worker::host::UnlaunchableHost),
+            failure_reason: Mutex::new(None),
+            journal_failures_reported: AtomicU64::new(0),
             conn: RwLock::new(None),
             epoch: AtomicU64::new(1),
             state: Mutex::new(WorkerState::Starting),

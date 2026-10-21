@@ -1,10 +1,14 @@
+//! The sidecar's release manifest (v1): binary SHA-256 + hello axes, staged by
+//! `scripts/build-worker.sh` and embedded by `build.rs` (feature `sidecar`).
+
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-use onecad_protocol::messages::HelloResult;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+
+use super::identity::{validate_hex, HelloAxes};
 
 const EMBEDDED_MANIFEST: &str =
     include_str!(concat!(env!("OUT_DIR"), "/onecad-worker-manifest.json"));
@@ -73,77 +77,30 @@ pub(super) fn verify_binary(path: &Path, expected: &WorkerManifest) -> Result<()
     Ok(())
 }
 
-pub(super) fn verify_hello(expected: &WorkerManifest, actual: &HelloResult) -> Result<(), String> {
-    compare(
-        "protocolVersion",
-        expected.protocol_version,
-        actual.protocol_version,
-    )?;
-    compare(
-        "quantizationVersion",
-        expected.quantization_version,
-        actual.quantization_version,
-    )?;
-    compare(
-        "solverPolicyVersion",
-        expected.solver_policy_version,
-        actual.solver_policy_version,
-    )?;
-    compare_ref(
-        "workerVersion",
-        &expected.worker_version,
-        &actual.worker_version,
-    )?;
-    compare_ref("occt.version", &expected.occt.version, &actual.occt.version)?;
-    compare_ref(
-        "occt.fingerprint",
-        &expected.occt.fingerprint,
-        &actual.occt.fingerprint,
-    )
-}
-
-fn validate_hex(label: &str, value: &str, length: usize) -> Result<(), String> {
-    if value.len() != length
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(format!(
-            "worker manifest {label} must be {length} lowercase hex characters"
-        ));
+impl WorkerManifest {
+    pub(super) fn axes(&self) -> HelloAxes {
+        HelloAxes {
+            protocol_version: self.protocol_version,
+            worker_version: self.worker_version.clone(),
+            quantization_version: self.quantization_version,
+            solver_policy_version: self.solver_policy_version,
+            occt_version: self.occt.version.clone(),
+            occt_fingerprint: self.occt.fingerprint.clone(),
+        }
     }
-    Ok(())
-}
-
-fn compare<T>(label: &str, expected: T, actual: T) -> Result<(), String>
-where
-    T: PartialEq + std::fmt::Display,
-{
-    if actual != expected {
-        return Err(format!(
-            "worker hello {label} mismatch: expected {expected}, got {actual}"
-        ));
-    }
-    Ok(())
-}
-
-fn compare_ref<T>(label: &str, expected: &T, actual: &T) -> Result<(), String>
-where
-    T: PartialEq + std::fmt::Display,
-{
-    if actual != expected {
-        return Err(format!(
-            "worker hello {label} mismatch: expected {expected}, got {actual}"
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use onecad_protocol::messages::{HelloLimits, OcctInfo};
+    use onecad_protocol::messages::{HelloLimits, HelloResult, OcctInfo};
 
     use super::*;
+    use crate::worker::identity::verify_hello_axes;
+
+    /// The sidecar's hello check: the manifest's axes, by the shared rule.
+    fn verify_hello(expected: &WorkerManifest, actual: &HelloResult) -> Result<(), String> {
+        verify_hello_axes(&expected.axes(), actual)
+    }
 
     const SHA: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 

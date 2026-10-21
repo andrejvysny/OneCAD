@@ -51,7 +51,7 @@ use crate::error::ApiError;
 use crate::export::GeometryExporter;
 use crate::worker::manager::SupervisorConfig;
 use crate::worker::{
-    resolve_worker_path, ElementQuery, MeshProvider, SolverEngine, StepImport, WorkerManager,
+    ElementQuery, MeshProvider, SolverEngine, StepImport, WorkerBackend, WorkerManager, WorkerRole,
 };
 
 /// The MACHINE-READABLE marker on the "your keep-list is still several separate
@@ -553,19 +553,26 @@ pub fn ingest_supervisor_config(binary: PathBuf) -> SupervisorConfig {
     }
 }
 
-/// Spawns a worker of the ingest's own, under [`ingest_supervisor_config`], and
-/// waits out its handshake.
+/// Spawns a worker of the ingest's own, under [`ingest_supervisor_config`], on
+/// the default backend, and waits out its handshake.
 ///
 /// # Errors
 /// [`ApiError::Internal`] when no worker binary resolves, [`ApiError::Worker`]
 /// when it never becomes ready.
 pub async fn spawn_ingest_worker() -> Result<EphemeralWorker, ApiError> {
-    let bin = resolve_worker_path().ok_or_else(|| {
+    spawn_ingest_worker_on(&WorkerBackend::default()).await
+}
+
+/// [`spawn_ingest_worker`] on an explicit backend.
+///
+/// # Errors
+/// As [`spawn_ingest_worker`].
+pub async fn spawn_ingest_worker_on(backend: &WorkerBackend) -> Result<EphemeralWorker, ApiError> {
+    let worker = EphemeralWorker(backend.spawn(WorkerRole::Ingest).ok_or_else(|| {
         ApiError::Internal(
             "ingestComponents: no geometry worker binary resolved — an ingest needs one".into(),
         )
-    })?;
-    let worker = EphemeralWorker(WorkerManager::spawn(ingest_supervisor_config(bin)));
+    })?);
     if !worker.0.wait_ready(INGEST_WORKER_READY_TIMEOUT).await {
         return Err(ApiError::Worker(
             "ingestComponents: the ingest worker never became ready".into(),

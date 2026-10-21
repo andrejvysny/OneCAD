@@ -1,5 +1,17 @@
 //! Host-independent application services over OneCAD's single-writer runtime.
 
+// Worker backends (docs/ios/ARCHITECTURE.md): iOS cannot spawn the sidecar and
+// has no other kernel; every build needs at least one backend.
+#[cfg(all(target_os = "ios", feature = "sidecar"))]
+compile_error!(
+    "onecad-app: the `sidecar` backend cannot target iOS (no child processes); build with \
+     --no-default-features --features embedded-kernel"
+);
+#[cfg(all(target_os = "ios", not(feature = "embedded-kernel")))]
+compile_error!("onecad-app: iOS requires the `embedded-kernel` feature");
+#[cfg(not(any(feature = "sidecar", feature = "embedded-kernel")))]
+compile_error!("onecad-app: enable a worker backend (`sidecar` and/or `embedded-kernel`)");
+
 pub mod api;
 pub mod autosave;
 pub mod document_runtime;

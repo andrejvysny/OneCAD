@@ -25,7 +25,7 @@ use onecad_core::ids::DocumentId;
 use onecad_core::io::recovery::RecoveryOffer;
 
 use crate::reservations::Reservations;
-use crate::worker::{resolve_worker_path, SupervisorConfig, WorkerManager, WorkerState};
+use crate::worker::{WorkerBackend, WorkerManager, WorkerRole, WorkerState};
 
 /// A worker slot shared with a backend factory, which is built before the host that
 /// owns it exists.
@@ -36,6 +36,8 @@ pub type HostId = u64;
 
 /// Services shared by every document host in one process.
 pub struct ProcessServices {
+    /// Where every worker of this process runs (explicit; never inferred).
+    backend: WorkerBackend,
     warm: WorkerSlot,
     pending_recovery: StdMutex<BTreeMap<DocumentId, RecoveryOffer>>,
     maintenance_claimed: AtomicBool,
@@ -50,9 +52,18 @@ impl Default for ProcessServices {
 }
 
 impl ProcessServices {
+    /// Services over the default backend: the sidecar when that feature is
+    /// built, the in-process kernel otherwise.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_backend(WorkerBackend::default())
+    }
+
+    /// Services whose workers all run on `backend`.
+    #[must_use]
+    pub fn with_backend(backend: WorkerBackend) -> Self {
         Self {
+            backend,
             warm: Arc::new(StdMutex::new(None)),
             pending_recovery: StdMutex::new(BTreeMap::new()),
             maintenance_claimed: AtomicBool::new(false),
@@ -82,18 +93,26 @@ impl ProcessServices {
         self.warm.clone()
     }
 
+    /// The backend every worker of this process runs on.
+    #[must_use]
+    pub fn backend(&self) -> &WorkerBackend {
+        &self.backend
+    }
+
     /// Spawns the pool's pre-warmed worker unless one already exists or no worker
     /// binary resolves. Must be called from a Tokio context (the supervisor is a
-    /// spawned task, and lives on the runtime that called this).
+    /// spawned task, and lives on the runtime that called this). In-process the
+    /// warm worker is the first document's worker started early: it counts as a
+    /// document instance, never as an auxiliary one (docs/ios/KERNEL.md).
     pub fn prewarm(&self) {
         let mut warm = self.warm.lock().unwrap();
         if warm.is_some() {
             return;
         }
-        let Some(path) = resolve_worker_path() else {
+        let Some(wm) = self.backend.spawn(WorkerRole::Document) else {
             return; // no binary ⇒ PendingBackend lane; nothing to warm.
         };
-        *warm = Some(WorkerManager::spawn(SupervisorConfig::production(path)));
+        *warm = Some(wm);
         tracing::info!("geometry worker pre-warmed");
     }
 
@@ -169,6 +188,7 @@ mod tests {
         assert_ne!(a, b);
     }
 
+    #[cfg(feature = "sidecar")]
     #[tokio::test]
     async fn prewarm_never_stacks_workers_and_retire_warm_is_idempotent() {
         let services = ProcessServices::new();
