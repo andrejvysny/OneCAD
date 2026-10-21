@@ -236,6 +236,19 @@ fn invalidate_returns_removed_items_in_order() {
 }
 
 #[test]
+fn body_tint_yields_only_to_own_face_or_edge() {
+    let a = SelectionItem::Body(body(1));
+    let vertex = SelectionItem::Vertex(topo(SCENE, 1, "v:1"));
+    assert!(set_of(vec![a.clone()]).body_tinted(body(1)));
+    assert!(set_of(vec![a.clone(), face(2, "f:1")]).body_tinted(body(1)));
+    assert!(set_of(vec![a.clone(), edge(2, "e:1")]).body_tinted(body(1)));
+    assert!(!set_of(vec![a.clone(), face(1, "f:1")]).body_tinted(body(1)));
+    assert!(!set_of(vec![a.clone(), edge(1, "e:1")]).body_tinted(body(1)));
+    assert!(set_of(vec![a, vertex]).body_tinted(body(1)));
+    assert!(!set_of(vec![face(1, "f:1")]).body_tinted(body(1)));
+}
+
+#[test]
 fn kind_summary_and_typed_accessors() {
     let set = set_of(vec![
         edge(1, "e:1"),
