@@ -17,6 +17,8 @@ const DISTANCE: ParameterKey = ParameterKey::Scalar(NumericParameter::ExtrudeDis
 const DRAFT: ParameterKey = ParameterKey::Scalar(NumericParameter::ExtrudeDraftAngle);
 const TX: ParameterKey =
     ParameterKey::Scalar(NumericParameter::TransformTranslation(ParameterAxis::X));
+const TY: ParameterKey =
+    ParameterKey::Scalar(NumericParameter::TransformTranslation(ParameterAxis::Y));
 
 fn extrude_record() -> OperationRecord {
     let (state, _) = started();
@@ -237,12 +239,14 @@ fn unchanged_existing_edit_confirms_without_a_command() {
     }
     let mut state = begin(record.clone(), vec![DISTANCE], true);
     let tag = tool(&state).tag.clone();
-    // The stored value is a stale cache: re-evaluating the same text must not author.
+    // The stored value is a stale cache: re-evaluating the same text must not
+    // author, but display and placement use the fresh value.
     assert!(answer(&mut state, &tag, "length", 8.0).is_empty());
     assert_eq!(
         tool(&state).draft_status,
-        DraftStatus::Valid(Scalar::new(10.0))
+        DraftStatus::Valid(Scalar::new(8.0))
     );
+    assert_eq!(tool(&state).value(DISTANCE), Some(8.0));
     assert!(tool(&state).ready());
     let effects = state.dispatch(Action::Confirm);
     assert!(matches!(effects.as_slice(), [Effect::ClearPreview { .. }]));
@@ -463,6 +467,84 @@ fn gizmo_motion_keeps_typed_expression_and_cancel_restores_it() {
     assert_eq!(translate(&preview)[0], Scalar::with_expr(3.0, "=a"));
     assert_eq!(translate(&preview)[1], Scalar::new(0.0));
     assert_eq!(tool(&state).draft, "=a");
+}
+
+/// Answers every evaluation in turn, numbers by parsing and `=a` as 3.
+fn settle(state: &mut Interaction, mut effects: Vec<Effect>) {
+    while let Some((tag, text, _)) = evaluation(&effects) {
+        let value = if text == "=a" {
+            3.0
+        } else {
+            text.parse().unwrap()
+        };
+        effects = answer(state, &tag, "length", value);
+    }
+}
+
+fn gizmo(translate: [f64; 3]) -> Action {
+    Action::TransformDraftChanged {
+        translate,
+        axis: [0.0, 0.0, 1.0],
+        angle_degrees: 0.0,
+    }
+}
+
+fn committed_translate(state: &mut Interaction) -> [Scalar; 3] {
+    let effects = state.dispatch(Action::Confirm);
+    let [EditCommand::UpdateOperationParams { op, .. }] = applied(&effects).as_slice() else {
+        panic!("one update")
+    };
+    translate(op)
+}
+
+#[test]
+fn existing_transform_field_typed_back_to_original_commits_the_authored_slot() {
+    let edit = |state: &mut Interaction| {
+        let effects = state.dispatch(Action::BeginParameterEdit {
+            record: Box::new(transform_record()),
+            parameter: TX.parameter(),
+            gesture: 3,
+            context: context(),
+        });
+        settle(state, effects);
+    };
+    // Expression on X, gizmo on Y, then X typed back to its original.
+    let mut state = Interaction::default();
+    state.dispatch(Action::ContextChanged(Some(context())));
+    edit(&mut state);
+    let effects = typed(&mut state, TX, "=a");
+    settle(&mut state, effects);
+    let effects = state.dispatch(gizmo([3.0, 7.0, 0.0]));
+    settle(&mut state, effects);
+    let effects = typed(&mut state, TX, "0");
+    settle(&mut state, effects);
+    assert_eq!(
+        tool(&state).params.field(TX).unwrap().status,
+        FieldStatus::Authored
+    );
+    assert_eq!(tool(&state).value(TX), Some(0.0));
+    assert_eq!(tool(&state).value(TY), Some(7.0));
+    let committed = committed_translate(&mut state);
+    assert_eq!(committed[0], Scalar::new(0.0));
+    assert_eq!(committed[1].value, 7.0);
+
+    // The gizmo itself moved X, then X was typed back to its original.
+    let mut state = Interaction::default();
+    state.dispatch(Action::ContextChanged(Some(context())));
+    edit(&mut state);
+    let effects = state.dispatch(gizmo([5.0, 7.0, 0.0]));
+    settle(&mut state, effects);
+    let effects = typed(&mut state, TX, "0");
+    settle(&mut state, effects);
+    assert_eq!(tool(&state).value(TX), Some(0.0));
+    assert_eq!(
+        translate(&tool(&state).effective_op())[0],
+        Scalar::new(0.0),
+        "placement shows the authored slot"
+    );
+    let committed = committed_translate(&mut state);
+    assert_eq!(committed[0], Scalar::new(0.0));
+    assert_eq!(committed[1].value, 7.0);
 }
 
 fn preview_result(tag: &RequestTag) -> PreviewResultDto {

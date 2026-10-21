@@ -1,6 +1,7 @@
-//! Declared parameter fields of one model session. The base operation stays
-//! authoritative: only Valid, active fields override its slots, so untouched
-//! fields keep their authored scalar (and expression) verbatim.
+//! Declared parameter fields of one model session. The base operation holds
+//! choices and placement; active fields override its slots: Valid fields with
+//! their evaluated scalar, Authored fields with the slot captured at begin, so
+//! untouched fields keep their authored scalar (and expression) verbatim.
 use crate::NumericParameter;
 use onecad_core::document::{
     record::{Operation, OperationRecord},
@@ -39,7 +40,8 @@ impl ParameterKey {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum FieldStatus {
-    /// Text equals the authored original on an existing edit: the base slot is used verbatim.
+    /// Text equals the authored original on an existing edit: the slot captured at
+    /// begin is used verbatim, whatever placement later wrote into the base.
     Authored,
     Pending,
     Valid(Scalar),
@@ -55,6 +57,20 @@ pub struct ParameterField {
     pub text: String,
     pub status: FieldStatus,
     pub active: bool,
+    /// Slot at session begin; an Authored field commits it verbatim.
+    pub(crate) authored: Scalar,
+    /// Fresh evaluation of the untouched original; the stored value may be a stale cache.
+    pub(crate) authored_value: Option<f64>,
+}
+
+impl ParameterField {
+    /// Authored slot with its freshest known value, for display and placement.
+    pub(crate) fn authored_shown(&self) -> Scalar {
+        Scalar {
+            value: self.authored_value.unwrap_or(self.authored.value),
+            expr: self.authored.expr.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -106,13 +122,18 @@ impl ParameterSet {
                 return Err(format!("{} is declared twice", key.label()));
             }
             let scalar = key.parameter().registered_scalar(op)?;
-            let original = scalar.expr.unwrap_or_else(|| scalar.value.to_string());
+            let original = scalar
+                .expr
+                .clone()
+                .unwrap_or_else(|| scalar.value.to_string());
             fields.push(ParameterField {
                 key: *key,
                 text: original.clone(),
                 original,
                 status: FieldStatus::Authored,
                 active: key.parameter().is_active(op),
+                authored: scalar,
+                authored_value: None,
             });
         }
         if let Some(focus) = focus {
@@ -193,27 +214,29 @@ impl ParameterSet {
     }
 
     /// Evaluated value of `key`; None while its text is pending or invalid.
-    pub fn value(&self, key: ParameterKey, base: &Operation) -> Option<f64> {
+    pub fn value(&self, key: ParameterKey) -> Option<f64> {
         let field = self.field(key).filter(|field| field.active)?;
         if self.error(key).is_some() {
             return None;
         }
         match &field.status {
             FieldStatus::Valid(scalar) => Some(scalar.value),
-            FieldStatus::Authored => key
-                .parameter()
-                .current_scalar(base)
-                .ok()
-                .map(|scalar| scalar.value),
+            FieldStatus::Authored => Some(field.authored_shown().value),
             FieldStatus::Pending | FieldStatus::Invalid(_) => None,
         }
     }
 
-    /// Base with every Valid, active override written, unvalidated.
+    /// Base with every active override written, unvalidated, Authored fields at
+    /// their freshest value: what placement handles show.
     pub(crate) fn overlay(&self, base: &Operation) -> Operation {
         let mut op = base.clone();
-        for (key, scalar) in self.overrides() {
-            let _ = key.parameter().write(&mut op, scalar.clone());
+        for field in self.active() {
+            let scalar = match &field.status {
+                FieldStatus::Valid(scalar) => scalar.clone(),
+                FieldStatus::Authored => field.authored_shown(),
+                FieldStatus::Pending | FieldStatus::Invalid(_) => continue,
+            };
+            let _ = field.key.parameter().write(&mut op, scalar);
         }
         op
     }
@@ -224,6 +247,13 @@ impl ParameterSet {
         base: &Operation,
     ) -> Result<Operation, (Option<ParameterKey>, String)> {
         let mut op = base.clone();
+        // Untouched slots are written back verbatim, never re-validated: a broken
+        // authored binding must not block the other fields.
+        for field in self.active() {
+            if field.status == FieldStatus::Authored {
+                let _ = field.key.parameter().write(&mut op, field.authored.clone());
+            }
+        }
         for (key, scalar) in self.overrides() {
             key.parameter()
                 .validate_value(&op, scalar.value)

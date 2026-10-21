@@ -21,10 +21,15 @@ impl Interaction {
         }) else {
             return Vec::new();
         };
-        // Compare against what the session shows, so evaluated overrides (and
-        // their expressions) survive motion on other components.
+        // Compare against what the session shows, but write only into the base:
+        // field overrides (and Authored slots) stay out of it, so a field typed
+        // back to its original still commits the authored slot verbatim.
         let effective = tool.effective_op();
-        let Operation::Known(KnownOperation::TransformBody(params)) = &effective else {
+        let (
+            Operation::Known(KnownOperation::TransformBody(shown)),
+            Operation::Known(KnownOperation::TransformBody(base)),
+        ) = (&effective, &tool.record.op)
+        else {
             return Vec::new();
         };
         if !translate
@@ -35,18 +40,35 @@ impl Interaction {
         {
             return self.reject_transform("Transform draft components must be finite".into());
         }
-        let mut updated = params.clone();
-        for (scalar, value) in updated.translate.iter_mut().zip(translate) {
-            replace_scalar(scalar, value);
+        let axis = Vec3::new_unchecked(axis[0], axis[1], axis[2]);
+        let mut placed = shown.clone();
+        let mut updated = base.clone();
+        let mut moved = shown.rotate.axis != axis;
+        placed.rotate.axis = axis;
+        updated.rotate.axis = axis;
+        let slots = placed
+            .translate
+            .iter_mut()
+            .zip(updated.translate.iter_mut())
+            .zip(translate)
+            .chain([(
+                (&mut placed.rotate.angle_deg, &mut updated.rotate.angle_deg),
+                angle_degrees,
+            )]);
+        for ((shown_slot, base_slot), value) in slots {
+            if shown_slot.value != value {
+                *shown_slot = Scalar::new(value);
+                *base_slot = Scalar::new(value);
+                moved = true;
+            }
         }
-        updated.rotate.axis = Vec3::new_unchecked(axis[0], axis[1], axis[2]);
-        replace_scalar(&mut updated.rotate.angle_deg, angle_degrees);
-        if let Err(message) = updated.validate() {
-            return self.reject_transform(message);
-        }
-        if updated == *params {
+        if !moved {
             return Vec::new();
         }
+        if let Err(message) = placed.validate() {
+            return self.reject_transform(message);
+        }
+        let placed = Operation::Known(KnownOperation::TransformBody(placed));
         let operation = Operation::Known(KnownOperation::TransformBody(updated));
         let Some(tool) = self.tool.as_mut() else {
             return Vec::new();
@@ -54,7 +76,7 @@ impl Interaction {
         let existing = tool.editing_existing;
         for field in tool.params.fields.iter_mut().filter(|field| field.active) {
             let parameter = field.key.parameter();
-            let Ok(moved) = parameter.current_scalar(&operation) else {
+            let Ok(moved) = parameter.current_scalar(&placed) else {
                 continue;
             };
             if parameter.current_scalar(&effective).ok().as_ref() != Some(&moved) {
@@ -91,11 +113,5 @@ impl Interaction {
         tool.params.evaluating = None;
         tool.params.op_error = Some((tool.params.focus, message));
         vec![clear]
-    }
-}
-
-fn replace_scalar(scalar: &mut Scalar, value: f64) {
-    if scalar.value != value {
-        *scalar = Scalar::new(value);
     }
 }

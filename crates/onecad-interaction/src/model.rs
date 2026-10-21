@@ -93,7 +93,7 @@ impl ModelSession {
     }
     /// Evaluated value of `key`; None while pending or invalid.
     pub fn value(&self, key: impl Into<ParameterKey>) -> Option<f64> {
-        self.params.value(key.into(), &self.record.op)
+        self.params.value(key.into())
     }
     /// Base with the evaluated field overrides, as placement handles see it.
     pub fn effective_op(&self) -> Operation {

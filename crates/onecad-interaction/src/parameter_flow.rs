@@ -196,10 +196,7 @@ impl ModelSession {
             crate::DraftStatus::Invalid(message.to_owned())
         } else {
             match &field.status {
-                FieldStatus::Authored => key
-                    .parameter()
-                    .current_scalar(&self.record.op)
-                    .map_or_else(crate::DraftStatus::Invalid, crate::DraftStatus::Valid),
+                FieldStatus::Authored => crate::DraftStatus::Valid(field.authored_shown()),
                 FieldStatus::Pending => crate::DraftStatus::Pending,
                 FieldStatus::Valid(scalar) => crate::DraftStatus::Valid(scalar.clone()),
                 FieldStatus::Invalid(message) => crate::DraftStatus::Invalid(message.clone()),

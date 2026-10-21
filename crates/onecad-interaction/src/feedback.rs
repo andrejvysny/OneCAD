@@ -27,10 +27,15 @@ impl Interaction {
         // Untouched existing text keeps its authored slot, even when its binding no
         // longer evaluates: other fields must stay editable.
         let untouched = existing && field.text == field.original;
-        field.status = match validated_scalar(key.parameter(), &field.text, result) {
-            _ if untouched => FieldStatus::Authored,
-            Ok(scalar) => FieldStatus::Valid(scalar),
-            Err(message) => FieldStatus::Invalid(message),
+        let result = validated_scalar(key.parameter(), &field.text, result);
+        field.status = if untouched {
+            field.authored_value = result.ok().map(|scalar| scalar.value);
+            FieldStatus::Authored
+        } else {
+            match result {
+                Ok(scalar) => FieldStatus::Valid(scalar),
+                Err(message) => FieldStatus::Invalid(message),
+            }
         };
         if tool.params.first_pending().is_some() {
             // A later edit took the evaluation slot; resume the field it left pending.
