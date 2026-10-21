@@ -1520,10 +1520,20 @@ pub async fn new_from_template(
         ApiError::InvalidCommand(format!("newFromTemplate: unknown template {id}"))
     })?;
 
+    state.ensure_document_capacity()?;
     let mut rt =
         crate::api::open_runtime_over_new_backend_blocking(state, entry.document_path.clone())
             .await?;
     rt.detach_from_file(&entry.name);
+    // The copy keeps the template's identity, so a second untitled copy open in
+    // another host is refused rather than sharing its autosave and recovery state.
+    let claim = match state.claim_document(rt.document_uuid()) {
+        Ok(claim) => claim,
+        Err(error) => {
+            state.rollback_backend();
+            return Err(error);
+        }
+    };
 
     let (snapshot, projection) = {
         let mut guard = state.runtime.lock().await;
@@ -1533,6 +1543,7 @@ pub async fn new_from_template(
         (crate::api::snapshot_of(rt), rt.projection())
     };
     state.commit_backend();
+    state.adopt_claims(vec![claim]);
     let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
     // NOT recorded in recents: the user has not saved anything yet, and a
     // recents entry pointing INTO the library would reopen the template itself.

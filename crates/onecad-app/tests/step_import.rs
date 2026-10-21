@@ -769,8 +769,7 @@ fn import_path_is_wire_only_and_never_hashed() {
     };
 
     let (path_a, path_b) = {
-        // Sequential, not concurrent: resolution returns the FIRST live path, so the
-        // second root can only be observed once the first is gone.
+        // Sequential: each workspace materializes, lowers and releases on its own.
         let mut a = ImportWorkspace::new(DocumentId::new());
         let pa = lower_under(&mut a);
         drop(a);
@@ -779,10 +778,9 @@ fn import_path_is_wire_only_and_never_hashed() {
         drop(b);
         (pa, pb)
     };
-    assert_ne!(
-        path_a, path_b,
-        "the two temp roots must be distinct for this test to prove anything"
-    );
+    // Blobs live in one process-shared, reference-counted directory, so every
+    // workspace lowers the same absolute path; the hash must never see it either way.
+    assert_eq!(path_a, path_b, "one shared file per digest per process");
     assert!(
         path_a.ends_with(&format!("{sha}.brep")) && path_b.ends_with(&format!("{sha}.brep")),
         "the lowered path is the content-addressed blob file, got {path_a:?} / {path_b:?}"
@@ -794,17 +792,26 @@ fn import_path_is_wire_only_and_never_hashed() {
         history_prefix_hash(&records).as_str(),
         "the planner hash is over the CORE params — no absolute path may enter it"
     );
-    // The strong form: the wire form DIFFERS across roots while the hash cannot,
-    // because the hash never sees the wire form (`wire_op_line` reads the typed op).
+    // The hash never sees the wire form (`wire_op_line` reads the typed op).
     let hash = history_prefix_hash(&records).as_str().to_string();
     let mut ws = ImportWorkspace::new(DocumentId::new());
     let path_c = lower_under(&mut ws);
-    assert_ne!(path_c, path_a, "a third root lowers a third path");
+    assert!(path_c.ends_with(&format!("{sha}.brep")));
     assert_eq!(
         history_prefix_hash(&records).as_str(),
         hash,
         "same document ⇒ same hash regardless of where the blob was materialized"
     );
+    // The strong form: the wire form DIFFERS (a live path vs the empty path once the
+    // last holder released the blob) while the hash cannot, because the hash never
+    // sees the wire form.
+    drop(ws);
+    let released = preview_wire_op(&op, &op_id)["params"]["path"]
+        .as_str()
+        .expect("lowering injects params.path")
+        .to_string();
+    assert_ne!(released, path_c, "the wire form really changed");
+    assert_eq!(history_prefix_hash(&records).as_str(), hash);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

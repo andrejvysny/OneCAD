@@ -17,7 +17,7 @@ pub use sketch_gestures::{
     ready_native_gesture, update_native_gesture, NativeGestureHandle,
 };
 mod sketch_history;
-pub use document_state::get_document_state;
+pub use document_state::{get_document_state, unsaved_changes};
 pub use replacement::{discard_replaced_document, prepare_replacement_discard, ReplacementDiscard};
 pub use sketch_constraints::{
     add_sketch_constraints_controlled, add_sketch_constraints_with_completion,
@@ -237,13 +237,21 @@ pub async fn new_document(
     state: &AppState,
     app: HostContext,
 ) -> Result<DocumentSnapshotDto, ApiError> {
+    state.ensure_document_capacity()?;
     let (engine, meshes, solver, query) = state.make_backend_with_query();
+    let mut runtime = DocumentRuntime::new_blank(engine, meshes, solver);
+    runtime
+        .bind_geometry_read_query(query)
+        .expect("fresh runtime has no geometry-read provider");
+    let claim = match state.claim_document(runtime.document_uuid()) {
+        Ok(claim) => claim,
+        Err(error) => {
+            state.rollback_backend();
+            return Err(error);
+        }
+    };
     let (snapshot, projection) = {
         let mut guard = state.runtime.lock().await;
-        let mut runtime = DocumentRuntime::new_blank(engine, meshes, solver);
-        runtime
-            .bind_geometry_read_query(query)
-            .expect("fresh runtime has no geometry-read provider");
         *guard = Some(runtime);
         let rt = guard.as_ref().unwrap();
         rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
@@ -254,6 +262,7 @@ pub async fn new_document(
     // unreachable — retire it (see `AppState::make_backend`'s two-phase contract).
     // Nothing between the swap and here can fail, so there is no rollback arm.
     state.commit_backend();
+    state.adopt_claims(vec![claim]);
     #[cfg(debug_assertions)]
     render_watchdog_reconcile_projection(&projection, "new document");
     let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
@@ -292,7 +301,17 @@ pub async fn open_document(
     if let Some(offer) = state.pending_recovery_for_path(Path::new(&path)) {
         recovery_open_decision(&offer, &path, on_recovery.as_deref())?;
     }
+    // Ownership first: a path open elsewhere is focused, not opened twice.
+    let path_claim = state.claim_path(Path::new(&path))?;
+    state.ensure_document_capacity()?;
     let rt = open_runtime_over_new_backend_blocking(state, PathBuf::from(&path)).await?;
+    let document_claim = match state.claim_document(rt.document_uuid()) {
+        Ok(claim) => claim,
+        Err(error) => {
+            state.rollback_backend();
+            return Err(error);
+        }
+    };
     // The decoded identity closes aliases, renamed copies and orphan-marker gaps.
     // Refusal must also restore the prior document's staged worker services.
     let discard_recovery = match state.peek_pending_recovery(rt.document_uuid()) {
@@ -314,6 +333,7 @@ pub async fn open_document(
         (snapshot_of(rt), rt.projection())
     };
     state.commit_backend();
+    state.adopt_claims(vec![path_claim, document_claim]);
     if let Some(document_id) = discard_recovery {
         // Failed opens must leave the sole recovery copy reachable. Dispose only
         // after replacement succeeds, outside the runtime lock and in writer order.
@@ -374,6 +394,7 @@ pub async fn import_step(
     app: HostContext,
     path: String,
 ) -> Result<DocumentSnapshotDto, ApiError> {
+    state.ensure_document_capacity()?;
     let (staged, (engine, meshes, solver, query)) = import_readiness::ImportBackend::stage(state);
     staged.wait_ready(std::time::Duration::from_secs(8)).await?;
     // Worker round-trip FIRST, with no lock held and no runtime published (the
@@ -387,6 +408,7 @@ pub async fn import_step(
     rt.bind_geometry_read_query(query)
         .expect("fresh runtime has no geometry-read provider");
     rt.add_import_record(&prepared, false)?;
+    let claim = state.claim_document(rt.document_uuid())?;
     let (snapshot, projection) = {
         let mut guard = state.runtime.lock().await;
         staged.publish(|| {
@@ -397,6 +419,7 @@ pub async fn import_step(
             (snapshot_of(rt), rt.projection())
         })?
     };
+    state.adopt_claims(vec![claim]);
     #[cfg(debug_assertions)]
     render_watchdog_reconcile_projection(&projection, "imported document");
     let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
@@ -458,18 +481,31 @@ pub async fn import_project(
     let Some(path) = pick_file(app.clone(), false).await else {
         return Ok(None);
     };
+    let mut claim = None;
     let (snapshot, projection, outcome) = {
         let mut guard = state.runtime.lock().await;
         let create_new = guard.is_none();
         let outcome = if create_new {
+            state.ensure_document_capacity()?;
             let (engine, meshes, solver, query) = state.make_backend_with_query();
             let mut rt = DocumentRuntime::new_blank(engine, meshes, solver);
             rt.bind_geometry_read_query(query)
                 .expect("fresh runtime has no geometry-read provider");
-            let outcome = rt.import_project(Path::new(&path))?;
+            let staged = rt
+                .import_project(Path::new(&path))
+                .and_then(|outcome| Ok((outcome, state.claim_document(rt.document_uuid())?)));
+            let (outcome, document_claim) = match staged {
+                Ok(staged) => staged,
+                Err(error) => {
+                    state.rollback_backend();
+                    return Err(error);
+                }
+            };
+            claim = Some(document_claim);
             rt.adopt_current_epoch();
             *guard = Some(rt);
             state.bind_restart_owner(guard.as_ref().unwrap());
+            state.commit_backend();
             outcome
         } else {
             let rt = guard
@@ -480,6 +516,9 @@ pub async fn import_project(
         let rt = guard.as_ref().unwrap();
         (snapshot_of(rt), rt.projection(), outcome)
     };
+    if let Some(claim) = claim {
+        state.adopt_claims(vec![claim]);
+    }
     let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
     if let Some(sched) = state.scheduler.get() {
         sched.handle(&outcome);
@@ -530,6 +569,7 @@ pub async fn save_document(
     preview_png: Option<String>,
 ) -> Result<SaveOutcomeDto, ApiError> {
     let preview_png = decode_preview_png(preview_png);
+    let save_as = path.is_some();
     // ── 1. Locked: target path + checkpoint admission + engine handle. ──
     let (target, document_id, ticket, engine) = {
         let guard = state.runtime.lock().await;
@@ -549,6 +589,14 @@ pub async fn save_document(
             rt.prepare_checkpoint(),
             rt.engine_arc(),
         )
+    };
+
+    // A Save As target is leased before any byte is written, so another open host
+    // can neither be overwritten nor race this write; adopted only on success.
+    let target_claim = if save_as {
+        Some(state.claim_path(&target)?)
+    } else {
+        None
     };
 
     // ── 2. Unlocked: the worker round-trip. Checkpoint policy (SCHEMA §7.7) — mint a
@@ -600,6 +648,11 @@ pub async fn save_document(
             .filter(|rt| rt.document_uuid() == document_id)
         {
             Some(rt) => {
+                // Adopted under the runtime lock, while this document is provably
+                // still the host's: a close cannot interleave and leak the lease.
+                if let Some(claim) = target_claim {
+                    state.adopt_path_claim(claim);
+                }
                 let clean = rt.mark_saved(&target, revision);
                 SaveOutcomeDto {
                     document_id: rt.document_id(),
@@ -885,7 +938,7 @@ async fn head_bodies(state: &AppState) -> Result<(Vec<BodyId>, Option<SnapshotId
 /// Closes the document, retaining dirty recovery work after queued writes drain.
 /// Clean documents discard stale recovery state. Unresolved offers stay protected.
 pub async fn close_document(state: &AppState, app: HostContext) -> Result<(), ApiError> {
-    close_document_inner(state, app, None).await
+    close_document_inner(state, app, None, true).await
 }
 
 /// Explicitly discards the runtime named by the user's close decision.
@@ -895,13 +948,46 @@ pub async fn discard_and_close_document(
     app: HostContext,
     expected_runtime_session: &str,
 ) -> Result<(), ApiError> {
-    close_document_inner(state, app, Some(expected_runtime_session)).await
+    close_document_inner(state, app, Some(expected_runtime_session), true).await
+}
+
+/// Closes the document like [`close_document`] (or [`discard_and_close_document`]
+/// when `discard_session` names the user's discard decision) and then tears the
+/// whole host down: its regen scheduler and autosave lanes stop, and its workers
+/// are retired and reaped. The process worker pool is left alone — other hosts
+/// share it — so nothing is pre-warmed on this host's behalf.
+///
+/// This is the close path for one of several open documents, and the quit path of
+/// a host whose runtime outlives it.
+pub async fn shutdown_host(
+    state: &AppState,
+    app: HostContext,
+    discard_session: Option<&str>,
+) -> Result<(), ApiError> {
+    // Admission closes first, so no open can publish into the host being torn down.
+    state.begin_closing();
+    if let Err(error) = close_document_inner(state, app, discard_session, false).await {
+        // A refused close (stale discard consent) leaves the document open and
+        // fully owned: nothing below may run, or the host would keep a document
+        // with no scheduler, autosave, worker or claims.
+        state.cancel_closing();
+        return Err(error);
+    }
+    if let Some(scheduler) = state.scheduler.get() {
+        scheduler.shutdown();
+    }
+    state.tasks.stop().await;
+    state.retire_host().await;
+    // Last: until the host is fully torn down it still owns its path and identity.
+    state.release_claims();
+    Ok(())
 }
 
 async fn close_document_inner(
     state: &AppState,
     app: HostContext,
     discard_session: Option<&str>,
+    rewarm: bool,
 ) -> Result<(), ApiError> {
     let closed = {
         let mut guard = state.runtime.lock().await;
@@ -922,6 +1008,10 @@ async fn close_document_inner(
     };
     // Never await the writer lane while holding the runtime lock. Admitted
     // autosaves finish before cleanup; queued old-session snapshots fail their fence.
+    #[cfg(debug_assertions)]
+    if let Some((id, _)) = closed {
+        render_watchdog_retire_document(&id.to_string(), "document closed");
+    }
     let _lane = state.persistence.lock().await;
     let current = state.runtime.lock().await;
     reconcile_closed_recovery(
@@ -933,7 +1023,10 @@ async fn close_document_inner(
     );
     // A document opened while close waited owns its worker and projection now.
     if current.is_none() {
-        state.rewarm();
+        if rewarm {
+            state.release_claims();
+            state.rewarm();
+        }
         #[cfg(debug_assertions)]
         render_watchdog_reconcile_projection(&DocumentProjection::empty(), "document closed");
         let _ = app.emit(AppEvent::ProjectionUpdated(DocumentProjection::empty()));
@@ -1036,9 +1129,21 @@ pub async fn recover_document(
     }
     let opened_path = offer.marker.as_ref().and_then(|m| m.opened_path.clone());
     let title = offer.marker.as_ref().and_then(|m| m.title.clone());
+    let mut claims = Vec::new();
+    if let Some(path) = &opened_path {
+        claims.push(state.claim_path(path)?);
+    }
+    state.ensure_document_capacity()?;
     // Restore: open the autosave container as the live document. Anything below that
     // fails leaves the offer pending, so the user can try again or discard.
     let mut rt = open_runtime_over_new_backend_blocking(state, offer.autosave_path.clone()).await?;
+    match state.claim_document(rt.document_uuid()) {
+        Ok(claim) => claims.push(claim),
+        Err(error) => {
+            state.rollback_backend();
+            return Err(error);
+        }
+    }
     rt.mark_recovered(opened_path, title);
     let (snapshot, projection, opened_path_for_marker, title_for_marker) = {
         let mut guard = state.runtime.lock().await;
@@ -1054,6 +1159,7 @@ pub async fn recover_document(
         )
     };
     state.commit_backend();
+    state.adopt_claims(claims);
     state.take_pending_recovery(id);
     // Re-stamp the marker under THIS process: the container is still unsaved work,
     // and it is now ours. Synthesized when the offer was an orphan, so a restore
@@ -4415,10 +4521,14 @@ pub async fn list_recents(
 /// validation, collision refusal).
 #[tracing::instrument(skip_all, fields(path = %path, new_name = %new_name), err(Display))]
 pub async fn rename_recent_project(
+    state: &AppState,
     app: HostContext,
     path: String,
     new_name: String,
 ) -> Result<(), ApiError> {
+    // Held across the rename: an open document's file is never renamed under it,
+    // and no host can open it mid-rename.
+    let _guard = process_file_claim(state, Path::new(&path))?;
     recents::rename(&app, Path::new(&path), &new_name)?;
     Ok(())
 }
@@ -4426,8 +4536,28 @@ pub async fn rename_recent_project(
 /// Moves a recent project's `.onecad` file to the OS trash and drops its
 /// `recents.json` entry (start-screen card menu). See [`recents::remove`].
 #[tracing::instrument(skip_all, fields(path = %path), err(Display))]
-pub async fn delete_recent_project(app: HostContext, path: String) -> Result<(), ApiError> {
+pub async fn delete_recent_project(
+    state: &AppState,
+    app: HostContext,
+    path: String,
+) -> Result<(), ApiError> {
+    let _guard = process_file_claim(state, Path::new(&path))?;
     recents::remove(&app, Path::new(&path))
+}
+
+/// Leases `path` for a process-level file operation under a fresh identity that
+/// is never a document host, refusing while any open document owns it.
+fn process_file_claim(
+    state: &AppState,
+    path: &Path,
+) -> Result<crate::reservations::Claim, ApiError> {
+    let services = state.services();
+    services
+        .reservations()
+        .claim_path(services.next_host_id(), path)
+        .map_err(|_| {
+            ApiError::InvalidCommand(format!("{} is open; close it first", path.display()))
+        })
 }
 
 /// Reveals a recent project's `.onecad` file in the OS file manager (start-screen
@@ -4620,6 +4750,47 @@ static RENDER_EXPECTATIONS: OnceLock<Mutex<HashMap<u64, RenderExpectation>>> = O
 #[cfg(debug_assertions)]
 static NEXT_RENDER_EXPECTATION: AtomicU64 = AtomicU64::new(1);
 
+/// The document the host is drawing, once a multi-document host declares it.
+/// `None` keeps the single-window rule: the latest publication's document is the
+/// drawn one, and any other document's expectations belong to a replaced runtime.
+#[cfg(debug_assertions)]
+static RENDER_DEMAND: Mutex<Option<String>> = Mutex::new(None);
+
+/// Declares which document the host is drawing (debug render watchdog only).
+///
+/// Only the drawn document can acknowledge renders, so expectations are armed for
+/// it alone and every other document's pending expectations are retired here —
+/// otherwise a background document that regenerates freely would be reported as a
+/// render stall three seconds later.
+pub fn set_render_demand(document_id: &str) {
+    #[cfg(debug_assertions)]
+    {
+        *RENDER_DEMAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(document_id.to_owned());
+        render_expectations()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, pending| pending.document_id == document_id);
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = document_id;
+}
+
+/// Whether a publication of `document` may arm a render expectation.
+#[cfg(debug_assertions)]
+fn render_armed_for(drawn: Option<&str>, document: &str) -> bool {
+    drawn.is_none_or(|drawn| drawn == document)
+}
+
+#[cfg(debug_assertions)]
+fn render_demand() -> Option<String> {
+    RENDER_DEMAND
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
 #[cfg(debug_assertions)]
 fn render_expectations() -> &'static Mutex<HashMap<u64, RenderExpectation>> {
     RENDER_EXPECTATIONS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -4642,7 +4813,7 @@ fn render_watchdog_expect(
         })
         .map(|body| body.body_id.clone())
         .collect::<std::collections::BTreeSet<_>>();
-    if bodies.is_empty() {
+    if bodies.is_empty() || !render_armed_for(render_demand().as_deref(), &projection.document_id) {
         return None;
     }
     Some(insert_render_expectation(
@@ -4659,10 +4830,15 @@ fn render_watchdog_reconcile_projection(projection: &DocumentProjection, reason:
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut retired = Vec::new();
+    let demanded = render_demand().is_some();
     for (expectation_id, pending) in guard.iter_mut() {
         let before = pending.bodies.len();
         if projection.document_id != pending.document_id {
-            pending.bodies.clear();
+            // With a declared drawn document, other documents' expectations are
+            // owned by `set_render_demand`, not by this publication.
+            if !demanded {
+                pending.bodies.clear();
+            }
         } else {
             pending
                 .bodies
@@ -4685,6 +4861,28 @@ fn render_watchdog_reconcile_projection(projection: &DocumentProjection, reason:
 }
 
 #[cfg(debug_assertions)]
+fn render_watchdog_retire_document(document_id: &str, reason: &str) {
+    // A closed drawn document no longer gates arming; the next declaration does.
+    let mut demand = RENDER_DEMAND
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if demand.as_deref() == Some(document_id) {
+        *demand = None;
+    }
+    drop(demand);
+    let mut guard = render_expectations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let before = guard.len();
+    guard.retain(|_, pending| pending.document_id != document_id);
+    let retired = before - guard.len();
+    drop(guard);
+    if retired > 0 {
+        tracing::debug!(retired, reason, "mesh render watchdog retired document");
+    }
+}
+
+#[cfg(debug_assertions)]
 fn insert_render_expectation(
     document_id: &str,
     revision: u64,
@@ -4695,10 +4893,12 @@ fn insert_render_expectation(
     let mut guard = render_expectations()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // One app window owns one active runtime. A publication for a different
-    // document retires expectations from the replaced runtime instead of
-    // reporting them as render stalls three seconds later.
-    guard.retain(|_, pending| pending.document_id == document_id);
+    // Without a declared drawn document, one window owns one active runtime: a
+    // publication for a different document retires the replaced runtime's
+    // expectations instead of reporting them as render stalls three seconds later.
+    if render_demand().is_none() {
+        guard.retain(|_, pending| pending.document_id == document_id);
+    }
     for pending in guard
         .values_mut()
         .filter(|pending| pending.document_id == document_id)
@@ -5029,6 +5229,21 @@ mod tests {
         projection
     }
 
+    #[cfg(debug_assertions)]
+    #[test]
+    fn only_the_drawn_document_arms_render_expectations() {
+        assert!(
+            render_armed_for(None, "a"),
+            "single-window hosts arm everything"
+        );
+        assert!(render_armed_for(Some("a"), "a"));
+        assert!(
+            !render_armed_for(Some("a"), "b"),
+            "a background document never waits on a render it cannot receive"
+        );
+    }
+
+    #[cfg(debug_assertions)]
     #[tokio::test]
     async fn render_watchdog_ack_requires_full_identity_and_clears_each_body() {
         let _serial = RENDER_TEST_LOCK.lock().unwrap();

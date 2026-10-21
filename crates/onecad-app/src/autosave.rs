@@ -398,18 +398,51 @@ pub async fn run<F>(
     runtime: Arc<Mutex<Option<DocumentRuntime>>>,
     app_data: PathBuf,
     lane: Arc<Mutex<()>>,
-    mut tick: watch::Receiver<u64>,
+    tick: watch::Receiver<u64>,
     debounce: Duration,
     max_age: Duration,
     emit: F,
 ) where
     F: Fn(AutosaveEvent),
 {
+    let timing = (debounce, max_age);
+    run_until(
+        runtime,
+        app_data,
+        lane,
+        tick,
+        timing,
+        std::future::pending(),
+        emit,
+    )
+    .await;
+}
+
+/// [`run`], also returning when `stop` resolves. `stop` is observed only while the
+/// loop waits, never during a write, so an admitted autosave always completes —
+/// this is how a closing document host stops its own lane on a shared runtime.
+pub async fn run_until<F>(
+    runtime: Arc<Mutex<Option<DocumentRuntime>>>,
+    app_data: PathBuf,
+    lane: Arc<Mutex<()>>,
+    mut tick: watch::Receiver<u64>,
+    (debounce, max_age): (Duration, Duration),
+    stop: impl std::future::Future<Output = ()>,
+    emit: F,
+) where
+    F: Fn(AutosaveEvent),
+{
+    let mut stop = std::pin::pin!(stop);
     loop {
         // Wait for the first mutation since the last cycle (the freshly-subscribed
         // receiver treats its initial value as seen ⇒ an idle app never autosaves).
-        if tick.changed().await.is_err() {
-            return; // all senders dropped.
+        tokio::select! {
+            () = &mut stop => return,
+            r = tick.changed() => {
+                if r.is_err() {
+                    return; // all senders dropped.
+                }
+            }
         }
         // The oldest edit this cycle covers is from HERE, so the deadline is absolute:
         // re-arming the debounce below cannot push it out.
@@ -418,6 +451,8 @@ pub async fn run<F>(
         // at the deadline, whichever comes first.
         loop {
             tokio::select! {
+                // A closing host has already closed its document; nothing to save.
+                () = &mut stop => return,
                 () = tokio::time::sleep(debounce) => break,
                 () = tokio::time::sleep_until(deadline) => break,
                 r = tick.changed() => {

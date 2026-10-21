@@ -177,6 +177,11 @@ impl DocumentSession {
         self.undo.redo_depth()
     }
 
+    /// Labels of every undoable step, oldest first.
+    pub fn undo_labels(&self) -> impl Iterator<Item = &str> {
+        self.undo.undo_labels()
+    }
+
     /// The label of the step [`undo`](Self::undo) would revert.
     #[must_use]
     pub fn undo_label(&self) -> Option<&str> {

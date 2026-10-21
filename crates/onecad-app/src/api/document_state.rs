@@ -23,6 +23,17 @@ pub async fn get_document_state(state: &AppState) -> Result<DocumentState, ApiEr
     })
 }
 
+/// The steps since the last save, for a close prompt. Empty when nothing is open.
+pub async fn unsaved_changes(
+    state: &AppState,
+) -> Result<crate::document_runtime::UnsavedChanges, ApiError> {
+    let guard = state.runtime.lock().await;
+    Ok(guard
+        .as_ref()
+        .map(crate::document_runtime::DocumentRuntime::unsaved_changes)
+        .unwrap_or_default())
+}
+
 fn bounded_text(value: &str, limit: usize) -> String {
     let mut end = value.len().min(limit);
     while !value.is_char_boundary(end) {

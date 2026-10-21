@@ -417,6 +417,11 @@ impl UndoStack {
             })
     }
 
+    /// Labels of every undoable step, oldest first.
+    pub fn undo_labels(&self) -> impl Iterator<Item = &str> {
+        self.undo.iter().map(|txn| txn.label.as_str())
+    }
+
     /// The label of the step a redo would replay (top of the redo stack).
     #[must_use]
     pub fn redo_label(&self) -> Option<&str> {

@@ -20,26 +20,30 @@
 //! * a **worker restart replay** (a crash re-executes the whole timeline from 0,
 //!   which re-reads every import path).
 //!
-//! So the files are owned by an [`ImportWorkspace`] that lives on the
-//! `DocumentRuntime` and is cleaned on drop (close / document swap), plus a
-//! best-effort [`sweep_stale_workspaces`] at startup for directories a crash left
-//! behind. No daemon, no refcount file — just mtime.
+//! # Shared, reference-counted files
+//!
+//! Several documents can be open at once and may hold the same import digest. The
+//! wire layer resolves a digest to ONE path, so per-document copies would let a
+//! request built for document B embed document A's file, and closing A would
+//! delete it before the worker read it. Instead every blob lives once per process
+//! at `<tmp>/onecad-imports/shared-<pid>/<sha256>.<codec>` and the registry counts
+//! how many [`ImportWorkspace`]s hold it. A workspace's drop releases only ITS
+//! holds; the file goes away when the last holder lets go. A best-effort
+//! [`sweep_stale_workspaces`] at startup removes what a crash left behind. No
+//! daemon, no refcount file — just mtime and the pid in the directory name.
 //!
 //! # The path registry
 //!
 //! Lowering happens in [`wire`](crate::worker::wire), a pure function with no
-//! access to the runtime, so the `sha → path` mapping is process-global (the same
+//! access to the runtime, so the `sha → blob` mapping is process-global (the same
 //! shape as that module's split-id interner). This is sound precisely BECAUSE the
-//! key is a content address: two documents holding the same digest hold
-//! byte-identical bytes, so either path is equally correct. Each sha maps to a
-//! LIST of paths and resolution takes the first that still exists, so one
-//! document's teardown can never invalidate another's still-live materialization.
+//! key is a content address: every holder of a digest holds byte-identical bytes,
+//! so the single shared file is correct for all of them.
 //!
 //! [`ImportStepParams`]: onecad_core::document::record::ImportStepParams
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, SystemTime};
 
@@ -68,39 +72,35 @@ pub const LARGE_IMPORT_HINT_BYTES: u64 = 64 * 1024 * 1024;
 /// deleting a LIVE one is a broken regen.
 pub const STALE_WORKSPACE_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-/// The parent directory of every per-document workspace.
+/// The parent directory of every import workspace (the shared per-process
+/// directory, and per-document directories left by older builds).
 const WORKSPACE_ROOT: &str = "onecad-imports";
 
+/// Name prefix of the per-process directory; the pid after it lets the sweep tell
+/// a live process's files from a crashed one's.
+const SHARED_PREFIX: &str = "shared-";
+
 // ─────────────────────────────────────────────────────────────────────────────
-// Process-wide `sha → materialized paths` registry (read by wire lowering)
+// Process-wide `sha → shared blob` registry (read by wire lowering)
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn registry() -> &'static RwLock<HashMap<String, Vec<PathBuf>>> {
-    static REGISTRY: OnceLock<RwLock<HashMap<String, Vec<PathBuf>>>> = OnceLock::new();
+/// One materialized file plus the number of workspaces keeping it alive.
+#[derive(Debug)]
+struct SharedBlob {
+    path: PathBuf,
+    holders: usize,
+}
+
+fn registry() -> &'static RwLock<HashMap<String, SharedBlob>> {
+    static REGISTRY: OnceLock<RwLock<HashMap<String, SharedBlob>>> = OnceLock::new();
     REGISTRY.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-/// Records that `sha`'s bytes are readable at `path`.
-fn register(sha: &str, path: &Path) {
-    if let Ok(mut map) = registry().write() {
-        let paths = map.entry(sha.to_string()).or_default();
-        if !paths.iter().any(|p| p == path) {
-            paths.push(path.to_path_buf());
-        }
-    }
-}
-
-/// Drops `path` from `sha`'s list (its owning workspace is going away). Other
-/// workspaces' copies of the same digest stay resolvable.
-fn unregister(sha: &str, path: &Path) {
-    if let Ok(mut map) = registry().write() {
-        if let Some(paths) = map.get_mut(sha) {
-            paths.retain(|p| p != path);
-            if paths.is_empty() {
-                map.remove(sha);
-            }
-        }
-    }
+/// The one directory this process materializes blobs into.
+fn shared_dir() -> PathBuf {
+    std::env::temp_dir()
+        .join(WORKSPACE_ROOT)
+        .join(format!("{SHARED_PREFIX}{}", std::process::id()))
 }
 
 /// The filesystem path a materialized import blob is readable at, or `""` when the
@@ -116,57 +116,54 @@ pub fn resolve_blob_path(sha256: &str) -> String {
         return String::new();
     };
     map.get(sha256)
-        .and_then(|paths| paths.iter().find(|p| p.is_file()))
-        .map(|p| p.to_string_lossy().into_owned())
+        .filter(|blob| blob.path.is_file())
+        .map(|blob| blob.path.to_string_lossy().into_owned())
         .unwrap_or_default()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Per-document workspace
+// Per-document hold set
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Process-unique suffix so two runtimes over the SAME document id (reopen while
-/// the old one is still alive — the save/reopen test does exactly this) never
-/// share a directory, and so one's teardown never deletes the other's files.
-static WORKSPACE_SEQ: AtomicU64 = AtomicU64::new(0);
-
-/// The temp directory holding one document's materialized import blobs, laid out
-/// as `<tmp>/onecad-imports/<documentId>-<pid>-<seq>/<sha256>.<codec>`.
+/// One document runtime's claim on the shared blob files.
 ///
-/// Cleaned on [`Drop`] (document close / swap). Every materialized file is also
-/// registered in the process-wide path registry and unregistered here, so a
-/// dropped workspace cannot leave the wire layer pointing at a deleted file.
+/// Files live in [`shared_dir`] (`<tmp>/onecad-imports/shared-<pid>/<sha256>.<codec>`);
+/// the workspace only remembers WHICH digests it holds. Dropping it (document
+/// close / swap) releases those holds, so a dropped workspace can neither delete a
+/// file another open document still needs nor leave the wire layer pointing at a
+/// deleted one.
 #[derive(Debug)]
 pub struct ImportWorkspace {
     dir: PathBuf,
-    /// `(sha, path)` for everything this workspace put in the registry.
-    entries: Vec<(String, PathBuf)>,
+    /// Digests this workspace has taken a hold on (at most one hold per digest).
+    held: HashSet<String>,
 }
 
 impl ImportWorkspace {
     /// A workspace for `document`. The directory is created lazily on the first
     /// [`materialize`](Self::materialize), so a document with no imports (the
     /// overwhelming majority) touches the filesystem zero times.
+    ///
+    /// The id is unused: blobs are keyed by content, not by owner. The parameter
+    /// stays so callers keep one constructor shape.
     #[must_use]
-    pub fn new(document: DocumentId) -> Self {
-        let seq = WORKSPACE_SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir()
-            .join(WORKSPACE_ROOT)
-            .join(format!("{document}-{}-{seq}", std::process::id()));
+    pub fn new(_document: DocumentId) -> Self {
         Self {
-            dir,
-            entries: Vec::new(),
+            dir: shared_dir(),
+            held: HashSet::new(),
         }
     }
 
-    /// This workspace's directory (may not exist until the first materialization).
+    /// The shared directory blobs are materialized into (may not exist until the
+    /// first materialization). It is per process, not per document.
     #[must_use]
     pub fn dir(&self) -> &Path {
         &self.dir
     }
 
-    /// Writes `bytes` to `<dir>/<sha256>.<codec>` and registers the path for wire
-    /// lowering. Re-materializing an already-present digest is a no-op.
+    /// Ensures `<shared dir>/<sha256>.<codec>` holds `bytes` and that this
+    /// workspace holds a reference to it. Re-materializing an already-held digest
+    /// takes no new hold.
     ///
     /// # Errors
     /// [`std::io::Error`] on a filesystem failure. The caller treats this as
@@ -180,52 +177,80 @@ impl ImportWorkspace {
         bytes: &[u8],
     ) -> std::io::Result<PathBuf> {
         let path = self.dir.join(format!("{sha256}.{}", codec.extension()));
-        if self.entries.iter().any(|(s, p)| s == sha256 && p == &path) && path.is_file() {
+        let already_held = self.held.contains(sha256);
+        if already_held && path.is_file() {
             return Ok(path);
         }
-        std::fs::create_dir_all(&self.dir)?;
-        // Content-addressed, so an existing file with this name already holds these
-        // exact bytes; rewriting is harmless and covers a truncated leftover.
-        std::fs::write(&path, bytes)?;
-        register(sha256, &path);
-        self.entries.push((sha256.to_string(), path.clone()));
-        tracing::debug!(sha = %sha256, path = %path.display(), bytes = bytes.len(), "import blob materialized");
+        // The lock spans the existence check AND the write: otherwise a concurrent
+        // last-holder drop could delete the file between our check and our hold.
+        let mut map = registry()
+            .write()
+            .map_err(|_| std::io::Error::other("import registry poisoned"))?;
+        let live = map.get(sha256).filter(|blob| blob.path.is_file());
+        let (path, previous) = match live {
+            Some(blob) => (blob.path.clone(), blob.holders),
+            None => {
+                std::fs::create_dir_all(&self.dir)?;
+                // Content-addressed, so a leftover with this name holds these exact
+                // bytes; rewriting is harmless and covers a truncated leftover.
+                std::fs::write(&path, bytes)?;
+                let previous = map.get(sha256).map_or(0, |blob| blob.holders);
+                (path, previous)
+            }
+        };
+        // A re-write for an already-held digest (file purged behind our back)
+        // must not count this workspace twice, or drop would leak the entry.
+        let holders = previous + usize::from(!already_held);
+        map.insert(
+            sha256.to_string(),
+            SharedBlob {
+                path: path.clone(),
+                holders,
+            },
+        );
+        self.held.insert(sha256.to_string());
+        tracing::debug!(sha = %sha256, path = %path.display(), bytes = bytes.len(), holders, "import blob materialized");
         Ok(path)
     }
 }
 
 impl Drop for ImportWorkspace {
     fn drop(&mut self) {
-        for (sha, path) in &self.entries {
-            unregister(sha, path);
+        if self.held.is_empty() {
+            return;
         }
-        if self.dir.exists() {
-            if let Err(e) = std::fs::remove_dir_all(&self.dir) {
-                tracing::warn!(dir = %self.dir.display(), error = %e, "import workspace cleanup failed");
+        let Ok(mut map) = registry().write() else {
+            return;
+        };
+        // Deleting under the lock keeps release atomic with a concurrent
+        // `materialize` that would otherwise revive an entry we are removing.
+        for sha in &self.held {
+            let Some(blob) = map.get_mut(sha) else {
+                continue;
+            };
+            blob.holders = blob.holders.saturating_sub(1);
+            if blob.holders > 0 {
+                continue;
+            }
+            if let Some(blob) = map.remove(sha) {
+                if let Err(e) = std::fs::remove_file(&blob.path) {
+                    tracing::debug!(path = %blob.path.display(), error = %e, "import blob cleanup failed");
+                }
             }
         }
+        // Best-effort: only succeeds once the directory is empty.
+        let _ = std::fs::remove_dir(&self.dir);
     }
 }
 
-/// True if `pid` names a process that is currently alive.
-#[cfg(unix)]
-fn is_process_alive(pid: u32) -> bool {
-    // `kill(pid, 0)` returns 0 if the process exists and we have permission to
-    // signal it, without actually delivering a signal.
-    unsafe { libc::kill(pid as i32, 0) == 0 }
-}
-
-#[cfg(not(unix))]
-fn is_process_alive(_pid: u32) -> bool {
-    // On platforms where we cannot check, treat unknown processes as alive so we
-    // never delete a workspace that might still be in use.
-    true
-}
-
-/// Parses the `<pid>` component from a workspace directory name formatted as
-/// `<documentId>-<pid>-<seq>`. The document id may itself contain '-' characters,
-/// so the pid is the second-to-last '-' separated component.
+/// The owning pid encoded in a workspace directory name: `shared-<pid>` for the
+/// per-process directory, or `<documentId>-<pid>-<seq>` for the per-document ones
+/// older builds left behind. A document id may itself contain '-', so there the
+/// pid is the second-to-last '-' separated component.
 fn parse_workspace_pid(name: &str) -> Option<u32> {
+    if let Some(pid) = name.strip_prefix(SHARED_PREFIX) {
+        return pid.parse::<u32>().ok();
+    }
     let mut parts = name.rsplit('-');
     let _seq = parts.next()?;
     let pid_str = parts.next()?;
@@ -236,7 +261,8 @@ fn parse_workspace_pid(name: &str) -> Option<u32> {
 /// (or a kill -9) left behind, since [`ImportWorkspace::drop`] never ran.
 ///
 /// Directories whose embedded process id is still alive are preserved, even if old,
-/// so a second running instance never deletes another live instance's workspace.
+/// so a second running instance never deletes another live instance's workspace
+/// (including its `shared-<pid>` blob directory).
 ///
 /// Best-effort and cheap: one directory listing plus an mtime stat each, no
 /// recursion into live directories, every failure ignored. Safe to call at every
@@ -263,7 +289,7 @@ pub fn sweep_stale_workspaces(max_age: Duration) -> usize {
         }
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if parse_workspace_pid(&name_str).is_some_and(is_process_alive) {
+        if parse_workspace_pid(&name_str).is_some_and(crate::autosave::pid_alive) {
             tracing::debug!(dir = %entry.path().display(), "skipping live import workspace");
             continue;
         }
@@ -511,7 +537,7 @@ mod tests {
             let other = doomed
                 .materialize(&sha, ImportSourceCodec::Brep, b"shared bytes")
                 .expect("materialize doomed");
-            assert_ne!(other, kept, "each runtime gets its OWN directory");
+            assert_eq!(other, kept, "both runtimes share ONE refcounted file");
         }
         assert_eq!(
             resolve_blob_path(&sha),
@@ -665,3 +691,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(test)]
+#[path = "imports_tests.rs"]
+mod shared_tests;

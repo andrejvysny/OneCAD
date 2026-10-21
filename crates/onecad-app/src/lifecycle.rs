@@ -19,7 +19,9 @@ pub fn start(state: &AppState, host: HostContext) -> Result<(), &'static str> {
         .host
         .set(host.clone())
         .map_err(|_| "application host already started")?;
-    start_maintenance(&host);
+    if state.services().claim_maintenance() {
+        start_maintenance(&host);
+    }
     state.prewarm();
     let completion_host = host.clone();
     let emit: RegenEmitter = Arc::new(move |report, projection| {
@@ -52,7 +54,9 @@ pub fn start(state: &AppState, host: HostContext) -> Result<(), &'static str> {
         .scheduler
         .set(handle)
         .map_err(|_| "application scheduler already started")?;
-    tokio::spawn(scheduler.run());
+    state
+        .tasks
+        .track("regen-scheduler", tokio::spawn(scheduler.run()));
     start_autosave(state, host);
     Ok(())
 }
@@ -73,16 +77,17 @@ fn start_maintenance(host: &HostContext) {
 
 fn start_autosave(state: &AppState, host: HostContext) {
     if let Some(app_data) = autosave::autosave_root(&host) {
-        tokio::spawn(autosave::run(
+        let lane = tokio::spawn(autosave::run_until(
             state.runtime.clone(),
             app_data,
             state.persistence.clone(),
             state.autosave_tick.subscribe(),
-            autosave::AUTOSAVE_DEBOUNCE,
-            autosave::AUTOSAVE_MAX_AGE,
+            (autosave::AUTOSAVE_DEBOUNCE, autosave::AUTOSAVE_MAX_AGE),
+            crate::host_tasks::stopped(state.tasks.stop_signal()),
             move |event| {
                 let _ = host.emit(AppEvent::Autosave(event));
             },
         ));
+        state.tasks.track("autosave", lane);
     }
 }

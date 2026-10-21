@@ -3,6 +3,7 @@
 //! Filesystem operations stay in Rust; tests use temporary directories.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex as StdMutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::host::HostContext;
@@ -29,6 +30,20 @@ struct RecentEntry {
 
 /// The `recents.json` path under the app config dir, or `None` if it cannot be
 /// resolved (a headless / permission-denied environment — recents degrade to []).
+/// Serializes every read-modify-write of `recents.json` within the process.
+///
+/// Each write is atomic, but the file is read, edited and written back, and several
+/// open documents record, list (which prunes and rewrites) and rename concurrently:
+/// two unserialized cycles would lose one edit. Process-wide rather than per host
+/// because every host shares the one file.
+static RECENTS_LANE: StdMutex<()> = StdMutex::new(());
+
+fn recents_lane() -> MutexGuard<'static, ()> {
+    RECENTS_LANE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn recents_file(app: &HostContext) -> Option<PathBuf> {
     app.paths.app_config.clone().map(|d| d.join("recents.json"))
 }
@@ -100,6 +115,7 @@ fn store_at(recents_path: &Path, entries: &[RecentEntry]) {
 }
 
 fn record_at(recents_path: &Path, project_path: &Path) {
+    let _lane = recents_lane();
     let path = project_path.to_string_lossy().into_owned();
     let name = project_path
         .file_stem()
@@ -141,6 +157,7 @@ pub fn record(app: &HostContext, project_path: &Path) {
 /// This is the app's only "sync to filesystem" — re-verified on every call, which
 /// already fires on boot and after every open/save/close/rename/delete.
 fn list_at(recents_path: &Path) -> Vec<RecentProjectDto> {
+    let _lane = recents_lane();
     let entries = load_at(recents_path);
     let live: Vec<RecentEntry> = entries
         .iter()
@@ -175,6 +192,7 @@ pub fn list(app: &HostContext) -> Vec<RecentProjectDto> {
 }
 
 fn rename_at(recents_path: &Path, old_path: &Path, new_name: &str) -> Result<PathBuf, ApiError> {
+    let _lane = recents_lane();
     let trimmed = new_name.trim();
     if trimmed.is_empty() {
         return Err(ApiError::Io("project name cannot be empty".into()));
@@ -219,6 +237,7 @@ pub fn rename(app: &HostContext, old_path: &Path, new_name: &str) -> Result<Path
 }
 
 fn remove_at(recents_path: &Path, path: &Path) -> Result<(), ApiError> {
+    let _lane = recents_lane();
     trash::delete(path).map_err(|e| ApiError::Io(e.to_string()))?;
 
     let target = path.to_string_lossy().into_owned();
@@ -321,9 +340,47 @@ pub fn with_thumbnails(mut entries: Vec<RecentProjectDto>) -> Vec<RecentProjectD
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn touch(path: &Path) {
         std::fs::write(path, b"not a real container").unwrap();
+    }
+
+    #[test]
+    fn concurrent_records_and_prunes_from_several_hosts_lose_no_entry() {
+        let scratch = tempfile::tempdir().unwrap();
+        let recents_path = Arc::new(scratch.path().join("recents.json"));
+        let dir = tempfile::tempdir().unwrap();
+        let dead = dir.path().join("Dead.onecad");
+        touch(&dead);
+        record_at(&recents_path, &dead);
+        std::fs::remove_file(&dead).unwrap();
+        let projects: Vec<_> = (0..MAX_RECENTS)
+            .map(|i| {
+                let path = dir.path().join(format!("P{i}.onecad"));
+                touch(&path);
+                path
+            })
+            .collect();
+        let handles: Vec<_> = projects
+            .iter()
+            .cloned()
+            .map(|project| {
+                let recents_path = recents_path.clone();
+                std::thread::spawn(move || {
+                    record_at(&recents_path, &project);
+                    list_at(&recents_path);
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let mut names: Vec<_> = list_at(&recents_path).into_iter().map(|d| d.name).collect();
+        names.sort();
+        let mut expected: Vec<_> = (0..MAX_RECENTS).map(|i| format!("P{i}")).collect();
+        expected.sort();
+        assert_eq!(names, expected, "every record survives and the prune holds");
     }
 
     #[test]

@@ -68,6 +68,7 @@ use onecad_core::regen::{GeometryEngine, RegenRequest, SchedulerHandle};
 use crate::document_runtime::DocumentRuntime;
 use crate::dto::WorkerStatusDto;
 use crate::export::GeometryExporter;
+use crate::process::{take_warm, HostId, ProcessServices, WorkerSlot};
 use crate::worker::{
     resolve_worker_path, CircuitControl, ElementQuery, FaceBoundaryProjection, MeshProvider,
     PendingBackend, PreviewEngine, SolverEngine, StepImport, SupervisorConfig, WorkerLifecycle,
@@ -79,6 +80,10 @@ use crate::worker::{
 /// is always covered, long enough that alt-tab churn cannot turn a 16 MiB import
 /// into a write storm.
 const BLUR_FLUSH_THROTTLE: Duration = Duration::from_secs(5);
+
+/// Bound on waiting for a closed host's worker process to be reaped. Retirement
+/// force-kills after its own grace, so this only guards a wedged supervisor.
+const WORKER_REAP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The geometry backend split into its three facets (the executor drives the
 /// [`GeometryEngine`]; the mesh cache pulls bytes from the [`MeshProvider`]; the
@@ -117,10 +122,6 @@ pub type BackendBundle = (
 
 /// Builds a fresh backend bundle for a newly opened document.
 pub type BackendFactory = Arc<dyn Fn() -> BackendBundle + Send + Sync>;
-
-/// One of the two worker slots (`warm` / `live`). Shared with the backend factory,
-/// which is built before `AppState` exists and therefore cannot reach its fields.
-type WorkerSlot = Arc<StdMutex<Option<WorkerManager>>>;
 
 /// Everything one [`AppState::make_backend`] call displaced, held until the open
 /// resolves. [`AppState::commit_backend`] throws it away (retiring its worker);
@@ -185,19 +186,25 @@ pub struct AppState {
     /// document-mutating command bumps it via [`note_mutation`](Self::note_mutation);
     /// the driver subscribes in `AppState::start` (the autosave signal seam).
     pub autosave_tick: Arc<watch::Sender<u64>>,
-    /// The crash-recovery offers surfaced by
-    /// [`check_recovery`](crate::api::check_recovery), keyed by document and consumed
-    /// one at a time by [`recover_document`](crate::api::recover_document).
+    /// Process-wide services shared with every other open document host: the
+    /// worker pool, the crash-recovery offers and the maintenance claim.
     ///
-    /// A map rather than a single slot because several sessions can have crashed:
-    /// surfacing only the first left the rest invisible AND unswept. It is also read
-    /// by [`open_document`](crate::api::open_document), which must refuse to open a
-    /// path an unresolved offer names.
-    ///
-    /// Reached only through [`AppState::pending_recovery`](Self::pending_recovery) —
-    /// a poisoned lock must degrade this, never panic the two commands that stand
-    /// between the user and their unsaved work.
-    pending_recovery: StdMutex<BTreeMap<DocumentId, RecoveryOffer>>,
+    /// The recovery offers surfaced by [`check_recovery`](crate::api::check_recovery)
+    /// live there, keyed by document and consumed one at a time by
+    /// [`recover_document`](crate::api::recover_document). A map rather than a single
+    /// slot because several sessions can have crashed: surfacing only the first left
+    /// the rest invisible AND unswept. It is also read by
+    /// [`open_document`](crate::api::open_document), which must refuse to open a path
+    /// an unresolved offer names.
+    services: Arc<ProcessServices>,
+    /// This host's identity within the process.
+    host_id: HostId,
+    /// The lanes [`AppState::start`] spawned, stopped by
+    /// [`shutdown_host`](crate::api::shutdown_host).
+    pub(crate) tasks: crate::host_tasks::HostTasks,
+    /// This host's committed path and document-identity leases (see
+    /// [`crate::reservations`]); released when the host shuts down.
+    pub(crate) claims: StdMutex<Vec<crate::reservations::Claim>>,
     /// When the last *blur-triggered* autosave flush ran, for
     /// [`AppState::claim_blur_flush`].
     ///
@@ -233,9 +240,6 @@ pub struct AppState {
     /// exporter.
     readiness: RwLock<Arc<dyn WorkerReadiness>>,
     backend_factory: BackendFactory,
-    /// The pre-warmed worker awaiting adoption (see the module docs). Shared with
-    /// the factory, which takes it at the next document open.
-    warm: WorkerSlot,
     /// The OPEN document's worker, retired once a newer one is COMMITTED.
     live: WorkerSlot,
     /// The in-flight backend swap's displaced half — `Some` between
@@ -285,8 +289,20 @@ impl AppState {
     /// [`prewarm`](Self::prewarm) / [`retire_all`](Self::retire_all) are no-ops.
     #[must_use]
     pub fn new(backend_factory: BackendFactory) -> Self {
+        Self::new_with_services(backend_factory, Arc::new(ProcessServices::new()))
+    }
+
+    /// [`AppState::new`] over process services shared with other hosts.
+    #[must_use]
+    pub fn new_with_services(
+        backend_factory: BackendFactory,
+        services: Arc<ProcessServices>,
+    ) -> Self {
         Self {
-            warm: Arc::new(StdMutex::new(None)),
+            host_id: services.next_host_id(),
+            services,
+            tasks: Default::default(),
+            claims: StdMutex::new(Vec::new()),
             live: Arc::new(StdMutex::new(None)),
             displaced: StdMutex::new(None),
             backend_swap: StdMutex::new(Arc::new(())),
@@ -297,7 +313,6 @@ impl AppState {
             scheduler: Arc::new(OnceLock::new()),
             host: Arc::new(OnceLock::new()),
             autosave_tick: Arc::new(watch::channel(0u64).0),
-            pending_recovery: StdMutex::new(BTreeMap::new()),
             blur_flush_at: StdMutex::new(None),
             exporter: RwLock::new(Arc::new(PendingBackend)),
             element_query: RwLock::new(Arc::new(PendingBackend)),
@@ -361,17 +376,9 @@ impl AppState {
         self.pending_recovery_for_path(path).is_some()
     }
 
-    /// The pending-offer map, poison-tolerant.
-    ///
-    /// A panic while another thread held this lock must not turn `check_recovery`
-    /// and `recover_document` into hard panics — that would put the user's only copy
-    /// of their work behind an unrecoverable error. Recovering the inner value is
-    /// safe here: the map is a plain scan result with no invariant a partial write
-    /// could break.
+    /// The process-wide pending-offer map, poison-tolerant.
     fn pending_recovery(&self) -> std::sync::MutexGuard<'_, BTreeMap<DocumentId, RecoveryOffer>> {
-        self.pending_recovery
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.services.pending_recovery()
     }
 
     /// Claims the right to run a blur-triggered autosave flush, at most once per
@@ -640,34 +647,28 @@ impl AppState {
         self.readiness.read().unwrap().clone()
     }
 
-    /// Spawns the pre-warmed worker so the NEXT document open adopts a sidecar that
-    /// is already through (or well into) its OCW1 handshake instead of paying cold
-    /// start. Returns immediately — the handshake completes in the background and
-    /// [`make_backend`](Self::make_backend) adopts whatever state it has reached.
+    /// Pre-warms the process worker pool so the NEXT document open — in this host
+    /// or any other sharing its [`ProcessServices`] — adopts a sidecar that is
+    /// already through (or well into) its OCW1 handshake instead of paying cold
+    /// start. Returns immediately.
     ///
     /// No-op when a warm worker already exists (so it can never stack processes) or
     /// when no worker binary resolves. Must be called from a Tokio context: the
-    /// supervisor and the status forwarder are spawned tasks.
+    /// supervisor is a spawned task.
     pub fn prewarm(&self) {
-        if self.warm.lock().unwrap().is_some() {
-            return;
-        }
-        let Some(path) = resolve_worker_path() else {
-            return; // no binary ⇒ PendingBackend lane; nothing to warm.
-        };
-        let wm = WorkerManager::spawn(SupervisorConfig::production(path));
-        // Hook + forwarder are installed HERE rather than at adoption so a warm
-        // worker that flaps before it is adopted is still supervised and still
-        // reported. With no document open the hook's replay is a no-op.
-        install_restart_hook(
-            &wm,
-            self.runtime.clone(),
-            self.scheduler.clone(),
-            self.restart_owner.clone(),
-        );
-        spawn_status_forwarder(&wm, self.host.clone());
-        *self.warm.lock().unwrap() = Some(wm);
-        tracing::info!("geometry worker pre-warmed");
+        self.services.prewarm();
+    }
+
+    /// The process services this host shares with every other open document.
+    #[must_use]
+    pub fn services(&self) -> &Arc<ProcessServices> {
+        &self.services
+    }
+
+    /// This host's identity within the process.
+    #[must_use]
+    pub fn host_id(&self) -> HostId {
+        self.host_id
     }
 
     /// The `close_document` lane: retires the closed document's worker (it can serve
@@ -691,8 +692,36 @@ impl AppState {
         let mut owner = self.backend_swap.lock().unwrap();
         *owner = Arc::new(());
         self.retire_displaced_backend();
-        retire_slot(&self.warm);
+        self.services.retire_warm();
         retire_slot(&self.live);
+    }
+
+    /// Retires this host's own workers — live and any staged swap — and waits,
+    /// bounded, until their processes are reaped. The process pool is untouched.
+    pub async fn retire_host(&self) {
+        for worker in &self.retire_host_workers() {
+            if !worker.wait_torn_down(WORKER_REAP_TIMEOUT).await {
+                tracing::warn!("closed host's worker was not reaped in time");
+            }
+        }
+    }
+
+    /// Retires this host's own workers without waiting for their reaping, and
+    /// returns them so a caller can wait. Idempotent: a second call finds none.
+    pub fn retire_host_workers(&self) -> Vec<WorkerManager> {
+        let mut owner = self.backend_swap.lock().unwrap();
+        *owner = Arc::new(());
+        let displaced = self.displaced.lock().unwrap().take();
+        let live = self.live.lock().unwrap().take();
+        let workers: Vec<_> = displaced
+            .and_then(|d| d.worker)
+            .into_iter()
+            .chain(live)
+            .collect();
+        for worker in &workers {
+            worker.retire();
+        }
+        workers
     }
 
     fn retire_displaced_backend(&self) {
@@ -706,7 +735,7 @@ impl AppState {
     /// The pre-warmed worker awaiting adoption, if any (introspection / tests).
     #[must_use]
     pub fn warm_worker(&self) -> Option<WorkerManager> {
-        self.warm.lock().unwrap().clone()
+        self.services.warm_worker()
     }
 
     /// The open document's worker, if any (introspection / tests).
@@ -718,22 +747,33 @@ impl AppState {
 
 impl Default for AppState {
     fn default() -> Self {
+        Self::with_services(Arc::new(ProcessServices::new()))
+    }
+}
+
+impl AppState {
+    /// The production host over the real worker factory, sharing `services` (its
+    /// worker pool and recovery offers) with every other host built from them.
+    #[must_use]
+    pub fn with_services(services: Arc<ProcessServices>) -> Self {
         let runtime = Arc::new(Mutex::new(None));
         let scheduler: SharedScheduler = Arc::new(OnceLock::new());
         let app: SharedHost = Arc::new(OnceLock::new());
-        let warm: WorkerSlot = Arc::new(StdMutex::new(None));
         let live: WorkerSlot = Arc::new(StdMutex::new(None));
         let restart_owner = Arc::new(StdMutex::new(None));
         let backend_factory = real_worker_factory(
             runtime.clone(),
             scheduler.clone(),
             app.clone(),
-            warm.clone(),
+            services.warm_slot(),
             live.clone(),
             restart_owner.clone(),
         );
         Self {
-            warm,
+            host_id: services.next_host_id(),
+            services,
+            tasks: Default::default(),
+            claims: StdMutex::new(Vec::new()),
             live,
             displaced: StdMutex::new(None),
             backend_swap: StdMutex::new(Arc::new(())),
@@ -744,7 +784,6 @@ impl Default for AppState {
             native_gestures: Arc::new(StdMutex::new(None)),
             host: app,
             autosave_tick: Arc::new(watch::channel(0u64).0),
-            pending_recovery: StdMutex::new(BTreeMap::new()),
             blur_flush_at: StdMutex::new(None),
             exporter: RwLock::new(Arc::new(PendingBackend)),
             element_query: RwLock::new(Arc::new(PendingBackend)),
@@ -765,8 +804,9 @@ impl Default for AppState {
 ///
 /// The restart hook captures the shared runtime + scheduler so a worker restart
 /// re-drives geometry against the freshly-bumped epoch; each real worker also gets a
-/// [`WorkerLifecycle`] forwarder emitting `worker-status`. Both are installed once
-/// per manager — at pre-warm time for an adopted one, here for a cold spawn.
+/// [`WorkerLifecycle`] forwarder emitting `worker-status`. Both are installed HERE,
+/// at adoption, for warm and cold workers alike: the pool's worker is shared by
+/// every host in the process, so only the adopting host may own its hooks.
 fn real_worker_factory(
     runtime: Arc<Mutex<Option<DocumentRuntime>>>,
     scheduler: SharedScheduler,
@@ -782,35 +822,19 @@ fn real_worker_factory(
                 let Some(path) = resolve_worker_path() else {
                     return pending_bundle();
                 };
-                let wm = WorkerManager::spawn(SupervisorConfig::production(path));
-                install_restart_hook(
-                    &wm,
-                    runtime.clone(),
-                    scheduler.clone(),
-                    restart_owner.clone(),
-                );
-                spawn_status_forwarder(&wm, app.clone());
-                wm
+                WorkerManager::spawn(SupervisorConfig::production(path))
             }
         };
+        install_restart_hook(
+            &wm,
+            runtime.clone(),
+            scheduler.clone(),
+            restart_owner.clone(),
+        );
+        spawn_status_forwarder(&wm, app.clone());
         adopt_live(&live, &wm);
         bundle_from(wm)
     })
-}
-
-/// Takes the pre-warmed worker **iff** it can still become useful. A `Failed` or
-/// already-`Retired` warm worker is retired and dropped so the caller cold-spawns a
-/// healthy one — adopting a corpse would hand the new document a backend that can
-/// never serve a request.
-fn take_warm(warm: &WorkerSlot) -> Option<WorkerManager> {
-    let candidate = warm.lock().unwrap().take()?;
-    match candidate.state() {
-        WorkerState::Starting | WorkerState::Ready | WorkerState::Restarting => Some(candidate),
-        WorkerState::Failed | WorkerState::Retired => {
-            candidate.retire();
-            None
-        }
-    }
 }
 
 /// Installs `wm` as the open document's worker.
@@ -1226,7 +1250,7 @@ mod slot_tests {
     #[tokio::test]
     async fn retire_all_empties_both_slots() {
         let state = AppState::new(Arc::new(pending_bundle));
-        *state.warm.lock().unwrap() = Some(unstartable());
+        *state.services.warm_slot().lock().unwrap() = Some(unstartable());
         *state.live.lock().unwrap() = Some(unstartable());
         let (warm, live) = (
             state.warm_worker().expect("warm"),
@@ -1345,11 +1369,14 @@ mod recovery_state_tests {
 
         let poisoner = state.clone();
         let _ = std::thread::spawn(move || {
-            let _guard = poisoner.pending_recovery.lock().unwrap();
+            let _guard = poisoner.services.pending_recovery_lock().lock().unwrap();
             panic!("poison the lock");
         })
         .join();
-        assert!(state.pending_recovery.is_poisoned(), "precondition");
+        assert!(
+            state.services.pending_recovery_lock().is_poisoned(),
+            "precondition"
+        );
 
         assert!(state
             .peek_pending_recovery(DocumentId(uuid::Uuid::from_u128(1)))

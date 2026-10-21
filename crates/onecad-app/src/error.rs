@@ -41,6 +41,20 @@ pub enum ApiError {
     /// live pid, destroying the offer with no prompt and no undo. The frontend must
     /// come back with an explicit `restore` or `openSaved`.
     RecoveryPending(String),
+    /// The path is already open in another document host (`host`); the caller
+    /// should switch to that document instead of opening a second copy.
+    AlreadyOpen {
+        host: crate::process::HostId,
+        message: String,
+    },
+    /// Another open document (`host`) has the same document identity — a copied
+    /// file. Its autosave and crash-recovery state would collide, so it is refused.
+    DuplicateDocument {
+        host: crate::process::HostId,
+        message: String,
+    },
+    /// The open-document cap is reached.
+    TooManyDocuments(String),
     /// A generic internal failure.
     Internal(String),
 }
@@ -55,6 +69,9 @@ impl std::fmt::Display for ApiError {
             Self::Worker(m) => write!(f, "worker error: {m}"),
             Self::Io(m) => write!(f, "io error: {m}"),
             Self::RecoveryPending(m) => write!(f, "recovery pending: {m}"),
+            Self::AlreadyOpen { message, .. } => write!(f, "already open: {message}"),
+            Self::DuplicateDocument { message, .. } => write!(f, "duplicate document: {message}"),
+            Self::TooManyDocuments(m) => write!(f, "too many documents: {m}"),
             Self::Internal(m) => write!(f, "internal error: {m}"),
         }
     }
@@ -78,6 +95,9 @@ impl Serialize for ApiError {
             Self::Worker(message) => ("worker", message, None),
             Self::Io(message) => ("io", message, None),
             Self::RecoveryPending(message) => ("recoveryPending", message, None),
+            Self::AlreadyOpen { message, .. } => ("alreadyOpen", message, None),
+            Self::DuplicateDocument { message, .. } => ("duplicateDocument", message, None),
+            Self::TooManyDocuments(message) => ("tooManyDocuments", message, None),
             Self::Internal(message) => ("internal", message, None),
         };
         let include_diagnostics = diagnostics.is_some_and(|items| !items.is_empty());

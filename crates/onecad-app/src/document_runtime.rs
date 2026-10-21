@@ -698,6 +698,9 @@ pub struct DocumentRuntime {
     title: String,
     path: Option<PathBuf>,
     dirty: bool,
+    /// The undo history as of the last save (see `unsaved.rs`); `None` when that
+    /// point is unknown (a recovered autosave).
+    saved_history: Option<unsaved::SavedHistory>,
     read_only: bool,
     mesh_cache: MeshCache,
     /// MESH1 blobs read back from the container at **open** — the last-saved
@@ -999,6 +1002,8 @@ impl DocumentRuntime {
             title,
             path,
             dirty: false,
+            // Opened (or new) means "matches the file": no step since then.
+            saved_history: Some(unsaved::SavedHistory::default()),
             read_only,
             mesh_cache: MeshCache::new(),
             cached_meshes: HashMap::new(),
@@ -3053,6 +3058,7 @@ impl DocumentRuntime {
         let now = self.fencing.revision();
         if now == revision_at_build {
             self.dirty = false;
+            self.saved_history = Some(self.history_now());
             true
         } else {
             tracing::info!(
@@ -3110,6 +3116,7 @@ impl DocumentRuntime {
         }
         self.path = original;
         self.dirty = true;
+        self.saved_history = None;
     }
 
     /// Detaches this runtime from the file it was loaded from: no path, no
@@ -6983,7 +6990,9 @@ mod ordinal_tripwire;
 mod sketch_adoption;
 mod sketch_constraints;
 mod sketch_history;
+mod unsaved;
 pub use sketch_constraints::{DrivenSketchConstraints, PreparedSketchConstraints};
+pub use unsaved::UnsavedChanges;
 pub mod solver_lane;
 
 #[cfg(test)]
