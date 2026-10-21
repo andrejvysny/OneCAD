@@ -28,6 +28,7 @@ mod section_contours_gpu;
 mod section_contours_worker;
 mod silhouette;
 mod targets;
+mod thumbnail;
 
 pub use frame::{grid_step, GridFrame, RenderStyle, SilhouetteMode, Theme};
 pub use highlights::{HighlightKind, HighlightTarget, PreparedHighlights};
@@ -37,6 +38,7 @@ pub use options::{required_device_features, DisplayMode, RenderOptions};
 pub use prepared::{PreparationBudget, PreparationCache, PreparedScene};
 pub use section_contours::{PreparedSectionContours, SectionContourKey};
 pub use section_contours_worker::SectionContourWorker;
+pub use thumbnail::Thumbnail;
 
 use frame::FrameU;
 use mesh::GpuBody;
@@ -93,6 +95,7 @@ pub struct Renderer {
     section_contours: [Option<section_contours::GpuSectionContours>; 2],
     options: RenderOptions,
     contact_dirty: bool,
+    blit: Option<thumbnail::BlitResources>,
 }
 
 impl Renderer {
@@ -168,6 +171,7 @@ impl Renderer {
             section_contours: [None, None],
             options: RenderOptions::default(),
             contact_dirty: true,
+            blit: None,
         })
     }
     pub fn output_view(&self) -> Option<&wgpu::TextureView> {

@@ -479,6 +479,8 @@ mod edge_modes;
 
 mod resize_recovery;
 
+mod thumbnail_gpu;
+
 mod capture_artifacts;
 #[test]
 fn support_grid_shader_validates_without_gpu() {

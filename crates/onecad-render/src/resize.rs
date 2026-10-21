@@ -4,6 +4,7 @@ pub(crate) struct RetainedOutput {
     pub _texture: wgpu::Texture,
     pub view: wgpu::TextureView,
     pub bytes: u64,
+    pub size: [u32; 2],
 }
 
 impl RenderError {
@@ -71,6 +72,7 @@ impl Renderer {
                 _texture: targets._output,
                 view: targets.output_view,
                 bytes,
+                size: self.size,
             });
             self.estimate.target_bytes = bytes;
         }
