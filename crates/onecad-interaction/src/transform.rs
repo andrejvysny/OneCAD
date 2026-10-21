@@ -1,5 +1,5 @@
 //! Gizmo drafts replace placement against frozen targets and pivot, never accumulate deltas.
-use crate::{DraftStatus, Effect, Interaction, PreviewStatus, SessionPhase};
+use crate::{Effect, FieldStatus, Interaction, PreviewStatus, SessionPhase};
 use onecad_core::{
     document::{
         record::{KnownOperation, Operation},
@@ -9,6 +9,7 @@ use onecad_core::{
 };
 
 impl Interaction {
+    /// Drag-sourced placement: it never commits an open parameter drag.
     pub(crate) fn change_transform(
         &mut self,
         translate: [f64; 3],
@@ -20,7 +21,10 @@ impl Interaction {
         }) else {
             return Vec::new();
         };
-        let Operation::Known(KnownOperation::TransformBody(params)) = &tool.record.op else {
+        // Compare against what the session shows, so evaluated overrides (and
+        // their expressions) survive motion on other components.
+        let effective = tool.effective_op();
+        let Operation::Known(KnownOperation::TransformBody(params)) = &effective else {
             return Vec::new();
         };
         if !translate
@@ -44,24 +48,49 @@ impl Interaction {
             return Vec::new();
         }
         let operation = Operation::Known(KnownOperation::TransformBody(updated));
-        let Ok(scalar) = tool.parameter.current_scalar(&operation) else {
+        let Some(tool) = self.tool.as_mut() else {
             return Vec::new();
         };
-        let draft = scalar.expr.unwrap_or_else(|| scalar.value.to_string());
-        if let Some(tool) = self.tool.as_mut() {
-            tool.record.op = operation;
+        let existing = tool.editing_existing;
+        for field in tool.params.fields.iter_mut().filter(|field| field.active) {
+            let parameter = field.key.parameter();
+            let Ok(moved) = parameter.current_scalar(&operation) else {
+                continue;
+            };
+            if parameter.current_scalar(&effective).ok().as_ref() != Some(&moved) {
+                field.text = moved.value.to_string();
+                field.status = if existing && field.text == field.original {
+                    FieldStatus::Authored
+                } else {
+                    FieldStatus::Pending
+                };
+            }
         }
-        self.change_draft(draft)
+        tool.record.op = operation;
+        self.refresh()
     }
 
     fn reject_transform(&mut self, message: String) -> Vec<Effect> {
-        let mut effects = self.change_draft(String::new());
-        effects.retain(|effect| matches!(effect, Effect::ClearPreview { .. }));
-        if let Some(tool) = self.tool.as_mut() {
-            tool.draft_status = DraftStatus::Invalid(message);
-            tool.preview = PreviewStatus::Empty;
-        }
-        effects
+        let Some(tool) = self
+            .tool
+            .as_mut()
+            .filter(|tool| tool.phase == SessionPhase::Editing)
+        else {
+            return Vec::new();
+        };
+        let clear = Effect::ClearPreview {
+            gesture: tool.tag.gesture,
+        };
+        let Some(sequence) = self.sequence.checked_add(1) else {
+            tool.preview = PreviewStatus::Failed("Interaction sequence exhausted".into());
+            return vec![clear];
+        };
+        self.sequence = sequence;
+        tool.tag.sequence = sequence;
+        tool.preview = PreviewStatus::Empty;
+        tool.params.evaluating = None;
+        tool.params.op_error = Some((tool.params.focus, message));
+        vec![clear]
     }
 }
 

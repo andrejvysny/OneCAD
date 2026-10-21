@@ -13,38 +13,34 @@ impl Interaction {
         let Some(tool) = self.tool.as_mut() else {
             return Vec::new();
         };
-        if tool.draft_status != DraftStatus::Pending {
+        let Some(key) = tool.params.evaluating.take() else {
             return Vec::new();
-        }
-        let scalar = match validated_scalar(tool.parameter, &tool.draft, result) {
-            Ok(scalar) => scalar,
-            Err(message) => {
-                tool.draft_status = DraftStatus::Invalid(message);
-                return Vec::new();
-            }
         };
-        let mut operation = tool.record.op.clone();
-        if let Err(message) = tool.parameter.apply(&mut operation, scalar.clone()) {
-            tool.draft_status = DraftStatus::Invalid(message);
+        let existing = tool.editing_existing;
+        let Some(field) = tool
+            .params
+            .field_mut(key)
+            .filter(|field| field.status == FieldStatus::Pending)
+        else {
             return Vec::new();
+        };
+        // Untouched existing text keeps its authored slot, even when its binding no
+        // longer evaluates: other fields must stay editable.
+        let untouched = existing && field.text == field.original;
+        field.status = match validated_scalar(key.parameter(), &field.text, result) {
+            _ if untouched => FieldStatus::Authored,
+            Ok(scalar) => FieldStatus::Valid(scalar),
+            Err(message) => FieldStatus::Invalid(message),
+        };
+        if tool.params.first_pending().is_some() {
+            // A later edit took the evaluation slot; resume the field it left pending.
+            return self.changed(None);
         }
-        tool.draft_status = DraftStatus::Valid(scalar);
-        if let Err(message) = crate::extrude::validate_target(&operation) {
-            tool.preview = PreviewStatus::Failed(message);
-            return Vec::new();
+        if tool.params.readiness() == Readiness::Ready {
+            tool.request_preview()
+        } else {
+            Vec::new()
         }
-        if tool.editing_existing {
-            tool.preview = PreviewStatus::UnavailableForEdit;
-            return Vec::new();
-        }
-        let sketch_id = crate::session::profile_sketch(&operation);
-        tool.preview = PreviewStatus::Pending;
-        vec![Effect::Preview {
-            tag: tag.clone(),
-            sketch_id,
-            operation: Box::new(operation),
-            expected_snapshot: tag.context.snapshot_id,
-        }]
     }
 
     pub(crate) fn preview_finished(
@@ -58,9 +54,7 @@ impl Interaction {
         let Some(tool) = self.tool.as_mut() else {
             return Vec::new();
         };
-        if tool.preview != PreviewStatus::Pending
-            || !matches!(tool.draft_status, DraftStatus::Valid(_))
-        {
+        if tool.preview != PreviewStatus::Pending || tool.params.readiness() != Readiness::Ready {
             return Vec::new();
         }
         match result {

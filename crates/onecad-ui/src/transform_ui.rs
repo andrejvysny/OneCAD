@@ -1,7 +1,8 @@
 //! SolidCraft's triad edits OneCAD typed drafts; only explicit Apply authors history.
 use crate::{
     app::App,
-    gizmo::{Change, Gizmo, Triad},
+    gizmo::{Change, Drag, Gizmo, Triad},
+    parameter_drag::{Lifecycle, Outcome},
 };
 use onecad_core::{
     document::{
@@ -13,7 +14,7 @@ use onecad_core::{
     ids::RecordId,
     math::Vec3,
 };
-use onecad_interaction::{Action, DraftStatus, NumericParameter, ParameterAxis, SessionPhase};
+use onecad_interaction::{Action, NumericParameter, ParameterAxis, ParameterKey, SessionPhase};
 use onecad_scene::{DVec3, ViewSnapshot};
 
 #[derive(Default)]
@@ -21,6 +22,9 @@ pub struct TransformGizmo {
     pub gizmo: Gizmo,
     baseline: Option<TransformBodyParams>,
     record: Option<RecordId>,
+    lifecycle: Lifecycle,
+    /// The last authored placement differs from the frozen baseline.
+    moved: bool,
 }
 
 impl App {
@@ -68,9 +72,11 @@ impl App {
             "Move / Rotate",
             Operation::Known(KnownOperation::TransformBody(params)),
         );
+        let x = ParameterKey::from(NumericParameter::TransformTranslation(ParameterAxis::X));
         self.dispatch(Action::BeginOperation {
             record: Box::new(record),
-            parameter: NumericParameter::TransformTranslation(ParameterAxis::X),
+            fields: vec![x],
+            focus: Some(x),
             gesture: self.doc.gesture,
             context,
         });
@@ -85,23 +91,9 @@ fn parameters(app: &App) -> Option<(RecordId, TransformBodyParams)> {
     if tool.phase != SessionPhase::Editing || !app.viewport_ready() || !app.doc.bridge.valid() {
         return None;
     }
-    let Operation::Known(KnownOperation::TransformBody(mut params)) = tool.record.op.clone() else {
+    let Operation::Known(KnownOperation::TransformBody(params)) = tool.effective_op() else {
         return None;
     };
-    if let DraftStatus::Valid(scalar) = &tool.draft_status {
-        match tool.parameter {
-            NumericParameter::TransformTranslation(axis) => {
-                let index = match axis {
-                    ParameterAxis::X => 0,
-                    ParameterAxis::Y => 1,
-                    ParameterAxis::Z => 2,
-                };
-                params.translate[index] = scalar.clone();
-            }
-            NumericParameter::TransformRotationAngle => params.rotate.angle_deg = scalar.clone(),
-            _ => return None,
-        }
-    }
     let display = app.doc.display.as_ref()?;
     if params.targets.iter().any(|id| {
         !display
@@ -144,6 +136,7 @@ pub fn owns_pointer(app: &App, view: &ViewSnapshot, rect: egui::Rect, pointer: e
 
 pub fn show(app: &mut App, ui: &mut egui::Ui, view: &ViewSnapshot, rect: egui::Rect) -> bool {
     let Some((record, params)) = parameters(app) else {
+        abandon(app, Outcome::Lost);
         app.doc.transform_gizmo = TransformGizmo::default();
         return false;
     };
@@ -162,27 +155,80 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, view: &ViewSnapshot, rect: egui::R
         .transform_gizmo
         .gizmo
         .show(ui, view, rect, triad, step, &app.theme);
-    if let Some(drag) = response.drag {
-        if drag.started {
-            app.doc.transform_gizmo.baseline = Some(params);
-        }
-        if let Some(base) = &app.doc.transform_gizmo.baseline
-            && let Some((translate, axis, angle_degrees)) = changed(base, drag.change)
-        {
-            app.dispatch(Action::TransformDraftChanged {
-                translate,
-                axis,
-                angle_degrees,
-            });
-            ui.ctx().request_repaint();
-        }
-        if drag.done {
-            app.doc.transform_gizmo.baseline = None;
-        }
+    // An earlier release in this batch ends its capture before the next one starts.
+    for drag in response.finished.into_iter().chain(response.drag) {
+        apply(app, drag, &params);
+        ui.ctx().request_repaint();
+    }
+    if response.cancelled {
+        abandon(app, Outcome::Lost);
     } else if !app.doc.transform_gizmo.gizmo.active() {
         app.doc.transform_gizmo.baseline = None;
     }
     response.owns_pointer
+}
+
+/// One capture's motion against its frozen baseline; nothing is authored
+/// until the placement changes.
+fn apply(app: &mut App, drag: Drag, params: &TransformBodyParams) {
+    let gizmo = &mut app.doc.transform_gizmo;
+    if drag.started {
+        gizmo.baseline = Some(params.clone());
+        gizmo.lifecycle = Lifecycle::default();
+        gizmo.moved = false;
+    }
+    let moved = match drag.change {
+        Change::Translate(delta) => delta != DVec3::ZERO,
+        Change::Rotate { angle, .. } => angle != 0.0,
+    };
+    if let Some(base) = &gizmo.baseline
+        && let Some((translate, axis, angle_degrees)) = changed(base, drag.change)
+        && (moved || gizmo.lifecycle.begun())
+    {
+        gizmo.moved = moved;
+        let mut lifecycle = std::mem::take(&mut gizmo.lifecycle);
+        lifecycle.author(
+            app,
+            Action::TransformDraftChanged {
+                translate,
+                axis,
+                angle_degrees,
+            },
+        );
+        app.doc.transform_gizmo.lifecycle = lifecycle;
+    }
+    if drag.done {
+        let gizmo = &mut app.doc.transform_gizmo;
+        gizmo.baseline = None;
+        let changed = std::mem::take(&mut gizmo.moved);
+        std::mem::take(&mut gizmo.lifecycle).end(app, Outcome::Finish { changed });
+    }
+}
+
+/// Ends a gizmo capture whose release or loss never reached `show`.
+pub(crate) fn settle(app: &mut App, ctx: &egui::Context) {
+    if !app.doc.transform_gizmo.gizmo.active() {
+        return;
+    }
+    let (focused, down) = ctx.input(|i| (i.focused, i.pointer.primary_down()));
+    if !focused || app.doc.interaction.tool.is_none() {
+        abandon(app, Outcome::Lost);
+    } else if !down {
+        let gizmo = &mut app.doc.transform_gizmo;
+        gizmo.gizmo.cancel();
+        gizmo.baseline = None;
+        let changed = std::mem::take(&mut gizmo.moved);
+        std::mem::take(&mut gizmo.lifecycle).end(app, Outcome::Finish { changed });
+    }
+}
+
+/// Ends any gizmo capture and restores the placement authored before it.
+pub(crate) fn abandon(app: &mut App, outcome: Outcome) {
+    let gizmo = &mut app.doc.transform_gizmo;
+    gizmo.gizmo.cancel();
+    gizmo.baseline = None;
+    gizmo.moved = false;
+    std::mem::take(&mut gizmo.lifecycle).end(app, outcome);
 }
 
 pub(crate) fn snap_step(world_per_pixel: f64) -> f64 {

@@ -1,38 +1,24 @@
-//! Only applicable typed scalar fields are exposed; authored sibling inputs remain intact.
+//! Re-edit field selector: switching moves focus inside one session, so edits
+//! to several fields accumulate into one Apply and one Undo.
 use crate::app::App;
-use onecad_interaction::{Action, ModelSession, SessionPhase, numeric_parameters};
+use onecad_interaction::{Action, ModelSession, SessionPhase};
 
 pub fn selector(app: &mut App, ui: &mut egui::Ui, tool: &ModelSession) {
     if !tool.editing_existing || tool.phase != SessionPhase::Editing {
         return;
     }
-    let Some(display) = app.doc.display.clone() else {
+    let Some(focus) = tool.params.focus() else {
         return;
     };
-    let Some(record) = display
-        .records
-        .iter()
-        .find(|record| record.record_id == tool.tag.record_id)
-    else {
-        return;
-    };
-    let mut parameter = tool.parameter;
+    let mut selected = focus;
     egui::ComboBox::from_id_salt("numeric-parameter")
-        .selected_text(parameter.label())
+        .selected_text(focus.label())
         .show_ui(ui, |ui| {
-            for descriptor in numeric_parameters(&record.op) {
-                ui.selectable_value(&mut parameter, descriptor.parameter, descriptor.label);
+            for field in tool.params.active() {
+                ui.selectable_value(&mut selected, field.key, field.key.label());
             }
         });
-    if parameter != tool.parameter
-        && let Some(context) = app.doc.interaction.context.clone()
-    {
-        app.doc.gesture += 1;
-        app.dispatch(Action::BeginParameterEdit {
-            record: Box::new(record.clone()),
-            parameter,
-            gesture: app.doc.gesture,
-            context,
-        });
+    if selected != focus {
+        app.dispatch(Action::FocusParameter(selected));
     }
 }

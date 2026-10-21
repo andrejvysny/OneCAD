@@ -149,6 +149,7 @@ impl App {
             action,
             Action::Confirm
                 | Action::DraftChanged(_)
+                | Action::ParameterChanged { .. }
                 | Action::BeginExtrude { .. }
                 | Action::BeginOperation { .. }
                 | Action::BeginEdit { .. }
@@ -738,8 +739,8 @@ impl eframe::App for App {
         } else {
             crate::viewport::show(self, ui);
         }
-        // After the viewport, so an in-batch release consumed by the handle wins.
-        crate::extrude_handle::settle(self, &ctx);
+        // After the viewport, so an in-batch release consumed by a handle wins.
+        crate::parameter_drag::settle(self, &ctx);
         crate::component_wizard::show(self, &ctx);
         crate::tab_switcher::show(self, &ctx);
         crate::shell::close_prompt(self, &ctx);

@@ -433,6 +433,8 @@ impl App {
     /// gestures and previews are cancelled; tools, sketch mode and selection stay.
     fn deactivate(&mut self) {
         self.capture_thumbnail();
+        // A parked document keeps its authored values, never a half-finished drag.
+        crate::parameter_drag::abandon(self, crate::parameter_drag::Outcome::Lost);
         if self.doc.interaction.tool.is_some() && !self.tabs.stranded.contains(&self.doc.tab) {
             self.tabs.stranded.push(self.doc.tab);
         }

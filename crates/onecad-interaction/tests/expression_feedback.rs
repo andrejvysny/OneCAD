@@ -46,7 +46,7 @@ async fn evaluate(app: &AppState, state: &mut Interaction, expression: &str) -> 
             _ => None,
         })
         .unwrap();
-    let site = state.tool.as_ref().unwrap().parameter.site();
+    let site = state.tool.as_ref().unwrap().parameter().unwrap().site();
     let result = api::evaluate_expression(app, expression.into(), site.into())
         .await
         .map_err(|error| error.to_string());

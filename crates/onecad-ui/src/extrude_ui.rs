@@ -95,10 +95,11 @@ pub(crate) fn rows(app: &mut App, rows: &mut FeatureCardRows, tool: &ModelSessio
         target_row(app, rows, params.target_body);
     }
     rows.row("Direction", |ui| {
-        let direction = match &tool.draft_status {
-            onecad_interaction::DraftStatus::Valid(value) if value.value < 0.0 => "Reverse",
-            onecad_interaction::DraftStatus::Valid(_) => "Forward",
-            _ => "Evaluating",
+        let distance = tool.value(onecad_interaction::NumericParameter::ExtrudeDistance);
+        let direction = match distance {
+            Some(value) if value < 0.0 => "Reverse",
+            Some(_) => "Forward",
+            None => "Evaluating",
         };
         ui.label(direction);
         if ui.button("Flip").clicked() {

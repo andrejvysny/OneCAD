@@ -2,6 +2,14 @@ use crate::*;
 
 impl Interaction {
     pub fn dispatch(&mut self, action: Action) -> Vec<Effect> {
+        let effects = self.route(action);
+        if let Some(tool) = self.tool.as_mut() {
+            tool.project();
+        }
+        effects
+    }
+
+    fn route(&mut self, action: Action) -> Vec<Effect> {
         match action {
             Action::ContextChanged(context) => self.change_context(context),
             Action::ClearSelection => {
@@ -23,14 +31,15 @@ impl Interaction {
             } => self.begin_extrude(record_id, gesture, step_index),
             Action::BeginOperation {
                 record,
-                parameter,
+                fields,
+                focus,
                 gesture,
                 context,
             } => {
                 if self.context.as_ref() != Some(&context) {
                     return Vec::new();
                 }
-                self.begin_operation(*record, parameter, gesture)
+                self.begin_operation(*record, fields, focus, gesture)
             }
             Action::BeginEdit {
                 record,
@@ -54,6 +63,9 @@ impl Interaction {
                 self.begin_parameter_edit(*record, parameter, gesture)
             }
             Action::DraftChanged(draft) => self.change_draft(draft),
+            Action::ParameterChanged { key, text } => self.change_parameter(key, text),
+            Action::FocusParameter(key) => self.focus_parameter(key),
+            Action::ParameterDrag(phase) => self.drag(phase),
             Action::ExtrudeModeChanged(mode) => self.change_extrude_mode(mode),
             Action::ExtrudeTargetChanged { body, context } => {
                 self.change_extrude_target(body, context)

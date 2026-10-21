@@ -482,5 +482,49 @@ fn escape_and_focus_loss_end_gizmo_without_dispatching_further_delta() {
             focused,
         );
         assert!(response.drag.is_none() && !gizmo.active());
+        assert!(
+            response.cancelled,
+            "the caller restores the authored placement"
+        );
     }
+}
+
+#[test]
+fn pointer_loss_reports_cancel_and_an_earlier_release_survives_a_new_press() {
+    let v = view(Projection::Orthographic, 1.0);
+    let geometry = Geometry::new(&v, rect(), triad()).unwrap();
+    let frame = Frame {
+        view: &v,
+        rect: rect(),
+        triad: triad(),
+        step: 0.0,
+        free: true,
+        geometry: &geometry,
+    };
+    let start = geometry.ball;
+    let end = start + egui::vec2(12.0, 0.0);
+    let mut gizmo = Gizmo::default();
+    let response = gizmo.process(
+        &[
+            press(start, true),
+            egui::Event::PointerMoved(end),
+            egui::Event::PointerGone,
+        ],
+        &frame,
+    );
+    assert!(response.cancelled && response.drag.is_none() && !gizmo.active());
+    let idle = gizmo.process(&[egui::Event::PointerGone], &frame);
+    assert!(!idle.cancelled, "no capture, nothing to restore");
+    let response = gizmo.process(
+        &[
+            press(start, true),
+            egui::Event::PointerMoved(end),
+            press(end, false),
+            press(start, true),
+        ],
+        &frame,
+    );
+    let finished = response.finished.unwrap();
+    assert!(finished.done && translation(finished).length() > 0.0);
+    assert!(response.drag.unwrap().started && gizmo.active());
 }
