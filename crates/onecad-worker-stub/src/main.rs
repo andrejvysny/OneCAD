@@ -74,6 +74,9 @@
 //!   §7.6 shape: `detail {requested, head}`), then behave normally. Drives Rust's
 //!   re-read-the-head-once rule: `n = 1` must be invisible to the caller, `n = 2`
 //!   must surface.
+//! - `ONECAD_STUB_CAPABILITIES=<a,b,…>` — advertise these Hello capabilities
+//!   (default none), so a test can stand the stub in for a worker that has one
+//!   capability but lacks another. Advertising does not implement the verb.
 //!
 //! Beyond the lifecycle verbs, the stub speaks a minimal `ExecutePlan`
 //! (one `planStep` per op minting `body_<opId>`, terminal `PlanPrepared` echoing
@@ -1844,7 +1847,14 @@ fn write_hello<W: Write>(writer: &mut W, seq: u64) -> Result<(), ProtocolError> 
             },
             quantization_version: 1,
             solver_policy_version: 4,
-            capabilities: vec![],
+            capabilities: std::env::var("ONECAD_STUB_CAPABILITIES")
+                .map(|list| {
+                    list.split(',')
+                        .filter(|c| !c.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
             // SCHEMA §6 + the hello fixture require a `limits` object.
             limits: Some(HelloLimits {
                 chunk_size: 1_048_576,

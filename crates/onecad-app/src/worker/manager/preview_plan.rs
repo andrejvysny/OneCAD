@@ -54,6 +54,7 @@ pub(super) async fn preview_plan(
         return Err(plan_preview_unavailable());
     }
     super::super::endpoint_tangency::plan(&req.plan, capabilities)?;
+    super::super::boolean_tools::plan(&req.plan, capabilities)?;
 
     let (tx, mut rx) = oneshot::channel();
     tokio::spawn(drive(shared, client, req, op_keys, cancel.clone(), tx));
