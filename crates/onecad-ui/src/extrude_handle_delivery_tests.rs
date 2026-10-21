@@ -163,11 +163,116 @@ async fn handle_pointer_gone_focus_loss_and_escape_restore_without_history() {
         if condition < 2 {
             valid(&mut host, AUTHORED, 12.0).await;
         } else {
-            // Escape is routed to the Extrude session first: it ends with no draft at all.
+            // KNOWN GAP (ONECAD-324, input.rs/pill.rs owner): the brief wants Escape
+            // to cancel only the drag and restore AUTHORED, but input.rs routes it to
+            // pill::cancel_or_deselect first, which ends the whole session. Pinned
+            // as observed so the fix is noticed; not the intended outcome.
             assert!(host.app.doc.interaction.tool.is_none());
         }
         assert_eq!(undo_depth(&host), undo, "condition {condition}");
     }
+    host.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic native input is not physical acceptance"]
+async fn handle_second_press_in_batch_drags_from_the_first_release() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut host, axis) = extruding(root.path(), AUTHORED, 12.0).await;
+    let undo = undo_depth(&host);
+    let (tip, first) = (axis.at(&host, 12.0), axis.at(&host, 20.0));
+    host.ui(vec![
+        egui::Event::PointerMoved(tip),
+        button(tip, true),
+        egui::Event::PointerMoved(first),
+        button(first, false),
+        button(first, true),
+        egui::Event::PointerMoved(tip),
+    ]);
+    assert!(host.app.doc.extrude_handle.active());
+    assert_eq!(
+        draft(&host),
+        "12",
+        "second drag starts from the dispatched 20"
+    );
+    host.ui(vec![button(tip, false)]);
+    assert!(!host.app.doc.extrude_handle.active());
+    valid(&mut host, "12", 12.0).await;
+    confirm(&mut host).await;
+    assert_eq!(undo_depth(&host), undo + 1);
+    host.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic native input is not physical acceptance"]
+async fn handle_cancelled_second_press_keeps_the_first_drag() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut host, axis) = extruding(root.path(), AUTHORED, 12.0).await;
+    let undo = undo_depth(&host);
+    let (tip, first) = (axis.at(&host, 12.0), axis.at(&host, 20.0));
+    host.ui(vec![
+        egui::Event::PointerMoved(tip),
+        button(tip, true),
+        egui::Event::PointerMoved(first),
+        button(first, false),
+        button(first, true),
+        egui::Event::PointerMoved(axis.at(&host, 26.0)),
+    ]);
+    assert_eq!(draft(&host), "26");
+    host.ui(vec![egui::Event::PointerGone]);
+    assert!(!host.app.doc.extrude_handle.active());
+    valid(&mut host, "20", 20.0).await;
+    assert_eq!(undo_depth(&host), undo);
+    host.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic native input is not physical acceptance"]
+async fn handle_three_drags_then_confirm_add_one_history_entry() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut host, axis) = extruding(root.path(), AUTHORED, 12.0).await;
+    let undo = undo_depth(&host);
+    let mut from = 12.0;
+    for to in [20.0, 25.0, 30.0] {
+        let (tip, end) = (axis.at(&host, from), axis.at(&host, to));
+        host.ui(vec![
+            egui::Event::PointerMoved(tip),
+            button(tip, true),
+            egui::Event::PointerMoved(end),
+        ]);
+        host.ui(vec![button(end, false)]);
+        valid(&mut host, &format!("{to}"), to).await;
+        assert_eq!(undo_depth(&host), undo, "drag {to} authors a draft only");
+        from = to;
+    }
+    confirm(&mut host).await;
+    assert_eq!(undo_depth(&host), undo + 1, "three drags, one entry");
+    host.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic native input is not physical acceptance"]
+async fn handle_release_over_chrome_ends_drag_at_last_motion() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut host, axis) = extruding(root.path(), AUTHORED, 12.0).await;
+    let undo = undo_depth(&host);
+    let tip = axis.at(&host, 12.0);
+    let card = crate::layout::chrome(host.screen(), &host.app.ui)
+        .feature_card
+        .center();
+    host.ui(vec![
+        egui::Event::PointerMoved(tip),
+        button(tip, true),
+        egui::Event::PointerMoved(axis.at(&host, 20.0)),
+        egui::Event::PointerMoved(card),
+    ]);
+    let dragged = draft(&host);
+    host.ui(vec![button(card, false)]);
+    assert!(!host.app.doc.extrude_handle.active());
+    assert_eq!(draft(&host), dragged, "release adds no motion of its own");
+    valid(&mut host, &dragged, dragged.parse().unwrap()).await;
+    confirm(&mut host).await;
+    assert_eq!(undo_depth(&host), undo + 1);
     host.stop().await;
 }
 

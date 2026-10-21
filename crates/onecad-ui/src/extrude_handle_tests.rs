@@ -424,3 +424,34 @@ fn release_position_ends_the_drag_and_frames_carry_motion() {
     close(drag.d, 20.0);
     assert_eq!(drag.pending().as_deref(), Some("20"));
 }
+
+#[test]
+fn second_press_in_a_batch_starts_from_the_dispatched_draft() {
+    let mut target = Target {
+        evaluated: Some(12.0),
+        draft: "6 * 2".into(),
+        ..target_z()
+    };
+    rebase(&mut target, Some("6 * 2"));
+    assert_eq!(
+        (target.draft.as_str(), target.evaluated),
+        ("6 * 2", Some(12.0))
+    );
+    rebase(&mut target, None);
+    assert_eq!(target.evaluated, Some(12.0));
+
+    rebase(&mut target, Some("20"));
+    assert_eq!((target.draft.as_str(), target.evaluated), ("20", None));
+    let mut drag = Drag::start(PRESS, axis(PRESS).unwrap(), 20.0, &target, false);
+    assert_eq!((drag.original.as_str(), drag.sent.as_str()), ("20", "20"));
+    drag.feed(&moved(egui::pos2(100.0, 180.0)), &axis, &RULE);
+    assert_eq!(drag.pending().as_deref(), Some("12"));
+    drag.sent = "12".into();
+    assert_eq!(
+        drag.restore().as_deref(),
+        Some("20"),
+        "cancel keeps drag one"
+    );
+    drag.feed(&moved(PRESS), &axis, &RULE);
+    assert_eq!(drag.pending().as_deref(), Some("20"));
+}

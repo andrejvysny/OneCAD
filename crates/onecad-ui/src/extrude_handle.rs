@@ -20,8 +20,6 @@ pub(crate) struct ExtrudeHandle {
     record: Option<RecordId>,
     last_valid: Option<f64>,
     drag: Option<Drag>,
-    /// Pass in which `show` consumed this frame's events; `settle` defers to it.
-    shown_pass: Option<u64>,
 }
 
 struct Drag {
@@ -194,12 +192,10 @@ pub(crate) fn owns_pointer(app: &App, view: &ViewSnapshot, rect: Rect, pointer: 
 }
 
 /// Ends or cancels a capture whose release/focus events never reached `show`
-/// (viewport early returns). Runs after the viewport and only when `show` did
-/// not consume this pass's events, so it never preempts an in-batch release.
+/// (viewport early returns). Runs after the viewport, so an in-batch release
+/// that `show` consumed has already ended the drag and cannot be preempted.
 pub(crate) fn settle(app: &mut App, ctx: &egui::Context) {
-    if !app.doc.extrude_handle.active()
-        || app.doc.extrude_handle.shown_pass == Some(ctx.cumulative_pass_nr())
-    {
+    if !app.doc.extrude_handle.active() {
         return;
     }
     let (focused, down) = ctx.input(|i| (i.focused, i.pointer.primary_down()));
@@ -219,7 +215,7 @@ pub(crate) fn abandon(app: &mut App) {
 }
 
 pub(crate) fn show(app: &mut App, ui: &mut egui::Ui, view: &ViewSnapshot, rect: Rect) -> bool {
-    let Some(target) = target(app) else {
+    let Some(mut target) = target(app) else {
         let drag = app.doc.extrude_handle.drag.take();
         cancel(app, drag);
         app.doc.extrude_handle = ExtrudeHandle::default();
@@ -231,7 +227,6 @@ pub(crate) fn show(app: &mut App, ui: &mut egui::Ui, view: &ViewSnapshot, rect: 
             ..Default::default()
         };
     }
-    app.doc.extrude_handle.shown_pass = Some(ui.ctx().cumulative_pass_nr());
     if app.doc.extrude_handle.drag.is_none()
         && let Some(value) = target.evaluated
     {
@@ -261,7 +256,8 @@ pub(crate) fn show(app: &mut App, ui: &mut egui::Ui, view: &ViewSnapshot, rect: 
         step: crate::transform_ui::snap_step(view.world_per_pixel(view.depth(target.base))),
         two_directions: target.two_directions,
     };
-    let axis = |pos| along(view, rect, pos, target.base, target.normal);
+    let (base, normal) = (target.base, target.normal);
+    let axis = |pos| along(view, rect, pos, base, normal);
     let mut shown = shown;
     // Delivery order decides: a release ends the drag at that event, so later
     // motion in the same batch can never move the value.
@@ -281,13 +277,15 @@ pub(crate) fn show(app: &mut App, ui: &mut egui::Ui, view: &ViewSnapshot, rect: 
             continue;
         };
         match active.feed(event, &axis, &rule) {
-            Fed::Tracking => {}
+            Fed::Tracking => continue,
             Fed::Released => {
                 finish(app, drag.take());
                 shown = app.doc.extrude_handle.last_valid.unwrap_or(shown);
             }
             Fed::Lost => cancel(app, drag.take()),
         }
+        let draft = app.doc.interaction.tool.as_ref().map(|t| t.draft.as_str());
+        rebase(&mut target, draft);
     }
     // One draft change per frame keeps the evaluate/preview pipeline from flooding.
     if let Some(active) = drag.as_mut() {
@@ -311,6 +309,17 @@ pub(crate) fn show(app: &mut App, ui: &mut egui::Ui, view: &ViewSnapshot, rect: 
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
     }
     hot
+}
+
+/// A later press in the same batch starts from the draft the ended drag left,
+/// not the frame-start snapshot; a changed draft has no evaluation yet.
+fn rebase(target: &mut Target, draft: Option<&str>) {
+    if let Some(draft) = draft
+        && draft != target.draft
+    {
+        target.draft = draft.to_owned();
+        target.evaluated = None;
+    }
 }
 
 impl Drag {

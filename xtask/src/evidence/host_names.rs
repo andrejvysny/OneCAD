@@ -49,4 +49,8 @@ pub(super) const HOST_TESTS: &[&str] = &[
     "app_logic_tests::extrude_handle_delivery_tests::handle_press_move_then_move_release_next_frame_keeps_final_value",
     "app_logic_tests::extrude_handle_delivery_tests::handle_release_at_authored_value_restores_expression_and_precision",
     "app_logic_tests::extrude_handle_delivery_tests::handle_pointer_gone_focus_loss_and_escape_restore_without_history",
+    "app_logic_tests::extrude_handle_delivery_tests::handle_second_press_in_batch_drags_from_the_first_release",
+    "app_logic_tests::extrude_handle_delivery_tests::handle_cancelled_second_press_keeps_the_first_drag",
+    "app_logic_tests::extrude_handle_delivery_tests::handle_three_drags_then_confirm_add_one_history_entry",
+    "app_logic_tests::extrude_handle_delivery_tests::handle_release_over_chrome_ends_drag_at_last_motion",
 ];
