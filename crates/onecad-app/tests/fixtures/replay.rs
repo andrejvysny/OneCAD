@@ -6,8 +6,24 @@ use std::collections::VecDeque;
 use onecad_protocol::client::{ProtocolClient, WorkerEvent};
 use serde_json::Value;
 
+/// Mirrors `json_subset` in worker/tools/harness/main.cpp: a lowercase-hex
+/// string of 16 (64-bit) or 64 (SHA-256) chars.
+fn is_hex_hash(value: &str) -> bool {
+    matches!(value.len(), 16 | 64)
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 fn matches(expected: &Value, actual: &Value, tolerance: f64) {
-    if expected == "$any" {
+    if expected == "$any" || expected == "$present" {
+        return;
+    }
+    if expected == "$hex64" {
+        assert!(
+            actual.as_str().is_some_and(is_hex_hash),
+            "expected $hex64 hex hash, got {actual}"
+        );
         return;
     }
     match expected {
@@ -25,7 +41,8 @@ fn matches(expected: &Value, actual: &Value, tolerance: f64) {
         }
         Value::Array(values) => {
             let found = actual.as_array().expect("expected array");
-            assert_eq!(values.len(), found.len(), "{expected} versus {actual}");
+            // A prefix match, as in the C++ harness.
+            assert!(found.len() >= values.len(), "{expected} versus {actual}");
             for (value, found) in values.iter().zip(found) {
                 matches(value, found, tolerance);
             }
