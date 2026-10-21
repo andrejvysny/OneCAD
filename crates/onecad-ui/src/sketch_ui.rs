@@ -125,10 +125,7 @@ impl App {
                 SketchStatus::Finished {
                     kept_reason,
                     result,
-                } => kept_reason
-                    .clone()
-                    .or_else(|| profile_refused(result))
-                    .unwrap_or("Sketch finished".into()),
+                } => crate::sketch_feedback::finished(kept_reason.as_deref(), result).0,
                 SketchStatus::Discarded(_) => "Sketch edits discarded".into(),
             };
             use crate::diagnostics::{Source, State};
@@ -139,12 +136,9 @@ impl App {
                 SketchStatus::Refused(_) => State::Rejected,
                 SketchStatus::Failed { .. } => State::Failed,
                 SketchStatus::Finished {
-                    kept_reason: Some(_),
-                    ..
-                } => State::Warning,
-                SketchStatus::Finished { result, .. } if profile_refused(result).is_some() => {
-                    State::Warning
-                }
+                    kept_reason,
+                    result,
+                } => crate::sketch_feedback::finished(kept_reason.as_deref(), result).1,
                 SketchStatus::Discarded(_) => State::Cancelled,
                 SketchStatus::Entered(_) | SketchStatus::Solved(_)
                     if matches!(
@@ -217,15 +211,6 @@ impl App {
         self.dispatch(onecad_interaction::Action::Cancel);
         self.submit(Command::Sketch(Box::new(Request::Load { id, context })));
     }
-}
-
-/// A Finish that closed over a refused profile is a warning, never a success.
-fn profile_refused(result: &onecad_app::dto::FinishSketchDto) -> Option<String> {
-    let diagnostic = result.diagnostics.first()?;
-    result
-        .regions
-        .is_empty()
-        .then(|| format!("Sketch finished without a profile: {}", diagnostic.message))
 }
 
 /// Sketch tools are clickable only on an active, bridge-valid session.

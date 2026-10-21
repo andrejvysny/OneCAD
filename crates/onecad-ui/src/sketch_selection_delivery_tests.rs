@@ -52,10 +52,12 @@ async fn arc_roles_line_ends_symmetric_axis_marquee_and_undo_prune() {
     host.redraw();
     host.click(role(&host, end));
     let at = role(&host, start);
-    for _ in 0..3 {
-        shift_click(&mut host, at);
-    }
-    assert_eq!(selection(&host), vec![end, start], "toggle off, then on");
+    shift_click(&mut host, at);
+    assert_eq!(selection(&host), vec![end, start], "Shift adds");
+    shift_click(&mut host, at);
+    assert_eq!(selection(&host), vec![end], "Shift toggles off");
+    shift_click(&mut host, at);
+    assert_eq!(selection(&host), vec![end, start], "Shift toggles on");
     let at = host.project(0.0, 32.0);
     shift_click(&mut host, at);
     assert_eq!(

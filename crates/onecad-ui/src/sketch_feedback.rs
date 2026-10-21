@@ -1,6 +1,8 @@
 //! Present solver evidence without deriving degrees of freedom in the host.
-use onecad_app::dto::{EntityConstrainedState, SketchSolveStatus, SketchTruthDto};
+use crate::diagnostics::State;
+use onecad_app::dto::{EntityConstrainedState, FinishSketchDto, SketchSolveStatus, SketchTruthDto};
 use onecad_core::ids::EntityId;
+use onecad_core::regen::Severity;
 use onecad_interaction::sketch::SketchStatus;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,12 +61,37 @@ pub(crate) fn summary(status: &SketchStatus) -> Feedback {
         SketchStatus::Pending | SketchStatus::Accepted => "Solving sketch…".into(),
         SketchStatus::Refused(message) => format!("Edit rejected: {message}"),
         SketchStatus::Failed { message, .. } => format!("Solver unavailable: {message}"),
-        SketchStatus::Finished { .. } => "Sketch finished".into(),
+        SketchStatus::Finished {
+            kept_reason,
+            result,
+        } => finished(kept_reason.as_deref(), result).0,
         SketchStatus::Discarded(_) => "Sketch edits discarded".into(),
     };
     Feedback {
         label,
         assessment: Assessment::Unavailable,
+    }
+}
+
+/// Label and diagnostics state of a closed Finish, shared by the status line and
+/// the inspector. A refused profile still closes the sketch (the runtime commits
+/// the record before deriving regions), so it arrives as a region-less result
+/// carrying the profile-stage error; success advisories are warnings and never
+/// mark a refusal.
+pub(crate) fn finished(kept_reason: Option<&str>, result: &FinishSketchDto) -> (String, State) {
+    let refused = || {
+        if !result.regions.is_empty() {
+            return None;
+        }
+        result
+            .diagnostics
+            .iter()
+            .find(|d| d.severity == Severity::Error && d.stage.as_deref() == Some("profile"))
+            .map(|d| format!("Sketch finished without a profile: {}", d.message))
+    };
+    match kept_reason.map(str::to_owned).or_else(refused) {
+        Some(reason) => (reason, State::Warning),
+        None => ("Sketch finished".into(), State::Succeeded),
     }
 }
 
@@ -126,6 +153,56 @@ mod tests {
             })
             .assessment,
             Assessment::Unavailable
+        );
+    }
+
+    fn diagnostic(severity: Severity, message: &str) -> onecad_core::regen::Diagnostic {
+        onecad_core::regen::Diagnostic {
+            severity,
+            code: "SKETCH_PROFILE".into(),
+            message: message.into(),
+            stage: Some("profile".into()),
+            reason_code: None,
+            evidence: None,
+        }
+    }
+
+    fn finish(regions: usize, diagnostics: Vec<onecad_core::regen::Diagnostic>) -> FinishSketchDto {
+        let region = |i: usize| onecad_app::dto::SketchRegionDto {
+            region_id: format!("r{i}"),
+            outer_loop: Vec::new(),
+            holes: Vec::new(),
+            preview_triangles: None,
+        };
+        FinishSketchDto {
+            region_identity_version: 2,
+            regions: (0..regions).map(region).collect(),
+            diagnostics,
+        }
+    }
+
+    #[test]
+    fn refused_profile_finish_is_a_warning_and_advisories_are_not() {
+        let advisory = diagnostic(Severity::Warning, "tiny edge omitted");
+        let refusal = diagnostic(Severity::Error, "open profile");
+        let refused = finish(0, vec![advisory.clone(), refusal]);
+        let expected = "Sketch finished without a profile: open profile";
+        assert_eq!(finished(None, &refused), (expected.into(), State::Warning));
+        let status = SketchStatus::Finished {
+            result: Box::new(refused),
+            kept_reason: None,
+        };
+        assert_eq!(summary(&status).label, expected, "inspector agrees");
+
+        let profiled = finish(1, vec![advisory.clone()]);
+        let success = ("Sketch finished".to_owned(), State::Succeeded);
+        assert_eq!(finished(None, &profiled), success);
+        let open_path = finish(0, vec![advisory]);
+        assert_eq!(finished(None, &open_path), success, "advisory only");
+        assert_eq!(finished(None, &finish(0, Vec::new())), success);
+        assert_eq!(
+            finished(Some("kept"), &finish(0, Vec::new())),
+            ("kept".into(), State::Warning)
         );
     }
 }

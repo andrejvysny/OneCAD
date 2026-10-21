@@ -104,9 +104,34 @@ async fn selection_does_not_cross_sketch_visits_or_document_tabs() {
             .all(|target| target.is_valid(&session.authoritative))
     );
     host.click(host.project(20.0, 30.0));
-    assert!(
-        matches!(selection(&host)[..], [SketchTarget::Entity(id)] if host.sketch().contains_entity(id)),
+    assert_eq!(
+        selection(&host),
+        vec![SketchTarget::Entity(top_edge(&host))],
         "picks after return use the owner's fresh capture"
     );
     host.stop().await;
+}
+
+/// The rectangle's top edge: the one line whose midpoint is (20, 30), within
+/// the pixel quantisation of the synthetic clicks that placed its corners.
+fn top_edge(host: &Host) -> EntityId {
+    let sketch = host.sketch();
+    let at = |id| match sketch.get_entity(id) {
+        Some(SketchEntity::Point { at, .. }) => *at,
+        _ => panic!("line endpoint"),
+    };
+    let edges: Vec<_> = sketch
+        .entities()
+        .iter()
+        .filter_map(|entity| match entity {
+            SketchEntity::Line { start, end, .. } => {
+                let (a, b) = (at(*start), at(*end));
+                let mid = ((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+                ((mid.0 - 20.0).abs() < 1e-3 && (mid.1 - 30.0).abs() < 1e-3).then(|| entity.id())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(edges.len(), 1, "exactly one top edge");
+    edges[0]
 }
