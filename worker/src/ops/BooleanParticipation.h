@@ -6,8 +6,9 @@
 //   * a result solid is ANCHORED when it holds an image of a target face, or (the
 //     target fully swallowed by the tool group) contains a target vertex;
 //   * a tool PARTICIPATES when one of its faces has an image in the result that
-//     is not also an image of a target face (a coincident flush face is shared
-//     evidence, not a contribution).
+//     is an image of no target face and of no other tool (a coincident flush
+//     face — a shared sketch-plane base, a common wall, an identical tool — is
+//     shared evidence, not a contribution).
 #pragma once
 
 #include <cstddef>
@@ -32,7 +33,8 @@ UnionAnchoring union_anchoring(BRepBuilderAPI_MakeShape& builder, const TopoDS_S
                                const std::vector<TopoDS_Shape>& tools);
 
 // Union / Cut: the first tool (in order) whose faces leave no image of their own
-// in `result` — a tool covered by the target or by other tools — or nullopt.
+// in `result` — a tool covered by the target or by other tools, including one
+// that only coincides with another tool's faces — or nullopt.
 std::optional<std::size_t> first_tool_without_effect(BRepBuilderAPI_MakeShape& builder,
                                                      const TopoDS_Shape& result,
                                                      const TopoDS_Shape& target,

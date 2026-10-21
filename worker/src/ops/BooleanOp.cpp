@@ -7,6 +7,7 @@
 #include <set>
 #include <vector>
 
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakeShape.hxx>
 #include <TopoDS_Shape.hxx>
 
@@ -69,6 +70,9 @@ std::optional<OpOutcome> parse_tools(const json& params, const std::string& targ
             return OpOutcome::fail("OP_FAILED", "Boolean tools contain a duplicate body " + id);
         }
     }
+    // The non-canonical `toolBodyIds:[a]` without retention IS the legacy op
+    // (SCHEMA §7.3): same semantics and evidence keys as the app's reader.
+    if (out.ids.size() == 1 && !out.keep) out.array_form = false;
     return std::nullopt;
 }
 
@@ -195,7 +199,10 @@ OpOutcome execute_boolean(OpContext& ctx, const json& op, const std::string& op_
     std::vector<TopoDS_Shape> tool_shapes;
     for (const session::BodyRecord* rec : tool_recs) {
         if (auto invalid = validate_modeling_body(*rec, "Boolean", "tool")) return *invalid;
-        tool_shapes.push_back(rec->geom);
+        // A retained tool stays a live body: the non-destructive BOP would carry
+        // its untouched faces into the target, and BRepMesh reuses any shared
+        // triangulation, so the target's MESH1 would depend on tool meshing order.
+        tool_shapes.push_back(tools.keep ? BRepBuilderAPI_Copy(rec->geom).Shape() : rec->geom);
     }
     const json evidence_tools = tools_evidence(tools);
 

@@ -112,10 +112,28 @@ std::optional<std::size_t> first_tool_without_effect(BRepBuilderAPI_MakeShape& b
     const ResultIndex index = index_result(result);
     TopTools_IndexedMapOfShape target_images;
     for (const TopoDS_Shape& image : images_of(builder, target, index)) target_images.Add(image);
+    // A face image shared by two tools (coplanar walls, identical tools) proves
+    // neither one's contribution: only an image no other input owns counts.
+    TopTools_IndexedMapOfShape tool_images;
+    std::vector<std::size_t> owner;
+    constexpr std::size_t kShared = static_cast<std::size_t>(-1);
+    std::vector<std::vector<int>> per_tool(tools.size());
+    for (std::size_t t = 0; t < tools.size(); ++t) {
+        for (const TopoDS_Shape& image : images_of(builder, tools[t], index)) {
+            if (target_images.Contains(image)) continue;
+            const int i = tool_images.Add(image);
+            if (static_cast<std::size_t>(i) > owner.size()) {
+                owner.push_back(t);
+            } else if (owner[static_cast<std::size_t>(i - 1)] != t) {
+                owner[static_cast<std::size_t>(i - 1)] = kShared;
+            }
+            per_tool[t].push_back(i);
+        }
+    }
     for (std::size_t t = 0; t < tools.size(); ++t) {
         bool contributes = false;
-        for (const TopoDS_Shape& image : images_of(builder, tools[t], index)) {
-            if (!target_images.Contains(image)) {
+        for (int i : per_tool[t]) {
+            if (owner[static_cast<std::size_t>(i - 1)] == t) {
                 contributes = true;
                 break;
             }
