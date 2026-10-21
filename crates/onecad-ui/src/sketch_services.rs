@@ -511,7 +511,13 @@ async fn finish(backend: &mut Backend, id: String) -> Result<Reply, String> {
         Err(onecad_app::error::ApiError::OpFailed { diagnostics, .. }) => diagnostics.clone(),
         _ => Vec::new(),
     };
-    match complete(backend, receipt).await {
+    finish_reply(complete(backend, receipt).await, diagnostics)
+}
+fn finish_reply(
+    completed: Result<onecad_app::dto::FinishSketchDto, String>,
+    diagnostics: Vec<onecad_core::regen::Diagnostic>,
+) -> Result<Reply, String> {
+    match completed {
         Ok(result) => Ok(Reply::Finished(Box::new(result))),
         // The runtime commits the sketch record before deriving regions, so an
         // invalid profile must not trap the user in sketch mode: close and warn.
@@ -529,11 +535,13 @@ async fn finish(backend: &mut Backend, id: String) -> Result<Reply, String> {
         Err(message) => Err(message),
     }
 }
+/// Only a profile-stage error closes a failed Finish. Advisory-only failures
+/// would otherwise close region-less and read as plain success.
 fn profile_refusal(diagnostics: &[onecad_core::regen::Diagnostic]) -> bool {
-    !diagnostics.is_empty()
-        && diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.stage.as_deref() == Some("profile"))
+    diagnostics.iter().any(|diagnostic| {
+        diagnostic.severity == onecad_core::regen::Severity::Error
+            && diagnostic.stage.as_deref() == Some("profile")
+    })
 }
 
 fn finish_error(error: onecad_app::error::ApiError) -> Result<Reply, String> {
@@ -756,5 +764,65 @@ mod stale_tests {
         let session = interaction.session.unwrap();
         assert_eq!(session.request, current);
         assert_eq!(session.phase, SketchPhase::Creating);
+    }
+}
+
+#[cfg(test)]
+mod finish_tests {
+    use super::*;
+    use crate::diagnostics::State;
+    use onecad_core::regen::{Diagnostic, Severity};
+
+    fn profile(severity: Severity, message: &str) -> Diagnostic {
+        Diagnostic {
+            severity,
+            code: "SKETCH_PROFILE".into(),
+            message: message.into(),
+            stage: Some("profile".into()),
+            reason_code: None,
+            evidence: None,
+        }
+    }
+
+    #[test]
+    fn advisory_only_op_failed_finish_is_refused_not_success() {
+        let advisory = vec![profile(Severity::Warning, "profile refinement cancelled")];
+        match finish_reply(Err("operation failed".into()), advisory.clone()) {
+            Ok(Reply::FinishRefused {
+                message,
+                diagnostics,
+            }) => {
+                assert_eq!(message, "operation failed");
+                assert_eq!(diagnostics, advisory, "diagnostics kept");
+            }
+            Ok(Reply::Finished(result)) => {
+                panic!(
+                    "closed as {:?}",
+                    crate::sketch_feedback::finished(None, &result)
+                )
+            }
+            _ => panic!("advisory-only OpFailed must route to FinishRefused"),
+        }
+    }
+
+    #[test]
+    fn profile_error_op_failed_finish_closes_with_refusal_feedback() {
+        let diagnostics = vec![
+            profile(Severity::Warning, "tiny edge omitted"),
+            profile(Severity::Error, "open profile"),
+        ];
+        let Ok(Reply::Finished(result)) = finish_reply(Err("failed".into()), diagnostics.clone())
+        else {
+            panic!("profile-stage error must close region-less");
+        };
+        assert!(result.regions.is_empty());
+        assert_eq!(result.diagnostics, diagnostics);
+        assert_eq!(
+            crate::sketch_feedback::finished(None, &result),
+            (
+                "Sketch finished without a profile: open profile".into(),
+                State::Warning
+            )
+        );
     }
 }

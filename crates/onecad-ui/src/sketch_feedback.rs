@@ -197,8 +197,14 @@ mod tests {
         let profiled = finish(1, vec![advisory.clone()]);
         let success = ("Sketch finished".to_owned(), State::Succeeded);
         assert_eq!(finished(None, &profiled), success);
-        let open_path = finish(0, vec![advisory]);
-        assert_eq!(finished(None, &open_path), success, "advisory only");
+        // Success-reply path only: an OpFailed Finish with advisory-only
+        // diagnostics never reaches here; it routes to FinishRefused.
+        let regionless_success = finish(0, vec![advisory]);
+        assert_eq!(
+            finished(None, &regionless_success),
+            success,
+            "successful Finish with advisory only"
+        );
         assert_eq!(finished(None, &finish(0, Vec::new())), success);
         assert_eq!(
             finished(Some("kept"), &finish(0, Vec::new())),
