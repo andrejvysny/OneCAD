@@ -20,6 +20,9 @@ src-tauri/gen/schemas
 # Standalone migration investigations retain source and evidence, not Cargo outputs.
 spikes/*/target/
 
+# Xcode DerivedData for the iPad host (xcodebuild -derivedDataPath build/DerivedData).
+/build/
+
 # Bundled worker sidecar binaries (produced by scripts/build-worker.sh)
 packaging/binaries/
 
