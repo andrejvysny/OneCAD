@@ -17,7 +17,11 @@ pub enum Request {
     DiscardAndReplace(Box<Request>),
     Open(Option<PathBuf>),
     Import,
-    Save { save_as: bool },
+    /// Adds a STEP file to the active document's history; never opens a tab.
+    InsertStep,
+    Save {
+        save_as: bool,
+    },
     Export(ExportFormat),
 }
 
@@ -28,6 +32,7 @@ impl Request {
             Self::New => FileAction::New,
             Self::Open(_) => FileAction::Open,
             Self::Import => FileAction::Import,
+            Self::InsertStep => FileAction::InsertStep,
             Self::Save { .. } => FileAction::Save,
             Self::Export(_) => FileAction::Export,
             Self::DiscardAndReplace(request) => request.diagnostic_action(),
@@ -46,6 +51,10 @@ impl Request {
 pub enum Outcome {
     Cancelled,
     Replaced {
+        warning: Option<String>,
+    },
+    /// A STEP file joined the active document's history.
+    Inserted {
         warning: Option<String>,
     },
     Saved(SaveOutcomeDto),
@@ -143,10 +152,12 @@ impl crate::app::App {
             return;
         }
         if tool_blocks_request(self, &request) {
-            self.file_status(
-                action,
-                "Finish or cancel the active tool before switching documents",
-            );
+            let message = if request == Request::InsertStep {
+                "Finish or cancel the active tool before inserting a STEP file"
+            } else {
+                "Finish or cancel the active tool before switching documents"
+            };
+            self.file_status(action, message);
             return;
         }
         let recovery_ready = self
@@ -165,6 +176,10 @@ impl crate::app::App {
                 action,
                 "Create or open a document before saving or exporting",
             );
+            return;
+        }
+        if request == Request::InsertStep && !self.document_open() {
+            self.file_status(action, "Open a document before inserting a STEP file");
             return;
         }
         if request.replaces_document() && self.document_open() {
@@ -247,7 +262,9 @@ impl crate::app::App {
         let diagnostic_state = match &result {
             Err(_) => crate::diagnostics::State::Failed,
             Ok(Outcome::Cancelled) => crate::diagnostics::State::Cancelled,
-            Ok(Outcome::Replaced { warning: Some(_) }) => crate::diagnostics::State::Warning,
+            Ok(Outcome::Replaced { warning: Some(_) } | Outcome::Inserted { warning: Some(_) }) => {
+                crate::diagnostics::State::Warning
+            }
             Ok(Outcome::Saved(saved)) if !saved.clean => crate::diagnostics::State::Warning,
             _ => crate::diagnostics::State::Succeeded,
         };
@@ -267,6 +284,10 @@ impl crate::app::App {
                 }
                 self.doc.status = warning.unwrap_or_else(|| "Document opened".into());
                 self.doc.origin = None;
+                self.draw_dirty = true;
+            }
+            Ok(Outcome::Inserted { warning }) => {
+                self.doc.status = warning.unwrap_or_else(|| "STEP file inserted".into());
                 self.draw_dirty = true;
             }
             Ok(Outcome::Saved(saved)) => {
@@ -349,7 +370,8 @@ pub(crate) fn tool_blocks_request(app: &crate::app::App, request: &Request) -> b
     let recovery_save =
         matches!(request, Request::Save { .. }) && crate::bars::recovery_sketch_save(app);
     app.sketch_active() && !recovery_save
-        || request.replaces_document() && app.doc.interaction.tool.is_some()
+        || (request.replaces_document() || *request == Request::InsertStep)
+            && app.doc.interaction.tool.is_some()
 }
 
 /// Runs without presentation so hidden windows still drain work and protect dirty close.
@@ -566,7 +588,9 @@ mod tests {
             Request::Save { save_as: false },
             Request::Save { save_as: true },
             Request::Export(ExportFormat::Step),
+            Request::InsertStep,
         ] {
+            assert!(!request.replaces_document());
             assert!(!needs_confirmation(&Pending::Document(request), true));
         }
         assert!(needs_confirmation(&Pending::Quit, true));

@@ -91,6 +91,11 @@ pub(crate) fn replacement_allowed(app: &App) -> bool {
     !app.busy() && !app.sketch_active() && app.doc.interaction.tool.is_none()
 }
 
+/// Insert STEP mutates the active document, so it needs one and an idle editor.
+pub(crate) fn insert_allowed(app: &App) -> bool {
+    replacement_allowed(app) && app.document_open()
+}
+
 pub(crate) fn save_allowed(app: &App) -> bool {
     !app.busy() && (!app.sketch_active() || recovery_sketch_save(app)) && app.document_open()
 }

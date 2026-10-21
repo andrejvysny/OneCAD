@@ -137,6 +137,7 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
         );
         menu.set_document_enabled(
             owner.is_none() && crate::bars::replacement_allowed(app),
+            owner.is_none() && crate::bars::insert_allowed(app),
             owner.is_none() && crate::bars::save_allowed(app),
             owner.is_none() && crate::bars::export_allowed(app),
         );
@@ -365,6 +366,7 @@ fn route_menu(
         menu::Action::CloseTab => app.request_close_tab(),
         menu::Action::SaveAll => app.save_all(),
         menu::Action::Import => app.document_request(Request::Import),
+        menu::Action::InsertStep => app.document_request(Request::InsertStep),
         menu::Action::Save => app.document_request(Request::Save { save_as: false }),
         menu::Action::SaveAs => app.document_request(Request::Save { save_as: true }),
         menu::Action::Export(format) => app.document_request(Request::Export(format)),
