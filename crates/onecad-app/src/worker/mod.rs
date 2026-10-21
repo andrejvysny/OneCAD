@@ -31,9 +31,10 @@ use onecad_core::document::body::BodyLifecycleEvent;
 use onecad_core::document::record::Operation;
 use onecad_core::ids::{BodyId, DocumentId, JobId, SketchId, SnapshotId, WorkerEpoch};
 use onecad_core::regen::{
-    AcceptResult, AcquireRequest, BindElementIdsRequest, CheckpointArtifacts, EngineError, Fencing,
-    GeometryEngine, Lod, OpenSessionRequest, PlanEvent, PlanRequest, RefResolution, ResolveRequest,
-    RestoreRequest, RestoreResult, TessellateRequest, TessellateResult, WorkerElementEvidence,
+    AcceptResult, AcquireRequest, BindElementIdsRequest, CancelToken, CheckpointArtifacts,
+    EngineError, Fencing, GeometryEngine, Lod, OpenSessionRequest, PlanEvent, PlanRequest,
+    PlanStepEvent, PreparedMeshRef, RefResolution, ResolveRequest, RestoreRequest, RestoreResult,
+    StepResult, StoppedReason, TessellateRequest, TessellateResult, WorkerElementEvidence,
     WorkerHead,
 };
 
@@ -41,6 +42,7 @@ mod checkpoint_result;
 mod endpoint_tangency;
 pub(crate) mod gesture_result;
 pub mod manager;
+mod preview_plan;
 pub(crate) mod sketch_result;
 pub(crate) mod sketch_truth;
 pub mod wire;
@@ -605,6 +607,62 @@ pub trait PreviewEngine: Send + Sync {
         expected_snapshot: Option<SnapshotId>,
         lod: Lod,
     ) -> Result<crate::dto::PreviewResultDto, EngineError>;
+
+    /// `PreviewPlan` (SCHEMA §7.6): a non-publishing full replay of `req.plan`
+    /// from an empty base. `cancel` is observed by the transport for the whole
+    /// job, including after this future is dropped.
+    ///
+    /// The default reports the verb unavailable, so a backend without it keeps
+    /// compiling and callers degrade to "Apply regenerates the feature".
+    async fn preview_plan(
+        &self,
+        req: PreviewPlanRequest,
+        cancel: CancelToken,
+    ) -> Result<PlanPreview, EngineError> {
+        let _ = (req, cancel);
+        Err(plan_preview_unavailable())
+    }
+}
+
+/// The `PreviewPlan` request: a from-0 [`PlanRequest`] (its `job_id`, ops,
+/// `prefix_hashes`, `policy_versions`, `target_step` and `edited_from` are
+/// lowered exactly as `ExecutePlan` lowers them) plus the read-only fence.
+#[derive(Debug, Clone)]
+pub struct PreviewPlanRequest {
+    pub plan: PlanRequest,
+    /// The head snapshot the preview is fenced against (`expectedSnapshotId`).
+    pub expected_snapshot: SnapshotId,
+    pub lod: Lod,
+}
+
+/// A validated `planPreviewed` terminal plus the streamed steps.
+#[derive(Debug, Clone)]
+pub struct PlanPreview {
+    /// The head echo; equals the request's `expected_snapshot`.
+    pub snapshot_id: SnapshotId,
+    pub last_valid_step: Option<usize>,
+    pub stopped_reason: StoppedReason,
+    pub per_step: Vec<StepResult>,
+    /// One `planStep` per executed step, in order (§7.2 shape).
+    pub steps: Vec<PlanStepEvent>,
+    /// The full candidate body set at `last_valid_step`.
+    pub bodies: Vec<BodyId>,
+    /// Meshes for the bodies that differ from the head; `lod` is the ACTUAL tier.
+    pub meshes: Vec<PreparedMeshRef>,
+}
+
+/// The hello capability that advertises `PreviewPlan`.
+pub const PLAN_PREVIEW_CAPABILITY: &str = "plan.preview";
+
+/// The error a backend without `PreviewPlan` reports.
+#[must_use]
+pub fn plan_preview_unavailable() -> EngineError {
+    EngineError::OpFailed {
+        code: onecad_core::regen::OpFailureCode::Unsupported,
+        recoverable: true,
+        message: format!("edit preview unavailable: worker lacks {PLAN_PREVIEW_CAPABILITY}"),
+        diagnostics: Vec::new(),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1072,6 +1130,14 @@ impl PreviewEngine for PendingBackend {
         _expected_snapshot: Option<SnapshotId>,
         _lod: Lod,
     ) -> Result<crate::dto::PreviewResultDto, EngineError> {
+        Err(Self::not_ready())
+    }
+
+    async fn preview_plan(
+        &self,
+        _req: PreviewPlanRequest,
+        _cancel: CancelToken,
+    ) -> Result<PlanPreview, EngineError> {
         Err(Self::not_ready())
     }
 }

@@ -156,6 +156,12 @@ add_executable(test_preview_op test_preview_op.cpp)
 target_link_libraries(test_preview_op PRIVATE worker_core)
 add_test(NAME preview_op COMMAND test_preview_op)
 
+# --- ONECAD-369: full-replay edit preview (SCHEMA §7.6 PreviewPlan) — the
+#     "publishes nothing" invariant, the read-only fence, mesh scope and budget. ---
+add_executable(test_preview_plan test_preview_plan.cpp)
+target_link_libraries(test_preview_plan PRIVATE worker_core)
+add_test(NAME preview_plan COMMAND test_preview_plan)
+
 # --- W-WP3b: solver-lane latest-wins mailbox (drives the real worker) ---
 add_executable(test_solver_latest_wins test_solver_latest_wins.cpp)
 target_link_libraries(test_solver_latest_wins PRIVATE worker_core)
@@ -714,6 +720,14 @@ add_test(
     COMMAND worker_harness
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/restore_checkpoint_base.ndjson
+)
+# ONECAD-369 (SCHEMA §7.6 PreviewPlan): a full-replay edit preview leaves the
+# head byte-identical and meshes only the body whose B-rep changed.
+add_test(
+    NAME canonical_preview_plan
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/preview_plan.ndjson
 )
 add_test(
     NAME canonical_reader_snapshot_fence

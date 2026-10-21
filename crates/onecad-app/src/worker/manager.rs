@@ -117,7 +117,7 @@ pub struct SupervisorConfig {
     pub ping_interval: Duration,
     pub ping_timeout: Duration,
     pub max_missed_pings: u32,
-    /// Wedged-op wall deadline for `ExecutePlan` (SCHEMA §8, WP-H): the worker is
+    /// Wedged-op wall deadline for `ExecutePlan` and `PreviewPlan` (SCHEMA §8, WP-H): the worker is
     /// `SIGKILL`ed when `GetWorkerHead.inflight.sinceProgressMs` exceeds it. A plan
     /// that streams `planStep`/`progress` frames resets the clock on every one, so
     /// this only fires on a kernel that has genuinely stopped moving.
@@ -176,7 +176,7 @@ impl SupervisorConfig {
     #[must_use]
     fn wedge_deadline(&self, verb: &str) -> Duration {
         match verb {
-            "ExecutePlan" => self.wedge_deadline_execute_plan,
+            "ExecutePlan" | "PreviewPlan" => self.wedge_deadline_execute_plan,
             "Tessellate" | "ExportGeometry" | "ExportStep" | "ExportStl" | "ExportObj" => {
                 self.wedge_deadline_readers
             }
@@ -2323,6 +2323,14 @@ impl crate::worker::PreviewEngine for WorkerManager {
         let result = ok_result(resp)?;
         parse_preview_result(&result, &sections, &tail)
     }
+
+    async fn preview_plan(
+        &self,
+        req: crate::worker::PreviewPlanRequest,
+        cancel: onecad_core::regen::CancelToken,
+    ) -> Result<crate::worker::PlanPreview, EngineError> {
+        preview_plan::preview_plan(self.shared.clone(), req, cancel).await
+    }
 }
 
 #[async_trait]
@@ -3413,3 +3421,4 @@ mod poison_tests {
 }
 
 mod native_gestures;
+mod preview_plan;

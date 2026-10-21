@@ -804,6 +804,9 @@ pub struct DocumentRuntime {
     /// them (see [`apply_import_body_names`](Self::apply_import_body_names)) — the
     /// ids are not known until then.
     import_names: HashMap<RecordId, Vec<String>>,
+    /// The in-flight ONECAD-369 edit preview, cancelled by every publishing
+    /// regen and when the runtime drops (see [`edit_preview`]).
+    edit_preview: edit_preview::EditPreviewSlot,
 }
 
 fn title_for_path(path: &Path) -> String {
@@ -1038,6 +1041,7 @@ impl DocumentRuntime {
             imports: ImportBlobs::new(),
             import_workspace,
             import_names: HashMap::new(),
+            edit_preview: edit_preview::EditPreviewSlot::default(),
         }
     }
 
@@ -1809,6 +1813,9 @@ impl DocumentRuntime {
     /// lock-free on the copy. `None` for an empty plan. Enforces D1 body-id
     /// adoption via [`AdoptingEngine`].
     pub fn begin_regen(&mut self, request: RegenRequest) -> Option<PreparedRegen> {
+        // ONECAD-369: commit preempts preview — a publishing regen must never
+        // queue behind a full edit-preview replay on the kernel lane.
+        self.cancel_edit_preview();
         let planning_started = std::time::Instant::now();
         let ctx = PlanContext {
             policy_versions: PolicyVersions::default(),
@@ -6982,6 +6989,7 @@ fn element_ref_input(op: &Operation, index: usize) -> Option<&ElementRef> {
 }
 
 pub mod deletion;
+pub mod edit_preview;
 mod face_entry;
 mod gestures;
 pub use face_entry::FaceEntryTicket;

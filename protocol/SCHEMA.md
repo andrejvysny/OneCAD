@@ -398,7 +398,7 @@ Worker → Rust:
       "op.sketch", "op.extrude", "op.revolve", "op.fillet", "op.chamfer",
       "op.boolean", "op.importStep", "solver.planegcs", "tessellate.mesh1",
       "io.step", "io.step.import", "io.stl", "io.obj", "checkpoint.v1",
-      "constraint.tangentAtPoint"
+      "constraint.tangentAtPoint", "plan.preview"
     ],
     "limits": { "chunkSize": 1048576, "initialBulkCredit": 8388608 }
   }
@@ -4139,6 +4139,73 @@ session head and returns the resulting bodies' MESH1. Nothing is committed.
   their own in-flight previews (the reference client keeps ≤1 per preview session
   and discards stale epochs).
 
+#### PreviewPlan
+**Edit preview (ONECAD-369).** Replays an `ExecutePlan`-shaped op list from an
+**empty base** — the edited feature plus every downstream feature — and returns
+the candidate body set with meshes for the bodies that differ from the head.
+Nothing is prepared, committed or discarded. Advertised as the hello capability
+`"plan.preview"`; a client MUST NOT send the verb to a worker that does not
+advertise it (an old worker answers an unknown verb with `PROTOCOL_ERROR`).
+
+```json
+// req.args
+{ "jobId": 91,                      // Rust-minted; event stamp + crash attribution only
+  "workerEpoch": 3,                 // REQUIRED; ≠ head ⇒ STALE_PREVIEW
+  "expectedSnapshotId": 5012,       // REQUIRED; ≠ head ⇒ STALE_PREVIEW
+  "prefixHashes": ["…"],            // as ExecutePlan (opaque; crash journal only)
+  "policyVersions": { … }, "editedFrom": 4, "targetStep": 9,
+  "lod": "coarse",                  // coarse | medium | fine (default coarse)
+  "ops": [ /* §7.3 payloads, the same lowering as ExecutePlan, ascending stepIndex */ ] }
+// stream: one event:"planStep" per executed step — the §7.2 shape, unchanged
+// result
+{ "planPreviewed": true,
+  "snapshotId": 5012,                 // the HEAD echo; a preview has no snapshot
+  "lastValidStep": 8,                 // null ⇒ the first executed step stopped
+  "stoppedReason": "completed",       // completed | opFailed | needsRepair
+  "perStepResults": [ … ],            // exactly the §7.2 PlanPrepared rules
+  "bodies": ["body_…", …],            // the full candidate body set at lastValidStep, sorted
+  "meshes": [ { "bodyId": "body_…", "bin": "mesh:body_…", "lod": "coarse", … } ] }  // §7.6 handles
+```
+
+- **Replay.** The ops run against an empty base, exactly as a from-0
+  `ExecutePlan` (D5), with the same input resolution, NeedsRepair and
+  stop-at-first-failure rules and the same `editedFrom` reading. The `planStep`
+  stream is byte-shaped like §7.2, so a reader parses it with the same code.
+  Steps run at the **Tier A** validation tier (`PreviewOp`'s), so the documented
+  Tier A/B divergence above applies: geometry and signatures are unaffected, only
+  a Tier B-only refusal can differ at commit. `checkpointFallbackReplay` is never
+  read (the replay is an ordinary from-0 one); a commit that took the F12
+  fallback may therefore resolve a §10 tie differently — a recorded residual.
+- **Invisible to fencing.** After ANY terminal — ok, error, cancelled — the head
+  bodies, partition, `historyPrefixHash`, `snapshotId`, `documentRevision`,
+  `workerEpoch`, `hasScratch` and `hasRestoredBase` are unchanged, and a crash
+  mid-replay strands no session slot (restart + head replay is the §8 crash
+  path). A held prepared scratch and a parked restored base are untouched:
+  the verb never uses the `fence_and_clone` path, never reserves a snapshot id
+  and never claims the scratch or restored-base slot.
+- **Fence.** `workerEpoch` and `expectedSnapshotId` are both REQUIRED and both
+  compared with the head; a mismatch is `STALE_PREVIEW` with
+  `detail = { requested, head, workerEpoch }`. A malformed or missing one, a
+  non-array `ops`, an unknown `lod`, or ANY `baseCheckpoint` key is
+  `PROTOCOL_ERROR`. `documentRevision`, `expectedBaseHash`, `artifacts` and
+  `checkpointFallbackReplay` are not read.
+- **Mesh scope.** A body in `bodies` gets a mesh iff it is absent from the head or
+  its geometry differs from the head body with the same id (the worker compares
+  the triangle-free B-rep plus health and face colours, under the snapshot fence
+  above). A body in `bodies` with no mesh displays exactly as the head body; a
+  head body absent from `bodies` does not exist in the candidate. Meshes obey the
+  `PreviewOp` budget: degrade fine → medium → coarse to fit `chunkSize` per blob
+  and `initialBulkCredit` in aggregate, and the handle names the ACTUAL tier.
+- **Mesh failures** are `UNSUPPORTED` (a closed §8 code) with
+  `detail.diagnostics[0].reasonCode` `PREVIEW_MESH_BUDGET_EXCEEDED`
+  (`evidence: {bodyId, bytes, limit}`) when even `coarse` does not fit, or
+  `PREVIEW_TESSELLATE_FAILED` (`evidence: {bodyId}`) when triangulation fails.
+- **Cancel.** A `cancel` frame ends the job with `CANCELLED`; the token is polled
+  per step, inside the cooperative op paths, per meshed body and before the
+  terminal.
+- **Lane.** Kernel lane, single-writer with `ExecutePlan`. A replay holds the lane
+  for the length of the plan, so the wedge deadline is `ExecutePlan`'s (§8).
+
 #### Tessellate
 Produces MESH1 meshes; large meshes stream on the bulk lane
 ([§5.2](#52-chunked-bulk-streams)). `mesh_format.md` defines MESH1.
@@ -5252,7 +5319,7 @@ where an unknown value is ignorable.
 | Reference unresolved | `REF_UNRESOLVED` | scratch only | as above (distinct from NeedsRepair — this is a hard resolve failure, e.g. input body missing) |
 | Invalid geometry produced | `GEOMETRY_INVALID` | scratch only | as above |
 | Unsupported op/param (known verb) | `UNSUPPORTED` | none | Rust falls back / freezes node (the remaining un-shipped ops `opType:"Loft"` / `"Sweep"`; the M6a breadth ops Shell/LinearPattern/CircularPattern/MirrorBody are now supported, [§7.3](#73-op-payload-schemas-vertical-slice)) |
-| Stale snapshot on a fenced read (`PreviewOp`, `PrepareEdgeOp`, `AnalyzeEdgeOpRange`, `PrepareOffsetFace`, `ProjectToSketchPlane`, `ExtractPrismProfile`; and, when the OPTIONAL `snapshotId` is sent, `Tessellate`, `ExportGeometry`, `ExportStep`, `ExportStl`, `ExportObj`) | `STALE_PREVIEW` | none — head untouched, nothing written | caller re-picks / re-previews / re-reads the head once and re-issues against the fresh head snapshot ([§7.6](#76-geometry), [§7.8](#78-io)) |
+| Stale snapshot on a fenced read (`PreviewOp`, `PreviewPlan` — snapshot or epoch, `PrepareEdgeOp`, `AnalyzeEdgeOpRange`, `PrepareOffsetFace`, `ProjectToSketchPlane`, `ExtractPrismProfile`; and, when the OPTIONAL `snapshotId` is sent, `Tessellate`, `ExportGeometry`, `ExportStep`, `ExportStl`, `ExportObj`) | `STALE_PREVIEW` | none — head untouched, nothing written | caller re-picks / re-previews / re-reads the head once and re-issues against the fresh head snapshot ([§7.6](#76-geometry), [§7.8](#78-io)) |
 | Cooperative cancellation | `CANCELLED` | in-flight job dropped; session intact | terminal frame always sent ([§3.5](#35-cancel-rust--worker)) |
 | Protocol violation | `PROTOCOL_ERROR` | fatal | **restart worker** (no resync) |
 | Worker crash / abnormal exit | *(no frame)* | fatal | **restart + replay** from last checkpoint/head; crash **circuit breaker** on repeated `(historyPrefixHash, opId, occtFingerprint)` |
@@ -5265,7 +5332,9 @@ where an unknown value is ignorable.
   produced.
 - **Well-framed but protocol-illegal request** (**unknown verb**, mismatched
   `workerEpoch` or `expectedBaseHash` — the D4 fencing tokens; a stale
-  `documentRevision` is **not** an error, [§2](#2-identifier--scalar-types)/[§7.2](#72-regen--executeplan) — malformed `args`): the frame parsed, so the worker
+  `documentRevision` is **not** an error, [§2](#2-identifier--scalar-types)/[§7.2](#72-regen--executeplan) — malformed `args`; exception: a mismatched
+  `workerEpoch` on the read-only [`PreviewPlan`](#previewplan) is `STALE_PREVIEW`,
+  because a preview publishes nothing and is merely late): the frame parsed, so the worker
   replies with a terminal `resp` `ok:false` `error.code:"PROTOCOL_ERROR"`. Rust
   reconciles (`GetWorkerHead`) or restarts per severity.
 
@@ -5280,7 +5349,7 @@ where an unknown value is ignorable.
   not that an op is long.
 - **Wedged op** (WP-H): Rust reads `GetWorkerHead.inflight` on every ping and
   `SIGKILL`s + restarts when `sinceProgressMs` exceeds the verb's wall deadline —
-  `ExecutePlan` **180 s**, `Tessellate` and the `Export*` writers **60 s**, every
+  `ExecutePlan` and `PreviewPlan` **180 s**, `Tessellate` and the `Export*` writers **60 s**, every
   other kernel-lane verb **30 s** — measured since the job's last progress /
   event / chunk frame (its start when it emitted none), so a legitimately long
   op that streams progress is never killed, and a genuinely deadlocked OCCT call
@@ -8227,3 +8296,25 @@ sign-off) once fixtures exist.
   algorithm (sorted 16-byte member UUIDs + winding byte, rendered `"r_%016x"`) so
   the C++ worker and Rust core produce identical region ids; reference impl is
   onecad-core `sketch/mod.rs::derive_region_id`.
+
+- **2026-10-21 — §7.6 `PreviewPlan`, a non-publishing full-replay edit preview
+  (ONECAD-369).** Additive kernel-lane verb, advertised by the new hello capability
+  `"plan.preview"`; `protocolVersion` stays `1`. It replays an `ExecutePlan`-shaped
+  op list from an empty base at the Tier A validation tier, streams the unchanged
+  §7.2 `planStep` events, and ends with `planPreviewed` (`bodies` = the candidate
+  body set, `meshes` = the bodies whose B-rep differs from the head). It never
+  fences-and-clones, prepares, accepts or discards, so the head, `hasScratch` and
+  `hasRestoredBase` are unchanged after every terminal. §8: the STALE row gains
+  `PreviewPlan` (snapshot OR epoch mismatch), the `PROTOCOL_ERROR` sub-case exempts
+  its epoch mismatch, and the wedge deadline list gives it `ExecutePlan`'s 180 s.
+  New ignorable reasonCodes `PREVIEW_MESH_BUDGET_EXCEEDED` / `PREVIEW_TESSELLATE_FAILED`
+  ride the existing `UNSUPPORTED` code. `PreviewOp` output is byte-identical (its
+  mesh budget helper moved to `session/PreviewMesh.*`). OCCT fingerprint and
+  `kernelPolicyVersion` are unchanged (the fingerprint seed is the OCCT build
+  identity, not the capability list). Fixture bump: `protocol/fixtures/preview_plan.ndjson`
+  (C++ `canonical_preview_plan`, Rust replay in `crates/onecad-app/tests/edit_preview.rs`).
+  Sign-off: worker + Rust implemented together in this change; orchestrator
+  sign-off is recorded at integration. *Reason:* re-editing a feature must preview
+  the edited feature AND its dependents without applying the edit over the
+  feature's own old output, and without competing with regen for the single
+  scratch / restored-base slot.
