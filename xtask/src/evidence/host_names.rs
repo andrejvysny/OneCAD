@@ -50,4 +50,5 @@ pub(super) const HOST_TESTS: &[&str] = &[
     "app_logic_tests::document_tab_delivery_tests::save_all_saves_titled_in_place_and_continues_through_every_untitled",
     "app_logic_tests::document_tab_delivery_tests::save_all_stops_at_a_cancelled_dialog_reports_failures_and_busy_documents",
     "app_logic_tests::document_tab_delivery_tests::a_provisional_tab_answered_in_the_background_closes_its_host",
+    "app_logic_tests::document_tab_delivery_tests::save_all_moves_on_after_a_saved_dialog_even_when_that_document_closes",
 ];

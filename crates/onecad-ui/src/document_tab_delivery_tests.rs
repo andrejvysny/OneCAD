@@ -191,7 +191,25 @@ async fn a_draft_left_mid_preview_republishes_on_return_and_confirms_once() {
     assert_eq!(tool.draft, "5");
     assert_eq!(tool.draft_status, DraftStatus::Pending, "nothing answers");
 
+    // Shown while its file action runs (simulated): the draft is held, as a
+    // draft change would be, and re-issued once the action ends.
+    parked_mut(&mut app, drafting).documents.running = true;
     app.activate_tab(drafting);
+    for _ in 0..10 {
+        logic_tick(&mut app, &context, &mut frame, false);
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let tool = app.doc.interaction.tool.as_ref().unwrap();
+    assert_eq!(
+        tool.draft_status,
+        DraftStatus::Pending,
+        "held during the save"
+    );
+    assert_ne!(
+        app.doc.status,
+        "Finish the file action before editing the document"
+    );
+    app.doc.documents.running = false;
     pump_until(&mut app, &context, &mut frame, |app| {
         app.doc.interaction.tool.as_ref().is_some_and(|tool| {
             matches!(&tool.draft_status, DraftStatus::Valid(value) if value.value == 5.0)
@@ -308,6 +326,30 @@ async fn same_frame_shortcuts_reach_the_document_active_at_their_position() {
     assert_eq!(app.doc.tab, titled);
     assert!(app.doc.documents.running);
     assert!(!parked(&app, untitled).documents.running);
+    pump_until(&mut app, &context, &mut frame, |app| {
+        !app.doc.documents.running
+    })
+    .await;
+
+    // Save, then release Control over an open switcher: the release is refused
+    // like ⌘⇧[, so the saving document is never parked.
+    frame_events(&mut app, &context, vec![ctrl_tab(false)]);
+    assert!(app.switcher.is_some());
+    frame_events(
+        &mut app,
+        &context,
+        vec![
+            command(egui::Key::S, false),
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+        ],
+    );
+    assert_eq!(app.doc.tab, titled, "no switch while saving");
+    assert!(app.switcher.is_none());
+    assert!(app.doc.documents.running);
+    assert_eq!(
+        app.doc.status,
+        "Wait for the current command before switching documents"
+    );
     pump_until(&mut app, &context, &mut frame, |app| {
         !app.doc.documents.running
     })
@@ -451,6 +493,79 @@ async fn a_provisional_tab_answered_in_the_background_closes_its_host() {
     assert_eq!(app.doc.tab, origin);
     assert!(app.editor(provisional).is_none(), "no orphan host or tab");
     assert!(app.document_open());
+    // Its failure is not lost with its tab: reported where the user is.
+    let status = app.doc.status.clone();
+    assert!(
+        status.starts_with("Open (background tab): ") && status.len() > 23,
+        "{status}"
+    );
+    assert!(app.doc.diagnostics.contains(
+        crate::diagnostics::Source::File(crate::diagnostics::FileAction::Open),
+        crate::diagnostics::State::Failed,
+        &status,
+    ));
+    app.stop();
+    pump_until(&mut app, &context, &mut frame, |app| app.may_close).await;
+}
+
+fn saved(title: &str) -> Result<Outcome, String> {
+    Ok(Outcome::Saved(onecad_app::dto::SaveOutcomeDto {
+        document_id: "saved".into(),
+        saved_revision: 1,
+        current_revision: 1,
+        clean: true,
+        path: format!("/tmp/{title}.onecad"),
+        title: title.into(),
+    }))
+}
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; run with ONECAD_REQUIRE_WORKER=1 ONECAD_REQUIRE_GPU=1"]
+async fn save_all_moves_on_after_a_saved_dialog_even_when_that_document_closes() {
+    let area = tempfile::tempdir().unwrap();
+    let (mut app, context, mut frame) = two_tabs(area.path()).await;
+    let (first, second) = (app.tabs.parked[0].tab, app.doc.tab);
+    app.activate_tab(first);
+    {
+        let doc = parked_mut(&mut app, second);
+        doc.authoring_dirty = true;
+        // Its save fails at submission instead of opening a native dialog.
+        doc.bridge
+            .shared
+            .stopping
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+    // The first document's dialog was answered with a location (simulated).
+    let prompt = |app: &mut App| {
+        app.doc.authoring_dirty = true;
+        app.doc.documents.running = true;
+        app.tabs.save_all.prompted = Some(first);
+        app.tabs.save_all.queue = [second].into();
+    };
+
+    prompt(&mut app);
+    app.document_finished(saved("First"));
+    assert_eq!(app.doc.tab, second, "the next untitled one is shown");
+    assert_eq!(parked(&app, first).status, "Saved First");
+    assert_eq!(
+        app.doc.status, "Save All left unsaved: Untitled (Native host is shutting down)",
+        "and its save was requested"
+    );
+    assert!(app.tabs.save_all.prompted.is_none() && app.tabs.save_all.queue.is_empty());
+
+    // Saved, then closed (Save chosen in its close prompt): Save All still moves
+    // on from it rather than waiting on a tab that is gone.
+    app.activate_tab(first);
+    prompt(&mut app);
+    app.doc.documents.after_save = Some(Pending::CloseTab);
+    app.document_finished(saved("First"));
+    assert!(app.editor(first).is_none(), "closed after saving");
+    assert_eq!(app.doc.tab, second);
+    assert!(app.tabs.save_all.prompted.is_none() && app.tabs.save_all.queue.is_empty());
+    assert_eq!(
+        app.doc.status,
+        "Save All left unsaved: Untitled (Native host is shutting down)"
+    );
     app.stop();
     pump_until(&mut app, &context, &mut frame, |app| app.may_close).await;
 }

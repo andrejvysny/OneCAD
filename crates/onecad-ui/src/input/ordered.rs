@@ -1,6 +1,12 @@
 //! Shortcuts and the ⌃Tab switcher in one pass, in event order: a same-frame Save,
 //! Undo or New reaches the document that is active at that event's position, even
 //! when an earlier event in the frame switched documents.
+//!
+//! Policy for a frame that switches documents: every other event that preceded
+//! the switch (Enter, Escape, Delete, typing, pointer input) is dropped rather
+//! than applied to the document that was shown at its position, and pointer input
+//! after it is dropped too, so no document receives half a gesture or a stray key.
+//! Only releases, modifier state and focus changes survive.
 use super::{TabShortcut, document_shortcut, history_shortcut, submit_history, tab_shortcut};
 use crate::app::App;
 
@@ -11,7 +17,7 @@ pub(crate) fn route(
     shortcuts: bool,
     text: bool,
     composition: bool,
-) {
+) -> bool {
     let focused = raw.focused;
     // Losing focus mid-switch must not leave the switcher waiting for a release
     // that will never be delivered to this window, nor commit on that release.
@@ -39,6 +45,7 @@ pub(crate) fn route(
         Some(at) => after_switch(kept, at),
         None => kept,
     };
+    switched_at.is_some()
 }
 
 /// Executes one shortcut against the active document. Returns whether it was one.

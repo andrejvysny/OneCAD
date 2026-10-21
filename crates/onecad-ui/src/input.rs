@@ -103,7 +103,18 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     app.sync_document_state();
     crate::input_trace::input(app, ctx, raw);
     crate::sketch_gestures::route_raw(app, ctx, raw);
-    crate::sketch_creation::chain_input::route_raw(app, ctx, raw);
+    // The switcher runs later, in event order; its abandoning Escape must not
+    // first cancel the shown document's chain.
+    match crate::tab_switcher::without_own_escape(app, &raw.events) {
+        Some(events) => {
+            let unowned = egui::RawInput {
+                events,
+                ..raw.clone()
+            };
+            crate::sketch_creation::chain_input::route_raw(app, ctx, &unowned);
+        }
+        None => crate::sketch_creation::chain_input::route_raw(app, ctx, raw),
+    }
     if app.sampled && app.viewport_ready() {
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let finished = done.clone();
@@ -166,9 +177,12 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
                 route_menu(app, ctx, &mut raw.events, action, text);
             }
         }
-        ordered::route(app, raw, false, text, composition);
+        let switched = ordered::route(app, raw, false, text, composition);
         protect_composition(&mut app.composing, raw, text);
-        overlay::dismiss(&mut app.ui, &mut app.doc.sketch_entry, owner, raw, text);
+        // `owner` was the previous document's; the new one starts undisturbed.
+        if !switched {
+            overlay::dismiss(&mut app.ui, &mut app.doc.sketch_entry, owner, raw, text);
+        }
         return;
     }
     for action in actions {

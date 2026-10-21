@@ -71,6 +71,42 @@ pub(crate) fn event(app: &mut App, event: &egui::Event) -> bool {
     }
 }
 
+/// The frame's events without the Escapes the switcher will consume, for routers
+/// that run before it (`None` when there are none). Mirrors the open/closed
+/// transitions of [`event`], without effects.
+pub(crate) fn without_own_escape(app: &App, events: &[egui::Event]) -> Option<Vec<egui::Event>> {
+    let mut open = app.switcher.is_some();
+    let mut own = Vec::new();
+    for (index, event) in events.iter().enumerate() {
+        match event {
+            egui::Event::ModifiersChanged(modifiers) if !modifiers.ctrl => open = false,
+            egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } => match key {
+                egui::Key::Tab if modifiers.ctrl && !modifiers.alt => open |= !app.busy(),
+                egui::Key::W if open => open = false,
+                egui::Key::Escape if open => {
+                    own.push(index);
+                    open = false;
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    (!own.is_empty()).then(|| {
+        events
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !own.contains(index))
+            .map(|(_, event)| event.clone())
+            .collect()
+    })
+}
+
 /// The switcher's events alone, in frame order.
 #[cfg(test)]
 pub fn route(app: &mut App, raw: &mut egui::RawInput) {
@@ -110,7 +146,20 @@ fn open(app: &App, back: bool) -> Option<State> {
     Some(state)
 }
 
+/// Switching parks the active document, which must not be mid-command (as for
+/// ⌘⇧[ and the tab strip); the switcher is already dropped by then.
+fn refuse_busy(app: &mut App) -> bool {
+    if app.busy() {
+        app.doc.status = "Wait for the current command before switching documents".into();
+        return true;
+    }
+    false
+}
+
 fn go(app: &mut App, target: Target) {
+    if refuse_busy(app) {
+        return;
+    }
     match target {
         Target::Tab(tab) => app.show_tab(tab),
         Target::Home => app.open_home(),
@@ -123,6 +172,9 @@ fn close_selected(app: &mut App) {
     let Some(state) = app.switcher.take() else {
         return;
     };
+    if refuse_busy(app) {
+        return;
+    }
     if let Target::Tab(tab) = state.order[state.selected] {
         app.show_tab(tab);
         if app.doc.tab == tab {

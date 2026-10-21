@@ -110,10 +110,10 @@ impl App {
         }
     }
 
-    /// The active document's file action finished; continues Save All if it was
-    /// the document being asked about.
-    pub(crate) fn save_all_finished(&mut self, finished: Finished) {
-        if self.tabs.save_all.prompted != Some(self.doc.tab) {
+    /// `tab`'s file action finished; continues Save All if it was the document
+    /// being asked about, even when that document has since closed.
+    pub(crate) fn save_all_finished(&mut self, tab: TabId, finished: Finished) {
+        if self.tabs.save_all.prompted != Some(tab) {
             return;
         }
         self.tabs.save_all.prompted = None;
