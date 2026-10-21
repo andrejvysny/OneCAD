@@ -7,7 +7,7 @@ use onecad_core::sketch::SketchPlane;
 use onecad_core::{ids::SketchId, sketch::WorldPlane};
 use onecad_interaction::DocumentContext;
 use onecad_scene::CaptureIdentity;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, Weak, mpsc};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Candidate {
@@ -22,10 +22,21 @@ struct Preview {
     receiver: Arc<Mutex<mpsc::Receiver<Result<SketchPlane, String>>>>,
 }
 
+/// One FaceEntry request, owned by the entry until its terminal delivery was applied.
+#[derive(Clone, Debug)]
+pub struct Pending {
+    control: SketchCandidateControl,
+    /// The service holds the strong side until the UI applied its delivery, or drops
+    /// it when the request never reached the service.
+    lease: Weak<()>,
+    /// `Some(false)`: admission already owned the request; its sketch still opens.
+    cancelled: Option<bool>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Entry {
     pub open: bool,
-    pub pending: Option<SketchCandidateControl>,
+    pub pending: Option<Pending>,
     context: Option<DocumentContext>,
     candidate: Option<Candidate>,
     capture: Option<CaptureIdentity>,
@@ -33,6 +44,9 @@ pub struct Entry {
     query: Option<Preview>,
     message: Option<String>,
     accept: Option<(Candidate, CaptureIdentity)>,
+    /// Holds the next FaceEntry before admission until the test adds a permit.
+    #[cfg(test)]
+    pub(crate) admission_gate: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl Entry {
@@ -41,9 +55,24 @@ impl Entry {
         self.plane = None;
         self.query = None;
         self.accept = None;
-        if let Some(control) = &self.pending {
-            control.cancel();
-        } else {
+        match &mut self.pending {
+            // Only the first cancel decides; a later call would misreport admission.
+            Some(pending) if pending.cancelled.is_none() => {
+                pending.cancelled = Some(pending.control.cancel());
+            }
+            Some(_) => {}
+            None => self.open = false,
+        }
+    }
+
+    /// Releases ownership once the request's delivery was applied or never existed.
+    pub(crate) fn settle(&mut self) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.lease.strong_count() == 0)
+        {
+            self.pending = None;
             self.open = false;
         }
     }
@@ -51,7 +80,11 @@ impl Entry {
 
 impl App {
     pub fn choose_sketch_support(&mut self) {
-        if self.viewport_ready() && !self.busy() && !self.sketch_active() {
+        if self.viewport_ready()
+            && !self.busy()
+            && !self.sketch_active()
+            && self.doc.sketch_entry.pending.is_none()
+        {
             self.doc.sketch_entry.open = true;
             self.doc.sketch_entry.context = self.doc.interaction.context.clone();
             // A face selected beforehand already names the support; skip the chooser.
@@ -69,18 +102,32 @@ impl App {
     }
 
     fn new_sketch_on_face(&mut self, body: onecad_core::ids::BodyId, identity: String) {
+        // An owned request is never superseded: its control is the only cancel path.
+        if self.doc.sketch_entry.pending.is_some() {
+            return;
+        }
         let Some(context) = self.doc.interaction.context.clone() else {
             return;
         };
         let control = SketchCandidateControl::default();
-        self.doc.sketch_entry.pending = Some(control.clone());
-        self.submit(Command::Sketch(Box::new(Request::FaceEntry {
+        let lease = Arc::new(());
+        self.doc.sketch_entry.pending = Some(Pending {
+            control: control.clone(),
+            lease: Arc::downgrade(&lease),
+            cancelled: None,
+        });
+        // A refused submit drops the request and its lease; `settle` then closes.
+        let request = Request::FaceEntry {
             id: SketchId::new(),
             context,
             body,
             identity,
             control,
-        })));
+            lease,
+            #[cfg(test)]
+            admission_gate: self.doc.sketch_entry.admission_gate.take(),
+        };
+        self.submit(Command::Sketch(Box::new(request)));
     }
 }
 
@@ -263,19 +310,12 @@ fn start_preview(app: &mut App, capture: CaptureIdentity) {
 }
 
 pub fn show(app: &mut App, ctx: &egui::Context) {
+    app.doc.sketch_entry.settle();
     if !app.doc.sketch_entry.open {
-        return;
-    }
-    if app.doc.sketch_entry.pending.is_some() && !app.busy() {
-        app.doc.sketch_entry.pending = None;
-        app.doc.sketch_entry.open = false;
         return;
     }
     if app.doc.sketch_entry.context != app.doc.interaction.context {
         app.doc.sketch_entry.dismiss();
-        return;
-    }
-    if app.doc.sketch_entry.pending.is_some() && app.doc.sketch_entry.message.is_none() {
         return;
     }
     egui::Area::new(egui::Id::unique("sketch-support"))
@@ -293,13 +333,15 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
 
 fn instruction_row(app: &mut App, ui: &mut egui::Ui) {
     let entry = &app.doc.sketch_entry;
-    ui.label(if entry.pending.is_some() {
-        "Opening sketch…"
-    } else if entry.query.is_some() {
-        "Checking exact planar support…"
-    } else {
-        "Choose XY, XZ, YZ or a planar face"
-    });
+    ui.label(
+        match entry.pending.as_ref().map(|pending| pending.cancelled) {
+            Some(None) => "Opening sketch…",
+            Some(Some(true)) => "Cancelling sketch entry…",
+            Some(Some(false)) => "Sketch already admitted; opening it…",
+            None if entry.query.is_some() => "Checking exact planar support…",
+            None => "Choose XY, XZ, YZ or a planar face",
+        },
+    );
     if app.doc.sketch_entry.pending.is_none()
         && let Some((body, identity)) = app
             .doc

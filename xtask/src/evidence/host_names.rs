@@ -44,4 +44,9 @@ pub(super) const HOST_TESTS: &[&str] = &[
     "app_logic_tests::capability_delivery_tests::restored_controls_use_real_context_and_do_not_enable_mock_actions",
     "app_logic_tests::sketch_plane_choice_tests::viewport_world_patches_hover_cancel_and_click_without_stray_sketches",
     "app_logic_tests::gesture_delivery_tests::batch_delivery::ordinary_split_frame_click_selects_line_and_circle_without_drag_or_edit",
+    "app_logic_tests::sketch_entry_delivery_tests::face_entry_cancel_before_admission_leaves_document_unchanged",
+    "app_logic_tests::sketch_entry_delivery_tests::face_entry_admission_wins_over_late_cancel_and_opens_once",
+    "app_logic_tests::sketch_entry_delivery_tests::face_entry_context_replacement_cancels_and_releases_after_delivery",
+    "app_logic_tests::sketch_entry_delivery_tests::face_entry_submit_failure_releases_ownership_without_sketch",
+    "app_logic_tests::sketch_entry_delivery_tests::face_entry_ownership_stays_with_its_tab_when_another_document_opens",
 ];

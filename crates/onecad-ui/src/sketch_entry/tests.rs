@@ -146,18 +146,72 @@ fn camera_uses_persisted_world_and_exact_face_axes() {
     }
 }
 
-#[test]
-fn entry_cancel_keeps_executing_service_owner() {
+fn owned(lease: &Arc<()>) -> (Entry, SketchCandidateControl) {
     let control = SketchCandidateControl::default();
-    let mut entry = Entry {
+    let entry = Entry {
         open: true,
-        pending: Some(control.clone()),
+        pending: Some(Pending {
+            control: control.clone(),
+            lease: Arc::downgrade(lease),
+            cancelled: None,
+        }),
         ..Default::default()
     };
+    (entry, control)
+}
+
+#[test]
+fn entry_cancel_keeps_executing_service_owner() {
+    let lease = Arc::new(());
+    let (mut entry, control) = owned(&lease);
     entry.dismiss();
-    assert!(entry.open && entry.pending.is_some());
+    entry.settle();
+    assert!(entry.open);
+    assert_eq!(entry.pending.as_ref().unwrap().cancelled, Some(true));
     assert!(!control.cancel());
-    entry.pending = None;
+    // A repeated cancel must not turn the won cancel into a reported admission.
     entry.dismiss();
-    assert!(!entry.open);
+    assert_eq!(entry.pending.as_ref().unwrap().cancelled, Some(true));
+    drop(lease);
+    entry.settle();
+    assert!(!entry.open && entry.pending.is_none());
+}
+
+#[test]
+fn ownership_outlives_idle_frames_until_the_delivery_is_applied() {
+    let lease = Arc::new(());
+    // The service moves a clone into its delivery before the request is consumed.
+    let delivery = lease.clone();
+    let (mut entry, control) = owned(&lease);
+    drop(lease);
+    for _ in 0..3 {
+        entry.settle();
+    }
+    assert!(entry.open && entry.pending.is_some());
+    drop(delivery);
+    entry.settle();
+    assert!(!entry.open && entry.pending.is_none());
+    // Never cancelled: the request's own control remained untouched.
+    assert!(control.cancel());
+}
+
+#[test]
+fn refused_submit_releases_ownership_without_cancelling() {
+    let lease = Arc::new(());
+    let (mut entry, control) = owned(&lease);
+    // A refused submit drops the request, and with it the only strong lease.
+    drop(lease);
+    entry.settle();
+    assert!(!entry.open && entry.pending.is_none());
+    assert!(control.cancel());
+}
+
+#[test]
+fn settle_leaves_unowned_chooser_open() {
+    let mut entry = Entry {
+        open: true,
+        ..Default::default()
+    };
+    entry.settle();
+    assert!(entry.open);
 }

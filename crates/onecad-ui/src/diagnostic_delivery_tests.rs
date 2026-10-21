@@ -137,6 +137,7 @@ async fn rejected_sketch_mutation_and_worker_failure_reach_editor_diagnostics() 
                     message: "Stale sketch failure".into(),
                 }],
                 error: Some("Stale sketch failure".into()),
+                _lease: None,
             }),
             _permit: permit,
         },
