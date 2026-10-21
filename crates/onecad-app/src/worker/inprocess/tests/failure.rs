@@ -396,3 +396,24 @@ async fn sidecar_and_in_process_agree_on_results_and_errors() {
     retire(&sidecar).await;
     retire(&in_process).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bundle_without_test_hooks_does_not_answer_debug_busy() {
+    let _gate = GATE.lock().await;
+    if !kernel_linked() || identity()["testHooks"] == json!(true) {
+        return; // the hooks bundle answers it by design
+    }
+    let wm = spawn_ready(&embedded(None), fast_config()).await;
+    let busy = finish_raw(start_raw(&wm, "Debug.Busy", json!({ "durationMs": 0 })).await).await;
+    let error = busy.expect_err("Debug.Busy is compiled out of a release kernel");
+    assert!(
+        error.contains("ProtocolError") && error.contains("unknown verb"),
+        "{error}"
+    );
+    assert_eq!(
+        wm.state(),
+        WorkerState::Ready,
+        "an unknown verb is not a death"
+    );
+    retire(&wm).await;
+}

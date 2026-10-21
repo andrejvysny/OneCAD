@@ -40,6 +40,7 @@
 #include "protocol/Dispatcher.h"
 #include "protocol/Envelope.h"
 #include "session/PlanExecutor.h"
+#include "session/PreviewOp.h"
 #include "session/PreviewPlan.h"
 #include "session/Session.h"
 #include "step_fixture_util.h"
@@ -256,6 +257,18 @@ void test_preview_plan(const Fixtures& fx) {
     check_busy(r, "PreviewPlan ImportStep(step)", "ImportStep source");
 }
 
+// PreviewOp runs one candidate op on a head copy: the same retriable refusal.
+void test_preview_op(const Fixtures& fx) {
+    Session s;
+    s.open("doc", 0, 3, "determinism");
+    const CancelToken tok;
+    const LockHolder globals(io::occt_globals_mutex());
+    const Envelope r = onecad::session::handle_preview_op(
+        s, Envelope::request(8, "PreviewOp", json{{"op", place_op("pv_step", "step", fx.step)}}),
+        tok);
+    check_busy(r, "PreviewOp PlaceComponent(step)", "PlaceComponent");
+}
+
 // A session with one published body (brep import takes no OCCT lock).
 void seed_body(Session& s, const Fixtures& fx) {
     s.open("doc", 0, 3, "determinism");
@@ -329,6 +342,7 @@ int main() {
     if (make_fixtures(fx)) {
         test_plans(fx);
         test_preview_plan(fx);
+        test_preview_op(fx);
         test_verbs(fx);
     }
     std::error_code ec;

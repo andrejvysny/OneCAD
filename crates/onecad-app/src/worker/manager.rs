@@ -699,7 +699,8 @@ impl WorkerManager {
         *self.shared.restart_hook.write().unwrap() = Some(hook);
     }
 
-    #[cfg(test)]
+    // Only the sidecar slot tests (state.rs) drive it.
+    #[cfg(all(test, feature = "sidecar"))]
     pub(crate) fn invoke_restart_hook(&self, epoch: WorkerEpoch) {
         fire_restart_hook(&self.shared, epoch);
     }
