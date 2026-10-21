@@ -102,8 +102,13 @@ pub fn run() -> Result<(), String> {
     paths.require_launch_environment()?;
     let _profile_lifetime = paths.clone();
     let _logging = onecad_app::logging::init();
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!(
+        "../../../assets/native/app-icons/icon.png"
+    ))
+    .map_err(|error| format!("app icon: {error}"))?;
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("OneCAD")
+        .with_icon(icon)
         .with_inner_size([1280.0, 820.0])
         .with_min_inner_size([900.0, 560.0]);
     if cfg!(target_os = "macos") {

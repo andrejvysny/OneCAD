@@ -29,6 +29,7 @@ cp "$APP/Contents/MacOS/onecad-worker" "$STAGED"
 cargo run --quiet -p xtask -- rehash-worker-manifest "$STAGED" "$MANIFEST"
 cargo build --release -p onecad-ui
 cp "$TARGET_DIR/release/onecad-ui" "$APP/Contents/MacOS/onecad"
+cp assets/native/brand/macos/OneCAD.icns "$APP/Contents/Resources/OneCAD.icns"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -37,6 +38,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleDisplayName</key><string>OneCAD</string>
 <key>CFBundleIdentifier</key><string>dev.onecad.native</string>
 <key>CFBundleExecutable</key><string>onecad</string>
+<key>CFBundleIconFile</key><string>OneCAD</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>0.1.0</string>
 <key>CFBundleVersion</key><string>1</string>
