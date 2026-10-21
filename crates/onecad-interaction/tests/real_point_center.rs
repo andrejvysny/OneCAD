@@ -297,25 +297,32 @@ async fn gesture_contracts(harness: &Harness) {
     assert_width(&sketch(harness).await, 90.0);
 }
 
-async fn reopened(root: &Path) {
-    let harness = Harness::new(&root.join("reopen-host")).await;
+/// Opens a saved document in a fresh host and waits for its initial regen to publish.
+///
+/// `open_document` only schedules the initial regen. The worker head moves at
+/// `AcceptPrepared` before Rust publishes that snapshot, so a `preview_context`
+/// taken in between is correctly refused as `StalePreview` (ONECAD-441).
+/// `RegenFinished` is emitted only after `finish_regen` publishes, so it is the
+/// deterministic barrier; worker readiness alone is not.
+async fn reopen(host: &Path, document: &Path) -> Harness {
+    let harness = Harness::new(host).await;
     api::open_document(
         &harness.state,
         harness.host.clone(),
-        root.join("center.onecad").to_string_lossy().into_owned(),
+        document.to_string_lossy().into_owned(),
         None,
     )
     .await
     .unwrap();
-    assert!(
-        harness
-            .state
-            .live_worker()
-            .unwrap()
-            .wait_ready(std::time::Duration::from_secs(15))
-            .await
-    );
+    let opened = harness.projection().await;
+    assert!(!opened.dirty);
+    harness.settled(&opened).await;
     assert!(!harness.projection().await.dirty);
+    harness
+}
+
+async fn reopened(root: &Path) {
+    let harness = reopen(&root.join("reopen-host"), &root.join("center.onecad")).await;
     assert_width(&sketch(&harness).await, 90.0);
     let state = begin(&harness, false).await;
     let solve = api::get_sketch(&harness.state, sketch_id().to_string())
@@ -400,24 +407,7 @@ async fn numeric_point(harness: &Harness, state: &mut SketchInteraction) -> Sket
 }
 
 async fn reopened_point(root: &Path) {
-    let harness = Harness::new(&root.join("point-reopen-host")).await;
-    api::open_document(
-        &harness.state,
-        harness.host.clone(),
-        root.join("point.onecad").to_string_lossy().into_owned(),
-        None,
-    )
-    .await
-    .unwrap();
-    assert!(
-        harness
-            .state
-            .live_worker()
-            .unwrap()
-            .wait_ready(std::time::Duration::from_secs(15))
-            .await
-    );
-    assert!(!harness.projection().await.dirty);
+    let harness = reopen(&root.join("point-reopen-host"), &root.join("point.onecad")).await;
     let _ = begin(&harness, false).await;
     let accepted = sketch(&harness).await;
     near(at(&accepted, ids(2000).entities[0]), -15.0, 0.0);
