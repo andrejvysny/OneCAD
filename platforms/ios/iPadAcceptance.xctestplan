@@ -9,6 +9,7 @@
     }
   ],
   "defaultOptions" : {
+    "preferredScreenCaptureFormat" : "screenshots",
     "targetForVariableExpansion" : {
       "containerPath" : "container:OneCAD.xcodeproj",
       "identifier" : "858E90117B3770AF79C4920B",
