@@ -899,6 +899,8 @@ impl DocumentSession {
         validate_transform_body(&record.op)?;
         // Hole params must satisfy the SCHEMA §7.3 conditional blocks (all paths).
         validate_hole(&record.op)?;
+        // Boolean tools: 1..=32, distinct, never the target (all entry paths).
+        validate_boolean(&record.op)?;
         // Gear params must satisfy the SCHEMA §7.3 recipe-conditional blocks and
         // the exactly-one-of face/frame placement rule (all entry paths).
         validate_gear(&record.op)?;
@@ -1011,6 +1013,8 @@ impl DocumentSession {
         validate_transform_body(&op)?;
         // Hole params must satisfy the SCHEMA §7.3 conditional blocks (all paths).
         validate_hole(&op)?;
+        // Boolean tools: 1..=32, distinct, never the target (all entry paths).
+        validate_boolean(&op)?;
         // Gear params must satisfy the SCHEMA §7.3 recipe-conditional blocks and
         // the exactly-one-of face/frame placement rule (all entry paths).
         validate_gear(&op)?;
@@ -1187,6 +1191,8 @@ impl DocumentSession {
         let mut nr = prior.clone();
         set_input(&mut nr.op, path, reference)?;
         validate_shell_lockstep(&nr.op)?;
+        // A target/tool rebind must not alias another Boolean role.
+        validate_boolean(&nr.op)?;
         // A re-pick must leave a record the session can still WRITE. Without this
         // an `EditOperationInput` could land params that
         // [`ChamferParams::validate`] rejects — an anchorless reference-face ref,
@@ -2397,6 +2403,16 @@ fn validate_hole(op: &Operation) -> Result<(), DomainError> {
     p.validate().map_err(DomainError::Validation)
 }
 
+/// Validates a [`KnownOperation::Boolean`] record's tool set (SCHEMA §7.3:
+/// 1..=32 distinct tools, none the target). Deserialization enforces this only
+/// for the array form, so a hand-constructed legacy self-tool is caught here.
+fn validate_boolean(op: &Operation) -> Result<(), DomainError> {
+    let Operation::Known(KnownOperation::Boolean(p)) = op else {
+        return Ok(());
+    };
+    p.validate().map_err(DomainError::Validation)
+}
+
 /// Validates a [`KnownOperation::Gear`] record's params: the SCHEMA §7.3
 /// recipe-conditional blocks (checked BOTH ways, so a stale block left by a
 /// recipe switch cannot ride the record), the exactly-one-of face/frame
@@ -2945,8 +2961,14 @@ fn set_input(
         (InputPath::BooleanTarget, KnownOperation::Boolean(p)) => {
             p.target_body = want_body(reference)?;
         }
-        (InputPath::BooleanTool, KnownOperation::Boolean(p)) => {
-            p.tool_body = want_body(reference)?;
+        (InputPath::BooleanTool { index }, KnownOperation::Boolean(p)) => {
+            let count = p.tools.len();
+            let slot = p.tools.get_mut(*index).ok_or_else(|| {
+                DomainError::Validation(format!(
+                    "Boolean tool index {index} out of range ({count} tools)"
+                ))
+            })?;
+            *slot = want_body(reference)?;
         }
         (InputPath::ShellOpenFaces { index }, KnownOperation::Shell(p)) => {
             let face = want_element(reference)?;

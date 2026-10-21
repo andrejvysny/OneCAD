@@ -396,7 +396,7 @@ Worker → Rust:
     "solverPolicyVersion": 4,
     "capabilities": [
       "op.sketch", "op.extrude", "op.revolve", "op.fillet", "op.chamfer",
-      "op.boolean", "op.importStep", "solver.planegcs", "tessellate.mesh1",
+      "op.boolean", "op.boolean.tools", "op.importStep", "solver.planegcs", "tessellate.mesh1",
       "io.step", "io.step.import", "io.stl", "io.obj", "checkpoint.v1",
       "constraint.tangentAtPoint"
     ],
@@ -2356,19 +2356,89 @@ OneCAD-CPP `BooleanParams` (`operation` ∈ Union/Cut/Intersect; distinct from t
 `booleanMode` fused into feature ops).
 
 ```json
-// inputs: [ semanticRef(target body), semanticRef(tool body) ]
-// params
+// legacy form — inputs: [ semanticRef(target body), semanticRef(tool body) ]
 { "operation": "Union", "targetBodyId": "body_1", "toolBodyId": "body_2" }
+
+// array form (capability `op.boolean.tools`, ONECAD-362)
+// inputs: [ semanticRef(target), semanticRef(tools[0]), …, semanticRef(tools[n-1]) ]
+{ "operation": "Cut", "targetBodyId": "body_1",
+  "toolBodyIds": ["body_2", "body_3"], "keepTools": true }
 ```
 
 `operation` ∈ `Union` | `Cut` | `Intersect`.
+
+**Tool set (normative).** A Boolean names its tools in exactly one of two
+canonical encodings:
+
+- **Legacy** `toolBodyId` — iff exactly one tool is consumed. Bytes, plan hash,
+  evidence keys and fixtures are unchanged from before the array form.
+- **Array** `toolBodyIds` (+ optional `keepTools`) — every other tool set. Writers
+  MUST emit the canonical form: `keepTools` is written only when `true`, and a
+  single consumed tool is written in legacy form. Readers accept the
+  non-canonical `toolBodyIds:[a]` without `keepTools` and normalize it to legacy.
+- `toolBodyId` and `toolBodyIds` together, neither, or `keepTools` beside
+  `toolBodyId` are structural errors: the app refuses to load the record and the
+  worker answers `OP_FAILED` (a missing legacy `toolBodyId` keeps its historical
+  `REF_UNRESOLVED`). `keepTools` must be a boolean.
+- `toolBodyIds` holds **1..=32** entries (`BOOLEAN_MAX_TOOLS` / `kBooleanMaxTools`),
+  all distinct, none equal to `targetBodyId`. In array form an empty, oversized,
+  duplicate or self-referencing list is `OP_FAILED`; a legacy self tool keeps its
+  historical `REF_UNRESOLVED "Boolean tool body not found"`. A tool the head does
+  not hold is `REF_UNRESOLVED` naming the first missing id in order.
+- **Order** is authored order: it fixes the `inputs[]` slots (`<opId>.input<1+i>`),
+  the order of `deleted` events and the Intersect pre-combine order. Volume is
+  order-independent for Union/Cut, but face ordinals and topology keys may differ
+  with tool order, so a reorder edit can relabel elements.
+- **Fence.** The array shape fences itself: a worker that predates it reads
+  `toolBodyId` as absent and refuses `REF_UNRESOLVED`, so it can never consume a
+  retained tool or ignore extra tools; an app that predates it refuses to open the
+  document. Rust additionally refuses to send an array-form Boolean (plan and
+  `PreviewOp`) to a worker whose Hello lacks `op.boolean.tools`, with an
+  attributable protocol error. In the file, ids are bare uuids; the wire layer
+  rewrites every `*BodyIds` array element to `body_<uuid>`.
+
+**Semantics.**
+
+- **Union / Cut** run ONE builder: Arguments = `{target}`, Tools = the tool group.
+  OCCT treats the group as its union, so overlapping tools are legal.
+- **Intersect** is `target ∩ t0 ∩ t1 ∩ …` (common to ALL tools). The worker
+  pre-combines the tools in order (auxiliary builders, discarded), then runs one
+  final builder against the target for its history. Tools sharing no common solid
+  refuse `BOOLEAN_EMPTY_RESULT` with evidence `precombine:true`.
+- **Participation (array form, Union and Cut).** Every tool must contribute: a tool
+  participates iff one of its faces leaves an image in the result that is not also
+  an image of a target face. A tool covered by the target or by other tools (a
+  Cut tool outside the target, a Cut tool nested inside another tool, a Union
+  tool inside the target) refuses the WHOLE op with `BOOLEAN_TOOL_NO_EFFECT`
+  (`stage:"publish"`, evidence `{boolean:{operation,targetBodyId,toolBodyIds,
+  keepTools,noEffectToolBodyId,toolIndex}}`, the first offender in order).
+- **Union disjointness (array form).** Every result solid must hold target
+  material — an image of a target face, or a target vertex strictly inside it
+  (the target swallowed by the tools). Otherwise `BOOLEAN_DISJOINT_RESULT` with
+  evidence `{boolean:{operation:"Add",targetBodyId,toolBodyIds,keepTools,
+  targetSolids,solidCount,disjointToolBodyIds}}`, where `disjointToolBodyIds` lists,
+  in tool order, the tools whose every image lies in such a solid. Both predicates
+  read the one builder's history, so they are deterministic and cost no auxiliary
+  boolean. The legacy form keeps its solid-count rule below.
+- **Lifecycle.** Consumed tools (`keepTools` absent/false): after the target's
+  events, one `{"kind":"deleted","bodyId":t}` per tool in `toolBodyIds` order, and
+  their partition entries are dropped. Retained tools (`keepTools:true`) emit no
+  event, keep their BodyRecord and partition entries, and appear in neither
+  `changedBodies` nor `deletedBodies`. Tools never receive new ids; a single-solid
+  result modifies the target in place, a multi-solid Cut/Intersect splits it into
+  `body_<opId>:<k>` as below.
+- **All or nothing.** Every refusal leaves the target and every tool intact with no
+  lifecycle event; tools are resolved and validated before the kernel runs and
+  removed only after publication succeeds. A FeaturePattern source Boolean in array
+  form is refused (only `targetBodyId` is remapped per instance).
 
 - A zero-solid `Cut` or `Intersect` is a recoverable `OP_FAILED`: the target and
   tool remain intact, no body lifecycle event or mesh is emitted, and the caller
   may revise the operation. Complete-consumption deletion is not implicit in this
   standalone operation. It carries diagnostic `BOOLEAN_EMPTY_RESULT`
   (`stage:"publish"`) with evidence
-  `{boolean:{operation,targetBodyId,toolBodyId,solidCount:0}}`, so a caller routes
+  `{boolean:{operation,targetBodyId,toolBodyId,solidCount:0}}` (array form:
+  `toolBodyIds` + `keepTools` in place of `toolBodyId`), so a caller routes
   on the CODE rather than on message text — the §8 top-level value is the generic
   `OP_FAILED` every Boolean failure shares. Cross-track fixture:
   `protocol/fixtures/boolean_empty_refusal.ndjson`.
@@ -2381,8 +2451,8 @@ OneCAD-CPP `BooleanParams` (`operation` ∈ Union/Cut/Intersect; distinct from t
 - A `Cut` that removes no demonstrable material refuses under the shared **Cut
   effect policy** documented with Extrude above (`CUT_NO_EFFECT` /
   `CUT_VOLUME_INCREASED` / `CUT_VOLUME_UNMEASURABLE`, `stage:"publish"`), with
-  `toolBodyId` in the evidence beside `targetBodyId`. UX-2026-09-14 WP-1,
-  2026-09-15.
+  `toolBodyId` (array form: `toolBodyIds` + `keepTools`) in the evidence beside
+  `targetBodyId`. UX-2026-09-14 WP-1, 2026-09-15.
 
 **Shell** (`op.shell`) — hollow a body, removing (opening) selected faces. Field
 names from OneCAD-CPP `ShellParams`. Added M6a (see the [Changelog](#14-changelog)).
@@ -8227,3 +8297,21 @@ sign-off) once fixtures exist.
   algorithm (sorted 16-byte member UUIDs + winding byte, rendered `"r_%016x"`) so
   the C++ worker and Rust core produce identical region ids; reference impl is
   onecad-core `sketch/mod.rs::derive_region_id`.
+
+- **2026-10-21 — §7.3 Boolean multiple / retained tools (ONECAD-362).** Boolean
+  gains a canonical dual encoding: legacy `toolBodyId` (one consumed tool,
+  byte-identical) and array `toolBodyIds` (1..=32 distinct tools, none the target)
+  with optional `keepTools:true`. Intersect is common to ALL tools; Union/Cut run one
+  builder over the tool group. Array-form Union/Cut refuse a non-contributing tool
+  whole-op (`BOOLEAN_TOOL_NO_EFFECT`) and array-form Union refuses any result solid
+  without target material (`BOOLEAN_DISJOINT_RESULT` + `disjointToolBodyIds`), both
+  from the single builder's history. Retained tools emit no lifecycle event.
+  Hello capability `op.boolean.tools`; Rust refuses an array-form plan or preview
+  without it. An old worker refuses the array form `REF_UNRESOLVED` (absent
+  `toolBodyId`); an old app refuses to open such a document. `protocolVersion`
+  stays 1 (lockstep §13 + shape fence); `kernelPolicyVersion` stays 1 and the OCCT
+  fingerprint `0a6a1dce34181289` is unchanged — the legacy path issues the identical
+  OCCT call sequence. Fixtures: `boolean_multi_tool.ndjson`,
+  `boolean_tools_refusal.ndjson` (legacy fixtures unchanged). Cross-track sign-off
+  (worker + Rust + orchestrator) pending; serialize with the ONECAD-361 Hole slice,
+  which edits the same §7.3, §14 and capability list.

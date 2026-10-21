@@ -313,4 +313,21 @@ mod tests {
             .message
             .contains("more than one external body"));
     }
+
+    #[test]
+    fn array_form_boolean_source_is_refused_before_worker() {
+        use crate::document::record::{BooleanOp, BooleanParams};
+        let boolean = |params: BooleanParams| {
+            let op = Operation::Known(KnownOperation::Boolean(params));
+            OperationRecord::new(rid(0x362), 0, "Boolean", op)
+        };
+        let (target, tool) = (BodyId::new(), BodyId::new());
+        let kept = boolean(BooleanParams::new(BooleanOp::Cut, target, vec![tool], true));
+        let error = validate_lineage(&[&kept]).unwrap_err();
+        assert!(error.contains("multiple or retained tools"), "{error}");
+        // The legacy single consumed tool keeps its external-tool rule.
+        let legacy = boolean(BooleanParams::single(BooleanOp::Cut, target, tool));
+        let error = validate_lineage(&[&legacy]).unwrap_err();
+        assert!(error.contains("consumes an external tool body"), "{error}");
+    }
 }

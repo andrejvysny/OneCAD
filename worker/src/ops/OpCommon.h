@@ -177,6 +177,15 @@ BooleanResult checked_boolean(const TopoDS_Shape& target, const TopoDS_Shape& to
                               const nlohmann::json& occt_options, const onecad::CancelToken* cancel,
                               std::shared_ptr<BRepBuilderAPI_MakeShape>& builder_out);
 
+// As above with an ordered TOOL GROUP: one builder, Arguments = {target},
+// Tools = tools (OCCT treats the group as their union, so overlapping tools are
+// legal). The single-tool overload delegates here with `{tool}` — the OCCT call
+// sequence is identical, so legacy results are bit-equal.
+BooleanResult checked_boolean(const TopoDS_Shape& target, const std::vector<TopoDS_Shape>& tools,
+                              app::BooleanMode mode, bool parallel,
+                              const nlohmann::json& occt_options, const onecad::CancelToken* cancel,
+                              std::shared_ptr<BRepBuilderAPI_MakeShape>& builder_out);
+
 // One solid of an N-body result, paired with the quantized geometric key its
 // ordinal was assigned by (VF-B6 identity-tripwire evidence).
 struct RankedSolid {

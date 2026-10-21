@@ -459,6 +459,12 @@ add_executable(test_boolean_intersect test_boolean_intersect.cpp)
 target_link_libraries(test_boolean_intersect PRIVATE worker_core)
 add_test(NAME boolean_intersect COMMAND test_boolean_intersect)
 
+# ONECAD-362: multi-tool / retained-tool Boolean (SCHEMA §7.3) — analytic
+# volumes, lifecycle events, history-based participation refusals.
+add_executable(test_boolean_multi_tool test_boolean_multi_tool.cpp)
+target_link_libraries(test_boolean_multi_tool PRIVATE worker_core)
+add_test(NAME boolean_multi_tool COMMAND test_boolean_multi_tool)
+
 # --- M6a: breadth ops (Shell / Linear+Circular pattern / MirrorBody) numerics. ---
 add_executable(test_m6a_ops test_m6a_ops.cpp)
 target_link_libraries(test_m6a_ops PRIVATE worker_core)
@@ -732,6 +738,20 @@ add_test(
     COMMAND worker_harness
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/boolean_empty_refusal.ndjson
+)
+# ONECAD-362: Boolean multiple / retained tools (SCHEMA §7.3) — retention,
+# consumption order and the whole-op refusals, each pinned by fixture.
+add_test(
+    NAME canonical_boolean_multi_tool
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/boolean_multi_tool.ndjson
+)
+add_test(
+    NAME canonical_boolean_tools_refusal
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/boolean_tools_refusal.ndjson
 )
 # SCHEMA §7.2 `diagnostics[].reasonCode` (WP1-G2) — a publication refusal names
 # WHICH policy branch refused it, machine-readably, while the top-level §8 code

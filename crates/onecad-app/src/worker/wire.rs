@@ -668,11 +668,11 @@ fn to_wire_body_form(value: &mut Value) {
                         }
                     }
                 }
-                // `TransformBody.targets` is the one body-bearing param that is an
-                // ARRAY of ids rather than a `*BodyId` scalar (SCHEMA §7.3
-                // `"targets": ["body_1", …]`), so it needs its own arm. Same
+                // `TransformBody.targets` and `Boolean.toolBodyIds` are the
+                // body-bearing params that are ARRAYS of ids rather than a
+                // `*BodyId` scalar (SCHEMA §7.3), so they need their own arm. Same
                 // idempotent, uuid-parse-gated rewrite, applied per element.
-                if key == "targets" {
+                if key == "targets" || key.ends_with("BodyIds") {
                     if let Value::Array(items) = v {
                         for item in items.iter_mut() {
                             if let Value::String(s) = item {
@@ -728,9 +728,12 @@ fn wire_op_inputs(
             refs.extend(p.reference_face_refs.iter().map(element_ref_wire));
             refs
         }
-        Operation::Known(KnownOperation::Boolean(p)) => {
-            vec![body_input_ref(p.target_body), body_input_ref(p.tool_body)]
-        }
+        // Boolean: target, then one whole-body ref per tool in authored order
+        // (`<opId>.input<1+i>`).
+        Operation::Known(KnownOperation::Boolean(p)) => std::iter::once(p.target_body)
+            .chain(p.tools.iter().copied())
+            .map(body_input_ref)
+            .collect(),
         // Shell: one semantic ref per removed face. New records carry typed refs
         // with descriptor/anchor evidence; legacy bare-id records retain the safe
         // element-only fallback. The shelled body rides in `params`.
@@ -7561,12 +7564,11 @@ mod body_wire_tests {
     fn wire_op_boolean_renders_body_wire_form() {
         let target = BodyId(Uuid::from_u128(0x11));
         let tool = BodyId(Uuid::from_u128(0x22));
-        let op = Operation::Known(KnownOperation::Boolean(BooleanParams {
-            operation: BooleanOp::Cut,
-            target_body: target,
-            tool_body: tool,
-            extra: Default::default(),
-        }));
+        let op = Operation::Known(KnownOperation::Boolean(BooleanParams::single(
+            BooleanOp::Cut,
+            target,
+            tool,
+        )));
         let inputs = op.derive_inputs();
         let w = wire_op(&planned(op, inputs));
         assert_eq!(w["params"]["targetBodyId"], json!(body_id_wire(target)));
@@ -7581,6 +7583,39 @@ mod body_wire_tests {
             w["inputs"][1]["primary"]["bodyId"],
             json!(body_id_wire(tool))
         );
+    }
+
+    #[test]
+    fn wire_op_boolean_tools_array_renders_every_tool() {
+        let target = BodyId(Uuid::from_u128(0x11));
+        let tools = [0x22, 0x23, 0x24].map(|n| BodyId(Uuid::from_u128(n)));
+        let op = Operation::Known(KnownOperation::Boolean(BooleanParams::new(
+            BooleanOp::Intersect,
+            target,
+            tools.to_vec(),
+            true,
+        )));
+        let w = wire_op(&planned(op.clone(), op.derive_inputs()));
+        let wire_tools: Vec<String> = tools.iter().map(|t| body_id_wire(*t)).collect();
+        assert_eq!(
+            w["params"],
+            json!({"operation":"Intersect","targetBodyId":body_id_wire(target),
+                "toolBodyIds":wire_tools,"keepTools":true})
+        );
+        let slots: Vec<Value> = w["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|input| input["primary"]["bodyId"].clone())
+            .collect();
+        let expected: Vec<Value> = std::iter::once(target)
+            .chain(tools)
+            .map(|b| json!(body_id_wire(b)))
+            .collect();
+        assert_eq!(slots, expected, "inputs[] = target, then tools in order");
+        let previewed = preview_wire_op(&op, "op_preview");
+        assert_eq!(previewed["params"], w["params"]);
+        assert_eq!(previewed["inputs"], w["inputs"]);
     }
 
     #[test]
@@ -8172,12 +8207,11 @@ mod body_wire_tests {
             ),
             (
                 "Boolean",
-                Operation::Known(KnownOperation::Boolean(BooleanParams {
-                    operation: BooleanOp::Cut,
-                    target_body: target,
-                    tool_body: tool,
-                    extra: Default::default(),
-                })),
+                Operation::Known(KnownOperation::Boolean(BooleanParams::single(
+                    BooleanOp::Cut,
+                    target,
+                    tool,
+                ))),
             ),
         ];
 

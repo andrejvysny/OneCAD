@@ -445,8 +445,14 @@ pub enum InputPath {
     },
     /// A boolean op's target body (`params.targetBodyId`).
     BooleanTarget,
-    /// A boolean op's tool body (`params.toolBodyId`).
-    BooleanTool,
+    /// A boolean op's tool body at `index` (into `tools`; `inputs[1 + index]`).
+    /// `{"path":"booleanTool"}` stays index 0, so legacy commands are unchanged.
+    /// Adding or removing tools replaces the whole op.
+    BooleanTool {
+        /// Index of the tool to rebind.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        index: usize,
+    },
     /// A revolve axis (`params.axis`).
     RevolveAxis,
     /// A shell's removed (open) face at `index` (into `open_faces`).
@@ -477,6 +483,11 @@ pub enum InputPath {
     /// An OffsetFace `Total` opposite face (`params.oppositeFace`) — the LAST
     /// slot of the op's `inputs[]` array, present only while the op carries one.
     OffsetFaceOpposite,
+}
+
+// `skip_serializing_if` hands the field by reference.
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 /// The payload written by [`EditCommand::EditOperationInput`] — a union over the

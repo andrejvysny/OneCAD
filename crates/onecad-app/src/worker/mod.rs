@@ -37,6 +37,7 @@ use onecad_core::regen::{
     WorkerHead,
 };
 
+mod boolean_tools;
 mod checkpoint_result;
 mod endpoint_tangency;
 pub(crate) mod gesture_result;

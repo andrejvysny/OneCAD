@@ -259,12 +259,11 @@ pub fn op_shell() -> Operation {
 }
 
 pub fn op_boolean() -> Operation {
-    Operation::Known(KnownOperation::Boolean(BooleanParams {
-        operation: BooleanOp::Union,
-        target_body: body_a(),
-        tool_body: body_b(),
-        extra: Default::default(),
-    }))
+    Operation::Known(KnownOperation::Boolean(BooleanParams::single(
+        BooleanOp::Union,
+        body_a(),
+        body_b(),
+    )))
 }
 
 pub fn op_linear_pattern() -> Operation {

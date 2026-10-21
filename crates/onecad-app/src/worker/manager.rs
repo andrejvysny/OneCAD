@@ -1870,6 +1870,10 @@ async fn stream_plan(shared: Arc<Shared>, request: PlanRequest, tx: mpsc::Sender
         let _ = tx.send(PlanEvent::Failed(error)).await;
         return;
     }
+    if let Err(error) = super::boolean_tools::plan(&request, &client.hello().capabilities) {
+        let _ = tx.send(PlanEvent::Failed(error)).await;
+        return;
+    }
 
     // SCHEMA §7.2: a worker holds at most one prepared job. If the regen this plan
     // replaces was ABANDONED (its future dropped), its `DiscardPrepared` is in a
@@ -2301,6 +2305,7 @@ impl crate::worker::PreviewEngine for WorkerManager {
         lod: Lod,
     ) -> Result<crate::dto::PreviewResultDto, EngineError> {
         let client = self.client_or_err()?;
+        super::boolean_tools::operation(&operation, &client.hello().capabilities)?;
         let op = wire::preview_wire_op(&operation, &op_id);
         let mut args = serde_json::json!({ "op": op, "lod": crate::worker::lod_str(lod) });
         if let Some(sid) = sketch_id {

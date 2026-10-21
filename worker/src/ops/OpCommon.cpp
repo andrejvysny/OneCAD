@@ -658,8 +658,18 @@ BooleanResult checked_boolean(const TopoDS_Shape& target, const TopoDS_Shape& to
                               app::BooleanMode mode, bool parallel, const json& occt_options,
                               const onecad::CancelToken* cancel,
                               std::shared_ptr<BRepBuilderAPI_MakeShape>& builder_out) {
+    return checked_boolean(target, std::vector<TopoDS_Shape>{tool}, mode, parallel, occt_options,
+                           cancel, builder_out);
+}
+
+BooleanResult checked_boolean(const TopoDS_Shape& target, const std::vector<TopoDS_Shape>& tools,
+                              app::BooleanMode mode, bool parallel, const json& occt_options,
+                              const onecad::CancelToken* cancel,
+                              std::shared_ptr<BRepBuilderAPI_MakeShape>& builder_out) {
     BooleanResult out;
-    if (target.IsNull() || tool.IsNull()) {
+    const bool null_tool = std::any_of(tools.begin(), tools.end(),
+                                       [](const TopoDS_Shape& t) { return t.IsNull(); });
+    if (target.IsNull() || tools.empty() || null_tool) {
         out.error_code = "OP_FAILED";
         out.error_message = "boolean input is null";
         return out;
@@ -676,11 +686,11 @@ BooleanResult checked_boolean(const TopoDS_Shape& target, const TopoDS_Shape& to
     // OCCT history. Semantics match RegenerationEngine.cpp:144-199 (IsDone → fail,
     // invalid → fail), plus cancellation via CancelProgress.
     auto algo = std::make_shared<BRepAlgoAPI_BooleanOperation>();
-    TopTools_ListOfShape args, tools;
+    TopTools_ListOfShape args, tool_list;
     args.Append(target);
-    tools.Append(tool);
+    for (const TopoDS_Shape& tool : tools) tool_list.Append(tool);
     algo->SetArguments(args);
-    algo->SetTools(tools);
+    algo->SetTools(tool_list);
     algo->SetOperation(bop);
     // WP-E: NEVER let the BOP raise tolerances on the ARGUMENTS in place. The
     // scratch, the preview job and the live head share TShapes, so a failed,
