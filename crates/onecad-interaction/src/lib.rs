@@ -9,6 +9,7 @@ mod reducer;
 mod session;
 mod transform;
 
+pub mod selection_set;
 pub mod sketch;
 
 pub use model::*;
