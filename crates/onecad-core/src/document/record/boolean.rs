@@ -49,19 +49,37 @@ struct BooleanParamsSerde {
     #[serde(
         rename = "toolBodyId",
         default,
+        deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
     tool_body: Option<BodyId>,
     #[serde(
         rename = "toolBodyIds",
         default,
+        deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
     tool_bodies: Option<Vec<BodyId>>,
-    #[serde(rename = "keepTools", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "keepTools",
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
     keep_tools: Option<bool>,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     extra: Extra,
+}
+
+/// A tool-set key that is present must carry a value: an explicit `null` would
+/// otherwise read as absent (the worker's presence checks refuse it), so a
+/// `keepTools:null` record would load as consume and delete its tools on regen.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 impl TryFrom<BooleanParamsSerde> for BooleanParams {
@@ -263,6 +281,18 @@ mod tests {
         for (value, needle) in cases {
             let error = parse(value.clone()).unwrap_err();
             assert!(error.contains(needle), "{value}: {error}");
+        }
+        // An explicit null is a present, ill-typed key, never "absent".
+        for value in [
+            json!({"operation":"Cut","targetBodyId":b[0],"toolBodyId":b[1],"keepTools":null}),
+            json!({"operation":"Cut","targetBodyId":b[0],"toolBodyId":b[1],"toolBodyIds":null}),
+            json!({"operation":"Cut","targetBodyId":b[0],"toolBodyId":null,"toolBodyIds":[b[1],b[2]]}),
+            json!({"operation":"Cut","targetBodyId":b[0],"toolBodyIds":[b[1],b[2]],"keepTools":null}),
+        ] {
+            let error = parse(value.clone()).unwrap_err();
+            assert!(error.contains("null"), "{value}: {error}");
+            let record = json!({"opType":"Boolean","params":value});
+            assert!(serde_json::from_value::<super::super::Operation>(record).is_err());
         }
         let many: Vec<BodyId> = ids(BOOLEAN_MAX_TOOLS + 1);
         let error =

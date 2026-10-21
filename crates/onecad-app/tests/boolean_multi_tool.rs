@@ -9,7 +9,8 @@
 //! * A `[5,5]..[15,15]` × 30, B `[10,10]..[20,20]` × 30 — through-tools that
 //!   overlap each other (A∩B∩T = 5·5·20 = 500);
 //! * C `[12,12]..[22,14]` × 30 — touches A (A∪C = 3000 + 600 − 180 = 3420);
-//! * D `[100,100]..[105,105]` × 5 — far from everything.
+//! * D `[100,100]..[105,105]` × 5 — far from everything;
+//! * N `[5,5]..[10,10]` × 30 — nested in A, sharing its x=5, y=5 and base planes.
 
 #[path = "boolean_multi_tool/support.rs"]
 mod support;
@@ -31,6 +32,7 @@ const A: [f64; 4] = [5.0, 5.0, 10.0, 10.0];
 const B: [f64; 4] = [10.0, 10.0, 10.0, 10.0];
 const C: [f64; 4] = [12.0, 12.0, 10.0, 2.0];
 const D: [f64; 4] = [100.0, 100.0, 5.0, 5.0];
+const N: [f64; 4] = [5.0, 5.0, 5.0, 5.0];
 const OP_BOOLEAN: u128 = 0x200;
 const OP_LATER: u128 = 0x210;
 
@@ -45,6 +47,14 @@ struct Scene {
 async fn scene(third: [f64; 4], third_height: f64) -> Option<Scene> {
     let bin = real_worker()?;
     let wm = spawn_worker(bin).await;
+    // The app's capability gate and the worker's Hello must agree on the name, or
+    // every array-form Boolean would fail as an unattributed protocol error.
+    let hello = wm.hello().expect("hello");
+    assert!(
+        hello.capabilities.iter().any(|c| c == "op.boolean.tools"),
+        "real worker advertises op.boolean.tools: {:?}",
+        hello.capabilities
+    );
     let mut rt = runtime_over(&wm);
     let t = add_box(&mut rt, 0x100, T, 20.0);
     let a = add_box(&mut rt, 0x110, A, 30.0);
@@ -316,6 +326,39 @@ async fn refusals_leave_every_body_untouched() {
             failed[0].diagnostics.iter().any(|d| d.code == code),
             "{op:?}: {code} in {:?}",
             failed[0].diagnostics
+        );
+        s.wm.shutdown().await;
+    }
+}
+
+/// Case 4b: same-sketch-plane tools (the UI case). N shares walls and the base
+/// plane with A, so it removes nothing A does not: the WHOLE op refuses, naming N.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn coplanar_nested_tool_refuses_whole_op() {
+    for keep in [false, true] {
+        let Some(mut s) = scene(N, 30.0).await else {
+            return;
+        };
+        let before = signatures(&head(&s.rt));
+        let op = boolean_op(BooleanOp::Cut, s.t, &[s.a, s.b], keep);
+        add_op(&mut s.rt, boolean_record(OP_BOOLEAN, op));
+        let report = regen_all(&mut s.rt).await;
+        assert_eq!(
+            signatures(published(&report, "coplanar")),
+            before,
+            "keep={keep}: model geometry unchanged"
+        );
+        let failed = &report.failed_steps;
+        assert_eq!(failed.len(), 1, "keep={keep}: the Boolean step fails");
+        let diagnostic = failed[0]
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "BOOLEAN_TOOL_NO_EFFECT")
+            .unwrap_or_else(|| panic!("keep={keep}: {:?}", failed[0].diagnostics));
+        assert!(
+            failed[0].message.contains(&format!("body_{}", s.b)),
+            "keep={keep}: names the nested tool: {} / {diagnostic:?}",
+            failed[0].message
         );
         s.wm.shutdown().await;
     }
