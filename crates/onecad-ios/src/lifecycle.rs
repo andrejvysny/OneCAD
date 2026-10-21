@@ -1,6 +1,7 @@
-//! UIKit scene/app lifecycle onto the editor. Backgrounding flushes autosave and
-//! refuses frames (iOS forbids GPU work in the background); termination stops the
-//! document hosts within the shutdown grace.
+//! UIKit scene/app lifecycle onto the editor. Backgrounding requests an autosave
+//! flush and refuses frames and input (iOS forbids GPU work in the background);
+//! termination cancels host dialogs, awaits the flush and stops the document
+//! hosts within the shutdown grace.
 use crate::app::{Failure, IosApp, Outcome, Phase, SHUTDOWN_GRACE};
 use crate::ffi::{self, Status};
 
@@ -13,6 +14,8 @@ impl IosApp {
             ffi::WILL_RESIGN_ACTIVE => self.focus(false),
             ffi::DID_ENTER_BACKGROUND => {
                 self.focus(false);
+                // Not awaited: the actors write on their own threads while the main
+                // thread returns to UIKit (the host may hold a background task).
                 if let Some(editor) = &self.editor {
                     editor.flush_recovery();
                 }

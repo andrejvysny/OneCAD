@@ -8,12 +8,22 @@ use crate::gpu::{self, Surface};
 use crate::host::{Dialogs, Queue};
 use crate::input::Input;
 use crate::wake::Gate;
-use onecad_ui::{HostLayout, QaPaths, host::Editor};
+use onecad_ui::{
+    HostLayout, QaPaths,
+    host::{Editor, RuntimeExit},
+};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Upper bound on waiting for document hosts to stop (terminate and destroy).
+/// Upper bound on flushing autosave and stopping the document hosts (terminate
+/// and destroy).
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+/// Upper bound on destroy waiting for the service runtime thread to exit after
+/// the editor is dropped.
+pub const RUNTIME_EXIT_GRACE: Duration = Duration::from_secs(3);
+/// System-provided files waiting for the next frame.
+const OPENS_MAX: usize = 16;
 
 /// A failed call: the status the ABI returns and the `last_error` text.
 #[derive(Debug)]
@@ -57,6 +67,8 @@ pub struct IosApp {
     pub(crate) capabilities: ffi::Capabilities,
     /// Strings of the request last returned by `onecad_ios_host_request_next`.
     pub(crate) request_strings: Vec<std::ffi::CString>,
+    /// `onecad_ios_open_path` files, opened at the start of the next frame.
+    pub(crate) opens: Vec<PathBuf>,
     _logging: Box<dyn std::any::Any>,
 }
 
@@ -89,14 +101,9 @@ impl IosApp {
             keyboard_overlap: 0.0,
             capabilities: ffi::Capabilities::default(),
             request_strings: Vec::new(),
+            opens: Vec::new(),
             _logging: logging,
         })
-    }
-
-    pub fn editor(&mut self) -> Outcome<&mut Editor> {
-        self.editor
-            .as_mut()
-            .ok_or_else(|| Failure::new(Status::State, "the editor has stopped"))
     }
 
     /// # Safety
@@ -159,20 +166,50 @@ impl IosApp {
         Ok(())
     }
 
-    /// Stops every document host, pumping service messages for at most `grace`.
+    /// Input changes what the next frame shows; refused once frames are.
+    pub fn accept_input(&self) -> Outcome {
+        match self.phase {
+            Phase::Background => Err(Failure::new(
+                Status::State,
+                "input is not accepted in the background",
+            )),
+            Phase::Terminated => Err(Failure::new(Status::State, "the app has terminated")),
+            Phase::Active | Phase::Inactive => Ok(()),
+        }
+    }
+
+    /// Queues a system-provided file for the next frame, where the editor's busy
+    /// and tool gates apply (and GPU work such as the tab thumbnail is allowed).
+    pub fn queue_open(&mut self, path: PathBuf) -> Outcome {
+        if self.phase == Phase::Terminated {
+            return Err(Failure::new(Status::State, "the app has terminated"));
+        }
+        if self.opens.len() >= OPENS_MAX {
+            return Err(Failure::new(Status::Overflow, "too many pending opens"));
+        }
+        self.opens.push(path);
+        self.ctx.request_repaint();
+        Ok(())
+    }
+
+    /// Flushes autosave, then stops every document host, within `grace`.
+    ///
+    /// Waiting host dialogs are cancelled first: an open picker holds its
+    /// document's actor inside a command, where it serves neither the flush nor
+    /// the stop. The queue stays closed (terminate and destroy only).
     pub fn shutdown(&mut self, grace: Duration) {
+        let deadline = Instant::now() + grace;
+        self.input.cancel_all();
+        self.host.close();
         let Some(editor) = self.editor.as_mut() else {
             return;
         };
-        self.input.cancel_all();
-        editor.flush_recovery();
-        editor.stop();
-        let deadline = Instant::now() + grace;
-        while !editor.stopped() && Instant::now() < deadline {
-            editor.poll(&self.ctx);
-            std::thread::sleep(Duration::from_millis(10));
+        let flush = editor.flush_recovery();
+        if !pump(editor, &self.ctx, deadline, |_| flush.done()) {
+            tracing::warn!(?grace, "autosave flush unfinished at the shutdown grace");
         }
-        if !editor.stopped() {
+        editor.stop();
+        if !pump(editor, &self.ctx, deadline, Editor::stopped) {
             tracing::warn!(
                 ?grace,
                 "document hosts still stopping at the shutdown grace"
@@ -180,13 +217,36 @@ impl IosApp {
         }
     }
 
-    /// Destroy: no host callback, request or GPU use survives this call.
-    pub fn teardown(mut self) {
-        self.shutdown(SHUTDOWN_GRACE);
+    /// Destroy: no host callback, request or GPU use survives this call. Returns
+    /// the service runtime's exit when the thread outlived its grace.
+    pub fn teardown(mut self) -> Option<RuntimeExit> {
+        if self.phase != Phase::Terminated {
+            self.shutdown(SHUTDOWN_GRACE);
+        }
         self.wake.close();
         self.host.close();
-        self.editor = None;
+        let exit = self.editor.take().and_then(Editor::close);
         self.detach();
+        exit.filter(|exit| !exit.wait(RUNTIME_EXIT_GRACE))
+    }
+}
+
+/// Pumps service messages until `done` or `deadline`; whether `done` held.
+fn pump(
+    editor: &mut Editor,
+    ctx: &egui::Context,
+    deadline: Instant,
+    mut done: impl FnMut(&Editor) -> bool,
+) -> bool {
+    loop {
+        if done(editor) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        editor.poll(ctx);
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 

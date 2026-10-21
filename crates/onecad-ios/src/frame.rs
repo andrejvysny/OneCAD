@@ -73,8 +73,9 @@ pub fn paint(
         // Texture uploads above still need a submission to complete (as eframe does).
         gpu.queue.submit([]);
     }
-    for id in &textures.free {
-        renderer.free_texture(id);
+    // Taken, not borrowed: epaint's `TexturesDelta` drop asserts it was emptied.
+    for id in std::mem::take(&mut textures.free) {
+        renderer.free_texture(&id);
     }
     presented
 }
@@ -155,22 +156,28 @@ impl crate::app::IosApp {
         let view = self
             .view
             .ok_or_else(|| Failure::new(Status::State, "no surface is attached"))?;
-        let (events, again) = self.input.drain();
-        let inputs = Inputs {
-            time,
-            focused: self.phase == Phase::Active,
-            theme: self.theme,
-            events,
-        };
-        let raw = raw_input(&view, &self.gpu, inputs);
         let editor = self
             .editor
             .as_mut()
             .ok_or_else(|| Failure::new(Status::State, "the editor has stopped"))?;
+        let drained = self.input.drain();
+        if drained.cancelled {
+            onecad_ui::host::cancel_contact(&self.ctx);
+        }
+        for path in self.opens.drain(..) {
+            editor.open_path(path);
+        }
+        let inputs = Inputs {
+            time,
+            focused: self.phase == Phase::Active,
+            theme: self.theme,
+            events: drained.events,
+        };
+        let raw = raw_input(&view, &self.gpu, inputs);
         self.wake.set_in_frame(true);
         let output = editor.frame(&self.ctx, raw);
         self.wake.set_in_frame(false);
-        Ok(self.finish(output, again))
+        Ok(self.finish(output, drained.again))
     }
 
     fn finish(&mut self, mut output: egui::FullOutput, again: bool) -> crate::ffi::FrameResult {
@@ -181,9 +188,12 @@ impl crate::app::IosApp {
             .get(&egui::ViewportId::ROOT)
             .map_or(std::time::Duration::MAX, |viewport| viewport.repaint_delay);
         let presented = paint(&self.gpu, self.surface.as_mut(), &self.ctx, output);
+        // A skipped drawable (outdated, lost, timeout) leaves a stale or wrong-size
+        // image on screen; draw again rather than wait for the next input.
+        let retry = !presented && self.surface.is_some();
         let mut result = ffi::FrameResult {
             struct_size: std::mem::size_of::<ffi::FrameResult>() as u32,
-            repaint_after_s: if again { 0.0 } else { seconds(delay) },
+            repaint_after_s: if again || retry { 0.0 } else { seconds(delay) },
             ..Default::default()
         };
         if result.repaint_after_s == 0.0 {

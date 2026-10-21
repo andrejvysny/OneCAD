@@ -30,6 +30,35 @@ struct Inner {
     closed: bool,
 }
 
+impl Inner {
+    /// Requests counted against the capacity: pending ones plus dialogs the host
+    /// has popped and not completed (a pending dialog counts once).
+    fn in_flight(&self) -> usize {
+        let popped = self
+            .waiting
+            .keys()
+            .filter(|id| !self.pending.iter().any(|request| request.id == **id))
+            .count();
+        self.pending.len() + popped
+    }
+
+    /// Drops dialogs nobody awaits any more (dropped with their document), and
+    /// their requests if the host has not popped them yet.
+    fn forget_abandoned(&mut self) {
+        let abandoned: Vec<u64> = self
+            .waiting
+            .iter()
+            .filter(|(_, sender)| sender.is_closed())
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &abandoned {
+            self.waiting.remove(id);
+        }
+        self.pending
+            .retain(|request| !abandoned.contains(&request.id));
+    }
+}
+
 pub struct Queue {
     inner: Mutex<Inner>,
     ctx: egui::Context,
@@ -50,7 +79,8 @@ impl Queue {
         completion: Option<oneshot::Sender<Vec<String>>>,
     ) -> Option<u64> {
         let mut inner = self.inner.lock().ok()?;
-        if inner.closed || inner.pending.len() + inner.waiting.len() >= CAPACITY {
+        inner.forget_abandoned();
+        if inner.closed || inner.in_flight() >= CAPACITY {
             return None;
         }
         inner.next_id += 1;
@@ -66,13 +96,16 @@ impl Queue {
     }
 
     pub fn pop(&self) -> Option<Request> {
-        self.inner.lock().ok()?.pending.pop_front()
+        let mut inner = self.inner.lock().ok()?;
+        inner.forget_abandoned();
+        inner.pending.pop_front()
     }
 
     pub fn has_pending(&self) -> bool {
-        self.inner
-            .lock()
-            .is_ok_and(|inner| !inner.pending.is_empty())
+        self.inner.lock().is_ok_and(|mut inner| {
+            inner.forget_abandoned();
+            !inner.pending.is_empty()
+        })
     }
 
     /// Completes a popped request; `false` for an unknown or finished id.
@@ -172,6 +205,29 @@ mod tests {
         let cancelled =
             runtime.block_on(dialogs.pick(FileDialog::new("OneCAD", &["onecad"], false)));
         assert!(cancelled.is_empty());
+    }
+
+    #[test]
+    fn abandoned_dialogs_free_their_slots_and_count_once() {
+        let queue = Queue::new(egui::Context::default());
+        for _ in 0..CAPACITY {
+            let (sender, receiver) = oneshot::channel();
+            assert!(queue.push(Request::default(), Some(sender)).is_some());
+            drop(receiver);
+        }
+        assert!(!queue.has_pending(), "abandoned requests are not presented");
+        let (sender, _receiver) = oneshot::channel();
+        let id = queue.push(Request::default(), Some(sender));
+        assert!(id.is_some());
+        for _ in 1..CAPACITY {
+            assert!(queue.push(Request::default(), None).is_some());
+        }
+        assert!(queue.push(Request::default(), None).is_none());
+        assert_eq!(queue.pop().map(|request| request.id), id);
+        assert!(
+            queue.push(Request::default(), None).is_none(),
+            "popped dialog still counts"
+        );
     }
 
     #[test]

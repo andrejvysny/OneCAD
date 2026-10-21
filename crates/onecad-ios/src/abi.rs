@@ -1,15 +1,15 @@
 //! Exported lifecycle, surface and frame functions of `onecad_ios.h`, plus the
 //! guard every export runs through: NULL and thread-affinity checks, struct-size
 //! checks, panic containment with poisoning, and the per-thread `last_error`.
-use crate::app::{Failure, IosApp, Outcome};
+use crate::app::{Failure, IosApp, Outcome, RUNTIME_EXIT_GRACE};
 use crate::ffi::{self, Status};
 use crate::wake::Gate;
 use std::cell::{Cell, RefCell};
 use std::ffi::{CStr, CString, c_char};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::ThreadId;
 
 /// The C side's `onecad_ios_app`; only ever handled by pointer.
@@ -31,6 +31,10 @@ pub struct Handle {
 
 /// One app per process (`onecad_ios.h`).
 static LIVE: AtomicBool = AtomicBool::new(false);
+/// A destroyed app's service runtime that was still exiting when destroy
+/// returned; the next create waits for it, so two runtimes never share the
+/// app-support data.
+static PREVIOUS: Mutex<Option<onecad_ui::host::RuntimeExit>> = Mutex::new(None);
 
 thread_local! {
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
@@ -100,12 +104,12 @@ pub unsafe fn with_app(app: *const OpaqueApp, body: impl FnOnce(&mut IosApp) -> 
     }
 }
 
-/// Reads a struct after checking its leading `struct_size`.
+/// Checks a struct's leading `struct_size` without reading anything else, so an
+/// out-parameter whose other fields are uninitialized is never read.
 ///
 /// # Safety
-/// `ptr` is NULL or valid for reading a `u32`, and for a whole `T` whenever that
-/// `u32` is at least `size_of::<T>()`.
-pub unsafe fn read_struct<T: Copy>(ptr: *const T) -> Outcome<T> {
+/// `ptr` is NULL or valid for reading a `u32`.
+pub unsafe fn check_size<T>(ptr: *const T) -> Outcome {
     if ptr.is_null() {
         return Err(Failure::new(
             Status::InvalidArgument,
@@ -121,6 +125,17 @@ pub unsafe fn read_struct<T: Copy>(ptr: *const T) -> Outcome<T> {
             format!("struct_size {size} is smaller than {expected}"),
         ));
     }
+    Ok(())
+}
+
+/// Reads a struct after checking its leading `struct_size`.
+///
+/// # Safety
+/// `ptr` is NULL or valid for reading a `u32`, and for a whole initialized `T`
+/// whenever that `u32` is at least `size_of::<T>()`.
+pub unsafe fn read_struct<T: Copy>(ptr: *const T) -> Outcome<T> {
+    // SAFETY: forwarded from this function's contract.
+    unsafe { check_size(ptr)? };
     // SAFETY: the caller declared at least `size_of::<T>()` readable bytes.
     Ok(unsafe { ptr.read_unaligned() })
 }
@@ -163,6 +178,10 @@ pub unsafe extern "C" fn onecad_ios_app_create(
             "one onecad_ios app per process",
         ));
     }
+    if let Err(failure) = previous_exited() {
+        LIVE.store(false, Ordering::Release);
+        return fail(failure);
+    }
     // SAFETY: forwarded from this function's contract.
     let created = catch_unwind(AssertUnwindSafe(|| unsafe { create(config) }));
     let created = created
@@ -176,6 +195,41 @@ pub unsafe extern "C" fn onecad_ios_app_create(
         Err(failure) => {
             LIVE.store(false, Ordering::Release);
             fail(failure)
+        }
+    }
+}
+
+/// Waits (bounded) for a destroyed app's service runtime that had not exited.
+fn previous_exited() -> Outcome {
+    let mut previous = PREVIOUS
+        .lock()
+        .map_err(|_| Failure::new(Status::Internal, "previous app state poisoned"))?;
+    match previous.as_ref() {
+        Some(exit) if !exit.wait(RUNTIME_EXIT_GRACE) => Err(Failure::new(
+            Status::State,
+            "the previous app's services are still stopping",
+        )),
+        _ => {
+            *previous = None;
+            Ok(())
+        }
+    }
+}
+
+/// Closes the wake gate unless creation finishes, also while a panic unwinds,
+/// so nothing a failed create already started can call the host.
+struct Unfinished(Option<Arc<Gate>>);
+
+impl Unfinished {
+    fn finish(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for Unfinished {
+    fn drop(&mut self) {
+        if let Some(gate) = self.0.take() {
+            gate.close();
         }
     }
 }
@@ -201,7 +255,9 @@ unsafe fn create(config: *const ffi::Config) -> Outcome<Handle> {
     };
     let owner = std::thread::current().id();
     let wake = Arc::new(Gate::new(config.wake, config.wake_ctx, owner));
+    let unfinished = Unfinished(Some(wake.clone()));
     let app = IosApp::create(&layout, wake.clone())?;
+    unfinished.finish();
     Ok(Handle {
         owner,
         poisoned: Cell::new(false),
@@ -229,6 +285,14 @@ pub unsafe extern "C" fn onecad_ios_app_destroy(app: *mut OpaqueApp) -> Status {
     // Even after a panic, no host callback or request may outlive destroy.
     wake.close();
     host.close();
+    let result = result.map(|exit| {
+        if let Some(exit) = exit {
+            tracing::warn!("service runtime still exiting after destroy; the next create waits");
+            if let Ok(mut previous) = PREVIOUS.lock() {
+                *previous = Some(exit);
+            }
+        }
+    });
     LIVE.store(false, Ordering::Release);
     match result {
         Ok(()) => Status::Ok,
@@ -289,9 +353,9 @@ pub unsafe extern "C" fn onecad_ios_frame(
     // SAFETY: forwarded from this function's contract.
     unsafe {
         with_app(app, |state| {
-            read_struct(out.cast_const())?;
+            check_size(out.cast_const())?;
             let result = state.frame(time_s)?;
-            // SAFETY: `out` was checked readable and is writable by contract.
+            // SAFETY: `out` was checked non-NULL and is writable by contract.
             out.write_unaligned(result);
             Ok(())
         })
@@ -312,3 +376,7 @@ pub extern "C" fn onecad_ios_last_error(_app: *const OpaqueApp) -> *const c_char
     // The buffer lives in this thread's slot until the next failure replaces it.
     LAST_ERROR.with(|slot| slot.borrow().as_ptr())
 }
+
+#[cfg(test)]
+#[path = "abi_tests.rs"]
+mod tests;

@@ -26,6 +26,7 @@ pub unsafe extern "C" fn onecad_ios_input_submit(
     unsafe {
         with_app(app, |state| {
             let batch = read_struct(batch)?;
+            state.accept_input()?;
             let count = batch.count as usize;
             if count > BATCH_MAX || (count > 0 && batch.samples.is_null()) {
                 return Err(Failure::new(
@@ -81,7 +82,9 @@ pub unsafe extern "C" fn onecad_ios_navigation_submit(
     // SAFETY: forwarded from this function's contract.
     unsafe {
         with_app(app, |state| {
-            if !state.input.navigation(&read_struct(nav)?) {
+            let nav = read_struct(nav)?;
+            state.accept_input()?;
+            if !state.input.navigation(&nav) {
                 return Err(Failure::new(
                     Status::InvalidArgument,
                     "navigation phase or values",
@@ -138,7 +141,9 @@ pub unsafe extern "C" fn onecad_ios_key_submit(
     // SAFETY: forwarded from this function's contract.
     unsafe {
         with_app(app, |state| {
-            state.input.key(&read_struct(ev)?);
+            let ev = read_struct(ev)?;
+            state.accept_input()?;
+            state.input.key(&ev);
             state.input_changed();
             Ok(())
         })
@@ -155,7 +160,9 @@ pub unsafe extern "C" fn onecad_ios_text_insert(
     // SAFETY: forwarded from this function's contract.
     unsafe {
         with_app(app, |state| {
-            state.input.insert_text(&utf8(text, "text")?);
+            let text = utf8(text, "text")?;
+            state.accept_input()?;
+            state.input.insert_text(&text);
             state.input_changed();
             Ok(())
         })
@@ -169,6 +176,7 @@ pub unsafe extern "C" fn onecad_ios_text_delete_backward(app: *mut OpaqueApp) ->
     // SAFETY: forwarded from this function's contract.
     unsafe {
         with_app(app, |state| {
+            state.accept_input()?;
             state.input.delete_backward();
             state.input_changed();
             Ok(())
@@ -191,6 +199,7 @@ pub unsafe extern "C" fn onecad_ios_text_set_marked(
             } else {
                 utf8(text, "marked text")?
             };
+            state.accept_input()?;
             state.input.set_marked(&marked);
             state.input_changed();
             Ok(())
@@ -240,6 +249,7 @@ pub unsafe extern "C" fn onecad_ios_a11y_activate(app: *mut OpaqueApp, id: u64) 
 
 fn activate(state: &mut IosApp, id: u64) -> Outcome {
     use crate::a11y::Activation;
+    state.accept_input()?;
     let activation = state
         .a11y
         .activation(id)
@@ -355,9 +365,7 @@ pub unsafe extern "C" fn onecad_ios_open_path(app: *mut OpaqueApp, path: *const 
                     "path must be absolute",
                 ));
             }
-            state.editor()?.open_path(path);
-            state.input_changed();
-            Ok(())
+            state.queue_open(path)
         })
     }
 }

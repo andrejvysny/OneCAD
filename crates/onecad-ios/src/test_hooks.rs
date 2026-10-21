@@ -39,6 +39,20 @@ fn command(state: &mut IosApp, request: &Value) -> Result<Value, String> {
                 .get("generation")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
+            if samples.len() > crate::input::BATCH_MAX {
+                return Err(format!(
+                    "replay batch exceeds {} samples",
+                    crate::input::BATCH_MAX
+                ));
+            }
+            state.accept_input().map_err(|failure| failure.message)?;
+            // The trace record of a synthetic batch says so (not Pencil hardware evidence).
+            tracing::info!(
+                synthetic = true,
+                samples = samples.len(),
+                generation,
+                "onecad_ios test replay batch"
+            );
             let overflowed = state.input.submit(&samples, generation);
             state.ctx.request_repaint();
             Ok(json!({"synthetic": true, "accepted": samples.len(), "overflowed": overflowed}))
