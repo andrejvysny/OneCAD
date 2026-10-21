@@ -345,6 +345,7 @@ pub fn op_hole() -> Operation {
         target_body: body_a(),
         face: hole_face_ref(),
         point: v3(25.0, 10.0, 30.0),
+        points: None,
         hole_type: HoleType::Simple,
         diameter: Scalar::new(5.5),
         depth: Some(Scalar::new(20.0)),

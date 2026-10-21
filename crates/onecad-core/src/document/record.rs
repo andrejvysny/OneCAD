@@ -49,6 +49,9 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
+pub use crate::document::hole_placement::{
+    HolePlacement, HolePoint, HolePointId, HOLE_MAX_POINTS, HOLE_POINTS_POLICY_VERSION,
+};
 use crate::document::refs::{AxisRef, ElementKind, ElementRef, Extra, SketchRegionRef};
 use crate::document::variables::Scalar;
 use crate::expr::Dimension;
@@ -2253,8 +2256,14 @@ pub struct HoleParams {
     /// The planar host face the hole enters through — identity + descriptor +
     /// anchor evidence, resolved through the ladder (§10) like a Fillet edge.
     pub face: ElementRef,
-    /// World-space hole centre, frozen at authoring (see the type docs).
+    /// World-space hole centre, frozen at authoring (see the type docs). In a
+    /// V3 record it equals `points[0].at` bit-for-bit (kept for old readers).
     pub point: Vec3,
+    /// V3 ordered placements with stable per-point ids (SCHEMA §7.3,
+    /// ONECAD-361); `None` = a single-point legacy/V2 record. See
+    /// [`crate::document::hole_placement`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub points: Option<Vec<HolePoint>>,
     pub hole_type: HoleType,
     /// Drill diameter in mm.
     pub diameter: Scalar,
@@ -2330,13 +2339,7 @@ impl HoleParams {
         if !self.point.is_finite() {
             return Err("Hole point has a non-finite component".into());
         }
-        if let Some(version) = self.result_policy_version {
-            if version != HOLE_RESULT_POLICY_VERSION {
-                return Err(format!(
-                    "Hole resultPolicyVersion {version} is unsupported (expected {HOLE_RESULT_POLICY_VERSION})"
-                ));
-            }
-        }
+        self.validate_placement_policy()?;
         positive("Hole diameter", self.diameter.value)?;
         if let Some(d) = &self.depth {
             positive("Hole depth", d.value)?;
@@ -2369,6 +2372,11 @@ impl HoleParams {
                 positive("Hole thread.depthMm", d.value)?;
             }
         }
+        self.validate_profile()?;
+        self.validate_spacing()
+    }
+
+    fn validate_profile(&self) -> Result<(), String> {
         match self.hole_type {
             HoleType::Simple => {
                 self.reject_counterbore("simple")?;
@@ -4267,6 +4275,7 @@ mod tests {
             target_body: body(1),
             face: hole_face_ref(),
             point: Vec3::new_unchecked(25.0, 10.0, 30.0),
+            points: None,
             hole_type: HoleType::Simple,
             diameter: Scalar::new(5.5),
             depth: Some(Scalar::new(20.0)),
@@ -4768,7 +4777,7 @@ mod tests {
 
         let mut future =
             serde_json::to_value(Operation::Known(KnownOperation::Hole(hole_params()))).unwrap();
-        future["params"]["resultPolicyVersion"] = serde_json::json!(3);
+        future["params"]["resultPolicyVersion"] = serde_json::json!(4);
         let parsed: Operation = serde_json::from_value(future.clone()).unwrap();
         let Operation::Known(KnownOperation::Hole(params)) = &parsed else {
             panic!("expected Hole");
@@ -6279,6 +6288,7 @@ mod tests {
             target_body: body(1),
             face: hole_face_ref(),
             point: Vec3::new_unchecked(0.0, 0.0, 0.0),
+            points: None,
             hole_type: HoleType::Counterbore,
             diameter: Scalar::new(5.0),
             depth: Some(Scalar::new(10.0)),

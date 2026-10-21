@@ -689,6 +689,7 @@ fn base_hole_record() -> OperationRecord {
             extra: Default::default(),
         },
         point: Vec3::new_unchecked(25.0, 10.0, 30.0),
+        points: None,
         hole_type: HoleType::Simple,
         diameter: Scalar::new(5.5),
         depth: Some(Scalar::new(20.0)),

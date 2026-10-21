@@ -384,6 +384,7 @@ fn hole_record(rec: u128, body: BodyId, face: &ElementId, at: Vec3) -> Operation
             target_body: body,
             face: anchored_ref(body, face, ElementKind::Face, at),
             point: at,
+            points: None,
             hole_type: HoleType::Simple,
             diameter: Scalar::new(6.0),
             depth: Some(Scalar::new(10.0)),

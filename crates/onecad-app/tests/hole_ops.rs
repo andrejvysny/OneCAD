@@ -371,6 +371,7 @@ fn hole_params(body: BodyId, element: &str, at: Vec3, diameter: f64) -> HolePara
         target_body: body,
         face: face_ref(body, &id, at),
         point: at,
+        points: None,
         hole_type: HoleType::Simple,
         diameter: Scalar::new(diameter),
         depth: None, // through-all

@@ -17,7 +17,7 @@ use onecad_core::document::record::PlaneKind;
 use onecad_core::document::record::{
     BooleanMode, BooleanOp, BooleanParams, ChamferParams, ChamferReferenceFace, ComponentMate,
     ComponentSourceRef, DetachComponentParams, ExtrudeMode, ExtrudeParams, FilletParams,
-    FrozenPlacement, HoleParams, HoleType, KnownOperation, MateKind, MateSidedness,
+    FrozenPlacement, HoleParams, HolePlacement, HoleType, KnownOperation, MateKind, MateSidedness,
     OffsetDistanceType, OffsetFaceParams, Operation, OperationRecord, PlaceComponentParams,
     RevolveParams, ShellParams, SketchOpParams, SketchPlaneRef, HOLE_RESULT_POLICY_VERSION,
 };
@@ -2743,6 +2743,7 @@ fn hole_op(hole_type: HoleType, diameter: f64, cb: Option<(f64, f64)>) -> Operat
             extra: Default::default(),
         },
         point: Vec3::new_unchecked(1.0, 2.0, 3.0),
+        points: None,
         hole_type,
         diameter: Scalar::new(diameter),
         depth: None,
@@ -2838,6 +2839,61 @@ fn update_operation_params_rejects_an_invalid_hole_edit() {
         Some(11.0),
         "the refused edit left the record alone"
     );
+}
+
+/// ONECAD-361: an edit that makes two placements overlap is refused by the
+/// single writer, and the stored multi-point record is untouched.
+#[test]
+fn update_operation_params_rejects_overlapping_hole_points() {
+    let placed = |xs: &[f64]| {
+        let Operation::Known(KnownOperation::Hole(mut p)) = hole_op(HoleType::Simple, 6.0, None)
+        else {
+            unreachable!()
+        };
+        let list = xs
+            .iter()
+            .map(|x| HolePlacement {
+                id: None,
+                at: Vec3::new_unchecked(*x, 2.0, 3.0),
+            })
+            .collect();
+        p.set_placements(list).expect("canonical writer");
+        p
+    };
+    let mut sess = hole_doc();
+    let accepted = placed(&[1.0, 11.0, 21.0]);
+    sess.apply(EditCommand::AddOperation {
+        record: record(
+            rid(1),
+            "Hole",
+            Operation::Known(KnownOperation::Hole(accepted.clone())),
+            vec![BX()],
+        ),
+        at_cursor: false,
+    })
+    .expect("three spaced Ø6 holes are accepted");
+
+    let mut overlapping = accepted.clone();
+    let mut list = overlapping.placements();
+    list[2].at = Vec3::new_unchecked(14.0, 2.0, 3.0);
+    overlapping
+        .set_placements(list)
+        .expect("writer accepts geometry");
+    let err = sess
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(1),
+            op: Operation::Known(KnownOperation::Hole(overlapping)),
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("points[1] and points[2] overlap"),
+        "{err}"
+    );
+    let Operation::Known(KnownOperation::Hole(p)) = &sess.document().timeline.record(0).unwrap().op
+    else {
+        panic!("expected the stored Hole");
+    };
+    assert_eq!(p, &accepted, "the refused edit left the record alone");
 }
 
 #[test]

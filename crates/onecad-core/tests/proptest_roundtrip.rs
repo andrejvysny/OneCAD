@@ -10,9 +10,10 @@ use uuid::Uuid;
 
 use onecad_core::document::record::{
     BooleanMode, BooleanOp, BooleanParams, ChamferParams, CircularPatternParams,
-    DeterminismSettings, ExtrudeMode, ExtrudeParams, FilletParams, KnownOperation,
-    LinearPatternParams, LoftParams, MirrorBodyParams, OpaqueOperation, Operation, OperationRecord,
-    PlaneKind, RevolveParams, ShellParams, SketchOpParams, SketchPlaneRef, SweepParams,
+    DeterminismSettings, ExtrudeMode, ExtrudeParams, FilletParams, HoleParams, HolePoint,
+    HolePointId, HoleType, KnownOperation, LinearPatternParams, LoftParams, MirrorBodyParams,
+    OpaqueOperation, Operation, OperationRecord, PlaneKind, RevolveParams, ShellParams,
+    SketchOpParams, SketchPlaneRef, SweepParams,
 };
 use onecad_core::document::refs::{
     AnchorIntent, AxisRef, ElementKind, ElementRef, Extra, IntentQuery, LocalFrame, PrimaryRef,
@@ -419,6 +420,43 @@ fn operation_strategy() -> impl Strategy<Value = Operation> {
             }))
         });
 
+    // Hole: legacy single point, or V3 ordered `points` with ids (ONECAD-361).
+    let hole = (
+        body_id(),
+        element_ref_strategy(),
+        vec3(),
+        prop::collection::vec((uuid_strategy(), vec3()), 0..4),
+        scalar(),
+    )
+        .prop_map(|(target, face, point, placed, diameter)| {
+            let points: Option<Vec<HolePoint>> = (!placed.is_empty()).then(|| {
+                placed
+                    .into_iter()
+                    .map(|(id, at)| HolePoint {
+                        id: HolePointId(id),
+                        at,
+                        extra: Default::default(),
+                    })
+                    .collect()
+            });
+            Operation::Known(KnownOperation::Hole(HoleParams {
+                target_body: target,
+                face,
+                point: points.as_ref().map_or(point, |p| p[0].at),
+                result_policy_version: points.as_ref().map(|_| 3),
+                points,
+                hole_type: HoleType::Simple,
+                diameter,
+                depth: None,
+                cb_diameter: None,
+                cb_depth: None,
+                cs_diameter: None,
+                cs_angle_deg: None,
+                thread: None,
+                extra: Default::default(),
+            }))
+        });
+
     // Opaque: an opType guaranteed NOT in the known set, so it stays Opaque.
     let opaque = any::<u16>().prop_map(|n| {
         let mut raw = serde_json::Map::new();
@@ -432,7 +470,7 @@ fn operation_strategy() -> impl Strategy<Value = Operation> {
 
     prop_oneof![
         sketch, extrude, revolve, fillet, chamfer, shell, boolean, linear, circular, loft, sweep,
-        mirror, opaque,
+        mirror, hole, opaque,
     ]
 }
 

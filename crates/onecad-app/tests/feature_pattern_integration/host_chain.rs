@@ -79,6 +79,7 @@ fn hole_record(body: BodyId, face: ElementId, face_at: Vec3, point: Vec3) -> Ope
             target_body: body,
             face: element_ref(body, face, ElementKind::Face, face_at),
             point,
+            points: None,
             hole_type: HoleType::Simple,
             diameter: Scalar::new(3.0),
             depth: None,
