@@ -50,6 +50,7 @@
 #include "util/PolicyVersions.h"
 #include "util/LittleEndian.h"
 #include "util/Log.h"
+#include "util/TestHooks.h"
 
 #include "capi/OcctLogPrinter.h"
 
@@ -189,9 +190,12 @@ Envelope handle_shutdown(const Envelope& req, const std::vector<std::uint8_t>&,
     return Envelope::ok_response(req.id, nlohmann::json{{"goodbye", true}});
 }
 
+#if ONECAD_WORKER_HOOKS
 // Debug.Busy — busy-SPINS the kernel thread for `durationMs` (default 200ms).
-// Compiled always; harmless (a Rust core never sends it in production). Used by
-// the solver benchmark to prove drag latency is unaffected by a busy kernel lane.
+// A test hook (util/TestHooks.h): always in the sidecar, where a Rust core never
+// sends it in production; in the in-process library only with
+// ONECAD_WORKER_TEST_HOOKS. Used by the solver benchmark to prove drag latency is
+// unaffected by a busy kernel lane, and by the wedge drills.
 Envelope handle_debug_busy(const Envelope& req, const std::vector<std::uint8_t>&,
                            HandlerContext&) {
     const int duration_ms =
@@ -208,6 +212,7 @@ Envelope handle_debug_busy(const Envelope& req, const std::vector<std::uint8_t>&
     nlohmann::json result = {{"busySpunMs", duration_ms}};
     return Envelope::ok_response(req.id, std::move(result));
 }
+#endif
 
 void register_verbs(Dispatcher& dispatcher, SolverLane& solver_lane, Session& session) {
     dispatcher.register_verb(
@@ -407,7 +412,9 @@ void register_verbs(Dispatcher& dispatcher, SolverLane& solver_lane, Session& se
             return onecad::io::handle_restore_checkpoint(session, r);
         });
     dispatcher.register_verb("Shutdown", handle_shutdown);
+#if ONECAD_WORKER_HOOKS
     dispatcher.register_verb("Debug.Busy", handle_debug_busy);
+#endif
     solver_lane.register_verbs(dispatcher);  // Sketch* verbs -> solver lane
 }
 
@@ -489,7 +496,7 @@ nlohmann::json make_hello_result() { return make_hello_result_impl(); }
 int run_selftest() { return run_selftest_impl(); }
 
 int run_dispatch_loop(int in_fd, int out_fd, bool close_fds,
-                      onecad::protocol::JournalHooks journal) {
+                      onecad::protocol::JournalHooks journal, std::size_t lane_stack_bytes) {
     // Library mode owns both fds from the first statement: they are closed on
     // EVERY exit, an exception included, so the host end always sees EOF.
     // Until run() owns the reader fd, `closer` closes both.
@@ -512,6 +519,7 @@ int run_dispatch_loop(int in_fd, int out_fd, bool close_fds,
     // Every worker frame is stamped from the session head (SCHEMA §3).
     dispatcher.set_stamp_source([&session] { return session.head_stamp(); });
     dispatcher.set_journal_hooks(std::move(journal));
+    dispatcher.set_lane_stack_bytes(lane_stack_bytes);
 
     const Envelope hello = Envelope::hello(make_hello_result_impl());
     // From here the Dispatcher's exactly-once close owns the reader fd.

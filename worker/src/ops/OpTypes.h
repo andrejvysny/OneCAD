@@ -59,7 +59,10 @@ struct OpContext {
 // step payload. On Failed/Unsupported: error_code is the §8 code (recoverable —
 // scratch only), error_message the detail.
 struct OpOutcome {
-    enum class Status { Ok, Failed, Unsupported, Cancelled };
+    // Busy: a process-wide OCCT lock stayed busy (io/OcctBusy.h). Nothing ran;
+    // the executor aborts the whole plan RETRIABLE instead of recording a
+    // failed step.
+    enum class Status { Ok, Failed, Unsupported, Cancelled, Busy };
     Status status = Status::Ok;
 
     // Failure info (Status != Ok).
@@ -131,6 +134,14 @@ struct OpOutcome {
         OpOutcome o;
         o.status = Status::Cancelled;
         o.error_code = "CANCELLED";
+        return o;
+    }
+    // `msg` must keep the kOcctGlobalsBusy prefix (io::busy_message).
+    static OpOutcome busy(std::string msg) {
+        OpOutcome o;
+        o.status = Status::Busy;
+        o.error_code = "OP_FAILED";
+        o.error_message = std::move(msg);
         return o;
     }
 };

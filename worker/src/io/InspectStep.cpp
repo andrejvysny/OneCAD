@@ -10,6 +10,7 @@
 #include <Bnd_Box.hxx>
 #include <TopoDS_Shape.hxx>
 
+#include "io/OcctBusy.h"
 #include "io/OcctStaticGuard.h"
 #include "io/StepRead.h"
 #include "io/XcafCodec.h"
@@ -28,15 +29,6 @@ Envelope fail(std::uint64_t id, const std::string& message) {
     return Envelope::error_response(id,
                                     protocol::ErrorInfo{"OP_FAILED", message, /*retriable=*/false});
 }
-
-// A process-wide OCCT lock held by an in-process sibling worker
-// (OcctStaticGuard.h BoundedLock): nothing ran, so the probe is retriable.
-Envelope fail_busy(std::uint64_t id, const std::string& message) {
-    return Envelope::error_response(id,
-                                    protocol::ErrorInfo{"OP_FAILED", message, /*retriable=*/true});
-}
-
-bool is_busy(const std::string& error) { return error.rfind(kOcctGlobalsBusy, 0) == 0; }
 
 Envelope fail_read(std::uint64_t id, const std::string& message) {
     const char* code = message.find(kAmbiguousImportOrder) != std::string::npos
@@ -105,7 +97,11 @@ Envelope handle_inspect_step(const Envelope& req, const onecad::CancelToken& can
         return Envelope::error_response(
             req.id, protocol::ErrorInfo{"CANCELLED", "InspectStep cancelled", /*retriable=*/false});
     }
-    if (!read.ok() && is_busy(*read.error)) return fail_busy(req.id, "InspectStep: " + *read.error);
+    // A process-wide OCCT lock held by an in-process sibling worker: nothing
+    // ran, so the probe is retriable (io/OcctBusy.h).
+    if (!read.ok() && is_occt_busy(*read.error)) {
+        return busy_response(req.id, *read.error, "InspectStep");
+    }
     if (!read.ok()) return fail_read(req.id, "InspectStep: " + *read.error);
 
     // The XCAF attribute pass. ADVISORY: it runs unconditionally (so `productNames`
@@ -118,7 +114,7 @@ Envelope handle_inspect_step(const Envelope& req, const onecad::CancelToken& can
     }
     // A busy OCCT lock (in-process sibling holding it) is not "no attributes":
     // degrading would silently drop names/colours the file does carry.
-    if (is_busy(attrs.error)) return fail_busy(req.id, "InspectStep: " + attrs.error);
+    if (is_occt_busy(attrs.error)) return busy_response(req.id, attrs.error, "InspectStep");
     if (!attrs.error.empty()) {
         WLOG_WARN("InspectStep: XCAF attribute pass unavailable (%s); names/colors dropped",
                   attrs.error.c_str());
@@ -151,7 +147,7 @@ Envelope handle_inspect_step(const Envelope& req, const onecad::CancelToken& can
     // order — the single point where the §7.3 ordinals are baked into the bytes.
     std::vector<std::uint8_t> blob;
     const std::string err = write_xcaf_document(read.solids, bound.per_solid, blob);
-    if (!err.empty() && is_busy(err)) return fail_busy(req.id, "InspectStep: " + err);
+    if (is_occt_busy(err)) return busy_response(req.id, err, "InspectStep");
     if (!err.empty()) return fail(req.id, "InspectStep: " + err);
     resp.bin.push_back(protocol::BinSection{"geometry", /*off=*/0, blob.size()});
     resp.out_bin = std::move(blob);

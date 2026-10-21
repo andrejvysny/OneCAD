@@ -7,6 +7,8 @@
 // identically lives here, so the two can never drift.
 #pragma once
 
+#include <cstddef>
+
 #include <nlohmann/json.hpp>
 
 #include "protocol/Dispatcher.h"
@@ -30,8 +32,10 @@ int run_selftest();
 // call owns both fds and closes each exactly once before returning (library
 // mode); the sidecar passes false and leaves stdin/stdout to process exit.
 // `journal` (library only; empty for the sidecar) is installed on the
-// Dispatcher before the loop starts.
+// Dispatcher before the loop starts. `lane_stack_bytes` sizes the lane threads
+// (Dispatcher::set_lane_stack_bytes): 0, the sidecar, keeps the platform default.
 int run_dispatch_loop(int in_fd, int out_fd, bool close_fds = false,
-                      onecad::protocol::JournalHooks journal = {});
+                      onecad::protocol::JournalHooks journal = {},
+                      std::size_t lane_stack_bytes = 0);
 
 }  // namespace onecad::worker

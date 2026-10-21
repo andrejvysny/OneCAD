@@ -1,6 +1,7 @@
-// onecad_worker.cpp — see onecad_worker.h. P0.3 in-process spike, ONECAD-258.
+// onecad_worker.cpp — see onecad_worker.h. In-process host for iPadOS (ADR-0018).
 #include "capi/onecad_worker.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <string>
@@ -117,48 +118,69 @@ void close_valid(int in_fd, int out_fd) {
     if (out_fd >= 0 && out_fd != in_fd) ::close(out_fd);
 }
 
-int run_worker(const onecad_worker_config& cfg) {
+// The lane threads' stack in the library (util/LaneThread.h): the same 8 MiB a
+// host gives the run thread (docs/ios/KERNEL.md), not the 512 KiB secondary-
+// thread default, because an overflow inside OCCT takes the HOST app down.
+constexpr std::size_t kLibraryLaneStackBytes = std::size_t{8} << 20;
+
+// Everything after the sink is installed. Catches every exception itself, so
+// an escape is logged through THIS run's sink. Sets `handed_off` once
+// run_dispatch_loop owns the fds (from its first statement it closes both on
+// every exit, exceptional ones included).
+int run_with_sink(const onecad_worker_config& cfg, bool& handed_off) {
+    try {
+        onecad::log::set_level(level_from_abi(cfg.log_level));
+        onecad::io::set_occt_lock_wait_ms(cfg.occt_lock_wait_ms);
+        set_no_sigpipe(cfg.out_fd);
+        if (!onecad::endian::host_is_little_endian()) {
+            WLOG_ERROR("fatal: host is not little-endian; worker requires LE");
+            return 2;
+        }
+        onecad::worker::route_occt_diagnostics();
+        onecad::protocol::JournalHooks hooks = make_journal_hooks(cfg.journal_cb, cfg.journal_ctx);
+        handed_off = true;
+        return onecad::worker::run_dispatch_loop(cfg.in_fd, cfg.out_fd, /*close_fds=*/true,
+                                                 std::move(hooks), kLibraryLaneStackBytes);
+    } catch (const std::exception& ex) {
+        WLOG_ERROR("onecad_worker_run: escaped exception: %s", ex.what());
+    } catch (...) {
+        WLOG_ERROR("onecad_worker_run: escaped non-std exception");
+    }
+    return ONECAD_WORKER_EXIT_INTERNAL;
+}
+
+// No C++ exception may cross into a C/Rust caller (the entry points are
+// noexcept): SinkScope, the level and the lock wait are all set up INSIDE a
+// try, and the fds are closed here whenever run_dispatch_loop never got them,
+// so the host end always sees EOF (ADR-0016 finding B).
+int run_worker(const onecad_worker_config& cfg) noexcept {
     const int in_fd = cfg.in_fd;
     const int out_fd = cfg.out_fd;
     if (in_fd < 0 || out_fd < 0 || in_fd == out_fd) {
         close_valid(in_fd, out_fd);
         return ONECAD_WORKER_EXIT_INTERNAL;
     }
-    SinkScope sink(cfg.log_cb, cfg.log_ctx);
-    onecad::log::set_level(level_from_abi(cfg.log_level));
-    onecad::io::set_occt_lock_wait_ms(cfg.occt_lock_wait_ms);
-    set_no_sigpipe(out_fd);
-    // Until run_dispatch_loop owns the fds (from its first statement it closes
-    // both on every exit, exceptional ones included), an exception here must
-    // close them: otherwise the host end never sees EOF or a hello.
     bool handed_off = false;
-    // No C++ exception may cross into a C/Rust caller.
+    int code = ONECAD_WORKER_EXIT_INTERNAL;
     try {
-        if (!onecad::endian::host_is_little_endian()) {
-            WLOG_ERROR("fatal: host is not little-endian; worker requires LE");
-            close_valid(in_fd, out_fd);
-            return 2;
-        }
-        onecad::worker::route_occt_diagnostics();
-        onecad::protocol::JournalHooks hooks = make_journal_hooks(cfg.journal_cb, cfg.journal_ctx);
-        handed_off = true;
-        return onecad::worker::run_dispatch_loop(in_fd, out_fd, /*close_fds=*/true,
-                                                 std::move(hooks));
-    } catch (const std::exception& ex) {
-        WLOG_ERROR("onecad_worker_run: escaped exception: %s", ex.what());
+        // Its constructor allocates (live_sinks().push_back) and may throw.
+        SinkScope sink(cfg.log_cb, cfg.log_ctx);
+        code = run_with_sink(cfg, handed_off);
     } catch (...) {
-        WLOG_ERROR("onecad_worker_run: escaped non-std exception");
+        // Only SinkScope's constructor gets here (run_with_sink catches all),
+        // i.e. an allocation failed: log nothing (that would allocate again),
+        // just hand the host its EOF below.
     }
     if (!handed_off) close_valid(in_fd, out_fd);
-    return ONECAD_WORKER_EXIT_INTERNAL;
+    return code;
 }
 
 }  // namespace
 
-extern "C" int onecad_worker_abi_version(void) { return ONECAD_WORKER_ABI_VERSION; }
+extern "C" int onecad_worker_abi_version(void) noexcept { return ONECAD_WORKER_ABI_VERSION; }
 
 extern "C" int onecad_worker_run(int in_fd, int out_fd, onecad_worker_log_fn log_cb, void* ctx,
-                                 int log_level) {
+                                 int log_level) noexcept {
     onecad_worker_config cfg{};
     cfg.struct_size = sizeof(cfg);
     cfg.in_fd = in_fd;
@@ -169,7 +191,7 @@ extern "C" int onecad_worker_run(int in_fd, int out_fd, onecad_worker_log_fn log
     return run_worker(cfg);
 }
 
-extern "C" int onecad_worker_run_config(const onecad_worker_config* config) {
+extern "C" int onecad_worker_run_config(const onecad_worker_config* config) noexcept {
     if (config == nullptr) return ONECAD_WORKER_EXIT_INTERNAL;
     if (config->struct_size < sizeof(onecad_worker_config)) {
         close_valid(config->in_fd, config->out_fd);
