@@ -58,8 +58,9 @@ final hash is embedded in the host. Never re-sign the nested worker afterward.
 - `assets/native/cad-icons.json` contains ordered unprojected icon geometry;
   Rust generates the existing widget SVG registries. `bake-cad-icons --check`
   checks both files byte for byte. See [the source format](../assets/native/cad-icons.md).
-- `assets/native/app-icons` retains native packaging icon sources relocated
-  from the retired setup. The current packaging script does not select them.
+- `assets/native/app-icons` and `assets/native/brand` hold brand icons generated
+  from the SVG masters by `scripts/brand-icons.sh`. Packaging bundles
+  `brand/macos/OneCAD.icns`.
 - `docs/qa/expressions.fixture.json` and modeling coverage/contracts/residual JSON
   remain executable versioned inputs despite their documentation directory.
 - Protocol schemas/fixtures, render fixtures/goldens, the corpus, robustness

@@ -74,3 +74,12 @@ fn component_library_resets_source_tab() {
     navigate(&mut state, Nav::Library);
     assert_eq!(state.library.source, 0);
 }
+
+#[test]
+fn brand_symbol_decodes_for_both_themes() {
+    let ctx = egui::Context::default();
+    for dark in [false, true] {
+        let texture = brand_symbol(&ctx, dark).expect("embedded brand symbol decodes");
+        assert_eq!(texture.size(), [56, 56]);
+    }
+}
