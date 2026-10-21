@@ -14,12 +14,13 @@ Use the pinned toolchain, a fresh production sidecar and an isolated temporary
 profile. From the repository root:
 
 ```sh
-ONECAD_OCCT_ROOT="$HOME/.onecad-occt/8.0.1" scripts/build-worker.sh Release
+make build
 make run QA_ROOT=/private/tmp/onecad-release-check
 ```
 
-`make run` builds its worker under `worker/build-native` by default and generates
-a constrained-plate QA fixture when needed. See the [native host instructions](../../crates/onecad-ui/README.md)
+`make build` builds its worker under `worker/build-native` by default and generates
+a constrained-plate QA fixture when needed. `make run` only launches those existing
+outputs; use `make dev` to build before launch. See the [native host instructions](../../crates/onecad-ui/README.md)
 for blank-document startup, profile isolation, host arguments and input tracing.
 Use a fresh profile and cold process for startup and theme checks. Restarting a
 process is distinct from reopening a document in the running host.

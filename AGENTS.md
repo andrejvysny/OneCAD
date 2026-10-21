@@ -66,9 +66,11 @@ Pinned OCCT installation: `scripts/build-pinned-occt.sh`; packaging:
 `scripts/package-macos.sh`. The package script rewrites and signs worker dylibs
 before embedding its final hash. Never re-sign nested binaries with `--deep`.
 
-`make run` builds the worker, generates the constrained-plate QA document when
-needed and launches the native host with isolated paths. See `Makefile` and
-`crates/onecad-ui/README.md` for host arguments and environment requirements.
+`make build` builds/stages the worker, generates the constrained-plate QA document
+when needed and builds the native host. `make run` launches existing binaries only,
+using isolated paths. Use `make dev` to build first, then launch.
+See `Makefile` and `crates/onecad-ui/README.md` for host arguments and environment
+requirements.
 
 Generate renderer fixtures through shared services:
 
