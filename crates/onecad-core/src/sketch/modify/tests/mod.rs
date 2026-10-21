@@ -5,13 +5,12 @@ mod extend;
 mod props;
 mod remap;
 mod trim;
+mod trim_overlap;
 
 use std::collections::BTreeSet;
 
 use uuid::Uuid;
 
-use super::common::coincident_class;
-use super::geom::point_key;
 use super::{AddReason, ModifyIds, ModifyPlan};
 use crate::document::Document;
 use crate::edit::{DocumentSession, SketchEditOp};
@@ -191,6 +190,26 @@ pub(super) fn junction(
     }
 }
 
+/// A stem foot at (8,0) on `target` that is also the centre of an arc above
+/// the line, tied by a `Coincident` naming the arc's `Center` role
+/// (`role_in_weld`) or its centre point. Returns the `OnCurve` holding the
+/// junction on `target`, which uses the other spelling of the centre.
+pub(super) fn centre_junction(b: &mut B, target: EntityId, role_in_weld: bool) -> ConstraintId {
+    let (_, _, foot) = b.line((8.0, 5.0), (8.0, 0.0));
+    let (arc, centre) = b.arc((8.0, 0.0), 2.0, 0.3, 1.2);
+    let (role, point) = (
+        (arc, CurvePosition::Center),
+        (centre, CurvePosition::Arbitrary),
+    );
+    let (in_weld, in_on_curve) = if role_in_weld {
+        (role, point)
+    } else {
+        (point, role)
+    };
+    b.coincident((foot, CurvePosition::Arbitrary), in_weld);
+    b.on_curve_at(in_on_curve.0, in_on_curve.1, target)
+}
+
 pub(super) fn v(x: f64, y: f64) -> Vec2 {
     Vec2::new_unchecked(x, y)
 }
@@ -300,12 +319,77 @@ pub(super) fn check_accounting(
     check_no_restated_weld(after, plan);
 }
 
+type PointRef = (EntityId, CurvePosition);
+
+/// Canonical point reference, independent of the planner's `point_key`: a
+/// line `Start`/`End` role and an arc/circle/ellipse `Center` role name their
+/// point entity.
+fn canon(s: &Sketch, entity: EntityId, role: CurvePosition) -> PointRef {
+    let point = match (s.get_entity(entity), role) {
+        (Some(SketchEntity::Line { start, .. }), CurvePosition::Start) => Some(*start),
+        (Some(SketchEntity::Line { end, .. }), CurvePosition::End) => Some(*end),
+        (
+            Some(
+                SketchEntity::Arc { center, .. }
+                | SketchEntity::Circle { center, .. }
+                | SketchEntity::Ellipse { center, .. },
+            ),
+            CurvePosition::Center,
+        ) => Some(*center),
+        _ => None,
+    };
+    point.map_or((entity, role), |p| (p, CurvePosition::Arbitrary))
+}
+
+/// Union-find over every `Coincident` of a sketch, on canonical references.
+struct Welded {
+    refs: Vec<PointRef>,
+    parent: Vec<usize>,
+}
+
+impl Welded {
+    fn of(s: &Sketch) -> Self {
+        let mut w = Self {
+            refs: Vec::new(),
+            parent: Vec::new(),
+        };
+        for c in s.constraints() {
+            if let Constraint::Coincident {
+                point1,
+                point2,
+                point1_position,
+                point2_position,
+                ..
+            } = *c
+            {
+                let a = w.root(canon(s, point1, point1_position));
+                let b = w.root(canon(s, point2, point2_position));
+                w.parent[a] = b;
+            }
+        }
+        w
+    }
+
+    fn root(&mut self, r: PointRef) -> usize {
+        let mut i = self.refs.iter().position(|x| *x == r).unwrap_or_else(|| {
+            self.refs.push(r);
+            self.parent.push(self.refs.len() - 1);
+            self.refs.len() - 1
+        });
+        while self.parent[i] != i {
+            i = self.parent[i];
+        }
+        i
+    }
+}
+
 /// No `OnCurve` in the result restates a `Coincident` weld the plan added: a
 /// weld tying a piece end to point P makes `OnCurve(Q, piece)` the same
 /// equation twice for P and every Q a `Coincident` chain ties to P, which the
 /// worker solver reports as over-constrained. Point references compare
-/// canonically (a line role is its point entity).
+/// canonically (line and centre roles are their point entities).
 pub(super) fn check_no_restated_weld(after: &Sketch, plan: &ModifyPlan) {
+    let mut welded = Welded::of(after);
     let pieces: Vec<EntityId> = plan.pieces.iter().map(|p| p.id).collect();
     for added in &plan.added_constraints {
         if !matches!(
@@ -322,7 +406,7 @@ pub(super) fn check_no_restated_weld(after: &Sketch, plan: &ModifyPlan) {
         else {
             continue;
         };
-        let welded = coincident_class(after, (*point1, *point1_position));
+        let weld = welded.root(canon(after, *point1, *point1_position));
         for c in after.constraints() {
             if let Constraint::OnCurve {
                 point,
@@ -333,7 +417,7 @@ pub(super) fn check_no_restated_weld(after: &Sketch, plan: &ModifyPlan) {
             {
                 assert!(
                     !(pieces.contains(curve)
-                        && welded.contains(&point_key(after, *point, *point_position))),
+                        && welded.root(canon(after, *point, *point_position)) == weld),
                     "{c:?} restates weld {}",
                     added.id
                 );

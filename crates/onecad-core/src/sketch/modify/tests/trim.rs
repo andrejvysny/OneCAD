@@ -7,7 +7,12 @@ use crate::sketch::modify::{
     plan_trim, AddReason, DropReason, ModifyRefusal, TrimRequest, MIN_PIECE_MM,
 };
 
-fn trim(s: &Sketch, entity: EntityId, x: f64, y: f64) -> Result<ModifyPlan, ModifyRefusal> {
+pub(super) fn trim(
+    s: &Sketch,
+    entity: EntityId,
+    x: f64,
+    y: f64,
+) -> Result<ModifyPlan, ModifyRefusal> {
     plan_trim(
         s,
         &TrimRequest {
@@ -411,63 +416,20 @@ fn a_cut_weld_supersedes_on_curve_on_any_coincident_member() {
 }
 
 #[test]
-fn a_same_circle_arc_overlap_refuses_the_trim() {
-    // C7: the pick lies on the overlap with an arc of the same circle; a
-    // full circle there is refused alike.
-    let mut b = B::new();
-    let (arc, _) = b.arc((0.0, 0.0), 5.0, 0.0, PI);
-    let id = b.cid();
-    b.constrain(Constraint::Radius {
-        id,
-        entity: arc,
-        value: crate::document::variables::Scalar::new(5.0),
-    });
-    let (boundary, _) = b.arc((0.0, 0.0), 5.0, PI / 3.0, 2.0 * PI / 3.0);
-    let overlaps = ModifyRefusal::OverlapsBoundary {
-        entity: arc,
-        boundary,
-    };
-    assert_eq!(trim(&b.s, arc, 0.0, 5.0).unwrap_err(), overlaps);
-    // Cut at an overlap end from outside it, the piece would run along it.
-    assert_eq!(trim(&b.s, arc, 5.0, 0.5).unwrap_err(), overlaps);
-    let (circle, _) = b.circle((0.0, 0.0), 5.0);
-    assert_eq!(
-        trim(&b.s, circle, 0.0, -5.0).unwrap_err(),
-        ModifyRefusal::OverlapsBoundary {
-            entity: circle,
-            boundary: arc
-        }
-    );
-}
-
-#[test]
-fn a_collinear_boundary_cuts_at_its_end_points() {
-    let mut b = B::new();
-    let (l, _, _) = b.line((0.0, 0.0), (20.0, 0.0));
-    let (seg, p, q) = b.line((8.0, 0.0), (12.0, 0.0));
-    let plan = trim(&b.s, l, 10.0, 0.0).unwrap();
-    let after = apply(&b.s, &plan);
-    check_accounting(&b.s, &after, &plan, l, &[]);
-    assert_eq!(plan.pieces.len(), 2);
-    let (_, cut) = ends(&after, plan.pieces[0].id);
-    let (cut2, _) = ends(&after, plan.pieces[1].id);
-    assert!(near(cut, 8.0, 0.0) && near(cut2, 12.0, 0.0));
-    let welded: Vec<EntityId> = plan
-        .added_constraints
-        .iter()
-        .filter(|a| a.reason == AddReason::CutWeld { boundary: seg })
-        .filter_map(|a| match after.get_constraint(a.id) {
-            Some(Constraint::Coincident { point2, .. }) => Some(*point2),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(welded, vec![p, q]);
-    // A pick outside the overlap trims only up to it.
-    let head = trim(&b.s, l, 4.0, 0.0).unwrap();
-    assert_eq!(head.pieces.len(), 1);
-    let after = apply(&b.s, &head);
-    let (start, _) = ends(&after, head.pieces[0].id);
-    assert!(near(start, 8.0, 0.0));
+fn a_cut_weld_supersedes_on_curve_through_a_centre_role() {
+    for role_in_weld in [true, false] {
+        let mut b = B::new();
+        let (l, _, _) = b.line((0.0, 0.0), (10.0, 0.0));
+        let on = centre_junction(&mut b, l, role_in_weld);
+        let plan = trim(&b.s, l, 9.0, 0.0).unwrap();
+        let after = apply(&b.s, &plan);
+        check_accounting(&b.s, &after, &plan, l, &[]);
+        assert_eq!(
+            dropped_reason(&plan, on),
+            Some(DropReason::SupersededByCutWeld),
+            "role_in_weld {role_in_weld}"
+        );
+    }
 }
 
 #[test]

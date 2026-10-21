@@ -4,7 +4,8 @@
 //! repeatable and draws no ids. Scenes include boundary "feet" on the target's
 //! carrier (inside and beyond its extent) held there by an `OnCurve` that names
 //! the foot as a point entity, a line `End` role or an arc `Start` role, or
-//! naming either member of a stem foot `Coincident` with an arc `Start`.
+//! naming either member of a stem foot `Coincident` with an arc `Start` or
+//! with an arc centre (by `Center` role or centre point).
 
 use std::f64::consts::TAU;
 
@@ -48,6 +49,10 @@ enum Foot {
     /// A stem's end point plus an arc whose `Start` is `Coincident` with it;
     /// `(arc created first, OnCurve names the arc Start)`.
     Chained(bool, bool),
+    /// A stem's end point that is also an arc's centre, tied by a `Coincident`
+    /// naming the arc's `Center` role (`true`) or its centre point; the
+    /// `OnCurve` names the other spelling.
+    Centre(bool),
 }
 
 fn coord() -> impl Strategy<Value = (f64, f64)> {
@@ -88,6 +93,7 @@ fn foot() -> impl Strategy<Value = Foot> {
         Just(Foot::LineEnd),
         Just(Foot::ArcStart),
         (any::<bool>(), any::<bool>()).prop_map(|(a, n)| Foot::Chained(a, n)),
+        any::<bool>().prop_map(Foot::Centre),
     ]
 }
 
@@ -132,6 +138,19 @@ fn add_feet(b: &mut B, sc: &Scene, target: EntityId) {
             Foot::ArcStart => {
                 let arc = arc(b);
                 b.on_curve_at(arc, CurvePosition::Start, target);
+            }
+            Foot::Centre(role_in_weld) => {
+                let (_, _, foot) = stem(b);
+                let (arc, centre) = b.arc((fx, fy), 1.5, dir, dir + 1.0);
+                let role = (arc, CurvePosition::Center);
+                let point = (centre, CurvePosition::Arbitrary);
+                let (weld, named) = if role_in_weld {
+                    (role, point)
+                } else {
+                    (point, role)
+                };
+                b.coincident((foot, CurvePosition::Arbitrary), weld);
+                b.on_curve_at(named.0, named.1, target);
             }
             Foot::Chained(arc_first, name_arc) => {
                 let early = arc_first.then(|| arc(b));

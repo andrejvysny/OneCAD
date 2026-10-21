@@ -259,6 +259,24 @@ fn an_extend_weld_supersedes_on_curve_on_any_coincident_member() {
 }
 
 #[test]
+fn an_extend_weld_supersedes_on_curve_through_a_centre_role() {
+    for role_in_weld in [true, false] {
+        let mut b = B::new();
+        let (l, _, e) = b.line((0.0, 0.0), (5.0, 0.0));
+        let on = centre_junction(&mut b, l, role_in_weld);
+        let grown = extend(&b.s, l, 4.9, 0.0).unwrap();
+        assert!(near(grown.tip, 8.0, 0.0));
+        let after = apply(&b.s, &grown.plan);
+        check_accounting(&b.s, &after, &grown.plan, l, &[e]);
+        assert_eq!(
+            dropped_reason(&grown.plan, on),
+            Some(DropReason::SupersededByExtendWeld),
+            "role_in_weld {role_in_weld}"
+        );
+    }
+}
+
+#[test]
 fn an_arc_growing_into_an_arc_of_its_own_circle_is_refused() {
     let mut b = B::new();
     let (arc, _) = b.arc((0.0, 0.0), 5.0, 0.0, FRAC_PI_2);

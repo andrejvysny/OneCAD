@@ -165,7 +165,7 @@ pub enum ModifyRefusal {
     /// (collinear line, arc of the same circle) that continues ahead: the
     /// extension would run along it, never meet it. Also any trim cut or
     /// extend stop at an end point of an arc of the target's own circle.
-    #[error("{entity} overlaps boundary {boundary}")]
+    #[error("{entity} shares its carrier with boundary {boundary}")]
     OverlapsBoundary {
         /// The extended entity.
         entity: EntityId,

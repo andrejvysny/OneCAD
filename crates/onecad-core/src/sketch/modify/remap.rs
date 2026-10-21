@@ -13,7 +13,7 @@
 //! | Radius, Diameter (arc/circle) | copied to every arc piece |
 //! | Concentric (arc/circle) | first arc piece only — pieces share one centre point, so a copy would restate the same equation |
 //! | Tangent | kept on the piece holding the contact point; dropped if it was trimmed away |
-//! | OnCurve (anywhere on the target) | kept on the piece holding the point; dropped if trimmed away, or if a cut now welds that point — or any point a `Coincident` chain ties it to — with a `Coincident` (however the point is named: point entity, line role or arc role) |
+//! | OnCurve (anywhere on the target) | kept on the piece holding the point; dropped if trimmed away, or if a cut now welds that point — or any point a `Coincident` chain ties it to — with a `Coincident` (however the point is named: point entity, line role, arc role or centre role) |
 //! | Equal on a line, end-to-end Distance | dropped — the measured length changed |
 //! | Midpoint of the line | dropped — the midpoint moved |
 //! | Equal (arc/circle), Angle, Symmetric axis, point/curve Distance | kept when exactly one piece survives; dropped on a split |
