@@ -1,6 +1,9 @@
 //! Property tests over random scenes: every successful plan applies through the
-//! real edit path with total accounting and no dangling references; every
-//! plan is reproducible; every refusal is repeatable and draws no ids.
+//! real edit path with total accounting, no dangling references and no
+//! `OnCurve` restating a weld; every plan is reproducible; every refusal is
+//! repeatable and draws no ids. Scenes include boundary "feet" on the target's
+//! carrier (inside and beyond its extent) held there by an `OnCurve` that names
+//! the foot as a point entity, a line `End` role or an arc `Start` role.
 
 use std::f64::consts::TAU;
 
@@ -28,6 +31,19 @@ struct Scene {
     circles: Vec<((f64, f64), f64)>,
     flags: [bool; 6],
     pick: f64,
+    /// `(carrier position 0..1, stem direction, how the foot is named)`.
+    feet: Vec<(f64, f64, Foot)>,
+}
+
+/// How a boundary foot on the target's carrier is named in its `OnCurve`.
+#[derive(Debug, Clone, Copy)]
+enum Foot {
+    /// A stem line's end POINT entity.
+    Point,
+    /// A stem line's `End` role.
+    LineEnd,
+    /// An arc's `Start` role.
+    ArcStart,
 }
 
 fn coord() -> impl Strategy<Value = (f64, f64)> {
@@ -48,8 +64,9 @@ fn scene() -> impl Strategy<Value = Scene> {
         prop::collection::vec((coord(), 1.0f64..12.0), 0..3),
         prop::array::uniform6(prop::bool::weighted(0.3)),
         0.0f64..1.0,
+        prop::collection::vec((0.0f64..1.0, 0.0f64..TAU, foot()), 0..3),
     )
-        .prop_map(|(kind, a, b, segments, circles, flags, pick)| Scene {
+        .prop_map(|(kind, a, b, segments, circles, flags, pick, feet)| Scene {
             kind,
             a,
             b,
@@ -57,7 +74,55 @@ fn scene() -> impl Strategy<Value = Scene> {
             circles,
             flags,
             pick,
+            feet,
         })
+}
+
+fn foot() -> impl Strategy<Value = Foot> {
+    prop_oneof![Just(Foot::Point), Just(Foot::LineEnd), Just(Foot::ArcStart)]
+}
+
+/// A point on the target's carrier: a line from `t = −0.5` to `1.5` (beyond
+/// both ends), a circle/arc anywhere round its full circle.
+fn on_carrier(sc: &Scene, u: f64) -> (f64, f64) {
+    match sc.kind {
+        Kind::Line => {
+            let t = -0.5 + 2.0 * u;
+            (
+                sc.a.0 + (sc.b.0 - sc.a.0) * t,
+                sc.a.1 + (sc.b.1 - sc.a.1) * t,
+            )
+        }
+        Kind::Circle | Kind::Arc(..) => {
+            let (r, ang) = (radius(sc), u * TAU);
+            (sc.a.0 + r * ang.cos(), sc.a.1 + r * ang.sin())
+        }
+    }
+}
+
+fn radius(sc: &Scene) -> f64 {
+    2.0 + sc.b.0.abs() / 2.0
+}
+
+/// Boundaries ending on the target's carrier, held there by an `OnCurve`.
+fn add_feet(b: &mut B, sc: &Scene, target: EntityId) {
+    for &(u, dir, how) in &sc.feet {
+        let (fx, fy) = on_carrier(sc, u);
+        let (dx, dy) = (3.0 * dir.cos(), 3.0 * dir.sin());
+        match how {
+            Foot::Point | Foot::LineEnd => {
+                let (stem, _, foot) = b.line((fx + dx, fy + dy), (fx, fy));
+                match how {
+                    Foot::Point => b.on_curve(foot, target),
+                    _ => b.on_curve_at(stem, CurvePosition::End, target),
+                };
+            }
+            Foot::ArcStart => {
+                let (arc, _) = b.arc((fx - dx, fy - dy), 3.0, dir, dir + 1.0);
+                b.on_curve_at(arc, CurvePosition::Start, target);
+            }
+        }
+    }
 }
 
 /// Builds the scene; returns the sketch, the target, and a pick on it.
@@ -79,19 +144,20 @@ fn build(sc: &Scene) -> (Sketch, EntityId, Vec2) {
             (l, at, Some((s, e)))
         }
         Kind::Circle => {
-            let r = 2.0 + sc.b.0.abs() / 2.0;
+            let r = radius(sc);
             let (c, _) = b.circle(sc.a, r);
             let ang = sc.pick * TAU;
             (c, v(sc.a.0 + r * ang.cos(), sc.a.1 + r * ang.sin()), None)
         }
         Kind::Arc(s0, s1) => {
-            let r = 2.0 + sc.b.0.abs() / 2.0;
+            let r = radius(sc);
             let (arc, _) = b.arc(sc.a, r, s0, s1);
             let ang = s0 + sc.pick * (s1 - s0);
             (arc, v(sc.a.0 + r * ang.cos(), sc.a.1 + r * ang.sin()), None)
         }
     };
     constrain(&mut b, sc, target, ends, &lines, &circles);
+    add_feet(&mut b, sc, target);
     (b.s, target, pick)
 }
 

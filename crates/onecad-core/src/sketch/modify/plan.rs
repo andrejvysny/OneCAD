@@ -66,9 +66,13 @@ pub enum DropReason {
     SplitAmbiguous,
     /// Its on-curve point or tangent contact lies in the removed span.
     OnRemovedSpan,
-    /// An `OnCurve` of a point the cut now welds with a `Coincident`; keeping
-    /// both would state the same fact twice and over-constrain the point.
+    /// An `OnCurve` on the target of a point the cut now welds with a
+    /// `Coincident` (however the point is named); keeping both would state the
+    /// same fact twice and over-constrain the point.
     SupersededByCutWeld,
+    /// An `OnCurve` on the target of the boundary end point the extended end
+    /// now welds to with a `Coincident`; same redundancy as above.
+    SupersededByExtendWeld,
     /// No remap rule covers this constraint/entity combination.
     Unsupported,
 }
@@ -145,8 +149,9 @@ pub enum ModifyRefusal {
     /// Zero-length line, zero radius/sweep or missing defining point.
     #[error("entity {0} is degenerate")]
     DegenerateTarget(EntityId),
-    /// The pick sits on a boundary intersection (trim) or exactly between
-    /// both ends (extend), so the intended span/end is unknowable.
+    /// The pick sits on a boundary intersection (trim), exactly between both
+    /// ends (extend), half-way around an arc's gap, or on an arc/circle
+    /// centre, so the intended span/end is unknowable.
     #[error("pick on {0} is ambiguous")]
     AmbiguousPick(EntityId),
     /// A surviving piece or the extension would be shorter than
@@ -156,6 +161,16 @@ pub enum ModifyRefusal {
     /// The end's continuation meets no boundary.
     #[error("no boundary ahead of {0}")]
     NoBoundaryHit(EntityId),
+    /// The end already lies on a boundary sharing the target's carrier
+    /// (collinear line, arc of the same circle) that continues ahead: the
+    /// extension would run along it, never meet it.
+    #[error("end of {entity} already lies along boundary {boundary}")]
+    OverlapsBoundary {
+        /// The extended entity.
+        entity: EntityId,
+        /// The same-carrier boundary.
+        boundary: EntityId,
+    },
     /// The nearest boundary only touches the continuation tangentially.
     #[error("nearest boundary ahead of {0} is tangent")]
     TangentHit(EntityId),

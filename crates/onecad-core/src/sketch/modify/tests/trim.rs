@@ -363,3 +363,91 @@ fn a_pick_past_an_arc_end_selects_the_nearer_end_around_the_circle() {
     let end_side = trim(&b.s, arc, -5.0 * 0.2f64.cos(), -5.0 * 0.2f64.sin()).unwrap();
     assert!(!end_side.pieces[0].owns_end);
 }
+
+#[test]
+fn a_role_named_foot_at_a_cut_is_superseded_not_restated() {
+    // Line foot named by the stem's End role, arc foot by the arc's Start role.
+    let mut b = B::new();
+    let (l, _, _) = b.line((0.0, 0.0), (10.0, 0.0));
+    let (stem, _, _) = b.line((2.0, 5.0), (2.0, 0.0));
+    let stem_on = b.on_curve_at(stem, CurvePosition::End, l);
+    let (arc, _) = b.arc((11.0, 0.0), 3.0, PI, 1.5 * PI);
+    let arc_on = b.on_curve_at(arc, CurvePosition::Start, l);
+    let plan = trim(&b.s, l, 5.0, 0.0).unwrap();
+    let after = apply(&b.s, &plan);
+    check_accounting(&b.s, &after, &plan, l, &[]);
+    for on in [stem_on, arc_on] {
+        assert_eq!(
+            dropped_reason(&plan, on),
+            Some(DropReason::SupersededByCutWeld)
+        );
+    }
+    let welded_arc = plan.added_constraints.iter().any(|a| {
+        a.reason == AddReason::CutWeld { boundary: arc }
+            && matches!(
+                after.get_constraint(a.id),
+                Some(Constraint::Coincident { point2, point2_position: CurvePosition::Start, .. })
+                    if *point2 == arc
+            )
+    });
+    assert!(welded_arc, "{plan:#?}");
+}
+
+#[test]
+fn a_collinear_boundary_cuts_at_its_end_points() {
+    let mut b = B::new();
+    let (l, _, _) = b.line((0.0, 0.0), (20.0, 0.0));
+    let (seg, p, q) = b.line((8.0, 0.0), (12.0, 0.0));
+    let plan = trim(&b.s, l, 10.0, 0.0).unwrap();
+    let after = apply(&b.s, &plan);
+    check_accounting(&b.s, &after, &plan, l, &[]);
+    assert_eq!(plan.pieces.len(), 2);
+    let (_, cut) = ends(&after, plan.pieces[0].id);
+    let (cut2, _) = ends(&after, plan.pieces[1].id);
+    assert!(near(cut, 8.0, 0.0) && near(cut2, 12.0, 0.0));
+    let welded: Vec<EntityId> = plan
+        .added_constraints
+        .iter()
+        .filter(|a| a.reason == AddReason::CutWeld { boundary: seg })
+        .filter_map(|a| match after.get_constraint(a.id) {
+            Some(Constraint::Coincident { point2, .. }) => Some(*point2),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(welded, vec![p, q]);
+    // A pick outside the overlap trims only up to it.
+    let head = trim(&b.s, l, 4.0, 0.0).unwrap();
+    assert_eq!(head.pieces.len(), 1);
+    let after = apply(&b.s, &head);
+    let (start, _) = ends(&after, head.pieces[0].id);
+    assert!(near(start, 8.0, 0.0));
+}
+
+#[test]
+fn a_pick_half_way_round_an_arc_gap_or_at_a_centre_is_ambiguous() {
+    let mut b = B::new();
+    let (arc, _) = b.arc((0.0, 0.0), 5.0, 0.0, FRAC_PI_2);
+    b.line((3.0, -10.0), (3.0, 10.0));
+    let (circle, _) = b.circle((30.0, 0.0), 5.0);
+    b.line((30.0, -10.0), (30.0, 10.0));
+    let anti = 1.25 * PI;
+    for d in [0.0, 1e-7, -1e-7] {
+        let (x, y) = (5.0 * (anti + d).cos(), 5.0 * (anti + d).sin());
+        assert_eq!(
+            trim(&b.s, arc, x, y).unwrap_err(),
+            ModifyRefusal::AmbiguousPick(arc),
+            "gap pick offset {d}"
+        );
+    }
+    assert_eq!(
+        trim(&b.s, arc, 0.0, 0.0).unwrap_err(),
+        ModifyRefusal::AmbiguousPick(arc)
+    );
+    assert_eq!(
+        trim(&b.s, circle, 30.0, 0.0).unwrap_err(),
+        ModifyRefusal::AmbiguousPick(circle)
+    );
+    // Clearly nearer one end still resolves.
+    let clear = 1.1 * PI;
+    assert!(trim(&b.s, arc, 5.0 * clear.cos(), 5.0 * clear.sin()).is_ok());
+}

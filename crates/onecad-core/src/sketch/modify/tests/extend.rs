@@ -4,7 +4,9 @@ use std::f64::consts::{FRAC_PI_2, PI};
 
 use super::*;
 use crate::document::variables::Scalar;
-use crate::sketch::modify::{plan_extend, AddReason, ExtendPlan, ExtendRequest, ModifyRefusal};
+use crate::sketch::modify::{
+    plan_extend, AddReason, DropReason, ExtendPlan, ExtendRequest, ModifyRefusal,
+};
 
 fn extend(s: &Sketch, entity: EntityId, x: f64, y: f64) -> Result<ExtendPlan, ModifyRefusal> {
     plan_extend(
@@ -197,5 +199,90 @@ fn a_locked_end_point_is_never_moved() {
     assert_eq!(
         extend(&b.s, l, 3.5, 0.0).unwrap_err(),
         ModifyRefusal::ReferenceLocked(id)
+    );
+}
+
+#[test]
+fn landing_on_a_foot_supersedes_its_on_curve_for_lines_and_arcs() {
+    let mut b = B::new();
+    let (l, _, e) = b.line((0.0, 0.0), (5.0, 0.0));
+    let (_, _, foot) = b.line((8.0, 5.0), (8.0, 0.0));
+    let on = b.on_curve(foot, l);
+    let grown = extend(&b.s, l, 4.9, 0.0).unwrap();
+    let after = apply(&b.s, &grown.plan);
+    check_accounting(&b.s, &after, &grown.plan, l, &[e]);
+    assert_eq!(
+        dropped_reason(&grown.plan, on),
+        Some(DropReason::SupersededByExtendWeld)
+    );
+
+    let mut b = B::new();
+    let (arc, _) = b.arc((0.0, 0.0), 5.0, 0.0, FRAC_PI_2);
+    // Not tangent at (−5,0): it meets the circle there transversally.
+    let (stem, _, _) = b.line((-8.0, 4.0), (-5.0, 0.0));
+    let on = b.on_curve_at(stem, CurvePosition::End, arc);
+    let radius = b.cid();
+    b.constrain(Constraint::Radius {
+        id: radius,
+        entity: arc,
+        value: Scalar::new(5.0),
+    });
+    let grown = extend(&b.s, arc, 0.5, 5.0).unwrap();
+    let after = apply(&b.s, &grown.plan);
+    check_accounting(&b.s, &after, &grown.plan, arc, &[]);
+    assert_eq!(
+        dropped_reason(&grown.plan, on),
+        Some(DropReason::SupersededByExtendWeld)
+    );
+    assert_eq!(grown.plan.kept_constraints, vec![radius]);
+    let (_, a1) = arc_angles(&after, arc);
+    assert!((a1 - PI).abs() < 1e-9, "{a1}");
+}
+
+#[test]
+fn a_collinear_boundary_stops_the_extend_or_refuses_when_already_on_it() {
+    let mut b = B::new();
+    let (l, _, e) = b.line((0.0, 0.0), (5.0, 0.0));
+    let (_, p, _) = b.line((8.0, 0.0), (12.0, 0.0));
+    b.line((20.0, -5.0), (20.0, 5.0));
+    let grown = extend(&b.s, l, 4.9, 0.0).unwrap();
+    let after = apply(&b.s, &grown.plan);
+    check_accounting(&b.s, &after, &grown.plan, l, &[e]);
+    assert!(near(grown.tip, 8.0, 0.0));
+    assert!(matches!(
+        after.get_constraint(grown.plan.added_constraints[0].id),
+        Some(Constraint::Coincident { point2, .. }) if *point2 == p
+    ));
+    // A collinear segment that already starts at the end would be run along.
+    let mut b = B::new();
+    let (l, _, _) = b.line((0.0, 0.0), (5.0, 0.0));
+    let (touching, _, _) = b.line((5.0, 0.0), (9.0, 0.0));
+    b.line((20.0, -5.0), (20.0, 5.0));
+    assert_eq!(
+        extend(&b.s, l, 4.9, 0.0).unwrap_err(),
+        ModifyRefusal::OverlapsBoundary {
+            entity: l,
+            boundary: touching
+        }
+    );
+}
+
+#[test]
+fn an_arc_pick_half_way_round_its_gap_or_at_its_centre_is_ambiguous() {
+    let mut b = B::new();
+    let (arc, _) = b.arc((0.0, 0.0), 5.0, 0.0, FRAC_PI_2);
+    b.line((-10.0, 0.0), (0.0, 0.0));
+    let anti = 1.25 * PI;
+    for d in [0.0, 1e-7, -1e-7] {
+        let (x, y) = (5.0 * (anti + d).cos(), 5.0 * (anti + d).sin());
+        assert_eq!(
+            extend(&b.s, arc, x, y).unwrap_err(),
+            ModifyRefusal::AmbiguousPick(arc),
+            "gap pick offset {d}"
+        );
+    }
+    assert_eq!(
+        extend(&b.s, arc, 0.0, 0.0).unwrap_err(),
+        ModifyRefusal::AmbiguousPick(arc)
     );
 }

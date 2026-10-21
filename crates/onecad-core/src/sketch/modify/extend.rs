@@ -3,11 +3,13 @@
 use std::f64::consts::TAU;
 
 use super::common::{crossings, modifiable, representative, weld, Crossing};
-use super::geom::{angle_of, arc_param, curve_of, line_param, normalize_angle, Curve, Pt};
+use super::geom::{
+    angle_of, arc_param, curve_of, line_param, normalize_angle, on_circle, point_key, Curve, Pt,
+};
 use super::slots::{refs, Slot};
 use super::{
-    AddReason, AddedConstraint, ExtendPlan, ExtendRequest, ModifyIds, ModifyPlan, ModifyRefusal,
-    PlannedPiece, COINCIDENT_MM, MIN_PIECE_MM,
+    AddReason, AddedConstraint, DropReason, DroppedConstraint, ExtendPlan, ExtendRequest,
+    ModifyIds, ModifyPlan, ModifyRefusal, PlannedPiece, COINCIDENT_MM, MIN_PIECE_MM,
 };
 use crate::edit::SketchEditOp;
 use crate::ids::{ConstraintId, EntityId};
@@ -18,9 +20,11 @@ use crate::sketch::{Constraint, CurvePosition, Sketch, SketchEntity};
 ///
 /// # Errors
 /// A [`ModifyRefusal`] when the target is missing, a point, locked, a circle or
-/// ellipse, degenerate, picked exactly mid-way, its end is shared or held by a
-/// constraint, or its continuation meets no boundary / only a tangent one / one
-/// closer than [`MIN_PIECE_MM`]. A refusal draws no id from `ids`.
+/// ellipse, degenerate, picked ambiguously (mid-way, half-way around an arc's
+/// gap, at the centre), its end is shared or held by a constraint, already lies
+/// on a same-carrier boundary, or its continuation meets no boundary / only a
+/// tangent one / one closer than [`MIN_PIECE_MM`]. A refusal draws no id from
+/// `ids`.
 pub fn plan_extend(
     sketch: &Sketch,
     request: &ExtendRequest,
@@ -81,20 +85,27 @@ fn extend_line(
     };
     let curve = Curve::Line { a, b };
     let raw = crossings(sketch, id, &curve, false, &ahead);
-    let hit = nearest(raw, tol, f64::INFINITY, id)?;
+    let end = if role == CurvePosition::End { b } else { a };
+    let hit = nearest(sketch, raw, end, (tol, f64::INFINITY), id)?;
     if hit.param * len < MIN_PIECE_MM {
         return Err(ModifyRefusal::DegeneratePiece(id));
     }
     let tip = hit.p.to_vec2().ok_or(ModifyRefusal::DegenerateTarget(id))?;
-    let ops = vec![SketchEditOp::SetEntityPositions {
+    let superseded = superseded(sketch, id, &hit);
+    let mut ops: Vec<SketchEditOp> = superseded
+        .iter()
+        .map(|&constraint| SketchEditOp::RemoveConstraint { constraint })
+        .collect();
+    ops.push(SketchEditOp::SetEntityPositions {
         positions: vec![(point, tip)],
-    }];
+    });
     let grown = Grown {
         id,
         role,
         endpoint: (point, CurvePosition::Arbitrary),
         tip,
         hit,
+        superseded,
     };
     Ok(finish(grown, ops, Vec::new(), ids))
 }
@@ -110,6 +121,10 @@ fn extend_arc(
     if r * sweep < MIN_PIECE_MM {
         return Err(ModifyRefusal::DegenerateTarget(id));
     }
+    // At the centre the pick has no direction, so no end is nearer.
+    if pick.dist(c) <= COINCIDENT_MM {
+        return Err(ModifyRefusal::AmbiguousPick(id));
+    }
     let tol = COINCIDENT_MM / r;
     let role = pick_end(arc_param(c, r, start, pick), sweep, true, tol, id)?;
     check_free(sketch, id, role, None)?;
@@ -124,8 +139,17 @@ fn extend_arc(
     };
     let curve = Curve::Arc { c, r, start, sweep };
     let raw = crossings(sketch, id, &curve, false, &ahead);
+    let end = on_circle(
+        c,
+        r,
+        if role == CurvePosition::End {
+            end_angle
+        } else {
+            start
+        },
+    );
     // Growing into the arc's own span would wrap it onto itself.
-    let hit = nearest(raw, tol, TAU - sweep - tol, id)?;
+    let hit = nearest(sketch, raw, end, (tol, TAU - sweep - tol), id)?;
     if hit.param * r < MIN_PIECE_MM {
         return Err(ModifyRefusal::DegeneratePiece(id));
     }
@@ -136,20 +160,27 @@ fn extend_arc(
     };
     let grown = with_angles(entity, normalize_angle(new_start), normalize_angle(new_end));
     let tip = hit.p.to_vec2().ok_or(ModifyRefusal::DegenerateTarget(id))?;
-    let (ops, kept) = replace_arc(sketch, grown);
+    let superseded = superseded(sketch, id, &hit);
+    let (ops, kept) = replace_arc(sketch, grown, &superseded);
     let grown = Grown {
         id,
         role,
         endpoint: (id, role),
         tip,
         hit,
+        superseded,
     };
     Ok(finish(grown, ops, kept, ids))
 }
 
 /// Replaces the arc under its own id (there is no in-place angle op): every
-/// constraint naming it is removed and re-added unchanged, so all are kept.
-fn replace_arc(sketch: &Sketch, grown: SketchEntity) -> (Vec<SketchEditOp>, Vec<ConstraintId>) {
+/// constraint naming it is removed and re-added unchanged — and so kept —
+/// except the `superseded` ones, which stay removed.
+fn replace_arc(
+    sketch: &Sketch,
+    grown: SketchEntity,
+    superseded: &[ConstraintId],
+) -> (Vec<SketchEditOp>, Vec<ConstraintId>) {
     let id = grown.id();
     let held: Vec<&Constraint> = sketch
         .constraints()
@@ -162,15 +193,38 @@ fn replace_arc(sketch: &Sketch, grown: SketchEntity) -> (Vec<SketchEditOp>, Vec<
         .collect();
     ops.push(SketchEditOp::RemoveEntity { entity: id });
     ops.push(SketchEditOp::AddEntity { entity: grown });
-    ops.extend(held.iter().map(|k| SketchEditOp::AddConstraint {
+    let readded: Vec<&Constraint> = held
+        .into_iter()
+        .filter(|k| !superseded.contains(&k.id()))
+        .collect();
+    ops.extend(readded.iter().map(|k| SketchEditOp::AddConstraint {
         constraint: (*k).clone(),
     }));
-    (ops, held.iter().map(|k| k.id()).collect())
+    (ops, readded.iter().map(|k| k.id()).collect())
+}
+
+/// `OnCurve`s on the target of the boundary end point the extend welds to:
+/// once the grown end is `Coincident` with that point, each restates the weld
+/// (the solver reports the pair over-constrained). Matched however the point
+/// is named.
+fn superseded(sketch: &Sketch, id: EntityId, hit: &Crossing) -> Vec<ConstraintId> {
+    let Some(welded) = hit.at_endpoint else {
+        return Vec::new();
+    };
+    sketch
+        .constraints()
+        .iter()
+        .filter(|c| {
+            matches!(c, Constraint::OnCurve { point, point_position, curve, .. }
+                if *curve == id && point_key(sketch, *point, *point_position) == welded)
+        })
+        .map(Constraint::id)
+        .collect()
 }
 
 /// The end nearer `param` on `[0, len]`; a pick within `tol` of the middle is
 /// ambiguous. On an arc (`wrap`) a pick past the sweep counts for the nearer
-/// end around the circle.
+/// end around the circle, and one half-way around the gap is ambiguous.
 fn pick_end(
     param: f64,
     len: f64,
@@ -178,10 +232,18 @@ fn pick_end(
     tol: f64,
     id: EntityId,
 ) -> Result<CurvePosition, ModifyRefusal> {
-    let param = match wrap && param > len {
-        true if param - len < TAU - param => len,
-        true => 0.0,
-        false => param,
+    let param = if wrap && param > len {
+        let (to_end, to_start) = (param - len, TAU - param);
+        if (to_end - to_start).abs() <= 2.0 * tol {
+            return Err(ModifyRefusal::AmbiguousPick(id));
+        }
+        if to_end < to_start {
+            len
+        } else {
+            0.0
+        }
+    } else {
+        param
     };
     let mid = 0.5 * len;
     if (param - mid).abs() <= tol {
@@ -247,17 +309,31 @@ fn check_free(
 }
 
 /// The nearest crossing strictly ahead (`tol < param < limit`); refused when
-/// none, or when every crossing at that distance is a tangential touch.
+/// none, when every crossing at that distance is a tangential touch, or when
+/// `end` already lies on a same-carrier boundary that continues ahead.
 fn nearest(
+    sketch: &Sketch,
     raw: Vec<Crossing>,
-    tol: f64,
-    limit: f64,
+    end: Pt,
+    (tol, limit): (f64, f64),
     id: EntityId,
 ) -> Result<Crossing, ModifyRefusal> {
     let ahead: Vec<Crossing> = raw
         .into_iter()
         .filter(|c| c.param > tol && c.param < limit)
         .collect();
+    for c in ahead.iter().filter(|c| c.overlap) {
+        let covers_end = sketch
+            .get_entity(c.boundary)
+            .and_then(|e| curve_of(sketch, e))
+            .is_some_and(|b| b.contains(end));
+        if covers_end {
+            return Err(ModifyRefusal::OverlapsBoundary {
+                entity: id,
+                boundary: c.boundary,
+            });
+        }
+    }
     let min = ahead
         .iter()
         .map(|c| c.param)
@@ -292,6 +368,8 @@ struct Grown {
     endpoint: (EntityId, CurvePosition),
     tip: Vec2,
     hit: Crossing,
+    /// `OnCurve`s the weld makes redundant; removed by `ops`, reported here.
+    superseded: Vec<ConstraintId>,
 }
 
 /// Appends the weld holding the grown end on its boundary and the accounting.
@@ -322,7 +400,14 @@ fn finish(
             added_points: Vec::new(),
             kept_constraints,
             added_constraints: vec![added],
-            dropped_constraints: Vec::new(),
+            dropped_constraints: grown
+                .superseded
+                .iter()
+                .map(|&id| DroppedConstraint {
+                    id,
+                    reason: DropReason::SupersededByExtendWeld,
+                })
+                .collect(),
         },
         end: grown.role,
         tip: grown.tip,

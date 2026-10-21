@@ -10,7 +10,8 @@ use std::collections::BTreeSet;
 
 use uuid::Uuid;
 
-use super::{ModifyIds, ModifyPlan};
+use super::geom::point_key;
+use super::{AddReason, ModifyIds, ModifyPlan};
 use crate::document::Document;
 use crate::edit::{DocumentSession, SketchEditOp};
 use crate::ids::{ConstraintId, DocumentId, EntityId, SketchId};
@@ -132,11 +133,20 @@ impl B {
         })
     }
     pub fn on_curve(&mut self, point: EntityId, curve: EntityId) -> ConstraintId {
+        self.on_curve_at(point, CurvePosition::Arbitrary, curve)
+    }
+    /// `OnCurve` naming the point by role (`Start`/`End` of a line or arc).
+    pub fn on_curve_at(
+        &mut self,
+        point: EntityId,
+        point_position: CurvePosition,
+        curve: EntityId,
+    ) -> ConstraintId {
         let id = self.cid();
         self.constrain(Constraint::OnCurve {
             id,
             point,
-            point_position: CurvePosition::Arbitrary,
+            point_position,
             curve,
             position: CurvePosition::Arbitrary,
         })
@@ -249,6 +259,53 @@ pub(super) fn check_accounting(
         "result constraints = untouched + kept + added"
     );
     check_entities(before, after, plan, target, moved);
+    check_no_restated_weld(after, plan);
+}
+
+/// No `OnCurve` in the result restates a `Coincident` weld the plan added: a
+/// weld tying a piece end to point P makes `OnCurve(P, piece)` the same
+/// equation twice, which the worker solver reports as over-constrained.
+/// Point references compare canonically (a line role is its point entity).
+pub(super) fn check_no_restated_weld(after: &Sketch, plan: &ModifyPlan) {
+    let pieces: Vec<EntityId> = plan.pieces.iter().map(|p| p.id).collect();
+    for added in &plan.added_constraints {
+        if !matches!(
+            added.reason,
+            AddReason::CutWeld { .. } | AddReason::ExtendWeld { .. }
+        ) {
+            continue;
+        }
+        let Some(Constraint::Coincident {
+            point1,
+            point2,
+            point1_position,
+            point2_position,
+            ..
+        }) = after.get_constraint(added.id)
+        else {
+            continue;
+        };
+        let welded = [
+            point_key(after, *point1, *point1_position),
+            point_key(after, *point2, *point2_position),
+        ];
+        for c in after.constraints() {
+            if let Constraint::OnCurve {
+                point,
+                point_position,
+                curve,
+                ..
+            } = c
+            {
+                assert!(
+                    !(pieces.contains(curve)
+                        && welded.contains(&point_key(after, *point, *point_position))),
+                    "{c:?} restates weld {}",
+                    added.id
+                );
+            }
+        }
+    }
 }
 
 fn check_entities(

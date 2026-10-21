@@ -22,14 +22,13 @@ struct Minted {
 }
 
 impl Minted {
-    /// Existing point entities a cut weld ties a piece endpoint to.
-    fn welded_points(&self) -> Vec<EntityId> {
+    /// Existing boundary endpoints a cut `Coincident` ties a piece end to, as
+    /// canonical references (`Crossing::at_endpoint` is canonical: a line's
+    /// endpoint point entity, or an arc plus its role).
+    fn welded_points(&self) -> Vec<(EntityId, CurvePosition)> {
         self.cuts
             .iter()
-            .filter_map(|(_, c)| match c.at_endpoint {
-                Some((p, CurvePosition::Arbitrary)) => Some(p),
-                _ => None,
-            })
+            .filter_map(|(_, c)| c.at_endpoint)
             .collect()
     }
 }

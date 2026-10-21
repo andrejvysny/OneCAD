@@ -15,13 +15,26 @@
 //! pieces get fresh ids, and a kind change (circle → arc) always gets a fresh
 //! id. Unchanged endpoints keep their point reference; cut endpoints are new
 //! and are welded to the boundary (`Coincident` at an existing boundary
-//! endpoint, otherwise `OnCurve`). Ellipses are refused: the core has no
-//! elliptical-arc kind to express a trimmed ellipse.
+//! endpoint, otherwise `OnCurve`). An `OnCurve` holding that boundary endpoint
+//! on the target — however the point is named — would restate the weld and is
+//! dropped as superseded. Ellipses are refused: the core has no elliptical-arc
+//! kind to express a trimmed ellipse.
 //!
 //! **Extend** grows the line/arc end nearer the pick along its own
 //! continuation to the nearest boundary crossing; the end keeps its identity.
-//! It refuses rather than guesses: no hit, a tangent hit, a shared end point or
-//! any constraint pinning that end or the line length.
+//! A `Coincident` weld at a boundary endpoint supersedes that point's `OnCurve`
+//! on the target, as for trim. It refuses rather than guesses: no hit, a
+//! tangent hit, a shared end point or any constraint pinning that end or the
+//! line length.
+//!
+//! **Same-carrier boundaries** (a collinear line, an arc of the target's
+//! circle) overlap rather than cross: their end points count as crossings. A
+//! trim cuts there; an extend stops at the nearer one ahead and refuses
+//! ([`ModifyRefusal::OverlapsBoundary`]) when its end already lies on one.
+//!
+//! **Ambiguous picks** are refused, never resolved arbitrarily: on a crossing
+//! (trim), mid-way between the ends (extend), half-way around an arc's gap or
+//! at an arc/circle centre (both).
 //!
 //! Tolerances follow the worker's sketch policy: [`COINCIDENT_MM`] is its
 //! solver / loop-detection coincidence (`SOLVER_TOLERANCE`,

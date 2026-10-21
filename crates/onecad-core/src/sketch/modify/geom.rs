@@ -242,6 +242,25 @@ impl Curve {
     }
 }
 
+/// The canonical spelling of a constraint point reference: a line's
+/// `Start`/`End` role names its endpoint POINT entity, so both spellings of the
+/// same point compare equal. Arc roles and point entities are already canonical.
+pub(super) fn point_key(
+    sketch: &Sketch,
+    entity: EntityId,
+    role: CurvePosition,
+) -> (EntityId, CurvePosition) {
+    match (sketch.get_entity(entity), role) {
+        (Some(SketchEntity::Line { start, .. }), CurvePosition::Start) => {
+            (*start, CurvePosition::Arbitrary)
+        }
+        (Some(SketchEntity::Line { end, .. }), CurvePosition::End) => {
+            (*end, CurvePosition::Arbitrary)
+        }
+        _ => (entity, role),
+    }
+}
+
 /// Plane position of a constraint point reference: a point entity
 /// (`Arbitrary`), a line/arc endpoint role, or a centre role.
 pub(super) fn ref_point(sketch: &Sketch, entity: EntityId, role: CurvePosition) -> Option<Pt> {

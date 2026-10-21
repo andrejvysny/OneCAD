@@ -9,10 +9,16 @@
 //! can refuse to land on one. A circle against an ellipse is a quartic; it is
 //! solved by sampling the ellipse and bisecting sign changes, which finds every
 //! transversal crossing but cannot see a pure tangential touch (no sign change).
+//!
+//! A boundary on the target's OWN carrier (a collinear line, an arc of the same
+//! circle) meets it along a stretch rather than at points. Its drawn end
+//! points stand in for crossings, flagged `overlap`: a trim cuts at them, an
+//! extend stops at the nearer one (or refuses when the end already lies on
+//! it). A full circle on the same circle has no end points and so no hits.
 
 use std::f64::consts::TAU;
 
-use super::geom::{Curve, Pt};
+use super::geom::{on_circle, Curve, Pt};
 use super::COINCIDENT_MM;
 
 /// One carrier intersection.
@@ -21,6 +27,8 @@ pub(super) struct Hit {
     pub p: Pt,
     /// The carriers touch rather than cross here (within [`COINCIDENT_MM`]).
     pub tangent: bool,
+    /// An end point of a boundary lying on the target's own carrier.
+    pub overlap: bool,
 }
 
 /// Ellipse samples for the circle/ellipse root search; fine enough that two
@@ -31,6 +39,16 @@ const BISECTIONS: usize = 64;
 /// All intersections of `target`'s carrier with `other`'s carrier. `target` is
 /// a line, arc or circle (an arc contributes its full circle).
 pub(super) fn carrier_hits(target: &Curve, other: &Curve) -> Vec<Hit> {
+    if let Some(ends) = shared_carrier_ends(target, other) {
+        return ends
+            .into_iter()
+            .map(|p| Hit {
+                p,
+                tangent: false,
+                overlap: true,
+            })
+            .collect();
+    }
     match (*target, *other) {
         (Curve::Line { a, b }, Curve::Line { a: p, b: q }) => line_line(a, b, p, q),
         (Curve::Line { a, b }, Curve::Circle { c, r } | Curve::Arc { c, r, .. }) => {
@@ -51,6 +69,32 @@ pub(super) fn carrier_hits(target: &Curve, other: &Curve) -> Vec<Hit> {
     }
 }
 
+/// The drawn end points of `other` when it lies on `target`'s carrier: a
+/// non-degenerate collinear line, or an arc of the same circle.
+fn shared_carrier_ends(target: &Curve, other: &Curve) -> Option<Vec<Pt>> {
+    match (*target, *other) {
+        (Curve::Line { a, b }, Curve::Line { a: p, b: q }) => {
+            let off = |x: Pt| ((x - a).cross(b - a) / a.dist(b)).abs();
+            let collinear =
+                p.dist(q) > COINCIDENT_MM && off(p) <= COINCIDENT_MM && off(q) <= COINCIDENT_MM;
+            collinear.then(|| vec![p, q])
+        }
+        (
+            Curve::Circle { c, r } | Curve::Arc { c, r, .. },
+            Curve::Arc {
+                c: c2,
+                r: r2,
+                start,
+                sweep,
+            },
+        ) => {
+            let same = c.dist(c2) <= COINCIDENT_MM && (r - r2).abs() <= COINCIDENT_MM;
+            same.then(|| vec![on_circle(c2, r2, start), on_circle(c2, r2, start + sweep)])
+        }
+        _ => None,
+    }
+}
+
 fn line_line(a: Pt, b: Pt, p: Pt, q: Pt) -> Vec<Hit> {
     let (d1, d2) = (b - a, q - p);
     let cross = d1.cross(d2);
@@ -61,6 +105,7 @@ fn line_line(a: Pt, b: Pt, p: Pt, q: Pt) -> Vec<Hit> {
     vec![Hit {
         p: a + d1 * t,
         tangent: false,
+        overlap: false,
     }]
 }
 
@@ -90,6 +135,7 @@ fn line_circle(a: Pt, b: Pt, c: Pt, r: f64) -> Vec<Hit> {
         .map(|(t, tangent)| Hit {
             p: a + (b - a) * t,
             tangent,
+            overlap: false,
         })
         .collect()
 }
@@ -107,6 +153,7 @@ fn circle_circle(c1: Pt, r1: f64, c2: Pt, r2: f64) -> Vec<Hit> {
         return vec![Hit {
             p: base,
             tangent: true,
+            overlap: false,
         }];
     }
     let h = (r1 * r1 - along * along).max(0.0).sqrt();
@@ -115,10 +162,12 @@ fn circle_circle(c1: Pt, r1: f64, c2: Pt, r2: f64) -> Vec<Hit> {
         Hit {
             p: base + perp * h,
             tangent: false,
+            overlap: false,
         },
         Hit {
             p: base - perp * h,
             tangent: false,
+            overlap: false,
         },
     ]
 }
@@ -154,6 +203,7 @@ fn line_ellipse(a: Pt, b: Pt, ellipse: &Curve) -> Vec<Hit> {
         .map(|(t, tangent)| Hit {
             p: a + (b - a) * t,
             tangent,
+            overlap: false,
         })
         .collect()
 }
@@ -202,7 +252,11 @@ fn circle_ellipse(cc: Pt, r: f64, ellipse: &Curve) -> Vec<Hit> {
         hits.push(at(0.5 * (lo + hi)));
     }
     hits.into_iter()
-        .map(|p| Hit { p, tangent: false })
+        .map(|p| Hit {
+            p,
+            tangent: false,
+            overlap: false,
+        })
         .collect()
 }
 
@@ -223,6 +277,34 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert!(hits[0].p.dist(Pt::new(5.0, 0.0)) < 1e-12);
         assert!(carrier_hits(&line(0.0, 0.0, 1.0, 0.0), &line(0.0, 1.0, 1.0, 1.0)).is_empty());
+    }
+
+    #[test]
+    fn a_same_carrier_boundary_meets_at_its_end_points() {
+        let collinear = carrier_hits(&line(0.0, 0.0, 20.0, 0.0), &line(12.0, 0.0, 8.0, 0.0));
+        assert_eq!(
+            collinear.iter().map(|h| h.p).collect::<Vec<_>>(),
+            vec![Pt::new(12.0, 0.0), Pt::new(8.0, 0.0)]
+        );
+        assert!(collinear.iter().all(|h| h.overlap && !h.tangent));
+        let circle = Curve::Circle {
+            c: Pt::new(0.0, 0.0),
+            r: 5.0,
+        };
+        let arc = Curve::Arc {
+            c: Pt::new(0.0, 0.0),
+            r: 5.0,
+            start: 0.0,
+            sweep: std::f64::consts::FRAC_PI_2,
+        };
+        let same = carrier_hits(&circle, &arc);
+        assert_eq!(same.len(), 2);
+        assert!(same[0].p.dist(Pt::new(5.0, 0.0)) < 1e-12);
+        assert!(same[1].p.dist(Pt::new(0.0, 5.0)) < 1e-12);
+        assert!(
+            carrier_hits(&arc, &circle).is_empty(),
+            "a full circle has no ends"
+        );
     }
 
     #[test]

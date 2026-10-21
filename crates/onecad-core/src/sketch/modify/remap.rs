@@ -13,13 +13,13 @@
 //! | Radius, Diameter (arc/circle) | copied to every arc piece |
 //! | Concentric (arc/circle) | first arc piece only — pieces share one centre point, so a copy would restate the same equation |
 //! | Tangent | kept on the piece holding the contact point; dropped if it was trimmed away |
-//! | OnCurve (anywhere on the target) | kept on the piece holding the point; dropped if trimmed away or now welded at a cut |
+//! | OnCurve (anywhere on the target) | kept on the piece holding the point; dropped if trimmed away, or if a cut now welds that point (however it is named — point entity, line role or arc role) with a `Coincident` |
 //! | Equal on a line, end-to-end Distance | dropped — the measured length changed |
 //! | Midpoint of the line | dropped — the midpoint moved |
 //! | Equal (arc/circle), Angle, Symmetric axis, point/curve Distance | kept when exactly one piece survives; dropped on a split |
 //! | anything else naming the whole entity | dropped as unsupported |
 
-use super::geom::{ref_point, Curve, Pt};
+use super::geom::{point_key, ref_point, Curve, Pt};
 use super::slots::{map_refs, refs, Slot};
 use super::{
     AddReason, AddedConstraint, DropReason, DroppedConstraint, ModifyIds, PlannedPiece,
@@ -36,8 +36,9 @@ pub(super) struct RemapInput<'a> {
     pub pieces: &'a [PlannedPiece],
     /// Points the batch removes.
     pub removed_points: &'a [EntityId],
-    /// Existing points a cut weld now ties to a piece endpoint.
-    pub welded_points: &'a [EntityId],
+    /// Existing boundary endpoints a cut `Coincident` now ties to a piece
+    /// end, as canonical references ([`point_key`]).
+    pub welded_points: &'a [(EntityId, CurvePosition)],
     /// A line target's `(start, end)` point ids.
     pub line_ends: Option<(EntityId, EntityId)>,
     /// Index of the piece containing a point on the target's carrier.
@@ -204,7 +205,10 @@ fn on_curve(
     if point == input.target {
         return Err(DropReason::Unsupported);
     }
-    if role.is_arbitrary() && input.welded_points.contains(&point) {
+    if input
+        .welded_points
+        .contains(&point_key(input.sketch, point, role))
+    {
         return Err(DropReason::SupersededByCutWeld);
     }
     let at = ref_point(input.sketch, point, role).ok_or(DropReason::Unsupported)?;

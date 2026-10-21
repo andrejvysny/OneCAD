@@ -34,6 +34,8 @@ pub(super) struct Crossing {
     pub at_endpoint: Option<(EntityId, CurvePosition)>,
     /// The carriers only touch here.
     pub tangent: bool,
+    /// An end point of a boundary lying on the target's own carrier.
+    pub overlap: bool,
 }
 
 /// Every crossing of `target`'s carrier with another curve's DRAWN extent, in
@@ -67,6 +69,7 @@ pub(super) fn crossings(
                 boundary: entity.id(),
                 at_endpoint: boundary.endpoint_ref(entity, hit.p),
                 tangent: hit.tangent,
+                overlap: hit.overlap,
             });
         }
     }

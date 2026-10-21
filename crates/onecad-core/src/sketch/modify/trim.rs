@@ -159,6 +159,12 @@ impl Target {
 
     fn cut(&self, sketch: &Sketch, id: EntityId, pick: Pt) -> Result<Cut, ModifyRefusal> {
         let (tol, min) = (self.tol(), MIN_PIECE_MM / self.size());
+        // At the centre the pick has no direction, so no span is under it.
+        if let Self::Arc { c, .. } | Self::Circle { c, .. } = *self {
+            if pick.dist(c) <= COINCIDENT_MM {
+                return Err(ModifyRefusal::AmbiguousPick(id));
+            }
+        }
         let raw = crossings(sketch, id, &self.curve(), true, &|p| self.param(p));
         let pick = self.param(pick);
         match self.extent() {
@@ -168,7 +174,9 @@ impl Target {
                     .filter(|c| c.param > tol && c.param < len - tol)
                     .collect();
                 let crossings = cluster(inner, tol);
-                let spans = open_spans(&crossings, len, tol, clamp_pick(pick, len, self.wraps()))
+                let pick = clamp_pick(pick, len, self.wraps(), tol)
+                    .ok_or(ModifyRefusal::AmbiguousPick(id))?;
+                let spans = open_spans(&crossings, len, tol, pick)
                     .ok_or(ModifyRefusal::AmbiguousPick(id))?;
                 check_spans(&spans, min, id)?;
                 Ok(Cut { crossings, spans })
@@ -185,16 +193,17 @@ impl Target {
 }
 
 /// A pick off an open curve's extent selects the nearer end; on an arc
-/// (`wrap`) "nearer" is measured around the circle.
-fn clamp_pick(pick: f64, len: f64, wrap: bool) -> f64 {
+/// (`wrap`) "nearer" is measured around the circle, and a pick within `tol` of
+/// half-way around the gap is ambiguous (`None`).
+fn clamp_pick(pick: f64, len: f64, wrap: bool, tol: f64) -> Option<f64> {
     if pick <= len || !wrap {
-        return pick.clamp(0.0, len);
+        return Some(pick.clamp(0.0, len));
     }
-    if pick - len < TAU - pick {
-        len
-    } else {
-        0.0
+    let (to_end, to_start) = (pick - len, TAU - pick);
+    if (to_end - to_start).abs() <= 2.0 * tol {
+        return None;
     }
+    Some(if to_end < to_start { len } else { 0.0 })
 }
 
 fn check_spans(spans: &[Span], min: f64, id: EntityId) -> Result<(), ModifyRefusal> {
