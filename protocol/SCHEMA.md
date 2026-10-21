@@ -396,7 +396,8 @@ Worker → Rust:
     "solverPolicyVersion": 4,
     "capabilities": [
       "op.sketch", "op.extrude", "op.revolve", "op.fillet", "op.chamfer",
-      "op.boolean", "op.boolean.tools", "op.importStep", "solver.planegcs", "tessellate.mesh1",
+      "op.boolean", "op.boolean.tools", "op.hole", "op.hole.points",
+      "op.importStep", "solver.planegcs", "tessellate.mesh1",
       "io.step", "io.step.import", "io.stl", "io.obj", "checkpoint.v1",
       "constraint.tangentAtPoint", "plan.preview"
     ],
@@ -404,6 +405,10 @@ Worker → Rust:
   }
 }
 ```
+
+`capabilities` above is an illustrative subset. The authoritative list is the
+worker's `make_hello_result_impl` (`worker/src/capi/WorkerRuntime.cpp`). Rust
+gates only on `constraint.tangentAtPoint`, `op.boolean.tools` and `plan.preview`.
 
 Rust verifies `protocolVersion == 1` and applies the fingerprint policy
 (migration plan; V1/V2 §8): matching fingerprint ⇒ proceed; mismatch ⇒ warn →
@@ -2468,7 +2473,9 @@ canonical encodings:
 - **Array** `toolBodyIds` (+ optional `keepTools`) — every other tool set. Writers
   MUST emit the canonical form: `keepTools` is written only when `true`, and a
   single consumed tool is written in legacy form. Readers accept the
-  non-canonical `toolBodyIds:[a]` without `keepTools` and normalize it to legacy.
+  non-canonical `toolBodyIds:[a]` without `keepTools` and normalize it to legacy
+  after applying the array rules below, so `toolBodyIds:[targetBodyId]` is refused
+  and never read as a legacy self tool.
 - `toolBodyId` and `toolBodyIds` together, neither, or `keepTools` beside
   `toolBodyId` are structural errors, and so is an explicit `null` for any of the
   three keys (a present key is never read as absent): the app refuses to load the
@@ -2488,8 +2495,8 @@ canonical encodings:
 - **Fence.** The array shape fences itself: a worker that predates it reads
   `toolBodyId` as absent and refuses `REF_UNRESOLVED`, so it can never consume a
   retained tool or ignore extra tools; an app that predates it refuses to open the
-  document. Rust additionally refuses to send an array-form Boolean (plan and
-  `PreviewOp`) to a worker whose Hello lacks `op.boolean.tools`, with an
+  document. Rust additionally refuses to send an array-form Boolean (`ExecutePlan`,
+  `PreviewOp` and `PreviewPlan`) to a worker whose Hello lacks `op.boolean.tools`, with an
   attributable protocol error. In the file, ids are bare uuids; the wire layer
   rewrites every `*BodyIds` array element to `body_<uuid>`.
 
@@ -4418,6 +4425,8 @@ rows; empty or surfaceless nondegenerate faces may not be silently omitted.
 The same failure in an optional ExecutePlan tessellation artifact follows the
 existing `ARTIFACT_TESSELLATE_FAILED` warning path and drops the entire artifact.
 
+- **Capability gates.** Before sending, Rust applies the same per-op gates as
+  `ExecutePlan` (`constraint.tangentAtPoint`, `op.boolean.tools`).
 - **`snapshotId` (OPTIONAL, kernel-hardening WP-H, 2026-09-05)** — on
   `Tessellate` and on the §7.8 writers `ExportGeometry`, `ExportStep`,
   `ExportStl`, `ExportObj`. Absent ⇒ the live head, byte-identical to every
@@ -6014,6 +6023,60 @@ and back Invariant 5 and checkpoint drift detection.
 
 ## 14. Changelog
 
+- **2026-10-21 — §7.6 `PreviewPlan`, a non-publishing full-replay edit preview
+  (ONECAD-369).** Additive kernel-lane verb, advertised by the new hello capability
+  `"plan.preview"`; `protocolVersion` stays `1`. It replays an `ExecutePlan`-shaped
+  op list from an empty base at the Tier A validation tier, streams the unchanged
+  §7.2 `planStep` events, and ends with `planPreviewed` (`bodies` = the candidate
+  body set, `meshes` = the bodies whose B-rep differs from the head). It never
+  fences-and-clones, prepares, accepts or discards, so the head, `hasScratch` and
+  `hasRestoredBase` are unchanged after every terminal. §8: the STALE row gains
+  `PreviewPlan` (snapshot OR epoch mismatch), the `PROTOCOL_ERROR` sub-case exempts
+  its epoch mismatch, and the wedge deadline list gives it `ExecutePlan`'s 180 s.
+  New ignorable reasonCodes `PREVIEW_MESH_BUDGET_EXCEEDED` / `PREVIEW_TESSELLATE_FAILED`
+  ride the existing `UNSUPPORTED` code. `PreviewOp` output is byte-identical (its
+  mesh budget helper moved to `session/PreviewMesh.*`). OCCT fingerprint and
+  `kernelPolicyVersion` are unchanged (the fingerprint seed is the OCCT build
+  identity, not the capability list). Fixture bump: `protocol/fixtures/preview_plan.ndjson`
+  (C++ `canonical_preview_plan`, Rust replay in `crates/onecad-app/tests/edit_preview.rs`).
+  Worker + Rust evidence recorded 2026-10-21 (macOS arm64 only): C++
+  `canonical_preview_plan` and `preview_plan` ctest and Rust
+  `canonical_preview_plan_fixture_replays_on_real_worker` pass against the same
+  worker build; the fixture pins the epoch-stale `detail.workerEpoch` and the
+  missing-`expectedSnapshotId` / unknown-`lod` `PROTOCOL_ERROR` rounds with an
+  unchanged head after them; hello `occt.fingerprint` is `0a6a1dce34181289`, the
+  same as the pre-change worker. Linux is NOT checked here (seed unchanged; the
+  CI selftest grep owns it). Integrated with ONECAD-361/362 at `bb393e8`; the
+  `op.boolean.tools` gate also applies to `PreviewPlan`. Cross-track sign-off
+  (worker + Rust + orchestrator; protocol-auditor): recorded 2026-10-21. *Reason:* re-editing a feature must preview
+  the edited feature AND its dependents without applying the edit over the
+  feature's own old output, and without competing with regen for the single
+  scratch / restored-base slot.
+
+- **2026-10-21 — §7.3 Boolean multiple / retained tools (ONECAD-362).** Boolean
+  gains a canonical dual encoding: legacy `toolBodyId` (one consumed tool,
+  byte-identical) and array `toolBodyIds` (1..=32 distinct tools, none the target)
+  with optional `keepTools:true`. Intersect is common to ALL tools; Union/Cut run one
+  builder over the tool group. Array-form Union/Cut refuse a non-contributing tool
+  whole-op (`BOOLEAN_TOOL_NO_EFFECT`; a face image shared with the target or with
+  another tool is no contribution, so coplanar-nested and duplicate tools refuse)
+  and array-form Union refuses any result solid without target material
+  (`BOOLEAN_DISJOINT_RESULT` + `disjointToolBodyIds`), both from the single
+  builder's history. Retained tools emit no lifecycle event and the kernel runs on
+  their copies. An explicit `null` tool-set key is a structural error.
+  Hello capability `op.boolean.tools`; Rust refuses an array-form plan or preview
+  without it. An old worker refuses the array form `REF_UNRESOLVED` (absent
+  `toolBodyId`); an old app refuses to open such a document. `protocolVersion`
+  stays 1 (lockstep §13 + shape fence); `kernelPolicyVersion` stays 1 and the OCCT
+  fingerprint `0a6a1dce34181289` is unchanged — the legacy path issues the identical
+  OCCT call sequence. Fixtures: `boolean_multi_tool.ndjson`,
+  `boolean_tools_refusal.ndjson` (legacy fixtures unchanged; Rust replays both on
+  the real worker in `crates/onecad-app/tests/boolean_multi_tool.rs`). The Rust
+  array-form gate covers `ExecutePlan`, `PreviewOp` and `PreviewPlan`. Both
+  readers refuse `toolBodyIds:[targetBodyId]` (app: load error; worker:
+  `OP_FAILED`). Integrated with ONECAD-361/369 at `bb393e8`. Cross-track sign-off
+  (worker + Rust + orchestrator; protocol-auditor): recorded 2026-10-21.
+
 - **2026-10-21 — §7.3 Hole ordered multi-point placement, `resultPolicyVersion: 3`
   (ONECAD-361).** Adds `points: [{id, at}]` (1..=64, shared host face, shared
   params), the V3 preflight reasonCodes (`HOLE_POINTS_REQUIRE_V3`,
@@ -6036,31 +6099,14 @@ and back Invariant 5 and checkpoint drift detection.
   exactly as before. New fixture `hole_points.ndjson` runs as CTest
   `canonical_hole_points`; its Rust lane is parse-only (`onecad-protocol`
   messages.rs) plus the real-worker `crates/onecad-app/tests/hole_points.rs`.
-  Known gap handed to ONECAD-369: a re-edit PREVIEW carries no `editedFrom`
-  (PlanExecutor preview path), so preview may bind an anchor-decided ref that
-  the commit refuses post-edit; refs carrying `originSlot` are narrowed the
-  same way on both paths. Cross-track sign-off (protocol-auditor): pending.
-
-- **2026-10-21 — §7.3 Boolean multiple / retained tools (ONECAD-362).** Boolean
-  gains a canonical dual encoding: legacy `toolBodyId` (one consumed tool,
-  byte-identical) and array `toolBodyIds` (1..=32 distinct tools, none the target)
-  with optional `keepTools:true`. Intersect is common to ALL tools; Union/Cut run one
-  builder over the tool group. Array-form Union/Cut refuse a non-contributing tool
-  whole-op (`BOOLEAN_TOOL_NO_EFFECT`; a face image shared with the target or with
-  another tool is no contribution, so coplanar-nested and duplicate tools refuse)
-  and array-form Union refuses any result solid without target material
-  (`BOOLEAN_DISJOINT_RESULT` + `disjointToolBodyIds`), both from the single
-  builder's history. Retained tools emit no lifecycle event and the kernel runs on
-  their copies. An explicit `null` tool-set key is a structural error.
-  Hello capability `op.boolean.tools`; Rust refuses an array-form plan or preview
-  without it. An old worker refuses the array form `REF_UNRESOLVED` (absent
-  `toolBodyId`); an old app refuses to open such a document. `protocolVersion`
-  stays 1 (lockstep §13 + shape fence); `kernelPolicyVersion` stays 1 and the OCCT
-  fingerprint `0a6a1dce34181289` is unchanged — the legacy path issues the identical
-  OCCT call sequence. Fixtures: `boolean_multi_tool.ndjson`,
-  `boolean_tools_refusal.ndjson` (legacy fixtures unchanged). Cross-track sign-off
-  (worker + Rust + orchestrator) pending; serialize with the ONECAD-361 Hole slice,
-  which edits the same §7.3, §14 and capability list.
+  Known gap, narrowed by ONECAD-369: `PreviewOp` carries no `editedFrom`, so a
+  single-op preview may bind an anchor-decided ref that the commit refuses
+  post-edit. `PreviewPlan` (§7.6) forwards the commit's `editedFrom` and does
+  not have the gap. Refs carrying `originSlot` are narrowed the same way on
+  every path. Rust replays `hole_points.ndjson` on the real worker
+  (`crates/onecad-app/tests/hole_points.rs`). Integrated with ONECAD-362/369 at
+  `bb393e8`. Cross-track sign-off (worker + Rust + orchestrator; protocol-auditor):
+  recorded 2026-10-21.
 
 - **2026-10-20 — §7.4 stable solver parameter ordering, solver policy 4 (ONECAD-305).**
   PlaneGCS subsystem columns and dual-priority parameter unions retain declared
@@ -8538,32 +8584,3 @@ sign-off) once fixtures exist.
   algorithm (sorted 16-byte member UUIDs + winding byte, rendered `"r_%016x"`) so
   the C++ worker and Rust core produce identical region ids; reference impl is
   onecad-core `sketch/mod.rs::derive_region_id`.
-
-- **2026-10-21 — §7.6 `PreviewPlan`, a non-publishing full-replay edit preview
-  (ONECAD-369).** Additive kernel-lane verb, advertised by the new hello capability
-  `"plan.preview"`; `protocolVersion` stays `1`. It replays an `ExecutePlan`-shaped
-  op list from an empty base at the Tier A validation tier, streams the unchanged
-  §7.2 `planStep` events, and ends with `planPreviewed` (`bodies` = the candidate
-  body set, `meshes` = the bodies whose B-rep differs from the head). It never
-  fences-and-clones, prepares, accepts or discards, so the head, `hasScratch` and
-  `hasRestoredBase` are unchanged after every terminal. §8: the STALE row gains
-  `PreviewPlan` (snapshot OR epoch mismatch), the `PROTOCOL_ERROR` sub-case exempts
-  its epoch mismatch, and the wedge deadline list gives it `ExecutePlan`'s 180 s.
-  New ignorable reasonCodes `PREVIEW_MESH_BUDGET_EXCEEDED` / `PREVIEW_TESSELLATE_FAILED`
-  ride the existing `UNSUPPORTED` code. `PreviewOp` output is byte-identical (its
-  mesh budget helper moved to `session/PreviewMesh.*`). OCCT fingerprint and
-  `kernelPolicyVersion` are unchanged (the fingerprint seed is the OCCT build
-  identity, not the capability list). Fixture bump: `protocol/fixtures/preview_plan.ndjson`
-  (C++ `canonical_preview_plan`, Rust replay in `crates/onecad-app/tests/edit_preview.rs`).
-  Worker + Rust evidence recorded 2026-10-21 (macOS arm64 only): C++
-  `canonical_preview_plan` and `preview_plan` ctest and Rust
-  `canonical_preview_plan_fixture_replays_on_real_worker` pass against the same
-  worker build; the fixture pins the epoch-stale `detail.workerEpoch` and the
-  missing-`expectedSnapshotId` / unknown-`lod` `PROTOCOL_ERROR` rounds with an
-  unchanged head after them; hello `occt.fingerprint` is `0a6a1dce34181289`, the
-  same as the pre-change worker. Linux is NOT checked. PENDING: the
-  protocol-auditor / orchestrator cross-track sign-off (§13), to be recorded
-  here at integration. *Reason:* re-editing a feature must preview
-  the edited feature AND its dependents without applying the edit over the
-  feature's own old output, and without competing with regen for the single
-  scratch / restored-base slot.
