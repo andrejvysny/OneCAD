@@ -965,6 +965,16 @@ pub struct SketchConstraintAdmission {
     pub solve: SketchUpsertDto,
 }
 
+/// A lane-safe projection edit's answer plus the solver-lane resync it caused.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchProjectionReceipt<T> {
+    pub value: T,
+    /// The `SketchUpsert` that resynced the worker with the committed edit;
+    /// `None` when nothing was committed (every source refused, nothing moved).
+    pub solve: Option<SketchUpsertDto>,
+}
+
 /// A re-solve result (`sketchUpsert`/`endGesture`; `types.ts SketchUpsertResult`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
