@@ -1,8 +1,11 @@
 //! ONECAD-315 S-315c (app half): staged operand promotion against the REAL C++
 //! worker. Staging mints and binds ids without dirtying, persisting, ticking
 //! autosave or bumping the revision; a commit adopts exactly the staged ids it
-//! references; a cancelled stage never reaches `doc.elements` (leak guard); a
-//! stale scope refuses loudly with no mutation.
+//! references; the real worker never folds a cancelled stage into `doc.elements`
+//! (the leak guard itself is driven through `commit_snapshot` by the FakeBackend
+//! unit test `published_regen_strips_a_folded_staged_id_and_keeps_a_promoted_one`);
+//! a stale scope, a restarted worker or a swapped runtime refuses loudly with no
+//! mutation.
 //!
 //! Gated on `ONECAD_WORKER_PATH`; `ONECAD_REQUIRE_WORKER=1` makes a missing
 //! binary a hard failure.
@@ -246,6 +249,13 @@ fn fillet_record(rec: u128, edges: Vec<ElementRef>, radius: f64) -> OperationRec
 /// A 40×20×25 box as body A, published; the state owns the runtime.
 async fn box_state(wm: &WorkerManager) -> AppState {
     let state = app_state_over(wm);
+    let rt = box_runtime(&state, wm).await;
+    *state.runtime.lock().await = Some(rt);
+    state
+}
+
+/// The published box runtime, not yet installed in `state`.
+async fn box_runtime(state: &AppState, wm: &WorkerManager) -> DocumentRuntime {
     let (engine, meshes, solver) = state.make_backend();
     let mut rt = DocumentRuntime::new_blank(engine, meshes, solver);
     rt.bind_geometry_read_query(Arc::new(wm.clone()))
@@ -262,8 +272,7 @@ async fn box_state(wm: &WorkerManager) -> AppState {
         .expect("AddOperation");
     }
     assert_eq!(published(&regen(&mut rt).await, "box"), 0);
-    *state.runtime.lock().await = Some(rt);
-    state
+    rt
 }
 
 // ── MESH1 picks ──────────────────────────────────────────────────────────────
@@ -554,12 +563,14 @@ async fn staging_does_not_dirty_and_commit_adopts_the_staged_refs() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cancelled_stage_never_reaches_document_elements() {
+async fn real_worker_does_not_fold_a_cancelled_staged_id() {
     let Some(bin) = real_worker() else {
         return;
     };
     let wm = spawn_worker(bin).await;
     let state = box_state(&wm).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    saved_elements(&state, &dir.path().join("clean.onecad")).await;
     let blob = body_mesh(&state).await;
     let edges = top_x_edges(&blob);
     let scope = api::preview_context(&state).await.expect("scope");
@@ -571,6 +582,7 @@ async fn cancelled_stage_never_reaches_document_elements() {
     {
         let mut guard = state.runtime.lock().await;
         let rt = guard.as_mut().expect("runtime");
+        assert!(!rt.is_dirty(), "staging left the saved document clean");
         let snapshot = rt.head_snapshot_id().expect("head");
         let other = rt
             .promote_selection(snapshot, body_a(), vec![(TopoKey::new(&edges[1].0), None)])
@@ -598,10 +610,11 @@ async fn cancelled_stage_never_reaches_document_elements() {
         assert_eq!(
             rt.staged_element_count(),
             1,
-            "cancelled stage stays guarded"
+            "the cancelled stage stays staged"
         );
     }
-    let dir = tempfile::tempdir().expect("tempdir");
+    // Observes the worker's delta, not the guard: the real worker never echoes an
+    // unadopted staged binding into `elementMapDelta`.
     let saved = saved_elements(&state, &dir.path().join("leak.onecad")).await;
     assert!(
         !saved.elements.contains(&staged_id),
@@ -706,10 +719,13 @@ async fn element_labeled_pick_reuses_its_id_and_edge_op_stages_without_dirtying(
     };
     let wm = spawn_worker(bin).await;
     let state = box_state(&wm).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    saved_elements(&state, &dir.path().join("clean.onecad")).await;
     let blob = body_mesh(&state).await;
     let key = top_x_edges(&blob)[0].0.clone();
     let scope = api::preview_context(&state).await.expect("scope");
     let observed = observe(&state).await;
+    assert!(!observed.0, "saved before observing");
     let first = api::stage_elements(&state, &scope, vec![edge_pick(&key)])
         .await
         .expect("stage by TopoKey");
@@ -738,10 +754,8 @@ async fn element_labeled_pick_reuses_its_id_and_edge_op_stages_without_dirtying(
         assert!(reference.intent.is_some());
     }
     let (dirty, revision, _, tick) = observe(&state).await;
-    assert_eq!(
-        (dirty, revision, tick),
-        (observed.0, observed.1, observed.3)
-    );
+    assert!(!dirty, "stage_edge_op does not dirty");
+    assert_eq!((revision, tick), (observed.1, observed.3));
     {
         let mut guard = state.runtime.lock().await;
         let rt = guard.as_mut().expect("runtime");
@@ -752,7 +766,6 @@ async fn element_labeled_pick_reuses_its_id_and_edge_op_stages_without_dirtying(
         .expect("commit staged closure");
         assert_eq!(rt.staged_element_count(), 0);
     }
-    let dir = tempfile::tempdir().expect("tempdir");
     let saved = saved_elements(&state, &dir.path().join("closure.onecad")).await;
     for reference in &staged.refs {
         assert!(
@@ -826,4 +839,209 @@ async fn face_entry_after_cancelled_stage_persists_host_face_evidence() {
     let mut reopened = DocumentRuntime::open(&path, engine, meshes, solver).expect("reopen");
     assert_eq!(published(&regen(&mut reopened).await, "reopen"), 0);
     fresh.shutdown().await;
+}
+
+// ── legacy promotion, restart/swap fencing, byte identity ────────────────────
+
+#[derive(Default)]
+struct Events {
+    projections: std::sync::atomic::AtomicUsize,
+}
+
+impl onecad_app::host::EventSink for Events {
+    fn emit(&self, event: onecad_app::host::AppEvent) -> Result<(), String> {
+        if matches!(event, onecad_app::host::AppEvent::ProjectionUpdated(_)) {
+            self.projections
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+
+struct NoDialogs;
+
+#[async_trait::async_trait]
+impl onecad_app::host::DialogPort for NoDialogs {
+    async fn pick(&self, _request: onecad_app::host::FileDialog) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_prepare_edge_op_still_persists_dirties_emits_and_ticks() {
+    let Some(bin) = real_worker() else {
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let state = box_state(&wm).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    saved_elements(&state, &dir.path().join("clean.onecad")).await;
+    let key = top_x_edges(&body_mesh(&state).await)[0].0.clone();
+    let scope = api::preview_context(&state).await.expect("scope");
+    let observed = observe(&state).await;
+    assert!(!observed.0, "saved before observing");
+    let events = Arc::new(Events::default());
+    let host = onecad_app::host::HostContext {
+        paths: Default::default(),
+        events: events.clone(),
+        dialogs: Arc::new(NoDialogs),
+    };
+    let prepared = api::prepare_edge_op(
+        &state,
+        host,
+        scope.snapshot_id.0,
+        "Fillet".into(),
+        vec![edge_input(&key)],
+        false,
+    )
+    .await
+    .expect("legacy prepare");
+    assert!(prepared.refusal.is_none());
+    let (dirty, _, staged, tick) = observe(&state).await;
+    assert!(dirty, "legacy prepare_edge_op dirties");
+    assert_eq!(staged, 0, "legacy prepare stages nothing");
+    assert_eq!(tick, observed.3 + 1, "legacy prepare ticks autosave");
+    assert_eq!(
+        events.projections.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "legacy prepare emits ProjectionUpdated"
+    );
+    let saved = saved_elements(&state, &dir.path().join("legacy.onecad")).await;
+    for edge in &prepared.edges {
+        let id = edge.element_id.as_deref().expect("promoted id");
+        assert!(saved.elements.contains(&ElementId::new(id)), "persisted");
+    }
+    wm.shutdown().await;
+}
+
+fn assert_stale(error: onecad_core::regen::EngineError, what: &str) {
+    assert!(
+        matches!(
+            error,
+            onecad_core::regen::EngineError::OpFailed {
+                code: onecad_core::regen::OpFailureCode::StalePreview,
+                ..
+            }
+        ),
+        "{what}: {error:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn swapped_runtime_or_restarted_worker_refuses_an_admitted_stage() {
+    let Some(bin) = real_worker() else {
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let state = box_state(&wm).await;
+    let key = TopoKey::new(top_x_edges(&body_mesh(&state).await)[0].0.clone());
+    let scope = api::preview_context(&state).await.expect("scope");
+    let ticket = {
+        let guard = state.runtime.lock().await;
+        guard
+            .as_ref()
+            .expect("runtime")
+            .stage_ticket(&scope)
+            .expect("admitted")
+    };
+    // The document slot is swapped between admission and staging.
+    let swapped = box_runtime(&state, &wm).await;
+    drop(state.runtime.lock().await.replace(swapped));
+    {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard.as_mut().expect("runtime");
+        let error = rt
+            .stage_selection(&ticket, body_a(), vec![key.clone()])
+            .await
+            .expect_err("a ticket from the replaced runtime");
+        assert_stale(error, "swapped runtime");
+        assert_eq!(rt.staged_element_count(), 0);
+    }
+    // The worker restarts between admission and staging.
+    let scope = api::preview_context(&state).await.expect("scope");
+    let ticket = {
+        let guard = state.runtime.lock().await;
+        guard
+            .as_ref()
+            .expect("runtime")
+            .stage_ticket(&scope)
+            .expect("admitted")
+    };
+    let epoch = wm.epoch().0;
+    wm.shutdown().await;
+    let mut restarted = false;
+    for _ in 0..200 {
+        if wm.epoch().0 > epoch && wm.state() == onecad_app::worker::WorkerState::Ready {
+            restarted = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(restarted, "worker restarted (epoch bumped + Ready)");
+    {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard.as_mut().expect("runtime");
+        let error = rt
+            .stage_selection(&ticket, body_a(), vec![key.clone()])
+            .await
+            .expect_err("a ticket from the dead worker epoch");
+        assert_stale(error, "restarted worker");
+        rt.on_worker_restart(wm.epoch());
+        let error = rt
+            .stage_selection(&ticket, body_a(), vec![key.clone()])
+            .await
+            .expect_err("still stale after the runtime adopts the epoch");
+        assert_stale(error, "adopted epoch");
+        assert_eq!(rt.staged_element_count(), 0);
+    }
+    let error = api::stage_elements(&state, &scope, vec![edge_pick(key.as_str())])
+        .await
+        .expect_err("captured scope predates the restart");
+    assert!(matches!(error, ApiError::StalePreview(_)), "{error:?}");
+    wm.shutdown().await;
+}
+
+/// Opens `path` into a fresh state over `wm` and publishes it.
+async fn opened_state(wm: &WorkerManager, path: &Path) -> AppState {
+    let state = app_state_over(wm);
+    let (engine, meshes, solver) = state.make_backend();
+    let mut rt = DocumentRuntime::open(path, engine, meshes, solver).expect("open");
+    assert_eq!(published(&regen(&mut rt).await, "open"), 0);
+    *state.runtime.lock().await = Some(rt);
+    state
+}
+
+fn document_bytes(document: &onecad_core::document::Document) -> Vec<u8> {
+    onecad_core::io::document_io::serialize_document(document).expect("serialize")
+}
+
+/// Spec test 9, qualified per critique to `document.json`: mesh caches embed
+/// MESH1 blobs whose labels follow the live worker partition.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn open_save_equals_open_stage_drop_save() {
+    let Some(bin) = real_worker() else {
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().join("base.onecad");
+    saved_elements(&box_state(&wm).await, &base).await;
+
+    let plain = opened_state(&wm, &base).await;
+    let plain = saved_elements(&plain, &dir.path().join("plain.onecad")).await;
+
+    let staged = opened_state(&wm, &base).await;
+    let edges = top_x_edges(&body_mesh(&staged).await);
+    let scope = api::preview_context(&staged).await.expect("scope");
+    api::stage_elements(
+        &staged,
+        &scope,
+        edges.iter().map(|(key, _)| edge_pick(key)).collect(),
+    )
+    .await
+    .expect("stage both edges");
+    assert_eq!(observe(&staged).await.2, 2);
+    let dropped = saved_elements(&staged, &dir.path().join("dropped.onecad")).await;
+    assert_eq!(document_bytes(&plain), document_bytes(&dropped));
+    wm.shutdown().await;
 }

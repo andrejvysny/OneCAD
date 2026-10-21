@@ -148,30 +148,18 @@ impl DocumentRuntime {
         reference
     }
 
-    /// Staged ids referenced by `commands`. Ids in neither map are left alone: a
-    /// regen legitimately drops consumed elements (a filleted edge) from the
-    /// partition, and re-editing such a feature must still commit.
+    /// Staged ids referenced by `commands`: operation refs, a host-face sketch
+    /// attachment, a rebound element input and a face colour all persist an id,
+    /// so each must carry its evidence into `doc.elements`. Ids in neither map are
+    /// left alone: a regen legitimately drops consumed elements (a filleted edge)
+    /// from the partition, and re-editing such a feature must still commit.
     pub(crate) fn staged_ids_in(&self, commands: &[EditCommand]) -> Vec<ElementId> {
-        let mut out = Vec::new();
+        let mut referenced = Vec::new();
         for command in commands {
-            let op = match command {
-                EditCommand::AddOperation { record, .. } => &record.op,
-                EditCommand::UpdateOperationParams { op, .. } => op,
-                _ => continue,
-            };
-            let Operation::Known(known) = op else {
-                continue;
-            };
-            let mut known = known.clone();
-            for reference in known.element_refs_mut() {
-                if let Some(primary) = reference.primary.as_ref() {
-                    if self.staged.contains_key(&primary.element) {
-                        out.push(primary.element.clone());
-                    }
-                }
-            }
+            command_element_ids(command, &mut referenced);
         }
-        out
+        referenced.retain(|id| self.staged.contains_key(id));
+        referenced
     }
 
     pub(crate) fn adopt_staged(&mut self, ids: Vec<ElementId>) {
@@ -195,6 +183,49 @@ impl DocumentRuntime {
 
     pub fn staged_element_count(&self) -> usize {
         self.staged.len()
+    }
+}
+
+/// Every element id `command` would persist.
+fn command_element_ids(command: &EditCommand, out: &mut Vec<ElementId>) {
+    let mut push_ref = |reference: &ElementRef| {
+        if let Some(primary) = reference.primary.as_ref() {
+            out.push(primary.element.clone());
+        }
+    };
+    match command {
+        EditCommand::AddOperation {
+            record:
+                OperationRecord {
+                    op: Operation::Known(known),
+                    ..
+                },
+            ..
+        }
+        | EditCommand::UpdateOperationParams {
+            op: Operation::Known(known),
+            ..
+        } => {
+            let mut known = known.clone();
+            for reference in known.element_refs_mut() {
+                push_ref(reference);
+            }
+        }
+        EditCommand::AddSketch { sketch } => {
+            if let SketchAttachment::HostFace { face, .. } = &sketch.attachment {
+                push_ref(face);
+            }
+        }
+        EditCommand::UpdateSketchAttachment {
+            attachment: SketchAttachment::HostFace { face, .. },
+            ..
+        } => push_ref(face),
+        EditCommand::EditOperationInput {
+            reference: InputRef::Element(reference),
+            ..
+        } => push_ref(reference),
+        EditCommand::SetFaceColor { element_id, .. } => out.push(element_id.clone()),
+        _ => {}
     }
 }
 
