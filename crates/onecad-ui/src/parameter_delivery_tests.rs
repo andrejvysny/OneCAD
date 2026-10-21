@@ -12,7 +12,10 @@ use onecad_core::{
     },
     ids::{BodyId, RecordId},
 };
-use onecad_interaction::{Action, DraftStatus, NumericParameter, PreviewStatus};
+use onecad_interaction::{
+    Action, DraftStatus, NumericParameter, PreviewStatus,
+    selection_set::{SelectionItem, SelectionMode},
+};
 
 const AUTHORED: &str = "6 * 2";
 
@@ -35,7 +38,11 @@ async fn moving(root: &std::path::Path) -> (Host, egui::Pos2) {
         .unwrap()
         .parse()
         .unwrap();
-    host.app.doc.selected_body = Some(body);
+    crate::item_selection::apply(
+        &mut host.app,
+        SelectionMode::Replace,
+        vec![SelectionItem::Body(body)],
+    );
     host.app.begin_transform();
     placed(&mut host).await;
     let ball = gizmo_ball(&host);
@@ -255,7 +262,11 @@ fn selector(host: &Host, focused: &str) -> egui::Pos2 {
 }
 
 async fn edit(host: &mut Host, record: RecordId) {
-    host.app.doc.selected_feature = Some(record);
+    crate::item_selection::apply(
+        &mut host.app,
+        SelectionMode::Replace,
+        vec![SelectionItem::Feature(record)],
+    );
     crate::inspector_history::edit_selected_feature(&mut host.app);
     pump_until(&mut host.app, &host.context, &mut host.frame, |app| {
         app.doc
