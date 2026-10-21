@@ -1,5 +1,4 @@
 use crate::app::App;
-use onecad_interaction::{Action, ProfileSelection};
 use onecad_render::{BodyStyle, RenderStyle, Theme};
 use onecad_scene::{Bounds, DVec2, ViewSnapshot, Viewport};
 use std::sync::atomic::Ordering;
@@ -141,16 +140,17 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 }
                 return;
             }
+            let mode = crate::model_pick::track(ui, rect);
             if (response.clicked() || response.double_clicked())
                 && !overlay_owns
                 && !crate::viewport_selection::sectioned(app)
                 && app.doc.bridge.valid()
                 && !app.busy()
-                && app.doc.interaction.tool.is_none()
+                && crate::model_pick::allowed(app)
                 && let Some(position) = response.interact_pointer_pos()
                 && crate::viewport_widgets::allows_pointer(ui, rect, position)
             {
-                pick(
+                crate::model_pick::pick(
                     app,
                     &display,
                     &view,
@@ -159,6 +159,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         f64::from(position.y - rect.min.y),
                     ),
                     response.double_clicked(),
+                    mode,
                 );
             }
         });
@@ -489,10 +490,10 @@ fn paint_profiles(
     for profile in &display.profiles {
         let selected = app
             .doc
-            .interaction
             .selection
-            .as_ref()
-            .is_some_and(|selection| {
+            .profiles()
+            .chain(app.doc.interaction.selection.as_ref())
+            .any(|selection| {
                 selection.profile.sketch == profile.reference.sketch
                     && selection.profile.region == profile.reference.region
             });
@@ -550,57 +551,6 @@ fn profile_fill(
     mesh
 }
 
-pub(crate) fn pick(
-    app: &mut App,
-    display: &crate::bridge::Display,
-    view: &ViewSnapshot,
-    logical: DVec2,
-    whole_body: bool,
-) {
-    let hit = display
-        .profiles
-        .iter()
-        .filter_map(|profile| profile.pick(view, logical).map(|hit| (profile, hit)))
-        .min_by(|a, b| a.1.1.total_cmp(&b.1.1));
-    let body = onecad_scene::pick_with_policy(
-        &display.scene,
-        view,
-        view.identity(),
-        logical,
-        pick_policy(app.renderer.options().display_mode),
-    )
-    .ok()
-    .flatten();
-    if !whole_body
-        && let Some((profile, (anchor, distance))) = hit
-        && profile_visible(body.as_ref(), distance)
-        && let Some(context) = app.doc.interaction.context.clone()
-    {
-        let mut reference = profile.reference.clone();
-        reference.region_anchor = Some(anchor);
-        app.dispatch(Action::SelectProfile(Box::new(ProfileSelection {
-            profile: reference,
-            context,
-            capture: view.identity(),
-        })));
-        app.doc.status = "Profile selected".into();
-        app.doc.selected_sketch = Some(profile.reference.sketch);
-        app.doc.selected_body = None;
-        app.doc.selected_feature = None;
-        app.doc.topology.select(None);
-        app.draw_dirty = true;
-        return;
-    }
-    app.dispatch(Action::ClearSelection);
-    app.doc.selected_feature = None;
-    app.doc.selected_body = body.as_ref().map(|body| body.body_id);
-    app.doc.topology.select(body.as_ref());
-    if whole_body {
-        app.doc.topology.select(None);
-    }
-    app.draw_dirty = true;
-}
-
 pub(crate) fn pick_policy(mode: onecad_render::DisplayMode) -> onecad_scene::PickPolicy {
     match mode {
         onecad_render::DisplayMode::Wireframe => onecad_scene::PickPolicy::EdgesOnly,
@@ -608,7 +558,7 @@ pub(crate) fn pick_policy(mode: onecad_render::DisplayMode) -> onecad_scene::Pic
     }
 }
 
-fn profile_visible(body: Option<&onecad_scene::PickHit<'_>>, distance: f64) -> bool {
+pub(crate) fn profile_visible(body: Option<&onecad_scene::PickHit<'_>>, distance: f64) -> bool {
     body.is_none_or(|body| body.ray_distance >= distance - 1e-6)
 }
 

@@ -75,6 +75,9 @@ pub(super) const HOST_TESTS: &[&str] = &[
     "app_logic_tests::extrude_handle_delivery_tests::handle_cancelled_second_press_keeps_the_first_drag",
     "app_logic_tests::extrude_handle_delivery_tests::handle_three_drags_then_confirm_add_one_history_entry",
     "app_logic_tests::extrude_handle_delivery_tests::handle_release_over_chrome_ends_drag_at_last_motion",
+    "app_logic_tests::model_selection_delivery_tests::modifier_clicks_build_face_and_edge_sets_and_escape_clears",
+    "app_logic_tests::model_selection_delivery_tests::explorer_rows_and_viewport_share_one_selection",
+    "app_logic_tests::model_selection_delivery_tests::tab_switch_keeps_each_documents_selection",
 ];
 /// Ignored service and bridge cases outside `app_logic_tests`; they do not
 /// emit adapter evidence, so the gate runs them as a separate exact selection.

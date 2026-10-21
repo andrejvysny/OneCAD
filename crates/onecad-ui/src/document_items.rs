@@ -62,12 +62,13 @@ pub(crate) fn unavailable(app: &App) -> Option<&'static str> {
 }
 
 pub(crate) fn selected(app: &App) -> Option<DeleteTarget> {
-    if let Some(id) = app.doc.selected_sketch {
-        Some(DeleteTarget::Sketch(id))
-    } else if app.doc.topology.selected_kind().is_none() {
-        app.doc.selected_body.map(DeleteTarget::Body)
-    } else {
-        None
+    use onecad_interaction::selection_set::SelectionItem;
+    if let Some(id) = app.doc.selected_sketch() {
+        return Some(DeleteTarget::Sketch(id));
+    }
+    match app.doc.selection.items() {
+        [SelectionItem::Body(id)] => Some(DeleteTarget::Body(*id)),
+        _ => None,
     }
 }
 

@@ -9,6 +9,7 @@ use crate::{
 use egui::{Align2, Context, Order};
 use onecad_interaction::{
     Action,
+    selection_set::{SelectionItem, SelectionMode},
     sketch::{SketchAction, SketchTool},
 };
 use onecad_widgets::{
@@ -124,7 +125,7 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
         ),
         ToolId::Edit => model_view(
             app,
-            app.doc.selected_feature.is_some_and(|id| {
+            app.doc.selected_feature().is_some_and(|id| {
                 app.doc
                     .display
                     .as_ref()
@@ -137,9 +138,11 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
             }),
             "Select an editable feature first",
         ),
-        ToolId::MoveRotate => {
-            model_view(app, app.doc.selected_body.is_some(), "Select a body first")
-        }
+        ToolId::MoveRotate => model_view(
+            app,
+            app.doc.selected_body().is_some(),
+            "Select a body first",
+        ),
         ToolId::Import => gate(
             crate::bars::replacement_allowed(app),
             "Finish the current operation first",
@@ -288,7 +291,7 @@ pub(crate) fn activate(app: &mut App, ctx: &Context, id: ToolId) {
 pub(crate) fn cancel_tool(app: &mut App) {
     app.dispatch(Action::Cancel);
     if app.doc.interaction.tool.is_none() {
-        app.doc.selected_feature = None;
+        crate::item_selection::retain(app, |item| !matches!(item, SelectionItem::Feature(_)));
     }
 }
 
@@ -301,10 +304,11 @@ pub(crate) fn cancel_or_deselect(app: &mut App) {
 }
 
 pub(crate) fn select_feature(app: &mut App, id: onecad_core::ids::RecordId) {
-    app.dispatch(Action::ClearSelection);
-    app.doc.topology.select(None);
-    app.doc.selected_feature = Some(id);
-    app.draw_dirty = true;
+    crate::item_selection::apply(
+        app,
+        SelectionMode::Replace,
+        vec![SelectionItem::Feature(id)],
+    );
 }
 
 /// The label's close button explicitly deselects as well as canceling a draft.
@@ -324,11 +328,7 @@ fn clear_selection(app: &mut App, kind: SelectionKind) {
         return;
     }
     cancel_tool(app);
-    app.dispatch(Action::ClearSelection);
-    app.doc.selected_body = None;
-    app.doc.selected_feature = None;
-    app.doc.topology.select(None);
-    app.draw_dirty = true;
+    crate::item_selection::clear(app);
 }
 
 pub(crate) fn body_name(app: &App, id: onecad_core::ids::BodyId) -> String {
@@ -355,20 +355,34 @@ pub(crate) fn selection_label(
     {
         return Some((tool.record.name.clone(), "feature".into(), model));
     }
-    match kind {
-        SelectionKind::Face | SelectionKind::Edge => {
-            let (_, body) = app.doc.topology.selected_kind()?;
-            let name = if kind == SelectionKind::Face {
-                "Face"
-            } else {
-                "Edge"
-            };
-            Some((name.into(), body_name(app, body), model))
+    let count = app.doc.selection.len();
+    let context = || match app.doc.selected_body() {
+        Some(body) => body_name(app, body),
+        None => {
+            let items = app.doc.selection.items().iter();
+            let bodies: std::collections::HashSet<_> =
+                items.filter_map(SelectionItem::body).collect();
+            format!("{} bodies", bodies.len())
         }
-        SelectionKind::Body => Some(("Body".into(), body_name(app, app.doc.selected_body?), model)),
-        SelectionKind::Region => Some(("Region".into(), "profile".into(), model)),
+    };
+    match kind {
+        SelectionKind::Face => Some((counted(count, "Face", "Faces"), context(), model)),
+        SelectionKind::Edge => Some((counted(count, "Edge", "Edges"), context(), model)),
+        SelectionKind::Body if count == 1 => Some(("Body".into(), context(), model)),
+        SelectionKind::Body => Some((counted(count, "Body", "Bodies"), "bodies".into(), model)),
+        SelectionKind::Region => Some((
+            counted(count.max(1), "Region", "Regions"),
+            "profile".into(),
+            model,
+        )),
+        SelectionKind::Mixed => Some((format!("{count} items"), "mixed".into(), model)),
+        SelectionKind::Feature if count > 1 => Some((
+            counted(count, "Feature", "Features"),
+            "feature".into(),
+            model,
+        )),
         SelectionKind::Feature => {
-            let id = app.doc.selected_feature?.to_string();
+            let id = app.doc.selected_feature()?.to_string();
             let label = app
                 .doc
                 .display
@@ -410,6 +424,15 @@ pub(crate) fn selection_label(
             ))
         }
         SelectionKind::None | SelectionKind::SketchIdle => None,
+    }
+}
+
+/// "Face" for one item, "3 Faces" for several: the existing label, counted.
+fn counted(count: usize, one: &str, many: &str) -> String {
+    if count > 1 {
+        format!("{count} {many}")
+    } else {
+        one.into()
     }
 }
 

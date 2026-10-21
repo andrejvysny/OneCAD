@@ -1,6 +1,7 @@
 //! Real worker/Metal widget delivery; physical device acceptance remains separate.
 use super::point_center_delivery_tests::support::Host;
 use super::*;
+use onecad_interaction::selection_set::{SelectionItem, SelectionMode};
 use onecad_scene::Camera;
 
 #[tokio::test]
@@ -21,13 +22,33 @@ async fn sidebar_viewport_selection_and_delete_share_authority_and_history() {
         .project((bounds.min + bounds.max) * 0.5)
         .unwrap()
         .logical;
-    crate::viewport::pick(&mut host.app, &display, &view, point, false);
-    assert_eq!(host.app.doc.selected_body, Some(body));
-    assert!(host.app.doc.topology.selected_kind().is_some());
+    crate::model_pick::pick(
+        &mut host.app,
+        &display,
+        &view,
+        point,
+        false,
+        SelectionMode::Replace,
+    );
+    assert_eq!(host.app.doc.selected_body(), Some(body));
+    assert!(matches!(
+        host.app.doc.selection.items(),
+        [SelectionItem::Face(_) | SelectionItem::Edge(_)]
+    ));
     assert!(!crate::item_selection::whole_body_selected(&host.app, body));
-    crate::viewport::pick(&mut host.app, &display, &view, point, true);
+    crate::model_pick::pick(
+        &mut host.app,
+        &display,
+        &view,
+        point,
+        true,
+        SelectionMode::Replace,
+    );
     assert!(crate::item_selection::whole_body_selected(&host.app, body));
-    assert!(host.app.doc.topology.selected_kind().is_none());
+    assert!(matches!(
+        host.app.doc.selection.items(),
+        [SelectionItem::Body(_)]
+    ));
     host.app.ui.explorer_open = true;
     host.app.ui.inspector_open = true;
     host.redraw();
@@ -39,8 +60,11 @@ async fn sidebar_viewport_selection_and_delete_share_authority_and_history() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
-    assert_eq!(host.app.doc.selected_sketch.unwrap().to_string(), sketch.id);
-    assert!(host.app.doc.selected_body.is_none());
+    assert_eq!(
+        host.app.doc.selected_sketch().unwrap().to_string(),
+        sketch.id
+    );
+    assert!(host.app.doc.selected_body().is_none());
     assert!(
         host.app.doc.selection_preview.ready(),
         "hidden sketch selection must draw a preview"
@@ -104,7 +128,7 @@ async fn keyboard_and_sketch_delete(host: &mut Host, name: &str) {
     }
     select_row(host, name);
     assert!(!host.app.sketch_active());
-    assert!(host.app.doc.selected_sketch.is_some());
+    assert!(host.app.doc.selected_sketch().is_some());
     // Text editing owns Backspace even while a document item is selected.
     let filter = crate::layout::chrome(host.screen(), &host.app.ui)
         .explorer
@@ -121,7 +145,7 @@ async fn keyboard_and_sketch_delete(host: &mut Host, name: &str) {
         }
     });
     assert!(
-        host.app.doc.selected_sketch.is_some(),
+        host.app.doc.selected_sketch().is_some(),
         "Filter must preserve item selection"
     );
     host.ui(vec![key(egui::Key::Delete)]);
@@ -147,7 +171,7 @@ async fn keyboard_and_sketch_delete(host: &mut Host, name: &str) {
             && projection.sketches.is_empty()
             && projection.features.is_empty()
     );
-    assert!(host.app.doc.selected_sketch.is_none() && host.app.doc.selected_body.is_none());
+    assert!(host.app.doc.selected_sketch().is_none() && host.app.doc.selected_body().is_none());
     history(host, false).await;
     assert_eq!(
         host.app

@@ -1,5 +1,6 @@
 //! Transient topology highlights never become persistent authoring references.
 use crate::{app::App, bridge::Display};
+use onecad_interaction::selection_set::SelectionItem;
 use onecad_render::{HighlightKind, HighlightTarget, PreparedHighlights};
 use onecad_scene::{BodyId, DVec2, PickHit, SceneIdentity, SceneSnapshot, ViewSnapshot};
 use std::sync::{Arc, mpsc};
@@ -22,6 +23,25 @@ impl Target {
             topology_id: hit.topology_id.to_owned(),
         }
     }
+    /// A selected face or edge drawn against `scene`; other kinds have no highlight.
+    fn from_item(item: &SelectionItem, scene: &SceneSnapshot) -> Option<Self> {
+        let (kind, topology) = match item {
+            SelectionItem::Face(topology) => (HighlightKind::Face, topology),
+            SelectionItem::Edge(topology) => (HighlightKind::Edge, topology),
+            _ => return None,
+        };
+        let body = scene
+            .bodies()
+            .iter()
+            .find(|body| body.body_id() == topology.body)?;
+        (topology.scene == scene.identity()).then(|| Self {
+            scene: topology.scene,
+            body_id: topology.body,
+            mesh_revision: body.mesh_revision(),
+            kind,
+            topology_id: crate::model_pick::label(&topology.id).to_owned(),
+        })
+    }
     fn borrowed(&self) -> HighlightTarget<'_> {
         HighlightTarget {
             scene: self.scene,
@@ -33,13 +53,16 @@ impl Target {
     }
 }
 
+/// Hover plus the highlight pipeline for the shared model selection.
 #[derive(Default)]
 pub struct Selection {
-    selected: Option<Target>,
     hover: Option<Target>,
     dirty: bool,
     sequence: u64,
     pending: Option<mpsc::Receiver<Delivery>>,
+    /// Draw count of the last uploaded highlights (selection plus hover).
+    #[cfg(test)]
+    pub(crate) uploaded: usize,
 }
 struct Delivery {
     sequence: u64,
@@ -47,49 +70,21 @@ struct Delivery {
     result: Result<PreparedHighlights, String>,
 }
 impl Selection {
-    pub fn selected_face(&self, scene: SceneIdentity) -> Option<(BodyId, String)> {
-        self.selected
-            .as_ref()
-            .filter(|target| target.scene == scene && target.kind == HighlightKind::Face)
-            .map(|target| (target.body_id, target.topology_id.clone()))
-    }
-    #[cfg(test)]
-    pub(crate) fn select_face_for_test(
-        &mut self,
-        scene: SceneIdentity,
-        body_id: BodyId,
-        face: &str,
-    ) {
-        self.selected = Some(Target {
-            scene,
-            body_id,
-            mesh_revision: 0,
-            kind: HighlightKind::Face,
-            topology_id: face.into(),
-        });
-    }
-    pub fn selected_kind(&self) -> Option<(HighlightKind, BodyId)> {
-        self.selected
-            .as_ref()
-            .map(|target| (target.kind, target.body_id))
-    }
-    pub fn select(&mut self, hit: Option<&PickHit<'_>>) {
-        self.selected = hit.map(Target::from_hit);
-        self.changed();
-    }
     pub fn invalidate(&mut self, scene: SceneIdentity) {
-        self.selected = self.selected.take().filter(|target| target.scene == scene);
         self.hover = self.hover.take().filter(|target| target.scene == scene);
         self.changed();
     }
-    fn changed(&mut self) {
+    pub(crate) fn changed(&mut self) {
         self.sequence = self.sequence.wrapping_add(1);
         self.dirty = true;
     }
     pub fn invalidate_pending(&mut self) {
-        self.selected = None;
         self.hover = None;
         self.changed();
+    }
+    #[cfg(test)]
+    pub(crate) fn settled(&self) -> bool {
+        !self.dirty && self.pending.is_none()
     }
     fn accepts(&self, sequence: u64, scene: SceneIdentity, current: SceneIdentity) -> bool {
         self.sequence == sequence && scene == current
@@ -109,7 +104,7 @@ pub fn hover(
         && !sectioned(app)
         && !app.sketch_active()
         && !app.busy()
-        && app.doc.interaction.tool.is_none()
+        && crate::model_pick::allowed(app)
         && !crate::viewport_widgets::owns_pointer(app, ui, rect);
     let target = pointer
         .filter(|point| allowed && crate::viewport_widgets::allows_pointer(ui, rect, *point))
@@ -120,7 +115,7 @@ pub fn hover(
                 view,
                 view.identity(),
                 DVec2::new(f64::from(logical.x), f64::from(logical.y)),
-                crate::viewport::pick_policy(app.renderer.options().display_mode),
+                crate::model_pick::policy(app),
             )
             .ok()??;
             Some(Target::from_hit(&hit))
@@ -159,8 +154,13 @@ pub fn upload(
                     .topology
                     .accepts(delivery.sequence, delivery.scene, scene.identity())
                 {
+                    let prepared = delivery.result?;
+                    #[cfg(test)]
+                    {
+                        app.doc.topology.uploaded = prepared.len();
+                    }
                     app.renderer
-                        .replace_highlights(delivery.result?)
+                        .replace_highlights(prepared)
                         .map_err(|error| error.to_string())?;
                     app.draw_dirty = true;
                     ctx.request_repaint();
@@ -191,7 +191,7 @@ fn start_preparation(
         .host_budget
         .reserve(scene.resident_bytes())?;
     let sequence = app.doc.topology.sequence;
-    let selected = app.doc.topology.selected.clone();
+    let selected = highlighted(app, &scene);
     let hover = app.doc.topology.hover.clone();
     let budget = app.renderer.preparation_budget();
     let (sender, receiver) = mpsc::sync_channel(1);
@@ -199,11 +199,7 @@ fn start_preparation(
         .name("viewport-highlights".into())
         .spawn(move || {
             let _lease = lease;
-            let targets: Vec<_> = selected
-                .as_ref()
-                .map(Target::borrowed)
-                .into_iter()
-                .collect();
+            let targets: Vec<_> = selected.iter().map(Target::borrowed).collect();
             let result = PreparedHighlights::new(
                 &scene,
                 &targets,
@@ -224,37 +220,97 @@ fn start_preparation(
     Ok(())
 }
 
+/// Staged operands while a tool feeds them, else the shared selection.
+fn highlighted(app: &App, scene: &SceneSnapshot) -> Vec<Target> {
+    let items: Vec<&SelectionItem> = match &app.doc.operand_staging {
+        Some(staging) if crate::model_pick::staging(app) => staging
+            .operands
+            .stages()
+            .iter()
+            .flat_map(|stage| stage.items.iter())
+            .collect(),
+        _ => app.doc.selection.items().iter().collect(),
+    };
+    items
+        .into_iter()
+        .filter_map(|item| Target::from_item(item, scene))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use onecad_interaction::selection_set::{TopologyId, TopologyRef};
+    use onecad_scene::{MeshLimits, SceneBody, SceneLimits};
+
     #[test]
-    fn replacement_scene_discards_selected_and_hover_topology() {
+    fn replacement_scene_discards_hover_topology() {
         let scene = SceneIdentity {
             session: 1,
             scene: 1,
         };
-        let target = Target {
-            scene,
-            body_id: BodyId::new(),
-            mesh_revision: 7,
-            kind: HighlightKind::Face,
-            topology_id: "face:1".into(),
-        };
         let mut selection = Selection {
-            selected: Some(target.clone()),
-            hover: Some(target),
-            dirty: false,
+            hover: Some(Target {
+                scene,
+                body_id: BodyId::new(),
+                mesh_revision: 7,
+                kind: HighlightKind::Face,
+                topology_id: "f:1".into(),
+            }),
             ..Default::default()
         };
-        assert!(selection.selected_face(scene).is_some());
-        assert!(
-            selection
-                .selected_face(SceneIdentity { scene: 2, ..scene })
-                .is_none()
-        );
         selection.invalidate(SceneIdentity { scene: 2, ..scene });
-        assert!(selection.selected.is_none() && selection.hover.is_none());
+        assert!(selection.hover.is_none());
         assert!(selection.dirty);
+    }
+
+    #[test]
+    fn every_selected_face_and_edge_of_the_current_scene_is_highlighted() {
+        let body = SceneBody::new(
+            BodyId::new(),
+            4,
+            Arc::from(&include_bytes!("../../../fixtures/render/edge-policy/box.mesh1")[..]),
+            MeshLimits::default(),
+        )
+        .unwrap();
+        let id = body.body_id();
+        let identity = SceneIdentity {
+            session: 1,
+            scene: 3,
+        };
+        let scene = SceneSnapshot::new(identity, vec![body], SceneLimits::default()).unwrap();
+        let topology = |scene, raw: &str| TopologyRef {
+            scene,
+            body: id,
+            id: TopologyId::Snapshot(onecad_core::ids::TopoKey::new(raw)),
+        };
+        let stale = SceneIdentity {
+            scene: 2,
+            ..identity
+        };
+        let items = [
+            SelectionItem::Face(topology(identity, "f:1")),
+            SelectionItem::Face(topology(identity, "f:2")),
+            SelectionItem::Edge(topology(identity, "e:3")),
+            SelectionItem::Body(id),
+            SelectionItem::Face(topology(stale, "f:4")),
+        ];
+        let targets: Vec<_> = items
+            .iter()
+            .filter_map(|item| Target::from_item(item, &scene))
+            .collect();
+        let labels: Vec<_> = targets
+            .iter()
+            .map(|t| (t.kind, t.topology_id.as_str(), t.mesh_revision))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                (HighlightKind::Face, "f:1", 4),
+                (HighlightKind::Face, "f:2", 4),
+                (HighlightKind::Edge, "e:3", 4)
+            ]
+        );
     }
     #[test]
     fn old_highlights_rejected_after_selection_scene_or_session_change() {
@@ -265,7 +321,7 @@ mod tests {
         let mut selection = Selection::default();
         let sequence = selection.sequence;
         assert!(selection.accepts(sequence, scene, scene));
-        selection.select(None);
+        selection.changed();
         assert!(!selection.accepts(sequence, scene, scene));
         assert!(!selection.accepts(
             selection.sequence,

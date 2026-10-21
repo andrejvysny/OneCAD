@@ -320,9 +320,15 @@ fn apply_options(app: &mut App, display: &Display) -> Result<bool, String> {
             app.resize_refusal = None;
             crate::viewport::replace_texture(app);
             if changed_section {
-                app.doc.selected_body = None;
+                // Sectioned geometry is not pickable; drop model picks, keep rows.
+                crate::item_selection::retain(app, |item| {
+                    matches!(
+                        item,
+                        onecad_interaction::selection_set::SelectionItem::Feature(_)
+                            | onecad_interaction::selection_set::SelectionItem::Sketch(_)
+                    )
+                });
                 app.doc.interaction.selection = None;
-                app.doc.topology.select(None);
             }
         }
         Err(error) => {

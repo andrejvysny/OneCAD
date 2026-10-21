@@ -63,7 +63,6 @@ pub(crate) fn select_target(app: &mut App, body: BodyId) -> bool {
             body: Some(body),
             context,
         });
-        app.doc.selected_body = Some(body);
         app.draw_dirty = true;
     }
     true
@@ -86,7 +85,6 @@ pub(crate) fn rows(app: &mut App, rows: &mut FeatureCardRows, tool: &ModelSessio
     if mode != params.boolean_mode {
         app.dispatch(Action::ExtrudeModeChanged(mode));
         if mode == BooleanMode::NewBody {
-            app.doc.selected_body = None;
             app.draw_dirty = true;
         }
         return;
@@ -137,7 +135,6 @@ fn target_row(app: &mut App, rows: &mut FeatureCardRows, target: Option<BodyId>)
             body: selected,
             context,
         });
-        app.doc.selected_body = selected;
         app.draw_dirty = true;
     }
 }

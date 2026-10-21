@@ -156,9 +156,6 @@ impl App {
         ) {
             self.doc.command_status = false;
         }
-        if matches!(action, Action::ClearSelection | Action::SelectProfile(_)) {
-            self.doc.selected_sketch = None;
-        }
         for effect in self.doc.interaction.dispatch(action) {
             self.effect(effect);
         }
@@ -181,6 +178,10 @@ impl App {
                 "model.refused",
                 serde_json::json!({"reason": crate::input_trace::bounded_id(reason)}),
             );
+        }
+        if self.doc.interaction.tool.is_none() {
+            // Staged operands never outlive the tool that owned them.
+            self.doc.operand_staging = None;
         }
         if self.doc.interaction.tool.is_none()
             && let Some(id) = self.doc.numeric_id.take()
@@ -319,7 +320,7 @@ impl App {
             self.doc.interaction.selection = None;
             self.doc.pending_preview = None;
             self.doc.clear_preview = true;
-            self.doc.selected_body = None;
+            self.doc.selection.clear();
             self.doc.topology.invalidate_pending();
             self.doc.transform_gizmo = Default::default();
             self.draw_dirty = true;
@@ -345,7 +346,7 @@ impl App {
         self.doc.sections.cancel();
         self.dispatch(Action::Cancel);
         self.doc.interaction.selection = None;
-        self.doc.selected_body = None;
+        self.doc.selection.clear();
         self.doc.topology.invalidate_pending();
         self.doc.transform_gizmo = Default::default();
     }
@@ -394,9 +395,7 @@ impl App {
         self.sync_sketch_gesture();
         if changed {
             crate::document_items::reset(self);
-            self.doc.selected_sketch = None;
-            self.doc.selected_body = None;
-            self.doc.selected_feature = None;
+            self.doc.selection.clear();
             self.doc.topology.invalidate_pending();
             self.doc.transform_gizmo = Default::default();
             self.doc.fit_pending = true;

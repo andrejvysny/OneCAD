@@ -759,6 +759,11 @@ pub struct DocumentRuntime {
     /// renumbered the ordinals: one face got two ids, or worse, two faces shared
     /// one. Pruned to two generations by [`prune_promoted`](Self::prune_promoted).
     promoted: HashMap<(SnapshotId, BodyId, TopoKey), PromotionEntry>,
+    /// Evidence for ids promoted for a tool's operands but not yet committed.
+    /// Never persisted or pruned: an entry leaves only when a commit adopts it or a
+    /// persisting writer records the same id. Until then it doubles as the leak
+    /// guard in [`commit_snapshot`](Self::commit_snapshot).
+    staged: HashMap<ElementId, ElementEntry>,
     /// Whether the one-shot DI-4 re-bind of PERSISTED element ids has already run
     /// this session (see [`rebind_persisted_elements`](Self::rebind_persisted_elements)).
     /// Ids minted in THIS session are bound at promotion time, so the pass has
@@ -1031,6 +1036,7 @@ impl DocumentRuntime {
             pending_sketch_finish: None,
             gesture_seq: 0,
             promoted: HashMap::new(),
+            staged: HashMap::new(),
             rebind_attempted: false,
             rebind_transport_failures: 0,
             checkpoints: InMemoryCheckpointStore::new(),
@@ -1269,8 +1275,10 @@ impl DocumentRuntime {
         }
         self.reject_timeline_body_delete(&cmd)?;
         let cmd = self.hydrate_ref_intents(cmd);
+        let staged = self.staged_ids_in(std::slice::from_ref(&cmd));
         let is_rollback = matches!(cmd, EditCommand::SetRollback { .. });
         let outcome = self.session.apply(cmd)?;
+        self.adopt_staged(staged);
         // Truncation eviction (SCHEMA §7.7): every checkpoint at or above the dirty
         // floor describes a prefix this edit just changed, so the planner would reject
         // it on every future plan — an orphan that only grows the cache. Metadata-only
@@ -1316,6 +1324,7 @@ impl DocumentRuntime {
             }
             hydrated.push(self.hydrate_ref_intents(command));
         }
+        let staged = self.staged_ids_in(&hydrated);
         self.session.begin_transaction(label);
         for command in hydrated {
             if let Err(error) = self.session.apply(command) {
@@ -1326,6 +1335,7 @@ impl DocumentRuntime {
         let Some(outcome) = self.session.end_transaction() else {
             return Err(DomainError::Validation("empty transaction".into()));
         };
+        self.adopt_staged(staged);
         if let Some(dirty) = outcome.dirty {
             self.checkpoints.invalidate_from(dirty.from);
         }
@@ -2538,6 +2548,8 @@ impl DocumentRuntime {
             self.session.document(),
         );
         let prev_snapshot = self.latest_snapshot.as_ref().map(|s| s.id);
+        let mut scratch = scratch;
+        self.guard_staged_leaks(&mut scratch);
         self.regen = scratch;
         self.latest_snapshot = Some(snap.clone());
         // First publish retires the container's last-saved geometry: real geometry
@@ -4640,6 +4652,57 @@ impl DocumentRuntime {
         body: BodyId,
         picks: Vec<(TopoKey, Option<AnchorIntent>)>,
     ) -> Result<Vec<PromotedElementDto>, EngineError> {
+        let minted = self.promote_inner(snapshot, body, picks).await?;
+        let mut out = Vec::with_capacity(minted.len());
+        for (id, ev) in minted {
+            // A persisted promotion supersedes any staged evidence for the same id.
+            self.staged.remove(&id);
+            // Record the partition binding into the (regen-mirror) element index,
+            // WITH the evidence a fresh session needs to find this element again
+            // (DI-4). The anchor and descriptor are already in hand here and were
+            // previously dropped on the floor, which is why an authored face colour
+            // survived a save and then had nothing to paint after a reopen — the
+            // worker's partition is minted on demand and dies with the process.
+            self.regen.elements.insert(
+                id.clone(),
+                ElementEntry::new(ev.body, ev.kind)
+                    .with_evidence(ev.anchor.clone(), ev.descriptor.clone()),
+            );
+            out.push(PromotedElementDto {
+                topo_key: ev.topo_key.as_str().to_string(),
+                element_id: id.as_str().to_string(),
+                kind: kind_str(ev.kind).to_string(),
+                body_id: crate::worker::wire::body_id_wire(ev.body),
+            });
+        }
+        // `regen.elements` is PERSISTED — `build_save_payload` writes it out as
+        // `doc.elements`. Marking dirty here (rather than at the two commands that
+        // reach this method) is what keeps the class closed: any future caller of
+        // `promote_selection` inherits it. Without this the promotion rode along in
+        // the next save while `dirty` stayed false, so the close prompt was skipped
+        // and — once the autosave learned to gate on dirtiness — the promotion was
+        // never autosaved at all.
+        //
+        // NOT on a read-only document. `apply` refuses those outright, so nothing
+        // else can dirty one, and a promotion is identity plumbing rather than user
+        // intent: claiming unsaved work on a document that cannot be saved would arm
+        // a crash marker and offer a face pick back as "unsaved changes".
+        if !out.is_empty() && !self.read_only {
+            self.dirty = true;
+        }
+        Ok(out)
+    }
+
+    /// Gate, acquire, mint, bind and cache: the shared, non-persisting half of
+    /// [`promote_selection`](Self::promote_selection) and staged promotion. The
+    /// worker binding is process-scoped and the cache is in-memory, so nothing
+    /// here reaches `doc.elements` or dirties the document.
+    pub(crate) async fn promote_inner(
+        &mut self,
+        snapshot: SnapshotId,
+        body: BodyId,
+        picks: Vec<(TopoKey, Option<AnchorIntent>)>,
+    ) -> Result<Vec<(ElementId, onecad_core::regen::WorkerElementEvidence)>, EngineError> {
         self.gate_stale_pick(snapshot)?;
         // The MESH1 id table is a TWO-NAMESPACE table: `Tessellate.cpp` substitutes
         // the minted ElementId for any element that already has a live binding, and
@@ -4753,8 +4816,7 @@ impl DocumentRuntime {
                 bindings,
             })
             .await?;
-        let mut out = Vec::with_capacity(minted.len());
-        for (id, ev) in minted {
+        for (id, ev) in &minted {
             self.promoted.insert(
                 (snapshot, ev.body, ev.topo_key.clone()),
                 PromotionEntry {
@@ -4763,40 +4825,8 @@ impl DocumentRuntime {
                     descriptor: ev.descriptor.clone(),
                 },
             );
-            // Record the partition binding into the (regen-mirror) element index,
-            // WITH the evidence a fresh session needs to find this element again
-            // (DI-4). The anchor and descriptor are already in hand here and were
-            // previously dropped on the floor, which is why an authored face colour
-            // survived a save and then had nothing to paint after a reopen — the
-            // worker's partition is minted on demand and dies with the process.
-            self.regen.elements.insert(
-                id.clone(),
-                ElementEntry::new(ev.body, ev.kind)
-                    .with_evidence(ev.anchor.clone(), ev.descriptor.clone()),
-            );
-            out.push(PromotedElementDto {
-                topo_key: ev.topo_key.as_str().to_string(),
-                element_id: id.as_str().to_string(),
-                kind: kind_str(ev.kind).to_string(),
-                body_id: crate::worker::wire::body_id_wire(ev.body),
-            });
         }
-        // `regen.elements` is PERSISTED — `build_save_payload` writes it out as
-        // `doc.elements`. Marking dirty here (rather than at the two commands that
-        // reach this method) is what keeps the class closed: any future caller of
-        // `promote_selection` inherits it. Without this the promotion rode along in
-        // the next save while `dirty` stayed false, so the close prompt was skipped
-        // and — once the autosave learned to gate on dirtiness — the promotion was
-        // never autosaved at all.
-        //
-        // NOT on a read-only document. `apply` refuses those outright, so nothing
-        // else can dirty one, and a promotion is identity plumbing rather than user
-        // intent: claiming unsaved work on a document that cannot be saved would arm
-        // a crash marker and offer a face pick back as "unsaved changes".
-        if !out.is_empty() && !self.read_only {
-            self.dirty = true;
-        }
-        Ok(out)
+        Ok(minted)
     }
 
     /// Refuses a promotion whose pick was taken against a snapshot that is no
@@ -6984,8 +7014,10 @@ fn element_ref_input(op: &Operation, index: usize) -> Option<&ElementRef> {
 pub mod deletion;
 mod face_entry;
 mod gestures;
+mod staged_elements;
 pub use face_entry::FaceEntryTicket;
 pub use projection_visit::ProjectionVisit;
+pub use staged_elements::StageTicket;
 pub(crate) mod native_gestures;
 mod ordinal_tripwire;
 mod projection_visit;

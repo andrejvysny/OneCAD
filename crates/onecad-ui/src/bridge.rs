@@ -42,6 +42,9 @@ pub enum Command {
         choice: crate::startup_recovery::Choice,
     },
     Sketch(Box<crate::sketch_services::Request>),
+    /// Non-dirtying operand staging; FIFO with `Apply` on this lane.
+    #[allow(dead_code, reason = "the operand session slice (S-315c-ui) submits it")]
+    Operands(Box<crate::operand_services::Request>),
     Apply {
         tag: RequestTag,
         command: Box<EditCommand>,
@@ -649,6 +652,7 @@ pub fn command_name(command: &Command) -> &'static str {
         Command::Items(_) => "Delete",
         Command::Recovery { .. } => "Recovery",
         Command::Sketch(_) => "Sketch",
+        Command::Operands(_) => "Operands",
         Command::Apply { .. } => "Apply",
         Command::Undo => "Undo",
         Command::Redo => "Redo",

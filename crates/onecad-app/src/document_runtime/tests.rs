@@ -6626,3 +6626,6 @@ mod gesture_tests;
 
 #[path = "tests/finish_history.rs"]
 mod finish_history;
+
+#[path = "tests/staged_elements.rs"]
+mod staged_elements;

@@ -1,5 +1,6 @@
 use crate::bridge::{Bridge, Display};
-use onecad_core::ids::{BodyId, RecordId};
+use onecad_core::ids::{BodyId, RecordId, SketchId};
+use onecad_interaction::selection_set::{SelectionItem, SelectionSet};
 use onecad_interaction::{Interaction, RequestTag};
 use onecad_scene::{Camera, ViewSnapshot};
 use std::sync::Arc;
@@ -31,8 +32,10 @@ pub struct DocumentEditor {
     pub view: Option<ViewSnapshot>,
     pub(crate) view_presentation: Option<crate::viewport_capture::Presentation>,
     pub fit_pending: bool,
-    pub selected_body: Option<BodyId>,
-    pub selected_feature: Option<RecordId>,
+    /// Typed model selection shared by viewport, Explorer, History and pill.
+    pub selection: SelectionSet,
+    /// Present only while an active tool feeds operand stages from picks.
+    pub(crate) operand_staging: Option<crate::model_pick::Staging>,
     pub numeric_id: Option<egui::Id>,
     pub status: String,
     pub command_status: bool,
@@ -43,7 +46,6 @@ pub struct DocumentEditor {
     pub clear_preview: bool,
     pub(crate) received_preview: Option<crate::viewport_updates::Preview>,
     pub sketch_entry: crate::sketch_entry::Entry,
-    pub selected_sketch: Option<onecad_core::ids::SketchId>,
     /// Identity of this document's tab within the window.
     pub tab: crate::documents::TabId,
     /// Switched back in after its prepared scene was uploaded: the viewport shows
@@ -96,8 +98,8 @@ impl DocumentEditor {
             view: None,
             view_presentation: None,
             fit_pending: true,
-            selected_body: None,
-            selected_feature: None,
+            selection: SelectionSet::default(),
+            operand_staging: None,
             numeric_id: None,
             status,
             command_status: false,
@@ -108,7 +110,6 @@ impl DocumentEditor {
             clear_preview: true,
             received_preview: None,
             sketch_entry: Default::default(),
-            selected_sketch: None,
             tab: crate::documents::next_tab_id(),
             awaiting_scene: false,
             stopped: false,
@@ -133,6 +134,49 @@ impl DocumentEditor {
             session.phase != onecad_interaction::sketch::SketchPhase::Closed
         });
         dirty || sketching || self.interaction.tool.is_some()
+    }
+
+    /// The one body every whole-body or topology item belongs to; a face pick
+    /// therefore still names the body Move acts on.
+    pub fn selected_body(&self) -> Option<BodyId> {
+        self.selection.single_body()
+    }
+
+    pub fn selected_feature(&self) -> Option<RecordId> {
+        match self.selection.items() {
+            [SelectionItem::Feature(id)] => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// A selected sketch row, or the sketch owning the one selected profile.
+    pub fn selected_sketch(&self) -> Option<SketchId> {
+        match self.selection.items() {
+            [SelectionItem::Sketch(id)] => Some(*id),
+            [SelectionItem::Profile(profile)] => Some(profile.profile.sketch),
+            _ => None,
+        }
+    }
+
+    /// The one selected face picked in `scene`, as its MESH1 label.
+    pub fn selected_face(&self, scene: onecad_scene::SceneIdentity) -> Option<(BodyId, String)> {
+        match self.selection.items() {
+            [SelectionItem::Face(face)] if face.scene == scene => {
+                Some((face.body, crate::model_pick::label(&face.id).to_owned()))
+            }
+            _ => None,
+        }
+    }
+
+    /// A whole-body item with no face or edge item beside it.
+    pub fn whole_body_selected(&self, id: BodyId) -> bool {
+        self.selection.contains(&SelectionItem::Body(id))
+            && !self.selection.items().iter().any(|item| {
+                matches!(
+                    item,
+                    SelectionItem::Face(_) | SelectionItem::Edge(_) | SelectionItem::Vertex(_)
+                )
+            })
     }
 
     /// Document title for window/tab chrome; "Untitled" before a document exists.

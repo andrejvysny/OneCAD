@@ -26,8 +26,10 @@ pub use sketch_gestures::{
     begin_native_gesture, cancel_native_gesture, end_native_gesture_with_completion,
     ready_native_gesture, update_native_gesture, NativeGestureHandle,
 };
+mod operands;
 mod sketch_history;
 pub use document_state::{get_document_state, unsaved_changes};
+pub use operands::{stage_edge_op, stage_elements, StageAddress, StagePick, StagedEdgeOp};
 pub use replacement::{discard_replaced_document, prepare_replacement_discard, ReplacementDiscard};
 pub use sketch_constraints::{
     add_sketch_constraints_controlled, add_sketch_constraints_with_completion,
