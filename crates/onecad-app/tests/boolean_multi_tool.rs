@@ -12,6 +12,8 @@
 //! * D `[100,100]..[105,105]` × 5 — far from everything;
 //! * N `[5,5]..[10,10]` × 30 — nested in A, sharing its x=5, y=5 and base planes.
 
+#[path = "fixtures/replay.rs"]
+mod fixture_replay;
 #[path = "boolean_multi_tool/support.rs"]
 mod support;
 
@@ -395,4 +397,14 @@ async fn legacy_single_tool_document_round_trips_byte_identical() {
     assert_eq!(first_text, second_text, "legacy document bytes are stable");
     wm2.shutdown().await;
     s.wm.shutdown().await;
+}
+
+#[tokio::test]
+async fn canonical_boolean_fixtures_replay_on_real_worker() {
+    let Some(worker) = real_worker() else { return };
+    let fixtures =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../protocol/fixtures");
+    for name in ["boolean_multi_tool.ndjson", "boolean_tools_refusal.ndjson"] {
+        fixture_replay::replay(&worker, &fixtures.join(name)).await;
+    }
 }

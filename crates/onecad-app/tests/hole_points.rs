@@ -21,6 +21,16 @@ mod hole_points {
     mod lifecycle;
 }
 
+#[path = "fixtures/replay.rs"]
+mod fixture_replay;
+
+#[tokio::test]
+async fn canonical_hole_points_fixture_replays_on_real_worker() {
+    let Some(worker) = real_worker() else { return };
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    fixture_replay::replay(&worker, &root.join("protocol/fixtures/hole_points.ndjson")).await;
+}
+
 use std::f64::consts::PI;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

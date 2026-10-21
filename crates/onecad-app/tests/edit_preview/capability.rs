@@ -70,3 +70,83 @@ async fn an_old_worker_is_unsupported_and_never_sent_the_verb() {
     assert_eq!(wm.state(), WorkerState::Ready);
     assert_eq!(wm.epoch(), epoch, "the stub never received PreviewPlan");
 }
+
+/// A worker with `plan.preview` but not `op.boolean.tools` must refuse an
+/// array-form Boolean preview as the ExecutePlan gate does, before the verb is
+/// sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn array_form_boolean_preview_needs_boolean_tools_capability() {
+    use onecad_app::worker::PreviewPlanRequest;
+    use onecad_core::document::record::{BooleanOp, BooleanParams};
+    use onecad_core::history::{DependencyGraph, Timeline};
+    use onecad_core::ids::{DocumentRevision, JobId, SnapshotId};
+    use onecad_core::regen::{
+        EngineError, PlanArtifacts, PlanContext, PolicyVersions, RegenPlanner,
+    };
+
+    let Some(stub) = stub_binary() else {
+        eprintln!("skip: onecad-worker-stub not built");
+        return;
+    };
+    let mut config = SupervisorConfig::production(stub);
+    config.envs = vec![
+        ("ONECAD_STUB_CAPABILITIES".into(), "plan.preview".into()),
+        ("ONECAD_STUB_CRASH_ON".into(), "PreviewPlan".into()),
+    ];
+    let wm = WorkerManager::spawn(config);
+    assert!(
+        wm.wait_ready(Duration::from_secs(10)).await,
+        "stub handshake"
+    );
+    let capabilities = wm.hello().expect("hello").capabilities;
+    assert!(capabilities.iter().any(|c| c == "plan.preview"));
+    assert!(!capabilities.iter().any(|c| c == "op.boolean.tools"));
+    let epoch = wm.epoch();
+
+    let boolean = Operation::Known(KnownOperation::Boolean(BooleanParams::new(
+        BooleanOp::Cut,
+        BodyId::new(),
+        vec![BodyId::new(), BodyId::new()],
+        false,
+    )));
+    let mut timeline = Timeline::new();
+    timeline.insert_at_cursor(OperationRecord::new(
+        RecordId(Uuid::from_u128(0x10)),
+        0,
+        "Boolean",
+        boolean,
+    ));
+    let ctx = PlanContext {
+        policy_versions: PolicyVersions::default(),
+        occt_fingerprint: "0000000000000000".into(),
+    };
+    let plan = RegenPlanner::plan(
+        &timeline,
+        &DependencyGraph::new(),
+        &[],
+        RegenRequest::ToEnd { from: 0 },
+        &ctx,
+    )
+    .into_request(
+        JobId(Uuid::from_u128(1)),
+        DocumentRevision(0),
+        epoch,
+        PolicyVersions::default(),
+        PlanArtifacts { tessellate: None },
+    );
+    let request = PreviewPlanRequest {
+        plan,
+        expected_snapshot: SnapshotId(0),
+        lod: Lod::Coarse,
+    };
+
+    let result = wm.preview_plan(request, CancelToken::new()).await;
+    assert!(
+        matches!(result, Err(EngineError::Protocol { ref message }) if message.contains("op.boolean.tools")),
+        "{result:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(wm.state(), WorkerState::Ready);
+    assert_eq!(wm.epoch(), epoch, "the stub never received PreviewPlan");
+    wm.shutdown().await;
+}
