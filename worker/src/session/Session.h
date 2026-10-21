@@ -222,10 +222,13 @@ public:
     std::uint64_t current_snapshot_id() const;
 
     // Atomically fence an optional snapshot claim and copy bodies + partition.
-    // A missing claim reads the current head for legacy callers.
+    // A missing claim reads the current head for legacy callers. The out-params
+    // report the head's snapshot id and worker epoch from the SAME critical
+    // section, so an epoch + snapshot fence is one read.
     std::optional<PublishedStateSnapshot> published_state_at(
         std::optional<std::uint64_t> expected_snapshot_id,
-        std::uint64_t* head_snapshot_id = nullptr) const;
+        std::uint64_t* head_snapshot_id = nullptr,
+        std::uint64_t* head_worker_epoch = nullptr) const;
 
     // Validate the complete Rust-owned binding batch against one unchanged head,
     // then publish its partition update atomically under the same lock.

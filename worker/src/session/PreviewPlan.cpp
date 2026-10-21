@@ -188,12 +188,12 @@ Envelope handle_preview_plan(Session& session, const Envelope& req, HandlerConte
     }
     // Read-only fence. A mismatched epoch is STALE_PREVIEW here, not the D4
     // PROTOCOL_ERROR: a preview publishes nothing, so a stale one is merely late.
-    const WorkerHead head = session.head();
-    std::uint64_t head_snapshot = head.snapshot_id;
-    std::optional<PublishedStateSnapshot> published;
-    if (head.worker_epoch == in.worker_epoch) {
-        published = session.published_state_at(in.expected_snapshot, &head_snapshot);
-    }
+    // Epoch, snapshot and bodies come from ONE critical section.
+    std::uint64_t head_snapshot = 0;
+    std::uint64_t head_epoch = 0;
+    std::optional<PublishedStateSnapshot> published =
+        session.published_state_at(in.expected_snapshot, &head_snapshot, &head_epoch);
+    if (head_epoch != in.worker_epoch) published.reset();
     if (!published) {
         return fail(req, in.job_id, "STALE_PREVIEW",
                     "PreviewPlan: stale head; expected epoch " +
@@ -201,7 +201,7 @@ Envelope handle_preview_plan(Session& session, const Envelope& req, HandlerConte
                         std::to_string(in.expected_snapshot),
                     json{{"requested", in.expected_snapshot},
                          {"head", head_snapshot},
-                         {"workerEpoch", head.worker_epoch}});
+                         {"workerEpoch", head_epoch}});
     }
     if (ctx.cancel.cancelled()) return fail(req, in.job_id, "CANCELLED", "preview cancelled");
 

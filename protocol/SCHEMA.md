@@ -4194,11 +4194,16 @@ advertise it (an old worker answers an unknown verb with `PROTOCOL_ERROR`).
   the triangle-free B-rep plus health and face colours, under the snapshot fence
   above). A body in `bodies` with no mesh displays exactly as the head body; a
   head body absent from `bodies` does not exist in the candidate. Meshes obey the
-  `PreviewOp` budget: degrade fine → medium → coarse to fit `chunkSize` per blob
-  and `initialBulkCredit` in aggregate, and the handle names the ACTUAL tier.
+  `PreviewOp` budget: every blob must fit `chunkSize` and, in aggregate,
+  `initialBulkCredit`. An over-budget blob is retried at the next coarser tier
+  (fine → medium → coarse) and the handle names the tier of the attempt that was
+  sent. The retry is best-effort only: a coarser tier helps only when the shared
+  tessellator re-triangulates the body, which this verb does not guarantee, so a
+  client MUST treat `PREVIEW_MESH_BUDGET_EXCEEDED` as a possible outcome of ANY
+  over-budget body and MUST NOT rely on a degraded success.
 - **Mesh failures** are `UNSUPPORTED` (a closed §8 code) with
   `detail.diagnostics[0].reasonCode` `PREVIEW_MESH_BUDGET_EXCEEDED`
-  (`evidence: {bodyId, bytes, limit}`) when even `coarse` does not fit, or
+  (`evidence: {bodyId, bytes, limit}`) when the last tier tried does not fit, or
   `PREVIEW_TESSELLATE_FAILED` (`evidence: {bodyId}`) when triangulation fails.
 - **Cancel.** A `cancel` frame ends the job with `CANCELLED`; the token is polled
   per step, inside the cooperative op paths, per meshed body and before the
@@ -8313,8 +8318,15 @@ sign-off) once fixtures exist.
   `kernelPolicyVersion` are unchanged (the fingerprint seed is the OCCT build
   identity, not the capability list). Fixture bump: `protocol/fixtures/preview_plan.ndjson`
   (C++ `canonical_preview_plan`, Rust replay in `crates/onecad-app/tests/edit_preview.rs`).
-  Sign-off: worker + Rust implemented together in this change; orchestrator
-  sign-off is recorded at integration. *Reason:* re-editing a feature must preview
+  Worker + Rust evidence recorded 2026-10-21 (macOS arm64 only): C++
+  `canonical_preview_plan` and `preview_plan` ctest and Rust
+  `canonical_preview_plan_fixture_replays_on_real_worker` pass against the same
+  worker build; the fixture pins the epoch-stale `detail.workerEpoch` and the
+  missing-`expectedSnapshotId` / unknown-`lod` `PROTOCOL_ERROR` rounds with an
+  unchanged head after them; hello `occt.fingerprint` is `0a6a1dce34181289`, the
+  same as the pre-change worker. Linux is NOT checked. PENDING: the
+  protocol-auditor / orchestrator cross-track sign-off (§13), to be recorded
+  here at integration. *Reason:* re-editing a feature must preview
   the edited feature AND its dependents without applying the edit over the
   feature's own old output, and without competing with regen for the single
   scratch / restored-base slot.
