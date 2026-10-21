@@ -81,9 +81,17 @@ fn a_new_preview_supersedes_and_cancels_the_previous_one() {
         "install cancels the previous preview"
     );
     assert!(!second_token.is_cancelled());
-    assert!(!slot.finish(first), "a superseded preview is not current");
-    assert!(slot.finish(second));
-    assert!(!slot.finish(second), "finish releases the slot");
+    assert_eq!(
+        slot.finish(first),
+        SlotFinish::Superseded,
+        "a superseded preview is not current"
+    );
+    assert_eq!(slot.finish(second), SlotFinish::Current);
+    assert_eq!(
+        slot.finish(second),
+        SlotFinish::Superseded,
+        "finish releases the slot"
+    );
     let (_, token) = slot.install();
     drop(slot);
     assert!(
@@ -98,6 +106,41 @@ fn a_publishing_regen_preempts_the_preview() {
     let job = run_job(&mut rt, 5.0);
     let _ = rt.begin_regen(RegenRequest::ToEnd { from: 0 });
     assert!(job.cancel_token().is_cancelled());
+    let result = rt.finish_edit_preview(
+        *job,
+        Ok(EditPreviewRun {
+            halted: halted_at(1, StepStatus::OpFailed),
+            isolated: None,
+        }),
+    );
+    assert!(
+        matches!(result, Err(ApiError::Cancelled(_))),
+        "a preempted preview reports Cancelled, not a superseded StalePreview: {result:?}"
+    );
+}
+
+/// Latest-wins holds for drafts answered without the worker too: reverting a
+/// field (Unchanged) or an invalid draft must not leave the old replay running.
+#[test]
+fn every_new_draft_supersedes_the_running_preview() {
+    let mut rt = runtime();
+    let running = run_job(&mut rt, 5.0);
+    let EditPreviewPrep::Done(same) = rt
+        .plan_edit_preview(rec(0x11), extrude(10.0), Lod::Coarse)
+        .unwrap()
+    else {
+        panic!("unchanged must not run");
+    };
+    assert_eq!(same.outcome, EditPreviewOutcome::Unchanged);
+    assert!(running.cancel_token().is_cancelled());
+    assert_eq!(rt.edit_preview.finish(running.seq), SlotFinish::Superseded);
+
+    let running = run_job(&mut rt, 6.0);
+    assert!(rt
+        .plan_edit_preview(rec(0x99), extrude(1.0), Lod::Coarse)
+        .is_err());
+    assert!(running.cancel_token().is_cancelled());
+    assert_eq!(rt.edit_preview.finish(running.seq), SlotFinish::Superseded);
 }
 
 #[test]
@@ -269,17 +312,83 @@ async fn failures_are_classified_relative_to_the_edited_step() {
     );
 }
 
+fn completed(steps: &[usize]) -> PlanPreview {
+    PlanPreview {
+        snapshot_id: SnapshotId(0),
+        last_valid_step: steps.last().copied(),
+        stopped_reason: StoppedReason::Completed,
+        per_step: steps
+            .iter()
+            .map(|&s| StepResult {
+                step_index: s,
+                status: StepStatus::Ok,
+                body_ids: Vec::new(),
+                message: String::new(),
+                diagnostics: Vec::new(),
+            })
+            .collect(),
+        steps: Vec::new(),
+        bodies: Vec::new(),
+        meshes: Vec::new(),
+    }
+}
+
+/// WP-D1: a halt BEFORE the edited step that the isolation pass routes around
+/// still lets Apply publish the edit, so it is not `NotReached`.
+#[tokio::test]
+async fn an_earlier_halt_routed_around_classifies_from_the_isolated_pass() {
+    let mut rt = runtime();
+    let job = run_job(&mut rt, 5.0);
+    let engine = ScriptedPreview {
+        answers: Mutex::new(vec![
+            Ok(halted_at(0, StepStatus::OpFailed)),
+            Ok(completed(&[1, 2])),
+        ]),
+        ..Default::default()
+    };
+    let run = drive_edit_preview(&job, &engine).await;
+    let preview = rt.finish_edit_preview(*job, run).unwrap();
+    assert!(preview.isolated, "the isolation pass ran");
+    assert!(
+        matches!(preview.outcome, EditPreviewOutcome::DownstreamFailed { step: 0, record, .. } if record == rec(0x10)),
+        "{:?}",
+        preview.outcome
+    );
+
+    let job = run_job(&mut rt, 5.0);
+    let engine = ScriptedPreview {
+        answers: Mutex::new(vec![
+            Ok(halted_at(0, StepStatus::OpFailed)),
+            Ok({
+                let mut pass = halted_at(1, StepStatus::OpFailed);
+                pass.per_step.remove(0);
+                pass.last_valid_step = None;
+                pass
+            }),
+        ]),
+        ..Default::default()
+    };
+    let run = drive_edit_preview(&job, &engine).await;
+    let preview = rt.finish_edit_preview(*job, run).unwrap();
+    assert!(
+        matches!(preview.outcome, EditPreviewOutcome::EditedFailed { .. }),
+        "the edited step's own failure in the isolation pass: {:?}",
+        preview.outcome
+    );
+}
+
 #[tokio::test]
 async fn engine_errors_map_explicitly() {
+    let job = run_job(&mut runtime(), 5.0);
     let unavailable = PreviewEngine::preview_plan(
         &PendingBackendWithoutPlan,
-        run_job(&mut runtime(), 5.0).request.clone(),
+        job.request.clone(),
         CancelToken::new(),
     )
     .await
     .unwrap_err();
     assert!(matches!(
-        map_preview_error(unavailable),
+        map_preview_error(&job, unavailable),
         ApiError::Unsupported(_)
     ));
     assert!(matches!(
@@ -296,6 +405,19 @@ async fn engine_errors_map_explicitly() {
         finish_with(Err(stale)).await,
         Err(ApiError::StalePreview(_))
     ));
+    let refused = EngineError::OpFailed {
+        code: OpFailureCode::GeometryInvalid,
+        recoverable: true,
+        message: "handler threw".into(),
+        diagnostics: Vec::new(),
+    };
+    assert!(
+        matches!(
+            finish_with(Err(refused)).await,
+            Err(ApiError::Unsupported(_))
+        ),
+        "a top-level refusal is 'no preview', never an edited-feature failure"
+    );
     let crashed = EngineError::Crashed {
         message: "gone".into(),
     };

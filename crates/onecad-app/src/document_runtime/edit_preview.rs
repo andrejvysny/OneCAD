@@ -20,8 +20,8 @@ use onecad_core::edit::{EditCommand, RegenHint};
 use onecad_core::history::{DependencyGraph, Timeline};
 use onecad_core::ids::{BodyId, JobId, RecordId, SnapshotId};
 use onecad_core::regen::{
-    CancelToken, Diagnostic, EngineError, Lod, OpFailureCode, PlanArtifacts, PlanContext,
-    PolicyVersions, RegenPlanner, RegenRequest, StepSignatures, StepStatus, StoppedReason,
+    CancelToken, Diagnostic, EngineError, Lod, PlanArtifacts, PlanContext, PolicyVersions,
+    RegenPlanner, RegenRequest, StepSignatures,
 };
 
 use super::{lower_feature_patterns, DocumentRuntime};
@@ -29,7 +29,10 @@ use crate::dto::PreviewBodyDto;
 use crate::error::ApiError;
 use crate::worker::{PlanPreview, PreviewPlanRequest};
 
+mod classify;
 mod drive;
+
+use classify::map_preview_error;
 
 pub use drive::{drive_edit_preview, EditPreviewRun};
 
@@ -38,7 +41,18 @@ pub use drive::{drive_edit_preview, EditPreviewRun};
 #[derive(Debug, Default)]
 pub(crate) struct EditPreviewSlot {
     active: Option<(u64, CancelToken)>,
+    /// The preview a publishing regen cancelled, so its caller hears `Cancelled`
+    /// rather than the `StalePreview` of a superseded draft.
+    preempted: Option<u64>,
     next: u64,
+}
+
+/// How a finishing preview relates to the slot.
+#[derive(Debug, PartialEq, Eq)]
+enum SlotFinish {
+    Current,
+    Preempted,
+    Superseded,
 }
 
 impl EditPreviewSlot {
@@ -50,20 +64,34 @@ impl EditPreviewSlot {
         (self.next, token)
     }
 
+    /// Supersedes the current preview: it finishes as `StalePreview`.
     pub(crate) fn cancel_active(&mut self) {
+        self.preempted = None;
         if let Some((_, token)) = self.active.take() {
             token.cancel();
         }
     }
 
-    /// Whether `seq` is still the current preview; releases the slot if so.
-    fn finish(&mut self, seq: u64) -> bool {
+    /// A publishing regen cancels the current preview: it finishes as `Cancelled`.
+    fn preempt(&mut self) {
+        if let Some((seq, token)) = self.active.take() {
+            token.cancel();
+            self.preempted = Some(seq);
+        }
+    }
+
+    /// Releases the slot for `seq` and says whether it was still current.
+    fn finish(&mut self, seq: u64) -> SlotFinish {
         match &self.active {
             Some((current, _)) if *current == seq => {
                 self.active = None;
-                true
+                SlotFinish::Current
             }
-            _ => false,
+            _ if self.preempted == Some(seq) => {
+                self.preempted = None;
+                SlotFinish::Preempted
+            }
+            _ => SlotFinish::Superseded,
         }
     }
 }
@@ -83,7 +111,8 @@ pub enum EditPreviewOutcome {
     Unchanged,
     /// The edited step cannot execute: it is suppressed or rolled back, a repair
     /// or variable gate sits at or below it, or an earlier step stopped the
-    /// replay. `ceiling` is the last step the replay may or did reach.
+    /// replay and the edited step depends on it. `ceiling` is the last step the
+    /// replay may or did reach.
     NotReached { ceiling: Option<usize> },
     /// The edited feature itself failed or needs repair at its own step.
     EditedFailed {
@@ -91,13 +120,14 @@ pub enum EditPreviewOutcome {
         diagnostics: Vec<Diagnostic>,
         needs_repair: bool,
     },
-    /// A later feature failed at `step`.
+    /// Another feature failed at `step`: a later one, or an earlier one the
+    /// WP-D1 isolation pass routed around (Apply still publishes the edit).
     DownstreamFailed {
         step: usize,
         record: RecordId,
         message: String,
     },
-    /// A later feature needs repair at `step`.
+    /// Another feature needs repair at `step` (later, or routed around as above).
     DownstreamNeedsRepair { step: usize, record: RecordId },
 }
 
@@ -156,6 +186,8 @@ pub enum EditPreviewPrep {
 pub struct EditPreviewJob {
     seq: u64,
     cancel: CancelToken,
+    /// For failure surfacing only.
+    runtime_session: String,
     record: RecordId,
     edited_step: usize,
     request: PreviewPlanRequest,
@@ -214,6 +246,9 @@ impl DocumentRuntime {
         lod: Lod,
     ) -> Result<EditPreviewPrep, ApiError> {
         self.refuse_edit_preview_now()?;
+        // Latest-wins for EVERY draft, including the ones answered without the
+        // worker: reverting a field must not leave the obsolete replay running.
+        self.edit_preview.cancel_active();
         if self.reedit_is_unchanged(record, &op)? {
             return Ok(EditPreviewPrep::Done(Box::new(EditPreview::idle(
                 record,
@@ -297,6 +332,7 @@ impl DocumentRuntime {
         Ok(EditPreviewPrep::Run(Box::new(EditPreviewJob {
             seq,
             cancel,
+            runtime_session: self.runtime_session(),
             record,
             edited_step: k,
             request: PreviewPlanRequest {
@@ -329,29 +365,39 @@ impl DocumentRuntime {
         Ok(())
     }
 
-    /// Cancels the in-flight edit preview, if any. Every publishing regen calls
-    /// this first: commit preempts preview.
+    /// Cancels the in-flight edit preview, if any; it then reports
+    /// `ApiError::Cancelled`. Every publishing regen calls this first: commit
+    /// preempts preview.
     pub fn cancel_edit_preview(&mut self) {
-        self.edit_preview.cancel_active();
+        self.edit_preview.preempt();
     }
 
     /// Phase 3 (**locked**). A result that is no longer the current preview is
-    /// `StalePreview`, whatever it carries.
+    /// `Cancelled` when a publishing regen preempted it and `StalePreview` when a
+    /// newer draft superseded it, whatever it carries.
     ///
     /// # Errors
-    /// `StalePreview` (superseded / fenced out), `Cancelled`, `Unsupported` (no
-    /// capability, mesh budget, an unmeshed body the head cannot show), or the
-    /// worker-class error as-is.
+    /// `StalePreview` (superseded / fenced out), `Cancelled` (preempted by a
+    /// publishing regen), `Unsupported` (no capability, mesh budget, an unmeshed
+    /// body the head cannot show, any other worker refusal of the preview), or
+    /// the worker-class error as-is.
     pub fn finish_edit_preview(
         &mut self,
         job: EditPreviewJob,
         run: Result<EditPreviewRun, EngineError>,
     ) -> Result<EditPreview, ApiError> {
-        let current = self.edit_preview.finish(job.seq);
-        if !current {
-            return Err(ApiError::StalePreview("edit preview superseded".into()));
+        match self.edit_preview.finish(job.seq) {
+            SlotFinish::Current => {}
+            SlotFinish::Preempted => {
+                return Err(ApiError::Cancelled(
+                    "edit preview preempted by a publishing regen".into(),
+                ))
+            }
+            SlotFinish::Superseded => {
+                return Err(ApiError::StalePreview("edit preview superseded".into()))
+            }
         }
-        let run = run.map_err(map_preview_error)?;
+        let run = run.map_err(|error| map_preview_error(&job, error))?;
         let hidden: HashSet<BodyId> = self
             .session
             .document()
@@ -365,31 +411,12 @@ impl DocumentRuntime {
     }
 }
 
-/// The explicit engine → API mapping for a preview (the generic `From` folds
-/// `Cancelled` and `StalePreview` into `OpFailed`).
-fn map_preview_error(error: EngineError) -> ApiError {
-    match error {
-        EngineError::Cancelled => ApiError::Cancelled("edit preview cancelled".into()),
-        EngineError::OpFailed {
-            code: OpFailureCode::StalePreview,
-            message,
-            ..
-        } => ApiError::StalePreview(message),
-        EngineError::OpFailed {
-            code: OpFailureCode::Unsupported,
-            message,
-            ..
-        } => ApiError::Unsupported(message),
-        other => other.into(),
-    }
-}
-
 fn build_preview(
     job: &EditPreviewJob,
     run: EditPreviewRun,
     hidden: &HashSet<BodyId>,
 ) -> Result<EditPreview, ApiError> {
-    let outcome = classify(job, &run.halted);
+    let outcome = classify::classify(job, &run.halted, run.isolated.as_ref());
     let needs_repair = run
         .halted
         .steps
@@ -441,54 +468,6 @@ fn build_preview(
             .collect(),
         isolated,
     })
-}
-
-/// Classifies the HALTED (first) pass relative to the edited step `k`.
-fn classify(job: &EditPreviewJob, halted: &PlanPreview) -> EditPreviewOutcome {
-    if halted.stopped_reason == StoppedReason::Completed {
-        return EditPreviewOutcome::Ready;
-    }
-    let Some(stop) = halted.per_step.last() else {
-        return EditPreviewOutcome::Ready;
-    };
-    let step = stop.step_index;
-    let k = job.edited_step;
-    let needs_repair = stop.status == StepStatus::NeedsRepair;
-    if step < k {
-        return EditPreviewOutcome::NotReached {
-            ceiling: step.checked_sub(1),
-        };
-    }
-    if step == k {
-        let mut diagnostics = stop.diagnostics.clone();
-        if let Some(event) = halted.steps.iter().find(|s| s.step_index == k) {
-            diagnostics.extend(event.diagnostics.iter().cloned());
-        }
-        let message = if stop.message.is_empty() {
-            if needs_repair {
-                "The edited feature needs repair".to_string()
-            } else {
-                "The edited feature failed".to_string()
-            }
-        } else {
-            stop.message.clone()
-        };
-        return EditPreviewOutcome::EditedFailed {
-            message,
-            diagnostics,
-            needs_repair,
-        };
-    }
-    let record = job.records.get(step).map_or(job.record, |r| r.record_id);
-    if needs_repair {
-        EditPreviewOutcome::DownstreamNeedsRepair { step, record }
-    } else {
-        EditPreviewOutcome::DownstreamFailed {
-            step,
-            record,
-            message: stop.message.clone(),
-        }
-    }
 }
 
 #[cfg(test)]

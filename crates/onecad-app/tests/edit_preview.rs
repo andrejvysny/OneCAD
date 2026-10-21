@@ -1,20 +1,28 @@
 //! ONECAD-369 edit preview against the REAL C++ worker (SCHEMA §7.6 `PreviewPlan`).
 //!
 //! The service previews replacing an existing record's operation by a full,
-//! non-publishing replay. What this file proves end to end:
+//! non-publishing replay. What this target proves end to end:
 //!
-//! * preview == commit: the displayed body set, the last step's three §12
-//!   signatures and the MESH1 bytes of every re-meshed body equal what the commit
-//!   publishes — including the WP-D1 isolation case, where a downstream feature
-//!   halts and an independent part above it still regenerates;
-//! * a preview changes nothing: worker head, revision, dirty flag, undo depth;
-//! * a stale fence is refused, a cancel mid-flight leaves no scratch and the next
-//!   regen publishes, an edited-feature failure is classified at its own step, a
-//!   worker death is a worker-class error, and save/reopen sees the unedited
+//! * `equivalence` — preview == commit: the displayed body set, the last step's
+//!   three §12 signatures and the MESH1 bytes of every re-meshed body equal what
+//!   the commit publishes, for Extrude and Fillet edits with dependents and for
+//!   both WP-D1 isolation cases (a halt after the edit, and an earlier halt the
+//!   isolation pass routes around); a preview changes nothing (worker head,
+//!   revision, dirty flag, undo depth); an edited-feature failure is classified
+//!   at its own step; a stale fence is refused; save/reopen sees the unedited
 //!   document;
+//! * `races` — abandoning a preview frees the worker's kernel lane well inside
+//!   the replay time (the worker-side cancel, not just the Rust fence), Apply
+//!   preempts an in-flight preview as `Cancelled` without queueing behind it, a
+//!   supersede storm leaves only the last draft `Ready`, and a worker crash
+//!   mid-preview is a worker-class error after which the restart replay equals
+//!   the pre-preview head and a fresh preview runs;
+//! * `capability` — an old worker without `plan.preview` is `Unsupported` and is
+//!   never sent the verb (stub worker);
 //! * the canonical `preview_plan.ndjson` fixture replays from Rust.
 //!
-//! Run: `ONECAD_REQUIRE_WORKER=1 ONECAD_WORKER_PATH=… cargo test -p onecad-app --test edit_preview`.
+//! Run: `ONECAD_REQUIRE_WORKER=1 ONECAD_WORKER_PATH=… cargo test -p onecad-app --test edit_preview`
+//! (`capability` needs `cargo build -p onecad-worker-stub` first and skips without it).
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -113,7 +121,12 @@ fn app_state_over(wm: &WorkerManager) -> AppState {
 
 /// A state over a fresh worker with `records` applied and regenerated.
 async fn document(records: Vec<OperationRecord>) -> Option<(WorkerManager, AppState)> {
-    let wm = spawn_worker(real_worker()?).await;
+    Some(document_on(real_worker()?, records).await)
+}
+
+/// [`document`] over the worker binary at `bin`.
+async fn document_on(bin: PathBuf, records: Vec<OperationRecord>) -> (WorkerManager, AppState) {
+    let wm = spawn_worker(bin).await;
     let state = app_state_over(&wm);
     let (engine, meshes, solver) = state.make_backend();
     let mut rt = DocumentRuntime::new_blank(engine, meshes, solver);
@@ -133,7 +146,7 @@ async fn document(records: Vec<OperationRecord>) -> Option<(WorkerManager, AppSt
         report.outcome
     );
     *state.runtime.lock().await = Some(rt);
-    Some((wm, state))
+    (wm, state)
 }
 
 async fn preview(state: &AppState, record: u128, op: Operation) -> Result<EditPreview, ApiError> {
@@ -354,247 +367,10 @@ fn part_with_dependent() -> Vec<OperationRecord> {
     ]
 }
 
-// ── Tests ──────────────────────────────────────────────────────────────────
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn preview_equals_commit_and_changes_nothing() {
-    let Some((_wm, state)) = document(part_with_dependent()).await else {
-        return;
-    };
-    let before = head_state(&state).await;
-    let edited = extrude_op(SKETCH_A, "", 5.0, None);
-    let preview = preview(&state, EXTRUDE_A, edited.clone())
-        .await
-        .expect("preview");
-
-    assert_eq!(preview.outcome, EditPreviewOutcome::Ready);
-    assert!(!preview.isolated);
-    let meshed: Vec<&str> = preview.meshes.iter().map(|m| m.body_id.as_str()).collect();
-    assert_eq!(
-        meshed,
-        [body(EXTRUDE_A).to_string()],
-        "only the edited part is re-meshed"
-    );
-    assert_eq!(
-        preview.suppressed,
-        vec![body(EXTRUDE_A)],
-        "its old version is hidden"
-    );
-    assert_eq!(
-        head_state(&state).await,
-        before,
-        "a preview publishes nothing"
-    );
-
-    let snap = commit(&state, EXTRUDE_A, edited).await;
-    assert_preview_equals_commit(&state, &preview, &snap).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_downstream_halt_previews_the_isolated_commit() {
-    let mut records = part_with_dependent();
-    // A broken feature on sketch A between the parts: the halt is downstream of
-    // the edit, and part C above it is provably independent (WP-D1).
-    records.insert(
-        4,
-        extrude_record(BROKEN, extrude_op(SKETCH_A, "no-such-region", 3.0, None)),
-    );
-    let Some((_wm, state)) = document(records).await else {
-        return;
-    };
-    let edited = extrude_op(SKETCH_A, "", 5.0, None);
-    let preview = preview(&state, EXTRUDE_A, edited.clone())
-        .await
-        .expect("preview");
-
-    assert!(
-        matches!(preview.outcome, EditPreviewOutcome::DownstreamFailed { step: 4, record, .. } if record == rec(BROKEN)),
-        "{:?}",
-        preview.outcome
-    );
-    assert!(
-        preview.isolated,
-        "the isolation pass supplies the displayed bodies"
-    );
-    assert!(
-        preview.bodies.contains(&body(EXTRUDE_C)),
-        "{:?}",
-        preview.bodies
-    );
-
-    let snap = commit(&state, EXTRUDE_A, edited).await;
-    assert_preview_equals_commit(&state, &preview, &snap).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_edited_feature_failure_is_reported_at_its_own_step() {
-    let Some((_wm, state)) = document(part_with_dependent()).await else {
-        return;
-    };
-    let before = head_state(&state).await;
-    let broken = extrude_op(SKETCH_A, "no-such-region", 5.0, None);
-    let preview = preview(&state, EXTRUDE_A, broken).await.expect("preview");
-    assert!(
-        matches!(
-            preview.outcome,
-            EditPreviewOutcome::EditedFailed {
-                needs_repair: false,
-                ..
-            }
-        ),
-        "{:?}",
-        preview.outcome
-    );
-    assert_eq!(head_state(&state).await, before);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_stale_fence_is_refused() {
-    let Some((_wm, state)) = document(part_with_dependent()).await else {
-        return;
-    };
-    let fence = api::preview_context(&state).await.unwrap();
-    commit(&state, EXTRUDE_C, extrude_op(SKETCH_C, "", 9.0, None)).await;
-    let stale = api::preview_existing_edit(
-        &state,
-        fence,
-        rec(EXTRUDE_A),
-        extrude_op(SKETCH_A, "", 5.0, None),
-        Lod::Coarse,
-    )
-    .await;
-    assert!(matches!(stale, Err(ApiError::StalePreview(_))), "{stale:?}");
-}
-
-/// Twenty fused bosses: long enough that a cancel lands mid-replay.
-fn heavy_part() -> Vec<OperationRecord> {
-    let mut records = vec![
-        sketch_record(SKETCH_A, 0.0, 0.0, 40.0, 40.0),
-        extrude_record(EXTRUDE_A, extrude_op(SKETCH_A, "", 10.0, None)),
-    ];
-    for i in 0..20u128 {
-        let sketch = 0x700 + 2 * i;
-        let x = 1.0 + (i % 5) as f64 * 7.5;
-        let y = 1.0 + (i / 5) as f64 * 9.0;
-        records.push(sketch_record(sketch, x, y, 5.0, 5.0));
-        records.push(extrude_record(
-            sketch + 1,
-            extrude_op(sketch, "", 12.0 + i as f64, Some(EXTRUDE_A)),
-        ));
-    }
-    records
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn apply_cancels_an_inflight_preview_and_publishes() {
-    let Some((wm, state)) = document(heavy_part()).await else {
-        return;
-    };
-    let state = Arc::new(state);
-    // The uncancelled replay must take several times the cancel delay, or the
-    // "mid-flight" below would really be "after the fact".
-    let started = std::time::Instant::now();
-    preview(&state, EXTRUDE_A, extrude_op(SKETCH_A, "", 5.0, None))
-        .await
-        .expect("calibration preview");
-    let full = started.elapsed();
-    eprintln!("heavy preview replay took {full:?}");
-    assert!(
-        full >= Duration::from_millis(160),
-        "replay too short to cancel mid-flight: {full:?}"
-    );
-    let task = {
-        let state = state.clone();
-        tokio::spawn(async move {
-            preview(&state, EXTRUDE_A, extrude_op(SKETCH_A, "", 6.0, None)).await
-        })
-    };
-    tokio::time::sleep(Duration::from_millis(40)).await;
-    // Apply: `begin_regen` preempts the preview before the commit plan is sent.
-    let snap = commit(&state, EXTRUDE_A, extrude_op(SKETCH_A, "", 7.0, None)).await;
-    let result = task.await.unwrap();
-    assert!(
-        matches!(
-            result,
-            Err(ApiError::Cancelled(_) | ApiError::StalePreview(_))
-        ),
-        "a preempted preview never reports Ready: {result:?}"
-    );
-    let head = wm.get_worker_head().await.unwrap();
-    assert!(!head.has_scratch, "a cancelled preview leaves no scratch");
-    assert_eq!(head.snapshot_id, snap.id, "the commit published");
-    // And the lane is free: a later preview runs to completion.
-    let again = preview(&state, EXTRUDE_A, extrude_op(SKETCH_A, "", 8.0, None)).await;
-    assert!(
-        matches!(again, Ok(ref p) if p.outcome == EditPreviewOutcome::Ready),
-        "{again:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_worker_death_is_a_worker_class_error() {
-    let Some((wm, state)) = document(heavy_part()).await else {
-        return;
-    };
-    let state = Arc::new(state);
-    let task = {
-        let state = state.clone();
-        tokio::spawn(async move {
-            preview(&state, EXTRUDE_A, extrude_op(SKETCH_A, "", 6.0, None)).await
-        })
-    };
-    tokio::time::sleep(Duration::from_millis(40)).await;
-    wm.retire();
-    let result = task.await.unwrap();
-    assert!(matches!(result, Err(ApiError::Worker(_))), "{result:?}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn save_and_reopen_see_the_unedited_document() {
-    let Some((wm, state)) = document(part_with_dependent()).await else {
-        return;
-    };
-    let signatures_before = {
-        let guard = state.runtime.lock().await;
-        guard
-            .as_ref()
-            .unwrap()
-            .subscribe_snapshots()
-            .borrow()
-            .clone()
-            .unwrap()
-            .signatures
-            .clone()
-    };
-    preview(&state, EXTRUDE_A, extrude_op(SKETCH_A, "", 5.0, None))
-        .await
-        .expect("preview");
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("previewed.onecad");
-    {
-        let mut guard = state.runtime.lock().await;
-        let meta = SaveMeta {
-            app_version: "0.1.0-test".into(),
-            occt_fingerprint: None,
-            created: "2026-10-21T00:00:00Z".into(),
-            modified: "2026-10-21T00:00:00Z".into(),
-        };
-        guard.as_mut().unwrap().save(&path, meta).expect("save");
-    }
-    let engine: Arc<dyn GeometryEngine> = Arc::new(wm.clone());
-    let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
-    let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
-    let mut reopened = DocumentRuntime::open(&path, engine, meshes, solver).expect("reopen");
-    let report = reopened
-        .run_regen(RegenRequest::RevertToEnd { from: 0 }, CancelToken::new())
-        .await;
-    let Outcome::Published(snap) = report.outcome else {
-        panic!("reopen regen must publish: {:?}", report.outcome);
-    };
-    assert_eq!(
-        snap.signatures, signatures_before,
-        "the saved document is the unedited one"
-    );
+mod edit_preview {
+    mod capability;
+    mod equivalence;
+    mod races;
 }
 
 #[tokio::test]

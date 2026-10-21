@@ -67,6 +67,7 @@ pub(crate) fn parse_plan_previewed(
     let stopped_reason = parse_stopped(result.get("stoppedReason"))?;
     let per_step = wire::parse_per_step(result.get("perStepResults"))?;
     validate_step_summary(&per_step, last_valid_step, stopped_reason)?;
+    validate_step_events(&per_step, &steps)?;
     let bodies = parse_bodies(result.get("bodies"))?;
     let meshes = parse_meshes(result.get("meshes"), sections, tail, expected, &bodies)?;
     Ok(PlanPreview {
@@ -127,6 +128,35 @@ fn validate_step_summary(
         return Err("PreviewPlan: lastValidStep disagrees with perStepResults".into());
     }
     Ok(())
+}
+
+/// The streamed `planStep`s are the preview == commit evidence and carry the
+/// edited step's diagnostics, so a dropped, repeated or reordered one is a
+/// protocol defect, not short evidence. Every Ok step emits exactly one, in
+/// order; the stopping step MAY emit one (a NeedsRepair step and a §3.4
+/// substituted event do, a plain op failure does not).
+fn validate_step_events(
+    per_step: &[onecad_core::regen::StepResult],
+    steps: &[PlanStepEvent],
+) -> Result<(), String> {
+    let ok: Vec<usize> = per_step
+        .iter()
+        .filter(|s| s.status == StepStatus::Ok)
+        .map(|s| s.step_index)
+        .collect();
+    let streamed: Vec<usize> = steps.iter().map(|s| s.step_index).collect();
+    let stop = per_step
+        .last()
+        .filter(|s| s.status != StepStatus::Ok)
+        .map(|s| s.step_index);
+    let with_stop = stop.map(|i| [ok.as_slice(), &[i]].concat());
+    if streamed == ok || with_stop.is_some_and(|expected| streamed == expected) {
+        Ok(())
+    } else {
+        Err(format!(
+            "PreviewPlan: planStep events {streamed:?} disagree with perStepResults (ok steps {ok:?})"
+        ))
+    }
 }
 
 fn parse_bodies(value: Option<&Value>) -> Result<Vec<BodyId>, String> {
@@ -260,7 +290,7 @@ mod tests {
             &[],
             &[],
             SnapshotId(9),
-            vec![],
+            vec![event(0)],
         )
         .unwrap();
         assert_eq!(parsed.last_valid_step, Some(0));
@@ -282,6 +312,34 @@ mod tests {
         .is_err());
         let stale = terminal(json!([]), Value::Null, "completed");
         assert!(parse_plan_previewed(&stale, &[], &[], SnapshotId(8), vec![]).is_err());
+    }
+
+    fn event(step_index: usize) -> PlanStepEvent {
+        wire::parse_plan_step(
+            &json!({"stepIndex": step_index, "bodyEvents": []}),
+            step_index,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn streamed_steps_must_match_the_summary() {
+        let ok = json!([{"stepIndex":0,"status":"ok"},{"stepIndex":1,"status":"ok"},
+                        {"stepIndex":2,"status":"needsRepair"}]);
+        let result = terminal(ok, json!(1), "needsRepair");
+        let parse = |steps| parse_plan_previewed(&result, &[], &[], SnapshotId(9), steps);
+        assert!(parse(vec![event(0), event(1)]).is_ok());
+        assert!(
+            parse(vec![event(0), event(1), event(2)]).is_ok(),
+            "the stopping step may stream"
+        );
+        let dropped = parse(vec![event(0)]).unwrap_err();
+        assert!(dropped.contains("disagree"), "{dropped}");
+        assert!(parse(vec![event(1), event(0)]).is_err(), "out of order");
+        assert!(
+            parse(vec![event(0), event(0), event(1)]).is_err(),
+            "repeated"
+        );
     }
 
     #[test]

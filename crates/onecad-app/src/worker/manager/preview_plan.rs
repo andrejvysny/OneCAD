@@ -171,7 +171,11 @@ fn finish(
                 }
             }
             Err(EngineError::Crashed {
-                message: format!("worker crashed mid-preview: {proto}"),
+                message: format!(
+                    "worker crashed mid-preview (job {}, {} steps streamed): {proto}",
+                    req.plan.job_id.0,
+                    steps.len()
+                ),
             })
         }
     }

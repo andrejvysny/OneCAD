@@ -33,10 +33,19 @@ impl Drop for CancelOnDrop {
 /// no checkpoint and no mesh-cache write.
 ///
 /// # Errors
-/// `StalePreview` when the head or document moved (or a newer preview
-/// superseded this one), `Cancelled`, `Unsupported` (the worker lacks
-/// `plan.preview`, a mesh budget refusal), `InvalidCommand` for a candidate the
-/// commit would reject, or the worker-class error as-is.
+/// * `StalePreview` — the head or document moved, or a newer draft superseded
+///   this one (any new `preview_existing_edit` call does, whatever its outcome).
+///   Re-issue against a fresh context.
+/// * `Cancelled` — a publishing regen (Apply, undo/redo, restart replay)
+///   preempted the preview. Not a failure; the commit is the answer.
+/// * `Unsupported` — no preview is available (the worker lacks `plan.preview`,
+///   a mesh budget refusal, any other worker refusal of the replay). Apply stays
+///   allowed.
+/// * `InvalidCommand` — a candidate the commit would reject.
+/// * `Worker` — a worker-class failure (crash, protocol, not connected).
+///
+/// Only an `Ok` preview with `EditPreviewOutcome::EditedFailed` describes the
+/// edit itself failing.
 pub async fn preview_existing_edit(
     state: &AppState,
     fence: PreviewContext,
@@ -72,6 +81,10 @@ pub async fn preview_existing_edit(
             return Err(stale());
         }
         let preview = runtime.finish_edit_preview(*job, run);
+        // A preemption moves the head by definition; report it as what it is.
+        if let Err(cancelled @ ApiError::Cancelled(_)) = preview {
+            return Err(cancelled);
+        }
         ensure_runtime_fence(runtime, &fence)?;
         preview?
     };

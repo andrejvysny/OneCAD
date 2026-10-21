@@ -49,7 +49,13 @@ pub async fn drive_edit_preview(
             // `adopt_isolated`: an isolation pass that does not complete costs
             // only the isolation benefit, never the halted pass's result.
             Err(error) => {
-                tracing::warn!(%error, "edit preview: isolation pass failed — showing the halted pass");
+                tracing::warn!(
+                    runtime_session = %job.runtime_session,
+                    record = %job.record,
+                    job = %job.isolation_job.0,
+                    %error,
+                    "edit preview: isolation pass failed — showing the halted pass"
+                );
                 None
             }
         },
