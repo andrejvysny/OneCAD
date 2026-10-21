@@ -9,6 +9,16 @@ pub use document_items::{
     delete_document_item, plan_delete_document_item, DeleteTarget, DeletionItem, DeletionPlan,
 };
 mod import_readiness;
+mod projection_parts;
+use projection_parts::{
+    detach_targets, parse_projection_request, plan_projection_sources, projected_edit,
+    promote_projection_picks, refusal_dtos, reproject_sketch, wire_projection_sources,
+};
+mod projection_visit;
+pub use projection_visit::{
+    detach_projection_with_completion, project_to_sketch_with_completion,
+    update_projection_with_completion,
+};
 mod replacement;
 mod sketch_constraints;
 mod sketch_gestures;
@@ -3198,27 +3208,6 @@ pub struct ProjectionSourceInput {
     pub anchor: Option<AnchorIntent>,
 }
 
-/// How one projection source is addressed: by the persistent id it already
-/// carries, or by the snapshot-scoped key that has to be promoted to get one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ProjectionAddress {
-    Promoted(ElementId),
-    Pick(TopoKey),
-}
-
-fn refusal_dtos(refusals: Vec<wire::ProjectionRefusal>) -> Vec<crate::dto::ProjectionRefusalDto> {
-    refusals
-        .into_iter()
-        .map(|r| crate::dto::ProjectionRefusalDto {
-            body_id: r.body_id,
-            element_id: r.element_id,
-            topo_key: r.topo_key,
-            code: r.code,
-            message: r.message,
-        })
-        .collect()
-}
-
 /// Projects picked body edges (or a picked face's whole boundary) into an
 /// EXISTING sketch as locked reference geometry (WP-P; SCHEMA §7.6
 /// `ProjectToSketchPlane`).
@@ -3261,54 +3250,7 @@ pub async fn project_to_sketch(
     sources: Vec<ProjectionSourceInput>,
 ) -> Result<crate::dto::ProjectToSketchDto, ApiError> {
     let sketch = parse_sketch_id(&sketch_id)?;
-    let mode = wire::ProjectionMode::parse(&mode).ok_or_else(|| {
-        ApiError::InvalidCommand(format!(
-            "projectToSketch: unknown mode {mode:?} (edges|faceOutline)"
-        ))
-    })?;
-    if sources.is_empty() {
-        return Err(ApiError::InvalidCommand(
-            "projectToSketch: at least one source is required".into(),
-        ));
-    }
-    // De-duplicate on (body, address), preserving request order: a doubled pick
-    // would otherwise promote as a mismatched batch and project the same edge
-    // twice into the sketch.
-    let mut addressed: Vec<(BodyId, ProjectionAddress, Option<AnchorIntent>)> = Vec::new();
-    for source in sources {
-        let body = wire::parse_body_id(&source.body_id).map_err(ApiError::InvalidCommand)?;
-        let address = match source.element_id.filter(|id| !id.is_empty()) {
-            Some(id) => ProjectionAddress::Promoted(ElementId::new(id)),
-            None => {
-                if source.topo_key.is_empty() {
-                    return Err(ApiError::InvalidCommand(
-                        "projectToSketch: every source needs a topoKey or an elementId".into(),
-                    ));
-                }
-                ProjectionAddress::Pick(TopoKey::new(source.topo_key))
-            }
-        };
-        if addressed
-            .iter()
-            .any(|(b, a, _)| *b == body && *a == address)
-        {
-            continue;
-        }
-        addressed.push((body, address, source.anchor));
-    }
-    // Only the un-promoted sources go through `promote_selection`; a source that
-    // already names its ElementId is bound in the worker's partition already.
-    // Skipping the promotion also skips its stale-pick gate, which costs nothing:
-    // an ElementId is durable across snapshots (Invariant 1), so there is no
-    // older pick snapshot for it to be stale against — and the kernel query plus
-    // `apply_sketch_edit_fenced` below still fence the whole triple on the head.
-    let picks: Vec<(BodyId, TopoKey, Option<AnchorIntent>)> = addressed
-        .iter()
-        .filter_map(|(body, address, anchor)| match address {
-            ProjectionAddress::Pick(key) => Some((*body, key.clone(), anchor.clone())),
-            ProjectionAddress::Promoted(_) => None,
-        })
-        .collect();
+    let (mode, addressed) = parse_projection_request(&mode, sources)?;
     let snapshot = SnapshotId(snapshot_id);
 
     // ── Locked: presence, the gesture refusal, the plane, and the promotion ──
@@ -3329,10 +3271,7 @@ pub async fn project_to_sketch(
             });
         }
         let existing = rt.sketch_snapshot(sketch, "projectToSketch")?;
-        let mut promoted = Vec::new();
-        for (body, group) in group_picks_by_body(&picks) {
-            promoted.extend(rt.promote_selection(snapshot, body, group).await?);
-        }
+        let promoted = promote_projection_picks(rt, snapshot, &addressed).await?;
         (
             existing.plane,
             existing.projections,
@@ -3345,68 +3284,9 @@ pub async fn project_to_sketch(
         let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
     }
 
-    // A source addressed by its ElementId declares the kind the MODE requires:
-    // the worker refuses any other value anyway (`ProjectToSketchPlane` checks
-    // `sources[].kind` against the mode's required kind), and there is no
-    // promotion answer to read one off.
-    let mode_kind = match mode {
-        wire::ProjectionMode::FaceOutline => wire::ProjectionSourceKind::Face,
-        wire::ProjectionMode::Edges => wire::ProjectionSourceKind::Edge,
-    };
-    let mut wire_sources = Vec::with_capacity(addressed.len());
-    let mut minted_refusals: Vec<wire::ProjectionRefusal> = Vec::new();
-    for (body, address, _) in &addressed {
-        let body_wire = wire::body_id_wire(*body);
-        let (element_id, key, kind) = match address {
-            ProjectionAddress::Promoted(id) => (id.as_str().to_string(), "", mode_kind),
-            ProjectionAddress::Pick(key) => {
-                let hit = promoted
-                    .iter()
-                    .find(|p| p.body_id == body_wire && p.topo_key == key.as_str())
-                    .ok_or_else(|| {
-                        ApiError::Internal(format!(
-                            "projectToSketch: promotion returned no identity for {body_wire} {}",
-                            key.as_str()
-                        ))
-                    })?;
-                let kind = match hit.kind.as_str() {
-                    "face" => wire::ProjectionSourceKind::Face,
-                    _ => wire::ProjectionSourceKind::Edge,
-                };
-                (hit.element_id.clone(), key.as_str(), kind)
-            }
-        };
-        // A source this sketch has already projected is REFUSED, not projected
-        // again: a second coincident outline would give one source two provenance
-        // runs, and no later update could tell which rows belong to which
-        // (WP-P F15). Per-source, so the rest of the batch still lands.
-        if already
-            .values()
-            .any(|row| row.source_body == *body && row.source_element_id.as_str() == element_id)
-        {
-            minted_refusals.push(wire::ProjectionRefusal {
-                body_id: body_wire,
-                element_id: element_id.clone(),
-                topo_key: key.to_string(),
-                code: sketch_projection::ALREADY_PROJECTED.to_string(),
-                message: format!(
-                    "{element_id} is already projected into this sketch — update or detach the \
-                     existing geometry instead of projecting it a second time"
-                ),
-            });
-            continue;
-        }
-        wire_sources.push((*body, element_id, kind));
-    }
-    let wire_sources: Vec<wire::ProjectionSource<'_>> = wire_sources
-        .iter()
-        .map(|(body, element_id, kind)| wire::ProjectionSource {
-            body: *body,
-            address: wire::FaceAddress::ElementId(element_id.as_str()),
-            kind: *kind,
-        })
-        .collect();
-    if wire_sources.is_empty() {
+    let (planned, minted_refusals) =
+        plan_projection_sources(mode, &addressed, &promoted, &already)?;
+    if planned.is_empty() {
         // Every pick was already projected: there is nothing to ask the kernel,
         // and an empty `sources` array is not a legal §7.6 request.
         return Ok(crate::dto::ProjectToSketchDto {
@@ -3421,41 +3301,17 @@ pub async fn project_to_sketch(
     // ── Unlocked: the fenced kernel query ────────────────────────────────────
     let result = state
         .face_projection()
-        .project_to_sketch_plane(snapshot, sketch, &plane, mode, &wire_sources)
+        .project_to_sketch_plane(
+            snapshot,
+            sketch,
+            &plane,
+            mode,
+            &wire_projection_sources(&planned),
+        )
         .await?;
 
     // ── Pure translate (no worker, no lock) ──────────────────────────────────
-    let (entities, constraints, projections) = onecad_core::sketch::projected_sketch_content(
-        &result.geometry,
-        &mut EntityId::new,
-        &mut ConstraintId::new,
-    );
-    let point_count = result.geometry.points.len().try_into().unwrap_or(u32::MAX);
-    let type_by_id: HashMap<EntityId, &'static str> = entities
-        .iter()
-        .map(|e| (e.id(), sketch_projection::type_token(e)))
-        .collect();
-    let mut ops: Vec<SketchEditOp> = Vec::new();
-    for entity in entities {
-        ops.push(SketchEditOp::AddEntity { entity });
-    }
-    for constraint in constraints {
-        ops.push(SketchEditOp::AddConstraint { constraint });
-    }
-    let mut dtos = Vec::with_capacity(projections.len());
-    for (entity, source) in projections {
-        dtos.push(crate::dto::ProjectedEntityDto {
-            entity_id: entity.to_string(),
-            entity_type: type_by_id.get(&entity).copied().unwrap_or("Line").into(),
-            source_body_id: wire::body_id_wire(source.source_body),
-            source_element_id: source.source_element_id.as_str().to_string(),
-            projected_hash: source.projected_hash.clone(),
-        });
-        ops.push(SketchEditOp::SetEntityProjection {
-            entity,
-            source: Some(source),
-        });
-    }
+    let (ops, dtos, point_count) = projected_edit(&result.geometry);
 
     // ── The single locked, FENCED write ──────────────────────────────────────
     let (outcome, projection) = {
@@ -3492,23 +3348,6 @@ pub async fn project_to_sketch(
         point_count,
         refusals: refusal_dtos(refusals),
     })
-}
-
-/// One pick, resolved to its body (`promote_selection` batches per body).
-type BodyPick = (TopoKey, Option<AnchorIntent>);
-
-/// Groups picks by body, preserving first-seen body order.
-fn group_picks_by_body(
-    picks: &[(BodyId, TopoKey, Option<AnchorIntent>)],
-) -> Vec<(BodyId, Vec<BodyPick>)> {
-    let mut out: Vec<(BodyId, Vec<BodyPick>)> = Vec::new();
-    for (body, key, anchor) in picks {
-        match out.iter_mut().find(|(b, _)| b == body) {
-            Some((_, group)) => group.push((key.clone(), anchor.clone())),
-            None => out.push((*body, vec![(key.clone(), anchor.clone())])),
-        }
-    }
-    out
 }
 
 /// Re-runs the projection for a sketch's mapped sources and replaces the entities
@@ -3549,19 +3388,6 @@ pub async fn update_projection(
         let snapshot = rt.head_snapshot_id().unwrap_or(SnapshotId(0));
         (sketch, snapshot, rt.projection_rebind_ticket(sketch_key))
     };
-    // ── Unlocked: the §7.5 re-bind ──────────────────────────────────────────
-    // The sources are snapshot-scoped in the WORKER even though the `ElementId`s
-    // are Rust-owned: a regen renumbers sub-shapes, so a source promoted two
-    // edits ago names nothing until the ladder re-binds it. Only an AutoBind
-    // binds; anything else stays absent and comes back as a per-source refusal
-    // rather than a guess. It is worker IO and mutates nothing here, so it runs
-    // with the runtime lock RELEASED (WP-P F7).
-    if let Some((engine, head, pending)) = rebind {
-        let (bound, unresolved) = DocumentRuntime::rebind_entries_with(&engine, head, &pending)
-            .await
-            .unwrap_or((0, pending.len()));
-        tracing::debug!("update_projection: rebind bound={bound} unresolved={unresolved}");
-    }
     // The rows read here are the ones the plan is built against; the fenced
     // commit below refuses if they moved (WP-P F12).
     let committed_rows = sketch.projections.clone();
@@ -3575,51 +3401,16 @@ pub async fn update_projection(
         });
     }
 
-    // ── Unlocked: one call per MODE, since a face source is re-requested as
-    // `faceOutline` and an edge source as `edges` ───────────────────────────
-    let projector = state.face_projection();
-    let mut fresh = Vec::new();
-    for (mode, sources) in sketch_projection::projection_request_plan(&sketch) {
-        let wire_sources: Vec<wire::ProjectionSource<'_>> = sources
-            .iter()
-            .map(|(body, element)| wire::ProjectionSource {
-                body: *body,
-                address: wire::FaceAddress::ElementId(element.as_str()),
-                kind: match mode {
-                    wire::ProjectionMode::FaceOutline => wire::ProjectionSourceKind::Face,
-                    wire::ProjectionMode::Edges => wire::ProjectionSourceKind::Edge,
-                },
-            })
-            .collect();
-        let result = projector
-            .project_to_sketch_plane(snapshot, sketch_key, &sketch.plane, mode, &wire_sources)
-            .await?;
-        fresh.push((result.geometry, result.refusals));
-    }
-
-    // ── Pure: match by (source element, ordinal) and build the ops ───────────
-    let plan = sketch_projection::build_projection_update(&sketch, &fresh);
-    let mut refusals: Vec<wire::ProjectionRefusal> =
-        fresh.iter().flat_map(|(_, r)| r.iter().cloned()).collect();
-    refusals.extend(plan.refusals.iter().cloned());
-    let dtos: Vec<crate::dto::ProjectedEntityDto> = plan
-        .replaced
-        .iter()
-        .map(|r| crate::dto::ProjectedEntityDto {
-            entity_id: r.entity.to_string(),
-            entity_type: r.entity_type.to_string(),
-            source_body_id: r.source_body_id.clone(),
-            source_element_id: r.source_element_id.clone(),
-            projected_hash: r.projected_hash.clone(),
-        })
-        .collect();
+    // ── Unlocked: the §7.5 re-bind and one kernel call per mode (WP-P F7),
+    // then the pure (source element, ordinal) match ─────────────────────────
+    let plan = reproject_sketch(state, &sketch, snapshot, rebind).await?;
     if plan.ops.is_empty() {
         return Ok(crate::dto::ProjectToSketchDto {
             sketch_id,
             snapshot_id: snapshot.0,
-            entities: dtos,
+            entities: plan.entities,
             point_count: 0,
-            refusals: refusal_dtos(refusals),
+            refusals: refusal_dtos(plan.refusals),
         });
     }
 
@@ -3649,8 +3440,8 @@ pub async fn update_projection(
     };
     tracing::info!(
         "update_projection: sketch={sketch_key} replaced={} refusals={}",
-        dtos.len(),
-        refusals.len()
+        plan.entities.len(),
+        plan.refusals.len()
     );
     // The optional host slot keeps this operation usable in headless runtimes.
     if let Some(app) = state.host.get() {
@@ -3664,9 +3455,9 @@ pub async fn update_projection(
     Ok(crate::dto::ProjectToSketchDto {
         sketch_id,
         snapshot_id: snapshot.0,
-        entities: dtos,
+        entities: plan.entities,
         point_count: 0,
-        refusals: refusal_dtos(refusals),
+        refusals: refusal_dtos(plan.refusals),
     })
 }
 
@@ -3705,28 +3496,7 @@ pub async fn detach_projection(
         rt.sketch_snapshot(sketch_key, "detachProjection")?
     };
 
-    let targets: Vec<EntityId> = match entity_ids {
-        None => sketch.projections.keys().copied().collect(),
-        Some(ids) => {
-            let mut out = Vec::with_capacity(ids.len());
-            for id in ids {
-                let entity = EntityId::from_str(&id).map_err(|e| {
-                    ApiError::InvalidCommand(format!("detachProjection: bad entityId {id:?}: {e}"))
-                })?;
-                if !sketch.projections.contains_key(&entity) {
-                    return Err(ApiError::InvalidCommand(format!(
-                        "detachProjection: entity {entity} is not projected in sketch {sketch_key}"
-                    )));
-                }
-                // A repeated id is the caller's, not a second projection: counting
-                // it twice would make `remaining` underflow.
-                if !out.contains(&entity) {
-                    out.push(entity);
-                }
-            }
-            out
-        }
-    };
+    let targets = detach_targets(&sketch, entity_ids)?;
     let (ops, freed_constraints) = sketch_projection::build_projection_detach(&sketch, &targets);
     let remaining = sketch
         .projections
