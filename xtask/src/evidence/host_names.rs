@@ -66,6 +66,15 @@ pub(super) const HOST_TESTS: &[&str] = &[
     "app_logic_tests::document_tab_delivery_tests::save_all_stops_at_a_cancelled_dialog_reports_failures_and_busy_documents",
     "app_logic_tests::document_tab_delivery_tests::a_provisional_tab_answered_in_the_background_closes_its_host",
     "app_logic_tests::document_tab_delivery_tests::save_all_moves_on_after_a_saved_dialog_even_when_that_document_closes",
+    "app_logic_tests::extrude_handle_delivery_tests::handle_click_and_sub_threshold_keep_authored_expression",
+    "app_logic_tests::extrude_handle_delivery_tests::handle_batched_drag_uses_release_before_later_hover",
+    "app_logic_tests::extrude_handle_delivery_tests::handle_press_move_then_move_release_next_frame_keeps_final_value",
+    "app_logic_tests::extrude_handle_delivery_tests::handle_release_at_authored_value_restores_expression_and_precision",
+    "app_logic_tests::extrude_handle_delivery_tests::handle_pointer_gone_focus_loss_and_escape_restore_without_history",
+    "app_logic_tests::extrude_handle_delivery_tests::handle_second_press_in_batch_drags_from_the_first_release",
+    "app_logic_tests::extrude_handle_delivery_tests::handle_cancelled_second_press_keeps_the_first_drag",
+    "app_logic_tests::extrude_handle_delivery_tests::handle_three_drags_then_confirm_add_one_history_entry",
+    "app_logic_tests::extrude_handle_delivery_tests::handle_release_over_chrome_ends_drag_at_last_motion",
 ];
 /// Ignored service and bridge cases outside `app_logic_tests`; they do not
 /// emit adapter evidence, so the gate runs them as a separate exact selection.

@@ -263,3 +263,6 @@ async fn home_without_document_and_empty_new_share_back_and_escape_predicate() {
 
 #[path = "capability_delivery_tests.rs"]
 mod capability_delivery_tests;
+
+#[path = "extrude_handle_delivery_tests.rs"]
+mod extrude_handle_delivery_tests;

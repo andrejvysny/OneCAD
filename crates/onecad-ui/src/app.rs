@@ -732,13 +732,14 @@ impl eframe::App for App {
             crate::shell::close_prompt(self, &ctx);
             return;
         }
-        crate::extrude_handle::settle(self, &ctx);
         crate::shell::show(self, ui);
         if self.ui.start_open {
             crate::start_screen::show(self, ui);
         } else {
             crate::viewport::show(self, ui);
         }
+        // After the viewport, so an in-batch release consumed by the handle wins.
+        crate::extrude_handle::settle(self, &ctx);
         crate::component_wizard::show(self, &ctx);
         crate::tab_switcher::show(self, &ctx);
         crate::shell::close_prompt(self, &ctx);
