@@ -17,20 +17,24 @@
 //! and are welded to the boundary (`Coincident` at an existing boundary
 //! endpoint, otherwise `OnCurve`). An `OnCurve` holding that boundary endpoint
 //! on the target — however the point is named — would restate the weld and is
-//! dropped as superseded. Ellipses are refused: the core has no elliptical-arc
+//! dropped as superseded, as is one naming any point a `Coincident` chain ties
+//! to that endpoint. Ellipses are refused: the core has no elliptical-arc
 //! kind to express a trimmed ellipse.
 //!
 //! **Extend** grows the line/arc end nearer the pick along its own
 //! continuation to the nearest boundary crossing; the end keeps its identity.
-//! A `Coincident` weld at a boundary endpoint supersedes that point's `OnCurve`
-//! on the target, as for trim. It refuses rather than guesses: no hit, a
+//! A `Coincident` weld at a boundary endpoint supersedes the `OnCurve` on the
+//! target of that point and of its `Coincident` chain, as for trim. It refuses rather than guesses: no hit, a
 //! tangent hit, a shared end point or any constraint pinning that end or the
 //! line length.
 //!
-//! **Same-carrier boundaries** (a collinear line, an arc of the target's
-//! circle) overlap rather than cross: their end points count as crossings. A
-//! trim cuts there; an extend stops at the nearer one ahead and refuses
-//! ([`ModifyRefusal::OverlapsBoundary`]) when its end already lies on one.
+//! **Same-carrier boundaries** overlap rather than cross. A collinear line's
+//! end points count as crossings: a trim cuts there; an extend stops at the
+//! nearer one ahead and refuses ([`ModifyRefusal::OverlapsBoundary`]) when its
+//! end already lies on one. An arc of the target's own circle is refused
+//! outright ([`ModifyRefusal::OverlapsBoundary`]) wherever its end point would
+//! bound the trimmed span or stop the extend. A full circle on the target's
+//! circle has no end points and is ignored as a boundary.
 //!
 //! **Ambiguous picks** are refused, never resolved arbitrarily: on a crossing
 //! (trim), mid-way between the ends (extend), half-way around an arc's gap or

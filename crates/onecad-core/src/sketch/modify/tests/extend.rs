@@ -240,6 +240,40 @@ fn landing_on_a_foot_supersedes_its_on_curve_for_lines_and_arcs() {
 }
 
 #[test]
+fn an_extend_weld_supersedes_on_curve_on_any_coincident_member() {
+    // C2: whichever member the weld picks, the OnCurve on the other restates it.
+    for (arc_first, name_arc) in [(false, true), (false, false), (true, true), (true, false)] {
+        let mut b = B::new();
+        let (l, _, e) = b.line((0.0, 0.0), (5.0, 0.0));
+        let on = junction(&mut b, l, arc_first, name_arc);
+        let grown = extend(&b.s, l, 4.9, 0.0).unwrap();
+        assert!(near(grown.tip, 8.0, 0.0));
+        let after = apply(&b.s, &grown.plan);
+        check_accounting(&b.s, &after, &grown.plan, l, &[e]);
+        assert_eq!(
+            dropped_reason(&grown.plan, on),
+            Some(DropReason::SupersededByExtendWeld),
+            "arc_first {arc_first}, name_arc {name_arc}"
+        );
+    }
+}
+
+#[test]
+fn an_arc_growing_into_an_arc_of_its_own_circle_is_refused() {
+    let mut b = B::new();
+    let (arc, _) = b.arc((0.0, 0.0), 5.0, 0.0, FRAC_PI_2);
+    let (boundary, _) = b.arc((0.0, 0.0), 5.0, 0.75 * PI, PI);
+    b.line((-10.0, -1.0), (10.0, -1.0));
+    assert_eq!(
+        extend(&b.s, arc, 0.5, 5.0).unwrap_err(),
+        ModifyRefusal::OverlapsBoundary {
+            entity: arc,
+            boundary
+        }
+    );
+}
+
+#[test]
 fn a_collinear_boundary_stops_the_extend_or_refuses_when_already_on_it() {
     let mut b = B::new();
     let (l, _, e) = b.line((0.0, 0.0), (5.0, 0.0));

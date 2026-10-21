@@ -2,7 +2,7 @@
 
 use std::f64::consts::TAU;
 
-use super::common::{orphaned, weld, Crossing};
+use super::common::{coincident_class, orphaned, weld, Crossing};
 use super::geom::{normalize_angle, Pt};
 use super::remap::{remap, RemapInput, RemapOutput};
 use super::trim::{Cut, Span, SpanEnd, Target};
@@ -22,13 +22,14 @@ struct Minted {
 }
 
 impl Minted {
-    /// Existing boundary endpoints a cut `Coincident` ties a piece end to, as
-    /// canonical references (`Crossing::at_endpoint` is canonical: a line's
-    /// endpoint point entity, or an arc plus its role).
-    fn welded_points(&self) -> Vec<(EntityId, CurvePosition)> {
+    /// Existing points a cut `Coincident` ties a piece end to — the boundary
+    /// endpoint and every point `Coincident`-chained to it — as canonical
+    /// references.
+    fn welded_points(&self, sketch: &Sketch) -> Vec<(EntityId, CurvePosition)> {
         self.cuts
             .iter()
             .filter_map(|(_, c)| c.at_endpoint)
+            .flat_map(|p| coincident_class(sketch, p))
             .collect()
     }
 }
@@ -43,7 +44,7 @@ pub(super) fn build(
     let id = entity.id();
     let minted = mint(sketch, entity, target, cut, ids);
     let removed_points = removed_points(sketch, id, target, &minted.pieces);
-    let welded_points = minted.welded_points();
+    let welded_points = minted.welded_points(sketch);
     let locate = |p: Pt| locate(target, &cut.spans, p);
     let line_ends = match *target {
         Target::Line { start, end, .. } => Some((start, end)),

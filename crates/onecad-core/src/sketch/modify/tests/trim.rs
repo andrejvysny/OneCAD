@@ -394,6 +394,53 @@ fn a_role_named_foot_at_a_cut_is_superseded_not_restated() {
 }
 
 #[test]
+fn a_cut_weld_supersedes_on_curve_on_any_coincident_member() {
+    for (arc_first, name_arc) in [(false, true), (false, false), (true, true), (true, false)] {
+        let mut b = B::new();
+        let (l, _, _) = b.line((0.0, 0.0), (10.0, 0.0));
+        let on = junction(&mut b, l, arc_first, name_arc);
+        let plan = trim(&b.s, l, 9.0, 0.0).unwrap();
+        let after = apply(&b.s, &plan);
+        check_accounting(&b.s, &after, &plan, l, &[]);
+        assert_eq!(
+            dropped_reason(&plan, on),
+            Some(DropReason::SupersededByCutWeld),
+            "arc_first {arc_first}, name_arc {name_arc}"
+        );
+    }
+}
+
+#[test]
+fn a_same_circle_arc_overlap_refuses_the_trim() {
+    // C7: the pick lies on the overlap with an arc of the same circle; a
+    // full circle there is refused alike.
+    let mut b = B::new();
+    let (arc, _) = b.arc((0.0, 0.0), 5.0, 0.0, PI);
+    let id = b.cid();
+    b.constrain(Constraint::Radius {
+        id,
+        entity: arc,
+        value: crate::document::variables::Scalar::new(5.0),
+    });
+    let (boundary, _) = b.arc((0.0, 0.0), 5.0, PI / 3.0, 2.0 * PI / 3.0);
+    let overlaps = ModifyRefusal::OverlapsBoundary {
+        entity: arc,
+        boundary,
+    };
+    assert_eq!(trim(&b.s, arc, 0.0, 5.0).unwrap_err(), overlaps);
+    // Cut at an overlap end from outside it, the piece would run along it.
+    assert_eq!(trim(&b.s, arc, 5.0, 0.5).unwrap_err(), overlaps);
+    let (circle, _) = b.circle((0.0, 0.0), 5.0);
+    assert_eq!(
+        trim(&b.s, circle, 0.0, -5.0).unwrap_err(),
+        ModifyRefusal::OverlapsBoundary {
+            entity: circle,
+            boundary: arc
+        }
+    );
+}
+
+#[test]
 fn a_collinear_boundary_cuts_at_its_end_points() {
     let mut b = B::new();
     let (l, _, _) = b.line((0.0, 0.0), (20.0, 0.0));

@@ -12,9 +12,11 @@
 //!
 //! A boundary on the target's OWN carrier (a collinear line, an arc of the same
 //! circle) meets it along a stretch rather than at points. Its drawn end
-//! points stand in for crossings, flagged `overlap`: a trim cuts at them, an
-//! extend stops at the nearer one (or refuses when the end already lies on
-//! it). A full circle on the same circle has no end points and so no hits.
+//! points are reported flagged `overlap`. A collinear line's stand in for
+//! crossings (a trim cuts at them, an extend stops at the nearer one or
+//! refuses when the end already lies on it); a same-circle arc's are never
+//! cut or welded at, only refused at. A full circle on the same circle has no
+//! end points and so no hits.
 
 use std::f64::consts::TAU;
 

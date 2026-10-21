@@ -13,8 +13,9 @@ use crate::sketch::{Sketch, SketchEntity};
 ///
 /// # Errors
 /// A [`ModifyRefusal`] when the target is missing, a point, locked, an
-/// ellipse, degenerate, the pick sits on a crossing, or a surviving piece would
-/// be shorter than [`MIN_PIECE_MM`]. A refusal draws no id from `ids`.
+/// ellipse, degenerate, the pick sits on a crossing, a surviving piece would
+/// be shorter than [`MIN_PIECE_MM`], or an arc/circle would be cut where an
+/// arc of its own circle ends. A refusal draws no id from `ids`.
 pub fn plan_trim(
     sketch: &Sketch,
     request: &TrimRequest,
@@ -167,7 +168,7 @@ impl Target {
         }
         let raw = crossings(sketch, id, &self.curve(), true, &|p| self.param(p));
         let pick = self.param(pick);
-        match self.extent() {
+        let cut = match self.extent() {
             Some(len) => {
                 let inner = raw
                     .into_iter()
@@ -178,18 +179,39 @@ impl Target {
                     .ok_or(ModifyRefusal::AmbiguousPick(id))?;
                 let spans = open_spans(&crossings, len, tol, pick)
                     .ok_or(ModifyRefusal::AmbiguousPick(id))?;
-                check_spans(&spans, min, id)?;
-                Ok(Cut { crossings, spans })
+                Cut { crossings, spans }
             }
             None => {
                 let crossings = wrap_merge(cluster(raw, tol), tol);
                 let spans =
                     ring_spans(&crossings, tol, pick).ok_or(ModifyRefusal::AmbiguousPick(id))?;
-                check_spans(&spans, min, id)?;
-                Ok(Cut { crossings, spans })
+                Cut { crossings, spans }
+            }
+        };
+        check_spans(&cut.spans, min, id)?;
+        if self.wraps() {
+            check_no_arc_overlap(&cut, id)?;
+        }
+        Ok(cut)
+    }
+}
+
+/// Refuses a cut at an end point of an arc of the target's own circle: the
+/// pick shares that stretch with it, or a surviving piece would run along it.
+/// (A collinear line's ends do cut a line: its pieces are new point entities.)
+fn check_no_arc_overlap(cut: &Cut, id: EntityId) -> Result<(), ModifyRefusal> {
+    let ends = cut.spans.iter().flat_map(|s| [s.start, s.end]);
+    for end in ends {
+        if let SpanEnd::Cut(i) = end {
+            if cut.crossings[i].overlap {
+                return Err(ModifyRefusal::OverlapsBoundary {
+                    entity: id,
+                    boundary: cut.crossings[i].boundary,
+                });
             }
         }
     }
+    Ok(())
 }
 
 /// A pick off an open curve's extent selects the nearer end; on an arc

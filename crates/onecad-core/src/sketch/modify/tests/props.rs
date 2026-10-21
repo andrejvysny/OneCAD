@@ -3,7 +3,8 @@
 //! `OnCurve` restating a weld; every plan is reproducible; every refusal is
 //! repeatable and draws no ids. Scenes include boundary "feet" on the target's
 //! carrier (inside and beyond its extent) held there by an `OnCurve` that names
-//! the foot as a point entity, a line `End` role or an arc `Start` role.
+//! the foot as a point entity, a line `End` role or an arc `Start` role, or
+//! naming either member of a stem foot `Coincident` with an arc `Start`.
 
 use std::f64::consts::TAU;
 
@@ -44,6 +45,9 @@ enum Foot {
     LineEnd,
     /// An arc's `Start` role.
     ArcStart,
+    /// A stem's end point plus an arc whose `Start` is `Coincident` with it;
+    /// `(arc created first, OnCurve names the arc Start)`.
+    Chained(bool, bool),
 }
 
 fn coord() -> impl Strategy<Value = (f64, f64)> {
@@ -79,7 +83,12 @@ fn scene() -> impl Strategy<Value = Scene> {
 }
 
 fn foot() -> impl Strategy<Value = Foot> {
-    prop_oneof![Just(Foot::Point), Just(Foot::LineEnd), Just(Foot::ArcStart)]
+    prop_oneof![
+        Just(Foot::Point),
+        Just(Foot::LineEnd),
+        Just(Foot::ArcStart),
+        (any::<bool>(), any::<bool>()).prop_map(|(a, n)| Foot::Chained(a, n)),
+    ]
 }
 
 /// A point on the target's carrier: a line from `t = −0.5` to `1.5` (beyond
@@ -109,17 +118,32 @@ fn add_feet(b: &mut B, sc: &Scene, target: EntityId) {
     for &(u, dir, how) in &sc.feet {
         let (fx, fy) = on_carrier(sc, u);
         let (dx, dy) = (3.0 * dir.cos(), 3.0 * dir.sin());
+        let stem = |b: &mut B| b.line((fx + dx, fy + dy), (fx, fy));
+        let arc = |b: &mut B| b.arc((fx - dx, fy - dy), 3.0, dir, dir + 1.0).0;
         match how {
-            Foot::Point | Foot::LineEnd => {
-                let (stem, _, foot) = b.line((fx + dx, fy + dy), (fx, fy));
-                match how {
-                    Foot::Point => b.on_curve(foot, target),
-                    _ => b.on_curve_at(stem, CurvePosition::End, target),
-                };
+            Foot::Point => {
+                let (_, _, foot) = stem(b);
+                b.on_curve(foot, target);
+            }
+            Foot::LineEnd => {
+                let (stem, _, _) = stem(b);
+                b.on_curve_at(stem, CurvePosition::End, target);
             }
             Foot::ArcStart => {
-                let (arc, _) = b.arc((fx - dx, fy - dy), 3.0, dir, dir + 1.0);
+                let arc = arc(b);
                 b.on_curve_at(arc, CurvePosition::Start, target);
+            }
+            Foot::Chained(arc_first, name_arc) => {
+                let early = arc_first.then(|| arc(b));
+                let (_, _, foot) = stem(b);
+                let arc = early.unwrap_or_else(|| arc(b));
+                let arc_start = (arc, CurvePosition::Start);
+                b.coincident((foot, CurvePosition::Arbitrary), arc_start);
+                if name_arc {
+                    b.on_curve_at(arc, CurvePosition::Start, target);
+                } else {
+                    b.on_curve(foot, target);
+                }
             }
         }
     }

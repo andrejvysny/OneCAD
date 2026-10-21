@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 
 use uuid::Uuid;
 
+use super::common::coincident_class;
 use super::geom::point_key;
 use super::{AddReason, ModifyIds, ModifyPlan};
 use crate::document::Document;
@@ -132,6 +133,20 @@ impl B {
             at,
         })
     }
+    pub fn coincident(
+        &mut self,
+        (point1, point1_position): (EntityId, CurvePosition),
+        (point2, point2_position): (EntityId, CurvePosition),
+    ) -> ConstraintId {
+        let id = self.cid();
+        self.constrain(Constraint::Coincident {
+            id,
+            point1,
+            point2,
+            point1_position,
+            point2_position,
+        })
+    }
     pub fn on_curve(&mut self, point: EntityId, curve: EntityId) -> ConstraintId {
         self.on_curve_at(point, CurvePosition::Arbitrary, curve)
     }
@@ -150,6 +165,29 @@ impl B {
             curve,
             position: CurvePosition::Arbitrary,
         })
+    }
+}
+
+/// A junction at (8,0) on `target`: a stem's foot point and an arc's `Start`
+/// tied by a `Coincident`, created stem first unless `arc_first`. Returns the
+/// `OnCurve` holding the junction on `target`, which names the arc `Start`
+/// (`name_arc`) or the stem's foot point.
+pub(super) fn junction(
+    b: &mut B,
+    target: EntityId,
+    arc_first: bool,
+    name_arc: bool,
+) -> ConstraintId {
+    let arc_at = |b: &mut B| b.arc((11.0, 0.0), 3.0, std::f64::consts::PI, 4.7).0;
+    let early_arc = arc_first.then(|| arc_at(b));
+    let (_, _, foot) = b.line((8.0, 5.0), (8.0, 0.0));
+    let arc = early_arc.unwrap_or_else(|| arc_at(b));
+    let arc_start = (arc, CurvePosition::Start);
+    b.coincident((foot, CurvePosition::Arbitrary), arc_start);
+    if name_arc {
+        b.on_curve_at(arc, CurvePosition::Start, target)
+    } else {
+        b.on_curve(foot, target)
     }
 }
 
@@ -263,9 +301,10 @@ pub(super) fn check_accounting(
 }
 
 /// No `OnCurve` in the result restates a `Coincident` weld the plan added: a
-/// weld tying a piece end to point P makes `OnCurve(P, piece)` the same
-/// equation twice, which the worker solver reports as over-constrained.
-/// Point references compare canonically (a line role is its point entity).
+/// weld tying a piece end to point P makes `OnCurve(Q, piece)` the same
+/// equation twice for P and every Q a `Coincident` chain ties to P, which the
+/// worker solver reports as over-constrained. Point references compare
+/// canonically (a line role is its point entity).
 pub(super) fn check_no_restated_weld(after: &Sketch, plan: &ModifyPlan) {
     let pieces: Vec<EntityId> = plan.pieces.iter().map(|p| p.id).collect();
     for added in &plan.added_constraints {
@@ -277,18 +316,13 @@ pub(super) fn check_no_restated_weld(after: &Sketch, plan: &ModifyPlan) {
         }
         let Some(Constraint::Coincident {
             point1,
-            point2,
             point1_position,
-            point2_position,
             ..
         }) = after.get_constraint(added.id)
         else {
             continue;
         };
-        let welded = [
-            point_key(after, *point1, *point1_position),
-            point_key(after, *point2, *point2_position),
-        ];
+        let welded = coincident_class(after, (*point1, *point1_position));
         for c in after.constraints() {
             if let Constraint::OnCurve {
                 point,

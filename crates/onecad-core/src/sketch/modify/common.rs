@@ -1,7 +1,7 @@
 //! Pieces shared by Trim and Extend: target validation, boundary crossings and
 //! the weld that holds a new endpoint on its boundary.
 
-use super::geom::{curve_of, Curve, Pt};
+use super::geom::{curve_of, point_key, Curve, Pt};
 use super::intersect::carrier_hits;
 use super::ModifyRefusal;
 use crate::ids::{ConstraintId, EntityId};
@@ -78,15 +78,15 @@ pub(super) fn crossings(
 
 /// Of crossings within `tol` of each other, the one a weld should use: a
 /// boundary endpoint first (a `Coincident` is exact), then a transversal
-/// crossing, then iteration order.
+/// crossing, then a same-carrier end point (so a refusal of an arc overlap is
+/// never masked by another curve meeting there), then iteration order.
 pub(super) fn representative<'a>(cluster: impl Iterator<Item = &'a Crossing>) -> Crossing {
+    let rank = |c: &Crossing| (c.at_endpoint.is_some(), !c.tangent, c.overlap);
     let mut best: Option<&Crossing> = None;
     for c in cluster {
         let better = match best {
             None => true,
-            Some(b) => {
-                (c.at_endpoint.is_some(), !c.tangent) > (b.at_endpoint.is_some(), !b.tangent)
-            }
+            Some(b) => rank(c) > rank(b),
         };
         if better {
             best = Some(c);
@@ -119,6 +119,50 @@ pub(super) fn weld(
             position: CurvePosition::Arbitrary,
         },
     }
+}
+
+/// Every point reference a chain of `Coincident`s ties to `seed`, `seed`
+/// included, all canonical ([`point_key`]). A weld at any member welds them
+/// all, so an `OnCurve` naming any member restates it.
+pub(super) fn coincident_class(
+    sketch: &Sketch,
+    (entity, role): (EntityId, CurvePosition),
+) -> Vec<(EntityId, CurvePosition)> {
+    let links: Vec<_> = sketch
+        .constraints()
+        .iter()
+        .filter_map(|c| match *c {
+            Constraint::Coincident {
+                point1,
+                point2,
+                point1_position,
+                point2_position,
+                ..
+            } => Some((
+                point_key(sketch, point1, point1_position),
+                point_key(sketch, point2, point2_position),
+            )),
+            _ => None,
+        })
+        .collect();
+    let mut class = vec![point_key(sketch, entity, role)];
+    let mut next = 0;
+    while let Some(&at) = class.get(next) {
+        for &(a, b) in &links {
+            let other = if a == at {
+                b
+            } else if b == at {
+                a
+            } else {
+                continue;
+            };
+            if !class.contains(&other) {
+                class.push(other);
+            }
+        }
+        next += 1;
+    }
+    class
 }
 
 /// True when no entity other than `owner` is built from `point`, so removing

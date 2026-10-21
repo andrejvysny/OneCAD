@@ -2,7 +2,7 @@
 
 use std::f64::consts::TAU;
 
-use super::common::{crossings, modifiable, representative, weld, Crossing};
+use super::common::{coincident_class, crossings, modifiable, representative, weld, Crossing};
 use super::geom::{
     angle_of, arc_param, curve_of, line_param, normalize_angle, on_circle, point_key, Curve, Pt,
 };
@@ -150,6 +150,7 @@ fn extend_arc(
     );
     // Growing into the arc's own span would wrap it onto itself.
     let hit = nearest(sketch, raw, end, (tol, TAU - sweep - tol), id)?;
+    let hit = not_same_circle(hit, id)?;
     if hit.param * r < MIN_PIECE_MM {
         return Err(ModifyRefusal::DegeneratePiece(id));
     }
@@ -171,6 +172,18 @@ fn extend_arc(
         superseded,
     };
     Ok(finish(grown, ops, kept, ids))
+}
+
+/// An arc target's `overlap` hit is the end point of an arc of its own
+/// circle: overlapped, never met, so refused rather than welded.
+fn not_same_circle(hit: Crossing, id: EntityId) -> Result<Crossing, ModifyRefusal> {
+    if hit.overlap {
+        return Err(ModifyRefusal::OverlapsBoundary {
+            entity: id,
+            boundary: hit.boundary,
+        });
+    }
+    Ok(hit)
 }
 
 /// Replaces the arc under its own id (there is no in-place angle op): every
@@ -203,20 +216,21 @@ fn replace_arc(
     (ops, readded.iter().map(|k| k.id()).collect())
 }
 
-/// `OnCurve`s on the target of the boundary end point the extend welds to:
-/// once the grown end is `Coincident` with that point, each restates the weld
-/// (the solver reports the pair over-constrained). Matched however the point
-/// is named.
+/// `OnCurve`s on the target of the boundary end point the extend welds to,
+/// or of any point a `Coincident` chain ties to it: once the grown end is
+/// `Coincident` with that point, each restates the weld (the solver reports
+/// the pair over-constrained). Matched however the point is named.
 fn superseded(sketch: &Sketch, id: EntityId, hit: &Crossing) -> Vec<ConstraintId> {
     let Some(welded) = hit.at_endpoint else {
         return Vec::new();
     };
+    let class = coincident_class(sketch, welded);
     sketch
         .constraints()
         .iter()
         .filter(|c| {
             matches!(c, Constraint::OnCurve { point, point_position, curve, .. }
-                if *curve == id && point_key(sketch, *point, *point_position) == welded)
+                if *curve == id && class.contains(&point_key(sketch, *point, *point_position)))
         })
         .map(Constraint::id)
         .collect()
