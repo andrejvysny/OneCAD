@@ -199,18 +199,21 @@ fn a_circle_touched_once_is_deleted_whole_with_its_center() {
 
 #[test]
 fn a_small_circle_on_an_ellipse_is_cut_not_deleted_whole() {
-    // Both crossings fall inside one 0.5 deg ellipse seed interval.
+    // Both crossings fall inside one 0.5 deg ellipse seed interval; on the
+    // huge ellipses rounding of f must not merge them into one touch.
     let phi = 0.25f64.to_radians();
-    let (cx, cy, r) = (100.0 * phi.cos(), 50.0 * phi.sin(), 0.1);
-    let mut b = B::new();
-    b.ellipse((0.0, 0.0), 100.0, 50.0, 0.0);
-    let (c, center) = b.circle((cx, cy), r);
-    let plan = trim(&b.s, c, cx - r, cy).unwrap();
-    let after = apply(&b.s, &plan);
-    check_accounting(&b.s, &after, &plan, c, &[]);
-    assert_eq!(plan.pieces.len(), 1, "the outer arc survives");
-    assert_eq!(plan.removed_entities, vec![c]);
-    assert!(after.contains_entity(center));
+    for (major, minor, r) in [(100.0, 50.0, 0.1), (1e5, 5e4, 0.02), (1e6, 5e5, 0.15)] {
+        let (cx, cy) = (major * phi.cos(), minor * phi.sin());
+        let mut b = B::new();
+        b.ellipse((0.0, 0.0), major, minor, 0.0);
+        let (c, center) = b.circle((cx, cy), r);
+        let plan = trim(&b.s, c, cx - r, cy).unwrap();
+        let after = apply(&b.s, &plan);
+        check_accounting(&b.s, &after, &plan, c, &[]);
+        assert_eq!(plan.pieces.len(), 1, "{major}: the outer arc survives");
+        assert_eq!(plan.removed_entities, vec![c]);
+        assert!(after.contains_entity(center));
+    }
 }
 
 #[test]

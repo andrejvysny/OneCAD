@@ -232,17 +232,18 @@ fn circle_ellipse(cc: Pt, r: f64, ellipse: &Curve) -> Vec<Hit> {
         return Vec::new();
     };
     let reach = major.max(minor);
-    let far = c.dist(cc) + reach;
+    let offset = c - cc;
+    let far = offset.len() + reach;
     let mut search = CircleEllipse {
         c,
         major,
         minor,
         rot,
-        cc,
+        offset,
         r,
         f2: 2.0 * reach * (reach + far),
         band: COINCIDENT_MM * (2.0 * r + COINCIDENT_MM),
-        noise: 64.0 * f64::EPSILON * (far * far + r * r),
+        span: far + r,
         leaf: COINCIDENT_MM / (4.0 * reach),
         nodes: 0,
         roots: Vec::new(),
@@ -271,19 +272,22 @@ struct Sample {
 
 /// Root search for `f(φ) = |E(φ) − cc|² − r²`, a degree-2 trigonometric
 /// polynomial with up to four roots, any two of which may be arbitrarily close.
+/// `f` is evaluated from `E − cc = (c − cc) + R·(a cos φ, b sin φ)`, so its
+/// rounding depends on the pair's relative size, not where it sits.
 struct CircleEllipse {
     c: Pt,
     major: f64,
     minor: f64,
     rot: f64,
-    cc: Pt,
+    /// `c − cc`.
+    offset: Pt,
     r: f64,
     /// `≥ max|f''|`: `f'' = 2(|E'|² + (E − cc)·E'')`, `|E'|, |E − c| ≤ reach`.
     f2: f64,
     /// `|f|` bound of a point within [`COINCIDENT_MM`] of the circle.
     band: f64,
-    /// `|f|` indistinguishable from zero after rounding.
-    noise: f64,
+    /// `|c − cc| + reach + r`, the magnitude every rounding in `f` scales by.
+    span: f64,
     /// Interval width below which subdivision stops.
     leaf: f64,
     nodes: usize,
@@ -296,16 +300,35 @@ impl CircleEllipse {
         ellipse_point(self.c, self.major, self.minor, self.rot, phi)
     }
 
+    /// `E(φ) − cc`.
+    fn rel(&self, phi: f64) -> Pt {
+        ellipse_point(self.offset, self.major, self.minor, self.rot, phi)
+    }
+
     fn f(&self, phi: f64) -> f64 {
-        let d = self.point(phi).dist(self.cc);
-        d * d - self.r * self.r
+        let d = self.rel(phi);
+        d.dot(d) - self.r * self.r
+    }
+
+    /// First-order bound on the rounding of `f(φ)` as computed, `u = ε`.
+    ///
+    /// `c − cc` rounds by `u|c − cc|`; `cos`, `sin` (libm, under 1 ulp), the
+    /// axis scaling and the rotation add about `5u·reach` per component, so
+    /// `|δd| ≤ 8u(|c − cc| + reach)`. `d·d − r²` then rounds by
+    /// `2|d||δd| + 3u(|d|² + r²)`, all within `16u(|d| + r)(span + |d|)`:
+    /// about `16u·r·span` near a root, independent of where the pair sits.
+    /// Doubled because a merge tests a computed `f` whose true value at a
+    /// flickering root's neighbour may itself be off by the bound.
+    fn noise(&self, phi: f64) -> f64 {
+        let d = self.rel(phi).len();
+        32.0 * f64::EPSILON * (d + self.r) * (self.span + d)
     }
 
     fn df(&self, phi: f64) -> f64 {
         let (sin, cos) = self.rot.sin_cos();
         let (x, y) = (-self.major * phi.sin(), self.minor * phi.cos());
         let tangent = Pt::new(x * cos - y * sin, x * sin + y * cos);
-        2.0 * (self.point(phi) - self.cc).dot(tangent)
+        2.0 * self.rel(phi).dot(tangent)
     }
 
     fn sample(&self, phi: f64) -> Sample {
@@ -368,7 +391,7 @@ impl CircleEllipse {
         }
         // A minimum at or above zero, or a maximum below it.
         let touches = rising == (ext.f >= 0.0);
-        if touches && (self.point(ext.phi).dist(self.cc) - self.r).abs() <= COINCIDENT_MM {
+        if touches && (self.rel(ext.phi).len() - self.r).abs() <= COINCIDENT_MM {
             self.roots.push((ext.phi, true));
         }
     }
@@ -383,7 +406,8 @@ impl CircleEllipse {
         let chained = |i: usize| {
             let (a, b) = (self.roots[(i + n - 1) % n].0, self.roots[i].0);
             let mid = 0.5 * (a + b + if b < a { TAU } else { 0.0 });
-            self.point(a).dist(self.point(b)) <= COINCIDENT_MM || self.f(mid).abs() <= self.noise
+            self.point(a).dist(self.point(b)) <= COINCIDENT_MM
+                || self.f(mid).abs() <= self.noise(mid)
         };
         let start = (0..n).find(|&i| !chained(i)).unwrap_or(0);
         let mut runs: Vec<Vec<(f64, bool)>> = Vec::new();
@@ -569,6 +593,39 @@ mod tests {
             let hits = carrier_hits(&Curve::Circle { c, r }, &origin_ellipse(major, minor));
             assert_eq!(hits.len(), 2, "{major}x{minor} r={r}: {hits:?}");
             assert_hits(&hits, (c, r), (major, minor), &[]);
+        }
+    }
+
+    #[test]
+    fn a_small_circle_centred_on_a_huge_ellipse_crosses_it_twice() {
+        // Rounding of f scales with the circle, not the ellipse: a noise
+        // bound growing with the ellipse squared merged these into a touch.
+        for (major, minor, r) in [(1e5, 5e4, 0.02), (1e6, 5e5, 0.15)] {
+            let c = ellipse_point(Pt::new(0.0, 0.0), major, minor, 0.0, 0.25f64.to_radians());
+            let hits = carrier_hits(&Curve::Circle { c, r }, &origin_ellipse(major, minor));
+            assert_eq!(hits.len(), 2, "{major}x{minor} r={r}: {hits:?}");
+            for h in &hits {
+                assert!(!h.tangent && (h.p.dist(c) - r).abs() < 1e-6, "{h:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_translated_osculating_circle_is_one_tangent_hit() {
+        for at in [1e5, 1e6] {
+            let ellipse = Curve::Ellipse {
+                c: Pt::new(at, at),
+                major: 100.0,
+                minor: 50.0,
+                rot: 0.0,
+            };
+            let circle = Curve::Circle {
+                c: Pt::new(at + 75.0, at),
+                r: 25.0,
+            };
+            let hits = carrier_hits(&circle, &ellipse);
+            assert_eq!(hits.len(), 1, "at {at}: {hits:?}");
+            assert!(hits[0].tangent && hits[0].p.dist(Pt::new(at + 100.0, at)) < 1e-2);
         }
     }
 
