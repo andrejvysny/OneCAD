@@ -15,6 +15,8 @@ use onecad_core::{
 };
 use uuid::Uuid;
 
+#[path = "sketch_constraint_admission/cancellation.rs"]
+mod cancellation;
 #[path = "sketch_constraint_admission/primitive.rs"]
 mod primitive;
 #[path = "sketch_constraint_admission/repair.rs"]

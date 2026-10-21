@@ -141,6 +141,13 @@ pub enum Action {
         context: DocumentContext,
     },
     DraftChanged(String),
+    ExtrudeModeChanged(onecad_core::document::record::BooleanMode),
+    /// Host admits only visible, healthy bodies from this accepted document context.
+    ExtrudeTargetChanged {
+        body: Option<onecad_core::ids::BodyId>,
+        context: DocumentContext,
+    },
+    FlipExtrude,
     TransformDraftChanged {
         translate: [f64; 3],
         axis: [f64; 3],

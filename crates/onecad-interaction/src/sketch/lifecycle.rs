@@ -11,6 +11,21 @@ impl SketchInteraction {
                 create,
                 context,
             } => self.begin_captured(*sketch, create, context),
+            SketchAction::BeginCreated { sketch, context } => {
+                let effects = self.begin_captured(*sketch, true, context);
+                match effects.into_iter().next() {
+                    Some(SketchEffect::CreateSketch { tag, .. }) => {
+                        if let Some(session) = self.session.as_mut() {
+                            session.phase = SketchPhase::Entering;
+                        }
+                        vec![SketchEffect::EnterSketch {
+                            tag,
+                            created_here: true,
+                        }]
+                    }
+                    _ => Vec::new(),
+                }
+            }
             SketchAction::Created { tag } => self.created(tag),
             SketchAction::Entered {
                 tag,
@@ -66,6 +81,21 @@ impl SketchInteraction {
                 ids,
                 dimensions,
             } => self.create_numeric(key, capture, ids, *dimensions),
+            SketchAction::CreateNumericAuthored {
+                key,
+                capture,
+                draft_generation,
+                ids,
+                dimensions,
+                authored,
+            } => self.create_numeric_authored(
+                key,
+                capture,
+                ids,
+                *dimensions,
+                draft_generation,
+                authored,
+            ),
             SketchAction::Escape => self.escape(),
             SketchAction::Enter => self.enter_key(),
             SketchAction::Finish => self.exit(ExitIntent::Finish(FinishReason::Explicit)),
@@ -395,7 +425,7 @@ impl SketchInteraction {
             session.selection.clear();
             return Vec::new();
         }
-        self.exit(ExitIntent::Finish(FinishReason::Escape))
+        Vec::new()
     }
 
     pub(crate) fn clear_draft(&mut self) -> bool {

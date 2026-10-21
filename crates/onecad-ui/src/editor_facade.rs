@@ -7,6 +7,9 @@ mod placement;
 
 use crate::{app::App, layout::Chrome, tool_registry::ToolId, ui_state::StartPage};
 
+/// Native workspace excludes demonstration-only library and extension surfaces.
+pub(crate) const PREVIEW_FACADES: bool = false;
+
 pub use extensions::footer;
 pub use library::{list as library_list, mode_switch};
 
@@ -88,6 +91,9 @@ pub fn placement_allowed(app: &App) -> bool {
 
 /// Opens a Start-screen page; ignored while a command is in progress like the Home button.
 pub(crate) fn open_start(app: &mut App, page: StartPage) {
+    if !PREVIEW_FACADES {
+        return;
+    }
     if !crate::bars::home_allowed(app) {
         return;
     }
@@ -101,6 +107,9 @@ pub(crate) fn open_start(app: &mut App, page: StartPage) {
 
 /// Pill entry point for Insert component: the Explorer lists the library.
 pub fn show_library(app: &mut App) {
+    if !PREVIEW_FACADES {
+        return;
+    }
     app.ui.editor_facade.library_mode = true;
     app.ui.explorer_open = true;
 }
@@ -109,6 +118,9 @@ pub use placement::pill as placement_pill;
 
 /// Floating facade surfaces drawn after the pill.
 pub fn overlays(app: &mut App, ctx: &egui::Context, chrome: &Chrome) {
+    if !PREVIEW_FACADES {
+        return;
+    }
     extensions::popover(app, ctx, chrome);
     placement::overlay(app, ctx, chrome);
     notice::show(app, ctx, chrome);
@@ -117,6 +129,9 @@ pub fn overlays(app: &mut App, ctx: &egui::Context, chrome: &Chrome) {
 /// Escape/Enter end placement and ⇧L opens the library page; handled before the model's
 /// own Escape so ending placement never also clears the selection.
 pub fn keys(app: &mut App, raw: &mut egui::RawInput, text: bool) {
+    if !PREVIEW_FACADES {
+        return;
+    }
     if text {
         return;
     }

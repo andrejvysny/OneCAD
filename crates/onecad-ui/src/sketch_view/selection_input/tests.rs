@@ -138,7 +138,10 @@ fn pointer_drag_uses_original_capture_and_escape_clears_cache() {
         &session,
         rect,
         &view,
-        vec![button(end, false, egui::Modifiers::NONE)],
+        vec![
+            button(end, false, egui::Modifiers::NONE),
+            egui::Event::PointerMoved(start),
+        ],
         egui::Modifiers::NONE,
     )
     .unwrap();
@@ -165,6 +168,111 @@ fn pointer_drag_uses_original_capture_and_escape_clears_cache() {
     assert!(frame(&ctx, &session, rect, &view, vec![], egui::Modifiers::NONE).is_none());
     assert!(
         ctx.data(|data| data.get_temp::<Marquee>(cache_id()))
+            .is_none()
+    );
+}
+
+#[test]
+fn click_uses_press_modifiers_and_position_despite_batched_later_input() {
+    let (mut session, rect, view) = session();
+    let id = add_point(&mut session, 0.0, 0.0);
+    let ctx = egui::Context::default();
+    frame(&ctx, &session, rect, &view, vec![], egui::Modifiers::NONE);
+    let position = at(&session, rect, &view, 0.0, 0.0);
+    let action = frame(
+        &ctx,
+        &session,
+        rect,
+        &view,
+        vec![
+            egui::Event::PointerMoved(position),
+            button(position, true, egui::Modifiers::SHIFT),
+            button(position, false, egui::Modifiers::NONE),
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            egui::Event::PointerMoved(position + egui::vec2(100.0, 0.0)),
+        ],
+        egui::Modifiers::NONE,
+    )
+    .unwrap();
+    assert!(
+        matches!(action, SketchAction::Select { mode: SelectionMode::Toggle, targets, .. }
+        if targets == vec![SketchTarget::Point { entity: id, role: CurvePosition::Arbitrary }])
+    );
+}
+
+#[test]
+fn marquee_keeps_press_mode_after_shift_release_before_drag() {
+    let (mut session, rect, view) = session();
+    add_point(&mut session, 0.0, 0.0);
+    let ctx = egui::Context::default();
+    frame(&ctx, &session, rect, &view, vec![], egui::Modifiers::NONE);
+    let start = rect.center() - egui::vec2(30.0, 30.0);
+    let end = rect.center() + egui::vec2(30.0, 30.0);
+    frame(
+        &ctx,
+        &session,
+        rect,
+        &view,
+        vec![
+            egui::Event::PointerMoved(start),
+            button(start, true, egui::Modifiers::SHIFT),
+        ],
+        egui::Modifiers::SHIFT,
+    );
+    assert!(matches!(
+        frame(
+            &ctx,
+            &session,
+            rect,
+            &view,
+            vec![egui::Event::PointerMoved(end)],
+            egui::Modifiers::NONE
+        ),
+        Some(SketchAction::SelectionDrag { active: true, .. })
+    ));
+    session.selection_dragging = true;
+    assert!(matches!(
+        frame(
+            &ctx,
+            &session,
+            rect,
+            &view,
+            vec![button(end, false, egui::Modifiers::NONE)],
+            egui::Modifiers::NONE
+        ),
+        Some(SketchAction::Select {
+            mode: SelectionMode::Toggle,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn multiple_primary_cycles_refuse_instead_of_selecting_last_input() {
+    let (session, rect, view) = session();
+    let ctx = egui::Context::default();
+    let position = rect.center();
+    let mut result = Ok(None);
+    let mut output = ctx.run_ui(
+        egui::RawInput {
+            events: vec![
+                button(position, true, egui::Modifiers::NONE),
+                button(position, false, egui::Modifiers::NONE),
+                button(position, true, egui::Modifiers::SHIFT),
+                button(position, false, egui::Modifiers::SHIFT),
+            ],
+            ..Default::default()
+        },
+        |ui| {
+            result = primary_press(ui, rect, &view, &session);
+        },
+    );
+    output.textures_delta.clear();
+    assert!(
+        matches!(result, Err(message) if message == "Multiple pointer cycles in one frame; select again")
+    );
+    assert!(
+        ctx.data(|data| data.get_temp::<Marquee>(press_id()))
             .is_none()
     );
 }

@@ -6,7 +6,7 @@ use crate::{
     sketch_ui,
     tool_registry::{SelectionKind, ToolDef, ToolId, pill_tools, running_tool, selection_kind},
 };
-use egui::{Align2, Context, Order, pos2};
+use egui::{Align2, Context, Order};
 use onecad_interaction::{
     Action,
     sketch::{SketchAction, SketchTool},
@@ -14,15 +14,22 @@ use onecad_interaction::{
 use onecad_widgets::{
     components::{
         actions::{
-            PillAccent, PillMode, SelectionLabel, SelectionVariant, ToolButton, ToolPill,
-            ToolState, pill_divider,
+            PillAccent, PillMode, SelectionLabel, SelectionVariant, ToolButton, ToolState,
+            pill_divider,
         },
         tooltip::Tip,
     },
     frame,
 };
 
-type Groups = &'static [&'static [ToolDef]];
+mod layout;
+use layout::{bounded_pill, toolbar_rect};
+
+pub(crate) fn center_x(ctx: &Context, chrome: &Chrome) -> f32 {
+    toolbar_rect(ctx, chrome).center().x
+}
+
+type Groups<'a> = &'a [&'a [ToolDef]];
 
 const NOT_YET: &str = "Not available yet";
 
@@ -41,12 +48,20 @@ fn gate(ok: bool, reason: &'static str) -> View {
     }
 }
 
-/// Same readiness predicate the old toolbar used.
-fn model_ready(app: &App) -> bool {
-    app.viewport_ready()
-        && app.bridge.valid()
-        && !app.busy()
-        && !crate::viewport_selection::sectioned(app)
+fn model_view(app: &App, eligible: bool, reason: &'static str) -> View {
+    if app.interaction.tool.is_some() || app.busy() {
+        return gate(false, "Finish the current operation first");
+    }
+    if !app.viewport_ready() {
+        return gate(false, "Viewport unavailable");
+    }
+    if !app.bridge.valid() {
+        return gate(false, "Worker unavailable");
+    }
+    if crate::viewport_selection::sectioned(app) {
+        return gate(false, "Turn off section view first");
+    }
+    gate(eligible, reason)
 }
 
 fn sketch_view(app: &App, tool: SketchTool) -> View {
@@ -74,7 +89,6 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
             reason: None,
         };
     }
-    let idle = app.interaction.tool.is_none();
     match def.id {
         ToolId::Select if app.sketch_active() => sketch_view(app, SketchTool::Select),
         ToolId::Select => View {
@@ -95,18 +109,27 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
         ToolId::Circle => sketch_view(app, SketchTool::Circle),
         ToolId::Arc => sketch_view(app, arc_tool(app)),
         ToolId::Slot => sketch_view(app, SketchTool::Slot),
-        ToolId::Sketch => gate(
-            model_ready(app) && idle,
-            "Finish the current operation first",
-        ),
-        ToolId::Extrude => gate(
-            model_ready(app) && app.interaction.selection.is_some() && idle,
+        ToolId::Sketch => model_view(app, true, "Finish the current operation first"),
+        ToolId::Extrude => model_view(
+            app,
+            app.interaction.selection.is_some(),
             "Select a closed sketch profile first",
         ),
-        ToolId::MoveRotate => gate(
-            model_ready(app) && app.selected_body.is_some() && idle,
-            "Select a body first",
+        ToolId::Edit => model_view(
+            app,
+            app.selected_feature.is_some_and(|id| {
+                app.display
+                    .as_ref()
+                    .and_then(|display| {
+                        display.records.iter().find(|record| record.record_id == id)
+                    })
+                    .is_some_and(|record| {
+                        !onecad_interaction::numeric_parameters(&record.op).is_empty()
+                    })
+            }),
+            "Select an editable feature first",
         ),
+        ToolId::MoveRotate => model_view(app, app.selected_body.is_some(), "Select a body first"),
         ToolId::Section => gate(app.viewport_ready(), "Viewport unavailable"),
         ToolId::Horizontal
         | ToolId::Vertical
@@ -188,7 +211,7 @@ pub(crate) fn activate(app: &mut App, ctx: &Context, id: ToolId) {
     match id {
         ToolId::Construction => crate::sketch_repair::toggle_construction(app),
         ToolId::Delete if app.sketch_active() => crate::sketch_repair::delete_selected(app),
-        ToolId::Sketch => app.new_sketch(),
+        ToolId::Sketch => app.choose_sketch_support(),
         ToolId::Extrude => {
             app.gesture += 1;
             let step = app
@@ -201,6 +224,7 @@ pub(crate) fn activate(app: &mut App, ctx: &Context, id: ToolId) {
                 step_index: step,
             });
         }
+        ToolId::Edit => crate::inspector_history::edit_selected_feature(app),
         ToolId::MoveRotate => app.begin_transform(),
         ToolId::InsertComponent => crate::editor_facade::show_library(app),
         ToolId::MakeComponent => crate::component_wizard::open(&mut app.ui),
@@ -287,6 +311,11 @@ pub(crate) fn selection_label(
     kind: SelectionKind,
 ) -> Option<(String, String, SelectionVariant)> {
     let model = SelectionVariant::Model;
+    if let Some(tool) = &app.interaction.tool
+        && tool.editing_existing
+    {
+        return Some((tool.record.name.clone(), "feature".into(), model));
+    }
     match kind {
         SelectionKind::Face | SelectionKind::Edge => {
             let (_, body) = app.topology.selected_kind()?;
@@ -360,11 +389,13 @@ struct Hits {
     clicked: Option<ToolId>,
     section: Option<egui::Response>,
     constraints: Option<egui::Rect>,
+    #[cfg(test)]
+    tools: Vec<(ToolId, egui::Rect)>,
 }
 
 fn draw_groups(
     ui: &mut egui::Ui,
-    groups: Groups,
+    groups: Groups<'_>,
     views: &[Vec<View>],
     running: Option<ToolId>,
 ) -> Hits {
@@ -386,6 +417,8 @@ fn draw_groups(
                 .enabled(v.enabled)
                 .extension(def.source.is_some());
             let r = ui.add(button.tip(tip));
+            #[cfg(test)]
+            hits.tools.push((def.id, r.rect));
             if def.id == ToolId::Constraints {
                 hits.constraints = Some(r.rect);
             }
@@ -400,13 +433,19 @@ fn draw_groups(
 }
 
 pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
-    if app.ui.editor_facade.placing.is_some() {
+    if crate::editor_facade::PREVIEW_FACADES && app.ui.editor_facade.placing.is_some() {
         crate::editor_facade::placement_pill(app, ctx, chrome);
         return;
     }
     let kind = selection_kind(app);
     let running = running_tool(app);
-    let groups = pill_tools(kind);
+    let definition = crate::tool_registry::running_definition(app);
+    let running_groups = [definition.as_slice()];
+    let groups = if running.is_some() {
+        &running_groups[..]
+    } else {
+        pill_tools(kind)
+    };
     let views: Vec<Vec<View>> = groups
         .iter()
         .map(|g| g.iter().map(|d| view(app, d, running)).collect())
@@ -419,11 +458,11 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
     };
     let accent = accent(app, kind);
     let (mut hits, mut clear) = (Hits::default(), false);
-    let pos = pos2(chrome.pill_centre_x, chrome.viewport.top() + 10.0);
-    frame::floating(egui::Id::unique("tool-pill"), pos, Order::Middle)
-        .pivot(Align2::CENTER_TOP)
+    let bounds = toolbar_rect(ctx, chrome);
+    frame::floating(egui::Id::unique("tool-pill"), bounds.min, Order::Middle)
+        .pivot(Align2::LEFT_TOP)
         .show(ctx, |ui| {
-            ToolPill::new().mode(mode).accent(accent).show(ui, |ui| {
+            bounded_pill(ui, bounds.width(), None, mode, accent, |ui| {
                 if let Some((k, c, v)) = &label {
                     clear = SelectionLabel::new(k, c).variant(*v).show(ui).clear;
                     pill_divider(ui);

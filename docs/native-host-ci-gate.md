@@ -16,7 +16,7 @@ ONECAD_WORKER_PATH="$PWD/worker/build/onecad-worker" \
 
 The gate sets `ONECAD_REQUIRE_WORKER=1` and `ONECAD_REQUIRE_GPU=1`. It requires
 the exact ignored `app_logic_tests` inventory declared in
-`xtask/src/evidence/host_names.rs`: thirty-eight cases covering occluded delivery (one),
+`xtask/src/evidence/host_names.rs`: forty cases covering occluded delivery (one),
 document lifecycle (three), overlays (one), diagnostics (three), existing
 dimensions (one), the synthetic From-New plate workflow (one), and numeric/IME
 routing (one), invalid-profile Finish refusal with repair re-entry (one), and
@@ -32,6 +32,9 @@ tangent Arc H/V snapping with endpoint roles (one), and tangent chain keyboard,
 drag, existing-endpoint seeding, cancellation and numeric Radius (one), and
 exactly-once drag release with accepted chain closure/profile publication (one).
 Eight batched-input regression cases cover ordered modifier delivery and pointer/camera cancellation.
+Two additional cases cover initially unselected sketch/history row selection,
+double-click and explicit Edit, plus world-plane and checked planar-face entry,
+frame alignment and whole-visit discard.
 It first verifies the Cargo test inventory, then executes all cases
 serially with `--ignored --nocapture --test-threads=1`. Every expected test must
 execute exactly once and pass. Missing, duplicate, unexpected, skipped, and

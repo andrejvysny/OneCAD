@@ -20,6 +20,7 @@ pub mod mesh_cache;
 pub mod read;
 pub mod recents;
 pub mod regen_driver;
+pub mod sketch_candidate;
 pub mod sketch_projection;
 pub mod state;
 pub mod worker;

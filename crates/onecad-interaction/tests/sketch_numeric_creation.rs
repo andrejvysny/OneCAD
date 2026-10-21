@@ -351,3 +351,191 @@ fn invalid_or_missing_numeric_input_keeps_draft_and_accepted_state() {
         assert_eq!(session.phase, SketchPhase::Active);
     }
 }
+
+fn authored_dimensions(
+    state: &mut SketchInteraction,
+    dimensions: CreationDimensions,
+    authored: Vec<CreationField>,
+) -> Vec<SketchEffect> {
+    let session = state.session.as_ref().unwrap();
+    state.dispatch(SketchAction::CreateNumericAuthored {
+        draft_generation: session.draft_generation,
+        key: session.key.clone(),
+        capture: session.accepted_capture.unwrap(),
+        ids: ids(2000),
+        dimensions: Box::new(dimensions),
+        authored,
+    })
+}
+
+#[test]
+fn width_only_rectangle_leaves_measured_height_without_a_driving_dimension() {
+    for tool in [SketchTool::Rectangle, SketchTool::CenterRectangle] {
+        let mut state = state(tool);
+        origin_anchor(&mut state);
+        move_to(&mut state, 40.0, 25.0);
+        let width = Scalar::with_expr(80.0, "plate_width");
+        let values = if tool == SketchTool::Rectangle {
+            CreationDimensions::Rectangle {
+                width: width.clone(),
+                height: Scalar::new(25.0),
+            }
+        } else {
+            CreationDimensions::CenterRectangle {
+                width: width.clone(),
+                height: Scalar::new(50.0),
+            }
+        };
+        let (_, ops) = upsert(authored_dimensions(
+            &mut state,
+            values,
+            vec![CreationField::Width],
+        ));
+        let driving: Vec<_> = ops
+            .iter()
+            .filter_map(|op| match op {
+                SketchEditOp::AddConstraint {
+                    constraint: Constraint::Distance { id, value, .. },
+                } => Some((*id, value)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(driving, vec![(ids(2000).constraints[8], &width)]);
+        assert!(ops.iter().any(|op| matches!(op, SketchEditOp::AddEntity { entity: SketchEntity::Point { at, .. } } if at.y != 0.0)));
+    }
+}
+
+#[test]
+fn focus_only_creation_adds_geometry_without_measured_driving_dimensions() {
+    for tool in [SketchTool::Rectangle, SketchTool::Circle, SketchTool::Line] {
+        let mut state = state(tool);
+        origin_anchor(&mut state);
+        move_to(&mut state, 10.0, 5.0);
+        let values = match tool {
+            SketchTool::Rectangle => CreationDimensions::Rectangle {
+                width: Scalar::new(10.0),
+                height: Scalar::new(5.0),
+            },
+            SketchTool::Circle => CreationDimensions::Circle {
+                diameter: Scalar::new(6.0),
+            },
+            _ => CreationDimensions::Line {
+                length: Scalar::new(10.0),
+            },
+        };
+        let (_, ops) = upsert(authored_dimensions(&mut state, values, vec![]));
+        assert!(ops
+            .iter()
+            .any(|op| matches!(op, SketchEditOp::AddEntity { .. })));
+        assert!(!ops.iter().any(|op| matches!(
+            op,
+            SketchEditOp::AddConstraint {
+                constraint: Constraint::Distance { .. }
+                    | Constraint::Diameter { .. }
+                    | Constraint::Radius { .. }
+            }
+        )));
+    }
+}
+
+#[test]
+fn point_zero_x_only_authorship_keeps_y_free_and_refuses_wrong_field() {
+    let mut state = state(SketchTool::Point);
+    let session = state.session.as_ref().unwrap();
+    state.dispatch(SketchAction::BeginPointNumeric {
+        key: session.key.clone(),
+    });
+    let values = CreationDimensions::Point {
+        x: Scalar::new(0.0),
+        y: Scalar::new(0.0),
+    };
+    assert!(
+        authored_dimensions(&mut state, values.clone(), vec![CreationField::Radius]).is_empty()
+    );
+    let (_, ops) = upsert(authored_dimensions(
+        &mut state,
+        values,
+        vec![CreationField::X],
+    ));
+    assert!(ops.iter().any(|op| matches!(op, SketchEditOp::AddConstraint { constraint: Constraint::HorizontalDistance { value, .. } } if value.value == 0.0)));
+    assert!(!ops.iter().any(|op| matches!(
+        op,
+        SketchEditOp::AddConstraint {
+            constraint: Constraint::VerticalDistance { .. }
+        }
+    )));
+}
+
+#[test]
+fn duplicate_numeric_confirmation_submits_only_one_correlated_batch() {
+    let mut state = state(SketchTool::Circle);
+    origin_anchor(&mut state);
+    let values = CreationDimensions::Circle {
+        diameter: Scalar::new(6.0),
+    };
+    let first = authored_dimensions(&mut state, values.clone(), vec![CreationField::Diameter]);
+    assert_eq!(first.len(), 1);
+    assert!(authored_dimensions(&mut state, values, vec![CreationField::Diameter]).is_empty());
+    assert_eq!(
+        state.session.as_ref().unwrap().phase,
+        SketchPhase::Submitting
+    );
+}
+
+#[test]
+fn cancelled_and_restarted_primitive_has_new_generation_without_service_or_camera_changes() {
+    let mut state = state(SketchTool::Rectangle);
+    origin_anchor(&mut state);
+    let generation = state.session.as_ref().unwrap().draft_generation;
+    let sequence = state.session.as_ref().unwrap().request.sequence;
+    move_to(&mut state, 10.0, 20.0);
+    assert_eq!(state.session.as_ref().unwrap().draft_generation, generation);
+    state.dispatch(SketchAction::Escape);
+    origin_anchor(&mut state);
+    let session = state.session.as_ref().unwrap();
+    assert!(session.draft_generation > generation);
+    assert_eq!(session.request.sequence, sequence);
+    let generation = session.draft_generation;
+    let key = session.key.clone();
+    let document = session.document.clone();
+    let capture = session.accepted_capture.unwrap();
+    let next = onecad_scene::ViewSnapshot::new(
+        capture.scene,
+        capture.view + 1,
+        view(&state).camera(),
+        view(&state).viewport(),
+    )
+    .unwrap();
+    state.dispatch(SketchAction::AcceptView {
+        key,
+        document,
+        capture: next.identity(),
+    });
+    assert_eq!(state.session.as_ref().unwrap().draft_generation, generation);
+}
+
+#[test]
+fn delayed_authored_command_from_cancelled_primitive_cannot_create_replacement() {
+    let mut state = state(SketchTool::Circle);
+    origin_anchor(&mut state);
+    let old_generation = state.session.as_ref().unwrap().draft_generation;
+    state.dispatch(SketchAction::Escape);
+    origin_anchor(&mut state);
+    let session = state.session.as_ref().unwrap();
+    let effects = state.dispatch(SketchAction::CreateNumericAuthored {
+        key: session.key.clone(),
+        capture: session.accepted_capture.unwrap(),
+        draft_generation: old_generation,
+        ids: ids(2000),
+        dimensions: Box::new(CreationDimensions::Circle {
+            diameter: Scalar::new(6.0),
+        }),
+        authored: vec![CreationField::Diameter],
+    });
+    assert!(effects.is_empty());
+    let session = state.session.as_ref().unwrap();
+    assert_eq!(session.phase, SketchPhase::Active);
+    assert!(!matches!(session.status, SketchStatus::Refused(_)));
+    assert!(session.authoritative.entities().is_empty());
+    assert!(session.draft.is_some());
+}

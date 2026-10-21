@@ -76,7 +76,13 @@ pub async fn load_display(backend: &mut Backend) -> Result<Display, String> {
             .await
             .map_err(|error| error.to_string())?;
         record_budget.charge(&record)?;
-        if !onecad_interaction::numeric_parameters(&record.op).is_empty() {
+        if matches!(
+            record.op,
+            onecad_core::document::record::Operation::Known(
+                onecad_core::document::record::KnownOperation::Sketch(_)
+            )
+        ) || !onecad_interaction::numeric_parameters(&record.op).is_empty()
+        {
             records.push(record);
         }
     }

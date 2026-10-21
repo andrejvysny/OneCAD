@@ -25,6 +25,9 @@ fn intro(name: &str, kind: SelectionKind) -> String {
 
 /// Appends the Sheet Metal section for edge and body selections.
 pub fn sheet_metal(app: &mut App, ui: &mut Ui) {
+    if !crate::editor_facade::PREVIEW_FACADES {
+        return;
+    }
     let kind = selection_kind(app);
     if !matches!(kind, SelectionKind::Edge | SelectionKind::Body) {
         return;

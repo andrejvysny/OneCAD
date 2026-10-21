@@ -10,6 +10,7 @@ fn layout() -> Layout {
 /// Menu toggled by `button`, anchored under it.
 pub fn popup_for(app: &mut App, ctx: &Context, button: &Response) {
     egui::Popup::menu(button)
+        .width(280.0)
         .frame(menu_frame(ctx))
         .show(|ui| crate::viewport_options::contents(app, ui));
 }
@@ -26,6 +27,7 @@ pub fn popup_at(app: &mut App, ctx: &Context) {
         anchor,
         egui::LayerId::background(),
     )
+    .width(280.0)
     .kind(egui::PopupKind::Menu)
     .layout(layout())
     .align(egui::RectAlign::LEFT_START)

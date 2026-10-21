@@ -44,6 +44,7 @@ pub struct MenuRow<'a> {
     shortcut: Option<&'a str>,
     enabled: bool,
     checked: bool,
+    highlight_checked: bool,
 }
 
 impl<'a> MenuRow<'a> {
@@ -54,6 +55,7 @@ impl<'a> MenuRow<'a> {
             shortcut: None,
             enabled: true,
             checked: false,
+            highlight_checked: false,
         }
     }
     pub fn shortcut(mut self, key: Option<&'a str>) -> Self {
@@ -69,6 +71,11 @@ impl<'a> MenuRow<'a> {
         self.checked = checked;
         self
     }
+    /// Highlight the checked row as the active choice in a selection popover.
+    pub fn highlight_checked(mut self) -> Self {
+        self.highlight_checked = true;
+        self
+    }
 }
 
 impl Widget for MenuRow<'_> {
@@ -80,7 +87,9 @@ impl Widget for MenuRow<'_> {
             sense(self.enabled, Sense::click()),
         );
         let op = opacity(self.enabled);
-        let fill = if response.hovered() && self.enabled {
+        let fill = if self.checked && self.highlight_checked {
+            t.sel_bg
+        } else if response.hovered() && self.enabled {
             t.well
         } else {
             Color32::TRANSPARENT
@@ -116,7 +125,13 @@ impl Widget for MenuRow<'_> {
                 t.ink6.gamma_multiply(op),
             );
         }
-        let colour = if self.checked { t.ink } else { t.ink2 };
+        let colour = if self.checked && self.highlight_checked {
+            t.accent
+        } else if self.checked {
+            t.ink
+        } else {
+            t.ink2
+        };
         let g = galley(p, self.label, CONTROL, egui::FontFamily::Proportional);
         p.galley(pos2(x, cy - g.size().y / 2.0), g, colour.gamma_multiply(op));
         response.widget_info(|| {

@@ -1,5 +1,7 @@
 //! Pure native primitive effects admitted by the real application/PlaneGCS services.
 //! Fresh-process persistence is service evidence, never a physical native checkpoint.
+#[path = "real_point_center/authorship.rs"]
+mod authorship;
 #[allow(dead_code)]
 #[path = "../../onecad-app/tests/native_plate_support/host.rs"]
 mod host;

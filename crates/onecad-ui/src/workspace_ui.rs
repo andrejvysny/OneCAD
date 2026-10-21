@@ -76,6 +76,9 @@ fn item<'a>(
 
 /// Workspace popover anchored under the title-bar button (19c).
 pub fn workspace_menu(app: &mut App, ctx: &Context, anchor: &Response) {
+    if !crate::editor_facade::PREVIEW_FACADES {
+        return;
+    }
     let items = [
         item("Design", "body", "⌃1", None, true),
         item("Assembly", "component", "⌃2", None, false),

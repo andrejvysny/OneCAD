@@ -183,6 +183,8 @@ pub struct SketchSession {
     pub construction: bool,
     pub phase: SketchPhase,
     pub draft: Option<SketchDraft>,
+    /// Advances only when a new primitive draft starts, independent of captures and requests.
+    pub draft_generation: u64,
     pub preview: Option<DraftPrimitive>,
     pub selection: Vec<super::SketchTarget>,
     pub accepted_capture: Option<CaptureIdentity>,
@@ -213,6 +215,7 @@ impl SketchSession {
                 SketchPhase::Entering
             },
             draft: None,
+            draft_generation: 0,
             preview: None,
             selection: Default::default(),
             accepted_capture: None,
@@ -259,6 +262,10 @@ pub(crate) struct PendingBatch {
 #[derive(Debug)]
 pub enum SketchAction {
     ContextChanged(Option<DocumentContext>),
+    BeginCreated {
+        sketch: Box<Sketch>,
+        context: DocumentContext,
+    },
     Begin {
         sketch: Box<Sketch>,
         create: bool,
@@ -309,6 +316,14 @@ pub enum SketchAction {
         capture: CaptureIdentity,
         ids: PrimitiveIds,
         dimensions: Box<super::CreationDimensions>,
+    },
+    CreateNumericAuthored {
+        key: SketchSessionKey,
+        capture: CaptureIdentity,
+        draft_generation: u64,
+        ids: PrimitiveIds,
+        dimensions: Box<super::CreationDimensions>,
+        authored: Vec<super::CreationField>,
     },
     Escape,
     Enter,

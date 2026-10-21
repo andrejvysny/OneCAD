@@ -37,6 +37,9 @@ impl SketchInteraction {
             return;
         };
         if session.tool == SketchTool::Point {
+            if session.draft.is_none() {
+                session.draft_generation = session.draft_generation.saturating_add(1);
+            }
             session.draft = Some(point_draft(point.point));
             session.preview = Some(DraftPrimitive::Point { at: point.point });
             return;
@@ -106,6 +109,7 @@ impl SketchInteraction {
             return self.submit_point(point, ids, snap);
         }
         let Some(draft) = session.draft.as_ref() else {
+            session.draft_generation = session.draft_generation.saturating_add(1);
             session.draft = Some(SketchDraft {
                 first: point.point,
                 anchor: point.point,
@@ -271,6 +275,7 @@ impl SketchInteraction {
         }
         let session = self.session.as_mut().expect("validated session");
         if session.draft.is_none() {
+            session.draft_generation = session.draft_generation.saturating_add(1);
             session.draft = Some(point_draft(onecad_core::math::Vec2::new_unchecked(
                 0.0, 0.0,
             )));

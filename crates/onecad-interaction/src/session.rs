@@ -166,6 +166,10 @@ impl Interaction {
             tool.draft_status = DraftStatus::Invalid(message);
             return Vec::new();
         }
+        if let Err(message) = crate::extrude::validate_target(&operation) {
+            tool.preview = PreviewStatus::Failed(message);
+            return Vec::new();
+        }
         tool.record.op = operation;
         let (command, hide_sketch) = commit_command(tool);
         tool.phase = SessionPhase::Committing;

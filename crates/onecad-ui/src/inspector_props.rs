@@ -1,12 +1,11 @@
 //! Inspector Properties tab (README 03a): title block, data rows and the footer hint.
-//! Only values already present in the projection / sketch session are shown; the rest
-//! of the design's rows render "—".
+//! Shows supported projection/session values and identifies unavailable measurements.
 use crate::{
     app::App,
     pill::{body_name, selection_label},
     tool_registry::{SelectionKind, selection_kind},
 };
-use egui::{CornerRadius, Rect, RichText, Sense, Ui, pos2, vec2};
+use egui::{CornerRadius, Rect, RichText, Sense, Ui, vec2};
 use onecad_widgets::{
     components::lists::{PropertyRow, SectionLabel},
     fonts,
@@ -15,7 +14,7 @@ use onecad_widgets::{
 };
 
 const NONE_HINT: &str = "Select a face, edge or body in the viewport.";
-const DASH: &str = "—";
+const UNAVAILABLE: &str = "Not evaluated";
 
 struct Block {
     icon: &'static str,
@@ -24,14 +23,11 @@ struct Block {
     sections: Vec<(&'static str, Vec<(&'static str, String)>)>,
 }
 
-fn dash_rows(labels: &[&'static str]) -> Vec<(&'static str, String)> {
-    labels.iter().map(|l| (*l, DASH.to_owned())).collect()
-}
-
 fn body_section(name: String) -> (&'static str, Vec<(&'static str, String)>) {
-    let mut rows = vec![("Name", name)];
-    rows.extend(dash_rows(&["Material", "Mass", "Volume"]));
-    ("BODY", rows)
+    (
+        "BODY",
+        vec![("Name", name), ("Measurements", "Not available".into())],
+    )
 }
 
 fn region_sketch(app: &App) -> Option<String> {
@@ -63,7 +59,20 @@ fn sketch_block(app: &App) -> Block {
         .as_ref()
         .map(|session| crate::sketch_feedback::summary(&session.status).label);
     let mut rows = vec![("Name", name.clone())];
-    rows.push(("Solve", dof.clone().unwrap_or_else(|| DASH.to_owned())));
+    rows.push((
+        "Solve",
+        dof.clone().unwrap_or_else(|| UNAVAILABLE.to_owned()),
+    ));
+    if let Some(session) = &app.sketch.session {
+        rows.push((
+            "Entities",
+            session.authoritative.entities().len().to_string(),
+        ));
+        rows.push((
+            "Constraints",
+            session.authoritative.constraints().len().to_string(),
+        ));
+    }
     Block {
         icon: "sketch",
         title: "Sketch".into(),
@@ -101,6 +110,11 @@ fn feature_block(app: &App) -> Option<Block> {
 }
 
 fn block(app: &App) -> Block {
+    if !app.sketch_active()
+        && let Some(block) = selected_sketch_block(app)
+    {
+        return block;
+    }
     let kind = selection_kind(app);
     let label = selection_label(app, kind);
     match kind {
@@ -116,9 +130,9 @@ fn block(app: &App) -> Block {
 fn face_edge_block(kind: SelectionKind, body: Option<String>) -> Block {
     let face = kind == SelectionKind::Face;
     let (title, geometry) = if face {
-        ("Face", dash_rows(&["Area", "Perimeter", "Normal"]))
+        ("Face", vec![("Measurements", "Not available".into())])
     } else {
-        ("Edge", dash_rows(&["Length"]))
+        ("Edge", vec![("Measurements", "Not available".into())])
     };
     let body = body.unwrap_or_default();
     Block {
@@ -134,11 +148,26 @@ fn body_block(app: &App) -> Block {
         .selected_body
         .map(|id| body_name(app, id))
         .unwrap_or_default();
+    let mut section = body_section(name.clone());
+    if let Some(body) = app.selected_body.and_then(|id| {
+        app.display
+            .as_ref()?
+            .projection
+            .bodies
+            .values()
+            .find(|body| body.id == id.to_string())
+    }) {
+        section.1.push((
+            "Visibility",
+            if body.visible { "Shown" } else { "Hidden" }.into(),
+        ));
+        section.1.push(("Health", format!("{:?}", body.health)));
+    }
     Block {
         icon: "body",
         title: name.clone(),
         subtitle: "Body".into(),
-        sections: vec![body_section(name)],
+        sections: vec![section],
     }
 }
 
@@ -163,7 +192,7 @@ fn none_block() -> Block {
     }
 }
 
-pub fn properties(app: &mut App, ui: &mut Ui, panel: Rect) {
+pub fn properties(app: &mut App, ui: &mut Ui, _panel: Rect) {
     let b = block(app);
     title_block(app, ui, &b);
     for (name, rows) in &b.sections {
@@ -174,7 +203,7 @@ pub fn properties(app: &mut App, ui: &mut Ui, panel: Rect) {
         ui.add_space(4.0);
     }
     crate::inspector_ext::sheet_metal(app, ui);
-    hint(app, ui, panel);
+    hint(app, ui);
 }
 
 fn title_block(app: &App, ui: &mut Ui, b: &Block) {
@@ -203,28 +232,47 @@ fn title_block(app: &App, ui: &mut Ui, b: &Block) {
     ui.add_space(8.0);
 }
 
-/// Footer hint pinned to the panel bottom.
-fn hint(app: &App, ui: &mut Ui, panel: Rect) {
-    let t = &app.theme;
-    let bar = Rect::from_min_max(pos2(panel.left(), panel.bottom() - 36.0), panel.max);
-    let p = ui.painter();
-    p.hline(
-        bar.x_range(),
-        bar.top(),
-        egui::Stroke::new(1.0, t.border_subtle),
+fn hint(app: &App, ui: &mut Ui) {
+    ui.add_space(6.0);
+    ui.add(
+        egui::Label::new(
+            RichText::new("Esc clears selection")
+                .size(11.5)
+                .color(app.theme.ink5),
+        )
+        .wrap(),
     );
-    let style = IconStyle {
-        tint: t.ink5,
-        bg: t.floating,
-        grey: false,
-    };
-    let glyph = Rect::from_center_size(pos2(bar.left() + 20.0, bar.center().y), vec2(14.0, 14.0));
-    icon::paint(p, glyph, "help", app.dark, style, 1.0);
-    p.text(
-        pos2(bar.left() + 34.0, bar.center().y),
-        egui::Align2::LEFT_CENTER,
-        "⇧-click adds faces · Esc clears",
-        egui::FontId::proportional(11.5),
-        t.ink5,
+}
+
+fn selected_sketch_block(app: &App) -> Option<Block> {
+    let id = app.ui.selected_sketch?.to_string();
+    let sketch = app
+        .display
+        .as_ref()?
+        .projection
+        .sketches
+        .values()
+        .find(|sketch| sketch.id == id)?;
+    let solve = sketch.dof.map_or_else(
+        || "Not evaluated".into(),
+        |dof| format!("{dof} degrees of freedom"),
     );
+    let mut rows = vec![
+        ("Name", sketch.name.clone()),
+        (
+            "Visibility",
+            if sketch.visible { "Shown" } else { "Hidden" }.into(),
+        ),
+        ("Solve", solve),
+    ];
+    if let Some(host) = &sketch.host_face {
+        rows.push(("Support body", host.body_id.clone()));
+        rows.push(("Support face", host.element_id.clone()));
+    }
+    Some(Block {
+        icon: "sketch",
+        title: "Sketch".into(),
+        subtitle: sketch.name.clone(),
+        sections: vec![("SKETCH", rows)],
+    })
 }

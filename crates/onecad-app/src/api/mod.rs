@@ -16,8 +16,10 @@ mod sketch_history;
 pub use document_state::get_document_state;
 pub use replacement::{discard_replaced_document, prepare_replacement_discard, ReplacementDiscard};
 pub use sketch_constraints::{
-    add_sketch_constraints_with_completion, author_sketch_primitive_with_completion,
-    repair_sketch_with_completion, set_sketch_dimension_with_completion,
+    add_sketch_constraints_controlled, add_sketch_constraints_with_completion,
+    author_sketch_primitive_controlled, author_sketch_primitive_with_completion,
+    repair_sketch_with_completion, set_sketch_dimension_controlled,
+    set_sketch_dimension_with_completion,
 };
 pub use sketch_history::sketch_history_with_completion;
 
@@ -2687,8 +2689,11 @@ impl ResolvedFaceAddress {
 ///   [`element_info`] do — topoKey FIRST, because a just-promoted, never-consumed
 ///   `ElementId` is genuinely absent from the worker's on-demand element-map
 ///   partition (see [`element_info`]'s doc comment).
-/// * Both worker round-trips run OUTSIDE the runtime lock; the lock is taken only
-///   for the presence check and for the single [`EditCommand::AddSketch`] apply.
+/// * Worker queries run outside the runtime lock. A scoped ticket captures the
+///   runtime, revision, snapshot, epoch and providers before querying; commit
+///   revalidates them before the single [`EditCommand::AddSketch`] apply.
+/// * New topology identities remain staged with the candidate. Refusal or dropping
+///   the prepared candidate changes no sketch, binding, history or dirty state.
 /// * An unresolvable face, a non-planar face, or a malformed response leaves the
 ///   document **completely untouched** — nothing is applied until the projection
 ///   has landed and translated.
@@ -2711,6 +2716,50 @@ pub async fn add_sketch_on_face(
     sketch_id: String,
     name: String,
 ) -> Result<SketchOnFaceDto, ApiError> {
+    let scope = preview_context(state).await?;
+    if scope.snapshot_id != SnapshotId(snapshot_id) {
+        return Err(ApiError::StalePreview(
+            "Sketch support is stale; select the face again".into(),
+        ));
+    }
+    let prepared =
+        prepare_sketch_on_face(state, scope, body_id, element_id, topo_key, sketch_id, name)
+            .await?;
+    commit_sketch_on_face(state, prepared).await
+}
+
+/// A fully checked candidate; cancellation by dropping it has no persistent effects.
+pub struct PreparedFaceSketch {
+    ticket: crate::document_runtime::FaceEntryTicket,
+    projector: std::sync::Arc<dyn crate::worker::FaceBoundaryProjection>,
+    sketch: onecad_core::sketch::Sketch,
+    identity: Option<(ElementId, onecad_core::regen::WorkerElementEvidence)>,
+    result: SketchOnFaceDto,
+}
+
+impl PreparedFaceSketch {
+    pub fn sketch(&self) -> &onecad_core::sketch::Sketch {
+        &self.sketch
+    }
+}
+
+/// Captures runtime ownership before querying the kernel without its mutation lock.
+#[allow(clippy::too_many_arguments)]
+pub async fn prepare_sketch_on_face(
+    state: &AppState,
+    scope: PreviewContext,
+    body_id: String,
+    mut element_id: String,
+    topo_key: Option<String>,
+    sketch_id: String,
+    name: String,
+) -> Result<PreparedFaceSketch, ApiError> {
+    if preview_context(state).await? != scope {
+        return Err(ApiError::StalePreview(
+            "Sketch support belongs to an obsolete worker head; select the face again".into(),
+        ));
+    }
+    let snapshot_id = scope.snapshot_id.0;
     let body = wire::parse_body_id(&body_id).map_err(ApiError::InvalidCommand)?;
     // Adopted VERBATIM (see the doc comment): backend SketchId == frontend id.
     let sketch_id = parse_sketch_id(&sketch_id)?;
@@ -2720,16 +2769,25 @@ pub async fn add_sketch_on_face(
             "addSketchOnFace: one of elementId / topoKey is required".into(),
         ));
     }
-    {
-        // Presence check only — the runtime lock is NOT held across the worker
-        // round-trips below (the R-WP11 rule; a held lock makes fencing inert).
+    let (ticket, projector) = {
         let guard = state.runtime.lock().await;
-        guard
+        let runtime = guard
             .as_ref()
             .ok_or_else(|| ApiError::NoDocument("addSketchOnFace".into()))?;
-    }
+        if runtime.document_id() != scope.document_id {
+            return Err(ApiError::StalePreview(
+                "Sketch support belongs to another document".into(),
+            ));
+        }
+        let ticket = runtime.prepare_face_entry(
+            &scope.runtime_session,
+            scope.revision,
+            scope.snapshot_id,
+            scope.worker_epoch,
+        )?;
+        (ticket, state.face_projection())
+    };
     let snapshot = SnapshotId(snapshot_id);
-    let projector = state.face_projection();
 
     // ── Round-trip 1: the kernel-exact frame, via the topoKey-first ladder ────
     let mut resolved: Option<(ResolvedFaceAddress, onecad_core::sketch::FaceFrame)> = None;
@@ -2804,6 +2862,55 @@ pub async fn add_sketch_on_face(
         &mut EntityId::new,
         &mut ConstraintId::new,
     );
+    let identity = if element_id.is_empty() || TopoKey::new(topo_key.clone()).is_valid() {
+        let key = TopoKey::new(topo_key.clone());
+        if !key.is_valid() {
+            return Err(ApiError::InvalidCommand(
+                "Select a checked face topology identity".into(),
+            ));
+        }
+        let mut evidence = ticket
+            .engine
+            .acquire_element_ids(onecad_core::regen::AcquireRequest {
+                snapshot_id: snapshot,
+                body,
+                picks: vec![onecad_core::regen::Pick {
+                    topo_key: key.clone(),
+                    anchor: None,
+                }],
+            })
+            .await?;
+        if evidence.len() != 1
+            || evidence[0].body != body
+            || evidence[0].kind != ElementKind::Face
+            || evidence[0].topo_key != key
+        {
+            return Err(ApiError::InvalidCommand(
+                "Face identity is unresolved or ambiguous; select it again".into(),
+            ));
+        }
+        evidence[0].anchor = Some(AnchorIntent {
+            world_point: frame.anchor.unwrap_or(frame.origin),
+            surface_uv: None,
+            local_frame: None,
+            adjacency_hint: None,
+            extra: Default::default(),
+        });
+        let guard = state.runtime.lock().await;
+        let runtime = guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("face entry".into()))?;
+        let identity = runtime.face_entry_identity(&ticket, evidence.remove(0))?;
+        if !element_id.is_empty() && element_id != identity.0.as_str() {
+            return Err(ApiError::InvalidCommand(
+                "Face identity and topology pick disagree; select the face again".into(),
+            ));
+        }
+        element_id = identity.0.as_str().to_owned();
+        Some(identity)
+    } else {
+        None
+    };
     let attachment = onecad_core::sketch::SketchAttachment::HostFace {
         face: ElementRef {
             // Only a real, non-empty ElementId is a binding; an empty string
@@ -2814,9 +2921,17 @@ pub async fn add_sketch_on_face(
                 kind: ElementKind::Face,
                 extra: Default::default(),
             }),
-            // No `intent`: the descriptor is worker-owned evidence and capturing
-            // it would cost a third round-trip this command has no other use for.
-            intent: None,
+            // Staged promotion provides worker-owned evidence without persisting it
+            // before the sketch itself is admitted.
+            intent: identity
+                .as_ref()
+                .and_then(|(_, evidence)| evidence.descriptor.clone())
+                .map(|descriptor| onecad_core::document::refs::IntentQuery {
+                    version: onecad_core::regen::PolicyVersions::default().descriptor,
+                    kind: ElementKind::Face,
+                    descriptor,
+                    extra: Default::default(),
+                }),
             anchor: Some(AnchorIntent {
                 // SCHEMA §7.6 `exact.anchor`: a point the KERNEL classified IN/ON
                 // this face. Deliberately NOT the plane origin: that is a property
@@ -2854,25 +2969,67 @@ pub async fn add_sketch_on_face(
         })?;
     }
 
-    // ── The single locked write ──────────────────────────────────────────────
+    let result = SketchOnFaceDto {
+        sketch_id: sketch_id.to_string(),
+        plane: plane.into(),
+        entity_count: entity_count.try_into().unwrap_or(u32::MAX),
+        constraint_count: constraint_count.try_into().unwrap_or(u32::MAX),
+        face_count: payload.face_count,
+        has_closed_boundary: payload.has_closed_boundary,
+        projected_boundary_version: 1,
+    };
+    Ok(PreparedFaceSketch {
+        ticket,
+        projector,
+        sketch,
+        identity,
+        result,
+    })
+}
+
+/// Revalidates every captured axis before the sole persistent mutation.
+pub async fn commit_sketch_on_face(
+    state: &AppState,
+    prepared: PreparedFaceSketch,
+) -> Result<SketchOnFaceDto, ApiError> {
+    commit_sketch_on_face_controlled(state, prepared, Default::default()).await
+}
+
+pub async fn commit_sketch_on_face_controlled(
+    state: &AppState,
+    prepared: PreparedFaceSketch,
+    control: crate::sketch_candidate::SketchCandidateControl,
+) -> Result<SketchOnFaceDto, ApiError> {
+    let PreparedFaceSketch {
+        ticket,
+        projector,
+        sketch,
+        identity,
+        result,
+    } = prepared;
     let (outcome, projection) = {
         let mut guard = state.runtime.lock().await;
         let rt = guard
             .as_mut()
             .ok_or_else(|| ApiError::NoDocument("addSketchOnFace".into()))?;
-        let outcome = rt
-            .apply(EditCommand::AddSketch { sketch })
-            .inspect_err(|e| {
-                tracing::warn!("add_sketch_on_face: sketch={sketch_id} REJECTED: {e}")
-            })?;
+        if !std::sync::Arc::ptr_eq(&projector, &state.face_projection()) {
+            return Err(ApiError::StalePreview(
+                "Sketch support provider changed; select the face again".into(),
+            ));
+        }
+        if !rt.face_entry_is_current(&ticket) {
+            return Err(ApiError::StalePreview(
+                "Sketch support changed; select the planar face again".into(),
+            ));
+        }
+        if !control.admit() {
+            return Err(ApiError::InvalidCommand(
+                "Sketch entry cancelled before admission".into(),
+            ));
+        }
+        let outcome = rt.commit_face_entry(&ticket, sketch, identity)?;
         (outcome, rt.projection())
     };
-    tracing::info!(
-        "add_sketch_on_face: sketch={sketch_id} body={body_id} faces={} entities={entity_count} \
-         constraints={constraint_count} closed={}",
-        payload.face_count,
-        payload.has_closed_boundary
-    );
     // The optional host slot keeps this operation usable in headless runtimes.
     if let Some(app) = state.host.get() {
         let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
@@ -2882,15 +3039,7 @@ pub async fn add_sketch_on_face(
     }
     state.note_mutation();
 
-    Ok(SketchOnFaceDto {
-        sketch_id: sketch_id.to_string(),
-        plane: plane.into(),
-        entity_count: entity_count.try_into().unwrap_or(u32::MAX),
-        constraint_count: constraint_count.try_into().unwrap_or(u32::MAX),
-        face_count: payload.face_count,
-        has_closed_boundary: payload.has_closed_boundary,
-        projected_boundary_version: 1,
-    })
+    Ok(result)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

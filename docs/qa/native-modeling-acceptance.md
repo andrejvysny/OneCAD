@@ -87,3 +87,41 @@ After body qualification, an isolated enter/cancel checks the editing solver's
 current DOF; fresh-open regeneration alone does not populate that solver cache.
 Capture hashes must remain unchanged. This semantic gate supplements actual
 foreground input and history evidence; it does not establish them by itself.
+
+## Separate plate depth and reopen captures
+
+Keep the existing 17-constraint, 4 mm width-edit gate unchanged. Capture the
+following separate journey from an actual native GUI session using the same
+mounting plate, including both holes and the authored construction centerline:
+
+| Immutable save | Width | Extrusion depth |
+|---|---:|---:|
+| `committed-6.onecad` | 80 mm | 6 mm |
+| `edited-8.onecad` | 80 mm | 8 mm |
+| `undo-6.onecad` | 80 mm | 6 mm |
+| `redo-8.onecad` | 80 mm | 8 mm |
+| `width90-8.onecad` | 90 mm | 8 mm |
+| `reopened90-8.onecad` | 90 mm | 8 mm |
+| `further-edited90-6.onecad` | 90 mm | 6 mm |
+
+The reopened checkpoint requires clean Quit and a fresh process opening the
+saved QA copy. Edit again in that fresh process before saving the last capture.
+Keep input traces, clean-quit evidence, source/worker hashes and screenshots with
+the run. Copy saves without overwriting any earlier checkpoint. Run:
+
+```sh
+ONECAD_REQUIRE_WORKER=1 \
+ONECAD_WORKER_PATH="$PWD/worker/build/onecad-worker" \
+ONECAD_FROM_NEW_DEPTH_CAPTURE_ROOT=/absolute/path/to/depth-captures \
+  cargo test -p onecad-app --test native_from_new_capture \
+  native_from_new_depth_capture_semantics -- --exact --ignored --nocapture
+```
+
+The gate independently opens each immutable capture in a fresh service process.
+It checks the 17 constraints, both hole centers and diameters, construction
+exclusion, persistent sketch/entity/constraint/region/operation/body identities,
+eight BRep faces, analytic volume and surface area, centroid, checked mesh bounds,
+fully constrained re-entry and unchanged capture hashes. It never manufactures
+GUI evidence. Missing captures or required worker prerequisites fail the lane.
+The older prepared-profile depth gate remains separate and does not qualify
+holes or the From-New plate.

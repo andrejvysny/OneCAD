@@ -341,6 +341,10 @@ fn draft() -> Draft {
         editing: true,
         text: "6".into(),
         focus: true,
+        position: None,
+        viewport: None,
+        error: None,
+        pending: None,
     }
 }
 

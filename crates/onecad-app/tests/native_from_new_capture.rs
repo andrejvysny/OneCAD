@@ -1,5 +1,7 @@
 //! Read-only semantic checks for five immutable From-New native GUI captures.
 //! Physical input/history evidence remains separate from these service checks.
+#[path = "native_from_new_capture/depth.rs"]
+mod depth;
 #[path = "native_from_new_capture/geometry.rs"]
 mod geometry;
 #[allow(dead_code)]
@@ -33,6 +35,12 @@ const CAPTURES: [(&str, f64); 5] = [
 ];
 const CHILD: &str = "ONECAD_FROM_NEW_CAPTURE_CASE";
 const SERVICE_ROOT: &str = "ONECAD_FROM_NEW_CAPTURE_SERVICE_ROOT";
+
+#[test]
+#[ignore = "requires actual GUI captures in ONECAD_FROM_NEW_DEPTH_CAPTURE_ROOT and staged production worker"]
+fn native_from_new_depth_capture_semantics() {
+    depth::run();
+}
 
 #[test]
 #[ignore = "requires actual GUI captures in ONECAD_FROM_NEW_CAPTURE_ROOT and staged production worker"]

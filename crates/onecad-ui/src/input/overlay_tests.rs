@@ -107,3 +107,31 @@ fn placement_enter_is_consumed_without_reaching_document_commands() {
     assert!(ui.editor_facade.placing.is_none());
     assert!(raw.events.is_empty());
 }
+
+#[test]
+fn dismissed_overlay_blocks_retained_pass_but_not_later_direct_ui_frames() {
+    let ctx = egui::Context::default();
+    let pass = ctx.cumulative_pass_nr();
+    let mut state = RoutingState {
+        pass,
+        retained: 0,
+        overlay_blocked: true,
+    };
+    let mut raw = egui::RawInput {
+        events: vec![escape()],
+        ..Default::default()
+    };
+    route_events(&mut state, pass, &mut raw, |raw| raw.events.clear());
+    assert!(state.overlay_blocks(ctx.cumulative_pass_nr()));
+    route_events(&mut state, pass, &mut raw, |_| {});
+    assert!(state.overlay_blocks(ctx.cumulative_pass_nr()));
+    let mut output = ctx.run_ui(raw, |ui| {
+        assert!(state.overlay_blocks(ui.ctx().cumulative_pass_nr()));
+    });
+    output.textures_delta.clear();
+    assert!(!state.overlay_blocks(ctx.cumulative_pass_nr()));
+    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        assert!(!state.overlay_blocks(ui.ctx().cumulative_pass_nr()));
+    });
+    output.textures_delta.clear();
+}

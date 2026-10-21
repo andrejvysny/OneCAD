@@ -3,6 +3,7 @@ use crate::ui_state::UiState;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Owner {
+    SketchEntry,
     Document,
     Customize,
     Popup,
@@ -15,6 +16,8 @@ pub(super) enum Owner {
 pub(super) fn owner(ui: &UiState, document: bool, popup: bool) -> Option<Owner> {
     if document {
         Some(Owner::Document)
+    } else if ui.sketch_entry.open {
+        Some(Owner::SketchEntry)
     } else if popup {
         Some(Owner::Popup)
     } else if ui.shell_facade.customize_open {
@@ -57,6 +60,7 @@ pub(super) fn dismiss(ui: &mut UiState, owner: Owner, raw: &mut egui::RawInput, 
         return;
     }
     match owner {
+        Owner::SketchEntry => ui.sketch_entry.dismiss(),
         Owner::Customize => ui.shell_facade.customize_open = false,
         Owner::Layers => ui.shell_facade.layers_open = false,
         Owner::Extensions => ui.editor_facade.popover_open = false,

@@ -175,7 +175,7 @@ impl Host {
             "editing fields must not mutate accepted geometry"
         );
         self.ui(vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
-        assert!(!crate::sketch_numeric::editor_open(&self.context));
+        assert!(crate::sketch_numeric::editor_open(&self.context));
     }
 
     pub(crate) async fn count(&mut self, count: usize) {
@@ -192,6 +192,11 @@ impl Host {
                     == count
         })
         .await;
+        self.ui(vec![]);
+        assert!(
+            !crate::sketch_numeric::editor_open(&self.context),
+            "terminal creation must close the pending chip"
+        );
     }
 
     pub(crate) fn sketch(&self) -> &Sketch {

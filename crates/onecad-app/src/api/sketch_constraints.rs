@@ -10,6 +10,16 @@ pub async fn author_sketch_primitive_with_completion(
     sketch_id: String,
     ops: Vec<SketchEditOp>,
 ) -> Result<CommandCompletion<SketchConstraintAdmission>, ApiError> {
+    author_sketch_primitive_controlled(state, app, sketch_id, ops, Default::default()).await
+}
+
+pub async fn author_sketch_primitive_controlled(
+    state: &AppState,
+    app: HostContext,
+    sketch_id: String,
+    ops: Vec<SketchEditOp>,
+    control: crate::sketch_candidate::SketchCandidateControl,
+) -> Result<CommandCompletion<SketchConstraintAdmission>, ApiError> {
     let id = parse_sketch_id(&sketch_id)?;
     let prepared = {
         let guard = state.runtime.lock().await;
@@ -18,7 +28,13 @@ pub async fn author_sketch_primitive_with_completion(
             .ok_or_else(|| ApiError::NoDocument("authorSketchPrimitive".into()))?;
         runtime.prepare_sketch_primitive(id, ops).await?
     };
-    complete_constraints(state, app, prepared, "authorSketchPrimitive").await
+    complete_constraints(
+        state,
+        app,
+        prepared.with_control(control),
+        "authorSketchPrimitive",
+    )
+    .await
 }
 
 pub async fn add_sketch_constraints_with_completion(
@@ -26,6 +42,16 @@ pub async fn add_sketch_constraints_with_completion(
     app: HostContext,
     sketch_id: String,
     constraints: Vec<Constraint>,
+) -> Result<CommandCompletion<SketchConstraintAdmission>, ApiError> {
+    add_sketch_constraints_controlled(state, app, sketch_id, constraints, Default::default()).await
+}
+
+pub async fn add_sketch_constraints_controlled(
+    state: &AppState,
+    app: HostContext,
+    sketch_id: String,
+    constraints: Vec<Constraint>,
+    control: crate::sketch_candidate::SketchCandidateControl,
 ) -> Result<CommandCompletion<SketchConstraintAdmission>, ApiError> {
     let id = parse_sketch_id(&sketch_id)?;
     let prepared = {
@@ -35,7 +61,13 @@ pub async fn add_sketch_constraints_with_completion(
             .ok_or_else(|| ApiError::NoDocument("addSketchConstraints".into()))?;
         runtime.prepare_sketch_constraints(id, constraints).await?
     };
-    complete_constraints(state, app, prepared, "addSketchConstraints").await
+    complete_constraints(
+        state,
+        app,
+        prepared.with_control(control),
+        "addSketchConstraints",
+    )
+    .await
 }
 
 /// Edits one dimension through detached solving; literals intentionally clear expression bindings.
@@ -47,6 +79,25 @@ pub async fn set_sketch_dimension_with_completion(
     constraint_id: ConstraintId,
     value: Scalar,
 ) -> Result<CommandCompletion<SketchConstraintAdmission>, ApiError> {
+    set_sketch_dimension_controlled(
+        state,
+        app,
+        sketch_id,
+        constraint_id,
+        value,
+        Default::default(),
+    )
+    .await
+}
+
+pub async fn set_sketch_dimension_controlled(
+    state: &AppState,
+    app: HostContext,
+    sketch_id: String,
+    constraint_id: ConstraintId,
+    value: Scalar,
+    control: crate::sketch_candidate::SketchCandidateControl,
+) -> Result<CommandCompletion<SketchConstraintAdmission>, ApiError> {
     let id = parse_sketch_id(&sketch_id)?;
     let prepared = {
         let guard = state.runtime.lock().await;
@@ -57,7 +108,13 @@ pub async fn set_sketch_dimension_with_completion(
             .prepare_sketch_dimension(id, constraint_id, value)
             .await?
     };
-    complete_constraints(state, app, prepared, "setSketchDimension").await
+    complete_constraints(
+        state,
+        app,
+        prepared.with_control(control),
+        "setSketchDimension",
+    )
+    .await
 }
 
 /// Repairs existing sketch geometry without admitting arbitrary unhealthy authoring.

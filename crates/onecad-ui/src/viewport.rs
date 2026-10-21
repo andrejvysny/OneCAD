@@ -5,11 +5,13 @@ use onecad_scene::{Bounds, DVec2, ViewSnapshot, Viewport};
 use std::sync::atomic::Ordering;
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
+    crate::sketch_entry::show(app, ui.ctx());
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE)
         .show(ui, |ui| {
             let (rect, response) =
                 ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+            crate::sketch_numeric::capture_viewport(ui.ctx(), rect);
             response.widget_info(|| {
                 egui::WidgetInfo::labeled(
                     egui::Role::Image,
@@ -81,7 +83,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             } else {
                 paint_profiles(app, ui, rect, &view, &display);
             }
+            if crate::sketch_numeric::editor_open(ui.ctx()) {
+                crate::sketch_numeric::viewport(app, ui, rect, &view);
+            }
             if crate::input::overlay_owns_keyboard(app, ui.ctx()) {
+                if crate::constraint_authoring::editor_open(ui.ctx()) {
+                    crate::sketch_dimensions::show(app, ui, rect, &view);
+                }
                 crate::sketch_creation::chain_input::cancel(app, ui.ctx());
                 app.cancel_sketch_gesture();
                 return;

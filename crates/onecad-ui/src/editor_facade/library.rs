@@ -139,6 +139,9 @@ pub fn visible(source: usize, query: &str) -> Vec<&'static Item> {
 
 /// Model | Library switch in the Explorer's first row.
 pub fn mode_switch(f: &mut EditorFacade, ui: &mut Ui) {
+    if !super::PREVIEW_FACADES {
+        return;
+    }
     let mut index = usize::from(f.library_mode);
     let segments = [
         Segment {
@@ -157,6 +160,9 @@ pub fn mode_switch(f: &mut EditorFacade, ui: &mut Ui) {
 }
 
 pub fn list(app: &mut App, ui: &mut Ui) {
+    if !super::PREVIEW_FACADES {
+        return;
+    }
     ui.spacing_mut().item_spacing.y = 0.0;
     controls(&mut app.ui.editor_facade, ui);
     let height = (ui.available_height() - 36.0).max(0.0);

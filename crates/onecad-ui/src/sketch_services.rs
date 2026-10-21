@@ -14,11 +14,22 @@ use tokio::sync::OwnedSemaphorePermit;
 
 #[derive(Debug)]
 pub enum Request {
+    FaceEntry {
+        id: SketchId,
+        context: DocumentContext,
+        body: onecad_core::ids::BodyId,
+        identity: String,
+        control: onecad_app::sketch_candidate::SketchCandidateControl,
+    },
     Load {
         id: SketchId,
         context: DocumentContext,
     },
     Effect(SketchEffect),
+    Candidate {
+        effect: SketchEffect,
+        control: onecad_app::sketch_candidate::SketchCandidateControl,
+    },
 }
 pub struct Delivery {
     pub tag: Option<SketchTag>,
@@ -44,6 +55,7 @@ impl Delivery {
 }
 
 enum Reply {
+    BeginCreated(Box<onecad_core::sketch::Sketch>),
     Begin(Box<onecad_core::sketch::Sketch>),
     Created,
     Entered(Box<SketchSessionDto>, bool),
@@ -66,6 +78,7 @@ pub async fn execute(
 ) {
     let tag = match &request {
         Request::Effect(effect) => Some(effect_tag(effect).clone()),
+        Request::Candidate { effect, .. } => Some(effect_tag(effect).clone()),
         _ => None,
     };
     let mut actions = Vec::new();
@@ -134,6 +147,54 @@ async fn run(
 ) -> Result<Reply, String> {
     let state = &backend.state;
     match request {
+        Request::FaceEntry {
+            id,
+            context,
+            body,
+            identity,
+            control,
+        } => {
+            check_context(state, &context).await?;
+            let scope = api::preview_context(state)
+                .await
+                .map_err(|e| e.to_string())?;
+            check_context(state, &context).await?;
+            if scope.runtime_session != context.runtime_session
+                || scope.revision.0 != context.revision
+                || scope.snapshot_id != context.snapshot_id
+            {
+                return Err("Sketch support belongs to a replaced document head".into());
+            }
+            let (element, topo) = if onecad_core::ids::TopoKey::new(identity.clone()).is_valid() {
+                (String::new(), Some(identity))
+            } else {
+                (identity, None)
+            };
+            backend.events.begin(crate::event_mailbox::Expected::Known {
+                session: context.runtime_session,
+                revision: context.revision + 1,
+            });
+            let prepared = api::prepare_sketch_on_face(
+                state,
+                scope,
+                onecad_app::worker::wire::body_id_wire(body),
+                element,
+                topo,
+                id.to_string(),
+                "Sketch".into(),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            crate::record_budget::check_payload(prepared.sketch())?;
+            api::commit_sketch_on_face_controlled(state, prepared, control)
+                .await
+                .map_err(|e| e.to_string())?;
+            api::get_sketch_snapshot(state, id)
+                .await
+                .map(Box::new)
+                .map(Reply::BeginCreated)
+                .map_err(|e| e.to_string())
+        }
         Request::Load { id, context } => {
             check_context(state, &context).await?;
             let sketch = api::get_sketch_snapshot(state, id)
@@ -143,7 +204,12 @@ async fn run(
             crate::record_budget::check_payload(&sketch)?;
             Ok(Reply::Begin(Box::new(sketch)))
         }
-        Request::Effect(effect) => execute_effect(backend, effect, actions).await,
+        Request::Effect(effect) => {
+            execute_effect(backend, effect, actions, Default::default()).await
+        }
+        Request::Candidate { effect, control } => {
+            execute_effect(backend, effect, actions, control).await
+        }
     }
 }
 
@@ -151,6 +217,7 @@ async fn execute_effect(
     backend: &mut Backend,
     effect: SketchEffect,
     actions: &mut Vec<SketchAction>,
+    control: onecad_app::sketch_candidate::SketchCandidateControl,
 ) -> Result<Reply, String> {
     let tag = effect_tag(&effect).clone();
     check_context(&backend.state, &tag.document).await?;
@@ -186,13 +253,18 @@ async fn execute_effect(
             Ok(Reply::Entered(Box::new(solve), true))
         }
         SketchEffect::Upsert { ops, .. } => {
-            let receipt =
-                match api::author_sketch_primitive_with_completion(&backend.state, host, id, ops)
-                    .await
-                {
-                    Ok(receipt) => receipt,
-                    Err(error) => return candidate_refusal(error),
-                };
+            let receipt = match api::author_sketch_primitive_controlled(
+                &backend.state,
+                host,
+                id,
+                ops,
+                control,
+            )
+            .await
+            {
+                Ok(receipt) => receipt,
+                Err(error) => return candidate_refusal(error),
+            };
             admission_reply(backend, receipt, tag, actions).await
         }
         SketchEffect::History {
@@ -214,11 +286,12 @@ async fn execute_effect(
             complete(backend, receipt).await.map(Reply::History)
         }
         SketchEffect::AddConstraints { constraints, .. } => {
-            let receipt = match api::add_sketch_constraints_with_completion(
+            let receipt = match api::add_sketch_constraints_controlled(
                 &backend.state,
                 host,
                 id,
                 constraints,
+                control,
             )
             .await
             {
@@ -230,12 +303,13 @@ async fn execute_effect(
         SketchEffect::SetDimension {
             constraint, value, ..
         } => {
-            let receipt = match api::set_sketch_dimension_with_completion(
+            let receipt = match api::set_sketch_dimension_controlled(
                 &backend.state,
                 host,
                 id,
                 constraint,
                 value,
+                control,
             )
             .await
             {
@@ -368,6 +442,9 @@ async fn feedback(
     context: DocumentContext,
 ) -> Result<SketchAction, String> {
     check_context(&backend.state, &context).await?;
+    if let Reply::BeginCreated(sketch) = reply {
+        return Ok(SketchAction::BeginCreated { sketch, context });
+    }
     if let Reply::Begin(sketch) = reply {
         return Ok(SketchAction::Begin {
             sketch,
@@ -445,7 +522,7 @@ async fn feedback(
             diagnostics,
         },
         Reply::Discarded(result) => SketchAction::Discarded { tag, result },
-        Reply::Begin(_) | Reply::ConstraintRefused(_) => {
+        Reply::BeginCreated(_) | Reply::Begin(_) | Reply::ConstraintRefused(_) => {
             return Err("unexpected sketch load reply".into());
         }
     })

@@ -341,6 +341,7 @@ fn apply_after(session: &mut SketchSession, after: AfterPrimitive) -> Result<(),
                 _ => return Err("Solved chain start is missing".into()),
             };
             let b = super::tangent_continuation::anchor(&session.authoritative, last, preceding)?;
+            session.draft_generation = session.draft_generation.saturating_add(1);
             session.draft = Some(SketchDraft {
                 first: a,
                 anchor: b,

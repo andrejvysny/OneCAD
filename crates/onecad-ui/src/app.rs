@@ -21,6 +21,7 @@ pub struct App {
     pub document_state_serial: u64,
     pub interaction: Interaction,
     pub sketch: onecad_interaction::sketch::SketchInteraction,
+    pub(crate) sketch_candidate: Option<crate::sketch_candidates::Pending>,
     pub sketch_gesture: onecad_interaction::sketch::gesture::SketchGestureInteraction,
     pub(crate) gesture_followup: Option<crate::sketch_gestures::Followup>,
     pub(crate) gesture_expected: Option<onecad_app::api::PreviewContext>,
@@ -123,6 +124,7 @@ impl App {
             document_state_serial: 0,
             interaction: Interaction::default(),
             sketch: Default::default(),
+            sketch_candidate: None,
             sketch_gesture: Default::default(),
             gesture_followup: None,
             gesture_expected: None,
@@ -196,6 +198,9 @@ impl App {
                 | Action::BeginParameterEdit { .. }
         ) {
             self.command_status = false;
+        }
+        if matches!(action, Action::ClearSelection | Action::SelectProfile(_)) {
+            self.ui.selected_sketch = None;
         }
         for effect in self.interaction.dispatch(action) {
             self.effect(effect);
@@ -428,6 +433,7 @@ impl App {
         ));
         self.sync_sketch_gesture();
         if changed {
+            self.ui.selected_sketch = None;
             self.selected_body = None;
             self.selected_feature = None;
             self.topology.invalidate_pending();
@@ -472,6 +478,7 @@ impl App {
             Message::Document { result, .. } => self.document_finished(result),
             Message::Gesture { delivery, .. } => self.gesture_delivery(*delivery),
             Message::Sketch { delivery, .. } => {
+                self.finish_sketch_candidate(delivery.tag.as_ref());
                 let current = delivery.tag.as_ref().is_none_or(|tag| {
                     self.document_state
                         .as_ref()

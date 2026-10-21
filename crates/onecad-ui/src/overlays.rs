@@ -30,7 +30,12 @@ pub fn nav_pill(app: &mut App, ctx: &Context, chrome: &Chrome) {
         nav_button("fit", "Fit all", ready, false),
         nav_button("isolate", "Isolate", false, false),
         nav_button("section", "Section", false, false),
-        nav_button("layers", "Layers", true, layers_open),
+        nav_button(
+            "layers",
+            "Layers",
+            crate::editor_facade::PREVIEW_FACADES,
+            layers_open,
+        ),
     ];
     let mut clicked = None;
     frame::floating(egui::Id::unique("nav-pill"), chrome.nav_pill, Order::Middle)

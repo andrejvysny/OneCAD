@@ -26,6 +26,9 @@ use support::*;
 mod assertions;
 use assertions::*;
 
+#[path = "plate_delivery_tests/history_editor.rs"]
+mod history_editor;
+
 struct Plate {
     rectangle: PrimitiveIds,
     holes: [PrimitiveIds; 2],
@@ -101,6 +104,7 @@ async fn from_new_plate_constraints_edit_repair_history_finish_and_extrude() {
     host.finish().await;
     assert_profiles(&host, &plate);
     extrude(&mut host).await;
+    history_editor::check(&mut host).await;
     model_history(&mut host).await;
     assert_brep(&host, 90.0).await;
     assert_stale_brep_reads_refused(&host).await;

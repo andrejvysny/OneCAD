@@ -498,3 +498,47 @@ fn dragging_label_keeps_grab_offset_and_never_mutates_the_sketch() {
     assert!(cache.drag.is_none());
     assert_eq!(session.authoritative, before);
 }
+
+#[test]
+fn default_dimensions_follow_actual_selected_operands() {
+    let (mut session, _, _) = fixture();
+    let diameter = session
+        .authoritative
+        .constraints()
+        .iter()
+        .find(|constraint| matches!(constraint, Constraint::Diameter { .. }))
+        .unwrap()
+        .clone();
+    assert!(!selected_dimension(&session, &diameter));
+    session.selection =
+        crate::constraint_authoring::constraint_targets(&session.authoritative, &diameter);
+    assert!(selected_dimension(&session, &diameter));
+    let unrelated = session
+        .authoritative
+        .constraints()
+        .iter()
+        .find(|constraint| matches!(constraint, Constraint::Angle { .. }))
+        .unwrap();
+    assert!(!selected_dimension(&session, unrelated));
+}
+
+#[test]
+fn explicit_visibility_survives_camera_but_resets_next_visit() {
+    let (mut session, _, view) = fixture();
+    let mut cache = Cache::sync(None, &session, view.identity());
+    assert!(!cache.show_all);
+    cache.show_all = true;
+    let capture = ViewSnapshot::new(
+        view.identity().scene,
+        view.identity().view + 1,
+        view.camera(),
+        view.viewport(),
+    )
+    .unwrap()
+    .identity();
+    cache = Cache::sync(Some(cache), &session, capture);
+    assert!(cache.show_all);
+    session.key.generation += 1;
+    cache = Cache::sync(Some(cache), &session, capture);
+    assert!(!cache.show_all);
+}

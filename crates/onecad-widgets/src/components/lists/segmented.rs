@@ -23,6 +23,7 @@ pub struct SegmentedControl<'a> {
     selected: &'a mut usize,
     segments: &'a [Segment<'a>],
     width: Option<f32>,
+    accent_selected: bool,
 }
 
 impl<'a> SegmentedControl<'a> {
@@ -36,7 +37,13 @@ impl<'a> SegmentedControl<'a> {
             selected,
             segments,
             width: None,
+            accent_selected: false,
         }
+    }
+    /// Use the theme accent for the selected label in a choice popover.
+    pub fn accent_selected(mut self) -> Self {
+        self.accent_selected = true;
+        self
     }
     /// Fixed total width, split equally; unset = content width.
     pub fn width(mut self, width: f32) -> Self {
@@ -166,7 +173,14 @@ impl Widget for SegmentedControl<'_> {
                 focus_ring(p, t, seg_rect, 5);
             }
             let (family, colour) = match (on, r.hovered()) {
-                (true, _) => (fonts::semibold(), t.ink),
+                (true, _) => (
+                    fonts::semibold(),
+                    if self.accent_selected {
+                        t.accent
+                    } else {
+                        t.ink
+                    },
+                ),
                 (false, true) => (FontFamily::Proportional, t.ink2),
                 (false, false) => (FontFamily::Proportional, t.ink4),
             };

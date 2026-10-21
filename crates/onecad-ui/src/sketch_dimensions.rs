@@ -67,10 +67,16 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect, view: &ViewSnapshot) -> bool
         previous
     });
     let mut cache = Cache::sync(previous, session, view.identity());
+    let active = crate::constraint_authoring::active_constraint(ui.ctx());
     let badges: Vec<_> = session
         .authoritative
         .constraints()
         .iter()
+        .filter(|constraint| {
+            cache.show_all
+                || active == Some(constraint.id())
+                || selected_dimension(session, constraint)
+        })
         .filter_map(|constraint| {
             let (text, accessible) = paint::label(constraint)?;
             Some(paint::Badge {
@@ -82,8 +88,13 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect, view: &ViewSnapshot) -> bool
         })
         .take(cache::MAX_BADGES)
         .collect();
-    let occupied = exclusions(app, ui, rect);
-    let enabled = !app.busy() && crate::viewport_widgets::gesture_allowed(ui);
+    let mut occupied = exclusions(app, ui, rect);
+    if let Some(bounds) = crate::constraint_authoring::editor_bounds(ui.ctx()) {
+        occupied.push(bounds);
+    }
+    let enabled = !app.busy()
+        && !crate::constraint_authoring::editor_open(ui.ctx())
+        && crate::viewport_widgets::gesture_allowed(ui);
     let canvas = paint::Canvas {
         rect,
         view,
@@ -92,6 +103,9 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect, view: &ViewSnapshot) -> bool
         enabled,
     };
     let output = paint::show(ui, &canvas, &badges, &mut cache, occupied);
+    if let Some(id) = output.hover {
+        crate::sketch_repair::set_constraint_hover(app, ui.ctx(), Some(id));
+    }
     let edit = output.edit.filter(|_| {
         app.sketch.session.as_ref().is_some_and(|session| {
             cache.current(session, view.identity()) && current(session, rect, view)
@@ -104,6 +118,44 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect, view: &ViewSnapshot) -> bool
         crate::constraint_authoring::edit_dimension(app, ui.ctx(), id);
     }
     output.owns_pointer
+}
+
+fn selected_dimension(
+    session: &SketchSession,
+    constraint: &onecad_core::sketch::Constraint,
+) -> bool {
+    crate::constraint_authoring::constraint_targets(&session.authoritative, constraint)
+        .iter()
+        .any(|operand| {
+            session.selection.iter().any(|target| {
+                target == operand
+                    || matches!(target, onecad_interaction::sketch::SketchTarget::Entity(_))
+                        && (target.owner_id() == operand.owner_id()
+                            || session
+                                .authoritative
+                                .get_entity(target.owner_id())
+                                .is_some_and(|entity| {
+                                    entity.referenced_entities().contains(&operand.owner_id())
+                                }))
+            })
+        })
+}
+
+pub(crate) fn label_position(
+    ctx: &egui::Context,
+    session: &SketchSession,
+    id: onecad_core::ids::ConstraintId,
+) -> Option<egui::Pos2> {
+    let cache = ctx.data(|data| data.get_temp::<Cache>(cache_id()))?;
+    if cache.key != session.key {
+        return None;
+    }
+    cache
+        .entries
+        .iter()
+        .find(|entry| entry.id == id)?
+        .last_rect
+        .map(|rect| rect.min)
 }
 
 fn exclusions(app: &App, ui: &Ui, rect: Rect) -> Vec<Rect> {
@@ -178,6 +230,7 @@ pub fn show_all(app: &App, ctx: &egui::Context) {
             .get_temp::<Cache>(cache_id())
             .filter(|cache| cache.key == session.key)
         {
+            cache.show_all = true;
             for entry in &mut cache.entries {
                 entry.hidden = false;
             }

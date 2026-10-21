@@ -10,6 +10,7 @@ use onecad_core::{
 };
 
 pub struct PreparedSketchConstraints {
+    control: Option<crate::sketch_candidate::SketchCandidateControl>,
     candidate: Sketch,
     ops: Vec<SketchEditOp>,
     solver: Arc<dyn SolverEngine>,
@@ -56,9 +57,23 @@ pub struct DrivenSketchConstraints {
 }
 
 impl PreparedSketchConstraints {
+    pub fn with_control(
+        mut self,
+        control: crate::sketch_candidate::SketchCandidateControl,
+    ) -> Self {
+        self.control = Some(control);
+        self
+    }
     /// Worker I/O runs outside the runtime lock; the lane remains claimed
     /// until the fenced decision, including refusal, is complete.
     pub async fn drive(self) -> Result<DrivenSketchConstraints, EngineError> {
+        if self
+            .control
+            .as_ref()
+            .is_some_and(|control| control.cancelled())
+        {
+            return Err(op_failed("Sketch candidate cancelled before admission"));
+        }
         let solve = self.solver.sketch_upsert(&self.candidate).await?;
         Ok(DrivenSketchConstraints {
             prepared: self,
@@ -171,6 +186,7 @@ impl DocumentRuntime {
             ));
         }
         Ok(PreparedSketchConstraints {
+            control: None,
             candidate,
             ops,
             solver: self.solver.clone(),
@@ -211,6 +227,13 @@ impl DocumentRuntime {
             }
         };
         let outcome = if accepted {
+            if prepared
+                .control
+                .as_ref()
+                .is_some_and(|control| !control.admit())
+            {
+                return Err(op_failed("Sketch candidate cancelled before admission"));
+            }
             let id = prepared.candidate.id;
             let outcome = self.commit_sketch_solve(prepared.candidate, after, prepared.ops)?;
             self.record_upsert(id, &driven.solve);

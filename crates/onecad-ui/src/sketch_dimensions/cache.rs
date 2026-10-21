@@ -30,6 +30,7 @@ pub struct Cache {
     pub capture: CaptureIdentity,
     pub entries: Vec<Placement>,
     pub drag: Option<Drag>,
+    pub show_all: bool,
 }
 
 impl Cache {
@@ -42,6 +43,7 @@ impl Cache {
                 capture,
                 entries: Vec::new(),
                 drag: None,
+                show_all: false,
             });
         cache.entries.retain(|entry| {
             session

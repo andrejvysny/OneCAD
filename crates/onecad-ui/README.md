@@ -3,9 +3,18 @@
 This macOS host uses the shared application services, interaction reducer, checked
 CPU scene and renderer. It implements the first prepared-profile workflow:
 viewport profile selection, new extrusion preview and commit, applicable typed numeric
-feature edits, new XY and existing sketch editing with line/rectangle/circle
+feature edits, world-plane and planar-face sketch entry and existing sketch editing with line/rectangle/circle
 batches, scoped sketch undo/redo, finish/discard, body Move / Rotate, model undo/redo, save, and reopen of the saved copy. Build and automated
 tests do not establish native input, appearance, accessibility or workflow acceptance.
+
+The [native sketch and extrusion editing contract](../../docs/design/native-sketch-editing.md)
+defines selection, input ownership, dimension authorship and admission behavior.
+The tool pill and sketch visit actions use bounded horizontal scrolling when their
+contents exceed the available lane. Their placement excludes side panels and
+viewport controls; at the minimum window size, sketch visit actions move below
+the camera controls. Pure egui layout tests cover light and dark themes at 1×
+and 2× scale in minimum, default and larger windows. Native appearance and physical
+input remain separate qualification lanes.
 
 From the workspace root, `make run` builds/stages the OCCT sidecar, creates a
 synthetic constrained plate fixture on first use, and launches the Rust desktop
@@ -112,10 +121,24 @@ required native acceptance gate.
 
 Only implemented controls are exposed. Select a worker-produced profile fill in
 the viewport, choose Extrude, enter a length or expression, wait for its real
-preview and choose Create. Select an editable history row and an applicable numeric field to edit its stored
+preview and choose Create. New Body is the default. Add and Cut require an explicit
+visible, healthy target body from the feature card or body tree; choosing a target
+retains the exact profile region and its holes. Mode and target changes invalidate
+the prior preview. Flip negates the same signed distance expression through the
+application resolver. Select an editable history row and an applicable numeric field to edit its stored
 parameters. Existing-feature edits rebuild on Apply: PreviewOp appends a candidate
 at HEAD and cannot correctly preview replacement of an existing operation.
-Choose New sketch (XY), or select an existing sketch row, to enter sketch mode.
+Choose Sketch, then XY, XZ, YZ or Selected planar face. The face option requires
+a checked viewport face selection. One click selects an existing sketch row;
+double-click or Properties Edit enters it. Camera, picking and rendering use the
+same effective sketch frame, preserving the persisted named-plane conventions.
+Face entry queries OCCT's exact frame and projected boundary without holding the
+document mutation lock. Runtime, revision, snapshot, worker epoch and provider
+ownership are checked again before sketch and identity adoption. Dropping or
+cancelling a candidate before admission changes no sketch, binding, history or
+dirty state. Accepted work retains its owner through completion. Nonplanar or
+unresolved support is refused; no world-plane fallback is substituted. Boundary
+entities remain locked, and existing support regeneration/reopen rules apply.
 Point, Line, Rectangle and Circle emit typed batches through the shared solver.
 Rectangle exposes Corner and Center methods in the sketch inspector. Center
 Rectangle retains its center through a construction diagonal and a solver midpoint
@@ -189,9 +212,15 @@ without passing the healthy-candidate creation gate. Missing, cached or invalid
 solver truth never displays as fully constrained; missing point reporting remains
 neutral instead of inheriting a whole-curve DOF claim.
 
-Finish keeps accepted edits and Discard uses guarded session discard. Enter/Escape
-clear a transient draft before exit. Read-only refresh never opens another edit
-session.
+Finish sketch keeps accepted edits; Discard sketch edits uses guarded whole-visit
+application history. Enter first clears a transient draft; a later Enter finishes.
+Escape unwinds numeric input, gesture/draft, tool, then selection. Idle Escape
+stays in the sketch. Read-only refresh never opens another edit session.
+Sketch and History rows select on one click and expose Properties. Double-click
+and the Properties Edit action use the same sketch or saved-feature entry path,
+including initially unselected rows. Selection records the owning primary press's
+coordinates and Shift/Command mode, retaining that mode through marquee and
+overlap choices. Ambiguous multiple primary cycles in one frame are refused.
 Automated host evidence and physical workflow acceptance are separate; see the
 [recurring host gate](../../docs/native-host-ci-gate.md).
 Focused text owns undo/redo and clipboard actions. Outside text editing, the title
@@ -379,7 +408,7 @@ with application data. Chrome modules:
   backing action are disabled with the reason "Not available yet".
 - `feature_card.rs`: card for the running model tool (numeric field, Create / Apply,
   Cancel). Enter confirms and Escape cancels under the same predicates as before.
-  Preview refusal/failure appears inline and in the bounded Activity window.
+  Preview refusal/failure appears inline.
 - `session_strip.rs`, `constraints_menu.rs`, `constraint_authoring.rs`: sketch
   session strip, applicability-driven constraint menu and scoped dimension editor.
   Unsupported constraints remain disabled.
@@ -476,3 +505,23 @@ ONECAD_WORKER_PATH="$PWD/worker/build-native/onecad-worker" \
   -- --ignored --test-threads=1
 cargo test -p onecad-ui input_trace
 ```
+
+New profiles default to Light appearance; saved appearance choices take precedence.
+The main toolbar centers in the window and stays inside the space reserved between
+sidebars and view controls; long tool lists scroll horizontally. Explorer and
+Inspector use 32 px toggles both inside their headers and when collapsed. The
+collapsed Inspector toggle sits below the viewport controls, centered in their
+column. The
+navigation cube occupies 104 px. Saved feature parameters expand inline beneath
+their History row, with the same expression validation, Apply and Cancel actions.
+New feature creation retains its floating parameter card. Application diagnostics
+remain recorded without an Activity overlay.
+
+The Display popover uses a compact 280 px width, render-style icons and an active
+row highlight/checkmark. Projection fills the popover width. X-ray, SSAA and
+Section are grouped under More settings. Hidden line remains disabled until the
+renderer supports it.
+
+The sketch Finish/Discard strip centers beneath the main toolbar, clamped to its
+free layout lane. Long sketch labels retain horizontal scrolling and reachable
+actions.

@@ -43,6 +43,9 @@ use onecad_app::worker::{
 
 use onecad_protocol::mesh::{f32_le, u32_le, validate_mesh_blob, MeshHeaderView};
 
+#[path = "sketch_on_face/scoped_entry.rs"]
+mod scoped_entry;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Harness (mirrors wire_contract.rs / m2_gate.rs — each worker-backed test file
 // keeps its own small harness rather than sharing a `tests/common` module).

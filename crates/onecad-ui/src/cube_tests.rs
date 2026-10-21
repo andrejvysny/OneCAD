@@ -230,7 +230,7 @@ fn quarter_roll_control_emits_camera_action_and_owns_click() {
     let captured = view(-DVec3::Y);
     let before = captured.identity();
     let viewport = Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0));
-    let position = rect(viewport).center() + vec2(72.0, -42.0);
+    let position = rect(viewport).center() + vec2(72.0, -42.0) * (SIZE / 164.0);
     let theme = crate::theme::load(true).unwrap();
     let mut result = CubeResponse::default();
     let _ = frame(&ctx, vec![egui::Event::PointerMoved(position)], |ui| {

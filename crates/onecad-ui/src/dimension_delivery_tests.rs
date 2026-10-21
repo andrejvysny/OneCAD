@@ -205,7 +205,7 @@ async fn circle_dimension_modal_edits_existing_id_and_real_solver_radius() {
         .unwrap()
         .id();
     assert!((radius(&app, circle) - 12.5).abs() < 1e-8);
-    open_badge_editor(&mut app, &context, &mut frame, constraint);
+    open_badge_editor(&mut app, &context, &mut frame, constraint).await;
     assert!(constraint_authoring::editor_open(&context));
     submit_modal(&mut app, &context, "30");
     pump_until(&mut app, &context, &mut frame, |app| {
@@ -230,6 +230,21 @@ async fn circle_dimension_modal_edits_existing_id_and_real_solver_radius() {
             .len(),
         1
     );
+    let before = app.sketch.session.as_ref().unwrap();
+    let request = before.request.clone();
+    let document = before.document.clone();
+    open_badge_editor(&mut app, &context, &mut frame, constraint).await;
+    submit_modal(&mut app, &context, "30");
+    let after = app.sketch.session.as_ref().unwrap();
+    assert_eq!(
+        after.request, request,
+        "unchanged confirmation must not submit a mutation"
+    );
+    assert_eq!(
+        after.document, document,
+        "unchanged confirmation must preserve revision and snapshot"
+    );
+    assert!(!constraint_authoring::editor_open(&context));
     app.sketch_dispatch(SketchAction::Discard);
     pump_until(&mut app, &context, &mut frame, |app| !app.sketch_active()).await;
     app.stop_discard();
@@ -242,28 +257,43 @@ fn editor_frame(
     frame: &mut eframe::Frame,
     events: Vec<egui::Event>,
 ) {
-    let mut output = context.run_ui(
-        egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(1280.0, 820.0),
-            )),
-            events,
-            focused: true,
-            ..Default::default()
-        },
-        |ui| eframe::App::ui(app, ui, frame),
-    );
+    let mut raw = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 820.0),
+        )),
+        events,
+        focused: true,
+        ..Default::default()
+    };
+    eframe::App::raw_input_hook(app, context, &mut raw);
+    let mut output = context.run_ui(raw, |ui| eframe::App::ui(app, ui, frame));
     output.textures_delta.clear();
 }
 
-fn open_badge_editor(
+async fn open_badge_editor(
     app: &mut App,
     context: &egui::Context,
     frame: &mut eframe::Frame,
     constraint: ConstraintId,
 ) {
     app.ui.start_open = false;
+    for _ in 0..100 {
+        logic_tick(app, context, frame, false);
+        editor_frame(app, context, frame, vec![]);
+        let ready = app
+            .view
+            .as_ref()
+            .zip(app.sketch.session.as_ref())
+            .is_some_and(|(view, session)| {
+                view.identity().scene == session.document.scene
+                    && session.accepted_capture == Some(view.identity())
+            });
+        if ready {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     for _ in 0..3 {
         editor_frame(app, context, frame, vec![]);
     }
@@ -285,6 +315,11 @@ fn open_badge_editor(
     editor_frame(app, context, frame, vec![event(false)]);
     assert!(
         constraint_authoring::editor_open(context),
-        "badge click must open existing dimension editor"
+        "badge click must open existing dimension editor; status={} phase={:?} tool={:?} current_rect={:?} clicked={:?}",
+        app.status,
+        app.sketch.session.as_ref().unwrap().phase,
+        app.sketch.session.as_ref().unwrap().tool,
+        crate::sketch_dimensions::badge_rect(context, constraint),
+        position
     );
 }

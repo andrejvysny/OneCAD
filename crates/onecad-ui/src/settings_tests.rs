@@ -33,6 +33,7 @@ fn roundtrip_preferences_without_transient_editor_state() {
 fn unchanged_or_transient_changes_never_create_settings() {
     let directory = tempfile::tempdir().unwrap();
     let (mut store, mut ui, _) = load(&directory);
+    assert_eq!(ui.appearance, Appearance::Light);
     store.save_if_changed(&ui).unwrap();
     ui.explorer_filter = "search".into();
     ui.start_open = true;
@@ -46,11 +47,12 @@ fn valid_loaded_preferences_are_not_rewritten_without_change() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join(FILE_NAME);
     let mut preferences = Preferences::capture(&UiState::default());
-    preferences.appearance = Appearance::Light;
+    preferences.appearance = Appearance::Dark;
     let bytes = serde_json::to_vec(&preferences).unwrap();
     fs::write(&path, &bytes).unwrap();
     let (mut store, mut ui, warning) = load(&directory);
     assert!(warning.is_none());
+    assert_eq!(ui.appearance, Appearance::Dark);
     ui.explorer_filter = "transient".into();
     store.save_if_changed(&ui).unwrap();
     assert!(store.writer.is_none());
@@ -73,7 +75,7 @@ fn corrupt_future_oversize_and_invalid_layout_stay_untouched() {
         fs::write(&path, &bytes).unwrap();
         let (mut store, mut ui, warning) = load(&directory);
         assert!(warning.is_some());
-        ui.appearance = Appearance::Light;
+        ui.appearance = Appearance::Dark;
         store.save_if_changed(&ui).unwrap();
         drop(store);
         assert_eq!(fs::read(path).unwrap(), bytes);
@@ -84,7 +86,7 @@ fn corrupt_future_oversize_and_invalid_layout_stay_untouched() {
 fn final_change_survives_shutdown_while_prior_write_runs() {
     let directory = tempfile::tempdir().unwrap();
     let (mut store, mut ui, _) = load(&directory);
-    ui.appearance = Appearance::Light;
+    ui.appearance = Appearance::Dark;
     store.save_if_changed(&ui).unwrap();
     ui.appearance = Appearance::System;
     ui.inspector_tab = InspectorTab::History;
@@ -100,7 +102,7 @@ fn write_failure_is_reported_and_not_retried_each_frame() {
     let directory = tempfile::tempdir().unwrap();
     let (mut store, mut ui, _) = load(&directory);
     fs::create_dir(directory.path().join(FILE_NAME)).unwrap();
-    ui.appearance = Appearance::Light;
+    ui.appearance = Appearance::Dark;
     store.save_if_changed(&ui).unwrap();
     assert!(
         store

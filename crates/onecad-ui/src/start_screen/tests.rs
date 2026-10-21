@@ -1,14 +1,13 @@
 use super::*;
 
 #[test]
-fn home_actions_have_real_intents_except_assembly() {
+fn home_actions_have_real_intents() {
     let specs = tile_specs();
     assert_eq!(specs[0].request, Some(Request::New));
-    assert_eq!(specs[1].request, None);
-    assert_eq!(specs.len(), 3);
-    assert_eq!(specs[2].title, "Open or import");
-    assert_eq!(specs[2].subtitle, ".onecad and STEP");
-    assert_eq!(specs[2].request, Some(Request::Import));
+    assert_eq!(specs.len(), 2);
+    assert_eq!(specs[1].title, "Open or import");
+    assert_eq!(specs[1].subtitle, ".onecad and STEP");
+    assert_eq!(specs[1].request, Some(Request::Import));
 }
 
 #[test]

@@ -21,6 +21,9 @@ fn pill_rect(chrome: &Chrome) -> Rect {
 }
 
 pub fn popover(app: &mut App, ctx: &Context, chrome: &Chrome) {
+    if !crate::editor_facade::PREVIEW_FACADES {
+        return;
+    }
     if !app.ui.shell_facade.layers_open {
         return;
     }

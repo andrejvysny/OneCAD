@@ -54,6 +54,11 @@ impl Interaction {
                 self.begin_parameter_edit(*record, parameter, gesture)
             }
             Action::DraftChanged(draft) => self.change_draft(draft),
+            Action::ExtrudeModeChanged(mode) => self.change_extrude_mode(mode),
+            Action::ExtrudeTargetChanged { body, context } => {
+                self.change_extrude_target(body, context)
+            }
+            Action::FlipExtrude => self.flip_extrude(),
             Action::TransformDraftChanged {
                 translate,
                 axis,

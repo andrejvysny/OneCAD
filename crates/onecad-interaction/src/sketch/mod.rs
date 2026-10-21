@@ -19,7 +19,7 @@ mod selection;
 pub use selection::{SelectionMode, SketchTarget, MAX_SELECTION_TARGETS};
 
 mod numeric_creation;
-pub use numeric_creation::CreationDimensions;
+pub use numeric_creation::{CreationDimensions, CreationField};
 
 pub mod gesture;
 

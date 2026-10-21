@@ -49,6 +49,9 @@ fn back(app: &mut App) {
 /// Main area right of the sidebar. Library pages own their padding and scrolling because
 /// the standard-part page runs edge to edge.
 fn page(app: &mut App, ui: &mut Ui, area: Rect) {
+    if !crate::editor_facade::PREVIEW_FACADES {
+        app.ui.start_page = StartPage::Home;
+    }
     let content = Rect::from_min_max(
         pos2(area.left() + sidebar_width(area.width()), area.top()),
         area.max,
@@ -153,6 +156,9 @@ fn sidebar(app: &mut App, ui: &mut Ui, area: Rect) {
         pos2(rect.right() - 11.0, rect.bottom() - 12.0),
     );
     ui.scope_builder(UiBuilder::new().max_rect(bottom), |ui| {
+        if !crate::editor_facade::PREVIEW_FACADES {
+            return;
+        }
         ui.spacing_mut().item_spacing.y = 2.0;
         let page = app.ui.start_page;
         let (_, _, pending) = app.ui.extensions.counts();
@@ -184,6 +190,9 @@ fn top_items(app: &App, ui: &mut Ui) -> Option<Nav> {
         ("component", "Component library", Some(Nav::Library)),
     ];
     for (icon, label, target) in items {
+        if !crate::editor_facade::PREVIEW_FACADES && target != Some(Nav::Home) {
+            continue;
+        }
         let active = match target {
             Some(Nav::Home) => page == StartPage::Home,
             Some(Nav::Library) => library_active(page),
@@ -265,7 +274,7 @@ struct Tile {
     request: Option<Request>,
 }
 
-fn tile_specs() -> [Tile; 3] {
+fn tile_specs() -> [Tile; 2] {
     [
         Tile {
             primary: true,
@@ -273,13 +282,6 @@ fn tile_specs() -> [Tile; 3] {
             title: "New part",
             subtitle: "Sketch and model a single part",
             request: Some(Request::New),
-        },
-        Tile {
-            primary: false,
-            icon: "component",
-            title: "New assembly",
-            subtitle: "Not available yet",
-            request: None,
         },
         Tile {
             primary: false,

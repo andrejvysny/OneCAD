@@ -6,6 +6,9 @@ use crate::{
 };
 use eframe::App as _;
 
+#[path = "row_delivery_tests.rs"]
+mod row_delivery_tests;
+
 #[tokio::test]
 #[ignore = "requires production worker and Metal; run with ONECAD_REQUIRE_WORKER=1 ONECAD_REQUIRE_GPU=1"]
 async fn occluded_app_logic_delivers_new_and_protects_close_without_ui() {
@@ -174,3 +177,6 @@ mod arc_gesture_delivery_tests;
 
 #[path = "arc_slot_delivery_tests.rs"]
 mod arc_slot_delivery_tests;
+
+#[path = "sketch_entry_delivery_tests.rs"]
+mod sketch_entry_delivery_tests;

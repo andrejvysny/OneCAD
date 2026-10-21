@@ -11,6 +11,19 @@ use onecad_scene::CaptureIdentity;
 
 const METHOD_MISMATCH: &str = "Numeric dimensions do not match the active sketch method";
 
+/// Fields explicitly changed by the user; measured hints never become dimensions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CreationField {
+    X,
+    Y,
+    Length,
+    Width,
+    Height,
+    Diameter,
+    Radius,
+    Sweep,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum CreationDimensions {
     Point { x: Scalar, y: Scalar },
@@ -25,6 +38,19 @@ pub enum CreationDimensions {
 }
 
 impl CreationDimensions {
+    pub fn fields(&self) -> &'static [CreationField] {
+        use CreationField::*;
+        match self {
+            Self::Point { .. } => &[X, Y],
+            Self::Line { .. } => &[Length],
+            Self::Rectangle { .. } | Self::CenterRectangle { .. } => &[Width, Height],
+            Self::Circle { .. } => &[Diameter],
+            Self::Arc { .. } => &[Radius, Sweep],
+            Self::TangentArc { .. } | Self::ThreePointArc { .. } => &[Radius],
+            Self::Slot { .. } => &[Width],
+        }
+    }
+
     pub fn endpoint(&self, anchor: Vec2, cursor: Vec2) -> Result<Vec2, String> {
         if !anchor.is_finite() || !cursor.is_finite() {
             return Err("Numeric creation requires finite anchor and cursor coordinates".into());
@@ -171,11 +197,36 @@ impl SketchInteraction {
         ids: PrimitiveIds,
         dimensions: CreationDimensions,
     ) -> Vec<SketchEffect> {
+        let authored = dimensions.fields().to_vec();
+        let generation = self
+            .session
+            .as_ref()
+            .map_or(0, |session| session.draft_generation);
+        self.create_numeric_authored(key, capture, ids, dimensions, generation, authored)
+    }
+
+    pub(crate) fn create_numeric_authored(
+        &mut self,
+        key: SketchSessionKey,
+        capture: CaptureIdentity,
+        ids: PrimitiveIds,
+        dimensions: CreationDimensions,
+        draft_generation: u64,
+        authored: Vec<CreationField>,
+    ) -> Vec<SketchEffect> {
         let Some(session) = self.session.as_ref() else {
             return Vec::new();
         };
-        if !self.selection_scope(&key, &session.document, capture) {
+        if !self.selection_scope(&key, &session.document, capture)
+            || session.draft_generation != draft_generation
+        {
             return Vec::new();
+        }
+        if authored
+            .iter()
+            .any(|field| !dimensions.fields().contains(field))
+        {
+            return self.refuse("Authored field does not match the active primitive");
         }
         if session.numeric_method() != dimensions.method() {
             return self.refuse(METHOD_MISMATCH);
@@ -191,7 +242,7 @@ impl SketchInteraction {
                 } else {
                     super::inferred_creation::append(session, capture, endpoint, &ids, None, batch)?
                 };
-                append_dimensions(&mut ops, &ids, &dimensions)?;
+                append_dimensions(&mut ops, &ids, &dimensions, &authored)?;
                 Ok((ops, after))
             });
         match batch {
@@ -205,7 +256,11 @@ fn append_dimensions(
     ops: &mut Vec<SketchEditOp>,
     ids: &PrimitiveIds,
     dimensions: &CreationDimensions,
+    authored: &[CreationField],
 ) -> Result<(), String> {
+    if authored.is_empty() || authored == [CreationField::Sweep] {
+        return Ok(());
+    }
     let constraints = match dimensions {
         CreationDimensions::Point { x, y } => point_dimensions(ops, ids, x, y),
         CreationDimensions::Line { length } => {
@@ -256,6 +311,28 @@ fn append_dimensions(
     ops.extend(
         constraints
             .into_iter()
+            .filter(|constraint| {
+                let field = match constraint {
+                    Constraint::Fixed { .. } => return true,
+                    Constraint::HorizontalDistance { .. } => CreationField::X,
+                    Constraint::VerticalDistance { .. } => CreationField::Y,
+                    Constraint::Distance { id, .. }
+                        if matches!(
+                            dimensions,
+                            CreationDimensions::Rectangle { .. }
+                                | CreationDimensions::CenterRectangle { .. }
+                        ) =>
+                    {
+                        if *id == ids.constraints[8] {
+                            CreationField::Width
+                        } else {
+                            CreationField::Height
+                        }
+                    }
+                    _ => dimensions.fields()[0],
+                };
+                authored.contains(&field)
+            })
             .map(|constraint| SketchEditOp::AddConstraint { constraint }),
     );
     Ok(())

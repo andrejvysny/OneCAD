@@ -1,5 +1,6 @@
 //! Typed native constraint intents; only application admission changes accepted sketch state.
 mod dimensions;
+mod editor;
 mod geometric;
 mod operands;
 mod relation;
@@ -39,6 +40,10 @@ struct Draft {
     editing: bool,
     text: String,
     focus: bool,
+    position: Option<egui::Pos2>,
+    viewport: Option<egui::Rect>,
+    error: Option<String>,
+    pending: Option<onecad_interaction::sketch::SketchTag>,
 }
 
 fn editor_id() -> egui::Id {
@@ -149,17 +154,26 @@ fn open_editor(
     let Some(text) = dimensions::text(&constraint) else {
         return;
     };
+    let position = crate::sketch_dimensions::label_position(ctx, session, constraint.id());
     ctx.data_mut(|data| {
         data.insert_temp(
             editor_id(),
             Draft {
                 key: session.key.clone(),
                 document: session.document.clone(),
-                targets: session.selection.clone(),
-                constraint,
+                targets: if editing {
+                    constraint_targets(&session.authoritative, &constraint)
+                } else {
+                    session.selection.clone()
+                },
+                constraint: constraint.clone(),
                 editing,
                 text,
                 focus: true,
+                position,
+                viewport: None,
+                error: None,
+                pending: None,
             },
         )
     });
@@ -187,40 +201,20 @@ fn current(draft: &Draft, session: &SketchSession) -> bool {
         }
 }
 
-fn editor(ctx: &egui::Context, draft: &mut Draft, variables: &[VariableDto]) -> (bool, bool) {
-    let Some(relation) = Relation::from_constraint(&draft.constraint) else {
-        return (false, true);
-    };
-    let mut apply = false;
-    let mut cancel = false;
-    let modal = egui::Modal::new(editor_id()).show(ctx, |ui| {
-        let action = if draft.editing { "Edit" } else { "Add" };
-        ui.heading(format!("{action} {}", relation.label()));
-        ui.label(if relation == Relation::Angle {
-            "Degrees; expressions may use deg or rad"
-        } else {
-            "Millimetres; expressions may reference document variables"
-        });
-        let field = ui.add(egui::TextEdit::singleline(&mut draft.text)
-            .desired_width(260.0)
-            .char_limit(onecad_core::expr::MAX_SOURCE_LEN));
-        if draft.focus {
-            field.request_focus();
-            draft.focus = false;
-        }
-        let parsed = dimensions::scalar(&draft.text, relation, variables);
-        if let Err(error) = &parsed {
-            ui.colored_label(ui.visuals().error_fg_color, error);
-        } else {
-            ui.small("Expressions use current document variables. A literal removes the expression binding.");
-        }
-        ui.horizontal(|ui| {
-            apply = ui.add_enabled(parsed.is_ok(), egui::Button::new("Apply")).clicked()
-                || (parsed.is_ok() && ui.input(|input| input.key_pressed(egui::Key::Enter)));
-            cancel = ui.button("Cancel").clicked();
-        });
-    });
-    (apply, cancel || modal.should_close())
+use editor::editor;
+
+pub(crate) fn active_constraint(ctx: &egui::Context) -> Option<ConstraintId> {
+    ctx.data(|data| data.get_temp::<Draft>(editor_id()))
+        .filter(|draft| draft.editing)
+        .map(|draft| draft.constraint.id())
+}
+
+pub(crate) fn editor_bounds(ctx: &egui::Context) -> Option<egui::Rect> {
+    let draft = ctx.data(|data| data.get_temp::<Draft>(editor_id()))?;
+    Some(egui::Rect::from_min_size(
+        draft.position?,
+        egui::vec2(300.0, 164.0),
+    ))
 }
 
 pub(crate) fn editor_open(ctx: &egui::Context) -> bool {
@@ -235,36 +229,68 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     }) else {
         return;
     };
-    if ready(app).is_none_or(|session| !current(&draft, session)) {
+    let Some(session) = app.sketch.session.as_ref() else {
+        return;
+    };
+    if draft.key != session.key {
         return;
     }
+    if draft.pending.is_some() {
+        match editor::settle(&mut draft, session) {
+            editor::Settlement::Waiting => {}
+            editor::Settlement::Complete => return,
+            editor::Settlement::Retry => {}
+        }
+    } else if ready(app).is_none_or(|session| !current(&draft, session)) {
+        return;
+    }
+    crate::sketch_repair::set_constraint_hover(app, ctx, Some(draft.constraint.id()));
     let variables = app
         .display
         .as_ref()
         .map_or(&[][..], |display| display.projection.variables.as_slice());
+    draft.viewport = Some(crate::layout::chrome(ctx.content_rect(), &app.ui).viewport);
     let (apply, cancel) = editor(ctx, &mut draft, variables);
-    if apply {
+    if cancel {
+        if let Some(tag) = &draft.pending {
+            app.cancel_sketch_candidate(tag);
+        }
+        return;
+    }
+    if apply && draft.pending.is_none() {
         let Some(relation) = Relation::from_constraint(&draft.constraint) else {
             return;
         };
         if let Ok(value) = dimensions::scalar(&draft.text, relation, variables) {
-            if draft.editing {
-                app.sketch_dispatch(SketchAction::SetDimension {
-                    key: draft.key,
+            if draft.editing
+                && (draft.constraint.value() == Some(&value)
+                    || dimensions::text(&draft.constraint)
+                        .is_some_and(|text| text == draft.text.trim()))
+            {
+                return;
+            }
+            let action = if draft.editing {
+                SketchAction::SetDimension {
+                    key: draft.key.clone(),
                     constraint: draft.constraint.id(),
                     value,
-                });
+                }
             } else {
-                dimensions::set_value(&mut draft.constraint, value);
-                app.sketch_dispatch(SketchAction::AddConstraints {
-                    key: draft.key,
-                    constraints: vec![draft.constraint],
-                });
+                let mut constraint = draft.constraint.clone();
+                dimensions::set_value(&mut constraint, value);
+                SketchAction::AddConstraints {
+                    key: draft.key.clone(),
+                    constraints: vec![constraint],
+                }
+            };
+            app.sketch_dispatch(action);
+            if let Some(session) = app.sketch.session.as_ref() {
+                draft.pending = Some(session.request.clone());
+                draft.error = None;
             }
         }
-    } else if !cancel {
-        ctx.data_mut(|data| data.insert_temp(editor_id(), draft));
     }
+    ctx.data_mut(|data| data.insert_temp(editor_id(), draft));
 }
 
 pub fn dimension_list(app: &mut App, ui: &mut egui::Ui) {

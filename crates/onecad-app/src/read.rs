@@ -27,7 +27,9 @@ pub async fn get_sketch_plane(
     let runtime = guard
         .as_ref()
         .ok_or_else(|| ApiError::NoDocument("sketchPlane".into()))?;
-    Ok(runtime.sketch_snapshot(sketch_id, "sketchPlane")?.plane)
+    Ok(runtime
+        .sketch_snapshot(sketch_id, "sketchPlane")?
+        .effective_plane())
 }
 
 /// Returns owned sketch data without opening a solver session or changing history.

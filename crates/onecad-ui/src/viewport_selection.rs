@@ -47,6 +47,12 @@ struct Delivery {
     result: Result<PreparedHighlights, String>,
 }
 impl Selection {
+    pub fn selected_face(&self, scene: SceneIdentity) -> Option<(BodyId, String)> {
+        self.selected
+            .as_ref()
+            .filter(|target| target.scene == scene && target.kind == HighlightKind::Face)
+            .map(|target| (target.body_id, target.topology_id.clone()))
+    }
     pub fn selected_kind(&self) -> Option<(HighlightKind, BodyId)> {
         self.selected
             .as_ref()
@@ -223,6 +229,12 @@ mod tests {
             dirty: false,
             ..Default::default()
         };
+        assert!(selection.selected_face(scene).is_some());
+        assert!(
+            selection
+                .selected_face(SceneIdentity { scene: 2, ..scene })
+                .is_none()
+        );
         selection.invalidate(SceneIdentity { scene: 2, ..scene });
         assert!(selection.selected.is_none() && selection.hover.is_none());
         assert!(selection.dirty);

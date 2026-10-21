@@ -21,11 +21,12 @@ pub fn title(app: &mut App, ui: &mut Ui) {
         .as_ref()
         .map_or_else(|| "OneCAD".to_owned(), |state| state.title.clone());
     let dirty = app.document_dirty();
-    let workspace = (!app.ui.start_open).then_some(WorkspaceSpec {
-        name: "Design",
-        icon: "body",
-        open: app.ui.workspace_menu_open,
-    });
+    let workspace =
+        (crate::editor_facade::PREVIEW_FACADES && !app.ui.start_open).then_some(WorkspaceSpec {
+            name: "Design",
+            icon: "body",
+            open: app.ui.workspace_menu_open,
+        });
     egui::Panel::top("title")
         .exact_size(44.0)
         .frame(egui::Frame::NONE)

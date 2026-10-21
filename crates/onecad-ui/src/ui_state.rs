@@ -14,8 +14,8 @@ pub enum InspectorTab {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Appearance {
-    Light,
     #[default]
+    Light,
     Dark,
     System,
 }
@@ -44,12 +44,14 @@ pub enum StartPage {
 
 #[derive(Clone, Debug)]
 pub struct UiState {
+    pub sketch_entry: crate::sketch_entry::Entry,
     pub explorer_open: bool,
     pub inspector_open: bool,
     pub inspector_tab: InspectorTab,
     pub workspace_menu_open: bool,
     pub start_open: bool,
     pub explorer_filter: String,
+    pub selected_sketch: Option<onecad_core::ids::SketchId>,
     /// Anchor of the open Display menu; `None` while closed.
     pub display_menu: Option<egui::Rect>,
     /// Sketch Constraints menu (display-only rows).
@@ -73,12 +75,14 @@ pub struct UiState {
 impl Default for UiState {
     fn default() -> Self {
         Self {
+            sketch_entry: Default::default(),
             explorer_open: true,
             inspector_open: true,
             inspector_tab: InspectorTab::default(),
             workspace_menu_open: false,
             start_open: false,
             explorer_filter: String::new(),
+            selected_sketch: None,
             display_menu: None,
             constraints_open: false,
             rectangle_centered: false,
@@ -166,7 +170,7 @@ mod tests {
         assert!(!Appearance::System.resolve_dark(l));
         assert!(Appearance::System.resolve_dark(d));
         assert!(Appearance::System.resolve_dark(None));
-        assert_eq!(UiState::default().appearance, Appearance::Dark);
+        assert_eq!(UiState::default().appearance, Appearance::Light);
     }
 
     #[test]

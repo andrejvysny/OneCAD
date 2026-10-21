@@ -17,6 +17,10 @@ pub enum SelectionKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "Legacy gallery identities are not native creation commands"
+)]
 pub enum ToolId {
     Select,
     Sketch,
@@ -108,159 +112,37 @@ const fn k(id: ToolId, icon: &'static str, label: &'static str, key: &'static st
         source: None,
     }
 }
-const fn x(
-    id: ToolId,
-    icon: &'static str,
-    label: &'static str,
-    extension: &'static str,
-    publisher: &'static str,
-) -> ToolDef {
-    ToolDef {
-        id,
-        icon,
-        label,
-        shortcut: None,
-        source: Some((extension, publisher)),
-    }
-}
-
 const SELECT: ToolDef = t(ToolId::Select, "select", "Select");
-const MEASURE: ToolDef = t(ToolId::Measure, "measure", "Measure");
-const ISOLATE: ToolDef = t(ToolId::Isolate, "isolate", "Isolate");
-const HIDE: ToolDef = t(ToolId::Hide, "eyeOff", "Hide");
-const MORE: ToolDef = t(ToolId::More, "overflow", "More");
-const SKETCH: ToolDef = t(ToolId::Sketch, "sketch", "Sketch (XY)");
+const SKETCH: ToolDef = t(ToolId::Sketch, "sketch", "Sketch");
 const EXTRUDE: ToolDef = k(ToolId::Extrude, "extrude", "Extrude", "E");
-const MATERIAL: ToolDef = t(ToolId::Material, "material", "Material");
-
-const NONE: Groups = &[
-    &[SELECT],
-    &[
-        SKETCH,
-        t(ToolId::DatumPlane, "datum", "Datum plane"),
-        t(ToolId::OffsetPlane, "offsetPlane", "Offset plane"),
-    ],
-    &[
-        t(ToolId::Generators, "gear", "Generators"),
-        t(ToolId::InsertComponent, "component", "Insert component"),
-        t(ToolId::Import, "import", "Import"),
-    ],
-    &[MEASURE, t(ToolId::Section, "section", "Section")],
+const CREATE: &[ToolDef] = &[
+    k(ToolId::Line, "line", "Line", "L"),
+    t(ToolId::Rectangle, "rect", "Rectangle"),
+    t(ToolId::Circle, "circle", "Circle"),
+    t(ToolId::Arc, "arc", "Arc"),
+    t(ToolId::Slot, "slot", "Slot"),
+    t(ToolId::Point, "point", "Point"),
 ];
-
-const FACE: Groups = &[
-    &[
-        SKETCH,
-        EXTRUDE,
-        t(ToolId::OffsetFace, "offsetFace", "Offset face"),
-        t(ToolId::Hole, "hole", "Hole"),
-        t(ToolId::Draft, "draft", "Draft"),
-        t(ToolId::Shell, "shell", "Shell"),
-    ],
-    &[MATERIAL, MEASURE],
-    &[ISOLATE, HIDE, MORE],
+const DIMENSIONS: &[ToolDef] = &[
+    k(ToolId::Dimension, "dimension", "Dimension", "D"),
+    t(ToolId::Constraints, "coincident", "Constraints"),
 ];
-
-const SKETCH_IDLE: Groups = &[
-    &[SELECT],
-    &[
-        k(ToolId::Line, "line", "Line", "L"),
-        t(ToolId::Rectangle, "rect", "Rectangle"),
-        t(ToolId::Circle, "circle", "Circle"),
-        t(ToolId::Arc, "arc", "Arc"),
-        t(ToolId::Slot, "slot", "Slot"),
-        t(ToolId::Polygon, "polygon", "Polygon"),
-        t(ToolId::Spline, "spline", "Spline"),
-        t(ToolId::Point, "point", "Point"),
-    ],
-    &[
-        k(ToolId::Dimension, "dimension", "Dimension", "D"),
-        t(ToolId::Constraints, "coincident", "Constraints"),
-    ],
-    &[
-        t(ToolId::Trim, "trim", "Trim"),
-        t(ToolId::Extend, "extend", "Extend"),
-        t(ToolId::SketchFillet, "sketchFillet", "Sketch fillet"),
-        t(ToolId::SketchOffset, "sketchOffset", "Offset"),
-        t(ToolId::Project, "project", "Project"),
-    ],
-];
-
+const NONE: Groups = &[&[SELECT], &[SKETCH]];
+const FACE: Groups = &[&[SKETCH]];
+const SKETCH_IDLE: Groups = &[&[SELECT], CREATE, DIMENSIONS];
 const SKETCH_ENTITY: Groups = &[
-    &[
-        k(ToolId::Horizontal, "horizontal", "Horizontal", "H"),
-        k(ToolId::Vertical, "vertical", "Vertical", "V"),
-        k(ToolId::Parallel, "parallel", "Parallel", "⇧P"),
-        k(
-            ToolId::Perpendicular,
-            "perpendicular",
-            "Perpendicular",
-            "⇧L",
-        ),
-        k(ToolId::Equal, "equal", "Equal", "="),
-        k(ToolId::Midpoint, "midpoint", "Midpoint", "M"),
-        k(ToolId::Fix, "fix", "Fix", "F"),
-        k(ToolId::Distance, "distance", "Distance", "D"),
-        t(ToolId::Constraints, "coincident", "Constraints"),
-    ],
+    &[SELECT],
+    CREATE,
+    DIMENSIONS,
     &[
         t(ToolId::Construction, "construction", "Construction"),
         t(ToolId::Delete, "delete", "Delete"),
     ],
 ];
-
-const REGION: Groups = &[
-    &[
-        EXTRUDE,
-        t(ToolId::Revolve, "revolve", "Revolve"),
-        t(ToolId::Sweep, "sweep", "Sweep"),
-        t(ToolId::Loft, "loft", "Loft"),
-    ],
-    &[MEASURE, MORE],
-];
-
-const EDGE: Groups = &[
-    &[
-        t(ToolId::Fillet, "fillet", "Fillet"),
-        t(ToolId::Chamfer, "chamfer", "Chamfer"),
-        x(ToolId::Flange, "extrude", "Flange", "Sheet Metal", "OneCAD"),
-        x(
-            ToolId::Dogbone,
-            "hole",
-            "Dogbone — corner relief for a ⌀6 tool",
-            "CNC Prep",
-            "Millhouse",
-        ),
-    ],
-    &[MEASURE, ISOLATE, MORE],
-];
-
-const FEATURE: Groups = &[
-    &[
-        t(ToolId::Edit, "edit", "Edit"),
-        t(ToolId::RollBack, "rolledBack", "Roll back to here"),
-        t(ToolId::Suppress, "suppressed", "Suppress"),
-        t(ToolId::Duplicate, "duplicate", "Duplicate"),
-    ],
-    &[t(ToolId::Delete, "delete", "Delete"), MORE],
-];
-
-const BODY: Groups = &[
-    &[
-        k(ToolId::MoveRotate, "move", "Move / Rotate", "M"),
-        MATERIAL,
-        MEASURE,
-        x(
-            ToolId::CheckGeometry,
-            "needsRepair",
-            "Check geometry",
-            "Topology Check",
-            "OneCAD",
-        ),
-    ],
-    &[ISOLATE, HIDE, MORE],
-    &[t(ToolId::MakeComponent, "component", "Make component")],
-];
+const REGION: Groups = &[&[EXTRUDE]];
+const EDGE: Groups = &[];
+const FEATURE: Groups = &[&[t(ToolId::Edit, "edit", "Edit")]];
+const BODY: Groups = &[&[k(ToolId::MoveRotate, "move", "Move / Rotate", "M")]];
 
 /// Tool groups for a selection kind, in README order.
 pub fn pill_tools(kind: SelectionKind) -> &'static [&'static [ToolDef]] {
@@ -276,19 +158,73 @@ pub fn pill_tools(kind: SelectionKind) -> &'static [&'static [ToolDef]] {
     }
 }
 
-/// The running model tool: Move / Rotate or (for every other known operation) Extrude.
+/// The running model tool, including saved-feature parameter edits.
 pub fn running_tool(app: &App) -> Option<ToolId> {
     let tool = app.interaction.tool.as_ref()?;
-    Some(
-        if matches!(
-            tool.record.op,
-            Operation::Known(KnownOperation::TransformBody(_))
-        ) {
-            ToolId::MoveRotate
-        } else {
-            ToolId::Extrude
-        },
-    )
+    match tool.record.op {
+        Operation::Known(KnownOperation::Extrude(_)) => Some(ToolId::Extrude),
+        Operation::Known(KnownOperation::TransformBody(_)) => Some(ToolId::MoveRotate),
+        Operation::Known(KnownOperation::Revolve(_)) => Some(ToolId::Revolve),
+        Operation::Known(KnownOperation::Fillet(_)) => Some(ToolId::Fillet),
+        Operation::Known(KnownOperation::Chamfer(_)) => Some(ToolId::Chamfer),
+        Operation::Known(KnownOperation::Shell(_)) => Some(ToolId::Shell),
+        Operation::Known(KnownOperation::Loft(_)) => Some(ToolId::Loft),
+        Operation::Known(KnownOperation::Sweep(_)) => Some(ToolId::Sweep),
+        Operation::Known(KnownOperation::Hole(_)) => Some(ToolId::Hole),
+        Operation::Known(KnownOperation::OffsetFace(_)) => Some(ToolId::OffsetFace),
+        _ => Some(ToolId::Edit),
+    }
+}
+
+pub fn operation_icon(op_type: &str) -> &'static str {
+    match op_type {
+        "Sketch" => "sketch",
+        "Extrude" => "extrude",
+        "Revolve" => "revolve",
+        "Fillet" => "fillet",
+        "Chamfer" => "chamfer",
+        "Shell" => "shell",
+        "LinearPattern" | "FeaturePattern" => "patternLinear",
+        "CircularPattern" => "patternCircular",
+        "Loft" => "loft",
+        "Sweep" => "sweep",
+        "MirrorBody" => "mirror",
+        "ImportStep" => "import",
+        "TransformBody" => "move",
+        "Hole" => "hole",
+        "OffsetFace" => "offsetFace",
+        "Gear" => "gear",
+        "PlaceComponent" | "DetachComponent" => "component",
+        _ => "body",
+    }
+}
+
+pub fn running_definition(app: &App) -> Option<ToolDef> {
+    let op = &app.interaction.tool.as_ref()?.record.op;
+    let label = match op.op_type() {
+        "Sketch" => "Sketch",
+        "Extrude" => "Extrude",
+        "Revolve" => "Revolve",
+        "Fillet" => "Fillet",
+        "Chamfer" => "Chamfer",
+        "Shell" => "Shell",
+        "Boolean" => "Boolean",
+        "LinearPattern" => "Linear pattern",
+        "CircularPattern" => "Circular pattern",
+        "FeaturePattern" => "Feature pattern",
+        "Loft" => "Loft",
+        "Sweep" => "Sweep",
+        "MirrorBody" => "Mirror body",
+        "ImportStep" => "Import STEP",
+        "TransformBody" => "Move / Rotate",
+        "Hole" => "Hole",
+        "OffsetFace" => "Offset face",
+        "Gear" => "Gear",
+        "PlaceComponent" => "Place component",
+        "DetachComponent" => "Detach component",
+        _ => "Unknown feature",
+    };
+    Some(t(running_tool(app)?, operation_icon(op.op_type()), label))
 }
 
 pub fn selection_kind(app: &App) -> SelectionKind {
@@ -332,13 +268,6 @@ pub fn selection_kind(app: &App) -> SelectionKind {
 mod tests {
     use super::*;
 
-    fn labels(kind: SelectionKind) -> Vec<Vec<&'static str>> {
-        pill_tools(kind)
-            .iter()
-            .map(|g| g.iter().map(|d| d.label).collect())
-            .collect()
-    }
-
     const ALL: [SelectionKind; 8] = [
         SelectionKind::None,
         SelectionKind::Face,
@@ -351,133 +280,74 @@ mod tests {
     ];
 
     #[test]
-    fn every_icon_exists() {
+    fn normal_tools_have_existing_icons_and_no_extensions() {
         for kind in ALL {
-            for def in pill_tools(kind).iter().flat_map(|g| g.iter()) {
+            for def in pill_tools(kind).iter().flat_map(|group| group.iter()) {
                 assert!(onecad_widgets::icon::exists(def.icon), "{}", def.icon);
+                assert!(def.source.is_none());
             }
         }
     }
 
     #[test]
-    fn idle_and_face_lists_match_readme() {
+    fn running_operation_icons_exist_and_match_operation_families() {
+        for operation in [
+            "Sketch",
+            "Extrude",
+            "Revolve",
+            "Fillet",
+            "Chamfer",
+            "Shell",
+            "Boolean",
+            "LinearPattern",
+            "CircularPattern",
+            "FeaturePattern",
+            "Loft",
+            "Sweep",
+            "MirrorBody",
+            "ImportStep",
+            "TransformBody",
+            "Hole",
+            "OffsetFace",
+            "Gear",
+            "PlaceComponent",
+            "DetachComponent",
+        ] {
+            assert!(
+                onecad_widgets::icon::exists(operation_icon(operation)),
+                "{operation}"
+            );
+        }
+        assert_eq!(operation_icon("TransformBody"), "move");
+        assert_eq!(operation_icon("OffsetFace"), "offsetFace");
+        assert_ne!(operation_icon("Revolve"), operation_icon("Extrude"));
+    }
+
+    #[test]
+    fn sketch_selection_preserves_creation_tools() {
         assert_eq!(
-            labels(SelectionKind::None),
-            vec![
-                vec!["Select"],
-                vec!["Sketch (XY)", "Datum plane", "Offset plane"],
-                vec!["Generators", "Insert component", "Import"],
-                vec!["Measure", "Section"],
-            ]
+            SKETCH_IDLE[1]
+                .iter()
+                .map(|tool| tool.id)
+                .collect::<Vec<_>>(),
+            SKETCH_ENTITY[1]
+                .iter()
+                .map(|tool| tool.id)
+                .collect::<Vec<_>>()
         );
-        assert_eq!(
-            labels(SelectionKind::Face),
-            vec![
-                vec![
-                    "Sketch (XY)",
-                    "Extrude",
-                    "Offset face",
-                    "Hole",
-                    "Draft",
-                    "Shell"
-                ],
-                vec!["Material", "Measure"],
-                vec!["Isolate", "Hide", "More"],
-            ]
+        assert!(
+            SKETCH_ENTITY
+                .iter()
+                .flat_map(|group| group.iter())
+                .any(|tool| tool.id == ToolId::Construction)
         );
     }
 
     #[test]
-    fn sketch_lists_match_readme() {
-        assert_eq!(
-            labels(SelectionKind::SketchIdle),
-            vec![
-                vec!["Select"],
-                vec![
-                    "Line",
-                    "Rectangle",
-                    "Circle",
-                    "Arc",
-                    "Slot",
-                    "Polygon",
-                    "Spline",
-                    "Point"
-                ],
-                vec!["Dimension", "Constraints"],
-                vec!["Trim", "Extend", "Sketch fillet", "Offset", "Project"],
-            ]
-        );
-        assert_eq!(
-            labels(SelectionKind::SketchEntity),
-            vec![
-                vec![
-                    "Horizontal",
-                    "Vertical",
-                    "Parallel",
-                    "Perpendicular",
-                    "Equal",
-                    "Midpoint",
-                    "Fix",
-                    "Distance",
-                    "Constraints"
-                ],
-                vec!["Construction", "Delete"],
-            ]
-        );
-    }
-
-    #[test]
-    fn region_edge_feature_body_lists_match_readme() {
-        assert_eq!(
-            labels(SelectionKind::Region),
-            vec![
-                vec!["Extrude", "Revolve", "Sweep", "Loft"],
-                vec!["Measure", "More"]
-            ]
-        );
-        assert_eq!(
-            labels(SelectionKind::Edge),
-            vec![
-                vec![
-                    "Fillet",
-                    "Chamfer",
-                    "Flange",
-                    "Dogbone — corner relief for a ⌀6 tool"
-                ],
-                vec!["Measure", "Isolate", "More"]
-            ]
-        );
-        assert_eq!(
-            labels(SelectionKind::Feature),
-            vec![
-                vec!["Edit", "Roll back to here", "Suppress", "Duplicate"],
-                vec!["Delete", "More"]
-            ]
-        );
-        assert_eq!(
-            labels(SelectionKind::Body),
-            vec![
-                vec!["Move / Rotate", "Material", "Measure", "Check geometry"],
-                vec!["Isolate", "Hide", "More"],
-                vec!["Make component"]
-            ]
-        );
-    }
-
-    #[test]
-    fn extension_tools_name_their_source() {
-        let sources: Vec<_> = ALL
-            .iter()
-            .flat_map(|k| pill_tools(*k).iter().flat_map(|g| g.iter()))
-            .filter_map(|d| d.source)
-            .collect();
-        assert_eq!(
-            sources,
-            vec![
-                ("Sheet Metal", "OneCAD"),
-                ("CNC Prep", "Millhouse"),
-                ("Topology Check", "OneCAD")
-            ]
-        );
+    fn normal_model_surfaces_offer_implemented_creation_and_editing() {
+        assert_eq!(REGION[0].len(), 1);
+        assert_eq!(REGION[0][0].id, ToolId::Extrude);
+        assert_eq!(BODY[0][0].id, ToolId::MoveRotate);
+        assert_eq!(FEATURE[0][0].id, ToolId::Edit);
     }
 }

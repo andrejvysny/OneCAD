@@ -80,6 +80,7 @@ impl Flow {
                     | SketchAction::Click { .. }
                     | SketchAction::ClickInferred { .. }
                     | SketchAction::CreateNumeric { .. }
+                    | SketchAction::CreateNumericAuthored { .. }
                     | SketchAction::PreviewNumeric { .. }
                     | SketchAction::BeginPointNumeric { .. }
                     | SketchAction::Escape

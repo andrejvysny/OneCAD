@@ -4,12 +4,12 @@ use egui::{Pos2, Rect, pos2, vec2};
 
 const TITLEBAR: f32 = 44.0;
 const EDGE: f32 = 10.0;
-const TOGGLE: f32 = 44.0;
+const TOGGLE: f32 = 32.0;
 const EXPLORER_W: f32 = 248.0;
 const INSPECTOR_W: f32 = 288.0;
 const CARD_W: f32 = 280.0;
 const CARD_H: f32 = 320.0;
-const CUBE: f32 = 164.0;
+pub(crate) const CUBE: f32 = 104.0;
 const CONTROL_W: f32 = 36.0;
 const CONTROLS_H: f32 = 124.0;
 
@@ -20,6 +20,7 @@ pub struct Chrome {
     pub titlebar: Rect,
     pub viewport: Rect,
     pub explorer_toggle: Rect,
+    pub toolbar_left: f32,
     pub explorer: Rect,
     /// Only present while the Inspector is closed.
     pub inspector_toggle: Option<Rect>,
@@ -47,15 +48,11 @@ fn feature_card(viewport: Rect, inspector_open: bool) -> Rect {
     )
 }
 
-fn pill_centre_x(viewport: Rect, state: &UiState) -> f32 {
-    viewport.center().x
-        + if state.inspector_open {
-            -64.0
-        } else if state.explorer_open {
-            86.0
-        } else {
-            0.0
-        }
+fn collapsed_inspector_toggle(controls: Rect) -> Rect {
+    Rect::from_min_size(
+        pos2(controls.center().x - TOGGLE / 2.0, controls.bottom() + 8.0),
+        vec2(TOGGLE, TOGGLE),
+    )
 }
 
 pub fn chrome(screen: Rect, state: &UiState) -> Chrome {
@@ -73,30 +70,38 @@ pub fn chrome(screen: Rect, state: &UiState) -> Chrome {
     } else {
         pos2(r - 14.0, t + 62.0)
     };
+    let view_controls = Rect::from_min_size(
+        pos2(
+            view_cluster.x - CUBE / 2.0 - CONTROL_W / 2.0,
+            view_cluster.y + CUBE + 4.0,
+        ),
+        vec2(CONTROL_W, CONTROLS_H),
+    );
     Chrome {
         titlebar,
         viewport,
         explorer_toggle: Rect::from_min_size(pos2(l + EDGE, t + EDGE), vec2(TOGGLE, TOGGLE)),
+        toolbar_left: l
+            + EDGE
+            + if state.explorer_open {
+                EXPLORER_W
+            } else {
+                TOGGLE
+            }
+            + EDGE,
         explorer: Rect::from_min_max(
-            pos2(l + EDGE, t + 62.0),
+            pos2(l + EDGE, t + EDGE),
             pos2(l + EDGE + EXPLORER_W, b - EDGE),
         ),
-        inspector_toggle: (!open)
-            .then(|| Rect::from_min_size(pos2(r - EDGE - TOGGLE, t + EDGE), vec2(TOGGLE, TOGGLE))),
+        inspector_toggle: (!open).then(|| collapsed_inspector_toggle(view_controls)),
         inspector: Rect::from_min_max(
             pos2(r - EDGE - INSPECTOR_W, t + EDGE),
             pos2(r - EDGE, b - EDGE),
         ),
-        pill_centre_x: pill_centre_x(viewport, state),
+        pill_centre_x: viewport.center().x,
         feature_card: feature_card(viewport, open),
         view_cluster,
-        view_controls: Rect::from_min_size(
-            pos2(
-                view_cluster.x - CUBE / 2.0 - CONTROL_W / 2.0,
-                view_cluster.y + CUBE + 4.0,
-            ),
-            vec2(CONTROL_W, CONTROLS_H),
-        ),
+        view_controls,
         nav_pill: pos2(l + if state.explorer_open { 268.0 } else { EDGE }, b - EDGE),
     }
 }
@@ -104,8 +109,8 @@ pub fn chrome(screen: Rect, state: &UiState) -> Chrome {
 impl Chrome {
     /// Move controls beside the cube while parameters occupy the space beneath it.
     pub fn with_feature_card(mut self) -> Self {
-        if let Some(toggle) = self.inspector_toggle {
-            self.view_cluster = pos2(toggle.left() - 8.0, self.viewport.top() + EDGE);
+        if self.inspector_toggle.is_some() {
+            self.view_cluster = pos2(self.viewport.right() - 14.0, self.viewport.top() + EDGE);
         }
         self.view_controls = Rect::from_min_size(
             pos2(
@@ -114,7 +119,13 @@ impl Chrome {
             ),
             vec2(CONTROL_W, CONTROLS_H),
         );
-        let top = self.view_cluster.y + CUBE + 8.0;
+        self.inspector_toggle = self
+            .inspector_toggle
+            .map(|_| collapsed_inspector_toggle(self.view_controls));
+        let controls_bottom = self
+            .inspector_toggle
+            .map_or(self.view_controls.bottom(), |toggle| toggle.bottom());
+        let top = (self.view_cluster.y + CUBE).max(controls_bottom) + 8.0;
         self.feature_card = Rect::from_min_size(
             pos2(self.feature_card.left(), top),
             vec2(
@@ -142,19 +153,19 @@ mod tests {
         assert_eq!(c.viewport.bottom(), 800.0);
         assert_eq!(c.explorer.bottom(), 790.0);
         assert_eq!(c.inspector.bottom(), 790.0);
-        assert_eq!(c.explorer.min, pos2(10.0, 106.0));
+        assert_eq!(c.explorer.min, pos2(10.0, 54.0));
         assert_eq!(c.explorer.width(), 248.0);
         assert_eq!(c.inspector.width(), 288.0);
         assert_eq!(c.inspector.right(), 1270.0);
     }
 
     #[test]
-    fn pill_offset_follows_panels() {
+    fn pill_stays_centred_when_panels_change() {
         let mut s = UiState::default();
         let centre = 640.0;
-        assert_eq!(chrome(screen(), &s).pill_centre_x, centre - 64.0);
+        assert_eq!(chrome(screen(), &s).pill_centre_x, centre);
         s.inspector_open = false;
-        assert_eq!(chrome(screen(), &s).pill_centre_x, centre + 86.0);
+        assert_eq!(chrome(screen(), &s).pill_centre_x, centre);
         s.explorer_open = false;
         assert_eq!(chrome(screen(), &s).pill_centre_x, centre);
     }
@@ -168,7 +179,10 @@ mod tests {
         s.inspector_open = false;
         let c = chrome(screen(), &s);
         assert_eq!(c.view_cluster, pos2(1266.0, 106.0));
-        assert_eq!(c.inspector_toggle.map(|r| r.min), Some(pos2(1226.0, 54.0)));
+        let toggle = c.inspector_toggle.unwrap();
+        assert_eq!(toggle.center().x, c.view_controls.center().x);
+        assert_eq!(toggle.top(), c.view_controls.bottom() + 8.0);
+        assert_eq!(toggle.size(), vec2(32.0, 32.0));
     }
 
     #[test]

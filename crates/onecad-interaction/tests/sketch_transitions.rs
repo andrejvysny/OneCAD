@@ -184,18 +184,20 @@ fn degenerate_primitives_do_not_author_geometry() {
 }
 
 #[test]
-fn escape_and_enter_cancel_draft_before_finishing_and_never_upsert_preview() {
+fn escape_unwinds_to_idle_and_only_enter_finishes_without_upserting_preview() {
     let mut state = active(SketchPlane::xy(), SketchTool::Rectangle);
     click(&mut state, 0.0, 0.0, 1000);
     assert!(state.dispatch(SketchAction::Enter).is_empty());
     assert!(state.session.as_ref().unwrap().draft.is_none());
     assert!(state.dispatch(SketchAction::Escape).is_empty());
     assert_eq!(state.session.as_ref().unwrap().tool, SketchTool::Select);
-    let effects = state.dispatch(SketchAction::Escape);
+    assert!(state.dispatch(SketchAction::Escape).is_empty());
+    assert_eq!(state.session.as_ref().unwrap().phase, SketchPhase::Active);
+    let effects = state.dispatch(SketchAction::Enter);
     assert!(matches!(
         effects.as_slice(),
         [SketchEffect::FinishSketch {
-            reason: FinishReason::Escape,
+            reason: FinishReason::Explicit,
             ..
         }]
     ));
@@ -557,4 +559,37 @@ fn sketch_history_reply_preserves_scope_and_empty_history_is_explicit() {
         state.session.as_ref().unwrap().authoritative.name,
         "New visit"
     );
+}
+
+#[test]
+fn application_created_sketch_enters_without_repeating_creation_and_keeps_discard_scope() {
+    let mut state = SketchInteraction::default();
+    state.dispatch(SketchAction::ContextChanged(Some(context())));
+    let sketch = empty(SketchPlane::xy());
+    let effects = state.dispatch(SketchAction::BeginCreated {
+        sketch: Box::new(sketch.clone()),
+        context: context(),
+    });
+    let [SketchEffect::EnterSketch {
+        tag,
+        created_here: true,
+    }] = effects.as_slice()
+    else {
+        panic!("already-created sketch must enter without another AddSketch");
+    };
+    assert_eq!(state.session.as_ref().unwrap().phase, SketchPhase::Entering);
+    state.dispatch(SketchAction::Entered {
+        tag: tag.clone(),
+        snapshot: SketchSnapshot {
+            history: None,
+            document: context(),
+            sketch: Box::new(sketch.clone()),
+        },
+        solve: Box::new(enter_dto(sketch.id)),
+    });
+    assert_eq!(state.session.as_ref().unwrap().phase, SketchPhase::Active);
+    assert!(matches!(
+        state.dispatch(SketchAction::Discard).as_slice(),
+        [SketchEffect::DiscardSketch { .. }]
+    ));
 }

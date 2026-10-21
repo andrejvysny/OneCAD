@@ -19,6 +19,13 @@ impl App {
             .is_some_and(|session| session.phase != SketchPhase::Closed)
     }
     pub fn sketch_dispatch(&mut self, action: SketchAction) {
+        let align_entry = matches!(
+            action,
+            SketchAction::Begin { .. } | SketchAction::BeginCreated { .. }
+        );
+        if matches!(action, SketchAction::BeginCreated { .. }) {
+            self.ui.sketch_entry = Default::default();
+        }
         if self.bridge.shared.input_trace.enabled()
             && !matches!(
                 action,
@@ -67,12 +74,13 @@ impl App {
         }
         for effect in self.sketch.dispatch(action) {
             let tag = effect_tag(&effect).clone();
-            if let Err(message) = self
-                .bridge
-                .submit(Command::Sketch(Box::new(Request::Effect(effect))))
-            {
+            if let Err(message) = self.submit_sketch_effect(effect) {
                 self.sketch_dispatch(SketchAction::Failed { tag, message });
             }
+        }
+        if align_entry && let Some(session) = &self.sketch.session {
+            crate::sketch_entry::align_camera(&mut self.camera, session.plane);
+            self.draw_dirty = true;
         }
         self.sync_sketch_gesture();
         self.replay_gesture_followup();
@@ -151,7 +159,11 @@ impl App {
             self.ui.inspector_tab = crate::ui_state::InspectorTab::Properties;
         }
     }
+    #[cfg(test)]
     pub fn new_sketch(&mut self) {
+        self.new_sketch_on_plane(WorldPlane::XY);
+    }
+    pub fn new_sketch_on_plane(&mut self, plane: WorldPlane) {
         if !self.viewport_ready() || crate::viewport_selection::sectioned(self) {
             self.status = "Turn off section display before editing geometry".into();
             return;
@@ -160,13 +172,7 @@ impl App {
             return;
         };
         self.dispatch(onecad_interaction::Action::Cancel);
-        let sketch = Sketch::new(
-            SketchId::new(),
-            "Sketch",
-            SketchAttachment::World {
-                plane: WorldPlane::XY,
-            },
-        );
+        let sketch = Sketch::new(SketchId::new(), "Sketch", SketchAttachment::World { plane });
         self.sketch_dispatch(SketchAction::Begin {
             sketch: Box::new(sketch),
             create: true,

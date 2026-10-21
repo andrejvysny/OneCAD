@@ -84,7 +84,7 @@ pub(super) fn numeric_one(host: &mut Host, text: &str) {
     assert_eq!(host.sketch(), &before);
     assert_eq!(undo_depth(host), depth);
     host.ui(vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
-    assert!(!crate::sketch_numeric::editor_open(&host.context));
+    assert!(crate::sketch_numeric::editor_open(&host.context));
 }
 
 pub(super) fn refusal(host: &mut Host, text: &str) {
@@ -96,11 +96,12 @@ pub(super) fn refusal(host: &mut Host, text: &str) {
     host.ui(vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
     assert_eq!(host.sketch(), &accepted);
     assert_eq!(host.app.sketch.session.as_ref().unwrap().history, history);
-    if !crate::sketch_numeric::editor_open(&host.context) {
-        host.ui(vec![key(egui::Key::Tab, egui::Modifiers::NONE)]);
-    }
+    assert!(crate::sketch_numeric::editor_open(&host.context));
     host.ui(vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
     assert!(!crate::sketch_numeric::editor_open(&host.context));
+    assert!(host.app.sketch.session.as_ref().unwrap().draft.is_some());
+    host.ui(vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    assert!(host.app.sketch.session.as_ref().unwrap().draft.is_none());
     assert_eq!(host.sketch(), &accepted);
 }
 
@@ -169,6 +170,15 @@ pub(super) fn assert_numeric_keyboard_ownership(host: &mut Host) {
     host.ui(vec![egui::Event::Ime(egui::ImeEvent::Commit("8".into()))]);
     host.ui(vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
     assert!(!crate::sketch_numeric::editor_open(&host.context));
+    assert!(
+        host.app.sketch.session.as_ref().unwrap().can_tangent_arc(),
+        "first Escape closes numeric editing while preserving the solved chain"
+    );
+    host.ui(vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    assert!(
+        host.app.sketch.session.as_ref().unwrap().draft.is_none(),
+        "second Escape cancels the primitive before endpoint reseeding"
+    );
 }
 
 pub(super) async fn arc_to_arc_and_stale_capture(host: &mut Host) {

@@ -297,20 +297,35 @@ async fn assert_small_center_defaults(host: &mut Host) {
     assert_eq!(host.sketch(), &before);
     host.ui(vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
     host.count(20).await;
-    let mut dimensions: Vec<_> = host
+    let added: Vec<_> = host
         .sketch()
-        .constraints()
+        .entities()
         .iter()
-        .filter(|constraint| !before.contains_constraint(constraint.id()))
-        .filter_map(|constraint| match constraint {
-            Constraint::Distance { value, .. } => Some(value.value),
+        .filter(|entity| !before.contains_entity(entity.id()))
+        .filter_map(|entity| match entity {
+            SketchEntity::Point { at, .. } => Some(*at),
             _ => None,
         })
         .collect();
-    dimensions.sort_by(f64::total_cmp);
-    assert_eq!(dimensions.len(), 2);
-    near(dimensions[0], 0.4);
-    near(dimensions[1], 0.6);
+    let extent = |coordinate: fn(&Vec2) -> f64| {
+        let min = added.iter().map(coordinate).fold(f64::INFINITY, f64::min);
+        let max = added
+            .iter()
+            .map(coordinate)
+            .fold(f64::NEG_INFINITY, f64::max);
+        max - min
+    };
+    near(extent(|point| point.x), 0.4);
+    near(extent(|point| point.y), 0.6);
+    assert!(
+        !host
+            .sketch()
+            .constraints()
+            .iter()
+            .filter(|constraint| !before.contains_constraint(constraint.id()))
+            .any(|constraint| matches!(constraint, Constraint::Distance { .. })),
+        "measured defaults must not become driving dimensions"
+    );
 }
 
 #[tokio::test]

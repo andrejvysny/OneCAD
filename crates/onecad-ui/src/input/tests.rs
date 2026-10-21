@@ -316,3 +316,22 @@ fn retained_events_are_restored_when_fresh_routing_returns_early() {
     });
     assert_eq!(raw.events, vec![egui::Event::Text("filter".into())]);
 }
+
+#[test]
+fn focused_editor_with_empty_history_retains_undo_and_redo_ownership() {
+    let ctx = egui::Context::default();
+    let mut text = String::new();
+    editor_frame(&ctx, &mut text, vec![], 0.0);
+    for (time, action) in [(1.0, menu::Action::Undo), (2.0, menu::Action::Redo)] {
+        let mut events = Vec::new();
+        assert!(route_text_menu(&mut events, action));
+        assert!(
+            events
+                .iter()
+                .all(|event| history_shortcut(event, text_owns_keyboard(&ctx), true).is_none())
+        );
+        editor_frame(&ctx, &mut text, events, time);
+        assert!(text.is_empty());
+        assert!(text_owns_keyboard(&ctx));
+    }
+}

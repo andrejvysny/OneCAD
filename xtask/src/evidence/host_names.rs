@@ -37,4 +37,6 @@ pub(super) const HOST_TESTS: &[&str] = &[
     "app_logic_tests::gesture_delivery_tests::batch_delivery::stationary_batched_release_completes_on_service_repaint_wakes",
     "app_logic_tests::gesture_delivery_tests::batch_delivery::viewport_corner_drag_batched_in_one_frame_commits_one_edit",
     "app_logic_tests::gesture_delivery_tests::batch_delivery::viewport_release_over_chrome_refuses_even_after_pointer_returns",
+    "app_logic_tests::row_delivery_tests::unselected_rows_single_select_double_click_and_explicit_edit_share_entry",
+    "app_logic_tests::sketch_entry_delivery_tests::world_planes_and_face_entry_preserve_native_frame_and_discard",
 ];

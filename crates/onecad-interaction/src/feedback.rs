@@ -29,6 +29,10 @@ impl Interaction {
             return Vec::new();
         }
         tool.draft_status = DraftStatus::Valid(scalar);
+        if let Err(message) = crate::extrude::validate_target(&operation) {
+            tool.preview = PreviewStatus::Failed(message);
+            return Vec::new();
+        }
         if tool.editing_existing {
             tool.preview = PreviewStatus::UnavailableForEdit;
             return Vec::new();

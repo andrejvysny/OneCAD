@@ -1,6 +1,6 @@
 //! Running-feature card (README 05a): the numeric field, Create / Apply and Cancel for the
 //! active model tool. Replaces the old Inspector form; dispatches the same actions.
-use crate::{app::App, layout::Chrome, tool_registry::ToolId};
+use crate::{app::App, layout::Chrome};
 use egui::{Context, Order, Ui};
 use onecad_interaction::{Action, DraftStatus, ModelSession, PreviewStatus, SessionPhase};
 use onecad_widgets::{
@@ -26,10 +26,9 @@ fn can_apply(app: &App, tool: &ModelSession) -> bool {
 }
 
 fn icon(app: &App) -> &'static str {
-    match crate::tool_registry::running_tool(app) {
-        Some(ToolId::MoveRotate) => "move",
-        _ => "extrude",
-    }
+    app.interaction.tool.as_ref().map_or("body", |tool| {
+        crate::tool_registry::operation_icon(tool.record.op.op_type())
+    })
 }
 
 fn choices(app: &App, tool: &ModelSession) -> usize {
@@ -56,7 +55,7 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
         }
         return;
     };
-    if app.sketch_active() {
+    if app.sketch_active() || tool.editing_existing {
         return;
     }
     let apply = can_apply(app, &tool);
@@ -73,6 +72,52 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
     }
 }
 
+pub(crate) fn history_editor(app: &mut App, ui: &mut Ui, record_id: &str) {
+    let Some(tool) = app
+        .interaction
+        .tool
+        .clone()
+        .filter(|tool| tool.editing_existing && tool.tag.record_id.to_string() == record_id)
+    else {
+        return;
+    };
+    ui.push_id(("history-editor", tool.tag.record_id.to_string()), |ui| {
+        ui.group(|ui| {
+            ui.set_width(ui.available_width());
+            ui.strong(format!("Edit {}", tool.record.name));
+            if choices(app, &tool) > 1 {
+                ui.label("Parameter");
+                crate::parameter_ui::selector(app, ui, &tool);
+            }
+            let current = app.interaction.tool.clone().unwrap_or(tool.clone());
+            let apply = can_apply(app, &current);
+            ui.label(current.parameter.label());
+            let response = number_field(app, ui, &current);
+            focus_keys(app, &response, apply);
+            if let Some(message) = apply_feedback(app, &current) {
+                ui.add(egui::Label::new(message).wrap().selectable(true));
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(apply, egui::Button::new("Apply ↵"))
+                    .clicked()
+                {
+                    app.dispatch(Action::Confirm);
+                }
+                if ui
+                    .add_enabled(
+                        current.phase == SessionPhase::Editing,
+                        egui::Button::new("Cancel"),
+                    )
+                    .clicked()
+                {
+                    crate::pill::cancel_tool(app);
+                }
+            });
+        });
+    });
+}
+
 fn card(
     app: &mut App,
     ctx: &Context,
@@ -81,9 +126,13 @@ fn card(
     apply: bool,
 ) -> (Option<egui::Response>, FeatureCardOutput) {
     let title = if tool.editing_existing {
-        "Edit feature"
+        format!(
+            "Edit {}",
+            crate::tool_registry::running_definition(app)
+                .map_or(tool.record.op.op_type(), |definition| definition.label)
+        )
     } else {
-        tool.record.name.as_str()
+        tool.record.name.clone()
     };
     let ok_label = if tool.editing_existing {
         "Apply ↵"
@@ -100,7 +149,7 @@ fn card(
     )
     .show(ctx, |ui| {
         card_scroll(ui, chrome.feature_card.height(), |ui| {
-            out = FeatureCard::new("feature-card", icon, title)
+            out = FeatureCard::new("feature-card", icon, &title)
                 .width(chrome.feature_card.width())
                 .ok_enabled(apply)
                 .ok_label(ok_label)
@@ -131,6 +180,7 @@ fn card_rows(
     tool: &ModelSession,
     response: &mut Option<egui::Response>,
 ) {
+    crate::extrude_ui::rows(app, rows, tool);
     if choices(app, tool) > 1 {
         rows.row("Parameter", |ui| {
             crate::parameter_ui::selector(app, ui, tool);

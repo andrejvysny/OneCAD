@@ -11,6 +11,17 @@ pub async fn solid(
     body: &str,
     width: f64,
 ) {
+    solid_at_depth(harness, projection, sketch, body, width, 4.0).await;
+}
+
+pub async fn solid_at_depth(
+    harness: &Harness,
+    projection: &DocumentProjection,
+    sketch: &Sketch,
+    body: &str,
+    width: f64,
+    depth: f64,
+) {
     let wire = onecad_app::worker::wire::body_id_wire(body.parse().unwrap());
     let topology = api::query_body_topology(&harness.state, wire.clone())
         .await
@@ -22,17 +33,17 @@ pub async fn solid(
         .unwrap();
     assert_eq!(mass.body_id, wire);
     let area = width * 50.0 - 18.0 * PI;
-    near(mass.volume, 4.0 * area);
+    near(mass.volume, depth * area);
     near(
         mass.surface_area,
-        2.0 * area + 4.0 * (2.0 * (width + 50.0) + 12.0 * PI),
+        2.0 * area + depth * (2.0 * (width + 50.0) + 12.0 * PI),
     );
     let plane = sketch.effective_plane();
     let center = plane.to_world(Vec2::new_unchecked(width / 2.0, 25.0));
     for (actual, expected) in mass.centroid.into_iter().zip([
-        center.x + 2.0 * plane.normal.x,
-        center.y + 2.0 * plane.normal.y,
-        center.z + 2.0 * plane.normal.z,
+        center.x + depth * 0.5 * plane.normal.x,
+        center.y + depth * 0.5 * plane.normal.y,
+        center.z + depth * 0.5 * plane.normal.z,
     ]) {
         near(actual, expected);
     }
@@ -45,10 +56,10 @@ pub async fn solid(
     )
     .await
     .unwrap();
-    bounds(&blob, sketch, width);
+    bounds(&blob, sketch, width, depth);
 }
 
-fn bounds(blob: &[u8], sketch: &Sketch, width: f64) {
+fn bounds(blob: &[u8], sketch: &Sketch, width: f64, depth: f64) {
     let mesh = MeshView::decode(
         blob,
         MeshLimits {
@@ -72,7 +83,7 @@ fn bounds(blob: &[u8], sketch: &Sketch, width: f64) {
     let mut expected_upper = [f64::NEG_INFINITY; 3];
     for u in [0.0, width] {
         for v in [0.0, 50.0] {
-            for z in [0.0, 4.0] {
+            for z in [0.0, depth] {
                 let point = plane.to_world(Vec2::new_unchecked(u, v));
                 for (axis, value) in [
                     point.x + z * plane.normal.x,

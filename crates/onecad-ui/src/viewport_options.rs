@@ -3,10 +3,12 @@
 use crate::app::App;
 use onecad_render::{DisplayMode, RenderOptions};
 use onecad_scene::Projection;
-use onecad_widgets::components::lists::{SectionLabel, Segment, SegmentedControl};
+use onecad_widgets::components::lists::{MenuRow, SectionLabel, Segment, SegmentedControl};
 
 /// Menu body; hosted by the title menu and by the floating chrome's popups.
 pub fn contents(app: &mut App, ui: &mut egui::Ui) {
+    ui.set_width(268.0);
+    ui.spacing_mut().item_spacing.y = 6.0;
     let mut options = *app
         .pending_display_options
         .as_ref()
@@ -16,16 +18,20 @@ pub fn contents(app: &mut App, ui: &mut egui::Ui) {
         .device
         .features()
         .contains(wgpu::Features::FLOAT32_BLENDABLE);
-    let mut changed = display_modes(ui, &mut options, xray_supported);
-    ui.separator();
-    changed |= supersampling(ui, &mut options);
-    changed |= ui
-        .add_enabled_ui(
-            app.interaction.tool.is_none() && !app.sketch_active(),
-            |ui| section(ui, app, &mut options),
-        )
-        .inner;
+    let mut changed = display_modes(ui, &mut options);
     projection(app, ui);
+    egui::CollapsingHeader::new("More settings")
+        .id_salt("display-more-settings")
+        .show(ui, |ui| {
+            changed |= xray(ui, &mut options, xray_supported);
+            changed |= supersampling(ui, &mut options);
+            changed |= ui
+                .add_enabled_ui(
+                    app.interaction.tool.is_none() && !app.sketch_active(),
+                    |ui| section(ui, app, &mut options),
+                )
+                .inner;
+        });
     if changed {
         app.pending_display_options = Some(options);
         app.draw_dirty = true;
@@ -49,7 +55,11 @@ fn projection(app: &mut App, ui: &mut egui::Ui) {
         },
     ];
     let before = index;
-    ui.add(SegmentedControl::new("display-projection", &mut index, &segments).width(220.0));
+    ui.add(
+        SegmentedControl::new("display-projection", &mut index, &segments)
+            .accent_selected()
+            .width(ui.available_width()),
+    );
     if index != before {
         app.camera.projection = if index == 1 {
             Projection::Orthographic
@@ -60,30 +70,49 @@ fn projection(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-fn display_modes(ui: &mut egui::Ui, options: &mut RenderOptions, xray_supported: bool) -> bool {
+fn display_modes(ui: &mut egui::Ui, options: &mut RenderOptions) -> bool {
     ui.add(SectionLabel::new("Render style"));
     let mut changed = false;
-    for (mode, label) in [
-        (DisplayMode::Shaded, "Shaded"),
-        (DisplayMode::ShadedEdges, "Shaded + edges"),
-        (DisplayMode::Wireframe, "Wireframe"),
-        (DisplayMode::Xray, "X-ray"),
+    for (mode, label, icon) in [
+        (DisplayMode::Shaded, "Shaded", "shaded"),
+        (DisplayMode::ShadedEdges, "Shaded with edges", "shadedEdges"),
+        (DisplayMode::Wireframe, "Wireframe", "wireframe"),
     ] {
-        let enabled = mode != DisplayMode::Xray || xray_supported;
-        let response = ui
-            .add_enabled_ui(enabled, |ui| {
-                ui.selectable_value(&mut options.display_mode, mode, label)
-            })
-            .inner
-            .on_disabled_hover_text(
-                "X-ray requires FLOAT32_BLENDABLE, unavailable on this GPU device.",
-            );
-        changed |= response.changed();
+        let response = ui.add(
+            MenuRow::new(Some(icon), label)
+                .checked(options.display_mode == mode)
+                .highlight_checked(),
+        );
         if response.clicked() {
+            changed |= options.display_mode != mode;
+            options.display_mode = mode;
             ui.close();
         }
     }
+    ui.add(MenuRow::new(Some("hiddenLine"), "Hidden line").enabled(false))
+        .on_disabled_hover_text("Hidden line rendering is not available yet.");
     changed
+}
+
+fn xray(ui: &mut egui::Ui, options: &mut RenderOptions, supported: bool) -> bool {
+    let response = ui
+        .add(
+            MenuRow::new(Some("hiddenLine"), "X-ray")
+                .enabled(supported)
+                .checked(options.display_mode == DisplayMode::Xray)
+                .highlight_checked(),
+        )
+        .on_disabled_hover_text(
+            "X-ray requires FLOAT32_BLENDABLE, unavailable on this GPU device.",
+        );
+    if response.clicked() {
+        let changed = options.display_mode != DisplayMode::Xray;
+        options.display_mode = DisplayMode::Xray;
+        ui.close();
+        changed
+    } else {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -203,7 +232,9 @@ mod tests {
                 },
                 |ui| {
                     self.menu = display_menu(ui, |ui| {
-                        display_modes(ui, &mut self.options, self.xray_supported);
+                        ui.set_width(268.0);
+                        display_modes(ui, &mut self.options);
+                        xray(ui, &mut self.options, self.xray_supported);
                         ui.separator();
                         supersampling(ui, &mut self.options);
                         section_axis_ui(ui, &mut self.axis);
@@ -270,7 +301,7 @@ mod tests {
     fn display_choices_select_canonical_modes_and_preserve_pending_settings() {
         for (mode, label) in [
             (DisplayMode::Shaded, "Shaded"),
-            (DisplayMode::ShadedEdges, "Shaded + edges"),
+            (DisplayMode::ShadedEdges, "Shaded with edges"),
             (DisplayMode::Wireframe, "Wireframe"),
             (DisplayMode::Xray, "X-ray"),
         ] {

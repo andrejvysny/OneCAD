@@ -28,7 +28,12 @@ fn numeric_frame(app: &mut App, context: &egui::Context, events: Vec<egui::Event
         ..Default::default()
     };
     crate::input::route(app, context, &mut raw);
-    let mut output = context.run_ui(raw, |_| crate::sketch_numeric::show(app, context));
+    let mut output = context.run_ui(raw, |ui| {
+        if let Some(view) = app.view {
+            crate::sketch_numeric::viewport(app, ui, ui.max_rect(), &view);
+        }
+        crate::sketch_numeric::show(app, context);
+    });
     output.textures_delta.clear();
 }
 
@@ -152,19 +157,25 @@ async fn routed_tab_numeric_fields_enter_once_and_ime_cancel_preserve_authority(
     replace_field(&mut app, &context, "80");
     numeric_frame(&mut app, &context, vec![key(egui::Key::Tab)]);
     replace_field(&mut app, &context, "50");
+    refresh_stationary_capture(&mut app, &context);
     assert_eq!(app.sketch.session.as_ref().unwrap().authoritative, before);
     assert_eq!(
         app.sketch.session.as_ref().unwrap().document.revision,
         revision
     );
     numeric_frame(&mut app, &context, vec![key(egui::Key::Enter)]);
-    assert!(!crate::sketch_numeric::editor_open(&context));
+    assert!(crate::sketch_numeric::editor_open(&context));
+    // A duplicate confirmation cannot submit a second candidate while admission runs.
+    numeric_frame(&mut app, &context, vec![key(egui::Key::Enter)]);
+    assert!(crate::sketch_numeric::editor_open(&context));
     pump_until(&mut app, &context, &mut frame, |app| {
         app.sketch.session.as_ref().is_some_and(|session| {
             session.phase == SketchPhase::Active && session.authoritative.entities().len() == 8
         })
     })
     .await;
+    numeric_frame(&mut app, &context, vec![]);
+    assert!(!crate::sketch_numeric::editor_open(&context));
     assert_rectangle(&app, 80.0, 50.0);
     assert_eq!(
         app.sketch
@@ -183,6 +194,36 @@ async fn routed_tab_numeric_fields_enter_once_and_ime_cancel_preserve_authority(
     pump_until(&mut app, &context, &mut frame, |app| !app.sketch_active()).await;
     app.stop_discard();
     pump_until(&mut app, &context, &mut frame, |app| app.may_close).await;
+}
+
+fn refresh_stationary_capture(app: &mut App, context: &egui::Context) {
+    assert!(context.text_edit_focused());
+    let before = app.view.unwrap();
+    let mut viewport = before.viewport();
+    viewport.width += 24.0;
+    let resized = onecad_scene::ViewSnapshot::new(
+        before.identity().scene,
+        before.identity().view + 1,
+        before.camera(),
+        viewport,
+    )
+    .unwrap();
+    let session = app.sketch.session.as_ref().unwrap();
+    let generation = session.draft_generation;
+    let cursor = session.draft.as_ref().unwrap().cursor;
+    assert_ne!(session.accepted_capture, Some(resized.identity()));
+    app.view_number = resized.identity().view;
+    app.view = Some(resized);
+    numeric_frame(app, context, vec![]);
+    assert!(
+        context.text_edit_focused(),
+        "resize must preserve numeric text focus"
+    );
+    assert!(crate::sketch_numeric::editor_open(context));
+    let session = app.sketch.session.as_ref().unwrap();
+    assert_eq!(session.accepted_capture, Some(resized.identity()));
+    assert_eq!(session.draft_generation, generation);
+    assert_eq!(session.draft.as_ref().unwrap().cursor, cursor);
 }
 
 fn cancel_during_ime(app: &mut App, context: &egui::Context) {
@@ -219,6 +260,10 @@ fn cancel_during_ime(app: &mut App, context: &egui::Context) {
     assert!(!crate::sketch_numeric::editor_open(context));
     let session = app.sketch.session.as_ref().unwrap();
     assert_eq!(session.phase, SketchPhase::Active);
+    assert!(
+        session.draft.is_some(),
+        "first Escape closes numeric editing before the primitive draft"
+    );
     assert_eq!(session.authoritative, accepted);
     assert_eq!(session.document.revision, revision);
     assert_eq!(session.history, history);

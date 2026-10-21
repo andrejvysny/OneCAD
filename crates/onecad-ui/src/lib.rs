@@ -25,6 +25,7 @@ mod editor_facade;
 mod event_mailbox;
 mod explorer;
 mod extension_pages;
+mod extrude_ui;
 mod feature_card;
 mod gesture_services;
 mod gizmo;
@@ -59,6 +60,7 @@ mod shell;
 mod sketch_completion;
 mod sketch_creation;
 mod sketch_dimensions;
+mod sketch_entry;
 mod sketch_feedback;
 mod sketch_gestures;
 mod sketch_methods;
@@ -134,3 +136,4 @@ fn viewport_gpu_configuration() -> egui_wgpu::WgpuConfiguration {
 
 #[cfg(test)]
 mod app_logic_tests;
+mod sketch_candidates;

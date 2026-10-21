@@ -4,7 +4,7 @@ use crate::{app::App, bridge::Command, document_flow::Request, menu};
 mod overlay;
 
 pub(crate) fn overlay_owns_keyboard(app: &App, ctx: &egui::Context) -> bool {
-    app.input_routing.overlay_blocked
+    app.input_routing.overlay_blocks(ctx.cumulative_pass_nr())
         || app.documents.confirm.is_some()
         || crate::constraint_authoring::editor_open(ctx)
         || crate::sketch_numeric::editor_open(ctx)
@@ -20,6 +20,12 @@ pub(crate) struct RoutingState {
     pass: u64,
     retained: usize,
     overlay_blocked: bool,
+}
+
+impl RoutingState {
+    fn overlay_blocks(&self, pass: u64) -> bool {
+        self.pass == pass && self.overlay_blocked
+    }
 }
 
 fn route_events(
@@ -67,7 +73,7 @@ pub fn route(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
         || crate::constraint_authoring::editor_open(ctx)
         || crate::sketch_numeric::editor_open(ctx)
         || ui_owns_keyboard(&app.ui, ctx);
-    state.overlay_blocked = owned || state.pass == pass && state.overlay_blocked;
+    state.overlay_blocked = owned || state.overlay_blocks(pass);
     route_events(&mut state, pass, raw, |raw| route_fresh(app, ctx, raw));
     app.input_routing = state;
 }
@@ -151,7 +157,7 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     let mut commands = Vec::new();
     let mut documents = Vec::new();
     raw.events.retain(|event| {
-        if let Some(command) = history_shortcut(event, text, raw.focused) {
+        if let Some(command) = history_shortcut(event, text || composition, raw.focused) {
             commands.push(command);
             return false;
         }
@@ -162,6 +168,7 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
             ..
         } = event
             && modifiers.command
+            && !composition
         {
             match key {
                 _ if raw.focused && document_shortcut(*key, *modifiers).is_some() => {
@@ -194,10 +201,10 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     if !text && !composition && raw.focused && crate::sketch_numeric::route(app, ctx, raw) {
         return;
     }
-    if raw.focused {
+    if raw.focused && !composition {
         crate::editor_facade::keys(app, raw, text);
     }
-    if !text && raw.focused && app.sketch_active() {
+    if !text && !composition && raw.focused && app.sketch_active() {
         let delete = raw.events.iter().any(|event| matches!(event,
             egui::Event::Key { key: egui::Key::Delete | egui::Key::Backspace, pressed: true, modifiers, .. }
                 if !modifiers.command && !modifiers.alt && !modifiers.ctrl));
@@ -214,7 +221,7 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
             });
         }
     }
-    if !text && raw.focused && app.sketch_active() && app.viewport_ready() {
+    if !text && !composition && raw.focused && app.sketch_active() && app.viewport_ready() {
         let keys: Vec<_> = raw
             .events
             .iter()
@@ -223,6 +230,7 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
                     key,
                     pressed: true,
                     modifiers,
+                    repeat: false,
                     ..
                 } if !modifiers.command && matches!(key, egui::Key::Enter | egui::Key::Escape) => {
                     Some(*key)
@@ -230,6 +238,11 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
                 _ => None,
             })
             .collect();
+        raw.events.retain(|event| {
+            !matches!(event, egui::Event::Key {
+            key: egui::Key::Enter | egui::Key::Escape, pressed: true, modifiers, ..
+        } if !modifiers.command)
+        });
         for key in keys {
             app.sketch_dispatch(if key == egui::Key::Enter {
                 onecad_interaction::sketch::SketchAction::Enter
@@ -239,6 +252,7 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
         }
     }
     if !text
+        && !composition
         && raw.focused
         && !app.sketch_active()
         && raw.events.iter().any(|event| {

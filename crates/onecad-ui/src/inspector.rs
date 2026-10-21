@@ -22,7 +22,12 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
         )
         .show(ctx, |ui| {
             if ui
-                .add(PanelToggle::new(Side::Right).dot(dot).tip(tip))
+                .add(
+                    PanelToggle::new(Side::Right)
+                        .compact(true)
+                        .dot(dot)
+                        .tip(tip),
+                )
                 .clicked()
             {
                 app.ui.inspector_open = true;
@@ -41,10 +46,17 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
                     ui.add_space(10.0);
                     match app.ui.inspector_tab {
                         InspectorTab::Properties => {
-                            sketch_options(app, ui);
-                            crate::inspector_props::properties(app, ui, chrome.inspector);
-                            crate::constraint_authoring::dimension_list(app, ui);
-                            crate::profile_diagnostics::show(app, ui);
+                            egui::ScrollArea::vertical()
+                                .id_salt("inspector-properties")
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    sketch_options(app, ui);
+                                    crate::inspector_props::properties(app, ui, chrome.inspector);
+                                    crate::explorer::selected_sketch_edit_button(app, ui);
+                                    crate::inspector_history::edit_button(app, ui);
+                                    crate::constraint_authoring::dimension_list(app, ui);
+                                    crate::profile_diagnostics::show(app, ui);
+                                });
                         }
                         InspectorTab::History => crate::inspector_history::history(app, ui),
                     }

@@ -62,6 +62,9 @@ fn footer_rect(panel: Rect) -> Rect {
 
 /// 36px footer pinned to the panel bottom; its meaning follows the Explorer mode.
 pub fn footer(app: &mut App, ui: &mut Ui, panel: Rect) {
+    if !super::PREVIEW_FACADES {
+        return;
+    }
     let bar = footer_rect(panel);
     let l = look(ui.ctx());
     let t = &l.theme;

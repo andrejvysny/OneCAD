@@ -16,7 +16,9 @@ fn matches(filter: &str, name: &str) -> bool {
 }
 
 pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
-    toggle(app, ctx, chrome);
+    if !app.ui.explorer_open {
+        toggle(app, ctx, chrome);
+    }
     let rect = chrome.explorer;
     let open = app.ui.explorer_open;
     FloatingPanel::new(egui::Id::unique("explorer"), Side::Left)
@@ -24,9 +26,11 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
         .rect(rect)
         .show(ctx, |ui| {
             egui::Frame::new()
-                .inner_margin(Margin::symmetric(6, 8))
+                .inner_margin(Margin::same(12))
                 .show(ui, |ui| {
                     ui.set_min_size(ui.available_size());
+                    header(app, ui);
+                    ui.add_space(10.0);
                     crate::editor_facade::mode_switch(&mut app.ui.editor_facade, ui);
                     if app.ui.editor_facade.library_mode {
                         crate::editor_facade::library_list(app, ui);
@@ -46,12 +50,25 @@ fn toggle(app: &mut App, ctx: &Context, chrome: &Chrome) {
         Order::Middle,
     )
     .show(ctx, |ui| {
-        let button = PanelToggle::new(Side::Left)
-            .open(app.ui.explorer_open)
-            .tip(tip);
+        let button = PanelToggle::new(Side::Left).compact(true).tip(tip);
         if ui.add(button).clicked() {
             app.ui.explorer_open = !app.ui.explorer_open;
         }
+    });
+}
+
+fn header(app: &mut App, ui: &mut Ui) {
+    ui.horizontal(|ui| {
+        ui.strong("Explorer");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let toggle = PanelToggle::new(Side::Left)
+                .open(true)
+                .compact(true)
+                .tip(Tip::new("Hide explorer").shortcut(Some("⌘1")));
+            if ui.add(toggle).clicked() {
+                app.ui.explorer_open = false;
+            }
+        });
     });
 }
 
@@ -106,6 +123,11 @@ fn body_row(app: &mut App, ui: &mut Ui, id_text: &str, name: &str) {
     let enabled = app.viewport_ready() && app.bridge.valid() && !app.busy();
     let row = TreeRow::new("body", name).state(state).enabled(enabled);
     if ui.add(row).clicked() {
+        if let Some(id) = id
+            && crate::extrude_ui::select_target(app, id)
+        {
+            return;
+        }
         crate::pill::cancel_tool(app);
         app.dispatch(onecad_interaction::Action::ClearSelection);
         app.selected_body = id;
@@ -128,15 +150,31 @@ fn sketch_row(app: &mut App, ui: &mut Ui, sketch: &onecad_app::dto::SketchDto) {
         .meta(meta.as_deref())
         .state(if editing {
             RowState::Editing
+        } else if app
+            .ui
+            .selected_sketch
+            .is_some_and(|id| id.to_string() == sketch.id)
+        {
+            RowState::Selected
         } else {
             RowState::Normal
         })
         .enabled(can_edit || editing);
-    if ui.add(row).clicked()
+    let response = ui.add(row);
+    if (response.clicked() || response.double_clicked())
         && can_edit
         && let Ok(id) = sketch.id.parse()
     {
-        app.edit_sketch(id);
+        app.dispatch(onecad_interaction::Action::ClearSelection);
+        app.selected_body = None;
+        app.topology.select(None);
+        app.ui.selected_sketch = Some(id);
+        app.selected_feature = None;
+        app.ui.inspector_open = true;
+        app.ui.inspector_tab = crate::ui_state::InspectorTab::Properties;
+        if response.double_clicked() {
+            app.edit_sketch(id);
+        }
     }
     if editing {
         sketch_children(app, ui);
@@ -170,5 +208,30 @@ fn sketch_children(app: &App, ui: &mut Ui) {
         if count > 0 {
             ui.add(TreeRow::new(icon, &label).child(true));
         }
+    }
+}
+
+pub(crate) fn selected_sketch_edit_button(app: &mut App, ui: &mut Ui) {
+    if app.sketch_active() || app.interaction.tool.is_some() {
+        return;
+    }
+    let Some(sketch) = app.ui.selected_sketch.and_then(|id| {
+        app.display
+            .as_ref()?
+            .projection
+            .sketches
+            .values()
+            .find(|sketch| sketch.id == id.to_string())
+            .cloned()
+    }) else {
+        return;
+    };
+    let can_edit = app.viewport_ready() && app.bridge.valid() && !app.busy();
+    if ui
+        .add_enabled(can_edit, egui::Button::new("Edit sketch"))
+        .clicked()
+        && let Ok(id) = sketch.id.parse()
+    {
+        app.edit_sketch(id);
     }
 }

@@ -9,6 +9,15 @@ use onecad_core::{
 use std::collections::BTreeSet;
 
 pub fn saved(baseline: &Document, saved: &Document, width: f64) {
+    assert_eq!(
+        extrude(saved).0.op,
+        extrude(baseline).0.op,
+        "width edit does not alter extrusion"
+    );
+    saved_at_depth(baseline, saved, width, 4.0);
+}
+
+pub fn saved_at_depth(baseline: &Document, saved: &Document, width: f64, depth: f64) {
     assert_eq!(saved.id, baseline.id);
     assert_eq!(
         (saved.timeline.cursor(), saved.timeline.records().len()),
@@ -33,15 +42,17 @@ pub fn saved(baseline: &Document, saved: &Document, width: f64) {
     );
     let (record, params) = extrude(saved);
     let (baseline_record, baseline_params) = extrude(baseline);
+    let mut normalized = params.clone();
+    normalized.distance = baseline_params.distance.clone();
     assert_eq!(
-        record.op, baseline_record.op,
-        "width edit does not alter extrusion"
+        &normalized, baseline_params,
+        "only extrusion distance may change"
     );
     assert_eq!(record.outputs, baseline_record.outputs);
     assert_eq!(record.inputs, record.op.derive_inputs());
     assert_eq!(record.step_index, 1);
     assert!(!record.suppressed);
-    near(params.distance.value, 4.0);
+    near(params.distance.value, depth);
     let profile = params.profile.as_ref().unwrap();
     assert_eq!(params.profile, baseline_params.profile);
     let expected = &baseline.sketches[&profile.sketch];

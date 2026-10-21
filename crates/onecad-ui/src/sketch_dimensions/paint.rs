@@ -28,6 +28,7 @@ struct Scope {
 pub struct Output {
     pub owns_pointer: bool,
     pub edit: Option<ConstraintId>,
+    pub hover: Option<ConstraintId>,
 }
 
 pub fn project(
@@ -118,6 +119,9 @@ pub fn show(
         {
             occupied.push(result.0);
             output.owns_pointer |= result.1;
+            if result.1 {
+                output.hover = Some(badge.id);
+            }
             if result.2 {
                 output.edit = Some(badge.id);
             }

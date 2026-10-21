@@ -10,7 +10,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         crate::ui_state::shortcuts(&mut app.ui, &ctx);
     }
     let chrome = layout::chrome(ctx.content_rect(), &app.ui);
-    let chrome = if app.interaction.tool.is_some() && !app.sketch_active() {
+    let chrome = if app
+        .interaction
+        .tool
+        .as_ref()
+        .is_some_and(|tool| !tool.editing_existing)
+        && !app.sketch_active()
+    {
         chrome.with_feature_card()
     } else {
         chrome
@@ -31,7 +37,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     overlays::nav_pill(app, &ctx, &chrome);
     overlays::view_cluster(app, &ctx, &chrome);
     crate::sketch_numeric::show(app, &ctx);
-    crate::diagnostics::show(app, &ctx, &chrome);
+    app.diagnostics.observe(&app.status);
 }
 
 pub fn close_prompt(app: &mut App, ctx: &egui::Context) {

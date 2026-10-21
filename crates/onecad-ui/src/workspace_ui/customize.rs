@@ -26,6 +26,9 @@ const ROWS: [(&str, &str, &str); 3] = [
 ];
 
 pub fn dialog(app: &mut App, ctx: &Context) {
+    if !crate::editor_facade::PREVIEW_FACADES {
+        return;
+    }
     if !app.ui.shell_facade.customize_open {
         return;
     }

@@ -38,23 +38,17 @@ pub fn selection_input(
                 && drag.capture == view.identity()
                 && session.selection_dragging
         });
-    let mode = ui.input(|input| {
-        if input.modifiers.shift || input.modifiers.mac_cmd {
-            SelectionMode::Toggle
-        } else {
-            SelectionMode::Replace
-        }
-    });
+    let press = primary_press(ui, rect, view, session)?;
     if response.drag_started_by(egui::PointerButton::Primary) {
-        return Ok(begin_drag(ui, rect, view, session, mode));
+        return Ok(press.map(|press| begin_drag(ui, view, session, press)));
     }
     if let Some(drag) = marquee {
         return continue_drag(ui, rect, response, view, session, drag);
     }
     if response.clicked_by(egui::PointerButton::Primary)
-        && let Some(position) = response.interact_pointer_pos()
+        && let Some(press) = press
     {
-        return click_selection(ui, rect, view, session, position, mode);
+        return click_selection(ui, rect, view, session, press.start, press.mode);
     }
     Ok(None)
 }
@@ -83,27 +77,97 @@ fn click_selection(
 
 fn begin_drag(
     ui: &egui::Ui,
+    view: &ViewSnapshot,
+    session: &SketchSession,
+    press: Marquee,
+) -> SketchAction {
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(cache_id(), press));
+    drag_action(session, view, true)
+}
+
+fn press_id() -> egui::Id {
+    egui::Id::unique("sketch-selection-primary-press")
+}
+
+fn primary_transitions(ui: &egui::Ui) -> Vec<(Pos2, bool, egui::Modifiers)> {
+    ui.input(|input| {
+        input
+            .events
+            .iter()
+            .filter_map(|event| {
+                if let egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers,
+                } = event
+                {
+                    Some((*pos, *pressed, *modifiers))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    })
+}
+
+fn take_press(ui: &egui::Ui, view: &ViewSnapshot, session: &SketchSession) -> Option<Marquee> {
+    ui.ctx()
+        .data_mut(|data| {
+            let press = data.get_temp::<Marquee>(press_id());
+            data.remove::<Marquee>(press_id());
+            press
+        })
+        .filter(|press| {
+            press.key == session.key
+                && press.document == session.document
+                && press.capture == view.identity()
+        })
+}
+
+fn primary_press(
+    ui: &egui::Ui,
     rect: Rect,
     view: &ViewSnapshot,
     session: &SketchSession,
-    mode: SelectionMode,
-) -> Option<SketchAction> {
-    let start = ui
-        .input(|input| input.pointer.press_origin())
-        .filter(|start| rect.contains(*start))?;
-    ui.ctx().data_mut(|data| {
-        data.insert_temp(
-            cache_id(),
-            Marquee {
+) -> Result<Option<Marquee>, String> {
+    let mut press = take_press(ui, view, session);
+    if ui.input(|input| !input.focused || input.events.contains(&egui::Event::PointerGone)) {
+        return Ok(None);
+    }
+    let transitions = primary_transitions(ui);
+    let presses = transitions
+        .iter()
+        .filter(|(_, pressed, _)| *pressed)
+        .count();
+    let releases = transitions.len() - presses;
+    if presses > 1 || releases > 1 || presses == 1 && press.is_some() {
+        return Err("Multiple pointer cycles in one frame; select again".into());
+    }
+    let mut released = false;
+    for (position, pressed, modifiers) in transitions {
+        if pressed && rect.contains(position) {
+            press = Some(Marquee {
                 key: session.key.clone(),
                 document: session.document.clone(),
                 capture: view.identity(),
-                start,
-                mode,
-            },
-        )
-    });
-    Some(drag_action(session, view, true))
+                start: position,
+                mode: if modifiers.shift || modifiers.mac_cmd {
+                    SelectionMode::Toggle
+                } else {
+                    SelectionMode::Replace
+                },
+            });
+        } else if !pressed {
+            released = true;
+        }
+    }
+    if !released && let Some(press) = &press {
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(press_id(), press.clone()));
+    }
+    Ok(press)
 }
 
 fn continue_drag(
@@ -114,8 +178,11 @@ fn continue_drag(
     session: &SketchSession,
     drag: Marquee,
 ) -> Result<Option<SketchAction>, String> {
-    let Some(end) = ui
-        .input(|input| input.pointer.hover_pos())
+    let release = primary_transitions(ui)
+        .into_iter()
+        .find_map(|(position, pressed, _)| (!pressed).then_some(position));
+    let Some(end) = release
+        .or_else(|| ui.input(|input| input.pointer.hover_pos()))
         .filter(|end| rect.contains(*end))
     else {
         return Ok(Some(drag_action(session, view, false)));

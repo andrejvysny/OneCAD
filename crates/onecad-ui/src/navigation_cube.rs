@@ -13,7 +13,7 @@ mod painter;
 mod tests;
 use painter::Facet;
 
-const SIZE: f32 = 164.0;
+const SIZE: f32 = crate::layout::CUBE;
 const HALF: f64 = 40.0;
 const INSET: f64 = 0.68;
 
@@ -371,7 +371,7 @@ pub fn show(
     if !outer.intersect(ui.clip_rect()).is_positive() {
         return CubeResponse::default();
     }
-    let scale = outer.width() / SIZE;
+    let scale = outer.width() / 164.0;
     let center = outer.center();
     let faces = facets(view.basis(), center, HALF * f64::from(scale));
     let over = ui

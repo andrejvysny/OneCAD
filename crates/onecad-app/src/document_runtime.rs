@@ -6950,7 +6950,9 @@ fn element_ref_input(op: &Operation, index: usize) -> Option<&ElementRef> {
     }
 }
 
+mod face_entry;
 mod gestures;
+pub use face_entry::FaceEntryTicket;
 pub(crate) mod native_gestures;
 mod ordinal_tripwire;
 mod sketch_adoption;

@@ -13,7 +13,13 @@ pub use pointer_policy::{allows_pointer, gesture_allowed};
 /// moves with the Inspector.
 fn cube_host(app: &App, ui: &egui::Ui, rect: egui::Rect) -> egui::Rect {
     let chrome = crate::layout::chrome(ui.ctx().content_rect(), &app.ui);
-    let chrome = if app.interaction.tool.is_some() && !app.sketch_active() {
+    let chrome = if app
+        .interaction
+        .tool
+        .as_ref()
+        .is_some_and(|tool| !tool.editing_existing)
+        && !app.sketch_active()
+    {
         chrome.with_feature_card()
     } else {
         chrome
