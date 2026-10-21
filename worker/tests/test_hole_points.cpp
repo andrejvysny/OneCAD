@@ -25,6 +25,7 @@
 
 #include "elementmap/ElementMapPartition.h"
 #include "nlohmann/json.hpp"
+#include "session/FeaturePattern.h"
 #include "session/PlanExecutor.h"
 #include "session/ScratchJob.h"
 #include "session/ShapeMetrics.h"
@@ -341,6 +342,50 @@ void test_downstream_ref_keeps_its_hole() {
           "no slot: NeedsRepair, a sibling is never chamfered");
 }
 
+// Review finding (ONECAD-361): one op mixing a slotted and an unslotted ref on
+// the SAME shape must keep the §10 distinct assignment joint. Before the fix the
+// two refs were resolved in separate ladder calls and both bound p2's rim, so
+// the Chamfer committed on an ambiguous binding instead of NeedsRepair.
+void test_mixed_slotted_and_unslotted_refs_never_share_a_shape() {
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(60, 20, 10).Shape();
+    session::ScratchJob authored;
+    run_on(box, hole_v3(box, 10, {{"p0", 10, 10}, {"p1", 30, 10}, {"p2", 50, 10}}, 4), authored);
+    const TopoDS_Shape drilled = authored.bodies.get("body_1")->geom;
+    const TopoDS_Shape rim = circle_at(drilled, 50, 10, 10, 2);
+    const auto claim = authored.topology_owners.lookup("body_1", rim);
+    json slotted = input_ref("edge_a", "edge", rim, drilled, 50, 12, 10);
+    slotted["intent"]["descriptor"]["originSlot"] = {{"recordId", claim.producer_record_id},
+                                                     {"slot", claim.slot}};
+    const json unslotted = input_ref("edge_b", "edge", rim, drilled, 50, 12, 10);
+    for (const bool slotted_first : {true, false}) {
+        const json inputs = slotted_first ? json::array({slotted, unslotted})
+                                          : json::array({unslotted, slotted});
+        const json chamfer = {{"opType", "Chamfer"}, {"opId", "record_chamfer"},
+                              {"stepIndex", 2}, {"inputs", inputs},
+                              {"params", {{"mode", "Chamfer"}, {"radius", 0.5},
+                                          {"edgeIds", json::array({"edge_a", "edge_b"})},
+                                          {"chainTangentEdges", false}}}};
+        // Clean replay: each ref alone would AutoBind p2's rim, so only the
+        // joint assignment can keep them apart.
+        session::ScratchJob replay;
+        run_on(box, hole_v3(box, 10, {{"p0", 10, 10}, {"p1", 30, 10}, {"p2", 50, 10}}, 4),
+               replay);
+        const auto out = run(replay, chamfer);
+        const std::string order = slotted_first ? "slotted first" : "unslotted first";
+        check(out.status == session::CandidateResult::Status::NeedsRepair,
+              "mixed slotted/unslotted refs on one rim (" + order + "): NeedsRepair");
+        for (std::size_t a = 0; a < out.delta.added.size(); ++a)
+            for (std::size_t b = a + 1; b < out.delta.added.size(); ++b)
+                check(out.delta.added[a].topo_key != out.delta.added[b].topo_key,
+                      "mixed refs (" + order + "): never minted on one shape");
+        check(out.needs_repair.size() == 1 ||
+                  (out.needs_repair.size() == 2 &&
+                   out.needs_repair[0].value("refId", "") == "record_chamfer.input0" &&
+                   out.needs_repair[1].value("refId", "") == "record_chamfer.input1"),
+              "mixed refs (" + order + "): needsRepair in input order");
+    }
+}
+
 // ── FeaturePattern transforms every point; N holes × instances ───────────────
 void test_feature_pattern_transforms_points() {
     const TopoDS_Shape box = BRepPrimAPI_MakeBox(100, 20, 10).Shape();
@@ -366,6 +411,56 @@ void test_feature_pattern_transforms_points() {
           "FeaturePattern: points[1] moved with points[0]");
 }
 
+// A Chamfer slotted on p1, patterned with its V3 Hole: `rewrite_origin_slot`
+// must retarget each instance's slot to the instance's virtual producer, so
+// every instance chamfers ITS copy of p1 and never p0.
+void test_feature_pattern_rewrites_origin_slot() {
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(100, 20, 10).Shape();
+    session::ScratchJob job;
+    json source_hole = hole_v3(box, 10, {{"p0", 10, 10}, {"p1", 20, 10}}, 4);
+    run_on(box, source_hole, job);
+    const TopoDS_Shape drilled = job.bodies.get("body_1")->geom;
+    const TopoDS_Shape rim = circle_at(drilled, 20, 10, 10, 2);
+    const auto claim = job.topology_owners.lookup("body_1", rim);
+    check(claim.slot == "p1", "seed: p1 rim carries slot p1");
+    json edge = input_ref("edge_rim", "edge", rim, drilled, 20, 12, 10);
+    edge["intent"]["descriptor"]["originSlot"] = {{"recordId", claim.producer_record_id},
+                                                  {"slot", claim.slot}};
+    json source_chamfer = {{"opType", "Chamfer"}, {"opId", "record_chamfer"}, {"stepIndex", 2},
+                           {"inputs", json::array({edge})},
+                           {"params", {{"mode", "Chamfer"}, {"radius", 0.5},
+                                       {"edgeIds", json::array({"edge_rim"})},
+                                       {"chainTangentEdges", false}}}};
+    const auto seeded = run(job, source_chamfer);
+    check(seeded.status == session::CandidateResult::Status::Ok, "seed slotted chamfer: Ok");
+    source_hole["sourceRecordId"] = "record_hole";
+    source_chamfer["sourceRecordId"] = "record_chamfer";
+    const json pattern = {{"opType", "FeaturePattern"}, {"opId", "pattern"}, {"stepIndex", 3},
+        {"inputs", json::array()},
+        {"params", {{"semanticsVersion", 1}, {"count", 3},
+                    {"sourceRecordIds", json::array({"record_hole", "record_chamfer"})},
+                    {"layout", {{"kind", "Linear"}, {"direction", {1.0, 0.0, 0.0}},
+                                {"spacing", 30.0}}},
+                    {"sourceOps", json::array({source_hole, source_chamfer})}}}};
+    const auto out = run(job, pattern);
+    check(out.status == session::CandidateResult::Status::Ok,
+          "FeaturePattern of [V3 Hole, slotted Chamfer]: Ok " + out.error_message +
+              json(out.needs_repair).dump());
+    const TopoDS_Shape body = job.bodies.get("body_1")->geom;
+    for (const double x : {20.0, 50.0, 80.0})
+        check(chamfered_at(body, x), "pattern: chamfer on its own p1 copy at x=" +
+                                         std::to_string(x));
+    for (const double x : {10.0, 40.0, 70.0})
+        check(!chamfered_at(body, x) && !circle_at(body, x, 10, 10, 2).IsNull(),
+              "pattern: p0 copy at x=" + std::to_string(x) + " is never chamfered");
+    const std::string virtual_id = session::feature_pattern_virtual_id("pattern", "record_hole", 1);
+    const auto instance_claim =
+        job.topology_owners.lookup("body_1", circle_at(body, 40, 10, 0, 2));
+    check(instance_claim.state == session::OriginState::Known &&
+              instance_claim.producer_record_id == virtual_id && instance_claim.slot == "p0",
+          "instance 1 p0 bottom rim: producer = virtual id, slot p0");
+}
+
 }  // namespace
 
 int main() {
@@ -376,7 +471,9 @@ int main() {
     test_points_determinism_and_cancel();
     test_points_ledger_slots();
     test_downstream_ref_keeps_its_hole();
+    test_mixed_slotted_and_unslotted_refs_never_share_a_shape();
     test_feature_pattern_transforms_points();
+    test_feature_pattern_rewrites_origin_slot();
     if (g_failures == 0) std::fprintf(stderr, "test_hole_points: all checks passed\n");
     return g_failures;
 }

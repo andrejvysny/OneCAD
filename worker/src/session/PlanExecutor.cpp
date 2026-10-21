@@ -243,38 +243,41 @@ void resolve_input_refs(ScratchJob& job, const json& op, const std::string& op_i
         // ONECAD-361: a ref frozen with an `originSlot` (one hole of a multi-point
         // Hole) scores only against the shapes the live ledger attributes to that
         // same producer slot. Refs without one keep the whole pool, so a plan
-        // that carries no slot claim resolves exactly as before.
-        std::map<std::pair<std::string, std::string>, std::vector<em::LadderRef>> by_origin;
-        for (em::LadderRef& r : refs)
-            by_origin[{r.origin_record_id, r.origin_slot}].push_back(std::move(r));
-        for (auto& [origin, group] : by_origin) {
-            em::CandidateFilter filter = admissible;
-            if (!origin.second.empty()) {
-                auto slot =
-                    origin_slot_filter(job.topology_owners, bid, origin.first, origin.second);
-                filter = [admissible, slot](const TopoDS_Shape& candidate) {
-                    return slot(candidate) && (!admissible || admissible(candidate));
-                };
+        // that carries no slot claim resolves exactly as before. ONE ladder call
+        // per body keeps the distinct assignment joint across slotted and
+        // unslotted refs (two refs never bind one shape) and keeps input order.
+        std::vector<em::CandidateFilter> slot_filters(refs.size());
+        std::map<std::pair<std::string, std::string>, em::CandidateFilter> by_origin;
+        for (std::size_t k = 0; k < refs.size(); ++k) {
+            if (refs[k].origin_slot.empty()) continue;
+            const std::pair<std::string, std::string> origin{refs[k].origin_record_id,
+                                                             refs[k].origin_slot};
+            auto it = by_origin.find(origin);
+            if (it == by_origin.end()) {
+                it = by_origin
+                         .emplace(origin, origin_slot_filter(job.topology_owners, bid,
+                                                             origin.first, origin.second))
+                         .first;
             }
-            const std::vector<em::LadderResolution> resolutions =
-                em::resolve_descriptor_stage(rec->geom, bid, group, edit, filter);
-            for (std::size_t k = 0; k < resolutions.size(); ++k) {
-                const em::LadderResolution& res = resolutions[k];
-                if (res.outcome == em::LadderOutcome::AutoBind && !res.bound_shape.IsNull()) {
-                    json anchor = group[k].anchor_json;
-                    delta.added.push_back(job.partition.mint(bid, res.element_id, res.kind,
-                                                             res.bound_shape, rec->geom,
-                                                             std::move(anchor)));
-                    continue;
-                }
+            slot_filters[k] = it->second;
+        }
+        const std::vector<em::LadderResolution> resolutions =
+            em::resolve_descriptor_stage(rec->geom, bid, refs, edit, admissible, slot_filters);
+        for (std::size_t k = 0; k < resolutions.size(); ++k) {
+            const em::LadderResolution& res = resolutions[k];
+            if (res.outcome == em::LadderOutcome::AutoBind && !res.bound_shape.IsNull()) {
+                json anchor = refs[k].anchor_json;
+                delta.added.push_back(job.partition.mint(bid, res.element_id, res.kind,
+                                                         res.bound_shape, rec->geom, std::move(anchor)));
+            } else {
                 needs_repair.push_back(res.to_needs_repair_json());
                 // Say WHY a ref on a gear body could not bind: the pool it was
                 // scored against excludes tooth geometry by rule.
-                if (gear && (group[k].kind == em::km::ElementKind::Face ||
-                             group[k].kind == em::km::ElementKind::Edge ||
-                             group[k].kind == em::km::ElementKind::Vertex)) {
-                    diagnostics.push_back(gear_element_diagnostic(bid, *gear, group[k].element_id,
-                                                                  group[k].kind, std::string(),
+                if (gear && (refs[k].kind == em::km::ElementKind::Face ||
+                             refs[k].kind == em::km::ElementKind::Edge ||
+                             refs[k].kind == em::km::ElementKind::Vertex)) {
+                    diagnostics.push_back(gear_element_diagnostic(bid, *gear, refs[k].element_id,
+                                                                  refs[k].kind, std::string(),
                                                                   std::string()));
                 }
             }
