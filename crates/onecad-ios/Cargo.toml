@@ -1,0 +1,15 @@
+[package]
+name = "onecad-ios"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "iPadOS host bridge: C ABI, egui frame loop and Metal surface for the UIKit app"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[features]
+# Acceptance-only replay, semantic queries and fault injection (onecad_ios_test.h).
+test-hooks = []
+
+[dependencies]

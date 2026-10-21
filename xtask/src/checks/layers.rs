@@ -10,9 +10,15 @@ pub(super) const LAYERS: &[(&str, &[&str])] = &[
     ("onecad-widgets", &[]),
     ("onecad-protocol", &[]),
     ("onecad-library", &[]),
+    ("onecad-embedded-worker", &[]),
     (
         "onecad-app",
-        &["onecad-core", "onecad-protocol", "onecad-library"],
+        &[
+            "onecad-core",
+            "onecad-protocol",
+            "onecad-library",
+            "onecad-embedded-worker",
+        ],
     ),
     ("onecad-scene", &["onecad-core", "onecad-protocol"]),
     (
@@ -37,6 +43,20 @@ pub(super) const LAYERS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "onecad-ios",
+        &[
+            "onecad-ui",
+            "onecad-app",
+            "onecad-scene",
+            "onecad-interaction",
+            "onecad-render",
+            "onecad-core",
+            "onecad-protocol",
+            "onecad-widgets",
+            "onecad-embedded-worker",
+        ],
+    ),
+    (
         "onecad-mesh-fixture",
         &["onecad-app", "onecad-core", "onecad-protocol"],
     ),
@@ -46,6 +66,9 @@ pub(super) const LAYERS: &[(&str, &[&str])] = &[
     ("onecad-worker-stub", &["onecad-protocol"]),
     ("xtask", &[]),
 ];
+/// Packages allowed to use UI/platform toolkits and GPU families. The iPadOS
+/// bridge is a host: it owns the UIKit surface and the egui frame loop.
+pub(super) const HOSTS: &[&str] = &["onecad-ui", "onecad-widgets", "onecad-ios"];
 const TOOLKITS: &[&str] = &[
     "tauri",
     "egui",
@@ -239,7 +262,7 @@ fn check_dependency(
     if let Some(reason) = reason {
         return Ok(Some(format!("{context}: {reason}")));
     }
-    let host = ["onecad-ui", "onecad-widgets"].contains(&pkg.name.as_str());
+    let host = HOSTS.contains(&pkg.name.as_str());
     let renderer_gpu = pkg.name == "onecad-render"
         && (family(name, &["wgpu"]) || (name == "naga" && kind == "dev"));
     let reason = if !host && family(name, TOOLKITS) {

@@ -2751,6 +2751,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "onecad-embedded-worker"
+version = "0.1.0"
+
+[[package]]
 name = "onecad-interaction"
 version = "0.1.0"
 dependencies = [
@@ -2763,6 +2767,10 @@ dependencies = [
  "tokio",
  "uuid",
 ]
+
+[[package]]
+name = "onecad-ios"
+version = "0.1.0"
 
 [[package]]
 name = "onecad-kernelbench"

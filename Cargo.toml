@@ -16,6 +16,8 @@ members = [
     "crates/onecad-kernelbench",
     "crates/onecad-library",
     "crates/onecad-library-ingest",
+    "crates/onecad-embedded-worker",
+    "crates/onecad-ios",
 ]
 
 # Shared dependency versions for every workspace member. Individual crates
@@ -29,6 +31,7 @@ onecad-ui = { path = "crates/onecad-ui" }
 onecad-widgets = { path = "crates/onecad-widgets" }
 onecad-core = { path = "crates/onecad-core" }
 onecad-protocol = { path = "crates/onecad-protocol" }
+onecad-embedded-worker = { path = "crates/onecad-embedded-worker" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
