@@ -18,6 +18,7 @@ pub fn show(ui: &mut Ui, t: &Theme, dark: bool) {
     strip(ui, t);
     valtag(ui, t);
     card(ui, t);
+    super::g_tabs::switcher(ui, t);
 }
 
 fn view(ui: &mut Ui, t: &Theme, dark: bool) {

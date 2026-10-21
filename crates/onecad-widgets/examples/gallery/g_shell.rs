@@ -59,6 +59,7 @@ pub fn set_flag(ui: &Ui, key: &str, value: bool) {
 
 pub fn show(ui: &mut Ui, t: &Theme, dark: bool) {
     title_bar(ui, t);
+    super::g_tabs::tabs(ui, t);
     panel(ui, t, dark);
     toggles(ui, t);
     workspace(ui, t);

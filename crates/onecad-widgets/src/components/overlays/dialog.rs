@@ -259,7 +259,7 @@ fn hinted(label: &str, default: bool) -> String {
 }
 
 /// Text-only button used for the left-hand tertiary action.
-fn link(ui: &mut Ui, label: &str, colour: Color32, enabled: bool) -> bool {
+pub(super) fn link(ui: &mut Ui, label: &str, colour: Color32, enabled: bool) -> bool {
     let galley =
         ui.painter()
             .layout_no_wrap(label.to_owned(), FontId::new(12.5, fonts::medium()), colour);

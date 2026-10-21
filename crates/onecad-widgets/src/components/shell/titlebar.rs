@@ -3,6 +3,7 @@
 
 use egui::{Color32, CornerRadius, FontId, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2, vec2};
 
+use super::tabs::{TabStrip, TabsOut, show_strip};
 use super::{IconButton, WorkspaceButton};
 use crate::components::actions::common::fitted;
 use crate::components::tooltip::Tip;
@@ -36,6 +37,7 @@ pub struct TitleBar<'a> {
     drag_window: bool,
     workspace: Option<WorkspaceSpec<'a>>,
     bare: bool,
+    tabs: Option<TabStrip<'a>>,
 }
 
 pub struct TitleBarOutput {
@@ -48,6 +50,31 @@ pub struct TitleBarOutput {
     pub redo: bool,
     /// Command search clicked; the host decides what opens.
     pub search: bool,
+    /// Tab clicked (tab mode only).
+    pub activate: Option<u64>,
+    /// Tab × or middle-click.
+    pub close: Option<u64>,
+    /// "+" clicked.
+    pub add: bool,
+    /// Painted rect of every tab, so the host can anchor a popover to one.
+    pub tab_rects: Vec<(u64, Rect)>,
+}
+
+impl TitleBarOutput {
+    fn plain(home: bool, workspace: Option<Response>) -> Self {
+        Self {
+            home,
+            workspace,
+            file: None,
+            undo: false,
+            redo: false,
+            search: false,
+            activate: None,
+            close: None,
+            add: false,
+            tab_rects: Vec::new(),
+        }
+    }
 }
 
 impl<'a> TitleBar<'a> {
@@ -63,6 +90,7 @@ impl<'a> TitleBar<'a> {
             drag_window: true,
             workspace: None,
             bare: false,
+            tabs: None,
         }
     }
     pub fn dirty(mut self, dirty: bool) -> Self {
@@ -107,6 +135,13 @@ impl<'a> TitleBar<'a> {
         self
     }
 
+    /// Document tab strip: Home, Undo, Redo on the left, tabs centred, search on the
+    /// right; no File button or document name. `None` keeps the other modes.
+    pub fn tabs(mut self, tabs: Option<TabStrip<'a>>) -> Self {
+        self.tabs = tabs;
+        self
+    }
+
     pub fn drag_window(mut self, v: bool) -> Self {
         self.drag_window = v;
         self
@@ -127,13 +162,14 @@ impl<'a> TitleBar<'a> {
         let ws_w = self
             .workspace
             .map(|w| WorkspaceButton::compact_width(ui.painter(), w.name));
-        if !self.bare {
+        if !self.bare && self.tabs.is_none() {
             self.paint_centre(ui, rect, &l, ws_w);
         }
         let cy = rect.center().y;
         let mut x = rect.left() + TRAFFIC_INSET;
         let home_rect = Rect::from_min_size(Pos2::new(x, cy - BTN / 2.0), Vec2::splat(BTN));
         let home = IconButton::new("home", "Home", BTN, 16.0)
+            .on(self.tabs.is_some_and(|s| s.home_active))
             .enabled(self.home_blocked.is_none())
             .gap_bg(t.titlebar)
             .tip(Some(Tip::new("Home").reason(self.home_blocked)));
@@ -151,23 +187,75 @@ impl<'a> TitleBar<'a> {
         if self.bare {
             let (undo, redo) = self.history_buttons(ui, Pos2::new(x, cy - BTN / 2.0), &l);
             return TitleBarOutput {
-                home,
-                workspace,
-                file: None,
                 undo,
                 redo,
-                search: false,
+                ..TitleBarOutput::plain(home, workspace)
             };
+        }
+        if let Some(strip) = self.tabs {
+            return self.show_tabs(ui, rect, &l, strip, (x, home, workspace));
         }
         let file = Some(file_button(ui, Pos2::new(x, cy - BTN / 2.0), &l));
         let (search, undo, redo) = self.right_cluster(ui, rect, &l);
         TitleBarOutput {
-            home,
-            workspace,
             file,
             undo,
             redo,
             search,
+            ..TitleBarOutput::plain(home, workspace)
+        }
+    }
+
+    /// Tab mode: undo/redo follow Home on the left, the strip is centred, search on the right.
+    fn show_tabs(
+        &self,
+        ui: &mut Ui,
+        rect: Rect,
+        l: &Look,
+        strip: TabStrip<'_>,
+        (x, home, workspace): (f32, bool, Option<Response>),
+    ) -> TitleBarOutput {
+        let cy = rect.center().y;
+        let (undo, redo) = self.history_buttons(ui, Pos2::new(x, cy - BTN / 2.0), l);
+        let left = x + 2.0 * (BTN + 4.0) + 4.0;
+        let search_rect = Rect::from_min_size(
+            Pos2::new(rect.right() - 12.0 - SEARCH_W, cy - BTN / 2.0),
+            vec2(SEARCH_W, BTN),
+        );
+        let right = search_rect.left() - 8.0;
+        let search = self.search_box(ui, search_rect, l, "Search");
+        let c = rect.center().x;
+        let sym_w = 2.0 * (c - left).min(right - c).max(0.0);
+        let area = Rect::from_min_max(Pos2::new(left, rect.top()), Pos2::new(right, rect.bottom()));
+        let TabsOut {
+            activate,
+            close,
+            add,
+            rects,
+        } = show_strip(ui, area, c, sym_w, strip, l);
+        TitleBarOutput {
+            undo,
+            redo,
+            search,
+            activate,
+            close,
+            add,
+            tab_rects: rects,
+            ..TitleBarOutput::plain(home, workspace)
+        }
+    }
+
+    /// Command-search look plus click; honours `search_blocked`.
+    fn search_box(&self, ui: &mut Ui, rect: Rect, l: &Look, hint: &str) -> bool {
+        let r = ui
+            .add_enabled_ui(self.search_blocked.is_none(), |ui| {
+                search_look(ui, rect, l, self.search_blocked.is_none(), hint)
+            })
+            .inner;
+        if let Some(reason) = self.search_blocked {
+            r.on_disabled_hover_text(reason).clicked()
+        } else {
+            r.clicked()
         }
     }
 
@@ -239,16 +327,7 @@ impl<'a> TitleBar<'a> {
             Pos2::new(right - SEARCH_W, cy - BTN / 2.0),
             vec2(SEARCH_W, BTN),
         );
-        let search = ui
-            .add_enabled_ui(self.search_blocked.is_none(), |ui| {
-                search_look(ui, search, l, self.search_blocked.is_none())
-            })
-            .inner;
-        let search = if let Some(reason) = self.search_blocked {
-            search.on_disabled_hover_text(reason).clicked()
-        } else {
-            search.clicked()
-        };
+        let search = self.search_box(ui, search, l, "Search commands");
         right -= SEARCH_W + 8.0;
         let specs = [
             ("redo", "Redo", self.can_redo, Some("⌘⇧Z")),
@@ -319,7 +398,7 @@ fn file_button(ui: &mut Ui, pos: Pos2, l: &Look) -> Response {
 }
 
 /// 220×28 command-search look: chip fill, search icon, hint text, "⌘K" chip.
-fn search_look(ui: &mut Ui, rect: Rect, l: &Look, shortcut: bool) -> Response {
+fn search_look(ui: &mut Ui, rect: Rect, l: &Look, shortcut: bool, hint: &str) -> Response {
     let t = &l.theme;
     let id = ui.scope_id().with("titlebar-search");
     let r = ui.interact(rect, id, Sense::click());
@@ -348,11 +427,7 @@ fn search_look(ui: &mut Ui, rect: Rect, l: &Look, shortcut: bool) -> Response {
     let glyph_box =
         Rect::from_center_size(Pos2::new(rect.left() + 8.0 + 7.0, cy), Vec2::splat(14.0));
     glyph::search(p, glyph_box.center(), 13.0, t.ink5);
-    let hint = p.layout_no_wrap(
-        "Search commands".to_owned(),
-        FontId::proportional(12.0),
-        t.ink5,
-    );
+    let hint = p.layout_no_wrap(hint.to_owned(), FontId::proportional(12.0), t.ink5);
     let hh = hint.size().y;
     p.galley(Pos2::new(rect.left() + 30.0, cy - hh / 2.0), hint, t.ink5);
     if !shortcut {

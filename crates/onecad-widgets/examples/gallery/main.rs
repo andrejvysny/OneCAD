@@ -7,6 +7,7 @@ mod g_lists;
 mod g_overlays;
 mod g_shell;
 mod g_start;
+mod g_tabs;
 mod icons;
 mod screens;
 

@@ -259,6 +259,7 @@ pub struct RecentCard<'a> {
     thumbnail: Option<egui::TextureId>,
     width: f32,
     metadata_only: bool,
+    open: bool,
 }
 
 const THUMB_H: f32 = 150.0;
@@ -272,7 +273,13 @@ impl<'a> RecentCard<'a> {
             thumbnail: None,
             width: 200.0,
             metadata_only: false,
+            open: false,
         }
+    }
+    /// Marks a recent that is already open in a tab; opening it switches there.
+    pub fn open(mut self, open: bool) -> Self {
+        self.open = open;
+        self
     }
     /// Show only real document metadata when no checked thumbnail is available.
     pub fn metadata_only(mut self) -> Self {
@@ -287,6 +294,26 @@ impl<'a> RecentCard<'a> {
         self.width = width;
         self
     }
+}
+
+/// "Open" pill in the card's top-right corner.
+fn paint_open_badge(p: &egui::Painter, card: Rect, l: &crate::theme::Look) {
+    let t = &l.theme;
+    let font = egui::FontId::proportional(11.0);
+    let text = p.layout_no_wrap("Open".into(), font, t.accent);
+    let size = text.size() + vec2(12.0, 6.0);
+    let badge = Rect::from_min_size(
+        Pos2::new(card.right() - 10.0 - size.x, card.top() + 8.0),
+        size,
+    );
+    p.rect(
+        badge,
+        CornerRadius::same(4),
+        t.surface,
+        Stroke::new(1.0, t.border),
+        StrokeKind::Inside,
+    );
+    p.galley(badge.min + vec2(6.0, 3.0), text, t.accent);
 }
 
 impl egui::Widget for RecentCard<'_> {
@@ -340,6 +367,9 @@ impl egui::Widget for RecentCard<'_> {
                 Stroke::new(1.0, t.border_subtle),
             );
             self.paint_caption(p, Pos2::new(rect.left() + 12.0, line_y + 1.0 + 10.0), &l);
+        }
+        if self.open {
+            paint_open_badge(ui.painter(), rect, &l);
         }
         if r.has_focus() {
             focus_ring(ui, rect, RADIUS_LG, &l);
