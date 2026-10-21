@@ -80,6 +80,8 @@ pub(super) fn crossings(
 /// boundary endpoint first (a `Coincident` is exact), then a transversal
 /// crossing, then a same-carrier end point (so a refusal of an arc overlap is
 /// never masked by another curve meeting there), then iteration order.
+/// Extend drops tangent crossings from the cluster before ranking, so a
+/// tangent arc end never outranks a transversal stop there.
 pub(super) fn representative<'a>(cluster: impl Iterator<Item = &'a Crossing>) -> Crossing {
     let rank = |c: &Crossing| (c.at_endpoint.is_some(), !c.tangent, c.overlap);
     let mut best: Option<&Crossing> = None;
