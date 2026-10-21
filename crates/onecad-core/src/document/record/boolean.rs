@@ -86,6 +86,7 @@ impl TryFrom<BooleanParamsSerde> for BooleanParams {
     type Error = String;
 
     fn try_from(raw: BooleanParamsSerde) -> Result<Self, String> {
+        let from_array = raw.tool_bodies.is_some();
         let (tools, keep_tools) = match (raw.tool_body, raw.tool_bodies) {
             (Some(_), Some(_)) => {
                 return Err("Boolean carries both toolBodyId and toolBodyIds".into())
@@ -108,7 +109,10 @@ impl TryFrom<BooleanParamsSerde> for BooleanParams {
             keep_tools,
             extra: raw.extra,
         };
-        if params.uses_tools_array() {
+        // Validate the array as authored: `toolBodyIds:[t]` normalizes to the
+        // legacy shape, which skips validation, but the worker validates the
+        // array form before normalizing and refuses a self tool there.
+        if from_array {
             params.validate()?;
         }
         Ok(params)
@@ -275,6 +279,10 @@ mod tests {
             ),
             (
                 json!({"operation":"Cut","targetBodyId":b[0],"toolBodyIds":[b[1],b[0]]}),
+                "is the target",
+            ),
+            (
+                json!({"operation":"Cut","targetBodyId":b[0],"toolBodyIds":[b[0]]}),
                 "is the target",
             ),
         ];
