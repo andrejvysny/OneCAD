@@ -23,13 +23,15 @@ mod services;
 static GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Whether the kernel is linked; panics when it is required and absent.
+/// `cargo test --workspace` unifies `embedded-kernel` through onecad-ios but
+/// links the stub, so the sidecar's `ONECAD_REQUIRE_WORKER` does not require it.
 fn kernel_linked() -> bool {
     if onecad_embedded_worker::is_linked() {
         return true;
     }
     assert!(
-        std::env::var("ONECAD_REQUIRE_WORKER").as_deref() != Ok("1"),
-        "ONECAD_REQUIRE_WORKER=1 but the embedded kernel is not linked (set ONECAD_EMBEDDED_WORKER_DIR)"
+        std::env::var("ONECAD_REQUIRE_EMBEDDED_KERNEL").as_deref() != Ok("1"),
+        "ONECAD_REQUIRE_EMBEDDED_KERNEL=1 but the embedded kernel is not linked (set ONECAD_EMBEDDED_WORKER_DIR)"
     );
     eprintln!("skip: embedded kernel not linked (set ONECAD_EMBEDDED_WORKER_DIR)");
     false

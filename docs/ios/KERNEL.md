@@ -67,7 +67,8 @@ evidence lives in Plane (ONECAD-449, ONECAD-450).
 
    ```sh
    # macOS in-process tests (real kernel; hooks bundle for the wedge drills)
-   ONECAD_EMBEDDED_WORKER_DIR=<macosx --test-hooks out> ONECAD_REQUIRE_WORKER=1 \
+   ONECAD_EMBEDDED_WORKER_DIR=<macosx --test-hooks out> ONECAD_REQUIRE_EMBEDDED_KERNEL=1 \
+   ONECAD_REQUIRE_WORKER=1 \
    ONECAD_WORKER_PATH="$PWD/worker/build/onecad-worker" \
        cargo test -p onecad-app --lib --features embedded-kernel worker::inprocess::tests
    # iOS type check (no kernel needed: the link crate builds a stub)
@@ -78,7 +79,7 @@ evidence lives in Plane (ONECAD-449, ONECAD-450).
        cargo test -p onecad-app --lib --no-default-features --features embedded-kernel \
        --target aarch64-apple-ios-sim --no-run
    xcrun simctl boot <udid>
-   SIMCTL_CHILD_ONECAD_REQUIRE_WORKER=1 xcrun simctl spawn <udid> \
+   SIMCTL_CHILD_ONECAD_REQUIRE_EMBEDDED_KERNEL=1 xcrun simctl spawn <udid> \
        target/aarch64-apple-ios-sim/debug/deps/onecad_app-<hash> worker::inprocess::tests
    # Device: compile/link only
    IPHONEOS_DEPLOYMENT_TARGET=18.0 ONECAD_EMBEDDED_WORKER_DIR=<iphoneos out> \
@@ -88,7 +89,9 @@ evidence lives in Plane (ONECAD-449, ONECAD-450).
 
    Without `ONECAD_EMBEDDED_WORKER_DIR` the link crate is a stub
    (`NotLinked`), so `cargo check/clippy/test --workspace` on macOS never needs
-   the kernel; an iOS release build fails in `build.rs` instead.
+   the kernel: the in-process tests skip unless
+   `ONECAD_REQUIRE_EMBEDDED_KERNEL=1` requires it (`ONECAD_REQUIRE_WORKER`
+   requires only the sidecar); an iOS release build fails in `build.rs` instead.
 
 4. Xcode (a `staticlib` consumer such as `onecad-ios`). The link crate emits
    the bundle as `static:-bundle`: it is NOT copied into the Rust rlib or into
