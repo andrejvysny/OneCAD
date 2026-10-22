@@ -14,7 +14,8 @@ pub fn title(app: &mut App, ui: &mut Ui) {
         .frame(egui::Frame::NONE)
         .resizable(false)
         .show(ui, |ui| {
-            // File actions live in the native menu; documents are tabs.
+            // File actions live in the native menu (or, without one, the title bar's
+            // File menu); documents are tabs.
             let summaries = app.tab_summaries();
             let specs: Vec<TabSpec> = summaries
                 .iter()
@@ -28,7 +29,11 @@ pub fn title(app: &mut App, ui: &mut Ui) {
                     busy: tab.busy,
                 })
                 .collect();
-            let out = TitleBar::new("")
+            let bar = TitleBar::new("");
+            // No traffic lights or movable window without the desktop host.
+            #[cfg(not(feature = "desktop"))]
+            let bar = bar.leading_inset(0.0).drag_window(false).tab_file(true);
+            let out = bar
                 .tabs(Some(TabStrip {
                     tabs: &specs,
                     home_active: app.ui.start_open,
@@ -40,6 +45,10 @@ pub fn title(app: &mut App, ui: &mut Ui) {
                 .search_blocked(Some("Command search is not available yet"))
                 .show(ui);
             app.tab_rects = out.tab_rects.clone();
+            #[cfg(not(feature = "desktop"))]
+            if let Some(file) = &out.file {
+                crate::touch_menu::show(app, file);
+            }
             if (out.home || out.add) && home_allowed(app) {
                 app.open_home();
             }

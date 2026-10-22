@@ -23,7 +23,8 @@ members = [
 # Shared dependency versions for every workspace member. Individual crates
 # opt into features via `{ workspace = true, features = [...] }`.
 [workspace.dependencies]
-onecad-app = { path = "crates/onecad-app" }
+# Backend features are chosen by each binary (docs/ios/KERNEL.md).
+onecad-app = { path = "crates/onecad-app", default-features = false }
 onecad-scene = { path = "crates/onecad-scene" }
 onecad-render = { path = "crates/onecad-render" }
 onecad-interaction = { path = "crates/onecad-interaction" }

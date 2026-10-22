@@ -6,6 +6,17 @@ license = "MIT OR Apache-2.0"
 publish = false
 description = "Isolated native OneCAD workflow host"
 
+[features]
+default = ["desktop"]
+# The eframe/winit lifecycle, rfd dialogs and the AppKit menu bar. The iPadOS host
+# (`onecad-ios`) builds without it and drives `App::frame` itself.
+desktop = ["dep:eframe", "dep:rfd", "dep:muda", "dep:arboard", "onecad-app/sidecar"]
+
+[[bin]]
+name = "onecad-ui"
+path = "src/main.rs"
+required-features = ["desktop"]
+
 [dependencies]
 onecad-app = { workspace = true }
 onecad-interaction = { workspace = true }
@@ -14,9 +25,13 @@ onecad-protocol = { workspace = true }
 onecad-scene = { workspace = true }
 onecad-render = { workspace = true }
 onecad-widgets = { workspace = true }
-eframe = { version = "=0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "system_fonts", "wgpu"] }
-egui = "=0.37.0"
-egui-wgpu = "=0.37.0"
+eframe = { version = "=0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "system_fonts", "wgpu"], optional = true }
+# egui's bundled fonts are the fallback behind the CoreText SF fonts (eframe also
+# enables them on desktop, so its feature set is unchanged).
+egui = { version = "=0.37.0", features = ["default_fonts"] }
+# Defaults (GL/Vulkan/WebGL backends) arrive only through eframe on desktop; the
+# Metal backend comes from the `wgpu` dependency below.
+egui-wgpu = { version = "=0.37.0", default-features = false }
 wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }
 glam = "0.30"
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros"] }
@@ -24,12 +39,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
-rfd = "=0.17.2"
+rfd = { version = "=0.17.2", optional = true }
 uuid = { workspace = true }
+png = "0.18"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-muda = "=0.21.2"
-arboard = { version = "3.6", default-features = false }
+muda = { version = "=0.21.2", optional = true }
+arboard = { version = "3.6", default-features = false, optional = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,4 +1,5 @@
-//! QA paths are explicit and confined to a dedicated temporary root.
+//! QA paths are explicit and confined to a dedicated temporary root. Sandboxed
+//! hosts (iPadOS) instead name the container directories the OS gives them.
 use std::{
     ffi::OsString,
     fs,
@@ -12,12 +13,23 @@ const MARKER_CONTENT: &str = "onecad-native-qa-v1\n";
 #[derive(Clone, Debug)]
 pub struct QaPaths {
     pub root: PathBuf,
+    /// Where documents are opened, saved and exported (`root/documents` for QA).
+    pub documents: PathBuf,
     pub document: PathBuf,
     pub open_on_start: bool,
     pub data: PathBuf,
     pub config: PathBuf,
     pub temporary: PathBuf,
-    _lock: Arc<fs::File>,
+    _lock: Option<Arc<fs::File>>,
+}
+
+/// Container directories of a sandboxed host, as absolute paths.
+#[derive(Clone, Debug)]
+pub struct HostLayout {
+    pub documents: PathBuf,
+    pub app_support: PathBuf,
+    pub caches: PathBuf,
+    pub temporary: PathBuf,
 }
 
 impl QaPaths {
@@ -58,6 +70,28 @@ impl QaPaths {
             );
         }
         Ok(())
+    }
+
+    /// Paths inside an OS-provided app container. The OS already isolates the
+    /// container, so neither the QA marker, lock nor launch environment applies.
+    /// Service data and settings live under Application Support.
+    pub fn sandbox(layout: &HostLayout) -> Result<Self, String> {
+        let support = sandbox_dir(&layout.app_support)?;
+        let documents = sandbox_dir(&layout.documents)?;
+        sandbox_dir(&layout.caches)?;
+        let temporary = sandbox_dir(&layout.temporary)?;
+        let data = sandbox_dir(&support.join("data"))?;
+        let config = sandbox_dir(&support.join("config"))?;
+        Ok(Self {
+            document: documents.join("Untitled.onecad"),
+            root: support,
+            documents,
+            open_on_start: false,
+            data,
+            config,
+            temporary,
+            _lock: None,
+        })
     }
 
     #[cfg(test)]
@@ -123,12 +157,23 @@ impl QaPaths {
             data: root.join("data"),
             config: root.join("config"),
             temporary: root.join("temporary"),
+            documents: root.join("documents"),
             root,
             document,
             open_on_start,
-            _lock: lock,
+            _lock: Some(lock),
         })
     }
+}
+
+/// Creates an absolute container directory and returns its canonical path, so
+/// confinement checks compare resolved paths (`/var` is a link on iOS).
+fn sandbox_dir(path: &Path) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err(format!("sandbox path must be absolute: {}", path.display()));
+    }
+    fs::create_dir_all(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    fs::canonicalize(path).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 fn reject_link(path: &Path) -> Result<(), String> {
@@ -223,6 +268,31 @@ mod tests {
         let reopened = QaPaths::prepare(&root, &saved_path).unwrap();
         assert_eq!(fs::read(reopened.document).unwrap(), b"saved edit");
         assert_eq!(fs::read(fixture).unwrap(), b"synthetic fixture");
+    }
+    #[test]
+    fn sandbox_layout_uses_container_directories_without_qa_marker() {
+        let area = tempfile::tempdir().unwrap();
+        let base = fs::canonicalize(area.path()).unwrap();
+        let layout = HostLayout {
+            documents: base.join("Documents"),
+            app_support: base.join("Library/Application Support"),
+            caches: base.join("Library/Caches"),
+            temporary: base.join("tmp"),
+        };
+        let paths = QaPaths::sandbox(&layout).unwrap();
+        assert_eq!(paths.documents, layout.documents);
+        assert_eq!(paths.data, layout.app_support.join("data"));
+        assert_eq!(paths.config, layout.app_support.join("config"));
+        assert!(paths.document.starts_with(&paths.documents));
+        assert!(!paths.open_on_start && layout.caches.is_dir());
+        assert!(!layout.app_support.join(MARKER).exists());
+        assert!(
+            QaPaths::sandbox(&HostLayout {
+                documents: "relative".into(),
+                ..layout
+            })
+            .is_err()
+        );
     }
     #[test]
     fn production_and_unmarked_shared_roots_are_refused() {

@@ -3,7 +3,7 @@ pub(crate) use crate::event_mailbox::{BackendEvent, EventMailbox};
 use crate::{profiles::Profile, qa::QaPaths, service_runtime::ServiceRuntime, services};
 use onecad_app::{
     dto::DocumentProjection,
-    host::{AppEvent, EventSink, HostContext, HostPaths},
+    host::{AppEvent, DialogPort, EventSink, HostContext, HostPaths},
     process::ProcessServices,
     state::AppState,
 };
@@ -151,6 +151,8 @@ pub struct Shared {
     pub stopping: std::sync::atomic::AtomicBool,
     pub shutdown: Notify,
     pub recovery_flush: Notify,
+    /// Recovery flushes this actor has finished (a host awaits one after asking).
+    pub recovery_flushes: std::sync::atomic::AtomicU64,
     pub budget: Mutex<onecad_render::PreparationBudget>,
     pub host_budget: Arc<crate::budget::HostBudget>,
     /// The document host's process identity, set once its actor has started.
@@ -191,6 +193,7 @@ impl Shared {
             stopping: std::sync::atomic::AtomicBool::new(false),
             shutdown: Notify::new(),
             recovery_flush: Notify::new(),
+            recovery_flushes: std::sync::atomic::AtomicU64::new(0),
             generation: std::sync::atomic::AtomicU64::new(0),
             notify: Notify::new(),
             context,
@@ -280,13 +283,14 @@ pub struct Bridge {
 
 impl Bridge {
     /// A bridge on its own private service runtime (isolated tests).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "desktop"))]
     pub fn start(
         paths: QaPaths,
         context: egui::Context,
         budget: onecad_render::PreparationBudget,
     ) -> Result<Self, String> {
-        Self::start_on(ServiceRuntime::start()?, paths, context, budget)
+        let dialogs = Arc::new(crate::dialogs::NativeDialogs::new(paths.documents.clone()));
+        Self::start_on(ServiceRuntime::start()?, paths, dialogs, context, budget)
     }
 
     /// A bridge whose document host shares `runtime` and its process services with
@@ -294,6 +298,7 @@ impl Bridge {
     pub fn start_on(
         runtime: Arc<ServiceRuntime>,
         paths: QaPaths,
+        dialogs: Arc<dyn DialogPort>,
         context: egui::Context,
         budget: onecad_render::PreparationBudget,
     ) -> Result<Self, String> {
@@ -303,6 +308,7 @@ impl Bridge {
         let shared = Arc::new(Shared::new(context, budget));
         runtime.spawn_actor(actor(
             paths,
+            dialogs,
             runtime.services().clone(),
             shared.clone(),
             receiver,
@@ -498,6 +504,7 @@ pub(crate) struct Backend {
 
 async fn actor(
     paths: QaPaths,
+    dialogs: Arc<dyn DialogPort>,
     services: Arc<ProcessServices>,
     shared: Arc<Shared>,
     mut receiver: async_mpsc::Receiver<Envelope>,
@@ -516,9 +523,7 @@ async fn actor(
             shared: shared.clone(),
             failed: std::sync::atomic::AtomicBool::new(false),
         }),
-        dialogs: Arc::new(crate::dialogs::NativeDialogs::new(
-            paths.root.join("documents"),
-        )),
+        dialogs,
     };
     let state = Arc::new(AppState::with_services(services));
     shared
@@ -565,6 +570,7 @@ async fn actor(
                 {
                     eprintln!("Viewport recovery checkpoint failed: {error}");
                 }
+                shared.recovery_flushes.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             }
             envelope = receiver.recv() => {
                 let Some(envelope) = envelope else { break; };
@@ -666,6 +672,6 @@ pub fn record_id(raw: &str) -> Result<RecordId, String> {
         .map_err(|error| format!("invalid record identity: {error}"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 #[path = "bridge_tests.rs"]
 mod tests;

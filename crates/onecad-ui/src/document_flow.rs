@@ -3,6 +3,8 @@ use onecad_app::dto::SaveOutcomeDto;
 use onecad_widgets::components::overlays::{Dialog, DialogIntent};
 use std::path::PathBuf;
 
+// Mesh exports are offered only by the desktop menu bar so far.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExportFormat {
     Step,
@@ -321,7 +323,12 @@ impl crate::app::App {
                         format!("Saved {} — newer changes remain unsaved", saved.title);
                 }
             }
-            Ok(Outcome::Exported(path)) => self.doc.status = format!("Exported {}", path.display()),
+            Ok(Outcome::Exported(path)) => {
+                self.doc.status = format!("Exported {}", path.display());
+                // A sandboxed host publishes the written file through its own picker.
+                #[cfg(not(feature = "desktop"))]
+                self.exported.push(path);
+            }
             Err(error) => {
                 self.doc.status = error;
                 self.settle_provisional_tab(None, diagnostic);

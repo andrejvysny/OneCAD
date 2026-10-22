@@ -98,7 +98,7 @@ async fn apply_choice(
     choice: Choice,
 ) -> Result<(), String> {
     let id = &offer.document_id;
-    let destination = destination(&backend.paths.root, offer)?;
+    let destination = destination(&backend.paths.documents, offer)?;
     match choice {
         Choice::Restore => {
             api::recover_document(&backend.state, backend.host.clone(), id.clone(), true)
@@ -170,11 +170,8 @@ fn remove_offer(backend: &Backend, id: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn destination(root: &Path, offer: &RecoveryInfoDto) -> Result<PathBuf, String> {
-    let documents = root
-        .join("documents")
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
+fn destination(documents: &Path, offer: &RecoveryInfoDto) -> Result<PathBuf, String> {
+    let documents = documents.canonicalize().map_err(|e| e.to_string())?;
     if let Some(path) = offer
         .original_path
         .as_deref()

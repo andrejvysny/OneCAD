@@ -4,7 +4,6 @@ use crate::{
     document_flow::{Pending, Request},
     qa::QaPaths,
 };
-use eframe::App as _;
 
 #[path = "row_delivery_tests.rs"]
 mod row_delivery_tests;
@@ -142,7 +141,7 @@ fn logic_tick(
     }
     context.run_logic(&input, |context| {
         assert_eq!(context.input(|input| input.viewport().occluded), Some(true));
-        app.logic(context, frame);
+        eframe::App::logic(app, context, frame);
     })
 }
 
