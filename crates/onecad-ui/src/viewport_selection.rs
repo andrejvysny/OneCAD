@@ -110,12 +110,13 @@ pub fn hover(
         .filter(|point| allowed && crate::viewport_widgets::allows_pointer(ui, rect, *point))
         .and_then(|point| {
             let logical = point - rect.min;
-            let hit = onecad_scene::pick_with_policy(
+            let hit = onecad_scene::pick_with_tolerance(
                 &display.scene,
                 view,
                 view.identity(),
                 DVec2::new(f64::from(logical.x), f64::from(logical.y)),
                 crate::model_pick::policy(app),
+                crate::viewport_widgets::edge_tolerance(ui.ctx()),
             )
             .ok()??;
             Some(Target::from_hit(&hit))

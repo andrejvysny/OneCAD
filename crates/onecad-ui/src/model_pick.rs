@@ -164,6 +164,8 @@ pub(crate) fn policy(app: &App) -> onecad_scene::PickPolicy {
     }
 }
 
+/// Mouse-precision pick, as tests drive it; the viewport passes its input kind.
+#[cfg(test)]
 pub(crate) fn pick(
     app: &mut App,
     display: &Display,
@@ -172,15 +174,35 @@ pub(crate) fn pick(
     whole_body: bool,
     mode: SelectionMode,
 ) {
+    let tolerance = onecad_scene::EDGE_PICK_LOGICAL_PIXELS;
+    pick_with_tolerance(app, display, view, logical, whole_body, mode, tolerance);
+}
+
+/// `edge_tolerance` (points) follows the input kind that pressed.
+pub(crate) fn pick_with_tolerance(
+    app: &mut App,
+    display: &Display,
+    view: &ViewSnapshot,
+    logical: DVec2,
+    whole_body: bool,
+    mode: SelectionMode,
+    edge_tolerance: f64,
+) {
     let profile = display
         .profiles
         .iter()
         .filter_map(|profile| profile.pick(view, logical).map(|hit| (profile, hit)))
         .min_by(|a, b| a.1.1.total_cmp(&b.1.1));
-    let body =
-        onecad_scene::pick_with_policy(&display.scene, view, view.identity(), logical, policy(app))
-            .ok()
-            .flatten();
+    let body = onecad_scene::pick_with_tolerance(
+        &display.scene,
+        view,
+        view.identity(),
+        logical,
+        policy(app),
+        edge_tolerance,
+    )
+    .ok()
+    .flatten();
     let profile = profile
         .filter(|(_, (_, distance))| {
             !whole_body && crate::viewport::profile_visible(body.as_ref(), *distance)

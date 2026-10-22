@@ -150,7 +150,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 && let Some(position) = response.interact_pointer_pos()
                 && crate::viewport_widgets::allows_pointer(ui, rect, position)
             {
-                crate::model_pick::pick(
+                crate::model_pick::pick_with_tolerance(
                     app,
                     &display,
                     &view,
@@ -160,6 +160,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     ),
                     response.double_clicked(),
                     mode,
+                    crate::viewport_widgets::edge_tolerance(ui.ctx()),
                 );
             }
         });

@@ -7,7 +7,9 @@ use onecad_scene::{Camera, DVec3, Projection, ViewSnapshot};
 
 #[path = "pointer_policy.rs"]
 mod pointer_policy;
-pub use pointer_policy::{allows_pointer, gesture_allowed};
+pub use pointer_policy::{
+    PointerKind, allows_pointer, edge_tolerance, gesture_allowed, set_pointer_kind,
+};
 
 /// Region the cube is laid out in: its top-right corner is the ViewCluster anchor, which
 /// moves with the Inspector.

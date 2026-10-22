@@ -56,7 +56,50 @@ pub fn pick_with_policy<'a>(
     logical: DVec2,
     policy: PickPolicy,
 ) -> Result<Option<PickHit<'a>>, SceneError> {
-    pick_impl(scene, view, capture, logical, policy, true)
+    pick_with_tolerance(
+        scene,
+        view,
+        capture,
+        logical,
+        policy,
+        EDGE_PICK_LOGICAL_PIXELS,
+    )
+}
+
+/// As [`pick_with_policy`], with the edge tolerance (logical pixels) chosen by
+/// the input kind: a finger needs a wider aperture than a mouse or Pencil.
+/// Non-finite or non-positive tolerances fall back to the default.
+pub fn pick_with_tolerance<'a>(
+    scene: &'a SceneSnapshot,
+    view: &ViewSnapshot,
+    capture: CaptureIdentity,
+    logical: DVec2,
+    policy: PickPolicy,
+    edge_tolerance: f64,
+) -> Result<Option<PickHit<'a>>, SceneError> {
+    let query = Query {
+        logical,
+        policy,
+        tolerance: tolerance(edge_tolerance),
+        indexed: true,
+    };
+    pick_impl(scene, view, capture, query)
+}
+
+fn tolerance(edge_tolerance: f64) -> f64 {
+    if edge_tolerance.is_finite() && edge_tolerance > 0.0 {
+        edge_tolerance
+    } else {
+        EDGE_PICK_LOGICAL_PIXELS
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Query {
+    logical: DVec2,
+    policy: PickPolicy,
+    tolerance: f64,
+    indexed: bool,
 }
 
 /// Independent traversal oracle for acceleration qualification.
@@ -76,41 +119,54 @@ pub fn pick_brute_force_with_policy<'a>(
     logical: DVec2,
     policy: PickPolicy,
 ) -> Result<Option<PickHit<'a>>, SceneError> {
-    pick_impl(scene, view, capture, logical, policy, false)
+    let query = Query {
+        logical,
+        policy,
+        tolerance: EDGE_PICK_LOGICAL_PIXELS,
+        indexed: false,
+    };
+    pick_impl(scene, view, capture, query)
+}
+
+/// Independent traversal oracle with an explicit edge tolerance.
+pub fn pick_brute_force_with_tolerance<'a>(
+    scene: &'a SceneSnapshot,
+    view: &ViewSnapshot,
+    capture: CaptureIdentity,
+    logical: DVec2,
+    policy: PickPolicy,
+    edge_tolerance: f64,
+) -> Result<Option<PickHit<'a>>, SceneError> {
+    let query = Query {
+        logical,
+        policy,
+        tolerance: tolerance(edge_tolerance),
+        indexed: false,
+    };
+    pick_impl(scene, view, capture, query)
 }
 
 fn pick_impl<'a>(
     scene: &'a SceneSnapshot,
     view: &ViewSnapshot,
     capture: CaptureIdentity,
-    logical: DVec2,
-    policy: PickPolicy,
-    indexed: bool,
+    query: Query,
 ) -> Result<Option<PickHit<'a>>, SceneError> {
     if scene.identity() != view.identity().scene || capture != view.identity() {
         return Err(SceneError::CaptureMismatch);
     }
-    let ray = view.ray(logical)?;
+    let ray = view.ray(query.logical)?;
     let mut face: Option<PickHit<'a>> = None;
-    if policy == PickPolicy::FacesAndEdges {
+    if query.policy == PickPolicy::FacesAndEdges {
         for body in scene.bodies() {
             let mesh = body.mesh()?;
-            pick_body_faces(body, &mesh, view, ray, indexed, &mut face);
+            pick_body_faces(body, &mesh, view, ray, query.indexed, &mut face);
         }
     }
     let mut edge: Option<PickHit<'a>> = None;
     for body in scene.bodies() {
         let mesh = body.mesh()?;
-        pick_body_edges(
-            body,
-            &mesh,
-            view,
-            ray,
-            logical,
-            indexed,
-            face.as_ref(),
-            &mut edge,
-        );
+        pick_body_edges(body, &mesh, view, ray, query, face.as_ref(), &mut edge);
     }
     Ok(edge.or(face))
 }
@@ -149,27 +205,25 @@ fn pick_body_faces<'a>(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn pick_body_edges<'a>(
     body: &'a SceneBody,
     mesh: &MeshView<'a>,
     view: &ViewSnapshot,
     ray: Ray,
-    logical: DVec2,
-    indexed: bool,
+    query: Query,
     face: Option<&PickHit<'a>>,
     edge: &mut Option<PickHit<'a>>,
 ) {
-    if let Some(index) = body.edge_index().filter(|_| indexed) {
+    if let Some(index) = body.edge_index().filter(|_| query.indexed) {
         index.visit(
-            |bounds| crate::index::screen_bounds(view, logical, bounds),
+            |bounds| crate::index::screen_bounds(view, query.logical, query.tolerance, bounds),
             |p| {
                 pick_edges(
                     body,
                     mesh,
                     view,
                     ray,
-                    logical,
+                    query,
                     face,
                     edge,
                     std::iter::once((p.topology, p.element)),
@@ -185,7 +239,7 @@ fn pick_body_edges<'a>(
                         .map(move |point| (edge, point))
                 })
         });
-        pick_edges(body, mesh, view, ray, logical, face, edge, candidates);
+        pick_edges(body, mesh, view, ray, query, face, edge, candidates);
     }
 }
 
@@ -241,7 +295,7 @@ fn pick_edges<'a>(
     mesh: &MeshView<'a>,
     view: &ViewSnapshot,
     ray: Ray,
-    logical: DVec2,
+    query: Query,
     face: Option<&PickHit<'a>>,
     best: &mut Option<PickHit<'a>>,
     candidates: impl Iterator<Item = (u32, u32)>,
@@ -255,7 +309,8 @@ fn pick_edges<'a>(
         };
         let Some(world) = closest_edge(
             view,
-            logical,
+            query.logical,
+            query.tolerance,
             DVec3::from_array(a.map(f64::from)),
             DVec3::from_array(b.map(f64::from)),
         ) else {
@@ -349,7 +404,13 @@ fn triangle_hit(ray: Ray, a: DVec3, b: DVec3, c: DVec3) -> Option<(f64, DVec3)> 
     (distance.is_finite() && distance >= 0.0).then(|| (distance, normal.normalize()))
 }
 
-fn closest_edge(view: &ViewSnapshot, cursor: DVec2, a: DVec3, b: DVec3) -> Option<DVec3> {
+fn closest_edge(
+    view: &ViewSnapshot,
+    cursor: DVec2,
+    tolerance: f64,
+    a: DVec3,
+    b: DVec3,
+) -> Option<DVec3> {
     let (a, b) = clip_depth(view, a, b)?;
     let (pa, pb) = (view.project_unclipped(a)?, view.project_unclipped(b)?);
     let delta = pb.logical - pa.logical;
@@ -366,7 +427,7 @@ fn closest_edge(view: &ViewSnapshot, cursor: DVec2, a: DVec3, b: DVec3) -> Optio
         1.0
     };
     let screen_distance = (cursor - pa.logical.lerp(pb.logical, alpha)).length_squared();
-    if !screen_distance.is_finite() || screen_distance > EDGE_PICK_LOGICAL_PIXELS.powi(2) {
+    if !screen_distance.is_finite() || screen_distance > tolerance.powi(2) {
         return None;
     }
     // A linear screen parameter is not a linear world parameter in perspective.

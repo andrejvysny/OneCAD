@@ -5,6 +5,8 @@ use crate::{app::App, qa::QaPaths};
 use onecad_app::host::DialogPort;
 use std::sync::Arc;
 
+pub use crate::viewport_widgets::PointerKind;
+
 pub struct Editor {
     app: App,
 }
@@ -94,6 +96,13 @@ pub fn cancel_contact(ctx: &egui::Context) {
         input.pointer = Default::default();
     });
     ctx.stop_dragging();
+}
+
+/// Records which input kind presses next, so picking uses its edge aperture
+/// (a fingertip covers far more than the 8 points a mouse needs). Set it
+/// before the frame that carries the press; desktop never calls it.
+pub fn set_pointer_kind(ctx: &egui::Context, kind: PointerKind) {
+    crate::viewport_widgets::set_pointer_kind(ctx, kind);
 }
 
 /// Recovery flushes requested by [`Editor::flush_recovery`].

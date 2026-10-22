@@ -6,6 +6,36 @@ pub fn gesture_allowed(ui: &egui::Ui) -> bool {
         && ui.input(|input| input.focused && !input.key_pressed(egui::Key::Escape))
 }
 
+/// Which input drives the primary pointer; picking widens the edge aperture
+/// for a finger. Desktop never sets it, so mouse picking keeps its 8 points.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PointerKind {
+    /// Mouse, trackpad pointer or Pencil.
+    #[default]
+    Precise,
+    Finger,
+}
+
+/// Edge pick aperture per input kind, in points. Scene picking measures in
+/// logical pixels, which are egui points, so no further scaling applies.
+pub const PRECISE_EDGE_TOLERANCE_PT: f64 = onecad_scene::EDGE_PICK_LOGICAL_PIXELS;
+pub const FINGER_EDGE_TOLERANCE_PT: f64 = 22.0;
+
+fn pointer_kind_id() -> egui::Id {
+    egui::Id::unique("onecad-pointer-kind")
+}
+
+pub fn set_pointer_kind(ctx: &egui::Context, kind: PointerKind) {
+    ctx.data_mut(|data| data.insert_temp(pointer_kind_id(), kind));
+}
+
+pub fn edge_tolerance(ctx: &egui::Context) -> f64 {
+    match ctx.data(|data| data.get_temp::<PointerKind>(pointer_kind_id())) {
+        Some(PointerKind::Finger) => FINGER_EDGE_TOLERANCE_PT,
+        Some(PointerKind::Precise) | None => PRECISE_EDGE_TOLERANCE_PT,
+    }
+}
+
 pub fn allows_pointer(ui: &egui::Ui, rect: egui::Rect, position: egui::Pos2) -> bool {
     gesture_allowed(ui)
         && rect.contains(position)
@@ -18,6 +48,16 @@ pub fn allows_pointer(ui: &egui::Ui, rect: egui::Rect, position: egui::Pos2) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finger_presses_widen_the_edge_aperture_and_mouse_keeps_eight_points() {
+        let ctx = egui::Context::default();
+        assert_eq!(edge_tolerance(&ctx), 8.0, "desktop default");
+        set_pointer_kind(&ctx, PointerKind::Finger);
+        assert_eq!(edge_tolerance(&ctx), FINGER_EDGE_TOLERANCE_PT);
+        set_pointer_kind(&ctx, PointerKind::Precise);
+        assert_eq!(edge_tolerance(&ctx), 8.0);
+    }
 
     #[test]
     fn higher_layer_chrome_blocks_hover_and_new_gestures() {
