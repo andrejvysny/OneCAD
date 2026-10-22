@@ -7,6 +7,18 @@
 use crate::ffi::Insets;
 use egui_wgpu::{RenderState, ScreenDescriptor};
 
+/// The document the last frame ended on, so a frame that switched documents
+/// is noticed after the editor pass.
+#[derive(Default)]
+pub struct ShownDocument(Option<u64>);
+
+impl ShownDocument {
+    /// Records `tab`; whether a previous frame ended on another one.
+    pub fn switched(&mut self, tab: u64) -> bool {
+        self.0.replace(tab).is_some_and(|before| before != tab)
+    }
+}
+
 /// What the host told us about the view, in logical points.
 #[derive(Clone, Copy, Debug)]
 pub struct View {
@@ -194,7 +206,28 @@ impl crate::app::IosApp {
         self.wake.set_in_frame(true);
         let output = editor.frame(&self.ctx, raw);
         self.wake.set_in_frame(false);
-        Ok(self.finish(output, drained.again))
+        let switched = self.left_document();
+        Ok(self.finish(output, drained.again || switched))
+    }
+
+    /// A pass that changed the active document (tab strip, ⌃Tab, a new tab)
+    /// cancels every live contact: it belonged to the document that was left,
+    /// and must not release or drag on the one now shown. The next frame
+    /// forgets egui's press and carries `PointerGone`.
+    fn left_document(&mut self) -> bool {
+        let Some(tab) = self
+            .editor
+            .as_ref()
+            .map(onecad_ui::host::Editor::active_tab)
+        else {
+            return false;
+        };
+        if !self.shown_document.switched(tab) {
+            return false;
+        }
+        self.input
+            .cancel_all(onecad_interaction::touch::CancelReason::DocumentSwitch);
+        true
     }
 
     fn finish(&mut self, mut output: egui::FullOutput, again: bool) -> crate::ffi::FrameResult {
@@ -289,5 +322,20 @@ fn seconds(delay: std::time::Duration) -> f64 {
         -1.0
     } else {
         delay.as_secs_f64()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ShownDocument;
+
+    #[test]
+    fn only_a_change_of_the_shown_document_is_a_switch() {
+        let mut shown = ShownDocument::default();
+        assert!(!shown.switched(1), "the first frame switches nothing");
+        assert!(!shown.switched(1));
+        assert!(shown.switched(2), "tab strip, ⌃Tab or a new tab");
+        assert!(!shown.switched(2));
+        assert!(shown.switched(1), "and back");
     }
 }
