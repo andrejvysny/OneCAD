@@ -199,6 +199,7 @@ fn check_preparation_budget(
             scene.bodies().len() as u64,
             std::mem::size_of::<GpuBody>() as u64,
         )?,
+        peak_gpu_bytes: 0,
         peak_total_bytes: 0,
     };
     budget.limits.check(
@@ -280,6 +281,7 @@ impl Renderer {
             )?,
             target_bytes: self.estimate.target_bytes,
             ibl_bytes: self.estimate.ibl_bytes,
+            peak_gpu_bytes: 0,
             peak_total_bytes: 0,
         };
         let old = MemoryEstimate {

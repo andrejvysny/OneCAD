@@ -55,7 +55,7 @@ impl Renderer {
             |output| output.bytes,
         );
         let next = MemoryEstimate {
-            target_bytes: limits::quality_target_bytes(size, options)?,
+            target_bytes: limits::quality_target_bytes(size, options, self.profile)?,
             cpu_prepared_bytes: 0,
             upload_bytes: 0,
             ..self.estimate

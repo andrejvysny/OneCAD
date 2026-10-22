@@ -116,6 +116,7 @@ impl Renderer {
                 + metadata,
             target_bytes: self.estimate.target_bytes,
             ibl_bytes: self.estimate.ibl_bytes,
+            peak_gpu_bytes: 0,
             peak_total_bytes: 0,
         })
     }
@@ -174,7 +175,11 @@ impl Renderer {
                     - self.section_contour_metadata_bytes(true)
                     + prepared.iter().flatten().count() as u64
                         * std::mem::size_of::<GpuSectionContours>() as u64,
-                target_bytes: crate::limits::quality_target_bytes(self.size, options)?,
+                target_bytes: crate::limits::quality_target_bytes(
+                    self.size,
+                    options,
+                    self.profile,
+                )?,
                 cpu_prepared_bytes: cpu,
                 upload_bytes: bytes,
                 ..self.estimate
@@ -183,7 +188,7 @@ impl Renderer {
                 geometry_bytes: old,
                 resident_metadata_bytes: self.section_contour_metadata_bytes(false)
                     + self.section_contour_metadata_bytes(true),
-                target_bytes: if options.ssaa != self.options.ssaa {
+                target_bytes: if self.needs_new_targets(options) {
                     self.estimate.target_bytes
                 } else {
                     0
