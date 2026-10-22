@@ -93,10 +93,14 @@ fn an_empty_draft_has_nothing_to_republish() {
 }
 
 #[test]
-fn an_existing_feature_edit_republishes_without_a_preview() {
+fn an_existing_feature_edit_republishes_a_replay_and_can_fall_back_to_apply() {
     let (mut state, _) = editing();
     let tag = republished(&mut state);
-    assert!(evaluate(&mut state, &tag, 20.0).is_empty());
+    assert!(matches!(
+        evaluate(&mut state, &tag, 20.0).as_slice(),
+        [Effect::PreviewExistingEdit { .. }]
+    ));
+    edit_unavailable(&mut state, &tag);
     assert_eq!(
         state.tool.as_ref().unwrap().preview,
         PreviewStatus::UnavailableForEdit

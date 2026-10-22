@@ -328,6 +328,7 @@ impl Renderer {
                 let mut next = existing.clone();
                 next.mesh_revision = body.mesh_revision;
                 next.style = crate::BodyStyle::default();
+                next.preview_suppressed = false;
                 next
             } else {
                 body.upload(&gpu, &self.pipelines.frame_layout, id)

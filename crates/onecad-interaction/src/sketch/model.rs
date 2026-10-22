@@ -170,6 +170,7 @@ pub enum SketchStatus {
         result: Box<FinishSketchDto>,
         kept_reason: Option<String>,
     },
+    FinishUncertain(String),
     Discarded(CancelSketchDto),
 }
 
@@ -405,6 +406,11 @@ pub enum SketchAction {
     Finished {
         tag: SketchTag,
         result: Box<FinishSketchDto>,
+        warning: Option<String>,
+    },
+    FinishUncertain {
+        tag: SketchTag,
+        message: String,
     },
     Discarded {
         tag: SketchTag,

@@ -252,6 +252,11 @@ pub(crate) fn available(app: &App, def: &ToolDef) -> bool {
     view(app, def, running_tool(app)).enabled
 }
 
+/// Explain the same gate used when dispatching a tool from command search.
+pub(crate) fn disabled_reason(app: &App, def: &ToolDef) -> Option<&'static str> {
+    view(app, def, None).reason
+}
+
 /// Registry shortcuts are design data; show one only once the app binds it (none yet).
 fn bound_shortcut(def: &ToolDef) -> Option<&'static str> {
     const BOUND: &[ToolId] = &[];

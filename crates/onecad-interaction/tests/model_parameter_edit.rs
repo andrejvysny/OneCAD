@@ -70,7 +70,11 @@ fn radian_literal_uses_angle_evaluator_degrees_without_second_conversion() {
     )
     .unwrap();
     assert!((result.number - 90.0).abs() < 1e-10);
-    evaluate(&mut state, tag, "angle", result.number);
+    assert!(matches!(
+        evaluate(&mut state, tag.clone(), "angle", result.number).as_slice(),
+        [Effect::PreviewExistingEdit { .. }]
+    ));
+    complete_edit_preview(&mut state, &tag);
     state.dispatch(Action::Confirm);
     let Operation::Known(KnownOperation::Revolve(p)) = &state.tool.unwrap().record.op else {
         panic!()
@@ -131,7 +135,11 @@ fn explicit_length_units_evaluate_to_millimetres_and_keep_source_expression() {
     )
     .unwrap();
     assert!((result.number - 27.4).abs() < 1e-10);
-    evaluate(&mut state, tag, "length", result.number);
+    assert!(matches!(
+        evaluate(&mut state, tag.clone(), "length", result.number).as_slice(),
+        [Effect::PreviewExistingEdit { .. }]
+    ));
+    complete_edit_preview(&mut state, &tag);
     state.dispatch(Action::Confirm);
     let Operation::Known(KnownOperation::TransformBody(p)) = state.tool.unwrap().record.op else {
         panic!()

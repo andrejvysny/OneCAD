@@ -76,7 +76,10 @@ fn actual_application_angle_results_accept_scalar_and_angle() {
         let app = application().await;
         for expression in ["6", "2 * 3", "6deg"] {
             let mut state = interaction(NumericParameter::ExtrudeDraftAngle);
-            assert!(evaluate(&app, &mut state, expression).await.is_empty());
+            assert!(matches!(
+                evaluate(&app, &mut state, expression).await.as_slice(),
+                [Effect::PreviewExistingEdit { .. }]
+            ));
             assert!(matches!(
                 &state.tool.as_ref().unwrap().draft_status,
                 DraftStatus::Valid(scalar) if scalar.value == 6.0

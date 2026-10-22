@@ -34,6 +34,7 @@ fn lines(app: &App, sketch: SketchId) -> Vec<(EntityId, String)> {
             let id = entity.get("id")?.as_str()?.parse().ok()?;
             Some((
                 id,
+                entity,
                 entity
                     .get("construction")
                     .and_then(|v| v.as_bool())
@@ -41,25 +42,59 @@ fn lines(app: &App, sketch: SketchId) -> Vec<(EntityId, String)> {
             ))
         })
         .collect();
-    lines.sort_by_key(|(_, construction)| !construction);
+    lines.sort_by_key(|(_, _, construction)| !construction);
     lines
         .into_iter()
         .enumerate()
-        .map(|(i, (id, construction))| {
+        .map(|(i, (id, entity, construction))| {
             (
                 id,
-                format!(
-                    "{} line {}",
-                    if construction {
-                        "Construction"
-                    } else {
-                        "Profile"
-                    },
-                    i + 1
-                ),
+                axis_label(entity, &params.entities, construction, i + 1),
             )
         })
         .collect()
+}
+
+fn axis_label(
+    entity: &serde_json::Value,
+    entities: &[serde_json::Value],
+    construction: bool,
+    index: usize,
+) -> String {
+    let kind = if construction {
+        "Construction"
+    } else {
+        "Profile"
+    };
+    let name = format!("{kind} line {index}");
+    match (
+        endpoint(entity, entities, "p0"),
+        endpoint(entity, entities, "p1"),
+    ) {
+        (Some([x0, y0]), Some([x1, y1])) => {
+            format!("{name}: ({x0:.3}, {y0:.3}) to ({x1:.3}, {y1:.3}) mm")
+        }
+        _ => format!("{name}: coordinates unavailable"),
+    }
+}
+
+fn endpoint(
+    entity: &serde_json::Value,
+    entities: &[serde_json::Value],
+    key: &str,
+) -> Option<[f64; 2]> {
+    let point = if let Some(reference) = entity.get(format!("{key}Ref")).and_then(|id| id.as_str())
+    {
+        entities
+            .iter()
+            .find(|point| point.get("id").and_then(|id| id.as_str()) == Some(reference))?
+            .get("at")?
+    } else {
+        entity.get(key)?
+    };
+    let values = point.as_array()?;
+    let [x, y] = [values.first()?.as_f64()?, values.get(1)?.as_f64()?];
+    (x.is_finite() && y.is_finite()).then_some([x, y])
 }
 
 pub(crate) fn ready(app: &App) -> bool {
@@ -109,6 +144,8 @@ pub(crate) fn rows(
     let mut selected = *line;
     rows.row("Axis", |ui| {
         let response = egui::ComboBox::from_id_salt("revolve-axis")
+            .width(ui.available_width())
+            .wrap()
             .selected_text(
                 lines
                     .iter()
@@ -123,6 +160,7 @@ pub(crate) fn rows(
             .response;
         crate::automation::name(ui.ctx(), response.id, "onecad.option.revolveAxis");
     });
+    rows.caption("Axis endpoints in sketch coordinates (mm)");
     if selected != *line {
         app.dispatch(Action::ModelingOptionsChanged {
             tag: tool.tag.clone(),
@@ -132,5 +170,38 @@ pub(crate) fn rows(
                 extra: Default::default(),
             })),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn axis_names_include_type_and_resolved_endpoint_coordinates() {
+        let points = [
+            json!({"id": "start", "type": "Point", "at": [1.25, -2.5]}),
+            json!({"id": "end", "type": "Point", "at": [1.25, 40.0]}),
+        ];
+        let line = json!({"type": "Line", "p0Ref": "start", "p1Ref": "end"});
+        assert_eq!(
+            axis_label(&line, &points, true, 1),
+            "Construction line 1: (1.250, -2.500) to (1.250, 40.000) mm"
+        );
+        let legacy = json!({"type": "Line", "p0": [0, 0], "p1": [20, 0]});
+        assert_eq!(
+            axis_label(&legacy, &[], false, 2),
+            "Profile line 2: (0.000, 0.000) to (20.000, 0.000) mm"
+        );
+    }
+
+    #[test]
+    fn missing_axis_points_are_reported_without_raw_ids() {
+        let line = json!({"type": "Line", "p0Ref": "missing", "p1Ref": "missing"});
+        assert_eq!(
+            axis_label(&line, &[], false, 2),
+            "Profile line 2: coordinates unavailable"
+        );
     }
 }

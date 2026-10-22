@@ -6,6 +6,7 @@ pub(crate) struct GpuSectionContours {
     buffer: wgpu::Buffer,
     count: u32,
     key: SectionContourKey,
+    owners: Vec<[u64; 4]>,
 }
 impl GpuSectionContours {
     fn bytes(&self) -> u64 {
@@ -112,7 +113,7 @@ impl Renderer {
             upload_bytes: add(scene.gpu_bytes, bytes)?,
             resident_metadata_bytes: (scene.body_count() + count) as u64
                 * std::mem::size_of::<crate::mesh::GpuBody>() as u64
-                + std::mem::size_of::<GpuSectionContours>() as u64
+                + contours.gpu_metadata_bytes()
                 + metadata,
             target_bytes: self.estimate.target_bytes,
             ibl_bytes: self.estimate.ibl_bytes,
@@ -173,8 +174,11 @@ impl Renderer {
                 resident_metadata_bytes: self.estimate.resident_metadata_bytes
                     - self.section_contour_metadata_bytes(false)
                     - self.section_contour_metadata_bytes(true)
-                    + prepared.iter().flatten().count() as u64
-                        * std::mem::size_of::<GpuSectionContours>() as u64,
+                    + prepared
+                        .iter()
+                        .flatten()
+                        .map(|p| p.gpu_metadata_bytes())
+                        .sum::<u64>(),
                 target_bytes: crate::limits::quality_target_bytes(
                     self.size,
                     options,
@@ -218,6 +222,7 @@ impl Renderer {
             buffer,
             count: prepared.segments().len() as u32,
             key: prepared.key,
+            owners: prepared.owners,
         }
     }
     pub(crate) fn section_contour_gpu_bytes(&self, preview: bool) -> u64 {
@@ -226,11 +231,12 @@ impl Renderer {
             .map_or(0, GpuSectionContours::bytes)
     }
     pub(crate) fn section_contour_metadata_bytes(&self, preview: bool) -> u64 {
-        if self.section_contours[usize::from(preview)].is_some() {
-            std::mem::size_of::<GpuSectionContours>() as u64
-        } else {
-            0
-        }
+        self.section_contours[usize::from(preview)]
+            .as_ref()
+            .map_or(0, |contours| {
+                std::mem::size_of::<GpuSectionContours>() as u64
+                    + contours.owners.capacity() as u64 * 32
+            })
     }
     pub(crate) fn clear_preview_section_contours(&mut self) {
         let bytes = self.section_contour_gpu_bytes(true);
@@ -259,7 +265,7 @@ impl Renderer {
             geometry_bytes: add(self.estimate.geometry_bytes.saturating_sub(old), size)?,
             resident_metadata_bytes: self.estimate.resident_metadata_bytes
                 - self.section_contour_metadata_bytes(key.preview.is_some())
-                + std::mem::size_of::<GpuSectionContours>() as u64,
+                + prepared.gpu_metadata_bytes(),
             cpu_prepared_bytes: prepared.cpu_bytes(),
             upload_bytes: size,
             ..self.estimate
@@ -305,8 +311,41 @@ impl Renderer {
                 && (contours.key.preview.is_none() || contours.key.preview == self.preview_identity)
             {
                 pass.set_vertex_buffer(0, contours.buffer.slice(..));
-                pass.draw(0..4, 0..contours.count);
+                self.draw_visible_contours(pass, contours);
             }
+        }
+    }
+    fn draw_visible_contours(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        contours: &GpuSectionContours,
+    ) {
+        if contours.key.preview.is_some()
+            || !self.committed.iter().any(|body| body.preview_suppressed)
+        {
+            pass.draw(0..4, 0..contours.count);
+            return;
+        }
+        let mut visible = [0u64; 4];
+        for (index, body) in self.committed.iter().enumerate().take(256) {
+            if !body.preview_suppressed {
+                visible[index / 64] |= 1 << (index % 64);
+            }
+        }
+        let mut first = None;
+        for (index, owners) in contours.owners.iter().enumerate() {
+            let draw = owners
+                .iter()
+                .zip(visible)
+                .any(|(owner, visible)| owner & visible != 0);
+            if draw {
+                first.get_or_insert(index as u32);
+            } else if let Some(start) = first.take() {
+                pass.draw(0..4, start..index as u32);
+            }
+        }
+        if let Some(first) = first {
+            pass.draw(0..4, first..contours.count);
         }
     }
 }

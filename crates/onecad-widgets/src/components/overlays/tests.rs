@@ -164,3 +164,89 @@ fn feature_card_respects_cancellation_availability() {
         }
     }
 }
+
+#[test]
+fn long_feature_card_scrolls_parameters_with_fixed_header_and_actions() {
+    for size in [vec2(900.0, 560.0), vec2(1280.0, 820.0)] {
+        let ctx = egui::Context::default();
+        theme::install(&ctx, theme::load(false).unwrap(), false);
+        let card_top = egui::pos2(50.0, 100.0);
+        let height = 296.0;
+        let mut fixed = None;
+        let mut last_visible = false;
+        for pass in 0..8 {
+            let events = if pass >= 3 {
+                vec![
+                    egui::Event::PointerMoved(card_top + vec2(150.0, 100.0)),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        source: egui::MouseWheelSource::Wheel,
+                        phase: egui::TouchPhase::Move,
+                        delta: vec2(0.0, -1000.0),
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]
+            } else {
+                Vec::new()
+            };
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                    events,
+                    ..Default::default()
+                },
+                |_| {
+                    crate::frame::floating(
+                        egui::Id::unique("long-card"),
+                        card_top,
+                        egui::Order::Middle,
+                    )
+                    .show(&ctx, |ui| {
+                        ui.set_max_height(height);
+                        FeatureCard::new("long", "gear", "Gear")
+                            .max_height(height)
+                            .ok_label("Create ↵")
+                            .show(ui, |rows| {
+                                for index in 0..20 {
+                                    rows.row("Value", |ui| {
+                                        ui.label(format!("Parameter {index}"));
+                                    });
+                                }
+                            });
+                    });
+                },
+            );
+            out.textures_delta.clear();
+            if pass == 0 {
+                continue;
+            }
+            let mut positions = Vec::new();
+            for shape in &out.shapes {
+                if let egui::epaint::Shape::Text(text) = &shape.shape {
+                    let bounds = Rect::from_min_size(text.pos, text.galley.size());
+                    let visible = shape.clip_rect.contains_rect(bounds);
+                    if matches!(
+                        text.galley.job.text.as_str(),
+                        "Gear" | "Cancel" | "Create ↵"
+                    ) {
+                        assert!(visible, "{} clipped", text.galley.job.text);
+                        assert!(bounds.bottom() <= card_top.y + height);
+                        positions.push(text.pos);
+                    }
+                    if text.galley.job.text == "Parameter 19" {
+                        last_visible = visible;
+                    }
+                }
+            }
+            assert_eq!(positions.len(), 3);
+            if pass == 2 {
+                fixed = Some(positions.clone());
+                assert!(!last_visible);
+            }
+            if pass > 2 {
+                assert_eq!(Some(&positions), fixed.as_ref());
+            }
+        }
+        assert!(last_visible, "last parameter unreachable at {size:?}");
+    }
+}

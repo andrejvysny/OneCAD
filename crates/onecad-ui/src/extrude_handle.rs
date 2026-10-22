@@ -98,16 +98,25 @@ fn target(app: &App) -> Option<Target> {
     let tool = app.doc.interaction.tool.as_ref()?;
     let params = distance_params(tool)?;
     let wanted = params.profile.as_ref()?;
-    let profile = app
-        .doc
-        .display
-        .as_ref()?
+    let display = app.doc.display.as_ref()?;
+    let (base, normal) = display
         .profiles
         .iter()
-        .find(|p| p.reference.sketch == wanted.sketch && p.reference.region == wanted.region)?;
-    let normal = profile.plane().normal;
-    let normal = DVec3::new(normal.x, normal.y, normal.z).try_normalize()?;
-    let base = profile.centroid();
+        .find(|p| p.reference.sketch == wanted.sketch && p.reference.region == wanted.region)
+        .map(|p| {
+            let normal = p.plane().normal;
+            (p.centroid(), DVec3::new(normal.x, normal.y, normal.z))
+        })
+        .or_else(|| {
+            display
+                .profile_anchors
+                .iter()
+                .find(|a| {
+                    a.reference.sketch == wanted.sketch && a.reference.region == wanted.region
+                })
+                .map(|a| (a.base, a.normal))
+        })?;
+    let normal = normal.try_normalize()?;
     let fallback = if params.distance.value.is_finite() && params.distance.value != 0.0 {
         params.distance.value
     } else {
@@ -510,6 +519,11 @@ fn paint(ui: &egui::Ui, rect: Rect, theme: &crate::theme::Theme, base: Pos2, tip
         color,
         Stroke::new(1.5, theme.border_strong),
     );
+}
+
+#[cfg(test)]
+pub(crate) fn testing_tip(app: &App, rect: Rect, distance: f64) -> Option<Pos2> {
+    Some(points(app.doc.view.as_ref()?, rect, &target(app)?, distance)?.1)
 }
 
 #[cfg(test)]

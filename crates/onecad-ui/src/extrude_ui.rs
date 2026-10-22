@@ -11,7 +11,7 @@ use onecad_interaction::{Action, ModelSession, SessionPhase};
 use onecad_widgets::components::overlays::FeatureCardRows;
 
 pub(crate) fn params(tool: &ModelSession) -> Option<&onecad_core::document::record::ExtrudeParams> {
-    if tool.editing_existing || tool.phase != SessionPhase::Editing {
+    if tool.phase != SessionPhase::Editing {
         return None;
     }
     match &tool.record.op {
@@ -124,13 +124,10 @@ fn target_row(app: &mut App, rows: &mut FeatureCardRows, target: Option<BodyId>)
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut selected, None, "Select body");
                 for (id, name) in &targets {
-                    ui.selectable_value(&mut selected, Some(*id), name)
-                        .on_hover_text(id.to_string());
+                    ui.selectable_value(&mut selected, Some(*id), name);
                 }
             });
-        if let Some(id) = target {
-            ui.add(egui::Label::new(egui::RichText::new(id.to_string()).small()).wrap());
-        } else {
+        if target.is_none() {
             ui.label("Choose body here or in the tree");
         }
     });

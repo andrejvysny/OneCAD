@@ -98,6 +98,31 @@ fn coplanar_patch_diagonals_cancel_and_nested_bodies_keep_boundaries() {
 }
 
 #[test]
+fn coincident_contour_ownership_keeps_unedited_body_lines_visible() {
+    let segment = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    let (segments, owners) = resolve_owned(vec![
+        Candidate {
+            segment,
+            coplanar: false,
+            body: 0,
+        },
+        Candidate {
+            segment,
+            coplanar: false,
+            body: 1,
+        },
+    ])
+    .unwrap();
+    assert_eq!(segments, [segment]);
+    assert_eq!(owners, [[3, 0, 0, 0]]);
+    assert_ne!(
+        owners[0][0] & 2,
+        0,
+        "suppressing body 0 must keep body 1's shared line"
+    );
+}
+
+#[test]
 fn retained_request_releases_source_lease_after_cancel() {
     struct Lease(Arc<std::sync::atomic::AtomicBool>);
     impl Drop for Lease {

@@ -9,10 +9,11 @@ use crate::components::tooltip::Tip;
 use crate::fonts;
 use crate::frame;
 use crate::icon::{self, IconStyle};
-use crate::metrics::{CONTROL, Elevation, PANEL_TITLE, RADIUS_XL};
+use crate::metrics::{CONTROL, Elevation, H_FIELD, PANEL_TITLE, RADIUS_XL};
 use crate::theme::look;
 
 const HEADER_H: f32 = 44.0;
+const FOOTER_H: f32 = H_FIELD + 20.0;
 const LABEL_W: f32 = 76.0;
 
 #[derive(Default)]
@@ -34,6 +35,7 @@ pub struct FeatureCard<'a> {
     ok_enabled: bool,
     ok_label: &'a str,
     cancel_enabled: bool,
+    max_height: Option<f32>,
 }
 
 /// Body helper: label column 76, row gap 10. The closure passed to `row` gets the
@@ -95,6 +97,7 @@ impl<'a> FeatureCard<'a> {
             ok_enabled: true,
             ok_label: "OK ↵",
             cancel_enabled: true,
+            max_height: None,
         }
     }
     pub fn shortcut(mut self, key: Option<&'a str>) -> Self {
@@ -103,6 +106,11 @@ impl<'a> FeatureCard<'a> {
     }
     pub fn width(mut self, width: f32) -> Self {
         self.width = width;
+        self
+    }
+    /// Bounds the whole card; only parameters scroll, leaving actions visible.
+    pub fn max_height(mut self, height: f32) -> Self {
+        self.max_height = Some(height);
         self
     }
     pub fn ok_enabled(mut self, enabled: bool) -> Self {
@@ -129,24 +137,15 @@ impl<'a> FeatureCard<'a> {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 out.close = self.header(ui);
                 divider(ui);
-                egui::Frame::new()
-                    .inner_margin(Margin::same(12))
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 10.0;
-                        let key = ui.scope_id().with("label-w");
-                        let stored = ui.data(|d| d.get_temp::<f32>(key));
-                        let mut body = FeatureCardRows {
-                            ui,
-                            label_w: stored.unwrap_or(LABEL_W).max(LABEL_W),
-                            seen_w: 0.0,
-                        };
-                        rows(&mut body);
-                        let next = (body.seen_w.ceil() + 2.0).max(LABEL_W);
-                        if stored != Some(next) {
-                            ui.data_mut(|d| d.insert_temp(key, next));
-                            ui.ctx().request_repaint();
-                        }
-                    });
+                if let Some(height) = self.max_height {
+                    egui::ScrollArea::vertical()
+                        .id_salt("parameters")
+                        .max_height((height - HEADER_H - FOOTER_H - 4.0).max(0.0))
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| Self::body(ui, rows));
+                } else {
+                    Self::body(ui, rows);
+                }
                 divider(ui);
                 self.footer(ui, &mut out);
             });
@@ -154,11 +153,33 @@ impl<'a> FeatureCard<'a> {
         out
     }
 
+    fn body(ui: &mut Ui, rows: impl FnOnce(&mut FeatureCardRows)) {
+        egui::Frame::new()
+            .inner_margin(Margin::same(12))
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 10.0;
+                let key = ui.scope_id().with("label-w");
+                let stored = ui.data(|d| d.get_temp::<f32>(key));
+                let mut body = FeatureCardRows {
+                    ui,
+                    label_w: stored.unwrap_or(LABEL_W).max(LABEL_W),
+                    seen_w: 0.0,
+                };
+                rows(&mut body);
+                let next = (body.seen_w.ceil() + 2.0).max(LABEL_W);
+                if stored != Some(next) {
+                    ui.data_mut(|d| d.insert_temp(key, next));
+                    ui.ctx().request_repaint();
+                }
+            });
+    }
+
     fn header(&self, ui: &mut Ui) -> bool {
         let l = look(ui.ctx());
         let t = &l.theme;
-        let (rect, _) =
+        let (rect, response) =
             ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H), Sense::hover());
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, self.title));
         let cy = rect.center().y;
         let p = ui.painter();
         let glyph =

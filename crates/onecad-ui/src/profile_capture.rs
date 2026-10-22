@@ -4,7 +4,15 @@ use crate::{
     profiles::{Profile, ProfileBudget, decode_profiles_budgeted},
 };
 use onecad_app::{api, dto::DocumentProjection, error::ApiError};
-use onecad_core::{ids::SketchId, regen::Diagnostic};
+use onecad_core::{
+    document::{
+        record::{KnownOperation, Operation, OperationRecord},
+        refs::SketchRegionRef,
+    },
+    ids::SketchId,
+    regen::Diagnostic,
+};
+use onecad_scene::DVec3;
 
 #[derive(Debug)]
 pub struct Failure {
@@ -13,15 +21,54 @@ pub struct Failure {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// Hidden profile geometry is retained only for authoring; never rendered or picked.
+pub struct Anchor {
+    pub reference: SketchRegionRef,
+    pub base: DVec3,
+    pub normal: DVec3,
+    pub triangle: [DVec3; 3],
+}
+#[derive(Default)]
+pub struct Captured {
+    pub profiles: Vec<Profile>,
+    pub anchors: Vec<Anchor>,
+    pub failures: Vec<Failure>,
+}
+fn referenced(records: &[OperationRecord]) -> Vec<&SketchRegionRef> {
+    records
+        .iter()
+        .filter_map(|record| match &record.op {
+            Operation::Known(KnownOperation::Extrude(p)) => p.profile.as_ref(),
+            Operation::Known(KnownOperation::Revolve(p)) => p.profile.as_ref(),
+            _ => None,
+        })
+        .collect()
+}
+fn anchor(profile: &Profile) -> Option<Anchor> {
+    let triangle = profile.triangles.iter().find_map(|t| {
+        let [a, b, c] = t.map(|i| profile.vertices[i as usize]);
+        ((b - a).cross(c - a).length_squared() > 1e-20).then_some([a, b, c])
+    })?;
+    let normal = profile.plane().normal;
+    Some(Anchor {
+        reference: profile.reference.clone(),
+        base: profile.centroid(),
+        normal: DVec3::new(normal.x, normal.y, normal.z).try_normalize()?,
+        triangle,
+    })
+}
 pub async fn load(
     backend: &Backend,
     projection: &DocumentProjection,
-) -> Result<(Vec<Profile>, Vec<Failure>), String> {
-    let mut profiles = Vec::new();
-    let mut failures = Vec::new();
+    records: &[OperationRecord],
+) -> Result<Captured, String> {
+    let references = referenced(records);
+    let mut captured = Captured::default();
     let mut profile_budget = ProfileBudget::default();
     let mut evidence_budget = EvidenceBudget::default();
-    for sketch in projection.sketches.values().filter(|sketch| sketch.visible) {
+    for sketch in projection.sketches.values().filter(|sketch| {
+        sketch.visible || references.iter().any(|r| r.sketch.to_string() == sketch.id)
+    }) {
         let id: SketchId = sketch
             .id
             .parse()
@@ -30,23 +77,53 @@ pub async fn load(
             .await
             .map_err(|error| error.to_string())?;
         match api::get_sketch_regions(&backend.state, sketch.id.clone()).await {
-            Ok(regions) => profiles.extend(decode_profiles_budgeted(
-                id,
-                plane,
-                regions,
-                &mut profile_budget,
-            )?),
+            Ok(regions) => {
+                let profiles = decode_profiles_budgeted(id, plane, regions, &mut profile_budget)?;
+                if sketch.visible {
+                    captured.profiles.extend(profiles);
+                } else {
+                    retain_hidden(
+                        &mut captured.anchors,
+                        &profiles,
+                        &references,
+                        &mut profile_budget,
+                    )?;
+                }
+            }
             Err(error) => {
                 let failure = recoverable(id, error)?;
-                if failures.len() >= 64 {
+                if captured.failures.len() >= 64 {
                     return Err("Native profile refusal sketch count exceeded".into());
                 }
                 evidence_budget.failure(&failure)?;
-                failures.push(failure);
+                captured.failures.push(failure);
             }
         }
     }
-    Ok((profiles, failures))
+    Ok(captured)
+}
+
+fn retain_hidden(
+    anchors: &mut Vec<Anchor>,
+    profiles: &[Profile],
+    references: &[&SketchRegionRef],
+    budget: &mut ProfileBudget,
+) -> Result<(), String> {
+    for profile in profiles.iter().filter(|p| {
+        references
+            .iter()
+            .any(|r| r.sketch == p.reference.sketch && r.region == p.reference.region)
+    }) {
+        if let Some(anchor) = anchor(profile) {
+            // Four slots cover Vec growth, including its initial allocation; cloned refs have no extra map entries.
+            let bytes = (4 * std::mem::size_of::<Anchor>())
+                .checked_add(anchor.reference.region.0.capacity())
+                .ok_or("profile anchor metadata overflow")?;
+            budget.retain_metadata(bytes)?;
+            anchors.push(anchor);
+        }
+    }
+    Ok(())
 }
 
 fn recoverable(sketch: SketchId, error: ApiError) -> Result<Failure, String> {
@@ -176,6 +253,44 @@ mod tests {
                 evidence: None,
             }],
         }
+    }
+    #[test]
+    fn hidden_anchor_allocations_share_the_existing_profile_reservation() {
+        let profiles = crate::profiles::decode_profiles(
+            SketchId::new(),
+            onecad_core::sketch::SketchPlane::xy(),
+            onecad_app::dto::FinishSketchDto {
+                region_identity_version: 3,
+                diagnostics: vec![],
+                regions: vec![onecad_app::dto::SketchRegionDto {
+                    region_id: "cell-v3:anchor-budget".into(),
+                    outer_loop: vec![],
+                    holes: vec![],
+                    preview_triangles: Some(onecad_app::dto::PreviewTrianglesDto {
+                        positions: vec![0.0, 0.0, 10.0, 0.0, 0.0, 10.0],
+                        indices: vec![0, 1, 2],
+                        holes_subtracted: 0,
+                    }),
+                }],
+            },
+        )
+        .unwrap();
+        let references = vec![&profiles[0].reference];
+        let mut anchors = Vec::new();
+        let mut budget = ProfileBudget::default();
+        retain_hidden(&mut anchors, &profiles, &references, &mut budget).unwrap();
+        assert_eq!(anchors.len(), 1);
+        assert!(
+            budget
+                .retain_metadata(crate::budget::MAX_PROFILE_BYTES)
+                .is_err()
+        );
+        let mut full = ProfileBudget::default();
+        full.retain_metadata(crate::budget::MAX_PROFILE_BYTES)
+            .unwrap();
+        let mut refused = Vec::new();
+        assert!(retain_hidden(&mut refused, &profiles, &references, &mut full).is_err());
+        assert!(refused.is_empty(), "reserve before retaining allocation");
     }
     #[test]
     fn only_known_profile_formation_refusals_can_omit_fills() {

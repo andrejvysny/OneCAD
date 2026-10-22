@@ -594,3 +594,134 @@ fn assert_draft(host: &Host, text: &str, value: f64) {
 pub(super) fn undo_depth(host: &Host) -> usize {
     host.app.doc.display.as_ref().unwrap().projection.undo_depth
 }
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic native input is not physical acceptance"]
+async fn reopened_consumed_extrude_profile_has_a_real_handle_and_draft_preview() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut app, context) = create_app(root.path()).await;
+    context.enable_accesskit();
+    let mut frame = eframe::Frame::_new_kittest();
+    pump_until(&mut app, &context, &mut frame, |app| {
+        app.doc.display.is_some()
+    })
+    .await;
+    let path = root.path().join("qa/documents/QA-plate-hole.onecad");
+    std::fs::write(
+        &path,
+        include_bytes!("../../onecad-app/tests/fixtures/qa_plate_hole.onecad"),
+    )
+    .unwrap();
+    app.document_request(crate::document_flow::Request::Open(Some(path)));
+    pump_until(&mut app, &context, &mut frame, |app| {
+        !app.busy()
+            && app
+                .doc
+                .display
+                .as_ref()
+                .is_some_and(|d| d.projection.features.len() >= 5)
+    })
+    .await;
+    let mut host = Host {
+        app,
+        context,
+        frame,
+        size: egui::vec2(1280.0, 820.0),
+        widgets: vec![],
+    };
+    host.app.ui.start_open = false;
+    let record = host
+        .app
+        .doc
+        .display
+        .as_ref()
+        .unwrap()
+        .records
+        .iter()
+        .rev()
+        .find(|r| {
+            matches!(
+                r.op,
+                onecad_core::document::record::Operation::Known(
+                    onecad_core::document::record::KnownOperation::Extrude(_)
+                )
+            )
+        })
+        .unwrap()
+        .clone();
+    let context = host.app.doc.interaction.context.clone().unwrap();
+    host.app.doc.gesture += 1;
+    host.app.dispatch(Action::BeginOperationEdit {
+        record: Box::new(record),
+        gesture: host.app.doc.gesture,
+        context,
+    });
+    pump_until(&mut host.app, &host.context, &mut host.frame, |app| {
+        app.doc.interaction.tool.as_ref().is_some_and(|t| t.ready())
+    })
+    .await;
+    host.redraw();
+    assert!(
+        crate::extrude_handle::available(&host.app),
+        "reopened consumed profile must retain a worker-derived anchor"
+    );
+    let tool = host.app.doc.interaction.tool.as_ref().unwrap();
+    let onecad_core::document::record::Operation::Known(
+        onecad_core::document::record::KnownOperation::Extrude(params),
+    ) = tool.effective_op()
+    else {
+        panic!()
+    };
+    let wanted = params.profile.unwrap();
+    let display = host.app.doc.display.as_ref().unwrap();
+    assert!(
+        !display
+            .profiles
+            .iter()
+            .any(|p| p.reference.sketch == wanted.sketch && p.reference.region == wanted.region),
+        "consumed profile must remain hidden and unpickable"
+    );
+    let anchor = display
+        .profile_anchors
+        .iter()
+        .find(|p| p.reference.sketch == wanted.sketch && p.reference.region == wanted.region)
+        .unwrap();
+    host.app.doc.camera = Camera {
+        target: anchor.base,
+        offset: DVec3::new(70.0, -110.0, 90.0),
+        projection: Projection::Perspective,
+        ..Default::default()
+    };
+    host.app.doc.fit_pending = false;
+    host.redraw();
+    let rect = crate::layout::chrome(host.screen(), &host.app.ui).viewport;
+    let start = crate::extrude_handle::testing_tip(&host.app, rect, 8.0).unwrap();
+    let end = crate::extrude_handle::testing_tip(&host.app, rect, 20.0).unwrap();
+    let undo = undo_depth(&host);
+    let original = draft(&host);
+    let sequence = host.app.doc.interaction.tool.as_ref().unwrap().tag.sequence;
+    host.ui(vec![
+        egui::Event::PointerMoved(start),
+        button(start, true),
+        button(start, false),
+    ]);
+    assert_eq!(draft(&host), original);
+    assert_eq!(
+        host.app.doc.interaction.tool.as_ref().unwrap().tag.sequence,
+        sequence
+    );
+    host.ui(vec![
+        egui::Event::PointerMoved(start),
+        button(start, true),
+        egui::Event::PointerMoved(end),
+        button(end, false),
+    ]);
+    valid(&mut host, "20", 20.0).await;
+    assert_eq!(
+        undo_depth(&host),
+        undo,
+        "reopened edit drag authors a draft only"
+    );
+    assert!(crate::extrude_handle::available(&host.app));
+    host.stop().await;
+}

@@ -61,6 +61,7 @@ fn diagnostic(entity: EntityId) -> Diagnostic {
 
 fn finished(tag: SketchTag, diagnostics: Vec<Diagnostic>) -> SketchAction {
     SketchAction::Finished {
+        warning: None,
         tag,
         result: Box::new(onecad_app::dto::FinishSketchDto {
             region_identity_version: 3,

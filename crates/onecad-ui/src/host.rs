@@ -233,6 +233,8 @@ pub(crate) fn drag_authoring(app: &App) -> bool {
     let handles = !app.sketch_active()
         && (app.doc.extrude_handle.active()
             || app.doc.transform_gizmo.gizmo.active()
+            || app.doc.model_handle.active()
+            || crate::model_handle::available(app)
             || crate::extrude_handle::available(app)
             || crate::transform_ui::triad(app).is_some());
     sketch_tool || app.doc.sketch_gesture.busy() || handles

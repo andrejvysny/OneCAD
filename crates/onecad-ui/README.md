@@ -527,6 +527,18 @@ continuous redraw or change click timing. An `unclaimed` pointer snapshot means
 that no tracked host owner is currently captured; event-specific overlay and
 focus fields still determine whether a new gesture is allowed.
 
+`host.window_state` records the initial viewport state and changes observed in
+the logic callback, including ticks where occlusion suppresses the UI. It includes
+focus, occlusion, minimization, rendering visibility, inner/outer rectangles,
+monitor size and native/effective pixel scale. Rectangles are `[x, y, width,
+height]` in egui points. Unknown platform values remain `null`; unchanged state
+adds no records or repaint requests. This is eframe's reported state, not an
+independent AppKit or WindowServer observation. Monitor size does not identify
+equally sized displays, Spaces, native dialog placement or automation capture
+routing. Correlate transitions with `host.logic`, `host.ui` and repaint requests
+before attributing a stale screenshot to rendering. An idle window emits no
+periodic samples, so absent records alone do not establish a stalled event loop.
+
 `viewport.gpu_submit` and `viewport.gpu_complete` identify submitted and completed
 CAD render work. `viewport.image_queued` means the captured image was added to an
 egui UI pass. Neither event proves that macOS physically presented that frame.

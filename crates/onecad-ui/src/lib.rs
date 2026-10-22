@@ -53,6 +53,7 @@ mod item_selection;
 mod layout;
 mod library_pages;
 mod menu;
+mod model_handle;
 mod model_pick;
 mod modeling_ui;
 mod native_extensions;

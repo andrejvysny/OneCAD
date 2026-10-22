@@ -25,6 +25,7 @@ pub(crate) fn model(action: &Action) -> Value {
         Action::TransformDraftChanged { .. } => "TransformDraftChanged",
         Action::Evaluated { .. } => "Evaluated",
         Action::PreviewFinished { .. } => "PreviewFinished",
+        Action::EditPreviewFinished { .. } => "EditPreviewFinished",
         Action::Confirm => "Confirm",
         Action::Cancel => "Cancel",
         Action::Republish => "Republish",
@@ -74,6 +75,7 @@ pub(crate) fn sketch(action: &SketchAction) -> Value {
         SketchAction::ReenterForRepair { .. } => "ReenterForRepair",
         SketchAction::FinishRefused { .. } => "FinishRefused",
         SketchAction::Finished { .. } => "Finished",
+        SketchAction::FinishUncertain { .. } => "FinishUncertain",
         SketchAction::Discarded { .. } => "Discarded",
     };
     let mut detail = json!({"action": name});

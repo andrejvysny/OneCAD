@@ -56,15 +56,29 @@ pub struct Delivery {
 }
 impl Delivery {
     pub fn stale_actions(self) -> Vec<SketchAction> {
+        let backend_closed = self.actions.iter().any(|action| {
+            matches!(
+                action,
+                SketchAction::Finished { .. } | SketchAction::FinishUncertain { .. }
+            )
+        });
         let mut actions: Vec<_> = self
             .actions
             .into_iter()
             .filter(|action| matches!(action, SketchAction::BatchAccepted { .. }))
             .collect();
         if let Some(tag) = self.tag {
-            actions.push(SketchAction::Failed {
-                tag,
-                message: "Sketch scene became stale before delivery".into(),
+            let message = "Sketch scene became stale before delivery";
+            actions.push(if backend_closed {
+                SketchAction::FinishUncertain {
+                    tag,
+                    message: uncertain_finish(message),
+                }
+            } else {
+                SketchAction::Failed {
+                    tag,
+                    message: message.into(),
+                }
             });
         }
         actions
@@ -79,13 +93,14 @@ enum Reply {
     Solved(Box<SketchUpsertDto>),
     ConstraintRefused(String),
     History(onecad_app::dto::SketchHistoryDto),
-    Finished(Box<onecad_app::dto::FinishSketchDto>),
-    FinishRefused {
-        message: String,
-        diagnostics: Vec<onecad_core::regen::Diagnostic>,
-    },
+    Finished(Box<onecad_app::dto::FinishSketchDto>, Option<String>),
+    FinishUncertain(String),
     Discarded(onecad_app::dto::CancelSketchDto),
 }
+
+#[cfg(all(test, feature = "desktop"))]
+#[path = "sketch_services/regression.rs"]
+mod regression;
 
 pub async fn execute(
     backend: &mut Backend,
@@ -126,7 +141,9 @@ pub async fn execute(
         _ => None,
     };
     let mut actions = Vec::new();
-    let result = match run(backend, request, &mut actions).await {
+    let reply = run(backend, request, &mut actions).await;
+    let backend_closed = matches!(reply, Ok(Reply::Finished(..) | Reply::FinishUncertain(_)));
+    let result = match reply {
         Ok(reply) => api::preview_context(&backend.state)
             .await
             .map(|context| (reply, context))
@@ -161,11 +178,21 @@ pub async fn execute(
             }
         }
     }
+    if backend_closed {
+        error = error.map(|message| uncertain_finish(&message));
+    }
     if let Some(message) = &error {
         if let Some(tag) = tag.clone() {
-            actions.push(SketchAction::Failed {
-                tag,
-                message: message.clone(),
+            actions.push(if backend_closed {
+                SketchAction::FinishUncertain {
+                    tag,
+                    message: message.clone(),
+                }
+            } else {
+                SketchAction::Failed {
+                    tag,
+                    message: message.clone(),
+                }
             });
         }
         if display.is_none() {
@@ -495,6 +522,13 @@ async fn finish(backend: &mut Backend, id: String) -> Result<Reply, String> {
     .await
     .map_err(|e| e.to_string())?;
     complete(backend, receipt).await?;
+    Ok(match finish_closed_session(backend, id).await {
+        Ok(reply) => reply,
+        Err(message) => Reply::FinishUncertain(uncertain_finish(&message)),
+    })
+}
+
+async fn finish_closed_session(backend: &mut Backend, id: String) -> Result<Reply, String> {
     let before = api::get_projection(&backend.state)
         .await
         .map_err(|e| e.to_string())?;
@@ -502,38 +536,79 @@ async fn finish(backend: &mut Backend, id: String) -> Result<Reply, String> {
         session: before.runtime_session,
         revision: before.revision + 1,
     });
-    let receipt =
-        match api::finish_sketch_with_completion(&backend.state, backend.host.clone(), id).await {
-            Ok(receipt) => receipt,
-            Err(error) => return finish_error(error),
+    let receipt = api::finish_sketch_with_completion(&backend.state, backend.host.clone(), id)
+        .await
+        .map_err(|error| error.to_string())?;
+    if receipt.regen_expected {
+        backend.events.retarget(
+            &receipt.projection.runtime_session,
+            receipt.projection.revision,
+        );
+    }
+    let session = receipt.projection.runtime_session.clone();
+    let revision = receipt.projection.revision;
+    let completed = crate::sketch_completion::finish_authoring(
+        receipt,
+        crate::services::wait_regen(backend, &session, revision),
+    )
+    .await?;
+    let projection = api::get_projection(&backend.state)
+        .await
+        .map_err(|error| error.to_string())?;
+    if projection.runtime_session != session || projection.revision < revision {
+        return Err("Finish projection belongs to a replaced document head".into());
+    }
+    finish_reply(completed, &projection)
+}
+fn finish_reply(
+    completed: crate::sketch_completion::FinishCompletion,
+    projection: &onecad_app::dto::DocumentProjection,
+) -> Result<Reply, String> {
+    let warning = completed
+        .regeneration
+        .as_ref()
+        .and_then(|completion| crate::sketch_completion::finish_warning(completion, projection));
+    let published = completed
+        .regeneration
+        .as_ref()
+        .is_none_or(|completion| matches!(completion.outcome.as_str(), "published" | "noop"));
+    if !published {
+        let error = completed
+            .regeneration
+            .as_ref()
+            .and_then(crate::sketch_completion::completion_error)
+            .unwrap_or_else(|| "Finish geometry was not published".into());
+        let authored = if completed.authored.is_ok() {
+            "accepted"
+        } else {
+            "not confirmed"
         };
-    let diagnostics = match &receipt.result {
+        return Err(format!("Finish authoring {authored}; {error}"));
+    }
+    let diagnostics = match &completed.authored {
         Err(onecad_app::error::ApiError::OpFailed { diagnostics, .. }) => diagnostics.clone(),
         _ => Vec::new(),
     };
-    finish_reply(complete(backend, receipt).await, diagnostics)
-}
-fn finish_reply(
-    completed: Result<onecad_app::dto::FinishSketchDto, String>,
-    diagnostics: Vec<onecad_core::regen::Diagnostic>,
-) -> Result<Reply, String> {
-    match completed {
-        Ok(result) => Ok(Reply::Finished(Box::new(result))),
+    match completed.authored {
+        Ok(result) => Ok(Reply::Finished(Box::new(result), warning)),
         // The runtime commits the sketch record before deriving regions, so an
         // invalid profile must not trap the user in sketch mode: close and warn.
-        Err(_) if profile_refusal(&diagnostics) => Ok(Reply::Finished(Box::new(
-            onecad_app::dto::FinishSketchDto {
+        Err(_) if profile_refusal(&diagnostics) => Ok(Reply::Finished(
+            Box::new(onecad_app::dto::FinishSketchDto {
                 region_identity_version: 0,
                 regions: Vec::new(),
                 diagnostics,
-            },
-        ))),
-        Err(message) if !diagnostics.is_empty() => Ok(Reply::FinishRefused {
-            message,
-            diagnostics,
-        }),
-        Err(message) => Err(message),
+            }),
+            warning,
+        )),
+        Err(error) => Err(error.to_string()),
     }
+}
+
+fn uncertain_finish(message: &str) -> String {
+    format!(
+        "Sketch edit session closed; Finish outcome unconfirmed: {message}. No automatic retry. Review History before continuing."
+    )
 }
 /// Only a profile-stage error closes a failed Finish. Advisory-only failures
 /// would otherwise close region-less and read as plain success.
@@ -542,19 +617,6 @@ fn profile_refusal(diagnostics: &[onecad_core::regen::Diagnostic]) -> bool {
         diagnostic.severity == onecad_core::regen::Severity::Error
             && diagnostic.stage.as_deref() == Some("profile")
     })
-}
-
-fn finish_error(error: onecad_app::error::ApiError) -> Result<Reply, String> {
-    match error {
-        onecad_app::error::ApiError::OpFailed {
-            diagnostics,
-            message,
-        } => Ok(Reply::FinishRefused {
-            message: format!("operation failed: {message}"),
-            diagnostics,
-        }),
-        error => Err(error.to_string()),
-    }
 }
 
 async fn complete<T: serde::Serialize>(
@@ -653,15 +715,12 @@ async fn feedback(
                 direction: result.direction,
             }
         }
-        Reply::Finished(result) => SketchAction::Finished { tag, result },
-        Reply::FinishRefused {
-            message,
-            diagnostics,
-        } => SketchAction::FinishRefused {
+        Reply::Finished(result, warning) => SketchAction::Finished {
             tag,
-            message,
-            diagnostics,
+            result,
+            warning,
         },
+        Reply::FinishUncertain(message) => SketchAction::FinishUncertain { tag, message },
         Reply::Discarded(result) => SketchAction::Discarded { tag, result },
         Reply::BeginCreated(_) | Reply::Begin(_) | Reply::ConstraintRefused(_) => {
             return Err("unexpected sketch load reply".into());
@@ -765,6 +824,39 @@ mod stale_tests {
         assert_eq!(session.request, current);
         assert_eq!(session.phase, SketchPhase::Creating);
     }
+
+    #[test]
+    fn stale_finished_delivery_retains_closed_backend_fact_and_original_scope() {
+        let mut interaction = SketchInteraction::default();
+        let old = begin(&mut interaction, context("old"));
+        let current = begin(&mut interaction, context("new"));
+        let delivery = Delivery {
+            tag: Some(old.clone()),
+            display: None,
+            error: None,
+            _lease: None,
+            actions: vec![SketchAction::Finished {
+                tag: old.clone(),
+                warning: Some("Hole needs repair".into()),
+                result: Box::new(onecad_app::dto::FinishSketchDto {
+                    region_identity_version: 2,
+                    regions: Vec::new(),
+                    diagnostics: Vec::new(),
+                }),
+            }],
+        };
+        let actions = delivery.stale_actions();
+        assert!(
+            matches!(&actions[..], [SketchAction::FinishUncertain { tag, message }]
+            if tag == &old && message.contains("session closed"))
+        );
+        for action in actions {
+            interaction.dispatch(action);
+        }
+        let session = interaction.session.unwrap();
+        assert_eq!(session.request, current);
+        assert_eq!(session.phase, SketchPhase::Creating);
+    }
 }
 
 #[cfg(test)]
@@ -787,22 +879,13 @@ mod finish_tests {
     #[test]
     fn advisory_only_op_failed_finish_is_refused_not_success() {
         let advisory = vec![profile(Severity::Warning, "profile refinement cancelled")];
-        match finish_reply(Err("operation failed".into()), advisory.clone()) {
-            Ok(Reply::FinishRefused {
-                message,
-                diagnostics,
-            }) => {
-                assert_eq!(message, "operation failed");
-                assert_eq!(diagnostics, advisory, "diagnostics kept");
-            }
-            Ok(Reply::Finished(result)) => {
-                panic!(
-                    "closed as {:?}",
-                    crate::sketch_feedback::finished(None, &result)
-                )
-            }
-            _ => panic!("advisory-only OpFailed must route to FinishRefused"),
-        }
+        let error = finish_reply(
+            refusal(advisory),
+            &onecad_app::dto::DocumentProjection::empty(),
+        )
+        .err()
+        .expect("advisory-only OpFailed must not read as successful Finish");
+        assert!(error.contains("operation failed"));
     }
 
     #[test]
@@ -811,8 +894,10 @@ mod finish_tests {
             profile(Severity::Warning, "tiny edge omitted"),
             profile(Severity::Error, "open profile"),
         ];
-        let Ok(Reply::Finished(result)) = finish_reply(Err("failed".into()), diagnostics.clone())
-        else {
+        let Ok(Reply::Finished(result, _)) = finish_reply(
+            refusal(diagnostics.clone()),
+            &onecad_app::dto::DocumentProjection::empty(),
+        ) else {
             panic!("profile-stage error must close region-less");
         };
         assert!(result.regions.is_empty());
@@ -824,5 +909,48 @@ mod finish_tests {
                 State::Warning
             )
         );
+    }
+
+    #[test]
+    fn unpublished_finish_never_claims_finished_or_healthy_geometry() {
+        for outcome in ["failed", "cancelled"] {
+            let completed = crate::sketch_completion::FinishCompletion {
+                authored: Ok(onecad_app::dto::FinishSketchDto {
+                    region_identity_version: 2,
+                    regions: Vec::new(),
+                    diagnostics: Vec::new(),
+                }),
+                regeneration: Some(onecad_app::dto::RegenFinished {
+                    runtime_session: "test".into(),
+                    revision: 3,
+                    source_revision: 3,
+                    outcome: outcome.into(),
+                    message: Some("worker retired".into()),
+                    diagnostics: Vec::new(),
+                    failed_steps: Vec::new(),
+                    repair_steps: Vec::new(),
+                    affected_bodies: Default::default(),
+                }),
+            };
+            let error = finish_reply(completed, &onecad_app::dto::DocumentProjection::empty())
+                .err()
+                .expect("unpublished Finish must require review");
+            let message = uncertain_finish(&error);
+            assert!(message.contains("Finish authoring accepted") && message.contains(outcome));
+            assert!(message.contains("session closed") && message.contains("unconfirmed"));
+            assert!(
+                !message.contains("Sketch finished") && !message.contains("Solver unavailable")
+            );
+        }
+    }
+
+    fn refusal(diagnostics: Vec<Diagnostic>) -> crate::sketch_completion::FinishCompletion {
+        crate::sketch_completion::FinishCompletion {
+            authored: Err(onecad_app::error::ApiError::OpFailed {
+                message: "operation failed".into(),
+                diagnostics,
+            }),
+            regeneration: None,
+        }
     }
 }

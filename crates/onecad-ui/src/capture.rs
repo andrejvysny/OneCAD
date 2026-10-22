@@ -71,7 +71,6 @@ pub async fn load_display(backend: &mut Backend) -> Result<Display, String> {
             .map_err(|e| e.to_string())?,
         );
     }
-    let (profiles, profile_failures) = crate::profile_capture::load(backend, &projection).await?;
     let mut records = Vec::new();
     let mut record_budget = crate::record_budget::RecordBudget::default();
     for feature in &projection.features {
@@ -89,6 +88,7 @@ pub async fn load_display(backend: &mut Backend) -> Result<Display, String> {
             records.push(record);
         }
     }
+    let profiles = crate::profile_capture::load(backend, &projection, &records).await?;
     if api::preview_context(&backend.state)
         .await
         .map_err(|e| e.to_string())?
@@ -169,8 +169,9 @@ pub async fn load_display(backend: &mut Backend) -> Result<Display, String> {
         projection,
         context,
         scene,
-        profiles,
-        profile_failures,
+        profiles: profiles.profiles,
+        profile_anchors: profiles.anchors,
+        profile_failures: profiles.failures,
         records,
         render_receipt,
         prepared: std::sync::Mutex::new(Some(prepared)),

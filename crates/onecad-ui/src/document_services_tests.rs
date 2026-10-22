@@ -372,3 +372,126 @@ async fn prepared_startup_path_opens_exact_saved_document() {
     assert!(!opened.runtime_session.is_empty());
     assert_eq!(opened.path.as_deref(), paths.document.to_str());
 }
+
+#[test]
+fn export_filename_preserves_document_name_and_sanitizes_paths() {
+    for extension in ["step", "stl", "obj", "3mf"] {
+        assert_eq!(
+            export_filename("QA-plate-hole", extension),
+            format!("QA-plate-hole.{extension}")
+        );
+        assert_eq!(
+            export_filename("", extension),
+            format!("Untitled.{extension}")
+        );
+        assert_eq!(
+            export_filename("  ", extension),
+            format!("Untitled.{extension}")
+        );
+    }
+    assert_eq!(
+        export_filename("../plate\\boss:part\n", "step"),
+        ".._plate_boss_part.step"
+    );
+    assert_eq!(export_filename("装置 α", "3mf"), "装置 α.3mf");
+}
+
+#[tokio::test]
+async fn export_dialog_uses_active_named_document_title() {
+    let area = tempfile::tempdir().unwrap();
+    let (state, host) = test_document(area.path()).await;
+    let target = area.path().join("documents/QA-plate-hole.onecad");
+    api::save_document(
+        &state,
+        host,
+        Some(target.to_string_lossy().into_owned()),
+        None,
+    )
+    .await
+    .unwrap();
+    for (label, extension) in [
+        ("STEP", "step"),
+        ("STL", "stl"),
+        ("OBJ", "obj"),
+        ("3MF", "3mf"),
+    ] {
+        let request = export_dialog(&state, label, extension).await;
+        assert_eq!(
+            request.suggested_filename.as_deref(),
+            Some(format!("QA-plate-hole.{extension}").as_str())
+        );
+        assert!(request.save);
+        assert_eq!(request.extensions, vec![extension]);
+    }
+}
+
+#[test]
+fn save_filename_uses_current_name_or_safe_title_with_one_extension() {
+    assert_eq!(
+        save_filename(Some(Path::new("/qa/Current.onecad")), "Old title"),
+        "Current.onecad"
+    );
+    for (title, expected) in [
+        (
+            "QA-shell-connected-opening",
+            "QA-shell-connected-opening.onecad",
+        ),
+        ("part.ONECAD.onecad", "part.onecad"),
+        ("part.v2", "part.v2.onecad"),
+        ("", "Untitled.onecad"),
+        ("  ", "Untitled.onecad"),
+        (".onecad", "Untitled.onecad"),
+        ("装置 α", "装置 α.onecad"),
+        ("../plate\\boss:part\n", ".._plate_boss_part.onecad"),
+    ] {
+        assert_eq!(save_filename(None, title), expected);
+    }
+}
+
+#[derive(Default)]
+struct SaveDialogRecorder(Mutex<Option<FileDialog>>);
+
+#[async_trait::async_trait]
+impl DialogPort for SaveDialogRecorder {
+    async fn pick(&self, request: FileDialog) -> Vec<String> {
+        *self.0.lock().unwrap() = Some(request);
+        Vec::new()
+    }
+}
+
+#[tokio::test]
+async fn save_as_passes_active_filename_to_native_dialog_without_mutating_document() {
+    let area = tempfile::tempdir().unwrap();
+    let (state, mut host) = test_document(area.path()).await;
+    let documents = area.path().join("documents");
+    let recorder = Arc::new(SaveDialogRecorder::default());
+    host.dialogs = recorder.clone();
+    for filename in [None, Some("QA-shell-connected-opening.onecad")] {
+        if let Some(filename) = filename {
+            api::save_document(
+                &state,
+                host.clone(),
+                Some(documents.join(filename).to_string_lossy().into_owned()),
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        let before = api::get_document_state(&state).await.unwrap();
+        assert!(matches!(
+            save_to_qa(&state, host.clone(), &documents, true)
+                .await
+                .unwrap(),
+            Outcome::Cancelled
+        ));
+        let request = recorder.0.lock().unwrap().take().unwrap();
+        assert_eq!(
+            request.suggested_filename.as_deref(),
+            Some(filename.unwrap_or("Untitled.onecad"))
+        );
+        assert_eq!(request.extensions, vec!["onecad"]);
+        assert!(request.save);
+        assert!(!request.multiple);
+        assert_eq!(api::get_document_state(&state).await.unwrap(), before);
+    }
+}

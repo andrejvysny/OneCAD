@@ -259,6 +259,7 @@ async fn finish(harness: &Harness, state: &mut SketchInteraction) -> FinishSketc
     assert_eq!(dto.regions.len(), 1);
     assert!(dto.regions[0].holes.is_empty());
     state.dispatch(SketchAction::Finished {
+        warning: None,
         tag,
         result: Box::new(dto.clone()),
     });

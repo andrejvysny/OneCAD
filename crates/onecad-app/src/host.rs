@@ -44,6 +44,7 @@ pub struct FileDialog {
     pub extensions: Vec<String>,
     pub save: bool,
     pub multiple: bool,
+    pub suggested_filename: Option<String>,
 }
 
 impl FileDialog {
@@ -53,6 +54,7 @@ impl FileDialog {
             extensions: extensions.iter().map(|value| (*value).to_owned()).collect(),
             save,
             multiple: false,
+            suggested_filename: None,
         }
     }
 }

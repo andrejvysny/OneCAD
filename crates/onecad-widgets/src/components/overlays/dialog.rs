@@ -322,22 +322,27 @@ pub fn affected_list(ui: &mut Ui, rows: &[(&str, &str, &str)]) {
                     t.ink5,
                 );
                 let kx = rect.right() - 10.0 - k.size().x;
-                let n = p.layout_no_wrap((*name).to_owned(), FontId::proportional(BODY), t.ink2);
                 let nx = glyph.right() + 8.0;
-                // Clip long names so they never run under the kind tag.
-                let np = ui.painter().with_clip_rect(Rect::from_min_max(
-                    rect.min,
-                    egui::pos2(kx - 8.0, rect.max.y),
-                ));
-                np.galley(
-                    egui::pos2(nx, rect.center().y - n.size().y / 2.0),
-                    n,
-                    t.ink2,
+                let name_rect = Rect::from_min_max(
+                    egui::pos2(nx, rect.top()),
+                    egui::pos2(kx - 8.0, rect.bottom()),
                 );
-                p.galley(
-                    egui::pos2(kx, rect.center().y - k.size().y / 2.0),
-                    k,
-                    t.ink5,
+                ui.put(
+                    name_rect,
+                    egui::Label::new(RichText::new(*name).size(BODY).color(t.ink2))
+                        .halign(Align::LEFT)
+                        .truncate(),
+                );
+                ui.put(
+                    Rect::from_min_max(
+                        egui::pos2(kx, rect.top()),
+                        egui::pos2(rect.right() - 10.0, rect.bottom()),
+                    ),
+                    egui::Label::new(
+                        RichText::new(*kind)
+                            .font(FontId::new(SECTION, fonts::mono()))
+                            .color(t.ink5),
+                    ),
                 );
             }
         };

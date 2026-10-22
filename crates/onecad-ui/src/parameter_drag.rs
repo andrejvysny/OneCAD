@@ -68,18 +68,22 @@ pub(crate) fn beyond_threshold(press: Pos2, position: Pos2, threshold_px: f32) -
 }
 
 pub(crate) fn active(app: &App) -> bool {
-    app.doc.extrude_handle.active() || app.doc.transform_gizmo.gizmo.active()
+    app.doc.extrude_handle.active()
+        || app.doc.model_handle.active()
+        || app.doc.transform_gizmo.gizmo.active()
 }
 
 /// Ends captures whose release or loss never reached the viewport this pass.
 pub(crate) fn settle(app: &mut App, ctx: &egui::Context) {
     crate::extrude_handle::settle(app, ctx);
+    crate::model_handle::settle(app, ctx);
     crate::transform_ui::settle(app, ctx);
 }
 
 /// Restores the authored values of every open capture (Escape, tab deactivation).
 pub(crate) fn abandon(app: &mut App, outcome: Outcome) {
     crate::extrude_handle::abandon(app, outcome);
+    crate::model_handle::abandon(app, outcome);
     crate::transform_ui::abandon(app, outcome);
 }
 

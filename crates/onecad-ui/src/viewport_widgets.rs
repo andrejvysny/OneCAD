@@ -36,7 +36,7 @@ fn cube_host(app: &App, ui: &egui::Ui, rect: egui::Rect) -> egui::Rect {
 }
 
 pub fn owns_pointer(app: &App, ui: &egui::Ui, rect: egui::Rect) -> bool {
-    if app.doc.transform_gizmo.gizmo.active() || app.doc.extrude_handle.active() {
+    if crate::parameter_drag::active(app) {
         return true;
     }
     let Some(pointer) = ui.input(|input| input.pointer.hover_pos()) else {
@@ -56,15 +56,15 @@ pub(crate) fn owns_position(
             || app.doc.view.as_ref().is_some_and(|view| {
                 crate::transform_ui::owns_pointer(app, view, rect, pointer)
                     || crate::extrude_handle::owns_pointer(app, view, rect, pointer)
+                    || crate::model_handle::owns_pointer(app, view, rect, pointer)
             }))
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui, rect: egui::Rect, view: &ViewSnapshot) -> bool {
     let cube = ui
-        .add_enabled_ui(
-            !app.doc.transform_gizmo.gizmo.active() && !app.doc.extrude_handle.active(),
-            |ui| navigation_cube::show(ui, cube_host(app, ui, rect), view, &app.theme),
-        )
+        .add_enabled_ui(!crate::parameter_drag::active(app), |ui| {
+            navigation_cube::show(ui, cube_host(app, ui, rect), view, &app.theme)
+        })
         .inner;
     for action in cube.actions {
         apply_cube(app, view, action);
@@ -81,7 +81,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, rect: egui::Rect, view: &ViewSnaps
     } else {
         crate::extrude_handle::show(app, ui, view, rect)
     };
-    cube.owns_pointer || gizmo || handle
+    let model = if cube.owns_pointer || gizmo || handle {
+        false
+    } else {
+        crate::model_handle::show(app, ui, view, rect)
+    };
+    cube.owns_pointer || gizmo || handle || model
 }
 
 fn apply_cube(app: &mut App, view: &ViewSnapshot, action: CubeAction) {

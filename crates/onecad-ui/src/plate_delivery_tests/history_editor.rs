@@ -21,7 +21,7 @@ pub(super) async fn check(host: &mut Harness) {
     host.wait(|app| {
         app.doc.interaction.tool.as_ref().is_some_and(|tool| {
             matches!(tool.draft_status, DraftStatus::Valid(_))
-                && tool.preview == PreviewStatus::UnavailableForEdit
+                && tool.preview == PreviewStatus::Ready
         })
     })
     .await;

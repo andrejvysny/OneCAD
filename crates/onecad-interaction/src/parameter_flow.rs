@@ -169,8 +169,15 @@ impl ModelSession {
             return Vec::new();
         }
         if self.editing_existing {
-            self.preview = PreviewStatus::UnavailableForEdit;
-            return Vec::new();
+            if operation == *self.origin {
+                self.preview = PreviewStatus::Ready;
+                return Vec::new();
+            }
+            self.preview = PreviewStatus::Pending;
+            return vec![Effect::PreviewExistingEdit {
+                tag: self.tag.clone(),
+                operation: Box::new(operation),
+            }];
         }
         self.preview = PreviewStatus::Pending;
         vec![Effect::Preview {

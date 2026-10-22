@@ -1045,3 +1045,6 @@ async fn open_save_equals_open_stage_drop_save() {
     assert_eq!(document_bytes(&plain), document_bytes(&dropped));
     wm.shutdown().await;
 }
+
+#[path = "staged_operands/hole.rs"]
+mod hole;

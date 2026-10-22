@@ -28,20 +28,24 @@ pub(crate) fn selection_label(
         return Some((tool.record.name.clone(), "feature".into(), model));
     }
     let count = app.doc.selection.len();
-    let context = || match app.doc.selected_body() {
-        Some(body) => body_name(app, body),
-        None => {
-            let items = app.doc.selection.items().iter();
-            let bodies: std::collections::HashSet<_> =
-                items.filter_map(SelectionItem::body).collect();
-            format!("{} bodies", bodies.len())
-        }
+    let context = || {
+        let mut seen = std::collections::HashSet::new();
+        app.doc
+            .selection
+            .items()
+            .iter()
+            .filter_map(SelectionItem::body)
+            .filter(|id| seen.insert(*id))
+            .map(|id| body_name(app, id))
+            .filter(|name| !name.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ")
     };
     match kind {
         SelectionKind::Face => Some((counted(count, "Face", "Faces"), context(), model)),
         SelectionKind::Edge => Some((counted(count, "Edge", "Edges"), context(), model)),
         SelectionKind::Body if count == 1 => Some(("Body".into(), context(), model)),
-        SelectionKind::Body => Some((counted(count, "Body", "Bodies"), "bodies".into(), model)),
+        SelectionKind::Body => Some((counted(count, "Body", "Bodies"), context(), model)),
         SelectionKind::Region => Some((
             counted(count.max(1), "Region", "Regions"),
             "profile".into(),

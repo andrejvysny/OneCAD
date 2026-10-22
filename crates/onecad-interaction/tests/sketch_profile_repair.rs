@@ -15,6 +15,27 @@ fn finishing() -> (SketchInteraction, SketchTag) {
 }
 
 #[test]
+fn confirmed_closed_backend_with_uncertain_finish_cannot_discard_or_retry() {
+    let (mut state, tag) = finishing();
+    state.dispatch(SketchAction::FinishUncertain {
+        tag,
+        message: "Sketch edit session closed; Finish outcome unconfirmed: worker retired".into(),
+    });
+    let session = state.session.as_ref().unwrap();
+    assert_eq!(session.phase, SketchPhase::Closed);
+    assert!(session.edit_session.is_none() && session.history.is_none());
+    assert!(
+        matches!(&session.status, SketchStatus::FinishUncertain(message) if message.contains("worker retired"))
+    );
+    assert_eq!(
+        state.text_undo_route(false),
+        onecad_interaction::UndoRoute::Model
+    );
+    assert!(state.dispatch(SketchAction::Discard).is_empty());
+    assert!(state.dispatch(SketchAction::Finish).is_empty());
+}
+
+#[test]
 fn known_finish_refusal_reenters_new_service_owned_visit_without_document_restore() {
     let (mut state, old) = finishing();
     state.dispatch(SketchAction::FinishRefused {

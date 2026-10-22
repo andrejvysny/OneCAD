@@ -16,6 +16,7 @@ pub(crate) struct Source {
 pub(crate) struct Preview {
     pub prepared: PreparedScene,
     pub source: Source,
+    pub suppressed: Vec<onecad_scene::BodyId>,
 }
 
 struct Job {
@@ -266,6 +267,10 @@ fn replace_preview(app: &mut App, display: &Display) -> Result<bool, String> {
             .renderer
             .replace_prepared_preview(identity, preview.prepared),
     };
+    let result = result.and_then(|()| {
+        app.renderer
+            .suppress_preview_bodies(identity, &preview.suppressed)
+    });
     match result {
         Ok(()) => app.doc.sections.retained_preview = Some((identity, preview.source)),
         Err(error) => app.doc.status = format!("Preview display: {error}"),

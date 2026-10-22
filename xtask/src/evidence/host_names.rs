@@ -86,6 +86,7 @@ pub(super) const HOST_TESTS: &[&str] = &[
     "app_logic_tests::extrude_handle_delivery_tests::handle_release_then_escape_in_one_batch_reaches_the_tool",
     "app_logic_tests::extrude_handle_delivery_tests::handle_camera_change_mid_drag_restores_authored_value",
     "app_logic_tests::extrude_handle_delivery_tests::handle_drag_begun_while_file_action_runs_still_restores_on_escape",
+    "app_logic_tests::extrude_handle_delivery_tests::reopened_consumed_extrude_profile_has_a_real_handle_and_draft_preview",
     "app_logic_tests::parameter_delivery_tests::gizmo_release_then_pointer_loss_in_one_batch_survives_a_tab_switch",
     "app_logic_tests::parameter_delivery_tests::gizmo_camera_change_mid_drag_restores_placement",
     "app_logic_tests::model_selection_delivery_tests::modifier_clicks_build_face_and_edge_sets_and_escape_clears",
@@ -96,6 +97,10 @@ pub(super) const HOST_TESTS: &[&str] = &[
     "app_logic_tests::sketch_finish_delivery_tests::refused_finish_reenters_for_chooser_repair_and_model_history_restores_region",
     "app_logic_tests::sketch_finish_delivery_tests::no_op_finish_discards_and_partial_undo_keep_model_history_and_region",
     "app_logic_tests::sketch_finish_delivery_tests::reopen::finished_sketch_saves_in_place_and_reopens_with_same_region_and_identities",
+    "app_logic_tests::edit_preview_delivery_tests::existing_extrude_numeric_preview_cancel_apply_undo_preserve_history",
+    "app_logic_tests::model_handle_delivery_tests::native_hole_scalar_click_drag_release_and_losses_preserve_draft_history_and_ownership",
+    "app_logic_tests::model_handle_delivery_tests::native_pattern_angle_and_mirror_plane_drag_route_real_pointer_events",
+    "app_logic_tests::model_handle_delivery_tests::native_boolean_viewport_controls_own_click_and_only_author_options",
 ];
 /// Ignored service and bridge cases outside `app_logic_tests`; they do not
 /// emit adapter evidence, so the gate runs them as a separate exact selection.

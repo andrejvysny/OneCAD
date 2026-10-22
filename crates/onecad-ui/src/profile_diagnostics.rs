@@ -46,7 +46,7 @@ impl Report {
 
     pub fn observe(interaction: &SketchInteraction, action: &SketchAction) -> Option<Self> {
         let (tag, diagnostics, regions, failure) = match action {
-            SketchAction::Finished { tag, result } => (
+            SketchAction::Finished { tag, result, .. } => (
                 tag,
                 result.diagnostics.as_slice(),
                 Some(result.regions.len()),

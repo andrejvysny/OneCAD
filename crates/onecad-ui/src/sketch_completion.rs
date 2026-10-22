@@ -2,6 +2,72 @@
 use onecad_app::{api::CommandCompletion, dto::RegenFinished};
 use std::future::Future;
 
+pub(crate) struct FinishCompletion {
+    pub authored: Result<onecad_app::dto::FinishSketchDto, onecad_app::error::ApiError>,
+    pub regeneration: Option<RegenFinished>,
+}
+
+/// Finish has already closed its edit session. Retain authoring and geometry
+/// separately so a published downstream repair cannot masquerade as a solver fault.
+pub(crate) async fn finish_authoring(
+    receipt: CommandCompletion<onecad_app::dto::FinishSketchDto>,
+    wait: impl Future<Output = Result<RegenFinished, String>>,
+) -> Result<FinishCompletion, String> {
+    let authoring = match &receipt.result {
+        Ok(_) => "Finish authoring accepted".to_owned(),
+        Err(error) => format!("Finish authoring result: {error}"),
+    };
+    let regeneration = if receipt.regen_expected {
+        Some(wait.await.map_err(|error| {
+            format!(
+                "{authoring}; geometry completion unavailable: {error}; authoring was not automatically reverted"
+            )
+        })?)
+    } else {
+        None
+    };
+    if let Ok(result) = &receipt.result {
+        crate::record_budget::check_payload(result)?;
+    }
+    Ok(FinishCompletion {
+        authored: receipt.result,
+        regeneration,
+    })
+}
+
+pub(crate) fn finish_warning(
+    completion: &RegenFinished,
+    projection: &onecad_app::dto::DocumentProjection,
+) -> Option<String> {
+    if !matches!(completion.outcome.as_str(), "published" | "noop") {
+        return None;
+    }
+    let mut named = completion.clone();
+    let name = |id: &str| {
+        projection
+            .features
+            .iter()
+            .find(|feature| feature.id == id)
+            .map_or_else(|| bounded(id), |feature| bounded(&feature.label))
+    };
+    for id in &mut named.repair_steps {
+        *id = name(id);
+    }
+    for failure in &mut named.failed_steps {
+        failure.record_id = name(&failure.record_id);
+    }
+    completion_error(&named).map(|error| {
+        let undo = if projection.undo_depth > 0 {
+            " Undo available."
+        } else {
+            ""
+        };
+        format!(
+            "Sketch finished; changes retained. {error}. Review affected features in History.{undo}"
+        )
+    })
+}
+
 pub async fn finish<T: serde::Serialize>(
     receipt: CommandCompletion<T>,
     wait: impl Future<Output = Result<RegenFinished, String>>,
@@ -155,5 +221,24 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.contains("may be accepted") && error.contains("worker retired"));
+    }
+
+    #[tokio::test]
+    async fn finish_unavailable_retains_authoring_receipt_without_claiming_geometry() {
+        let receipt = CommandCompletion {
+            result: Ok(onecad_app::dto::FinishSketchDto {
+                region_identity_version: 2,
+                regions: Vec::new(),
+                diagnostics: Vec::new(),
+            }),
+            projection: DocumentProjection::empty(),
+            regen_expected: true,
+        };
+        let error = finish_authoring(receipt, async { Err("worker retired".into()) })
+            .await
+            .err()
+            .expect("unconfirmed geometry must not produce Finish success");
+        assert!(error.contains("Finish authoring accepted") && error.contains("worker retired"));
+        assert!(error.contains("completion unavailable") && !error.contains("Sketch finished"));
     }
 }

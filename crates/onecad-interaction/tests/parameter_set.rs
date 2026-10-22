@@ -231,6 +231,33 @@ fn op_error_is_recomputed_while_expression_error_sticks() {
 }
 
 #[test]
+fn focusing_precise_or_expression_fields_then_applying_never_quantizes_authored_values() {
+    let precise = 50.00019918212638;
+    for scalar in [
+        Scalar::new(precise),
+        Scalar::with_expr(precise, "=width / 3"),
+    ] {
+        let mut record = extrude_record();
+        if let Operation::Known(KnownOperation::Extrude(params)) = &mut record.op {
+            params.distance = scalar.clone();
+        }
+        let mut state = begin(record.clone(), vec![DISTANCE], true);
+        let tag = tool(&state).tag.clone();
+        answer(&mut state, &tag, "length", precise);
+        let original = tool(&state).params.field(DISTANCE).unwrap().text.clone();
+        assert!(state.dispatch(Action::FocusParameter(DISTANCE)).is_empty());
+        let field = tool(&state).params.field(DISTANCE).unwrap();
+        assert_eq!(field.text, original);
+        assert_eq!(field.status, FieldStatus::Authored);
+        assert_eq!(tool(&state).value(DISTANCE), Some(precise));
+        assert_eq!(extrude(&tool(&state).record.op).distance, scalar);
+        let effects = state.dispatch(Action::Confirm);
+        assert!(matches!(effects.as_slice(), [Effect::ClearPreview { .. }]));
+        assert!(state.tool.is_none());
+    }
+}
+
+#[test]
 fn unchanged_existing_edit_confirms_without_a_command() {
     let mut record = extrude_record();
     if let Operation::Known(KnownOperation::Extrude(p)) = &mut record.op {
@@ -287,6 +314,7 @@ fn broken_untouched_binding_never_blocks_other_fields_and_one_apply_updates_both
     assert_eq!(tool(&state).draft, "=deleted");
     let tag = evaluation(&typed(&mut state, DISTANCE, "14")).unwrap().0;
     answer(&mut state, &tag, "length", 14.0);
+    edit_unavailable(&mut state, &tag);
     let effects = state.dispatch(Action::Confirm);
     let [EditCommand::UpdateOperationParams { op, .. }] = applied(&effects).as_slice() else {
         panic!("one command for two fields")
@@ -490,6 +518,8 @@ fn gizmo(translate: [f64; 3]) -> Action {
 }
 
 fn committed_translate(state: &mut Interaction) -> [Scalar; 3] {
+    let tag = tool(state).tag.clone();
+    edit_unavailable(state, &tag);
     let effects = state.dispatch(Action::Confirm);
     let [EditCommand::UpdateOperationParams { op, .. }] = applied(&effects).as_slice() else {
         panic!("one update")

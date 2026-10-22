@@ -358,11 +358,7 @@ pub fn selection_kind(app: &App) -> SelectionKind {
         };
     }
     if let Some(running) = running_tool(app) {
-        return if running == ToolId::MoveRotate {
-            SelectionKind::Body
-        } else {
-            SelectionKind::Region
-        };
+        return running_operand_kind(running);
     }
     if app.doc.interaction.selection.is_some() {
         return SelectionKind::Region;
@@ -370,9 +366,42 @@ pub fn selection_kind(app: &App) -> SelectionKind {
     crate::item_selection::model_kind(&app.doc.selection)
 }
 
+fn running_operand_kind(tool: ToolId) -> SelectionKind {
+    match tool {
+        ToolId::MoveRotate
+        | ToolId::LinearPattern
+        | ToolId::CircularPattern
+        | ToolId::MirrorBody
+        | ToolId::Boolean => SelectionKind::Body,
+        ToolId::OffsetFace | ToolId::Shell | ToolId::Hole => SelectionKind::Face,
+        ToolId::Fillet | ToolId::Chamfer => SelectionKind::Edge,
+        ToolId::Extrude | ToolId::Revolve => SelectionKind::Region,
+        _ => SelectionKind::None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn running_operations_name_their_operand_kind() {
+        for (tool, kind) in [
+            (ToolId::LinearPattern, SelectionKind::Body),
+            (ToolId::CircularPattern, SelectionKind::Body),
+            (ToolId::Boolean, SelectionKind::Body),
+            (ToolId::MirrorBody, SelectionKind::Body),
+            (ToolId::OffsetFace, SelectionKind::Face),
+            (ToolId::Shell, SelectionKind::Face),
+            (ToolId::Hole, SelectionKind::Face),
+            (ToolId::Fillet, SelectionKind::Edge),
+            (ToolId::Chamfer, SelectionKind::Edge),
+            (ToolId::Revolve, SelectionKind::Region),
+            (ToolId::Generators, SelectionKind::None),
+        ] {
+            assert_eq!(running_operand_kind(tool), kind);
+        }
+    }
 
     const ALL: [SelectionKind; 9] = [
         SelectionKind::None,

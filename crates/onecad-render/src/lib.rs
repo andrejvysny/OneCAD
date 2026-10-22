@@ -272,6 +272,7 @@ impl Renderer {
         bounds: Option<onecad_scene::Bounds>,
         source: u64,
     ) {
+        self.reset_preview_suppression();
         self.contact_dirty |= self.committed.len() != bodies.len()
             || self.committed.iter().zip(&bodies).any(|(old, new)| {
                 old.id != new.id || !std::sync::Arc::ptr_eq(&old.source, &new.source)
@@ -336,6 +337,7 @@ impl Renderer {
         identity: PreviewIdentity,
         source: u64,
     ) {
+        self.reset_preview_suppression();
         self.preview = bodies;
         self.clear_preview_section_contours();
         self.preview_source_bytes = source;
@@ -345,6 +347,7 @@ impl Renderer {
     }
     pub fn clear_preview(&mut self) -> Result<(), RenderError> {
         self.require_idle()?;
+        self.reset_preview_suppression();
         self.preview.clear();
         self.clear_preview_section_contours();
         self.preview_identity = None;
@@ -496,3 +499,4 @@ mod tests;
 
 #[cfg(test)]
 mod highlight_tests;
+mod preview_visibility;

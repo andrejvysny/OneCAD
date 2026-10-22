@@ -404,9 +404,7 @@ fn vector(ui: &mut egui::Ui, id: &str, v: &mut Vec3) {
         for (label, value) in [("X", &mut v.x), ("Y", &mut v.y), ("Z", &mut v.z)] {
             ui.horizontal(|ui| {
                 let label_id = ui.label(label).id;
-                let response = ui
-                    .add(egui::DragValue::new(value).speed(0.1))
-                    .labelled_by(label_id);
+                let response = vector_value(ui, value).labelled_by(label_id);
                 crate::automation::name(
                     ui.ctx(),
                     response.id,
@@ -415,6 +413,22 @@ fn vector(ui: &mut egui::Ui, id: &str, v: &mut Vec3) {
             });
         }
     });
+}
+
+fn vector_value(ui: &mut egui::Ui, value: &mut f64) -> egui::Response {
+    let field_id = ui.next_auto_id();
+    let ctx = ui.ctx().clone();
+    ui.add(
+        egui::DragValue::new(value)
+            .speed(0.1)
+            .custom_formatter(move |value, _| {
+                if ctx.memory(|memory| memory.has_focus(field_id)) {
+                    value.to_string()
+                } else {
+                    format!("{value:.2}")
+                }
+            }),
+    )
 }
 
 fn gear(rows: &mut FeatureCardRows, p: &GearParams) -> Option<ModelingOptions> {
@@ -458,6 +472,40 @@ fn named(ui: &mut egui::Ui, widget: impl egui::Widget, id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn vector_default_rounding_and_focus_blur_never_quantize_bound_values() {
+        let ctx = egui::Context::default();
+        let original = 50.00019918212638;
+        let mut value = original;
+        let mut id = None;
+        for focused in [false, true, false, false] {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                if let Some(id) = id {
+                    ui.memory_mut(|memory| {
+                        if focused {
+                            memory.request_focus(id);
+                        } else {
+                            memory.surrender_focus(id);
+                        }
+                    });
+                }
+                let response = vector_value(ui, &mut value);
+                id = Some(response.id);
+                assert!(!response.changed());
+            });
+            out.textures_delta.clear();
+            assert_eq!(value, original);
+            let expected = if focused {
+                original.to_string()
+            } else {
+                "50.00".into()
+            };
+            assert!(out.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::epaint::Shape::Text(text) if text.galley.job.text == expected)
+            }), "missing shown value: {expected}");
+        }
+    }
+
     #[test]
     fn pattern_controls_are_addressable_by_both_hosts() {
         let nodes = crate::automation::testing::author_ids(|ui| {

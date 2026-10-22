@@ -247,7 +247,7 @@ fn closure_anchor(anchor: Option<&serde_json::Value>) -> Option<AnchorIntent> {
     serde_json::from_value(anchor?.clone()).ok()
 }
 
-fn stage_error(error: EngineError) -> ApiError {
+pub(super) fn stage_error(error: EngineError) -> ApiError {
     match error {
         EngineError::OpFailed {
             code: OpFailureCode::StalePreview,

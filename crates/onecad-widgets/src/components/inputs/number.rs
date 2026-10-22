@@ -70,6 +70,14 @@ fn stepped_text(text: &str, step: f64, shift: bool, up: bool, decimals: usize) -
     Some(format!("{value:.precision$}"))
 }
 
+fn shown_text(text: &str, decimals: usize, focused: bool) -> String {
+    if !focused && let ParsedValue::Number(value) = parse_value(text) {
+        format!("{value:.decimals$}")
+    } else {
+        text.to_owned()
+    }
+}
+
 /// Width reserved for the vector degree sign.
 const DEGREE_W: f32 = 6.0;
 
@@ -208,7 +216,8 @@ impl Widget for NumberField<'_> {
                     .max_rect(inner)
                     .layout(Layout::left_to_right(Align::Center)),
             );
-            let mut edit = TextEdit::singleline(self.text)
+            let mut shown = shown_text(self.text, self.decimals, ui.memory(|m| m.has_focus(id)));
+            let mut edit = TextEdit::singleline(&mut shown)
                 .id(id)
                 .font(FontId::new(size, fonts::mono()))
                 .text_color(colour)
@@ -220,6 +229,9 @@ impl Widget for NumberField<'_> {
                 edit = edit.return_key(None);
             }
             let mut response = child.add(edit);
+            if response.changed() {
+                *self.text = shown;
+            }
             if nudged {
                 response.mark_changed();
             }
@@ -262,6 +274,89 @@ impl Widget for NumberField<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn draw(
+        ctx: &egui::Context,
+        text: &mut String,
+        focus: bool,
+        events: Vec<egui::Event>,
+    ) -> (bool, String) {
+        let mut changed = false;
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                let id = ui.make_persistent_id(egui::IdSalt::new("value"));
+                ui.memory_mut(|memory| {
+                    if focus {
+                        memory.request_focus(id);
+                    } else {
+                        memory.surrender_focus(id);
+                    }
+                });
+                changed = ui.add(NumberField::new("value", text)).changed();
+            },
+        );
+        out.textures_delta.clear();
+        let update = out.platform_output.accesskit_update.unwrap();
+        let value = update
+            .nodes
+            .iter()
+            .find_map(|(_, node)| {
+                (node.role() == egui::accesskit::Role::TextInput)
+                    .then(|| node.value().unwrap().to_owned())
+            })
+            .expect("accessible input");
+        (changed, value)
+    }
+
+    #[test]
+    fn rounded_idle_value_focus_and_blur_preserve_bound_precision_and_accessible_text() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let source = "50.00019918212638";
+        let mut text = source.to_owned();
+        for (focus, expected) in [(false, "50.00"), (true, source), (false, "50.00")] {
+            let (changed, shown) = draw(&ctx, &mut text, focus, Vec::new());
+            assert!(!changed);
+            assert_eq!(text, source);
+            assert_eq!(shown, expected);
+        }
+    }
+
+    #[test]
+    fn typed_precision_and_expressions_survive_display_rounding() {
+        for source in ["3.141592653589793", "=width / 3"] {
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            let mut text = String::new();
+            draw(&ctx, &mut text, true, Vec::new());
+            let (changed, shown) = draw(
+                &ctx,
+                &mut text,
+                true,
+                vec![egui::Event::Text(source.into())],
+            );
+            assert!(changed);
+            assert_eq!(shown, source);
+            assert_eq!(text, source);
+            let expected = if source.starts_with('=') {
+                source
+            } else {
+                "3.14"
+            };
+            let (changed, shown) = draw(&ctx, &mut text, false, Vec::new());
+            assert!(!changed);
+            assert_eq!(shown, expected);
+            assert_eq!(text, source);
+            let (changed, shown) = draw(&ctx, &mut text, true, Vec::new());
+            assert!(!changed);
+            assert_eq!(shown, source);
+            assert_eq!(text, source);
+        }
+    }
 
     #[test]
     fn parse_value_table() {

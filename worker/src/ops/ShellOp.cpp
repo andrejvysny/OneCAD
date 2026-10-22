@@ -21,6 +21,7 @@
 #include "elementmap/Ladder.h"
 #include "kernel/validation/GeometryPrecision.h"
 #include "ops/OpCommon.h"
+#include "ops/ShellOpenFacePatch.h"
 
 namespace onecad::ops {
 
@@ -47,6 +48,21 @@ std::string target_body_of(const json& op, const json& params) {
         }
     }
     return "";
+}
+
+OpOutcome construction_refusal(BRepOffset_Error error) {
+    if (error != BRepOffset_NotConnectedShell) {
+        return OpOutcome::fail("OP_FAILED", "Shell operation failed");
+    }
+    const std::string message =
+        "Selected opening disconnects the remaining shell. Choose an opening that keeps "
+        "the remaining walls connected.";
+    OpOutcome out = OpOutcome::fail("OP_FAILED", message);
+    out.diagnostics.push_back({{"severity", "error"},
+                               {"code", "SHELL_DISCONNECTED_RETAINED_SKIN"},
+                               {"message", message},
+                               {"stage", "construction"}});
+    return out;
 }
 
 }  // namespace
@@ -143,6 +159,13 @@ OpOutcome execute_shell(OpContext& ctx, const json& op, const std::string& op_id
 
     if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
 
+    TopTools_ListOfShape open_patch;
+    if (!shell_detail::expand_open_faces(target_shape, faces_to_remove, ctx.cancel, open_patch)) {
+        if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
+        return OpOutcome::fail("OP_FAILED", "Shell could not determine the selected opening");
+    }
+    if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
+
     // --- build the thick solid, keeping the builder alive for history ---
     TopoDS_Shape result;
     std::shared_ptr<BRepOffsetAPI_MakeThickSolid> builder;
@@ -150,12 +173,12 @@ OpOutcome execute_shell(OpContext& ctx, const json& op, const std::string& op_id
         builder = std::make_shared<BRepOffsetAPI_MakeThickSolid>();
         // NEGATIVE offset hollows inward (legacy `-params.thickness`). Skin mode,
         // Arc joins, 1e-3 tolerance — verbatim from RegenerationEngine.cpp:1482-1485.
-        builder->MakeThickSolidByJoin(target_shape, faces_to_remove, -thickness, 1e-3,
+        builder->MakeThickSolidByJoin(target_shape, open_patch, -thickness, 1e-3,
                                       BRepOffset_Skin, Standard_False, Standard_False, GeomAbs_Arc,
                                       Standard_False);
         builder->Build();
         if (!builder->IsDone()) {
-            return OpOutcome::fail("OP_FAILED", "Shell operation failed");
+            return construction_refusal(builder->MakeOffset().Error());
         }
         result = builder->Shape();
         // OCCT 8.0.1 reports IsDone/NoError yet returns the body unchanged when the
@@ -167,9 +190,8 @@ OpOutcome execute_shell(OpContext& ctx, const json& op, const std::string& op_id
         if (out_faces.Extent() <= in_faces.Extent()) {
             return OpOutcome::fail(
                 "OP_FAILED",
-                "Shell left the body unchanged: the kernel could not offset the faces next "
-                "to the open face (a fillet tangent to it is the usual cause). Shell before "
-                "filleting, or open a different face.");
+                "Shell left the body unchanged: the kernel could not build a cavity for "
+                "the selected opening and thickness. Try a different thickness or opening.");
         }
     } catch (const Standard_Failure& f) {
         return OpOutcome::fail("OP_FAILED",

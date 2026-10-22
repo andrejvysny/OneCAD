@@ -284,8 +284,25 @@ impl App {
                 self.doc.received_preview = None;
                 self.doc.clear_preview = true;
             }
-            Effect::PublishPreview { tag, .. } => {
-                if let Some(preview) = self.doc.received_preview.take() {
+            Effect::PreviewExistingEdit { tag, operation } => self
+                .doc
+                .bridge
+                .candidate(Candidate::PreviewExistingEdit { tag, operation }),
+            Effect::PublishPreview { tag, result } => {
+                if let Some(mut preview) = self.doc.received_preview.take() {
+                    if self
+                        .doc
+                        .interaction
+                        .tool
+                        .as_ref()
+                        .is_some_and(|tool| tool.editing_existing)
+                    {
+                        preview.suppressed = result
+                            .changed_bodies
+                            .iter()
+                            .filter_map(|id| id.parse().ok())
+                            .collect();
+                    }
                     self.doc.pending_preview = Some((tag, preview));
                 }
             }
@@ -355,6 +372,7 @@ impl App {
                 .map(
                     |((prepared, lease), scene)| crate::viewport_updates::Preview {
                         prepared,
+                        suppressed: Vec::new(),
                         source: crate::viewport_updates::Source {
                             scene,
                             lease: Arc::new(lease),
@@ -790,6 +808,7 @@ impl App {
             "host.logic",
             serde_json::json!({"pass": ctx.cumulative_pass_nr()}),
         );
+        self.doc.bridge.shared.input_trace.observe_window(ctx);
         self.poll(ctx);
         if ctx.input(|input| input.viewport().close_requested()) && !self.may_close {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);

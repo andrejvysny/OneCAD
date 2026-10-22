@@ -60,6 +60,9 @@ use onecad_app::worker::{
 
 use onecad_protocol::mesh::{f32_le, u32_le, validate_mesh_blob, MeshHeaderView};
 
+#[path = "preview_edge_shell_support/connected_opening.rs"]
+mod shell_connected_opening;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Harness (mirrors wire_contract.rs)
 // ─────────────────────────────────────────────────────────────────────────────

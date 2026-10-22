@@ -4,8 +4,59 @@ use super::*;
 fn disabled_trace_has_no_state_or_records() {
     let trace = Trace::new(false);
     trace.record("test", Value::Null);
+    trace.observe_window(&egui::Context::default());
     assert!(!trace.enabled());
     assert!(trace.state.is_none());
+}
+
+#[test]
+fn window_transitions_record_without_ui_passes_or_extra_repaints() {
+    let context = egui::Context::default();
+    let trace = Trace::new(true);
+    let mut raw = egui::RawInput::default();
+    let sample = |raw: &egui::RawInput| {
+        let output = context.run_logic(raw, |ctx| trace.observe_window(ctx));
+        assert!(output.viewport_commands.is_empty());
+        let state = trace.state.as_ref().unwrap().lock().unwrap();
+        (state.sequence, state.window.clone().unwrap())
+    };
+    let (sequence, initial) = sample(&raw);
+    assert_eq!(sequence, 1);
+    assert!(initial["occluded"].is_null());
+    assert!(initial["inner_rect_points"].is_null());
+    assert!(initial["monitor_size_points"].is_null());
+    assert_eq!(sample(&raw).0, 1);
+
+    let viewport = raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap();
+    viewport.occluded = Some(true);
+    viewport.minimized = Some(false);
+    viewport.focused = Some(false);
+    viewport.native_pixels_per_point = Some(2.0);
+    viewport.inner_rect = Some(egui::Rect::from_min_size(
+        egui::pos2(-1280.0, 24.0),
+        egui::vec2(1280.0, 820.0),
+    ));
+    viewport.monitor_size = Some(egui::vec2(2560.0, 1440.0));
+    raw.focused = false;
+    let (sequence, hidden) = sample(&raw);
+    assert_eq!(sequence, 2);
+    assert_eq!(hidden["occluded"], true);
+    assert_eq!(hidden["visible_for_rendering"], false);
+    assert_eq!(hidden["input_focused"], false);
+    assert_eq!(
+        hidden["inner_rect_points"],
+        json!([-1280.0, 24.0, 1280.0, 820.0])
+    );
+    assert_eq!(hidden["native_pixels_per_point"], 2.0);
+    assert_eq!(sample(&raw).0, 2);
+    raw.viewports
+        .get_mut(&egui::ViewportId::ROOT)
+        .unwrap()
+        .occluded = Some(false);
+    let (sequence, visible) = sample(&raw);
+    assert_eq!(sequence, 3);
+    assert_eq!(visible["visible_for_rendering"], true);
+    assert_eq!(context.cumulative_pass_nr(), 0);
 }
 
 #[test]

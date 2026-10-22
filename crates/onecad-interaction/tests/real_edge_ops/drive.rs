@@ -72,6 +72,18 @@ pub async fn drive(
                 state.dispatch(Action::PreviewFinished { tag, result })
             }
             Effect::PublishPreview { .. } | Effect::ClearPreview { .. } => Vec::new(),
+            Effect::PreviewExistingEdit { tag, operation } => {
+                let fence = api::preview_context(&harness.state).await.unwrap();
+                let result = api::preview_existing_edit(
+                    &harness.state,
+                    fence,
+                    tag.record_id,
+                    *operation,
+                    Lod::Fine,
+                )
+                .await;
+                state.dispatch(Action::EditPreviewFinished { tag, result })
+            }
             Effect::ApplyOperation { tag, command, .. } => {
                 let (projection, effects) = commit(harness, state, tag, *command).await;
                 committed = Some(projection);

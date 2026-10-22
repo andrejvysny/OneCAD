@@ -48,6 +48,7 @@ pub(crate) struct GpuBody {
     pub id: BodyId,
     pub mesh_revision: u64,
     pub style: BodyStyle,
+    pub preview_suppressed: bool,
     pub positions: wgpu::Buffer,
     pub normals: wgpu::Buffer,
     pub indices: wgpu::Buffer,
@@ -256,6 +257,7 @@ impl PreparedBody {
         });
         let frame_bind = gpu.bind("body frame", layout, &[uniform.as_entire_binding()]);
         GpuBody {
+            preview_suppressed: false,
             source: self.geometry.source.clone(),
             id,
             mesh_revision: self.mesh_revision,

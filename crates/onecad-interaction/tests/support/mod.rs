@@ -93,6 +93,15 @@ pub fn preview(tag: &RequestTag) -> PreviewResultDto {
     }
 }
 
+pub fn edit_unavailable(state: &mut Interaction, tag: &RequestTag) {
+    state.dispatch(Action::EditPreviewFinished {
+        tag: tag.clone(),
+        result: Err(onecad_app::error::ApiError::Unsupported(
+            "test worker lacks plan.preview".into(),
+        )),
+    });
+}
+
 pub fn completion(tag: &RequestTag, source_revision: u64) -> RegenFinished {
     RegenFinished {
         runtime_session: tag.context.runtime_session.clone(),

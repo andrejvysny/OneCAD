@@ -102,27 +102,9 @@ async fn stage_hole(
     pick: api::StagePick,
 ) -> Result<(ElementRef, onecad_core::math::Vec3), String> {
     let scope = scope(state, context).await?;
-    let (element, topo) = match &pick.address {
-        api::StageAddress::Element(id) => (id.clone(), None),
-        api::StageAddress::TopoKey(key) => (String::new(), Some(key.clone())),
-    };
-    let plane = api::face_sketch_plane(
-        state,
-        scope.snapshot_id.0,
-        onecad_app::worker::wire::body_id_wire(pick.body),
-        element,
-        topo,
-    )
-    .await
-    .map_err(|error| error.to_string())?;
-    let refs = api::stage_elements(state, &scope, vec![pick])
+    let (face, point) = api::stage_hole(state, &scope, pick)
         .await
         .map_err(|error| error.to_string())?;
-    let face = refs
-        .into_iter()
-        .next()
-        .ok_or("Hole face staging returned no reference")?;
-    let point = onecad_core::math::Vec3::try_from(plane.origin).map_err(str::to_owned)?;
     current(state, &scope, Ok((face, point))).await
 }
 

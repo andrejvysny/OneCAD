@@ -183,6 +183,7 @@ pub fn closed(state: &mut SketchInteraction) {
         panic!()
     };
     state.dispatch(SketchAction::Finished {
+        warning: None,
         tag: tag.clone(),
         result: Box::new(FinishSketchDto {
             region_identity_version: 2,

@@ -6,6 +6,8 @@ use crate::{
 use onecad_scene::{SceneIdentity, SceneSnapshot};
 
 pub(crate) use crate::section_contours_gpu::GpuSectionContours;
+type OwnedContours = (Vec<[f32; 6]>, Vec<[u64; 4]>);
+type OwnedSegment = ([f32; 6], [u64; 4]);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SectionContourKey {
@@ -17,6 +19,7 @@ pub struct SectionContourKey {
 pub struct PreparedSectionContours {
     pub(super) key: SectionContourKey,
     segments: Vec<[f32; 6]>,
+    pub(super) owners: Vec<[u64; 4]>,
 }
 
 #[derive(Clone, Copy)]
@@ -160,6 +163,9 @@ impl PreparedSectionContours {
         if !section.iter().all(|v| v.is_finite()) {
             return Err(RenderError::Mesh("invalid section plane"));
         }
+        if scene.bodies().len() > 255 && section[..3].iter().any(|v| *v != 0.0) {
+            return Err(RenderError::Budget("section winding body count"));
+        }
         let key = SectionContourKey {
             scene: scene.identity(),
             preview: None,
@@ -170,7 +176,7 @@ impl PreparedSectionContours {
             visit(scene, section, current, |_| count += 1)?;
         }
         let bytes = add(
-            mul(count, (std::mem::size_of::<Candidate>() + 24) as u64)?,
+            mul(count, (std::mem::size_of::<Candidate>() + 112) as u64)?,
             std::mem::size_of::<Self>() as u64,
         )?;
         check_budget(budget, bytes, mul(count, 24)?)?;
@@ -182,8 +188,12 @@ impl PreparedSectionContours {
         if count != 0 {
             visit(scene, section, current, |item| candidates.push(item))?;
         }
-        let segments = resolve(candidates)?;
-        Ok(Self { key, segments })
+        let (segments, owners) = resolve_owned(candidates)?;
+        Ok(Self {
+            key,
+            segments,
+            owners,
+        })
     }
     pub fn with_preview(mut self, preview: PreviewIdentity) -> Result<Self, RenderError> {
         if preview.base != self.key.scene {
@@ -205,18 +215,27 @@ impl PreparedSectionContours {
         &self.segments
     }
     pub fn cpu_bytes(&self) -> u64 {
-        std::mem::size_of::<Self>() as u64 + self.segments.capacity() as u64 * 24
+        std::mem::size_of::<Self>() as u64
+            + self.segments.capacity() as u64 * 24
+            + self.owners.capacity() as u64 * 32
+    }
+    pub(super) fn gpu_metadata_bytes(&self) -> u64 {
+        std::mem::size_of::<GpuSectionContours>() as u64 + self.owners.capacity() as u64 * 32
     }
 }
-fn resolve(mut candidates: Vec<Candidate>) -> Result<Vec<[f32; 6]>, RenderError> {
+#[cfg(test)]
+fn resolve(candidates: Vec<Candidate>) -> Result<Vec<[f32; 6]>, RenderError> {
+    resolve_owned(candidates).map(|(segments, _)| segments)
+}
+fn resolve_owned(mut candidates: Vec<Candidate>) -> Result<OwnedContours, RenderError> {
     let count = candidates.len();
     candidates.sort_unstable_by(|a, b| {
         a.body
             .cmp(&b.body)
             .then_with(|| compare(&a.segment, &b.segment))
     });
-    let mut segments = Vec::new();
-    segments
+    let mut resolved = Vec::new();
+    resolved
         .try_reserve_exact(count)
         .map_err(|_| RenderError::Budget("section contours"))?;
     let mut first = 0;
@@ -230,13 +249,41 @@ fn resolve(mut candidates: Vec<Candidate>) -> Result<Vec<[f32; 6]>, RenderError>
         }
         let coplanar = candidates[first..end].iter().filter(|c| c.coplanar).count();
         if coplanar < 2 || candidates[first..end].iter().any(|c| !c.coplanar) {
-            segments.push(candidates[first].segment);
+            let mut owners = [0u64; 4];
+            let body = candidates[first].body as usize;
+            if body >= 256 {
+                return Err(RenderError::Budget("section winding body count"));
+            }
+            owners[body / 64] = 1 << (body % 64);
+            resolved.push((candidates[first].segment, owners));
         }
         first = end;
     }
-    segments.sort_unstable_by(compare);
-    segments.dedup();
-    Ok(segments)
+    merge_owners(resolved)
+}
+fn merge_owners(mut resolved: Vec<OwnedSegment>) -> Result<OwnedContours, RenderError> {
+    resolved.sort_unstable_by(|a, b| compare(&a.0, &b.0));
+    let mut segments = Vec::new();
+    let mut owners: Vec<[u64; 4]> = Vec::new();
+    segments
+        .try_reserve_exact(resolved.len())
+        .map_err(|_| RenderError::Budget("section contours"))?;
+    owners
+        .try_reserve_exact(resolved.len())
+        .map_err(|_| RenderError::Budget("section contour ownership"))?;
+    for (segment, mask) in resolved {
+        if segments.last() == Some(&segment) {
+            if let Some(previous) = owners.last_mut() {
+                for (word, incoming) in previous.iter_mut().zip(mask) {
+                    *word |= incoming;
+                }
+            }
+        } else {
+            segments.push(segment);
+            owners.push(mask);
+        }
+    }
+    Ok((segments, owners))
 }
 pub(super) fn check_budget(
     budget: PreparationBudget,

@@ -476,6 +476,14 @@ add_executable(test_m6a_ops test_m6a_ops.cpp)
 target_link_libraries(test_m6a_ops PRIVATE worker_core)
 add_test(NAME m6a_ops COMMAND test_m6a_ops)
 
+add_executable(test_shell_coplanar_patch test_shell_coplanar_patch.cpp)
+target_link_libraries(test_shell_coplanar_patch PRIVATE worker_core)
+add_test(NAME shell_coplanar_patch COMMAND test_shell_coplanar_patch)
+
+add_executable(test_shell_connected_opening test_shell_connected_opening.cpp)
+target_link_libraries(test_shell_connected_opening PRIVATE worker_core)
+add_test(NAME shell_connected_opening COMMAND test_shell_connected_opening)
+
 # --- P3 Pattern V2: ExecutePlan lifecycle must preserve source and create only
 #     transformed ordinal children. ---
 add_executable(test_pattern_v2_plan test_pattern_v2_plan.cpp)

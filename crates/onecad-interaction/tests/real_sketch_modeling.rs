@@ -386,6 +386,7 @@ async fn finish(harness: &Harness, state: &mut SketchInteraction) -> FinishSketc
         .indices
         .is_empty());
     state.dispatch(SketchAction::Finished {
+        warning: None,
         tag,
         result: Box::new(regions.clone()),
     });

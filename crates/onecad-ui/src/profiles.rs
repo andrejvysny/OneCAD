@@ -28,6 +28,14 @@ pub struct ProfileBudget {
     bytes: usize,
 }
 impl ProfileBudget {
+    pub(crate) fn retain_metadata(&mut self, bytes: usize) -> Result<(), String> {
+        crate::budget::charge(
+            &mut self.bytes,
+            bytes,
+            crate::budget::MAX_PROFILE_BYTES,
+            "aggregate profile source/decoded/scratch/anchors",
+        )
+    }
     fn charge(&mut self, result: &FinishSketchDto) -> Result<(), String> {
         use crate::budget::charge;
         charge(

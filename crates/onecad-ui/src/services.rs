@@ -12,6 +12,8 @@ use onecad_interaction::Action;
 use onecad_scene::{MeshLimits, SceneBody, SceneLimits, SceneSnapshot};
 use std::sync::{Arc, mpsc};
 use tokio::sync::OwnedSemaphorePermit;
+#[path = "edit_preview_service.rs"]
+mod edit_preview_service;
 
 pub fn invalidate(shared: &crate::bridge::Shared, error: String) {
     shared.invalidate(Some(error));
@@ -350,6 +352,10 @@ pub async fn candidate(backend: &Backend, generation: u64, candidate: Candidate)
     if !backend.shared.is_current(generation) {
         return;
     }
+    if let Candidate::PreviewExistingEdit { tag, operation } = candidate {
+        edit_preview_service::candidate(backend, generation, tag, *operation).await;
+        return;
+    }
     let mut prepared = None;
     let mut retained_scene = None;
     let lease = if matches!(&candidate, Candidate::Preview { .. }) {
@@ -382,6 +388,7 @@ pub async fn candidate(backend: &Backend, generation: u64, candidate: Candidate)
         None
     };
     let action = match candidate {
+        Candidate::PreviewExistingEdit { .. } => unreachable!("existing edit routed above"),
         Candidate::Evaluate {
             tag,
             expression,
@@ -402,7 +409,7 @@ pub async fn candidate(backend: &Backend, generation: u64, candidate: Candidate)
             snapshot,
         } => {
             let result = match preview(backend, &tag, *operation, sketch_id, snapshot).await {
-                Ok(result) => match preview_scene(&tag, &result) {
+                Ok(result) => match preview_scene(&tag, &result.bodies) {
                     Ok(scene) => {
                         match backend.shared.preparation_budget().and_then(|budget| {
                             onecad_render::PreparedScene::new(
@@ -468,13 +475,13 @@ async fn preview(
 
 fn preview_scene(
     tag: &onecad_interaction::RequestTag,
-    result: &onecad_app::dto::PreviewResultDto,
+    meshes: &[onecad_app::dto::PreviewBodyDto],
 ) -> Result<SceneSnapshot, String> {
-    if result.bodies.len() > crate::budget::MAX_BODIES {
+    if meshes.len() > crate::budget::MAX_BODIES {
         return Err("Native preview body count budget exceeded".into());
     }
     let mut bytes = 0;
-    for body in &result.bodies {
+    for body in meshes {
         crate::budget::charge(
             &mut bytes,
             body.mesh.len(),
@@ -482,8 +489,7 @@ fn preview_scene(
             "preview mesh",
         )?;
     }
-    let bodies = result
-        .bodies
+    let bodies = meshes
         .iter()
         .map(|body| {
             let id = body

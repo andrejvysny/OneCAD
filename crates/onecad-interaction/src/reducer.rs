@@ -91,6 +91,7 @@ impl Interaction {
             } => self.change_transform(translate, axis, angle_degrees),
             Action::Evaluated { tag, result } => self.evaluated(tag, result),
             Action::PreviewFinished { tag, result } => self.preview_finished(tag, result),
+            Action::EditPreviewFinished { tag, result } => self.edit_preview_finished(tag, result),
             Action::Confirm => self.confirm(),
             Action::Cancel => self.cancel(),
             Action::Republish => self.republish(),

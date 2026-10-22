@@ -360,10 +360,9 @@ async fn save_to_qa(
         .as_ref()
         .is_none_or(|path| confined_target(documents, path).is_err());
     let target = if save_as || needs_path {
-        let Some(path) = api::save_file_dialog(host.clone())
-            .await
-            .map_err(|e| e.to_string())?
-        else {
+        let request = save_dialog(state, current.as_deref()).await;
+        let paths = host.dialogs.pick(request).await;
+        let Some(path) = paths.first() else {
             return Ok(Outcome::Cancelled);
         };
         PathBuf::from(path)
@@ -385,6 +384,29 @@ async fn save_to_qa(
     .map_err(|e| e.to_string())
 }
 
+async fn save_dialog(state: &onecad_app::state::AppState, current: Option<&Path>) -> FileDialog {
+    let runtime = state.runtime.lock().await;
+    let title = runtime.as_ref().map_or("", |runtime| runtime.title());
+    let mut request = FileDialog::new("OneCAD", &["onecad"], true);
+    request.suggested_filename = Some(save_filename(current, title));
+    request
+}
+
+fn save_filename(current: Option<&Path>, title: &str) -> String {
+    let mut name = current
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .unwrap_or(title)
+        .trim();
+    while let Some((stem, extension)) = name.rsplit_once('.') {
+        if !extension.eq_ignore_ascii_case("onecad") {
+            break;
+        }
+        name = stem;
+    }
+    export_filename(name, "onecad")
+}
+
 async fn export(backend: &Backend, format: ExportFormat) -> Result<Outcome, String> {
     let (label, extension) = match format {
         ExportFormat::Step => ("STEP", "step"),
@@ -392,11 +414,8 @@ async fn export(backend: &Backend, format: ExportFormat) -> Result<Outcome, Stri
         ExportFormat::Obj => ("OBJ", "obj"),
         ExportFormat::ThreeMf => ("3MF", "3mf"),
     };
-    let paths = backend
-        .host
-        .dialogs
-        .pick(FileDialog::new(label, &[extension], true))
-        .await;
+    let request = export_dialog(&backend.state, label, extension).await;
+    let paths = backend.host.dialogs.pick(request).await;
     let Some(path) = paths.first() else {
         return Ok(Outcome::Cancelled);
     };
@@ -421,6 +440,32 @@ async fn export(backend: &Backend, format: ExportFormat) -> Result<Outcome, Stri
     Ok(result.map_or(Outcome::Cancelled, |path| {
         Outcome::Exported(PathBuf::from(path))
     }))
+}
+
+async fn export_dialog(
+    state: &onecad_app::state::AppState,
+    label: &str,
+    extension: &str,
+) -> FileDialog {
+    let runtime = state.runtime.lock().await;
+    let title = runtime.as_ref().map_or("", |runtime| runtime.title());
+    let mut request = FileDialog::new(label, &[extension], true);
+    request.suggested_filename = Some(export_filename(title, extension));
+    request
+}
+
+fn export_filename(title: &str, extension: &str) -> String {
+    let title = title.trim();
+    let title = if title.is_empty() { "Untitled" } else { title };
+    let name: String = title
+        .chars()
+        .map(|character| match character {
+            '/' | '\\' | ':' => '_',
+            character if character.is_control() => '_',
+            character => character,
+        })
+        .collect();
+    format!("{name}.{extension}")
 }
 
 fn validate_export_extension(format: ExportFormat, path: &Path) -> Result<(), String> {

@@ -18,6 +18,11 @@ impl DialogPort for NativeDialogs {
         let dialog = rfd::AsyncFileDialog::new()
             .set_directory(&self.directory)
             .add_filter(&request.label, &request.extensions);
+        let dialog = if let Some(filename) = &request.suggested_filename {
+            dialog.set_file_name(filename)
+        } else {
+            dialog
+        };
         let files = if request.save {
             dialog.save_file().await.into_iter().collect()
         } else if request.multiple {

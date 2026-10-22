@@ -82,7 +82,7 @@ impl Renderer {
             pass.set_stencil_reference(0);
             pass.set_pipeline(&self.pipelines.prepass);
             pass.set_bind_group(1, &target.body_bind, &[]);
-            for body in self.committed.iter() {
+            for body in self.visible_committed() {
                 geometry(&mut pass, body);
             }
             if self.options.section[..3].iter().any(|v| *v != 0.0) {
@@ -127,7 +127,7 @@ impl Renderer {
         pass.set_stencil_reference(0);
         pass.set_pipeline(&self.pipelines.height);
         pass.set_bind_group(1, &target.body_bind, &[]);
-        for body in self.committed.iter() {
+        for body in self.visible_committed() {
             pass.set_bind_group(0, &body.frame_bind, &[]);
             pass.set_vertex_buffer(0, body.positions.slice(..));
             pass.set_index_buffer(body.indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -192,7 +192,7 @@ impl Renderer {
             } else {
                 &self.pipelines.body
             });
-            for body in &self.committed {
+            for body in self.visible_committed() {
                 geometry(&mut pass, body);
             }
         }
@@ -311,6 +311,13 @@ impl Renderer {
                 pass.set_pipeline(&self.pipelines.highlight_edge);
                 pass.set_vertex_buffer(0, highlights.boundaries.slice(..));
                 for draw in &highlights.boundary_draws {
+                    if self
+                        .committed
+                        .get(draw.body_index)
+                        .is_none_or(|body| body.preview_suppressed)
+                    {
+                        continue;
+                    }
                     let tone = usize::from(draw.tone == crate::highlights::HighlightTone::Hover);
                     pass.set_bind_group(0, &highlights.binds[tone], &[]);
                     pass.draw(0..4, draw.first..draw.first + draw.count);
@@ -341,10 +348,9 @@ impl Renderer {
     }
     fn line_bodies(&self) -> impl Iterator<Item = &GpuBody> {
         // Selection is an interaction overlay: its line color must not depend on publication order.
-        self.committed
-            .iter()
+        self.visible_committed()
             .filter(|body| !body.style.selected)
-            .chain(self.committed.iter().filter(|body| body.style.selected))
+            .chain(self.visible_committed().filter(|body| body.style.selected))
     }
     fn draw_preview_cap(&self, pass: &mut wgpu::RenderPass<'_>) {
         let Some(preview) = self.preview.first() else {
@@ -376,7 +382,7 @@ impl Renderer {
         );
         pass.set_pipeline(&self.pipelines.oit);
         pass.set_bind_group(1, &target.body_bind, &[]);
-        for body in &self.committed {
+        for body in self.visible_committed() {
             geometry(&mut pass, body);
         }
         if self.options.section[..3].iter().any(|v| *v != 0.0) {
@@ -399,7 +405,7 @@ impl Renderer {
         height: bool,
     ) {
         pass.set_pipeline(pipeline);
-        for body in &self.committed {
+        for body in self.visible_committed() {
             if height {
                 pass.set_bind_group(0, &body.frame_bind, &[]);
                 pass.set_vertex_buffer(0, body.positions.slice(..));
@@ -422,6 +428,9 @@ impl Renderer {
             let Some(body) = self.committed.get(draw.body_index) else {
                 continue;
             };
+            if body.preview_suppressed {
+                continue;
+            }
             let uniform = match draw.tone {
                 crate::highlights::HighlightTone::Selected => 0,
                 crate::highlights::HighlightTone::Hover => 1,

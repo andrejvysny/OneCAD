@@ -21,6 +21,7 @@ pub struct Display {
     pub context: onecad_app::api::PreviewContext,
     pub scene: Arc<SceneSnapshot>,
     pub profiles: Vec<Profile>,
+    pub profile_anchors: Vec<crate::profile_capture::Anchor>,
     pub profile_failures: Vec<crate::profile_capture::Failure>,
     pub prepared: Mutex<Option<onecad_render::PreparedScene>>,
     pub _lease: Arc<crate::budget::Lease>,
@@ -71,6 +72,10 @@ pub enum Candidate {
         operation: Box<onecad_core::document::record::Operation>,
         sketch_id: Option<String>,
         snapshot: onecad_core::ids::SnapshotId,
+    },
+    PreviewExistingEdit {
+        tag: RequestTag,
+        operation: Box<onecad_core::document::record::Operation>,
     },
 }
 

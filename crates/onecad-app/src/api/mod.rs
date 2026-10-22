@@ -28,6 +28,8 @@ pub use sketch_gestures::{
     begin_native_gesture, cancel_native_gesture, end_native_gesture_with_completion,
     ready_native_gesture, update_native_gesture, NativeGestureHandle,
 };
+mod hole_operands;
+pub use hole_operands::stage_hole;
 mod operands;
 mod sketch_history;
 pub use document_state::{get_document_state, unsaved_changes};

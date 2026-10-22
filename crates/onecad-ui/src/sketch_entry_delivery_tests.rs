@@ -24,6 +24,10 @@ async fn world_planes_and_face_entry_preserve_native_frame_and_discard() {
         (WorldPlane::YZ, onecad_scene::Projection::Perspective),
     ] {
         app.doc.camera.projection = modeling;
+        app.doc.camera.target = onecad_scene::DVec3::new(12.0, -8.0, 25.0);
+        app.doc.camera.offset = onecad_scene::DVec3::new(160.0, -240.0, 180.0);
+        app.doc.camera.roll_radians = 0.12;
+        let modeling_camera = app.doc.camera;
         app.new_sketch_on_plane(plane);
         active(&mut app, &context, &mut frame).await;
         assert_eq!(
@@ -32,8 +36,10 @@ async fn world_planes_and_face_entry_preserve_native_frame_and_discard() {
         );
         assert_camera(&app);
         discard(&mut app, &context, &mut frame).await;
-        // Leaving the sketch restores the projection chosen for modeling.
-        assert_eq!(app.doc.camera.projection, modeling);
+        assert_eq!(
+            app.doc.camera, modeling_camera,
+            "Discard restores the full modeling camera"
+        );
         assert!(
             app.doc
                 .display
@@ -45,6 +51,27 @@ async fn world_planes_and_face_entry_preserve_native_frame_and_discard() {
         );
     }
     make_host(&mut app, &context, &mut frame).await;
+    let modeling_camera = app.doc.camera;
+    let base_sketch = app
+        .doc
+        .display
+        .as_ref()
+        .unwrap()
+        .projection
+        .sketches
+        .keys()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    app.edit_sketch(base_sketch);
+    active(&mut app, &context, &mut frame).await;
+    app.sketch_dispatch(SketchAction::Finish);
+    pump_until(&mut app, &context, &mut frame, |app| !app.sketch_active()).await;
+    assert_eq!(
+        app.doc.camera, modeling_camera,
+        "Finish restores the full modeling camera"
+    );
     let display = app.doc.display.clone().unwrap();
     let body = &display.scene.bodies()[0];
     let identity = body.mesh().unwrap().face_id(0).unwrap().to_owned();

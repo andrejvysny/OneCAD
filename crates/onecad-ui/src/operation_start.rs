@@ -278,6 +278,7 @@ fn start(app: &mut App, record: OperationRecord, pending: Pending) {
         );
         return;
     }
+    crate::model_handle::capture_operands(app, &record, &context);
     app.doc.gesture += 1;
     match operand_binding::begin_bound(record, app.doc.gesture, context) {
         Ok(action) => app.dispatch(action),

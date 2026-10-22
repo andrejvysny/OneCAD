@@ -59,7 +59,10 @@ impl Interaction {
         let Some(tool) = self.tool.as_mut() else {
             return Vec::new();
         };
-        if tool.preview != PreviewStatus::Pending || tool.params.readiness() != Readiness::Ready {
+        if tool.editing_existing
+            || tool.preview != PreviewStatus::Pending
+            || tool.params.readiness() != Readiness::Ready
+        {
             return Vec::new();
         }
         match result {

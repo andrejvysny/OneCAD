@@ -58,6 +58,7 @@ impl Interaction {
         let Some(tool) = self.editing_tool().filter(|tool| tool.tag == tag) else {
             return Vec::new();
         };
+        let preserve_drag = matches!(&options, ModelingOptions::Mirror { .. });
         let mut operation = tool.effective_op();
         if let Err(message) = apply(&mut operation, options) {
             tool.params.op_error = Some((None, message));
@@ -97,7 +98,9 @@ impl Interaction {
         tool.params = params;
         tool.record.op = operation;
         tool.record.inputs = tool.record.op.derive_inputs();
-        tool.drag = None;
+        if !preserve_drag {
+            tool.drag = None;
+        }
         self.changed(None)
     }
 }

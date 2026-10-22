@@ -19,6 +19,7 @@ pub(crate) struct Trace {
 struct State {
     sequence: u64,
     context: Value,
+    window: Option<Value>,
 }
 
 impl Trace {
@@ -55,6 +56,7 @@ impl Trace {
                 Mutex::new(State {
                     sequence: 0,
                     context: Value::Null,
+                    window: None,
                 })
             }),
         }
@@ -62,6 +64,37 @@ impl Trace {
 
     pub(crate) fn enabled(&self) -> bool {
         self.state.is_some()
+    }
+
+    pub(crate) fn observe_window(&self, context: &egui::Context) {
+        let Some(state) = &self.state else {
+            return;
+        };
+        let detail = context.input(|input| {
+            let viewport = input.viewport();
+            json!({
+                "viewport": format!("{:?}", input.raw.viewport_id),
+                "focused": viewport.focused,
+                "input_focused": input.focused,
+                "occluded": viewport.occluded,
+                "minimized": viewport.minimized,
+                "visible_for_rendering": viewport.visible(),
+                "inner_rect_points": viewport.inner_rect.map(rect_points),
+                "outer_rect_points": viewport.outer_rect.map(rect_points),
+                "monitor_size_points": viewport.monitor_size.map(|size| [size.x, size.y]),
+                "native_pixels_per_point": viewport.native_pixels_per_point,
+                "pixels_per_point": input.pixels_per_point,
+            })
+        });
+        let Ok(mut state) = state.lock() else {
+            return;
+        };
+        if state.window.as_ref() == Some(&detail) {
+            return;
+        }
+        state.window = Some(detail.clone());
+        drop(state);
+        self.record("host.window_state", detail);
     }
 
     pub(crate) fn record(&self, kind: &'static str, detail: Value) {
@@ -113,6 +146,10 @@ impl Trace {
             self.record(kind, display_identity(display));
         }
     }
+}
+
+fn rect_points(rect: egui::Rect) -> [f32; 4] {
+    [rect.min.x, rect.min.y, rect.width(), rect.height()]
 }
 
 fn bounded_detail(detail: Value) -> String {
@@ -201,6 +238,8 @@ fn pointer_owner(app: &App) -> &'static str {
         "text_editor"
     } else if app.doc.transform_gizmo.gizmo.active() {
         "transform_gizmo"
+    } else if app.doc.model_handle.active() {
+        "model_handle"
     } else if app.doc.extrude_handle.active() {
         "extrude_handle"
     } else if app.doc.sketch_gesture.busy() {

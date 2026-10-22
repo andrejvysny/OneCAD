@@ -45,7 +45,7 @@ fn accepted() -> String {
 }
 #[test]
 fn host_inventory_requires_exact_current_names() {
-    assert_eq!(HOST_TESTS.len(), 97);
+    assert_eq!(HOST_TESTS.len(), 102);
     let inventory = HOST_TESTS
         .iter()
         .map(|name| format!("{name}: test\n"))
@@ -140,7 +140,9 @@ fn host_service_selection_requires_its_own_exact_inventory_and_count() {
 #[test]
 fn host_missing_worker_requires_selected_test_and_decisive_failure() {
     let name = HOST_TESTS[1];
-    let failed = format!("test {name} ... FAILED\n\nfailures:\n\nfailures:\n    {name}\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored;\nnative host gate requires existing worker\n");
+    let failed = format!(
+        "test {name} ... FAILED\n\nfailures:\n\nfailures:\n    {name}\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored;\nnative host gate requires existing worker\n"
+    );
     host::missing_worker(Some(101), &failed).unwrap();
     for (status, output) in [
         (0, failed.clone()),

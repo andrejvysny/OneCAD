@@ -213,6 +213,27 @@ pub fn evaluate(
         }),
     })
 }
+
+pub fn complete_edit_preview(state: &mut Interaction, tag: &RequestTag) {
+    assert_eq!(state.tool.as_ref().unwrap().preview, PreviewStatus::Pending);
+    assert!(state.dispatch(Action::Confirm).is_empty());
+    state.dispatch(Action::EditPreviewFinished {
+        tag: tag.clone(),
+        result: Ok(onecad_app::api::EditPreview {
+            record: tag.record_id,
+            edited_step: Some(7),
+            snapshot_id: tag.context.snapshot_id,
+            outcome: onecad_app::api::EditPreviewOutcome::Ready,
+            bodies: Vec::new(),
+            meshes: Vec::new(),
+            suppressed: Vec::new(),
+            needs_repair: Vec::new(),
+            step_signatures: Vec::new(),
+            isolated: false,
+        }),
+    });
+    assert!(state.tool.as_ref().unwrap().ready());
+}
 pub fn edit(record: OperationRecord, parameter: NumericParameter, value: f64) -> OperationRecord {
     let expected_id = record.record_id;
     let (mut state, _) = begin(record, parameter);
@@ -224,7 +245,16 @@ pub fn edit(record: OperationRecord, parameter: NumericParameter, value: f64) ->
             _ => None,
         })
         .unwrap();
-    assert!(evaluate(&mut state, tag, parameter.site(), value).is_empty());
+    assert!(matches!(
+        evaluate(&mut state, tag.clone(), parameter.site(), value).as_slice(),
+        [Effect::PreviewExistingEdit { .. }]
+    ));
+    state.dispatch(Action::EditPreviewFinished {
+        tag,
+        result: Err(onecad_app::error::ApiError::Unsupported(
+            "test worker lacks plan.preview".into(),
+        )),
+    });
     assert_eq!(
         state.tool.as_ref().unwrap().preview,
         PreviewStatus::UnavailableForEdit
@@ -276,7 +306,11 @@ pub fn accepted_filleted_edit(defer: bool) -> (Interaction, RequestTag, RegenFin
         .unwrap();
     let (mut state, _) = begin(record(op), NumericParameter::FilletRadius);
     let tag = typed(&mut state, "4");
-    evaluate(&mut state, tag.clone(), "length", 4.0);
+    assert!(matches!(
+        evaluate(&mut state, tag.clone(), "length", 4.0).as_slice(),
+        [Effect::PreviewExistingEdit { .. }]
+    ));
+    complete_edit_preview(&mut state, &tag);
     assert_eq!(
         state
             .dispatch(Action::Confirm)

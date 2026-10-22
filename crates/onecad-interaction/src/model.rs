@@ -52,8 +52,10 @@ pub enum DraftStatus {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PreviewStatus {
     Empty,
-    /// Existing-feature edits need rollback-prefix preview support in onecad-app.
+    /// The backend cannot preview this existing edit; Apply can still regenerate it.
     UnavailableForEdit,
+    /// The edited feature succeeded, but another feature could not regenerate.
+    EditWarning(String),
     Pending,
     Ready,
     NeedsRepair,
@@ -106,6 +108,7 @@ impl ModelSession {
         self.phase == SessionPhase::Editing
             && self.params.readiness() == Readiness::Ready
             && (self.preview == PreviewStatus::Ready
+                || self.editing_existing && matches!(self.preview, PreviewStatus::EditWarning(_))
                 || self.editing_existing && self.preview == PreviewStatus::UnavailableForEdit)
     }
 }
@@ -214,6 +217,10 @@ pub enum Action {
         tag: RequestTag,
         result: Result<PreviewResultDto, String>,
     },
+    EditPreviewFinished {
+        tag: RequestTag,
+        result: Result<onecad_app::api::EditPreview, onecad_app::error::ApiError>,
+    },
     Confirm,
     Cancel,
     /// The host dropped the tool's in-flight evaluation and preview (its document
@@ -265,6 +272,10 @@ pub enum Effect {
         operation: Box<onecad_core::document::record::Operation>,
         sketch_id: Option<SketchId>,
         expected_snapshot: SnapshotId,
+    },
+    PreviewExistingEdit {
+        tag: RequestTag,
+        operation: Box<Operation>,
     },
     PublishPreview {
         tag: RequestTag,

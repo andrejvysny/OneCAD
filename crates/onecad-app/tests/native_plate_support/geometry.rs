@@ -1,13 +1,10 @@
-use super::{
-    profile::{HEIGHT, WIDTH},
-    Harness,
-};
+use super::profile::{HEIGHT, WIDTH};
 use onecad_app::{api, dto::DocumentProjection};
 use onecad_protocol::mesh::{MeshLimits, MeshView};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub async fn assert_plate(
-    harness: &Harness,
+    harness: &super::Harness,
     projection: &DocumentProjection,
     depth: f64,
 ) -> Vec<u8> {

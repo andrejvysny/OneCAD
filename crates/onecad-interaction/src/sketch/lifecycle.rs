@@ -165,7 +165,12 @@ impl SketchInteraction {
             SketchAction::ReenterForRepair { key, document } => {
                 self.reenter_for_repair(key, document)
             }
-            SketchAction::Finished { tag, result } => self.finished(tag, result),
+            SketchAction::Finished {
+                tag,
+                result,
+                warning,
+            } => self.finished(tag, result, warning),
+            SketchAction::FinishUncertain { tag, message } => self.finish_uncertain(tag, message),
             SketchAction::Discarded { tag, result } => self.discarded(tag, result),
         }
     }

@@ -294,6 +294,8 @@ mod extension_refresh_delivery_tests;
 #[path = "extrude_handle_delivery_tests.rs"]
 mod extrude_handle_delivery_tests;
 
+#[path = "edit_preview_delivery_tests.rs"]
+mod edit_preview_delivery_tests;
 #[path = "parameter_delivery_tests.rs"]
 mod parameter_delivery_tests;
 
@@ -311,3 +313,6 @@ mod sketch_selection_delivery_tests;
 
 #[path = "sketch_finish_delivery_tests.rs"]
 mod sketch_finish_delivery_tests;
+
+#[path = "model_handle/delivery_tests.rs"]
+mod model_handle_delivery_tests;

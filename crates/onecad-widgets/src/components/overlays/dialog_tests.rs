@@ -122,3 +122,29 @@ fn fits_width_in_both_themes() {
         }
     }
 }
+
+#[test]
+fn affected_names_and_kinds_are_accessible() {
+    let ctx = Context::default();
+    ctx.enable_accesskit();
+    theme::install(&ctx, theme::load(false).unwrap(), false);
+    let rows = [
+        ("body", "Body 1", "body"),
+        ("extrude", "Import STEP", "feature"),
+    ];
+    let mut output = ctx.run_ui(RawInput::default(), |ui| affected_list(ui, &rows));
+    output.textures_delta.clear();
+    let update = output
+        .platform_output
+        .accesskit_update
+        .expect("accesskit enabled");
+    for expected in ["Body 1", "Import STEP", "body", "feature"] {
+        assert!(
+            update.nodes.iter().any(|(_, node)| {
+                node.label() == Some(expected) || node.value() == Some(expected)
+            }),
+            "affected item missing: {expected}; {:?}",
+            update.nodes
+        );
+    }
+}

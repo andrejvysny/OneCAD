@@ -179,9 +179,9 @@ fn session(mode: ExtrudeMode, editing_existing: bool) -> ModelSession {
 }
 
 #[test]
-fn gate_hides_handle_unless_editing_a_new_extrude_distance() {
+fn gate_hides_handle_unless_editing_an_active_extrude_distance() {
     assert!(distance_params(&session(ExtrudeMode::Blind, false)).is_some());
-    assert!(distance_params(&session(ExtrudeMode::Blind, true)).is_none());
+    assert!(distance_params(&session(ExtrudeMode::Blind, true)).is_some());
     assert!(distance_params(&session(ExtrudeMode::ThroughAll, false)).is_none());
     let mut committing = session(ExtrudeMode::Blind, false);
     committing.phase = SessionPhase::Committing;

@@ -255,6 +255,7 @@ impl SketchInteraction {
         &mut self,
         tag: SketchTag,
         result: Box<FinishSketchDto>,
+        warning: Option<String>,
     ) -> Vec<SketchEffect> {
         if !self.valid_tag(&tag) || !self.phase_is(SketchPhase::Finishing) {
             return Vec::new();
@@ -264,10 +265,34 @@ impl SketchInteraction {
         };
         session.phase = SketchPhase::Closed;
         session.selection.clear();
+        session.edit_session = None;
+        session.history = None;
         session.status = SketchStatus::Finished {
             result,
-            kept_reason: session.kept_reason.take(),
+            kept_reason: match (session.kept_reason.take(), warning) {
+                (Some(kept), Some(warning)) => Some(format!("{kept}; {warning}")),
+                (kept, warning) => warning.or(kept),
+            },
         };
+        Vec::new()
+    }
+
+    pub(crate) fn finish_uncertain(
+        &mut self,
+        tag: SketchTag,
+        message: String,
+    ) -> Vec<SketchEffect> {
+        if !self.valid_tag(&tag) || !self.phase_is(SketchPhase::Finishing) {
+            return Vec::new();
+        }
+        let Some(session) = self.session.as_mut() else {
+            return Vec::new();
+        };
+        session.phase = SketchPhase::Closed;
+        session.selection.clear();
+        session.edit_session = None;
+        session.history = None;
+        session.status = SketchStatus::FinishUncertain(message);
         Vec::new()
     }
 

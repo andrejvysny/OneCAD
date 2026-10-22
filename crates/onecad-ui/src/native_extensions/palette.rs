@@ -1,5 +1,42 @@
 use super::command_available;
-use crate::app::App;
+use crate::{
+    app::App,
+    tool_registry::{PLANNED_MODEL, PLANNED_SKETCH, SelectionKind, ToolDef, ToolId, pill_tools},
+};
+
+#[derive(Clone)]
+enum Command {
+    Core(ToolId),
+    Extension(String),
+}
+
+fn core_commands() -> Vec<ToolDef> {
+    let mut commands = Vec::new();
+    for kind in [
+        SelectionKind::None,
+        SelectionKind::Face,
+        SelectionKind::Edge,
+        SelectionKind::Body,
+        SelectionKind::Region,
+        SelectionKind::SketchIdle,
+        SelectionKind::SketchEntity,
+        SelectionKind::Feature,
+    ] {
+        for tool in pill_tools(kind)
+            .iter()
+            .flat_map(|group| group.iter())
+            .chain(PLANNED_MODEL)
+            .chain(PLANNED_SKETCH)
+        {
+            if tool.id != ToolId::More
+                && !commands.iter().any(|entry: &ToolDef| entry.id == tool.id)
+            {
+                commands.push(*tool);
+            }
+        }
+    }
+    commands
+}
 
 pub(crate) fn route_shortcut(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     if !raw.focused
@@ -39,59 +76,88 @@ pub(super) fn show(app: &mut App, ctx: &egui::Context) {
         .iter()
         .any(|item| item.body().is_some());
     let idle = !app.busy() && !app.ui.extensions.native.pending;
+    let core: Vec<_> = core_commands()
+        .into_iter()
+        .map(|tool| {
+            let reason = crate::pill::disabled_reason(app, &tool);
+            (tool, reason)
+        })
+        .collect();
     let state = &mut app.ui.extensions.native;
     let mut picked = None;
     let mut first_available = None;
     let mut close = false;
     egui::Modal::new(egui::Id::unique("extension-command-palette")).show(ctx, |ui| {
         ui.set_width(440.0);
-        ui.heading("Extension commands");
+        ui.heading("Search commands");
         let search = ui.add(
             egui::TextEdit::singleline(&mut state.palette_query)
-                .hint_text("Search extension commands")
+                .hint_text("Search commands")
                 .desired_width(f32::INFINITY),
         );
         if std::mem::take(&mut state.palette_focus) {
             search.request_focus();
         }
         let mut count = 0;
-        for entry in state.commands.iter().filter(|entry| {
-            entry
-                .command
-                .locations
-                .iter()
-                .any(|location| location == "palette")
-        }) {
-            if !matches_query(
-                &entry.command.title,
-                &entry.command.description,
-                &state.palette_query,
-            ) {
-                continue;
-            }
-            count += 1;
-            let enabled =
-                idle && entry.enabled && command_available(&entry.command, document, selection);
-            if enabled && first_available.is_none() {
-                first_available = Some(entry.command.id.clone());
-            }
-            if ui
-                .add_enabled(enabled, egui::Button::new(&entry.command.title))
-                .on_disabled_hover_text(
-                    "Enable the extension and provide its required document or selection",
-                )
-                .clicked()
-            {
-                picked = Some(entry.command.id.clone());
-            }
-            if !entry.command.description.is_empty() {
-                ui.small(&entry.command.description);
-            }
-        }
+        egui::ScrollArea::vertical()
+            .max_height(360.0)
+            .show(ui, |ui| {
+                for (tool, reason) in &core {
+                    if !matches_query(tool.label, "", &state.palette_query) {
+                        continue;
+                    }
+                    count += 1;
+                    let enabled = reason.is_none();
+                    if enabled && first_available.is_none() {
+                        first_available = Some(Command::Core(tool.id));
+                    }
+                    if ui
+                        .add_enabled(enabled, egui::Button::new(tool.label))
+                        .clicked()
+                    {
+                        picked = Some(Command::Core(tool.id));
+                    }
+                    if let Some(reason) = reason {
+                        ui.small(*reason);
+                    }
+                }
+                for entry in state.commands.iter().filter(|entry| {
+                    entry
+                        .command
+                        .locations
+                        .iter()
+                        .any(|location| location == "palette")
+                }) {
+                    if !matches_query(
+                        &entry.command.title,
+                        &entry.command.description,
+                        &state.palette_query,
+                    ) {
+                        continue;
+                    }
+                    count += 1;
+                    let enabled = idle
+                        && entry.enabled
+                        && command_available(&entry.command, document, selection);
+                    if enabled && first_available.is_none() {
+                        first_available = Some(Command::Extension(entry.command.id.clone()));
+                    }
+                    if ui
+                        .add_enabled(enabled, egui::Button::new(&entry.command.title))
+                        .on_disabled_hover_text(
+                            "Enable the extension and provide its required document or selection",
+                        )
+                        .clicked()
+                    {
+                        picked = Some(Command::Extension(entry.command.id.clone()));
+                    }
+                    if !entry.command.description.is_empty() {
+                        ui.small(&entry.command.description);
+                    }
+                }
+            });
         if count == 0 {
-            ui.label(
-                "No matching extension commands. Install or enable an extension in Extensions.",
-            );
+            ui.label("No matching commands.");
         }
         if ctx.input(|input| input.key_pressed(egui::Key::Enter)) {
             picked = first_available.take();
@@ -104,14 +170,39 @@ pub(super) fn show(app: &mut App, ctx: &egui::Context) {
     if close || picked.is_some() {
         state.palette_open = false;
     }
-    if let Some(command) = picked {
-        app.run_extension_command(&command);
+    match picked {
+        Some(Command::Core(id)) => crate::pill::activate(app, ctx, id),
+        Some(Command::Extension(command)) => app.run_extension_command(&command),
+        None => {}
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn palette_finds_core_modeling_and_sketch_commands_once() {
+        let commands = core_commands();
+        for (query, expected) in [
+            ("extrude", ToolId::Extrude),
+            ("fillet", ToolId::Fillet),
+            ("rectangle", ToolId::Rectangle),
+            ("gear", ToolId::Generators),
+        ] {
+            assert_eq!(
+                commands.iter().filter(|tool| tool.id == expected).count(),
+                1
+            );
+            assert!(
+                commands
+                    .iter()
+                    .any(|tool| tool.id == expected && matches_query(tool.label, "", query))
+            );
+        }
+        assert!(!commands.iter().any(|tool| tool.id == ToolId::More));
+        assert!(commands.iter().any(|tool| tool.id == ToolId::Sweep));
+    }
 
     #[test]
     fn palette_search_matches_title_and_description_without_case() {

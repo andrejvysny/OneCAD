@@ -90,17 +90,21 @@ impl App {
             self.ui.previous_sketch_tool = tool_before;
         }
         if align_entry && let Some(session) = &self.doc.sketch.session {
-            self.doc
-                .modeling_projection
-                .get_or_insert(self.doc.camera.projection);
+            self.doc.modeling_camera.get_or_insert(self.doc.camera);
             crate::sketch_entry::align_camera(&mut self.doc.camera, session.plane);
             self.draw_dirty = true;
         }
         if was_active
             && !self.sketch_active()
-            && let Some(projection) = self.doc.modeling_projection.take()
+            && let Some(camera) = self.doc.modeling_camera.take()
+            && self.doc.sketch.session.as_ref().is_some_and(|session| {
+                matches!(
+                    session.status,
+                    SketchStatus::Finished { .. } | SketchStatus::Discarded(_)
+                )
+            })
         {
-            self.doc.camera.projection = projection;
+            self.doc.camera = camera;
             self.draw_dirty = true;
         }
         self.sync_sketch_gesture();
@@ -132,6 +136,7 @@ impl App {
                     result,
                 } => crate::sketch_feedback::finished(kept_reason.as_deref(), result).0,
                 SketchStatus::Discarded(_) => "Sketch edits discarded".into(),
+                SketchStatus::FinishUncertain(message) => message.clone(),
             };
             use crate::diagnostics::{Source, State};
             let state = match &session.status {
@@ -145,6 +150,7 @@ impl App {
                     result,
                 } => crate::sketch_feedback::finished(kept_reason.as_deref(), result).1,
                 SketchStatus::Discarded(_) => State::Cancelled,
+                SketchStatus::FinishUncertain(_) => State::Warning,
                 SketchStatus::Entered(_) | SketchStatus::Solved(_)
                     if matches!(
                         crate::sketch_feedback::summary(&session.status).assessment,

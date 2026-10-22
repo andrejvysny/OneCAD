@@ -365,7 +365,11 @@ fn per_feature_repair_and_sibling_failure_are_not_reported_as_generic_success() 
 #[test]
 fn committed_extrusion_edit_uses_apply_operation_without_auto_hiding_or_rollback() {
     let (mut state, tag) = editing();
-    assert!(evaluate(&mut state, &tag, 30.0).is_empty());
+    assert!(matches!(
+        evaluate(&mut state, &tag, 30.0).as_slice(),
+        [Effect::PreviewExistingEdit { .. }]
+    ));
+    edit_unavailable(&mut state, &tag);
     assert_eq!(
         state.tool.as_ref().unwrap().preview,
         PreviewStatus::UnavailableForEdit

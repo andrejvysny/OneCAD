@@ -66,6 +66,7 @@ pub(crate) fn summary(status: &SketchStatus) -> Feedback {
             result,
         } => finished(kept_reason.as_deref(), result).0,
         SketchStatus::Discarded(_) => "Sketch edits discarded".into(),
+        SketchStatus::FinishUncertain(message) => message.clone(),
     };
     Feedback {
         label,

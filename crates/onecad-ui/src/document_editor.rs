@@ -25,8 +25,9 @@ pub struct DocumentEditor {
     pub navigation: crate::navigation::Navigation,
     pub transform_gizmo: crate::transform_ui::TransformGizmo,
     pub(crate) extrude_handle: crate::extrude_handle::ExtrudeHandle,
-    /// Projection chosen for modeling, restored when a sketch (always orthographic) closes.
-    pub(crate) modeling_projection: Option<onecad_scene::Projection>,
+    pub(crate) model_handle: crate::model_handle::ModelHandle,
+    /// Complete modeling camera restored when a sketch closes.
+    pub(crate) modeling_camera: Option<onecad_scene::Camera>,
     pub topology: crate::viewport_selection::Selection,
     /// Last drawable capture; `camera` may already contain pending navigation.
     pub view: Option<ViewSnapshot>,
@@ -95,7 +96,8 @@ impl DocumentEditor {
             navigation: Default::default(),
             transform_gizmo: Default::default(),
             extrude_handle: Default::default(),
-            modeling_projection: None,
+            model_handle: Default::default(),
+            modeling_camera: None,
             topology: Default::default(),
             view: None,
             view_presentation: None,

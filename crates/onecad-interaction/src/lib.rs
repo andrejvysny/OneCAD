@@ -1,6 +1,7 @@
 //! Pure interaction transitions. Hosts execute effects through onecad-app;
 //! preview responses become visible only after their captured identity matches.
 
+mod edit_preview;
 mod extrude;
 mod feedback;
 mod model;

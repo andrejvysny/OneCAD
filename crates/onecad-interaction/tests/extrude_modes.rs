@@ -154,7 +154,11 @@ fn saved_feature_modes_never_start_an_appended_preview() {
             context: context()
         })
         .is_empty());
-    assert!(evaluate(&mut state, &tag, 8.0).is_empty());
+    assert!(matches!(
+        evaluate(&mut state, &tag, 8.0).as_slice(),
+        [Effect::PreviewExistingEdit { .. }]
+    ));
+    edit_unavailable(&mut state, &tag);
     assert_eq!(
         state.tool.as_ref().unwrap().preview,
         PreviewStatus::UnavailableForEdit

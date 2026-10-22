@@ -2594,6 +2594,23 @@ names from OneCAD-CPP `ShellParams`. Added M6a (see the [Changelog](#14-changelo
   unresolved or ambiguous ⇒ **NeedsRepair** ([§9](#9-needsrepair-payload)), never
   a guessed face. The result **replaces** the shelled body (id preserved; OCCT
   history folds into its partition).
+- A resolved planar open face opens its entire edge-connected coplanar patch on
+  that target body, including planar splits left by a Boolean. Candidates retain
+  their original topology and orientation: only the same outward-oriented normal
+  qualifies. Plane distances and normal angles are compared against the original
+  seed using `GeometryPrecisionContext::semantic_length()` (mm) and
+  `semantic_angular()` (radians); tolerances never accumulate along a patch.
+  Disconnected coplanar faces, opposite-facing walls and noncoplanar neighbors
+  are not added. Nonplanar selections open only the explicitly resolved faces.
+  Overlapping patches are deduplicated. This does not unify or otherwise rewrite
+  the input body, alter reference ownership, or invent additional persistent refs.
+- If the kernel reports `BRepOffset_NotConnectedShell` after removing the selected
+  opening, Shell refuses with `OP_FAILED` and the diagnostic
+  `SHELL_DISCONNECTED_RETAINED_SKIN` at `stage:"construction"`. Removing a broad
+  plate face around a raised boss can separate the retained boss skin from the
+  plate skin. The message asks for an opening that keeps the remaining walls
+  connected; changing thickness does not resolve this topology. Shell never
+  silently opens another face, deletes the boss, or invents connecting material.
 
 **OffsetFace** (`op.offsetFace`) — Shapr3D-style direct-modeling face offset:
 selected face(s) move along their surface normals, adjacent faces extend/trim

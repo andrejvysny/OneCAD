@@ -156,30 +156,16 @@ fn card(
         Order::Middle,
     )
     .show(ctx, |ui| {
-        card_scroll(ui, chrome.feature_card.height(), |ui| {
-            out = FeatureCard::new("feature-card", icon, &title)
-                .width(chrome.feature_card.width())
-                .ok_enabled(apply)
-                .ok_label(ok_label)
-                .cancel_enabled(tool.phase == SessionPhase::Editing)
-                .show(ui, |rows| card_rows(app, rows, tool, &mut response));
-        });
+        ui.set_max_height(chrome.feature_card.height());
+        out = FeatureCard::new("feature-card", icon, &title)
+            .width(chrome.feature_card.width())
+            .max_height(chrome.feature_card.height())
+            .ok_enabled(apply)
+            .ok_label(ok_label)
+            .cancel_enabled(tool.phase == SessionPhase::Editing)
+            .show(ui, |rows| card_rows(app, rows, tool, &mut response));
     });
     (response, out)
-}
-
-fn card_scroll<R>(
-    ui: &mut Ui,
-    height: f32,
-    add: impl FnOnce(&mut Ui) -> R,
-) -> egui::scroll_area::ScrollAreaOutput<R> {
-    // Area remembers the previous tool's height; the current chrome bounds own admission.
-    ui.set_max_height(height);
-    egui::ScrollArea::vertical()
-        .id_salt("feature-card-scroll")
-        .max_height(height)
-        .auto_shrink([false, true])
-        .show(ui, add)
 }
 
 fn card_rows(
@@ -266,6 +252,7 @@ fn preview_feedback(
             Some("Edit preview unavailable. Apply regenerates the feature.".into())
         }
         PreviewStatus::Ready => None,
+        PreviewStatus::EditWarning(message) => Some(format!("Edit preview: {message}")),
     }
 }
 
@@ -298,7 +285,7 @@ fn number_field(
         app.doc.numeric_id = Some(response.id);
     }
     let label = format!("{} ({unit})", key.label());
-    response.widget_info(|| field_info(editing, &draft, &label));
+    name_field(&response, &label);
     crate::automation::name(ui.ctx(), response.id, &field_automation(tool, key));
     if response.gained_focus() && !focused {
         app.dispatch(Action::FocusParameter(key));
@@ -310,12 +297,12 @@ fn number_field(
 }
 
 /// The row label is painted beside the field, so assistive tech (and touch
-/// automation) gets the name only from the field itself. `text_edit`'s last
-/// argument is a placeholder, not a name.
-fn field_info(enabled: bool, text: &str, label: &str) -> egui::WidgetInfo {
-    let mut info = egui::WidgetInfo::text_edit(enabled, text, text, "");
-    info.label = Some(label.to_owned());
-    info
+/// automation) gets the name only from the field itself. Keep the widget's
+/// accessible value synchronized with its displayed text.
+fn name_field(response: &egui::Response, label: &str) {
+    response
+        .ctx
+        .accesskit_node_builder(response.id, |node| node.set_label(label));
 }
 
 fn focus_keys(app: &mut App, response: &egui::Response, can_apply: bool) {
@@ -384,8 +371,8 @@ mod tests {
         ctx.enable_accesskit();
         let mut text = String::from("10");
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let response = ui.add(egui::TextEdit::singleline(&mut text));
-            response.widget_info(|| field_info(true, "10", "Extrude distance (mm)"));
+            let response = ui.add(NumberField::new("distance", &mut text));
+            name_field(&response, "Extrude distance (mm)");
         });
         output.textures_delta.clear();
         let update = output
@@ -399,7 +386,8 @@ mod tests {
             .find(|node| node.role() == egui::accesskit::Role::TextInput)
             .expect("text input node");
         assert_eq!(field.label(), Some("Extrude distance (mm)"));
-        assert_eq!(field.value(), Some("10"));
+        assert_eq!(field.value(), Some("10.00"));
+        assert_eq!(text, "10");
     }
 
     #[test]
@@ -455,35 +443,21 @@ mod tests {
                     Order::Middle,
                 )
                 .show(ctx, |ui| {
-                    let scroll = card_scroll(ui, height, |ui| {
-                        FeatureCard::new("growth", "extrude", "Edit feature")
-                            .width(280.0)
-                            .ok_label("Apply ↵")
-                            .show(ui, |rows| {
-                                for index in 0..row_count {
-                                    rows.row(
-                                        if index == 0 { "Parameter" } else { "Distance" },
-                                        |ui| {
-                                            ui.add_sized(
-                                                egui::vec2(130.0, 30.0),
-                                                egui::Label::new("8.00 mm"),
-                                            );
-                                        },
+                    ui.set_max_height(height);
+                    FeatureCard::new("growth", "extrude", "Edit feature")
+                        .width(280.0)
+                        .max_height(height)
+                        .ok_label("Apply ↵")
+                        .show(ui, |rows| {
+                            for index in 0..row_count {
+                                rows.row(if index == 0 { "Parameter" } else { "Distance" }, |ui| {
+                                    ui.add_sized(
+                                        egui::vec2(130.0, 30.0),
+                                        egui::Label::new("8.00 mm"),
                                     );
-                                }
-                            });
-                    });
-                    assert!(scroll.inner_rect.height() <= height + 1.0);
-                    if height >= 296.0 {
-                        assert!(
-                            scroll.content_size.y <= scroll.inner_rect.height() + 1.0,
-                            "{} content clipped to {}",
-                            scroll.content_size.y,
-                            scroll.inner_rect.height()
-                        );
-                    } else {
-                        assert!(scroll.content_size.y > scroll.inner_rect.height());
-                    }
+                                });
+                            }
+                        });
                 });
             },
         )
