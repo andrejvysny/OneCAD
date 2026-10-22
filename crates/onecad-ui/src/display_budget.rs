@@ -4,11 +4,13 @@
 //! document's targets, IBL and geometry are on the GPU, and the renderer charges each
 //! replacement (resize, rotation, scene or option change) with its old and new resources
 //! against `RenderLimits::max_gpu_bytes`. Parked tabs keep only disposable caches: the
-//! ⌃Tab switcher thumbnail (GPU) and a prepared scene not yet uploaded (CPU, re-prepared
-//! on activation). The aggregate splits into the renderer's allowance, reserved for the
-//! active document, and what parked caches may hold; parked caches are evicted least
-//! recently active first, so the sum of both never exceeds the aggregate. On Apple
-//! silicon GPU and CPU share one memory pool, so both count against one figure.
+//! ⌃Tab switcher thumbnail (GPU), and the CPU geometry of their last preparation (the
+//! backend's preparation cache plus a prepared scene not yet uploaded), rebuilt from the
+//! retained scene on activation. The aggregate splits into the renderer's allowance,
+//! reserved for the active document, and what parked caches may hold; on Mobile parked
+//! caches are evicted least recently active first, so the sum of both stays within the
+//! aggregate. On Apple silicon GPU and CPU share one memory pool, so both count against
+//! one figure.
 use crate::app::App;
 use onecad_render::{RenderLimits, RenderProfile};
 
@@ -84,17 +86,28 @@ fn thumbnail_bytes(doc: &crate::document_editor::DocumentEditor) -> u64 {
     })
 }
 
-fn prepared_bytes(doc: &crate::document_editor::DocumentEditor) -> u64 {
-    doc.display.as_ref().map_or(0, |display| {
-        display
-            .prepared
-            .lock()
-            .map_or(0, |prepared| prepared.as_ref().map_or(0, |p| p.cpu_bytes()))
-    })
-}
-
+/// Resident bytes of one parked tab's disposable caches: its switcher thumbnail (GPU), its
+/// backend's preparation cache, and what its prepared scenes (adopted, or still in the
+/// bridge's latest-only slot) hold beyond that cache.
 fn parked_bytes(doc: &crate::document_editor::DocumentEditor) -> u64 {
-    thumbnail_bytes(doc) + prepared_bytes(doc)
+    let shared = &doc.bridge.shared;
+    let Ok(cache) = shared.preparation_cache.lock() else {
+        return thumbnail_bytes(doc);
+    };
+    let pending = shared.display.lock().ok().and_then(|slot| slot.clone());
+    let beyond = |display: Option<&std::sync::Arc<crate::bridge::Display>>| {
+        display.map_or(0, |display| {
+            display.prepared.lock().map_or(0, |prepared| {
+                prepared
+                    .as_ref()
+                    .map_or(0, |scene| scene.cpu_bytes_beyond(&cache))
+            })
+        })
+    };
+    thumbnail_bytes(doc)
+        + cache.cpu_bytes()
+        + beyond(doc.display.as_ref())
+        + beyond(pending.as_ref())
 }
 
 impl App {
@@ -108,7 +121,11 @@ impl App {
     }
 
     /// Evicts parked caches, least recently active tab first, until they fit their share.
+    /// Mobile only: the macOS host keeps every parked tab's caches, as it always has.
     pub(crate) fn enforce_parked_budget(&mut self) {
+        if self.renderer.profile() == RenderProfile::Desktop {
+            return;
+        }
         let mut order: Vec<usize> = (0..self.tabs.parked.len()).collect();
         order.sort_by_key(|index| self.tabs.parked[*index].last_active);
         for index in order {
@@ -119,19 +136,24 @@ impl App {
         }
     }
 
-    /// Drops one parked tab's thumbnail and unuploaded prepared scene; returns the bytes.
+    /// Drops one parked tab's thumbnail, adopted prepared scene and backend preparation
+    /// cache; returns the resident bytes that went. A scene still in the bridge's slot is
+    /// adopted on activation and stays, so geometry it shares with the cache stays too.
     fn release_parked_caches_of(&mut self, index: usize) -> u64 {
+        let before = parked_bytes(&self.tabs.parked[index]);
         let doc = &mut self.tabs.parked[index];
-        let bytes = parked_bytes(doc);
+        let shared = doc.bridge.shared.clone();
+        let cache = shared.take_preparation_cache();
         if let Some(display) = &doc.display
             && let Ok(mut prepared) = display.prepared.lock()
         {
             // Activation re-prepares a consumed scene under the same identity.
             prepared.take();
         }
+        drop(cache);
         let thumbnail = doc.thumbnail.take();
         self.release_thumbnail(thumbnail);
-        bytes
+        before.saturating_sub(parked_bytes(&self.tabs.parked[index]))
     }
 
     /// Memory pressure: every parked tab's caches go; they are rebuilt on demand.

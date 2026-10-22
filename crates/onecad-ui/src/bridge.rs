@@ -157,6 +157,10 @@ pub struct Shared {
     /// Recovery flushes this actor has finished (a host awaits one after asking).
     pub recovery_flushes: std::sync::atomic::AtomicU64,
     pub budget: Mutex<onecad_render::PreparationBudget>,
+    /// The last preparation's geometry, reused by the next one. Shared so a window can
+    /// count and drop a parked document's cache (`display_budget`); a preparation moves
+    /// it out and back, never holding the lock while it works.
+    pub preparation_cache: Mutex<onecad_render::PreparationCache>,
     pub host_budget: Arc<crate::budget::HostBudget>,
     /// The document host's process identity, set once its actor has started.
     pub host: std::sync::atomic::AtomicU64,
@@ -192,6 +196,7 @@ impl Shared {
             activity: Mutex::new(None),
             render_receipt: Mutex::new(None),
             budget: Mutex::new(budget),
+            preparation_cache: Mutex::new(Default::default()),
             host_budget: Arc::new(crate::budget::HostBudget::default()),
             host: std::sync::atomic::AtomicU64::new(0),
             valid: std::sync::atomic::AtomicBool::new(false),
@@ -209,6 +214,17 @@ impl Shared {
             .lock()
             .map(|budget| *budget)
             .map_err(|_| "renderer preparation budget poisoned".into())
+    }
+    pub(crate) fn take_preparation_cache(&self) -> onecad_render::PreparationCache {
+        self.preparation_cache
+            .lock()
+            .map(|mut cache| std::mem::take(&mut *cache))
+            .unwrap_or_default()
+    }
+    pub(crate) fn restore_preparation_cache(&self, cache: onecad_render::PreparationCache) {
+        if let Ok(mut slot) = self.preparation_cache.lock() {
+            *slot = cache;
+        }
     }
     pub fn wake(&self) {
         self.input_trace
@@ -503,7 +519,6 @@ pub(crate) struct Backend {
     pub startup_opened: bool,
     pub scene_revision: u64,
     pub previous_scene: Option<(Arc<SceneSnapshot>, Arc<crate::budget::Lease>)>,
-    pub preparation_cache: onecad_render::PreparationCache,
     pub preparation_lease: Option<Arc<crate::budget::Lease>>,
 }
 
@@ -557,7 +572,6 @@ async fn actor(
         startup_opened: false,
         scene_revision: 0,
         previous_scene: None,
-        preparation_cache: Default::default(),
         preparation_lease: None,
     };
     let mut gestures = crate::gesture_services::Service::new();
