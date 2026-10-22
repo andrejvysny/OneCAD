@@ -81,13 +81,11 @@ extension XCUIApplication {
 }
 
 extension OneCADID {
-    static let fileNew = "onecad.menu.file.new"
     static let fileSave = "onecad.menu.file.save"
     static let fileSaveAll = "onecad.menu.file.saveAll"
     static let fileCloseTab = "onecad.menu.file.closeTab"
     static let fileImport = "onecad.menu.file.import"
     static let fileSendCopy = "onecad.menu.file.sendCopy"
-    static let saveName = "onecad.save.name"
     static let planeXY = "onecad.plane.xy"
     static let finishSketch = "onecad.tool.finishSketch"
 
