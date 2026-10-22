@@ -164,14 +164,12 @@ async fn run_intent(backend: &mut Backend, request: Request) -> Result<Outcome, 
         }
         Request::Import(path) => {
             let path = match path {
-                Some(path) => Some(path),
-                None => api::import_file_dialog(backend.host.clone())
-                    .await
-                    .map_err(|e| e.to_string())?
-                    .map(PathBuf::from),
-            };
-            let Some(path) = path else {
-                return Ok(Outcome::Cancelled);
+                Some(path) => path,
+                None => match api::import_file_dialog(backend.host.clone()).await {
+                    Ok(Some(path)) => PathBuf::from(path),
+                    Ok(None) => return Ok(Outcome::Cancelled),
+                    Err(e) => return Err(e.to_string()),
+                },
             };
             open(backend, &path, true).await
         }
