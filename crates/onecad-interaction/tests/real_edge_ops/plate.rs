@@ -25,6 +25,17 @@ pub fn volume() -> f64 {
     WIDTH * HEIGHT * THICKNESS - PI * HOLE_RADIUS * HOLE_RADIUS * THICKNESS
 }
 
+/// World (x, y) of sketch point (u, v). The XY sketch frame is non-standard
+/// (u → world +Y, v → world −X), so the plate lies at x ∈ [−40, 0], y ∈ [0, 60].
+pub fn world(u: f64, v: f64) -> [f64; 2] {
+    let plane = WorldPlane::XY.plane();
+    let at = |axis: usize| {
+        let [o, x, y] = [plane.origin, plane.x_axis, plane.y_axis].map(|p| [p.x, p.y, p.z][axis]);
+        o + u * x + v * y
+    };
+    [at(0), at(1)]
+}
+
 fn uuid(n: u128) -> Uuid {
     Uuid::from_u128(0x4600_0000 + n)
 }

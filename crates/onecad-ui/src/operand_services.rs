@@ -10,6 +10,10 @@ use tokio::sync::OwnedSemaphorePermit;
 
 #[derive(Debug)]
 pub enum Request {
+    #[allow(
+        dead_code,
+        reason = "operation start stages closures; plain pick staging (S-315c-ui) submits it"
+    )]
     Elements {
         context: DocumentContext,
         picks: Vec<api::StagePick>,

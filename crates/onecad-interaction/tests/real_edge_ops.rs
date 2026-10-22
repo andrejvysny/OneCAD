@@ -118,8 +118,9 @@ async fn author(root: &Path, saved: &Path) -> Authored {
     }
 }
 
-/// The vertical plate edge at corner (x, y), by its snapshot TopoKey.
-async fn corner_edge(harness: &Harness, body: BodyId, x: f64, y: f64) -> String {
+/// The vertical plate edge at sketch corner (u, v), by its snapshot TopoKey.
+async fn corner_edge(harness: &Harness, body: BodyId, u: f64, v: f64) -> String {
+    let [x, y] = plate::world(u, v);
     let edges = drive::elements(harness, body, "e").await;
     let mut matching = edges.iter().filter(|edge| {
         edge.curve_type == 0

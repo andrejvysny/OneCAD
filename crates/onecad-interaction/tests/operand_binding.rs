@@ -175,7 +175,13 @@ fn chamfer_binds_equal_leg_without_reference_faces_and_commits_one_add() {
     else {
         panic!("a new chamfer appends exactly one operation")
     };
-    assert_eq!(committed, record);
+    // The reducer stamps the field's entered text as the expression; nothing else moves.
+    let mut expected = record;
+    let Operation::Known(KnownOperation::Chamfer(params)) = &mut expected.op else {
+        unreachable!()
+    };
+    params.radius = Scalar::with_expr(1.0, "1");
+    assert_eq!(committed, expected);
 }
 
 #[test]
