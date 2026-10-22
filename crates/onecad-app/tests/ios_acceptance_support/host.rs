@@ -155,6 +155,7 @@ pub async fn measure(host: &Host, outcome: &str) -> Measurement {
             .unwrap_or_default(),
         document_id: projection.document_id.clone(),
         regen_outcome: outcome.to_string(),
+        geometry_source: projection.geometry_source.clone(),
         features: projection
             .features
             .iter()
@@ -212,7 +213,8 @@ async fn measure_body(
 
 /// Vertex bounds of the checked MESH1 decode. OCW1 has no exact BRep box
 /// query; on planar extreme faces the tessellation vertices are the BRep
-/// vertices, so these bounds are exact up to their f32 storage.
+/// vertices, so these bounds are exact up to their f32 storage
+/// (`expect::f32_storage`).
 fn mesh_bounds(blob: &[u8]) -> ([f64; 3], [f64; 3]) {
     let mesh = MeshView::decode(blob, MeshLimits::default()).expect("checked MESH1 decode");
     let mut min = [f64::INFINITY; 3];

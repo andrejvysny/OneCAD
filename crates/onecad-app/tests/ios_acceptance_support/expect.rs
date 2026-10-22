@@ -123,6 +123,8 @@ pub struct Measurement {
     pub occt_fingerprint: String,
     pub document_id: String,
     pub regen_outcome: String,
+    /// `live` once a regeneration on this host published the geometry.
+    pub geometry_source: String,
     pub features: Vec<FeatureMeasure>,
     pub bodies: Vec<BodyMeasure>,
     pub sketches: Vec<SketchMeasure>,
@@ -177,8 +179,13 @@ pub fn check(case: &Case, measured: &Measurement, expectations: &Expectations) -
 
 fn history(case: &Case, measured: &Measurement) -> Vec<String> {
     let mut failures = Vec::new();
-    if !matches!(measured.regen_outcome.as_str(), "published" | "noop") {
-        failures.push(format!("regeneration ended {}", measured.regen_outcome));
+    // Measured geometry must be this host's own regeneration, never the
+    // container's cached meshes or an empty plan.
+    if measured.regen_outcome != "published" || measured.geometry_source != "live" {
+        failures.push(format!(
+            "regeneration ended {} with {} geometry",
+            measured.regen_outcome, measured.geometry_source
+        ));
     }
     let ops: Vec<&str> = measured
         .features
@@ -298,17 +305,27 @@ fn volume(case: &Case, body: &BodyMeasure, expectations: &Expectations) -> Vec<S
     failures
 }
 
-fn near(actual: f64, expected: f64, tolerance: &Tolerance) -> bool {
+/// Half an f32 ulp at `value`: what MESH1's f32 storage of a coordinate may
+/// add (the next-up gap is never smaller than the rounding step).
+pub fn f32_storage(value: f64) -> f64 {
+    let stored = (value.abs() as f32).min(f32::MAX);
+    f64::from(f32::from_bits(stored.to_bits() + 1) - stored) / 2.0
+}
+
+/// Within the declared tolerance plus `storage`, the f32 rounding the
+/// measured coordinates carry (docs/ios/SIMULATOR_GATE.md).
+fn near(actual: f64, expected: f64, storage: f64, tolerance: &Tolerance) -> bool {
     (actual - expected).abs()
-        <= tolerance.bounds_absolute + tolerance.bounds_relative * expected.abs()
+        <= tolerance.bounds_absolute + tolerance.bounds_relative * expected.abs() + storage
 }
 
 fn bounds(case: &Case, body: &BodyMeasure, tolerance: &Tolerance) -> Vec<String> {
     let mut failures = Vec::new();
     if let Some(expected) = &case.bounds {
         for axis in 0..3 {
-            if !near(body.min[axis], expected.min[axis], tolerance)
-                || !near(body.max[axis], expected.max[axis], tolerance)
+            let (min, max) = (expected.min[axis], expected.max[axis]);
+            if !near(body.min[axis], min, f32_storage(min), tolerance)
+                || !near(body.max[axis], max, f32_storage(max), tolerance)
             {
                 failures.push(format!(
                     "bounds {:?}..{:?} != {:?}..{:?}",
@@ -319,199 +336,27 @@ fn bounds(case: &Case, body: &BodyMeasure, tolerance: &Tolerance) -> Vec<String>
         }
     }
     if let Some(expected) = case.extents {
-        let mut actual: [f64; 3] = std::array::from_fn(|axis| body.max[axis] - body.min[axis]);
+        // (extent, f32 storage of both ends)
+        let mut actual: [(f64, f64); 3] = std::array::from_fn(|axis| {
+            let (min, max) = (body.min[axis], body.max[axis]);
+            (max - min, f32_storage(min) + f32_storage(max))
+        });
         let mut expected = expected;
         if case.extents_xy_unordered {
-            sort_xy(&mut actual);
-            sort_xy(&mut expected);
+            if actual[0].0 > actual[1].0 {
+                actual.swap(0, 1);
+            }
+            if expected[0] > expected[1] {
+                expected.swap(0, 1);
+            }
         }
-        if (0..3).any(|axis| !near(actual[axis], expected[axis], tolerance)) {
+        if (0..3).any(|axis| !near(actual[axis].0, expected[axis], actual[axis].1, tolerance)) {
             failures.push(format!("extents {actual:?} != {expected:?}"));
         }
     }
     failures
 }
 
-fn sort_xy(extents: &mut [f64; 3]) {
-    if extents[0] > extents[1] {
-        extents.swap(0, 1);
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn expectations() -> Expectations {
-        Expectations::load().0
-    }
-
-    fn plate(volume: f64) -> Measurement {
-        Measurement {
-            occt_fingerprint: "0a6a1dce34181289".into(),
-            document_id: "doc".into(),
-            regen_outcome: "published".into(),
-            features: ["Sketch", "Extrude"]
-                .map(|op| FeatureMeasure {
-                    id: format!("{op}-id"),
-                    op_type: op.into(),
-                    status: "ok".into(),
-                })
-                .to_vec(),
-            bodies: vec![BodyMeasure {
-                id: "body".into(),
-                healthy: true,
-                solids: 1,
-                faces: 7,
-                volume,
-                min: [-40.0, 0.0, 0.0],
-                max: [0.0, 60.0, 4.0],
-            }],
-            sketches: vec![SketchMeasure {
-                id: "sketch".into(),
-                status: "FullyConstrained".into(),
-                dof: Some(0),
-                entities: 14,
-                constraints: 13,
-            }],
-        }
-    }
-
-    fn reference() -> f64 {
-        9600.0 - 36.0 * std::f64::consts::PI
-    }
-
-    #[test]
-    fn the_reference_plate_passes_within_tolerance_and_fails_outside_it() {
-        let all = expectations();
-        let case = all.case("mac-plate").unwrap();
-        assert!(check(case, &plate(reference()), &all).is_empty());
-        assert!(check(case, &plate(reference() * (1.0 + 5e-7)), &all).is_empty());
-        assert!(!check(case, &plate(reference() * (1.0 + 2e-6)), &all).is_empty());
-        let mut shifted = plate(reference());
-        shifted.bodies[0].max[1] += 2e-7;
-        assert!(
-            !check(case, &shifted, &all).is_empty(),
-            "bounds 1e-7 abs + 1e-9 rel"
-        );
-    }
-
-    #[test]
-    fn edits_need_a_strict_analytic_decrease() {
-        let all = expectations();
-        let fillet = all.case("plate-fillet").unwrap();
-        let decrease = 4.0 - std::f64::consts::PI;
-        let mut measured = plate(reference() - decrease);
-        measured.features.push(FeatureMeasure {
-            id: "fillet".into(),
-            op_type: "Fillet".into(),
-            status: "ok".into(),
-        });
-        assert!(check(fillet, &measured, &all).is_empty());
-        measured.bodies[0].volume = reference() - decrease * (1.0 + 2e-4);
-        assert!(!check(fillet, &measured, &all).is_empty());
-        measured.bodies[0].volume = reference();
-        assert!(!check(fillet, &measured, &all).is_empty(), "no decrease");
-    }
-
-    #[test]
-    fn history_solid_and_constraint_integrity_are_required() {
-        let all = expectations();
-        let case = all.case("plate").unwrap();
-        let mut measured = plate(reference());
-        measured.bodies[0].min = [0.0, -40.0, 0.0];
-        measured.bodies[0].max = [60.0, 0.0, 4.0];
-        assert!(
-            check(case, &measured, &all).is_empty(),
-            "xy extents unordered"
-        );
-        let mut broken = measured.clone();
-        broken.features[1].status = "needsRepair".into();
-        assert!(!check(case, &broken, &all).is_empty());
-        let mut broken = measured.clone();
-        broken.bodies[0].solids = 2;
-        assert!(!check(case, &broken, &all).is_empty());
-        let mut broken = measured.clone();
-        broken.sketches[0].status = "OverConstrained".into();
-        assert!(!check(case, &broken, &all).is_empty());
-        let mut broken = measured;
-        broken.bodies.push(broken.bodies[0].clone());
-        assert!(!check(case, &broken, &all).is_empty());
-        let mac = all.case("mac-plate").unwrap();
-        assert!(check(mac, &plate(reference()), &all).is_empty());
-        let mut under = plate(reference());
-        under.sketches[0].status = "UnderConstrained".into();
-        under.sketches[0].dof = Some(1);
-        assert!(
-            !check(mac, &under, &all).is_empty(),
-            "authored sketch is fully constrained"
-        );
-    }
-
-    #[test]
-    fn a_resave_must_keep_the_authored_document() {
-        let original = plate(reference());
-        assert!(same_document(&original, &original.clone()).is_empty());
-        let mut other = original.clone();
-        other.document_id = "fresh".into();
-        assert!(
-            !same_document(&original, &other).is_empty(),
-            "a fresh plate"
-        );
-        let mut other = original.clone();
-        other.features[1].id = "rebuilt".into();
-        assert!(!same_document(&original, &other).is_empty());
-        let mut other = original.clone();
-        other.sketches[0].constraints = 12;
-        assert!(!same_document(&original, &other).is_empty());
-    }
-
-    /// The fixture's analytic values are the closed forms of its recorded
-    /// geometry, independently of the oracle's measurements.
-    #[test]
-    fn analytic_expectations_follow_from_the_recorded_parameters() {
-        use std::f64::consts::PI;
-        let all = expectations();
-        let plate = &all.reference_plate;
-        let radius = plate.hole_diameter / 2.0;
-        let volume = (plate.width * plate.height - PI * radius * radius) * plate.thickness;
-        assert!((plate.volume.value() - volume).abs() < 1e-9);
-        let sizes = [plate.width, plate.height, plate.thickness];
-        assert_eq!(
-            sizes,
-            [
-                super::super::plate::WIDTH,
-                super::super::plate::HEIGHT,
-                super::super::plate::THICKNESS
-            ]
-        );
-        assert_eq!(plate.hole_diameter, super::super::plate::HOLE_DIAMETER);
-        for case in all
-            .artifacts
-            .iter()
-            .filter(|c| c.decrease_from_reference.is_some())
-        {
-            let p = case
-                .parameters
-                .as_ref()
-                .expect("an edit case records its parameters");
-            let length = p["edgeLength"].as_f64().unwrap() * p["edges"].as_f64().unwrap();
-            let expected = match (p["radius"].as_f64(), p["distance"].as_f64()) {
-                (Some(r), None) => (1.0 - PI / 4.0) * r * r * length,
-                (None, Some(d)) => d * d * length / 2.0,
-                _ => panic!("{}: radius or distance", case.name),
-            };
-            let declared = case.decrease_from_reference.unwrap().value();
-            assert!((declared - expected).abs() < 1e-12, "{}", case.name);
-        }
-    }
-
-    #[test]
-    fn misspelt_rules_are_refused() {
-        let text = std::fs::read_to_string(repo_root().join(EXPECTATIONS)).unwrap();
-        let misspelt = text.replace("extentsXYUnordered", "extentsXyUnordered");
-        assert!(serde_json::from_str::<Expectations>(&misspelt).is_err());
-        let case = expectations();
-        assert!(case.case("plate").unwrap().extents_xy_unordered);
-    }
-}
+#[path = "expect_tests.rs"]
+mod tests;

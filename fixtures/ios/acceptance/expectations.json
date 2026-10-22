@@ -89,7 +89,7 @@
       "name": "plate",
       "source": "simulator",
       "required": true,
-      "description": "The reference plate modelled through the iPad UI; its sketch plane and orientation are the test's choice, so only extents are fixed (X and Y unordered).",
+      "description": "The reference plate modelled through the iPad UI: an axis-aligned 60 x 40 rectangle with the 6 mm hole sketched on a plane parallel to XY and extruded 4 mm along Z. Its position and which side runs along X are the test's choice, so only extents are fixed (X and Y unordered).",
       "features": [
         "Sketch",
         "Extrude"
