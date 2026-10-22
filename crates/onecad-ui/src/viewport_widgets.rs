@@ -8,7 +8,8 @@ use onecad_scene::{Camera, DVec3, Projection, ViewSnapshot};
 #[path = "pointer_policy.rs"]
 mod pointer_policy;
 pub use pointer_policy::{
-    PointerKind, allows_pointer, edge_tolerance, gesture_allowed, set_pointer_kind,
+    PointerKind, allows_pointer, capture_canvas, edge_tolerance, gesture_allowed, over_control,
+    set_pointer_kind,
 };
 
 /// Region the cube is laid out in: its top-right corner is the ViewCluster anchor, which

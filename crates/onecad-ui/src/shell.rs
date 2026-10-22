@@ -41,6 +41,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     overlays::nav_pill(app, &ctx, &chrome);
     overlays::view_cluster(app, &ctx, &chrome);
     crate::sketch_numeric::show(app, &ctx);
+    crate::tool_palette::show(app, &ctx);
     app.doc.diagnostics.observe(&app.doc.status);
 }
 

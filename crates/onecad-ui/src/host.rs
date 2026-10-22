@@ -81,6 +81,30 @@ impl Editor {
             .document_request(crate::document_flow::Request::Open(Some(path)));
     }
 
+    /// INPUT.md `drag_authoring`: a dragged finger can author because a sketch
+    /// creation tool is armed, a sketch handle drag runs, or a model tool with
+    /// on-canvas handles (extrude, move/rotate) is open. Otherwise fingers orbit.
+    pub fn drag_authoring(&self) -> bool {
+        let app = &self.app;
+        let sketch_tool = app.doc.sketch.session.as_ref().is_some_and(|session| {
+            app.sketch_active() && session.tool != onecad_interaction::sketch::SketchTool::Select
+        });
+        sketch_tool
+            || app.doc.sketch_gesture.busy()
+            || (!app.sketch_active() && app.doc.interaction.tool.is_some())
+    }
+
+    /// Pencil accessory "switch to previous tool": `false` when nothing changed.
+    pub fn toggle_previous_sketch_tool(&mut self) -> bool {
+        crate::tool_palette::toggle_previous(&mut self.app)
+    }
+
+    /// Pencil accessory "show palette": the adaptive tool palette opens at `at`
+    /// (points) on the next frame.
+    pub fn open_tool_palette(&mut self, at: egui::Pos2) {
+        crate::tool_palette::open(&mut self.app, at);
+    }
+
     /// A dimension or numeric-expression editor owns the keyboard.
     pub fn numeric_entry(&self, ctx: &egui::Context) -> bool {
         crate::sketch_numeric::editor_open(ctx) || crate::constraint_authoring::editor_open(ctx)
@@ -96,6 +120,12 @@ pub fn cancel_contact(ctx: &egui::Context) {
         input.pointer = Default::default();
     });
     ctx.stop_dragging();
+}
+
+/// INPUT.md `over_control` between frames: `pos` (points) is over chrome or
+/// a control rather than the bare CAD canvas of the last completed pass.
+pub fn over_control(ctx: &egui::Context, pos: egui::Pos2) -> bool {
+    crate::viewport_widgets::over_control(ctx, pos)
 }
 
 /// Records which input kind presses next, so picking uses its edge aperture

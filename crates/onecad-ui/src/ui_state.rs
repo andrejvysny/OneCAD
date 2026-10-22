@@ -68,6 +68,11 @@ pub struct UiState {
     pub extensions: crate::extension_pages::ExtensionsUi,
     pub shell_facade: crate::workspace_ui::ShellFacade,
     pub editor_facade: crate::editor_facade::EditorFacade,
+    /// The sketch tool before the current one, for the Pencil's "switch to
+    /// previous tool" accessory action.
+    pub previous_sketch_tool: Option<onecad_interaction::sketch::SketchTool>,
+    /// Anchor of the open adaptive tool palette; `None` while closed.
+    pub tool_palette: Option<egui::Pos2>,
 }
 
 impl Default for UiState {
@@ -93,6 +98,8 @@ impl Default for UiState {
             extensions: Default::default(),
             shell_facade: Default::default(),
             editor_facade: Default::default(),
+            previous_sketch_tool: None,
+            tool_palette: None,
         }
     }
 }

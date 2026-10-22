@@ -132,3 +132,52 @@ async fn strokes_commit_override_undo_and_refuse_without_history() {
     );
     host.stop().await;
 }
+
+fn tool(host: &Host) -> SketchTool {
+    host.app.doc.sketch.session.as_ref().unwrap().tool
+}
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic native input is not physical acceptance"]
+async fn accessory_previous_tool_and_adaptive_palette() {
+    let area = tempfile::tempdir().unwrap();
+    let mut host = Host::new(area.path()).await;
+    host.control("Line");
+    host.control("Pencil Stroke");
+    assert!(crate::tool_palette::toggle_previous(&mut host.app));
+    assert_eq!(tool(&host), SketchTool::Line);
+    assert!(crate::tool_palette::toggle_previous(&mut host.app));
+    assert_eq!(
+        tool(&host),
+        SketchTool::PenStroke,
+        "a second toggle returns"
+    );
+
+    let at = egui::pos2(400.0, 300.0);
+    crate::tool_palette::open(&mut host.app, at);
+    host.ui(vec![]);
+    host.ui(vec![]);
+    // Palette rows repeat pill labels; the palette's own sit right of its anchor.
+    let circle = host
+        .widgets
+        .iter()
+        .find(|(name, rect)| name == "Circle" && rect.min.x >= at.x && rect.min.y >= at.y)
+        .map(|(_, rect)| rect.center())
+        .expect("the sketch palette offers Circle");
+    host.click(circle);
+    assert_eq!(tool(&host), SketchTool::Circle);
+    assert!(host.app.ui.tool_palette.is_none(), "choosing closes it");
+
+    crate::tool_palette::open(&mut host.app, at);
+    host.ui(vec![]);
+    host.ui(vec![egui::Event::Key {
+        key: egui::Key::Escape,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    }]);
+    assert!(host.app.ui.tool_palette.is_none(), "Escape closes it");
+    assert_eq!(tool(&host), SketchTool::Circle);
+    host.stop().await;
+}

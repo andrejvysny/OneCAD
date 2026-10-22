@@ -36,6 +36,40 @@ pub fn edge_tolerance(ctx: &egui::Context) -> f64 {
     }
 }
 
+#[derive(Clone, Copy)]
+struct Canvas {
+    rect: egui::Rect,
+    layer: egui::LayerId,
+    pass: u64,
+}
+
+fn canvas_id() -> egui::Id {
+    egui::Id::unique("onecad-touch-canvas")
+}
+
+/// Records where the CAD canvas was drawn this pass, for touch routing between
+/// frames.
+pub fn capture_canvas(ctx: &egui::Context, rect: egui::Rect, layer: egui::LayerId) {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|data| data.insert_temp(canvas_id(), Canvas { rect, layer, pass }));
+}
+
+/// INPUT.md `over_control`, from the last completed pass: a point is a control
+/// unless it is on the CAD canvas with no higher egui layer over it. Without a
+/// canvas that pass (start screen, no document) everything is a control.
+pub fn over_control(ctx: &egui::Context, position: egui::Pos2) -> bool {
+    let current = ctx.cumulative_pass_nr();
+    let canvas = ctx
+        .data(|data| data.get_temp::<Canvas>(canvas_id()))
+        .filter(|canvas| canvas.pass + 1 >= current);
+    !canvas.is_some_and(|canvas| {
+        canvas.rect.contains(position)
+            && ctx
+                .layer_id_at(position)
+                .is_none_or(|layer| layer == canvas.layer)
+    })
+}
+
 pub fn allows_pointer(ui: &egui::Ui, rect: egui::Rect, position: egui::Pos2) -> bool {
     gesture_allowed(ui)
         && rect.contains(position)
@@ -88,6 +122,43 @@ mod tests {
             );
             output.textures_delta.clear();
         }
+    }
+
+    #[test]
+    fn touch_controls_are_chrome_or_anything_without_a_canvas_last_pass() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let canvas = egui::Rect::from_min_max(egui::pos2(0.0, 50.0), egui::pos2(800.0, 600.0));
+        let chrome = egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(200.0, 200.0));
+        let run = |draw_canvas: bool| {
+            let raw = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(raw, |ui| {
+                egui::Area::new(egui::Id::unique("chrome"))
+                    .fixed_pos(chrome.min)
+                    .show(ui.ctx(), |ui| {
+                        ui.allocate_exact_size(chrome.size(), egui::Sense::click());
+                    });
+                egui::CentralPanel::default().show(ui, |ui| {
+                    if draw_canvas {
+                        capture_canvas(ui.ctx(), canvas, ui.layer_id());
+                    }
+                });
+            });
+            output.textures_delta.clear();
+        };
+        run(true);
+        run(true);
+        assert!(over_control(&ctx, chrome.center()), "floating chrome");
+        assert!(!over_control(&ctx, egui::pos2(600.0, 400.0)), "bare canvas");
+        assert!(over_control(&ctx, egui::pos2(600.0, 20.0)), "title bar");
+        run(false);
+        assert!(
+            over_control(&ctx, egui::pos2(600.0, 400.0)),
+            "no canvas drawn last pass"
+        );
     }
 
     #[test]

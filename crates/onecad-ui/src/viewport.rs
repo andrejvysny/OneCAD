@@ -11,6 +11,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             let (rect, response) =
                 ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
             crate::sketch_numeric::capture_viewport(ui.ctx(), rect);
+            crate::viewport_widgets::capture_canvas(ui.ctx(), rect, ui.layer_id());
             response.widget_info(|| {
                 egui::WidgetInfo::labeled(
                     egui::Role::Image,

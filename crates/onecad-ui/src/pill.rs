@@ -209,6 +209,11 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
     }
 }
 
+/// The pill's availability for one tool, shared by the adaptive palette.
+pub(crate) fn available(app: &App, def: &ToolDef) -> bool {
+    view(app, def, running_tool(app)).enabled
+}
+
 /// Stable automation ids (`onecad.tool.<tool-id>`) of tools the iPad tests drive.
 pub(crate) fn automation_id(id: ToolId) -> Option<&'static str> {
     match id {
