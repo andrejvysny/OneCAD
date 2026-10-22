@@ -33,21 +33,26 @@ pub(crate) fn build_primitive(
             super::staged_creation::build(session.tool, draft, point, ids)
         }
         SketchTool::Select | SketchTool::Point => Err("Select does not author geometry".into()),
+        SketchTool::PenStroke => Err("Pen strokes are committed whole".into()),
     }?;
     if session.construction {
-        for op in &mut ops {
-            if let SketchEditOp::AddEntity { entity } = op {
-                match entity {
-                    SketchEntity::Point { construction, .. }
-                    | SketchEntity::Line { construction, .. }
-                    | SketchEntity::Circle { construction, .. }
-                    | SketchEntity::Arc { construction, .. }
-                    | SketchEntity::Ellipse { construction, .. } => *construction = true,
-                }
+        mark_construction(&mut ops);
+    }
+    Ok((ops, after))
+}
+
+pub(super) fn mark_construction(ops: &mut [SketchEditOp]) {
+    for op in ops {
+        if let SketchEditOp::AddEntity { entity } = op {
+            match entity {
+                SketchEntity::Point { construction, .. }
+                | SketchEntity::Line { construction, .. }
+                | SketchEntity::Circle { construction, .. }
+                | SketchEntity::Arc { construction, .. }
+                | SketchEntity::Ellipse { construction, .. } => *construction = true,
             }
         }
     }
-    Ok((ops, after))
 }
 
 pub(super) fn validate_ids(session: &SketchSession, ids: &PrimitiveIds) -> Result<(), String> {

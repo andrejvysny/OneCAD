@@ -30,3 +30,6 @@ mod staged_creation;
 mod staged_inference;
 mod staged_numeric;
 mod tangent_continuation;
+
+pub mod recognition;
+mod stroke_commit;

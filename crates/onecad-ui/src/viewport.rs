@@ -127,8 +127,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     crate::sketch_gestures::viewport(app, ui, rect, &response, &view);
                     return;
                 }
+                crate::sketch_pen_stroke::bar(app, ui, rect, &view);
                 if !overlay_owns && !dimension_owns
                     && (crate::sketch_gestures::delivered_inside(app, ui, rect)
+                        || crate::sketch_pen_stroke::drawing(ui.ctx())
                         || ui.input(|input| input.pointer.hover_pos()).is_some_and(|position| {
                             crate::viewport_widgets::allows_pointer(ui, rect, position)
                         }))

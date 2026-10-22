@@ -265,6 +265,12 @@ pub fn viewport(
     let Some(session) = app.doc.sketch.session.as_ref() else {
         return;
     };
+    if session.tool == SketchTool::PenStroke {
+        crate::sketch_creation::clear_candidate(ui.ctx());
+        crate::sketch_pen_stroke::viewport(app, ui, rect, view);
+        return;
+    }
+    crate::sketch_pen_stroke::clear(ui.ctx());
     if session.tool == SketchTool::Select {
         crate::sketch_creation::clear_candidate(ui.ctx());
         if crate::sketch_gestures::viewport(app, ui, rect, response, view) {

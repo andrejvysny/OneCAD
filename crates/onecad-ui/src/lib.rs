@@ -81,6 +81,7 @@ mod sketch_feedback;
 mod sketch_gestures;
 mod sketch_methods;
 mod sketch_numeric;
+mod sketch_pen_stroke;
 mod sketch_repair;
 mod sketch_services;
 mod sketch_snapping;

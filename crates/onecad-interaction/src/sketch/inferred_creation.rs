@@ -145,7 +145,11 @@ fn endpoint(
             });
             Some(id)
         }
-        SketchTool::Select | SketchTool::Arc | SketchTool::ThreePointArc | SketchTool::Slot => None,
+        SketchTool::Select
+        | SketchTool::Arc
+        | SketchTool::ThreePointArc
+        | SketchTool::Slot
+        | SketchTool::PenStroke => None,
     }
 }
 

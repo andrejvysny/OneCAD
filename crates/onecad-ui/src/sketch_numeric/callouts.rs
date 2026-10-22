@@ -117,7 +117,7 @@ fn graphics(app: &App, ctx: &Context, draft: &Draft) -> Vec<Option<Graphic>> {
             }
             _ => vec![None],
         },
-        SketchTool::Point | SketchTool::Select => Vec::new(),
+        SketchTool::Point | SketchTool::Select | SketchTool::PenStroke => Vec::new(),
     }
 }
 

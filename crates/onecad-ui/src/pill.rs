@@ -104,6 +104,7 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
             reason: None,
         },
         ToolId::Line => sketch_view(app, SketchTool::Line),
+        ToolId::PenStroke => sketch_view(app, SketchTool::PenStroke),
         ToolId::Rectangle => sketch_view(
             app,
             if app.ui.rectangle_centered {
@@ -208,6 +209,14 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
     }
 }
 
+/// Stable automation ids (`onecad.tool.<tool-id>`) of tools the iPad tests drive.
+pub(crate) fn automation_id(id: ToolId) -> Option<&'static str> {
+    match id {
+        ToolId::PenStroke => Some("onecad.tool.penStroke"),
+        _ => None,
+    }
+}
+
 /// Registry shortcuts are design data; show one only once the app binds it (none yet).
 fn bound_shortcut(def: &ToolDef) -> Option<&'static str> {
     const BOUND: &[ToolId] = &[];
@@ -228,6 +237,7 @@ pub(crate) fn activate(app: &mut App, ctx: &Context, id: ToolId) {
     let sketch_tool = match id {
         ToolId::Select if app.sketch_active() => Some(SketchTool::Select),
         ToolId::Line => Some(SketchTool::Line),
+        ToolId::PenStroke => Some(SketchTool::PenStroke),
         ToolId::Rectangle => Some(if app.ui.rectangle_centered {
             SketchTool::CenterRectangle
         } else {
@@ -380,6 +390,10 @@ fn draw_groups(
                 .enabled(v.enabled)
                 .extension(def.source.is_some());
             let r = ui.add(button.tip(tip));
+            if let Some(automation) = automation_id(def.id) {
+                ui.ctx()
+                    .accesskit_node_builder(r.id, |node| node.set_author_id(automation));
+            }
             hits.drawn.push(def.id);
             #[cfg(test)]
             hits.tools.push((def.id, r.rect));
