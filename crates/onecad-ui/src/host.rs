@@ -79,6 +79,60 @@ impl Editor {
             .document_request(crate::document_flow::Request::Open(Some(path)));
     }
 
+    /// The active document's application state (acceptance probes only).
+    /// `None` until its document host has started, and after it stopped.
+    #[cfg(feature = "semantic-probe")]
+    pub fn document_access(&self) -> Option<DocumentAccess> {
+        self.app.doc.bridge.shared.probe.lock().ok()?.clone()
+    }
+
+    /// Document tabs that hold a document (acceptance probes only).
+    #[cfg(feature = "semantic-probe")]
+    pub fn open_tab_count(&self) -> usize {
+        self.app
+            .tab_summaries()
+            .iter()
+            .filter(|tab| tab.open)
+            .count()
+    }
+
+    /// Starts the active document's File › Save As (acceptance probes only):
+    /// the document flow, services and `DialogPort` a user's Save As goes
+    /// through. `Err` is the status line when the editor refused to start it.
+    #[cfg(feature = "semantic-probe")]
+    pub fn request_save_as(&mut self) -> Result<(), String> {
+        self.app
+            .document_request(crate::document_flow::Request::Save { save_as: true });
+        if self.app.doc.documents.running {
+            Ok(())
+        } else {
+            Err(self.app.doc.status.clone())
+        }
+    }
+
+    /// The last Save the active document reported (acceptance probes only):
+    /// `None` while one runs or none finished; else its status line, `Ok` with
+    /// whether the document went clean when the file was written.
+    #[cfg(feature = "semantic-probe")]
+    pub fn save_outcome(&self) -> Option<Result<(bool, String), String>> {
+        use crate::diagnostics::{FileAction, Source, State};
+        if self.app.doc.documents.running {
+            return None;
+        }
+        let latest = self
+            .app
+            .doc
+            .diagnostics
+            .latest(Source::File(FileAction::Save));
+        match latest? {
+            (State::Pending, _) => None,
+            (State::Succeeded, message) => Some(Ok((true, message))),
+            // Saved, but an edit landed during the write (`saved.clean` false).
+            (State::Warning, message) => Some(Ok((false, message))),
+            (_, message) => Some(Err(message)),
+        }
+    }
+
     /// A dimension or numeric-expression editor owns the keyboard.
     pub fn numeric_entry(&self, ctx: &egui::Context) -> bool {
         crate::sketch_numeric::editor_open(ctx) || crate::constraint_authoring::editor_open(ctx)
@@ -122,4 +176,17 @@ impl RuntimeExit {
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
         )
     }
+}
+
+/// One document host's services, as the acceptance probes of the iPadOS
+/// bridge see them: the same `AppState` and host context the editor's
+/// document actor calls, and the runtime that actor runs on.
+#[cfg(feature = "semantic-probe")]
+#[derive(Clone)]
+pub struct DocumentAccess {
+    pub state: Arc<onecad_app::state::AppState>,
+    pub host: onecad_app::host::HostContext,
+    /// The sandbox Documents directory saves and exports are confined to.
+    pub documents: std::path::PathBuf,
+    pub runtime: tokio::runtime::Handle,
 }
