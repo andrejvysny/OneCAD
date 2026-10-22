@@ -65,7 +65,16 @@ pub struct Queue {
     /// Acceptance hooks: the path that answers the next save dialog in place
     /// of the host's name prompt (everything after the dialog is unchanged).
     #[cfg(feature = "test-hooks")]
-    pub(crate) save_answer: Mutex<Option<String>>,
+    pub(crate) save_answer: Mutex<Option<SaveAnswer>>,
+}
+
+/// A save dialog answered by the acceptance hooks.
+#[cfg(feature = "test-hooks")]
+pub(crate) struct SaveAnswer {
+    pub path: String,
+    /// Keeps the dialog open (the save pending) until it resolves; the
+    /// sender's drop releases it too.
+    pub hold: Option<oneshot::Receiver<()>>,
 }
 
 impl Queue {
@@ -152,8 +161,11 @@ impl DialogPort for Dialogs {
         #[cfg(feature = "test-hooks")]
         if request.save {
             let answer = self.0.save_answer.lock().ok().and_then(|mut a| a.take());
-            if let Some(path) = answer {
-                return vec![path];
+            if let Some(answer) = answer {
+                if let Some(hold) = answer.hold {
+                    let _ = hold.await;
+                }
+                return vec![answer.path];
             }
         }
         let (sender, receiver) = oneshot::channel();

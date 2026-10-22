@@ -78,26 +78,41 @@ final class MultiDocumentTests: XCTestCase {
         (Doc.view(summary)["cameraOffset"] as? [Double] ?? []) + (Doc.view(summary)["cameraTarget"] as? [Double] ?? [])
     }
 
-    /// A Save and a STEP import started in one tab finish there: the strip
-    /// refuses to switch while the owning document is busy, and neither
-    /// result reaches another tab.
+    /// A Save and a STEP import started in one tab finish there. The Save is
+    /// held pending, so the strip's busy gate must refuse the tap; its result
+    /// is read only after another tab is shown and still belongs to the plate.
+    /// The import's new tab keeps its result although the plate was tapped.
     func testPendingSaveAndImportLandOnlyInTheirOwnDocuments() async throws {
         let docs = try await start()
         _ = try await docs.openMacPlate(as: "pending-plate")
         let step = try await stagedStep(docs)
         _ = try await docs.newPart()
         _ = try await docs.showTab(0)
-        let ticket = try docs.hooks.call(["cmd": "save_artifact", "name": "pending-save"])
+        let ticket = try docs.hooks.call(["cmd": "save_artifact", "name": "pending-save", "hold": true])
+        let polled = await docs.summary()
+        let pending = try XCTUnwrap(polled)
+        XCTAssertEqual(Doc.busy(pending), true, "the held save keeps the plate busy")
         try await docs.activate("onecad.tab.1")
+        // The tap is handled within a frame; the held save keeps every later
+        // frame busy, so no number of frames lets it through.
+        for frame in 0..<10 {
+            try await nextRunLoopTick()
+            let summary = await docs.summary()
+            let refused = try XCTUnwrap(summary)
+            XCTAssertEqual(Doc.view(refused)["tabIndex"] as? Int, 0, "switched during a pending save (poll \(frame))")
+            XCTAssertEqual(Doc.busy(refused), true, "the held save finished (poll \(frame))")
+        }
+        XCTAssertEqual(try docs.hooks.call(["cmd": "release_save", "ticket": ticket["ticket"] as Any])["released"] as? Bool, true)
+        _ = try await docs.waitForSummary("save finished") { !Doc.busy($0) }
+        _ = try await docs.showTab(1)
         let saved = try await docs.hooks.run(["cmd": "result", "ticket": ticket["ticket"] as Any], in: self)
         artifacts.append(URL(fileURLWithPath: try XCTUnwrap(saved["path"] as? String)))
-        // Whether the strip refused the switch (save still running) or took it
-        // after the save finished, the result belongs to the plate alone.
+        XCTAssertEqual(saved["clean"] as? Bool, true, "\(saved)")
+        let other = try await docs.showTab(1)
+        XCTAssertNil(Doc.document(other)["path"] as? String, "the save reached another document")
         let plate = try await docs.showTab(0)
         XCTAssertEqual(Doc.dirty(plate), false)
         XCTAssertEqual(Doc.title(plate), "pending-save")
-        let other = try await docs.showTab(1)
-        XCTAssertNil(Doc.document(other)["path"] as? String, "the save reached another document")
         docs.openPath(step)
         try await docs.activate("onecad.tab.0")
         let imported = try await docs.waitForSummary("import finished") {

@@ -94,7 +94,8 @@ verifiable artifacts `cargo xtask ios-simulator-gate` checks
 | `run_id` | `{"cmd":"run_id","set"?:id}` | `runId`: `set` replaces the current id; otherwise the one read at launch from `ONECAD_RUN_ID` or `TEST_RUNNER_ONECAD_RUN_ID`; `null` when none |
 | `kernel_identity` | `{"cmd":"kernel_identity"}` | `kernelIdentity`: `backend` (`in-process`, or `null` before a document host runs), `embedded` (manifest the binary verifies against), `linked` (manifest of the linked bundle), worker `hello`, `epoch`, `workerState`, `journalWriteFailures`, `relaunchRequired` |
 | `document_summary` | `{"cmd":"document_summary"}` | ticket; then `summary` (`tabCount`, `document`: path, title, documentId, dirty, revision, undo/redo depth; `geometrySource`; `features`: id, opType, label, valueText, primaryValue, stored `params` (as a re-edit reads them), status; `bodies`: solids, faces, kernel `volume`, `surfaceArea`, `centroid`, tessellation `min`/`max`; `sketches`: status and `dof` of the last solve in this session, entity and constraint counts; `view`: the active tab's editor state when the command was sent, `tabIndex` (0-based strip position), `selected` (selection size), `cameraOffset`, `cameraTarget`, `status` (status line), `busy`) and `kernelIdentity`. Everything describes the active tab. |
-| `save_artifact` | `{"cmd":"save_artifact","name"}` | ticket; then `saved`, `path`, `clean`, `status`, `provenance` |
+| `save_artifact` | `{"cmd":"save_artifact","name","hold"?}` | ticket; then `saved`, `path`, `clean`, `status`, `provenance`. The result is read from the tab that started the save, whichever tab is shown. `hold: true` keeps the save pending (its dialog unanswered, the editor busy) until `release_save` |
+| `release_save` | `{"cmd":"release_save","ticket"}` | `released`: a held save continues; `false` when it was not held or already released |
 | `answer_save` | `{"cmd":"answer_save","name"}` | `path`: `Documents/acceptance-exports/<name>`, which answers the next save dialog (Save As or Export) in place of the name prompt; nothing is attributed to the run and the directory is outside every run directory |
 | `export_step_artifact` | `{"cmd":"export_step_artifact","name"}` | ticket; then `path`, `provenance` |
 | `write_semantic` | `{"cmd":"write_semantic","name"}` | ticket; then `path` of `<name>.json` |
@@ -134,15 +135,18 @@ Rules:
   write's rename (`Is a directory`, EISDIR). An existing target (an
   overwrite): its run directory is made read-only for that save, so the
   container write fails creating its temp file (`Permission denied`,
-  EACCES) and the previous file must stay byte-identical; the directory's
-  mode is restored when the result is read. The result is `saved:false,
+  EACCES) and the previous file must stay byte-identical. The directory's
+  previous mode is recorded in Application Support
+  (`save-fault.read-only.json`) and restored when the result is read, when
+  an unread ticket is dropped, by `fault clear`, by the bridge's destruction
+  and at the next launch; only one overwrite fault can be armed at once. The result is `saved:false,
   injectedFailure:true, blocked:"directory"|"readOnly"` with the editor's
   status line, and only when that status names the expected error. A Save the editor refused (another file
   action running) or one that failed elsewhere is an error. `fault journal_write` replaces the kernel journal
   directory by a regular file, so journal writes fail and are counted
   (`journalWriteFailures`); `clear`, the bridge's destruction and the next
-  launch restore it without the fault window's `inflight.json`. Nothing else
-  is injectable.
+  launch restore it without the fault window's `inflight.json`. `clear`
+  also releases every held save. Nothing else is injectable.
 - XCUITest runs in another process and cannot call hooks: UI tests prove UI
   behavior and screenshots; model artifacts come from native tests.
   `launchOneCAD` passes the run id on as `ONECAD_RUN_ID`.
@@ -172,7 +176,7 @@ Simulator evidence only; the Mac plate is `ONECAD_MAC_FIXTURE`.
 | `OneCADNativeTests/DocumentExportTests/testStepExportReachesTheExportPicker()` | 3 | File › Export STEP (name answered by `answer_save`) writes a STEP and presents the real export picker |
 | `OneCADNativeTests/DocumentExportTests/testSendACopyOffersOnlyTheSavedDocument()` | 3 | File › Send a Copy presents the export picker for a saved document and refuses one with unsaved changes |
 | `OneCADNativeTests/MultiDocumentTests/testThreeDocumentsKeepIndependentHistorySelectionCameraAndDirtyState()` | 3 | Three tabs: a sketch, an undo, a camera turn and a selection in one leave the other two's history, undo depth, dirty state, selection and camera unchanged, and the edited one keeps them across switches |
-| `OneCADNativeTests/MultiDocumentTests/testPendingSaveAndImportLandOnlyInTheirOwnDocuments()` | 3 | A tab tapped while a Save or a STEP import runs does not receive its result; the import keeps its own tab |
+| `OneCADNativeTests/MultiDocumentTests/testPendingSaveAndImportLandOnlyInTheirOwnDocuments()` | 3 | A Save held pending (`hold`) keeps the plate busy, so a tap on another tab is refused for 10 polls; after it finishes and another tab is shown, its result is still read from, and lands only in, the plate. A tab tapped while a STEP import opens its new tab does not receive the import, which keeps its own tab |
 | `OneCADNativeTests/MultiDocumentTests/testATabSwitchCancelsALiveTouchContact()` | 2+3 (synthetic Pencil replay) | Choosing a tab while a stroke is down cancels it (`DOCUMENT_SWITCH`): its prediction is dropped and its lift edits neither document |
 | `OneCADUITests/DocumentLifecycleTests/testSavedDocumentReopensFromRecentsInAFreshProcess()` | 4 | New part, sketch, Save through the name prompt, `terminate()`, relaunch, reopen from Home's recents; the History row reads `Sketch` |
 | `OneCADUITests/DocumentLifecycleTests/testUnsavedWorkIsOfferedAfterProcessTermination()` | 4 | Unsaved work flushed on backgrounding is offered after `terminate()` and relaunch; Restore brings its History back (process termination, not jetsam) |

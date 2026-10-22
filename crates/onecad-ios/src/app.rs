@@ -97,9 +97,11 @@ impl IosApp {
         let gpu = gpu::create_render_state().map_err(internal)?;
         let host = Arc::new(Queue::new(ctx.clone()));
         let dialogs = Arc::new(Dialogs(host.clone()));
-        // A journal fault a crash left armed must not outlive that launch.
+        // A journal or save fault a crash left armed must not outlive that launch.
         #[cfg(feature = "test-hooks")]
         crate::test_hooks_semantic::repair_journal(&layout.app_support);
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks_save::repair_save_fault(&layout.app_support);
         let backend =
             WorkerBackend::Embedded(EmbeddedKernelConfig::for_app_support(&layout.app_support));
         let mut editor =

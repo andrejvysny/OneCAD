@@ -36,6 +36,7 @@ pub const COMMANDS: &[&str] = &[
     "document_summary",
     "save_artifact",
     "answer_save",
+    "release_save",
     "export_step_artifact",
     "write_semantic",
     "seal_artifact",
@@ -95,12 +96,31 @@ impl State {
             repair_journal(&self.app_support);
         }
     }
+
+    pub(crate) fn app_support(&self) -> &Path {
+        &self.app_support
+    }
+
+    /// `fault clear`: no fault stays armed, no run directory stays blocked and
+    /// no held save keeps the editor busy, also after a test that timed out.
+    pub(crate) fn clear(&mut self) {
+        self.clear_journal_fault();
+        self.save_failure_armed = false;
+        for ticket in self.tickets.values_mut() {
+            if let Ticket::Save(save) = ticket {
+                save.release();
+            }
+        }
+        crate::test_hooks_save::repair_save_fault(&self.app_support);
+    }
 }
 
 impl Drop for State {
     fn drop(&mut self) {
-        // Never leave the next launch without its crash journal.
+        // Never leave the next launch without its crash journal or with a
+        // read-only run directory.
         self.clear_journal_fault();
+        crate::test_hooks_save::repair_save_fault(&self.app_support);
     }
 }
 
@@ -147,6 +167,7 @@ pub fn command(app: &mut IosApp, cmd: &str, request: &Value) -> Result<Value, St
         "result" => result(app, request),
         "save_artifact" => crate::test_hooks_save::save_artifact(app, request),
         "answer_save" => crate::test_hooks_save::answer_save(app, request),
+        "release_save" => crate::test_hooks_save::release_save(app, request),
         "seal_artifact" => seal_artifact(app, request),
         _ => start(app, cmd, request),
     }
@@ -165,10 +186,7 @@ fn fault(app: &mut IosApp, request: &Value) -> Result<Value, String> {
     match request.get("kind").and_then(Value::as_str) {
         Some("journal_write") => state.inject_journal_fault()?,
         Some("save_failure") => state.save_failure_armed = true,
-        Some("clear") => {
-            state.clear_journal_fault();
-            state.save_failure_armed = false;
-        }
+        Some("clear") => state.clear(),
         _ => return Err("fault kind must be journal_write, save_failure or clear".into()),
     }
     Ok(json!({
@@ -200,6 +218,17 @@ pub(crate) fn ticket_room(app: &IosApp) -> Result<(), String> {
         return Err("too many unread results".into());
     }
     Ok(())
+}
+
+/// An unread Save As ticket.
+pub(crate) fn save_ticket(
+    app: &mut IosApp,
+    id: u64,
+) -> Option<&mut crate::test_hooks_save::SaveTicket> {
+    match app.semantic.tickets.get_mut(&id)? {
+        Ticket::Save(save) => Some(save),
+        Ticket::Job(_) => None,
+    }
 }
 
 pub(crate) fn add_ticket(app: &mut IosApp, ticket: Ticket) -> Result<Value, String> {

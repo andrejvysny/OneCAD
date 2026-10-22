@@ -154,9 +154,10 @@ impl Editor {
 
     /// Starts the active document's File › Save As (acceptance probes only):
     /// the document flow, services and `DialogPort` a user's Save As goes
-    /// through. `Err` is the status line when the editor refused to start it.
+    /// through. `Ok` is the tab that owns the save; `Err` is the status line
+    /// when the editor refused to start it.
     #[cfg(feature = "semantic-probe")]
-    pub fn request_save_as(&mut self) -> Result<(), String> {
+    pub fn request_save_as(&mut self) -> Result<u64, String> {
         use crate::diagnostics::{FileAction, Source, State};
         self.app
             .document_request(crate::document_flow::Request::Save { save_as: true });
@@ -170,27 +171,25 @@ impl Editor {
             Some((State::Pending, _))
         );
         if self.app.doc.documents.running && pending {
-            Ok(())
+            Ok(self.app.doc.tab)
         } else {
             Err(self.app.doc.status.clone())
         }
     }
 
-    /// The last Save the active document reported (acceptance probes only):
-    /// `None` while one runs or none finished; else its status line, `Ok` with
-    /// whether the document went clean when the file was written.
+    /// The last Save `tab` reported (acceptance probes only), whichever tab is
+    /// shown: `None` while one runs or none finished; else its status line,
+    /// `Ok` with whether the document went clean when the file was written.
     #[cfg(feature = "semantic-probe")]
-    pub fn save_outcome(&self) -> Option<Result<(bool, String), String>> {
+    pub fn save_outcome(&self, tab: u64) -> Option<Result<(bool, String), String>> {
         use crate::diagnostics::{FileAction, Source, State};
-        if self.app.doc.documents.running {
+        let Some(doc) = self.app.editor(tab) else {
+            return Some(Err("the document closed before its Save finished".into()));
+        };
+        if doc.documents.running {
             return None;
         }
-        let latest = self
-            .app
-            .doc
-            .diagnostics
-            .latest(Source::File(FileAction::Save));
-        match latest? {
+        match doc.diagnostics.latest(Source::File(FileAction::Save))? {
             (State::Pending, _) => None,
             (State::Succeeded, message) => Some(Ok((true, message))),
             // Saved, but an edit landed during the write (`saved.clean` false).
