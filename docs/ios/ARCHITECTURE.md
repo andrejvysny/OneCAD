@@ -127,8 +127,11 @@ Xray is shown, no SSAA; 4× MSAA on both. egui overlays and picking stay at the
 display scale. One window's display memory is one budget: the shared renderer's
 allowance reserved for the active document (448 MiB on iPad, 512 MiB on macOS,
 replacement overlap included) plus 64 MiB for parked tabs' disposable caches.
+Parked caches are thumbnails plus each parked document's prepared CPU geometry;
+on iPad they are evicted oldest first when over their share, on macOS kept.
 Backgrounding releases the renderer's targets; a memory warning releases parked
-caches and may lower the scene scale. Figures, lifecycle and the exact target
+caches (and, in the background, retries a refused target release) and may lower
+the scene scale. Figures, lifecycle and the exact target
 arithmetic: [HOST.md](HOST.md#rendering-profile-and-display-memory). They are
 payload estimates; device memory, frame rate and thermals are physical-device
 evidence (class 6).

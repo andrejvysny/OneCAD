@@ -60,7 +60,11 @@ thread's last failure text, never NULL.
 
 `onecad_ios_frame(time_s)` on a display link, paused until `wake`. Rendering is
 on demand: an idle editor returns `repaint_after_s = -1` without
-`REDRAW_REQUESTED` (`frame::schedule`), so the link stays paused.
+`REDRAW_REQUESTED` (`frame::schedule` maps egui's unbounded repaint delay to -1),
+so the link stays paused. That a settled editor's `App::frame` reaches the
+unbounded delay is shown on macOS Metal with the real worker
+(`the_mobile_route_shows_xray_lazily_recreates_targets_and_idles`), not on a
+device.
 
 1. Refused (`ERR_STATE`) in the background, after terminate or without a
    surface. Only the leading `struct_size` of the result is read.
@@ -121,16 +125,22 @@ All tabs share one `Renderer`: only the active document's targets, IBL and
 geometry are on the GPU, and the renderer charges every replacement (resize,
 rotation, scene, preview or option change) with old plus new resources against
 its allowance (`RenderLimits::max_gpu_bytes`), which is reserved for the active
-document. Parked tabs hold only disposable caches (the ⌃Tab switcher thumbnail
-and a prepared scene not yet uploaded), limited to the parked share and evicted
-least recently active first; activation re-prepares a dropped scene under the
-same identity.
+document. Parked tabs hold only disposable caches: the ⌃Tab switcher thumbnail
+and the CPU geometry of their last preparation (the document's
+`PreparationCache`, kept in its bridge's `Shared`, plus what a prepared scene
+not yet uploaded holds beyond it). The ledger counts resident bytes, not the
+preparation peak (`PreparedScene::cpu_bytes`). On Mobile they are limited to
+the parked share and evicted least recently active first; macOS keeps them
+(no eviction, as before). Activation re-prepares a dropped scene from its
+retained source under the same identity. A scene still waiting in a parked
+bridge's latest-only display slot is counted but not dropped (it is adopted on
+activation).
 
 | Budget | Desktop | Mobile |
 |---|---|---|
 | Renderer allowance (active document, incl. replacement overlap) | 512 MiB | 448 MiB |
-| Parked tabs' caches | 64 MiB | 64 MiB |
-| Aggregate | 576 MiB | 512 MiB |
+| Parked tabs' caches | 64 MiB (advisory, not enforced) | 64 MiB |
+| Aggregate | 576 MiB (advisory) | 512 MiB |
 
 The renderer's total (GPU + CPU staging) cap stays 768 MiB and each document's
 CPU handoff budget (`onecad-ui` `budget.rs`) stays 768 MiB; those are not part
@@ -242,7 +252,7 @@ document's actor); completing such a request afterwards returns
 | `DID_ENTER_BACKGROUND` | as above, request an autosave flush for every open document (not awaited; a document whose actor waits on an open picker flushes after it), release the renderer's targets (fence the last frame, wait at most 1 s for the GPU, then zero-size targets; geometry, camera and document state stay), refuse frames and input. Logged as `lifecycle: background released render targets` with `released` |
 | `WILL_ENTER_FOREGROUND` | frames allowed (inactive); the first frame recreates the targets at the current size from the retained scene (same scene identity, no re-upload) |
 | `DID_BECOME_ACTIVE` | `WindowFocused(true)`, focused frames |
-| `MEMORY_WARNING` | release every parked tab's thumbnail and unuploaded prepared scene; then, when the active document's resident display memory plus one same-size target set exceeds the renderer allowance, lower the scene scale ceiling one 0.125 step (not below 0.5) for the rest of the session. Accepted in every phase. Logged as `lifecycle: memory warning released display caches` |
+| `MEMORY_WARNING` | in the background, first retry a target release the busy GPU refused on `DID_ENTER_BACKGROUND`; release every parked tab's thumbnail, unuploaded prepared scene and preparation cache (`released_bytes` is what went, measured before and after); then, when the active document's resident display memory plus one same-size target set exceeds the renderer allowance, lower the scene scale ceiling one 0.125 step (not below 0.5) for the rest of the session. Accepted in every phase. Logged as `lifecycle: memory warning released display caches` |
 | `WILL_TERMINATE` | cancel contacts, close the request queue (cancelling dialogs), await the autosave flush of every open document, stop the document hosts (flush and stop share 3 s); then frames, input, `a11y_activate`, `open_path` and lifecycle events other than `MEMORY_WARNING` return `ERR_STATE` |
 | `TRAIT_DARK` / `TRAIT_LIGHT` | `system_theme` (used when Appearance is System) |
 

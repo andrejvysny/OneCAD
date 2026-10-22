@@ -30,14 +30,25 @@ final class SurfaceLifecycleTests: XCTestCase {
         attachScreenshot(app, "2-rotated")
 
         XCUIDevice.shared.press(.home)
-        XCTAssertTrue(app.wait(for: .runningBackgroundSuspended, timeout: 20)
-                      || app.state == .runningBackground, "app did not leave the foreground")
+        XCTAssertTrue(waitForBackground(app, timeout: 20), "app did not leave the foreground")
         app.activate()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 20), "app did not return")
         waitUntil(viewport, .hittable, "viewport after returning to the foreground")
         waitUntil(fileMenu, .hittable, "File menu after returning to the foreground")
         XCTAssertFalse(app.element(id: OneCADID.relaunchRequired).exists)
         attachScreenshot(app, "3-foreground")
+    }
+
+    /// The simulator may keep the app in `.runningBackground` without suspending it.
+    private func waitForBackground(_ app: XCUIApplication, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if app.state == .runningBackground || app.state == .runningBackgroundSuspended {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        } while Date() < deadline
+        return false
     }
 
     private func attachScreenshot(_ app: XCUIApplication, _ name: String) {
