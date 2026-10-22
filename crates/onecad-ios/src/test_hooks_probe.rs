@@ -9,6 +9,7 @@ use onecad_protocol::mesh::{MeshLimits, MeshView};
 use onecad_ui::host::DocumentAccess;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// The kernel this process runs: the identity manifest the binary verifies
@@ -92,7 +93,7 @@ pub async fn document_summary(access: &DocumentAccess, tabs: usize) -> Result<Va
     let projection = api::get_projection(&access.state)
         .await
         .map_err(|e| e.to_string())?;
-    let (document, sketches) = runtime_facts(access, &projection).await?;
+    let (document, sketches, params) = runtime_facts(access, &projection).await?;
     let mut bodies = Vec::new();
     for (id, body) in &projection.bodies {
         bodies.push(body_facts(access, &projection, id, body.health).await?);
@@ -107,6 +108,7 @@ pub async fn document_summary(access: &DocumentAccess, tabs: usize) -> Result<Va
             "valueText": feature.value_text,
             "primaryValue": feature.primary_value,
             "primaryValueKind": feature.primary_value_kind,
+            "params": params.get(&feature.id),
             "status": feature.status,
             "suppressed": feature.suppressed,
         })).collect::<Vec<_>>(),
@@ -115,12 +117,22 @@ pub async fn document_summary(access: &DocumentAccess, tabs: usize) -> Result<Va
     }))
 }
 
+/// Document state, sketch sizes and every feature's stored params (as the
+/// re-edit path reads them), all under one runtime lock.
 async fn runtime_facts(
     access: &DocumentAccess,
     projection: &DocumentProjection,
-) -> Result<(Value, Vec<Value>), String> {
+) -> Result<(Value, Vec<Value>, HashMap<String, Value>), String> {
     let guard = access.state.runtime.lock().await;
     let runtime = guard.as_ref().ok_or("no document is open")?;
+    let params = projection
+        .features
+        .iter()
+        .filter_map(|feature| {
+            let record = feature.id.parse().ok()?;
+            Some((feature.id.clone(), runtime.operation_params(record)?))
+        })
+        .collect();
     let document = json!({
         "path": runtime.path(),
         "title": projection.title,
@@ -151,7 +163,7 @@ async fn runtime_facts(
             "constraints": sketch.constraints().len(),
         }));
     }
-    Ok((document, sketches))
+    Ok((document, sketches, params))
 }
 
 async fn body_facts(

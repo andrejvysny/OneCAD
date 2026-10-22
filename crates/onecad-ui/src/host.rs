@@ -101,9 +101,19 @@ impl Editor {
     /// through. `Err` is the status line when the editor refused to start it.
     #[cfg(feature = "semantic-probe")]
     pub fn request_save_as(&mut self) -> Result<(), String> {
+        use crate::diagnostics::{FileAction, Source, State};
         self.app
             .document_request(crate::document_flow::Request::Save { save_as: true });
-        if self.app.doc.documents.running {
+        // `running` alone may be another file action's job, which refused this
+        // Save; only a Save that just went pending is ours.
+        let pending = matches!(
+            self.app
+                .doc
+                .diagnostics
+                .latest(Source::File(FileAction::Save)),
+            Some((State::Pending, _))
+        );
+        if self.app.doc.documents.running && pending {
             Ok(())
         } else {
             Err(self.app.doc.status.clone())

@@ -50,6 +50,9 @@ final class SemanticHookTests: XCTestCase {
         let failed = try await hooks.saveArtifact("save-failure", in: self)
         XCTAssertEqual(failed["saved"] as? Bool, false, "\(failed)")
         XCTAssertEqual(failed["injectedFailure"] as? Bool, true, "\(failed)")
+        // The editor's own status names the container write's EISDIR.
+        let status = failed["status"] as? String ?? ""
+        XCTAssertTrue(status.contains("Is a directory"), "\(failed)")
         let before = try hooks.kernelIdentity()["journalWriteFailures"] as? Int ?? 0
         let armed = try hooks.fault("journal_write")
         XCTAssertEqual(armed["journalWrite"] as? Bool, true)

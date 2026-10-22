@@ -26,6 +26,12 @@ const JOURNAL_MARKER: &[u8] = b"onecad acceptance journal fault";
 const INFLIGHT: &str = "inflight.json";
 /// File inside the directory that stands in for an injected save failure.
 const SAVE_BLOCKER: &str = "fault-injection";
+/// What the container write reports when a directory holds the target's name
+/// (EISDIR); any other failure did not come from the injected fault.
+const SAVE_BLOCKED: &str = "Is a directory";
+/// Files only `save_artifact` and `export_step_artifact` may attribute to the
+/// run: sealing one would let a copied or forged model pass as saved here.
+const UNSEALABLE: [&str; 2] = [".onecad", ".step"];
 
 type Slot = Arc<Mutex<Option<Result<Value, String>>>>;
 
@@ -260,9 +266,12 @@ fn save_result(app: &IosApp, save: &SaveTicket) -> Option<Result<Value, String>>
     let outcome = app.editor.as_ref()?.save_outcome()?;
     finish_save(app, save.blocker.as_deref());
     Some(match (outcome, save.blocker.is_some()) {
-        (Err(status), true) => {
+        (Err(status), true) if status.contains(SAVE_BLOCKED) => {
             Ok(json!({"saved": false, "injectedFailure": true, "status": status}))
         }
+        (Err(status), true) => Err(format!(
+            "injected save failure: the save failed elsewhere: {status}"
+        )),
         (Ok(_), true) => Err("injected save failure: the save unexpectedly succeeded".into()),
         (Err(status), false) => Err(format!("save failed: {status}")),
         (Ok((clean, status)), false) => saved(app, save, clean, status),
@@ -312,21 +321,30 @@ fn result(app: &mut IosApp, request: &Value) -> Result<Value, String> {
     })
 }
 
-/// Writes `<name>.provenance.json` for a file a test already wrote into the
-/// run directory (trace records), so the gate can attribute it to this run.
+/// Writes `<name>.provenance.json` (kind `trace`) for a trace record a test
+/// already wrote into the run directory, so the gate can attribute it to this
+/// run. Documents and STEP files are attributed only by the commands that
+/// write them.
 fn seal_artifact(app: &mut IosApp, request: &Value) -> Result<Value, String> {
     let name = name(request)?;
-    if name.ends_with(".json") {
-        return Err("JSON artifacts carry runId and kernelIdentity themselves".into());
-    }
-    let kind = request
-        .get("kind")
-        .and_then(Value::as_str)
-        .unwrap_or("trace");
+    sealable(&name)?;
     let (access, run_id) = artifact_context(app)?;
     let file = probe::run_directory(&access, &run_id)?.join(&name);
-    let provenance = probe::write_provenance(&file, kind, &run_id, &access)?;
+    let provenance = probe::write_provenance(&file, "trace", &run_id, &access)?;
     Ok(json!({"runId": run_id, "provenance": provenance}))
+}
+
+fn sealable(name: &str) -> Result<(), String> {
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".json") {
+        return Err("JSON artifacts carry runId and kernelIdentity themselves".into());
+    }
+    if UNSEALABLE.iter().any(|suffix| lower.ends_with(suffix)) {
+        return Err(
+            "documents and STEP files come from save_artifact and export_step_artifact".into(),
+        );
+    }
+    Ok(())
 }
 
 /// Starts a service-backed command on the editor's service runtime.
@@ -397,6 +415,14 @@ mod tests {
         assert!(valid_name("plate-fillet", 64));
         for bad in ["", "../x", "a/b", ".hidden", "sp ace", &"x".repeat(65)] {
             assert!(!valid_name(bad, 64), "{bad}");
+        }
+    }
+
+    #[test]
+    fn only_trace_records_can_be_sealed() {
+        sealable("touch-trace.jsonl").unwrap();
+        for name in ["plate.onecad", "plate.STEP", "plate.step", "summary.json"] {
+            assert!(sealable(name).is_err(), "{name}");
         }
     }
 
