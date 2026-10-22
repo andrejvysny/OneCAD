@@ -74,13 +74,13 @@ verifiable artifacts `cargo xtask ios-simulator-gate` checks
 
 | Command | Request | Response fields |
 |---|---|---|
-| `run_id` | `{"cmd":"run_id","set"?:id}` | `runId` (from `ONECAD_RUN_ID`, else `set`; `null` when neither) |
+| `run_id` | `{"cmd":"run_id","set"?:id}` | `runId`: `set` replaces the current id; otherwise the one read at launch from `ONECAD_RUN_ID` or `TEST_RUNNER_ONECAD_RUN_ID`; `null` when none |
 | `kernel_identity` | `{"cmd":"kernel_identity"}` | `kernelIdentity`: `backend` (`in-process`, or `null` before a document host runs), `embedded` (manifest the binary verifies against), `linked` (manifest of the linked bundle), worker `hello`, `epoch`, `workerState`, `journalWriteFailures`, `relaunchRequired` |
-| `document_summary` | `{"cmd":"document_summary"}` | ticket; then `summary` (`tabCount`, `document`: path, dirty, revision, undo/redo depth; `features`: id, opType, label, value, status; `bodies`: solids, faces, kernel `volume`, `surfaceArea`, `centroid`, tessellation `min`/`max`; `sketches`: status and `dof` of the last solve in this session, entity and constraint counts) and `kernelIdentity` |
+| `document_summary` | `{"cmd":"document_summary"}` | ticket; then `summary` (`tabCount`, `document`: path, dirty, revision, undo/redo depth; `geometrySource`; `features`: id, opType, label, valueText, primaryValue, stored `params` (as a re-edit reads them), status; `bodies`: solids, faces, kernel `volume`, `surfaceArea`, `centroid`, tessellation `min`/`max`; `sketches`: status and `dof` of the last solve in this session, entity and constraint counts) and `kernelIdentity` |
 | `save_artifact` | `{"cmd":"save_artifact","name"}` | ticket; then `saved`, `path`, `clean`, `status`, `provenance` |
 | `export_step_artifact` | `{"cmd":"export_step_artifact","name"}` | ticket; then `path`, `provenance` |
 | `write_semantic` | `{"cmd":"write_semantic","name"}` | ticket; then `path` of `<name>.json` |
-| `seal_artifact` | `{"cmd":"seal_artifact","name","kind"?}` | `provenance` for a non-JSON file a test wrote into the run directory (`kind` defaults to `trace`) |
+| `seal_artifact` | `{"cmd":"seal_artifact","name"}` | `provenance` (kind `trace`) for a trace record a test wrote into the run directory; `.onecad`, `.step` and `.json` names are refused |
 | `fault` | `{"cmd":"fault","kind":"journal_write"\|"save_failure"\|"clear"}` | `journalWrite`, `saveFailureArmed` |
 | `result` | `{"cmd":"result","ticket"}` | `pending: true` until the ticket's command finished, then its fields plus `runId`; a failure is `ok:false` once |
 
@@ -91,10 +91,18 @@ Rules:
   unread tickets.
 - Artifacts go to `Documents/acceptance/<run id>/`; names are 1–64 of
   `[A-Za-z0-9._-]`. Without a run id every artifact command fails. Every
-  artifact carries the run id and `kernelIdentity`: JSON files inside,
-  `.onecad`, STEP and trace files in `<file>.provenance.json` (run id, kind,
-  SHA-256 of the file, kernel identity). Anything else in the directory is
-  rejected by the gate.
+  artifact carries the run id and `kernelIdentity`: JSON files inside
+  (kind `semantic`, from `write_semantic`), `.onecad`, STEP and trace files
+  in `<file>.provenance.json` (run id, kind, SHA-256 of the file, kernel
+  identity). The gate accepts kind `document` only for `.onecad`
+  (`save_artifact`), `step` only for `.step` (`export_step_artifact`) and
+  `trace` for anything else (`seal_artifact`). Anything else in the
+  directory, subdirectories and symlinks included, is rejected by the gate.
+- Every required simulator model (`plate`, `plate-fillet`, `plate-chamfer`,
+  `mac-plate-resaved`) needs `save_artifact` and then `write_semantic` with
+  the same name: the gate checks the in-process kernel's own summary (history,
+  one healthy solid, volume, bounds, live geometry) against the expectations
+  as well as the Mac regeneration of the saved file.
 - `save_artifact` runs the editor's own File › Save As (document flow, document
   services, `api::save_document`, path claim, recents, Saved status); only the
   name prompt is answered by the hook (`Queue::save_answer` in
@@ -106,7 +114,9 @@ Rules:
 - `fault save_failure` arms the next `save_artifact` only: a directory takes
   the target's name, the editor's Save As fails in the container write and
   reports it; the result is `saved:false, injectedFailure:true` with the
-  editor's status line. `fault journal_write` replaces the kernel journal
+  editor's status line, and only when that status names the container
+  write's `Is a directory` (EISDIR). A Save the editor refused (another file
+  action running) or one that failed elsewhere is an error. `fault journal_write` replaces the kernel journal
   directory by a regular file, so journal writes fail and are counted
   (`journalWriteFailures`); `clear`, the bridge's destruction and the next
   launch restore it without the fault window's `inflight.json`. Nothing else

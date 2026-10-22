@@ -81,6 +81,12 @@ within `1e-4` relative, plus solid validity.
 run from the repository root (`crates/onecad-app` tests, scripts and Xcode
 project are resolved there).
 
+- The evidence directory must be new or empty (a used one is refused, so no
+  earlier verdict, run id or artifact mixes in) and lie outside the source
+  tree or in an ignored path: after step 9 the gate re-reads `git rev-parse
+  HEAD` and `git status --porcelain=v1` (`source-final.log`,
+  `source-status-final.log`) and rejects a run whose HEAD moved or whose
+  tree became dirty while it ran.
 - `--provenance-only` runs steps 1–2 and resolves the simulator read-only
   (it never creates or boots one); it builds nothing.
 - `--verify-only` re-applies every verifier rule to an existing evidence
@@ -111,9 +117,22 @@ project are resolved there).
   case's `sketch` fixes status, DOF and entity/constraint counts.
 - Bounds come from the vertices of the oracle's fine MESH1 tessellation: OCW1
   has no exact BRep bounding-box query. On planar extreme faces those are the
-  BRep vertices (exact up to f32 storage); simulator-modelled cases therefore
-  check extents only, X and Y unordered, and only Mac-authored cases check
-  absolute bounds.
+  BRep vertices, exact up to their f32 storage, so every bounds and extents
+  comparison allows half an f32 ulp of each measured coordinate on top of
+  `1e-7` absolute plus `1e-9` relative (about 1.9e-6 mm at 60 mm; a plate
+  modelled at 13.7..73.7 carries 2.86e-6 mm on its 60 mm extent).
+  Simulator-modelled cases check extents only, X and Y unordered, and only
+  Mac-authored cases check absolute bounds.
+- A measurement counts only when the regeneration `published` and the
+  projection's `geometrySource` is `live` (not the container's cached meshes
+  or an empty plan).
+- Each required simulator model also needs the `write_semantic` record of
+  the same name; its in-process summary (history, one healthy solid, volume,
+  bounds, live geometry) is checked against the same case, so the simulator
+  kernel's own geometry is verified, not only the Mac regeneration.
+- `acceptance.json` claims evidence classes 3–5. Class 2 (synthetic replay)
+  is not claimed until replay tests are inventoried and their traces
+  required.
 - Step 9's `strings` rule is a byte search of the Release executable (the
   product can exceed the 16 MiB log bound). `otool -l` and `otool -L` are
   logged as `otool-load-commands.log` and `otool-libraries.log` (one file on
