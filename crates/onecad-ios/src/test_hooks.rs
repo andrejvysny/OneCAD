@@ -67,6 +67,9 @@ fn command(state: &mut IosApp, request: &Value) -> Result<Value, String> {
                 json!({"synthetic": true, "prediction": prediction.map(|p| [p.position.x, p.position.y])}),
             )
         }
+        Some(cmd) if crate::test_hooks_semantic::COMMANDS.contains(&cmd) => {
+            crate::test_hooks_semantic::command(state, cmd, request)
+        }
         Some(other) => Err(format!("unsupported command: {other}")),
         None => Err("missing cmd".into()),
     }

@@ -10,7 +10,13 @@ crate-type = ["staticlib", "rlib"]
 
 [features]
 # Acceptance-only replay, semantic queries and fault injection (onecad_ios_test.h).
-test-hooks = ["dep:serde_json"]
+test-hooks = [
+    "dep:serde_json",
+    "dep:sha2",
+    "dep:onecad-core",
+    "dep:onecad-protocol",
+    "onecad-ui/semantic-probe",
+]
 
 [dependencies]
 # Path dependencies: `default-features = false` is ignored on inherited workspace
@@ -26,6 +32,9 @@ tokio = { workspace = true, features = ["sync"] }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 serde_json = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+onecad-core = { workspace = true, optional = true }
+onecad-protocol = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt"] }

@@ -70,6 +70,9 @@ pub struct IosApp {
     pub(crate) request_strings: Vec<std::ffi::CString>,
     /// `onecad_ios_open_path` files, opened at the start of the next frame.
     pub(crate) opens: Vec<PathBuf>,
+    /// Run id, pending results and injected faults of the semantic test hooks.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) semantic: crate::test_hooks_semantic::State,
     _logging: Box<dyn std::any::Any>,
 }
 
@@ -86,6 +89,9 @@ impl IosApp {
         let gpu = gpu::create_render_state().map_err(internal)?;
         let host = Arc::new(Queue::new(ctx.clone()));
         let dialogs = Arc::new(Dialogs(host.clone()));
+        // A journal fault a crash left armed must not outlive that launch.
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks_semantic::repair_journal(&layout.app_support);
         let backend =
             WorkerBackend::Embedded(EmbeddedKernelConfig::for_app_support(&layout.app_support));
         let editor = Editor::new(&ctx, gpu.clone(), paths, dialogs, backend).map_err(internal)?;
@@ -105,6 +111,8 @@ impl IosApp {
             capabilities: ffi::Capabilities::default(),
             request_strings: Vec::new(),
             opens: Vec::new(),
+            #[cfg(feature = "test-hooks")]
+            semantic: crate::test_hooks_semantic::State::new(layout.app_support.clone()),
             _logging: logging,
         })
     }

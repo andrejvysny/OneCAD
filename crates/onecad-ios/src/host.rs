@@ -62,6 +62,10 @@ impl Inner {
 pub struct Queue {
     inner: Mutex<Inner>,
     ctx: egui::Context,
+    /// Acceptance hooks: the path that answers the next save dialog in place
+    /// of the host's name prompt (everything after the dialog is unchanged).
+    #[cfg(feature = "test-hooks")]
+    pub(crate) save_answer: Mutex<Option<String>>,
 }
 
 impl Queue {
@@ -69,6 +73,8 @@ impl Queue {
         Self {
             inner: Mutex::new(Inner::default()),
             ctx,
+            #[cfg(feature = "test-hooks")]
+            save_answer: Mutex::new(None),
         }
     }
 
@@ -143,6 +149,13 @@ pub struct Dialogs(pub Arc<Queue>);
 #[async_trait::async_trait]
 impl DialogPort for Dialogs {
     async fn pick(&self, request: FileDialog) -> Vec<String> {
+        #[cfg(feature = "test-hooks")]
+        if request.save {
+            let answer = self.0.save_answer.lock().ok().and_then(|mut a| a.take());
+            if let Some(path) = answer {
+                return vec![path];
+            }
+        }
         let (sender, receiver) = oneshot::channel();
         let kind = if request.save {
             ffi::REQ_SAVE_DOCUMENT
