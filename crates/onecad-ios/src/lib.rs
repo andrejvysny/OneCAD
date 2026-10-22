@@ -21,4 +21,5 @@ mod keys;
 mod lifecycle;
 #[cfg(feature = "test-hooks")]
 mod test_hooks;
+mod touch_input;
 mod wake;

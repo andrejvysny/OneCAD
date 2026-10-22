@@ -75,6 +75,8 @@ pub struct IosApp {
     pub(crate) request_strings: Vec<std::ffi::CString>,
     /// `onecad_ios_open_path` files, opened at the start of the next frame.
     pub(crate) opens: Vec<PathBuf>,
+    /// The latest Pencil accessory action, applied at the start of the next frame.
+    pub(crate) accessory: Option<onecad_interaction::touch::accessory::AccessoryAction>,
     _logging: Box<dyn std::any::Any>,
 }
 
@@ -112,6 +114,7 @@ impl IosApp {
             capabilities: ffi::Capabilities::default(),
             request_strings: Vec::new(),
             opens: Vec::new(),
+            accessory: None,
             _logging: logging,
         })
     }
@@ -209,7 +212,8 @@ impl IosApp {
     /// the stop. The queue stays closed (terminate and destroy only).
     pub fn shutdown(&mut self, grace: Duration) {
         let deadline = Instant::now() + grace;
-        self.input.cancel_all();
+        self.input
+            .cancel_all(onecad_interaction::touch::CancelReason::SceneInactive);
         self.host.close();
         let Some(editor) = self.editor.as_mut() else {
             return;

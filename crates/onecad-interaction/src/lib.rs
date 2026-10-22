@@ -14,6 +14,7 @@ mod transform;
 pub mod operand_binding;
 pub mod selection_set;
 pub mod sketch;
+pub mod touch;
 
 pub use model::*;
 pub use numeric_parameter::{

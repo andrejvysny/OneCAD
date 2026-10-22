@@ -177,7 +177,7 @@ fn optional_snaps(enabled: bool, modifiers: egui::Modifiers) -> bool {
     enabled && !modifiers.alt
 }
 
-fn fresh_ids() -> PrimitiveIds {
+pub(crate) fn fresh_ids() -> PrimitiveIds {
     PrimitiveIds {
         entities: std::array::from_fn(|_| EntityId::new()),
         constraints: std::array::from_fn(|_| ConstraintId::new()),

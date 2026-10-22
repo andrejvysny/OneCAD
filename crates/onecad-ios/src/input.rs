@@ -1,33 +1,39 @@
 //! UIKit samples to egui events, queued until the next frame.
 //!
-//! First version of the routing contract (`docs/ios/INPUT.md` owns the full
-//! router): the first contact that begins while none is active owns egui's
-//! primary pointer, and a Pencil that begins while a finger owns it takes over;
-//! other contacts are left to the native gesture recognizers (`navigation`).
-//! Actual and coalesced samples are replayed in chronological order; predicted
-//! samples are kept for the owner as a transient overlay and never become events.
+//! Samples go through `onecad_interaction::touch` (`docs/ios/INPUT.md`): the
+//! normalizer orders, dedupes and bounds them and drops predictions from the
+//! pointer stream; the router gives every contact one owner for its whole life
+//! from the previous frame's route context. `input_routed.rs` maps the routed
+//! events to egui pointer, trackpad-wheel and overlay input; keys, text and the
+//! native navigation recognizers are queued here in arrival order.
 use crate::ffi::{self, TouchSample};
 use egui::{Event, PointerButton, Pos2};
-use std::collections::{HashMap, HashSet};
+use onecad_interaction::touch::{
+    self, CancelReason, ContactKind, Normalizer, RawSample, RouteContext, Router,
+};
+use std::collections::HashMap;
 
 #[path = "input_navigation.rs"]
 mod navigation;
+#[path = "input_routed.rs"]
+mod routed;
 
-pub const BATCH_MAX: usize = 4096;
-pub const PENDING_MAX: usize = 16_384;
+pub const BATCH_MAX: usize = touch::MAX_BATCH;
+pub const PENDING_MAX: usize = touch::MAX_PENDING;
 
 struct Item {
     event: Event,
     /// Intermediate movement that may be coalesced away under pressure.
     disposable: bool,
-    /// The owner contact whose pointer stream produced this event.
+    /// The pointer contact whose stream produced this event.
     contact: Option<u64>,
 }
 
+/// The contact holding egui's single pointer (an `Author`, `Control` or `Tap`
+/// owner).
 #[derive(Clone, Copy)]
-struct Owner {
+struct Pointer {
     contact: u64,
-    kind: u32,
     last: Pos2,
     /// Its press has reached egui (a frame drained it).
     delivered: bool,
@@ -43,12 +49,6 @@ enum Gone {
     Due,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Prediction {
-    pub position: Pos2,
-    pub timestamp: f64,
-}
-
 /// One frame's input.
 #[derive(Debug, Default, PartialEq)]
 pub struct Drained {
@@ -59,198 +59,119 @@ pub struct Drained {
     /// editor must forget the press (`onecad_ui::host::cancel_contact`), so no
     /// release, click or drag commit follows from it.
     pub cancelled: bool,
+    /// The input kind of the newest press or hover, for the pick aperture
+    /// (`onecad_ui::host::set_pointer_kind`).
+    pub pointer_kind: Option<onecad_ui::host::PointerKind>,
+    /// Whether the newest press is a Pencil tip double tap
+    /// (`onecad_ui::host::set_pencil_double_tap`); `None` without a press.
+    pub pencil_double_tap: Option<bool>,
+    /// Controls tapped while another contact held the pointer, in points: the
+    /// frame clicks the accessibility node under each.
+    pub activations: Vec<Pos2>,
 }
 
 pub struct Input {
     pending: Vec<Item>,
-    owner: Option<Owner>,
+    normalizer: Normalizer,
+    router: Router,
+    pointer: Option<Pointer>,
+    /// A Pencil or pointer hovers with no pointer held.
     hovering: bool,
     gone: Gone,
     forget_pointer: bool,
     navigating: bool,
-    /// The current navigation gesture is ignored (a Pencil or pointer owns the
-    /// canvas, so the camera is held stable).
+    /// The current navigation gesture is ignored (a Pencil or pointer authors,
+    /// so the camera is held stable).
     navigation_ignored: bool,
     /// Start of the trailing queued navigation `Move` group, which later moves
     /// of the same gesture merge into.
     navigation_tail: Option<usize>,
+    /// Start of the trailing queued one-finger orbit move, merged the same way.
+    orbit_tail: Option<usize>,
     composing: bool,
     modifiers: egui::Modifiers,
-    newest_generation: u64,
-    predictions: HashMap<u64, Prediction>,
+    /// Latest predicted points per authoring contact: overlay input only.
+    predictions: HashMap<u64, Vec<Pos2>>,
+    pointer_kind: Option<ContactKind>,
+    pencil_double_tap: Option<bool>,
+    activations: Vec<Pos2>,
 }
 
 impl Default for Input {
     fn default() -> Self {
         Self {
             pending: Vec::new(),
-            owner: None,
+            normalizer: Normalizer::default(),
+            router: Router::default(),
+            pointer: None,
             hovering: false,
             gone: Gone::Idle,
             forget_pointer: false,
             navigating: false,
             navigation_ignored: false,
             navigation_tail: None,
+            orbit_tail: None,
             composing: false,
             modifiers: egui::Modifiers::NONE,
-            newest_generation: 0,
             predictions: HashMap::new(),
+            pointer_kind: None,
+            pencil_double_tap: None,
+            activations: Vec::new(),
         }
     }
 }
 
-fn position(sample: &TouchSample) -> Pos2 {
-    Pos2::new(sample.x_pt as f32, sample.y_pt as f32)
-}
-
-type SampleKey = (u64, u64, u64, u64);
-
-fn key(sample: &TouchSample) -> SampleKey {
-    (
-        sample.contact_id,
-        sample.timestamp_s.to_bits(),
-        sample.x_pt.to_bits(),
-        sample.y_pt.to_bits(),
-    )
-}
-
-/// Drops prediction/estimation records and the coalesced copy of each actual
-/// sample, then orders the rest by timestamp (stable for equal times).
-fn chronological(samples: &[TouchSample]) -> Vec<TouchSample> {
-    let actual: HashSet<SampleKey> = samples
-        .iter()
-        .filter(|sample| sample.provenance == ffi::SAMPLE_ACTUAL)
-        .map(key)
-        .collect();
-    let mut ordered: Vec<TouchSample> = samples
-        .iter()
-        .filter(|sample| match sample.provenance {
-            ffi::SAMPLE_ACTUAL => true,
-            ffi::SAMPLE_COALESCED => !actual.contains(&key(sample)),
-            _ => false,
-        })
-        .copied()
-        .collect();
-    ordered.sort_by(|a, b| a.timestamp_s.total_cmp(&b.timestamp_s));
-    ordered
+fn raw(sample: &TouchSample) -> RawSample {
+    RawSample {
+        contact_id: sample.contact_id,
+        kind: sample.kind,
+        phase: sample.phase,
+        provenance: sample.provenance,
+        present: sample.present,
+        estimated: sample.estimated,
+        expects_update: sample.expects_update,
+        timestamp_s: sample.timestamp_s,
+        x_pt: sample.x_pt,
+        y_pt: sample.y_pt,
+        force: sample.force,
+        max_force: sample.max_force,
+        altitude_rad: sample.altitude_rad,
+        azimuth_rad: sample.azimuth_rad,
+        roll_rad: sample.roll_rad,
+        hover_z: sample.hover_z,
+        estimation_index: sample.estimation_index,
+        tap_count: sample.tap_count,
+    }
 }
 
 impl Input {
-    /// Returns `true` when queued movement had to be coalesced (overflow).
-    pub fn submit(&mut self, samples: &[TouchSample], generation: u64) -> bool {
-        let stale = generation < self.newest_generation;
-        self.newest_generation = self.newest_generation.max(generation);
-        for sample in chronological(samples) {
-            self.sample(&sample, stale);
-        }
-        // After the batch's phases: only a still-live owner keeps a prediction.
-        let owner = self.owner.map(|owner| owner.contact);
-        for sample in samples.iter().filter(|sample| {
-            sample.provenance == ffi::SAMPLE_PREDICTED && !stale && Some(sample.contact_id) == owner
-        }) {
-            self.predictions.insert(
-                sample.contact_id,
-                Prediction {
-                    position: position(sample),
-                    timestamp: sample.timestamp_s,
-                },
-            );
-        }
-        self.enforce_bound()
+    /// Normalizes and routes one host batch with the route context of the
+    /// previous frame. `Ok(true)` when queued movement had to be coalesced.
+    pub fn submit(
+        &mut self,
+        samples: &[TouchSample],
+        generation: u64,
+        route: &RouteContext<'_>,
+    ) -> Result<bool, touch::SubmitError> {
+        let raw: Vec<RawSample> = samples.iter().map(raw).collect();
+        let merged = self.normalizer.submit_raw(&raw, generation)?;
+        let routed = self.router.route(self.normalizer.drain(), route);
+        self.apply_all(routed);
+        Ok(self.enforce_bound() || merged)
     }
 
-    fn sample(&mut self, sample: &TouchSample, stale: bool) {
-        let finite = sample.x_pt.is_finite() && sample.y_pt.is_finite();
-        let owned = self.owner.is_some_and(|o| o.contact == sample.contact_id);
-        let usable = finite && !stale;
-        match sample.phase {
-            ffi::PHASE_BEGAN if usable && self.pencil_takes_over(sample) => {
-                self.cancel_owner();
-                self.press(sample);
-            }
-            ffi::PHASE_BEGAN if self.owner.is_none() && usable => self.press(sample),
-            ffi::PHASE_MOVED | ffi::PHASE_STATIONARY if owned && usable => self.drag(sample),
-            ffi::PHASE_ENDED if owned && usable => self.release(sample),
-            // A stale-coordinate end cannot commit at a meaningful point.
-            ffi::PHASE_ENDED | ffi::PHASE_CANCELLED if owned => self.cancel_owner(),
-            ffi::PHASE_ENDED | ffi::PHASE_CANCELLED => {
-                self.predictions.remove(&sample.contact_id);
-            }
-            ffi::PHASE_HOVER_MOVED if self.owner.is_none() && usable => {
-                self.hovering = true;
-                self.gone = Gone::Idle;
-                self.push(Event::PointerMoved(position(sample)), true);
-            }
-            ffi::PHASE_HOVER_EXITED if self.owner.is_none() && self.hovering => {
-                self.hovering = false;
-                self.gone = Gone::Armed;
-            }
-            _ => {}
-        }
-    }
-
-    /// Pencil contacts own authoring: a Pencil landing while a finger (or palm)
-    /// owns the pointer cancels that finger instead of being ignored.
-    fn pencil_takes_over(&self, sample: &TouchSample) -> bool {
-        sample.kind == ffi::CONTACT_PENCIL
-            && self
-                .owner
-                .is_some_and(|owner| owner.kind == ffi::CONTACT_FINGER)
-    }
-
-    fn press(&mut self, sample: &TouchSample) {
-        let pos = position(sample);
-        self.owner = Some(Owner {
-            contact: sample.contact_id,
-            kind: sample.kind,
-            last: pos,
-            delivered: false,
-        });
-        self.gone = Gone::Idle;
-        self.push_owned(Event::PointerMoved(pos), false);
-        self.push_owned(self.button(pos, true), false);
-    }
-
-    fn drag(&mut self, sample: &TouchSample) {
-        let pos = position(sample);
-        if let Some(owner) = &mut self.owner
-            && owner.last != pos
-        {
-            owner.last = pos;
-            self.push_owned(Event::PointerMoved(pos), true);
-        }
-    }
-
-    fn release(&mut self, sample: &TouchSample) {
-        let pos = position(sample);
-        let finger = self.owner.is_some_and(|o| o.kind == ffi::CONTACT_FINGER);
-        self.push_owned(Event::PointerMoved(pos), false);
-        self.push_owned(self.button(pos, false), false);
-        self.predictions.remove(&sample.contact_id);
-        self.owner = None;
-        // A finger cannot hover after lifting; Pencil and pointers report hover exit.
-        if finger {
-            self.gone = Gone::Armed;
-        }
-    }
-
-    /// Cancellation never delivers a release, so it can neither click nor commit a
-    /// drag: the contact's queued pointer events are dropped, and a press egui has
-    /// already seen is forgotten before the next frame, which carries
-    /// `PointerGone` so the editor's canvas gestures cancel.
-    fn cancel_owner(&mut self) {
-        let Some(owner) = self.owner.take() else {
-            return;
-        };
-        self.predictions.remove(&owner.contact);
-        self.pending
-            .retain(|item| item.contact != Some(owner.contact));
-        self.navigation_tail = None;
-        if owner.delivered {
-            self.forget_pointer = true;
-            self.push(Event::PointerGone, false);
-        }
-        self.gone = Gone::Idle;
+    /// System gesture, interruption, text focus or document switch: every live
+    /// contact is cancelled without a release.
+    pub fn cancel_all(&mut self, reason: CancelReason) {
+        self.normalizer.cancel_all(reason);
+        let routed = self
+            .router
+            .route(self.normalizer.drain(), &RouteContext::CANVAS);
+        self.apply_all(routed);
+        // A synthesized tap holds no router contact; nothing may outlive this.
+        self.cancel_pointer();
+        self.cancel_navigation();
+        self.predictions.clear();
     }
 
     fn button(&self, pos: Pos2, pressed: bool) -> Event {
@@ -264,6 +185,7 @@ impl Input {
 
     fn push(&mut self, event: Event, disposable: bool) {
         self.navigation_tail = None;
+        self.orbit_tail = None;
         self.pending.push(Item {
             event,
             disposable,
@@ -273,7 +195,8 @@ impl Input {
 
     fn push_owned(&mut self, event: Event, disposable: bool) {
         self.navigation_tail = None;
-        let contact = self.owner.map(|owner| owner.contact);
+        self.orbit_tail = None;
+        let contact = self.pointer.map(|pointer| pointer.contact);
         self.pending.push(Item {
             event,
             disposable,
@@ -294,14 +217,8 @@ impl Input {
             !drop
         });
         self.navigation_tail = None;
+        self.orbit_tail = None;
         true
-    }
-
-    /// System gesture or interruption: every live contact is cancelled.
-    pub fn cancel_all(&mut self) {
-        self.cancel_owner();
-        self.cancel_navigation();
-        self.predictions.clear();
     }
 
     pub fn key(&mut self, event: &ffi::KeyEvent) {
@@ -371,7 +288,7 @@ impl Input {
 
     /// A tap synthesized for an accessibility activation without a click action.
     pub fn synthesized_tap(&mut self, pos: Pos2) {
-        self.cancel_owner();
+        self.cancel_pointer();
         self.push(Event::PointerMoved(pos), false);
         self.push(self.button(pos, true), false);
         self.push(self.button(pos, false), false);
@@ -388,30 +305,47 @@ impl Input {
         // A new press, hover or navigation since arming resets `gone` to Idle.
         if self.gone == Gone::Due {
             self.gone = Gone::Idle;
-            if self.owner.is_none() {
+            if self.pointer.is_none() {
                 events.push(Event::PointerGone);
             }
         }
         events.extend(self.pending.drain(..).map(|item| item.event));
         self.navigation_tail = None;
-        if let Some(owner) = &mut self.owner {
-            owner.delivered = true;
+        self.orbit_tail = None;
+        if let Some(pointer) = &mut self.pointer {
+            pointer.delivered = true;
         }
         let again = self.gone == Gone::Armed;
         if again {
             self.gone = Gone::Due;
         }
+        let pointer_kind = self.pointer_kind.take().map(|kind| match kind {
+            ContactKind::Finger => onecad_ui::host::PointerKind::Finger,
+            ContactKind::Pencil | ContactKind::IndirectPointer => {
+                onecad_ui::host::PointerKind::Precise
+            }
+        });
         Drained {
             events,
             again,
             cancelled: std::mem::take(&mut self.forget_pointer),
+            pointer_kind,
+            pencil_double_tap: self.pencil_double_tap.take(),
+            activations: std::mem::take(&mut self.activations),
         }
     }
 
-    /// Latest prediction for a live contact: transient overlay input only.
+    /// Newest predicted point of a live authoring contact: overlay input only.
     #[cfg_attr(not(any(test, feature = "test-hooks")), allow(dead_code))]
-    pub fn prediction(&self, contact: u64) -> Option<Prediction> {
-        self.predictions.get(&contact).copied()
+    pub fn prediction(&self, contact: u64) -> Option<Pos2> {
+        self.predictions.get(&contact)?.last().copied()
+    }
+
+    /// The newest Pencil position, kept after the Pencil lifts.
+    pub fn pencil_position(&self) -> Option<Pos2> {
+        self.router
+            .pencil_position()
+            .map(|point| Pos2::new(point.x as f32, point.y as f32))
     }
 }
 

@@ -1,0 +1,22 @@
+{
+  "name": "view_generation_change",
+  "description": "A rotation bumps view_generation mid-stroke: the stroke is cancelled and its later samples dropped.",
+  "steps": [
+    {"batch": {"generation": 1, "samples": [
+      {"contact": 1, "kind": "pencil", "phase": "began", "t": 0.0, "x": 200, "y": 200}
+    ]}},
+    {"batch": {"generation": 1, "samples": [
+      {"contact": 1, "kind": "pencil", "phase": "moved", "t": 0.02, "x": 220, "y": 200}
+    ]}},
+    {"batch": {"generation": 2, "samples": [
+      {"contact": 1, "kind": "pencil", "phase": "moved", "t": 0.04, "x": 240, "y": 200}
+    ]}},
+    {"batch": {"generation": 2, "samples": [
+      {"contact": 1, "kind": "pencil", "phase": "ended", "t": 0.06, "x": 260, "y": 200}
+    ]}},
+    {"batch": {"generation": 2, "samples": [
+      {"contact": 2, "kind": "pencil", "phase": "began", "t": 0.1, "x": 300, "y": 300},
+      {"contact": 2, "kind": "pencil", "phase": "ended", "t": 0.12, "x": 310, "y": 300}
+    ]}}
+  ]
+}

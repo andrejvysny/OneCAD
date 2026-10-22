@@ -1,0 +1,30 @@
+{
+  "name": "pencil_arc_stroke",
+  "description": "Pencil quarter arc (radius 100 pt) with coalesced samples.",
+  "steps": [
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "pencil", "phase": "began", "t": 0.0, "x": 500.0, "y": 400.0, "force": 0.4, "max_force": 4.17, "altitude": 1.1, "azimuth": 0.6}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "pencil", "phase": "moved", "t": 0.016, "x": 498.769, "y": 384.357, "provenance": "coalesced", "force": 0.4, "max_force": 4.17, "altitude": 1.1, "azimuth": 0.6},
+      {"contact": 1, "kind": "pencil", "phase": "moved", "t": 0.032, "x": 495.106, "y": 369.098, "provenance": "coalesced", "force": 0.4, "max_force": 4.17, "altitude": 1.1, "azimuth": 0.6},
+      {"contact": 1, "kind": "pencil", "phase": "moved", "t": 0.048, "x": 489.101, "y": 354.601, "provenance": "coalesced", "force": 0.4, "max_force": 4.17, "altitude": 1.1, "azimuth": 0.6},
+      {"contact": 1, "kind": "pencil", "phase": "moved", "t": 0.048, "x": 489.101, "y": 354.601, "force": 0.4, "max_force": 4.17, "altitude": 1.1, "azimuth": 0.6}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "pencil", "phase": "moved", "t": 0.064, "x": 480.902, "y": 341.221, "provenance": "coalesced", "force": 0.4, "max_force": 4.17, "altitude": 1.1, "azimuth": 0.6},
+      {"contact": 1, "kind": "pencil", "phase": "moved", "t": 0.08, "x": 470.711, "y": 329.289, "provenance": "coalesced", "force": 0.4, "max_force": 4.17, "altitude": 1.1, "azimuth": 0.6},
+      {"contact": 1, "kind": "pencil", "phase": "moved", "t": 0.096, "x": 458.779, "y": 319.098, "provenance": "coalesced", "force": 0.4, "max_force": 4.17, "altitude": 1.1, "azimuth": 0.6},
+      {"contact": 1, "kind": "pencil", "phase": "moved", "t": 0.096, "x": 458.779, "y": 319.098, "force": 0.4, "max_force": 4.17, "altitude": 1.1, "azimuth": 0.6}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "pencil", "phase": "moved", "t": 0.112, "x": 445.399, "y": 310.899, "provenance": "coalesced", "force": 0.4, "max_force": 4.17, "altitude": 1.1, "azimuth": 0.6},
+      {"contact": 1, "kind": "pencil", "phase": "moved", "t": 0.128, "x": 430.902, "y": 304.894, "provenance": "coalesced", "force": 0.4, "max_force": 4.17, "altitude": 1.1, "azimuth": 0.6},
+      {"contact": 1, "kind": "pencil", "phase": "moved", "t": 0.144, "x": 415.643, "y": 301.231, "provenance": "coalesced", "force": 0.4, "max_force": 4.17, "altitude": 1.1, "azimuth": 0.6},
+      {"contact": 1, "kind": "pencil", "phase": "moved", "t": 0.144, "x": 415.643, "y": 301.231, "force": 0.4, "max_force": 4.17, "altitude": 1.1, "azimuth": 0.6}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "pencil", "phase": "ended", "t": 0.16, "x": 400.0, "y": 300.0, "force": 0.4, "max_force": 4.17, "altitude": 1.1, "azimuth": 0.6}
+    ]}}
+  ]
+}

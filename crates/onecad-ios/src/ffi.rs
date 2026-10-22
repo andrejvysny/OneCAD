@@ -116,6 +116,8 @@ pub struct TouchSample {
     pub reserved: u32,
 }
 
+pub const HAS_LOCATION: u32 = 1 << 6;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct InputBatch {
@@ -156,6 +158,9 @@ pub struct PencilEvent {
     pub roll_rad: f64,
     pub timestamp_s: f64,
 }
+
+pub const CAP_PENCIL_CONNECTED: u32 = 1 << 0;
+pub const CAP_HOVER: u32 = 1 << 1;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]

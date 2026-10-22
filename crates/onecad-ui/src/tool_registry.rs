@@ -43,6 +43,7 @@ pub enum ToolId {
     Hide,
     More,
     Line,
+    PenStroke,
     Rectangle,
     Circle,
     Arc,
@@ -125,6 +126,7 @@ const SKETCH: ToolDef = t(ToolId::Sketch, "sketch", "Sketch");
 const EXTRUDE: ToolDef = k(ToolId::Extrude, "extrude", "Extrude", "E");
 const CREATE: &[ToolDef] = &[
     k(ToolId::Line, "line", "Line", "L"),
+    t(ToolId::PenStroke, "spline", "Pencil Stroke"),
     t(ToolId::Rectangle, "rect", "Rectangle"),
     t(ToolId::Circle, "circle", "Circle"),
     t(ToolId::Arc, "arc", "Arc"),

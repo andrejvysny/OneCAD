@@ -138,3 +138,36 @@ fn removed_widgets_leave_the_snapshot_and_strings_are_c_safe() {
     assert_eq!(normalize("⌘ Export STEP…"), "export-step");
     assert_eq!(normalize("…"), "unlabeled");
 }
+
+#[test]
+fn a_control_tap_targets_the_last_enabled_clickable_element_under_it() {
+    let mut tree = Tree::default();
+    let mut disabled = node(Role::Button, "Off", rect(100.0, 0.0), true);
+    disabled.set_disabled();
+    let mut group = node(
+        Role::Group,
+        "Toolbar",
+        Some(Rect::new(0.0, 0.0, 200.0, 40.0)),
+        false,
+    );
+    group.set_children(vec![NodeId(3), NodeId(4), NodeId(5)]);
+    tree.update(update(
+        vec![
+            (NodeId(1), window(&[2])),
+            (NodeId(2), group),
+            (NodeId(3), node(Role::Button, "Line", rect(10.0, 0.0), true)),
+            (NodeId(4), node(Role::Button, "Arc", rect(25.0, 0.0), true)),
+            (NodeId(5), disabled),
+        ],
+        1,
+    ));
+    let at = |x, y| tree.click_target(egui::pos2(x, y));
+    assert_eq!(at(15.0, 5.0), Some(NodeId(3)));
+    assert_eq!(
+        at(27.0, 5.0),
+        Some(NodeId(4)),
+        "the later overlapping element wins"
+    );
+    assert_eq!(at(105.0, 5.0), None, "disabled");
+    assert_eq!(at(180.0, 5.0), None, "a group is not clickable");
+}

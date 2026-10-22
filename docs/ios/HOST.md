@@ -89,37 +89,43 @@ surface. A drawable is acquired only after the editor pass, never twice per fram
 
 ## Input mapping
 
-Samples are copied at submit and become egui events on the next frame. Up to
-4096 samples per batch and 16 384 queued events; overflow coalesces the oldest
-intermediate movement and returns `ERR_OVERFLOW`; presses, releases,
-cancellations, keys and text are never dropped, and navigation moves between
-frames merge into one pan and one zoom. Input calls return `ERR_STATE` in the
-background and after terminate (`cancel_all` is always accepted).
+Samples are copied at submit and routed at once through
+`onecad_interaction::touch` (`docs/ios/INPUT.md`): the normalizer (rules 1-7)
+and the router (one owner per contact) use the route context of the last
+completed frame: `over_control` is `onecad_ui::host::over_control` (anything
+but the bare CAD canvas drawn that pass), `drag_authoring` is
+`Editor::drag_authoring` (a sketch creation tool, a sketch handle drag, or a
+model tool with canvas handles), and `pencil_only_drawing` comes from
+`capabilities_set`. Test-hook replay uses the same path. Up to 4096 samples per
+batch and 16 384 queued events; overflow coalesces the oldest intermediate
+movement and returns `ERR_OVERFLOW`; presses, releases, cancellations, keys and
+text are never dropped, and navigation and orbit moves between frames merge.
+Input calls return `ERR_STATE` in the background and after terminate
+(`cancel_all` is always accepted).
 
-| UIKit input | egui events |
+| Routed event | egui events |
 |---|---|
-| First contact `BEGAN` (Pencil, finger or pointer) while none is active | `PointerMoved` + primary `PointerButton` press; it owns the pointer |
-| Pencil `BEGAN` while a finger owns the pointer | the finger is cancelled (below); the Pencil owns the pointer |
-| Owner `MOVED`/`STATIONARY` (actual, coalesced) | `PointerMoved` per changed position, chronological; the coalesced copy of the actual sample is skipped |
-| Owner `ENDED` | `PointerMoved` + release; a finger's `PointerGone` follows one frame later |
-| Owner `CANCELLED`, `cancel_all`, focus loss | no release: the contact's queued events are dropped; if egui saw its press, the next frame first forgets it (pointer state and drag) and carries `PointerGone`, which cancels the editor's canvas gestures. No click or drag commit can result. |
-| Other simultaneous contacts | ignored (native recognizers own them) |
-| `PREDICTED` | latest kept for the owner only (transient overlay), cleared when it ends; never an event |
-| `ESTIMATION_UPDATE` | ignored |
-| `HOVER_MOVED` / `HOVER_EXITED` without an owner | `PointerMoved` / deferred `PointerGone` |
-| Samples from an older `view_generation` | ignored; an owner's end becomes a cancellation |
-| Navigation `BEGAN/MOVED/ENDED/CANCELLED` | `PointerMoved(anchor)` (no owner), `MouseWheel{Trackpad, Point, Start/Move/End/Cancel}` pan delta, `Zoom(scale_delta)`; deferred `PointerGone` after the end. `BEGAN` cancels a finger owner; under a Pencil or pointer owner the whole gesture is ignored. Rotation is not mapped. |
+| `Press` (`Author`, `Control`, `Tap`) | `PointerMoved` + primary press; it holds the single pointer. The frame sets `host::set_pointer_kind` (finger: 22 pt edge pick aperture; Pencil/pointer: 8 pt) and `host::set_pencil_double_tap` (a Pencil press with `tap_count` ≥ 2 picks like a double click, face to body, even when egui's click timing does not count it) |
+| `Move` of the pointer contact | `PointerMoved` per changed position (disposable under overflow) |
+| `Release` | `PointerMoved` + release; after a finger or a tap, `PointerGone` one frame later |
+| `Tap` (finger within 8 pt / 0.5 s) | press and release at the begin position in one frame (double tap counted by egui's timing) |
+| `Orbit` (canvas finger past the slop, no drag authoring) | `PointerMoved(position)` (only while no pointer is held) + `MouseWheel{Trackpad, Point, Start/Move/End/Cancel}` with Shift, which the editor treats as orbit; `PointerGone` after the end |
+| `MultiTouch` | nothing: native pan/pinch drive navigation |
+| `Activate` (a finger tapped a control while another contact held the pointer) | no pointer event: the next frame sends `AccessKitActionRequest(Click)` to the last-flattened enabled clickable accessibility element under the begin position, from the previous frame's tree; nothing if none |
+| `Cancel` (UIKit cancel, `cancel_all`, generation change, Pencil precedence, multi-touch, document switch) | no release: the contact's queued events are dropped; if egui saw its press, the next frame first forgets it (`onecad_ui::host::cancel_contact`) and carries `PointerGone`. No click or drag commit can result. |
+| `Hover` / `HoverExit` (Pencil or pointer, no pointer held) | `PointerMoved` / deferred `PointerGone` |
+| `Overlay::Prediction` | latest points kept per authoring contact (transient; never an event, not drawn yet) |
+| Navigation `BEGAN/MOVED/ENDED/CANCELLED` | `BEGAN` hands canvas fingers to it (`Router::native_navigation`): an authoring finger is cancelled, an orbit ends in place; ignored while a Pencil or pointer authors. Then `PointerMoved(anchor)` (no pointer held), `MouseWheel{Trackpad, Point}` pan delta, `Zoom(scale_delta)`; deferred `PointerGone` after the end. Rotation is not mapped. |
 | Key (HID usage, modifiers) | `ModifiersChanged` on change, `Key{key, physical_key, pressed, repeat}`; ⌘ = `command` + `mac_cmd` |
 | `text_insert` | `Text`; `"\n"` is an Enter tap; while composing, `Ime(Commit)` |
 | `text_delete_backward` | Backspace tap |
 | `text_set_marked` | `Ime(Preedit)`; empty ends composition without commit |
-| Pencil barrel tap / squeeze | `ERR_UNAVAILABLE` (not routed to tools yet) |
+| Pencil barrel tap / squeeze (`pencil_event_submit`) | INPUT.md accessory policy on the event's `preferred` action, applied at the start of the next frame: `Editor::toggle_previous_sketch_tool` or `Editor::open_tool_palette` at the hover pose (only with `CAP_HOVER` and `HAS_LOCATION`), else the last Pencil position, else the canvas centre. A squeeze acts on `ENDED`; a barrel tap must be `ENDED`; other phases are `ERR_INVALID_ARGUMENT`. Visible equivalents: the tool pill (and the palette is the pill's tools). |
 
 A deferred `PointerGone` never shares a frame with the release or navigation it
 follows: `sketch_gestures::route_raw` cancels on any `PointerGone` in a frame
-and egui drops hover-gated navigation. `prefers_pencil_only_drawing` is stored
-but not read: the full router of `docs/ios/INPUT.md` replaces this first
-version.
+and egui drops hover-gated navigation. Opening a system-provided file cancels
+live contacts (`DOCUMENT_SWITCH`) before the frame that switches documents.
 
 ### Hardware keyboard and text
 
@@ -204,10 +210,11 @@ with `onecad_ios_test_string_free`). Implemented commands (the catalogue
 | Command | Request | Response fields |
 |---|---|---|
 | `ping` | `{"cmd":"ping"}` | `abi` |
-| `replay` | `{"cmd":"replay","samples":[{"contact","phase","t","x","y","kind"?,"provenance"?}],"generation"?}`; `kind` defaults to Pencil, `provenance` to actual; at most 4096 samples; `ERR_STATE`-equivalent error in the background | `synthetic: true`, `accepted`, `overflowed` |
+| `replay` | `{"cmd":"replay","samples":[<sample>],"generation"?}`; a sample is the trace fixture sample of `INPUT.md` (appendix): `contact`, `phase`, `t`, `x`, `y`, optional `kind` (Pencil), `provenance` (actual), `tap_count`, pose and estimation fields, names or ABI numbers; at most 4096 samples; `ERR_STATE`-equivalent error in the background | `synthetic: true`, `accepted`, `overflowed` |
 | `prediction` | `{"cmd":"prediction","contact"}` | `synthetic: true`, `prediction` (`[x, y]` or null) |
 
-Replay goes through the same `Input::submit` as `onecad_ios_input_submit`; each
-batch is logged with `synthetic = true`. The egui events it produces are not
+Replay goes through the same normalizer, router and route context as
+`onecad_ios_input_submit` (`IosApp::submit_touches`); each batch is logged with
+`synthetic = true`. Samples also accept `tap_count` (default 1). The egui events it produces are not
 marked further. Semantic queries (mass properties, history, constraints) and
 fault injection are not implemented.

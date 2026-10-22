@@ -1,0 +1,27 @@
+{
+  "name": "finger_orbit",
+  "description": "One finger on the canvas without drag authoring orbits from the slop exit point.",
+  "context": {"controls": [[0, 0, 100, 44]]},
+  "steps": [
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "finger", "phase": "began", "t": 0.0, "x": 300, "y": 300}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "finger", "phase": "moved", "t": 0.016, "x": 306, "y": 302},
+      {"contact": 1, "kind": "finger", "phase": "moved", "t": 0.032, "x": 312, "y": 304},
+      {"contact": 1, "kind": "finger", "phase": "moved", "t": 0.048, "x": 318, "y": 306}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "finger", "phase": "moved", "t": 0.064, "x": 324, "y": 308},
+      {"contact": 1, "kind": "finger", "phase": "moved", "t": 0.08, "x": 330, "y": 310},
+      {"contact": 1, "kind": "finger", "phase": "moved", "t": 0.096, "x": 336, "y": 312}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "finger", "phase": "moved", "t": 0.112, "x": 342, "y": 314},
+      {"contact": 1, "kind": "finger", "phase": "moved", "t": 0.128, "x": 348, "y": 316}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "finger", "phase": "ended", "t": 0.144, "x": 354, "y": 318}
+    ]}}
+  ]
+}

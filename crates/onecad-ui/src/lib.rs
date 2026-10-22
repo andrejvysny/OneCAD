@@ -83,6 +83,7 @@ mod sketch_feedback;
 mod sketch_gestures;
 mod sketch_methods;
 mod sketch_numeric;
+mod sketch_pen_stroke;
 mod sketch_repair;
 mod sketch_services;
 mod sketch_snapping;
@@ -92,6 +93,7 @@ mod start_screen;
 mod startup_recovery;
 mod support_view;
 mod tab_switcher;
+mod tool_palette;
 mod tool_registry;
 #[cfg(not(feature = "desktop"))]
 mod touch_menu;

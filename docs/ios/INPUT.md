@@ -89,3 +89,43 @@ commit can result from a cancelled contact.
 
 Unavailable capabilities stay unavailable; every accessory action has a visible
 control equivalent.
+
+## Appendix: trace fixtures
+
+`fixtures/ios/traces/*.json` are deterministic inputs for the normalizer and
+router (`onecad_interaction::touch::trace`). Each file:
+
+```json
+{
+  "name": "<file stem>",
+  "description": "free text",
+  "context": {"pencil_only_drawing": false, "drag_authoring": false,
+              "controls": [[x0, y0, x1, y1]]},
+  "steps": [
+    {"batch": {"generation": 0, "samples": [ <sample>, ... ]}},
+    {"cancel_all": "system_gesture" | "scene_inactive" | "orientation" | "text_focus" | "document_switch" | <ABI code>},
+    {"context": { <context, replaces the current one> }},
+    {"navigation": true}
+  ]
+}
+```
+
+A sample is `contact`, `phase`, `t` (seconds), `x`, `y` (logical points), all
+required, plus optional `kind` (`finger`, `pencil` (default), `pointer`),
+`provenance` (`actual` (default), `coalesced`, `predicted`,
+`estimation_update`), `tap_count` (default 1), `estimation_index`, `force`,
+`max_force`, `altitude`, `azimuth`, `roll`, `hover_z`, `estimated` and
+`expects_update` (lists of property names) and `"location": false` (an
+estimation update without a location). Enum fields also accept their ABI
+numbers. A property is present only when given, which is how a trace models
+missing capabilities.
+
+`navigation` models the host's native pan/pinch recognizer beginning. Controls
+are inclusive rectangles; a point inside one is `over_control`. After each step
+the pending events are routed with the current context.
+
+`fixtures/ios/traces/expected/<name>.txt` holds the canonical routed-event
+lines (`touch::trace::describe`, then the normalizer counters) preceded by
+`digest <FNV-1a 64>` of those lines. `crates/onecad-interaction/tests/touch_traces.rs`
+compares them; `ONECAD_UPDATE_TOUCH_TRACES=1` rewrites them, and the rewrite is
+reviewed like code.

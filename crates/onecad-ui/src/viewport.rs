@@ -11,6 +11,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             let (rect, response) =
                 ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
             crate::sketch_numeric::capture_viewport(ui.ctx(), rect);
+            crate::viewport_widgets::capture_canvas(ui.ctx(), rect, ui.layer_id());
             response.widget_info(|| {
                 egui::WidgetInfo::labeled(
                     egui::Role::Canvas,
@@ -128,8 +129,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     crate::sketch_gestures::viewport(app, ui, rect, &response, &view);
                     return;
                 }
+                crate::sketch_pen_stroke::bar(app, ui, rect, &view);
                 if !overlay_owns && !dimension_owns
                     && (crate::sketch_gestures::delivered_inside(app, ui, rect)
+                        || crate::sketch_pen_stroke::drawing(ui.ctx())
                         || ui.input(|input| input.pointer.hover_pos()).is_some_and(|position| {
                             crate::viewport_widgets::allows_pointer(ui, rect, position)
                         }))
@@ -142,6 +145,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 return;
             }
             let mode = crate::model_pick::track(ui, rect);
+            let double = response.double_clicked()
+                || response.clicked() && crate::viewport_widgets::pencil_double_tap(ui.ctx());
             if (response.clicked() || response.double_clicked())
                 && !overlay_owns
                 && !crate::viewport_selection::sectioned(app)
@@ -151,7 +156,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 && let Some(position) = response.interact_pointer_pos()
                 && crate::viewport_widgets::allows_pointer(ui, rect, position)
             {
-                crate::model_pick::pick(
+                crate::model_pick::pick_with_tolerance(
                     app,
                     &display,
                     &view,
@@ -159,8 +164,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         f64::from(position.x - rect.min.x),
                         f64::from(position.y - rect.min.y),
                     ),
-                    response.double_clicked(),
+                    double,
                     mode,
+                    crate::viewport_widgets::edge_tolerance(ui.ctx()),
                 );
             }
         });

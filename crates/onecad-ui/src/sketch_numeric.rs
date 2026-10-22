@@ -158,7 +158,7 @@ fn method_fields(method: NumericCreationMethod) -> &'static [CreationField] {
             SketchTool::Arc => &[Radius, Sweep],
             SketchTool::ThreePointArc => &[Radius],
             SketchTool::Slot => &[Width],
-            SketchTool::Select => &[],
+            SketchTool::Select | SketchTool::PenStroke => &[],
         },
     }
 }
@@ -175,6 +175,7 @@ pub(crate) fn availability(app: &App) -> Result<(), &'static str> {
         .ok_or("Open a sketch first")?;
     match session.tool {
         SketchTool::Select => Err("Choose a creation tool"),
+        SketchTool::PenStroke => Err("Pencil strokes take no numeric input"),
         SketchTool::Point => Ok(()),
         SketchTool::Arc | SketchTool::ThreePointArc | SketchTool::Slot
             if session

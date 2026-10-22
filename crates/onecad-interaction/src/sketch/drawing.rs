@@ -18,7 +18,7 @@ impl SketchInteraction {
         session.preview = None;
     }
 
-    fn valid_point(&self, point: &CapturedSketchPoint) -> bool {
+    pub(super) fn valid_point(&self, point: &CapturedSketchPoint) -> bool {
         self.session.as_ref().is_some_and(|session| {
             session.phase == SketchPhase::Active
                 && self.context.as_ref() == Some(&session.document)
@@ -75,7 +75,7 @@ impl SketchInteraction {
             SketchTool::Arc | SketchTool::ThreePointArc | SketchTool::Slot => {
                 super::staged_creation::preview(session.tool, draft, point.point).ok()
             }
-            SketchTool::Select | SketchTool::Point => None,
+            SketchTool::Select | SketchTool::Point | SketchTool::PenStroke => None,
         };
     }
 
@@ -102,7 +102,7 @@ impl SketchInteraction {
         let Some(session) = self.session.as_mut() else {
             return Vec::new();
         };
-        if session.tool == SketchTool::Select {
+        if matches!(session.tool, SketchTool::Select | SketchTool::PenStroke) {
             return Vec::new();
         }
         if session.tool == SketchTool::Point {

@@ -48,7 +48,8 @@ impl IosApp {
     /// Focus loss cancels live contacts; egui sees the window focus change too.
     fn focus(&mut self, focused: bool) {
         if !focused {
-            self.input.cancel_all();
+            self.input
+                .cancel_all(onecad_interaction::touch::CancelReason::SceneInactive);
         }
         self.input.push_event(egui::Event::WindowFocused(focused));
         self.phase = if focused {

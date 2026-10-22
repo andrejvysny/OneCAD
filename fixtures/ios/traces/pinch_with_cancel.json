@@ -1,0 +1,26 @@
+{
+  "name": "pinch_with_cancel",
+  "description": "Two fingers become multi-touch, native navigation takes them, one is cancelled by the system.",
+  "context": {"drag_authoring": true},
+  "steps": [
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "finger", "phase": "began", "t": 0.0, "x": 300, "y": 300}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "finger", "phase": "moved", "t": 0.02, "x": 302, "y": 300},
+      {"contact": 2, "kind": "finger", "phase": "began", "t": 0.03, "x": 500, "y": 300}
+    ]}},
+    {"navigation": true},
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "finger", "phase": "moved", "t": 0.05, "x": 290, "y": 300},
+      {"contact": 2, "kind": "finger", "phase": "moved", "t": 0.05, "x": 520, "y": 300}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 2, "kind": "finger", "phase": "cancelled", "t": 0.07, "x": 520, "y": 300}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "finger", "phase": "moved", "t": 0.09, "x": 280, "y": 300},
+      {"contact": 1, "kind": "finger", "phase": "ended", "t": 0.1, "x": 280, "y": 300}
+    ]}}
+  ]
+}

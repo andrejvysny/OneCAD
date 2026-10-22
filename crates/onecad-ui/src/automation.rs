@@ -62,6 +62,7 @@ impl ToolId {
             Self::CircularPattern => "circularPattern",
             Self::FeaturePattern => "featurePattern",
             Self::Spline => "spline",
+            Self::PenStroke => "penStroke",
             Self::Point => "point",
             Self::Dimension => "dimension",
             Self::Constraints => "constraints",

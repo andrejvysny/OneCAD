@@ -108,6 +108,7 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
             reason: None,
         },
         ToolId::Line => sketch_view(app, SketchTool::Line),
+        ToolId::PenStroke => sketch_view(app, SketchTool::PenStroke),
         ToolId::Rectangle => sketch_view(
             app,
             if app.ui.rectangle_centered {
@@ -222,6 +223,11 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
     }
 }
 
+/// The pill's availability for one tool, shared by the adaptive palette.
+pub(crate) fn available(app: &App, def: &ToolDef) -> bool {
+    view(app, def, running_tool(app)).enabled
+}
+
 /// Registry shortcuts are design data; show one only once the app binds it (none yet).
 fn bound_shortcut(def: &ToolDef) -> Option<&'static str> {
     const BOUND: &[ToolId] = &[];
@@ -242,6 +248,7 @@ pub(crate) fn activate(app: &mut App, ctx: &Context, id: ToolId) {
     let sketch_tool = match id {
         ToolId::Select if app.sketch_active() => Some(SketchTool::Select),
         ToolId::Line => Some(SketchTool::Line),
+        ToolId::PenStroke => Some(SketchTool::PenStroke),
         ToolId::Rectangle => Some(if app.ui.rectangle_centered {
             SketchTool::CenterRectangle
         } else {

@@ -1,0 +1,27 @@
+{
+  "name": "coalesced_predicted_estimation",
+  "description": "Coalesced and predicted samples plus estimation updates (one after the end, one unmatched).",
+  "steps": [
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "pencil", "phase": "began", "t": 0.0, "x": 200, "y": 200, "force": 0.2, "max_force": 4.17, "estimation_index": 10, "estimated": ["force"], "expects_update": ["force"]}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "pencil", "phase": "moved", "t": 0.01, "x": 205, "y": 200, "provenance": "coalesced", "force": 0.3, "estimation_index": 11, "estimated": ["force"], "expects_update": ["force"]},
+      {"contact": 1, "kind": "pencil", "phase": "moved", "t": 0.02, "x": 210, "y": 200, "provenance": "coalesced", "force": 0.3, "estimation_index": 12, "estimated": ["force"], "expects_update": ["force"]},
+      {"contact": 1, "kind": "pencil", "phase": "moved", "t": 0.02, "x": 210, "y": 200, "force": 0.3, "estimation_index": 12, "estimated": ["force"], "expects_update": ["force"]},
+      {"contact": 1, "kind": "pencil", "phase": "moved", "t": 0.03, "x": 9215, "y": 200, "provenance": "predicted"},
+      {"contact": 1, "kind": "pencil", "phase": "moved", "t": 0.04, "x": 9220, "y": 200, "provenance": "predicted"}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "pencil", "phase": "moved", "t": 0.05, "x": 225, "y": 200, "estimation_index": 13},
+      {"contact": 1, "kind": "pencil", "phase": "moved", "t": 0.06, "x": 9230, "y": 200, "provenance": "predicted"}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "pencil", "phase": "ended", "t": 0.07, "x": 230, "y": 200, "estimation_index": 14}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "pencil", "phase": "ended", "t": 0.2, "x": 999, "y": 999, "provenance": "estimation_update", "force": 0.55, "estimation_index": 10, "location": false},
+      {"contact": 1, "kind": "pencil", "phase": "ended", "t": 0.2, "x": 999, "y": 999, "provenance": "estimation_update", "force": 0.6, "estimation_index": 77}
+    ]}}
+  ]
+}

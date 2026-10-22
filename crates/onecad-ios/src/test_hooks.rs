@@ -1,25 +1,38 @@
 //! Acceptance-only hooks (`onecad_ios_test.h`), compiled only with the
 //! nondefault `test-hooks` feature. Synthetic samples go through the same
-//! `Input::submit` normalization as `onecad_ios_input_submit` and every reply
-//! about them is labeled synthetic.
+//! normalizer, router and route context as `onecad_ios_input_submit`
+//! (`IosApp::submit_touches`) and every reply and log record about them is
+//! labeled synthetic.
 use crate::abi::{OpaqueApp, fail, utf8, with_app};
 use crate::app::{Failure, IosApp, Outcome};
 use crate::ffi::{self, Status, TouchSample};
 use serde_json::{Value, json};
 use std::ffi::{CString, c_char};
 
-fn sample(value: &Value) -> Option<TouchSample> {
-    let number = |key: &str| value.get(key).and_then(Value::as_f64);
-    let integer = |key: &str| value.get(key).and_then(Value::as_u64);
-    Some(TouchSample {
-        contact_id: integer("contact")?,
-        kind: u32::try_from(integer("kind").unwrap_or(u64::from(ffi::CONTACT_PENCIL))).ok()?,
-        phase: u32::try_from(integer("phase")?).ok()?,
-        provenance: u32::try_from(integer("provenance").unwrap_or(0)).ok()?,
-        timestamp_s: number("t")?,
-        x_pt: number("x")?,
-        y_pt: number("y")?,
-        ..Default::default()
+/// One replay sample in the trace fixture schema (`docs/ios/INPUT.md`
+/// appendix), so `fixtures/ios/traces` batches replay as written.
+fn sample(value: &Value) -> Result<TouchSample, String> {
+    let raw = onecad_interaction::touch::trace::sample(value)?;
+    Ok(TouchSample {
+        contact_id: raw.contact_id,
+        kind: raw.kind,
+        phase: raw.phase,
+        provenance: raw.provenance,
+        present: raw.present,
+        estimated: raw.estimated,
+        expects_update: raw.expects_update,
+        timestamp_s: raw.timestamp_s,
+        x_pt: raw.x_pt,
+        y_pt: raw.y_pt,
+        force: raw.force,
+        max_force: raw.max_force,
+        altitude_rad: raw.altitude_rad,
+        azimuth_rad: raw.azimuth_rad,
+        roll_rad: raw.roll_rad,
+        hover_z: raw.hover_z,
+        estimation_index: raw.estimation_index,
+        tap_count: raw.tap_count,
+        reserved: 0,
     })
 }
 
@@ -33,8 +46,8 @@ fn command(state: &mut IosApp, request: &Value) -> Result<Value, String> {
                 .ok_or("replay needs samples")?
                 .iter()
                 .map(sample)
-                .collect::<Option<Vec<_>>>()
-                .ok_or("malformed sample")?;
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("malformed sample: {error}"))?;
             let generation = request
                 .get("generation")
                 .and_then(Value::as_u64)
@@ -53,8 +66,9 @@ fn command(state: &mut IosApp, request: &Value) -> Result<Value, String> {
                 generation,
                 "onecad_ios test replay batch"
             );
-            let overflowed = state.input.submit(&samples, generation);
-            state.ctx.request_repaint();
+            let overflowed = state
+                .submit_touches(&samples, generation)
+                .map_err(|failure| failure.message)?;
             Ok(json!({"synthetic": true, "accepted": samples.len(), "overflowed": overflowed}))
         }
         Some("prediction") => {
@@ -63,9 +77,7 @@ fn command(state: &mut IosApp, request: &Value) -> Result<Value, String> {
                 .and_then(Value::as_u64)
                 .ok_or("contact")?;
             let prediction = state.input.prediction(contact);
-            Ok(
-                json!({"synthetic": true, "prediction": prediction.map(|p| [p.position.x, p.position.y])}),
-            )
+            Ok(json!({"synthetic": true, "prediction": prediction.map(|p| [p.x, p.y])}))
         }
         Some(other) => Err(format!("unsupported command: {other}")),
         None => Err("missing cmd".into()),
@@ -121,5 +133,40 @@ pub unsafe extern "C" fn onecad_ios_test_string_free(s: *mut c_char) {
     if !s.is_null() {
         // SAFETY: `s` came from `CString::into_raw` and is freed exactly once.
         drop(unsafe { CString::from_raw(s) });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every batch of every trace fixture replays as written.
+    #[test]
+    fn trace_fixture_samples_parse_as_replay_samples() {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/ios/traces");
+        let mut parsed = 0;
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|ext| ext != "json") {
+                continue;
+            }
+            let trace: Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            for step in trace["steps"].as_array().unwrap() {
+                for value in step["batch"]["samples"].as_array().into_iter().flatten() {
+                    let replayed = sample(value).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+                    let traced = onecad_interaction::touch::trace::sample(value).unwrap();
+                    assert_eq!(replayed.present, traced.present);
+                    assert_eq!(replayed.estimation_index, traced.estimation_index);
+                    parsed += 1;
+                }
+            }
+        }
+        assert!(parsed > 50, "{parsed} samples");
+        let named =
+            json!({"contact": 1, "kind": "finger", "phase": "began", "t": 0.0, "x": 1, "y": 2});
+        assert_eq!(sample(&named).unwrap().kind, ffi::CONTACT_FINGER);
+        assert!(sample(&json!({"contact": 1, "t": 0.0, "x": 1, "y": 2})).is_err());
     }
 }

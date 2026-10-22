@@ -99,6 +99,7 @@ impl Flow {
                     | SketchAction::Move(_)
                     | SketchAction::Click { .. }
                     | SketchAction::ClickInferred { .. }
+                    | SketchAction::CommitStroke { .. }
                     | SketchAction::CreateNumeric { .. }
                     | SketchAction::CreateNumericAuthored { .. }
                     | SketchAction::PreviewNumeric { .. }

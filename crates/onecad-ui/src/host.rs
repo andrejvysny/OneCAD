@@ -5,6 +5,8 @@ use crate::{app::App, qa::QaPaths};
 use onecad_app::host::DialogPort;
 use std::sync::Arc;
 
+pub use crate::viewport_widgets::PointerKind;
+
 pub struct Editor {
     app: App,
 }
@@ -85,10 +87,42 @@ impl Editor {
             .document_request(crate::document_flow::Request::Open(Some(path)));
     }
 
+    /// INPUT.md `drag_authoring`: see [`drag_authoring`].
+    pub fn drag_authoring(&self) -> bool {
+        drag_authoring(&self.app)
+    }
+
+    /// Pencil accessory "switch to previous tool": `false` when nothing changed.
+    pub fn toggle_previous_sketch_tool(&mut self) -> bool {
+        crate::tool_palette::toggle_previous(&mut self.app)
+    }
+
+    /// Pencil accessory "show palette": the adaptive tool palette opens at `at`
+    /// (points) on the next frame.
+    pub fn open_tool_palette(&mut self, at: egui::Pos2) {
+        crate::tool_palette::open(&mut self.app, at);
+    }
+
     /// A dimension or numeric-expression editor owns the keyboard.
     pub fn numeric_entry(&self, ctx: &egui::Context) -> bool {
         crate::sketch_numeric::editor_open(ctx) || crate::constraint_authoring::editor_open(ctx)
     }
+}
+
+/// A dragged finger can author because a sketch creation tool is armed, a
+/// sketch handle drag runs, or a model tool shows on-canvas handles (extrude
+/// distance, move/rotate triad). Otherwise, including model tools without
+/// handles, fingers orbit.
+pub(crate) fn drag_authoring(app: &App) -> bool {
+    let sketch_tool = app.doc.sketch.session.as_ref().is_some_and(|session| {
+        app.sketch_active() && session.tool != onecad_interaction::sketch::SketchTool::Select
+    });
+    let handles = !app.sketch_active()
+        && (app.doc.extrude_handle.active()
+            || app.doc.transform_gizmo.gizmo.active()
+            || crate::extrude_handle::available(app)
+            || crate::transform_ui::triad(app).is_some());
+    sketch_tool || app.doc.sketch_gesture.busy() || handles
 }
 
 /// Cancels a touch contact whose press egui has already seen, without leaving
@@ -100,6 +134,26 @@ pub fn cancel_contact(ctx: &egui::Context) {
         input.pointer = Default::default();
     });
     ctx.stop_dragging();
+}
+
+/// INPUT.md `over_control` between frames: `pos` (points) is over chrome or
+/// a control rather than the bare CAD canvas of the last completed pass.
+pub fn over_control(ctx: &egui::Context, pos: egui::Pos2) -> bool {
+    crate::viewport_widgets::over_control(ctx, pos)
+}
+
+/// Records which input kind presses next, so picking uses its edge aperture
+/// (a fingertip covers far more than the 8 points a mouse needs). Set it
+/// before the frame that carries the press; desktop never calls it.
+pub fn set_pointer_kind(ctx: &egui::Context, kind: PointerKind) {
+    crate::viewport_widgets::set_pointer_kind(ctx, kind);
+}
+
+/// Whether the press the next frame carries is a Pencil tip double tap
+/// (`tap_count` 2), which picks like a double click (face to body). Set it with
+/// every press; desktop never calls it.
+pub fn set_pencil_double_tap(ctx: &egui::Context, double: bool) {
+    crate::viewport_widgets::set_pencil_double_tap(ctx, double);
 }
 
 /// Recovery flushes requested by [`Editor::flush_recovery`].

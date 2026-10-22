@@ -82,6 +82,11 @@ pub(crate) fn distance_params(tool: &ModelSession) -> Option<&ExtrudeParams> {
         .then_some(params)
 }
 
+/// The distance handle is drawn for the open tool.
+pub(crate) fn available(app: &App) -> bool {
+    target(app).is_some()
+}
+
 fn target(app: &App) -> Option<Target> {
     if !app.viewport_ready()
         || !app.doc.bridge.valid()

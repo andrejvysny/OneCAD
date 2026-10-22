@@ -1,0 +1,7 @@
+digest b6813af48f1419b5
+press c1 Control Finger (40.000,20.000) taps=1
+move c1 Control (42.000,21.000)
+release c1 Control Finger (42.000,21.000)
+press c2 Tap Finger (300.000,300.000) taps=1
+release c2 Tap Finger (300.000,300.000)
+stats NormalizerStats { invalid: 0, duplicate_coalesced: 0, stale: 0, unknown_contact: 0, old_generation: 0, refused_contacts: 0, estimation_matched: 0, estimation_unmatched: 0, merged_moves: 0 }

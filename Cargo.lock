@@ -2780,6 +2780,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "onecad-app",
+ "onecad-interaction",
  "onecad-render",
  "onecad-ui",
  "pollster 0.4.0",

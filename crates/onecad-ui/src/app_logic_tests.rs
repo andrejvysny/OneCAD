@@ -212,6 +212,9 @@ mod arc_gesture_delivery_tests;
 #[path = "arc_slot_delivery_tests.rs"]
 mod arc_slot_delivery_tests;
 
+#[path = "pen_stroke_delivery_tests.rs"]
+mod pen_stroke_delivery_tests;
+
 #[path = "sketch_entry_delivery_tests.rs"]
 mod sketch_entry_delivery_tests;
 #[path = "sketch_plane_choice_tests.rs"]

@@ -48,6 +48,7 @@ pub(crate) fn sketch(action: &SketchAction) -> Value {
         SketchAction::Move(_) => "Move",
         SketchAction::Click { .. } => "Click",
         SketchAction::ClickInferred { .. } => "ClickInferred",
+        SketchAction::CommitStroke { .. } => "CommitStroke",
         SketchAction::BeginPointNumeric { .. } => "BeginPointNumeric",
         SketchAction::PreviewNumeric { .. } => "PreviewNumeric",
         SketchAction::CreateNumeric { .. } => "CreateNumeric",
@@ -77,7 +78,8 @@ pub(crate) fn sketch(action: &SketchAction) -> Value {
     match action {
         SketchAction::Move(point)
         | SketchAction::Click { point, .. }
-        | SketchAction::ClickInferred { point, .. } => {
+        | SketchAction::ClickInferred { point, .. }
+        | SketchAction::CommitStroke { point, .. } => {
             detail["point"] = json!([point.point.x, point.point.y]);
             detail["capture_view"] = json!(point.capture.view);
         }

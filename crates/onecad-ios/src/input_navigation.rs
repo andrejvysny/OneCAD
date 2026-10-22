@@ -1,7 +1,8 @@
 //! Two-finger navigation recognized natively: a trackpad-style `MouseWheel` pan
-//! and `Zoom` over the gesture's anchor. A finger owner is cancelled when it
-//! starts (the finger became part of the pinch); while a Pencil or pointer owns
-//! the canvas the whole gesture is ignored so the camera stays put.
+//! and `Zoom` over the gesture's anchor. Its start hands the canvas fingers to
+//! it through the router (an authoring finger is cancelled, an orbit ends in
+//! place); while a Pencil or pointer authors, the whole gesture is ignored so
+//! the camera stays put.
 use super::{Event, Input, Item};
 use crate::ffi;
 use egui::{Pos2, TouchPhase, Vec2};
@@ -47,11 +48,9 @@ impl Input {
         };
         let ending = matches!(step.phase, TouchPhase::End | TouchPhase::Cancel);
         if step.phase == TouchPhase::Start {
-            let owner = self.owner.map(|owner| owner.kind);
-            self.navigation_ignored = owner.is_some_and(|kind| kind != ffi::CONTACT_FINGER);
-            if owner == Some(ffi::CONTACT_FINGER) {
-                self.cancel_owner();
-            }
+            let (allowed, routed) = self.router.native_navigation();
+            self.apply_all(routed);
+            self.navigation_ignored = !allowed;
         }
         if self.navigation_ignored {
             self.navigation_ignored = !ending;
@@ -62,7 +61,7 @@ impl Input {
         }
         let start = self.pending.len();
         // Navigation reads the hovered viewport; a held contact keeps its own position.
-        if self.owner.is_none() {
+        if self.pointer.is_none() {
             self.gone = super::Gone::Idle;
             self.push_navigation(Event::PointerMoved(step.anchor));
         }
@@ -72,7 +71,7 @@ impl Input {
         if let Some(zoom) = step.zoom {
             self.push_navigation(Event::Zoom(zoom));
         }
-        if ending && self.owner.is_none() {
+        if ending && self.pointer.is_none() {
             self.gone = super::Gone::Armed;
         }
         self.navigation_tail = (step.phase == TouchPhase::Move).then_some(start);
@@ -118,6 +117,7 @@ impl Input {
         }
         self.navigation_ignored = false;
         self.navigation_tail = None;
+        self.orbit_tail = None;
     }
 
     fn navigation_wheel(&mut self, delta: Vec2, phase: TouchPhase) {
@@ -134,6 +134,7 @@ impl Input {
 
     /// Like `push`, but keeps the trailing move group open for merging.
     fn push_navigation(&mut self, event: Event) {
+        self.orbit_tail = None;
         self.pending.push(Item {
             event,
             disposable: false,
