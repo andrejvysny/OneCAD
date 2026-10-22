@@ -479,11 +479,9 @@ mod edge_modes;
 
 mod resize_recovery;
 
-mod thumbnail_gpu;
-
-mod mobile_profile;
-
 mod capture_artifacts;
+mod mobile_profile;
+mod thumbnail_gpu;
 #[test]
 fn support_grid_shader_validates_without_gpu() {
     let source = [

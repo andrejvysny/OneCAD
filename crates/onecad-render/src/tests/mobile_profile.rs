@@ -1,4 +1,4 @@
-//! The Mobile profile on real Metal: its targets match the estimate, Xray targets exist only
+//! The Mobile profile on real Metal: its allocated targets match the estimate, Xray targets exist only
 //! while Xray is shown, supersampling is refused and the body still renders without AO.
 use super::{
     quality_acceptance::{idle, render},
@@ -50,6 +50,59 @@ fn expected(options: RenderOptions, profile: RenderProfile) -> u64 {
     limits::quality_target_bytes([320, 240], options, profile).unwrap()
 }
 
+/// What the renderer's targets really allocate, each texture once (the resolve aliases the
+/// output without SSAA), depth/stencil at the estimate's conservative 8 bytes per texel.
+fn allocated_target_bytes(renderer: &Renderer) -> u64 {
+    let t = renderer.targets.as_ref().unwrap();
+    let views = [
+        &t.output_attachment,
+        &t.resolved,
+        &t.color,
+        &t.depth,
+        &t.pre_depth,
+        &t.pre_normal,
+        &t.ao_raw,
+        &t.ao_tmp,
+        &t.ao_final,
+        &t.height,
+        &t.occ,
+        &t.occ_tmp,
+        &t.occ_final,
+        &t.oit_accum,
+        &t.oit_reveal,
+    ];
+    let mut textures: Vec<&wgpu::Texture> = vec![];
+    for texture in views.map(|view| view.texture()) {
+        if !textures.contains(&texture) {
+            textures.push(texture);
+        }
+    }
+    let bytes = |texture: &wgpu::Texture| {
+        let format = texture.format();
+        let texel = if format.is_depth_stencil_format() {
+            8
+        } else {
+            u64::from(format.block_copy_size(None).unwrap())
+        };
+        u64::from(texture.width() * texture.height() * texture.sample_count()) * texel
+    };
+    textures.into_iter().map(bytes).sum()
+}
+
+/// The estimate charges the larger FLOAT32_BLENDABLE Xray pair; without it, the smaller one.
+fn assert_allocates_its_estimate(renderer: &Renderer, device: &wgpu::Device) {
+    let estimate = renderer.memory_estimate().target_bytes;
+    let allocated = allocated_target_bytes(renderer);
+    if device
+        .features()
+        .contains(wgpu::Features::FLOAT32_BLENDABLE)
+    {
+        assert_eq!(allocated, estimate);
+    } else {
+        assert!(allocated <= estimate, "{allocated} > {estimate}");
+    }
+}
+
 fn pixel(image: &[u8], x: usize, y: usize) -> [u8; 3] {
     let i = (y * 320 + x) * 4;
     [image[i], image[i + 1], image[i + 2]]
@@ -82,6 +135,7 @@ fn mobile_profile_allocates_what_it_estimates_and_xray_targets_lazily() {
         estimate.target_bytes,
         expected(RenderOptions::default(), mobile)
     );
+    assert_allocates_its_estimate(&renderer, &device);
     renderer.replace_scene(&scene).unwrap();
     let shaded = render(
         &mut renderer,
@@ -100,6 +154,7 @@ fn mobile_profile_allocates_what_it_estimates_and_xray_targets_lazily() {
     renderer.set_options(mode(DisplayMode::Xray)).unwrap();
     let xray_bytes = expected(mode(DisplayMode::Xray), mobile);
     assert_eq!(renderer.memory_estimate().target_bytes, xray_bytes);
+    assert_allocates_its_estimate(&renderer, &device);
     assert!(xray_bytes > estimate.target_bytes);
     let xray = render(
         &mut renderer,
@@ -139,8 +194,15 @@ fn desktop_profile_keeps_eager_xray_targets() {
     assert_eq!(renderer.profile(), RenderProfile::Desktop);
     let before = renderer.memory_estimate().target_bytes;
     assert_eq!(before, limits::target_bytes([320, 240]).unwrap());
+    assert_allocates_its_estimate(&renderer, &device);
     renderer.set_options(mode(DisplayMode::Xray)).unwrap();
     assert_eq!(renderer.memory_estimate().target_bytes, before);
+    let supersampled = RenderOptions {
+        ssaa: 2.0,
+        ..mode(DisplayMode::Shaded)
+    };
+    renderer.set_options(supersampled).unwrap();
+    assert_allocates_its_estimate(&renderer, &device);
     assert_eq!(
         renderer.memory_estimate().ibl_bytes,
         limits::ibl_bytes(RenderProfile::Desktop)
