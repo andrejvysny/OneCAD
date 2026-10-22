@@ -110,7 +110,7 @@ background and after terminate (`cancel_all` is always accepted).
 | Samples from an older `view_generation` | ignored; an owner's end becomes a cancellation |
 | Navigation `BEGAN/MOVED/ENDED/CANCELLED` | `PointerMoved(anchor)` (no owner), `MouseWheel{Trackpad, Point, Start/Move/End/Cancel}` pan delta, `Zoom(scale_delta)`; deferred `PointerGone` after the end. `BEGAN` cancels a finger owner; under a Pencil or pointer owner the whole gesture is ignored. Rotation is not mapped. |
 | Key (HID usage, modifiers) | `ModifiersChanged` on change, `Key{key, physical_key, pressed, repeat}`; ⌘ = `command` + `mac_cmd` |
-| `text_insert` | `Text`; `"\n"` is an Enter tap; while composing, `Ime(Commit)` |
+| `text_insert` | `Text`; `"\n"` is an Enter tap and `"\t"` a Tab tap (the software keyboard's Tab key moves between numeric fields); while composing, `Ime(Commit)` |
 | `text_delete_backward` | Backspace tap |
 | `text_set_marked` | `Ime(Preedit)`; empty ends composition without commit |
 | Pencil barrel tap / squeeze | `ERR_UNAVAILABLE` (not routed to tools yet) |

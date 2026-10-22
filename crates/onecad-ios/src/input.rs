@@ -340,13 +340,18 @@ impl Input {
         }
     }
 
-    /// Committed text. A return from the software keyboard is egui's Enter key.
+    /// Committed text. Return and Tab from the software keyboard (and a
+    /// hardware keyboard while text input is active, docs/ios/BUILD.md) are
+    /// egui's Enter and Tab keys: as text they would land inside the field
+    /// instead of committing it or moving focus.
     pub fn insert_text(&mut self, text: &str) {
         if self.composing {
             self.composing = false;
             self.push(Event::Ime(egui::ImeEvent::Commit(text.to_owned())), false);
         } else if text == "\n" || text == "\r" {
             self.tap_key(egui::Key::Enter);
+        } else if text == "\t" {
+            self.tap_key(egui::Key::Tab);
         } else if !text.is_empty() {
             self.push(Event::Text(text.to_owned()), false);
         }
