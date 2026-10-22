@@ -10,7 +10,7 @@ use crate::error::ApiError;
 use crate::read::PreviewContext;
 use crate::state::AppState;
 use crate::worker::wire;
-use onecad_core::document::refs::{ElementKind, ElementRef};
+use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef};
 use onecad_core::ids::{BodyId, ElementId, TopoKey};
 use onecad_core::regen::{EngineError, OpFailureCode};
 
@@ -146,17 +146,20 @@ pub async fn stage_edge_op(
         });
     }
     let body = wire::parse_body_id(&prepared.target_body_id).map_err(ApiError::Internal)?;
-    let keys = prepared
+    let picks = prepared
         .edges
         .iter()
-        .map(|edge| TopoKey::new(edge.topo_key.clone()))
+        .map(|edge| {
+            let key = TopoKey::new(edge.topo_key.clone());
+            (key, closure_anchor(edge.anchor.as_ref()))
+        })
         .collect();
     let refs = {
         let mut guard = state.runtime.lock().await;
         guard
             .as_mut()
             .ok_or_else(|| ApiError::NoDocument("stageEdgeOp".into()))?
-            .stage_selection(&ticket, body, keys)
+            .stage_anchored(&ticket, body, picks)
             .await
             .map_err(stage_error)?
     };
@@ -209,14 +212,39 @@ pub async fn stage_offset_face(
     let picks = prepared
         .faces
         .iter()
-        .map(|face| StagePick {
-            body,
-            kind: ElementKind::Face,
-            address: StageAddress::TopoKey(face.topo_key.clone()),
+        .map(|face| {
+            let key = TopoKey::new(face.topo_key.clone());
+            (key, closure_anchor(face.anchor.as_ref()))
         })
         .collect();
-    let refs = stage_elements(state, scope, picks).await?;
+    let refs = {
+        let mut guard = state.runtime.lock().await;
+        let runtime = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("stageOffsetFace".into()))?;
+        let ticket = runtime.stage_ticket(scope).map_err(stage_error)?;
+        runtime
+            .stage_anchored(&ticket, body, picks)
+            .await
+            .map_err(stage_error)?
+    };
+    if refs
+        .iter()
+        .any(|reference| reference.primary.as_ref().map(|p| p.kind) != Some(ElementKind::Face))
+    {
+        return Err(refused(
+            "a closure face resolved to a different element kind",
+        ));
+    }
     Ok(StagedOffsetFace { prepared, refs })
+}
+
+/// A closure entry's worker anchor (`{worldPoint}`), the evidence that separates
+/// sidedness twins when the commit rebinds the staged id. An unparseable one
+/// stages as no anchor, which can only refuse an ambiguous bind, never pick a
+/// different element.
+fn closure_anchor(anchor: Option<&serde_json::Value>) -> Option<AnchorIntent> {
+    serde_json::from_value(anchor?.clone()).ok()
 }
 
 fn stage_error(error: EngineError) -> ApiError {
