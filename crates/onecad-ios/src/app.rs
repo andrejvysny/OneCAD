@@ -17,11 +17,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Scene image pixel cap: at the renderer's 94 B/px target estimate a full
-/// 13-inch iPad drawable (5.7 Mpx) exceeds its 512 MiB GPU budget, while 3 Mpx
-/// keeps targets near 270 MiB and leaves room for a replacement overlap.
-const MOBILE_RENDER_PIXEL_CAP: f64 = 3_000_000.0;
-
 /// Upper bound on flushing autosave and stopping the document hosts (terminate
 /// and destroy).
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
@@ -101,9 +96,11 @@ impl IosApp {
         crate::test_hooks_semantic::repair_journal(&layout.app_support);
         let backend =
             WorkerBackend::Embedded(EmbeddedKernelConfig::for_app_support(&layout.app_support));
-        let mut editor =
-            Editor::new(&ctx, gpu.clone(), paths, dialogs, backend).map_err(internal)?;
-        editor.set_render_pixel_cap(Some(MOBILE_RENDER_PIXEL_CAP));
+        // Mobile: sub-native scene image on large drawables, no SSAO, smaller IBL and
+        // Xray targets only while shown (docs/ios/HOST.md, Rendering).
+        let profile = onecad_render::RenderProfile::Mobile;
+        let editor =
+            Editor::new(&ctx, gpu.clone(), paths, dialogs, backend, profile).map_err(internal)?;
         Ok(Self {
             ctx,
             editor: Some(editor),
@@ -272,7 +269,7 @@ fn pump(
     }
 }
 
-fn view(desc: &ffi::SurfaceDesc, keyboard_overlap: f32) -> Outcome<View> {
+pub(crate) fn view(desc: &ffi::SurfaceDesc, keyboard_overlap: f32) -> Outcome<View> {
     let insets = desc.safe_area;
     let finite = [insets.top, insets.left, insets.bottom, insets.right]
         .iter()
