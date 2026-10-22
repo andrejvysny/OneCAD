@@ -25,7 +25,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             let viewport = Viewport {
                 width: f64::from(rect.width()),
                 height: f64::from(rect.height()),
-                scale_factor: f64::from(ui.ctx().pixels_per_point()),
+                scale_factor: render_scale(rect, ui.ctx().pixels_per_point(), app.render_pixel_cap),
             };
             if !app.viewport_ready() {
                 ui.painter().text(
@@ -171,6 +171,18 @@ fn drawable_capture(
     viewport: Viewport,
 ) -> Option<ViewSnapshot> {
     view.filter(|view| view.identity().scene == scene && view.viewport() == viewport)
+}
+
+/// Physical pixels per point for the scene image: the display scale, reduced
+/// uniformly when the image would exceed `cap` pixels. Picking and the camera
+/// work in points, so only the image resolution and line widths change.
+fn render_scale(rect: egui::Rect, pixels_per_point: f32, cap: Option<f64>) -> f64 {
+    let full = f64::from(pixels_per_point);
+    let points = f64::from(rect.width()) * f64::from(rect.height());
+    match cap {
+        Some(cap) if points > 0.0 && points * full * full > cap => (cap / points).sqrt(),
+        _ => full,
+    }
 }
 
 fn physical_size(viewport: Viewport) -> [u32; 2] {
@@ -576,3 +588,29 @@ fn profile_bounds(display: &crate::bridge::Display) -> Option<Bounds> {
 #[cfg(test)]
 #[path = "viewport_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod render_scale_tests {
+    use super::render_scale;
+
+    fn rect(w: f32, h: f32) -> egui::Rect {
+        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h))
+    }
+
+    #[test]
+    fn display_scale_is_kept_without_cap_or_below_it() {
+        assert_eq!(render_scale(rect(1032.0, 1376.0), 2.0, None), 2.0);
+        assert_eq!(
+            render_scale(rect(100.0, 100.0), 2.0, Some(3_000_000.0)),
+            2.0
+        );
+    }
+
+    #[test]
+    fn large_viewports_are_reduced_to_the_cap() {
+        let scale = render_scale(rect(1032.0, 1332.0), 2.0, Some(3_000_000.0));
+        let pixels = 1032.0 * scale * 1332.0 * scale;
+        assert!(scale < 2.0);
+        assert!((pixels - 3_000_000.0).abs() < 1.0, "{pixels}");
+    }
+}

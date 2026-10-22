@@ -17,6 +17,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Scene image pixel cap: at the renderer's 94 B/px target estimate a full
+/// 13-inch iPad drawable (5.7 Mpx) exceeds its 512 MiB GPU budget, while 3 Mpx
+/// keeps targets near 270 MiB and leaves room for a replacement overlap.
+const MOBILE_RENDER_PIXEL_CAP: f64 = 3_000_000.0;
+
 /// Upper bound on flushing autosave and stopping the document hosts (terminate
 /// and destroy).
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
@@ -88,7 +93,9 @@ impl IosApp {
         let dialogs = Arc::new(Dialogs(host.clone()));
         let backend =
             WorkerBackend::Embedded(EmbeddedKernelConfig::for_app_support(&layout.app_support));
-        let editor = Editor::new(&ctx, gpu.clone(), paths, dialogs, backend).map_err(internal)?;
+        let mut editor =
+            Editor::new(&ctx, gpu.clone(), paths, dialogs, backend).map_err(internal)?;
+        editor.set_render_pixel_cap(Some(MOBILE_RENDER_PIXEL_CAP));
         Ok(Self {
             ctx,
             editor: Some(editor),

@@ -44,6 +44,9 @@ pub struct App {
     pub cad_needs_fence: bool,
     pub sampled: bool,
     pub sampling_done: Arc<std::sync::atomic::AtomicBool>,
+    /// Upper bound on the viewport's physical pixel count; above it the scene
+    /// renders at a reduced scale and is composited up (mobile memory profile).
+    pub render_pixel_cap: Option<f64>,
     /// Files exported since the host last asked (`host::Editor::take_exported`).
     #[cfg(not(feature = "desktop"))]
     pub(crate) exported: Vec<std::path::PathBuf>,
@@ -164,6 +167,7 @@ impl App {
             cad_needs_fence: false,
             sampled: false,
             sampling_done: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            render_pixel_cap: None,
             #[cfg(not(feature = "desktop"))]
             exported: Vec::new(),
         })
@@ -749,7 +753,11 @@ impl App {
         self.raw_input_hook(ctx, &mut raw);
         ctx.run_ui(raw, |ui| {
             self.logic(ui.ctx());
-            self.ui(ui);
+            // The root Ui spans the full viewport; hosts with a status bar or
+            // home indicator report them as safe-area insets, so lay out inside
+            // the content rect.
+            let content = ui.ctx().content_rect();
+            ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| self.ui(ui));
         })
     }
 

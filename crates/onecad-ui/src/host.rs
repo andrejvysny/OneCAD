@@ -21,6 +21,12 @@ impl Editor {
         App::new_with(ctx, gpu, paths, dialogs, backend).map(|app| Self { app })
     }
 
+    /// Caps the viewport image at `pixels` physical pixels (see
+    /// [`App::render_pixel_cap`]); `None` renders at the display scale.
+    pub fn set_render_pixel_cap(&mut self, pixels: Option<f64>) {
+        self.app.render_pixel_cap = pixels;
+    }
+
     /// See [`App::frame`]: submit and present the output before the next call.
     pub fn frame(&mut self, ctx: &egui::Context, raw: egui::RawInput) -> egui::FullOutput {
         self.app.frame(ctx, raw)
