@@ -64,9 +64,9 @@ follows its role (button, static text or other).
 | `onecad.save.name` | Native | Name field of the SAVE_DOCUMENT prompt | planned document tests |
 | `onecad.import.failed` | Native | Alert when an OPEN_DOCUMENT/"Open in" copy into `Documents/Inbox` fails | planned document tests |
 | `onecad.keyInputProxy` | Native | Hidden first responder for the keyboard; not an accessibility element | — |
-| `onecad.viewport` | Snapshot (egui viewport, role CANVAS) | 3D viewport region | implemented |
-| `onecad.menu.file` | Snapshot (egui "File" menu button) | In-app File menu | `LaunchTests`, `OrientationTests` |
-| `onecad.menu.file.new`, `.open`, `.save`, `.saveAs`, `.closeTab`, `.import`, `.insertStep`, `.export` | Snapshot (egui File menu items, `crates/onecad-ui/src/touch_menu.rs`) | File commands (iPad has no native menu bar for them) | planned document tests |
+| `onecad.viewport` | Snapshot (egui viewport, role CANVAS) | 3D viewport region | `SurfaceLifecycleTests` |
+| `onecad.menu.file` | Snapshot (egui "File" menu button) | In-app File menu | `LaunchTests`, `OrientationTests`, `SurfaceLifecycleTests` |
+| `onecad.menu.file.new`, `.open`, `.save`, `.saveAs`, `.closeTab`, `.import`, `.insertStep`, `.export` | Snapshot (egui File menu items, `crates/onecad-ui/src/touch_menu.rs`) | File commands (iPad has no native menu bar for them) | `.new`: `SurfaceLifecycleTests`; others planned document tests |
 | `onecad.menu.edit.undo`, `onecad.menu.edit.redo` | Snapshot (egui Edit items) | Undo/redo | planned |
 | `onecad.tab.<n>`, `onecad.tab.new` | Snapshot (egui document tabs, role TAB; "+" button) | Document tabs, 0-based in strip order | implemented; planned multi-document tests |
 | `onecad.tool.<tool-id>` | Snapshot (egui pill tool buttons; `<tool-id>` = `ToolId::automation_name`: `select`, `sketch`, `line`, `rectangle`, `circle`, `arc`, `slot`, `point`, `dimension`, `constraints`, `extrude`, `fillet`, `chamfer`, `offsetFace`, `moveRotate`, `edit`, `import`, `more`, …) | Tools shown in the pill and rows of its More catalog (`onecad.tool.more`); a narrow pill draws only the first tool and More, the rest stay addressable as catalog rows, each id once | implemented; planned tool tests |

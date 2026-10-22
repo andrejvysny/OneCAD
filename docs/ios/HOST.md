@@ -58,7 +58,9 @@ thread's last failure text, never NULL.
 
 ## Frame loop
 
-`onecad_ios_frame(time_s)` on a display link, paused until `wake`:
+`onecad_ios_frame(time_s)` on a display link, paused until `wake`. Rendering is
+on demand: an idle editor returns `repaint_after_s = -1` without
+`REDRAW_REQUESTED` (`frame::schedule`), so the link stays paused.
 
 1. Refused (`ERR_STATE`) in the background, after terminate or without a
    surface. Only the leading `struct_size` of the result is read.
@@ -86,6 +88,54 @@ lowered to the adapter's) exists from `create`; `surface_attach` creates the `wg
 same layer, `Suboptimal` presents then reconfigures, timeouts skip the frame.
 `surface_detach` waits (at most 1 s) for submitted work before releasing the
 surface. A drawable is acquired only after the editor pass, never twice per frame.
+
+## Rendering profile and display memory
+
+The editor is built with `onecad_render::RenderProfile::Mobile`
+(`Editor::new(.., profile)`); macOS builds `Desktop`. The profile is fixed when the
+renderer is created (pipelines and the prefiltered environment are built once).
+
+| Choice | Desktop | Mobile |
+|---|---|---|
+| Scene image scale (relative to native pixels) | 1 | `RenderProfile::scene_scale`: continuous, the largest scale that keeps the image at or below 3 000 000 physical pixels, clamped to 0.5–1, times a memory-pressure ceiling |
+| MSAA | 4× | 4× (wgpu guarantees only 1 and 4 samples without adapter-specific format features; 1× aliases CAD edges) |
+| Ambient occlusion (prepass + GTAO + blur) | on | off (1×1 placeholders keep bind groups valid; bodies do not read them) |
+| Xray accumulation targets and their depth | always allocated | only while Xray is shown; entering or leaving Xray replaces the targets |
+| IBL cubes (radiance / prefiltered specular) | 512² / 256² | 256² / 128² |
+| SSAA 2× | offered | not offered; `set_options` refuses it (`Budget`) |
+
+Only the scene image is sub-native. The viewport's `ViewSnapshot` keeps logical
+points, so picking, the camera and every egui overlay (sketch, selection
+outlines, dimensions, handles, cursor) stay at the display scale; the image is
+composited up to the native rect. `limits::quality_target_bytes` mirrors the
+allocation exactly per profile: per render pixel Desktop 94 B (MSAA colour 16,
+MSAA depth 32, resolve 4, prepass depth 8, normal 8, three AO 6, Xray 20),
+Mobile 52 B (80 B in Xray); plus 8.75 MiB of fixed contact-shadow targets and
+the placeholders. IBL: Desktop 21 085 168 B, Mobile 5 357 296 B (including the
+radiance cube that lives until its prefilter commands finish). Example, 13-inch
+drawable 2732×2048: Desktop targets at native 510 MiB; Mobile renders 2000×1500
+(scale 0.73) at 157.5 MiB per target set.
+
+Display memory is accounted per window (`onecad_ui` `DisplayBudget`/`Ledger`).
+All tabs share one `Renderer`: only the active document's targets, IBL and
+geometry are on the GPU, and the renderer charges every replacement (resize,
+rotation, scene, preview or option change) with old plus new resources against
+its allowance (`RenderLimits::max_gpu_bytes`), which is reserved for the active
+document. Parked tabs hold only disposable caches (the ⌃Tab switcher thumbnail
+and a prepared scene not yet uploaded), limited to the parked share and evicted
+least recently active first; activation re-prepares a dropped scene under the
+same identity.
+
+| Budget | Desktop | Mobile |
+|---|---|---|
+| Renderer allowance (active document, incl. replacement overlap) | 512 MiB | 448 MiB |
+| Parked tabs' caches | 64 MiB | 64 MiB |
+| Aggregate | 576 MiB | 512 MiB |
+
+The renderer's total (GPU + CPU staging) cap stays 768 MiB and each document's
+CPU handoff budget (`onecad-ui` `budget.rs`) stays 768 MiB; those are not part
+of this aggregate. These are estimates of payload bytes, not measured device
+memory.
 
 ## Input mapping
 
@@ -189,10 +239,10 @@ document's actor); completing such a request afterwards returns
 | Event | Effect |
 |---|---|
 | `WILL_RESIGN_ACTIVE` | cancel contacts, `WindowFocused(false)`, unfocused frames |
-| `DID_ENTER_BACKGROUND` | as above, request an autosave flush for every open document (not awaited; a document whose actor waits on an open picker flushes after it), refuse frames and input |
-| `WILL_ENTER_FOREGROUND` | frames allowed (inactive) |
+| `DID_ENTER_BACKGROUND` | as above, request an autosave flush for every open document (not awaited; a document whose actor waits on an open picker flushes after it), release the renderer's targets (fence the last frame, wait at most 1 s for the GPU, then zero-size targets; geometry, camera and document state stay), refuse frames and input. Logged as `lifecycle: background released render targets` with `released` |
+| `WILL_ENTER_FOREGROUND` | frames allowed (inactive); the first frame recreates the targets at the current size from the retained scene (same scene identity, no re-upload) |
 | `DID_BECOME_ACTIVE` | `WindowFocused(true)`, focused frames |
-| `MEMORY_WARNING` | release parked tabs' switcher thumbnails |
+| `MEMORY_WARNING` | release every parked tab's thumbnail and unuploaded prepared scene; then, when the active document's resident display memory plus one same-size target set exceeds the renderer allowance, lower the scene scale ceiling one 0.125 step (not below 0.5) for the rest of the session. Accepted in every phase. Logged as `lifecycle: memory warning released display caches` |
 | `WILL_TERMINATE` | cancel contacts, close the request queue (cancelling dialogs), await the autosave flush of every open document, stop the document hosts (flush and stop share 3 s); then frames, input, `a11y_activate`, `open_path` and lifecycle events other than `MEMORY_WARNING` return `ERR_STATE` |
 | `TRAIT_DARK` / `TRAIT_LIGHT` | `system_theme` (used when Appearance is System) |
 

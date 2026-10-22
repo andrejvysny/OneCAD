@@ -118,6 +118,21 @@ services as macOS.
   fault injection. Release and Debug products must not export any
   `onecad_ios_test_` symbol; the simulator gate checks this with `nm`.
 
+## Rendering
+
+The shared renderer runs with `RenderProfile::Mobile` on iPad and `Desktop` on
+macOS: sub-native scene image on large drawables (3 Mpx cap, scale 0.5–1),
+no screen-space ambient occlusion, half-size IBL cubes, Xray targets only while
+Xray is shown, no SSAA; 4× MSAA on both. egui overlays and picking stay at the
+display scale. One window's display memory is one budget: the shared renderer's
+allowance reserved for the active document (448 MiB on iPad, 512 MiB on macOS,
+replacement overlap included) plus 64 MiB for parked tabs' disposable caches.
+Backgrounding releases the renderer's targets; a memory warning releases parked
+caches and may lower the scene scale. Figures, lifecycle and the exact target
+arithmetic: [HOST.md](HOST.md#rendering-profile-and-display-memory). They are
+payload estimates; device memory, frame rate and thermals are physical-device
+evidence (class 6).
+
 ## Threads
 
 | Thread | Work |
