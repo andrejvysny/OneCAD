@@ -46,6 +46,36 @@ fn each_modifier_maps_to_one_selection_mode() {
 }
 
 #[test]
+fn multi_select_switch_toggles_hits_but_a_miss_clears_and_a_double_tap_replaces() {
+    use SelectionMode::*;
+    assert_eq!(additive(true, Replace, true, false), Toggle);
+    assert_eq!(
+        additive(true, Replace, false, false),
+        Replace,
+        "a miss clears"
+    );
+    assert_eq!(
+        additive(true, Replace, true, true),
+        Replace,
+        "a double tap selects the body alone"
+    );
+    for mode in [Add, Toggle, Subtract] {
+        assert_eq!(additive(true, mode, true, false), mode, "modifiers win");
+        assert_eq!(additive(true, mode, false, false), mode, "modifiers win");
+    }
+    assert_eq!(additive(false, Replace, true, false), Replace);
+    // What a Replace double tap does to the face its first tap toggled in.
+    let body = BodyId::new();
+    let mut selection = SelectionSet::default();
+    selection.apply(Toggle, vec![face(body, "f:1")]).unwrap();
+    let mode = additive(true, Replace, true, true);
+    selection
+        .apply(mode, vec![SelectionItem::Body(body)])
+        .unwrap();
+    assert_eq!(selection.items(), [SelectionItem::Body(body)]);
+}
+
+#[test]
 fn batched_press_modifier_change_and_release_uses_the_press_modifiers() {
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(100.0, 100.0));
     let at = egui::pos2(10.0, 10.0);

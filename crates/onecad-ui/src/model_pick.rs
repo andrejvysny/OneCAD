@@ -102,6 +102,23 @@ pub(crate) fn track(ui: &egui::Ui, rect: egui::Rect) -> SelectionMode {
     })
 }
 
+/// The multi-select switch turns a plain pick on an item into a toggle; a
+/// modifier pick keeps the mode its keys chose. A miss still clears and a
+/// whole-body double tap still replaces: touch has no other tap-to-clear, and a
+/// toggled body would join the face the double tap's first tap toggled in.
+pub(crate) fn additive(
+    on: bool,
+    mode: SelectionMode,
+    hit: bool,
+    whole_body: bool,
+) -> SelectionMode {
+    if on && mode == SelectionMode::Replace && hit && !whole_body {
+        SelectionMode::Toggle
+    } else {
+        mode
+    }
+}
+
 /// MESH1 labels a sub-shape with a snapshot TopoKey or a promoted ElementId.
 pub(crate) fn topology_id(raw: &str) -> TopologyId {
     let key = TopoKey::new(raw);
@@ -142,9 +159,10 @@ pub(crate) fn staging(app: &App) -> bool {
             .is_some_and(|tool| tool.phase == SessionPhase::Editing)
 }
 
-/// Picking needs no tool, or a tool that feeds operand stages.
+/// Picking needs no tool, or a tool that feeds operand stages. A selection
+/// already sent for staging stays as staged until its tool begins.
 pub(crate) fn allowed(app: &App) -> bool {
-    app.doc.interaction.tool.is_none() || staging(app)
+    app.doc.interaction.tool.is_none() && !crate::operation_start::pending(app) || staging(app)
 }
 
 pub(crate) fn policy(app: &App) -> onecad_scene::PickPolicy {
@@ -164,6 +182,8 @@ pub(crate) fn policy(app: &App) -> onecad_scene::PickPolicy {
     }
 }
 
+/// `mode` comes from the press's modifiers; the multi-select switch applies
+/// here, once the hit is known.
 pub(crate) fn pick(
     app: &mut App,
     display: &Display,
@@ -205,6 +225,7 @@ pub(crate) fn pick(
             }
         })
     });
+    let mode = additive(app.ui.additive_select, mode, item.is_some(), whole_body);
     if staging(app) {
         // A miss never clears staged operands.
         if let Some(item) = item {

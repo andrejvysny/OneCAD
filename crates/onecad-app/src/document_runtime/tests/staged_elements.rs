@@ -150,6 +150,39 @@ async fn published_regen_strips_a_folded_staged_id_and_keeps_a_promoted_one() {
     assert!(payload.doc.elements.contains(&recorded));
 }
 
+/// A closure's anchor rides the staged ref and the evidence a commit adopts:
+/// the commit's from-empty replay rebinds the id by descriptor + anchor.
+#[tokio::test]
+async fn anchored_stage_carries_each_anchor_into_ref_and_staged_evidence() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    rt.apply(add_extrude(0x12, 25.0)).unwrap();
+    let report = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    assert!(matches!(report.outcome, Outcome::Published(_)));
+    let body = BodyId(Uuid::from_u128(0x12));
+    let anchor = AnchorIntent {
+        world_point: Vec3::new(0.0, 60.0, 2.0).unwrap(),
+        surface_uv: None,
+        local_frame: None,
+        adjacency_hint: None,
+        extra: Default::default(),
+    };
+    let ticket = rt.stage_ticket(&head_scope(&rt)).expect("current scope");
+    let picks = vec![
+        (TopoKey::new("e:3"), Some(anchor.clone())),
+        (TopoKey::new("e:4"), None),
+    ];
+    let staged = rt
+        .stage_anchored(&ticket, body, picks)
+        .await
+        .expect("stage");
+    assert_eq!(staged[0].anchor.as_ref(), Some(&anchor));
+    assert_eq!(staged[1].anchor, None);
+    let id = staged[0].primary.as_ref().unwrap().element.clone();
+    assert_eq!(rt.staged[&id].anchor.as_ref(), Some(&anchor));
+}
+
 fn host_face(id: &str, body: BodyId) -> ElementRef {
     ElementRef {
         primary: Some(PrimaryRef {

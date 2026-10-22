@@ -43,7 +43,6 @@ pub enum Command {
     },
     Sketch(Box<crate::sketch_services::Request>),
     /// Non-dirtying operand staging; FIFO with `Apply` on this lane.
-    #[allow(dead_code, reason = "the operand session slice (S-315c-ui) submits it")]
     Operands(Box<crate::operand_services::Request>),
     Apply {
         tag: RequestTag,

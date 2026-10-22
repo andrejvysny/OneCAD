@@ -110,6 +110,9 @@ fn field(
             )
         })
         .inner;
+    // Dimension editing needs the Select tool and no draft, so a creation
+    // chip never shows this id at the same time.
+    crate::automation::name(ui.ctx(), response.id, crate::automation::DIMENSION_INPUT);
     if draft.focus && !pending {
         response.request_focus();
         draft.focus = false;

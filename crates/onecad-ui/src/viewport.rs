@@ -13,11 +13,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             crate::sketch_numeric::capture_viewport(ui.ctx(), rect);
             response.widget_info(|| {
                 egui::WidgetInfo::labeled(
-                    egui::Role::Image,
+                    egui::Role::Canvas,
                     true,
                     "Model viewport; select a closed profile",
                 )
             });
+            crate::automation::name(ui.ctx(), response.id, crate::automation::VIEWPORT);
             let Some(display) = app.doc.display.clone() else {
                 crate::sketch_creation::clear_candidate(ui.ctx());
                 return;

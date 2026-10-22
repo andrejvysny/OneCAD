@@ -37,10 +37,21 @@ Rules:
 ## Accessibility identifiers
 
 Identifiers are stable, never localized and dot-separated. **Native** ones are
-set by Swift in `platforms/ios`. **Snapshot** ones must be exported by Rust
-through `onecad_ios_a11y_snapshot` (`identifier` field) from the egui
-widgets; they are the planned catalogue and are not implemented by the host.
-UI tests address elements by identifier with
+set by Swift in `platforms/ios`. **Snapshot** ones are AccessKit author ids set
+by the shared egui editor (`crates/onecad-ui/src/automation.rs`; the File menu
+in `touch_menu.rs`) and exported through `onecad_ios_a11y_snapshot`
+(`identifier` field); macOS carries the same ids. GPU-free Rust tests assert
+that pill tools and More-catalog rows, the multi-select switch, operation
+fields and footer, sketch creation chips, the sketch dimension editor,
+document tabs and the sketch strip actions appear in an egui AccessKit
+`TreeUpdate` (`onecad-ui` `automation::tests`, `pill::automation_tests`,
+`sketch_numeric::editor::tests`, `constraint_authoring::tests`,
+`session_strip::tests`). The ignored Metal + real-worker host tests in
+`model_operation_delivery_tests` (`ONECAD_REQUIRE_GPU=1 ONECAD_REQUIRE_WORKER=1`)
+tap the running editor by these ids, including the viewport, history rows,
+document tabs and plane buttons that only the full App draws; they are macOS
+evidence, not simulator acceptance. Repeats of one id in a snapshot
+get `#2`, `#3` (HOST.md). UI tests address elements by identifier with
 `descendants(matching: .any)`, because a snapshot node's XCUITest element type
 follows its role (button, static text or other).
 
@@ -53,13 +64,19 @@ follows its role (button, static text or other).
 | `onecad.save.name` | Native | Name field of the SAVE_DOCUMENT prompt | planned document tests |
 | `onecad.import.failed` | Native | Alert when an OPEN_DOCUMENT/"Open in" copy into `Documents/Inbox` fails | planned document tests |
 | `onecad.keyInputProxy` | Native | Hidden first responder for the keyboard; not an accessibility element | — |
-| `onecad.viewport` | Snapshot (egui viewport, role CANVAS) | 3D viewport region | planned |
+| `onecad.viewport` | Snapshot (egui viewport, role CANVAS) | 3D viewport region | implemented |
 | `onecad.menu.file` | Snapshot (egui "File" menu button) | In-app File menu | `LaunchTests`, `OrientationTests` |
 | `onecad.menu.file.new`, `.open`, `.save`, `.saveAs`, `.saveAll`, `.export`, `.importStep` | Snapshot (egui File menu items) | File commands (iPad has no native menu bar for them) | planned document tests |
 | `onecad.menu.edit.undo`, `onecad.menu.edit.redo` | Snapshot (egui Edit items) | Undo/redo | planned |
-| `onecad.tab.<n>`, `onecad.tab.new` | Snapshot (egui document tabs, role TAB) | Document tabs, 0-based | planned multi-document tests |
-| `onecad.tool.<tool-id>` | Snapshot (egui tool buttons; `<tool-id>` = tool registry id) | Modeling and sketch tools | planned tool tests |
-| `onecad.dimension.input` | Snapshot (egui numeric field, role TEXT_FIELD) | Dimension/parameter entry | planned numeric-entry tests |
+| `onecad.tab.<n>`, `onecad.tab.new` | Snapshot (egui document tabs, role TAB; "+" button) | Document tabs, 0-based in strip order | implemented; planned multi-document tests |
+| `onecad.tool.<tool-id>` | Snapshot (egui pill tool buttons; `<tool-id>` = `ToolId::automation_name`: `select`, `sketch`, `line`, `rectangle`, `circle`, `arc`, `slot`, `point`, `dimension`, `constraints`, `extrude`, `fillet`, `chamfer`, `offsetFace`, `moveRotate`, `edit`, `import`, `more`, …) | Tools shown in the pill and rows of its More catalog (`onecad.tool.more`); a narrow pill draws only the first tool and More, the rest stay addressable as catalog rows, each id once | implemented; planned tool tests |
+| `onecad.tool.finishSketch`, `onecad.tool.discardSketch` | Snapshot (sketch session strip buttons) | Finish or discard the open sketch | implemented |
+| `onecad.dimension.input` | Snapshot (egui numeric field, role TEXT_FIELD) | Primary value entry: the running operation's first declared field (fillet radius, chamfer distance, offset distance, extrude distance, translation X), a sketch creation chip's first field (line length, rectangle width, circle Ø, arc radius, point X) or the sketch dimension editor's value (Distance/Diameter/Dimension tools, dimension edit). Return applies a sketch chip or dimension | implemented; planned numeric-entry tests |
+| `onecad.param.<name>` | Snapshot (egui numeric fields) | Every other field of the running operation (`translationY`, `translationZ`, `rotationAngle`, `extrudeSecondDistance`, …) or of a sketch creation chip (`height`, `y`, `sweep`) (`automation.rs`) | implemented |
+| `onecad.op.confirm`, `onecad.op.cancel` | Snapshot (operation card or History editor buttons) | Create/Apply and Cancel of the running operation | implemented |
+| `onecad.plane.xy`, `.xz`, `.yz` | Snapshot (sketch support chooser buttons) | Sketch on an origin plane | implemented |
+| `onecad.history.<index>` | Snapshot (Inspector History rows) | Feature row, 0-based in history order | implemented |
+| `onecad.select.additive` | Snapshot (pill multi-select switch; toggled sets `A11Y_SELECTED`) | Plain viewport picks on an item toggle it instead of replacing the selection; a tap on empty space still clears and a double tap still selects the whole body alone | implemented |
 
 ## Test-hook commands (`onecad_ios_test.h`)
 

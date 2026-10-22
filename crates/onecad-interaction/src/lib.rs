@@ -11,6 +11,7 @@ mod reducer;
 mod session;
 mod transform;
 
+pub mod operand_binding;
 pub mod selection_set;
 pub mod sketch;
 

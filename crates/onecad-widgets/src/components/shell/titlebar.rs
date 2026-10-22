@@ -60,6 +60,9 @@ pub struct TitleBarOutput {
     pub add: bool,
     /// Painted rect of every tab, so the host can anchor a popover to one.
     pub tab_rects: Vec<(u64, Rect)>,
+    /// Widget id of every tab and of "+", so the host can name them for automation.
+    pub tab_ids: Vec<(u64, egui::Id)>,
+    pub add_id: Option<egui::Id>,
 }
 
 impl TitleBarOutput {
@@ -75,6 +78,8 @@ impl TitleBarOutput {
             close: None,
             add: false,
             tab_rects: Vec::new(),
+            tab_ids: Vec::new(),
+            add_id: None,
         }
     }
 }
@@ -256,6 +261,8 @@ impl<'a> TitleBar<'a> {
             close,
             add,
             rects,
+            ids,
+            add_id,
         } = show_strip(ui, area, c, sym_w, strip, l);
         TitleBarOutput {
             file,
@@ -266,6 +273,8 @@ impl<'a> TitleBar<'a> {
             close,
             add,
             tab_rects: rects,
+            tab_ids: ids,
+            add_id,
             ..TitleBarOutput::plain(home, workspace)
         }
     }

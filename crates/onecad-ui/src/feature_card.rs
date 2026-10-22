@@ -48,6 +48,7 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
     let apply = can_apply(app, &tool);
     let editing = tool.phase == SessionPhase::Editing;
     let (response, out) = card(app, ctx, chrome, &tool, apply);
+    name_footer(ctx, out.ok_id, out.cancel_id);
     if let Some(response) = &response {
         focus_keys(app, response, apply);
     }
@@ -88,24 +89,40 @@ pub(crate) fn history_editor(app: &mut App, ui: &mut Ui, record_id: &str) {
                 ui.add(egui::Label::new(message).wrap().selectable(true));
             }
             ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(apply, egui::Button::new("Apply ↵"))
-                    .clicked()
-                {
+                let confirm = ui.add_enabled(apply, egui::Button::new("Apply ↵"));
+                let cancel = ui.add_enabled(
+                    current.phase == SessionPhase::Editing,
+                    egui::Button::new("Cancel"),
+                );
+                name_footer(ui.ctx(), Some(confirm.id), Some(cancel.id));
+                if confirm.clicked() {
                     app.dispatch(Action::Confirm);
                 }
-                if ui
-                    .add_enabled(
-                        current.phase == SessionPhase::Editing,
-                        egui::Button::new("Cancel"),
-                    )
-                    .clicked()
-                {
+                if cancel.clicked() {
                     crate::pill::cancel_tool(app);
                 }
             });
         });
     });
+}
+
+/// The running operation's confirm and cancel, wherever they are drawn.
+pub(crate) fn name_footer(ctx: &Context, confirm: Option<egui::Id>, cancel: Option<egui::Id>) {
+    use crate::automation::{OP_CANCEL, OP_CONFIRM, name};
+    for (id, automation) in [(confirm, OP_CONFIRM), (cancel, OP_CANCEL)] {
+        if let Some(id) = id {
+            name(ctx, id, automation);
+        }
+    }
+}
+
+/// The first declared field is the operation's primary value entry.
+pub(crate) fn field_automation(tool: &ModelSession, key: ParameterKey) -> String {
+    if tool.params.active().next().map(|field| field.key) == Some(key) {
+        crate::automation::DIMENSION_INPUT.to_owned()
+    } else {
+        crate::automation::param(key.parameter())
+    }
 }
 
 fn card(
@@ -280,6 +297,7 @@ fn number_field(
     }
     let label = format!("{} ({unit})", key.label());
     response.widget_info(|| egui::WidgetInfo::text_edit(editing, "", &draft, &label));
+    crate::automation::name(ui.ctx(), response.id, &field_automation(tool, key));
     if response.gained_focus() && !focused {
         app.dispatch(Action::FocusParameter(key));
     }

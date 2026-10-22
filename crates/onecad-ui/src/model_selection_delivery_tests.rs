@@ -5,7 +5,7 @@ use super::*;
 use onecad_interaction::selection_set::SelectionItem;
 use onecad_scene::{Camera, DVec2, PickKind, PickPolicy};
 
-async fn boxed(root: &std::path::Path) -> Host {
+pub(super) async fn boxed(root: &std::path::Path) -> Host {
     let (mut app, context) = create_app(root).await;
     context.enable_accesskit();
     let mut frame = eframe::Frame::_new_kittest();
@@ -31,7 +31,7 @@ async fn boxed(root: &std::path::Path) -> Host {
 }
 
 /// Screen points over distinct sub-shapes of `kind`, from the central viewport.
-fn targets(host: &Host, kind: PickKind) -> Vec<(egui::Pos2, String)> {
+pub(super) fn targets(host: &Host, kind: PickKind) -> Vec<(egui::Pos2, String)> {
     let display = host.app.doc.display.clone().unwrap();
     let view = host.app.doc.view.unwrap();
     let rect = crate::layout::chrome(host.screen(), &host.app.ui).viewport;
@@ -83,7 +83,7 @@ fn row(host: &mut Host, name: &str) -> egui::Pos2 {
     host.rect(name).center()
 }
 
-fn press(pos: egui::Pos2, pressed: bool, modifiers: egui::Modifiers) -> egui::Event {
+pub(super) fn press(pos: egui::Pos2, pressed: bool, modifiers: egui::Modifiers) -> egui::Event {
     egui::Event::PointerButton {
         pos,
         button: egui::PointerButton::Primary,
@@ -93,7 +93,7 @@ fn press(pos: egui::Pos2, pressed: bool, modifiers: egui::Modifiers) -> egui::Ev
 }
 
 /// A single click whose press carries `modifiers`, kept apart from double-clicks.
-fn click(host: &mut Host, pos: egui::Pos2, modifiers: egui::Modifiers) {
+pub(super) fn click(host: &mut Host, pos: egui::Pos2, modifiers: egui::Modifiers) {
     for _ in 0..24 {
         host.ui(vec![]);
     }
@@ -104,7 +104,7 @@ fn click(host: &mut Host, pos: egui::Pos2, modifiers: egui::Modifiers) {
     host.ui(vec![press(pos, false, modifiers)]);
 }
 
-fn labels(host: &Host) -> Vec<String> {
+pub(super) fn labels(host: &Host) -> Vec<String> {
     host.app
         .doc
         .selection

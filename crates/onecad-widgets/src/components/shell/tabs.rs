@@ -45,6 +45,8 @@ pub(super) struct TabsOut {
     pub close: Option<u64>,
     pub add: bool,
     pub rects: Vec<(u64, Rect)>,
+    pub ids: Vec<(u64, egui::Id)>,
+    pub add_id: Option<egui::Id>,
 }
 
 /// A tab's content width: icon, title and the trailing close/dirty slot.
@@ -117,7 +119,9 @@ pub(super) fn show_strip(
             .enabled(strip.can_add)
             .gap_bg(l.theme.titlebar)
             .tip(Some(Tip::new("New document")));
-        out.add = ui.put(r, b).clicked();
+        let add = ui.put(r, b);
+        out.add = add.clicked();
+        out.add_id = Some(add.id);
     });
     out
 }
@@ -141,6 +145,7 @@ fn tab(ui: &mut Ui, rect: Rect, spec: &TabSpec<'_>, hl: bool, l: &Look, out: &mu
     let slot = Rect::from_center_size(centre, Vec2::splat(SLOT));
     let x_hit = show_x.then(|| ui.interact(slot, id.with("x"), Sense::click()));
     body.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, spec.title));
+    out.ids.push((spec.id, body.id));
     let pose = Pose { hl, hover };
     paint_tab(ui, rect, slot, spec, pose, x_hit.as_ref(), l);
     if x_hit.as_ref().is_some_and(|r| r.clicked()) || body.middle_clicked() {

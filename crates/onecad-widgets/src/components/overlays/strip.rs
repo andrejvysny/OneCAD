@@ -74,6 +74,13 @@ impl<'a> SessionStrip<'a> {
 
     /// Index of the clicked action.
     pub fn show(self, ui: &mut Ui) -> Option<usize> {
+        self.show_actions(ui)
+            .iter()
+            .position(egui::Response::clicked)
+    }
+
+    /// Every action's response in order, so the host can name them for automation.
+    pub fn show_actions(self, ui: &mut Ui) -> Vec<egui::Response> {
         let l = look(ui.ctx());
         let t = &l.theme;
         let (fill, border, title) = match self.variant {
@@ -90,25 +97,23 @@ impl<'a> SessionStrip<'a> {
             top: 0,
             bottom: 0,
         };
-        let mut clicked = None;
+        let mut responses = Vec::with_capacity(self.actions.len());
         frame.corner_radius = CornerRadius::same(RADIUS_LG);
         frame.show(ui, |ui| {
             ui.set_height(36.0);
             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
                 self.leading(ui, &lead, &l);
-                for (i, a) in self.actions.iter().enumerate() {
+                for a in self.actions {
                     let mut b = Button::new(a.label).kind(a.kind).enabled(a.enabled);
                     if let Some(tip) = a.tip {
                         b = b.tip(tip);
                     }
-                    if ui.add(b).clicked() {
-                        clicked = Some(i);
-                    }
+                    responses.push(ui.add(b));
                 }
             });
         });
-        clicked
+        responses
     }
 
     fn leading(&self, ui: &mut Ui, lead: &Lead, l: &crate::theme::Look) {

@@ -58,6 +58,9 @@ pub struct UiState {
     pub arc_three_point: bool,
     pub sketch_snap: bool,
     pub sketch_grid_snap: bool,
+    /// Touch multi-select: a plain viewport pick toggles the item instead of
+    /// replacing the selection, so several edges can be picked without keys.
+    pub additive_select: bool,
     pub appearance: Appearance,
     /// Target darkness whose theme failed to load; not retried until another succeeds.
     pub theme_failed: Option<bool>,
@@ -85,6 +88,7 @@ impl Default for UiState {
             arc_three_point: false,
             sketch_snap: true,
             sketch_grid_snap: true,
+            additive_select: false,
             appearance: Appearance::default(),
             theme_failed: None,
             recent_view: 0,

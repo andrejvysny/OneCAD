@@ -348,6 +348,7 @@ impl App {
         }
         // Command permits bound accepted plus terminal messages to at most 16; drain fairly each frame.
         self.drain_messages(ctx);
+        crate::operation_start::poll(self);
         self.sync_document_state();
         let failure = self
             .doc

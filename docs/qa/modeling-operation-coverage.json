@@ -165,13 +165,13 @@
       "mode": "selected edge",
       "supportStatus": "supported",
       "cppTest": "worker/tests/test_fillet_builder.cpp",
-      "rustRealWorkerTest": "crates/onecad-app/tests/topology_rebind.rs",
+      "rustRealWorkerTest": "crates/onecad-app/tests/topology_rebind.rs; crates/onecad-interaction/tests/real_edge_ops.rs",
       "frontendTest": "",
       "playwrightTest": "",
       "corpusCase": "d_fillet_selected_edge",
       "kernelbenchSuite": "fillet/foundation",
       "ciJob": "worker-8-0-1; rust-8-0-1; linux-kernelbench",
-      "notes": "Semantic-reference lane.",
+      "notes": "Semantic-reference lane. Native creation flow: real_edge_ops.rs stages one picked plate corner edge with its closure anchor, binds it through onecad-interaction operand_binding and drives the shared reducer: 1 mm fillet removes (1 − π/4)·4 mm³, an unchanged edit emits no command, the 1 → 0.5 mm edit, undo/redo, a 4 → 6 mm plate edit upstream and save/reopen.",
       "uiExposure": "hidden"
     },
     {
@@ -193,13 +193,13 @@
       "mode": "edge",
       "supportStatus": "supported",
       "cppTest": "worker/tests/test_fillet_builder.cpp; worker/tests/test_wp6_ops.cpp",
-      "rustRealWorkerTest": "crates/onecad-app/tests/preview_edge_shell.rs; crates/onecad-app/tests/chamfer_angle.rs",
+      "rustRealWorkerTest": "crates/onecad-app/tests/preview_edge_shell.rs; crates/onecad-app/tests/chamfer_angle.rs; crates/onecad-interaction/tests/real_edge_ops.rs",
       "frontendTest": "",
       "playwrightTest": "",
       "corpusCase": "",
       "kernelbenchSuite": "",
       "ciJob": "worker-8-0-1; rust-8-0-1",
-      "notes": "Three modes, picked by PRESENCE (SCHEMA §7.3): equal-leg, two-distance (distance2), distance-angle (angleDeg, DEGREES) — the last two mutually exclusive, and a Chamfer carrying either refuses the flip to Fillet by name. FRONTEND LANE MEASURED (this row's frontendTest/playwrightTest lists): the FSM exclusion and (0,180) domain, the marshalling seam that emits at most one mode, the preview-op builder the fresh-author commit materializes, the mock's mirror of the Rust flip reason and value text, the chip fields, and e2e/chamfer-angle.spec.ts (author → commit → re-open → refused flip). MOCK LIMIT, stated: the browser lane builds no chamfer geometry at all, so it proves the params round-trip and the UI semantics, never the solid. RUST LANE MEASURED: chamfer_angle.rs drives the distance-angle mode through DocumentRuntime against the real worker on a 10 mm cube — angleDeg 60 commits to 991.3397455 (analytic 1000 − d·(d·tan A)/2·L = 991.3397460, not the 995 an equal-leg reading would give), angleDeg 45 equals the equal-leg solid at 995 exactly, PreviewOp equals the commit bit-for-bit, distance2 + angleDeg is refused by name with no regen issued, and angleDeg 180 is refused by the session on the authoring path and by the worker as a recoverable OP_FAILED on the preview path. Curved-edge and short-edge atomicity remain unproven (plan item C4).",
+      "notes": "Three modes, picked by PRESENCE (SCHEMA §7.3): equal-leg, two-distance (distance2), distance-angle (angleDeg, DEGREES) — the last two mutually exclusive, and a Chamfer carrying either refuses the flip to Fillet by name. FRONTEND LANE MEASURED (this row's frontendTest/playwrightTest lists): the FSM exclusion and (0,180) domain, the marshalling seam that emits at most one mode, the preview-op builder the fresh-author commit materializes, the mock's mirror of the Rust flip reason and value text, the chip fields, and e2e/chamfer-angle.spec.ts (author → commit → re-open → refused flip). MOCK LIMIT, stated: the browser lane builds no chamfer geometry at all, so it proves the params round-trip and the UI semantics, never the solid. RUST LANE MEASURED: chamfer_angle.rs drives the distance-angle mode through DocumentRuntime against the real worker on a 10 mm cube — angleDeg 60 commits to 991.3397455 (analytic 1000 − d·(d·tan A)/2·L = 991.3397460, not the 995 an equal-leg reading would give), angleDeg 45 equals the equal-leg solid at 995 exactly, PreviewOp equals the commit bit-for-bit, distance2 + angleDeg is refused by name with no regen issued, and angleDeg 180 is refused by the session on the authoring path and by the worker as a recoverable OP_FAILED on the preview path. Curved-edge and short-edge atomicity remain unproven (plan item C4). Native creation flow (equal-leg only): real_edge_ops.rs binds a staged, anchored corner edge next to an earlier fillet, commits 1 mm (2 mm³ removed), edits it to 0.5 mm, survives a 4 → 6 mm plate edit upstream and reopens.",
       "uiExposure": "hidden"
     },
     {
@@ -221,13 +221,13 @@
       "mode": "distance types",
       "supportStatus": "supported",
       "cppTest": "worker/tests/test_offsetface.cpp",
-      "rustRealWorkerTest": "crates/onecad-app/tests/offset_face.rs",
+      "rustRealWorkerTest": "crates/onecad-app/tests/offset_face.rs; crates/onecad-interaction/tests/real_edge_ops.rs",
       "frontendTest": "",
       "playwrightTest": "",
       "corpusCase": "",
       "kernelbenchSuite": "",
       "ciJob": "worker-8-0-1; rust-8-0-1",
-      "notes": "MEASURED LIMIT: the C++ lane EXECUTES Radius and Diameter; the Rust lane executes Radius and covers Total only through PrepareOffsetFace (the opposite-face handshake), never as a committed offset. Diameter has no Rust or browser coverage. The contract rows for Total/Diameter are deferred accordingly.",
+      "notes": "MEASURED LIMIT: the C++ lane EXECUTES Radius and Diameter; the Rust lane executes Radius and covers Total only through PrepareOffsetFace (the opposite-face handshake), never as a committed offset. Diameter has no Rust or browser coverage. The contract rows for Total/Diameter are deferred accordingly. Native creation flow (planar Distance): real_edge_ops.rs stages the plate top face, commits +1 mm (adds the top area), reopens and edits 1 → 2 mm under two later TransformBody records.",
       "uiExposure": "hidden"
     },
     {

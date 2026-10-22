@@ -9,6 +9,7 @@
 #![cfg_attr(all(test, not(feature = "desktop")), allow(dead_code))]
 mod app;
 mod appearance;
+mod automation;
 mod bars;
 #[cfg(test)]
 mod body_inspection_tests_support;
@@ -55,6 +56,7 @@ mod model_pick;
 mod navigation;
 mod navigation_cube;
 mod operand_services;
+mod operation_start;
 mod outcome;
 mod overlays;
 mod parameter_drag;

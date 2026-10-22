@@ -31,7 +31,10 @@ pub use sketch_gestures::{
 mod operands;
 mod sketch_history;
 pub use document_state::{get_document_state, unsaved_changes};
-pub use operands::{stage_edge_op, stage_elements, StageAddress, StagePick, StagedEdgeOp};
+pub use operands::{
+    stage_edge_op, stage_elements, stage_offset_face, StageAddress, StagePick, StagedEdgeOp,
+    StagedOffsetFace,
+};
 pub use replacement::{discard_replaced_document, prepare_replacement_discard, ReplacementDiscard};
 pub use sketch_constraints::{
     add_sketch_constraints_controlled, add_sketch_constraints_with_completion,

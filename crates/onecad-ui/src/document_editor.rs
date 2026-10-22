@@ -36,6 +36,8 @@ pub struct DocumentEditor {
     pub selection: SelectionSet,
     /// Present only while an active tool feeds operand stages from picks.
     pub(crate) operand_staging: Option<crate::model_pick::Staging>,
+    /// Staging for a Fillet, Chamfer or Offset Face the user chose, in flight.
+    pub(crate) operation_start: Option<crate::operation_start::Pending>,
     pub numeric_id: Option<egui::Id>,
     pub status: String,
     pub command_status: bool,
@@ -100,6 +102,7 @@ impl DocumentEditor {
             fit_pending: true,
             selection: SelectionSet::default(),
             operand_staging: None,
+            operation_start: None,
             numeric_id: None,
             status,
             command_status: false,
