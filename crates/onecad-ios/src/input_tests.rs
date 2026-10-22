@@ -1,6 +1,13 @@
 use super::*;
 use egui::{Event, TouchPhase, pos2};
 
+/// Fingers author once they leave the tap slop (a sketch tool is armed).
+const AUTHOR: RouteContext<'static> = RouteContext {
+    pencil_only_drawing: false,
+    drag_authoring: true,
+    over_control: &|_| false,
+};
+
 fn sample(contact: u64, phase: u32, provenance: u32, t: f64, x: f64) -> TouchSample {
     TouchSample {
         contact_id: contact,
@@ -10,6 +17,7 @@ fn sample(contact: u64, phase: u32, provenance: u32, t: f64, x: f64) -> TouchSam
         timestamp_s: t,
         x_pt: x,
         y_pt: x,
+        tap_count: 1,
         ..Default::default()
     }
 }
@@ -23,6 +31,13 @@ fn finger(contact: u64, phase: u32, t: f64, x: f64) -> TouchSample {
         kind: ffi::CONTACT_FINGER,
         ..actual(contact, phase, t, x)
     }
+}
+
+/// Submits with the authoring context; `true` when movement was coalesced.
+fn submit(input: &mut Input, samples: &[TouchSample], generation: u64) -> bool {
+    input
+        .submit(samples, generation, &AUTHOR)
+        .expect("batch fits")
 }
 
 fn release(pos: Pos2) -> Event {
@@ -39,6 +54,7 @@ fn drained(events: Vec<Event>, again: bool, cancelled: bool) -> Drained {
         events,
         again,
         cancelled,
+        pointer_kind: None,
     }
 }
 
@@ -52,10 +68,16 @@ fn presses(events: &[Event]) -> Vec<bool> {
         .collect()
 }
 
+/// A finger that left the slop on the canvas: it owns the pointer (authoring).
+fn finger_author(input: &mut Input, contact: u64) {
+    submit(input, &[finger(contact, ffi::PHASE_BEGAN, 0.0, 3.0)], 0);
+    submit(input, &[finger(contact, ffi::PHASE_MOVED, 0.05, 30.0)], 0);
+}
+
 #[test]
 fn coalesced_samples_replay_in_order_without_the_actual_duplicate_or_predictions() {
     let mut input = Input::default();
-    input.submit(&[actual(7, ffi::PHASE_BEGAN, 1.0, 5.0)], 0);
+    submit(&mut input, &[actual(7, ffi::PHASE_BEGAN, 1.0, 5.0)], 0);
     input.drain();
     let batch = [
         actual(7, ffi::PHASE_MOVED, 1.2, 20.0),
@@ -70,7 +92,7 @@ fn coalesced_samples_replay_in_order_without_the_actual_duplicate_or_predictions
             99.0,
         ),
     ];
-    assert!(!input.submit(&batch, 0));
+    assert!(!submit(&mut input, &batch, 0));
     let events = input.drain().events;
     assert_eq!(
         events,
@@ -79,24 +101,33 @@ fn coalesced_samples_replay_in_order_without_the_actual_duplicate_or_predictions
             Event::PointerMoved(pos2(20.0, 20.0))
         ]
     );
-    assert_eq!(
-        input.prediction(7).map(|p| p.position),
-        Some(pos2(30.0, 30.0))
-    );
+    assert_eq!(input.prediction(7), Some(pos2(30.0, 30.0)));
 }
 
 #[test]
-fn predictions_are_kept_for_the_owner_only_and_end_with_it() {
+fn predictions_are_kept_for_the_author_only_and_end_with_it() {
     let mut input = Input::default();
     let predicted = |contact| sample(contact, ffi::PHASE_MOVED, ffi::SAMPLE_PREDICTED, 0.2, 9.0);
-    input.submit(&[actual(1, ffi::PHASE_BEGAN, 0.0, 1.0), predicted(1)], 0);
-    input.submit(&[finger(2, ffi::PHASE_BEGAN, 0.1, 5.0), predicted(2)], 0);
+    submit(
+        &mut input,
+        &[actual(1, ffi::PHASE_BEGAN, 0.0, 1.0), predicted(1)],
+        0,
+    );
+    submit(
+        &mut input,
+        &[finger(2, ffi::PHASE_BEGAN, 0.1, 5.0), predicted(2)],
+        0,
+    );
     assert!(input.prediction(1).is_some());
     assert!(
         input.prediction(2).is_none(),
-        "a non-owner keeps no prediction"
+        "a non-authoring contact keeps no prediction"
     );
-    input.submit(&[actual(1, ffi::PHASE_ENDED, 0.3, 2.0), predicted(1)], 0);
+    submit(
+        &mut input,
+        &[actual(1, ffi::PHASE_ENDED, 0.3, 2.0), predicted(1)],
+        0,
+    );
     assert!(
         input.prediction(1).is_none(),
         "an ended contact keeps no prediction"
@@ -104,9 +135,10 @@ fn predictions_are_kept_for_the_owner_only_and_end_with_it() {
 }
 
 #[test]
-fn finger_release_commits_before_the_pointer_leaves_in_a_later_frame() {
+fn a_finger_tap_clicks_and_the_pointer_leaves_in_a_later_frame() {
     let mut input = Input::default();
-    input.submit(
+    submit(
+        &mut input,
         &[
             finger(1, ffi::PHASE_BEGAN, 0.0, 4.0),
             finger(1, ffi::PHASE_ENDED, 0.1, 4.0),
@@ -115,7 +147,12 @@ fn finger_release_commits_before_the_pointer_leaves_in_a_later_frame() {
     );
     let first = input.drain();
     assert!(first.again && !first.events.contains(&Event::PointerGone));
+    assert_eq!(presses(&first.events), [true, false]);
     assert_eq!(first.events.last(), Some(&release(pos2(4.0, 4.0))));
+    assert_eq!(
+        first.pointer_kind,
+        Some(onecad_ui::host::PointerKind::Finger)
+    );
     assert_eq!(
         input.drain(),
         drained(vec![Event::PointerGone], false, false)
@@ -126,7 +163,8 @@ fn finger_release_commits_before_the_pointer_leaves_in_a_later_frame() {
 #[test]
 fn cancellation_never_releases_and_ignores_other_contacts() {
     let mut input = Input::default();
-    input.submit(
+    submit(
+        &mut input,
         &[
             actual(1, ffi::PHASE_BEGAN, 0.0, 3.0),
             actual(2, ffi::PHASE_BEGAN, 0.0, 50.0),
@@ -134,9 +172,14 @@ fn cancellation_never_releases_and_ignores_other_contacts() {
         ],
         0,
     );
-    assert_eq!(input.drain().events.len(), 2, "only the owner presses");
-    input.submit(&[actual(1, ffi::PHASE_MOVED, 0.2, 8.0)], 0);
-    input.cancel_all();
+    let first = input.drain();
+    assert_eq!(first.events.len(), 2, "only the first Pencil presses");
+    assert_eq!(
+        first.pointer_kind,
+        Some(onecad_ui::host::PointerKind::Precise)
+    );
+    submit(&mut input, &[actual(1, ffi::PHASE_MOVED, 0.2, 8.0)], 0);
+    input.cancel_all(CancelReason::SystemGesture);
     assert_eq!(
         input.drain(),
         drained(vec![Event::PointerGone], false, true)
@@ -145,22 +188,24 @@ fn cancellation_never_releases_and_ignores_other_contacts() {
 
 #[test]
 fn a_contact_cancelled_before_any_frame_never_reaches_egui() {
-    let mut input = Input::default();
-    input.push_event(Event::Text("a".into()));
-    input.submit(&[finger(1, ffi::PHASE_BEGAN, 0.0, 3.0)], 0);
-    input.submit(&[finger(1, ffi::PHASE_CANCELLED, 0.1, 3.0)], 0);
-    assert_eq!(
-        input.drain(),
-        drained(vec![Event::Text("a".into())], false, false)
-    );
+    for author in [finger, actual] {
+        let mut input = Input::default();
+        input.push_event(Event::Text("a".into()));
+        submit(&mut input, &[author(1, ffi::PHASE_BEGAN, 0.0, 3.0)], 0);
+        submit(&mut input, &[author(1, ffi::PHASE_MOVED, 0.05, 40.0)], 0);
+        submit(&mut input, &[author(1, ffi::PHASE_CANCELLED, 0.1, 40.0)], 0);
+        let frame = input.drain();
+        assert_eq!(frame.events, vec![Event::Text("a".into())]);
+        assert!(!frame.cancelled && !frame.again);
+    }
 }
 
 #[test]
 fn stale_generation_cancels_instead_of_committing() {
     let mut input = Input::default();
-    input.submit(&[actual(1, ffi::PHASE_BEGAN, 0.0, 1.0)], 4);
+    submit(&mut input, &[actual(1, ffi::PHASE_BEGAN, 0.0, 1.0)], 4);
     input.drain();
-    input.submit(&[actual(1, ffi::PHASE_ENDED, 0.1, 9.0)], 3);
+    submit(&mut input, &[actual(1, ffi::PHASE_ENDED, 0.1, 9.0)], 3);
     assert_eq!(
         input.drain(),
         drained(vec![Event::PointerGone], false, true)
@@ -168,17 +213,17 @@ fn stale_generation_cancels_instead_of_committing() {
 }
 
 #[test]
-fn a_pencil_takes_the_pointer_from_a_finger() {
+fn a_pencil_takes_the_pointer_from_an_authoring_finger() {
     let mut input = Input::default();
-    input.submit(&[finger(1, ffi::PHASE_BEGAN, 0.0, 3.0)], 0);
-    input.drain();
-    input.submit(&[actual(2, ffi::PHASE_BEGAN, 0.1, 40.0)], 0);
+    finger_author(&mut input, 1);
+    assert_eq!(presses(&input.drain().events), [true]);
+    submit(&mut input, &[actual(2, ffi::PHASE_BEGAN, 0.1, 40.0)], 0);
     let frame = input.drain();
     assert!(frame.cancelled);
     assert_eq!(frame.events[0], Event::PointerGone);
     assert_eq!(presses(&frame.events), [true]);
-    input.submit(&[finger(1, ffi::PHASE_ENDED, 0.2, 3.0)], 0);
-    input.submit(&[actual(2, ffi::PHASE_ENDED, 0.3, 40.0)], 0);
+    submit(&mut input, &[finger(1, ffi::PHASE_ENDED, 0.2, 3.0)], 0);
+    submit(&mut input, &[actual(2, ffi::PHASE_ENDED, 0.3, 40.0)], 0);
     assert_eq!(
         presses(&input.drain().events),
         [false],
@@ -189,16 +234,25 @@ fn a_pencil_takes_the_pointer_from_a_finger() {
 #[test]
 fn overflow_coalesces_movement_but_keeps_terminal_events() {
     let mut input = Input::default();
-    input.submit(&[actual(1, ffi::PHASE_BEGAN, 0.0, 0.0)], 0);
-    let moves: Vec<_> = (1..=PENDING_MAX)
-        .map(|i| actual(1, ffi::PHASE_MOVED, i as f64, i as f64))
-        .collect();
-    assert!(input.submit(&moves, 0));
+    submit(&mut input, &[actual(1, ffi::PHASE_BEGAN, 0.0, 0.0)], 0);
+    let mut overflowed = false;
+    for chunk in 0..PENDING_MAX / BATCH_MAX {
+        let moves: Vec<_> = (1..=BATCH_MAX)
+            .map(|i| {
+                let at = (chunk * BATCH_MAX + i) as f64;
+                actual(1, ffi::PHASE_MOVED, at, at)
+            })
+            .collect();
+        overflowed |= submit(&mut input, &moves, 0);
+    }
+    assert!(overflowed);
     let last = PENDING_MAX as f64 + 1.0;
-    input.submit(&[actual(1, ffi::PHASE_ENDED, last, last)], 0);
+    submit(&mut input, &[actual(1, ffi::PHASE_ENDED, last, last)], 0);
     let events = input.drain().events;
     assert!(events.len() <= PENDING_MAX + 2);
     assert_eq!(presses(&events), [true, false], "press and release survive");
+    let oversized = vec![actual(1, ffi::PHASE_MOVED, 0.0, 0.0); BATCH_MAX + 1];
+    assert!(input.submit(&oversized, 0, &AUTHOR).is_err());
 }
 
 fn nav(phase: u32, dx: f64, scale: f64) -> ffi::Navigation {
@@ -273,9 +327,9 @@ fn navigation_moves_between_frames_merge() {
 }
 
 #[test]
-fn navigation_cancels_a_finger_owner_and_is_ignored_under_a_pencil() {
+fn navigation_cancels_an_authoring_finger_and_is_ignored_under_a_pencil() {
     let mut input = Input::default();
-    input.submit(&[finger(1, ffi::PHASE_BEGAN, 0.0, 3.0)], 0);
+    finger_author(&mut input, 1);
     input.drain();
     input.navigation(&nav(ffi::PHASE_BEGAN, 0.0, 1.0));
     let frame = input.drain();
@@ -285,7 +339,7 @@ fn navigation_cancels_a_finger_owner_and_is_ignored_under_a_pencil() {
     input.drain();
     input.drain();
 
-    input.submit(&[actual(2, ffi::PHASE_BEGAN, 1.0, 3.0)], 0);
+    submit(&mut input, &[actual(2, ffi::PHASE_BEGAN, 1.0, 3.0)], 0);
     input.drain();
     for phase in [ffi::PHASE_BEGAN, ffi::PHASE_MOVED, ffi::PHASE_ENDED] {
         assert!(input.navigation(&nav(phase, 5.0, 2.0)));
@@ -327,3 +381,6 @@ fn text_composition_commits_through_ime_and_return_is_enter() {
 
 #[path = "input_egui_tests.rs"]
 mod egui_level;
+
+#[path = "input_route_tests.rs"]
+mod route;

@@ -17,6 +17,7 @@ test-hooks = ["dep:serde_json"]
 # dependencies whose workspace entry keeps defaults.
 onecad-ui = { path = "../onecad-ui", default-features = false }
 onecad-app = { workspace = true, features = ["embedded-kernel"] }
+onecad-interaction = { workspace = true }
 onecad-render = { workspace = true }
 egui = "=0.37.0"
 egui-wgpu = { version = "=0.37.0", default-features = false }

@@ -4,6 +4,18 @@ use super::{finger, nav};
 use crate::ffi;
 use crate::input::Input;
 use egui::{Rect, Sense, pos2, vec2};
+use onecad_interaction::touch::{CancelReason, RouteContext};
+
+/// The button row is a control; fingers author on the drag area (a sketch tool).
+const ROUTE: RouteContext<'static> = RouteContext {
+    pencil_only_drawing: false,
+    drag_authoring: true,
+    over_control: &|point| point.y < 100.0,
+};
+
+fn submit(input: &mut Input, sample: ffi::TouchSample) {
+    input.submit(&[sample], 0, &ROUTE).expect("batch fits");
+}
 
 #[derive(Default)]
 struct Seen {
@@ -56,8 +68,8 @@ fn a_quick_tap_clicks_but_a_cancelled_one_does_not() {
     let ctx = egui::Context::default();
     let mut input = Input::default();
     frame(&ctx, &mut input, 0.0);
-    input.submit(&[contact(ffi::PHASE_BEGAN, 0.01, 50.0, 40.0)], 0);
-    input.submit(&[contact(ffi::PHASE_ENDED, 0.02, 50.0, 40.0)], 0);
+    submit(&mut input, contact(ffi::PHASE_BEGAN, 0.01, 50.0, 40.0));
+    submit(&mut input, contact(ffi::PHASE_ENDED, 0.02, 50.0, 40.0));
     assert!(
         frame(&ctx, &mut input, 0.02).clicked,
         "the harness sees clicks"
@@ -65,17 +77,17 @@ fn a_quick_tap_clicks_but_a_cancelled_one_does_not() {
     frame(&ctx, &mut input, 0.03);
 
     for cancel in [ffi::PHASE_CANCELLED, ffi::PHASE_ENDED] {
-        input.submit(&[contact(ffi::PHASE_BEGAN, 1.0, 50.0, 40.0)], 0);
+        submit(&mut input, contact(ffi::PHASE_BEGAN, 1.0, 50.0, 40.0));
         assert!(!frame(&ctx, &mut input, 1.0).clicked);
         if cancel == ffi::PHASE_ENDED {
-            input.cancel_all();
+            input.cancel_all(CancelReason::SystemGesture);
         } else {
-            input.submit(&[contact(cancel, 1.05, 50.0, 40.0)], 0);
+            submit(&mut input, contact(cancel, 1.05, 50.0, 40.0));
         }
         assert!(!frame(&ctx, &mut input, 1.05).clicked);
         assert!(!frame(&ctx, &mut input, 1.1).clicked);
-        input.submit(&[contact(ffi::PHASE_BEGAN, 1.2, 50.0, 40.0)], 0);
-        input.submit(&[contact(ffi::PHASE_ENDED, 1.21, 50.0, 40.0)], 0);
+        submit(&mut input, contact(ffi::PHASE_BEGAN, 1.2, 50.0, 40.0));
+        submit(&mut input, contact(ffi::PHASE_ENDED, 1.21, 50.0, 40.0));
         assert!(
             frame(&ctx, &mut input, 1.21).clicked,
             "the next tap still clicks"
@@ -89,9 +101,9 @@ fn a_cancelled_drag_never_reports_drag_stopped() {
     let ctx = egui::Context::default();
     let mut input = Input::default();
     frame(&ctx, &mut input, 0.0);
-    input.submit(&[contact(ffi::PHASE_BEGAN, 0.01, 50.0, 200.0)], 0);
+    submit(&mut input, contact(ffi::PHASE_BEGAN, 0.01, 50.0, 200.0));
     frame(&ctx, &mut input, 0.01);
-    input.submit(&[contact(ffi::PHASE_MOVED, 0.05, 90.0, 210.0)], 0);
+    submit(&mut input, contact(ffi::PHASE_MOVED, 0.05, 90.0, 210.0));
     assert!(frame(&ctx, &mut input, 0.05).dragged);
     // A second finger starts a pinch: the authoring finger is cancelled.
     input.navigation(&nav(ffi::PHASE_BEGAN, 0.0, 1.0));

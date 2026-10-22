@@ -1,7 +1,8 @@
 //! Acceptance-only hooks (`onecad_ios_test.h`), compiled only with the
 //! nondefault `test-hooks` feature. Synthetic samples go through the same
-//! `Input::submit` normalization as `onecad_ios_input_submit` and every reply
-//! about them is labeled synthetic.
+//! normalizer, router and route context as `onecad_ios_input_submit`
+//! (`IosApp::submit_touches`) and every reply and log record about them is
+//! labeled synthetic.
 use crate::abi::{OpaqueApp, fail, utf8, with_app};
 use crate::app::{Failure, IosApp, Outcome};
 use crate::ffi::{self, Status, TouchSample};
@@ -19,6 +20,7 @@ fn sample(value: &Value) -> Option<TouchSample> {
         timestamp_s: number("t")?,
         x_pt: number("x")?,
         y_pt: number("y")?,
+        tap_count: u32::try_from(integer("tap_count").unwrap_or(1)).ok()?,
         ..Default::default()
     })
 }
@@ -53,8 +55,9 @@ fn command(state: &mut IosApp, request: &Value) -> Result<Value, String> {
                 generation,
                 "onecad_ios test replay batch"
             );
-            let overflowed = state.input.submit(&samples, generation);
-            state.ctx.request_repaint();
+            let overflowed = state
+                .submit_touches(&samples, generation)
+                .map_err(|failure| failure.message)?;
             Ok(json!({"synthetic": true, "accepted": samples.len(), "overflowed": overflowed}))
         }
         Some("prediction") => {
@@ -63,9 +66,7 @@ fn command(state: &mut IosApp, request: &Value) -> Result<Value, String> {
                 .and_then(Value::as_u64)
                 .ok_or("contact")?;
             let prediction = state.input.prediction(contact);
-            Ok(
-                json!({"synthetic": true, "prediction": prediction.map(|p| [p.position.x, p.position.y])}),
-            )
+            Ok(json!({"synthetic": true, "prediction": prediction.map(|p| [p.x, p.y])}))
         }
         Some(other) => Err(format!("unsupported command: {other}")),
         None => Err("missing cmd".into()),

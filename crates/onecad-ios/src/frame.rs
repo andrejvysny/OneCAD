@@ -156,13 +156,22 @@ impl crate::app::IosApp {
         let view = self
             .view
             .ok_or_else(|| Failure::new(Status::State, "no surface is attached"))?;
+        self.apply_accessory();
         let editor = self
             .editor
             .as_mut()
             .ok_or_else(|| Failure::new(Status::State, "the editor has stopped"))?;
+        if !self.opens.is_empty() {
+            // The active document changes under any live contact.
+            self.input
+                .cancel_all(onecad_interaction::touch::CancelReason::DocumentSwitch);
+        }
         let drained = self.input.drain();
         if drained.cancelled {
             onecad_ui::host::cancel_contact(&self.ctx);
+        }
+        if let Some(kind) = drained.pointer_kind {
+            onecad_ui::host::set_pointer_kind(&self.ctx, kind);
         }
         for path in self.opens.drain(..) {
             editor.open_path(path);

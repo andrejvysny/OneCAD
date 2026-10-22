@@ -5,6 +5,7 @@ use crate::abi::{OpaqueApp, read_struct, utf8, with_app};
 use crate::app::{Failure, IosApp, Outcome};
 use crate::ffi::{self, Status};
 use crate::input::BATCH_MAX;
+use onecad_interaction::touch::CancelReason;
 use std::ffi::{CString, c_char};
 
 impl IosApp {
@@ -39,9 +40,7 @@ pub unsafe extern "C" fn onecad_ios_input_submit(
             } else {
                 std::slice::from_raw_parts(batch.samples, count)
             };
-            let overflowed = state.input.submit(samples, batch.view_generation);
-            state.input_changed();
-            if overflowed {
+            if state.submit_touches(samples, batch.view_generation)? {
                 return Err(Failure::new(
                     Status::Overflow,
                     "pending input full; intermediate movement was coalesced",
@@ -59,13 +58,9 @@ pub unsafe extern "C" fn onecad_ios_input_cancel_all(app: *mut OpaqueApp, reason
     // SAFETY: forwarded from this function's contract.
     unsafe {
         with_app(app, |state| {
-            if reason > ffi::CANCEL_TEXT_FOCUS {
-                return Err(Failure::new(
-                    Status::InvalidArgument,
-                    "unknown cancel reason",
-                ));
-            }
-            state.input.cancel_all();
+            let reason = CancelReason::from_cancel_all(reason)
+                .ok_or_else(|| Failure::new(Status::InvalidArgument, "unknown cancel reason"))?;
+            state.input.cancel_all(reason);
             state.input_changed();
             Ok(())
         })
@@ -105,12 +100,10 @@ pub unsafe extern "C" fn onecad_ios_pencil_event_submit(
 ) -> Status {
     // SAFETY: forwarded from this function's contract.
     unsafe {
-        with_app(app, |_| {
-            read_struct(ev)?;
-            Err(Failure::new(
-                Status::Unavailable,
-                "Pencil barrel tap and squeeze are not routed to tools in this build",
-            ))
+        with_app(app, |state| {
+            let ev = read_struct(ev)?;
+            state.accept_input()?;
+            state.pencil_event(&ev)
         })
     }
 }
