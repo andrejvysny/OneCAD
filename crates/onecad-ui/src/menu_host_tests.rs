@@ -24,3 +24,16 @@ fn disabled_rows_never_queue_and_enabled_ones_drain_once() {
     );
     assert!(menu.drain().is_empty());
 }
+
+#[test]
+fn save_all_and_send_a_copy_follow_save_enablement() {
+    let menu = host_menu().expect("hosts without a menu bar get the in-app queue");
+    menu.set_document_enabled(true, true, false, true);
+    menu.push(Action::SaveAll);
+    menu.push(Action::ExportDocument);
+    assert!(menu.drain().is_empty(), "no save, no Save All or copy");
+    menu.set_document_enabled(false, false, true, false);
+    menu.push(Action::SaveAll);
+    menu.push(Action::ExportDocument);
+    assert_eq!(menu.drain(), [Action::SaveAll, Action::ExportDocument]);
+}

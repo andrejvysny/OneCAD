@@ -340,6 +340,8 @@ fn route_menu(
         menu::Action::Save => app.document_request(Request::Save { save_as: false }),
         menu::Action::SaveAs => app.document_request(Request::Save { save_as: true }),
         menu::Action::Export(format) => app.document_request(Request::Export(format)),
+        #[cfg(not(feature = "desktop"))]
+        menu::Action::ExportDocument => crate::touch_menu::send_copy(app),
         menu::Action::Quit => app.close_prompt = true,
         menu::Action::Fit => app.doc.fit_pending = true,
         menu::Action::Home => {
