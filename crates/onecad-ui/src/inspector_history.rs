@@ -105,17 +105,13 @@ pub(crate) fn edit_selected_feature(app: &mut App) {
     let Some(context) = app.doc.interaction.context.clone() else {
         return;
     };
-    let Some(first) = onecad_interaction::numeric_parameters(&record.op)
-        .first()
-        .cloned()
-    else {
+    if !crate::modeling_ui::editable(&record.op) {
         return;
-    };
+    }
     app.ui.inspector_open = true;
     app.ui.inspector_tab = crate::ui_state::InspectorTab::History;
     app.doc.gesture += 1;
-    app.dispatch(Action::BeginParameterEdit {
-        parameter: first.parameter,
+    app.dispatch(Action::BeginOperationEdit {
         record: Box::new(record),
         gesture: app.doc.gesture,
         context,
@@ -136,7 +132,7 @@ pub(crate) fn edit_button(app: &mut App, ui: &mut Ui) {
             .and_then(|display| display.records.iter().find(|record| record.record_id == id))
             .is_some_and(|record| {
                 matches!(record.op, Operation::Known(KnownOperation::Sketch(_)))
-                    || !onecad_interaction::numeric_parameters(&record.op).is_empty()
+                    || crate::modeling_ui::editable(&record.op)
             })
     }) && app.viewport_ready()
         && app.doc.bridge.valid()

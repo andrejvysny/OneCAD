@@ -216,15 +216,11 @@ fn snapshot_topology_keys_are_not_promoted_persistent_references() {
     assert!(state.tool.is_none());
 }
 #[test]
-fn unqualified_pattern_and_expansion_preview_are_explicitly_unavailable() {
-    for op in operations().into_iter().filter(|op| {
-        matches!(
-            op,
-            KnownOperation::LinearPattern(_)
-                | KnownOperation::CircularPattern(_)
-                | KnownOperation::FeaturePattern(_)
-        )
-    }) {
+fn feature_expansion_preview_is_explicitly_unavailable() {
+    for op in operations()
+        .into_iter()
+        .filter(|op| matches!(op, KnownOperation::FeaturePattern(_)))
+    {
         let before = record(op);
         let parameter = numeric_parameters(&before.op)[0].parameter;
         let mut state = Interaction::default();

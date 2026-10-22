@@ -46,6 +46,15 @@ pub struct FeatureCardRows<'u> {
 }
 
 impl FeatureCardRows<'_> {
+    /// Uses the card's row layout inside an existing editor without another footer.
+    pub fn inline(ui: &mut Ui, add: impl FnOnce(&mut FeatureCardRows<'_>)) {
+        let mut rows = FeatureCardRows {
+            ui,
+            label_w: 76.0,
+            seen_w: 0.0,
+        };
+        add(&mut rows);
+    }
     pub fn row(&mut self, label: &str, add: impl FnOnce(&mut Ui)) {
         let ink4 = look(self.ui.ctx()).theme.ink4;
         let label_w = self.label_w;

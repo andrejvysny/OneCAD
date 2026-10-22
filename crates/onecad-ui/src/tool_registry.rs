@@ -14,7 +14,7 @@ pub enum SelectionKind {
     SketchIdle,
     SketchEntity,
     Feature,
-    /// Several kinds at once: only tools that need no selection apply.
+    /// Several kinds at once; specialized tools validate their operand mix.
     Mixed,
 }
 
@@ -54,6 +54,7 @@ pub enum ToolId {
     Boolean,
     LinearPattern,
     CircularPattern,
+    MirrorBody,
     FeaturePattern,
     Spline,
     Point,
@@ -201,11 +202,12 @@ pub const PLANNED_MODEL: &[ToolDef] = &[
         "Circular pattern",
     ),
     t(ToolId::FeaturePattern, "patternLinear", "Feature pattern"),
+    t(ToolId::MirrorBody, "mirror", "Mirror body"),
     t(ToolId::Sweep, "sweep", "Sweep"),
     t(ToolId::Loft, "loft", "Loft"),
     t(ToolId::DatumPlane, "datum", "Datum plane"),
     t(ToolId::OffsetPlane, "offsetPlane", "Offset plane"),
-    t(ToolId::Generators, "gear", "Generators"),
+    t(ToolId::Generators, "gear", "Gear generator"),
     t(ToolId::Measure, "measure", "Measure"),
     t(ToolId::Isolate, "isolate", "Isolate"),
     t(ToolId::Hide, "eyeOff", "Hide body"),
@@ -233,14 +235,7 @@ pub fn unavailable_reason(id: ToolId) -> &'static str {
         }
         ToolId::Project => "Native projection workflow is planned (ONECAD-296)",
         ToolId::Spline => "Native spline creation is planned (ONECAD-298)",
-        ToolId::Revolve => "Native revolve operand and preview flow is planned (ONECAD-220)",
-        ToolId::Shell => "Native shell creation flow is planned (ONECAD-317)",
-        ToolId::Hole => "Native hole creation flow is planned (ONECAD-318)",
-        ToolId::Boolean => "Native target/tool selection and preview are planned (ONECAD-253)",
-        ToolId::LinearPattern => "Native linear body-pattern creation flow is planned (ONECAD-221)",
-        ToolId::CircularPattern => {
-            "Native circular body-pattern creation flow is planned (ONECAD-222)"
-        }
+        ToolId::Sweep | ToolId::Loft => "Kernel executor is not implemented (ONECAD-314)",
         ToolId::FeaturePattern => "Native feature-pattern expansion is planned (ONECAD-29)",
         ToolId::Isolate | ToolId::Hide => {
             "Native temporary/persistent body visibility is planned (ONECAD-320)"
@@ -288,6 +283,11 @@ pub fn running_tool(app: &App) -> Option<ToolId> {
         Operation::Known(KnownOperation::Sweep(_)) => Some(ToolId::Sweep),
         Operation::Known(KnownOperation::Hole(_)) => Some(ToolId::Hole),
         Operation::Known(KnownOperation::OffsetFace(_)) => Some(ToolId::OffsetFace),
+        Operation::Known(KnownOperation::Boolean(_)) => Some(ToolId::Boolean),
+        Operation::Known(KnownOperation::LinearPattern(_)) => Some(ToolId::LinearPattern),
+        Operation::Known(KnownOperation::CircularPattern(_)) => Some(ToolId::CircularPattern),
+        Operation::Known(KnownOperation::MirrorBody(_)) => Some(ToolId::MirrorBody),
+        Operation::Known(KnownOperation::Gear(_)) => Some(ToolId::Generators),
         _ => Some(ToolId::Edit),
     }
 }
@@ -396,6 +396,14 @@ mod tests {
                     | ToolId::Fillet
                     | ToolId::Chamfer
                     | ToolId::OffsetFace
+                    | ToolId::Revolve
+                    | ToolId::Shell
+                    | ToolId::Hole
+                    | ToolId::Boolean
+                    | ToolId::LinearPattern
+                    | ToolId::CircularPattern
+                    | ToolId::MirrorBody
+                    | ToolId::Generators
             ) {
                 assert!(
                     unavailable_reason(tool.id).contains("ONECAD-"),

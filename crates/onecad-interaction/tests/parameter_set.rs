@@ -116,7 +116,7 @@ fn ready_two_field_extrude() -> Interaction {
 }
 
 #[test]
-fn legacy_extrude_effect_list_is_unchanged() {
+fn extrude_exposes_draft_and_keeps_distance_as_the_initial_evaluation() {
     let mut state = Interaction::default();
     state.dispatch(Action::ContextChanged(Some(context())));
     state.dispatch(Action::SelectProfile(Box::new(selection(context()))));
@@ -131,7 +131,7 @@ fn legacy_extrude_effect_list_is_unchanged() {
             if expression == "10"
     ));
     let fields: Vec<_> = tool(&state).params.fields().iter().map(|f| f.key).collect();
-    assert_eq!(fields, vec![DISTANCE]);
+    assert_eq!(fields, vec![DISTANCE, DRAFT]);
     assert_eq!(
         tool(&state).parameter(),
         Some(NumericParameter::ExtrudeDistance)

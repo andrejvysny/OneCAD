@@ -77,7 +77,12 @@ pub(crate) fn rows(app: &mut App, rows: &mut FeatureCardRows, tool: &ModelSessio
         egui::ComboBox::from_id_salt("extrude-mode")
             .selected_text(mode_label(mode))
             .show_ui(ui, |ui| {
-                for value in [BooleanMode::NewBody, BooleanMode::Add, BooleanMode::Cut] {
+                for value in [
+                    BooleanMode::NewBody,
+                    BooleanMode::Add,
+                    BooleanMode::Cut,
+                    BooleanMode::Intersect,
+                ] {
                     ui.selectable_value(&mut mode, value, mode_label(value));
                 }
             });

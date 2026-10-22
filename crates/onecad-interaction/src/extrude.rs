@@ -62,10 +62,6 @@ impl Interaction {
         let tool = self.tool.as_mut()?;
         if tool.phase != SessionPhase::Editing
             || tool.editing_existing
-            || !tool
-                .params
-                .field(DISTANCE)
-                .is_some_and(|field| field.active)
             || self.context.as_ref() != Some(&tool.tag.context)
         {
             return None;
@@ -89,10 +85,13 @@ impl Interaction {
 const DISTANCE: ParameterKey = ParameterKey::Scalar(NumericParameter::ExtrudeDistance);
 
 pub(crate) fn validate_target(operation: &Operation) -> Result<(), String> {
-    if let Operation::Known(KnownOperation::Extrude(params)) = operation {
-        if params.boolean_mode != BooleanMode::NewBody && params.target_body.is_none() {
-            return Err("Select a visible, healthy target body for Add or Cut".into());
-        }
+    let (mode, target) = match operation {
+        Operation::Known(KnownOperation::Extrude(p)) => (p.boolean_mode, p.target_body),
+        Operation::Known(KnownOperation::Revolve(p)) => (p.boolean_mode, p.target_body),
+        _ => return Ok(()),
+    };
+    if mode != BooleanMode::NewBody && target.is_none() {
+        return Err("Select a visible, healthy target body for Add, Cut or Intersect".into());
     }
     Ok(())
 }
