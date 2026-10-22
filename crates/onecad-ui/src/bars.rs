@@ -45,6 +45,7 @@ pub fn title(app: &mut App, ui: &mut Ui) {
                 .search_blocked(Some("Command search is not available yet"))
                 .show(ui);
             app.tab_rects = out.tab_rects.clone();
+            name_tabs(ui.ctx(), &out);
             #[cfg(not(feature = "desktop"))]
             if let Some(file) = &out.file {
                 crate::touch_menu::show(app, file);
@@ -67,6 +68,17 @@ pub fn title(app: &mut App, ui: &mut Ui) {
                 crate::input::submit_history(app, Command::Redo);
             }
         });
+}
+
+/// Document tabs are 0-based in strip order; "+" opens a new document.
+pub(crate) fn name_tabs(ctx: &Context, out: &onecad_widgets::components::shell::TitleBarOutput) {
+    for (index, (_, id)) in out.tab_ids.iter().enumerate() {
+        crate::automation::name(ctx, *id, &crate::automation::tab(index));
+        ctx.accesskit_node_builder(*id, |node| node.set_role(egui::accesskit::Role::Tab));
+    }
+    if let Some(id) = out.add_id {
+        crate::automation::name(ctx, id, crate::automation::TAB_NEW);
+    }
 }
 
 /// Native window title: document name, " — Edited" when dirty; sent only on change.

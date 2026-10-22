@@ -146,9 +146,11 @@ Identifier: `author_id` when set, otherwise `<role>.<label>` with the role name
 of other characters replaced by `-` (`"Export STEP…"` → `menu_item.export-step`).
 Repeats in z-order get `#2`, `#3`. Labels are the editor's English strings.
 
-Author ids set today (touch File menu): `onecad.menu.file` (title bar button),
+Author ids set today: the touch File menu (`onecad.menu.file` title bar button,
 `onecad.menu.file.new`, `.open`, `.save`, `.saveAs`, `.closeTab`, `.import`,
-`.insertStep`, `.export`, and `onecad.menu.edit.undo`, `.redo`.
+`.insertStep`, `.export`, `onecad.menu.edit.undo`, `.redo`) and the editor
+catalogue in [TESTING.md](TESTING.md#accessibility-identifiers) (tools,
+operation fields, confirm/cancel, tabs, history, planes, viewport, multi-select).
 Flags: disabled, selected/toggled, focused. `A11Y_CHANGED` is set when the
 flattened list differs; the snapshot generation increments with it.
 

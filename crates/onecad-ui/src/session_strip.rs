@@ -72,15 +72,23 @@ fn strip_contents(
         },
     ];
     let strip = SessionStrip::new(StripVariant::Sketch).actions(&actions);
-    if compact {
-        strip.show(ui)
+    let responses = if compact {
+        strip.show_actions(ui)
     } else {
         strip
             .icon(Some("sketch"))
             .title(title)
             .status(Some((status, color, None)))
-            .show(ui)
+            .show_actions(ui)
+    };
+    let names = [
+        crate::automation::DISCARD_SKETCH,
+        crate::automation::FINISH_SKETCH,
+    ];
+    for (response, name) in responses.iter().zip(names) {
+        crate::automation::name(ui.ctx(), response.id, name);
     }
+    responses.iter().position(egui::Response::clicked)
 }
 
 fn strip_bounds(chrome: &Chrome, explorer: bool, inspector: bool) -> Rect {

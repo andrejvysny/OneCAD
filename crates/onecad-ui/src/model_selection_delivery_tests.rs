@@ -321,3 +321,64 @@ async fn tab_switch_keeps_each_documents_selection() {
     host.app.activate_tab(first);
     host.stop().await;
 }
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic pointer delivery is not physical acceptance"]
+async fn multi_select_switch_and_pill_fillet_commit_through_the_card() {
+    let root = tempfile::tempdir().unwrap();
+    let mut host = boxed(root.path()).await;
+    let edges = targets(&host, PickKind::Edge);
+    assert!(edges.len() >= 2, "{edges:?}");
+    host.control("Multi-select: each pick adds or removes an item");
+    assert!(host.app.ui.additive_select);
+    click(&mut host, edges[0].0, egui::Modifiers::NONE);
+    click(&mut host, edges[1].0, egui::Modifiers::NONE);
+    let both = [edges[0].1.clone(), edges[1].1.clone()];
+    assert_eq!(
+        labels(&host),
+        both,
+        "plain picks add while the switch is on"
+    );
+    click(&mut host, edges[1].0, egui::Modifiers::NONE);
+    assert_eq!(
+        labels(&host),
+        std::slice::from_ref(&edges[0].1),
+        "a repeat pick removes"
+    );
+    host.control("Multi-select on: each pick adds or removes an item");
+    assert!(!host.app.ui.additive_select);
+    let before = host
+        .app
+        .doc
+        .display
+        .as_ref()
+        .unwrap()
+        .projection
+        .features
+        .len();
+    host.control("Fillet");
+    pump_until(&mut host.app, &host.context, &mut host.frame, |app| {
+        app.doc
+            .interaction
+            .tool
+            .as_ref()
+            .is_some_and(|tool| tool.preview == onecad_interaction::PreviewStatus::Ready)
+    })
+    .await;
+    host.control("Create ↵");
+    pump_until(&mut host.app, &host.context, &mut host.frame, |app| {
+        app.doc.interaction.tool.is_none()
+            && app
+                .doc
+                .display
+                .as_ref()
+                .is_some_and(|display| display.projection.features.len() == before + 1)
+    })
+    .await;
+    let display = host.app.doc.display.clone().unwrap();
+    assert_eq!(
+        display.projection.features.last().unwrap().op_type,
+        "Fillet"
+    );
+    host.stop().await;
+}

@@ -9,6 +9,7 @@ use crate::{
 use egui::{Align2, Context, Order};
 use onecad_interaction::{
     Action,
+    operand_binding::EdgeOpKind,
     selection_set::{SelectionItem, SelectionMode},
     sketch::{SketchAction, SketchTool},
 };
@@ -20,6 +21,8 @@ use onecad_widgets::{
     frame,
 };
 
+#[cfg(test)]
+mod automation_tests;
 mod catalog;
 mod label;
 mod layout;
@@ -51,7 +54,7 @@ fn model_view(app: &App, eligible: bool, reason: &'static str) -> View {
     if !app.document_open() {
         return gate(false, "Create or open a document first");
     }
-    if app.doc.interaction.tool.is_some() || app.busy() {
+    if app.doc.interaction.tool.is_some() || app.busy() || crate::operation_start::pending(app) {
         return gate(false, "Finish the current operation first");
     }
     if !app.viewport_ready() {
@@ -145,6 +148,16 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
             app,
             app.doc.selected_body().is_some(),
             "Select a body first",
+        ),
+        ToolId::Fillet | ToolId::Chamfer => model_view(
+            app,
+            crate::operation_start::edges_ready(app),
+            "Select edges of one body first",
+        ),
+        ToolId::OffsetFace => model_view(
+            app,
+            crate::operation_start::faces_ready(app),
+            "Select faces of one body first",
         ),
         ToolId::Import => gate(
             crate::bars::replacement_allowed(app),
@@ -262,6 +275,9 @@ pub(crate) fn activate(app: &mut App, ctx: &Context, id: ToolId) {
         }
         ToolId::Edit => crate::inspector_history::edit_selected_feature(app),
         ToolId::MoveRotate => app.begin_transform(),
+        ToolId::Fillet => crate::operation_start::begin_edge_op(app, EdgeOpKind::Fillet),
+        ToolId::Chamfer => crate::operation_start::begin_edge_op(app, EdgeOpKind::Chamfer),
+        ToolId::OffsetFace => crate::operation_start::begin_offset_face(app),
         ToolId::Import => app.document_request(crate::document_flow::Request::Import),
         ToolId::Section => crate::display_menu::toggle(app, ctx.content_rect().shrink(48.0)),
         ToolId::InsertComponent if crate::editor_facade::PREVIEW_FACADES => {
@@ -290,8 +306,10 @@ pub(crate) fn activate(app: &mut App, ctx: &Context, id: ToolId) {
     }
 }
 
-/// Canceling a draft keeps its selected input available for another tool.
+/// Canceling a draft keeps its selected input available for another tool. A
+/// start still staging is dropped too; its late reply finds no receiver.
 pub(crate) fn cancel_tool(app: &mut App) {
+    app.doc.operation_start = None;
     app.dispatch(Action::Cancel);
     if app.doc.interaction.tool.is_none() {
         crate::item_selection::retain(app, |item| !matches!(item, SelectionItem::Feature(_)));
@@ -380,6 +398,7 @@ fn draw_groups(
                 .enabled(v.enabled)
                 .extension(def.source.is_some());
             let r = ui.add(button.tip(tip));
+            crate::automation::name(ui.ctx(), r.id, &crate::automation::tool(def.id));
             hits.drawn.push(def.id);
             #[cfg(test)]
             hits.tools.push((def.id, r.rect));
@@ -396,6 +415,31 @@ fn draw_groups(
         }
     }
     hits
+}
+
+/// The visible multi-select switch: touch has no Shift or Command key.
+fn additive_button(ui: &mut egui::Ui, on: bool) -> bool {
+    let (state, tip) = if on {
+        (
+            ToolState::Active,
+            "Multi-select on: each pick adds or removes an item",
+        )
+    } else {
+        (
+            ToolState::Default,
+            "Multi-select: each pick adds or removes an item",
+        )
+    };
+    let response = ui.add(ToolButton::new("plus").state(state).tip(Tip::new(tip)));
+    crate::automation::name(ui.ctx(), response.id, crate::automation::ADDITIVE_SELECT);
+    let toggled = if on {
+        egui::accesskit::Toggled::True
+    } else {
+        egui::accesskit::Toggled::False
+    };
+    ui.ctx()
+        .accesskit_node_builder(response.id, |node| node.set_toggled(toggled));
+    response.clicked()
 }
 
 pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
@@ -425,7 +469,10 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
             )
         })
         .map(|def| def.id);
-    let compact = layout::compact_tools(groups, active, lane.width(), label.is_some());
+    // Multi-select applies to model picks only; a running tool owns the pill.
+    let additive = (!app.sketch_active() && running.is_none()).then_some(app.ui.additive_select);
+    let room = lane.width() - if additive.is_some() { 44.0 } else { 0.0 };
+    let compact = layout::compact_tools(groups, active, room, label.is_some());
     let mode_key = egui::Id::unique("tool-pill-compact");
     if ctx.data(|data| data.get_temp::<bool>(mode_key)) != Some(compact.is_some()) {
         bounds = lane;
@@ -447,11 +494,15 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
         PillMode::Model
     };
     let accent = accent(app, kind);
-    let (mut hits, mut clear) = (Hits::default(), false);
+    let (mut hits, mut clear, mut toggled) = (Hits::default(), false, false);
     frame::floating(egui::Id::unique("tool-pill"), bounds.min, Order::Middle)
         .pivot(Align2::LEFT_TOP)
         .show(ctx, |ui| {
             bounded_pill(ui, lane.width(), None, mode, accent, |ui| {
+                if let Some(on) = additive {
+                    toggled = additive_button(ui, on);
+                    pill_divider(ui);
+                }
                 if compact.is_none()
                     && let Some((k, c, v)) = &label
                 {
@@ -463,6 +514,9 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
         });
     hits.clicked =
         catalog::show(app, chrome, hits.more.as_ref(), running, &hits.drawn).or(hits.clicked);
+    if toggled {
+        app.ui.additive_select = !app.ui.additive_select;
+    }
     if let Some(id) = hits.clicked {
         activate(app, ctx, id);
     }

@@ -342,6 +342,9 @@ fn instruction_row(app: &mut App, ui: &mut egui::Ui) {
             None => "Choose XY, XZ, YZ or a planar face",
         },
     );
+    if app.doc.sketch_entry.pending.is_none() && plane_buttons(app, ui) {
+        return;
+    }
     if app.doc.sketch_entry.pending.is_none()
         && let Some((body, identity)) = app
             .doc
@@ -355,6 +358,28 @@ fn instruction_row(app: &mut App, ui: &mut egui::Ui) {
     if ui.button("Cancel").clicked() {
         app.doc.sketch_entry.dismiss();
     }
+}
+
+/// Origin planes as buttons, so a plane is choosable by tap or by automation
+/// without hitting its small viewport glyph. True when one was chosen.
+fn plane_buttons(app: &mut App, ui: &mut egui::Ui) -> bool {
+    for (plane, label) in [
+        (WorldPlane::XY, "XY"),
+        (WorldPlane::XZ, "XZ"),
+        (WorldPlane::YZ, "YZ"),
+    ] {
+        let response = ui.add_enabled(!app.busy(), egui::Button::new(label));
+        crate::automation::name(ui.ctx(), response.id, crate::automation::plane(plane));
+        if response.clicked() {
+            let entry = &mut app.doc.sketch_entry;
+            entry.open = false;
+            entry.plane = None;
+            entry.accept = None;
+            app.new_sketch_on_plane(plane);
+            return true;
+        }
+    }
+    false
 }
 
 pub fn align_camera(camera: &mut onecad_scene::Camera, plane: onecad_core::sketch::SketchPlane) {

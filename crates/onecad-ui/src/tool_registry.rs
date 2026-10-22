@@ -90,6 +90,78 @@ pub enum ToolId {
     CheckGeometry,
 }
 
+impl ToolId {
+    /// Stable, unlocalized registry name; the automation id is `onecad.tool.<name>`.
+    pub fn automation_name(self) -> &'static str {
+        match self {
+            Self::Select => "select",
+            Self::Sketch => "sketch",
+            Self::DatumPlane => "datumPlane",
+            Self::OffsetPlane => "offsetPlane",
+            Self::Generators => "generators",
+            Self::InsertComponent => "insertComponent",
+            Self::Import => "import",
+            Self::Measure => "measure",
+            Self::Section => "section",
+            Self::Extrude => "extrude",
+            Self::OffsetFace => "offsetFace",
+            Self::Hole => "hole",
+            Self::Draft => "draft",
+            Self::Shell => "shell",
+            Self::Material => "material",
+            Self::Isolate => "isolate",
+            Self::Hide => "hide",
+            Self::More => "more",
+            Self::Line => "line",
+            Self::Rectangle => "rectangle",
+            Self::Circle => "circle",
+            Self::Arc => "arc",
+            Self::Slot => "slot",
+            Self::Polygon => "polygon",
+            Self::Ellipse => "ellipse",
+            Self::SketchMirror => "sketchMirror",
+            Self::Boolean => "boolean",
+            Self::LinearPattern => "linearPattern",
+            Self::CircularPattern => "circularPattern",
+            Self::FeaturePattern => "featurePattern",
+            Self::Spline => "spline",
+            Self::Point => "point",
+            Self::Dimension => "dimension",
+            Self::Constraints => "constraints",
+            Self::Trim => "trim",
+            Self::Extend => "extend",
+            Self::SketchFillet => "sketchFillet",
+            Self::SketchOffset => "sketchOffset",
+            Self::Project => "project",
+            Self::Horizontal => "horizontal",
+            Self::Vertical => "vertical",
+            Self::Parallel => "parallel",
+            Self::Perpendicular => "perpendicular",
+            Self::Equal => "equal",
+            Self::Midpoint => "midpoint",
+            Self::Fix => "fix",
+            Self::Distance => "distance",
+            Self::Diameter => "diameter",
+            Self::Construction => "construction",
+            Self::Delete => "delete",
+            Self::Revolve => "revolve",
+            Self::Sweep => "sweep",
+            Self::Loft => "loft",
+            Self::Fillet => "fillet",
+            Self::Chamfer => "chamfer",
+            Self::Edit => "edit",
+            Self::RollBack => "rollBack",
+            Self::Suppress => "suppress",
+            Self::Duplicate => "duplicate",
+            Self::MoveRotate => "moveRotate",
+            Self::MakeComponent => "makeComponent",
+            Self::Flange => "flange",
+            Self::Dogbone => "dogbone",
+            Self::CheckGeometry => "checkGeometry",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ToolDef {
     pub id: ToolId,
@@ -145,8 +217,11 @@ const DIRECT_CONSTRAINTS: &[ToolDef] = &[
     t(ToolId::Vertical, "vertical", "Vertical"),
     t(ToolId::Fix, "fix", "Fix"),
 ];
+const FILLET: ToolDef = t(ToolId::Fillet, "fillet", "Fillet");
+const CHAMFER: ToolDef = t(ToolId::Chamfer, "chamfer", "Chamfer");
+const OFFSET_FACE: ToolDef = t(ToolId::OffsetFace, "offsetFace", "Offset face");
 const NONE: Groups = &[&[SELECT], &[SKETCH], UTILITIES];
-const FACE: Groups = &[&[SKETCH], UTILITIES];
+const FACE: Groups = &[&[SKETCH, OFFSET_FACE], UTILITIES];
 const SKETCH_IDLE: Groups = &[&[SELECT], CREATE, DIMENSIONS, DIRECT_CONSTRAINTS, MORE];
 const SKETCH_ENTITY: Groups = &[
     &[SELECT],
@@ -160,7 +235,7 @@ const SKETCH_ENTITY: Groups = &[
     ],
 ];
 const REGION: Groups = &[&[EXTRUDE], UTILITIES];
-const EDGE: Groups = &[UTILITIES];
+const EDGE: Groups = &[&[FILLET, CHAMFER], UTILITIES];
 const FEATURE: Groups = &[&[t(ToolId::Edit, "edit", "Edit")], UTILITIES];
 const BODY: Groups = &[
     &[k(ToolId::MoveRotate, "move", "Move / Rotate", "M")],
@@ -183,11 +258,11 @@ pub const PLANNED_MODEL: &[ToolDef] = &[
     t(ToolId::Extrude, "extrude", "Extrude"),
     t(ToolId::MoveRotate, "move", "Move / Rotate"),
     t(ToolId::Revolve, "revolve", "Revolve"),
-    t(ToolId::Fillet, "fillet", "Fillet"),
-    t(ToolId::Chamfer, "chamfer", "Chamfer"),
+    FILLET,
+    CHAMFER,
     t(ToolId::Shell, "shell", "Shell"),
     t(ToolId::Hole, "hole", "Hole"),
-    t(ToolId::OffsetFace, "offsetFace", "Offset face"),
+    OFFSET_FACE,
     t(ToolId::Boolean, "union", "Boolean"),
     t(ToolId::LinearPattern, "patternLinear", "Linear pattern"),
     t(
@@ -229,15 +304,8 @@ pub fn unavailable_reason(id: ToolId) -> &'static str {
         ToolId::Project => "Native projection workflow is planned (ONECAD-296)",
         ToolId::Spline => "Native spline creation is planned (ONECAD-298)",
         ToolId::Revolve => "Native revolve operand and preview flow is planned (ONECAD-220)",
-        ToolId::Fillet => {
-            "Native fillet creation flow is planned (ONECAD-316); saved features remain editable"
-        }
-        ToolId::Chamfer => {
-            "Native chamfer creation flow is planned (ONECAD-316); saved features remain editable"
-        }
         ToolId::Shell => "Native shell creation flow is planned (ONECAD-317)",
         ToolId::Hole => "Native hole creation flow is planned (ONECAD-318)",
-        ToolId::OffsetFace => "Native offset-face creation flow is planned (ONECAD-319)",
         ToolId::Boolean => "Native target/tool selection and preview are planned (ONECAD-253)",
         ToolId::LinearPattern => "Native linear body-pattern creation flow is planned (ONECAD-221)",
         ToolId::CircularPattern => {
@@ -391,7 +459,14 @@ mod tests {
     #[test]
     fn restored_catalog_is_discoverable_with_owned_implementation_gaps() {
         for tool in PLANNED_SKETCH.iter().chain(PLANNED_MODEL) {
-            if !matches!(tool.id, ToolId::Extrude | ToolId::MoveRotate) {
+            if !matches!(
+                tool.id,
+                ToolId::Extrude
+                    | ToolId::MoveRotate
+                    | ToolId::Fillet
+                    | ToolId::Chamfer
+                    | ToolId::OffsetFace
+            ) {
                 assert!(
                     unavailable_reason(tool.id).contains("ONECAD-"),
                     "{:?}",
@@ -485,5 +560,32 @@ mod tests {
         assert_eq!(REGION[0][0].id, ToolId::Extrude);
         assert_eq!(BODY[0][0].id, ToolId::MoveRotate);
         assert_eq!(FEATURE[0][0].id, ToolId::Edit);
+        let ids = |group: &[ToolDef]| group.iter().map(|tool| tool.id).collect::<Vec<_>>();
+        assert_eq!(ids(EDGE[0]), [ToolId::Fillet, ToolId::Chamfer]);
+        assert_eq!(ids(FACE[0]), [ToolId::Sketch, ToolId::OffsetFace]);
+    }
+
+    #[test]
+    fn automation_names_are_unique_registry_identifiers() {
+        let mut seen = std::collections::BTreeSet::new();
+        for def in ALL
+            .iter()
+            .flat_map(|kind| pill_tools(*kind).iter().flat_map(|group| group.iter()))
+            .chain(PLANNED_SKETCH)
+            .chain(PLANNED_MODEL)
+        {
+            let name = def.id.automation_name();
+            assert!(name.starts_with(|c: char| c.is_ascii_lowercase()), "{name}");
+            assert!(name.chars().all(|c| c.is_ascii_alphanumeric()), "{name}");
+            seen.insert((name, format!("{:?}", def.id)));
+        }
+        let names: std::collections::BTreeSet<_> = seen.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names.len(),
+            seen.len(),
+            "two tools share an automation name"
+        );
+        assert_eq!(ToolId::OffsetFace.automation_name(), "offsetFace");
+        assert_eq!(ToolId::MoveRotate.automation_name(), "moveRotate");
     }
 }

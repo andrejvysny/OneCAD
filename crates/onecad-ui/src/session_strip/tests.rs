@@ -189,3 +189,19 @@ fn short_strip_centers_below_toolbar_after_content_measurement() {
         assert!(actual.width() <= lane.width());
     }
 }
+
+#[test]
+fn finish_and_discard_carry_automation_ids_in_both_widths() {
+    use crate::automation::testing::{author_ids, find};
+    for width in [480.0, 900.0] {
+        let named = author_ids(|ui| {
+            strip_contents(ui, width, "Sketch", "10 DOF", egui::Color32::GRAY, true);
+        });
+        for id in [
+            crate::automation::FINISH_SKETCH,
+            crate::automation::DISCARD_SKETCH,
+        ] {
+            assert_eq!(find(&named, id).1, egui::accesskit::Role::Button);
+        }
+    }
+}
