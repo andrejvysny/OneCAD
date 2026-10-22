@@ -22,11 +22,12 @@ over the same `App` that eframe runs on macOS:
   `<Application Support>/data` and `/config`. No QA marker, lock or launch
   environment applies. The caches directory is created but nothing writes it yet.
 - Without a menu bar the title bar shows the existing "File ▾" control
-  (`TitleBar::tab_file`) with a menu of New, Open, Save, Save As, Close Tab,
-  Import, Insert STEP, Export STEP, Undo and Redo. Rows queue the same
-  `menu::Action`s the AppKit menu sends; `input::route` drains them next frame
-  with the enablement it publishes (computed as if this menu's own popup were
-  closed). The title bar has no traffic-light inset
+  (`TitleBar::tab_file`) with a menu of New, Open, Save, Save As, Save All,
+  Close Tab, Import, Insert STEP, Export STEP, Send a Copy, Undo and Redo.
+  Rows queue the same `menu::Action`s the AppKit menu sends; `input::route`
+  drains them next frame with the enablement it publishes (computed as if this
+  menu's own popup were closed). Save All and Send a Copy follow Save's
+  enablement; Save All has no keyboard shortcut on iPad. The title bar has no traffic-light inset
   and does not drag a window.
 - On iOS, ⌘ sets `command` and `mac_cmd`, orbit direction matches macOS, and the
   CoreText font lookup runs as on macOS. `onecad-ui` enables egui's
@@ -126,6 +127,12 @@ A deferred `PointerGone` never shares a frame with the release or navigation it
 follows: `sketch_gestures::route_raw` cancels on any `PointerGone` in a frame
 and egui drops hover-gated navigation. Opening a system-provided file cancels
 live contacts (`DOCUMENT_SWITCH`) before the frame that switches documents.
+A frame whose editor pass changed the active document by any other path (tab
+strip, ⌃Tab, a New or Open that got its own tab) cancels every live contact
+with `DOCUMENT_SWITCH` right after the pass (`Editor::active_tab` compared
+across frames); the next frame forgets egui's press and carries
+`PointerGone`, so a stroke or drag begun on one document never releases on
+another.
 
 ### Hardware keyboard and text
 
@@ -153,8 +160,9 @@ of other characters replaced by `-` (`"Export STEP…"` → `menu_item.export-st
 Repeats in z-order get `#2`, `#3`. Labels are the editor's English strings.
 
 Author ids set today: the touch File menu (`onecad.menu.file` title bar button,
-`onecad.menu.file.new`, `.open`, `.save`, `.saveAs`, `.closeTab`, `.import`,
-`.insertStep`, `.export`, `onecad.menu.edit.undo`, `.redo`) and the editor
+`onecad.menu.file.new`, `.open`, `.save`, `.saveAs`, `.saveAll`, `.closeTab`,
+`.import`, `.insertStep`, `.export`, `.sendCopy`, `onecad.menu.edit.undo`,
+`.redo`) and the editor
 catalogue in [TESTING.md](TESTING.md#accessibility-identifiers) (tools,
 operation fields, confirm/cancel, tabs, history, planes, viewport, multi-select).
 Flags: disabled, selected/toggled, focused. `A11Y_CHANGED` is set when the
@@ -175,14 +183,41 @@ slot, and its request is withdrawn if the host has not popped it.
 |---|---|---|
 | Open, Import, Insert STEP dialog | `OPEN_DOCUMENT` (label, extensions, multiple) | `host_request_complete(id, paths)`; empty = cancelled. The host copies picked files into the sandbox; opening copies non-STEP files into Documents. |
 | Save As, Export dialog | `SAVE_DOCUMENT` (label, extension, `suggested_name`) | One path inside Documents (other paths are refused by the services). |
-| Finished export | `EXPORT_FILE` (`path`, `suggested_name`) | None needed; the host presents an export picker. |
+| Finished export; Send a Copy | `EXPORT_FILE` (`path`, `suggested_name`) | None needed; the host presents an export picker. Send a Copy names the document's saved `.onecad` and is refused (status line) when the document has no file or unsaved changes. |
 | egui copy / open URL | `COPY_TEXT` / `OPEN_URL` (`text`) | None. |
 
 A full or closed queue cancels the dialog. `WILL_TERMINATE` and `destroy` close
 the queue and cancel every waiting dialog first (an open picker holds its
 document's actor); completing such a request afterwards returns
 `ERR_INVALID_ARGUMENT`. `onecad_ios_open_path` queues a system-provided file
-(at most 16) that the next frame opens like Open Recent.
+(at most 16) that the next frame opens like Open Recent; a `.step`/`.stp`
+file is imported into a new document instead (`Request::Import(Some(path))`,
+the File › Import path without its dialog).
+
+## Files and documents
+
+Managed-copy policy: `LSSupportsOpeningDocumentsInPlace` is `NO`, so the app
+never edits a file where another provider keeps it. Rust's document services
+write only inside the sandbox (path claims, atomic container writes, crash
+recovery, recents and autosave all assume a local, always-reachable file with
+POSIX rename semantics), and a provider file can vanish, be evicted or be
+replaced behind the app (iCloud, third-party providers, revoked bookmarks).
+`UIFileSharingEnabled` exposes `Documents` to Finder file sharing.
+
+| Path | Behaviour |
+|---|---|
+| In: Open, Import, Insert STEP pickers | `UIDocumentPickerViewController(forOpeningContentTypes:asCopy: true)`; the picked files are copied into `Documents/Inbox` (`DocumentInbox.importCopies`, off the main thread) and only sandbox paths reach Rust. A failed copy shows `onecad.import.failed`; Cancel completes the request empty and the editor reports `File action cancelled`. |
+| In: Files "Open in" | The system copies the file into `Documents/Inbox`; one that arrives elsewhere is copied there. Then `onecad_ios_open_path`. |
+| Security scope | `SecurityScope.withAccess` starts the source URL's security-scoped access, runs the whole coordinated read (`NSFileCoordinator`, `.withoutChanges`) and copy synchronously inside it, and stops it when that returns or throws; an ungranted scope is never stopped. Each URL of a batch gets its own scope. |
+| Save / Save As | The native name prompt answers `SAVE_DOCUMENT` with `Documents/<name>.onecad`. The container writer creates an exclusive same-directory temp file, writes and `fsync`s it, renames it over the target and `fsync`s the directory (`onecad-core` `ContainerWriter::save_inner`, `OwnedTempFile`); a failure removes the temp and leaves the previous file untouched, the document dirty and bound to its previous path. |
+| Out: Export STEP, Send a Copy | Rust writes (STEP) or names (saved `.onecad`) a sandbox file and queues `EXPORT_FILE`; the host presents `UIDocumentPickerViewController(forExporting:asCopy: true)`, which performs the coordinated write at the destination. The document keeps its sandbox path. A save that runs meanwhile replaces the source only by rename, so the picker reads one complete container. |
+| Recovery | `DID_ENTER_BACKGROUND` flushes every open document's autosave (the host holds a 5 s background task); `WILL_TERMINATE` and `destroy` await it. A dirty document closed by shutdown keeps its recovery files; the next launch offers them (Recover unsaved work: Restore, Open saved, Discard recovery). A process killed after the flush is offered the flushed revision; edits after it are lost. |
+| Tabs | One `UIScene`, at most three document kernels (KERNEL.md run cap). Each tab keeps its own document host, history, selection, camera and dirty state; the strip ignores a tab tap while the active document is busy (file action, command, decision), so a save or import finishes in the document that started it. |
+
+Physical-only (ONECAD-469; the simulator offers only local storage): iCloud
+Drive download/eviction, third-party File Provider extensions, a provider
+revoking access or going offline mid-copy, and security-scoped bookmarks of
+real provider URLs.
 
 ## Lifecycle
 
