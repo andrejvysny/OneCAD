@@ -24,11 +24,27 @@ fn read(path: &Path) -> Value {
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
 }
 
-/// An `inflight.json` as a crashed EARLIER launch left it.
-fn leave_leftover(dir: &Path, jobs: &[Value]) {
+/// An `inflight.json` as a crashed EARLIER launch left it (a fresh session per
+/// call: each call is another launch). Returns that session.
+fn leave_leftover(dir: &Path, jobs: &[Value]) -> String {
+    let session = uuid::Uuid::new_v4().to_string();
+    leave_session(dir, &session, jobs);
+    session
+}
+
+fn leave_session(dir: &Path, session: &str, jobs: &[Value]) {
     fs::create_dir_all(dir).unwrap();
-    let file = json!({ "version": 1, "session": "an-earlier-launch", "jobs": jobs });
+    let file = json!({ "version": 1, "session": session, "jobs": jobs });
     fs::write(dir.join(INFLIGHT), serde_json::to_vec(&file).unwrap()).unwrap();
+}
+
+/// The persisted strikes of `key` (0 when absent).
+fn strikes(dir: &Path, key: &str) -> u64 {
+    let Ok(bytes) = fs::read(dir.join(POISON)) else {
+        return 0;
+    };
+    let file: Value = serde_json::from_slice(&bytes).unwrap();
+    file["entries"][key]["strikes"].as_u64().unwrap_or(0)
 }
 
 fn op_record(key: Option<&str>, fingerprint: &str) -> Value {
@@ -132,4 +148,101 @@ fn a_failing_write_is_counted_and_never_panics() {
         "{}",
         journal.write_failures()
     );
+}
+
+#[test]
+fn an_ambiguous_leftover_never_opens_and_only_an_unambiguous_repeat_does() {
+    let dir = tempfile::tempdir().unwrap();
+    let crashing = format!("aa|op_bad|{FP}");
+    let innocent = format!("bb|op_good|{FP}");
+    let both = [
+        op_record(Some(&crashing), FP),
+        op_record(Some(&innocent), FP),
+    ];
+    // Two tabs had ops in flight: each is struck once, neither opens…
+    leave_leftover(dir.path(), &both);
+    let seeds = KernelJournal::open(dir.path()).seeds(FP);
+    assert_eq!(seeds.len(), 2, "{seeds:?}");
+    assert!(seeds.iter().all(|s| s.strikes == 1 && !s.open), "{seeds:?}");
+    // …and a second ambiguous crash still opens nothing (capped below 2).
+    leave_leftover(dir.path(), &both);
+    let seeds = KernelJournal::open(dir.path()).seeds(FP);
+    assert!(seeds.iter().all(|s| s.strikes == 1 && !s.open), "{seeds:?}");
+    // The crashing op, run alone, crashes alone: now it opens; the innocent
+    // sibling keeps its single strike (it heals once it runs alone).
+    leave_leftover(dir.path(), &both[..1]);
+    let journal = KernelJournal::open(dir.path());
+    let seeds = journal.seeds(FP);
+    let by_key = |key: &str| seeds.iter().find(|s| s.key == key).cloned().unwrap();
+    assert_eq!(
+        (by_key(&crashing).strikes, by_key(&crashing).open),
+        (2, true)
+    );
+    assert_eq!(
+        (by_key(&innocent).strikes, by_key(&innocent).open),
+        (1, false)
+    );
+    journal.heal(std::slice::from_ref(&innocent));
+    assert_eq!(strikes(dir.path(), &innocent), 0, "healed: forgotten");
+    assert_eq!(strikes(dir.path(), &crashing), 2);
+}
+
+#[test]
+fn a_recovery_killed_before_the_leftover_was_consumed_strikes_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = format!("aa|op_bad|{FP}");
+    let session = leave_leftover(dir.path(), &[op_record(Some(&key), FP)]);
+    assert_eq!(KernelJournal::open(dir.path()).seeds(FP)[0].strikes, 1);
+    // poison.json is written first; a launch killed before inflight.json was
+    // replaced leaves the same leftover behind.
+    leave_session(dir.path(), &session, &[op_record(Some(&key), FP)]);
+    let seeds = KernelJournal::open(dir.path()).seeds(FP);
+    assert_eq!(
+        seeds[0].strikes, 1,
+        "the same leftover is never applied twice"
+    );
+    assert!(
+        !dir.path().join(INFLIGHT).exists(),
+        "and it is consumed now"
+    );
+}
+
+/// `Ok` when `permit` is granted within 100 ms, `Err` while it waits.
+async fn pending<F: std::future::Future>(
+    permit: F,
+) -> Result<F::Output, tokio::time::error::Elapsed> {
+    tokio::time::timeout(std::time::Duration::from_millis(100), permit).await
+}
+
+#[tokio::test]
+async fn a_struck_key_dispatches_alone_and_others_share() {
+    let dir = tempfile::tempdir().unwrap();
+    let struck = format!("aa|op_bad|{FP}");
+    let plain = vec![format!("cc|op_plain|{FP}")];
+    leave_leftover(dir.path(), &[op_record(Some(&struck), FP)]);
+    let journal = Arc::new(KernelJournal::open(dir.path()));
+    assert_eq!(journal.seeds(FP).len(), 1);
+
+    let first = journal.plan_permit(&plain).await;
+    let second = pending(journal.plan_permit(&plain)).await;
+    assert!(second.is_ok(), "plans without a strike share the kernel");
+    let keys = vec![plain[0].clone(), struck.clone()];
+    assert!(
+        pending(journal.plan_permit(&keys)).await.is_err(),
+        "a struck key waits for every running plan"
+    );
+    drop((first, second));
+    let alone = journal.plan_permit(&keys).await;
+    assert!(
+        pending(journal.plan_permit(&plain)).await.is_err(),
+        "nothing runs beside it"
+    );
+    drop(alone);
+    journal.heal(&keys);
+    let healed = journal.plan_permit(&keys).await;
+    assert!(
+        pending(journal.plan_permit(&plain)).await.is_ok(),
+        "healed: shared again"
+    );
+    drop(healed);
 }

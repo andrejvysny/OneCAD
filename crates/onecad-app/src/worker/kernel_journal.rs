@@ -18,6 +18,13 @@
 //!   poisons nothing — termination, jetsam or backgrounding never poison an op
 //!   without a leftover op record. At [`IN_PROCESS_POISON_THRESHOLD`] strikes the
 //!   key's circuit opens until the user clears it.
+//! * Attribution: when several instances had ops in flight (2–3 tabs), the
+//!   leftover cannot say which one crashed. Each gets its strike, but an
+//!   AMBIGUOUS strike never opens a circuit; and every key holding a strike
+//!   runs ALONE among this process's plan dispatches ([`KernelJournal::plan_permit`]),
+//!   so its next interruption is unambiguous. An innocent sibling therefore
+//!   runs alone, succeeds and is healed; the crashing op is struck again alone
+//!   and opens.
 //!
 //! Every write is best effort: a failure is logged, counted and surfaced in
 //! worker status, and never blocks the op.
@@ -76,17 +83,29 @@ pub(crate) struct PoisonRecord {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PoisonFile {
     version: u32,
     entries: BTreeMap<String, PoisonRecord>,
+    /// The leftover session whose strikes these entries already contain:
+    /// poison.json is written BEFORE that leftover is consumed, so a launch
+    /// killed in between must not strike it twice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    applied_session: Option<String>,
+}
+
+/// Another launch's `inflight.json`, read at open, applied at the first seed.
+struct Leftover {
+    session: String,
+    jobs: Vec<JobRecord>,
 }
 
 #[derive(Default)]
 struct State {
     jobs: BTreeMap<u64, JobRecord>,
-    /// Another launch's records, read at open, applied at the first seed.
-    leftover: Option<Vec<JobRecord>>,
+    leftover: Option<Leftover>,
     poison: BTreeMap<String, PoisonRecord>,
+    applied_session: Option<String>,
 }
 
 /// The process-wide journal of one directory.
@@ -95,6 +114,9 @@ pub(crate) struct KernelJournal {
     state: Mutex<State>,
     failures: AtomicU64,
     next_instance: AtomicU64,
+    /// Plan dispatch order across this process's instances: shared for a
+    /// plan with no struck key, exclusive for one with (module docs).
+    order: Arc<tokio::sync::RwLock<()>>,
 }
 
 impl std::fmt::Debug for KernelJournal {
@@ -149,35 +171,43 @@ impl KernelJournal {
             state: Mutex::default(),
             failures: AtomicU64::new(0),
             next_instance: AtomicU64::new(1),
+            order: Arc::default(),
         };
         if let Err(e) = fs::create_dir_all(dir) {
             journal.note_failure("create journal dir", &e);
         }
         let mut state = journal.state.lock().unwrap();
         state.leftover = journal.read_leftover();
-        state.poison = journal.read_poison();
+        let poison = journal.read_poison();
+        state.poison = poison.entries;
+        state.applied_session = poison.applied_session;
         drop(state);
         journal
     }
 
     /// Records of an earlier launch; `None` when there is nothing to recover.
-    fn read_leftover(&self) -> Option<Vec<JobRecord>> {
+    fn read_leftover(&self) -> Option<Leftover> {
         let bytes = fs::read(self.dir.join(INFLIGHT)).ok()?;
         match serde_json::from_slice::<InflightFile>(&bytes) {
-            Ok(file) if file.session != session() => Some(file.jobs),
+            Ok(file) if file.session != session() => Some(Leftover {
+                session: file.session,
+                jobs: file.jobs,
+            }),
             Ok(_) => None,
             Err(e) => {
                 tracing::warn!(error = %e, "kernel journal: unreadable inflight.json discarded");
-                Some(Vec::new())
+                Some(Leftover {
+                    session: String::new(),
+                    jobs: Vec::new(),
+                })
             }
         }
     }
 
-    fn read_poison(&self) -> BTreeMap<String, PoisonRecord> {
+    fn read_poison(&self) -> PoisonFile {
         fs::read(self.dir.join(POISON))
             .ok()
             .and_then(|bytes| serde_json::from_slice::<PoisonFile>(&bytes).ok())
-            .map(|file| file.entries)
             .unwrap_or_default()
     }
 
@@ -230,6 +260,7 @@ impl KernelJournal {
             let file = PoisonFile {
                 version: FORMAT_VERSION,
                 entries: state.poison.clone(),
+                applied_session: state.applied_session.clone(),
             };
             serde_json::to_vec(&file)
                 .map_err(std::io::Error::other)

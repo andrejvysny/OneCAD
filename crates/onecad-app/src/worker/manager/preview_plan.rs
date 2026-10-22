@@ -89,6 +89,13 @@ async fn run(
     cancel: &CancelToken,
 ) -> Result<PlanPreview, EngineError> {
     let job = req.plan.job_id;
+    // Ordered like `ExecutePlan` (a struck key runs alone); held to the terminal.
+    // Permit first: without ordering (sidecar) nothing changes.
+    let _permit = tokio::select! {
+        biased;
+        permit = shared.host.plan_permit(op_keys) => permit,
+        () = cancel.cancelled() => return Err(EngineError::Cancelled),
+    };
     let mut events = client.subscribe();
     // Checked again here: the token may have fired while the task was queued, and
     // a frame never sent is the cheapest cancel there is.

@@ -196,6 +196,18 @@ async fn a_bad_identity_or_abi_fails_startup_without_leaking_a_thread() {
     );
     let reason = wm.failure_reason().unwrap();
     assert!(reason.contains("occt.fingerprint mismatch"), "{reason}");
+    // Platform: an identity for another Apple platform is refused before a thread.
+    let launched = in_process_counters().launched;
+    let wm = bad_identity(|id| id["platform"] = json!("iphoneos"))
+        .spawn_with(fast_config(), WorkerRole::Document);
+    assert!(
+        eventually(Duration::from_secs(10), || wm.state()
+            == WorkerState::Failed)
+        .await
+    );
+    let reason = wm.failure_reason().unwrap();
+    assert!(reason.contains("platform \"iphoneos\""), "{reason}");
+    assert_eq!(in_process_counters().launched, launched);
     assert!(
         eventually(Duration::from_secs(5), || in_process_counters().live
             == before.live)
@@ -207,7 +219,7 @@ async fn a_bad_identity_or_abi_fails_startup_without_leaking_a_thread() {
 }
 
 /// Whether the linked bundle answers `Debug.Busy` (built with --test-hooks).
-fn has_test_hooks() -> bool {
+pub(super) fn has_test_hooks() -> bool {
     let hooks = identity()["testHooks"] == json!(true);
     if !hooks {
         eprintln!("skip: the linked bundle has no test hooks (build-ios-worker.sh --test-hooks)");
@@ -216,7 +228,7 @@ fn has_test_hooks() -> bool {
 }
 
 /// Policy for wedge drills: a 300 ms op deadline on every verb.
-fn wedge_config() -> SupervisorConfig {
+pub(super) fn wedge_config() -> SupervisorConfig {
     SupervisorConfig {
         wedge_deadline_execute_plan: Duration::from_millis(300),
         wedge_deadline_readers: Duration::from_millis(300),
@@ -225,7 +237,7 @@ fn wedge_config() -> SupervisorConfig {
     }
 }
 
-const BUSY_MS: u64 = 4000;
+pub(super) const BUSY_MS: u64 = 4000;
 
 fn os_threads() -> i32 {
     // SAFETY: plain-old-data out parameter sized for PROC_PIDTASKINFO.
@@ -293,6 +305,16 @@ async fn a_wedge_abandons_once_and_fails_relaunch_required_without_a_new_thread(
     // Evidence only: the OS count also moves with whatever other tests run in
     // parallel. Serially it is the run thread plus its still-spinning kernel lane.
     eprintln!("os thread delta at abandonment: {}", os_threads() - threads);
+    // The whole process is relaunch-required: a new supervisor fails at once.
+    let latched = in_process_relaunch_required().expect("the abandonment latched");
+    assert!(latched.contains("relaunch-required"), "{latched}");
+    let next = embedded(None).spawn_with(fast_config(), WorkerRole::Document);
+    assert!(
+        eventually(Duration::from_secs(5), || next.state()
+            == WorkerState::Failed)
+        .await
+    );
+    assert_eq!(next.failure_reason(), Some(latched));
     // When the spin ends the abandoned run returns; nothing restarts.
     assert!(
         eventually(Duration::from_secs(10), || in_process_counters().live
@@ -303,6 +325,8 @@ async fn a_wedge_abandons_once_and_fails_relaunch_required_without_a_new_thread(
     assert_eq!(in_process_counters().launched, before.launched + 1);
     assert_eq!(wm.state(), WorkerState::Failed);
     retire(&wm).await;
+    retire(&next).await;
+    clear_relaunch_latch(before).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -351,6 +375,7 @@ async fn an_accept_whose_completion_is_lost_is_never_resubmitted() {
         "no worker to resubmit to"
     );
     retire(&wm).await;
+    clear_relaunch_latch(before).await;
 }
 
 #[cfg(feature = "sidecar")]

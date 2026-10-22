@@ -969,8 +969,9 @@ fn spawn_status_forwarder(wm: &WorkerManager, app: SharedHost) {
         if let Some(handle) = app.get() {
             let _ = handle.emit(AppEvent::WorkerStatus(initial.clone()));
         }
+        let mut journal_failures = initial.journal_write_failures;
         while let Ok(ev) = rx.recv().await {
-            if let Some(dto) = status_from_lifecycle(&ev) {
+            if let Some(dto) = status_with_journal(&ev, &mut journal_failures) {
                 if let Some(handle) = app.get() {
                     let _ = handle.emit(AppEvent::WorkerStatus(dto.clone()));
                 }
@@ -996,6 +997,16 @@ fn status_from_state(state: WorkerState, epoch: u64) -> WorkerStatusDto {
         reason: None,
         journal_write_failures: 0,
     }
+}
+
+/// [`status_from_lifecycle`] with the cumulative journal-failure count: once
+/// degraded, every later status keeps saying so (a Ready after a restart must
+/// not reset it to zero). `seen` carries the count between events.
+fn status_with_journal(ev: &WorkerLifecycle, seen: &mut u64) -> Option<WorkerStatusDto> {
+    let mut dto = status_from_lifecycle(ev)?;
+    *seen = (*seen).max(dto.journal_write_failures);
+    dto.journal_write_failures = *seen;
+    Some(dto)
 }
 
 /// Maps a [`WorkerLifecycle`] transition to a `worker-status` payload. `CircuitOpen`
@@ -1280,6 +1291,50 @@ mod slot_tests {
     fn a_retired_worker_reports_as_failed_on_the_wire() {
         // `WorkerStatusDto.state` stays a four-value contract.
         assert_eq!(status_from_state(WorkerState::Retired, 7).state, "failed");
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn a_degraded_journal_stays_reported_after_ready_and_restarting() {
+        let mut seen = 0;
+        let degraded = WorkerLifecycle::JournalDegraded {
+            epoch: 2,
+            failures: 3,
+        };
+        let dto = status_with_journal(&degraded, &mut seen).unwrap();
+        assert_eq!(
+            (dto.state.as_str(), dto.journal_write_failures),
+            ("ready", 3)
+        );
+        let restarting = WorkerLifecycle::Restarting {
+            epoch: 3,
+            reason: "worker exited/crashed".into(),
+        };
+        let dto = status_with_journal(&restarting, &mut seen).unwrap();
+        assert_eq!(
+            (dto.state.as_str(), dto.journal_write_failures),
+            ("restarting", 3)
+        );
+        let ready = WorkerLifecycle::Ready {
+            epoch: 3,
+            fingerprint: "f".into(),
+        };
+        assert_eq!(
+            status_with_journal(&ready, &mut seen)
+                .unwrap()
+                .journal_write_failures,
+            3
+        );
+        let failed = WorkerLifecycle::Failed {
+            reason: "relaunch-required: x".into(),
+        };
+        let dto = status_with_journal(&failed, &mut seen).unwrap();
+        assert_eq!(dto.reason.as_deref(), Some("relaunch-required: x"));
+        assert_eq!(dto.journal_write_failures, 3);
     }
 }
 

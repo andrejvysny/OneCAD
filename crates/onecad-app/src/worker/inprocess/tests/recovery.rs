@@ -113,3 +113,46 @@ async fn a_stale_journal_strikes_only_the_crashed_op_and_the_circuit_clears() {
     assert!(matches!(cleared, PlanEnd::Prepared { .. }), "{cleared:?}");
     retire(&wm).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_two_instance_leftover_opens_nothing_and_the_innocent_op_heals() {
+    let _gate = GATE.lock().await;
+    if !kernel_linked() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let journal = dir.path().join("kernel-journal");
+    let fingerprint = fingerprint();
+    let crashed = key_of(&smoke_plan(0xc0de, WorkerEpoch(0)), &fingerprint);
+    let innocent = key_of(&smoke_plan(0x900d, WorkerEpoch(0)), &fingerprint);
+    // Two tabs were regenerating when the previous launch died.
+    let op = |key: &str, instance: u64| {
+        json!({ "instance": instance, "epoch": 1, "requestId": 9, "verb": "ExecutePlan",
+                "opId": key.split('|').nth(1).unwrap(), "stepIndex": 0,
+                "opPosition": 0, "key": key, "fingerprint": fingerprint, "startedMs": 0 })
+    };
+    fs::create_dir_all(&journal).unwrap();
+    let inflight = json!({ "version": 1, "session": "an-earlier-launch",
+                           "jobs": [op(&crashed, 1), op(&innocent, 2)] });
+    fs::write(journal.join("inflight.json"), inflight.to_string()).unwrap();
+
+    let first = spawn_ready(&embedded(Some(&journal)), fast_config()).await;
+    let second = spawn_ready(&embedded(Some(&journal)), fast_config()).await;
+    let persisted = || -> Value {
+        fs::read(journal.join("poison.json"))
+            .map_or(Value::Null, |bytes| serde_json::from_slice(&bytes).unwrap())
+    };
+    assert_eq!(persisted()["entries"][&crashed]["strikes"], 1);
+    assert_eq!(persisted()["entries"][&innocent]["strikes"], 1);
+    // Neither circuit is open: the innocent op is dispatched (alone), runs and
+    // heals; the other keeps its single strike until it, too, runs.
+    let healed = drive(&second, smoke_plan(0x900d, second.epoch())).await;
+    assert!(matches!(healed, PlanEnd::Prepared { .. }), "{healed:?}");
+    assert!(persisted()["entries"].get(&innocent).is_none(), "healed");
+    assert_eq!(persisted()["entries"][&crashed]["strikes"], 1);
+    let ran = drive(&first, smoke_plan(0xc0de, first.epoch())).await;
+    assert!(matches!(ran, PlanEnd::Prepared { .. }), "{ran:?}");
+    assert!(!journal.join("poison.json").exists(), "no strike left");
+    retire(&first).await;
+    retire(&second).await;
+}

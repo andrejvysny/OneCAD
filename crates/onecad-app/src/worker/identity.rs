@@ -45,6 +45,10 @@ pub(crate) fn verify_hello_axes(expected: &HelloAxes, actual: &HelloResult) -> R
     )
 }
 
+#[cfg_attr(
+    not(any(feature = "sidecar", feature = "embedded-kernel")),
+    allow(dead_code)
+)]
 pub(crate) fn validate_hex(label: &str, value: &str, length: usize) -> Result<(), String> {
     if value.len() != length
         || !value

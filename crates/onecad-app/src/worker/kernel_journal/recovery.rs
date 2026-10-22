@@ -1,8 +1,13 @@
 //! Launch-time recovery and the persisted circuit: turning another launch's
-//! leftover op records into strikes, and the strikes into circuit seeds.
+//! leftover op records into strikes, the strikes into circuit seeds, and the
+//! strikes into dispatch order.
 
-use super::{now_ms, JobRecord, KernelJournal, PoisonRecord, State, IN_PROCESS_POISON_THRESHOLD};
-use crate::worker::host::PoisonSeed;
+use std::collections::BTreeMap;
+
+use super::{
+    now_ms, JobRecord, KernelJournal, Leftover, PoisonRecord, State, IN_PROCESS_POISON_THRESHOLD,
+};
+use crate::worker::host::{PlanPermit, PoisonSeed};
 
 impl KernelJournal {
     /// Persisted circuit entries for a worker that handshook under
@@ -10,13 +15,16 @@ impl KernelJournal {
     /// records of the previous launch (one strike per op record whose
     /// fingerprint matches; everything else is discarded) and drops strikes
     /// keyed under any other fingerprint, which can never match again.
+    ///
+    /// Order: `poison.json` (strikes + the applied leftover's session) is
+    /// written BEFORE the leftover `inflight.json` is replaced, so a kill in
+    /// between neither loses the strike nor applies it twice.
     pub(crate) fn seeds(&self, fingerprint: &str) -> Vec<PoisonSeed> {
         let mut state = self.state.lock().unwrap();
+        let leftover = state.leftover.take();
         let mut changed = false;
-        if let Some(leftover) = state.leftover.take() {
-            changed |= strike_leftover(&mut state, &leftover, fingerprint);
-            // The previous launch's file is replaced by this launch's state.
-            self.persist_inflight(&state);
+        if let Some(leftover) = &leftover {
+            changed |= apply_leftover(&mut state, leftover, fingerprint);
         }
         let suffix = format!("|{fingerprint}");
         let before = state.poison.len();
@@ -24,6 +32,10 @@ impl KernelJournal {
         changed |= state.poison.len() != before;
         if changed {
             self.persist_poison(&state);
+        }
+        if leftover.is_some() {
+            // The previous launch's file is replaced by this launch's state.
+            self.persist_inflight(&state);
         }
         state
             .poison
@@ -51,11 +63,69 @@ impl KernelJournal {
         state.poison.clear();
         self.persist_poison(&state);
     }
+
+    /// Dispatch order for one plan: exclusive when any of `keys` holds a strike
+    /// (it runs alone among this process's plans, so an interruption during it
+    /// is attributable), shared otherwise. Held until the plan's terminal.
+    pub(crate) async fn plan_permit(&self, keys: &[String]) -> PlanPermit {
+        let alone = {
+            let state = self.state.lock().unwrap();
+            keys.iter()
+                .any(|key| state.poison.get(key).is_some_and(|r| r.strikes > 0))
+        };
+        if alone {
+            Box::new(self.order.clone().write_owned().await)
+        } else {
+            Box::new(self.order.clone().read_owned().await)
+        }
+    }
 }
 
-/// One strike per leftover OP record under `fingerprint`; `true` if any.
-fn strike_leftover(state: &mut State, leftover: &[JobRecord], fingerprint: &str) -> bool {
-    let mut struck = false;
+/// Applies `leftover` once (its session is remembered); `true` if anything
+/// in the persisted state changed.
+fn apply_leftover(state: &mut State, leftover: &Leftover, fingerprint: &str) -> bool {
+    if state.applied_session.as_deref() == Some(leftover.session.as_str()) {
+        tracing::info!("kernel journal: leftover already applied (interrupted recovery)");
+        return false;
+    }
+    state.applied_session = Some(leftover.session.clone());
+    strike_leftover(state, &leftover.jobs, fingerprint);
+    true
+}
+
+/// One strike per distinct leftover OP key under `fingerprint`. With more than
+/// one key in flight the crash is ambiguous: the strike is capped below the
+/// threshold, so only an unambiguous interruption can open a circuit.
+fn strike_leftover(state: &mut State, leftover: &[JobRecord], fingerprint: &str) {
+    let keys = op_keys(leftover, fingerprint);
+    let ambiguous = keys.len() > 1;
+    let cap =
+        if ambiguous {
+            tracing::warn!(ops = keys.len(),
+            "kernel journal: several ops were in flight — each is struck but runs alone until it \
+             completes; none opens on this evidence");
+            IN_PROCESS_POISON_THRESHOLD - 1
+        } else {
+            u32::MAX
+        };
+    for (key, op_id) in keys {
+        let entry = state.poison.entry(key.clone()).or_insert(PoisonRecord {
+            strikes: 0,
+            op_id,
+            last_ms: 0,
+        });
+        if entry.strikes < cap {
+            entry.strikes += 1;
+        }
+        entry.last_ms = now_ms();
+        tracing::warn!(key = %key, strikes = entry.strikes, ambiguous,
+            "kernel journal: the previous launch ended inside this op — suspected interruption");
+    }
+}
+
+/// The distinct op keys (and their op ids) of `leftover` under `fingerprint`.
+fn op_keys(leftover: &[JobRecord], fingerprint: &str) -> BTreeMap<String, String> {
+    let mut keys = BTreeMap::new();
     for record in leftover {
         let (Some(key), Some(op_id)) = (&record.key, &record.op_id) else {
             tracing::warn!(verb = %record.verb,
@@ -67,18 +137,9 @@ fn strike_leftover(state: &mut State, leftover: &[JobRecord], fingerprint: &str)
                 "kernel journal: leftover record from another OCCT build discarded");
             continue;
         }
-        let entry = state.poison.entry(key.clone()).or_insert(PoisonRecord {
-            strikes: 0,
-            op_id: op_id.clone(),
-            last_ms: 0,
-        });
-        entry.strikes += 1;
-        entry.last_ms = now_ms();
-        tracing::warn!(key = %key, strikes = entry.strikes,
-            "kernel journal: the previous launch ended inside this op — suspected interruption");
-        struck = true;
+        keys.insert(key.clone(), op_id.clone());
     }
-    struck
+    keys
 }
 
 fn seed(key: &str, record: &PoisonRecord) -> PoisonSeed {

@@ -27,6 +27,10 @@ pub(crate) struct Launched {
 
 /// What a forced stop achieved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(any(feature = "sidecar", feature = "embedded-kernel")),
+    allow(dead_code)
+)]
 pub(crate) enum KillOutcome {
     /// The worker is gone (a reaped child, or a run thread that returned).
     Reaped,
@@ -47,12 +51,33 @@ pub(crate) struct PoisonSeed {
     pub(crate) message: String,
 }
 
+/// Held for one plan dispatch (dispatch to terminal); dropping it lets the
+/// next ordered dispatch go.
+pub(crate) type PlanPermit = Box<dyn Send>;
+
 /// Starts worker instances for one supervisor.
 #[async_trait]
 pub(crate) trait WorkerHost: Send + Sync + fmt::Debug + 'static {
     /// Starts one instance under `epoch` (log attribution only). Identity
     /// preflight (binary SHA-256, ABI) happens here, before anything runs.
+    /// Cancel-safe: dropping the future before it resolves starts nothing.
     async fn launch(&self, epoch: u64) -> Result<Launched, String>;
+
+    /// `Some(reason)` once this process may start no further instance on this
+    /// host (an in-process run was abandoned: docs/ios/ARCHITECTURE.md "In-process
+    /// failure policy"). Terminal for every supervisor that observes it.
+    /// Default: never (a sidecar can always be killed and replaced).
+    fn relaunch_required(&self) -> Option<String> {
+        None
+    }
+
+    /// Orders one plan dispatch with `keys` (its crash-circuit candidates)
+    /// against the other instances' dispatches; held until the plan's
+    /// terminal. Default: no ordering.
+    async fn plan_permit(&self, keys: &[String]) -> Option<PlanPermit> {
+        let _ = keys;
+        None
+    }
 
     /// Persisted circuit entries to seed after a handshake under `fingerprint`.
     /// Default: none (the sidecar's circuit is in memory only).
@@ -89,15 +114,20 @@ pub(crate) trait WorkerInstance: Send {
     async fn force_kill(&mut self) -> KillOutcome;
 }
 
-/// A host that can never start anything — for supervisor bookkeeping tests.
-#[cfg(test)]
+/// A host that can never start anything: a build with no backend feature (a
+/// backend-agnostic consumer compiled on its own), and supervisor bookkeeping
+/// tests.
+#[cfg(any(test, not(any(feature = "sidecar", feature = "embedded-kernel"))))]
 #[derive(Debug)]
-pub(crate) struct UnlaunchableHost;
+pub(crate) struct NoKernelHost;
 
-#[cfg(test)]
+#[cfg(any(test, not(any(feature = "sidecar", feature = "embedded-kernel"))))]
 #[async_trait]
-impl WorkerHost for UnlaunchableHost {
+impl WorkerHost for NoKernelHost {
     async fn launch(&self, _epoch: u64) -> Result<Launched, String> {
-        Err("unlaunchable test host".into())
+        Err(
+            "no worker backend is compiled into this build (features `sidecar`, `embedded-kernel`)"
+                .into(),
+        )
     }
 }

@@ -1064,6 +1064,10 @@ enum Death {
     /// inside OCCT). Terminal — `Failed` with `relaunch-required`, no restart
     /// and no new thread (docs/ios/ARCHITECTURE.md "In-process failure policy").
     Abandoned { reason: String },
+    /// ANOTHER in-process run of this process was abandoned (the host's
+    /// `relaunch_required` latch): the app is relaunch-required, so this
+    /// healthy worker is stopped too and the supervisor fails with `reason`.
+    RelaunchRequired { reason: String },
 }
 
 /// How long a retired worker gets to honour its graceful `Shutdown` before it is
@@ -1101,6 +1105,12 @@ async fn supervise_loop(shared: &Shared) {
         // (here, inside the handshake, inside the run loop, and after every backoff
         // sleep) — a retired manager must never spawn another child.
         if shared.is_retired() {
+            return;
+        }
+        // An abandoned in-process run anywhere in the process: no new thread,
+        // ever (docs/ios/ARCHITECTURE.md). Never set for the sidecar.
+        if let Some(reason) = shared.host.relaunch_required() {
+            shared.fail(reason);
             return;
         }
         match spawn_and_connect(shared).await {
@@ -1149,14 +1159,21 @@ async fn supervise_loop(shared: &Shared) {
                 // Torn down: drop the connection and bump the epoch (fencing).
                 *shared.conn.write().unwrap() = None;
                 let new_epoch = shared.epoch.fetch_add(1, Ordering::SeqCst) + 1;
-                if let Death::Abandoned { reason } = &death {
+                match &death {
                     // Terminal: abandoned ONCE. A replacement would be a second
                     // thread beside one that may still hold the OCCT STEP locks.
-                    shared.fail(format!(
-                        "relaunch-required: in-process worker abandoned ({reason}); \
-                         kernel work stops until the app is relaunched"
-                    ));
-                    return;
+                    Death::Abandoned { reason } => {
+                        shared.fail(format!(
+                            "relaunch-required: in-process worker abandoned ({reason}); \
+                             kernel work stops until the app is relaunched"
+                        ));
+                        return;
+                    }
+                    Death::RelaunchRequired { reason } => {
+                        shared.fail(reason.clone());
+                        return;
+                    }
+                    _ => {}
                 }
                 let reason: String = match &death {
                     Death::Exited => "worker exited/crashed".into(),
@@ -1173,7 +1190,9 @@ async fn supervise_loop(shared: &Shared) {
                         "worker wedged (inflight {verb} {age_ms}ms, {since_progress_ms}ms since \
                          progress) → SIGKILL"
                     ),
-                    Death::Retired | Death::Abandoned { .. } => unreachable!("handled above"),
+                    Death::Retired | Death::Abandoned { .. } | Death::RelaunchRequired { .. } => {
+                        unreachable!("handled above")
+                    }
                 };
                 shared.set_state(WorkerState::Restarting);
                 shared.emit(WorkerLifecycle::Restarting {
@@ -1266,7 +1285,15 @@ async fn spawn_and_connect(
     shared: &Shared,
 ) -> Result<(Box<dyn WorkerInstance>, Arc<ProtocolClient>), String> {
     let epoch = shared.epoch.load(Ordering::SeqCst);
-    let launched = shared.host.launch(epoch).await?;
+    // A launch can wait (the in-process run cap), so retirement must be
+    // observable here too; `launch` is cancel-safe — nothing has started. The
+    // launch arm is polled first: one that is ready at once (the sidecar's
+    // always is) behaves exactly as an unconditional await did.
+    let launched = tokio::select! {
+        biased;
+        launched = shared.host.launch(epoch) => launched?,
+        () = shared.retired() => return Err("retired during launch".into()),
+    };
     let instance = launched.instance;
     // A worker that never sends its hello would park this await forever, so the
     // handshake is one of the three places retirement MUST be observable. On
@@ -1350,6 +1377,10 @@ async fn run_until_death(
                 return Death::Retired;
             }
             _ = ticker.tick() => {
+                if let Some(reason) = shared.host.relaunch_required() {
+                    let _ = instance.force_kill().await;
+                    return Death::RelaunchRequired { reason };
+                }
                 shared.report_journal_failures();
                 if let Some(death) = ping_once(shared, client, instance, &mut missed).await {
                     return death;
@@ -1907,6 +1938,21 @@ async fn stream_plan(shared: Arc<Shared>, request: PlanRequest, tx: mpsc::Sender
     // "not connected" still wins, and before the request is built so the ordering
     // is on the wire, not just in intent.
     shared.await_pending_discards().await;
+
+    // Ordered against the other in-process instances' plans (a key with
+    // persisted crash strikes runs alone: kernel_journal). Held to the terminal.
+    // The permit arm is polled first, so a host without ordering (the sidecar:
+    // ready at once) dispatches exactly as before; only a WAIT observes
+    // retirement or an abandoned caller.
+    let _permit = tokio::select! {
+        biased;
+        permit = shared.host.plan_permit(&op_keys) => permit,
+        () = shared.retired() => {
+            let _ = tx.send(PlanEvent::Failed(retired_err())).await;
+            return;
+        }
+        () = tx.closed() => return,
+    };
 
     let mut events = client.subscribe();
     let inflight = match client
@@ -3111,7 +3157,7 @@ mod poison_tests {
                 poison_threshold,
                 auto_open_session: false,
             },
-            host: Arc::new(crate::worker::host::UnlaunchableHost),
+            host: Arc::new(crate::worker::host::NoKernelHost),
             failure_reason: Mutex::new(None),
             journal_failures_reported: AtomicU64::new(0),
             conn: RwLock::new(None),

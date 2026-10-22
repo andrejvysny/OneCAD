@@ -10,15 +10,18 @@
 //! * Stop: there is no kill. The host end is shut down (`SHUT_RDWR` on a dup,
 //!   so it works whoever holds the tokio halves) and the run's exit is awaited
 //!   for a bounded grace; a run that does not return is ABANDONED — counted,
-//!   left running, never replaced (the supervisor fails `relaunch-required`).
-//! * Instance cap: auxiliary instances (Component Library re-bake / ingest) are
-//!   limited to ONE per process; document instances are bounded by the open-
-//!   document cap. Policy and rationale: docs/ios/KERNEL.md.
+//!   left running, and it latches `relaunch-required` for the whole process:
+//!   no further run thread starts and every in-process supervisor fails.
+//! * Run cap: at most [`DOCUMENT_RUNS`] document runs (open tabs; the pre-warmed
+//!   worker is one of them) and [`AUXILIARY_RUNS`] auxiliary run (Component
+//!   Library re-bake / ingest) live at once — counted until the run thread
+//!   returns, so retiring and abandoned runs keep their slot. Policy and
+//!   rationale: docs/ios/KERNEL.md.
 
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -26,9 +29,11 @@ use onecad_embedded_worker::{JournalEvent, LogLevel, RunConfig, WorkerCallbacks}
 use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
 
 use super::backend::{EmbeddedKernelConfig, WorkerRole};
-use super::host::{KillOutcome, Launched, PoisonSeed, WorkerHost, WorkerInstance};
-use super::identity::{parse_embedded_identity, HelloAxes};
+use super::host::{KillOutcome, Launched, PlanPermit, PoisonSeed, WorkerHost, WorkerInstance};
+use super::identity::HelloAxes;
 use super::kernel_journal::{JournalWriter, KernelJournal};
+
+mod preflight;
 
 /// The run thread's stack (the sidecar's reader runs on an 8 MiB main thread).
 const RUN_THREAD_STACK: usize = 8 << 20;
@@ -36,11 +41,15 @@ const RUN_THREAD_STACK: usize = 8 << 20;
 /// How long a force-stopped run gets to return once its socket is shut down.
 const KILL_GRACE: Duration = Duration::from_secs(1);
 
-/// Auxiliary instances that may run at once in this process.
-const AUXILIARY_INSTANCES: usize = 1;
+/// Document runs (open tabs, the pre-warmed one among them) live at once:
+/// docs/ios/ARCHITECTURE.md's two or three tabs.
+const DOCUMENT_RUNS: usize = 3;
 
-/// How long an auxiliary launch waits for the cap before it is a start failure.
-const AUXILIARY_WAIT: Duration = Duration::from_secs(30);
+/// Auxiliary runs (Component Library re-bake / ingest) live at once.
+const AUXILIARY_RUNS: usize = 1;
+
+/// How long a launch waits for a free run slot before it is a start failure.
+const SLOT_WAIT: Duration = Duration::from_secs(30);
 
 /// The identity `build.rs` embedded from `ONECAD_EMBEDDED_WORKER_DIR`.
 const APP_IDENTITY: &str = include_str!(concat!(env!("OUT_DIR"), "/onecad-embedded-kernel.json"));
@@ -48,6 +57,9 @@ const APP_IDENTITY: &str = include_str!(concat!(env!("OUT_DIR"), "/onecad-embedd
 static LAUNCHED: AtomicU64 = AtomicU64::new(0);
 static LIVE: AtomicU64 = AtomicU64::new(0);
 static ABANDONED: AtomicU64 = AtomicU64::new(0);
+/// Set by the first abandonment and never cleared (outside tests): the whole
+/// process is `relaunch-required` (ADR-0018 decision 4).
+static RELAUNCH_REQUIRED: Mutex<Option<String>> = Mutex::new(None);
 
 /// Process-wide in-process instance counts (diagnostics and tests).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,11 +81,43 @@ pub fn in_process_counters() -> InProcessCounters {
     }
 }
 
-fn auxiliary_permits() -> Arc<Semaphore> {
-    static PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    PERMITS
-        .get_or_init(|| Arc::new(Semaphore::new(AUXILIARY_INSTANCES)))
+/// Why this process may start no further in-process run, once one was
+/// abandoned (diagnostics and status).
+#[must_use]
+pub fn in_process_relaunch_required() -> Option<String> {
+    RELAUNCH_REQUIRED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
+}
+
+/// The first abandonment's reason wins; later ones only count.
+fn latch_relaunch_required(reason: String) {
+    let mut latch = RELAUNCH_REQUIRED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    latch.get_or_insert(reason);
+}
+
+/// Tests that drill an abandonment clear the latch once the abandoned run has
+/// returned, so the next test can launch again.
+#[cfg(test)]
+pub(crate) fn reset_relaunch_latch() {
+    *RELAUNCH_REQUIRED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+}
+
+/// The run slots `role` draws from, and their size.
+fn run_slots(role: WorkerRole) -> (Arc<Semaphore>, usize, &'static str) {
+    static DOCUMENT: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    static AUXILIARY: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    let (cell, size, name) = match role {
+        WorkerRole::Document => (&DOCUMENT, DOCUMENT_RUNS, "document"),
+        WorkerRole::Rebake | WorkerRole::Ingest => (&AUXILIARY, AUXILIARY_RUNS, "auxiliary"),
+    };
+    let slots = cell.get_or_init(|| Arc::new(Semaphore::new(size))).clone();
+    (slots, size, name)
 }
 
 /// Starts in-process worker runs for one supervisor.
@@ -82,81 +126,54 @@ pub(crate) struct InProcessHost {
     config: EmbeddedKernelConfig,
     role: WorkerRole,
     journal: Option<Arc<KernelJournal>>,
+    /// How long a retired run may take to return before it is abandoned.
+    retire_deadline: Duration,
 }
 
 impl InProcessHost {
-    pub(crate) fn new(config: EmbeddedKernelConfig, role: WorkerRole) -> Self {
+    /// `retire_deadline`: the supervisor's longest §8 op deadline. A retired
+    /// run finishes its current op before it returns (nothing can stop it
+    /// sooner); one still running past the deadline would have been declared
+    /// wedged had it not been retired, so only then is it abandoned.
+    pub(crate) fn new(
+        config: EmbeddedKernelConfig,
+        role: WorkerRole,
+        retire_deadline: Duration,
+    ) -> Self {
         let journal = config.journal_dir.as_deref().map(KernelJournal::shared);
         Self {
             config,
             role,
             journal,
+            retire_deadline,
         }
     }
 
-    /// The identity text to verify against: the explicit one, else the one
-    /// this crate embedded — which must equal the linked bundle's own.
-    fn identity_text(&self) -> Result<Option<String>, String> {
-        if let Some(explicit) = &self.config.identity {
-            return Ok(Some(explicit.clone()));
-        }
-        let embedded = (!APP_IDENTITY.trim().is_empty()).then(|| APP_IDENTITY.to_string());
-        if let (Some(app), Some(linked)) = (&embedded, onecad_embedded_worker::identity_json()) {
-            if app != linked {
-                return Err(
-                    "onecad-app and onecad-embedded-worker embed different kernel \
-                            identities (stale build: rebuild with one ONECAD_EMBEDDED_WORKER_DIR)"
-                        .into(),
-                );
-            }
-        }
-        Ok(embedded)
-    }
-
-    /// ABI first, then the identity manifest: everything checkable before a
-    /// thread exists. Returns the hello axes the handshake must match.
+    /// Everything checkable before a thread exists (`preflight::check`).
     fn preflight(&self) -> Result<Option<HelloAxes>, String> {
         let abi = onecad_embedded_worker::abi_version().map_err(|e| e.to_string())?;
-        if abi != onecad_embedded_worker::ABI_VERSION {
-            return Err(format!(
-                "embedded kernel ABI {abi}; this host speaks ABI {}",
-                onecad_embedded_worker::ABI_VERSION
-            ));
-        }
-        let Some(text) = self.identity_text()? else {
-            if cfg!(debug_assertions) {
-                tracing::warn!(
-                    "embedded kernel has no identity manifest (debug build): hello unchecked"
-                );
-                return Ok(None);
-            }
-            return Err("release build without an embedded kernel identity".into());
+        let app = (!APP_IDENTITY.trim().is_empty()).then_some(APP_IDENTITY);
+        let inputs = preflight::Inputs {
+            abi,
+            explicit: self.config.identity.as_deref(),
+            app,
+            linked: onecad_embedded_worker::identity_json(),
+            journal_dir: self.config.journal_dir.as_deref(),
         };
-        let identity = parse_embedded_identity(&text)?;
-        if identity.abi_version != abi {
-            return Err(format!(
-                "embedded kernel identity names ABI {}, the linked library is ABI {abi}",
-                identity.abi_version
-            ));
-        }
-        if !cfg!(debug_assertions) && cfg!(target_os = "ios") && identity.test_hooks {
-            return Err("an iOS release must not run a kernel built with test hooks".into());
-        }
-        Ok(Some(identity.axes()))
+        preflight::check(&inputs, preflight::Policy::BUILD)
     }
 
-    async fn reserve(&self) -> Result<Option<OwnedSemaphorePermit>, String> {
-        if self.role == WorkerRole::Document {
-            return Ok(None);
-        }
-        tokio::time::timeout(AUXILIARY_WAIT, auxiliary_permits().acquire_owned())
+    /// A run slot of this host's role, waiting up to [`SLOT_WAIT`]. Cancel-safe.
+    async fn reserve(&self) -> Result<OwnedSemaphorePermit, String> {
+        let (slots, size, name) = run_slots(self.role);
+        tokio::time::timeout(SLOT_WAIT, slots.acquire_owned())
             .await
             .map_err(|_| {
-                "in-process auxiliary worker cap reached (one per process); \
-                 another re-bake or ingest is still running"
-                    .to_string()
+                format!(
+                    "in-process {name} run cap reached ({size} per process); \
+                     the runs holding it have not returned"
+                )
             })?
-            .map(Some)
             .map_err(|e| e.to_string())
     }
 }
@@ -164,8 +181,15 @@ impl InProcessHost {
 #[async_trait]
 impl WorkerHost for InProcessHost {
     async fn launch(&self, epoch: u64) -> Result<Launched, String> {
+        if let Some(reason) = in_process_relaunch_required() {
+            return Err(reason);
+        }
         let expected = self.preflight()?;
+        // The only await: a cancelled launch has started nothing.
         let permit = self.reserve().await?;
+        if let Some(reason) = in_process_relaunch_required() {
+            return Err(reason); // abandoned while this one waited for a slot
+        }
         let (host, worker) = UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
         set_nosigpipe(&host)?;
         set_nosigpipe(&worker)?;
@@ -193,9 +217,21 @@ impl WorkerHost for InProcessHost {
                 done,
                 exited: false,
                 control,
+                retire_deadline: self.retire_deadline,
             }),
             expected,
         })
+    }
+
+    fn relaunch_required(&self) -> Option<String> {
+        in_process_relaunch_required()
+    }
+
+    async fn plan_permit(&self, keys: &[String]) -> Option<PlanPermit> {
+        match &self.journal {
+            Some(journal) => Some(journal.plan_permit(keys).await),
+            None => None,
+        }
     }
 
     fn poison_seeds(&self, fingerprint: &str) -> Vec<PoisonSeed> {
@@ -228,7 +264,7 @@ impl WorkerHost for InProcessHost {
 fn start_run_thread(
     run: RunConfig,
     callbacks: Arc<InstanceCallbacks>,
-    permit: Option<OwnedSemaphorePermit>,
+    permit: OwnedSemaphorePermit,
 ) -> Result<oneshot::Receiver<i32>, String> {
     let (done_tx, done_rx) = oneshot::channel();
     LAUNCHED.fetch_add(1, Ordering::SeqCst);
@@ -240,6 +276,7 @@ fn start_run_thread(
             let callbacks: Arc<dyn WorkerCallbacks> = callbacks;
             // `NotLinked` cannot happen past preflight; 3 = internal, as the C side.
             let code = onecad_embedded_worker::run(run, callbacks).unwrap_or(3);
+            // The slot frees only when the run has really returned.
             drop(permit);
             LIVE.fetch_sub(1, Ordering::SeqCst);
             let _ = done_tx.send(code);
@@ -277,6 +314,7 @@ struct InProcessInstance {
     /// A dup of the host end: shutting it down ends the socket for everyone
     /// (EOF to the worker's reader) whoever holds the tokio halves.
     control: UnixStream,
+    retire_deadline: Duration,
 }
 
 impl InProcessInstance {
@@ -284,16 +322,23 @@ impl InProcessInstance {
         let _ = self.control.shutdown(std::net::Shutdown::Both);
     }
 
-    /// Closes the socket and waits up to `grace` for the run to return.
-    async fn stop(&mut self, grace: Duration) -> KillOutcome {
+    /// Closes the socket and waits up to `grace` for the run to return; a run
+    /// that does not is abandoned and latches `relaunch-required`.
+    async fn stop(&mut self, grace: Duration, why: &str) -> KillOutcome {
         self.close_socket();
         if tokio::time::timeout(grace, self.exited()).await.is_ok() {
             return KillOutcome::Reaped;
         }
         let abandoned = ABANDONED.fetch_add(1, Ordering::SeqCst) + 1;
+        let grace_ms = u64::try_from(grace.as_millis()).unwrap_or(u64::MAX);
+        latch_relaunch_required(format!(
+            "relaunch-required: an in-process worker was abandoned ({why}, no return \
+             {grace_ms} ms after its socket closed); kernel work stops until the app is relaunched"
+        ));
         tracing::error!(
             abandoned,
-            grace_ms = u64::try_from(grace.as_millis()).unwrap_or(u64::MAX),
+            grace_ms,
+            why,
             "in-process worker did not return after its socket closed — abandoned (relaunch required)"
         );
         KillOutcome::Abandoned
@@ -312,12 +357,14 @@ impl WorkerInstance for InProcessInstance {
         self.exited = true;
     }
 
+    /// Retirement: the run gets at least the retire deadline (its current op
+    /// may legitimately still be running) before it is abandoned.
     async fn terminate(&mut self, grace: Duration) {
-        let _ = self.stop(grace).await;
+        let _ = self.stop(grace.max(self.retire_deadline), "retired").await;
     }
 
     async fn force_kill(&mut self) -> KillOutcome {
-        self.stop(KILL_GRACE).await
+        self.stop(KILL_GRACE, "stopped").await
     }
 }
 

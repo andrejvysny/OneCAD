@@ -554,7 +554,9 @@ pub fn ingest_supervisor_config(binary: PathBuf) -> SupervisorConfig {
 }
 
 /// Spawns a worker of the ingest's own, under [`ingest_supervisor_config`], on
-/// the default backend, and waits out its handshake.
+/// the build's default backend, and waits out its handshake — the standalone
+/// `onecad-library-ingest` tool. The app passes its process backend to
+/// [`spawn_ingest_worker_on`] instead.
 ///
 /// # Errors
 /// [`ApiError::Internal`] when no worker binary resolves, [`ApiError::Worker`]

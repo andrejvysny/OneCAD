@@ -13,7 +13,9 @@ path = "src/main.rs"
 # The CLI reuses the app crate's ingest lane verbatim (`onecad_app::library_ingest`),
 # exactly as `onecad-regen` reuses its regen path, so the recipe run and the
 # in-app "Import components…" run are the same code.
-onecad-app = { workspace = true }
+# Desktop tool: spawns the sidecar worker (explicit, so it survives the
+# workspace dependency dropping onecad-app's default features).
+onecad-app = { workspace = true, features = ["sidecar"] }
 tokio = { workspace = true, features = [
     "rt-multi-thread",
     "macros",

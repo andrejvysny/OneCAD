@@ -88,7 +88,9 @@ fn check_release_identity(identity: &str, source: &Path) {
 /// them. `rustc-link-arg` only reaches linked targets — this rlib has none
 /// besides its tests — and an iOS link file carries no rpath at all.
 fn add_test_rpaths(dir: &Path) {
-    let Ok(directives) = fs::read_to_string(dir.join(EMBEDDED_LINK)) else {
+    let link = dir.join(EMBEDDED_LINK);
+    println!("cargo:rerun-if-changed={}", link.display());
+    let Ok(directives) = fs::read_to_string(&link) else {
         return;
     };
     for rpath in directives

@@ -60,7 +60,9 @@ pub(crate) mod sketch_truth;
 pub mod wire;
 
 #[cfg(feature = "embedded-kernel")]
-pub use backend::{in_process_counters, EmbeddedKernelConfig, InProcessCounters};
+pub use backend::{
+    in_process_counters, in_process_relaunch_required, EmbeddedKernelConfig, InProcessCounters,
+};
 pub use backend::{WorkerBackend, WorkerRole};
 pub use manager::{RestartHook, SupervisorConfig, WorkerLifecycle, WorkerManager, WorkerState};
 
