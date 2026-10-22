@@ -350,12 +350,13 @@ fn navigation_cancels_an_authoring_finger_and_is_ignored_under_a_pencil() {
 }
 
 #[test]
-fn text_composition_commits_through_ime_and_return_is_enter() {
+fn text_composition_commits_through_ime_and_return_and_tab_are_keys() {
     let mut input = Input::default();
     input.set_marked("ni");
     input.insert_text("你");
     input.set_marked("");
     input.insert_text("\n");
+    input.insert_text("\t");
     input.delete_backward();
     let events = input.drain().events;
     assert!(matches!(
@@ -375,6 +376,8 @@ fn text_composition_commits_through_ime_and_return_is_enter() {
         [
             (egui::Key::Enter, true),
             (egui::Key::Enter, false),
+            (egui::Key::Tab, true),
+            (egui::Key::Tab, false),
             (egui::Key::Backspace, true),
             (egui::Key::Backspace, false)
         ]

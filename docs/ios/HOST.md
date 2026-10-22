@@ -178,7 +178,7 @@ Input calls return `ERR_STATE` in the background and after terminate
 | `Overlay::Prediction` | latest points kept per authoring contact (transient; never an event, not drawn yet) |
 | Navigation `BEGAN/MOVED/ENDED/CANCELLED` | `BEGAN` hands canvas fingers to it (`Router::native_navigation`): an authoring finger is cancelled, an orbit ends in place; ignored while a Pencil or pointer authors. Then `PointerMoved(anchor)` (no pointer held), `MouseWheel{Trackpad, Point}` pan delta, `Zoom(scale_delta)`; deferred `PointerGone` after the end. Rotation is not mapped. |
 | Key (HID usage, modifiers) | `ModifiersChanged` on change, `Key{key, physical_key, pressed, repeat}`; ⌘ = `command` + `mac_cmd` |
-| `text_insert` | `Text`; `"\n"` is an Enter tap; while composing, `Ime(Commit)` |
+| `text_insert` | `Text`; `"\n"` is an Enter tap and `"\t"` a Tab tap (the software keyboard's Tab key moves between numeric fields); while composing, `Ime(Commit)` |
 | `text_delete_backward` | Backspace tap |
 | `text_set_marked` | `Ime(Preedit)`; empty ends composition without commit |
 | Pencil barrel tap / squeeze (`pencil_event_submit`) | INPUT.md accessory policy on the event's `preferred` action, applied at the start of the next frame: `Editor::toggle_previous_sketch_tool` or `Editor::open_tool_palette` at the hover pose (only with `CAP_HOVER` and `HAS_LOCATION`), else the last Pencil position, else the canvas centre. A squeeze acts on `ENDED`; a barrel tap must be `ENDED`; other phases are `ERR_INVALID_ARGUMENT`. Visible equivalents: the tool pill (and the palette is the pill's tools). |

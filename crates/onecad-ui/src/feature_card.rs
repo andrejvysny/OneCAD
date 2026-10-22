@@ -296,7 +296,7 @@ fn number_field(
         app.doc.numeric_id = Some(response.id);
     }
     let label = format!("{} ({unit})", key.label());
-    response.widget_info(|| egui::WidgetInfo::text_edit(editing, "", &draft, &label));
+    response.widget_info(|| field_info(editing, &draft, &label));
     crate::automation::name(ui.ctx(), response.id, &field_automation(tool, key));
     if response.gained_focus() && !focused {
         app.dispatch(Action::FocusParameter(key));
@@ -305,6 +305,15 @@ fn number_field(
         app.dispatch(Action::ParameterChanged { key, text: draft });
     }
     response
+}
+
+/// The row label is painted beside the field, so assistive tech (and touch
+/// automation) gets the name only from the field itself. `text_edit`'s last
+/// argument is a placeholder, not a name.
+fn field_info(enabled: bool, text: &str, label: &str) -> egui::WidgetInfo {
+    let mut info = egui::WidgetInfo::text_edit(enabled, text, text, "");
+    info.label = Some(label.to_owned());
+    info
 }
 
 fn focus_keys(app: &mut App, response: &egui::Response, can_apply: bool) {
@@ -365,6 +374,30 @@ mod tests {
             .as_deref(),
             Some("Invalid value: unknown variable")
         );
+    }
+
+    #[test]
+    fn parameter_field_is_named_for_accessibility() {
+        let ctx = Context::default();
+        ctx.enable_accesskit();
+        let mut text = String::from("10");
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let response = ui.add(egui::TextEdit::singleline(&mut text));
+            response.widget_info(|| field_info(true, "10", "Extrude distance (mm)"));
+        });
+        output.textures_delta.clear();
+        let update = output
+            .platform_output
+            .accesskit_update
+            .expect("accesskit enabled");
+        let field = update
+            .nodes
+            .iter()
+            .map(|(_, node)| node)
+            .find(|node| node.role() == egui::accesskit::Role::TextInput)
+            .expect("text input node");
+        assert_eq!(field.label(), Some("Extrude distance (mm)"));
+        assert_eq!(field.value(), Some("10"));
     }
 
     #[test]

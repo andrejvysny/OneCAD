@@ -19,6 +19,7 @@
 		3488F822A7E69538FAEE716D /* DocumentInboxTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3EF5B5ED44ADD451825600BD /* DocumentInboxTests.swift */; };
 		35CB850E329CA06EFA5EBE08 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7211051842CA6F425D126385 /* AppDelegate.swift */; };
 		4218C20C758AE90630339FB7 /* DocumentPersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C121F993856F3FE4AB35A8DB /* DocumentPersistenceTests.swift */; };
+		434BF8AA882E560F93F331FF /* RequiredWorkflowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2EB0EC444F2488CF16D87501 /* RequiredWorkflowTests.swift */; };
 		4858EE15AFF2B9F158FACAD6 /* SemanticHooks.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E5BC0DABAF4683B8021EA87 /* SemanticHooks.swift */; };
 		4EF448E40EA3222EBDCC6D84 /* AccessibilityBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8D17FD7CBC9B45AF6A1BE0F /* AccessibilityBridge.swift */; };
 		57B555D4AC351FDA75CC3AC7 /* TestHookPingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B966A2E61CC04066F8180AB0 /* TestHookPingTests.swift */; };
@@ -29,6 +30,7 @@
 		82E9166A50AA25F467848BDD /* FatalErrorViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDC2BBD14BB6180620AE0B80 /* FatalErrorViewController.swift */; };
 		8BA08A54296F12BB7841A53E /* SaveAllTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DD22F39E7F0494FE44C7FF6 /* SaveAllTests.swift */; };
 		8C4F6A9DEB9EBCFED712014E /* KeyInputProxy+TextInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE2DC86614E04510234744A8 /* KeyInputProxy+TextInput.swift */; };
+		8C7BDE54C40B2A9447010FB3 /* WorkflowSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 827178CD79CF90BA594C9F5C /* WorkflowSupport.swift */; };
 		911E6EE8C1089E85EC22B72C /* TouchSampleBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92B9E16789CE50F6584D00F8 /* TouchSampleBuilder.swift */; };
 		92E6B0D891F85117FF0ECE85 /* MultiDocumentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1363530C9DE30332E79E3DD8 /* MultiDocumentTests.swift */; };
 		9515D5355BA1339BB7B171C3 /* RustBridge+Calls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F5236FA35EA92C24105116A /* RustBridge+Calls.swift */; };
@@ -78,6 +80,7 @@
 		1641281E136736F811AD28DC /* DocumentInbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentInbox.swift; sourceTree = "<group>"; };
 		1E5BC0DABAF4683B8021EA87 /* SemanticHooks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SemanticHooks.swift; sourceTree = "<group>"; };
 		1F3CACA3512AB02265770A40 /* OneCADNativeTests-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "OneCADNativeTests-Bridging-Header.h"; sourceTree = "<group>"; };
+		2EB0EC444F2488CF16D87501 /* RequiredWorkflowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RequiredWorkflowTests.swift; sourceTree = "<group>"; };
 		3EF5B5ED44ADD451825600BD /* DocumentInboxTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentInboxTests.swift; sourceTree = "<group>"; };
 		436124834EE926976B75C4AC /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		47F47CBD179A10B963741C03 /* NavigationGestures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationGestures.swift; sourceTree = "<group>"; };
@@ -90,6 +93,7 @@
 		6F8E7764E8B3D6AE32FB4517 /* RustBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RustBridge.swift; sourceTree = "<group>"; };
 		7211051842CA6F425D126385 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		76137638FADBA266025A7C0A /* DocumentLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentLifecycleTests.swift; sourceTree = "<group>"; };
+		827178CD79CF90BA594C9F5C /* WorkflowSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowSupport.swift; sourceTree = "<group>"; };
 		85614958BEB8E8E12DD63B5D /* SurfaceLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfaceLifecycleTests.swift; sourceTree = "<group>"; };
 		867ECAF4078A19E25234DE9F /* OneCADUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = OneCADUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		8F5236FA35EA92C24105116A /* RustBridge+Calls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "RustBridge+Calls.swift"; sourceTree = "<group>"; };
@@ -257,9 +261,11 @@
 				EDC28BA64E1F84800F465F2A /* DocumentUITestSupport.swift */,
 				C57C5550AC14B5E601476591 /* LaunchTests.swift */,
 				0A4EC2F23EA9085CB4C41E5C /* OrientationTests.swift */,
+				2EB0EC444F2488CF16D87501 /* RequiredWorkflowTests.swift */,
 				0DD22F39E7F0494FE44C7FF6 /* SaveAllTests.swift */,
 				85614958BEB8E8E12DD63B5D /* SurfaceLifecycleTests.swift */,
 				C46FAEE705612D377B69BB84 /* UITestSupport.swift */,
+				827178CD79CF90BA594C9F5C /* WorkflowSupport.swift */,
 			);
 			path = OneCADUITests;
 			sourceTree = "<group>";
@@ -455,9 +461,11 @@
 				B0015478F02895D2470064D6 /* DocumentUITestSupport.swift in Sources */,
 				ED7799D97F8626560E7C1834 /* LaunchTests.swift in Sources */,
 				70A8509AE3CBBEFCF453A15E /* OrientationTests.swift in Sources */,
+				434BF8AA882E560F93F331FF /* RequiredWorkflowTests.swift in Sources */,
 				8BA08A54296F12BB7841A53E /* SaveAllTests.swift in Sources */,
 				CB6FFC4F9B5AAC3C49B9140C /* SurfaceLifecycleTests.swift in Sources */,
 				FC084A85CD3C49779FDDD4AF /* UITestSupport.swift in Sources */,
+				8C7BDE54C40B2A9447010FB3 /* WorkflowSupport.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
