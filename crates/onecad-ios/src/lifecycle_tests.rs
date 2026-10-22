@@ -48,6 +48,8 @@ fn memory_warnings_relieve_in_every_phase_and_nothing_else_does() {
             warning,
             Plan {
                 relieve_memory: true,
+                // A release the GPU refused on entering the background is retried.
+                release_targets: phase == Phase::Background,
                 ..Plan::default()
             }
         );

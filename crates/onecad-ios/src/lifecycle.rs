@@ -2,7 +2,8 @@
 //! flush, releases the renderer's targets and refuses frames and input (iOS forbids GPU
 //! work in the background); the first foreground frame recreates the targets from the
 //! retained scene. A memory warning drops parked tabs' display caches and, when the
-//! active document is over its display allowance, lowers the scene scale one step.
+//! active document is over its display allowance, lowers the scene scale one step; in the
+//! background it first retries a target release the busy GPU refused.
 //! Termination cancels host dialogs, awaits the flush and stops the document hosts
 //! within the shutdown grace.
 use crate::app::{Failure, IosApp, Outcome, Phase, SHUTDOWN_GRACE};
@@ -48,7 +49,9 @@ pub(crate) fn plan(phase: Phase, event: u32) -> Result<Plan, Failure> {
             focus: Some(true),
             ..none
         },
+        // Retries a release the GPU refused when the app entered the background.
         ffi::MEMORY_WARNING => Plan {
+            release_targets: phase == Phase::Background,
             relieve_memory: true,
             ..none
         },
