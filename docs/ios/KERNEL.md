@@ -90,6 +90,19 @@ evidence lives in Plane (ONECAD-449, ONECAD-450).
    (`NotLinked`), so `cargo check/clippy/test --workspace` on macOS never needs
    the kernel; an iOS release build fails in `build.rs` instead.
 
+4. Xcode (a `staticlib` consumer such as `onecad-ios`). The link crate emits
+   the bundle as `static:-bundle`: it is NOT copied into the Rust rlib or into
+   `libonecad_ios.a` (130 MB would be duplicated per crate), so the final link
+   names it next to the Rust archive, from the same `--out` directory:
+
+   ```text
+   libonecad_ios.a  <out>/libonecad_worker_bundle.a  -lc++
+   ```
+
+   plus every `framework=`/`lib=` line of `<out>/onecad-embedded-link.txt`
+   (none for OCCT 8.0.1 on iOS). `cargo rustc --crate-type staticlib -- --print
+   native-static-libs` prints the same list for a given build.
+
 ## Identity manifest v2 (`onecad-embedded-kernel.json`)
 
 | Field | Source |
@@ -111,14 +124,18 @@ The versions are parsed out of the worker sources at configure time
 not match exactly once. The fingerprint differs per platform (the OCCT build
 id carries the platform); it keys disposable caches and poison only.
 
-Verification at start (`InProcessHost::launch`, before any thread exists):
-`onecad_worker_abi_version() == 3`; the identity (explicit config, else the
-copy `onecad-app/build.rs` embedded, which must equal the link crate's copy)
-parses as v2 and names that ABI; release iOS refuses `testHooks`. After the
-hello, the shared handshake checks protocol, quantization, solver policy,
-worker version, OCCT version and fingerprint against it — the same rule as the
-sidecar manifest. A debug build without an identity skips the hello check with
-a warning. `onecad-app/build.rs` fails a release build with `embedded-kernel`
+Verification at start (`InProcessHost::launch` → `inprocess/preflight.rs`,
+before any thread exists): `onecad_worker_abi_version() == 3`; a release iOS
+build has a crash-journal directory; the identity — the copy
+`onecad-app/build.rs` embedded, which must equal the link crate's copy —
+parses as v2, names that ABI and THIS binary's platform (`iphonesimulator`,
+`iphoneos` or `macosx`, from the Rust target); release iOS refuses
+`testHooks`. `EmbeddedKernelConfig.identity` is a test override honoured in
+debug builds only (a release accepts it only when it IS the linked identity).
+After the hello, the shared handshake checks protocol, quantization, solver
+policy, worker version, OCCT version and fingerprint against it — the same rule
+as the sidecar manifest. A debug build without an identity skips the hello
+check with a warning. `onecad-app/build.rs` fails a release build with `embedded-kernel`
 when the identity is absent or names another platform. The sidecar manifest
 path (`packaging/binaries/onecad-worker-manifest.json`, v1) is unchanged.
 
@@ -138,8 +155,12 @@ path (`packaging/binaries/onecad-worker-manifest.json`, v1) is unchanged.
 
 ## Crash journal (`<app_support>/kernel-journal/`)
 
-`EmbeddedKernelConfig.journal_dir`; `None` disables it (tests, tools). One
-`KernelJournal` per directory per process serializes every instance's writes.
+`EmbeddedKernelConfig.journal_dir`. The iOS host passes
+`EmbeddedKernelConfig::for_app_support(<app_support>)` (sets
+`<app_support>/kernel-journal`) to `ProcessServices::with_backend`; `None`
+disables the journal for tests and tools, and a release iOS launch refuses it.
+One `KernelJournal` per directory per process serializes every instance's
+writes.
 
 `inflight.json` — this launch's in-flight kernel jobs, rewritten by temp +
 rename (no fsync) on every journal event and removed when none is left:
@@ -159,20 +180,33 @@ instance's without asking about pids.
 `poison.json` — persisted strikes:
 
 ```json
-{ "version": 1, "entries": { "<key>": { "strikes": 1, "opId": "<record id>", "lastMs": 0 } } }
+{ "version": 1, "entries": { "<key>": { "strikes": 1, "opId": "<record id>", "lastMs": 0 } },
+  "appliedSession": "<the leftover session these strikes include>" }
 ```
 
 Recovery runs at the first handshake of the process (the leftover file is
-read when the journal opens and is replaced only then): each leftover record
-WITH an op key under the current fingerprint gets one strike; a record without
-an op (a non-plan job: termination, jetsam, backgrounding mid-Tessellate)
-poisons nothing; a record under another fingerprint is discarded; strikes under
-other fingerprints are pruned. Every instance seeds its circuit from
-`poison.json`; at `IN_PROCESS_POISON_THRESHOLD` (2) strikes a key's circuit is
-open and `stream_plan` fails that plan fast — two, so one innocent kill during
-a long op does not block it, while a deterministic crash costs at most two
-launches. A prepared plan heals its keys; `clear_worker_circuit` clears the
-file too. A write failure is logged (rate-limited), counted, never blocks the
+read when the journal opens and is replaced only then): each distinct leftover
+op key under the current fingerprint gets one strike; a record without an op
+(a non-plan job: termination, jetsam, backgrounding mid-Tessellate) poisons
+nothing; a record under another fingerprint is discarded; strikes under other
+fingerprints are pruned. `poison.json` (with `appliedSession`) is written
+BEFORE `inflight.json` is replaced, so a launch killed in between neither loses
+the strike nor applies the same leftover twice.
+
+Attribution with several tabs: a leftover holding more than one op key cannot
+say which op crashed, so its strikes are capped at threshold − 1 (an
+ambiguous leftover never opens a circuit). Every key that holds a strike runs
+ALONE among this process's plan dispatches (`ExecutePlan` and `PreviewPlan`
+take `KernelJournal::plan_permit`: exclusive for a struck key, shared
+otherwise, held to the terminal), so its next interruption is unambiguous. An
+innocent sibling runs alone, completes and is healed; a crashing op crashes
+alone and opens — at most one ambiguous and one unambiguous crash.
+
+Every instance seeds its circuit from `poison.json`; at
+`IN_PROCESS_POISON_THRESHOLD` (2) strikes a key's circuit is open and
+`stream_plan` / `preview_plan` fail that plan fast — two, so one innocent kill
+during a long op does not block it. A prepared plan heals its keys;
+`clear_worker_circuit` clears the file too. A write failure is logged (rate-limited), counted, never blocks the
 op, and reaches worker status (`WorkerLifecycle::JournalDegraded`,
 `WorkerStatusDto.journalWriteFailures`).
 
@@ -183,20 +217,34 @@ op, and reaches worker status (`WorkerLifecycle::JournalDegraded`,
   epoch and `expectedBaseHash` fencing, poison keys and plan gates are shared.
 - In-process stop: `SHUT_RDWR` on a dup of the host socket (EOF to the worker
   whoever holds the tokio halves), then a bounded wait for the run thread's
-  exit signal (`RETIRE_GRACE` 500 ms on retire, 1 s on a wedge or ping
-  timeout). A run that does not return is abandoned: counted, its thread left
-  running, `Death::Abandoned` → `WorkerState::Failed` with a reason containing
-  `relaunch-required` (`WorkerManager::failure_reason`,
-  `WorkerStatusDto.reason`). The epoch is bumped (fencing), but there is no
-  restart and no replacement thread. A run that does return after its socket
-  closed is a normal death and restarts like the sidecar.
-- Retirement sends `Shutdown`, closes the socket and waits the grace.
-- Instance cap: document workers (including the pre-warmed one, which is the
-  first document's worker started early) are bounded by the open-document cap;
-  auxiliary workers (Component Library re-bake, ingest) are limited to ONE
-  in-process instance per process — a second waits for it up to 30 s, then
-  counts as a start failure. An abandoned auxiliary keeps its slot until the
-  app is relaunched.
+  exit signal: 1 s on a wedge or ping timeout; on retirement the longest §8
+  op deadline of the supervisor's policy (`ExecutePlan` 180 s in production) —
+  a retired run finishes its current op before it returns, and only a run
+  still busy past the deadline it would have been wedge-stopped at is stuck.
+- A run that does not return is ABANDONED: counted, its thread left running,
+  and a process-wide latch is set (`in_process_relaunch_required()`, sticky
+  until relaunch — ADR-0018 decision 4: the app is relaunch-required). From
+  then on: no in-process launch starts a thread (`InProcessHost::launch` and
+  the supervisor loop both refuse); the supervisor that abandoned fails
+  `Death::Abandoned` → `WorkerState::Failed` with a reason containing
+  `relaunch-required`; every other in-process supervisor stops its healthy
+  run at its next ping tick and fails with the latch's reason
+  (`Death::RelaunchRequired`). Reasons reach `WorkerManager::failure_reason`
+  and `WorkerStatusDto.reason`. The epoch is bumped (fencing). A run that does
+  return after its socket closed is a normal death and restarts like the
+  sidecar. The sidecar never sets the latch.
+- Retirement sends `Shutdown`, closes the socket and waits the retire
+  deadline. A launch that is still waiting for a run slot observes retirement
+  and starts nothing (`launch` is cancel-safe).
+- Run cap (`inprocess.rs`): at most THREE document runs (open tabs; the
+  pre-warmed worker is the next tab's and counts among them) and ONE auxiliary
+  run (Component Library re-bake or ingest) are live at once — four kernels at
+  most. A slot is held until the run thread returns, so retiring and abandoned
+  runs keep theirs. A launch waits up to 30 s for a slot, then counts as a
+  start failure. The brief's "one in-process instance per process" for
+  pre-warm/ephemeral workers is read as: one auxiliary, and the warm worker
+  inside the document cap (a single process-wide instance would contradict
+  the frozen two-or-three-tab design).
 - Logs: the ABI log callback goes to `tracing` target `worker` with the
   instance's epoch. The worker's sink is process-global (the newest live run's
   callback receives every run's lines), so the epoch attributes an instance
@@ -204,9 +252,23 @@ op, and reaches worker status (`WorkerLifecycle::JournalDegraded`,
   routed (see `onecad_worker.h`).
 - `onecad-app` features: `sidecar` (default; `tokio/process`) and
   `embedded-kernel` (`tokio/net`, the link crate). `target_os = "ios"` with
-  `sidecar`, iOS without `embedded-kernel`, and a build with neither are compile
-  errors. `ProcessServices::with_backend(WorkerBackend::Embedded(...))` is the
-  explicit selection; `ProcessServices::new()` takes the build default.
+  `sidecar` and iOS without `embedded-kernel` are compile errors. A build with
+  neither compiles (a backend-agnostic crate such as `onecad-interaction` on
+  its own) and has `WorkerBackend::Unavailable`, which never starts a kernel.
+  `ProcessServices::with_backend(WorkerBackend::Embedded(...))` is the explicit
+  selection; `ProcessServices::new()` takes the build default. Every production
+  worker — document, pre-warm, re-bake and the app's ingest
+  (`api::ingest_components`) — starts on the process's backend; only the
+  standalone `onecad-library-ingest` tool uses the build default.
+- Feature unification: `sidecar` is a DEFAULT feature, so any crate in an iOS
+  graph that depends on `onecad-app` with default features turns it on and
+  trips the iOS compile error. The iOS graph therefore needs the workspace
+  dependency `onecad-app = { path = "crates/onecad-app", default-features =
+  false }`, with desktop leaves opting in: `onecad-regen`,
+  `onecad-library-ingest` and `onecad-mesh-fixture` already request
+  `features = ["sidecar"]`; `onecad-ui` must carry `onecad-app/sidecar` in its
+  `desktop` feature and `onecad-interaction` needs it as a dev-dependency (its
+  `real_extrude_modes` test spawns the sidecar).
 - iOS app-layer gates: recents removal uses `std::fs::remove_file` (no trash),
   `reveal` is a no-op returning `Ok`, and `autosave::pid_alive` uses the
   same-pid rule (one app process; `kill` would answer `EPERM` for a recycled
