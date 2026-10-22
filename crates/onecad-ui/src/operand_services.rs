@@ -10,10 +10,11 @@ use tokio::sync::OwnedSemaphorePermit;
 
 #[derive(Debug)]
 pub enum Request {
-    #[allow(
-        dead_code,
-        reason = "operation start stages closures; plain pick staging (S-315c-ui) submits it"
-    )]
+    Hole {
+        context: DocumentContext,
+        pick: api::StagePick,
+        sender: mpsc::Sender<Result<(ElementRef, onecad_core::math::Vec3), String>>,
+    },
     Elements {
         context: DocumentContext,
         picks: Vec<api::StagePick>,
@@ -37,6 +38,14 @@ pub enum Request {
 pub(crate) async fn execute(backend: &Backend, request: Request, permit: OwnedSemaphorePermit) {
     let state = &backend.state;
     match request {
+        Request::Hole {
+            context,
+            pick,
+            sender,
+        } => {
+            let result = stage_hole(state, &context, pick).await;
+            let _ = sender.send(result);
+        }
         Request::Elements {
             context,
             picks,
@@ -85,6 +94,36 @@ pub(crate) async fn execute(backend: &Backend, request: Request, permit: OwnedSe
     }
     drop(permit);
     backend.shared.wake();
+}
+
+async fn stage_hole(
+    state: &onecad_app::state::AppState,
+    context: &DocumentContext,
+    pick: api::StagePick,
+) -> Result<(ElementRef, onecad_core::math::Vec3), String> {
+    let scope = scope(state, context).await?;
+    let (element, topo) = match &pick.address {
+        api::StageAddress::Element(id) => (id.clone(), None),
+        api::StageAddress::TopoKey(key) => (String::new(), Some(key.clone())),
+    };
+    let plane = api::face_sketch_plane(
+        state,
+        scope.snapshot_id.0,
+        onecad_app::worker::wire::body_id_wire(pick.body),
+        element,
+        topo,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let refs = api::stage_elements(state, &scope, vec![pick])
+        .await
+        .map_err(|error| error.to_string())?;
+    let face = refs
+        .into_iter()
+        .next()
+        .ok_or("Hole face staging returned no reference")?;
+    let point = onecad_core::math::Vec3::try_from(plane.origin).map_err(str::to_owned)?;
+    current(state, &scope, Ok((face, point))).await
 }
 
 /// The head the UI picked against, or a refusal when it already moved.

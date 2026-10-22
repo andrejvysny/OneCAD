@@ -239,13 +239,19 @@ async fn add(harness: &Harness, id: RecordId, name: &str, op: Operation) -> Docu
     harness.settled(&response.projection).await
 }
 
-/// Builds the plate and cuts the hole; returns the one body and the head.
-pub async fn build(harness: &Harness) -> (BodyId, DocumentProjection) {
+/// Builds the solid plate before drilling; useful for hollowing workflows.
+pub async fn build_solid(harness: &Harness) -> (BodyId, DocumentProjection) {
     let profile = sketch(harness, plate_sketch(), rectangle()).await;
     let plate = extrude(plate_sketch(), &profile, None);
     let projection = add(harness, plate_record(), "Plate", plate).await;
     assert_eq!(projection.bodies.len(), 1);
     let body: BodyId = projection.bodies.keys().next().unwrap().parse().unwrap();
+    (body, projection)
+}
+
+/// Builds the plate and cuts the hole; returns the one body and the head.
+pub async fn build(harness: &Harness) -> (BodyId, DocumentProjection) {
+    let (body, _) = build_solid(harness).await;
     let circle = sketch(harness, hole_sketch(), hole()).await;
     let cut = extrude(hole_sketch(), &circle, Some(body));
     let projection = add(harness, hole_record(), "Through hole", cut).await;

@@ -41,6 +41,12 @@ pub enum NumericParameter {
     FeaturePatternAngle,
     TransformTranslation(ParameterAxis),
     TransformRotationAngle,
+    GearModule,
+    GearHeight,
+    GearPressureAngle,
+    GearAxleDiameter,
+    GearOffsetDiameter,
+    GearOffsetDistance,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -78,6 +84,12 @@ const PARAMETERS: &[NumericParameter] = &[
     NumericParameter::TransformTranslation(ParameterAxis::Y),
     NumericParameter::TransformTranslation(ParameterAxis::Z),
     NumericParameter::TransformRotationAngle,
+    NumericParameter::GearModule,
+    NumericParameter::GearHeight,
+    NumericParameter::GearPressureAngle,
+    NumericParameter::GearAxleDiameter,
+    NumericParameter::GearOffsetDiameter,
+    NumericParameter::GearOffsetDistance,
 ];
 
 /// Available controls carry the original scalar, including its verbatim expression.
@@ -126,7 +138,8 @@ impl NumericParameter {
             | Self::HoleCountersinkAngle
             | Self::CircularPatternAngle
             | Self::FeaturePatternAngle
-            | Self::TransformRotationAngle => Dimension::Angle,
+            | Self::TransformRotationAngle
+            | Self::GearPressureAngle => Dimension::Angle,
             _ => Dimension::Length,
         }
     }
@@ -156,6 +169,12 @@ impl NumericParameter {
             Self::TransformTranslation(ParameterAxis::Y) => "Translation Y",
             Self::TransformTranslation(ParameterAxis::Z) => "Translation Z",
             Self::TransformRotationAngle => "Rotation angle",
+            Self::GearModule => "Gear module",
+            Self::GearHeight => "Gear height",
+            Self::GearPressureAngle => "Pressure angle",
+            Self::GearAxleDiameter => "Axle hole diameter",
+            Self::GearOffsetDiameter => "Offset hole diameter",
+            Self::GearOffsetDistance => "Offset hole position",
         }
     }
     fn field_name(self) -> &'static str {
@@ -186,6 +205,12 @@ impl NumericParameter {
             Self::TransformTranslation(ParameterAxis::Y) => "TransformBody.translate[1]",
             Self::TransformTranslation(ParameterAxis::Z) => "TransformBody.translate[2]",
             Self::TransformRotationAngle => "TransformBody.rotate.angleDeg",
+            Self::GearModule => "Gear.module",
+            Self::GearHeight => "Gear.height",
+            Self::GearPressureAngle => "Gear.pressureAngleDeg",
+            Self::GearAxleDiameter => "Gear.axleHoleDiameter",
+            Self::GearOffsetDiameter => "Gear.offsetHoleDiameter",
+            Self::GearOffsetDistance => "Gear.offsetHoleOffset",
         }
     }
     /// Widget identity salt; the Extrude distance keeps its established id.
@@ -310,11 +335,13 @@ pub(crate) fn validate_operation(operation: &Operation) -> Result<(), String> {
     match operation {
         Operation::Known(KnownOperation::Extrude(p)) => p.validate(),
         Operation::Known(KnownOperation::Revolve(p)) => p.validate(),
+        Operation::Known(KnownOperation::Gear(p)) => p.validate(),
         Operation::Known(KnownOperation::Chamfer(p)) => p.validate(),
         Operation::Known(KnownOperation::Shell(p)) => p.validate(),
         Operation::Known(KnownOperation::Hole(p)) => p.validate(),
         Operation::Known(KnownOperation::OffsetFace(p)) => p.validate(),
         Operation::Known(KnownOperation::TransformBody(p)) => p.validate(),
+        Operation::Known(op) => crate::modeling_options::validate(op),
         _ => Ok(()),
     }
 }

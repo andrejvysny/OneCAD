@@ -44,7 +44,8 @@ impl Interaction {
             Operation::Known(KnownOperation::Extrude(params)),
         );
         let distance = ParameterKey::from(NumericParameter::ExtrudeDistance);
-        self.begin_operation(record, vec![distance], Some(distance), gesture)
+        let fields = declared_keys(&record.op);
+        self.begin_operation(record, fields, Some(distance), gesture)
     }
 
     pub(crate) fn begin_operation(
@@ -59,6 +60,16 @@ impl Interaction {
 
     pub(crate) fn begin_edit(&mut self, record: OperationRecord, gesture: u64) -> Vec<Effect> {
         self.begin_parameter_edit(record, NumericParameter::ExtrudeDistance, gesture)
+    }
+
+    pub(crate) fn begin_operation_edit(
+        &mut self,
+        record: OperationRecord,
+        gesture: u64,
+    ) -> Vec<Effect> {
+        let fields = declared_keys(&record.op);
+        let focus = fields.first().copied();
+        self.start(record, &fields, focus, gesture, true)
     }
 
     pub(crate) fn begin_parameter_edit(
@@ -137,12 +148,10 @@ impl Interaction {
     /// Only an editing tool with a draft has anything to re-evaluate; a commit in
     /// flight is not a candidate and is never re-sent.
     pub(crate) fn republish(&mut self) -> Vec<Effect> {
-        if self
-            .tool
-            .as_ref()
-            .filter(|tool| tool.phase == SessionPhase::Editing)
-            .is_none_or(|tool| tool.draft.is_empty())
-        {
+        if self.tool.as_ref().is_none_or(|tool| {
+            tool.phase != SessionPhase::Editing
+                || tool.params.active().next().is_some() && tool.draft.is_empty()
+        }) {
             return Vec::new();
         }
         self.refresh()
@@ -309,9 +318,11 @@ fn validate_bindings(operation: &KnownOperation) -> Result<(), String> {
         }
         KnownOperation::OffsetFace(p) => validate_faces(&p.face_ids, &p.faces, p.target_body),
         KnownOperation::TransformBody(params) => params.validate(),
-        KnownOperation::LinearPattern(_) | KnownOperation::CircularPattern(_) => {
-            Err("New pattern preview is not available in native authoring".into())
-        }
+        KnownOperation::Gear(params) => params.validate(),
+        KnownOperation::LinearPattern(_)
+        | KnownOperation::CircularPattern(_)
+        | KnownOperation::MirrorBody(_)
+        | KnownOperation::Boolean(_) => crate::modeling_options::validate(operation),
         KnownOperation::FeaturePattern(_) => {
             Err("FeaturePattern preview requires authoritative source expansion".into())
         }

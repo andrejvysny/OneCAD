@@ -21,11 +21,31 @@ use onecad_interaction::{
 use std::sync::mpsc::{self, TryRecvError};
 
 enum Reply {
+    Elements(
+        ElementOperation,
+        mpsc::Receiver<Result<Vec<onecad_core::document::refs::ElementRef>, String>>,
+    ),
+    Hole(
+        mpsc::Receiver<
+            Result<
+                (
+                    onecad_core::document::refs::ElementRef,
+                    onecad_core::math::Vec3,
+                ),
+                String,
+            >,
+        >,
+    ),
     Edge(
         EdgeOpKind,
         mpsc::Receiver<Result<api::StagedEdgeOp, String>>,
     ),
     Offset(mpsc::Receiver<Result<api::StagedOffsetFace, String>>),
+}
+
+enum ElementOperation {
+    Shell,
+    Revolve(onecad_core::document::refs::SketchRegionRef),
 }
 
 /// A staging request in flight for the operation the user chose.
@@ -178,6 +198,39 @@ pub(crate) fn poll(app: &mut App) {
     };
     let size = Scalar::new(DEFAULT_OPERATION_SIZE_MM);
     let bound = match &pending.reply {
+        Reply::Elements(kind, receiver) => match receiver.try_recv() {
+            Ok(result) => result.and_then(|refs| match kind {
+                ElementOperation::Shell => {
+                    onecad_interaction::modeling_records::shell(refs, RecordId::new(), pending.step)
+                }
+                ElementOperation::Revolve(profile) => {
+                    let edge = refs
+                        .into_iter()
+                        .next()
+                        .ok_or("Axis staging returned no edge")?;
+                    onecad_interaction::modeling_records::revolve(
+                        profile.clone(),
+                        edge,
+                        RecordId::new(),
+                        pending.step,
+                    )
+                }
+            }),
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err(stopped()),
+        },
+        Reply::Hole(receiver) => match receiver.try_recv() {
+            Ok(result) => result.and_then(|(face, point)| {
+                onecad_interaction::modeling_records::hole(
+                    face,
+                    point,
+                    RecordId::new(),
+                    pending.step,
+                )
+            }),
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err(stopped()),
+        },
         Reply::Edge(kind, receiver) => match receiver.try_recv() {
             Ok(staged) => staged.and_then(|staged| {
                 operand_binding::bind_edge_op(*kind, &staged, size, RecordId::new(), pending.step)
@@ -243,4 +296,107 @@ fn refuse(app: &mut App, message: String) {
         .diagnostics
         .record(Source::Model, State::Rejected, &message);
     app.doc.status = message;
+}
+
+fn stage_pick(
+    pick: &TopologyRef,
+    kind: onecad_core::document::refs::ElementKind,
+) -> api::StagePick {
+    api::StagePick {
+        body: pick.body,
+        kind,
+        address: match &pick.id {
+            TopologyId::Snapshot(key) => api::StageAddress::TopoKey(key.as_str().into()),
+            TopologyId::Element(id) => api::StageAddress::Element(id.as_str().into()),
+        },
+    }
+}
+
+pub(crate) fn begin_shell(app: &mut App) {
+    let Some((context, picks)) = operands(app, Operand::Face) else {
+        return;
+    };
+    let picks = picks
+        .iter()
+        .map(|pick| stage_pick(pick, onecad_core::document::refs::ElementKind::Face))
+        .collect();
+    let (sender, receiver) = mpsc::channel();
+    let request = Request::Elements {
+        context: context.clone(),
+        picks,
+        sender,
+    };
+    submit(
+        app,
+        request,
+        context,
+        Reply::Elements(ElementOperation::Shell, receiver),
+        "shell",
+    );
+}
+
+pub(crate) fn hole_ready(app: &App) -> bool {
+    operands(app, Operand::Face).is_some_and(|(_, picks)| picks.len() == 1)
+}
+
+pub(crate) fn begin_hole(app: &mut App) {
+    let Some((context, picks)) = operands(app, Operand::Face).filter(|(_, picks)| picks.len() == 1)
+    else {
+        return;
+    };
+    let pick = stage_pick(&picks[0], onecad_core::document::refs::ElementKind::Face);
+    let (sender, receiver) = mpsc::channel();
+    let request = Request::Hole {
+        context: context.clone(),
+        pick,
+        sender,
+    };
+    submit(app, request, context, Reply::Hole(receiver), "hole");
+}
+
+fn revolve_operands(app: &App) -> Option<(onecad_interaction::ProfileSelection, TopologyRef)> {
+    let context = app.doc.interaction.context.as_ref()?;
+    let mut profile = None;
+    let mut edge = None;
+    for item in app.doc.selection.items() {
+        match item {
+            SelectionItem::Profile(p) if profile.is_none() && &p.context == context => {
+                profile = Some((**p).clone())
+            }
+            SelectionItem::Edge(p) if edge.is_none() && p.scene == context.scene => {
+                edge = Some(p.clone())
+            }
+            _ => return None,
+        }
+    }
+    Some((profile?, edge?))
+}
+
+pub(crate) fn revolve_ready(app: &App) -> bool {
+    revolve_operands(app).is_some() || crate::revolve_ui::ready(app)
+}
+
+pub(crate) fn begin_revolve(app: &mut App) {
+    let Some((profile, edge)) = revolve_operands(app) else {
+        crate::revolve_ui::begin(app);
+        return;
+    };
+    let context = profile.context;
+    let picks = vec![stage_pick(
+        &edge,
+        onecad_core::document::refs::ElementKind::Edge,
+    )];
+    let (sender, receiver) = mpsc::channel();
+    let request = Request::Elements {
+        context: context.clone(),
+        picks,
+        sender,
+    };
+    submit(
+        app,
+        request,
+        context,
+        Reply::Elements(ElementOperation::Revolve(profile.profile), receiver),
+        "revolve",
+    );
 }

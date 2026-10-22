@@ -74,6 +74,7 @@ pub(crate) fn history_editor(app: &mut App, ui: &mut Ui, record_id: &str) {
         ui.group(|ui| {
             ui.set_width(ui.available_width());
             ui.strong(format!("Edit {}", tool.record.name));
+            FeatureCardRows::inline(ui, |rows| crate::modeling_ui::rows(app, rows, &tool));
             if choices(&tool) > 1 {
                 ui.label("Parameter");
                 crate::parameter_ui::selector(app, ui, &tool);
@@ -188,6 +189,7 @@ fn card_rows(
     response: &mut Option<egui::Response>,
 ) {
     crate::extrude_ui::rows(app, rows, tool);
+    crate::modeling_ui::rows(app, rows, tool);
     if choices(tool) > 1 {
         rows.row("Parameter", |ui| {
             crate::parameter_ui::selector(app, ui, tool);

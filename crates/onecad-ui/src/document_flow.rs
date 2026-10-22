@@ -151,6 +151,8 @@ impl Flow {
                     | Action::BeginOperation { .. }
                     | Action::BeginEdit { .. }
                     | Action::BeginParameterEdit { .. }
+                    | Action::BeginOperationEdit { .. }
+                    | Action::ModelingOptionsChanged { .. }
             )
     }
 

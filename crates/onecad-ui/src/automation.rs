@@ -60,6 +60,7 @@ impl ToolId {
             Self::Boolean => "boolean",
             Self::LinearPattern => "linearPattern",
             Self::CircularPattern => "circularPattern",
+            Self::MirrorBody => "mirrorBody",
             Self::FeaturePattern => "featurePattern",
             Self::Spline => "spline",
             Self::PenStroke => "penStroke",
@@ -169,6 +170,12 @@ fn parameter_name(parameter: NumericParameter) -> &'static str {
         NumericParameter::TransformTranslation(ParameterAxis::Y) => "translationY",
         NumericParameter::TransformTranslation(ParameterAxis::Z) => "translationZ",
         NumericParameter::TransformRotationAngle => "rotationAngle",
+        NumericParameter::GearModule => "gearModule",
+        NumericParameter::GearHeight => "gearHeight",
+        NumericParameter::GearPressureAngle => "gearPressureAngle",
+        NumericParameter::GearAxleDiameter => "gearAxleDiameter",
+        NumericParameter::GearOffsetDiameter => "gearOffsetDiameter",
+        NumericParameter::GearOffsetDistance => "gearOffsetDistance",
     }
 }
 

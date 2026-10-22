@@ -140,9 +140,7 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
                     .and_then(|display| {
                         display.records.iter().find(|record| record.record_id == id)
                     })
-                    .is_some_and(|record| {
-                        !onecad_interaction::numeric_parameters(&record.op).is_empty()
-                    })
+                    .is_some_and(|record| crate::modeling_ui::editable(&record.op))
             }),
             "Select an editable feature first",
         ),
@@ -160,6 +158,32 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
             app,
             crate::operation_start::faces_ready(app),
             "Select faces of one body first",
+        ),
+        ToolId::Shell => model_view(
+            app,
+            crate::operation_start::faces_ready(app),
+            "Select the faces to remove from one body",
+        ),
+        ToolId::Hole => model_view(
+            app,
+            crate::operation_start::hole_ready(app),
+            "Select one planar face first",
+        ),
+        ToolId::Revolve => model_view(
+            app,
+            crate::operation_start::revolve_ready(app),
+            "Select a profile with a sketch line, or multi-select a profile and an axis edge",
+        ),
+        ToolId::LinearPattern | ToolId::CircularPattern | ToolId::MirrorBody => model_view(
+            app,
+            crate::modeling_ui::selected_bodies(app).is_some_and(|bodies| bodies.len() == 1),
+            "Select one body first",
+        ),
+        ToolId::Generators => model_view(app, true, "Finish the current operation first"),
+        ToolId::Boolean => model_view(
+            app,
+            crate::modeling_ui::selected_bodies(app).is_some_and(|bodies| bodies.len() >= 2),
+            "Select the target body, then tool bodies using multi-select",
         ),
         ToolId::Import => gate(
             crate::bars::replacement_allowed(app),
@@ -286,6 +310,14 @@ pub(crate) fn activate(app: &mut App, ctx: &Context, id: ToolId) {
         ToolId::Fillet => crate::operation_start::begin_edge_op(app, EdgeOpKind::Fillet),
         ToolId::Chamfer => crate::operation_start::begin_edge_op(app, EdgeOpKind::Chamfer),
         ToolId::OffsetFace => crate::operation_start::begin_offset_face(app),
+        ToolId::Shell => crate::operation_start::begin_shell(app),
+        ToolId::Hole => crate::operation_start::begin_hole(app),
+        ToolId::Revolve => crate::operation_start::begin_revolve(app),
+        ToolId::LinearPattern
+        | ToolId::CircularPattern
+        | ToolId::MirrorBody
+        | ToolId::Boolean
+        | ToolId::Generators => crate::modeling_ui::begin_body_operation(app, id),
         ToolId::Import => app.document_request(crate::document_flow::Request::Import(None)),
         ToolId::Section => crate::display_menu::toggle(app, ctx.content_rect().shrink(48.0)),
         ToolId::InsertComponent if crate::editor_facade::PREVIEW_FACADES => {

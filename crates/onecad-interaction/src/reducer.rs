@@ -11,6 +11,16 @@ impl Interaction {
 
     fn route(&mut self, action: Action) -> Vec<Effect> {
         match action {
+            Action::BeginOperationEdit {
+                record,
+                gesture,
+                context,
+            } => {
+                if self.context.as_ref() != Some(&context) {
+                    return Vec::new();
+                }
+                self.begin_operation_edit(*record, gesture)
+            }
             Action::ContextChanged(context) => self.change_context(context),
             Action::ClearSelection => {
                 self.selection = None;
@@ -66,6 +76,9 @@ impl Interaction {
             Action::ParameterChanged { key, text } => self.change_parameter(key, text),
             Action::FocusParameter(key) => self.focus_parameter(key),
             Action::ParameterDrag(phase) => self.drag(phase),
+            Action::ModelingOptionsChanged { tag, options } => {
+                self.change_modeling_options(tag, options)
+            }
             Action::ExtrudeModeChanged(mode) => self.change_extrude_mode(mode),
             Action::ExtrudeTargetChanged { body, context } => {
                 self.change_extrude_target(body, context)

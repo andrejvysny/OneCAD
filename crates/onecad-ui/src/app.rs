@@ -213,6 +213,8 @@ impl App {
                 | Action::BeginOperation { .. }
                 | Action::BeginEdit { .. }
                 | Action::BeginParameterEdit { .. }
+                | Action::BeginOperationEdit { .. }
+                | Action::ModelingOptionsChanged { .. }
         ) {
             self.doc.command_status = false;
         }

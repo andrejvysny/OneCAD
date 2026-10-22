@@ -58,6 +58,72 @@ Permission denial, unavailable capture and skipped checks are blockers, not
 passes. Stop only test-owned processes when the session ends; retain QA files
 and evidence for review.
 
+## Shared desktop and iPad modeling commands
+
+Both hosts use `onecad-ui`, `onecad-interaction` and the same application
+services. The contextual pill exposes the common operations; **More tools**
+lists additional commands and explains selection requirements. On iPad, use
+the selection toolbar's multi-select mode for multiple operands. On desktop,
+use multi-select or the selection modifier.
+
+| Command | Starting selection | Controls |
+|---|---|---|
+| Extrude | Closed sketch profile | Distance, symmetric or through-all extent; draft for blind extent; new/add/cut/intersect and target body |
+| Revolve | Profile containing a sketch line, or profile plus body edge | Sketch-line axis chooser, angle, new/add/cut/intersect and target |
+| Fillet / Chamfer | Edges of one body | Radius / equal-leg distance; prepared tangent closure |
+| Offset face | Faces of one body | Signed offset, or radius/diameter for a single cylindrical face; prepared face closure |
+| Shell | Faces to remove from one body | Wall thickness |
+| Hole | One planar face | World center, diameter, blind/through-all, simple/counterbore/countersink |
+| Move / Rotate | One body | Translation, rotation and keep-original copy |
+| Boolean | Target body followed by one or more tool bodies | Union/subtract/intersect, target chooser and keep tools |
+| Linear pattern | One body | Spacing, count, direction, separate/fused result |
+| Circular pattern | One body | Angle, count, axis origin/direction, separate/fused result |
+| Mirror body | One body | Plane point/normal, separate/fused result |
+| Gear generator | No geometry required | Spur gear module, height, pressure angle, tooth count, world center and optional bores |
+
+New candidates use actual worker previews. Create is disabled while expression
+evaluation or preview is pending, invalid or refused. Cancel must leave no
+document edit. A changed option invalidates the previous preview, and an obsolete
+worker answer must never re-enable Create. Edit a saved feature through its
+history row; existing-feature edits currently report preview unavailable and
+regenerate on Apply. They do not have rollback-prefix preview integration yet.
+
+Qualify these commands on **both** physical hosts: create, change every applicable
+control, cancel, create again, undo/redo, save, quit and reopen. Include compact
+iPad layouts and keyboard-free value entry. Choice controls use
+`onecad.option.*` automation identities; numeric fields and footer buttons retain
+the existing `onecad.param.*`, dimension-input and operation identities.
+
+The GPU-free integration lane is:
+
+```sh
+ONECAD_REQUIRE_WORKER=1 ONECAD_WORKER_PATH="$PWD/worker/build/onecad-worker" \
+  cargo test -p onecad-interaction --test real_modeling_creation
+```
+
+It authors real candidates through the reducer, checks body counts/volumes and
+undo on a solid plate, and saves/reopens the Boolean result. The existing
+`real_edge_ops` lane covers extrude, fillet, chamfer, offset and transforms. These
+are service/interaction checks, not substitutes for physical host acceptance.
+
+Remaining distinctions to preserve during qualification:
+
+- Sweep and Loft have no worker executor. FeaturePattern preview refuses because
+  authoritative source expansion is missing. Their commands remain disabled.
+- To-face/two-direction extrusion, asymmetric chamfer reference-face picking,
+  total-wall face offsets and multipoint/threaded hole
+  authoring still require additional operand/mode controls. Existing supported
+  scalar fields can be edited without inventing missing references.
+- Gear creation uses a world frame and spur geometry. Face seating, helical gears
+  and advanced coefficient controls are not part of this entry flow.
+- Shelling a 60×40×4 plate **after** a centered through-hole can produce a valid
+  preview and committed geometry but an ambiguous split-face repair report.
+  Treat that as NeedsRepair; do not report a clean success or weaken reference
+  scoring. Shell-before-hole on the solid plate is the basic acceptance case.
+- Library component placement/detachment, standalone draft, datum tooling and
+  extension commands are separate workflows; adding a catalog label does not
+  establish that they execute.
+
 ## From-New plate semantic checks
 
 Author a fully constrained 80×50 mm plate with two Ø6 mm holes, each 15 mm

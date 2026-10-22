@@ -164,7 +164,7 @@ pub fn bind_offset_face(
 }
 
 /// Each ref must be a promoted persistent element of `kind` on `body`.
-fn persistent_ids(
+pub(crate) fn persistent_ids(
     refs: &[ElementRef],
     kind: ElementKind,
     body: BodyId,
@@ -229,15 +229,12 @@ pub fn begin_bound(
     gesture: u64,
     context: DocumentContext,
 ) -> Result<Action, String> {
-    let field: ParameterKey = crate::numeric_parameters(&record.op)
-        .first()
-        .ok_or("Bound operation has no numeric parameter")?
-        .parameter
-        .into();
+    let fields = crate::declared_keys(&record.op);
+    let focus = fields.first().copied();
     Ok(Action::BeginOperation {
         record: Box::new(record),
-        fields: vec![field],
-        focus: Some(field),
+        fields,
+        focus,
         gesture,
         context,
     })

@@ -147,6 +147,11 @@ pub enum CommitStatus {
 
 #[derive(Debug)]
 pub enum Action {
+    BeginOperationEdit {
+        record: Box<OperationRecord>,
+        gesture: u64,
+        context: DocumentContext,
+    },
     ContextChanged(Option<DocumentContext>),
     SelectProfile(Box<ProfileSelection>),
     /// Deselect authoring inputs without changing a tool or the document.
@@ -185,6 +190,10 @@ pub enum Action {
     /// Moves the projected draft only; nothing is re-evaluated.
     FocusParameter(ParameterKey),
     ParameterDrag(DragPhase),
+    ModelingOptionsChanged {
+        tag: RequestTag,
+        options: crate::ModelingOptions,
+    },
     ExtrudeModeChanged(onecad_core::document::record::BooleanMode),
     /// Host admits only visible, healthy bodies from this accepted document context.
     ExtrudeTargetChanged {
