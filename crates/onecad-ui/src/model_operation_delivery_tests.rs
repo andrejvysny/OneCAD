@@ -245,3 +245,35 @@ async fn selection_change_while_staging_refuses_the_start() {
     );
     host.stop().await;
 }
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic pointer delivery is not physical acceptance"]
+async fn sketch_chooser_planes_and_strip_actions_are_named() {
+    use onecad_core::sketch::WorldPlane;
+    let root = tempfile::tempdir().unwrap();
+    let mut host = boxed(root.path()).await;
+    crate::item_selection::retain(&mut host.app, |_| false);
+    tap(&mut host, &id::tool(ToolId::Sketch));
+    named(&mut host, id::plane(WorldPlane::XZ));
+    named(&mut host, id::plane(WorldPlane::YZ));
+    tap(&mut host, id::plane(WorldPlane::XY));
+    // Finish enables once the opened session is Active (`sketch_ui::can_exit`).
+    pump_until(&mut host.app, &host.context, &mut host.frame, |app| {
+        app.doc
+            .sketch
+            .session
+            .as_ref()
+            .is_some_and(|session| session.phase == onecad_interaction::sketch::SketchPhase::Active)
+    })
+    .await;
+    let plane = host.app.doc.sketch.session.as_ref().unwrap().plane;
+    assert_eq!(plane, WorldPlane::XY.plane());
+    named(&mut host, &id::tool(ToolId::Line));
+    named(&mut host, id::DISCARD_SKETCH);
+    tap(&mut host, id::FINISH_SKETCH);
+    pump_until(&mut host.app, &host.context, &mut host.frame, |app| {
+        !app.sketch_active()
+    })
+    .await;
+    host.stop().await;
+}

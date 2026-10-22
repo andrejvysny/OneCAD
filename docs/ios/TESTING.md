@@ -44,8 +44,11 @@ in `touch_menu.rs`) and exported through `onecad_ios_a11y_snapshot`
 that pill tools, the multi-select switch, operation fields and footer,
 document tabs and the sketch strip actions appear in an egui AccessKit
 `TreeUpdate` (`onecad-ui` `automation::tests`, `pill::automation_tests`,
-`session_strip::tests`). History rows, plane buttons and the viewport are named
-by App-level code those tests do not render. Repeats of one id in a snapshot
+`session_strip::tests`). The ignored Metal + real-worker host tests in
+`model_operation_delivery_tests` (`ONECAD_REQUIRE_GPU=1 ONECAD_REQUIRE_WORKER=1`)
+tap the running editor by these ids, including the viewport, history rows,
+document tabs and plane buttons that only the full App draws; they are macOS
+evidence, not simulator acceptance. Repeats of one id in a snapshot
 get `#2`, `#3` (HOST.md). UI tests address elements by identifier with
 `descendants(matching: .any)`, because a snapshot node's XCUITest element type
 follows its role (button, static text or other).
