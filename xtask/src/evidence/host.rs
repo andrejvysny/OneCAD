@@ -167,7 +167,11 @@ pub(super) fn run(args: &[String]) -> Result<()> {
     )?;
     Ok(())
 }
-fn worker(directory: &Path, environment: &BTreeMap<String, String>) -> Result<(String, String)> {
+/// The staged Mac sidecar: manifest hash, OCCT 8.0.1 fingerprint and selftest.
+pub(super) fn worker(
+    directory: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Result<(String, String)> {
     let path = environment
         .get("ONECAD_WORKER_PATH")
         .filter(|path| !path.is_empty())

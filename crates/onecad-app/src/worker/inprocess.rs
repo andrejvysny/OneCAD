@@ -54,6 +54,22 @@ const SLOT_WAIT: Duration = Duration::from_secs(30);
 /// The identity `build.rs` embedded from `ONECAD_EMBEDDED_WORKER_DIR`.
 const APP_IDENTITY: &str = include_str!(concat!(env!("OUT_DIR"), "/onecad-embedded-kernel.json"));
 
+/// The identity manifest (v2) this binary verifies every in-process run
+/// against: the copy `build.rs` embedded. `None` when the build embedded none
+/// (a debug build without `ONECAD_EMBEDDED_WORKER_DIR`). Acceptance evidence
+/// reports it so a verifier can compare it with the bundle that was built.
+#[must_use]
+pub fn embedded_identity_json() -> Option<&'static str> {
+    (!APP_IDENTITY.trim().is_empty()).then_some(APP_IDENTITY)
+}
+
+/// The identity manifest (v2) of the kernel bundle actually linked into this
+/// binary (`onecad-embedded-worker`'s copy); `None` in a stub build.
+#[must_use]
+pub fn linked_identity_json() -> Option<&'static str> {
+    onecad_embedded_worker::identity_json()
+}
+
 static LAUNCHED: AtomicU64 = AtomicU64::new(0);
 static LIVE: AtomicU64 = AtomicU64::new(0);
 static ABANDONED: AtomicU64 = AtomicU64::new(0);
@@ -152,11 +168,10 @@ impl InProcessHost {
     /// Everything checkable before a thread exists (`preflight::check`).
     fn preflight(&self) -> Result<Option<HelloAxes>, String> {
         let abi = onecad_embedded_worker::abi_version().map_err(|e| e.to_string())?;
-        let app = (!APP_IDENTITY.trim().is_empty()).then_some(APP_IDENTITY);
         let inputs = preflight::Inputs {
             abi,
             explicit: self.config.identity.as_deref(),
-            app,
+            app: embedded_identity_json(),
             linked: onecad_embedded_worker::identity_json(),
             journal_dir: self.config.journal_dir.as_deref(),
         };

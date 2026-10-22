@@ -37,9 +37,15 @@ extension XCTestCase {
     }
 
     /// Launches the app and waits until the canvas host view is on screen.
+    /// The gate's run id (`TEST_RUNNER_ONECAD_RUN_ID`, seen here without the
+    /// prefix) is passed on: the app is a separate process, and anything it
+    /// records must name this run.
     @MainActor
     func launchOneCAD(file: StaticString = #filePath, line: UInt = #line) -> XCUIApplication {
         let app = XCUIApplication()
+        if let runID = ProcessInfo.processInfo.environment["ONECAD_RUN_ID"] {
+            app.launchEnvironment["ONECAD_RUN_ID"] = runID
+        }
         app.launch()
         waitUntil(app.element(id: OneCADID.canvas), .exists, "canvas never appeared",
                   file: file, line: line)

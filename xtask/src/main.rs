@@ -20,9 +20,10 @@ fn run() -> Result {
         "check-rust-layers" | "verify-modeling-coverage" | "verify-modeling-contracts" => {
             checks::run(command, args)
         }
-        "native-host-gate" | "verify-render-captures" | "kernelbench-manifest" => {
-            evidence::run(command, args)
-        }
+        "native-host-gate"
+        | "ios-simulator-gate"
+        | "verify-render-captures"
+        | "kernelbench-manifest" => evidence::run(command, args),
         "bake-cad-icons" => icons::run(args),
         "check-hygiene" => hygiene::run(args),
         "prepare-release-materials"

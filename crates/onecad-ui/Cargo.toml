@@ -11,6 +11,9 @@ default = ["desktop"]
 # The eframe/winit lifecycle, rfd dialogs and the AppKit menu bar. The iPadOS host
 # (`onecad-ios`) builds without it and drives `App::frame` itself.
 desktop = ["dep:eframe", "dep:rfd", "dep:muda", "dep:arboard", "onecad-app/sidecar"]
+# Acceptance-only: lets the iPadOS test hooks (`onecad-ios/test-hooks`) read
+# the active document's application state. Never part of a shipped build.
+semantic-probe = []
 
 [[bin]]
 name = "onecad-ui"

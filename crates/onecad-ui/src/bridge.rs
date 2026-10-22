@@ -126,6 +126,10 @@ pub enum Message {
 
 pub struct Shared {
     pub(crate) input_trace: Arc<crate::input_trace::Trace>,
+    /// The started document host, for acceptance probes; cleared when the actor
+    /// ends so the host context's sink (which holds this `Shared`) is released.
+    #[cfg(feature = "semantic-probe")]
+    pub(crate) probe: Mutex<Option<crate::host::DocumentAccess>>,
     #[cfg(test)]
     pub fail_next_gesture_capture: std::sync::atomic::AtomicBool,
     #[cfg(test)]
@@ -165,6 +169,8 @@ impl Shared {
     pub(crate) fn new(context: egui::Context, budget: onecad_render::PreparationBudget) -> Self {
         Self {
             input_trace: crate::input_trace::Trace::from_environment(&context),
+            #[cfg(feature = "semantic-probe")]
+            probe: Mutex::new(None),
             #[cfg(test)]
             fail_next_gesture_capture: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -533,6 +539,15 @@ async fn actor(
         shared.wake();
         return;
     }
+    #[cfg(feature = "semantic-probe")]
+    if let Ok(mut probe) = shared.probe.lock() {
+        *probe = Some(crate::host::DocumentAccess {
+            state: state.clone(),
+            host: host.clone(),
+            documents: paths.documents.clone(),
+            runtime: tokio::runtime::Handle::current(),
+        });
+    }
     let mut backend = Backend {
         state,
         host,
@@ -627,6 +642,10 @@ async fn actor(
             .await;
     if let Err(error) = closed {
         eprintln!("Document close failed; recovery retained: {error}");
+    }
+    #[cfg(feature = "semantic-probe")]
+    if let Ok(mut probe) = shared.probe.lock() {
+        *probe = None;
     }
     let _ = sender.send(Message::Stopped);
     shared.wake();

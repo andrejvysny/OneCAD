@@ -17,7 +17,10 @@ use super::resolve_worker_path;
 use super::{SupervisorConfig, WorkerManager};
 
 #[cfg(feature = "embedded-kernel")]
-pub use super::inprocess::{in_process_counters, in_process_relaunch_required, InProcessCounters};
+pub use super::inprocess::{
+    embedded_identity_json, in_process_counters, in_process_relaunch_required,
+    linked_identity_json, InProcessCounters,
+};
 
 /// Where this process's workers run.
 #[derive(Debug, Clone)]

@@ -1,0 +1,12 @@
+{
+  "description": "Exact XCTest inventory of the iPadAcceptance test plan, checked by cargo xtask ios-simulator-gate (docs/ios/SIMULATOR_GATE.md step 6). Identifiers are <bundle>/<Suite>/<test()>. approvedSkips entries are {\"test\": <identifier>, \"reason\": <why>}.",
+  "tests": [
+    "OneCADNativeTests/SemanticHookTests/testInjectedFaultsHitTheNormalPaths()",
+    "OneCADNativeTests/SemanticHookTests/testKernelIdentityIsTheInProcessSimulatorKernel()",
+    "OneCADNativeTests/SemanticHookTests/testMacFixtureRoundTrip()",
+    "OneCADNativeTests/TestHookPingTests/testPingThroughTestCommand()",
+    "OneCADUITests/LaunchTests/testLaunchShowsCanvasAndFileMenu()",
+    "OneCADUITests/OrientationTests/testRotationKeepsAppResponsive()"
+  ],
+  "approvedSkips": []
+}

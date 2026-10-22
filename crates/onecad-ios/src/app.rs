@@ -77,6 +77,9 @@ pub struct IosApp {
     pub(crate) opens: Vec<PathBuf>,
     /// The latest Pencil accessory action, applied at the start of the next frame.
     pub(crate) accessory: Option<onecad_interaction::touch::accessory::AccessoryAction>,
+    /// Run id, pending results and injected faults of the semantic test hooks.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) semantic: crate::test_hooks_semantic::State,
     _logging: Box<dyn std::any::Any>,
 }
 
@@ -93,6 +96,9 @@ impl IosApp {
         let gpu = gpu::create_render_state().map_err(internal)?;
         let host = Arc::new(Queue::new(ctx.clone()));
         let dialogs = Arc::new(Dialogs(host.clone()));
+        // A journal fault a crash left armed must not outlive that launch.
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks_semantic::repair_journal(&layout.app_support);
         let backend =
             WorkerBackend::Embedded(EmbeddedKernelConfig::for_app_support(&layout.app_support));
         let mut editor =
@@ -115,6 +121,8 @@ impl IosApp {
             request_strings: Vec::new(),
             opens: Vec::new(),
             accessory: None,
+            #[cfg(feature = "test-hooks")]
+            semantic: crate::test_hooks_semantic::State::new(layout.app_support.clone()),
             _logging: logging,
         })
     }

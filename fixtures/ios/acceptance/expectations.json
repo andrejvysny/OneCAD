@@ -1,0 +1,164 @@
+{
+  "version": 1,
+  "description": "Geometry expectations for docs/ios/SIMULATOR_GATE.md step 8. Values are constant + piCoefficient * pi (mm^3 / mm). Read by the onecad-app oracle (tests/ios_simulator_artifacts.rs) and re-checked by cargo xtask ios-simulator-gate.",
+  "tolerance": {
+    "volumeRelative": 1e-06,
+    "editDecreaseRelative": 0.0001,
+    "boundsAbsolute": 1e-07,
+    "boundsRelative": 1e-09
+  },
+  "referencePlate": {
+    "width": 60.0,
+    "height": 40.0,
+    "thickness": 4.0,
+    "holeDiameter": 6.0,
+    "volume": {
+      "constant": 9600.0,
+      "piCoefficient": -36.0
+    }
+  },
+  "artifacts": [
+    {
+      "name": "mac-plate",
+      "source": "mac",
+      "required": true,
+      "description": "Reference plate the oracle authors headlessly on macOS (60 x 40 rectangle, centred 6 mm hole, fully constrained, extruded 4 mm); the simulator round-trip test opens it.",
+      "features": [
+        "Sketch",
+        "Extrude"
+      ],
+      "volume": {
+        "constant": 9600.0,
+        "piCoefficient": -36.0
+      },
+      "bounds": {
+        "min": [
+          -40.0,
+          0.0,
+          0.0
+        ],
+        "max": [
+          0.0,
+          60.0,
+          4.0
+        ]
+      },
+      "solids": 1,
+      "sketch": {
+        "status": "FullyConstrained",
+        "dof": 0,
+        "entities": 14,
+        "constraints": 13
+      }
+    },
+    {
+      "name": "mac-plate-resaved",
+      "source": "simulator",
+      "required": true,
+      "description": "The simulator's Save As of mac-plate after it regenerated in-process; must keep mac-plate's document, feature records and sketch.",
+      "features": [
+        "Sketch",
+        "Extrude"
+      ],
+      "volume": {
+        "constant": 9600.0,
+        "piCoefficient": -36.0
+      },
+      "bounds": {
+        "min": [
+          -40.0,
+          0.0,
+          0.0
+        ],
+        "max": [
+          0.0,
+          60.0,
+          4.0
+        ]
+      },
+      "solids": 1,
+      "sketch": {
+        "status": "FullyConstrained",
+        "dof": 0,
+        "entities": 14,
+        "constraints": 13
+      },
+      "roundTripOf": "mac-plate"
+    },
+    {
+      "name": "plate",
+      "source": "simulator",
+      "required": true,
+      "description": "The reference plate modelled through the iPad UI: an axis-aligned 60 x 40 rectangle with the 6 mm hole sketched on a plane parallel to XY and extruded 4 mm along Z. Its position and which side runs along X are the test's choice, so only extents are fixed (X and Y unordered).",
+      "features": [
+        "Sketch",
+        "Extrude"
+      ],
+      "volume": {
+        "constant": 9600.0,
+        "piCoefficient": -36.0
+      },
+      "extents": [
+        40.0,
+        60.0,
+        4.0
+      ],
+      "extentsXYUnordered": true,
+      "solids": 1
+    },
+    {
+      "name": "plate-fillet",
+      "source": "simulator",
+      "required": true,
+      "description": "plate with one 4 mm vertical outer edge filleted: a constant-radius blend on a straight 90 degree edge removes (1 - pi/4) r^2 L.",
+      "parameters": {
+        "edges": 1,
+        "edgeLength": 4.0,
+        "radius": 1.0
+      },
+      "features": [
+        "Sketch",
+        "Extrude",
+        "Fillet"
+      ],
+      "decreaseFromReference": {
+        "constant": 4.0,
+        "piCoefficient": -1.0
+      },
+      "extents": [
+        40.0,
+        60.0,
+        4.0
+      ],
+      "extentsXYUnordered": true,
+      "solids": 1
+    },
+    {
+      "name": "plate-chamfer",
+      "source": "simulator",
+      "required": true,
+      "description": "plate with one 4 mm vertical outer edge chamfered: an equal-distance chamfer on a straight 90 degree edge removes d^2 L / 2.",
+      "parameters": {
+        "edges": 1,
+        "edgeLength": 4.0,
+        "distance": 1.0
+      },
+      "features": [
+        "Sketch",
+        "Extrude",
+        "Chamfer"
+      ],
+      "decreaseFromReference": {
+        "constant": 2.0,
+        "piCoefficient": 0.0
+      },
+      "extents": [
+        40.0,
+        60.0,
+        4.0
+      ],
+      "extentsXYUnordered": true,
+      "solids": 1
+    }
+  ]
+}

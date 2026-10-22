@@ -15,6 +15,7 @@
 		2F65209BFC0FA9B7511501D4 /* TouchInputController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6CE29B1BFA01D6626DD9C166 /* TouchInputController.swift */; };
 		30195CCDBC9F4E7FC27E2BE6 /* RustBridge+Snapshots.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBCB6506270C09AB52F25E97 /* RustBridge+Snapshots.swift */; };
 		35CB850E329CA06EFA5EBE08 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7211051842CA6F425D126385 /* AppDelegate.swift */; };
+		4858EE15AFF2B9F158FACAD6 /* SemanticHooks.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E5BC0DABAF4683B8021EA87 /* SemanticHooks.swift */; };
 		4EF448E40EA3222EBDCC6D84 /* AccessibilityBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8D17FD7CBC9B45AF6A1BE0F /* AccessibilityBridge.swift */; };
 		57B555D4AC351FDA75CC3AC7 /* TestHookPingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B966A2E61CC04066F8180AB0 /* TestHookPingTests.swift */; };
 		5C7525FC9D16298AD0DC82E5 /* KeyInputProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0471C70A678029488DCC744E /* KeyInputProxy.swift */; };
@@ -25,6 +26,7 @@
 		8C4F6A9DEB9EBCFED712014E /* KeyInputProxy+TextInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE2DC86614E04510234744A8 /* KeyInputProxy+TextInput.swift */; };
 		911E6EE8C1089E85EC22B72C /* TouchSampleBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92B9E16789CE50F6584D00F8 /* TouchSampleBuilder.swift */; };
 		9515D5355BA1339BB7B171C3 /* RustBridge+Calls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F5236FA35EA92C24105116A /* RustBridge+Calls.swift */; };
+		997888AF9A3C422AFE33F74F /* SemanticHookTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9831A28D45556C0279AB9319 /* SemanticHookTests.swift */; };
 		A092E0A18F28E2C922893332 /* ImportFailureAlert.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4903C6E556533285E91746B3 /* ImportFailureAlert.swift */; };
 		BB77B95C47BDCB3E936A8332 /* SaveNamePrompt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66A4F5D5F5C0F04D0A1154A2 /* SaveNamePrompt.swift */; };
 		BF0525A721F55B8278E77B8E /* TextInputController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65CD96C1F39D7C8F7E4F6D1C /* TextInputController.swift */; };
@@ -61,6 +63,7 @@
 		0A4EC2F23EA9085CB4C41E5C /* OrientationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrientationTests.swift; sourceTree = "<group>"; };
 		0BE5EF688EDA7D5D43F4B535 /* MetalCanvasView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalCanvasView.swift; sourceTree = "<group>"; };
 		1641281E136736F811AD28DC /* DocumentInbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentInbox.swift; sourceTree = "<group>"; };
+		1E5BC0DABAF4683B8021EA87 /* SemanticHooks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SemanticHooks.swift; sourceTree = "<group>"; };
 		1F3CACA3512AB02265770A40 /* OneCADNativeTests-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "OneCADNativeTests-Bridging-Header.h"; sourceTree = "<group>"; };
 		436124834EE926976B75C4AC /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		47F47CBD179A10B963741C03 /* NavigationGestures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationGestures.swift; sourceTree = "<group>"; };
@@ -75,6 +78,7 @@
 		867ECAF4078A19E25234DE9F /* OneCADUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = OneCADUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		8F5236FA35EA92C24105116A /* RustBridge+Calls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "RustBridge+Calls.swift"; sourceTree = "<group>"; };
 		92B9E16789CE50F6584D00F8 /* TouchSampleBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TouchSampleBuilder.swift; sourceTree = "<group>"; };
+		9831A28D45556C0279AB9319 /* SemanticHookTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SemanticHookTests.swift; sourceTree = "<group>"; };
 		AB146270F5A32E9B4C16B0BA /* OneCAD.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = OneCAD.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AE2DC86614E04510234744A8 /* KeyInputProxy+TextInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "KeyInputProxy+TextInput.swift"; sourceTree = "<group>"; };
 		B895F357F1C733D2ADF98089 /* HostRequestCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostRequestCoordinator.swift; sourceTree = "<group>"; };
@@ -197,6 +201,8 @@
 			isa = PBXGroup;
 			children = (
 				1F3CACA3512AB02265770A40 /* OneCADNativeTests-Bridging-Header.h */,
+				1E5BC0DABAF4683B8021EA87 /* SemanticHooks.swift */,
+				9831A28D45556C0279AB9319 /* SemanticHookTests.swift */,
 				B966A2E61CC04066F8180AB0 /* TestHookPingTests.swift */,
 			);
 			path = OneCADNativeTests;
@@ -370,6 +376,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				997888AF9A3C422AFE33F74F /* SemanticHookTests.swift in Sources */,
+				4858EE15AFF2B9F158FACAD6 /* SemanticHooks.swift in Sources */,
 				57B555D4AC351FDA75CC3AC7 /* TestHookPingTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
