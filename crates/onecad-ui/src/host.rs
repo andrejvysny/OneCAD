@@ -81,10 +81,26 @@ impl Editor {
     }
 
     /// Opens a file the system handed to the app, like File › Open Recent: the same
-    /// busy/tool gates apply and a refusal is reported in the status bar.
+    /// busy/tool gates apply and a refusal is reported in the status bar. A STEP
+    /// file is imported into a new document, as File › Import would (the host
+    /// declares STEP as a type it can open).
     pub fn open_path(&mut self, path: std::path::PathBuf) {
-        self.app
-            .document_request(crate::document_flow::Request::Open(Some(path)));
+        use crate::document_flow::Request;
+        let step = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("step") || ext.eq_ignore_ascii_case("stp"));
+        self.app.document_request(if step {
+            Request::Import(Some(path))
+        } else {
+            Request::Open(Some(path))
+        });
+    }
+
+    /// The active document's tab id. A host compares it across frames to cancel
+    /// live touch contacts when the user switched documents.
+    pub fn active_tab(&self) -> u64 {
+        self.app.doc.tab
     }
 
     /// INPUT.md `drag_authoring`: see [`drag_authoring`].

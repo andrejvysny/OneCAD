@@ -18,7 +18,8 @@ pub enum Request {
     New,
     DiscardAndReplace(Box<Request>),
     Open(Option<PathBuf>),
-    Import,
+    /// `Some` imports that file without a dialog (a system-provided STEP file).
+    Import(Option<PathBuf>),
     /// Adds a STEP file to the active document's history; never opens a tab.
     InsertStep,
     Save {
@@ -33,7 +34,7 @@ impl Request {
         match self {
             Self::New => FileAction::New,
             Self::Open(_) => FileAction::Open,
-            Self::Import => FileAction::Import,
+            Self::Import(_) => FileAction::Import,
             Self::InsertStep => FileAction::InsertStep,
             Self::Save { .. } => FileAction::Save,
             Self::Export(_) => FileAction::Export,
@@ -44,7 +45,7 @@ impl Request {
     pub fn replaces_document(&self) -> bool {
         match self {
             Self::DiscardAndReplace(request) => request.replaces_document(),
-            other => matches!(other, Self::New | Self::Open(_) | Self::Import),
+            other => matches!(other, Self::New | Self::Open(_) | Self::Import(_)),
         }
     }
 }
@@ -604,7 +605,7 @@ mod tests {
     }
     #[test]
     fn only_dirty_document_replacement_or_exit_needs_confirmation() {
-        for request in [Request::New, Request::Open(None), Request::Import] {
+        for request in [Request::New, Request::Open(None), Request::Import(None)] {
             assert!(needs_confirmation(
                 &Pending::Document(request.clone()),
                 true

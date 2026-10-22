@@ -335,7 +335,7 @@ fn route_menu(
         }
         menu::Action::CloseTab => app.request_close_tab(),
         menu::Action::SaveAll => app.save_all(),
-        menu::Action::Import => app.document_request(Request::Import),
+        menu::Action::Import => app.document_request(Request::Import(None)),
         menu::Action::InsertStep => app.document_request(Request::InsertStep),
         menu::Action::Save => app.document_request(Request::Save { save_as: false }),
         menu::Action::SaveAs => app.document_request(Request::Save { save_as: true }),

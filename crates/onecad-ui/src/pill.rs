@@ -286,7 +286,7 @@ pub(crate) fn activate(app: &mut App, ctx: &Context, id: ToolId) {
         ToolId::Fillet => crate::operation_start::begin_edge_op(app, EdgeOpKind::Fillet),
         ToolId::Chamfer => crate::operation_start::begin_edge_op(app, EdgeOpKind::Chamfer),
         ToolId::OffsetFace => crate::operation_start::begin_offset_face(app),
-        ToolId::Import => app.document_request(crate::document_flow::Request::Import),
+        ToolId::Import => app.document_request(crate::document_flow::Request::Import(None)),
         ToolId::Section => crate::display_menu::toggle(app, ctx.content_rect().shrink(48.0)),
         ToolId::InsertComponent if crate::editor_facade::PREVIEW_FACADES => {
             crate::editor_facade::show_library(app)

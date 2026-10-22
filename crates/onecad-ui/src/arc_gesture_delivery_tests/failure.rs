@@ -125,7 +125,7 @@ pub(super) async fn accepted_capture_failure(mut host: Host, ids: ArcIds) {
             "recovery Save request must pass the actual frontend guard"
         );
     }
-    for request in [Request::New, Request::Import] {
+    for request in [Request::New, Request::Import(None)] {
         assert!(
             crate::document_flow::tool_blocks_request(&host.app, &request),
             "recovery saving must not authorize document replacement"

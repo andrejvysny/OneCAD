@@ -85,7 +85,10 @@ async fn run(backend: &mut Backend, request: Request) -> Result<Outcome, String>
     }
     let (request, discard) = match request {
         Request::DiscardAndReplace(request)
-            if matches!(*request, Request::New | Request::Open(_) | Request::Import) =>
+            if matches!(
+                *request,
+                Request::New | Request::Open(_) | Request::Import(_)
+            ) =>
         {
             let ticket = api::prepare_replacement_discard(&backend.state)
                 .await
@@ -159,14 +162,18 @@ async fn run_intent(backend: &mut Backend, request: Request) -> Result<Outcome, 
             };
             open(backend, &path, false).await
         }
-        Request::Import => {
-            let Some(path) = api::import_file_dialog(backend.host.clone())
-                .await
-                .map_err(|e| e.to_string())?
-            else {
+        Request::Import(path) => {
+            let path = match path {
+                Some(path) => Some(path),
+                None => api::import_file_dialog(backend.host.clone())
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .map(PathBuf::from),
+            };
+            let Some(path) = path else {
                 return Ok(Outcome::Cancelled);
             };
-            open(backend, Path::new(&path), true).await
+            open(backend, &path, true).await
         }
         Request::InsertStep => insert_step(backend).await,
     }

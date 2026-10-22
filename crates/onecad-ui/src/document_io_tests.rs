@@ -48,7 +48,7 @@ async fn typed_real_worker_import_export_roundtrip_preserves_document() {
     fs::copy(&original, &source).unwrap();
     choose(&mut backend, Some(&source));
     assert!(matches!(
-        intent(&mut backend, Request::Import).await.unwrap(),
+        intent(&mut backend, Request::Import(None)).await.unwrap(),
         Outcome::Replaced { warning: None }
     ));
     let expected = solid_properties(&backend).await;
@@ -61,7 +61,7 @@ async fn typed_real_worker_import_export_roundtrip_preserves_document() {
     choose(&mut backend, Some(&exported));
     let previous = api::get_projection(&backend.state).await.unwrap();
     assert!(matches!(
-        intent(&mut backend, Request::Import).await.unwrap(),
+        intent(&mut backend, Request::Import(None)).await.unwrap(),
         Outcome::Replaced { warning: None }
     ));
     assert_ne!(
@@ -210,7 +210,7 @@ async fn cancelled_failed_imports(backend: &mut Backend, events: &Events) {
     let count = events.publications.load(Ordering::Relaxed);
     choose(backend, None);
     assert!(matches!(
-        intent(backend, Request::Import).await.unwrap(),
+        intent(backend, Request::Import(None)).await.unwrap(),
         Outcome::Cancelled
     ));
     let worker = backend.state.live_worker().unwrap();
@@ -221,10 +221,19 @@ async fn cancelled_failed_imports(backend: &mut Backend, events: &Events) {
             .join(format!("documents/corrupt.{extension}"));
         fs::write(&corrupt, b"invalid import data").unwrap();
         choose(backend, Some(&corrupt));
-        assert!(intent(backend, Request::Import).await.is_err());
+        assert!(intent(backend, Request::Import(None)).await.is_err());
         assert!(!worker.is_retired());
         assert!(backend.state.live_worker().unwrap().is_same(&worker));
     }
+    // A system-provided file (iPadOS "Open in") is imported without a dialog.
+    let corrupt = backend.paths.root.join("documents/provided.stp");
+    fs::write(&corrupt, b"ISO-10303-21;\nnot a step body\n").unwrap();
+    choose(backend, None);
+    assert!(
+        intent(backend, Request::Import(Some(corrupt)))
+            .await
+            .is_err()
+    );
     assert_eq!(api::get_projection(&backend.state).await.unwrap(), before);
     assert_eq!(
         events.publications.load(Ordering::Relaxed),
