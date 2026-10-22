@@ -141,6 +141,7 @@ fn record_command(
                 "ONECAD_SIM_RUNTIME",
                 "ONECAD_IOS_MAC_FIXTURE_OUT",
                 "ONECAD_IOS_ACCEPTANCE_DIR",
+                "ONECAD_IOS_MAC_FIXTURE",
                 "ONECAD_IOS_ORACLE_REPORT",
                 "TEST_RUNNER_ONECAD_RUN_ID",
                 "TEST_RUNNER_ONECAD_MAC_FIXTURE",
