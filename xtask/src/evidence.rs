@@ -1,6 +1,17 @@
 mod captures;
 mod host;
 mod host_names;
+mod ios_evidence;
+#[cfg(test)]
+mod ios_evidence_tests;
+mod ios_gate;
+mod ios_geometry;
+mod ios_release;
+mod ios_sim;
+#[cfg(test)]
+mod ios_tests;
+mod ios_verify;
+mod ios_xcode;
 mod kernelbench;
 mod process;
 #[cfg(test)]
@@ -27,6 +38,7 @@ fn fail(code: i32, message: impl Into<String>) -> Box<dyn std::error::Error> {
 pub fn run(command: &str, args: &[String]) -> Result<()> {
     match command {
         "native-host-gate" => host::run(args),
+        "ios-simulator-gate" => ios_gate::run(args),
         "verify-render-captures" => {
             let path = args
                 .first()
