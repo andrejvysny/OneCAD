@@ -90,7 +90,14 @@ async fn occluded_app_logic_delivers_new_and_protects_close_without_ui() {
 }
 
 async fn create_app(root: &std::path::Path) -> (App, egui::Context) {
-    let (app, context) = create_home_app(root).await;
+    create_app_with(root, onecad_render::RenderProfile::Desktop).await
+}
+
+async fn create_app_with(
+    root: &std::path::Path,
+    profile: onecad_render::RenderProfile,
+) -> (App, egui::Context) {
+    let (app, context) = create_home_app_with(root, profile).await;
     app.doc
         .bridge
         .submit(crate::bridge::Command::Document(Request::New))
@@ -99,6 +106,15 @@ async fn create_app(root: &std::path::Path) -> (App, egui::Context) {
 }
 
 async fn create_home_app(root: &std::path::Path) -> (App, egui::Context) {
+    create_home_app_with(root, onecad_render::RenderProfile::Desktop).await
+}
+
+/// Desktop builds through `App::new` (the macOS route); Mobile through `App::new_with`, the
+/// route the iPadOS host takes.
+async fn create_home_app_with(
+    root: &std::path::Path,
+    profile: onecad_render::RenderProfile,
+) -> (App, egui::Context) {
     assert_eq!(std::env::var("ONECAD_REQUIRE_WORKER").as_deref(), Ok("1"));
     assert_eq!(std::env::var("ONECAD_REQUIRE_GPU").as_deref(), Ok("1"));
     let worker = std::env::var_os("ONECAD_WORKER_PATH")
@@ -119,11 +135,18 @@ async fn create_home_app(root: &std::path::Path) -> (App, egui::Context) {
     let adapter = render.adapter.get_info();
     eprintln!("Native host gate adapter: {adapter:?}");
     assert_eq!(adapter.backend, wgpu::Backend::Metal);
-    let mut creation = eframe::CreationContext::_new_kittest(context.clone());
-    creation.wgpu_render_state = Some(render);
     let paths =
         QaPaths::from_args(["--qa-root".into(), root.join("qa").into_os_string()].into_iter())
             .unwrap();
+    if profile == onecad_render::RenderProfile::Mobile {
+        let dialogs =
+            std::sync::Arc::new(crate::dialogs::NativeDialogs::new(paths.documents.clone()));
+        let backend = onecad_app::worker::WorkerBackend::default();
+        let app = App::new_with(&context, render, paths, dialogs, backend, profile);
+        return (app.unwrap(), context);
+    }
+    let mut creation = eframe::CreationContext::_new_kittest(context.clone());
+    creation.wgpu_render_state = Some(render);
     (App::new(&creation, paths).unwrap(), context)
 }
 
