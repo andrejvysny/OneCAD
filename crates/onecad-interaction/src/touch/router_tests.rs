@@ -144,7 +144,7 @@ fn finger_orbits_from_the_slop_exit_point_without_a_jump() {
 }
 
 #[test]
-fn canvas_finger_is_ignored_while_a_pencil_authors_but_controls_wait_for_the_pointer() {
+fn canvas_finger_is_ignored_while_a_pencil_authors_but_controls_still_work() {
     let mut pipe = Pipeline::default();
     let ctx = with_controls();
     pipe.submit(&[pencil(1, Began, 0.0, 300.0, 300.0)], &ctx);
@@ -154,12 +154,34 @@ fn canvas_finger_is_ignored_while_a_pencil_authors_but_controls_wait_for_the_poi
             finger(2, Moved, 0.2, 260.0, 200.0),
             finger(2, Ended, 0.3, 260.0, 200.0),
             finger(3, Began, 0.1, 10.0, 10.0),
-            finger(3, Ended, 0.2, 10.0, 10.0),
+            finger(3, Moved, 0.15, 12.0, 10.0),
+            finger(3, Ended, 0.2, 12.0, 10.0),
+        ],
+        &ctx,
+    );
+    // The control is activated without taking the Pencil's pointer.
+    assert_eq!(
+        events,
+        [RoutedEvent::Activate {
+            contact: 3,
+            position: p(10.0, 10.0)
+        }]
+    );
+    assert_eq!(pipe.router.owner(1), Some(Owner::Author));
+    // Dragged off the control, or cancelled, it activates nothing.
+    let events = pipe.submit(
+        &[
+            finger(4, Began, 0.4, 10.0, 10.0),
+            finger(4, Moved, 0.5, 40.0, 10.0),
+            finger(4, Ended, 0.6, 40.0, 10.0),
+            finger(5, Began, 0.4, 20.0, 10.0),
+            finger(5, Cancelled, 0.5, 20.0, 10.0),
         ],
         &ctx,
     );
     assert!(events.is_empty(), "{events:?}");
-    assert_eq!(pipe.router.owner(1), Some(Owner::Author));
+    let released = pipe.submit(&[pencil(1, Ended, 0.7, 300.0, 300.0)], &ctx);
+    assert_eq!(kinds(&released), ["release"], "the Pencil stroke is intact");
 }
 
 #[test]
@@ -405,7 +427,7 @@ fn cancel_all_cancels_pressed_contacts_and_ends_orbits() {
             contact: 1,
             reason: CancelReason::TextFocus
         }],
-        "the control finger was ignored (one pointer), so only the Pencil cancels"
+        "the control finger never held the pointer, so only the Pencil cancels"
     );
 }
 

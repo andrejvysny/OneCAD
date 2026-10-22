@@ -1,6 +1,7 @@
-digest 6b695d5bf06e8f3e
+digest 83fea4c1bb259fa5
 press c2 Author Pencil (500.000,500.000) taps=1
 move c2 Author (520.000,500.000)
+activate c3 (30.000,20.000)
 move c2 Author (540.000,500.000)
 release c2 Author Pencil (560.000,500.000)
 press c4 Control Finger (40.000,20.000) taps=1

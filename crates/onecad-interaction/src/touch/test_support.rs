@@ -115,6 +115,7 @@ pub fn kinds(events: &[RoutedEvent]) -> Vec<&'static str> {
             RoutedEvent::MultiTouch { .. } => "multitouch",
             RoutedEvent::Overlay(_) => "overlay",
             RoutedEvent::Cancel { .. } => "cancel",
+            RoutedEvent::Activate { .. } => "activate",
         })
         .collect()
 }

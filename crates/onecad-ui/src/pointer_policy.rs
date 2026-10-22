@@ -29,6 +29,21 @@ pub fn set_pointer_kind(ctx: &egui::Context, kind: PointerKind) {
     ctx.data_mut(|data| data.insert_temp(pointer_kind_id(), kind));
 }
 
+fn pencil_double_tap_id() -> egui::Id {
+    egui::Id::unique("onecad-pencil-double-tap")
+}
+
+/// INPUT.md: a Pencil tip's second tap (`tap_count` 2) promotes like a double
+/// click even when egui's click timing does not count it. Set per press.
+pub fn set_pencil_double_tap(ctx: &egui::Context, double: bool) {
+    ctx.data_mut(|data| data.insert_temp(pencil_double_tap_id(), double));
+}
+
+pub fn pencil_double_tap(ctx: &egui::Context) -> bool {
+    ctx.data(|data| data.get_temp::<bool>(pencil_double_tap_id()))
+        .unwrap_or(false)
+}
+
 pub fn edge_tolerance(ctx: &egui::Context) -> f64 {
     match ctx.data(|data| data.get_temp::<PointerKind>(pointer_kind_id())) {
         Some(PointerKind::Finger) => FINGER_EDGE_TOLERANCE_PT,
@@ -91,6 +106,16 @@ mod tests {
         assert_eq!(edge_tolerance(&ctx), FINGER_EDGE_TOLERANCE_PT);
         set_pointer_kind(&ctx, PointerKind::Precise);
         assert_eq!(edge_tolerance(&ctx), 8.0);
+    }
+
+    #[test]
+    fn a_pencil_double_tap_mark_lasts_until_the_next_press_sets_it() {
+        let ctx = egui::Context::default();
+        assert!(!pencil_double_tap(&ctx), "desktop never sets it");
+        set_pencil_double_tap(&ctx, true);
+        assert!(pencil_double_tap(&ctx));
+        set_pencil_double_tap(&ctx, false);
+        assert!(!pencil_double_tap(&ctx));
     }
 
     #[test]

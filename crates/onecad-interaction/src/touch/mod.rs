@@ -295,7 +295,8 @@ impl Normalized {
 pub enum Owner {
     /// Pointer down/move/up at the sample positions.
     Author,
-    /// A finger that started over a control.
+    /// A finger that started over a control: a pointer stream, or an
+    /// [`RoutedEvent::Activate`] on lift while another contact holds the pointer.
     Control,
     /// A finger that ended within the tap slop.
     Tap,
@@ -370,6 +371,13 @@ pub enum RoutedEvent {
     Cancel {
         contact: ContactId,
         reason: CancelReason,
+    },
+    /// A finger tapped a control while another contact held the single pointer
+    /// (INPUT.md: controls still work beside a Pencil). Hosts activate the
+    /// control at `position` without the pointer, e.g. an accessibility click.
+    Activate {
+        contact: ContactId,
+        position: Point,
     },
 }
 

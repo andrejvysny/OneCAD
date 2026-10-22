@@ -252,10 +252,37 @@ impl Tree {
         })
     }
 
+    /// The enabled clickable element under `at` (points) that was flattened
+    /// last, i.e. the innermost and topmost: where a control tap that could not
+    /// take egui's pointer is delivered as an AccessKit click.
+    pub fn click_target(&self, at: egui::Pos2) -> Option<NodeId> {
+        self.flat
+            .iter()
+            .rev()
+            .find(|flat| {
+                let [x, y, w, h] = flat.rect;
+                flat.clickable
+                    && flat.flags & ffi::A11Y_DISABLED == 0
+                    && (x..=x + w).contains(&at.x)
+                    && (y..=y + h).contains(&at.y)
+            })
+            .map(|flat| NodeId(flat.id))
+    }
+
     #[cfg(test)]
     pub fn flat(&self) -> &[Flat] {
         &self.flat
     }
+}
+
+/// egui's AccessKit click on `node`: the widget clicks without the pointer.
+pub fn click(node: NodeId) -> egui::Event {
+    egui::Event::AccessKitActionRequest(accesskit::ActionRequest {
+        action: Action::Click,
+        target_tree: accesskit::TreeId::ROOT,
+        target_node: node,
+        data: None,
+    })
 }
 
 #[cfg(test)]

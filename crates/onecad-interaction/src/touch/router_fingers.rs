@@ -15,15 +15,15 @@ impl Router {
         out: &mut Vec<RoutedEvent>,
     ) {
         if (ctx.over_control)(position) {
-            // Controls keep working beside a Pencil, but the host has one pointer.
-            let owner = if self.pointer_live() {
-                Owner::Ignored
-            } else {
-                Owner::Control
-            };
-            self.insert(sample, position, Some(owner), false);
-            if owner == Owner::Control {
-                out.push(press(sample, owner, position));
+            // Controls keep working beside a Pencil: with the host's one pointer
+            // held, the finger activates its control on lift instead of pressing.
+            let pointerless = self.pointer_live();
+            self.insert(sample, position, Some(Owner::Control), false);
+            if let Some(track) = self.tracks.get_mut(&sample.contact) {
+                track.pointerless = pointerless;
+            }
+            if !pointerless {
+                out.push(press(sample, Owner::Control, position));
             }
             return;
         }

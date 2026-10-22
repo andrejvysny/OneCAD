@@ -105,12 +105,13 @@ Input calls return `ERR_STATE` in the background and after terminate
 
 | Routed event | egui events |
 |---|---|
-| `Press` (`Author`, `Control`, `Tap`) | `PointerMoved` + primary press; it holds the single pointer. The frame sets `host::set_pointer_kind` (finger: 22 pt edge pick aperture; Pencil/pointer: 8 pt) |
+| `Press` (`Author`, `Control`, `Tap`) | `PointerMoved` + primary press; it holds the single pointer. The frame sets `host::set_pointer_kind` (finger: 22 pt edge pick aperture; Pencil/pointer: 8 pt) and `host::set_pencil_double_tap` (a Pencil press with `tap_count` ≥ 2 picks like a double click, face to body, even when egui's click timing does not count it) |
 | `Move` of the pointer contact | `PointerMoved` per changed position (disposable under overflow) |
 | `Release` | `PointerMoved` + release; after a finger or a tap, `PointerGone` one frame later |
 | `Tap` (finger within 8 pt / 0.5 s) | press and release at the begin position in one frame (double tap counted by egui's timing) |
 | `Orbit` (canvas finger past the slop, no drag authoring) | `PointerMoved(position)` (only while no pointer is held) + `MouseWheel{Trackpad, Point, Start/Move/End/Cancel}` with Shift, which the editor treats as orbit; `PointerGone` after the end |
 | `MultiTouch` | nothing: native pan/pinch drive navigation |
+| `Activate` (a finger tapped a control while another contact held the pointer) | no pointer event: the next frame sends `AccessKitActionRequest(Click)` to the last-flattened enabled clickable accessibility element under the begin position, from the previous frame's tree; nothing if none |
 | `Cancel` (UIKit cancel, `cancel_all`, generation change, Pencil precedence, multi-touch, document switch) | no release: the contact's queued events are dropped; if egui saw its press, the next frame first forgets it (`onecad_ui::host::cancel_contact`) and carries `PointerGone`. No click or drag commit can result. |
 | `Hover` / `HoverExit` (Pencil or pointer, no pointer held) | `PointerMoved` / deferred `PointerGone` |
 | `Overlay::Prediction` | latest points kept per authoring contact (transient; never an event, not drawn yet) |
@@ -207,7 +208,7 @@ with `onecad_ios_test_string_free`). Implemented commands (the catalogue
 | Command | Request | Response fields |
 |---|---|---|
 | `ping` | `{"cmd":"ping"}` | `abi` |
-| `replay` | `{"cmd":"replay","samples":[{"contact","phase","t","x","y","kind"?,"provenance"?,"tap_count"?}],"generation"?}`; `kind` defaults to Pencil, `provenance` to actual; at most 4096 samples; `ERR_STATE`-equivalent error in the background | `synthetic: true`, `accepted`, `overflowed` |
+| `replay` | `{"cmd":"replay","samples":[<sample>],"generation"?}`; a sample is the trace fixture sample of `INPUT.md` (appendix): `contact`, `phase`, `t`, `x`, `y`, optional `kind` (Pencil), `provenance` (actual), `tap_count`, pose and estimation fields, names or ABI numbers; at most 4096 samples; `ERR_STATE`-equivalent error in the background | `synthetic: true`, `accepted`, `overflowed` |
 | `prediction` | `{"cmd":"prediction","contact"}` | `synthetic: true`, `prediction` (`[x, y]` or null) |
 
 Replay goes through the same normalizer, router and route context as

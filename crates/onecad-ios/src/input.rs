@@ -62,6 +62,12 @@ pub struct Drained {
     /// The input kind of the newest press or hover, for the pick aperture
     /// (`onecad_ui::host::set_pointer_kind`).
     pub pointer_kind: Option<onecad_ui::host::PointerKind>,
+    /// Whether the newest press is a Pencil tip double tap
+    /// (`onecad_ui::host::set_pencil_double_tap`); `None` without a press.
+    pub pencil_double_tap: Option<bool>,
+    /// Controls tapped while another contact held the pointer, in points: the
+    /// frame clicks the accessibility node under each.
+    pub activations: Vec<Pos2>,
 }
 
 pub struct Input {
@@ -87,6 +93,8 @@ pub struct Input {
     /// Latest predicted points per authoring contact: overlay input only.
     predictions: HashMap<u64, Vec<Pos2>>,
     pointer_kind: Option<ContactKind>,
+    pencil_double_tap: Option<bool>,
+    activations: Vec<Pos2>,
 }
 
 impl Default for Input {
@@ -107,6 +115,8 @@ impl Default for Input {
             modifiers: egui::Modifiers::NONE,
             predictions: HashMap::new(),
             pointer_kind: None,
+            pencil_double_tap: None,
+            activations: Vec::new(),
         }
     }
 }
@@ -320,6 +330,8 @@ impl Input {
             again,
             cancelled: std::mem::take(&mut self.forget_pointer),
             pointer_kind,
+            pencil_double_tap: self.pencil_double_tap.take(),
+            activations: std::mem::take(&mut self.activations),
         }
     }
 

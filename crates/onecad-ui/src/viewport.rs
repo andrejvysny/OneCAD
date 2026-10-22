@@ -144,6 +144,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 return;
             }
             let mode = crate::model_pick::track(ui, rect);
+            let double = response.double_clicked()
+                || response.clicked() && crate::viewport_widgets::pencil_double_tap(ui.ctx());
             if (response.clicked() || response.double_clicked())
                 && !overlay_owns
                 && !crate::viewport_selection::sectioned(app)
@@ -161,7 +163,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         f64::from(position.x - rect.min.x),
                         f64::from(position.y - rect.min.y),
                     ),
-                    response.double_clicked(),
+                    double,
                     mode,
                     crate::viewport_widgets::edge_tolerance(ui.ctx()),
                 );

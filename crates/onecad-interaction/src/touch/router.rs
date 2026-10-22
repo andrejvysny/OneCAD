@@ -1,15 +1,18 @@
 //! INPUT.md ownership table: one owner per contact for its whole life, and at
 //! most one pointer stream (`Author`, `Control`) at a time because hosts have a
-//! single pointer. Finger arbitration lives in `router_fingers.rs`.
+//! single pointer. A control finger arriving while that pointer is held still
+//! works: it activates the control on lift (`RoutedEvent::Activate`) without
+//! the pointer. Finger arbitration lives in `router_fingers.rs`.
 use super::{
     CancelReason, ContactId, ContactKind, GesturePhase, Normalized, Overlay, Owner, Point,
-    RoutedEvent, Sample,
+    RoutedEvent, Sample, TAP_SLOP_PT,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Per-frame routing input, computed from the previous host frame.
 pub struct RouteContext<'a> {
-    /// `UIPencilInteraction.prefersPencilOnlyDrawing`: fingers never author.
+    /// `UIPencilInteraction.prefersPencilOnlyDrawing`: a dragged finger never
+    /// authors (it orbits); taps and controls are unchanged.
     pub pencil_only_drawing: bool,
     /// A sketch tool, handle or parameter drag can use a dragged pointer.
     pub drag_authoring: bool,
@@ -32,11 +35,23 @@ pub(super) struct Track {
     pub owner: Option<Owner>,
     /// A pressed contact was cancelled; it emits nothing more.
     pub cancelled: bool,
+    /// A `Control` finger that arrived while another contact held the pointer:
+    /// it never presses and activates its control on lift instead.
+    pub pointerless: bool,
     pub canvas: bool,
     pub begin: Point,
     pub begin_time: f64,
     pub last: Point,
     pub tap_count: u32,
+}
+
+impl Track {
+    /// Owns the host's single pointer: pressed, not cancelled.
+    fn holds_pointer(&self) -> bool {
+        matches!(self.owner, Some(Owner::Author | Owner::Control))
+            && !self.cancelled
+            && !self.pointerless
+    }
 }
 
 #[derive(Default)]
@@ -82,9 +97,7 @@ impl Router {
     }
 
     pub(super) fn pointer_live(&self) -> bool {
-        self.tracks.values().any(|track| {
-            matches!(track.owner, Some(Owner::Author | Owner::Control)) && !track.cancelled
-        })
+        self.tracks.values().any(Track::holds_pointer)
     }
 
     fn contact(&mut self, sample: &Sample, ctx: &RouteContext<'_>, out: &mut Vec<RoutedEvent>) {
@@ -135,7 +148,7 @@ impl Router {
     /// navigating and are ignored until lifted (the camera holds still).
     fn yield_fingers(&mut self, out: &mut Vec<RoutedEvent>) {
         for (contact, track) in self.tracks.iter_mut() {
-            if track.kind != ContactKind::Finger || track.cancelled {
+            if track.kind != ContactKind::Finger || track.cancelled || track.pointerless {
                 continue;
             }
             match track.owner {
@@ -181,6 +194,7 @@ impl Router {
                 kind: sample.kind,
                 owner,
                 cancelled: false,
+                pointerless: false,
                 canvas,
                 begin: position,
                 begin_time: sample.timestamp,
@@ -202,7 +216,7 @@ impl Router {
         };
         let previous = std::mem::replace(&mut track.last, position);
         match track.owner {
-            Some(owner @ (Owner::Author | Owner::Control)) if !track.cancelled => {
+            Some(owner @ (Owner::Author | Owner::Control)) if track.holds_pointer() => {
                 out.push(RoutedEvent::Move {
                     contact,
                     owner,
@@ -234,6 +248,15 @@ impl Router {
             return;
         };
         match track.owner {
+            Some(Owner::Control) if track.pointerless => {
+                // Lifted within the slop: a tap on the control, not a drag off it.
+                if track.begin.distance(position) <= TAP_SLOP_PT {
+                    out.push(RoutedEvent::Activate {
+                        contact,
+                        position: track.begin,
+                    });
+                }
+            }
             Some(owner @ (Owner::Author | Owner::Control)) if !track.cancelled => {
                 out.push(RoutedEvent::Release {
                     contact,
@@ -255,7 +278,7 @@ impl Router {
             return;
         };
         match track.owner {
-            Some(Owner::Author | Owner::Control) if !track.cancelled => {
+            Some(Owner::Author | Owner::Control) if track.holds_pointer() => {
                 out.push(RoutedEvent::Cancel { contact, reason });
             }
             Some(Owner::Orbit) => {

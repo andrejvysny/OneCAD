@@ -55,6 +55,8 @@ fn drained(events: Vec<Event>, again: bool, cancelled: bool) -> Drained {
         again,
         cancelled,
         pointer_kind: None,
+        pencil_double_tap: None,
+        activations: Vec::new(),
     }
 }
 

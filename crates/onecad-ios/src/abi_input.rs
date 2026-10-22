@@ -248,17 +248,7 @@ fn activate(state: &mut IosApp, id: u64) -> Outcome {
         .activation(id)
         .ok_or_else(|| Failure::new(Status::InvalidArgument, "unknown accessibility node"))?;
     match activation {
-        Activation::Click(node) => {
-            let request = egui::accesskit::ActionRequest {
-                action: egui::accesskit::Action::Click,
-                target_tree: egui::accesskit::TreeId::ROOT,
-                target_node: node,
-                data: None,
-            };
-            state
-                .input
-                .push_event(egui::Event::AccessKitActionRequest(request));
-        }
+        Activation::Click(node) => state.input.push_event(crate::a11y::click(node)),
         Activation::Tap(pos) => state.input.synthesized_tap(pos),
     }
     state.input_changed();

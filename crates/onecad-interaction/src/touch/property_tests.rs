@@ -199,6 +199,13 @@ impl Ledger {
                 assert!(self.pointer.is_none(), "hover moved a held pointer");
             }
             RoutedEvent::Cancel { contact, .. } => self.end(*contact, true),
+            RoutedEvent::Activate { contact, position } => {
+                assert_ne!(position.x, PREDICTED_X, "prediction became an activation");
+                assert!(
+                    !self.open.contains(contact),
+                    "c{contact} activated while it holds a press"
+                );
+            }
             _ => {}
         }
     }

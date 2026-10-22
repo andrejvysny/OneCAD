@@ -1,6 +1,6 @@
 //! Deterministic input traces (`fixtures/ios/traces/*.json`, schema in the
 //! appendix of `docs/ios/INPUT.md`) and the canonical text of their routed
-//! events. Test-hook replay parses samples with the same schema.
+//! events. Test-hook replay parses its samples with [`sample`].
 use super::{
     mask, CancelReason, Normalizer, Overlay, Point, RawSample, RouteContext, RoutedEvent, Router,
 };
@@ -138,6 +138,9 @@ pub fn describe(event: &RoutedEvent) -> String {
                 .join(" ")
         ),
         RoutedEvent::Cancel { contact, reason } => format!("cancel c{contact} {reason:?}"),
+        RoutedEvent::Activate { contact, position } => {
+            format!("activate c{contact} {}", point(*position))
+        }
     }
 }
 
@@ -211,7 +214,7 @@ fn parse_step(value: &Value) -> Result<Step, String> {
     if let Some(context) = value.get("context") {
         return parse_context(context).map(Step::Context);
     }
-    if value.get("navigation").is_some() {
+    if value.get("navigation") == Some(&Value::Bool(true)) {
         return Ok(Step::Navigation);
     }
     Err(format!("unknown step {value}"))

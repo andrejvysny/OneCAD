@@ -2,7 +2,8 @@
 //! `Author`, `Control` and `Tap` owners drive egui's primary pointer; a one
 //! finger `Orbit` becomes a Shift trackpad wheel (the editor's orbit gesture);
 //! `MultiTouch` fingers leave navigation to the native recognizers; a `Cancel`
-//! never delivers a release.
+//! never delivers a release; an `Activate` (a control tapped while the pointer
+//! is held) is queued for an accessibility click at the next frame.
 use super::{Event, Gone, Input, Pointer};
 use egui::{Pos2, TouchPhase, Vec2};
 use onecad_interaction::touch::{ContactKind, GesturePhase, Overlay, Owner, Point, RoutedEvent};
@@ -24,8 +25,9 @@ impl Input {
                 contact,
                 kind,
                 position,
+                tap_count,
                 ..
-            } => self.press(contact, kind, pos(position)),
+            } => self.press(contact, kind, pos(position), tap_count),
             RoutedEvent::Move {
                 contact, position, ..
             } => self.drag(contact, pos(position)),
@@ -54,26 +56,35 @@ impl Input {
             ),
             RoutedEvent::MultiTouch { .. } => {}
             RoutedEvent::Overlay(Overlay::Prediction { contact, points }) => {
-                if points.is_empty() {
-                    self.predictions.remove(&contact);
-                } else {
-                    let points = points.into_iter().map(pos).collect();
-                    self.predictions.insert(contact, points);
-                }
+                self.predict(contact, points);
             }
-            RoutedEvent::Cancel { contact, .. } => {
-                if self
-                    .pointer
-                    .is_some_and(|pointer| pointer.contact == contact)
-                {
-                    self.cancel_pointer();
-                }
-                self.predictions.remove(&contact);
-            }
+            RoutedEvent::Cancel { contact, .. } => self.cancel_contact(contact),
+            RoutedEvent::Activate { position, .. } => self.activations.push(pos(position)),
         }
     }
 
-    fn press(&mut self, contact: u64, kind: ContactKind, at: Pos2) {
+    fn predict(&mut self, contact: u64, points: Vec<Point>) {
+        if points.is_empty() {
+            self.predictions.remove(&contact);
+        } else {
+            let points = points.into_iter().map(pos).collect();
+            self.predictions.insert(contact, points);
+        }
+    }
+
+    fn cancel_contact(&mut self, contact: u64) {
+        if self
+            .pointer
+            .is_some_and(|pointer| pointer.contact == contact)
+        {
+            self.cancel_pointer();
+        }
+        self.predictions.remove(&contact);
+    }
+
+    /// A Pencil tip's second tap (`tap_count` 2) promotes like a double click
+    /// even when egui's click timing disagrees (INPUT.md).
+    fn press(&mut self, contact: u64, kind: ContactKind, at: Pos2, tap_count: u32) {
         // The router hands out one pointer at a time; never leave one pressed.
         self.cancel_pointer();
         self.pointer = Some(Pointer {
@@ -84,6 +95,7 @@ impl Input {
         self.gone = Gone::Idle;
         self.hovering = false;
         self.pointer_kind = Some(kind);
+        self.pencil_double_tap = Some(kind == ContactKind::Pencil && tap_count >= 2);
         self.push_owned(Event::PointerMoved(at), false);
         self.push_owned(self.button(at, true), false);
     }

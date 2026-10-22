@@ -1,10 +1,10 @@
 //! INPUT.md ownership rows as they reach egui: orbit, controls, Pencil-only
-//! drawing and hover.
+//! drawing, hover, tip double tap and document-switch cancellation.
 use super::{actual, finger, presses, sample, submit, wheels};
 use crate::ffi;
 use crate::input::Input;
 use egui::{Event, TouchPhase, pos2};
-use onecad_interaction::touch::RouteContext;
+use onecad_interaction::touch::{CancelReason, RouteContext};
 
 const ORBIT: RouteContext<'static> = RouteContext::CANVAS;
 
@@ -108,4 +108,79 @@ fn hover_moves_the_pointer_without_a_button_and_exit_only_clears_it() {
     assert_eq!(presses(&frame.events), [false]);
     assert!(frame.again && !frame.cancelled, "exit clears hover only");
     assert_eq!(input.drain().events, vec![Event::PointerGone]);
+}
+
+#[test]
+fn a_control_tapped_beside_a_pencil_stroke_is_activated_without_the_pointer() {
+    let controls = RouteContext {
+        pencil_only_drawing: false,
+        drag_authoring: true,
+        over_control: &|point| point.y < 50.0,
+    };
+    let mut input = Input::default();
+    let route = |input: &mut Input, sample| input.submit(&[sample], 0, &controls).unwrap();
+    route(&mut input, actual(1, ffi::PHASE_BEGAN, 0.0, 200.0));
+    route(&mut input, finger(2, ffi::PHASE_BEGAN, 0.05, 20.0));
+    route(&mut input, actual(1, ffi::PHASE_MOVED, 0.1, 220.0));
+    route(&mut input, finger(2, ffi::PHASE_ENDED, 0.15, 20.0));
+    let frame = input.drain();
+    assert_eq!(presses(&frame.events), [true], "only the Pencil presses");
+    assert_eq!(frame.activations, vec![pos2(20.0, 20.0)]);
+    route(&mut input, actual(1, ffi::PHASE_ENDED, 0.2, 240.0));
+    let frame = input.drain();
+    assert_eq!(presses(&frame.events), [false], "the stroke still releases");
+    assert!(
+        frame.activations.is_empty(),
+        "each activation is drained once"
+    );
+}
+
+#[test]
+fn a_pencil_tip_double_tap_is_marked_for_promotion_and_a_finger_one_is_not() {
+    let mut input = Input::default();
+    let tap = |contact, kind, phase, t| ffi::TouchSample {
+        kind,
+        tap_count: 2,
+        ..actual(contact, phase, t, 200.0)
+    };
+    submit(
+        &mut input,
+        &[tap(1, ffi::CONTACT_PENCIL, ffi::PHASE_BEGAN, 0.0)],
+        0,
+    );
+    assert_eq!(input.drain().pencil_double_tap, Some(true));
+    submit(
+        &mut input,
+        &[tap(1, ffi::CONTACT_PENCIL, ffi::PHASE_ENDED, 0.05)],
+        0,
+    );
+    assert_eq!(
+        input.drain().pencil_double_tap,
+        None,
+        "only a press sets it"
+    );
+    let finger_tap = [
+        tap(2, ffi::CONTACT_FINGER, ffi::PHASE_BEGAN, 0.3),
+        tap(2, ffi::CONTACT_FINGER, ffi::PHASE_ENDED, 0.35),
+    ];
+    submit(&mut input, &finger_tap, 0);
+    assert_eq!(
+        input.drain().pencil_double_tap,
+        Some(false),
+        "a finger double tap is egui's to count"
+    );
+}
+
+#[test]
+fn a_document_switch_cancels_a_live_stroke_without_a_release() {
+    let mut input = Input::default();
+    submit(&mut input, &[actual(1, ffi::PHASE_BEGAN, 0.0, 20.0)], 0);
+    submit(&mut input, &[actual(1, ffi::PHASE_MOVED, 0.1, 40.0)], 0);
+    input.drain();
+    input.cancel_all(CancelReason::DocumentSwitch);
+    let frame = input.drain();
+    assert_eq!(frame.events, vec![Event::PointerGone]);
+    assert!(frame.cancelled, "the editor forgets the press");
+    submit(&mut input, &[actual(1, ffi::PHASE_ENDED, 0.2, 60.0)], 0);
+    assert!(presses(&input.drain().events).is_empty(), "no late release");
 }

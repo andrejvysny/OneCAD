@@ -181,3 +181,59 @@ async fn accessory_previous_tool_and_adaptive_palette() {
     assert_eq!(tool(&host), SketchTool::Circle);
     host.stop().await;
 }
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic native input is not physical acceptance"]
+async fn a_stroke_whose_release_the_canvas_missed_is_dropped() {
+    let area = tempfile::tempdir().unwrap();
+    let mut host = Host::new(area.path()).await;
+    host.control("Pencil Stroke");
+    host.redraw();
+    let (start, end) = (host.project(-20.0, 5.0), host.project(20.0, 5.0));
+    host.ui(vec![egui::Event::PointerMoved(start), button(start, true)]);
+    host.ui(vec![egui::Event::PointerMoved(end)]);
+    assert!(crate::sketch_pen_stroke::drawing(&host.context));
+    // An overlay owns the pointer for the frame that carries the release.
+    crate::tool_palette::open(&mut host.app, end);
+    host.ui(vec![]);
+    host.ui(vec![button(end, false)]);
+    host.app.ui.tool_palette = None;
+    host.ui(vec![egui::Event::PointerMoved(start)]);
+    assert!(
+        !crate::sketch_pen_stroke::drawing(&host.context),
+        "hover moves must not extend a stroke whose release was missed"
+    );
+    host.ui(vec![]);
+    assert!(host.sketch().entities().is_empty(), "nothing committed");
+    host.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic native input is not physical acceptance"]
+async fn drag_authoring_follows_sketch_tools_and_canvas_handles() {
+    let area = tempfile::tempdir().unwrap();
+    let mut host = Host::new(area.path()).await;
+    assert_eq!(tool(&host), SketchTool::Select);
+    assert!(
+        !crate::host::drag_authoring(&host.app),
+        "a finger drag orbits in Select"
+    );
+    host.control("Line");
+    assert!(crate::host::drag_authoring(&host.app));
+    host.stop().await;
+
+    let root = tempfile::tempdir().unwrap();
+    let (mut host, _) =
+        super::extrude_handle_delivery_tests::extruding(root.path(), "12", 12.0).await;
+    assert!(
+        crate::host::drag_authoring(&host.app),
+        "the extrude distance handle takes a finger drag"
+    );
+    super::extrude_handle_delivery_tests::confirm(&mut host).await;
+    assert!(host.app.doc.interaction.tool.is_none());
+    assert!(
+        !crate::host::drag_authoring(&host.app),
+        "no tool: fingers orbit"
+    );
+    host.stop().await;
+}
