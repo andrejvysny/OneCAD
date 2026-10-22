@@ -1,0 +1,150 @@
+# XcodeGen spec for the OneCAD iPad host. OneCAD.xcodeproj is generated from
+# this file and checked in; regenerate with `xcodegen generate` in this
+# directory after every edit (docs/ios/BUILD.md). Never edit the project by hand.
+name: OneCAD
+options:
+  minimumXcodeGenVersion: 2.44.0
+  bundleIdPrefix: com.onecad
+  deploymentTarget:
+    iOS: "18.0"
+  developmentLanguage: en
+  createIntermediateGroups: true
+  defaultConfig: Debug
+  groupSortPosition: top
+
+configs:
+  Debug: debug
+  Release: release
+  # Debug-like build with the Rust `test-hooks` feature and native tests.
+  Acceptance: debug
+
+settings:
+  base:
+    # Swift 6 language mode: the C ABI is main-thread-only, and complete
+    # concurrency checking proves every bridge call is main-actor isolated.
+    SWIFT_VERSION: "6.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+    TARGETED_DEVICE_FAMILY: "2"
+    SUPPORTS_MACCATALYST: NO
+    SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+    SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: NO
+    # Device and Apple-silicon simulator are arm64 only (docs/ios/ARCHITECTURE.md).
+    ARCHS: arm64
+    "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
+    ONECAD_REPO_ROOT: $(SRCROOT)/../..
+    HEADER_SEARCH_PATHS: $(ONECAD_REPO_ROOT)/crates/onecad-ios/include
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Automatic
+  configs:
+    Acceptance:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG ONECAD_ACCEPTANCE
+      # Read by the bridging headers' Clang importer.
+      GCC_PREPROCESSOR_DEFINITIONS: DEBUG=1 ONECAD_ACCEPTANCE=1
+
+targets:
+  OneCAD:
+    type: application
+    platform: iOS
+    sources:
+      - path: OneCAD
+    dependencies:
+      # Staged into BUILT_PRODUCTS_DIR by the "Build Rust" phase and linked by
+      # path, so a changed archive relinks the app.
+      - framework: libonecad_ios.a
+        implicit: true
+        embed: false
+      - framework: libonecad_worker_bundle.a
+        implicit: true
+        embed: false
+    settings:
+      base:
+        PRODUCT_NAME: OneCAD
+        PRODUCT_BUNDLE_IDENTIFIER: com.onecad.ipad
+        INFOPLIST_FILE: OneCAD/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        SWIFT_OBJC_BRIDGING_HEADER: OneCAD/OneCAD-Bridging-Header.h
+        ONECAD_RUST_LIB_DIR: $(BUILT_PRODUCTS_DIR)
+        # The build phase writes under <repo>/target and runs cargo.
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        OTHER_LDFLAGS:
+          - -lc++
+          - -framework Metal
+          - -framework QuartzCore
+          - -framework UIKit
+          - -framework Foundation
+          - -framework UniformTypeIdentifiers
+      configs:
+        Acceptance:
+          # Keep the test-hook entry points in the executable so the hosted
+          # OneCADNativeTests bundle can bind them through BUNDLE_LOADER.
+          DEAD_CODE_STRIPPING: NO
+          OTHER_LDFLAGS:
+            - -lc++
+            - -framework Metal
+            - -framework QuartzCore
+            - -framework UIKit
+            - -framework Foundation
+            - -framework UniformTypeIdentifiers
+            - -Wl,-u,_onecad_ios_test_command
+            - -Wl,-u,_onecad_ios_test_string_free
+    preBuildScripts:
+      - name: Build Rust (onecad-ios)
+        shell: /bin/bash
+        script: |
+          exec "${SRCROOT}/scripts/build-rust.sh"
+        # cargo owns Rust-source dependency tracking, so the phase always runs;
+        # it restages archives only when their bytes change.
+        basedOnDependencyAnalysis: false
+        inputFiles:
+          - $(SRCROOT)/scripts/build-rust.sh
+        outputFiles:
+          - $(BUILT_PRODUCTS_DIR)/libonecad_ios.a
+          - $(BUILT_PRODUCTS_DIR)/libonecad_worker_bundle.a
+
+  OneCADNativeTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: OneCADNativeTests
+    dependencies:
+      - target: OneCAD
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.onecad.ipad.nativetests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_OBJC_BRIDGING_HEADER: OneCADNativeTests/OneCADNativeTests-Bridging-Header.h
+
+  OneCADUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: OneCADUITests
+    dependencies:
+      - target: OneCAD
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.onecad.ipad.uitests
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  OneCADiPad:
+    build:
+      targets:
+        OneCAD: all
+        OneCADNativeTests: [test]
+        OneCADUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Acceptance
+      gatherCoverageData: false
+      testPlans:
+        - path: iPadAcceptance.xctestplan
+          defaultPlan: true
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
