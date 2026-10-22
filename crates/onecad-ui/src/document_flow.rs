@@ -23,6 +23,7 @@ pub enum Request {
         save_as: bool,
     },
     Export(ExportFormat),
+    Extension(crate::native_extensions::Request),
 }
 
 impl Request {
@@ -35,6 +36,7 @@ impl Request {
             Self::InsertStep => FileAction::InsertStep,
             Self::Save { .. } => FileAction::Save,
             Self::Export(_) => FileAction::Export,
+            Self::Extension(_) => FileAction::Export,
             Self::DiscardAndReplace(request) => request.diagnostic_action(),
         }
     }
@@ -59,6 +61,7 @@ pub enum Outcome {
     },
     Saved(SaveOutcomeDto),
     Exported(PathBuf),
+    Extension(crate::native_extensions::Reply),
     /// The file (or a copy with its identity) is open in another document host.
     AlreadyOpen {
         host: onecad_app::process::HostId,
@@ -76,6 +79,7 @@ pub enum Pending {
 #[derive(Default)]
 pub struct Flow {
     pub running: bool,
+    extension_request: bool,
     pub(crate) recovery_sketch_save: bool,
     pub(crate) diagnostic_action: Option<crate::diagnostics::FileAction>,
     pub confirm: Option<Pending>,
@@ -83,6 +87,17 @@ pub struct Flow {
 }
 
 impl Flow {
+    fn report_extension_result(
+        &mut self,
+        native: &mut crate::native_extensions::State,
+        result: &Result<Outcome, String>,
+    ) {
+        if std::mem::take(&mut self.extension_request)
+            && let Err(error) = result
+        {
+            native.failed(error.clone());
+        }
+    }
     pub fn blocks_sketch_authoring(
         &self,
         action: &onecad_interaction::sketch::SketchAction,
@@ -137,6 +152,7 @@ impl Flow {
 
     fn complete(&mut self, result: &Result<Outcome, String>) -> Option<Pending> {
         self.running = false;
+        self.extension_request = false;
         let pending = self.after_save.take();
         if matches!(result, Ok(Outcome::Saved(saved)) if saved.clean) {
             pending
@@ -234,6 +250,7 @@ impl crate::app::App {
         self.doc.documents.recovery_sketch_save =
             matches!(request, Request::Save { .. }) && crate::bars::recovery_sketch_save(self);
         self.doc.documents.running = true;
+        self.doc.documents.extension_request = matches!(&request, Request::Extension(_));
         self.doc.documents.diagnostic_action = Some(request.diagnostic_action());
         self.doc.command_status = true;
         self.doc.status = "File action pending…".into();
@@ -248,6 +265,7 @@ impl crate::app::App {
             .submit(crate::bridge::Command::Document(request))
         {
             self.doc.documents.running = false;
+            self.doc.documents.extension_request = false;
             self.doc.documents.after_save = None;
             self.doc.status = error;
             if let Some(action) = self.doc.documents.diagnostic_action.take() {
@@ -261,6 +279,9 @@ impl crate::app::App {
     }
 
     pub(crate) fn document_finished(&mut self, result: Result<Outcome, String>) {
+        self.doc
+            .documents
+            .report_extension_result(&mut self.ui.extensions.native, &result);
         let recovery_save = std::mem::take(&mut self.doc.documents.recovery_sketch_save);
         tracing::info!(?result, "native file delivery");
         self.doc.command_status = true;
@@ -272,6 +293,7 @@ impl crate::app::App {
                 crate::diagnostics::State::Warning
             }
             Ok(Outcome::Saved(saved)) if !saved.clean => crate::diagnostics::State::Warning,
+            Ok(Outcome::Extension(reply)) if reply.warning => crate::diagnostics::State::Warning,
             _ => crate::diagnostics::State::Succeeded,
         };
         let next = self.doc.documents.complete(&result);
@@ -322,6 +344,10 @@ impl crate::app::App {
                 }
             }
             Ok(Outcome::Exported(path)) => self.doc.status = format!("Exported {}", path.display()),
+            Ok(Outcome::Extension(reply)) => {
+                self.doc.status = reply.status.clone();
+                self.ui.extensions.native.receive(reply);
+            }
             Err(error) => {
                 self.doc.status = error;
                 self.settle_provisional_tab(None, diagnostic);
@@ -522,6 +548,43 @@ pub(crate) fn apply_close_choice(app: &mut crate::app::App, choice: Option<u8>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_extensions_ignore_unrelated_document_failure() {
+        let command =
+            serde_json::from_value(serde_json::json!({"id": "addon.run", "title": "Run"})).unwrap();
+        let mut native = crate::native_extensions::State {
+            pending: true,
+            status: "Extension is running".into(),
+            commands: vec![onecad_extension_host::RegisteredCommand {
+                extension_id: "addon".into(),
+                command,
+                enabled: true,
+            }],
+            ..Default::default()
+        };
+        let mut ordinary_file = Flow {
+            running: true,
+            ..Default::default()
+        };
+        ordinary_file
+            .report_extension_result(&mut native, &Err("A parked document could not save".into()));
+        assert!(native.pending);
+        assert!(native.commands[0].enabled);
+        assert_eq!(native.status, "Extension is running");
+        let mut extension = Flow {
+            running: true,
+            extension_request: true,
+            ..Default::default()
+        };
+        extension.report_extension_result(
+            &mut native,
+            &Err("Extension approval store is unreadable".into()),
+        );
+        assert!(!native.pending);
+        assert!(!native.commands[0].enabled);
+        assert_eq!(native.status, "Extension approval store is unreadable");
+        assert!(!extension.extension_request);
+    }
     #[test]
     fn save_and_save_before_quit_block_authoring_but_allow_completion() {
         use onecad_interaction::Action;

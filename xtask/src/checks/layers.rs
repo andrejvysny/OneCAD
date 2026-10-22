@@ -7,6 +7,13 @@ use std::process::Command;
 
 pub(super) const LAYERS: &[(&str, &[&str])] = &[
     ("onecad-core", &[]),
+    ("onecad-extension-api", &[]),
+    ("onecad-extension-sdk", &["onecad-extension-api"]),
+    ("onecad-addon-bambu-studio", &["onecad-extension-sdk"]),
+    (
+        "onecad-extension-host",
+        &["onecad-extension-api", "onecad-app", "onecad-core"],
+    ),
     ("onecad-widgets", &[]),
     ("onecad-protocol", &[]),
     ("onecad-library", &[]),
@@ -34,6 +41,8 @@ pub(super) const LAYERS: &[(&str, &[&str])] = &[
             "onecad-protocol",
             "onecad-library",
             "onecad-widgets",
+            "onecad-extension-api",
+            "onecad-extension-host",
         ],
     ),
     (
@@ -242,7 +251,12 @@ fn check_dependency(
     let host = ["onecad-ui", "onecad-widgets"].contains(&pkg.name.as_str());
     let renderer_gpu = pkg.name == "onecad-render"
         && (family(name, &["wgpu"]) || (name == "naga" && kind == "dev"));
-    let reason = if !host && family(name, TOOLKITS) {
+    let reason = if pkg.name == "onecad-extension-host"
+        && ["onecad-app", "onecad-core"].contains(&name)
+        && kind != "dev"
+    {
+        Some("extension sandbox application dependencies are test-only")
+    } else if !host && family(name, TOOLKITS) {
         Some("UI/platform toolkit forbidden")
     } else if !host && family(name, GPU) && !renderer_gpu {
         Some("GPU dependency forbidden")

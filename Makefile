@@ -11,9 +11,9 @@ OCCT_ROOT ?= $(HOME)/.onecad-occt/8.0.1
 TARGET_DIR ?= $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR),$(CURDIR)/target)
 APP_BINARY ?= $(TARGET_DIR)/debug/onecad-ui
 
-.PHONY: build run dev qa worker fixture
+.PHONY: build run dev qa worker fixture addons
 
-build: worker
+build: worker addons
 	cargo build --target-dir "$(TARGET_DIR)" -p onecad-ui
 
 dev: build
@@ -31,6 +31,9 @@ run:
 	ONECAD_LIBRARY_ROOT="$(QA_ROOT)/data/library" \
 	ONECAD_WORKER_PATH="$(WORKER)" \
 	"$(APP_BINARY)" --qa-root "$(QA_ROOT)" $(if $(DOCUMENT),--open "$(DOCUMENT)")
+
+addons:
+	CARGO_TARGET_DIR="$(TARGET_DIR)" ./scripts/build-addons.sh
 
 worker:
 	ONECAD_OCCT_ROOT="$(OCCT_ROOT)" ONECAD_WORKER_BUILD_DIR="$(WORKER_BUILD_DIR)" \

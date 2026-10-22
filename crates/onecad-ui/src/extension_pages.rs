@@ -1,11 +1,11 @@
-//! Extensions manager pages (Extensions 16a–22a): UI facade over mock data; no extension host yet.
+//! Native extension manager entry point. The older design fixtures stay isolated below.
 mod catalog;
 mod detail;
 mod detail_side;
 mod detail_tabs;
 mod developer;
 mod installed;
-mod kit;
+pub(crate) mod kit;
 mod manager;
 mod sheets;
 mod state;
@@ -16,6 +16,11 @@ use egui::Ui;
 pub use state::{ExtensionsUi, ManagerTab};
 
 pub fn show(app: &mut App, ui: &mut Ui) {
+    crate::native_extensions::show(app, ui);
+}
+
+#[allow(dead_code)]
+fn preview_show(app: &mut App, ui: &mut Ui) {
     let page = app.ui.start_page;
     let nav = render(ui, &mut app.ui.extensions, page);
     if let Some(next) = nav {

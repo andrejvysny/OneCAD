@@ -13,15 +13,18 @@ Historical screenshots are static evidence only.
 ## Development
 
 Use the repository-root Cargo workspace. Install pinned OCCT using
-`scripts/build-pinned-occt.sh`; then build and stage the worker:
+`scripts/build-pinned-occt.sh` and the Rust guest target, then build the native
+host, worker and bundled addons:
 
 ```sh
-ONECAD_OCCT_ROOT="$HOME/.onecad-occt/8.0.1" scripts/build-worker.sh Release
+rustup target add wasm32-unknown-unknown
+make build
 make run
 ```
 
-`make run` creates an isolated QA profile and, when needed, a synthetic constrained
-plate through shared application services. Host arguments and launch requirements
+`make run` launches the existing binaries with an isolated QA profile. `make qa`
+creates a synthetic constrained plate through shared application services when
+needed. Host arguments and launch requirements
 are documented in [native host instructions](crates/onecad-ui/README.md).
 
 ```sh
@@ -52,7 +55,9 @@ cargo run -p onecad-mesh-fixture -- --worker "$PWD/worker/build/onecad-worker" -
 
 Worker binaries and integrity manifests are staged in ignored
 `packaging/binaries`. [Native packaging](docs/PACKAGING.md) preserves binary hash,
-hello compatibility and OCCT fingerprint checks.
+hello compatibility and OCCT fingerprint checks. Portable addons are built from
+`addons/*` source into ignored staged component packages; see the
+[Rust extension SDK](crates/onecad-extension-sdk/README.md).
 
 Repository automation runs through the Rust `xtask` package:
 

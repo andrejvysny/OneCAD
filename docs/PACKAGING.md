@@ -7,6 +7,7 @@ bundle does not establish production cutover or workflow parity.
 Run on macOS with Rust, CMake and pinned OCCT installed:
 
 ```sh
+rustup target add wasm32-unknown-unknown
 ONECAD_OCCT_ROOT="$HOME/.onecad-occt/8.0.1" scripts/package-macos.sh
 ```
 
@@ -27,7 +28,13 @@ The script does not install or publish the result.
 4. `cargo build --release -p onecad-ui` embeds this final manifest through
    `onecad-app/build.rs`. The native executable is installed as
    `Contents/MacOS/onecad`; `Info.plist` names it as the bundle entry point.
-5. Only the host executable and outer bundle are signed. The script verifies
+5. The source addons built by `scripts/build-addons.sh` earlier in the script
+   use locked Rust dependencies and validated Wasm components. These fresh
+   generated packages are copied to `Contents/Resources/addons/`;
+   stale packages from earlier builds are removed. The installed host locates
+   these resources relative to its executable. Each bundled addon is installed
+   disabled and requires the same package/capability review as a local package.
+6. Only the host executable and outer bundle are signed. The script verifies
    signatures, checks that bundled worker SHA-256 still matches the manifest,
    and executes the bundled worker's self-test.
 

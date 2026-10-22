@@ -22,6 +22,9 @@ MANIFEST="packaging/binaries/onecad-worker-manifest.json"
 : "${ONECAD_OCCT_ROOT:=$HOME/.onecad-occt/8.0.1}"
 export ONECAD_OCCT_ROOT
 scripts/build-worker.sh Release
+ADDON_STAGING="$(mktemp -d "${TMPDIR:-/tmp}/onecad-bundled-addons.XXXXXX")"
+trap 'rm -rf "$ADDON_STAGING"' EXIT
+ONECAD_ADDON_STAGING_DIR="$ADDON_STAGING" scripts/build-addons.sh
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$STAGED" "$APP/Contents/MacOS/onecad-worker"
 scripts/bundle-dylibs.sh "$APP"
@@ -30,6 +33,9 @@ cargo run --quiet -p xtask -- rehash-worker-manifest "$STAGED" "$MANIFEST"
 cargo build --release -p onecad-ui
 cp "$TARGET_DIR/release/onecad-ui" "$APP/Contents/MacOS/onecad"
 cp assets/native/brand/macos/OneCAD.icns "$APP/Contents/Resources/OneCAD.icns"
+rm -rf "$APP/Contents/Resources/addons"
+mkdir -p "$APP/Contents/Resources/addons"
+cp -R "$ADDON_STAGING/." "$APP/Contents/Resources/addons/"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

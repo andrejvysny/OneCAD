@@ -2,6 +2,10 @@
 resolver = "2"
 members = [
     "xtask",
+    "crates/onecad-extension-api",
+    "crates/onecad-extension-host",
+    "crates/onecad-extension-sdk",
+    "addons/bambu-studio",
     "crates/onecad-app",
     "crates/onecad-mesh-fixture",
     "crates/onecad-scene",
@@ -21,6 +25,9 @@ members = [
 # Shared dependency versions for every workspace member. Individual crates
 # opt into features via `{ workspace = true, features = [...] }`.
 [workspace.dependencies]
+onecad-extension-api = { path = "crates/onecad-extension-api" }
+onecad-extension-host = { path = "crates/onecad-extension-host" }
+onecad-extension-sdk = { path = "crates/onecad-extension-sdk" }
 onecad-app = { path = "crates/onecad-app" }
 onecad-scene = { path = "crates/onecad-scene" }
 onecad-render = { path = "crates/onecad-render" }

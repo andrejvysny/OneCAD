@@ -15,6 +15,7 @@ is claimed. Exact tags describe HEAD only and do not describe dirty changes.
 ## Rebuild and relink
 
 Use macOS with Xcode command-line tools, CMake, Ninja, Rust/Cargo.
+Install the guest target with `rustup target add wasm32-unknown-unknown`.
 Eigen and Boost versions and their license texts are recorded in dependencies/
 and licenses/. Install those versions and make their CMake package directories
 available through CMAKE_PREFIX_PATH. Their complete header distributions and
@@ -33,9 +34,12 @@ export ONECAD_OCCT_BUILD_ID="@BUILD_ID@"
 ```
 
 Modify worker/third_party/planegcs as needed, then run scripts/package-macos.sh.
-Its native procedure builds the worker, bundles dylibs,
+Its native procedure builds the worker and source addon components, bundles dylibs,
 re-stages the rewritten worker SHA-256, builds the host with that manifest,
-and verifies the bundled worker. The release app pins the worker SHA-256, so
+bundles the generated addon packages under Contents/Resources/addons,
+and verifies the bundled worker. Addon source, manifests, WIT, Rust SDK and
+build tooling are included in source/; ignored compiled guest and staged package
+outputs are regenerated during packaging. The release app pins the worker SHA-256, so
 rebuilding the app is required after replacing or relinking that worker.
 Read docs/PACKAGING.md before running this locally; package-macos.sh performs
 local ad-hoc signing. This preparation tool never runs it.

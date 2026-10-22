@@ -1,0 +1,20 @@
+[package]
+name = "onecad-extension-sdk"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+build-tools = ["dep:wit-component"]
+
+[dependencies]
+onecad-extension-api = { path = "../onecad-extension-api" }
+serde_json = { workspace = true }
+wit-bindgen = "0.57.1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wit-component = { version = "0.245", optional = true }
+
+[[bin]]
+name = "onecad-addon-build"
+required-features = ["build-tools"]

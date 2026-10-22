@@ -82,6 +82,7 @@ impl Default for CncSettings {
 
 #[derive(Clone, Debug)]
 pub struct ExtensionsUi {
+    pub native: crate::native_extensions::State,
     pub tab: ManagerTab,
     pub category: usize,
     pub search: String,
@@ -100,6 +101,7 @@ pub struct ExtensionsUi {
 impl Default for ExtensionsUi {
     fn default() -> Self {
         Self {
+            native: Default::default(),
             tab: ManagerTab::default(),
             category: 0,
             search: String::new(),

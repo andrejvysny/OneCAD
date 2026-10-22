@@ -1,0 +1,7 @@
+package onecad:extension@0.1.0;
+
+/// Version 1 returns a complete, typed effect plan; the host validates it before
+/// application services perform any action. Interactive callbacks need a new ABI.
+world addon {
+    export execute: func(command: string, context-json: string) -> result<string, string>;
+}

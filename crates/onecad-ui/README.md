@@ -405,6 +405,39 @@ Oversized or malformed payloads fail closed and disable stale picking/commit.
 
 ## Editor chrome
 
+The Home sidebar's **Extensions** page manages real local packages. Bundled
+packages are copied into the current QA profile's `data/extensions` directory on
+first discovery and start disabled. **Install from folder…** accepts another
+package and opens permission review before enabling its exact fingerprint.
+Discover shows only real local packages; online catalogs and update checking are
+explicitly unavailable. Installed rows lead to Overview, Settings and Changelog
+details; missing metadata is shown honestly. **Update from folder…** replaces a
+matching installed package only after validation, revokes its old grants and
+opens fresh permission review. Disable and Uninstall are persistent; refreshing
+does not restore a bundled package the user uninstalled. Package errors remain
+visible. Historical extension catalog mockups are not part of this route.
+The [extension UI contract](../../docs/design/native-extension-ui.md) maps the
+reference screens to supported behavior and documents visual validation.
+
+Enabled commands appear in their declared Export locations and the manager.
+The title search control, Cmd/Ctrl+K and Cmd/Ctrl+Shift+P open a searchable **Extension
+commands** palette for contributions declaring the `palette` location. Commands
+requiring a document or selection stay disabled until that context is ready.
+Menu-only contributions appear in the native Extensions menu and a portable
+Extension commands submenu. The portable Export menu also provides STEP, STL,
+OBJ and 3MF exports.
+Application executable paths are saved under the profile's `config` directory;
+an empty path permits declared macOS bundle discovery. Reset application paths
+backs up the prior settings file before clearing saved paths. Exported files remain in
+`data/extension-exports` if launching the receiving application fails. Launch
+success means process handoff; units and appearance still need verification in
+the receiving application.
+
+All management requests use the bounded document service lane. Guest execution,
+package I/O and process launch run away from the UI thread. Export requests retain
+the invocation's document/session/revision/snapshot/epoch/hash and selected body
+IDs; the shared application service rechecks that target through handoff.
+
 The window follows the OneCAD Final design (`docs/design/native-ui/final/`). The
 presentation components live in the `onecad-widgets` crate (design tokens, baked
 icons, fonts and egui widgets, no OneCAD dependencies); this crate only composes them
