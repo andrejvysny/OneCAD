@@ -7,3 +7,10 @@
 - [Supervisor + stub lanes](repo_supervisor_and_stub_lanes.md) — SupervisorConfig/WorkerHead fan-out, GeometryEngine default+forward rule, no tokio `rt` in core, stub's three threads
 - [Native menu lane](native-menu-lane.md) — muda's main-thread panic kills a build() test, predefined items steal OS chords, the duplicate-client emit trap, noRegenWhen
 - [Regen provenance in tests](regen-provenance-in-tests.md) — RevertToEnd vs ToEnd{from} in real-worker tests; v6 blanket-refuses anchor-only refs downstream of editedFrom
+- [iOS Xcode lane](ios-xcode-lane.md) — nm --no-llvm-bc, debug-dylib binding, testplan IDs, stub override, delayed picker presentation, press bubbling
+- [iPad host lane](ipad-host-lane.md) — Editor facade, default-features trap, release manifest, sim Metal limits, cancel-no-click, author ids, sim recipe
+- [iOS gate lane](ios-gate-lane.md) — case-insensitive logs, Xcode 26 xcresult JSON, f32 mesh bounds, Save As pending check, empty evidence dir
+- [Touch lane](touch-lane.md) — status overwritten per tick, hover-gated sketch viewport, undo clears capture, op gate, a11y click for control taps, arc-slot flake
+- [iPad XCUITest lane](ipad-xcuitest-lane.md) — typeText vs egui, persisted tab, recovery prompt, ids, canvas mm mapping, pick-based geometry checks
+- [iPad render lane](ipad-render-lane.md) — profile at with_profile, renderer idle in tests, Host::ui skips logic, Mobile host+zoom tests, cache in Shared, sim bg state
+- [iPad docs lane](ipad-docs-lane.md) — shared hosted process, gate-clean run dir, plate identity, sim content limits, picker detection, background state

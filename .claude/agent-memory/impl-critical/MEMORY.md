@@ -21,3 +21,5 @@
 - [Frozen handle mapping](repo_frozen_handle_mapping.md) — FrozenMapping/β=0/exact perspective inverse, the grabHandleMapping fallback trap, one representative edge
 - [Offset value attachment](repo_offset_attachment.md) — absolute types drag now, inner-Radius grows outward, two-segment Total witness, shared re-edit ladder
 - [Shell wall attachment](repo_shell_wall_attachment.md) — rim adjacency refuses ambiguity, σ is never assumed, axisDepthFromRay returns null, chip rides H(q)
+- [Embedded kernel lane](repo_embedded_kernel.md) — bundle script + env, lib-unit tests, simctl, sticky relaunch latch, feature-unification trap
+- [iPad model lane](repo_ipad_model_lane.md) — anchors on staged refs, XY plate frame, tap-by-id Metal tests, fmt hook style trap, TransformBody edit gate, zsh
