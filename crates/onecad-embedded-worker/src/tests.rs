@@ -152,3 +152,32 @@ fn trampolines_tolerate_null_pointers_and_short_events() {
     let lines = recorder.lines.lock().unwrap();
     assert_eq!(lines.as_slice(), &[(LogLevel::Info, String::new())]);
 }
+
+#[cfg(onecad_embedded_linked)]
+#[test]
+fn a_short_config_is_refused_reading_nothing_past_its_size() {
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, IntoRawFd};
+    // Too short to hold the fds: refused, and nothing closed (fds unknown).
+    let (mut host, worker) = UnixStream::pair().unwrap();
+    let fd = worker.as_raw_fd();
+    assert_eq!(ffi::run_config_sized(4, fd, fd), 3);
+    host.write_all(b"x").unwrap();
+    let mut byte = [0u8; 1];
+    (&worker)
+        .read_exact(&mut byte)
+        .expect("the caller's fd is still open");
+    // Holds both fds but not the whole struct: refused, both closed.
+    let (mut host, worker) = UnixStream::pair().unwrap();
+    let output: OwnedFd = worker.try_clone().unwrap().into();
+    let fds_end = u32::try_from(3 * std::mem::size_of::<i32>()).unwrap();
+    assert_eq!(
+        ffi::run_config_sized(fds_end, worker.into_raw_fd(), output.into_raw_fd()),
+        3
+    );
+    assert_eq!(
+        host.read(&mut byte).unwrap(),
+        0,
+        "EOF: both worker fds closed"
+    );
+}

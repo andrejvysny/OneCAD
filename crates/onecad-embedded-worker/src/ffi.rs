@@ -80,6 +80,27 @@ pub(crate) fn run(config: RunConfig, callbacks: Arc<dyn WorkerCallbacks>) -> i32
     code
 }
 
+/// `onecad_worker_run_config` with a caller-declared `struct_size`, no
+/// callbacks and the fds passed as given: drives the ABI's short-struct rule.
+#[cfg(test)]
+pub(crate) fn run_config_sized(struct_size: u32, in_fd: c_int, out_fd: c_int) -> c_int {
+    let raw = RawConfig {
+        struct_size,
+        in_fd,
+        out_fd,
+        log_cb: None,
+        log_ctx: std::ptr::null_mut(),
+        log_level: LogLevel::Info.to_abi(),
+        journal_cb: None,
+        journal_ctx: std::ptr::null_mut(),
+        occt_lock_wait_ms: 0,
+    };
+    // SAFETY: `raw` is fully initialised and outlives the call (the library
+    // reads at most `struct_size` bytes of it); no callback pointers; the entry
+    // point is noexcept. Fd ownership is the caller's business (see the test).
+    unsafe { onecad_worker_run_config(&raw) }
+}
+
 /// Copies a C string; NULL reads as empty (the ABI never passes NULL, but a
 /// production host does not rely on that).
 ///

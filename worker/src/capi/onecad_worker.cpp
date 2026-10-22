@@ -193,6 +193,9 @@ extern "C" int onecad_worker_run(int in_fd, int out_fd, onecad_worker_log_fn log
 
 extern "C" int onecad_worker_run_config(const onecad_worker_config* config) noexcept {
     if (config == nullptr) return ONECAD_WORKER_EXIT_INTERNAL;
+    // A caller's struct may end before a field: nothing past struct_size is read.
+    constexpr std::size_t kFdsEnd = offsetof(onecad_worker_config, out_fd) + sizeof(int);
+    if (config->struct_size < kFdsEnd) return ONECAD_WORKER_EXIT_INTERNAL;
     if (config->struct_size < sizeof(onecad_worker_config)) {
         close_valid(config->in_fd, config->out_fd);
         return ONECAD_WORKER_EXIT_INTERNAL;

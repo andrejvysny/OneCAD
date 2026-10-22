@@ -169,10 +169,12 @@ typedef struct onecad_worker_config {
 } onecad_worker_config;
 
 /* onecad_worker_run with the full configuration; identical contract. Returns
- * ONECAD_WORKER_EXIT_INTERNAL when `config` is NULL (nothing is closed: the fds
- * are unknown) or when `struct_size` is smaller than this header's struct (both
- * fds closed). On every other exit path — invalid fds, an exception before or
- * during the loop — both fds are closed exactly once before the call returns. */
+ * ONECAD_WORKER_EXIT_INTERNAL when `config` is NULL or its `struct_size` ends
+ * before `out_fd` (nothing past `struct_size` is read and nothing is closed:
+ * the fds are unknown), or when `struct_size` covers both fds but is smaller
+ * than this header's struct (both fds closed). On every other exit path —
+ * invalid fds, an exception before or during the loop — both fds are closed
+ * exactly once before the call returns. */
 int onecad_worker_run_config(const onecad_worker_config* config) ONECAD_WORKER_NOEXCEPT;
 
 #ifdef __cplusplus
