@@ -4862,6 +4862,13 @@ impl DocumentRuntime {
         self.latest_snapshot.as_ref().map(|s| s.id)
     }
 
+    /// Geometry-only hash of the current authored prefix, for read-only export
+    /// admission. Metadata edits preserve it; pending geometry edits do not.
+    pub(crate) fn export_history_hash(&self) -> onecad_core::regen::HistoryPrefixHash {
+        let timeline = &self.regen.timeline;
+        onecad_core::regen::history_prefix_hash(&timeline.records()[..timeline.cursor()])
+    }
+
     fn gate_stale_pick(&self, snapshot: SnapshotId) -> Result<(), EngineError> {
         let Some(head) = &self.latest_snapshot else {
             return Ok(());

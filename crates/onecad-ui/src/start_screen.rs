@@ -20,7 +20,10 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     // Sheets close themselves on Esc while drawing; sample before so one press closes only the sheet.
     let modal_open = app.ui.library.sheet.is_some()
         || app.ui.library.wizard.is_some()
-        || app.ui.extensions.sheet.is_some();
+        || app.ui.extensions.sheet.is_some()
+        || app.ui.extensions.native.review.is_some()
+        || app.ui.extensions.native.palette_open
+        || app.ui.extensions.native.reset_confirmation;
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE)
         .show(ui, |ui| {
@@ -47,7 +50,7 @@ fn back(app: &mut App) {
 /// Main area right of the sidebar. Library pages own their padding and scrolling because
 /// the standard-part page runs edge to edge.
 fn page(app: &mut App, ui: &mut Ui, area: Rect) {
-    if !crate::editor_facade::PREVIEW_FACADES {
+    if !crate::editor_facade::PREVIEW_FACADES && library_active(app.ui.start_page) {
         app.ui.start_page = StartPage::Home;
     }
     let content = Rect::from_min_max(
@@ -158,10 +161,15 @@ fn sidebar(app: &mut App, ui: &mut Ui, area: Rect) {
     );
     ui.scope_builder(UiBuilder::new().max_rect(bottom), |ui| {
         if !crate::editor_facade::PREVIEW_FACADES {
-            ui.add(SidebarNavItem::new("extension", "Extensions").enabled(false))
-                .on_disabled_hover_text(
-                    "Native extension discovery and execution are not available yet",
-                );
+            if ui
+                .add(
+                    SidebarNavItem::new("extension", "Extensions")
+                        .active(app.ui.start_page == StartPage::Extensions),
+                )
+                .clicked()
+            {
+                nav = Some(Nav::Extensions);
+            }
             ui.add(SidebarNavItem::new("settings", "Settings").enabled(false))
                 .on_disabled_hover_text(
                     "Native settings page is not available yet; use the appearance menu",

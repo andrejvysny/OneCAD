@@ -28,6 +28,8 @@ onecad-protocol = { workspace = true }
 onecad-scene = { workspace = true }
 onecad-render = { workspace = true }
 onecad-widgets = { workspace = true }
+onecad-extension-api = { workspace = true }
+onecad-extension-host = { workspace = true }
 eframe = { version = "=0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "system_fonts", "wgpu"], optional = true }
 # egui's bundled fonts are the fallback behind the CoreText SF fonts (eframe also
 # enables them on desktop, so its feature set is unchanged).
@@ -52,3 +54,5 @@ arboard = { version = "3.6", default-features = false, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+png = "0.18"
+zip = { workspace = true }

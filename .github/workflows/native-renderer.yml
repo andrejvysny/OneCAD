@@ -105,6 +105,10 @@ jobs:
           mkdir -p "$RUNNER_TEMP/onecad-native-host-gate"
           scripts/build-worker.sh Release 2>&1 | tee "$RUNNER_TEMP/onecad-native-host-gate/worker-build.log"
           cp "$ONECAD_OCCT_ROOT/share/onecad/occt-build.json" "$RUNNER_TEMP/onecad-native-host-gate/occt-build.json"
+      - name: Build bundled portable addons
+        run: |
+          rustup target add wasm32-unknown-unknown
+          scripts/build-addons.sh
       - name: Gate verifier regressions
         run: cargo test -p xtask evidence::tests
       - name: Require all native lifecycle tests and missing-worker rejection

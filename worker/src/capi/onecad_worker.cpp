@@ -1,4 +1,4 @@
-// onecad_worker.cpp — see onecad_worker.h. In-process host for iPadOS (ADR-0018).
+// onecad_worker.cpp — see onecad_worker.h. In-process host for iPadOS (ADR-0019).
 #include "capi/onecad_worker.h"
 
 #include <cstddef>

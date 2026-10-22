@@ -3,7 +3,7 @@
 Status: frozen contract for the iPadOS workstream (Plane ONECAD-270, IP01
 ONECAD-448). Plane owns scope, status and evidence summaries; this file owns the
 code-coupled boundaries. It does not assert any test result. See
-[ADR-0018](../adr/0018-ipados-embedded-kernel.md) for the hosting decision.
+[ADR-0019](../adr/0019-ipados-embedded-kernel.md) for the hosting decision.
 
 ## Scope and deployment
 

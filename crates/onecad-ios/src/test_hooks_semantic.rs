@@ -21,7 +21,7 @@ const JOURNAL_HELD: &str = "kernel-journal.fault-held";
 const JOURNAL_MARKER: &[u8] = b"onecad acceptance journal fault";
 /// The held journal's in-flight record describes the moment the fault was
 /// injected, not any later job; restoring it would strike an innocent op at
-/// the next launch (ADR-0018 decision 5). The worker rewrites it at its next
+/// the next launch (ADR-0019 decision 5). The worker rewrites it at its next
 /// journal event.
 const INFLIGHT: &str = "inflight.json";
 /// Files only `save_artifact` and `export_step_artifact` may attribute to the

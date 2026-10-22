@@ -6,6 +6,9 @@
 //! key equivalents still swallow the keys, so egui's own Cmd+C/V/A handling never runs.
 
 #[cfg_attr(not(all(target_os = "macos", feature = "desktop")), allow(dead_code))]
+mod extension_routes;
+
+#[cfg_attr(not(all(target_os = "macos", feature = "desktop")), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     Undo,
@@ -31,6 +34,7 @@ pub enum Action {
     /// without a menu bar; the document keeps its sandbox path).
     #[cfg_attr(feature = "desktop", allow(dead_code))]
     ExportDocument,
+    ExtensionCommand(u64),
     Quit,
     Fit,
     Home,
@@ -40,6 +44,7 @@ pub enum Action {
 #[cfg(all(target_os = "macos", feature = "desktop"))]
 mod imp {
     use super::Action;
+    use super::extension_routes::MenuLocation;
     use crate::ui_state::Appearance;
     use muda::accelerator::{Accelerator, Code, Modifiers};
     use muda::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
@@ -59,6 +64,10 @@ mod imp {
         saves: [MenuItem; 3],
         exports: [MenuItem; 4],
         recent: Submenu,
+        export_menu: Submenu,
+        extension_menu: Submenu,
+        extension_items: Mutex<Vec<(MenuLocation, MenuItem)>>,
+        extension_routes: Mutex<super::extension_routes::ExtensionRoutes>,
         recent_items: Mutex<(Vec<String>, Vec<MenuItem>)>,
         routes: Routes,
     }
@@ -189,7 +198,9 @@ mod imp {
             ],
         )
         .map_err(e)?;
-        let menu = Menu::with_items(&[&app, &file, &edit, &view, &window]).map_err(e)?;
+        let extensions = Submenu::new("Extensions", false);
+        let menu =
+            Menu::with_items(&[&app, &file, &edit, &view, &extensions, &window]).map_err(e)?;
         menu.init_for_nsapp();
         window.set_as_windows_menu_for_nsapp();
 
@@ -267,6 +278,10 @@ mod imp {
             saves: [save, save_as, save_all],
             exports,
             recent,
+            export_menu: export,
+            extension_menu: extensions,
+            extension_items: Mutex::new(Vec::new()),
+            extension_routes: Mutex::new(Default::default()),
             recent_items: Mutex::new((Vec::new(), Vec::new())),
             routes,
         })
@@ -288,6 +303,52 @@ mod imp {
             for item in &self.exports {
                 item.set_enabled(export);
             }
+        }
+
+        /// Route export commands to File > Export and generic commands to Extensions.
+        pub fn set_extension_commands(
+            &self,
+            export: &[(String, String)],
+            generic: &[(String, String)],
+            enabled: bool,
+            generation: u64,
+        ) {
+            let (Ok(mut registrations), Ok(mut items), Ok(mut routes)) = (
+                self.extension_routes.lock(),
+                self.extension_items.lock(),
+                self.routes.lock(),
+            ) else {
+                return;
+            };
+            if registrations.replace(export, generic, generation) {
+                for (location, item) in items.drain(..) {
+                    routes.retain(|(id, _)| id != item.id());
+                    let _ = self.extension_submenu(location).remove(&item);
+                }
+                for entry in &registrations.entries {
+                    let item = MenuItem::new(&entry.title, enabled, None);
+                    if self.extension_submenu(entry.location).append(&item).is_ok() {
+                        routes.push((item.id().clone(), Action::ExtensionCommand(entry.token)));
+                        items.push((entry.location, item));
+                    }
+                }
+            }
+            for (_, item) in items.iter() {
+                item.set_enabled(enabled);
+            }
+            self.extension_menu
+                .set_enabled(enabled && !generic.is_empty());
+        }
+
+        fn extension_submenu(&self, location: MenuLocation) -> &Submenu {
+            match location {
+                MenuLocation::Export => &self.export_menu,
+                MenuLocation::Extensions => &self.extension_menu,
+            }
+        }
+
+        pub fn extension_command(&self, token: u64) -> Option<String> {
+            self.extension_routes.lock().ok()?.command(token)
         }
 
         /// Rebuilds File › Open Recent when the recents list changed.
@@ -404,6 +465,17 @@ mod imp {
                 _ => true,
             }
         }
+        pub fn set_extension_commands(
+            &self,
+            _export: &[(String, String)],
+            _generic: &[(String, String)],
+            _enabled: bool,
+            _generation: u64,
+        ) {
+        }
+        pub fn extension_command(&self, _token: u64) -> Option<String> {
+            None
+        }
     }
 }
 
@@ -474,6 +546,7 @@ impl Action {
                     // Save All carries Option, which the shift-only comparison cannot express.
                     Self::Appearance(_)
                     | Self::Export(_)
+                    | Self::ExtensionCommand(_)
                     | Self::OpenRecent(_)
                     | Self::SaveAll
                     | Self::ExportDocument

@@ -1,6 +1,6 @@
 # iPadOS embedded kernel: build, identity, journal and failure policy
 
-Code-coupled procedures for the in-process OCCT worker (ADR-0018, IP02/IP03).
+Code-coupled procedures for the in-process OCCT worker (ADR-0019, IP02/IP03).
 Boundaries and policy are frozen in [ARCHITECTURE.md](ARCHITECTURE.md); this
 file says how they are built and implemented. It records no test result —
 evidence lives in Plane (ONECAD-449, ONECAD-450).
@@ -226,7 +226,7 @@ op, and reaches worker status (`WorkerLifecycle::JournalDegraded`,
   still busy past the deadline it would have been wedge-stopped at is stuck.
 - A run that does not return is ABANDONED: counted, its thread left running,
   and a process-wide latch is set (`in_process_relaunch_required()`, sticky
-  until relaunch — ADR-0018 decision 4: the app is relaunch-required). From
+  until relaunch — ADR-0019 decision 4: the app is relaunch-required). From
   then on: no in-process launch starts a thread (`InProcessHost::launch` and
   the supervisor loop both refuse); the supervisor that abandoned fails
   `Death::Abandoned` → `WorkerState::Failed` with a reason containing

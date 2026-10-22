@@ -3,7 +3,7 @@
  * The same worker runs as a library behind the same OCW1 wire
  * (protocol/SCHEMA.md): the host hands it one end of a socketpair and speaks
  * OCW1 to the other end exactly as it speaks to the sidecar's stdio. This is
- * the iPadOS kernel host (ADR-0018, docs/ios/ARCHITECTURE.md; iPadOS forbids
+ * the iPadOS kernel host (ADR-0019, docs/ios/ARCHITECTURE.md; iPadOS forbids
  * child processes) and a macOS test host for onecad-app's `embedded-kernel`
  * backend. The shipping macOS host stays the sidecar, for crash and hang
  * isolation. Build procedures and the identity manifest: docs/ios/KERNEL.md.

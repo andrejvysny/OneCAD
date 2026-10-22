@@ -1,5 +1,5 @@
 //! [`InProcessHost`]: the iPadOS backend — the OCCT worker library run on a
-//! dedicated thread over a socketpair (ADR-0018; docs/ios/ARCHITECTURE.md
+//! dedicated thread over a socketpair (ADR-0019; docs/ios/ARCHITECTURE.md
 //! "In-process failure policy"; docs/ios/KERNEL.md).
 //!
 //! * Transport: `UnixStream::pair`, `SO_NOSIGPIPE` on both ends (an iOS host
@@ -74,7 +74,7 @@ static LAUNCHED: AtomicU64 = AtomicU64::new(0);
 static LIVE: AtomicU64 = AtomicU64::new(0);
 static ABANDONED: AtomicU64 = AtomicU64::new(0);
 /// Set by the first abandonment and never cleared (outside tests): the whole
-/// process is `relaunch-required` (ADR-0018 decision 4).
+/// process is `relaunch-required` (ADR-0019 decision 4).
 static RELAUNCH_REQUIRED: Mutex<Option<String>> = Mutex::new(None);
 
 /// Process-wide in-process instance counts (diagnostics and tests).

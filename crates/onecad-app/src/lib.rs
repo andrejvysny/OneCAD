@@ -20,6 +20,7 @@ pub mod error;
 pub mod events;
 pub mod export;
 pub mod export_threemf;
+pub mod extension_handoff;
 pub mod host;
 mod host_claims;
 mod host_tasks;

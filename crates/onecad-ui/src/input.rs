@@ -122,7 +122,9 @@ pub(crate) fn fence_previous_frame(app: &mut App, ctx: &egui::Context) {
 fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     app.poll_device_failure();
     app.sync_document_state();
+    app.sync_extension_menu();
     crate::input_trace::input(app, ctx, raw);
+    crate::native_extensions::route_shortcut(app, ctx, raw);
     crate::sketch_gestures::route_raw(app, ctx, raw);
     // The switcher runs later, in event order; its abandoning Escape must not
     // first cancel the shown document's chain.
@@ -348,6 +350,15 @@ fn route_menu(
         menu::Action::Export(format) => app.document_request(Request::Export(format)),
         #[cfg(not(feature = "desktop"))]
         menu::Action::ExportDocument => crate::touch_menu::send_copy(app),
+        menu::Action::ExtensionCommand(token) => {
+            if let Some(id) = app
+                .menu
+                .as_ref()
+                .and_then(|menu| menu.extension_command(token))
+            {
+                app.run_extension_command(&id);
+            }
+        }
         menu::Action::Quit => app.close_prompt = true,
         menu::Action::Fit => app.doc.fit_pending = true,
         menu::Action::Home => {

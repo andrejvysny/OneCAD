@@ -328,7 +328,7 @@ endif()
 # ---------------------------------------------------------------------------
 # onecad_worker_lib : the SAME worker as a static library behind a C ABI
 # (src/capi/onecad_worker.h) for in-process hosting: the iPadOS kernel
-# (ADR-0018) and onecad-app's macOS `embedded-kernel` test backend; the
+# (ADR-0019) and onecad-app's macOS `embedded-kernel` test backend; the
 # shipping macOS host is the sidecar. Recompiles worker_core's sources with
 # ONECAD_WORKER_LIBRARY (compiles out the `__crash` std::abort chaos hook, and
 # Debug.Busy/__slow unless ONECAD_WORKER_LIB_TEST_HOOKS), so it never shares

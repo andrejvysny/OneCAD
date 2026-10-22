@@ -1,0 +1,26 @@
+[package]
+name = "onecad-extension-host"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Local package registry and capability-restricted portable extension sandbox"
+
+[dependencies]
+onecad-extension-api = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+cap-std = "4"
+cap-fs-ext = "4"
+# Keep the sandbox engine on a maintained release with current security patches.
+wasmtime = { version = "50", default-features = false, features = ["std", "runtime", "cranelift", "component-model"] }
+
+[dev-dependencies]
+tempfile = "3"
+wat = "1"
+onecad-app = { workspace = true }
+onecad-core = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+uuid = { workspace = true }
+zip = { workspace = true }

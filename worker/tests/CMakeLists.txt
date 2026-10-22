@@ -591,7 +591,7 @@ add_executable(test_import_step test_import_step.cpp)
 target_link_libraries(test_import_step PRIVATE worker_core)
 add_test(NAME import_step COMMAND test_import_step)
 
-# --- In-process library hardening (ADR-0016 findings, ADR-0018): every OCCT
+# --- In-process library hardening (ADR-0016 findings, ADR-0019): every OCCT
 #     lock site refuses RETRIABLE with the OCCT_GLOBALS_BUSY prefix first, and a
 #     refused plan leaves no trace; the Dispatcher closes the journal window only
 #     after the terminal frame is written and sizes its lane stacks as asked. ---

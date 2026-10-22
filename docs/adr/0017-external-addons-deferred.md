@@ -1,6 +1,6 @@
 # 0017 — External addons are deferred; modules, slots and ordering continue as Rust traits
 
-- Status: Accepted direction. Current delivery and qualification status belongs in Plane; this record does not establish gate completion.
+- Status: Decision 1 superseded by [ADR-0018](0018-portable-command-addons.md); other native boundary principles retained. Accepted direction. Current delivery and qualification status belongs in Plane; this record does not establish gate completion.
 - Date: 2026-10-17
 - Plane: ONECAD-261 (P0.6), program ONECAD-255
 - Scope: the macOS desktop app. The iPad/iOS target was dropped from scope by the user on 2026-10-17.

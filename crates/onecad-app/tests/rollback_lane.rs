@@ -521,11 +521,15 @@ async fn roll_to_current_row_is_a_full_noop() {
     build_two_boxes(&runtime, &sched, &mut rx).await;
 
     // Mint a checkpoint of the head (step 3) — the state the roll must not evict.
-    let (undo_before, checkpoints_before) = {
+    let (undo_before, checkpoints_before, checkpoint_steps_before) = {
         let mut guard = runtime.lock().await;
         let rt = guard.as_mut().expect("document open");
         rt.take_checkpoint_at_head().await;
-        (rt.undo_depth(), rt.checkpoint_count())
+        (
+            rt.undo_depth(),
+            rt.checkpoint_count(),
+            rt.checkpoint_steps(),
+        )
     };
     assert_eq!(checkpoints_before, 1, "a checkpoint was taken at the head");
 
@@ -571,10 +575,15 @@ async fn roll_to_current_row_is_a_full_noop() {
     assert_eq!(s, "published", "the real roll published");
     {
         let guard = runtime.lock().await;
-        assert_eq!(
-            guard.as_ref().expect("document open").checkpoint_count(),
-            checkpoints_before,
-            "cursor motion changes no record, so checkpoints survive the roll"
+        let checkpoint_steps_after = guard.as_ref().expect("document open").checkpoint_steps();
+        // Completion precedes the driver's best-effort rollback checkpoint mint.
+        // The new prefix checkpoint may exist already; the original must survive.
+        assert!(
+            checkpoint_steps_before
+                .iter()
+                .all(|step| checkpoint_steps_after.contains(step)),
+            "cursor motion must retain existing checkpoints: before \
+             {checkpoint_steps_before:?}, after {checkpoint_steps_after:?}"
         );
     }
 

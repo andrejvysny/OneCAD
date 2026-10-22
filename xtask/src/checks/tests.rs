@@ -271,6 +271,15 @@ fn all_registered_edges_pass_each_declaration_kind() {
     for (from, allowed) in layers::LAYERS {
         for to in *allowed {
             for kind in [Value::Null, json!("dev"), json!("build")] {
+                if *from == "onecad-extension-host"
+                    && ["onecad-app", "onecad-core"].contains(to)
+                    && kind != json!("dev")
+                {
+                    let errors =
+                        layers::check(metadata(from, vec![local(to, kind)], &[to])).unwrap();
+                    assert!(errors.iter().any(|error| error.contains("test-only")));
+                    continue;
+                }
                 assert!(layers::check(metadata(from, vec![local(to, kind)], &[to]))
                     .unwrap()
                     .is_empty());
