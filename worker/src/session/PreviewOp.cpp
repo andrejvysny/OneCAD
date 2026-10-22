@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "io/OcctBusy.h"
 #include "session/PlanExecutor.h"
 #include "session/PreviewMesh.h"
 #include "session/ScratchJob.h"
@@ -230,6 +231,9 @@ Envelope handle_preview_op(Session& session, const Envelope& req,
         ops::ValidationMode::PreviewInteractive);
     if (outcome.status == CandidateResult::Status::Cancelled) {
         return err(req, "CANCELLED", "preview cancelled");
+    }
+    if (outcome.status == CandidateResult::Status::Busy) {
+        return io::busy_response(req.id, outcome.error_message);
     }
     if (outcome.status == CandidateResult::Status::NeedsRepair) {
         return Envelope::ok_response(

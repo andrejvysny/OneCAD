@@ -4427,6 +4427,7 @@ pub async fn pick_component_files(app: HostContext) -> Result<Vec<String>, ApiEr
 /// errors from spawning the ingest worker.
 #[tracing::instrument(skip_all, fields(paths = paths.len()), err(Display))]
 pub async fn ingest_components(
+    state: &AppState,
     app: HostContext,
     paths: Vec<String>,
     library_root: Option<String>,
@@ -4444,7 +4445,8 @@ pub async fn ingest_components(
         ..Default::default()
     };
     let plan = crate::library_ingest::plan_from_paths(&paths, &defaults);
-    let worker = crate::library_ingest::spawn_ingest_worker().await?;
+    // The process's own backend (explicit, like every production worker).
+    let worker = crate::library_ingest::spawn_ingest_worker_on(state.services().backend()).await?;
     Ok(crate::library_ingest::ingest_components_at(&worker.0, &root, &plan).await)
 }
 

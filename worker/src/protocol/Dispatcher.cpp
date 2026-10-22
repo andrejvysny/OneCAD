@@ -10,6 +10,7 @@
 #include <Standard_Failure.hxx>
 
 #include "protocol/Frame.h"
+#include "util/LaneThread.h"
 #include "util/Log.h"
 
 namespace onecad::protocol {
@@ -304,12 +305,15 @@ void Dispatcher::kernel_loop(int out_fd) {
                 last_emit_substituted = !stamp_and_write(out_fd, e);
             },
             [&last_emit_substituted] { return last_emit_substituted; });
-        if (journal_.job_end) journal_.job_end(job.env.id, job.env.verb);
         {
             std::lock_guard<std::mutex> lk(tokens_mu_);
             tokens_.erase(job.env.id);
         }
         stamp_and_write(out_fd, resp);
+        // The journal closes the job only once its terminal frame is out: the
+        // serialization of a large result runs inside stamp_and_write, and a
+        // crash there must still be attributed to this job (ADR-0016 finding C).
+        if (journal_.job_end) journal_.job_end(job.env.id, job.env.verb);
         inflight_end();
 
         // If a handler asked to shut down, unblock the reader by closing stdin.
@@ -453,13 +457,13 @@ int Dispatcher::run(int in_fd, int out_fd, const Envelope* hello) {
     }
 
     // Stops and joins the lanes on EVERY exit from run(), an exception included
-    // (a failed std::thread ctor, bad_alloc in the reader): a joinable
-    // std::thread destroyed during unwinding is std::terminate, which in the
+    // (a failed lane-thread ctor, bad_alloc in the reader): a joinable
+    // lane thread destroyed during unwinding is std::terminate, which in the
     // in-process library aborts the HOST app (P0.3 ONECAD-258). The normal path
     // calls stop_and_join() explicitly, exactly where it always joined.
     struct Lanes {
         Dispatcher& d;
-        std::thread kernel, solver, status;
+        util::LaneThread kernel, solver, status;
         void stop_and_join() {
             {
                 std::lock_guard<std::mutex> lk(d.queue_mu_);
@@ -482,9 +486,9 @@ int Dispatcher::run(int in_fd, int out_fd, const Envelope* hello) {
         }
         ~Lanes() { stop_and_join(); }
     } lanes{*this, {}, {}, {}};
-    lanes.kernel = std::thread(&Dispatcher::kernel_loop, this, out_fd);
-    lanes.solver = std::thread(&Dispatcher::solver_loop, this, out_fd);
-    lanes.status = std::thread(&Dispatcher::status_loop, this, out_fd);
+    lanes.kernel = util::LaneThread([this, out_fd] { kernel_loop(out_fd); }, lane_stack_bytes_);
+    lanes.solver = util::LaneThread([this, out_fd] { solver_loop(out_fd); }, lane_stack_bytes_);
+    lanes.status = util::LaneThread([this, out_fd] { status_loop(out_fd); }, lane_stack_bytes_);
 
     int exit_code = 0;
     for (;;) {

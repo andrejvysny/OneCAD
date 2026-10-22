@@ -43,7 +43,9 @@ namespace onecad::session {
 // Result of executing one candidate step against scratch state. Failed,
 // cancelled, and NeedsRepair candidates are rolled back before this is returned.
 struct CandidateResult {
-    enum class Status { Ok, Failed, Unsupported, NeedsRepair, Cancelled };
+    // Busy: ops::OpOutcome::Status::Busy, rolled back like a failure but never
+    // reported as one (io/OcctBusy.h).
+    enum class Status { Ok, Failed, Unsupported, NeedsRepair, Cancelled, Busy };
     Status status = Status::Ok;
     std::string error_code;
     std::string error_message;
@@ -83,11 +85,14 @@ CandidateResult execute_candidate_op(
 // retain order; the terminal failure diagnostic is last.
 nlohmann::json candidate_diagnostics(const CandidateResult& candidate);
 
-enum class ExecStatus { Completed, Cancelled };
+// Busy: an op was refused OCCT_GLOBALS_BUSY; the caller answers the whole
+// request with io::busy_response(busy_message) and stores no scratch.
+enum class ExecStatus { Completed, Cancelled, Busy };
 
 struct ExecResult {
     ExecStatus status = ExecStatus::Completed;
     std::optional<std::size_t> last_ok_exec_idx;  // execution-order index for prefixHashes
+    std::string busy_message;                     // set iff status == Busy
 };
 
 // Drive the ordered op slice into `job`, streaming one planStep per executed step

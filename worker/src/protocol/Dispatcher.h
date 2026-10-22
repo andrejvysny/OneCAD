@@ -79,8 +79,10 @@ struct HandlerContext {
 // in the socket buffer die with it, so the host cannot attribute the crash from
 // the frames it managed to read. These run synchronously on the kernel thread:
 // whatever the host records in them is on record before the work they name
-// starts. `job_begin` at dequeue, `job_end` after the handler returned (before
-// its terminal frame is written). Kernel lane only. Set before run().
+// starts. `job_begin` at dequeue, `job_end` after the job's terminal frame was
+// written (or its write failed), so a crash while SERIALIZING a large result
+// (Tessellate, ExportGeometry) is still attributed to the job. Kernel lane
+// only. Set before run().
 // `plan_op_begin` carries the op's own `prefixHashes[position]` (falling back to
 // `expectedBaseHash` when the array is short, like Rust's plan_op_keys), read
 // from THIS job's args, so the host can key the crash circuit
@@ -136,6 +138,11 @@ public:
 
     // Install the in-process crash-journal hooks. Before run() only.
     void set_journal_hooks(JournalHooks hooks) { journal_ = std::move(hooks); }
+
+    // Stack size of the kernel/solver/status lane threads, bytes. 0 (the
+    // default, the sidecar) keeps the platform default; the in-process library
+    // asks for 8 MiB (util/LaneThread.h). Before run() only.
+    void set_lane_stack_bytes(std::size_t bytes) { lane_stack_bytes_ = bytes; }
 
     // Execute a single request synchronously in-process, no threads/fds.
     // Used by --selftest. Returns the terminal response.
@@ -265,6 +272,7 @@ private:
 
     // Read-only once run() starts (set_journal_hooks is before-run only).
     JournalHooks journal_;
+    std::size_t lane_stack_bytes_ = 0;
 };
 
 }  // namespace onecad::protocol

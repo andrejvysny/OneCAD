@@ -44,16 +44,31 @@ readonly DOWNLOAD_DIR="${ONECAD_OCCT_DOWNLOAD_DIR:-$HOME/.onecad-occt-build/${VE
 readonly ARCHIVE="${DOWNLOAD_DIR}/OCCT-${TAG}.tar.gz"
 readonly SOURCE_DIR="${BUILD_DIR}-source"
 readonly METADATA="${PREFIX}/share/onecad/occt-build.json"
+# The worker's CMake reads THIS file (worker/CMakeLists.txt): it pins the
+# fingerprint seed's sourceCommit, options and build id, exactly as
+# build-pinned-occt.sh does for the desktop prefix.
+readonly CMAKE_METADATA="${PREFIX}/share/onecad/occt-build.cmake"
 
-if [[ -f "$METADATA" ]] && grep -Fq "\"buildId\": \"${BUILD_ID}\"" "$METADATA"; then
+metadata_matches() {
+    [[ -f "$METADATA" ]] && grep -Fq "\"buildId\": \"${BUILD_ID}\"" "$METADATA" &&
+        [[ -f "$CMAKE_METADATA" ]] &&
+        grep -Fq "set(ONECAD_OCCT_SOURCE_COMMIT \"${COMMIT}\")" "$CMAKE_METADATA" &&
+        grep -Fq "set(ONECAD_OCCT_NORMALIZED_BUILD_OPTIONS \"${NORMALIZED_OPTIONS}\")" "$CMAKE_METADATA" &&
+        grep -Fq "set(ONECAD_OCCT_BUILT_ID \"${BUILD_ID}\")" "$CMAKE_METADATA"
+}
+
+if metadata_matches; then
     echo "==> Reusing iPadOS OCCT ${PLATFORM}: ${PREFIX}"
     exit 0
 fi
 
 mkdir -p "$DOWNLOAD_DIR" "$BUILD_DIR" "$PREFIX"
-if [[ ! -f "$ARCHIVE" ]]; then
+# Verified BEFORE it is moved into place: a truncated or tampered download never
+# becomes the archive a later run trusts by name.
+if [[ ! -f "$ARCHIVE" ]] || ! printf '%s  %s\n' "$ARCHIVE_SHA256" "$ARCHIVE" | shasum -a 256 -c - >/dev/null 2>&1; then
     curl --fail --location --retry 3 --output "${ARCHIVE}.part" \
         "https://github.com/Open-Cascade-SAS/OCCT/archive/refs/tags/${TAG}.tar.gz"
+    printf '%s  %s\n' "$ARCHIVE_SHA256" "${ARCHIVE}.part" | shasum -a 256 -c -
     mv "${ARCHIVE}.part" "$ARCHIVE"
 fi
 printf '%s  %s\n' "$ARCHIVE_SHA256" "$ARCHIVE" | shasum -a 256 -c -
@@ -94,6 +109,11 @@ cmake --build "$BUILD_DIR" --parallel "${ONECAD_OCCT_JOBS:-6}"
 cmake --install "$BUILD_DIR"
 
 mkdir -p "${PREFIX}/share/onecad"
+{
+    printf 'set(ONECAD_OCCT_SOURCE_COMMIT "%s")\n' "$COMMIT"
+    printf 'set(ONECAD_OCCT_NORMALIZED_BUILD_OPTIONS "%s")\n' "$NORMALIZED_OPTIONS"
+    printf 'set(ONECAD_OCCT_BUILT_ID "%s")\n' "$BUILD_ID"
+} >"$CMAKE_METADATA"
 {
     printf '{\n'
     printf '  "schemaVersion": 1,\n'

@@ -13,6 +13,7 @@
 #include <TopTools_IndexedMapOfShape.hxx>
 
 #include "io/BrepCodec.h"
+#include "io/OcctBusy.h"
 #include "session/PlanExecutor.h"
 #include "session/PreviewMesh.h"
 #include "session/ScratchJob.h"
@@ -214,6 +215,11 @@ Envelope handle_preview_plan(Session& session, const Envelope& req, HandlerConte
                                              ops::ValidationMode::PreviewInteractive);
     if (exec.status == ExecStatus::Cancelled) {
         return fail(req, in.job_id, "CANCELLED", "preview cancelled");
+    }
+    if (exec.status == ExecStatus::Busy) {
+        Envelope r = io::busy_response(req.id, exec.busy_message);
+        r.stamp.job_id = in.job_id;
+        return r;
     }
 
     Envelope response = Envelope::ok_response(req.id, json::object());

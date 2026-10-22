@@ -238,13 +238,26 @@ pub fn rename(app: &HostContext, old_path: &Path, new_name: &str) -> Result<Path
 
 fn remove_at(recents_path: &Path, path: &Path) -> Result<(), ApiError> {
     let _lane = recents_lane();
-    trash::delete(path).map_err(|e| ApiError::Io(e.to_string()))?;
+    discard_file(path)?;
 
     let target = path.to_string_lossy().into_owned();
     let mut entries = load_at(recents_path);
     entries.retain(|e| e.path != target);
     store_at(recents_path, &entries);
     Ok(())
+}
+
+/// The OS trash: recoverable, unlike a permanent delete.
+#[cfg(not(target_os = "ios"))]
+fn discard_file(path: &Path) -> Result<(), ApiError> {
+    trash::delete(path).map_err(|e| ApiError::Io(e.to_string()))
+}
+
+/// iOS has no app-reachable trash (`trash` does not build there and
+/// `FileManager.trashItem` is unavailable), so the sandboxed file is removed.
+#[cfg(target_os = "ios")]
+fn discard_file(path: &Path) -> Result<(), ApiError> {
+    std::fs::remove_file(path).map_err(|e| ApiError::Io(e.to_string()))
 }
 
 /// Moves a project's `.onecad` file to the OS trash (recoverable, unlike a
@@ -261,8 +274,12 @@ pub fn remove(app: &HostContext, path: &Path) -> Result<(), ApiError> {
 /// whatever the Linux desktop offers), selected if the platform supports it.
 ///
 /// Every arm passes `path` as a separate process argument (never interpolated into
-/// a shell string), so there is no shell-injection surface here.
+/// a shell string), so there is no shell-injection surface here. On iOS there is
+/// no file manager to spawn (and no child processes): a no-op returning `Ok`;
+/// the UIKit host presents files itself.
 pub fn reveal(path: &Path) -> Result<(), ApiError> {
+    #[cfg(target_os = "ios")]
+    let _ = path;
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open")
@@ -282,7 +299,7 @@ pub fn reveal(path: &Path) -> Result<(), ApiError> {
             .status()
             .map_err(|e| ApiError::Io(e.to_string()))?;
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
     {
         let uri = format!("file://{}", path.display());
         let by_dbus = std::process::Command::new("dbus-send")

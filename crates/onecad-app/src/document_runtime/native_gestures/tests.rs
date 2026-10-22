@@ -328,4 +328,5 @@ async fn malformed_foreign_and_locked_end_channels_never_commit() {
 }
 
 mod fencing;
+#[cfg(feature = "sidecar")]
 mod production;

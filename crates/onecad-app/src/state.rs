@@ -10,7 +10,7 @@
 //!
 //! [`AppState::default`] builds a factory that spawns a real
 //! [`WorkerManager`]-backed backend when the worker binary resolves
-//! ([`resolve_worker_path`]), wiring its **restart hook** to bump the document's
+//! ([`crate::worker::resolve_worker_path`]), wiring its **restart hook** to bump the document's
 //! epoch + enqueue a replay (SCHEMA §8 crash → restart + replay). When no binary
 //! is present it falls back to [`PendingBackend`] so the app still boots. The
 //! factory also produces the [`GeometryExporter`] (the same `WorkerManager` Arc) that
@@ -70,9 +70,9 @@ use crate::dto::WorkerStatusDto;
 use crate::export::GeometryExporter;
 use crate::process::{take_warm, HostId, ProcessServices, WorkerSlot};
 use crate::worker::{
-    resolve_worker_path, CircuitControl, ElementQuery, FaceBoundaryProjection, MeshProvider,
-    PendingBackend, PreviewEngine, SolverEngine, StepImport, SupervisorConfig, WorkerLifecycle,
-    WorkerManager, WorkerReadiness, WorkerState,
+    CircuitControl, ElementQuery, FaceBoundaryProjection, MeshProvider, PendingBackend,
+    PreviewEngine, SolverEngine, StepImport, WorkerBackend, WorkerLifecycle, WorkerManager,
+    WorkerReadiness, WorkerRole, WorkerState,
 };
 
 /// Minimum gap between two blur-triggered autosave flushes
@@ -762,6 +762,7 @@ impl AppState {
         let live: WorkerSlot = Arc::new(StdMutex::new(None));
         let restart_owner = Arc::new(StdMutex::new(None));
         let backend_factory = real_worker_factory(
+            services.backend().clone(),
             runtime.clone(),
             scheduler.clone(),
             app.clone(),
@@ -798,7 +799,8 @@ impl AppState {
 }
 
 /// The production factory: **adopt** the pre-warmed worker when there is a usable
-/// one, else spawn a fresh [`WorkerManager`] over the resolved binary; else
+/// one, else spawn a fresh [`WorkerManager`] on the process's [`WorkerBackend`]
+/// (the resolved sidecar binary, or the in-process kernel); else
 /// [`PendingBackend`]. Either way the resulting manager is installed as `live`,
 /// which retires the previous document's worker.
 ///
@@ -808,6 +810,7 @@ impl AppState {
 /// at adoption, for warm and cold workers alike: the pool's worker is shared by
 /// every host in the process, so only the adopting host may own its hooks.
 fn real_worker_factory(
+    backend: WorkerBackend,
     runtime: Arc<Mutex<Option<DocumentRuntime>>>,
     scheduler: SharedScheduler,
     app: SharedHost,
@@ -819,10 +822,10 @@ fn real_worker_factory(
         let wm = match take_warm(&warm) {
             Some(adopted) => adopted,
             None => {
-                let Some(path) = resolve_worker_path() else {
+                let Some(wm) = backend.spawn(WorkerRole::Document) else {
                     return pending_bundle();
                 };
-                WorkerManager::spawn(SupervisorConfig::production(path))
+                wm
             }
         };
         install_restart_hook(
@@ -957,13 +960,18 @@ fn pending_bundle() -> BackendBundle {
 /// learns the state without a separate fetch).
 fn spawn_status_forwarder(wm: &WorkerManager, app: SharedHost) {
     let mut rx = wm.subscribe();
-    let initial = status_from_state(wm.state(), wm.epoch().0);
+    let initial = WorkerStatusDto {
+        reason: wm.failure_reason(),
+        journal_write_failures: wm.journal_write_failures(),
+        ..status_from_state(wm.state(), wm.epoch().0)
+    };
     tokio::spawn(async move {
         if let Some(handle) = app.get() {
             let _ = handle.emit(AppEvent::WorkerStatus(initial.clone()));
         }
+        let mut journal_failures = initial.journal_write_failures;
         while let Ok(ev) = rx.recv().await {
-            if let Some(dto) = status_from_lifecycle(&ev) {
+            if let Some(dto) = status_with_journal(&ev, &mut journal_failures) {
                 if let Some(handle) = app.get() {
                     let _ = handle.emit(AppEvent::WorkerStatus(dto.clone()));
                 }
@@ -986,30 +994,45 @@ fn status_from_state(state: WorkerState, epoch: u64) -> WorkerStatusDto {
     WorkerStatusDto {
         state: state.into(),
         epoch,
+        reason: None,
+        journal_write_failures: 0,
     }
+}
+
+/// [`status_from_lifecycle`] with the cumulative journal-failure count: once
+/// degraded, every later status keeps saying so (a Ready after a restart must
+/// not reset it to zero). `seen` carries the count between events.
+fn status_with_journal(ev: &WorkerLifecycle, seen: &mut u64) -> Option<WorkerStatusDto> {
+    let mut dto = status_from_lifecycle(ev)?;
+    *seen = (*seen).max(dto.journal_write_failures);
+    dto.journal_write_failures = *seen;
+    Some(dto)
 }
 
 /// Maps a [`WorkerLifecycle`] transition to a `worker-status` payload. `CircuitOpen`
 /// is a per-plan poison event (not a worker-level state), so it is not forwarded.
+/// A failure carries its reason (an abandoned in-process worker's says
+/// `relaunch-required`); a degraded crash journal is reported against the live
+/// worker it belongs to, which is Ready while it runs jobs.
 fn status_from_lifecycle(ev: &WorkerLifecycle) -> Option<WorkerStatusDto> {
     match ev {
-        WorkerLifecycle::Ready { epoch, .. } => Some(WorkerStatusDto {
-            state: "ready".into(),
-            epoch: *epoch,
+        WorkerLifecycle::Ready { epoch, .. } => Some(status_from_state(WorkerState::Ready, *epoch)),
+        WorkerLifecycle::Restarting { epoch, .. } => {
+            Some(status_from_state(WorkerState::Restarting, *epoch))
+        }
+        WorkerLifecycle::Failed { reason } => Some(WorkerStatusDto {
+            reason: Some(reason.clone()),
+            ..status_from_state(WorkerState::Failed, 0)
         }),
-        WorkerLifecycle::Restarting { epoch, .. } => Some(WorkerStatusDto {
-            state: "restarting".into(),
-            epoch: *epoch,
-        }),
-        WorkerLifecycle::Failed { .. } => Some(WorkerStatusDto {
-            state: "failed".into(),
-            epoch: 0,
+        WorkerLifecycle::JournalDegraded { epoch, failures } => Some(WorkerStatusDto {
+            journal_write_failures: *failures,
+            ..status_from_state(WorkerState::Ready, *epoch)
         }),
         WorkerLifecycle::CircuitOpen { .. } => None,
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sidecar"))]
 mod slot_tests {
     //! The `warm`/`live` slot mechanics — adoption, rejection of an unusable warm
     //! worker, and the retire-the-previous-live rule that closes the process leak.
@@ -1021,6 +1044,7 @@ mod slot_tests {
     //! the next open should take).
 
     use super::*;
+    use crate::worker::SupervisorConfig;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -1267,6 +1291,50 @@ mod slot_tests {
     fn a_retired_worker_reports_as_failed_on_the_wire() {
         // `WorkerStatusDto.state` stays a four-value contract.
         assert_eq!(status_from_state(WorkerState::Retired, 7).state, "failed");
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn a_degraded_journal_stays_reported_after_ready_and_restarting() {
+        let mut seen = 0;
+        let degraded = WorkerLifecycle::JournalDegraded {
+            epoch: 2,
+            failures: 3,
+        };
+        let dto = status_with_journal(&degraded, &mut seen).unwrap();
+        assert_eq!(
+            (dto.state.as_str(), dto.journal_write_failures),
+            ("ready", 3)
+        );
+        let restarting = WorkerLifecycle::Restarting {
+            epoch: 3,
+            reason: "worker exited/crashed".into(),
+        };
+        let dto = status_with_journal(&restarting, &mut seen).unwrap();
+        assert_eq!(
+            (dto.state.as_str(), dto.journal_write_failures),
+            ("restarting", 3)
+        );
+        let ready = WorkerLifecycle::Ready {
+            epoch: 3,
+            fingerprint: "f".into(),
+        };
+        assert_eq!(
+            status_with_journal(&ready, &mut seen)
+                .unwrap()
+                .journal_write_failures,
+            3
+        );
+        let failed = WorkerLifecycle::Failed {
+            reason: "relaunch-required: x".into(),
+        };
+        let dto = status_with_journal(&failed, &mut seen).unwrap();
+        assert_eq!(dto.reason.as_deref(), Some("relaunch-required: x"));
+        assert_eq!(dto.journal_write_failures, 3);
     }
 }
 

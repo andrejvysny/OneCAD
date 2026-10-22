@@ -125,9 +125,18 @@ pub fn autosave_root(app: &HostContext) -> Option<PathBuf> {
 /// On Unix, `kill(pid, 0)`: `0` ⇒ alive; `EPERM` ⇒ alive (exists, not ours);
 /// `ESRCH` ⇒ dead. Elsewhere the conservative answer is **alive** — it merely
 /// defers recovery to a later launch, never a false "safe to discard".
+///
+/// iOS: the same-pid rule. One app process owns every scene, so a marker or
+/// workspace stamped with another pid belongs to a previous launch. `kill` is
+/// not asked: in the sandbox a recycled pid of another app answers `EPERM`,
+/// which the rule above would read as alive and so never offer recovery.
 #[must_use]
 pub fn pid_alive(pid: u32) -> bool {
-    #[cfg(unix)]
+    #[cfg(target_os = "ios")]
+    {
+        pid == std::process::id()
+    }
+    #[cfg(all(unix, not(target_os = "ios")))]
     {
         let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
         if ret == 0 {

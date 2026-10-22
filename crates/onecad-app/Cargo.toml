@@ -6,13 +6,19 @@ license = "MIT OR Apache-2.0"
 description = "Host-independent OneCAD application services and worker runtime"
 
 [features]
+default = ["sidecar"]
+# Worker backends (docs/ios/ARCHITECTURE.md). macOS ships `sidecar`; iOS builds
+# `--no-default-features --features embedded-kernel`; both may be on for tests.
+sidecar = ["tokio/process"]
+embedded-kernel = ["dep:onecad-embedded-worker", "tokio/net"]
 composition-test = []
 
 [dependencies]
 onecad-core = { workspace = true }
 onecad-library = { path = "../onecad-library" }
 onecad-protocol = { workspace = true, features = ["client", "tracing"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "time", "sync"] }
+onecad-embedded-worker = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -24,10 +30,13 @@ async-trait = { workspace = true }
 sha2 = { workspace = true }
 base64 = "0.22"
 toml = "0.8"
-trash = "5"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Recents removal moves files to the OS trash; `trash` has no iOS backend.
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+trash = "5"
 
 [dev-dependencies]
 tempfile = "3"

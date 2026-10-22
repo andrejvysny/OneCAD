@@ -19,6 +19,7 @@
 
 #include "elementmap/ElementMapPartition.h"
 #include "elementmap/Ladder.h"
+#include "io/OcctBusy.h"
 #include "ops/BooleanOp.h"
 #include "ops/ComponentOp.h"
 #include "ops/ExtrudeOp.h"
@@ -43,6 +44,7 @@
 #include "tess/Tessellate.h"
 #include "util/Hashing.h"
 #include "util/Log.h"
+#include "util/TestHooks.h"
 
 namespace onecad::session {
 
@@ -625,6 +627,8 @@ void merge_outcome(CandidateResult& result, ops::OpOutcome outcome) {
         result.status = CandidateResult::Status::Failed;
     } else if (outcome.status == ops::OpOutcome::Status::Unsupported) {
         result.status = CandidateResult::Status::Unsupported;
+    } else if (outcome.status == ops::OpOutcome::Status::Busy) {
+        result.status = CandidateResult::Status::Busy;
     } else {
         result.status = CandidateResult::Status::Cancelled;
     }
@@ -851,12 +855,15 @@ ExecResult execute_plan_ops(ScratchJob& job, const json& ops, std::uint64_t job_
             std::abort();  // chaos drill: no terminal frame
         }
 #endif
+#if ONECAD_WORKER_HOOKS
+        // Library builds keep it only with ONECAD_WORKER_TEST_HOOKS (util/TestHooks.h).
         if (op_id.find("__slow") != std::string::npos) {
             for (int i = 0; i < 50; ++i) {  // ~500 ms in 10 ms cancellation slices
                 if (ctx.cancel.cancelled()) { res.status = ExecStatus::Cancelled; return res; }
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
         }
+#endif
         if (ctx.cancel.cancelled()) { res.status = ExecStatus::Cancelled; return res; }
 
         // SCHEMA §3.4/§7.2 (WP-H): a step's `bodyEvents` and `elementMapDelta`
@@ -888,6 +895,13 @@ ExecResult execute_plan_ops(ScratchJob& job, const json& ops, std::uint64_t job_
 
         if (candidate.status == CandidateResult::Status::Cancelled) {
             res.status = ExecStatus::Cancelled;
+            return res;
+        }
+        if (candidate.status == CandidateResult::Status::Busy) {
+            // Not a model error: the op never ran (io/OcctBusy.h). No planStep,
+            // no perStepResults entry — the caller refuses the whole request.
+            res.status = ExecStatus::Busy;
+            res.busy_message = candidate.error_message;
             return res;
         }
         const json diagnostics = candidate_diagnostics(candidate);
@@ -1162,6 +1176,13 @@ Envelope handle_execute_plan(Session& session, const Envelope& req, HandlerConte
         // hasScratch stays false (SCHEMA §8 CANCELLED: session intact).
         Envelope r = Envelope::error_response(
             req.id, ErrorInfo{"CANCELLED", "plan cancelled", /*retriable=*/false});
+        r.stamp.job_id = job_id;
+        return r;
+    }
+    if (exec.status == ExecStatus::Busy) {
+        // Like CANCELLED: the scratch was never stored, the session is intact,
+        // and the same plan can succeed once the sibling releases the lock.
+        Envelope r = io::busy_response(req.id, exec.busy_message);
         r.stamp.job_id = job_id;
         return r;
     }

@@ -13,6 +13,7 @@
 #include <TopoDS_Shape.hxx>
 
 #include "io/BrepCodec.h"
+#include "io/OcctBusy.h"
 #include "io/XcafCodec.h"
 #include "session/BodyStore.h"
 #include "util/Log.h"
@@ -181,6 +182,7 @@ Envelope handle_export_geometry(session::Session& session, const Envelope& req) 
         format = kBrepFormatVersion;
     } else {
         const std::string err = write_xcaf_document(solids, attrs, bytes);
+        if (is_occt_busy(err)) return busy_response(req.id, err, "ExportGeometry");
         if (!err.empty()) return fail(req.id, "ExportGeometry: " + err);
         format = kXcafFormatVersion;
     }
