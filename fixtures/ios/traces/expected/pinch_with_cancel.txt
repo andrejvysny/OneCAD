@@ -1,0 +1,7 @@
+digest 889e439ce0c55424
+multitouch c1 Start
+multitouch c2 Start
+navigation allowed=true
+multitouch c2 Cancel
+multitouch c1 End
+stats NormalizerStats { invalid: 0, duplicate_coalesced: 0, stale: 0, unknown_contact: 0, old_generation: 0, refused_contacts: 0, estimation_matched: 0, estimation_unmatched: 0, merged_moves: 0 }

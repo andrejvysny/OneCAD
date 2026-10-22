@@ -1,0 +1,8 @@
+digest 6b695d5bf06e8f3e
+press c2 Author Pencil (500.000,500.000) taps=1
+move c2 Author (520.000,500.000)
+move c2 Author (540.000,500.000)
+release c2 Author Pencil (560.000,500.000)
+press c4 Control Finger (40.000,20.000) taps=1
+release c4 Control Finger (40.000,20.000)
+stats NormalizerStats { invalid: 0, duplicate_coalesced: 0, stale: 0, unknown_contact: 0, old_generation: 0, refused_contacts: 0, estimation_matched: 0, estimation_unmatched: 0, merged_moves: 0 }
