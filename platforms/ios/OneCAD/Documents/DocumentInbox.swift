@@ -32,12 +32,12 @@ enum DocumentInbox {
 
     /// Copies each URL into the inbox. Failures are logged and never leave a
     /// partially written file behind.
-    static func importCopies(of urls: [URL]) async -> Result {
+    static func importCopies(of urls: [URL], scope: SecurityScope = SecurityScope()) async -> Result {
         await Task.detached(priority: .userInitiated) {
             var result = Result()
             for url in urls {
                 do {
-                    result.paths.append(try importCopy(of: url).path)
+                    result.paths.append(try importCopy(of: url, scope: scope).path)
                 } catch {
                     inboxLog.error("import of \(url.lastPathComponent, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
                     result.failedNames.append(url.lastPathComponent)
@@ -47,22 +47,23 @@ enum DocumentInbox {
         }.value
     }
 
-    /// Security scope is held only around the coordinated read; the copy
-    /// itself owns no external resource afterwards.
-    static func importCopy(of source: URL) throws -> URL {
+    /// The security scope is held for the whole coordinated read and copy
+    /// (which runs synchronously inside it) and released on every path; the
+    /// copy owns no external resource afterwards.
+    static func importCopy(of source: URL, scope: SecurityScope = SecurityScope()) throws -> URL {
         if isInInbox(source) { return source }
-        let scoped = source.startAccessingSecurityScopedResource()
-        defer { if scoped { source.stopAccessingSecurityScopedResource() } }
-        let inbox = try inboxDirectory()
-        var coordinationError: NSError?
-        var outcome: Swift.Result<URL, Error> = .failure(CocoaError(.fileReadUnknown))
-        NSFileCoordinator(filePresenter: nil).coordinate(
-            readingItemAt: source, options: [.withoutChanges], error: &coordinationError
-        ) { readable in
-            outcome = Swift.Result { try copyOrReuse(readable, named: source.lastPathComponent, in: inbox) }
+        return try scope.withAccess(to: source) {
+            let inbox = try inboxDirectory()
+            var coordinationError: NSError?
+            var outcome: Swift.Result<URL, Error> = .failure(CocoaError(.fileReadUnknown))
+            NSFileCoordinator(filePresenter: nil).coordinate(
+                readingItemAt: source, options: [.withoutChanges], error: &coordinationError
+            ) { readable in
+                outcome = Swift.Result { try copyOrReuse(readable, named: source.lastPathComponent, in: inbox) }
+            }
+            if let coordinationError { throw coordinationError }
+            return try outcome.get()
         }
-        if let coordinationError { throw coordinationError }
-        return try outcome.get()
     }
 
     /// Reopening the same file reuses an identical earlier copy ("name",
@@ -82,5 +83,20 @@ enum DocumentInbox {
         }
         try fm.copyItem(at: readable, to: candidate)
         return candidate
+    }
+}
+
+/// A file's security-scoped access, held for exactly the work passed to
+/// `withAccess` and released when it returns or throws. The two calls are
+/// injectable so tests can prove the pairing: URLs on the managed-copy paths
+/// (picker copies, system Inbox files) usually carry no scope to observe.
+struct SecurityScope: Sendable {
+    var start: @Sendable (URL) -> Bool = { $0.startAccessingSecurityScopedResource() }
+    var stop: @Sendable (URL) -> Void = { $0.stopAccessingSecurityScopedResource() }
+
+    func withAccess<T>(to url: URL, _ body: () throws -> T) throws -> T {
+        let scoped = start(url)
+        defer { if scoped { stop(url) } }
+        return try body()
     }
 }
