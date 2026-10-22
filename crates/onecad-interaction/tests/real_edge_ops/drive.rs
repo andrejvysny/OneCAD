@@ -136,6 +136,14 @@ pub async fn volume(harness: &Harness, body: BodyId) -> f64 {
         .volume
 }
 
+/// The exact (OCCT) volume centroid of the head body.
+pub async fn centroid(harness: &Harness, body: BodyId) -> [f64; 3] {
+    api::query_mass_properties(&harness.state, body_id_wire(body), None)
+        .await
+        .unwrap()
+        .centroid
+}
+
 /// Every face or edge of the head body, by snapshot TopoKey.
 pub async fn elements(harness: &Harness, body: BodyId, prefix: &str) -> Vec<ElementInfoDto> {
     let snapshot = api::preview_context(&harness.state)

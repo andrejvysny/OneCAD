@@ -8,6 +8,8 @@ mod drive;
 #[allow(dead_code)]
 #[path = "../../onecad-app/tests/native_plate_support/host.rs"]
 mod host;
+#[path = "real_edge_ops/placement.rs"]
+mod placement;
 #[path = "real_edge_ops/plate.rs"]
 mod plate;
 
@@ -31,8 +33,6 @@ use std::{
 const SAME: f64 = 1e-9;
 /// Feature volume deltas against their closed forms.
 const DELTA: f64 = 1e-4;
-/// Mesh bounds are f32 vertex positions.
-const MESH: f64 = 1e-5;
 
 #[test]
 fn edge_face_and_body_operations_create_edit_undo_and_reopen() {
@@ -96,7 +96,7 @@ async fn author(root: &Path, saved: &Path) -> Authored {
     let (fillet, filleted) = fillet_edit_and_history(&harness, &mut state, body, base).await;
     let (chamfer, chamfered) = chamfer(&harness, &mut state, body, filleted).await;
     let (offset, volume) = offset_top(&harness, &mut state, body, chamfered).await;
-    let (moved, rotated) = move_and_rotate(&harness, &mut state, body, volume).await;
+    let (moved, rotated) = placement::move_and_rotate(&harness, &mut state, body, volume).await;
     let op_types = harness
         .projection()
         .await
@@ -369,83 +369,6 @@ async fn offset_top(
         "+1 mm offset adds the top area",
     );
     (id, after)
-}
-
-type Bounds = ([f64; 3], [f64; 3]);
-
-/// A new Move / Rotate about the bounds centre with one typed value.
-async fn transform(
-    harness: &Harness,
-    state: &mut Interaction,
-    (body, bounds): (BodyId, Bounds),
-    (parameter, text): (NumericParameter, &str),
-    gesture: u64,
-) -> RecordId {
-    let context = drive::adopt(harness, state).await;
-    let step = harness.projection().await.applied_ops as u32;
-    let center = [0, 1, 2].map(|axis| (bounds.0[axis] + bounds.1[axis]) * 0.5);
-    let record = operand_binding::transform_record(body, center, RecordId::new(), step);
-    let id = record.record_id;
-    let fields = operand_binding::transform_fields();
-    let effects = state.dispatch(Action::BeginOperation {
-        record: Box::new(record),
-        focus: fields.first().copied(),
-        fields,
-        gesture,
-        context,
-    });
-    drive::drive(harness, state, effects).await;
-    drive::typed(harness, state, parameter.into(), text).await;
-    assert_eq!(state.tool.as_ref().unwrap().preview, PreviewStatus::Ready);
-    drive::confirm(harness, state).await;
-    id
-}
-
-async fn move_and_rotate(
-    harness: &Harness,
-    state: &mut Interaction,
-    body: BodyId,
-    volume: f64,
-) -> (RecordId, RecordId) {
-    let start = drive::bounds(harness, body).await;
-    let x = NumericParameter::TransformTranslation(ParameterAxis::X);
-    let moved = transform(harness, state, (body, start), (x, "10"), 6).await;
-    close(
-        drive::volume(harness, body).await,
-        volume,
-        volume,
-        SAME,
-        "move keeps volume",
-    );
-    let shifted = drive::bounds(harness, body).await;
-    for axis in 0..3 {
-        let shift = if axis == 0 { 10.0 } else { 0.0 };
-        assert!(
-            (shifted.0[axis] - start.0[axis] - shift).abs() < MESH,
-            "{shifted:?}"
-        );
-        assert!(
-            (shifted.1[axis] - start.1[axis] - shift).abs() < MESH,
-            "{shifted:?}"
-        );
-    }
-    let angle = NumericParameter::TransformRotationAngle;
-    let rotated = transform(harness, state, (body, shifted), (angle, "90"), 7).await;
-    close(
-        drive::volume(harness, body).await,
-        volume,
-        volume,
-        SAME,
-        "rotate keeps volume",
-    );
-    let turned = drive::bounds(harness, body).await;
-    let extent = |bounds: &Bounds, axis: usize| bounds.1[axis] - bounds.0[axis];
-    let centre = |bounds: &Bounds, axis: usize| (bounds.1[axis] + bounds.0[axis]) * 0.5;
-    for (axis, swapped) in [(0, 1), (1, 0), (2, 2)] {
-        assert!((extent(&turned, axis) - extent(&shifted, swapped)).abs() < MESH);
-        assert!((centre(&turned, axis) - centre(&shifted, axis)).abs() < MESH);
-    }
-    (moved, rotated)
 }
 
 async fn save(harness: &Harness, path: &Path) {
