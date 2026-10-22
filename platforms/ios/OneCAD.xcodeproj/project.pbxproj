@@ -30,6 +30,7 @@
 		A092E0A18F28E2C922893332 /* ImportFailureAlert.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4903C6E556533285E91746B3 /* ImportFailureAlert.swift */; };
 		BB77B95C47BDCB3E936A8332 /* SaveNamePrompt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66A4F5D5F5C0F04D0A1154A2 /* SaveNamePrompt.swift */; };
 		BF0525A721F55B8278E77B8E /* TextInputController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65CD96C1F39D7C8F7E4F6D1C /* TextInputController.swift */; };
+		CB6FFC4F9B5AAC3C49B9140C /* SurfaceLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85614958BEB8E8E12DD63B5D /* SurfaceLifecycleTests.swift */; };
 		D197216A777619480F76E947 /* libonecad_ios.a in Frameworks */ = {isa = PBXBuildFile; fileRef = DFCC5ED7DB7ECA348C086793 /* libonecad_ios.a */; };
 		D7A0E3FA1E799593975187F3 /* PencilController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1DED4B0818F4EE16B6DE5E5 /* PencilController.swift */; };
 		DBABF569DF657E9743DA5307 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69DB9BE4B5F647E3A2C44E2B /* SceneDelegate.swift */; };
@@ -75,6 +76,7 @@
 		6CE29B1BFA01D6626DD9C166 /* TouchInputController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TouchInputController.swift; sourceTree = "<group>"; };
 		6F8E7764E8B3D6AE32FB4517 /* RustBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RustBridge.swift; sourceTree = "<group>"; };
 		7211051842CA6F425D126385 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		85614958BEB8E8E12DD63B5D /* SurfaceLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfaceLifecycleTests.swift; sourceTree = "<group>"; };
 		867ECAF4078A19E25234DE9F /* OneCADUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = OneCADUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		8F5236FA35EA92C24105116A /* RustBridge+Calls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "RustBridge+Calls.swift"; sourceTree = "<group>"; };
 		92B9E16789CE50F6584D00F8 /* TouchSampleBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TouchSampleBuilder.swift; sourceTree = "<group>"; };
@@ -229,6 +231,7 @@
 			children = (
 				C57C5550AC14B5E601476591 /* LaunchTests.swift */,
 				0A4EC2F23EA9085CB4C41E5C /* OrientationTests.swift */,
+				85614958BEB8E8E12DD63B5D /* SurfaceLifecycleTests.swift */,
 				C46FAEE705612D377B69BB84 /* UITestSupport.swift */,
 			);
 			path = OneCADUITests;
@@ -417,6 +420,7 @@
 			files = (
 				ED7799D97F8626560E7C1834 /* LaunchTests.swift in Sources */,
 				70A8509AE3CBBEFCF453A15E /* OrientationTests.swift in Sources */,
+				CB6FFC4F9B5AAC3C49B9140C /* SurfaceLifecycleTests.swift in Sources */,
 				FC084A85CD3C49779FDDD4AF /* UITestSupport.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

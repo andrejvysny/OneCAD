@@ -160,7 +160,7 @@ async fn prepare(
         .shared
         .preparation_budget()?
         .limit_cpu_prepared_bytes(crate::budget::MAX_PREPARED_BYTES);
-    let mut cache = std::mem::take(&mut backend.preparation_cache);
+    let mut cache = backend.shared.take_preparation_cache();
     let (prepared, cache) = tokio::task::spawn_blocking(move || {
         let prepared = onecad_render::PreparedScene::new_cached(&scene, budget, &mut cache)
             .map_err(|e| e.to_string());
@@ -168,11 +168,12 @@ async fn prepare(
     })
     .await
     .map_err(|error| format!("scene preparation stopped: {error}"))?;
-    backend.preparation_cache = cache;
+    let cache_bytes = (cache.source_bytes(), cache.cpu_bytes());
+    backend.shared.restore_preparation_cache(cache);
     let prepared = prepared?;
     if prepared.cpu_bytes() > crate::budget::MAX_PREPARED_BYTES
-        || backend.preparation_cache.source_bytes() > crate::budget::MAX_SOURCE_BYTES as u64
-        || backend.preparation_cache.cpu_bytes() > crate::budget::MAX_PREPARED_BYTES
+        || cache_bytes.0 > crate::budget::MAX_SOURCE_BYTES as u64
+        || cache_bytes.1 > crate::budget::MAX_PREPARED_BYTES
     {
         return Err("Native CPU preparation budget exceeded".into());
     }

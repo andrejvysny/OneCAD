@@ -313,6 +313,8 @@ impl App {
         for doc in stopped {
             self.release_thumbnail(doc.thumbnail);
         }
+        // A parked document may have received a prepared scene while draining.
+        self.enforce_parked_budget();
     }
 
     /// Keeps the outgoing document's last drawn frame for the ⌃Tab switcher. Only
@@ -345,23 +347,9 @@ impl App {
         self.release_thumbnail(previous);
     }
 
-    fn release_thumbnail(&mut self, thumbnail: Option<Thumbnail>) {
+    pub(crate) fn release_thumbnail(&mut self, thumbnail: Option<Thumbnail>) {
         if let Some(thumbnail) = thumbnail {
             self.gpu.renderer.write().free_texture(&thumbnail.texture);
-        }
-    }
-
-    /// Memory pressure: drops the ⌃Tab switcher frames kept for parked tabs; they
-    /// are captured again the next time each tab is left.
-    pub fn release_parked_thumbnails(&mut self) {
-        let thumbnails: Vec<_> = self
-            .tabs
-            .parked
-            .iter_mut()
-            .map(|doc| doc.thumbnail.take())
-            .collect();
-        for thumbnail in thumbnails {
-            self.release_thumbnail(thumbnail);
         }
     }
 
@@ -493,6 +481,8 @@ impl App {
     /// its own scene is drawn, and a consumed scene is re-prepared, same identity.
     fn activated(&mut self) {
         set_current_tab(self.doc.tab);
+        // The outgoing document's thumbnail was just captured.
+        self.enforce_parked_budget();
         self.tabs.activations += 1;
         self.doc.last_active = self.tabs.activations;
         self.doc.view = None;

@@ -101,6 +101,9 @@ impl Renderer {
     }
     pub(crate) fn validate_options(&self, options: RenderOptions) -> Result<(), RenderError> {
         options.validate()?;
+        if options.ssaa != 1.0 && !self.profile.supersampling() {
+            return Err(RenderError::Budget("supersampling on this render profile"));
+        }
         if options.display_mode == DisplayMode::Xray
             && !self
                 .device
@@ -117,7 +120,7 @@ impl Renderer {
     }
     pub(crate) fn apply_options(&mut self, options: RenderOptions) -> Result<(), RenderError> {
         self.require_idle()?;
-        if options.ssaa != self.options.ssaa {
+        if self.needs_new_targets(options) {
             self.replace_targets(self.size, options)?;
         }
         self.contact_dirty |= options.section != self.options.section
@@ -129,6 +132,13 @@ impl Renderer {
         Ok(())
     }
 
+    /// Whether `options` allocate different targets than the current ones.
+    pub(crate) fn needs_new_targets(&self, options: RenderOptions) -> bool {
+        let xray = |options: RenderOptions| options.display_mode == DisplayMode::Xray;
+        options.ssaa != self.options.ssaa
+            || self.profile.lazy_transparency() && xray(options) != xray(self.options)
+    }
+
     pub(crate) fn replace_targets(
         &mut self,
         size: [u32; 2],
@@ -138,7 +148,7 @@ impl Renderer {
             .validate_size(options.render_size(size)?, &self.device)?;
         let estimate = self.limits.check(
             crate::MemoryEstimate {
-                target_bytes: limits::quality_target_bytes(size, options)?,
+                target_bytes: limits::quality_target_bytes(size, options, self.profile)?,
                 cpu_prepared_bytes: 0,
                 upload_bytes: 0,
                 ..self.estimate
@@ -162,6 +172,7 @@ impl Renderer {
                 &self.ibl,
                 size,
                 options,
+                self.profile,
             )?)
         };
         self.targets = targets;

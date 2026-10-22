@@ -44,9 +44,13 @@ pub struct App {
     pub cad_needs_fence: bool,
     pub sampled: bool,
     pub sampling_done: Arc<std::sync::atomic::AtomicBool>,
-    /// Upper bound on the viewport's physical pixel count; above it the scene
-    /// renders at a reduced scale and is composited up (mobile memory profile).
-    pub render_pixel_cap: Option<f64>,
+    /// Process-wide display memory: the renderer's share and parked tabs' caches.
+    pub display_budget: crate::display_budget::DisplayBudget,
+    /// Memory-pressure ceiling on the scene image scale (1 = none); see
+    /// `onecad_render::RenderProfile::scene_scale`.
+    pub render_scale_limit: f64,
+    /// The scene image scale relative to native pixels the viewport last used.
+    pub scene_scale: f64,
     /// Files exported since the host last asked (`host::Editor::take_exported`).
     #[cfg(not(feature = "desktop"))]
     pub(crate) exported: Vec<std::path::PathBuf>,
@@ -63,7 +67,8 @@ impl App {
         let menu: MenuInstall<'_> =
             Box::new(|ctx| cc.winit_window().map(|_| menu::install(ctx)).transpose());
         let backend = onecad_app::worker::WorkerBackend::default();
-        Self::build(&cc.egui_ctx, gpu, paths, dialogs, backend, menu)
+        let profile = onecad_render::RenderProfile::Desktop;
+        Self::build(&cc.egui_ctx, gpu, paths, dialogs, backend, profile, menu)
     }
 
     /// For hosts that own the egui context, GPU device and file dialogs and drive
@@ -75,6 +80,7 @@ impl App {
         paths: QaPaths,
         dialogs: Arc<dyn DialogPort>,
         backend: onecad_app::worker::WorkerBackend,
+        profile: onecad_render::RenderProfile,
     ) -> Result<Self, String> {
         Self::build(
             ctx,
@@ -82,6 +88,7 @@ impl App {
             paths,
             dialogs,
             backend,
+            profile,
             Box::new(|_| Ok(menu::host_menu())),
         )
     }
@@ -92,15 +99,18 @@ impl App {
         paths: QaPaths,
         dialogs: Arc<dyn DialogPort>,
         backend: onecad_app::worker::WorkerBackend,
+        profile: onecad_render::RenderProfile,
         install_menu: MenuInstall<'_>,
     ) -> Result<Self, String> {
-        let limits = onecad_render::RenderLimits {
-            max_cpu_prepared_bytes: crate::budget::MAX_PREPARED_BYTES,
-            max_upload_bytes: crate::budget::MAX_PREPARED_BYTES,
-            ..Default::default()
-        };
-        let renderer =
-            Renderer::new(&gpu.device, &gpu.queue, [0, 0], limits).map_err(|e| e.to_string())?;
+        let display_budget = crate::display_budget::DisplayBudget::for_profile(profile);
+        let renderer = Renderer::with_profile(
+            &gpu.device,
+            &gpu.queue,
+            [0, 0],
+            display_budget.render_limits(),
+            profile,
+        )
+        .map_err(|e| e.to_string())?;
         let device_failure = Arc::new(std::sync::Mutex::new(None));
         let failure = device_failure.clone();
         let context = ctx.clone();
@@ -167,7 +177,9 @@ impl App {
             cad_needs_fence: false,
             sampled: false,
             sampling_done: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            render_pixel_cap: None,
+            display_budget,
+            render_scale_limit: 1.0,
+            scene_scale: 1.0,
             #[cfg(not(feature = "desktop"))]
             exported: Vec::new(),
         })

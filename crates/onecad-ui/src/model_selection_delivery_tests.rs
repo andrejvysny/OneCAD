@@ -6,7 +6,14 @@ use onecad_interaction::selection_set::SelectionItem;
 use onecad_scene::{Camera, DVec2, PickKind, PickPolicy};
 
 pub(super) async fn boxed(root: &std::path::Path) -> Host {
-    let (mut app, context) = create_app(root).await;
+    boxed_with(root, onecad_render::RenderProfile::Desktop).await
+}
+
+pub(super) async fn boxed_with(
+    root: &std::path::Path,
+    profile: onecad_render::RenderProfile,
+) -> Host {
+    let (mut app, context) = create_app_with(root, profile).await;
     context.enable_accesskit();
     let mut frame = eframe::Frame::_new_kittest();
     pump_until(&mut app, &context, &mut frame, |app| {

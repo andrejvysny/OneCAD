@@ -7,6 +7,8 @@ enum OneCADID {
     static let startupError = "onecad.error.startup"
     static let relaunchRequired = "onecad.error.relaunchRequired"
     static let fileMenu = "onecad.menu.file"
+    static let fileNew = "onecad.menu.file.new"
+    static let viewport = "onecad.viewport"
 }
 
 extension XCUIApplication {

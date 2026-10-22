@@ -33,7 +33,6 @@ async fn backend(root: &Path) -> Backend {
         startup_opened: false,
         scene_revision: 0,
         previous_scene: None,
-        preparation_cache: Default::default(),
         preparation_lease: None,
     }
 }

@@ -53,12 +53,13 @@ impl Targets {
         ibl: &Ibl,
         size: [u32; 2],
         options: crate::RenderOptions,
+        profile: crate::RenderProfile,
     ) -> Result<Self, crate::RenderError> {
         #[cfg(test)]
         tests::fail_if_injected()?;
         let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let validation = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let targets = Self::new(gpu, pipes, ibl, size, options);
+        let targets = Self::new(gpu, pipes, ibl, size, options, profile);
         // Allocation scopes contain no submitted work; popping does not wait for GPU completion.
         let invalid = pollster::block_on(validation.pop());
         let allocation = pollster::block_on(scope.pop());
@@ -71,6 +72,7 @@ impl Targets {
         ibl: &Ibl,
         size: [u32; 2],
         options: crate::RenderOptions,
+        profile: crate::RenderProfile,
     ) -> Self {
         use wgpu::TextureUsages as U;
         let rt = U::RENDER_ATTACHMENT | U::TEXTURE_BINDING;
@@ -92,6 +94,11 @@ impl Targets {
             target("supersampled resolve", render_size, OUTPUT_FORMAT, 1, rt)
         };
         let size = render_size;
+        // Attachments the profile leaves out stay 1x1 so every bind group stays valid; the
+        // passes that would write them are skipped (limits::quality_target_bytes counts them).
+        let ao = profile.ambient_occlusion();
+        let oit = !profile.lazy_transparency() || options.display_mode == crate::DisplayMode::Xray;
+        let only = |needed: bool| if needed { size } else { [1, 1] };
         let depth_format = crate::options::depth_format(gpu.device);
         let color = target(
             "MSAA color",
@@ -107,16 +114,16 @@ impl Targets {
             SAMPLES,
             U::RENDER_ATTACHMENT,
         );
-        let pre_texture = gpu.texture("prepass depth", size, depth_format, 1, rt);
+        let pre_texture = gpu.texture("prepass depth", only(ao || oit), depth_format, 1, rt);
         let pre_depth = gpu::view(&pre_texture);
         let pre_sample = pre_texture.create_view(&wgpu::TextureViewDescriptor {
             aspect: wgpu::TextureAspect::DepthOnly,
             ..Default::default()
         });
-        let pre_normal = target("prepass normal", size, HDR_FORMAT, 1, rt);
-        let ao_raw = target("AO raw", size, AO_FORMAT, 1, rt);
-        let ao_tmp = target("AO tmp", size, AO_FORMAT, 1, rt);
-        let ao_final = target("AO final", size, AO_FORMAT, 1, rt);
+        let pre_normal = target("prepass normal", only(ao), HDR_FORMAT, 1, rt);
+        let ao_raw = target("AO raw", only(ao), AO_FORMAT, 1, rt);
+        let ao_tmp = target("AO tmp", only(ao), AO_FORMAT, 1, rt);
+        let ao_final = target("AO final", only(ao), AO_FORMAT, 1, rt);
         let height_texture = gpu.texture("contact height", [1024; 2], depth_format, 1, rt);
         let height = gpu::view(&height_texture);
         let height_sample = height_texture.create_view(&wgpu::TextureViewDescriptor {
@@ -167,8 +174,8 @@ impl Targets {
             &[Tv(&resolved), Sampler(&sampler)],
         );
         let formats = oit_formats(gpu.device);
-        let oit_accum = target("Xray accumulation", size, formats[0], 1, rt);
-        let oit_reveal = target("Xray revealage", size, formats[1], 1, rt);
+        let oit_accum = target("Xray accumulation", only(oit), formats[0], 1, rt);
+        let oit_reveal = target("Xray revealage", only(oit), formats[1], 1, rt);
         let oit_bind = gpu.bind(
             "Xray resolve",
             &pipes.oit_layout,

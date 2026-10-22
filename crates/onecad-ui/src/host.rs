@@ -5,6 +5,7 @@ use crate::{app::App, qa::QaPaths};
 use onecad_app::host::DialogPort;
 use std::sync::Arc;
 
+pub use crate::display_budget::{DisplayBudget, Ledger, MemoryRelief};
 pub use crate::viewport_widgets::PointerKind;
 
 pub struct Editor {
@@ -19,14 +20,9 @@ impl Editor {
         paths: QaPaths,
         dialogs: Arc<dyn DialogPort>,
         backend: onecad_app::worker::WorkerBackend,
+        profile: onecad_render::RenderProfile,
     ) -> Result<Self, String> {
-        App::new_with(ctx, gpu, paths, dialogs, backend).map(|app| Self { app })
-    }
-
-    /// Caps the viewport image at `pixels` physical pixels (see
-    /// [`App::render_pixel_cap`]); `None` renders at the display scale.
-    pub fn set_render_pixel_cap(&mut self, pixels: Option<f64>) {
-        self.app.render_pixel_cap = pixels;
+        App::new_with(ctx, gpu, paths, dialogs, backend, profile).map(|app| Self { app })
     }
 
     /// See [`App::frame`]: submit and present the output before the next call.
@@ -45,9 +41,31 @@ impl Editor {
         RecoveryFlush(self.app.request_recovery_flush())
     }
 
-    /// Memory pressure: drops caches that are rebuilt on demand.
-    pub fn release_caches(&mut self) {
-        self.app.release_parked_thumbnails();
+    /// Memory warning: drops parked tabs' caches (rebuilt on demand) and lowers the scene
+    /// scale one step when the active document is over its display allowance.
+    pub fn relieve_memory_pressure(&mut self) -> MemoryRelief {
+        self.app.relieve_memory_pressure()
+    }
+
+    /// Backgrounded: releases the renderer's targets after the last frame finished; the
+    /// next frame recreates them. `false` when the GPU was still busy after 1 s.
+    pub fn release_render_targets(&mut self, ctx: &egui::Context) -> bool {
+        self.app.release_render_targets(ctx)
+    }
+
+    /// The scene image scale relative to native pixels the viewport last used.
+    pub fn scene_scale(&self) -> f64 {
+        self.app.scene_scale
+    }
+
+    /// Whether the renderer holds targets (released in the background).
+    pub fn has_render_targets(&self) -> bool {
+        self.app.renderer.has_targets()
+    }
+
+    /// One accounting of the window's display memory.
+    pub fn display_ledger(&self) -> (Ledger, DisplayBudget) {
+        (self.app.display_ledger(), self.app.display_budget)
     }
 
     /// Starts shutting every document host down; see [`Editor::stopped`].

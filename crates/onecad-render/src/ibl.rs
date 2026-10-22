@@ -1,11 +1,10 @@
-//! Procedural studio IBL, prefiltered once at start-up (no HDRI file): a 512² radiance cube with
-//! a full mip chain, a 256² GGX-prefiltered specular cube (6 roughness mips), a 32² irradiance
-//! cube and a 128² split-sum BRDF LUT.
+//! Procedural studio IBL, prefiltered once at start-up (no HDRI file): a radiance cube with a
+//! full mip chain, a GGX-prefiltered specular cube (6 roughness mips), a 32² irradiance cube and
+//! a 128² split-sum BRDF LUT. Cube edges come from the profile: 512²/256² on Desktop, 256²/128²
+//! on Mobile.
 
 use crate::gpu::{self, Gpu, Pipe};
 
-pub const ENV_SIZE: u32 = 512;
-pub const SPEC_SIZE: u32 = 256;
 pub const SPEC_MIPS: u32 = 6;
 pub const IRR_SIZE: u32 = 32;
 pub const LUT_SIZE: u32 = 128;
@@ -84,7 +83,7 @@ fn draw(
 }
 
 impl Ibl {
-    pub fn build(gpu: &Gpu, sampler: &wgpu::Sampler) -> Ibl {
+    pub fn build(gpu: &Gpu, sampler: &wgpu::Sampler, sizes: crate::profile::IblSizes) -> Ibl {
         let module = gpu.shader("ibl", &[include_str!("shaders/ibl.wgsl")]);
         let bgl = gpu.layout(
             "ibl_src",
@@ -121,9 +120,9 @@ impl Ibl {
         let irr_pipe = pipe("ibl_irradiance", "fs_irradiance", &with_src, hdr);
         let lut_pipe = pipe("ibl_lut", "fs_lut", &no_src, wgpu::TextureFormat::Rg16Float);
 
-        let env_mips = ENV_SIZE.ilog2() + 1;
-        let env = cube(gpu, "env", ENV_SIZE, env_mips);
-        let spec = cube(gpu, "spec", SPEC_SIZE, SPEC_MIPS);
+        let env_mips = sizes.env.ilog2() + 1;
+        let env = cube(gpu, "env", sizes.env, env_mips);
+        let spec = cube(gpu, "spec", sizes.spec, SPEC_MIPS);
         let irr = cube(gpu, "irr", IRR_SIZE, 1);
         let lut = gpu.texture(
             "brdf_lut",

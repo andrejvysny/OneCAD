@@ -254,3 +254,34 @@ fn stale_scene_resize_and_monitor_scale_reject_drawable_actions() {
     }
     assert!(drawable_capture(None, scene, viewport).is_none());
 }
+
+#[test]
+fn desktop_renders_at_the_display_scale_and_mobile_caps_large_viewports() {
+    use onecad_render::RenderProfile::{Desktop, Mobile};
+    let rect = |w: f32, h: f32| egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h));
+    for ppp in [1.0, 2.0, 1.5] {
+        assert_eq!(
+            scale_factor(Desktop, 1.0, rect(1366.0, 1024.0), ppp).0,
+            f64::from(ppp)
+        );
+    }
+    assert_eq!(
+        scale_factor(Mobile, 1.0, rect(100.0, 100.0), 2.0),
+        (2.0, 1.0)
+    );
+    // 13-inch iPad viewport in points: the scene image keeps the 3 Mpx cap.
+    let (factor, scale) = scale_factor(Mobile, 1.0, rect(1366.0, 1024.0), 2.0);
+    assert!(scale < 1.0);
+    let pixels = 1366.0 * factor * 1024.0 * factor;
+    assert!((pixels - 3e6).abs() < 1.0, "{pixels}");
+    // A memory-pressure ceiling lowers it further, never below half native.
+    assert_eq!(
+        scale_factor(Mobile, 0.625, rect(1366.0, 1024.0), 2.0),
+        (1.25, 0.625)
+    );
+    assert_eq!(
+        scale_factor(Mobile, 0.1, rect(800.0, 600.0), 2.0),
+        (1.0, 0.5)
+    );
+    assert_eq!(scale_factor(Mobile, 1.0, rect(0.0, 0.0), 2.0), (2.0, 1.0));
+}

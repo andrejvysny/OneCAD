@@ -57,29 +57,7 @@ impl Host {
         let mut output = self.context.run_ui(raw, |ui| {
             eframe::App::ui(&mut self.app, ui, &mut self.frame)
         });
-        self.widgets = output
-            .platform_output
-            .accesskit_update
-            .as_ref()
-            .unwrap()
-            .nodes
-            .iter()
-            .filter_map(|(_, node)| {
-                Some((
-                    node.label().or_else(|| node.value())?.to_owned(),
-                    node.bounds()?,
-                ))
-            })
-            .map(|(label, rect)| {
-                (
-                    label,
-                    egui::Rect::from_min_max(
-                        egui::pos2(rect.x0 as f32, rect.y0 as f32),
-                        egui::pos2(rect.x1 as f32, rect.y1 as f32),
-                    ),
-                )
-            })
-            .collect();
+        self.widgets = widgets(&output);
         output.textures_delta.clear();
     }
 
@@ -248,6 +226,33 @@ pub(crate) fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
         pressed: true,
         repeat: false,
     }
+}
+
+/// Labelled accessibility nodes of one pass, with their screen rects.
+pub(crate) fn widgets(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .unwrap()
+        .nodes
+        .iter()
+        .filter_map(|(_, node)| {
+            Some((
+                node.label().or_else(|| node.value())?.to_owned(),
+                node.bounds()?,
+            ))
+        })
+        .map(|(label, rect)| {
+            (
+                label,
+                egui::Rect::from_min_max(
+                    egui::pos2(rect.x0 as f32, rect.y0 as f32),
+                    egui::pos2(rect.x1 as f32, rect.y1 as f32),
+                ),
+            )
+        })
+        .collect()
 }
 
 pub(crate) fn button(pos: egui::Pos2, pressed: bool) -> egui::Event {

@@ -144,18 +144,7 @@ impl crate::app::IosApp {
     pub fn frame(&mut self, time: f64) -> crate::app::Outcome<crate::ffi::FrameResult> {
         use crate::app::{Failure, Phase};
         use crate::ffi::Status;
-        if matches!(self.phase, Phase::Background | Phase::Terminated) {
-            return Err(Failure::new(Status::State, "no frames in the background"));
-        }
-        if !time.is_finite() {
-            return Err(Failure::new(
-                Status::InvalidArgument,
-                "time_s is not finite",
-            ));
-        }
-        let view = self
-            .view
-            .ok_or_else(|| Failure::new(Status::State, "no surface is attached"))?;
+        let view = admit(self.phase, self.view, time)?;
         self.apply_accessory();
         let editor = self
             .editor
@@ -205,20 +194,13 @@ impl crate::app::IosApp {
             .get(&egui::ViewportId::ROOT)
             .map_or(std::time::Duration::MAX, |viewport| viewport.repaint_delay);
         let presented = paint(&self.gpu, self.surface.as_mut(), &self.ctx, output);
-        // A skipped drawable (outdated, lost, timeout) leaves a stale or wrong-size
-        // image on screen; draw again rather than wait for the next input.
-        let retry = !presented && self.surface.is_some();
+        let (repaint_after_s, flags) = schedule(again, presented, self.surface.is_some(), delay);
         let mut result = ffi::FrameResult {
             struct_size: std::mem::size_of::<ffi::FrameResult>() as u32,
-            repaint_after_s: if again || retry { 0.0 } else { seconds(delay) },
+            repaint_after_s,
+            flags,
             ..Default::default()
         };
-        if result.repaint_after_s == 0.0 {
-            result.flags |= ffi::FRAME_REDRAW_REQUESTED;
-        }
-        if presented {
-            result.flags |= ffi::FRAME_PRESENTED;
-        }
         if let Some(ime) = &platform.ime {
             result.flags |= ffi::FRAME_TEXT_INPUT_ACTIVE;
             result.text_cursor_x = ime.cursor_rect.min.x;
@@ -282,6 +264,50 @@ impl crate::app::IosApp {
             }
         }
     }
+}
+
+/// Frames run only in the foreground with an attached (non-empty) surface.
+pub(crate) fn admit(
+    phase: crate::app::Phase,
+    view: Option<View>,
+    time: f64,
+) -> crate::app::Outcome<View> {
+    use crate::app::{Failure, Phase};
+    use crate::ffi::Status;
+    if matches!(phase, Phase::Background | Phase::Terminated) {
+        return Err(Failure::new(Status::State, "no frames in the background"));
+    }
+    if !time.is_finite() {
+        return Err(Failure::new(
+            Status::InvalidArgument,
+            "time_s is not finite",
+        ));
+    }
+    view.ok_or_else(|| Failure::new(Status::State, "no surface is attached"))
+}
+
+/// `repaint_after_s` and the frame flags it implies. Rendering is on demand: an idle
+/// editor (egui's repaint delay unbounded, nothing queued, drawable presented) asks for
+/// no frame (-1), so the host's display link stays paused until `wake` or input.
+pub(crate) fn schedule(
+    again: bool,
+    presented: bool,
+    surface: bool,
+    delay: std::time::Duration,
+) -> (f64, u32) {
+    use crate::ffi;
+    // A skipped drawable (outdated, lost, timeout) leaves a stale or wrong-size image
+    // on screen; draw again rather than wait for the next input.
+    let retry = !presented && surface;
+    let after = if again || retry { 0.0 } else { seconds(delay) };
+    let mut flags = 0;
+    if after == 0.0 {
+        flags |= ffi::FRAME_REDRAW_REQUESTED;
+    }
+    if presented {
+        flags |= ffi::FRAME_PRESENTED;
+    }
+    (after, flags)
 }
 
 fn seconds(delay: std::time::Duration) -> f64 {
