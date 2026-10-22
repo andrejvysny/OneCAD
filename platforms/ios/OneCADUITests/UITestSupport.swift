@@ -7,6 +7,7 @@ enum OneCADID {
     static let startupError = "onecad.error.startup"
     static let relaunchRequired = "onecad.error.relaunchRequired"
     static let fileMenu = "onecad.menu.file"
+    static let saveName = "onecad.save.name"
 }
 
 extension XCUIApplication {
@@ -51,12 +52,16 @@ enum ElementCondition: CustomStringConvertible {
     case exists
     case hittable
     case gone
+    case enabled
+    case value(String)
 
     var predicate: NSPredicate {
         switch self {
         case .exists: NSPredicate(format: "exists == true")
         case .hittable: NSPredicate(format: "exists == true AND hittable == true")
         case .gone: NSPredicate(format: "exists == false")
+        case .enabled: NSPredicate(format: "exists == true AND hittable == true AND enabled == true")
+        case let .value(text): NSPredicate(format: "exists == true AND value == %@", text)
         }
     }
 
@@ -65,6 +70,8 @@ enum ElementCondition: CustomStringConvertible {
         case .exists: "existing"
         case .hittable: "hittable"
         case .gone: "gone"
+        case .enabled: "enabled"
+        case let .value(text): "showing '\(text)'"
         }
     }
 }
