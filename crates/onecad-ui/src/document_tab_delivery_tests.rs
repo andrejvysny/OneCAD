@@ -448,6 +448,10 @@ async fn save_all_stops_at_a_cancelled_dialog_reports_failures_and_busy_document
     assert_eq!(app.doc.tab, first, "Cancel stops the sequence");
     assert!(app.tabs.save_all.queue.is_empty());
     assert_eq!(parked(&app, second).status, before, "never asked");
+    assert_eq!(
+        app.doc.status, "Save All left unsaved: Untitled (cancelled), Untitled (not asked)",
+        "the report names the cancelled document and every one left unasked"
+    );
 
     prompt(&mut app);
     app.document_finished(Err("disk full".into()));
