@@ -38,7 +38,7 @@ pub(super) fn show(app: &mut App, ctx: &egui::Context) {
         .items()
         .iter()
         .any(|item| item.body().is_some());
-    let idle = !app.busy();
+    let idle = !app.busy() && !app.ui.extensions.native.pending;
     let state = &mut app.ui.extensions.native;
     let mut picked = None;
     let mut first_available = None;

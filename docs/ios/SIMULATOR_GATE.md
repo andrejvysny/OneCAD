@@ -130,9 +130,11 @@ project are resolved there).
   the same name; its in-process summary (history, one healthy solid, volume,
   bounds, live geometry) is checked against the same case, so the simulator
   kernel's own geometry is verified, not only the Mac regeneration.
-- `acceptance.json` claims evidence classes 3–5. Class 2 (synthetic replay)
-  is not claimed until replay tests are inventoried and their traces
-  required.
+- `acceptance.json` claims evidence classes 2–5. The inventoried synthetic
+  Pencil test must produce a sealed `pencil-replay.trace`; the verifier checks
+  chronology/deduplication, prediction replacement, estimation refinement,
+  cancellation and unchanged document observations. Missing or invalid traces
+  fail the gate. This never establishes physical Pencil behavior.
 - Step 9's `strings` rule is a byte search of the Release executable (the
   product can exceed the 16 MiB log bound). `otool -l` and `otool -L` are
   logged as `otool-load-commands.log` and `otool-libraries.log` (one file on

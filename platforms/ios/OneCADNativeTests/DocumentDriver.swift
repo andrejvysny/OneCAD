@@ -35,6 +35,9 @@ struct DocumentDriver {
         try await test.waitFor("\(what) exported and enabled", timeout: timeout) { node(enabled) != nil }
         let target = try XCTUnwrap(node(enabled))
         XCTAssertTrue(bridge?.activateAccessibility(target.id) ?? false, "activating \(what)")
+        // Activation queues an egui event. Let the host consume it before a
+        // following action can target a control from the previous snapshot.
+        try await test.nextRunLoopTick()
     }
 
     func activate(_ identifier: String, timeout: TimeInterval = 15) async throws {

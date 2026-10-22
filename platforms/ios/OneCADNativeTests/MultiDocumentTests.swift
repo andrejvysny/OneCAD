@@ -1,3 +1,5 @@
+import QuartzCore
+import UIKit
 import XCTest
 @testable import OneCAD
 
@@ -135,18 +137,21 @@ final class MultiDocumentTests: XCTestCase {
         let fresh = try await docs.newPart()
         let canvas = try XCTUnwrap(docs.node { $0.identifier == "onecad.viewport" }?.frame)
         let (x, y) = (canvas.midX, canvas.midY + 120)
-        _ = try docs.hooks.call(["cmd": "replay", "samples": [
-            ["contact": 41, "phase": "began", "t": 1.0, "x": x, "y": y],
-            ["contact": 41, "phase": "moved", "t": 1.02, "x": x + 30, "y": y],
-            ["contact": 41, "phase": "moved", "provenance": "predicted", "t": 1.04, "x": x + 45, "y": y],
+        let generation = try XCTUnwrap(Self.metalCanvas(), "no live Metal canvas").viewGeneration
+        let contact = Int.random(in: 10_000_000...1_000_000_000)
+        let timestamp = CACurrentMediaTime()
+        _ = try docs.hooks.call(["cmd": "replay", "generation": generation, "samples": [
+            ["contact": contact, "phase": "began", "t": timestamp, "x": x, "y": y],
+            ["contact": contact, "phase": "moved", "t": timestamp + 0.02, "x": x + 30, "y": y],
+            ["contact": contact, "phase": "moved", "provenance": "predicted", "t": timestamp + 0.04, "x": x + 45, "y": y],
         ]])
-        XCTAssertNotNil(try prediction(docs, 41), "the stroke is live")
+        XCTAssertNotNil(try prediction(docs, contact), "the stroke is live")
         try await docs.activate("onecad.tab.0")
         try await waitFor("contact cancelled by the switch", timeout: 15) {
-            try self.prediction(docs, 41) == nil
+            try self.prediction(docs, contact) == nil
         }
-        _ = try docs.hooks.call(["cmd": "replay", "samples": [
-            ["contact": 41, "phase": "ended", "t": 1.1, "x": x + 60, "y": y],
+        _ = try docs.hooks.call(["cmd": "replay", "generation": generation, "samples": [
+            ["contact": contact, "phase": "ended", "t": max(CACurrentMediaTime(), timestamp + 0.1), "x": x + 60, "y": y],
         ]])
         let plate = try await docs.waitForSummary("plate shown") { Doc.view($0)["tabIndex"] as? Int == 0 }
         XCTAssertEqual(Doc.features(plate), ["Sketch", "Extrude"])
@@ -158,6 +163,15 @@ final class MultiDocumentTests: XCTestCase {
 
     private func prediction(_ docs: DocumentDriver, _ contact: Int) throws -> [Double]? {
         try docs.hooks.call(["cmd": "prediction", "contact": contact])["prediction"] as? [Double]
+    }
+
+    private static func metalCanvas() -> MetalCanvasView? {
+        func find(_ view: UIView) -> MetalCanvasView? {
+            if let canvas = view as? MetalCanvasView { return canvas }
+            return view.subviews.lazy.compactMap(find).first
+        }
+        return UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows).lazy.compactMap { find($0) }.first
     }
 
     /// A STEP of the plate, written by the kernel and moved out of the run

@@ -8,6 +8,7 @@ mod interaction_tests;
 mod manager;
 mod menu_surface;
 mod palette;
+pub(crate) mod refresh;
 mod service;
 mod view;
 #[cfg(test)]
@@ -125,6 +126,14 @@ pub struct State {
 }
 
 impl State {
+    fn begin(&mut self, request: Request) {
+        self.attempted = true;
+        self.pending = true;
+        self.pending_request = Some(request);
+        self.status_warning = false;
+        self.status = "Extension action pending…".into();
+    }
+
     pub(crate) fn open_palette(&mut self) {
         self.palette_open = true;
         self.palette_query.clear();
@@ -236,16 +245,33 @@ pub(crate) fn command_available(
 
 impl App {
     pub fn extension_request(&mut self, request: Request) {
+        if self.stopping || self.ui.extensions.native.pending {
+            return;
+        }
+        if request == Request::Refresh {
+            if self
+                .extension_refresh
+                .submit(self.tabs.runtime(), self.doc.bridge.shared.context.clone())
+            {
+                self.ui.extensions.native.begin(request);
+            }
+            return;
+        }
         let was_running = self.doc.documents.running;
         let pending_request = request.clone();
         self.document_request(crate::document_flow::Request::Extension(request));
         if !was_running && self.doc.documents.running {
-            let state = &mut self.ui.extensions.native;
-            state.attempted = true;
-            state.pending = true;
-            state.pending_request = Some(pending_request);
-            state.status_warning = false;
-            state.status = "Extension action pending…".into();
+            self.ui.extensions.native.begin(pending_request);
+        }
+    }
+
+    pub(crate) fn poll_extension_refresh(&mut self) {
+        if let Some(result) = self.extension_refresh.poll() {
+            match result {
+                Ok(reply) => self.ui.extensions.native.receive(reply),
+                Err(error) => self.ui.extensions.native.failed(error),
+            }
+            self.sync_extension_menu();
         }
     }
 
@@ -344,7 +370,7 @@ impl App {
             menu.set_extension_commands(
                 &commands,
                 &generic,
-                !self.busy(),
+                !self.busy() && !self.ui.extensions.native.pending,
                 self.ui.extensions.native.generation,
             );
         }

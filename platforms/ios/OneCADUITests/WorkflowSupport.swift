@@ -59,6 +59,10 @@ enum UI {
     static let rectangle = tool("rectangle", auto: "rectangle", label: "Rectangle")
     static let circle = tool("circle", auto: "circle", label: "Circle")
     static let extrude = tool("extrude", auto: "extrude", label: "Extrude")
+    static let fillet = tool("fillet", auto: "fillet", label: "Fillet")
+    static let chamfer = tool("chamfer", auto: "chamfer", label: "Chamfer")
+    static let offsetFace = tool("offsetFace", auto: "offset-face", label: "Offset face")
+    static let moveRotate = tool("moveRotate", auto: "move-rotate", label: "Move / Rotate")
     static let numericInput = UIRef("button.numeric-input-tab", label: "Numeric input · Tab")
     static let finish = UIRef("onecad.tool.finishSketch", "button.finish", label: "Finish")
     static let discard = UIRef("onecad.tool.discardSketch", "button.discard", label: "Discard")
@@ -74,6 +78,11 @@ enum UI {
     static let extrudeDistance = UIRef("onecad.dimension.input", "onecad.param.extrudeDistance",
                                        "text_field.extrude-distance-mm", label: "Extrude distance (mm)")
     static let create = UIRef("onecad.op.confirm", "button.create", label: "Create ↵")
+    static let cancelOperation = UIRef("onecad.op.cancel", "button.cancel", label: "Cancel")
+    static let operationValue = UIRef("onecad.dimension.input")
+    static let translationY = UIRef("onecad.param.translationY", label: "Translation Y (mm)")
+    static let translationZ = UIRef("onecad.param.translationZ", label: "Translation Z (mm)")
+    static let rotationAngle = UIRef("onecad.param.rotationAngle", label: "Rotation angle (deg)")
     static let point = tool("point", auto: "point", label: "Point")
     static let cutMode = UIRef("button.cut", label: "Cut")
     static let flip = UIRef("button.flip", label: "Flip")
@@ -88,6 +97,8 @@ enum UI {
     static let supportFace = UIRef(labelPrefix: "Support face: ")
     static let fitAll = UIRef("button.fit-all", label: "Fit all")
     static let topView = UIRef("button.top-view", label: "TOP view")
+    static let homeView = UIRef("button.home-view", label: "Home view")
+    static let rightView = UIRef("button.right-view", label: "RIGHT view")
 }
 
 @MainActor

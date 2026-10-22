@@ -5,6 +5,7 @@ use super::{
     captures::hash,
     ios_geometry::{self, EXPECTATIONS},
     ios_release::{self, Platform},
+    ios_replay,
     ios_verify::{self, INVENTORY},
     Result,
 };
@@ -134,7 +135,19 @@ fn tests(dir: &Path, root: &Path, run: &Value) -> Result<()> {
 fn artifacts(dir: &Path, root: &Path, run_id: &str, simulator: &Value) -> Result<()> {
     let expectations = json(&root.join(EXPECTATIONS))?;
     let required = ios_geometry::required_simulator(&expectations);
-    ios_verify::verify_artifacts(&dir.join("artifacts"), run_id, simulator, &required)?;
+    let names = ios_verify::verify_artifacts(&dir.join("artifacts"), run_id, simulator, &required)?;
+    if !names.contains(ios_replay::ARTIFACT) {
+        return Err(format!(
+            "required synthetic replay artifact missing: {}",
+            ios_replay::ARTIFACT
+        )
+        .into());
+    }
+    ios_replay::verify(
+        &json(&dir.join("artifacts").join(ios_replay::ARTIFACT))?,
+        run_id,
+        simulator,
+    )?;
     ios_geometry::verify_in_process(&dir.join("artifacts"), &expectations)
 }
 

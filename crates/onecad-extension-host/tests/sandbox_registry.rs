@@ -242,13 +242,16 @@ fn changed_content_revokes_approval_before_code_runs() {
 
 #[test]
 fn traps_fuel_memory_and_response_budgets_fail_closed() {
+    const SPIN: &str = "(loop $spin br $spin) i32.const 0";
     for (body, response, limits) in [
         ("unreachable", "{}".into(), SandboxLimits::default()),
         (
-            "(loop $spin br $spin) i32.const 0",
+            SPIN,
             "{}".into(),
             SandboxLimits {
-                fuel: 1000,
+                // Wasmtime charges the page-aligned startup data copy before
+                // execute; leave headroom so this case reaches the loop.
+                fuel: 64 * 1024,
                 ..SandboxLimits::default()
             },
         ),
@@ -279,15 +282,43 @@ fn traps_fuel_memory_and_response_budgets_fail_closed() {
         registry
             .set_enabled(ID, true, Some(approval(&registry)))
             .unwrap();
-        assert!(matches!(
-            registry.execute(COMMAND, &context()),
-            Err(HostError::Sandbox(_))
-        ));
+        let error = registry.execute(COMMAND, &context()).unwrap_err();
+        assert!(matches!(&error, HostError::Sandbox(_)), "{error:?}");
+        if body == SPIN {
+            assert_execute_exhausts_fuel(&component(&response, body, false), limits.fuel);
+        }
         assert!(matches!(
             registry.packages()[0].state,
             PackageState::Failed(_)
         ));
     }
+}
+
+fn assert_execute_exhausts_fuel(bytes: &[u8], fuel: u64) {
+    use wasmtime::{
+        component::{Component, Linker},
+        Config, Engine, Store, Trap,
+    };
+
+    let mut config = Config::new();
+    config
+        .wasm_component_model(true)
+        .consume_fuel(true)
+        .max_wasm_stack(512 * 1024);
+    let engine = Engine::new(&config).unwrap();
+    let component = Component::from_binary(&engine, bytes).unwrap();
+    let mut store = Store::new(&engine, ());
+    store.set_fuel(fuel).unwrap();
+    let instance = Linker::new(&engine)
+        .instantiate(&mut store, &component)
+        .unwrap();
+    let execute = instance
+        .get_typed_func::<(String, String), (Result<String, String>,)>(&mut store, "execute")
+        .unwrap();
+    let args = (COMMAND.into(), serde_json::to_string(&context()).unwrap());
+    // The registry's string error omits Wasmtime's chained trap cause.
+    let error = execute.call(&mut store, args).unwrap_err();
+    assert_eq!(error.downcast_ref::<Trap>(), Some(&Trap::OutOfFuel));
 }
 
 #[test]

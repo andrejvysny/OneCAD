@@ -1,5 +1,25 @@
 use super::*;
 
+#[tokio::test]
+async fn catalog_refresh_uses_the_management_lock_before_filesystem_work() {
+    let root = tempfile::tempdir().unwrap();
+    let paths = crate::qa::QaPaths::from_args(
+        ["--qa-root".into(), root.path().join("qa").into_os_string()].into_iter(),
+    )
+    .unwrap();
+    let guard = MANAGEMENT.lock().await;
+    let work = refresh(&paths);
+    tokio::pin!(work);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut work)
+            .await
+            .is_err()
+    );
+    assert!(!paths.data.join("extensions").exists());
+    drop(guard);
+    assert_eq!(work.await.unwrap().status, "Extensions refreshed");
+}
+
 #[test]
 fn application_paths_round_trip_per_profile_and_report_corruption() {
     let directory = tempfile::tempdir().unwrap();

@@ -29,15 +29,36 @@ final class SemanticHookTests: XCTestCase {
     /// Opens the gate's Mac-authored plate, checks it regenerated here, and
     /// re-saves it for the Mac oracle (`mac-plate-resaved`).
     func testMacFixtureRoundTrip() async throws {
-        let hooks = try await SemanticHooks.attach(self)
+        let documents = try await DocumentDriver.attach(self)
+        try await documents.closeEveryTab()
+        let hooks = documents.hooks
         let runID = try XCTUnwrap(hooks.runID, "ONECAD_RUN_ID (TEST_RUNNER_ONECAD_RUN_ID) not set")
         XCTAssertFalse(runID.isEmpty)
-        try await openMacFixture(hooks)
+        let opened = try await documents.openMacPlate(as: "mac-round-trip")
+        let solved = try await ModelDriver(documents: documents).solveFirstSketch()
+        try assertSamePlate(opened, solved)
         let saved = try await hooks.saveArtifact("mac-plate-resaved", in: self)
         XCTAssertEqual(saved["saved"] as? Bool, true, "\(saved)")
         XCTAssertEqual(saved["clean"] as? Bool, true, "\(saved)")
         _ = try await hooks.exportStepArtifact("mac-plate-resaved", in: self)
         _ = try await hooks.writeSemantic("mac-plate-resaved", in: self)
+        try await documents.closeEveryTab()
+    }
+
+    private func assertSamePlate(_ opened: [String: Any], _ solved: [String: Any]) throws {
+        XCTAssertEqual(DocumentDriver.document(solved)["documentId"] as? String,
+                       DocumentDriver.document(opened)["documentId"] as? String)
+        let records = { (summary: [String: Any]) in summary["features"] as? [[String: Any]] ?? [] }
+        XCTAssertEqual(records(solved).compactMap { $0["id"] as? String },
+                       records(opened).compactMap { $0["id"] as? String })
+        XCTAssertEqual(DocumentDriver.features(solved), ["Sketch", "Extrude"])
+        let before = try XCTUnwrap((opened["sketches"] as? [[String: Any]])?.first)
+        let after = try XCTUnwrap((solved["sketches"] as? [[String: Any]])?.first)
+        XCTAssertEqual(after["id"] as? String, before["id"] as? String)
+        XCTAssertEqual(after["entities"] as? Int, 14)
+        XCTAssertEqual(after["constraints"] as? Int, 13)
+        XCTAssertEqual(after["status"] as? String, "FullyConstrained")
+        XCTAssertEqual(after["dof"] as? Int, 0)
     }
 
     /// The two injectable faults reach the paths a user's actions take: a

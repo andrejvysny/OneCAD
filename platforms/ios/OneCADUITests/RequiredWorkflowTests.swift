@@ -140,8 +140,9 @@ final class RequiredWorkflowTests: XCTestCase {
             ui.waitText("Health: Healthy")
             // The hole's rim is an edge of Body 1 on the top face: a Cut (an
             // Add would merge into the top face, a new body is ruled out
-            // above). Through-ness is checked zoomed in, in step 09.
-            expectPicks([(sketchPoint(10, 10), .face), (sketchPoint(30, 20), .edge)], "hole rim at (30, 20)")
+            // above). Fit keeps the face pick outside the 22 pt finger edge
+            // window; the visible hole's rim is 3 mm from its centre.
+            expectPlatePicks([(10, 10, .face), (33, 20, .edge)], "hole rim at (33, 20)")
         }
         step("08-edit-width-70") {
             editPlateWidth(from: "60", to: "70")
@@ -149,26 +150,40 @@ final class RequiredWorkflowTests: XCTestCase {
             ui.tap(UI.propertiesTab)
             ui.tap(UI.bodyRow)
             ui.waitText("Health: Healthy")
-            // The regenerated plate reaches x = 70: x = 62 is top face, more
-            // than the 8 pt edge window (6.2 mm here) from its right edge.
-            expectPicks([(sketchPoint(-20, 20), .nothing), (sketchPoint(62, 20), .face)], "widened plate at (62, 20)")
-            expectPicks([(sketchPoint(10, 10), .face), (sketchPoint(30, 20), .edge)], "hole rim kept at (30, 20)")
+            // The regenerated plate reaches x = 70. Fitted picks clear the
+            // 22 pt finger edge window and stay inside the visible canvas.
+            expectPlatePicks([(-3, 20, .nothing), (62, 20, .face)], width: 70, "widened plate at (62, 20)")
+            expectPlatePicks([(10, 10, .face), (33, 20, .edge)], width: 70, "hole rim kept at (33, 20)")
         }
         step("09-undo-redo") {
             // Undo restores the 60 mm width, a second undo removes the cut.
             ui.tap(UI.undo)
             expectPlateWidth("60")
-            // At 60 mm the right edge is 2 mm from x = 62, inside the edge window.
-            expectPicks([(sketchPoint(10, 10), .face), (sketchPoint(62, 20), .edge)], "plate back to 60 mm at (62, 20)")
+            // At the fitted scale, x = 62 lies more than 22 pt outside the
+            // restored 60 mm plate. Y = 28 avoids the floating tool pill.
+            expectPlatePicks([(10, 10, .face), (62, 28, .nothing)], "plate back to 60 mm at (62, 28)")
             ui.tap(UI.undo)
             ui.expectHistory(["Sketch", "Extrude", "Sketch"])
             ui.tap(UI.redo)
             ui.expectHistory(["Sketch", "Extrude", "Sketch", "Extrude"])
             expectPlateWidth("60")
-            // Last use of the default camera: Fit all changes it.
             expectThroughHole()
         }
-        step("10-save") {
+        let modeling = WorkflowModelingChecks(ui: ui, keyboard: keyboard, test: self)
+        step("10-fillet-1mm-preview-commit-undo") {
+            modeling.edgeTreatment(UI.fillet, feature: "Fillet")
+        }
+        step("11-separate-chamfer-1mm-preview-commit-undo") {
+            modeling.edgeTreatment(UI.chamfer, feature: "Chamfer")
+        }
+        step("12-offset-face-preview-cancel-commit-undo") {
+            modeling.offsetFace()
+        }
+        step("13-move-rotate-preview-commit-undo") {
+            modeling.moveRotate()
+            expectThroughHole()
+        }
+        step("14-save") {
             ui.tap(UI.fileMenu)
             ui.tap(UI.save)
             let field = app.textFields[OneCADID.saveName]
@@ -180,7 +195,7 @@ final class RequiredWorkflowTests: XCTestCase {
             waitUntil(field, .gone, "save name prompt dismissed")
             ui.wait(UIRef("button.\(name.lowercased())", label: name), .exists)
         }
-        step("11-relaunch-and-reopen") {
+        step("15-relaunch-and-reopen") {
             app.terminate()
             app.launch()
             waitUntil(app.element(id: OneCADID.canvas), .exists, "canvas after relaunch")
@@ -290,10 +305,20 @@ final class RequiredWorkflowTests: XCTestCase {
         }
     }
 
+    /// Coordinates remain sketch millimetres after editing or fitting; Home
+    /// restores the camera basis before Top and Fit frame the current bounds.
+    private func expectPlatePicks(_ picks: [(Double, Double, Pick)], width: Double = 60, _ what: String) {
+        ui.tap(UI.homeView)
+        ui.tap(UI.topView)
+        ui.tap(UI.fitAll)
+        let view = WorkflowFittedPlateView(ui: ui, direction: .top, width: width, height: 4)
+        expectPicks(picks.map { (view.point($0.0, $0.1, 4), $0.2) }, what)
+    }
+
     /// Top view, then Fit all, frames the plate's bounding box at the
     /// viewport centre, which is the hole's centre (30, 20) of the 60 x 40
-    /// plate, with the hole about 90 pt across: far wider than the 8 pt edge
-    /// pick window. Nothing under the centre, looking straight down, means no
+    /// plate, with the hole about 90 pt across: wider than twice the 22 pt
+    /// finger edge window. Nothing under the centre, looking straight down, means no
     /// floor: the hole goes through. A reopened document keeps its own
     /// (isometric) camera, hence the explicit top view.
     private func expectThroughHole(file: StaticString = #filePath, line: UInt = #line) {
@@ -302,6 +327,7 @@ final class RequiredWorkflowTests: XCTestCase {
         expectPicks([(ui.point(centre.x - 100, centre.y), .face), (ui.point(centre.x, centre.y), .nothing)],
                     "through hole at the fitted plate's centre",
                     prepare: {
+                        ui.tap(UI.homeView, file: file, line: line)
                         ui.tap(UI.topView, file: file, line: line)
                         ui.tap(UI.fitAll, file: file, line: line)
                     }, file: file, line: line)

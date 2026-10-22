@@ -1,4 +1,6 @@
 pub(super) const HOST_TESTS: &[&str] = &[
+    "app_logic_tests::extension_refresh_delivery_tests::catalog_refresh_keeps_immediate_modeling_input_available",
+    "app_logic_tests::extension_refresh_delivery_tests::management_waits_for_refresh_then_keeps_document_serialization",
     "app_logic_tests::item_delivery_tests::sidebar_viewport_selection_and_delete_share_authority_and_history",
     "app_logic_tests::occluded_app_logic_delivers_new_and_protects_close_without_ui",
     "app_logic_tests::document_lifecycle_tests::recovered_document_remains_saveable_and_protected_after_capture_refusal",

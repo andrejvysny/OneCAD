@@ -7,6 +7,7 @@ use super::{
     ios_evidence::{self, BUNDLES, MAC_FIXTURE},
     ios_gate, ios_geometry,
     ios_release::Platform,
+    ios_replay,
     ios_tests::{identity, kernel, repo, write, RUN, SOURCE, UDID},
     ios_verify,
 };
@@ -247,6 +248,13 @@ fn evidence(dir: &Path) {
     fs::create_dir_all(dir.join("mac-authored")).unwrap();
     fs::write(dir.join(MAC_FIXTURE), MAC_BYTES).unwrap();
     fs::create_dir_all(dir.join("artifacts")).unwrap();
+    let replay = dir.join("artifacts").join(ios_replay::ARTIFACT);
+    write(&replay, &ios_replay::tests::valid(RUN, &kernel()));
+    write(
+        &replay.with_file_name(format!("{}.provenance.json", ios_replay::ARTIFACT)),
+        &json!({"runId":RUN,"kind":"trace","artifact":ios_replay::ARTIFACT,
+            "sha256":hash(&fs::read(&replay).unwrap()),"kernelIdentity":kernel()}),
+    );
     write(&dir.join("oracle-author.json"), &author_report(&all));
     write(
         &dir.join("oracle-verify.json"),
@@ -284,7 +292,24 @@ fn ios_synthetic_evidence_passes_and_acceptance_is_written_last() {
     let acceptance = ios_evidence::json(&area.path().join("acceptance.json")).unwrap();
     assert_eq!(acceptance["run"]["runId"], RUN);
     type Mutation = fn(&Path);
-    let mutations: [(&str, Mutation); 10] = [
+    let mutations: [(&str, Mutation); 13] = [
+        ("no Pencil replay", |d| {
+            fs::remove_file(d.join("artifacts/pencil-replay.trace")).unwrap();
+            fs::remove_file(d.join("artifacts/pencil-replay.trace.provenance.json")).unwrap();
+        }),
+        ("unsealed Pencil replay", |d| {
+            fs::remove_file(d.join("artifacts/pencil-replay.trace.provenance.json")).unwrap();
+        }),
+        ("sealed replay with bad transitions", |d| {
+            let file = d.join("artifacts/pencil-replay.trace");
+            let mut record = ios_evidence::json(&file).unwrap();
+            record["scenarios"][3]["observations"][4]["response"]["liveContacts"] = json!(1);
+            write(&file, &record);
+            let sidecar = d.join("artifacts/pencil-replay.trace.provenance.json");
+            let mut provenance = ios_evidence::json(&sidecar).unwrap();
+            provenance["sha256"] = json!(hash(&fs::read(&file).unwrap()));
+            write(&sidecar, &provenance);
+        }),
         ("dirty tree", |d| {
             fs::write(d.join("source-status.log"), " M x\n").unwrap()
         }),

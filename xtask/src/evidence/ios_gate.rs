@@ -127,9 +127,7 @@ pub(super) fn report(dir: &Path, root: &Path, accept: bool) -> Result<()> {
     let simulator =
         ios_evidence::json(&dir.join("kernel").join(format!("{SIMULATOR_BUNDLE}.json")))?;
     let acceptance = json!({
-        // No replay test is inventoried and no trace is required yet, so
-        // synthetic replay (class 2) is not claimed.
-        "classification": "iPad Simulator: native XCTest and XCUITest with the in-process kernel, Mac geometry oracle, unsigned Release compile/link (evidence classes 3-5); no synthetic replay, physical device, Pencil hardware, performance or release qualification",
+        "classification": "iPad Simulator: verified synthetic Pencil replay, native XCTest and XCUITest with the in-process kernel, Mac geometry oracle, unsigned Release compile/link (evidence classes 2-5); no physical device, Pencil hardware, performance or release qualification",
         "run": run,
         "simulatorKernel": simulator,
         "inventory": ios_evidence::json(&root.join(super::ios_verify::INVENTORY))?,

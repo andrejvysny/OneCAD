@@ -102,11 +102,15 @@ Each step keeps a screenshot attachment named after it.
 | `04-finish-sketch` | Finish | `1 closed region(s) returned` |
 | `05-extrude-4mm` | tap the profile, Extrude, distance `4`, Create | `Solve: 0 degrees of freedom`, `Body 1`, history `Sketch, Extrude` |
 | `06-hole-sketch-on-top-face` | Sketch on the top face; Point numeric X `30` Y `20`; Circle snapped to the point, Ø `6`; Finish; tap the disk | H/V distances 30/20, `Coincident`, `Diameter (mm): 6`, fully constrained; `2 closed region(s) returned`; `Support face: …` |
-| `07-cut-through` | Extrude, Operation Cut, target Body 1, distance `5`, Flip, Create; tap (10, 10), then the hole centre | Operation shows `Cut`, `Reverse`; history `Sketch, Extrude, Sketch, Extrude`; no `Body 2`; `Health: Healthy`; face at (10, 10), hole rim edge `on Body 1` at (30, 20) |
-| `08-edit-width-70` | History row 1 (Sketch), Edit feature, Edit beside `Distance (mm): 60`, `70` Return, Finish; tap (-20, 20), (62, 20), (10, 10), (30, 20) | `Distance (mm): 70`, same four history rows, `Health: Healthy`; regenerated plate: nothing at (-20, 20), face at (62, 20), hole rim still at (30, 20) |
-| `09-undo-redo` | Undo, Undo, Redo, TOP view, Fit all, tap left of and at the viewport centre | width back to 60 (read in the sketch, then Discard) and the right edge, not face, at (62, 20); three rows after the second Undo, four after Redo; through hole: face 100 pt left of the fitted centre, nothing at it |
-| `10-save` | File, Save, name `Plate-<run>` in `onecad.save.name`, Save | prompt dismissed, tab titled with the name |
-| `11-relaunch-and-reopen` | `terminate`, `launch`, open the document from Recent, select History rows 2 and 4, TOP view, Fit all | four history rows, `Extrude · 4.0 mm` and `Extrude · 5.0 mm`, `Body 1` healthy and no `Body 2`, through hole as in step 09, width 60 |
+| `07-cut-through` | Extrude, Operation Cut, target Body 1, distance `5`, Flip, Create; Home, TOP, Fit all; tap (10, 10), then (33, 20) | Operation shows `Cut`, `Reverse`; history `Sketch, Extrude, Sketch, Extrude`; no `Body 2`; `Health: Healthy`; face at (10, 10), hole rim edge `on Body 1` at (33, 20) |
+| `08-edit-width-70` | History row 1 (Sketch), Edit feature, Edit beside `Distance (mm): 60`, `70` Return, Finish; Home, TOP, Fit all before each pick group; tap (-3, 20), (62, 20), (10, 10), (33, 20) | `Distance (mm): 70`, same four history rows, `Health: Healthy`; regenerated plate: nothing at (-3, 20), face at (62, 20), hole rim still at (33, 20) |
+| `09-undo-redo` | Undo, Undo, Redo; Home, TOP, Fit all before geometry checks | width back to 60 (read in the sketch, then Discard), nothing at (62, 28) beyond the 22 pt finger edge window and clear of the floating tool pill; three rows after the second Undo, four after Redo; through hole: face 100 pt left of the fitted centre, nothing at it |
+| `10-fillet-1mm-preview-commit-undo` | Home/Fit, select one vertical outer edge, Fillet 1 mm, Create, Undo | preview ready, Fillet history and value, one healthy body, restored baseline history |
+| `11-separate-chamfer-1mm-preview-commit-undo` | Select the restored sharp edge, Chamfer 1 mm, Create, Undo | separate Chamfer history and value, one healthy body, restored baseline history |
+| `12-offset-face-preview-cancel-commit-undo` | Select top face, Offset Face 4 mm, Cancel; repeat and Create, Undo | cancel preserves history; side-face picks at z = 6 mm distinguish 8 mm thickness from 4 mm with more than 22 pt edge clearance; Undo restores 4 mm |
+| `13-move-rotate-preview-commit-undo` | Select body, translate (10,5,0) mm and rotate 90°, Create, Undo | TransformBody history; picks distinguish transformed bounds; Undo restores original bounds and through hole |
+| `14-save` | File, Save, name `Plate-<run>` in `onecad.save.name`, Save | prompt dismissed, tab titled with the name |
+| `15-relaunch-and-reopen` | `terminate`, `launch`, open the document from Recent, select History rows 2 and 4, TOP view, Fit all | four history rows, `Extrude · 4.0 mm` and `Extrude · 5.0 mm`, `Body 1` healthy and no `Body 2`, through hole as in step 09, width 60 |
 
 Preconditions and conventions:
 
@@ -123,11 +127,14 @@ Preconditions and conventions:
   not checked.
 - Geometry is checked through picks in the top view: Properties titles a
   tap's selection `Face` or `Edge` (subtitle `on Body 1`) or `Nothing
-  selected`. Edges within 8 pt of a tap win over faces
-  (`onecad-scene` `EDGE_PICK_LOGICAL_PIXELS`), so under the default camera
-  (hole radius ≈ 4 pt) the hole centre picks its rim; through-ness is
-  checked after TOP view and Fit all, which centre the plate (and so the
-  hole) in the viewport at ≈ 15 pt/mm. Regeneration and camera animation
+  selected`. Finger taps select edges within 22 pt
+  (`onecad-ui` `FINGER_EDGE_TOLERANCE_PT`); the default plate is too small
+  for an unambiguous face pick. Geometry checks therefore use public Home,
+  TOP view and Fit all with the source-derived `WorkflowFittedPlateView`
+  projection and the current 60 or 70 mm width. Mouse and Pencil retain
+  the 8 pt aperture. Through-ness is checked after fitting, which centres
+  the 60 × 40 mm plate and its hole in the viewport at ≈ 15 pt/mm.
+  Regeneration and camera animation
   have no UI completion signal, so a pick sequence is retried a bounded
   number of times. Volume and bounds stay with the gate's Mac oracle.
 - `Plate-<run>` embeds the full `ONECAD_RUN_ID` (`TEST_RUNNER_ONECAD_RUN_ID`,
@@ -146,8 +153,27 @@ Preconditions and conventions:
   their value.
 - Sketches are reached through History rows (feature order), not the
   explorer, which lists sketches in id order (random per document).
-- Fillet, chamfer, offset face and move/rotate (workflow steps 5–6) are not
-  in this suite.
+- Modeling checks use Home/Top/Right and Fit with the shared camera projection
+  constants. Sketch XY uses world basis X=(0,1,0), Y=(-1,0,0); the projection
+  helper preserves that basis when locating the plate and its vertical edge.
+
+## Simulator-authored geometry artifacts
+
+`ModelArtifactTests` authors three independent models through accessibility
+controls and the public touch, key and text ABI. These hosted native tests are
+class 3 evidence; their synthesized finger input is not physical input evidence.
+`ModelDriver` draws a constrained 60 × 40 mm rectangle and centered Ø6 mm circle
+in one sketch, then extrudes 4 mm. Separate cases apply a 1 mm fillet or chamfer
+to one 4 mm vertical outer edge. The tests save `plate`, `plate-fillet` and
+`plate-chamfer` plus matching semantic records for the independent Mac oracle.
+
+Assertions cover live geometry, exact feature order, one healthy solid,
+analytic volume/extents, fully constrained sketches, saved hashes and run/kernel
+provenance. Semantic sketch status uses canonical solver names; an unsolved
+sketch remains absent rather than being reported as successful. The Mac fixture
+round-trip test enters and finishes its sketch through public controls before
+recording solver evidence, checking that document, feature and sketch identities
+remain unchanged. These test definitions do not assert a successful gate run.
 
 ## Test-hook commands (`onecad_ios_test.h`)
 
@@ -162,6 +188,7 @@ verifiable artifacts `cargo xtask ios-simulator-gate` checks
 
 | Command | Request | Response fields |
 |---|---|---|
+| `input_state` | `{"cmd":"input_state","contact","estimationIndex"}` | Read-only `synthetic:true`, `liveContacts`, normalizer `stats`, retained `pose`, current `prediction` and `pencilPosition`; never drains or resets input |
 | `run_id` | `{"cmd":"run_id","set"?:id}` | `runId`: `set` replaces the current id; otherwise the one read at launch from `ONECAD_RUN_ID` or `TEST_RUNNER_ONECAD_RUN_ID`; `null` when none |
 | `kernel_identity` | `{"cmd":"kernel_identity"}` | `kernelIdentity`: `backend` (`in-process`, or `null` before a document host runs), `embedded` (manifest the binary verifies against), `linked` (manifest of the linked bundle), worker `hello`, `epoch`, `workerState`, `journalWriteFailures`, `relaunchRequired` |
 | `document_summary` | `{"cmd":"document_summary"}` | ticket; then `summary` (`tabCount`, `document`: path, title, documentId, dirty, revision, undo/redo depth; `geometrySource`; `features`: id, opType, label, valueText, primaryValue, stored `params` (as a re-edit reads them), status; `bodies`: solids, faces, kernel `volume`, `surfaceArea`, `centroid`, tessellation `min`/`max`; `sketches`: status and `dof` of the last solve in this session, entity and constraint counts; `view`: the active tab's editor state when the command was sent, `tabIndex` (0-based strip position), `selected` (selection size), `cameraOffset`, `cameraTarget`, `status` (status line), `busy`) and `kernelIdentity`. Everything describes the active tab. |
@@ -234,6 +261,18 @@ label (`onecad_ios_a11y_activate`, as a tap), opens files with
 `closeEveryTab` (discarding unsaved work and a leftover recovery offer)
 starts and ends each document test, which also removes the files it
 created, because the gate rejects run-directory files it did not expect.
+
+## Synthetic Pencil replay
+
+`PencilReplayTests/testSyntheticPencilReplayPreservesInputAndDocumentContracts`
+uses the actual canvas generation and the production normalizer/router. It
+checks chronological delivery and coalesced deduplication, prediction replacement,
+retained force correction without position changes, and public cancellation
+followed by a rejected late end. Document summaries must remain unchanged.
+`pencil-replay.trace` records requests and observed responses for all four
+scenarios; `seal_artifact` binds its bytes to the current run and kernel.
+The simulator gate rechecks these observations and requires the sealed trace.
+This is synthetic input evidence, not physical Pencil qualification.
 
 ## Document tests (IP16 ONECAD-463, IP17 ONECAD-464)
 

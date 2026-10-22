@@ -7,6 +7,7 @@ mod ios_evidence_tests;
 mod ios_gate;
 mod ios_geometry;
 mod ios_release;
+mod ios_replay;
 mod ios_sim;
 #[cfg(test)]
 mod ios_tests;

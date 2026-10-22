@@ -79,12 +79,57 @@ fn command(state: &mut IosApp, request: &Value) -> Result<Value, String> {
             let prediction = state.input.prediction(contact);
             Ok(json!({"synthetic": true, "prediction": prediction.map(|p| [p.x, p.y])}))
         }
+        Some("input_state") => input_state(&state.input, request),
         Some(cmd) if crate::test_hooks_semantic::COMMANDS.contains(&cmd) => {
             crate::test_hooks_semantic::command(state, cmd, request)
         }
         Some(other) => Err(format!("unsupported command: {other}")),
         None => Err("missing cmd".into()),
     }
+}
+
+/// Reads the live production input pipeline without draining or resetting it.
+fn input_state(input: &crate::input::Input, request: &Value) -> Result<Value, String> {
+    let contact = request
+        .get("contact")
+        .and_then(Value::as_u64)
+        .ok_or("input_state needs contact")?;
+    let index = request
+        .get("estimationIndex")
+        .and_then(Value::as_u64)
+        .ok_or("input_state needs estimationIndex")?;
+    let stats = input.normalizer_stats();
+    Ok(json!({
+        "synthetic": true,
+        "liveContacts": input.live_contacts(),
+        "stats": {
+            "invalid": stats.invalid,
+            "duplicateCoalesced": stats.duplicate_coalesced,
+            "stale": stats.stale,
+            "unknownContact": stats.unknown_contact,
+            "oldGeneration": stats.old_generation,
+            "refusedContacts": stats.refused_contacts,
+            "estimationMatched": stats.estimation_matched,
+            "estimationUnmatched": stats.estimation_unmatched,
+            "mergedMoves": stats.merged_moves,
+        },
+        "pose": input.retained_pose(contact, index).map(pose_state),
+        "prediction": input.prediction(contact).map(|point| [point.x, point.y]),
+        "pencilPosition": input.pencil_position().map(|point| [point.x, point.y]),
+    }))
+}
+
+fn pose_state(pose: onecad_interaction::touch::Pose) -> Value {
+    json!({
+        "force": pose.force,
+        "maxForce": pose.max_force,
+        "altitude": pose.altitude,
+        "azimuth": pose.azimuth,
+        "roll": pose.roll,
+        "hoverZ": pose.hover_z,
+        "estimated": pose.estimated,
+        "expectsUpdate": pose.expects_update,
+    })
 }
 
 fn reply(state: &mut IosApp, json_text: &str) -> String {
@@ -142,6 +187,48 @@ pub unsafe extern "C" fn onecad_ios_test_string_free(s: *mut c_char) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_state_reads_retained_pose_without_draining_or_resetting_input() {
+        let mut input = crate::input::Input::default();
+        let mut stroke = json!({
+            "contact": 77, "kind": "pencil", "phase": "began", "t": 1.0,
+            "x": 10, "y": 20, "force": 0.25, "max_force": 1,
+            "estimated": ["force"], "expects_update": ["force"], "estimation_index": 9,
+        });
+        let query = json!({"contact": 77, "estimationIndex": 9});
+        input
+            .submit(
+                &[sample(&stroke).unwrap()],
+                1,
+                &onecad_interaction::touch::RouteContext::CANVAS,
+            )
+            .unwrap();
+        let initial = input_state(&input, &query).unwrap();
+        assert_eq!(initial["liveContacts"], 1);
+        assert_eq!(initial["pose"]["force"], 0.25);
+        assert_eq!(input_state(&input, &query).unwrap(), initial);
+        assert!(!input.drain().events.is_empty());
+        stroke["provenance"] = json!("estimation_update");
+        stroke["force"] = json!(0.75);
+        stroke["estimated"] = json!([]);
+        stroke["expects_update"] = json!([]);
+        stroke["x"] = json!(999);
+        input
+            .submit(
+                &[sample(&stroke).unwrap()],
+                1,
+                &onecad_interaction::touch::RouteContext::CANVAS,
+            )
+            .unwrap();
+        let refined = input_state(&input, &query).unwrap();
+        assert_eq!(refined["pose"]["force"], 0.75);
+        assert_eq!(refined["pose"]["estimated"], 0);
+        assert_eq!(refined["stats"]["estimationMatched"], 1);
+        assert_eq!(refined["pencilPosition"], initial["pencilPosition"]);
+        assert_eq!(refined["liveContacts"], initial["liveContacts"]);
+        assert!(input.drain().events.is_empty());
+    }
 
     /// Every batch of every trace fixture replays as written.
     #[test]

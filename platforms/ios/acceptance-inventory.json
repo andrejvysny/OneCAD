@@ -1,12 +1,34 @@
 {
   "description": "Exact XCTest inventory of the iPadAcceptance test plan, checked by cargo xtask ios-simulator-gate (docs/ios/SIMULATOR_GATE.md step 6). Identifiers are <bundle>/<Suite>/<test()>. approvedSkips entries are {\"test\": <identifier>, \"reason\": <why>}.",
   "tests": [
+    "OneCADNativeTests/DocumentExportTests/testSendACopyOffersOnlyTheSavedDocument()",
+    "OneCADNativeTests/DocumentExportTests/testStepExportReachesTheExportPicker()",
+    "OneCADNativeTests/DocumentInboxTests/testABatchReleasesEveryScopeAndSeparatesFailures()",
+    "OneCADNativeTests/DocumentInboxTests/testAnUngrantedScopeIsNeverStopped()",
+    "OneCADNativeTests/DocumentInboxTests/testScopeCoversTheWholeCopyAndEndsAfterIt()",
+    "OneCADNativeTests/DocumentInboxTests/testScopeIsReleasedWhenTheCopyFails()",
+    "OneCADNativeTests/DocumentPersistenceTests/testFailedOverwriteKeepsThePreviousFileByteIdentical()",
+    "OneCADNativeTests/DocumentPersistenceTests/testMalformedStepFromFilesLeavesTheDocumentUnchanged()",
+    "OneCADNativeTests/ModelArtifactTests/testChamferedPlateArtifact()",
+    "OneCADNativeTests/ModelArtifactTests/testFilletedPlateArtifact()",
+    "OneCADNativeTests/ModelArtifactTests/testPlateArtifact()",
+    "OneCADNativeTests/MultiDocumentTests/testATabSwitchCancelsALiveTouchContact()",
+    "OneCADNativeTests/MultiDocumentTests/testPendingSaveAndImportLandOnlyInTheirOwnDocuments()",
+    "OneCADNativeTests/MultiDocumentTests/testThreeDocumentsKeepIndependentHistorySelectionCameraAndDirtyState()",
+    "OneCADNativeTests/PencilReplayTests/testSyntheticPencilReplayPreservesInputAndDocumentContracts()",
     "OneCADNativeTests/SemanticHookTests/testInjectedFaultsHitTheNormalPaths()",
     "OneCADNativeTests/SemanticHookTests/testKernelIdentityIsTheInProcessSimulatorKernel()",
     "OneCADNativeTests/SemanticHookTests/testMacFixtureRoundTrip()",
     "OneCADNativeTests/TestHookPingTests/testPingThroughTestCommand()",
+    "OneCADUITests/DocumentLifecycleTests/testSavedDocumentReopensFromRecentsInAFreshProcess()",
+    "OneCADUITests/DocumentLifecycleTests/testUnsavedWorkIsOfferedAfterProcessTermination()",
+    "OneCADUITests/DocumentPickerTests/testCancelledImportPickerLeavesTheDocumentUnchanged()",
+    "OneCADUITests/DocumentPickerTests/testSendACopyOfASavedDocumentOpensTheExportPicker()",
     "OneCADUITests/LaunchTests/testLaunchShowsCanvasAndFileMenu()",
-    "OneCADUITests/OrientationTests/testRotationKeepsAppResponsive()"
+    "OneCADUITests/OrientationTests/testRotationKeepsAppResponsive()",
+    "OneCADUITests/RequiredWorkflowTests/testPlateWithHoleEditUndoSaveReopen()",
+    "OneCADUITests/SaveAllTests/testSaveAllAsksForEachUntitledDocumentAndReportsACancel()",
+    "OneCADUITests/SurfaceLifecycleTests/testViewportReturnsAfterRotationAndBackgrounding()"
   ],
   "approvedSkips": []
 }

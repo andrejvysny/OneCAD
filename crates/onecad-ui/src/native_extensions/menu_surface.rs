@@ -39,6 +39,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui) {
         {
             let available = entry.enabled
                 && !app.busy()
+                && !app.ui.extensions.native.pending
                 && command_available(&entry.command, document, selection);
             if ui
                 .add_enabled(available, egui::Button::new(&entry.command.title))
@@ -54,6 +55,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui) {
                 for entry in commands.iter().filter(|entry| menu_command(&entry.command)) {
                     let enabled = entry.enabled
                         && !app.busy()
+                        && !app.ui.extensions.native.pending
                         && command_available(&entry.command, document, selection);
                     if ui
                         .add_enabled(enabled, egui::Button::new(&entry.command.title))

@@ -41,6 +41,9 @@ async fn pick_package_folder(_update: bool) -> Option<PathBuf> {
 }
 
 pub(crate) async fn execute(backend: &Backend, request: Request) -> Result<Reply, String> {
+    if request == Request::Refresh {
+        return refresh(&backend.paths).await;
+    }
     let update = matches!(&request, Request::UpdateFolder { .. });
     let source = if matches!(
         &request,
@@ -79,6 +82,17 @@ pub(crate) async fn execute(backend: &Backend, request: Request) -> Result<Reply
         prepared,
     )
     .await
+}
+
+pub(super) async fn refresh(paths: &crate::qa::QaPaths) -> Result<Reply, String> {
+    let _guard = MANAGEMENT.lock().await;
+    let root = paths.data.join("extensions");
+    let settings = paths.config.join("extension-applications.json");
+    tokio::task::spawn_blocking(move || {
+        prepare(&root, &settings, Request::Refresh, None).map(|(reply, _)| reply)
+    })
+    .await
+    .map_err(|error| format!("Extension service failed: {error}"))?
 }
 
 async fn finish_execution(

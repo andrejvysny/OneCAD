@@ -3,7 +3,11 @@
 //! only). Every artifact written here embeds the run id and the kernel
 //! identity, or carries them in a `<file>.provenance.json` sidecar, so the
 //! simulator gate can reject stale or fake-backend evidence.
-use onecad_app::{api, dto::DocumentProjection, worker::WorkerBackend};
+use onecad_app::{
+    api,
+    dto::{DocumentProjection, SketchSolveStatus, SketchStatus},
+    worker::WorkerBackend,
+};
 use onecad_core::{document::body::BodyHealth, ids::BodyId};
 use onecad_protocol::mesh::{MeshLimits, MeshView};
 use onecad_ui::host::DocumentAccess;
@@ -170,13 +174,24 @@ async fn runtime_facts(
         sketches.push(json!({
             "id": dto.id,
             "name": dto.name,
-            "status": dto.status,
+            "status": solve_status(dto.status),
             "dof": dto.dof,
             "entities": sketch.entities().len(),
             "constraints": sketch.constraints().len(),
         }));
     }
     Ok((document, sketches, params))
+}
+
+// The evidence schema uses solver names, while the tree uses compact labels.
+// An absent current solve must remain absent, especially after reopening.
+fn solve_status(status: Option<SketchStatus>) -> Option<SketchSolveStatus> {
+    status.map(|status| match status {
+        SketchStatus::Ok => SketchSolveStatus::FullyConstrained,
+        SketchStatus::Under => SketchSolveStatus::UnderConstrained,
+        SketchStatus::Over => SketchSolveStatus::OverConstrained,
+        SketchStatus::Error => SketchSolveStatus::Conflicting,
+    })
 }
 
 async fn body_facts(
@@ -264,4 +279,22 @@ pub async fn write_semantic(
     });
     write_json(&target, &record)?;
     Ok(json!({ "path": target }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn evidence_status_preserves_failed_and_missing_solves() {
+        assert_eq!(solve_status(None), None);
+        for status in [
+            SketchSolveStatus::FullyConstrained,
+            SketchSolveStatus::UnderConstrained,
+            SketchSolveStatus::OverConstrained,
+            SketchSolveStatus::Conflicting,
+        ] {
+            assert_eq!(solve_status(Some(status.tree_status())), Some(status));
+        }
+    }
 }

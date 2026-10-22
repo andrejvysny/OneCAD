@@ -346,6 +346,21 @@ impl Input {
         self.predictions.get(&contact)?.last().copied()
     }
 
+    #[cfg(feature = "test-hooks")]
+    pub fn normalizer_stats(&self) -> touch::NormalizerStats {
+        self.normalizer.stats()
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub fn live_contacts(&self) -> usize {
+        self.normalizer.live_contacts()
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub fn retained_pose(&self, contact: u64, estimation_index: u64) -> Option<touch::Pose> {
+        self.normalizer.pose(contact, estimation_index)
+    }
+
     /// The newest Pencil position, kept after the Pencil lifts.
     pub fn pencil_position(&self) -> Option<Pos2> {
         self.router

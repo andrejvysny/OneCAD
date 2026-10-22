@@ -18,6 +18,7 @@ pub struct App {
     pub parked: bool,
     /// Every other open document, parked behind the active one.
     pub(crate) tabs: crate::documents::Tabs,
+    pub(crate) extension_refresh: crate::native_extensions::refresh::Service,
     /// Where each document tab was last painted, to anchor its close prompt.
     pub(crate) tab_rects: Vec<(crate::documents::TabId, egui::Rect)>,
     /// The ⌃Tab switcher while Control is held.
@@ -125,6 +126,7 @@ impl App {
         let (settings, mut ui, settings_error) = crate::settings::Store::load(&paths, ctx.clone());
         ui.start_open = !paths.open_on_start;
         let dark = ui.appearance.resolve_dark(ctx.system_theme());
+        let extension_refresh = crate::native_extensions::refresh::Service::new(paths.clone());
         let tabs = crate::documents::Tabs::new(
             crate::service_runtime::ServiceRuntime::start_with(backend)?,
             paths,
@@ -153,6 +155,7 @@ impl App {
             )?,
             parked: false,
             tabs,
+            extension_refresh,
             switcher: None,
             tab_rects: Vec::new(),
             input_routing: Default::default(),
@@ -335,6 +338,7 @@ impl App {
     pub fn poll(&mut self, ctx: &egui::Context) {
         crate::documents::set_current_tab(self.doc.tab);
         self.poll_device_failure();
+        self.poll_extension_refresh();
         self.sync_document_state();
         if let Some(display) = self.doc.bridge.take_display()
             && self.doc.bridge.shared.accept_display(&display)
