@@ -5,7 +5,7 @@ use super::*;
 use onecad_interaction::selection_set::SelectionItem;
 use onecad_scene::{Camera, DVec2, PickKind, PickPolicy};
 
-async fn boxed(root: &std::path::Path) -> Host {
+pub(super) async fn boxed(root: &std::path::Path) -> Host {
     let (mut app, context) = create_app(root).await;
     context.enable_accesskit();
     let mut frame = eframe::Frame::_new_kittest();
@@ -31,7 +31,7 @@ async fn boxed(root: &std::path::Path) -> Host {
 }
 
 /// Screen points over distinct sub-shapes of `kind`, from the central viewport.
-fn targets(host: &Host, kind: PickKind) -> Vec<(egui::Pos2, String)> {
+pub(super) fn targets(host: &Host, kind: PickKind) -> Vec<(egui::Pos2, String)> {
     let display = host.app.doc.display.clone().unwrap();
     let view = host.app.doc.view.unwrap();
     let rect = crate::layout::chrome(host.screen(), &host.app.ui).viewport;
@@ -83,7 +83,7 @@ fn row(host: &mut Host, name: &str) -> egui::Pos2 {
     host.rect(name).center()
 }
 
-fn press(pos: egui::Pos2, pressed: bool, modifiers: egui::Modifiers) -> egui::Event {
+pub(super) fn press(pos: egui::Pos2, pressed: bool, modifiers: egui::Modifiers) -> egui::Event {
     egui::Event::PointerButton {
         pos,
         button: egui::PointerButton::Primary,
@@ -93,7 +93,7 @@ fn press(pos: egui::Pos2, pressed: bool, modifiers: egui::Modifiers) -> egui::Ev
 }
 
 /// A single click whose press carries `modifiers`, kept apart from double-clicks.
-fn click(host: &mut Host, pos: egui::Pos2, modifiers: egui::Modifiers) {
+pub(super) fn click(host: &mut Host, pos: egui::Pos2, modifiers: egui::Modifiers) {
     for _ in 0..24 {
         host.ui(vec![]);
     }
@@ -104,7 +104,7 @@ fn click(host: &mut Host, pos: egui::Pos2, modifiers: egui::Modifiers) {
     host.ui(vec![press(pos, false, modifiers)]);
 }
 
-fn labels(host: &Host) -> Vec<String> {
+pub(super) fn labels(host: &Host) -> Vec<String> {
     host.app
         .doc
         .selection
@@ -319,66 +319,5 @@ async fn tab_switch_keeps_each_documents_selection() {
     host.app.activate_tab(second);
     assert!(host.app.doc.selection.is_empty());
     host.app.activate_tab(first);
-    host.stop().await;
-}
-
-#[tokio::test]
-#[ignore = "requires production worker and Metal; synthetic pointer delivery is not physical acceptance"]
-async fn multi_select_switch_and_pill_fillet_commit_through_the_card() {
-    let root = tempfile::tempdir().unwrap();
-    let mut host = boxed(root.path()).await;
-    let edges = targets(&host, PickKind::Edge);
-    assert!(edges.len() >= 2, "{edges:?}");
-    host.control("Multi-select: each pick adds or removes an item");
-    assert!(host.app.ui.additive_select);
-    click(&mut host, edges[0].0, egui::Modifiers::NONE);
-    click(&mut host, edges[1].0, egui::Modifiers::NONE);
-    let both = [edges[0].1.clone(), edges[1].1.clone()];
-    assert_eq!(
-        labels(&host),
-        both,
-        "plain picks add while the switch is on"
-    );
-    click(&mut host, edges[1].0, egui::Modifiers::NONE);
-    assert_eq!(
-        labels(&host),
-        std::slice::from_ref(&edges[0].1),
-        "a repeat pick removes"
-    );
-    host.control("Multi-select on: each pick adds or removes an item");
-    assert!(!host.app.ui.additive_select);
-    let before = host
-        .app
-        .doc
-        .display
-        .as_ref()
-        .unwrap()
-        .projection
-        .features
-        .len();
-    host.control("Fillet");
-    pump_until(&mut host.app, &host.context, &mut host.frame, |app| {
-        app.doc
-            .interaction
-            .tool
-            .as_ref()
-            .is_some_and(|tool| tool.preview == onecad_interaction::PreviewStatus::Ready)
-    })
-    .await;
-    host.control("Create ↵");
-    pump_until(&mut host.app, &host.context, &mut host.frame, |app| {
-        app.doc.interaction.tool.is_none()
-            && app
-                .doc
-                .display
-                .as_ref()
-                .is_some_and(|display| display.projection.features.len() == before + 1)
-    })
-    .await;
-    let display = host.app.doc.display.clone().unwrap();
-    assert_eq!(
-        display.projection.features.last().unwrap().op_type,
-        "Fillet"
-    );
     host.stop().await;
 }
