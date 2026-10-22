@@ -4,6 +4,7 @@ use egui::{Context, Ui};
 use onecad_widgets::components::shell::{TabSpec, TabStrip, TitleBar};
 
 pub fn title(app: &mut App, ui: &mut Ui) {
+    app.sync_extension_menu();
     let (can_undo, can_redo) = (
         crate::input::history_available(app, false),
         crate::input::history_available(app, true),
@@ -14,7 +15,16 @@ pub fn title(app: &mut App, ui: &mut Ui) {
         .frame(egui::Frame::NONE)
         .resizable(false)
         .show(ui, |ui| {
-            // File actions live in the native menu; documents are tabs.
+            let area = ui.available_rect_before_wrap();
+            let mut title = area;
+            title.max.x -= 90.0;
+            let theme = onecad_widgets::theme::look(ui.ctx()).theme;
+            ui.painter().rect_filled(area, 0.0, theme.titlebar);
+            ui.painter().hline(
+                area.x_range(),
+                area.bottom() - 0.5,
+                egui::Stroke::new(1.0, theme.border),
+            );
             let summaries = app.tab_summaries();
             let specs: Vec<TabSpec> = summaries
                 .iter()
@@ -28,18 +38,27 @@ pub fn title(app: &mut App, ui: &mut Ui) {
                     busy: tab.busy,
                 })
                 .collect();
-            let out = TitleBar::new("")
-                .tabs(Some(TabStrip {
-                    tabs: &specs,
-                    home_active: app.ui.start_open,
-                    can_add: home_allowed(app),
-                }))
-                .can_undo(can_undo)
-                .can_redo(can_redo)
-                .home_blocked((!home_allowed(app)).then_some("Finish the current command first"))
-                .search_blocked(Some("Command search is not available yet"))
-                .show(ui);
+            let out = ui
+                .scope_builder(egui::UiBuilder::new().max_rect(title), |ui| {
+                    TitleBar::new("")
+                        .tabs(Some(TabStrip {
+                            tabs: &specs,
+                            home_active: app.ui.start_open,
+                            can_add: home_allowed(app),
+                        }))
+                        .can_undo(can_undo)
+                        .can_redo(can_redo)
+                        .home_blocked(
+                            (!home_allowed(app)).then_some("Finish the current command first"),
+                        )
+                        .search_blocked(None)
+                        .show(ui)
+                })
+                .inner;
             app.tab_rects = out.tab_rects.clone();
+            if out.search {
+                app.ui.extensions.native.open_palette();
+            }
             if (out.home || out.add) && home_allowed(app) {
                 app.open_home();
             }
@@ -57,6 +76,13 @@ pub fn title(app: &mut App, ui: &mut Ui) {
             if out.redo {
                 crate::input::submit_history(app, Command::Redo);
             }
+            let menu = egui::Rect::from_min_size(
+                egui::pos2(title.right() + 8.0, area.top() + 8.0),
+                egui::vec2(74.0, 28.0),
+            );
+            ui.scope_builder(egui::UiBuilder::new().max_rect(menu), |ui| {
+                crate::native_extensions::menu(app, ui)
+            });
         });
 }
 

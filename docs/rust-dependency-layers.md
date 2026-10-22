@@ -37,3 +37,12 @@ dependency closure. New toolkit families require a corresponding checker rule.
 Tauri, Wry and WebKit package families are forbidden throughout the workspace,
 including the native host and all dependency kinds. Renaming a dependency does
 not change its package identity or bypass this boundary.
+
+Extension contracts are a toolkit-independent foundation (`onecad-extension-api`).
+The Rust guest SDK consumes only those contracts; the Bambu Studio addon consumes
+that SDK. The extension host owns package admission and sandbox execution without
+normal dependencies on document services, UI or rendering. Its app/core development
+dependencies exercise real export integration; the checker rejects those edges
+for normal and build dependencies. Native UI composes the extension host and API
+with application services, so extension side effects retain the existing document
+service authority. Adding future contribution adapters must preserve this boundary.

@@ -124,3 +124,14 @@ paths, hashes and negative controls remain strict gates.
 CPU tests do not prove appearance. GPU submission or completion does not prove
 OS presentation. Cleanup, compilation and synthetic host tests do not establish
 From-New modeling, physical input, IME, display, product or release acceptance.
+
+## Portable command addons
+
+The [portable addon boundary](adr/0018-portable-command-addons.md) introduces a
+versioned Rust SDK and import-free WebAssembly Component Model runtime. Package
+approval binds the entire content fingerprint and declared capabilities. Guests
+return bounded effect plans; native document actors route approved export and
+application-handoff effects through `onecad-app`. No addon receives mutable
+document state, OCCT transport, UI toolkit or GPU handles. The initial external
+contributions are commands; custom features, panels, workspaces and viewport
+layers require further typed contracts.

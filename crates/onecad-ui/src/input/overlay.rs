@@ -24,7 +24,11 @@ pub(super) fn owner(ui: &UiState, entry_open: bool, document: bool, popup: bool)
         Some(Owner::Customize)
     } else if ui.shell_facade.layers_open {
         Some(Owner::Layers)
-    } else if ui.editor_facade.popover_open {
+    } else if ui.editor_facade.popover_open
+        || ui.extensions.native.palette_open
+        || ui.extensions.native.review.is_some()
+        || ui.extensions.native.reset_confirmation
+    {
         Some(Owner::Extensions)
     } else if ui.constraints_open {
         Some(Owner::Constraints)
@@ -80,7 +84,12 @@ pub(super) fn dismiss(
         Owner::SketchEntry => entry.dismiss(),
         Owner::Customize => ui.shell_facade.customize_open = false,
         Owner::Layers => ui.shell_facade.layers_open = false,
-        Owner::Extensions => ui.editor_facade.popover_open = false,
+        Owner::Extensions => {
+            ui.editor_facade.popover_open = false;
+            ui.extensions.native.palette_open = false;
+            ui.extensions.native.review = None;
+            ui.extensions.native.reset_confirmation = false;
+        }
         Owner::Constraints => ui.constraints_open = false,
         Owner::Placement => ui.editor_facade.placing = None,
         Owner::Document | Owner::Popup => unreachable!(),
@@ -101,4 +110,38 @@ pub(super) fn text_menu(action: crate::menu::Action, text: bool, focused: bool) 
                 | crate::menu::Action::Paste
                 | crate::menu::Action::SelectAll
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_extensions_palette_owns_and_consumes_its_escape() {
+        let mut state = UiState::default();
+        state.extensions.native.open_palette();
+        assert_eq!(owner(&state, false, false, false), Some(Owner::Extensions));
+        assert!(navigation_blocked(&state, false, false, false));
+        let mut raw = egui::RawInput {
+            focused: true,
+            ..Default::default()
+        };
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        dismiss(
+            &mut state,
+            &mut Default::default(),
+            Owner::Extensions,
+            &mut raw,
+            false,
+        );
+        assert!(!state.extensions.native.palette_open);
+        assert!(raw.events.is_empty());
+        assert_eq!(owner(&state, false, false, false), None);
+    }
 }

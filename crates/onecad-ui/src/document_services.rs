@@ -18,6 +18,17 @@ pub async fn execute(
     sender: &mpsc::Sender<Message>,
 ) {
     tracing::info!(?request, "Native document request started");
+    if let Request::Extension(request) = request {
+        let result = crate::native_extensions::execute(backend, request)
+            .await
+            .map(Outcome::Extension);
+        let _ = sender.send(Message::Document {
+            result,
+            _permit: permit,
+        });
+        backend.shared.wake();
+        return;
+    }
     let mut result = run(backend, request).await;
     backend.events.finish();
     crate::document_state::refresh(backend).await;
@@ -137,6 +148,7 @@ async fn run_intent(backend: &mut Backend, request: Request) -> Result<Outcome, 
     }
     match request {
         Request::DiscardAndReplace(_) => Err("Nested discard replacement is unsupported".into()),
+        Request::Extension(_) => Err("extension request reached file dispatcher".into()),
         Request::Save { save_as } => save(backend, save_as).await,
         Request::Export(format) => export(backend, format).await,
         Request::New => {

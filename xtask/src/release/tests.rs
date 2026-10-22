@@ -51,13 +51,28 @@ pub(super) fn fixture() -> Fixture {
         "crates/onecad-app/src/lib.rs",
         "crates/onecad-ui/src/lib.rs",
         "crates/onecad-render/src/lib.rs",
+        "crates/onecad-extension-host/src/lib.rs",
         "xtask/src/main.rs",
         "worker/src/main.cpp",
     ] {
         put(source, name, &format!("synthetic {name}\n"));
     }
-    put(source, ".gitignore", "ignored-file\n");
+    put(
+        source,
+        ".gitignore",
+        "ignored-file\n/target/\n/packaging/binaries/\n",
+    );
     put(source, "ignored-file", "excluded\n");
+    put(
+        source,
+        "target/wasm32-unknown-unknown/release/addon.wasm",
+        "generated core module\n",
+    );
+    put(
+        source,
+        "packaging/binaries/addons/example/extension.wasm",
+        "generated component\n",
+    );
     put(
         root,
         "occt-archive",
@@ -152,6 +167,21 @@ fn clean_snapshot_final_worker_and_dependency_evidence() {
         json!({"buildProvenance":"unverified","relink":"unverified","publication":"unverified","transitiveLicenseInventory":"incomplete"})
     );
     assert!(!fixture.payload().join("source/ignored-file").exists());
+    assert!(!fixture.payload().join("source/target").exists());
+    assert!(!fixture.payload().join("source/packaging/binaries").exists());
+    for path in [
+        "crates/onecad-extension-api/wit/extension.wit",
+        "crates/onecad-extension-sdk/src/lib.rs",
+        "crates/onecad-extension-sdk/src/bin/onecad-addon-build.rs",
+        "addons/bambu-studio/manifest.json",
+        "addons/bambu-studio/src/lib.rs",
+        "scripts/build-addons.sh",
+    ] {
+        assert_eq!(
+            fs::read(fixture.payload().join("source").join(path)).unwrap(),
+            fs::read(fixture.path("--source").join(path)).unwrap(),
+        );
+    }
     assert_eq!(
         fs::read(fixture.payload().join("occt/OCCT-V8_0_1.tar.gz")).unwrap(),
         fs::read(fixture.path("--occt-archive")).unwrap()
@@ -209,6 +239,10 @@ fn missing_required_source_and_external_licenses_fail_closed() {
         "worker/third_party/planegcs/LICENSE",
         "Cargo.lock",
         "scripts/package-macos.sh",
+        "scripts/build-addons.sh",
+        "addons/bambu-studio/manifest.json",
+        "crates/onecad-extension-api/wit/extension.wit",
+        "crates/onecad-extension-sdk/src/bin/onecad-addon-build.rs",
     ] {
         let fixture = fixture();
         fs::remove_file(fixture.path("--source").join(missing)).unwrap();

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "dev.onecad.bambu-studio",
+  "name": "Bambu Studio",
+  "version": "0.1.0",
+  "description": "Send selected bodies, or the current document, to Bambu Studio as a 3MF file.",
+  "runtime": "portable_component",
+  "entry": "extension.wasm",
+  "capabilities": ["export_3mf", "launch_application"],
+  "applications": [
+    {
+      "id": "dev.onecad.bambu-studio.application",
+      "name": "Bambu Studio",
+      "macos_bundle_name": "BambuStudio"
+    }
+  ],
+  "contributions": {
+    "commands": [
+      {
+        "id": "dev.onecad.bambu-studio.send",
+        "title": "Send to Bambu Studio",
+        "description": "Export selected bodies, or the document, as 3MF and open it in Bambu Studio.",
+        "requires_document": true,
+        "requires_selection": false,
+        "menu": "export",
+        "locations": ["export", "menu", "palette"]
+      }
+    ]
+  }
+}

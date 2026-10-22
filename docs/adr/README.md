@@ -28,6 +28,7 @@ the native direction. Accepted direction does not imply qualification or deliver
 | [0014](0014-render-module-openpbr.md) | Render is its own module, targets the Visualization placeholder, adopts OpenPBR |
 | [0015](0015-native-rust-ui.md) | Accepted native Rust/egui/wgpu direction; qualification remains separate |
 | [0016](0016-kernel-hosting-macos.md) | Accepted production sidecar direction; optional in-process experiment retained |
-| [0017](0017-external-addons-deferred.md) | External addons deferred; native boundaries do not expose toolkit types |
+| [0017](0017-external-addons-deferred.md) | Deferral superseded by 0018; native boundaries remain toolkit-independent |
+| [0018](0018-portable-command-addons.md) | Restricted portable command addons, Rust SDK and host-owned effects |
 
 Status values: `Proposed`, `Accepted`, `Superseded by NNNN`.

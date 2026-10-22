@@ -46,6 +46,7 @@ mod layout;
 mod library_pages;
 mod menu;
 mod model_pick;
+mod native_extensions;
 mod navigation;
 mod navigation_cube;
 mod operand_services;

@@ -29,6 +29,16 @@ jobs:
         run: |
           cargo xtask check-rust-layers
           cargo test -p xtask checks::tests
+      - name: Build portable addons
+        run: |
+          rustup target add wasm32-unknown-unknown
+          scripts/build-addons.sh
+      - name: Addon contracts and sandbox boundaries
+        run: |
+          cargo test --locked -p onecad-extension-api -p onecad-extension-sdk -p onecad-addon-bambu-studio
+          cargo test --locked -p onecad-extension-host --test sandbox_registry
+          ONECAD_TEST_ADDON_COMPONENT="$PWD/packaging/binaries/addons/dev.onecad.bambu-studio/extension.wasm" \
+            cargo test --locked -p onecad-extension-host --test bambu_pipeline disabled_denied_and_changed_bambu_packages_produce_no_export_or_launch
       - name: Modeling evidence
         run: |
           cargo xtask verify-modeling-coverage
@@ -306,9 +316,13 @@ jobs:
         with:
           workspaces: .
       - name: fmt
-        run: cargo fmt --check -p onecad-mesh-fixture -p onecad-app -p onecad-core -p onecad-protocol -p onecad-scene -p onecad-render -p onecad-interaction -p onecad-ui -p onecad-widgets -p onecad-worker-stub -p onecad-regen -p onecad-kernelbench -p onecad-library -p onecad-library-ingest -p xtask
+        run: cargo fmt --all --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build portable addons for required integration tests
+        run: |
+          rustup target add wasm32-unknown-unknown
+          scripts/build-addons.sh
       - name: Full workspace tests
         env:
           ONECAD_WORKER_PATH: ${{ github.workspace }}/worker/build-8.0.1-rust/onecad-worker
