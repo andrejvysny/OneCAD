@@ -236,12 +236,44 @@ pub(super) fn verify_kernel(kernel: &Value, simulator: &Value) -> Result<()> {
     Ok(())
 }
 
+/// The only provenance kind each artifact may carry: documents come from
+/// `save_artifact`, STEP files from `export_step_artifact`, and `seal_artifact`
+/// attributes nothing but trace records.
+fn provenance_kind(artifact: &str) -> &'static str {
+    let lower = artifact.to_ascii_lowercase();
+    if lower.ends_with(".onecad") {
+        "document"
+    } else if lower.ends_with(".step") {
+        "step"
+    } else {
+        "trace"
+    }
+}
+
 fn recorded_run(value: &Value, run_id: &str, what: &str) -> Result<()> {
     match value["runId"].as_str() {
         Some(id) if id == run_id => Ok(()),
         Some(id) => Err(format!("{what} belongs to stale run {id}").into()),
         None => Err(format!("{what} carries no run id").into()),
     }
+}
+
+/// `<artifact>.provenance.json`: this run, the simulator kernel, the file's
+/// hash and the one kind the command that may write it records.
+fn verify_provenance(dir: &Path, artifact: &str, run_id: &str, simulator: &Value) -> Result<()> {
+    let name = format!("{artifact}.provenance.json");
+    let record: Value = serde_json::from_slice(&fs::read(dir.join(&name))?)?;
+    recorded_run(&record, run_id, &name)?;
+    verify_kernel(&record["kernelIdentity"], simulator)?;
+    let bytes =
+        fs::read(dir.join(artifact)).map_err(|_| format!("{name} names a missing artifact"))?;
+    if record["artifact"] != artifact || record["sha256"] != hash(&bytes) {
+        return Err(format!("{name} does not describe {artifact}").into());
+    }
+    if record["kind"] != provenance_kind(artifact) {
+        return Err(format!("{name}: kind {} for {artifact}", record["kind"]).into());
+    }
+    Ok(())
 }
 
 /// Copied `Documents/acceptance/<run-id>/`: every model and STEP file has a
@@ -267,17 +299,13 @@ pub(super) fn verify_artifacts(
             return Err(format!("artifact is not a regular file: {name}").into());
         }
         if let Some(artifact) = name.strip_suffix(".provenance.json") {
-            let record: Value = serde_json::from_slice(&fs::read(&path)?)?;
-            recorded_run(&record, run_id, name)?;
-            verify_kernel(&record["kernelIdentity"], simulator)?;
-            let bytes = fs::read(dir.join(artifact))
-                .map_err(|_| format!("{name} names a missing artifact"))?;
-            if record["artifact"] != artifact || record["sha256"] != hash(&bytes) {
-                return Err(format!("{name} does not describe {artifact}").into());
-            }
+            verify_provenance(dir, artifact, run_id, simulator)?;
         } else if name.ends_with(".json") {
             let record: Value = serde_json::from_slice(&fs::read(&path)?)?;
             recorded_run(&record, run_id, name)?;
+            if record["kind"] != "semantic" {
+                return Err(format!("{name} is not a write_semantic record").into());
+            }
             verify_kernel(&record["kernelIdentity"], simulator)?;
         } else if !names.contains(&format!("{name}.provenance.json")) {
             return Err(format!("artifact without provenance: {name}").into());

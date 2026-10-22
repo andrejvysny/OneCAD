@@ -20,7 +20,7 @@ use std::{
 const USAGE: &str =
     "usage: cargo xtask ios-simulator-gate [--provenance-only | --verify-only] OUTPUT_DIRECTORY
 
-  OUTPUT_DIRECTORY   evidence directory (created; a stale acceptance.json is removed)
+  OUTPUT_DIRECTORY   evidence directory, new or empty (outside the source tree or ignored)
   --provenance-only  steps 1-2 and a read-only simulator resolution; builds nothing
   --verify-only      re-verify an existing evidence directory; never writes acceptance.json
 
@@ -75,10 +75,15 @@ pub(super) fn run(args: &[String]) -> Result<()> {
     if mode == "--verify-only" {
         return report(&dir, &root, false);
     }
+    // A reused directory would mix another run's verdict, artifacts or run
+    // id into this one's evidence.
     fs::create_dir_all(&dir)?;
-    match fs::remove_file(dir.join("acceptance.json")) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
-        _ => (),
+    if fs::read_dir(&dir)?.next().is_some() {
+        return Err(format!(
+            "{} is not empty; use a new evidence directory",
+            dir.display()
+        )
+        .into());
     }
     let mut gate = Gate {
         dir,
@@ -91,6 +96,10 @@ pub(super) fn run(args: &[String]) -> Result<()> {
         return Ok(());
     }
     full(&mut gate, &run_id)?;
+    // The run takes hours: the verified source must still be the tree it
+    // built and tested, and the inventory/expectations the verifier reads.
+    gate.run("source-final", "git", &["rev-parse", "HEAD"])?;
+    gate.run("source-status-final", "git", &["status", "--porcelain=v1"])?;
     report(&gate.dir, &root, true)
 }
 
@@ -118,7 +127,9 @@ pub(super) fn report(dir: &Path, root: &Path, accept: bool) -> Result<()> {
     let simulator =
         ios_evidence::json(&dir.join("kernel").join(format!("{SIMULATOR_BUNDLE}.json")))?;
     let acceptance = json!({
-        "classification": "iPad Simulator: synthetic replay, native XCTest and XCUITest with the in-process kernel, Mac geometry oracle, unsigned Release compile/link (evidence classes 2-5); no physical device, Pencil hardware, performance or release qualification",
+        // No replay test is inventoried and no trace is required yet, so
+        // synthetic replay (class 2) is not claimed.
+        "classification": "iPad Simulator: native XCTest and XCUITest with the in-process kernel, Mac geometry oracle, unsigned Release compile/link (evidence classes 3-5); no synthetic replay, physical device, Pencil hardware, performance or release qualification",
         "run": run,
         "simulatorKernel": simulator,
         "inventory": ios_evidence::json(&root.join(super::ios_verify::INVENTORY))?,

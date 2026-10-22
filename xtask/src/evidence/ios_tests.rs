@@ -252,7 +252,19 @@ fn ios_artifacts_reject_stale_runs_missing_files_and_fake_kernels() {
     write(&area.path().join("trace.jsonl.provenance.json"), &sealed);
     check(area.path()).unwrap();
     type Mutation = fn(&Path);
-    let mutations: [(&str, Mutation); 8] = [
+    let mutations: [(&str, Mutation); 11] = [
+        ("document sealed as a trace", |d| {
+            edit(d, "plate.onecad.provenance.json", "kind", json!("trace"))
+        }),
+        ("trace sealed as a document", |d| {
+            fs::write(d.join("trace.jsonl"), b"{}").unwrap();
+            let forged = json!({ "runId": RUN, "kind": "document", "artifact": "trace.jsonl",
+                "sha256": hash(b"{}"), "kernelIdentity": kernel() });
+            write(&d.join("trace.jsonl.provenance.json"), &forged);
+        }),
+        ("not a semantic record", |d| {
+            edit(d, "plate.json", "kind", json!("trace"))
+        }),
         ("stale provenance", |d| {
             edit(
                 d,
@@ -376,4 +388,19 @@ fn ios_simulator_selection_prefers_named_gate_devices_and_newest_runtime() {
         "dt.M5"
     );
     assert!(ios_sim::device_type(&types, "iPhone").is_err());
+}
+
+#[test]
+fn ios_collect_rejects_directories_and_symlinks_in_the_run_directory() {
+    let area = tempfile::tempdir().unwrap();
+    let (source, target) = (area.path().join("run"), area.path().join("artifacts"));
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("plate.onecad"), b"zip").unwrap();
+    super::ios_xcode::copy_run_directory(&source, &target).unwrap();
+    assert!(target.join("plate.onecad").is_file());
+    fs::create_dir(source.join("nested")).unwrap();
+    assert!(super::ios_xcode::copy_run_directory(&source, &target).is_err());
+    fs::remove_dir(source.join("nested")).unwrap();
+    std::os::unix::fs::symlink(source.join("plate.onecad"), source.join("link.onecad")).unwrap();
+    assert!(super::ios_xcode::copy_run_directory(&source, &target).is_err());
 }

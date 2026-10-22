@@ -32,7 +32,7 @@ fn expectations() -> Value {
 
 fn plate(volume: f64, features: &[&str]) -> Value {
     json!({ "occtFingerprint": ios_geometry::MAC_OCCT_FINGERPRINT, "documentId": "doc",
-        "regenOutcome": "published",
+        "regenOutcome": "published", "geometrySource": "live",
         "features": features.iter()
             .map(|op| json!({ "id": format!("{op}-id"), "opType": op, "status": "ok" }))
             .collect::<Vec<_>>(),
@@ -82,6 +82,11 @@ fn simulator_report(all: &Value, artifacts: &Path) -> Value {
             &provenance,
         );
         let case = ios_geometry::case(all, &name).unwrap();
+        let mut summary = measured(case);
+        summary["document"] = json!({ "geometrySource": "live" });
+        let semantic = json!({ "runId": RUN, "kind": "semantic", "name": name,
+            "kernelIdentity": kernel(), "summary": summary });
+        write(&artifacts.join(format!("{name}.json")), &semantic);
         let round_trip =
             (!case["roundTripOf"].is_null()).then(|| json!({ "fixtureSha256": hash(MAC_BYTES) }));
         checked.push(json!({ "name": name, "sha256": hash(bytes.as_bytes()),
@@ -110,13 +115,15 @@ fn ios_geometry_outside_tolerance_is_rejected() {
         }
         *target = value;
     };
-    let mutations: [(&Value, &[&str], Value); 8] = [
+    let mutations: [(&Value, &[&str], Value); 10] = [
         (
             mac,
             &["bodies", "0", "volume"],
             json!(REFERENCE * (1.0 + 2e-6)),
         ),
-        (mac, &["bodies", "0", "max", "1"], json!(60.0 + 2e-7)),
+        (mac, &["bodies", "0", "max", "1"], json!(60.0 + 1e-5)),
+        (mac, &["regenOutcome"], json!("noop")),
+        (mac, &["geometrySource"], json!("cached")),
         (mac, &["bodies", "0", "healthy"], json!(false)),
         (mac, &["features", "1", "opType"], json!("Revolve")),
         (mac, &["sketches", "0", "status"], json!("OverConstrained")),
@@ -135,6 +142,17 @@ fn ios_geometry_outside_tolerance_is_rejected() {
         ios_geometry::check(fillet, &off, &all).is_err(),
         "1e-4 decrease"
     );
+    // A plate off f32-exact coordinates carries MESH1's f32 rounding
+    // (2.86e-6 on 13.7..73.7), which is allowed; 1e-5 more is not.
+    let plate = ios_geometry::case(&all, "plate").unwrap();
+    let stored = |value: f64| f64::from(value as f32);
+    let mut anchored = measured(plate);
+    anchored["bodies"][0]["min"] = json!([stored(13.7), stored(-12.345), 0.0]);
+    anchored["bodies"][0]["max"] = json!([stored(73.7), stored(27.655), 4.0]);
+    ios_geometry::check(plate, &anchored, &all).unwrap();
+    anchored["bodies"][0]["max"][0] = json!(stored(73.7) + 1e-5);
+    assert!(ios_geometry::check(plate, &anchored, &all).is_err());
+    assert_eq!(ios_geometry::f32_storage(60.0), 1.9073486328125e-6);
 }
 
 #[test]
@@ -207,6 +225,8 @@ fn xcresult(inventory: &ios_verify::Inventory) -> (Value, Value) {
 fn evidence(dir: &Path) {
     fs::write(dir.join("source.log"), format!("{SOURCE}\n")).unwrap();
     fs::write(dir.join("source-status.log"), "").unwrap();
+    fs::write(dir.join("source-final.log"), format!("{SOURCE}\n")).unwrap();
+    fs::write(dir.join("source-status-final.log"), "").unwrap();
     write(
         &dir.join("run.json"),
         &json!({ "runId": RUN, "source": SOURCE, "udid": UDID,
@@ -264,9 +284,24 @@ fn ios_synthetic_evidence_passes_and_acceptance_is_written_last() {
     let acceptance = ios_evidence::json(&area.path().join("acceptance.json")).unwrap();
     assert_eq!(acceptance["run"]["runId"], RUN);
     type Mutation = fn(&Path);
-    let mutations: [(&str, Mutation); 6] = [
+    let mutations: [(&str, Mutation); 10] = [
         ("dirty tree", |d| {
             fs::write(d.join("source-status.log"), " M x\n").unwrap()
+        }),
+        ("edited during the run", |d| {
+            fs::write(d.join("source-status-final.log"), " M x\n").unwrap()
+        }),
+        ("committed during the run", |d| {
+            fs::write(d.join("source-final.log"), "0".repeat(40)).unwrap()
+        }),
+        ("in-process volume off", |d| {
+            let file = d.join("artifacts/plate.json");
+            let mut record = ios_evidence::json(&file).unwrap();
+            record["summary"]["bodies"][0]["volume"] = json!(REFERENCE * 1.01);
+            write(&file, &record);
+        }),
+        ("no in-process summary", |d| {
+            fs::remove_file(d.join("artifacts/plate-chamfer.json")).unwrap()
         }),
         ("no summary", |d| {
             fs::remove_file(d.join("xcresult-summary.json")).unwrap()
@@ -304,4 +339,17 @@ fn ios_synthetic_evidence_passes_and_acceptance_is_written_last() {
         let verdict = ios_evidence::json(&area.path().join("verification.json")).unwrap();
         assert_eq!(verdict["passed"], false, "{label}");
     }
+}
+
+#[test]
+fn ios_gate_refuses_a_used_evidence_directory() {
+    let area = tempfile::tempdir().unwrap();
+    let verdict = json!({ "passed": true, "failures": [] });
+    write(&area.path().join("verification.json"), &verdict);
+    let dir = area.path().to_string_lossy().into_owned();
+    for args in [vec![dir.clone()], vec!["--provenance-only".into(), dir]] {
+        let error = ios_gate::run(&args).unwrap_err().to_string();
+        assert!(error.contains("not empty"), "{error}");
+    }
+    assert!(area.path().join("verification.json").is_file());
 }

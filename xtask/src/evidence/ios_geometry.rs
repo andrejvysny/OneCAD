@@ -48,12 +48,24 @@ pub(super) fn required_simulator(expectations: &Value) -> Vec<String> {
 
 /// One measurement (`{features, bodies, sketches, regenOutcome}`) against one case.
 pub(super) fn check(case: &Value, measured: &Value, expectations: &Value) -> Result<()> {
-    if !matches!(
-        measured["regenOutcome"].as_str(),
-        Some("published" | "noop")
-    ) {
-        return Err(format!("regeneration ended {}", measured["regenOutcome"]).into());
+    // The Mac host's own regeneration, never cached meshes or an empty plan.
+    if measured["regenOutcome"] != "published" || measured["geometrySource"] != "live" {
+        return Err(format!(
+            "regeneration ended {} with {} geometry",
+            measured["regenOutcome"], measured["geometrySource"]
+        )
+        .into());
     }
+    if measured["occtFingerprint"] != MAC_OCCT_FINGERPRINT {
+        return Err("not measured by the Mac sidecar's OCCT".into());
+    }
+    sketches(case, measured)?;
+    model(case, measured, expectations)
+}
+
+/// History, the one body, its volume and bounds: the rules a Mac oracle
+/// measurement and the simulator kernel's own summary share.
+fn model(case: &Value, measured: &Value, expectations: &Value) -> Result<()> {
     let features = measured["features"].as_array().ok_or("features")?;
     let ops: Vec<&Value> = features.iter().map(|f| &f["opType"]).collect();
     let expected: Vec<&Value> = case["features"]
@@ -66,10 +78,6 @@ pub(super) fn check(case: &Value, measured: &Value, expectations: &Value) -> Res
             format!("feature history {ops:?} differs from {expected:?} or is not ok").into(),
         );
     }
-    if measured["occtFingerprint"] != MAC_OCCT_FINGERPRINT {
-        return Err("not measured by the Mac sidecar's OCCT".into());
-    }
-    sketches(case, measured)?;
     let [body] = measured["bodies"].as_array().ok_or("bodies")?.as_slice() else {
         return Err("expected exactly one body".into());
     };
@@ -78,6 +86,25 @@ pub(super) fn check(case: &Value, measured: &Value, expectations: &Value) -> Res
     }
     volume(case, body, expectations)?;
     bounds(case, body, &expectations["tolerance"])
+}
+
+/// The simulator kernel's own measurement of each required model: the
+/// `write_semantic` record of the same name (`summary`, in-process mass
+/// properties and tessellation) meets the case like the Mac regeneration.
+pub(super) fn verify_in_process(artifacts: &Path, expectations: &Value) -> Result<()> {
+    for name in required_simulator(expectations) {
+        let file = artifacts.join(format!("{name}.json"));
+        let record: Value = serde_json::from_slice(
+            &fs::read(&file).map_err(|_| format!("{name}.json (in-process summary) missing"))?,
+        )?;
+        let case = case(expectations, &name).ok_or("case")?;
+        if record["summary"]["document"]["geometrySource"] != "live" {
+            return Err(format!("{name} in-process: geometry is not a live regeneration").into());
+        }
+        model(case, &record["summary"], expectations)
+            .map_err(|e| format!("{name} in-process: {e}"))?;
+    }
+    Ok(())
 }
 
 /// Constraint integrity: every sketch solves without over-constraint or
@@ -131,33 +158,52 @@ fn volume(case: &Value, body: &Value, expectations: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Half an f32 ulp at `value`: what MESH1's f32 storage of a coordinate may
+/// add (the oracle's `expect::f32_storage`).
+pub(super) fn f32_storage(value: f64) -> f64 {
+    let stored = (value.abs() as f32).min(f32::MAX);
+    f64::from(f32::from_bits(stored.to_bits() + 1) - stored) / 2.0
+}
+
 fn bounds(case: &Value, body: &Value, tolerance: &Value) -> Result<()> {
     let (absolute, relative) = (
         number(&tolerance["boundsAbsolute"])?,
         number(&tolerance["boundsRelative"])?,
     );
-    let near = |a: f64, e: f64| (a - e).abs() <= absolute + relative * e.abs();
+    let near =
+        |a: f64, e: f64, storage: f64| (a - e).abs() <= absolute + relative * e.abs() + storage;
     let (min, max) = (triple(&body["min"])?, triple(&body["max"])?);
     if !case["bounds"].is_null() {
         let (emin, emax) = (
             triple(&case["bounds"]["min"])?,
             triple(&case["bounds"]["max"])?,
         );
-        if (0..3).any(|axis| !near(min[axis], emin[axis]) || !near(max[axis], emax[axis])) {
+        let off = |axis: usize| {
+            !near(min[axis], emin[axis], f32_storage(emin[axis]))
+                || !near(max[axis], emax[axis], f32_storage(emax[axis]))
+        };
+        if (0..3).any(off) {
             return Err(format!("bounds {min:?}..{max:?} outside tolerance").into());
         }
     }
     if !case["extents"].is_null() {
-        let mut actual: [f64; 3] = std::array::from_fn(|axis| max[axis] - min[axis]);
+        // (extent, f32 storage of both ends)
+        let mut actual: [(f64, f64); 3] = std::array::from_fn(|axis| {
+            (
+                max[axis] - min[axis],
+                f32_storage(min[axis]) + f32_storage(max[axis]),
+            )
+        });
         let mut expected = triple(&case["extents"])?;
         if case["extentsXYUnordered"] == true {
-            for extents in [&mut actual, &mut expected] {
-                if extents[0] > extents[1] {
-                    extents.swap(0, 1);
-                }
+            if actual[0].0 > actual[1].0 {
+                actual.swap(0, 1);
+            }
+            if expected[0] > expected[1] {
+                expected.swap(0, 1);
             }
         }
-        if (0..3).any(|axis| !near(actual[axis], expected[axis])) {
+        if (0..3).any(|axis| !near(actual[axis].0, expected[axis], actual[axis].1)) {
             return Err(format!("extents {actual:?} outside tolerance of {expected:?}").into());
         }
     }

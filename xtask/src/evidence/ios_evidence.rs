@@ -103,7 +103,13 @@ fn provenance(dir: &Path) -> Result<()> {
     if run["source"] != source {
         return Err("run.json names another source revision".into());
     }
-    ios_verify::verify_clean_tree(&text(&dir.join("source-status.log"))?)
+    ios_verify::verify_clean_tree(&text(&dir.join("source-status.log"))?)?;
+    // Re-read before the verdict: nothing was committed or edited mid-run.
+    if text(&dir.join("source-final.log"))?.trim() != source {
+        return Err("HEAD moved during the run".into());
+    }
+    ios_verify::verify_clean_tree(&text(&dir.join("source-status-final.log"))?)
+        .map_err(|e| format!("at the end of the run: {e}").into())
 }
 
 fn bundles(dir: &Path) -> Result<()> {
@@ -128,7 +134,8 @@ fn tests(dir: &Path, root: &Path, run: &Value) -> Result<()> {
 fn artifacts(dir: &Path, root: &Path, run_id: &str, simulator: &Value) -> Result<()> {
     let expectations = json(&root.join(EXPECTATIONS))?;
     let required = ios_geometry::required_simulator(&expectations);
-    ios_verify::verify_artifacts(&dir.join("artifacts"), run_id, simulator, &required).map(drop)
+    ios_verify::verify_artifacts(&dir.join("artifacts"), run_id, simulator, &required)?;
+    ios_geometry::verify_in_process(&dir.join("artifacts"), &expectations)
 }
 
 fn oracle(dir: &Path, root: &Path, run: &Value) -> Result<()> {

@@ -26,24 +26,21 @@ pub(super) fn json_output(output: &Output) -> Result<Value> {
     Ok(serde_json::from_str(&output.stdout)?)
 }
 
+const TEST_PLAN: [&str; 6] = [
+    "-project",
+    PROJECT,
+    "-scheme",
+    "OneCADiPad",
+    "-testPlan",
+    "iPadAcceptance",
+];
+
 /// Step 5: build for testing, then test without building on the same products.
 pub(super) fn xctest(gate: &mut Gate, run_id: &str, udid: &str) -> Result<()> {
     let destination = format!("platform=iOS Simulator,id={udid}");
     let derived = gate.dir.join("DerivedData").to_string_lossy().into_owned();
-    let result = gate.dir.join("iPadAcceptance.xcresult");
-    if result.exists() {
-        fs::remove_dir_all(&result)?;
-    }
-    let common = [
-        "-project",
-        PROJECT,
-        "-scheme",
-        "OneCADiPad",
-        "-testPlan",
-        "iPadAcceptance",
-    ];
     let mut build: Vec<&str> = vec!["build-for-testing"];
-    build.extend(common);
+    build.extend(TEST_PLAN);
     build.extend([
         "-configuration",
         "Acceptance",
@@ -59,6 +56,20 @@ pub(super) fn xctest(gate: &mut Gate, run_id: &str, udid: &str) -> Result<()> {
         true,
         BUILD,
     )?;
+    test_without_building(gate, run_id, udid, &destination, &derived)
+}
+
+fn test_without_building(
+    gate: &mut Gate,
+    run_id: &str,
+    udid: &str,
+    destination: &str,
+    derived: &str,
+) -> Result<()> {
+    let result = gate.dir.join("iPadAcceptance.xcresult");
+    if result.exists() {
+        fs::remove_dir_all(&result)?;
+    }
     // A reused simulator keeps the app's data container (poison strikes,
     // recovery, recents, earlier runs' artifacts): every run starts from a
     // fresh install. Not installed yet is fine.
@@ -76,12 +87,12 @@ pub(super) fn xctest(gate: &mut Gate, run_id: &str, udid: &str) -> Result<()> {
         .insert("TEST_RUNNER_ONECAD_MAC_FIXTURE".into(), fixture);
     let result = result.to_string_lossy().into_owned();
     let mut test: Vec<&str> = vec!["test-without-building"];
-    test.extend(common);
+    test.extend(TEST_PLAN);
     test.extend([
         "-destination",
-        &destination,
+        destination,
         "-derivedDataPath",
-        &derived,
+        derived,
         "-resultBundlePath",
         &result,
     ]);
@@ -141,18 +152,30 @@ pub(super) fn collect(gate: &Gate, run_id: &str, udid: &str) -> Result<()> {
     let source = Path::new(container.stdout.trim())
         .join("Documents/acceptance")
         .join(run_id);
-    let target = gate.dir.join("artifacts");
+    copy_run_directory(&source, &gate.dir.join("artifacts"))
+}
+
+/// Copies the run's acceptance directory. The verifier sees only what is
+/// copied: anything but a regular file (a directory, a symlink) is rejected
+/// here instead.
+pub(super) fn copy_run_directory(source: &Path, target: &Path) -> Result<()> {
     if target.exists() {
-        fs::remove_dir_all(&target)?;
+        fs::remove_dir_all(target)?;
     }
-    fs::create_dir_all(&target)?;
-    if source.is_dir() {
-        for entry in fs::read_dir(&source)? {
-            let entry = entry?;
-            if entry.file_type()?.is_file() {
-                fs::copy(entry.path(), target.join(entry.file_name()))?;
-            }
+    fs::create_dir_all(target)?;
+    if !source.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            return Err(format!(
+                "acceptance artifact is not a regular file: {}",
+                entry.file_name().to_string_lossy()
+            )
+            .into());
         }
+        fs::copy(entry.path(), target.join(entry.file_name()))?;
     }
     Ok(())
 }
