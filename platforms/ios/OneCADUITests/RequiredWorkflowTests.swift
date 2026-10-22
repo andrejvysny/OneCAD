@@ -6,12 +6,16 @@ import XCTest
 /// No test hooks, no synthesized HID or touch events.
 ///
 /// Canvas coordinates assume the iPad Pro 13-inch simulator in portrait with
-/// the default camera of a new document (docs/ios/TESTING.md).
+/// the default camera of a new document (docs/ios/TESTING.md); the test fails
+/// fast on any other window size.
 @MainActor
 final class RequiredWorkflowTests: XCTestCase {
     /// Sketch-plane millimetres to screen points under the default sketch
     /// camera, measured on iPad Pro 13-inch (M5) portrait: 60 mm = 77 pt.
     static let pointsPerMillimetre: CGFloat = 1.285
+    /// Window of that measurement; the scale, the XY quad offset and the
+    /// software keyboard's tab key all depend on it.
+    static let measuredWindow = CGSize(width: 1032, height: 1376)
 
     private var app: XCUIApplication!
     private var ui: OneCADScreen!
@@ -38,6 +42,7 @@ final class RequiredWorkflowTests: XCTestCase {
         ui = OneCADScreen(app: app, test: self)
         keyboard = SoftwareKeyboard(app: app, test: self)
         let name = "Plate-" + documentSuffix()
+        requireMeasuredDevice()
 
         step("01-new-document") {
             ui.waitStartPage()
@@ -109,24 +114,34 @@ final class RequiredWorkflowTests: XCTestCase {
             ui.tap(UI.finish)
             ui.wait(UI.sketch)
             ui.waitText("2 closed region(s) returned")
+            // The circle's disk (the outer region excludes it); its sketch
+            // reports the face it was placed on.
+            sketchPoint(30, 20).tap()
+            ui.wait(UI.supportFace, .exists)
         }
         step("07-cut-through") {
-            // The circle's disk: the outer region excludes it.
-            sketchPoint(30, 20).tap()
+            // The disk selected in step 06 is the profile.
             ui.tap(UI.extrude)
             let operation = ui.control(stableID: "onecad.param.operation", value: "New Body")
             waitUntil(operation, .hittable, "extrude Operation selector")
             operation.tap()
             ui.tap(UI.cutMode)
+            waitUntil(ui.control(stableID: "onecad.param.operation", value: "Cut"), .value("Cut"),
+                      "extrude Operation shows Cut")
             ui.tap(UI.bodyRow)
             setExtrudeDistance("5")
             ui.tap(UI.flip)
             ui.waitText("Reverse")
             ui.wait(UI.create, .enabled).tap()
             ui.expectHistory(["Sketch", "Extrude", "Sketch", "Extrude"])
+            XCTAssertFalse(ui.text("Body 2").exists, "Cut adds no body")
             ui.tap(UI.propertiesTab)
             ui.tap(UI.bodyRow)
             ui.waitText("Health: Healthy")
+            // The hole's rim is an edge of Body 1 on the top face: a Cut (an
+            // Add would merge into the top face, a new body is ruled out
+            // above). Through-ness is checked zoomed in, in step 09.
+            expectPicks([(sketchPoint(10, 10), .face), (sketchPoint(30, 20), .edge)], "hole rim at (30, 20)")
         }
         step("08-edit-width-70") {
             editPlateWidth(from: "60", to: "70")
@@ -134,16 +149,24 @@ final class RequiredWorkflowTests: XCTestCase {
             ui.tap(UI.propertiesTab)
             ui.tap(UI.bodyRow)
             ui.waitText("Health: Healthy")
+            // The regenerated plate reaches x = 70: x = 62 is top face, more
+            // than the 8 pt edge window (6.2 mm here) from its right edge.
+            expectPicks([(sketchPoint(-20, 20), .nothing), (sketchPoint(62, 20), .face)], "widened plate at (62, 20)")
+            expectPicks([(sketchPoint(10, 10), .face), (sketchPoint(30, 20), .edge)], "hole rim kept at (30, 20)")
         }
         step("09-undo-redo") {
             // Undo restores the 60 mm width, a second undo removes the cut.
             ui.tap(UI.undo)
             expectPlateWidth("60")
+            // At 60 mm the right edge is 2 mm from x = 62, inside the edge window.
+            expectPicks([(sketchPoint(10, 10), .face), (sketchPoint(62, 20), .edge)], "plate back to 60 mm at (62, 20)")
             ui.tap(UI.undo)
             ui.expectHistory(["Sketch", "Extrude", "Sketch"])
             ui.tap(UI.redo)
             ui.expectHistory(["Sketch", "Extrude", "Sketch", "Extrude"])
             expectPlateWidth("60")
+            // Last use of the default camera: Fit all changes it.
+            expectThroughHole()
         }
         step("10-save") {
             ui.tap(UI.fileMenu)
@@ -165,10 +188,14 @@ final class RequiredWorkflowTests: XCTestCase {
             ui.tap(UIRef(label: name))
             ui.wait(UI.viewport, .exists)
             ui.expectHistory(["Sketch", "Extrude", "Sketch", "Extrude"])
+            expectFeatureValue(row: 1, "Extrude · 4.0 mm")
+            expectFeatureValue(row: 3, "Extrude · 5.0 mm")
             ui.waitText("Body 1")
+            XCTAssertFalse(ui.text("Body 2").exists, "reopened cut adds no body")
             ui.tap(UI.propertiesTab)
             ui.tap(UI.bodyRow)
             ui.waitText("Health: Healthy")
+            expectThroughHole()
             expectPlateWidth("60")
         }
     }
@@ -183,9 +210,25 @@ final class RequiredWorkflowTests: XCTestCase {
         }
     }
 
+    /// The gate's full run id (`TEST_RUNNER_ONECAD_RUN_ID`), so the saved
+    /// document carries it; otherwise a short unique suffix.
     private func documentSuffix() -> String {
-        let run = ProcessInfo.processInfo.environment["ONECAD_RUN_ID"] ?? UUID().uuidString
-        return String(run.filter { $0.isLetter || $0.isNumber }.suffix(8))
+        let keep: (Character) -> Bool = { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }
+        if let run = ProcessInfo.processInfo.environment["ONECAD_RUN_ID"], !run.isEmpty {
+            return String(run.filter(keep))
+        }
+        return String(UUID().uuidString.filter(keep).suffix(8))
+    }
+
+    /// Canvas millimetres, the XY quad offset and the keyboard's tab key were
+    /// measured on one window size; elsewhere every coordinate tap would miss.
+    private func requireMeasuredDevice() {
+        let size = app.windows.firstMatch.frame.size
+        if size != Self.measuredWindow {
+            XCTFail("RequiredWorkflowTests needs the iPad Pro 13-inch simulator in portrait "
+                + "(window \(Self.measuredWindow)); this window is \(size). Re-measure "
+                + "pointsPerMillimetre and the XY quad offset first (docs/ios/TESTING.md).")
+        }
     }
 
     /// Screen point of sketch coordinates (mm) under the default camera.
@@ -214,6 +257,66 @@ final class RequiredWorkflowTests: XCTestCase {
         keyboard.waitShown()
         keyboard.replace(field.value as? String ?? "", with: text)
         waitUntil(field, .value(text), "extrude distance shows \(text)")
+    }
+
+    /// What a tap in the model view selects, read from the Properties title.
+    enum Pick: String {
+        case face = "Face"
+        case edge = "Edge"
+        case nothing = "Nothing selected"
+    }
+
+    /// Taps `taps` in order; each must select its pick (a face or edge of
+    /// Body 1, or nothing). Consecutive picks differ, so every title change
+    /// shows that tap was handled. A plain tap replaces the selection.
+    /// Regeneration and camera animation have no completion signal in the
+    /// UI, so a tap may meet the previous geometry or view: the sequence is
+    /// retried from `prepare` and its first tap, each wait bounded, at most
+    /// `attempts` times.
+    private func expectPicks(_ taps: [(XCUICoordinate, Pick)], _ what: String, attempts: Int = 4,
+                             prepare: () -> Void = {}, file: StaticString = #filePath, line: UInt = #line) {
+        ui.tap(UI.propertiesTab, file: file, line: line)
+        for attempt in 1...attempts {
+            prepare()
+            let met = taps.allSatisfy { point, pick in
+                point.tap()
+                guard ui.text(pick.rawValue).waitForExistence(timeout: 5) else { return false }
+                return pick == .nothing || ui.text("on Body 1").exists
+            }
+            if met { return }
+            if attempt == attempts {
+                XCTFail("\(what): expected \(taps.map(\.1.rawValue))", file: file, line: line)
+            }
+        }
+    }
+
+    /// Top view, then Fit all, frames the plate's bounding box at the
+    /// viewport centre, which is the hole's centre (30, 20) of the 60 x 40
+    /// plate, with the hole about 90 pt across: far wider than the 8 pt edge
+    /// pick window. Nothing under the centre, looking straight down, means no
+    /// floor: the hole goes through. A reopened document keeps its own
+    /// (isometric) camera, hence the explicit top view.
+    private func expectThroughHole(file: StaticString = #filePath, line: UInt = #line) {
+        let viewport = ui.find(UI.viewport).frame
+        let centre = CGPoint(x: viewport.midX, y: viewport.midY)
+        expectPicks([(ui.point(centre.x - 100, centre.y), .face), (ui.point(centre.x, centre.y), .nothing)],
+                    "through hole at the fitted plate's centre",
+                    prepare: {
+                        ui.tap(UI.topView, file: file, line: line)
+                        ui.tap(UI.fitAll, file: file, line: line)
+                    }, file: file, line: line)
+    }
+
+    /// Selects History row `row` (0-based) and reads its "<type> · <value>" line.
+    private func expectFeatureValue(row: Int, _ text: String, file: StaticString = #filePath, line: UInt = #line) {
+        ui.tap(UI.historyTab, file: file, line: line)
+        let rows = ui.historyRowElements()
+        guard rows.indices.contains(row) else {
+            XCTFail("history row \(row) missing: \(rows.map(\.label))", file: file, line: line)
+            return
+        }
+        rows[row].tap()
+        ui.waitText(text, file: file, line: line)
     }
 
     /// Opens the plate sketch from its History row (feature 1).

@@ -55,7 +55,7 @@ follows its role (button, static text or other).
 | `onecad.keyInputProxy` | Native | Hidden first responder for the keyboard; not an accessibility element | — |
 | `onecad.viewport` | Snapshot (egui viewport, role CANVAS) | 3D viewport region | planned |
 | `onecad.menu.file` | Snapshot (egui "File" menu button) | In-app File menu | `LaunchTests`, `OrientationTests`, `RequiredWorkflowTests` |
-| `onecad.menu.file.new`, `.open`, `.save`, `.saveAs`, `.saveAll`, `.export`, `.importStep` | Snapshot (egui File menu items) | File commands (iPad has no native menu bar for them) | `.save`: `RequiredWorkflowTests` |
+| `onecad.menu.file.new`, `.open`, `.save`, `.saveAs`, `.saveAll`, `.export`, `.importStep` | Snapshot (egui File menu items) | File commands (iPad has no native menu bar for them) | planned (`RequiredWorkflowTests` tries `.save`, then the label "Save") |
 | `onecad.menu.edit.undo`, `onecad.menu.edit.redo` | Snapshot (egui Edit items) | Undo/redo | planned |
 | `onecad.tab.<n>`, `onecad.tab.new` | Snapshot (egui document tabs, role TAB) | Document tabs, 0-based | planned multi-document tests |
 | `onecad.tool.<tool-id>` | Snapshot (egui tool buttons; `<tool-id>` = tool registry id) | Modeling and sketch tools | planned tool tests |
@@ -84,29 +84,49 @@ Each step keeps a screenshot attachment named after it.
 | `03-rectangle-60x40` | Rectangle, tap the origin, Numeric input, `60` Tab `40` Return | `Distance (mm): 60` and `40`, `Fixed`, `Entities: 8`, `Constraints: 7`, fully constrained |
 | `04-finish-sketch` | Finish | `1 closed region(s) returned` |
 | `05-extrude-4mm` | tap the profile, Extrude, distance `4`, Create | `Solve: 0 degrees of freedom`, `Body 1`, history `Sketch, Extrude` |
-| `06-hole-sketch-on-top-face` | Sketch on the top face; Point numeric X `30` Y `20`; Circle snapped to the point, Ø `6` | H/V distances 30/20, `Coincident`, `Diameter (mm): 6`, fully constrained; `2 closed region(s) returned` |
-| `07-cut-through` | tap the disk, Extrude, Operation Cut, target Body 1, distance `5`, Flip, Create | `Reverse`; history `Sketch, Extrude, Sketch, Extrude`; `Health: Healthy` |
-| `08-edit-width-70` | History row 1 (Sketch), Edit feature, Edit beside `Distance (mm): 60`, `70` Return, Finish | `Distance (mm): 70`, same four history rows, `Health: Healthy` |
-| `09-undo-redo` | Undo, Undo, Redo | width back to 60 (read in the sketch, then Discard); three rows after the second Undo, four after Redo |
+| `06-hole-sketch-on-top-face` | Sketch on the top face; Point numeric X `30` Y `20`; Circle snapped to the point, Ø `6`; Finish; tap the disk | H/V distances 30/20, `Coincident`, `Diameter (mm): 6`, fully constrained; `2 closed region(s) returned`; `Support face: …` |
+| `07-cut-through` | Extrude, Operation Cut, target Body 1, distance `5`, Flip, Create; tap (10, 10), then the hole centre | Operation shows `Cut`, `Reverse`; history `Sketch, Extrude, Sketch, Extrude`; no `Body 2`; `Health: Healthy`; face at (10, 10), hole rim edge `on Body 1` at (30, 20) |
+| `08-edit-width-70` | History row 1 (Sketch), Edit feature, Edit beside `Distance (mm): 60`, `70` Return, Finish; tap (-20, 20), (62, 20), (10, 10), (30, 20) | `Distance (mm): 70`, same four history rows, `Health: Healthy`; regenerated plate: nothing at (-20, 20), face at (62, 20), hole rim still at (30, 20) |
+| `09-undo-redo` | Undo, Undo, Redo, TOP view, Fit all, tap left of and at the viewport centre | width back to 60 (read in the sketch, then Discard) and the right edge, not face, at (62, 20); three rows after the second Undo, four after Redo; through hole: face 100 pt left of the fitted centre, nothing at it |
 | `10-save` | File, Save, name `Plate-<run>` in `onecad.save.name`, Save | prompt dismissed, tab titled with the name |
-| `11-relaunch-and-reopen` | `terminate`, `launch`, open the document from Recent | four history rows, `Body 1` healthy, width 60 |
+| `11-relaunch-and-reopen` | `terminate`, `launch`, open the document from Recent, select History rows 2 and 4, TOP view, Fit all | four history rows, `Extrude · 4.0 mm` and `Extrude · 5.0 mm`, `Body 1` healthy and no `Body 2`, through hole as in step 09, width 60 |
 
 Preconditions and conventions:
 
-- iPad Pro 13-inch simulator in portrait (the test sets portrait). Canvas
-  taps are sketch millimetres mapped from the viewport centre (the world
-  origin of a new document) with `pointsPerMillimetre` measured for that
-  device's default camera; another device needs a new measurement.
+- iPad Pro 13-inch simulator in portrait (the test sets portrait and fails
+  at once on any other window size than 1032×1376 pt). Canvas taps are
+  sketch millimetres mapped from the viewport centre (the world origin of a
+  new document) with `pointsPerMillimetre` measured for that device's
+  default camera; another device needs a new measurement of it and of the
+  XY quad offset.
 - The software keyboard must appear (simulator "Connect Hardware Keyboard"
   off). egui fields have no UIKit element with keyboard focus, so `typeText`
-  cannot target them; the test taps keyboard keys, including Tab and Done.
-- `Plate-<run>` uses the last 8 alphanumerics of `ONECAD_RUN_ID`
-  (`TEST_RUNNER_ONECAD_RUN_ID`), else of a UUID, so saves never overwrite.
+  cannot target them; the test taps keyboard keys, including `tab` and
+  `Done`. The 13-inch keyboard has a `tab` key; smaller iPad layouts were
+  not checked.
+- Geometry is checked through picks in the top view: Properties titles a
+  tap's selection `Face` or `Edge` (subtitle `on Body 1`) or `Nothing
+  selected`. Edges within 8 pt of a tap win over faces
+  (`onecad-scene` `EDGE_PICK_LOGICAL_PIXELS`), so under the default camera
+  (hole radius ≈ 4 pt) the hole centre picks its rim; through-ness is
+  checked after TOP view and Fit all, which centre the plate (and so the
+  hole) in the viewport at ≈ 15 pt/mm. Regeneration and camera animation
+  have no UI completion signal, so a pick sequence is retried a bounded
+  number of times. Volume and bounds stay with the gate's Mac oracle.
+- `Plate-<run>` embeds the full `ONECAD_RUN_ID` (`TEST_RUNNER_ONECAD_RUN_ID`,
+  ASCII letters, digits and `-` kept), else 8 characters of a UUID. The
+  native save prompt only writes `Documents/<name>.onecad` (it strips `/`),
+  so the document is not under `Documents/acceptance/<run-id>/`.
 - Controls are found through `UIRef` (`OneCADUITests/WorkflowSupport.swift`):
-  the planned stable id first (`onecad.tool.<id>`, `onecad.param.<name>`,
-  `onecad.op.confirm`, `onecad.dimension.input`, ...), then today's derived
-  `<role>.<label>` id, then the label. Unnamed egui controls (Operation
-  combo, dimension field) are found by their value until they get ids.
+  the stable automation id where the editor defines one
+  (`onecad.tool.<id>`, `onecad.tool.finishSketch`, `onecad.dimension.input`
+  for a chip's or card's first field, `onecad.param.<name>` for the others,
+  `onecad.op.confirm`, `onecad.history.<n>`, `onecad.menu.file.save`), then
+  today's derived `<role>.<label>` id, then the label. Start page, plane
+  chooser, numeric-input toggle, Cut/Flip, explorer rows, inspector tabs,
+  Undo/Redo and Edit feature have no stable id and rely on the derived id
+  or label; the Operation combo and the dimension editor field are found by
+  their value.
 - Sketches are reached through History rows (feature order), not the
   explorer, which lists sketches in id order (random per document).
 - Fillet, chamfer, offset face and move/rotate (workflow steps 5–6) are not

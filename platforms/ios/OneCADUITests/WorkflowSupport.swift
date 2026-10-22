@@ -1,9 +1,11 @@
 import XCTest
 
-/// One UI control as the suite addresses it: the stable automation id the
-/// editor is moving to (`onecad.tool.<id>`, `onecad.param.<name>`, ...), then
-/// today's derived `<role>.<label>` id, then the visible label. The first that
-/// exists wins, so the suite survives the switch to stable ids unchanged.
+/// One UI control as the suite addresses it: the stable automation id where
+/// the editor defines one (`crates/onecad-ui/src/automation.rs` on the
+/// stable-id lane: `onecad.tool.<id>`, `onecad.dimension.input`,
+/// `onecad.param.<name>`, `onecad.op.confirm`, ...), then today's derived
+/// `<role>.<label>` id, then the visible label. The first that exists wins.
+/// Controls without a stable id list only the derived id and label.
 struct UIRef: CustomStringConvertible {
     let ids: [String]
     let label: String?
@@ -49,38 +51,43 @@ enum UI {
         UIRef("onecad.tool.\(id)", "button.\(auto)", "menu_item.\(auto)", label: label)
     }
 
-    static let newPart = UIRef("onecad.start.newPart", "button.new-part", label: "New part")
-    static let discardRecovery = UIRef("onecad.recovery.discard", "button.discard-recovery", label: "Discard recovery")
+    static let newPart = UIRef("button.new-part", label: "New part")
+    static let discardRecovery = UIRef("button.discard-recovery", label: "Discard recovery")
     static let viewport = UIRef("onecad.viewport", labelPrefix: "Model viewport")
     static let sketch = tool("sketch", auto: "sketch", label: "Sketch")
-    static let moreTools = UIRef("onecad.tool.more", "button.more-tools", label: "More tools")
+    static let moreTools = tool("more", auto: "more-tools", label: "More tools")
     static let rectangle = tool("rectangle", auto: "rectangle", label: "Rectangle")
     static let circle = tool("circle", auto: "circle", label: "Circle")
     static let extrude = tool("extrude", auto: "extrude", label: "Extrude")
-    static let numericInput = UIRef("onecad.sketch.numeric", "button.numeric-input-tab", label: "Numeric input · Tab")
-    static let finish = UIRef("onecad.sketch.finish", "button.finish", label: "Finish")
-    static let planeChooser = UIRef("onecad.plane.chooser", "static_text.choose-xy-xz-yz-or-a-planar-face",
+    static let numericInput = UIRef("button.numeric-input-tab", label: "Numeric input · Tab")
+    static let finish = UIRef("onecad.tool.finishSketch", "button.finish", label: "Finish")
+    static let discard = UIRef("onecad.tool.discardSketch", "button.discard", label: "Discard")
+    static let planeChooser = UIRef("static_text.choose-xy-xz-yz-or-a-planar-face",
                                     label: "Choose XY, XZ, YZ or a planar face")
-    static let width = UIRef("onecad.param.width", "text_field.width-mm", label: "Width mm")
+    // A creation chip's or operation card's first field is the dimension
+    // input; the others are `onecad.param.<field>`.
+    static let width = UIRef("onecad.dimension.input", "text_field.width-mm", label: "Width mm")
     static let height = UIRef("onecad.param.height", "text_field.height-mm", label: "Height mm")
-    static let diameter = UIRef("onecad.param.diameter", "text_field.ø-mm", "text_field.mm", label: "Ø mm")
-    static let extrudeDistance = UIRef("onecad.param.distance", "text_field.extrude-distance-mm",
-                                       label: "Extrude distance (mm)")
+    static let diameter = UIRef("onecad.dimension.input", "text_field.ø-mm", "text_field.mm", label: "Ø mm")
+    static let x = UIRef("onecad.dimension.input", "text_field.x", label: "X")
+    static let y = UIRef("onecad.param.y", "text_field.y", label: "Y")
+    static let extrudeDistance = UIRef("onecad.dimension.input", "onecad.param.extrudeDistance",
+                                       "text_field.extrude-distance-mm", label: "Extrude distance (mm)")
     static let create = UIRef("onecad.op.confirm", "button.create", label: "Create ↵")
     static let point = tool("point", auto: "point", label: "Point")
-    static let x = UIRef("onecad.param.x", "text_field.x", label: "X")
-    static let y = UIRef("onecad.param.y", "text_field.y", label: "Y")
-    static let cutMode = UIRef("onecad.param.operation.cut", "button.cut", label: "Cut")
-    static let flip = UIRef("onecad.param.flip", "button.flip", label: "Flip")
-    static let bodyRow = UIRef("onecad.explorer.body.0", "other.body-1", label: "Body 1")
-    static let editFeature = UIRef("onecad.history.edit", "button.edit-feature", label: "Edit feature")
-    static let discard = UIRef("onecad.sketch.discard", "button.discard", label: "Discard")
-    static let undo = UIRef("onecad.titlebar.undo", "button.undo", label: "Undo")
-    static let redo = UIRef("onecad.titlebar.redo", "button.redo", label: "Redo")
+    static let cutMode = UIRef("button.cut", label: "Cut")
+    static let flip = UIRef("button.flip", label: "Flip")
+    static let bodyRow = UIRef("other.body-1", label: "Body 1")
+    static let editFeature = UIRef("button.edit-feature", label: "Edit feature")
+    static let undo = UIRef("button.undo", label: "Undo")
+    static let redo = UIRef("button.redo", label: "Redo")
     static let fileMenu = UIRef(OneCADID.fileMenu)
     static let save = UIRef("onecad.menu.file.save", label: "Save")
-    static let historyTab = UIRef("onecad.inspector.history", "checkbox.history", label: "History")
-    static let propertiesTab = UIRef("onecad.inspector.properties", "checkbox.properties", label: "Properties")
+    static let historyTab = UIRef("checkbox.history", label: "History")
+    static let propertiesTab = UIRef("checkbox.properties", label: "Properties")
+    static let supportFace = UIRef(labelPrefix: "Support face: ")
+    static let fitAll = UIRef("button.fit-all", label: "Fit all")
+    static let topView = UIRef("button.top-view", label: "TOP view")
 }
 
 @MainActor
@@ -115,9 +122,16 @@ struct OneCADScreen {
         return app.descendants(matching: .any).matching(NSPredicate(format: "value == %@", value)).firstMatch
     }
 
-    /// The `index`-th (0-based) element labelled `label`, for counting rows.
+    /// Inspector History rows: derived `other.` ids today, `onecad.history.<n>`
+    /// on the stable-id lane. Excludes toolbar buttons with the same label.
+    static let historyRow = NSPredicate(format: "identifier BEGINSWITH 'other.' OR identifier BEGINSWITH 'onecad.history.'")
+
+    /// The `index`-th (0-based) row-like element labelled `label`, for counting rows.
     func nth(_ label: String, _ index: Int) -> XCUIElement {
-        app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", label)).element(boundBy: index)
+        let named = NSPredicate(format: "label == %@", label)
+        return app.descendants(matching: .any)
+            .matching(NSCompoundPredicate(andPredicateWithSubpredicates: [named, Self.historyRow]))
+            .element(boundBy: index)
     }
 
     /// Feature rows of the inspector's History tab, top to bottom (feature
@@ -126,7 +140,7 @@ struct OneCADScreen {
     func historyRowElements() -> [XCUIElement] {
         let tab = find(UI.propertiesTab).frame
         return app.descendants(matching: .any)
-            .matching(NSPredicate(format: "identifier BEGINSWITH 'other.' OR identifier BEGINSWITH 'onecad.history.'"))
+            .matching(Self.historyRow)
             .allElementsBoundByIndex
             .filter { $0.frame.minX >= tab.minX - 24 && $0.frame.minY > tab.maxY && !$0.label.isEmpty }
             .sorted { $0.frame.minY < $1.frame.minY }
