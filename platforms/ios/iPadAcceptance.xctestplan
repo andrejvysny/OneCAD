@@ -1,0 +1,36 @@
+{
+  "configurations" : [
+    {
+      "id" : "6F0B4C8E-2D7A-4E39-9B1C-0A5E3D7F1C24",
+      "name" : "Default",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "preferredScreenCaptureFormat" : "screenshots",
+    "targetForVariableExpansion" : {
+      "containerPath" : "container:OneCAD.xcodeproj",
+      "identifier" : "858E90117B3770AF79C4920B",
+      "name" : "OneCAD"
+    }
+  },
+  "testTargets" : [
+    {
+      "target" : {
+        "containerPath" : "container:OneCAD.xcodeproj",
+        "identifier" : "3530CA49A90BCECDD14943B5",
+        "name" : "OneCADNativeTests"
+      }
+    },
+    {
+      "target" : {
+        "containerPath" : "container:OneCAD.xcodeproj",
+        "identifier" : "C9A54FFB1C62431899387FA0",
+        "name" : "OneCADUITests"
+      }
+    }
+  ],
+  "version" : 1
+}

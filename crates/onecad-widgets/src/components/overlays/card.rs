@@ -20,6 +20,9 @@ pub struct FeatureCardOutput {
     pub close: bool,
     pub cancel: bool,
     pub ok: bool,
+    /// Widget ids of the footer buttons, so the host can name them for automation.
+    pub cancel_id: Option<egui::Id>,
+    pub ok_id: Option<egui::Id>,
 }
 
 pub struct FeatureCard<'a> {
@@ -185,18 +188,20 @@ impl<'a> FeatureCard<'a> {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
                     let w = (ui.available_width() - 8.0) / 2.0;
-                    out.cancel = ui
-                        .add(
-                            Button::new("Cancel")
-                                .enabled(self.cancel_enabled)
-                                .min_width(w),
-                        )
-                        .clicked();
+                    let cancel = ui.add(
+                        Button::new("Cancel")
+                            .enabled(self.cancel_enabled)
+                            .min_width(w),
+                    );
+                    out.cancel = cancel.clicked();
+                    out.cancel_id = Some(cancel.id);
                     let ok = Button::new(self.ok_label)
                         .kind(ButtonKind::Primary)
                         .enabled(self.ok_enabled)
                         .min_width(w);
-                    out.ok = ui.add(ok).clicked();
+                    let ok = ui.add(ok);
+                    out.ok = ok.clicked();
+                    out.ok_id = Some(ok.id);
                 });
             });
     }

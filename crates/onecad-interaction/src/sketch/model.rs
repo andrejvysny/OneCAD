@@ -42,6 +42,8 @@ pub enum SketchTool {
     Arc,
     ThreePointArc,
     Slot,
+    /// A drawn stroke recognized as one Line or Arc (Pencil, finger or mouse drag).
+    PenStroke,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -305,6 +307,13 @@ pub enum SketchAction {
     },
     BeginPointNumeric {
         key: SketchSessionKey,
+    },
+    /// A finished pen stroke: a recognized shape becomes one Upsert batch, an
+    /// unrecognized one is refused with its reason and authors nothing.
+    CommitStroke {
+        point: CapturedSketchPoint,
+        ids: PrimitiveIds,
+        stroke: super::recognition::Recognition,
     },
     PreviewNumeric {
         key: SketchSessionKey,

@@ -13,7 +13,9 @@ path = "src/main.rs"
 # The CLI reuses the app crate's WorkerManager + DocumentRuntime verbatim (the
 # integration tests already consume `onecad_app` this way — checkpoints.rs /
 # worker_chaos.rs), so the headless replay is byte-for-byte the app's regen path.
-onecad-app = { workspace = true }
+# Desktop tool: spawns the sidecar worker (explicit, so it survives the
+# workspace dependency dropping onecad-app's default features).
+onecad-app = { workspace = true, features = ["sidecar"] }
 onecad-core = { workspace = true }
 tokio = { workspace = true, features = [
     "rt-multi-thread",

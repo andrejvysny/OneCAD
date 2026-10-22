@@ -46,7 +46,7 @@ async fn dirty_step_import_and_save_publish_lifecycle_despite_failed_capture() {
     let source = backend.paths.root.join("documents/imported.step");
     fs::copy(original, &source).unwrap();
     choose(&mut backend, Some(&source));
-    let outcome = execute(&mut backend, Request::Import).await.unwrap();
+    let outcome = execute(&mut backend, Request::Import(None)).await.unwrap();
     assert!(matches!(outcome, Outcome::Replaced { warning: Some(_) }));
     let imported = lifecycle(&backend);
     assert_ne!(imported.runtime_session, previous_session);

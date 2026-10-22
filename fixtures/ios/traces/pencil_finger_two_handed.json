@@ -1,0 +1,30 @@
+{
+  "name": "pencil_finger_two_handed",
+  "description": "Pencil authors while a finger rests on the canvas and another taps a control.",
+  "context": {"drag_authoring": true, "controls": [[0, 0, 100, 44]]},
+  "steps": [
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "finger", "phase": "began", "t": 0.0, "x": 300, "y": 300}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 2, "kind": "pencil", "phase": "began", "t": 0.05, "x": 500, "y": 500},
+      {"contact": 1, "kind": "finger", "phase": "moved", "t": 0.05, "x": 330, "y": 300}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 2, "kind": "pencil", "phase": "moved", "t": 0.07, "x": 520, "y": 500},
+      {"contact": 3, "kind": "finger", "phase": "began", "t": 0.07, "x": 30, "y": 20}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 3, "kind": "finger", "phase": "ended", "t": 0.09, "x": 30, "y": 20},
+      {"contact": 2, "kind": "pencil", "phase": "moved", "t": 0.09, "x": 540, "y": 500}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 2, "kind": "pencil", "phase": "ended", "t": 0.11, "x": 560, "y": 500},
+      {"contact": 1, "kind": "finger", "phase": "ended", "t": 0.12, "x": 330, "y": 300}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 4, "kind": "finger", "phase": "began", "t": 0.5, "x": 40, "y": 20},
+      {"contact": 4, "kind": "finger", "phase": "ended", "t": 0.55, "x": 40, "y": 20}
+    ]}}
+  ]
+}

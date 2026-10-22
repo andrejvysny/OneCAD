@@ -151,7 +151,11 @@ pub(crate) fn reversed_depth() -> Mat4 {
     )
 }
 
-pub(crate) fn with_options(mut frame: FrameU, options: crate::RenderOptions) -> FrameU {
+pub(crate) fn with_options(
+    mut frame: FrameU,
+    options: crate::RenderOptions,
+    profile: crate::RenderProfile,
+) -> FrameU {
     let ratio = options.ssaa / frame.display[1];
     frame.viewport[0] *= ratio;
     frame.viewport[1] *= ratio;
@@ -182,6 +186,10 @@ pub(crate) fn with_options(mut frame: FrameU, options: crate::RenderOptions) -> 
         frame.flags[1] = 0.0;
         frame.flags[2] = 0.0;
         frame.contact[3] = 0.0;
+    }
+    if !profile.ambient_occlusion() {
+        // The AO attachment is a 1x1 placeholder; bodies must not read it.
+        frame.flags[1] = 0.0;
     }
     frame
 }

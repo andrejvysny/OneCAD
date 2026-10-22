@@ -98,6 +98,27 @@ pub fn route(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     app.input_routing = state;
 }
 
+/// Fences the previous frame's CAD submission and its sampling by the host's UI pass; call
+/// only after the host submitted that pass.
+pub(crate) fn fence_previous_frame(app: &mut App, ctx: &egui::Context) {
+    if app.sampled && app.viewport_ready() {
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let finished = done.clone();
+        app.gpu.queue.on_submitted_work_done(move || {
+            finished.store(true, std::sync::atomic::Ordering::Release)
+        });
+        app.sampling_done = done;
+        app.sampled = false;
+    }
+    if app.cad_needs_fence && app.viewport_ready() {
+        let context = ctx.clone();
+        if let Err(error) = app.renderer.after_submit(move || context.request_repaint()) {
+            app.fail_viewport(error.to_string());
+        }
+        app.cad_needs_fence = false;
+    }
+}
+
 fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     app.poll_device_failure();
     app.sync_document_state();
@@ -117,42 +138,30 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
         }
         None => crate::sketch_creation::chain_input::route_raw(app, ctx, raw),
     }
-    if app.sampled && app.viewport_ready() {
-        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let finished = done.clone();
-        app.gpu.queue.on_submitted_work_done(move || {
-            finished.store(true, std::sync::atomic::Ordering::Release)
-        });
-        app.sampling_done = done;
-        app.sampled = false;
-    }
-    if app.cad_needs_fence && app.viewport_ready() {
-        let context = ctx.clone();
-        if let Err(error) = app.renderer.after_submit(move || context.request_repaint()) {
-            app.fail_viewport(error.to_string());
-        }
-        app.cad_needs_fence = false;
-    }
-    let owner = overlay::owner(
-        &app.ui,
-        app.doc.sketch_entry.open,
-        app.doc.documents.confirm.is_some()
-            || app.doc.items.blocks()
-            || crate::constraint_authoring::editor_open(ctx)
-            || crate::sketch_numeric::editor_open(ctx),
-        egui::Popup::is_any_open(ctx),
-    );
+    fence_previous_frame(app, ctx);
+    let blocked = app.doc.documents.confirm.is_some()
+        || app.doc.items.blocks()
+        || crate::constraint_authoring::editor_open(ctx)
+        || crate::sketch_numeric::editor_open(ctx);
+    let popup = egui::Popup::is_any_open(ctx);
+    let owner = overlay::owner(&app.ui, app.doc.sketch_entry.open, blocked, popup);
+    // The in-app File menu is itself a popup: enable its rows as if it were closed.
+    let menu_owner = if cfg!(feature = "desktop") {
+        owner
+    } else {
+        overlay::owner(&app.ui, app.doc.sketch_entry.open, blocked, false)
+    };
     if let Some(menu) = &app.menu {
         let text = text_owns_keyboard(ctx);
         menu.set_history_enabled(
-            text || owner.is_none() && history_available(app, false),
-            text || owner.is_none() && history_available(app, true),
+            text || menu_owner.is_none() && history_available(app, false),
+            text || menu_owner.is_none() && history_available(app, true),
         );
         menu.set_document_enabled(
-            owner.is_none() && crate::bars::replacement_allowed(app),
-            owner.is_none() && crate::bars::insert_allowed(app),
-            owner.is_none() && crate::bars::save_allowed(app),
-            owner.is_none() && crate::bars::export_allowed(app),
+            menu_owner.is_none() && crate::bars::replacement_allowed(app),
+            menu_owner.is_none() && crate::bars::insert_allowed(app),
+            menu_owner.is_none() && crate::bars::save_allowed(app),
+            menu_owner.is_none() && crate::bars::export_allowed(app),
         );
         if let Ok(recents) = app.doc.bridge.shared.recents.lock() {
             let names: Vec<String> = recents.iter().map(|recent| recent.name.clone()).collect();
@@ -334,11 +343,13 @@ fn route_menu(
         }
         menu::Action::CloseTab => app.request_close_tab(),
         menu::Action::SaveAll => app.save_all(),
-        menu::Action::Import => app.document_request(Request::Import),
+        menu::Action::Import => app.document_request(Request::Import(None)),
         menu::Action::InsertStep => app.document_request(Request::InsertStep),
         menu::Action::Save => app.document_request(Request::Save { save_as: false }),
         menu::Action::SaveAs => app.document_request(Request::Save { save_as: true }),
         menu::Action::Export(format) => app.document_request(Request::Export(format)),
+        #[cfg(not(feature = "desktop"))]
+        menu::Action::ExportDocument => crate::touch_menu::send_copy(app),
         menu::Action::ExtensionCommand(token) => {
             if let Some(id) = app
                 .menu
@@ -362,7 +373,7 @@ fn route_menu(
             }
         }
         menu::Action::Paste if text => {
-            #[cfg(target_os = "macos")]
+            #[cfg(all(target_os = "macos", feature = "desktop"))]
             if let Ok(text) =
                 arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text())
             {

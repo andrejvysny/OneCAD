@@ -3131,6 +3131,7 @@ dependencies = [
  "base64",
  "libc",
  "onecad-core",
+ "onecad-embedded-worker",
  "onecad-library",
  "onecad-protocol",
  "serde",
@@ -3163,6 +3164,13 @@ dependencies = [
  "tokio",
  "uuid",
  "zip",
+]
+
+[[package]]
+name = "onecad-embedded-worker"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -3217,6 +3225,27 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "onecad-ios"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "egui",
+ "egui-wgpu",
+ "onecad-app",
+ "onecad-core",
+ "onecad-interaction",
+ "onecad-protocol",
+ "onecad-render",
+ "onecad-ui",
+ "pollster 0.4.0",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "wgpu",
 ]
 
 [[package]]

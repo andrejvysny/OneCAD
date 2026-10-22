@@ -20,6 +20,8 @@ members = [
     "crates/onecad-kernelbench",
     "crates/onecad-library",
     "crates/onecad-library-ingest",
+    "crates/onecad-embedded-worker",
+    "crates/onecad-ios",
 ]
 
 # Shared dependency versions for every workspace member. Individual crates
@@ -28,7 +30,8 @@ members = [
 onecad-extension-api = { path = "crates/onecad-extension-api" }
 onecad-extension-host = { path = "crates/onecad-extension-host" }
 onecad-extension-sdk = { path = "crates/onecad-extension-sdk" }
-onecad-app = { path = "crates/onecad-app" }
+# Backend features are chosen by each binary (docs/ios/KERNEL.md).
+onecad-app = { path = "crates/onecad-app", default-features = false }
 onecad-scene = { path = "crates/onecad-scene" }
 onecad-render = { path = "crates/onecad-render" }
 onecad-interaction = { path = "crates/onecad-interaction" }
@@ -36,6 +39,7 @@ onecad-ui = { path = "crates/onecad-ui" }
 onecad-widgets = { path = "crates/onecad-widgets" }
 onecad-core = { path = "crates/onecad-core" }
 onecad-protocol = { path = "crates/onecad-protocol" }
+onecad-embedded-worker = { path = "crates/onecad-embedded-worker" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

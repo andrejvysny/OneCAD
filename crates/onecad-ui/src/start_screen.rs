@@ -277,12 +277,26 @@ fn brand_symbol(ctx: &egui::Context, dark: bool) -> Option<egui::TextureHandle> 
     } else {
         include_bytes!("../../../assets/native/brand/png/symbol-56.png")
     };
-    let icon = eframe::icon_data::from_png_bytes(png).ok()?;
-    let size = [icon.width as usize, icon.height as usize];
-    let image = egui::ColorImage::from_rgba_unmultiplied(size, &icon.rgba);
+    let (size, rgba) = decode_rgba8(png)?;
+    let image = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
     let texture = ctx.load_texture("onecad-brand-symbol", image, egui::TextureOptions::LINEAR);
     ctx.data_mut(|data| data.insert_temp(id, texture.clone()));
     Some(texture)
+}
+
+/// The brand rasters are 8-bit RGBA PNGs; anything else is refused rather than
+/// guessed. Decoded without eframe so every host shares this path.
+fn decode_rgba8(png: &[u8]) -> Option<([usize; 2], Vec<u8>)> {
+    let mut reader = png::Decoder::new(std::io::Cursor::new(png))
+        .read_info()
+        .ok()?;
+    let mut rgba = vec![0; reader.output_buffer_size()?];
+    let frame = reader.next_frame(&mut rgba).ok()?;
+    if frame.color_type != png::ColorType::Rgba || frame.bit_depth != png::BitDepth::Eight {
+        return None;
+    }
+    rgba.truncate(frame.buffer_size());
+    Some(([frame.width as usize, frame.height as usize], rgba))
 }
 
 fn heading(app: &App, ui: &mut Ui, text: &str) {
@@ -330,7 +344,7 @@ fn tile_specs() -> [Tile; 2] {
             icon: "import",
             title: "Open or import",
             subtitle: ".onecad and STEP · ⌘O",
-            request: Some(Request::Import),
+            request: Some(Request::Import(None)),
         },
     ]
 }

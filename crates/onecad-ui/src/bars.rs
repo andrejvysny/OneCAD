@@ -15,6 +15,8 @@ pub fn title(app: &mut App, ui: &mut Ui) {
         .frame(egui::Frame::NONE)
         .resizable(false)
         .show(ui, |ui| {
+            // File actions live in the native menu (or, without one, the title bar's
+            // File menu); documents are tabs.
             let area = ui.available_rect_before_wrap();
             let mut title = area;
             title.max.x -= 90.0;
@@ -40,22 +42,30 @@ pub fn title(app: &mut App, ui: &mut Ui) {
                 .collect();
             let out = ui
                 .scope_builder(egui::UiBuilder::new().max_rect(title), |ui| {
-                    TitleBar::new("")
-                        .tabs(Some(TabStrip {
-                            tabs: &specs,
-                            home_active: app.ui.start_open,
-                            can_add: home_allowed(app),
-                        }))
-                        .can_undo(can_undo)
-                        .can_redo(can_redo)
-                        .home_blocked(
-                            (!home_allowed(app)).then_some("Finish the current command first"),
-                        )
-                        .search_blocked(None)
-                        .show(ui)
+                    let bar = TitleBar::new("");
+                    // No traffic lights or movable window without the desktop host.
+                    #[cfg(not(feature = "desktop"))]
+                    let bar = bar.leading_inset(0.0).drag_window(false).tab_file(true);
+                    bar.tabs(Some(TabStrip {
+                        tabs: &specs,
+                        home_active: app.ui.start_open,
+                        can_add: home_allowed(app),
+                    }))
+                    .can_undo(can_undo)
+                    .can_redo(can_redo)
+                    .home_blocked(
+                        (!home_allowed(app)).then_some("Finish the current command first"),
+                    )
+                    .search_blocked(None)
+                    .show(ui)
                 })
                 .inner;
             app.tab_rects = out.tab_rects.clone();
+            name_tabs(ui.ctx(), &out);
+            #[cfg(not(feature = "desktop"))]
+            if let Some(file) = &out.file {
+                crate::touch_menu::show(app, file);
+            }
             if out.search {
                 app.ui.extensions.native.open_palette();
             }
@@ -84,6 +94,17 @@ pub fn title(app: &mut App, ui: &mut Ui) {
                 crate::native_extensions::menu(app, ui)
             });
         });
+}
+
+/// Document tabs are 0-based in strip order; "+" opens a new document.
+pub(crate) fn name_tabs(ctx: &Context, out: &onecad_widgets::components::shell::TitleBarOutput) {
+    for (index, (_, id)) in out.tab_ids.iter().enumerate() {
+        crate::automation::name(ctx, *id, &crate::automation::tab(index));
+        ctx.accesskit_node_builder(*id, |node| node.set_role(egui::accesskit::Role::Tab));
+    }
+    if let Some(id) = out.add_id {
+        crate::automation::name(ctx, id, crate::automation::TAB_NEW);
+    }
 }
 
 /// Native window title: document name, " — Edited" when dirty; sent only on change.

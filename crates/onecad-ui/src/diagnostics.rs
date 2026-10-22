@@ -79,6 +79,15 @@ impl Diagnostics {
         })
     }
 
+    /// The outcome `source` last recorded (acceptance probes only).
+    #[cfg(feature = "semantic-probe")]
+    pub(crate) fn latest(&self, source: Source) -> Option<(State, String)> {
+        self.entries
+            .iter()
+            .find(|entry| entry.source == source)
+            .map(|entry| (entry.state, entry.message.clone()))
+    }
+
     pub fn model(&mut self, status: &onecad_interaction::CommitStatus) {
         use onecad_interaction::{CommitStatus, FeatureOutcome};
         let (state, message) = match status {

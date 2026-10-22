@@ -20,7 +20,11 @@ scene, protocol and core. Render may use the wgpu family but cannot import a UI
 toolkit. Its development dependencies may also use the exact `naga` package to
 validate WGSL without creating a GPU device; normal and build dependencies may
 not use this exception. Scene, interaction and app cannot import GPU or UI toolkit families.
-The native UI composes these layers and is the only UI host. Headless replay
+The native UI composes these layers. The iPadOS bridge `onecad-ios` is the
+second host: it drives the native UI's egui editor without eframe, owns the
+UIKit/Metal surface boundary and may use toolkit and GPU families. Nothing
+depends on it. `onecad-embedded-worker` only declares and links the in-process
+worker C ABI; the application may use it behind its `embedded-kernel` feature. Headless replay
 and ingest consume app; the mesh-fixture utility consumes app, core and protocol.
 None imports the native UI.
 Kernelbench remains independent; the worker stub consumes protocol.

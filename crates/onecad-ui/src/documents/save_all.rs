@@ -118,8 +118,18 @@ impl App {
         }
         self.tabs.save_all.prompted = None;
         match finished {
-            // The user stopped Save All at this document's dialog.
-            Finished::Cancelled => self.tabs.save_all.queue.clear(),
+            // The user stopped Save All at this document's dialog: the report
+            // names it and every document never asked, not just "cancelled".
+            Finished::Cancelled => {
+                self.skip_save("cancelled");
+                let unasked = std::mem::take(&mut self.tabs.save_all.queue);
+                for tab in unasked {
+                    if let Some(doc) = self.editor(tab) {
+                        let entry = format!("{} (not asked)", doc.editor_title());
+                        self.tabs.save_all.unsaved.push(entry);
+                    }
+                }
+            }
             Finished::Failed => {
                 let reason = self.doc.status.clone();
                 self.skip_save(&reason);

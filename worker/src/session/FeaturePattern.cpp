@@ -20,6 +20,7 @@
 #include "session/ScratchJob.h"
 #include "sketch/Sketch.h"
 #include "elementmap/Ladder.h"
+#include "io/OcctBusy.h"
 
 namespace onecad::session {
 namespace em = onecad::elementmap;
@@ -446,6 +447,11 @@ ops::OpOutcome execute_feature_pattern(ScratchJob& job, const json& op,
                         result.needs_repair = std::move(candidate.needs_repair);
                         result.diagnostics = std::move(candidate.diagnostics);
                         return result;
+                    }
+                    if (candidate.status == CandidateResult::Status::Busy) {
+                        // Busy keeps its prefix first and aborts the plan retriable.
+                        return ops::OpOutcome::busy(
+                            io::busy_message(candidate.error_message, context));
                     }
                     result.error_code = candidate.error_code.empty() ? "OP_FAILED" : candidate.error_code;
                     result.error_message = candidate.error_message.empty()

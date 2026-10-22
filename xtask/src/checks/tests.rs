@@ -331,6 +331,10 @@ fn upward_and_concrete_product_edges_fail() {
         ("onecad-render", "onecad-ui"),
         ("onecad-regen", "onecad-ui"),
         ("onecad-library-ingest", "onecad-ui"),
+        ("onecad-app", "onecad-ios"),
+        ("onecad-ui", "onecad-ios"),
+        ("onecad-render", "onecad-ios"),
+        ("onecad-embedded-worker", "onecad-app"),
         ("xtask", "onecad-core"),
     ] {
         for kind in [Value::Null, json!("dev"), json!("build")] {
@@ -343,7 +347,7 @@ fn upward_and_concrete_product_edges_fail() {
 #[test]
 fn pure_layers_reject_toolkits_and_gpu() {
     for (from, _) in layers::LAYERS {
-        if ["onecad-ui", "onecad-widgets"].contains(from) {
+        if layers::HOSTS.contains(from) {
             continue;
         }
         for name in [
@@ -396,7 +400,7 @@ fn render_gpu_and_host_toolkits_preserve_existing_exceptions() {
             1
         );
     }
-    for from in ["onecad-ui", "onecad-widgets"] {
+    for from in layers::HOSTS {
         assert!(layers::check(metadata(
             from,
             vec![external("egui", Value::Null), external("wgpu", Value::Null)],

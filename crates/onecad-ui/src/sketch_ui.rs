@@ -78,11 +78,16 @@ impl App {
                 self.ui.inspector_tab = crate::ui_state::InspectorTab::Properties;
             }
         }
+        let tool_before = self.doc.sketch.session.as_ref().map(|s| s.tool);
         for effect in self.doc.sketch.dispatch(action) {
             let tag = effect_tag(&effect).clone();
             if let Err(message) = self.submit_sketch_effect(effect) {
                 self.sketch_dispatch(SketchAction::Failed { tag, message });
             }
+        }
+        let tool_after = self.doc.sketch.session.as_ref().map(|s| s.tool);
+        if tool_before.is_some() && tool_after.is_some() && tool_before != tool_after {
+            self.ui.previous_sketch_tool = tool_before;
         }
         if align_entry && let Some(session) = &self.doc.sketch.session {
             self.doc
@@ -265,6 +270,12 @@ pub fn viewport(
     let Some(session) = app.doc.sketch.session.as_ref() else {
         return;
     };
+    if session.tool == SketchTool::PenStroke {
+        crate::sketch_creation::clear_candidate(ui.ctx());
+        crate::sketch_pen_stroke::viewport(app, ui, rect, view);
+        return;
+    }
+    crate::sketch_pen_stroke::clear(ui.ctx());
     if session.tool == SketchTool::Select {
         crate::sketch_creation::clear_candidate(ui.ctx());
         if crate::sketch_gestures::viewport(app, ui, rect, response, view) {

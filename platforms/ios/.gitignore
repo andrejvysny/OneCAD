@@ -1,0 +1,3 @@
+# Per-user Xcode state; shared schemes live in xcshareddata and are tracked.
+xcuserdata/
+*.xcuserstate

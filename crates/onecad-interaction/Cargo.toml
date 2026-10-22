@@ -12,6 +12,8 @@ onecad-scene = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+# Real-worker integration tests drive the sidecar.
+onecad-app = { workspace = true, features = ["sidecar"] }
 uuid = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
 tempfile = "3"

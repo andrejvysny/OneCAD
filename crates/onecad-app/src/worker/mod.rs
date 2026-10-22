@@ -38,16 +38,33 @@ use onecad_core::regen::{
     WorkerHead,
 };
 
+pub mod backend;
 mod boolean_tools;
 mod checkpoint_result;
 mod endpoint_tangency;
 pub(crate) mod gesture_result;
+pub(crate) mod host;
+mod identity;
+#[cfg(feature = "embedded-kernel")]
+mod inprocess;
+#[cfg(feature = "embedded-kernel")]
+mod kernel_journal;
 pub mod manager;
+#[cfg(feature = "sidecar")]
+mod manifest;
 mod preview_plan;
+#[cfg(feature = "sidecar")]
+mod sidecar;
 pub(crate) mod sketch_result;
 pub(crate) mod sketch_truth;
 pub mod wire;
 
+#[cfg(feature = "embedded-kernel")]
+pub use backend::{
+    embedded_identity_json, in_process_counters, in_process_relaunch_required,
+    linked_identity_json, EmbeddedKernelConfig, InProcessCounters,
+};
+pub use backend::{WorkerBackend, WorkerRole};
 pub use manager::{RestartHook, SupervisorConfig, WorkerLifecycle, WorkerManager, WorkerState};
 
 #[cfg(feature = "composition-test")]

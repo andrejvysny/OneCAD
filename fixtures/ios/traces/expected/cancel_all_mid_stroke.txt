@@ -1,0 +1,7 @@
+digest d256355c15220cd0
+press c1 Author Pencil (200.000,200.000) taps=1
+move c1 Author (230.000,200.000)
+cancel c1 SystemGesture
+press c2 Author Pencil (300.000,300.000) taps=1
+release c2 Author Pencil (320.000,300.000)
+stats NormalizerStats { invalid: 0, duplicate_coalesced: 0, stale: 0, unknown_contact: 0, old_generation: 2, refused_contacts: 0, estimation_matched: 0, estimation_unmatched: 0, merged_moves: 0 }

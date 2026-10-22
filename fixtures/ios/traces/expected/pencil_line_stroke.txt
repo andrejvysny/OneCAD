@@ -1,0 +1,15 @@
+digest 652f9d336d231db1
+press c1 Author Pencil (200.000,300.000) taps=1
+move c1 Author (212.000,303.000)
+move c1 Author (224.000,306.000)
+move c1 Author (236.000,309.000)
+move c1 Author (248.000,312.000)
+move c1 Author (260.000,315.000)
+move c1 Author (272.000,318.000)
+move c1 Author (284.000,321.000)
+move c1 Author (296.000,324.000)
+move c1 Author (308.000,327.000)
+move c1 Author (320.000,330.000)
+move c1 Author (332.000,333.000)
+release c1 Author Pencil (344.000,336.000)
+stats NormalizerStats { invalid: 0, duplicate_coalesced: 4, stale: 0, unknown_contact: 0, old_generation: 0, refused_contacts: 0, estimation_matched: 0, estimation_unmatched: 0, merged_moves: 0 }

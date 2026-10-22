@@ -1,14 +1,20 @@
 /* onecad_worker.h — C ABI for running the OneCAD OCCT worker IN-PROCESS.
  *
- * P0.3 in-process worker spike (Plane ONECAD-258). The same worker runs as a
- * library behind the same OCW1 wire (protocol/SCHEMA.md): the host hands it one
- * end of a socketpair and speaks OCW1 to the other end exactly as it speaks to
- * the sidecar's stdio. Written for iPadOS (no child processes); since the iPad
- * target was dropped (2026-10-17) it is an optional macOS dev/CI host only —
- * the shipping macOS host stays the sidecar, for crash and hang isolation.
+ * The same worker runs as a library behind the same OCW1 wire
+ * (protocol/SCHEMA.md): the host hands it one end of a socketpair and speaks
+ * OCW1 to the other end exactly as it speaks to the sidecar's stdio. This is
+ * the iPadOS kernel host (ADR-0019, docs/ios/ARCHITECTURE.md; iPadOS forbids
+ * child processes) and a macOS test host for onecad-app's `embedded-kernel`
+ * backend. The shipping macOS host stays the sidecar, for crash and hang
+ * isolation. Build procedures and the identity manifest: docs/ios/KERNEL.md.
  *
  * Built by the CMake target `onecad_worker_lib` (static, ONECAD_WORKER_LIBRARY
- * defined, which compiles out the `__crash` std::abort chaos hook).
+ * defined: the `__crash` std::abort chaos hook is compiled out, and so are the
+ * `Debug.Busy` verb and the `__slow` op hook unless ONECAD_WORKER_TEST_HOOKS is
+ * defined — worker/src/util/TestHooks.h).
+ *
+ * C++ callers see every entry point `noexcept`: no C++ exception ever leaves
+ * the library (an escape inside the loop becomes ONECAD_WORKER_EXIT_INTERNAL).
  */
 #ifndef ONECAD_WORKER_H
 #define ONECAD_WORKER_H
@@ -16,10 +22,15 @@
 #include <stdint.h>
 
 #ifdef __cplusplus
+#define ONECAD_WORKER_NOEXCEPT noexcept
 extern "C" {
+#else
+#define ONECAD_WORKER_NOEXCEPT
 #endif
 
-/* Bumped on any change to the functions below. 2: onecad_worker_run_config and
+/* Bumped on any change to the functions or structs below (and every consumer —
+ * crates/onecad-embedded-worker, onecad-embedded-kernel.json `abiVersion` —
+ * moves with it). 2: onecad_worker_run_config and
  * the crash-journal callback (onecad_worker_run is unchanged). 3: the journal
  * callback takes an event struct (op position, prefix hash, fingerprint) and
  * the config gains occt_lock_wait_ms. */
@@ -41,7 +52,7 @@ extern "C" {
  * callback must not call back into the worker and should return quickly. */
 typedef void (*onecad_worker_log_fn)(int level, const char* msg, void* ctx);
 
-int onecad_worker_abi_version(void);
+int onecad_worker_abi_version(void) ONECAD_WORKER_NOEXCEPT;
 
 /* Runs the worker's reader/kernel/solver/status loop — the exact loop the
  * sidecar's main() runs — reading OCW1 frames from `in_fd` and writing them to
@@ -52,10 +63,14 @@ int onecad_worker_abi_version(void);
  * Returns the code the sidecar process would exit with (0 clean, 2 protocol
  * loss), or ONECAD_WORKER_EXIT_INTERNAL.
  *
+ * Threads: the calling thread runs the reader loop (give it a large stack;
+ * onecad-app uses 8 MiB). The kernel, solver and status lanes are started with
+ * an explicit 8 MiB stack (worker/src/util/LaneThread.h).
+ *
  * WEDGE: an op that never returns blocks this call forever (the lanes are
  * joined, never abandoned — there is no safe way to stop a thread inside OCCT).
  * The host must time-box its wait after closing its end and treat expiry as
- * "relaunch required" (docs/design/native-ui/inprocess-worker-spike.md).
+ * "relaunch required" (docs/ios/ARCHITECTURE.md "In-process failure policy").
  *
  * fds: must be distinct (dup() a socket to get two). Ownership of BOTH
  * transfers to this call; each is closed exactly once, after every worker lane
@@ -87,14 +102,18 @@ int onecad_worker_abi_version(void);
  * inspect and export (and the XCAF codec) are serialized process-wide
  * (io::occt_globals_mutex, io::ocaf_mutex). Those locks are taken with a
  * bounded wait (onecad_worker_config.occt_lock_wait_ms, default 20 s): a call
- * that cannot get one fails with an OP_FAILED whose message starts with
- * "OCCT_GLOBALS_BUSY" instead of blocking its kernel lane. A worker wedged
+ * that cannot get one fails with a RETRIABLE OP_FAILED whose message starts
+ * with "OCCT_GLOBALS_BUSY" instead of blocking its kernel lane — every verb
+ * (InspectStep, ExportStep, ExportGeometry) and every ExecutePlan / PreviewPlan
+ * / PreviewOp whose op (ImportStep, PlaceComponent) hit the lock; a plan is
+ * refused as a whole, never recorded as an opFailed step
+ * (worker/src/io/OcctBusy.h). A worker wedged
  * INSIDE a STEP call holds them for the rest of the process's life, so after
  * such a wedge every worker's STEP/XCAF calls fail busy until the app is
  * relaunched; modeling, meshing and starting new workers are unaffected
  * (starting a worker never takes these locks). */
 int onecad_worker_run(int in_fd, int out_fd, onecad_worker_log_fn log_cb, void* ctx,
-                      int log_level);
+                      int log_level) ONECAD_WORKER_NOEXCEPT;
 
 /* Crash-journal events (ABI 2). */
 #define ONECAD_WORKER_JOURNAL_JOB_BEGIN 0
@@ -124,9 +143,10 @@ typedef struct onecad_worker_journal_event {
 } onecad_worker_journal_event;
 
 /* Called SYNCHRONOUSLY on the worker's kernel thread: JOB_BEGIN when a kernel
- * job is dequeued, PLAN_OP_BEGIN before each ExecutePlan op's work starts,
- * JOB_END after the job's handler returned and before its terminal frame is
- * written. Whatever the host persists inside the callback is on record before the
+ * job is dequeued, PLAN_OP_BEGIN before each ExecutePlan / PreviewPlan op's work
+ * starts, JOB_END after the job's terminal frame was written (or its write
+ * failed) — so result serialization is inside the window. Whatever the host
+ * persists inside the callback is on record before the
  * named work runs, so a crash that kills the process inside that work can be
  * attributed without having read a single frame (in-process, frames still in
  * the socket buffer die with the process). The kernel lane is blocked while
@@ -149,11 +169,13 @@ typedef struct onecad_worker_config {
 } onecad_worker_config;
 
 /* onecad_worker_run with the full configuration; identical contract. Returns
- * ONECAD_WORKER_EXIT_INTERNAL (closing any valid fds) when `config` is NULL or
- * `struct_size` is smaller than this header's struct. Whatever the exit path —
- * invalid arguments, an exception before or during the loop — both fds are
- * closed exactly once before the call returns. */
-int onecad_worker_run_config(const onecad_worker_config* config);
+ * ONECAD_WORKER_EXIT_INTERNAL when `config` is NULL or its `struct_size` ends
+ * before `out_fd` (nothing past `struct_size` is read and nothing is closed:
+ * the fds are unknown), or when `struct_size` covers both fds but is smaller
+ * than this header's struct (both fds closed). On every other exit path —
+ * invalid fds, an exception before or during the loop — both fds are closed
+ * exactly once before the call returns. */
+int onecad_worker_run_config(const onecad_worker_config* config) ONECAD_WORKER_NOEXCEPT;
 
 #ifdef __cplusplus
 }

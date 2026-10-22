@@ -1,0 +1,11 @@
+[package]
+name = "onecad-embedded-worker"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Link and C ABI v3 declarations for the in-process OneCAD OCCT worker"
+
+[dependencies]
+
+[dev-dependencies]
+serde_json = { workspace = true }

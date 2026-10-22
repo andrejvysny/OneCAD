@@ -238,7 +238,7 @@ async fn entered_editor_defers_other_offers_and_recovery_save_paths_stay_isolate
     let mut offers = api::check_recovery(&state, host).await.unwrap();
     let offer = offers.pop().unwrap();
     assert_eq!(
-        destination(directory.path(), &offer).unwrap(),
+        destination(&directory.path().join("documents"), &offer).unwrap(),
         saved_path.canonicalize().unwrap()
     );
     let mut deferred = State {
@@ -283,7 +283,7 @@ async fn entered_editor_defers_other_offers_and_recovery_save_paths_stay_isolate
         ..offer
     };
     assert_eq!(
-        destination(directory.path(), &orphan).unwrap(),
+        destination(&directory.path().join("documents"), &orphan).unwrap(),
         directory
             .path()
             .canonicalize()

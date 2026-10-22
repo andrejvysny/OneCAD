@@ -168,6 +168,21 @@ impl PreparedScene {
     pub fn body_count(&self) -> usize {
         self.bodies.len()
     }
+    /// Resident CPU bytes this scene alone keeps alive: its body metadata and the geometry
+    /// `cache` does not also hold. Unlike [`Self::cpu_bytes`] (a preparation peak), this is
+    /// what dropping the scene frees while `cache` lives.
+    pub fn cpu_bytes_beyond(&self, cache: &PreparationCache) -> u64 {
+        let metadata =
+            self.bodies.capacity() as u64 * std::mem::size_of::<(BodyId, PreparedBody)>() as u64;
+        let unshared = self
+            .bodies
+            .iter()
+            .map(|(_, body)| &body.geometry)
+            .filter(|geometry| !cache.geometries.iter().any(|g| Arc::ptr_eq(g, geometry)))
+            .map(|geometry| geometry.cpu_bytes())
+            .sum::<u64>();
+        metadata + unshared
+    }
 }
 fn check_preparation_budget(
     scene: &SceneSnapshot,
@@ -199,6 +214,7 @@ fn check_preparation_budget(
             scene.bodies().len() as u64,
             std::mem::size_of::<GpuBody>() as u64,
         )?,
+        peak_gpu_bytes: 0,
         peak_total_bytes: 0,
     };
     budget.limits.check(
@@ -280,6 +296,7 @@ impl Renderer {
             )?,
             target_bytes: self.estimate.target_bytes,
             ibl_bytes: self.estimate.ibl_bytes,
+            peak_gpu_bytes: 0,
             peak_total_bytes: 0,
         };
         let old = MemoryEstimate {

@@ -1,0 +1,20 @@
+{
+  "name": "missing_optional_capabilities",
+  "description": "A Pencil without force, altitude, azimuth, roll or hover still authors; no hover means no hover events.",
+  "context": {"controls": [[0, 0, 100, 44]]},
+  "steps": [
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "pencil", "phase": "began", "t": 0.0, "x": 200, "y": 200}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "pencil", "phase": "moved", "t": 0.02, "x": 240, "y": 210}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "pencil", "phase": "ended", "t": 0.04, "x": 280, "y": 220}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 2, "kind": "pointer", "phase": "began", "t": 0.3, "x": 50, "y": 20},
+      {"contact": 2, "kind": "pointer", "phase": "ended", "t": 0.35, "x": 50, "y": 20}
+    ]}}
+  ]
+}

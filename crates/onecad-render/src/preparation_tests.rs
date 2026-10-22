@@ -208,3 +208,36 @@ fn cache_reuses_cpu_arrays_across_publication_revisions_and_preserves_cache_on_r
         ));
     }
 }
+
+#[test]
+fn a_cached_scene_frees_only_its_metadata_and_the_cache_holds_the_geometry() {
+    let bytes: Arc<[u8]> = Arc::from(
+        include_bytes!(
+            "../../../fixtures/render/fillet-block/00000000-0000-0000-0000-00000000f101.mesh1"
+        )
+        .as_slice(),
+    );
+    let body = SceneBody::new(BodyId::new(), 1, bytes, Default::default()).unwrap();
+    let identity = SceneIdentity {
+        session: 1,
+        scene: 1,
+    };
+    let scene = SceneSnapshot::new(identity, vec![body], Default::default()).unwrap();
+    let budget = PreparationBudget {
+        limits: RenderLimits::default(),
+        resident: MemoryEstimate::default(),
+        max_buffer: u64::MAX,
+    };
+    let mut cache = PreparationCache::default();
+    let prepared = PreparedScene::new_cached(&scene, budget, &mut cache).unwrap();
+    let metadata = std::mem::size_of::<(BodyId, mesh::PreparedBody)>() as u64;
+    let geometry = prepared.bodies[0].1.geometry.cpu_bytes();
+    assert!(geometry > 0);
+    assert_eq!(prepared.cpu_bytes_beyond(&cache), metadata);
+    assert_eq!(
+        prepared.cpu_bytes_beyond(&PreparationCache::default()),
+        metadata + geometry
+    );
+    // The preparation charge is a peak, larger than anything dropping the scene frees.
+    assert!(prepared.cpu_bytes() > metadata + geometry);
+}

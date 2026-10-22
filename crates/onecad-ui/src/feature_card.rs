@@ -48,6 +48,7 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
     let apply = can_apply(app, &tool);
     let editing = tool.phase == SessionPhase::Editing;
     let (response, out) = card(app, ctx, chrome, &tool, apply);
+    name_footer(ctx, out.ok_id, out.cancel_id);
     if let Some(response) = &response {
         focus_keys(app, response, apply);
     }
@@ -88,24 +89,40 @@ pub(crate) fn history_editor(app: &mut App, ui: &mut Ui, record_id: &str) {
                 ui.add(egui::Label::new(message).wrap().selectable(true));
             }
             ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(apply, egui::Button::new("Apply ↵"))
-                    .clicked()
-                {
+                let confirm = ui.add_enabled(apply, egui::Button::new("Apply ↵"));
+                let cancel = ui.add_enabled(
+                    current.phase == SessionPhase::Editing,
+                    egui::Button::new("Cancel"),
+                );
+                name_footer(ui.ctx(), Some(confirm.id), Some(cancel.id));
+                if confirm.clicked() {
                     app.dispatch(Action::Confirm);
                 }
-                if ui
-                    .add_enabled(
-                        current.phase == SessionPhase::Editing,
-                        egui::Button::new("Cancel"),
-                    )
-                    .clicked()
-                {
+                if cancel.clicked() {
                     crate::pill::cancel_tool(app);
                 }
             });
         });
     });
+}
+
+/// The running operation's confirm and cancel, wherever they are drawn.
+pub(crate) fn name_footer(ctx: &Context, confirm: Option<egui::Id>, cancel: Option<egui::Id>) {
+    use crate::automation::{OP_CANCEL, OP_CONFIRM, name};
+    for (id, automation) in [(confirm, OP_CONFIRM), (cancel, OP_CANCEL)] {
+        if let Some(id) = id {
+            name(ctx, id, automation);
+        }
+    }
+}
+
+/// The first declared field is the operation's primary value entry.
+pub(crate) fn field_automation(tool: &ModelSession, key: ParameterKey) -> String {
+    if tool.params.active().next().map(|field| field.key) == Some(key) {
+        crate::automation::DIMENSION_INPUT.to_owned()
+    } else {
+        crate::automation::param(key.parameter())
+    }
 }
 
 fn card(
@@ -279,7 +296,8 @@ fn number_field(
         app.doc.numeric_id = Some(response.id);
     }
     let label = format!("{} ({unit})", key.label());
-    response.widget_info(|| egui::WidgetInfo::text_edit(editing, "", &draft, &label));
+    response.widget_info(|| field_info(editing, &draft, &label));
+    crate::automation::name(ui.ctx(), response.id, &field_automation(tool, key));
     if response.gained_focus() && !focused {
         app.dispatch(Action::FocusParameter(key));
     }
@@ -287,6 +305,15 @@ fn number_field(
         app.dispatch(Action::ParameterChanged { key, text: draft });
     }
     response
+}
+
+/// The row label is painted beside the field, so assistive tech (and touch
+/// automation) gets the name only from the field itself. `text_edit`'s last
+/// argument is a placeholder, not a name.
+fn field_info(enabled: bool, text: &str, label: &str) -> egui::WidgetInfo {
+    let mut info = egui::WidgetInfo::text_edit(enabled, text, text, "");
+    info.label = Some(label.to_owned());
+    info
 }
 
 fn focus_keys(app: &mut App, response: &egui::Response, can_apply: bool) {
@@ -347,6 +374,30 @@ mod tests {
             .as_deref(),
             Some("Invalid value: unknown variable")
         );
+    }
+
+    #[test]
+    fn parameter_field_is_named_for_accessibility() {
+        let ctx = Context::default();
+        ctx.enable_accesskit();
+        let mut text = String::from("10");
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let response = ui.add(egui::TextEdit::singleline(&mut text));
+            response.widget_info(|| field_info(true, "10", "Extrude distance (mm)"));
+        });
+        output.textures_delta.clear();
+        let update = output
+            .platform_output
+            .accesskit_update
+            .expect("accesskit enabled");
+        let field = update
+            .nodes
+            .iter()
+            .map(|(_, node)| node)
+            .find(|node| node.role() == egui::accesskit::Role::TextInput)
+            .expect("text input node");
+        assert_eq!(field.label(), Some("Extrude distance (mm)"));
+        assert_eq!(field.value(), Some("10"));
     }
 
     #[test]

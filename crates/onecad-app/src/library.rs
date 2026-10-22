@@ -38,8 +38,7 @@ use crate::dto::{
 use crate::error::ApiError;
 use crate::export::GeometryExporter;
 use crate::state::AppState;
-use crate::worker::manager::SupervisorConfig;
-use crate::worker::{resolve_worker_path, MeshProvider, SolverEngine, WorkerManager};
+use crate::worker::{MeshProvider, SolverEngine, WorkerBackend, WorkerManager, WorkerRole};
 
 /// `ONECAD_LIBRARY_ROOT`, else `<app_data_dir>/library`; `None` only when
 /// neither resolves (a headless/permission-denied environment — mirrors
@@ -927,6 +926,7 @@ fn variable_overrides(
 /// the user is editing. The scratch runtime is never published, never locked
 /// into [`AppState`], and is dropped with the worker.
 async fn rebake_document_component(
+    backend: &WorkerBackend,
     root: &Path,
     package: &ComponentPackage,
     current: &PlaceComponentParams,
@@ -950,6 +950,7 @@ async fn rebake_document_component(
     let staged = match std::fs::write(&document_path, &frozen) {
         Ok(()) => {
             replay_and_bake(
+                backend,
                 &document_path,
                 &geometry_path,
                 &overrides,
@@ -968,17 +969,17 @@ async fn rebake_document_component(
 /// The worker-facing half of [`rebake_document_component`], split out so the
 /// scratch directory is swept whatever this returns.
 async fn replay_and_bake(
+    backend: &WorkerBackend,
     document_path: &Path,
     geometry_path: &Path,
     overrides: &[(String, f64)],
     component_id: &str,
 ) -> Result<StagedBlob, ApiError> {
-    let bin = resolve_worker_path().ok_or_else(|| {
+    let worker = EphemeralWorker(backend.spawn(WorkerRole::Rebake).ok_or_else(|| {
         ApiError::Internal(
             "setComponentParams: no geometry worker binary resolved — a re-bake needs one".into(),
         )
-    })?;
-    let worker = EphemeralWorker(WorkerManager::spawn(SupervisorConfig::production(bin)));
+    })?);
     if !worker.0.wait_ready(REBAKE_WORKER_READY_TIMEOUT).await {
         return Err(ApiError::Worker(format!(
             "setComponentParams: the re-bake worker for {component_id} never became ready"
@@ -1213,6 +1214,7 @@ pub async fn set_component_params_at(
             ..
         } => {
             let staged = rebake_document_component(
+                state.services().backend(),
                 root,
                 &package,
                 &current,

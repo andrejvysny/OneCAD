@@ -7,7 +7,9 @@ license = "MIT OR Apache-2.0"
 description = "Generate checked MESH1 fixtures through shared application services and the OCCT worker"
 
 [dependencies]
-onecad-app = { workspace = true }
+# Desktop tool: spawns the sidecar worker (explicit, so it survives the
+# workspace dependency dropping onecad-app's default features).
+onecad-app = { workspace = true, features = ["sidecar"] }
 onecad-core = { workspace = true }
 onecad-protocol = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

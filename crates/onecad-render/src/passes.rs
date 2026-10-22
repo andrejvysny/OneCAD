@@ -70,7 +70,9 @@ impl Renderer {
                 self.fullscreen(encoder, view, pipeline, &target.post_binds[bind]);
             }
         }
-        if studio {
+        // The prepass feeds only ambient occlusion; profiles without it skip both.
+        let ao = studio && self.profile.ambient_occlusion();
+        if ao {
             let mut pass = begin(
                 encoder,
                 "depth/normal",
@@ -90,7 +92,7 @@ impl Renderer {
                 pass.draw(0..3, 0..1);
             }
         }
-        if studio {
+        if ao {
             for (view, pipeline, bind) in [
                 (&target.ao_raw, &self.pipelines.gtao, 3),
                 (&target.ao_tmp, &self.pipelines.ao_h, 4),

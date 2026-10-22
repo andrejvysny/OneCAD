@@ -22,6 +22,10 @@ Their Rust replacements keep the same command-specific inputs:
 | `bake-cad-icons.ts` | `cargo xtask bake-cad-icons` |
 | `bun test scripts/tests` | `cargo test -p xtask` |
 
+`cargo xtask ios-simulator-gate [--provenance-only | --verify-only] DIRECTORY`
+is new (no former script): the iPad simulator gate and its verifier,
+[docs/ios/SIMULATOR_GATE.md](../docs/ios/SIMULATOR_GATE.md).
+
 `make check-tooling` runs the live guards and icon equivalence check.
 `make test-tooling` runs their regression tests. `check-hygiene` rejects retired
 setup and duplicate management files, including known ignored root paths.

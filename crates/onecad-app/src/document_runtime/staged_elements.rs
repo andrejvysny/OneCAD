@@ -55,25 +55,34 @@ impl DocumentRuntime {
     }
 
     /// Promotes TopoKey picks on one body for a tool's operands. Returns refs in
-    /// pick order with intent and anchor filled, so preview and commit carry the
-    /// same bytes. Does not touch `regen.elements`, `dirty` or the revision.
+    /// pick order with intent filled, so preview and commit carry the same bytes.
+    /// Does not touch `regen.elements`, `dirty` or the revision.
     pub async fn stage_selection(
         &mut self,
         ticket: &StageTicket,
         body: BodyId,
         picks: Vec<TopoKey>,
     ) -> Result<Vec<ElementRef>, EngineError> {
+        let picks = picks.into_iter().map(|key| (key, None)).collect();
+        self.stage_anchored(ticket, body, picks).await
+    }
+
+    /// [`stage_selection`](Self::stage_selection) with each pick's anchor, which
+    /// the ref and its staged evidence then carry. Every commit replays from an
+    /// empty partition, so a staged id binds by descriptor + anchor (SCHEMA §10);
+    /// without the anchor, an edge whose only rival differs by sidedness alone
+    /// (a corner edge beside an earlier fillet's boundary) misses the 0.10 margin.
+    pub async fn stage_anchored(
+        &mut self,
+        ticket: &StageTicket,
+        body: BodyId,
+        picks: Vec<(TopoKey, Option<AnchorIntent>)>,
+    ) -> Result<Vec<ElementRef>, EngineError> {
         if !self.stage_ticket_is_current(ticket) {
             return Err(stage_stale());
         }
-        let requested = picks.clone();
-        let minted = self
-            .promote_inner(
-                ticket.snapshot,
-                body,
-                picks.into_iter().map(|key| (key, None)).collect(),
-            )
-            .await?;
+        let requested: Vec<TopoKey> = picks.iter().map(|(key, _)| key.clone()).collect();
+        let minted = self.promote_inner(ticket.snapshot, body, picks).await?;
         // Guard every bound id at once, before any later refusal can drop it.
         for (id, evidence) in &minted {
             if !self.regen.elements.contains(id) {

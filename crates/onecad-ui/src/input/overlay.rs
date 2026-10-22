@@ -11,6 +11,7 @@ pub(super) enum Owner {
     Extensions,
     Constraints,
     Placement,
+    Palette,
 }
 
 pub(super) fn owner(ui: &UiState, entry_open: bool, document: bool, popup: bool) -> Option<Owner> {
@@ -34,6 +35,8 @@ pub(super) fn owner(ui: &UiState, entry_open: bool, document: bool, popup: bool)
         Some(Owner::Constraints)
     } else if ui.editor_facade.placing.is_some() {
         Some(Owner::Placement)
+    } else if ui.tool_palette.is_some() {
+        Some(Owner::Palette)
     } else {
         None
     }
@@ -92,6 +95,7 @@ pub(super) fn dismiss(
         }
         Owner::Constraints => ui.constraints_open = false,
         Owner::Placement => ui.editor_facade.placing = None,
+        Owner::Palette => ui.tool_palette = None,
         Owner::Document | Owner::Popup => unreachable!(),
     }
     // A dismissed owner must not expose another command to the rest of this frame.

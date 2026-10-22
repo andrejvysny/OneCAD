@@ -11,13 +11,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             let (rect, response) =
                 ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
             crate::sketch_numeric::capture_viewport(ui.ctx(), rect);
+            crate::viewport_widgets::capture_canvas(ui.ctx(), rect, ui.layer_id());
             response.widget_info(|| {
                 egui::WidgetInfo::labeled(
-                    egui::Role::Image,
+                    egui::Role::Canvas,
                     true,
                     "Model viewport; select a closed profile",
                 )
             });
+            crate::automation::name(ui.ctx(), response.id, crate::automation::VIEWPORT);
             let Some(display) = app.doc.display.clone() else {
                 crate::sketch_creation::clear_candidate(ui.ctx());
                 return;
@@ -25,7 +27,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             let viewport = Viewport {
                 width: f64::from(rect.width()),
                 height: f64::from(rect.height()),
-                scale_factor: f64::from(ui.ctx().pixels_per_point()),
+                scale_factor: render_scale(app, rect, ui.ctx().pixels_per_point()),
             };
             if !app.viewport_ready() {
                 ui.painter().text(
@@ -127,8 +129,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     crate::sketch_gestures::viewport(app, ui, rect, &response, &view);
                     return;
                 }
+                crate::sketch_pen_stroke::bar(app, ui, rect, &view);
                 if !overlay_owns && !dimension_owns
                     && (crate::sketch_gestures::delivered_inside(app, ui, rect)
+                        || crate::sketch_pen_stroke::drawing(ui.ctx())
                         || ui.input(|input| input.pointer.hover_pos()).is_some_and(|position| {
                             crate::viewport_widgets::allows_pointer(ui, rect, position)
                         }))
@@ -141,6 +145,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 return;
             }
             let mode = crate::model_pick::track(ui, rect);
+            let double = response.double_clicked()
+                || response.clicked() && crate::viewport_widgets::pencil_double_tap(ui.ctx());
             if (response.clicked() || response.double_clicked())
                 && !overlay_owns
                 && !crate::viewport_selection::sectioned(app)
@@ -150,7 +156,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 && let Some(position) = response.interact_pointer_pos()
                 && crate::viewport_widgets::allows_pointer(ui, rect, position)
             {
-                crate::model_pick::pick(
+                crate::model_pick::pick_with_tolerance(
                     app,
                     &display,
                     &view,
@@ -158,8 +164,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         f64::from(position.x - rect.min.x),
                         f64::from(position.y - rect.min.y),
                     ),
-                    response.double_clicked(),
+                    double,
                     mode,
+                    crate::viewport_widgets::edge_tolerance(ui.ctx()),
                 );
             }
         });
@@ -171,6 +178,30 @@ fn drawable_capture(
     viewport: Viewport,
 ) -> Option<ViewSnapshot> {
     view.filter(|view| view.identity().scene == scene && view.viewport() == viewport)
+}
+
+/// Physical pixels per point for the scene image: the display scale times the render
+/// profile's scene scale (1 on Desktop; below 1 for large Mobile viewports or under memory
+/// pressure). Picking, the camera and egui overlays work in points, so only the scene
+/// image's resolution changes; it is composited up to the native rect.
+fn render_scale(app: &mut App, rect: egui::Rect, pixels_per_point: f32) -> f64 {
+    let profile = app.renderer.profile();
+    let (factor, scale) = scale_factor(profile, app.render_scale_limit, rect, pixels_per_point);
+    app.scene_scale = scale;
+    factor
+}
+
+/// `(scale_factor, scene scale)` of a viewport `rect` at `pixels_per_point`.
+fn scale_factor(
+    profile: onecad_render::RenderProfile,
+    limit: f64,
+    rect: egui::Rect,
+    pixels_per_point: f32,
+) -> (f64, f64) {
+    let native = f64::from(pixels_per_point);
+    let pixels = f64::from(rect.width()) * f64::from(rect.height()) * native * native;
+    let scale = profile.scene_scale(pixels, limit);
+    (native * scale, scale)
 }
 
 fn physical_size(viewport: Viewport) -> [u32; 2] {
@@ -244,7 +275,7 @@ fn navigate_input(
                 && response.hovered()
             {
                 if let crate::navigation::Motion::Orbit(delta) = &mut motion
-                    && !cfg!(target_os = "macos")
+                    && !cfg!(any(target_os = "macos", target_os = "ios"))
                 {
                     *delta = -*delta;
                 }

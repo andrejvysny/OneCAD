@@ -7,7 +7,7 @@ fn home_actions_have_real_intents() {
     assert_eq!(specs.len(), 2);
     assert_eq!(specs[1].title, "Open or import");
     assert_eq!(specs[1].subtitle, ".onecad and STEP · ⌘O");
-    assert_eq!(specs[1].request, Some(Request::Import));
+    assert_eq!(specs[1].request, Some(Request::Import(None)));
 }
 
 #[test]
@@ -81,5 +81,20 @@ fn brand_symbol_decodes_for_both_themes() {
     for dark in [false, true] {
         let texture = brand_symbol(&ctx, dark).expect("embedded brand symbol decodes");
         assert_eq!(texture.size(), [56, 56]);
+    }
+}
+
+/// The brand decode left eframe; desktop pixels must not change.
+#[cfg(feature = "desktop")]
+#[test]
+fn brand_decode_matches_the_eframe_decoder() {
+    for png in [
+        &include_bytes!("../../../../assets/native/brand/png/symbol-dark-56.png")[..],
+        &include_bytes!("../../../../assets/native/brand/png/symbol-56.png")[..],
+    ] {
+        let reference = eframe::icon_data::from_png_bytes(png).unwrap();
+        let (size, rgba) = decode_rgba8(png).unwrap();
+        assert_eq!(size, [reference.width as usize, reference.height as usize]);
+        assert_eq!(rgba, reference.rgba);
     }
 }

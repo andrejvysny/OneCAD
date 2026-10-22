@@ -18,13 +18,17 @@ pub fn contents(app: &mut App, ui: &mut egui::Ui) {
         .device
         .features()
         .contains(wgpu::Features::FLOAT32_BLENDABLE);
+    // The Mobile render profile has no supersampling (target memory).
+    let supersampling_offered = app.renderer.profile().supersampling();
     let mut changed = display_modes(ui, &mut options);
     projection(app, ui);
     egui::CollapsingHeader::new("More settings")
         .id_salt("display-more-settings")
         .show(ui, |ui| {
             changed |= xray(ui, &mut options, xray_supported);
-            changed |= supersampling(ui, &mut options);
+            if supersampling_offered {
+                changed |= supersampling(ui, &mut options);
+            }
             changed |= ui
                 .add_enabled_ui(
                     app.doc.interaction.tool.is_none() && !app.sketch_active(),

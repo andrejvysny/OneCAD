@@ -24,7 +24,7 @@ pub(super) fn initial_fields(
         SketchTool::Arc => arc_values(draft),
         SketchTool::Slot => slot_values(draft),
         SketchTool::ThreePointArc => vec![three_point_radius(draft)],
-        SketchTool::Select => Vec::new(),
+        SketchTool::Select | SketchTool::PenStroke => Vec::new(),
     };
     values
         .into_iter()
@@ -144,7 +144,9 @@ pub(super) fn dimensions(draft: &Draft, app: &App) -> Result<CreationDimensions,
         SketchTool::ThreePointArc => CreationDimensions::ThreePointArc {
             radius: values[0].clone(),
         },
-        SketchTool::Select => return Err("Choose a creation tool".into()),
+        SketchTool::Select | SketchTool::PenStroke => {
+            return Err("Choose a creation tool".into());
+        }
     })
 }
 

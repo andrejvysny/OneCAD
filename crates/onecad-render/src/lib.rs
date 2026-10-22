@@ -22,6 +22,7 @@ mod options;
 mod passes;
 mod pipelines;
 mod prepared;
+mod profile;
 mod resize;
 mod section_contours;
 mod section_contours_gpu;
@@ -36,6 +37,7 @@ pub use limits::{MemoryEstimate, RenderLimits};
 pub use mesh::{BodyStyle, PreviewIdentity};
 pub use options::{required_device_features, DisplayMode, RenderOptions};
 pub use prepared::{PreparationBudget, PreparationCache, PreparedScene};
+pub use profile::{RenderProfile, MIN_SCENE_SCALE, MOBILE_MAX_SCENE_PIXELS, SCENE_SCALE_STEP};
 pub use section_contours::{PreparedSectionContours, SectionContourKey};
 pub use section_contours_worker::SectionContourWorker;
 pub use thumbnail::Thumbnail;
@@ -94,22 +96,37 @@ pub struct Renderer {
     highlights: Option<highlights::GpuHighlights>,
     section_contours: [Option<section_contours::GpuSectionContours>; 2],
     options: RenderOptions,
+    profile: RenderProfile,
     contact_dirty: bool,
     blit: Option<thumbnail::BlitResources>,
 }
 
 impl Renderer {
+    /// A [`RenderProfile::Desktop`] renderer.
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         size: [u32; 2],
         limits: RenderLimits,
     ) -> Result<Self, RenderError> {
+        Self::with_profile(device, queue, size, limits, RenderProfile::Desktop)
+    }
+    pub fn with_profile(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        size: [u32; 2],
+        limits: RenderLimits,
+        profile: RenderProfile,
+    ) -> Result<Self, RenderError> {
         limits.validate_size(size, device)?;
         let estimate = limits.check(
             MemoryEstimate {
-                target_bytes: limits::quality_target_bytes(size, RenderOptions::default())?,
-                ibl_bytes: limits::ibl_bytes(),
+                target_bytes: limits::quality_target_bytes(
+                    size,
+                    RenderOptions::default(),
+                    profile,
+                )?,
+                ibl_bytes: limits::ibl_bytes(profile),
                 geometry_bytes: std::mem::size_of::<FrameU>() as u64,
                 ..Default::default()
             },
@@ -123,7 +140,7 @@ impl Renderer {
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
-        let ibl = ibl::Ibl::build(&gpu, &sampler);
+        let ibl = ibl::Ibl::build(&gpu, &sampler, profile.ibl());
         let targets = if size.contains(&0) {
             None
         } else {
@@ -133,6 +150,7 @@ impl Renderer {
                 &ibl,
                 size,
                 RenderOptions::default(),
+                profile,
             )?)
         };
         let frame_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -170,6 +188,7 @@ impl Renderer {
             highlights: None,
             section_contours: [None, None],
             options: RenderOptions::default(),
+            profile,
             contact_dirty: true,
             blit: None,
         })
@@ -188,6 +207,13 @@ impl Renderer {
     }
     pub fn memory_estimate(&self) -> MemoryEstimate {
         self.estimate
+    }
+    pub fn profile(&self) -> RenderProfile {
+        self.profile
+    }
+    /// Bytes of the targets this renderer would allocate for `size` with its current options.
+    pub fn target_bytes(&self, size: [u32; 2]) -> Result<u64, RenderError> {
+        limits::quality_target_bytes(size, self.options, self.profile)
     }
     pub fn scene_identity(&self) -> Option<SceneIdentity> {
         self.scene_identity
@@ -386,6 +412,7 @@ impl Renderer {
                 false,
             )?,
             self.options,
+            self.profile,
         );
         let selected = frame::with_options(
             frame::uniform(
@@ -396,6 +423,7 @@ impl Renderer {
                 false,
             )?,
             self.options,
+            self.profile,
         );
         let mut preview_frame = frame::with_options(
             frame::uniform(
@@ -406,6 +434,7 @@ impl Renderer {
                 true,
             )?,
             self.options,
+            self.profile,
         );
         preview_frame.display[2] = frame::PREVIEW_HIDDEN_EDGE_ALPHA;
         let highlight_frames = if self.highlights.is_some() {
@@ -418,6 +447,7 @@ impl Renderer {
                         highlights::HighlightTone::Selected,
                     )?,
                     self.options,
+                    self.profile,
                 ),
                 frame::with_options(
                     frame::highlight_uniform(
@@ -427,6 +457,7 @@ impl Renderer {
                         highlights::HighlightTone::Hover,
                     )?,
                     self.options,
+                    self.profile,
                 ),
             ])
         } else {

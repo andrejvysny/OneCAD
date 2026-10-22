@@ -1,0 +1,10 @@
+digest b0eb8ba6d6495ebf
+orbit c1 Start (312.000,304.000) d(0.000,0.000)
+orbit c1 Move (318.000,306.000) d(6.000,2.000)
+orbit c1 Move (324.000,308.000) d(6.000,2.000)
+orbit c1 Move (330.000,310.000) d(6.000,2.000)
+orbit c1 Move (336.000,312.000) d(6.000,2.000)
+orbit c1 Move (342.000,314.000) d(6.000,2.000)
+orbit c1 Move (348.000,316.000) d(6.000,2.000)
+orbit c1 End (354.000,318.000) d(0.000,0.000)
+stats NormalizerStats { invalid: 0, duplicate_coalesced: 0, stale: 0, unknown_contact: 0, old_generation: 0, refused_contacts: 0, estimation_matched: 0, estimation_unmatched: 0, merged_moves: 0 }

@@ -74,6 +74,7 @@ struct Settled {
 pub struct Tabs {
     runtime: Arc<ServiceRuntime>,
     paths: QaPaths,
+    dialogs: Arc<dyn onecad_app::host::DialogPort>,
     budget: onecad_render::PreparationBudget,
     /// Open documents other than the active one, in tab order around it.
     pub(crate) parked: Vec<DocumentEditor>,
@@ -93,11 +94,13 @@ impl Tabs {
     pub fn new(
         runtime: Arc<ServiceRuntime>,
         paths: QaPaths,
+        dialogs: Arc<dyn onecad_app::host::DialogPort>,
         budget: onecad_render::PreparationBudget,
     ) -> Self {
         Self {
             runtime,
             paths,
+            dialogs,
             budget,
             parked: Vec::new(),
             closing: Vec::new(),
@@ -108,11 +111,22 @@ impl Tabs {
         }
     }
 
+    /// The service runtime every bridge of this window shares.
+    pub(crate) fn runtime(&self) -> &Arc<ServiceRuntime> {
+        &self.runtime
+    }
+
     pub fn bridge(&self, context: egui::Context, startup: bool) -> Result<Bridge, String> {
         let mut paths = self.paths.clone();
         // Only the first window bridge may open the launch document.
         paths.open_on_start &= startup;
-        let bridge = Bridge::start_on(self.runtime.clone(), paths, context, self.budget)?;
+        let bridge = Bridge::start_on(
+            self.runtime.clone(),
+            paths,
+            self.dialogs.clone(),
+            context,
+            self.budget,
+        )?;
         if !startup && let Ok(mut recovery) = bridge.shared.recovery.lock() {
             // Crash recovery is discovered once per window, by the startup bridge.
             recovery.checked = true;
@@ -299,6 +313,8 @@ impl App {
         for doc in stopped {
             self.release_thumbnail(doc.thumbnail);
         }
+        // A parked document may have received a prepared scene while draining.
+        self.enforce_parked_budget();
     }
 
     /// Keeps the outgoing document's last drawn frame for the ⌃Tab switcher. Only
@@ -331,10 +347,26 @@ impl App {
         self.release_thumbnail(previous);
     }
 
-    fn release_thumbnail(&mut self, thumbnail: Option<Thumbnail>) {
+    pub(crate) fn release_thumbnail(&mut self, thumbnail: Option<Thumbnail>) {
         if let Some(thumbnail) = thumbnail {
             self.gpu.renderer.write().free_texture(&thumbnail.texture);
         }
+    }
+
+    /// Asks every open document's autosave to write its pending recovery now.
+    /// Returns each bridge with its finished-flush count before the request.
+    pub fn request_recovery_flush(&self) -> Vec<(Arc<crate::bridge::Shared>, u64)> {
+        std::iter::once(&self.doc)
+            .chain(&self.tabs.parked)
+            .map(|doc| {
+                let shared = doc.bridge.shared.clone();
+                let before = shared
+                    .recovery_flushes
+                    .load(std::sync::atomic::Ordering::Acquire);
+                shared.recovery_flush.notify_one();
+                (shared, before)
+            })
+            .collect()
     }
 
     /// The background tab is gone, so its outcome is the active tab's to show,
@@ -449,6 +481,8 @@ impl App {
     /// its own scene is drawn, and a consumed scene is re-prepared, same identity.
     fn activated(&mut self) {
         set_current_tab(self.doc.tab);
+        // The outgoing document's thumbnail was just captured.
+        self.enforce_parked_budget();
         self.tabs.activations += 1;
         self.doc.last_active = self.tabs.activations;
         self.doc.view = None;

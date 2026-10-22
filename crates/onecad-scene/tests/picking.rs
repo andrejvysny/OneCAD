@@ -88,6 +88,33 @@ fn edge_aperture_is_eight_logical_pixels_at_both_scales_and_projections() {
 }
 
 #[test]
+fn edge_aperture_follows_the_supplied_tolerance_in_both_traversals() {
+    let edge = vec![[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+    let s = scene(&[], &[], &[edge]);
+    for projection in [Projection::Perspective, Projection::Orthographic] {
+        for scale in [1.0, 2.0] {
+            let v = view(projection, scale);
+            for (tolerance, pixels, expected) in [
+                (22.0, 21.99, true),
+                (22.0, 22.01, false),
+                (8.0, 8.01, false),
+                // Invalid tolerances fall back to the default eight pixels.
+                (f64::NAN, 7.99, true),
+                (-1.0, 8.01, false),
+            ] {
+                let at = CENTER + DVec2::Y * pixels;
+                let policy = PickPolicy::FacesAndEdges;
+                let indexed = pick_with_tolerance(&s, &v, v.identity(), at, policy, tolerance);
+                let brute =
+                    pick_brute_force_with_tolerance(&s, &v, v.identity(), at, policy, tolerance);
+                assert_eq!(indexed.unwrap().is_some(), expected, "{tolerance} {pixels}");
+                assert_eq!(brute.unwrap().is_some(), expected, "{tolerance} {pixels}");
+            }
+        }
+    }
+}
+
+#[test]
 fn nearest_face_occludes_edges_only_beyond_two_pixel_depth_slack() {
     for depth in [2.0, 10.0, 100.0] {
         for projection in [Projection::Perspective, Projection::Orthographic] {

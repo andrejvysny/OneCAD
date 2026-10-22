@@ -66,7 +66,7 @@ pub async fn execute(
 }
 
 pub fn refresh_recents(backend: &Backend) {
-    let root = backend.paths.root.join("documents");
+    let root = backend.paths.documents.clone();
     let mut entries = onecad_app::recents::list(&backend.host);
     entries.retain(|entry| {
         Path::new(&entry.path)
@@ -96,7 +96,10 @@ async fn run(backend: &mut Backend, request: Request) -> Result<Outcome, String>
     }
     let (request, discard) = match request {
         Request::DiscardAndReplace(request)
-            if matches!(*request, Request::New | Request::Open(_) | Request::Import) =>
+            if matches!(
+                *request,
+                Request::New | Request::Open(_) | Request::Import(_)
+            ) =>
         {
             let ticket = api::prepare_replacement_discard(&backend.state)
                 .await
@@ -171,14 +174,16 @@ async fn run_intent(backend: &mut Backend, request: Request) -> Result<Outcome, 
             };
             open(backend, &path, false).await
         }
-        Request::Import => {
-            let Some(path) = api::import_file_dialog(backend.host.clone())
-                .await
-                .map_err(|e| e.to_string())?
-            else {
-                return Ok(Outcome::Cancelled);
+        Request::Import(path) => {
+            let path = match path {
+                Some(path) => path,
+                None => match api::import_file_dialog(backend.host.clone()).await {
+                    Ok(Some(path)) => PathBuf::from(path),
+                    Ok(None) => return Ok(Outcome::Cancelled),
+                    Err(e) => return Err(e.to_string()),
+                },
             };
-            open(backend, Path::new(&path), true).await
+            open(backend, &path, true).await
         }
         Request::InsertStep => insert_step(backend).await,
     }
@@ -258,7 +263,7 @@ async fn open(backend: &mut Backend, source: &Path, import: bool) -> Result<Outc
     let path = if step {
         source.to_owned()
     } else {
-        copy_for_open(&backend.paths.root.join("documents"), source)?
+        copy_for_open(&backend.paths.documents, source)?
     };
     match replace_from_path(backend, &path, step).await {
         Err(onecad_app::error::ApiError::AlreadyOpen { host, .. })
@@ -333,7 +338,7 @@ async fn save(backend: &Backend, save_as: bool) -> Result<Outcome, String> {
     save_to_qa(
         &backend.state,
         backend.host.clone(),
-        &backend.paths.root.join("documents"),
+        &backend.paths.documents,
         save_as,
     )
     .await
@@ -395,7 +400,7 @@ async fn export(backend: &Backend, format: ExportFormat) -> Result<Outcome, Stri
     let Some(path) = paths.first() else {
         return Ok(Outcome::Cancelled);
     };
-    let path = confined_target(&backend.paths.root.join("documents"), Path::new(path))?;
+    let path = confined_target(&backend.paths.documents, Path::new(path))?;
     validate_export_extension(format, &path)?;
     let target = Some(path.to_string_lossy().into_owned());
     let result = match format {

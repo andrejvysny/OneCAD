@@ -21,22 +21,33 @@ static NEXT_SNAPSHOT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 type Applications = BTreeMap<String, PathBuf>;
 type Prepared = (Reply, Option<(PackageSummary, CommandExecution)>);
 
+#[cfg(feature = "desktop")]
+async fn pick_package_folder(update: bool) -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_title(if update {
+            "Choose updated extension package folder"
+        } else {
+            "Choose extension package folder"
+        })
+        .pick_folder()
+        .await
+        .map(|folder| folder.path().to_path_buf())
+}
+
+/// Hosts without the desktop folder dialog (iPadOS) install no package folders.
+#[cfg(not(feature = "desktop"))]
+async fn pick_package_folder(_update: bool) -> Option<PathBuf> {
+    None
+}
+
 pub(crate) async fn execute(backend: &Backend, request: Request) -> Result<Reply, String> {
     let update = matches!(&request, Request::UpdateFolder { .. });
     let source = if matches!(
         &request,
         Request::InstallFolder | Request::UpdateFolder { .. }
     ) {
-        match rfd::AsyncFileDialog::new()
-            .set_title(if update {
-                "Choose updated extension package folder"
-            } else {
-                "Choose extension package folder"
-            })
-            .pick_folder()
-            .await
-        {
-            Some(folder) => Some(folder.path().to_path_buf()),
+        match pick_package_folder(update).await {
+            Some(folder) => Some(folder),
             None => {
                 return snapshot(
                     backend,
@@ -478,7 +489,8 @@ async fn run_plan(
     Ok((status, false))
 }
 
-#[cfg(all(test, unix))]
+// The real-guest pipeline spawns the sidecar worker, a desktop backend.
+#[cfg(all(test, unix, feature = "desktop"))]
 mod pipeline;
 #[cfg(test)]
 mod tests;

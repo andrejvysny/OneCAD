@@ -3,7 +3,7 @@ pub(crate) use crate::event_mailbox::{BackendEvent, EventMailbox};
 use crate::{profiles::Profile, qa::QaPaths, service_runtime::ServiceRuntime, services};
 use onecad_app::{
     dto::DocumentProjection,
-    host::{AppEvent, EventSink, HostContext, HostPaths},
+    host::{AppEvent, DialogPort, EventSink, HostContext, HostPaths},
     process::ProcessServices,
     state::AppState,
 };
@@ -43,7 +43,6 @@ pub enum Command {
     },
     Sketch(Box<crate::sketch_services::Request>),
     /// Non-dirtying operand staging; FIFO with `Apply` on this lane.
-    #[allow(dead_code, reason = "the operand session slice (S-315c-ui) submits it")]
     Operands(Box<crate::operand_services::Request>),
     Apply {
         tag: RequestTag,
@@ -127,6 +126,10 @@ pub enum Message {
 
 pub struct Shared {
     pub(crate) input_trace: Arc<crate::input_trace::Trace>,
+    /// The started document host, for acceptance probes; cleared when the actor
+    /// ends so the host context's sink (which holds this `Shared`) is released.
+    #[cfg(feature = "semantic-probe")]
+    pub(crate) probe: Mutex<Option<crate::host::DocumentAccess>>,
     #[cfg(test)]
     pub fail_next_gesture_capture: std::sync::atomic::AtomicBool,
     #[cfg(test)]
@@ -151,7 +154,13 @@ pub struct Shared {
     pub stopping: std::sync::atomic::AtomicBool,
     pub shutdown: Notify,
     pub recovery_flush: Notify,
+    /// Recovery flushes this actor has finished (a host awaits one after asking).
+    pub recovery_flushes: std::sync::atomic::AtomicU64,
     pub budget: Mutex<onecad_render::PreparationBudget>,
+    /// The last preparation's geometry, reused by the next one. Shared so a window can
+    /// count and drop a parked document's cache (`display_budget`); a preparation moves
+    /// it out and back, never holding the lock while it works.
+    pub preparation_cache: Mutex<onecad_render::PreparationCache>,
     pub host_budget: Arc<crate::budget::HostBudget>,
     /// The document host's process identity, set once its actor has started.
     pub host: std::sync::atomic::AtomicU64,
@@ -164,6 +173,8 @@ impl Shared {
     pub(crate) fn new(context: egui::Context, budget: onecad_render::PreparationBudget) -> Self {
         Self {
             input_trace: crate::input_trace::Trace::from_environment(&context),
+            #[cfg(feature = "semantic-probe")]
+            probe: Mutex::new(None),
             #[cfg(test)]
             fail_next_gesture_capture: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -185,12 +196,14 @@ impl Shared {
             activity: Mutex::new(None),
             render_receipt: Mutex::new(None),
             budget: Mutex::new(budget),
+            preparation_cache: Mutex::new(Default::default()),
             host_budget: Arc::new(crate::budget::HostBudget::default()),
             host: std::sync::atomic::AtomicU64::new(0),
             valid: std::sync::atomic::AtomicBool::new(false),
             stopping: std::sync::atomic::AtomicBool::new(false),
             shutdown: Notify::new(),
             recovery_flush: Notify::new(),
+            recovery_flushes: std::sync::atomic::AtomicU64::new(0),
             generation: std::sync::atomic::AtomicU64::new(0),
             notify: Notify::new(),
             context,
@@ -201,6 +214,17 @@ impl Shared {
             .lock()
             .map(|budget| *budget)
             .map_err(|_| "renderer preparation budget poisoned".into())
+    }
+    pub(crate) fn take_preparation_cache(&self) -> onecad_render::PreparationCache {
+        self.preparation_cache
+            .lock()
+            .map(|mut cache| std::mem::take(&mut *cache))
+            .unwrap_or_default()
+    }
+    pub(crate) fn restore_preparation_cache(&self, cache: onecad_render::PreparationCache) {
+        if let Ok(mut slot) = self.preparation_cache.lock() {
+            *slot = cache;
+        }
     }
     pub fn wake(&self) {
         self.input_trace
@@ -280,13 +304,14 @@ pub struct Bridge {
 
 impl Bridge {
     /// A bridge on its own private service runtime (isolated tests).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "desktop"))]
     pub fn start(
         paths: QaPaths,
         context: egui::Context,
         budget: onecad_render::PreparationBudget,
     ) -> Result<Self, String> {
-        Self::start_on(ServiceRuntime::start()?, paths, context, budget)
+        let dialogs = Arc::new(crate::dialogs::NativeDialogs::new(paths.documents.clone()));
+        Self::start_on(ServiceRuntime::start()?, paths, dialogs, context, budget)
     }
 
     /// A bridge whose document host shares `runtime` and its process services with
@@ -294,6 +319,7 @@ impl Bridge {
     pub fn start_on(
         runtime: Arc<ServiceRuntime>,
         paths: QaPaths,
+        dialogs: Arc<dyn DialogPort>,
         context: egui::Context,
         budget: onecad_render::PreparationBudget,
     ) -> Result<Self, String> {
@@ -303,6 +329,7 @@ impl Bridge {
         let shared = Arc::new(Shared::new(context, budget));
         runtime.spawn_actor(actor(
             paths,
+            dialogs,
             runtime.services().clone(),
             shared.clone(),
             receiver,
@@ -492,12 +519,12 @@ pub(crate) struct Backend {
     pub startup_opened: bool,
     pub scene_revision: u64,
     pub previous_scene: Option<(Arc<SceneSnapshot>, Arc<crate::budget::Lease>)>,
-    pub preparation_cache: onecad_render::PreparationCache,
     pub preparation_lease: Option<Arc<crate::budget::Lease>>,
 }
 
 async fn actor(
     paths: QaPaths,
+    dialogs: Arc<dyn DialogPort>,
     services: Arc<ProcessServices>,
     shared: Arc<Shared>,
     mut receiver: async_mpsc::Receiver<Envelope>,
@@ -516,9 +543,7 @@ async fn actor(
             shared: shared.clone(),
             failed: std::sync::atomic::AtomicBool::new(false),
         }),
-        dialogs: Arc::new(crate::dialogs::NativeDialogs::new(
-            paths.root.join("documents"),
-        )),
+        dialogs,
     };
     let state = Arc::new(AppState::with_services(services));
     shared
@@ -529,6 +554,15 @@ async fn actor(
         shared.wake();
         return;
     }
+    #[cfg(feature = "semantic-probe")]
+    if let Ok(mut probe) = shared.probe.lock() {
+        *probe = Some(crate::host::DocumentAccess {
+            state: state.clone(),
+            host: host.clone(),
+            documents: paths.documents.clone(),
+            runtime: tokio::runtime::Handle::current(),
+        });
+    }
     let mut backend = Backend {
         state,
         host,
@@ -538,7 +572,6 @@ async fn actor(
         startup_opened: false,
         scene_revision: 0,
         previous_scene: None,
-        preparation_cache: Default::default(),
         preparation_lease: None,
     };
     let mut gestures = crate::gesture_services::Service::new();
@@ -565,6 +598,7 @@ async fn actor(
                 {
                     eprintln!("Viewport recovery checkpoint failed: {error}");
                 }
+                shared.recovery_flushes.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             }
             envelope = receiver.recv() => {
                 let Some(envelope) = envelope else { break; };
@@ -623,6 +657,10 @@ async fn actor(
     if let Err(error) = closed {
         eprintln!("Document close failed; recovery retained: {error}");
     }
+    #[cfg(feature = "semantic-probe")]
+    if let Ok(mut probe) = shared.probe.lock() {
+        *probe = None;
+    }
     let _ = sender.send(Message::Stopped);
     shared.wake();
 }
@@ -666,6 +704,6 @@ pub fn record_id(raw: &str) -> Result<RecordId, String> {
         .map_err(|error| format!("invalid record identity: {error}"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 #[path = "bridge_tests.rs"]
 mod tests;

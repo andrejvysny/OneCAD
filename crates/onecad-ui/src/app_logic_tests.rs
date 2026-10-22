@@ -4,7 +4,6 @@ use crate::{
     document_flow::{Pending, Request},
     qa::QaPaths,
 };
-use eframe::App as _;
 
 #[path = "row_delivery_tests.rs"]
 mod row_delivery_tests;
@@ -91,7 +90,14 @@ async fn occluded_app_logic_delivers_new_and_protects_close_without_ui() {
 }
 
 async fn create_app(root: &std::path::Path) -> (App, egui::Context) {
-    let (app, context) = create_home_app(root).await;
+    create_app_with(root, onecad_render::RenderProfile::Desktop).await
+}
+
+async fn create_app_with(
+    root: &std::path::Path,
+    profile: onecad_render::RenderProfile,
+) -> (App, egui::Context) {
+    let (app, context) = create_home_app_with(root, profile).await;
     app.doc
         .bridge
         .submit(crate::bridge::Command::Document(Request::New))
@@ -100,6 +106,15 @@ async fn create_app(root: &std::path::Path) -> (App, egui::Context) {
 }
 
 async fn create_home_app(root: &std::path::Path) -> (App, egui::Context) {
+    create_home_app_with(root, onecad_render::RenderProfile::Desktop).await
+}
+
+/// Desktop builds through `App::new` (the macOS route); Mobile through `App::new_with`, the
+/// route the iPadOS host takes.
+async fn create_home_app_with(
+    root: &std::path::Path,
+    profile: onecad_render::RenderProfile,
+) -> (App, egui::Context) {
     assert_eq!(std::env::var("ONECAD_REQUIRE_WORKER").as_deref(), Ok("1"));
     assert_eq!(std::env::var("ONECAD_REQUIRE_GPU").as_deref(), Ok("1"));
     let worker = std::env::var_os("ONECAD_WORKER_PATH")
@@ -120,11 +135,18 @@ async fn create_home_app(root: &std::path::Path) -> (App, egui::Context) {
     let adapter = render.adapter.get_info();
     eprintln!("Native host gate adapter: {adapter:?}");
     assert_eq!(adapter.backend, wgpu::Backend::Metal);
-    let mut creation = eframe::CreationContext::_new_kittest(context.clone());
-    creation.wgpu_render_state = Some(render);
     let paths =
         QaPaths::from_args(["--qa-root".into(), root.join("qa").into_os_string()].into_iter())
             .unwrap();
+    if profile == onecad_render::RenderProfile::Mobile {
+        let dialogs =
+            std::sync::Arc::new(crate::dialogs::NativeDialogs::new(paths.documents.clone()));
+        let backend = onecad_app::worker::WorkerBackend::default();
+        let app = App::new_with(&context, render, paths, dialogs, backend, profile);
+        return (app.unwrap(), context);
+    }
+    let mut creation = eframe::CreationContext::_new_kittest(context.clone());
+    creation.wgpu_render_state = Some(render);
     (App::new(&creation, paths).unwrap(), context)
 }
 
@@ -142,7 +164,7 @@ fn logic_tick(
     }
     context.run_logic(&input, |context| {
         assert_eq!(context.input(|input| input.viewport().occluded), Some(true));
-        app.logic(context, frame);
+        eframe::App::logic(app, context, frame);
     })
 }
 
@@ -213,6 +235,9 @@ mod arc_gesture_delivery_tests;
 #[path = "arc_slot_delivery_tests.rs"]
 mod arc_slot_delivery_tests;
 
+#[path = "pen_stroke_delivery_tests.rs"]
+mod pen_stroke_delivery_tests;
+
 #[path = "sketch_entry_delivery_tests.rs"]
 mod sketch_entry_delivery_tests;
 #[path = "sketch_plane_choice_tests.rs"]
@@ -272,6 +297,12 @@ mod parameter_delivery_tests;
 
 #[path = "model_selection_delivery_tests.rs"]
 mod model_selection_delivery_tests;
+
+#[path = "display_budget_delivery_tests.rs"]
+mod display_budget_delivery_tests;
+
+#[path = "model_operation_delivery_tests.rs"]
+mod model_operation_delivery_tests;
 
 #[path = "sketch_selection_delivery_tests.rs"]
 mod sketch_selection_delivery_tests;

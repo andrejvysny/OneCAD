@@ -179,7 +179,12 @@ pub(crate) fn ray_bounds(ray: Ray, bounds: Bounds) -> bool {
     true
 }
 
-pub(crate) fn screen_bounds(view: &ViewSnapshot, cursor: DVec2, bounds: Bounds) -> bool {
+pub(crate) fn screen_bounds(
+    view: &ViewSnapshot,
+    cursor: DVec2,
+    tolerance: f64,
+    bounds: Bounds,
+) -> bool {
     let (mut near, mut far) = (f64::INFINITY, f64::NEG_INFINITY);
     for corner in bounds.corners() {
         let depth = view.depth(corner);
@@ -201,6 +206,6 @@ pub(crate) fn screen_bounds(view: &ViewSnapshot, cursor: DVec2, bounds: Bounds) 
         min = min.min(projected.logical);
         max = max.max(projected.logical);
     }
-    let aperture = DVec2::splat(crate::EDGE_PICK_LOGICAL_PIXELS);
+    let aperture = DVec2::splat(tolerance);
     cursor.cmpge(min - aperture).all() && cursor.cmple(max + aperture).all()
 }

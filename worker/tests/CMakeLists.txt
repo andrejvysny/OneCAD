@@ -591,6 +591,17 @@ add_executable(test_import_step test_import_step.cpp)
 target_link_libraries(test_import_step PRIVATE worker_core)
 add_test(NAME import_step COMMAND test_import_step)
 
+# --- In-process library hardening (ADR-0016 findings, ADR-0019): every OCCT
+#     lock site refuses RETRIABLE with the OCCT_GLOBALS_BUSY prefix first, and a
+#     refused plan leaves no trace; the Dispatcher closes the journal window only
+#     after the terminal frame is written and sizes its lane stacks as asked. ---
+add_executable(test_occt_busy test_occt_busy.cpp)
+target_link_libraries(test_occt_busy PRIVATE worker_core)
+add_test(NAME occt_busy COMMAND test_occt_busy)
+add_executable(test_dispatcher_lanes test_dispatcher_lanes.cpp)
+target_link_libraries(test_dispatcher_lanes PRIVATE worker_core)
+add_test(NAME dispatcher_lanes COMMAND test_dispatcher_lanes)
+
 # --- WP-A W4.5: XCAF fidelity end to end — a colored, named multi-solid STEP
 #     (authored via STEPCAFControl_Writer, see step_fixture_util.h) through the
 #     probe, the xbf conversion, the `sourceCodec:"xbf"` replay op and out into the

@@ -1,0 +1,20 @@
+{
+  "name": "finger_tap_on_control",
+  "description": "Finger taps a control (Control owner), then a canvas tap (Tap owner).",
+  "context": {"controls": [[0, 0, 100, 44]]},
+  "steps": [
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "finger", "phase": "began", "t": 0.0, "x": 40, "y": 20}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "finger", "phase": "moved", "t": 0.05, "x": 42, "y": 21},
+      {"contact": 1, "kind": "finger", "phase": "ended", "t": 0.1, "x": 42, "y": 21}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 2, "kind": "finger", "phase": "began", "t": 0.5, "x": 300, "y": 300}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 2, "kind": "finger", "phase": "ended", "t": 0.6, "x": 303, "y": 302}
+    ]}}
+  ]
+}

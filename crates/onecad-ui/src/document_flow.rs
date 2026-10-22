@@ -3,6 +3,8 @@ use onecad_app::dto::SaveOutcomeDto;
 use onecad_widgets::components::overlays::{Dialog, DialogIntent};
 use std::path::PathBuf;
 
+// Mesh exports are offered only by the desktop menu bar so far.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExportFormat {
     Step,
@@ -16,7 +18,8 @@ pub enum Request {
     New,
     DiscardAndReplace(Box<Request>),
     Open(Option<PathBuf>),
-    Import,
+    /// `Some` imports that file without a dialog (a system-provided STEP file).
+    Import(Option<PathBuf>),
     /// Adds a STEP file to the active document's history; never opens a tab.
     InsertStep,
     Save {
@@ -32,7 +35,7 @@ impl Request {
         match self {
             Self::New => FileAction::New,
             Self::Open(_) => FileAction::Open,
-            Self::Import => FileAction::Import,
+            Self::Import(_) => FileAction::Import,
             Self::InsertStep => FileAction::InsertStep,
             Self::Save { .. } => FileAction::Save,
             Self::Export(_) => FileAction::Export,
@@ -44,7 +47,7 @@ impl Request {
     pub fn replaces_document(&self) -> bool {
         match self {
             Self::DiscardAndReplace(request) => request.replaces_document(),
-            other => matches!(other, Self::New | Self::Open(_) | Self::Import),
+            other => matches!(other, Self::New | Self::Open(_) | Self::Import(_)),
         }
     }
 }
@@ -112,6 +115,7 @@ impl Flow {
                     | SketchAction::Move(_)
                     | SketchAction::Click { .. }
                     | SketchAction::ClickInferred { .. }
+                    | SketchAction::CommitStroke { .. }
                     | SketchAction::CreateNumeric { .. }
                     | SketchAction::CreateNumericAuthored { .. }
                     | SketchAction::PreviewNumeric { .. }
@@ -343,7 +347,12 @@ impl crate::app::App {
                         format!("Saved {} — newer changes remain unsaved", saved.title);
                 }
             }
-            Ok(Outcome::Exported(path)) => self.doc.status = format!("Exported {}", path.display()),
+            Ok(Outcome::Exported(path)) => {
+                self.doc.status = format!("Exported {}", path.display());
+                // A sandboxed host publishes the written file through its own picker.
+                #[cfg(not(feature = "desktop"))]
+                self.exported.push(path);
+            }
             Ok(Outcome::Extension(reply)) => {
                 self.doc.status = reply.status.clone();
                 self.ui.extensions.native.receive(reply);
@@ -659,7 +668,7 @@ mod tests {
     }
     #[test]
     fn only_dirty_document_replacement_or_exit_needs_confirmation() {
-        for request in [Request::New, Request::Open(None), Request::Import] {
+        for request in [Request::New, Request::Open(None), Request::Import(None)] {
             assert!(needs_confirmation(
                 &Pending::Document(request.clone()),
                 true

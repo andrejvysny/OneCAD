@@ -5,16 +5,10 @@ use crate::{
     parameter_drag::{Lifecycle, Outcome},
 };
 use onecad_core::{
-    document::{
-        record::{
-            KnownOperation, Operation, OperationRecord, TransformBodyParams, TransformRotation,
-        },
-        variables::Scalar,
-    },
+    document::record::{KnownOperation, Operation, TransformBodyParams},
     ids::RecordId,
-    math::Vec3,
 };
-use onecad_interaction::{Action, NumericParameter, ParameterAxis, ParameterKey, SessionPhase};
+use onecad_interaction::{Action, SessionPhase, operand_binding};
 use onecad_scene::{DVec3, ViewSnapshot};
 
 #[derive(Default)]
@@ -56,27 +50,18 @@ impl App {
         }
         self.doc.gesture += 1;
         self.doc.transform_gizmo = TransformGizmo::default();
-        let params = TransformBodyParams {
-            targets: vec![body],
-            translate: [Scalar::new(0.0), Scalar::new(0.0), Scalar::new(0.0)],
-            rotate: TransformRotation {
-                center: Vec3::new_unchecked(center.x, center.y, center.z),
-                ..Default::default()
-            },
-            copy: false,
-            extra: Default::default(),
-        };
-        let record = OperationRecord::new(
+        let record = operand_binding::transform_record(
+            body,
+            [center.x, center.y, center.z],
             RecordId::new(),
             step,
-            "Move / Rotate",
-            Operation::Known(KnownOperation::TransformBody(params)),
         );
-        let x = ParameterKey::from(NumericParameter::TransformTranslation(ParameterAxis::X));
+        // Every placement value is typeable: touch has no precise gizmo drag.
+        let fields = operand_binding::transform_fields();
         self.dispatch(Action::BeginOperation {
             record: Box::new(record),
-            fields: vec![x],
-            focus: Some(x),
+            focus: fields.first().copied(),
+            fields,
             gesture: self.doc.gesture,
             context,
         });
@@ -276,6 +261,7 @@ fn changed(base: &TransformBodyParams, change: Change) -> Option<([f64; 3], [f64
 #[cfg(test)]
 mod tests {
     use super::*;
+    use onecad_core::document::variables::Scalar;
     fn base() -> TransformBodyParams {
         TransformBodyParams {
             targets: vec![onecad_core::ids::BodyId::new()],

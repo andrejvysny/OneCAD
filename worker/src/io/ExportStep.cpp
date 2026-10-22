@@ -28,6 +28,7 @@
 
 #include "elementmap/ElementMapPartition.h"
 #include "io/OcafApp.h"
+#include "io/OcctBusy.h"
 #include "io/OcctStaticGuard.h"
 #include "io/XcafCodec.h"
 #include "session/BodyStore.h"
@@ -157,21 +158,14 @@ Envelope handle_export_step(session::Session& session, const Envelope& req) {
     // refusal is retriable (nothing was opened or written).
     const BoundedLock occt_globals(occt_globals_mutex(), nullptr);
     if (!occt_globals.owns()) {
-        return Envelope::error_response(
-            req.id, protocol::ErrorInfo{"OP_FAILED",
-                                        occt_globals.busy_error("ExportStep", "occt_globals_mutex"),
-                                        /*retriable=*/true});
+        return busy_response(req.id, occt_globals.busy_error("ExportStep", "occt_globals_mutex"));
     }
     STEPControl_Controller::Init();
     OcctMessengerGuard quiet;
     InterfaceStaticGuard knobs;
 
     const BoundedLock lock(ocaf_mutex(), nullptr);
-    if (!lock.owns()) {
-        return Envelope::error_response(
-            req.id, protocol::ErrorInfo{"OP_FAILED", lock.busy_error("ExportStep", "ocaf_mutex"),
-                                        /*retriable=*/true});
-    }
+    if (!lock.owns()) return busy_response(req.id, lock.busy_error("ExportStep", "ocaf_mutex"));
     std::size_t transferred = 0;
     std::size_t named = 0;
     std::size_t coloured_faces = 0;

@@ -1,0 +1,41 @@
+[package]
+name = "onecad-ios"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "iPadOS host bridge: C ABI, egui frame loop and Metal surface for the UIKit app"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[features]
+# Acceptance-only replay, semantic queries and fault injection (onecad_ios_test.h).
+test-hooks = [
+    "dep:serde_json",
+    "dep:sha2",
+    "dep:onecad-core",
+    "dep:onecad-protocol",
+    "onecad-ui/semantic-probe",
+]
+
+[dependencies]
+# Path dependencies: `default-features = false` is ignored on inherited workspace
+# dependencies whose workspace entry keeps defaults.
+onecad-ui = { path = "../onecad-ui", default-features = false }
+onecad-app = { workspace = true, features = ["embedded-kernel"] }
+onecad-interaction = { workspace = true }
+onecad-render = { workspace = true }
+egui = "=0.37.0"
+egui-wgpu = { version = "=0.37.0", default-features = false }
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }
+pollster = "0.4"
+tokio = { workspace = true, features = ["sync"] }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+onecad-core = { workspace = true, optional = true }
+onecad-protocol = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt"] }

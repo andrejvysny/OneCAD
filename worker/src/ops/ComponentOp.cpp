@@ -36,6 +36,7 @@
 #include "elementmap/ElementMapPartition.h"
 #include "elementmap/Ladder.h"
 #include "io/BrepCodec.h"
+#include "io/OcctBusy.h"
 #include "io/StepRead.h"
 #include "io/XcafCodec.h"
 #include "kernel/validation/ShapeAudit.h"
@@ -776,11 +777,17 @@ std::optional<OpOutcome> read_source_blob(const json& source, const std::string&
         const std::string bad = check_format(io::kXcafFormatVersion);
         if (!bad.empty()) return OpOutcome::fail("OP_FAILED", bad);
         const io::XcafReadResult read = io::read_xcaf_solids(path);
+        if (!read.ok() && io::is_occt_busy(read.error)) {
+            return OpOutcome::busy(io::busy_message(read.error, op_label));
+        }
         if (!read.ok()) return OpOutcome::fail("OP_FAILED", op_label + ": " + read.error);
         solids = read.solids;
     } else if (codec == "step") {
         const io::StepReadResult read = io::read_step(path, io::StepReadPolicy{}, cancel);
         if (read.cancelled) return OpOutcome::cancelled();
+        if (!read.ok() && read.error && io::is_occt_busy(*read.error)) {
+            return OpOutcome::busy(io::busy_message(*read.error, op_label));
+        }
         if (!read.ok()) {
             return OpOutcome::fail("OP_FAILED",
                                    op_label + ": " + (read.error ? *read.error : "STEP read failed"));

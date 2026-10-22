@@ -35,6 +35,8 @@ pub struct TitleBar<'a> {
     home_blocked: Option<&'a str>,
     search_blocked: Option<&'a str>,
     drag_window: bool,
+    leading_inset: f32,
+    tab_file: bool,
     workspace: Option<WorkspaceSpec<'a>>,
     bare: bool,
     tabs: Option<TabStrip<'a>>,
@@ -58,6 +60,9 @@ pub struct TitleBarOutput {
     pub add: bool,
     /// Painted rect of every tab, so the host can anchor a popover to one.
     pub tab_rects: Vec<(u64, Rect)>,
+    /// Widget id of every tab and of "+", so the host can name them for automation.
+    pub tab_ids: Vec<(u64, egui::Id)>,
+    pub add_id: Option<egui::Id>,
 }
 
 impl TitleBarOutput {
@@ -73,6 +78,8 @@ impl TitleBarOutput {
             close: None,
             add: false,
             tab_rects: Vec::new(),
+            tab_ids: Vec::new(),
+            add_id: None,
         }
     }
 }
@@ -88,6 +95,8 @@ impl<'a> TitleBar<'a> {
             home_blocked: None,
             search_blocked: None,
             drag_window: true,
+            leading_inset: TRAFFIC_INSET,
+            tab_file: false,
             workspace: None,
             bare: false,
             tabs: None,
@@ -136,7 +145,8 @@ impl<'a> TitleBar<'a> {
     }
 
     /// Document tab strip: Home, Undo, Redo on the left, tabs centred, search on the
-    /// right; no File button or document name. `None` keeps the other modes.
+    /// right; no document name and no File button unless `tab_file`. `None` keeps the
+    /// other modes.
     pub fn tabs(mut self, tabs: Option<TabStrip<'a>>) -> Self {
         self.tabs = tabs;
         self
@@ -144,6 +154,20 @@ impl<'a> TitleBar<'a> {
 
     pub fn drag_window(mut self, v: bool) -> Self {
         self.drag_window = v;
+        self
+    }
+
+    /// Leading gap before Home; defaults to the macOS traffic-light width. Hosts
+    /// without window controls (iPadOS) pass their own inset.
+    pub fn leading_inset(mut self, inset: f32) -> Self {
+        self.leading_inset = inset;
+        self
+    }
+
+    /// Tab mode only: show the "File ▾" button after Undo/Redo for hosts without a
+    /// native menu bar; its response is returned in `file`.
+    pub fn tab_file(mut self, v: bool) -> Self {
+        self.tab_file = v;
         self
     }
 
@@ -166,7 +190,7 @@ impl<'a> TitleBar<'a> {
             self.paint_centre(ui, rect, &l, ws_w);
         }
         let cy = rect.center().y;
-        let mut x = rect.left() + TRAFFIC_INSET;
+        let mut x = rect.left() + self.leading_inset;
         let home_rect = Rect::from_min_size(Pos2::new(x, cy - BTN / 2.0), Vec2::splat(BTN));
         let home = IconButton::new("home", "Home", BTN, 16.0)
             .on(self.tabs.is_some_and(|s| s.home_active))
@@ -217,7 +241,12 @@ impl<'a> TitleBar<'a> {
     ) -> TitleBarOutput {
         let cy = rect.center().y;
         let (undo, redo) = self.history_buttons(ui, Pos2::new(x, cy - BTN / 2.0), l);
-        let left = x + 2.0 * (BTN + 4.0) + 4.0;
+        let mut left = x + 2.0 * (BTN + 4.0) + 4.0;
+        let file = self.tab_file.then(|| {
+            let file = file_button(ui, Pos2::new(left, cy - BTN / 2.0), l);
+            left += file.rect.width() + 8.0;
+            file
+        });
         let search_rect = Rect::from_min_size(
             Pos2::new(rect.right() - 12.0 - SEARCH_W, cy - BTN / 2.0),
             vec2(SEARCH_W, BTN),
@@ -232,8 +261,11 @@ impl<'a> TitleBar<'a> {
             close,
             add,
             rects,
+            ids,
+            add_id,
         } = show_strip(ui, area, c, sym_w, strip, l);
         TitleBarOutput {
+            file,
             undo,
             redo,
             search,
@@ -241,6 +273,8 @@ impl<'a> TitleBar<'a> {
             close,
             add,
             tab_rects: rects,
+            tab_ids: ids,
+            add_id,
             ..TitleBarOutput::plain(home, workspace)
         }
     }
@@ -260,9 +294,9 @@ impl<'a> TitleBar<'a> {
     }
 
     /// Room for the centred name: symmetric about the bar centre, between the clusters.
-    fn centre_width(rect: Rect, ws_w: Option<f32>) -> f32 {
+    fn centre_width(rect: Rect, ws_w: Option<f32>, inset: f32) -> f32 {
         let ws = ws_w.map_or(0.0, |w| w + 8.0 + 1.0 + 8.0);
-        let left = rect.left() + TRAFFIC_INSET + BTN + 4.0 + ws + FILE_W + 8.0;
+        let left = rect.left() + inset + BTN + 4.0 + ws + FILE_W + 8.0;
         let right = rect.right() - 12.0 - SEARCH_W - 8.0 - 2.0 * (BTN + 4.0) - 4.0;
         let c = rect.center().x;
         2.0 * (c - left).min(right - c).max(0.0)
@@ -271,7 +305,7 @@ impl<'a> TitleBar<'a> {
     fn paint_centre(&self, ui: &Ui, rect: Rect, l: &Look, ws_w: Option<f32>) {
         let t = &l.theme;
         let p = ui.painter();
-        let avail = Self::centre_width(rect, ws_w);
+        let avail = Self::centre_width(rect, ws_w, self.leading_inset);
         let suffix = self.suffix.map(|s| {
             let font = FontId::proportional(12.0);
             fitted(p, &format!("— {s}"), font, t.ink5, avail * 0.4)

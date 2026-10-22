@@ -43,6 +43,7 @@ pub enum ToolId {
     Hide,
     More,
     Line,
+    PenStroke,
     Rectangle,
     Circle,
     Arc,
@@ -125,6 +126,7 @@ const SKETCH: ToolDef = t(ToolId::Sketch, "sketch", "Sketch");
 const EXTRUDE: ToolDef = k(ToolId::Extrude, "extrude", "Extrude", "E");
 const CREATE: &[ToolDef] = &[
     k(ToolId::Line, "line", "Line", "L"),
+    t(ToolId::PenStroke, "spline", "Pencil Stroke"),
     t(ToolId::Rectangle, "rect", "Rectangle"),
     t(ToolId::Circle, "circle", "Circle"),
     t(ToolId::Arc, "arc", "Arc"),
@@ -145,8 +147,11 @@ const DIRECT_CONSTRAINTS: &[ToolDef] = &[
     t(ToolId::Vertical, "vertical", "Vertical"),
     t(ToolId::Fix, "fix", "Fix"),
 ];
+const FILLET: ToolDef = t(ToolId::Fillet, "fillet", "Fillet");
+const CHAMFER: ToolDef = t(ToolId::Chamfer, "chamfer", "Chamfer");
+const OFFSET_FACE: ToolDef = t(ToolId::OffsetFace, "offsetFace", "Offset face");
 const NONE: Groups = &[&[SELECT], &[SKETCH], UTILITIES];
-const FACE: Groups = &[&[SKETCH], UTILITIES];
+const FACE: Groups = &[&[SKETCH, OFFSET_FACE], UTILITIES];
 const SKETCH_IDLE: Groups = &[&[SELECT], CREATE, DIMENSIONS, DIRECT_CONSTRAINTS, MORE];
 const SKETCH_ENTITY: Groups = &[
     &[SELECT],
@@ -160,7 +165,7 @@ const SKETCH_ENTITY: Groups = &[
     ],
 ];
 const REGION: Groups = &[&[EXTRUDE], UTILITIES];
-const EDGE: Groups = &[UTILITIES];
+const EDGE: Groups = &[&[FILLET, CHAMFER], UTILITIES];
 const FEATURE: Groups = &[&[t(ToolId::Edit, "edit", "Edit")], UTILITIES];
 const BODY: Groups = &[
     &[k(ToolId::MoveRotate, "move", "Move / Rotate", "M")],
@@ -183,11 +188,11 @@ pub const PLANNED_MODEL: &[ToolDef] = &[
     t(ToolId::Extrude, "extrude", "Extrude"),
     t(ToolId::MoveRotate, "move", "Move / Rotate"),
     t(ToolId::Revolve, "revolve", "Revolve"),
-    t(ToolId::Fillet, "fillet", "Fillet"),
-    t(ToolId::Chamfer, "chamfer", "Chamfer"),
+    FILLET,
+    CHAMFER,
     t(ToolId::Shell, "shell", "Shell"),
     t(ToolId::Hole, "hole", "Hole"),
-    t(ToolId::OffsetFace, "offsetFace", "Offset face"),
+    OFFSET_FACE,
     t(ToolId::Boolean, "union", "Boolean"),
     t(ToolId::LinearPattern, "patternLinear", "Linear pattern"),
     t(
@@ -229,15 +234,8 @@ pub fn unavailable_reason(id: ToolId) -> &'static str {
         ToolId::Project => "Native projection workflow is planned (ONECAD-296)",
         ToolId::Spline => "Native spline creation is planned (ONECAD-298)",
         ToolId::Revolve => "Native revolve operand and preview flow is planned (ONECAD-220)",
-        ToolId::Fillet => {
-            "Native fillet creation flow is planned (ONECAD-316); saved features remain editable"
-        }
-        ToolId::Chamfer => {
-            "Native chamfer creation flow is planned (ONECAD-316); saved features remain editable"
-        }
         ToolId::Shell => "Native shell creation flow is planned (ONECAD-317)",
         ToolId::Hole => "Native hole creation flow is planned (ONECAD-318)",
-        ToolId::OffsetFace => "Native offset-face creation flow is planned (ONECAD-319)",
         ToolId::Boolean => "Native target/tool selection and preview are planned (ONECAD-253)",
         ToolId::LinearPattern => "Native linear body-pattern creation flow is planned (ONECAD-221)",
         ToolId::CircularPattern => {
@@ -391,7 +389,14 @@ mod tests {
     #[test]
     fn restored_catalog_is_discoverable_with_owned_implementation_gaps() {
         for tool in PLANNED_SKETCH.iter().chain(PLANNED_MODEL) {
-            if !matches!(tool.id, ToolId::Extrude | ToolId::MoveRotate) {
+            if !matches!(
+                tool.id,
+                ToolId::Extrude
+                    | ToolId::MoveRotate
+                    | ToolId::Fillet
+                    | ToolId::Chamfer
+                    | ToolId::OffsetFace
+            ) {
                 assert!(
                     unavailable_reason(tool.id).contains("ONECAD-"),
                     "{:?}",
@@ -485,5 +490,8 @@ mod tests {
         assert_eq!(REGION[0][0].id, ToolId::Extrude);
         assert_eq!(BODY[0][0].id, ToolId::MoveRotate);
         assert_eq!(FEATURE[0][0].id, ToolId::Edit);
+        let ids = |group: &[ToolDef]| group.iter().map(|tool| tool.id).collect::<Vec<_>>();
+        assert_eq!(ids(EDGE[0]), [ToolId::Fillet, ToolId::Chamfer]);
+        assert_eq!(ids(FACE[0]), [ToolId::Sketch, ToolId::OffsetFace]);
     }
 }

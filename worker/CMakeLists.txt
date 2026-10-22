@@ -5,6 +5,15 @@ set(ONECAD_OCCT_ROOT "" CACHE PATH "Root of caller-selected OCCT installation")
 set(ONECAD_OCCT_VERSION "8.0.1" CACHE STRING "Exact OCCT version required by this worker build")
 set(ONECAD_OCCT_BUILD_ID "local" CACHE STRING "Stable identity of the OCCT build artifact")
 set(ONECAD_WORKER_BUILD_DIR "${CMAKE_BINARY_DIR}" CACHE PATH "Expected worker binary directory")
+# The embedded (in-process) kernel build: scripts/build-ios-worker.sh. iOS has
+# no sidecar and no host to run the tests on, so it is library-only by force.
+option(ONECAD_WORKER_LIBRARY_ONLY
+    "Configure only onecad_worker_lib + its link probe (no sidecar, tests or tools)" OFF)
+option(ONECAD_WORKER_LIB_TEST_HOOKS
+    "Compile Debug.Busy and the __slow op hook into onecad_worker_lib (never for release apps)" OFF)
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    set(ONECAD_WORKER_LIBRARY_ONLY ON CACHE BOOL "" FORCE)
+endif()
 
 file(REAL_PATH "${CMAKE_BINARY_DIR}" _onecad_actual_build_dir)
 file(REAL_PATH "${ONECAD_WORKER_BUILD_DIR}" _onecad_requested_build_dir BASE_DIRECTORY "${CMAKE_SOURCE_DIR}")
@@ -308,20 +317,24 @@ endif()
 # ---------------------------------------------------------------------------
 # onecad-worker : the sidecar executable
 # ---------------------------------------------------------------------------
-add_executable(onecad-worker src/main.cpp)
-target_link_libraries(onecad-worker PRIVATE worker_core)
-# The verb table + dispatch loop, shared with onecad_worker_lib below (moved
-# out of main.cpp unchanged; P0.3, ONECAD-258).
-target_sources(onecad-worker PRIVATE src/capi/WorkerRuntime.cpp)
+if(NOT ONECAD_WORKER_LIBRARY_ONLY)
+    add_executable(onecad-worker src/main.cpp)
+    target_link_libraries(onecad-worker PRIVATE worker_core)
+    # The verb table + dispatch loop, shared with onecad_worker_lib below (moved
+    # out of main.cpp unchanged; P0.3, ONECAD-258).
+    target_sources(onecad-worker PRIVATE src/capi/WorkerRuntime.cpp)
+endif()
 
 # ---------------------------------------------------------------------------
 # onecad_worker_lib : the SAME worker as a static library behind a C ABI
-# (src/capi/onecad_worker.h) for in-process hosting (optional macOS dev/CI
-# host; the shipping host is the sidecar). P0.3 spike (Plane ONECAD-258); docs/design/native-ui/
-# inprocess-worker-spike.md. Recompiles worker_core's sources with
-# ONECAD_WORKER_LIBRARY (compiles out the `__crash` std::abort chaos hook), so
-# it never shares objects with the sidecar. EXCLUDE_FROM_ALL: the default build
-# and ctest are unchanged; build it with `--target onecad_worker_lib`.
+# (src/capi/onecad_worker.h) for in-process hosting: the iPadOS kernel
+# (ADR-0019) and onecad-app's macOS `embedded-kernel` test backend; the
+# shipping macOS host is the sidecar. Recompiles worker_core's sources with
+# ONECAD_WORKER_LIBRARY (compiles out the `__crash` std::abort chaos hook, and
+# Debug.Busy/__slow unless ONECAD_WORKER_LIB_TEST_HOOKS), so it never shares
+# objects with the sidecar. EXCLUDE_FROM_ALL: the default build and ctest are
+# unchanged; scripts/build-ios-worker.sh builds and bundles it
+# (docs/ios/KERNEL.md).
 # ---------------------------------------------------------------------------
 get_target_property(_onecad_worker_core_sources worker_core SOURCES)
 add_library(onecad_worker_lib STATIC EXCLUDE_FROM_ALL
@@ -354,6 +367,9 @@ target_compile_definitions(onecad_worker_lib
     PUBLIC $<TARGET_PROPERTY:worker_core,INTERFACE_COMPILE_DEFINITIONS>
     PRIVATE ONECAD_WORKER_LIBRARY=1
 )
+if(ONECAD_WORKER_LIB_TEST_HOOKS)
+    target_compile_definitions(onecad_worker_lib PRIVATE ONECAD_WORKER_TEST_HOOKS=1)
+endif()
 target_compile_options(onecad_worker_lib PUBLIC
     $<TARGET_PROPERTY:worker_core,INTERFACE_COMPILE_OPTIONS>)
 target_link_libraries(onecad_worker_lib PUBLIC
@@ -375,12 +391,31 @@ list(JOIN _onecad_worker_link_lines "\n" _onecad_worker_link_content)
 file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/onecad_worker_lib.link"
     CONTENT "${_onecad_worker_link_content}\n")
 
+# The embedded identity inputs (versions parsed from the sources, the exact
+# fingerprint seed): onecad_worker_identity.txt for build-ios-worker.sh.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbeddedIdentity.cmake)
+
+# A minimal executable over the C ABI, linked against onecad_worker_lib exactly
+# as a host would be. Its linker map (static OCCT) or its surviving dylib
+# references (-dead_strip_dylibs, shared OCCT) are the DERIVED dependency
+# closure build-ios-worker.sh bundles — the OCCT toolkits the worker really
+# pulls, not a hand-kept list.
+add_executable(onecad_worker_link_probe EXCLUDE_FROM_ALL tools/link_probe/link_probe.cpp)
+target_link_libraries(onecad_worker_link_probe PRIVATE onecad_worker_lib)
+target_link_options(onecad_worker_link_probe PRIVATE
+    "LINKER:-map,${CMAKE_BINARY_DIR}/onecad_worker_link_probe.map")
+if(APPLE)
+    target_link_options(onecad_worker_link_probe PRIVATE "LINKER:-dead_strip_dylibs")
+endif()
+
 # ---------------------------------------------------------------------------
 # Testing
 # ---------------------------------------------------------------------------
-enable_testing()
-add_subdirectory(tests)
-add_subdirectory(tools/harness)
-add_subdirectory(tools/solverbench)
-add_subdirectory(tools/filletbench)
-add_subdirectory(tools/kernelbench-runner)
+if(NOT ONECAD_WORKER_LIBRARY_ONLY)
+    enable_testing()
+    add_subdirectory(tests)
+    add_subdirectory(tools/harness)
+    add_subdirectory(tools/solverbench)
+    add_subdirectory(tools/filletbench)
+    add_subdirectory(tools/kernelbench-runner)
+endif()

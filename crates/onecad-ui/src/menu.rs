@@ -5,10 +5,10 @@
 //! send `copy:` etc. to the first responder, which winit's view does not implement, and their
 //! key equivalents still swallow the keys, so egui's own Cmd+C/V/A handling never runs.
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(all(target_os = "macos", feature = "desktop")), allow(dead_code))]
 mod extension_routes;
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(all(target_os = "macos", feature = "desktop")), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     Undo,
@@ -30,6 +30,10 @@ pub enum Action {
     Save,
     SaveAs,
     Export(crate::document_flow::ExportFormat),
+    /// Sends a copy of the saved `.onecad` to the host's export picker (hosts
+    /// without a menu bar; the document keeps its sandbox path).
+    #[cfg_attr(feature = "desktop", allow(dead_code))]
+    ExportDocument,
     ExtensionCommand(u64),
     Quit,
     Fit,
@@ -37,7 +41,7 @@ pub enum Action {
     Appearance(crate::ui_state::Appearance),
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "desktop"))]
 mod imp {
     use super::Action;
     use super::extension_routes::MenuLocation;
@@ -386,28 +390,81 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Without a native menu bar the same actions come from in-app controls
+/// (`touch_menu`): they queue here and `input::route` drains them exactly like
+/// AppKit menu events, with the same enablement the router publishes.
+#[cfg(not(all(target_os = "macos", feature = "desktop")))]
 mod imp {
     use super::Action;
-    pub struct NativeMenu;
+    use std::cell::{Cell, RefCell};
+
+    #[derive(Clone, Copy, Default)]
+    struct Enabled {
+        undo: bool,
+        redo: bool,
+        replace: bool,
+        insert: bool,
+        save: bool,
+        export: bool,
+    }
+
+    #[derive(Default)]
+    pub struct NativeMenu {
+        queue: RefCell<Vec<Action>>,
+        enabled: Cell<Enabled>,
+    }
+    #[cfg(feature = "desktop")]
     pub fn install(_ctx: &egui::Context) -> Result<NativeMenu, String> {
         Err("no native menu on this platform".into())
     }
     impl NativeMenu {
         pub fn drain(&self) -> Vec<Action> {
-            Vec::new()
+            std::mem::take(&mut *self.queue.borrow_mut())
         }
         pub fn set_appearance(&self, _current: crate::ui_state::Appearance) {}
-        pub fn set_history_enabled(&self, _undo: bool, _redo: bool) {}
-        pub fn set_document_enabled(
-            &self,
-            _replace: bool,
-            _insert: bool,
-            _save: bool,
-            _export: bool,
-        ) {
+        pub fn set_history_enabled(&self, undo: bool, redo: bool) {
+            let mut enabled = self.enabled.get();
+            (enabled.undo, enabled.redo) = (undo, redo);
+            self.enabled.set(enabled);
+        }
+        pub fn set_document_enabled(&self, replace: bool, insert: bool, save: bool, export: bool) {
+            let Enabled { undo, redo, .. } = self.enabled.get();
+            self.enabled.set(Enabled {
+                undo,
+                redo,
+                replace,
+                insert,
+                save,
+                export,
+            });
         }
         pub fn set_recents(&self, _names: &[String]) {}
+
+        /// Queues an in-app menu choice for the next frame's routing; a disabled
+        /// action is dropped, as a disabled AppKit item would never fire.
+        #[cfg_attr(feature = "desktop", allow(dead_code))]
+        pub fn push(&self, action: Action) {
+            if self.enabled(action) {
+                self.queue.borrow_mut().push(action);
+            }
+        }
+
+        /// Mirrors the AppKit item groups of `set_document_enabled`.
+        #[cfg_attr(feature = "desktop", allow(dead_code))]
+        pub fn enabled(&self, action: Action) -> bool {
+            let enabled = self.enabled.get();
+            match action {
+                Action::Undo => enabled.undo,
+                Action::Redo => enabled.redo,
+                Action::New | Action::Open | Action::Import => enabled.replace,
+                Action::InsertStep => enabled.insert,
+                Action::Save | Action::SaveAs | Action::SaveAll | Action::ExportDocument => {
+                    enabled.save
+                }
+                Action::Export(_) => enabled.export,
+                _ => true,
+            }
+        }
         pub fn set_extension_commands(
             &self,
             _export: &[(String, String)],
@@ -422,7 +479,22 @@ mod imp {
     }
 }
 
-pub use imp::{NativeMenu, install};
+pub use imp::NativeMenu;
+#[cfg(feature = "desktop")]
+pub use imp::install;
+
+/// The in-app menu queue for hosts without a native menu bar. Desktop builds
+/// install their menu from the window instead (`App::new`).
+pub fn host_menu() -> Option<NativeMenu> {
+    #[cfg(feature = "desktop")]
+    {
+        None
+    }
+    #[cfg(not(feature = "desktop"))]
+    {
+        Some(NativeMenu::default())
+    }
+}
 
 pub(crate) fn push_command(events: &mut Vec<egui::Event>, key: egui::Key, shift: bool) {
     for pressed in [true, false] {
@@ -433,7 +505,7 @@ pub(crate) fn push_command(events: &mut Vec<egui::Event>, key: egui::Key, shift:
             repeat: false,
             modifiers: egui::Modifiers {
                 command: true,
-                mac_cmd: cfg!(target_os = "macos"),
+                mac_cmd: cfg!(any(target_os = "macos", target_os = "ios")),
                 shift,
                 ..Default::default()
             },
@@ -477,6 +549,7 @@ impl Action {
                     | Self::ExtensionCommand(_)
                     | Self::OpenRecent(_)
                     | Self::SaveAll
+                    | Self::ExportDocument
                     | Self::InsertStep => {
                         return false;
                     }
@@ -493,3 +566,7 @@ impl Action {
         }
     }
 }
+
+#[cfg(all(test, not(feature = "desktop")))]
+#[path = "menu_host_tests.rs"]
+mod host_menu_tests;

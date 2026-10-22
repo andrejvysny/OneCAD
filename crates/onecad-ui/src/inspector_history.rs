@@ -58,6 +58,7 @@ fn feature_row(
         .meta(Some(&feature.value_text))
         .state(state);
     let response = row.show(ui, None).response;
+    crate::automation::name(ui.ctx(), response.id, &crate::automation::history(index));
     if (response.clicked() || response.double_clicked())
         && selectable
         && let Ok(id) = feature.id.parse()

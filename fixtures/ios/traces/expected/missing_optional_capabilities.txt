@@ -1,0 +1,7 @@
+digest fee874ad5e3bc970
+press c1 Author Pencil (200.000,200.000) taps=1
+move c1 Author (240.000,210.000)
+release c1 Author Pencil (280.000,220.000)
+press c2 Author IndirectPointer (50.000,20.000) taps=1
+release c2 Author IndirectPointer (50.000,20.000)
+stats NormalizerStats { invalid: 0, duplicate_coalesced: 0, stale: 0, unknown_contact: 0, old_generation: 0, refused_contacts: 0, estimation_matched: 0, estimation_unmatched: 0, merged_moves: 0 }

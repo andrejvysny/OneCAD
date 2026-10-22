@@ -115,23 +115,24 @@ pub async fn load_display(backend: &mut Backend) -> Result<Display, String> {
         )
         .map_err(|e| e.to_string())?,
     );
-    let prepared = onecad_render::PreparedScene::new_cached(
-        &scene,
-        backend
-            .shared
-            .preparation_budget()?
-            .limit_cpu_prepared_bytes(crate::budget::MAX_PREPARED_BYTES),
-        &mut backend.preparation_cache,
-    )
-    .map_err(|e| e.to_string())?;
+    let budget = backend
+        .shared
+        .preparation_budget()?
+        .limit_cpu_prepared_bytes(crate::budget::MAX_PREPARED_BYTES);
+    let mut cache = backend.shared.take_preparation_cache();
+    let prepared = onecad_render::PreparedScene::new_cached(&scene, budget, &mut cache)
+        .map_err(|e| e.to_string());
+    let cache_bytes = (cache.source_bytes(), cache.cpu_bytes());
+    backend.shared.restore_preparation_cache(cache);
+    let prepared = prepared?;
     // Preparation can succeed before the final publication fence rejects this capture.
     // Keep its source and CPU charge alive even when no Display reaches the UI.
     backend.preparation_lease = Some(lease.clone());
     if prepared.cpu_bytes() > crate::budget::MAX_PREPARED_BYTES {
         return Err("Native CPU preparation budget exceeded".into());
     }
-    if backend.preparation_cache.source_bytes() > crate::budget::MAX_SOURCE_BYTES as u64
-        || backend.preparation_cache.cpu_bytes() > crate::budget::MAX_PREPARED_BYTES
+    if cache_bytes.0 > crate::budget::MAX_SOURCE_BYTES as u64
+        || cache_bytes.1 > crate::budget::MAX_PREPARED_BYTES
     {
         return Err("Native preparation cache budget exceeded".into());
     }

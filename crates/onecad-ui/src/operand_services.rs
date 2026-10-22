@@ -9,8 +9,11 @@ use std::sync::mpsc;
 use tokio::sync::OwnedSemaphorePermit;
 
 #[derive(Debug)]
-#[allow(dead_code, reason = "the operand session slice (S-315c-ui) submits it")]
 pub enum Request {
+    #[allow(
+        dead_code,
+        reason = "operation start stages closures; plain pick staging (S-315c-ui) submits it"
+    )]
     Elements {
         context: DocumentContext,
         picks: Vec<api::StagePick>,
@@ -22,6 +25,12 @@ pub enum Request {
         picks: Vec<api::EdgeOpPickInput>,
         chain_tangent: bool,
         sender: mpsc::Sender<Result<api::StagedEdgeOp, String>>,
+    },
+    /// `PrepareOffsetFace` is a pure read; its closure then stages like picks.
+    OffsetFace {
+        context: DocumentContext,
+        picks: Vec<api::OffsetFacePickInput>,
+        sender: mpsc::Sender<Result<api::StagedOffsetFace, String>>,
     },
 }
 
@@ -53,6 +62,20 @@ pub(crate) async fn execute(backend: &Backend, request: Request, permit: OwnedSe
                 Ok(scope) => {
                     let staged =
                         api::stage_edge_op(state, &scope, &mode, picks, chain_tangent).await;
+                    current(state, &scope, staged.map_err(|e| e.to_string())).await
+                }
+                Err(error) => Err(error),
+            };
+            let _ = sender.send(result);
+        }
+        Request::OffsetFace {
+            context,
+            picks,
+            sender,
+        } => {
+            let result = match scope(state, &context).await {
+                Ok(scope) => {
+                    let staged = api::stage_offset_face(state, &scope, picks, true).await;
                     current(state, &scope, staged.map_err(|e| e.to_string())).await
                 }
                 Err(error) => Err(error),

@@ -18,6 +18,7 @@
 #include <gp_Trsf.hxx>
 
 #include "io/BrepCodec.h"
+#include "io/OcctBusy.h"
 #include "io/StepRead.h"
 #include "io/XcafCodec.h"
 #include "ops/OpCommon.h"
@@ -190,6 +191,9 @@ OpOutcome execute_import_step(OpContext& ctx, const json& op, const std::string&
     if (codec == "step") {
         const io::StepReadResult read = io::read_step(path, io::StepReadPolicy{}, ctx.cancel);
         if (read.cancelled) return OpOutcome::cancelled();
+        if (!read.ok() && io::is_occt_busy(*read.error)) {
+            return OpOutcome::busy(io::busy_message(*read.error, "ImportStep source " + label));
+        }
         if (!read.ok()) {
             const std::string code = read.error->starts_with(io::kAmbiguousImportOrder)
                                          ? io::kAmbiguousImportOrder
@@ -216,6 +220,9 @@ OpOutcome execute_import_step(OpContext& ctx, const json& op, const std::string&
         const std::string bad = check_format(io::kXcafFormatVersion);
         if (!bad.empty()) return OpOutcome::fail("OP_FAILED", bad);
         const io::XcafReadResult read = io::read_xcaf_solids(path);
+        if (!read.ok() && io::is_occt_busy(read.error)) {
+            return OpOutcome::busy(io::busy_message(read.error, "ImportStep source " + label));
+        }
         if (!read.ok()) {
             return OpOutcome::fail("OP_FAILED", "ImportStep: " + read.error + " for source " + label);
         }

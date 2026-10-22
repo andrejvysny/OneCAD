@@ -1,0 +1,10 @@
+digest 040176b5edf51c4c
+press c1 Author Pencil (200.000,200.000) taps=1
+move c1 Author (205.000,200.000)
+move c1 Author (210.000,200.000)
+prediction c1 [(9215.000,200.000) (9220.000,200.000)]
+move c1 Author (225.000,200.000)
+prediction c1 [(9230.000,200.000)]
+prediction c1 []
+release c1 Author Pencil (230.000,200.000)
+stats NormalizerStats { invalid: 0, duplicate_coalesced: 1, stale: 0, unknown_contact: 0, old_generation: 0, refused_contacts: 0, estimation_matched: 1, estimation_unmatched: 1, merged_moves: 0 }
