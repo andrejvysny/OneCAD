@@ -24,6 +24,7 @@ mod diagnostics;
 #[cfg(feature = "desktop")]
 mod dialogs;
 mod dimension_chip;
+mod display_budget;
 mod display_menu;
 mod document_editor;
 mod document_flow;

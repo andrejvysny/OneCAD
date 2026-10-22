@@ -98,6 +98,27 @@ pub fn route(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     app.input_routing = state;
 }
 
+/// Fences the previous frame's CAD submission and its sampling by the host's UI pass; call
+/// only after the host submitted that pass.
+pub(crate) fn fence_previous_frame(app: &mut App, ctx: &egui::Context) {
+    if app.sampled && app.viewport_ready() {
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let finished = done.clone();
+        app.gpu.queue.on_submitted_work_done(move || {
+            finished.store(true, std::sync::atomic::Ordering::Release)
+        });
+        app.sampling_done = done;
+        app.sampled = false;
+    }
+    if app.cad_needs_fence && app.viewport_ready() {
+        let context = ctx.clone();
+        if let Err(error) = app.renderer.after_submit(move || context.request_repaint()) {
+            app.fail_viewport(error.to_string());
+        }
+        app.cad_needs_fence = false;
+    }
+}
+
 fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     app.poll_device_failure();
     app.sync_document_state();
@@ -115,22 +136,7 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
         }
         None => crate::sketch_creation::chain_input::route_raw(app, ctx, raw),
     }
-    if app.sampled && app.viewport_ready() {
-        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let finished = done.clone();
-        app.gpu.queue.on_submitted_work_done(move || {
-            finished.store(true, std::sync::atomic::Ordering::Release)
-        });
-        app.sampling_done = done;
-        app.sampled = false;
-    }
-    if app.cad_needs_fence && app.viewport_ready() {
-        let context = ctx.clone();
-        if let Err(error) = app.renderer.after_submit(move || context.request_repaint()) {
-            app.fail_viewport(error.to_string());
-        }
-        app.cad_needs_fence = false;
-    }
+    fence_previous_frame(app, ctx);
     let blocked = app.doc.documents.confirm.is_some()
         || app.doc.items.blocks()
         || crate::constraint_authoring::editor_open(ctx)

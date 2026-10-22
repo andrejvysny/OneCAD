@@ -275,6 +275,9 @@ mod parameter_delivery_tests;
 #[path = "model_selection_delivery_tests.rs"]
 mod model_selection_delivery_tests;
 
+#[path = "display_budget_delivery_tests.rs"]
+mod display_budget_delivery_tests;
+
 #[path = "model_operation_delivery_tests.rs"]
 mod model_operation_delivery_tests;
 
