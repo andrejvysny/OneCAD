@@ -197,7 +197,7 @@ surface and waits for the service runtime as described under Threads.
 With the `test-hooks` feature only. `onecad_ios_test_command` takes one JSON
 object and returns `{"ok":true,...}` or `{"ok":false,"error":"..."}` (free it
 with `onecad_ios_test_string_free`). Implemented commands (the catalogue
-`onecad_ios_test.h` points at; `docs/ios/TESTING.md` should link here):
+`onecad_ios_test.h` points at; [TESTING.md](TESTING.md) links here):
 
 | Command | Request | Response fields |
 |---|---|---|
@@ -207,5 +207,6 @@ with `onecad_ios_test_string_free`). Implemented commands (the catalogue
 
 Replay goes through the same `Input::submit` as `onecad_ios_input_submit`; each
 batch is logged with `synthetic = true`. The egui events it produces are not
-marked further. Semantic queries (mass properties, history, constraints) and
-fault injection are not implemented.
+marked further. Semantic queries (run and kernel identity, mass properties,
+history, constraints), acceptance artifacts and fault injection are catalogued
+in [TESTING.md](TESTING.md#test-hook-commands-onecad_ios_testh).

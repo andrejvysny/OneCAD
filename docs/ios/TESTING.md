@@ -55,7 +55,7 @@ follows its role (button, static text or other).
 | `onecad.keyInputProxy` | Native | Hidden first responder for the keyboard; not an accessibility element | — |
 | `onecad.viewport` | Snapshot (egui viewport, role CANVAS) | 3D viewport region | planned |
 | `onecad.menu.file` | Snapshot (egui "File" menu button) | In-app File menu | `LaunchTests`, `OrientationTests` |
-| `onecad.menu.file.new`, `.open`, `.save`, `.saveAs`, `.saveAll`, `.export`, `.importStep` | Snapshot (egui File menu items) | File commands (iPad has no native menu bar for them) | planned document tests |
+| `onecad.menu.file.new`, `.open`, `.save`, `.saveAs`, `.closeTab`, `.import`, `.insertStep`, `.export` | Snapshot (egui File menu items, `crates/onecad-ui/src/touch_menu.rs`) | File commands (iPad has no native menu bar for them) | planned document tests |
 | `onecad.menu.edit.undo`, `onecad.menu.edit.redo` | Snapshot (egui Edit items) | Undo/redo | planned |
 | `onecad.tab.<n>`, `onecad.tab.new` | Snapshot (egui document tabs, role TAB) | Document tabs, 0-based | planned multi-document tests |
 | `onecad.tool.<tool-id>` | Snapshot (egui tool buttons; `<tool-id>` = tool registry id) | Modeling and sketch tools | planned tool tests |
@@ -63,13 +63,65 @@ follows its role (button, static text or other).
 
 ## Test-hook commands (`onecad_ios_test.h`)
 
-Acceptance-only, main thread, JSON in and out. The bridge lane owns the full
-catalogue; the host tests currently use:
+Acceptance-only (`test-hooks`), main thread, JSON in and out:
+`onecad_ios_test_command` returns `{"ok":true,...}` or
+`{"ok":false,"error":"..."}`, freed with `onecad_ios_test_string_free`.
+`ping`, `replay` and `prediction` are catalogued in
+[HOST.md](HOST.md#test-hooks). The semantic commands below
+(`crates/onecad-ios/src/test_hooks_semantic.rs`) give native tests the
+verifiable artifacts `cargo xtask ios-simulator-gate` checks
+([SIMULATOR_GATE.md](SIMULATOR_GATE.md)).
 
-| Command | Request | Expected response |
+| Command | Request | Response fields |
 |---|---|---|
-| `ping` | `{"cmd":"ping"}` | `{"ok":true, ...}` |
+| `run_id` | `{"cmd":"run_id","set"?:id}` | `runId` (from `ONECAD_RUN_ID`, else `set`; `null` when neither) |
+| `kernel_identity` | `{"cmd":"kernel_identity"}` | `kernelIdentity`: `backend` (`in-process`, or `null` before a document host runs), `embedded` (manifest the binary verifies against), `linked` (manifest of the linked bundle), worker `hello`, `epoch`, `workerState`, `journalWriteFailures`, `relaunchRequired` |
+| `document_summary` | `{"cmd":"document_summary"}` | ticket; then `summary` (`tabCount`, `document`: path, dirty, revision, undo/redo depth; `features`: id, opType, label, value, status; `bodies`: solids, faces, kernel `volume`, `surfaceArea`, `centroid`, tessellation `min`/`max`; `sketches`: status and `dof` of the last solve in this session, entity and constraint counts) and `kernelIdentity` |
+| `save_artifact` | `{"cmd":"save_artifact","name"}` | ticket; then `saved`, `path`, `clean`, `status`, `provenance` |
+| `export_step_artifact` | `{"cmd":"export_step_artifact","name"}` | ticket; then `path`, `provenance` |
+| `write_semantic` | `{"cmd":"write_semantic","name"}` | ticket; then `path` of `<name>.json` |
+| `seal_artifact` | `{"cmd":"seal_artifact","name","kind"?}` | `provenance` for a non-JSON file a test wrote into the run directory (`kind` defaults to `trace`) |
+| `fault` | `{"cmd":"fault","kind":"journal_write"\|"save_failure"\|"clear"}` | `journalWrite`, `saveFailureArmed` |
+| `result` | `{"cmd":"result","ticket"}` | `pending: true` until the ticket's command finished, then its fields plus `runId`; a failure is `ok:false` once |
 
-Responses are freed with `onecad_ios_test_string_free`. Release and Debug
-archives must not export any `onecad_ios_test_` symbol; the Xcode build phase
-refuses them, and `cargo xtask ios-simulator-gate` checks the shipped archive.
+Rules:
+
+- Commands that wait on document services answer `{"pending":true,"ticket":n}`
+  and never block the main thread; poll `result` from the run loop. At most 64
+  unread tickets.
+- Artifacts go to `Documents/acceptance/<run id>/`; names are 1–64 of
+  `[A-Za-z0-9._-]`. Without a run id every artifact command fails. Every
+  artifact carries the run id and `kernelIdentity`: JSON files inside,
+  `.onecad`, STEP and trace files in `<file>.provenance.json` (run id, kind,
+  SHA-256 of the file, kernel identity). Anything else in the directory is
+  rejected by the gate.
+- `save_artifact` runs the editor's own File › Save As (document flow, document
+  services, `api::save_document`, path claim, recents, Saved status); only the
+  name prompt is answered by the hook (`Queue::save_answer` in
+  `crates/onecad-ios/src/host.rs`). The document is then bound to the
+  artifact path, as after a user's Save As, so save the artifact last or save
+  it again after later edits.
+- `export_step_artifact` calls `api::export_step_file` with the artifact path
+  and publishes nothing (no `EXPORT_FILE` request).
+- `fault save_failure` arms the next `save_artifact` only: a directory takes
+  the target's name, the editor's Save As fails in the container write and
+  reports it; the result is `saved:false, injectedFailure:true` with the
+  editor's status line. `fault journal_write` replaces the kernel journal
+  directory by a regular file, so journal writes fail and are counted
+  (`journalWriteFailures`); `clear`, the bridge's destruction and the next
+  launch restore it without the fault window's `inflight.json`. Nothing else
+  is injectable.
+- XCUITest runs in another process and cannot call hooks: UI tests prove UI
+  behavior and screenshots; model artifacts come from native tests.
+  `launchOneCAD` passes the run id on as `ONECAD_RUN_ID`.
+
+Swift helpers: `platforms/ios/OneCADNativeTests/SemanticHooks.swift`
+(`SemanticHooks.attach`, `call`, `run` with ticket polling, `runID`,
+`kernelIdentity`, `documentSummary`, `saveArtifact`, `exportStepArtifact`,
+`writeSemantic`, `fault`; `XCTestCase.waitFor` polls on the main run loop).
+`SemanticHookTests.swift` uses them for the in-process identity, the Mac
+fixture round trip and both faults.
+
+Release and Debug archives must not export any `onecad_ios_test_` symbol; the
+Xcode build phase refuses them, and `cargo xtask ios-simulator-gate` checks
+the Release products.

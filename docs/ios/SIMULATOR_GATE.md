@@ -12,7 +12,7 @@ physical-device, Pencil-hardware, performance or release readiness.
 |---|---|
 | `ONECAD_SIM_UDID` | optional explicit simulator; otherwise the gate reuses or creates `OneCAD Gate <device> <runtime>` (never erases other simulators) |
 | `ONECAD_SIM_DEVICE_TYPE`, `ONECAD_SIM_RUNTIME` | defaults: newest installed iPadOS runtime, iPad Pro 13-inch (M5) |
-| `ONECAD_WORKER_PATH` | Mac sidecar used by the independent geometry oracle and Mac round trip |
+| `ONECAD_WORKER_PATH` | Mac sidecar used by the independent geometry oracle and Mac round trip; must match the staged `packaging/binaries/onecad-worker-manifest.json` (hash, OCCT 8.0.1, fingerprint) and pass `--selftest`, as for `native-host-gate` |
 | `ONECAD_OCCT_ROOT` | desktop OCCT for that sidecar |
 
 ## Steps (each command logged as `<name>.log` + `<name>.command.json`)
@@ -74,3 +74,57 @@ tolerance is `1e-6` relative (about 0.0095 mm^3), with bounds checked to
 `1e-7` mm absolute plus `1e-9` relative. Fillet and chamfer cases assert a
 strict volume decrease and the analytic expectation for the modified edges
 within `1e-4` relative, plus solid validity.
+
+## Runner details
+
+`cargo xtask ios-simulator-gate [--provenance-only | --verify-only] <dir>`,
+run from the repository root (`crates/onecad-app` tests, scripts and Xcode
+project are resolved there).
+
+- `--provenance-only` runs steps 1–2 and resolves the simulator read-only
+  (it never creates or boots one); it builds nothing.
+- `--verify-only` re-applies every verifier rule to an existing evidence
+  directory (for example a downloaded one) and never writes
+  `acceptance.json`. A full run writes `verification.json` with every
+  rejection, then `acceptance.json` only when there is none.
+- Simulator names drop `-inch` and parentheses: `OneCAD Gate iPad Pro 13 M5
+  26.5`. A reused simulator is never erased, but the app is uninstalled
+  before `test-without-building` so its data container (crash journal,
+  recovery, recents, earlier runs' artifacts) does not carry over.
+- Step 3 builds three bundles under `target/ios-worker/` (where
+  `platforms/ios/scripts/build-rust.sh` looks): simulator Debug with test
+  hooks for the Acceptance products, device Release and simulator Release
+  for step 9. Their identity JSONs are copied to `kernel/`.
+- Step 8 runs in two halves. The author half runs before step 5:
+  `ONECAD_IOS_MAC_FIXTURE_OUT=<dir>/mac-authored` writes
+  `mac-plate.onecad`, which reaches the native round-trip test as
+  `TEST_RUNNER_ONECAD_MAC_FIXTURE` (`ONECAD_MAC_FIXTURE` inside the test).
+  The verify half runs after step 7 with `ONECAD_IOS_ACCEPTANCE_DIR=<dir>/artifacts`
+  and `ONECAD_IOS_MAC_FIXTURE`, and compares the re-save (`roundTripOf`)
+  with the authored file: same document id, feature records and sketch
+  definitions, different bytes. Each half gets only its own inputs and
+  writes `oracle-author.json` / `oracle-verify.json`, which the gate
+  re-checks against the expectations, the copied documents' hashes and the
+  sidecar's OCCT fingerprint instead of trusting `passed`.
+- The oracle's sketch rule solves every sketch on macOS (a reopened document
+  carries no solve): `OverConstrained` or conflicting is rejected, and a
+  case's `sketch` fixes status, DOF and entity/constraint counts.
+- Bounds come from the vertices of the oracle's fine MESH1 tessellation: OCW1
+  has no exact BRep bounding-box query. On planar extreme faces those are the
+  BRep vertices (exact up to f32 storage); simulator-modelled cases therefore
+  check extents only, X and Y unordered, and only Mac-authored cases check
+  absolute bounds.
+- Step 9's `strings` rule is a byte search of the Release executable (the
+  product can exceed the 16 MiB log bound). `otool -l` and `otool -L` are
+  logged as `otool-load-commands.log` and `otool-libraries.log` (one file on
+  a case-insensitive volume otherwise).
+- Artifacts follow [TESTING.md](TESTING.md#test-hook-commands-onecad_ios_testh):
+  JSON records carry `runId` and `kernelIdentity`; every other file needs a
+  `<file>.provenance.json` with a matching SHA-256 (trace records are sealed
+  with `seal_artifact`). `kernelIdentity.embedded` and `.linked` must both
+  equal `kernel/iphonesimulator-Debug-test-hooks.json`, `backend` must be
+  `in-process` and the worker hello must match its axes.
+- The checked-in inventory is `platforms/ios/acceptance-inventory.json`
+  (`tests`, `approvedSkips` with reasons; empty); the expectations are
+  `fixtures/ios/acceptance/expectations.json`, whose unknown keys the oracle
+  refuses.
