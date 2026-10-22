@@ -141,7 +141,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 }
                 return;
             }
-            let mode = crate::model_pick::additive(app, crate::model_pick::track(ui, rect));
+            let mode = crate::model_pick::track(ui, rect);
             if (response.clicked() || response.double_clicked())
                 && !overlay_owns
                 && !crate::viewport_selection::sectioned(app)

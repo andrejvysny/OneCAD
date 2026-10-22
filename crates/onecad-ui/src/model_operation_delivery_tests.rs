@@ -224,6 +224,49 @@ async fn double_tapped_body_moves_and_turns_by_typed_values() {
 
 #[tokio::test]
 #[ignore = "requires production worker and Metal; synthetic pointer delivery is not physical acceptance"]
+async fn multi_select_switch_keeps_tap_to_clear_and_whole_body_double_tap() {
+    let root = tempfile::tempdir().unwrap();
+    let mut host = boxed(root.path()).await;
+    let faces = targets(&host, PickKind::Face);
+    assert!(faces.len() >= 2, "{faces:?}");
+    tap(&mut host, id::ADDITIVE_SELECT);
+    click(&mut host, faces[0].0, egui::Modifiers::NONE);
+    assert_eq!(labels(&host), std::slice::from_ref(&faces[0].1));
+    double_tap(&mut host, faces[1].0);
+    assert!(
+        matches!(host.app.doc.selection.items(), [SelectionItem::Body(_)]),
+        "a double tap selects the body alone: {:?}",
+        host.app.doc.selection.items()
+    );
+    let viewport = crate::layout::chrome(host.screen(), &host.app.ui).viewport;
+    let empty = egui::pos2(
+        viewport.left() + viewport.width() * 0.06,
+        viewport.center().y,
+    );
+    let (display, view) = (
+        host.app.doc.display.clone().unwrap(),
+        host.app.doc.view.unwrap(),
+    );
+    let logical = onecad_scene::DVec2::new(
+        f64::from(empty.x - viewport.left()),
+        f64::from(empty.y - viewport.top()),
+    );
+    let policy = onecad_scene::PickPolicy::FacesAndEdges;
+    let hit =
+        onecad_scene::pick_with_policy(&display.scene, &view, view.identity(), logical, policy);
+    assert!(hit.ok().flatten().is_none(), "the tap must miss the body");
+    click(&mut host, empty, egui::Modifiers::NONE);
+    assert!(host.app.ui.additive_select);
+    assert!(
+        host.app.doc.selection.items().is_empty(),
+        "a miss clears while the switch is on: {:?}",
+        host.app.doc.selection.items()
+    );
+    host.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic pointer delivery is not physical acceptance"]
 async fn selection_change_while_staging_refuses_the_start() {
     let root = tempfile::tempdir().unwrap();
     let mut host = boxed(root.path()).await;

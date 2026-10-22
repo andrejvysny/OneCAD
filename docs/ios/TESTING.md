@@ -76,7 +76,7 @@ follows its role (button, static text or other).
 | `onecad.op.confirm`, `onecad.op.cancel` | Snapshot (operation card or History editor buttons) | Create/Apply and Cancel of the running operation | implemented |
 | `onecad.plane.xy`, `.xz`, `.yz` | Snapshot (sketch support chooser buttons) | Sketch on an origin plane | implemented |
 | `onecad.history.<index>` | Snapshot (Inspector History rows) | Feature row, 0-based in history order | implemented |
-| `onecad.select.additive` | Snapshot (pill multi-select switch; toggled sets `A11Y_SELECTED`) | Plain viewport picks toggle items instead of replacing the selection | implemented |
+| `onecad.select.additive` | Snapshot (pill multi-select switch; toggled sets `A11Y_SELECTED`) | Plain viewport picks on an item toggle it instead of replacing the selection; a tap on empty space still clears and a double tap still selects the whole body alone | implemented |
 
 ## Test-hook commands (`onecad_ios_test.h`)
 
