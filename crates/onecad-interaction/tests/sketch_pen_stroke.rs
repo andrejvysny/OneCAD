@@ -126,3 +126,26 @@ fn unrecognized_or_tiny_strokes_leave_no_history() {
     });
     assert!(effects.is_empty(), "a stray touch is ignored");
 }
+
+#[test]
+fn a_stroke_finished_while_a_batch_is_in_flight_is_refused_with_a_reason() {
+    let mut state = active(SketchPlane::xy(), SketchTool::PenStroke);
+    let line = |y| StrokeShape::Line {
+        start: v(0.0, y),
+        end: v(5.0, y),
+    };
+    let (tag, ops) = upsert(commit(&mut state, line(0.0), 1));
+    assert!(
+        commit(&mut state, line(3.0), 2).is_empty(),
+        "one batch at a time"
+    );
+    let session = state.session.as_ref().unwrap();
+    assert_eq!(session.phase, SketchPhase::Submitting);
+    let SketchStatus::Refused(message) = &session.status else {
+        panic!("the dropped stroke is reported");
+    };
+    assert!(message.contains("still being applied"), "{message}");
+    let snapshot = applied(&state, &ops);
+    complete(&mut state, tag, snapshot);
+    assert_eq!(state.session.as_ref().unwrap().phase, SketchPhase::Active);
+}

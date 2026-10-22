@@ -60,21 +60,74 @@ pub(crate) fn viewport(app: &mut App, ui: &Ui, rect: Rect, view: &ViewSnapshot) 
         return;
     };
     let key = session.key.clone();
-    let mut drawing = ui
+    let drawing = ui
         .ctx()
         .data(|data| data.get_temp::<Drawing>(drawing_id()))
         .filter(|drawing| drawing.key == key);
-    let events = ui.input(|input| input.events.clone());
+    let (drawing, finished) = feed(session, ui, rect, view, drawing);
+    paint(app, ui, drawing.as_ref());
+    ui.ctx().data_mut(|data| match &drawing {
+        Some(drawing) => {
+            data.insert_temp(drawing_id(), drawing.clone());
+        }
+        None => data.remove::<Drawing>(drawing_id()),
+    });
+    if let Some((done, at)) = finished {
+        finish(app, ui, rect, view, done, at);
+    }
+}
+
+/// Applies this frame's pointer events: the stroke in progress after them,
+/// and the stroke a release finished with its release position.
+fn feed(
+    session: &SketchSession,
+    ui: &Ui,
+    rect: Rect,
+    view: &ViewSnapshot,
+    mut drawing: Option<Drawing>,
+) -> (Option<Drawing>, Option<(Drawing, Pos2)>) {
+    let canvas = Canvas {
+        session,
+        ui,
+        rect,
+        view,
+    };
     let mut finished = None;
-    for event in &events {
+    for event in ui.input(|input| input.events.clone()) {
+        if let Some(done) = canvas.step(&event, &mut drawing) {
+            finished = Some(done);
+        }
+    }
+    // The release landed in a frame that never reached this canvas (an overlay
+    // or dimension owned the pointer): drop the stroke, or later hover moves
+    // would extend it and a later release commit it.
+    if !ui.input(|input| input.pointer.primary_down()) {
+        drawing = None;
+    }
+    (drawing, finished)
+}
+
+struct Canvas<'a> {
+    session: &'a SketchSession,
+    ui: &'a Ui,
+    rect: Rect,
+    view: &'a ViewSnapshot,
+}
+
+impl Canvas<'_> {
+    fn step(&self, event: &Event, drawing: &mut Option<Drawing>) -> Option<(Drawing, Pos2)> {
+        let (session, view, rect) = (self.session, self.view, self.rect);
         match event {
+            // A press elsewhere (chrome) is another contact: the old stroke is over.
             Event::PointerButton {
                 pos,
                 button: PointerButton::Primary,
                 pressed: true,
                 ..
-            } if crate::viewport_widgets::allows_pointer(ui, rect, *pos) => {
-                drawing = begin(session, view, rect, *pos);
+            } => {
+                *drawing = crate::viewport_widgets::allows_pointer(self.ui, rect, *pos)
+                    .then(|| begin(session, view, rect, *pos))
+                    .flatten();
             }
             Event::PointerMoved(pos) => {
                 if let Some(drawing) = drawing.as_mut() {
@@ -87,29 +140,19 @@ pub(crate) fn viewport(app: &mut App, ui: &Ui, rect: Rect, view: &ViewSnapshot) 
                 pressed: false,
                 ..
             } => {
-                if let Some(mut done) = drawing.take() {
-                    extend(&mut done, session, view, rect, *pos);
-                    finished = Some((done, *pos));
-                }
+                let mut done = drawing.take()?;
+                extend(&mut done, session, view, rect, *pos);
+                return Some((done, *pos));
             }
             Event::PointerGone
             | Event::Key {
                 key: egui::Key::Escape,
                 pressed: true,
                 ..
-            } => drawing = None,
+            } => *drawing = None,
             _ => {}
         }
-    }
-    paint(app, ui, drawing.as_ref());
-    ui.ctx().data_mut(|data| match &drawing {
-        Some(drawing) => {
-            data.insert_temp(drawing_id(), drawing.clone());
-        }
-        None => data.remove::<Drawing>(drawing_id()),
-    });
-    if let Some((done, at)) = finished {
-        finish(app, ui, rect, view, done, at);
+        None
     }
 }
 
@@ -202,12 +245,12 @@ fn finish(app: &mut App, ui: &Ui, rect: Rect, view: &ViewSnapshot, done: Drawing
     let Ok(point) = capture_sketch_pointer(session, view, logical(rect, at)) else {
         return;
     };
-    ui.ctx()
-        .data_mut(|data| data.remove::<LastStroke>(last_id()));
     let kind = match &stroke {
         Recognition::Shape(shape) => shape.kind(),
         Recognition::TooShort | Recognition::Unrecognized(_) => StrokeKind::Line,
     };
+    // A refused stroke (unrecognized, or an earlier batch still in flight)
+    // leaves the previous stroke's bar and any override it awaits in place.
     let entities = commit(app, point, stroke);
     if !entities.is_empty() {
         let last = LastStroke {
@@ -236,14 +279,12 @@ fn commit(
         Recognition::TooShort | Recognition::Unrecognized(_) => 0,
     };
     let entities = ids.entities[..count].to_vec();
+    let phase = |app: &App| app.doc.sketch.session.as_ref().map(|session| session.phase);
+    // While a batch is in flight the session refuses the stroke with a reason;
+    // only a stroke dispatched from Active and now submitting was accepted.
+    let was_active = phase(app) == Some(SketchPhase::Active);
     app.sketch_dispatch(SketchAction::CommitStroke { point, ids, stroke });
-    // A refusal leaves the session Active; only an accepted stroke submits.
-    let submitted = app
-        .doc
-        .sketch
-        .session
-        .as_ref()
-        .is_some_and(|session| session.phase == SketchPhase::Submitting);
+    let submitted = was_active && phase(app) == Some(SketchPhase::Submitting);
     if submitted { entities } else { Vec::new() }
 }
 
