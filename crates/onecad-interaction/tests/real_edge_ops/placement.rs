@@ -1,7 +1,10 @@
 //! Move / Rotate of the plate by exact typed values: volume is kept, the exact
 //! centroid moves rigidly and the mesh bounds shift or swap their extents.
 use super::{drive, host::Harness, SAME};
-use onecad_core::ids::{BodyId, RecordId};
+use onecad_core::{
+    document::record::{KnownOperation, Operation},
+    ids::{BodyId, RecordId},
+};
 use onecad_interaction::{operand_binding, *};
 
 /// Mesh bounds are f32 vertex positions.
@@ -65,7 +68,7 @@ pub async fn move_and_rotate(
     let start = drive::bounds(harness, body).await;
     let centroid = drive::centroid(harness, body).await;
     let x = NumericParameter::TransformTranslation(ParameterAxis::X);
-    let moved = transform(harness, state, (body, centre(&start)), (x, "10"), 6).await;
+    let moved = transform(harness, state, (body, centre(&start)), (x, "10"), 8).await;
     drive::close(
         drive::volume(harness, body).await,
         volume,
@@ -95,7 +98,7 @@ pub async fn move_and_rotate(
     );
     let pivot = centre(&shifted);
     let angle = NumericParameter::TransformRotationAngle;
-    let rotated = transform(harness, state, (body, pivot), (angle, "90"), 7).await;
+    let rotated = transform(harness, state, (body, pivot), (angle, "90"), 9).await;
     drive::close(
         drive::volume(harness, body).await,
         volume,
@@ -126,4 +129,40 @@ pub async fn move_and_rotate(
         "turned centroid",
     );
     (moved, rotated)
+}
+
+/// After reopen: the last TransformBody turns 90° → 180° about its frozen
+/// pivot through its History edit. Nothing follows it, so the SCHEMA §7.3
+/// edit-safety gate seeds no repair; editing the earlier Move instead gates this
+/// record by design (`onecad-app/tests/transform_body.rs`).
+pub async fn turn_further(
+    harness: &Harness,
+    state: &mut Interaction,
+    (body, rotated): (BodyId, RecordId),
+    volume: f64,
+) {
+    let before = drive::centroid(harness, body).await;
+    let record = onecad_app::api::get_operation_record(&harness.state, rotated)
+        .await
+        .unwrap();
+    let Operation::Known(KnownOperation::TransformBody(params)) = &record.op else {
+        panic!("rotation record expected")
+    };
+    let pivot = params.rotate.center;
+    let angle = NumericParameter::TransformRotationAngle;
+    super::edits::edit(harness, state, (rotated, angle), "180", 2).await;
+    drive::close(
+        drive::volume(harness, body).await,
+        volume,
+        volume,
+        SAME,
+        "a further turn keeps volume",
+    );
+    let (dx, dy) = (before[0] - pivot.x, before[1] - pivot.y);
+    near(
+        drive::centroid(harness, body).await,
+        [pivot.x - dy, pivot.y + dx, before[2]],
+        CENTROID,
+        "another 90° about the frozen pivot",
+    );
 }

@@ -1,10 +1,13 @@
 //! Fillet, Chamfer, Offset Face and Move / Rotate creation through the shared
 //! binder and reducer with the real worker (ONECAD-316/319; IP13–IP15) on the
 //! 60 × 40 × 4 mm reference plate with one Ø6 mm through hole, then parameter
-//! edit, undo/redo and save/reopen in a fresh AppState. Automated service
+//! edits (including the plate thickness upstream of the edge ops), undo/redo,
+//! save/reopen in a fresh AppState and edits after reopen. Automated service
 //! evidence, not native input.
 #[path = "real_edge_ops/drive.rs"]
 mod drive;
+#[path = "real_edge_ops/edits.rs"]
+mod edits;
 #[allow(dead_code)]
 #[path = "../../onecad-app/tests/native_plate_support/host.rs"]
 mod host;
@@ -66,6 +69,8 @@ struct Authored {
     moved: RecordId,
     rotated: RecordId,
     volume: f64,
+    /// The planar top face the offset moved, after both edge ops trimmed it.
+    top_area: f64,
     op_types: Vec<String>,
 }
 
@@ -94,8 +99,9 @@ async fn author(root: &Path, saved: &Path) -> Authored {
     );
     let mut state = Interaction::default();
     let (fillet, filleted) = fillet_edit_and_history(&harness, &mut state, body, base).await;
-    let (chamfer, chamfered) = chamfer(&harness, &mut state, body, filleted).await;
-    let (offset, volume) = offset_top(&harness, &mut state, body, chamfered).await;
+    let (chamfer, _) = chamfer(&harness, &mut state, body, filleted).await;
+    let thick = edits::thicken_plate(&harness, &mut state, body).await;
+    let (offset, volume, top_area) = offset_top(&harness, &mut state, body, thick).await;
     let (moved, rotated) = placement::move_and_rotate(&harness, &mut state, body, volume).await;
     let op_types = harness
         .projection()
@@ -114,6 +120,7 @@ async fn author(root: &Path, saved: &Path) -> Authored {
         moved,
         rotated,
         volume,
+        top_area,
         op_types,
     }
 }
@@ -312,13 +319,23 @@ async fn chamfer(
     let key = corner_edge(harness, body, plate::WIDTH, 0.0).await;
     let id = begin_edge_op(harness, state, EdgeOpKind::Chamfer, (body, key), 4).await;
     drive::confirm(harness, state).await;
-    let after = drive::volume(harness, body).await;
+    let created = drive::volume(harness, body).await;
     close(
-        before - after,
+        before - created,
         2.0,
         2.0,
         DELTA,
         "1 mm equal chamfer removes ½·1·1·4",
+    );
+    let distance = (id, NumericParameter::ChamferDistance);
+    edits::edit(harness, state, distance, "0.5", 5).await;
+    let after = drive::volume(harness, body).await;
+    close(
+        before - after,
+        0.5,
+        0.5,
+        DELTA,
+        "0.5 mm chamfer edit removes ½·0.5·0.5·4",
     );
     (id, after)
 }
@@ -328,7 +345,7 @@ async fn offset_top(
     state: &mut Interaction,
     body: BodyId,
     before: f64,
-) -> (RecordId, f64) {
+) -> (RecordId, f64, f64) {
     let faces = drive::elements(harness, body, "f").await;
     let top = faces
         .iter()
@@ -336,8 +353,8 @@ async fn offset_top(
         .max_by(|a, b| a.center[2].total_cmp(&b.center[2]))
         .expect("planar top face")
         .clone();
-    // The 0.5 mm fillet and the 1 mm chamfer each trim one top corner.
-    let trimmed = (1.0 - PI / 4.0) * 0.25 + 0.5;
+    // The 0.5 mm fillet and the 0.5 mm chamfer each trim one top corner.
+    let trimmed = (1.0 - PI / 4.0) * 0.25 + 0.5 * 0.5 * 0.5;
     let hole = PI * plate::HOLE_RADIUS * plate::HOLE_RADIUS;
     let area = plate::WIDTH * plate::HEIGHT - hole - trimmed;
     close(top.magnitude, area, area, 1e-9, "top face area");
@@ -358,7 +375,7 @@ async fn offset_top(
     let size = Scalar::new(DEFAULT_OPERATION_SIZE_MM);
     let step = head.applied_ops as u32;
     let record = operand_binding::bind_offset_face(&staged, size, RecordId::new(), step).unwrap();
-    let id = begin(harness, state, record, 5, context).await;
+    let id = begin(harness, state, record, 7, context).await;
     drive::confirm(harness, state).await;
     let after = drive::volume(harness, body).await;
     close(
@@ -368,7 +385,7 @@ async fn offset_top(
         DELTA,
         "+1 mm offset adds the top area",
     );
-    (id, after)
+    (id, after, area)
 }
 
 async fn save(harness: &Harness, path: &Path) {
@@ -426,6 +443,7 @@ async fn reopen(root: &Path, path: &Path, authored: &Authored) {
         SAME,
         "reopened volume",
     );
+    edits::after_reopen(&harness, authored, volume).await;
     harness.close().await;
 }
 
@@ -447,8 +465,14 @@ async fn reopened_params(harness: &Harness, authored: &Authored) {
     else {
         panic!("chamfer survives reopen")
     };
-    assert_eq!(chamfer.radius.value, 1.0);
+    assert_eq!(chamfer.radius.value, 0.5);
     assert!(!chamfer.is_asymmetric());
+    let Operation::Known(KnownOperation::Extrude(plate)) =
+        stored(harness, plate::plate_record()).await
+    else {
+        panic!("plate extrude survives reopen")
+    };
+    assert_eq!(plate.distance.value, 6.0);
     let Operation::Known(KnownOperation::OffsetFace(offset)) =
         stored(harness, authored.offset).await
     else {

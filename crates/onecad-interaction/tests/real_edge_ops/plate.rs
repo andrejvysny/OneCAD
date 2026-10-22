@@ -22,7 +22,12 @@ pub const HOLE_RADIUS: f64 = 3.0;
 
 /// 9600 − 36π mm³.
 pub fn volume() -> f64 {
-    WIDTH * HEIGHT * THICKNESS - PI * HOLE_RADIUS * HOLE_RADIUS * THICKNESS
+    volume_at(THICKNESS)
+}
+
+/// The plate with its through hole at `thickness`.
+pub fn volume_at(thickness: f64) -> f64 {
+    WIDTH * HEIGHT * thickness - PI * HOLE_RADIUS * HOLE_RADIUS * thickness
 }
 
 /// World (x, y) of sketch point (u, v). The XY sketch frame is non-standard
