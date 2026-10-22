@@ -27,6 +27,10 @@ pub enum Action {
     Save,
     SaveAs,
     Export(crate::document_flow::ExportFormat),
+    /// Sends a copy of the saved `.onecad` to the host's export picker (hosts
+    /// without a menu bar; the document keeps its sandbox path).
+    #[cfg_attr(feature = "desktop", allow(dead_code))]
+    ExportDocument,
     Quit,
     Fit,
     Home,
@@ -393,7 +397,9 @@ mod imp {
                 Action::Redo => enabled.redo,
                 Action::New | Action::Open | Action::Import => enabled.replace,
                 Action::InsertStep => enabled.insert,
-                Action::Save | Action::SaveAs | Action::SaveAll => enabled.save,
+                Action::Save | Action::SaveAs | Action::SaveAll | Action::ExportDocument => {
+                    enabled.save
+                }
                 Action::Export(_) => enabled.export,
                 _ => true,
             }
@@ -470,6 +476,7 @@ impl Action {
                     | Self::Export(_)
                     | Self::OpenRecent(_)
                     | Self::SaveAll
+                    | Self::ExportDocument
                     | Self::InsertStep => {
                         return false;
                     }

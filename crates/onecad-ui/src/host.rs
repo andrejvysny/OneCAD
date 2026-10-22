@@ -99,10 +99,26 @@ impl Editor {
     }
 
     /// Opens a file the system handed to the app, like File › Open Recent: the same
-    /// busy/tool gates apply and a refusal is reported in the status bar.
+    /// busy/tool gates apply and a refusal is reported in the status bar. A STEP
+    /// file is imported into a new document, as File › Import would (the host
+    /// declares STEP as a type it can open).
     pub fn open_path(&mut self, path: std::path::PathBuf) {
-        self.app
-            .document_request(crate::document_flow::Request::Open(Some(path)));
+        use crate::document_flow::Request;
+        let step = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("step") || ext.eq_ignore_ascii_case("stp"));
+        self.app.document_request(if step {
+            Request::Import(Some(path))
+        } else {
+            Request::Open(Some(path))
+        });
+    }
+
+    /// The active document's tab id. A host compares it across frames to cancel
+    /// live touch contacts when the user switched documents.
+    pub fn active_tab(&self) -> u64 {
+        self.app.doc.tab
     }
 
     /// INPUT.md `drag_authoring`: see [`drag_authoring`].
@@ -138,11 +154,28 @@ impl Editor {
             .count()
     }
 
+    /// The active tab's editor-side state (acceptance probes only), which the
+    /// document services do not hold: strip position, selection, camera,
+    /// status line and whether it is busy.
+    #[cfg(feature = "semantic-probe")]
+    pub fn view_probe(&self) -> ViewProbe {
+        let camera = &self.app.doc.camera;
+        ViewProbe {
+            tab_index: self.app.active_index(),
+            selected: self.app.doc.selection.len(),
+            camera_target: camera.target.to_array(),
+            camera_offset: camera.offset.to_array(),
+            status: self.app.doc.status.clone(),
+            busy: self.app.busy(),
+        }
+    }
+
     /// Starts the active document's File › Save As (acceptance probes only):
     /// the document flow, services and `DialogPort` a user's Save As goes
-    /// through. `Err` is the status line when the editor refused to start it.
+    /// through. `Ok` is the tab that owns the save; `Err` is the status line
+    /// when the editor refused to start it.
     #[cfg(feature = "semantic-probe")]
-    pub fn request_save_as(&mut self) -> Result<(), String> {
+    pub fn request_save_as(&mut self) -> Result<u64, String> {
         use crate::diagnostics::{FileAction, Source, State};
         self.app
             .document_request(crate::document_flow::Request::Save { save_as: true });
@@ -156,27 +189,25 @@ impl Editor {
             Some((State::Pending, _))
         );
         if self.app.doc.documents.running && pending {
-            Ok(())
+            Ok(self.app.doc.tab)
         } else {
             Err(self.app.doc.status.clone())
         }
     }
 
-    /// The last Save the active document reported (acceptance probes only):
-    /// `None` while one runs or none finished; else its status line, `Ok` with
-    /// whether the document went clean when the file was written.
+    /// The last Save `tab` reported (acceptance probes only), whichever tab is
+    /// shown: `None` while one runs or none finished; else its status line,
+    /// `Ok` with whether the document went clean when the file was written.
     #[cfg(feature = "semantic-probe")]
-    pub fn save_outcome(&self) -> Option<Result<(bool, String), String>> {
+    pub fn save_outcome(&self, tab: u64) -> Option<Result<(bool, String), String>> {
         use crate::diagnostics::{FileAction, Source, State};
-        if self.app.doc.documents.running {
+        let Some(doc) = self.app.editor(tab) else {
+            return Some(Err("the document closed before its Save finished".into()));
+        };
+        if doc.documents.running {
             return None;
         }
-        let latest = self
-            .app
-            .doc
-            .diagnostics
-            .latest(Source::File(FileAction::Save));
-        match latest? {
+        match doc.diagnostics.latest(Source::File(FileAction::Save))? {
             (State::Pending, _) => None,
             (State::Succeeded, message) => Some(Ok((true, message))),
             // Saved, but an edit landed during the write (`saved.clean` false).
@@ -277,4 +308,18 @@ pub struct DocumentAccess {
     /// The sandbox Documents directory saves and exports are confined to.
     pub documents: std::path::PathBuf,
     pub runtime: tokio::runtime::Handle,
+}
+
+/// See [`Editor::view_probe`].
+#[cfg(feature = "semantic-probe")]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ViewProbe {
+    /// 0-based position of the active tab in the strip.
+    pub tab_index: usize,
+    pub selected: usize,
+    pub camera_target: [f64; 3],
+    pub camera_offset: [f64; 3],
+    pub status: String,
+    /// A file action, command or decision blocks the editor (tab switches too).
+    pub busy: bool,
 }

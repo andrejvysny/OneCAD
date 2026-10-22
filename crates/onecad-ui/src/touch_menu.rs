@@ -45,6 +45,13 @@ const FILE: &[Row] = &[
         "onecad.menu.file.saveAs",
     ),
     (
+        "save",
+        "Save All",
+        None,
+        Action::SaveAll,
+        "onecad.menu.file.saveAll",
+    ),
+    (
         "close",
         "Close Tab",
         Some("⌘W"),
@@ -74,6 +81,13 @@ const EXCHANGE: &[Row] = &[
         None,
         Action::Export(ExportFormat::Step),
         "onecad.menu.file.export",
+    ),
+    (
+        "export",
+        "Send a Copy…",
+        None,
+        Action::ExportDocument,
+        "onecad.menu.file.sendCopy",
     ),
 ];
 
@@ -136,4 +150,26 @@ fn contents(app: &App, ui: &mut egui::Ui) {
             }
         }
     }
+}
+
+/// Send a Copy…: the saved `.onecad` goes to the host's export picker, which
+/// writes a copy where the user chooses (managed-copy policy: a Files location
+/// never becomes the document's path). Only saved bytes are sent, so a document
+/// with unsaved changes is refused rather than sent stale.
+pub(crate) fn send_copy(app: &mut App) {
+    let path = app
+        .doc
+        .document_state
+        .as_ref()
+        .and_then(|state| state.path.clone());
+    let message = match path {
+        None => "Save the document before sending a copy".to_owned(),
+        Some(_) if app.document_dirty() => "Save your changes before sending a copy".to_owned(),
+        Some(path) => {
+            app.exported.push(std::path::PathBuf::from(path));
+            "Choose where to send a copy".to_owned()
+        }
+    };
+    app.doc.command_status = true;
+    app.doc.status = message;
 }

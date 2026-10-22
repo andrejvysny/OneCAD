@@ -343,7 +343,8 @@ onecad_ios_status onecad_ios_host_request_next(onecad_ios_app *app,
 onecad_ios_status onecad_ios_host_request_complete(onecad_ios_app *app, uint64_t id,
                                                    const char *const *paths,
                                                    uint32_t count);
-/* Opens a file the system handed to the app (Files "Open in", URL scheme). */
+/* Opens a file the system handed to the app (Files "Open in", URL scheme) like
+ * Open Recent; a .step/.stp file is imported into a new document instead. */
 onecad_ios_status onecad_ios_open_path(onecad_ios_app *app, const char *utf8_path);
 
 /* ---- Diagnostics ------------------------------------------------------- */

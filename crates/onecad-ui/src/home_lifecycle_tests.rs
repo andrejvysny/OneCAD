@@ -60,7 +60,7 @@ async fn startup_and_cancelled_failed_file_actions_leave_no_document() {
     assert!(backend.state.runtime.lock().await.is_none());
     assert!(backend.shared.failure.lock().unwrap().is_none());
     assert!(backend.shared.recovery.lock().unwrap().checked);
-    for request in [Request::Open(None), Request::Import] {
+    for request in [Request::Open(None), Request::Import(None)] {
         assert!(matches!(
             run(&mut backend, request).await,
             Ok(Outcome::Cancelled)
@@ -124,7 +124,7 @@ async fn explicit_new_establishes_one_empty_unsaved_session_and_failure_preserve
         .is_err()
     );
     assert!(matches!(
-        run(&mut backend, Request::Import).await,
+        run(&mut backend, Request::Import(None)).await,
         Ok(Outcome::Cancelled)
     ));
     assert_eq!(

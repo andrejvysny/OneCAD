@@ -336,7 +336,7 @@ fn tile_specs() -> [Tile; 2] {
             icon: "import",
             title: "Open or import",
             subtitle: ".onecad and STEP · ⌘O",
-            request: Some(Request::Import),
+            request: Some(Request::Import(None)),
         },
     ]
 }
