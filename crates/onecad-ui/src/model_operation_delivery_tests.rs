@@ -221,3 +221,27 @@ async fn double_tapped_body_moves_and_turns_by_typed_values() {
     }
     host.stop().await;
 }
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; synthetic pointer delivery is not physical acceptance"]
+async fn selection_change_while_staging_refuses_the_start() {
+    let root = tempfile::tempdir().unwrap();
+    let mut host = boxed(root.path()).await;
+    let edges = targets(&host, PickKind::Edge);
+    click(&mut host, edges[0].0, egui::Modifiers::NONE);
+    tap(&mut host, &id::tool(ToolId::Chamfer));
+    // `Host::ui` runs no logic tick, so the staging reply is still unread.
+    assert!(crate::operation_start::pending(&host.app));
+    crate::item_selection::retain(&mut host.app, |_| false);
+    pump_until(&mut host.app, &host.context, &mut host.frame, |app| {
+        !crate::operation_start::pending(app)
+    })
+    .await;
+    assert!(host.app.doc.interaction.tool.is_none());
+    assert!(
+        host.app.doc.status.contains("selection changed"),
+        "{}",
+        host.app.doc.status
+    );
+    host.stop().await;
+}

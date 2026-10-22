@@ -31,6 +31,8 @@ enum Reply {
 /// A staging request in flight for the operation the user chose.
 pub(crate) struct Pending {
     context: DocumentContext,
+    /// Selection revision the picks came from; a change means other operands.
+    selection: u64,
     step: u32,
     reply: Reply,
 }
@@ -159,6 +161,7 @@ fn submit(app: &mut App, request: Request, context: DocumentContext, reply: Repl
         Ok(()) => {
             app.doc.operation_start = Some(Pending {
                 context,
+                selection: app.doc.selection.revision(),
                 step,
                 reply,
             });
@@ -194,7 +197,7 @@ pub(crate) fn poll(app: &mut App) {
         return;
     };
     match bound {
-        Ok(record) => start(app, record, pending.context),
+        Ok(record) => start(app, record, pending),
         Err(message) => refuse(app, message),
     }
 }
@@ -203,13 +206,22 @@ fn stopped() -> String {
     "Operand staging stopped before answering; select again".into()
 }
 
-/// Staged refs are valid only under the head they were staged against.
-fn start(app: &mut App, record: OperationRecord, context: DocumentContext) {
+/// Staged refs are valid only under the head they were staged against, and
+/// only for the selection the user chose the tool on.
+fn start(app: &mut App, record: OperationRecord, pending: Pending) {
+    let context = pending.context;
     if app.doc.interaction.context.as_ref() != Some(&context) || app.doc.interaction.tool.is_some()
     {
         refuse(
             app,
             "The document changed while preparing; select again".into(),
+        );
+        return;
+    }
+    if app.doc.selection.revision() != pending.selection {
+        refuse(
+            app,
+            "The selection changed while preparing; choose the tool again".into(),
         );
         return;
     }
