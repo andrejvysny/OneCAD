@@ -72,6 +72,57 @@ fn every_parameter_and_tool_name_is_distinct() {
 }
 
 #[test]
+fn automation_names_are_unique_registry_identifiers() {
+    use crate::tool_registry::{PLANNED_MODEL, PLANNED_SKETCH, SelectionKind, pill_tools};
+    let kinds = [
+        SelectionKind::None,
+        SelectionKind::Face,
+        SelectionKind::Edge,
+        SelectionKind::Body,
+        SelectionKind::Region,
+        SelectionKind::SketchIdle,
+        SelectionKind::SketchEntity,
+        SelectionKind::Feature,
+        SelectionKind::Mixed,
+    ];
+    let mut seen = std::collections::BTreeSet::new();
+    for def in kinds
+        .iter()
+        .flat_map(|kind| pill_tools(*kind).iter().flat_map(|group| group.iter()))
+        .chain(PLANNED_SKETCH)
+        .chain(PLANNED_MODEL)
+    {
+        let name = def.id.automation_name();
+        assert!(name.starts_with(|c: char| c.is_ascii_lowercase()), "{name}");
+        assert!(name.chars().all(|c| c.is_ascii_alphanumeric()), "{name}");
+        seen.insert((name, format!("{:?}", def.id)));
+    }
+    let names: std::collections::BTreeSet<_> = seen.iter().map(|(name, _)| *name).collect();
+    assert_eq!(
+        names.len(),
+        seen.len(),
+        "two tools share an automation name"
+    );
+    assert_eq!(ToolId::OffsetFace.automation_name(), "offsetFace");
+    assert_eq!(ToolId::MoveRotate.automation_name(), "moveRotate");
+}
+
+#[test]
+fn sketch_creation_fields_follow_the_operation_card_rule() {
+    assert_eq!(creation_field(0, CreationField::Width), DIMENSION_INPUT);
+    assert_eq!(creation_field(0, CreationField::Diameter), DIMENSION_INPUT);
+    assert_eq!(
+        creation_field(1, CreationField::Height),
+        "onecad.param.height"
+    );
+    assert_eq!(creation_field(1, CreationField::Y), "onecad.param.y");
+    assert_eq!(
+        creation_field(1, CreationField::Sweep),
+        "onecad.param.sweep"
+    );
+}
+
+#[test]
 fn operation_card_names_primary_field_parameters_and_footer() {
     let tool = transform_session();
     let named = author_ids(|ui| {

@@ -26,6 +26,7 @@ mod automation_tests;
 mod catalog;
 mod label;
 mod layout;
+mod multi_select;
 pub(crate) use label::{body_name, selection_label};
 use layout::{bounded_pill, toolbar_rect};
 
@@ -417,31 +418,6 @@ fn draw_groups(
     hits
 }
 
-/// The visible multi-select switch: touch has no Shift or Command key.
-fn additive_button(ui: &mut egui::Ui, on: bool) -> bool {
-    let (state, tip) = if on {
-        (
-            ToolState::Active,
-            "Multi-select on: each pick adds or removes an item",
-        )
-    } else {
-        (
-            ToolState::Default,
-            "Multi-select: each pick adds or removes an item",
-        )
-    };
-    let response = ui.add(ToolButton::new("plus").state(state).tip(Tip::new(tip)));
-    crate::automation::name(ui.ctx(), response.id, crate::automation::ADDITIVE_SELECT);
-    let toggled = if on {
-        egui::accesskit::Toggled::True
-    } else {
-        egui::accesskit::Toggled::False
-    };
-    ui.ctx()
-        .accesskit_node_builder(response.id, |node| node.set_toggled(toggled));
-    response.clicked()
-}
-
 pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
     if crate::editor_facade::PREVIEW_FACADES && app.ui.editor_facade.placing.is_some() {
         crate::editor_facade::placement_pill(app, ctx, chrome);
@@ -500,7 +476,7 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
         .show(ctx, |ui| {
             bounded_pill(ui, lane.width(), None, mode, accent, |ui| {
                 if let Some(on) = additive {
-                    toggled = additive_button(ui, on);
+                    toggled = multi_select::button(ui, on);
                     pill_divider(ui);
                 }
                 if compact.is_none()

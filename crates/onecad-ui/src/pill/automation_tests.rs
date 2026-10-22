@@ -41,11 +41,49 @@ fn selection_groups_name_every_tool_by_registry_id() {
     }
 }
 
+/// A narrow lane draws only [preferred, More]; the rest must stay addressable
+/// by the same ids as rows of the More catalog, each exactly once.
+#[test]
+fn compact_pill_and_more_catalog_name_each_selection_tool_once() {
+    for (kind, moved, expected) in [
+        (
+            SelectionKind::Edge,
+            ToolId::Chamfer,
+            &["fillet", "chamfer", "import", "more", "offsetFace"][..],
+        ),
+        (
+            SelectionKind::Face,
+            ToolId::OffsetFace,
+            &["sketch", "offsetFace", "import", "more", "fillet"][..],
+        ),
+    ] {
+        let groups = pill_tools(kind);
+        // 120 pt is the narrowest lane `toolbar_bounds` yields.
+        let compact = layout::compact_tools(groups, None, 120.0, true).expect("compact lane");
+        let drawn: Vec<ToolId> = compact.iter().map(|def| def.id).collect();
+        assert!(!drawn.contains(&moved), "{drawn:?}");
+        let pill = [&compact[..]];
+        let views = enabled(&pill);
+        let named = author_ids(|ui| {
+            ui.horizontal(|ui| {
+                draw_groups(ui, &pill, &views, None);
+            });
+            let rows = catalog::overflow(groups, crate::tool_registry::PLANNED_MODEL, &drawn);
+            for def in rows {
+                catalog::row(ui, def, true);
+            }
+        });
+        for tool in expected {
+            assert_eq!(find(&named, &format!("onecad.tool.{tool}")).1, Role::Button);
+        }
+    }
+}
+
 #[test]
 fn multi_select_switch_reports_its_state() {
     for (on, state) in [(false, Toggled::False), (true, Toggled::True)] {
         let named = author_ids(|ui| {
-            additive_button(ui, on);
+            multi_select::button(ui, on);
         });
         let (_, role, toggled) = find(&named, crate::automation::ADDITIVE_SELECT);
         assert_eq!((*role, *toggled), (Role::Button, Some(state)));

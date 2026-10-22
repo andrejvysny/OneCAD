@@ -3,10 +3,12 @@
 //! never follow a label, so UI tests survive copy changes.
 use crate::tool_registry::ToolId;
 use onecad_core::sketch::WorldPlane;
-use onecad_interaction::{NumericParameter, ParameterAxis};
+use onecad_interaction::{NumericParameter, ParameterAxis, sketch::CreationField};
 
-/// The running operation's first declared field (fillet radius, offset
-/// distance, translation X…), whatever field currently has focus.
+/// The primary value entry, whatever field currently has focus: the running
+/// operation's first declared field (fillet radius, offset distance,
+/// translation X…), a sketch creation chip's first field (line length,
+/// rectangle width, circle Ø…) or the sketch dimension editor's value.
 pub(crate) const DIMENSION_INPUT: &str = "onecad.dimension.input";
 pub(crate) const OP_CONFIRM: &str = "onecad.op.confirm";
 pub(crate) const OP_CANCEL: &str = "onecad.op.cancel";
@@ -23,6 +25,78 @@ pub(crate) fn name(ctx: &egui::Context, id: egui::Id, name: &str) {
 
 pub(crate) fn tool(id: ToolId) -> String {
     format!("onecad.tool.{}", id.automation_name())
+}
+
+impl ToolId {
+    /// Stable, unlocalized registry name; the automation id is `onecad.tool.<name>`.
+    pub fn automation_name(self) -> &'static str {
+        match self {
+            Self::Select => "select",
+            Self::Sketch => "sketch",
+            Self::DatumPlane => "datumPlane",
+            Self::OffsetPlane => "offsetPlane",
+            Self::Generators => "generators",
+            Self::InsertComponent => "insertComponent",
+            Self::Import => "import",
+            Self::Measure => "measure",
+            Self::Section => "section",
+            Self::Extrude => "extrude",
+            Self::OffsetFace => "offsetFace",
+            Self::Hole => "hole",
+            Self::Draft => "draft",
+            Self::Shell => "shell",
+            Self::Material => "material",
+            Self::Isolate => "isolate",
+            Self::Hide => "hide",
+            Self::More => "more",
+            Self::Line => "line",
+            Self::Rectangle => "rectangle",
+            Self::Circle => "circle",
+            Self::Arc => "arc",
+            Self::Slot => "slot",
+            Self::Polygon => "polygon",
+            Self::Ellipse => "ellipse",
+            Self::SketchMirror => "sketchMirror",
+            Self::Boolean => "boolean",
+            Self::LinearPattern => "linearPattern",
+            Self::CircularPattern => "circularPattern",
+            Self::FeaturePattern => "featurePattern",
+            Self::Spline => "spline",
+            Self::Point => "point",
+            Self::Dimension => "dimension",
+            Self::Constraints => "constraints",
+            Self::Trim => "trim",
+            Self::Extend => "extend",
+            Self::SketchFillet => "sketchFillet",
+            Self::SketchOffset => "sketchOffset",
+            Self::Project => "project",
+            Self::Horizontal => "horizontal",
+            Self::Vertical => "vertical",
+            Self::Parallel => "parallel",
+            Self::Perpendicular => "perpendicular",
+            Self::Equal => "equal",
+            Self::Midpoint => "midpoint",
+            Self::Fix => "fix",
+            Self::Distance => "distance",
+            Self::Diameter => "diameter",
+            Self::Construction => "construction",
+            Self::Delete => "delete",
+            Self::Revolve => "revolve",
+            Self::Sweep => "sweep",
+            Self::Loft => "loft",
+            Self::Fillet => "fillet",
+            Self::Chamfer => "chamfer",
+            Self::Edit => "edit",
+            Self::RollBack => "rollBack",
+            Self::Suppress => "suppress",
+            Self::Duplicate => "duplicate",
+            Self::MoveRotate => "moveRotate",
+            Self::MakeComponent => "makeComponent",
+            Self::Flange => "flange",
+            Self::Dogbone => "dogbone",
+            Self::CheckGeometry => "checkGeometry",
+        }
+    }
 }
 
 /// 0-based position among the open document tabs.
@@ -45,6 +119,25 @@ pub(crate) fn plane(plane: WorldPlane) -> &'static str {
 
 pub(crate) fn param(parameter: NumericParameter) -> String {
     format!("onecad.param.{}", parameter_name(parameter))
+}
+
+/// A sketch creation chip follows the operation card's rule: the first field
+/// is the dimension input and the others are named by field.
+pub(crate) fn creation_field(index: usize, field: CreationField) -> String {
+    if index == 0 {
+        return DIMENSION_INPUT.to_owned();
+    }
+    let name = match field {
+        CreationField::X => "x",
+        CreationField::Y => "y",
+        CreationField::Length => "length",
+        CreationField::Width => "width",
+        CreationField::Height => "height",
+        CreationField::Diameter => "diameter",
+        CreationField::Radius => "radius",
+        CreationField::Sweep => "sweep",
+    };
+    format!("onecad.param.{name}")
 }
 
 fn parameter_name(parameter: NumericParameter) -> &'static str {

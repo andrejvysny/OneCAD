@@ -90,78 +90,6 @@ pub enum ToolId {
     CheckGeometry,
 }
 
-impl ToolId {
-    /// Stable, unlocalized registry name; the automation id is `onecad.tool.<name>`.
-    pub fn automation_name(self) -> &'static str {
-        match self {
-            Self::Select => "select",
-            Self::Sketch => "sketch",
-            Self::DatumPlane => "datumPlane",
-            Self::OffsetPlane => "offsetPlane",
-            Self::Generators => "generators",
-            Self::InsertComponent => "insertComponent",
-            Self::Import => "import",
-            Self::Measure => "measure",
-            Self::Section => "section",
-            Self::Extrude => "extrude",
-            Self::OffsetFace => "offsetFace",
-            Self::Hole => "hole",
-            Self::Draft => "draft",
-            Self::Shell => "shell",
-            Self::Material => "material",
-            Self::Isolate => "isolate",
-            Self::Hide => "hide",
-            Self::More => "more",
-            Self::Line => "line",
-            Self::Rectangle => "rectangle",
-            Self::Circle => "circle",
-            Self::Arc => "arc",
-            Self::Slot => "slot",
-            Self::Polygon => "polygon",
-            Self::Ellipse => "ellipse",
-            Self::SketchMirror => "sketchMirror",
-            Self::Boolean => "boolean",
-            Self::LinearPattern => "linearPattern",
-            Self::CircularPattern => "circularPattern",
-            Self::FeaturePattern => "featurePattern",
-            Self::Spline => "spline",
-            Self::Point => "point",
-            Self::Dimension => "dimension",
-            Self::Constraints => "constraints",
-            Self::Trim => "trim",
-            Self::Extend => "extend",
-            Self::SketchFillet => "sketchFillet",
-            Self::SketchOffset => "sketchOffset",
-            Self::Project => "project",
-            Self::Horizontal => "horizontal",
-            Self::Vertical => "vertical",
-            Self::Parallel => "parallel",
-            Self::Perpendicular => "perpendicular",
-            Self::Equal => "equal",
-            Self::Midpoint => "midpoint",
-            Self::Fix => "fix",
-            Self::Distance => "distance",
-            Self::Diameter => "diameter",
-            Self::Construction => "construction",
-            Self::Delete => "delete",
-            Self::Revolve => "revolve",
-            Self::Sweep => "sweep",
-            Self::Loft => "loft",
-            Self::Fillet => "fillet",
-            Self::Chamfer => "chamfer",
-            Self::Edit => "edit",
-            Self::RollBack => "rollBack",
-            Self::Suppress => "suppress",
-            Self::Duplicate => "duplicate",
-            Self::MoveRotate => "moveRotate",
-            Self::MakeComponent => "makeComponent",
-            Self::Flange => "flange",
-            Self::Dogbone => "dogbone",
-            Self::CheckGeometry => "checkGeometry",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct ToolDef {
     pub id: ToolId,
@@ -563,29 +491,5 @@ mod tests {
         let ids = |group: &[ToolDef]| group.iter().map(|tool| tool.id).collect::<Vec<_>>();
         assert_eq!(ids(EDGE[0]), [ToolId::Fillet, ToolId::Chamfer]);
         assert_eq!(ids(FACE[0]), [ToolId::Sketch, ToolId::OffsetFace]);
-    }
-
-    #[test]
-    fn automation_names_are_unique_registry_identifiers() {
-        let mut seen = std::collections::BTreeSet::new();
-        for def in ALL
-            .iter()
-            .flat_map(|kind| pill_tools(*kind).iter().flat_map(|group| group.iter()))
-            .chain(PLANNED_SKETCH)
-            .chain(PLANNED_MODEL)
-        {
-            let name = def.id.automation_name();
-            assert!(name.starts_with(|c: char| c.is_ascii_lowercase()), "{name}");
-            assert!(name.chars().all(|c| c.is_ascii_alphanumeric()), "{name}");
-            seen.insert((name, format!("{:?}", def.id)));
-        }
-        let names: std::collections::BTreeSet<_> = seen.iter().map(|(name, _)| *name).collect();
-        assert_eq!(
-            names.len(),
-            seen.len(),
-            "two tools share an automation name"
-        );
-        assert_eq!(ToolId::OffsetFace.automation_name(), "offsetFace");
-        assert_eq!(ToolId::MoveRotate.automation_name(), "moveRotate");
     }
 }

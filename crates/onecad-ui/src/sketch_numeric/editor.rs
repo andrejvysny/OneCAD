@@ -152,6 +152,8 @@ fn edit_fields(
                             info.label = Some(accessible_name(field.field).into());
                             info
                         });
+                        let automation = crate::automation::creation_field(index, field.field);
+                        crate::automation::name(ui.ctx(), response.id, &automation);
                         ui.label(egui::RichText::new(unit).small().weak());
                         if draft.focus == Some(index) && !pending {
                             response.request_focus()
@@ -391,6 +393,19 @@ pub(super) mod tests {
         output.textures_delta.clear();
         assert!(draft.fields.iter().all(|field| !field.authored));
         assert!(draft.focus.is_none());
+    }
+
+    #[test]
+    fn creation_chips_name_the_first_field_as_the_dimension_input() {
+        use crate::automation::testing::{author_ids, find};
+        let mut draft = draft();
+        let named = author_ids(|ui| {
+            edit_fields(ui.ctx(), &mut draft, false, &callouts(), bounds(), None);
+        });
+        let (_, role, _) = find(&named, crate::automation::DIMENSION_INPUT);
+        assert_eq!(*role, egui::accesskit::Role::TextInput);
+        find(&named, "onecad.param.height");
+        assert!(named.iter().all(|(id, _, _)| id != "onecad.param.width"));
     }
 
     #[test]

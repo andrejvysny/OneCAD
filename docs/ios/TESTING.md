@@ -41,9 +41,11 @@ set by Swift in `platforms/ios`. **Snapshot** ones are AccessKit author ids set
 by the shared egui editor (`crates/onecad-ui/src/automation.rs`; the File menu
 in `touch_menu.rs`) and exported through `onecad_ios_a11y_snapshot`
 (`identifier` field); macOS carries the same ids. GPU-free Rust tests assert
-that pill tools, the multi-select switch, operation fields and footer,
+that pill tools and More-catalog rows, the multi-select switch, operation
+fields and footer, sketch creation chips, the sketch dimension editor,
 document tabs and the sketch strip actions appear in an egui AccessKit
 `TreeUpdate` (`onecad-ui` `automation::tests`, `pill::automation_tests`,
+`sketch_numeric::editor::tests`, `constraint_authoring::tests`,
 `session_strip::tests`). The ignored Metal + real-worker host tests in
 `model_operation_delivery_tests` (`ONECAD_REQUIRE_GPU=1 ONECAD_REQUIRE_WORKER=1`)
 tap the running editor by these ids, including the viewport, history rows,
@@ -67,10 +69,10 @@ follows its role (button, static text or other).
 | `onecad.menu.file.new`, `.open`, `.save`, `.saveAs`, `.saveAll`, `.export`, `.importStep` | Snapshot (egui File menu items) | File commands (iPad has no native menu bar for them) | planned document tests |
 | `onecad.menu.edit.undo`, `onecad.menu.edit.redo` | Snapshot (egui Edit items) | Undo/redo | planned |
 | `onecad.tab.<n>`, `onecad.tab.new` | Snapshot (egui document tabs, role TAB; "+" button) | Document tabs, 0-based in strip order | implemented; planned multi-document tests |
-| `onecad.tool.<tool-id>` | Snapshot (egui pill tool buttons; `<tool-id>` = `ToolId::automation_name`: `select`, `sketch`, `line`, `rectangle`, `circle`, `arc`, `slot`, `point`, `dimension`, `constraints`, `extrude`, `fillet`, `chamfer`, `offsetFace`, `moveRotate`, `edit`, `import`, `more`, …) | Tools shown in the pill; rows of the More catalog carry no id | implemented; planned tool tests |
+| `onecad.tool.<tool-id>` | Snapshot (egui pill tool buttons; `<tool-id>` = `ToolId::automation_name`: `select`, `sketch`, `line`, `rectangle`, `circle`, `arc`, `slot`, `point`, `dimension`, `constraints`, `extrude`, `fillet`, `chamfer`, `offsetFace`, `moveRotate`, `edit`, `import`, `more`, …) | Tools shown in the pill and rows of its More catalog (`onecad.tool.more`); a narrow pill draws only the first tool and More, the rest stay addressable as catalog rows, each id once | implemented; planned tool tests |
 | `onecad.tool.finishSketch`, `onecad.tool.discardSketch` | Snapshot (sketch session strip buttons) | Finish or discard the open sketch | implemented |
-| `onecad.dimension.input` | Snapshot (egui numeric field, role TEXT_FIELD) | First declared field of the running operation: fillet radius, chamfer distance, offset distance, extrude distance, translation X | implemented; planned numeric-entry tests |
-| `onecad.param.<name>` | Snapshot (egui numeric fields) | Every other field of the running operation: `translationY`, `translationZ`, `rotationAngle`, `extrudeSecondDistance`, … (`automation.rs`) | implemented |
+| `onecad.dimension.input` | Snapshot (egui numeric field, role TEXT_FIELD) | Primary value entry: the running operation's first declared field (fillet radius, chamfer distance, offset distance, extrude distance, translation X), a sketch creation chip's first field (line length, rectangle width, circle Ø, arc radius, point X) or the sketch dimension editor's value (Distance/Diameter/Dimension tools, dimension edit). Return applies a sketch chip or dimension | implemented; planned numeric-entry tests |
+| `onecad.param.<name>` | Snapshot (egui numeric fields) | Every other field of the running operation (`translationY`, `translationZ`, `rotationAngle`, `extrudeSecondDistance`, …) or of a sketch creation chip (`height`, `y`, `sweep`) (`automation.rs`) | implemented |
 | `onecad.op.confirm`, `onecad.op.cancel` | Snapshot (operation card or History editor buttons) | Create/Apply and Cancel of the running operation | implemented |
 | `onecad.plane.xy`, `.xz`, `.yz` | Snapshot (sketch support chooser buttons) | Sketch on an origin plane | implemented |
 | `onecad.history.<index>` | Snapshot (Inspector History rows) | Feature row, 0-based in history order | implemented |

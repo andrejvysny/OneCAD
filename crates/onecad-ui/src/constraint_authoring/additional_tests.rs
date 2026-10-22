@@ -1,6 +1,17 @@
 use super::*;
 
 #[test]
+fn dimension_editor_value_is_the_dimension_input() {
+    use crate::automation::testing::{author_ids, find};
+    let mut draft = draft();
+    let named = author_ids(|ui| {
+        editor(ui.ctx(), &mut draft, &[]);
+    });
+    let (_, role, _) = find(&named, crate::automation::DIMENSION_INPUT);
+    assert_eq!(*role, egui::accesskit::Role::TextInput);
+}
+
+#[test]
 fn highlights_preserve_point_roles_and_do_not_turn_distance_lines_into_points() {
     let f = fixture();
     let endpoint = SketchTarget::Point {
