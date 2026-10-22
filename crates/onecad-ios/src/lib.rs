@@ -24,6 +24,8 @@ mod test_hooks;
 #[cfg(feature = "test-hooks")]
 mod test_hooks_probe;
 #[cfg(feature = "test-hooks")]
+mod test_hooks_save;
+#[cfg(feature = "test-hooks")]
 mod test_hooks_semantic;
 mod touch_input;
 mod wake;

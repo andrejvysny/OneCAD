@@ -43,6 +43,19 @@ pub fn kernel_identity(access: Option<&DocumentAccess>) -> Value {
 }
 
 /// `Documents/acceptance/<run id>/`, created on demand.
+/// `document_summary`'s `view`: the active tab's editor state (strip
+/// position, selection size, camera, status line, busy).
+pub fn view_summary(view: &onecad_ui::host::ViewProbe) -> Value {
+    json!({
+        "tabIndex": view.tab_index,
+        "selected": view.selected,
+        "cameraTarget": view.camera_target,
+        "cameraOffset": view.camera_offset,
+        "status": view.status,
+        "busy": view.busy,
+    })
+}
+
 pub fn run_directory(access: &DocumentAccess, run_id: &str) -> Result<PathBuf, String> {
     let directory = access.documents.join("acceptance").join(run_id);
     std::fs::create_dir_all(&directory).map_err(|e| format!("{}: {e}", directory.display()))?;

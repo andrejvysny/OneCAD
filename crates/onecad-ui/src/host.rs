@@ -136,6 +136,22 @@ impl Editor {
             .count()
     }
 
+    /// The active tab's editor-side state (acceptance probes only), which the
+    /// document services do not hold: strip position, selection, camera,
+    /// status line and whether it is busy.
+    #[cfg(feature = "semantic-probe")]
+    pub fn view_probe(&self) -> ViewProbe {
+        let camera = &self.app.doc.camera;
+        ViewProbe {
+            tab_index: self.app.active_index(),
+            selected: self.app.doc.selection.len(),
+            camera_target: camera.target.to_array(),
+            camera_offset: camera.offset.to_array(),
+            status: self.app.doc.status.clone(),
+            busy: self.app.busy(),
+        }
+    }
+
     /// Starts the active document's File › Save As (acceptance probes only):
     /// the document flow, services and `DialogPort` a user's Save As goes
     /// through. `Err` is the status line when the editor refused to start it.
@@ -275,4 +291,18 @@ pub struct DocumentAccess {
     /// The sandbox Documents directory saves and exports are confined to.
     pub documents: std::path::PathBuf,
     pub runtime: tokio::runtime::Handle,
+}
+
+/// See [`Editor::view_probe`].
+#[cfg(feature = "semantic-probe")]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ViewProbe {
+    /// 0-based position of the active tab in the strip.
+    pub tab_index: usize,
+    pub selected: usize,
+    pub camera_target: [f64; 3],
+    pub camera_offset: [f64; 3],
+    pub status: String,
+    /// A file action, command or decision blocks the editor (tab switches too).
+    pub busy: bool,
 }
