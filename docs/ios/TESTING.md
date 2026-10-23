@@ -62,8 +62,8 @@ follows its role (button, static text or other).
 | `onecad.error.relaunchRequired` | Native | Full-screen error after `ERR_TERMINAL`/`ERR_PANIC` | `LaunchTests` (must be absent) |
 | `onecad.error.title`, `onecad.error.message`, `onecad.error.hint` | Native | Labels inside either error view | — |
 | `onecad.save.name` | Native | Name field of the SAVE_DOCUMENT prompt | `RequiredWorkflowTests`, `DocumentLifecycleTests`, `DocumentPickerTests` |
-| `onecad.import.failed` | Native | Alert when an OPEN_DOCUMENT/"Open in" copy into `Documents/Inbox` fails | planned document tests |
-| `onecad.keyInputProxy` | Native | Hidden first responder for the keyboard; not an accessibility element | — |
+| `onecad.import.failed` | Native | Alert when an OPEN_DOCUMENT/"Open in" copy into `Documents/Imported` fails | planned document tests |
+| `onecad.keyInputProxy` | Native | Editable accessibility target for the focused field; mirrors its full draft and selection | `TextInputTests` |
 | `onecad.viewport` | Snapshot (egui viewport, role CANVAS) | 3D viewport region | `SurfaceLifecycleTests` |
 | `onecad.menu.file` | Snapshot (egui "File" menu button) | In-app File menu | `LaunchTests`, `OrientationTests`, `SurfaceLifecycleTests`, `RequiredWorkflowTests` |
 | `onecad.menu.file.new`, `.open`, `.save`, `.saveAs`, `.saveAll`, `.closeTab`, `.import`, `.insertStep`, `.export`, `.sendCopy` | Snapshot (egui File menu items, `crates/onecad-ui/src/touch_menu.rs`) | File commands (iPad has no native menu bar for them) | `.new`: `SurfaceLifecycleTests`; document native and UI tests (below) |
@@ -86,6 +86,26 @@ follows its role (button, static text or other).
 | `OneCADUITests/LaunchTests/testLaunchShowsCanvasAndFileMenu` | UI | class 4 |
 | `OneCADUITests/OrientationTests/testRotationKeepsAppResponsive` | UI | class 4 |
 | `OneCADUITests/RequiredWorkflowTests/testPlateWithHoleEditUndoSaveReopen` | UI | class 4, IP18/IP21 required workflow |
+
+### Synthetic Pencil modeling
+
+`PencilModelingTests/testSyntheticPencilStrokeRectangleExtrudeAndHistoryInLandscape`
+requires the actual canvas to be landscape. Confirmed `kind: pencil` samples
+traverse the production normalizer/router with pressure and hover absent. Public
+controls choose Pencil Stroke, Rectangle and Extrude; semantic commands only
+observe accepted geometry and seal evidence. The test accepts a continuous
+straight stroke (three entities), undoes it, completes a rectangle with two
+Pencil taps, then drags the extrude distance handle with Pencil samples and
+commits. It checks draft-only history before commit, live solid volume/bounds,
+and model Undo/Redo. `acceptance/<run-id>/pencil-modeling.trace` records synthetic
+input and summaries. Visual evidence is captured separately: hosted native XCTest
+does not have UI automation authorization for `XCUIScreen` screenshots.
+The test creates and closes only its own unsaved tab and preserves existing
+document files. This is simulator input evidence, not physical Pencil, pressure,
+hover, prediction appearance or haptic qualification.
+
+The exact Acceptance inventory includes this test, the six native text-session
+tests and six document-inbox tests. No skip allowance is added for them.
 
 ## Required workflow (`RequiredWorkflowTests`)
 
@@ -280,7 +300,7 @@ Simulator evidence only; the Mac plate is `ONECAD_MAC_FIXTURE`.
 
 | Test | Class | Proves |
 |---|---|---|
-| `OneCADNativeTests/DocumentInboxTests/*` (4) | 3 (host only) | The security scope covers the whole coordinated copy into `Documents/Inbox` and is released on success, failure and in async batches; an ungranted scope is never stopped |
+| `OneCADNativeTests/DocumentInboxTests/*` (6) | 3 (host only) | The security scope covers the whole coordinated copy into `Documents/Imported` and is released on success, failure and in async batches; an ungranted scope is never stopped |
 | `OneCADNativeTests/DocumentPersistenceTests/testFailedOverwriteKeepsThePreviousFileByteIdentical()` | 3 | A Save over an existing file that fails in the container write (`fault save_failure`, read-only) leaves its SHA-256 unchanged, the document dirty, at its revision and bound to that file, with the error in the status line; the next Save replaces it whole |
 | `OneCADNativeTests/DocumentPersistenceTests/testMalformedStepFromFilesLeavesTheDocumentUnchanged()` | 3 | A malformed STEP in `Documents/Inbox` opened with `open_path` is refused; the open document keeps identity, history, revision and dirty state, and the status line reports the failure |
 | `OneCADNativeTests/DocumentExportTests/testStepExportReachesTheExportPicker()` | 3 | File › Export STEP (name answered by `answer_save`) writes a STEP and presents the real export picker |

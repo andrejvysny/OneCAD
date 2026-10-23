@@ -626,6 +626,16 @@ pub trait PreviewEngine: Send + Sync {
         lod: Lod,
     ) -> Result<crate::dto::PreviewResultDto, EngineError>;
 
+    /// Read-only pre-feature operands, independent of mutable draft previews.
+    async fn edit_operand_context(
+        &self,
+        request: EditOperandRequest,
+        cancel: CancelToken,
+    ) -> Result<OperandContextPreview, EngineError> {
+        let _ = (request, cancel);
+        Err(edit_operands::unavailable())
+    }
+
     /// `PreviewPlan` (SCHEMA §7.6): a non-publishing full replay of `req.plan`
     /// from an empty base. `cancel` is observed by the transport for the whole
     /// job, including after this future is dropped.
@@ -641,6 +651,12 @@ pub trait PreviewEngine: Send + Sync {
         Err(plan_preview_unavailable())
     }
 }
+
+pub(crate) mod edit_operands;
+pub use edit_operands::{
+    EditOperandRequest, OperandBodyBounds, OperandContextGeometry, OperandContextPreview,
+    OperandGeometry, EDIT_OPERAND_CAPABILITY, MAX_EDIT_OPERAND_INPUTS,
+};
 
 /// The `PreviewPlan` request: a from-0 [`PlanRequest`] (its `job_id`, ops,
 /// `prefix_hashes`, `policy_versions`, `target_step` and `edited_from` are

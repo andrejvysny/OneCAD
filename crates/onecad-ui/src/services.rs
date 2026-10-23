@@ -99,8 +99,9 @@ pub async fn execute(
             backend.shared.wake();
             return;
         }
-        Command::Prepare(scene) => {
-            let result = prepare(backend, scene.clone()).await;
+        Command::Prepare(source) => {
+            let identity = source.scene.identity();
+            let result = prepare(backend, source).await;
             if result.is_err() {
                 // The retained capture cannot be drawn: publish a fresh one instead.
                 match load_ready_display(backend).await {
@@ -111,7 +112,7 @@ pub async fn execute(
                 }
             }
             let _ = sender.send(Message::Prepared {
-                identity: scene.identity(),
+                identity,
                 result,
                 _permit: permit,
             });
@@ -156,16 +157,48 @@ pub async fn execute(
 /// runtime, so a large preparation must not stall the others' actors.
 async fn prepare(
     backend: &mut Backend,
-    scene: Arc<SceneSnapshot>,
+    source: crate::viewport_updates::Source,
 ) -> Result<onecad_render::PreparedScene, String> {
+    let epoch = backend
+        .shared
+        .display_epoch
+        .load(std::sync::atomic::Ordering::Acquire);
+    let preparation = Arc::new(
+        backend
+            .shared
+            .host_budget
+            .admit_while(
+                crate::budget::MAX_PREPARED_BYTES as usize,
+                crate::budget::Kind::Preparation,
+                || {
+                    !backend
+                        .shared
+                        .stopping
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        && backend
+                            .shared
+                            .display_epoch
+                            .load(std::sync::atomic::Ordering::Acquire)
+                            == epoch
+                },
+            )
+            .await?,
+    );
+    let retention = onecad_render::PreparationRetention {
+        source: Some(source.lease),
+        preparation: Some(preparation),
+    };
+    let scene = source.scene;
     let budget = backend
         .shared
         .preparation_budget()?
         .limit_cpu_prepared_bytes(crate::budget::MAX_PREPARED_BYTES);
     let mut cache = backend.shared.take_preparation_cache();
     let (prepared, cache) = tokio::task::spawn_blocking(move || {
-        let prepared = onecad_render::PreparedScene::new_cached(&scene, budget, &mut cache)
-            .map_err(|e| e.to_string());
+        let prepared = onecad_render::PreparedScene::new_cached_retained(
+            &scene, budget, &mut cache, retention,
+        )
+        .map_err(|e| e.to_string());
         (prepared, cache)
     })
     .await
@@ -358,13 +391,34 @@ pub async fn candidate(backend: &Backend, generation: u64, candidate: Candidate)
     }
     let mut prepared = None;
     let mut retained_scene = None;
+    let mut preparation = None;
     let lease = if matches!(&candidate, Candidate::Preview { .. }) {
         match backend
             .shared
             .host_budget
-            .reserve(crate::budget::PREVIEW_RESERVATION)
-        {
-            Ok(lease) => Some(lease),
+            .admit_while(
+                crate::budget::PREVIEW_RESERVATION,
+                crate::budget::Kind::Preview,
+                || {
+                    backend.shared.is_current(generation)
+                        && !backend
+                            .shared
+                            .stopping
+                            .load(std::sync::atomic::Ordering::Acquire)
+                },
+            )
+            .await
+            .and_then(|lease| {
+                lease.split_kinds(
+                    crate::budget::PREVIEW_SOURCE_RESERVATION,
+                    crate::budget::Kind::PreviewSource,
+                    crate::budget::Kind::Preparation,
+                )
+            }) {
+            Ok((source, prepared)) => {
+                preparation = Some(Arc::new(prepared));
+                Some(Arc::new(source))
+            }
             Err(error) => {
                 let Candidate::Preview { tag, .. } = candidate else {
                     return;
@@ -412,9 +466,17 @@ pub async fn candidate(backend: &Backend, generation: u64, candidate: Candidate)
                 Ok(result) => match preview_scene(&tag, &result.bodies) {
                     Ok(scene) => {
                         match backend.shared.preparation_budget().and_then(|budget| {
-                            onecad_render::PreparedScene::new(
+                            onecad_render::PreparedScene::new_retained(
                                 &scene,
                                 budget.limit_cpu_prepared_bytes(crate::budget::MAX_PREPARED_BYTES),
+                                onecad_render::PreparationRetention {
+                                    source: lease
+                                        .clone()
+                                        .map(|lease| lease as Arc<dyn Send + Sync>),
+                                    preparation: preparation
+                                        .clone()
+                                        .map(|lease| lease as Arc<dyn Send + Sync>),
+                                },
                             )
                             .map_err(|error| error.to_string())
                         }) {

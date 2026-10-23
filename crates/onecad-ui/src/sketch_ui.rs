@@ -96,13 +96,15 @@ impl App {
         }
         if was_active
             && !self.sketch_active()
-            && let Some(camera) = self.doc.modeling_camera.take()
             && self.doc.sketch.session.as_ref().is_some_and(|session| {
                 matches!(
                     session.status,
-                    SketchStatus::Finished { .. } | SketchStatus::Discarded(_)
+                    SketchStatus::Finished { .. }
+                        | SketchStatus::Discarded(_)
+                        | SketchStatus::FinishUncertain(_)
                 )
             })
+            && let Some(camera) = self.doc.modeling_camera.take()
         {
             self.doc.camera = camera;
             self.draw_dirty = true;

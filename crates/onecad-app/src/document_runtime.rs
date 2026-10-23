@@ -812,6 +812,7 @@ pub struct DocumentRuntime {
     /// The in-flight ONECAD-369 edit preview, cancelled by every publishing
     /// regen and when the runtime drops (see [`edit_preview`]).
     edit_preview: edit_preview::EditPreviewSlot,
+    edit_operands: edit_operands::OperandReadSlot,
 }
 
 fn title_for_path(path: &Path) -> String {
@@ -1048,6 +1049,7 @@ impl DocumentRuntime {
             import_workspace,
             import_names: HashMap::new(),
             edit_preview: edit_preview::EditPreviewSlot::default(),
+            edit_operands: edit_operands::OperandReadSlot::default(),
         }
     }
 
@@ -7026,6 +7028,7 @@ fn element_ref_input(op: &Operation, index: usize) -> Option<&ElementRef> {
 }
 
 pub mod deletion;
+mod edit_operands;
 pub mod edit_preview;
 mod face_entry;
 mod gestures;

@@ -8,9 +8,9 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     /// (autosave flush on background) must still reach Rust then.
     private var bridge: RustBridge?
     private var backgroundTask = UIBackgroundTaskIdentifier.invalid
-    /// No flush-completion signal exists in ABI v1, so background time is held
-    /// for a bounded grace while Rust's service runtime writes the autosave.
-    private static let backgroundFlushGrace: TimeInterval = 5
+    private var backgroundToken: UInt64 = 0
+    private var backgroundGeneration: UInt64 = 0
+    private var recoveryPoll: DispatchSourceTimer?
 
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession,
                options connectionOptions: UIScene.ConnectionOptions) {
@@ -54,10 +54,11 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         canvasController?.sceneDidEnterBackground()
         beginBackgroundFlush()
         bridge.lifecycle(ONECAD_IOS_DID_ENTER_BACKGROUND)
+        observeBackgroundFlush()
     }
 
     func sceneWillEnterForeground(_ scene: UIScene) {
-        endBackgroundFlush()
+        endBackgroundFlush(cancel: true)
         bridge?.lifecycle(ONECAD_IOS_WILL_ENTER_FOREGROUND)
         canvasController?.sceneWillEnterForeground()
     }
@@ -68,22 +69,55 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 
     private func beginBackgroundFlush() {
-        endBackgroundFlush()
+        endBackgroundFlush(cancel: true)
+        backgroundToken &+= 1
+        let token = backgroundToken
         backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "OneCAD autosave flush") {
             [weak self] in
-            self?.endBackgroundFlush()
-        }
-        let task = backgroundTask
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.backgroundFlushGrace) { [weak self] in
-            MainActor.assumeIsolated {
-                // A later background entry owns a newer task; leave that one alone.
-                guard let self, self.backgroundTask == task else { return }
-                self.endBackgroundFlush()
-            }
+            guard let self, self.backgroundToken == token else { return }
+            self.endBackgroundFlush(expired: true)
         }
     }
 
-    private func endBackgroundFlush() {
+    private func observeBackgroundFlush() {
+        guard let bridge else { return }
+        let (status, snapshot, _) = bridge.recoverySnapshot()
+        guard status == ONECAD_IOS_OK else { endBackgroundFlush(cancel: true); return }
+        backgroundGeneration = snapshot.generation
+        guard backgroundTask != .invalid else {
+            bridge.finishRecoveryWaiting(generation: backgroundGeneration, expired: true)
+            return
+        }
+        let token = backgroundToken
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(50))
+        timer.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.backgroundToken == token else { return }
+                self.pollBackgroundFlush()
+            }
+        }
+        recoveryPoll = timer
+        timer.resume()
+    }
+
+    private func pollBackgroundFlush() {
+        guard let bridge else { endBackgroundFlush(cancel: true); return }
+        let (status, snapshot, documents) = bridge.recoverySnapshot()
+        guard status == ONECAD_IOS_OK else { endBackgroundFlush(cancel: true); return }
+        guard snapshot.generation == backgroundGeneration else { endBackgroundFlush(cancel: true); return }
+        guard snapshot.status != 0 else { return }
+        bridgeLog.info("Background recovery completed: \(documents, privacy: .private)")
+        endBackgroundFlush()
+    }
+
+    private func endBackgroundFlush(expired: Bool = false, cancel: Bool = false) {
+        recoveryPoll?.cancel()
+        recoveryPoll = nil
+        if backgroundGeneration != 0 && (expired || cancel) {
+            bridge?.finishRecoveryWaiting(generation: backgroundGeneration, expired: expired)
+        }
+        backgroundGeneration = 0
         guard backgroundTask != .invalid else { return }
         UIApplication.shared.endBackgroundTask(backgroundTask)
         backgroundTask = .invalid
@@ -95,7 +129,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         openExternal(contexts)
     }
 
-    /// Copies each file into Documents/Inbox under its security scope, then
+    /// Copies each file into Documents/Imported under its security scope, then
     /// hands only the sandbox path to Rust.
     private func openExternal(_ contexts: Set<UIOpenURLContext>) {
         let urls = contexts.map(\.url).filter(\.isFileURL)

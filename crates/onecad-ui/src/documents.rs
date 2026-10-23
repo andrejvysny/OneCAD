@@ -255,6 +255,7 @@ impl App {
         self.activated();
         if self.doc.document_state.is_none() && self.doc.display.is_none() {
             self.ui.start_open = true;
+            self.sync_active_budget();
         }
         Ok(())
     }
@@ -353,19 +354,11 @@ impl App {
         }
     }
 
-    /// Asks every open document's autosave to write its pending recovery now.
-    /// Returns each bridge with its finished-flush count before the request.
-    pub fn request_recovery_flush(&self) -> Vec<(Arc<crate::bridge::Shared>, u64)> {
+    /// Requests document-scoped checkpoints outside each command actor.
+    pub fn request_recovery_flush(&self) -> Vec<crate::recovery_flush::Ticket> {
         std::iter::once(&self.doc)
             .chain(&self.tabs.parked)
-            .map(|doc| {
-                let shared = doc.bridge.shared.clone();
-                let before = shared
-                    .recovery_flushes
-                    .load(std::sync::atomic::Ordering::Acquire);
-                shared.recovery_flush.notify_one();
-                (shared, before)
-            })
+            .map(|doc| crate::recovery_flush::Ticket::request(&doc.bridge.shared))
             .collect()
     }
 
@@ -473,6 +466,7 @@ impl App {
         self.cancel_sketch_gesture();
         self.doc.bridge.cancel_candidates();
         self.doc.sections.cancel();
+        self.doc.topology.invalidate_pending();
         self.doc.pending_preview = None;
         self.doc.clear_preview = true;
     }
@@ -499,14 +493,16 @@ impl App {
                 .lock()
                 .map_or(true, |prepared| prepared.is_none())
         });
-        if let Some(scene) = consumed.map(|display| display.scene.clone())
-            && self.doc.prepare_in_flight != Some(scene.identity())
+        if let Some(source) = consumed.map(|display| crate::viewport_updates::Source {
+            scene: display.scene.clone(),
+            lease: display._lease.clone(),
+        }) && self.doc.prepare_in_flight != Some(source.scene.identity())
         {
-            let identity = scene.identity();
+            let identity = source.scene.identity();
             match self
                 .doc
                 .bridge
-                .submit(crate::bridge::Command::Prepare(scene))
+                .submit(crate::bridge::Command::Prepare(source))
             {
                 Ok(()) => self.doc.prepare_in_flight = Some(identity),
                 Err(error) => self.display_unavailable(error),
@@ -522,7 +518,19 @@ impl App {
         // identity, and an occluded window never clears that flag.
         self.republish_stranded();
         self.ui.start_open = self.doc.document_state.is_none() && self.doc.display.is_none();
+        self.sync_active_budget();
         self.context().request_repaint();
+    }
+
+    pub(crate) fn sync_active_budget(&self) {
+        if self.parked {
+            return;
+        }
+        if self.ui.start_open {
+            self.tabs.runtime.budget().set_active(None);
+        } else {
+            self.doc.bridge.shared.host_budget.activate();
+        }
     }
 
     /// The switched-in document cannot be drawn from its retained capture: drop
@@ -591,6 +599,7 @@ impl App {
         if crate::bars::home_allowed(self) {
             self.ui.start_page = crate::ui_state::StartPage::Home;
             self.ui.start_open = true;
+            self.sync_active_budget();
         }
     }
 
@@ -622,6 +631,7 @@ impl App {
         // A clean document closes at once; Home stays where the user was.
         if home && !decide && self.document_open() {
             self.ui.start_open = true;
+            self.sync_active_budget();
         }
     }
 
@@ -632,6 +642,7 @@ impl App {
         }
         if self.doc.tab == tab {
             self.ui.start_open = false;
+            self.sync_active_budget();
             self.draw_dirty = true;
         }
     }

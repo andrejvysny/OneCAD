@@ -748,6 +748,21 @@ std::optional<ops::OpOutcome> validate_published_bodies(
 }
 }  // namespace
 
+CandidateResult resolve_read_operand_inputs(ScratchJob& job, const json& op) {
+    CandidateResult result;
+    const std::string op_id = get_str(op, "opId");
+    if (const auto failure = validate_operation_body_inputs(job, op)) {
+        merge_outcome(result, *failure);
+        return result;
+    }
+    result.needs_repair = ops::operation_ref_ownership_repairs(op, op_id);
+    if (result.needs_repair.empty()) {
+        resolve_input_refs(job, op, op_id, em::LadderEditContext{false, job.from_zero_replay},
+                           result.delta, result.needs_repair, result.diagnostics);
+    }
+    return result;
+}
+
 CandidateResult execute_candidate_op(ScratchJob& job, const json& op,
                                      const std::string& op_id,
                                      std::string& last_sketch_id,

@@ -34,7 +34,7 @@ fn leave_leftover(dir: &Path, jobs: &[Value]) -> String {
 
 fn leave_session(dir: &Path, session: &str, jobs: &[Value]) {
     fs::create_dir_all(dir).unwrap();
-    let file = json!({ "version": 1, "session": session, "jobs": jobs });
+    let file = json!({ "version": 2, "session": session, "jobs": jobs, "complete": true });
     fs::write(dir.join(INFLIGHT), serde_json::to_vec(&file).unwrap()).unwrap();
 }
 
@@ -245,4 +245,177 @@ async fn a_struck_key_dispatches_alone_and_others_share() {
         "healed: shared again"
     );
     drop(healed);
+}
+
+#[test]
+fn repeated_mixed_plan_and_non_plan_interruption_never_quarantines_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = format!("aa|op_bad|{FP}");
+    let mut other = op_record(None, FP);
+    other["requestId"] = json!(4);
+    other["verb"] = json!("SketchUpsert");
+    let jobs = [op_record(Some(&key), FP), other];
+    for _ in 0..3 {
+        leave_leftover(dir.path(), &jobs);
+        let seeds = KernelJournal::open(dir.path()).seeds(FP);
+        assert!(seeds.iter().all(|seed| !seed.open), "{seeds:?}");
+    }
+}
+
+#[test]
+fn concurrent_jobs_in_one_instance_end_independently() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = Arc::new(KernelJournal::open(dir.path()));
+    let writer = journal.writer(4);
+    let plan = event(JournalKind::JobBegin, "ExecutePlan", "");
+    let mut solver = event(JournalKind::JobBegin, "SketchUpsert", "");
+    solver.request_id = 8;
+    writer.record(&plan);
+    writer.record(&solver);
+    writer.record(&event(JournalKind::PlanOpBegin, "op_plan", "ab"));
+    assert_eq!(
+        read(&dir.path().join(INFLIGHT))["jobs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    solver.kind = JournalKind::JobEnd;
+    writer.record(&solver);
+    let jobs = read(&dir.path().join(INFLIGHT))["jobs"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0]["key"], format!("ab|op_plan|{FP}"));
+}
+
+#[test]
+fn distinct_instances_and_generations_reject_stale_or_duplicate_completion() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = Arc::new(KernelJournal::open(dir.path()));
+    let old = journal.writer(1);
+    let new = JournalWriter {
+        journal: journal.clone(),
+        instance: old.instance,
+        epoch: 2,
+    };
+    let sibling = journal.writer(1);
+    for writer in [&old, &new, &sibling] {
+        writer.record(&event(JournalKind::JobBegin, "Tessellate", ""));
+    }
+    old.record(&event(JournalKind::JobEnd, "Tessellate", ""));
+    old.record(&event(JournalKind::JobEnd, "Tessellate", ""));
+    new.record(&event(JournalKind::JobEnd, "SketchRegions", ""));
+    let jobs = read(&dir.path().join(INFLIGHT))["jobs"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(jobs.len(), 2);
+    assert!(jobs.iter().any(|job| job["epoch"] == 2));
+    sibling.record(&event(JournalKind::JobEnd, "Tessellate", ""));
+    new.record(&event(JournalKind::JobEnd, "Tessellate", ""));
+    assert!(!dir.path().join(INFLIGHT).exists());
+}
+
+#[test]
+fn truncated_unknown_version_and_malformed_job_never_invent_strikes() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = format!("aa|op_bad|{FP}");
+    fs::write(dir.path().join(INFLIGHT), b"{\"version\":2,").unwrap();
+    let journal = KernelJournal::open(dir.path());
+    assert!(journal.seeds(FP).is_empty());
+    assert_eq!(journal.write_failures(), 1);
+    let file = json!({"version":99,"session":"old","jobs":[op_record(Some(&key), FP)]});
+    fs::write(dir.path().join(INFLIGHT), file.to_string()).unwrap();
+    let journal = KernelJournal::open(dir.path());
+    assert!(journal.seeds(FP).is_empty());
+    assert_eq!(journal.write_failures(), 1);
+    let mut malformed = op_record(Some(&key), FP);
+    malformed["verb"] = json!("SketchRegions");
+    leave_leftover(dir.path(), &[malformed]);
+    assert!(KernelJournal::open(dir.path()).seeds(FP).is_empty());
+}
+
+#[test]
+fn duplicate_begin_never_replaces_original_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = Arc::new(KernelJournal::open(dir.path()));
+    let writer = journal.writer(4);
+    writer.record(&event(JournalKind::JobBegin, "ExecutePlan", ""));
+    writer.record(&event(JournalKind::JobBegin, "SketchUpsert", ""));
+    writer.record(&event(JournalKind::JobEnd, "SketchUpsert", ""));
+    assert_eq!(
+        read(&dir.path().join(INFLIGHT))["jobs"][0]["verb"],
+        "ExecutePlan"
+    );
+    assert_eq!(journal.write_failures(), 1);
+}
+
+#[test]
+fn incomplete_or_missing_completeness_marker_cannot_quarantine_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = format!("aa|op_bad|{FP}");
+    for marker in [Some(false), None, Some(false)] {
+        let mut file = json!({"version":2,"session":uuid::Uuid::new_v4().to_string(),
+            "jobs":[op_record(Some(&key), FP)]});
+        if let Some(complete) = marker {
+            file["complete"] = json!(complete);
+        }
+        fs::write(dir.path().join(INFLIGHT), file.to_string()).unwrap();
+        let seeds = KernelJournal::open(dir.path()).seeds(FP);
+        assert!(
+            seeds.iter().all(|seed| seed.strikes == 1 && !seed.open),
+            "{seeds:?}"
+        );
+    }
+}
+
+#[test]
+fn journal_capacity_marks_incomplete_instead_of_dropping_attribution_silently() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = Arc::new(KernelJournal::open(dir.path()));
+    let writer = journal.writer(4);
+    writer.record(&event(JournalKind::JobBegin, "ExecutePlan", ""));
+    {
+        let mut state = journal.state.lock().unwrap();
+        let record = state.jobs.values().next().unwrap().clone();
+        for id in 0..MAX_JOBS {
+            let mut record = record.clone();
+            record.request_id = id as u64 + 1;
+            state
+                .jobs
+                .insert((writer.instance, 4, record.request_id), record);
+        }
+    }
+    let mut overflow = event(JournalKind::JobBegin, "SketchRegions", "");
+    overflow.request_id = MAX_JOBS as u64 + 1;
+    writer.record(&overflow);
+    let file = read(&dir.path().join(INFLIGHT));
+    assert_eq!(file["complete"], false);
+    assert_eq!(file["jobs"].as_array().unwrap().len(), MAX_JOBS);
+    assert_eq!(journal.write_failures(), 1);
+}
+
+#[test]
+fn legacy_journal_and_poison_migrate_to_suspicion_without_quarantine() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = format!("aa|op_bad|{FP}");
+    let mut poison = json!({"version":1,"entries":{}});
+    poison["entries"][&key] = json!({"strikes":2,"opId":"op_bad","lastMs":0});
+    fs::write(dir.path().join(POISON), poison.to_string()).unwrap();
+    for _ in 0..3 {
+        let file = json!({"version":1,"session":uuid::Uuid::new_v4().to_string(),
+            "jobs":[op_record(Some(&key), FP)]});
+        fs::write(dir.path().join(INFLIGHT), file.to_string()).unwrap();
+        let seeds = KernelJournal::open(dir.path()).seeds(FP);
+        assert_eq!((seeds[0].strikes, seeds[0].open), (1, false));
+    }
+    leave_leftover(dir.path(), &[op_record(Some(&key), FP)]);
+    let seeds = KernelJournal::open(dir.path()).seeds(FP);
+    assert_eq!(
+        (seeds[0].strikes, seeds[0].open),
+        (2, true),
+        "complete v2 evidence can confirm"
+    );
 }

@@ -10,6 +10,7 @@ pub mod frame;
 pub(crate) mod glyph;
 pub mod icon;
 pub mod metrics;
+pub mod text_session;
 pub mod theme;
 
 pub use theme::Theme;

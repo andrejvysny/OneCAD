@@ -1,10 +1,11 @@
+import Darwin
 import Foundation
 import os
 
 private let inboxLog = Logger(subsystem: "com.onecad.ipad", category: "documents")
 
 /// Managed-copy policy (LSSupportsOpeningDocumentsInPlace = NO): every
-/// external file is copied into Documents/Inbox under file coordination and
+/// external file is copied into Documents/Imported under file coordination and
 /// Rust only ever sees sandbox paths. Runs off the main thread.
 enum DocumentInbox {
     static func inboxDirectory() throws -> URL {
@@ -15,8 +16,14 @@ enum DocumentInbox {
         return inbox
     }
 
-    /// The system already copies "Open in" files into Documents/Inbox when
-    /// in-place opening is off; those are used as they are.
+    static func workingDirectory() throws -> URL {
+        let working = try inboxDirectory().deletingLastPathComponent()
+            .appending(path: "Imported", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: working, withIntermediateDirectories: true)
+        return working
+    }
+
+    /// Inbox is incoming data, including system-provided "Open in" copies.
     static func isInInbox(_ url: URL) -> Bool {
         guard let inbox = try? inboxDirectory() else { return false }
         let parent = url.resolvingSymlinksInPath().deletingLastPathComponent().standardizedFileURL
@@ -30,7 +37,7 @@ enum DocumentInbox {
         var failedNames: [String] = []
     }
 
-    /// Copies each URL into the inbox. Failures are logged and never leave a
+    /// Copies each URL into the editable working directory. Failures are logged and never leave a
     /// partially written file behind.
     static func importCopies(of urls: [URL], scope: SecurityScope = SecurityScope()) async -> Result {
         await Task.detached(priority: .userInitiated) {
@@ -50,16 +57,18 @@ enum DocumentInbox {
     /// The security scope is held for the whole coordinated read and copy
     /// (which runs synchronously inside it) and released on every path; the
     /// copy owns no external resource afterwards.
-    static func importCopy(of source: URL, scope: SecurityScope = SecurityScope()) throws -> URL {
-        if isInInbox(source) { return source }
+    static func importCopy(
+        of source: URL, scope: SecurityScope = SecurityScope(),
+        copy: (URL, URL) throws -> Void = { try FileManager.default.copyItem(at: $0, to: $1) }
+    ) throws -> URL {
         return try scope.withAccess(to: source) {
-            let inbox = try inboxDirectory()
+            let working = try workingDirectory()
             var coordinationError: NSError?
             var outcome: Swift.Result<URL, Error> = .failure(CocoaError(.fileReadUnknown))
             NSFileCoordinator(filePresenter: nil).coordinate(
                 readingItemAt: source, options: [.withoutChanges], error: &coordinationError
             ) { readable in
-                outcome = Swift.Result { try copyOrReuse(readable, named: source.lastPathComponent, in: inbox) }
+                outcome = Swift.Result { try copyOrReuse(readable, named: source.lastPathComponent, in: working, copy: copy) }
             }
             if let coordinationError { throw coordinationError }
             return try outcome.get()
@@ -68,21 +77,47 @@ enum DocumentInbox {
 
     /// Reopening the same file reuses an identical earlier copy ("name",
     /// "name 2", ...) instead of adding another, so repeated imports of one
-    /// file do not grow the inbox. A changed file gets the next free name.
-    private static func copyOrReuse(_ readable: URL, named fileName: String, in inbox: URL) throws -> URL {
+    /// file do not grow the working directory. A changed file gets the next free name.
+    private static func copyOrReuse(
+        _ readable: URL, named fileName: String, in working: URL,
+        copy: (URL, URL) throws -> Void
+    ) throws -> URL {
         let fm = FileManager.default
         let base = (fileName as NSString).deletingPathExtension
         let ext = (fileName as NSString).pathExtension
-        var candidate = inbox.appending(path: fileName)
+        var candidate = working.appending(path: fileName)
         var counter = 2
         while fm.fileExists(atPath: candidate.path) {
             if fm.contentsEqual(atPath: readable.path, andPath: candidate.path) { return candidate }
             let name = ext.isEmpty ? "\(base) \(counter)" : "\(base) \(counter).\(ext)"
-            candidate = inbox.appending(path: name)
+            candidate = working.appending(path: name)
             counter += 1
         }
-        try fm.copyItem(at: readable, to: candidate)
+        let temporary = working.appending(path: ".import-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: temporary) }
+        try copy(readable, temporary)
+        let handle = try FileHandle(forWritingTo: temporary)
+        defer { try? handle.close() }
+        try handle.synchronize()
+        guard link(temporary.path, candidate.path) == 0 else {
+            if errno == EEXIST { return try copyOrReuse(readable, named: fileName, in: working, copy: copy) }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        do {
+            try synchronizeDirectory(working)
+        } catch {
+            try? fm.removeItem(at: candidate)
+            throw error
+        }
         return candidate
+    }
+    private static func synchronizeDirectory(_ directory: URL) throws {
+        let descriptor = open(directory.path, O_RDONLY)
+        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { close(descriptor) }
+        if fsync(descriptor) != 0 && errno != EINVAL && errno != ENOTSUP {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
     }
 }
 

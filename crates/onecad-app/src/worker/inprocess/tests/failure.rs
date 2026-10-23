@@ -222,6 +222,10 @@ async fn a_bad_identity_or_abi_fails_startup_without_leaking_a_thread() {
 pub(super) fn has_test_hooks() -> bool {
     let hooks = identity()["testHooks"] == json!(true);
     if !hooks {
+        assert!(
+            std::env::var("ONECAD_REQUIRE_EMBEDDED_FAULTS").as_deref() != Ok("1"),
+            "ONECAD_REQUIRE_EMBEDDED_FAULTS=1 but the linked kernel has no test hooks"
+        );
         eprintln!("skip: the linked bundle has no test hooks (build-ios-worker.sh --test-hooks)");
     }
     hooks

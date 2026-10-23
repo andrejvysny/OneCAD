@@ -9,15 +9,22 @@ struct BoundGestureClient {
 }
 
 pub(super) fn bind(manager: &WorkerManager) -> Result<Arc<dyn NativeGestureWorker>, EngineError> {
-    let connection = manager.shared.conn.read().unwrap();
-    let client = connection.as_ref().cloned().ok_or_else(not_connected)?;
+    let connection = manager.shared.connection.read().unwrap();
+    let client = connection
+        .client
+        .as_ref()
+        .cloned()
+        .ok_or_else(not_connected)?;
+    if connection.state != WorkerState::Ready || client.is_closed() {
+        return Err(not_connected());
+    }
     if manager.shared.is_retired() {
         return Err(retired_err());
     }
     Ok(Arc::new(BoundGestureClient {
         manager: manager.clone(),
         client,
-        epoch: manager.epoch(),
+        epoch: WorkerEpoch(connection.epoch),
     }))
 }
 
@@ -26,12 +33,19 @@ impl BoundGestureClient {
         if !self.is_current() {
             return Err(protocol("Native gesture connection was replaced"));
         }
-        let result = ok_result(
+        let response = if verb == "SketchUpsert" {
+            self.manager
+                .shared
+                .solver_round_trip(&self.client, verb, args)
+                .await?
+                .0
+        } else {
             self.client
                 .request(verb, args)
                 .await
-                .map_err(protocol_err)?,
-        )?;
+                .map_err(protocol_err)?
+        };
+        let result = ok_result(response)?;
         if !self.is_current() {
             return Err(protocol("Native gesture connection was replaced"));
         }
@@ -68,9 +82,10 @@ impl NativeGestureWorker for BoundGestureClient {
 
     async fn quarantine(&self) -> bool {
         {
-            let connection = self.manager.shared.conn.read().unwrap();
-            if self.manager.epoch() != self.epoch
+            let mut connection = self.manager.shared.connection.write().unwrap();
+            if connection.epoch != self.epoch.0
                 || !connection
+                    .client
                     .as_ref()
                     .is_some_and(|client| Arc::ptr_eq(client, &self.client))
             {
@@ -78,7 +93,7 @@ impl NativeGestureWorker for BoundGestureClient {
             }
             // Holding the connection guard closes the check/retire replacement race.
             self.manager.shared.latch_retired();
-            self.manager.shared.set_state(WorkerState::Retired);
+            connection.state = WorkerState::Retired;
             self.manager.shared.retire_signal.notify_waiters();
         }
         self.manager.wait_torn_down(Duration::from_secs(5)).await

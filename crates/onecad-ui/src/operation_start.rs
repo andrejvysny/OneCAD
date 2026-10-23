@@ -197,6 +197,7 @@ pub(crate) fn poll(app: &mut App) {
         return;
     };
     let size = Scalar::new(DEFAULT_OPERATION_SIZE_MM);
+    let mut surface = None;
     let bound = match &pending.reply {
         Reply::Elements(kind, receiver) => match receiver.try_recv() {
             Ok(result) => result.and_then(|refs| match kind {
@@ -240,6 +241,7 @@ pub(crate) fn poll(app: &mut App) {
         },
         Reply::Offset(receiver) => match receiver.try_recv() {
             Ok(staged) => staged.and_then(|staged| {
+                surface = staged.surface.clone();
                 operand_binding::bind_offset_face(&staged, size, RecordId::new(), pending.step)
             }),
             Err(TryRecvError::Empty) => return,
@@ -250,7 +252,7 @@ pub(crate) fn poll(app: &mut App) {
         return;
     };
     match bound {
-        Ok(record) => start(app, record, pending),
+        Ok(record) => start(app, record, pending, surface),
         Err(message) => refuse(app, message),
     }
 }
@@ -261,7 +263,12 @@ fn stopped() -> String {
 
 /// Staged refs are valid only under the head they were staged against, and
 /// only for the selection the user chose the tool on.
-fn start(app: &mut App, record: OperationRecord, pending: Pending) {
+fn start(
+    app: &mut App,
+    record: OperationRecord,
+    pending: Pending,
+    surface: Option<onecad_app::dto::ClassifyElementDto>,
+) {
     let context = pending.context;
     if app.doc.interaction.context.as_ref() != Some(&context) || app.doc.interaction.tool.is_some()
     {
@@ -279,6 +286,7 @@ fn start(app: &mut App, record: OperationRecord, pending: Pending) {
         return;
     }
     crate::model_handle::capture_operands(app, &record, &context);
+    crate::model_handle::capture_surface(app, &record, &context, surface.as_ref());
     app.doc.gesture += 1;
     match operand_binding::begin_bound(record, app.doc.gesture, context) {
         Ok(action) => app.dispatch(action),

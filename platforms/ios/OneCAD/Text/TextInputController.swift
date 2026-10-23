@@ -6,7 +6,10 @@ import UIKit
 final class TextInputController: KeyInputProxyDelegate {
     private let bridge: RustBridge
     private weak var canvas: UIView?
-    private let proxy = KeyInputProxy(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
+    private let proxy = KeyInputProxy(frame: .zero)
+    var accessibilityProxy: UIView? { proxy.session == nil ? nil : proxy }
+    var focusedFieldID: UInt64? { proxy.session?.fieldID }
+    private var focusGeneration: UInt64?
     private var kind = ONECAD_IOS_TEXT_GENERAL.rawValue
     /// Rust still has a focused field but the user dismissed the keyboard;
     /// it is not re-shown until Rust ends and restarts text input.
@@ -35,7 +38,11 @@ final class TextInputController: KeyInputProxyDelegate {
     var isEditing: Bool { proxy.isFirstResponder }
 
     func apply(_ result: onecad_ios_frame_result) {
-        let active = result.flags & ONECAD_IOS_FRAME_TEXT_INPUT_ACTIVE != 0
+        let snapshot = bridge.textSnapshot()
+        let active = result.flags & ONECAD_IOS_FRAME_TEXT_INPUT_ACTIVE != 0 && snapshot != nil
+        if snapshot?.generation != focusGeneration { dismissedByUser = false }
+        focusGeneration = snapshot?.generation
+        proxy.reconcile(snapshot)
         guard active else {
             dismissedByUser = false
             if proxy.isFirstResponder {
@@ -44,7 +51,6 @@ final class TextInputController: KeyInputProxyDelegate {
             }
             return
         }
-        placeCaret(x: result.text_cursor_x, y: result.text_cursor_y, height: result.text_cursor_h)
         let kindChanged = result.text_input_kind != kind
         kind = result.text_input_kind
         proxy.keyboardType = kind == ONECAD_IOS_TEXT_NUMERIC_EXPRESSION.rawValue
@@ -54,12 +60,6 @@ final class TextInputController: KeyInputProxyDelegate {
         } else if !dismissedByUser {
             _ = proxy.becomeFirstResponder()
         }
-    }
-
-    private func placeCaret(x: Float, y: Float, height: Float) {
-        let caretHeight = max(CGFloat(height), 1)
-        proxy.frame = CGRect(x: CGFloat(x), y: CGFloat(y), width: 1, height: caretHeight)
-        proxy.caretRect = CGRect(x: 0, y: 0, width: 2, height: caretHeight)
     }
 
     // MARK: Keyboard frame
@@ -143,19 +143,10 @@ final class TextInputController: KeyInputProxyDelegate {
 
     // MARK: KeyInputProxyDelegate
 
-    func proxyInsert(_ text: String) {
-        bridge.insertText(text)
+    func proxyApply(_ operation: NativeTextOperation) -> NativeTextSnapshot? {
+        let snapshot = bridge.applyText(operation)
         onInput?()
-    }
-
-    func proxyDeleteBackward() {
-        bridge.deleteBackward()
-        onInput?()
-    }
-
-    func proxySetMarked(_ text: String?) {
-        bridge.setMarkedText(text)
-        onInput?()
+        return snapshot
     }
 
     func proxyPresses(_ presses: Set<UIPress>, pressed: Bool) {

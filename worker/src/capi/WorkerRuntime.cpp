@@ -114,7 +114,7 @@ nlohmann::json make_hello_result_impl() {
                                 "op.detachComponent", "solver.planegcs", "constraint.tangentAtPoint", "tessellate.mesh1",
                                 "io.step", "io.step.import", "io.geometry.export",
                                 "query.classifyElement", "query.bodyTopology",
-                                "plan.preview"})},
+                                "plan.preview", "editOperandContext"})},
         {"limits",
          {{"chunkSize", onecad::protocol::kChunkSize},
           {"initialBulkCredit", onecad::protocol::kInitialBulkCredit}}},
@@ -159,18 +159,23 @@ Envelope handle_reset_session(Session& session, const Envelope& req) {
 // answer inside 100 ms while the kernel lane is mid-op. Everything it reads is a
 // scalar — the session's head under `mu_` plus the dispatcher's in-flight record
 // — and it touches no `TopoDS_Shape`, which is what makes that promise keepable.
+nlohmann::json inflight_json(const Dispatcher::Inflight& job) {
+    nlohmann::json result{{"verb", job.verb}, {"id", job.id}, {"ageMs", job.age_ms},
+                          {"sinceProgressMs", job.since_progress_ms}};
+    if (job.job_id.has_value()) result["jobId"] = *job.job_id;
+    return result;
+}
+
 Envelope handle_get_worker_head(Session& session, const Envelope& req,
-                                const std::optional<Dispatcher::Inflight>& inflight) {
+                                const std::vector<Dispatcher::Inflight>& inflight) {
     const WorkerHead head = session.head();
-    nlohmann::json in = nlohmann::json(nullptr);  // §7.1: `null` when the lane is idle
-    if (inflight.has_value()) {
-        in = nlohmann::json{{"verb", inflight->verb},
-                            {"id", inflight->id},
-                            {"ageMs", inflight->age_ms},
-                            {"sinceProgressMs", inflight->since_progress_ms}};
-        // `jobId` is OMITTED when the verb carries none (§7.1) — absence is "no
-        // job id", which a 0 would misreport as job zero.
-        if (inflight->job_id.has_value()) in["jobId"] = *inflight->job_id;
+    nlohmann::json kernel = nullptr;
+    nlohmann::json jobs = nlohmann::json::array();
+    for (const auto& job : inflight) {
+        auto record = inflight_json(job);
+        if (!job.solver) kernel = record;
+        record["kind"] = job.solver ? "solver" : "kernel";
+        jobs.push_back(std::move(record));
     }
     nlohmann::json result = {
         {"documentRevision", head.document_revision},
@@ -178,8 +183,9 @@ Envelope handle_get_worker_head(Session& session, const Envelope& req,
         {"snapshotId", head.snapshot_id},
         {"historyPrefixHash", head.history_prefix_hash},
         {"hasScratch", head.has_scratch},
-        {"hasRestoredBase", head.has_restored_base},  // WP-H, additive
-        {"inflight", std::move(in)},                  // WP-H, additive
+        {"hasRestoredBase", head.has_restored_base},
+        {"inflight", std::move(kernel)},
+        {"inflightJobs", std::move(jobs)},
     };
     return Envelope::ok_response(req.id, std::move(result));
 }
@@ -237,7 +243,7 @@ void register_verbs(Dispatcher& dispatcher, SolverLane& solver_lane, Session& se
         "GetWorkerHead",
         [&session, &dispatcher](const Envelope& r, const std::vector<std::uint8_t>&,
                                 HandlerContext&) {
-            return handle_get_worker_head(session, r, dispatcher.inflight_snapshot());
+            return handle_get_worker_head(session, r, dispatcher.inflight_jobs_snapshot());
         });
     // --- W-WP4: transactional regen (kernel lane, single-writer) ---
     dispatcher.register_verb(

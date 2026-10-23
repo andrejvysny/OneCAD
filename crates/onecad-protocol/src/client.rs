@@ -251,6 +251,16 @@ impl ProtocolClient {
         })
     }
 
+    /// Whether transport loss has fenced every pending and future request.
+    pub fn is_closed(&self) -> bool {
+        self.pending.lock().unwrap().closed
+    }
+
+    /// Whether the terminal response for this correlation ID is still outstanding.
+    pub fn is_pending(&self, id: u64) -> bool {
+        self.pending.lock().unwrap().waiters.contains_key(&id)
+    }
+
     /// The worker's handshake result (SCHEMA §6).
     pub fn hello(&self) -> &HelloResult {
         &self.hello

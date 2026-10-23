@@ -102,12 +102,23 @@ fn field(
                 }
             ))
             .on_hover_text(relation.label());
-            ui.add_enabled(
-                !pending,
-                egui::TextEdit::singleline(&mut draft.text)
-                    .desired_width(ui.available_width().clamp(24.0, 110.0))
-                    .char_limit(onecad_core::expr::MAX_SOURCE_LEN),
-            )
+            let id = ui.make_persistent_id("constraint-dimension-value");
+            let width = ui.available_width().clamp(24.0, 110.0);
+            ui.add_enabled_ui(!pending, |ui| {
+                onecad_widgets::text_session::show(
+                    ui,
+                    id,
+                    &mut draft.text,
+                    relation.label(),
+                    onecad_core::expr::MAX_SOURCE_LEN,
+                    |text| {
+                        egui::TextEdit::singleline(text)
+                            .desired_width(width)
+                            .char_limit(onecad_core::expr::MAX_SOURCE_LEN)
+                    },
+                )
+            })
+            .inner
         })
         .inner;
     // Dimension editing needs the Select tool and no draft, so a creation

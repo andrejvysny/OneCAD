@@ -101,6 +101,21 @@ pub(super) const HOST_TESTS: &[&str] = &[
     "app_logic_tests::model_handle_delivery_tests::native_hole_scalar_click_drag_release_and_losses_preserve_draft_history_and_ownership",
     "app_logic_tests::model_handle_delivery_tests::native_pattern_angle_and_mirror_plane_drag_route_real_pointer_events",
     "app_logic_tests::model_handle_delivery_tests::native_boolean_viewport_controls_own_click_and_only_author_options",
+    "app_logic_tests::model_handle_delivery_tests::history_regressions::reopened_shell_resolves_its_consumed_opening_handle",
+    "app_logic_tests::model_handle_delivery_tests::history_regressions::cylinder_diameter_handle_uses_the_worker_sample_and_radial_scale",
+    "app_logic_tests::display_budget_delivery_tests::a_sub_native_scene_image_keeps_picks_and_highlights_aligned",
+    "app_logic_tests::display_budget_delivery_tests::released_targets_and_memory_pressure_keep_scene_and_document_state",
+    "app_logic_tests::display_budget_delivery_tests::the_mobile_route_shows_xray_lazily_recreates_targets_and_idles",
+    "app_logic_tests::display_budget_delivery_tests::three_documents_and_a_rotation_stay_within_the_display_aggregate",
+    "app_logic_tests::model_operation_delivery_tests::double_tapped_body_moves_and_turns_by_typed_values",
+    "app_logic_tests::model_operation_delivery_tests::multi_select_switch_and_pill_fillet_commit_through_the_card",
+    "app_logic_tests::model_operation_delivery_tests::multi_select_switch_keeps_tap_to_clear_and_whole_body_double_tap",
+    "app_logic_tests::model_operation_delivery_tests::selection_change_while_staging_refuses_the_start",
+    "app_logic_tests::model_operation_delivery_tests::sketch_chooser_planes_and_strip_actions_are_named",
+    "app_logic_tests::pen_stroke_delivery_tests::a_stroke_whose_release_the_canvas_missed_is_dropped",
+    "app_logic_tests::pen_stroke_delivery_tests::accessory_previous_tool_and_adaptive_palette",
+    "app_logic_tests::pen_stroke_delivery_tests::drag_authoring_follows_sketch_tools_and_canvas_handles",
+    "app_logic_tests::pen_stroke_delivery_tests::strokes_commit_override_undo_and_refuse_without_history",
 ];
 /// Ignored service and bridge cases outside `app_logic_tests`; they do not
 /// emit adapter evidence, so the gate runs them as a separate exact selection.

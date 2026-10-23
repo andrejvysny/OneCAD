@@ -22,6 +22,7 @@ type Actors = Vec<JoinHandle<()>>;
 pub struct ServiceRuntime {
     handle: Handle,
     services: Arc<ProcessServices>,
+    budget: Arc<crate::budget::BudgetAuthority>,
     actors: Mutex<Actors>,
     stop: Mutex<Option<oneshot::Sender<Actors>>>,
     /// Disconnects when the runtime thread has exited (its sender is dropped).
@@ -37,7 +38,14 @@ impl ServiceRuntime {
 
     /// A runtime whose workers all run on `backend` (the iPadOS host passes the
     /// in-process kernel with its crash journal).
+    #[cfg(test)]
     pub fn start_with(backend: WorkerBackend) -> Result<Arc<Self>, String> {
+        Self::start_with_profile(backend, onecad_render::RenderProfile::Desktop)
+    }
+    pub fn start_with_profile(
+        backend: WorkerBackend,
+        profile: onecad_render::RenderProfile,
+    ) -> Result<Arc<Self>, String> {
         let (handle_tx, handle_rx) = std::sync::mpsc::channel();
         let (stop_tx, stop_rx) = oneshot::channel::<Actors>();
         let services = Arc::new(ProcessServices::with_backend(backend));
@@ -82,6 +90,7 @@ impl ServiceRuntime {
         Ok(Arc::new(Self {
             handle,
             services,
+            budget: crate::budget::BudgetAuthority::new(profile),
             actors: Mutex::new(Vec::new()),
             stop: Mutex::new(Some(stop_tx)),
             exit: Mutex::new(Some(exit_rx)),
@@ -96,6 +105,10 @@ impl ServiceRuntime {
 
     pub fn services(&self) -> &Arc<ProcessServices> {
         &self.services
+    }
+
+    pub(crate) fn budget(&self) -> &Arc<crate::budget::BudgetAuthority> {
+        &self.budget
     }
 
     /// Spawns a bridge actor the runtime waits for before it stops.
@@ -125,6 +138,17 @@ impl Drop for ServiceRuntime {
 mod tests {
     use super::*;
 
+    #[test]
+    fn window_runtime_owns_one_budget_across_document_views() {
+        let runtime = ServiceRuntime::start().unwrap();
+        let first = runtime.budget().owner().unwrap();
+        let second = runtime.budget().owner().unwrap();
+        let lease = first.reserve(crate::budget::DISPLAY_RESERVATION).unwrap();
+        assert_eq!(second.snapshot().used, crate::budget::DISPLAY_RESERVATION);
+        assert_ne!(first.owner_id(), second.owner_id());
+        drop(lease);
+        assert_eq!(second.snapshot().used, 0);
+    }
     #[test]
     fn tasks_spawned_on_the_runtime_run_until_it_is_dropped() {
         let runtime = ServiceRuntime::start().unwrap();

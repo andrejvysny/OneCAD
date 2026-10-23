@@ -45,5 +45,12 @@
 {"expect":{"v":1,"t":"resp","id":11,"ok":false,"error":{"code":"PROTOCOL_ERROR","retriable":false}}}
 {"send":{"v":1,"t":"req","id":12,"verb":"GetWorkerHead","args":{}}}
 {"expect":{"v":1,"t":"resp","id":12,"ok":true,"result":{"documentRevision":1,"workerEpoch":3,"snapshotId":1,"historyPrefixHash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","hasScratch":false,"hasRestoredBase":false}}}
-{"send":{"v":1,"t":"req","id":13,"verb":"Shutdown","args":{}}}
-{"expect":{"v":1,"t":"resp","id":13,"ok":true,"result":{"goodbye":true}}}
+# Additive editOperandContext: prefix eligibility, explicit absent-ref refusal, no publish.
+{"send":{"v":1,"t":"req","id":13,"verb":"PreviewPlan","args":{"jobId":17,"workerEpoch":3,"expectedSnapshotId":1,"targetStep":1,"ops":[{"opType":"Sketch","opId":"opSA","stepIndex":0,"params":{"sketchId":"skA","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[20,0]},{"id":"e2","type":"Line","p0":[20,0],"p1":[20,10]},{"id":"e3","type":"Line","p0":[20,10],"p1":[0,10]},{"id":"e4","type":"Line","p0":[0,10],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"opA","stepIndex":1,"params":{"sketchId":"skA","distance":10,"extrudeMode":"Blind","booleanMode":"NewBody"}}],"editOperandContext":{"opId":"readShell","opType":"Shell","params":{"targetBodyId":"body_opA","openFaces":["el_absent_context"],"thickness":1},"inputs":[{"primary":{"bodyId":"body_opA","elementId":"el_absent_context","kind":"face"}}]}}}}
+{"expect":{"v":1,"t":"event","id":13,"event":"planStep","stepIndex":0,"jobId":17}}
+{"expect":{"v":1,"t":"event","id":13,"event":"planStep","stepIndex":1,"jobId":17}}
+{"expect":{"v":1,"t":"resp","id":13,"ok":true,"result":{"planPreviewed":true,"snapshotId":1,"lastValidStep":1,"stoppedReason":"completed","bodies":["body_opA"],"meshes":[],"editOperandContext":{"eligibleBodies":["body_opA"],"inputs":[{"inputIndex":0,"bodyId":"body_opA","elementId":"el_absent_context","kind":"face","refusal":"operand does not resolve unambiguously in the authoritative prefix"}]}}}}
+{"send":{"v":1,"t":"req","id":14,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":14,"ok":true,"result":{"documentRevision":1,"workerEpoch":3,"snapshotId":1,"historyPrefixHash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","hasScratch":false,"hasRestoredBase":false}}}
+{"send":{"v":1,"t":"req","id":15,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":15,"ok":true,"result":{"goodbye":true}}}

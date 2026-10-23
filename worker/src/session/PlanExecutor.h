@@ -81,6 +81,9 @@ CandidateResult execute_candidate_op(
     std::string& last_sketch_id, const onecad::CancelToken& cancel,
     ops::ValidationMode validation_mode = ops::ValidationMode::CommitAuthoritative);
 
+// Resolve a feature's inputs in read-only scratch without executing the feature.
+CandidateResult resolve_read_operand_inputs(ScratchJob& job, const nlohmann::json& op);
+
 // Stable diagnostic projection shared by ExecutePlan and PreviewOp. Op findings
 // retain order; the terminal failure diagnostic is last.
 nlohmann::json candidate_diagnostics(const CandidateResult& candidate);

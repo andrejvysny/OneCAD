@@ -61,16 +61,10 @@ fn leave_previous_launch(dir: &Path, crashed_key: &str, fingerprint: &str) {
                 "opId": key.map(|k| k.split('|').nth(1).unwrap()), "stepIndex": 0,
                 "opPosition": 0, "key": key, "fingerprint": fp, "startedMs": 0 })
     };
-    let jobs = [
-        op(Some(crashed_key), fingerprint),
-        op(None, fingerprint), // a non-plan job: poisons nothing
-        op(
-            Some("ff|other-build-op|0000000000000000"),
-            "0000000000000000",
-        ),
-    ];
+    let jobs = [op(Some(crashed_key), fingerprint)];
     fs::create_dir_all(dir).unwrap();
-    let inflight = json!({ "version": 1, "session": "an-earlier-launch", "jobs": jobs });
+    let inflight =
+        json!({ "version": 2, "session": "an-earlier-launch", "jobs": jobs, "complete": true });
     fs::write(dir.join("inflight.json"), inflight.to_string()).unwrap();
     let op_id = crashed_key.split('|').nth(1).unwrap();
     let poison = json!({ "version": 1, "entries": { crashed_key:
@@ -155,4 +149,33 @@ async fn a_two_instance_leftover_opens_nothing_and_the_innocent_op_heals() {
     assert!(!journal.join("poison.json").exists(), "no strike left");
     retire(&first).await;
     retire(&second).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mixed_plan_solver_leftover_preserves_editability_and_heals_suspicion() {
+    let _gate = GATE.lock().await;
+    if !kernel_linked() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let fingerprint = fingerprint();
+    let key = key_of(&smoke_plan(0xc0de, WorkerEpoch(0)), &fingerprint);
+    leave_previous_launch(dir.path(), &key, &fingerprint);
+    let path = dir.path().join("inflight.json");
+    let mut file: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    file["jobs"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"instance":1,"epoch":1,
+        "requestId":10,"verb":"SketchUpsert","opId":null,"stepIndex":null,
+        "opPosition":null,"key":null,"fingerprint":fingerprint,"startedMs":0}));
+    fs::write(path, file.to_string()).unwrap();
+    let wm = spawn_ready(&embedded(Some(dir.path())), fast_config()).await;
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(dir.path().join("poison.json")).unwrap()).unwrap();
+    assert_eq!(persisted["entries"][&key]["strikes"], 1);
+    let result = drive(&wm, smoke_plan(0xc0de, wm.epoch())).await;
+    assert!(matches!(result, PlanEnd::Prepared { .. }), "{result:?}");
+    assert!(!dir.path().join("poison.json").exists());
+    retire(&wm).await;
 }

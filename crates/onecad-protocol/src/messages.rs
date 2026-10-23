@@ -416,6 +416,8 @@ pub struct WorkerHeadResult {
     /// response pair from a producer without it is byte-identical to before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inflight: Option<InflightResult>,
+    #[serde(default, deserialize_with = "inflight::deserialize_jobs")]
+    pub inflight_jobs: Vec<inflight::TrackedJob>,
 }
 
 /// `GetWorkerHead.result.inflight` (SCHEMA §7.1, WP-H).
@@ -747,3 +749,6 @@ mod tests {
         assert_eq!(v["workerHead"]["documentRevision"], 0);
     }
 }
+
+/// Additive, bounded execution-lane telemetry.
+pub mod inflight;

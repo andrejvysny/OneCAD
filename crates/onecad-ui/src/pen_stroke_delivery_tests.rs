@@ -215,9 +215,15 @@ async fn drag_authoring_follows_sketch_tools_and_canvas_handles() {
     let mut host = Host::new(area.path()).await;
     assert_eq!(tool(&host), SketchTool::Select);
     assert!(
-        !crate::host::drag_authoring(&host.app),
-        "a finger drag orbits in Select"
+        crate::host::drag_authoring(&host.app),
+        "an active sketch Select routes finger dragging to shared sketch interaction"
     );
+    host.app.ui.start_open = true;
+    assert!(
+        !crate::host::drag_authoring(&host.app),
+        "Home owns no authoring contact"
+    );
+    host.app.ui.start_open = false;
     host.control("Line");
     assert!(crate::host::drag_authoring(&host.app));
     host.stop().await;

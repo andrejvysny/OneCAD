@@ -37,6 +37,8 @@ final class AccessibilityBridge {
     private let bridge: RustBridge
     private var elements: [UInt64: CanvasAccessibilityElement] = [:]
     private var order: [UInt64] = []
+    var focusedTextProxy: UIView?
+    var focusedTextFieldID: UInt64?
     var onActivate: (() -> Void)?
 
     init(container: UIView, bridge: RustBridge) {
@@ -50,6 +52,7 @@ final class AccessibilityBridge {
         var next: [UInt64: CanvasAccessibilityElement] = [:]
         var nextOrder: [UInt64] = []
         for node in snapshot.nodes where node.flags & ONECAD_IOS_A11Y_HIDDEN == 0 {
+            if node.id == focusedTextFieldID && node.role == ONECAD_IOS_ROLE_TEXT_FIELD.rawValue { continue }
             let element = elements[node.id] ?? makeElement(node.id, in: container)
             configure(element, with: node)
             next[node.id] = element
@@ -58,7 +61,9 @@ final class AccessibilityBridge {
         let structureChanged = nextOrder != order
         elements = next
         order = nextOrder
-        container.accessibilityElements = nextOrder.compactMap { next[$0] }
+        var accessible: [Any] = nextOrder.compactMap { next[$0] }
+        if let focusedTextProxy { accessible.append(focusedTextProxy) }
+        container.accessibilityElements = accessible
         if structureChanged { UIAccessibility.post(notification: .layoutChanged, argument: nil) }
     }
 

@@ -153,8 +153,15 @@ final class HostRequestCoordinator: NSObject, UIDocumentPickerDelegate {
     // MARK: Save
 
     private func presentSavePrompt(_ request: HostRequest) {
+        let fileExtension = request.extensions.first ?? "onecad"
+        guard request.extensions.count <= 1, SaveNamePrompt.supportedExtensions.contains(fileExtension) else {
+            bridgeLog.error("save request \(request.id) has an unsupported format")
+            complete(paths: [])
+            return
+        }
         withReadyPresenter { [weak self] host in
-            SaveNamePrompt.present(on: host, title: request.label, suggestedName: request.suggestedName) { path in
+            SaveNamePrompt.present(on: host, title: request.label, suggestedName: request.suggestedName,
+                                   fileExtension: fileExtension) { path in
                 self?.complete(paths: path.map { [$0] } ?? [])
             }
         }
@@ -163,6 +170,14 @@ final class HostRequestCoordinator: NSObject, UIDocumentPickerDelegate {
     // MARK: Fire-and-forget requests
 
     private func playHaptic(_ request: HostRequest) {
+        if request.text == "pencil-tool" {
+            if let view = presenter?.view {
+                let center = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
+                UICanvasFeedbackGenerator(view: view).alignmentOccurred(at: center)
+            }
+            complete(paths: [])
+            return
+        }
         let style: UIImpactFeedbackGenerator.FeedbackStyle = switch request.text {
         case "light": .light
         case "heavy": .heavy

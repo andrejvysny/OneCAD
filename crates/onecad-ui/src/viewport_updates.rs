@@ -7,8 +7,8 @@ use onecad_render::{
 use onecad_scene::{SceneIdentity, SceneSnapshot};
 use std::sync::{Arc, Mutex};
 
-#[derive(Clone)]
-pub(crate) struct Source {
+#[derive(Clone, Debug)]
+pub struct Source {
     pub scene: Arc<SceneSnapshot>,
     pub lease: Arc<crate::budget::Lease>,
 }
@@ -66,7 +66,10 @@ impl Job {
         if self.key != Some(key) || (current != Some(key) && self.error.is_none()) {
             self.cancel();
             self.key = Some(key);
-            let reservation = Arc::new(host.reserve(crate::budget::MAX_PREPARED_BYTES as usize)?);
+            let reservation = Arc::new(host.reserve_kind(
+                crate::budget::MAX_PREPARED_BYTES as usize,
+                crate::budget::Kind::Contour,
+            )?);
             if let Err(error) = self.worker.submit_retained(
                 source.scene,
                 preview,
@@ -165,17 +168,39 @@ pub(crate) fn apply(app: &mut App, display: &Display) -> Result<bool, String> {
         return Ok(false);
     }
     if app.doc.clear_preview {
-        app.renderer
-            .clear_preview()
-            .map_err(|error| error.to_string())?;
-        app.doc.sections.preview.cancel();
-        app.doc.sections.retained_preview = None;
-        app.doc.clear_preview = false;
+        clear_preview(app)?;
     }
     if !replace_preview(app, display)? {
         return Ok(false);
     }
     apply_options(app, display)
+}
+
+/// Retire cancelled preview payloads even when occlusion suppresses viewport drawing.
+pub(crate) fn retire_cancelled_preview(app: &mut App, ctx: &egui::Context) -> Result<(), String> {
+    if app.parked || !app.doc.clear_preview {
+        return Ok(());
+    }
+    if !app
+        .renderer
+        .poll_idle()
+        .map_err(|error| error.to_string())?
+        || !app.sampling_done.load(std::sync::atomic::Ordering::Acquire)
+    {
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        return Ok(());
+    }
+    clear_preview(app)
+}
+fn clear_preview(app: &mut App) -> Result<(), String> {
+    app.renderer
+        .clear_preview()
+        .map_err(|error| error.to_string())?;
+    app.doc.sections.preview.cancel();
+    app.doc.sections.retained_preview = None;
+    app.doc.clear_preview = false;
+    app.draw_dirty = true;
+    Ok(())
 }
 
 fn replace_scene(app: &mut App, display: &Display) -> Result<bool, String> {

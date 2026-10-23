@@ -162,6 +162,9 @@ fn logic_tick(
     if close {
         viewport.events.push(egui::ViewportEvent::Close);
     }
+    // The synthetic UI helper submits CAD, but never encodes an egui GPU sampling pass.
+    // A logic-only pass still needs to retire that previously submitted frame.
+    crate::input::fence_previous_frame(app, context);
     context.run_logic(&input, |context| {
         assert_eq!(context.input(|input| input.viewport().occluded), Some(true));
         eframe::App::logic(app, context, frame);

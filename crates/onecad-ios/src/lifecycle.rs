@@ -77,6 +77,11 @@ pub(crate) fn plan(phase: Phase, event: u32) -> Result<Plan, Failure> {
     })
 }
 
+pub(crate) struct BackgroundRecovery {
+    pub generation: u64,
+    pub flush: onecad_ui::host::RecoveryFlush,
+}
+
 impl IosApp {
     pub fn lifecycle(&mut self, event: u32) -> Outcome {
         let plan = plan(self.phase, event)?;
@@ -88,7 +93,19 @@ impl IosApp {
         if plan.flush_autosave
             && let Some(editor) = &self.editor
         {
-            editor.flush_recovery();
+            if let Some(previous) = &self.recovery {
+                previous.flush.finish_waiting(false);
+            }
+            self.recovery_generation = self.recovery_generation.wrapping_add(1).max(1);
+            self.recovery = Some(BackgroundRecovery {
+                generation: self.recovery_generation,
+                flush: editor.flush_recovery(),
+            });
+        }
+        if event == ffi::WILL_ENTER_FOREGROUND
+            && let Some(recovery) = &self.recovery
+        {
+            recovery.flush.finish_waiting(false);
         }
         if let Some(editor) = self.editor.as_mut().filter(|_| plan.release_targets) {
             let released = editor.release_render_targets(&self.ctx);
@@ -118,8 +135,8 @@ impl IosApp {
     /// Focus loss cancels live contacts; egui sees the window focus change too.
     fn focus(&mut self, focused: bool) {
         if !focused {
-            self.input
-                .cancel_all(onecad_interaction::touch::CancelReason::SceneInactive);
+            self.input.focus_lost();
+            self.accessory.clear();
         }
         self.input.push_event(egui::Event::WindowFocused(focused));
         self.phase = if focused {

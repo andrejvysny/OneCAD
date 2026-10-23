@@ -10,7 +10,7 @@ use std::ffi::{CString, c_char};
 
 impl IosApp {
     /// Input changes what the next frame shows; let the host schedule it.
-    fn input_changed(&self) {
+    pub(crate) fn input_changed(&self) {
         self.ctx.request_repaint();
     }
 }
@@ -116,12 +116,7 @@ pub unsafe extern "C" fn onecad_ios_capabilities_set(
     caps: *const ffi::Capabilities,
 ) -> Status {
     // SAFETY: forwarded from this function's contract.
-    unsafe {
-        with_app(app, |state| {
-            state.capabilities = read_struct(caps)?;
-            Ok(())
-        })
-    }
+    unsafe { with_app(app, |state| state.set_capabilities(read_struct(caps)?)) }
 }
 
 /// # Safety

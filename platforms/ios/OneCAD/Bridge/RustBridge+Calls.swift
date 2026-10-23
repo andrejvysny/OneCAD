@@ -106,3 +106,19 @@ extension RustBridge {
         _ = call("open_path") { app in path.withCString { onecad_ios_open_path(app, $0) } }
     }
 }
+
+extension RustBridge {
+    func recoverySnapshot() -> (onecad_ios_status, onecad_ios_recovery_snapshot_result, String) {
+        var result = onecad_ios_recovery_snapshot_result()
+        result.struct_size = UInt32(MemoryLayout<onecad_ios_recovery_snapshot_result>.size)
+        let status = call("recovery_snapshot") { onecad_ios_recovery_snapshot($0, &result) }
+        let documents = result.documents_json.map { String(cString: $0) } ?? "[]"
+        return (status, result, documents)
+    }
+
+    func finishRecoveryWaiting(generation: UInt64, expired: Bool) {
+        _ = call("recovery_finish_waiting") {
+            onecad_ios_recovery_finish_waiting($0, generation, expired ? 0 : 1)
+        }
+    }
+}

@@ -85,6 +85,7 @@ pub struct NumberField<'a> {
     id_salt: IdSalt,
     text: &'a mut String,
     unit: Option<&'a str>,
+    label: &'a str,
     width: f32,
     step: f64,
     decimals: usize,
@@ -101,6 +102,7 @@ impl<'a> NumberField<'a> {
             id_salt: IdSalt::new(id_salt),
             text,
             unit: None,
+            label: "Numeric expression",
             width: 150.0,
             step: 1.0,
             decimals: 2,
@@ -110,6 +112,10 @@ impl<'a> NumberField<'a> {
             keep_focus: false,
             step_keys: true,
         }
+    }
+    pub fn label(mut self, label: &'a str) -> Self {
+        self.label = label;
+        self
     }
     pub fn unit(mut self, unit: &'a str) -> Self {
         self.unit = Some(unit);
@@ -196,6 +202,7 @@ impl Widget for NumberField<'_> {
             {
                 ui.memory_mut(|m| m.request_focus(id));
             }
+            let native_changed = crate::text_session::before(ui, id, self.text, self.enabled);
             let nudged = self.nudge(ui, id);
             let op = opacity(self.enabled);
             let is_expr = self.text.trim_start().starts_with('=');
@@ -228,10 +235,21 @@ impl Widget for NumberField<'_> {
             if self.keep_focus {
                 edit = edit.return_key(None);
             }
-            let mut response = child.add(edit);
-            if response.changed() {
+            let mut output = edit.show(&mut child);
+            if output.response.changed() {
                 *self.text = shown;
             }
+            crate::text_session::after(
+                &child,
+                self.text,
+                &output,
+                self.label,
+                crate::text_session::MAX_UTF16,
+            );
+            if native_changed {
+                output.response.mark_changed();
+            }
+            let mut response = output.response.response;
             if nudged {
                 response.mark_changed();
             }

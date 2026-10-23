@@ -3,7 +3,7 @@
 # stage it for crates/onecad-embedded-worker (ONECAD_EMBEDDED_WORKER_DIR).
 #
 # Usage: scripts/build-ios-worker.sh --platform <iphonesimulator|iphoneos|macosx>
-#            --config <Debug|Release> [--test-hooks] --out <absolute dir>
+#            --config <Debug|Release> [--test-hooks] [--reuse-if-valid] --out <absolute dir>
 #
 # Emits into --out (contract: docs/ios/KERNEL.md):
 #   libonecad_worker_bundle.a    onecad_worker_lib + planegcs + the OCCT toolkits
@@ -13,6 +13,7 @@
 #   onecad-embedded-kernel.json  identity manifest v2
 #   onecad-embedded-link.txt     link directives for build.rs (kind=value lines)
 #   audit.txt                    otool/vtool audit, every command recorded
+#   onecad-worker-provenance.txt input/output content hashes, published after audit
 #
 # Optional environment:
 #   ONECAD_IOS_OCCT_ROOT            iOS OCCT prefix (default ~/.onecad-occt/8.0.1-<platform>)
@@ -34,9 +35,12 @@ PLATFORM=""
 CONFIG=""
 TEST_HOOKS=0
 OUT_DIR=""
+REUSE_IF_VALID=0
+# shellcheck source=scripts/ios-worker-provenance.sh
+source "${SCRIPT_DIR}/ios-worker-provenance.sh"
 
 usage() {
-    echo "usage: $0 --platform <iphonesimulator|iphoneos|macosx> --config <Debug|Release> [--test-hooks] --out <dir>" >&2
+    echo "usage: $0 --platform <iphonesimulator|iphoneos|macosx> --config <Debug|Release> [--test-hooks] [--reuse-if-valid] --out <dir>" >&2
 }
 
 parse_args() {
@@ -45,6 +49,7 @@ parse_args() {
             --platform) PLATFORM="${2:-}"; shift 2 ;;
             --config) CONFIG="${2:-}"; shift 2 ;;
             --test-hooks) TEST_HOOKS=1; shift ;;
+            --reuse-if-valid) REUSE_IF_VALID=1; shift ;;
             --out) OUT_DIR="${2:-}"; shift 2 ;;
             -h | --help) usage; exit 0 ;;
             *) echo "unknown argument: $1" >&2; usage; exit 2 ;;
@@ -52,6 +57,10 @@ parse_args() {
     done
     case "$PLATFORM" in iphonesimulator | iphoneos | macosx) ;; *) usage; exit 2 ;; esac
     case "$CONFIG" in Debug | Release) ;; *) usage; exit 2 ;; esac
+    if [[ "$CONFIG" == Release && "$TEST_HOOKS" == 1 ]]; then
+        echo "Release worker must not enable test hooks" >&2
+        exit 2
+    fi
     if [[ "$OUT_DIR" != /* ]]; then
         echo "--out must be an absolute path" >&2
         exit 2
@@ -89,11 +98,26 @@ resolve_platform() {
     BUILD_DIR="${ONECAD_EMBEDDED_BUILD_DIR:-${ROOT_DIR}/worker/build-embedded-${PLATFORM}-${lower_config}${suffix}}"
 }
 
+worker_env() {
+    env -u CPATH -u CPLUS_INCLUDE_PATH -u C_INCLUDE_PATH -u OBJC_INCLUDE_PATH \
+        -u LIBRARY_PATH -u COMPILER_PATH -u GCC_EXEC_PREFIX "$@"
+}
+
 configure_and_build() {
     local hooks=OFF
     [[ "$TEST_HOOKS" == 1 ]] && hooks=ON
     local args=(
-        -S "${ROOT_DIR}/worker" -B "$BUILD_DIR" -G Ninja
+        --fresh -S "${ROOT_DIR}/worker" -B "$BUILD_DIR" -G Ninja
+        -DCMAKE_MAKE_PROGRAM="$(command -v ninja)"
+        -DCMAKE_FIND_USE_PACKAGE_ROOT_PATH=OFF
+        -DCMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH=OFF
+        -DCMAKE_FIND_USE_CMAKE_SYSTEM_PATH=OFF
+        -DCMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH=OFF
+        -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF
+        -DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF
+        -DCMAKE_CXX_COMPILER="$(xcrun --sdk "$PLATFORM" --find clang++)"
+        -DCMAKE_CXX_FLAGS="${CXXFLAGS:-}"
+        -DCMAKE_EXE_LINKER_FLAGS="${LDFLAGS:-}"
         -DCMAKE_BUILD_TYPE="$CONFIG"
         -DONECAD_OCCT_ROOT="$OCCT_ROOT"
         -DONECAD_OCCT_VERSION="$OCCT_VERSION"
@@ -114,9 +138,10 @@ configure_and_build() {
             -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH)
     fi
     echo "==> Configuring onecad_worker_lib for ${PLATFORM} ${SDK_VERSION} (${CONFIG}, deployment ${DEPLOYMENT_TARGET}, test hooks ${hooks})"
-    cmake "${args[@]}"
-    cmake --build "$BUILD_DIR" --target onecad_worker_lib onecad_worker_link_probe \
-        --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-5}"
+    worker_env env -u CMAKE_TOOLCHAIN_FILE -u CMAKE_CXX_COMPILER_LAUNCHER \
+        -u CMAKE_C_COMPILER_LAUNCHER cmake "${args[@]}"
+    worker_env cmake --build "$BUILD_DIR" --target onecad_worker_lib onecad_worker_link_probe \
+        --clean-first --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-5}"
 }
 
 # The OCCT archives the probe link pulled at least one object from (ld map,
@@ -239,7 +264,7 @@ link_bundle_probe() {
         local name
         for name in "${NEEDED_DYLIBS[@]}"; do extra+=(-l"$name"); done
     fi
-    xcrun --sdk "$PLATFORM" clang++ -target "$target" -isysroot "$SDK_PATH" \
+    worker_env xcrun --sdk "$PLATFORM" clang++ -target "$target" -isysroot "$SDK_PATH" \
         -I"${ROOT_DIR}/worker/src" "${ROOT_DIR}/worker/tools/link_probe/link_probe.cpp" \
         "$BUNDLE" ${extra[@]+"${extra[@]}"} -lc++ "$@" -o "$out"
 }
@@ -301,6 +326,14 @@ audit() {
     printf '$ otool -l %s | LC_BUILD_VERSION minos counts\n%s\n\n' "$BUNDLE" "$minos" >>"$AUDIT"
     check_platforms "$platforms" "$minos"
     check_probe_loads "$probe"
+    if [[ "$TEST_HOOKS" == 0 ]]; then
+        local bundle_strings
+        bundle_strings="$(strings -a "$BUNDLE")" || { echo "audit: cannot inspect worker strings" >&2; exit 1; }
+        if grep -qE 'Debug\.Busy|__slow|__testSolverDelayMs|__testSolverIgnoreCancel' <<<"$bundle_strings"; then
+            echo "audit: production worker contains test-input/fault hooks" >&2
+            exit 1
+        fi
+    fi
     local homebrew_strings
     homebrew_strings="$(strings -a "$BUNDLE" | grep -c '/opt/homebrew' || true)"
     printf '$ strings -a %s | grep -c /opt/homebrew\n%s (informational: debug info / __FILE__ text, not a load path)\n' \
@@ -343,8 +376,23 @@ main() {
     parse_args "$@"
     "${SCRIPT_DIR}/check-worker-stdout-hygiene.sh"
     resolve_platform
-    configure_and_build
+    local before after
+    PROVENANCE_SNAPSHOT="$(mktemp -t onecad-worker-provenance.XXXXXX)"
+    trap 'rm -f "${PROVENANCE_SNAPSHOT:-}"' EXIT
+    before="$(provenance_collect "$PROVENANCE_SNAPSHOT")" || {
+        echo "Cannot validate worker inputs; check SDK/dependency paths and rerun $0 with the same arguments" >&2
+        exit 1
+    }
+    if [[ "$REUSE_IF_VALID" == 1 ]] && provenance_matches "$before"; then
+        echo "note: verified embedded worker cache ${OUT_DIR}"
+        rm -f "$PROVENANCE_SNAPSHOT"
+        trap - EXIT
+        return
+    fi
+    echo "==> Worker provenance missing or changed; rebuilding ${OUT_DIR}"
     mkdir -p "$OUT_DIR"
+    rm -f "${OUT_DIR}/onecad-worker-provenance.txt"
+    configure_and_build
     if [[ "$SHARED_OCCT" == 0 ]]; then derive_static_closure; else derive_shared_closure; fi
     merge_bundle
     derive_system_libs
@@ -352,6 +400,15 @@ main() {
     write_link_file
     cp "${ROOT_DIR}/worker/src/capi/onecad_worker.h" "${OUT_DIR}/onecad_worker.h"
     audit
+    after="$(provenance_collect "$PROVENANCE_SNAPSHOT")"
+    [[ "$before" == "$after" ]] || {
+        echo "Worker inputs changed during build; rerun $0 with the same arguments" >&2
+        exit 1
+    }
+    provenance_record "$after" >"${OUT_DIR}/onecad-worker-provenance.txt.tmp"
+    mv "${OUT_DIR}/onecad-worker-provenance.txt.tmp" "${OUT_DIR}/onecad-worker-provenance.txt"
+    rm -f "$PROVENANCE_SNAPSHOT"
+    trap - EXIT
     echo "==> Embedded worker for ${PLATFORM} (${CONFIG}): ${OUT_DIR}"
     echo "    bundle sha256 ${ARCHIVE_SHA256}"
     if [[ "$SHARED_OCCT" == 0 ]]; then

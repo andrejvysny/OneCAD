@@ -11,10 +11,12 @@ use onecad_widgets::components::lists::{MenuRow, menu_frame};
 
 const WIDTH: f32 = 200.0;
 
-pub(crate) fn open(app: &mut App, at: egui::Pos2) {
-    if at.is_finite() {
-        app.ui.tool_palette = Some(at);
+pub(crate) fn open(app: &mut App, at: egui::Pos2) -> bool {
+    if !at.is_finite() || app.ui.start_open || app.busy() || tools(app).is_empty() {
+        return false;
     }
+    app.ui.tool_palette = Some(at);
+    true
 }
 
 /// Switches to the sketch tool used before the current one; `false` when there

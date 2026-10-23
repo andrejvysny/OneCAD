@@ -72,6 +72,7 @@ async fn world_planes_and_face_entry_preserve_native_frame_and_discard() {
         app.doc.camera, modeling_camera,
         "Finish restores the full modeling camera"
     );
+    uncertain_finish_restores_camera(&mut app, &context, &mut frame, base_sketch).await;
     let display = app.doc.display.clone().unwrap();
     let body = &display.scene.bodies()[0];
     let identity = body.mesh().unwrap().face_id(0).unwrap().to_owned();
@@ -353,6 +354,58 @@ async fn active(app: &mut App, ctx: &egui::Context, frame: &mut eframe::Frame) {
 async fn discard(app: &mut App, ctx: &egui::Context, frame: &mut eframe::Frame) {
     app.sketch_dispatch(SketchAction::Discard);
     pump_until(app, ctx, frame, |app| !app.sketch_active()).await;
+}
+
+async fn uncertain_finish_restores_camera(
+    app: &mut App,
+    ctx: &egui::Context,
+    frame: &mut eframe::Frame,
+    sketch: onecad_core::ids::SketchId,
+) {
+    let modeling = app.doc.camera;
+    app.edit_sketch(sketch);
+    active(app, ctx, frame).await;
+    let planar = app.doc.camera;
+    app.sketch_dispatch(SketchAction::Finish);
+    let crate::bridge::Message::Sketch { delivery, .. } = completed_sketch_delivery(app, ctx).await
+    else {
+        panic!("expected sketch completion");
+    };
+    let tag = delivery.tag.clone().unwrap();
+    assert!(
+        delivery
+            .actions
+            .iter()
+            .any(|action| matches!(action, SketchAction::Finished { .. }))
+    );
+    let warning = "Finish accepted; completion unavailable. Do not retry.";
+    let mut stale = tag.clone();
+    stale.document.document_id = onecad_core::ids::DocumentId::new().to_string();
+    app.sketch_dispatch(SketchAction::FinishUncertain {
+        tag: stale,
+        message: warning.into(),
+    });
+    assert!(app.sketch_active());
+    assert_eq!(app.doc.camera, planar);
+    assert_eq!(app.doc.modeling_camera, Some(modeling));
+    app.sketch_dispatch(SketchAction::FinishUncertain {
+        tag,
+        message: warning.into(),
+    });
+    assert!(!app.sketch_active());
+    assert_eq!(app.doc.status, warning);
+    assert_eq!(app.doc.camera, modeling);
+    assert!(app.doc.modeling_camera.is_none());
+    app.sketch_dispatch(SketchAction::Finish);
+    assert!(
+        !app.sketch_active(),
+        "uncertain finish cannot submit another finish"
+    );
+    app.edit_sketch(sketch);
+    active(app, ctx, frame).await;
+    assert_eq!(app.doc.modeling_camera, Some(modeling));
+    discard(app, ctx, frame).await;
+    assert_eq!(app.doc.camera, modeling);
 }
 
 fn capture(app: &mut App) -> ViewSnapshot {

@@ -21,11 +21,19 @@ impl PreparationBudget {
     }
 }
 
-/// A bounded cache of the last successful preparation. Keep its CPU budget lease alive until
-/// this cache and all prepared results are dropped. Source bytes remain immutable scene data.
+/// Opaque host admission guards, retained by the allocations they cover.
+#[derive(Clone, Default)]
+pub struct PreparationRetention {
+    pub source: Option<Arc<dyn Send + Sync>>,
+    pub preparation: Option<Arc<dyn Send + Sync>>,
+}
+
+/// A bounded cache of the last successful preparation. Retained constructors preserve host
+/// admission guards with geometry and vector metadata until their final owner drops.
 #[derive(Default)]
 pub struct PreparationCache {
     geometries: Vec<Arc<PreparedGeometry>>,
+    _preparation_retention: Option<Arc<dyn Send + Sync>>,
 }
 impl PreparationCache {
     /// Retained capacities and Arc allocations, excluding separately charged source blobs.
@@ -37,28 +45,33 @@ impl PreparationCache {
                 .map(|geometry| geometry.cpu_bytes())
                 .sum::<u64>()
     }
-    /// Source blobs retained by the cache; hosts must preserve their source-residency lease.
+    /// Source blobs retained by the cache, excluding checked scene metadata and BVHs.
     pub fn source_bytes(&self) -> u64 {
         self.geometries
             .iter()
             .map(|geometry| geometry.source.len() as u64)
             .sum()
     }
-    fn find(&self, body: &SceneBody) -> Option<&Arc<PreparedGeometry>> {
-        self.geometries
-            .iter()
-            .find(|geometry| Arc::ptr_eq(&geometry.source, body.bytes()))
+    fn find(
+        &self,
+        body: &SceneBody,
+        retention: &PreparationRetention,
+    ) -> Option<&Arc<PreparedGeometry>> {
+        self.geometries.iter().find(|geometry| {
+            Arc::ptr_eq(&geometry.source, body.bytes()) && geometry.retains(retention)
+        })
     }
     fn estimates(
         &self,
         scene: &SceneSnapshot,
         max_buffer: u64,
         exact: bool,
+        retention: &PreparationRetention,
     ) -> Result<(u64, u64), RenderError> {
         let mut gpu = 0;
         let mut new_cpu = 0;
         for body in scene.bodies() {
-            let bytes = if let Some(geometry) = self.find(body) {
+            let bytes = if let Some(geometry) = self.find(body, retention) {
                 geometry.gpu_bytes(max_buffer)?
             } else {
                 let bytes = mesh::body_estimate(body, max_buffer, exact)?;
@@ -87,10 +100,18 @@ pub struct PreparedScene {
     pub(crate) gpu_bytes: u64,
     pub(crate) cpu_bytes: u64,
     pub(crate) bodies: Vec<(BodyId, PreparedBody)>,
+    _preparation_retention: Option<Arc<dyn Send + Sync>>,
 }
 impl PreparedScene {
     pub fn new(scene: &SceneSnapshot, budget: PreparationBudget) -> Result<Self, RenderError> {
-        Self::new_cached(scene, budget, &mut PreparationCache::default())
+        Self::new_retained(scene, budget, PreparationRetention::default())
+    }
+    pub fn new_retained(
+        scene: &SceneSnapshot,
+        budget: PreparationBudget,
+        retention: PreparationRetention,
+    ) -> Result<Self, RenderError> {
+        Self::new_cached_retained(scene, budget, &mut PreparationCache::default(), retention)
     }
     /// Reuse immutable geometry despite changed publication revisions. Failure leaves the
     /// previous cache intact; cache and incoming preparation share one bounded CPU budget.
@@ -98,6 +119,15 @@ impl PreparedScene {
         scene: &SceneSnapshot,
         budget: PreparationBudget,
         cache: &mut PreparationCache,
+    ) -> Result<Self, RenderError> {
+        Self::new_cached_retained(scene, budget, cache, PreparationRetention::default())
+    }
+    /// Reused geometry preserves its original guards; new metadata retains this build's guard.
+    pub fn new_cached_retained(
+        scene: &SceneSnapshot,
+        budget: PreparationBudget,
+        cache: &mut PreparationCache,
+        retention: PreparationRetention,
     ) -> Result<Self, RenderError> {
         let triangles = scene.bodies().iter().try_fold(0u64, |total, body| {
             add(total, u64::from(body.mesh()?.header().triangle_count))
@@ -115,16 +145,16 @@ impl PreparedScene {
         )?;
         let mut scratch = 0;
         for body in scene.bodies() {
-            if cache.find(body).is_none() {
+            if cache.find(body, &retention).is_none() {
                 scratch = scratch.max(crate::silhouette::scratch_bytes(&body.mesh()?)?);
             }
         }
         let retained = add(cache.cpu_bytes(), add(metadata, scratch)?)?;
-        let (_, minimum) = cache.estimates(scene, budget.max_buffer, false)?;
+        let (_, minimum) = cache.estimates(scene, budget.max_buffer, false, &retention)?;
         if add(retained, minimum)? > budget.limits.max_cpu_prepared_bytes {
             return Err(RenderError::Budget("CPU preparation"));
         }
-        let (gpu_bytes, new_cpu) = cache.estimates(scene, budget.max_buffer, true)?;
+        let (gpu_bytes, new_cpu) = cache.estimates(scene, budget.max_buffer, true, &retention)?;
         let cpu_bytes = add(retained, new_cpu)?;
         check_preparation_budget(scene, budget, cache, gpu_bytes, cpu_bytes)?;
         let mut bodies = Vec::new();
@@ -136,18 +166,19 @@ impl PreparedScene {
             .try_reserve_exact(scene.bodies().len())
             .map_err(|_| RenderError::Budget("prepared cache metadata"))?;
         for body in scene.bodies() {
-            let prepared = if let Some(geometry) = cache.find(body) {
+            let prepared = if let Some(geometry) = cache.find(body, &retention) {
                 PreparedBody {
                     mesh_revision: body.mesh_revision(),
                     geometry: Arc::clone(geometry),
                 }
             } else {
-                PreparedBody::new(body)?
+                PreparedBody::new_retained(body, retention.clone())?
             };
             geometries.push(Arc::clone(&prepared.geometry));
             bodies.push((body.body_id(), prepared));
         }
         cache.geometries = geometries;
+        cache._preparation_retention = retention.preparation.clone();
         Ok(Self {
             identity: scene.identity(),
             bounds: scene.bounds(),
@@ -155,6 +186,7 @@ impl PreparedScene {
             gpu_bytes,
             cpu_bytes,
             bodies,
+            _preparation_retention: retention.preparation,
         })
     }
     pub fn identity(&self) -> SceneIdentity {
@@ -326,6 +358,7 @@ impl Renderer {
             });
             let next = if let Some(existing) = reusable {
                 let mut next = existing.clone();
+                next.retain_source(&body);
                 next.mesh_revision = body.mesh_revision;
                 next.style = crate::BodyStyle::default();
                 next.preview_suppressed = false;
@@ -342,3 +375,7 @@ impl Renderer {
 #[cfg(test)]
 #[path = "preparation_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "retention_tests.rs"]
+mod retention_tests;

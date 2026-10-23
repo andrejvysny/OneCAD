@@ -64,15 +64,20 @@ pub struct IosApp {
     pub(crate) host: Arc<Queue>,
     pub(crate) wake: Arc<Gate>,
     pub(crate) phase: Phase,
+    pub(crate) recovery: Option<crate::lifecycle::BackgroundRecovery>,
+    pub(crate) recovery_generation: u64,
+    pub(crate) text_strings: Vec<std::ffi::CString>,
+    pub(crate) recovery_json: std::ffi::CString,
     pub(crate) theme: Option<egui::Theme>,
     pub(crate) keyboard_overlap: f32,
     pub(crate) capabilities: ffi::Capabilities,
+    pub(crate) capabilities_published: bool,
     /// Strings of the request last returned by `onecad_ios_host_request_next`.
     pub(crate) request_strings: Vec<std::ffi::CString>,
     /// `onecad_ios_open_path` files, opened at the start of the next frame.
     pub(crate) opens: Vec<PathBuf>,
     /// The latest Pencil accessory action, applied at the start of the next frame.
-    pub(crate) accessory: Option<onecad_interaction::touch::accessory::AccessoryAction>,
+    pub(crate) accessory: crate::pencil_accessory::State,
     /// Run id, pending results and injected faults of the semantic test hooks.
     #[cfg(feature = "test-hooks")]
     pub(crate) semantic: crate::test_hooks_semantic::State,
@@ -89,6 +94,7 @@ impl IosApp {
         let gate = wake.clone();
         ctx.set_request_repaint_callback(move |_| gate.wake());
         ctx.enable_accesskit();
+        onecad_widgets::text_session::enable(&ctx);
         let gpu = gpu::create_render_state().map_err(internal)?;
         let host = Arc::new(Queue::new(ctx.clone()));
         let dialogs = Arc::new(Dialogs(host.clone()));
@@ -116,12 +122,17 @@ impl IosApp {
             host,
             wake,
             phase: Phase::Active,
+            recovery: None,
+            recovery_generation: 0,
+            text_strings: Vec::new(),
+            recovery_json: std::ffi::CString::default(),
             theme: None,
             keyboard_overlap: 0.0,
             capabilities: ffi::Capabilities::default(),
+            capabilities_published: false,
             request_strings: Vec::new(),
             opens: Vec::new(),
-            accessory: None,
+            accessory: Default::default(),
             #[cfg(feature = "test-hooks")]
             semantic: crate::test_hooks_semantic::State::new(layout.app_support.clone()),
             _logging: logging,
@@ -153,6 +164,8 @@ impl IosApp {
 
     pub fn resize(&mut self, desc: &ffi::SurfaceDesc) -> Outcome {
         let view = view(desc, self.keyboard_overlap)?;
+        self.input.clear_predictions();
+        self.accessory.clear();
         let surface = self
             .surface
             .as_mut()

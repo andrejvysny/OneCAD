@@ -369,6 +369,7 @@ impl DocumentRuntime {
     /// `ApiError::Cancelled`. Every publishing regen calls this first: commit
     /// preempts preview.
     pub fn cancel_edit_preview(&mut self) {
+        self.edit_operands.cancel();
         self.edit_preview.preempt();
     }
 

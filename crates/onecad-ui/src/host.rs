@@ -5,6 +5,10 @@ use crate::{app::App, qa::QaPaths};
 use onecad_app::host::DialogPort;
 use std::sync::Arc;
 
+#[path = "host_presentation.rs"]
+mod presentation;
+pub use presentation::{OwnerIdentity, PresentationContext};
+
 pub use crate::display_budget::{DisplayBudget, Ledger, MemoryRelief};
 pub use crate::viewport_widgets::PointerKind;
 
@@ -27,7 +31,17 @@ impl Editor {
 
     /// See [`App::frame`]: submit and present the output before the next call.
     pub fn frame(&mut self, ctx: &egui::Context, raw: egui::RawInput) -> egui::FullOutput {
-        self.app.frame(ctx, raw)
+        let scope = presentation::text_scope(&self.app);
+        onecad_widgets::text_session::begin_frame(ctx, scope.clone());
+        if onecad_widgets::text_session::enabled(ctx) {
+            self.app.composing = onecad_widgets::text_session::composing(ctx);
+        }
+        let output = self.app.frame(ctx, raw);
+        onecad_widgets::text_session::end_frame(ctx);
+        if scope != presentation::text_scope(&self.app) {
+            onecad_widgets::text_session::invalidate(ctx);
+        }
+        output
     }
 
     /// Drains service messages outside a frame (shutdown pumping).
@@ -121,6 +135,19 @@ impl Editor {
         self.app.doc.tab
     }
 
+    /// Identity and viewport of the actual editor presentation, for transient host ink.
+    pub fn presentation_context(&self, ctx: &egui::Context) -> PresentationContext {
+        presentation::capture(&self.app, ctx)
+    }
+
+    pub fn prediction_clips(&self, ctx: &egui::Context) -> Vec<egui::Rect> {
+        presentation::clips(ctx)
+    }
+
+    pub fn accent_color(&self) -> egui::Color32 {
+        self.app.theme.accent
+    }
+
     /// INPUT.md `drag_authoring`: see [`drag_authoring`].
     pub fn drag_authoring(&self) -> bool {
         drag_authoring(&self.app)
@@ -133,8 +160,11 @@ impl Editor {
 
     /// Pencil accessory "show palette": the adaptive tool palette opens at `at`
     /// (points) on the next frame.
-    pub fn open_tool_palette(&mut self, at: egui::Pos2) {
-        crate::tool_palette::open(&mut self.app, at);
+    pub fn open_tool_palette(&mut self, at: egui::Pos2) -> bool {
+        if self.app.ui.start_open || self.app.busy() || !at.is_finite() {
+            return false;
+        }
+        crate::tool_palette::open(&mut self.app, at)
     }
 
     /// The active document's application state (acceptance probes only).
@@ -222,14 +252,15 @@ impl Editor {
     }
 }
 
-/// A dragged finger can author because a sketch creation tool is armed, a
+/// A dragged finger can author because a sketch session is active, a
 /// sketch handle drag runs, or a model tool shows on-canvas handles (extrude
 /// distance, move/rotate triad). Otherwise, including model tools without
 /// handles, fingers orbit.
 pub(crate) fn drag_authoring(app: &App) -> bool {
-    let sketch_tool = app.doc.sketch.session.as_ref().is_some_and(|session| {
-        app.sketch_active() && session.tool != onecad_interaction::sketch::SketchTool::Select
-    });
+    if app.ui.start_open {
+        return false;
+    }
+    let sketch_tool = app.sketch_active() && app.doc.sketch.session.is_some();
     let handles = !app.sketch_active()
         && (app.doc.extrude_handle.active()
             || app.doc.transform_gizmo.gizmo.active()
@@ -272,17 +303,28 @@ pub fn set_pencil_double_tap(ctx: &egui::Context, double: bool) {
 }
 
 /// Recovery flushes requested by [`Editor::flush_recovery`].
-pub struct RecoveryFlush(Vec<(Arc<crate::bridge::Shared>, u64)>);
+pub struct RecoveryFlush(Vec<crate::recovery_flush::Ticket>);
+pub use crate::recovery_flush::{RecoveryResult, Status as RecoveryStatus};
 
 impl RecoveryFlush {
-    /// Every document's actor has finished a flush since the request.
+    pub fn results(&self) -> Vec<RecoveryResult> {
+        self.0
+            .iter()
+            .map(crate::recovery_flush::Ticket::snapshot)
+            .collect()
+    }
+
+    /// Completion includes failure; inspect results before claiming durability.
     pub fn done(&self) -> bool {
-        self.0.iter().all(|(shared, before)| {
-            shared
-                .recovery_flushes
-                .load(std::sync::atomic::Ordering::Acquire)
-                > *before
-        })
+        self.results()
+            .iter()
+            .all(|result| result.outcome != RecoveryStatus::Pending)
+    }
+
+    pub fn finish_waiting(&self, expired: bool) {
+        for ticket in &self.0 {
+            ticket.finish_waiting(expired);
+        }
     }
 }
 
@@ -324,4 +366,9 @@ pub struct ViewProbe {
     pub status: String,
     /// A file action, command or decision blocks the editor (tab switches too).
     pub busy: bool,
+}
+
+/// Routing, services or title-bar actions may switch owner before fields render.
+pub(crate) fn refresh_text_scope(app: &App, ctx: &egui::Context) {
+    onecad_widgets::text_session::refresh_scope(ctx, presentation::text_scope(app));
 }

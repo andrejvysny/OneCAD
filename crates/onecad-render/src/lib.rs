@@ -36,7 +36,7 @@ pub use highlights::{HighlightKind, HighlightTarget, PreparedHighlights};
 pub use limits::{MemoryEstimate, RenderLimits};
 pub use mesh::{BodyStyle, PreviewIdentity};
 pub use options::{required_device_features, DisplayMode, RenderOptions};
-pub use prepared::{PreparationBudget, PreparationCache, PreparedScene};
+pub use prepared::{PreparationBudget, PreparationCache, PreparationRetention, PreparedScene};
 pub use profile::{RenderProfile, MIN_SCENE_SCALE, MOBILE_MAX_SCENE_PIXELS, SCENE_SCALE_STEP};
 pub use section_contours::{PreparedSectionContours, SectionContourKey};
 pub use section_contours_worker::SectionContourWorker;

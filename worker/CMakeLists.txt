@@ -126,6 +126,7 @@ add_library(worker_core STATIC
     # --- ONECAD-369: full-replay edit preview (SCHEMA §7.6 PreviewPlan) ---
     src/session/PreviewMesh.cpp
     src/session/PreviewPlan.cpp
+    src/session/EditOperandContext.cpp
     src/session/Tessellate.cpp
     # --- W-WP5: REAL OCCT ops + ElementMap V2 + tessellation ---
     src/elementmap/ElementMapPartition.cpp

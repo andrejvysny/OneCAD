@@ -19,7 +19,7 @@
 extern "C" {
 #endif
 
-#define ONECAD_IOS_ABI_VERSION 1u
+#define ONECAD_IOS_ABI_VERSION 2u
 
 typedef struct onecad_ios_app onecad_ios_app;
 
@@ -244,6 +244,35 @@ typedef enum onecad_ios_text_kind {
 #define ONECAD_IOS_MOD_OPTION  (1u << 2)
 #define ONECAD_IOS_MOD_COMMAND (1u << 3)
 
+/* Draft-only text protocol v1. Offsets: UTF-16 scalar boundaries. Snapshot
+ * strings are borrowed until the next text_snapshot call. Missing mark: UINT32_MAX.
+ * Every mutation requires current generation/revision and a larger sequence;
+ * rejected operations never mutate. Read a fresh snapshot after every response. */
+typedef struct onecad_ios_text_snapshot_v1 {
+    uint32_t struct_size, version;
+    uint64_t generation, revision, sequence, field_id;
+    const char *text;
+    uint32_t text_len, selection_start, selection_end, marked_start, marked_end, active;
+    float field_x, field_y, field_w, field_h;
+    float caret_x, caret_y, caret_w, caret_h;
+    const char *label;
+} onecad_ios_text_snapshot_v1;
+
+enum onecad_ios_text_operation_kind {
+    ONECAD_IOS_TEXT_REPLACE = 0, ONECAD_IOS_TEXT_SELECT = 1,
+    ONECAD_IOS_TEXT_MARK = 2, ONECAD_IOS_TEXT_UNMARK = 3,
+    ONECAD_IOS_TEXT_CANCEL = 4, ONECAD_IOS_TEXT_CONFIRM = 5,
+    ONECAD_IOS_TEXT_TAB = 6, ONECAD_IOS_TEXT_BLUR = 7
+};
+typedef struct onecad_ios_text_operation_v1 {
+    uint32_t struct_size, version;
+    uint64_t generation, revision, sequence;
+    uint32_t kind, start, end, selected_start, selected_end, text_len;
+    const char *text; /* text_len bytes, not NUL terminated; NULL only for zero bytes */
+} onecad_ios_text_operation_v1;
+onecad_ios_status onecad_ios_text_snapshot(onecad_ios_app *, onecad_ios_text_snapshot_v1 *out);
+onecad_ios_status onecad_ios_text_apply(onecad_ios_app *, const onecad_ios_text_operation_v1 *operation);
+
 typedef struct onecad_ios_key_event {
     uint32_t struct_size;
     uint32_t hid_usage;          /* UIKeyboardHIDUsage */
@@ -262,6 +291,23 @@ onecad_ios_status onecad_ios_text_set_marked(onecad_ios_app *app, const char *ut
 onecad_ios_status onecad_ios_keyboard_frame(onecad_ios_app *app, float overlap_pt);
 
 /* ---- Lifecycle --------------------------------------------------------- */
+
+/* Recovery status: 0 pending, 1 completed (inspect per-document outcomes),
+ * 2 expired, 3 cancelled. JSON is borrowed until the next snapshot call.
+ * Each JSON result carries generation, documentId, runtimeSession, outcome and
+ * durableOutcome. Expiry/cancellation never turns a late disk result into success.
+ */
+typedef struct onecad_ios_recovery_snapshot_result {
+    uint32_t struct_size;
+    uint32_t status;
+    uint64_t generation;
+    const char *documents_json;
+} onecad_ios_recovery_snapshot_result;
+onecad_ios_status onecad_ios_recovery_snapshot(onecad_ios_app *app,
+    onecad_ios_recovery_snapshot_result *out_result);
+/* reason: 0 system expiry; 1 foreground/superseded cancellation. Stale generations fail. */
+onecad_ios_status onecad_ios_recovery_finish_waiting(onecad_ios_app *app,
+    uint64_t generation, uint32_t reason);
 
 typedef enum onecad_ios_lifecycle_event {
     ONECAD_IOS_WILL_RESIGN_ACTIVE = 0,

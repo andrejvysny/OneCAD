@@ -174,7 +174,7 @@ fn save_meta() -> SaveMeta {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Lock order: runtime → release → lane, never nested
+// Autosave admits the lane before briefly locking the runtime for its snapshot.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -188,8 +188,7 @@ async fn autosave_holds_no_runtime_lock_while_waiting_on_the_persistence_lane() 
     let runtime: SharedRuntime = Arc::new(Mutex::new(Some(rt)));
     let lane: Lane = Arc::new(Mutex::new(()));
 
-    // Hold the lane, so the autosave gets exactly as far as "payload built, waiting
-    // to write" and parks there.
+    // Hold admission so the queued autosave must include edits accepted before release.
     let held = lane.lock().await;
     let task = spawn_autosave(&runtime, &app_data, &lane);
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -214,9 +213,9 @@ async fn autosave_holds_no_runtime_lock_while_waiting_on_the_persistence_lane() 
     assert!(marker_path(&app_data, doc_id).exists(), "marker written");
     assert_eq!(
         record_count(&path),
-        1,
-        "the container holds the PRE-edit snapshot — proof the payload was built \
-         under the runtime lock and the edit landed while the write was pending"
+        2,
+        "the container includes the edit accepted before persistence admission; \
+         a queued older snapshot must not overwrite newer recovery state"
     );
     let guard = runtime.lock().await;
     assert_eq!(

@@ -44,23 +44,27 @@
 //!
 //! ## The persistence lane (VF-B7 / M2 / M3)
 //!
-//! Both writers here — [`autosave_current`] and [`write_save_payload`] (the explicit
-//! save's second half) — take the runtime lock ONLY to build a
-//! [`SavePayload`](crate::document_runtime::SavePayload), release it, and then do the
+//! Autosave acquires the persistence lane before its short runtime snapshot so
+//! queued older work cannot overwrite a newer checkpoint. Both writers build a
+//! [`SavePayload`](crate::document_runtime::SavePayload) under the runtime lock, release
+//! that lock, then do the
 //! container write on a `spawn_blocking` thread. That keeps serialization + deflate of
 //! up to a 256 MiB import blob off the single-writer lock, so an edit is never blocked
 //! by a save.
 //!
 //! Two writers off one lock need their own ordering, which is the `lane` parameter
 //! both take: a `tokio::sync::Mutex<()>` (`AppState::persistence`) serializing
-//! {container write + recovery-marker mutation}. **Lock order is runtime → release →
-//! lane, never nested in that order** — no function awaits the lane while holding
-//! the runtime lock. After lane admission, a short runtime recheck fences stale
-//! autosaves; the runtime guard is released before container I/O.
+//! {container write + recovery-marker mutation}. No function awaits the lane
+//! while holding the runtime lock. Autosave admits its lane first, then briefly
+//! locks the runtime for the current accepted snapshot and session fence. Explicit
+//! save snapshots before its lane admission. Neither holds the runtime during I/O.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+#[path = "autosave_checkpoint.rs"]
+mod checkpoint_store;
 
 use crate::host::HostContext;
 use tokio::sync::{watch, Mutex};
@@ -157,7 +161,7 @@ pub fn pid_alive(pid: u32) -> bool {
 /// The outcome of one [`attempt`] — richer than [`autosave_current`]'s collapsed
 /// `Option`, so a caller that surfaces autosave state to the user can tell "there
 /// was nothing to do" from "we tried and it broke".
-enum AutosaveAttempt {
+pub enum AutosaveAttempt {
     /// No document open, or the open one is not dirty — nothing was attempted.
     Skipped,
     /// The container + marker were written.
@@ -196,7 +200,7 @@ pub async fn autosave_current(
     app_data: &Path,
     lane: &Mutex<()>,
 ) -> Option<AutosaveEvent> {
-    match attempt(runtime, app_data, lane).await {
+    match attempt(runtime, app_data, lane, None).await {
         AutosaveAttempt::Written(ev) => Some(ev),
         AutosaveAttempt::Skipped | AutosaveAttempt::Failed(_) => None,
     }
@@ -212,7 +216,7 @@ pub async fn autosave_current_reporting(
     app_data: &Path,
     lane: &Mutex<()>,
 ) -> Option<AutosaveEvent> {
-    match attempt(runtime, app_data, lane).await {
+    match attempt(runtime, app_data, lane, None).await {
         AutosaveAttempt::Written(ev) | AutosaveAttempt::Failed(ev) => Some(ev),
         AutosaveAttempt::Skipped => None,
     }
@@ -229,10 +233,48 @@ pub async fn autosave_current_reporting(
 ///
 /// The marker is written only after a successful container write, and under the same
 /// `lane` acquisition, so a marker never advertises an autosave that does not exist.
+/// Captures only the requested runtime session; replacements cannot redirect a flush.
+pub async fn checkpoint(
+    runtime: &Mutex<Option<DocumentRuntime>>,
+    app_data: &Path,
+    lane: &Mutex<()>,
+    session: &str,
+) -> AutosaveAttempt {
+    attempt(runtime, app_data, lane, Some(session)).await
+}
+
+/// Stops waiting for persistence admission when the host closes. Once admitted,
+/// the full disk transaction remains awaited under its lane guard.
+pub async fn checkpoint_until(
+    runtime: &Mutex<Option<DocumentRuntime>>,
+    app_data: &Path,
+    lane: &Mutex<()>,
+    session: Option<&str>,
+    stop: impl std::future::Future<Output = ()>,
+) -> AutosaveAttempt {
+    let guard = tokio::select! {
+        biased;
+        () = stop => return AutosaveAttempt::Skipped,
+        guard = lane.lock() => guard,
+    };
+    attempt_admitted(runtime, app_data, session, guard).await
+}
+
 async fn attempt(
     runtime: &Mutex<Option<DocumentRuntime>>,
     app_data: &Path,
     lane: &Mutex<()>,
+    expected_session: Option<&str>,
+) -> AutosaveAttempt {
+    let guard = lane.lock().await;
+    attempt_admitted(runtime, app_data, expected_session, guard).await
+}
+
+async fn attempt_admitted(
+    runtime: &Mutex<Option<DocumentRuntime>>,
+    app_data: &Path,
+    expected_session: Option<&str>,
+    _lane: tokio::sync::MutexGuard<'_, ()>,
 ) -> AutosaveAttempt {
     let now = now_rfc3339();
     let meta = SaveMeta {
@@ -251,7 +293,9 @@ async fn attempt(
         let Some(rt) = guard.as_mut() else {
             return AutosaveAttempt::Skipped; // no document open.
         };
-        if !rt.is_dirty() {
+        if expected_session.is_some_and(|session| !rt.matches_runtime_session(session))
+            || !rt.is_dirty()
+        {
             return AutosaveAttempt::Skipped; // nothing at risk.
         }
         let doc_id = rt.document_uuid();
@@ -275,7 +319,6 @@ async fn attempt(
 
     // ── Persistence lane: container write + marker, serialized against an
     //    explicit save's write + recovery clearing (M2/M3). ──
-    let _lane = lane.lock().await;
     // A snapshot queued behind replacement cleanup must not resurrect discarded work.
     if !runtime
         .lock()
@@ -285,20 +328,6 @@ async fn attempt(
     {
         return AutosaveAttempt::Skipped;
     }
-    let target = path.clone();
-    match tokio::task::spawn_blocking(move || DocumentRuntime::write_payload(&target, &payload))
-        .await
-    {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            tracing::warn!("autosave: write container failed: {e}");
-            return AutosaveAttempt::Failed(failed_event(&path, format!("write container: {e}")));
-        }
-        Err(e) => {
-            tracing::warn!("autosave: write task did not complete: {e}");
-            return AutosaveAttempt::Failed(failed_event(&path, format!("write task: {e}")));
-        }
-    }
     let marker = SessionMarker {
         document_id: doc_id,
         pid: std::process::id(),
@@ -306,16 +335,30 @@ async fn attempt(
         last_autosave: now,
         title: Some(title),
     };
-    // A container whose marker never landed is not a recovery snapshot — discovery
-    // treats a marker-less container as an unowned orphan, and reporting success
-    // here would tell the caller (and the UI) that the work is protected when it is
-    // not. Fail the whole write and take the half-state with it.
-    if let Err(e) = write_marker(app_data, &marker) {
-        tracing::warn!("autosave: write marker failed: {e}");
-        if let Err(e) = std::fs::remove_file(&path) {
-            tracing::warn!("autosave: rollback of {path:?} failed: {e}");
+    let target = path.clone();
+    let root = app_data.to_owned();
+    let write = tokio::task::spawn_blocking(move || {
+        checkpoint_store::preserve_pair(
+            &target,
+            &onecad_core::io::recovery::marker_path(&root, doc_id),
+            || {
+                DocumentRuntime::write_payload(&target, &payload)?;
+                write_marker(&root, &marker)
+            },
+        )
+    })
+    .await;
+    match write {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            return AutosaveAttempt::Failed(failed_event(
+                &path,
+                format!("write checkpoint: {error}"),
+            ));
         }
-        return AutosaveAttempt::Failed(failed_event(&path, format!("write marker: {e}")));
+        Err(error) => {
+            return AutosaveAttempt::Failed(failed_event(&path, format!("write task: {error}")));
+        }
     }
     AutosaveAttempt::Written(AutosaveEvent {
         path: path.to_string_lossy().into_owned(),

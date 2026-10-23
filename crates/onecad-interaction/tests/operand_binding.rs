@@ -231,6 +231,7 @@ fn offset_face_binds_closure_with_picks_as_primary_faces_and_begins() {
     let staged = StagedOffsetFace {
         prepared: prepared_faces(body),
         refs: refs.to_vec(),
+        surface: None,
     };
     let record = bind_offset_face(&staged, Scalar::new(1.0), RecordId::new(), 5).unwrap();
     let Operation::Known(KnownOperation::OffsetFace(params)) = &record.op else {
@@ -265,6 +266,7 @@ fn offset_binding_refuses_refusals_missing_picks_and_short_refs() {
         let staged = StagedOffsetFace {
             prepared: prepared.clone(),
             refs: refs.to_vec(),
+            surface: None,
         };
         bind_offset_face(&staged, Scalar::new(1.0), RecordId::new(), 1)
     };
@@ -287,6 +289,7 @@ fn offset_binding_refuses_refusals_missing_picks_and_short_refs() {
     let zero = StagedOffsetFace {
         prepared: prepared_faces(body),
         refs: refs.to_vec(),
+        surface: None,
     };
     assert!(
         bind_offset_face(&zero, Scalar::new(0.0), RecordId::new(), 1).is_err(),

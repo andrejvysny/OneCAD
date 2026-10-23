@@ -142,16 +142,18 @@ typedef struct onecad_worker_journal_event {
     const char* occt_fingerprint;
 } onecad_worker_journal_event;
 
-/* Called SYNCHRONOUSLY on the worker's kernel thread: JOB_BEGIN when a kernel
- * job is dequeued, PLAN_OP_BEGIN before each ExecutePlan / PreviewPlan op's work
+/* Called SYNCHRONOUSLY from worker threads: JOB_BEGIN before a kernel/solver
+ * job enters its mailbox, PLAN_OP_BEGIN before each ExecutePlan / PreviewPlan op's work
  * starts, JOB_END after the job's terminal frame was written (or its write
  * failed) — so result serialization is inside the window. Whatever the host
  * persists inside the callback is on record before the
  * named work runs, so a crash that kills the process inside that work can be
  * attributed without having read a single frame (in-process, frames still in
- * the socket buffer die with the process). The kernel lane is blocked while
- * the callback runs; it must not call into the worker. Kernel lane only:
- * solver-lane (Sketch*) and status-lane jobs are not journaled. */
+ * the socket buffer die with the process). The calling thread is blocked while
+ * the callback runs; it must not call into the worker. Callbacks may overlap on
+ * the reader, kernel and solver threads; the host must serialize persistence.
+ * Status jobs are not journaled. The event request_id identifies each job
+ * within this run, including queued jobs and cancelled/superseded solvers. */
 typedef void (*onecad_worker_journal_fn)(const onecad_worker_journal_event* event, void* ctx);
 
 typedef struct onecad_worker_config {

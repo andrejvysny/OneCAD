@@ -11,6 +11,8 @@
 mod a11y;
 mod abi;
 mod abi_input;
+mod abi_recovery;
+mod abi_text;
 mod app;
 mod ffi;
 mod frame;
@@ -19,6 +21,8 @@ mod host;
 mod input;
 mod keys;
 mod lifecycle;
+mod pencil_accessory;
+mod predictions;
 #[cfg(feature = "test-hooks")]
 mod test_hooks;
 #[cfg(feature = "test-hooks")]

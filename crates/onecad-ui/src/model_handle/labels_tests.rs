@@ -206,6 +206,7 @@ fn mirror_caption_keeps_signed_plane_offset_before_during_and_after_drag() {
         extra: Default::default(),
     };
     let baseline = Target {
+        caption: None,
         record: RecordId::new(),
         kind: Kind::Mirror(plane.clone()),
         geometry: Geometry::axis(DVec3::ZERO, DVec3::X, 1.0),

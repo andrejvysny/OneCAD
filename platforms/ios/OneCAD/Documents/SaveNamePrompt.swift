@@ -1,17 +1,21 @@
 import UIKit
 
-/// Native name prompt for SAVE_DOCUMENT. The result is always
-/// Documents/<name>.onecad; Rust performs the actual atomic write.
+/// Native name prompt for SAVE_DOCUMENT. Rust selects the format and performs
+/// the atomic write; the prompt confines the selected name to Documents.
 @MainActor
 enum SaveNamePrompt {
-    static let fileExtension = "onecad"
+    static let supportedExtensions: Set<String> = ["onecad", "step", "stl", "obj", "3mf"]
 
     static func present(on host: UIViewController, title: String, suggestedName: String,
-                        completion: @escaping (String?) -> Void) {
+                        fileExtension: String, completion: @escaping (String?) -> Void) {
+        guard supportedExtensions.contains(fileExtension) else {
+            completion(nil)
+            return
+        }
         let alert = UIAlertController(title: title.isEmpty ? "Save Document" : title,
                                       message: nil, preferredStyle: .alert)
         alert.addTextField { field in
-            field.text = baseName(suggestedName)
+            field.text = baseName(suggestedName, fileExtension: fileExtension)
             field.placeholder = "Name"
             field.clearButtonMode = .whileEditing
             field.accessibilityIdentifier = "onecad.save.name"
@@ -19,7 +23,7 @@ enum SaveNamePrompt {
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in completion(nil) })
         alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak alert] _ in
             let typed = alert?.textFields?.first?.text ?? ""
-            guard let url = destination(for: typed) else {
+            guard let url = destination(for: typed, fileExtension: fileExtension) else {
                 completion(nil)
                 return
             }
@@ -30,11 +34,18 @@ enum SaveNamePrompt {
 
     /// Strips path separators and leading dots so the name cannot escape
     /// Documents; nil for an empty name.
-    static func destination(for typed: String) -> URL? {
-        var name = baseName(typed)
+    static func destination(for typed: String, fileExtension: String) -> URL? {
+        guard supportedExtensions.contains(fileExtension),
+              !typed.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+        else { return nil }
+        var name = baseName(typed, fileExtension: fileExtension)
             .replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: ":", with: "-")
-        while name.hasPrefix(".") { name.removeFirst() }
+            .replacingOccurrences(of: "\\", with: "-")
+        while name.hasPrefix(".") {
+            name.removeFirst()
+            name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty,
               let documents = try? FileManager.default.url(
@@ -43,10 +54,13 @@ enum SaveNamePrompt {
         return documents.appending(path: name).appendingPathExtension(fileExtension)
     }
 
-    private static func baseName(_ name: String) -> String {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    static func baseName(_ name: String, fileExtension: String) -> String {
+        var trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let suffix = "." + fileExtension
-        return trimmed.lowercased().hasSuffix(suffix) ? String(trimmed.dropLast(suffix.count)) : trimmed
+        while trimmed.lowercased().hasSuffix(suffix) {
+            trimmed = String(trimmed.dropLast(suffix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return trimmed
     }
 
     private static func confirmOverwriteIfNeeded(_ url: URL, on host: UIViewController,

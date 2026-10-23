@@ -215,6 +215,99 @@ final class RequiredWorkflowTests: XCTestCase {
         }
     }
 
+    /// Public UIKit controls answer every prompt. The retained STEP artifact
+    /// is inspected from the app container after the run; no answer_save hook.
+    func testNamedPlateSaveAsAndStepExportThroughNativePrompts() {
+        app = launchOneCAD()
+        ui = OneCADScreen(app: app, test: self)
+        keyboard = SoftwareKeyboard(app: app, test: self)
+        requireMeasuredDevice()
+        discardRecoveryOffer(app)
+        let name = "PromptPlate-" + documentSuffix()
+        createPromptPlate()
+        saveThroughPrompt(app, as: name)
+        exerciseNamedPrompts(name)
+        app.terminate()
+        app.launch()
+        waitUntil(app.element(id: OneCADID.canvas), .exists, "canvas after relaunch")
+        let recent = app.element(label: name)
+        waitUntil(recent, .hittable, "named Save As document in recents")
+        recent.tap()
+        ui.wait(UI.viewport, .exists)
+        ui.expectHistory(["Sketch", "Extrude"])
+        ui.waitText("Body 1")
+        closeTabDiscarding(app)
+    }
+
+    private func createPromptPlate() {
+        tapFileMenu(app, OneCADID.fileNew)
+        let viewport = ui.wait(UI.viewport, .exists)
+        origin = CGPoint(x: viewport.frame.midX, y: viewport.frame.midY)
+        ui.tap(UI.sketch)
+        ui.tap(UIRef(OneCADID.planeXY))
+        ui.wait(UI.finish)
+        ui.tap(UI.propertiesTab)
+        ui.tap(UI.moreTools)
+        ui.tap(UI.rectangle)
+        sketchPoint(0, 0).tap()
+        enterNumeric([(UI.width, "60"), (UI.height, "40")])
+        ui.waitText("Sketch · Fully constrained")
+        ui.tap(UI.finish)
+        ui.wait(UI.sketch)
+        sketchPoint(30, 20).tap()
+        ui.tap(UI.extrude)
+        setExtrudeDistance("4")
+        ui.wait(UI.create, .enabled).tap()
+        ui.waitText("Body 1")
+        ui.expectHistory(["Sketch", "Extrude"])
+    }
+
+    private func exerciseNamedPrompts(_ name: String) {
+        let field = app.textFields[OneCADID.saveName]
+        for decision in ["Cancel", "Replace"] {
+            tapFileMenu(app, "onecad.menu.file.saveAs")
+            waitUntil(field, .hittable, "named Save As prompt")
+            XCTAssertEqual(field.value as? String, name, "named document supplies its own default")
+            field.tap()
+            field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: name.count)
+                + name + ".OneCaD.onecad")
+            app.alerts.buttons["Save"].tap()
+            let replace = app.alerts.buttons["Replace"]
+            waitUntil(replace, .hittable, "one suffix resolves to the existing document")
+            app.alerts.buttons[decision].tap()
+            waitUntil(replace, .gone, "overwrite decision completed")
+            XCTAssertEqual(app.element(id: OneCADID.tab(0)).label, name)
+        }
+        for cancel in [true, false] {
+            tapFileMenu(app, "onecad.menu.file.export")
+            waitUntil(field, .hittable, "native STEP name prompt")
+            XCTAssertEqual(field.value as? String, name, "export uses the named plate default")
+            if cancel {
+                app.alerts.buttons["Cancel"].tap()
+                waitUntil(field, .gone, "cancelled STEP prompt")
+                XCTAssertEqual(app.element(id: OneCADID.tab(0)).label, name)
+                continue
+            }
+            field.tap()
+            field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: name.count)
+                + name + ".STEP.step")
+            app.alerts.buttons["Save"].tap()
+            let cancelPicker = app.navigationBars.buttons["Cancel"]
+            waitUntil(cancelPicker, .hittable, timeout: 60, "valid STEP reaches system export picker")
+            ui.screenshot("native-prompt-step-picker")
+            cancelPicker.tap()
+            waitUntil(cancelPicker, .gone, "system export picker dismissed")
+            let activity = app.element(label: "Activity · Completed")
+            waitUntil(activity, .hittable, "STEP export completed")
+            activity.tap()
+            let exported = app.descendants(matching: .any).matching(NSPredicate(
+                format: "label BEGINSWITH %@ AND label ENDSWITH %@", "Exported ", "/" + name + ".step"))
+                .firstMatch
+            waitUntil(exported, .exists, "STEP export reports one normalized suffix")
+            app.element(id: OneCADID.canvas).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
+        }
+    }
+
     // MARK: Steps
 
     /// One workflow step: its actions and assertions, then a kept screenshot.

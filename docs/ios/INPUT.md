@@ -44,8 +44,10 @@ UITouch / UIPencilInteraction / gesture recognizers   (platforms/ios, main threa
 Router input per frame: `RouteContext { pencil_only_drawing, drag_authoring,
 over_control: fn(pos) -> bool }` where `over_control` comes from the previous
 egui frame (pointer over an egui area other than the CAD canvas) and
-`drag_authoring` is true while a sketch tool, handle or parameter drag can use
-a dragged pointer.
+`drag_authoring` is true while an active sketch session (including Select),
+handle or parameter drag can use a dragged pointer. Home has no authoring
+owner. Select finger drags use the shared sketch interaction; Pencil-only
+drawing and two-finger navigation retain the router rules below.
 
 | Contact | Condition | Owner |
 |---|---|---|
@@ -69,6 +71,41 @@ a dragged pointer.
   and squeeze arrive as `onecad_ios_pencil_event` and are handled by the
   accessory policy below; they never author geometry.
 
+## Native text sessions
+
+The optional shared widget adapter is enabled only by the iOS host. It publishes
+one focused, enabled field's exact authored draft, UTF-16 selection, marked range,
+label and field/caret bounds. Unfocused NumberField display rounding never enters
+this snapshot. NumberField, SearchField and raw editor fields use the same hooks.
+The UIKit first responder occupies the focused field, exposes its editable value
+and replaces only that same Rust field's accessibility element. Other fields stay
+accessible. The canvas is not a native text or Scribble target.
+
+A session is fenced by document/runtime/authoring scope, egui field ID and a
+monotonic focus generation. Every operation requires the acknowledged revision
+and a larger sequence. The Rust mirror acknowledges synchronously so multiple
+UIKit callbacks before a frame see updated draft/selection state. Duplicate,
+stale, out-of-range and surrogate-splitting operations fail without mutation.
+The snapshot is bounded to 16,384 UTF-16 units; expression fields retain their
+existing source limit. UIKit positions/ranges carry the focus generation, and
+position arithmetic checks overflow.
+
+The next widget pass applies pending text only if its live draft still equals
+the last published base. External undo or service changes invalidate pending
+input. The adapter marks the response changed and uses the public egui cursor and
+undo APIs; normal validation and application services still own CAD acceptance.
+No native text callback authors accepted geometry directly.
+
+Marked updates replace the prior mark or initial selection; the selected range
+is relative to the new marked text. Unmark preserves the composed draft without
+inserting it again. Later insertText is genuine new input. Cancel restores the
+composition's original draft/selection; focus loss cancels uncommitted composition.
+Return/Tab commit composition before one sequence-fenced key is delivered. There
+is no text-equality or timing heuristic for deduplication. Grapheme-aware deletion
+respects selected ranges. Numeric keyboards allow units and expressions.
+Selection rectangles and point-to-glyph hit testing are not exported; unsupported
+geometry queries return no position rather than inventing a character index.
+
 ## Cancellation
 
 `RoutedEvent::Cancel { contact, reason }` is produced for UIKit cancellation,
@@ -77,6 +114,10 @@ focus. `onecad-ios` maps it to `App::cancel_contact()` (cancels live canvas
 drags and pending clicks without leaving the active tool) followed by
 `PointerGone`; no release is delivered at the canvas, so no click or drag
 commit can result from a cancelled contact.
+
+Scene focus loss also clears cached hardware modifiers and emits a modifier
+reset before later software Return/Tab or pointer input. Ordinary contact
+cancellation, including a document switch, retains physically held modifiers.
 
 ## Accessory policy (IP19)
 
@@ -89,6 +130,27 @@ commit can result from a cancelled contact.
 
 Unavailable capabilities stay unavailable; every accessory action has a visible
 control equivalent.
+
+The latest valid `onecad_ios_capabilities_set` publication owns both preferred
+actions. Event `preferred` is a compatibility fallback only before the first
+publication. An explicitly unavailable barrel tap or squeeze does nothing;
+unknown enums/flags are refused. Swift observes hardware and publishes current
+Settings preferences before delivering its callback. An exact completed callback
+identity (action, timestamp, contact epoch, view generation, document/runtime)
+is consumed once; no timing threshold suppresses distinct gestures.
+
+Successful tool changes and palette opens may enqueue bounded native feedback
+only with `CAP_HAPTICS`. Pencil feedback uses `UICanvasFeedbackGenerator`;
+ignored, cancelled, unavailable or refused actions produce no feedback. Palette
+visibility also provides feedback. Actual hardware qualification remains separate.
+
+Predictions render as subdued theme-accent paths from the last confirmed point
+through the newest prediction batch. They are appended only to egui output,
+clipped to the actual model viewport with control regions excluded. Contact,
+view generation, document/runtime, scene/camera/viewport and authoring session
+must still match after the editor frame. Confirmed movement, end/cancel, focus,
+Home/tab, resize and context loss clear old ink. No predicted sample enters
+`RawInput`, recognition, accepted geometry, bounds, history or persistence.
 
 ## Appendix: trace fixtures
 

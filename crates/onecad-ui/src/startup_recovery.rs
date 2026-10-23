@@ -101,10 +101,19 @@ async fn apply_choice(
     let destination = destination(&backend.paths.documents, offer)?;
     match choice {
         Choice::Restore => {
-            api::recover_document(&backend.state, backend.host.clone(), id.clone(), true)
-                .await
-                .map_err(|e| e.to_string())?
-                .ok_or("Recovery offer is no longer pending")?;
+            api::recover_document_at_path(
+                &backend.state,
+                backend.host.clone(),
+                id.clone(),
+                true,
+                Some(destination.clone()),
+            )
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("Recovery offer is no longer pending")?;
+            if let Some(original) = offer.original_path.as_deref() {
+                onecad_app::recents::relocate(&backend.host, Path::new(original), &destination);
+            }
             backend.paths.document = destination;
             backend.startup_opened = true;
         }
@@ -131,9 +140,7 @@ async fn open_saved(
         .original_path
         .as_deref()
         .ok_or("No saved version exists")?;
-    if Path::new(original)
-        .canonicalize()
-        .map_err(|e| e.to_string())?
+    if crate::imported_documents::migrate(&backend.paths.documents, Path::new(original))?
         != destination
     {
         return Err("Saved version must remain inside the isolated QA documents directory".into());
@@ -141,7 +148,7 @@ async fn open_saved(
     api::open_document(
         &backend.state,
         backend.host.clone(),
-        original.into(),
+        destination.to_string_lossy().into_owned(),
         Some("openSaved".into()),
     )
     .await
@@ -172,18 +179,21 @@ fn remove_offer(backend: &Backend, id: &str) -> Result<(), String> {
 
 fn destination(documents: &Path, offer: &RecoveryInfoDto) -> Result<PathBuf, String> {
     let documents = documents.canonicalize().map_err(|e| e.to_string())?;
+    let id: onecad_core::ids::DocumentId = offer
+        .document_id
+        .parse()
+        .map_err(|e| format!("Invalid recovery identity: {e}"))?;
     if let Some(path) = offer
         .original_path
         .as_deref()
         .and_then(|path| Path::new(path).canonicalize().ok())
         && path.starts_with(&documents)
     {
-        return Ok(path);
+        verify_destination_identity(&path, id)?;
+        let target = crate::imported_documents::migrate(&documents, &path)?;
+        verify_destination_identity(&target, id)?;
+        return Ok(target);
     }
-    let id: onecad_core::ids::DocumentId = offer
-        .document_id
-        .parse()
-        .map_err(|e| format!("Invalid recovery identity: {e}"))?;
     let fallback = documents.join(format!("recovered-{id}.onecad"));
     if fallback
         .symlink_metadata()
@@ -191,7 +201,25 @@ fn destination(documents: &Path, offer: &RecoveryInfoDto) -> Result<PathBuf, Str
     {
         return Err("Recovery save destination must not be a symlink".into());
     }
+    if fallback.exists() {
+        verify_destination_identity(&fallback, id)?;
+    }
     Ok(fallback)
+}
+
+fn verify_destination_identity(
+    path: &Path,
+    expected: onecad_core::ids::DocumentId,
+) -> Result<(), String> {
+    let document = onecad_core::io::container::ContainerReader::open(path)
+        .map_err(|error| error.to_string())?;
+    if document.document().id != expected {
+        return Err(
+            "Recovery path belongs to a different document; saved source and checkpoint retained"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 pub fn show(app: &mut crate::app::App, ctx: &egui::Context) -> bool {

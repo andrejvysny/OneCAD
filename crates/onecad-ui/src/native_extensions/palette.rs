@@ -90,10 +90,18 @@ pub(super) fn show(app: &mut App, ctx: &egui::Context) {
     egui::Modal::new(egui::Id::unique("extension-command-palette")).show(ctx, |ui| {
         ui.set_width(440.0);
         ui.heading("Search commands");
-        let search = ui.add(
-            egui::TextEdit::singleline(&mut state.palette_query)
-                .hint_text("Search commands")
-                .desired_width(f32::INFINITY),
+        let field_id = ui.make_persistent_id("command-search");
+        let search = onecad_widgets::text_session::show(
+            ui,
+            field_id,
+            &mut state.palette_query,
+            "Search commands",
+            16_384,
+            |text| {
+                egui::TextEdit::singleline(text)
+                    .hint_text("Search commands")
+                    .desired_width(f32::INFINITY)
+            },
         );
         if std::mem::take(&mut state.palette_focus) {
             search.request_focus();

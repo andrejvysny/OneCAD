@@ -3,11 +3,12 @@
 //!
 //! In-process an OCCT crash kills the app, and the in-memory crash circuit dies
 //! with it. The worker therefore reports every kernel job and plan op through
-//! the ABI journal callback, synchronously on its kernel thread BEFORE the work
-//! runs, and this module persists it:
+//! the ABI journal callback, synchronously before queue admission and before each
+//! plan op runs, and this module persists it:
 //!
-//! * `inflight.json` — this process's in-flight kernel jobs (one per live
-//!   instance), rewritten by temp + rename on every event (no fsync: it must
+//! * `inflight.json` — this process's admitted kernel and solver jobs (independent
+//!   identities within every live instance), rewritten by temp + rename on every
+//!   event (no fsync: it must
 //!   survive process death, not power loss) and removed when none is left. It
 //!   carries a per-launch session token, so a record from another launch is
 //!   told apart from a live sibling instance's without asking about pids.
@@ -18,13 +19,13 @@
 //!   poisons nothing — termination, jetsam or backgrounding never poison an op
 //!   without a leftover op record. At [`IN_PROCESS_POISON_THRESHOLD`] strikes the
 //!   key's circuit opens until the user clears it.
-//! * Attribution: when several instances had ops in flight (2–3 tabs), the
-//!   leftover cannot say which one crashed. Each gets its strike, but an
+//! * Attribution: when several jobs were unfinished (across lanes or tabs), the
+//!   leftover cannot say which one caused process loss. Each gets its strike, but an
 //!   AMBIGUOUS strike never opens a circuit; and every key holding a strike
 //!   runs ALONE among this process's plan dispatches ([`KernelJournal::plan_permit`]),
-//!   so its next interruption is unambiguous. An innocent sibling therefore
-//!   runs alone, succeeds and is healed; the crashing op is struck again alone
-//!   and opens.
+//!   reducing plan overlap without claiming exclusive access against solvers.
+//!   Successful plans heal their keys; only a complete, single supported plan
+//!   record can advance a suspicion to quarantine.
 //!
 //! Every write is best effort: a failure is logged, counted and surfaced in
 //! worker status, and never blocks the op.
@@ -47,7 +48,31 @@ pub(crate) const IN_PROCESS_POISON_THRESHOLD: u32 = 2;
 
 const INFLIGHT: &str = "inflight.json";
 const POISON: &str = "poison.json";
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
+const MAX_JOBS: usize = 512;
+const MAX_POISON: usize = 128;
+const MAX_FILE_BYTES: u64 = 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum JobKind {
+    #[default]
+    Kernel,
+    Solver,
+}
+
+impl JobKind {
+    fn for_verb(verb: &str) -> Self {
+        if matches!(
+            verb,
+            "SketchUpsert" | "SketchRegions" | "BeginGesture" | "SolveDrag" | "EndGesture"
+        ) {
+            Self::Solver
+        } else {
+            Self::Kernel
+        }
+    }
+}
 
 /// One in-flight kernel job of one instance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +82,8 @@ pub(crate) struct JobRecord {
     pub(crate) epoch: u64,
     pub(crate) request_id: u64,
     pub(crate) verb: String,
+    #[serde(default)]
+    pub(crate) kind: JobKind,
     pub(crate) op_id: Option<String>,
     pub(crate) step_index: Option<u64>,
     pub(crate) op_position: Option<u64>,
@@ -72,6 +99,8 @@ struct InflightFile {
     version: u32,
     session: String,
     jobs: Vec<JobRecord>,
+    #[serde(default)]
+    complete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,14 +127,16 @@ struct PoisonFile {
 struct Leftover {
     session: String,
     jobs: Vec<JobRecord>,
+    complete: bool,
 }
 
 #[derive(Default)]
 struct State {
-    jobs: BTreeMap<u64, JobRecord>,
+    jobs: BTreeMap<(u64, u64, u64), JobRecord>,
     leftover: Option<Leftover>,
     poison: BTreeMap<String, PoisonRecord>,
     applied_session: Option<String>,
+    incomplete: bool,
 }
 
 /// The process-wide journal of one directory.
@@ -187,28 +218,97 @@ impl KernelJournal {
 
     /// Records of an earlier launch; `None` when there is nothing to recover.
     fn read_leftover(&self) -> Option<Leftover> {
-        let bytes = fs::read(self.dir.join(INFLIGHT)).ok()?;
+        let path = self.dir.join(INFLIGHT);
+        let bytes = self.read_bounded(&path)?;
         match serde_json::from_slice::<InflightFile>(&bytes) {
-            Ok(file) if file.session != session() => Some(Leftover {
-                session: file.session,
-                jobs: file.jobs,
-            }),
-            Ok(_) => None,
-            Err(e) => {
-                tracing::warn!(error = %e, "kernel journal: unreadable inflight.json discarded");
+            Ok(mut file)
+                if matches!(file.version, 1 | FORMAT_VERSION)
+                    && file.jobs.len() <= MAX_JOBS
+                    && !file.session.is_empty()
+                    && file.session != session() =>
+            {
+                if file.version == 1 {
+                    // Version 1 never recorded solver overlap.
+                    file.complete = false;
+                    for record in &mut file.jobs {
+                        record.kind = JobKind::for_verb(&record.verb);
+                    }
+                }
+                Some(Leftover {
+                    session: file.session,
+                    jobs: file.jobs,
+                    complete: file.complete,
+                })
+            }
+            Ok(file) if file.session == session() => None,
+            Ok(_) => {
+                self.note_failure(
+                    "inflight.json read",
+                    &"unsupported version or oversized journal",
+                );
                 Some(Leftover {
                     session: String::new(),
                     jobs: Vec::new(),
+                    complete: false,
+                })
+            }
+            Err(e) => {
+                self.note_failure("inflight.json parse", &e);
+                Some(Leftover {
+                    session: String::new(),
+                    jobs: Vec::new(),
+                    complete: false,
                 })
             }
         }
     }
 
+    fn read_bounded(&self, path: &Path) -> Option<Vec<u8>> {
+        use std::io::Read;
+        let file = match fs::File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(error) => {
+                self.note_failure("journal read", &error);
+                return None;
+            }
+        };
+        let mut bytes = Vec::new();
+        if let Err(error) = file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes) {
+            self.note_failure("journal read", &error);
+            return None;
+        }
+        if bytes.len() as u64 > MAX_FILE_BYTES {
+            self.note_failure("journal read", &"oversized journal discarded");
+            return None;
+        }
+        Some(bytes)
+    }
+
     fn read_poison(&self) -> PoisonFile {
-        fs::read(self.dir.join(POISON))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<PoisonFile>(&bytes).ok())
-            .unwrap_or_default()
+        let Some(bytes) = self.read_bounded(&self.dir.join(POISON)) else {
+            return PoisonFile::default();
+        };
+        match serde_json::from_slice::<PoisonFile>(&bytes) {
+            Ok(mut file)
+                if matches!(file.version, 1 | FORMAT_VERSION)
+                    && file.entries.len() <= MAX_POISON =>
+            {
+                if file.version == 1 {
+                    for record in file.entries.values_mut() {
+                        record.strikes = record.strikes.min(IN_PROCESS_POISON_THRESHOLD - 1);
+                    }
+                }
+                file
+            }
+            _ => {
+                self.note_failure(
+                    "poison.json read",
+                    &"malformed or unsupported journal discarded",
+                );
+                PoisonFile::default()
+            }
+        }
     }
 
     /// A writer for one new instance (its records are keyed by a fresh id).
@@ -235,13 +335,15 @@ impl KernelJournal {
     /// Rewrites `inflight.json` from `state.jobs` (removed when empty).
     fn persist_inflight(&self, state: &State) {
         let path = self.dir.join(INFLIGHT);
-        let result = if state.jobs.is_empty() {
+        let complete = !state.incomplete && self.write_failures() == 0;
+        let result = if state.jobs.is_empty() && complete {
             remove_if_present(&path)
         } else {
             let file = InflightFile {
                 version: FORMAT_VERSION,
                 session: session().to_string(),
                 jobs: state.jobs.values().cloned().collect(),
+                complete,
             };
             serde_json::to_vec(&file)
                 .map_err(std::io::Error::other)
@@ -272,7 +374,7 @@ impl KernelJournal {
     }
 }
 
-/// One instance's journal: called from the worker's kernel thread.
+/// One instance's journal: callbacks may overlap on reader and lane threads.
 pub(crate) struct JournalWriter {
     journal: Arc<KernelJournal>,
     instance: u64,
@@ -283,13 +385,30 @@ impl JournalWriter {
     pub(crate) fn record(&self, event: &JournalEvent) {
         let journal = &self.journal;
         let mut state = journal.state.lock().unwrap();
+        if [&event.name, &event.prefix_hash, &event.occt_fingerprint]
+            .iter()
+            .any(|value| value.len() > 128)
+        {
+            state.incomplete = true;
+            journal.note_failure("journal event", &"identity field exceeds 128 bytes");
+            journal.persist_inflight(&state);
+            return;
+        }
+        let identity = (self.instance, self.epoch, event.request_id);
         match event.kind {
             JournalKind::JobBegin => {
+                if state.jobs.contains_key(&identity) || state.jobs.len() >= MAX_JOBS {
+                    state.incomplete = true;
+                    journal.note_failure("job begin", &"duplicate identity or job limit reached");
+                    journal.persist_inflight(&state);
+                    return;
+                }
                 let record = JobRecord {
                     instance: self.instance,
                     epoch: self.epoch,
                     request_id: event.request_id,
                     verb: event.name.clone(),
+                    kind: JobKind::for_verb(&event.name),
                     op_id: None,
                     step_index: None,
                     op_position: None,
@@ -297,12 +416,20 @@ impl JournalWriter {
                     fingerprint: event.occt_fingerprint.clone(),
                     started_ms: now_ms(),
                 };
-                state.jobs.insert(self.instance, record);
+                state.jobs.insert(identity, record);
             }
             JournalKind::PlanOpBegin => {
-                let Some(record) = state.jobs.get_mut(&self.instance) else {
+                let Some(record) = state.jobs.get_mut(&identity) else {
                     return; // an op outside a recorded job: nothing to attribute
                 };
+                if record.kind != JobKind::Kernel
+                    || !matches!(record.verb.as_str(), "ExecutePlan" | "PreviewPlan")
+                    || record.fingerprint != event.occt_fingerprint
+                    || event.name.is_empty()
+                    || event.prefix_hash.is_empty()
+                {
+                    return;
+                }
                 record.op_id = Some(event.name.clone());
                 record.step_index = Some(event.step_index);
                 record.op_position = Some(event.op_position);
@@ -312,7 +439,13 @@ impl JournalWriter {
                 ));
             }
             JournalKind::JobEnd => {
-                state.jobs.remove(&self.instance);
+                if state.jobs.get(&identity).is_some_and(|record| {
+                    record.verb == event.name
+                        && record.fingerprint == event.occt_fingerprint
+                        && record.kind == JobKind::for_verb(&event.name)
+                }) {
+                    state.jobs.remove(&identity);
+                }
             }
         }
         journal.persist_inflight(&state);

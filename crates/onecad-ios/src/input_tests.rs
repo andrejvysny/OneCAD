@@ -77,6 +77,27 @@ fn finger_author(input: &mut Input, contact: u64) {
 }
 
 #[test]
+fn focus_loss_clears_modifiers_but_contact_cancellation_preserves_them() {
+    let mut input = Input::default();
+    let key = ffi::KeyEvent {
+        modifiers: ffi::MOD_SHIFT | ffi::MOD_COMMAND,
+        ..Default::default()
+    };
+    input.key(&key);
+    input.focus_lost();
+    assert_eq!(input.modifiers, egui::Modifiers::NONE);
+    input.insert_text("\n");
+    input.insert_text("\t");
+    assert!(input.drain().events.iter().all(|event| match event {
+        Event::Key { modifiers, .. } => *modifiers == egui::Modifiers::NONE,
+        _ => true,
+    }));
+    input.key(&key);
+    input.cancel_all(CancelReason::DocumentSwitch);
+    assert!(input.modifiers.shift && input.modifiers.command);
+}
+
+#[test]
 fn coalesced_samples_replay_in_order_without_the_actual_duplicate_or_predictions() {
     let mut input = Input::default();
     submit(&mut input, &[actual(7, ffi::PHASE_BEGAN, 1.0, 5.0)], 0);

@@ -516,12 +516,24 @@ did before it mirrored them): absent `inflight` reads as `null`, absent
                 "ageMs": 12034, "sinceProgressMs": 340 } }      //   | null
 ```
 
+- `inflightJobs` (additive): an array of **0..=2** currently executing jobs,
+  one kernel job and one solver job at most. Each record has `kind` (`"kernel"`
+  or `"solver"`), `verb`, unique OCW1 request `id`, optional plan `jobId`, `ageMs`
+  and `sinceProgressMs` with the same clock semantics as `inflight`. Records
+  have distinct IDs and kinds. Status probes are excluded. Readers reject
+  oversized/malformed arrays; absence means use the legacy `inflight` view.
+  Idle is `[]`. The legacy `inflight` is unchanged and remains kernel-only, so
+  older readers keep working without an OCW1/ABI version bump. Both views are
+  captured from the same active-job snapshot. Queue admission is tracked by
+  the in-process crash journal independently of active-job clocks.
+
 - `inflight` (additive, WP-H): the KERNEL-lane job being executed when the probe
   was answered, or `null`. `ageMs` is measured from the moment the job was
   dequeued; `sinceProgressMs` from the last NON-terminal frame that job emitted
   (`progress`, `event` or `chunk`) and equals `ageMs` while it has emitted none.
-  Solver-lane jobs (§7.4) are never reported here — they have their own 250 ms
-  Rust timeout. The status thread reads only the session's scalar head
+  Solver jobs remain excluded from this legacy field. `SolveDrag` retains its
+  separate 250 ms interaction timeout; ordinary Upsert/Regions are supervised
+  as described below. The status thread reads only the session's scalar head
   (`documentRevision`, `workerEpoch`, `snapshotId`, `historyPrefixHash`,
   `hasScratch`, `hasRestoredBase`) under the session mutex and the dispatcher's
   own bookkeeping; it never touches a shape. `hasRestoredBase` (additive, WP-H)
@@ -4413,6 +4425,53 @@ advertise it (an old worker answers an unknown verb with `PROTOCOL_ERROR`).
 - **Lane.** Kernel lane, single-writer with `ExecutePlan`. A replay holds the lane
   for the length of the plan, so the wedge deadline is `ExecutePlan`'s (§8).
 
+##### Read-only edit operand context
+
+Workers advertising `editOperandContext` additionally accept optional
+`PreviewPlan.args.editOperandContext`: one fully lowered feature operation
+(`opId`, `opType`, `inputs`, `params`). Rust supplies the authoritative effective
+prefix strictly before that feature. The queried `opId` MUST NOT appear in
+`ops`. This mode never executes the queried operation, prepares a document
+change, publishes, mints persistent document identity, or produces meshes.
+Its snapshot/epoch fences, streamed prefix steps, cancellation and crash
+supervision are identical to ordinary `PreviewPlan`. The original feature and
+its downstream operations are excluded. `editedFrom` is omitted.
+
+The query contains at most **64 input refs**, including body refs. Both clients
+and workers reject a larger query before replay; no truncation is permitted.
+The numeric edit/commit contract is unchanged for larger operations. This is a
+new context-query cap, not a limit on normal operation inputs.
+
+The response retains `planPreviewed`, `snapshotId`, the complete prefix body set
+and per-step results; `meshes` is empty. Additional `editOperandContext` contains:
+
+- `eligibleBodies`: unique visible, healthy modeling bodies present in prefix
+  scratch, excluding the edited feature's new output and every downstream body.
+- `inputs`: exactly one entry per queried input, in request order. Every entry
+  echoes `inputIndex`, `bodyId`, `elementId`, `kind`. A resolved face/edge entry
+  provides finite `point`, unit `direction`, optional unit `tangent`, and
+  `classification` using the existing `ClassifyElement` analytic frame vocabulary.
+  A resolved body entry instead provides `bounds: {min: [x,y,z], max: [x,y,z]}`:
+  finite, ordered B-rep bounds, with no fabricated point, direction or analytic
+  classification. UI derives centers and corners from these prefix bounds.
+  An unsupported, absent or ambiguous operand provides a nonempty `refusal` reason.
+
+Resolution uses the same target-ownership checks, tracked binding and descriptor
+ladder as operation execution, against private prefix scratch. Any identity
+materialized while resolving the query exists only in that discarded scratch.
+Faces are sampled inside their trimmed analytic domain with body orientation;
+edge directions use local adjacent-face evidence. No final-head query, ordinal
+fallback, body-center substitution or normalization of a cancelled whole-face
+normal sum is allowed. Cylinder frames retain axis, radius and measured
+material-side `sidedness` (`pin`/`hole`).
+
+Callers verify complete prefix execution, exact input order/identity, bounded
+cardinality, finite geometry and the full document/runtime/head fence before
+exposing context. Missing capability means context unavailable, while the
+existing unsupported-preview Apply fallback remains unchanged. A separate
+latest-only read task per runtime is cancelled on replacement, publication,
+restart or edit-session abandonment; scalar draft previews do not replace it.
+
 #### Tessellate
 Produces MESH1 meshes; large meshes stream on the bulk lane
 ([§5.2](#52-chunked-bulk-streams)). `mesh_format.md` defines MESH1.
@@ -5556,7 +5615,18 @@ where an unknown value is ignorable.
   restart. Since kernel-hardening WP-H (2026-09-05) the ping is answered from
   the worker's status thread, so a missed ping means the PROCESS is unresponsive,
   not that an op is long.
-- **Wedged op** (WP-H): Rust reads `GetWorkerHead.inflight` on every ping and
+- **Ordinary solver deadline**: `SketchUpsert` and `SketchRegions` use the
+  shared host's configurable default deadline (30 s production), measured from
+  host dispatch and including protocol write/mailbox wait. The host signals only
+  the current generation and connection's supervisor on expiry. The command's
+  completion is unknown, not rejected; no automatic retry is allowed. Healthy
+  status pings do not override an overdue active solver or this host deadline.
+  Late terminal responses cannot publish into a replacement generation. A
+  completed request is excluded from wedge decisions even when a status snapshot
+  was taken immediately before its terminal write. In-process force-stop uses
+  the existing bounded abandon-once/relaunch-required policy.
+
+- **Wedged op** (WP-H): Rust reads `GetWorkerHead.inflightJobs` (legacy `inflight` fallback) on every ping and
   `SIGKILL`s + restarts when `sinceProgressMs` exceeds the verb's wall deadline —
   `ExecutePlan` and `PreviewPlan` **180 s**, `Tessellate` and the `Export*` writers **60 s**, every
   other kernel-lane verb **30 s** — measured since the job's last progress /

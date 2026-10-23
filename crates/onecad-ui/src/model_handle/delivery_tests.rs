@@ -363,3 +363,6 @@ async fn native_boolean_viewport_controls_own_click_and_only_author_options() {
     }
     host.stop().await;
 }
+
+#[path = "history_regressions.rs"]
+mod history_regressions;

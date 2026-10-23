@@ -40,8 +40,6 @@ jobs:
         run: cargo clippy -p onecad-render -p onecad-ui -p onecad-widgets --all-targets -- -D warnings
       - name: CPU renderer and scene tests
         run: cargo test -p onecad-render -p onecad-scene -p onecad-protocol
-      - name: Native host and interaction unit tests
-        run: cargo test -p onecad-ui -p onecad-interaction -p onecad-widgets --lib
       - name: Require real Metal acceptance
         env:
           ONECAD_RENDER_CAPTURE_DIR: ${{ runner.temp }}/onecad-render-quality-smoke
@@ -109,6 +107,9 @@ jobs:
         run: |
           rustup target add wasm32-unknown-unknown
           scripts/build-addons.sh
+      # Includes the nonignored sketch-repair regression: production worker is required.
+      - name: Native host and interaction unit tests
+        run: cargo test -p onecad-ui -p onecad-interaction -p onecad-widgets --lib
       - name: Gate verifier regressions
         run: cargo test -p xtask evidence::tests
       - name: Require all native lifecycle tests and missing-worker rejection

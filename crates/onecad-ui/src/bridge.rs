@@ -24,9 +24,9 @@ pub struct Display {
     pub profile_anchors: Vec<crate::profile_capture::Anchor>,
     pub profile_failures: Vec<crate::profile_capture::Failure>,
     pub prepared: Mutex<Option<onecad_render::PreparedScene>>,
-    pub _lease: Arc<crate::budget::Lease>,
     pub records: Vec<OperationRecord>,
     pub render_receipt: Option<crate::render_receipt::RenderReceipt>,
+    pub _lease: Arc<crate::budget::Lease>,
 }
 
 #[derive(Debug)]
@@ -55,7 +55,7 @@ pub enum Command {
     /// Re-prepares an already-captured scene for upload, keeping its identity, so
     /// a document switched back into the viewport is drawn without a new capture
     /// (a new identity would reset the document's active tool and selection).
-    Prepare(Arc<SceneSnapshot>),
+    Prepare(crate::viewport_updates::Source),
     /// The steps since the last save, for the close prompt.
     DescribeChanges,
 }
@@ -82,8 +82,8 @@ pub enum Candidate {
 pub struct CandidateDelivery {
     pub action: Action,
     pub prepared: Option<onecad_render::PreparedScene>,
-    pub lease: Option<crate::budget::Lease>,
     pub scene: Option<Arc<SceneSnapshot>>,
+    pub lease: Option<Arc<crate::budget::Lease>>,
 }
 
 pub enum Message {
@@ -158,9 +158,8 @@ pub struct Shared {
     pub valid: std::sync::atomic::AtomicBool,
     pub stopping: std::sync::atomic::AtomicBool,
     pub shutdown: Notify,
-    pub recovery_flush: Notify,
-    /// Recovery flushes this actor has finished (a host awaits one after asking).
-    pub recovery_flushes: std::sync::atomic::AtomicU64,
+    pub recovery_flush: Arc<Notify>,
+    pub(crate) recovery_requests: Arc<Mutex<Vec<crate::recovery_flush::Ticket>>>,
     pub budget: Mutex<onecad_render::PreparationBudget>,
     /// The last preparation's geometry, reused by the next one. Shared so a window can
     /// count and drop a parked document's cache (`display_budget`); a preparation moves
@@ -175,7 +174,19 @@ pub struct Shared {
 }
 
 impl Shared {
+    #[cfg(test)]
     pub(crate) fn new(context: egui::Context, budget: onecad_render::PreparationBudget) -> Self {
+        Self::with_host_budget(
+            context,
+            budget,
+            Arc::new(crate::budget::HostBudget::default()),
+        )
+    }
+    fn with_host_budget(
+        context: egui::Context,
+        budget: onecad_render::PreparationBudget,
+        host_budget: Arc<crate::budget::HostBudget>,
+    ) -> Self {
         Self {
             input_trace: crate::input_trace::Trace::from_environment(&context),
             #[cfg(feature = "semantic-probe")]
@@ -202,13 +213,13 @@ impl Shared {
             render_receipt: Mutex::new(None),
             budget: Mutex::new(budget),
             preparation_cache: Mutex::new(Default::default()),
-            host_budget: Arc::new(crate::budget::HostBudget::default()),
+            host_budget,
             host: std::sync::atomic::AtomicU64::new(0),
             valid: std::sync::atomic::AtomicBool::new(false),
             stopping: std::sync::atomic::AtomicBool::new(false),
             shutdown: Notify::new(),
-            recovery_flush: Notify::new(),
-            recovery_flushes: std::sync::atomic::AtomicU64::new(0),
+            recovery_flush: Arc::new(Notify::new()),
+            recovery_requests: Arc::new(Mutex::new(Vec::new())),
             generation: std::sync::atomic::AtomicU64::new(0),
             notify: Notify::new(),
             context,
@@ -268,6 +279,7 @@ impl Shared {
                 *failure = Some(message);
             }
         });
+        self.host_budget.wake();
         self.wake();
     }
     pub fn accept_display(&self, display: &Display) -> bool {
@@ -331,7 +343,11 @@ impl Bridge {
         let (commands, receiver) = async_mpsc::channel(ADMISSION);
         let (gestures, gesture_receiver) = async_mpsc::channel(crate::gesture_services::CAPACITY);
         let (sender, messages) = mpsc::channel();
-        let shared = Arc::new(Shared::new(context, budget));
+        let shared = Arc::new(Shared::with_host_budget(
+            context,
+            budget,
+            runtime.budget().owner()?,
+        ));
         runtime.spawn_actor(actor(
             paths,
             dialogs,
@@ -406,6 +422,7 @@ impl Bridge {
         if let Ok(mut slot) = self.shared.candidate.lock() {
             *slot = Some((generation, candidate));
         }
+        self.shared.host_budget.wake();
         self.shared.notify.notify_one();
     }
 
@@ -413,6 +430,7 @@ impl Bridge {
         self.shared
             .stopping
             .store(true, std::sync::atomic::Ordering::Release);
+        self.shared.host_budget.close();
         self.shared.shutdown.notify_one();
     }
     pub fn request_discard_shutdown(&self, runtime_session: &str) {
@@ -443,6 +461,7 @@ impl Bridge {
         if let Ok(mut slot) = self.shared.candidate_result.lock() {
             *slot = None;
         }
+        self.shared.host_budget.wake();
     }
 
     pub fn take_display(&self) -> Option<Arc<Display>> {
@@ -524,7 +543,6 @@ pub(crate) struct Backend {
     pub startup_opened: bool,
     pub scene_revision: u64,
     pub previous_scene: Option<(Arc<SceneSnapshot>, Arc<crate::budget::Lease>)>,
-    pub preparation_lease: Option<Arc<crate::budget::Lease>>,
 }
 
 async fn actor(
@@ -568,6 +586,8 @@ async fn actor(
             runtime: tokio::runtime::Handle::current(),
         });
     }
+    let (recovery_stop, recovery_task) =
+        crate::recovery_flush::spawn(state.clone(), host.clone(), shared.clone());
     let mut backend = Backend {
         state,
         host,
@@ -577,7 +597,6 @@ async fn actor(
         startup_opened: false,
         scene_revision: 0,
         previous_scene: None,
-        preparation_lease: None,
     };
     let mut gestures = crate::gesture_services::Service::new();
     loop {
@@ -593,17 +612,6 @@ async fn actor(
                     shared.input_trace.record("service.gesture_finished", serde_json::Value::Null);
                     shared.wake();
                 }
-            }
-            _=shared.recovery_flush.notified()=>{
-                if let Some(root) = onecad_app::autosave::autosave_root(&backend.host)
-                    && let Some(event) = onecad_app::autosave::autosave_current_reporting(
-                        &backend.state.runtime, &root, &backend.state.persistence,
-                    ).await
-                    && let Some(error) = event.error
-                {
-                    eprintln!("Viewport recovery checkpoint failed: {error}");
-                }
-                shared.recovery_flushes.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             }
             envelope = receiver.recv() => {
                 let Some(envelope) = envelope else { break; };
@@ -635,6 +643,12 @@ async fn actor(
             }
         }
     }
+    shared
+        .stopping
+        .store(true, std::sync::atomic::Ordering::Release);
+    shared.host_budget.close();
+    let _ = recovery_stop.send(());
+    let _ = recovery_task.await;
     gestures.shutdown().await;
     gesture_receiver.close();
     receiver.close();

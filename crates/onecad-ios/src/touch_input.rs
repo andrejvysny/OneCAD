@@ -17,6 +17,10 @@ impl IosApp {
         samples: &[TouchSample],
         generation: u64,
     ) -> Outcome<bool> {
+        if let Some(editor) = &self.editor {
+            self.input
+                .set_prediction_context(editor.presentation_context(&self.ctx));
+        }
         let ctx = &self.ctx;
         let over_control = |point: Point| {
             onecad_ui::host::over_control(ctx, egui::pos2(point.x as f32, point.y as f32))
@@ -50,13 +54,32 @@ impl IosApp {
             last_pencil,
             center: self.canvas_center(),
         };
-        match accessory_action(event, &anchors)? {
-            AccessoryAction::Nothing | AccessoryAction::SystemShortcut => {}
-            action => {
-                self.accessory = Some(action);
-                self.ctx.request_repaint();
-            }
+        let action = capability_action(
+            event,
+            &anchors,
+            self.capabilities_published.then_some(&self.capabilities),
+        )?;
+        if event.phase == ffi::PHASE_CANCELLED {
+            self.accessory.clear();
         }
+        if let Some(editor) = &self.editor {
+            self.accessory.submit(
+                event,
+                action,
+                editor.presentation_context(&self.ctx),
+                self.input.contact_context(),
+            );
+            self.ctx.request_repaint();
+        }
+        Ok(())
+    }
+
+    pub(crate) fn set_capabilities(&mut self, caps: ffi::Capabilities) -> Outcome {
+        validate_capabilities(&caps)?;
+        self.capabilities = caps;
+        self.capabilities_published = true;
+        self.accessory.clear();
+        self.ctx.request_repaint();
         Ok(())
     }
 
@@ -72,19 +95,61 @@ impl IosApp {
 
     /// Applies the queued accessory action before the frame's editor pass.
     pub(crate) fn apply_accessory(&mut self) {
-        let (Some(action), Some(editor)) = (self.accessory.take(), self.editor.as_mut()) else {
+        if !self.opens.is_empty() {
+            self.accessory.clear();
+            return;
+        }
+        let Some(editor) = self.editor.as_mut() else {
             return;
         };
-        match action {
-            AccessoryAction::TogglePreviousTool => {
-                editor.toggle_previous_sketch_tool();
-            }
+        let context = editor.presentation_context(&self.ctx);
+        let Some(action) = self.accessory.take(&context, self.input.contact_context()) else {
+            return;
+        };
+        let changed = match action {
+            AccessoryAction::TogglePreviousTool => editor.toggle_previous_sketch_tool(),
             AccessoryAction::OpenPalette(at) => {
-                editor.open_tool_palette(egui::pos2(at.x as f32, at.y as f32));
+                editor.open_tool_palette(egui::pos2(at.x as f32, at.y as f32))
             }
-            AccessoryAction::Nothing | AccessoryAction::SystemShortcut => {}
+            AccessoryAction::Nothing | AccessoryAction::SystemShortcut => false,
+        };
+        if let Some(request) = crate::pencil_accessory::feedback(changed, self.capabilities.flags) {
+            self.host.push(request, None);
         }
     }
+}
+
+fn validate_capabilities(caps: &ffi::Capabilities) -> Outcome {
+    if caps.flags & !0xff != 0
+        || caps.prefers_pencil_only_drawing > 1
+        || Preference::from_abi(caps.preferred_tap_action).is_none()
+        || Preference::from_abi(caps.preferred_squeeze_action).is_none()
+    {
+        return Err(Failure::new(Status::InvalidArgument, "pencil capabilities"));
+    }
+    Ok(())
+}
+
+fn capability_action(
+    event: &ffi::PencilEvent,
+    anchors: &Anchors,
+    caps: Option<&ffi::Capabilities>,
+) -> Outcome<AccessoryAction> {
+    // Validate the event even when a published preference supersedes its fallback.
+    accessory_action(event, anchors)?;
+    let Some(caps) = caps else {
+        return accessory_action(event, anchors);
+    };
+    let mut event = *event;
+    let (flag, preference) = match event.action {
+        0 => (ffi::CAP_BARREL_TAP, caps.preferred_tap_action),
+        _ => (ffi::CAP_SQUEEZE, caps.preferred_squeeze_action),
+    };
+    if caps.flags & flag == 0 {
+        return Ok(AccessoryAction::Nothing);
+    }
+    event.preferred = preference;
+    accessory_action(&event, anchors)
 }
 
 /// Where a palette may open, besides the event's own hover location.
@@ -98,6 +163,23 @@ struct Anchors {
 /// The accessory policy for one event; `ERR_INVALID_ARGUMENT` for values the
 /// header does not define.
 fn accessory_action(event: &ffi::PencilEvent, anchors: &Anchors) -> Outcome<AccessoryAction> {
+    if !event.timestamp_s.is_finite() || event.timestamp_s < 0.0 || event.present & !0x5e != 0 {
+        return Err(Failure::new(
+            Status::InvalidArgument,
+            "pencil timestamp or pose flags",
+        ));
+    }
+    for (flag, values) in [
+        (ffi::HAS_LOCATION, &[event.x_pt, event.y_pt][..]),
+        (1 << 1, &[event.altitude_rad][..]),
+        (1 << 2, &[event.azimuth_rad][..]),
+        (1 << 3, &[event.roll_rad][..]),
+        (1 << 4, &[event.hover_z][..]),
+    ] {
+        if event.present & flag != 0 && values.iter().any(|value| !value.is_finite()) {
+            return Err(Failure::new(Status::InvalidArgument, "pencil pose"));
+        }
+    }
     let invalid = |what: &str| Failure::new(Status::InvalidArgument, what.to_owned());
     let kind = AccessoryEvent::from_abi(event.action).ok_or_else(|| invalid("pencil action"))?;
     let preference =
@@ -153,6 +235,77 @@ mod tests {
             last_pencil,
             center: Point::new(400.0, 300.0),
         }
+    }
+
+    #[test]
+    fn published_preferences_override_event_and_unavailable_actions_are_suppressed() {
+        let event = event(BARREL, SWITCH_PREVIOUS, ffi::PHASE_ENDED, false);
+        let anchors = anchors(false, None);
+        assert_eq!(
+            capability_action(&event, &anchors, None).unwrap(),
+            AccessoryAction::TogglePreviousTool
+        );
+        let mut caps = ffi::Capabilities {
+            flags: ffi::CAP_BARREL_TAP,
+            preferred_tap_action: 0,
+            preferred_squeeze_action: CONTEXTUAL_PALETTE,
+            ..Default::default()
+        };
+        assert_eq!(
+            capability_action(&event, &anchors, Some(&caps)).unwrap(),
+            AccessoryAction::Nothing
+        );
+        caps.preferred_tap_action = CONTEXTUAL_PALETTE;
+        assert_eq!(
+            capability_action(&event, &anchors, Some(&caps)).unwrap(),
+            AccessoryAction::OpenPalette(anchors.center)
+        );
+        caps.flags = 0;
+        assert_eq!(
+            capability_action(&event, &anchors, Some(&caps)).unwrap(),
+            AccessoryAction::Nothing
+        );
+        let squeeze = event_for_squeeze();
+        caps.flags = ffi::CAP_SQUEEZE;
+        assert_eq!(
+            capability_action(&squeeze, &anchors, Some(&caps)).unwrap(),
+            AccessoryAction::OpenPalette(anchors.center)
+        );
+        assert_eq!(
+            caps.flags & ffi::CAP_HAPTICS,
+            0,
+            "no pressure/hover/haptics fabricated"
+        );
+    }
+
+    fn event_for_squeeze() -> ffi::PencilEvent {
+        event(SQUEEZE, 0, ffi::PHASE_ENDED, false)
+    }
+
+    #[test]
+    fn invalid_capabilities_and_superseded_event_enums_are_refused() {
+        for changed in 0..4 {
+            let mut caps = ffi::Capabilities::default();
+            match changed {
+                0 => caps.flags = 1 << 31,
+                1 => caps.preferred_tap_action = 7,
+                2 => caps.preferred_squeeze_action = 7,
+                _ => caps.prefers_pencil_only_drawing = 2,
+            }
+            assert!(validate_capabilities(&caps).is_err());
+        }
+        let mut event = event(BARREL, 99, ffi::PHASE_ENDED, false);
+        assert!(
+            capability_action(
+                &event,
+                &anchors(false, None),
+                Some(&ffi::Capabilities::default())
+            )
+            .is_err()
+        );
+        event.preferred = 0;
+        event.timestamp_s = f64::NAN;
+        assert!(accessory_action(&event, &anchors(false, None)).is_err());
     }
 
     fn palette(event: &ffi::PencilEvent, anchors: &Anchors) -> Point {

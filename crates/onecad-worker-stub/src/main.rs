@@ -581,6 +581,14 @@ fn status_loop(core: &Mutex<StubCore>, inflight: &InflightCell, rx: &Receiver<Re
                 // field is mirrored so its ABSENCE is never what a Rust reader is
                 // being tested against.
                 has_restored_base: false,
+                inflight_jobs: snapshot
+                    .clone()
+                    .into_iter()
+                    .map(|job| onecad_protocol::messages::inflight::TrackedJob {
+                        kind: onecad_protocol::messages::inflight::JobKind::Kernel,
+                        job,
+                    })
+                    .collect(),
                 inflight: snapshot,
             },
         );

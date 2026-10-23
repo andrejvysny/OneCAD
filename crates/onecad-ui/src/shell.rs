@@ -23,6 +23,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         chrome
     };
     bars::title(app, ui);
+    crate::host::refresh_text_scope(app, &ctx);
     app.doc.diagnostics.observe(&app.doc.status);
     app.doc.diagnostics.show(&ctx);
     crate::document_items::show(app, &ctx);

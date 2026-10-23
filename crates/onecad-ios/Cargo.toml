@@ -11,7 +11,6 @@ crate-type = ["staticlib", "rlib"]
 [features]
 # Acceptance-only replay, semantic queries and fault injection (onecad_ios_test.h).
 test-hooks = [
-    "dep:serde_json",
     "dep:sha2",
     "dep:onecad-core",
     "dep:onecad-protocol",
@@ -24,6 +23,7 @@ test-hooks = [
 onecad-ui = { path = "../onecad-ui", default-features = false }
 onecad-app = { workspace = true, features = ["embedded-kernel"] }
 onecad-interaction = { workspace = true }
+onecad-widgets = { path = "../onecad-widgets" }
 onecad-render = { workspace = true }
 egui = "=0.37.0"
 egui-wgpu = { version = "=0.37.0", default-features = false }
@@ -32,7 +32,7 @@ pollster = "0.4"
 tokio = { workspace = true, features = ["sync"] }
 async-trait = { workspace = true }
 tracing = { workspace = true }
-serde_json = { workspace = true, optional = true }
+serde_json = { workspace = true }
 sha2 = { workspace = true, optional = true }
 onecad-core = { workspace = true, optional = true }
 onecad-protocol = { workspace = true, optional = true }

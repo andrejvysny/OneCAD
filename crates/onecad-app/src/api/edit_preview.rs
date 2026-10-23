@@ -99,7 +99,10 @@ fn stale() -> ApiError {
     ApiError::StalePreview("edit preview belongs to an obsolete document head".into())
 }
 
-async fn ensure_context(state: &AppState, fence: &PreviewContext) -> Result<(), ApiError> {
+pub(super) async fn ensure_context(
+    state: &AppState,
+    fence: &PreviewContext,
+) -> Result<(), ApiError> {
     if preview_context(state).await? == *fence {
         Ok(())
     } else {
@@ -108,7 +111,10 @@ async fn ensure_context(state: &AppState, fence: &PreviewContext) -> Result<(), 
 }
 
 /// The runtime-local half of the fence; no worker IO, safe under the lock.
-fn ensure_runtime_fence(runtime: &DocumentRuntime, fence: &PreviewContext) -> Result<(), ApiError> {
+pub(super) fn ensure_runtime_fence(
+    runtime: &DocumentRuntime,
+    fence: &PreviewContext,
+) -> Result<(), ApiError> {
     let (revision, epoch) = runtime.fencing().get();
     if runtime.matches_runtime_session(&fence.runtime_session)
         && revision == fence.revision

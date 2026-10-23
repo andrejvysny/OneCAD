@@ -141,12 +141,32 @@ activation).
 |---|---|---|
 | Renderer allowance (active document, incl. replacement overlap) | 512 MiB | 448 MiB |
 | Parked tabs' caches | 64 MiB (advisory, not enforced) | 64 MiB |
-| Aggregate | 576 MiB (advisory) | 512 MiB |
+| Renderer + parked-cache allowance (partial ledger) | 576 MiB (advisory) | 512 MiB |
 
-The renderer's total (GPU + CPU staging) cap stays 768 MiB and each document's
-CPU handoff budget (`onecad-ui` `budget.rs`) stays 768 MiB; those are not part
-of this aggregate. These are estimates of payload bytes, not measured device
-memory.
+The renderer's total (GPU + CPU staging) cap stays 768 MiB. CPU handoff
+admission (`onecad-ui` `budget.rs`) has one separate 768 MiB authority per shared
+`ServiceRuntime`/window, with per-document owners. Mobile new admission by inactive
+owners must also fit within 576 MiB, preserving 192 MiB of active-work headroom;
+existing leases are never revoked when the active tab changes or Home is shown.
+Capture, re-preparation and preview wait at most 3 seconds in a bounded FIFO
+(24 tickets: eight documents, three work kinds). The oldest eligible ticket wins;
+an ineligible inactive ticket does not block active work, and synchronous contour
+or highlight work cannot jump an eligible ticket. Cancellation removes waiting
+tickets without releasing memory still owned by an executing job. A refusal does
+not retry an accepted CAD operation. A degraded ledger refuses new admission
+while known allocations can still retire.
+
+Display/preview admission remains atomic at 160/192 MiB, then splits into source
+portions of 96/128 MiB and preparation portions of 64 MiB. Source geometry,
+preparation/cache metadata and uploaded CPU highlight metadata retain the portions
+that cover their allocations; shared geometry keeps its original guards. Uploaded
+mesh bodies retain source guards without retaining the CPU preparation arrays.
+The reservation snapshot counts unique portions once, including retired work
+that still owns them; it does not equate reserved bytes with RSS. These CPU
+reservations are separate from the table's renderer/parked-cache allowance. The
+current display ledger is partial, omitting several source, closing-owner and
+native drawable estimates; neither 512 MiB nor 768 MiB is a measured process
+memory bound.
 
 ## Input mapping
 
@@ -266,13 +286,23 @@ replaced behind the app (iCloud, third-party providers, revoked bookmarks).
 
 | Path | Behaviour |
 |---|---|
-| In: Open, Import, Insert STEP pickers | `UIDocumentPickerViewController(forOpeningContentTypes:asCopy: true)`; the picked files are copied into `Documents/Inbox` (`DocumentInbox.importCopies`, off the main thread) and only sandbox paths reach Rust. A failed copy shows `onecad.import.failed`; Cancel completes the request empty and the editor reports `File action cancelled`. |
-| In: Files "Open in" | The system copies the file into `Documents/Inbox`; one that arrives elsewhere is copied there. Then `onecad_ios_open_path`. |
+| In: Open, Import, Insert STEP pickers | `UIDocumentPickerViewController(forOpeningContentTypes:asCopy: true)`; the picked files are copied into editable `Documents/Imported` (`DocumentInbox.importCopies`, off the main thread) and only sandbox paths reach Rust. A failed copy shows `onecad.import.failed`; Cancel completes the request empty and the editor reports `File action cancelled`. |
+| In: Files "Open in" | The system may copy the file into `Documents/Inbox`; every incoming source is copied under coordination into `Documents/Imported` before `onecad_ios_open_path`. |
 | Security scope | `SecurityScope.withAccess` starts the source URL's security-scoped access, runs the whole coordinated read (`NSFileCoordinator`, `.withoutChanges`) and copy synchronously inside it, and stops it when that returns or throws; an ungranted scope is never stopped. Each URL of a batch gets its own scope. |
 | Save / Save As | The native name prompt answers `SAVE_DOCUMENT` with `Documents/<name>.onecad`. The container writer creates an exclusive same-directory temp file, writes and `fsync`s it, renames it over the target and `fsync`s the directory (`onecad-core` `ContainerWriter::save_inner`, `OwnedTempFile`); a failure removes the temp and leaves the previous file untouched, the document dirty and bound to its previous path. |
 | Out: Export STEP, Send a Copy | Rust writes (STEP) or names (saved `.onecad`) a sandbox file and queues `EXPORT_FILE`; the host presents `UIDocumentPickerViewController(forExporting:asCopy: true)`, which performs the coordinated write at the destination. The document keeps its sandbox path. A save that runs meanwhile replaces the source only by rename, so the picker reads one complete container. |
-| Recovery | `DID_ENTER_BACKGROUND` flushes every open document's autosave (the host holds a 5 s background task); `WILL_TERMINATE` and `destroy` await it. A dirty document closed by shutdown keeps its recovery files; the next launch offers them (Recover unsaved work: Restore, Open saved, Discard recovery). A process killed after the flush is offered the flushed revision; edits after it are lost. |
+| Recovery | `DID_ENTER_BACKGROUND` requests every open document's autosave and holds a generation-scoped background task until completion, expiry or cancellation; `WILL_TERMINATE` and `destroy` await shutdown flushing. A dirty document closed by shutdown keeps its recovery files; the next launch offers them (Recover unsaved work: Restore, Open saved, Discard recovery). A process killed after a successful flush is offered the flushed revision; edits after it are lost. |
 | Tabs | One `UIScene`, at most three document kernels (KERNEL.md run cap). Each tab keeps its own document host, history, selection, camera and dirty state; the strip ignores a tab tap while the active document is busy (file action, command, decision), so a save or import finishes in the document that started it. |
+
+Incoming sources remain intact. Copies are synchronized before non-overwriting
+publication; repeated identical imports reuse a copy, while edited-name collisions
+receive a numbered filename. Legacy native recent/recovery paths under Inbox
+migrate lazily to `Documents/Imported/Inbox`; a pre-existing working copy must
+match the native document UUID and is never overwritten. Restore still loads the
+accepted recovery checkpoint, independently of the saved working file. The live
+runtime claims both migrated path and source alias until replacement/close, so
+another path cannot create a second writer for the same document identity.
+Recents adopt the migrated path only after a successful open or recovery.
 
 Physical-only (ONECAD-469; the simulator offers only local storage): iCloud
 Drive download/eviction, third-party File Provider extensions, a provider
@@ -284,12 +314,31 @@ real provider URLs.
 | Event | Effect |
 |---|---|
 | `WILL_RESIGN_ACTIVE` | cancel contacts, `WindowFocused(false)`, unfocused frames |
-| `DID_ENTER_BACKGROUND` | as above, request an autosave flush for every open document (not awaited; a document whose actor waits on an open picker flushes after it), release the renderer's targets (fence the last frame, wait at most 1 s for the GPU, then zero-size targets; geometry, camera and document state stay), refuse frames and input. Logged as `lifecycle: background released render targets` with `released` |
+| `DID_ENTER_BACKGROUND` | as above, request generation/document-scoped recovery for every open document on an independent service future, including while its command actor awaits a native dialog, release the renderer's targets (fence the last frame, wait at most 1 s for the GPU, then zero-size targets; geometry, camera and document state stay), refuse frames and input. Logged as `lifecycle: background released render targets` with `released` |
 | `WILL_ENTER_FOREGROUND` | frames allowed (inactive); the first frame recreates the targets at the current size from the retained scene (same scene identity, no re-upload) |
 | `DID_BECOME_ACTIVE` | `WindowFocused(true)`, focused frames |
 | `MEMORY_WARNING` | in the background, first retry a target release the busy GPU refused on `DID_ENTER_BACKGROUND`; release every parked tab's thumbnail, unuploaded prepared scene and preparation cache (`released_bytes` is what went, measured before and after); then, when the active document's resident display memory plus one same-size target set exceeds the renderer allowance, lower the scene scale ceiling one 0.125 step (not below 0.5) for the rest of the session. Accepted in every phase. Logged as `lifecycle: memory warning released display caches` |
 | `WILL_TERMINATE` | cancel contacts, close the request queue (cancelling dialogs), await the autosave flush of every open document, stop the document hosts (flush and stop share 3 s); then frames, input, `a11y_activate`, `open_path` and lifecycle events other than `MEMORY_WARNING` return `ERR_STATE` |
 | `TRAIT_DARK` / `TRAIT_LIGHT` | `system_theme` (used when Appearance is System) |
+
+`onecad_ios_recovery_snapshot` reports a background generation and JSON results
+attributed by document UUID/runtime session. Outcomes distinguish pending,
+written, skipped, failed, expired and cancelled. UIKit polls this ABI independently
+of frames and ends only the matching background task after completion, system
+expiry, foreground cancellation or an ABI failure. A timer tick is never evidence
+of durable success. `onecad_ios_recovery_finish_waiting` fences its generation;
+a late admitted write finishes under the existing persistence lane and retains
+its actual durable outcome without changing an expired/cancelled terminal result.
+Stopping the service cancels queued requests and persistence-lane waits; once a
+transaction is admitted, shutdown continues awaiting its complete disk transaction.
+
+Autosave snapshots are captured after persistence-lane admission, independently
+of transient UI drafts. Prior checkpoint/container markers are hard-linked to
+owned sibling backups until both durable replacements succeed. A failed write
+restores the prior pair. Rollback errors report retained backup paths; 16 retained
+backup files stop additional checkpoints until reconciled. Unsupported hard links
+fail before changing prior data. Backups from failed rollback are never cleaned
+as stale scratch files.
 
 `destroy` runs the terminate sequence (unless `WILL_TERMINATE` already did),
 closes the wake gate and the request queue, drops the editor, releases the

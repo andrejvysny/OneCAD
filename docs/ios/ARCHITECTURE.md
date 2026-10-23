@@ -90,6 +90,8 @@ services as macOS.
 
 ## C ABI (`crates/onecad-ios/include/onecad_ios.h`)
 
+- ABI v2 adds generation/document-scoped background recovery completion and
+  expiry/cancellation calls.
 - `ONECAD_IOS_ABI_VERSION` is bumped on any signature or struct change; every
   struct starts with `uint32_t struct_size` and older/smaller structs are
   rejected.

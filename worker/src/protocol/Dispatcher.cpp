@@ -1,5 +1,6 @@
 #include "protocol/Dispatcher.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <sys/socket.h>
@@ -12,6 +13,7 @@
 #include "protocol/Frame.h"
 #include "util/LaneThread.h"
 #include "util/Log.h"
+#include "util/TestHooks.h"
 
 namespace onecad::protocol {
 
@@ -100,7 +102,7 @@ void Dispatcher::set_stamp_source(std::function<Stamp()> source) {
     stamp_source_ = std::move(source);
 }
 
-void Dispatcher::inflight_begin(const Job& job) {
+bool Dispatcher::inflight_begin(const Job& job, bool solver) {
     InflightRecord rec;
     rec.verb = job.env.verb;
     rec.id = job.env.id;
@@ -113,38 +115,53 @@ void Dispatcher::inflight_begin(const Job& job) {
     rec.started = std::chrono::steady_clock::now();
     rec.last_progress = rec.started;  // §7.1: sinceProgressMs == ageMs until it emits
     std::lock_guard<std::mutex> lk(inflight_mu_);
-    inflight_ = std::move(rec);
+    if (inflight_.size() >= 2 || inflight_.count(rec.id) != 0) {
+        shutdown_requested_.store(true, std::memory_order_relaxed);
+        return false;
+    }
+    rec.solver = solver;
+    inflight_.emplace(rec.id, std::move(rec));
+    return true;
 }
 
-void Dispatcher::inflight_note_progress() {
+void Dispatcher::inflight_note_progress(std::uint64_t id) {
     // Called for every NON-TERMINAL frame the kernel job emits (progress / event
     // / chunk, §7.1). When bulk streaming lands, the credit wait must call this
     // too: time blocked on §5.3 credit is Rust's wait, not the worker's, so it
     // counts as progress and a credit-starved sender can never read as wedged.
     std::lock_guard<std::mutex> lk(inflight_mu_);
-    if (inflight_.has_value()) inflight_->last_progress = std::chrono::steady_clock::now();
+    const auto it = inflight_.find(id);
+    if (it != inflight_.end()) it->second.last_progress = std::chrono::steady_clock::now();
 }
 
-void Dispatcher::inflight_end() {
+void Dispatcher::inflight_end(std::uint64_t id) {
     std::lock_guard<std::mutex> lk(inflight_mu_);
-    inflight_.reset();
+    inflight_.erase(id);
 }
 
-std::optional<Dispatcher::Inflight> Dispatcher::inflight_snapshot() const {
+std::vector<Dispatcher::Inflight> Dispatcher::inflight_jobs_snapshot() const {
     std::lock_guard<std::mutex> lk(inflight_mu_);
-    if (!inflight_.has_value()) return std::nullopt;
     const auto now = std::chrono::steady_clock::now();
     auto ms_since = [now](std::chrono::steady_clock::time_point t) {
         const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(now - t).count();
         return d > 0 ? static_cast<std::uint64_t>(d) : std::uint64_t{0};
     };
-    Inflight out;
-    out.verb = inflight_->verb;
-    out.id = inflight_->id;
-    out.job_id = inflight_->job_id;
-    out.age_ms = ms_since(inflight_->started);
-    out.since_progress_ms = ms_since(inflight_->last_progress);
-    return out;
+    std::vector<Inflight> jobs;
+    for (const auto& [id, record] : inflight_) {
+        jobs.push_back(Inflight{record.verb, id, record.job_id, ms_since(record.started),
+                                ms_since(record.last_progress), record.solver});
+    }
+    std::sort(jobs.begin(), jobs.end(), [](const Inflight& a, const Inflight& b) {
+        return a.id < b.id;
+    });
+    return jobs;
+}
+
+std::optional<Dispatcher::Inflight> Dispatcher::inflight_snapshot() const {
+    for (const auto& job : inflight_jobs_snapshot()) {
+        if (!job.solver) return job;
+    }
+    return std::nullopt;
 }
 
 namespace {
@@ -207,6 +224,21 @@ Envelope Dispatcher::execute(const Job& job, const std::function<void(Envelope&)
     };
 
     try {
+#if ONECAD_WORKER_HOOKS
+        if (req.verb == "SketchUpsert" || req.verb == "SketchRegions") {
+            const auto delay = std::min<std::uint64_t>(read_u64(req.args, "__testSolverDelayMs"), 10000);
+            const auto until = started + std::chrono::milliseconds(delay);
+            while (std::chrono::steady_clock::now() < until) {
+                if (!req.args.value("__testSolverIgnoreCancel", false) && job.cancel->cancelled()) {
+                    return Envelope::error_response(req.id, ErrorInfo{"CANCELLED", "cancelled", false});
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+#endif
+        if (solver_verbs_.count(req.verb) != 0 && job.cancel->cancelled()) {
+            return Envelope::error_response(req.id, ErrorInfo{"CANCELLED", "cancelled", false});
+        }
         Envelope resp = it->second(req, job.bin, ctx);
         WLOG_DEBUG("verb '%s' id %llu ok in %lld ms", req.verb.c_str(),
                    static_cast<unsigned long long>(req.id),
@@ -292,29 +324,23 @@ void Dispatcher::kernel_loop(int out_fd) {
         // §7.1: the in-flight record opens at DEQUEUE and closes after the
         // terminal frame is written, so the status thread reports exactly the job
         // this lane is actually running.
-        inflight_begin(job);
-        if (journal_.job_begin) journal_.job_begin(job.env.id, job.env.verb);
+        if (!inflight_begin(job)) {
+            refuse_job(out_fd, job, "active job identity or capacity violation");
+            close_reader_fd();
+            return;
+        }
         // Per-job, kernel-thread-local: ASSIGNED (not or-ed) on every emit, so it
         // always describes the LAST frame this job streamed — which is what the
         // producer asks about immediately after streaming it (SCHEMA §3.4).
         bool last_emit_substituted = false;
         Envelope resp = execute(
             job,
-            [this, out_fd, &last_emit_substituted](Envelope& e) {
-                inflight_note_progress();
+            [this, out_fd, &last_emit_substituted, id = job.env.id](Envelope& e) {
+                inflight_note_progress(id);
                 last_emit_substituted = !stamp_and_write(out_fd, e);
             },
             [&last_emit_substituted] { return last_emit_substituted; });
-        {
-            std::lock_guard<std::mutex> lk(tokens_mu_);
-            tokens_.erase(job.env.id);
-        }
-        stamp_and_write(out_fd, resp);
-        // The journal closes the job only once its terminal frame is out: the
-        // serialization of a large result runs inside stamp_and_write, and a
-        // crash there must still be attributed to this job (ADR-0016 finding C).
-        if (journal_.job_end) journal_.job_end(job.env.id, job.env.verb);
-        inflight_end();
+        finish_job(out_fd, job, resp);
 
         // If a handler asked to shut down, unblock the reader by closing stdin.
         if (shutdown_requested_.load(std::memory_order_relaxed)) {
@@ -337,13 +363,37 @@ void Dispatcher::solver_loop(int out_fd) {
             solver_queue_.pop_front();
         }
 
-        Envelope resp = execute(job, [this, out_fd](Envelope& e) { stamp_and_write(out_fd, e); });
-        {
-            std::lock_guard<std::mutex> lk(tokens_mu_);
-            tokens_.erase(job.env.id);
+        if (!inflight_begin(job, true)) {
+            refuse_job(out_fd, job, "active job identity or capacity violation");
+            close_reader_fd();
+            return;
         }
-        stamp_and_write(out_fd, resp);
+        Envelope resp = execute(job, [this, out_fd, id = job.env.id](Envelope& e) {
+            inflight_note_progress(id);
+            stamp_and_write(out_fd, e);
+        });
+        finish_job(out_fd, job, resp);
+        if (shutdown_requested_.load(std::memory_order_relaxed)) {
+            close_reader_fd();
+            return;
+        }
     }
+}
+
+void Dispatcher::finish_job(int out_fd, const Job& job, Envelope& response) {
+    {
+        std::lock_guard<std::mutex> lk(tokens_mu_);
+        tokens_.erase(job.env.id);
+    }
+    stamp_and_write(out_fd, response);
+    inflight_end(job.env.id);
+    if (journal_.job_end) journal_.job_end(job.env.id, job.env.verb);
+}
+
+void Dispatcher::refuse_job(int out_fd, const Job& job, const char* message) {
+    Envelope response = Envelope::error_response(
+        job.env.id, ErrorInfo{"PROTOCOL_ERROR", message, false});
+    finish_job(out_fd, job, response);
 }
 
 void Dispatcher::close_reader_fd() {
@@ -425,6 +475,7 @@ void Dispatcher::enqueue_solver_job(Job job, int out_fd) {
             }
         }
         if (enqueue) {
+            if (journal_.job_begin) journal_.job_begin(job.env.id, job.env.verb);
             solver_queue_.push_back(std::move(job));
         }
     }
@@ -441,6 +492,7 @@ void Dispatcher::enqueue_solver_job(Job job, int out_fd) {
         Envelope resp = Envelope::error_response(
             id, ErrorInfo{"CANCELLED", "superseded", /*retriable=*/false});
         stamp_and_write(out_fd, resp);
+        if (journal_.job_end) journal_.job_end(id, "SolveDrag");
     }
 }
 
@@ -571,6 +623,7 @@ int Dispatcher::run(int in_fd, int out_fd, const Envelope* hello) {
         } else {
             {
                 std::lock_guard<std::mutex> lk(queue_mu_);
+                if (journal_.job_begin) journal_.job_begin(job.env.id, job.env.verb);
                 queue_.push(std::move(job));
             }
             queue_cv_.notify_one();

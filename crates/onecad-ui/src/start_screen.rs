@@ -87,6 +87,7 @@ pub(crate) fn leave(app: &mut App) {
         return;
     }
     app.ui.start_open = false;
+    app.sync_active_budget();
     app.ui.start_page = StartPage::Home;
     app.draw_dirty = true;
 }

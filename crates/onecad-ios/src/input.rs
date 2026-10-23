@@ -92,6 +92,9 @@ pub struct Input {
     modifiers: egui::Modifiers,
     /// Latest predicted points per authoring contact: overlay input only.
     predictions: HashMap<u64, Vec<Pos2>>,
+    prediction_context: Option<onecad_ui::host::PresentationContext>,
+    generation: u64,
+    contact_epoch: u64,
     pointer_kind: Option<ContactKind>,
     pencil_double_tap: Option<bool>,
     activations: Vec<Pos2>,
@@ -114,6 +117,9 @@ impl Default for Input {
             composing: false,
             modifiers: egui::Modifiers::NONE,
             predictions: HashMap::new(),
+            prediction_context: None,
+            generation: 0,
+            contact_epoch: 0,
             pointer_kind: None,
             pencil_double_tap: None,
             activations: Vec::new(),
@@ -155,6 +161,7 @@ impl Input {
     ) -> Result<bool, touch::SubmitError> {
         let raw: Vec<RawSample> = samples.iter().map(raw).collect();
         let merged = self.normalizer.submit_raw(&raw, generation)?;
+        self.generation = self.generation.max(generation);
         let routed = self.router.route(self.normalizer.drain(), route);
         self.apply_all(routed);
         Ok(self.enforce_bound() || merged)
@@ -172,6 +179,16 @@ impl Input {
         self.cancel_pointer();
         self.cancel_navigation();
         self.predictions.clear();
+        self.prediction_context = None;
+        self.contact_epoch = self.contact_epoch.wrapping_add(1);
+    }
+
+    pub fn focus_lost(&mut self) {
+        self.cancel_all(CancelReason::SceneInactive);
+        if self.modifiers != egui::Modifiers::NONE {
+            self.modifiers = egui::Modifiers::NONE;
+            self.push(Event::ModifiersChanged(self.modifiers), false);
+        }
     }
 
     fn button(&self, pos: Pos2, pressed: bool) -> Event {
@@ -346,6 +363,37 @@ impl Input {
         self.predictions.get(&contact)?.last().copied()
     }
 
+    pub fn set_prediction_context(&mut self, context: onecad_ui::host::PresentationContext) {
+        if self.prediction_context.as_ref() != Some(&context) {
+            self.predictions.clear();
+        }
+        self.prediction_context = Some(context);
+    }
+
+    pub fn prediction_snapshot(&self) -> Option<crate::predictions::Snapshot> {
+        let pointer = self.pointer?;
+        Some(crate::predictions::Snapshot {
+            contact: pointer.contact,
+            generation: self.generation,
+            context: self.prediction_context.clone()?,
+            anchor: pointer.last,
+            points: self.predictions.get(&pointer.contact)?.clone(),
+        })
+    }
+
+    pub fn clear_predictions(&mut self) {
+        self.predictions.clear();
+        self.prediction_context = None;
+    }
+
+    pub fn contact_context(&self) -> (u64, u64, Option<u64>) {
+        (
+            self.contact_epoch,
+            self.generation,
+            self.pointer.map(|pointer| pointer.contact),
+        )
+    }
+
     #[cfg(feature = "test-hooks")]
     pub fn normalizer_stats(&self) -> touch::NormalizerStats {
         self.normalizer.stats()
@@ -372,3 +420,7 @@ impl Input {
 #[cfg(test)]
 #[path = "input_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "input_prediction_tests.rs"]
+mod prediction_tests;

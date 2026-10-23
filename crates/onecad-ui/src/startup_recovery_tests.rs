@@ -327,3 +327,97 @@ async fn failed_open_saved_preserves_recovery_for_retry_and_restore() {
         8.1234
     );
 }
+
+#[tokio::test]
+async fn legacy_inbox_recovery_uses_checkpoint_state_and_migrated_path_ownership() {
+    let area = tempfile::tempdir().unwrap();
+    let (host, original, id) = crashed_copy(area.path()).await;
+    let documents = area.path().join("documents");
+    std::fs::create_dir(documents.join("Inbox")).unwrap();
+    let source = documents.join("Inbox/plate.onecad");
+    std::fs::rename(original, &source).unwrap();
+    let mut marker = read_marker(area.path(), id).unwrap();
+    marker.opened_path = Some(source.clone());
+    write_marker(area.path(), &marker).unwrap();
+    let state = new_state();
+    let offers = api::check_recovery(&state, host.clone()).await.unwrap();
+    let target = destination(&documents, &offers[0]).unwrap();
+    assert!(!target.starts_with(documents.join("Inbox")));
+    assert_eq!(
+        onecad_core::io::container::ContainerReader::open(&target)
+            .unwrap()
+            .document()
+            .variables
+            .len(),
+        0
+    );
+    api::recover_document_at_path(
+        &state,
+        host.clone(),
+        id.to_string(),
+        true,
+        Some(target.clone()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let projection = api::get_projection(&state).await.unwrap();
+    assert_eq!(projection.variables[0].name, "RecoveredDepth");
+    assert!(projection.dirty);
+    assert_eq!(
+        state.runtime.lock().await.as_ref().unwrap().path(),
+        Some(target.as_path())
+    );
+    assert_eq!(
+        read_marker(area.path(), id).unwrap().opened_path,
+        Some(target.clone())
+    );
+    let reservations = state.services().reservations();
+    assert_eq!(reservations.path_owner(&source), Some(state.host_id()));
+    assert_eq!(reservations.path_owner(&target), Some(state.host_id()));
+    api::close_document(&state, host).await.unwrap();
+    assert_eq!(
+        reservations.path_owner(&source),
+        None,
+        "source alias belongs only to open runtime"
+    );
+    assert!(source.is_file());
+}
+
+#[tokio::test]
+async fn inbox_source_identity_conflict_preserves_saved_source_and_recovery_checkpoint() {
+    let area = tempfile::tempdir().unwrap();
+    let (host, original, id) = crashed_copy(area.path()).await;
+    let documents = area.path().join("documents");
+    std::fs::create_dir(documents.join("Inbox")).unwrap();
+    let source = documents.join("Inbox/replaced.onecad");
+    std::fs::rename(original, &source).unwrap();
+    let backend = Arc::new(PendingBackend);
+    DocumentRuntime::new_blank(backend.clone(), backend.clone(), backend)
+        .save(
+            &source,
+            SaveMeta {
+                app_version: "test".into(),
+                occt_fingerprint: None,
+                created: "2026-10-22T00:00:00Z".into(),
+                modified: "2026-10-22T00:00:00Z".into(),
+            },
+        )
+        .unwrap();
+    let mut marker = read_marker(area.path(), id).unwrap();
+    marker.opened_path = Some(source.clone());
+    write_marker(area.path(), &marker).unwrap();
+    let state = new_state();
+    let offers = api::check_recovery(&state, host).await.unwrap();
+    let checkpoint = Path::new(&offers[0].autosave_path);
+    let saved_bytes = std::fs::read(&source).unwrap();
+    let checkpoint_bytes = std::fs::read(checkpoint).unwrap();
+    assert!(
+        destination(&documents, &offers[0])
+            .unwrap_err()
+            .contains("different document")
+    );
+    assert_eq!(std::fs::read(&source).unwrap(), saved_bytes);
+    assert_eq!(std::fs::read(checkpoint).unwrap(), checkpoint_bytes);
+    assert!(!documents.join("Imported").exists());
+}

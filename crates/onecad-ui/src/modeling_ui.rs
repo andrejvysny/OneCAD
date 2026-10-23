@@ -362,17 +362,8 @@ fn profile_boolean(
             egui::ComboBox::from_id_salt("profile-target")
                 .selected_text(next_target.map_or("Select body".into(), |id| body_name(app, id)))
                 .show_ui(ui, |ui| {
-                    if let Some(display) = &app.doc.display {
-                        for body in display
-                            .projection
-                            .bodies
-                            .values()
-                            .filter(|b| b.visible && b.health == BodyHealth::Healthy)
-                        {
-                            if let Ok(id) = body.id.parse() {
-                                ui.selectable_value(&mut next_target, Some(id), &body.name);
-                            }
-                        }
+                    for (id, name) in profile_targets(app) {
+                        ui.selectable_value(&mut next_target, Some(id), name);
                     }
                 });
         });
@@ -380,6 +371,24 @@ fn profile_boolean(
     ((next_mode, next_target) != (mode, target)).then_some(ModelingOptions::ProfileBoolean {
         mode: next_mode,
         target: next_target,
+    })
+}
+
+fn profile_targets(app: &App) -> Vec<(BodyId, String)> {
+    if let Some(eligible) = crate::model_handle::eligible_bodies(app) {
+        return eligible
+            .iter()
+            .map(|&id| (id, body_name(app, id)))
+            .collect();
+    }
+    app.doc.display.as_ref().map_or_else(Vec::new, |display| {
+        display
+            .projection
+            .bodies
+            .values()
+            .filter(|body| body.visible && body.health == BodyHealth::Healthy)
+            .filter_map(|body| Some((body.id.parse().ok()?, body.name.clone())))
+            .collect()
     })
 }
 

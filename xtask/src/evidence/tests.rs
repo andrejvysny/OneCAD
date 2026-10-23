@@ -45,7 +45,7 @@ fn accepted() -> String {
 }
 #[test]
 fn host_inventory_requires_exact_current_names() {
-    assert_eq!(HOST_TESTS.len(), 102);
+    assert_eq!(HOST_TESTS.len(), 117);
     let inventory = HOST_TESTS
         .iter()
         .map(|name| format!("{name}: test\n"))
@@ -53,6 +53,8 @@ fn host_inventory_requires_exact_current_names() {
     host::inventory(&inventory, &host::LIFECYCLE).unwrap();
     host::verify(&accepted(), &host::LIFECYCLE).unwrap();
     for output in [
+        inventory.clone() + "unexpected::test: test\n",
+        inventory.replace(&format!("{}: test\n", HOST_TESTS[0]), ""),
         inventory.clone() + &format!("{}: test\n", HOST_TESTS[0]),
         inventory.replace(HOST_TESTS[0], HOST_TESTS[1]),
         inventory.replace(HOST_TESTS[0], "unknown"),

@@ -77,12 +77,13 @@ struct HandlerContext {
 // Crash-journal hooks for an IN-PROCESS host (capi/onecad_worker.h, P0.3
 // ONECAD-258). In-process a crash inside OCCT kills the host, and frames still
 // in the socket buffer die with it, so the host cannot attribute the crash from
-// the frames it managed to read. These run synchronously on the kernel thread:
-// whatever the host records in them is on record before the work they name
-// starts. `job_begin` at dequeue, `job_end` after the job's terminal frame was
+// the frames it managed to read. Begin callbacks run on the reader at admission;
+// progress/end callbacks run on the owning lane. They may overlap, so the host
+// serializes persistence. Each callback completes before the named work
+// starts. `job_begin` before mailbox admission, `job_end` after the terminal frame was
 // written (or its write failed), so a crash while SERIALIZING a large result
-// (Tessellate, ExportGeometry) is still attributed to the job. Kernel lane
-// only. Set before run().
+// (Tessellate, ExportGeometry) is still inside the journal window. Kernel and
+// solver jobs, including queued work; callbacks may overlap. Set before run().
 // `plan_op_begin` carries the op's own `prefixHashes[position]` (falling back to
 // `expectedBaseHash` when the array is short, like Rust's plan_op_keys), read
 // from THIS job's args, so the host can key the crash circuit
@@ -150,8 +151,8 @@ public:
                            const std::vector<std::uint8_t>& bin = {});
 
     // SCHEMA §7.1 `GetWorkerHead.result.inflight`: the KERNEL-lane job being
-    // executed right now, in wire units. Solver-lane and status jobs are never
-    // reported. `age_ms` runs from the dequeue; `since_progress_ms` from the last
+    // executed right now, in wire units. The legacy snapshot excludes solvers;
+    // inflight_jobs_snapshot reports both active lanes. Status jobs are excluded. `age_ms` runs from the dequeue; `since_progress_ms` from the last
     // non-terminal frame the job emitted (== `age_ms` while it has emitted none).
     struct Inflight {
         std::string verb;
@@ -159,11 +160,13 @@ public:
         std::optional<std::uint64_t> job_id;
         std::uint64_t age_ms = 0;
         std::uint64_t since_progress_ms = 0;
+        bool solver = false;
     };
 
     // Snapshot of the in-flight kernel job, or nullopt when the lane is idle.
     // Thread-safe (guarded by `inflight_mu_`); called from the status thread.
     std::optional<Inflight> inflight_snapshot() const;
+    std::vector<Inflight> inflight_jobs_snapshot() const;
 
 private:
     struct Job {
@@ -193,13 +196,15 @@ private:
     void solver_loop(int out_fd);
     void status_loop(int out_fd);
 
-    // In-flight bookkeeping for the kernel lane (WP-H). `begin` at dequeue,
+    // In-flight bookkeeping for both active lanes. `begin` at dequeue,
     // `note_progress` on every non-terminal frame the job emits (and on any wait
     // that is NOT the worker's own — see the credit note in the .cpp), `end`
     // after its terminal frame is written.
-    void inflight_begin(const Job& job);
-    void inflight_note_progress();
-    void inflight_end();
+    bool inflight_begin(const Job& job, bool solver = false);
+    void inflight_note_progress(std::uint64_t id);
+    void inflight_end(std::uint64_t id);
+    void finish_job(int out_fd, const Job& job, Envelope& response);
+    void refuse_job(int out_fd, const Job& job, const char* message);
 
     // Enqueue onto the solver mailbox with latest-wins coalescing for drags.
     // Superseded drags are terminal-responded CANCELLED/superseded on `out_fd`.
@@ -245,8 +250,8 @@ private:
     std::mutex write_mu_;
     std::uint64_t out_seq_ = 0;
 
-    // §7.1 in-flight record for the KERNEL lane, guarded by `inflight_mu_`
-    // (written by the kernel thread, read by the status thread — never by both
+    // §7.1 active records for kernel and solver lanes, guarded by `inflight_mu_`
+    // (written by lane threads, read by the status thread — never by both
     // under any other lock, so it can never be behind a running op).
     struct InflightRecord {
         std::string verb;
@@ -254,9 +259,10 @@ private:
         std::optional<std::uint64_t> job_id;
         std::chrono::steady_clock::time_point started;
         std::chrono::steady_clock::time_point last_progress;
+        bool solver = false;
     };
     mutable std::mutex inflight_mu_;
-    std::optional<InflightRecord> inflight_;
+    std::unordered_map<std::uint64_t, InflightRecord> inflight_;
 
     // Active cancel tokens keyed by request id (reader sets, lane clears).
     std::mutex tokens_mu_;

@@ -13,12 +13,35 @@ pub async fn load_display(backend: &mut Backend) -> Result<Display, String> {
         .shared
         .display_epoch
         .load(std::sync::atomic::Ordering::Acquire);
-    let lease = Arc::new(
-        backend
-            .shared
-            .host_budget
-            .reserve(crate::budget::DISPLAY_RESERVATION)?,
-    );
+    let (source, preparation) = backend
+        .shared
+        .host_budget
+        .admit_while(
+            crate::budget::DISPLAY_RESERVATION,
+            crate::budget::Kind::Display,
+            || {
+                !backend
+                    .shared
+                    .stopping
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    && backend
+                        .shared
+                        .display_epoch
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        == epoch
+            },
+        )
+        .await?
+        .split_kinds(
+            crate::budget::DISPLAY_SOURCE_RESERVATION,
+            crate::budget::Kind::DisplaySource,
+            crate::budget::Kind::Preparation,
+        )?;
+    let lease = Arc::new(source);
+    let retention = onecad_render::PreparationRetention {
+        source: Some(lease.clone()),
+        preparation: Some(Arc::new(preparation)),
+    };
     let projection = api::get_projection(&backend.state)
         .await
         .map_err(|e| e.to_string())?;
@@ -120,14 +143,12 @@ pub async fn load_display(backend: &mut Backend) -> Result<Display, String> {
         .preparation_budget()?
         .limit_cpu_prepared_bytes(crate::budget::MAX_PREPARED_BYTES);
     let mut cache = backend.shared.take_preparation_cache();
-    let prepared = onecad_render::PreparedScene::new_cached(&scene, budget, &mut cache)
-        .map_err(|e| e.to_string());
+    let prepared =
+        onecad_render::PreparedScene::new_cached_retained(&scene, budget, &mut cache, retention)
+            .map_err(|e| e.to_string());
     let cache_bytes = (cache.source_bytes(), cache.cpu_bytes());
     backend.shared.restore_preparation_cache(cache);
     let prepared = prepared?;
-    // Preparation can succeed before the final publication fence rejects this capture.
-    // Keep its source and CPU charge alive even when no Display reaches the UI.
-    backend.preparation_lease = Some(lease.clone());
     if prepared.cpu_bytes() > crate::budget::MAX_PREPARED_BYTES {
         return Err("Native CPU preparation budget exceeded".into());
     }

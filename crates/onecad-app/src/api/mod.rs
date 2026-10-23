@@ -5,10 +5,12 @@
 
 mod document_items;
 mod document_state;
+mod edit_operands;
 mod edit_preview;
 pub use document_items::{
     delete_document_item, plan_delete_document_item, DeleteTarget, DeletionItem, DeletionPlan,
 };
+pub use edit_operands::{start_edit_operand_context, EditOperandContext, EditOperandRead};
 pub use edit_preview::{preview_existing_edit, EditPreview, EditPreviewOutcome};
 mod import_readiness;
 mod projection_parts;
@@ -1150,6 +1152,18 @@ pub async fn recover_document(
     document_id: String,
     accept: bool,
 ) -> Result<Option<DocumentSnapshotDto>, ApiError> {
+    recover_document_at_path(state, app, document_id, accept, None).await
+}
+
+/// Restores the checkpoint's accepted state while adopting a migrated editable path.
+/// The caller must validate its destination; path and document claims remain enforced.
+pub async fn recover_document_at_path(
+    state: &AppState,
+    app: HostContext,
+    document_id: String,
+    accept: bool,
+    destination: Option<PathBuf>,
+) -> Result<Option<DocumentSnapshotDto>, ApiError> {
     let id = parse_document_id(&document_id)?;
     let Some(offer) = state.peek_pending_recovery(id) else {
         return Ok(None);
@@ -1162,11 +1176,15 @@ pub async fn recover_document(
         }
         return Ok(None);
     }
-    let opened_path = offer.marker.as_ref().and_then(|m| m.opened_path.clone());
+    let original_path = offer.marker.as_ref().and_then(|m| m.opened_path.clone());
+    let opened_path = destination.or_else(|| original_path.clone());
     let title = offer.marker.as_ref().and_then(|m| m.title.clone());
     let mut claims = Vec::new();
     if let Some(path) = &opened_path {
         claims.push(state.claim_path(path)?);
+    }
+    if let Some(original) = original_path.filter(|path| Some(path) != opened_path.as_ref()) {
+        claims.push(state.claim_path(&original)?);
     }
     state.ensure_document_capacity()?;
     // Restore: open the autosave container as the live document. Anything below that

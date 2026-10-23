@@ -16,7 +16,25 @@ pub(super) async fn candidate(
     let lease = backend
         .shared
         .host_budget
-        .reserve(crate::budget::PREVIEW_RESERVATION);
+        .admit_while(
+            crate::budget::PREVIEW_RESERVATION,
+            crate::budget::Kind::Preview,
+            || {
+                backend.shared.is_current(generation)
+                    && !backend
+                        .shared
+                        .stopping
+                        .load(std::sync::atomic::Ordering::Acquire)
+            },
+        )
+        .await
+        .and_then(|lease| {
+            lease.split_kinds(
+                crate::budget::PREVIEW_SOURCE_RESERVATION,
+                crate::budget::Kind::PreviewSource,
+                crate::budget::Kind::Preparation,
+            )
+        });
     let mut delivery = CandidateDelivery {
         action: Action::EditPreviewFinished {
             tag: tag.clone(),
@@ -27,10 +45,11 @@ pub(super) async fn candidate(
         scene: None,
     };
     let result = match lease {
-        Ok(lease) => {
-            delivery.lease = Some(lease);
+        Ok((source, preparation)) => {
+            delivery.lease = Some(Arc::new(source));
+            let preparation = Arc::new(preparation);
             preview(backend, &tag, operation).await.and_then(|result| {
-                prepare(backend, &tag, &result, &mut delivery)?;
+                prepare(backend, &tag, &result, &mut delivery, preparation)?;
                 Ok(result)
             })
         }
@@ -45,6 +64,7 @@ fn prepare(
     tag: &RequestTag,
     result: &EditPreview,
     delivery: &mut CandidateDelivery,
+    preparation: Arc<crate::budget::Lease>,
 ) -> Result<(), ApiError> {
     if matches!(
         result.outcome,
@@ -65,9 +85,16 @@ fn prepare(
         .preparation_budget()
         .map_err(ApiError::Unsupported)?;
     delivery.prepared = Some(
-        onecad_render::PreparedScene::new(
+        onecad_render::PreparedScene::new_retained(
             &scene,
             budget.limit_cpu_prepared_bytes(crate::budget::MAX_PREPARED_BYTES),
+            onecad_render::PreparationRetention {
+                source: delivery
+                    .lease
+                    .clone()
+                    .map(|lease| lease as Arc<dyn Send + Sync>),
+                preparation: Some(preparation),
+            },
         )
         .map_err(|error| ApiError::Internal(error.to_string()))?,
     );

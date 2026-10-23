@@ -1,6 +1,6 @@
 //! Real Bambu component → approved registry → real worker export → desktop argv.
 //! Set ONECAD_TEST_ADDON_COMPONENT and ONECAD_REQUIRE_WORKER=1 to require this gate.
-#![cfg(unix)]
+#![cfg(all(unix, not(target_os = "ios")))]
 
 #[path = "bambu_pipeline/model.rs"]
 mod model;

@@ -3,9 +3,13 @@ mod anchors;
 mod boolean;
 mod drag;
 mod geometry;
+mod history;
 mod labels;
 mod operands;
+mod surface;
+pub(crate) use history::{eligible_bodies, poll as poll_history};
 pub(crate) use operands::capture as capture_operands;
+pub(crate) use surface::capture as capture_surface;
 mod target;
 #[cfg(test)]
 mod test_support;
@@ -25,6 +29,7 @@ pub(crate) struct ModelHandle {
     record: Option<RecordId>,
     values: Vec<(ParameterKey, f64)>,
     operands: Option<operands::Operands>,
+    history: Option<history::History>,
     choice: Option<boolean::ChoicePress>,
 }
 impl ModelHandle {
@@ -47,6 +52,7 @@ struct Target {
     geometry: Geometry,
     value: f64,
     original: String,
+    caption: Option<&'static str>,
 }
 impl Target {
     fn label(&self, value: f64) -> String {
@@ -60,7 +66,8 @@ impl Target {
             }
         };
         format!(
-            "{name}: {} {}",
+            "{}: {} {}",
+            self.caption.unwrap_or(name),
             labels::number(shown),
             if self.geometry.angle() { "°" } else { "mm" }
         )
@@ -346,6 +353,27 @@ pub(crate) fn testing_tip(
             .points(app.doc.view.as_ref()?, rect, value)?
             .1,
     )
+}
+#[cfg(test)]
+pub(crate) fn testing_axis(
+    app: &App,
+    parameter: onecad_interaction::NumericParameter,
+) -> Option<(onecad_scene::DVec3, onecad_scene::DVec3, f64)> {
+    target::targets(app).into_iter().find_map(|target| {
+        let Kind::Scalar(key) = target.kind else {
+            return None;
+        };
+        let Geometry::Axis {
+            base,
+            direction,
+            scale,
+            ..
+        } = target.geometry
+        else {
+            return None;
+        };
+        (key.parameter() == parameter).then_some((base, direction, scale))
+    })
 }
 #[cfg(test)]
 pub(crate) fn testing_boolean_button(app: &App, rect: Rect, index: usize) -> Option<Pos2> {

@@ -10,12 +10,12 @@ use egui_wgpu::{RenderState, ScreenDescriptor};
 /// The document the last frame ended on, so a frame that switched documents
 /// is noticed after the editor pass.
 #[derive(Default)]
-pub struct ShownDocument(Option<u64>);
+pub struct ShownDocument(Option<onecad_ui::host::OwnerIdentity>);
 
 impl ShownDocument {
     /// Records `tab`; whether a previous frame ended on another one.
-    pub fn switched(&mut self, tab: u64) -> bool {
-        self.0.replace(tab).is_some_and(|before| before != tab)
+    pub fn switched(&mut self, owner: onecad_ui::host::OwnerIdentity) -> bool {
+        self.0.replace(owner).is_some_and(|before| before != owner)
     }
 }
 
@@ -193,8 +193,23 @@ impl crate::app::IosApp {
         };
         let raw = raw_input(&view, &self.gpu, inputs);
         self.wake.set_in_frame(true);
-        let output = editor.frame(&self.ctx, raw);
+        let mut output = editor.frame(&self.ctx, raw);
         self.wake.set_in_frame(false);
+        let context = editor.presentation_context(&self.ctx);
+        if let Some(snapshot) = self.input.prediction_snapshot() {
+            if snapshot.context == context {
+                crate::predictions::append(
+                    &mut output,
+                    &snapshot,
+                    &context,
+                    (snapshot.contact, self.input.contact_context().1),
+                    &editor.prediction_clips(&self.ctx),
+                    editor.accent_color(),
+                );
+            } else {
+                self.input.clear_predictions();
+            }
+        }
         let switched = self.left_document();
         Ok(self.finish(output, drained.again || switched))
     }
@@ -204,14 +219,14 @@ impl crate::app::IosApp {
     /// and must not release or drag on the one now shown. The next frame
     /// forgets egui's press and carries `PointerGone`.
     fn left_document(&mut self) -> bool {
-        let Some(tab) = self
+        let Some(owner) = self
             .editor
             .as_ref()
-            .map(onecad_ui::host::Editor::active_tab)
+            .map(|editor| editor.presentation_context(&self.ctx).owner)
         else {
             return false;
         };
-        if !self.shown_document.switched(tab) {
+        if !self.shown_document.switched(owner) {
             return false;
         }
         self.input
@@ -357,11 +372,25 @@ mod tests {
 
     #[test]
     fn only_a_change_of_the_shown_document_is_a_switch() {
+        let owner = |tab| onecad_ui::host::OwnerIdentity {
+            tab,
+            editor_visible: true,
+        };
         let mut shown = ShownDocument::default();
-        assert!(!shown.switched(1), "the first frame switches nothing");
-        assert!(!shown.switched(1));
-        assert!(shown.switched(2), "tab strip, ⌃Tab or a new tab");
-        assert!(!shown.switched(2));
-        assert!(shown.switched(1), "and back");
+        assert!(
+            !shown.switched(owner(1)),
+            "the first frame switches nothing"
+        );
+        assert!(!shown.switched(owner(1)));
+        assert!(shown.switched(owner(2)), "tab strip, ⌃Tab or a new tab");
+        assert!(!shown.switched(owner(2)));
+        assert!(shown.switched(owner(1)), "and back");
+        let home = onecad_ui::host::OwnerIdentity {
+            editor_visible: false,
+            ..owner(1)
+        };
+        assert!(shown.switched(home), "Home leaves the same tab's editor");
+        assert!(!shown.switched(home), "repeated Home is idempotent");
+        assert!(shown.switched(owner(1)));
     }
 }

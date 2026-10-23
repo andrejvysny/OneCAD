@@ -3,7 +3,7 @@ import XCTest
 
 /// Managed-copy policy (docs/ios/HOST.md, Files and documents): an external
 /// file's security scope covers the whole coordinated copy into
-/// Documents/Inbox and is released on every path. Pure host behaviour; no
+/// Documents/Imported and is released on every path. Pure host behaviour; no
 /// Rust call, so it runs in every test configuration.
 final class DocumentInboxTests: XCTestCase {
     /// Records scope calls and what the inbox held when the scope ended.
@@ -50,7 +50,7 @@ final class DocumentInboxTests: XCTestCase {
     }
 
     private func inboxCopy(of source: URL) throws -> URL {
-        let copy = try DocumentInbox.inboxDirectory().appending(path: source.lastPathComponent)
+        let copy = try DocumentInbox.workingDirectory().appending(path: source.lastPathComponent)
         created.append(copy)
         return copy
     }
@@ -96,4 +96,33 @@ final class DocumentInboxTests: XCTestCase {
         XCTAssertEqual(events.filter { $0.hasPrefix("start") }.count, 2)
         XCTAssertEqual(events.filter { $0.hasPrefix("stop") }.count, 2)
     }
+    func testInboxIsOnlyASourceAndEditedCopiesAreNeverReplaced() throws {
+        let source = try DocumentInbox.inboxDirectory().appending(path: "incoming-\(UUID()).onecad")
+        created.append(source)
+        try Data("original".utf8).write(to: source)
+        let first = try DocumentInbox.importCopy(of: source)
+        created.append(first)
+        XCTAssertFalse(DocumentInbox.isInInbox(first))
+        XCTAssertEqual(try DocumentInbox.importCopy(of: source), first)
+        try Data("accepted edit".utf8).write(to: first)
+        let second = try DocumentInbox.importCopy(of: source)
+        created.append(second)
+        XCTAssertNotEqual(first, second)
+        XCTAssertEqual(try Data(contentsOf: first), Data("accepted edit".utf8))
+        XCTAssertEqual(try Data(contentsOf: source), Data("original".utf8))
+    }
+
+    func testInterruptedCopyNeverAdvertisesPartialDestination() throws {
+        let source = try externalFile()
+        let expected = try inboxCopy(of: source)
+        let log = ScopeLog()
+        XCTAssertThrowsError(try DocumentInbox.importCopy(of: source, scope: log.scope()) { _, target in
+            try Data("partial".utf8).write(to: target)
+            throw CocoaError(.fileWriteUnknown)
+        })
+        XCTAssertFalse(FileManager.default.fileExists(atPath: expected.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: source.path))
+        XCTAssertEqual(log.all.count, 2)
+    }
+
 }

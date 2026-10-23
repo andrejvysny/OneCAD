@@ -1,16 +1,10 @@
-//! Process-wide display memory of one window.
+//! Renderer allowance and selected parked-cache estimates for one window.
 //!
-//! Every tab of a window draws through the window's single `Renderer`: only the active
-//! document's targets, IBL and geometry are on the GPU, and the renderer charges each
-//! replacement (resize, rotation, scene or option change) with its old and new resources
-//! against `RenderLimits::max_gpu_bytes`. Parked tabs keep only disposable caches: the
-//! ⌃Tab switcher thumbnail (GPU), and the CPU geometry of their last preparation (the
-//! backend's preparation cache plus a prepared scene not yet uploaded), rebuilt from the
-//! retained scene on activation. The aggregate splits into the renderer's allowance,
-//! reserved for the active document, and what parked caches may hold; on Mobile parked
-//! caches are evicted least recently active first, so the sum of both stays within the
-//! aggregate. On Apple silicon GPU and CPU share one memory pool, so both count against
-//! one figure.
+//! The single renderer enforces GPU replacement peaks. Parked preparations and
+//! thumbnails have a separate allowance, with Mobile eviction of adopted caches.
+//! This is a partial display ledger: source payloads, closing owners and native
+//! drawable estimates are not all included. Shared CPU admission lives in `budget`;
+//! neither allowance represents measured process memory or a complete combined cap.
 use crate::app::App;
 use onecad_render::{RenderLimits, RenderProfile};
 
@@ -18,7 +12,7 @@ const MIB: u64 = 1 << 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DisplayBudget {
-    /// Everything display-related one window may hold at a replacement peak.
+    /// Renderer plus parked-cache allowance, separate from shared CPU admission.
     pub aggregate: u64,
     /// The renderer's allowance (`max_gpu_bytes`), reserved for the active document.
     pub active: u64,

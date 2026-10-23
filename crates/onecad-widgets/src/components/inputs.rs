@@ -305,17 +305,28 @@ impl Widget for SearchField<'_> {
                 .max_rect(field)
                 .layout(Layout::left_to_right(Align::Center)),
         );
-        let response = child.add(
-            TextEdit::singleline(self.text)
-                .id(id)
-                .font(FontId::new(CONTROL, FontFamily::Proportional))
-                .text_color(t.ink2.gamma_multiply(op))
-                .hint_text(RichText::new(self.placeholder.to_owned()).color(hint))
-                .frame(Frame::NONE)
-                .margin(Margin::ZERO)
-                .desired_width(field.width())
-                .interactive(self.enabled),
+        let native_changed = crate::text_session::before(&child, id, self.text, self.enabled);
+        let mut output = TextEdit::singleline(&mut *self.text)
+            .id(id)
+            .font(FontId::new(CONTROL, FontFamily::Proportional))
+            .text_color(t.ink2.gamma_multiply(op))
+            .hint_text(RichText::new(self.placeholder.to_owned()).color(hint))
+            .frame(Frame::NONE)
+            .margin(Margin::ZERO)
+            .desired_width(field.width())
+            .interactive(self.enabled)
+            .show(&mut child);
+        crate::text_session::after(
+            &child,
+            self.text,
+            &output,
+            self.placeholder,
+            crate::text_session::MAX_UTF16,
         );
+        if native_changed {
+            output.response.mark_changed();
+        }
+        let response = output.response.response;
         if let Some(g) = key {
             let pos = pos2(
                 rect.right() - pad - g.size().x,

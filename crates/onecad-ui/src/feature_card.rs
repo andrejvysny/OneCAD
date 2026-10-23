@@ -271,8 +271,10 @@ fn number_field(
         .unwrap_or_default();
     let error = tool.params.error(key);
     let salt = (key.salt(), tool.tag.record_id.to_string(), tool.tag.gesture);
+    let label = format!("{} ({unit})", key.label());
     let response = ui.add(
         NumberField::new(salt, &mut draft)
+            .label(&label)
             .unit(unit)
             .error(error)
             .enabled(editing)
@@ -284,7 +286,6 @@ fn number_field(
     if focused || response.has_focus() {
         app.doc.numeric_id = Some(response.id);
     }
-    let label = format!("{} ({unit})", key.label());
     name_field(&response, &label);
     crate::automation::name(ui.ctx(), response.id, &field_automation(tool, key));
     if response.gained_focus() && !focused {

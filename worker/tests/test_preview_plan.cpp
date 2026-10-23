@@ -12,6 +12,7 @@
 //
 // No test framework: exit code == failure count.
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <thread>
@@ -25,6 +26,9 @@
 #include "session/PlanExecutor.h"
 #include "session/PreviewMesh.h"
 #include "session/PreviewPlan.h"
+#include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include "elementmap/ElementMapPartition.h"
 #include "session/Session.h"
 #include "session/Tessellate.h"
 #include "tess/Tessellate.h"
@@ -189,6 +193,68 @@ void signatures_equal_execute_plan(Session& s) {
     }
 }
 
+void operand_context_reads_only_the_prefix(Session& s) {
+    const WorkerHead before = s.head();
+    const auto bodies = s.bodies_copy();
+    const auto* body = bodies.get("body_opA");
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(body->geom, TopAbs_FACE, faces);
+    const auto descriptor = onecad::elementmap::ElementMapPartition::describe(faces(1), body->geom);
+    const json input{{"primary", {{"bodyId", "body_opA"}, {"elementId", "el_read"}, {"kind", "face"}}},
+                     {"intent", {{"version", 4}, {"kind", "face"},
+                                 {"descriptor", onecad::elementmap::ElementMapPartition::descriptor_to_json(descriptor)}}},
+                     {"anchor", {{"worldPoint", {descriptor.center.X(), descriptor.center.Y(), descriptor.center.Z()}}}}};
+    json args = preview_args(json::array({sketch_op("opSA", "skA", 0, 0), extrude_op("opA", "skA", 1, 10)}), before.snapshot_id);
+    args.erase("editedFrom");
+    args["editOperandContext"] = {{"opId", "readShell"}, {"opType", "Shell"},
+        {"inputs", json::array({input})}, {"params", {{"targetBodyId", "body_opA"}, {"openFaces", {"el_read"}}, {"thickness", 1}}}};
+    const Envelope result = preview(s, args);
+    CHECK(result.ok.value_or(false), "prefix operand query failed: %s", code_of(result).c_str());
+    if (result.ok.value_or(false)) {
+        const json context = result.result["editOperandContext"];
+        CHECK(context["eligibleBodies"] == json::array({"body_opA"}), "downstream body leaked into prefix");
+        CHECK(context["inputs"].size() == 1 && !context["inputs"][0].contains("refusal"), "operand unresolved: %s", context.dump().c_str());
+        CHECK(context["inputs"][0]["classification"]["surfaceType"] == "plane", "analytic surface missing");
+        CHECK(result.result["meshes"].empty() && result.out_bin.empty(), "context query must not mesh");
+    }
+    json too_many = args;
+    too_many["editOperandContext"]["inputs"] = json::array();
+    for (int i = 0; i < 65; ++i) too_many["editOperandContext"]["inputs"].push_back(input);
+    CHECK(code_of(preview(s, too_many)) == "PROTOCOL_ERROR", "65 inputs must fail before replay");
+    json self = args;
+    self["editOperandContext"]["opId"] = "opA";
+    CHECK(code_of(preview(s, self)) == "PROTOCOL_ERROR", "queried feature must not execute in prefix");
+    json body_query = args;
+    body_query["editOperandContext"] = {{"opId", "readBody"}, {"opType", "TransformBody"},
+        {"params", {{"targets", {"body_opA"}}}},
+        {"inputs", json::array({{{"primary", {{"bodyId", "body_opA"},
+            {"elementId", "body_opA"}, {"kind", "body"}}}}})}};
+    const auto body_result = preview(s, body_query);
+    CHECK(body_result.ok.value_or(false), "body context failed");
+    if (body_result.ok.value_or(false)) {
+        const auto measured = body_result.result["editOperandContext"]["inputs"][0];
+        CHECK(measured.contains("bounds") && std::abs(measured["bounds"]["max"][2].get<double>() - 10.0) < 1e-5,
+            "body bounds must come from replayed prefix, not final head");
+        CHECK(measured.contains("bounds") && !measured.contains("point") &&
+            !measured.contains("direction") && !measured.contains("classification"),
+            "body requires bounds without fabricated analytic geometry: %s", measured.dump().c_str());
+    }
+    json empty = args;
+    empty["ops"] = json::array();
+    empty["editOperandContext"] = {{"opId", "firstFeature"}, {"opType", "Sketch"},
+        {"params", json::object()}, {"inputs", json::array()}};
+    const auto first = preview(s, empty);
+    CHECK(first.ok.value_or(false) && first.result["bodies"].empty() &&
+        first.result["editOperandContext"]["inputs"].empty(), "k0 no-input context failed");
+    json malformed = args;
+    malformed["editOperandContext"]["inputs"][0]["primary"]["kind"] = 9;
+    CHECK(code_of(preview(s, malformed)) == "PROTOCOL_ERROR", "malformed primary must fail before replay");
+    malformed = args;
+    malformed["editedFrom"] = 0;
+    CHECK(code_of(preview(s, malformed)) == "PROTOCOL_ERROR", "context must not claim edited operation execution");
+    CHECK(same_head(before, s.head()), "operand read changed worker head");
+}
+
 void fence_refusals(Session& s) {
     const WorkerHead before = s.head();
     const Envelope stale = preview(s, preview_args(two_parts(5), before.snapshot_id + 9));
@@ -298,6 +364,7 @@ int main() {
     edit_meshes_only_changed_bodies(s);
     signatures_equal_execute_plan(s);
     fence_refusals(s);
+    operand_context_reads_only_the_prefix(s);
     edited_failure_stops_at_k(s);
     cancel_mid_flight(s);
     held_scratch_and_restored_base_survive(s);

@@ -87,6 +87,7 @@ impl Input {
     fn press(&mut self, contact: u64, kind: ContactKind, at: Pos2, tap_count: u32) {
         // The router hands out one pointer at a time; never leave one pressed.
         self.cancel_pointer();
+        self.contact_epoch = self.contact_epoch.wrapping_add(1);
         self.pointer = Some(Pointer {
             contact,
             last: at,
@@ -101,6 +102,7 @@ impl Input {
     }
 
     fn drag(&mut self, contact: u64, at: Pos2) {
+        self.predictions.remove(&contact);
         if let Some(pointer) = &mut self.pointer
             && pointer.contact == contact
             && pointer.last != at

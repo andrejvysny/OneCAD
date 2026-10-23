@@ -175,10 +175,12 @@ impl DialogPort for Dialogs {
             ffi::REQ_OPEN_DOCUMENT
         };
         let suggested_name = if request.save {
-            format!(
-                "Untitled.{}",
-                request.extensions.first().map_or("onecad", String::as_str)
-            )
+            request.suggested_filename.unwrap_or_else(|| {
+                format!(
+                    "Untitled.{}",
+                    request.extensions.first().map_or("onecad", String::as_str)
+                )
+            })
         } else {
             String::new()
         };
@@ -230,6 +232,38 @@ mod tests {
         let cancelled =
             runtime.block_on(dialogs.pick(FileDialog::new("OneCAD", &["onecad"], false)));
         assert!(cancelled.is_empty());
+    }
+
+    #[test]
+    fn save_dialogs_forward_names_and_extensions_without_replacing_supplied_names() {
+        for extension in ["onecad", "step", "stl", "obj", "3mf"] {
+            for supplied in [None, Some("Named plate"), Some("")] {
+                let queue = Arc::new(Queue::new(egui::Context::default()));
+                let dialogs = Dialogs(queue.clone());
+                let mut request = FileDialog::new("Save", &[extension], true);
+                request.suggested_filename = supplied.map(str::to_owned);
+                let expected =
+                    supplied.map_or_else(|| format!("Untitled.{extension}"), str::to_owned);
+                let picked = std::thread::spawn(move || {
+                    loop {
+                        if let Some(request) = queue.pop() {
+                            assert_eq!(request.kind, ffi::REQ_SAVE_DOCUMENT);
+                            assert_eq!(request.extensions, extension);
+                            assert_eq!(request.suggested_name, expected);
+                            assert!(queue.complete(request.id, Vec::new()));
+                            assert!(!queue.complete(request.id, Vec::new()));
+                            break;
+                        }
+                        std::thread::yield_now();
+                    }
+                });
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap();
+                assert!(runtime.block_on(dialogs.pick(request)).is_empty());
+                picked.join().unwrap();
+            }
+        }
     }
 
     #[test]

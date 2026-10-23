@@ -81,6 +81,7 @@ impl Selection {
     pub fn invalidate_pending(&mut self) {
         self.hover = None;
         self.changed();
+        self.pending = None;
     }
     #[cfg(test)]
     pub(crate) fn settled(&self) -> bool {
@@ -185,32 +186,49 @@ fn start_preparation(
     scene: Arc<SceneSnapshot>,
     ctx: egui::Context,
 ) -> Result<(), String> {
-    let lease = app
-        .doc
-        .bridge
-        .shared
-        .host_budget
-        .reserve(scene.resident_bytes())?;
-    let sequence = app.doc.topology.sequence;
     let selected = highlighted(app, &scene);
     let hover = app.doc.topology.hover.clone();
-    let budget = app.renderer.preparation_budget();
+    if selected.is_empty() && hover.is_none() {
+        app.doc.topology.dirty = false;
+        #[cfg(test)]
+        {
+            app.doc.topology.uploaded = 0;
+        }
+        return Ok(());
+    }
+    let lease = app.doc.bridge.shared.host_budget.reserve_kind(
+        crate::budget::MAX_PREPARED_BYTES as usize,
+        crate::budget::Kind::Highlight,
+    )?;
+    let source_lease = app
+        .doc
+        .display
+        .as_ref()
+        .filter(|display| display.scene.identity() == scene.identity())
+        .map(|display| display._lease.clone())
+        .ok_or("highlight scene has no retained source owner")?;
+    let sequence = app.doc.topology.sequence;
+    let budget = app
+        .renderer
+        .preparation_budget()
+        .limit_cpu_prepared_bytes(crate::budget::MAX_PREPARED_BYTES);
     let (sender, receiver) = mpsc::sync_channel(1);
     std::thread::Builder::new()
         .name("viewport-highlights".into())
         .spawn(move || {
-            let _lease = lease;
+            let source = (scene, source_lease);
             let targets: Vec<_> = selected.iter().map(Target::borrowed).collect();
-            let result = PreparedHighlights::new(
-                &scene,
+            let result = PreparedHighlights::new_retained(
+                &source.0,
                 &targets,
                 hover.as_ref().map(Target::borrowed),
                 budget,
+                Some(Arc::new(lease)),
             )
             .map_err(|error| error.to_string());
             let _ = sender.send(Delivery {
                 sequence,
-                scene: scene.identity(),
+                scene: source.0.identity(),
                 result,
             });
             ctx.request_repaint();

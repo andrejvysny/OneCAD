@@ -11,7 +11,7 @@
 #   CONFIGURATION  Release -> --release; Debug/Acceptance -> dev profile;
 #                  Acceptance additionally -> --features onecad-ios/test-hooks
 #
-# ONECAD_IOS_STUB_LIB_DIR (explicit opt-in, never set by the project) skips
+# ONECAD_IOS_STUB_LIB_DIR (explicit Debug-only opt-in, never set by project) skips
 # cargo and the worker and stages link-only stub archives from that directory.
 # It exists to compile/link the Swift host without the Rust lane; a stub build
 # proves nothing about runtime behavior.
@@ -76,16 +76,11 @@ worker_dir() {
 # The worker bundle is produced by the kernel lane's scripts/build-ios-worker.sh.
 ensure_worker() {
     local dir="$1" worker_config="$2"
-    if [[ -f "${dir}/${WORKER_LIB}" ]]; then
-        # Only built when missing: kernel/OCCT changes need a manual rebuild.
-        echo "note: using existing ${dir}/${WORKER_LIB}; delete it or rerun scripts/build-ios-worker.sh after kernel changes"
-        return 0
-    fi
     local builder="${REPO_ROOT}/scripts/build-ios-worker.sh"
     if [[ ! -x "$builder" ]]; then
-        die "missing ${dir}/${WORKER_LIB} and ${builder} does not exist; build the embedded worker for ${PLATFORM_NAME}/${worker_config} first (see docs/ios/BUILD.md)"
+        die "cannot validate ${dir}/${WORKER_LIB}: ${builder} is unavailable; restore it and run scripts/build-ios-worker.sh --platform ${PLATFORM_NAME} --config ${worker_config} --out ${dir} (see docs/ios/BUILD.md)"
     fi
-    local args=(--platform "$PLATFORM_NAME" --config "$worker_config" --out "$dir")
+    local args=(--platform "$PLATFORM_NAME" --config "$worker_config" --out "$dir" --reuse-if-valid)
     [[ "$CONFIGURATION" == "Acceptance" ]] && args+=(--test-hooks)
     echo "==> ${builder} ${args[*]}"
     "$builder" "${args[@]}" || die "${builder} failed for ${PLATFORM_NAME}/${worker_config}"
@@ -157,6 +152,7 @@ main() {
     worker_config="${profiles#* }"
 
     if [[ -n "${ONECAD_IOS_STUB_LIB_DIR:-}" ]]; then
+        [[ "$CONFIGURATION" == "Debug" ]] || die "ONECAD_IOS_STUB_LIB_DIR is permitted only in explicit Debug builds; refused ${CONFIGURATION}"
         warn "ONECAD_IOS_STUB_LIB_DIR=${ONECAD_IOS_STUB_LIB_DIR}: linking STUB archives, not the Rust app or kernel; runtime behavior is not representative"
         check_test_hooks "${ONECAD_IOS_STUB_LIB_DIR}/${APP_LIB}"
         stage "${ONECAD_IOS_STUB_LIB_DIR}/${APP_LIB}" "$APP_LIB"

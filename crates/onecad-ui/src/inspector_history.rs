@@ -6,16 +6,7 @@ use onecad_interaction::Action;
 use onecad_widgets::components::lists::{HistoryRow, HistoryState, RollbackMarker, SectionLabel};
 
 pub fn feature_icon(op_type: &str) -> &'static str {
-    match op_type {
-        "Extrude" => "extrude",
-        "Revolve" => "revolve",
-        "Fillet" => "fillet",
-        "Chamfer" => "chamfer",
-        "Hole" => "hole",
-        "Shell" => "shell",
-        "Sketch" => "sketch",
-        _ => "body",
-    }
+    crate::tool_registry::operation_icon(op_type)
 }
 
 pub fn history(app: &mut App, ui: &mut Ui) {

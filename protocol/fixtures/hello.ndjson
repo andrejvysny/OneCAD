@@ -5,6 +5,6 @@
 {"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_1","documentRevision":0,"workerEpoch":1,"tolerancePolicy":{"linear":1e-7,"angular":1e-9,"tolerancePolicyHash":"0000000000000000"},"mode":"determinism"}}}
 {"expect":{"v":1,"t":"resp","id":1,"ok":true,"documentRevision":0,"workerEpoch":1,"snapshotId":"$any","seq":"$any","result":{"sessionOpen":true,"workerHead":{"documentRevision":0,"snapshotId":"$any"}}}}
 {"send":{"v":1,"t":"req","id":2,"verb":"GetWorkerHead","args":{}}}
-{"expect":{"v":1,"t":"resp","id":2,"ok":true,"result":{"documentRevision":0,"workerEpoch":1,"historyPrefixHash":"$hex64","hasScratch":false}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"result":{"documentRevision":0,"workerEpoch":1,"historyPrefixHash":"$hex64","hasScratch":false,"inflightJobs":"$any"}}}
 {"send":{"v":1,"t":"req","id":3,"verb":"Shutdown","args":{}}}
 {"expect":{"v":1,"t":"resp","id":3,"ok":true,"result":{"goodbye":true}}}

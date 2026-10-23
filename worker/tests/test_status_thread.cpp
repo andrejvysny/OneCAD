@@ -25,6 +25,10 @@
 
 #include <chrono>
 #include <cstdio>
+#include <condition_variable>
+#include <future>
+#include <mutex>
+#include <vector>
 #include <string>
 #include <thread>
 
@@ -161,6 +165,10 @@ void probe_overtakes_a_busy_kernel_lane(const std::string& worker_path) {
               static_cast<unsigned long long>(inflight.value("ageMs", std::uint64_t{0})));
     }
 
+    const json jobs = result.value("inflightJobs", json::array());
+    CHECK(jobs.size() == 1 && jobs[0].value("kind", std::string{}) == "kernel" &&
+              jobs[0].value("id", std::uint64_t{0}) == 2,
+          "additive snapshot must preserve the running kernel identity");
     CHECK(read_resp(w.from, 2).value("ok", false), "the busy job still terminates normally");
 
     // The lane is idle again: `inflight` must go back to null.
@@ -273,6 +281,113 @@ void progress_moves_since_progress() {
     std::fprintf(stderr, "status-thread(in-process): job ran %lld ms\n", total);
 }
 
+void ordinary_solver_status_and_cancellation(const std::string& path) {
+    for (const char* verb : {"SketchUpsert", "SketchRegions"}) {
+        Worker worker;
+        CHECK(spawn(path, worker), "spawn solver probe");
+        onecad::protocol::read_frame(worker.from);
+        send_req(worker.to, 1, "OpenSession", json{{"documentId", "doc_solver"},
+                 {"documentRevision", 0}, {"workerEpoch", 1}, {"mode", "determinism"}});
+        CHECK(read_resp(worker.from, 1).value("ok", false), "open solver session");
+        send_req(worker.to, 2, verb, json{{"__testSolverDelayMs", 2000}});
+        json jobs = json::array();
+        for (std::uint64_t id = 3; id < 103 && jobs.empty(); ++id) {
+            send_req(worker.to, id, "GetWorkerHead");
+            const auto head = read_resp(worker.from, id).value("result", json::object());
+            jobs = head.value("inflightJobs", json::array());
+            if (jobs.empty()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        CHECK(jobs.size() == 1 && jobs[0].value("kind", std::string{}) == "solver" &&
+                  jobs[0].value("verb", std::string{}) == verb &&
+                  jobs[0].value("id", std::uint64_t{0}) == 2,
+              "%s must stay visible despite successful status pings", verb);
+        Frame cancel;
+        cancel.json = json{{"v", 1}, {"t", "cancel"}, {"id", 2}}.dump();
+        onecad::protocol::write_frame(worker.to, cancel);
+        const auto terminal = read_resp(worker.from, 2);
+        CHECK(!terminal.value("ok", true) &&
+                  terminal.value("error", json::object()).value("code", std::string{}) == "CANCELLED",
+              "%s cancellation must terminate exactly once", verb);
+        send_req(worker.to, 104, "Shutdown");
+        CHECK(read_resp(worker.from, 104).value("ok", false), "shutdown solver probe");
+        close(worker.to);
+        int status = 0;
+        waitpid(worker.pid, &status, 0);
+        CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0, "clean solver shutdown");
+        close(worker.from);
+    }
+}
+
+void concurrent_solver_jobs_keep_independent_lifecycle() {
+    int input[2], output[2];
+    CHECK(pipe(input) == 0 && pipe(output) == 0, "pipes");
+    Dispatcher dispatcher;
+    std::promise<void> kernel_started, solver_started, kernel_release, solver_release;
+    auto kernel_wait = kernel_release.get_future().share();
+    auto solver_wait = solver_release.get_future().share();
+    dispatcher.register_verb("ProbeKernel", [&](const Envelope& req, const auto&, auto&) {
+        kernel_started.set_value();
+        kernel_wait.wait();
+        return Envelope::ok_response(req.id, json::object());
+    });
+    dispatcher.register_solver_verb("SketchUpsert", [&](const Envelope& req, const auto&, auto&) {
+        solver_started.set_value();
+        solver_wait.wait();
+        return Envelope::ok_response(req.id, json::object());
+    });
+    dispatcher.register_solver_verb("SketchRegions", [](const Envelope& req, const auto&, auto&) {
+        return Envelope::ok_response(req.id, json::object());
+    });
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::vector<std::uint64_t> begun, ended;
+    onecad::protocol::JournalHooks hooks;
+    hooks.job_begin = [&](std::uint64_t id, const auto&) {
+        std::lock_guard<std::mutex> lock(mutex);
+        begun.push_back(id);
+        changed.notify_all();
+    };
+    hooks.job_end = [&](std::uint64_t id, const auto&) {
+        std::lock_guard<std::mutex> lock(mutex);
+        ended.push_back(id);
+        changed.notify_all();
+    };
+    dispatcher.set_journal_hooks(std::move(hooks));
+    std::thread runner([&] { dispatcher.run(input[0], output[1]); });
+    send_req(input[1], 1, "ProbeKernel");
+    send_req(input[1], 2, "SketchUpsert");
+    CHECK(kernel_started.get_future().wait_for(std::chrono::seconds(2)) == std::future_status::ready,
+          "kernel started");
+    CHECK(solver_started.get_future().wait_for(std::chrono::seconds(2)) == std::future_status::ready,
+          "solver started");
+    send_req(input[1], 3, "SketchRegions");
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        CHECK(changed.wait_for(lock, std::chrono::seconds(2), [&] { return begun.size() == 3; }),
+              "queued solver must be journaled before execution");
+    }
+    const auto active = dispatcher.inflight_jobs_snapshot();
+    CHECK(active.size() == 2 && active[0].id == 1 && active[1].id == 2 && active[1].solver,
+          "active jobs must contain independent kernel and solver identities");
+    CHECK(dispatcher.inflight_snapshot()->id == 1, "legacy field remains kernel-only");
+    solver_release.set_value();
+    CHECK(read_resp(output[0], 2).value("ok", false), "upsert terminal");
+    CHECK(read_resp(output[0], 3).value("ok", false), "regions terminal");
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        CHECK(changed.wait_for(lock, std::chrono::seconds(2), [&] { return ended.size() == 2; }),
+              "both solver journals end independently");
+    }
+    CHECK(dispatcher.inflight_jobs_snapshot().size() == 1, "kernel survives solver completion");
+    kernel_release.set_value();
+    CHECK(read_resp(output[0], 1).value("ok", false), "kernel terminal");
+    close(input[1]);
+    runner.join();
+    CHECK(begun.size() == 3 && ended.size() == 3, "exactly one begin/end per accepted job");
+    CHECK(dispatcher.inflight_jobs_snapshot().empty(), "no active records after shutdown");
+    close(input[0]); close(output[0]); close(output[1]);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -282,6 +397,8 @@ int main(int argc, char** argv) {
     }
     probe_overtakes_a_busy_kernel_lane(argv[1]);
     progress_moves_since_progress();
+    concurrent_solver_jobs_keep_independent_lifecycle();
+    ordinary_solver_status_and_cancellation(argv[1]);
     if (g_failures == 0) std::fprintf(stderr, "status_thread PASS\n");
     return g_failures;
 }

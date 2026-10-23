@@ -128,7 +128,8 @@ pub struct SupervisorConfig {
     /// The same deadline for the READER verbs — `Tessellate` and the four
     /// `Export*` writers (§8: 60 s).
     pub wedge_deadline_readers: Duration,
-    /// The same deadline for every other kernel-lane verb (§8: 30 s).
+    /// The default active-job deadline and ordinary solver dispatch-to-terminal
+    /// deadline, including queue/write time (§8: 30 s).
     pub wedge_deadline_default: Duration,
     /// Backoff delays between failed *start* attempts.
     pub backoff: Vec<Duration>,
@@ -199,11 +200,9 @@ struct Shared {
     failure_reason: Mutex<Option<String>>,
     /// The journal-failure count last announced (`JournalDegraded`).
     journal_failures_reported: AtomicU64,
-    /// The current connection; `None` while (re)starting or Failed.
-    conn: RwLock<Option<Arc<ProtocolClient>>>,
-    epoch: AtomicU64,
-    state: Mutex<WorkerState>,
-    hello: Mutex<Option<HelloResult>>,
+    /// One publication boundary for readiness, generation and validated connection.
+    connection: RwLock<ConnectionState>,
+    solver_deadline_signal: Notify,
     /// `jobId → in-flight request id`, for cancel propagation (SCHEMA §3.5).
     inflight: Mutex<HashMap<JobId, u64>>,
     poison: Mutex<Poison>,
@@ -231,6 +230,27 @@ struct Shared {
     pending_discards: AtomicUsize,
     /// Notified every time [`Shared::pending_discards`] reaches zero.
     discard_settled: Notify,
+}
+
+struct ConnectionState {
+    client: Option<Arc<ProtocolClient>>,
+    epoch: u64,
+    state: WorkerState,
+    expired_solver: Option<solver_supervision::ExpiredSolver>,
+    // Retained during recovery only for fingerprint-scoped poison lookup.
+    hello: Option<HelloResult>,
+}
+
+impl Default for ConnectionState {
+    fn default() -> Self {
+        Self {
+            client: None,
+            epoch: 1,
+            state: WorkerState::Starting,
+            expired_solver: None,
+            hello: None,
+        }
+    }
 }
 
 /// How long a new plan waits for an outstanding detached discard before going
@@ -311,16 +331,50 @@ impl Poison {
 }
 
 impl Shared {
+    fn publish_ready(&self, client: Arc<ProtocolClient>) -> bool {
+        let mut connection = self.connection.write().unwrap();
+        if self.is_retired()
+            || matches!(connection.state, WorkerState::Retired | WorkerState::Failed)
+        {
+            return false;
+        }
+        connection.expired_solver = None;
+        connection.hello = Some(client.hello().clone());
+        connection.client = Some(client);
+        connection.state = WorkerState::Ready;
+        true
+    }
+
+    fn disconnect_generation(&self) -> u64 {
+        self.disconnect_generation_with(|| {})
+    }
+
+    fn disconnect_generation_with(&self, mut checkpoint: impl FnMut()) -> u64 {
+        let mut connection = self.connection.write().unwrap();
+        if self.is_retired() || connection.state == WorkerState::Retired {
+            connection.client = None;
+            return connection.epoch;
+        }
+        connection.state = WorkerState::Restarting;
+        checkpoint();
+        connection.client = None;
+        connection.expired_solver = None;
+        checkpoint();
+        connection.epoch += 1;
+        checkpoint();
+        connection.epoch
+    }
+
     /// Publishes a lifecycle state. [`WorkerState::Retired`] is **terminal**: once
     /// set, nothing overwrites it. That stickiness is what makes retirement race-free
     /// against a supervisor that is already mid-transition (e.g. about to publish
     /// `Ready`) when [`WorkerManager::retire`] lands.
     fn set_state(&self, s: WorkerState) {
-        let mut current = self.state.lock().unwrap();
-        if *current == WorkerState::Retired {
+        let mut current = self.connection.write().unwrap();
+        if current.state == WorkerState::Retired {
             return;
         }
-        *current = s;
+        current.state = s;
     }
 
     fn is_retired(&self) -> bool {
@@ -420,13 +474,25 @@ impl Shared {
     }
 
     fn client(&self) -> Option<Arc<ProtocolClient>> {
-        self.conn.read().unwrap().clone()
+        if self.is_retired() {
+            return None;
+        }
+        let connection = self.connection.read().unwrap();
+        if connection.state != WorkerState::Ready || connection.hello.is_none() {
+            return None;
+        }
+        connection
+            .client
+            .as_ref()
+            .filter(|client| !client.is_closed())
+            .cloned()
     }
 
     fn fingerprint(&self) -> String {
-        self.hello
-            .lock()
+        self.connection
+            .read()
             .unwrap()
+            .hello
             .as_ref()
             .map(|h| h.occt.fingerprint.clone())
             .unwrap_or_default()
@@ -477,7 +543,7 @@ impl Shared {
                 .journal_failures_reported
                 .swap(failures, Ordering::SeqCst)
         {
-            let epoch = self.epoch.load(Ordering::SeqCst);
+            let epoch = self.connection.read().unwrap().epoch;
             self.emit(WorkerLifecycle::JournalDegraded { epoch, failures });
         }
     }
@@ -633,10 +699,8 @@ impl WorkerManager {
             host,
             failure_reason: Mutex::new(None),
             journal_failures_reported: AtomicU64::new(0),
-            conn: RwLock::new(None),
-            epoch: AtomicU64::new(1),
-            state: Mutex::new(WorkerState::Starting),
-            hello: Mutex::new(None),
+            connection: RwLock::default(),
+            solver_deadline_signal: Notify::new(),
             inflight: Mutex::new(HashMap::new()),
             poison: Mutex::new(Poison::default()),
             lifecycle,
@@ -654,19 +718,19 @@ impl WorkerManager {
     /// The current lifecycle state.
     #[must_use]
     pub fn state(&self) -> WorkerState {
-        *self.shared.state.lock().unwrap()
+        self.shared.connection.read().unwrap().state
     }
 
     /// The current worker epoch (bumped on every restart).
     #[must_use]
     pub fn epoch(&self) -> WorkerEpoch {
-        WorkerEpoch(self.shared.epoch.load(Ordering::SeqCst))
+        WorkerEpoch(self.shared.connection.read().unwrap().epoch)
     }
 
     /// The worker's handshake result once connected (fingerprint policy surface).
     #[must_use]
     pub fn hello(&self) -> Option<HelloResult> {
-        self.shared.hello.lock().unwrap().clone()
+        self.shared.connection.read().unwrap().hello.clone()
     }
 
     /// Why the manager reached [`WorkerState::Failed`], once it has. An abandoned
@@ -711,7 +775,7 @@ impl WorkerManager {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             match self.state() {
-                WorkerState::Ready => return true,
+                WorkerState::Ready if self.shared.client().is_some() => return true,
                 WorkerState::Failed | WorkerState::Retired => return false,
                 _ => {}
             }
@@ -1121,21 +1185,12 @@ async fn supervise_loop(shared: &Shared) {
                     instance.terminate(RETIRE_GRACE).await;
                     return;
                 }
-                *shared.conn.write().unwrap() = Some(client.clone());
-                *shared.hello.lock().unwrap() = Some(client.hello().clone());
-                // A different OCCT build re-keys every poison entry; drop the
-                // unreachable ones now rather than carrying them for the process
-                // lifetime (memory bound).
-                shared.note_fingerprint(&client.hello().occt.fingerprint);
-                // Persisted strikes (in-process journal) seed BEFORE the first job,
-                // so a plan that crashed the previous launch fails fast here.
-                shared.seed_poison(shared.host.poison_seeds(&client.hello().occt.fingerprint));
-                if shared.config.auto_open_session {
-                    let _ = auto_open_session(shared, &client).await;
+                if !shared.publish_ready(client.clone()) {
+                    instance.terminate(RETIRE_GRACE).await;
+                    return;
                 }
-                shared.set_state(WorkerState::Ready);
                 shared.emit(WorkerLifecycle::Ready {
-                    epoch: shared.epoch.load(Ordering::SeqCst),
+                    epoch: shared.connection.read().unwrap().epoch,
                     fingerprint: client.hello().occt.fingerprint.clone(),
                 });
                 // Fire the deferred restart hook now that the worker is Ready + the
@@ -1152,13 +1207,15 @@ async fn supervise_loop(shared: &Shared) {
                     // Terminal. Drop the connection but do NOT bump the epoch and do
                     // NOT emit a transition: retirement is not a restart, and a fence
                     // that saw a bump here would reject work it should have kept.
-                    *shared.conn.write().unwrap() = None;
+                    shared.connection.write().unwrap().client = None;
                     return;
                 }
 
                 // Torn down: drop the connection and bump the epoch (fencing).
-                *shared.conn.write().unwrap() = None;
-                let new_epoch = shared.epoch.fetch_add(1, Ordering::SeqCst) + 1;
+                let new_epoch = shared.disconnect_generation();
+                if shared.is_retired() {
+                    return;
+                }
                 match &death {
                     // Terminal: abandoned ONCE. A replacement would be a second
                     // thread beside one that may still hold the OCCT STEP locks.
@@ -1237,13 +1294,15 @@ async fn supervise_loop(shared: &Shared) {
             Err(reason) => {
                 // A retirement observed inside `spawn_and_connect` surfaces as a start
                 // failure; it must NOT be announced as a restart or counted as a flap.
-                if shared.is_retired() {
+                if shared.is_retired()
+                    || shared.connection.read().unwrap().state == WorkerState::Failed
+                {
                     return;
                 }
                 flap_strikes += 1;
                 shared.set_state(WorkerState::Restarting);
                 shared.emit(WorkerLifecycle::Restarting {
-                    epoch: shared.epoch.load(Ordering::SeqCst),
+                    epoch: shared.connection.read().unwrap().epoch,
                     reason: format!("start failed: {reason}"),
                 });
                 if flap_strikes > shared.config.max_rapid_deaths {
@@ -1284,7 +1343,7 @@ fn fire_restart_hook(shared: &Shared, epoch: WorkerEpoch) {
 async fn spawn_and_connect(
     shared: &Shared,
 ) -> Result<(Box<dyn WorkerInstance>, Arc<ProtocolClient>), String> {
-    let epoch = shared.epoch.load(Ordering::SeqCst);
+    let epoch = shared.connection.read().unwrap().epoch;
     // A launch can wait (the in-process run cap), so retirement must be
     // observable here too; `launch` is cancel-safe — nothing has started. The
     // launch arm is polled first: one that is ready at once (the sidecar's
@@ -1294,22 +1353,7 @@ async fn spawn_and_connect(
         launched = shared.host.launch(epoch) => launched?,
         () = shared.retired() => return Err("retired during launch".into()),
     };
-    let instance = launched.instance;
-    // A worker that never sends its hello would park this await forever, so the
-    // handshake is one of the three places retirement MUST be observable. On
-    // cancellation `instance` drops here and stops the worker.
-    let client = tokio::select! {
-        biased;
-        () = shared.retired() => return Err("retired during handshake".into()),
-        connected = ProtocolClient::connect(launched.reader, launched.writer) => {
-            connected.map_err(|e| format!("handshake: {e}"))?
-        }
-    };
-    verify_solver_policy(client.hello().solver_policy_version)?;
-    if let Some(expected) = &launched.expected {
-        verify_hello_axes(expected, client.hello())?;
-    }
-    Ok((instance, Arc::new(client)))
+    startup::initialize(shared, launched).await
 }
 
 fn verify_solver_policy(actual: u32) -> Result<(), String> {
@@ -1323,35 +1367,54 @@ fn verify_solver_policy(actual: u32) -> Result<(), String> {
 }
 
 async fn auto_open_session(shared: &Shared, client: &ProtocolClient) -> Result<(), ProtocolError> {
-    let epoch = shared.epoch.load(Ordering::SeqCst);
+    let epoch = shared.connection.read().unwrap().epoch;
     let args = wire::open_session_args(&OpenSessionRequest {
         document_id: DocumentId::from_uuid(uuid::Uuid::nil()),
         document_revision: DocumentRevision(0),
         worker_epoch: WorkerEpoch(epoch),
         mode: SessionMode::Determinism,
     });
-    let _ = client.request("OpenSession", args).await?;
+    let response = client.request("OpenSession", args).await?;
+    if !response.ok {
+        return Err(ProtocolError::ConnectionLost("OpenSession refused"));
+    }
     Ok(())
 }
 
-/// The §8 wedge decision for one answered ping: `Some(job)` when the in-flight
-/// kernel job has gone longer than its verb's wall deadline WITHOUT emitting a
-/// non-terminal frame.
-///
-/// Three ways this returns `None`, all deliberate: an idle lane; a worker that
-/// omits `inflight` entirely (an older producer — a tolerant reader must not kill
-/// a process it cannot measure); and a job still inside its deadline. Note it is
-/// `sinceProgressMs`, never `ageMs`, that is compared: a legitimately long op that
-/// streams progress resets that clock on every frame and can never be killed here,
-/// which is the whole point of the field (a 4 s op streaming `progress` was
-/// `SIGKILL`ed at 1.2 s by the ping rule alone — finding session-executor-1).
+/// Checks each active lane's progress clock against its configured deadline.
+/// Missing telemetry from an older producer has no measurable wedge. Malformed
+/// new telemetry fails the ping; completed correlation IDs cannot trigger a kill
+/// from a snapshot captured immediately before their terminal frame.
 fn wedged_inflight(
     shared: &Shared,
+    client: &ProtocolClient,
     result: Option<&Value>,
-) -> Option<onecad_core::regen::InflightJob> {
-    let inflight = wire::parse_worker_head(result?).inflight?;
-    let deadline = shared.config.wedge_deadline(&inflight.verb);
-    (Duration::from_millis(inflight.since_progress_ms) > deadline).then_some(inflight)
+) -> Result<Option<onecad_core::regen::InflightJob>, ProtocolError> {
+    let Some(result) = result else {
+        return Ok(None);
+    };
+    let jobs = if let Some(jobs) = result.get("inflightJobs") {
+        onecad_protocol::messages::inflight::decode_jobs(jobs.clone())?
+            .into_iter()
+            .map(|record| onecad_core::regen::InflightJob {
+                verb: record.job.verb,
+                id: record.job.id,
+                job_id: record.job.job_id,
+                age_ms: record.job.age_ms,
+                since_progress_ms: record.job.since_progress_ms,
+            })
+            .collect::<Vec<_>>()
+    } else {
+        wire::parse_worker_head(result)
+            .inflight
+            .into_iter()
+            .collect()
+    };
+    Ok(jobs.into_iter().find(|job| {
+        client.is_pending(job.id)
+            && Duration::from_millis(job.since_progress_ms)
+                > shared.config.wedge_deadline(&job.verb)
+    }))
 }
 
 /// Runs while the worker lives: ping on an interval, watch for exit; stop it on
@@ -1375,6 +1438,15 @@ async fn run_until_death(
             () = shared.retired() => {
                 instance.terminate(RETIRE_GRACE).await;
                 return Death::Retired;
+            }
+            () = shared.solver_deadline_signal.notified() => {
+                if let Some(expired) = shared.take_expired_solver(client) {
+                    let outcome = instance.force_kill().await;
+                    return after_kill(outcome, Death::Wedged {
+                        verb: expired.verb, age_ms: expired.age_ms,
+                        since_progress_ms: expired.age_ms,
+                    });
+                }
             }
             _ = ticker.tick() => {
                 if let Some(reason) = shared.host.relaunch_required() {
@@ -1410,8 +1482,16 @@ async fn ping_once(
         }
         pinged = ping => pinged,
     };
+    let pinged = pinged.and_then(|resp| {
+        let wedged = if resp.ok {
+            wedged_inflight(shared, client, resp.result.as_ref())?
+        } else {
+            None
+        };
+        Ok((resp, wedged))
+    });
     match pinged {
-        Ok(resp) if resp.ok => {
+        Ok((resp, wedged)) if resp.ok => {
             *missed = 0;
             // SCHEMA §8 wedged op (WP-H). The WORKER's `inflight` is authoritative
             // — it is measured from the dequeue and from the last non-terminal frame
@@ -1419,7 +1499,7 @@ async fn ping_once(
             // and about frames Rust has not drained yet — so it is READ here, never
             // re-derived. An answered ping means the worker is fine; this is the
             // separate question of whether the op it is running still moves.
-            let wedged = wedged_inflight(shared, resp.result.as_ref())?;
+            let wedged = wedged?;
             tracing::error!(
                 verb = %wedged.verb,
                 ageMs = wedged.age_ms,
@@ -1540,16 +1620,20 @@ impl GeometryEngine for WorkerManager {
             .and_then(Value::as_u64)
             .filter(|epoch| *epoch > worker_epoch.0)
             .ok_or_else(|| protocol("ResetSession did not advance workerEpoch"))?;
-        if !Arc::ptr_eq(&client, &self.client_or_err()?)
-            || self
-                .shared
-                .epoch
-                .compare_exchange(worker_epoch.0, epoch, Ordering::SeqCst, Ordering::SeqCst)
-                .is_err()
         {
-            return Err(protocol(
-                "ResetSession response belongs to a replaced worker session",
-            ));
+            let mut connection = self.shared.connection.write().unwrap();
+            if connection.epoch != worker_epoch.0
+                || connection.state != WorkerState::Ready
+                || !connection
+                    .client
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &client))
+            {
+                return Err(protocol(
+                    "ResetSession response belongs to a replaced worker session",
+                ));
+            }
+            connection.epoch = epoch;
         }
         Ok(WorkerEpoch(epoch))
     }
@@ -1754,10 +1838,10 @@ impl SolverEngine for WorkerManager {
         let epoch = self.epoch();
         let client = self.client_or_err()?;
         super::endpoint_tangency::sketch(sketch, &client.hello().capabilities)?;
-        let resp = client
-            .request("SketchUpsert", wire::sketch_upsert_args(sketch))
-            .await
-            .map_err(protocol_err)?;
+        let (resp, _) = self
+            .shared
+            .solver_round_trip(&client, "SketchUpsert", wire::sketch_upsert_args(sketch))
+            .await?;
         if self.epoch() != epoch {
             return Err(EngineError::Protocol {
                 message: "SketchUpsert: worker restarted during solve".into(),
@@ -1849,15 +1933,14 @@ impl SolverEngine for WorkerManager {
     async fn sketch_regions(&self, sketch_id: &str) -> Result<FinishSketchDto, EngineError> {
         // Uses the resp binary tail (previewTriangles bins, SCHEMA §7.4 inline §5.2).
         let client = self.client_or_err()?;
-        let inflight = client
-            .start_request(
+        let (resp, tail) = self
+            .shared
+            .solver_round_trip(
+                &client,
                 "SketchRegions",
                 wire::sketch_regions_args(sketch_id),
-                Lane::Control,
             )
-            .await
-            .map_err(protocol_err)?;
-        let (resp, tail) = inflight.response_with_bin().await.map_err(protocol_err)?;
+            .await?;
         let sections = resp.bin.clone().unwrap_or_default();
         let result = ok_result(resp)?;
         wire::parse_sketch_regions(sketch_id, &result, &sections, &tail).map_err(|e| protocol(&e))
@@ -2397,6 +2480,14 @@ impl crate::worker::PreviewEngine for WorkerManager {
         let sections = resp.bin.clone().unwrap_or_default();
         let result = ok_result(resp)?;
         parse_preview_result(&result, &sections, &tail)
+    }
+
+    async fn edit_operand_context(
+        &self,
+        req: crate::worker::EditOperandRequest,
+        cancel: onecad_core::regen::CancelToken,
+    ) -> Result<crate::worker::OperandContextPreview, EngineError> {
+        preview_plan::edit_operand_context(self.shared.clone(), req, cancel).await
     }
 
     async fn preview_plan(
@@ -3138,7 +3229,7 @@ mod poison_tests {
     const FP: &str = "occt-793-aaaa";
 
     /// A `Shared` with no supervisor attached — nothing here touches `conn`.
-    fn shared(poison_threshold: u32) -> Arc<Shared> {
+    pub(super) fn shared(poison_threshold: u32) -> Arc<Shared> {
         let (lifecycle, _) = broadcast::channel(8);
         Arc::new(Shared {
             manager_id: NEXT_MANAGER_ID.fetch_add(1, Ordering::Relaxed),
@@ -3160,10 +3251,8 @@ mod poison_tests {
             host: Arc::new(crate::worker::host::NoKernelHost),
             failure_reason: Mutex::new(None),
             journal_failures_reported: AtomicU64::new(0),
-            conn: RwLock::new(None),
-            epoch: AtomicU64::new(1),
-            state: Mutex::new(WorkerState::Starting),
-            hello: Mutex::new(None),
+            connection: RwLock::default(),
+            solver_deadline_signal: Notify::new(),
             inflight: Mutex::new(HashMap::new()),
             poison: Mutex::new(Poison::default()),
             lifecycle,
@@ -3428,7 +3517,15 @@ mod poison_tests {
         settler.await.unwrap();
     }
 
-    async fn send_mock_frame(io: &mut tokio::io::DuplexStream, frame: Value) {
+    #[tokio::test]
+    async fn disconnected_ready_flag_never_satisfies_wait_ready() {
+        let shared = shared(1);
+        shared.set_state(WorkerState::Ready);
+        let manager = WorkerManager { shared };
+        assert!(!manager.wait_ready(Duration::ZERO).await);
+    }
+
+    pub(super) async fn send_mock_frame(io: &mut tokio::io::DuplexStream, frame: Value) {
         use tokio::io::AsyncWriteExt;
         let bytes =
             onecad_protocol::framing::encode_frame(&serde_json::to_vec(&frame).unwrap(), &[])
@@ -3452,7 +3549,7 @@ mod poison_tests {
         }
     }
 
-    async fn read_mock_request(io: &mut tokio::io::DuplexStream) -> Value {
+    pub(super) async fn read_mock_request(io: &mut tokio::io::DuplexStream) -> Value {
         use tokio::io::AsyncReadExt;
         let mut header = [0_u8; 12];
         io.read_exact(&mut header).await.unwrap();
@@ -3476,7 +3573,7 @@ mod poison_tests {
             "quantizationVersion":1,"solverPolicyVersion":4,"capabilities":[]}})).await;
         let (reader, writer) = tokio::io::split(client_io);
         let client = Arc::new(ProtocolClient::connect(reader, writer).await.unwrap());
-        *shared.conn.write().unwrap() = Some(client);
+        assert!(shared.publish_ready(client));
         let id = SketchId(uuid::Uuid::from_u128(0x13));
         let request = {
             let manager = manager.clone();
@@ -3500,3 +3597,10 @@ mod poison_tests {
 
 mod native_gestures;
 mod preview_plan;
+
+#[cfg(test)]
+mod readiness_tests;
+
+mod solver_supervision;
+
+mod startup;

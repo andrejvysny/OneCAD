@@ -356,7 +356,11 @@ fn settings(
             common::label(ui, "Application executable or macOS app bundle", 12.0, theme.ink5);
             ui.add_space(8.0);
             let value = state.application_drafts.entry(application_key(&package.manifest.id, &application.id)).or_default();
-            ui.add_enabled(context.idle, egui::TextEdit::singleline(value).id(egui::Id::unique(("native-app-path", &package.manifest.id, &application.id))).desired_width(ui.available_width()).hint_text("Absolute path · leave empty for automatic discovery").font(egui::FontId::proportional(12.5)).margin(vec2(10.0, 7.0)));
+            let id = egui::Id::unique(("native-app-path", &package.manifest.id, &application.id));
+            ui.add_enabled_ui(context.idle, |ui| {
+                let width = ui.available_width();
+                onecad_widgets::text_session::show(ui, id, value, "Application path", 16_384, |text| egui::TextEdit::singleline(text).desired_width(width).hint_text("Absolute path · leave empty for automatic discovery").font(egui::FontId::proportional(12.5)).margin(vec2(10.0, 7.0)))
+            });
             ui.add_space(8.0);
             ui.horizontal_wrapped(|ui| {
                 if ui.add_enabled(context.idle, Button::new("Save path").kind(ButtonKind::Primary)).clicked() { action.request = Some(Request::SetApplication { extension: package.manifest.id.clone(), application: application.id.clone(), executable: (!value.trim().is_empty()).then(|| value.trim().into()) }); }

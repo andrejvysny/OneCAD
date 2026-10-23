@@ -247,6 +247,7 @@ fn press_no_motion_and_return_to_original_preserve_expression_and_precision() {
     for text in ["6 * 2", "12.3456"] {
         let value = if text == "6 * 2" { 12.0 } else { 12.3456 };
         let target = Target {
+            caption: None,
             record: RecordId::new(),
             kind: Kind::Scalar(N::HoleDiameter.into()),
             geometry: Geometry::axis(DVec3::ZERO, DVec3::X, 0.5),

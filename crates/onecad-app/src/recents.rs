@@ -67,6 +67,35 @@ fn load_at(recents_path: &Path) -> Vec<RecentEntry> {
     }
 }
 
+/// Updates a successfully migrated working path without deleting its source.
+pub fn relocate(app: &HostContext, source: &Path, destination: &Path) {
+    let Some(path) = recents_file(app) else {
+        return;
+    };
+    let _lane = recents_lane();
+    let mut entries = load_at(&path);
+    let source = source.to_string_lossy();
+    let target = destination.to_string_lossy().into_owned();
+    entries.retain(|entry| entry.path != source.as_ref() && entry.path != target);
+    entries.insert(
+        0,
+        RecentEntry {
+            path: target,
+            name: destination
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            last_opened_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|time| time.as_millis() as u64)
+                .unwrap_or(0),
+        },
+    );
+    entries.truncate(MAX_RECENTS);
+    store_at(&path, &entries);
+}
+
 /// Renames an unparseable `recents.json` aside to `recents.json.corrupt-<unix
 /// seconds>` (or `…-<unix seconds>-<n>` when that name is taken), so the next
 /// [`store_at`] — which only ever targets `recents_path` itself — can never

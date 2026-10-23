@@ -87,11 +87,13 @@ fn fields(ui: &mut Ui, w: &mut WizardState) {
     let width = ui.available_width();
     ui.spacing_mut().item_spacing.y = 5.0;
     caption(ui, "Name");
-    let name = egui::TextEdit::singleline(&mut w.name)
-        .font(FontId::new(12.5, fonts::mono()))
-        .margin(vec2(10.0, 6.0))
-        .desired_width(width);
-    ui.add(name);
+    let name_id = ui.make_persistent_id("component-name");
+    onecad_widgets::text_session::show(ui, name_id, &mut w.name, "Name", 16_384, |text| {
+        egui::TextEdit::singleline(text)
+            .font(FontId::new(12.5, fonts::mono()))
+            .margin(vec2(10.0, 6.0))
+            .desired_width(width)
+    });
     ui.add_space(8.0);
     let half = (width - 12.0) / 2.0;
     ui.horizontal_top(|ui| {
@@ -118,11 +120,20 @@ fn fields(ui: &mut Ui, w: &mut WizardState) {
         caption(ui, "Description");
         kit::label(ui, "optional", 12.0, FontFamily::Proportional, t.ink5);
     });
-    let description = egui::TextEdit::multiline(&mut w.description)
-        .margin(vec2(10.0, 8.0))
-        .desired_rows(4)
-        .desired_width(width);
-    ui.add(description);
+    let description_id = ui.make_persistent_id("component-description");
+    onecad_widgets::text_session::show(
+        ui,
+        description_id,
+        &mut w.description,
+        "Description",
+        16_384,
+        |text| {
+            egui::TextEdit::multiline(text)
+                .margin(vec2(10.0, 8.0))
+                .desired_rows(4)
+                .desired_width(width)
+        },
+    );
     ui.add_space(8.0);
     caption(ui, "Type");
     type_cards(ui, w, width);

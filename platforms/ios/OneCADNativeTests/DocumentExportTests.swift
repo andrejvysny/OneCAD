@@ -2,6 +2,33 @@ import UIKit
 import XCTest
 @testable import OneCAD
 
+@MainActor
+final class SaveNamePromptNamingTests: XCTestCase {
+    func testEverySupportedFormatNormalizesExactlyOneSuffix() throws {
+        for fileExtension in ["onecad", "step", "stl", "obj", "3mf"] {
+            let name = "Named plate.\(fileExtension.uppercased()).\(fileExtension)"
+            let url = try XCTUnwrap(SaveNamePrompt.destination(for: name, fileExtension: fileExtension))
+            XCTAssertEqual(url.lastPathComponent, "Named plate.\(fileExtension)")
+            XCTAssertEqual(SaveNamePrompt.baseName(name, fileExtension: fileExtension), "Named plate")
+        }
+    }
+
+    func testInvalidNamesAndUnsupportedFormatsAreRefusedAndSeparatorsStayConfined() throws {
+        for name in ["", "   ", ".", "..", ". .", ".step.STEP", "bad\0name", "bad\nname"] {
+            XCTAssertNil(SaveNamePrompt.destination(for: name, fileExtension: "step"), name)
+        }
+        for fileExtension in ["", "exe", "../step", "step,stl"] {
+            XCTAssertNil(SaveNamePrompt.destination(for: "plate", fileExtension: fileExtension))
+        }
+        let url = try XCTUnwrap(SaveNamePrompt.destination(for: "../plate\\part:copy.STEP",
+                                                         fileExtension: "step"))
+        let documents = try FileManager.default.url(for: .documentDirectory, in: .userDomainMask,
+                                                    appropriateFor: nil, create: true)
+        XCTAssertEqual(url.deletingLastPathComponent().standardizedFileURL, documents.standardizedFileURL)
+        XCTAssertEqual(url.lastPathComponent, "-plate-part-copy.step")
+    }
+}
+
 #if ONECAD_ACCEPTANCE
 /// Copies leave the sandbox only through the system export picker (managed
 /// copy policy, docs/ios/HOST.md): File › Export STEP and File › Send a Copy

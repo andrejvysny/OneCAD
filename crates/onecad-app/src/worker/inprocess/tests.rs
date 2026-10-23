@@ -19,6 +19,7 @@ mod failure;
 mod plate;
 mod recovery;
 mod services;
+mod solver;
 
 static GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -30,8 +31,9 @@ fn kernel_linked() -> bool {
         return true;
     }
     assert!(
-        std::env::var("ONECAD_REQUIRE_EMBEDDED_KERNEL").as_deref() != Ok("1"),
-        "ONECAD_REQUIRE_EMBEDDED_KERNEL=1 but the embedded kernel is not linked (set ONECAD_EMBEDDED_WORKER_DIR)"
+        std::env::var("ONECAD_REQUIRE_EMBEDDED_KERNEL").as_deref() != Ok("1")
+            && std::env::var("ONECAD_REQUIRE_EMBEDDED_FAULTS").as_deref() != Ok("1"),
+        "embedded kernel required but not linked (set ONECAD_EMBEDDED_WORKER_DIR)"
     );
     eprintln!("skip: embedded kernel not linked (set ONECAD_EMBEDDED_WORKER_DIR)");
     false

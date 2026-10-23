@@ -42,6 +42,8 @@ pub struct StagedEdgeOp {
 pub struct StagedOffsetFace {
     pub prepared: crate::dto::PrepareOffsetFaceDto,
     pub refs: Vec<ElementRef>,
+    /// Analytic classification of the first operative face, under the same head.
+    pub surface: Option<crate::dto::ClassifyElementDto>,
 }
 
 /// Stages picks under one runtime lock. TopoKey picks promote per body in first
@@ -200,6 +202,7 @@ pub async fn stage_offset_face(
         return Ok(StagedOffsetFace {
             prepared,
             refs: Vec::new(),
+            surface: None,
         });
     }
     if prepared.snapshot_id != scope.snapshot_id.0 {
@@ -208,6 +211,7 @@ pub async fn stage_offset_face(
             prepared.snapshot_id, scope.snapshot_id.0
         )));
     }
+    let surface = first_face_surface(state, scope, &prepared).await?;
     let body = wire::parse_body_id(&prepared.target_body_id).map_err(ApiError::Internal)?;
     let picks = prepared
         .faces
@@ -236,7 +240,33 @@ pub async fn stage_offset_face(
             "a closure face resolved to a different element kind",
         ));
     }
-    Ok(StagedOffsetFace { prepared, refs })
+    Ok(StagedOffsetFace {
+        prepared,
+        refs,
+        surface,
+    })
+}
+
+async fn first_face_surface(
+    state: &AppState,
+    scope: &PreviewContext,
+    prepared: &crate::dto::PrepareOffsetFaceDto,
+) -> Result<Option<crate::dto::ClassifyElementDto>, ApiError> {
+    let Some(face) = prepared.faces.first() else {
+        return Ok(None);
+    };
+    super::classify_element(
+        state,
+        prepared.target_body_id.clone(),
+        String::new(),
+        Some(face.topo_key.clone()),
+        Some(crate::dto::GeometryReadFenceDto {
+            document_id: scope.document_id.clone(),
+            runtime_session: scope.runtime_session.clone(),
+            snapshot_id: scope.snapshot_id.0,
+        }),
+    )
+    .await
 }
 
 /// A closure entry's worker anchor (`{worldPoint}`), the evidence that separates

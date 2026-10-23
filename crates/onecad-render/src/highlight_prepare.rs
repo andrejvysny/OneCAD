@@ -14,6 +14,16 @@ impl PreparedHighlights {
         hover: Option<HighlightTarget<'_>>,
         budget: PreparationBudget,
     ) -> Result<Self, RenderError> {
+        Self::new_retained(scene, selected, hover, budget, None)
+    }
+    /// Keep host admission attached to the prepared and uploaded CPU draw metadata.
+    pub fn new_retained(
+        scene: &SceneSnapshot,
+        selected: &[HighlightTarget<'_>],
+        hover: Option<HighlightTarget<'_>>,
+        budget: PreparationBudget,
+        retention: Option<std::sync::Arc<dyn Send + Sync>>,
+    ) -> Result<Self, RenderError> {
         let count = selected
             .len()
             .checked_add(usize::from(hover.is_some()))
@@ -50,6 +60,7 @@ impl PreparedHighlights {
         }
         Self {
             scene: scene.identity(),
+            retention,
             draws,
             boundaries: Vec::new(),
             boundary_draws: Vec::new(),

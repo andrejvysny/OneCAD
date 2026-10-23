@@ -15,6 +15,7 @@
 #include "io/BrepCodec.h"
 #include "io/OcctBusy.h"
 #include "session/PlanExecutor.h"
+#include "session/EditOperandContext.h"
 #include "session/PreviewMesh.h"
 #include "session/ScratchJob.h"
 #include "util/Log.h"
@@ -35,6 +36,7 @@ struct PreviewPlanArgs {
     std::optional<std::uint64_t> edited_from;
     std::string lod = "coarse";
     json ops = json::array();
+    std::optional<json> operand_operation;
 };
 
 Envelope fail(const Envelope& req, std::uint64_t job_id, const char* code,
@@ -76,6 +78,36 @@ bool parse_args(const Envelope& req, PreviewPlanArgs& out, std::string& error) {
     if (!args.contains("ops") || !args["ops"].is_array()) {
         error = "PreviewPlan: ops must be an array";
         return false;
+    }
+    if (args.contains("editOperandContext")) {
+        const json& operation = args["editOperandContext"];
+        if (!operation.is_object() || !operation.contains("inputs") ||
+            !operation["inputs"].is_array() || operation["inputs"].size() > 64 ||
+            !operation.contains("opId") || !operation["opId"].is_string() ||
+            !operation.contains("opType") || !operation["opType"].is_string()) {
+            error = "PreviewPlan: editOperandContext requires one operation with at most 64 inputs";
+            return false;
+        }
+        if (args.contains("editedFrom")) {
+            error = "PreviewPlan: editOperandContext does not accept editedFrom";
+            return false;
+        }
+        for (const auto& input : operation["inputs"]) {
+            if (!input.is_object() || !input.contains("primary") || !input["primary"].is_object() ||
+                !input["primary"].contains("bodyId") || !input["primary"]["bodyId"].is_string() ||
+                !input["primary"].contains("kind") || !input["primary"]["kind"].is_string() ||
+                (input["primary"].contains("elementId") && !input["primary"]["elementId"].is_string())) {
+                error = "PreviewPlan: editOperandContext inputs require typed primary refs";
+                return false;
+            }
+        }
+        for (const auto& prefix : args["ops"]) {
+            if (prefix.value("opId", std::string()) == operation["opId"].get<std::string>()) {
+                error = "PreviewPlan: queried operation must be outside the prefix";
+                return false;
+            }
+        }
+        out.operand_operation = operation;
     }
     out.ops = args["ops"];
     if (args.contains("lod")) {
@@ -226,7 +258,11 @@ Envelope handle_preview_plan(Session& session, const Envelope& req, HandlerConte
     response.stamp.job_id = in.job_id;
     json meshes = json::array();
     json bodies = json::array();
-    if (auto failure =
+    json operands;
+    if (in.operand_operation) {
+        for (const auto& [id, body] : job.bodies.all()) bodies.push_back(id);
+        operands = edit_operand_context(job, *in.operand_operation);
+    } else if (auto failure =
             attach_meshes(req, in, job, published->bodies, ctx, response, meshes, bodies)) {
         return std::move(*failure);
     }
@@ -244,6 +280,7 @@ Envelope handle_preview_plan(Session& session, const Envelope& req, HandlerConte
         {"bodies", std::move(bodies)},
         {"meshes", std::move(meshes)},
     };
+    if (in.operand_operation) response.result["editOperandContext"] = std::move(operands);
     return response;
 }
 

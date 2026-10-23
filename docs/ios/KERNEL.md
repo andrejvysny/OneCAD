@@ -165,12 +165,14 @@ disables the journal for tests and tools, and a release iOS launch refuses it.
 One `KernelJournal` per directory per process serializes every instance's
 writes.
 
-`inflight.json` — this launch's in-flight kernel jobs, rewritten by temp +
-rename (no fsync) on every journal event and removed when none is left:
+`inflight.json` — this launch's admitted kernel and solver jobs, including queued
+jobs, rewritten by temp + rename (no fsync) on every journal event and removed
+when none is left:
 
 ```json
-{ "version": 1, "session": "<per-launch uuid>",
+{ "version": 2, "session": "<per-launch uuid>", "complete": true,
   "jobs": [ { "instance": 1, "epoch": 3, "requestId": 41, "verb": "ExecutePlan",
+              "kind": "kernel",
               "opId": "<record id>", "stepIndex": 1, "opPosition": 1,
               "key": "<prefixHash>|<opId>|<fingerprint>",
               "fingerprint": "<hex16>", "startedMs": 1761100000000 } ] }
@@ -178,12 +180,38 @@ rename (no fsync) on every journal event and removed when none is left:
 
 `opId`/`stepIndex`/`opPosition`/`key` are `null` until a plan op begins. The
 session token separates a previous launch's record from a live sibling
-instance's without asking about pids.
+instance's without asking about pids. Identity is `(session, instance, epoch,
+requestId, kind)`; the verb is checked on completion. Progress and completion
+cannot alter a sibling job, even within the same host or across generations.
+`kind` is `kernel` or `solver`; status probes are excluded. ABI 3 already carries
+the unique request ID and verb, so its layout and OCW1 version remain unchanged.
+Callbacks may overlap on reader, kernel and solver threads. `JOB_BEGIN` precedes
+mailbox admission; `JOB_END` follows terminal serialization/write attempt, including
+cancelled and superseded jobs. A failed write closes a physically completed job;
+its caller still reports completion unknown and never retries automatically. Active clocks still start at dequeue.
+
+Version 1 journals migrate by deriving kind from verb and marking evidence
+incomplete: legacy writers did not record solver overlap. Version 1 poison counts
+retain at most one suspicion; only complete version 2 evidence can quarantine.
+Unknown versions,
+truncated/malformed files and unsupported plan records never invent a guilty op.
+Reads are bounded to 1 MiB, identity strings to 128 bytes, admitted journal
+records to 512 and poison entries to 128. `complete: false` marks known incomplete recording (overflow or earlier
+write failure); such leftovers cannot quarantine a plan. Every unfinished record,
+including non-plan, queued, other-generation and other-fingerprint work, makes
+attribution ambiguous before plan-key filtering. Repeated ambiguous suspicion
+remains below the quarantine threshold. A valid, complete, single supported plan
+record alone may advance its strike count.
+
+Best-effort rename cannot guarantee that a failed write or immediate process loss
+leaves the newest completeness marker on disk. Leftovers therefore remain
+suspected interruptions; neither a successful callback nor a readable old file
+proves the recorded operation caused process loss.
 
 `poison.json` — persisted strikes:
 
 ```json
-{ "version": 1, "entries": { "<key>": { "strikes": 1, "opId": "<record id>", "lastMs": 0 } },
+{ "version": 2, "entries": { "<key>": { "strikes": 1, "opId": "<record id>", "lastMs": 0 } },
   "appliedSession": "<the leftover session these strikes include>" }
 ```
 
@@ -196,14 +224,14 @@ fingerprints are pruned. `poison.json` (with `appliedSession`) is written
 BEFORE `inflight.json` is replaced, so a launch killed in between neither loses
 the strike nor applies the same leftover twice.
 
-Attribution with several tabs: a leftover holding more than one op key cannot
-say which op crashed, so its strikes are capped at threshold − 1 (an
-ambiguous leftover never opens a circuit). Every key that holds a strike runs
-ALONE among this process's plan dispatches (`ExecutePlan` and `PreviewPlan`
-take `KernelJournal::plan_permit`: exclusive for a struck key, shared
-otherwise, held to the terminal), so its next interruption is unambiguous. An
-innocent sibling runs alone, completes and is healed; a crashing op crashes
-alone and opens — at most one ambiguous and one unambiguous crash.
+Attribution with several jobs: a leftover holding more than one unfinished job
+cannot identify a guilty op, so its plan suspicions are capped at threshold − 1
+(an ambiguous leftover never opens a circuit). Every key that holds a strike runs
+alone among this process's plan dispatches (`ExecutePlan` and `PreviewPlan` take
+`KernelJournal::plan_permit`: exclusive for a struck key, shared otherwise, held
+to the terminal). Other solver/non-plan jobs can still overlap, so this ordering
+does not guarantee unambiguous evidence. A successful plan heals its keys; only a
+complete, single supported plan record can advance a suspicion to quarantine.
 
 Every instance seeds its circuit from `poison.json`; at
 `IN_PROCESS_POISON_THRESHOLD` (2) strikes a key's circuit is open and
@@ -277,3 +305,33 @@ op, and reaches worker status (`WorkerLifecycle::JournalDegraded`,
   same-pid rule (one app process; `kill` would answer `EPERM` for a recycled
   foreign pid). Residual: a relaunch that receives the previous launch's pid
   defers that marker's recovery offer to the next launch.
+
+## Readiness and ordinary solver supervision
+
+The manager publishes lifecycle state, worker epoch, connection and validated
+hello under one lock. A usable Ready tuple requires the current connection to
+remain open and its handshake/session startup to have succeeded. Recovery retires
+Ready before dropping the connection or advancing the epoch. No intermediate
+tuple is observable; retirement remains terminal and does not advance the epoch.
+Handshake plus initial `OpenSession` share the configured ping timeout (5 s in
+production). A failed or cancelled startup explicitly stops and awaits its
+instance before any replacement; abandonment is terminal. Previous-launch journal
+recovery precedes the first new `OpenSession` journal event.
+The restart hook remains deferred until the replacement reaches Ready. Requests
+and replies pinned to an older connection or epoch cannot publish results.
+
+`GetWorkerHead.inflightJobs` adds at most two active records (`kernel` and
+`solver`), each with request identity and its own age/progress clocks. Legacy
+`inflight` remains the kernel-only view; absent `inflightJobs` falls back to it.
+Ordinary `SketchUpsert` and `SketchRegions` use the existing default supervision
+budget (30 s in production), including host dispatch/write/queue delay. An
+answered status ping cannot excuse an overdue solver. Expiry reports completion
+unknown and signals only the matching generation/connection's supervisor. It does
+not retry the accepted request. An unresponsive in-process run is abandoned once
+and leaves the process terminal `relaunch-required`, with no replacement thread.
+
+Fault qualification uses `ONECAD_REQUIRE_EMBEDDED_FAULTS=1`; missing linked kernel
+or test hooks fails. `__testSolverDelayMs` (maximum 10000 ms) delays an ordinary
+Upsert/Regions request only in a hooks build. `__testSolverIgnoreCancel` makes the
+delay deliberately non-cooperative for bounded abandonment tests. These are
+controlled injections, not physical crash/jetsam evidence.

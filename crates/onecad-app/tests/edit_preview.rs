@@ -370,6 +370,7 @@ fn part_with_dependent() -> Vec<OperationRecord> {
 mod edit_preview {
     mod capability;
     mod equivalence;
+    mod operands;
     mod races;
 }
 

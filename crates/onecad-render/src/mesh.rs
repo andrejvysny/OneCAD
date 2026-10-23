@@ -40,6 +40,8 @@ pub(crate) struct PreparedGeometry {
     segments: Vec<Segment>,
     feature_segments: Vec<Segment>,
     silhouettes: Vec<crate::silhouette::SilEdge>,
+    source_retention: Option<Arc<dyn Send + Sync>>,
+    _preparation_retention: Option<Arc<dyn Send + Sync>>,
 }
 
 #[derive(Clone)]
@@ -61,6 +63,7 @@ pub(crate) struct GpuBody {
     pub segment_count: u32,
     pub uniform: wgpu::Buffer,
     pub frame_bind: wgpu::BindGroup,
+    _source_retention: Option<Arc<dyn Send + Sync>>,
 }
 
 #[cfg(test)]
@@ -136,6 +139,10 @@ fn estimate_inner(
 }
 
 impl PreparedGeometry {
+    pub(crate) fn retains(&self, requested: &crate::PreparationRetention) -> bool {
+        (requested.source.is_none() || self.source_retention.is_some())
+            && (requested.preparation.is_none() || self._preparation_retention.is_some())
+    }
     pub(crate) fn gpu_bytes(&self, max_buffer: u64) -> Result<u64, RenderError> {
         buffer_estimate(
             [
@@ -171,7 +178,14 @@ fn reserve<T>(count: usize) -> Result<Vec<T>, RenderError> {
 }
 
 impl PreparedBody {
+    #[cfg(test)]
     pub(crate) fn new(body: &SceneBody) -> Result<Self, RenderError> {
+        Self::new_retained(body, crate::PreparationRetention::default())
+    }
+    pub(crate) fn new_retained(
+        body: &SceneBody,
+        retention: crate::PreparationRetention,
+    ) -> Result<Self, RenderError> {
         let mesh = body.mesh()?;
         let h = mesh.header();
         let mut positions = reserve(h.vertex_count as usize)?;
@@ -226,16 +240,19 @@ impl PreparedBody {
                 }
             }
         }
+        let silhouettes = crate::silhouette::candidates(&mesh)?;
         Ok(Self {
             mesh_revision: body.mesh_revision(),
             geometry: Arc::new(PreparedGeometry {
                 source: Arc::clone(body.bytes()),
+                source_retention: retention.source,
+                _preparation_retention: retention.preparation,
                 positions,
                 normals,
                 indices,
                 segments,
                 feature_segments,
-                silhouettes: crate::silhouette::candidates(&mesh)?,
+                silhouettes,
             }),
         })
     }
@@ -259,6 +276,7 @@ impl PreparedBody {
         GpuBody {
             preview_suppressed: false,
             source: self.geometry.source.clone(),
+            _source_retention: self.geometry.source_retention.clone(),
             id,
             mesh_revision: self.mesh_revision,
             style: BodyStyle::default(),
@@ -298,6 +316,14 @@ impl PreparedBody {
             ),
             uniform,
             frame_bind,
+        }
+    }
+}
+
+impl GpuBody {
+    pub(crate) fn retain_source(&mut self, body: &PreparedBody) {
+        if let Some(retention) = &body.geometry.source_retention {
+            self._source_retention = Some(retention.clone());
         }
     }
 }

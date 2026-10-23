@@ -29,11 +29,58 @@ use crate::worker::{
 /// before returning; the spawned task keeps draining after that.
 const CANCEL_DRAIN: Duration = Duration::from_secs(2);
 
+struct OperandQuery {
+    operation: Value,
+    _serialization: tokio::sync::OwnedMutexGuard<()>,
+}
+
 pub(super) async fn preview_plan(
     shared: Arc<Shared>,
     req: PreviewPlanRequest,
     cancel: CancelToken,
 ) -> Result<PlanPreview, EngineError> {
+    request(shared, req, None, cancel)
+        .await
+        .map(|(preview, _)| preview)
+}
+
+pub(super) async fn edit_operand_context(
+    shared: Arc<Shared>,
+    req: crate::worker::EditOperandRequest,
+    cancel: CancelToken,
+) -> Result<crate::worker::OperandContextPreview, EngineError> {
+    let operation =
+        crate::worker::edit_operands::operation(&req).map_err(|message| EngineError::OpFailed {
+            code: onecad_core::regen::OpFailureCode::Unsupported,
+            recoverable: true,
+            message,
+            diagnostics: vec![],
+        })?;
+    let serialization = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err(EngineError::Cancelled),
+        permit = req.serialization.lock_owned() => permit,
+    };
+    let (prefix, context) = request(
+        shared,
+        req.prefix,
+        Some(OperandQuery {
+            operation: operation.clone(),
+            _serialization: serialization,
+        }),
+        cancel,
+    )
+    .await?;
+    crate::worker::edit_operands::parse(prefix, &operation, &context)
+        .map_err(|message| EngineError::Protocol { message })
+}
+
+async fn request(
+    shared: Arc<Shared>,
+    req: PreviewPlanRequest,
+    query: Option<OperandQuery>,
+    cancel: CancelToken,
+) -> Result<(PlanPreview, Value), EngineError> {
     if cancel.is_cancelled() {
         return Err(EngineError::Cancelled);
     }
@@ -53,11 +100,26 @@ pub(super) async fn preview_plan(
     if !capabilities.iter().any(|c| c == PLAN_PREVIEW_CAPABILITY) {
         return Err(plan_preview_unavailable());
     }
+    if query.is_some()
+        && !capabilities
+            .iter()
+            .any(|c| c == crate::worker::EDIT_OPERAND_CAPABILITY)
+    {
+        return Err(crate::worker::edit_operands::unavailable());
+    }
     super::super::endpoint_tangency::plan(&req.plan, capabilities)?;
     super::super::boolean_tools::plan(&req.plan, capabilities)?;
 
     let (tx, mut rx) = oneshot::channel();
-    tokio::spawn(drive(shared, client, req, op_keys, cancel.clone(), tx));
+    tokio::spawn(drive(
+        shared,
+        client,
+        req,
+        query,
+        op_keys,
+        cancel.clone(),
+        tx,
+    ));
     tokio::select! {
         result = &mut rx => result.unwrap_or(Err(EngineError::Cancelled)),
         () = cancel.cancelled() => {
@@ -73,11 +135,20 @@ async fn drive(
     shared: Arc<Shared>,
     client: Arc<ProtocolClient>,
     req: PreviewPlanRequest,
+    query: Option<OperandQuery>,
     op_keys: Vec<String>,
     cancel: CancelToken,
-    tx: oneshot::Sender<Result<PlanPreview, EngineError>>,
+    tx: oneshot::Sender<Result<(PlanPreview, Value), EngineError>>,
 ) {
-    let result = run(&shared, &client, &req, &op_keys, &cancel).await;
+    let result = run(
+        &shared,
+        &client,
+        &req,
+        query.as_ref().map(|query| &query.operation),
+        &op_keys,
+        &cancel,
+    )
+    .await;
     let _ = tx.send(result);
 }
 
@@ -85,9 +156,10 @@ async fn run(
     shared: &Shared,
     client: &ProtocolClient,
     req: &PreviewPlanRequest,
+    operation: Option<&Value>,
     op_keys: &[String],
     cancel: &CancelToken,
-) -> Result<PlanPreview, EngineError> {
+) -> Result<(PlanPreview, Value), EngineError> {
     let job = req.plan.job_id;
     // Ordered like `ExecutePlan` (a struck key runs alone); held to the terminal.
     // Permit first: without ordering (sidecar) nothing changes.
@@ -102,12 +174,12 @@ async fn run(
     if cancel.is_cancelled() {
         return Err(EngineError::Cancelled);
     }
+    let mut args = wire_preview::preview_plan_args(req);
+    if let Some(operation) = operation {
+        args["editOperandContext"] = operation.clone();
+    }
     let inflight = client
-        .start_request(
-            "PreviewPlan",
-            wire_preview::preview_plan_args(req),
-            Lane::Control,
-        )
+        .start_request("PreviewPlan", args, Lane::Control)
         .await
         .map_err(protocol_err)?;
     let id = inflight.id;
@@ -150,20 +222,27 @@ fn finish(
     req: &PreviewPlanRequest,
     steps: Vec<PlanStepEvent>,
     terminal: StreamEnd,
-) -> Result<PlanPreview, EngineError> {
+) -> Result<(PlanPreview, Value), EngineError> {
     match terminal {
         StreamEnd::Local(error) => Err(error),
         StreamEnd::Resp(Ok((resp, tail))) if resp.ok => {
             let sections = resp.bin.clone().unwrap_or_default();
             let result = resp.result.unwrap_or(Value::Null);
-            wire_preview::parse_plan_previewed(
+            let preview = wire_preview::parse_plan_previewed(
                 &result,
                 &sections,
                 &tail,
                 req.expected_snapshot,
                 steps,
             )
-            .map_err(|message| EngineError::Protocol { message })
+            .map_err(|message| EngineError::Protocol { message })?;
+            Ok((
+                preview,
+                result
+                    .get("editOperandContext")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            ))
         }
         StreamEnd::Resp(Ok((resp, _))) => Err(resp.error.as_ref().map_or_else(
             || EngineError::Protocol {

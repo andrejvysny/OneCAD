@@ -101,7 +101,7 @@ impl LogLevel {
 /// `ONECAD_WORKER_JOURNAL_*`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JournalKind {
-    /// A kernel job was dequeued.
+    /// A kernel or solver job is about to enter its mailbox.
     JobBegin,
     /// An ExecutePlan / PreviewPlan op is about to run.
     PlanOpBegin,
@@ -154,7 +154,7 @@ pub trait WorkerCallbacks: Send + Sync {
         false
     }
 
-    /// One journal event, synchronously on the kernel thread, before the named
+    /// One journal event, synchronously on the reader or owning execution lane, before the named
     /// work runs (`JobEnd`: after the job's terminal frame was written).
     fn journal(&self, event: &JournalEvent) {
         let _ = event;

@@ -1,10 +1,17 @@
-//! Conservative CPU payload reservations include current, pending and building handoffs.
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+//! Conservative CPU admission, shared by a window's service runtime.
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
+use tokio::sync::Notify;
+mod admission;
 pub const DISPLAY_RESERVATION: usize = 160 << 20;
 pub const PREVIEW_RESERVATION: usize = 192 << 20;
+pub const DISPLAY_SOURCE_RESERVATION: usize = DISPLAY_RESERVATION - MAX_PREPARED_BYTES as usize;
+pub const PREVIEW_SOURCE_RESERVATION: usize = PREVIEW_RESERVATION - MAX_PREPARED_BYTES as usize;
 pub const MAX_SOURCE_BYTES: usize = 32 << 20;
 pub const MAX_PREPARED_BYTES: u64 = 64 << 20;
 pub const MAX_PROFILE_BYTES: usize = 16 << 20;
@@ -17,33 +24,362 @@ pub const MAX_DISPLAY_SCENE_BYTES: usize =
 pub const MAX_PREVIEW_SCENE_BYTES: usize =
     PREVIEW_RESERVATION - MAX_SOURCE_BYTES - MAX_PREPARED_BYTES as usize - (2 << 20);
 const HOST_BYTES: usize = 768 << 20;
-#[derive(Default)]
+
+pub const ADMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+const MAX_WAITERS: usize = onecad_app::reservations::MAX_OPEN_DOCUMENTS * 3;
+pub type OwnerId = u64;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Kind {
+    #[cfg(test)]
+    Other,
+    Display,
+    DisplaySource,
+    Preview,
+    PreviewSource,
+    Preparation,
+    Contour,
+    Highlight,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct Policy {
+    pub aggregate: usize,
+    pub active_headroom: usize,
+}
+impl Policy {
+    pub fn for_profile(profile: onecad_render::RenderProfile) -> Self {
+        Self {
+            aggregate: HOST_BYTES,
+            active_headroom: if profile == onecad_render::RenderProfile::Mobile {
+                PREVIEW_RESERVATION
+            } else {
+                0
+            },
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub struct Portion {
+    pub id: u64,
+    pub admission: u64,
+    pub owner: OwnerId,
+    pub kind: Kind,
+    pub bytes: usize,
+}
+#[derive(Default, Debug)]
+pub struct OwnerSnapshot {
+    pub used: usize,
+    pub kinds: BTreeMap<Kind, usize>,
+}
+pub struct Snapshot {
+    pub used: usize,
+    pub inactive: usize,
+    pub active: Option<OwnerId>,
+    pub portions: Vec<Portion>,
+    pub owners: BTreeMap<OwnerId, OwnerSnapshot>,
+    pub waiting: usize,
+    pub degraded: bool,
+}
+impl std::fmt::Debug for Snapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Snapshot")
+            .field("used", &self.used)
+            .field("inactive", &self.inactive)
+            .field("active", &self.active)
+            .field("portions", &self.portions)
+            .field("owners", &self.owners)
+            .field("waiting", &self.waiting)
+            .field("degraded", &self.degraded)
+            .finish()
+    }
+}
+#[derive(Debug)]
+struct Ticket {
+    id: u64,
+    owner: OwnerId,
+    kind: Kind,
+    bytes: usize,
+    closed: Arc<AtomicBool>,
+}
+#[derive(Debug)]
+struct State {
+    policy: Policy,
+    active: Option<OwnerId>,
+    next: u64,
+    degraded: bool,
+    portions: BTreeMap<u64, Portion>,
+    waiters: VecDeque<Ticket>,
+}
+impl State {
+    fn next_id(&mut self) -> Result<u64, String> {
+        if self.degraded {
+            return Err("Native CPU budget ledger unavailable; document remains open".into());
+        }
+        let Some(next) = self.next.checked_add(1) else {
+            self.degraded = true;
+            return Err("Native CPU budget identity exhausted; document remains open".into());
+        };
+        self.next = next;
+        Ok(next)
+    }
+    fn used(&self) -> usize {
+        self.portions
+            .values()
+            .fold(0usize, |used, portion| used.saturating_add(portion.bytes))
+    }
+    fn inactive(&self) -> usize {
+        self.portions
+            .values()
+            .filter(|portion| Some(portion.owner) != self.active)
+            .map(|portion| portion.bytes)
+            .sum()
+    }
+    fn eligible(&self, owner: OwnerId, bytes: usize) -> bool {
+        !self.degraded
+            && self
+                .used()
+                .checked_add(bytes)
+                .is_some_and(|next| next <= self.policy.aggregate)
+            && (self.active == Some(owner)
+                || self.inactive().checked_add(bytes).is_some_and(|next| {
+                    next <= self.policy.aggregate - self.policy.active_headroom
+                }))
+    }
+    fn first_eligible(&self) -> Option<u64> {
+        self.waiters
+            .iter()
+            .find(|ticket| {
+                !ticket.closed.load(Ordering::Acquire) && self.eligible(ticket.owner, ticket.bytes)
+            })
+            .map(|ticket| ticket.id)
+    }
+    fn allocate(&mut self, owner: OwnerId, kind: Kind, bytes: usize) -> Result<u64, String> {
+        let id = self.next_id()?;
+        self.portions.insert(
+            id,
+            Portion {
+                id,
+                admission: id,
+                owner,
+                kind,
+                bytes,
+            },
+        );
+        Ok(id)
+    }
+}
+#[derive(Debug)]
+pub struct BudgetAuthority {
+    state: Mutex<State>,
+    changed: Notify,
+}
+impl BudgetAuthority {
+    pub fn new(profile: onecad_render::RenderProfile) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(State {
+                policy: Policy::for_profile(profile),
+                active: None,
+                next: 0,
+                degraded: false,
+                portions: BTreeMap::new(),
+                waiters: VecDeque::new(),
+            }),
+            changed: Notify::new(),
+        })
+    }
+    /// Poisoned accounting is inspectable and can retire known portions, but cannot admit work.
+    fn state(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|poisoned| {
+            let mut state = poisoned.into_inner();
+            let first_failure = !state.degraded;
+            state.degraded = true;
+            if first_failure {
+                self.changed.notify_waiters();
+            }
+            state
+        })
+    }
+    pub fn owner(self: &Arc<Self>) -> Result<Arc<HostBudget>, String> {
+        let owner = self.state().next_id()?;
+        Ok(Arc::new(HostBudget {
+            authority: self.clone(),
+            owner,
+            closed: Arc::new(AtomicBool::new(false)),
+        }))
+    }
+    pub fn set_active(&self, owner: Option<OwnerId>) {
+        let mut state = self.state();
+        if state.active != owner {
+            state.active = owner;
+            drop(state);
+            self.changed.notify_waiters();
+        }
+    }
+    pub fn snapshot(&self) -> Snapshot {
+        let state = self.state();
+        let mut owners = BTreeMap::<OwnerId, OwnerSnapshot>::new();
+        for portion in state.portions.values() {
+            let owner = owners.entry(portion.owner).or_default();
+            owner.used += portion.bytes;
+            *owner.kinds.entry(portion.kind).or_default() += portion.bytes;
+        }
+        Snapshot {
+            used: state.used(),
+            inactive: state.inactive(),
+            active: state.active,
+            portions: state
+                .portions
+                .iter()
+                .map(|(id, portion)| {
+                    debug_assert_eq!(*id, portion.id);
+                    portion.clone()
+                })
+                .collect(),
+            owners,
+            waiting: state.waiters.len(),
+            degraded: state.degraded,
+        }
+    }
+}
+#[derive(Debug)]
 pub struct HostBudget {
-    used: AtomicUsize,
+    authority: Arc<BudgetAuthority>,
+    owner: OwnerId,
+    closed: Arc<AtomicBool>,
+}
+#[cfg(test)]
+impl Default for HostBudget {
+    fn default() -> Self {
+        let authority = BudgetAuthority::new(onecad_render::RenderProfile::Desktop);
+        let owner = authority.state().next_id().unwrap();
+        Self {
+            authority,
+            owner,
+            closed: Arc::new(AtomicBool::new(false)),
+        }
+    }
 }
 pub struct Lease {
     budget: Arc<HostBudget>,
+    id: u64,
     bytes: usize,
 }
+impl std::fmt::Debug for Lease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Lease")
+            .field("id", &self.id)
+            .field("bytes", &self.bytes)
+            .finish()
+    }
+}
 impl HostBudget {
+    pub fn owner_id(&self) -> OwnerId {
+        self.owner
+    }
+    pub fn snapshot(&self) -> Snapshot {
+        self.authority.snapshot()
+    }
+    pub fn activate(&self) {
+        let mut state = self.authority.state();
+        if !self.closed.load(Ordering::Acquire) && state.active != Some(self.owner_id()) {
+            state.active = Some(self.owner_id());
+            drop(state);
+            self.wake();
+        }
+    }
+    pub fn wake(&self) {
+        self.authority.changed.notify_waiters();
+    }
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        let mut state = self.authority.state();
+        if state.active == Some(self.owner) {
+            state.active = None;
+        }
+        drop(state);
+        self.wake();
+    }
+    #[cfg(test)]
     pub fn reserve(self: &Arc<Self>, bytes: usize) -> Result<Lease, String> {
-        self.used
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                used.checked_add(bytes).filter(|next| *next <= HOST_BYTES)
-            })
-            .map_err(|_| {
-                "Native host CPU handoff budget exhausted; wait for previous scene delivery"
-                    .to_string()
-            })?;
+        self.reserve_kind(bytes, Kind::Other)
+    }
+    pub fn reserve_kind(self: &Arc<Self>, bytes: usize, kind: Kind) -> Result<Lease, String> {
+        let mut state = self.authority.state();
+        if state.degraded {
+            return Err("Native CPU budget ledger unavailable; document remains open".into());
+        }
+        if self.closed.load(Ordering::Acquire)
+            || !state.eligible(self.owner, bytes)
+            || state.first_eligible().is_some()
+        {
+            return Err(exhausted());
+        }
+        let id = state.allocate(self.owner, kind, bytes)?;
         Ok(Lease {
             budget: self.clone(),
+            id,
             bytes,
         })
     }
 }
+fn exhausted() -> String {
+    "Native host CPU handoff budget exhausted; document remains open; display work was not admitted"
+        .into()
+}
+impl Lease {
+    #[cfg(test)]
+    pub fn split(self, first_bytes: usize) -> Result<(Self, Self), String> {
+        self.split_kinds(first_bytes, Kind::Other, Kind::Other)
+    }
+    /// Both portions retain one admission identity; no capacity is released or reacquired.
+    pub fn split_kinds(
+        mut self,
+        first_bytes: usize,
+        first_kind: Kind,
+        second_kind: Kind,
+    ) -> Result<(Self, Self), String> {
+        if first_bytes > self.bytes {
+            return Err("Native reservation split exceeds admitted bytes".into());
+        }
+        let mut state = self.budget.authority.state();
+        if state.degraded {
+            return Err("Native CPU budget ledger unavailable".into());
+        }
+        let Some(mut original) = state.portions.get(&self.id).cloned() else {
+            state.degraded = true;
+            return Err("Native CPU budget portion missing".into());
+        };
+        let second_id = state.next_id()?;
+        let second = Portion {
+            id: second_id,
+            admission: original.admission,
+            owner: original.owner,
+            kind: second_kind,
+            bytes: self.bytes - first_bytes,
+        };
+        original.bytes = first_bytes;
+        original.kind = first_kind;
+        state.portions.insert(self.id, original);
+        state.portions.insert(second_id, second);
+        let second = Self {
+            budget: self.budget.clone(),
+            id: second_id,
+            bytes: self.bytes - first_bytes,
+        };
+        self.bytes = first_bytes;
+        drop(state);
+        Ok((self, second))
+    }
+}
 impl Drop for Lease {
     fn drop(&mut self) {
-        self.budget.used.fetch_sub(self.bytes, Ordering::AcqRel);
+        let mut state = self.budget.authority.state();
+        if state.portions.remove(&self.id).is_none() {
+            state.degraded = true;
+        }
+        drop(state);
+        self.budget.wake();
     }
 }
 pub fn charge(total: &mut usize, bytes: usize, limit: usize, kind: &str) -> Result<(), String> {
@@ -53,83 +389,9 @@ pub fn charge(total: &mut usize, bytes: usize, limit: usize, kind: &str) -> Resu
         .ok_or_else(|| format!("Native {kind} budget exceeded"))?;
     Ok(())
 }
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn old_pending_and_building_payloads_share_one_reservation_limit() {
-        let budget = Arc::new(HostBudget::default());
-        let current = budget.reserve(DISPLAY_RESERVATION).unwrap();
-        let pending = budget.reserve(DISPLAY_RESERVATION).unwrap();
-        let building = budget.reserve(DISPLAY_RESERVATION).unwrap();
-        let preview = budget.reserve(PREVIEW_RESERVATION).unwrap();
-        assert!(budget.reserve(PREVIEW_RESERVATION).is_err());
-        drop(pending);
-        drop(building);
-        assert!(budget.reserve(PREVIEW_RESERVATION).is_ok());
-        drop(current);
-        drop(preview);
-        assert_eq!(budget.used.load(Ordering::Acquire), 0);
-    }
-    #[test]
-    fn canceled_contour_job_keeps_its_host_reservation_until_execution_retires() {
-        let budget = Arc::new(HostBudget::default());
-        let _current = budget.reserve(DISPLAY_RESERVATION).unwrap();
-        let _pending = budget.reserve(DISPLAY_RESERVATION).unwrap();
-        let _building = budget.reserve(DISPLAY_RESERVATION).unwrap();
-        let _preview = budget.reserve(PREVIEW_RESERVATION).unwrap();
-        let host = Arc::new(budget.reserve(MAX_PREPARED_BYTES as usize).unwrap());
-        let executing_job = host.clone();
-        drop(host);
-        assert!(budget.reserve(MAX_PREPARED_BYTES as usize).is_err());
-        drop(executing_job);
-        assert!(budget.reserve(MAX_PREPARED_BYTES as usize).is_ok());
-    }
-    #[test]
-    fn nema_checked_scene_fits_display_reservation_with_bvh_storage() {
-        let directory =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/render/nema17");
-        let mut paths: Vec<_> = std::fs::read_dir(directory)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension == "mesh1")
-            })
-            .collect();
-        paths.sort();
-        let bodies = paths
-            .into_iter()
-            .map(|path| {
-                onecad_scene::SceneBody::new(
-                    onecad_scene::BodyId::new(),
-                    1,
-                    Arc::from(std::fs::read(path).unwrap()),
-                    onecad_scene::MeshLimits::default(),
-                )
-                .unwrap()
-            })
-            .collect();
-        let scene = onecad_scene::SceneSnapshot::new(
-            onecad_scene::SceneIdentity {
-                session: 1,
-                scene: 1,
-            },
-            bodies,
-            onecad_scene::SceneLimits {
-                max_resident_bytes: MAX_DISPLAY_SCENE_BYTES,
-                max_bodies: MAX_BODIES,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(scene.bodies().len(), 67);
-        assert!(
-            scene.resident_bytes()
-                + MAX_PREPARED_BYTES as usize
-                + MAX_PROFILE_BYTES
-                + DISPLAY_METADATA
-                <= DISPLAY_RESERVATION
-        );
-    }
-}
+mod tests;
+
+#[cfg(test)]
+mod admission_tests;

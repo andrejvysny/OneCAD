@@ -128,14 +128,15 @@ Outcome run_dispatcher(std::size_t lane_stack) {
 
     std::thread runner([&] { d.run(worker_in, worker_out, nullptr); });
     // One job at a time, each terminal read before the next request. For a
-    // kernel job the host does not read until job_end fired, so FIONREAD there
+    // kernel/solver job the host does not read until job_end fired, so FIONREAD there
     // sees exactly what the lane had written by then (0 with the old order).
     const std::string verbs[] = {"KernelStack", "SolverStack", "StatusStack", "BigResult"};
     std::uint64_t id = 1;
     for (const std::string& verb : verbs) {
-        const std::size_t ends_before = out.pending_at_job_end.size();
+        std::size_t ends_before;
+        { std::lock_guard<std::mutex> lock(mu); ends_before = out.pending_at_job_end.size(); }
         send(host, id++, verb);
-        if (verb == "KernelStack" || verb == "BigResult") {
+        if (verb != "StatusStack") {
             std::unique_lock<std::mutex> lk(mu);
             check(ended.wait_for(lk, std::chrono::seconds(10),
                                  [&] { return out.pending_at_job_end.size() > ends_before; }),
@@ -157,17 +158,17 @@ Outcome run_dispatcher(std::size_t lane_stack) {
 
 void test_journal_window() {
     const Outcome out = run_dispatcher(0);
-    // KernelStack + BigResult ran on the kernel lane: two job_end calls. The
-    // solver and status lanes are not journaled.
-    check(out.pending_at_job_end.size() == 2, "journal: one job_end per kernel job");
+    // KernelStack, SolverStack and BigResult each have their own lifecycle.
+    // The status-only probe remains outside the crash journal.
+    check(out.pending_at_job_end.size() == 3, "journal: one job_end per kernel/solver job");
     for (std::size_t i = 0; i < out.pending_at_job_end.size(); ++i) {
         check(out.pending_at_job_end[i] > 0,
               "journal: job_end #" + std::to_string(i) +
                   " fired after its terminal frame was written (pending bytes " +
                   std::to_string(out.pending_at_job_end[i]) + ")");
     }
-    if (out.pending_at_job_end.size() == 2) {
-        check(out.pending_at_job_end[1] > static_cast<int>(kBigResult),
+    if (out.pending_at_job_end.size() == 3) {
+        check(out.pending_at_job_end[2] > static_cast<int>(kBigResult),
               "journal: the large result was fully serialized and written before job_end");
     }
 }

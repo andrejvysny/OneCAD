@@ -30,6 +30,16 @@ impl KernelJournal {
         let before = state.poison.len();
         state.poison.retain(|key, _| key.ends_with(&suffix));
         changed |= state.poison.len() != before;
+        while state.poison.len() > super::MAX_POISON {
+            let victim = state
+                .poison
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_ms)
+                .map(|(key, _)| key.clone())
+                .unwrap();
+            state.poison.remove(&victim);
+            changed = true;
+        }
         if changed {
             self.persist_poison(&state);
         }
@@ -89,16 +99,18 @@ fn apply_leftover(state: &mut State, leftover: &Leftover, fingerprint: &str) -> 
         return false;
     }
     state.applied_session = Some(leftover.session.clone());
-    strike_leftover(state, &leftover.jobs, fingerprint);
+    strike_leftover(state, &leftover.jobs, fingerprint, leftover.complete);
     true
 }
 
 /// One strike per distinct leftover OP key under `fingerprint`. With more than
 /// one key in flight the crash is ambiguous: the strike is capped below the
 /// threshold, so only an unambiguous interruption can open a circuit.
-fn strike_leftover(state: &mut State, leftover: &[JobRecord], fingerprint: &str) {
+fn strike_leftover(state: &mut State, leftover: &[JobRecord], fingerprint: &str, complete: bool) {
     let keys = op_keys(leftover, fingerprint);
-    let ambiguous = keys.len() > 1;
+    // Any unfinished job may have caused process loss, including another lane
+    // or kernel build. Filtering to plan keys first would invent attribution.
+    let ambiguous = !complete || leftover.len() != 1;
     let cap =
         if ambiguous {
             tracing::warn!(ops = keys.len(),
@@ -127,12 +139,25 @@ fn strike_leftover(state: &mut State, leftover: &[JobRecord], fingerprint: &str)
 fn op_keys(leftover: &[JobRecord], fingerprint: &str) -> BTreeMap<String, String> {
     let mut keys = BTreeMap::new();
     for record in leftover {
+        if record.kind != super::JobKind::Kernel
+            || !matches!(record.verb.as_str(), "ExecutePlan" | "PreviewPlan")
+            || record.instance == 0
+            || record.epoch == 0
+            || record.request_id == 0
+        {
+            continue;
+        }
         let (Some(key), Some(op_id)) = (&record.key, &record.op_id) else {
             tracing::warn!(verb = %record.verb,
                 "kernel journal: the previous launch ended inside a non-plan job — nothing poisoned");
             continue;
         };
-        if record.fingerprint != fingerprint {
+        if record.fingerprint != fingerprint
+            || op_id.is_empty()
+            || record.step_index.is_none()
+            || record.op_position.is_none()
+            || !key.ends_with(&format!("|{op_id}|{fingerprint}"))
+        {
             tracing::info!(key = %key,
                 "kernel journal: leftover record from another OCCT build discarded");
             continue;

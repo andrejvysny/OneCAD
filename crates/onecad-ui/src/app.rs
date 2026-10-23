@@ -128,12 +128,15 @@ impl App {
         let dark = ui.appearance.resolve_dark(ctx.system_theme());
         let extension_refresh = crate::native_extensions::refresh::Service::new(paths.clone());
         let tabs = crate::documents::Tabs::new(
-            crate::service_runtime::ServiceRuntime::start_with(backend)?,
+            crate::service_runtime::ServiceRuntime::start_with_profile(backend, profile)?,
             paths,
             dialogs,
             renderer.preparation_budget(),
         );
         let bridge = tabs.bridge(ctx.clone(), true)?;
+        if !ui.start_open {
+            bridge.shared.host_budget.activate();
+        }
         let resolved = fonts::install(ctx);
         eprintln!(
             "native fonts: {:?} {:?}; icons: {}",
@@ -373,10 +376,7 @@ impl App {
                     |((prepared, lease), scene)| crate::viewport_updates::Preview {
                         prepared,
                         suppressed: Vec::new(),
-                        source: crate::viewport_updates::Source {
-                            scene,
-                            lease: Arc::new(lease),
-                        },
+                        source: crate::viewport_updates::Source { scene, lease },
                     },
                 );
             self.dispatch(delivery.action);
@@ -385,6 +385,7 @@ impl App {
         // Command permits bound accepted plus terminal messages to at most 16; drain fairly each frame.
         self.drain_messages(ctx);
         crate::operation_start::poll(self);
+        crate::model_handle::poll_history(self, ctx);
         self.sync_document_state();
         let failure = self
             .doc
@@ -411,7 +412,11 @@ impl App {
             self.doc.transform_gizmo = Default::default();
             self.draw_dirty = true;
         }
+        if let Err(error) = crate::viewport_updates::retire_cancelled_preview(self, ctx) {
+            self.fail_viewport(error);
+        }
         self.drain_parked(ctx);
+        self.sync_active_budget();
     }
 
     pub fn viewport_ready(&self) -> bool {
@@ -824,6 +829,7 @@ impl App {
     }
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        crate::host::refresh_text_scope(self, &ctx);
         crate::input_trace::app(
             self,
             "host.ui",

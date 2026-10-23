@@ -1,11 +1,11 @@
-//! `#[repr(C)]` mirrors of `include/onecad_ios.h` (ABI version 1). Field order,
+//! `#[repr(C)]` mirrors of `include/onecad_ios.h` (ABI version 2). Field order,
 //! types and constants must match the header exactly; `tests` pins the sizes
 //! clang reports for the header on arm64.
 // A complete mirror: some constants are only produced or read by the host.
 #![allow(dead_code)]
 use std::ffi::{c_char, c_void};
 
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,7 +143,7 @@ pub struct Navigation {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct PencilEvent {
     pub struct_size: u32,
     pub action: u32,
@@ -161,6 +161,9 @@ pub struct PencilEvent {
 
 pub const CAP_PENCIL_CONNECTED: u32 = 1 << 0;
 pub const CAP_HOVER: u32 = 1 << 1;
+pub const CAP_BARREL_TAP: u32 = 1 << 3;
+pub const CAP_SQUEEZE: u32 = 1 << 4;
+pub const CAP_HAPTICS: u32 = 1 << 6;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -233,6 +236,7 @@ pub struct A11yNode {
 pub const REQ_OPEN_DOCUMENT: u32 = 0;
 pub const REQ_SAVE_DOCUMENT: u32 = 1;
 pub const REQ_EXPORT_FILE: u32 = 2;
+pub const REQ_HAPTIC: u32 = 3;
 pub const REQ_COPY_TEXT: u32 = 4;
 pub const REQ_OPEN_URL: u32 = 5;
 
@@ -249,6 +253,15 @@ pub struct HostRequest {
     pub text: *const c_char,
 }
 
+/// Additive recovery snapshot; documents_json is borrowed until the next snapshot.
+#[repr(C)]
+pub struct RecoverySnapshot {
+    pub struct_size: u32,
+    pub status: u32,
+    pub generation: u64,
+    pub documents_json: *const c_char,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,6 +271,14 @@ mod tests {
     #[test]
     fn layouts_match_the_c_header() {
         assert_eq!(size_of::<Status>(), 4);
+        assert_eq!(
+            (
+                size_of::<RecoverySnapshot>(),
+                offset_of!(RecoverySnapshot, generation)
+            ),
+            (24, 8)
+        );
+        assert_eq!(offset_of!(RecoverySnapshot, documents_json), 16);
         assert_eq!((size_of::<Config>(), offset_of!(Config, wake)), (64, 40));
         assert_eq!(size_of::<Insets>(), 16);
         assert_eq!(size_of::<SurfaceDesc>(), 48);

@@ -137,14 +137,24 @@ fn edit_fields(
                             ui.label(egui::RichText::new(prefix).small().weak());
                         }
                         let width = (text_width(ui, &field.text) + 8.0).max(40.0);
-                        let response = ui.add_enabled(
-                            !pending,
-                            egui::TextEdit::singleline(&mut field.text)
-                                .id(ids[index])
-                                .frame(egui::Frame::NONE)
-                                .desired_width(width)
-                                .char_limit(onecad_core::expr::MAX_SOURCE_LEN),
-                        );
+                        let response = ui
+                            .add_enabled_ui(!pending, |ui| {
+                                onecad_widgets::text_session::show(
+                                    ui,
+                                    ids[index],
+                                    &mut field.text,
+                                    accessible_name(field.field),
+                                    onecad_core::expr::MAX_SOURCE_LEN,
+                                    |text| {
+                                        egui::TextEdit::singleline(text)
+                                            .id(ids[index])
+                                            .frame(egui::Frame::NONE)
+                                            .desired_width(width)
+                                            .char_limit(onecad_core::expr::MAX_SOURCE_LEN)
+                                    },
+                                )
+                            })
+                            .inner;
                         // Visible affixes are terse; assistive tech still needs the full name.
                         response.widget_info(|| {
                             let mut info =
@@ -180,6 +190,12 @@ fn edit_fields(
         }
     }
     draft.focus = None;
+    if let Some(origin) =
+        onecad_widgets::text_session::native_tab_origin(ctx).filter(|id| ids.contains(id))
+    {
+        cycle_from(ctx, draft, pending, Some(origin));
+        ctx.request_repaint();
+    }
 }
 
 /// A refusal or pending state hangs under the focused chip instead of widening it.
@@ -214,6 +230,10 @@ fn note(
 }
 
 fn cycle(ctx: &Context, draft: &mut Draft, pending: bool) {
+    cycle_from(ctx, draft, pending, ctx.memory(|memory| memory.focused()));
+}
+
+fn cycle_from(ctx: &Context, draft: &mut Draft, pending: bool, focused: Option<egui::Id>) {
     if pending || draft.fields.is_empty() {
         return;
     }
@@ -223,7 +243,6 @@ fn cycle(ctx: &Context, draft: &mut Draft, pending: bool) {
     if !backwards && !forward {
         return;
     }
-    let focused = ctx.memory(|memory| memory.focused());
     let index = draft
         .fields
         .iter()

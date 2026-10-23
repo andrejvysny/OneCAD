@@ -32,8 +32,8 @@ test or qualification result.
 - The embedded worker bundle (`libonecad_worker_bundle.a`), produced by the
   kernel lane's `scripts/build-ios-worker.sh` into
   `target/ios-worker/<platform>-<Release|Debug>[-test-hooks]`. The Xcode build
-  phase runs that script itself when the bundle is missing and the script
-  exists; otherwise it stops with an error naming the missing file.
+  phase validates content provenance through that script on every invocation.
+  Missing, stale or altered bundles are rebuilt before Rust compilation.
 
 ## Open, build and run
 
@@ -104,11 +104,15 @@ The app target's first phase, **Build Rust (onecad-ios)**, runs
 2. Maps `CONFIGURATION`: Release → `--release`; Debug and Acceptance → dev
    profile; Acceptance adds `--features onecad-ios/test-hooks`. Unknown
    configurations fail.
-3. Ensures `target/ios-worker/<platform>-<Release|Debug>[-test-hooks]/libonecad_worker_bundle.a`
-   exists, invoking `scripts/build-ios-worker.sh --platform <platform>
-   --config <Release|Debug> --out <dir> [--test-hooks]` when it does not.
-   An existing bundle is reused as is (the phase prints a note): after kernel
-   or OCCT changes, delete it or rerun `scripts/build-ios-worker.sh`.
+3. Invokes `scripts/build-ios-worker.sh --platform <platform>
+   --config <Release|Debug> --out <dir> --reuse-if-valid [--test-hooks]` for
+   `target/ios-worker/<platform>-<Release|Debug>[-test-hooks]`. It reuses the
+   bundle only when `onecad-worker-provenance.txt` matches current inputs and
+   output hashes. Missing provenance, changed inputs or altered outputs trigger
+   a fresh CMake configure and clean worker rebuild. Missing SDK/dependency
+   inputs fail with a diagnostic; restore those inputs and rerun the same
+   builder command. A build whose inputs change while it runs fails without
+   publishing reusable provenance.
 4. Runs `cargo build --locked -p onecad-ios --target <triple>` from the
    repository root with `CARGO_TARGET_DIR=target/ios-xcode/<platform>-<configuration>`
    (one directory per SDK and configuration) and
@@ -129,26 +133,68 @@ target because the phase writes under `target/` and runs cargo. The app links
 frameworks; MetalKit is not used.
 
 `ONECAD_IOS_STUB_LIB_DIR=<dir>` (an explicit build-setting override, never set
-by the project) skips cargo and the worker and stages `libonecad_ios.a` and
+by the project) is accepted only in **Debug**. Release, Acceptance and unknown
+configurations reject it before archive inspection or staging. Debug skips
+cargo and the worker and stages `libonecad_ios.a` and
 `libonecad_worker_bundle.a` from `<dir>`, with a build warning. It exists only
 to compile and link the Swift host without the Rust lanes; such a build proves
 nothing about runtime behavior.
+
+## Worker cache provenance
+
+The local provenance sidecar hashes content, not mtimes or Git status. Its input
+hash covers worker sources, CMake files, vendored solver/JSON sources, link probe,
+protocol fixtures/schemas, Rust protocol and generated iOS ABI headers, worker
+build/provenance/OCCT scripts and stdout-hygiene policy. Traversal includes new
+files. It also covers complete selected OCCT and Eigen/Boost prefix contents,
+including dependency identities, headers, CMake configuration and archive bytes.
+
+Target inputs include platform, arm64, worker configuration, test-hook mode,
+deployment target, SDK path/version/build/settings, resolved compiler/linker/libtool
+bytes, compiler version, CMake/Ninja paths and versions, and explicit `CXXFLAGS`
+and `LDFLAGS`. Dependency discovery uses the selected OCCT root and
+`ONECAD_HEADER_PREFIXES` (semicolon-separated Eigen/Boost prefixes); ambient CMake
+package roots, environment paths and registries cannot select an unhashed
+replacement. Inherited compiler include/library search overrides (`CPATH`,
+`CPLUS_INCLUDE_PATH`, `C_INCLUDE_PATH`, `OBJC_INCLUDE_PATH`, `LIBRARY_PATH`,
+`COMPILER_PATH`, `GCC_EXEC_PREFIX`), toolchain files and compiler launchers are
+not used. Parallelism and output
+paths do not change artifact provenance. SDK/dependency content checks require
+those installations even when the archive already exists.
+
+Output hashes cover the worker archive, runtime identity manifest, C ABI header,
+link directives and platform/linkage audit. The sidecar is published only after
+the existing audit succeeds and a second input snapshot matches the first.
+An unchanged valid cache retains its archive bytes and mtime. Explicit builder
+invocations without `--reuse-if-valid` continue to rebuild. Release workers
+reject `--test-hooks`; device/simulator and hook/non-hook outputs remain separate.
+
+Run bounded contract tests without compiling the kernel or invoking an Xcode
+build:
+
+```sh
+scripts/tests/ios-worker-provenance.test.sh
+```
+
+These tests use synthetic build tools to exercise cache reuse, input/output
+invalidation, mid-build mutation and stub restrictions. They do not qualify
+Mach-O metadata, real worker execution or Simulator modeling; those remain
+required real-build gates in [SIMULATOR_GATE.md](SIMULATOR_GATE.md).
 
 ## Host conventions the Rust side relies on
 
 Behavior of the UIKit host that `onecad_ios.h` leaves open:
 
-- **Keyboard channels.** While the hidden key-input proxy is first responder
-  (`TEXT_INPUT_ACTIVE`), Return, keypad Enter, Backspace and Tab without
-  ⌘/⌃ arrive only on the text channel, from hardware and software keyboards
-  alike: `text_insert("\n")`, `text_insert("\t")` and
-  `text_delete_backward`, including the system's key repeat. Their
-  `key_submit` events are not sent. Rust maps `"\n"` to Enter, `"\t"` to Tab
-  and delete-backward to Backspace. All other keys, ⌘/⌃ chords and the
-  modifier keys themselves stay on `key_submit`, also while text input is
-  active, and printable keys additionally produce `text_insert` (like a
-  desktop key event plus text event). Each UIPress is submitted at most once
-  per edge, and its key-up follows its key-down's channel. `repeat` is always 0.
+- **Keyboard channels.** The visible focused-field proxy mirrors Rust's complete
+  authored draft through `text_snapshot` / `text_apply` v1. Return, keypad Enter,
+  Backspace and Tab without ⌘/⌃ use only this protocol, including system repeat;
+  their `key_submit` edges are suppressed. Confirm/Tab commit composition and
+  emit one fenced egui key after draft reconciliation. Printable input replaces
+  the acknowledged selection or marked range. Other keys and ⌘/⌃ chords stay on
+  `key_submit`; raw navigation/undo is captured in the next draft snapshot.
+  Each UIPress is submitted at most once per edge; key-up follows key-down's
+  channel. `repeat` is always 0. Legacy `text_insert` / `text_set_marked` entry
+  points remain ABI-compatible but are not used by this UIKit proxy.
 - **Host requests** are popped one at a time; the next is popped only after
   the previous is completed, so the backlog stays in Rust's queue. An
   OPEN_DOCUMENT copy that fails shows a native alert

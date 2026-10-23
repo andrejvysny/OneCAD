@@ -1,120 +1,112 @@
 import UIKit
 
-/// UTF-16 offset into the proxy's marked text.
+/// UTF-16 offsets belong only to the focus generation that created them.
 final class IndexPosition: UITextPosition {
     let offset: Int
-
-    init(_ offset: Int) {
-        self.offset = offset
-    }
+    let generation: UInt64
+    init(_ offset: Int, generation: UInt64) { self.offset = offset; self.generation = generation }
 }
 
 final class IndexRange: UITextRange {
     let lower: IndexPosition
     let upper: IndexPosition
-
-    init(_ lower: Int, _ upper: Int) {
-        self.lower = IndexPosition(min(lower, upper))
-        self.upper = IndexPosition(max(lower, upper))
+    init(_ lower: Int, _ upper: Int, generation: UInt64) {
+        self.lower = IndexPosition(min(lower, upper), generation: generation)
+        self.upper = IndexPosition(max(lower, upper), generation: generation)
     }
-
     override var start: UITextPosition { lower }
     override var end: UITextPosition { upper }
     override var isEmpty: Bool { lower.offset == upper.offset }
 }
 
-/// The remaining UITextInput surface. The proxy's "document" is only the
-/// current marked text: committed text lives in Rust and is never mirrored.
 extension KeyInputProxy {
-    private func clamp(_ offset: Int) -> Int { max(0, min(offset, markedLength)) }
-
-    private func offset(_ position: UITextPosition) -> Int {
-        (position as? IndexPosition)?.offset ?? 0
+    private func offset(_ position: UITextPosition) -> Int? {
+        guard let position = position as? IndexPosition, let session,
+              position.generation == session.generation,
+              session.scalarBoundary(position.offset) else { return nil }
+        return position.offset
     }
 
-    func text(in range: UITextRange) -> String? {
-        guard let range = range as? IndexRange else { return nil }
-        let ns = markedText as NSString
-        let lower = clamp(range.lower.offset)
-        return ns.substring(with: NSRange(location: lower, length: clamp(range.upper.offset) - lower))
+    private func offsets(_ range: UITextRange) -> NSRange? {
+        guard let lower = offset(range.start), let upper = offset(range.end), upper >= lower else { return nil }
+        return NSRange(location: lower, length: upper - lower)
     }
 
-    func replace(_ range: UITextRange, withText text: String) {
-        insertText(text)
+    override func text(in range: UITextRange) -> String? {
+        guard let range = offsets(range), let session, session.valid(range) else { return nil }
+        return (session.text as NSString).substring(with: range)
     }
 
-    /// Rust owns the committed selection; only the IME's selection inside the
-    /// marked text is meaningful here, and UIKit-initiated changes are ignored.
-    var selectedTextRange: UITextRange? {
+    override func replace(_ range: UITextRange, withText text: String) {
+        guard let range = offsets(range) else { return }
+        submit(ONECAD_IOS_TEXT_REPLACE.rawValue, range: range, text: text)
+    }
+
+    override var selectedTextRange: UITextRange? {
         get {
-            let lower = clamp(markedSelection.location)
-            return IndexRange(lower, clamp(lower + markedSelection.length))
+            guard let session else { return nil }
+            return IndexRange(session.selection.location, session.selection.upperBound, generation: session.generation)
         }
-        set { _ = newValue }
+        set {
+            guard let newValue, let range = offsets(newValue) else { return }
+            submit(ONECAD_IOS_TEXT_SELECT.rawValue, range: range)
+        }
     }
 
-    var beginningOfDocument: UITextPosition { IndexPosition(0) }
-    var endOfDocument: UITextPosition { IndexPosition(markedLength) }
+    override var beginningOfDocument: UITextPosition { IndexPosition(0, generation: session?.generation ?? 0) }
+    override var endOfDocument: UITextPosition { IndexPosition(session?.text.utf16.count ?? 0, generation: session?.generation ?? 0) }
 
-    func textRange(from fromPosition: UITextPosition, to toPosition: UITextPosition) -> UITextRange? {
-        IndexRange(offset(fromPosition), offset(toPosition))
+    override func textRange(from fromPosition: UITextPosition, to toPosition: UITextPosition) -> UITextRange? {
+        guard let lower = offset(fromPosition), let upper = offset(toPosition), let session else { return nil }
+        return IndexRange(lower, upper, generation: session.generation)
     }
 
-    func position(from position: UITextPosition, offset delta: Int) -> UITextPosition? {
-        let target = offset(position) + delta
-        return (0...markedLength).contains(target) ? IndexPosition(target) : nil
+    override func position(from position: UITextPosition, offset delta: Int) -> UITextPosition? {
+        guard let at = offset(position), let session else { return nil }
+        let (target, overflow) = at.addingReportingOverflow(delta)
+        guard !overflow, session.scalarBoundary(target) else { return nil }
+        return IndexPosition(target, generation: session.generation)
     }
 
-    func position(from position: UITextPosition, in direction: UITextLayoutDirection,
+    override func position(from position: UITextPosition, in direction: UITextLayoutDirection,
                   offset delta: Int) -> UITextPosition? {
         switch direction {
-        case .left, .up: self.position(from: position, offset: -delta)
-        default: self.position(from: position, offset: delta)
+        case .left, .up:
+            guard delta != Int.min else { return nil }
+            return self.position(from: position, offset: -delta)
+        default: return self.position(from: position, offset: delta)
         }
     }
 
-    func compare(_ position: UITextPosition, to other: UITextPosition) -> ComparisonResult {
-        let a = offset(position)
-        let b = offset(other)
+    override func compare(_ position: UITextPosition, to other: UITextPosition) -> ComparisonResult {
+        guard let a = offset(position), let b = offset(other) else { return .orderedSame }
         return a < b ? .orderedAscending : (a > b ? .orderedDescending : .orderedSame)
     }
-
-    func offset(from: UITextPosition, to toPosition: UITextPosition) -> Int {
-        offset(toPosition) - offset(from)
+    override func offset(from: UITextPosition, to toPosition: UITextPosition) -> Int {
+        guard let lower = offset(from), let upper = offset(toPosition) else { return 0 }
+        return upper - lower
     }
-
-    func position(within range: UITextRange, farthestIn direction: UITextLayoutDirection) -> UITextPosition? {
-        switch direction {
-        case .left, .up: range.start
-        default: range.end
-        }
+    override func position(within range: UITextRange, farthestIn direction: UITextLayoutDirection) -> UITextPosition? {
+        guard offsets(range) != nil else { return nil }
+        return direction == .left || direction == .up ? range.start : range.end
     }
-
-    func characterRange(byExtending position: UITextPosition,
+    override func characterRange(byExtending position: UITextPosition,
                         in direction: UITextLayoutDirection) -> UITextRange? {
-        let at = offset(position)
-        switch direction {
-        case .left, .up: return IndexRange(0, at)
-        default: return IndexRange(at, markedLength)
-        }
+        guard let at = offset(position), let session else { return nil }
+        let ns = session.text as NSString
+        let backward = direction == .left || direction == .up
+        guard backward ? at > 0 : at < ns.length else { return nil }
+        let range = ns.rangeOfComposedCharacterSequence(at: backward ? at - 1 : at)
+        return IndexRange(range.location, range.upperBound, generation: session.generation)
     }
-
-    func baseWritingDirection(for position: UITextPosition,
-                              in direction: UITextStorageDirection) -> NSWritingDirection {
-        .natural
-    }
-
-    func setBaseWritingDirection(_ writingDirection: NSWritingDirection, for range: UITextRange) {}
-
-    func firstRect(for range: UITextRange) -> CGRect { caretRect }
-
-    func caretRect(for position: UITextPosition) -> CGRect { caretRect }
-
-    func selectionRects(for range: UITextRange) -> [UITextSelectionRect] { [] }
-
-    func closestPosition(to point: CGPoint) -> UITextPosition? { endOfDocument }
-
-    func closestPosition(to point: CGPoint, within range: UITextRange) -> UITextPosition? { range.end }
-
-    func characterRange(at point: CGPoint) -> UITextRange? { nil }
+    override func baseWritingDirection(for position: UITextPosition,
+                              in direction: UITextStorageDirection) -> NSWritingDirection { .natural }
+    override func setBaseWritingDirection(_ writingDirection: NSWritingDirection, for range: UITextRange) {}
+    override func firstRect(for range: UITextRange) -> CGRect { offsets(range) == nil ? .null : caretRect }
+    override func caretRect(for position: UITextPosition) -> CGRect { offset(position) == nil ? .null : caretRect }
+    override func selectionRects(for range: UITextRange) -> [UITextSelectionRect] { [] }
+    // No glyph hit-test geometry is exported by Rust. Do not invent positions for distant points.
+    override func closestPosition(to point: CGPoint) -> UITextPosition? { nil }
+    override func closestPosition(to point: CGPoint, within range: UITextRange) -> UITextPosition? { nil }
+    override func characterRange(at point: CGPoint) -> UITextRange? { nil }
 }

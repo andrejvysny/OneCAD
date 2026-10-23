@@ -62,6 +62,87 @@ fn canvas_id() -> egui::Id {
     egui::Id::unique("onecad-touch-canvas")
 }
 
+fn canvas(ctx: &egui::Context) -> Option<Canvas> {
+    let current = ctx.cumulative_pass_nr();
+    ctx.data(|data| data.get_temp::<Canvas>(canvas_id()))
+        .filter(|canvas| canvas.pass + 1 >= current)
+}
+
+pub fn canvas_rect(ctx: &egui::Context) -> Option<egui::Rect> {
+    canvas(ctx).map(|canvas| canvas.rect)
+}
+
+/// Output ink is appended after egui's pass; exclude chrome so it cannot cover controls.
+pub fn canvas_clips(ctx: &egui::Context) -> Vec<egui::Rect> {
+    let Some(canvas) = canvas(ctx) else {
+        return Vec::new();
+    };
+    let blockers = ctx.memory(|memory| {
+        memory
+            .areas()
+            .visible_layer_ids()
+            .into_iter()
+            .filter(|layer| *layer != canvas.layer && layer.order >= canvas.layer.order)
+            .filter_map(|layer| memory.area_rect(layer.id).map(|rect| (layer, rect)))
+            .collect::<Vec<_>>()
+    });
+    if blockers.len() > 256 {
+        return Vec::new();
+    }
+    let mut clips = vec![canvas.rect];
+    for (layer, rect) in blockers {
+        let rect = ctx
+            .layer_transform_to_global(layer)
+            .map_or(rect, |transform| transform * rect);
+        clips = clips
+            .into_iter()
+            .flat_map(|clip| subtract(clip, rect))
+            .collect();
+        if clips.len() > 64 {
+            return Vec::new();
+        }
+    }
+    let widgets = ctx.interactive_rects_last_pass();
+    if widgets.len() > 256 {
+        return Vec::new();
+    }
+    for rect in widgets
+        .into_iter()
+        .filter(|rect| !rect.contains_rect(canvas.rect))
+    {
+        clips = clips
+            .into_iter()
+            .flat_map(|clip| subtract(clip, rect))
+            .collect();
+        if clips.len() > 64 {
+            return Vec::new();
+        }
+    }
+    clips
+}
+
+fn subtract(rect: egui::Rect, blocker: egui::Rect) -> Vec<egui::Rect> {
+    let cut = rect.intersect(blocker);
+    if !cut.is_positive() {
+        return vec![rect];
+    }
+    [
+        egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, cut.min.y)),
+        egui::Rect::from_min_max(egui::pos2(rect.min.x, cut.max.y), rect.max),
+        egui::Rect::from_min_max(
+            egui::pos2(rect.min.x, cut.min.y),
+            egui::pos2(cut.min.x, cut.max.y),
+        ),
+        egui::Rect::from_min_max(
+            egui::pos2(cut.max.x, cut.min.y),
+            egui::pos2(rect.max.x, cut.max.y),
+        ),
+    ]
+    .into_iter()
+    .filter(egui::Rect::is_positive)
+    .collect()
+}
+
 /// Records where the CAD canvas was drawn this pass, for touch routing between
 /// frames.
 pub fn capture_canvas(ctx: &egui::Context, rect: egui::Rect, layer: egui::LayerId) {
@@ -97,6 +178,24 @@ pub fn allows_pointer(ui: &egui::Ui, rect: egui::Rect, position: egui::Pos2) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prediction_clip_subtraction_never_covers_control_rect() {
+        let canvas = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let control = egui::Rect::from_min_max(egui::pos2(100.0, 100.0), egui::pos2(200.0, 200.0));
+        let pieces = subtract(canvas, control);
+        assert_eq!(pieces.len(), 4);
+        assert!(
+            pieces.iter().all(
+                |piece| canvas.contains_rect(*piece) && !piece.intersect(control).is_positive()
+            )
+        );
+        assert_eq!(
+            pieces.iter().map(egui::Rect::area).sum::<f32>(),
+            canvas.area() - control.area()
+        );
+        assert!(subtract(canvas, canvas).is_empty());
+    }
 
     #[test]
     fn finger_presses_widen_the_edge_aperture_and_mouse_keeps_eight_points() {
@@ -179,7 +278,15 @@ mod tests {
         assert!(over_control(&ctx, chrome.center()), "floating chrome");
         assert!(!over_control(&ctx, egui::pos2(600.0, 400.0)), "bare canvas");
         assert!(over_control(&ctx, egui::pos2(600.0, 20.0)), "title bar");
+        let clips = canvas_clips(&ctx);
+        assert!(!clips.is_empty());
+        assert!(
+            clips
+                .iter()
+                .all(|clip| canvas.contains_rect(*clip) && !clip.intersect(chrome).is_positive())
+        );
         run(false);
+        assert!(canvas_clips(&ctx).is_empty());
         assert!(
             over_control(&ctx, egui::pos2(600.0, 400.0)),
             "no canvas drawn last pass"

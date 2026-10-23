@@ -148,7 +148,9 @@ final class CanvasViewController: UIViewController {
         frameLoop?.scheduleRepaint(after: result.repaint_after_s)
         if result.flags & ONECAD_IOS_FRAME_REDRAW_REQUESTED != 0 { requestFrame() }
         textInput?.apply(result)
-        if result.flags & ONECAD_IOS_FRAME_A11Y_CHANGED != 0 { accessibility?.rebuild() }
+        accessibility?.focusedTextProxy = textInput?.accessibilityProxy
+        accessibility?.focusedTextFieldID = textInput?.focusedFieldID
+        accessibility?.rebuild()
         if result.flags & ONECAD_IOS_FRAME_HOST_REQUESTS != 0 { hostRequests?.drain() }
         if result.flags & ONECAD_IOS_FRAME_KERNEL_TERMINAL != 0, !reportedKernelTerminal {
             // The editor keeps rendering its own relaunch-required state.

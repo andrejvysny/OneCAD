@@ -89,6 +89,7 @@ pub struct PreparedHighlights {
     pub(crate) draws: Vec<HighlightDraw>,
     pub(crate) boundaries: Vec<[f32; 6]>,
     pub(crate) boundary_draws: Vec<HighlightDraw>,
+    pub(crate) retention: Option<std::sync::Arc<dyn Send + Sync>>,
 }
 impl PreparedHighlights {
     pub(crate) fn validate_scene(
@@ -134,6 +135,7 @@ pub(crate) struct GpuHighlights {
     pub boundary_draws: Vec<HighlightDraw>,
     pub uniforms: [wgpu::Buffer; 2],
     pub binds: [wgpu::BindGroup; 2],
+    _retention: Option<std::sync::Arc<dyn Send + Sync>>,
 }
 impl GpuHighlights {
     pub(crate) fn new(
@@ -142,6 +144,7 @@ impl GpuHighlights {
         draws: Vec<HighlightDraw>,
         boundaries: Vec<[f32; 6]>,
         boundary_draws: Vec<HighlightDraw>,
+        retention: Option<std::sync::Arc<dyn Send + Sync>>,
     ) -> Self {
         let uniforms = std::array::from_fn(|_| {
             gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -168,6 +171,7 @@ impl GpuHighlights {
                 usage: wgpu::BufferUsages::VERTEX,
             });
         Self {
+            _retention: retention,
             draws,
             boundaries,
             boundary_draws,
@@ -243,6 +247,7 @@ impl Renderer {
                 prepared.draws,
                 prepared.boundaries,
                 prepared.boundary_draws,
+                prepared.retention,
             )
         });
         self.estimate = estimate;

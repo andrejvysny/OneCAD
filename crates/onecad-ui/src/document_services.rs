@@ -282,6 +282,9 @@ async fn open(backend: &mut Backend, source: &Path, import: bool) -> Result<Outc
                 .map_err(|e| e.to_string())?,
         );
     }
+    if path != source {
+        onecad_app::recents::relocate(&backend.host, source, &path);
+    }
     backend.startup_opened = true;
     replacement_outcome(backend).await
 }
@@ -344,7 +347,7 @@ async fn save(backend: &Backend, save_as: bool) -> Result<Outcome, String> {
     .await
 }
 
-async fn save_to_qa(
+pub(crate) async fn save_to_qa(
     state: &onecad_app::state::AppState,
     host: onecad_app::host::HostContext,
     documents: &Path,
@@ -515,7 +518,7 @@ fn copy_for_open(documents: &Path, source: &Path) -> Result<PathBuf, String> {
     let source = source.canonicalize().map_err(|e| e.to_string())?;
     let documents = documents.canonicalize().map_err(|e| e.to_string())?;
     if source.starts_with(&documents) {
-        return Ok(source);
+        return crate::imported_documents::migrate(&documents, &source);
     }
     let stem = source
         .file_stem()
