@@ -18,32 +18,11 @@ The gate sets `ONECAD_REQUIRE_WORKER=1` and `ONECAD_REQUIRE_GPU=1`. It runs two
 explicitly filtered selections, each with its own exact inventory declared in
 `xtask/src/evidence/host_names.rs`, which is the authoritative list.
 
-The lifecycle selection (`app_logic_tests::`, `HOST_TESTS`) has fifty-five cases
-covering occluded delivery (one),
-document lifecycle (three), overlays (one), diagnostics (three), existing
-dimensions (one), the synthetic From-New plate workflow (one), and numeric/IME
-routing (one), invalid-profile Finish closing the sketch and reporting the
-overlap (one), and marquee preservation across redraw with camera-change cancellation (one), Point
-numeric/repeated construction placement (one), Center Rectangle method/full-size
-numeric creation and history (one), and numeric refusal after viewport failure
-(one), point/radius/body gesture history and cancellation (three), pre-threshold
-camera and Escape ownership (two), stationary-pointer service repaint delivery
-(one), and prepared-arc center/endpoint gestures plus accepted-End capture failure
-recovery (three), Arc method numeric creation/refusal (one), expression-driven
-Slot full-width creation and construction/history (one), clockwise/counterclockwise
-tangent Arc H/V snapping with endpoint roles (one), and tangent chain keyboard,
-drag, existing-endpoint seeding, cancellation and numeric Radius (one), and
-exactly-once drag release with accepted chain closure/profile publication (one).
-Nine batched-input regression cases cover ordered modifier delivery,
-pointer/camera cancellation and ordinary split-frame clicks.
-Further cases cover initially unselected sketch/history row selection,
-double-click and explicit Edit, world-plane and checked planar-face entry,
-frame alignment and whole-visit discard, viewport world-plane choice, Home
-without a document, and restored-control capability context. Ten document tab
-cases cover second live tabs, re-preparation on switch, tab close, per-document
-crash restore, quit prompts, background close decisions, tab ordering and
-Ctrl+Tab cycling, unpreparable-switch fallback, and the new-tab Home and close
-prompt.
+The lifecycle selection (`app_logic_tests::`, `HOST_TESTS`) covers document
+lifecycle, recovery, multi-document delivery, display budgets, sketch/model
+workflows, input ownership and asynchronous service delivery. Its exact names
+and count come from `HOST_TESTS`; do not use an older prose count as the inventory.
+New reliability cases must be added there and pass this same strict gate.
 
 The service selection (`document_services::tests::home_lifecycle_tests::` and
 `bridge::tests::`, `SERVICE_TESTS`) has four cases: three no-document Home
@@ -77,3 +56,8 @@ application services, production OCCT, and Metal. They are distinct from rendere
 acceptance, service-only tests, and physical macOS input qualification. They do
 not prove native dialogs, complete viewport workflows, clean AppKit teardown, or
 ONECAD-273 checkpoint acceptance. Those physical gates remain separate.
+
+For save/recovery/reopen and memory-pressure qualification, follow the
+[reliability handoff](qa/MANUAL_RELEASE_GATES.md#reliability-acceptance-and-hardware-handoff).
+A synthetic call to memory relief does not establish delivery of a native macOS
+memory-pressure notification.

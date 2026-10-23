@@ -142,6 +142,39 @@ async fn repeated_open_close_on_one_runtime_leaks_no_worker() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_shutdown_retires_its_worker_while_disk_cleanup_waits() {
+    if !have_worker() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let services = Arc::new(ProcessServices::new());
+    let (state, ctx, _) = started(&services, root.path()).await;
+    api::new_document(&state, ctx.clone()).await.unwrap();
+    let worker = state.live_worker().expect("document has a worker");
+    let lane = state.persistence.lock().await;
+    let mut shutdown = Box::pin(api::shutdown_host(&state, ctx, None));
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(shutdown.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert!(state.runtime.lock().await.is_none());
+    assert!(state.live_worker().is_none());
+    assert!(worker.is_retired());
+    drop(shutdown);
+    drop(lane);
+    assert!(worker.wait_torn_down(Duration::from_secs(30)).await);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while services.reservations().open_documents() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached cleanup releases the closed claims");
+    services.retire_warm();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_pooled_worker_reports_status_only_to_the_host_that_adopts_it() {
     if !have_worker() {
         return;

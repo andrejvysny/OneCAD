@@ -1,5 +1,7 @@
 //! Existing-kernel modeling commands and choice controls for the shared feature card.
+mod numeric;
 use crate::{app::App, tool_registry::ToolId};
+use numeric::Fields;
 use onecad_core::{
     document::{body::BodyHealth, record::*},
     ids::{BodyId, RecordId},
@@ -90,12 +92,26 @@ pub(crate) fn begin_body_operation(app: &mut App, id: ToolId) {
 }
 
 pub(crate) fn rows(app: &mut App, rows: &mut FeatureCardRows, tool: &ModelSession) {
+    let Some(current) = app.doc.interaction.tool.clone().filter(|current| {
+        current.tag.context == tool.tag.context
+            && current.tag.record_id == tool.tag.record_id
+            && current.tag.gesture == tool.tag.gesture
+    }) else {
+        return;
+    };
+    let tool = &current;
     if tool.phase != SessionPhase::Editing {
         return;
     }
     let Operation::Known(op) = &tool.record.op else {
         return;
     };
+    let mut fields = Fields::new((
+        &tool.tag.context.runtime_session,
+        &tool.tag.context.document_id,
+        tool.tag.record_id,
+        tool.tag.gesture,
+    ));
     let options = match op {
         KnownOperation::Extrude(p) => extent(rows, p),
         KnownOperation::OffsetFace(p) => face_offset(rows, p),
@@ -105,6 +121,7 @@ pub(crate) fn rows(app: &mut App, rows: &mut FeatureCardRows, tool: &ModelSessio
         }
         KnownOperation::LinearPattern(p) => pattern(
             rows,
+            &mut fields,
             p.count,
             p.direction,
             Vec3::new_unchecked(0.0, 0.0, 0.0),
@@ -113,16 +130,17 @@ pub(crate) fn rows(app: &mut App, rows: &mut FeatureCardRows, tool: &ModelSessio
         ),
         KnownOperation::CircularPattern(p) => pattern(
             rows,
+            &mut fields,
             p.count,
             p.axis_direction,
             p.axis_origin,
             p.fuse_result,
             true,
         ),
-        KnownOperation::MirrorBody(p) => mirror(rows, p),
+        KnownOperation::MirrorBody(p) => mirror(rows, &mut fields, p),
         KnownOperation::Boolean(p) => boolean(app, rows, p),
-        KnownOperation::Hole(p) => hole(rows, p),
-        KnownOperation::Gear(p) => gear(rows, p),
+        KnownOperation::Hole(p) => hole(rows, &mut fields, p),
+        KnownOperation::Gear(p) => gear(rows, &mut fields, p),
         KnownOperation::TransformBody(p) => {
             let mut copy = p.copy;
             rows.row("Copy", |ui| {
@@ -136,10 +154,21 @@ pub(crate) fn rows(app: &mut App, rows: &mut FeatureCardRows, tool: &ModelSessio
         }
         _ => None,
     };
-    if let Some(options) = options {
-        app.dispatch(Action::ModelingOptionsChanged {
-            tag: tool.tag.clone(),
+    if fields.changed || options.is_some() || fields.error != tool.option_draft_error {
+        // Earlier controls in this pass may already have advanced the same session.
+        let Some(current) = app.doc.interaction.tool.as_ref().filter(|current| {
+            current.tag.context == tool.tag.context
+                && current.tag.record_id == tool.tag.record_id
+                && current.tag.gesture == tool.tag.gesture
+                && current.phase == SessionPhase::Editing
+        }) else {
+            return;
+        };
+        let tag = current.tag.clone();
+        app.dispatch(Action::ModelingOptionsDraftChanged {
+            tag,
             options,
+            error: fields.error,
         });
     }
 }
@@ -187,6 +216,7 @@ fn face_offset(rows: &mut FeatureCardRows, p: &OffsetFaceParams) -> Option<Model
 
 fn pattern(
     rows: &mut FeatureCardRows,
+    fields: &mut Fields,
     count: u32,
     direction: Vec3,
     origin: Vec3,
@@ -195,11 +225,8 @@ fn pattern(
 ) -> Option<ModelingOptions> {
     let (mut n, mut axis, mut point, mut joined) = (count, direction, origin, fuse);
     rows.row("Instances", |ui| {
-        named(
-            ui,
-            egui::DragValue::new(&mut n).range(2..=128),
-            "patternCount",
-        );
+        let response = fields.count(ui, "patternCount", "Instances", &mut n, 2..=128);
+        crate::automation::name(ui.ctx(), response.id, "onecad.option.patternCount");
     });
     rows.row(
         if circular {
@@ -207,10 +234,12 @@ fn pattern(
         } else {
             "Direction"
         },
-        |ui| vector(ui, "patternDirection", &mut axis),
+        |ui| vector(ui, fields, "patternDirection", &mut axis),
     );
     if circular {
-        rows.row("Axis origin (mm)", |ui| vector(ui, "origin", &mut point));
+        rows.row("Axis origin (mm)", |ui| {
+            vector(ui, fields, "origin", &mut point)
+        });
     }
     rows.row("Result", |ui| {
         named(
@@ -229,10 +258,18 @@ fn pattern(
     )
 }
 
-fn mirror(rows: &mut FeatureCardRows, p: &MirrorBodyParams) -> Option<ModelingOptions> {
+fn mirror(
+    rows: &mut FeatureCardRows,
+    fields: &mut Fields,
+    p: &MirrorBodyParams,
+) -> Option<ModelingOptions> {
     let (mut point, mut normal, mut fuse) = (p.plane_point, p.plane_normal, p.fuse_with_original);
-    rows.row("Plane point (mm)", |ui| vector(ui, "origin", &mut point));
-    rows.row("Plane normal", |ui| vector(ui, "planeNormal", &mut normal));
+    rows.row("Plane point (mm)", |ui| {
+        vector(ui, fields, "origin", &mut point)
+    });
+    rows.row("Plane normal", |ui| {
+        vector(ui, fields, "planeNormal", &mut normal)
+    });
     rows.row("Result", |ui| {
         named(
             ui,
@@ -249,7 +286,11 @@ fn mirror(rows: &mut FeatureCardRows, p: &MirrorBodyParams) -> Option<ModelingOp
     )
 }
 
-fn hole(rows: &mut FeatureCardRows, p: &HoleParams) -> Option<ModelingOptions> {
+fn hole(
+    rows: &mut FeatureCardRows,
+    fields: &mut Fields,
+    p: &HoleParams,
+) -> Option<ModelingOptions> {
     if p.points.is_some() {
         return None;
     }
@@ -273,7 +314,9 @@ fn hole(rows: &mut FeatureCardRows, p: &HoleParams) -> Option<ModelingOptions> {
             "holeThroughAll",
         );
     });
-    rows.row("Center (world mm)", |ui| vector(ui, "origin", &mut point));
+    rows.row("Center (world mm)", |ui| {
+        vector(ui, fields, "origin", &mut point)
+    });
     ((kind, through_all, point) != (p.hole_type, p.depth.is_none(), p.point)).then_some(
         ModelingOptions::Hole {
             kind,
@@ -408,12 +451,20 @@ fn choice<T: Copy + PartialEq>(ui: &mut egui::Ui, id: &str, value: &mut T, choic
     crate::automation::name(ui.ctx(), response.id, &format!("onecad.option.{id}"));
 }
 
-fn vector(ui: &mut egui::Ui, id: &str, v: &mut Vec3) {
+fn vector(ui: &mut egui::Ui, fields: &mut Fields, id: &str, v: &mut Vec3) {
     ui.vertical(|ui| {
         for (label, value) in [("X", &mut v.x), ("Y", &mut v.y), ("Z", &mut v.z)] {
             ui.horizontal(|ui| {
                 let label_id = ui.label(label).id;
-                let response = vector_value(ui, value).labelled_by(label_id);
+                let name = format!("{id}{label}");
+                let caption = match id {
+                    "patternDirection" => "Direction",
+                    "planeNormal" => "Plane normal",
+                    _ => "Origin",
+                };
+                let response = fields
+                    .value(ui, &name, &format!("{caption} {label}"), value)
+                    .labelled_by(label_id);
                 crate::automation::name(
                     ui.ctx(),
                     response.id,
@@ -424,32 +475,17 @@ fn vector(ui: &mut egui::Ui, id: &str, v: &mut Vec3) {
     });
 }
 
-fn vector_value(ui: &mut egui::Ui, value: &mut f64) -> egui::Response {
-    let field_id = ui.next_auto_id();
-    let ctx = ui.ctx().clone();
-    ui.add(
-        egui::DragValue::new(value)
-            .speed(0.1)
-            .custom_formatter(move |value, _| {
-                if ctx.memory(|memory| memory.has_focus(field_id)) {
-                    value.to_string()
-                } else {
-                    format!("{value:.2}")
-                }
-            }),
-    )
-}
-
-fn gear(rows: &mut FeatureCardRows, p: &GearParams) -> Option<ModelingOptions> {
+fn gear(
+    rows: &mut FeatureCardRows,
+    fields: &mut Fields,
+    p: &GearParams,
+) -> Option<ModelingOptions> {
     let inv = p.involute()?;
     let (mut teeth, mut axle, mut offset, mut point) =
         (inv.teeth, inv.axle_hole, inv.offset_hole, p.placement.point);
     rows.row("Teeth", |ui| {
-        named(
-            ui,
-            egui::DragValue::new(&mut teeth).range(3..=400),
-            "gearTeeth",
-        );
+        let response = fields.count(ui, "gearTeeth", "Teeth", &mut teeth, 3..=400);
+        crate::automation::name(ui.ctx(), response.id, "onecad.option.gearTeeth");
     });
     rows.row("Bores", |ui| {
         named(
@@ -463,7 +499,9 @@ fn gear(rows: &mut FeatureCardRows, p: &GearParams) -> Option<ModelingOptions> {
             "gearOffsetHole",
         );
     });
-    rows.row("Center (world mm)", |ui| vector(ui, "origin", &mut point));
+    rows.row("Center (world mm)", |ui| {
+        vector(ui, fields, "origin", &mut point)
+    });
     ((teeth, axle, offset, point) != (inv.teeth, inv.axle_hole, inv.offset_hole, p.placement.point))
         .then_some(ModelingOptions::Gear {
             teeth,
@@ -479,74 +517,4 @@ fn named(ui: &mut egui::Ui, widget: impl egui::Widget, id: &str) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn vector_default_rounding_and_focus_blur_never_quantize_bound_values() {
-        let ctx = egui::Context::default();
-        let original = 50.00019918212638;
-        let mut value = original;
-        let mut id = None;
-        for focused in [false, true, false, false] {
-            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
-                if let Some(id) = id {
-                    ui.memory_mut(|memory| {
-                        if focused {
-                            memory.request_focus(id);
-                        } else {
-                            memory.surrender_focus(id);
-                        }
-                    });
-                }
-                let response = vector_value(ui, &mut value);
-                id = Some(response.id);
-                assert!(!response.changed());
-            });
-            out.textures_delta.clear();
-            assert_eq!(value, original);
-            let expected = if focused {
-                original.to_string()
-            } else {
-                "50.00".into()
-            };
-            assert!(out.shapes.iter().any(|shape| {
-                matches!(&shape.shape, egui::epaint::Shape::Text(text) if text.galley.job.text == expected)
-            }), "missing shown value: {expected}");
-        }
-    }
-
-    #[test]
-    fn pattern_controls_are_addressable_by_both_hosts() {
-        let nodes = crate::automation::testing::author_ids(|ui| {
-            FeatureCardRows::inline(ui, |rows| {
-                pattern(
-                    rows,
-                    3,
-                    Vec3::new_unchecked(0.0, 0.0, 1.0),
-                    Vec3::new_unchecked(0.0, 0.0, 0.0),
-                    false,
-                    true,
-                );
-            });
-        });
-        for suffix in [
-            "patternCount",
-            "patternDirectionX",
-            "patternDirectionY",
-            "patternDirectionZ",
-            "originX",
-            "originY",
-            "originZ",
-            "patternFuse",
-        ] {
-            assert_eq!(
-                nodes
-                    .iter()
-                    .filter(|(id, _, _)| id == &format!("onecad.option.{suffix}"))
-                    .count(),
-                1,
-                "{suffix}: {nodes:?}"
-            );
-        }
-    }
-}
+mod tests;

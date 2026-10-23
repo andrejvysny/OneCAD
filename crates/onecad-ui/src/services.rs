@@ -99,10 +99,11 @@ pub async fn execute(
             backend.shared.wake();
             return;
         }
-        Command::Prepare(source) => {
+        Command::Prepare { source, generation } => {
             let identity = source.scene.identity();
-            let result = prepare(backend, source).await;
-            if result.is_err() {
+            let result = prepare(backend, source, generation).await;
+            if result.is_err() && backend.shared.preparation_generation.current() == Ok(generation)
+            {
                 // The retained capture cannot be drawn: publish a fresh one instead.
                 match load_ready_display(backend).await {
                     Ok(display) => backend.shared.publish_display(display),
@@ -113,6 +114,7 @@ pub async fn execute(
             }
             let _ = sender.send(Message::Prepared {
                 identity,
+                generation,
                 result,
                 _permit: permit,
             });
@@ -158,6 +160,7 @@ pub async fn execute(
 async fn prepare(
     backend: &mut Backend,
     source: crate::viewport_updates::Source,
+    generation: u64,
 ) -> Result<onecad_render::PreparedScene, String> {
     let epoch = backend
         .shared
@@ -180,6 +183,7 @@ async fn prepare(
                             .display_epoch
                             .load(std::sync::atomic::Ordering::Acquire)
                             == epoch
+                        && backend.shared.preparation_generation.current() == Ok(generation)
                 },
             )
             .await?,
@@ -193,7 +197,7 @@ async fn prepare(
         .shared
         .preparation_budget()?
         .limit_cpu_prepared_bytes(crate::budget::MAX_PREPARED_BYTES);
-    let mut cache = backend.shared.take_preparation_cache();
+    let mut cache = backend.shared.take_preparation_cache(generation);
     let (prepared, cache) = tokio::task::spawn_blocking(move || {
         let prepared = onecad_render::PreparedScene::new_cached_retained(
             &scene, budget, &mut cache, retention,
@@ -204,7 +208,7 @@ async fn prepare(
     .await
     .map_err(|error| format!("scene preparation stopped: {error}"))?;
     let cache_bytes = (cache.source_bytes(), cache.cpu_bytes());
-    backend.shared.restore_preparation_cache(cache);
+    backend.shared.restore_preparation_cache(generation, cache);
     let prepared = prepared?;
     if prepared.cpu_bytes() > crate::budget::MAX_PREPARED_BYTES
         || cache_bytes.0 > crate::budget::MAX_SOURCE_BYTES as u64
@@ -250,7 +254,7 @@ async fn execute_command(
         Command::Items(_) => return Err("item command reached model dispatcher".into()),
         Command::Sketch(_) => return Err("sketch command reached model dispatcher".into()),
         Command::Operands(_) => return Err("operand command reached model dispatcher".into()),
-        Command::Prepare(_) | Command::DescribeChanges => {
+        Command::Prepare { .. } | Command::DescribeChanges => {
             return Err("display command reached model dispatcher".into());
         }
         Command::Recovery {

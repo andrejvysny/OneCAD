@@ -1,7 +1,8 @@
 //! Renderer allowance and selected parked-cache estimates for one window.
 //!
 //! The single renderer enforces GPU replacement peaks. Parked preparations and
-//! thumbnails have a separate allowance, with Mobile eviction of adopted caches.
+//! thumbnails have a separate allowance, with LRU eviction of adopted and pending
+//! preparations on both profiles. Disposable generations fence work still executing.
 //! This is a partial display ledger: source payloads, closing owners and native
 //! drawable estimates are not all included. Shared CPU admission lives in `budget`;
 //! neither allowance represents measured process memory or a complete combined cap.
@@ -115,11 +116,7 @@ impl App {
     }
 
     /// Evicts parked caches, least recently active tab first, until they fit their share.
-    /// Mobile only: the macOS host keeps every parked tab's caches, as it always has.
     pub(crate) fn enforce_parked_budget(&mut self) {
-        if self.renderer.profile() == RenderProfile::Desktop {
-            return;
-        }
         let mut order: Vec<usize> = (0..self.tabs.parked.len()).collect();
         order.sort_by_key(|index| self.tabs.parked[*index].last_active);
         for index in order {
@@ -131,20 +128,13 @@ impl App {
     }
 
     /// Drops one parked tab's thumbnail, adopted prepared scene and backend preparation
-    /// cache; returns the resident bytes that went. A scene still in the bridge's slot is
-    /// adopted on activation and stays, so geometry it shares with the cache stays too.
+    /// cache, including pending preparations. Source scenes remain for activation.
     fn release_parked_caches_of(&mut self, index: usize) -> u64 {
         let before = parked_bytes(&self.tabs.parked[index]);
         let doc = &mut self.tabs.parked[index];
         let shared = doc.bridge.shared.clone();
-        let cache = shared.take_preparation_cache();
-        if let Some(display) = &doc.display
-            && let Ok(mut prepared) = display.prepared.lock()
-        {
-            // Activation re-prepares a consumed scene under the same identity.
-            prepared.take();
-        }
-        drop(cache);
+        shared.evict_preparations(doc.display.as_ref());
+        doc.prepare_in_flight = None;
         let thumbnail = doc.thumbnail.take();
         self.release_thumbnail(thumbnail);
         before.saturating_sub(parked_bytes(&self.tabs.parked[index]))

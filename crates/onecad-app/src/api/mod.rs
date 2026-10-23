@@ -23,7 +23,11 @@ pub use projection_visit::{
     detach_projection_with_completion, project_to_sketch_with_completion,
     update_projection_with_completion,
 };
+mod close;
 mod replacement;
+mod save;
+pub use close::{close_document, discard_and_close_document, shutdown_host};
+pub use save::save_document;
 mod sketch_constraints;
 mod sketch_gestures;
 pub use sketch_gestures::{
@@ -273,17 +277,21 @@ pub async fn new_document(
     };
     let (snapshot, projection) = {
         let mut guard = state.runtime.lock().await;
+        if let Err(error) = state.ensure_not_closing() {
+            state.rollback_backend();
+            return Err(error);
+        }
         *guard = Some(runtime);
         let rt = guard.as_ref().unwrap();
         rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
         state.bind_restart_owner(rt);
+        state.commit_backend();
+        state.adopt_claims(vec![claim]);
         (snapshot_of(rt), rt.projection())
     };
     // The new runtime is published, so the previous document's worker is now
     // unreachable — retire it (see `AppState::make_backend`'s two-phase contract).
     // Nothing between the swap and here can fail, so there is no rollback arm.
-    state.commit_backend();
-    state.adopt_claims(vec![claim]);
     #[cfg(debug_assertions)]
     render_watchdog_reconcile_projection(&projection, "new document");
     let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
@@ -347,21 +355,36 @@ pub async fn open_document(
     };
     let (snapshot, projection) = {
         let mut guard = state.runtime.lock().await;
+        if let Err(error) = state.ensure_not_closing() {
+            state.rollback_backend();
+            return Err(error);
+        }
         *guard = Some(rt);
         let rt = guard.as_ref().unwrap();
         rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
         state.bind_restart_owner(rt);
+        state.commit_backend();
+        state.adopt_claims(vec![path_claim, document_claim]);
         (snapshot_of(rt), rt.projection())
     };
-    state.commit_backend();
-    state.adopt_claims(vec![path_claim, document_claim]);
     if let Some(document_id) = discard_recovery {
         // Failed opens must leave the sole recovery copy reachable. Dispose only
         // after replacement succeeds, outside the runtime lock and in writer order.
         let _lane = state.persistence.lock().await;
+        let current = state.runtime.lock().await;
+        if !current
+            .as_ref()
+            .is_some_and(|rt| rt.matches_runtime_session(&projection.runtime_session))
+        {
+            return Err(ApiError::NoDocument(
+                "open saved completed after replacement".into(),
+            ));
+        }
         state.take_pending_recovery(document_id);
-        if let Some(root) = autosave::autosave_root(&app) {
-            autosave::clear_recovery_state(&root, document_id);
+        if current.as_ref().is_some_and(|rt| !rt.is_dirty()) {
+            if let Some(root) = autosave::autosave_root(&app) {
+                autosave::clear_recovery_state(&root, document_id);
+            }
         }
     }
     #[cfg(debug_assertions)]
@@ -432,15 +455,16 @@ pub async fn import_step(
     let claim = state.claim_document(rt.document_uuid())?;
     let (snapshot, projection) = {
         let mut guard = state.runtime.lock().await;
+        state.ensure_not_closing()?;
         staged.publish(|| {
             *guard = Some(rt);
             let rt = guard.as_ref().unwrap();
             rt.adopt_current_epoch();
             state.bind_restart_owner(rt);
+            state.adopt_claims(vec![claim]);
             (snapshot_of(rt), rt.projection())
         })?
     };
-    state.adopt_claims(vec![claim]);
     #[cfg(debug_assertions)]
     render_watchdog_reconcile_projection(&projection, "imported document");
     let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
@@ -518,7 +542,6 @@ pub async fn import_project(
     let Some(path) = pick_file(app.clone(), false).await else {
         return Ok(None);
     };
-    let mut claim = None;
     let (snapshot, projection, outcome) = {
         let mut guard = state.runtime.lock().await;
         let create_new = guard.is_none();
@@ -538,11 +561,11 @@ pub async fn import_project(
                     return Err(error);
                 }
             };
-            claim = Some(document_claim);
             rt.adopt_current_epoch();
             *guard = Some(rt);
             state.bind_restart_owner(guard.as_ref().unwrap());
             state.commit_backend();
+            state.adopt_claims(vec![document_claim]);
             outcome
         } else {
             let rt = guard
@@ -553,166 +576,12 @@ pub async fn import_project(
         let rt = guard.as_ref().unwrap();
         (snapshot_of(rt), rt.projection(), outcome)
     };
-    if let Some(claim) = claim {
-        state.adopt_claims(vec![claim]);
-    }
     let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
     if let Some(sched) = state.scheduler.get() {
         sched.handle(&outcome);
     }
     state.note_mutation();
     Ok(Some(snapshot))
-}
-
-/// Saves the open document (`CadClient` save). `path` `None` reuses the last save
-/// path; an unsaved document with no path is an error (the frontend's Save action
-/// then falls back to Save As). Records the saved path in the recents store.
-///
-/// `preview_png` is an optional base64 PNG capture of the viewport, stored as the
-/// container's `preview.png` and served to the start screen by
-/// [`list_recents`](crate::api::list_recents). It is **entirely optional**: a
-/// frontend that does not send it (and Tauri passes `None` for an argument the
-/// caller omits entirely) keeps whatever thumbnail the document already had, and a
-/// malformed or oversized capture is dropped with a warning. A thumbnail never
-/// fails a save.
-///
-/// ## Off the single-writer lock (VF-B7 / plan F1a)
-///
-/// The two slow parts of a save — the worker `SaveCheckpoint` round-trip and the
-/// container write (JSON + deflate of every import blob) — used to run with the
-/// runtime lock held, stalling every edit for their whole duration. They now run
-/// unlocked, in five phases:
-///
-/// 1. locked: resolve the target path, admit a checkpoint
-///    ([`prepare_checkpoint`](DocumentRuntime::prepare_checkpoint)), clone the engine;
-/// 2. **unlocked**: `SaveCheckpoint`; re-lock briefly to
-///    [`adopt_checkpoint`](DocumentRuntime::adopt_checkpoint), whose fencing recheck
-///    discards artifacts an interleaved edit or worker restart invalidated;
-/// 3. locked: [`build_save_payload`](DocumentRuntime::build_save_payload) + the
-///    revision it describes;
-/// 4. **unlocked**, under the persistence lane: the container write, then the
-///    recovery-marker clear ([`autosave::write_save_payload`]);
-/// 5. locked: [`mark_saved`](DocumentRuntime::mark_saved) — adopt the path, and go
-///    clean only if no edit landed during the write.
-///
-/// Every re-lock re-checks the document identity: `close_document` / `open_document`
-/// can interleave now that the lock is dropped, and the tail of a save must never be
-/// applied to a different document.
-#[tracing::instrument(skip_all, fields(path = ?path), err(Display))]
-pub async fn save_document(
-    state: &AppState,
-    app: HostContext,
-    path: Option<String>,
-    preview_png: Option<String>,
-) -> Result<SaveOutcomeDto, ApiError> {
-    let preview_png = decode_preview_png(preview_png);
-    let save_as = path.is_some();
-    // ── 1. Locked: target path + checkpoint admission + engine handle. ──
-    let (target, document_id, ticket, engine) = {
-        let guard = state.runtime.lock().await;
-        let rt = guard
-            .as_ref()
-            .ok_or_else(|| ApiError::NoDocument("save".into()))?;
-        let target: PathBuf = match path {
-            Some(p) => PathBuf::from(p),
-            None => rt
-                .path()
-                .map(Path::to_path_buf)
-                .ok_or_else(|| ApiError::Io("no save path; provide one".into()))?,
-        };
-        (
-            target,
-            rt.document_uuid(),
-            rt.prepare_checkpoint(),
-            rt.engine_arc(),
-        )
-    };
-
-    // A Save As target is leased before any byte is written, so another open host
-    // can neither be overwritten nor race this write; adopted only on success.
-    let target_claim = if save_as {
-        Some(state.claim_path(&target)?)
-    } else {
-        None
-    };
-
-    // ── 2. Unlocked: the worker round-trip. Checkpoint policy (SCHEMA §7.7) — mint a
-    //    durable acceleration base of the current head so a later edit regens
-    //    incrementally. Best-effort: a worker failure just skips it (Invariant 7).
-    if let Some(ticket) = ticket {
-        if let Ok(artifacts) = engine.save_checkpoint(ticket.step()).await {
-            let mut guard = state.runtime.lock().await;
-            if let Some(rt) = guard
-                .as_mut()
-                .filter(|rt| rt.document_uuid() == document_id)
-            {
-                rt.adopt_checkpoint(ticket, artifacts);
-            }
-        }
-    }
-
-    // ── 3. Locked: snapshot the bytes-to-be + the revision they describe. ──
-    let (payload, revision) = {
-        let mut guard = state.runtime.lock().await;
-        let rt = guard
-            .as_mut()
-            .filter(|rt| rt.document_uuid() == document_id)
-            .ok_or_else(|| ApiError::NoDocument("save".into()))?;
-        let revision = rt.revision();
-        let caches = SaveCaches {
-            meshes: true,
-            preview_png,
-        };
-        (rt.build_save_payload(save_meta(), caches), revision)
-    };
-
-    // ── 4. Unlocked, persistence lane: write + clear the crash-recovery state. ──
-    let recovery_root = autosave::autosave_root(&app);
-    autosave::write_save_payload(
-        &state.persistence,
-        &target,
-        payload,
-        recovery_root.as_deref(),
-        document_id,
-    )
-    .await?;
-
-    // ── 5. Locked: adopt the path; go clean only if nothing was edited mid-write. ──
-    let outcome = {
-        let mut guard = state.runtime.lock().await;
-        match guard
-            .as_mut()
-            .filter(|rt| rt.document_uuid() == document_id)
-        {
-            Some(rt) => {
-                // Adopted under the runtime lock, while this document is provably
-                // still the host's: a close cannot interleave and leak the lease.
-                if let Some(claim) = target_claim {
-                    state.adopt_path_claim(claim);
-                }
-                let clean = rt.mark_saved(&target, revision);
-                SaveOutcomeDto {
-                    document_id: rt.document_id(),
-                    saved_revision: revision.0,
-                    current_revision: rt.revision().0,
-                    clean,
-                    path: target.to_string_lossy().into_owned(),
-                    title: rt.title().to_string(),
-                }
-            }
-            None => {
-                tracing::warn!(
-                    "save: the document closed while its container was being written; \
-                     the file at {target:?} is complete but no live document adopts it"
-                );
-                return Err(ApiError::NoDocument(
-                    "save completed after document close".into(),
-                ));
-            }
-        }
-    };
-    recents::record(&app, &target);
-    Ok(outcome)
 }
 
 /// Hard cap on a decoded viewport capture (512 KiB). A start-screen card is a few
@@ -972,129 +841,6 @@ async fn head_bodies(state: &AppState) -> Result<(Vec<BodyId>, Option<SnapshotId
     Ok((rt.head_body_ids(), crate::export::export_fence(rt)))
 }
 
-/// Closes the document, retaining dirty recovery work after queued writes drain.
-/// Clean documents discard stale recovery state. Unresolved offers stay protected.
-pub async fn close_document(state: &AppState, app: HostContext) -> Result<(), ApiError> {
-    close_document_inner(state, app, None, true).await
-}
-
-/// Explicitly discards the runtime named by the user's close decision.
-/// Session validation and runtime removal share one lock to reject stale consent.
-pub async fn discard_and_close_document(
-    state: &AppState,
-    app: HostContext,
-    expected_runtime_session: &str,
-) -> Result<(), ApiError> {
-    close_document_inner(state, app, Some(expected_runtime_session), true).await
-}
-
-/// Closes the document like [`close_document`] (or [`discard_and_close_document`]
-/// when `discard_session` names the user's discard decision) and then tears the
-/// whole host down: its regen scheduler and autosave lanes stop, and its workers
-/// are retired and reaped. The process worker pool is left alone — other hosts
-/// share it — so nothing is pre-warmed on this host's behalf.
-///
-/// This is the close path for one of several open documents, and the quit path of
-/// a host whose runtime outlives it.
-pub async fn shutdown_host(
-    state: &AppState,
-    app: HostContext,
-    discard_session: Option<&str>,
-) -> Result<(), ApiError> {
-    // Admission closes first, so no open can publish into the host being torn down.
-    state.begin_closing();
-    if let Err(error) = close_document_inner(state, app, discard_session, false).await {
-        // A refused close (stale discard consent) leaves the document open and
-        // fully owned: nothing below may run, or the host would keep a document
-        // with no scheduler, autosave, worker or claims.
-        state.cancel_closing();
-        return Err(error);
-    }
-    if let Some(scheduler) = state.scheduler.get() {
-        scheduler.shutdown();
-    }
-    state.tasks.stop().await;
-    state.retire_host().await;
-    // Last: until the host is fully torn down it still owns its path and identity.
-    state.release_claims();
-    Ok(())
-}
-
-async fn close_document_inner(
-    state: &AppState,
-    app: HostContext,
-    discard_session: Option<&str>,
-    rewarm: bool,
-) -> Result<(), ApiError> {
-    let closed = {
-        let mut guard = state.runtime.lock().await;
-        if discard_session.is_some_and(|expected| {
-            !guard
-                .as_ref()
-                .is_some_and(|rt| rt.matches_runtime_session(expected))
-        }) {
-            return Err(ApiError::InvalidCommand(
-                "discard close belongs to a stale runtime".into(),
-            ));
-        }
-        let closed = guard.as_ref().map(|rt| (rt.document_uuid(), rt.is_dirty()));
-        *guard = None;
-        state.invalidate_backend_stage();
-        state.clear_restart_owner();
-        closed
-    };
-    // Never await the writer lane while holding the runtime lock. Admitted
-    // autosaves finish before cleanup; queued old-session snapshots fail their fence.
-    #[cfg(debug_assertions)]
-    if let Some((id, _)) = closed {
-        render_watchdog_retire_document(&id.to_string(), "document closed");
-    }
-    let _lane = state.persistence.lock().await;
-    let current = state.runtime.lock().await;
-    reconcile_closed_recovery(
-        state,
-        &app,
-        closed,
-        current.as_ref(),
-        discard_session.is_some(),
-    );
-    // A document opened while close waited owns its worker and projection now.
-    if current.is_none() {
-        if rewarm {
-            state.release_claims();
-            state.rewarm();
-        }
-        #[cfg(debug_assertions)]
-        render_watchdog_reconcile_projection(&DocumentProjection::empty(), "document closed");
-        let _ = app.emit(AppEvent::ProjectionUpdated(DocumentProjection::empty()));
-    }
-    Ok(())
-}
-
-fn reconcile_closed_recovery(
-    state: &AppState,
-    app: &HostContext,
-    closed: Option<(DocumentId, bool)>,
-    current: Option<&DocumentRuntime>,
-    discard: bool,
-) {
-    let (Some((id, dirty)), Some(root)) = (closed, autosave::autosave_root(app)) else {
-        return;
-    };
-    if current.is_some_and(|runtime| runtime.document_uuid() == id)
-        || state.peek_pending_recovery(id).is_some()
-    {
-        return;
-    }
-    if dirty && !discard {
-        if let Err(error) = onecad_core::io::recovery::release_marker(&root, id) {
-            tracing::warn!(%error, "close: release recovery owner failed");
-        }
-    } else {
-        autosave::clear_recovery_state(&root, id);
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Crash recovery (autosave; `io::recovery`)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1116,6 +862,41 @@ pub async fn check_recovery(
     };
     let offers = scan_recoverable(&root, autosave::pid_alive, SystemTime::now())
         .map_err(|e| ApiError::Io(e.to_string()))?;
+    let dtos = offers.iter().map(recovery_info_dto).collect();
+    state.set_pending_recovery(offers);
+    Ok(dtos)
+}
+
+/// Discovers recovery after an Apple container move without guessing file identity.
+/// Invalid or missing candidates keep their recorded path and recovery remains offered.
+pub async fn check_recovery_in_documents(
+    state: &AppState,
+    app: HostContext,
+    documents: &Path,
+) -> Result<Vec<RecoveryInfoDto>, ApiError> {
+    let Some(root) = autosave::autosave_root(&app) else {
+        return Ok(Vec::new());
+    };
+    let mut offers = scan_recoverable(&root, autosave::pid_alive, SystemTime::now())
+        .map_err(|error| ApiError::Io(error.to_string()))?;
+    for offer in &mut offers {
+        let Some(marker) = &mut offer.marker else {
+            continue;
+        };
+        for path in marker
+            .opened_path
+            .iter_mut()
+            .chain(marker.source_paths.iter_mut())
+        {
+            match crate::document_paths::relocate_saved_path(documents, path, offer.document_id) {
+                Ok(Some(relocated)) => *path = relocated,
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, path = %path.display(), "recovery path relocation refused")
+                }
+            }
+        }
+    }
     let dtos = offers.iter().map(recovery_info_dto).collect();
     state.set_pending_recovery(offers);
     Ok(dtos)
@@ -1165,11 +946,26 @@ pub async fn recover_document_at_path(
     destination: Option<PathBuf>,
 ) -> Result<Option<DocumentSnapshotDto>, ApiError> {
     let id = parse_document_id(&document_id)?;
+    // A restore reads and re-stamps the pair; discard removes it. Neither may
+    // overtake an admitted writer, including one whose API waiter was dropped.
+    let _lane = state.persistence.clone().lock_owned().await;
     let Some(offer) = state.peek_pending_recovery(id) else {
         return Ok(None);
     };
     let root = autosave::autosave_root(&app);
     if !accept {
+        let _claim = state.claim_document(id)?;
+        if state
+            .runtime
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|rt| rt.document_uuid() == id)
+        {
+            return Err(ApiError::RecoveryPending(
+                "An open document still owns this recovery".into(),
+            ));
+        }
         state.take_pending_recovery(id);
         if let Some(root) = &root {
             autosave::clear_recovery_state(root, offer.document_id);
@@ -1177,6 +973,10 @@ pub async fn recover_document_at_path(
         return Ok(None);
     }
     let original_path = offer.marker.as_ref().and_then(|m| m.opened_path.clone());
+    let mut source_paths = offer
+        .marker
+        .as_ref()
+        .map_or_else(Vec::new, |m| m.source_paths.clone());
     let opened_path = destination.or_else(|| original_path.clone());
     let title = offer.marker.as_ref().and_then(|m| m.title.clone());
     let mut claims = Vec::new();
@@ -1184,54 +984,64 @@ pub async fn recover_document_at_path(
         claims.push(state.claim_path(path)?);
     }
     if let Some(original) = original_path.filter(|path| Some(path) != opened_path.as_ref()) {
-        claims.push(state.claim_path(&original)?);
+        source_paths.push(original);
     }
+    source_paths.sort();
+    source_paths.dedup();
+    for source in &source_paths {
+        claims.push(state.claim_path(source)?.protect_source());
+    }
+    // The recovery filename is already keyed by this identity; reserve it before
+    // reading so another host cannot discard the same offer during restore.
+    claims.push(state.claim_document(id)?);
     state.ensure_document_capacity()?;
     // Restore: open the autosave container as the live document. Anything below that
     // fails leaves the offer pending, so the user can try again or discard.
     let mut rt = open_runtime_over_new_backend_blocking(state, offer.autosave_path.clone()).await?;
-    match state.claim_document(rt.document_uuid()) {
-        Ok(claim) => claims.push(claim),
-        Err(error) => {
+    if rt.document_uuid() != id {
+        state.rollback_backend();
+        return Err(ApiError::Io(
+            "Recovery container identity does not match its offer".into(),
+        ));
+    }
+    rt.mark_recovered(opened_path, title);
+    let (snapshot, projection) = {
+        let mut guard = state.runtime.lock().await;
+        if let Err(error) = state.ensure_not_closing() {
             state.rollback_backend();
             return Err(error);
         }
-    }
-    rt.mark_recovered(opened_path, title);
-    let (snapshot, projection, opened_path_for_marker, title_for_marker) = {
-        let mut guard = state.runtime.lock().await;
+        // Publish only after the tiny owner record is durable. Keeping this
+        // metadata step and publication in one poll prevents cancellation from
+        // stranding a live marker without its runtime or losing source aliases.
+        if let Some(root) = &root {
+            let marker = SessionMarker {
+                document_id: id,
+                pid: std::process::id(),
+                opened_path: rt.path().map(Path::to_path_buf),
+                source_paths,
+                last_autosave: offer
+                    .marker
+                    .as_ref()
+                    .map(|m| m.last_autosave.clone())
+                    .unwrap_or_default(),
+                title: Some(rt.title().to_owned()),
+            };
+            if let Err(error) = onecad_core::io::recovery::write_marker(root, &marker) {
+                state.rollback_backend();
+                return Err(ApiError::Io(format!("recovery owner metadata: {error}")));
+            }
+        }
         *guard = Some(rt);
         let rt = guard.as_ref().unwrap();
-        rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
+        rt.adopt_current_epoch();
         state.bind_restart_owner(rt);
-        (
-            snapshot_of(rt),
-            rt.projection(),
-            rt.path().map(Path::to_path_buf),
-            Some(rt.title().to_string()),
-        )
+        state.commit_backend();
+        state.adopt_claims(claims);
+        state.take_pending_recovery(id);
+        (snapshot_of(rt), rt.projection())
     };
-    state.commit_backend();
-    state.adopt_claims(claims);
-    state.take_pending_recovery(id);
-    // Re-stamp the marker under THIS process: the container is still unsaved work,
-    // and it is now ours. Synthesized when the offer was an orphan, so a restore
-    // always leaves owner evidence behind — otherwise a second window would be
-    // offered the document this one just opened.
-    if let Some(root) = &root {
-        let marker = SessionMarker {
-            document_id: offer.document_id,
-            pid: std::process::id(),
-            opened_path: opened_path_for_marker,
-            last_autosave: offer
-                .marker
-                .as_ref()
-                .map(|m| m.last_autosave.clone())
-                .unwrap_or_default(),
-            title: title_for_marker,
-        };
-        let _ = onecad_core::io::recovery::write_marker(root, &marker);
-    }
+    drop(_lane);
     #[cfg(debug_assertions)]
     render_watchdog_reconcile_projection(&projection, "recovered document");
     let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
@@ -5020,6 +4830,9 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 mod recovery_identity_tests;
 
 #[cfg(test)]
+mod save_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -5988,3 +5801,9 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod save_cancellation_tests;
+
+#[cfg(test)]
+mod persistence_cancellation_tests;

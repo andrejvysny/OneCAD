@@ -6,6 +6,7 @@ use super::*;
 use crate::display_budget::DisplayBudget;
 use onecad_render::RenderProfile;
 use onecad_scene::PickKind;
+use std::sync::Arc;
 
 /// Test-only readback of the renderer's output (RGBA8, rows packed).
 fn read_output(host: &Host) -> Vec<u8> {
@@ -247,6 +248,196 @@ async fn three_documents_and_a_rotation_stay_within_the_display_aggregate() {
     host.redraw();
     assert_eq!(host.app.renderer.scene_identity(), Some(identity));
     assert!(cache_bytes(&host.app.doc) > 0);
+    host.stop().await;
+}
+
+fn pending_copy(display: &crate::bridge::Display) -> crate::bridge::Display {
+    crate::bridge::Display {
+        epoch: display.epoch,
+        preparation_generation: std::sync::atomic::AtomicU64::new(
+            display
+                .preparation_generation
+                .load(std::sync::atomic::Ordering::Acquire),
+        ),
+        projection: display.projection.clone(),
+        context: display.context.clone(),
+        scene: display.scene.clone(),
+        profiles: Vec::new(),
+        profile_anchors: Vec::new(),
+        profile_failures: Vec::new(),
+        records: display.records.clone(),
+        render_receipt: display.render_receipt.clone(),
+        _lease: display._lease.clone(),
+        prepared: Default::default(),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires production worker and Metal; run with ONECAD_REQUIRE_WORKER=1 ONECAD_REQUIRE_GPU=1"]
+async fn parked_eviction_fences_pending_cache_and_old_reply_then_rebuilds_on_desktop() {
+    let root = tempfile::tempdir().unwrap();
+    let mut host = boxed(root.path()).await;
+    let first = host.app.doc.tab;
+    let display = host.app.doc.display.as_ref().unwrap().clone();
+    let shared = host.app.doc.bridge.shared.clone();
+    let camera = host.app.doc.camera;
+    let generation = shared.preparation_generation.current().unwrap();
+    host.app.document_request(Request::New);
+    pump_until(&mut host.app, &host.context, &mut host.frame, |app| {
+        app.tabs.parked.len() == 1 && app.document_open() && !app.busy()
+    })
+    .await;
+    host.redraw();
+
+    let mut executing_cache = shared.take_preparation_cache(generation);
+    let allocation = Arc::new(
+        shared
+            .host_budget
+            .reserve_kind(
+                crate::budget::MAX_PREPARED_BYTES as usize,
+                crate::budget::Kind::Preparation,
+            )
+            .unwrap(),
+    );
+    let executing_owner = Arc::downgrade(&allocation);
+    let retention = onecad_render::PreparationRetention {
+        source: Some(display._lease.clone()),
+        preparation: Some(allocation),
+    };
+    let prepare = |cache: &mut onecad_render::PreparationCache| {
+        onecad_render::PreparedScene::new_cached_retained(
+            &display.scene,
+            host.app.renderer.preparation_budget(),
+            cache,
+            retention.clone(),
+        )
+        .unwrap()
+    };
+    *display.prepared.lock().unwrap() = Some(prepare(&mut executing_cache));
+    let pending = pending_copy(&display);
+    *pending.prepared.lock().unwrap() = Some(prepare(&mut executing_cache));
+    shared.publish_display(pending);
+    let pending = shared.display.lock().unwrap().as_ref().unwrap().clone();
+    let late = pending_copy(&display);
+    *late.prepared.lock().unwrap() = Some(prepare(&mut executing_cache));
+    drop(retention);
+
+    // Desktop uses the same LRU share. The executing cache still owns allocations.
+    host.app.display_budget.aggregate = host.app.display_budget.active;
+    host.app.enforce_parked_budget();
+    assert!(host.app.tabs.parked[0].thumbnail.is_none());
+    assert!(display.prepared.lock().unwrap().is_none());
+    assert!(pending.prepared.lock().unwrap().is_none());
+    assert_eq!(cache_bytes(&host.app.tabs.parked[0]), 0);
+    assert_eq!(host.app.tabs.parked[0].camera, camera);
+    assert_eq!(
+        host.app.tabs.parked[0].display.as_ref().unwrap().projection,
+        display.projection
+    );
+    assert!(
+        executing_owner.upgrade().is_some(),
+        "executing payload remains charged"
+    );
+    let retained = shared.host_budget.snapshot().used;
+    shared.restore_preparation_cache(generation, executing_cache);
+    assert_eq!(
+        cache_bytes(&host.app.tabs.parked[0]),
+        0,
+        "late restore was rejected"
+    );
+    assert!(shared.host_budget.snapshot().used <= retained);
+    shared.publish_display(late);
+    assert!(
+        executing_owner.upgrade().is_none(),
+        "last stale payload retired its lease"
+    );
+    assert!(
+        shared
+            .display
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .prepared
+            .lock()
+            .unwrap()
+            .is_none()
+    );
+
+    let projection = display.projection.clone();
+    // Simulate switching back before this tab's first source capture is delivered.
+    host.app.tabs.parked[0].display = None;
+    host.app.activate_tab(first);
+    assert!(!host.app.doc.awaiting_scene);
+    assert!(host.app.doc.prepare_in_flight.is_none());
+    let late = host.app.doc.bridge.take_display().unwrap();
+    assert!(shared.accept_display(&late));
+    host.app.adopt_display(late);
+    assert!(
+        host.app.doc.awaiting_scene,
+        "late source waits for its rebuild"
+    );
+    let requested = host.app.doc.prepare_in_flight;
+    host.app.doc.awaiting_scene = false;
+    host.app.request_preparation();
+    assert!(
+        host.app.doc.awaiting_scene,
+        "an existing request also waits"
+    );
+    assert_eq!(
+        host.app.doc.prepare_in_flight, requested,
+        "one rebuild per generation"
+    );
+    let raw = egui::RawInput {
+        screen_rect: Some(host.screen()),
+        ..Default::default()
+    };
+    // Render without draining the queued reply: a missing preparation must wait.
+    let mut output = host
+        .context
+        .run_ui(raw, |ui| crate::viewport::show(&mut host.app, ui));
+    output.textures_delta.clear();
+    assert!(host.app.viewport_failure.is_none());
+    assert!(
+        host.app.doc.view.is_none(),
+        "old document cannot be picked while waiting"
+    );
+    // Initial source adoption may fit the camera; preparation completion must retain it.
+    let camera = host.app.doc.camera;
+    let newer = host.app.doc.prepare_in_flight;
+    assert_eq!(
+        newer.map(|request| request.0),
+        Some(display.scene.identity())
+    );
+    assert_ne!(newer.unwrap().1, generation);
+    let permits = tokio::sync::Semaphore::new(1);
+    host.app.message(
+        crate::bridge::Message::Prepared {
+            identity: display.scene.identity(),
+            generation,
+            result: Err("obsolete preparation".into()),
+            _permit: Arc::new(permits).acquire_owned().await.unwrap(),
+        },
+        &host.context,
+    );
+    assert_eq!(
+        host.app.doc.prepare_in_flight, newer,
+        "old reply kept newer request"
+    );
+    pump_until(&mut host.app, &host.context, &mut host.frame, |app| {
+        app.doc.prepare_in_flight.is_none()
+    })
+    .await;
+    host.redraw();
+    assert_eq!(
+        host.app.renderer.scene_identity(),
+        Some(display.scene.identity())
+    );
+    assert_eq!(host.app.doc.camera, camera);
+    assert_eq!(
+        host.app.doc.display.as_ref().unwrap().projection,
+        projection
+    );
     host.stop().await;
 }
 

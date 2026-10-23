@@ -9,6 +9,7 @@ use std::{
 };
 
 pub async fn load_display(backend: &mut Backend) -> Result<Display, String> {
+    let preparation_generation = backend.shared.preparation_generation.current()?;
     let epoch = backend
         .shared
         .display_epoch
@@ -142,12 +143,16 @@ pub async fn load_display(backend: &mut Backend) -> Result<Display, String> {
         .shared
         .preparation_budget()?
         .limit_cpu_prepared_bytes(crate::budget::MAX_PREPARED_BYTES);
-    let mut cache = backend.shared.take_preparation_cache();
+    let mut cache = backend
+        .shared
+        .take_preparation_cache(preparation_generation);
     let prepared =
         onecad_render::PreparedScene::new_cached_retained(&scene, budget, &mut cache, retention)
             .map_err(|e| e.to_string());
     let cache_bytes = (cache.source_bytes(), cache.cpu_bytes());
-    backend.shared.restore_preparation_cache(cache);
+    backend
+        .shared
+        .restore_preparation_cache(preparation_generation, cache);
     let prepared = prepared?;
     if prepared.cpu_bytes() > crate::budget::MAX_PREPARED_BYTES {
         return Err("Native CPU preparation budget exceeded".into());
@@ -186,6 +191,7 @@ pub async fn load_display(backend: &mut Backend) -> Result<Display, String> {
     backend.previous_scene = Some((scene.clone(), lease.clone()));
     Ok(Display {
         epoch,
+        preparation_generation: std::sync::atomic::AtomicU64::new(preparation_generation),
         _lease: lease,
         projection,
         context,

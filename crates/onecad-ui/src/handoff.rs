@@ -4,6 +4,51 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
+/// Serializes disposable-cache eviction with restoration and handoff. Document
+/// publication has a separate epoch: dropping rebuildable memory is not a model change.
+#[derive(Default)]
+pub struct EvictionGeneration(Mutex<u64>);
+
+impl EvictionGeneration {
+    pub fn current(&self) -> Result<u64, String> {
+        self.0
+            .lock()
+            .ok()
+            .filter(|generation| **generation != u64::MAX)
+            .map(|generation| *generation)
+            .ok_or_else(|| "Preparation eviction state unavailable; document remains open".into())
+    }
+
+    pub fn with_current(&self, expected: u64, apply: impl FnOnce()) -> bool {
+        let Ok(generation) = self.0.lock() else {
+            return false;
+        };
+        if *generation == u64::MAX || *generation != expected {
+            return false;
+        }
+        apply();
+        true
+    }
+
+    pub fn publish(&self, expected: u64, apply: impl FnOnce(bool)) {
+        let Ok(generation) = self.0.lock() else {
+            return;
+        };
+        apply(*generation != u64::MAX && *generation == expected);
+    }
+
+    pub fn evict(&self, release: impl FnOnce()) {
+        // Even exhausted identities may release memory; they cannot admit another preparation.
+        let mut generation = self.0.lock().unwrap_or_else(|poisoned| {
+            let mut generation = poisoned.into_inner();
+            *generation = u64::MAX;
+            generation
+        });
+        *generation = generation.saturating_add(1);
+        release();
+    }
+}
+
 pub fn with_current<T>(
     slot: &Mutex<Option<T>>,
     epoch: &AtomicU64,
@@ -49,6 +94,68 @@ pub fn take_current<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn eviction_during_execution_rejects_restore_and_keeps_live_allocation_charged() {
+        let generation = EvictionGeneration::default();
+        let captured = generation.current().unwrap();
+        let budget = std::sync::Arc::new(crate::budget::HostBudget::default());
+        let allocation = std::sync::Arc::new(budget.reserve(64 << 20).unwrap());
+        let executing = allocation.clone();
+        let cache = Mutex::new(Some(allocation));
+        generation.evict(|| {
+            cache.lock().unwrap().take();
+        });
+        assert_eq!(budget.snapshot().used, 64 << 20);
+        assert!(!generation.with_current(captured, || {
+            *cache.lock().unwrap() = Some(executing.clone());
+        }));
+        assert!(cache.lock().unwrap().is_none());
+        drop(executing);
+        assert_eq!(budget.snapshot().used, 0);
+    }
+
+    #[test]
+    fn eviction_fences_late_publication_but_allows_new_generation_rebuild() {
+        let generation = EvictionGeneration::default();
+        let captured = generation.current().unwrap();
+        let adopted = Mutex::new(Some("old preparation"));
+        let pending = Mutex::new(Some("pending preparation"));
+        generation.evict(|| {
+            adopted.lock().unwrap().take();
+            pending.lock().unwrap().take();
+        });
+        generation.publish(captured, |current| {
+            *pending.lock().unwrap() = current.then_some("late preparation");
+        });
+        assert!(adopted.lock().unwrap().is_none());
+        assert!(pending.lock().unwrap().is_none());
+        let rebuilt = generation.current().unwrap();
+        assert_ne!(captured, rebuilt);
+        assert!(generation.with_current(rebuilt, || {
+            *adopted.lock().unwrap() = Some("rebuilt preparation");
+        }));
+        assert_eq!(*adopted.lock().unwrap(), Some("rebuilt preparation"));
+    }
+
+    #[test]
+    fn exhaustion_and_poison_refuse_rebuild_without_reusing_an_identity() {
+        let generation = EvictionGeneration(Mutex::new(u64::MAX - 1));
+        generation.evict(|| {});
+        assert!(generation.current().is_err());
+        assert!(!generation.with_current(u64::MAX, || panic!("reused identity")));
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = generation.0.lock().unwrap();
+            panic!("injected eviction-state poison");
+        });
+        assert!(generation.current().is_err());
+        assert!(!generation.with_current(0, || panic!("poison admitted work")));
+        let mut released = false;
+        generation.evict(|| released = true);
+        assert!(
+            released,
+            "degraded state may still release disposable owners"
+        );
+    }
     #[test]
     fn invalidation_between_capture_and_publication_rejects_publish_and_accept() {
         let slot = Mutex::new(Some(1));

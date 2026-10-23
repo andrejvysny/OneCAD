@@ -77,8 +77,11 @@ fn start_maintenance(host: &HostContext) {
 
 fn start_autosave(state: &AppState, host: HostContext) {
     if let Some(app_data) = autosave::autosave_root(&host) {
-        let lane = tokio::spawn(autosave::run_until(
-            state.runtime.clone(),
+        let lane = tokio::spawn(autosave::run_owned(
+            (
+                state.runtime.clone(),
+                Some(crate::host_claims::Ownership::new(state)),
+            ),
             app_data,
             state.persistence.clone(),
             state.autosave_tick.subscribe(),

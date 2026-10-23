@@ -59,8 +59,8 @@ pub struct DocumentEditor {
     /// The tab this one was opened from, while its New/Open/Import is in flight:
     /// a cancelled or redirected request closes this tab and returns there.
     pub origin: Option<crate::documents::TabId>,
-    /// The scene a `Command::Prepare` is re-preparing for this document, if any.
-    pub prepare_in_flight: Option<onecad_scene::SceneIdentity>,
+    /// Scene and eviction generation of the preparation this document awaits.
+    pub prepare_in_flight: Option<(onecad_scene::SceneIdentity, u64)>,
     /// A close the user already decided while this document was parked (a Save
     /// that finished in the background); applied when it is shown again. The
     /// inner value is the runtime session to discard, if the decision was discard.

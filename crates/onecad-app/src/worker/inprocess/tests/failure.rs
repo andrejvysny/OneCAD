@@ -243,6 +243,7 @@ pub(super) fn wedge_config() -> SupervisorConfig {
 
 pub(super) const BUSY_MS: u64 = 4000;
 
+#[cfg(target_vendor = "apple")]
 fn os_threads() -> i32 {
     // SAFETY: plain-old-data out parameter sized for PROC_PIDTASKINFO.
     let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
@@ -261,6 +262,7 @@ fn os_threads() -> i32 {
     info.pti_threadnum
 }
 
+#[cfg(target_vendor = "apple")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_wedge_abandons_once_and_fails_relaunch_required_without_a_new_thread() {
     let _gate = GATE.lock().await;

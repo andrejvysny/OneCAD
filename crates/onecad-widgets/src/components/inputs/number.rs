@@ -70,8 +70,11 @@ fn stepped_text(text: &str, step: f64, shift: bool, up: bool, decimals: usize) -
     Some(format!("{value:.precision$}"))
 }
 
-fn shown_text(text: &str, decimals: usize, focused: bool) -> String {
-    if !focused && let ParsedValue::Number(value) = parse_value(text) {
+fn shown_text(text: &str, decimals: usize, focused: bool, invalid: bool) -> String {
+    if !focused
+        && !invalid
+        && let ParsedValue::Number(value) = parse_value(text)
+    {
         format!("{value:.decimals$}")
     } else {
         text.to_owned()
@@ -223,7 +226,12 @@ impl Widget for NumberField<'_> {
                     .max_rect(inner)
                     .layout(Layout::left_to_right(Align::Center)),
             );
-            let mut shown = shown_text(self.text, self.decimals, ui.memory(|m| m.has_focus(id)));
+            let mut shown = shown_text(
+                self.text,
+                self.decimals,
+                ui.memory(|m| m.has_focus(id)),
+                self.error.is_some(),
+            );
             let mut edit = TextEdit::singleline(&mut shown)
                 .id(id)
                 .font(FontId::new(size, fonts::mono()))
@@ -292,6 +300,31 @@ impl Widget for NumberField<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_numeric_drafts_remain_visible_verbatim_after_blur() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut text = "2.5".to_owned();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.add(
+                NumberField::new("count", &mut text)
+                    .decimals(0)
+                    .error(Some("Enter a whole number")),
+            );
+        });
+        out.textures_delta.clear();
+        let update = out.platform_output.accesskit_update.unwrap();
+        let value = update
+            .nodes
+            .iter()
+            .find_map(|(_, node)| {
+                (node.role() == egui::accesskit::Role::TextInput).then(|| node.value().unwrap())
+            })
+            .expect("accessible numeric option");
+        assert_eq!(value, "2.5");
+        assert_eq!(text, "2.5");
+    }
 
     fn draw(
         ctx: &egui::Context,

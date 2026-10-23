@@ -13,6 +13,9 @@ use onecad_core::{
 };
 use std::sync::Arc;
 
+#[path = "startup_relocation_tests.rs"]
+mod relocation;
+
 struct Quiet;
 impl EventSink for Quiet {
     fn emit(&self, _: AppEvent) -> Result<(), String> {

@@ -67,7 +67,7 @@ pub async fn execute(
 
 pub fn refresh_recents(backend: &Backend) {
     let root = backend.paths.documents.clone();
-    let mut entries = onecad_app::recents::list(&backend.host);
+    let mut entries = onecad_app::recents::list_in_documents(&backend.host, &root);
     entries.retain(|entry| {
         Path::new(&entry.path)
             .canonicalize()

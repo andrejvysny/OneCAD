@@ -12,7 +12,7 @@
 //! a save onto its own path); claims are counted so each lease releases only itself.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
 use onecad_core::ids::DocumentId;
@@ -40,6 +40,7 @@ pub struct Claim {
     table: Arc<Reservations>,
     host: HostId,
     key: Key,
+    source_alias: bool,
 }
 
 impl std::fmt::Debug for Claim {
@@ -56,6 +57,31 @@ impl Claim {
     #[must_use]
     pub fn is_path(&self) -> bool {
         matches!(self.key, Key::Path(_))
+    }
+
+    /// Keep an imported/original source reserved when the editable target changes.
+    pub fn protect_source(mut self) -> Self {
+        self.source_alias = self.is_path();
+        self
+    }
+
+    pub(crate) fn source_path(&self) -> Option<&Path> {
+        match &self.key {
+            Key::Path(path) if self.source_alias => Some(path),
+            _ => None,
+        }
+    }
+}
+
+impl Clone for Claim {
+    fn clone(&self) -> Self {
+        // This live lease prevents another host from acquiring the key while its
+        // operation takes an independent reference, even during host teardown.
+        let mut claim = self
+            .table
+            .lease(&mut self.table.owners(), self.host, self.key.clone());
+        claim.source_alias = self.source_alias;
+        claim
     }
 }
 
@@ -137,6 +163,7 @@ impl Reservations {
             table: self.clone(),
             host,
             key,
+            source_alias: false,
         }
     }
 
@@ -160,19 +187,36 @@ fn occupied_hosts(owners: &HashMap<Key, (HostId, usize)>) -> Vec<HostId> {
     hosts
 }
 
-/// The comparable form of `path`: canonical when it exists, else its canonical
-/// parent joined with the file name (a Save As target), else the path as given.
-fn canonical(path: &Path) -> PathBuf {
+/// Resolves existing prefixes before normalizing absent Save As directories.
+/// In particular, `missing/../held.onecad` must collide with `held.onecad`
+/// before a writer creates `missing`; symlink parents retain filesystem semantics.
+pub(crate) fn canonical(path: &Path) -> PathBuf {
     if let Ok(path) = path.canonicalize() {
         return path;
     }
-    match (path.parent(), path.file_name()) {
-        (Some(parent), Some(name)) => parent
-            .canonicalize()
-            .map(|parent| parent.join(name))
-            .unwrap_or_else(|_| path.to_path_buf()),
-        _ => path.to_path_buf(),
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|directory| directory.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    let mut resolved = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::CurDir => {}
+            component => {
+                resolved.push(component.as_os_str());
+                if let Ok(existing) = resolved.canonicalize() {
+                    resolved = existing;
+                }
+            }
+        }
     }
+    resolved
 }
 
 #[cfg(test)]

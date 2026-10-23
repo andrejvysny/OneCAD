@@ -18,6 +18,9 @@ use onecad_app::reservations::MAX_OPEN_DOCUMENTS;
 use onecad_app::state::{AppState, BackendBundle};
 use onecad_app::worker::{resolve_worker_path, PendingBackend};
 
+#[path = "multi_document/recovery.rs"]
+mod recovery;
+
 #[derive(Default)]
 struct Events(Mutex<Vec<AppEvent>>);
 

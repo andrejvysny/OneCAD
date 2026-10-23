@@ -166,13 +166,7 @@ async fn flush_idle(
         return true;
     };
     let cancel = tokio::sync::Notify::new();
-    let work = onecad_app::autosave::checkpoint_until(
-        &state.runtime,
-        &root,
-        &state.persistence,
-        None,
-        cancel.notified(),
-    );
+    let work = onecad_app::autosave::checkpoint_state_until(state, &root, None, cancel.notified());
     tokio::pin!(work);
     let outcome = tokio::select! {
         biased;
@@ -233,10 +227,9 @@ async fn checkpoint_until(
         ticket.complete(Status::Failed("Recovery storage is unavailable".into()));
         return;
     };
-    let outcome = onecad_app::autosave::checkpoint_until(
-        &state.runtime,
+    let outcome = onecad_app::autosave::checkpoint_state_until(
+        state,
         &root,
-        &state.persistence,
         Some(&requested.runtime_session),
         stop,
     )

@@ -52,23 +52,45 @@ impl Interaction {
         tag: RequestTag,
         options: ModelingOptions,
     ) -> Vec<Effect> {
-        if self.context.as_ref() != Some(&tag.context) {
+        if !self.matches_editing(&tag) {
             return Vec::new();
         }
-        let Some(tool) = self.editing_tool().filter(|tool| tool.tag == tag) else {
+        match self.update_modeling_options(options) {
+            Ok(false) => Vec::new(),
+            Ok(true) => self.changed(None),
+            Err(message) => self.changed_with_error(None, Some((None, message))),
+        }
+    }
+
+    pub(crate) fn change_modeling_options_draft(
+        &mut self,
+        tag: RequestTag,
+        options: Option<ModelingOptions>,
+        error: Option<String>,
+    ) -> Vec<Effect> {
+        if !self.matches_editing(&tag) {
             return Vec::new();
+        }
+        if let Some(tool) = self.editing_tool() {
+            tool.option_draft_error = error;
+        }
+        let error = options
+            .map(|options| self.update_modeling_options(options))
+            .transpose()
+            .err()
+            .map(|message| (None, message));
+        self.changed_with_error(None, error)
+    }
+
+    fn update_modeling_options(&mut self, options: ModelingOptions) -> Result<bool, String> {
+        let Some(tool) = self.editing_tool() else {
+            return Ok(false);
         };
         let preserve_drag = matches!(&options, ModelingOptions::Mirror { .. });
         let mut operation = tool.effective_op();
-        if let Err(message) = apply(&mut operation, options) {
-            tool.params.op_error = Some((None, message));
-            tool.preview = crate::PreviewStatus::Empty;
-            return vec![Effect::ClearPreview {
-                gesture: tag.gesture,
-            }];
-        }
+        apply(&mut operation, options)?;
         if operation == tool.record.op {
-            return Vec::new();
+            return Ok(false);
         }
         let mut keys = declared_keys(&operation);
         let focus = tool
@@ -83,9 +105,7 @@ impl Interaction {
                 keys.push(field.key);
             }
         }
-        let Ok(mut params) = ParameterSet::declare(&operation, &keys, focus) else {
-            return Vec::new();
-        };
+        let mut params = ParameterSet::declare(&operation, &keys, focus)?;
         // Existing fields retain even invalid/pending expressions. Only newly
         // introduced fields get defaults; removed optional fields stay removed.
         for field in &mut params.fields {
@@ -101,7 +121,7 @@ impl Interaction {
         if !preserve_drag {
             tool.drag = None;
         }
-        self.changed(None)
+        Ok(true)
     }
 }
 

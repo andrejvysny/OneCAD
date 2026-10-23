@@ -87,6 +87,10 @@ pub struct SessionMarker {
     /// filesystem path). `None` for an unsaved (autosave-only) document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opened_path: Option<PathBuf>,
+    /// Original sources retained when the editable document was migrated.
+    /// They remain reserved after recovery, even when Save As changes its target.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_paths: Vec<PathBuf>,
     /// RFC3339 timestamp of the last autosave (caller-supplied — the core does not
     /// read the wall clock).
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -268,9 +272,27 @@ mod tests {
             document_id: id,
             pid,
             opened_path: Some(app_data.join("real.onecad")),
+            source_paths: Vec::new(),
             last_autosave: "2026-07-16T12:00:00Z".into(),
             title: Some("real".into()),
         }
+    }
+
+    #[test]
+    fn original_sources_round_trip_and_older_markers_remain_compatible() {
+        let area = tempfile::tempdir().unwrap();
+        let mut expected = marker(area.path(), DocumentId::new(), 123);
+        expected.source_paths = vec![area.path().join("original.onecad")];
+        let mut json = serde_json::to_value(&expected).unwrap();
+        assert_eq!(
+            serde_json::from_value::<SessionMarker>(json.clone()).unwrap(),
+            expected
+        );
+        json.as_object_mut().unwrap().remove("sourcePaths");
+        assert!(serde_json::from_value::<SessionMarker>(json)
+            .unwrap()
+            .source_paths
+            .is_empty());
     }
 
     /// A successful [`write_marker`] leaves the temp sibling cleaned up (consumed

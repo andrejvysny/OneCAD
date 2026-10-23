@@ -96,6 +96,14 @@ input. The adapter marks the response changed and uses the public egui cursor an
 undo APIs; normal validation and application services still own CAD acceptance.
 No native text callback authors accepted geometry directly.
 
+Modeling option counts and vector components use the same native text session.
+Their drafts belong to the document/runtime, operation and gesture, and survive
+preview sequence changes. Counts require whole numbers within the control's range;
+vector components require finite numbers. Invalid text remains visible, retires
+the prior preview and disables Create/Apply until corrected. A correction to the
+original value still refreshes readiness. Desktop option controls retain pointer
+dragging. Scalar parameter fields continue to use the shared expression resolver.
+
 Marked updates replace the prior mark or initial selection; the selected range
 is relative to the new marked text. Unmark preserves the composed draft without
 inserting it again. Later insertText is genuine new input. Cancel restores the

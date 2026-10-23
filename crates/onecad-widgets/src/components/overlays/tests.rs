@@ -108,6 +108,19 @@ fn every_overlay_renders_light_and_dark() {
 }
 
 #[test]
+fn feature_card_uses_readiness_after_row_edits_for_its_footer() {
+    for enabled in [false, true] {
+        run(false, |ui| {
+            let output = FeatureCard::new("draft-readiness", "extrude", "Extrude")
+                .ok_enabled(!enabled)
+                .show(ui, |rows| rows.set_ok_enabled(enabled));
+            let response = ui.ctx().read_response(output.ok_id.unwrap()).unwrap();
+            assert_eq!(response.sense.senses_click(), enabled);
+        });
+    }
+}
+
+#[test]
 fn feature_card_has_requested_width() {
     run(false, |ui| {
         let before = ui.cursor().min;

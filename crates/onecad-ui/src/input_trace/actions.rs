@@ -15,6 +15,7 @@ pub(crate) fn model(action: &Action) -> Value {
         Action::BeginParameterEdit { .. } => "BeginParameterEdit",
         Action::BeginOperationEdit { .. } => "BeginOperationEdit",
         Action::ModelingOptionsChanged { .. } => "ModelingOptionsChanged",
+        Action::ModelingOptionsDraftChanged { .. } => "ModelingOptionsDraftChanged",
         Action::DraftChanged(_) => "DraftChanged",
         Action::ParameterChanged { .. } => "ParameterChanged",
         Action::FocusParameter(_) => "FocusParameter",

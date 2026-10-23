@@ -60,6 +60,7 @@ impl Interaction {
             return Vec::new();
         };
         if tool.editing_existing
+            || tool.option_draft_error.is_some()
             || tool.preview != PreviewStatus::Pending
             || tool.params.readiness() != Readiness::Ready
         {

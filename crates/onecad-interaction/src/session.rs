@@ -123,6 +123,7 @@ impl Interaction {
             params,
             draft: String::new(),
             draft_status: DraftStatus::Pending,
+            option_draft_error: None,
             preview: PreviewStatus::Empty,
             phase: SessionPhase::Editing,
             drag: None,

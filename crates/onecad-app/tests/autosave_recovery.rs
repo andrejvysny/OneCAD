@@ -182,7 +182,7 @@ async fn clear_recovery_state_removes_marker_and_autosave() {
     let runtime = Mutex::new(Some(rt));
 
     // Write one autosave (marker + container).
-    let lane = Mutex::new(());
+    let lane = Arc::new(Mutex::new(()));
     let ev = autosave::autosave_current(&runtime, &app_data, &lane)
         .await
         .expect("autosave written");
@@ -222,7 +222,7 @@ async fn recovery_round_trip_reconstructs_the_autosaved_document() {
         rt.mark_recovered(Some(original_path.clone()), None); // sets path/title + dirty
         doc_id = rt.document_uuid();
         let runtime = Mutex::new(Some(rt));
-        let lane = Mutex::new(());
+        let lane = Arc::new(Mutex::new(()));
         autosave::autosave_current(&runtime, &app_data, &lane)
             .await
             .expect("autosave the pre-crash revision");
@@ -293,7 +293,7 @@ async fn an_orphaned_container_still_recovers_with_a_usable_title() {
         rt.mark_recovered(Some(original_path.clone()), None);
         let id = rt.document_uuid();
         let runtime = Mutex::new(Some(rt));
-        autosave::autosave_current(&runtime, &app_data, &Mutex::new(()))
+        autosave::autosave_current(&runtime, &app_data, &Arc::new(Mutex::new(())))
             .await
             .expect("autosave");
         id

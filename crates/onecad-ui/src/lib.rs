@@ -53,6 +53,8 @@ mod inspector_props;
 mod item_selection;
 mod layout;
 mod library_pages;
+#[cfg(any(all(feature = "desktop", target_os = "macos"), test))]
+mod memory_pressure;
 mod menu;
 mod model_handle;
 mod model_pick;

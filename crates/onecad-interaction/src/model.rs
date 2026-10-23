@@ -81,6 +81,8 @@ pub struct ModelSession {
     /// (`""`/Pending) without focus; gate on `params.readiness()`.
     pub draft: String,
     pub draft_status: DraftStatus,
+    /// Invalid native option text remains authoritative until that draft is corrected.
+    pub option_draft_error: Option<String>,
     pub preview: PreviewStatus,
     pub phase: SessionPhase,
     /// Operation at begin; an unchanged existing edit closes without a command.
@@ -106,6 +108,7 @@ impl ModelSession {
     }
     pub fn ready(&self) -> bool {
         self.phase == SessionPhase::Editing
+            && self.option_draft_error.is_none()
             && self.params.readiness() == Readiness::Ready
             && (self.preview == PreviewStatus::Ready
                 || self.editing_existing && matches!(self.preview, PreviewStatus::EditWarning(_))
@@ -196,6 +199,13 @@ pub enum Action {
     ModelingOptionsChanged {
         tag: RequestTag,
         options: crate::ModelingOptions,
+    },
+    /// Atomically update option values and their full native text validity. Even
+    /// a same-value correction fences previous evaluation and preview replies.
+    ModelingOptionsDraftChanged {
+        tag: RequestTag,
+        options: Option<crate::ModelingOptions>,
+        error: Option<String>,
     },
     ExtrudeModeChanged(onecad_core::document::record::BooleanMode),
     /// Host admits only visible, healthy bodies from this accepted document context.

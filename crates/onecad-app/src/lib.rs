@@ -14,6 +14,7 @@ compile_error!("onecad-app: iOS requires the `embedded-kernel` feature");
 
 pub mod api;
 pub mod autosave;
+pub mod document_paths;
 pub mod document_runtime;
 pub mod dto;
 pub mod error;
@@ -32,6 +33,7 @@ pub mod library_seed_templates;
 pub mod lifecycle;
 pub mod logging;
 pub mod mesh_cache;
+mod persistence;
 pub mod process;
 pub mod read;
 pub mod recents;

@@ -51,9 +51,13 @@ impl State {
 }
 
 pub async fn discover(backend: &Backend) -> Result<bool, String> {
-    let offers = api::check_recovery(&backend.state, backend.host.clone())
-        .await
-        .map_err(|error| error.to_string())?;
+    let offers = api::check_recovery_in_documents(
+        &backend.state,
+        backend.host.clone(),
+        &backend.paths.documents,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     let pending = !offers.is_empty();
     let mut recovery = backend.shared.recovery.lock().map_err(|e| e.to_string())?;
     recovery.checked = true;
@@ -97,13 +101,35 @@ async fn apply_choice(
     offer: &RecoveryInfoDto,
     choice: Choice,
 ) -> Result<(), String> {
+    if let Some(destination) = apply_file_choice(
+        &backend.state,
+        backend.host.clone(),
+        &backend.paths.documents,
+        offer,
+        choice,
+    )
+    .await?
+    {
+        backend.paths.document = destination;
+        backend.startup_opened = true;
+    }
+    Ok(())
+}
+
+async fn apply_file_choice(
+    state: &onecad_app::state::AppState,
+    host: onecad_app::host::HostContext,
+    documents: &Path,
+    offer: &RecoveryInfoDto,
+    choice: Choice,
+) -> Result<Option<PathBuf>, String> {
     let id = &offer.document_id;
-    let destination = destination(&backend.paths.documents, offer)?;
     match choice {
         Choice::Restore => {
+            let destination = restore_destination(documents, offer)?;
             api::recover_document_at_path(
-                &backend.state,
-                backend.host.clone(),
+                state,
+                host.clone(),
                 id.clone(),
                 true,
                 Some(destination.clone()),
@@ -112,27 +138,28 @@ async fn apply_choice(
             .map_err(|e| e.to_string())?
             .ok_or("Recovery offer is no longer pending")?;
             if let Some(original) = offer.original_path.as_deref() {
-                onecad_app::recents::relocate(&backend.host, Path::new(original), &destination);
+                onecad_app::recents::relocate(&host, Path::new(original), &destination);
             }
-            backend.paths.document = destination;
-            backend.startup_opened = true;
+            Ok(Some(destination))
         }
         Choice::OpenSaved => {
-            open_saved(backend, offer, &destination).await?;
-            backend.paths.document = destination;
-            backend.startup_opened = true;
+            let destination = destination(documents, offer)?;
+            open_saved(state, host, documents, offer, &destination).await?;
+            Ok(Some(destination))
         }
         Choice::Discard => {
-            api::recover_document(&backend.state, backend.host.clone(), id.clone(), false)
+            api::recover_document(state, host, id.clone(), false)
                 .await
                 .map_err(|e| e.to_string())?;
+            Ok(None)
         }
     }
-    Ok(())
 }
 
 async fn open_saved(
-    backend: &Backend,
+    state: &onecad_app::state::AppState,
+    host: onecad_app::host::HostContext,
+    documents: &Path,
     offer: &RecoveryInfoDto,
     destination: &Path,
 ) -> Result<(), String> {
@@ -140,14 +167,12 @@ async fn open_saved(
         .original_path
         .as_deref()
         .ok_or("No saved version exists")?;
-    if crate::imported_documents::migrate(&backend.paths.documents, Path::new(original))?
-        != destination
-    {
+    if crate::imported_documents::migrate(documents, Path::new(original))? != destination {
         return Err("Saved version must remain inside the isolated QA documents directory".into());
     }
     api::open_document(
-        &backend.state,
-        backend.host.clone(),
+        state,
+        host,
         destination.to_string_lossy().into_owned(),
         Some("openSaved".into()),
     )
@@ -175,6 +200,30 @@ fn remove_offer(backend: &Backend, id: &str) -> Result<(), String> {
         .offers
         .retain(|offer| offer.document_id != id);
     Ok(())
+}
+
+fn restore_destination(documents: &Path, offer: &RecoveryInfoDto) -> Result<PathBuf, String> {
+    match destination(documents, offer) {
+        Ok(path) => Ok(path),
+        Err(error) => {
+            // A bad saved copy must not strand a valid checkpoint. Keep the
+            // original intact and give the recovered runtime its own save path.
+            let documents = documents.canonicalize().map_err(|e| e.to_string())?;
+            let id: onecad_core::ids::DocumentId = offer
+                .document_id
+                .parse()
+                .map_err(|e| format!("Invalid recovery identity: {e}"))?;
+            let path = documents.join(format!("recovered-{id}-{}.onecad", uuid::Uuid::new_v4()));
+            match path.symlink_metadata() {
+                Err(metadata_error) if metadata_error.kind() == std::io::ErrorKind::NotFound => {
+                    tracing::warn!(%error, "Saved recovery destination refused; using a fresh path");
+                    Ok(path)
+                }
+                Err(error) => Err(error.to_string()),
+                Ok(_) => Err("Fresh recovery destination already exists; retry Restore".into()),
+            }
+        }
+    }
 }
 
 fn destination(documents: &Path, offer: &RecoveryInfoDto) -> Result<PathBuf, String> {

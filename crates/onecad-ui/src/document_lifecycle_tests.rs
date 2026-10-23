@@ -57,6 +57,7 @@ pub(super) fn recovered_fixture_named(root: &Path, name: &str) -> (String, PathB
             document_id: id,
             pid: i32::MAX as u32,
             opened_path: Some(destination.clone()),
+            source_paths: Vec::new(),
             last_autosave: "2026-10-19T00:00:00Z".into(),
             title: Some("Recovered metadata".into()),
         },
