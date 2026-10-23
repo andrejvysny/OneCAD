@@ -45,6 +45,7 @@ pub struct FeatureCardRows<'u> {
     /// Label column width: 76, or the widest label seen last frame.
     label_w: f32,
     seen_w: f32,
+    ok_enabled: Option<bool>,
 }
 
 impl FeatureCardRows<'_> {
@@ -54,8 +55,13 @@ impl FeatureCardRows<'_> {
             ui,
             label_w: 76.0,
             seen_w: 0.0,
+            ok_enabled: None,
         };
         add(&mut rows);
+    }
+    /// Recheck confirmation after row edits, before the card draws its footer.
+    pub fn set_ok_enabled(&mut self, enabled: bool) {
+        self.ok_enabled = Some(enabled);
     }
     pub fn row(&mut self, label: &str, add: impl FnOnce(&mut Ui)) {
         let ink4 = look(self.ui.ctx()).theme.ink4;
@@ -127,7 +133,11 @@ impl<'a> FeatureCard<'a> {
         self
     }
 
-    pub fn show(self, ui: &mut Ui, rows: impl FnOnce(&mut FeatureCardRows)) -> FeatureCardOutput {
+    pub fn show(
+        mut self,
+        ui: &mut Ui,
+        rows: impl FnOnce(&mut FeatureCardRows),
+    ) -> FeatureCardOutput {
         let l = look(ui.ctx());
         let mut out = FeatureCardOutput::default();
         let inner_w = self.width - 2.0;
@@ -137,14 +147,18 @@ impl<'a> FeatureCard<'a> {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 out.close = self.header(ui);
                 divider(ui);
-                if let Some(height) = self.max_height {
+                let ok_enabled = if let Some(height) = self.max_height {
                     egui::ScrollArea::vertical()
                         .id_salt("parameters")
                         .max_height((height - HEADER_H - FOOTER_H - 4.0).max(0.0))
                         .auto_shrink([false, true])
-                        .show(ui, |ui| Self::body(ui, rows));
+                        .show(ui, |ui| Self::body(ui, rows))
+                        .inner
                 } else {
-                    Self::body(ui, rows);
+                    Self::body(ui, rows)
+                };
+                if let Some(enabled) = ok_enabled {
+                    self.ok_enabled = enabled;
                 }
                 divider(ui);
                 self.footer(ui, &mut out);
@@ -153,7 +167,7 @@ impl<'a> FeatureCard<'a> {
         out
     }
 
-    fn body(ui: &mut Ui, rows: impl FnOnce(&mut FeatureCardRows)) {
+    fn body(ui: &mut Ui, rows: impl FnOnce(&mut FeatureCardRows)) -> Option<bool> {
         egui::Frame::new()
             .inner_margin(Margin::same(12))
             .show(ui, |ui| {
@@ -164,14 +178,18 @@ impl<'a> FeatureCard<'a> {
                     ui,
                     label_w: stored.unwrap_or(LABEL_W).max(LABEL_W),
                     seen_w: 0.0,
+                    ok_enabled: None,
                 };
                 rows(&mut body);
                 let next = (body.seen_w.ceil() + 2.0).max(LABEL_W);
+                let ok_enabled = body.ok_enabled;
                 if stored != Some(next) {
                     ui.data_mut(|d| d.insert_temp(key, next));
                     ui.ctx().request_repaint();
                 }
-            });
+                ok_enabled
+            })
+            .inner
     }
 
     fn header(&self, ui: &mut Ui) -> bool {

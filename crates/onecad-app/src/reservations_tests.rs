@@ -43,6 +43,42 @@ fn a_save_target_that_does_not_exist_yet_is_still_comparable() {
 }
 
 #[test]
+fn missing_parent_traversal_cannot_bypass_an_existing_path_claim() {
+    let table = Arc::new(Reservations::default());
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("held.onecad");
+    std::fs::write(&target, b"owned").unwrap();
+    let _claim = table.claim_path(1, &target).unwrap();
+    let alias = dir.path().join("missing/../held.onecad");
+    assert!(matches!(
+        table.claim_path(2, &alias),
+        Err(ApiError::AlreadyOpen { host: 1, .. })
+    ));
+    assert_eq!(table.path_owner(&alias), Some(1));
+    assert!(!dir.path().join("missing").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn missing_parents_preserve_symlink_parent_traversal_when_claiming_future_targets() {
+    let table = Arc::new(Reservations::default());
+    let dir = tempfile::tempdir().unwrap();
+    let destination = dir.path().join("destination");
+    std::fs::create_dir_all(destination.join("child")).unwrap();
+    std::os::unix::fs::symlink(destination.join("child"), dir.path().join("alias")).unwrap();
+    let target = destination.join("new/deep/part.onecad");
+    let _claim = table.claim_path(1, &target).unwrap();
+    let alias = dir.path().join("alias/../new/deep/part.onecad");
+    assert_eq!(table.path_owner(&alias), Some(1));
+    assert!(matches!(
+        table.claim_path(2, &alias),
+        Err(ApiError::AlreadyOpen { host: 1, .. })
+    ));
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    assert_eq!(table.path_owner(&target), Some(1));
+}
+
+#[test]
 fn dropping_a_claim_releases_only_that_lease() {
     let table = Arc::new(Reservations::default());
     let path = Path::new("/nonexistent/onecad/A.onecad");

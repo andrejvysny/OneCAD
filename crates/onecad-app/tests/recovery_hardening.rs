@@ -188,7 +188,7 @@ async fn a_clean_document_is_never_autosaved() {
     let doc_id = rt.document_uuid();
     let runtime = Mutex::new(Some(rt));
 
-    let event = autosave::autosave_current(&runtime, &app_data, &Mutex::new(())).await;
+    let event = autosave::autosave_current(&runtime, &app_data, &Arc::new(Mutex::new(()))).await;
 
     assert!(event.is_none(), "a clean document reports no autosave");
     assert!(
@@ -218,7 +218,7 @@ async fn a_dirty_document_is_still_autosaved() {
     let doc_id = rt.document_uuid();
     let runtime = Mutex::new(Some(rt));
 
-    let event = autosave::autosave_current(&runtime, &app_data, &Mutex::new(())).await;
+    let event = autosave::autosave_current(&runtime, &app_data, &Arc::new(Mutex::new(()))).await;
 
     assert!(event.is_some(), "dirty work is autosaved");
     assert!(autosave_path(&app_data, doc_id).exists());
@@ -254,7 +254,7 @@ async fn a_failed_marker_write_fails_the_whole_autosave() {
     std::fs::create_dir_all(marker_path(&app_data, doc_id)).unwrap();
     std::fs::write(marker_path(&app_data, doc_id).join("occupied"), b"x").unwrap();
 
-    let event = autosave::autosave_current(&runtime, &app_data, &Mutex::new(())).await;
+    let event = autosave::autosave_current(&runtime, &app_data, &Arc::new(Mutex::new(()))).await;
 
     assert!(
         event.is_none(),

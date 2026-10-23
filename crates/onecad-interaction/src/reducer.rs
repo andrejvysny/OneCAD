@@ -79,6 +79,11 @@ impl Interaction {
             Action::ModelingOptionsChanged { tag, options } => {
                 self.change_modeling_options(tag, options)
             }
+            Action::ModelingOptionsDraftChanged {
+                tag,
+                options,
+                error,
+            } => self.change_modeling_options_draft(tag, options, error),
             Action::ExtrudeModeChanged(mode) => self.change_extrude_mode(mode),
             Action::ExtrudeTargetChanged { body, context } => {
                 self.change_extrude_target(body, context)

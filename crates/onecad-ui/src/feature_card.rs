@@ -49,6 +49,12 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
     let editing = tool.phase == SessionPhase::Editing;
     let (response, out) = card(app, ctx, chrome, &tool, apply);
     name_footer(ctx, out.ok_id, out.cancel_id);
+    let apply = app
+        .doc
+        .interaction
+        .tool
+        .as_ref()
+        .is_some_and(|tool| can_apply(app, tool));
     if let Some(response) = &response {
         focus_keys(app, response, apply);
     }
@@ -80,12 +86,19 @@ pub(crate) fn history_editor(app: &mut App, ui: &mut Ui, record_id: &str) {
                 crate::parameter_ui::selector(app, ui, &tool);
             }
             let current = app.doc.interaction.tool.clone().unwrap_or(tool.clone());
-            let apply = can_apply(app, &current);
             if let Some(key) = current.params.focus() {
                 ui.label(key.label());
                 let response = number_field(app, ui, &current, key);
+                let apply = app
+                    .doc
+                    .interaction
+                    .tool
+                    .as_ref()
+                    .is_some_and(|tool| can_apply(app, tool));
                 focus_keys(app, &response, apply);
             }
+            let current = app.doc.interaction.tool.clone().unwrap_or(current);
+            let apply = can_apply(app, &current);
             if let Some(message) = apply_feedback(app, &current) {
                 ui.add(egui::Label::new(message).wrap().selectable(true));
             }
@@ -181,28 +194,41 @@ fn card_rows(
             crate::parameter_ui::selector(app, ui, tool);
         });
     }
-    let current = app
-        .doc
-        .interaction
-        .tool
-        .as_ref()
-        .is_some_and(|now| now.tag == tool.tag);
-    if current {
+    if let Some(current) = current_session(&app.doc.interaction, tool) {
         // One row per active declared field; the keyboard follows the focused one.
-        for key in tool.params.active().map(|field| field.key) {
+        // Option controls may have advanced the sequence above. Keep the fields
+        // visible so acknowledged native text edits still reach their owner.
+        for key in current.params.active().map(|field| field.key) {
             rows.row(key.label(), |ui| {
-                let field = number_field(app, ui, tool, key);
-                if field.has_focus() || response.is_none() && tool.params.focus() == Some(key) {
+                let field = number_field(app, ui, &current, key);
+                if field.has_focus() || response.is_none() && current.params.focus() == Some(key) {
                     *response = Some(field);
                 }
             });
         }
     }
-    if let Some(message) = apply_feedback(app, tool) {
+    let current = app.doc.interaction.tool.as_ref();
+    rows.set_ok_enabled(current.is_some_and(|tool| can_apply(app, tool)));
+    if let Some(message) = current.and_then(|tool| apply_feedback(app, tool)) {
         rows.row("Status", |ui| {
             ui.add(egui::Label::new(message).wrap().selectable(true));
         });
     }
+}
+
+fn current_session(
+    interaction: &onecad_interaction::Interaction,
+    previous: &ModelSession,
+) -> Option<ModelSession> {
+    interaction
+        .tool
+        .as_ref()
+        .filter(|current| {
+            current.tag.context == previous.tag.context
+                && current.tag.record_id == previous.tag.record_id
+                && current.tag.gesture == previous.tag.gesture
+        })
+        .cloned()
 }
 
 fn apply_feedback(app: &App, tool: &ModelSession) -> Option<String> {
@@ -223,6 +249,9 @@ fn apply_feedback(app: &App, tool: &ModelSession) -> Option<String> {
     }
     if app.busy() && tool.phase == SessionPhase::Editing {
         return Some("Wait for the current command before applying".into());
+    }
+    if let Some(error) = &tool.option_draft_error {
+        return Some(format!("Invalid value: {error}"));
     }
     preview_feedback(&tool.params.readiness(), &tool.preview, tool.phase)
 }
@@ -326,6 +355,10 @@ fn focus_keys(app: &mut App, response: &egui::Response, can_apply: bool) {
         response.surrender_focus();
     }
 }
+
+#[cfg(test)]
+#[path = "feature_card/frame_tests.rs"]
+mod frame_tests;
 
 #[cfg(test)]
 mod tests {

@@ -16,6 +16,7 @@ impl Interaction {
         }
         let Some(tool) = self.tool.as_mut().filter(|tool| {
             tool.editing_existing
+                && tool.option_draft_error.is_none()
                 && tool.preview == PreviewStatus::Pending
                 && tool.params.readiness() == Readiness::Ready
         }) else {

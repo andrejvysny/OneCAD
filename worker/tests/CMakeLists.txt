@@ -609,6 +609,7 @@ add_test(NAME occt_busy COMMAND test_occt_busy)
 add_executable(test_dispatcher_lanes test_dispatcher_lanes.cpp)
 target_link_libraries(test_dispatcher_lanes PRIVATE worker_core)
 add_test(NAME dispatcher_lanes COMMAND test_dispatcher_lanes)
+set_tests_properties(dispatcher_lanes PROPERTIES TIMEOUT 45)
 
 # --- WP-A W4.5: XCAF fidelity end to end — a colored, named multi-solid STEP
 #     (authored via STEPCAFControl_Writer, see step_fixture_util.h) through the

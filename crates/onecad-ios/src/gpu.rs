@@ -3,11 +3,13 @@
 //! its services start at create; any `CAMetalLayer` accepts this device's format.
 use egui_wgpu::RenderState;
 use std::ffi::c_void;
+#[cfg(target_vendor = "apple")]
 use std::sync::Arc;
 
 /// egui paints in gamma space, as eframe does on macOS; the layer must not be sRGB.
 pub const SURFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
 
+#[cfg(target_vendor = "apple")]
 pub fn create_render_state() -> Result<RenderState, String> {
     let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
     descriptor.backends = wgpu::Backends::METAL;
@@ -33,10 +35,16 @@ pub fn create_render_state() -> Result<RenderState, String> {
     })
 }
 
+#[cfg(not(target_vendor = "apple"))]
+pub fn create_render_state() -> Result<RenderState, String> {
+    Err("the iPadOS renderer requires Apple Metal support".into())
+}
+
 /// egui-wgpu's default device request plus the renderer's optional features,
 /// matching the desktop host's `viewport_gpu_configuration`. Limits the adapter
 /// cannot meet are lowered to its own: the iOS Simulator's Metal adapter reports
 /// 15 inter-stage shader variables against the default 16.
+#[cfg(target_vendor = "apple")]
 fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> {
     let desktop = wgpu::Limits {
         max_texture_dimension_2d: 8192,
@@ -154,6 +162,7 @@ impl Surface {
 
 /// # Safety
 /// `layer` must be a live `CAMetalLayer` that outlives the returned surface.
+#[cfg(target_vendor = "apple")]
 unsafe fn create(
     instance: &wgpu::Instance,
     layer: *mut c_void,
@@ -162,4 +171,22 @@ unsafe fn create(
     // outlives the surface; wgpu retains it for the surface's lifetime.
     unsafe { instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer)) }
         .map_err(|error| format!("Metal surface: {error}"))
+}
+
+#[cfg(not(target_vendor = "apple"))]
+unsafe fn create(
+    _instance: &wgpu::Instance,
+    _layer: *mut c_void,
+) -> Result<wgpu::Surface<'static>, String> {
+    Err("CAMetalLayer surfaces require Apple Metal support".into())
+}
+
+#[cfg(all(test, not(target_vendor = "apple")))]
+mod tests {
+    #[test]
+    fn unsupported_platform_refuses_gpu_initialization_without_panicking() {
+        assert!(
+            matches!(super::create_render_state(), Err(error) if error.contains("Apple Metal"))
+        );
+    }
 }

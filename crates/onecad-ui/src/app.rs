@@ -52,6 +52,8 @@ pub struct App {
     pub render_scale_limit: f64,
     /// The scene image scale relative to native pixels the viewport last used.
     pub scene_scale: f64,
+    #[cfg(all(feature = "desktop", target_os = "macos"))]
+    memory_pressure: crate::memory_pressure::Monitor,
     /// Files exported since the host last asked (`host::Editor::take_exported`).
     #[cfg(not(feature = "desktop"))]
     pub(crate) exported: Vec<std::path::PathBuf>,
@@ -152,6 +154,8 @@ impl App {
         }
         bridge.submit(Command::Open)?;
         Ok(Self {
+            #[cfg(all(feature = "desktop", target_os = "macos"))]
+            memory_pressure: crate::memory_pressure::Monitor::new(ctx).map_err(str::to_owned)?,
             doc: crate::document_editor::DocumentEditor::new(
                 bridge,
                 settings_error.unwrap_or_else(|| "Opening QA workspace…".into()),
@@ -500,6 +504,7 @@ impl App {
         crate::item_selection::reconcile(self, &display);
         self.doc.display = Some(display);
         crate::item_selection::refresh(self);
+        self.request_preparation();
     }
 
     fn model_delivery_current(&self, tag: &RequestTag) -> bool {
@@ -587,8 +592,11 @@ impl App {
                 }
             }
             Message::Prepared {
-                identity, result, ..
-            } => self.adopt_prepared(identity, result),
+                identity,
+                generation,
+                result,
+                ..
+            } => self.adopt_prepared(identity, generation, result),
             Message::Changes {
                 runtime_session,
                 changes,
@@ -742,14 +750,19 @@ impl App {
     fn adopt_prepared(
         &mut self,
         identity: onecad_scene::SceneIdentity,
+        generation: u64,
         result: Result<onecad_render::PreparedScene, String>,
     ) {
         // Only the reply the editor is waiting for: a duplicate or superseded one
         // must not park a second prepared scene in an already-drawn display.
-        if self.doc.prepare_in_flight != Some(identity) {
+        if self.doc.prepare_in_flight != Some((identity, generation)) {
             return;
         }
         self.doc.prepare_in_flight = None;
+        if self.doc.bridge.shared.preparation_generation.current() != Ok(generation) {
+            self.request_preparation();
+            return;
+        }
         let Some(display) = self
             .doc
             .display
@@ -760,9 +773,18 @@ impl App {
         };
         match result {
             Ok(prepared) => {
-                if let Ok(mut slot) = display.prepared.lock() {
-                    slot.get_or_insert(prepared);
-                }
+                self.doc
+                    .bridge
+                    .shared
+                    .preparation_generation
+                    .with_current(generation, || {
+                        if let Ok(mut slot) = display.prepared.lock() {
+                            slot.get_or_insert(prepared);
+                            display
+                                .preparation_generation
+                                .store(generation, std::sync::atomic::Ordering::Release);
+                        }
+                    });
                 self.draw_dirty = true;
             }
             Err(error) => self.display_unavailable(error),
@@ -808,6 +830,12 @@ impl App {
     }
 
     pub fn logic(&mut self, ctx: &egui::Context) {
+        #[cfg(all(feature = "desktop", target_os = "macos"))]
+        if self.memory_pressure.take_pending() {
+            let relief = self.relieve_memory_pressure();
+            tracing::warn!(released_bytes = relief.released, lowered_scale = ?relief.lowered_scale,
+                "macOS memory-pressure notification released display caches");
+        }
         crate::input_trace::app(
             self,
             "host.logic",

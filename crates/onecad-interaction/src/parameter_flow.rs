@@ -100,6 +100,14 @@ impl Interaction {
 
     /// New sequence, cleared preview, then the next evaluation or the preview.
     pub(crate) fn changed(&mut self, prefer: Option<ParameterKey>) -> Vec<Effect> {
+        self.changed_with_error(prefer, None)
+    }
+
+    pub(crate) fn changed_with_error(
+        &mut self,
+        prefer: Option<ParameterKey>,
+        error: Option<(Option<ParameterKey>, String)>,
+    ) -> Vec<Effect> {
         let Some(tool) = self
             .tool
             .as_mut()
@@ -117,7 +125,7 @@ impl Interaction {
         self.sequence = sequence;
         tool.tag.sequence = sequence;
         tool.preview = PreviewStatus::Empty;
-        tool.params.op_error = None;
+        tool.params.op_error = error;
         let mut effects = vec![clear];
         effects.extend(tool.pump(prefer));
         effects
@@ -157,6 +165,9 @@ impl ModelSession {
     }
 
     pub(crate) fn request_preview(&mut self) -> Vec<Effect> {
+        if self.option_draft_error.is_some() {
+            return Vec::new();
+        }
         let operation = match self.params.candidate(&self.record.op) {
             Ok(operation) => operation,
             Err(error) => {

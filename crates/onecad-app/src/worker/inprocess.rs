@@ -2,7 +2,7 @@
 //! dedicated thread over a socketpair (ADR-0019; docs/ios/ARCHITECTURE.md
 //! "In-process failure policy"; docs/ios/KERNEL.md).
 //!
-//! * Transport: `UnixStream::pair`, `SO_NOSIGPIPE` on both ends (an iOS host
+//! * Transport: `UnixStream::pair`, Apple `SO_NOSIGPIPE` on both ends (an iOS host
 //!   does not ignore SIGPIPE), the worker end `dup`ed because the ABI wants two
 //!   fds, the host end split into tokio halves for the shared handshake.
 //! * Thread: one `onecad-worker` thread with an 8 MiB stack per instance; the
@@ -18,7 +18,9 @@
 //!   returns, so retiring and abandoned runs keep their slot. Policy and
 //!   rationale: docs/ios/KERNEL.md.
 
-use std::os::fd::{AsRawFd, OwnedFd};
+#[cfg(target_vendor = "apple")]
+use std::os::fd::AsRawFd;
+use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -302,6 +304,7 @@ fn start_run_thread(
     })
 }
 
+#[cfg(target_vendor = "apple")]
 fn set_nosigpipe(socket: &UnixStream) -> Result<(), String> {
     let on: libc::c_int = 1;
     // SAFETY: `socket` is a live fd for the duration of the call; the option
@@ -320,6 +323,13 @@ fn set_nosigpipe(socket: &UnixStream) -> Result<(), String> {
     } else {
         Err(format!("SO_NOSIGPIPE: {}", std::io::Error::last_os_error()))
     }
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn set_nosigpipe(_socket: &UnixStream) -> Result<(), String> {
+    // Only Apple kernels can be linked today (embedded-worker/build.rs).
+    // Do not silently permit a raw C++ write to raise SIGPIPE if that changes.
+    Err("in-process kernel sockets require Apple SO_NOSIGPIPE support".into())
 }
 
 /// One running in-process worker.

@@ -17,6 +17,8 @@ const ADMISSION: usize = 8;
 
 pub struct Display {
     pub epoch: u64,
+    /// The installed preparation's disposable generation; source identity is independent.
+    pub preparation_generation: std::sync::atomic::AtomicU64,
     pub projection: DocumentProjection,
     pub context: onecad_app::api::PreviewContext,
     pub scene: Arc<SceneSnapshot>,
@@ -55,7 +57,10 @@ pub enum Command {
     /// Re-prepares an already-captured scene for upload, keeping its identity, so
     /// a document switched back into the viewport is drawn without a new capture
     /// (a new identity would reset the document's active tool and selection).
-    Prepare(crate::viewport_updates::Source),
+    Prepare {
+        source: crate::viewport_updates::Source,
+        generation: u64,
+    },
     /// The steps since the last save, for the close prompt.
     DescribeChanges,
 }
@@ -113,6 +118,7 @@ pub enum Message {
     },
     Prepared {
         identity: onecad_scene::SceneIdentity,
+        generation: u64,
         result: Result<onecad_render::PreparedScene, String>,
         _permit: OwnedSemaphorePermit,
     },
@@ -165,6 +171,7 @@ pub struct Shared {
     /// count and drop a parked document's cache (`display_budget`); a preparation moves
     /// it out and back, never holding the lock while it works.
     pub preparation_cache: Mutex<onecad_render::PreparationCache>,
+    pub(crate) preparation_generation: crate::handoff::EvictionGeneration,
     pub host_budget: Arc<crate::budget::HostBudget>,
     /// The document host's process identity, set once its actor has started.
     pub host: std::sync::atomic::AtomicU64,
@@ -213,6 +220,7 @@ impl Shared {
             render_receipt: Mutex::new(None),
             budget: Mutex::new(budget),
             preparation_cache: Mutex::new(Default::default()),
+            preparation_generation: Default::default(),
             host_budget,
             host: std::sync::atomic::AtomicU64::new(0),
             valid: std::sync::atomic::AtomicBool::new(false),
@@ -231,16 +239,47 @@ impl Shared {
             .map(|budget| *budget)
             .map_err(|_| "renderer preparation budget poisoned".into())
     }
-    pub(crate) fn take_preparation_cache(&self) -> onecad_render::PreparationCache {
-        self.preparation_cache
-            .lock()
-            .map(|mut cache| std::mem::take(&mut *cache))
-            .unwrap_or_default()
+    pub(crate) fn take_preparation_cache(
+        &self,
+        generation: u64,
+    ) -> onecad_render::PreparationCache {
+        let mut taken = Default::default();
+        self.preparation_generation.with_current(generation, || {
+            if let Ok(mut cache) = self.preparation_cache.lock() {
+                taken = std::mem::take(&mut *cache);
+            }
+        });
+        taken
     }
-    pub(crate) fn restore_preparation_cache(&self, cache: onecad_render::PreparationCache) {
-        if let Ok(mut slot) = self.preparation_cache.lock() {
-            *slot = cache;
-        }
+    pub(crate) fn restore_preparation_cache(
+        &self,
+        generation: u64,
+        cache: onecad_render::PreparationCache,
+    ) {
+        self.preparation_generation.with_current(generation, || {
+            if let Ok(mut slot) = self.preparation_cache.lock() {
+                *slot = cache;
+            }
+        });
+    }
+    pub(crate) fn evict_preparations(&self, adopted: Option<&Arc<Display>>) {
+        self.preparation_generation.evict(|| {
+            if let Ok(mut cache) = self.preparation_cache.lock() {
+                *cache = Default::default();
+            }
+            if let Some(display) = adopted
+                && let Ok(mut prepared) = display.prepared.lock()
+            {
+                prepared.take();
+            }
+            if let Ok(slot) = self.display.lock()
+                && let Some(display) = &*slot
+                && let Ok(mut prepared) = display.prepared.lock()
+            {
+                prepared.take();
+            }
+        });
+        self.host_budget.wake();
     }
     pub fn wake(&self) {
         self.input_trace
@@ -256,17 +295,27 @@ impl Shared {
     pub fn publish_display(&self, display: Display) {
         self.input_trace.capture("service.capture", &display);
         let epoch = display.epoch;
-        crate::handoff::with_current(
-            &self.display,
-            &self.display_epoch,
-            &self.stopping,
-            epoch,
-            |slot| {
-                *slot = Some(Arc::new(display));
-                self.valid.store(true, std::sync::atomic::Ordering::Release);
-                if let Ok(mut failure) = self.failure.lock() {
-                    *failure = None;
+        self.preparation_generation.publish(
+            display
+                .preparation_generation
+                .load(std::sync::atomic::Ordering::Acquire),
+            |current| {
+                if !current && let Ok(mut prepared) = display.prepared.lock() {
+                    prepared.take();
                 }
+                crate::handoff::with_current(
+                    &self.display,
+                    &self.display_epoch,
+                    &self.stopping,
+                    epoch,
+                    |slot| {
+                        *slot = Some(Arc::new(display));
+                        self.valid.store(true, std::sync::atomic::Ordering::Release);
+                        if let Ok(mut failure) = self.failure.lock() {
+                            *failure = None;
+                        }
+                    },
+                );
             },
         );
         self.wake();
@@ -283,15 +332,27 @@ impl Shared {
         self.wake();
     }
     pub fn accept_display(&self, display: &Display) -> bool {
-        crate::handoff::with_current(
-            &self.display,
-            &self.display_epoch,
-            &self.stopping,
-            display.epoch,
-            |_| {
-                self.valid.store(true, std::sync::atomic::Ordering::Release);
+        let mut accepted = false;
+        self.preparation_generation.publish(
+            display
+                .preparation_generation
+                .load(std::sync::atomic::Ordering::Acquire),
+            |current| {
+                if !current && let Ok(mut prepared) = display.prepared.lock() {
+                    prepared.take();
+                }
+                accepted = crate::handoff::with_current(
+                    &self.display,
+                    &self.display_epoch,
+                    &self.stopping,
+                    display.epoch,
+                    |_| {
+                        self.valid.store(true, std::sync::atomic::Ordering::Release);
+                    },
+                );
             },
-        )
+        );
+        accepted
     }
     pub fn publish_candidate(&self, generation: u64, result: CandidateDelivery) {
         if self.is_current(generation) {
@@ -713,7 +774,7 @@ pub fn command_name(command: &Command) -> &'static str {
         Command::Apply { .. } => "Apply",
         Command::Undo => "Undo",
         Command::Redo => "Redo",
-        Command::Prepare(_) => "Prepare",
+        Command::Prepare { .. } => "Prepare",
         Command::DescribeChanges => "DescribeChanges",
     }
 }

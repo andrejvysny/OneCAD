@@ -130,18 +130,19 @@ document. Parked tabs hold only disposable caches: the ⌃Tab switcher thumbnail
 and the CPU geometry of their last preparation (the document's
 `PreparationCache`, kept in its bridge's `Shared`, plus what a prepared scene
 not yet uploaded holds beyond it). The ledger counts resident bytes, not the
-preparation peak (`PreparedScene::cpu_bytes`). On Mobile they are limited to
-the parked share and evicted least recently active first; macOS keeps them
-(no eviction, as before). Activation re-prepares a dropped scene from its
-retained source under the same identity. A scene still waiting in a parked
-bridge's latest-only display slot is counted but not dropped (it is adopted on
-activation).
+preparation peak (`PreparedScene::cpu_bytes`). On both profiles they are limited to
+the parked share and evicted least recently active first. Eviction covers adopted
+scenes and pending latest-only replies, and advances a preparation generation so
+a late executing preparation cannot republish an evicted cache. Executing work
+keeps its live allocation reservation until completion. Activation re-prepares
+from the retained source under the same identity with a fresh generation; the
+source, document state and persistence data are not disposable caches.
 
 | Budget | Desktop | Mobile |
 |---|---|---|
 | Renderer allowance (active document, incl. replacement overlap) | 512 MiB | 448 MiB |
-| Parked tabs' caches | 64 MiB (advisory, not enforced) | 64 MiB |
-| Renderer + parked-cache allowance (partial ledger) | 576 MiB (advisory) | 512 MiB |
+| Parked tabs' caches | 64 MiB | 64 MiB |
+| Renderer + parked-cache allowance (partial ledger) | 576 MiB | 512 MiB |
 
 The renderer's total (GPU + CPU staging) cap stays 768 MiB. CPU handoff
 admission (`onecad-ui` `budget.rs`) has one separate 768 MiB authority per shared
@@ -153,7 +154,8 @@ Capture, re-preparation and preview wait at most 3 seconds in a bounded FIFO
 an ineligible inactive ticket does not block active work, and synchronous contour
 or highlight work cannot jump an eligible ticket. Cancellation removes waiting
 tickets without releasing memory still owned by an executing job. A refusal does
-not retry an accepted CAD operation. A degraded ledger refuses new admission
+not retry an accepted CAD operation. Save and recovery persistence remain usable
+when display preparation is refused. A degraded ledger refuses new admission
 while known allocations can still retire.
 
 Display/preview admission remains atomic at 160/192 MiB, then splits into source
@@ -302,7 +304,20 @@ match the native document UUID and is never overwritten. Restore still loads the
 accepted recovery checkpoint, independently of the saved working file. The live
 runtime claims both migrated path and source alias until replacement/close, so
 another path cannot create a second writer for the same document identity.
-Recents adopt the migrated path only after a successful open or recovery.
+Recents adopt the Inbox migration path only after a successful open or recovery.
+Separately, a missing saved path under an Apple application container's Documents
+can rebase to the same relative location under the current container. The candidate
+must remain inside current Documents and open as the recorded document UUID;
+existing sources and external paths are never redirected. Recents persist a
+validated rebase during listing, before missing-file pruning. Missing container
+references whose legacy UUID is unknown, or whose candidate fails validation,
+remain stored for recovery/manual resolution instead of being guessed from a
+filename; unresolved missing entries are omitted from the visible Recent list.
+Recovery still restores checkpoint semantics and preserves source aliases; a
+rejected candidate cannot replace the checkpoint with unrelated saved content.
+If the saved copy or default recovery target is corrupt or belongs to another
+document, Restore selects a fresh claimed destination and preserves the original.
+Open saved continues to require a valid matching document.
 
 Physical-only (ONECAD-469; the simulator offers only local storage): iCloud
 Drive download/eviction, third-party File Provider extensions, a provider
@@ -317,7 +332,7 @@ real provider URLs.
 | `DID_ENTER_BACKGROUND` | as above, request generation/document-scoped recovery for every open document on an independent service future, including while its command actor awaits a native dialog, release the renderer's targets (fence the last frame, wait at most 1 s for the GPU, then zero-size targets; geometry, camera and document state stay), refuse frames and input. Logged as `lifecycle: background released render targets` with `released` |
 | `WILL_ENTER_FOREGROUND` | frames allowed (inactive); the first frame recreates the targets at the current size from the retained scene (same scene identity, no re-upload) |
 | `DID_BECOME_ACTIVE` | `WindowFocused(true)`, focused frames |
-| `MEMORY_WARNING` | in the background, first retry a target release the busy GPU refused on `DID_ENTER_BACKGROUND`; release every parked tab's thumbnail, unuploaded prepared scene and preparation cache (`released_bytes` is what went, measured before and after); then, when the active document's resident display memory plus one same-size target set exceeds the renderer allowance, lower the scene scale ceiling one 0.125 step (not below 0.5) for the rest of the session. Accepted in every phase. Logged as `lifecycle: memory warning released display caches` |
+| `MEMORY_WARNING` | in the background, first retry a target release the busy GPU refused on `DID_ENTER_BACKGROUND`; release every parked tab's thumbnail and adopted/pending preparation caches (including generation fencing of late replies) (`released_bytes` is what went, measured before and after); then, when the active document's resident display memory plus one same-size target set exceeds the renderer allowance, lower the scene scale ceiling one 0.125 step (not below 0.5) for the rest of the session. Accepted in every phase. Logged as `lifecycle: memory warning released display caches` |
 | `WILL_TERMINATE` | cancel contacts, close the request queue (cancelling dialogs), await the autosave flush of every open document, stop the document hosts (flush and stop share 3 s); then frames, input, `a11y_activate`, `open_path` and lifecycle events other than `MEMORY_WARNING` return `ERR_STATE` |
 | `TRAIT_DARK` / `TRAIT_LIGHT` | `system_theme` (used when Appearance is System) |
 
@@ -364,3 +379,9 @@ events it produces are not marked further. Semantic queries (run and kernel
 identity, mass properties, history, constraints), acceptance artifacts and
 fault injection are catalogued in
 [TESTING.md](TESTING.md#test-hook-commands-onecad_ios_testh).
+
+For the exact-tree shared check sequence and separate Mac, simulator and physical
+iPad save/recovery/memory-pressure procedures, see the
+[reliability handoff](../qa/MANUAL_RELEASE_GATES.md#reliability-acceptance-and-hardware-handoff).
+A completed background checkpoint can protect only its committed revision;
+Simulator process termination and synthetic warnings are not jetsam evidence.

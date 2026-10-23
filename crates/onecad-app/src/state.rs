@@ -159,23 +159,10 @@ pub struct AppState {
     /// Exact manager/runtime pair allowed to react to a restart. Updated only
     /// while holding `runtime`; callbacks use the same runtime -> owner order.
     restart_owner: Arc<StdMutex<Option<(u64, String)>>>,
-    /// The **persistence lane** — serializes the two writers that can touch the same
-    /// on-disk recovery state: an autosave (container + crash marker) and an explicit
-    /// save (container + marker/autosave *clearing*).
-    ///
-    /// Not a general IO lock. It exists for exactly two races opened by moving the
-    /// container write off the runtime lock (VF-B7):
-    ///
-    /// * **M3** — two concurrent writers on one target path eat each other's temps
-    ///   (`ContainerWriter` sweeps sibling temps with
-    ///   [`cleanup_stale_temps`](onecad_core::io::container) before its rename);
-    /// * **M2** — an in-flight autosave landing *after* a save cleared the crash
-    ///   marker would resurrect a bogus recovery offer for a cleanly-saved document.
-    ///
-    /// **Lock order is `runtime` → release → `persistence`, never nested.** No path
-    /// may await this lane while holding the runtime lock: both lanes take the
-    /// runtime lock first (to build a [`SavePayload`](crate::document_runtime::SavePayload)),
-    /// release it, and only then contend here.
+    /// Serializes container writes and recovery lifecycle changes for this host.
+    /// Admitted transactions own this lane independently of their API waiters.
+    /// Never await admission while holding `runtime`; after admission, a brief
+    /// runtime lock fences snapshots and completion without holding it during I/O.
     pub persistence: Arc<Mutex<()>>,
     /// The regen scheduler control surface, set once in `AppState::start`.
     pub scheduler: SharedScheduler,
@@ -204,7 +191,9 @@ pub struct AppState {
     pub(crate) tasks: crate::host_tasks::HostTasks,
     /// This host's committed path and document-identity leases (see
     /// [`crate::reservations`]); released when the host shuts down.
-    pub(crate) claims: StdMutex<Vec<crate::reservations::Claim>>,
+    pub(crate) claims: Arc<StdMutex<Vec<crate::reservations::Claim>>>,
+    #[cfg(test)]
+    pub(crate) save_hooks: StdMutex<Option<crate::persistence::Hooks>>,
     /// When the last *blur-triggered* autosave flush ran, for
     /// [`AppState::claim_blur_flush`].
     ///
@@ -302,7 +291,9 @@ impl AppState {
             host_id: services.next_host_id(),
             services,
             tasks: Default::default(),
-            claims: StdMutex::new(Vec::new()),
+            claims: Arc::new(StdMutex::new(Vec::new())),
+            #[cfg(test)]
+            save_hooks: StdMutex::new(None),
             live: Arc::new(StdMutex::new(None)),
             displaced: StdMutex::new(None),
             backend_swap: StdMutex::new(Arc::new(())),
@@ -362,10 +353,10 @@ impl AppState {
         self.pending_recovery()
             .values()
             .find(|o| {
-                o.marker
-                    .as_ref()
-                    .and_then(|m| m.opened_path.as_deref())
-                    .is_some_and(|p| p == path)
+                o.marker.as_ref().is_some_and(|marker| {
+                    marker.opened_path.as_deref() == Some(path)
+                        || marker.source_paths.iter().any(|source| source == path)
+                })
             })
             .cloned()
     }
@@ -699,7 +690,11 @@ impl AppState {
     /// Retires this host's own workers — live and any staged swap — and waits,
     /// bounded, until their processes are reaped. The process pool is untouched.
     pub async fn retire_host(&self) {
-        for worker in &self.retire_host_workers() {
+        Self::reap_host_workers(&self.retire_host_workers()).await;
+    }
+
+    pub(crate) async fn reap_host_workers(workers: &[WorkerManager]) {
+        for worker in workers {
             if !worker.wait_torn_down(WORKER_REAP_TIMEOUT).await {
                 tracing::warn!("closed host's worker was not reaped in time");
             }
@@ -774,7 +769,9 @@ impl AppState {
             host_id: services.next_host_id(),
             services,
             tasks: Default::default(),
-            claims: StdMutex::new(Vec::new()),
+            claims: Arc::new(StdMutex::new(Vec::new())),
+            #[cfg(test)]
+            save_hooks: StdMutex::new(None),
             live,
             displaced: StdMutex::new(None),
             backend_swap: StdMutex::new(Arc::new(())),
@@ -1356,6 +1353,7 @@ mod recovery_state_tests {
                 document_id,
                 pid: 4321,
                 opened_path: path.map(PathBuf::from),
+                source_paths: Vec::new(),
                 last_autosave: String::new(),
                 title: Some("Bracket".into()),
             }),

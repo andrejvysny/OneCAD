@@ -7,7 +7,10 @@ use std::sync::{Mutex as StdMutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::host::HostContext;
-use onecad_core::io::{container, durable_write};
+use onecad_core::{
+    ids::DocumentId,
+    io::{container, durable_write},
+};
 use serde::{Deserialize, Serialize};
 
 use crate::dto::RecentProjectDto;
@@ -17,7 +20,7 @@ use crate::error::ApiError;
 const MAX_RECENTS: usize = 10;
 
 /// One persisted recents entry (`recents.json` element).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RecentEntry {
     /// Absolute project path (the dedup key).
@@ -26,6 +29,10 @@ struct RecentEntry {
     name: String,
     /// Unix-epoch milliseconds of the last open/save.
     last_opened_ms: u64,
+    /// Identity lets container relocation distinguish the saved document from an
+    /// unrelated file at the same relative path. Older entries lack this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    document_id: Option<DocumentId>,
 }
 
 /// The `recents.json` path under the app config dir, or `None` if it cannot be
@@ -81,6 +88,7 @@ pub fn relocate(app: &HostContext, source: &Path, destination: &Path) {
         0,
         RecentEntry {
             path: target,
+            document_id: saved_identity(destination),
             name: destination
                 .file_stem()
                 .unwrap_or_default()
@@ -163,6 +171,7 @@ fn record_at(recents_path: &Path, project_path: &Path) {
             path,
             name,
             last_opened_ms: now_ms,
+            document_id: saved_identity(project_path),
         },
     );
     entries.truncate(MAX_RECENTS);
@@ -180,23 +189,42 @@ pub fn record(app: &HostContext, project_path: &Path) {
 /// The recents list mapped to the frontend `RecentProject` DTO shape (missing file
 /// ⇒ empty). `id` is the path (unique + stable); `modifiedAt` is the ISO timestamp.
 ///
-/// **Prunes dead entries first**: a project deleted outside the app (Finder, `rm`,
+/// **Prunes dead external entries**: a project deleted outside the app (Finder, `rm`,
 /// an external tool) is dropped here rather than left to error when opened, and the
 /// drop is persisted back to `recents.json` so it does not reappear next launch.
+/// Missing app-container references remain stored until a host can resolve their
+/// relocation with the saved document identity; listing cannot discard that evidence.
 /// This is the app's only "sync to filesystem" — re-verified on every call, which
 /// already fires on boot and after every open/save/close/rename/delete.
 fn list_at(recents_path: &Path) -> Vec<RecentProjectDto> {
+    list_at_in_documents(recents_path, None)
+}
+
+fn saved_identity(path: &Path) -> Option<DocumentId> {
+    container::ContainerReader::open(path)
+        .ok()
+        .map(|reader| reader.document().id)
+}
+
+fn list_at_in_documents(recents_path: &Path, documents: Option<&Path>) -> Vec<RecentProjectDto> {
     let _lane = recents_lane();
     let entries = load_at(recents_path);
-    let live: Vec<RecentEntry> = entries
-        .iter()
-        .filter(|e| Path::new(&e.path).exists())
-        .cloned()
-        .collect();
-    if live.len() != entries.len() {
-        store_at(recents_path, &live);
+    let mut retained = entries.clone();
+    for entry in &mut retained {
+        resolve_entry(entry, documents);
     }
-    live.into_iter()
+    let mut seen = std::collections::HashSet::new();
+    retained.retain(|entry| {
+        let path = Path::new(&entry.path);
+        (path.exists() || crate::document_paths::is_container_document(path))
+            && seen.insert(entry.path.clone())
+    });
+    if retained != entries {
+        store_at(recents_path, &retained);
+    }
+    retained
+        .into_iter()
+        .filter(|entry| Path::new(&entry.path).exists())
         .map(|e| RecentProjectDto {
             id: e.path.clone(),
             name: e.name,
@@ -210,12 +238,41 @@ fn list_at(recents_path: &Path) -> Vec<RecentProjectDto> {
         .collect()
 }
 
+fn resolve_entry(entry: &mut RecentEntry, documents: Option<&Path>) {
+    let path = Path::new(&entry.path);
+    if path.exists() {
+        if entry.document_id.is_none() {
+            entry.document_id = saved_identity(path);
+        }
+        return;
+    }
+    if let (Some(documents), Some(id)) = (documents, entry.document_id) {
+        match crate::document_paths::relocate_saved_path(documents, path, id) {
+            Ok(Some(relocated)) => entry.path = relocated.to_string_lossy().into_owned(),
+            Err(error) => {
+                tracing::warn!(%error, "Recent document relocation refused; reference retained")
+            }
+            Ok(None) => {}
+        }
+    }
+}
+
 /// See [`list_at`]; `thumbnail` is left `None` here — this function touches only
 /// `recents.json`. Filling it means opening up to [`MAX_RECENTS`] containers,
 /// which is blocking IO; see [`with_thumbnails`].
 pub fn list(app: &HostContext) -> Vec<RecentProjectDto> {
     match recents_file(app) {
         Some(p) => list_at(&p),
+        None => Vec::new(),
+    }
+}
+
+/// Resolve application-container relocation before pruning missing recent files.
+/// Unknown legacy identities and rejected candidates retain their stored reference
+/// for recovery/manual resolution; they are never guessed from a filename.
+pub fn list_in_documents(app: &HostContext, documents: &Path) -> Vec<RecentProjectDto> {
+    match recents_file(app) {
+        Some(path) => list_at_in_documents(&path, Some(documents)),
         None => Vec::new(),
     }
 }
@@ -383,6 +440,10 @@ pub fn with_thumbnails(mut entries: Vec<RecentProjectDto>) -> Vec<RecentProjectD
     }
     entries
 }
+
+#[cfg(test)]
+#[path = "recents_relocation_tests.rs"]
+mod relocation_tests;
 
 #[cfg(test)]
 mod tests {

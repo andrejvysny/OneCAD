@@ -1,7 +1,8 @@
 //! Real-kernel tests of the in-process backend (`embedded-kernel`), on macOS
 //! against the `macosx` bundle and on the iOS Simulator against its own
 //! (docs/ios/KERNEL.md). They need `ONECAD_EMBEDDED_WORKER_DIR`; without a
-//! linked kernel they skip, unless `ONECAD_REQUIRE_WORKER=1` makes that fail.
+//! linked kernel they skip, unless `ONECAD_REQUIRE_EMBEDDED_KERNEL=1` or
+//! `ONECAD_REQUIRE_EMBEDDED_FAULTS=1` makes that fail.
 //! Process-global counters (instances, sockets, threads) are compared, so the
 //! tests run one at a time behind [`GATE`].
 
@@ -22,6 +23,14 @@ mod services;
 mod solver;
 
 static GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[cfg(not(target_vendor = "apple"))]
+#[test]
+fn unsupported_platform_rejects_unprotected_worker_socket() {
+    let (_host, worker) = UnixStream::pair().expect("socketpair");
+    let error = set_nosigpipe(&worker).expect_err("raw C++ writes require SIGPIPE protection");
+    assert!(error.contains("Apple SO_NOSIGPIPE"), "{error}");
+}
 
 /// Whether the kernel is linked; panics when it is required and absent.
 /// `cargo test --workspace` unifies `embedded-kernel` through onecad-ios but

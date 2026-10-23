@@ -148,11 +148,12 @@ Outcome run_dispatcher(std::size_t lane_stack) {
             out.results.push_back(json::parse(rr.frame.json, nullptr, false));
         }
     }
-    ::shutdown(host, SHUT_WR);  // EOF: the reader loop ends, lanes drain + join
+    // All terminals are consumed: close the peer to deliver EOF without needing
+    // shutdown(), which some sandboxed hosts forbid. Lanes then drain + join.
+    ::close(host);
     runner.join();
     d.close_input();
     ::close(worker_out);
-    ::close(host);
     return out;
 }
 

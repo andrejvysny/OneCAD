@@ -107,6 +107,7 @@ pub(super) const HOST_TESTS: &[&str] = &[
     "app_logic_tests::display_budget_delivery_tests::released_targets_and_memory_pressure_keep_scene_and_document_state",
     "app_logic_tests::display_budget_delivery_tests::the_mobile_route_shows_xray_lazily_recreates_targets_and_idles",
     "app_logic_tests::display_budget_delivery_tests::three_documents_and_a_rotation_stay_within_the_display_aggregate",
+    "app_logic_tests::display_budget_delivery_tests::parked_eviction_fences_pending_cache_and_old_reply_then_rebuilds_on_desktop",
     "app_logic_tests::model_operation_delivery_tests::double_tapped_body_moves_and_turns_by_typed_values",
     "app_logic_tests::model_operation_delivery_tests::multi_select_switch_and_pill_fillet_commit_through_the_card",
     "app_logic_tests::model_operation_delivery_tests::multi_select_switch_keeps_tap_to_clear_and_whole_body_double_tap",

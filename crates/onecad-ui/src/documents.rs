@@ -487,39 +487,57 @@ impl App {
         }
         // Never show the previous document's image under this tab.
         self.doc.awaiting_scene = self.doc.display.is_some();
-        let consumed = self.doc.display.as_ref().filter(|display| {
-            display
-                .prepared
-                .lock()
-                .map_or(true, |prepared| prepared.is_none())
-        });
-        if let Some(source) = consumed.map(|display| crate::viewport_updates::Source {
-            scene: display.scene.clone(),
-            lease: display._lease.clone(),
-        }) && self.doc.prepare_in_flight != Some(source.scene.identity())
-        {
-            let identity = source.scene.identity();
-            match self
-                .doc
-                .bridge
-                .submit(crate::bridge::Command::Prepare(source))
-            {
-                Ok(()) => self.doc.prepare_in_flight = Some(identity),
-                Err(error) => self.display_unavailable(error),
-            }
-        }
+        self.request_preparation();
         if let Some(close) = self.doc.close_when_active.take() {
             let _ = self.close_active_tab(close.as_deref());
             return;
         }
         // Parking dropped the tool's evaluation and preview; its context is the
         // retained display's, so the re-issued draft previews against this scene.
-        // Not held for `awaiting_scene`: preview upload is fenced on the scene's
-        // identity, and an occluded window never clears that flag.
         self.republish_stranded();
         self.ui.start_open = self.doc.document_state.is_none() && self.doc.display.is_none();
         self.sync_active_budget();
         self.context().request_repaint();
+    }
+
+    /// A pending capture may arrive after eviction; rebuild it only when visible.
+    pub(crate) fn request_preparation(&mut self) {
+        if self.parked {
+            return;
+        }
+        let generation = match self.doc.bridge.shared.preparation_generation.current() {
+            Ok(generation) => generation,
+            Err(error) => {
+                self.display_unavailable(error);
+                return;
+            }
+        };
+        let consumed = self.doc.display.as_ref().filter(|display| {
+            self.renderer.scene_identity() != Some(display.scene.identity())
+                && display
+                    .prepared
+                    .lock()
+                    .map_or(true, |prepared| prepared.is_none())
+        });
+        let Some(source) = consumed.map(|display| crate::viewport_updates::Source {
+            scene: display.scene.clone(),
+            lease: display._lease.clone(),
+        }) else {
+            return;
+        };
+        self.doc.awaiting_scene = true;
+        let identity = source.scene.identity();
+        if self.doc.prepare_in_flight == Some((identity, generation)) {
+            return;
+        }
+        match self
+            .doc
+            .bridge
+            .submit(crate::bridge::Command::Prepare { source, generation })
+        {
+            Ok(()) => self.doc.prepare_in_flight = Some((identity, generation)),
+            Err(error) => self.display_unavailable(error),
+        }
     }
 
     pub(crate) fn sync_active_budget(&self) {

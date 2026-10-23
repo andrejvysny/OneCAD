@@ -1539,13 +1539,17 @@ pub async fn new_from_template(
 
     let (snapshot, projection) = {
         let mut guard = state.runtime.lock().await;
+        if let Err(error) = state.ensure_not_closing() {
+            state.rollback_backend();
+            return Err(error);
+        }
         *guard = Some(rt);
         let rt = guard.as_ref().unwrap();
         rt.adopt_current_epoch();
+        state.commit_backend();
+        state.adopt_claims(vec![claim]);
         (crate::api::snapshot_of(rt), rt.projection())
     };
-    state.commit_backend();
-    state.adopt_claims(vec![claim]);
     let _ = app.emit(AppEvent::ProjectionUpdated(projection.clone()));
     // NOT recorded in recents: the user has not saved anything yet, and a
     // recents entry pointing INTO the library would reopen the template itself.

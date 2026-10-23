@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-/// How long [`HostTasks::stop`] waits for one lane before abandoning it.
+/// How long [`HostTasks::begin_stop`]'s drain waits before abandoning one lane.
 const LANE_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Join handles plus a stop signal for the lanes a host spawned.
@@ -33,34 +33,51 @@ impl Default for HostTasks {
 }
 
 impl HostTasks {
-    /// Records a spawned lane so [`stop`](Self::stop) can await it.
+    /// Records a spawned lane so [`begin_stop`](Self::begin_stop) can drain it.
     pub(crate) fn track(&self, name: &'static str, handle: JoinHandle<()>) {
         self.handles.lock().unwrap().push((name, handle));
     }
 
-    /// A receiver that resolves once [`stop`](Self::stop) is called.
+    /// A receiver that resolves once [`begin_stop`](Self::begin_stop) is called.
     pub(crate) fn stop_signal(&self) -> watch::Receiver<bool> {
         self.stop.subscribe()
     }
 
-    /// Signals every lane to stop and awaits each one, bounded per lane.
+    /// Signals stop and spawns an owned drain, bounded per lane.
     ///
     /// A lane that does not stop in time is aborted rather than waited on forever:
     /// a wedged lane must not hold the user's close hostage. Lanes only observe the
     /// signal between units of work, so an in-flight autosave write completes.
-    pub(crate) async fn stop(&self) {
-        self.stop_within(LANE_STOP_TIMEOUT).await;
+    pub(crate) fn begin_stop(&self) -> JoinHandle<()> {
+        self.stop_with_timeout(LANE_STOP_TIMEOUT)
     }
 
-    async fn stop_within(&self, timeout: Duration) {
+    /// Stop admission synchronously before a shutdown waiter can be cancelled.
+    pub(crate) fn request_stop(&self) {
         self.stop.send_replace(true);
+    }
+
+    fn stop_with_timeout(&self, timeout: Duration) -> JoinHandle<()> {
+        self.request_stop();
         let handles = std::mem::take(&mut *self.handles.lock().unwrap());
-        for (name, mut handle) in handles {
-            if tokio::time::timeout(timeout, &mut handle).await.is_err() {
-                tracing::warn!(lane = name, "host lane did not stop in time; aborting");
-                handle.abort();
+        tokio::spawn(async move {
+            for (name, mut handle) in handles {
+                if tokio::time::timeout(timeout, &mut handle).await.is_err() {
+                    tracing::warn!(lane = name, "host lane did not stop in time; aborting");
+                    handle.abort();
+                }
             }
-        }
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn stop(&self) {
+        self.begin_stop().await.unwrap();
+    }
+
+    #[cfg(test)]
+    async fn stop_within(&self, timeout: Duration) {
+        self.stop_with_timeout(timeout).await.unwrap();
     }
 
     /// Number of lanes still tracked (tests / introspection).
@@ -115,6 +132,23 @@ mod tests {
         tasks.stop_within(Duration::from_millis(20)).await;
         tokio::task::yield_now().await;
         assert!(abort.is_finished(), "a wedged lane must not block close");
+    }
+
+    #[tokio::test]
+    async fn dropping_shutdown_waiter_still_aborts_a_wedged_lane() {
+        let tasks = HostTasks::default();
+        let stuck = tokio::spawn(std::future::pending::<()>());
+        let abort = stuck.abort_handle();
+        tasks.track("stuck", stuck);
+        drop(tasks.stop_with_timeout(Duration::from_millis(20)));
+        assert_eq!(tasks.tracked(), 0, "drain owns every admitted handle");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !abort.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached drain must still abort the lane");
     }
 
     #[tokio::test]
