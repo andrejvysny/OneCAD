@@ -90,6 +90,33 @@ impl Interaction {
         gesture: u64,
         editing_existing: bool,
     ) -> Vec<Effect> {
+        self.start_with_repair(record, fields, focus, gesture, editing_existing, None)
+    }
+
+    pub(crate) fn begin_input_repair(
+        &mut self,
+        repair: onecad_app::api::InputRepair,
+        gesture: u64,
+    ) -> Vec<Effect> {
+        self.start_with_repair(
+            repair.record().clone(),
+            &[],
+            None,
+            gesture,
+            true,
+            Some(repair),
+        )
+    }
+
+    fn start_with_repair(
+        &mut self,
+        record: OperationRecord,
+        fields: &[ParameterKey],
+        focus: Option<ParameterKey>,
+        gesture: u64,
+        editing_existing: bool,
+        repair: Option<onecad_app::api::InputRepair>,
+    ) -> Vec<Effect> {
         if self.tool.as_ref().is_some_and(|tool| {
             matches!(
                 tool.phase,
@@ -120,6 +147,7 @@ impl Interaction {
             origin: Box::new(record.op.clone()),
             record,
             editing_existing,
+            repair,
             params,
             draft: String::new(),
             draft_status: DraftStatus::Pending,
@@ -154,6 +182,9 @@ impl Interaction {
         }) {
             return Vec::new();
         }
+        if self.tool.as_ref().is_some_and(|tool| tool.repair.is_some()) {
+            return self.changed(None);
+        }
         self.refresh()
     }
 
@@ -175,6 +206,17 @@ impl Interaction {
         let clear = Effect::ClearPreview {
             gesture: tool.tag.gesture,
         };
+        if let Some(repair) = tool.repair.clone() {
+            tool.phase = SessionPhase::Committing;
+            self.status = CommitStatus::Pending(tool.tag.clone());
+            return vec![
+                clear,
+                Effect::ApplyInputRepair {
+                    tag: tool.tag.clone(),
+                    repair: Box::new(repair),
+                },
+            ];
+        }
         if tool.editing_existing && operation == *tool.origin {
             // Nothing changed: no command, no history entry, no revision.
             self.tool = None;
@@ -205,6 +247,9 @@ impl Interaction {
             gesture: tool.tag.gesture,
         };
         if matches!(tool.phase, SessionPhase::Editing | SessionPhase::Completed) {
+            if let Some(repair) = &tool.repair {
+                repair.cancel();
+            }
             self.tool = None;
         }
         vec![effect]
@@ -304,6 +349,7 @@ fn validate_bindings(operation: &KnownOperation) -> Result<(), String> {
             validate_boolean_target(p.boolean_mode, p.target_body)?;
             validate_axis(p.axis.as_ref())
         }
+        KnownOperation::Loft(p) => p.validate(),
         KnownOperation::Fillet(p) => validate_edges(&p.edge_ids, &p.edges),
         KnownOperation::Chamfer(p) => {
             validate_edges(&p.edge_ids, &p.edges)?;

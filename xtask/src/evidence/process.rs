@@ -145,6 +145,7 @@ fn record_command(
                 "ONECAD_IOS_ORACLE_REPORT",
                 "TEST_RUNNER_ONECAD_RUN_ID",
                 "TEST_RUNNER_ONECAD_MAC_FIXTURE",
+                "TEST_RUNNER_ONECAD_PUBLIC_FIXTURE_NAME",
             ]
             .contains(&key.as_str())
         })

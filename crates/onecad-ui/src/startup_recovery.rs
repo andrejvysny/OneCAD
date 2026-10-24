@@ -1,5 +1,9 @@
 //! Startup decisions precede opening any saved UUID and remain explicit.
-use crate::bridge::{Backend, Command};
+use crate::{
+    bridge::{Backend, Command},
+    path_policy::PathPolicy,
+    qa::QaPaths,
+};
 use onecad_app::{api, dto::RecoveryInfoDto};
 use onecad_widgets::components::overlays::{Dialog, DialogIntent};
 use std::path::{Path, PathBuf};
@@ -98,7 +102,13 @@ async fn apply_choice(
     choice: Choice,
 ) -> Result<(), String> {
     let id = &offer.document_id;
-    let destination = destination(&backend.paths.documents, offer)?;
+    if matches!(choice, Choice::Discard) {
+        return api::recover_document(&backend.state, backend.host.clone(), id.clone(), false)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+    }
+    let destination = recovery_destination(&backend.paths, offer)?;
     match choice {
         Choice::Restore => {
             api::recover_document_at_path(
@@ -122,11 +132,7 @@ async fn apply_choice(
             backend.paths.document = destination;
             backend.startup_opened = true;
         }
-        Choice::Discard => {
-            api::recover_document(&backend.state, backend.host.clone(), id.clone(), false)
-                .await
-                .map_err(|e| e.to_string())?;
-        }
+        Choice::Discard => unreachable!("discard returns before resolving a save destination"),
     }
     Ok(())
 }
@@ -140,10 +146,13 @@ async fn open_saved(
         .original_path
         .as_deref()
         .ok_or("No saved version exists")?;
-    if crate::imported_documents::migrate(&backend.paths.documents, Path::new(original))?
-        != destination
-    {
-        return Err("Saved version must remain inside the isolated QA documents directory".into());
+    let saved = if backend.paths.policy == PathPolicy::Desktop {
+        backend.paths.open_source(Path::new(original))?
+    } else {
+        crate::imported_documents::migrate(&backend.paths.documents, Path::new(original))?
+    };
+    if saved != destination {
+        return Err("Saved version is not an admitted recovery destination".into());
     }
     api::open_document(
         &backend.state,
@@ -177,7 +186,26 @@ fn remove_offer(backend: &Backend, id: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn recovery_destination(paths: &QaPaths, offer: &RecoveryInfoDto) -> Result<PathBuf, String> {
+    destination_in(
+        paths.policy,
+        &paths.documents,
+        &paths.recovery_directory()?,
+        offer,
+    )
+}
+
+#[cfg(test)]
 fn destination(documents: &Path, offer: &RecoveryInfoDto) -> Result<PathBuf, String> {
+    destination_in(PathPolicy::Qa, documents, documents, offer)
+}
+
+fn destination_in(
+    policy: PathPolicy,
+    documents: &Path,
+    recovered: &Path,
+    offer: &RecoveryInfoDto,
+) -> Result<PathBuf, String> {
     let documents = documents.canonicalize().map_err(|e| e.to_string())?;
     let id: onecad_core::ids::DocumentId = offer
         .document_id
@@ -187,14 +215,21 @@ fn destination(documents: &Path, offer: &RecoveryInfoDto) -> Result<PathBuf, Str
         .original_path
         .as_deref()
         .and_then(|path| Path::new(path).canonicalize().ok())
-        && path.starts_with(&documents)
+        && (policy == PathPolicy::Desktop || path.starts_with(&documents))
     {
         verify_destination_identity(&path, id)?;
-        let target = crate::imported_documents::migrate(&documents, &path)?;
+        let target = if policy == PathPolicy::Desktop {
+            path
+        } else {
+            crate::imported_documents::migrate(&documents, &path)?
+        };
         verify_destination_identity(&target, id)?;
         return Ok(target);
     }
-    let fallback = documents.join(format!("recovered-{id}.onecad"));
+    let fallback = recovered
+        .canonicalize()
+        .map_err(|error| error.to_string())?
+        .join(format!("recovered-{id}.onecad"));
     if fallback
         .symlink_metadata()
         .is_ok_and(|metadata| metadata.file_type().is_symlink())

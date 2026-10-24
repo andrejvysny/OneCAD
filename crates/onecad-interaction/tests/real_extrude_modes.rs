@@ -12,12 +12,17 @@ use onecad_core::{
     document::{record::*, refs::SketchRegionRef, variables::Scalar},
     edit::EditCommand,
     ids::{BodyId, EntityId, RecordId, RegionId, SketchId},
+    io::container::SaveMeta,
     math::{Vec2, Vec3},
     regen::{CancelToken, GeometryEngine, Lod, ModelSnapshot, Outcome, RegenRequest},
     sketch::{Sketch, SketchEntity, SketchPlane, WorldPlane},
 };
 use onecad_interaction::*;
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use uuid::Uuid;
 
 fn record(id: u128, op: KnownOperation) -> OperationRecord {
@@ -123,9 +128,11 @@ fn append(runtime: &mut DocumentRuntime, record: OperationRecord) {
 }
 
 async fn regen(runtime: &mut DocumentRuntime) -> Arc<ModelSnapshot> {
-    let report = runtime
-        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
-        .await;
+    regenerate(runtime, RegenRequest::ToEnd { from: 0 }).await
+}
+
+async fn regenerate(runtime: &mut DocumentRuntime, request: RegenRequest) -> Arc<ModelSnapshot> {
+    let report = runtime.run_regen(request, CancelToken::new()).await;
     let Outcome::Published(snapshot) = report.outcome else {
         panic!("{report:?}")
     };
@@ -134,12 +141,12 @@ async fn regen(runtime: &mut DocumentRuntime) -> Arc<ModelSnapshot> {
 }
 
 #[tokio::test]
-async fn add_cut_keep_explicit_second_body_profile_hole_and_oriented_frame() {
+async fn add_cut_intersect_keep_explicit_second_body_profile_hole_and_oriented_frame() {
     let worker_path =
         PathBuf::from(std::env::var_os("ONECAD_WORKER_PATH").expect("required real worker"));
     assert!(worker_path.is_file());
     for plane in [SketchPlane::xy(), SketchPlane::xz()] {
-        for mode in [BooleanMode::Add, BooleanMode::Cut] {
+        for mode in [BooleanMode::Add, BooleanMode::Cut, BooleanMode::Intersect] {
             qualify(worker_path.clone(), plane, mode).await;
         }
     }
@@ -288,12 +295,13 @@ async fn assert_volume(worker: &WorkerManager, mode: BooleanMode) {
         .await
         .unwrap();
     let delta = std::f64::consts::PI * (25.0 - 4.0) * 3.0;
-    let expected = std::f64::consts::PI * 100.0 * 5.0
-        + if mode == BooleanMode::Add {
-            delta
-        } else {
-            -delta
-        };
+    let cylinder = std::f64::consts::PI * 100.0 * 5.0;
+    let expected = match mode {
+        BooleanMode::NewBody => cylinder,
+        BooleanMode::Add => cylinder + delta,
+        BooleanMode::Cut => cylinder - delta,
+        BooleanMode::Intersect => delta,
+    };
     assert!(
         (mass.volume - expected).abs() < 1e-6,
         "{mode:?} {} != {expected}",
@@ -302,7 +310,7 @@ async fn assert_volume(worker: &WorkerManager, mode: BooleanMode) {
 }
 
 async fn qualify(worker_path: PathBuf, plane: SketchPlane, mode: BooleanMode) {
-    let worker = WorkerManager::spawn(SupervisorConfig::production(worker_path));
+    let worker = WorkerManager::spawn(SupervisorConfig::production(worker_path.clone()));
     assert!(worker.wait_ready(Duration::from_secs(15)).await);
     let (mut runtime, before, profile_plane) = baseline(&worker, plane, mode).await;
     let other = BodyId(Uuid::from_u128(2000));
@@ -334,6 +342,70 @@ async fn qualify(worker_path: PathBuf, plane: SketchPlane, mode: BooleanMode) {
     let next_mesh = runtime.get_mesh(other, Lod::Coarse, None).await.unwrap();
     assert_same_mesh_vertices(&other_mesh, &next_mesh);
     assert_volume(&worker, mode).await;
+    let saved = tempfile::tempdir().unwrap();
+    let path = saved.path().join("intersect.onecad");
+    if mode == BooleanMode::Intersect {
+        intersect_history_and_save(&mut runtime, &worker, &path).await;
+    }
+    worker.retire();
+    assert!(worker.wait_torn_down(Duration::from_secs(10)).await);
+    if mode == BooleanMode::Intersect {
+        reopen_intersect(worker_path, &path).await;
+    }
+}
+
+async fn intersect_history_and_save(
+    runtime: &mut DocumentRuntime,
+    worker: &WorkerManager,
+    path: &Path,
+) {
+    let undo = runtime.undo().expect("undo Intersect");
+    regenerate(runtime, undo.regen.expect("undo regeneration")).await;
+    assert_eq!(runtime.projection().features.len(), 5);
+    assert_volume(worker, BooleanMode::NewBody).await;
+    let redo = runtime.redo().unwrap().expect("redo Intersect");
+    regenerate(runtime, redo.regen.expect("redo regeneration")).await;
+    assert_eq!(runtime.projection().features.len(), 6);
+    assert_volume(worker, BooleanMode::Intersect).await;
+    runtime
+        .save(
+            path,
+            SaveMeta {
+                app_version: "0.1.0-test".into(),
+                occt_fingerprint: None,
+                created: "2026-10-23T00:00:00Z".into(),
+                modified: "2026-10-23T00:00:00Z".into(),
+            },
+        )
+        .unwrap();
+}
+
+async fn reopen_intersect(worker_path: PathBuf, path: &Path) {
+    let worker = WorkerManager::spawn(SupervisorConfig::production(worker_path));
+    assert!(worker.wait_ready(Duration::from_secs(15)).await);
+    let mut runtime = DocumentRuntime::open(
+        path,
+        Arc::new(worker.clone()),
+        Arc::new(worker.clone()),
+        Arc::new(worker.clone()),
+    )
+    .unwrap();
+    regenerate(&mut runtime, RegenRequest::RevertToEnd { from: 0 }).await;
+    assert_eq!(runtime.projection().features.len(), 6);
+    let record = runtime
+        .operation_record(RecordId(Uuid::from_u128(6000)))
+        .unwrap();
+    let Operation::Known(KnownOperation::Extrude(params)) = &record.op else {
+        panic!("saved Intersect feature")
+    };
+    assert_eq!(params.boolean_mode, BooleanMode::Intersect);
+    assert_eq!(params.target_body, Some(BodyId(Uuid::from_u128(4000))));
+    let ids = runtime.head_body_ids();
+    assert_eq!(ids.len(), 2);
+    for id in [2000, 4000] {
+        assert!(ids.contains(&BodyId(Uuid::from_u128(id))));
+    }
+    assert_volume(&worker, BooleanMode::Intersect).await;
     worker.retire();
     assert!(worker.wait_torn_down(Duration::from_secs(10)).await);
 }

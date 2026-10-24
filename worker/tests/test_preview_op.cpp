@@ -287,7 +287,7 @@ int main() {
 
     // ── 4. An unsupported opType reports UNSUPPORTED, not a crash ────────────
     {
-        json op = {{"opType", "Loft"}, {"opId", "op_loft"}, {"params", json::object()}};
+        json op = {{"opType", "Sweep"}, {"opId", "op_sweep"}, {"params", json::object()}};
         Envelope resp =
             onecad::session::handle_preview_op(session, preview_req(json{{"op", op}}));
         CHECK(resp.error.has_value());

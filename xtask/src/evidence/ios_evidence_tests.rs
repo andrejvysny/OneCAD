@@ -247,6 +247,16 @@ fn evidence(dir: &Path) {
     let all = expectations();
     fs::create_dir_all(dir.join("mac-authored")).unwrap();
     fs::write(dir.join(MAC_FIXTURE), MAC_BYTES).unwrap();
+    write(
+        &dir.join("public-fixture.json"),
+        &json!({
+            "runId": RUN, "carrierBundleId": ios_evidence::FIXTURE_CARRIER_BUNDLE,
+            "source": dir.join(MAC_FIXTURE),
+            "name": format!("MacInput-{RUN}.onecad"),
+            "destination": format!("Documents/MacInput-{RUN}.onecad"),
+            "bytes": MAC_BYTES.len(), "sha256": hash(MAC_BYTES),
+        }),
+    );
     fs::create_dir_all(dir.join("artifacts")).unwrap();
     let replay = dir.join("artifacts").join(ios_replay::ARTIFACT);
     write(&replay, &ios_replay::tests::valid(RUN, &kernel()));
@@ -292,7 +302,22 @@ fn ios_synthetic_evidence_passes_and_acceptance_is_written_last() {
     let acceptance = ios_evidence::json(&area.path().join("acceptance.json")).unwrap();
     assert_eq!(acceptance["run"]["runId"], RUN);
     type Mutation = fn(&Path);
-    let mutations: [(&str, Mutation); 13] = [
+    let mutations: [(&str, Mutation); 16] = [
+        ("tampered public fixture carrier", |d| {
+            let file = d.join("public-fixture.json");
+            let mut record = ios_evidence::json(&file).unwrap();
+            record["carrierBundleId"] = json!("com.onecad.ipad");
+            write(&file, &record);
+        }),
+        ("missing public fixture record", |d| {
+            fs::remove_file(d.join("public-fixture.json")).unwrap();
+        }),
+        ("tampered public fixture hash", |d| {
+            let file = d.join("public-fixture.json");
+            let mut record = ios_evidence::json(&file).unwrap();
+            record["sha256"] = json!("0".repeat(64));
+            write(&file, &record);
+        }),
         ("no Pencil replay", |d| {
             fs::remove_file(d.join("artifacts/pencil-replay.trace")).unwrap();
             fs::remove_file(d.join("artifacts/pencil-replay.trace.provenance.json")).unwrap();

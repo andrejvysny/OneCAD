@@ -257,6 +257,26 @@ impl DocumentRuntime {
             ))));
         }
         let command = self.hydrate_ref_intents(EditCommand::UpdateOperationParams { record, op });
+        self.plan_command_preview(record, command, lod)
+    }
+
+    pub(crate) fn plan_input_repair_preview(
+        &mut self,
+        record: RecordId,
+        command: EditCommand,
+        lod: Lod,
+    ) -> Result<EditPreviewPrep, ApiError> {
+        self.refuse_edit_preview_now()?;
+        self.edit_preview.cancel_active();
+        self.plan_command_preview(record, command, lod)
+    }
+
+    fn plan_command_preview(
+        &mut self,
+        record: RecordId,
+        command: EditCommand,
+        lod: Lod,
+    ) -> Result<EditPreviewPrep, ApiError> {
         let mut candidate = DocumentSession::new(self.session.document().clone());
         let outcome = candidate.apply(command)?;
         let doc = candidate.document();

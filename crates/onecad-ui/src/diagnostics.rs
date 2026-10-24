@@ -19,6 +19,7 @@ pub enum Source {
     Model,
     Viewport,
     Application,
+    Autosave,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,6 +144,7 @@ impl Diagnostics {
                     .add(egui::Button::new(label).wrap_mode(egui::TextWrapMode::Extend))
                     .on_hover_text("Operation outcomes and details");
                 egui::Popup::menu(&button)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                     .width(360.0_f32.min(bounds.width() - 32.0))
                     .show(|ui| self.details(ui, bounds.height() * 0.6));
             });
@@ -241,6 +243,7 @@ impl Source {
             Self::Model => "Feature",
             Self::Viewport => "Viewport",
             Self::Application => "Application",
+            Self::Autosave => "Recovery checkpoint",
         }
     }
 }
@@ -257,6 +260,10 @@ fn summary(message: &str) -> String {
     }
     summary
 }
+
+#[cfg(test)]
+#[path = "diagnostics_popup_tests.rs"]
+mod popup_tests;
 
 #[cfg(test)]
 mod tests {

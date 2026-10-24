@@ -414,17 +414,17 @@
     },
     {
       "operation": "Loft",
-      "mode": "all",
-      "supportStatus": "unsupported",
-      "cppTest": "",
-      "rustRealWorkerTest": "",
-      "frontendTest": "",
+      "mode": "solid NewBody smooth/ruled",
+      "supportStatus": "supported",
+      "cppTest": "worker/tests/test_loft.cpp",
+      "rustRealWorkerTest": "crates/onecad-app/tests/loft_ops.rs",
+      "frontendTest": "crates/onecad-ui/src/loft_ui_tests.rs",
       "playwrightTest": "",
       "corpusCase": "",
       "kernelbenchSuite": "",
-      "ciJob": "",
-      "notes": "Out of roadmap scope.",
-      "uiExposure": "unsupported"
+      "ciJob": "worker-8-0-1; rust-8-0-1; native-host-lifecycle",
+      "notes": "Real OCCT smooth/ruled two/three-section rectangle and circle volumes, reverse winding/order, mixed circle/rectangle and triangle/rectangle compatibility, profile refusal, birth history, transaction fencing, exact preview mesh and unchanged head; canonical_loft_basic and canonical_loft_refusal wire fixtures. Native UI and iPad acceptance remain separate gates.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Sweep",

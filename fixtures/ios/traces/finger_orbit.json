@@ -1,7 +1,7 @@
 {
   "name": "finger_orbit",
-  "description": "One finger on the canvas without drag authoring orbits from the slop exit point.",
-  "context": {"controls": [[0, 0, 100, 44]]},
+  "description": "Strict Pencil-only canvas: a finger orbits even while drag authoring is available.",
+  "context": {"pencil_only_drawing": true, "drag_authoring": true, "controls": [[0, 0, 100, 44]]},
   "steps": [
     {"batch": {"samples": [
       {"contact": 1, "kind": "finger", "phase": "began", "t": 0.0, "x": 300, "y": 300}

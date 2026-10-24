@@ -395,7 +395,7 @@ Worker → Rust:
     "quantizationVersion": 1,
     "solverPolicyVersion": 4,
     "capabilities": [
-      "op.sketch", "op.extrude", "op.revolve", "op.fillet", "op.chamfer",
+      "op.sketch", "op.extrude", "op.revolve", "op.loft", "op.fillet", "op.chamfer",
       "op.boolean", "op.boolean.tools", "op.hole", "op.hole.points",
       "op.importStep", "solver.planegcs", "tessellate.mesh1",
       "io.step", "io.step.import", "io.stl", "io.obj", "checkpoint.v1",
@@ -1152,11 +1152,12 @@ Each op in `ExecutePlan.ops` is:
 `opType` ∈ `Sketch` | `Extrude` | `Revolve` | `Fillet` | `Chamfer` | `Boolean`
 | `Shell` | `LinearPattern` | `CircularPattern` | `MirrorBody` | `ImportStep`
 | `TransformBody` | `Hole` | `OffsetFace` | `PlaceComponent` | `DetachComponent`
-| `Gear`
+| `Gear` | `Loft`
 (the M6a breadth ops, the 2026-08-02 `ImportStep`/`TransformBody`, the
 Component Library ops, and the 2026-08-14 `Gear` generator extend the original
 vertical slice — see the [Changelog](#14-changelog)).
-`Loft` and `Sweep` remain **`UNSUPPORTED`** ([§8](#8-error-taxonomy)). Values
+`Loft` supports the bounded solid NewBody contract below; `Sweep` remains
+**`UNSUPPORTED`** ([§8](#8-error-taxonomy)). Values
 keep OneCAD-CPP `operationTypeName` spelling (PascalCase). Spec §3.2/§3.3's
 `SetComponentParams`/`ReplaceComponent` are NOT `opType` values at all — both
 are in-place edits of `PlaceComponent`'s own params at the Rust layer (see
@@ -1850,6 +1851,71 @@ together. This is additive; old readers may continue to use the legacy pair.
   pole edges of a shaft or a sphere. Pinned by
   `worker/tests/test_commit_tier_validation.cpp`.
 
+**Loft** (`op.loft`) — bounded solid NewBody through ordered sketch regions.
+
+```json
+// inputs: [] — sketch-region references are not semantic body references
+{
+  "profiles": [
+    { "sketchId": "sk_1", "regionId": "r_0123456789abcdef", "regionIdentityVersion": 3,
+      "regionAnchor": [5.0, 5.0] },
+    { "sketchId": "sk_2", "regionId": "r_fedcba9876543210", "regionIdentityVersion": 3,
+      "regionAnchor": [2.5, 2.5] }
+  ],
+  "isSolid": true,
+  "isRuled": false,
+  "booleanMode": "NewBody"
+}
+```
+
+- `profiles` MUST contain 2..32 sections, each resolving to one closed planar
+  sketch-region wire without holes. The array order is authoritative; no sorting
+  occurs. All section planes MUST be parallel, with strictly monotone distinct
+  offsets in either direction. Repeated sketch-region pairs, coincident planes,
+  nonmonotone order, degenerate profiles and nonfinite data refuse with `OP_FAILED`;
+  a missing sketch refuses with `REF_UNRESOLVED`.
+- Every entry requires a nonempty `sketchId` and `regionId`, using the same
+  exact region resolution and optional `regionIdentityVersion`
+  (2 or 3; absent retains legacy resolution), and optional `regionAnchor` policy as
+  Extrude/Revolve via `build_profile_face`. These references stay inside
+  `params.profiles[]`; they are neither flattened into singular params nor placed
+  in `inputs[]`. Exact identity misses may rebind only through the shared unique
+  containing-cell anchor policy and emit `REGION_REBOUND_BY_ANCHOR`.
+- `booleanMode` defaults to `NewBody`, `isSolid` to `true`, `isRuled` to `false`.
+  Only solid NewBody is supported. Boolean Add/Cut/Intersect, shell output,
+  holes, open curves, point/vertex/body-face sections, guide rails, end conditions,
+  nonparallel planes are outside this contract. Present advanced directives
+  `sections`, `guideRails`, `guides`, `rails`, `spine`, `startCondition`,
+  `endCondition`, `continuity` and `points` refuse even when empty.
+  Explicit unsupported mode requests refuse with `UNSUPPORTED`; malformed values
+  and unusable/open/point profiles refuse with `OP_FAILED`. No fallback geometry
+  or Boolean substitution is permitted.
+- Construction uses OCCT `BRepOffsetAPI_ThruSections(true, isRuled, 1e-6)`:
+  `SetMutableInput(false)`, `CheckCompatibility(true)`, `SetSmoothing(false)`,
+  chord-length parametrization, C2 continuity and maximum degree 8. Smooth
+  (`isRuled:false`) uses the section approximation; ruled (`true`) connects each
+  neighboring section pair with ruled surfaces. Automatic seam/orientation
+  compatibility is the only seam policy; no user seam or tangency controls ship.
+  Different section edge counts use OCCT compatibility splitting; rectangle to
+  circle and triangle transitions are qualified in both modes. This does not
+  establish arbitrary profile correspondence or expose stable seam identities.
+  Existing pinned OCCT version/fingerprint fencing covers algorithm provenance.
+- Before publication, the shared single-solid policy rejects empty, invalid,
+  degenerate, excessive-tolerance or multiple-solid results. Commit uses Tier B;
+  interactive preview uses the existing Tier A policy. Tolerances remain local
+  and use the shared geometry precision policy; no global tolerance is changed.
+  Cancellation uses the shared progress token and polls before/after construction
+  and publication. Existing plan epoch/base-hash and preview snapshot fences apply.
+- Success creates exactly `body_<opId>` with one `created` event. Authoritative
+  NewBody history certifies every referenceable output face/edge/vertex as a birth
+  through `created_body_history`; it makes no source-section correspondence claim.
+  Preview runs the same constructor over scratch state and publishes no head
+  changes. `PreviewOp` seeds every section from the authoritative sketch store;
+  missing sections refuse rather than substituting the last active sketch.
+
+Executable coverage: `worker/tests/test_loft.cpp`,
+`protocol/fixtures/loft_basic.ndjson`, `protocol/fixtures/loft_refusal.ndjson`.
+
 **Fillet** (`op.fillet`) and **Chamfer** (`op.chamfer`) — split ops sharing the
 OneCAD-CPP `FilletChamferParams` shape (`mode` distinguishes; radius doubles as
 chamfer distance).
@@ -2454,7 +2520,7 @@ placement. Added 2026-08-14 (Gear Generator G1).
   version (§8) — helical and herringbone gears need the Frenet sweep
   infrastructure scheduled for a later phase. The fields are present and
   round-trip so the payload does not change shape when that lands, the same
-  forward-compatibility posture `Loft`/`Sweep` carry as `KnownOperation`
+  forward-compatibility posture `Sweep` carries as `KnownOperation`
   variants.
 - `sampleCount` is an ACCURACY knob (spline samples per curve segment), not a
   geometric parameter: it changes the fidelity of the flank approximation and
@@ -5586,7 +5652,7 @@ where an unknown value is ignorable.
 | Recoverable op failure | `OP_FAILED` | scratch only — **session intact** | Rust discards scratch; user edits and retries |
 | Reference unresolved | `REF_UNRESOLVED` | scratch only | as above (distinct from NeedsRepair — this is a hard resolve failure, e.g. input body missing) |
 | Invalid geometry produced | `GEOMETRY_INVALID` | scratch only | as above |
-| Unsupported op/param (known verb) | `UNSUPPORTED` | none | Rust falls back / freezes node (the remaining un-shipped ops `opType:"Loft"` / `"Sweep"`; the M6a breadth ops Shell/LinearPattern/CircularPattern/MirrorBody are now supported, [§7.3](#73-op-payload-schemas-vertical-slice)) |
+| Unsupported op/param (known verb) | `UNSUPPORTED` | none | Rust falls back / freezes node (the remaining un-shipped op `opType:"Sweep"`; the M6a breadth ops Shell/LinearPattern/CircularPattern/MirrorBody are now supported, [§7.3](#73-op-payload-schemas-vertical-slice)) |
 | Stale snapshot on a fenced read (`PreviewOp`, `PreviewPlan` — snapshot or epoch, `PrepareEdgeOp`, `AnalyzeEdgeOpRange`, `PrepareOffsetFace`, `ProjectToSketchPlane`, `ExtractPrismProfile`; and, when the OPTIONAL `snapshotId` is sent, `Tessellate`, `ExportGeometry`, `ExportStep`, `ExportStl`, `ExportObj`) | `STALE_PREVIEW` | none — head untouched, nothing written | caller re-picks / re-previews / re-reads the head once and re-issues against the fresh head snapshot ([§7.6](#76-geometry), [§7.8](#78-io)) |
 | Cooperative cancellation | `CANCELLED` | in-flight job dropped; session intact | terminal frame always sent ([§3.5](#35-cancel-rust--worker)) |
 | Protocol violation | `PROTOCOL_ERROR` | fatal | **restart worker** (no resync) |
@@ -7447,7 +7513,7 @@ sign-off) once fixtures exist.
   - `helixAngleDeg` ≠ 0 and `doubleHelix` = true are **`UNSUPPORTED`** in this
     version (the Frenet sweep infrastructure is a later phase). The fields are
     present and round-trip so the payload will not change shape when helical
-    lands — the same forward-compatibility posture `Loft`/`Sweep` already carry.
+    lands — the same forward-compatibility posture `Sweep` already carries.
   No fixture bump is owed by this entry alone: the op adds files rather than
   moving any existing shape, and its own fixtures land with the worker path.
 - **2026-08-14 — §7.2 the mate carve-out, written down.** The hardening entry below

@@ -8,10 +8,10 @@
 # /usr/local dylib dependency closure (skipping the /usr/lib + /System system
 # libraries the OS always ships), copies each dependency into Contents/Frameworks/,
 # rewrites every install name to @rpath, adds an @executable_path/../Frameworks
-# rpath to the worker, and ad-hoc re-signs every Mach-O it touched (install_name_tool
-# invalidates code signatures). Idempotent: re-running against an already-bundled
-# .app is a no-op because the worker's dependencies then resolve via @rpath and no
-# longer look bundleable.
+# rpath to the worker, and signs dylibs before the worker. ONECAD_SIGNING_IDENTITY
+# selects an installed Developer ID Application certificate; absence keeps ad-hoc
+# local signing. Re-running an already-bundled .app reapplies the selected signing
+# policy. This must happen before the package embeds the worker's final digest.
 set -euo pipefail
 
 if [[ "$(uname)" != "Darwin" ]]; then
@@ -23,6 +23,10 @@ if [[ $# -ne 1 ]]; then
     echo "usage: bundle-dylibs.sh <path-to.app>" >&2
     exit 2
 fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/macos-signing.sh
+source "$SCRIPT_DIR/macos-signing.sh"
+onecad_signing_init
 
 APP="$1"
 if [[ ! -d "$APP" ]]; then
@@ -130,8 +134,18 @@ while [[ $idx -lt ${#WORKLIST[@]} ]]; do
     done < <(deps_of "$current")
 done
 
+sign_bundle() {
+    local dylib
+    for dylib in "$FRAMEWORKS_DIR"/*.dylib; do
+        [[ -f "$dylib" ]] || continue
+        onecad_sign_target "$dylib"
+    done
+    onecad_sign_target "$WORKER"
+}
+
 if [[ ${#CLOSURE_LIST[@]} -eq 0 ]]; then
-    echo "bundle-dylibs.sh: no bundleable dylibs for $(basename "$WORKER") (already bundled?); nothing to do."
+    sign_bundle
+    echo "bundle-dylibs.sh: existing dylib closure and worker signed."
     exit 0
 fi
 
@@ -179,10 +193,7 @@ if ! install_name_tool -add_rpath "@executable_path/../Frameworks" "$WORKER" 2>/
     echo "bundle-dylibs.sh: @executable_path/../Frameworks rpath already present on worker (ok)."
 fi
 
-# install_name_tool invalidates signatures — ad-hoc re-sign every Mach-O touched.
-codesign --force --sign - "$WORKER"
-for dep in "${CLOSURE_LIST[@]}"; do
-    codesign --force --sign - "$FRAMEWORKS_DIR/$(basename "$dep")"
-done
+# install_name_tool invalidates signatures; finalize nested libraries first.
+sign_bundle
 
 echo "bundle-dylibs.sh: bundled ${#CLOSURE_LIST[@]} dylib(s) into $FRAMEWORKS_DIR and re-signed."

@@ -138,7 +138,7 @@ fn modeling_coverage_negative_controls() {
             m["rows"][0]["uiExposure"] = json!("exposed");
             m["rows"][0]["playwrightTest"] = json!("");
         },
-        "lacks a browser lane",
+        "lacks a native UI or browser lane",
     );
     coverage_failure(
         coverage_manifest(),
@@ -147,6 +147,47 @@ fn modeling_coverage_negative_controls() {
         },
         "is UI-hidden but cites a browser exposure lane",
     );
+}
+
+#[test]
+fn native_modeling_coverage_requires_ui_evidence_and_actual_ci_owner() {
+    for (field, value, expected) in [
+        ("frontendTest", "", "lacks a native UI or browser lane"),
+        (
+            "frontendTest",
+            "crates/onecad-app/tests/loft_ops.rs",
+            "frontendTest must name native host Rust tests",
+        ),
+        (
+            "frontendTest",
+            "crates/onecad-ui/src/../../onecad-app/tests/loft_ops.rs",
+            "frontendTest must name native host Rust tests",
+        ),
+        (
+            "ciJob",
+            "worker-8-0-1",
+            "cites frontendTest but names no job",
+        ),
+        (
+            "ciJob",
+            "worker-8-0-1; native-host-lifecycle",
+            "cites rustRealWorkerTest but names no job",
+        ),
+    ] {
+        coverage_failure(
+            coverage_manifest(),
+            |manifest| {
+                let row = manifest["rows"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|row| row["operation"] == "Loft")
+                    .unwrap();
+                row[field] = json!(value);
+            },
+            expected,
+        );
+    }
 }
 
 #[test]
@@ -221,12 +262,12 @@ fn modeling_contracts_negative_controls() {
                 .as_array_mut()
                 .unwrap()
                 .iter_mut()
-                .find(|r| r["operation"] == "Loft")
+                .find(|r| r["operation"] == "Sweep")
                 .unwrap();
             row["supportStatus"] = json!("supported");
             row["uiExposure"] = json!("exposed");
         },
-        "worker has no Loft dispatch arm",
+        "worker has no Sweep dispatch arm",
     );
     contract_failure(
         |m| {

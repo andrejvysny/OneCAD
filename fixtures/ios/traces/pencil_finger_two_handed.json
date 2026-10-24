@@ -1,7 +1,7 @@
 {
   "name": "pencil_finger_two_handed",
   "description": "Pencil authors while a finger rests on the canvas and another taps a control.",
-  "context": {"drag_authoring": true, "controls": [[0, 0, 100, 44]]},
+  "context": {"pencil_only_drawing": true, "drag_authoring": true, "controls": [[0, 0, 100, 44]]},
   "steps": [
     {"batch": {"samples": [
       {"contact": 1, "kind": "finger", "phase": "began", "t": 0.0, "x": 300, "y": 300}

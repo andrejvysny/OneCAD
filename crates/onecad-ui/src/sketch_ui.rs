@@ -224,6 +224,41 @@ impl App {
         self.dispatch(onecad_interaction::Action::Cancel);
         self.submit(Command::Sketch(Box::new(Request::Load { id, context })));
     }
+
+    pub(crate) fn new_sketch_on_datum(&mut self, id: onecad_core::ids::DatumPlaneId) {
+        if !self.viewport_ready()
+            || !self.doc.bridge.valid()
+            || self.busy()
+            || self.sketch_active()
+            || crate::viewport_selection::sectioned(self)
+        {
+            self.doc.status =
+                "Finish the current operation and turn off section display before sketching".into();
+            return;
+        }
+        let Some(context) = self.doc.interaction.context.clone() else {
+            return;
+        };
+        let sketch = self
+            .doc
+            .display
+            .as_ref()
+            .and_then(|display| display.projection.datums.get(&id.to_string()))
+            .ok_or_else(|| "Datum plane is no longer available".to_string())
+            .and_then(crate::datum_ui::sketch);
+        match sketch {
+            Ok(sketch) => {
+                self.doc.sketch_entry.dismiss();
+                self.dispatch(onecad_interaction::Action::Cancel);
+                self.sketch_dispatch(SketchAction::Begin {
+                    sketch: Box::new(sketch),
+                    create: true,
+                    context,
+                });
+            }
+            Err(error) => self.doc.status = error,
+        }
+    }
 }
 
 /// Sketch tools are clickable only on an active, bridge-valid session.
@@ -275,6 +310,9 @@ pub fn viewport(
         document,
         capture: view.identity(),
     });
+    if crate::sketch_creation::primitive_drag::viewport(app, ui, rect, view) {
+        return;
+    }
     let Some(session) = app.doc.sketch.session.as_ref() else {
         return;
     };

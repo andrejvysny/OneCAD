@@ -164,8 +164,9 @@ impl DocumentRuntime {
             .commit_sketch_history(id, prepared.direction, after)
             .map_err(|error| op_failed(format!("Sketch history: {error}")))?
             .ok_or_else(|| op_failed("Sketch history: history entry disappeared"))?;
+        let dirty_floor = outcome.dirty_floor;
         let report = self.revert_report(outcome);
-        self.after_mutation();
+        self.after_mutation(dirty_floor);
         if let Some(session) = &mut self.sketch_session {
             session.history_redo = match prepared.direction {
                 HistoryDirection::Undo => redo + 1,

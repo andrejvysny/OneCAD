@@ -18,6 +18,8 @@ use onecad_scene::{DVec2, ViewSnapshot};
 pub(crate) mod chain_input;
 #[path = "sketch_creation_feedback.rs"]
 mod feedback;
+#[path = "sketch_primitive_drag.rs"]
+pub(crate) mod primitive_drag;
 pub(crate) use feedback::anchors as paint_anchors;
 
 #[derive(Clone)]
@@ -109,28 +111,15 @@ fn winning_snap(
         .ctx()
         .data(|data| data.get_temp::<CachedSnap>(cache))
         .filter(|previous| previous.current(session));
-    let snap = optional_snaps(app.ui.sketch_snap, ui.input(|input| input.modifiers))
-        .then(|| {
-            resolve_snap(&SnapRequest {
-                sketch: &session.authoritative,
-                plane: session.plane,
-                view,
-                rect,
-                pointer: position,
-                anchor: session.draft.as_ref().map(snap_anchor),
-                previous: previous.as_ref().map(|previous| &previous.snap),
-                generation: session.request.sequence,
-                settings: SnapSettings {
-                    grid_step: app.ui.sketch_grid_snap.then(|| {
-                        f64::from(onecad_render::grid_step(
-                            view.camera().offset.length() as f32
-                        ))
-                    }),
-                    ..Default::default()
-                },
-            })
-        })
-        .flatten();
+    let snap = snap_at(
+        app,
+        ui,
+        rect,
+        view,
+        position,
+        session.draft.as_ref().map(snap_anchor),
+        previous.as_ref().map(|previous| &previous.snap),
+    );
     ui.ctx().data_mut(|data| {
         data.remove::<CachedSnap>(cache);
         if let Some(snap) = snap {
@@ -146,6 +135,40 @@ fn winning_snap(
         }
     });
     snap
+}
+
+fn snap_at(
+    app: &App,
+    ui: &Ui,
+    rect: Rect,
+    view: &ViewSnapshot,
+    position: egui::Pos2,
+    anchor: Option<(onecad_core::math::Vec2, Option<SketchTarget>)>,
+    previous: Option<&AcceptedSnap>,
+) -> Option<AcceptedSnap> {
+    let session = app.doc.sketch.session.as_ref()?;
+    optional_snaps(app.ui.sketch_snap, ui.input(|input| input.modifiers))
+        .then(|| {
+            resolve_snap(&SnapRequest {
+                sketch: &session.authoritative,
+                plane: session.plane,
+                view,
+                rect,
+                pointer: position,
+                anchor,
+                previous,
+                generation: session.request.sequence,
+                settings: SnapSettings {
+                    grid_step: app.ui.sketch_grid_snap.then(|| {
+                        f64::from(onecad_render::grid_step(
+                            view.camera().offset.length() as f32
+                        ))
+                    }),
+                    ..Default::default()
+                },
+            })
+        })
+        .flatten()
 }
 
 pub(crate) fn snap_anchor(

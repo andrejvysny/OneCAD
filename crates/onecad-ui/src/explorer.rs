@@ -157,7 +157,23 @@ fn tree(app: &mut App, ui: &mut Ui) {
             ui.add(SectionLabel::new("DATUMS"));
             for datum in display.projection.datums.values() {
                 if matches(&filter, &datum.name) {
-                    ui.add(TreeRow::new("datum", &datum.name));
+                    let enabled = datum.resolved_valid
+                        && app.viewport_ready()
+                        && app.doc.bridge.valid()
+                        && !app.busy()
+                        && !app.sketch_active();
+                    let response = ui.add(TreeRow::new("datum", &datum.name).enabled(enabled));
+                    if response.double_clicked()
+                        && enabled
+                        && let Ok(id) = datum.id.parse()
+                    {
+                        app.new_sketch_on_datum(id);
+                    }
+                    response.on_hover_text(if datum.resolved_valid {
+                        "Double-click to create a sketch on this datum"
+                    } else {
+                        "Datum frame is unresolved"
+                    });
                 }
             }
         });

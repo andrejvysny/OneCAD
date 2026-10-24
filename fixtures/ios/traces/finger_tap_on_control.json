@@ -1,7 +1,7 @@
 {
   "name": "finger_tap_on_control",
-  "description": "Finger taps a control (Control owner), then a canvas tap (Tap owner).",
-  "context": {"controls": [[0, 0, 100, 44]]},
+  "description": "Generic nonstrict routing: a finger taps a control, then the canvas. iOS uses strict Pencil-only canvas routing.",
+  "context": {"pencil_only_drawing": false, "controls": [[0, 0, 100, 44]]},
   "steps": [
     {"batch": {"samples": [
       {"contact": 1, "kind": "finger", "phase": "began", "t": 0.0, "x": 40, "y": 20}

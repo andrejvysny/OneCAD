@@ -156,6 +156,10 @@ add_executable(test_preview_op test_preview_op.cpp)
 target_link_libraries(test_preview_op PRIVATE worker_core)
 add_test(NAME preview_op COMMAND test_preview_op)
 
+add_executable(test_loft test_loft.cpp)
+target_link_libraries(test_loft PRIVATE worker_core)
+add_test(NAME loft COMMAND test_loft)
+
 # --- ONECAD-369: full-replay edit preview (SCHEMA §7.6 PreviewPlan) — the
 #     "publishes nothing" invariant, the read-only fence, mesh scope and budget. ---
 add_executable(test_preview_plan test_preview_plan.cpp)
@@ -713,6 +717,12 @@ endforeach()
 # interop contract. Referenced by absolute path (sibling protocol/ dir).
 # ---------------------------------------------------------------------------
 set(PROTOCOL_FIXTURES ${CMAKE_CURRENT_SOURCE_DIR}/../../protocol/fixtures)
+add_test(NAME canonical_loft_basic COMMAND worker_harness
+    --worker $<TARGET_FILE:onecad-worker>
+    --fixture ${PROTOCOL_FIXTURES}/loft_basic.ndjson)
+add_test(NAME canonical_loft_refusal COMMAND worker_harness
+    --worker $<TARGET_FILE:onecad-worker>
+    --fixture ${PROTOCOL_FIXTURES}/loft_refusal.ndjson)
 add_test(
     NAME canonical_hello
     COMMAND worker_harness

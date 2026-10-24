@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Per-frame routing input, computed from the previous host frame.
 pub struct RouteContext<'a> {
-    /// `UIPencilInteraction.prefersPencilOnlyDrawing`: a dragged finger never
-    /// authors (it orbits); taps and controls are unchanged.
+    /// When true, canvas fingers never author or synthesize taps; drags orbit.
+    /// Controls and precise Pencil/indirect-pointer contacts remain usable.
     pub pencil_only_drawing: bool,
     /// A sketch tool, handle or parameter drag can use a dragged pointer.
     pub drag_authoring: bool,
@@ -21,7 +21,7 @@ pub struct RouteContext<'a> {
 }
 
 impl RouteContext<'_> {
-    /// Everything is canvas; fingers navigate.
+    /// Generic canvas routing: fingers orbit and tap. Hosts may require Pencil.
     pub const CANVAS: RouteContext<'static> = RouteContext {
         pencil_only_drawing: false,
         drag_authoring: false,

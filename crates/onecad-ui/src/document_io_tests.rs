@@ -6,6 +6,9 @@ use crate::{
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[path = "desktop_document_io_tests.rs"]
+mod desktop_tests;
+
 #[derive(Default)]
 struct Events {
     mailbox: Arc<EventMailbox>,
@@ -130,6 +133,14 @@ async fn insert_step_routes_into_the_active_document_without_replacing_it() {
 }
 
 async fn backend(root: &Path) -> (Backend, Arc<Events>) {
+    let paths = crate::qa::QaPaths::from_args(
+        ["--qa-root".into(), root.join("qa").into_os_string()].into_iter(),
+    )
+    .unwrap();
+    backend_at(paths).await
+}
+
+async fn backend_at(paths: crate::qa::QaPaths) -> (Backend, Arc<Events>) {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = instance.request_adapter(&Default::default()).await.unwrap();
     let (device, queue) = adapter
@@ -141,10 +152,6 @@ async fn backend(root: &Path) -> (Backend, Arc<Events>) {
         .unwrap();
     let renderer =
         onecad_render::Renderer::new(&device, &queue, [0, 0], Default::default()).unwrap();
-    let paths = crate::qa::QaPaths::from_args(
-        ["--qa-root".into(), root.join("qa").into_os_string()].into_iter(),
-    )
-    .unwrap();
     let events = Arc::new(Events::default());
     let host = HostContext {
         paths: HostPaths {

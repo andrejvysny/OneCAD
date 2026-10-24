@@ -162,7 +162,9 @@ pub(crate) fn staging(app: &App) -> bool {
 /// Picking needs no tool, or a tool that feeds operand stages. A selection
 /// already sent for staging stays as staged until its tool begins.
 pub(crate) fn allowed(app: &App) -> bool {
-    app.doc.interaction.tool.is_none() && !crate::operation_start::pending(app) || staging(app)
+    app.doc.interaction.tool.is_none() && !crate::operation_start::pending(app)
+        || staging(app)
+        || crate::loft_ui::picking(app)
 }
 
 pub(crate) fn policy(app: &App) -> onecad_scene::PickPolicy {
@@ -248,6 +250,16 @@ pub(crate) fn pick_with_tolerance(
         })
     });
     let mode = additive(app.ui.additive_select, mode, item.is_some(), whole_body);
+    if crate::loft_ui::picking(app)
+        && item
+            .as_ref()
+            .is_some_and(|item| !matches!(item, SelectionItem::Profile(_)))
+    {
+        app.doc.status =
+            "Loft takes finalized closed sketch profiles; faces, edges and points are unsupported"
+                .into();
+        return;
+    }
     if staging(app) {
         // A miss never clears staged operands.
         if let Some(item) = item {

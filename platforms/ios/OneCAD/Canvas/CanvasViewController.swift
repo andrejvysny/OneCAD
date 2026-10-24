@@ -17,6 +17,7 @@ final class CanvasViewController: UIViewController {
     private var hostRequests: HostRequestCoordinator?
     private var surfaceAttached = false
     private var reportedKernelTerminal = false
+    private var editorDarkAppearance: Bool?
 
     init(bridge: RustBridge) {
         self.bridge = bridge
@@ -26,6 +27,18 @@ final class CanvasViewController: UIViewController {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is not supported")
+    }
+
+    override var preferredStatusBarStyle: UIStatusBarStyle {
+        guard let dark = editorDarkAppearance else { return .default }
+        return dark ? .lightContent : .darkContent
+    }
+
+    private func applyEditorAppearance(_ flags: UInt32) {
+        let dark = flags & ONECAD_IOS_FRAME_DARK_APPEARANCE != 0
+        guard editorDarkAppearance != dark else { return }
+        editorDarkAppearance = dark
+        setNeedsStatusBarAppearanceUpdate()
     }
 
     override func loadView() {
@@ -145,6 +158,7 @@ final class CanvasViewController: UIViewController {
         let (status, result) = bridge.frame(time: CACurrentMediaTime())
         // PANIC/TERMINAL are latched by the bridge, which swaps in the error view.
         guard status == ONECAD_IOS_OK else { return }
+        applyEditorAppearance(result.flags)
         frameLoop?.scheduleRepaint(after: result.repaint_after_s)
         if result.flags & ONECAD_IOS_FRAME_REDRAW_REQUESTED != 0 { requestFrame() }
         textInput?.apply(result)

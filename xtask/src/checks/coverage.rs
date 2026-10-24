@@ -20,7 +20,7 @@ const REQUIRED: &[&str] = &[
 const LANES: &[(&str, &[&str])] = &[
     ("cppTest", &["worker-8-0-1", "linux-worker", "s3-worker"]),
     ("rustRealWorkerTest", &["rust-8-0-1"]),
-    ("frontendTest", &["frontend"]),
+    ("frontendTest", &["rust-8-0-1", "native-host-lifecycle"]),
     ("playwrightTest", &["e2e-chromium", "e2e-webkit"]),
     ("kernelbenchSuite", &["linux-kernelbench", "s4-kernelbench"]),
 ];
@@ -53,11 +53,13 @@ pub(super) fn validate(root: &Path, manifest: &Value) -> Result<(usize, usize, u
         "expected a nonOperationRows array (rows that are deliberately not KnownOperations)",
     )?;
     let mut errors = Vec::new();
-    let mut jobs = workflow_jobs(&read(root, ".github/workflows/ci.yml")?)?;
-    jobs.extend(workflow_jobs(&read(
-        root,
-        ".github/workflows/self-hosted.yml",
-    )?)?);
+    let mut jobs = BTreeSet::new();
+    for workflow in ["ci.yml", "self-hosted.yml", "native-renderer.yml"] {
+        jobs.extend(workflow_jobs(&read(
+            root,
+            &format!(".github/workflows/{workflow}"),
+        )?)?);
+    }
     if jobs.is_empty() {
         errors.push(
             "no CI jobs parsed from .github/workflows — refusing to validate vacuously".to_owned(),
@@ -134,8 +136,10 @@ fn check_row(
         if list(string(row, "rustRealWorkerTest")).is_empty() {
             errors.push(format!("{where_} lacks a real-worker lane"));
         }
-        if list(string(row, "playwrightTest")).is_empty() {
-            errors.push(format!("{where_} lacks a browser lane"));
+        if list(string(row, "playwrightTest")).is_empty()
+            && list(string(row, "frontendTest")).is_empty()
+        {
+            errors.push(format!("{where_} lacks a native UI or browser lane"));
         }
     }
     if exposure == "hidden" && !list(string(row, "playwrightTest")).is_empty() {
@@ -155,6 +159,7 @@ fn check_row(
             }
         }
     }
+    check_native_ui_paths(row, &where_, errors);
     let named = list(string(row, "ciJob"));
     for job in &named {
         if !jobs.contains(*job) {
@@ -168,6 +173,28 @@ fn check_row(
             errors.push(format!(
                 "{where_} cites {lane} but names no job that runs it (expected one of {})",
                 owners.join(", ")
+            ));
+        }
+    }
+}
+
+fn check_native_ui_paths(row: &Value, where_: &str, errors: &mut Vec<String>) {
+    // Native host unit tests run in both the full workspace and native-host jobs.
+    // Backend tests cannot substitute for an exposed command's UI evidence.
+    for path in list(string(row, "frontendTest")) {
+        let native = Path::new(path)
+            .strip_prefix("crates/onecad-ui/src")
+            .is_ok_and(|relative| {
+                relative
+                    .extension()
+                    .is_some_and(|extension| extension == "rs")
+                    && relative
+                        .components()
+                        .all(|component| matches!(component, std::path::Component::Normal(_)))
+            });
+        if !native {
+            errors.push(format!(
+                "{where_} frontendTest must name native host Rust tests under crates/onecad-ui/src: {path}"
             ));
         }
     }

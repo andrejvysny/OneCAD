@@ -70,6 +70,8 @@ use multi-select or the selection modifier.
 |---|---|---|
 | Extrude | Closed sketch profile | Distance, symmetric or through-all extent; draft for blind extent; new/add/cut/intersect and target body |
 | Revolve | Profile containing a sketch line, or profile plus body edge | Sketch-line axis chooser, angle, new/add/cut/intersect and target |
+| Loft | 2–32 finalized closed sketch profiles in authored order | Smooth/ruled solid New Body; reorder, remove, add or replace sections |
+| Offset plane | No geometry required | XY/XZ/YZ base and signed offset; creates a frozen datum for sketch support |
 | Fillet / Chamfer | Edges of one body | Radius / equal-leg distance; prepared tangent closure |
 | Offset face | Faces of one body | Signed offset, or radius/diameter for a single cylindrical face; prepared face closure |
 | Shell | Faces to remove from one body | Wall thickness |
@@ -85,8 +87,8 @@ New candidates use actual worker previews. Create is disabled while expression
 evaluation or preview is pending, invalid or refused. Cancel must leave no
 document edit. A changed option invalidates the previous preview, and an obsolete
 worker answer must never re-enable Create. Edit a saved feature through its
-history row; existing-feature edits currently report preview unavailable and
-regenerate on Apply. They do not have rollback-prefix preview integration yet.
+history row. Existing-feature edits use full-prefix replay preview and rebuild
+downstream features on Apply; previews must leave the authoritative head unchanged.
 
 Qualify these commands on **both** physical hosts: create, change every applicable
 control, cancel, create again, undo/redo, save, quit and reopen. Include compact
@@ -108,8 +110,11 @@ are service/interaction checks, not substitutes for physical host acceptance.
 
 Remaining distinctions to preserve during qualification:
 
-- Sweep and Loft have no worker executor. FeaturePattern preview refuses because
+- Sweep has no worker executor. FeaturePattern preview refuses because
   authoritative source expansion is missing. Their commands remain disabled.
+- Basic Loft accepts closed regions without holes on parallel, distinct planes
+  in forward or reverse offset order. Open curves, point or face sections,
+  guide rails, end conditions and Boolean result modes are explicitly refused.
 - To-face/two-direction extrusion, asymmetric chamfer reference-face picking,
   total-wall face offsets and multipoint/threaded hole
   authoring still require additional operand/mode controls. Existing supported
@@ -120,9 +125,35 @@ Remaining distinctions to preserve during qualification:
   preview and committed geometry but an ambiguous split-face repair report.
   Treat that as NeedsRepair; do not report a clean success or weaken reference
   scoring. Shell-before-hole on the solid plate is the basic acceptance case.
-- Library component placement/detachment, standalone draft, datum tooling and
+- Library component placement/detachment, standalone draft, advanced datum tooling and
   extension commands are separate workflows; adding a catalog label does not
   establish that they execute.
+
+## Basic Loft qualification
+
+Create offset planes from XY at 0, 10 and 20 mm. Choose each resolved datum in
+the Sketch support chooser (or double-click its Explorer row), create a fully
+constrained circle, and Finish. Use radii 5, 8 and 5 mm respectively. Enable
+multi-select and pick the three finalized profile fills in section order, then
+choose Loft. Verify smooth preview, Cancel without a history edit, and creation
+of one body. Source sketches remain visible for subsequent section selection.
+
+Edit Loft in History. Enable Ruled and verify volume 860π mm³. Reverse the section
+order and verify the same solid volume; a nonmonotone order must refuse. Verify
+section replacement/addition/removal invalidates the previous preview. Change the
+middle sketch radius to 9 mm and verify downstream regeneration. Create a centered
+Ø2 mm through-hole from the planar top face; its volume reduction is 20π mm³.
+Undo/redo, save, quit and reopen; verify section order, identities, dimensions and
+the downstream hole. Invalid section choices must not mutate the committed model.
+After reopening, select Loft in History and edit its Ruled choice again. Verify
+Edit remains available for choice-only operations (Loft, Boolean and Mirror),
+and that Apply preserves later features. Display capture must retain all
+budget-admitted history records, including those without numeric fields.
+
+`cargo test -p onecad-app --test loft_ops` with required real-worker settings
+checks this lifecycle through shared services. `cargo test -p onecad-ui --lib
+loft_ui::tests::` checks section-control input and selection fencing. These checks
+do not replace native mouse, touch or Pencil qualification.
 
 ## From-New plate semantic checks
 

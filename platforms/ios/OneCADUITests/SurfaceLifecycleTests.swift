@@ -10,7 +10,13 @@ final class SurfaceLifecycleTests: XCTestCase {
     }
 
     override func tearDown() async throws {
-        XCUIDevice.shared.orientation = .portrait
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let canvas = XCUIApplication().element(id: OneCADID.canvas)
+        let landscape = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            MainActor.assumeIsolated { canvas.exists && canvas.frame.width > canvas.frame.height }
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter().wait(for: [landscape], timeout: 20), .completed,
+                       "canvas did not restore landscape after surface lifecycle coverage")
     }
 
     func testViewportReturnsAfterRotationAndBackgrounding() {
@@ -52,7 +58,7 @@ final class SurfaceLifecycleTests: XCTestCase {
     }
 
     private func attachScreenshot(_ app: XCUIApplication, _ name: String) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
+        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)

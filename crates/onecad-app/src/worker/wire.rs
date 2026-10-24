@@ -56,6 +56,10 @@ use crate::dto::{
 
 use super::{lod_from_str, lod_str, StepInspection};
 
+#[cfg(test)]
+#[path = "wire_loft_tests.rs"]
+mod loft_tests;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // BodyId ↔ wire (`body_<opId>`)
 // ─────────────────────────────────────────────────────────────────────────────

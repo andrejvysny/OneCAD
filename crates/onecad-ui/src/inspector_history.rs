@@ -68,6 +68,7 @@ fn feature_row(
         ui.label(format!("{} · {}", feature.op_type, feature.value_text));
         edit_button(app, ui);
     }
+    crate::input_repair_ui::button(app, ui, display, index, feature);
     crate::feature_card::history_editor(app, ui, &feature.id);
     if let Some(message) = &feature.status_message {
         ui.colored_label(app.theme.traffic_close, message);

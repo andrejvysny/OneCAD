@@ -85,17 +85,31 @@ follows its role (button, static text or other).
 | `OneCADNativeTests/TestHookPingTests/testPingThroughTestCommand` | native | class 3 |
 | `OneCADUITests/LaunchTests/testLaunchShowsCanvasAndFileMenu` | UI | class 4 |
 | `OneCADUITests/OrientationTests/testRotationKeepsAppResponsive` | UI | class 4 |
-| `OneCADUITests/RequiredWorkflowTests/testPlateWithHoleEditUndoSaveReopen` | UI | class 4, IP18/IP21 required workflow |
+| `OneCADUITests/RequiredWorkflowTests/testPencilOnlyCanvasWithNumericControlsHistoryUndoSaveReopen` | UI | class 4, public numeric controls, history, undo/redo and file workflow |
 
 ### Synthetic Pencil modeling
 
 `PencilModelingTests/testSyntheticPencilStrokeRectangleExtrudeAndHistoryInLandscape`
-requires the actual canvas to be landscape. Confirmed `kind: pencil` samples
-traverse the production normalizer/router with pressure and hover absent. Public
+requests landscape through the canvas's `UIWindowScene.requestGeometryUpdate`,
+propagates rotation errors, and waits for the scene orientation and stable actual
+landscape viewport before delivery. Teardown restores the prior supported scene
+orientation.
+
+In windowing modes that reject programmatic orientation, rotate the dedicated
+simulator to landscape through Device > Rotate Left before the native target.
+The test avoids an unnecessary request only when both the actual scene
+orientation and canvas are already landscape; it still requires a stable
+landscape viewport. The dedicated UI orientation test still exercises all four
+rotations and restores an actual landscape canvas in teardown.
+
+Confirmed `kind: pencil` samples traverse the production normalizer/router with
+pressure and hover absent. Public
 controls choose Pencil Stroke, Rectangle and Extrude; semantic commands only
 observe accepted geometry and seal evidence. The test accepts a continuous
-straight stroke (three entities), undoes it, completes a rectangle with two
-Pencil taps, then drags the extrude distance handle with Pencil samples and
+straight stroke (three entities), undoes it, then drags Circle and Line. Each
+keeps zero authoritative entities/history changes before lift, commits exactly
+two or three entities after lift, and returns to zero with one Undo. It completes a rectangle with a
+Pencil press-drag-lift, then drags the extrude distance handle with Pencil samples and
 commits. It checks draft-only history before commit, live solid volume/bounds,
 and model Undo/Redo. `acceptance/<run-id>/pencil-modeling.trace` records synthetic
 input and summaries. Visual evidence is captured separately: hosted native XCTest
@@ -107,85 +121,131 @@ hover, prediction appearance or haptic qualification.
 The exact Acceptance inventory includes this test, the six native text-session
 tests and six document-inbox tests. No skip allowance is added for them.
 
-## Required workflow (`RequiredWorkflowTests`)
+## Required public workflows (`RequiredWorkflowTests`)
 
-One test drives the real app (embedded OCCT/PlaneGCS kernel) through public
-XCUITest only: element and coordinate taps, the system software keyboard for
-egui fields, `typeText` for the native save prompt, `terminate`/`launch`.
-Each step keeps a screenshot attachment named after it.
+These two tests use public XCUITest only (evidence class 4): finger controls,
+keyboard keys, Files pickers, native prompts, and process termination/relaunch.
+They do not synthesize Pencil input or call app test hooks. Canvas authoring and
+picking require Pencil or an external pointer; fingers operate controls and
+navigation. The former finger-authored plate workflow is superseded by that
+policy, not retained as Pencil evidence.
 
-| Step | Actions | Asserted UI state |
-|---|---|---|
-| `01-new-document` | Start page (discarding any recovery prompt a killed run left), New part | viewport, Sketch tool, no body |
-| `02-sketch-on-xy` | Sketch, tap the XY quad below the origin | plane chooser, then Finish; `Sketch · Fully constrained`, `Entities: 0` |
-| `03-rectangle-60x40` | Rectangle, tap the origin, Numeric input, `60` Tab `40` Return | `Distance (mm): 60` and `40`, `Fixed`, `Entities: 8`, `Constraints: 7`, fully constrained |
-| `04-finish-sketch` | Finish | `1 closed region(s) returned` |
-| `05-extrude-4mm` | tap the profile, Extrude, distance `4`, Create | `Solve: 0 degrees of freedom`, `Body 1`, history `Sketch, Extrude` |
-| `06-hole-sketch-on-top-face` | Sketch on the top face; Point numeric X `30` Y `20`; Circle snapped to the point, Ø `6`; Finish; tap the disk | H/V distances 30/20, `Coincident`, `Diameter (mm): 6`, fully constrained; `2 closed region(s) returned`; `Support face: …` |
-| `07-cut-through` | Extrude, Operation Cut, target Body 1, distance `5`, Flip, Create; Home, TOP, Fit all; tap (10, 10), then (33, 20) | Operation shows `Cut`, `Reverse`; history `Sketch, Extrude, Sketch, Extrude`; no `Body 2`; `Health: Healthy`; face at (10, 10), hole rim edge `on Body 1` at (33, 20) |
-| `08-edit-width-70` | History row 1 (Sketch), Edit feature, Edit beside `Distance (mm): 60`, `70` Return, Finish; Home, TOP, Fit all before each pick group; tap (-3, 20), (62, 20), (10, 10), (33, 20) | `Distance (mm): 70`, same four history rows, `Health: Healthy`; regenerated plate: nothing at (-3, 20), face at (62, 20), hole rim still at (33, 20) |
-| `09-undo-redo` | Undo, Undo, Redo; Home, TOP, Fit all before geometry checks | width back to 60 (read in the sketch, then Discard), nothing at (62, 28) beyond the 22 pt finger edge window and clear of the floating tool pill; three rows after the second Undo, four after Redo; through hole: face 100 pt left of the fitted centre, nothing at it |
-| `10-fillet-1mm-preview-commit-undo` | Home/Fit, select one vertical outer edge, Fillet 1 mm, Create, Undo | preview ready, Fillet history and value, one healthy body, restored baseline history |
-| `11-separate-chamfer-1mm-preview-commit-undo` | Select the restored sharp edge, Chamfer 1 mm, Create, Undo | separate Chamfer history and value, one healthy body, restored baseline history |
-| `12-offset-face-preview-cancel-commit-undo` | Select top face, Offset Face 4 mm, Cancel; repeat and Create, Undo | cancel preserves history; side-face picks at z = 6 mm distinguish 8 mm thickness from 4 mm with more than 22 pt edge clearance; Undo restores 4 mm |
-| `13-move-rotate-preview-commit-undo` | Select body, translate (10,5,0) mm and rotate 90°, Create, Undo | TransformBody history; picks distinguish transformed bounds; Undo restores original bounds and through hole |
-| `14-save` | File, Save, name `Plate-<run>` in `onecad.save.name`, Save | prompt dismissed, tab titled with the name |
-| `15-relaunch-and-reopen` | `terminate`, `launch`, open the document from Recent, select History rows 2 and 4, TOP view, Fit all | four history rows, `Extrude · 4.0 mm` and `Extrude · 5.0 mm`, `Body 1` healthy and no `Body 2`, through hole as in step 09, width 60 |
+`testPencilOnlyCanvasWithNumericControlsHistoryUndoSaveReopen` checks:
 
-Preconditions and conventions:
+1. New part, Sketch, stable `onecad.plane.xy`, Rectangle: two finger taps and a drag
+   leave `Entities: 0` and a fully constrained empty sketch.
+2. Point and Numeric input: the public keyboard enters X=30 mm and Y=20 mm.
+   Acknowledged values, the point plus its fixed construction origin (two
+   entities), and exactly three constraints (Fixed, horizontal30, vertical20)
+   prove controls remain usable with fingers. Undo restores zero entities and
+   constraints; Redo restores two entities, three constraints and zero DOF.
+3. Discard that sketch, close its tab, then File > Open through the real Files
+   picker: On My iPad > OneCAD Fixtures > the gate's current Mac-authored plate fixture.
+4. Require exact history labels `Sketch, Plate`, the selected Plate row's
+   `Extrude · 4.0 mm` operation detail, one healthy body, width60 mm,
+   height40 mm and diameter6 mm. Edit the first sketch's width to70 mm through
+   its constraint control, Undo to60, Redo to70, Undo to60.
+5. Save As `Plate-<run>`, terminate, relaunch, reopen from Recent and check the
+   same history, health and exact sketch dimensions.
 
-- iPad Pro 13-inch simulator in portrait (the test sets portrait and fails
-  at once on any other window size than 1032×1376 pt). Canvas taps are
-  sketch millimetres mapped from the viewport centre (the world origin of a
-  new document) with `pointsPerMillimetre` measured for that device's
-  default camera; another device needs a new measurement of it and of the
-  XY quad offset.
-- The software keyboard must appear (simulator "Connect Hardware Keyboard"
-  off). egui fields have no UIKit element with keyboard focus, so `typeText`
-  cannot target them; the test taps keyboard keys, including `tab` and
-  `Done`. The 13-inch keyboard has a `tab` key; smaller iPad layouts were
-  not checked.
-- Geometry is checked through picks in the top view: Properties titles a
-  tap's selection `Face` or `Edge` (subtitle `on Body 1`) or `Nothing
-  selected`. Finger taps select edges within 22 pt
-  (`onecad-ui` `FINGER_EDGE_TOLERANCE_PT`); the default plate is too small
-  for an unambiguous face pick. Geometry checks therefore use public Home,
-  TOP view and Fit all with the source-derived `WorkflowFittedPlateView`
-  projection and the current 60 or 70 mm width. Mouse and Pencil retain
-  the 8 pt aperture. Through-ness is checked after fitting, which centres
-  the 60 × 40 mm plate and its hole in the viewport at ≈ 15 pt/mm.
-  Regeneration and camera animation
-  have no UI completion signal, so a pick sequence is retried a bounded
-  number of times. Volume and bounds stay with the gate's Mac oracle.
-- `Plate-<run>` embeds the full `ONECAD_RUN_ID` (`TEST_RUNNER_ONECAD_RUN_ID`,
-  ASCII letters, digits and `-` kept), else 8 characters of a UUID. The
-  native save prompt only writes `Documents/<name>.onecad` (it strips `/`),
-  so the document is not under `Documents/acceptance/<run-id>/`.
-- Controls are found through `UIRef` (`OneCADUITests/WorkflowSupport.swift`):
-  the stable automation id where the editor defines one
-  (`onecad.tool.<id>`, `onecad.tool.finishSketch`, `onecad.dimension.input`
-  for a chip's or card's first field, `onecad.param.<name>` for the others,
-  `onecad.op.confirm`, `onecad.history.<n>`, `onecad.menu.file.save`), then
-  today's derived `<role>.<label>` id, then the label. Start page, plane
-  chooser, numeric-input toggle, Cut/Flip, explorer rows, inspector tabs,
-  Undo/Redo and Edit feature have no stable id and rely on the derived id
-  or label; the Operation combo and the dimension editor field are found by
-  their value.
-- Sketches are reached through History rows (feature order), not the
-  explorer, which lists sketches in id order (random per document).
-- Modeling checks use Home/Top/Right and Fit with the shared camera projection
-  constants. Sketch XY uses world basis X=(0,1,0), Y=(-1,0,0); the projection
-  helper preserves that basis when locating the plate and its vertical edge.
+`testOpenedPlateSaveAsAndStepExportThroughNativePrompts` opens the same fixture
+through Files, saves as `PromptPlate-<run>`, then exercises Save As defaults,
+case-insensitive extension normalization, overwrite Cancel/Replace, STEP prompt
+Cancel/Save, the native export picker and the completed export's normalized
+path. Relaunch/reopen retains exact `Sketch, Extrude` history and one healthy
+body. The independent Mac oracle checks saved geometry and STEP output.
+
+The fixture is the current gate's Mac-authored 60×40×4 mm plate with centered
+Ø6 mm through hole, fourteen sketch entities, thirteen constraints, zero DOF
+and exact history `Sketch, Extrude`. The public tests open existing geometry;
+from-new Pencil authoring, fillet/chamfer, handle drags, exact geometry and
+model history have separate synthetic native tests and physical acceptance.
+A public workflow pass must not be reported as physical Pencil qualification.
+
+Before these tests, the gate fresh-installs OneCAD and the separate
+simulator-only `OneCADFixtureSource` app on its dedicated simulator. It copies
+the freshly authored Mac fixture into the source app's Documents directory.
+The source exposes that directory through the public Files provider; the
+shipping OneCAD app retains its copy-only document policy. The source target
+has no dependency from OneCAD and is excluded from shipping archives. Record
+the fixture hash/provenance with the gate; never substitute a stale fixture
+or a semantic creation command. After building the source's dedicated scheme:
+
+```sh
+xcrun simctl install "$ONECAD_SIM_UDID" \
+  build/ios-air4-public/Build/Products/Acceptance-iphonesimulator/OneCAD.app
+xcrun simctl install "$ONECAD_SIM_UDID" \
+  "$ONECAD_FIXTURE_DERIVED/Build/Products/Acceptance-iphonesimulator/OneCADFixtureSource.app"
+fixture_data="$(xcrun simctl get_app_container "$ONECAD_SIM_UDID" com.onecad.fixture-source data)"
+mkdir -p "$fixture_data/Documents"
+cp "$ONECAD_MAC_FIXTURE" "$fixture_data/Documents/$ONECAD_PUBLIC_FIXTURE_NAME"
+xcrun simctl launch "$ONECAD_SIM_UDID" com.onecad.fixture-source
+```
+
+Pass `TEST_RUNNER_ONECAD_PUBLIC_FIXTURE_NAME` to Xcode alongside
+`TEST_RUNNER_ONECAD_RUN_ID` and `TEST_RUNNER_ONECAD_MAC_FIXTURE`. It names that
+file, for example `MacInput-<run>.onecad`; it is not an alternate opening path.
+The test still selects the file through the native picker. Both tests keep
+screenshots and attach the actual accessibility tree on failure. Public saved
+files live at `Documents/Plate-<run>.onecad` and
+`Documents/PromptPlate-<run>.onecad`, outside `acceptance/<run>`.
+
+Targets include Air4 (820×1180 pt portrait) and Pro13 (1032×1376 pt portrait);
+source portability does not establish a destination's result. These workflows
+retain the actual window orientation. On the Air4 iPadOS26.5 simulator's current
+windowing mode, forcing portrait after the native landscape test produced
+inconsistent app/keyboard window transforms and offscreen keyboard hit targets.
+Removing that test precondition does not qualify production rotation; dedicated
+`OrientationTests` retain their separate rotation assertions. The finger refusal probe
+uses the actual public viewport and source default-camera projection, refreshed
+after layout. XY support uses its stable identifier, not glyph coordinates.
+
+The software keyboard must appear (simulator Connect Hardware Keyboard off).
+Each field is focused explicitly; no Tab key is assumed on the smaller keyboard.
+The focused virtual field becomes `onecad.keyInputProxy`, a custom UIKit
+`UITextInput` exposing Rust's acknowledged draft, queried by identifier across
+accessibility roles. Other virtual fields and all keyboard keys remain subject
+to hittability checks. The workflow asserts exact acknowledged values, taps
+Done and awaits keyboard dismissal. When a locale presents an alphabet layout,
+the test taps its public `more` key before a digit. A first-use alternate-letter
+tutorial is dismissed only when its exact message appears, using its public
+`OK` button; the requested digit must then be hittable.
+
+Controls use stable automation identifiers where provided, then current derived
+role/label identifiers or public labels. Sketches are reached by History order,
+not Explorer's random sketch-ID order. Canvas picks are absent from these
+public control workflows; the synthetic native helpers explicitly distinguish
+Pencil authoring from finger control/refusal probes.
+
+Constraint-list searches use at most eight finger drags inside the observed
+Edit/Remove content bounds, starting clear of buttons. They require visible row
+movement and tap Edit only when the whole row and button lie inside the capped
+scroll area. Export checks expand the
+Details disclosure belonging to the latest completed Export entry before
+asserting the full normalized filename; the Activity summary truncates long paths.
 
 ## Simulator-authored geometry artifacts
 
 `ModelArtifactTests` authors three independent models through accessibility
 controls and the public touch, key and text ABI. These hosted native tests are
-class 3 evidence; their synthesized finger input is not physical input evidence.
+class 3 evidence; confirmed synthetic Pencil samples are not physical input evidence.
 `ModelDriver` draws a constrained 60 × 40 mm rectangle and centered Ø6 mm circle
 in one sketch, then extrudes 4 mm. Separate cases apply a 1 mm fillet or chamfer
 to one 4 mm vertical outer edge. The tests save `plate`, `plate-fillet` and
 `plate-chamfer` plus matching semantic records for the independent Mac oracle.
+After saving its original baseline, `testPlateArtifact` also picks the top face
+with confirmed synthetic Pencil input, previews/cancels Offset Face4 mm,
+applies it (exact height8 mm and twice the original volume), then undoes it.
+Move / Rotate applies translation(10,5,0) mm and rotation90° about Z through
+public controls, preserving mass and requiring world bounds
+[-40,15,0]..[20,55,4]. Undo restores the original bounds, volume and history.
+These checks preserve the former public operation coverage as explicit native
+input evidence; they do not claim public XCUITest Pencil delivery.
+Native card fields are tapped only after their complete rectangles fit between
+the observed card header and footer, inside the keyboard-safe viewport. Up to
+eight confirmed synthetic finger drags scroll the card's label column; each tap
+uses freshly settled field bounds and surface generation. Scrolling does not
+dismiss the keyboard or submit the operation.
 
 Assertions cover live geometry, exact feature order, one healthy solid,
 analytic volume/extents, fully constrained sketches, saved hashes and run/kernel

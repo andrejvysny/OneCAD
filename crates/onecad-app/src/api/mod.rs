@@ -7,11 +7,16 @@ mod document_items;
 mod document_state;
 mod edit_operands;
 mod edit_preview;
+mod input_repair;
 pub use document_items::{
     delete_document_item, plan_delete_document_item, DeleteTarget, DeletionItem, DeletionPlan,
 };
 pub use edit_operands::{start_edit_operand_context, EditOperandContext, EditOperandRead};
 pub use edit_preview::{preview_existing_edit, EditPreview, EditPreviewOutcome};
+pub use input_repair::{
+    commit_input_repair, input_repair_target, preview_input_repair, repair_preview_ready,
+    stage_input_repair, InputRepair, InputRepairTarget,
+};
 mod import_readiness;
 mod projection_parts;
 use projection_parts::{

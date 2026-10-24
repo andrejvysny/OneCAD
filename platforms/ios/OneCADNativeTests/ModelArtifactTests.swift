@@ -24,9 +24,15 @@ final class ModelArtifactTests: XCTestCase {
 
     func testPlateArtifact() async throws {
         let model = try await start()
-        let summary = try await model.authorPlate()
+        let summary: [String: Any]
+        do { summary = try await model.authorPlate() }
+        catch {
+            model.documents.diagnostic("plate authoring failed: \(error)")
+            throw error
+        }
         try assertModel(summary, operations: ["Sketch", "Extrude"], decrease: nil)
         try await save("plate", model: model)
+        try await exerciseOffsetAndTransform(model, baseline: summary)
     }
 
     func testFilletedPlateArtifact() async throws {
@@ -45,7 +51,45 @@ final class ModelArtifactTests: XCTestCase {
         try await save("plate-chamfer", model: model)
     }
 
-    private func assertModel(_ summary: [String: Any], operations: [String], decrease: Double?) throws {
+    private func exerciseOffsetAndTransform(_ model: ModelDriver, baseline: [String: Any]) async throws {
+        let original = DocumentDriver.document(baseline)
+        let cancelled = try await model.offsetTopFace(cancel: true)
+        try assertModel(cancelled, operations: ["Sketch", "Extrude"], decrease: nil)
+        XCTAssertEqual(DocumentDriver.document(cancelled)["revision"] as? Int, original["revision"] as? Int)
+        XCTAssertEqual(DocumentDriver.document(cancelled)["undoDepth"] as? Int, original["undoDepth"] as? Int)
+        let offset = try await model.offsetTopFace(cancel: false)
+        try assertModel(offset, operations: ["Sketch", "Extrude", "OffsetFace"], decrease: nil,
+                        height: 8, volumeMultiplier: 2)
+        try assertBounds(offset, min: [-40, 0, 0], max: [0, 60, 8])
+        XCTAssertEqual(DocumentDriver.document(offset)["undoDepth"] as? Int,
+                       (original["undoDepth"] as? Int).map { $0 + 1 })
+        try assertModel(try await model.undoModelOperation(), operations: ["Sketch", "Extrude"], decrease: nil)
+        let transformed = try await model.transformBody()
+        try assertModel(transformed, operations: ["Sketch", "Extrude", "TransformBody"], decrease: nil)
+        try assertBounds(transformed, min: [-40, 15, 0], max: [20, 55, 4])
+        XCTAssertEqual(DocumentDriver.document(transformed)["undoDepth"] as? Int,
+                       (original["undoDepth"] as? Int).map { $0 + 1 })
+        let restored = try await model.undoModelOperation()
+        try assertModel(restored, operations: ["Sketch", "Extrude"], decrease: nil)
+        try assertBounds(restored, min: [-40, 0, 0], max: [0, 60, 4])
+        XCTAssertEqual(DocumentDriver.document(restored)["undoDepth"] as? Int, original["undoDepth"] as? Int)
+    }
+
+    private func assertBounds(_ summary: [String: Any], min expectedMin: [Double], max expectedMax: [Double]) throws {
+        let body = try XCTUnwrap((summary["bodies"] as? [[String: Any]])?.first)
+        let min = try XCTUnwrap(body["min"] as? [Double])
+        let max = try XCTUnwrap(body["max"] as? [Double])
+        XCTAssertEqual(min.count, 3)
+        XCTAssertEqual(max.count, 3)
+        guard min.count == 3, max.count == 3 else { return }
+        for axis in 0..<3 {
+            XCTAssertEqual(min[axis], expectedMin[axis], accuracy: 1e-5)
+            XCTAssertEqual(max[axis], expectedMax[axis], accuracy: 1e-5)
+        }
+    }
+
+    private func assertModel(_ summary: [String: Any], operations: [String], decrease: Double?,
+                             height: Double = 4, volumeMultiplier: Double = 1) throws {
         XCTAssertEqual(DocumentDriver.features(summary), operations)
         XCTAssertEqual(DocumentDriver.document(summary)["geometrySource"] as? String, "live")
         let features = try XCTUnwrap(summary["features"] as? [[String: Any]])
@@ -61,9 +105,9 @@ final class ModelArtifactTests: XCTestCase {
             XCTAssertLessThan(volume, plateVolume)
             XCTAssertEqual(plateVolume - volume, decrease, accuracy: decrease * 1e-4)
         } else {
-            XCTAssertEqual(volume, plateVolume, accuracy: plateVolume * 1e-6)
+            XCTAssertEqual(volume, plateVolume * volumeMultiplier, accuracy: plateVolume * volumeMultiplier * 1e-6)
         }
-        try assertExtents(body)
+        try assertExtents(body, height: height)
         let sketches = try XCTUnwrap(summary["sketches"] as? [[String: Any]])
         XCTAssertEqual(sketches.count, 1)
         let sketch = try XCTUnwrap(sketches.first)
@@ -73,7 +117,7 @@ final class ModelArtifactTests: XCTestCase {
         XCTAssertEqual(sketch["constraints"] as? Int, 12)
     }
 
-    private func assertExtents(_ body: [String: Any]) throws {
+    private func assertExtents(_ body: [String: Any], height: Double) throws {
         let min = try XCTUnwrap(body["min"] as? [Double])
         let max = try XCTUnwrap(body["max"] as? [Double])
         XCTAssertEqual(min.count, 3)
@@ -85,7 +129,7 @@ final class ModelArtifactTests: XCTestCase {
             XCTAssertEqual(xy[axis], expected, accuracy: 1e-7 + 1e-9 * expected + rounding)
         }
         let rounding = Double(Float(min[2]).ulp + Float(max[2]).ulp) / 2
-        XCTAssertEqual(max[2] - min[2], 4, accuracy: 1e-7 + 4e-9 + rounding)
+        XCTAssertEqual(max[2] - min[2], height, accuracy: 1e-7 + height * 1e-9 + rounding)
     }
 
     private func save(_ name: String, model: ModelDriver) async throws {

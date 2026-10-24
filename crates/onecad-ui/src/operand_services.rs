@@ -10,6 +10,12 @@ use tokio::sync::OwnedSemaphorePermit;
 
 #[derive(Debug)]
 pub enum Request {
+    InputRepair {
+        context: DocumentContext,
+        record: onecad_core::ids::RecordId,
+        pick: api::StagePick,
+        sender: mpsc::Sender<Result<api::InputRepair, String>>,
+    },
     EditContext {
         context: DocumentContext,
         record: onecad_core::ids::RecordId,
@@ -43,6 +49,20 @@ pub enum Request {
 pub(crate) async fn execute(backend: &Backend, request: Request, permit: OwnedSemaphorePermit) {
     let state = &backend.state;
     match request {
+        Request::InputRepair {
+            context,
+            record,
+            pick,
+            sender,
+        } => {
+            let result = match scope(state, &context).await {
+                Ok(fence) => api::stage_input_repair(state, fence, record, pick)
+                    .await
+                    .map_err(|error| error.to_string()),
+                Err(error) => Err(error),
+            };
+            let _ = sender.send(result);
+        }
         Request::EditContext {
             context,
             record,

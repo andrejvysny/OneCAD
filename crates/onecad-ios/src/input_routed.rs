@@ -12,6 +12,16 @@ fn pos(point: Point) -> Pos2 {
     Pos2::new(point.x as f32, point.y as f32)
 }
 
+fn touch(contact: u64, phase: TouchPhase, pos: Pos2) -> Event {
+    Event::Touch {
+        device_id: egui::TouchDeviceId(0),
+        id: egui::TouchId(contact),
+        phase,
+        pos,
+        force: None,
+    }
+}
+
 impl Input {
     pub(super) fn apply_all(&mut self, events: Vec<RoutedEvent>) {
         for event in events {
@@ -24,10 +34,11 @@ impl Input {
             RoutedEvent::Press {
                 contact,
                 kind,
+                owner,
                 position,
                 tap_count,
                 ..
-            } => self.press(contact, kind, pos(position), tap_count),
+            } => self.press(contact, kind, owner, pos(position), tap_count),
             RoutedEvent::Move {
                 contact, position, ..
             } => self.drag(contact, pos(position)),
@@ -84,19 +95,24 @@ impl Input {
 
     /// A Pencil tip's second tap (`tap_count` 2) promotes like a double click
     /// even when egui's click timing disagrees (INPUT.md).
-    fn press(&mut self, contact: u64, kind: ContactKind, at: Pos2, tap_count: u32) {
+    fn press(&mut self, contact: u64, kind: ContactKind, owner: Owner, at: Pos2, tap_count: u32) {
         // The router hands out one pointer at a time; never leave one pressed.
         self.cancel_pointer();
         self.contact_epoch = self.contact_epoch.wrapping_add(1);
         self.pointer = Some(Pointer {
             contact,
+            kind,
+            control_touch: kind == ContactKind::Finger && owner == Owner::Control,
             last: at,
             delivered: false,
         });
         self.gone = Gone::Idle;
         self.hovering = false;
-        self.pointer_kind = Some(kind);
+        self.mark_pointer_kind(kind);
         self.pencil_double_tap = Some(kind == ContactKind::Pencil && tap_count >= 2);
+        if self.pointer.is_some_and(|pointer| pointer.control_touch) {
+            self.push_owned(touch(contact, TouchPhase::Start, at), false);
+        }
         self.push_owned(Event::PointerMoved(at), false);
         self.push_owned(self.button(at, true), false);
     }
@@ -108,6 +124,12 @@ impl Input {
             && pointer.last != at
         {
             pointer.last = at;
+            let kind = pointer.kind;
+            let control_touch = pointer.control_touch;
+            self.mark_pointer_kind(kind);
+            if control_touch {
+                self.push_owned(touch(contact, TouchPhase::Move, at), true);
+            }
             self.push_owned(Event::PointerMoved(at), true);
         }
     }
@@ -118,6 +140,10 @@ impl Input {
             .is_none_or(|pointer| pointer.contact != contact)
         {
             return;
+        }
+        self.mark_pointer_kind(kind);
+        if self.pointer.is_some_and(|pointer| pointer.control_touch) {
+            self.push_owned(touch(contact, TouchPhase::End, at), false);
         }
         self.push_owned(Event::PointerMoved(at), false);
         self.push_owned(self.button(at, false), false);
@@ -135,8 +161,13 @@ impl Input {
         }
         self.hovering = true;
         self.gone = Gone::Idle;
-        self.pointer_kind = Some(kind);
+        self.mark_pointer_kind(kind);
         self.push(Event::PointerMoved(at), true);
+    }
+
+    fn mark_pointer_kind(&mut self, kind: ContactKind) {
+        self.pointer_kind_conflict |= self.pointer_kind.is_some_and(|prior| prior != kind);
+        self.pointer_kind = Some(kind);
     }
 
     /// The editor orbits on a Shift trackpad wheel over the hovered canvas; a
@@ -204,9 +235,24 @@ impl Input {
         self.predictions.remove(&pointer.contact);
         self.pending
             .retain(|item| item.contact != Some(pointer.contact));
+        if !self.pending.iter().any(|item| {
+            matches!(
+                item.event,
+                Event::PointerMoved(_) | Event::PointerButton { .. }
+            )
+        }) {
+            self.pointer_kind = None;
+            self.pointer_kind_conflict = false;
+        }
         self.navigation_tail = None;
         self.orbit_tail = None;
         if pointer.delivered {
+            if pointer.control_touch {
+                self.push(
+                    touch(pointer.contact, TouchPhase::Cancel, pointer.last),
+                    false,
+                );
+            }
             self.forget_pointer = true;
             self.push(Event::PointerGone, false);
         }

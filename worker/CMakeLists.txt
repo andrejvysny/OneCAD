@@ -158,6 +158,7 @@ add_library(worker_core STATIC
     src/ops/BooleanParticipation.cpp
     # --- W-WP6: new OCCT ops (Revolve / Fillet / Chamfer) + STEP IO ---
     src/ops/RevolveOp.cpp
+    src/ops/LoftOp.cpp
     src/ops/FilletChamferOp.cpp
     # --- M6a: breadth ops (Shell / Linear+Circular pattern / MirrorBody) ---
     src/ops/ShellOp.cpp

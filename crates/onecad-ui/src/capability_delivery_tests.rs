@@ -1,6 +1,7 @@
 //! Production dispatch guards; this synthetic host test does not qualify physical input.
 use super::*;
 use crate::tool_registry::ToolId;
+use onecad_core::document::record::{KnownOperation, Operation};
 use onecad_interaction::sketch::{SketchPhase, SketchTool};
 
 #[tokio::test]
@@ -26,7 +27,10 @@ async fn restored_controls_use_real_context_and_do_not_enable_mock_actions() {
             continue;
         }
         crate::pill::activate(&mut app, &context, tool.id);
+        cancel_supported_model_start(&mut app, tool.id);
         assert!(app.doc.interaction.tool.is_none(), "{:?}", tool.id);
+        assert!(!app.doc.sketch_entry.open, "{:?}", tool.id);
+        assert!(app.doc.sketch_entry.pending.is_none(), "{:?}", tool.id);
         assert!(!app.ui.editor_facade.library_mode, "{:?}", tool.id);
         assert!(app.ui.editor_facade.active_tool.is_none(), "{:?}", tool.id);
         assert!(!app.ui.editor_facade.topology_failed, "{:?}", tool.id);
@@ -62,4 +66,27 @@ async fn restored_controls_use_real_context_and_do_not_enable_mock_actions() {
     }
     app.stop_discard();
     pump_until(&mut app, &context, &mut frame, |app| app.may_close).await;
+}
+
+fn cancel_supported_model_start(app: &mut App, id: ToolId) {
+    match id {
+        ToolId::Generators => {
+            assert!(
+                app.doc.interaction.tool.as_ref().is_some_and(|tool| {
+                    matches!(tool.record.op, Operation::Known(KnownOperation::Gear(_)))
+                }),
+                "Generators must start an actual Gear draft"
+            );
+            crate::pill::cancel_tool(app);
+        }
+        ToolId::DatumPlane | ToolId::OffsetPlane => {
+            assert!(
+                app.doc.sketch_entry.open,
+                "{id:?} must open the offset-plane chooser"
+            );
+            assert!(app.doc.sketch_entry.pending.is_none());
+            app.doc.sketch_entry.dismiss();
+        }
+        _ => {}
+    }
 }

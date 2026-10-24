@@ -97,7 +97,7 @@ pub(crate) fn faces_ready(app: &App) -> bool {
 
 /// A staging request is in flight; no other model tool may start meanwhile.
 pub(crate) fn pending(app: &App) -> bool {
-    app.doc.operation_start.is_some()
+    app.doc.operation_start.is_some() || app.doc.input_repair.is_some()
 }
 
 /// MESH1 names a pick by snapshot TopoKey or by promoted ElementId: (topo, element).

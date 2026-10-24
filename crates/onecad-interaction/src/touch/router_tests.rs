@@ -497,3 +497,6 @@ fn native_navigation_is_refused_under_a_pencil_and_takes_canvas_fingers_otherwis
         }]
     );
 }
+
+#[path = "router_strict_tests.rs"]
+mod strict;

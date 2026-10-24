@@ -80,7 +80,9 @@ pub fn paint(
         }
     }
     textures.set.clear();
-    let presented = surface.is_some_and(|surface| draw(gpu, surface, &mut renderer, &jobs, ppp));
+    let clear = surface_clear_color(ctx);
+    let presented =
+        surface.is_some_and(|surface| draw(gpu, surface, &mut renderer, &jobs, ppp, clear));
     if !presented {
         // Texture uploads above still need a submission to complete (as eframe does).
         gpu.queue.submit([]);
@@ -98,6 +100,7 @@ fn draw(
     renderer: &mut egui_wgpu::Renderer,
     jobs: &[egui::ClippedPrimitive],
     pixels_per_point: f32,
+    clear: wgpu::Color,
 ) -> bool {
     let (frame, suboptimal) = match surface.acquire(gpu) {
         crate::gpu::Acquired::Frame(frame, suboptimal) => (frame, suboptimal),
@@ -116,21 +119,13 @@ fn draw(
     let view = frame
         .texture
         .create_view(&wgpu::TextureViewDescriptor::default());
-    // eframe's default clear colour; the editor paints every pixel over it.
-    let [r, g, b, a] =
-        egui::Color32::from_rgba_unmultiplied(12, 12, 12, 180).to_normalized_gamma_f32();
     let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("onecad-ios egui pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             view: &view,
             resolve_target: None,
             ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color {
-                    r: r.into(),
-                    g: g.into(),
-                    b: b.into(),
-                    a: a.into(),
-                }),
+                load: wgpu::LoadOp::Clear(clear),
                 store: wgpu::StoreOp::Store,
             },
             depth_slice: None,
@@ -149,6 +144,67 @@ fn draw(
         surface.reconfigure(gpu);
     }
     true
+}
+
+fn surface_clear_color(ctx: &egui::Context) -> wgpu::Color {
+    // Safe areas lie outside editor content but still belong to the drawable.
+    let [r, g, b, _] = onecad_widgets::theme::look(ctx)
+        .theme
+        .canvas
+        .to_normalized_gamma_f32();
+    wgpu::Color {
+        r: r.into(),
+        g: g.into(),
+        b: b.into(),
+        a: 1.0,
+    }
+}
+
+fn appearance_flags(ctx: &egui::Context) -> u32 {
+    if onecad_widgets::theme::look(ctx).dark {
+        crate::ffi::FRAME_DARK_APPEARANCE
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+#[path = "frame_safe_area_tests.rs"]
+mod safe_area_tests;
+
+#[cfg(test)]
+#[path = "frame_text_input_tests.rs"]
+mod text_input_tests;
+
+fn text_input_output(
+    result: &mut crate::ffi::FrameResult,
+    ctx: &egui::Context,
+    platform: &egui::PlatformOutput,
+    numeric: bool,
+) {
+    use crate::ffi;
+    // egui omits IME output for clipped fields; the native session still owns keyboard input.
+    let caret = onecad_widgets::text_session::snapshot(ctx)
+        .filter(|snapshot| snapshot.enabled)
+        .map(|snapshot| snapshot.caret)
+        .or_else(|| {
+            if onecad_widgets::text_session::enabled(ctx) {
+                None
+            } else {
+                platform.ime.as_ref().map(|ime| ime.cursor_rect)
+            }
+        });
+    if let Some(caret) = caret {
+        result.flags |= ffi::FRAME_TEXT_INPUT_ACTIVE;
+        result.text_cursor_x = caret.min.x;
+        result.text_cursor_y = caret.min.y;
+        result.text_cursor_h = caret.height();
+        result.text_input_kind = if numeric {
+            ffi::TEXT_NUMERIC_EXPRESSION
+        } else {
+            ffi::TEXT_GENERAL
+        };
+    }
 }
 
 impl crate::app::IosApp {
@@ -243,27 +299,18 @@ impl crate::app::IosApp {
             .map_or(std::time::Duration::MAX, |viewport| viewport.repaint_delay);
         let presented = paint(&self.gpu, self.surface.as_mut(), &self.ctx, output);
         let (repaint_after_s, flags) = schedule(again, presented, self.surface.is_some(), delay);
+        let flags = flags | appearance_flags(&self.ctx);
         let mut result = ffi::FrameResult {
             struct_size: std::mem::size_of::<ffi::FrameResult>() as u32,
             repaint_after_s,
             flags,
             ..Default::default()
         };
-        if let Some(ime) = &platform.ime {
-            result.flags |= ffi::FRAME_TEXT_INPUT_ACTIVE;
-            result.text_cursor_x = ime.cursor_rect.min.x;
-            result.text_cursor_y = ime.cursor_rect.min.y;
-            result.text_cursor_h = ime.cursor_rect.height();
-            let numeric = self
-                .editor
-                .as_ref()
-                .is_some_and(|e| e.numeric_entry(&self.ctx));
-            result.text_input_kind = if numeric {
-                ffi::TEXT_NUMERIC_EXPRESSION
-            } else {
-                ffi::TEXT_GENERAL
-            };
-        }
+        let numeric = self
+            .editor
+            .as_ref()
+            .is_some_and(|e| e.numeric_entry(&self.ctx));
+        text_input_output(&mut result, &self.ctx, &platform, numeric);
         if let Some(update) = platform.accesskit_update
             && self.a11y.update(update)
         {

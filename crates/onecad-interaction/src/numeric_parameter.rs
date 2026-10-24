@@ -335,6 +335,7 @@ pub(crate) fn validate_operation(operation: &Operation) -> Result<(), String> {
     match operation {
         Operation::Known(KnownOperation::Extrude(p)) => p.validate(),
         Operation::Known(KnownOperation::Revolve(p)) => p.validate(),
+        Operation::Known(KnownOperation::Loft(p)) => p.validate(),
         Operation::Known(KnownOperation::Gear(p)) => p.validate(),
         Operation::Known(KnownOperation::Chamfer(p)) => p.validate(),
         Operation::Known(KnownOperation::Shell(p)) => p.validate(),

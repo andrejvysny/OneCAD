@@ -9,26 +9,33 @@ protocol KeyInputProxyDelegate: AnyObject {
 
 /// Native editable accessibility target for the focused egui field. Rust owns its full draft.
 /// Only this field's bounds accept text interactions; the canvas never becomes a Scribble target.
-final class KeyInputProxy: UITextField {
+final class KeyInputProxy: UIView, UITextInput {
     static let accessibilityID = "onecad.keyInputProxy"
     weak var proxyDelegate: KeyInputProxyDelegate?
     private(set) var session: NativeTextSnapshot?
     private var resignRequested = false
     var caretRect = CGRect(x: 0, y: 0, width: 2, height: 17)
+    weak var inputDelegate: UITextInputDelegate?
+    var markedTextStyle: [NSAttributedString.Key: Any]?
+    var keyboardType: UIKeyboardType = .default
+    var autocorrectionType: UITextAutocorrectionType = .no
+    var autocapitalizationType: UITextAutocapitalizationType = .none
+    var spellCheckingType: UITextSpellCheckingType = .no
+    var smartQuotesType: UITextSmartQuotesType = .no
+    var smartDashesType: UITextSmartDashesType = .no
+    var smartInsertDeleteType: UITextSmartInsertDeleteType = .no
+    var returnKeyType: UIReturnKeyType = .done
+    var isEditable: Bool { session != nil }
+    var textInputView: UIView { self }
+    override var isAccessibilityElement: Bool {
+        get { session != nil }
+        set { super.isAccessibilityElement = newValue }
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .clear
-        textColor = .clear
         tintColor = .clear
-        borderStyle = .none
-        autocorrectionType = .no
-        autocapitalizationType = .none
-        spellCheckingType = .no
-        smartQuotesType = .no
-        smartDashesType = .no
-        smartInsertDeleteType = .no
-        returnKeyType = .done
         accessibilityIdentifier = Self.accessibilityID
         accessibilityTextualContext = .wordProcessing
         isAccessibilityElement = false
@@ -39,30 +46,41 @@ final class KeyInputProxy: UITextField {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     override var canBecomeFirstResponder: Bool { session != nil }
 
-    func reconcile(_ next: NativeTextSnapshot?) {
-        inputDelegate?.textWillChange(self)
-        inputDelegate?.selectionWillChange(self)
+    // The public tokenizer understands custom positions. Keep it outside
+    // proxy ownership to avoid a reference cycle.
+    var tokenizer: UITextInputTokenizer {
+        DraftTokenizer(input: self)
+    }
+
+    func reconcile(_ next: NativeTextSnapshot?, notifyInputDelegate: Bool = true) {
+        let focusChanged = session?.generation != next?.generation || session?.fieldID != next?.fieldID
+        let textChanged = notifyInputDelegate && (focusChanged || session?.text != next?.text)
+        let selectionChanged = notifyInputDelegate && (textChanged || session?.selection != next?.selection
+            || session?.marked != next?.marked)
+        if textChanged { inputDelegate?.textWillChange(self) }
+        if selectionChanged { inputDelegate?.selectionWillChange(self) }
         session = next
-        super.text = next?.text
-        isUserInteractionEnabled = next != nil
-        isAccessibilityElement = next != nil
-        accessibilityLabel = next?.label
-        accessibilityValue = next?.text
         if let next {
             frame = next.fieldRect
             caretRect = next.caretRect.offsetBy(dx: -frame.minX, dy: -frame.minY)
         }
-        inputDelegate?.selectionDidChange(self)
-        inputDelegate?.textDidChange(self)
+        if selectionChanged { inputDelegate?.selectionDidChange(self) }
+        if textChanged { inputDelegate?.textDidChange(self) }
+        accessibilityLabel = next?.label
+        accessibilityValue = next?.text
+        isUserInteractionEnabled = next != nil
     }
 
     func submit(_ kind: UInt32, range: NSRange = NSRange(location: 0, length: 0),
-                text: String = "", selection: NSRange = NSRange(location: 0, length: 0)) {
+                text: String = "", selection: NSRange = NSRange(location: 0, length: 0),
+                notifyInputDelegate: Bool = false) {
         guard let session, session.sequence < UInt64.max else { return }
         let operation = NativeTextOperation(generation: session.generation, revision: session.revision,
                                             sequence: session.sequence + 1, kind: kind, range: range,
                                             selection: selection, text: text)
-        reconcile(proxyDelegate?.proxyApply(operation))
+        // UIKit already knows edits it initiated. Only external changes need
+        // delegate notifications; repeating them can reset keyboard/IME state.
+        reconcile(proxyDelegate?.proxyApply(operation), notifyInputDelegate: notifyInputDelegate)
     }
 
     func resign() {
@@ -74,22 +92,24 @@ final class KeyInputProxy: UITextField {
     override func resignFirstResponder() -> Bool {
         let resigned = super.resignFirstResponder()
         if resigned {
-            if session?.marked != nil { submit(ONECAD_IOS_TEXT_CANCEL.rawValue) }
+            if session?.marked != nil {
+                submit(ONECAD_IOS_TEXT_CANCEL.rawValue, notifyInputDelegate: resignRequested)
+            }
             if !resignRequested { proxyDelegate?.proxyDidResignWithoutRequest() }
         }
         return resigned
     }
 
-    override var hasText: Bool { session?.text.isEmpty == false }
+    var hasText: Bool { session?.text.isEmpty == false }
 
-    override func insertText(_ text: String) {
+    func insertText(_ text: String) {
         if text == "\n" || text == "\r" { submit(ONECAD_IOS_TEXT_CONFIRM.rawValue); return }
         if text == "\t" { submit(ONECAD_IOS_TEXT_TAB.rawValue); return }
         guard let session else { return }
         submit(ONECAD_IOS_TEXT_REPLACE.rawValue, range: session.marked ?? session.selection, text: text)
     }
 
-    override func deleteBackward() {
+    func deleteBackward() {
         guard let session else { return }
         var range = session.selection
         if range.length == 0 {
@@ -113,13 +133,12 @@ final class KeyInputProxy: UITextField {
         super.pressesCancelled(presses, with: event)
     }
 
-    override var markedTextRange: UITextRange? {
+    var markedTextRange: UITextRange? {
         guard let session, let range = session.marked else { return nil }
         return IndexRange(range.location, range.upperBound, generation: session.generation)
     }
-    override var markedTextStyle: [NSAttributedString.Key: Any]? { get { super.markedTextStyle } set { super.markedTextStyle = newValue } }
 
-    override func setMarkedText(_ markedText: String?, selectedRange: NSRange) {
+    func setMarkedText(_ markedText: String?, selectedRange: NSRange) {
         let text = markedText ?? ""
         let local = NativeTextSnapshot(generation: 0, revision: 0, sequence: 0, fieldID: 0,
                                       text: text, selection: selectedRange, label: "", fieldRect: .zero, caretRect: .zero)
@@ -127,5 +146,5 @@ final class KeyInputProxy: UITextField {
         submit(ONECAD_IOS_TEXT_MARK.rawValue, text: text, selection: selectedRange)
     }
 
-    override func unmarkText() { submit(ONECAD_IOS_TEXT_UNMARK.rawValue) }
+    func unmarkText() { submit(ONECAD_IOS_TEXT_UNMARK.rawValue) }
 }

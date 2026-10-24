@@ -126,7 +126,7 @@ impl Interaction {
     pub(crate) fn editing_tool(&mut self) -> Option<&mut ModelSession> {
         self.tool
             .as_mut()
-            .filter(|tool| tool.phase == SessionPhase::Editing)
+            .filter(|tool| tool.phase == SessionPhase::Editing && tool.repair.is_none())
     }
 }
 
@@ -157,6 +157,13 @@ impl ModelSession {
     }
 
     pub(crate) fn request_preview(&mut self) -> Vec<Effect> {
+        if let Some(repair) = &self.repair {
+            self.preview = PreviewStatus::Pending;
+            return vec![Effect::PreviewInputRepair {
+                tag: self.tag.clone(),
+                repair: Box::new(repair.clone()),
+            }];
+        }
         let operation = match self.params.candidate(&self.record.op) {
             Ok(operation) => operation,
             Err(error) => {

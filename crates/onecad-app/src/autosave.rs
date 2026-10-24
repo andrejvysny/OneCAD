@@ -25,8 +25,9 @@
 //!   schedules one. Writing on that armed a crash marker for documents the user had
 //!   only looked at, and the next launch offered them back as "unsaved changes".
 //!
-//! The desktop host window-blur flush calls [`autosave_current`] directly, past
-//! the debounce but through both gates and the same lane.
+//! Explicit host recovery flushes use the same admission lane and dirty gates.
+//! The periodic driver retries failed dirty checkpoints on a fixed deadline without
+//! requiring another edit. The age limit bounds scheduling; admission and IO add time.
 //!
 //! ## Recovery lifecycle
 //!
@@ -60,6 +61,7 @@
 //! save snapshots before its lane admission. Neither holds the runtime during I/O.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -90,22 +92,34 @@ pub const AUTOSAVE_DEBOUNCE: Duration = Duration::from_secs(30);
 /// A debounce ALONE starves: sustained modelling re-arms the quiet window on every
 /// edit, so a user who never pauses for [`AUTOSAVE_DEBOUNCE`] never gets an
 /// autosave at all, and a crash takes the whole session with it. The deadline turns
-/// "30 s after you stop" into "30 s after you stop, or 2 min after you started,
+/// "30 s after you stop" into "30 s after you stop, or 60 s after you started,
 /// whichever comes first" — the debounce still wins in the common case, and it can
 /// no longer be starved.
 ///
-/// 120 s is the figure `io::recovery`'s layout docs always claimed
-/// (`AUTOSAVE_INTERVAL_SECS`), which until now no code read.
+/// This bounds scheduling, not durable completion: admission and IO take time,
+/// and failed writes are surfaced and retried rather than claimed as recoverable.
 pub const AUTOSAVE_MAX_AGE: Duration =
     Duration::from_secs(onecad_core::io::recovery::AUTOSAVE_INTERVAL_SECS);
 
+/// A failed checkpoint retries without an edit; mutations never postpone this delay.
+pub const AUTOSAVE_RETRY_DELAY: Duration = Duration::from_secs(5);
+
+static NEXT_ATTEMPT: AtomicU64 = AtomicU64::new(1);
+
 /// One autosave ATTEMPT — the payload of the [`events::AUTOSAVE`](crate::events::AUTOSAVE)
-/// event (`{path, atMs, error?}`). `error` absent ⇒ the container + marker were
+/// event, fenced to its document, runtime session and accepted revision.
+/// `error` absent ⇒ the container + marker were
 /// written; present ⇒ the write at `path` was attempted and failed (`path` is the
 /// INTENDED target, not a written one) — see [`autosave_current_reporting`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutosaveEvent {
+    pub document_id: String,
+    pub runtime_session: String,
+    /// The accepted snapshot attempted, even when its write fails.
+    pub document_revision: u64,
+    /// Process-local ordering across independent checkpoint event producers.
+    pub attempt_id: u64,
     /// The autosave container written, or (on failure) the one that was attempted.
     pub path: String,
     /// Wall-clock time of the write attempt, in Unix-epoch milliseconds.
@@ -208,8 +222,7 @@ pub async fn autosave_current(
 
 /// Same as [`autosave_current`], except a FAILED attempt is also reported (as an
 /// [`AutosaveEvent`] carrying `error`) rather than collapsed to `None`. Used by the
-/// debounced [`run`] driver and the window-blur flush — the two call sites that
-/// actually emit [`events::AUTOSAVE`](crate::events::AUTOSAVE) to the frontend —
+/// debounced [`run`] driver, which emits [`events::AUTOSAVE`](crate::events::AUTOSAVE) —
 /// so a broken autosave is visible instead of silently absent.
 pub async fn autosave_current_reporting(
     runtime: &Mutex<Option<DocumentRuntime>>,
@@ -288,7 +301,7 @@ async fn attempt_admitted(
     //    a timer against a document the user is actively editing, and its container
     //    is only ever read by crash recovery — which regens from 0 regardless. The
     //    "paint at open" caches belong to an explicit save.
-    let (payload, doc_id, session, opened, title) = {
+    let (payload, doc_id, session, opened, title, identity) = {
         let mut guard = runtime.lock().await;
         let Some(rt) = guard.as_mut() else {
             return AutosaveAttempt::Skipped; // no document open.
@@ -301,12 +314,19 @@ async fn attempt_admitted(
         let doc_id = rt.document_uuid();
         let opened = rt.path().map(Path::to_path_buf);
         let title = rt.title().to_string();
+        let identity = AttemptIdentity {
+            document_id: doc_id.to_string(),
+            runtime_session: rt.runtime_session(),
+            document_revision: rt.revision().0,
+            attempt_id: NEXT_ATTEMPT.fetch_add(1, Ordering::Relaxed),
+        };
         (
             rt.build_save_payload(meta, SaveCaches::none()),
             doc_id,
             rt.runtime_session(),
             opened,
             title,
+            identity,
         )
     };
     let path = autosave_path(app_data, doc_id);
@@ -314,7 +334,7 @@ async fn attempt_admitted(
     // The marker writer creates the dir, but the container writer needs it first.
     if let Err(e) = std::fs::create_dir_all(autosave_dir(app_data)) {
         tracing::warn!("autosave: create dir failed: {e}");
-        return AutosaveAttempt::Failed(failed_event(&path, format!("create dir: {e}")));
+        return AutosaveAttempt::Failed(identity.event(&path, Some(format!("create dir: {e}"))));
     }
 
     // ── Persistence lane: container write + marker, serialized against an
@@ -351,28 +371,37 @@ async fn attempt_admitted(
     match write {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
-            return AutosaveAttempt::Failed(failed_event(
-                &path,
-                format!("write checkpoint: {error}"),
-            ));
+            return AutosaveAttempt::Failed(
+                identity.event(&path, Some(format!("write checkpoint: {error}"))),
+            );
         }
         Err(error) => {
-            return AutosaveAttempt::Failed(failed_event(&path, format!("write task: {error}")));
+            return AutosaveAttempt::Failed(
+                identity.event(&path, Some(format!("write task: {error}"))),
+            );
         }
     }
-    AutosaveAttempt::Written(AutosaveEvent {
-        path: path.to_string_lossy().into_owned(),
-        at_ms: now_ms(),
-        error: None,
-    })
+    AutosaveAttempt::Written(identity.event(&path, None))
 }
 
-/// An [`AutosaveEvent`] describing a failed attempt at `path`.
-fn failed_event(path: &Path, message: String) -> AutosaveEvent {
-    AutosaveEvent {
-        path: path.to_string_lossy().into_owned(),
-        at_ms: now_ms(),
-        error: Some(message),
+struct AttemptIdentity {
+    document_id: String,
+    runtime_session: String,
+    document_revision: u64,
+    attempt_id: u64,
+}
+
+impl AttemptIdentity {
+    fn event(self, path: &Path, error: Option<String>) -> AutosaveEvent {
+        AutosaveEvent {
+            document_id: self.document_id,
+            runtime_session: self.runtime_session,
+            document_revision: self.document_revision,
+            attempt_id: self.attempt_id,
+            path: path.to_string_lossy().into_owned(),
+            at_ms: now_ms(),
+            error,
+        }
     }
 }
 
@@ -477,45 +506,89 @@ pub async fn run_until<F>(
     runtime: Arc<Mutex<Option<DocumentRuntime>>>,
     app_data: PathBuf,
     lane: Arc<Mutex<()>>,
+    tick: watch::Receiver<u64>,
+    timing: (Duration, Duration),
+    stop: impl std::future::Future<Output = ()>,
+    emit: F,
+) where
+    F: Fn(AutosaveEvent),
+{
+    run_driver(
+        runtime,
+        app_data,
+        lane,
+        tick,
+        (timing.0, timing.1, AUTOSAVE_RETRY_DELAY),
+        stop,
+        emit,
+    )
+    .await;
+}
+
+async fn run_driver<F>(
+    runtime: Arc<Mutex<Option<DocumentRuntime>>>,
+    app_data: PathBuf,
+    lane: Arc<Mutex<()>>,
     mut tick: watch::Receiver<u64>,
-    (debounce, max_age): (Duration, Duration),
+    (debounce, max_age, retry_delay): (Duration, Duration, Duration),
     stop: impl std::future::Future<Output = ()>,
     emit: F,
 ) where
     F: Fn(AutosaveEvent),
 {
     let mut stop = std::pin::pin!(stop);
-    loop {
-        // Wait for the first mutation since the last cycle (the freshly-subscribed
-        // receiver treats its initial value as seen ⇒ an idle app never autosaves).
+    let mut retry: Option<(tokio::time::Instant, String)> = None;
+    while wait_for_attempt(
+        &mut tick,
+        stop.as_mut(),
+        (debounce, max_age),
+        retry.as_ref().map(|(deadline, _)| *deadline),
+    )
+    .await
+    {
+        let session = retry.take().map(|(_, session)| session);
+        let mut outcome = attempt(&runtime, &app_data, &lane, session.as_deref()).await;
+        if session.is_some() && matches!(outcome, AutosaveAttempt::Skipped) {
+            // A replacement's mutation may already have been consumed while the
+            // old retry waited. Snapshot current dirty work without deferring it again.
+            outcome = attempt(&runtime, &app_data, &lane, None).await;
+        }
+        match outcome {
+            AutosaveAttempt::Failed(event) => {
+                retry = Some((
+                    tokio::time::Instant::now() + retry_delay,
+                    event.runtime_session.clone(),
+                ));
+                emit(event);
+            }
+            AutosaveAttempt::Written(event) => emit(event),
+            AutosaveAttempt::Skipped => {}
+        }
+    }
+}
+
+async fn wait_for_attempt(
+    tick: &mut watch::Receiver<u64>,
+    mut stop: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
+    (debounce, max_age): (Duration, Duration),
+    retry: Option<tokio::time::Instant>,
+) -> bool {
+    if retry.is_none() {
         tokio::select! {
-            () = &mut stop => return,
-            r = tick.changed() => {
-                if r.is_err() {
-                    return; // all senders dropped.
-                }
-            }
+            biased;
+            () = stop.as_mut() => return false,
+            result = tick.changed() => if result.is_err() { return false; },
         }
-        // The oldest edit this cycle covers is from HERE, so the deadline is absolute:
-        // re-arming the debounce below cannot push it out.
-        let deadline = tokio::time::Instant::now() + max_age;
-        // Debounce: fire after `debounce` of quiet (a newer mutation restarts it), or
-        // at the deadline, whichever comes first.
-        loop {
-            tokio::select! {
-                // A closing host has already closed its document; nothing to save.
-                () = &mut stop => return,
-                () = tokio::time::sleep(debounce) => break,
-                () = tokio::time::sleep_until(deadline) => break,
-                r = tick.changed() => {
-                    if r.is_err() {
-                        return;
-                    }
-                }
-            }
-        }
-        if let Some(ev) = autosave_current_reporting(&runtime, &app_data, &lane).await {
-            emit(ev);
+    }
+    let deadline = retry.unwrap_or_else(|| tokio::time::Instant::now() + max_age);
+    loop {
+        let quiet = retry.unwrap_or_else(|| tokio::time::Instant::now() + debounce);
+        tokio::select! {
+            biased;
+            () = stop.as_mut() => return false,
+            () = tokio::time::sleep_until(quiet) => return true,
+            () = tokio::time::sleep_until(deadline) => return true,
+            result = tick.changed() => if result.is_err() { return false; },
         }
     }
 }
@@ -533,3 +606,7 @@ fn now_ms() -> u64 {
 fn now_rfc3339() -> String {
     crate::api::rfc3339_from_secs(now_ms() / 1000)
 }
+
+#[cfg(test)]
+#[path = "autosave_driver_tests.rs"]
+mod driver_tests;

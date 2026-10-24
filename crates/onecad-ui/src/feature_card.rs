@@ -74,7 +74,16 @@ pub(crate) fn history_editor(app: &mut App, ui: &mut Ui, record_id: &str) {
         ui.group(|ui| {
             ui.set_width(ui.available_width());
             ui.strong(format!("Edit {}", tool.record.name));
-            FeatureCardRows::inline(ui, |rows| crate::modeling_ui::rows(app, rows, &tool));
+            if tool.repair.is_some() {
+                ui.add(
+                    egui::Label::new(
+                        "Replacement selected. Review the repair preview, then Apply.",
+                    )
+                    .wrap(),
+                );
+            } else {
+                FeatureCardRows::inline(ui, |rows| crate::modeling_ui::rows(app, rows, &tool));
+            }
             if choices(&tool) > 1 {
                 ui.label("Parameter");
                 crate::parameter_ui::selector(app, ui, &tool);
@@ -252,6 +261,7 @@ fn preview_feedback(
             Some("Edit preview unavailable. Apply regenerates the feature.".into())
         }
         PreviewStatus::Ready => None,
+        PreviewStatus::RepairWarning(message) => Some(message.clone()),
         PreviewStatus::EditWarning(message) => Some(format!("Edit preview: {message}")),
     }
 }

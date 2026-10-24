@@ -1,4 +1,27 @@
 use super::*;
+
+#[test]
+fn capacity_advice_respects_mobile_headroom_without_allocating_or_retiring_live_work() {
+    let authority = BudgetAuthority::new(onecad_render::RenderProfile::Mobile);
+    let parked = authority.owner().unwrap();
+    let active = authority.owner().unwrap();
+    active.activate();
+    let live = parked.reserve(576 << 20).unwrap();
+    let before = authority.snapshot();
+    assert!(!parked.has_capacity(1));
+    assert!(active.has_capacity(PREVIEW_RESERVATION));
+    assert!(!active.has_capacity(PREVIEW_RESERVATION + 1));
+    let after = authority.snapshot();
+    assert_eq!(after.used, before.used);
+    assert_eq!(after.portions.len(), before.portions.len());
+    assert_eq!(after.waiting, 0);
+    parked.close();
+    assert!(!parked.has_capacity(0));
+    assert_eq!(authority.snapshot().used, 576 << 20);
+    drop(live);
+    assert_eq!(authority.snapshot().used, 0);
+}
+
 #[test]
 fn split_reservation_releases_only_retired_allocation_owners() {
     let budget = Arc::new(HostBudget::default());

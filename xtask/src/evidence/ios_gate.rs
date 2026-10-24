@@ -131,7 +131,7 @@ pub(super) fn report(dir: &Path, root: &Path, accept: bool) -> Result<()> {
         "run": run,
         "simulatorKernel": simulator,
         "inventory": ios_evidence::json(&root.join(super::ios_verify::INVENTORY))?,
-        "checks": ["provenance", "kernel bundles", "tests", "artifacts", "oracle", "release iphoneos", "release iphonesimulator"],
+        "checks": ["provenance", "kernel bundles", "tests", "public fixture", "artifacts", "oracle", "release iphoneos", "release iphonesimulator"],
     });
     fs::write(
         dir.join("acceptance.json"),

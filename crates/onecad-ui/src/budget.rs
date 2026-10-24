@@ -280,6 +280,10 @@ impl HostBudget {
     pub fn snapshot(&self) -> Snapshot {
         self.authority.snapshot()
     }
+    /// Advisory capacity check only; callers still join the admission queue.
+    pub fn has_capacity(&self, bytes: usize) -> bool {
+        !self.closed.load(Ordering::Acquire) && self.authority.state().eligible(self.owner, bytes)
+    }
     pub fn activate(&self) {
         let mut state = self.authority.state();
         if !self.closed.load(Ordering::Acquire) && state.active != Some(self.owner_id()) {

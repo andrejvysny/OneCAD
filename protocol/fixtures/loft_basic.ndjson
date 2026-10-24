@@ -1,0 +1,16 @@
+# Bounded solid Loft: smooth circular sections create exactly one NewBody; atomic accept.
+# Exact V3 circle identity matches SketchRegions publication; no implicit first-region binding.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"loft_basic","documentRevision":0,"workerEpoch":3,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":1,"documentRevision":1,"workerEpoch":3,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Sketch","opId":"op_a","stepIndex":0,"params":{"sketchId":"a","plane":{"kind":"custom","origin":[0,0,0],"xAxis":[1,0,0],"yAxis":[0,1,0],"normal":[0,0,1]},"entities":[{"id":"circle","type":"Circle","center":[0,0],"radius":5}],"constraints":[]}},{"opType":"Sketch","opId":"op_b","stepIndex":1,"params":{"sketchId":"b","plane":{"kind":"custom","origin":[0,0,20],"xAxis":[1,0,0],"yAxis":[0,1,0],"normal":[0,0,1]},"entities":[{"id":"circle","type":"Circle","center":[0,0],"radius":5}],"constraints":[]}},{"opType":"Loft","opId":"loft","stepIndex":2,"params":{"profiles":[{"sketchId":"a","regionId":"r_f9ed000663ac6aa4","regionIdentityVersion":3},{"sketchId":"b","regionId":"r_f9ed000663ac6aa4","regionIdentityVersion":3}],"isSolid":true,"isRuled":false,"booleanMode":"NewBody"}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"payload":{"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":1,"payload":{"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":2,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_loft"}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"result":{"planPrepared":true,"preparedSnapshotId":1,"lastValidStep":2,"perStepResults":[{"stepIndex":0,"status":"ok"},{"stepIndex":1,"status":"ok"},{"stepIndex":2,"status":"ok","bodyIds":["body_loft"]}],"historyPrefixHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":1,"documentRevision":1,"workerEpoch":3}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"result":{"accepted":true,"snapshotId":1}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"snapshotId":1,"hasScratch":false,"historyPrefixHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
+{"send":{"v":1,"t":"req","id":5,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"goodbye":true}}}

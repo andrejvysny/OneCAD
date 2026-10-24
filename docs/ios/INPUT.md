@@ -46,16 +46,22 @@ over_control: fn(pos) -> bool }` where `over_control` comes from the previous
 egui frame (pointer over an egui area other than the CAD canvas) and
 `drag_authoring` is true while an active sketch session (including Select),
 handle or parameter drag can use a dragged pointer. Home has no authoring
-owner. Select finger drags use the shared sketch interaction; Pencil-only
-drawing and two-finger navigation retain the router rules below.
+owner. The iOS host always sets `pencil_only_drawing = true`, independently of
+`UIPencilInteraction.prefersPencilOnlyDrawing`. Direct fingers navigate the
+canvas; only Pencil and external indirect pointers author there. Finger taps
+still operate controls, buttons and native text fields. Generic router fixtures
+may explicitly set `pencil_only_drawing = false` to exercise nonstrict routing;
+that setting does not describe the iOS host policy.
 
 | Contact | Condition | Owner |
 |---|---|---|
 | Pencil | any | `Author` (pointer down/move/up at the sample position) |
+| External indirect pointer | any | `Author` (mouse/trackpad pointer remains usable) |
 | Finger | starts over a control | `Control` (pointer, so buttons and fields work) |
 | Finger | on canvas while a Pencil `Author` contact is live | `Ignored` (camera held stable; controls still work) |
-| Finger | on canvas, ends within slop (8 pt, 0.5 s) | `Tap` (pointer down+up at the begin position; double tap counted by egui) |
-| Finger | on canvas, exceeds slop, `drag_authoring && !pencil_only_drawing` | `Author` |
+| Finger | on canvas, ends within slop (8 pt, 0.5 s), Pencil-only routing | no pointer event, including double taps |
+| Finger | on canvas, ends within slop, explicitly nonstrict routing | `Tap` (pointer down+up at the begin position) |
+| Finger | on canvas, exceeds slop, explicitly nonstrict `drag_authoring` | `Author` (generic router behavior; unavailable in the iOS host) |
 | Finger | on canvas, exceeds slop otherwise | `Orbit` (camera motion from the slop exit point, no jump) |
 | Finger | a second finger contact arrives | all canvas fingers become `MultiTouch`; native pan/pinch drive navigation; an `Orbit` ends without a jump; an `Author` finger is cancelled |
 | Finger | back to one finger after multi-touch | the remaining finger is `Ignored` until lifted |
@@ -63,6 +69,11 @@ drawing and two-finger navigation retain the router rules below.
 - One owner per contact for its whole life. An `Author` contact produces
   exactly one pointer press; Pencil never also produces a finger tap or a
   synthesized mouse click.
+- A finger with `Control` ownership emits paired egui touch and pointer events,
+  enabling default panel drag scrolling. Its touch ID follows the routed contact;
+  cancellation ends the touch without a pointer release. Pencil, indirect
+  pointers, canvas navigation and pointerless control activations do not enter
+  egui's touch gesture stream; native recognizers remain responsible for pan/pinch.
 - Hover (Pencil or pointer, no contact down) produces pointer moves without a
   button and is suppressed while any `Author` contact is live. Hover exit
   clears hover only; it never cancels accepted work.
@@ -70,6 +81,22 @@ drawing and two-finger navigation retain the router rules below.
   promotes through egui's double-click path (face to body). Barrel double tap
   and squeeze arrive as `onecad_ios_pencil_event` and are handled by the
   accessory policy below; they never author geometry.
+
+## Pencil primitive drags
+
+Line, Rectangle, Center Rectangle and Circle accept a Pencil press, drag and
+release on the canvas. Confirmed movement updates a local preview; release
+submits one primitive through the shared sketch service, and one Undo removes
+it. Dragged Lines start at the press position and do not continue the prior
+line chain or implicitly enter tangent-arc mode. Tap construction, explicit
+tangent arcs, staged Arc and Slot tools, PenStroke and external pointer behavior
+retain their existing contracts.
+
+The drag is fenced by document, sketch session, view, tool, draft and snap
+provenance. Cancellation or a conflicting pointer source discards the capture
+without committing geometry or replacing a prior tap draft. Predicted samples
+never author a primitive. Simulator replay verifies this delivery path; physical
+Pencil qualification remains a separate release requirement.
 
 ## Native text sessions
 
@@ -80,6 +107,12 @@ this snapshot. NumberField, SearchField and raw editor fields use the same hooks
 The UIKit first responder occupies the focused field, exposes its editable value
 and replaces only that same Rust field's accessibility element. Other fields stay
 accessible. The canvas is not a native text or Scribble target.
+
+Keyboard ownership follows the live native text session even when its field
+scrolls outside the visible card. The frame's active flag and caret come from
+that session, because egui omits IME output for clipped fields. Losing focus or
+removing the editor ends ownership; clipping alone must not hide the keyboard
+and resize the viewport during a control drag.
 
 A session is fenced by document/runtime/authoring scope, egui field ID and a
 monotonic focus generation. Every operation requires the acknowledged revision

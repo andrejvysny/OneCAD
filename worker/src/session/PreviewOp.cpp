@@ -120,9 +120,36 @@ std::optional<std::string> profile_sketch_id(const Envelope& req, const json& op
     return !op_id.empty() ? op_id : arg_id;
 }
 
+bool seed_loft_sketches(Session& session, const Envelope& req, const json& op,
+                       ScratchJob& job, std::string& last_sketch_id, Envelope& error) {
+    if (!op.contains("params") || !op["params"].is_object() ||
+        !op["params"].contains("profiles") || !op["params"]["profiles"].is_array()) return true;
+    const auto& profiles = op["params"]["profiles"];
+    if (profiles.size() < 2 || profiles.size() > 32) return true;
+    for (const auto& profile : profiles) {
+        if (!profile.is_object() || !profile.contains("sketchId") ||
+            !profile["sketchId"].is_string()) continue;
+        const std::string id = profile["sketchId"].get<std::string>();
+        if (id.empty()) continue;
+        const auto stored = session.sketches().snapshot(id);
+        if (!stored) {
+            error = err(req, "REF_UNRESOLVED", "PreviewOp: profile sketch not found: " + id);
+            return false;
+        }
+        json params = stored->wire_args;
+        params["sketchId"] = id;
+        job.sketches.emplace_back(id, std::move(params));
+        last_sketch_id = id;
+    }
+    return true;
+}
+
 bool seed_profile_sketch(Session& session, const Envelope& req, const json& op,
                          ScratchJob& job, std::string& last_sketch_id,
                          Envelope& error) {
+    if (op.value("opType", std::string{}) == "Loft") {
+        return seed_loft_sketches(session, req, op, job, last_sketch_id, error);
+    }
     std::string sketch_error;
     const std::optional<std::string> sketch_id =
         profile_sketch_id(req, op, sketch_error);

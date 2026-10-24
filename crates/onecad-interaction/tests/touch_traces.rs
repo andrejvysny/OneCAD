@@ -10,6 +10,7 @@ const REQUIRED: &[&str] = &[
     "pencil_arc_stroke",
     "finger_tap_on_control",
     "finger_orbit",
+    "pencil_only_canvas",
     "pinch_with_cancel",
     "pencil_finger_two_handed",
     "coalesced_predicted_estimation",

@@ -45,6 +45,10 @@ pub enum Command {
     Sketch(Box<crate::sketch_services::Request>),
     /// Non-dirtying operand staging; FIFO with `Apply` on this lane.
     Operands(Box<crate::operand_services::Request>),
+    Repair {
+        tag: RequestTag,
+        repair: Box<onecad_app::api::InputRepair>,
+    },
     Apply {
         tag: RequestTag,
         command: Box<EditCommand>,
@@ -72,6 +76,10 @@ pub enum Candidate {
         operation: Box<onecad_core::document::record::Operation>,
         sketch_id: Option<String>,
         snapshot: onecad_core::ids::SnapshotId,
+    },
+    PreviewInputRepair {
+        tag: RequestTag,
+        repair: Box<onecad_app::api::InputRepair>,
     },
     PreviewExistingEdit {
         tag: RequestTag,
@@ -154,6 +162,7 @@ pub struct Shared {
     pub display_epoch: std::sync::atomic::AtomicU64,
     pub failure: Mutex<Option<String>>,
     pub activity: Mutex<Option<String>>,
+    pub(crate) autosave_status: Mutex<crate::autosave_status::Slot>,
     pub render_receipt: Mutex<Option<crate::render_receipt::RenderReceipt>>,
     pub valid: std::sync::atomic::AtomicBool,
     pub stopping: std::sync::atomic::AtomicBool,
@@ -210,6 +219,7 @@ impl Shared {
             display_epoch: std::sync::atomic::AtomicU64::new(0),
             failure: Mutex::new(None),
             activity: Mutex::new(None),
+            autosave_status: Mutex::new(Default::default()),
             render_receipt: Mutex::new(None),
             budget: Mutex::new(budget),
             preparation_cache: Mutex::new(Default::default()),
@@ -464,6 +474,16 @@ impl Bridge {
         self.shared.host_budget.wake();
     }
 
+    #[cfg(test)]
+    pub(crate) fn emit_autosave_for_test(&self, event: onecad_app::autosave::AutosaveEvent) {
+        let sink = Sink {
+            events: Arc::new(EventMailbox::default()),
+            shared: self.shared.clone(),
+            failed: std::sync::atomic::AtomicBool::new(false),
+        };
+        sink.emit(AppEvent::Autosave(event)).unwrap();
+    }
+
     pub fn take_display(&self) -> Option<Arc<Display>> {
         self.shared.display.lock().ok()?.take()
     }
@@ -523,7 +543,12 @@ impl EventSink for Sink {
                 }
                 "Geometry changed".to_owned()
             }
-            AppEvent::Autosave(_) => "Autosave updated".to_owned(),
+            AppEvent::Autosave(event) => {
+                if let Ok(mut slot) = self.shared.autosave_status.lock() {
+                    slot.record(event);
+                }
+                "Recovery checkpoint status changed".to_owned()
+            }
             AppEvent::NeedsRepair(_) => "Feature needs repair".to_owned(),
             AppEvent::SketchSolved(_) => "Sketch solved".to_owned(),
         };
@@ -655,7 +680,7 @@ async fn actor(
     while let Ok(envelope) = receiver.try_recv() {
         let name = command_name(&envelope.command);
         let tag = match envelope.command {
-            Command::Apply { tag, .. } => Some(tag),
+            Command::Apply { tag, .. } | Command::Repair { tag, .. } => Some(tag),
             _ => None,
         };
         let _ = sender.send(Message::Terminal {
@@ -711,6 +736,7 @@ pub fn command_name(command: &Command) -> &'static str {
         Command::Sketch(_) => "Sketch",
         Command::Operands(_) => "Operands",
         Command::Apply { .. } => "Apply",
+        Command::Repair { .. } => "Repair",
         Command::Undo => "Undo",
         Command::Redo => "Redo",
         Command::Prepare(_) => "Prepare",

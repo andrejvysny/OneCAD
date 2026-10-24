@@ -174,6 +174,16 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
             crate::operation_start::revolve_ready(app),
             "Select a profile with a sketch line, or multi-select a profile and an axis edge",
         ),
+        ToolId::Loft => model_view(
+            app,
+            crate::loft_ui::ready(app),
+            "Finish sketch editing, then select 2–32 closed profiles in section order",
+        ),
+        ToolId::DatumPlane | ToolId::OffsetPlane => model_view(
+            app,
+            !app.sketch_active(),
+            "Finish sketch editing before creating an offset plane",
+        ),
         ToolId::LinearPattern | ToolId::CircularPattern | ToolId::MirrorBody => model_view(
             app,
             crate::modeling_ui::selected_bodies(app).is_some_and(|bodies| bodies.len() == 1),
@@ -318,6 +328,8 @@ pub(crate) fn activate(app: &mut App, ctx: &Context, id: ToolId) {
         ToolId::Shell => crate::operation_start::begin_shell(app),
         ToolId::Hole => crate::operation_start::begin_hole(app),
         ToolId::Revolve => crate::operation_start::begin_revolve(app),
+        ToolId::Loft => crate::loft_ui::begin(app),
+        ToolId::DatumPlane | ToolId::OffsetPlane => app.choose_offset_plane(),
         ToolId::LinearPattern
         | ToolId::CircularPattern
         | ToolId::MirrorBody
@@ -355,6 +367,7 @@ pub(crate) fn activate(app: &mut App, ctx: &Context, id: ToolId) {
 /// start still staging is dropped too; its late reply finds no receiver.
 pub(crate) fn cancel_tool(app: &mut App) {
     app.doc.operation_start = None;
+    app.doc.input_repair = None;
     app.dispatch(Action::Cancel);
     if app.doc.interaction.tool.is_none() {
         crate::item_selection::retain(app, |item| !matches!(item, SelectionItem::Feature(_)));

@@ -17,8 +17,8 @@ fn params(state: &Interaction) -> &onecad_core::document::record::ExtrudeParams 
 }
 
 #[test]
-fn add_cut_require_explicit_target_and_preserve_profile_and_record_identity() {
-    for mode in [BooleanMode::Add, BooleanMode::Cut] {
+fn add_cut_intersect_require_explicit_target_and_preserve_profile_and_record_identity() {
+    for mode in [BooleanMode::Add, BooleanMode::Cut, BooleanMode::Intersect] {
         let (mut state, old_tag) = started();
         let profile = params(&state).profile.clone();
         let effects = state.dispatch(Action::ExtrudeModeChanged(mode));
@@ -65,6 +65,38 @@ fn add_cut_require_explicit_target_and_preserve_profile_and_record_identity() {
         assert_eq!(record.inputs, record.op.derive_inputs());
         assert!(state.dispatch(Action::Confirm).is_empty());
     }
+}
+
+#[test]
+fn intersect_invalidates_ready_preview_and_refuses_delayed_new_body_reply() {
+    let (mut state, old_tag) = started();
+    evaluate(&mut state, &old_tag, 10.0);
+    state.dispatch(Action::PreviewFinished {
+        tag: old_tag.clone(),
+        result: Ok(preview(&old_tag)),
+    });
+    assert_eq!(state.tool.as_ref().unwrap().preview, PreviewStatus::Ready);
+    let effects = state.dispatch(Action::ExtrudeModeChanged(BooleanMode::Intersect));
+    let tag = evaluation_tag(&effects);
+    assert_eq!(params(&state).boolean_mode, BooleanMode::Intersect);
+    assert!(effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::ClearPreview { .. })));
+    assert_ne!(tag, old_tag);
+    assert_ne!(state.tool.as_ref().unwrap().preview, PreviewStatus::Ready);
+    assert!(state.dispatch(Action::Confirm).is_empty());
+    assert!(state
+        .dispatch(Action::PreviewFinished {
+            tag: old_tag.clone(),
+            result: Ok(preview(&old_tag)),
+        })
+        .is_empty());
+    assert!(evaluate(&mut state, &tag, 10.0).is_empty());
+    assert!(matches!(
+        &state.tool.as_ref().unwrap().preview,
+        PreviewStatus::Failed(reason) if reason.contains("target body")
+    ));
+    assert!(state.dispatch(Action::Confirm).is_empty());
 }
 
 #[test]

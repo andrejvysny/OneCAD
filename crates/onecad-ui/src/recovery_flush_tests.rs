@@ -10,9 +10,13 @@ use tokio::sync::{Notify, oneshot};
 struct HeldDialog {
     started: Notify,
     answer: tokio::sync::Mutex<Option<oneshot::Receiver<()>>>,
+    events: Mutex<Vec<onecad_app::autosave::AutosaveEvent>>,
 }
 impl EventSink for HeldDialog {
-    fn emit(&self, _: AppEvent) -> std::result::Result<(), String> {
+    fn emit(&self, event: AppEvent) -> std::result::Result<(), String> {
+        if let AppEvent::Autosave(event) = event {
+            self.events.lock().unwrap().push(event);
+        }
         Ok(())
     }
 }
@@ -54,6 +58,7 @@ async fn fixture(
     let dialogs = Arc::new(HeldDialog {
         started: Notify::new(),
         answer: tokio::sync::Mutex::new(Some(waiting)),
+        events: Mutex::new(Vec::new()),
     });
     let host = HostContext {
         paths: HostPaths {
@@ -279,4 +284,77 @@ async fn cancellation_after_lane_admission_keeps_lane_until_durable_write_finish
     drop(runtime);
     assert!(matches!(work.await, AutosaveAttempt::Written(_)));
     assert!(state.persistence.try_lock().is_ok());
+}
+
+#[tokio::test]
+async fn idle_and_ticket_flushes_emit_fenced_failure_success_and_skip_no_events() {
+    for ticketed in [false, true] {
+        let area = tempfile::tempdir().unwrap();
+        let (state, host, sink, _) = fixture(area.path()).await;
+        let identity = api::get_document_state(&state).await.unwrap();
+        let blocker = area.path().join("autosave");
+        std::fs::write(&blocker, b"blocked directory").unwrap();
+        flush_once(&state, &host, ticketed).await;
+        std::fs::remove_file(blocker).unwrap();
+        flush_once(&state, &host, ticketed).await;
+        {
+            let events = sink.events.lock().unwrap();
+            assert_eq!(events.len(), 2);
+            assert!(events[0].error.is_some());
+            assert!(events[1].error.is_none());
+            assert!(events[1].attempt_id > events[0].attempt_id);
+            for event in events.iter() {
+                assert_eq!(event.document_id, identity.document_id);
+                assert_eq!(event.runtime_session, identity.runtime_session);
+                assert_eq!(event.document_revision, identity.revision);
+            }
+        }
+        api::save_document(
+            &state,
+            host.clone(),
+            Some(area.path().join("saved.onecad").to_string_lossy().into()),
+            None,
+        )
+        .await
+        .unwrap();
+        flush_once(&state, &host, ticketed).await;
+        assert_eq!(sink.events.lock().unwrap().len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn stopping_idle_flush_still_emits_admitted_durable_completion() {
+    let area = tempfile::tempdir().unwrap();
+    let (state, host, sink, _) = fixture(area.path()).await;
+    let runtime = state.runtime.lock().await;
+    let (stop, mut stopped) = oneshot::channel();
+    let mut work = Box::pin(flush_idle(&state, &host, &mut stopped));
+    std::future::poll_fn(|context| {
+        assert!(work.as_mut().poll(context).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    assert!(state.persistence.try_lock().is_err());
+    stop.send(()).unwrap();
+    std::future::poll_fn(|context| {
+        assert!(work.as_mut().poll(context).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    drop(runtime);
+    assert!(!work.await);
+    let events = sink.events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].error.is_none());
+    assert!(Path::new(&events[0].path).is_file());
+    assert!(state.persistence.try_lock().is_ok());
+}
+
+async fn flush_once(state: &AppState, host: &HostContext, ticketed: bool) {
+    if ticketed {
+        checkpoint(state, host, &ticket(state).await).await;
+    } else {
+        let (_stop, mut stopped) = oneshot::channel();
+        assert!(flush_idle(state, host, &mut stopped).await);
+    }
 }

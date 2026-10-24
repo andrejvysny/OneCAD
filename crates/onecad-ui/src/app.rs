@@ -287,6 +287,22 @@ impl App {
                 self.doc.received_preview = None;
                 self.doc.clear_preview = true;
             }
+            Effect::PreviewInputRepair { tag, repair } => self
+                .doc
+                .bridge
+                .candidate(Candidate::PreviewInputRepair { tag, repair }),
+            Effect::ApplyInputRepair { tag, repair } => {
+                self.doc.bridge.cancel_candidates();
+                self.doc.sections.cancel_preview();
+                self.doc.pending_preview = None;
+                self.doc.clear_preview = true;
+                if let Err(message) = self.doc.bridge.submit(Command::Repair {
+                    tag: tag.clone(),
+                    repair,
+                }) {
+                    self.dispatch(Action::CommitRejected { tag, message });
+                }
+            }
             Effect::PreviewExistingEdit { tag, operation } => self
                 .doc
                 .bridge
@@ -385,8 +401,10 @@ impl App {
         // Command permits bound accepted plus terminal messages to at most 16; drain fairly each frame.
         self.drain_messages(ctx);
         crate::operation_start::poll(self);
+        crate::input_repair_ui::poll(self);
         crate::model_handle::poll_history(self, ctx);
         self.sync_document_state();
+        crate::autosave_status::poll(self);
         let failure = self
             .doc
             .bridge

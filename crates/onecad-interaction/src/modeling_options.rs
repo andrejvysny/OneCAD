@@ -8,6 +8,10 @@ use onecad_core::{
 
 #[derive(Clone, Debug)]
 pub enum ModelingOptions {
+    Loft {
+        profiles: Vec<onecad_core::document::refs::SketchRegionRef>,
+        is_ruled: bool,
+    },
     ExtrudeExtent(ExtrudeMode),
     FaceOffsetMode(OffsetDistanceType),
     ProfileBoolean {
@@ -110,6 +114,10 @@ fn apply(operation: &mut Operation, options: ModelingOptions) -> Result<(), Stri
         return Err("Unknown operation".into());
     };
     match (op, options) {
+        (KnownOperation::Loft(p), ModelingOptions::Loft { profiles, is_ruled }) => {
+            p.profiles = profiles;
+            p.is_ruled = is_ruled;
+        }
         (KnownOperation::OffsetFace(p), ModelingOptions::FaceOffsetMode(mode)) => {
             if mode == OffsetDistanceType::Total {
                 return Err("Total wall thickness requires a staged opposite face".into());

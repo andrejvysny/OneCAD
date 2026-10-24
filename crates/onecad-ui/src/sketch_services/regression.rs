@@ -4,9 +4,7 @@ use onecad_app::dto::{DocumentProjection, FeatureStatus};
 use onecad_core::{document::variables::Scalar, ids::ConstraintId};
 use onecad_interaction::sketch::{SketchInteraction, SketchPhase, SketchStatus};
 
-#[allow(dead_code)]
-#[path = "../../../onecad-app/tests/native_plate_support/mod.rs"]
-mod support;
+use super::test_support as support;
 
 const TEST: &str = "sketch_services::regression::upstream_width_edit_retains_authoring_and_closes_with_named_repair";
 const SKETCH: &str = "5ced698c-2b07-48cc-b602-a06aac0463d2";

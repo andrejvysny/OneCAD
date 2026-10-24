@@ -127,7 +127,7 @@ pub async fn execute(
     }
     let name = command_name(&command);
     let tag = match &command {
-        Command::Apply { tag, .. } => Some(tag.clone()),
+        Command::Apply { tag, .. } | Command::Repair { tag, .. } => Some(tag.clone()),
         _ => None,
     };
     let result = execute_command(backend, command, sender).await;
@@ -273,6 +273,9 @@ async fn execute_command(
                 .await
                 .map_err(|e| e.to_string())?
         }
+        Command::Repair { tag, repair } => {
+            return crate::provisional::repair(backend, tag, *repair, sender).await;
+        }
         Command::Apply {
             tag,
             command,
@@ -385,10 +388,29 @@ pub async fn candidate(backend: &Backend, generation: u64, candidate: Candidate)
     if !backend.shared.is_current(generation) {
         return;
     }
-    if let Candidate::PreviewExistingEdit { tag, operation } = candidate {
-        edit_preview_service::candidate(backend, generation, tag, *operation).await;
-        return;
-    }
+    let candidate = match candidate {
+        Candidate::PreviewExistingEdit { tag, operation } => {
+            edit_preview_service::candidate(
+                backend,
+                generation,
+                tag,
+                edit_preview_service::Edit::Parameters(operation),
+            )
+            .await;
+            return;
+        }
+        Candidate::PreviewInputRepair { tag, repair } => {
+            edit_preview_service::candidate(
+                backend,
+                generation,
+                tag,
+                edit_preview_service::Edit::Repair(repair),
+            )
+            .await;
+            return;
+        }
+        candidate => candidate,
+    };
     let mut prepared = None;
     let mut retained_scene = None;
     let mut preparation = None;
@@ -442,7 +464,9 @@ pub async fn candidate(backend: &Backend, generation: u64, candidate: Candidate)
         None
     };
     let action = match candidate {
-        Candidate::PreviewExistingEdit { .. } => unreachable!("existing edit routed above"),
+        Candidate::PreviewExistingEdit { .. } | Candidate::PreviewInputRepair { .. } => {
+            unreachable!("existing edit routed above")
+        }
         Candidate::Evaluate {
             tag,
             expression,

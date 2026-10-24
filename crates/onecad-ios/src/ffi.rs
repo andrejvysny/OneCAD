@@ -62,6 +62,7 @@ pub const FRAME_A11Y_CHANGED: u32 = 1 << 2;
 pub const FRAME_HOST_REQUESTS: u32 = 1 << 3;
 pub const FRAME_KERNEL_TERMINAL: u32 = 1 << 4;
 pub const FRAME_PRESENTED: u32 = 1 << 5;
+pub const FRAME_DARK_APPEARANCE: u32 = 1 << 6;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]

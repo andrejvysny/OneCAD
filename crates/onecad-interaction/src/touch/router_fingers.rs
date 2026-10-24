@@ -87,8 +87,8 @@ impl Router {
         }
     }
 
-    /// An undecided finger lifted: a quick one within the slop is a tap at its
-    /// begin position; a long press does nothing.
+    /// Only a nonstrict canvas may turn a quick finger lift into a tap.
+    /// Pencil-only canvases and long presses leave the pointer untouched.
     pub(super) fn finger_ended(
         &mut self,
         sample: &Sample,
@@ -110,7 +110,7 @@ impl Router {
         let begin = track.begin;
         let tap_count = track.tap_count;
         self.tracks.remove(&contact);
-        if quick && !self.pointer_live() {
+        if quick && !ctx.pencil_only_drawing && !self.pointer_live() {
             out.push(RoutedEvent::Press {
                 contact,
                 owner: Owner::Tap,

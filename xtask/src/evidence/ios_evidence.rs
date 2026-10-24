@@ -31,6 +31,7 @@ pub(super) const BUNDLES: [(&str, &str, &str, bool); 3] = [
 ];
 pub(super) const SIMULATOR_BUNDLE: &str = "iphonesimulator-Debug-test-hooks";
 pub(super) const MAC_FIXTURE: &str = "mac-authored/mac-plate.onecad";
+pub(super) const FIXTURE_CARRIER_BUNDLE: &str = "com.onecad.fixture-source";
 
 pub(super) fn json(path: &Path) -> Result<Value> {
     let bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -82,6 +83,7 @@ pub(super) fn verify(dir: &Path, root: &Path) -> Vec<String> {
     };
     let run_id = run["runId"].as_str().unwrap_or_default().to_string();
     note("tests", tests(dir, root, &run));
+    note("public fixture", verify_public_fixture(dir, &run_id));
     note("artifacts", artifacts(dir, root, &run_id, &simulator));
     note("oracle", oracle(dir, root, &run));
     for platform in [Platform::Device, Platform::Simulator] {
@@ -130,6 +132,42 @@ fn tests(dir: &Path, root: &Path, run: &Value) -> Result<()> {
         &inventory,
         udid,
     )
+}
+
+/// Archived evidence may move; the recorded origin still identifies MAC_FIXTURE.
+pub(super) fn verify_public_fixture(dir: &Path, run_id: &str) -> Result<()> {
+    let manifest = dir.join("public-fixture.json");
+    let fixture = dir.join(MAC_FIXTURE);
+    if !fs::symlink_metadata(&manifest)?.is_file() || !fs::symlink_metadata(&fixture)?.is_file() {
+        return Err("public fixture record and Mac source must be regular files".into());
+    }
+    let record = json(&manifest)?;
+    let source = Path::new(
+        record["source"]
+            .as_str()
+            .ok_or("public fixture source missing")?,
+    );
+    let matches_source =
+        source == Path::new(MAC_FIXTURE) || source.is_absolute() && source.ends_with(MAC_FIXTURE);
+    let name = format!("MacInput-{run_id}.onecad");
+    if record["runId"] != run_id
+        || record["carrierBundleId"] != FIXTURE_CARRIER_BUNDLE
+        || record["name"] != name
+        || record["destination"] != format!("Documents/{name}")
+        || !matches_source
+    {
+        return Err(
+            "public fixture record names another run, carrier, source or public destination".into(),
+        );
+    }
+    let bytes = fs::read(&fixture)?;
+    if bytes.is_empty()
+        || record["bytes"].as_u64() != Some(bytes.len() as u64)
+        || record["sha256"] != hash(&bytes)
+    {
+        return Err("public fixture record differs from the same-run Mac source bytes".into());
+    }
+    Ok(())
 }
 
 fn artifacts(dir: &Path, root: &Path, run_id: &str, simulator: &Value) -> Result<()> {

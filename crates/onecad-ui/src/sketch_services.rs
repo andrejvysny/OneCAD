@@ -14,6 +14,10 @@ use tokio::sync::OwnedSemaphorePermit;
 
 #[derive(Debug)]
 pub enum Request {
+    CreateDatum {
+        context: DocumentContext,
+        datum: Box<onecad_core::document::datum::DatumPlane>,
+    },
     SelectionPreview {
         expected: api::PreviewContext,
         id: SketchId,
@@ -98,6 +102,11 @@ enum Reply {
     Discarded(onecad_app::dto::CancelSketchDto),
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../onecad-app/tests/native_plate_support/mod.rs"]
+pub(crate) mod test_support;
+
 #[cfg(all(test, feature = "desktop"))]
 #[path = "sketch_services/regression.rs"]
 mod regression;
@@ -108,6 +117,10 @@ pub async fn execute(
     permit: OwnedSemaphorePermit,
     sender: &mpsc::Sender<Message>,
 ) {
+    if let Request::CreateDatum { context, datum } = &request {
+        execute_datum(backend, context, datum.as_ref().clone(), permit, sender).await;
+        return;
+    }
     if let Request::SelectionPreview {
         expected,
         id,
@@ -219,6 +232,7 @@ async fn run(
 ) -> Result<Reply, String> {
     let state = &backend.state;
     match request {
+        Request::CreateDatum { .. } => Err("Datum creation has its own completion".into()),
         Request::SelectionPreview { .. } => Err("Sketch preview is read-only".into()),
         Request::FacePreview { .. } => Err("Face preview is read-only".into()),
         Request::FaceEntry {
@@ -293,6 +307,62 @@ async fn run(
             execute_effect(backend, effect, actions, control).await
         }
     }
+}
+
+async fn execute_datum(
+    backend: &mut Backend,
+    context: &DocumentContext,
+    datum: onecad_core::document::datum::DatumPlane,
+    permit: OwnedSemaphorePermit,
+    sender: &mpsc::Sender<Message>,
+) {
+    let result = create_datum(&backend.state, backend.host.clone(), context, datum).await;
+    let result = match result {
+        Ok(receipt) => complete(backend, receipt)
+            .await
+            .map(|_| crate::outcome::CommandOutcome {
+                completion: None,
+                rollback: None,
+            }),
+        Err(error) => Err(error),
+    };
+    backend.events.finish();
+    crate::document_state::refresh(backend).await;
+    match crate::services::load_ready_display(backend).await {
+        Ok(display) => backend.shared.publish_display(display),
+        Err(error) => {
+            crate::services::invalidate(&backend.shared, format!("Datum refresh failed: {error}"))
+        }
+    }
+    let _ = sender.send(Message::Terminal {
+        command: "Create Datum Plane",
+        tag: None,
+        result,
+        _permit: permit,
+    });
+    backend.shared.wake();
+}
+
+pub(crate) async fn create_datum(
+    state: &onecad_app::state::AppState,
+    host: onecad_app::host::HostContext,
+    context: &DocumentContext,
+    datum: onecad_core::document::datum::DatumPlane,
+) -> Result<api::CommandCompletion<onecad_app::dto::DocumentProjection>, String> {
+    if datum.kind != onecad_core::document::datum::DatumKind::OffsetFromPlane
+        || !matches!(datum.base_plane_id.as_str(), "XY" | "XZ" | "YZ")
+        || !datum.offset.is_finite()
+    {
+        return Err("Offset datum requires XY, XZ or YZ and a finite offset in mm".into());
+    }
+    check_context(state, context).await?;
+    api::apply_edit_command_with_completion(
+        state,
+        host,
+        onecad_core::edit::EditCommand::AddDatumPlane { datum },
+    )
+    .await
+    .map_err(|error| error.to_string())
 }
 
 async fn selection_preview(

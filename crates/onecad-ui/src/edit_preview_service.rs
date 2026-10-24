@@ -7,12 +7,12 @@ use onecad_app::{
 use onecad_core::document::record::Operation;
 use onecad_interaction::RequestTag;
 
-pub(super) async fn candidate(
-    backend: &Backend,
-    generation: u64,
-    tag: RequestTag,
-    operation: Operation,
-) {
+pub(super) enum Edit {
+    Parameters(Box<Operation>),
+    Repair(Box<onecad_app::api::InputRepair>),
+}
+
+pub(super) async fn candidate(backend: &Backend, generation: u64, tag: RequestTag, edit: Edit) {
     let lease = backend
         .shared
         .host_budget
@@ -48,7 +48,7 @@ pub(super) async fn candidate(
         Ok((source, preparation)) => {
             delivery.lease = Some(Arc::new(source));
             let preparation = Arc::new(preparation);
-            preview(backend, &tag, operation).await.and_then(|result| {
+            preview(backend, &tag, edit).await.and_then(|result| {
                 prepare(backend, &tag, &result, &mut delivery, preparation)?;
                 Ok(result)
             })
@@ -102,22 +102,25 @@ fn prepare(
     Ok(())
 }
 
-async fn preview(
-    backend: &Backend,
-    tag: &RequestTag,
-    operation: Operation,
-) -> Result<EditPreview, ApiError> {
+async fn preview(backend: &Backend, tag: &RequestTag, edit: Edit) -> Result<EditPreview, ApiError> {
     let fence = super::check_tag(&backend.state, tag)
         .await
         .map_err(ApiError::StalePreview)?;
-    let result = api::preview_existing_edit(
-        &backend.state,
-        fence.clone(),
-        tag.record_id,
-        operation,
-        Lod::Coarse,
-    )
-    .await?;
+    let result = match edit {
+        Edit::Parameters(operation) => {
+            api::preview_existing_edit(
+                &backend.state,
+                fence.clone(),
+                tag.record_id,
+                *operation,
+                Lod::Coarse,
+            )
+            .await?
+        }
+        Edit::Repair(repair) => {
+            api::preview_input_repair(&backend.state, &repair, Lod::Coarse).await?
+        }
+    };
     if api::preview_context(&backend.state).await? != fence
         || result.snapshot_id != fence.snapshot_id
     {

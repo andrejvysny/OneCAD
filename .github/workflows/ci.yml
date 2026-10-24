@@ -167,6 +167,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Fingerprint normalizer tests
         run: scripts/tests/occt-fingerprint.test.sh
+      - name: macOS packaging policy tests
+        run: |
+          scripts/tests/macos-signing.test.sh
+          scripts/tests/macos-minimum.test.sh
 
   occt-8-0-1:
     name: build OCCT 8.0.1

@@ -37,8 +37,8 @@
     "OneCADUITests/DocumentPickerTests/testSendACopyOfASavedDocumentOpensTheExportPicker()",
     "OneCADUITests/LaunchTests/testLaunchShowsCanvasAndFileMenu()",
     "OneCADUITests/OrientationTests/testRotationKeepsAppResponsive()",
-    "OneCADUITests/RequiredWorkflowTests/testNamedPlateSaveAsAndStepExportThroughNativePrompts()",
-    "OneCADUITests/RequiredWorkflowTests/testPlateWithHoleEditUndoSaveReopen()",
+    "OneCADUITests/RequiredWorkflowTests/testOpenedPlateSaveAsAndStepExportThroughNativePrompts()",
+    "OneCADUITests/RequiredWorkflowTests/testPencilOnlyCanvasWithNumericControlsHistoryUndoSaveReopen()",
     "OneCADUITests/SaveAllTests/testSaveAllAsksForEachUntitledDocumentAndReportsACancel()",
     "OneCADUITests/SurfaceLifecycleTests/testViewportReturnsAfterRotationAndBackgrounding()"
   ],

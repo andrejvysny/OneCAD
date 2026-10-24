@@ -34,7 +34,7 @@
 //! field on a terminal event. `timestamp`/`level`/`target`/`span`/`message` are
 //! RESERVED event-field names.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -112,7 +112,21 @@ fn open_sink(
 /// installed one) is a no-op rather than a panic.
 #[must_use]
 pub fn init() -> Option<WorkerGuard> {
-    let sink = log_dir().map(|dir| (dir.clone(), open_sink(&dir)));
+    init_directory(log_dir())
+}
+
+/// Uses a host-owned log directory unless the user explicitly configures logging.
+#[must_use]
+pub fn init_with_default_directory(default: &Path) -> Option<WorkerGuard> {
+    let directory = match std::env::var("ONECAD_LOG_DIR") {
+        Ok(value) if !value.trim().is_empty() => log_dir(),
+        _ => Some(default.to_path_buf()),
+    };
+    init_directory(directory)
+}
+
+fn init_directory(directory: Option<PathBuf>) -> Option<WorkerGuard> {
+    let sink = directory.map(|dir| (dir.clone(), open_sink(&dir)));
     let (dir, layer, guard, error) = match sink {
         Some((dir, Ok((writer, guard)))) => {
             (Some(dir), Some(json_layer(writer)), Some(guard), None)

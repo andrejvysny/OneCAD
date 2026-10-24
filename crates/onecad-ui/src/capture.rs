@@ -20,7 +20,7 @@ pub async fn load_display(backend: &mut Backend) -> Result<Display, String> {
             crate::budget::DISPLAY_RESERVATION,
             crate::budget::Kind::Display,
             || {
-                !backend
+                let current = !backend
                     .shared
                     .stopping
                     .load(std::sync::atomic::Ordering::Acquire)
@@ -28,7 +28,18 @@ pub async fn load_display(backend: &mut Backend) -> Result<Display, String> {
                         .shared
                         .display_epoch
                         .load(std::sync::atomic::Ordering::Acquire)
-                        == epoch
+                        == epoch;
+                if current
+                    && !backend
+                        .shared
+                        .host_budget
+                        .has_capacity(crate::budget::DISPLAY_RESERVATION)
+                {
+                    // Reused geometry can keep an older admission in this cache.
+                    // Live prepared scenes and GPU sources retain their own guards.
+                    drop(backend.shared.take_preparation_cache());
+                }
+                current
             },
         )
         .await?
@@ -101,15 +112,7 @@ pub async fn load_display(backend: &mut Backend) -> Result<Display, String> {
             .await
             .map_err(|error| error.to_string())?;
         record_budget.charge(&record)?;
-        if matches!(
-            record.op,
-            onecad_core::document::record::Operation::Known(
-                onecad_core::document::record::KnownOperation::Sketch(_)
-            )
-        ) || !onecad_interaction::numeric_parameters(&record.op).is_empty()
-        {
-            records.push(record);
-        }
+        records.push(record);
     }
     let profiles = crate::profile_capture::load(backend, &projection, &records).await?;
     if api::preview_context(&backend.state)

@@ -2,6 +2,7 @@
 use crate::{
     bridge::{Backend, Message},
     document_flow::{ExportFormat, Outcome, Request},
+    path_policy::{PathPolicy, target_path},
 };
 use onecad_app::{api, host::FileDialog};
 use std::{
@@ -69,9 +70,9 @@ pub fn refresh_recents(backend: &Backend) {
     let root = backend.paths.documents.clone();
     let mut entries = onecad_app::recents::list(&backend.host);
     entries.retain(|entry| {
-        Path::new(&entry.path)
-            .canonicalize()
-            .is_ok_and(|path| path.starts_with(&root))
+        Path::new(&entry.path).canonicalize().is_ok_and(|path| {
+            backend.paths.policy == PathPolicy::Desktop || path.starts_with(&root)
+        })
     });
     entries.truncate(10);
     for entry in &mut entries {
@@ -263,7 +264,7 @@ async fn open(backend: &mut Backend, source: &Path, import: bool) -> Result<Outc
     let path = if step {
         source.to_owned()
     } else {
-        copy_for_open(&backend.paths.documents, source)?
+        backend.paths.open_source(source)?
     };
     match replace_from_path(backend, &path, step).await {
         Err(onecad_app::error::ApiError::AlreadyOpen { host, .. })
@@ -338,18 +339,30 @@ async fn replacement_outcome(backend: &mut Backend) -> Result<Outcome, String> {
 }
 
 async fn save(backend: &Backend, save_as: bool) -> Result<Outcome, String> {
-    save_to_qa(
+    save_with_policy(
         &backend.state,
         backend.host.clone(),
+        backend.paths.policy,
         &backend.paths.documents,
         save_as,
     )
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn save_to_qa(
     state: &onecad_app::state::AppState,
     host: onecad_app::host::HostContext,
+    documents: &Path,
+    save_as: bool,
+) -> Result<Outcome, String> {
+    save_with_policy(state, host, PathPolicy::Qa, documents, save_as).await
+}
+
+async fn save_with_policy(
+    state: &onecad_app::state::AppState,
+    host: onecad_app::host::HostContext,
+    policy: PathPolicy,
     documents: &Path,
     save_as: bool,
 ) -> Result<Outcome, String> {
@@ -361,7 +374,7 @@ pub(crate) async fn save_to_qa(
         .and_then(|runtime| runtime.path().map(Path::to_owned));
     let needs_path = current
         .as_ref()
-        .is_none_or(|path| confined_target(documents, path).is_err());
+        .is_none_or(|path| target_path(policy, documents, path).is_err());
     let target = if save_as || needs_path {
         let request = save_dialog(state, current.as_deref()).await;
         let paths = host.dialogs.pick(request).await;
@@ -372,8 +385,11 @@ pub(crate) async fn save_to_qa(
     } else {
         current.ok_or("No save path")?
     };
-    let target = confined_target(documents, &target)?;
-    if target.extension().and_then(|s| s.to_str()) != Some("onecad") {
+    let target = target_path(policy, documents, &target)?;
+    if !target
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("onecad"))
+    {
         return Err("Save requires a .onecad filename".into());
     }
     api::save_document(
@@ -422,7 +438,7 @@ async fn export(backend: &Backend, format: ExportFormat) -> Result<Outcome, Stri
     let Some(path) = paths.first() else {
         return Ok(Outcome::Cancelled);
     };
-    let path = confined_target(&backend.paths.documents, Path::new(path))?;
+    let path = backend.paths.target(Path::new(path))?;
     validate_export_extension(format, &path)?;
     let target = Some(path.to_string_lossy().into_owned());
     let result = match format {
@@ -490,31 +506,12 @@ fn validate_export_extension(format: ExportFormat, path: &Path) -> Result<(), St
     }
 }
 
+#[cfg(test)]
 fn confined_target(documents: &Path, target: &Path) -> Result<PathBuf, String> {
-    let documents = documents.canonicalize().map_err(|e| e.to_string())?;
-    if !target.is_absolute() {
-        return Err("Save and export require absolute QA paths".into());
-    }
-    if target
-        .symlink_metadata()
-        .is_ok_and(|m| m.file_type().is_symlink())
-    {
-        return Err("Save and export destinations must not be symlinks".into());
-    }
-    let parent = target
-        .parent()
-        .ok_or("Missing destination directory")?
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
-    if !parent.starts_with(&documents) {
-        return Err(
-            "Save and export must remain inside the isolated QA documents directory".into(),
-        );
-    }
-    Ok(parent.join(target.file_name().ok_or("Missing destination filename")?))
+    target_path(PathPolicy::Qa, documents, target)
 }
 
-fn copy_for_open(documents: &Path, source: &Path) -> Result<PathBuf, String> {
+pub(crate) fn copy_for_open(documents: &Path, source: &Path) -> Result<PathBuf, String> {
     let source = source.canonicalize().map_err(|e| e.to_string())?;
     let documents = documents.canonicalize().map_err(|e| e.to_string())?;
     if source.starts_with(&documents) {

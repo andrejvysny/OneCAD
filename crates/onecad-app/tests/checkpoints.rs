@@ -43,6 +43,9 @@ use onecad_app::document_runtime::{DocumentRuntime, RegenReport};
 use onecad_app::worker::manager::{SupervisorConfig, WorkerState};
 use onecad_app::worker::{resolve_worker_path, MeshProvider, SolverEngine, WorkerManager};
 
+#[path = "checkpoints/status_retention.rs"]
+mod status_retention;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Harness (mirrors wire_contract.rs)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -510,6 +513,14 @@ async fn checkpoint_incremental_matches_from_zero_and_stays_in_session() {
         "the incremental regen selected the step-1 checkpoint (RestoreCheckpoint path)"
     );
     let (inc_sig, inc_bodies) = head_geometry(&inc_report, "incremental");
+    assert!(
+        rt.projection()
+            .features
+            .iter()
+            .all(|feature| feature.status == onecad_app::dto::FeatureStatus::Ok),
+        "checkpoint reuse must preserve every applied prefix feature status: {:?}",
+        rt.projection().features
+    );
 
     // ── (3) The determinism cross-check: incremental == forced from-0 ──────────
     assert_eq!(inc_bodies, base_bodies, "incremental body count == from-0");
@@ -526,6 +537,11 @@ async fn checkpoint_incremental_matches_from_zero_and_stays_in_session() {
     let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
     let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
     let reopened = DocumentRuntime::open(&path, engine, meshes, solver).expect("reopen container");
+    assert!(reopened
+        .projection()
+        .features
+        .iter()
+        .all(|feature| feature.status == onecad_app::dto::FeatureStatus::Dirty));
     assert_eq!(
         reopened.checkpoint_count(),
         0,

@@ -43,6 +43,23 @@ settings:
       GCC_PREPROCESSOR_DEFINITIONS: DEBUG=1 ONECAD_ACCEPTANCE=1
 
 targets:
+  # Public Files provider for simulator acceptance inputs only. The shipping
+  # host keeps its copy-only document policy and has no dependency on this app.
+  OneCADFixtureSource:
+    type: application
+    platform: iOS
+    sources:
+      - path: OneCADFixtureSource
+    settings:
+      base:
+        PRODUCT_NAME: OneCADFixtureSource
+        PRODUCT_BUNDLE_IDENTIFIER: com.onecad.fixture-source
+        TARGETED_DEVICE_FAMILY: "2"
+        SUPPORTED_PLATFORMS: iphonesimulator
+        INFOPLIST_FILE: OneCADFixtureSource/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        SKIP_INSTALL: YES
+
   OneCAD:
     type: application
     platform: iOS
@@ -61,6 +78,7 @@ targets:
       base:
         PRODUCT_NAME: OneCAD
         PRODUCT_BUNDLE_IDENTIFIER: com.onecad.ipad
+        TARGETED_DEVICE_FAMILY: "2"
         INFOPLIST_FILE: OneCAD/Info.plist
         GENERATE_INFOPLIST_FILE: NO
         SWIFT_OBJC_BRIDGING_HEADER: OneCAD/OneCAD-Bridging-Header.h
@@ -112,6 +130,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.onecad.ipad.nativetests
+        TARGETED_DEVICE_FAMILY: "2"
         GENERATE_INFOPLIST_FILE: YES
         SWIFT_OBJC_BRIDGING_HEADER: OneCADNativeTests/OneCADNativeTests-Bridging-Header.h
 
@@ -125,9 +144,16 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.onecad.ipad.uitests
+        TARGETED_DEVICE_FAMILY: "2"
         GENERATE_INFOPLIST_FILE: YES
 
 schemes:
+  OneCADFixtureSource:
+    build:
+      targets:
+        OneCADFixtureSource: [run, test, analyze]
+    run:
+      config: Acceptance
   OneCADiPad:
     build:
       targets:

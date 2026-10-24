@@ -46,6 +46,9 @@ pub const REQUIRED_SOURCE: &[&str] = &[
     "scripts/occt-fingerprint.sh",
     "scripts/package-macos.sh",
     "scripts/bundle-dylibs.sh",
+    "scripts/macos-signing.sh",
+    "scripts/macos-minimum.sh",
+    "packaging/macos/host-entitlements.plist",
     "docs/PACKAGING.md",
 ];
 

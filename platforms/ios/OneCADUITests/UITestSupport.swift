@@ -10,6 +10,7 @@ enum OneCADID {
     static let fileNew = "onecad.menu.file.new"
     static let viewport = "onecad.viewport"
     static let saveName = "onecad.save.name"
+    static let keyInputProxy = "onecad.keyInputProxy"
 }
 
 extension XCUIApplication {

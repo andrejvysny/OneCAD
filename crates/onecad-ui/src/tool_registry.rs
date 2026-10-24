@@ -235,7 +235,7 @@ pub fn unavailable_reason(id: ToolId) -> &'static str {
         }
         ToolId::Project => "Native projection workflow is planned (ONECAD-296)",
         ToolId::Spline => "Native spline creation is planned (ONECAD-298)",
-        ToolId::Sweep | ToolId::Loft => "Kernel executor is not implemented (ONECAD-314)",
+        ToolId::Sweep => "Kernel executor is not implemented (ONECAD-314)",
         ToolId::FeaturePattern => "Native feature-pattern expansion is planned (ONECAD-29)",
         ToolId::Isolate | ToolId::Hide => {
             "Native temporary/persistent body visibility is planned (ONECAD-320)"
@@ -375,7 +375,7 @@ fn running_operand_kind(tool: ToolId) -> SelectionKind {
         | ToolId::Boolean => SelectionKind::Body,
         ToolId::OffsetFace | ToolId::Shell | ToolId::Hole => SelectionKind::Face,
         ToolId::Fillet | ToolId::Chamfer => SelectionKind::Edge,
-        ToolId::Extrude | ToolId::Revolve => SelectionKind::Region,
+        ToolId::Extrude | ToolId::Revolve | ToolId::Loft => SelectionKind::Region,
         _ => SelectionKind::None,
     }
 }
@@ -426,6 +426,9 @@ mod tests {
                     | ToolId::Chamfer
                     | ToolId::OffsetFace
                     | ToolId::Revolve
+                    | ToolId::Loft
+                    | ToolId::DatumPlane
+                    | ToolId::OffsetPlane
                     | ToolId::Shell
                     | ToolId::Hole
                     | ToolId::Boolean

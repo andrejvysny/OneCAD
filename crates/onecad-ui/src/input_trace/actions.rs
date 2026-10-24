@@ -14,6 +14,7 @@ pub(crate) fn model(action: &Action) -> Value {
         Action::BeginEdit { .. } => "BeginEdit",
         Action::BeginParameterEdit { .. } => "BeginParameterEdit",
         Action::BeginOperationEdit { .. } => "BeginOperationEdit",
+        Action::BeginInputRepair { .. } => "BeginInputRepair",
         Action::ModelingOptionsChanged { .. } => "ModelingOptionsChanged",
         Action::DraftChanged(_) => "DraftChanged",
         Action::ParameterChanged { .. } => "ParameterChanged",
@@ -51,6 +52,7 @@ pub(crate) fn sketch(action: &SketchAction) -> Value {
         SketchAction::Move(_) => "Move",
         SketchAction::Click { .. } => "Click",
         SketchAction::ClickInferred { .. } => "ClickInferred",
+        SketchAction::CommitPrimitiveDrag(_) => "CommitPrimitiveDrag",
         SketchAction::CommitStroke { .. } => "CommitStroke",
         SketchAction::BeginPointNumeric { .. } => "BeginPointNumeric",
         SketchAction::PreviewNumeric { .. } => "PreviewNumeric",
@@ -89,6 +91,12 @@ pub(crate) fn sketch(action: &SketchAction) -> Value {
         }
         SketchAction::Select { targets, .. } => detail["targets"] = json!(targets.len()),
         SketchAction::SetTool(tool) => detail["tool"] = json!(format!("{tool:?}")),
+        SketchAction::CommitPrimitiveDrag(drag) => {
+            detail["tool"] = json!(format!("{:?}", drag.tool));
+            detail["start"] = json!([drag.start.point.x, drag.start.point.y]);
+            detail["end"] = json!([drag.end.point.x, drag.end.point.y]);
+            detail["capture_view"] = json!(drag.end.capture.view);
+        }
         _ => {}
     }
     detail

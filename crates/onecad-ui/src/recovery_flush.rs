@@ -174,15 +174,22 @@ async fn flush_idle(
         cancel.notified(),
     );
     tokio::pin!(work);
-    let outcome = tokio::select! {
+    let (outcome, keep_running) = tokio::select! {
         biased;
-        _ = stopped => { cancel.notify_one(); let _ = work.await; return false; }
-        outcome = &mut work => outcome,
+        _ = stopped => { cancel.notify_one(); (work.await, false) }
+        outcome = &mut work => (outcome, true),
     };
+    publish_checkpoint(host, &outcome);
     if let AutosaveAttempt::Failed(event) = outcome {
         tracing::warn!(error = ?event.error, "Recovery checkpoint failed");
     }
-    true
+    keep_running
+}
+
+fn publish_checkpoint(host: &HostContext, outcome: &AutosaveAttempt) {
+    if let AutosaveAttempt::Written(event) | AutosaveAttempt::Failed(event) = outcome {
+        let _ = host.emit(onecad_app::host::AppEvent::Autosave(event.clone()));
+    }
 }
 
 async fn flush_tickets(
@@ -241,6 +248,7 @@ async fn checkpoint_until(
         stop,
     )
     .await;
+    publish_checkpoint(host, &outcome);
     ticket.complete(match outcome {
         AutosaveAttempt::Skipped => Status::Skipped,
         AutosaveAttempt::Written(_) => Status::Written,

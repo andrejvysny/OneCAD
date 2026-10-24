@@ -13,6 +13,9 @@ use onecad_core::{
 };
 use std::sync::Arc;
 
+#[path = "desktop_recovery_tests.rs"]
+mod desktop_tests;
+
 struct Quiet;
 impl EventSink for Quiet {
     fn emit(&self, _: AppEvent) -> Result<(), String> {

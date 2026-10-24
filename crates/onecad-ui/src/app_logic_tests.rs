@@ -212,6 +212,9 @@ mod overlay_routing_tests;
 #[path = "diagnostic_delivery_tests.rs"]
 mod diagnostic_delivery_tests;
 
+#[path = "autosave_delivery_tests.rs"]
+mod autosave_delivery_tests;
+
 #[path = "dimension_delivery_tests.rs"]
 mod dimension_delivery_tests;
 
@@ -231,6 +234,9 @@ mod selection_delivery_tests;
 mod gesture_delivery_tests;
 #[path = "point_center_delivery_tests.rs"]
 mod point_center_delivery_tests;
+
+#[path = "sketch_primitive_drag_delivery_tests.rs"]
+mod sketch_primitive_drag_delivery_tests;
 
 #[path = "arc_gesture_delivery_tests.rs"]
 mod arc_gesture_delivery_tests;

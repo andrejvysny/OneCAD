@@ -34,6 +34,9 @@ struct Item {
 #[derive(Clone, Copy)]
 struct Pointer {
     contact: u64,
+    kind: ContactKind,
+    /// Only a router-admitted finger on chrome may participate in egui touch gestures.
+    control_touch: bool,
     last: Pos2,
     /// Its press has reached egui (a frame drained it).
     delivered: bool,
@@ -96,6 +99,7 @@ pub struct Input {
     generation: u64,
     contact_epoch: u64,
     pointer_kind: Option<ContactKind>,
+    pointer_kind_conflict: bool,
     pencil_double_tap: Option<bool>,
     activations: Vec<Pos2>,
 }
@@ -121,6 +125,7 @@ impl Default for Input {
             generation: 0,
             contact_epoch: 0,
             pointer_kind: None,
+            pointer_kind_conflict: false,
             pencil_double_tap: None,
             activations: Vec::new(),
         }
@@ -341,11 +346,12 @@ impl Input {
         if again {
             self.gone = Gone::Due;
         }
+        let conflict = std::mem::take(&mut self.pointer_kind_conflict);
         let pointer_kind = self.pointer_kind.take().map(|kind| match kind {
+            _ if conflict => onecad_ui::host::PointerKind::Precise,
             ContactKind::Finger => onecad_ui::host::PointerKind::Finger,
-            ContactKind::Pencil | ContactKind::IndirectPointer => {
-                onecad_ui::host::PointerKind::Precise
-            }
+            ContactKind::Pencil => onecad_ui::host::PointerKind::Pencil,
+            ContactKind::IndirectPointer => onecad_ui::host::PointerKind::Precise,
         });
         Drained {
             events,
@@ -424,3 +430,7 @@ mod tests;
 #[cfg(test)]
 #[path = "input_prediction_tests.rs"]
 mod prediction_tests;
+
+#[cfg(test)]
+#[path = "input_scroll_tests.rs"]
+mod scroll_tests;

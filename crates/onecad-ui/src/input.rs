@@ -128,16 +128,20 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     crate::sketch_gestures::route_raw(app, ctx, raw);
     // The switcher runs later, in event order; its abandoning Escape must not
     // first cancel the shown document's chain.
-    match crate::tab_switcher::without_own_escape(app, &raw.events) {
+    let primitive_escape = match crate::tab_switcher::without_own_escape(app, &raw.events) {
         Some(events) => {
             let unowned = egui::RawInput {
                 events,
                 ..raw.clone()
             };
             crate::sketch_creation::chain_input::route_raw(app, ctx, &unowned);
+            crate::sketch_creation::primitive_drag::route_raw(app, ctx, &unowned)
         }
-        None => crate::sketch_creation::chain_input::route_raw(app, ctx, raw),
-    }
+        None => {
+            crate::sketch_creation::chain_input::route_raw(app, ctx, raw);
+            crate::sketch_creation::primitive_drag::route_raw(app, ctx, raw)
+        }
+    };
     fence_previous_frame(app, ctx);
     let blocked = app.doc.documents.confirm.is_some()
         || app.doc.items.blocks()
@@ -282,6 +286,9 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
         } if !modifiers.command)
         });
         for key in keys {
+            if key == egui::Key::Escape && primitive_escape {
+                continue;
+            }
             app.sketch_dispatch(if key == egui::Key::Enter {
                 onecad_interaction::sketch::SketchAction::Enter
             } else {

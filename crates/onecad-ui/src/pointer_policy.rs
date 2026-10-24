@@ -10,9 +10,10 @@ pub fn gesture_allowed(ui: &egui::Ui) -> bool {
 /// for a finger. Desktop never sets it, so mouse picking keeps its 8 points.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PointerKind {
-    /// Mouse, trackpad pointer or Pencil.
+    /// Mouse or trackpad pointer.
     #[default]
     Precise,
+    Pencil,
     Finger,
 }
 
@@ -27,6 +28,11 @@ fn pointer_kind_id() -> egui::Id {
 
 pub fn set_pointer_kind(ctx: &egui::Context, kind: PointerKind) {
     ctx.data_mut(|data| data.insert_temp(pointer_kind_id(), kind));
+}
+
+pub fn pointer_kind(ctx: &egui::Context) -> PointerKind {
+    ctx.data(|data| data.get_temp::<PointerKind>(pointer_kind_id()))
+        .unwrap_or_default()
 }
 
 fn pencil_double_tap_id() -> egui::Id {
@@ -45,9 +51,9 @@ pub fn pencil_double_tap(ctx: &egui::Context) -> bool {
 }
 
 pub fn edge_tolerance(ctx: &egui::Context) -> f64 {
-    match ctx.data(|data| data.get_temp::<PointerKind>(pointer_kind_id())) {
-        Some(PointerKind::Finger) => FINGER_EDGE_TOLERANCE_PT,
-        Some(PointerKind::Precise) | None => PRECISE_EDGE_TOLERANCE_PT,
+    match pointer_kind(ctx) {
+        PointerKind::Finger => FINGER_EDGE_TOLERANCE_PT,
+        PointerKind::Precise | PointerKind::Pencil => PRECISE_EDGE_TOLERANCE_PT,
     }
 }
 

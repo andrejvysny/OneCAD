@@ -375,8 +375,8 @@ mod tests {
 }
 
 mod paint;
-pub(crate) use paint::hover_target;
 pub use paint::paint;
+pub(crate) use paint::{hover_target, paint_draft};
 mod selection;
 #[cfg(test)]
 use selection::pick_sketch;

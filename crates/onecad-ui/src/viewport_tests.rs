@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "viewport_fit_tests.rs"]
+mod fit_tests;
+
 #[test]
 fn acute_profile_fill_preserves_exact_vertices_without_stroke_joins() {
     let points = [

@@ -64,6 +64,7 @@ async fn prepared_arc(root: &std::path::Path) -> (Host, ArcIds) {
         context,
     });
     host.count(2).await;
+    frame_prepared_arc(&mut host);
     host.control("Select");
     host.redraw();
     assert_arc(
@@ -74,6 +75,16 @@ async fn prepared_arc(root: &std::path::Path) -> (Host, ArcIds) {
         Some([0.0, std::f64::consts::FRAC_PI_2]),
     );
     (host, ids)
+}
+
+fn frame_prepared_arc(host: &mut Host) {
+    // Discard restored the modeling camera; keep fixture gestures above the logical-point drag threshold.
+    let plane = host.sketch().effective_plane();
+    host.app.doc.fit_pending = false;
+    host.app.doc.camera.target =
+        onecad_scene::DVec3::new(plane.origin.x, plane.origin.y, plane.origin.z);
+    host.app.doc.camera.offset =
+        onecad_scene::DVec3::new(plane.normal.x, plane.normal.y, plane.normal.z) * 120.0;
 }
 
 #[tokio::test]
@@ -203,6 +214,13 @@ fn begin_drag(
     host.redraw();
     let start = host.project(from[0], from[1]);
     let end = host.project(to[0], to[1]);
+    let threshold = host
+        .context
+        .options(|options| options.input_options.max_click_dist);
+    assert!(
+        start.distance(end) > threshold,
+        "fixture drag must exceed {threshold} points: {start:?} to {end:?}"
+    );
     host.ui(vec![egui::Event::PointerMoved(start), button(start, true)]);
     host.ui(vec![egui::Event::PointerMoved(end)]);
     assert!(

@@ -9,6 +9,22 @@ use onecad_core::{
     math::Vec3,
 };
 
+pub fn loft(
+    profiles: Vec<SketchRegionRef>,
+    id: RecordId,
+    step: u32,
+) -> Result<OperationRecord, String> {
+    let params = LoftParams {
+        profiles,
+        is_solid: true,
+        is_ruled: false,
+        boolean_mode: BooleanMode::NewBody,
+        extra: Default::default(),
+    };
+    params.validate()?;
+    Ok(record(id, step, "Loft", KnownOperation::Loft(params)))
+}
+
 pub fn shell(refs: Vec<ElementRef>, id: RecordId, step: u32) -> Result<OperationRecord, String> {
     let body = refs
         .first()

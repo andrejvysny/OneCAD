@@ -77,6 +77,57 @@ fn finger_author(input: &mut Input, contact: u64) {
 }
 
 #[test]
+fn mixed_pointer_stroke_and_pencil_hover_do_not_label_the_stroke_as_pencil() {
+    mixed_source_frame(ffi::CONTACT_INDIRECT_POINTER, ffi::CONTACT_PENCIL);
+}
+
+#[test]
+fn mixed_pencil_stroke_and_pointer_hover_do_not_author_a_pencil_primitive() {
+    mixed_source_frame(ffi::CONTACT_PENCIL, ffi::CONTACT_INDIRECT_POINTER);
+}
+
+fn mixed_source_frame(stroke: u32, hover: u32) {
+    let mut input = Input::default();
+    let samples = [
+        TouchSample {
+            kind: stroke,
+            ..actual(1, ffi::PHASE_BEGAN, 0.0, 1.0)
+        },
+        TouchSample {
+            kind: stroke,
+            ..actual(1, ffi::PHASE_MOVED, 0.1, 20.0)
+        },
+        TouchSample {
+            kind: stroke,
+            ..actual(1, ffi::PHASE_ENDED, 0.2, 30.0)
+        },
+        TouchSample {
+            kind: hover,
+            ..actual(2, ffi::PHASE_HOVER_MOVED, 0.3, 40.0)
+        },
+    ];
+    submit(&mut input, &samples, 0);
+    let frame = input.drain();
+    assert_eq!(presses(&frame.events), [true, false]);
+    assert_eq!(
+        frame.pointer_kind,
+        Some(onecad_ui::host::PointerKind::Precise)
+    );
+    assert!(!frame.cancelled);
+    submit(&mut input, &[actual(3, ffi::PHASE_BEGAN, 0.4, 50.0)], 0);
+    assert_eq!(
+        input.drain().pointer_kind,
+        Some(onecad_ui::host::PointerKind::Pencil),
+        "mixed provenance belongs only to its pending frame"
+    );
+    submit(&mut input, &[actual(3, ffi::PHASE_MOVED, 0.5, 60.0)], 0);
+    assert_eq!(
+        input.drain().pointer_kind,
+        Some(onecad_ui::host::PointerKind::Pencil)
+    );
+}
+
+#[test]
 fn focus_loss_clears_modifiers_but_contact_cancellation_preserves_them() {
     let mut input = Input::default();
     let key = ffi::KeyEvent {
@@ -199,7 +250,7 @@ fn cancellation_never_releases_and_ignores_other_contacts() {
     assert_eq!(first.events.len(), 2, "only the first Pencil presses");
     assert_eq!(
         first.pointer_kind,
-        Some(onecad_ui::host::PointerKind::Precise)
+        Some(onecad_ui::host::PointerKind::Pencil)
     );
     submit(&mut input, &[actual(1, ffi::PHASE_MOVED, 0.2, 8.0)], 0);
     input.cancel_all(CancelReason::SystemGesture);

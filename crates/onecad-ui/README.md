@@ -4,8 +4,20 @@ This macOS host uses the shared application services, interaction reducer, check
 CPU scene and renderer. It implements the first prepared-profile workflow:
 viewport profile selection, new extrusion preview and commit, applicable typed numeric
 feature edits, world-plane and planar-face sketch entry and existing sketch editing with line/rectangle/circle
-batches, scoped sketch undo/redo, finish/discard, body Move / Rotate, model undo/redo, save, and reopen of the saved copy. Build and automated
+batches, scoped sketch undo/redo, finish/discard, body Move / Rotate, model undo/redo, save, and reopen. Build and automated
 tests do not establish native input, appearance, accessibility or workflow acceptance.
+
+Launch `onecad-ui` without arguments for the desktop start page, or use
+`onecad-ui --open /absolute/path/part.onecad`. On macOS, the persistent profile
+lives under `~/Library/Application Support/OneCAD/` (`data/`, `config/` and
+`Recovered/`), caches under `~/Library/Caches/OneCAD/`, and logs under
+`~/Library/Logs/OneCAD/`. Temporary imports use the OS temporary directory.
+An exclusive profile lock prevents concurrent desktop processes from sharing
+settings and recovery state. Opening a `.onecad` file retains its canonical user
+path; Save updates it atomically. Save As and geometry export accept destinations
+chosen through native dialogs outside `~/Documents`, which is only their initial
+directory. `ONECAD_LOG_DIR` overrides the default log directory; `off` disables
+file logging. Startup does not modify process environment.
 
 The [native sketch and extrusion editing contract](../../docs/design/native-sketch-editing.md)
 defines selection, input ownership, dimension authorship and admission behavior.
@@ -33,8 +45,8 @@ with parallel Make.
 Override `QA_ROOT`, `FIXTURE`, `DOCUMENT`, `QA_DOCUMENT`, `WORKER_BUILD_DIR`, `WORKER`, `TARGET_DIR`,
 or `APP_BINARY` with Make variables as needed. `TARGET_DIR` defaults to
 `CARGO_TARGET_DIR` when set, otherwise the repository's `target` directory.
-`DOCUMENT` must be a `.onecad` file in temporary storage,
-because this host still enforces QA isolation. For example:
+`DOCUMENT` must be a `.onecad` file in temporary storage for the explicit QA
+launch used by these Make targets. For example:
 
 ```sh
 make build
@@ -49,7 +61,7 @@ CARGO_BUILD_JOBS=3 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
   cargo build -p onecad-ui
 ```
 
-The host requires an explicitly isolated temporary profile. Omit `--open` to
+Use `--qa-root` to select an explicitly isolated temporary QA profile. Omit `--open` to
 start Home without a document, or provide a prepared `.onecad` fixture. New part
 creates a real empty unsaved document; Back to document and Escape share that
 document-presence predicate independently of viewport success.
@@ -67,13 +79,13 @@ ONECAD_WORKER_PATH="$PWD/worker/build-native-migration/onecad-worker" \
   --open /private/tmp/onecad-273-qa/constrained-plate-80x50.onecad
 ```
 
-The binary creates its dedicated directories before application startup. It
+The QA launch creates its dedicated directories before application startup. It
 rejects production roots, unmarked shared directories and symlink escapes, and
 holds an exclusive profile lock. The source fixture is copied to `documents/`.
 To reopen saved work, pass that copied path with `--open`; an existing copy is
 never overwritten from its original fixture. Settings, recents, autosave,
 recovery, library, temporary imports and logs stay in this profile. Shared data
-continuity remains outside this host's current scope.
+continuity is available through the separate default desktop profile.
 
 Startup discovers crash recovery before opening the prepared saved document. Each
 offer requires Restore, Open saved (which explicitly discards that recovery copy),
@@ -82,17 +94,22 @@ offers stay protected for the next startup, rather than replacing unsaved recove
 work with another document. Closing the host before a decision preserves pending offers.
 Restore keeps the recovered document dirty and uses the shared service's ownership
 marker and autosave mutation notification, so a second crash retains the recovered
-work. Saves stay under the isolated profile's `documents/`: an unavailable or
-out-of-profile original path uses `recovered-<document UUID>.onecad` instead.
+work. Desktop recovery retains an existing original path after checking document
+identity. If that file is unavailable, it uses
+`Application Support/OneCAD/Recovered/recovered-<document UUID>.onecad`.
+QA and sandbox recovery remain confined to their `documents/` directory.
 File actions use asynchronous native dialogs and typed requests on the bounded
 service actor. New/Open/Import ask how to handle dirty work before replacement;
-Save As and export stay within the QA `documents/` directory. External projects
-open as unique bounded copies, while STEP import uses shared application services.
+Save As and export stay within `documents/` only in QA and sandbox hosts. External
+projects open as unique bounded copies in those hosts, while desktop opens retain
+the user-selected source. STEP import uses shared application services.
 The File menu exports STEP, STL, OBJ and 3MF. Recents come from application metadata
-inside this profile; no example projects or synthetic thumbnails are shown.
+inside the selected profile; desktop recents include files outside `~/Documents`.
+No example projects or synthetic thumbnails are shown.
 Cancellation and failed replacement preserve the current runtime. Save-before-close
 continues only after a clean save, and blocks further authoring while pending.
-Recovered documents with an out-of-profile path require Save As into QA storage.
+Recovered documents with an out-of-profile path require Save As into QA storage
+only in the QA host.
 
 Document identity, runtime session, revision, dirty state, title and path travel
 through a bounded lifecycle slot independently of scene capture. Restore, import
@@ -103,7 +120,19 @@ runtime's complete path. An ordinary dirty close preserves existing recovery and
 releases its marker ownership without dropping labels. Only a clean durable Save
 or explicit session-fenced Discard permits cleanup of dirty recovery. Discovery
 never deletes recovery containers because of age. Ordinary close does not force
-a fresh autosave; the existing autosave cadence still bounds captured changes.
+a fresh autosave; recoverable changes depend on the latest successful checkpoint.
+
+Periodic autosave waits 30 seconds of quiet, with a 60-second maximum scheduling
+delay from the first observed unsaved mutation. Persistence admission and IO add
+time; this is not a 60-second durable-write deadline. A failed dirty checkpoint
+retries after 5 seconds without another edit, fenced to the attempted runtime
+session. Further edits do not postpone that retry. Clean or replaced sessions
+cannot receive the old checkpoint; dirty replacement work is checked separately.
+Failures appear in Activity with the last successful checkpoint time and revision
+when available, plus a reminder that Save remains available. A later successful
+checkpoint clears only the recovery checkpoint failure. Automatic checkpoints
+preserve document dirty state and remain separate from explicit Save. These
+service checks do not qualify physical crash recovery or a maximum loss window.
 
 STEP import stages a production worker, waits at most 8 seconds for its handshake,
 and only then probes the source. The staged guard retains that exact worker's
@@ -134,19 +163,38 @@ Implemented controls are enabled in valid contexts; planned entries remain
 discoverable with specific unavailable reasons. See the
 [control inventory](../../docs/design/native-ui/capabilities.md). Select a worker-produced profile fill in
 the viewport, choose Extrude, enter a length or expression, wait for its real
-preview and choose Create. New Body is the default. Add and Cut require an explicit
+preview and choose Create. New Body is the default. Add, Cut and Intersect require an explicit
 visible, healthy target body from the feature card or body tree; choosing a target
 retains the exact profile region and its holes. Mode and target changes invalidate
 the prior preview. Flip negates the same signed distance expression through the
 application resolver. Select an editable history row and an applicable numeric field to edit its stored
-parameters. Existing-feature edits rebuild on Apply: PreviewOp appends a candidate
-at HEAD and cannot correctly preview replacement of an existing operation.
+parameters. Existing-feature edits use full-prefix replay preview and rebuild on
+Apply; their previews leave the committed worker head unchanged.
+
+For the first `NeedsRepair` History row, select one replacement edge or face on
+the original body and choose **Repair using selection**. This supports one Fillet
+edge, one equal-leg Chamfer edge, one Shell opening face or one Offset Face input;
+tangent closure must contain exactly one input. Multi-input, asymmetric Chamfer,
+whole-body, Hole and hosted-sketch repairs are explicitly refused. The repair
+preview preserves the document; Cancel discards the replacement. Apply requires
+a successful preview of that feature and creates one Undo entry while preserving
+its record. A later feature's repair gate remains visible and is repaired next.
+Undo restores the previous binding and gate; Redo restores the replacement.
+
 Choose Sketch, then click a translucent XY/XZ/YZ patch or a planar face in the
 viewport. Hover previews the exact support grid without changing the camera or
 document. Cancel clears transient choice; navigation remains available. Face
 frames resolve through the worker before existing fenced admission. One click selects an existing sketch row;
 double-click or Properties Edit enters it. Camera, picking and rendering use the
 same effective sketch frame, preserving the persisted named-plane conventions.
+The support chooser also offers resolved datum planes and an Offset plane editor
+with XY/XZ/YZ base and a signed finite offset. Create plane is an explicit document
+edit; Cancel plane discards only the unsubmitted draft. A datum-supported sketch
+retains its real attachment and the authoritative frozen frame. Basic Loft uses
+2–32 finalized closed profiles on parallel distinct planes, with smooth/ruled
+New Body results and editable section order. See the
+[modeling acceptance procedure](../../docs/qa/native-modeling-acceptance.md#basic-loft-qualification)
+for the bounded contract and qualification workflow.
 Face entry queries OCCT's exact frame and projected boundary without holding the
 document mutation lock. Runtime, revision, snapshot, worker epoch and provider
 ownership are checked again before sketch and identity adoption. Dropping or
@@ -272,9 +320,10 @@ preference persistence and physical mouse/trackpad qualification remain open.
 Durable commands reserve one of eight permits before entering the service
 runtime and execute in FIFO order through regeneration. Accepted authoring and
 geometry completion are separate results. A failed fresh provisional operation
-uses only its backend-issued guarded rollback receipt; edits, NeedsRepair and
-unknown completions are retained. Preview drafts coalesce to one pending request
-and one worker request in flight. Cancellation invalidates completion delivery;
+or explicit input repair uses only its backend-issued guarded rollback receipt;
+existing parameter edits, NeedsRepair and unknown completions are retained.
+Preview drafts coalesce to one pending request and one worker request in flight.
+Cancellation invalidates completion delivery;
 it does not claim to interrupt an executing worker operation. Late results must
 match document, runtime, revision, worker head and gesture identity.
 

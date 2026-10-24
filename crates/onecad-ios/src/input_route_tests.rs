@@ -92,7 +92,7 @@ fn hover_moves_the_pointer_without_a_button_and_exit_only_clears_it() {
     assert_eq!(frame.events, vec![Event::PointerMoved(pos2(12.0, 12.0))]);
     assert_eq!(
         frame.pointer_kind,
-        Some(onecad_ui::host::PointerKind::Precise)
+        Some(onecad_ui::host::PointerKind::Pencil)
     );
     submit(&mut input, &[actual(1, ffi::PHASE_BEGAN, 0.1, 20.0)], 0);
     submit(&mut input, &[hover(ffi::PHASE_HOVER_MOVED, 90.0)], 0);

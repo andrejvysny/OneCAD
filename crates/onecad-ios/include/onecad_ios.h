@@ -88,6 +88,7 @@ onecad_ios_status onecad_ios_surface_detach(onecad_ios_app *app);
 #define ONECAD_IOS_FRAME_HOST_REQUESTS     (1u << 3) /* poll host requests */
 #define ONECAD_IOS_FRAME_KERNEL_TERMINAL   (1u << 4) /* relaunch required */
 #define ONECAD_IOS_FRAME_PRESENTED         (1u << 5) /* a drawable was presented */
+#define ONECAD_IOS_FRAME_DARK_APPEARANCE   (1u << 6) /* resolved editor theme; absent means light */
 
 typedef struct onecad_ios_frame_result {
     uint32_t struct_size;

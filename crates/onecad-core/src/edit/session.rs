@@ -901,6 +901,7 @@ impl DocumentSession {
         validate_hole(&record.op)?;
         // Boolean tools: 1..=32, distinct, never the target (all entry paths).
         validate_boolean(&record.op)?;
+        validate_loft(&record.op)?;
         // Gear params must satisfy the SCHEMA §7.3 recipe-conditional blocks and
         // the exactly-one-of face/frame placement rule (all entry paths).
         validate_gear(&record.op)?;
@@ -1015,6 +1016,7 @@ impl DocumentSession {
         validate_hole(&op)?;
         // Boolean tools: 1..=32, distinct, never the target (all entry paths).
         validate_boolean(&op)?;
+        validate_loft(&op)?;
         // Gear params must satisfy the SCHEMA §7.3 recipe-conditional blocks and
         // the exactly-one-of face/frame placement rule (all entry paths).
         validate_gear(&op)?;
@@ -1193,6 +1195,7 @@ impl DocumentSession {
         validate_shell_lockstep(&nr.op)?;
         // A target/tool rebind must not alias another Boolean role.
         validate_boolean(&nr.op)?;
+        validate_loft(&nr.op)?;
         // A re-pick must leave a record the session can still WRITE. Without this
         // an `EditOperationInput` could land params that
         // [`ChamferParams::validate`] rejects — an anchorless reference-face ref,
@@ -2401,6 +2404,13 @@ fn validate_hole(op: &Operation) -> Result<(), DomainError> {
         return Ok(());
     };
     p.validate().map_err(DomainError::Validation)
+}
+
+fn validate_loft(op: &Operation) -> Result<(), DomainError> {
+    if let Operation::Known(KnownOperation::Loft(params)) = op {
+        params.validate().map_err(DomainError::Validation)?;
+    }
+    Ok(())
 }
 
 /// Validates a [`KnownOperation::Boolean`] record's tool set (SCHEMA §7.3:

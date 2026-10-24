@@ -60,6 +60,8 @@ use crate::math::Vec3;
 
 mod boolean;
 pub use boolean::{BooleanParams, BOOLEAN_MAX_TOOLS};
+mod loft;
+pub use loft::LOFT_MAX_PROFILES;
 
 /// The record-schema version stamped on freshly authored records.
 pub const RECORD_SCHEMA_VERSION: u32 = 1;

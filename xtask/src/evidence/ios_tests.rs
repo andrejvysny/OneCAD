@@ -404,3 +404,90 @@ fn ios_collect_rejects_directories_and_symlinks_in_the_run_directory() {
     std::os::unix::fs::symlink(source.join("plate.onecad"), source.join("link.onecad")).unwrap();
     assert!(super::ios_xcode::copy_run_directory(&source, &target).is_err());
 }
+
+#[test]
+fn ios_public_fixture_is_regular_current_and_byte_identical() {
+    let area = tempfile::tempdir().unwrap();
+    let source = area.path().join("mac-plate.onecad");
+    let container = area.path().join("container");
+    fs::create_dir(&container).unwrap();
+    let bytes = b"same-run Mac-authored container bytes";
+    fs::write(&source, bytes).unwrap();
+    let record = super::ios_xcode::copy_public_fixture(&source, &container, RUN).unwrap();
+    let name = format!("MacInput-{RUN}.onecad");
+    assert_eq!(record["runId"], RUN);
+    assert_eq!(
+        record["carrierBundleId"],
+        ios_evidence::FIXTURE_CARRIER_BUNDLE
+    );
+    assert_eq!(record["source"], source.to_string_lossy().as_ref());
+    assert_eq!(record["name"], name);
+    assert_eq!(record["sha256"], hash(bytes));
+    assert_eq!(record["bytes"], bytes.len());
+    assert_eq!(
+        fs::read(container.join("Documents").join(&name)).unwrap(),
+        bytes
+    );
+    assert!(!container.join("Documents/acceptance").exists());
+    assert!(
+        super::ios_xcode::copy_public_fixture(&source, &container, RUN).is_err(),
+        "never overwrite an existing public fixture"
+    );
+    for invalid in ["", "../other", "run/file", "run\\file"] {
+        assert!(super::ios_xcode::copy_public_fixture(&source, &container, invalid).is_err());
+    }
+    let empty = area.path().join("empty.onecad");
+    fs::write(&empty, []).unwrap();
+    assert!(super::ios_xcode::copy_public_fixture(&empty, &container, "empty").is_err());
+    assert!(super::ios_xcode::copy_public_fixture(&container, &container, "directory").is_err());
+    #[cfg(unix)]
+    {
+        let linked = area.path().join("linked.onecad");
+        std::os::unix::fs::symlink(&source, &linked).unwrap();
+        assert!(super::ios_xcode::copy_public_fixture(&linked, &container, "symlink").is_err());
+    }
+}
+
+#[test]
+fn ios_public_fixture_verification_survives_archive_moves_and_rejects_tampering() {
+    let area = tempfile::tempdir().unwrap();
+    let original = area.path().join("original");
+    let source = original.join(ios_evidence::MAC_FIXTURE);
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    let bytes = b"same-run Mac fixture";
+    fs::write(&source, bytes).unwrap();
+    let container = area.path().join("container");
+    fs::create_dir(&container).unwrap();
+    let record = super::ios_xcode::copy_public_fixture(&source, &container, RUN).unwrap();
+    write(&original.join("public-fixture.json"), &record);
+    ios_evidence::verify_public_fixture(&original, RUN).unwrap();
+    let archived = area.path().join("archived");
+    fs::rename(&original, &archived).unwrap();
+    ios_evidence::verify_public_fixture(&archived, RUN).unwrap();
+    let manifest = archived.join("public-fixture.json");
+    for (field, value) in [
+        ("runId", json!("another-run")),
+        ("carrierBundleId", json!("com.onecad.ipad")),
+        ("carrierBundleId", Value::Null),
+        ("name", json!("another.onecad")),
+        ("destination", json!("Documents/acceptance/plate.onecad")),
+        ("source", json!("another/mac-authored/mac-plate.onecad")),
+        ("source", json!("/old/evidence/mac-authored/other.onecad")),
+        ("bytes", json!(bytes.len() + 1)),
+        ("sha256", json!("0".repeat(64))),
+    ] {
+        let mut changed = record.clone();
+        changed[field] = value;
+        write(&manifest, &changed);
+        assert!(
+            ios_evidence::verify_public_fixture(&archived, RUN).is_err(),
+            "accepted {field} tampering"
+        );
+    }
+    write(&manifest, &record);
+    fs::write(archived.join(ios_evidence::MAC_FIXTURE), b"changed").unwrap();
+    assert!(ios_evidence::verify_public_fixture(&archived, RUN).is_err());
+    fs::write(archived.join(ios_evidence::MAC_FIXTURE), bytes).unwrap();
+    fs::remove_file(manifest).unwrap();
+    assert!(ios_evidence::verify_public_fixture(&archived, RUN).is_err());
+}

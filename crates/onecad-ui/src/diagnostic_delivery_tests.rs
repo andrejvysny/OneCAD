@@ -40,8 +40,9 @@ async fn file_failure_callbacks_remain_visible_until_retry_or_document_replaceme
         .unwrap()
         .runtime_session
         .clone();
-    std::fs::remove_file(&destination).unwrap();
-    std::fs::create_dir(&destination).unwrap();
+    let original = std::fs::read(&destination).unwrap();
+    let read_only =
+        super::document_lifecycle_tests::ReadOnlyDirectory::new(destination.parent().unwrap());
     app.document_request(Request::Save { save_as: false });
     pump_until(&mut app, &context, &mut frame, |app| {
         !app.doc.documents.running
@@ -52,7 +53,13 @@ async fn file_failure_callbacks_remain_visible_until_retry_or_document_replaceme
             .diagnostics
             .contains(Source::File(FileAction::Save), State::Failed, "")
     );
-    std::fs::remove_dir(&destination).unwrap();
+    assert!(
+        app.doc.status.contains("Permission denied (os error 13)"),
+        "{}",
+        app.doc.status
+    );
+    assert_eq!(std::fs::read(&destination).unwrap(), original);
+    drop(read_only);
     app.document_request(Request::Open(Some(area.path().join("missing.onecad"))));
     pump_until(&mut app, &context, &mut frame, |app| {
         !app.doc.documents.running

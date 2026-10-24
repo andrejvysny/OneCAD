@@ -11,6 +11,11 @@ const EXPLORER_W: f32 = 248.0;
 const INSPECTOR_W: f32 = 288.0;
 const CARD_W: f32 = 280.0;
 const CARD_H: f32 = 320.0;
+// Header, footer and dividers leave at least 80px of scrollable parameters.
+const CARD_MIN_H: f32 = 180.0;
+// NavPill has five 32px buttons, four 2px gaps, 3px padding and a 1px border.
+// Keep this clearance aligned with onecad-widgets' overlays/nav.rs.
+const NAV_PILL_SIZE: Vec2 = vec2(176.0, 40.0);
 pub(crate) const CUBE: f32 = 104.0;
 const CONTROL_W: f32 = 36.0;
 const CONTROLS_H: f32 = 124.0;
@@ -23,13 +28,14 @@ pub struct Chrome {
     pub viewport: Rect,
     pub explorer_toggle: Rect,
     pub toolbar_left: f32,
+    pub explorer_open: bool,
     pub explorer: Rect,
     /// Only present while the Inspector is closed.
     pub inspector_toggle: Option<Rect>,
     pub inspector_open: bool,
     pub inspector: Rect,
     pub pill_centre_x: f32,
-    /// Running-feature card: left of the Inspector (or the viewport edge), under the pill row.
+    /// Running-feature card below or beside navigation, clear of visible sidebars.
     pub feature_card: Rect,
     /// Top-right corner of the navigation cube region.
     pub view_cluster: Pos2,
@@ -92,6 +98,7 @@ pub fn chrome(screen: Rect, state: &UiState) -> Chrome {
                 EXPLORER_CHIP.x
             }
             + EDGE,
+        explorer_open: state.explorer_open,
         explorer: Rect::from_min_max(
             pos2(l + EDGE, t + EDGE),
             pos2(l + EDGE + EXPLORER_W, b - EDGE),
@@ -108,6 +115,35 @@ pub fn chrome(screen: Rect, state: &UiState) -> Chrome {
         view_controls,
         nav_pill: pos2(l + if state.explorer_open { 268.0 } else { EDGE }, b - EDGE),
     }
+}
+
+/// Floating sidebars cover the image without reducing its camera viewport.
+pub(crate) fn fit_work_area(
+    screen: Rect,
+    viewport: Rect,
+    state: &UiState,
+) -> Option<onecad_scene::SafeRect> {
+    if !screen.is_finite() || !viewport.is_finite() || !viewport.is_positive() {
+        return None;
+    }
+    let chrome = chrome(screen, state);
+    let left = if state.explorer_open {
+        chrome.explorer.right()
+    } else {
+        chrome.viewport.left() + EDGE
+    };
+    let right = if state.inspector_open {
+        chrome.inspector.left()
+    } else {
+        chrome.viewport.right() - EDGE
+    };
+    let (left, right) = (left.max(viewport.left()), right.min(viewport.right()));
+    (right > left).then_some(onecad_scene::SafeRect {
+        x: f64::from(left - viewport.left()),
+        y: 0.0,
+        width: f64::from(right - left),
+        height: f64::from(viewport.height()),
+    })
 }
 
 impl Chrome {
@@ -137,9 +173,61 @@ impl Chrome {
                 CARD_H.min((self.viewport.bottom() - EDGE - top).max(0.0)),
             ),
         );
+        if self.feature_card.height() < CARD_MIN_H
+            && let Some(card) = self.compact_feature_card()
+        {
+            self.feature_card = card;
+        }
         self
     }
+
+    fn compact_feature_card(&self) -> Option<Rect> {
+        // A keyboard can leave less space below navigation than the card's scroll
+        // minimum plus header/footer. Use free width without hiding any chrome.
+        let top = self.viewport.top() + 62.0;
+        let mut card = Rect::from_min_size(
+            pos2(self.view_controls.left() - EDGE - CARD_W, top),
+            vec2(CARD_W, CARD_H.min(self.viewport.bottom() - EDGE - top)),
+        );
+        let nav = Rect::from_min_size(self.nav_pill - vec2(0.0, NAV_PILL_SIZE.y), NAV_PILL_SIZE);
+        if card.left() < nav.right() && card.right() > nav.left() {
+            card.max.y = card.bottom().min(nav.top() - EDGE);
+        }
+        if card.height() < CARD_MIN_H || !self.viewport.contains_rect(card) {
+            return None;
+        }
+        let cube = Rect::from_min_size(self.view_cluster - vec2(CUBE, 0.0), vec2(CUBE, CUBE));
+        let occupied = [
+            if self.explorer_open {
+                self.explorer
+            } else {
+                self.explorer_toggle
+            },
+            if self.inspector_open {
+                self.inspector
+            } else {
+                Rect::NOTHING
+            },
+            cube,
+            self.view_controls,
+            nav,
+            Rect::from_min_size(self.viewport.min, vec2(self.viewport.width(), EDGE + 48.0)),
+        ];
+        occupied
+            .into_iter()
+            .chain(self.inspector_toggle)
+            .all(|region| !card.intersect(region).is_positive())
+            .then_some(card)
+    }
 }
+
+#[cfg(test)]
+#[path = "layout_fit_tests.rs"]
+mod fit_tests;
+
+#[cfg(test)]
+#[path = "layout_keyboard_tests.rs"]
+mod keyboard_tests;
 
 #[cfg(test)]
 mod tests {

@@ -21,29 +21,29 @@ impl RollbackOutcome {
                 if let Some(result) = completion {
                     if let Some(failure) = result.failed_steps.first() {
                         return format!(
-                            "New operation rolled back; restored geometry contains failed feature: {}",
+                            "Operation rolled back; restored geometry contains failed feature: {}",
                             failure.message
                         );
                     }
                     if !result.repair_steps.is_empty() {
-                        return "New operation rolled back; restored geometry needs repair".into();
+                        return "Operation rolled back; restored geometry needs repair".into();
                     }
                     if !matches!(result.outcome.as_str(), "published" | "noop") {
                         return format!(
-                            "New operation rolled back; rollback regeneration {}: {}",
+                            "Operation rolled back; rollback regeneration {}: {}",
                             result.outcome,
                             result.message.as_deref().unwrap_or("no detail provided")
                         );
                     }
                 }
-                "New provisional operation rolled back".into()
+                "Provisional operation rolled back".into()
             }
             Self::Refused(reason) => {
                 format!("Rollback refused: {reason}; authoring history preserved")
             }
             Self::Failed(reason) => format!("Rollback failed: {reason}"),
             Self::AppliedCompletionUnavailable(reason) => {
-                format!("New operation rolled back; geometry completion unavailable: {reason}")
+                format!("Operation rolled back; geometry completion unavailable: {reason}")
             }
         }
     }

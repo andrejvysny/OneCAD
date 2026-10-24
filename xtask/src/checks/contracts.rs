@@ -27,6 +27,7 @@ const REQUIRED: &[&str] = &[
 const TIERS: &[(&str, &str)] = &[
     ("Extrude", "ExtrudeOp.cpp"),
     ("Revolve", "RevolveOp.cpp"),
+    ("Loft", "LoftOp.cpp"),
     ("Fillet", "FilletChamferOp.cpp"),
     ("Chamfer", "FilletChamferOp.cpp"),
     ("Shell", "ShellOp.cpp"),

@@ -63,6 +63,7 @@ impl SketchInteraction {
             SketchAction::ClickInferred { point, ids, snap } => {
                 self.clicked_inferred(point, ids, snap.map(|snap| *snap))
             }
+            SketchAction::CommitPrimitiveDrag(drag) => self.commit_primitive_drag(*drag),
             SketchAction::CommitStroke { point, ids, stroke } => {
                 self.commit_stroke(point, ids, stroke)
             }

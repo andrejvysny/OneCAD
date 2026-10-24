@@ -7,6 +7,9 @@ use crate::display_budget::DisplayBudget;
 use onecad_render::RenderProfile;
 use onecad_scene::PickKind;
 
+#[path = "capture_pressure_tests.rs"]
+mod capture_pressure_tests;
+
 /// Test-only readback of the renderer's output (RGBA8, rows packed).
 fn read_output(host: &Host) -> Vec<u8> {
     let app = &host.app;

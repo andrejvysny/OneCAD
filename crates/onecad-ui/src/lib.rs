@@ -10,6 +10,7 @@
 mod app;
 mod appearance;
 mod automation;
+mod autosave_status;
 mod bars;
 #[cfg(test)]
 mod body_inspection_tests_support;
@@ -20,6 +21,7 @@ mod capture;
 mod component_wizard;
 mod constraint_authoring;
 mod constraints_menu;
+mod datum_ui;
 mod diagnostics;
 #[cfg(feature = "desktop")]
 mod dialogs;
@@ -45,6 +47,7 @@ mod handoff;
 pub mod host;
 mod imported_documents;
 mod input;
+mod input_repair_ui;
 mod input_trace;
 mod inspector;
 mod inspector_ext;
@@ -53,6 +56,7 @@ mod inspector_props;
 mod item_selection;
 mod layout;
 mod library_pages;
+mod loft_ui;
 mod menu;
 mod model_handle;
 mod model_pick;
@@ -66,6 +70,7 @@ mod outcome;
 mod overlays;
 mod parameter_drag;
 mod parameter_ui;
+mod path_policy;
 mod pill;
 mod profile_capture;
 mod profile_diagnostics;
@@ -120,10 +125,10 @@ use onecad_widgets::{fonts, theme};
 
 #[cfg(feature = "desktop")]
 pub fn run() -> Result<(), String> {
-    let paths = qa::QaPaths::from_args(std::env::args_os().skip(1))?;
+    let paths = qa::QaPaths::startup(std::env::args_os().skip(1))?;
     paths.require_launch_environment()?;
     let _profile_lifetime = paths.clone();
-    let _logging = onecad_app::logging::init();
+    let _logging = onecad_app::logging::init_with_default_directory(&paths.logs);
     let icon = eframe::icon_data::from_png_bytes(include_bytes!(
         "../../../assets/native/app-icons/icon.png"
     ))

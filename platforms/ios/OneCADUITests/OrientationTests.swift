@@ -7,7 +7,13 @@ final class OrientationTests: XCTestCase {
     }
 
     override func tearDown() async throws {
-        XCUIDevice.shared.orientation = .portrait
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let canvas = XCUIApplication().element(id: OneCADID.canvas)
+        let landscape = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            MainActor.assumeIsolated { canvas.exists && canvas.frame.width > canvas.frame.height }
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter().wait(for: [landscape], timeout: 20), .completed,
+                       "canvas did not restore landscape after rotation coverage")
     }
 
     /// Rotates through every iPad orientation; after each one the canvas and

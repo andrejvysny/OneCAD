@@ -11,6 +11,22 @@ impl Interaction {
 
     fn route(&mut self, action: Action) -> Vec<Effect> {
         match action {
+            Action::BeginInputRepair {
+                repair,
+                gesture,
+                context,
+            } => {
+                let fence = repair.fence();
+                if self.context.as_ref() != Some(&context)
+                    || context.document_id != fence.document_id
+                    || context.runtime_session != fence.runtime_session
+                    || context.revision != fence.revision.0
+                    || context.snapshot_id != fence.snapshot_id
+                {
+                    return Vec::new();
+                }
+                self.begin_input_repair(*repair, gesture)
+            }
             Action::BeginOperationEdit {
                 record,
                 gesture,
@@ -142,6 +158,9 @@ impl Interaction {
         self.tool
             .take()
             .map(|tool| {
+                if let Some(repair) = &tool.repair {
+                    repair.cancel();
+                }
                 vec![Effect::ClearPreview {
                     gesture: tool.tag.gesture,
                 }]

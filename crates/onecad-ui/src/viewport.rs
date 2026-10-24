@@ -115,6 +115,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     crate::sketch_dimensions::show(app, ui, rect, &view);
                 }
                 crate::sketch_creation::chain_input::cancel(app, ui.ctx());
+                crate::sketch_creation::primitive_drag::cancel(ui.ctx());
                 app.cancel_sketch_gesture();
                 // Menus and dialogs own input, but the cube and handles stay visible beneath them.
                 ui.add_enabled_ui(false, |ui| {
@@ -132,6 +133,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 crate::sketch_pen_stroke::bar(app, ui, rect, &view);
                 if !overlay_owns && !dimension_owns
                     && (crate::sketch_gestures::delivered_inside(app, ui, rect)
+                        || crate::sketch_creation::primitive_drag::pending(ui.ctx())
+                        || crate::sketch_creation::primitive_drag::delivered(ui)
                         || crate::sketch_pen_stroke::drawing(ui.ctx())
                         || ui.input(|input| input.pointer.hover_pos()).is_some_and(|position| {
                             crate::viewport_widgets::allows_pointer(ui, rect, position)
@@ -141,6 +144,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 } else {
                     crate::sketch_creation::clear_candidate(ui.ctx());
                     crate::sketch_creation::chain_input::cancel(app, ui.ctx());
+                    crate::sketch_creation::primitive_drag::cancel(ui.ctx());
                 }
                 return;
             }
@@ -211,6 +215,19 @@ fn physical_size(viewport: Viewport) -> [u32; 2] {
     ]
 }
 
+fn fit_for_layout(
+    bounds: Bounds,
+    camera: onecad_scene::Camera,
+    viewport: Viewport,
+    screen: egui::Rect,
+    rect: egui::Rect,
+    state: &crate::ui_state::UiState,
+) -> Result<onecad_scene::CameraFit, onecad_scene::SceneError> {
+    let safe = crate::layout::fit_work_area(screen, rect, state)
+        .ok_or(onecad_scene::SceneError::InvalidView("empty fit work area"))?;
+    onecad_scene::fit_camera(bounds, camera, viewport, Some(safe))
+}
+
 fn navigation(
     app: &mut App,
     ui: &egui::Ui,
@@ -221,7 +238,14 @@ fn navigation(
     if app.doc.fit_pending {
         let bounds = display.scene.bounds().or_else(|| profile_bounds(display));
         if let Some(bounds) = bounds
-            && let Ok(fit) = onecad_scene::fit_camera(bounds, app.doc.camera, viewport, None)
+            && let Ok(fit) = fit_for_layout(
+                bounds,
+                app.doc.camera,
+                viewport,
+                ui.ctx().content_rect(),
+                response.rect,
+                &app.ui,
+            )
         {
             app.doc.camera.target = fit.target;
             app.doc.camera.offset = app.doc.camera.offset.normalize() * fit.distance;

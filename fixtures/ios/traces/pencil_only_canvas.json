@@ -1,0 +1,29 @@
+{
+  "name": "pencil_only_canvas",
+  "description": "Strict iOS canvas: finger taps emit no click, finger drags orbit, controls work, Pencil and indirect pointers author.",
+  "context": {"pencil_only_drawing": true, "drag_authoring": true, "controls": [[0, 0, 100, 44]]},
+  "steps": [
+    {"batch": {"samples": [
+      {"contact": 1, "kind": "finger", "phase": "began", "t": 0.0, "x": 300, "y": 300},
+      {"contact": 1, "kind": "finger", "phase": "ended", "t": 0.1, "x": 302, "y": 300}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 2, "kind": "finger", "phase": "began", "t": 0.2, "x": 40, "y": 20},
+      {"contact": 2, "kind": "finger", "phase": "ended", "t": 0.3, "x": 40, "y": 20}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 3, "kind": "finger", "phase": "began", "t": 0.4, "x": 300, "y": 300},
+      {"contact": 3, "kind": "finger", "phase": "moved", "t": 0.5, "x": 320, "y": 300},
+      {"contact": 3, "kind": "finger", "phase": "moved", "t": 0.6, "x": 330, "y": 302},
+      {"contact": 3, "kind": "finger", "phase": "ended", "t": 0.7, "x": 330, "y": 302}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 4, "kind": "pencil", "phase": "began", "t": 0.8, "x": 400, "y": 400},
+      {"contact": 4, "kind": "pencil", "phase": "ended", "t": 0.9, "x": 420, "y": 400}
+    ]}},
+    {"batch": {"samples": [
+      {"contact": 5, "kind": "pointer", "phase": "began", "t": 1.0, "x": 500, "y": 500},
+      {"contact": 5, "kind": "pointer", "phase": "ended", "t": 1.1, "x": 520, "y": 500}
+    ]}}
+  ]
+}

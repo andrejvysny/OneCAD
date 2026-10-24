@@ -56,6 +56,8 @@ pub enum PreviewStatus {
     UnavailableForEdit,
     /// The edited feature succeeded, but another feature could not regenerate.
     EditWarning(String),
+    /// This input repaired successfully; a later feature remains halted.
+    RepairWarning(String),
     Pending,
     Ready,
     NeedsRepair,
@@ -76,6 +78,7 @@ pub struct ModelSession {
     /// Base operation: choices and placement live here; Valid fields override its slots.
     pub record: OperationRecord,
     pub editing_existing: bool,
+    pub repair: Option<onecad_app::api::InputRepair>,
     pub params: ParameterSet,
     /// Projection of the focused field, written only by the reducer. Undefined
     /// (`""`/Pending) without focus; gate on `params.readiness()`.
@@ -108,8 +111,13 @@ impl ModelSession {
         self.phase == SessionPhase::Editing
             && self.params.readiness() == Readiness::Ready
             && (self.preview == PreviewStatus::Ready
-                || self.editing_existing && matches!(self.preview, PreviewStatus::EditWarning(_))
-                || self.editing_existing && self.preview == PreviewStatus::UnavailableForEdit)
+                || self.repair.is_some() && matches!(self.preview, PreviewStatus::RepairWarning(_))
+                || self.repair.is_none()
+                    && self.editing_existing
+                    && matches!(self.preview, PreviewStatus::EditWarning(_))
+                || self.repair.is_none()
+                    && self.editing_existing
+                    && self.preview == PreviewStatus::UnavailableForEdit)
     }
 }
 
@@ -150,6 +158,11 @@ pub enum CommitStatus {
 
 #[derive(Debug)]
 pub enum Action {
+    BeginInputRepair {
+        repair: Box<onecad_app::api::InputRepair>,
+        gesture: u64,
+        context: DocumentContext,
+    },
     BeginOperationEdit {
         record: Box<OperationRecord>,
         gesture: u64,
@@ -262,6 +275,14 @@ pub enum DragPhase {
 
 #[derive(Debug)]
 pub enum Effect {
+    PreviewInputRepair {
+        tag: RequestTag,
+        repair: Box<onecad_app::api::InputRepair>,
+    },
+    ApplyInputRepair {
+        tag: RequestTag,
+        repair: Box<onecad_app::api::InputRepair>,
+    },
     EvaluateExpression {
         tag: RequestTag,
         expression: String,

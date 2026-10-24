@@ -9,9 +9,10 @@ use onecad_interaction::touch::{
 
 impl IosApp {
     /// Routes one batch (`onecad_ios_input_submit` and test-hook replay alike):
-    /// `over_control` and `drag_authoring` come from the last completed frame,
-    /// `pencil_only_drawing` from `onecad_ios_capabilities_set`. `Ok(true)` when
-    /// queued movement was coalesced.
+    /// Controls and drag availability come from the last completed frame.
+    /// Canvas authoring always requires Pencil or an external pointer; the
+    /// system drawing preference cannot enable finger authoring. `Ok(true)`
+    /// means queued movement was coalesced.
     pub(crate) fn submit_touches(
         &mut self,
         samples: &[TouchSample],
@@ -25,14 +26,12 @@ impl IosApp {
         let over_control = |point: Point| {
             onecad_ui::host::over_control(ctx, egui::pos2(point.x as f32, point.y as f32))
         };
-        let route = RouteContext {
-            pencil_only_drawing: self.capabilities.prefers_pencil_only_drawing != 0,
-            drag_authoring: self
-                .editor
+        let route = route_context(
+            self.editor
                 .as_ref()
                 .is_some_and(onecad_ui::host::Editor::drag_authoring),
-            over_control: &over_control,
-        };
+            &over_control,
+        );
         let merged = self
             .input
             .submit(samples, generation, &route)
@@ -116,6 +115,17 @@ impl IosApp {
         if let Some(request) = crate::pencil_accessory::feedback(changed, self.capabilities.flags) {
             self.host.push(request, None);
         }
+    }
+}
+
+fn route_context<'a>(
+    drag_authoring: bool,
+    over_control: &'a dyn Fn(Point) -> bool,
+) -> RouteContext<'a> {
+    RouteContext {
+        pencil_only_drawing: true,
+        drag_authoring,
+        over_control,
     }
 }
 
@@ -379,3 +389,7 @@ mod tests {
         assert_eq!(completed(Squeeze, ffi::PHASE_HOVER_MOVED), None);
     }
 }
+
+#[cfg(test)]
+#[path = "touch_input_routing_tests.rs"]
+mod routing_tests;

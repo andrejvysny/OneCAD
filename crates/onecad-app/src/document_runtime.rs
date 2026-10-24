@@ -1297,7 +1297,7 @@ impl DocumentRuntime {
                 self.checkpoints.invalidate_from(dirty.from);
             }
         }
-        self.after_mutation();
+        self.after_mutation(outcome.dirty.map(|dirty| dirty.from));
         Ok(outcome)
     }
 
@@ -1349,7 +1349,7 @@ impl DocumentRuntime {
         for body in body_cleanup {
             self.regen.bodies.remove(body);
         }
-        self.after_mutation();
+        self.after_mutation(outcome.dirty.map(|dirty| dirty.from));
         Ok(outcome)
     }
 
@@ -1563,11 +1563,12 @@ impl DocumentRuntime {
             return None;
         }
         let outcome = self.session.undo()?;
+        let dirty_floor = outcome.dirty_floor;
         if let Some(session) = &mut self.sketch_session {
             session.history_valid = false;
         }
         let report = self.revert_report(outcome);
-        self.after_mutation();
+        self.after_mutation(dirty_floor);
         self.drop_stale_sketch_session();
         Some(report)
     }
@@ -1583,11 +1584,12 @@ impl DocumentRuntime {
         let Some(outcome) = self.session.redo()? else {
             return Ok(None);
         };
+        let dirty_floor = outcome.dirty_floor;
         if let Some(session) = &mut self.sketch_session {
             session.history_valid = false;
         }
         let report = self.revert_report(outcome);
-        self.after_mutation();
+        self.after_mutation(dirty_floor);
         self.drop_stale_sketch_session();
         Ok(Some(report))
     }
@@ -1695,14 +1697,14 @@ impl DocumentRuntime {
         }
     }
 
-    /// After any structural mutation: re-mirror the timeline (all Dirty pending
-    /// regen), bump the fencing revision, and mark unsaved.
-    fn after_mutation(&mut self) {
+    /// Re-mirror a mutation while retaining verdicts below its dirty floor, bump
+    /// the fencing revision, and mark unsaved. None means no timeline invalidation.
+    fn after_mutation(&mut self, dirty_floor: Option<usize>) {
         self.pending_sketch_finish = None;
         if let Some(session) = &mut self.sketch_session {
             session.history_redo = 0;
         }
-        self.sync_regen_timeline();
+        self.sync_regen_timeline(dirty_floor);
         // Mirror the authoritative document's SEEDED repair gates (SCHEMA §7.3)
         // into the regen copy — that copy is what `begin_regen` reads for its
         // execution ceiling and what `save` persists. Only the seeded subset is
@@ -1719,8 +1721,8 @@ impl DocumentRuntime {
     }
 
     /// Rebuilds the regen mirror timeline from the authoritative session timeline
-    /// (records + cursor). `from_records` marks every step Dirty; the next regen
-    /// recomputes states.
+    /// (records + cursor). Only the invalidated suffix starts Dirty: checkpoint
+    /// replay does not execute the unchanged prefix, so its verdicts must survive.
     ///
     /// WP-VE.1: the mirror is the document's **effective** form — every
     /// expression-driven `Scalar` resolved against the current variable table on
@@ -1730,12 +1732,13 @@ impl DocumentRuntime {
     /// re-plan. A step whose expression cannot resolve is stamped
     /// `StepState::Error` immediately — the state is a pure function of
     /// (records, variables), so it needs no worker round-trip to be true.
-    fn sync_regen_timeline(&mut self) {
+    fn sync_regen_timeline(&mut self, dirty_floor: Option<usize>) {
         let doc = self.session.document();
         let (mut mirror, unresolved) =
             onecad_core::regen::substituted_timeline(&doc.timeline, &doc.variables);
         let feature_pattern_errors = lower_feature_patterns(&mut mirror);
         log_unresolved_variables(&unresolved, "edit");
+        timeline_states::retain_prefix_states(&self.regen.timeline, &mut mirror, dirty_floor);
         self.regen.timeline = mirror;
         self.unresolved_variables = unresolved;
         self.feature_pattern_errors = feature_pattern_errors;
@@ -4413,6 +4416,7 @@ impl DocumentRuntime {
                         "the edit could not be reverted",
                     )));
                 };
+                let mut dirty_floor = outcome.dirty_floor;
                 let mut revert = self.revert_report(outcome);
                 // A discarded session must not be redoable back into existence.
                 self.session.clear_redo();
@@ -4421,10 +4425,12 @@ impl DocumentRuntime {
                 );
                 if matches!(created, Some((true, _))) {
                     let outcome = self.session.undo().expect("creation suffix preflighted");
+                    dirty_floor =
+                        timeline_states::earliest_dirty_floor(dirty_floor, outcome.dirty_floor);
                     revert = self.revert_report(outcome);
                     self.session.clear_redo();
                 }
-                self.after_mutation();
+                self.after_mutation(dirty_floor);
                 Ok(CancelSketchOutcome {
                     discarded: true,
                     kept_reason: None,
@@ -4436,9 +4442,10 @@ impl DocumentRuntime {
             SessionSquash::NoNetStep => {
                 let creation_revert = if matches!(created, Some((true, _))) {
                     let outcome = self.session.undo().expect("creation suffix preflighted");
+                    let dirty_floor = outcome.dirty_floor;
                     let revert = self.revert_report(outcome);
                     self.session.clear_redo();
-                    self.after_mutation();
+                    self.after_mutation(dirty_floor);
                     Some(revert)
                 } else {
                     None
@@ -4628,7 +4635,7 @@ impl DocumentRuntime {
                         if let Some(dirty) = outcome.dirty {
                             self.checkpoints.invalidate_from(dirty.from);
                         }
-                        self.after_mutation();
+                        self.after_mutation(outcome.dirty.map(|dirty| dirty.from));
                         return Ok(Some(outcome));
                     }
                 }
@@ -7033,6 +7040,7 @@ pub mod edit_preview;
 mod face_entry;
 mod gestures;
 mod staged_elements;
+mod timeline_states;
 pub use face_entry::FaceEntryTicket;
 pub use projection_visit::ProjectionVisit;
 pub use staged_elements::StageTicket;

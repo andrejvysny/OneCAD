@@ -1,5 +1,5 @@
-//! QA paths are explicit and confined to a dedicated temporary root. Sandboxed
-//! hosts (iPadOS) instead name the container directories the OS gives them.
+//! Host directories with explicit desktop, isolated QA and sandbox policies.
+use crate::path_policy::PathPolicy;
 use std::{
     ffi::OsString,
     fs,
@@ -12,6 +12,9 @@ const MARKER_CONTENT: &str = "onecad-native-qa-v1\n";
 
 #[derive(Clone, Debug)]
 pub struct QaPaths {
+    pub(crate) policy: PathPolicy,
+    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    pub(crate) logs: PathBuf,
     pub root: PathBuf,
     /// Where documents are opened, saved and exported (`root/documents` for QA).
     pub documents: PathBuf,
@@ -20,7 +23,7 @@ pub struct QaPaths {
     pub data: PathBuf,
     pub config: PathBuf,
     pub temporary: PathBuf,
-    _lock: Option<Arc<fs::File>>,
+    pub(crate) _lock: Option<Arc<fs::File>>,
 }
 
 /// Container directories of a sandboxed host, as absolute paths.
@@ -50,6 +53,9 @@ impl QaPaths {
     }
 
     pub fn require_launch_environment(&self) -> Result<(), String> {
+        if self.policy != PathPolicy::Qa {
+            return Ok(());
+        }
         let actual = fs::canonicalize(std::env::temp_dir()).map_err(|error| error.to_string())?;
         if actual != self.temporary {
             return Err(format!(
@@ -83,6 +89,8 @@ impl QaPaths {
         let data = sandbox_dir(&support.join("data"))?;
         let config = sandbox_dir(&support.join("config"))?;
         Ok(Self {
+            policy: PathPolicy::Sandbox,
+            logs: support.join("logs"),
             document: documents.join("Untitled.onecad"),
             root: support,
             documents,
@@ -154,6 +162,8 @@ impl QaPaths {
             None => root.join("documents/Untitled.onecad"),
         };
         Ok(Self {
+            policy: PathPolicy::Qa,
+            logs: root.join("logs"),
             data: root.join("data"),
             config: root.join("config"),
             temporary: root.join("temporary"),

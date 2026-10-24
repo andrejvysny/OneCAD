@@ -306,6 +306,8 @@ pub enum SketchAction {
         ids: PrimitiveIds,
         snap: Option<Box<super::inference::AcceptedSnap>>,
     },
+    /// One confirmed press-to-release primitive, with both inference captures fenced.
+    CommitPrimitiveDrag(Box<super::PrimitiveDrag>),
     BeginPointNumeric {
         key: SketchSessionKey,
     },

@@ -80,11 +80,18 @@ device.
    and ui; the viewport encodes and submits the CAD pass.
 5. Texture uploads → tessellation → drawable acquire → egui pass (load-clear,
    gamma-space `Bgra8Unorm` surface) → one `queue.submit` → present → texture
-   frees. Without a drawable the uploads are still submitted.
+   frees. The full drawable clears opaquely to the installed shared theme's
+   `canvas` token, including the status-bar and home-indicator safe areas.
+   Content and controls remain inside the reported safe area; camera, picking
+   and keyboard geometry are unchanged. Without a drawable the uploads are still submitted.
 6. Result flags: `REDRAW_REQUESTED` and `repaint_after_s` from the root viewport's
    repaint delay (`-1` = none; `0` when a drawable could not be acquired), `PRESENTED`, `TEXT_INPUT_ACTIVE` with the cursor
    rect and `NUMERIC_EXPRESSION` while a dimension/numeric editor is open,
-   `A11Y_CHANGED`, `HOST_REQUESTS`. `KERNEL_TERMINAL` is not produced yet.
+   `A11Y_CHANGED`, `HOST_REQUESTS`, and `DARK_APPEARANCE` (bit 6) for the installed
+   editor theme; absence means light. This additive ABI-v2 output flag does not
+   change struct layouts. UIKit selects light or dark status-bar text from this
+   resolved editor appearance without overriding system interface traits.
+   `KERNEL_TERMINAL` is not produced yet.
 
 Surface: one Metal device (`required_device_features` as on desktop; limits the
 adapter cannot meet, such as the Simulator's 15 inter-stage variables, are
@@ -186,7 +193,7 @@ Input calls return `ERR_STATE` in the background and after terminate
 
 | Routed event | egui events |
 |---|---|
-| `Press` (`Author`, `Control`, `Tap`) | `PointerMoved` + primary press; it holds the single pointer. The frame sets `host::set_pointer_kind` (finger: 22 pt edge pick aperture; Pencil/pointer: 8 pt) and `host::set_pencil_double_tap` (a Pencil press with `tap_count` ≥ 2 picks like a double click, face to body, even when egui's click timing does not count it) |
+| `Press` (`Author`, `Control`, `Tap`) | `PointerMoved` + primary press; it holds the single pointer. The frame sets `host::set_pointer_kind` (Pencil/pointer: 8 pt edge pick aperture; the iOS host emits finger pointer events only for controls) and `host::set_pencil_double_tap` (a Pencil press with `tap_count` ≥ 2 picks like a double click, face to body, even when egui's click timing does not count it) |
 | `Move` of the pointer contact | `PointerMoved` per changed position (disposable under overflow) |
 | `Release` | `PointerMoved` + release; after a finger or a tap, `PointerGone` one frame later |
 | `Tap` (finger within 8 pt / 0.5 s) | press and release at the begin position in one frame (double tap counted by egui's timing) |

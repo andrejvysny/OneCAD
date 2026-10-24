@@ -235,10 +235,13 @@ fn dirty_snapshot_tracks_current_bytes_deletions_tags_and_untracked_files() {
 #[test]
 fn missing_required_source_and_external_licenses_fail_closed() {
     for missing in [
+        "scripts/macos-minimum.sh",
         "LICENSE-MIT",
         "worker/third_party/planegcs/LICENSE",
         "Cargo.lock",
         "scripts/package-macos.sh",
+        "scripts/macos-signing.sh",
+        "packaging/macos/host-entitlements.plist",
         "scripts/build-addons.sh",
         "addons/bambu-studio/manifest.json",
         "crates/onecad-extension-api/wit/extension.wit",

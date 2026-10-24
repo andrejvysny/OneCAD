@@ -25,12 +25,31 @@ impl Interaction {
             Ok(result) => result,
             Err(status) => {
                 if let Some(status) = status {
-                    tool.preview = status;
+                    tool.preview =
+                        if tool.repair.is_some() && status == PreviewStatus::UnavailableForEdit {
+                            PreviewStatus::Failed("Repair requires a successful preview".into())
+                        } else {
+                            status
+                        };
                 }
                 return Vec::new();
             }
         };
-        tool.preview = status(&result.outcome);
+        if tool.repair.is_some() {
+            if !onecad_app::api::repair_preview_ready(&result) {
+                tool.preview = PreviewStatus::Failed(format!(
+                    "Repair preview did not complete: {:?}",
+                    result.outcome
+                ));
+                return Vec::new();
+            }
+            tool.preview = match result.outcome {
+                EditPreviewOutcome::DownstreamNeedsRepair { record, .. } => PreviewStatus::RepairWarning(format!("This input repaired successfully. Feature {record} still needs explicit repair.")),
+                _ => PreviewStatus::Ready,
+            };
+        } else {
+            tool.preview = status(&result.outcome);
+        }
         if matches!(
             result.outcome,
             EditPreviewOutcome::Unchanged | EditPreviewOutcome::NotReached { .. }

@@ -82,6 +82,12 @@ XcodeGen derives from target names; renaming a target requires updating
 | Acceptance | `DEBUG ONECAD_ACCEPTANCE` | dev, `onecad-ios/test-hooks` | `<platform>-Debug-test-hooks` | native + UI tests |
 | Release | none | `--release`, default features | `<platform>-Release` | none |
 
+The workspace dev profile optimizes `naga` at level 2. Unoptimized WGSL
+lowering can overflow the physical iPad's 1 MiB main-thread stack during renderer
+startup. Debug and Acceptance inherit this dependency override; application debug
+checks remain enabled. Release retains its normal optimized profile. Qualify
+startup on the physical device as well as the simulator after changing it.
+
 Acceptance also defines `ONECAD_ACCEPTANCE=1` for the Clang importer so the
 bridging headers include `onecad_ios_test.h`, disables dead-code stripping and
 forces `_onecad_ios_test_command`/`_onecad_ios_test_string_free` into the app
@@ -91,6 +97,13 @@ The project builds arm64 only (`ARCHS = arm64`, x86_64 excluded on the
 simulator). Swift uses the Swift 6 language mode: the C ABI is
 main-thread-only and complete concurrency checking keeps every bridge call on
 the main actor.
+
+The application and both test targets explicitly set `TARGETED_DEVICE_FAMILY`
+to `2` (iPad). Keep this setting on each target: XcodeGen's target defaults
+otherwise override the project-level value with `1,2`. After regenerating,
+check `xcodebuild -showBuildSettings` for Debug, Acceptance and Release; the
+application must report `TARGETED_DEVICE_FAMILY = 2`, and built application
+`Info.plist` files must contain only `2` in `UIDeviceFamily`.
 
 ## Build phase contract
 
@@ -220,3 +233,16 @@ Behavior of the UIKit host that `onecad_ios.h` leaves open:
 - Running on a physical iPad requires selecting a development team in Xcode
   (`DEVELOPMENT_TEAM` is intentionally not checked in). Signed device and
   distribution builds belong to ONECAD-469.
+- The iPad app icon is an opaque 1024×1024 PNG in
+  `platforms/ios/OneCAD/Assets.xcassets/AppIcon.appiconset`. Its source,
+  `platforms/ios/Assets/app-icon-ipad.svg`, derives from the existing macOS brand
+  master with the same cube, grid and palette, a full square background and no
+  macOS shadow or mask. Regenerate with the repository's existing renderer:
+
+  ```sh
+  rsvg-convert -w 1024 -h 1024 platforms/ios/Assets/app-icon-ipad.svg \
+    -o platforms/ios/OneCAD/Assets.xcassets/AppIcon.appiconset/AppIcon.png
+  ```
+
+  Validate the asset catalog and resulting icon in the signed archive before
+  distribution; an unsigned build does not establish distribution readiness.

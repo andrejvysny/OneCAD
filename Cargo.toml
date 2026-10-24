@@ -57,6 +57,10 @@ bytes = "1"
 zip = "2"
 sha2 = "0.10"
 
+# Unoptimized WGSL lowering overflows the iPad's 1 MiB main-thread stack.
+[profile.dev.package.naga]
+opt-level = 2
+
 # AccessKit #835 preserves AppKit KVO subclasses during native accessibility teardown.
 # Keep the adapter and its path dependencies on one source so their public types match.
 [patch.crates-io]

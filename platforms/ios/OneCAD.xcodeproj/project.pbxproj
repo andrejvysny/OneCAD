@@ -11,6 +11,7 @@
 		0892F14119D93DB02CBE4439 /* FrameLoop.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED42B6DBD22A8758B165854C /* FrameLoop.swift */; };
 		0C45AD526A776300FC755EDC /* CanvasViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01AD8E4234C105ACA6332CC5 /* CanvasViewController.swift */; };
 		0EDEC6E16268F3275B60C059 /* libonecad_worker_bundle.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 48C2713B68BAC0958CFF6F19 /* libonecad_worker_bundle.a */; };
+		14FC072D8582F35F9DB809D4 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9EAF049E2C1F9DE689353D1 /* AppDelegate.swift */; };
 		1EF5DCDB23D6141F1F567ABD /* RustBridge+Text.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69BC87DC8D437367062B4C5F /* RustBridge+Text.swift */; };
 		1F354F3256682C59D9B9E4F2 /* PencilModelingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2B2DF63858A5B9030C73BF0 /* PencilModelingTests.swift */; };
 		1F659BF01910C49D1B76705F /* NavigationGestures.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47F47CBD179A10B963741C03 /* NavigationGestures.swift */; };
@@ -20,6 +21,7 @@
 		30195CCDBC9F4E7FC27E2BE6 /* RustBridge+Snapshots.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBCB6506270C09AB52F25E97 /* RustBridge+Snapshots.swift */; };
 		3488F822A7E69538FAEE716D /* DocumentInboxTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3EF5B5ED44ADD451825600BD /* DocumentInboxTests.swift */; };
 		35CB850E329CA06EFA5EBE08 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7211051842CA6F425D126385 /* AppDelegate.swift */; };
+		35FBDE10FF755D2F70B84751 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = EF52353DCB603C2518FB9B4C /* Assets.xcassets */; };
 		4218C20C758AE90630339FB7 /* DocumentPersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C121F993856F3FE4AB35A8DB /* DocumentPersistenceTests.swift */; };
 		434BF8AA882E560F93F331FF /* RequiredWorkflowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2EB0EC444F2488CF16D87501 /* RequiredWorkflowTests.swift */; };
 		4858EE15AFF2B9F158FACAD6 /* SemanticHooks.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E5BC0DABAF4683B8021EA87 /* SemanticHooks.swift */; };
@@ -33,11 +35,11 @@
 		70A8509AE3CBBEFCF453A15E /* OrientationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A4EC2F23EA9085CB4C41E5C /* OrientationTests.swift */; };
 		7243F96ADC1AFCFB7FF72BD5 /* MetalCanvasView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BE5EF688EDA7D5D43F4B535 /* MetalCanvasView.swift */; };
 		82E9166A50AA25F467848BDD /* FatalErrorViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDC2BBD14BB6180620AE0B80 /* FatalErrorViewController.swift */; };
-		830C1EF535AFF41B857165BB /* WorkflowModelingChecks.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA3BBBCA0B6A69DC1B9CF894 /* WorkflowModelingChecks.swift */; };
 		875E9BC24BFE79D9D6432057 /* ModelDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19634DC718B1413EC0C54E1F /* ModelDriver.swift */; };
 		8BA08A54296F12BB7841A53E /* SaveAllTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DD22F39E7F0494FE44C7FF6 /* SaveAllTests.swift */; };
 		8C4F6A9DEB9EBCFED712014E /* KeyInputProxy+TextInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE2DC86614E04510234744A8 /* KeyInputProxy+TextInput.swift */; };
 		8C7BDE54C40B2A9447010FB3 /* WorkflowSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 827178CD79CF90BA594C9F5C /* WorkflowSupport.swift */; };
+		8D0DC7C5AB4188205329EE47 /* ModelDriver+Operations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C333D7DCD36F53434DB358A /* ModelDriver+Operations.swift */; };
 		911E6EE8C1089E85EC22B72C /* TouchSampleBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92B9E16789CE50F6584D00F8 /* TouchSampleBuilder.swift */; };
 		92E6B0D891F85117FF0ECE85 /* MultiDocumentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1363530C9DE30332E79E3DD8 /* MultiDocumentTests.swift */; };
 		9515D5355BA1339BB7B171C3 /* RustBridge+Calls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F5236FA35EA92C24105116A /* RustBridge+Calls.swift */; };
@@ -90,7 +92,9 @@
 		19634DC718B1413EC0C54E1F /* ModelDriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelDriver.swift; sourceTree = "<group>"; };
 		1E5BC0DABAF4683B8021EA87 /* SemanticHooks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SemanticHooks.swift; sourceTree = "<group>"; };
 		1F3CACA3512AB02265770A40 /* OneCADNativeTests-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "OneCADNativeTests-Bridging-Header.h"; sourceTree = "<group>"; };
+		2C333D7DCD36F53434DB358A /* ModelDriver+Operations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ModelDriver+Operations.swift"; sourceTree = "<group>"; };
 		2EB0EC444F2488CF16D87501 /* RequiredWorkflowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RequiredWorkflowTests.swift; sourceTree = "<group>"; };
+		345B280F8FE186BA20BB78DA /* OneCADFixtureSource.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = OneCADFixtureSource.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		3A2955C827F5A02B51F42BB8 /* PencilReplayTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PencilReplayTests.swift; sourceTree = "<group>"; };
 		3EF5B5ED44ADD451825600BD /* DocumentInboxTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentInboxTests.swift; sourceTree = "<group>"; };
 		436124834EE926976B75C4AC /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -113,18 +117,19 @@
 		92B9E16789CE50F6584D00F8 /* TouchSampleBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TouchSampleBuilder.swift; sourceTree = "<group>"; };
 		9803DC4FEC887CA3005D8131 /* DocumentPickerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentPickerTests.swift; sourceTree = "<group>"; };
 		9831A28D45556C0279AB9319 /* SemanticHookTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SemanticHookTests.swift; sourceTree = "<group>"; };
+		A5D6409C4B93D4716206C9FD /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		AB146270F5A32E9B4C16B0BA /* OneCAD.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = OneCAD.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AE2DC86614E04510234744A8 /* KeyInputProxy+TextInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "KeyInputProxy+TextInput.swift"; sourceTree = "<group>"; };
 		B157FFE85383C1CC886C4F54 /* DocumentExportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentExportTests.swift; sourceTree = "<group>"; };
 		B895F357F1C733D2ADF98089 /* HostRequestCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostRequestCoordinator.swift; sourceTree = "<group>"; };
 		B966A2E61CC04066F8180AB0 /* TestHookPingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestHookPingTests.swift; sourceTree = "<group>"; };
+		B9EAF049E2C1F9DE689353D1 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		BDC2BBD14BB6180620AE0B80 /* FatalErrorViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FatalErrorViewController.swift; sourceTree = "<group>"; };
 		C121F993856F3FE4AB35A8DB /* DocumentPersistenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentPersistenceTests.swift; sourceTree = "<group>"; };
 		C46FAEE705612D377B69BB84 /* UITestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UITestSupport.swift; sourceTree = "<group>"; };
 		C57C5550AC14B5E601476591 /* LaunchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchTests.swift; sourceTree = "<group>"; };
 		C8D17FD7CBC9B45AF6A1BE0F /* AccessibilityBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityBridge.swift; sourceTree = "<group>"; };
 		CBABA7B5367AF83D11D9A080 /* ContactRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContactRegistry.swift; sourceTree = "<group>"; };
-		DA3BBBCA0B6A69DC1B9CF894 /* WorkflowModelingChecks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowModelingChecks.swift; sourceTree = "<group>"; };
 		DFCC5ED7DB7ECA348C086793 /* libonecad_ios.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libonecad_ios.a; sourceTree = BUILT_PRODUCTS_DIR; };
 		E1DED4B0818F4EE16B6DE5E5 /* PencilController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PencilController.swift; sourceTree = "<group>"; };
 		E2B2DF63858A5B9030C73BF0 /* PencilModelingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PencilModelingTests.swift; sourceTree = "<group>"; };
@@ -132,6 +137,7 @@
 		EBCB6506270C09AB52F25E97 /* RustBridge+Snapshots.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "RustBridge+Snapshots.swift"; sourceTree = "<group>"; };
 		ED42B6DBD22A8758B165854C /* FrameLoop.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameLoop.swift; sourceTree = "<group>"; };
 		EDC28BA64E1F84800F465F2A /* DocumentUITestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentUITestSupport.swift; sourceTree = "<group>"; };
+		EF52353DCB603C2518FB9B4C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F3A1CA180A866A7C37A22A9E /* OneCADNativeTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = OneCADNativeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -180,6 +186,7 @@
 			isa = PBXGroup;
 			children = (
 				AB146270F5A32E9B4C16B0BA /* OneCAD.app */,
+				345B280F8FE186BA20BB78DA /* OneCADFixtureSource.app */,
 				F3A1CA180A866A7C37A22A9E /* OneCADNativeTests.xctest */,
 				867ECAF4078A19E25234DE9F /* OneCADUITests.xctest */,
 			);
@@ -198,6 +205,7 @@
 			isa = PBXGroup;
 			children = (
 				928E0BD129AC1C7F4E9F3E6F /* OneCAD */,
+				B732179EC215B8FC76AA8016 /* OneCADFixtureSource */,
 				73767306608A3E2A63CDD59B /* OneCADNativeTests */,
 				A842001A5B35EE75A49ABB17 /* OneCADUITests */,
 				0310CF369DF49C2035A6E171 /* Frameworks */,
@@ -248,6 +256,7 @@
 				C121F993856F3FE4AB35A8DB /* DocumentPersistenceTests.swift */,
 				6B05021645965A4EFBC9AA55 /* ModelArtifactTests.swift */,
 				19634DC718B1413EC0C54E1F /* ModelDriver.swift */,
+				2C333D7DCD36F53434DB358A /* ModelDriver+Operations.swift */,
 				1363530C9DE30332E79E3DD8 /* MultiDocumentTests.swift */,
 				1F3CACA3512AB02265770A40 /* OneCADNativeTests-Bridging-Header.h */,
 				E2B2DF63858A5B9030C73BF0 /* PencilModelingTests.swift */,
@@ -270,6 +279,7 @@
 				2E5CA8F51FA3560B9E0C513C /* Documents */,
 				EC8278D2F03A57D737F4386F /* Input */,
 				4CE4906EBA49B9B18BE85763 /* Text */,
+				EF52353DCB603C2518FB9B4C /* Assets.xcassets */,
 				436124834EE926976B75C4AC /* Info.plist */,
 				020E40AB1A8278AB4CC2A4BB /* OneCAD-Bridging-Header.h */,
 			);
@@ -288,10 +298,18 @@
 				0DD22F39E7F0494FE44C7FF6 /* SaveAllTests.swift */,
 				85614958BEB8E8E12DD63B5D /* SurfaceLifecycleTests.swift */,
 				C46FAEE705612D377B69BB84 /* UITestSupport.swift */,
-				DA3BBBCA0B6A69DC1B9CF894 /* WorkflowModelingChecks.swift */,
 				827178CD79CF90BA594C9F5C /* WorkflowSupport.swift */,
 			);
 			path = OneCADUITests;
+			sourceTree = "<group>";
+		};
+		B732179EC215B8FC76AA8016 /* OneCADFixtureSource */ = {
+			isa = PBXGroup;
+			children = (
+				B9EAF049E2C1F9DE689353D1 /* AppDelegate.swift */,
+				A5D6409C4B93D4716206C9FD /* Info.plist */,
+			);
+			path = OneCADFixtureSource;
 			sourceTree = "<group>";
 		};
 		EC8278D2F03A57D737F4386F /* Input */ = {
@@ -327,12 +345,30 @@
 			productReference = F3A1CA180A866A7C37A22A9E /* OneCADNativeTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		3A474FC78BE3C703C1783AD3 /* OneCADFixtureSource */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5BB3E51C95853259A01E6535 /* Build configuration list for PBXNativeTarget "OneCADFixtureSource" */;
+			buildPhases = (
+				F4A9CB171F2448F766B8876A /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = OneCADFixtureSource;
+			packageProductDependencies = (
+			);
+			productName = OneCADFixtureSource;
+			productReference = 345B280F8FE186BA20BB78DA /* OneCADFixtureSource.app */;
+			productType = "com.apple.product-type.application";
+		};
 		858E90117B3770AF79C4920B /* OneCAD */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 0C10625837AA7FB624F57B41 /* Build configuration list for PBXNativeTarget "OneCAD" */;
 			buildPhases = (
 				D8D483F54AEE4374063F128B /* Build Rust (onecad-ios) */,
 				C142F08BE4E321F61D781E6A /* Sources */,
+				C04251E2DDC31591CFFAC5FC /* Resources */,
 				E9ED76FEF0782E096FA5138D /* Frameworks */,
 			);
 			buildRules = (
@@ -376,6 +412,9 @@
 					3530CA49A90BCECDD14943B5 = {
 						ProvisioningStyle = Automatic;
 					};
+					3A474FC78BE3C703C1783AD3 = {
+						ProvisioningStyle = Automatic;
+					};
 					858E90117B3770AF79C4920B = {
 						ProvisioningStyle = Automatic;
 					};
@@ -400,11 +439,23 @@
 			projectRoot = "";
 			targets = (
 				858E90117B3770AF79C4920B /* OneCAD */,
+				3A474FC78BE3C703C1783AD3 /* OneCADFixtureSource */,
 				3530CA49A90BCECDD14943B5 /* OneCADNativeTests */,
 				C9A54FFB1C62431899387FA0 /* OneCADUITests */,
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		C04251E2DDC31591CFFAC5FC /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				35FBDE10FF755D2F70B84751 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
 		D8D483F54AEE4374063F128B /* Build Rust (onecad-ios) */ = {
@@ -441,6 +492,7 @@
 				3488F822A7E69538FAEE716D /* DocumentInboxTests.swift in Sources */,
 				4218C20C758AE90630339FB7 /* DocumentPersistenceTests.swift in Sources */,
 				4D01465DB0BD89DA616A8D69 /* ModelArtifactTests.swift in Sources */,
+				8D0DC7C5AB4188205329EE47 /* ModelDriver+Operations.swift in Sources */,
 				875E9BC24BFE79D9D6432057 /* ModelDriver.swift in Sources */,
 				92E6B0D891F85117FF0ECE85 /* MultiDocumentTests.swift in Sources */,
 				1F354F3256682C59D9B9E4F2 /* PencilModelingTests.swift in Sources */,
@@ -483,6 +535,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		F4A9CB171F2448F766B8876A /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				14FC072D8582F35F9DB809D4 /* AppDelegate.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		FEAE8469D98F38C72227C804 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -496,7 +556,6 @@
 				8BA08A54296F12BB7841A53E /* SaveAllTests.swift in Sources */,
 				CB6FFC4F9B5AAC3C49B9140C /* SurfaceLifecycleTests.swift in Sources */,
 				FC084A85CD3C49779FDDD4AF /* UITestSupport.swift in Sources */,
-				830C1EF535AFF41B857165BB /* WorkflowModelingChecks.swift in Sources */,
 				8C7BDE54C40B2A9447010FB3 /* WorkflowSupport.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -530,10 +589,30 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.onecad.ipad.nativetests;
 				SDKROOT = iphoneos;
 				SWIFT_OBJC_BRIDGING_HEADER = "OneCADNativeTests/OneCADNativeTests-Bridging-Header.h";
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 2;
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/OneCAD.app/OneCAD";
 			};
 			name = Release;
+		};
+		0A43B4C204E2B5830EF59AC3 /* Acceptance */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = OneCADFixtureSource/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.onecad.fixture-source";
+				PRODUCT_NAME = OneCADFixtureSource;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = iphonesimulator;
+				TARGETED_DEVICE_FAMILY = 2;
+			};
+			name = Acceptance;
 		};
 		283FC626D5A871FE6F6CE050 /* Acceptance */ = {
 			isa = XCBuildConfiguration;
@@ -547,7 +626,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.onecad.ipad.uitests;
 				SDKROOT = iphoneos;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 2;
 				TEST_TARGET_NAME = OneCAD;
 			};
 			name = Acceptance;
@@ -577,7 +656,7 @@
 				PRODUCT_NAME = OneCAD;
 				SDKROOT = iphoneos;
 				SWIFT_OBJC_BRIDGING_HEADER = "OneCAD/OneCAD-Bridging-Header.h";
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 2;
 			};
 			name = Release;
 		};
@@ -609,7 +688,7 @@
 				PRODUCT_NAME = OneCAD;
 				SDKROOT = iphoneos;
 				SWIFT_OBJC_BRIDGING_HEADER = "OneCAD/OneCAD-Bridging-Header.h";
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 2;
 			};
 			name = Acceptance;
 		};
@@ -626,7 +705,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.onecad.ipad.nativetests;
 				SDKROOT = iphoneos;
 				SWIFT_OBJC_BRIDGING_HEADER = "OneCADNativeTests/OneCADNativeTests-Bridging-Header.h";
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 2;
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/OneCAD.app/OneCAD";
 			};
 			name = Debug;
@@ -643,7 +722,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.onecad.ipad.uitests;
 				SDKROOT = iphoneos;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 2;
 				TEST_TARGET_NAME = OneCAD;
 			};
 			name = Release;
@@ -719,6 +798,26 @@
 			};
 			name = Acceptance;
 		};
+		848B4F09DDFFEA88A4B91A4E /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = OneCADFixtureSource/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.onecad.fixture-source";
+				PRODUCT_NAME = OneCADFixtureSource;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = iphonesimulator;
+				TARGETED_DEVICE_FAMILY = 2;
+			};
+			name = Release;
+		};
 		B6ABABADFD1E387C653A1FBB /* Acceptance */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -732,10 +831,30 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.onecad.ipad.nativetests;
 				SDKROOT = iphoneos;
 				SWIFT_OBJC_BRIDGING_HEADER = "OneCADNativeTests/OneCADNativeTests-Bridging-Header.h";
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 2;
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/OneCAD.app/OneCAD";
 			};
 			name = Acceptance;
+		};
+		C29D98E22881476ED4A5717E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = OneCADFixtureSource/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.onecad.fixture-source";
+				PRODUCT_NAME = OneCADFixtureSource;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = iphonesimulator;
+				TARGETED_DEVICE_FAMILY = 2;
+			};
+			name = Debug;
 		};
 		CB2848DFF27B917056B9A706 /* Debug */ = {
 			isa = XCBuildConfiguration;
@@ -749,7 +868,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.onecad.ipad.uitests;
 				SDKROOT = iphoneos;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 2;
 				TEST_TARGET_NAME = OneCAD;
 			};
 			name = Debug;
@@ -779,7 +898,7 @@
 				PRODUCT_NAME = OneCAD;
 				SDKROOT = iphoneos;
 				SWIFT_OBJC_BRIDGING_HEADER = "OneCAD/OneCAD-Bridging-Header.h";
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 2;
 			};
 			name = Debug;
 		};
@@ -953,6 +1072,16 @@
 				B6ABABADFD1E387C653A1FBB /* Acceptance */,
 				4C78A17007CC721AC830C044 /* Debug */,
 				04CE55D0C01EF9F714EFF810 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		5BB3E51C95853259A01E6535 /* Build configuration list for PBXNativeTarget "OneCADFixtureSource" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0A43B4C204E2B5830EF59AC3 /* Acceptance */,
+				C29D98E22881476ED4A5717E /* Debug */,
+				848B4F09DDFFEA88A4B91A4E /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

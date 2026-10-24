@@ -320,3 +320,9 @@ async fn sketch_chooser_planes_and_strip_actions_are_named() {
     .await;
     host.stop().await;
 }
+
+#[path = "input_repair_delivery_tests.rs"]
+mod input_repair_delivery_tests;
+
+#[path = "loft_history_delivery_tests.rs"]
+mod loft_history_delivery_tests;

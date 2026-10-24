@@ -1,4 +1,5 @@
 import CryptoKit
+import UIKit
 import XCTest
 @testable import OneCAD
 
@@ -19,8 +20,10 @@ struct DocumentDriver {
     private var bridge: RustBridge? { AppDelegate.shared?.bridge }
 
     func node(_ match: (AccessibilityNode) -> Bool) -> AccessibilityNode? {
-        bridge?.accessibilitySnapshot()?.nodes.first(where: match)
+        nodes().first(where: match)
     }
+
+    func nodes() -> [AccessibilityNode] { bridge?.accessibilitySnapshot()?.nodes ?? [] }
 
     func exists(_ identifier: String) -> Bool {
         node { $0.identifier == identifier } != nil
@@ -32,12 +35,61 @@ struct DocumentDriver {
         let enabled = { (node: AccessibilityNode) in
             match(node) && node.flags & UInt32(ONECAD_IOS_A11Y_DISABLED) == 0
         }
-        try await test.waitFor("\(what) exported and enabled", timeout: timeout) { node(enabled) != nil }
+        do {
+            try await test.waitFor("\(what) exported and enabled", timeout: timeout) { node(enabled) != nil }
+        } catch {
+            diagnostic("activation timeout: \(what)")
+            throw error
+        }
         let target = try XCTUnwrap(node(enabled))
         XCTAssertTrue(bridge?.activateAccessibility(target.id) ?? false, "activating \(what)")
         // Activation queues an egui event. Let the host consume it before a
         // following action can target a control from the previous snapshot.
         try await test.nextRunLoopTick()
+    }
+
+    func diagnostic(_ context: String) {
+        let nodes = bridge?.accessibilitySnapshot()?.nodes ?? []
+        let tree = nodes.map {
+            "\($0.identifier) | \($0.label) | \($0.value) | role \($0.role) flags \($0.flags) | \($0.frame)"
+        }.joined(separator: "\n")
+        let geometry = surfaceDiagnostic()
+        let attachment = XCTAttachment(string: context + "\n" + geometry + "\n" + tree)
+        attachment.name = context.components(separatedBy: "\n").first ?? "native diagnostic"
+        attachment.lifetime = .keepAlways
+        test.add(attachment)
+        print("NATIVE DIAGNOSTIC: \(context)\n\(geometry)\n\(tree)")
+        if let window = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
+            .flatMap(\.windows).first(where: \.isKeyWindow) {
+            let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+                _ = window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
+            }
+            let screenshot = XCTAttachment(image: image)
+            screenshot.name = "native diagnostic screen"
+            screenshot.lifetime = .keepAlways
+            test.add(screenshot)
+        }
+    }
+
+    private func surfaceDiagnostic() -> String {
+        guard let canvas = ModelDriver.canvas(), let window = canvas.window,
+              let scene = window.windowScene else { return "canvas/window/scene unavailable" }
+        let screen = scene.screen
+        let layer = canvas.metalLayer
+        let desc = canvas.surfaceDescriptor()
+        let proxies = canvas.subviews.compactMap { $0 as? KeyInputProxy }.map {
+            "proxy frame=\($0.frame) firstResponder=\($0.isFirstResponder) session=\(String(describing: $0.session))"
+        }.joined(separator: "\n")
+        return """
+        deviceOrientation=\(UIDevice.current.orientation.rawValue) sceneOrientation=\(scene.interfaceOrientation.rawValue)
+        scene=\(scene.coordinateSpace.bounds) screen=\(screen.bounds) fixed=\(screen.fixedCoordinateSpace.bounds) coordinate=\(screen.coordinateSpace.bounds) scale=\(screen.scale) nativeScale=\(screen.nativeScale)
+        window bounds=\(window.bounds) frame=\(window.frame) transform=\(window.transform) safeArea=\(window.safeAreaInsets)
+        canvas bounds=\(canvas.bounds) frame=\(canvas.frame) transform=\(canvas.transform) safeArea=\(canvas.safeAreaInsets) generation=\(canvas.viewGeneration)
+        canvasInWindow=\(canvas.convert(canvas.bounds, to: window)) canvasInScreen=\(canvas.convert(canvas.bounds, to: screen.coordinateSpace))
+        layer bounds=\(layer.bounds) contentsScale=\(layer.contentsScale) drawable=\(layer.drawableSize) presentation=\(String(describing: layer.presentation()?.bounds))
+        surface width=\(desc?.width_px ?? 0) height=\(desc?.height_px ?? 0) scale=\(desc?.scale ?? 0)
+        \(proxies)
+        """
     }
 
     func activate(_ identifier: String, timeout: TimeInterval = 15) async throws {

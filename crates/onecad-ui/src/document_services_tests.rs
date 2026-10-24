@@ -6,6 +6,9 @@ use onecad_app::{
 };
 use std::sync::{Arc, Mutex};
 
+#[path = "desktop_document_tests.rs"]
+mod desktop_tests;
+
 struct Host {
     picks: Mutex<Vec<String>>,
 }

@@ -37,6 +37,8 @@ pub struct DocumentEditor {
     pub selection: SelectionSet,
     /// Present only while an active tool feeds operand stages from picks.
     pub(crate) operand_staging: Option<crate::model_pick::Staging>,
+    /// Explicit replacement selection being staged for a halted history input.
+    pub(crate) input_repair: Option<crate::input_repair_ui::Pending>,
     /// Staging for a Fillet, Chamfer or Offset Face the user chose, in flight.
     pub(crate) operation_start: Option<crate::operation_start::Pending>,
     pub numeric_id: Option<egui::Id>,
@@ -105,6 +107,7 @@ impl DocumentEditor {
             selection: SelectionSet::default(),
             operand_staging: None,
             operation_start: None,
+            input_repair: None,
             numeric_id: None,
             status,
             command_status: false,

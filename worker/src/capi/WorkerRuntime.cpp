@@ -106,7 +106,7 @@ nlohmann::json make_hello_result_impl() {
         // exactly why it rotted, so it is completed here rather than extended by
         // three and left half-true.
         {"capabilities",
-         nlohmann::json::array({"op.sketch", "op.extrude", "op.revolve", "op.fillet", "op.chamfer",
+         nlohmann::json::array({"op.sketch", "op.extrude", "op.revolve", "op.loft", "op.fillet", "op.chamfer",
                                 "op.boolean", "op.boolean.tools", "op.hole", "op.hole.points",
                                 "op.shell", "op.linearPattern",
                                 "op.circularPattern", "op.mirrorBody", "op.transformBody",

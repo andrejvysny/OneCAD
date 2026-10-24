@@ -2,7 +2,9 @@
 //! batches become typed application effects. Solves remain application-owned.
 
 mod center_rectangle;
+mod drag_creation;
 mod drawing;
+pub use drag_creation::PrimitiveDrag;
 mod geometry;
 pub mod inference;
 mod inferred_creation;

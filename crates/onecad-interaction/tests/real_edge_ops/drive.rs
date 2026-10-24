@@ -84,6 +84,19 @@ pub async fn drive(
                 .await;
                 state.dispatch(Action::EditPreviewFinished { tag, result })
             }
+            Effect::PreviewInputRepair { tag, repair } => {
+                let result = api::preview_input_repair(&harness.state, &repair, Lod::Fine).await;
+                state.dispatch(Action::EditPreviewFinished { tag, result })
+            }
+            Effect::ApplyInputRepair { tag, repair } => {
+                let response =
+                    api::commit_input_repair(&harness.state, harness.host.clone(), &repair)
+                        .await
+                        .unwrap();
+                let (projection, effects) = finish_commit(harness, state, tag, response).await;
+                committed = Some(projection);
+                effects
+            }
             Effect::ApplyOperation { tag, command, .. } => {
                 let (projection, effects) = commit(harness, state, tag, *command).await;
                 committed = Some(projection);
@@ -104,6 +117,15 @@ async fn commit(
     let response = api::apply_operation(&harness.state, harness.host.clone(), vec![command], None)
         .await
         .unwrap();
+    finish_commit(harness, state, tag, response).await
+}
+
+async fn finish_commit(
+    harness: &Harness,
+    state: &mut Interaction,
+    tag: RequestTag,
+    response: api::ApplyOperationResponse,
+) -> (DocumentProjection, Vec<Effect>) {
     let mut effects = state.dispatch(Action::CommitAccepted {
         tag: tag.clone(),
         revision: response.projection.revision,

@@ -32,14 +32,19 @@ physical-device, Pencil-hardware, performance or release readiness.
 5. **Build for testing** and **test without building** against the same
    products, `-testPlan iPadAcceptance`, explicit `-destination
    'platform=iOS Simulator,id=<udid>'`, `-derivedDataPath <dir>/DerivedData`,
-   `-resultBundlePath <dir>/iPadAcceptance.xcresult`.
+   `-resultBundlePath <dir>/iPadAcceptance.xcresult`. Separately build the
+   simulator-only `OneCADFixtureSource` scheme. After clean installs, its public
+   Documents carries the same run's Mac-authored fixture for Files-based opening
+   in OneCAD (procedure below).
 6. **Result parsing**: `xcrun xcresulttool get test-results tests` and
    `summary`; the executed test identifiers must equal the checked-in
    inventory exactly; zero failures; zero skips unless listed in the approved
    skip list with a reason (empty initially); exactly one run of each test.
-7. **Artifacts**: copy the app data container's
+7. **Native artifacts**: copy the app data container's
    `Documents/acceptance/<run-id>/` (saved `.onecad`, exported STEP, semantic
-   JSON, trace records) and export xcresult attachments (screenshots).
+   JSON, trace records) and export xcresult attachments (screenshots). Public UI
+   documents remain in app Documents; they are separate from these native
+   geometry artifacts.
 8. **Independent geometry oracle (Mac)**: run the ignored Rust test
    `ios_simulator_artifacts` in `onecad-app` with the real Mac sidecar
    (`ONECAD_REQUIRE_WORKER=1`). It opens each simulator-authored `.onecad`,
@@ -97,6 +102,33 @@ project are resolved there).
   26.5`. A reused simulator is never erased, but the app is uninstalled
   before `test-without-building` so its data container (crash journal,
   recovery, recents, earlier runs' artifacts) does not carry over.
+- Build the helper independently with `xcodebuild build -project
+  platforms/ios/OneCAD.xcodeproj -scheme OneCADFixtureSource -configuration
+  Acceptance -destination 'platform=iOS Simulator,id=<udid>' -derivedDataPath
+  <dir>/DerivedData-fixture`. It is not a production-app dependency. Cleanly
+  uninstall `com.onecad.fixture-source`, install
+  `<dir>/DerivedData-fixture/Build/Products/Acceptance-iphonesimulator/OneCADFixtureSource.app`,
+  then run `xcrun simctl get_app_container <udid> com.onecad.fixture-source data`.
+  Copy `<dir>/mac-authored/mac-plate.onecad` to that carrier container's
+  `Documents/MacInput-<run-id>.onecad`. The runner requires a nonempty regular
+  source file, refuses an existing destination, verifies the copied bytes, and
+  writes carrier bundle, source, public filename and SHA-256 to
+  `<dir>/public-fixture.json`. Launch the carrier normally to register its local
+  Files folder, then install the main build's
+  `<dir>/DerivedData/Build/Products/Acceptance-iphonesimulator/OneCAD.app`.
+  The final verifier requires the exact carrier bundle, run identity, filename,
+  destination, byte count and SHA-256 matching the same run's Mac fixture.
+  `TEST_RUNNER_ONECAD_PUBLIC_FIXTURE_NAME` supplies only that filename to the
+  public UI tests (`ONECAD_PUBLIC_FIXTURE_NAME` inside XCTest), which open it
+  through Files under **On My iPad → OneCAD Fixtures**. The carrier enables
+  Files sharing and opening in place; OneCAD retains its intentional
+  `LSSupportsOpeningDocumentsInPlace = NO` import policy. This seeds ordinary
+  document bytes, without app test hooks, geometry injection or private provider
+  filesystem access. The public tests qualify finger-only canvas
+  refusal, numeric controls, history, Files, Save As and reopen using preseeded
+  Mac geometry. Synthetic native Pencil authoring and its native geometry
+  artifacts provide separate evidence; the public workflow does not claim to
+  create that plate with a Pencil.
 - Step 3 builds three bundles under `target/ios-worker/` (where
   `platforms/ios/scripts/build-rust.sh` looks): simulator Debug with test
   hooks for the Acceptance products, device Release and simulator Release

@@ -139,23 +139,34 @@ pub fn paint(
     if let Some(draft) = &session.preview
         && !matches!(draft, DraftPrimitive::Point { .. })
     {
-        let points = draft_points(draft, rect, view, session.plane);
-        if let [point] = points.as_slice()
-            && let Some(screen) = project(rect, view, session.plane, *point)
-        {
-            painter.circle_stroke(screen, 4.0, Stroke::new(1.5, theme.accent));
-        }
-        let stroke = Stroke::new(WIDTH_NORMAL, theme.accent);
-        paint_entity_path(
-            &painter,
-            rect,
-            view,
-            session.plane,
-            &points,
-            stroke,
-            Some((6.0, 4.0)),
-        );
+        paint_draft(&painter, rect, view, session.plane, draft, theme);
     }
+}
+
+pub(crate) fn paint_draft(
+    painter: &Painter,
+    rect: Rect,
+    view: &ViewSnapshot,
+    plane: SketchPlane,
+    draft: &DraftPrimitive,
+    theme: &Theme,
+) {
+    let points = draft_points(draft, rect, view, plane);
+    if let [point] = points.as_slice()
+        && let Some(screen) = project(rect, view, plane, *point)
+    {
+        painter.circle_stroke(screen, 4.0, Stroke::new(1.5, theme.accent));
+    }
+    let stroke = Stroke::new(WIDTH_NORMAL, theme.accent);
+    paint_entity_path(
+        painter,
+        rect,
+        view,
+        plane,
+        &points,
+        stroke,
+        Some((6.0, 4.0)),
+    );
 }
 
 fn paint_constraint_hover(

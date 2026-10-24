@@ -36,6 +36,7 @@ pub struct Pending {
 #[derive(Clone, Debug, Default)]
 pub struct Entry {
     pub open: bool,
+    pub(crate) datum: crate::datum_ui::Draft,
     pub pending: Option<Pending>,
     context: Option<DocumentContext>,
     candidate: Option<Candidate>,
@@ -51,6 +52,7 @@ pub struct Entry {
 
 impl Entry {
     pub fn dismiss(&mut self) {
+        self.datum = Default::default();
         self.candidate = None;
         self.plane = None;
         self.query = None;
@@ -79,6 +81,21 @@ impl Entry {
 }
 
 impl App {
+    pub(crate) fn choose_offset_plane(&mut self) {
+        if !self.viewport_ready()
+            || !self.doc.bridge.valid()
+            || self.busy()
+            || self.sketch_active()
+            || self.doc.sketch_entry.pending.is_some()
+        {
+            self.doc.status = "Finish the current operation before creating a datum plane".into();
+            return;
+        }
+        self.doc.sketch_entry.open = true;
+        self.doc.sketch_entry.context = self.doc.interaction.context.clone();
+        self.doc.sketch_entry.datum.open();
+    }
+
     pub fn choose_sketch_support(&mut self) {
         if self.viewport_ready()
             && !self.busy()
@@ -324,6 +341,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.horizontal(|ui| instruction_row(app, ui));
+                crate::datum_ui::show(app, ui);
                 if let Some(message) = &app.doc.sketch_entry.message {
                     ui.small(message);
                 }

@@ -1,4 +1,5 @@
-//! Only a failed fresh provisional operation may consume its backend rollback receipt.
+//! Fresh operations and explicit repairs use fenced backend rollback receipts;
+//! existing parameter edits retain their authored changes on regeneration failure.
 use crate::{
     bridge::{Backend, Message},
     event_mailbox::Expected,
@@ -35,6 +36,30 @@ pub async fn apply(
     )
     .await
     .map_err(|e| e.to_string())?;
+    finish_apply(backend, tag, result, fresh, sender).await
+}
+
+pub async fn repair(
+    backend: &mut Backend,
+    tag: RequestTag,
+    repair: api::InputRepair,
+    sender: &mpsc::Sender<Message>,
+) -> Result<CommandOutcome, String> {
+    services::check_tag(&backend.state, &tag).await?;
+    let record = repair.record().record_id;
+    let result = api::commit_input_repair(&backend.state, backend.host.clone(), &repair)
+        .await
+        .map_err(|error| error.to_string())?;
+    finish_apply(backend, tag, result, Some(record), sender).await
+}
+
+async fn finish_apply(
+    backend: &mut Backend,
+    tag: RequestTag,
+    result: api::ApplyOperationResponse,
+    fresh: Option<RecordId>,
+    sender: &mpsc::Sender<Message>,
+) -> Result<CommandOutcome, String> {
     let revision = result.projection.revision;
     let session = result.projection.runtime_session.clone();
     let receipt = result.rollback_token.clone();

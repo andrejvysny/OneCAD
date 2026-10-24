@@ -1,0 +1,11 @@
+digest 0f6fab4a2c8ee939
+press c2 Control Finger (40.000,20.000) taps=1
+release c2 Control Finger (40.000,20.000)
+orbit c3 Start (320.000,300.000) d(0.000,0.000)
+orbit c3 Move (330.000,302.000) d(10.000,2.000)
+orbit c3 End (330.000,302.000) d(0.000,0.000)
+press c4 Author Pencil (400.000,400.000) taps=1
+release c4 Author Pencil (420.000,400.000)
+press c5 Author IndirectPointer (500.000,500.000) taps=1
+release c5 Author IndirectPointer (520.000,500.000)
+stats NormalizerStats { invalid: 0, duplicate_coalesced: 0, stale: 0, unknown_contact: 0, old_generation: 0, refused_contacts: 0, estimation_matched: 0, estimation_unmatched: 0, merged_moves: 0 }

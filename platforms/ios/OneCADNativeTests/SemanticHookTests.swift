@@ -67,13 +67,30 @@ final class SemanticHookTests: XCTestCase {
     func testInjectedFaultsHitTheNormalPaths() async throws {
         let hooks = try await SemanticHooks.attach(self)
         try await openMacFixture(hooks)
+        // An existing regular file passes destination admission, so the fault
+        // reaches the container writer instead of the directory guard.
+        let saved = try await hooks.saveArtifact("save-failure", in: self)
+        XCTAssertEqual(saved["saved"] as? Bool, true, "\(saved)")
+        let file = URL(fileURLWithPath: try XCTUnwrap(saved["path"] as? String))
+        defer {
+            try? FileManager.default.removeItem(at: file)
+            try? FileManager.default.removeItem(at: URL(fileURLWithPath: file.path + ".provenance.json"))
+        }
+        let provenance = try XCTUnwrap(saved["provenance"] as? [String: Any])
+        let previous = try Data(contentsOf: file)
+        let previousHash = try XCTUnwrap(provenance["sha256"] as? String)
+        XCTAssertEqual(provenance["bytes"] as? Int, previous.count)
+        XCTAssertEqual(try DocumentDriver.sha256(file), previousHash)
         try hooks.fault("save_failure")
         let failed = try await hooks.saveArtifact("save-failure", in: self)
         XCTAssertEqual(failed["saved"] as? Bool, false, "\(failed)")
         XCTAssertEqual(failed["injectedFailure"] as? Bool, true, "\(failed)")
-        // The editor's own status names the container write's EISDIR.
+        XCTAssertEqual(failed["blocked"] as? String, "readOnly", "\(failed)")
+        // The editor's own status must identify EACCES from the real write.
         let status = failed["status"] as? String ?? ""
-        XCTAssertTrue(status.contains("Is a directory"), "\(failed)")
+        XCTAssertTrue(status.contains("Permission denied (os error 13)"), "\(failed)")
+        XCTAssertEqual(try Data(contentsOf: file), previous, "the failed overwrite changed the previous artifact")
+        XCTAssertEqual(try DocumentDriver.sha256(file), previousHash, "the failed overwrite changed its SHA-256")
         let before = try hooks.kernelIdentity()["journalWriteFailures"] as? Int ?? 0
         let armed = try hooks.fault("journal_write")
         XCTAssertEqual(armed["journalWrite"] as? Bool, true)

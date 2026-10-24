@@ -19,7 +19,7 @@ use crate::read::{preview_context, PreviewContext};
 use crate::state::AppState;
 
 /// Cancels the preview's worker job if the caller abandons this future.
-struct CancelOnDrop(CancelToken);
+pub(super) struct CancelOnDrop(pub(super) CancelToken);
 
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {

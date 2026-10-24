@@ -7,9 +7,6 @@ use onecad_core::{
 
 impl Interaction {
     pub(crate) fn change_extrude_mode(&mut self, mode: BooleanMode) -> Vec<Effect> {
-        if mode == BooleanMode::Intersect {
-            return Vec::new();
-        }
         let Some(params) = self.editable_extrude() else {
             return Vec::new();
         };

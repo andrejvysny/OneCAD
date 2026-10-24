@@ -17,6 +17,30 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub(super) struct ReadOnlyDirectory {
+    path: PathBuf,
+    permissions: fs::Permissions,
+}
+
+impl ReadOnlyDirectory {
+    pub(super) fn new(path: &Path) -> Self {
+        let permissions = fs::metadata(path).unwrap().permissions();
+        let mut read_only = permissions.clone();
+        read_only.set_readonly(true);
+        fs::set_permissions(path, read_only).unwrap();
+        Self {
+            path: path.into(),
+            permissions,
+        }
+    }
+}
+
+impl Drop for ReadOnlyDirectory {
+    fn drop(&mut self) {
+        fs::set_permissions(&self.path, self.permissions.clone()).unwrap();
+    }
+}
+
 fn recovered_fixture(root: &Path) -> (String, PathBuf) {
     recovered_fixture_named(root, "Saved metadata")
 }
@@ -70,12 +94,13 @@ pub(super) fn recovered_fixture_named(root: &Path, name: &str) -> (String, PathB
 async fn recovered_document_remains_saveable_and_protected_after_capture_refusal() {
     let area = tempfile::tempdir().unwrap();
     let (id, destination) = recovered_fixture(area.path());
-    let (mut app, context) = create_app(area.path()).await;
+    let (mut app, context) = create_home_app(area.path()).await;
     let mut frame = eframe::Frame::_new_kittest();
-    pump_until(&mut app, &context, &mut frame, |app| {
-        app.doc.bridge.shared.recovery.lock().unwrap().offers.len() == 1
-    })
-    .await;
+    await_startup(&mut app, &context).await;
+    assert_eq!(
+        app.doc.bridge.shared.recovery.lock().unwrap().offers.len(),
+        1
+    );
     app.doc.bridge.shared.recovery.lock().unwrap().busy = true;
     logic_tick(&mut app, &context, &mut frame, true);
     assert!(app.close_prompt);
@@ -130,6 +155,27 @@ async fn recovered_document_remains_saveable_and_protected_after_capture_refusal
     pump_until(&mut app, &context, &mut frame, |app| app.may_close).await;
 }
 
+async fn await_startup(app: &mut App, context: &egui::Context) {
+    // This FIFO reply follows all startup cleanup, including clearing recovery.busy.
+    app.doc.bridge.submit(Command::DescribeChanges).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match app.doc.bridge.messages.try_recv() {
+                Ok(message) => {
+                    let complete = matches!(message, crate::bridge::Message::Changes { .. });
+                    app.message(message, context);
+                    if complete {
+                        break;
+                    }
+                }
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+            }
+        }
+    })
+    .await
+    .expect("startup actor must complete before testing an in-flight recovery decision");
+}
+
 async fn check_prompts_and_failed_save(
     app: &mut App,
     context: &egui::Context,
@@ -149,10 +195,16 @@ async fn check_prompts_and_failed_save(
     apply_close_choice(app, Some(2));
     assert!(app.doc.documents.confirm.is_none());
     assert_eq!(app.doc.tab, tab, "cancel keeps the document open");
-    fs::remove_file(destination).unwrap();
-    fs::create_dir(destination).unwrap();
+    let original = fs::read(destination).unwrap();
+    let read_only = ReadOnlyDirectory::new(destination.parent().unwrap());
     app.document_request(Request::Save { save_as: false });
     pump_until(app, context, frame, |app| !app.doc.documents.running).await;
+    assert!(app.doc.diagnostics.contains(
+        crate::diagnostics::Source::File(crate::diagnostics::FileAction::Save),
+        crate::diagnostics::State::Failed,
+        "Permission denied (os error 13)"
+    ));
+    assert_eq!(fs::read(destination).unwrap(), original);
     assert!(app.document_dirty());
     assert_eq!(
         app.doc.document_state.as_ref().unwrap().title,
@@ -162,7 +214,7 @@ async fn check_prompts_and_failed_save(
         app.doc.document_state.as_ref().unwrap().path.as_deref(),
         destination.to_str()
     );
-    fs::remove_dir(destination).unwrap();
+    drop(read_only);
 }
 
 #[tokio::test]

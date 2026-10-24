@@ -47,9 +47,9 @@ use crate::ids::DocumentId;
 use super::{IoError, IoResult};
 
 /// The longest an autosave may be deferred once there is unsaved work, in seconds
-/// (~2 min; V1/V2 plan). The app scheduler owns the cadence and debounces below
-/// this; `autosave::AUTOSAVE_MAX_AGE` is the ceiling built from this constant.
-pub const AUTOSAVE_INTERVAL_SECS: u64 = 120;
+/// The app scheduler debounces below this ceiling. Admission and IO add time;
+/// this is not a guarantee that a checkpoint becomes durable within 60 seconds.
+pub const AUTOSAVE_INTERVAL_SECS: u64 = 60;
 
 /// The `.onecad` container extension (autosave files and real documents share it).
 pub const CONTAINER_EXT: &str = "onecad";
