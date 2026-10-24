@@ -30,6 +30,7 @@ mod section_contours_worker;
 mod silhouette;
 mod targets;
 mod thumbnail;
+mod uniforms;
 
 pub use frame::{grid_step, GridFrame, RenderStyle, SilhouetteMode, Theme};
 pub use highlights::{HighlightKind, HighlightTarget, PreparedHighlights};
@@ -41,6 +42,7 @@ pub use profile::{RenderProfile, MIN_SCENE_SCALE, MOBILE_MAX_SCENE_PIXELS, SCENE
 pub use section_contours::{PreparedSectionContours, SectionContourKey};
 pub use section_contours_worker::SectionContourWorker;
 pub use thumbnail::Thumbnail;
+pub use uniforms::FrameStats;
 
 use frame::FrameU;
 use mesh::GpuBody;
@@ -89,8 +91,8 @@ pub struct Renderer {
     committed_source_bytes: u64,
     preview_source_bytes: u64,
     estimate: MemoryEstimate,
-    frame_buffer: wgpu::Buffer,
-    frame_bind: wgpu::BindGroup,
+    frame_bindings: uniforms::FrameBindings,
+    frame_stats: FrameStats,
     flight: flight::Flight,
     latest_preview_generation: Option<u64>,
     highlights: Option<highlights::GpuHighlights>,
@@ -127,7 +129,7 @@ impl Renderer {
                     profile,
                 )?,
                 ibl_bytes: limits::ibl_bytes(profile),
-                geometry_bytes: std::mem::size_of::<FrameU>() as u64,
+                geometry_bytes: limits::shared_uniform_bytes(),
                 ..Default::default()
             },
             MemoryEstimate::default(),
@@ -153,17 +155,7 @@ impl Renderer {
                 profile,
             )?)
         };
-        let frame_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("CAD frame"),
-            size: std::mem::size_of::<FrameU>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let frame_bind = gpu.bind(
-            "CAD frame",
-            &pipelines.frame_layout,
-            &[frame_buffer.as_entire_binding()],
-        );
+        let frame_bindings = uniforms::FrameBindings::new(&gpu, &pipelines.frame_layout);
         Ok(Self {
             device: device.clone(),
             queue: queue.clone(),
@@ -181,8 +173,8 @@ impl Renderer {
             committed_source_bytes: 0,
             preview_source_bytes: 0,
             estimate,
-            frame_buffer,
-            frame_bind,
+            frame_bindings,
+            frame_stats: FrameStats::default(),
             flight: flight::Flight::submitted(queue, || {}),
             latest_preview_generation: None,
             highlights: None,
@@ -224,6 +216,9 @@ impl Renderer {
     pub fn set_body_style(&mut self, id: BodyId, style: BodyStyle) -> bool {
         if let Some(body) = self.committed.iter_mut().find(|body| body.id == id) {
             body.style = style;
+            let frame = self.frame_bindings.body(style, false);
+            body.uniform = frame.buffer.clone();
+            body.frame_bind = frame.bind.clone();
             true
         } else {
             false
@@ -358,7 +353,7 @@ impl Renderer {
             + self.highlight_metadata_bytes();
         self.estimate.resident_metadata_bytes += self.section_contour_metadata_bytes(false);
         self.estimate.geometry_bytes = self.committed.iter().map(mesh::gpu_bytes).sum::<u64>()
-            + std::mem::size_of::<FrameU>() as u64
+            + limits::shared_uniform_bytes()
             + self.highlight_gpu_bytes();
         self.estimate.geometry_bytes += self.section_contour_gpu_bytes(false);
         self.estimate.cpu_prepared_bytes = 0;
@@ -388,106 +383,25 @@ impl Renderer {
         {
             return Err(RenderError::CaptureMismatch);
         }
-        let highlight_uniforms = if self.highlights.is_some() { 2 } else { 0 };
-        if limits::uniform_bytes(self.committed.len() + self.preview.len() + highlight_uniforms)?
-            > self.limits.max_upload_bytes
-        {
+        let stats = self.frame_upload_stats();
+        if stats.uniform_upload_bytes > self.limits.max_upload_bytes {
             return Err(RenderError::Budget("frame upload"));
         }
-        let staging =
-            limits::uniform_bytes(self.committed.len() + self.preview.len() + highlight_uniforms)?;
         self.limits.check(
             MemoryEstimate {
                 source_bytes: limits::add(self.committed_source_bytes, self.preview_source_bytes)?,
-                cpu_prepared_bytes: (3 + highlight_uniforms) as u64
+                cpu_prepared_bytes: (3 + if self.highlights.is_some() { 2 } else { 0 })
                     * std::mem::size_of::<FrameU>() as u64,
-                upload_bytes: staging,
+                upload_bytes: stats.uniform_upload_bytes,
                 ..self.estimate
             },
             MemoryEstimate::default(),
         )?;
-        let uniform = frame::with_options(
-            frame::uniform(
-                view,
-                self.committed_bounds,
-                style,
-                BodyStyle::default(),
-                false,
-            )?,
-            self.options,
-            self.profile,
-        );
-        let selected = frame::with_options(
-            frame::uniform(
-                view,
-                self.committed_bounds,
-                style,
-                BodyStyle { selected: true },
-                false,
-            )?,
-            self.options,
-            self.profile,
-        );
-        let mut preview_frame = frame::with_options(
-            frame::uniform(
-                view,
-                self.committed_bounds,
-                style,
-                BodyStyle::default(),
-                true,
-            )?,
-            self.options,
-            self.profile,
-        );
-        preview_frame.display[2] = frame::PREVIEW_HIDDEN_EDGE_ALPHA;
-        let highlight_frames = if self.highlights.is_some() {
-            Some([
-                frame::with_options(
-                    frame::highlight_uniform(
-                        uniform,
-                        view,
-                        style,
-                        highlights::HighlightTone::Selected,
-                    )?,
-                    self.options,
-                    self.profile,
-                ),
-                frame::with_options(
-                    frame::highlight_uniform(
-                        uniform,
-                        view,
-                        style,
-                        highlights::HighlightTone::Hover,
-                    )?,
-                    self.options,
-                    self.profile,
-                ),
-            ])
-        } else {
-            None
-        };
-        self.queue
-            .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&uniform));
-        for (bodies, preview) in [(&self.committed, false), (&self.preview, true)] {
-            for body in bodies {
-                let uniform = if preview {
-                    preview_frame
-                } else if body.style.selected {
-                    selected
-                } else {
-                    uniform
-                };
-                self.queue
-                    .write_buffer(&body.uniform, 0, bytemuck::bytes_of(&uniform));
-            }
-        }
-        if let (Some(highlights), Some(frames)) = (&self.highlights, highlight_frames) {
-            for (buffer, frame) in highlights.uniforms.iter().zip(frames) {
-                self.queue
-                    .write_buffer(buffer, 0, bytemuck::bytes_of(&frame));
-            }
-        }
-        self.record(encoder, target, uniform.canvas);
+        let frames = self.frame_uniforms(view, style)?;
+        let uploaded = self.upload_frame_uniforms(&frames);
+        debug_assert_eq!(uploaded, stats);
+        self.record(encoder, target, frames.normal.canvas);
+        self.frame_stats = uploaded;
         self.contact_dirty = false;
         self.flight = flight::Flight::Encoded;
         Ok(true)

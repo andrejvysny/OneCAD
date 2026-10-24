@@ -147,6 +147,10 @@ fn negative_length_keeps_sign_and_empty_draft_rejects_forged_valid_result() {
     assert!(
         matches!(&state.tool.as_ref().unwrap().draft_status, DraftStatus::Valid(value) if value.value == -12.0)
     );
+    state.dispatch(Action::PreviewFinished {
+        tag: tag.clone(),
+        result: Ok(preview(&tag)),
+    });
     let tag = evaluation_tag(&state.dispatch(Action::DraftChanged(String::new())));
     assert!(evaluate(&mut state, &tag, 1.0).is_empty());
     assert!(state.dispatch(Action::Confirm).is_empty());
@@ -156,14 +160,21 @@ fn negative_length_keeps_sign_and_empty_draft_rejects_forged_valid_result() {
 fn newer_numeric_draft_coalesces_evaluation_and_preview_replies() {
     let (mut state, old) = started();
     evaluate(&mut state, &old, 10.0);
-    let current = evaluation_tag(&state.dispatch(Action::DraftChanged("25".into())));
+    let changed = state.dispatch(Action::DraftChanged("25".into()));
+    assert!(!changed.iter().any(|effect| matches!(
+        effect,
+        Effect::EvaluateExpression { .. } | Effect::Preview { .. }
+    )));
     assert!(evaluate(&mut state, &old, 99.0).is_empty());
-    assert!(state
-        .dispatch(Action::PreviewFinished {
-            tag: old.clone(),
-            result: Ok(preview(&old))
-        })
-        .is_empty());
+    let completed = state.dispatch(Action::PreviewFinished {
+        tag: old.clone(),
+        result: Ok(preview(&old)),
+    });
+    assert!(completed
+        .iter()
+        .any(|effect| matches!(effect, Effect::PublishPreview { tag, .. } if tag == &old)));
+    assert!(!state.tool.as_ref().unwrap().ready());
+    let current = evaluation_tag(&completed);
     assert!(matches!(
         evaluate(&mut state, &current, 25.0).as_slice(),
         [Effect::Preview { .. }]

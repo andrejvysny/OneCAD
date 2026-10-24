@@ -19,6 +19,46 @@ fn rect(x: f64, y: f64) -> Option<Rect> {
     Some(Rect::new(x, y, x + 20.0, y + 10.0))
 }
 
+#[test]
+fn cached_snapshots_rebuild_only_when_public_node_contents_change() {
+    let mut tree = Tree::default();
+    tree.update(update(
+        vec![
+            (NodeId(1), window(&[2])),
+            (NodeId(2), node(Role::Button, "Save", rect(2.0, 3.0), true)),
+        ],
+        1,
+    ));
+    let generation = tree.generation();
+    let (first, count) = tree.snapshot();
+    assert_eq!(count, 1);
+    assert_eq!(tree.snapshot_rebuilds, 1);
+    let (second, _) = tree.snapshot();
+    assert_eq!(first, second);
+    assert_eq!(tree.snapshot_rebuilds, 1);
+    assert!(!tree.update(update(vec![(NodeId(1), window(&[2]))], 1)));
+    tree.snapshot();
+    assert_eq!(tree.snapshot_rebuilds, 1);
+    assert!(tree.update(update(
+        vec![(NodeId(2), node(Role::Button, "Saved", rect(4.0, 5.0), true)),],
+        2
+    )));
+    assert!(tree.generation() > generation);
+    let (changed, _) = tree.snapshot();
+    assert_eq!(tree.snapshot_rebuilds, 2);
+    // SAFETY: the cached C array and strings remain owned by `tree` until the next snapshot.
+    let changed = unsafe { &*changed };
+    // SAFETY: snapshot labels are live NUL-terminated C strings owned by `tree`.
+    assert_eq!(
+        unsafe { std::ffi::CStr::from_ptr(changed.label) }
+            .to_str()
+            .unwrap(),
+        "Saved"
+    );
+    assert_eq!([changed.x, changed.y], [4.0, 5.0]);
+    assert_ne!(changed.flags & ffi::A11Y_FOCUSED, 0);
+}
+
 fn update(nodes: Vec<(NodeId, Node)>, focus: u64) -> TreeUpdate {
     TreeUpdate {
         nodes,

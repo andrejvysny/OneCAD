@@ -5,6 +5,22 @@ use crate::app::App;
 use egui::Pos2;
 use onecad_interaction::{Action, DragPhase};
 
+/// Pointer values already have canonical units; expressions still use application evaluation.
+pub(crate) fn scalar_update(key: onecad_interaction::ParameterKey, text: String) -> Action {
+    let phase = match text.parse::<f64>() {
+        Ok(number) => DragPhase::Value {
+            key,
+            text,
+            value: onecad_core::expr::Value {
+                number,
+                dim: key.parameter().dimension(),
+            },
+        },
+        Err(_) => DragPhase::Update { key, text },
+    };
+    Action::ParameterDrag(phase)
+}
+
 /// Sketch drag rule: travel must leave a 4 px box around the press, per axis.
 pub(crate) const THRESHOLD_PX: f32 = 4.0;
 

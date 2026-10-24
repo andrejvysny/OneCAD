@@ -71,6 +71,7 @@ mod overlays;
 mod parameter_drag;
 mod parameter_ui;
 mod path_policy;
+pub mod performance;
 mod pill;
 mod profile_capture;
 mod profile_diagnostics;

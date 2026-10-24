@@ -1,6 +1,6 @@
-//! Parameter-set transitions. Every input that changes the candidate takes a new
-//! sequence and clears the preview; the single correlated evaluation slot is
-//! then refilled with the next pending field, or the set previews when ready.
+//! Desired drafts advance immediately; one submitted preview keeps its exact tag.
+//! Scalar edits retain displayed geometry and replace the pending draft. Hard
+//! context changes clear geometry and retire the submitted request.
 use crate::{
     parameter_set::DragOrigin, DragPhase, Effect, FieldStatus, Interaction, ModelSession,
     ParameterKey, PreviewStatus, Readiness, SessionPhase,
@@ -28,7 +28,45 @@ impl Interaction {
         };
         field.text = text;
         tool.params.last_edited = Some(key);
-        self.changed(Some(key))
+        self.changed_soft(Some(key))
+    }
+
+    fn set_handle_value(
+        &mut self,
+        key: ParameterKey,
+        text: String,
+        value: onecad_core::expr::Value,
+    ) -> Vec<Effect> {
+        let result = if value.dim == key.parameter().dimension()
+            && text.parse::<f64>().ok() == Some(value.number)
+        {
+            crate::feedback::validated_scalar(
+                key.parameter(),
+                &text,
+                Ok(crate::EvaluatedExpressionDto {
+                    value: value.number,
+                    dimension: key.site().into(),
+                    error: None,
+                }),
+            )
+        } else {
+            Err(format!("Enter a finite {} value", key.site()))
+        };
+        let Some(tool) = self.editing_tool() else {
+            return Vec::new();
+        };
+        let existing = tool.editing_existing;
+        let Some(field) = tool.params.field_mut(key).filter(|field| field.active) else {
+            return Vec::new();
+        };
+        field.status = match result {
+            Ok(_) if existing && text == field.original => FieldStatus::Authored,
+            Ok(value) => FieldStatus::Valid(value),
+            Err(error) => FieldStatus::Invalid(error),
+        };
+        field.text = text;
+        tool.params.last_edited = Some(key);
+        self.changed_soft(Some(key))
     }
 
     pub(crate) fn focus_parameter(&mut self, key: ParameterKey) -> Vec<Effect> {
@@ -53,6 +91,7 @@ impl Interaction {
                 Vec::new()
             }
             DragPhase::Update { key, text } => self.set_parameter(key, text),
+            DragPhase::Value { key, text, value } => self.set_handle_value(key, text, value),
             DragPhase::Commit => {
                 self.commit_drag();
                 Vec::new()
@@ -98,8 +137,16 @@ impl Interaction {
         self.changed(focus)
     }
 
-    /// New sequence, cleared preview, then the next evaluation or the preview.
+    /// Hard invalidation takes a new sequence, clears geometry and refills evaluation.
     pub(crate) fn changed(&mut self, prefer: Option<ParameterKey>) -> Vec<Effect> {
+        self.advance(prefer, true)
+    }
+
+    pub(crate) fn changed_soft(&mut self, prefer: Option<ParameterKey>) -> Vec<Effect> {
+        self.advance(prefer, false)
+    }
+
+    fn advance(&mut self, prefer: Option<ParameterKey>, hard: bool) -> Vec<Effect> {
         let Some(tool) = self
             .tool
             .as_mut()
@@ -107,8 +154,13 @@ impl Interaction {
         else {
             return Vec::new();
         };
-        let clear = Effect::ClearPreview {
-            gesture: tool.tag.gesture,
+        let clear = if hard {
+            tool.progress = Default::default();
+            Effect::ClearPreview {
+                gesture: tool.tag.gesture,
+            }
+        } else {
+            Effect::InvalidatePreview
         };
         let Some(sequence) = self.sequence.checked_add(1) else {
             tool.preview = PreviewStatus::Failed("Interaction sequence exhausted".into());
@@ -117,6 +169,7 @@ impl Interaction {
         self.sequence = sequence;
         tool.tag.sequence = sequence;
         tool.preview = PreviewStatus::Empty;
+        tool.progress.validated = None;
         tool.params.op_error = None;
         let mut effects = vec![clear];
         effects.extend(tool.pump(prefer));
@@ -133,6 +186,10 @@ impl Interaction {
 impl ModelSession {
     /// Evaluates one pending field under the current sequence, else previews a ready set.
     pub(crate) fn pump(&mut self, prefer: Option<ParameterKey>) -> Vec<Effect> {
+        if self.progress.submitted.is_some() {
+            self.preview = PreviewStatus::Pending;
+            return Vec::new();
+        }
         let pending = prefer
             .filter(|key| self.params.is_pending(*key))
             .or_else(|| self.params.first_pending());
@@ -157,8 +214,12 @@ impl ModelSession {
     }
 
     pub(crate) fn request_preview(&mut self) -> Vec<Effect> {
+        if self.progress.submitted.is_some() {
+            return Vec::new();
+        }
         if let Some(repair) = &self.repair {
             self.preview = PreviewStatus::Pending;
+            self.progress.submitted = Some(self.tag.clone());
             return vec![Effect::PreviewInputRepair {
                 tag: self.tag.clone(),
                 repair: Box::new(repair.clone()),
@@ -178,15 +239,24 @@ impl ModelSession {
         if self.editing_existing {
             if operation == *self.origin {
                 self.preview = PreviewStatus::Ready;
-                return Vec::new();
+                self.progress.validated = Some(self.tag.clone());
+                return if self.progress.displayed.take().is_some() {
+                    vec![Effect::ClearPreview {
+                        gesture: self.tag.gesture,
+                    }]
+                } else {
+                    Vec::new()
+                };
             }
             self.preview = PreviewStatus::Pending;
+            self.progress.submitted = Some(self.tag.clone());
             return vec![Effect::PreviewExistingEdit {
                 tag: self.tag.clone(),
                 operation: Box::new(operation),
             }];
         }
         self.preview = PreviewStatus::Pending;
+        self.progress.submitted = Some(self.tag.clone());
         vec![Effect::Preview {
             tag: self.tag.clone(),
             sketch_id: crate::session::profile_sketch(&operation),

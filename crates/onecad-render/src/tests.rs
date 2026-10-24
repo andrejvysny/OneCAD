@@ -2,7 +2,7 @@ use super::*;
 use onecad_scene::{Camera, DVec3, Projection, SceneBody, SceneLimits, Viewport};
 use std::sync::Arc;
 
-fn fixture_scene(identity: SceneIdentity) -> SceneSnapshot {
+pub(crate) fn fixture_scene(identity: SceneIdentity) -> SceneSnapshot {
     let bytes = include_bytes!(
         "../../../fixtures/render/fillet-block/00000000-0000-0000-0000-00000000f101.mesh1"
     );
@@ -498,3 +498,5 @@ fn support_grid_shader_validates_without_gpu() {
     .unwrap();
 }
 mod support_grid;
+
+mod shared_uniforms;

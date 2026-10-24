@@ -1,5 +1,4 @@
 use crate::{
-    frame::FrameU,
     gpu::Gpu,
     limits::{add, mul},
     RenderError,
@@ -117,14 +116,12 @@ pub(crate) fn body_estimate(
 }
 
 fn buffer_estimate(lengths: [u64; 6], max_buffer: u64) -> Result<u64, RenderError> {
-    lengths
-        .into_iter()
-        .try_fold(std::mem::size_of::<FrameU>() as u64, |total, length| {
-            if length.max(64) > max_buffer {
-                return Err(RenderError::Budget("device buffer size"));
-            }
-            add(total, length.max(64))
-        })
+    lengths.into_iter().try_fold(0, |total, length| {
+        if length.max(64) > max_buffer {
+            return Err(RenderError::Budget("device buffer size"));
+        }
+        add(total, length.max(64))
+    })
 }
 
 #[cfg(test)]
@@ -256,7 +253,12 @@ impl PreparedBody {
             }),
         })
     }
-    pub(crate) fn upload(self, gpu: &Gpu, layout: &wgpu::BindGroupLayout, id: BodyId) -> GpuBody {
+    pub(crate) fn upload(
+        self,
+        gpu: &Gpu,
+        frame: &crate::uniforms::FrameBinding,
+        id: BodyId,
+    ) -> GpuBody {
         let buffer = |label, data: &[u8], usage| {
             gpu.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -266,13 +268,6 @@ impl PreparedBody {
                 })
         };
         let vertex = wgpu::BufferUsages::VERTEX;
-        let uniform = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("body frame"),
-            size: std::mem::size_of::<FrameU>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let frame_bind = gpu.bind("body frame", layout, &[uniform.as_entire_binding()]);
         GpuBody {
             preview_suppressed: false,
             source: self.geometry.source.clone(),
@@ -314,8 +309,8 @@ impl PreparedBody {
                 bytemuck::cast_slice(&self.geometry.segments),
                 vertex,
             ),
-            uniform,
-            frame_bind,
+            uniform: frame.buffer.clone(),
+            frame_bind: frame.bind.clone(),
         }
     }
 }
@@ -334,7 +329,6 @@ pub(crate) fn gpu_bytes(body: &GpuBody) -> u64 {
         + body.indices.size()
         + body.segments.size()
         + body.feature_segments.size()
-        + body.uniform.size()
         + body.silhouettes.size()
 }
 

@@ -89,6 +89,7 @@ pub struct ModelSession {
     /// Operation at begin; an unchanged existing edit closes without a command.
     pub(crate) origin: Box<Operation>,
     pub(crate) drag: Option<Box<DragOrigin>>,
+    pub(crate) progress: crate::preview_progress::PreviewProgress,
 }
 
 impl ModelSession {
@@ -109,6 +110,7 @@ impl ModelSession {
     }
     pub fn ready(&self) -> bool {
         self.phase == SessionPhase::Editing
+            && self.progress.validated.as_ref() == Some(&self.tag)
             && self.params.readiness() == Readiness::Ready
             && (self.preview == PreviewStatus::Ready
                 || self.repair.is_some() && matches!(self.preview, PreviewStatus::RepairWarning(_))
@@ -118,6 +120,24 @@ impl ModelSession {
                 || self.repair.is_none()
                     && self.editing_existing
                     && self.preview == PreviewStatus::UnavailableForEdit)
+    }
+    /// Display-only completions retain their own revision while a newer draft waits.
+    pub fn displays_preview(&self, tag: &RequestTag) -> bool {
+        self.progress.displayed.as_ref() == Some(tag)
+            && self.tag.context == tag.context
+            && self.tag.gesture == tag.gesture
+            && self.tag.record_id == tag.record_id
+    }
+
+    /// Desired, submitted, displayed and validated revisions; zero means absent.
+    pub fn preview_revisions(&self) -> [u64; 4] {
+        let revision = |tag: &Option<RequestTag>| tag.as_ref().map_or(0, |tag| tag.sequence);
+        [
+            self.tag.sequence,
+            revision(&self.progress.submitted),
+            revision(&self.progress.displayed),
+            revision(&self.progress.validated),
+        ]
     }
 }
 
@@ -268,6 +288,12 @@ pub enum DragPhase {
         key: ParameterKey,
         text: String,
     },
+    /// A handle's finite value in canonical mm/deg units, through the shared validator.
+    Value {
+        key: ParameterKey,
+        text: String,
+        value: onecad_core::expr::Value,
+    },
     Commit,
     /// Restore the snapshot exactly, expressions included.
     Cancel,
@@ -305,6 +331,8 @@ pub enum Effect {
     ClearPreview {
         gesture: u64,
     },
+    /// The desired scalar changed; retain geometry identified by its displayed revision.
+    InvalidatePreview,
     ApplyOperation {
         tag: RequestTag,
         command: Box<EditCommand>,

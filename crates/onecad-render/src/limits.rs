@@ -167,8 +167,8 @@ impl RenderLimits {
     }
 }
 
-pub(crate) fn uniform_bytes(bodies: usize) -> Result<u64, RenderError> {
-    mul(bodies as u64 + 1, std::mem::size_of::<FrameU>() as u64)
+pub(crate) const fn shared_uniform_bytes() -> u64 {
+    3 * std::mem::size_of::<FrameU>() as u64
 }
 
 #[cfg(test)]

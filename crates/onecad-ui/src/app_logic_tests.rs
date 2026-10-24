@@ -11,6 +11,9 @@ mod row_delivery_tests;
 #[path = "item_delivery_tests.rs"]
 mod item_delivery_tests;
 
+#[path = "viewport_navigation_tests.rs"]
+mod viewport_navigation_tests;
+
 #[tokio::test]
 #[ignore = "requires production worker and Metal; run with ONECAD_REQUIRE_WORKER=1 ONECAD_REQUIRE_GPU=1"]
 async fn occluded_app_logic_delivers_new_and_protects_close_without_ui() {
@@ -233,7 +236,7 @@ mod selection_delivery_tests;
 #[path = "gesture_delivery_tests.rs"]
 mod gesture_delivery_tests;
 #[path = "point_center_delivery_tests.rs"]
-mod point_center_delivery_tests;
+pub(crate) mod point_center_delivery_tests;
 
 #[path = "sketch_primitive_drag_delivery_tests.rs"]
 mod sketch_primitive_drag_delivery_tests;

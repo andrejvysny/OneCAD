@@ -75,6 +75,12 @@ gamma-space composition. Internal transparency and downsampling remain linear.
    Encoded or submitted work fences options, targets, geometry and uniforms. If an encoder is
    discarded, drop it before calling `abandon_frame(wake)`.
 
+Frame uniforms are shared by style: normal, selected, preview, selected topology highlight
+and hover topology highlight. Body count does not multiply uniform uploads. The normal
+binding also feeds postprocessing; the preview binding retains its distinct hidden-edge
+opacity. `Renderer::frame_stats()` reports actual uniform write count and bytes of the last
+successful encode. Refused and suspended captures leave those statistics unchanged.
+
 Z-up positions, outward winding, topology IDs and ordinals are preserved. Normals are required;
 non-finite f64-to-f32 camera conversion is rejected. Captured finite near/far planes and one
 section plane clip surfaces, lines, previews and highlights. Bounded CPU triangle-plane
@@ -93,7 +99,8 @@ this crate's ownership and portable accounting.
 `RenderLimits` retains existing body, highlight, texture, CPU, upload, GPU and total caps.
 Preparation additionally enforces the 500,000-triangle ceiling. Accounting includes source
 blobs, sorted silhouette scratch, all/clean edge buffers, expanded face-boundary scratch and
-metadata, synthetic contours, two shared highlight uniforms, frame uploads, OIT/MSAA/depth/AO/
+metadata, synthetic contours, three retained body-style uniforms, two shared highlight
+uniforms, frame uploads, OIT/MSAA/depth/AO/
 contact targets, startup IBL scratch, and old/new replacement overlap. Empty GPU buffers count
 at their actual 64-byte minimum. Charges precede expansion and allocation. These are payload
 estimates, not measured RSS or driver residency.

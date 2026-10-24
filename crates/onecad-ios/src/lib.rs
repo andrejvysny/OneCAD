@@ -11,6 +11,7 @@
 mod a11y;
 mod abi;
 mod abi_input;
+mod abi_performance;
 mod abi_recovery;
 mod abi_text;
 mod app;

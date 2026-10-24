@@ -264,3 +264,59 @@ fn unsupported_parameter_switch_cancels_old_valid_draft_before_confirmation() {
     assert!(state.dispatch(Action::Confirm).is_empty());
     assert!(evaluate(&mut state, old_tag, "length", 9.0).is_empty());
 }
+
+#[test]
+fn canonical_handle_values_share_typed_domains_and_never_request_expression_evaluation() {
+    for (parameter, number, valid) in [
+        (NumericParameter::FilletRadius, 4.0, true),
+        (NumericParameter::FilletRadius, 0.099, false),
+        (NumericParameter::ChamferDistance, 4.0, true),
+        (NumericParameter::ChamferSecondDistance, 0.099, false),
+        (NumericParameter::ChamferAngle, 60.0, true),
+        (NumericParameter::ChamferAngle, 180.0, false),
+        (NumericParameter::OffsetFaceDistance, -4.0, true),
+        (NumericParameter::RevolveAngle, 150.0, true),
+        (NumericParameter::RevolveAngle, -30.0, false),
+    ] {
+        let before = operations()
+            .into_iter()
+            .map(record)
+            .find(|record| {
+                numeric_parameters(&record.op)
+                    .iter()
+                    .any(|descriptor| descriptor.parameter == parameter)
+            })
+            .unwrap();
+        let (mut state, _) = begin(before, parameter);
+        let effects = state.dispatch(Action::ParameterDrag(DragPhase::Value {
+            key: parameter.into(),
+            text: number.to_string(),
+            value: onecad_core::expr::Value {
+                number,
+                dim: parameter.dimension(),
+            },
+        }));
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::EvaluateExpression { .. })),
+            "{parameter:?}"
+        );
+        assert_eq!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::PreviewExistingEdit { .. })),
+            valid,
+            "{parameter:?}"
+        );
+        assert_eq!(
+            matches!(
+                state.tool.as_ref().unwrap().draft_status,
+                DraftStatus::Invalid(_)
+            ),
+            !valid,
+            "{parameter:?}"
+        );
+        assert!(state.dispatch(Action::Confirm).is_empty());
+    }
+}

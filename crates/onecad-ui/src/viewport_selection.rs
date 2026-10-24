@@ -63,6 +63,8 @@ pub struct Selection {
     /// Draw count of the last uploaded highlights (selection plus hover).
     #[cfg(test)]
     pub(crate) uploaded: usize,
+    #[cfg(test)]
+    pub(crate) hover_picks: u64,
 }
 struct Delivery {
     sequence: u64,
@@ -90,6 +92,18 @@ impl Selection {
     fn accepts(&self, sequence: u64, scene: SceneIdentity, current: SceneIdentity) -> bool {
         self.sequence == sequence && scene == current
     }
+
+    fn clear_hover(&mut self) -> bool {
+        if self.hover.take().is_none() {
+            return false;
+        }
+        self.changed();
+        true
+    }
+}
+
+pub(crate) fn clear_hover(app: &mut App) {
+    app.draw_dirty |= app.doc.topology.clear_hover();
 }
 
 pub fn hover(
@@ -101,6 +115,7 @@ pub fn hover(
 ) {
     let pointer = ui.input(|input| input.pointer.hover_pos());
     let allowed = app.viewport_ready()
+        && !app.doc.navigation.active(ui.input(|input| input.time))
         && app.doc.bridge.valid()
         && !sectioned(app)
         && !app.sketch_active()
@@ -110,6 +125,19 @@ pub fn hover(
     let target = pointer
         .filter(|point| allowed && crate::viewport_widgets::allows_pointer(ui, rect, *point))
         .and_then(|point| {
+            let _timing = crate::performance::span(
+                crate::performance::Stage::HoverPick,
+                ui.ctx().cumulative_frame_nr(),
+                [
+                    view.identity().view,
+                    app.doc.navigation.generation(),
+                    display.scene.identity().scene,
+                ],
+            );
+            #[cfg(test)]
+            {
+                app.doc.topology.hover_picks += 1;
+            }
             let logical = point - rect.min;
             let hit = onecad_scene::pick_with_tolerance(
                 &display.scene,
@@ -281,6 +309,31 @@ mod tests {
         selection.invalidate(SceneIdentity { scene: 2, ..scene });
         assert!(selection.hover.is_none());
         assert!(selection.dirty);
+    }
+
+    #[test]
+    fn clearing_transient_hover_invalidates_it_once_without_repeated_highlight_work() {
+        let mut selection = Selection {
+            hover: Some(Target {
+                scene: SceneIdentity {
+                    session: 1,
+                    scene: 1,
+                },
+                body_id: BodyId::new(),
+                mesh_revision: 7,
+                kind: HighlightKind::Face,
+                topology_id: "f:1".into(),
+            }),
+            ..Default::default()
+        };
+        assert!(selection.clear_hover());
+        assert!(selection.hover.is_none());
+        assert_eq!(selection.sequence, 1);
+        assert!(!selection.clear_hover());
+        assert_eq!(
+            selection.sequence, 1,
+            "continuous navigation must not churn highlight work"
+        );
     }
 
     #[test]

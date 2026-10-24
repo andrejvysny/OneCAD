@@ -101,21 +101,45 @@ pub fn route(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
 /// Fences the previous frame's CAD submission and its sampling by the host's UI pass; call
 /// only after the host submitted that pass.
 pub(crate) fn fence_previous_frame(app: &mut App, ctx: &egui::Context) {
+    let correlation = ctx.cumulative_frame_nr().saturating_sub(1);
+    let sampled = app.sampled && app.viewport_ready();
+    let mut cad = false;
     if app.sampled && app.viewport_ready() {
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let finished = done.clone();
         app.gpu.queue.on_submitted_work_done(move || {
-            finished.store(true, std::sync::atomic::Ordering::Release)
+            finished.store(true, std::sync::atomic::Ordering::Release);
+            crate::performance::record(
+                crate::performance::Stage::GpuSamplingComplete,
+                correlation,
+                [0; 3],
+            );
         });
         app.sampling_done = done;
         app.sampled = false;
     }
     if app.cad_needs_fence && app.viewport_ready() {
         let context = ctx.clone();
-        if let Err(error) = app.renderer.after_submit(move || context.request_repaint()) {
+        if let Err(error) = app.renderer.after_submit(move || {
+            crate::performance::record(
+                crate::performance::Stage::GpuCadComplete,
+                correlation,
+                [0; 3],
+            );
+            context.request_repaint();
+        }) {
             app.fail_viewport(error.to_string());
+        } else {
+            cad = true;
         }
         app.cad_needs_fence = false;
+    }
+    if sampled || cad {
+        crate::performance::record(
+            crate::performance::Stage::CadFenceRegistered,
+            correlation,
+            [u64::from(sampled), u64::from(cad), 0],
+        );
     }
 }
 

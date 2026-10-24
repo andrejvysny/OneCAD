@@ -35,6 +35,9 @@ pub struct Tree {
     generation: u64,
     snapshot: Vec<A11yNode>,
     strings: Vec<CString>,
+    snapshot_generation: Option<u64>,
+    #[cfg(test)]
+    snapshot_rebuilds: usize,
 }
 
 fn role(role: Role) -> u32 {
@@ -215,6 +218,22 @@ impl Tree {
 
     /// Rebuilds the C array; valid until the next call or drop.
     pub fn snapshot(&mut self) -> (*const A11yNode, u32) {
+        let cached = self.snapshot_generation == Some(self.generation);
+        onecad_ui::performance::record(
+            onecad_ui::performance::Stage::SnapshotCache,
+            self.generation,
+            [u64::from(cached), self.flat.len() as u64, 0],
+        );
+        if cached {
+            return (
+                self.snapshot.as_ptr(),
+                u32::try_from(self.snapshot.len()).unwrap_or(u32::MAX),
+            );
+        }
+        #[cfg(test)]
+        {
+            self.snapshot_rebuilds += 1;
+        }
         self.strings.clear();
         self.snapshot.clear();
         for flat in &self.flat {
@@ -239,6 +258,7 @@ impl Tree {
             self.snapshot.push(node);
         }
         let count = u32::try_from(self.snapshot.len()).unwrap_or(u32::MAX);
+        self.snapshot_generation = Some(self.generation);
         (self.snapshot.as_ptr(), count)
     }
 

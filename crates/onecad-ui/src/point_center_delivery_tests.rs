@@ -9,7 +9,7 @@ use onecad_interaction::sketch::{SketchPhase, SketchTool};
 use onecad_scene::{Camera, DVec3, Projection};
 
 #[path = "point_center_delivery_tests/support.rs"]
-pub(super) mod support;
+pub(crate) mod support;
 use support::*;
 
 #[tokio::test]

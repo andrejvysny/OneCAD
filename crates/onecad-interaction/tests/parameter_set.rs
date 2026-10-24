@@ -65,14 +65,31 @@ fn evaluation(effects: &[Effect]) -> Option<(RequestTag, String, &'static str)> 
 }
 
 fn answer(state: &mut Interaction, tag: &RequestTag, dimension: &str, value: f64) -> Vec<Effect> {
-    state.dispatch(Action::Evaluated {
+    let effects = state.dispatch(Action::Evaluated {
         tag: tag.clone(),
         result: Ok(EvaluatedExpressionDto {
             value,
             dimension: dimension.into(),
             error: None,
         }),
-    })
+    });
+    complete_preview(state, &effects);
+    effects
+}
+
+fn complete_preview(state: &mut Interaction, effects: &[Effect]) {
+    for effect in effects {
+        match effect {
+            Effect::Preview { tag, .. } => {
+                state.dispatch(Action::PreviewFinished {
+                    tag: tag.clone(),
+                    result: Ok(preview_result(tag)),
+                });
+            }
+            Effect::PreviewExistingEdit { tag, .. } => edit_unavailable(state, tag),
+            _ => {}
+        }
+    }
 }
 
 fn typed(state: &mut Interaction, key: ParameterKey, text: &str) -> Vec<Effect> {
@@ -478,17 +495,18 @@ fn gizmo_motion_keeps_typed_expression_and_cancel_restores_it() {
         angle_degrees: 0.0,
     };
     state.dispatch(Action::ParameterDrag(DragPhase::Begin));
-    let tag = evaluation(&state.dispatch(gizmo([3.0, 7.0, 0.0]))).unwrap();
-    assert_eq!(tag.1, "=a", "untouched X keeps its expression");
-    let preview = previewed(&answer(&mut state, &tag.0, "length", 3.0)).unwrap();
+    let effects = state.dispatch(gizmo([3.0, 7.0, 0.0]));
+    let preview = previewed(&effects).expect("canonical gizmo values preview without evaluation");
+    complete_preview(&mut state, &effects);
     assert_eq!(translate(&preview)[0], Scalar::with_expr(3.0, "=a"));
     assert_eq!(translate(&preview)[1], Scalar::new(7.0));
     assert!(
         tool(&state).dragging(),
         "placement updates never commit the drag"
     );
-    let tag = evaluation(&state.dispatch(gizmo([5.0, 7.0, 0.0]))).unwrap();
-    assert_eq!(tag.1, "5");
+    let effects = state.dispatch(gizmo([5.0, 7.0, 0.0]));
+    assert!(previewed(&effects).is_some());
+    assert_eq!(tool(&state).draft, "5");
     assert_eq!(tool(&state).params.field(TX).unwrap().original, "0");
     let effects = state.dispatch(Action::ParameterDrag(DragPhase::Cancel));
     let preview = previewed(&effects).expect("restored placement previews");
@@ -499,6 +517,7 @@ fn gizmo_motion_keeps_typed_expression_and_cancel_restores_it() {
 
 /// Answers every evaluation in turn, numbers by parsing and `=a` as 3.
 fn settle(state: &mut Interaction, mut effects: Vec<Effect>) {
+    complete_preview(state, &effects);
     while let Some((tag, text, _)) = evaluation(&effects) {
         let value = if text == "=a" {
             3.0

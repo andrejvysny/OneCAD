@@ -75,6 +75,9 @@ impl Service {
             .as_ref()
             .is_some_and(|owner| owner.phase == Phase::Ending)
     }
+    pub fn active(&self) -> bool {
+        self.owner.is_some()
+    }
     pub async fn next(&mut self) -> Option<jobs::ResultMessage> {
         self.receiver.recv().await
     }

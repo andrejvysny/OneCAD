@@ -215,6 +215,7 @@ impl App {
                 | Action::DraftChanged(_)
                 | Action::ParameterChanged { .. }
                 | Action::ParameterDrag(onecad_interaction::DragPhase::Update { .. })
+                | Action::ParameterDrag(onecad_interaction::DragPhase::Value { .. })
                 | Action::BeginExtrude { .. }
                 | Action::BeginOperation { .. }
                 | Action::BeginEdit { .. }
@@ -224,7 +225,35 @@ impl App {
         ) {
             self.doc.command_status = false;
         }
-        for effect in self.doc.interaction.dispatch(action) {
+        let before = self
+            .doc
+            .interaction
+            .tool
+            .as_ref()
+            .map(|tool| tool.tag.sequence);
+        let completion = matches!(
+            action,
+            Action::PreviewFinished { .. } | Action::EditPreviewFinished { .. }
+        );
+        let effects = self.doc.interaction.dispatch(action);
+        if let Some(tool) = &self.doc.interaction.tool {
+            let [desired, submitted, displayed, validated] = tool.preview_revisions();
+            if before != Some(desired) {
+                crate::performance::record(
+                    crate::performance::Stage::PreviewDesired,
+                    tool.tag.context.scene.session,
+                    [desired, submitted, displayed],
+                );
+            }
+            if completion {
+                crate::performance::record(
+                    crate::performance::Stage::PreviewCompleted,
+                    tool.tag.context.scene.session,
+                    [desired, displayed, validated],
+                );
+            }
+        }
+        for effect in effects {
             self.effect(effect);
         }
         if self.doc.document_state.as_ref().is_none_or(|state| {
@@ -260,6 +289,9 @@ impl App {
 
     fn effect(&mut self, effect: Effect) {
         match effect {
+            Effect::InvalidatePreview => {
+                self.draw_dirty = true;
+            }
             Effect::EvaluateExpression {
                 tag,
                 expression,

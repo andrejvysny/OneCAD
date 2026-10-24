@@ -9,6 +9,7 @@ mod modeling_options;
 mod numeric_parameter;
 mod parameter_flow;
 mod parameter_set;
+mod preview_progress;
 mod reducer;
 mod session;
 mod transform;

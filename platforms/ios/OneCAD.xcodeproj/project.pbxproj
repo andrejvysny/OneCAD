@@ -31,6 +31,7 @@
 		57936EE0482A4F38FAA49999 /* TextInputTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E493DE04A8C680287899CBB5 /* TextInputTests.swift */; };
 		57B555D4AC351FDA75CC3AC7 /* TestHookPingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B966A2E61CC04066F8180AB0 /* TestHookPingTests.swift */; };
 		5C7525FC9D16298AD0DC82E5 /* KeyInputProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0471C70A678029488DCC744E /* KeyInputProxy.swift */; };
+		60F7AD371C0C1E0B563EEBCD /* AccessibilityBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6A760E6FC3EE7A1D41CBD15 /* AccessibilityBridgeTests.swift */; };
 		6133F509CD31A1E3D6E9A733 /* ContactRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBABA7B5367AF83D11D9A080 /* ContactRegistry.swift */; };
 		70A8509AE3CBBEFCF453A15E /* OrientationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A4EC2F23EA9085CB4C41E5C /* OrientationTests.swift */; };
 		7243F96ADC1AFCFB7FF72BD5 /* MetalCanvasView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BE5EF688EDA7D5D43F4B535 /* MetalCanvasView.swift */; };
@@ -53,6 +54,7 @@
 		BF0525A721F55B8278E77B8E /* TextInputController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65CD96C1F39D7C8F7E4F6D1C /* TextInputController.swift */; };
 		CB6FFC4F9B5AAC3C49B9140C /* SurfaceLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85614958BEB8E8E12DD63B5D /* SurfaceLifecycleTests.swift */; };
 		D197216A777619480F76E947 /* libonecad_ios.a in Frameworks */ = {isa = PBXBuildFile; fileRef = DFCC5ED7DB7ECA348C086793 /* libonecad_ios.a */; };
+		D1AC8A2912A6D95CD0C2978E /* FrameLoopTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EA686CA362CDE1542BB0F84 /* FrameLoopTests.swift */; };
 		D7A0E3FA1E799593975187F3 /* PencilController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1DED4B0818F4EE16B6DE5E5 /* PencilController.swift */; };
 		DBABF569DF657E9743DA5307 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69DB9BE4B5F647E3A2C44E2B /* SceneDelegate.swift */; };
 		DD456F7C3E96F74850185E48 /* RustBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F8E7764E8B3D6AE32FB4517 /* RustBridge.swift */; };
@@ -117,7 +119,9 @@
 		92B9E16789CE50F6584D00F8 /* TouchSampleBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TouchSampleBuilder.swift; sourceTree = "<group>"; };
 		9803DC4FEC887CA3005D8131 /* DocumentPickerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentPickerTests.swift; sourceTree = "<group>"; };
 		9831A28D45556C0279AB9319 /* SemanticHookTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SemanticHookTests.swift; sourceTree = "<group>"; };
+		9EA686CA362CDE1542BB0F84 /* FrameLoopTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameLoopTests.swift; sourceTree = "<group>"; };
 		A5D6409C4B93D4716206C9FD /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		A6A760E6FC3EE7A1D41CBD15 /* AccessibilityBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityBridgeTests.swift; sourceTree = "<group>"; };
 		AB146270F5A32E9B4C16B0BA /* OneCAD.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = OneCAD.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AE2DC86614E04510234744A8 /* KeyInputProxy+TextInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "KeyInputProxy+TextInput.swift"; sourceTree = "<group>"; };
 		B157FFE85383C1CC886C4F54 /* DocumentExportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentExportTests.swift; sourceTree = "<group>"; };
@@ -250,10 +254,12 @@
 		73767306608A3E2A63CDD59B /* OneCADNativeTests */ = {
 			isa = PBXGroup;
 			children = (
+				A6A760E6FC3EE7A1D41CBD15 /* AccessibilityBridgeTests.swift */,
 				07E56F95560B2D0B280E26AA /* DocumentDriver.swift */,
 				B157FFE85383C1CC886C4F54 /* DocumentExportTests.swift */,
 				3EF5B5ED44ADD451825600BD /* DocumentInboxTests.swift */,
 				C121F993856F3FE4AB35A8DB /* DocumentPersistenceTests.swift */,
+				9EA686CA362CDE1542BB0F84 /* FrameLoopTests.swift */,
 				6B05021645965A4EFBC9AA55 /* ModelArtifactTests.swift */,
 				19634DC718B1413EC0C54E1F /* ModelDriver.swift */,
 				2C333D7DCD36F53434DB358A /* ModelDriver+Operations.swift */,
@@ -487,10 +493,12 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				60F7AD371C0C1E0B563EEBCD /* AccessibilityBridgeTests.swift in Sources */,
 				2ED4C907ECB04B4EEE3503B6 /* DocumentDriver.swift in Sources */,
 				9F30FAC85E2797669D17DA35 /* DocumentExportTests.swift in Sources */,
 				3488F822A7E69538FAEE716D /* DocumentInboxTests.swift in Sources */,
 				4218C20C758AE90630339FB7 /* DocumentPersistenceTests.swift in Sources */,
+				D1AC8A2912A6D95CD0C2978E /* FrameLoopTests.swift in Sources */,
 				4D01465DB0BD89DA616A8D69 /* ModelArtifactTests.swift in Sources */,
 				8D0DC7C5AB4188205329EE47 /* ModelDriver+Operations.swift in Sources */,
 				875E9BC24BFE79D9D6432057 /* ModelDriver.swift in Sources */,

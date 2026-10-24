@@ -88,7 +88,7 @@ impl Renderer {
             if self.options.section[..3].iter().any(|v| *v != 0.0) {
                 self.section_mask(&mut pass, &self.pipelines.pre_cap_mask, false);
                 pass.set_pipeline(&self.pipelines.pre_cap);
-                pass.set_bind_group(0, &self.frame_bind, &[]);
+                pass.set_bind_group(0, &self.frame_bindings.normal.bind, &[]);
                 pass.draw(0..3, 0..1);
             }
         }
@@ -136,7 +136,7 @@ impl Renderer {
         if self.options.section[2] < 0.0 {
             self.section_mask(&mut pass, &self.pipelines.height_cap_mask, true);
             pass.set_pipeline(&self.pipelines.height_cap);
-            pass.set_bind_group(0, &self.frame_bind, &[]);
+            pass.set_bind_group(0, &self.frame_bindings.normal.bind, &[]);
             pass.draw(0..3, 0..1);
         }
     }
@@ -154,7 +154,7 @@ impl Renderer {
             None,
         );
         pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &self.frame_bind, &[]);
+        pass.set_bind_group(0, &self.frame_bindings.normal.bind, &[]);
         pass.set_bind_group(1, bind, &[]);
         pass.draw(0..3, 0..1);
     }
@@ -198,7 +198,7 @@ impl Renderer {
         }
         if xray {
             pass.set_pipeline(&self.pipelines.oit_compose);
-            pass.set_bind_group(0, &self.frame_bind, &[]);
+            pass.set_bind_group(0, &self.frame_bindings.normal.bind, &[]);
             pass.set_bind_group(1, &target.oit_bind, &[]);
             pass.draw(0..3, 0..1);
         }
@@ -210,7 +210,7 @@ impl Renderer {
             } else {
                 &self.pipelines.cap
             });
-            pass.set_bind_group(0, &self.frame_bind, &[]);
+            pass.set_bind_group(0, &self.frame_bindings.normal.bind, &[]);
             pass.draw(0..3, 0..1);
         }
         if self.options.display_mode.studio() {
@@ -360,7 +360,7 @@ impl Renderer {
             return;
         }
         pass.set_pipeline(&self.pipelines.preview_cap_clear);
-        pass.set_bind_group(0, &self.frame_bind, &[]);
+        pass.set_bind_group(0, &self.frame_bindings.normal.bind, &[]);
         pass.draw(0..3, 0..1);
         pass.set_pipeline(&self.pipelines.cap_mask);
         for body in &self.preview {
@@ -388,13 +388,13 @@ impl Renderer {
         if self.options.section[..3].iter().any(|v| *v != 0.0) {
             self.section_mask(&mut pass, &self.pipelines.oit_mask, false);
             pass.set_pipeline(&self.pipelines.oit_cap);
-            pass.set_bind_group(0, &self.frame_bind, &[]);
+            pass.set_bind_group(0, &self.frame_bindings.normal.bind, &[]);
             pass.draw(0..3, 0..1);
         }
     }
     fn draw_ground(&self, pass: &mut wgpu::RenderPass<'_>, target: &Targets) {
         pass.set_pipeline(&self.pipelines.ground);
-        pass.set_bind_group(0, &self.frame_bind, &[]);
+        pass.set_bind_group(0, &self.frame_bindings.normal.bind, &[]);
         pass.set_bind_group(1, &target.ground_bind, &[]);
         pass.draw(0..12, 0..1);
     }

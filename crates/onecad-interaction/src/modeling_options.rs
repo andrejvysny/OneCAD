@@ -65,6 +65,7 @@ impl Interaction {
         let preserve_drag = matches!(&options, ModelingOptions::Mirror { .. });
         let mut operation = tool.effective_op();
         if let Err(message) = apply(&mut operation, options) {
+            tool.progress = Default::default();
             tool.params.op_error = Some((None, message));
             tool.preview = crate::PreviewStatus::Empty;
             return vec![Effect::ClearPreview {
@@ -105,7 +106,11 @@ impl Interaction {
         if !preserve_drag {
             tool.drag = None;
         }
-        self.changed(None)
+        if preserve_drag && tool.drag.is_some() {
+            self.changed_soft(None)
+        } else {
+            self.changed(None)
+        }
     }
 }
 

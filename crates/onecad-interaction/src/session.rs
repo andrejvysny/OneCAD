@@ -154,6 +154,7 @@ impl Interaction {
             preview: PreviewStatus::Empty,
             phase: SessionPhase::Editing,
             drag: None,
+            progress: Default::default(),
         };
         if let Some(field) = focus.and_then(|key| tool.params.field_mut(key)) {
             field.status = FieldStatus::Pending;

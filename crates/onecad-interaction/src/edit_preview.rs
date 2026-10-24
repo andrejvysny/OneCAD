@@ -11,55 +11,57 @@ impl Interaction {
         tag: RequestTag,
         result: Result<EditPreview, ApiError>,
     ) -> Vec<Effect> {
-        if !self.matches_editing(&tag) {
+        if !self.matches_submitted_preview(&tag) {
             return Vec::new();
         }
-        let Some(tool) = self.tool.as_mut().filter(|tool| {
-            tool.editing_existing
-                && tool.preview == PreviewStatus::Pending
-                && tool.params.readiness() == Readiness::Ready
-        }) else {
+        let Some(tool) = self.tool.as_ref().filter(|tool| tool.editing_existing) else {
             return Vec::new();
         };
+        let repair = tool.repair.is_some();
         let result = match admit(&tag, result) {
             Ok(result) => result,
             Err(status) => {
-                if let Some(status) = status {
-                    tool.preview =
-                        if tool.repair.is_some() && status == PreviewStatus::UnavailableForEdit {
-                            PreviewStatus::Failed("Repair requires a successful preview".into())
-                        } else {
-                            status
-                        };
-                }
-                return Vec::new();
+                let status = status.map(|status| {
+                    if repair && status == PreviewStatus::UnavailableForEdit {
+                        PreviewStatus::Failed("Repair requires a successful preview".into())
+                    } else {
+                        status
+                    }
+                });
+                return self.finish_preview(tag, status, None);
             }
         };
-        if tool.repair.is_some() {
+        let status = if repair {
             if !onecad_app::api::repair_preview_ready(&result) {
-                tool.preview = PreviewStatus::Failed(format!(
-                    "Repair preview did not complete: {:?}",
-                    result.outcome
-                ));
-                return Vec::new();
+                return self.finish_preview(
+                    tag,
+                    Some(PreviewStatus::Failed(format!(
+                        "Repair preview did not complete: {:?}",
+                        result.outcome
+                    ))),
+                    None,
+                );
             }
-            tool.preview = match result.outcome {
-                EditPreviewOutcome::DownstreamNeedsRepair { record, .. } => PreviewStatus::RepairWarning(format!("This input repaired successfully. Feature {record} still needs explicit repair.")),
+            match result.outcome {
+                EditPreviewOutcome::DownstreamNeedsRepair { record, .. } => {
+                    PreviewStatus::RepairWarning(format!(
+                        "This input repaired successfully. Feature {record} still needs explicit repair."
+                    ))
+                }
                 _ => PreviewStatus::Ready,
-            };
+            }
         } else {
-            tool.preview = status(&result.outcome);
-        }
-        if matches!(
+            status(&result.outcome)
+        };
+        let geometry = if matches!(
             result.outcome,
             EditPreviewOutcome::Unchanged | EditPreviewOutcome::NotReached { .. }
         ) {
-            return Vec::new();
-        }
-        vec![Effect::PublishPreview {
-            tag,
-            result: Box::new(geometry(result)),
-        }]
+            None
+        } else {
+            Some(geometry(result))
+        };
+        self.finish_preview(tag, Some(status), geometry)
     }
 }
 

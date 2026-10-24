@@ -7,6 +7,52 @@ mod budget_tests {
     use std::{path::PathBuf, sync::Arc};
 
     #[test]
+    fn preparation_counts_retained_style_pool_once_and_uploads_only_geometry() {
+        let scene = crate::tests::fixture_scene(SceneIdentity {
+            session: 72,
+            scene: 1,
+        });
+        let geometry = mesh::estimate(&scene, u64::MAX).unwrap();
+        let pool = crate::limits::shared_uniform_bytes();
+        let budget = PreparationBudget {
+            limits: RenderLimits {
+                max_gpu_bytes: geometry + pool,
+                max_upload_bytes: geometry,
+                ..Default::default()
+            },
+            resident: MemoryEstimate {
+                geometry_bytes: pool,
+                ..Default::default()
+            },
+            max_buffer: u64::MAX,
+        };
+        let prepared = PreparedScene::new(&scene, budget).unwrap();
+        assert_eq!(prepared.gpu_bytes, geometry);
+        let insufficient = PreparationBudget {
+            limits: RenderLimits {
+                max_gpu_bytes: geometry + pool - 1,
+                ..budget.limits
+            },
+            ..budget
+        };
+        assert!(matches!(
+            PreparedScene::new(&scene, insufficient),
+            Err(RenderError::Budget("GPU replacement overlap"))
+        ));
+        let insufficient_upload = PreparationBudget {
+            limits: RenderLimits {
+                max_upload_bytes: geometry - 1,
+                ..budget.limits
+            },
+            ..budget
+        };
+        assert!(matches!(
+            PreparedScene::new(&scene, insufficient_upload),
+            Err(RenderError::Budget("upload staging"))
+        ));
+    }
+
+    #[test]
     fn nema_preparation_fits_host_budget_without_worst_case_reservations() {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/render/nema17");
         let mut paths: Vec<_> = std::fs::read_dir(path)

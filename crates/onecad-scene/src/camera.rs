@@ -82,6 +82,7 @@ pub struct ViewSnapshot {
     basis: CameraBasis,
     view_matrix: DMat4,
     projection_matrix: DMat4,
+    view_projection: DMat4,
 }
 
 impl ViewSnapshot {
@@ -118,6 +119,7 @@ impl ViewSnapshot {
                 camera.far,
             ),
         };
+        let view_matrix = world.inverse();
         let result = Self {
             capture: CaptureIdentity {
                 scene,
@@ -126,8 +128,9 @@ impl ViewSnapshot {
                 viewport,
             },
             basis,
-            view_matrix: world.inverse(),
+            view_matrix,
             projection_matrix,
+            view_projection: projection_matrix * view_matrix,
         };
         if !result.view_matrix.is_finite() || !projection_matrix.is_finite() {
             return Err(SceneError::InvalidView("non-finite matrices"));
@@ -154,7 +157,7 @@ impl ViewSnapshot {
         self.projection_matrix
     }
     pub fn view_projection(&self) -> DMat4 {
-        self.projection_matrix * self.view_matrix
+        self.view_projection
     }
     pub fn eye(&self) -> DVec3 {
         eye_position(self.camera(), self.basis)

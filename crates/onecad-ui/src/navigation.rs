@@ -16,6 +16,18 @@ pub enum Motion {
 pub struct Navigation {
     pad: Option<Pad>,
     unknown_bracket: bool,
+    activity: Activity,
+    camera: Option<onecad_scene::Camera>,
+    generation: u64,
+    frame: Option<u64>,
+}
+
+#[derive(Default)]
+struct Activity {
+    bracketed: bool,
+    dragging: bool,
+    until: Option<f64>,
+    last: Option<f64>,
 }
 
 struct Pad {
@@ -25,6 +37,122 @@ struct Pad {
 }
 
 impl Navigation {
+    pub fn enter_context(
+        &mut self,
+        ctx: &egui::Context,
+        document: u64,
+        scene: Option<onecad_scene::SceneIdentity>,
+    ) {
+        let id = egui::Id::unique("accepted-camera-navigation-context").with(ctx.viewport_id());
+        let current = (document, scene);
+        let changed = ctx.data_mut(|data| {
+            let previous = data.get_temp::<(u64, Option<onecad_scene::SceneIdentity>)>(id);
+            data.insert_temp(id, current);
+            previous != Some(current)
+        });
+        let frame = ctx.cumulative_frame_nr();
+        let skipped = self
+            .frame
+            .is_some_and(|last| frame < last || frame.saturating_sub(last) > 1);
+        self.frame = Some(frame);
+        if changed || skipped {
+            self.cancel_activity();
+        }
+        self.refresh(ctx.input(|input| input.time));
+    }
+
+    pub fn cancel_activity(&mut self) {
+        self.activity = Activity::default();
+    }
+
+    fn reset_input(&mut self) {
+        self.pad = None;
+        self.unknown_bracket = false;
+        self.cancel_activity();
+    }
+
+    fn refresh(&mut self, time: f64) {
+        if !time.is_finite() || time < 0.0 || self.activity.last.is_some_and(|last| time < last) {
+            self.cancel_activity();
+            return;
+        }
+        if self.activity.until.is_some_and(|until| time >= until) {
+            self.activity.until = None;
+        }
+        self.activity.last = Some(time);
+    }
+
+    /// Eligibility comes from the existing viewport ownership checks, never raw input alone.
+    pub fn accepted_event(&mut self, event: &Event, time: f64, accepted: bool) {
+        self.refresh(time);
+        if !time.is_finite() || time < 0.0 {
+            return;
+        }
+        match event {
+            Event::PointerGone | Event::WindowFocused(false) => self.cancel_activity(),
+            Event::MouseWheel {
+                phase: TouchPhase::End | TouchPhase::Cancel,
+                ..
+            } => {
+                self.activity.bracketed = false;
+                self.activity.until = None;
+            }
+            Event::MouseWheel {
+                source,
+                unit,
+                phase,
+                delta,
+                ..
+            } if accepted && delta.is_finite() => {
+                if *phase == TouchPhase::Start
+                    && *source != MouseWheelSource::Wheel
+                    && (*source != MouseWheelSource::Unknown || *unit == MouseWheelUnit::Point)
+                {
+                    self.activity.bracketed = true;
+                }
+                if !self.activity.bracketed {
+                    self.activity.until = Some(time + GESTURE_IDLE_SECONDS);
+                }
+            }
+            Event::Zoom(factor)
+                if accepted && factor.is_finite() && *factor > 0.0 && *factor != 1.0 =>
+            {
+                self.activity.until = Some(time + GESTURE_IDLE_SECONDS);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn dragging(&mut self, active: bool) {
+        self.activity.dragging = active;
+    }
+
+    pub fn active(&self, time: f64) -> bool {
+        self.activity.bracketed
+            || self.activity.dragging
+            || self.activity.until.is_some_and(|until| time < until)
+    }
+
+    pub fn repaint_after(&self, time: f64) -> Option<std::time::Duration> {
+        self.activity
+            .until
+            .filter(|until| *until > time)
+            .map(|until| std::time::Duration::from_secs_f64(until - time))
+    }
+
+    pub fn observe_camera(&mut self, camera: onecad_scene::Camera) -> bool {
+        if self.camera == Some(camera) {
+            return false;
+        }
+        self.camera = Some(camera);
+        self.generation = self.generation.wrapping_add(1);
+        true
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     pub fn event(&mut self, event: &Event, time: f64, page_height: f32) -> Option<Motion> {
         if matches!(event, Event::WindowFocused(false) | Event::PointerGone)
             || !time.is_finite()
@@ -32,7 +160,7 @@ impl Navigation {
             || !page_height.is_finite()
             || page_height <= 0.0
         {
-            *self = Self::default();
+            self.reset_input();
             return None;
         }
         match event {
@@ -47,7 +175,7 @@ impl Navigation {
                 source,
             } => {
                 if !delta.is_finite() {
-                    *self = Self::default();
+                    self.reset_input();
                     return None;
                 }
                 let pad = self.trackpad(*source, *unit, *phase);
@@ -55,7 +183,7 @@ impl Navigation {
                     return None;
                 }
                 if pad && self.pad.as_ref().is_some_and(|pad| time < pad.last) {
-                    *self = Self::default();
+                    self.reset_input();
                     return None;
                 }
                 let shift = pad && self.latch(*source, *phase, modifiers.shift, time);
@@ -81,7 +209,7 @@ impl Navigation {
             return false;
         }
         if phase == TouchPhase::Cancel {
-            *self = Self::default();
+            self.reset_input();
             return false;
         }
         if source != MouseWheelSource::Unknown {

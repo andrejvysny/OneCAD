@@ -164,20 +164,26 @@ fn all_request_fences_reject_late_replies_and_create_results_cannot_complete_edi
 }
 
 #[test]
-fn old_sequence_cancelled_results_and_cancel_never_publish_geometry() {
-    let (mut state, old) = pending();
-    let new = evaluation_tag(&state.dispatch(Action::DraftChanged("12".into())));
-    evaluate(&mut state, &new, 12.0);
-    assert!(state
-        .dispatch(Action::EditPreviewFinished {
-            tag: old.clone(),
-            result: Ok(result(&old, EditPreviewOutcome::Ready))
-        })
-        .is_empty());
+fn submitted_edit_can_display_while_newest_waits_and_cancelled_results_never_revive() {
     for error in [
         ApiError::StalePreview("moved".into()),
         ApiError::Cancelled("preempted".into()),
     ] {
+        let (mut state, old) = pending();
+        let changed = state.dispatch(Action::DraftChanged("12".into()));
+        assert!(!changed
+            .iter()
+            .any(|effect| matches!(effect, Effect::EvaluateExpression { .. })));
+        let completed = state.dispatch(Action::EditPreviewFinished {
+            tag: old.clone(),
+            result: Ok(result(&old, EditPreviewOutcome::Ready)),
+        });
+        assert!(completed
+            .iter()
+            .any(|effect| matches!(effect, Effect::PublishPreview { tag, .. } if tag == &old)));
+        assert!(!state.tool.as_ref().unwrap().ready());
+        let new = evaluation_tag(&completed);
+        evaluate(&mut state, &new, 12.0);
         assert!(state
             .dispatch(Action::EditPreviewFinished {
                 tag: new.clone(),
@@ -185,15 +191,15 @@ fn old_sequence_cancelled_results_and_cancel_never_publish_geometry() {
             })
             .is_empty());
         assert!(!state.tool.as_ref().unwrap().ready());
+        state.dispatch(Action::Cancel);
+        assert!(state
+            .dispatch(Action::EditPreviewFinished {
+                tag: new.clone(),
+                result: Ok(result(&new, EditPreviewOutcome::Ready)),
+            })
+            .is_empty());
+        assert!(state.tool.is_none());
     }
-    state.dispatch(Action::Cancel);
-    assert!(state
-        .dispatch(Action::EditPreviewFinished {
-            tag: new.clone(),
-            result: Ok(result(&new, EditPreviewOutcome::Ready))
-        })
-        .is_empty());
-    assert!(state.tool.is_none());
 }
 
 #[test]

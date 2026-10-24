@@ -144,6 +144,7 @@ impl Flow {
                     | Action::ParameterDrag(
                         onecad_interaction::DragPhase::Begin
                             | onecad_interaction::DragPhase::Update { .. }
+                            | onecad_interaction::DragPhase::Value { .. }
                     )
                     | Action::Republish
                     | Action::TransformDraftChanged { .. }
@@ -631,6 +632,35 @@ mod tests {
         assert!(!flow.blocks_sketch_authoring(
             &onecad_interaction::sketch::SketchAction::ContextChanged(None)
         ));
+    }
+    #[test]
+    fn file_operation_and_confirmation_block_canonical_handle_authoring() {
+        use onecad_interaction::{Action, DragPhase, NumericParameter};
+        let value = crate::parameter_drag::scalar_update(
+            NumericParameter::ExtrudeDistance.into(),
+            "12".into(),
+        );
+        assert!(matches!(
+            value,
+            Action::ParameterDrag(DragPhase::Value { .. })
+        ));
+        for flow in [
+            Flow {
+                running: true,
+                ..Default::default()
+            },
+            Flow {
+                confirm: Some(Pending::Quit),
+                ..Default::default()
+            },
+        ] {
+            assert!(flow.blocks_authoring(&Action::ParameterDrag(DragPhase::Begin)));
+            assert!(
+                flow.blocks_authoring(&value),
+                "a refused Begin must not admit its subsequent Value"
+            );
+            assert!(!flow.blocks_authoring(&Action::ParameterDrag(DragPhase::Cancel)));
+        }
     }
     fn saved(clean: bool) -> Result<Outcome, String> {
         Ok(Outcome::Saved(SaveOutcomeDto {

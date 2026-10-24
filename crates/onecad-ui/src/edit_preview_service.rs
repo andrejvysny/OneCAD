@@ -12,7 +12,18 @@ pub(super) enum Edit {
     Repair(Box<onecad_app::api::InputRepair>),
 }
 
-pub(super) async fn candidate(backend: &Backend, generation: u64, tag: RequestTag, edit: Edit) {
+pub(super) async fn candidate(
+    backend: &CandidateBackend,
+    generation: u64,
+    tag: RequestTag,
+    edit: Edit,
+) {
+    crate::performance::record(
+        crate::performance::Stage::PreviewSubmitted,
+        tag.context.scene.session,
+        [tag.sequence, tag.context.scene.scene, tag.gesture],
+    );
+    let _span = super::phase(crate::performance::Stage::PreviewService, &tag);
     let lease = backend
         .shared
         .host_budget
@@ -48,10 +59,20 @@ pub(super) async fn candidate(backend: &Backend, generation: u64, tag: RequestTa
         Ok((source, preparation)) => {
             delivery.lease = Some(Arc::new(source));
             let preparation = Arc::new(preparation);
-            preview(backend, &tag, edit).await.and_then(|result| {
-                prepare(backend, &tag, &result, &mut delivery, preparation)?;
-                Ok(result)
-            })
+            match preview(backend, &tag, edit).await {
+                Ok(result) => {
+                    prepare(
+                        backend,
+                        generation,
+                        &tag,
+                        result,
+                        &mut delivery,
+                        preparation,
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            }
         }
         Err(error) => Err(ApiError::Unsupported(error)),
     };
@@ -59,18 +80,19 @@ pub(super) async fn candidate(backend: &Backend, generation: u64, tag: RequestTa
     backend.shared.publish_candidate(generation, delivery);
 }
 
-fn prepare(
-    backend: &Backend,
+async fn prepare(
+    backend: &CandidateBackend,
+    generation: u64,
     tag: &RequestTag,
-    result: &EditPreview,
+    mut result: EditPreview,
     delivery: &mut CandidateDelivery,
     preparation: Arc<crate::budget::Lease>,
-) -> Result<(), ApiError> {
+) -> Result<EditPreview, ApiError> {
     if matches!(
         result.outcome,
         EditPreviewOutcome::Unchanged | EditPreviewOutcome::NotReached { .. }
     ) {
-        return Ok(());
+        return Ok(result);
     }
     if result.suppressed.len() > crate::budget::MAX_BODIES
         || result.bodies.len() > crate::budget::MAX_BODIES
@@ -79,33 +101,33 @@ fn prepare(
             "Native edit preview body count budget exceeded".into(),
         ));
     }
-    let scene = super::preview_scene(tag, &result.meshes).map_err(ApiError::Internal)?;
-    let budget = backend
-        .shared
-        .preparation_budget()
-        .map_err(ApiError::Unsupported)?;
-    delivery.prepared = Some(
-        onecad_render::PreparedScene::new_retained(
-            &scene,
-            budget.limit_cpu_prepared_bytes(crate::budget::MAX_PREPARED_BYTES),
-            onecad_render::PreparationRetention {
-                source: delivery
-                    .lease
-                    .clone()
-                    .map(|lease| lease as Arc<dyn Send + Sync>),
-                preparation: Some(preparation),
-            },
-        )
-        .map_err(|error| ApiError::Internal(error.to_string()))?,
-    );
-    delivery.scene = Some(Arc::new(scene));
-    Ok(())
+    let retention = onecad_render::PreparationRetention {
+        source: delivery
+            .lease
+            .clone()
+            .map(|lease| lease as Arc<dyn Send + Sync>),
+        preparation: Some(preparation),
+    };
+    let meshes = std::mem::take(&mut result.meshes);
+    let (meshes, prepared, scene) =
+        super::prepare_meshes(backend, generation, tag.clone(), meshes, retention)
+            .await
+            .map_err(ApiError::Internal)?;
+    result.meshes = meshes;
+    delivery.prepared = Some(prepared);
+    delivery.scene = Some(scene);
+    Ok(result)
 }
 
-async fn preview(backend: &Backend, tag: &RequestTag, edit: Edit) -> Result<EditPreview, ApiError> {
+async fn preview(
+    backend: &CandidateBackend,
+    tag: &RequestTag,
+    edit: Edit,
+) -> Result<EditPreview, ApiError> {
     let fence = super::check_tag(&backend.state, tag)
         .await
         .map_err(ApiError::StalePreview)?;
+    let _kernel = super::phase(crate::performance::Stage::PreviewKernel, tag);
     let result = match edit {
         Edit::Parameters(operation) => {
             api::preview_existing_edit(
@@ -121,6 +143,7 @@ async fn preview(backend: &Backend, tag: &RequestTag, edit: Edit) -> Result<Edit
             api::preview_input_repair(&backend.state, &repair, Lod::Coarse).await?
         }
     };
+    drop(_kernel);
     if api::preview_context(&backend.state).await? != fence
         || result.snapshot_id != fence.snapshot_id
     {

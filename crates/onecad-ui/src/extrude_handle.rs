@@ -7,7 +7,7 @@ use crate::{
 };
 use egui::{Pos2, Rect, Stroke};
 use onecad_core::{document::record::ExtrudeParams, ids::RecordId};
-use onecad_interaction::{Action, DragPhase, ModelSession, NumericParameter, ParameterKey};
+use onecad_interaction::{ModelSession, NumericParameter, ParameterKey};
 use onecad_scene::{Camera, DVec3, ViewSnapshot, Viewport};
 
 const DOT_PX: f32 = 9.0;
@@ -466,13 +466,8 @@ impl Drag {
 fn flush(app: &mut App, drag: &mut Drag) {
     if let Some(text) = drag.pending() {
         drag.sent = Some(text.clone());
-        drag.lifecycle.author(
-            app,
-            Action::ParameterDrag(DragPhase::Update {
-                key: DISTANCE,
-                text,
-            }),
-        );
+        drag.lifecycle
+            .author(app, crate::parameter_drag::scalar_update(DISTANCE, text));
     }
 }
 
@@ -529,3 +524,6 @@ pub(crate) fn testing_tip(app: &App, rect: Rect, distance: f64) -> Option<Pos2> 
 #[cfg(test)]
 #[path = "extrude_handle_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+use onecad_interaction::Action;

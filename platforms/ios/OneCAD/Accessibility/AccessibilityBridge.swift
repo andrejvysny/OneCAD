@@ -37,6 +37,11 @@ final class AccessibilityBridge {
     private let bridge: RustBridge
     private var elements: [UInt64: CanvasAccessibilityElement] = [:]
     private var order: [UInt64] = []
+    private var generation: UInt64?
+    private var appliedProxy: ObjectIdentifier?
+    private var appliedField: UInt64?
+    private(set) var snapshotReadCount: UInt64 = 0
+    private(set) var rebuildCount: UInt64 = 0
     var focusedTextProxy: UIView?
     var focusedTextFieldID: UInt64?
     var onActivate: (() -> Void)?
@@ -47,11 +52,27 @@ final class AccessibilityBridge {
     }
 
     /// Called when a frame reports A11Y_CHANGED.
-    func rebuild() {
+    func rebuild(changed: Bool = true) {
+        guard changed || generation == nil || proxyChanged else { return }
         guard let container, let snapshot = bridge.accessibilitySnapshot() else { return }
+        snapshotReadCount &+= 1
+        applySnapshot(nodes: snapshot.nodes, generation: snapshot.generation, container: container)
+    }
+
+    private var proxyChanged: Bool {
+        appliedProxy != focusedTextProxy.map { ObjectIdentifier($0) } || appliedField != focusedTextFieldID
+    }
+
+    /// The generation is Rust's complete flattened tree identity; native focus is separate.
+    func applySnapshot(nodes: [AccessibilityNode], generation: UInt64, container: UIView) {
+        guard self.generation != generation || proxyChanged else { return }
+        self.generation = generation
+        appliedProxy = focusedTextProxy.map { ObjectIdentifier($0) }
+        appliedField = focusedTextFieldID
+        rebuildCount &+= 1
         var next: [UInt64: CanvasAccessibilityElement] = [:]
         var nextOrder: [UInt64] = []
-        for node in snapshot.nodes where node.flags & ONECAD_IOS_A11Y_HIDDEN == 0 {
+        for node in nodes where node.flags & ONECAD_IOS_A11Y_HIDDEN == 0 {
             if node.id == focusedTextFieldID && node.role == ONECAD_IOS_ROLE_TEXT_FIELD.rawValue { continue }
             let element = elements[node.id] ?? makeElement(node.id, in: container)
             configure(element, with: node)

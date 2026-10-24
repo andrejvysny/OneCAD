@@ -74,7 +74,10 @@ impl Renderer {
         self.limits.check(
             incoming,
             crate::MemoryEstimate {
-                geometry_bytes: self.estimate.geometry_bytes,
+                geometry_bytes: self
+                    .estimate
+                    .geometry_bytes
+                    .saturating_sub(crate::limits::shared_uniform_bytes()),
                 source_bytes: self.estimate.source_bytes,
                 resident_metadata_bytes: self.estimate.resident_metadata_bytes,
                 ..Default::default()
@@ -107,7 +110,7 @@ impl Renderer {
             source_bytes: add(scene.source_bytes, source)?,
             geometry_bytes: add(
                 add(add(scene.gpu_bytes, retained)?, bytes)?,
-                std::mem::size_of::<crate::FrameU>() as u64,
+                crate::limits::shared_uniform_bytes(),
             )?,
             cpu_prepared_bytes: add(scene.cpu_bytes, contours.cpu_bytes())?,
             upload_bytes: add(scene.gpu_bytes, bytes)?,
@@ -304,7 +307,7 @@ impl Renderer {
             return;
         }
         pass.set_pipeline(&self.pipelines.edge);
-        pass.set_bind_group(0, &self.frame_bind, &[]);
+        pass.set_bind_group(0, &self.frame_bindings.normal.bind, &[]);
         for contours in self.section_contours.iter().flatten() {
             if Some(contours.key.scene) == self.scene_identity
                 && contours.key.section == self.options.section.map(f32::to_bits)

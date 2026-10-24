@@ -84,12 +84,12 @@ impl Interaction {
                 field.status = if existing && field.text == field.original {
                     FieldStatus::Authored
                 } else {
-                    FieldStatus::Pending
+                    FieldStatus::Valid(moved.clone())
                 };
             }
         }
         tool.record.op = operation;
-        self.refresh()
+        self.changed_soft(None)
     }
 
     fn reject_transform(&mut self, message: String) -> Vec<Effect> {
@@ -103,6 +103,7 @@ impl Interaction {
         let clear = Effect::ClearPreview {
             gesture: tool.tag.gesture,
         };
+        tool.progress = Default::default();
         let Some(sequence) = self.sequence.checked_add(1) else {
             tool.preview = PreviewStatus::Failed("Interaction sequence exhausted".into());
             return vec![clear];

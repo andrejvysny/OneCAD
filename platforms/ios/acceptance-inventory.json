@@ -1,6 +1,8 @@
 {
   "description": "Exact XCTest inventory of the iPadAcceptance test plan, checked by cargo xtask ios-simulator-gate (docs/ios/SIMULATOR_GATE.md step 6). Identifiers are <bundle>/<Suite>/<test()>. approvedSkips entries are {\"test\": <identifier>, \"reason\": <why>}.",
   "tests": [
+    "OneCADNativeTests/AccessibilityBridgeTests/testUnchangedFrameSkipsRustSnapshotButNativeProxyTransitionRefreshes()",
+    "OneCADNativeTests/AccessibilityBridgeTests/testUnchangedTreeReusesElementsWhileNativeFocusAndTextChangesRefresh()",
     "OneCADNativeTests/DocumentExportTests/testSendACopyOffersOnlyTheSavedDocument()",
     "OneCADNativeTests/DocumentExportTests/testStepExportReachesTheExportPicker()",
     "OneCADNativeTests/DocumentInboxTests/testABatchReleasesEveryScopeAndSeparatesFailures()",
@@ -11,6 +13,9 @@
     "OneCADNativeTests/DocumentInboxTests/testScopeIsReleasedWhenTheCopyFails()",
     "OneCADNativeTests/DocumentPersistenceTests/testFailedOverwriteKeepsThePreviousFileByteIdentical()",
     "OneCADNativeTests/DocumentPersistenceTests/testMalformedStepFromFilesLeavesTheDocumentUnchanged()",
+    "OneCADNativeTests/FrameLoopTests/testNonfiniteAndDisabledDelaysNeverCreateImmediateWork()",
+    "OneCADNativeTests/FrameLoopTests/testShortRetryUsesRefreshAndSuspensionRetainsOnlyPendingWork()",
+    "OneCADNativeTests/FrameLoopTests/testWakeDuringFrameSurvivesAndSettledLoopIdles()",
     "OneCADNativeTests/ModelArtifactTests/testChamferedPlateArtifact()",
     "OneCADNativeTests/ModelArtifactTests/testFilletedPlateArtifact()",
     "OneCADNativeTests/ModelArtifactTests/testPlateArtifact()",

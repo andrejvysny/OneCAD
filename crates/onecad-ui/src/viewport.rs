@@ -1,4 +1,5 @@
 use crate::app::App;
+use crate::performance::{self, Stage};
 use onecad_render::{BodyStyle, RenderStyle, Theme};
 use onecad_scene::{Bounds, DVec2, ViewSnapshot, Viewport};
 use std::sync::atomic::Ordering;
@@ -20,6 +21,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 )
             });
             crate::automation::name(ui.ctx(), response.id, crate::automation::VIEWPORT);
+            app.doc.navigation.enter_context(
+                ui.ctx(),
+                app.doc.tab,
+                app.doc.display.as_ref().map(|display| display.scene.identity()),
+            );
             let Some(display) = app.doc.display.clone() else {
                 crate::sketch_creation::clear_candidate(ui.ctx());
                 return;
@@ -46,6 +52,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 return;
             }
             navigation(app, ui, &response, viewport, &display);
+            if app.doc.navigation.active(ui.input(|input| input.time)) {
+                crate::viewport_selection::clear_hover(app);
+            }
             if let Err(error) = render(app, ui.ctx(), viewport, &display) {
                 app.fail_viewport(error);
                 return;
@@ -152,6 +161,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             let double = response.double_clicked()
                 || response.clicked() && crate::viewport_widgets::pencil_double_tap(ui.ctx());
             if (response.clicked() || response.double_clicked())
+                && !app.doc.navigation.active(ui.input(|input| input.time))
                 && !overlay_owns
                 && !crate::viewport_selection::sectioned(app)
                 && app.doc.bridge.valid()
@@ -254,6 +264,24 @@ fn navigation(
         app.doc.fit_pending = false;
     }
     navigate_input(app, ui, response, viewport, display.scene.identity());
+    if app.doc.navigation.observe_camera(app.doc.camera) {
+        performance::record(
+            Stage::CameraApplied,
+            ui.ctx().cumulative_frame_nr(),
+            [
+                app.doc.view.map_or(0, |view| view.identity().view),
+                app.doc.navigation.generation(),
+                display.scene.identity().scene,
+            ],
+        );
+    }
+    if let Some(delay) = app
+        .doc
+        .navigation
+        .repaint_after(ui.input(|input| input.time))
+    {
+        ui.ctx().request_repaint_after(delay);
+    }
     if app.doc.view.is_none_or(|view| {
         view.camera() != app.doc.camera
             || view.viewport() != viewport
@@ -287,12 +315,17 @@ fn navigate_input(
         && !crate::viewport_widgets::owns_pointer(app, ui, response.rect)
         && !egui::Popup::is_any_open(ui.ctx())
         && ui.is_enabled();
+    if !allowed {
+        app.doc.navigation.cancel_activity();
+    }
     ui.input(|input| {
         for event in &input.events {
             let motion = app
                 .doc
                 .navigation
                 .event(event, input.time, viewport.height as f32);
+            let eligible = allowed && !over_chrome && response.hovered();
+            let mut changed = false;
             if let Some(mut motion) = motion
                 && allowed
                 && !over_chrome
@@ -303,18 +336,34 @@ fn navigate_input(
                 {
                     *delta = -*delta;
                 }
-                app.draw_dirty |= crate::camera_navigation::apply(
+                changed = crate::camera_navigation::apply(
                     &mut app.doc.camera,
                     viewport,
                     scene,
                     cursor,
                     motion,
                 );
+                app.draw_dirty |= changed;
             }
+            let starts = matches!(
+                event,
+                egui::Event::MouseWheel {
+                    phase: egui::TouchPhase::Start,
+                    ..
+                }
+            );
+            app.doc
+                .navigation
+                .accepted_event(event, input.time, eligible && (changed || starts));
         }
     });
     // A drag that started on the viewport keeps running over chrome.
-    if allowed && (response.dragged() || !over_chrome) {
+    let dragging = allowed
+        && (response.dragged() || !over_chrome)
+        && (response.dragged_by(egui::PointerButton::Secondary)
+            || response.dragged_by(egui::PointerButton::Middle));
+    app.doc.navigation.dragging(dragging);
+    if dragging {
         navigate_drag(app, ui, response, viewport, scene);
     }
 }
@@ -367,6 +416,7 @@ fn render(
         } else if display.prepared.lock().map_or(true, |p| p.is_none()) {
             // Switched-in document: its re-prepared scene is on its way, and its
             // arrival (or failure) wakes the UI; nothing to draw until then.
+            cad_skipped(app, ctx, 3);
             return Ok(());
         }
     }
@@ -374,7 +424,8 @@ fn render(
         *budget = app.renderer.preparation_budget();
     }
     if !renderer_idle {
-        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        cad_skipped(app, ctx, 1);
+        repaint_waiting(app, ctx);
         return Ok(());
     }
     if !app.draw_dirty
@@ -384,14 +435,17 @@ fn render(
         && app.pending_display_options.is_none()
     {
         crate::viewport_selection::upload(app, &display.scene, ctx)?;
+        cad_skipped(app, ctx, 5);
         return Ok(());
     }
     if !app.sampling_done.load(Ordering::Acquire) {
-        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        cad_skipped(app, ctx, 2);
+        repaint_waiting(app, ctx);
         return Ok(());
     }
     if !crate::viewport_updates::apply(app, display)? {
-        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        cad_skipped(app, ctx, 4);
+        repaint_waiting(app, ctx);
         return Ok(());
     }
     let size = physical_size(viewport);
@@ -401,6 +455,7 @@ fn render(
             .as_ref()
             .is_some_and(|(rejected, _)| *rejected == size)
         {
+            cad_skipped(app, ctx, 6);
             return Ok(());
         }
         let result = app.renderer.resize(size).or_else(|error| {
@@ -418,6 +473,7 @@ fn render(
             Err(error) if error.recoverable_target_refusal() => {
                 app.resize_refusal = Some((size, error.to_string()));
                 app.doc.view = None;
+                cad_skipped(app, ctx, 6);
                 return Ok(());
             }
             Err(error) => return Err(error.to_string()),
@@ -454,21 +510,53 @@ fn render(
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("native CAD viewport"),
         });
-    if app
-        .renderer
-        .encode(
-            &mut encoder,
-            &view,
-            RenderStyle {
-                theme: if app.dark { Theme::Dark } else { Theme::Light },
-                support_grid,
-                grid_visible,
-                ..Default::default()
-            },
-        )
-        .map_err(|e| e.to_string())?
-    {
-        app.gpu.queue.submit([encoder.finish()]);
+    let timing_values = [
+        view.identity().view,
+        app.doc.navigation.generation(),
+        display.scene.identity().scene,
+    ];
+    let encoded = {
+        let _timing = performance::span(Stage::CadEncode, ctx.cumulative_frame_nr(), timing_values);
+        app.renderer
+            .encode(
+                &mut encoder,
+                &view,
+                RenderStyle {
+                    theme: if app.dark { Theme::Dark } else { Theme::Light },
+                    support_grid,
+                    grid_visible,
+                    ..Default::default()
+                },
+            )
+            .map_err(|e| e.to_string())?
+    };
+    if encoded {
+        let stats = app.renderer.frame_stats();
+        performance::record(
+            Stage::CadUniforms,
+            ctx.cumulative_frame_nr(),
+            [
+                view.identity().view,
+                u64::from(stats.uniform_writes),
+                stats.uniform_upload_bytes,
+            ],
+        );
+        {
+            let _timing =
+                performance::span(Stage::CadSubmit, ctx.cumulative_frame_nr(), timing_values);
+            app.gpu.queue.submit([encoder.finish()]);
+        }
+        if let Some(preview) = app.renderer.preview_identity() {
+            performance::record(
+                Stage::PreviewDrawSubmitted,
+                preview.base.session,
+                [
+                    preview.generation,
+                    ctx.cumulative_frame_nr(),
+                    preview.base.scene,
+                ],
+            );
+        }
         app.doc.bridge.shared.input_trace.gpu_submitted(
             &app.gpu.queue,
             display,
@@ -497,6 +585,29 @@ fn render(
     }
     app.draw_dirty = false;
     Ok(())
+}
+
+/// Skip values: reason (1 renderer, 2 sampling, 3 scene, 4 updates, 5 clean, 6 resize),
+/// captured view, desired camera generation. Timed encode/submit use view, generation, scene.
+fn cad_skipped(app: &App, ctx: &egui::Context, reason: u64) {
+    performance::record(
+        Stage::CadSkipped,
+        ctx.cumulative_frame_nr(),
+        [
+            reason,
+            app.doc.view.map_or(0, |view| view.identity().view),
+            app.doc.navigation.generation(),
+        ],
+    );
+}
+
+fn repaint_waiting(app: &App, ctx: &egui::Context) {
+    if cfg!(target_os = "ios") && app.doc.navigation.active(ctx.input(|input| input.time)) {
+        // iOS schedules immediate requests at the next display refresh, never inline.
+        ctx.request_repaint();
+    } else {
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+    }
 }
 
 pub(crate) fn replace_texture(app: &mut App) {

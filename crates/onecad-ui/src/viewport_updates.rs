@@ -251,7 +251,15 @@ fn replace_preview(app: &mut App, display: &Display) -> Result<bool, String> {
     let Some((tag, preview)) = app.doc.pending_preview.as_ref() else {
         return Ok(true);
     };
-    if tag.context.scene != display.scene.identity() {
+    if tag.context.scene != display.scene.identity()
+        || app.doc.interaction.context.as_ref() != Some(&tag.context)
+        || !app
+            .doc
+            .interaction
+            .tool
+            .as_ref()
+            .is_some_and(|tool| tool.displays_preview(tag))
+    {
         app.doc.pending_preview = None;
         app.doc.sections.preview.cancel();
         return Ok(true);
@@ -279,9 +287,13 @@ fn replace_preview(app: &mut App, display: &Display) -> Result<bool, String> {
     } else {
         None
     };
+    let session = tag.context.scene.session;
+    let metadata = [tag.sequence, tag.context.scene.scene, tag.gesture];
     let Some((_, preview)) = app.doc.pending_preview.take() else {
         return Ok(true);
     };
+    let upload =
+        crate::performance::span(crate::performance::Stage::PreviewUpload, session, metadata);
     let result = match contours {
         Some(contours) => app.renderer.replace_prepared_preview_with_section_contours(
             identity,
@@ -296,8 +308,16 @@ fn replace_preview(app: &mut App, display: &Display) -> Result<bool, String> {
         app.renderer
             .suppress_preview_bodies(identity, &preview.suppressed)
     });
+    drop(upload);
     match result {
-        Ok(()) => app.doc.sections.retained_preview = Some((identity, preview.source)),
+        Ok(()) => {
+            crate::performance::record(
+                crate::performance::Stage::PreviewDisplayed,
+                session,
+                metadata,
+            );
+            app.doc.sections.retained_preview = Some((identity, preview.source));
+        }
         Err(error) => app.doc.status = format!("Preview display: {error}"),
     }
     app.doc.sections.preview.cancel();

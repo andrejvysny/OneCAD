@@ -5,6 +5,26 @@ import Foundation
 extension RustBridge {
     static let maxSamplesPerBatch = 4096
 
+    func recordPerformance(stage: UInt32, correlation: UInt64, duration: UInt64 = 0,
+                           values: (UInt64, UInt64, UInt64)) {
+        guard HostPerformance.enabled else { return }
+        var record = onecad_ios_performance_record_v1()
+        record.struct_size = UInt32(MemoryLayout.size(ofValue: record))
+        record.stage = stage
+        record.correlation = correlation
+        record.duration_ns = duration
+        (record.a, record.b, record.c) = values
+        _ = call("performance_record") { onecad_ios_performance_record($0, &record) }
+    }
+
+    func requestPerformanceExport() {
+        guard HostPerformance.enabled else { return }
+        var status = onecad_ios_performance_status_v1()
+        status.struct_size = UInt32(MemoryLayout.size(ofValue: status))
+        guard call("performance_status", { onecad_ios_performance_status($0, &status) }) == ONECAD_IOS_OK else { return }
+        bridgeLog.info("performance buffered=\(status.buffered) in_flight=\(status.in_flight) dropped=\(status.dropped) exported=\(status.exported) errors=\(status.export_errors)")
+    }
+
     // MARK: Surface (attach/detach own the layer reference, see RustBridge)
 
     @discardableResult

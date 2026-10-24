@@ -39,7 +39,7 @@ impl Interaction {
         };
         if tool.params.first_pending().is_some() {
             // A later edit took the evaluation slot; resume the field it left pending.
-            return self.changed(None);
+            return self.changed_soft(None);
         }
         if tool.params.readiness() == Readiness::Ready {
             tool.request_preview()
@@ -53,38 +53,30 @@ impl Interaction {
         tag: RequestTag,
         result: Result<PreviewResultDto, String>,
     ) -> Vec<Effect> {
-        if !self.matches_editing(&tag) {
+        if !self.matches_submitted_preview(&tag) {
             return Vec::new();
         }
-        let Some(tool) = self.tool.as_mut() else {
+        let Some(tool) = self.tool.as_ref() else {
             return Vec::new();
         };
-        if tool.editing_existing
-            || tool.preview != PreviewStatus::Pending
-            || tool.params.readiness() != Readiness::Ready
-        {
+        if tool.editing_existing {
             return Vec::new();
         }
         match result {
             Ok(result) if result.snapshot_id == tag.context.snapshot_id.0 => {
-                tool.preview = if result.needs_repair.is_empty() {
+                let status = if result.needs_repair.is_empty() {
                     PreviewStatus::Ready
                 } else {
                     PreviewStatus::NeedsRepair
                 };
-                vec![Effect::PublishPreview {
-                    tag,
-                    result: Box::new(result),
-                }]
+                self.finish_preview(tag, Some(status), Some(result))
             }
-            Ok(_) => {
-                tool.preview = PreviewStatus::Failed("Preview snapshot changed".into());
-                Vec::new()
-            }
-            Err(message) => {
-                tool.preview = PreviewStatus::Failed(message);
-                Vec::new()
-            }
+            Ok(_) => self.finish_preview(
+                tag,
+                Some(PreviewStatus::Failed("Preview snapshot changed".into())),
+                None,
+            ),
+            Err(message) => self.finish_preview(tag, Some(PreviewStatus::Failed(message)), None),
         }
     }
 
@@ -205,7 +197,7 @@ impl Interaction {
     }
 }
 
-fn validated_scalar(
+pub(crate) fn validated_scalar(
     parameter: NumericParameter,
     draft: &str,
     result: Result<EvaluatedExpressionDto, String>,

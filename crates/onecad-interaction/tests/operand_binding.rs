@@ -351,7 +351,7 @@ fn answer(state: &mut Interaction, effects: &[Effect], value: f64, dimension: &s
             _ => None,
         })
         .expect("an evaluation request");
-    state.dispatch(Action::Evaluated {
+    let effects = state.dispatch(Action::Evaluated {
         tag,
         result: Ok(EvaluatedExpressionDto {
             value,
@@ -359,4 +359,12 @@ fn answer(state: &mut Interaction, effects: &[Effect], value: f64, dimension: &s
             error: None,
         }),
     });
+    for effect in effects {
+        if let Effect::Preview { tag, .. } = effect {
+            state.dispatch(Action::PreviewFinished {
+                result: Ok(support::preview(&tag)),
+                tag,
+            });
+        }
+    }
 }

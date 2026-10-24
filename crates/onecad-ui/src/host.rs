@@ -7,6 +7,9 @@ use std::sync::Arc;
 
 #[path = "host_presentation.rs"]
 mod presentation;
+#[cfg(all(test, feature = "desktop"))]
+#[path = "host_submit_tests.rs"]
+mod submit_tests;
 pub use presentation::{OwnerIdentity, PresentationContext};
 
 pub use crate::display_budget::{DisplayBudget, Ledger, MemoryRelief};
@@ -42,6 +45,12 @@ impl Editor {
             onecad_widgets::text_session::invalidate(ctx);
         }
         output
+    }
+
+    /// Call once after the host submits this frame's UI pass (including CAD image sampling).
+    /// Completion then wakes the next display refresh; the desktop input-hook fallback remains.
+    pub fn after_host_submit(&mut self, ctx: &egui::Context) {
+        crate::input::fence_previous_frame(&mut self.app, ctx);
     }
 
     /// Drains service messages outside a frame (shutdown pumping).

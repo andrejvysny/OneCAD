@@ -20,7 +20,7 @@ use drag::Drag;
 use egui::{Pos2, Rect};
 use geometry::Geometry;
 use onecad_core::{document::record::MirrorBodyParams, ids::RecordId};
-use onecad_interaction::{Action, DragPhase, ModelingOptions, ParameterKey};
+use onecad_interaction::{Action, ModelingOptions, ParameterKey};
 use onecad_scene::ViewSnapshot;
 
 #[derive(Default)]
@@ -108,10 +108,7 @@ fn flush(app: &mut App, drag: &mut Drag) {
         return;
     };
     let action = match &drag.target.kind {
-        Kind::Scalar(key) => Action::ParameterDrag(DragPhase::Update {
-            key: *key,
-            text: text.clone(),
-        }),
+        Kind::Scalar(key) => crate::parameter_drag::scalar_update(*key, text.clone()),
         Kind::Mirror(p) => {
             let Geometry::Axis { direction, .. } = drag.target.geometry else {
                 return;

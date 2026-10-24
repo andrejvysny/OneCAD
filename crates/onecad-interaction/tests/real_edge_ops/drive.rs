@@ -71,7 +71,9 @@ pub async fn drive(
                 .map_err(|error| error.to_string());
                 state.dispatch(Action::PreviewFinished { tag, result })
             }
-            Effect::PublishPreview { .. } | Effect::ClearPreview { .. } => Vec::new(),
+            Effect::PublishPreview { .. }
+            | Effect::ClearPreview { .. }
+            | Effect::InvalidatePreview => Vec::new(),
             Effect::PreviewExistingEdit { tag, operation } => {
                 let fence = api::preview_context(&harness.state).await.unwrap();
                 let result = api::preview_existing_edit(

@@ -87,6 +87,7 @@ pub struct IosApp {
 impl IosApp {
     pub fn create(layout: &HostLayout, wake: Arc<Gate>) -> Outcome<Self> {
         let logging: Box<dyn std::any::Any> = Box::new(onecad_app::logging::init());
+        onecad_ui::performance::initialize(&layout.documents.join("performance"));
         let internal = |message: String| Failure::new(Status::Internal, message);
         let paths =
             QaPaths::sandbox(layout).map_err(|e| Failure::new(Status::InvalidArgument, e))?;

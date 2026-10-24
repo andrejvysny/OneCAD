@@ -87,6 +87,12 @@ follows its role (button, static text or other).
 | `OneCADUITests/OrientationTests/testRotationKeepsAppResponsive` | UI | class 4 |
 | `OneCADUITests/RequiredWorkflowTests/testPencilOnlyCanvasWithNumericControlsHistoryUndoSaveReopen` | UI | class 4, public numeric controls, history, undo/redo and file workflow |
 
+The exact checked-in inventory also includes three `FrameLoopTests` covering
+reentrant wakes, short retries, suspension, idle and finite timer delays, and two
+`AccessibilityBridgeTests` covering unchanged-tree reuse, changed text and native
+text-proxy focus transitions. These are scheduler/cache regressions, not frame-rate
+or physical touch-latency evidence; see [PERFORMANCE.md](PERFORMANCE.md).
+
 ### Synthetic Pencil modeling
 
 `PencilModelingTests/testSyntheticPencilStrokeRectangleExtrudeAndHistoryInLandscape`

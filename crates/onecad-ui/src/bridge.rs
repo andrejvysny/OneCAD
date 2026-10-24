@@ -66,6 +66,13 @@ pub enum Command {
 
 #[derive(Debug)]
 pub enum Candidate {
+    #[cfg(test)]
+    Gate {
+        tag: RequestTag,
+        started: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
+        finished: tokio::sync::oneshot::Sender<()>,
+    },
     Evaluate {
         tag: RequestTag,
         expression: String,
@@ -157,7 +164,7 @@ pub struct Shared {
     pub discard_on_shutdown: Mutex<Option<String>>,
     pub recents: Mutex<Vec<onecad_app::dto::RecentProjectDto>>,
     pub recovery: Mutex<crate::startup_recovery::State>,
-    pub candidate: Mutex<Option<(u64, Candidate)>>,
+    pub candidate: Mutex<Option<(u64, Candidate, crate::performance::Span)>>,
     pub candidate_result: Mutex<Option<(u64, CandidateDelivery)>>,
     pub display_epoch: std::sync::atomic::AtomicU64,
     pub failure: Mutex<Option<String>>,
@@ -303,6 +310,18 @@ impl Shared {
             },
         )
     }
+    pub fn cancel_candidates(&self) {
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if let Ok(mut slot) = self.candidate.lock() {
+            *slot = None;
+        }
+        if let Ok(mut slot) = self.candidate_result.lock() {
+            *slot = None;
+        }
+        self.host_budget.wake();
+    }
+
     pub fn publish_candidate(&self, generation: u64, result: CandidateDelivery) {
         if self.is_current(generation) {
             if let Ok(mut slot) = self.candidate_result.lock() {
@@ -427,10 +446,22 @@ impl Bridge {
         let generation = self
             .shared
             .generation
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
-            + 1;
+            .load(std::sync::atomic::Ordering::Acquire);
+        let tag = match &candidate {
+            #[cfg(test)]
+            Candidate::Gate { tag, .. } => tag,
+            Candidate::Evaluate { tag, .. }
+            | Candidate::Preview { tag, .. }
+            | Candidate::PreviewExistingEdit { tag, .. }
+            | Candidate::PreviewInputRepair { tag, .. } => tag,
+        };
+        let queued = crate::performance::span(
+            crate::performance::Stage::PreviewQueued,
+            tag.context.scene.session,
+            [tag.sequence, tag.context.scene.scene, tag.gesture],
+        );
         if let Ok(mut slot) = self.shared.candidate.lock() {
-            *slot = Some((generation, candidate));
+            *slot = Some((generation, candidate, queued));
         }
         self.shared.host_budget.wake();
         self.shared.notify.notify_one();
@@ -462,16 +493,7 @@ impl Bridge {
     }
 
     pub fn cancel_candidates(&self) {
-        self.shared
-            .generation
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        if let Ok(mut slot) = self.shared.candidate.lock() {
-            *slot = None;
-        }
-        if let Ok(mut slot) = self.shared.candidate_result.lock() {
-            *slot = None;
-        }
-        self.shared.host_budget.wake();
+        self.shared.cancel_candidates();
     }
 
     #[cfg(test)]
@@ -624,11 +646,47 @@ async fn actor(
         previous_scene: None,
     };
     let mut gestures = crate::gesture_services::Service::new();
+    let mut candidate_task: Option<
+        std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+    > = None;
+    let mut waiting_commands = std::collections::VecDeque::with_capacity(ADMISSION);
     loop {
+        if shared.stopping.load(std::sync::atomic::Ordering::Acquire) {
+            break;
+        }
+        if candidate_task.is_none()
+            && let Some(envelope) = waiting_commands.pop_front()
+        {
+            execute_envelope(&mut backend, envelope, &sender).await;
+            if shared.stopping.load(std::sync::atomic::Ordering::Acquire) {
+                break;
+            }
+            continue;
+        }
+        if candidate_task.is_none()
+            && waiting_commands.is_empty()
+            && !gestures.active()
+            && receiver.is_empty()
+            && gesture_receiver.is_empty()
+        {
+            let candidate = shared
+                .candidate
+                .lock()
+                .ok()
+                .and_then(|mut slot| slot.take());
+            if let Some((generation, candidate, queued)) = candidate {
+                drop(queued);
+                candidate_task = Some(Box::pin(services::candidate(
+                    services::CandidateBackend::from(&backend),
+                    generation,
+                    candidate,
+                )));
+            }
+        }
         let gesture_ending = gestures.ending();
         tokio::select! {
             _=shared.shutdown.notified()=>{break;}
-            request = gesture_receiver.recv() => {
+            request = gesture_receiver.recv(), if candidate_task.is_none() => {
                 if let Some(request) = request { gestures.submit(&backend, request, &sender).await; shared.wake(); }
             }
             result = gestures.next() => {
@@ -640,13 +698,14 @@ async fn actor(
             }
             envelope = receiver.recv() => {
                 let Some(envelope) = envelope else { break; };
-                let name = command_name(&envelope.command);
-                shared.input_trace.record("service.command_started", serde_json::json!({"command": name}));
-                services::execute(&mut backend,envelope.command,envelope.permit,&sender).await;
-                shared.input_trace.record("service.command_finished", serde_json::json!({"command": name}));
+                if (candidate_task.is_some() || !waiting_commands.is_empty()) && !matches!(envelope.command, Command::DescribeChanges) {
+                    waiting_commands.push_back(envelope);
+                    continue;
+                }
+                execute_envelope(&mut backend, envelope, &sender).await;
                 if shared.stopping.load(std::sync::atomic::Ordering::Acquire) { break; }
             }
-            event = backend.events.next(), if !gesture_ending => {
+            event = backend.events.next(), if !gesture_ending && candidate_task.is_none() => {
                 match event {
                     BackendEvent::Regen(_)=>match services::load_display(&mut backend).await {
                         Ok(display)=>shared.publish_display(display),
@@ -656,22 +715,29 @@ async fn actor(
                     BackendEvent::WorkerFailed=>{},
                 }
             }
-            _ = shared.notify.notified() => {
-                let candidate = shared.candidate.lock().ok().and_then(|mut slot|slot.take());
-                if let Some((generation,candidate)) = candidate {
-                    // Keep one worker preview until completion; cancellation invalidates its delivery.
-                    tokio::select! {
-                        _=services::candidate(&backend,generation,candidate)=>{},
-                        _=shared.shutdown.notified()=>{backend.state.retire_host_workers();break;}
-                    }
+            _ = shared.notify.notified() => {}
+            _ = async {
+                match &mut candidate_task {
+                    Some(task) => task.await,
+                    None => std::future::pending::<()>().await,
                 }
+            } => {
+                candidate_task = None;
             }
         }
     }
     shared
         .stopping
         .store(true, std::sync::atomic::Ordering::Release);
+    shared.cancel_candidates();
     shared.host_budget.close();
+    // Embedded kernel work and blocking preparation retain their inputs until terminal.
+    if let Some(task) = candidate_task {
+        task.await;
+    }
+    for envelope in waiting_commands {
+        cancel_envelope(envelope, &sender);
+    }
     let _ = recovery_stop.send(());
     let _ = recovery_task.await;
     gestures.shutdown().await;
@@ -707,6 +773,37 @@ async fn actor(
     }
     let _ = sender.send(Message::Stopped);
     shared.wake();
+}
+
+async fn execute_envelope(
+    backend: &mut Backend,
+    envelope: Envelope,
+    sender: &mpsc::Sender<Message>,
+) {
+    let name = command_name(&envelope.command);
+    backend.shared.input_trace.record(
+        "service.command_started",
+        serde_json::json!({"command": name}),
+    );
+    services::execute(backend, envelope.command, envelope.permit, sender).await;
+    backend.shared.input_trace.record(
+        "service.command_finished",
+        serde_json::json!({"command": name}),
+    );
+}
+
+fn cancel_envelope(envelope: Envelope, sender: &mpsc::Sender<Message>) {
+    let command = command_name(&envelope.command);
+    let tag = match envelope.command {
+        Command::Apply { tag, .. } | Command::Repair { tag, .. } => Some(tag),
+        _ => None,
+    };
+    let _ = sender.send(Message::Terminal {
+        command,
+        tag,
+        result: Err("Command cancelled before execution during shutdown".into()),
+        _permit: envelope.permit,
+    });
 }
 
 fn admit(
@@ -752,3 +849,7 @@ pub fn record_id(raw: &str) -> Result<RecordId, String> {
 #[cfg(all(test, feature = "desktop"))]
 #[path = "bridge_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "candidate_actor_tests.rs"]
+mod candidate_actor_tests;

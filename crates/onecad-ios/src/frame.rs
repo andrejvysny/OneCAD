@@ -1,11 +1,13 @@
 //! One host frame. Order (the CAD fence contract of `onecad_ui::App::frame`):
-//! assemble `RawInput` → `Editor::frame` (raw-input routing fences the previous
+//! acquire → assemble `RawInput` → `Editor::frame` (raw-input routing fences the previous
 //! frame's CAD sampling, then logic and ui; the viewport submits its CAD pass) →
-//! upload egui textures → tessellate → acquire → encode the egui pass → submit →
-//! present → free textures. Exactly one egui pass is submitted per frame, and it
-//! is submitted before the next frame's routing registers its fence.
+//! tessellate → upload egui textures → encode the egui pass → submit →
+//! present → free textures → `Editor::after_host_submit`. The host registers
+//! lifetime fences immediately after submission; input routing remains an
+//! idempotent fallback. A missing drawable submits pending texture uploads only.
 use crate::ffi::Insets;
 use egui_wgpu::{RenderState, ScreenDescriptor};
+use onecad_ui::performance::{self, Stage};
 
 /// The document the last frame ended on, so a frame that switched documents
 /// is noticed after the editor pass.
@@ -69,9 +71,14 @@ pub fn paint(
     surface: Option<&mut crate::gpu::Surface>,
     ctx: &egui::Context,
     output: egui::FullOutput,
+    acquired: crate::gpu::Acquired,
 ) -> bool {
     let ppp = output.pixels_per_point;
-    let jobs = ctx.tessellate(output.shapes, ppp);
+    let frame_id = ctx.cumulative_frame_nr().saturating_sub(1);
+    let jobs = {
+        let _span = performance::span(Stage::Tessellate, frame_id, [0; 3]);
+        ctx.tessellate(output.shapes, ppp)
+    };
     let mut textures = output.textures_delta;
     let mut renderer = gpu.renderer.write();
     for (id, deltas) in &textures.set {
@@ -80,9 +87,8 @@ pub fn paint(
         }
     }
     textures.set.clear();
-    let clear = surface_clear_color(ctx);
     let presented =
-        surface.is_some_and(|surface| draw(gpu, surface, &mut renderer, &jobs, ppp, clear));
+        surface.is_some_and(|surface| draw(gpu, surface, &mut renderer, &jobs, ppp, ctx, acquired));
     if !presented {
         // Texture uploads above still need a submission to complete (as eframe does).
         gpu.queue.submit([]);
@@ -100,12 +106,15 @@ fn draw(
     renderer: &mut egui_wgpu::Renderer,
     jobs: &[egui::ClippedPrimitive],
     pixels_per_point: f32,
-    clear: wgpu::Color,
+    ctx: &egui::Context,
+    acquired: crate::gpu::Acquired,
 ) -> bool {
-    let (frame, suboptimal) = match surface.acquire(gpu) {
+    let (frame, suboptimal) = match acquired {
         crate::gpu::Acquired::Frame(frame, suboptimal) => (frame, suboptimal),
         crate::gpu::Acquired::Skip => return false,
     };
+    let frame_id = ctx.cumulative_frame_nr().saturating_sub(1);
+    let clear = surface_clear_color(ctx);
     let screen = ScreenDescriptor {
         size_in_pixels: surface.size(),
         pixels_per_point,
@@ -137,9 +146,22 @@ fn draw(
     });
     // The pass is dropped before `encoder.finish`, so the encoder is not reused early.
     renderer.render(&mut pass.forget_lifetime(), jobs, &screen);
-    gpu.queue
-        .submit(user.into_iter().chain(std::iter::once(encoder.finish())));
+    {
+        let _span = performance::span(Stage::UiSubmit, frame_id, [jobs.len() as u64, 0, 0]);
+        gpu.queue
+            .submit(user.into_iter().chain(std::iter::once(encoder.finish())));
+    }
+    if performance::enabled() {
+        gpu.queue.on_submitted_work_done(move || {
+            performance::record(Stage::GpuComplete, frame_id, [0; 3])
+        });
+    }
     gpu.queue.present(frame);
+    performance::record(
+        Stage::PresentRequested,
+        frame_id,
+        [u64::from(suboptimal), 0, 0],
+    );
     if suboptimal {
         surface.reconfigure(gpu);
     }
@@ -213,17 +235,38 @@ impl crate::app::IosApp {
         use crate::app::{Failure, Phase};
         use crate::ffi::Status;
         let view = admit(self.phase, self.view, time)?;
+        let frame_id = self.ctx.cumulative_frame_nr();
+        let _frame_span = performance::span(
+            Stage::RustFrame,
+            frame_id,
+            [view.size_px[0].into(), view.size_px[1].into(), 0],
+        );
         self.apply_accessory();
         let editor = self
             .editor
             .as_mut()
             .ok_or_else(|| Failure::new(Status::State, "the editor has stopped"))?;
+        // Drawable backpressure must precede the CAD sampling-readiness poll:
+        // otherwise another UI submission can keep moving the sampling fence.
+        let acquired = {
+            let _span = performance::span(Stage::Acquire, frame_id, [0; 3]);
+            self.surface
+                .as_mut()
+                .map_or(crate::gpu::Acquired::Skip, |surface| {
+                    surface.acquire(&self.gpu)
+                })
+        };
         if !self.opens.is_empty() {
             // The active document changes under any live contact.
             self.input
                 .cancel_all(onecad_interaction::touch::CancelReason::DocumentSwitch);
         }
         let mut drained = self.input.drain();
+        performance::record(
+            Stage::InputDrain,
+            frame_id,
+            [drained.events.len() as u64, u64::from(drained.again), 0],
+        );
         if drained.cancelled {
             onecad_ui::host::cancel_contact(&self.ctx);
         }
@@ -249,7 +292,10 @@ impl crate::app::IosApp {
         };
         let raw = raw_input(&view, &self.gpu, inputs);
         self.wake.set_in_frame(true);
-        let mut output = editor.frame(&self.ctx, raw);
+        let mut output = {
+            let _span = performance::span(Stage::EditorFrame, frame_id, [0; 3]);
+            editor.frame(&self.ctx, raw)
+        };
         self.wake.set_in_frame(false);
         let context = editor.presentation_context(&self.ctx);
         if let Some(snapshot) = self.input.prediction_snapshot() {
@@ -267,7 +313,7 @@ impl crate::app::IosApp {
             }
         }
         let switched = self.left_document();
-        Ok(self.finish(output, drained.again || switched))
+        Ok(self.finish(output, drained.again || switched, acquired))
     }
 
     /// A pass that changed the active document (tab strip, ⌃Tab, a new tab)
@@ -290,14 +336,28 @@ impl crate::app::IosApp {
         true
     }
 
-    fn finish(&mut self, mut output: egui::FullOutput, again: bool) -> crate::ffi::FrameResult {
+    fn finish(
+        &mut self,
+        mut output: egui::FullOutput,
+        again: bool,
+        acquired: crate::gpu::Acquired,
+    ) -> crate::ffi::FrameResult {
         use crate::ffi;
         let platform = std::mem::take(&mut output.platform_output);
         let delay = output
             .viewport_output
             .get(&egui::ViewportId::ROOT)
             .map_or(std::time::Duration::MAX, |viewport| viewport.repaint_delay);
-        let presented = paint(&self.gpu, self.surface.as_mut(), &self.ctx, output);
+        let presented = paint(
+            &self.gpu,
+            self.surface.as_mut(),
+            &self.ctx,
+            output,
+            acquired,
+        );
+        if let Some(editor) = &mut self.editor {
+            editor.after_host_submit(&self.ctx);
+        }
         let (repaint_after_s, flags) = schedule(again, presented, self.surface.is_some(), delay);
         let flags = flags | appearance_flags(&self.ctx);
         let mut result = ffi::FrameResult {

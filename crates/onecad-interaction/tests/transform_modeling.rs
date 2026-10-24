@@ -65,8 +65,11 @@ fn gizmo_replaces_placement_and_fences_previous_preview() {
     let mut state = begin(before.clone(), support::context());
     let previous = state.tool.as_ref().unwrap().tag.clone();
     let effects = state.dispatch(draft([10.0, -4.0, 2.0], [0.0, 0.0, 1.0], 90.0));
-    let tag = support::evaluation_tag(&effects);
+    let tag = state.tool.as_ref().unwrap().tag.clone();
     assert!(tag.sequence > previous.sequence);
+    assert!(effects.iter().any(
+        |effect| matches!(effect, Effect::Preview { tag: submitted, .. } if submitted == &tag)
+    ));
     let updated = &state.tool.as_ref().unwrap().record;
     assert_eq!(updated.inputs, before.inputs);
     let Operation::Known(KnownOperation::TransformBody(params)) = &updated.op else {
@@ -81,10 +84,9 @@ fn gizmo_replaces_placement_and_fences_previous_preview() {
     );
     assert_eq!(params.rotate.angle_deg.value, 90.0);
     assert!(support::evaluate(&mut state, &previous, 0.0).is_empty());
-    assert!(matches!(
-        support::evaluate(&mut state, &tag, 10.0).as_slice(),
-        [Effect::Preview { .. }]
-    ));
+    assert!(!effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::EvaluateExpression { .. })));
     state.dispatch(draft([2.0, 0.0, 0.0], [0.0, 0.0, 1.0], 0.0));
     let Operation::Known(KnownOperation::TransformBody(params)) =
         &state.tool.as_ref().unwrap().record.op
@@ -227,17 +229,16 @@ async fn workflow(root: &Path) {
     let harness = Harness::new(&root.join("transform-host")).await;
     let (before, body, mut state) = prepared_plate(&harness).await;
     let effects = state.dispatch(draft([10.0, -4.0, 2.0], [0.0, 0.0, 1.0], 90.0));
-    let tag = support::evaluation_tag(&effects);
-    let result = api::evaluate_expression(&harness.state, "10".into(), "length".into())
-        .await
-        .unwrap();
-    let effects = state.dispatch(Action::Evaluated {
-        tag: tag.clone(),
-        result: Ok(result),
-    });
-    let [Effect::Preview { operation, .. }] = effects.as_slice() else {
-        panic!("preview intent required")
-    };
+    let (tag, operation) = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Preview { tag, operation, .. } => Some((tag.clone(), operation)),
+            _ => None,
+        })
+        .expect("canonical placement previews without expression evaluation");
+    assert!(!effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::EvaluateExpression { .. })));
     let preview = checked_preview(&harness, &before, operation, &tag).await;
     assert_bounds(
         &preview.bodies[0].mesh,

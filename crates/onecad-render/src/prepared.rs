@@ -238,7 +238,7 @@ fn check_preparation_budget(
     let incoming = MemoryEstimate {
         source_bytes: add(scene.resident_bytes() as u64, old_sources)?,
         cpu_prepared_bytes: cpu_bytes,
-        geometry_bytes: gpu_bytes,
+        geometry_bytes: add(gpu_bytes, crate::limits::shared_uniform_bytes())?,
         upload_bytes: gpu_bytes,
         target_bytes: budget.resident.target_bytes,
         ibl_bytes: budget.resident.ibl_bytes,
@@ -253,6 +253,11 @@ fn check_preparation_budget(
         incoming,
         MemoryEstimate {
             target_bytes: 0,
+            // The renderer retains its style bindings across scene replacement.
+            geometry_bytes: budget
+                .resident
+                .geometry_bytes
+                .saturating_sub(crate::limits::shared_uniform_bytes()),
             ..budget.resident
         },
     )?;
@@ -324,7 +329,7 @@ impl Renderer {
             upload_bytes: scene.gpu_bytes.saturating_sub(reused_bytes),
             geometry_bytes: add(
                 add(scene.gpu_bytes, retained)?,
-                std::mem::size_of::<crate::FrameU>() as u64,
+                crate::limits::shared_uniform_bytes(),
             )?,
             target_bytes: self.estimate.target_bytes,
             ibl_bytes: self.estimate.ibl_bytes,
@@ -332,7 +337,11 @@ impl Renderer {
             peak_total_bytes: 0,
         };
         let old = MemoryEstimate {
-            geometry_bytes: self.estimate.geometry_bytes.saturating_sub(reused_bytes),
+            geometry_bytes: self
+                .estimate
+                .geometry_bytes
+                .saturating_sub(reused_bytes)
+                .saturating_sub(crate::limits::shared_uniform_bytes()),
             source_bytes: self.estimate.source_bytes,
             resident_metadata_bytes: self.estimate.resident_metadata_bytes,
             ..Default::default()
@@ -347,7 +356,7 @@ impl Renderer {
             queue: &self.queue,
         };
         for (id, body) in scene.bodies {
-            // Preview and committed draws need distinct frame uniforms even for shared geometry.
+            // Shared geometry still uses distinct committed and preview style bindings.
             let previous = if preview {
                 &self.preview
             } else {
@@ -356,15 +365,20 @@ impl Renderer {
             let reusable = previous.iter().find(|existing| {
                 existing.id == id && std::sync::Arc::ptr_eq(&existing.source, &body.geometry.source)
             });
+            let frame = self
+                .frame_bindings
+                .body(crate::BodyStyle::default(), preview);
             let next = if let Some(existing) = reusable {
                 let mut next = existing.clone();
                 next.retain_source(&body);
                 next.mesh_revision = body.mesh_revision;
                 next.style = crate::BodyStyle::default();
                 next.preview_suppressed = false;
+                next.uniform = frame.buffer.clone();
+                next.frame_bind = frame.bind.clone();
                 next
             } else {
-                body.upload(&gpu, &self.pipelines.frame_layout, id)
+                body.upload(&gpu, frame, id)
             };
             bodies.push(next);
         }

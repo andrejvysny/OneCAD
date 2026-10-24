@@ -102,6 +102,25 @@ typedef struct onecad_ios_frame_result {
 onecad_ios_status onecad_ios_frame(onecad_ios_app *app, double time_s,
                                    onecad_ios_frame_result *out);
 
+/* ---- Optional performance evidence (ONECAD_PERF_TRACE=1) ----------------- */
+/* Schema-1 host stages: 1 touch arrival, 2 display link, 3 host frame,
+ * 9 accessibility, 10 text reconciliation. Durations and values are numeric;
+ * clocks/units and stage-specific fields: docs/ios/PERFORMANCE.md. */
+typedef struct onecad_ios_performance_record_v1 {
+    uint32_t struct_size, stage;
+    uint64_t correlation, duration_ns, a, b, c;
+} onecad_ios_performance_record_v1;
+onecad_ios_status onecad_ios_performance_record(onecad_ios_app *app,
+    const onecad_ios_performance_record_v1 *record);
+typedef struct onecad_ios_performance_status_v1 {
+    uint32_t struct_size, enabled;
+    uint64_t buffered, dropped, exported, in_flight, export_errors;
+} onecad_ios_performance_status_v1;
+/* buffered=UINT64_MAX when a concurrent producer owns the buffer. Requests
+ * asynchronous export; this is not an acknowledgement that disk work finished. */
+onecad_ios_status onecad_ios_performance_status(onecad_ios_app *app,
+    onecad_ios_performance_status_v1 *out);
+
 /* ---- Touch and Pencil input ------------------------------------------- */
 
 typedef enum onecad_ios_contact_kind {

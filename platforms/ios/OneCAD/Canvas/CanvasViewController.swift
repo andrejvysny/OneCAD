@@ -18,6 +18,8 @@ final class CanvasViewController: UIViewController {
     private var surfaceAttached = false
     private var reportedKernelTerminal = false
     private var editorDarkAppearance: Bool?
+    private var performanceFrame: UInt64 = 0
+    private var performanceTouch: UInt64 = 0
 
     init(bridge: RustBridge) {
         self.bridge = bridge
@@ -48,6 +50,11 @@ final class CanvasViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         frameLoop = FrameLoop { [weak self] in self?.runFrame() }
+        frameLoop?.onDisplayLink = { [weak self] now, timestamp, target in
+            guard let self, HostPerformance.enabled else { return }
+            self.bridge.recordPerformance(stage: 2, correlation: self.performanceFrame,
+                values: (HostPerformance.nanoseconds(now), HostPerformance.nanoseconds(timestamp), HostPerformance.nanoseconds(target)))
+        }
         canvas.surfaceDelegate = self
         canvas.inputSink = self
         touchInput.delivery = self
@@ -155,16 +162,26 @@ final class CanvasViewController: UIViewController {
 
     private func runFrame() {
         guard surfaceAttached, bridge.isUsable else { return }
+        let interval = HostPerformance.begin("Host frame")
+        defer {
+            HostPerformance.end(interval, bridge: bridge, stage: 3, correlation: performanceFrame)
+            if HostPerformance.enabled { performanceFrame &+= 1 }
+        }
         let (status, result) = bridge.frame(time: CACurrentMediaTime())
         // PANIC/TERMINAL are latched by the bridge, which swaps in the error view.
         guard status == ONECAD_IOS_OK else { return }
         applyEditorAppearance(result.flags)
         frameLoop?.scheduleRepaint(after: result.repaint_after_s)
         if result.flags & ONECAD_IOS_FRAME_REDRAW_REQUESTED != 0 { requestFrame() }
+        let textInterval = HostPerformance.begin("Text input")
         textInput?.apply(result)
+        HostPerformance.end(textInterval, bridge: bridge, stage: 10, correlation: performanceFrame)
         accessibility?.focusedTextProxy = textInput?.accessibilityProxy
         accessibility?.focusedTextFieldID = textInput?.focusedFieldID
-        accessibility?.rebuild()
+        let accessibilityInterval = HostPerformance.begin("Accessibility")
+        accessibility?.rebuild(changed: result.flags & ONECAD_IOS_FRAME_A11Y_CHANGED != 0)
+        HostPerformance.end(accessibilityInterval, bridge: bridge, stage: 9, correlation: performanceFrame,
+            values: (accessibility?.snapshotReadCount ?? 0, accessibility?.rebuildCount ?? 0, UInt64(result.flags)))
         if result.flags & ONECAD_IOS_FRAME_HOST_REQUESTS != 0 { hostRequests?.drain() }
         if result.flags & ONECAD_IOS_FRAME_KERNEL_TERMINAL != 0, !reportedKernelTerminal {
             // The editor keeps rendering its own relaunch-required state.
@@ -177,6 +194,7 @@ final class CanvasViewController: UIViewController {
     // so they still reach Rust after this controller is gone)
 
     func sceneWillResignActive() {
+        bridge.requestPerformanceExport()
         cancelContacts(reason: ONECAD_IOS_CANCEL_SCENE_INACTIVE)
         textInput?.resetPresses()
     }
@@ -233,6 +251,14 @@ extension CanvasViewController: CanvasSurfaceDelegate {
 
 extension CanvasViewController: CanvasInputSink, InputDelivery, FrameWakeTarget {
     func touches(_ touches: Set<UITouch>, event: UIEvent?, in view: UIView) {
+        if HostPerformance.enabled {
+            performanceTouch &+= 1
+            let now = CACurrentMediaTime()
+            let oldest = touches.reduce(now) { min($0, $1.timestamp) }
+            let kinds = touches.reduce(UInt64(0)) { $0 | (1 << UInt64($1.type.rawValue)) }
+            bridge.recordPerformance(stage: 1, correlation: performanceTouch,
+                values: (HostPerformance.nanoseconds(now - oldest), UInt64(touches.count), kinds))
+        }
         touchInput.touches(touches, event: event, in: view)
     }
 

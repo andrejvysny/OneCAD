@@ -1,6 +1,9 @@
 use super::*;
 use egui::{Modifiers, vec2};
 
+#[path = "navigation_activity_tests.rs"]
+mod activity;
+
 fn wheel(source: MouseWheelSource, phase: TouchPhase, delta: Vec2, shift: bool) -> Event {
     Event::MouseWheel {
         source,
