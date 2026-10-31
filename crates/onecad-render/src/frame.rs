@@ -116,7 +116,7 @@ fn resolve_token(theme: Theme, name: &str) -> Result<[f32; 3], RenderError> {
 }
 
 pub(crate) fn token(theme: Theme, name: &str) -> Result<[f32; 3], RenderError> {
-    const NAMES: [&str; 9] = [
+    const NAMES: [&str; 12] = [
         "--color-body-fill",
         "--color-canvas",
         "--color-viewport-grid-minor",
@@ -126,6 +126,9 @@ pub(crate) fn token(theme: Theme, name: &str) -> Result<[f32; 3], RenderError> {
         "--color-body-edge-wire",
         "--color-accent",
         "--color-viewport-hover",
+        "--color-axis-x",
+        "--color-axis-y",
+        "--color-axis-z",
     ];
     type Palette = Result<Vec<[f32; 3]>, RenderError>;
     static LIGHT: std::sync::OnceLock<Palette> = std::sync::OnceLock::new();

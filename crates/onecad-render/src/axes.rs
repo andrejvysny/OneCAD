@@ -62,3 +62,49 @@ fn token_name(color: AxisColor) -> &'static str {
         AxisColor::Z => "--color-axis-z",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{BodyStyle, RenderStyle};
+    use onecad_scene::{Camera, SceneIdentity, Viewport};
+
+    #[test]
+    fn frames_with_axes_resolve_in_both_themes() {
+        let view = ViewSnapshot::new(
+            SceneIdentity {
+                session: 1,
+                scene: 1,
+            },
+            1,
+            Camera::default(),
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+                scale_factor: 2.0,
+            },
+        )
+        .unwrap();
+        let line = |direction, color| Some(AxisLine { direction, color });
+        let axes = AxesFrame {
+            origin: DVec3::ZERO,
+            lines: [
+                line(DVec3::X, AxisColor::X),
+                line(DVec3::Y, AxisColor::Y),
+                line(DVec3::Z, AxisColor::Z),
+            ],
+        };
+        for theme in [Theme::Light, Theme::Dark] {
+            let style = RenderStyle {
+                theme,
+                axes: Some(axes),
+                ..Default::default()
+            };
+            let frame =
+                crate::frame::uniform(&view, None, style, BodyStyle::default(), false).unwrap();
+            assert_eq!(frame.axes_style[2], 1.0);
+            assert!(frame.axes_dir.iter().all(|dir| dir[3] == 1.0));
+            assert!(frame.axes_color.iter().all(|color| color[3] == ALPHA));
+        }
+    }
+}

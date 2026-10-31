@@ -349,10 +349,9 @@ impl PreparedBody {
     }
 }
 
+/// Feature edges include tangent (smooth) joins such as fillet boundaries, as CAD
+/// viewers show them; only a surface's own seams and collapsed edges are hidden.
 fn clean_edge(class: onecad_protocol::mesh::EdgeClass) -> bool {
     use onecad_protocol::mesh::EdgeClass;
-    !matches!(
-        class,
-        EdgeClass::Smooth | EdgeClass::Seam | EdgeClass::Degenerate
-    )
+    !matches!(class, EdgeClass::Seam | EdgeClass::Degenerate)
 }

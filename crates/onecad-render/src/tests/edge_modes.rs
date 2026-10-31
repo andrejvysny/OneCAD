@@ -201,6 +201,7 @@ fn verify_edge_filters(renderer: &mut Renderer) {
                 EdgeClass::Unknown
                     | EdgeClass::Boundary
                     | EdgeClass::Sharp
+                    | EdgeClass::Smooth
                     | EdgeClass::NonManifold
             ) {
                 expected += mesh.edge_range(edge).unwrap().count.saturating_sub(1);
@@ -210,13 +211,18 @@ fn verify_edge_filters(renderer: &mut Renderer) {
             renderer.committed[0].feature_segment_count, expected,
             "{name}"
         );
-        if name == "small_crease" {
-            assert_eq!(expected, renderer.committed[0].segment_count);
-        } else {
+        let smooth = (0..mesh.header().edge_count as usize)
+            .any(|edge| mesh.edge_class(edge) == EdgeClass::Smooth);
+        if name == "filleted_tangent_block" {
+            assert!(smooth, "fixture must keep tangent fillet joins");
+        }
+        if matches!(name, "cylinder" | "sphere") {
             assert!(
                 expected < renderer.committed[0].segment_count,
-                "{name}: filtered joins/seams"
+                "{name}: filtered seams"
             );
+        } else {
+            assert_eq!(expected, renderer.committed[0].segment_count, "{name}");
         }
     }
 }
