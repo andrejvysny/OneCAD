@@ -185,12 +185,10 @@ fn document_tabs_and_new_tab_are_named_in_strip_order() {
             .tabs(Some(TabStrip {
                 tabs: &tabs,
                 home_active: false,
-                can_add: true,
             }))
             .show(ui);
         crate::bars::name_tabs(ui.ctx(), &out);
     });
     assert_eq!(find(&named, &tab(0)).1, Role::Tab);
     assert_eq!(find(&named, &tab(1)).1, Role::Tab);
-    assert_eq!(find(&named, TAB_NEW).1, Role::Button);
 }

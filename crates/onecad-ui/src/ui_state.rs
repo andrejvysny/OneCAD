@@ -66,6 +66,8 @@ pub struct UiState {
     pub theme_failed: Option<bool>,
     /// Start screen Recent layout: 0 Grid, 1 List.
     pub recent_view: usize,
+    /// Preferred perspective field of view for new and reset cameras.
+    pub camera_fov_degrees: u16,
     pub start_page: StartPage,
     pub library: crate::library_pages::LibraryUi,
     pub extensions: crate::extension_pages::ExtensionsUi,
@@ -97,6 +99,7 @@ impl Default for UiState {
             appearance: Appearance::default(),
             theme_failed: None,
             recent_view: 0,
+            camera_fov_degrees: crate::camera_fov::DEFAULT_FOV_DEGREES,
             start_page: StartPage::default(),
             library: Default::default(),
             extensions: Default::default(),

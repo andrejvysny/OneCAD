@@ -1,5 +1,6 @@
 //! Profile-local chrome preferences; document state and transient editors never persist.
 use crate::{
+    camera_fov::{DEFAULT_FOV_DEGREES, MAX_FOV_DEGREES, MIN_FOV_DEGREES},
     qa::QaPaths,
     ui_state::{Appearance, InspectorTab, UiState},
 };
@@ -24,6 +25,24 @@ struct Preferences {
     inspector_open: bool,
     inspector_tab: InspectorTab,
     recent_view: usize,
+    #[serde(default = "default_fov")]
+    camera_fov_degrees: u16,
+}
+
+fn default_fov() -> u16 {
+    DEFAULT_FOV_DEGREES
+}
+
+impl Preferences {
+    fn validate(&self) -> Result<(), &'static str> {
+        if self.recent_view > 1 {
+            return Err("recent layout must be Grid or List");
+        }
+        if !(MIN_FOV_DEGREES..=MAX_FOV_DEGREES).contains(&self.camera_fov_degrees) {
+            return Err("camera field of view must be 15 to 90 degrees");
+        }
+        Ok(())
+    }
 }
 
 impl Preferences {
@@ -35,6 +54,7 @@ impl Preferences {
             inspector_open: ui.inspector_open,
             inspector_tab: ui.inspector_tab,
             recent_view: ui.recent_view,
+            camera_fov_degrees: ui.camera_fov_degrees,
         }
     }
 
@@ -44,6 +64,7 @@ impl Preferences {
         ui.inspector_open = self.inspector_open;
         ui.inspector_tab = self.inspector_tab;
         ui.recent_view = self.recent_view;
+        ui.camera_fov_degrees = self.camera_fov_degrees;
     }
 }
 
@@ -95,9 +116,8 @@ impl Store {
     pub fn save_if_changed(&mut self, ui: &UiState) -> Result<(), String> {
         self.finish_ready()?;
         let next = Preferences::capture(ui);
-        if next.recent_view > 1 {
-            return Err("Native settings recent layout must be Grid or List".into());
-        }
+        next.validate()
+            .map_err(|error| format!("Native settings {error}"))?;
         self.desired = next.clone();
         if self.writer.is_some() {
             self.context
@@ -185,9 +205,9 @@ fn read(path: &Path) -> Result<Option<Preferences>, String> {
     }
     let preferences: Preferences =
         serde_json::from_value(value).map_err(|error| error.to_string())?;
-    if preferences.recent_view > 1 {
-        return Err("invalid recent layout".into());
-    }
+    preferences
+        .validate()
+        .map_err(|error| format!("invalid settings: {error}"))?;
     Ok(Some(preferences))
 }
 

@@ -1,7 +1,9 @@
 //! Pill tool buttons and the multi-select switch carry stable automation ids.
 use super::*;
 use crate::automation::testing::{author_ids, find};
-use egui::accesskit::{Role, Toggled};
+use egui::accesskit::Role;
+#[cfg(target_os = "ios")]
+use egui::accesskit::Toggled;
 
 fn enabled(groups: Groups<'_>) -> Vec<Vec<View>> {
     groups
@@ -32,7 +34,7 @@ fn selection_groups_name_every_tool_by_registry_id() {
         let views = enabled(groups);
         let named = author_ids(|ui| {
             ui.horizontal(|ui| {
-                draw_groups(ui, groups, &views, None);
+                draw_groups(ui, groups, &views, None, false);
             });
         });
         for tool in expected {
@@ -66,11 +68,11 @@ fn compact_pill_and_more_catalog_name_each_selection_tool_once() {
         let views = enabled(&pill);
         let named = author_ids(|ui| {
             ui.horizontal(|ui| {
-                draw_groups(ui, &pill, &views, None);
+                draw_groups(ui, &pill, &views, None, false);
             });
             let rows = catalog::overflow(groups, crate::tool_registry::PLANNED_MODEL, &drawn);
             for def in rows {
-                catalog::row(ui, def, true);
+                catalog::row(ui, def, true, false);
             }
         });
         for tool in expected {
@@ -79,6 +81,7 @@ fn compact_pill_and_more_catalog_name_each_selection_tool_once() {
     }
 }
 
+#[cfg(target_os = "ios")]
 #[test]
 fn multi_select_switch_reports_its_state() {
     for (on, state) in [(false, Toggled::False), (true, Toggled::True)] {

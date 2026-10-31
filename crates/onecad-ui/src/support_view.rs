@@ -1,9 +1,9 @@
 //! Presentation uses the same immutable support frame as sketch projection.
-mod rays;
 
 use crate::app::App;
 use onecad_core::sketch::SketchPlane;
-use onecad_scene::{DVec3, ViewSnapshot};
+use onecad_render::{AxesFrame, AxisColor, AxisLine};
+use onecad_scene::DVec3;
 
 pub(crate) fn grid_visible(ctx: &egui::Context) -> bool {
     ctx.data(|data| {
@@ -38,25 +38,16 @@ fn frame(plane: SketchPlane) -> onecad_render::GridFrame {
     }
 }
 
-pub(crate) fn axes(app: &App, painter: &egui::Painter, rect: egui::Rect, view: &ViewSnapshot) {
-    let (origin, directions) = axis_directions(app);
-    let painter = painter.with_clip_rect(rect);
-    for (axis, color) in directions {
-        if let Some(ray) = rays::project_ray(view, origin, axis) {
-            paint_axis(&painter, rect, ray, color);
-        }
-    }
-}
-
-fn axis_directions(app: &App) -> (DVec3, Vec<(DVec3, egui::Color32)>) {
+/// Origin triad for the renderer, which depth-tests it against the bodies.
+pub(crate) fn axes(app: &App) -> AxesFrame {
     // Axes follow the kernel's world frame, matching the navigation cube.
-    let world = [DVec3::X, DVec3::Y, DVec3::Z].into_iter().zip([
-        app.theme.axis_x,
-        app.theme.axis_y,
-        app.theme.axis_z,
-    ]);
+    let world = [
+        (DVec3::X, AxisColor::X),
+        (DVec3::Y, AxisColor::Y),
+        (DVec3::Z, AxisColor::Z),
+    ];
     let Some(support) = grid(app) else {
-        return (DVec3::ZERO, world.collect());
+        return frame_of(DVec3::ZERO, world);
     };
     let named = support.origin == DVec3::ZERO
         && [SketchPlane::xy(), SketchPlane::xz(), SketchPlane::yz()]
@@ -64,37 +55,31 @@ fn axis_directions(app: &App) -> (DVec3, Vec<(DVec3, egui::Color32)>) {
             .any(|plane| frame(*plane) == support);
     if named {
         let normal = support.x_axis.cross(support.y_axis);
-        return (
+        return frame_of(
             support.origin,
             world
-                .filter(|(axis, _)| axis.dot(normal).abs() < 1e-10)
-                .collect(),
+                .into_iter()
+                .filter(|(axis, _)| axis.dot(normal).abs() < 1e-10),
         );
     }
-    let colors = [app.theme.axis_x, app.theme.axis_y];
-    (
+    frame_of(
         support.origin,
-        [support.x_axis, support.y_axis]
-            .into_iter()
-            .zip(colors)
-            .collect(),
+        [
+            (support.x_axis, AxisColor::X),
+            (support.y_axis, AxisColor::Y),
+        ],
     )
 }
 
-fn paint_axis(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    ray: rays::ProjectedRay,
-    color: egui::Color32,
-) {
-    let point = |p: onecad_scene::DVec2| rect.min + egui::vec2(p.x as f32, p.y as f32);
-    painter.line_segment(
-        [point(ray.start), point(ray.end)],
-        egui::Stroke::new(1.25, color.linear_multiply(0.75)),
-    );
-    if let Some(origin) = ray.origin {
-        painter.circle_filled(point(origin), 2.5, color);
+fn frame_of(origin: DVec3, lines: impl IntoIterator<Item = (DVec3, AxisColor)>) -> AxesFrame {
+    let mut frame = AxesFrame {
+        origin,
+        lines: [None; 3],
+    };
+    for (slot, (direction, color)) in frame.lines.iter_mut().zip(lines) {
+        *slot = Some(AxisLine { direction, color });
     }
+    frame
 }
 
 #[cfg(test)]
@@ -124,5 +109,15 @@ mod tests {
         let world = frame.origin + frame.x_axis * 17.0 + frame.y_axis * -4.0;
         let expected = plane.to_world(onecad_core::math::Vec2::new_unchecked(17.0, -4.0));
         assert!((world - DVec3::new(expected.x, expected.y, expected.z)).length() < 1e-12);
+    }
+    #[test]
+    fn world_triad_without_support_plane() {
+        let frame = frame_of(
+            DVec3::ZERO,
+            [(DVec3::X, AxisColor::X), (DVec3::Z, AxisColor::Z)],
+        );
+        assert_eq!(frame.lines[0].unwrap().color, AxisColor::X);
+        assert_eq!(frame.lines[1].unwrap().direction, DVec3::Z);
+        assert!(frame.lines[2].is_none());
     }
 }

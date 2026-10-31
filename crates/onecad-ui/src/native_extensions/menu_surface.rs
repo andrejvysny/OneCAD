@@ -1,6 +1,7 @@
 use super::{Request, command_available, export_command, menu_command};
 use crate::{app::App, ui_state::StartPage};
 use egui::Ui;
+use onecad_widgets::components::button::{Button, ButtonKind};
 
 /// A portable export contribution surface, also reachable on platforms without native menus.
 pub(crate) fn show(app: &mut App, ui: &mut Ui) {
@@ -19,7 +20,16 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui) {
     let mut picked = None;
     let mut export = None;
     let mut manage = false;
-    ui.menu_button("Export", |ui| {
+    // Exporting needs an open document; the Home screen shows no Export at all.
+    if app.ui.start_open || !app.document_open() {
+        return;
+    }
+    let button = ui.add(
+        Button::new("Export")
+            .kind(ButtonKind::Secondary)
+            .min_width(74.0),
+    );
+    egui::Popup::menu(&button).show(|ui| {
         use crate::document_flow::ExportFormat;
         for (title, format) in [
             ("STEP…", ExportFormat::Step),

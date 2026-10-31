@@ -97,9 +97,48 @@ pub struct ToolDef {
     pub id: ToolId,
     pub icon: &'static str,
     pub label: &'static str,
-    pub shortcut: Option<&'static str>,
     /// (extension, publisher) for tools an extension contributes.
     pub source: Option<(&'static str, &'static str)>,
+}
+
+/// Single-key tool shortcuts per mode; the one source for binding and tooltips.
+const MODEL_KEYS: &[(egui::Key, ToolId)] = &[
+    (egui::Key::S, ToolId::Sketch),
+    (egui::Key::E, ToolId::Extrude),
+    (egui::Key::R, ToolId::Revolve),
+    (egui::Key::F, ToolId::Fillet),
+    (egui::Key::C, ToolId::Chamfer),
+    (egui::Key::H, ToolId::Hole),
+    (egui::Key::M, ToolId::MoveRotate),
+    (egui::Key::B, ToolId::Boolean),
+    (egui::Key::P, ToolId::DatumPlane),
+    (egui::Key::O, ToolId::OffsetFace),
+];
+const SKETCH_KEYS: &[(egui::Key, ToolId)] = &[
+    (egui::Key::L, ToolId::Line),
+    (egui::Key::R, ToolId::Rectangle),
+    (egui::Key::C, ToolId::Circle),
+    (egui::Key::A, ToolId::Arc),
+    (egui::Key::D, ToolId::Dimension),
+    (egui::Key::X, ToolId::Construction),
+];
+
+fn keymap(sketch: bool) -> &'static [(egui::Key, ToolId)] {
+    if sketch { SKETCH_KEYS } else { MODEL_KEYS }
+}
+
+pub fn shortcut_tool(key: egui::Key, sketch: bool) -> Option<ToolId> {
+    keymap(sketch)
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, id)| *id)
+}
+
+pub fn shortcut_label(id: ToolId, sketch: bool) -> Option<&'static str> {
+    keymap(sketch)
+        .iter()
+        .find(|(_, t)| *t == id)
+        .map(|(k, _)| k.name())
 }
 
 type Groups = &'static [&'static [ToolDef]];
@@ -109,24 +148,14 @@ const fn t(id: ToolId, icon: &'static str, label: &'static str) -> ToolDef {
         id,
         icon,
         label,
-        shortcut: None,
-        source: None,
-    }
-}
-const fn k(id: ToolId, icon: &'static str, label: &'static str, key: &'static str) -> ToolDef {
-    ToolDef {
-        id,
-        icon,
-        label,
-        shortcut: Some(key),
         source: None,
     }
 }
 const SELECT: ToolDef = t(ToolId::Select, "select", "Select");
 const SKETCH: ToolDef = t(ToolId::Sketch, "sketch", "Sketch");
-const EXTRUDE: ToolDef = k(ToolId::Extrude, "extrude", "Extrude", "E");
+const EXTRUDE: ToolDef = t(ToolId::Extrude, "extrude", "Extrude");
 const CREATE: &[ToolDef] = &[
-    k(ToolId::Line, "line", "Line", "L"),
+    t(ToolId::Line, "line", "Line"),
     t(ToolId::PenStroke, "spline", "Pencil Stroke"),
     t(ToolId::Rectangle, "rect", "Rectangle"),
     t(ToolId::Circle, "circle", "Circle"),
@@ -135,7 +164,7 @@ const CREATE: &[ToolDef] = &[
     t(ToolId::Point, "point", "Point"),
 ];
 const DIMENSIONS: &[ToolDef] = &[
-    k(ToolId::Dimension, "dimension", "Dimension", "D"),
+    t(ToolId::Dimension, "dimension", "Dimension"),
     t(ToolId::Constraints, "coincident", "Constraints"),
 ];
 const UTILITIES: &[ToolDef] = &[
@@ -168,10 +197,7 @@ const SKETCH_ENTITY: Groups = &[
 const REGION: Groups = &[&[EXTRUDE], UTILITIES];
 const EDGE: Groups = &[&[FILLET, CHAMFER], UTILITIES];
 const FEATURE: Groups = &[&[t(ToolId::Edit, "edit", "Edit")], UTILITIES];
-const BODY: Groups = &[
-    &[k(ToolId::MoveRotate, "move", "Move / Rotate", "M")],
-    UTILITIES,
-];
+const BODY: Groups = &[&[t(ToolId::MoveRotate, "move", "Move / Rotate")], UTILITIES];
 
 /// Discoverability uses the same availability and dispatch as the primary pill.
 pub const PLANNED_SKETCH: &[ToolDef] = &[
@@ -383,6 +409,43 @@ fn running_operand_kind(tool: ToolId) -> SelectionKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keymaps_have_unique_keys_and_tools() {
+        for sketch in [false, true] {
+            let map = keymap(sketch);
+            for (i, (key, id)) in map.iter().enumerate() {
+                assert!(map[i + 1..].iter().all(|(k, t)| k != key && t != id));
+                assert_eq!(shortcut_tool(*key, sketch), Some(*id));
+                assert_eq!(shortcut_label(*id, sketch), Some(key.name()));
+            }
+        }
+    }
+
+    #[test]
+    fn keymap_tools_exist_in_registry_and_modes_do_not_leak() {
+        let known: Vec<ToolId> = [
+            NONE,
+            FACE,
+            SKETCH_IDLE,
+            SKETCH_ENTITY,
+            REGION,
+            EDGE,
+            FEATURE,
+            BODY,
+        ]
+        .iter()
+        .flat_map(|g| g.iter().flat_map(|g| g.iter().map(|d| d.id)))
+        .chain(PLANNED_SKETCH.iter().chain(PLANNED_MODEL).map(|d| d.id))
+        .collect();
+        for (_, id) in MODEL_KEYS.iter().chain(SKETCH_KEYS) {
+            assert!(known.contains(id), "{id:?} not in registry");
+        }
+        assert_eq!(shortcut_tool(egui::Key::E, true), None);
+        assert_eq!(shortcut_tool(egui::Key::L, false), None);
+        assert_eq!(shortcut_label(ToolId::Line, false), None);
+        assert_eq!(shortcut_label(ToolId::Extrude, true), None);
+    }
 
     #[test]
     fn running_operations_name_their_operand_kind() {

@@ -24,7 +24,7 @@ pub(super) fn show(
                         crate::tool_registry::pill_tools(crate::tool_registry::selection_kind(app));
                     for def in overflow(current, catalog, drawn) {
                         let availability = view(app, def, running);
-                        let response = row(ui, def, availability.enabled);
+                        let response = row(ui, def, availability.enabled, app.sketch_active());
                         if response.clicked() {
                             clicked = Some(def.id);
                             ui.close();
@@ -42,8 +42,12 @@ pub(super) fn show(
 /// A compact pill moves its other tools here, so a row carries the same
 /// automation id its pill button would; `overflow` skips drawn tools, so an id
 /// never repeats.
-pub(super) fn row(ui: &mut egui::Ui, def: &ToolDef, enabled: bool) -> egui::Response {
-    let response = ui.add_enabled(enabled, egui::Button::new(def.label));
+pub(super) fn row(ui: &mut egui::Ui, def: &ToolDef, enabled: bool, sketch: bool) -> egui::Response {
+    let mut button = egui::Button::new(def.label);
+    if let Some(key) = super::bound_shortcut(def, sketch) {
+        button = button.shortcut_text(key);
+    }
+    let response = ui.add_enabled(enabled, button);
     crate::automation::name(ui.ctx(), response.id, &crate::automation::tool(def.id));
     response
 }
@@ -77,7 +81,6 @@ mod tests {
             id,
             icon: "",
             label: "",
-            shortcut: None,
             source: None,
         }
     }

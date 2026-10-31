@@ -338,7 +338,11 @@ pub(crate) fn selected_sketch_edit_button(app: &mut App, ui: &mut Ui) {
     };
     let can_edit = app.viewport_ready() && app.doc.bridge.valid() && !app.busy();
     if ui
-        .add_enabled(can_edit, egui::Button::new("Edit sketch"))
+        .add(
+            onecad_widgets::components::button::Button::new("Edit sketch")
+                .kind(onecad_widgets::components::button::ButtonKind::Secondary)
+                .enabled(can_edit),
+        )
         .clicked()
         && let Ok(id) = sketch.id.parse()
     {

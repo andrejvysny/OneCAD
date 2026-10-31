@@ -26,7 +26,9 @@ mod automation_tests;
 mod catalog;
 mod label;
 mod layout;
+#[cfg(target_os = "ios")]
 mod multi_select;
+mod promote;
 pub(crate) use label::{body_name, selection_label};
 use layout::{bounded_pill, toolbar_rect};
 
@@ -267,10 +269,9 @@ pub(crate) fn disabled_reason(app: &App, def: &ToolDef) -> Option<&'static str> 
     view(app, def, None).reason
 }
 
-/// Registry shortcuts are design data; show one only once the app binds it (none yet).
-fn bound_shortcut(def: &ToolDef) -> Option<&'static str> {
-    const BOUND: &[ToolId] = &[];
-    def.shortcut.filter(|_| BOUND.contains(&def.id))
+/// Tooltip key for the current mode, from the same keymap the input router binds.
+fn bound_shortcut(def: &ToolDef, sketch: bool) -> Option<&'static str> {
+    crate::tool_registry::shortcut_label(def.id, sketch)
 }
 
 pub(crate) fn activate(app: &mut App, ctx: &Context, id: ToolId) {
@@ -278,7 +279,6 @@ pub(crate) fn activate(app: &mut App, ctx: &Context, id: ToolId) {
         id,
         icon: "select",
         label: "",
-        shortcut: None,
         source: None,
     };
     if !view(app, &definition, None).enabled {
@@ -437,6 +437,7 @@ fn draw_groups(
     groups: Groups<'_>,
     views: &[Vec<View>],
     running: Option<ToolId>,
+    sketch: bool,
 ) -> Hits {
     let mut hits = Hits::default();
     for (gi, group) in groups.iter().enumerate() {
@@ -448,7 +449,7 @@ fn draw_groups(
                 .source
                 .map(|(ext, publisher)| format!("{ext} · {publisher}"));
             let tip = Tip::new(def.label)
-                .shortcut(bound_shortcut(def))
+                .shortcut(bound_shortcut(def, sketch))
                 .reason(v.reason)
                 .source(source.as_deref());
             let button = ToolButton::new(def.icon)
@@ -475,6 +476,11 @@ fn draw_groups(
     hits
 }
 
+/// Touch has no Shift or Command key; desktop multi-selects with Cmd+click.
+fn additive_visible(sketch: bool, idle: bool) -> bool {
+    cfg!(target_os = "ios") && !sketch && idle
+}
+
 pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
     if crate::editor_facade::PREVIEW_FACADES && app.ui.editor_facade.placing.is_some() {
         crate::editor_facade::placement_pill(app, ctx, chrome);
@@ -484,14 +490,22 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
     let running = running_tool(app);
     let definition = crate::tool_registry::running_definition(app);
     let running_groups = [definition.as_slice()];
-    let groups = if running.is_some() {
-        &running_groups[..]
-    } else {
-        pill_tools(kind)
-    };
     let label = selection_label(app, kind);
     let mut bounds = toolbar_rect(ctx, chrome);
     let lane = layout::toolbar_bounds(chrome);
+    // Multi-select applies to model picks only; a running tool owns the pill.
+    let additive =
+        additive_visible(app.sketch_active(), running.is_none()).then_some(app.ui.additive_select);
+    let room = lane.width() - if additive.is_some() { 44.0 } else { 0.0 };
+    let promoted;
+    let promoted_refs: Vec<&[ToolDef]>;
+    let groups = if running.is_some() {
+        &running_groups[..]
+    } else {
+        promoted = promote::groups(app, pill_tools(kind), room, label.is_some());
+        promoted_refs = promoted.iter().map(Vec::as_slice).collect();
+        &promoted_refs[..]
+    };
     let active = groups
         .iter()
         .flat_map(|group| group.iter())
@@ -502,9 +516,6 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
             )
         })
         .map(|def| def.id);
-    // Multi-select applies to model picks only; a running tool owns the pill.
-    let additive = (!app.sketch_active() && running.is_none()).then_some(app.ui.additive_select);
-    let room = lane.width() - if additive.is_some() { 44.0 } else { 0.0 };
     let compact = layout::compact_tools(groups, active, room, label.is_some());
     let mode_key = egui::Id::unique("tool-pill-compact");
     if ctx.data(|data| data.get_temp::<bool>(mode_key)) != Some(compact.is_some()) {
@@ -527,11 +538,14 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
         PillMode::Model
     };
     let accent = accent(app, kind);
-    let (mut hits, mut clear, mut toggled) = (Hits::default(), false, false);
+    let (mut hits, mut clear) = (Hits::default(), false);
+    #[cfg(target_os = "ios")]
+    let mut toggled = false;
     frame::floating(egui::Id::unique("tool-pill"), bounds.min, Order::Middle)
         .pivot(Align2::LEFT_TOP)
         .show(ctx, |ui| {
             bounded_pill(ui, lane.width(), None, mode, accent, |ui| {
+                #[cfg(target_os = "ios")]
                 if let Some(on) = additive {
                     toggled = multi_select::button(ui, on);
                     pill_divider(ui);
@@ -542,11 +556,12 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
                     clear = SelectionLabel::new(k, c).variant(*v).show(ui).clear;
                     pill_divider(ui);
                 }
-                hits = draw_groups(ui, groups, &views, running);
+                hits = draw_groups(ui, groups, &views, running, app.sketch_active());
             });
         });
     hits.clicked =
         catalog::show(app, chrome, hits.more.as_ref(), running, &hits.drawn).or(hits.clicked);
+    #[cfg(target_os = "ios")]
     if toggled {
         app.ui.additive_select = !app.ui.additive_select;
     }

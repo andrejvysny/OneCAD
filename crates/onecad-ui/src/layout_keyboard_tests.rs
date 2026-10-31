@@ -82,7 +82,7 @@ fn normal_height_and_exact_minimum_keep_existing_card_geometry() {
         vec2(900.0, 560.0),
         vec2(820.0, 1180.0),
         vec2(1180.0, 820.0),
-        vec2(1024.0, 436.0),
+        vec2(1024.0, 440.0),
     ] {
         for explorer_open in [false, true] {
             for inspector_open in [false, true] {
@@ -95,10 +95,10 @@ fn normal_height_and_exact_minimum_keep_existing_card_geometry() {
                 let base = chrome(screen, &state);
                 let active = base.with_feature_card();
                 assert_eq!(active.feature_card.left(), base.feature_card.left());
-                assert_eq!(active.feature_card.top(), 278.0);
+                assert_eq!(active.feature_card.top(), 282.0);
                 assert_eq!(
                     active.feature_card.height(),
-                    CARD_H.min(screen.bottom() - EDGE - 278.0)
+                    CARD_H.min(screen.bottom() - EDGE - 282.0)
                 );
             }
         }
@@ -110,7 +110,7 @@ fn impossible_short_narrow_window_keeps_existing_fallback() {
     let chrome = chrome(keyboard_screen(820.0), &UiState::default()).with_feature_card();
     assert_eq!(
         chrome.feature_card,
-        Rect::from_min_size(pos2(234.0, 278.0), vec2(CARD_W, 110.0))
+        Rect::from_min_size(pos2(234.0, 282.0), vec2(CARD_W, 106.0))
     );
     assert!(chrome.compact_feature_card().is_none());
 }
@@ -120,8 +120,8 @@ fn insufficient_height_refuses_compact_card() {
     let screen = Rect::from_min_size(pos2(0.0, 32.0), vec2(1180.0, 345.0));
     let chrome = chrome(screen, &UiState::default()).with_feature_card();
     assert!(chrome.compact_feature_card().is_none());
-    assert_eq!(chrome.feature_card.top(), 278.0);
-    assert_eq!(chrome.feature_card.height(), 89.0);
+    assert_eq!(chrome.feature_card.top(), 282.0);
+    assert_eq!(chrome.feature_card.height(), 85.0);
 }
 
 #[test]

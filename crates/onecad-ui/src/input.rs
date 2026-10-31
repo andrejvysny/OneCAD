@@ -3,6 +3,7 @@ use crate::{app::App, bridge::Command, document_flow::Request, menu};
 
 pub(crate) mod ordered;
 mod overlay;
+mod tool_keys;
 
 pub(crate) fn overlay_owns_keyboard(app: &App, ctx: &egui::Context) -> bool {
     app.input_routing.overlay_blocks(ctx.cumulative_pass_nr())
@@ -255,6 +256,7 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     if raw.focused && !composition {
         crate::editor_facade::keys(app, raw, text);
     }
+    tool_keys::route(app, ctx, raw, text, composition);
     if !text && !composition && raw.focused && app.sketch_active() {
         let delete = raw.events.iter().any(|event| matches!(event,
             egui::Event::Key { key: egui::Key::Delete | egui::Key::Backspace, pressed: true, modifiers, .. }
@@ -401,7 +403,7 @@ fn route_menu(
         menu::Action::Quit => app.close_prompt = true,
         menu::Action::Fit => app.doc.fit_pending = true,
         menu::Action::Home => {
-            app.doc.camera = onecad_scene::Camera::default();
+            app.doc.camera = crate::camera_fov::default_camera(app.ui.camera_fov_degrees);
             app.doc.fit_pending = true;
         }
         menu::Action::Appearance(choice) => {

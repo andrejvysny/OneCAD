@@ -149,6 +149,18 @@ impl Tabs {
 }
 
 impl App {
+    /// Stores the preferred field of view and applies it to every open document.
+    pub(crate) fn set_camera_fov(&mut self, degrees: u16) {
+        self.ui.camera_fov_degrees = degrees;
+        let degrees = f64::from(degrees);
+        for doc in std::iter::once(&mut self.doc).chain(self.tabs.parked.iter_mut()) {
+            crate::camera_fov::set_fov(&mut doc.camera, degrees);
+            if let Some(camera) = doc.modeling_camera.as_mut() {
+                crate::camera_fov::set_fov(camera, degrees);
+            }
+        }
+    }
+
     /// Every open document in tab order, the active one included.
     pub fn tab_summaries(&self) -> Vec<TabSummary> {
         let summary = |doc: &DocumentEditor, active: bool| TabSummary {
@@ -181,7 +193,8 @@ impl App {
     /// submits the New/Open/Import request to it.
     pub fn open_tab(&mut self) -> Result<(), String> {
         let bridge = self.tabs.bridge(self.context(), false)?;
-        let editor = DocumentEditor::new(bridge, String::new())?;
+        let mut editor = DocumentEditor::new(bridge, String::new())?;
+        editor.camera = crate::camera_fov::default_camera(self.ui.camera_fov_degrees);
         if self.parked {
             return Err("A background document cannot open tabs".into());
         }
@@ -240,7 +253,12 @@ impl App {
         // The right-hand neighbour takes over, else the left-hand one, else a fresh
         // empty document so the window always has an editor.
         let replacement = match self.tabs.parked.is_empty() {
-            true => DocumentEditor::new(self.tabs.bridge(self.context(), false)?, String::new())?,
+            true => {
+                let mut editor =
+                    DocumentEditor::new(self.tabs.bridge(self.context(), false)?, String::new())?;
+                editor.camera = crate::camera_fov::default_camera(self.ui.camera_fov_degrees);
+                editor
+            }
             false => {
                 let index = self.active_index().min(self.tabs.parked.len() - 1);
                 self.tabs.parked.remove(index)

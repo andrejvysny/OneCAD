@@ -54,6 +54,11 @@ pub(super) fn bounded_pill<R>(
 #[cfg(test)]
 mod tests;
 
+/// Deterministic pill width: button, separator and selection-chip budget.
+pub(super) fn required_width(tools: usize, groups: usize, selection: bool) -> f32 {
+    tools as f32 * 36.0 + groups as f32 * 14.0 + if selection { 180.0 } else { 8.0 }
+}
+
 /// Reserve a fixed overflow button instead of hiding commands in a horizontal scroller.
 pub(super) fn compact_tools(
     groups: &[&[crate::tool_registry::ToolDef]],
@@ -66,9 +71,7 @@ pub(super) fn compact_tools(
         .iter()
         .flat_map(|group| group.iter().copied())
         .collect();
-    let required = tools.len() as f32 * 36.0
-        + groups.len() as f32 * 14.0
-        + if selection { 180.0 } else { 8.0 };
+    let required = required_width(tools.len(), groups.len(), selection);
     if required <= width || tools.len() <= 1 {
         return None;
     }

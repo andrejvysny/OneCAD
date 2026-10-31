@@ -497,6 +497,32 @@ fn support_grid_shader_validates_without_gpu() {
     .validate(&module)
     .unwrap();
 }
+#[test]
+fn origin_axes_shader_validates_and_uniform_matches_wgsl() {
+    let source = [
+        include_str!("shaders/common.wgsl"),
+        include_str!("shaders/lines.wgsl"),
+    ]
+    .join("\n");
+    let module = naga::front::wgsl::parse_str(&source).unwrap();
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap();
+    let mut layouter = naga::proc::Layouter::default();
+    layouter.update(module.to_ctx()).unwrap();
+    let (frame, _) = module
+        .types
+        .iter()
+        .find(|(_, ty)| ty.name.as_deref() == Some("Frame"))
+        .unwrap();
+    assert_eq!(
+        layouter[frame].size as usize,
+        std::mem::size_of::<crate::FrameU>()
+    );
+}
 mod support_grid;
 
 mod shared_uniforms;

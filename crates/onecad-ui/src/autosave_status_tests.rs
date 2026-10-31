@@ -117,12 +117,12 @@ fn assert_failed_activity(diagnostics: &Diagnostics) {
                 )),
                 ..Default::default()
             },
-            |_| diagnostics.show(&context),
+            |_| crate::failure_toast::show(&context, diagnostics),
         );
         output.textures_delta.clear();
         visible |= output.shapes.iter().any(|shape| {
             matches!(&shape.shape,
-            egui::epaint::Shape::Text(text) if text.galley.text() == "Activity · Failed")
+            egui::epaint::Shape::Text(text) if text.galley.text().starts_with("Recovery checkpoint:"))
         });
     }
     assert!(visible);

@@ -14,6 +14,7 @@ fn roundtrip_preferences_without_transient_editor_state() {
     ui.inspector_open = false;
     ui.inspector_tab = InspectorTab::History;
     ui.recent_view = 1;
+    ui.camera_fov_degrees = 60;
     ui.explorer_filter = "private filter".into();
     ui.start_open = true;
     ui.constraints_open = true;
@@ -64,7 +65,13 @@ fn valid_loaded_preferences_are_not_rewritten_without_change() {
 fn corrupt_future_oversize_and_invalid_layout_stay_untouched() {
     let mut invalid = Preferences::capture(&UiState::default());
     invalid.recent_view = 2;
+    let mut low = Preferences::capture(&UiState::default());
+    low.camera_fov_degrees = 5;
+    let mut high = Preferences::capture(&UiState::default());
+    high.camera_fov_degrees = 200;
     for bytes in [
+        serde_json::to_vec(&low).unwrap(),
+        serde_json::to_vec(&high).unwrap(),
         b"invalid json".to_vec(),
         b"{\"version\":2,\"future\":true}".to_vec(),
         vec![b' '; MAX_BYTES as usize + 1],
@@ -80,6 +87,20 @@ fn corrupt_future_oversize_and_invalid_layout_stay_untouched() {
         drop(store);
         assert_eq!(fs::read(path).unwrap(), bytes);
     }
+}
+
+#[test]
+fn settings_without_fov_load_with_default() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join(FILE_NAME);
+    fs::write(
+        &path,
+        br#"{"version":1,"appearance":"dark","explorerOpen":true,"inspectorOpen":true,"inspectorTab":"history","recentView":0}"#,
+    )
+    .unwrap();
+    let (_, ui, warning) = load(&directory);
+    assert!(warning.is_none(), "{warning:?}");
+    assert_eq!(ui.camera_fov_degrees, 45);
 }
 
 #[test]

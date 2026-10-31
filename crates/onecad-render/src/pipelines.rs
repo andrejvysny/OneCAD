@@ -35,6 +35,8 @@ pub(crate) struct Pipelines {
     pub highlight_edge: wgpu::RenderPipeline,
     pub height: wgpu::RenderPipeline,
     pub ground: wgpu::RenderPipeline,
+    pub axis: wgpu::RenderPipeline,
+    pub axis_hidden: wgpu::RenderPipeline,
     pub edge: wgpu::RenderPipeline,
     pub silhouette: wgpu::RenderPipeline,
     pub contact_occ: wgpu::RenderPipeline,
@@ -417,6 +419,38 @@ impl Pipelines {
                 depth(false, none),
                 SAMPLES,
                 false,
+            ),
+            axis: pipe(
+                "origin axes",
+                &frame_pl,
+                &lines,
+                "vs_axis",
+                Some("fs_line"),
+                &[],
+                Some(OUTPUT_FORMAT),
+                Some(wgpu::BlendState::ALPHA_BLENDING),
+                depth(false, none),
+                SAMPLES,
+                true,
+            ),
+            axis_hidden: pipe(
+                "hidden origin axes",
+                &frame_pl,
+                &lines,
+                "vs_axis",
+                Some("fs_hidden"),
+                &[],
+                Some(OUTPUT_FORMAT),
+                Some(wgpu::BlendState::ALPHA_BLENDING),
+                {
+                    let mut state = depth(false, none);
+                    if let Some(state) = &mut state {
+                        state.depth_compare = Some(wgpu::CompareFunction::Less);
+                    }
+                    state
+                },
+                SAMPLES,
+                true,
             ),
             edge: pipe(
                 "edges",

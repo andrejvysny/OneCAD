@@ -347,7 +347,11 @@ pub fn dimension_list(app: &mut App, ui: &mut egui::Ui) {
                     .on_hover_text(id.to_string());
                     if text.is_some()
                         && ui
-                            .add_enabled(ready(app).is_some(), egui::Button::new("Edit"))
+                            .add(
+                                onecad_widgets::components::button::Button::new("Edit")
+                                    .kind(onecad_widgets::components::button::ButtonKind::Secondary)
+                                    .enabled(ready(app).is_some()),
+                            )
                             .clicked()
                     {
                         edit = Some(*id);

@@ -65,7 +65,7 @@ fn feature_row(
         .selected_feature()
         .is_some_and(|id| id.to_string() == feature.id)
     {
-        ui.label(format!("{} · {}", feature.op_type, feature.value_text));
+        ui.label(caption(&feature.op_type, &feature.value_text));
         edit_button(app, ui);
     }
     crate::input_repair_ui::button(app, ui, display, index, feature);
@@ -110,6 +110,15 @@ pub(crate) fn edit_selected_feature(app: &mut App) {
     });
 }
 
+/// Omits the separator when the feature has no value text.
+fn caption(op_type: &str, value_text: &str) -> String {
+    if value_text.is_empty() {
+        op_type.to_owned()
+    } else {
+        format!("{op_type} · {value_text}")
+    }
+}
+
 pub(crate) fn edit_button(app: &mut App, ui: &mut Ui) {
     if app.doc.selected_feature().is_none()
         || app.doc.interaction.tool.is_some()
@@ -130,7 +139,11 @@ pub(crate) fn edit_button(app: &mut App, ui: &mut Ui) {
         && app.doc.bridge.valid()
         && !app.busy();
     if ui
-        .add_enabled(editable, egui::Button::new("Edit feature"))
+        .add(
+            onecad_widgets::components::button::Button::new("Edit feature")
+                .kind(onecad_widgets::components::button::ButtonKind::Secondary)
+                .enabled(editable),
+        )
         .clicked()
     {
         edit_selected_feature(app);
@@ -183,6 +196,12 @@ fn history_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caption_drops_separator_without_value() {
+        assert_eq!(caption("Sketch", ""), "Sketch");
+        assert_eq!(caption("Extrude", "10 mm"), "Extrude · 10 mm");
+    }
     use onecad_app::dto::FeatureStatus;
 
     #[test]

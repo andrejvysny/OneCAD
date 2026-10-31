@@ -34,6 +34,10 @@ struct Frame {
     support_origin: vec4<f32>, // xyz, enabled
     support_x: vec4<f32>, // xyz axis, local fade centre x
     support_y: vec4<f32>, // xyz axis, local fade centre y
+    axes_origin: vec4<f32>, // origin xyz, half-ray length
+    axes_style: vec4<f32>,  // line width px, origin dot px, enabled
+    axes_dir: array<vec4<f32>, 3>,   // xyz unit direction, enabled
+    axes_color: array<vec4<f32>, 3>, // linear rgb, alpha
 };
 
 @group(0) @binding(0) var<uniform> u: Frame;

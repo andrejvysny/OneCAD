@@ -48,7 +48,6 @@ pub fn tabs(ui: &mut Ui, t: &Theme) {
             let strip = TabStrip {
                 tabs: &tabs,
                 home_active,
-                can_add: true,
             };
             let out = TitleBar::new("")
                 .tabs(Some(strip))

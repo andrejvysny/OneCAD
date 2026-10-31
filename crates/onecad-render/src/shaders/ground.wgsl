@@ -1,6 +1,8 @@
 // The ground: one quad on the world XY plane at Z = 0 (today's grid plane), carrying the
 // contact shadow and an analytic grid (today's 1/2/5/10 step ladder, minor + major lines,
 // fading out with distance from the target). Depth-tested against the bodies, writes no depth.
+// The plane is a transparent overlay, never an opaque floor: body parts on the far side of
+// Z = 0 must stay visible through it from either side (the clear colour is the canvas).
 
 @group(1) @binding(0) var shadow_tex: texture_2d<f32>;
 @group(1) @binding(1) var lin: sampler;
@@ -64,17 +66,21 @@ fn fs_ground(i: GOut) -> @location(0) vec4<f32> {
     let major = grid_cov(g, u.grid.x * 10.0, u.ground.z);
     let r = length(g - u.grid.yz) / u.grid.w;
     let fade = pow(clamp(1.0 - r, 0.0, 1.0), 2.0);
-    let lod = minor_lod(minor.y);
-    var c = u.canvas.rgb;
+    var line = 0.0;
     if (u.support_origin.w == 0.0) {
-        c = mix(c, u.grid_minor.rgb, minor.x * fade * lod);
-        c = mix(c, u.grid_major.rgb, major.x * fade);
+        line = max(minor.x * minor_lod(minor.y), major.x) * fade;
     }
-    if (u.flags.z > 0.5) {
+    // Contact shadow only reads as a shadow from above the plane.
+    var shade = 0.0;
+    if (u.flags.z > 0.5 && u.eye.z > u.ground.x) {
         let uv = vec2<f32>((g.x - u.shadow_rect.x) * u.shadow_rect.z, 1.0 - (g.y - u.shadow_rect.y) * u.shadow_rect.w);
         let s = textureSampleLevel(shadow_tex, lin, uv, 0.0).rg;
         let occ = 1.0 - (1.0 - u.contact.w * s.r) * (1.0 - (1.0 - u.contact.w) * s.g);
-        c *= 1.0 - u.ground.w * occ;
+        shade = clamp(u.ground.w * occ, 0.0, 1.0);
     }
-    return vec4<f32>(dither(c, i.pos.xy), 1.0);
+    // Black shadow layer under the line layer, folded into one straight-alpha fragment.
+    let alpha = 1.0 - (1.0 - shade) * (1.0 - line);
+    if (alpha < 1.0 / 255.0) { discard; }
+    let rgb = mix(u.grid_minor.rgb, u.grid_major.rgb, major.x) * (line / alpha);
+    return vec4<f32>(dither(rgb, i.pos.xy), alpha);
 }

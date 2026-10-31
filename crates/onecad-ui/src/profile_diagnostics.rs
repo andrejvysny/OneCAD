@@ -1,7 +1,7 @@
 //! Present worker profile evidence only while its exact sketch visit and document remain current.
 use crate::app::App;
 use onecad_core::{
-    ids::EntityId,
+    ids::{EntityId, SketchId},
     regen::{Diagnostic, Severity},
     sketch::Sketch,
 };
@@ -246,8 +246,20 @@ pub(crate) fn record_display_failures(
     );
 }
 
+/// Closed visits only matter while their sketch (or one of its profiles) is selected.
+fn relevant(app: &App, report: &Report, session: &SketchSession) -> bool {
+    relevant_for(
+        session.phase,
+        app.doc.selected_sketch(),
+        report.source.key.sketch_id,
+    )
+}
+
+fn relevant_for(phase: SketchPhase, selected: Option<SketchId>, report: SketchId) -> bool {
+    phase != SketchPhase::Closed || selected == Some(report)
+}
+
 enum Choice {
-    Reenter,
     Repair,
     Select(Box<SketchAction>),
 }
@@ -259,11 +271,12 @@ pub(crate) fn show(app: &mut App, ui: &mut egui::Ui) {
     let Some(session) = report.current(&app.doc.sketch) else {
         return;
     };
+    if !relevant(app, report, session) {
+        return;
+    }
     let available = !app.busy() && app.doc.bridge.valid() && app.viewport_ready();
     let choice = contents(ui, report, session, app.doc.view, available);
-    let sketch = report.source.key.sketch_id;
     match choice {
-        Some(Choice::Reenter) => app.edit_sketch(sketch),
         Some(Choice::Repair) => {
             if let Some(session) = app.doc.sketch.session.as_ref() {
                 app.sketch_dispatch(SketchAction::ReenterForRepair {
@@ -343,17 +356,14 @@ fn rows_ui(
 
 fn repair_actions(ui: &mut egui::Ui, session: &SketchSession, available: bool) -> Option<Choice> {
     let mut choice = None;
-    if session.phase == SketchPhase::Closed
-        && ui
-            .add_enabled(available, egui::Button::new("Re-enter sketch"))
-            .clicked()
-    {
-        choice = Some(Choice::Reenter);
-    }
     if session.phase == SketchPhase::Faulted && session.repair_reentry {
         ui.label("Earlier accepted edits are retained. Re-enter to start a fresh repair visit.");
         if ui
-            .add_enabled(available, egui::Button::new("Re-enter sketch to repair"))
+            .add(
+                onecad_widgets::components::button::Button::new("Re-enter sketch to repair")
+                    .kind(onecad_widgets::components::button::ButtonKind::Secondary)
+                    .enabled(available),
+            )
             .clicked()
         {
             choice = Some(Choice::Repair);

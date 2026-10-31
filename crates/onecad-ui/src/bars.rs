@@ -49,7 +49,6 @@ pub fn title(app: &mut App, ui: &mut Ui) {
                     bar.tabs(Some(TabStrip {
                         tabs: &specs,
                         home_active: app.ui.start_open,
-                        can_add: home_allowed(app),
                     }))
                     .can_undo(can_undo)
                     .can_redo(can_redo)
@@ -69,7 +68,7 @@ pub fn title(app: &mut App, ui: &mut Ui) {
             if out.search {
                 app.ui.extensions.native.open_palette();
             }
-            if (out.home || out.add) && home_allowed(app) {
+            if out.home && home_allowed(app) {
                 app.open_home();
             }
             if let Some(tab) = out.activate
@@ -96,14 +95,11 @@ pub fn title(app: &mut App, ui: &mut Ui) {
         });
 }
 
-/// Document tabs are 0-based in strip order; "+" opens a new document.
+/// Document tabs are 0-based in strip order; Home opens the start screen.
 pub(crate) fn name_tabs(ctx: &Context, out: &onecad_widgets::components::shell::TitleBarOutput) {
     for (index, (_, id)) in out.tab_ids.iter().enumerate() {
         crate::automation::name(ctx, *id, &crate::automation::tab(index));
         ctx.accesskit_node_builder(*id, |node| node.set_role(egui::accesskit::Role::Tab));
-    }
-    if let Some(id) = out.add_id {
-        crate::automation::name(ctx, id, crate::automation::TAB_NEW);
     }
 }
 

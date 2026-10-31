@@ -88,7 +88,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 return;
             };
             app.sync_sketch_gesture();
-            crate::support_view::axes(app, ui.painter(), rect, &view);
             if crate::sketch_entry::viewport(app, ui, rect, &response, &view, &display) {
                 crate::viewport_widgets::show(app, ui, rect, &view);
                 return;
@@ -525,6 +524,7 @@ fn render(
                     theme: if app.dark { Theme::Dark } else { Theme::Light },
                     support_grid,
                     grid_visible,
+                    axes: Some(crate::support_view::axes(app)),
                     ..Default::default()
                 },
             )

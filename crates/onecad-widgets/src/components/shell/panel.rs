@@ -84,6 +84,7 @@ pub struct PanelToggle<'a> {
     open: bool,
     dot: bool,
     compact: bool,
+    square: bool,
     tip: Option<Tip<'a>>,
     icon: Option<&'a str>,
 }
@@ -95,6 +96,7 @@ impl<'a> PanelToggle<'a> {
             open: false,
             dot: false,
             compact: false,
+            square: false,
             tip: None,
             icon: None,
         }
@@ -112,6 +114,12 @@ impl<'a> PanelToggle<'a> {
         self.compact = compact;
         self
     }
+    /// Matches the viewport SquareButtons (`H_SQUARE`, `RADIUS_MD`, 20px glyph, pill
+    /// shadow); takes precedence over `compact`.
+    pub fn square(mut self, square: bool) -> Self {
+        self.square = square;
+        self
+    }
     /// Replaces the default panel glyph, e.g. when the toggle names what the panel holds.
     pub fn icon(mut self, name: &'a str) -> Self {
         self.icon = Some(name);
@@ -127,7 +135,11 @@ impl egui::Widget for PanelToggle<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
         let l = look(ui.ctx());
         let t = &l.theme;
-        let (size, radius) = if self.compact { (32.0, 7) } else { (44.0, 12) };
+        let (size, radius) = match (self.square, self.compact) {
+            (true, _) => (metrics::H_SQUARE, metrics::RADIUS_MD),
+            (false, true) => (32.0, 7),
+            (false, false) => (44.0, 12),
+        };
         let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
         let cr = CornerRadius::same(radius);
         let (fill, border, tint) = if self.open {
@@ -141,7 +153,7 @@ impl egui::Widget for PanelToggle<'_> {
             (f, t.border, t.ink3)
         };
         let p = ui.painter();
-        if !self.compact {
+        if self.square || !self.compact {
             p.add(metrics::shadow(Elevation::Pill, t, l.dark).as_shape(rect, cr));
         }
         p.rect(rect, cr, fill, Stroke::new(1.0, border), StrokeKind::Inside);
@@ -177,7 +189,11 @@ impl PanelToggle<'_> {
             (Side::Right, false) => "panelRight",
             (Side::Right, true) => "panelRightOpen",
         });
-        let glyph_px = if self.compact { 18.0 } else { 20.0 };
+        let glyph_px = if self.compact && !self.square {
+            18.0
+        } else {
+            20.0
+        };
         let glyph = Rect::from_center_size(rect.center(), Vec2::splat(glyph_px));
         let style = IconStyle {
             tint,

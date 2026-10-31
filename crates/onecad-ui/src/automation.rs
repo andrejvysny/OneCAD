@@ -12,9 +12,9 @@ use onecad_interaction::{NumericParameter, ParameterAxis, sketch::CreationField}
 pub(crate) const DIMENSION_INPUT: &str = "onecad.dimension.input";
 pub(crate) const OP_CONFIRM: &str = "onecad.op.confirm";
 pub(crate) const OP_CANCEL: &str = "onecad.op.cancel";
+#[cfg(target_os = "ios")]
 pub(crate) const ADDITIVE_SELECT: &str = "onecad.select.additive";
 pub(crate) const VIEWPORT: &str = "onecad.viewport";
-pub(crate) const TAB_NEW: &str = "onecad.tab.new";
 pub(crate) const FINISH_SKETCH: &str = "onecad.tool.finishSketch";
 pub(crate) const DISCARD_SKETCH: &str = "onecad.tool.discardSketch";
 

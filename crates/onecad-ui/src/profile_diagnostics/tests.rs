@@ -124,6 +124,16 @@ fn unknown_wire_entity_ids_never_turn_into_uuid_or_partial_selection() {
 }
 
 #[test]
+fn results_show_only_for_open_visits_or_selected_sketch() {
+    let (own, other) = (SketchId::new(), SketchId::new());
+    assert!(!relevant_for(SketchPhase::Closed, None, own));
+    assert!(relevant_for(SketchPhase::Closed, Some(own), own));
+    assert!(!relevant_for(SketchPhase::Closed, Some(other), own));
+    assert!(relevant_for(SketchPhase::Faulted, None, own));
+    assert!(relevant_for(SketchPhase::Active, Some(other), own));
+}
+
+#[test]
 fn selection_requires_active_exact_capture_document_and_reported_entity() {
     let (mut interaction, tag, entity) = fixture();
     let report = Report::observe(&interaction, &finished(tag, vec![diagnostic(entity)])).unwrap();

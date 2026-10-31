@@ -90,6 +90,18 @@ fn vs_sil(
     return expand(vi, a, b, u.lines.y, u.edge.rgb, u.edge.w);
 }
 
+// Origin triad without vertex buffers: instances 0..3 are the half-rays, 3..6 their origin dots.
+@vertex
+fn vs_axis(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> LOut {
+    let slot = ii % 3u;
+    let d = u.axes_dir[slot];
+    if (u.axes_style.z < 0.5 || d.w < 0.5) { return culled(); }
+    let o = u.axes_origin.xyz;
+    let c = u.axes_color[slot];
+    if (ii >= 3u) { return expand(vi, o, o, u.axes_style.y, c.rgb, 1.0); }
+    return expand(vi, o, o + d.xyz * u.axes_origin.w, u.axes_style.x, c.rgb, c.a);
+}
+
 fn line_color(i: LOut) -> vec4<f32> {
     let p = i.pos.xy;
     let a = i.seg.xy;

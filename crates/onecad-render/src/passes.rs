@@ -216,6 +216,7 @@ impl Renderer {
         if self.options.display_mode.studio() {
             self.draw_ground(&mut pass, target);
         }
+        self.draw_axes(&mut pass, xray);
         pass.set_bind_group(1, &target.body_bind, &[]);
         if !wireframe {
             self.draw_highlights(&mut pass, crate::HighlightKind::Face);
@@ -397,6 +398,15 @@ impl Renderer {
         pass.set_bind_group(0, &self.frame_bindings.normal.bind, &[]);
         pass.set_bind_group(1, &target.ground_bind, &[]);
         pass.draw(0..12, 0..1);
+    }
+    fn draw_axes(&self, pass: &mut wgpu::RenderPass<'_>, xray: bool) {
+        pass.set_bind_group(0, &self.frame_bindings.normal.bind, &[]);
+        if xray {
+            pass.set_pipeline(&self.pipelines.axis_hidden);
+            pass.draw(0..4, 0..6);
+        }
+        pass.set_pipeline(&self.pipelines.axis);
+        pass.draw(0..4, 0..6);
     }
     fn section_mask(
         &self,

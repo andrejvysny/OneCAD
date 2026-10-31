@@ -1,6 +1,7 @@
 //! Transient viewport settings, applied by the host after GPU work completes.
 
 use crate::app::App;
+use crate::camera_fov::{MAX_FOV_DEGREES, MIN_FOV_DEGREES};
 use onecad_render::{DisplayMode, RenderOptions};
 use onecad_scene::Projection;
 use onecad_widgets::components::lists::{MenuRow, SectionLabel, Segment, SegmentedControl};
@@ -20,22 +21,20 @@ pub fn contents(app: &mut App, ui: &mut egui::Ui) {
         .contains(wgpu::Features::FLOAT32_BLENDABLE);
     // The Mobile render profile has no supersampling (target memory).
     let supersampling_offered = app.renderer.profile().supersampling();
-    let mut changed = display_modes(ui, &mut options);
+    let mut changed = display_modes(ui, &mut options, xray_supported);
     projection(app, ui);
-    egui::CollapsingHeader::new("More settings")
-        .id_salt("display-more-settings")
-        .show(ui, |ui| {
-            changed |= xray(ui, &mut options, xray_supported);
-            if supersampling_offered {
-                changed |= supersampling(ui, &mut options);
-            }
-            changed |= ui
-                .add_enabled_ui(
-                    app.doc.interaction.tool.is_none() && !app.sketch_active(),
-                    |ui| section(ui, app, &mut options),
-                )
-                .inner;
-        });
+    field_of_view(app, ui);
+    if supersampling_offered {
+        ui.separator();
+        ui.add(SectionLabel::new("Quality"));
+        changed |= supersampling(ui, &mut options);
+    }
+    changed |= ui
+        .add_enabled_ui(
+            app.doc.interaction.tool.is_none() && !app.sketch_active(),
+            |ui| section(ui, app, &mut options),
+        )
+        .inner;
     if changed {
         app.pending_display_options = Some(options);
         app.draw_dirty = true;
@@ -74,19 +73,54 @@ fn projection(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-fn display_modes(ui: &mut egui::Ui, options: &mut RenderOptions) -> bool {
+/// Perspective field of view; scales the camera distance so the target keeps its size.
+fn field_of_view(app: &mut App, ui: &mut egui::Ui) {
+    let perspective = app.doc.camera.projection == Projection::Perspective;
+    let mut degrees = app
+        .doc
+        .camera
+        .vertical_fov_degrees
+        .round()
+        .clamp(f64::from(MIN_FOV_DEGREES), f64::from(MAX_FOV_DEGREES)) as u16;
+    let before = degrees;
+    ui.label("Field of view");
+    ui.spacing_mut().slider_width = ui.available_width() - 56.0;
+    ui.add_enabled(
+        perspective,
+        egui::Slider::new(&mut degrees, MIN_FOV_DEGREES..=MAX_FOV_DEGREES).suffix("°"),
+    )
+    .on_disabled_hover_text("Perspective only");
+    if degrees != before {
+        app.set_camera_fov(degrees);
+        app.draw_dirty = true;
+        ui.ctx().request_repaint();
+    }
+}
+
+fn display_modes(ui: &mut egui::Ui, options: &mut RenderOptions, xray_supported: bool) -> bool {
     ui.add(SectionLabel::new("Render style"));
     let mut changed = false;
-    for (mode, label, icon) in [
-        (DisplayMode::Shaded, "Shaded", "shaded"),
-        (DisplayMode::ShadedEdges, "Shaded with edges", "shadedEdges"),
-        (DisplayMode::Wireframe, "Wireframe", "wireframe"),
+    for (mode, label, icon, enabled) in [
+        (DisplayMode::Shaded, "Shaded", "shaded", true),
+        (
+            DisplayMode::ShadedEdges,
+            "Shaded with edges",
+            "shadedEdges",
+            true,
+        ),
+        (DisplayMode::Wireframe, "Wireframe", "wireframe", true),
+        (DisplayMode::Xray, "X-ray", "ghost", xray_supported),
     ] {
-        let response = ui.add(
-            MenuRow::new(Some(icon), label)
-                .checked(options.display_mode == mode)
-                .highlight_checked(),
-        );
+        let response = ui
+            .add(
+                MenuRow::new(Some(icon), label)
+                    .enabled(enabled)
+                    .checked(options.display_mode == mode)
+                    .highlight_checked(),
+            )
+            .on_disabled_hover_text(
+                "X-ray requires FLOAT32_BLENDABLE, unavailable on this GPU device.",
+            );
         if response.clicked() {
             changed |= options.display_mode != mode;
             options.display_mode = mode;
@@ -96,27 +130,6 @@ fn display_modes(ui: &mut egui::Ui, options: &mut RenderOptions) -> bool {
     ui.add(MenuRow::new(Some("hiddenLine"), "Hidden line").enabled(false))
         .on_disabled_hover_text("Hidden line rendering is not available yet.");
     changed
-}
-
-fn xray(ui: &mut egui::Ui, options: &mut RenderOptions, supported: bool) -> bool {
-    let response = ui
-        .add(
-            MenuRow::new(Some("hiddenLine"), "X-ray")
-                .enabled(supported)
-                .checked(options.display_mode == DisplayMode::Xray)
-                .highlight_checked(),
-        )
-        .on_disabled_hover_text(
-            "X-ray requires FLOAT32_BLENDABLE, unavailable on this GPU device.",
-        );
-    if response.clicked() {
-        let changed = options.display_mode != DisplayMode::Xray;
-        options.display_mode = DisplayMode::Xray;
-        ui.close();
-        changed
-    } else {
-        false
-    }
 }
 
 #[cfg(test)]
@@ -238,8 +251,7 @@ mod tests {
                 |ui| {
                     self.menu = display_menu(ui, |ui| {
                         ui.set_width(268.0);
-                        display_modes(ui, &mut self.options);
-                        xray(ui, &mut self.options, self.xray_supported);
+                        display_modes(ui, &mut self.options, self.xray_supported);
                         ui.separator();
                         supersampling(ui, &mut self.options);
                         section_axis_ui(ui, &mut self.axis);

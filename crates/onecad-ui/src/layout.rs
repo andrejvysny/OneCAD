@@ -1,10 +1,12 @@
 //! Pure geometry of the floating editor chrome (docs/design/native-ui/final/README.md).
 use crate::ui_state::UiState;
 use egui::{Pos2, Rect, Vec2, pos2, vec2};
+use onecad_widgets::metrics::CHROME_GAP;
 
 const TITLEBAR: f32 = 44.0;
 const EDGE: f32 = 10.0;
-const TOGGLE: f32 = 32.0;
+/// Same square as the view controls above it (`metrics::H_SQUARE`).
+const TOGGLE: f32 = 36.0;
 /// Collapsed explorer chip: toggle | divider | workspace selector, in a 3px padded card.
 const EXPLORER_CHIP: Vec2 = vec2(97.0, 40.0);
 const EXPLORER_W: f32 = 248.0;
@@ -30,7 +32,7 @@ pub struct Chrome {
     pub toolbar_left: f32,
     pub explorer_open: bool,
     pub explorer: Rect,
-    /// Only present while the Inspector is closed.
+    /// Properties toggle under the view controls; present whether or not the Inspector is open.
     pub inspector_toggle: Option<Rect>,
     pub inspector_open: bool,
     pub inspector: Rect,
@@ -59,7 +61,10 @@ fn feature_card(viewport: Rect, inspector_open: bool) -> Rect {
 
 fn collapsed_inspector_toggle(controls: Rect) -> Rect {
     Rect::from_min_size(
-        pos2(controls.center().x - TOGGLE / 2.0, controls.bottom() + 8.0),
+        pos2(
+            controls.center().x - TOGGLE / 2.0,
+            controls.bottom() + CHROME_GAP,
+        ),
         vec2(TOGGLE, TOGGLE),
     )
 }
@@ -277,7 +282,7 @@ mod tests {
         let toggle = c.inspector_toggle.unwrap();
         assert_eq!(toggle.center().x, c.view_controls.center().x);
         assert_eq!(toggle.top(), c.view_controls.bottom() + 8.0);
-        assert_eq!(toggle.size(), vec2(32.0, 32.0));
+        assert_eq!(toggle.size(), vec2(36.0, 36.0));
     }
 
     #[test]

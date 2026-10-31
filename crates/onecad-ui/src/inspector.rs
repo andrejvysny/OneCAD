@@ -31,7 +31,7 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
                     PanelToggle::new(Side::Right)
                         .open(app.ui.inspector_open)
                         .icon("settings")
-                        .compact(true)
+                        .square(true)
                         .dot(dot && !app.ui.inspector_open)
                         .tip(tip),
                 )

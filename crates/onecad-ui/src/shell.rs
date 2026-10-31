@@ -25,7 +25,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     bars::title(app, ui);
     crate::host::refresh_text_scope(app, &ctx);
     app.doc.diagnostics.observe(&app.doc.status);
-    app.doc.diagnostics.show(&ctx);
+    crate::failure_toast::show(&ctx, &app.doc.diagnostics);
     crate::document_items::show(app, &ctx);
     if app.ui.start_open {
         return;

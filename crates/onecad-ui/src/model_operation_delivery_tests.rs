@@ -1,7 +1,9 @@
 //! Fillet and Move / Rotate through the real host route with the production
 //! worker and Metal, addressed by the AccessKit automation ids the iPadOS bridge
 //! exports. Synthetic pointer delivery is not physical acceptance.
-use super::model_selection_delivery_tests::{boxed, click, labels, press, targets};
+#[cfg(target_os = "ios")]
+use super::model_selection_delivery_tests::labels;
+use super::model_selection_delivery_tests::{boxed, click, press, targets};
 use super::point_center_delivery_tests::support::Host;
 use super::*;
 use crate::{automation as id, tool_registry::ToolId};
@@ -60,6 +62,7 @@ fn tap(host: &mut Host, id: &str) {
     host.click(center);
 }
 
+#[cfg(target_os = "ios")]
 #[tokio::test]
 #[ignore = "requires production worker and Metal; synthetic pointer delivery is not physical acceptance"]
 async fn multi_select_switch_and_pill_fillet_commit_through_the_card() {
@@ -222,6 +225,7 @@ async fn double_tapped_body_moves_and_turns_by_typed_values() {
     host.stop().await;
 }
 
+#[cfg(target_os = "ios")]
 #[tokio::test]
 #[ignore = "requires production worker and Metal; synthetic pointer delivery is not physical acceptance"]
 async fn multi_select_switch_keeps_tap_to_clear_and_whole_body_double_tap() {

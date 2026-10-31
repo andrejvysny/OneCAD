@@ -10,6 +10,7 @@
         clippy::unreachable
     )
 )]
+mod axes;
 mod flight;
 mod frame;
 mod gpu;
@@ -32,6 +33,7 @@ mod targets;
 mod thumbnail;
 mod uniforms;
 
+pub use axes::{AxesFrame, AxisColor, AxisLine};
 pub use frame::{grid_step, GridFrame, RenderStyle, SilhouetteMode, Theme};
 pub use highlights::{HighlightKind, HighlightTarget, PreparedHighlights};
 pub use limits::{MemoryEstimate, RenderLimits};

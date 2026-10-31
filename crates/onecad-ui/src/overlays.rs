@@ -48,7 +48,7 @@ pub fn nav_pill(app: &mut App, ctx: &Context, chrome: &Chrome) {
         .show(ctx, |ui| clicked = NavPill::new(&buttons).show(ui));
     match clicked {
         Some(0) => {
-            app.doc.camera = onecad_scene::Camera::default();
+            app.doc.camera = crate::camera_fov::default_camera(app.ui.camera_fov_degrees);
             app.doc.fit_pending = true;
         }
         Some(1) => app.doc.fit_pending = true,

@@ -36,11 +36,7 @@ fn bar(
     };
     let mut out = None;
     let mut frame = ctx.run_ui(input, |ui| {
-        let strip = TabStrip {
-            tabs,
-            home_active,
-            can_add: true,
-        };
+        let strip = TabStrip { tabs, home_active };
         out = Some(TitleBar::new("x").tabs(Some(strip)).show(ui));
     });
     frame.textures_delta.clear();

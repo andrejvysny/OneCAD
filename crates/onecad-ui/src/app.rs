@@ -151,11 +151,13 @@ impl App {
             menu.set_appearance(ui.appearance);
         }
         bridge.submit(Command::Open)?;
+        let mut doc = crate::document_editor::DocumentEditor::new(
+            bridge,
+            settings_error.unwrap_or_else(|| "Opening QA workspace…".into()),
+        )?;
+        doc.camera = crate::camera_fov::default_camera(ui.camera_fov_degrees);
         Ok(Self {
-            doc: crate::document_editor::DocumentEditor::new(
-                bridge,
-                settings_error.unwrap_or_else(|| "Opening QA workspace…".into()),
-            )?,
+            doc,
             parked: false,
             tabs,
             extension_refresh,

@@ -3,7 +3,6 @@
 
 use egui::{Pos2, Rect, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
 
-use super::IconButton;
 use crate::components::actions::common::fitted;
 use crate::components::tooltip::{self, Tip};
 use crate::fonts;
@@ -18,7 +17,6 @@ const TAB_MIN: f32 = 96.0;
 const TAB_MAX: f32 = 200.0;
 const TAB_GAP: f32 = 4.0;
 const SLOT: f32 = 16.0;
-const ADD: f32 = 28.0;
 
 /// One open document.
 #[derive(Clone, Copy)]
@@ -36,17 +34,14 @@ pub struct TabStrip<'a> {
     pub tabs: &'a [TabSpec<'a>],
     /// Home is the visible page: no tab is highlighted.
     pub home_active: bool,
-    pub can_add: bool,
 }
 
 #[derive(Default)]
 pub(super) struct TabsOut {
     pub activate: Option<u64>,
     pub close: Option<u64>,
-    pub add: bool,
     pub rects: Vec<(u64, Rect)>,
     pub ids: Vec<(u64, egui::Id)>,
-    pub add_id: Option<egui::Id>,
 }
 
 /// A tab's content width: icon, title and the trailing close/dirty slot.
@@ -63,7 +58,7 @@ fn natural_width(ui: &Ui, spec: &TabSpec<'_>) -> f32 {
 /// Content-sized tabs; when they do not fit, the widest shrink first (a common
 /// cap), never below the minimum. Past that the strip clips.
 fn tab_widths(naturals: &[f32], avail: f32) -> Vec<f32> {
-    let room = avail - ADD - naturals.len() as f32 * TAB_GAP;
+    let room = avail - naturals.len() as f32 * TAB_GAP;
     if naturals.iter().sum::<f32>() <= room {
         return naturals.to_vec();
     }
@@ -95,7 +90,7 @@ pub(super) fn show_strip(
     let n = strip.tabs.len();
     let naturals: Vec<f32> = strip.tabs.iter().map(|t| natural_width(ui, t)).collect();
     let widths = tab_widths(&naturals, sym_w);
-    let total = widths.iter().map(|w| w + TAB_GAP).sum::<f32>() + ADD;
+    let total = widths.iter().map(|w| w + TAB_GAP).sum::<f32>();
     let x0 = (centre_x - total / 2.0).max(area.left());
     let cy = area.center().y;
     let mut out = TabsOut::default();
@@ -114,14 +109,6 @@ pub(super) fn show_strip(
             out.rects.push((spec.id, rect));
             x += w + TAB_GAP;
         }
-        let r = Rect::from_min_size(pos2(x, cy - ADD / 2.0), Vec2::splat(ADD));
-        let b = IconButton::new("plus", "New document", ADD, 16.0)
-            .enabled(strip.can_add)
-            .gap_bg(l.theme.titlebar)
-            .tip(Some(Tip::new("New document")));
-        let add = ui.put(r, b);
-        out.add = add.clicked();
-        out.add_id = Some(add.id);
     });
     out
 }
@@ -240,7 +227,7 @@ mod width_tests {
             "a short tab is not stretched or squeezed first"
         );
         assert!(squeezed[1] < 200.0 && squeezed[1] == squeezed[2]);
-        let room = 400.0 - ADD - 3.0 * TAB_GAP;
+        let room = 400.0 - 3.0 * TAB_GAP;
         assert!(squeezed.iter().sum::<f32>() <= room + 0.01);
         assert!(tab_widths(&[200.0; 8], 300.0).iter().all(|w| *w == TAB_MIN));
     }

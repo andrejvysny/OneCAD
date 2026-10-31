@@ -39,6 +39,10 @@ pub struct FrameU {
     pub support_origin: [f32; 4],
     pub support_x: [f32; 4],
     pub support_y: [f32; 4],
+    pub axes_origin: [f32; 4],
+    pub axes_style: [f32; 4],
+    pub axes_dir: [[f32; 4]; 3],
+    pub axes_color: [[f32; 4]; 3],
 }
 
 /// Transient grid placement, independent of the world-ground contact shadow.
@@ -66,6 +70,7 @@ pub struct RenderStyle {
     pub silhouettes: SilhouetteMode,
     pub support_grid: Option<GridFrame>,
     pub grid_visible: bool,
+    pub axes: Option<crate::AxesFrame>,
 }
 impl Default for RenderStyle {
     fn default() -> Self {
@@ -74,6 +79,7 @@ impl Default for RenderStyle {
             silhouettes: SilhouetteMode::Geometric,
             support_grid: None,
             grid_visible: true,
+            axes: None,
         }
     }
 }
@@ -109,7 +115,7 @@ fn resolve_token(theme: Theme, name: &str) -> Result<[f32; 3], RenderError> {
     }))
 }
 
-fn token(theme: Theme, name: &str) -> Result<[f32; 3], RenderError> {
+pub(crate) fn token(theme: Theme, name: &str) -> Result<[f32; 3], RenderError> {
     const NAMES: [&str; 9] = [
         "--color-body-fill",
         "--color-canvas",
@@ -165,6 +171,8 @@ pub(crate) fn with_options(
     frame.lines[1] *= ratio;
     frame.ground[1] *= ratio;
     frame.ground[2] *= ratio;
+    frame.axes_style[0] *= ratio;
+    frame.axes_style[1] *= ratio;
     frame.section = options.section;
     frame.cap = options.cap;
     frame.display = [
@@ -206,6 +214,7 @@ pub(crate) fn uniform(
     set_camera(&mut frame, view, style);
     set_lighting(&mut frame, style)?;
     set_ground(&mut frame, view, bounds, style)?;
+    crate::axes::set_axes(&mut frame, view, style.axes, style.theme)?;
     set_body_style(&mut frame, view, style, body, preview)?;
     if bytemuck::cast_slice::<FrameU, f32>(&[frame])
         .iter()
@@ -216,7 +225,7 @@ pub(crate) fn uniform(
     Ok(frame)
 }
 
-fn rgba(rgb: [f32; 3], alpha: f32) -> [f32; 4] {
+pub(crate) fn rgba(rgb: [f32; 3], alpha: f32) -> [f32; 4] {
     [rgb[0], rgb[1], rgb[2], alpha]
 }
 

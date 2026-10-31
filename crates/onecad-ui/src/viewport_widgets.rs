@@ -115,7 +115,7 @@ fn apply_cube(app: &mut App, view: &ViewSnapshot, action: CubeAction) {
                 (app.doc.camera.roll_radians + angle).rem_euclid(std::f64::consts::TAU);
         }
         CubeAction::Home => {
-            app.doc.camera = Camera::default();
+            app.doc.camera = crate::camera_fov::default_camera(app.ui.camera_fov_degrees);
             app.doc.fit_pending = true;
         }
         CubeAction::Fit => app.doc.fit_pending = true,
