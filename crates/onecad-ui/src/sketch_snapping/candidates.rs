@@ -1,4 +1,4 @@
-use super::curves::{Curve, intersections, point, vector};
+use super::curves::{Curve, intersections, vector};
 use super::*;
 use onecad_core::{
     ids::EntityId,
@@ -15,24 +15,48 @@ pub(super) struct Candidate {
     pub(super) distance: f64,
     /// Collection order follows sketch entity order, so ties resolve reproducibly.
     order: usize,
+    pub(super) priority: u8,
+    /// Inference lines this candidate lies on; a crossing refines either of its lines.
+    pub(super) loci: [Option<LocusId>; 2],
+    pub(super) guides: [Option<SnapGuide>; 2],
+}
+
+/// Optional data a candidate carries beyond its kind and persisted intent.
+#[derive(Clone, Copy, Default)]
+pub(super) struct Extras {
+    pub(super) priority: Option<u8>,
+    pub(super) loci: [Option<LocusId>; 2],
+    pub(super) guides: [Option<SnapGuide>; 2],
+}
+
+/// Exact points beat crossings, crossings beat single lines, grid comes last.
+/// Crossings set their own tier: 10 with a real curve, 20 between inference lines,
+/// 45 with a grid line.
+pub(super) fn kind_priority(kind: SnapKind) -> u8 {
+    match kind {
+        SnapKind::Endpoint => 0,
+        SnapKind::Origin => 1,
+        SnapKind::Center => 2,
+        SnapKind::Intersection => 3,
+        SnapKind::Midpoint => 4,
+        SnapKind::Quadrant => 5,
+        SnapKind::Guides | SnapKind::GuideIntersection => 20,
+        SnapKind::OnCurve => 35,
+        SnapKind::HorizontalGuide | SnapKind::VerticalGuide => 60,
+        SnapKind::Extension => 62,
+        SnapKind::Polar => 70,
+        SnapKind::Grid => 80,
+    }
 }
 
 impl Candidate {
     pub(super) fn score(&self) -> f64 {
-        let priority = match self.snap.kind {
-            SnapKind::Endpoint => 0,
-            SnapKind::Origin => 1,
-            SnapKind::Center => 2,
-            SnapKind::Intersection => 3,
-            SnapKind::Midpoint => 4,
-            SnapKind::Quadrant => 5,
-            SnapKind::OnCurve => 35,
-            SnapKind::Guides => 50,
-            SnapKind::HorizontalGuide | SnapKind::VerticalGuide => 60,
-            SnapKind::Polar => 70,
-            SnapKind::Grid => 80,
-        };
-        self.distance + f64::from(priority) * 0.35
+        self.distance + f64::from(self.priority) * 0.35
+    }
+    /// A stronger candidate on the held candidate's line is a refinement, not a rival.
+    pub(super) fn refines(&self, held: &Self) -> bool {
+        self.priority < held.priority
+            && held.loci[0].is_some_and(|line| self.loci.contains(&Some(line)))
     }
     /// Equal scores are common at shared corners and aligned points; dropping the snap
     /// there hides exactly the inference users aim for, so order them instead.
@@ -61,6 +85,7 @@ impl Candidate {
                 vertical,
             } => distance(horizontal) + distance(vertical),
             SnapIntent::Quadrant { center, .. } => distance(center),
+            SnapIntent::GuideOnCurve { reference, .. } => distance(reference),
             _ => 0.0,
         }
     }
@@ -70,6 +95,7 @@ impl Candidate {
             && (matches!(
                 self.snap.kind,
                 SnapKind::OnCurve
+                    | SnapKind::Extension
                     | SnapKind::HorizontalGuide
                     | SnapKind::VerticalGuide
                     | SnapKind::Guides
@@ -95,6 +121,15 @@ fn farthest<T>(items: &[T], distance: impl Fn(&T) -> f64) -> Option<usize> {
 }
 impl Collector<'_, '_> {
     fn push(&mut self, value: Vec2, kind: SnapKind, intent: SnapIntent) -> Option<()> {
+        self.push_with(value, kind, intent, Extras::default())
+    }
+    pub(super) fn push_with(
+        &mut self,
+        value: Vec2,
+        kind: SnapKind,
+        intent: SnapIntent,
+        extras: Extras,
+    ) -> Option<()> {
         let Some(screen) = project(self.request, value) else {
             return Some(());
         };
@@ -117,6 +152,9 @@ impl Collector<'_, '_> {
                 snap,
                 distance,
                 order: self.order,
+                priority: extras.priority.unwrap_or_else(|| kind_priority(kind)),
+                loci: extras.loci,
+                guides: extras.guides,
             };
             self.order += 1;
             if self.candidates.len() < MAX_SNAP_CANDIDATES {
@@ -175,19 +213,19 @@ pub(super) fn collect_candidates(
     let nearby: Vec<Curve> = nearby.into_iter().map(|(_, curve)| curve).collect();
     for (index, a) in nearby.iter().enumerate() {
         for b in &nearby[index + 1..] {
-            for value in intersections(*a, *b) {
+            for value in intersections(a.shape, b.shape) {
                 collector.push(
                     value,
                     SnapKind::Intersection,
                     SnapIntent::Intersection {
-                        first: a.id(),
-                        second: b.id(),
+                        first: a.id,
+                        second: b.id,
                     },
                 )?;
             }
         }
     }
-    guides_and_grid(&mut collector)?;
+    guides_and_grid(&mut collector, &nearby)?;
     Some(collector.candidates)
 }
 
@@ -215,7 +253,7 @@ fn curve_candidates(
         {
             nearby[farthest] = (distance, curve);
         }
-        collector.push(value, SnapKind::OnCurve, SnapIntent::OnCurve(curve.id()))?;
+        collector.push(value, SnapKind::OnCurve, SnapIntent::OnCurve(curve.id))?;
     }
     Some(())
 }
@@ -271,7 +309,7 @@ fn circle_candidates(collector: &mut Collector<'_, '_>, id: EntityId, radius: f6
     for quadrant in 0..4 {
         let angle = f64::from(quadrant) * FRAC_PI_2;
         let value = Vec2::new(at.x + radius * angle.cos(), at.y + radius * angle.sin())?;
-        if !curve.contains(vector(value)) {
+        if !curve.shape.contains(vector(value)) {
             continue;
         }
         collector.push(
@@ -293,4 +331,7 @@ fn circle_candidates(collector: &mut Collector<'_, '_>, id: EntityId, radius: f6
 
 #[path = "guides.rs"]
 mod guides;
+#[path = "loci.rs"]
+mod loci;
 use guides::guides_and_grid;
+use loci::LocusId;

@@ -263,16 +263,17 @@ fn deliver(
     };
     let snap = super::winning_snap(app, ui, rect, view, position);
     if let Some(snap) = snap {
-        point.point = snap.point;
+        point.point = snap.snap.point;
         super::paint(app, ui, rect, view, snap);
     }
+    super::snap_state::paint_acquired(app, ui, rect, view);
     super::feedback::candidate(ui.painter(), rect, view, session, point.point, &app.theme);
     if released {
         let key = point.key.clone();
         app.sketch_dispatch(SketchAction::ClickInferred {
             point,
             ids: super::fresh_ids(),
-            snap: snap.map(Box::new),
+            snap: snap.map(|snap| Box::new(snap.snap)),
         });
         app.sketch_dispatch(SketchAction::SetTangentArc {
             key,

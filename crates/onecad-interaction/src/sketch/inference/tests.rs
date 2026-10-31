@@ -204,3 +204,85 @@ fn arc_endpoint_identity_and_role_survive_persistence_and_source_changes_are_det
         matches!(&constraints[0],Constraint::Coincident {point2,point2_position:CurvePosition::End,..} if *point2==arc)
     );
 }
+
+#[test]
+fn guide_on_curve_persists_alignment_then_membership_with_fresh_ids() {
+    let (sketch, source, circle) = fixture();
+    let center = sketch.entities()[0].id();
+    let reference = SketchTarget::Point {
+        entity: center,
+        role: CurvePosition::Arbitrary,
+    };
+    for axis in [PointAlignment::Horizontal, PointAlignment::Vertical] {
+        let snap = accepted(
+            source,
+            SnapIntent::GuideOnCurve {
+                reference,
+                alignment: axis,
+                curve: circle,
+            },
+        );
+        let point = EntityId::new();
+        let constraints =
+            persist_snap(&sketch, &snap, source, point, &mut ConstraintId::new).unwrap();
+        assert_eq!(constraints.len(), 2);
+        match (&constraints[0], axis) {
+            (
+                Constraint::HorizontalPoints {
+                    point1,
+                    point2,
+                    point2_position,
+                    ..
+                },
+                PointAlignment::Horizontal,
+            )
+            | (
+                Constraint::VerticalPoints {
+                    point1,
+                    point2,
+                    point2_position,
+                    ..
+                },
+                PointAlignment::Vertical,
+            ) => {
+                assert_eq!(*point1, point);
+                assert_eq!(*point2, center);
+                assert_eq!(*point2_position, CurvePosition::Arbitrary);
+            }
+            _ => panic!("alignment constraint missing or wrong axis"),
+        }
+        assert!(
+            matches!(&constraints[1], Constraint::OnCurve {point:p,curve,..} if *p==point&&*curve==circle)
+        );
+        assert_ne!(constraints[0].id(), constraints[1].id());
+    }
+}
+
+#[test]
+fn guide_on_curve_rejects_missing_or_unsupported_curves() {
+    let (sketch, source, _) = fixture();
+    let center = sketch.entities()[0].id();
+    let reference = SketchTarget::Point {
+        entity: center,
+        role: CurvePosition::Arbitrary,
+    };
+    // A point entity is not a curve; an unknown id is gone from the sketch.
+    for curve in [center, EntityId::new()] {
+        let snap = accepted(
+            source,
+            SnapIntent::GuideOnCurve {
+                reference,
+                alignment: PointAlignment::Horizontal,
+                curve,
+            },
+        );
+        assert!(persist_snap(
+            &sketch,
+            &snap,
+            source,
+            EntityId::new(),
+            &mut ConstraintId::new
+        )
+        .is_err());
+    }
+}

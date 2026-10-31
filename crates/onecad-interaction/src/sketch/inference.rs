@@ -20,6 +20,10 @@ pub enum SnapKind {
     Quadrant,
     Intersection,
     OnCurve,
+    /// A line or arc continued past one of its ends.
+    Extension,
+    /// Two inference lines (guides, polar, extension, grid) or one with a curve cross.
+    GuideIntersection,
     HorizontalGuide,
     VerticalGuide,
     Guides,
@@ -37,6 +41,8 @@ impl SnapKind {
             Self::Quadrant => "Quadrant",
             Self::Intersection => "Intersection",
             Self::OnCurve => "On curve",
+            Self::Extension => "Extension",
+            Self::GuideIntersection => "Guide intersection",
             Self::HorizontalGuide => "Horizontal",
             Self::VerticalGuide => "Vertical",
             Self::Guides => "Horizontal / Vertical",
@@ -75,6 +81,12 @@ pub enum SnapIntent {
     Guides {
         horizontal: SketchTarget,
         vertical: SketchTarget,
+    },
+    /// An alignment guide crossing a curve or a curve's extension.
+    GuideOnCurve {
+        reference: SketchTarget,
+        alignment: PointAlignment,
+        curve: EntityId,
     },
 }
 
@@ -289,6 +301,14 @@ fn build_constraints(
                 PointAlignment::Vertical,
                 next(),
             ),
+        ],
+        SnapIntent::GuideOnCurve {
+            reference,
+            alignment: axis,
+            curve: owner,
+        } => vec![
+            alignment(point, point_ref(sketch, reference)?, axis, next()),
+            on_curve(point, curve(sketch, owner)?, next()),
         ],
     })
 }

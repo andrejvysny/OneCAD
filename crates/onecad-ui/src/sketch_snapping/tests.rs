@@ -55,6 +55,8 @@ fn request<'a>(sketch: &'a Sketch, view: &'a ViewSnapshot) -> SnapRequest<'a> {
             polar_step_degrees: None,
             ..Default::default()
         },
+        extensions: &[],
+        suppressed: &[],
     }
 }
 
@@ -145,51 +147,39 @@ fn hysteresis_retains_a_winner_outside_the_base_aperture_until_release_distance(
 
 #[test]
 fn analytic_intersections_filter_segments_arcs_tangencies_and_coincident_curves() {
-    use super::curves::{Curve, intersections};
+    use super::curves::{Shape, intersections};
     use onecad_scene::DVec2;
-    let id = EntityId::new();
-    let line = Curve::Line {
-        id,
-        a: DVec2::new(-10.0, 0.0),
-        b: DVec2::new(10.0, 0.0),
+    let segment = |a: DVec2, b: DVec2| Shape::Line {
+        origin: a,
+        dir: b - a,
+        range: (0.0, 1.0),
     };
-    let circle = Curve::Circle {
-        id: EntityId::new(),
-        center: DVec2::ZERO,
+    let circle_at = |center: DVec2, sweep: f64| Shape::Circle {
+        center,
         radius: 5.0,
         start: 0.0,
-        sweep: std::f64::consts::TAU,
+        sweep,
     };
+    let line = segment(DVec2::new(-10.0, 0.0), DVec2::new(10.0, 0.0));
+    let circle = circle_at(DVec2::ZERO, std::f64::consts::TAU);
     assert_eq!(intersections(line, circle).len(), 2);
-    let arc = Curve::Circle {
-        id: EntityId::new(),
-        center: DVec2::ZERO,
-        radius: 5.0,
-        start: 0.0,
-        sweep: std::f64::consts::FRAC_PI_2,
-    };
+    let arc = circle_at(DVec2::ZERO, std::f64::consts::FRAC_PI_2);
     assert_eq!(intersections(line, arc).len(), 1);
     assert!(intersections(circle, circle).is_empty());
-    let tangent = Curve::Line {
-        id,
-        a: DVec2::new(-10.0, 5.0),
-        b: DVec2::new(10.0, 5.0),
-    };
+    let tangent = segment(DVec2::new(-10.0, 5.0), DVec2::new(10.0, 5.0));
     assert_eq!(intersections(tangent, circle).len(), 1);
-    let crossing = Curve::Line {
-        id,
-        a: DVec2::new(0.0, -10.0),
-        b: DVec2::new(0.0, 10.0),
-    };
+    let crossing = segment(DVec2::new(0.0, -10.0), DVec2::new(0.0, 10.0));
     assert_eq!(intersections(line, crossing).len(), 1);
-    let other = Curve::Circle {
-        id,
-        center: DVec2::new(6.0, 0.0),
-        radius: 5.0,
-        start: 0.0,
-        sweep: std::f64::consts::TAU,
-    };
+    let other = circle_at(DVec2::new(6.0, 0.0), std::f64::consts::TAU);
     assert_eq!(intersections(circle, other).len(), 2);
+    let short = segment(DVec2::new(20.0, -1.0), DVec2::new(20.0, 1.0));
+    assert!(intersections(line, short).is_empty());
+    let ray = Shape::Line {
+        origin: DVec2::new(10.0, 0.0),
+        dir: DVec2::new(20.0, 0.0),
+        range: (1e-6, f64::INFINITY),
+    };
+    assert_eq!(intersections(ray, short).len(), 1);
 }
 
 #[test]
@@ -412,3 +402,6 @@ fn creation_anchor_welded_to_existing_point_references_it_for_guides() {
     };
     assert_eq!(crate::sketch_creation::snap_anchor(&draft).1, Some(target));
 }
+
+#[path = "crossing_tests.rs"]
+mod crossing;

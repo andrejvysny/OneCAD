@@ -12,6 +12,8 @@ use onecad_scene::ViewSnapshot;
 mod candidates;
 mod curves;
 use candidates::{Candidate, collect_candidates};
+pub use guide_types::{GuideKind, GuideShape, ResolvedSnap, SnapGuide};
+mod guide_types;
 #[cfg(test)]
 mod tests;
 
@@ -47,13 +49,29 @@ pub struct SnapRequest<'a> {
     pub previous: Option<&'a AcceptedSnap>,
     pub generation: u64,
     pub settings: SnapSettings,
+    /// Acquired endpoints whose line or arc may be followed past its end.
+    pub extensions: &'a [SketchTarget],
+    /// Snaps the user discarded with Esc; they stay hidden while still in reach.
+    pub suppressed: &'a [AcceptedSnap],
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Resolution {
+    pub winner: Option<ResolvedSnap>,
+    /// Discarded snaps that are still within reach this frame; the rest are released.
+    pub suppressed_present: Vec<AcceptedSnap>,
 }
 
 pub fn snap_source(sketch: &Sketch, view: &ViewSnapshot, generation: u64) -> SnapSource {
     onecad_interaction::sketch::inference::source_for(sketch, view.identity(), generation)
 }
 
+#[cfg(test)]
 pub fn resolve_snap(request: &SnapRequest<'_>) -> Option<AcceptedSnap> {
+    resolve(request).winner.map(|winner| winner.snap)
+}
+
+pub fn resolve(request: &SnapRequest<'_>) -> Resolution {
     if request.sketch.entities().len() > MAX_SNAP_ENTITIES
         || request.plane != request.sketch.effective_plane()
         || !request.rect.contains(request.pointer)
@@ -64,18 +82,43 @@ pub fn resolve_snap(request: &SnapRequest<'_>) -> Option<AcceptedSnap> {
         || (f64::from(request.rect.width()) - request.view.viewport().width).abs() > 0.001
         || (f64::from(request.rect.height()) - request.view.viewport().height).abs() > 0.001
     {
-        return None;
+        return Resolution::default();
     }
     let source = snap_source(request.sketch, request.view, request.generation);
-    let candidates = collect_candidates(request, source)?;
-    arbitrate(request, &candidates, source)
+    let Some(mut candidates) = collect_candidates(request, source) else {
+        return Resolution::default();
+    };
+    let suppressed = |candidate: &Candidate| {
+        request
+            .suppressed
+            .iter()
+            .any(|snap| candidate.same_target(snap))
+    };
+    let suppressed_present = request
+        .suppressed
+        .iter()
+        .filter(|snap| {
+            candidates
+                .iter()
+                .any(|candidate| candidate.same_target(snap))
+        })
+        .copied()
+        .collect();
+    candidates.retain(|candidate| !suppressed(candidate));
+    Resolution {
+        winner: arbitrate(request, &candidates, source).map(|winner| ResolvedSnap {
+            snap: winner.snap,
+            guides: winner.guides,
+        }),
+        suppressed_present,
+    }
 }
 
-fn arbitrate(
+fn arbitrate<'c>(
     request: &SnapRequest<'_>,
-    candidates: &[Candidate],
+    candidates: &'c [Candidate],
     source: SnapSource,
-) -> Option<AcceptedSnap> {
+) -> Option<&'c Candidate> {
     let best = candidates
         .iter()
         .filter(|c| c.distance <= request.settings.tolerance)
@@ -87,11 +130,14 @@ fn arbitrate(
             .iter()
             .filter(|candidate| candidate.same_target(previous))
             .min_by(|a, b| a.distance.total_cmp(&b.distance))
-        && best.is_none_or(|best| retained.score() <= best.score() + request.settings.hysteresis)
+        && best.is_none_or(|best| {
+            !best.refines(retained)
+                && retained.score() <= best.score() + request.settings.hysteresis
+        })
     {
-        return Some(retained.snap);
+        return Some(retained);
     }
-    best.map(|best| best.snap)
+    best
 }
 
 fn ranked(

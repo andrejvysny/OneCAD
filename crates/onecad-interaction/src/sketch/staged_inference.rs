@@ -80,7 +80,8 @@ fn count(intent: SnapIntent) -> usize {
         SnapIntent::GeometryOnly => 0,
         SnapIntent::Intersection { .. }
         | SnapIntent::Quadrant { .. }
-        | SnapIntent::Guides { .. } => 2,
+        | SnapIntent::Guides { .. }
+        | SnapIntent::GuideOnCurve { .. } => 2,
         _ => 1,
     }
 }

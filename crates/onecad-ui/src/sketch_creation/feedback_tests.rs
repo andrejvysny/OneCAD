@@ -1,8 +1,10 @@
 use super::*;
+use crate::sketch_snapping::{GuideKind, GuideShape};
 use onecad_core::{
     ids::{EntityId, SketchId, SnapshotId},
     sketch::{CurvePosition, Sketch, SketchEntity, WorldPlane},
 };
+use onecad_interaction::sketch::inference::{AcceptedSnap, SnapIntent};
 use onecad_interaction::{
     DocumentContext,
     sketch::{PrimitiveIds, SketchAction, SketchInteraction, SketchTarget, SketchTool},
@@ -150,7 +152,7 @@ fn graphical_guide_uses_the_resolved_winner_reference_and_rejects_stale_source()
         .unwrap();
     let point = Vec2::new_unchecked(45.0, 20.0);
     let pointer = project(rect, &view, session.plane, point).unwrap();
-    let accepted = crate::sketch_snapping::resolve_snap(&crate::sketch_snapping::SnapRequest {
+    let resolved = crate::sketch_snapping::resolve(&crate::sketch_snapping::SnapRequest {
         sketch: &session.authoritative,
         plane: session.plane,
         view: &view,
@@ -163,8 +165,12 @@ fn graphical_guide_uses_the_resolved_winner_reference_and_rejects_stale_source()
             polar_step_degrees: None,
             ..Default::default()
         },
+        extensions: &[],
+        suppressed: &[],
     })
+    .winner
     .unwrap();
+    let accepted = resolved.snap;
     assert!((accepted.point.x - point.x).abs() < 1e-5);
     assert_eq!(accepted.point.y, point.y);
     assert_eq!(
@@ -177,18 +183,37 @@ fn graphical_guide_uses_the_resolved_winner_reference_and_rejects_stale_source()
             alignment: onecad_interaction::sketch::inference::PointAlignment::Horizontal
         }
     );
-    assert_eq!(guide_sources(session, &accepted), vec![anchor]);
+    let guide = resolved.guides[0].unwrap();
+    assert_eq!(guide.kind, GuideKind::Horizontal);
+    assert!(guide.persisted);
+    assert_eq!(guide.shape, GuideShape::From(anchor));
+    let theme = Theme::filled(egui::Color32::WHITE);
     let ctx = egui::Context::default();
+    let mut output = ctx.run_ui(Default::default(), |ui| {
+        snap(ui.painter(), rect, &view, session, resolved, &theme);
+    });
+    let tags: Vec<String> = output
+        .shapes
+        .iter()
+        .filter_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+            _ => None,
+        })
+        .collect();
+    // Four halo copies sit under the glyph itself; every text shape is the bare tag.
+    assert_eq!(tags.len(), 5);
+    assert!(tags.iter().all(|tag| tag == "H"));
+    assert!(
+        !output
+            .shapes
+            .iter()
+            .any(|clipped| matches!(clipped.shape, egui::Shape::Rect(_))),
+        "tags render without a badge"
+    );
+    output.textures_delta.clear();
     session.request.sequence += 1;
     let mut output = ctx.run_ui(Default::default(), |ui| {
-        snap(
-            ui.painter(),
-            rect,
-            &view,
-            session,
-            accepted,
-            &Theme::filled(egui::Color32::WHITE),
-        );
+        snap(ui.painter(), rect, &view, session, resolved, &theme);
     });
     assert!(output.shapes.is_empty());
     output.textures_delta.clear();
@@ -200,8 +225,9 @@ fn guide_only_polar_has_anchor_but_no_persistent_intent() {
     let anchor = Vec2::new_unchecked(10.0, 20.0);
     let anchor = click(&mut state, &view, anchor);
     let session = state.session.as_ref().unwrap();
-    let raw = Vec2::new_unchecked(30.0, 31.0);
-    let accepted = crate::sketch_snapping::resolve_snap(&crate::sketch_snapping::SnapRequest {
+    let angle = 30.0_f64.to_radians();
+    let raw = Vec2::new_unchecked(anchor.x + 40.0 * angle.cos(), anchor.y + 40.0 * angle.sin());
+    let resolved = crate::sketch_snapping::resolve(&crate::sketch_snapping::SnapRequest {
         sketch: &session.authoritative,
         plane: session.plane,
         view: &view,
@@ -211,11 +237,18 @@ fn guide_only_polar_has_anchor_but_no_persistent_intent() {
         previous: None,
         generation: session.request.sequence,
         settings: crate::sketch_snapping::SnapSettings::default(),
+        extensions: &[],
+        suppressed: &[],
     })
+    .winner
     .unwrap();
+    let accepted = resolved.snap;
     assert_eq!(accepted.kind, SnapKind::Polar);
     assert_eq!(accepted.intent, SnapIntent::GeometryOnly);
-    assert_eq!(guide_sources(session, &accepted), vec![anchor]);
+    let guide = resolved.guides[0].unwrap();
+    assert_eq!(guide.kind, GuideKind::Polar { degrees: 30.0 });
+    assert_eq!(guide.kind.label(), "30°");
+    assert!(!guide.persisted);
 }
 
 #[test]
@@ -233,7 +266,7 @@ fn combined_guide_uses_both_accepted_sources() {
             .unwrap();
     }
     let point = Vec2::new_unchecked(40.0, 20.0);
-    let accepted = crate::sketch_snapping::resolve_snap(&crate::sketch_snapping::SnapRequest {
+    let resolved = crate::sketch_snapping::resolve(&crate::sketch_snapping::SnapRequest {
         sketch: &session.authoritative,
         plane: session.plane,
         view: &view,
@@ -246,11 +279,21 @@ fn combined_guide_uses_both_accepted_sources() {
             polar_step_degrees: None,
             ..Default::default()
         },
+        extensions: &[],
+        suppressed: &[],
     })
+    .winner
     .unwrap();
+    let accepted = resolved.snap;
     assert_eq!(accepted.kind, SnapKind::Guides);
     assert_eq!(accepted.point, point);
-    assert_eq!(guide_sources(session, &accepted), sources);
+    let guides = resolved.guides.map(|guide| guide.unwrap());
+    assert!(guides.iter().all(|guide| guide.persisted));
+    let mut shapes = guides.map(|guide| guide.shape);
+    shapes.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+    let mut expected = sources.map(GuideShape::From);
+    expected.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+    assert_eq!(shapes, expected);
 }
 
 #[test]
@@ -258,15 +301,18 @@ fn hysteresis_cache_does_not_cross_tool_draft_or_visit_ownership() {
     let (mut state, view, _) = setup(SketchTool::Line);
     let session = state.session.as_mut().unwrap();
     let cached = crate::sketch_creation::CachedSnap {
-        snap: AcceptedSnap {
-            source: crate::sketch_snapping::snap_source(
-                &session.authoritative,
-                &view,
-                session.request.sequence,
-            ),
-            point: Vec2::new_unchecked(0.0, 0.0),
-            kind: SnapKind::Origin,
-            intent: SnapIntent::Origin,
+        snap: crate::sketch_snapping::ResolvedSnap {
+            guides: [None, None],
+            snap: AcceptedSnap {
+                source: crate::sketch_snapping::snap_source(
+                    &session.authoritative,
+                    &view,
+                    session.request.sequence,
+                ),
+                point: Vec2::new_unchecked(0.0, 0.0),
+                kind: SnapKind::Origin,
+                intent: SnapIntent::Origin,
+            },
         },
         key: session.key.clone(),
         tool: session.tool,

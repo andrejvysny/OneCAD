@@ -3,20 +3,27 @@ use onecad_core::{ids::EntityId, sketch::SketchEntity};
 use onecad_scene::DVec2;
 use std::f64::consts::TAU;
 
-#[derive(Clone, Copy, Debug)]
-pub(super) enum Curve {
+/// Planar geometry shared by real curves and unbounded inference lines.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Shape {
+    /// `origin + dir * t` for `t` within `range`; infinite bounds model rays and lines.
     Line {
-        id: EntityId,
-        a: DVec2,
-        b: DVec2,
+        origin: DVec2,
+        dir: DVec2,
+        range: (f64, f64),
     },
     Circle {
-        id: EntityId,
         center: DVec2,
         radius: f64,
         start: f64,
         sweep: f64,
     },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Curve {
+    pub(super) id: EntityId,
+    pub(super) shape: Shape,
 }
 
 pub(super) fn vector(point: Vec2) -> DVec2 {
@@ -26,97 +33,80 @@ pub(super) fn point(point: DVec2) -> Option<Vec2> {
     Vec2::new(point.x, point.y)
 }
 
+pub(super) fn raw_point(sketch: &Sketch, id: EntityId) -> Option<DVec2> {
+    SketchTarget::Point {
+        entity: id,
+        role: onecad_core::sketch::CurvePosition::Arbitrary,
+    }
+    .point_coordinates(sketch)
+    .map(vector)
+}
+
+/// Normalised sweep of an arc, so a full turn stays a full circle.
+pub(super) fn arc_sweep(start_angle: f64, end_angle: f64) -> f64 {
+    let delta = end_angle - start_angle;
+    if delta.abs() >= TAU {
+        TAU
+    } else {
+        delta.rem_euclid(TAU)
+    }
+}
+
 impl Curve {
     pub(super) fn from_entity(sketch: &Sketch, entity: &SketchEntity) -> Option<Self> {
-        let raw = |id| {
-            SketchTarget::Point {
-                entity: id,
-                role: onecad_core::sketch::CurvePosition::Arbitrary,
+        let shape = match entity {
+            SketchEntity::Line { start, end, .. } => {
+                let a = raw_point(sketch, *start)?;
+                Shape::Line {
+                    origin: a,
+                    dir: raw_point(sketch, *end)? - a,
+                    range: (0.0, 1.0),
+                }
             }
-            .point_coordinates(sketch)
-            .map(vector)
-        };
-        Some(match entity {
-            SketchEntity::Line { id, start, end, .. } => Self::Line {
-                id: *id,
-                a: raw(*start)?,
-                b: raw(*end)?,
-            },
-            SketchEntity::Circle {
-                id, center, radius, ..
-            } if *radius > 0.0 => Self::Circle {
-                id: *id,
-                center: raw(*center)?,
+            SketchEntity::Circle { center, radius, .. } if *radius > 0.0 => Shape::Circle {
+                center: raw_point(sketch, *center)?,
                 radius: *radius,
                 start: 0.0,
                 sweep: TAU,
             },
             SketchEntity::Arc {
-                id,
                 center,
                 radius,
                 start_angle,
                 end_angle,
                 ..
-            } if *radius > 0.0 => {
-                let delta = end_angle - start_angle;
-                Self::Circle {
-                    id: *id,
-                    center: raw(*center)?,
-                    radius: *radius,
-                    start: *start_angle,
-                    sweep: if delta.abs() >= TAU {
-                        TAU
-                    } else {
-                        delta.rem_euclid(TAU)
-                    },
-                }
-            }
+            } if *radius > 0.0 => Shape::Circle {
+                center: raw_point(sketch, *center)?,
+                radius: *radius,
+                start: *start_angle,
+                sweep: arc_sweep(*start_angle, *end_angle),
+            },
             _ => return None,
+        };
+        Some(Self {
+            id: entity.id(),
+            shape,
         })
     }
-    pub(super) fn id(self) -> EntityId {
-        match self {
-            Self::Line { id, .. } | Self::Circle { id, .. } => id,
-        }
-    }
-    pub(super) fn at(self, parameter: f64) -> DVec2 {
-        match self {
-            Self::Line { a, b, .. } => a + (b - a) * parameter,
-            Self::Circle {
+    /// Samples a bounded curve; `parameter` spans the segment or the arc sweep.
+    fn at(self, parameter: f64) -> DVec2 {
+        match self.shape {
+            Shape::Line { origin, dir, .. } => origin + dir * parameter,
+            Shape::Circle {
                 center,
                 radius,
                 start,
                 sweep,
-                ..
             } => {
                 let angle = start + sweep * parameter;
                 center + DVec2::new(angle.cos(), angle.sin()) * radius
             }
         }
     }
-    pub(super) fn contains(self, value: DVec2) -> bool {
-        match self {
-            Self::Line { a, b, .. } => {
-                let length = (b - a).length_squared();
-                length > 1e-20 && (-1e-9..=1.0 + 1e-9).contains(&((value - a).dot(b - a) / length))
-            }
-            Self::Circle {
-                center,
-                start,
-                sweep,
-                ..
-            } => {
-                let delta = value - center;
-                let angle = (delta.y.atan2(delta.x) - start).rem_euclid(TAU);
-                sweep >= TAU - 1e-10 || angle <= sweep + 1e-9 || TAU - angle < 1e-9
-            }
-        }
-    }
     pub(super) fn nearest(self, request: &SnapRequest<'_>) -> Option<Vec2> {
-        let samples: usize = match self {
-            Self::Line { .. } => 1,
-            Self::Circle { .. } => 64,
+        let samples: usize = match self.shape {
+            Shape::Line { .. } => 1,
+            Shape::Circle { .. } => 64,
         };
         let distance = |t: f64| {
             project(request, point(self.at(t))?)
@@ -141,31 +131,83 @@ impl Curve {
     }
 }
 
+impl Shape {
+    pub(super) fn contains(self, value: DVec2) -> bool {
+        match self {
+            Self::Line { origin, dir, range } => {
+                let length = dir.length_squared();
+                length > 1e-20 && {
+                    let t = (value - origin).dot(dir) / length;
+                    t >= range.0 - 1e-9 && t <= range.1 + 1e-9
+                }
+            }
+            Self::Circle {
+                center,
+                start,
+                sweep,
+                ..
+            } => {
+                let delta = value - center;
+                let angle = (delta.y.atan2(delta.x) - start).rem_euclid(TAU);
+                sweep >= TAU - 1e-10 || angle <= sweep + 1e-9 || TAU - angle < 1e-9
+            }
+        }
+    }
+    /// Orthogonal foot of `value` in sketch space, or `None` outside the shape's extent.
+    pub(super) fn project(self, value: DVec2) -> Option<DVec2> {
+        let foot = match self {
+            Self::Line { origin, dir, .. } => {
+                let length = dir.length_squared();
+                if length <= 1e-20 {
+                    return None;
+                }
+                origin + dir * ((value - origin).dot(dir) / length)
+            }
+            Self::Circle { center, radius, .. } => {
+                let delta = value - center;
+                let length = delta.length();
+                if length <= 1e-12 {
+                    return None;
+                }
+                center + delta * (radius / length)
+            }
+        };
+        (foot.is_finite() && self.contains(foot)).then_some(foot)
+    }
+}
+
 fn cross(a: DVec2, b: DVec2) -> f64 {
     a.x * b.y - a.y * b.x
 }
 
-pub(super) fn intersections(a: Curve, b: Curve) -> Vec<Vec2> {
+pub(super) fn intersections(a: Shape, b: Shape) -> Vec<Vec2> {
     let candidates = match (a, b) {
-        (Curve::Line { a, b, .. }, Curve::Line { a: c, b: d, .. }) => {
-            let denominator = cross(b - a, d - c);
-            if denominator.abs() <= 1e-12 * (b - a).length() * (d - c).length() {
+        (
+            Shape::Line { origin, dir, .. },
+            Shape::Line {
+                origin: other,
+                dir: other_dir,
+                ..
+            },
+        ) => {
+            let denominator = cross(dir, other_dir);
+            if denominator.abs() <= 1e-12 * dir.length() * other_dir.length() {
                 vec![]
             } else {
-                vec![a + (b - a) * (cross(c - a, d - c) / denominator)]
+                vec![origin + dir * (cross(other - origin, other_dir) / denominator)]
             }
         }
-        (Curve::Line { a, b, .. }, Curve::Circle { center, radius, .. })
-        | (Curve::Circle { center, radius, .. }, Curve::Line { a, b, .. }) => {
-            line_circle(a, b, center, radius)
+        (Shape::Line { origin, dir, .. }, Shape::Circle { center, radius, .. })
+        | (Shape::Circle { center, radius, .. }, Shape::Line { origin, dir, .. }) => {
+            line_circle(origin, dir, center, radius)
         }
         (
-            Curve::Circle {
+            Shape::Circle {
                 center: a,
                 radius: r,
                 ..
             },
-            Curve::Circle {
+            Shape::Circle {
                 center: b,
                 radius: s,
                 ..
@@ -188,8 +230,7 @@ pub(super) fn intersections(a: Curve, b: Curve) -> Vec<Vec2> {
     result
 }
 
-fn line_circle(a: DVec2, b: DVec2, center: DVec2, radius: f64) -> Vec<DVec2> {
-    let delta = b - a;
+fn line_circle(a: DVec2, delta: DVec2, center: DVec2, radius: f64) -> Vec<DVec2> {
     let length = delta.length_squared();
     if length <= 1e-20 {
         return vec![];

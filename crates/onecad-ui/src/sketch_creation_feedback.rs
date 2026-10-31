@@ -2,10 +2,7 @@
 use crate::theme::Theme;
 use egui::{Color32, Painter, Pos2, Rect, Stroke};
 use onecad_core::{math::Vec2, sketch::SketchPlane};
-use onecad_interaction::sketch::{
-    SketchDraft, SketchPhase, SketchSession,
-    inference::{AcceptedSnap, SnapIntent, SnapKind},
-};
+use onecad_interaction::sketch::{SketchDraft, SketchPhase, SketchSession, inference::SnapKind};
 use onecad_scene::{DVec3, ViewSnapshot};
 
 fn project(rect: Rect, view: &ViewSnapshot, plane: SketchPlane, point: Vec2) -> Option<Pos2> {
@@ -81,9 +78,10 @@ pub(super) fn snap(
     rect: Rect,
     view: &ViewSnapshot,
     session: &SketchSession,
-    snap: AcceptedSnap,
+    resolved: crate::sketch_snapping::ResolvedSnap,
     theme: &Theme,
 ) {
+    let snap = resolved.snap;
     let Some(position) = project(rect, view, session.plane, snap.point) else {
         return;
     };
@@ -98,21 +96,17 @@ pub(super) fn snap(
     }
     let painter = painter.with_clip_rect(rect);
     let color = theme.sketch_inference;
-    let guide = Stroke::new(1.25, color);
-    let anchor_ray = snap.intent == SnapIntent::GeometryOnly;
-    for source in guide_sources(session, &snap) {
-        let Some(start) = project(rect, view, session.plane, source) else {
-            continue;
-        };
-        if anchor_ray {
-            if let Some(line) = ray_to_rect(start, position, rect) {
-                painter.line_segment(line, guide);
-            }
-        } else {
-            painter.line_segment([start, position], guide);
-            painter.circle_filled(start, 3.0, color);
-        }
-    }
+    guide_paint::paint(
+        &guide_paint::Scene {
+            painter: &painter,
+            rect,
+            view,
+            plane: session.plane,
+            theme,
+        },
+        &resolved,
+        position,
+    );
     painter.circle_filled(position, 10.0, color.gamma_multiply(0.35));
     if matches!(
         snap.kind,
@@ -122,65 +116,12 @@ pub(super) fn snap(
             | SnapKind::Origin
             | SnapKind::Quadrant
             | SnapKind::Intersection
+            | SnapKind::GuideIntersection
     ) {
         marker(&painter, position, snap.kind, color);
     }
     painter.circle_stroke(position, 4.0, Stroke::new(1.5, Color32::WHITE));
     painter.circle_filled(position, 2.5, color);
-}
-
-/// Ray from `origin` through `through`, clipped to the viewport rect edge.
-fn ray_to_rect(origin: Pos2, through: Pos2, rect: Rect) -> Option<[Pos2; 2]> {
-    let dir = through - origin;
-    if dir.length() < 1.0 || !rect.contains(origin) {
-        return None;
-    }
-    let axis = |o: f32, d: f32, lo: f32, hi: f32| {
-        if d > 0.0 {
-            (hi - o) / d
-        } else if d < 0.0 {
-            (lo - o) / d
-        } else {
-            f32::INFINITY
-        }
-    };
-    let t = axis(origin.x, dir.x, rect.min.x, rect.max.x)
-        .min(axis(origin.y, dir.y, rect.min.y, rect.max.y));
-    t.is_finite().then(|| [origin, origin + dir * t.max(1.0)])
-}
-
-fn guide_sources(session: &SketchSession, snap: &AcceptedSnap) -> Vec<Vec2> {
-    match snap.intent {
-        SnapIntent::Guide { reference, .. } => reference
-            .point_coordinates(&session.authoritative)
-            .into_iter()
-            .collect(),
-        SnapIntent::Guides {
-            horizontal,
-            vertical,
-        } => [horizontal, vertical]
-            .into_iter()
-            .filter_map(|reference| reference.point_coordinates(&session.authoritative))
-            .collect(),
-        SnapIntent::Quadrant { center, .. } => center
-            .point_coordinates(&session.authoritative)
-            .into_iter()
-            .collect(),
-        SnapIntent::GeometryOnly
-            if matches!(
-                snap.kind,
-                SnapKind::HorizontalGuide | SnapKind::VerticalGuide | SnapKind::Polar
-            ) =>
-        {
-            session
-                .draft
-                .as_ref()
-                .map(|draft| draft.anchor)
-                .into_iter()
-                .collect()
-        }
-        _ => vec![],
-    }
 }
 
 fn marker(painter: &Painter, at: Pos2, kind: SnapKind, color: Color32) {
@@ -197,7 +138,7 @@ fn marker(painter: &Painter, at: Pos2, kind: SnapKind, color: Color32) {
             &[(0.0, -4.9), (4.9, 0.0), (0.0, 4.9), (-4.9, 0.0)],
             stroke,
         ),
-        SnapKind::Intersection => {
+        SnapKind::Intersection | SnapKind::GuideIntersection => {
             for sign in [-1.0, 1.0] {
                 painter.line_segment(
                     [
@@ -237,6 +178,9 @@ fn polygon(painter: &Painter, at: Pos2, points: &[(f32, f32)], stroke: Stroke) {
         stroke,
     ));
 }
+
+#[path = "sketch_creation/guide_paint.rs"]
+mod guide_paint;
 
 #[cfg(test)]
 #[path = "sketch_creation/feedback_tests.rs"]

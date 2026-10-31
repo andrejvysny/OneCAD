@@ -152,6 +152,8 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     crate::sketch_gestures::route_raw(app, ctx, raw);
     // The switcher runs later, in event order; its abandoning Escape must not
     // first cancel the shown document's chain.
+    // route_raw cancels the capture on this same Escape, so sample it first.
+    let chain_capture_was_active = crate::sketch_creation::chain_input::pointer_owned(ctx);
     let primitive_escape = match crate::tab_switcher::without_own_escape(app, &raw.events) {
         Some(events) => {
             let unowned = egui::RawInput {
@@ -311,6 +313,12 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
         });
         for key in keys {
             if key == egui::Key::Escape && primitive_escape {
+                continue;
+            }
+            if key == egui::Key::Escape
+                && !chain_capture_was_active
+                && crate::sketch_creation::discard_snap(ctx, app)
+            {
                 continue;
             }
             app.sketch_dispatch(if key == egui::Key::Enter {
