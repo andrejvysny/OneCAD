@@ -50,16 +50,18 @@ fn sidebar_navigation_routes_pages() {
     assert!(library_active(state.start_page));
     navigate(&mut state, Nav::Sub(0));
     assert_eq!(
-        (state.start_page, state.library.source),
-        (StartPage::Library, 1)
+        (state.start_page, state.library.catalog.query.source),
+        (StartPage::Library, Source::Generator)
     );
     assert!(sub_active(&state, 0) && !sub_active(&state, 1));
     navigate(&mut state, Nav::Sub(1));
-    assert_eq!(state.library.source, 2);
+    assert_eq!(state.library.catalog.query.source, Source::Embedded);
     assert!(sub_active(&state, 1));
-    navigate(&mut state, Nav::Sub(2));
-    assert_eq!(state.start_page, StartPage::StandardPart);
-    assert!(sub_active(&state, 2) && library_active(state.start_page));
+    navigate(&mut state, Nav::Sub(3));
+    assert_eq!(state.library.catalog.query.source, Source::Profile);
+    assert!(sub_active(&state, 3) && library_active(state.start_page));
+    state.start_page = StartPage::StandardPart;
+    assert!(library_active(state.start_page) && !sub_active(&state, 3));
     navigate(&mut state, Nav::Extensions);
     assert_eq!(state.start_page, StartPage::Extensions);
     assert!(!library_active(state.start_page));
@@ -78,15 +80,20 @@ fn settings_is_a_sidebar_destination_that_esc_leaves() {
         parent(StartPage::ExtensionDetail),
         Some(StartPage::Extensions)
     );
-    assert_eq!(parent(StartPage::StandardPart), Some(StartPage::Library));
+    assert_eq!(parent(StartPage::ComponentDetail), Some(StartPage::Library));
+    assert_eq!(
+        parent(StartPage::StandardPart),
+        Some(StartPage::ComponentDetail)
+    );
 }
 
 #[test]
-fn component_library_resets_source_tab() {
+fn component_library_resets_source_filter() {
     let mut state = crate::ui_state::UiState::default();
-    state.library.source = 3;
+    navigate(&mut state, Nav::Sub(2));
+    assert_eq!(state.library.catalog.query.source, Source::Document);
     navigate(&mut state, Nav::Library);
-    assert_eq!(state.library.source, 0);
+    assert_eq!(state.library.catalog.query.source, Source::All);
 }
 
 #[test]

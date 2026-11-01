@@ -32,7 +32,7 @@ generator = "iso4762"
 generator_version = 1
 
 [parameters]
-thread = { role = "free", key = "M6", domain = ["M2", "M2.5", "M3", "M4", "M5", "M6", "M8", "M10", "M12"] }
+thread = { role = "free", value = "M6", domain = ["M2", "M2.5", "M3", "M4", "M5", "M6", "M8", "M10", "M12"] }
 length = { role = "free", value = 20, snap = "preferred", min = 2 }
 thread_detail = { role = "free", value = "cosmetic", domain = ["cosmetic", "simplified", "modeled"] }
 

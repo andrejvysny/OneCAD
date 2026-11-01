@@ -435,6 +435,7 @@ impl App {
         // Command permits bound accepted plus terminal messages to at most 16; drain fairly each frame.
         self.drain_messages(ctx);
         crate::operation_start::poll(self);
+        crate::placement_gesture::poll(self);
         crate::input_repair_ui::poll(self);
         crate::model_handle::poll_history(self, ctx);
         self.sync_document_state();
@@ -587,6 +588,15 @@ impl App {
             Message::Items {
                 sequence, result, ..
             } => crate::document_items::receive(self, sequence, result),
+            Message::Library {
+                sequence, result, ..
+            } => crate::library_catalog::receive(self, sequence, result, ctx),
+            Message::Author {
+                sequence, result, ..
+            } => crate::component_wizard::receive(self, sequence, result),
+            Message::Instance {
+                sequence, result, ..
+            } => crate::component_instances::receive(self, sequence, result),
             Message::Document { result, .. } => self.document_finished(result),
             Message::Gesture { delivery, .. } => self.gesture_delivery(*delivery),
             Message::Sketch { delivery, .. } => {
@@ -822,6 +832,9 @@ impl App {
     }
     pub fn busy(&self) -> bool {
         self.doc.items.blocks()
+            || self.doc.instances.blocks()
+            || crate::component_wizard::blocks(self)
+            || crate::placement_gesture::arming(self)
             || matches!(
                 self.doc.interaction.status,
                 CommitStatus::Pending(_) | CommitStatus::Accepted { .. }
@@ -910,6 +923,7 @@ impl App {
         // After the viewport, so an in-batch release consumed by a handle wins.
         crate::parameter_drag::settle(self, &ctx);
         crate::component_wizard::show(self, &ctx);
+        crate::component_instances::show(self, &ctx);
         crate::tab_switcher::show(self, &ctx);
         crate::shell::close_prompt(self, &ctx);
     }

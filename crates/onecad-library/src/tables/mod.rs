@@ -15,10 +15,14 @@
 //! credited in the repo-root `THIRD_PARTY_NOTICES`; a family that dataset does
 //! not carry says so where it is defined.
 //!
-//! ONE family, because the seed catalog is one family. The six other fastener
-//! tables that lived here went with their worker generators — a mirror of a
-//! table nothing generates from pins nothing.
+//! One mirror per seeded family (ISO 4762, 4032, 7089). A mirror of a table
+//! nothing generates from pins nothing, so a family's table is removed with
+//! its worker generator.
 
+mod iso4032;
 mod iso4762;
+mod iso7089;
 
+pub use iso4032::{Iso4032Row, Iso4032Table};
 pub use iso4762::{Iso4762Row, Iso4762Table};
+pub use iso7089::{Iso7089Row, Iso7089Table};

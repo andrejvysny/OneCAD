@@ -61,6 +61,18 @@ pub async fn execute(
             crate::document_items::execute(backend, request, permit, sender).await;
             return;
         }
+        Command::Library(request) => {
+            crate::library_catalog::execute(backend, request, permit, sender).await;
+            return;
+        }
+        Command::Author(request) => {
+            crate::component_wizard::execute(backend, request, permit, sender).await;
+            return;
+        }
+        Command::Instance(request) => {
+            crate::component_instances::execute(backend, request, permit, sender).await;
+            return;
+        }
         Command::Operands(request) => {
             crate::operand_services::execute(backend, *request, permit).await;
             return;
@@ -244,6 +256,9 @@ async fn execute_command(
         Command::InspectBody(_) => return Err("inspection reached model dispatcher".into()),
         Command::Document(_) => return Err("file command reached model dispatcher".into()),
         Command::Items(_) => return Err("item command reached model dispatcher".into()),
+        Command::Library(_) => return Err("library command reached model dispatcher".into()),
+        Command::Instance(_) => return Err("instance command reached model dispatcher".into()),
+        Command::Author(_) => return Err("author command reached model dispatcher".into()),
         Command::Sketch(_) => return Err("sketch command reached model dispatcher".into()),
         Command::Operands(_) => return Err("operand command reached model dispatcher".into()),
         Command::Prepare(_) | Command::DescribeChanges => {

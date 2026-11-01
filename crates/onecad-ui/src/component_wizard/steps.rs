@@ -1,25 +1,32 @@
-//! Wizard step bodies: Source, Details, Parameters, Save.
-use super::{CATEGORIES, DESTINATIONS, DIMENSIONS, WizardState};
+//! Wizard step bodies: Source, Details, Parameters, Attachments/Save.
+use super::model::{Phase, WizardState, usable};
+use crate::library_catalog::draft::format_number;
 use crate::library_pages::kit;
-use egui::{
-    Align, CornerRadius, FontFamily, FontId, Layout, Rect, Response, Sense, Stroke, StrokeKind, Ui,
-    pos2, vec2,
-};
+use egui::{CornerRadius, FontFamily, FontId, Response, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use onecad_app::dto::VariableDto;
 use onecad_widgets::{
-    components::{
-        inputs::Select,
-        lists::{Segment, SegmentedControl},
-    },
+    components::button::{Button, ButtonKind},
     fonts,
     theme::look,
 };
 
-pub fn show(ui: &mut Ui, w: &mut WizardState) {
+pub(crate) fn show(ui: &mut Ui, w: &mut WizardState, variables: &[VariableDto]) {
+    match w.phase {
+        Phase::Saved(_) => return saved(ui, w),
+        Phase::Saving => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                kit::muted(ui, "Saving the component…", 12.5);
+            });
+            return;
+        }
+        _ => {}
+    }
     match w.step {
         0 => source(ui, w),
         1 => details(ui, w),
-        2 => parameters(ui, w),
-        _ => save(ui, w),
+        2 => parameters(ui, w, variables),
+        _ => attachments(ui, w),
     }
 }
 
@@ -28,131 +35,100 @@ fn caption(ui: &mut Ui, text: &str) {
     kit::label(ui, text, 12.0, FontFamily::Proportional, ink);
 }
 
-fn source(ui: &mut Ui, w: &mut WizardState) {
-    ui.spacing_mut().item_spacing.y = 10.0;
-    kit::title(ui, "What goes into the component", 14.0);
-    kit::muted(ui, "1 body · Bracket, 7 features, 2 sketches", 12.5);
-    ui.checkbox(&mut w.body, "Body · Bracket");
-    ui.checkbox(&mut w.sketches, "Sketches · Base profile, Upright profile");
+fn warn(ui: &mut Ui, text: &str) {
+    let ink = look(ui.ctx()).theme.warn;
+    kit::label(ui, text, 12.0, FontFamily::Proportional, ink);
 }
 
-fn details(ui: &mut Ui, w: &mut WizardState) {
-    ui.horizontal_top(|ui| {
-        ui.spacing_mut().item_spacing.x = 22.0;
-        ui.allocate_ui_with_layout(vec2(230.0, 380.0), Layout::top_down(Align::Min), |ui| {
-            thumbnail(ui, w);
-        });
-        let width = ui.available_width();
-        ui.allocate_ui_with_layout(vec2(width, 380.0), Layout::top_down(Align::Min), |ui| {
-            fields(ui, w);
-        });
-    });
-}
-
-fn thumbnail(ui: &mut Ui, w: &mut WizardState) {
-    let t = look(ui.ctx()).theme;
-    let (rect, _) = ui.allocate_exact_size(vec2(230.0, 200.0), Sense::hover());
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same(10), t.well);
-    ui.painter().rect_stroke(
-        rect,
-        CornerRadius::same(10),
-        Stroke::new(1.0, t.border_subtle),
-        StrokeKind::Inside,
-    );
-    ui.add_space(10.0);
-    let text = if w.retaken {
-        "Thumbnail updated from view"
-    } else {
-        "Retake thumbnail from view"
-    };
-    if kit::link(ui, text, 12.0).clicked() {
-        w.retaken = true;
-    }
-    ui.add_space(14.0);
-    let frame = egui::Frame::new()
-        .fill(t.panel)
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(egui::Margin::symmetric(12, 10));
-    frame.show(ui, |ui| {
-        ui.set_width(206.0);
-        ui.spacing_mut().item_spacing.y = 3.0;
-        kit::title(ui, "Source", 12.0);
-        kit::muted(ui, "1 body · Bracket", 12.0);
-        kit::muted(ui, "7 features · 2 sketches", 12.0);
-    });
-}
-
-fn fields(ui: &mut Ui, w: &mut WizardState) {
-    let width = ui.available_width();
-    ui.spacing_mut().item_spacing.y = 5.0;
-    caption(ui, "Name");
-    let name_id = ui.make_persistent_id("component-name");
-    onecad_widgets::text_session::show(ui, name_id, &mut w.name, "Name", 16_384, |text| {
+/// A single-line field with an optional refusal underneath; true when it changed.
+fn field(ui: &mut Ui, id: &str, text: &mut String, width: f32, error: Option<&str>) -> bool {
+    let id = ui.make_persistent_id(id);
+    let before = text.clone();
+    onecad_widgets::text_session::show(ui, id, text, "Component field", 16_384, |text| {
         egui::TextEdit::singleline(text)
             .font(FontId::new(12.5, fonts::mono()))
             .margin(vec2(10.0, 6.0))
             .desired_width(width)
     });
-    ui.add_space(8.0);
-    let half = (width - 12.0) / 2.0;
-    ui.horizontal_top(|ui| {
-        ui.spacing_mut().item_spacing.x = 12.0;
-        ui.vertical(|ui| {
-            caption(ui, "Category");
-            let out = Select::new("wizard-category", CATEGORIES[w.category], &CATEGORIES)
-                .width(half)
-                .show(ui);
-            if let Some(i) = out.chosen {
-                w.category = i;
-            }
-        });
-        ui.vertical(|ui| {
-            caption(ui, "Save to");
-            let segs = DESTINATIONS.map(|label| Segment { label, icon: None });
-            ui.add(SegmentedControl::new("wizard-save-to", &mut w.save_to, &segs).width(half));
-        });
-    });
-    ui.add_space(8.0);
-    let t = look(ui.ctx()).theme;
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 5.0;
-        caption(ui, "Description");
-        kit::label(ui, "optional", 12.0, FontFamily::Proportional, t.ink5);
-    });
-    let description_id = ui.make_persistent_id("component-description");
-    onecad_widgets::text_session::show(
-        ui,
-        description_id,
-        &mut w.description,
-        "Description",
-        16_384,
-        |text| {
-            egui::TextEdit::multiline(text)
-                .margin(vec2(10.0, 8.0))
-                .desired_rows(4)
-                .desired_width(width)
-        },
-    );
-    ui.add_space(8.0);
-    caption(ui, "Type");
-    type_cards(ui, w, width);
+    if let Some(error) = error {
+        warn(ui, error);
+    }
+    *text != before
 }
 
-fn type_cards(ui: &mut Ui, w: &mut WizardState, width: f32) {
+fn source(ui: &mut Ui, w: &mut WizardState) {
+    ui.spacing_mut().item_spacing.y = 10.0;
+    kit::title(ui, "What goes into the component", 14.0);
+    kit::muted(ui, &format!("1 body: {}", w.body_name), 12.5);
+    kit::muted(
+        ui,
+        "The component freezes this document with its variables and bakes the body as it is now.",
+        12.0,
+    );
+    ui.add_space(6.0);
+    caption(ui, "Type");
+    let width = ui.available_width();
     let half = (width - 12.0) / 2.0;
     let cards = [
         ("Static", "Fixed geometry. Inserts exactly as modeled."),
-        ("Parametric", "Pick dimensions to expose. Next step."),
+        ("Parametric", "Expose document variables as editable sizes."),
     ];
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 12.0;
         for (i, (title, text)) in cards.into_iter().enumerate() {
-            if radio_card(ui, half, w.kind == i, title, text).clicked() {
-                w.kind = i;
+            if radio_card(ui, half, w.parametric == (i == 1), title, text).clicked() {
+                w.parametric = i == 1;
             }
         }
     });
+}
+
+fn details(ui: &mut Ui, w: &mut WizardState) {
+    use super::validate::{id_error, name_error, version_error};
+    let width = ui.available_width();
+    ui.spacing_mut().item_spacing.y = 5.0;
+    caption(ui, "Name");
+    let error = name_error(&w.name);
+    if field(ui, "wizard-name", &mut w.name, width, error.as_deref()) {
+        w.follow_name();
+    }
+    ui.add_space(6.0);
+    let half = (width - 12.0) / 2.0;
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 12.0;
+        ui.vertical(|ui| {
+            caption(ui, "Id (namespaced, lower-case)");
+            let error = id_error(&w.id);
+            if field(ui, "wizard-id", &mut w.id, half, error.as_deref()) {
+                w.id_edited = true;
+            }
+        });
+        ui.vertical(|ui| {
+            caption(ui, "Version");
+            let error = version_error(&w.version);
+            field(ui, "wizard-version", &mut w.version, half, error.as_deref());
+        });
+    });
+    ui.add_space(6.0);
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 12.0;
+        ui.vertical(|ui| {
+            caption(ui, "Category (comma separated)");
+            field(ui, "wizard-category", &mut w.category, half, None);
+        });
+        ui.vertical(|ui| {
+            caption(ui, "Tags (comma separated)");
+            field(ui, "wizard-tags", &mut w.tags, half, None);
+        });
+    });
+    ui.add_space(6.0);
+    caption(
+        ui,
+        "Designation template (optional, e.g. Bracket {width}x{thickness})",
+    );
+    field(ui, "wizard-designation", &mut w.designation, width, None);
+    ui.add_space(10.0);
+    kit::muted(ui, "Saved to: your library (the only destination)", 12.0);
 }
 
 fn radio_card(ui: &mut Ui, width: f32, on: bool, title: &str, text: &str) -> Response {
@@ -181,12 +157,11 @@ fn radio_card(ui: &mut Ui, width: f32, on: bool, title: &str, text: &str) -> Res
         p.circle_filled(c, 4.5, t.accent);
     }
     let x = rect.left() + 40.0;
-    let font = FontId::new(13.0, fonts::semibold());
     p.text(
         pos2(x, rect.top() + 22.0),
         egui::Align2::LEFT_CENTER,
         title,
-        font,
+        FontId::new(13.0, fonts::semibold()),
         t.ink,
     );
     let g = p.layout(
@@ -199,89 +174,220 @@ fn radio_card(ui: &mut Ui, width: f32, on: bool, title: &str, text: &str) -> Res
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-fn parameters(ui: &mut Ui, w: &mut WizardState) {
+fn parameters(ui: &mut Ui, w: &mut WizardState, variables: &[VariableDto]) {
     ui.spacing_mut().item_spacing.y = 6.0;
-    let t = look(ui.ctx()).theme;
-    if w.kind == 0 {
-        kit::muted(ui, "Static components expose no parameters.", 12.5);
+    if !w.parametric {
+        kit::muted(ui, "A static component exposes no parameters.", 12.5);
         return;
     }
-    kit::muted(ui, "Pick dimensions on the model to expose them.", 12.5);
-    ui.add_space(8.0);
-    for (i, (name, value)) in DIMENSIONS.into_iter().enumerate() {
-        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::hover());
-        let p = ui.painter();
-        p.hline(
-            rect.x_range(),
-            rect.top() + 0.5,
-            Stroke::new(1.0, t.border_subtle),
+    kit::title(ui, "Document variables", 14.0);
+    kit::muted(
+        ui,
+        "An exposed variable becomes an editable size; its current value is the default.",
+        12.0,
+    );
+    let list: Vec<VariableDto> = usable(variables).cloned().collect();
+    if list.is_empty() {
+        warn(
+            ui,
+            "This document has no variables. Add one, or save a static component.",
         );
-        p.text(
-            pos2(rect.left() + 4.0, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            name,
-            FontId::new(12.5, fonts::mono()),
-            t.ink,
-        );
-        p.text(
-            pos2(rect.left() + 180.0, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            value,
-            FontId::new(12.5, fonts::mono()),
-            t.ink4,
-        );
-        let check = Rect::from_min_size(
-            pos2(rect.right() - 90.0, rect.center().y - 10.0),
-            vec2(90.0, 20.0),
-        );
-        ui.scope_builder(egui::UiBuilder::new().max_rect(check), |ui| {
-            ui.checkbox(&mut w.exposed[i], "Expose");
+    }
+    for variable in &list {
+        ui.horizontal(|ui| {
+            let mut on = w.exposed.contains(&variable.name);
+            if ui.checkbox(&mut on, "").changed() {
+                w.set_exposed(variables, &variable.name, on);
+            }
+            let ink = look(ui.ctx()).theme.ink;
+            kit::label(ui, &variable.name, 12.5, FontFamily::Monospace, ink);
+            let shown = variable
+                .expr
+                .as_ref()
+                .map_or_else(|| format_number(variable.value), |expr| format!("= {expr}"));
+            kit::muted(
+                ui,
+                &format!("{shown}  ({})", format_number(variable.resolved_value)),
+                12.0,
+            );
         });
+    }
+    configurations(ui, w, variables);
+}
+
+fn configurations(ui: &mut Ui, w: &mut WizardState, variables: &[VariableDto]) {
+    if w.exposed.is_empty() {
+        return;
+    }
+    ui.add_space(12.0);
+    kit::title(ui, "Configurations (optional)", 14.0);
+    kit::muted(
+        ui,
+        "Named variants that set the exposed values together.",
+        12.0,
+    );
+    let keys: Vec<String> = w.exposed.iter().cloned().collect();
+    let mut remove = None;
+    let mut rename = None;
+    for i in 0..w.configs.len() {
+        ui.horizontal(|ui| {
+            let mut name = w.configs[i].name.clone();
+            if field(ui, &format!("cfg-name-{i}"), &mut name, 150.0, None) {
+                rename = Some((i, name));
+            }
+            for key in &keys {
+                caption(ui, key);
+                if let Some(text) = w.configs[i].values.get_mut(key) {
+                    field(ui, &format!("cfg-{i}-{key}"), text, 80.0, None);
+                }
+            }
+            if kit::link(ui, "Remove", 12.0).clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some((i, name)) = rename {
+        w.rename_config(i, name);
+    }
+    if let Some(i) = remove {
+        w.remove_config(i);
+    }
+    if ui
+        .add(Button::new("Add configuration").kind(ButtonKind::Ghost))
+        .clicked()
+    {
+        w.add_config(variables);
+    }
+    default_config(ui, w);
+}
+
+fn default_config(ui: &mut Ui, w: &mut WizardState) {
+    if w.configs.is_empty() {
+        return;
+    }
+    let names: Vec<&str> = w.configs.iter().map(|c| c.name.as_str()).collect();
+    let current = w
+        .default_config
+        .clone()
+        .unwrap_or_else(|| "None".to_owned());
+    let mut options = vec!["None"];
+    options.extend(names);
+    caption(ui, "Default configuration");
+    let out = onecad_widgets::components::inputs::Select::new(
+        "wizard-default-config",
+        &current,
+        &options,
+    )
+    .width(200.0)
+    .show(ui);
+    if let Some(i) = out.chosen {
+        w.default_config = (i > 0).then(|| options[i].to_owned());
     }
 }
 
-fn save(ui: &mut Ui, w: &mut WizardState) {
-    let t = look(ui.ctx()).theme;
-    ui.spacing_mut().item_spacing.y = 4.0;
-    let kind = if w.kind == 1 { "Parametric" } else { "Static" };
-    let rows = [
-        ("Name", w.name.clone()),
-        ("Category", CATEGORIES[w.category].to_owned()),
-        ("Save to", DESTINATIONS[w.save_to].to_owned()),
-        ("Type", kind.to_owned()),
-        ("Exposed parameters", w.exposed_count().to_string()),
-    ];
-    for (name, value) in rows {
-        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::hover());
-        let p = ui.painter();
-        p.hline(
-            rect.x_range(),
-            rect.top() + 0.5,
-            Stroke::new(1.0, t.border_subtle),
-        );
-        p.text(
-            pos2(rect.left() + 4.0, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            name,
-            FontId::proportional(12.5),
-            t.ink4,
-        );
-        p.text(
-            pos2(rect.left() + 180.0, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            value,
-            FontId::proportional(12.5),
-            t.ink,
-        );
-    }
-    if w.saved {
-        ui.add_space(14.0);
-        let msg = format!("Saved to {}", DESTINATIONS[w.save_to]);
+fn attachments(ui: &mut Ui, w: &mut WizardState) {
+    ui.spacing_mut().item_spacing.y = 6.0;
+    kit::title(ui, "Attachments", 14.0);
+    kit::muted(
+        ui,
+        "Mate points a placement can snap to. Pick a planar face, a cylinder or a circular edge.",
+        12.0,
+    );
+    let mut remove = None;
+    let mut rename = None;
+    for (i, row) in w.attachments.iter().enumerate() {
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
-            kit::paint_icon(ui.painter(), r, "check", t.surface, t.ok_text);
-            kit::label(ui, &msg, 13.0, fonts::semibold(), t.ok_text);
+            let mut name = row.name.clone();
+            if field(ui, &format!("att-{i}"), &mut name, 160.0, None) {
+                rename = Some((i, name));
+            }
+            kit::muted(
+                ui,
+                &format!("{}  accepts {}", row.input.on, row.input.accepts.join(", ")),
+                12.0,
+            );
+            if kit::link(ui, "Remove", 12.0).clicked() {
+                remove = Some(i);
+            }
         });
     }
+    if let Some((i, name)) = rename
+        && let Err(error) = w.rename_attachment(i, &name)
+    {
+        w.error = Some(error);
+    }
+    if let Some(i) = remove {
+        w.remove_attachment(i);
+    }
+    if w.attachments.is_empty() {
+        kit::muted(
+            ui,
+            "No attachments yet; the component can still be saved.",
+            12.0,
+        );
+    }
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        caption(ui, "Name");
+        field(ui, "att-new", &mut w.new_attachment, 160.0, None);
+        let pick = Button::new("Pick face/edge").enabled(w.phase == Phase::Editing);
+        if ui.add(pick).clicked()
+            && let Err(error) = w.begin_pick()
+        {
+            w.error = Some(error);
+        }
+    });
+    if w.phase == Phase::Resolving {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            kit::muted(ui, "Resolving the pick…", 12.0);
+        });
+    }
+    if let Some(error) = &w.error {
+        warn(ui, error);
+    }
+    ui.add_space(10.0);
+    summary(ui, w);
+}
+
+fn summary(ui: &mut Ui, w: &WizardState) {
+    let kind = if w.parametric { "Parametric" } else { "Static" };
+    let rows = [
+        ("Name", w.name.trim().to_owned()),
+        ("Id", format!("{}@{}", w.id, w.version)),
+        ("Type", kind.to_owned()),
+        ("Exposed parameters", w.exposed.len().to_string()),
+        ("Configurations", w.configs.len().to_string()),
+        ("Saved to", "Your library".to_owned()),
+    ];
+    for (name, value) in rows {
+        ui.horizontal(|ui| {
+            caption(ui, &format!("{name}:"));
+            let ink = look(ui.ctx()).theme.ink;
+            kit::label(ui, &value, 12.5, FontFamily::Proportional, ink);
+        });
+    }
+    if !w.attachments.is_empty() {
+        kit::muted(
+            ui,
+            "Thumbnail: not captured; the library shows the part icon.",
+            11.5,
+        );
+    }
+}
+
+fn saved(ui: &mut Ui, w: &WizardState) {
+    let Phase::Saved(saved) = &w.phase else {
+        return;
+    };
+    let ok = look(ui.ctx()).theme.ok_text;
+    kit::label(
+        ui,
+        &format!("Saved {} {} to the library", saved.name, saved.version),
+        14.0,
+        fonts::semibold(),
+        ok,
+    );
+    ui.add_space(6.0);
+    kit::muted(ui, &format!("{}@{}", saved.id, saved.version), 12.5);
 }

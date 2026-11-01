@@ -11,6 +11,7 @@ pub mod index;
 pub mod package;
 pub mod registry;
 pub mod resolve;
+pub mod search;
 pub mod tables;
 pub mod template;
 
@@ -82,6 +83,48 @@ impl Library {
         self.index.get(id, version)
     }
 
+    /// Filtered, sorted catalog query over the cached index — see [`search`].
+    /// With `latest_only`, the newest version per id is selected BEFORE the
+    /// other filters: an older version that matches the query is intentionally
+    /// not a hit when a newer one exists.
+    #[must_use]
+    pub fn search(&self, query: &search::SearchQuery) -> Vec<search::SearchHit<'_>> {
+        search::run(&self.index, query)
+    }
+
+    /// The package's `preview.png`, only when the file exists.
+    #[must_use]
+    pub fn preview_path(&self, id: &str, version: &str) -> Option<PathBuf> {
+        let (_, entry) = self.index.get(id, Some(version))?;
+        let path = self.root.join(&entry.path).join("preview.png");
+        path.is_file().then_some(path)
+    }
+
+    /// The `identity.revision` the package's `component.toml` declares NOW.
+    ///
+    /// Re-parsed fresh from disk, not read from the cached index, so an edit
+    /// made after the last reindex is seen. Deliberately not a recomputed
+    /// content hash: seed packages pin a revision that differs from
+    /// `compute_revision` on purpose.
+    ///
+    /// # Errors
+    /// [`LibraryError::NotFound`] when the id@version is not indexed or its
+    /// manifest is gone; parse errors as [`LibraryError::MalformedPackage`].
+    pub fn declared_revision(&self, id: &str, version: &str) -> LibraryResult<String> {
+        let not_found = || LibraryError::NotFound(format!("{id}@{version}"));
+        let (_, entry) = self.index.get(id, Some(version)).ok_or_else(not_found)?;
+        let manifest = self
+            .root
+            .join(&entry.path)
+            .join(package::COMPONENT_MANIFEST_FILE);
+        let raw = match std::fs::read_to_string(&manifest) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_found()),
+            Err(e) => return Err(e.into()),
+        };
+        Ok(package::parse(&raw, &manifest)?.identity.revision)
+    }
+
     /// Resolves a placed instance's recorded identity to its
     /// worker-consumable source. Revision mismatch or absence is a typed
     /// [`LibraryError`] (never a load-breaking `Err`) — see [`resolve::resolve`].
@@ -116,8 +159,9 @@ impl Library {
     /// Returns the recorded revision.
     ///
     /// # Errors
-    /// [`LibraryError::InvalidIdentity`] for a malformed id/version, a plain
-    /// I/O error for a taken id@version or a filesystem failure.
+    /// [`LibraryError::InvalidIdentity`] for a malformed id/version,
+    /// [`LibraryError::AlreadyExists`] for a taken id@version, a plain I/O
+    /// error for a filesystem failure.
     pub fn save_component(&mut self, new: NewComponent) -> LibraryResult<String> {
         let NewComponent {
             mut package,
@@ -128,41 +172,30 @@ impl Library {
             preview_png,
         } = new;
         package::validate_identity(&package)?;
+        package::validate_configurations(&package, Path::new("<new component>"))?;
 
         let id = package.identity.id.clone();
         let version = package.identity.version.clone();
-        if self.index.get(&id, Some(&version)).is_some() {
-            return Err(LibraryError::Io(format!(
-                "{id}@{version} already exists — re-saving a component is a version bump \
-                 (existing instances recorded the old revision)"
-            )));
-        }
+        self.ensure_free(&id, &version)?;
 
         let sha256 = self.blobs.put(&geometry)?;
-        // VERSION-QUALIFIED directory. The index maps `id -> version -> path`,
-        // so two versions of one component are two entries — and therefore two
-        // directories. Writing to a bare `<id>` (the shape the built-in seed
-        // packages use, where only one version ever ships) would have the 1.1.0
-        // save silently overwrite 1.0.0's manifest, and every instance still
-        // recording 1.0.0 would resolve `NeedsRepair` with no file left to
-        // explain why. Caught by `saving_the_same_id_and_version_twice_is_refused`.
-        let dir = self.root.join(format!("{id}@{version}"));
-        std::fs::create_dir_all(&dir)?;
+        // The package is assembled in a private temp dir and PUBLISHED by one
+        // rename to the VERSION-QUALIFIED `<id>@<version>` directory (the index
+        // maps `id -> version -> path`, so two versions are two directories; a
+        // bare `<id>` would let 1.1.0 overwrite 1.0.0's manifest under live
+        // instances). See [`Library::publish_package`].
         const DOCUMENT_FILE: &str = "source.onecad";
-        std::fs::write(dir.join(DOCUMENT_FILE), &document)?;
-        if let Some(png) = &preview_png {
-            std::fs::write(dir.join("preview.png"), png)?;
-        }
         package.source = package::SourceSpec::Document {
             file: DOCUMENT_FILE.to_string(),
             geometry: sha256,
             geometry_codec,
             geometry_format,
         };
-
-        let revision = package::write_package(&dir, &package)?;
-        self.reindex()?;
-        Ok(revision)
+        let mut files: Vec<(&str, &[u8])> = vec![(DOCUMENT_FILE, document.as_slice())];
+        if let Some(png) = &preview_png {
+            files.push(("preview.png", png.as_slice()));
+        }
+        self.publish_package(&package, &files)
     }
 
     /// The BLOB-kind authoring leg (spec §7): writes an `embedded`- or
@@ -181,8 +214,9 @@ impl Library {
     /// recorded the old revision.
     ///
     /// # Errors
-    /// [`LibraryError::InvalidIdentity`] for a malformed id/version, a plain
-    /// I/O error for a taken `id@version` or a filesystem failure.
+    /// [`LibraryError::InvalidIdentity`] for a malformed id/version,
+    /// [`LibraryError::AlreadyExists`] for a taken `id@version`, a plain I/O
+    /// error for a filesystem failure.
     pub fn save_embedded_component(
         &mut self,
         req: EmbeddedComponentRequest,
@@ -199,12 +233,7 @@ impl Library {
 
         let id = package.identity.id.clone();
         let version = package.identity.version.clone();
-        if self.index.get(&id, Some(&version)).is_some() {
-            return Err(LibraryError::Io(format!(
-                "{id}@{version} already exists — re-saving a component is a version bump \
-                 (existing instances recorded the old revision)"
-            )));
-        }
+        self.ensure_free(&id, &version)?;
         if matches!(kind, BlobComponentKind::Profile) && geometry_codec != package::PROFILE_CODEC {
             return Err(LibraryError::Io(format!(
                 "a profile component's geometry must be `{}` (got `{geometry_codec}`) — the \
@@ -214,14 +243,6 @@ impl Library {
         }
 
         let sha256 = self.blobs.put(&geometry)?;
-        // VERSION-QUALIFIED directory, for the same reason `save_component`
-        // uses one: two versions of one component are two index entries and must
-        // be two directories.
-        let dir = self.root.join(format!("{id}@{version}"));
-        std::fs::create_dir_all(&dir)?;
-        if let Some(png) = &preview_png {
-            std::fs::write(dir.join("preview.png"), png)?;
-        }
         package.source = match kind {
             BlobComponentKind::Embedded => package::SourceSpec::Embedded {
                 blob: sha256.clone(),
@@ -234,10 +255,107 @@ impl Library {
                 format: geometry_format,
             },
         };
-
-        let revision = package::write_package(&dir, &package)?;
-        self.reindex()?;
+        let mut files: Vec<(&str, &[u8])> = Vec::new();
+        if let Some(png) = &preview_png {
+            files.push(("preview.png", png.as_slice()));
+        }
+        let revision = self.publish_package(&package, &files)?;
         Ok(SavedComponent { revision, sha256 })
+    }
+
+    /// Writes `package` + `files` into a fresh `<root>/.tmp-*` directory, stamps
+    /// the revision over what is there, and publishes it with ONE `rename` to
+    /// `<id>@<version>`.
+    ///
+    /// A failure at any step leaves no `<id>@<version>` behind (the temp dir is
+    /// removed), so a half-written package can never be indexed or block a
+    /// retry. The rename never replaces a non-empty directory: a package that
+    /// appeared since [`ensure_free`](Self::ensure_free) is refused as
+    /// [`LibraryError::AlreadyExists`]. A reindex failure AFTER the rename is
+    /// reported, but the package is complete on disk and a later reindex lists it.
+    fn publish_package(
+        &mut self,
+        package: &ComponentPackage,
+        files: &[(&str, &[u8])],
+    ) -> LibraryResult<String> {
+        let (id, version) = (&package.identity.id, &package.identity.version);
+        let temp = self.exclusive_temp_dir()?;
+        let built: LibraryResult<String> = (|| {
+            for (name, bytes) in files {
+                std::fs::write(temp.join(name), bytes)?;
+            }
+            let revision = package::write_package(&temp, package)?;
+            self.promote(&temp, id, version)?;
+            Ok(revision)
+        })();
+        if built.is_err() {
+            let _ = std::fs::remove_dir_all(&temp);
+        }
+        let revision = built?;
+        self.reindex().map_err(|e| {
+            LibraryError::Io(format!(
+                "{id}@{version} was saved, but reindexing failed ({e}); reindex the library to list it"
+            ))
+        })?;
+        Ok(revision)
+    }
+
+    fn exclusive_temp_dir(&self) -> LibraryResult<PathBuf> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        std::fs::create_dir_all(&self.root)?;
+        loop {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            let path = self.root.join(format!(
+                ".tmp-{}-{nanos}-{}",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Ok(path),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+
+    fn promote(&self, temp: &Path, id: &str, version: &str) -> LibraryResult<()> {
+        let target = self.root.join(format!("{id}@{version}"));
+        // A leftover EMPTY dir (a failed pre-atomic save) is replaced; any other
+        // occupant makes the rename fail, which is the refusal we want.
+        let _ = std::fs::remove_dir(&target);
+        std::fs::rename(temp, &target).map_err(|e| {
+            if target.exists() {
+                LibraryError::AlreadyExists {
+                    id: id.to_string(),
+                    version: version.to_string(),
+                }
+            } else {
+                e.into()
+            }
+        })
+    }
+
+    /// Refuses an id@version that is indexed OR whose target directory already
+    /// holds a `component.toml` — a stale or unwritten `library.json` must not
+    /// let a save overwrite an existing package. A bare directory with no
+    /// manifest (a failed partial save) does not block; the save reuses it.
+    fn ensure_free(&self, id: &str, version: &str) -> LibraryResult<()> {
+        if self.index.get(id, Some(version)).is_some()
+            || self
+                .root
+                .join(format!("{id}@{version}"))
+                .join(package::COMPONENT_MANIFEST_FILE)
+                .exists()
+        {
+            return Err(LibraryError::AlreadyExists {
+                id: id.to_string(),
+                version: version.to_string(),
+            });
+        }
+        Ok(())
     }
 
     /// "Save as Template" (spec §8) — writes a frozen document under
@@ -439,6 +557,7 @@ generator_version = 1
             },
             parameters: BTreeMap::new(),
             attachments: BTreeMap::new(),
+            configurations: BTreeMap::new(),
         }
     }
 
@@ -505,7 +624,12 @@ generator_version = 1
         let err = lib
             .save_component(new_component("acme.bracket", "1.0.0", b"v2"))
             .expect_err("same id@version");
-        assert!(format!("{err:?}").contains("already exists"), "{err:?}");
+        assert!(
+            matches!(&err, LibraryError::AlreadyExists { id, version }
+                if id == "acme.bracket" && version == "1.0.0"),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("already exists"), "{err}");
 
         // A bumped version is fine, and both stay resolvable.
         lib.save_component(new_component("acme.bracket", "1.1.0", b"v2"))
@@ -690,7 +814,109 @@ generator_version = 1
                 "brep",
             ))
             .expect_err("same id@version");
-        assert!(format!("{err:?}").contains("already exists"), "{err:?}");
+        assert!(
+            matches!(&err, LibraryError::AlreadyExists { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn preview_path_exists_only_when_the_file_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lib = Library::open(dir.path()).unwrap();
+        let mut with = new_component("acme.with", "1.0.0", b"a");
+        with.preview_png = Some(b"png".to_vec());
+        lib.save_component(with).unwrap();
+        let mut without = new_component("acme.without", "1.0.0", b"b");
+        without.preview_png = None;
+        lib.save_component(without).unwrap();
+
+        let path = lib.preview_path("acme.with", "1.0.0").expect("preview");
+        assert!(path.is_file() && path.ends_with("preview.png"));
+        assert!(lib.get("acme.with", None).unwrap().1.has_preview);
+        assert!(lib.preview_path("acme.without", "1.0.0").is_none());
+        assert!(lib.preview_path("acme.missing", "1.0.0").is_none());
+        std::fs::remove_file(path).unwrap();
+        assert!(lib.preview_path("acme.with", "1.0.0").is_none());
+    }
+
+    #[test]
+    fn declared_revision_rereads_the_manifest_and_reports_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lib = Library::open(dir.path()).unwrap();
+        let recorded = lib
+            .save_component(new_component("acme.part", "1.0.0", b"a"))
+            .unwrap();
+        assert_eq!(
+            lib.declared_revision("acme.part", "1.0.0").unwrap(),
+            recorded
+        );
+
+        // A pinned revision that differs from the content hash is returned
+        // verbatim; the index (not reindexed) still holds the old one.
+        let manifest = dir.path().join("acme.part@1.0.0/component.toml");
+        let pinned = format!("sha256:{}", "7".repeat(64));
+        let edited = std::fs::read_to_string(&manifest)
+            .unwrap()
+            .replace(&recorded, &pinned);
+        std::fs::write(&manifest, edited).unwrap();
+        assert_eq!(lib.declared_revision("acme.part", "1.0.0").unwrap(), pinned);
+
+        assert!(matches!(
+            lib.declared_revision("acme.part", "2.0.0"),
+            Err(LibraryError::NotFound(_))
+        ));
+        std::fs::remove_file(&manifest).unwrap();
+        assert!(matches!(
+            lib.declared_revision("acme.part", "1.0.0"),
+            Err(LibraryError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn a_target_dir_already_on_disk_but_not_indexed_is_refused_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lib = Library::open(dir.path()).unwrap();
+        let stray = dir.path().join("acme.bracket@1.0.0");
+        std::fs::create_dir_all(&stray).unwrap();
+        std::fs::write(stray.join("marker.txt"), b"keep").unwrap();
+        std::fs::write(stray.join("component.toml"), b"# existing").unwrap();
+
+        let err = lib
+            .save_component(new_component("acme.bracket", "1.0.0", b"v1"))
+            .expect_err("dir taken");
+        assert!(matches!(err, LibraryError::AlreadyExists { .. }), "{err:?}");
+        let err = lib
+            .save_embedded_component(blob_request(
+                "acme.bracket",
+                BlobComponentKind::Embedded,
+                b"v1",
+                "brep",
+            ))
+            .expect_err("dir taken");
+        assert!(matches!(err, LibraryError::AlreadyExists { .. }), "{err:?}");
+        assert_eq!(std::fs::read(stray.join("marker.txt")).unwrap(), b"keep");
+        assert_eq!(
+            std::fs::read(stray.join("component.toml")).unwrap(),
+            b"# existing"
+        );
+    }
+
+    #[test]
+    fn a_bare_stray_dir_without_a_manifest_does_not_block_a_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lib = Library::open(dir.path()).unwrap();
+        std::fs::create_dir_all(dir.path().join("acme.bracket@1.0.0")).unwrap();
+        lib.save_component(new_component("acme.bracket", "1.0.0", b"v1"))
+            .unwrap();
+        assert!(lib.get("acme.bracket", Some("1.0.0")).is_some());
+        lib.save_embedded_component(blob_request(
+            "acme.other",
+            BlobComponentKind::Embedded,
+            b"v1",
+            "brep",
+        ))
+        .unwrap();
     }
 
     /// The SHA-256 of an empty input — what EVERY embedded/profile package's
@@ -765,5 +991,52 @@ generator_version = 1
             matches!(err, LibraryError::RevisionMismatch { .. }),
             "{err:?}"
         );
+    }
+
+    fn leftovers(root: &Path) -> Vec<String> {
+        std::fs::read_dir(root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".tmp-"))
+            .collect()
+    }
+
+    #[test]
+    fn a_publish_that_loses_the_race_is_refused_and_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lib = Library::open(dir.path()).unwrap();
+        // Non-empty, manifest-less: passes `ensure_free`, blocks the rename.
+        let taken = dir.path().join("acme.bracket@1.0.0");
+        std::fs::create_dir_all(&taken).unwrap();
+        std::fs::write(taken.join("stray.txt"), b"keep").unwrap();
+        let err = lib
+            .save_component(new_component("acme.bracket", "1.0.0", b"v1"))
+            .unwrap_err();
+        assert!(matches!(err, LibraryError::AlreadyExists { .. }), "{err}");
+        assert_eq!(std::fs::read(taken.join("stray.txt")).unwrap(), b"keep");
+        assert!(!taken.join(package::COMPONENT_MANIFEST_FILE).exists());
+        assert!(leftovers(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_save_leaves_no_staging_dir_and_staging_is_never_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lib = Library::open(dir.path()).unwrap();
+        lib.save_component(new_component("acme.bracket", "1.0.0", b"v1"))
+            .unwrap();
+        assert!(leftovers(dir.path()).is_empty());
+        // A crashed publish's staging dir carries a manifest but is not a package.
+        let staged = dir.path().join(".tmp-crashed");
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::copy(
+            dir.path()
+                .join("acme.bracket@1.0.0")
+                .join(package::COMPONENT_MANIFEST_FILE),
+            staged.join(package::COMPONENT_MANIFEST_FILE),
+        )
+        .unwrap();
+        lib.reindex().unwrap();
+        assert_eq!(lib.index().components.len(), 1);
+        assert_eq!(lib.index().components["acme.bracket"].len(), 1);
     }
 }

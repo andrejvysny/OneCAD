@@ -90,6 +90,12 @@ pub struct ModelSession {
     pub(crate) origin: Box<Operation>,
     pub(crate) drag: Option<Box<DragOrigin>>,
     pub(crate) progress: crate::preview_progress::PreviewProgress,
+    /// "Copy" placement: Confirm commits an inert `DetachComponent` twin instead
+    /// of the linked `PlaceComponent`. Session state, never part of the record.
+    pub(crate) copy: bool,
+    /// The worker's mate-resolved placement from the preview of the CURRENT
+    /// draft (SCHEMA §7.6 `matePlacement`); cleared on every draft change.
+    pub(crate) mate_placement: Option<onecad_core::document::record::FrozenPlacement>,
 }
 
 impl ModelSession {
@@ -104,6 +110,10 @@ impl ModelSession {
     /// Base with the evaluated field overrides, as placement handles see it.
     pub fn effective_op(&self) -> Operation {
         self.params.overlay(&self.record.op)
+    }
+    /// Whether Confirm will commit a detached copy rather than a linked instance.
+    pub fn copies_component(&self) -> bool {
+        self.copy
     }
     pub fn dragging(&self) -> bool {
         self.drag.is_some()

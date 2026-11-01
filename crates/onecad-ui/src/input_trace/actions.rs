@@ -151,6 +151,15 @@ pub(crate) fn message(message: &crate::bridge::Message) -> Value {
         Message::Items {
             sequence, result, ..
         } => json!({"type": "Items", "sequence": sequence, "ok": result.is_ok()}),
+        Message::Library {
+            sequence, result, ..
+        } => json!({"type": "Library", "sequence": sequence, "ok": result.is_ok()}),
+        Message::Author {
+            sequence, result, ..
+        } => json!({"type": "Author", "sequence": sequence, "ok": result.is_ok()}),
+        Message::Instance {
+            sequence, result, ..
+        } => json!({"type": "Instance", "sequence": sequence, "ok": result.is_ok()}),
         Message::StartupFailed(error) => {
             json!({"type": "StartupFailed", "error": bounded_id(error)})
         }

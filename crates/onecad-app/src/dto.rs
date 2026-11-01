@@ -12,7 +12,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use onecad_core::document::record::{KnownOperation, OffsetDistanceType, Operation};
+use std::collections::BTreeMap;
+
+use onecad_core::document::record::{
+    ComponentParamValue, KnownOperation, OffsetDistanceType, Operation,
+};
 use onecad_core::document::variables::{Scalar, VariableTable};
 use onecad_core::expr::Dimension;
 use onecad_core::history::StepState;
@@ -566,6 +570,62 @@ pub struct LibraryComponentDto {
     /// declare one (spec's own open Q4: not every package needs one yet).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub designation: Option<String>,
+    /// `metadata.standard` (e.g. `"ISO 4762"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub standard: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    /// Absolute path of the package's `preview.png`; present only when the
+    /// file exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_path: Option<String>,
+    /// `[configurations]` verbatim (named variants: free-param key -> value),
+    /// in the same `toml::Value` shape as `parameters`. Absent when none.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub configurations: onecad_library::package::Configurations,
+    /// `metadata.default_configuration`, the variant a picker preselects.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_configuration: Option<String>,
+}
+
+/// One component with every indexed version (`versions` semver ascending).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentDetailDto {
+    pub component: LibraryComponentDto,
+    pub versions: Vec<String>,
+}
+
+/// Catalog search request; mirrors `onecad_library::search::SearchQuery`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SearchQueryDto {
+    pub text: Option<String>,
+    pub category: Option<String>,
+    pub source_kind: Option<String>,
+    pub latest_only: bool,
+    pub sort: SearchSortDto,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SearchSortDto {
+    #[default]
+    Name,
+    Id,
+}
+
+/// How a placed instance relates to the library right now. Read-only: the
+/// library never changes a placed instance by itself (spec §0 invariant 4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum ComponentStatusDto {
+    Linked,
+    UpgradeAvailable { version: String },
+    DefinitionMissing,
+    DefinitionUnreadable { reason: String },
+    RevisionMismatch { recorded: String, current: String },
+    Detached,
 }
 
 /// A `reindex_library` outcome (`types.ts` `ReindexReport`) — feeds the
@@ -706,6 +766,63 @@ pub struct ReplaceComponentReportDto {
 pub struct ReplaceComponentResultDto {
     pub projection: DocumentProjection,
     pub report: ReplaceComponentReportDto,
+}
+
+/// One placed or detached component instance in the open document, with the
+/// values its parameters actually resolve to (component-instance manager).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentInstanceDto {
+    pub record_id: String,
+    pub name: String,
+    /// Empty for a detached instance, which no longer carries library identity.
+    pub component_id: String,
+    pub component_version: String,
+    /// `generator` / `embedded` / `document` / `profile`.
+    pub source_kind: String,
+    /// `true` for `PlaceComponent`, `false` for a detached copy.
+    pub linked: bool,
+    /// The package's designation template resolved with `effective`; `None`
+    /// without a template or while the definition is missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub designation: Option<String>,
+    /// Package defaults overlaid by the instance's overrides.
+    pub effective: BTreeMap<String, ComponentParamValue>,
+    /// The package's free-parameter defaults; empty while the definition is missing.
+    pub defaults: BTreeMap<String, ComponentParamValue>,
+    /// Keys recorded on the instance whose value differs from the default.
+    pub overrides: Vec<String>,
+    pub status: ComponentStatusDto,
+}
+
+/// An override a version upgrade cannot carry to the target package.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DroppedOverrideDto {
+    pub key: String,
+    pub value: ComponentParamValue,
+    pub reason: String,
+}
+
+/// One instance's planned version upgrade. `apply` re-plans and refuses when
+/// the live plan differs from the one the user approved.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpgradeItemDto {
+    pub record_id: String,
+    pub from_version: String,
+    pub to_version: String,
+    /// The target package's `identity.revision` this plan was computed
+    /// against; apply refuses if the library no longer declares it.
+    #[serde(default)]
+    pub to_revision: String,
+    pub kept_overrides: BTreeMap<String, ComponentParamValue>,
+    pub dropped_overrides: Vec<DroppedOverrideDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped_mate_attachment: Option<String>,
+    pub applicable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
 }
 
 /// One project template (`list_templates`; `types.ts` `ProjectTemplate`) —
@@ -1621,6 +1738,11 @@ pub struct PreviewResultDto {
     pub deleted_bodies: Vec<String>,
     /// Successful NeedsRepair state (never a protocol error).
     pub needs_repair: Vec<serde_json::Value>,
+    /// SCHEMA §7.6 `matePlacement`: the mate-resolved placement of a
+    /// `PlaceComponent` candidate whose mate re-seated. `None` for every other
+    /// op, an unmoved mate, or an older worker that omits it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mate_placement: Option<onecad_core::document::record::FrozenPlacement>,
 }
 
 /// A resolved sketch plane basis (`types.ts SketchPlane`) — what the frontend

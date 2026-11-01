@@ -607,6 +607,9 @@ void merge_outcome(CandidateResult& result, ops::OpOutcome outcome) {
     }
     for (auto& diag : outcome.diagnostics) result.diagnostics.push_back(std::move(diag));
     if (outcome.mate_placement) result.mate_placement = std::move(outcome.mate_placement);
+    if (outcome.mate_resolved_placement) {
+        result.mate_resolved_placement = std::move(outcome.mate_resolved_placement);
+    }
     if (outcome.mate_resolved) result.mate_resolved = std::move(outcome.mate_resolved);
     if (outcome.sketch_placement) result.sketch_placement = std::move(outcome.sketch_placement);
     if (outcome.status == ops::OpOutcome::Status::Ok) {

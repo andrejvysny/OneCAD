@@ -260,6 +260,8 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     }
     if raw.focused && !composition {
         crate::editor_facade::keys(app, raw, text);
+        crate::placement_gesture::keys(app, raw, text);
+        crate::component_wizard::pick::keys(app, raw);
     }
     tool_keys::route(app, ctx, raw, text, composition);
     if !text && !composition && raw.focused && app.sketch_active() {

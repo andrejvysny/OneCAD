@@ -1,0 +1,29 @@
+# CANONICAL §7.3 fixture — `DetachComponent` (Component Library WP-1.2, spec §3.4):
+# the "honest break link". Plan 1 places the iso4762 M6x20 generator component;
+# plan 2 swaps the SAME record (same opId, same step) to `DetachComponent` with the
+# same source/placement and no componentId/version/revision/mate. The body survives:
+# the same `body_op0` id comes back created and a volume is still reported. A
+# generator source re-runs deterministically, so detach is indistinguishable from a
+# static copy; the exact volume (never an NDJSON literal — numbers compare exactly)
+# and placed==detached equality belong to worker/tests/test_component_ops.cpp.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_detach_component","documentRevision":0,"workerEpoch":4,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+# Place.
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":101,"documentRevision":0,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"targetStep":0,"ops":[{"opType":"PlaceComponent","opId":"op0","stepIndex":0,"inputs":[],"params":{"componentId":"onecad.std.iso4762","componentVersion":"1.0.0","componentRevision":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source":{"kind":"generator","generatorId":"iso4762","generatorVersion":1,"params":{"thread":"M6","length":20.0}},"placement":{"translate":[0.0,0.0,0.0]}}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"jobId":101,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op0"}],"needsRepair":[]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":101,"result":{"planPrepared":true,"lastValidStep":0,"stoppedReason":"completed","perStepResults":[{"stepIndex":0,"status":"ok","bodyIds":["body_op0"]}],"historyPrefixHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":101,"documentRevision":0,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":101,"result":{"accepted":true,"snapshotId":1,"documentRevision":0}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"QueryMassProperties","args":{"bodyId":"body_op0"}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"volume":"$present","surfaceArea":"$present"}}}
+# Detach: in-place op-type swap at the same record, same body id.
+{"send":{"v":1,"t":"req","id":5,"verb":"ExecutePlan","args":{"jobId":102,"documentRevision":1,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"targetStep":0,"ops":[{"opType":"DetachComponent","opId":"op0","stepIndex":0,"inputs":[],"params":{"source":{"kind":"generator","generatorId":"iso4762","generatorVersion":1,"params":{"thread":"M6","length":20.0}},"placement":{"translate":[0.0,0.0,0.0]}}}]}}}
+{"expect":{"v":1,"t":"event","id":5,"event":"planStep","stepIndex":0,"jobId":102,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op0"}],"needsRepair":[]}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"jobId":102,"result":{"planPrepared":true,"lastValidStep":0,"stoppedReason":"completed","perStepResults":[{"stepIndex":0,"status":"ok","bodyIds":["body_op0"]}],"historyPrefixHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+{"send":{"v":1,"t":"req","id":6,"verb":"AcceptPrepared","args":{"jobId":102,"documentRevision":1,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"jobId":102,"result":{"accepted":true,"snapshotId":2,"documentRevision":1}}}
+{"send":{"v":1,"t":"req","id":7,"verb":"QueryMassProperties","args":{"bodyId":"body_op0"}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"result":{"volume":"$present","surfaceArea":"$present"}}}
+{"send":{"v":1,"t":"req","id":8,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"result":{"goodbye":true}}}

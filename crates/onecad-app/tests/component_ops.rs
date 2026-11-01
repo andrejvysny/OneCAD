@@ -893,6 +893,7 @@ async fn a_body_saved_as_a_component_places_back_as_the_same_solid() {
             .into_iter()
             .collect(),
             parameters: Default::default(),
+            ..Default::default()
         },
         None,
         false,
@@ -1042,6 +1043,7 @@ async fn a_multi_solid_body_is_refused_and_the_union_opt_in_saves_it() {
         designation: None,
         attachments: Default::default(),
         parameters: Default::default(),
+        ..Default::default()
     };
 
     let refused = onecad_app::library::save_as_component_at(
@@ -1530,6 +1532,7 @@ async fn a_profile_component_extrudes_to_its_own_length_and_re_lengths_without_a
                 },
                 parameters: package_parameters,
                 attachments: Default::default(),
+                configurations: Default::default(),
             },
             kind: onecad_library::BlobComponentKind::Profile,
             geometry: face_bytes,
@@ -1711,6 +1714,7 @@ async fn a_profile_component_survives_save_and_reopen_with_no_library() {
                 },
                 parameters: package_parameters,
                 attachments: Default::default(),
+                configurations: Default::default(),
             },
             kind: onecad_library::BlobComponentKind::Profile,
             geometry: face_bytes,

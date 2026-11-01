@@ -48,6 +48,16 @@ pub enum ModelingOptions {
         offset_hole: bool,
         point: Vec3,
     },
+    /// Free-parameter overrides for a component placement.
+    ComponentParams(std::collections::BTreeMap<String, ComponentParamValue>),
+    /// A snap result: the placement transform and the mate that produced it.
+    ComponentSnap {
+        translate: [f64; 3],
+        rotate: TransformRotation,
+        mate: Option<Box<ComponentMate>>,
+    },
+    /// Commit a detached copy instead of a linked instance (session state).
+    ComponentCopy(bool),
 }
 
 impl Interaction {
@@ -62,9 +72,18 @@ impl Interaction {
         let Some(tool) = self.editing_tool().filter(|tool| tool.tag == tag) else {
             return Vec::new();
         };
+        if let ModelingOptions::ComponentCopy(copy) = options {
+            // Session state only: the draft, its preview and any resolved
+            // placement stay valid, so there is nothing to re-preview.
+            tool.copy = copy;
+            tool.params.op_error = None;
+            return Vec::new();
+        }
         let preserve_drag = matches!(&options, ModelingOptions::Mirror { .. });
         let mut operation = tool.effective_op();
-        if let Err(message) = apply(&mut operation, options) {
+        if let Err(message) = apply(&mut operation, options)
+            .and_then(|()| refuse_self_mate(&operation, tool.tag.record_id))
+        {
             tool.progress = Default::default();
             tool.params.op_error = Some((None, message));
             tool.preview = crate::PreviewStatus::Empty;
@@ -254,9 +273,63 @@ fn apply(operation: &mut Operation, options: ModelingOptions) -> Result<(), Stri
                 frame.origin = point;
             }
         }
+        (KnownOperation::PlaceComponent(p), ModelingOptions::ComponentParams(map)) => {
+            *p = p.with_free_params(map).map_err(|e| e.to_string())?;
+        }
+        (
+            KnownOperation::PlaceComponent(p),
+            ModelingOptions::ComponentSnap {
+                translate,
+                rotate,
+                mate,
+            },
+        ) => snap_component(p, translate, rotate, mate)?,
         _ => return Err("Control does not belong to the current operation".into()),
     }
     Ok(())
+}
+
+/// An instance can never be mated to a body its own record produces: the target
+/// would move with the mate. Bodies are `body_<opId>` (plain) or `body_<opId>:<k>` (split).
+pub(crate) fn refuse_self_mate(
+    operation: &Operation,
+    record: onecad_core::ids::RecordId,
+) -> Result<(), String> {
+    let Operation::Known(KnownOperation::PlaceComponent(p)) = operation else {
+        return Ok(());
+    };
+    let Some(body) = p
+        .mate
+        .as_ref()
+        .and_then(|m| m.target.primary.as_ref())
+        .map(|primary| primary.body)
+    else {
+        return Ok(());
+    };
+    let parent = onecad_app::worker::wire::split_parts(body).map_or(body.0, |(op, _)| op);
+    if parent == record.0 {
+        return Err("A component cannot be mated to its own geometry".into());
+    }
+    Ok(())
+}
+
+fn snap_component(
+    p: &mut PlaceComponentParams,
+    translate: [f64; 3],
+    rotate: TransformRotation,
+    mate: Option<Box<ComponentMate>>,
+) -> Result<(), String> {
+    if !translate.iter().all(|v| v.is_finite())
+        || !rotate.center.is_finite()
+        || !rotate.axis.is_finite()
+        || !rotate.angle_deg.value.is_finite()
+    {
+        return Err("Component placement must be finite".into());
+    }
+    p.placement.translate = translate.map(Scalar::new);
+    p.placement.rotate = rotate;
+    p.mate = mate.map(|mate| *mate);
+    p.validate()
 }
 
 fn optional(enabled: bool, current: Option<Scalar>, default: f64) -> Option<Scalar> {

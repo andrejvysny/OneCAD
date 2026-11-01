@@ -44,6 +44,34 @@ impl DocumentRuntime {
         })
     }
 
+    /// Admits a staging request from a pick's read fence. Unlike
+    /// [`stage_ticket`](Self::stage_ticket) it needs no worker round trip, but it is
+    /// as strict about the head: a fence naming any snapshot other than the current
+    /// head is stale (no current-head substitution).
+    pub fn stage_ticket_for_fence(
+        &self,
+        document_id: &str,
+        runtime_session: &str,
+        snapshot: SnapshotId,
+    ) -> Result<StageTicket, EngineError> {
+        let current = snapshot != SnapshotId(0)
+            && self.document_id() == document_id
+            && self.matches_runtime_session(runtime_session)
+            && self.head_snapshot_id() == Some(snapshot)
+            && self.fencing.get().1 == self.head_epoch
+            && self.engine.current_epoch() == self.head_epoch;
+        if !current {
+            return Err(stage_stale());
+        }
+        Ok(StageTicket {
+            instance: self.instance,
+            revision: self.revision(),
+            snapshot,
+            epoch: self.head_epoch,
+            engine: self.engine.clone(),
+        })
+    }
+
     pub fn stage_ticket_is_current(&self, ticket: &StageTicket) -> bool {
         self.instance == ticket.instance
             && self.revision() == ticket.revision

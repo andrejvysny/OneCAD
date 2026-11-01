@@ -3358,6 +3358,21 @@ impl DocumentRuntime {
         Ok(())
     }
 
+    /// Re-materializes an already carried import blob for the worker from the
+    /// bytes this document holds (no library needed). `Ok(false)` when the blob is
+    /// not carried. Idempotent: the same call [`stage_component_blob`](Self::stage_component_blob)
+    /// makes, so a workspace that lost its file (sweep, reopen) is repaired.
+    ///
+    /// # Errors
+    /// As [`stage_component_blob`](Self::stage_component_blob).
+    pub fn restage_carried_blob(&mut self, sha256: &str) -> Result<bool, ApiError> {
+        let Some(blob) = self.imports.get(sha256).cloned() else {
+            return Ok(false);
+        };
+        self.stage_component_blob(sha256, blob.codec, &blob.bytes)?;
+        Ok(true)
+    }
+
     /// The import blobs currently carried (a save writes the referenced subset).
     /// Tests / diagnostics.
     #[must_use]
@@ -5046,6 +5061,13 @@ impl DocumentRuntime {
             }
         }
         Ok(out.into_iter().flatten().collect())
+    }
+
+    /// How many element ids the document persists (`doc.elements`). Tests /
+    /// diagnostics: a staged id is not counted until a commit adopts it.
+    #[must_use]
+    pub fn persisted_element_count(&self) -> usize {
+        self.regen.elements.len()
     }
 
     /// Whether a DI-4 re-bind pass is still owed: this session has not attempted one

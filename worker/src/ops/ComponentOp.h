@@ -2,32 +2,30 @@
 // WP-0.2/WP-1.2; SCHEMA §7.3 `PlaceComponent`/`DetachComponent`, spec
 // §3.1/§3.4). New v2 op family, no OneCAD-CPP analogue.
 //
-// SCOPE (deliberately reduced, not a different shape — see the
-// implementation plan's phase boundaries):
-//   * `source.kind` MUST be `"generator"`. `embedded` reaches the worker once
-//     WP-1.3 wires the wire-only blob-path injection (mirrors ImportStep's
-//     `inject_import_path`); `document` lands in P3.
-//   * The generator builds an ISO 4762 socket-head cap screw solid (head
-//     fused to shank), TABLE-DRIVEN as of WP-2.1 across `source.params.thread`
-//     (M2–M12, BOLTS-seeded — see `ComponentOp.cpp::iso4762Table()`) and
-//     `source.params.length` (free, spec §6.1). Missing params default to
-//     `"M6"`/20mm, reproducing P0/P1's old hardcoded behavior exactly. WP-2.5
-//     adds a third free param, `source.params.thread_detail`
-//     (`cosmetic`/`simplified`/`modeled`, spec §6.4, default `cosmetic` —
-//     same byte-identical-when-absent rule): `cosmetic` is the unchanged
-//     head+shank blank, `simplified` cuts discrete annular grooves,
-//     `modeled` cuts a true helical V-thread via `BRepOffsetAPI_MakePipeShell`
-//     (flat-truncated profile, no root fillet — a deliberate kernel-
-//     robustness/fidelity tradeoff, see `ComponentOp.cpp::cut_modeled_thread`'s
-//     own comment). A second generator family (bearings, motors) dispatched
-//     by `generatorId` is later P2 scope.
-//   * `PlaceComponent`'s `mate` is READ (by Rust — see `record.rs`) but not
-//     yet re-seated by the worker; a placed component always uses
-//     `placement` as authored. Persistent mate re-seating on regen is the P3
-//     deliverable (spec §5.5). `SetComponentParams`/`ReplaceComponent` have
-//     NO C++ dispatch yet (fall through to `UNSUPPORTED` in
-//     `PlanExecutor.cpp`) — both are in-place edits of `PlaceComponentParams`
-//     at the Rust layer (`crate::edit::session`), not distinct wire ops (see
+// SCOPE:
+//   * `source.kind` is one of four: `generator` (built here), `embedded` and
+//     `document` (a baked solid read from the wire-only `source.path` Rust
+//     injects), and `profile` (an embedded planar face re-extruded to
+//     `params.length`). Unknown kinds refuse with `UNSUPPORTED`.
+//   * `generator` dispatches on `source.generatorId` through
+//     `ComponentGenerators.h`. The catalog is ONE family (`iso4762`) by
+//     decision, not by omission: the other families were removed with the
+//     seed catalog's SEED_VERSION 4, and re-adding one needs a generator, a
+//     table, a seed and a fixture. `source.params.thread` (M2-M12),
+//     `.length` and `.thread_detail` (cosmetic/simplified/modeled) are the
+//     free params; absent ones default to M6 / 20 mm / cosmetic.
+//   * GENERATOR VERSION PIN: each registered family declares the one
+//     `generatorVersion` it builds. A record whose version is absent or
+//     differs is refused with `UNSUPPORTED` before any geometry is built,
+//     because rebuilding a frozen record with different code would silently
+//     change a document's geometry on regen.
+//   * `PlaceComponent`'s `mate` is RE-SEATED here on every execute/regen
+//     against the resolved target geometry (`ComponentMateSolver.h`); an
+//     unresolvable or ambiguous mate halts with a named NeedsRepair item
+//     rather than guessing. Without a mate, `placement` is used as authored.
+//   * `SetComponentParams`/`ReplaceComponent` have NO C++ dispatch (they fall
+//     through to `UNSUPPORTED` in `PlanExecutor.cpp`): both are in-place edits
+//     of `PlaceComponentParams` at the Rust layer, not distinct wire ops (see
 //     `record.rs`'s `DetachComponentParams` doc comment for why only
 //     `DetachComponent` earned its own `KnownOperation` variant).
 //
@@ -35,8 +33,10 @@
 // `execute_detach_component` — see `ComponentOp.cpp`'s
 // `resolve_source_and_publish`; the two ops build IDENTICAL geometry, differing
 // only in what the RECORD's params carry):
-//   1. validate `source.kind == "generator"` + non-empty `generatorId`.
-//   2. build the table-driven SHCS blank: head (cylinder, dk×k) fused to
+//   1. validate `source.kind`; for `generator`, a non-empty `generatorId` and a
+//      supported `generatorVersion`.
+//   2. obtain the solid (blob read, profile extrusion, or generator). For
+//      `iso4762`: build the table-driven SHCS blank: head (cylinder, dk×k) fused to
 //      shank (cylinder, d×l) via a checked Union boolean, origin at the
 //      head-underside seating plane (the natural mate seat for a hole);
 //      then cut `thread_detail` geometry from the shank per WP-2.5.

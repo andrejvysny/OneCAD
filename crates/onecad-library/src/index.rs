@@ -48,6 +48,21 @@ pub struct IndexEntry {
     /// 4762 M{thread}x{length}"`) — the configurator's live-preview source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub designation: Option<String>,
+    /// `metadata.standard` (e.g. `"ISO 4762"`) — catalog display and search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standard: Option<String>,
+    /// `metadata.unit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    /// `<package_dir>/preview.png` existed when the index was built.
+    #[serde(default)]
+    pub has_preview: bool,
+    /// `[configurations]` verbatim — named variants a placement can pick.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub configurations: crate::package::Configurations,
+    /// `metadata.default_configuration`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_configuration: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -123,8 +138,8 @@ impl LibraryIndex {
         for entry in entries {
             let entry = entry?;
             let path = entry.path();
-            if !path.is_dir() {
-                continue;
+            if !path.is_dir() || entry.file_name().to_string_lossy().starts_with('.') {
+                continue; // `.tmp-*` publish staging is never a package
             }
             let manifest_path = path.join(COMPONENT_MANIFEST_FILE);
             if !manifest_path.is_file() {
@@ -173,6 +188,18 @@ impl LibraryIndex {
             .map(|(v, e)| (v.as_str(), e))
     }
 
+    /// Every indexed version of `id`, ascending by SEMVER order.
+    #[must_use]
+    pub fn versions(&self, id: &str) -> Vec<&str> {
+        let mut out: Vec<&str> = self
+            .components
+            .get(id)
+            .map(|v| v.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        out.sort_by(|a, b| compare_versions(a, b));
+        out
+    }
+
     /// The newest indexed version of `id` that is STRICTLY newer than
     /// `version` — the opt-in upgrade offer (spec §3.3), or `None` when the
     /// instance is already on the newest.
@@ -196,7 +223,7 @@ impl LibraryIndex {
 /// `version` semver and every shipped package is a plain triple; a full semver
 /// implementation can replace this the day a pre-release actually ships, and
 /// the tests below say what today's rule is rather than implying more.
-fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+pub(crate) fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     let parts = |v: &str| -> Vec<u64> {
         v.split(['.', '-', '+'])
             .map(|p| p.parse::<u64>().unwrap_or(0))
@@ -260,6 +287,11 @@ fn load_package_entry(
         attachments: pkg.attachments.clone(),
         parameters: pkg.parameters.clone(),
         designation: pkg.metadata.designation.clone(),
+        standard: pkg.metadata.standard.clone(),
+        unit: Some(pkg.metadata.unit.clone()),
+        has_preview: package_dir.join("preview.png").is_file(),
+        configurations: pkg.configurations.clone(),
+        default_configuration: pkg.metadata.default_configuration.clone(),
     };
     Ok((pkg.identity.id.clone(), pkg.identity.version.clone(), entry))
 }
@@ -305,6 +337,36 @@ generator_version = 1
     }
 
     #[test]
+    fn an_index_written_before_standard_unit_preview_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(INDEX_FILE);
+        let old = r#"{"indexVersion":1,"components":{"acme.part":{"1.0.0":{
+            "path":"acme.part","name":"Part","sourceKind":"generator",
+            "revision":"sha256:00"}}}}"#;
+        std::fs::write(&path, old).unwrap();
+        let index = LibraryIndex::load(&path).unwrap();
+        let (_, e) = index.get("acme.part", None).unwrap();
+        assert_eq!(
+            (e.standard.clone(), e.unit.clone(), e.has_preview),
+            (None, None, false)
+        );
+    }
+
+    #[test]
+    fn reindex_records_standard_unit_and_preview_presence() {
+        let dir = tempfile::tempdir().unwrap();
+        write_package(dir.path(), "a", "acme.a", "1.0.0", "A");
+        write_package(dir.path(), "b", "acme.b", "1.0.0", "B");
+        std::fs::write(dir.path().join("b").join("preview.png"), b"png").unwrap();
+        let (index, _) = LibraryIndex::reindex(dir.path()).unwrap();
+        let a = index.get("acme.a", None).unwrap().1;
+        let b = index.get("acme.b", None).unwrap().1;
+        assert!(!a.has_preview && b.has_preview);
+        assert_eq!(a.unit.as_deref(), Some("mm"));
+        assert_eq!(a.standard, None);
+    }
+
+    #[test]
     fn load_of_a_missing_file_is_an_empty_index_not_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let index = LibraryIndex::load(&dir.path().join(INDEX_FILE)).unwrap();
@@ -336,6 +398,11 @@ generator_version = 1
                     attachments: BTreeMap::new(),
                     parameters: BTreeMap::new(),
                     designation: None,
+                    standard: None,
+                    unit: None,
+                    has_preview: false,
+                    configurations: BTreeMap::new(),
+                    default_configuration: None,
                 },
             );
         index.save(&path).unwrap();
@@ -406,6 +473,11 @@ generator_version = 1
             attachments: BTreeMap::new(),
             parameters: BTreeMap::new(),
             designation: Some(version.to_string()),
+            standard: None,
+            unit: None,
+            has_preview: false,
+            configurations: BTreeMap::new(),
+            default_configuration: None,
         };
         let mut index = LibraryIndex::default();
         let mut versions = BTreeMap::new();
@@ -422,6 +494,8 @@ generator_version = 1
             "an explicit version is still exact"
         );
         assert!(index.latest("acme.missing").is_none());
+        assert_eq!(index.versions("acme.part"), ["1.2.0", "1.9.0", "1.10.0"]);
+        assert!(index.versions("acme.missing").is_empty());
     }
 
     #[test]

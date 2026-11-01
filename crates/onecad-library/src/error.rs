@@ -47,6 +47,12 @@ pub enum LibraryError {
     #[error("library index at {path} is malformed: {message}")]
     MalformedIndex { path: PathBuf, message: String },
 
+    #[error(
+        "{id}@{version} already exists — re-saving a component is a version bump \
+         (existing instances recorded the old revision)"
+    )]
+    AlreadyExists { id: String, version: String },
+
     #[error("io error: {0}")]
     Io(String),
 }

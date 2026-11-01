@@ -1,0 +1,30 @@
+# CANONICAL §7.3 fixture — the generator version pin is ENFORCED by the worker.
+# `iso4762` builds at `generatorVersion` 1 only. Version 2 and an ABSENT version are
+# recoverable step failures with top-level code `UNSUPPORTED` whose message names the
+# generator id, the requested version and the supported one — raised before any
+# geometry is built, so nothing is published and the head does not move. Version 1
+# is the positive control. (Rust always serialises a u32 `generatorVersion`; the
+# absent leg pins the worker's own defence for a hand-edited or foreign document.)
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_generator_version_refusal","documentRevision":0,"workerEpoch":4,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+# Version 2.
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":111,"documentRevision":0,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"targetStep":0,"ops":[{"opType":"PlaceComponent","opId":"op0","stepIndex":0,"inputs":[],"params":{"componentId":"onecad.std.iso4762","componentVersion":"1.0.0","componentRevision":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source":{"kind":"generator","generatorId":"iso4762","generatorVersion":2,"params":{"thread":"M6","length":20.0}},"placement":{"translate":[0.0,0.0,0.0]}}}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":111,"result":{"planPrepared":true,"lastValidStep":null,"stoppedReason":"opFailed","perStepResults":[{"stepIndex":0,"status":"opFailed","message":"$present","diagnostics":[{"severity":"error","code":"UNSUPPORTED","stage":"build","message":"$present"}]}]}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"DiscardPrepared","args":{"jobId":111}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":111,"result":{"discarded":true}}}
+# Version absent.
+{"send":{"v":1,"t":"req","id":4,"verb":"ExecutePlan","args":{"jobId":112,"documentRevision":0,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"targetStep":0,"ops":[{"opType":"PlaceComponent","opId":"op0","stepIndex":0,"inputs":[],"params":{"componentId":"onecad.std.iso4762","componentVersion":"1.0.0","componentRevision":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source":{"kind":"generator","generatorId":"iso4762","params":{"thread":"M6","length":20.0}},"placement":{"translate":[0.0,0.0,0.0]}}}]}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"jobId":112,"result":{"planPrepared":true,"lastValidStep":null,"stoppedReason":"opFailed","perStepResults":[{"stepIndex":0,"status":"opFailed","message":"$present","diagnostics":[{"severity":"error","code":"UNSUPPORTED","stage":"build","message":"$present"}]}]}}}
+{"send":{"v":1,"t":"req","id":5,"verb":"DiscardPrepared","args":{"jobId":112}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"jobId":112,"result":{"discarded":true}}}
+# Version 1: positive control.
+{"send":{"v":1,"t":"req","id":6,"verb":"ExecutePlan","args":{"jobId":113,"documentRevision":0,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"targetStep":0,"ops":[{"opType":"PlaceComponent","opId":"op0","stepIndex":0,"inputs":[],"params":{"componentId":"onecad.std.iso4762","componentVersion":"1.0.0","componentRevision":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source":{"kind":"generator","generatorId":"iso4762","generatorVersion":1,"params":{"thread":"M6","length":20.0}},"placement":{"translate":[0.0,0.0,0.0]}}}]}}}
+{"expect":{"v":1,"t":"event","id":6,"event":"planStep","stepIndex":0,"jobId":113,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op0"}],"needsRepair":[]}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"jobId":113,"result":{"planPrepared":true,"lastValidStep":0,"stoppedReason":"completed","perStepResults":[{"stepIndex":0,"status":"ok","bodyIds":["body_op0"]}],"historyPrefixHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+{"send":{"v":1,"t":"req","id":7,"verb":"AcceptPrepared","args":{"jobId":113,"documentRevision":0,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"jobId":113,"result":{"accepted":true,"snapshotId":"$present","documentRevision":0}}}
+{"send":{"v":1,"t":"req","id":8,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"result":{"documentRevision":0,"workerEpoch":4,"snapshotId":"$present","hasScratch":false,"historyPrefixHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+{"send":{"v":1,"t":"req","id":9,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":9,"ok":true,"result":{"goodbye":true}}}

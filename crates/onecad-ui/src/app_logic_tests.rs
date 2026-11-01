@@ -209,6 +209,9 @@ mod document_tabs_tests;
 #[path = "document_tab_delivery_tests.rs"]
 mod document_tab_delivery_tests;
 
+#[path = "library_delivery_tests.rs"]
+mod library_delivery_tests;
+
 #[path = "overlay_routing_tests.rs"]
 mod overlay_routing_tests;
 

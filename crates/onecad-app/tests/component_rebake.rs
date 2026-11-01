@@ -339,6 +339,7 @@ fn spec_with(parameters: BTreeMap<String, FreeParameterInput>) -> NewComponentSp
         designation: None,
         attachments: Default::default(),
         parameters,
+        ..Default::default()
     }
 }
 

@@ -132,6 +132,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 return;
             }
             let overlay_owns = crate::viewport_widgets::show(app, ui, rect, &view);
+            crate::placement_gesture::viewport(app, ui, rect, &response, (&view, &display), overlay_owns);
+            crate::component_wizard::pick::viewport(app, ui, rect, &response, (&view, &display), overlay_owns);
             if app.sketch_active() {
                 let dimension_owns = !app.doc.sketch_gesture.busy() && crate::sketch_dimensions::show(app, ui, rect, &view);
                 if app.doc.sketch_gesture.busy() {

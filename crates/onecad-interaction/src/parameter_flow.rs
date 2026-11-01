@@ -169,6 +169,7 @@ impl Interaction {
         self.sequence = sequence;
         tool.tag.sequence = sequence;
         tool.preview = PreviewStatus::Empty;
+        tool.mate_placement = None;
         tool.progress.validated = None;
         tool.params.op_error = None;
         let mut effects = vec![clear];

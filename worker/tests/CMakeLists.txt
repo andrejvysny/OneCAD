@@ -1178,6 +1178,20 @@ add_test(
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/place_component_mate_reseat.ndjson
 )
+# Component Library — the worker ENFORCES the generator version pin (UNSUPPORTED for a
+# version it does not implement or an absent one), `embedded` places a baked BRep
+# (self-generating via ExportGeometry), and DetachComponent keeps the body.
+# `preview_component_mate_placement`: PreviewOp echoes the mate-resolved placement.
+foreach(_fx place_component_generator_version_refusal place_component_iso4032
+        place_component_iso7089 place_component_embedded detach_component
+        preview_component_mate_placement)
+    add_test(
+        NAME canonical_${_fx}
+        COMMAND worker_harness
+                --worker $<TARGET_FILE:onecad-worker>
+                --fixture ${PROTOCOL_FIXTURES}/${_fx}.ndjson
+    )
+endforeach()
 # Kernel-hardening WP-I — §7.3 gear referenceability ENFORCED: `AcquireElementIds`
 # unchanged (it mints nothing), `BindElementIds` on a tooth flank refused by name
 # with `REF_UNRESOLVED` + `bindingIndex` + the `GEAR_FACE_NOT_REFERENCEABLE`

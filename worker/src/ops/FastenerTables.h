@@ -11,9 +11,9 @@
 // recorded at its definition in `FastenerTables.cpp`; the BOLTS-sourced ones
 // are credited in the repo-root `THIRD_PARTY_NOTICES`.
 //
-// ONE table, because the seed catalog is one family. `known_threads` and the
-// `std::map` keying stay generic rather than collapsing to this row type — the
-// loud-failure message is the shape every added family needs on day one.
+// Three tables: ISO 4762 (screw), ISO 4032 (nut), ISO 7089 (washer). `known_threads`
+// and the `std::map` keying stay generic — the loud-failure message is the shape
+// every added family needs on day one.
 //
 // `onecad-library::tables` (Rust) carries an authoring/metadata mirror of the
 // same data with the fuller column set. That copy is NEVER a geometry
@@ -39,7 +39,25 @@ struct ScrewSize {
     double pitch_mm;
 };
 
+/// A hex nut (ISO 4032). `bore_diameter_mm` is the thread's nominal major Ø —
+/// the nut's thread renders cosmetically (a plain bore), like `thread_detail:
+/// cosmetic` does for an external thread.
+struct NutSize {
+    double bore_diameter_mm;
+    double width_across_flats_mm;
+    double thickness_mm;
+};
+
+/// A plain washer (ISO 7089 normal series).
+struct WasherSize {
+    double inner_diameter_mm;
+    double outer_diameter_mm;
+    double thickness_mm;
+};
+
 const std::map<std::string, ScrewSize>& iso4762_table();
+const std::map<std::string, NutSize>& iso4032_table();
+const std::map<std::string, WasherSize>& iso7089_table();
 
 /// `"M2, M2.5, M3, …"` for the named table — the loud-failure message every
 /// generator emits on an unknown thread designation (spec §0 invariant 4: a

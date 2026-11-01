@@ -2295,6 +2295,7 @@ fn parse_preview_result(
         changed_bodies,
         deleted_bodies,
         needs_repair,
+        mate_placement: wire::parse_mate_placement(result.get("matePlacement")).map(|p| *p),
     })
 }
 

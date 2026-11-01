@@ -1,0 +1,48 @@
+# CANONICAL §7.6 fixture — `PreviewOp` echoes the mate-resolved placement
+# (additive optional `result.matePlacement`, same shape as §7.2
+# `planStep.matePlacement`) whenever the candidate PlaceComponent's mate RESOLVED,
+# whether or not the seat moved (present <=> resolved in this preview).
+#
+#   1. MATED, off the plane. The M6 screw is drafted at z=0 but mated COINCIDENT
+#      to the plate's top face (z=5): the preview re-seats it ON the plane, so the
+#      result carries `matePlacement.translate` z = 5 exactly (a plane-to-plane
+#      distance between faces the extrude placed at z=0 / z=5; no measured float).
+#   2. UNMATED. No mate: `matePlacement` is ABSENT. The harness matcher is
+#      subset-only and cannot assert absence, so the absence is pinned by the Rust
+#      real-worker test (`component_placement_pipeline.rs`) and by `GetWorkerHead`
+#      below proving the head is untouched; this leg pins that the unmated preview
+#      still succeeds with the unchanged result keys.
+#   3. MATED, UNMOVED. Drafted exactly on the plane (z=5): the echo is PRESENT with
+#      the resolved placement (translate z = 5).
+#
+# GEOMETRY as in place_component_mate_reseat.ndjson: plate x∈[−20,0], y∈[0,40],
+# z∈[0,5]; Ø6 cylinder through (100,0).
+# The plate (5 mm) and the cylinder, one plan.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_preview_component_mate_placement","documentRevision":0,"workerEpoch":4,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":80,"documentRevision":1,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],"targetStep":3,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk1","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[40,0]},{"id":"e2","type":"Line","p0":[40,0],"p1":[40,20]},{"id":"e3","type":"Line","p0":[40,20],"p1":[0,20]},{"id":"e4","type":"Line","p0":[0,20],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"inputs":[{"primary":{"bodyId":"","elementId":"sk1.region.r0","kind":"face"}}],"params":{"sketchId":"sk1","distance":5.0,"extrudeMode":"Blind","booleanMode":"NewBody"}},{"opType":"Sketch","opId":"op2","stepIndex":2,"params":{"sketchId":"sk2","plane":{"kind":"XY"},"entities":[{"id":"c1","type":"Circle","center":[0,-100],"radius":3.0}],"constraints":[]}},{"opType":"Extrude","opId":"op3","stepIndex":3,"inputs":[{"primary":{"bodyId":"","elementId":"sk2.region.r0","kind":"face"}}],"params":{"sketchId":"sk2","distance":10.0,"extrudeMode":"Blind","booleanMode":"NewBody"}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"jobId":80}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":1,"jobId":80,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":2,"jobId":80}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":3,"jobId":80,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op3"}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":80,"result":{"planPrepared":true,"lastValidStep":3,"stoppedReason":"completed","historyPrefixHash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":80,"documentRevision":1,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":80,"result":{"accepted":true,"snapshotId":1,"documentRevision":1}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"BindElementIds","args":{"snapshotId":1,"bindings":[{"bodyId":"body_op1","topoKey":"f:6","elementId":"el_top","kind":"face"},{"bodyId":"body_op3","topoKey":"f:1","elementId":"el_hole","kind":"face"}]}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"bound":[{"bodyId":"body_op1","topoKey":"f:6","elementId":"el_top","kind":"face"},{"bodyId":"body_op3","topoKey":"f:1","elementId":"el_hole","kind":"face"}]}}}
+# LEG 1 — mated, drafted 5 mm off the plane: the preview re-seats it.
+{"send":{"v":1,"t":"req","id":5,"verb":"PreviewOp","args":{"op":{"opType":"PlaceComponent","opId":"preview_mated","inputs":[],"params":{"componentId":"onecad.std.iso4762","componentVersion":"1.0.0","componentRevision":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source":{"kind":"generator","generatorId":"iso4762","generatorVersion":1,"params":{"thread":"M6","length":20.0}},"placement":{"translate":[-10.0,20.0,0.0]},"mate":{"selfAttachment":"shankAxis","target":{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}},"kind":"coincident","flipped":false}}},"expectedSnapshotId":1,"lod":"coarse"}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"snapshotId":1,"matePlacement":{"translate":[-10.0,20.0,5.0]},"needsRepair":[]}}}
+# LEG 2 — unmated: succeeds, `matePlacement` absent (see header).
+{"send":{"v":1,"t":"req","id":6,"verb":"PreviewOp","args":{"op":{"opType":"PlaceComponent","opId":"preview_unmated","inputs":[],"params":{"componentId":"onecad.std.iso4762","componentVersion":"1.0.0","componentRevision":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source":{"kind":"generator","generatorId":"iso4762","generatorVersion":1,"params":{"thread":"M6","length":20.0}},"placement":{"translate":[-10.0,20.0,5.0]}}},"expectedSnapshotId":1,"lod":"coarse"}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"result":{"snapshotId":1,"needsRepair":[]}}}
+# LEG 3 — mated and ALREADY on the plane (unmoved): the echo is still present,
+# because it means "the mate resolved", not "the seat moved".
+{"send":{"v":1,"t":"req","id":7,"verb":"PreviewOp","args":{"op":{"opType":"PlaceComponent","opId":"preview_mated_unmoved","inputs":[],"params":{"componentId":"onecad.std.iso4762","componentVersion":"1.0.0","componentRevision":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source":{"kind":"generator","generatorId":"iso4762","generatorVersion":1,"params":{"thread":"M6","length":20.0}},"placement":{"translate":[-10.0,20.0,5.0]},"mate":{"selfAttachment":"shankAxis","target":{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}},"kind":"coincident","flipped":false}}},"expectedSnapshotId":1,"lod":"coarse"}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"result":{"snapshotId":1,"matePlacement":{"translate":[-10.0,20.0,5.0]},"needsRepair":[]}}}
+# A preview is invisible to fencing: the head did not move.
+{"send":{"v":1,"t":"req","id":8,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"result":{"documentRevision":1,"workerEpoch":4,"snapshotId":1,"hasScratch":false}}}
+{"send":{"v":1,"t":"req","id":9,"verb":"CloseSession","args":{}}}
+{"expect":{"v":1,"t":"resp","id":9,"ok":true,"result":{"sessionClosed":true}}}

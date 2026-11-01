@@ -261,6 +261,10 @@ std::array<double, 3> nearest_point_on_face(const TopoDS_Face& face, const gp_Pn
 struct MateReseat {
     json placement;
     gp_Trsf trsf;
+    // True iff the solved seat moved beyond the reseat epsilon vs the frozen
+    // placement. A resolved-but-unmoved mate still returns its placement (the
+    // PreviewOp echo is "mate resolved", not "mate moved").
+    bool moved = false;
 };
 
 // Component Library P3 WP-3.1 (spec §5.5): re-resolves `mate.target` through
@@ -270,12 +274,13 @@ struct MateReseat {
 // (VF-M7) exists to enforce) and recomputes the component's seat from the
 // mate kind + resolved frame + flip via `solve_mate_placement`.
 //
-// Returns the new placement + transform iff AutoBind resolved AND the
-// candidate moved beyond the reseat epsilon vs `frozen` — the caller applies
-// it and echoes it back on `OpOutcome.mate_placement` for Rust to persist
-// (a derived writeback, never dropped/moved silently otherwise). Returns
-// `std::nullopt` in every other case (unresolved target, malformed frame,
-// or resolved-but-unmoved — the common no-op tick) — the frozen placement
+// Returns the solved placement + transform iff AutoBind resolved; `moved` says
+// whether the candidate moved beyond the reseat epsilon vs `frozen`. The caller
+// applies it and echoes it on `OpOutcome.mate_placement` for Rust to persist
+// only when `moved` (a derived writeback, never dropped/moved silently
+// otherwise), and on `OpOutcome.mate_resolved_placement` whenever it resolved.
+// Returns `std::nullopt` in every other case (unresolved target, malformed
+// frame, or a halt) — the frozen placement
 // stands unchanged, and an unresolved target additionally appends a
 // NeedsRepair item to `needs_repair_out` (never a hard `OP_FAILED`: a
 // component with a broken mate still publishes at its last-good spot,
@@ -552,11 +557,9 @@ std::optional<MateReseat> resolve_mate_reseat(OpContext& ctx, const json& mate, 
     const gp_Dir zc = local_z.Transformed(candidate_trsf);
     const double rotation_delta_deg = zf.Angle(zc) * 180.0 / kPi;
 
-    if (translation_delta_mm <= kMateReseatTranslationEpsilonMm &&
-        rotation_delta_deg <= kMateReseatRotationEpsilonDeg) {
-        return std::nullopt;  // within tolerance — a no-op tick, frozen stands
-    }
-    return MateReseat{*candidate, candidate_trsf};
+    const bool moved = translation_delta_mm > kMateReseatTranslationEpsilonMm ||
+                       rotation_delta_deg > kMateReseatRotationEpsilonDeg;
+    return MateReseat{*candidate, candidate_trsf, moved};
 }
 
 // A CONVERTED codec must pin the binary format version it was written in, and a
@@ -860,6 +863,22 @@ OpOutcome resolve_source_and_publish(OpContext& ctx, const json& params, const s
             return OpOutcome::fail("OP_FAILED", op_label + " source.generatorId must not be empty");
         }
 
+        // The version pin is enforced, not advisory: a record frozen at a version this
+        // worker does not implement is refused BEFORE any geometry is built. An
+        // unregistered id has no supported version and falls through to
+        // `build_component`'s own unknown-id refusal.
+        if (const int supported = generator_supported_version(generator_id); supported != 0) {
+            const json requested = source.contains("generatorVersion") ? source["generatorVersion"]
+                                                                       : json();
+            if (!requested.is_number_integer() || requested.get<long long>() != supported) {
+                return OpOutcome::fail(
+                    "UNSUPPORTED",
+                    op_label + ": generator '" + generator_id + "' version " +
+                        (requested.is_null() ? std::string("<absent>") : requested.dump()) +
+                        " is not supported (supported version: " + std::to_string(supported) + ")");
+            }
+        }
+
         if (ctx.cancel != nullptr && ctx.cancel->cancelled()) return OpOutcome::cancelled();
 
         // Free params live under `source.params` — the wire lowering has no
@@ -945,13 +964,17 @@ OpOutcome resolve_source_and_publish(OpContext& ctx, const json& params, const s
     // detach) — this branch simply never fires there.
     std::vector<json> mate_repairs;
     std::optional<json> mate_placement_echo;
+    std::optional<json> mate_resolved_placement_echo;
     std::optional<json> mate_resolved_echo;
     if (params.contains("mate") && params["mate"].is_object()) {
         if (const std::optional<MateReseat> reseated =
                 resolve_mate_reseat(ctx, params["mate"], params["placement"], op_id, mate_repairs,
                                     mate_resolved_echo)) {
-            trsf = reseated->trsf;
-            mate_placement_echo = reseated->placement;
+            mate_resolved_placement_echo = reseated->placement;
+            if (reseated->moved) {
+                trsf = reseated->trsf;
+                mate_placement_echo = reseated->placement;
+            }
         }
     }
 
@@ -995,6 +1018,9 @@ OpOutcome resolve_source_and_publish(OpContext& ctx, const json& params, const s
     out.body_ids.push_back(bid);
     for (json& r : mate_repairs) out.needs_repair.push_back(std::move(r));
     if (mate_placement_echo) out.mate_placement = std::move(*mate_placement_echo);
+    if (mate_resolved_placement_echo) {
+        out.mate_resolved_placement = std::move(*mate_resolved_placement_echo);
+    }
     if (mate_resolved_echo) out.mate_resolved = std::move(*mate_resolved_echo);
     return out;
 }

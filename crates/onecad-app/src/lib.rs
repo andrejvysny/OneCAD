@@ -27,6 +27,7 @@ mod host_tasks;
 pub mod imports;
 pub mod library;
 pub mod library_ingest;
+pub mod library_instances;
 pub mod library_seed;
 pub mod library_seed_templates;
 pub mod lifecycle;

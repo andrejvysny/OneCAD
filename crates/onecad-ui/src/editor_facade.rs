@@ -98,20 +98,11 @@ pub(crate) fn open_start(app: &mut App, page: StartPage) {
         return;
     }
     if page == StartPage::Library {
-        crate::library_pages::go_library(&mut app.ui, 0);
+        crate::library_pages::open_library(&mut app.ui);
     } else {
         app.ui.start_page = page;
     }
     app.ui.start_open = true;
-}
-
-/// Pill entry point for Insert component: the Explorer lists the library.
-pub fn show_library(app: &mut App) {
-    if !PREVIEW_FACADES {
-        return;
-    }
-    app.ui.editor_facade.library_mode = true;
-    app.ui.explorer_open = true;
 }
 
 pub use placement::pill as placement_pill;

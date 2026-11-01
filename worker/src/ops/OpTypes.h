@@ -95,6 +95,12 @@ struct OpOutcome {
     // did not move (the common no-op case) and a `mate` that fell to
     // NeedsRepair (the frozen `placement` stands unchanged there).
     std::optional<nlohmann::json> mate_placement;
+    // SCHEMA §7.6 `matePlacement` (PreviewOp ONLY): the solved seat whenever the
+    // `PlaceComponent` mate RESOLVED, moved or not — present iff the preview's mate
+    // resolved. Unresolved targets, halts (`mateAxisReversed`, `mateSeatOffFace`)
+    // and every other op leave it absent. ExecutePlan never reads it (its
+    // `planStep.matePlacement` stays "only when moved", `mate_placement` above).
+    std::optional<nlohmann::json> mate_resolved_placement;
     // Kernel-hardening WP-I (SCHEMA §7.2 `planStep.mateResolved`): set on EVERY
     // `PlaceComponent` step whose `mate` resolved AutoBind against a CYLINDRICAL
     // target (a cylinder face or a circle edge, mate kinds `concentric` /

@@ -422,3 +422,12 @@ async fn downstream_width_edits(host: &mut Harness, plate: &Plate) {
         );
     }
 }
+
+#[path = "plate_delivery_tests/placement.rs"]
+mod placement;
+
+#[path = "plate_delivery_tests/instances.rs"]
+mod instances;
+
+#[path = "plate_delivery_tests/wizard.rs"]
+mod wizard;

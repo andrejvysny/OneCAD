@@ -1,6 +1,6 @@
 //! Start screen (README 01a): sidebar, action tiles and recent cards under the title bar.
 //! File intents use the native lifecycle controller; recent metadata comes from application services.
-use crate::{app::App, document_flow::Request, ui_state::StartPage};
+use crate::{app::App, document_flow::Request, library_catalog::Source, ui_state::StartPage};
 use egui::{Rect, RichText, Stroke, Ui, UiBuilder, pos2, vec2};
 use onecad_app::dto::RecentProjectDto;
 use onecad_widgets::{
@@ -18,8 +18,7 @@ const MAIN_PAD_X: f32 = 40.0;
 pub fn show(app: &mut App, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
     // Sheets close themselves on Esc while drawing; sample before so one press closes only the sheet.
-    let modal_open = app.ui.library.sheet.is_some()
-        || app.ui.library.wizard.is_some()
+    let modal_open = app.doc.wizard.is_some()
         || app.ui.extensions.sheet.is_some()
         || app.ui.extensions.native.review.is_some()
         || app.ui.extensions.native.palette_open
@@ -52,18 +51,15 @@ fn back(app: &mut App) {
 /// The list a detail page returns to; `None` for pages Esc leaves the Start screen from.
 fn parent(page: StartPage) -> Option<StartPage> {
     match page {
-        StartPage::ComponentDetail | StartPage::StandardPart => Some(StartPage::Library),
+        StartPage::ComponentDetail => Some(StartPage::Library),
+        StartPage::StandardPart => Some(StartPage::ComponentDetail),
         StartPage::ExtensionDetail => Some(StartPage::Extensions),
         StartPage::Home | StartPage::Library | StartPage::Extensions | StartPage::Settings => None,
     }
 }
 
-/// Main area right of the sidebar. Library pages own their padding and scrolling because
-/// the standard-part page runs edge to edge.
+/// Main area right of the sidebar. Library pages own their padding and scrolling.
 fn page(app: &mut App, ui: &mut Ui, area: Rect) {
-    if !crate::editor_facade::PREVIEW_FACADES && library_active(app.ui.start_page) {
-        app.ui.start_page = StartPage::Home;
-    }
     let content = Rect::from_min_max(
         pos2(area.left() + sidebar_width(area.width()), area.top()),
         area.max,
@@ -109,7 +105,7 @@ pub(crate) fn leave(app: &mut App) {
     app.draw_dirty = true;
 }
 
-/// Sidebar destinations; `Sub` indexes the library source rows.
+/// Sidebar destinations; `Sub` indexes the library source rows (`Source::ALL[i + 1]`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Nav {
     Home,
@@ -119,20 +115,28 @@ enum Nav {
     Settings,
 }
 
-const SUB_ITEMS: [&str; 3] = ["My components", "This project", "Standard parts"];
+/// The library's real source kinds, as filters over one catalog.
+const SUB_ITEMS: [Source; 4] = [
+    Source::Generator,
+    Source::Embedded,
+    Source::Document,
+    Source::Profile,
+];
+
+fn show_source(state: &mut crate::ui_state::UiState, source: Source) {
+    state.start_page = StartPage::Library;
+    let catalog = &mut state.library.catalog;
+    if catalog.query.source != source {
+        catalog.query.source = source;
+        catalog.requery();
+    }
+}
 
 fn navigate(state: &mut crate::ui_state::UiState, nav: Nav) {
     match nav {
         Nav::Home => state.start_page = StartPage::Home,
-        Nav::Library => {
-            state.start_page = StartPage::Library;
-            state.library.source = 0;
-        }
-        Nav::Sub(2) => state.start_page = StartPage::StandardPart,
-        Nav::Sub(i) => {
-            state.start_page = StartPage::Library;
-            state.library.source = i + 1;
-        }
+        Nav::Library => show_source(state, Source::All),
+        Nav::Sub(i) => show_source(state, SUB_ITEMS[i]),
         Nav::Extensions => state.start_page = StartPage::Extensions,
         Nav::Settings => state.start_page = StartPage::Settings,
     }
@@ -146,11 +150,7 @@ fn library_active(page: StartPage) -> bool {
 }
 
 fn sub_active(state: &crate::ui_state::UiState, i: usize) -> bool {
-    match (state.start_page, i) {
-        (StartPage::StandardPart, 2) => true,
-        (StartPage::Library, 0 | 1) => state.library.source == i + 1,
-        _ => false,
-    }
+    state.start_page == StartPage::Library && state.library.catalog.query.source == SUB_ITEMS[i]
 }
 
 fn sidebar(app: &mut App, ui: &mut Ui, area: Rect) {
@@ -169,7 +169,7 @@ fn sidebar(app: &mut App, ui: &mut Ui, area: Rect) {
     let mut nav = None;
     let top = Rect::from_min_size(
         rect.min + vec2(10.0, 64.0),
-        vec2(rect.width() - 21.0, 260.0),
+        vec2(rect.width() - 21.0, 330.0),
     );
     ui.scope_builder(UiBuilder::new().max_rect(top), |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
@@ -232,16 +232,14 @@ fn top_items(app: &App, ui: &mut Ui) -> Option<Nav> {
         ("component", "Component library", Some(Nav::Library)),
     ];
     for (icon, label, target) in items {
-        if !crate::editor_facade::PREVIEW_FACADES && target != Some(Nav::Home) {
+        let open = target == Some(Nav::Home) || target == Some(Nav::Library);
+        if !crate::editor_facade::PREVIEW_FACADES && !open {
             let reason = match label {
                 "Recent" => {
                     "Recent documents are available in Home; a separate native page is not available yet"
                 }
                 "Starred" => "Native document starring is not available yet",
                 "Templates" => "Native template creation is not available yet",
-                "Component library" => {
-                    "Native component library browsing and placement are not available yet"
-                }
                 _ => "Native destination is not available yet",
             };
             ui.add(SidebarNavItem::new(icon, label).enabled(false))
@@ -261,8 +259,8 @@ fn top_items(app: &App, ui: &mut Ui) -> Option<Nav> {
         }
     }
     if library_active(page) {
-        for (i, label) in SUB_ITEMS.into_iter().enumerate() {
-            let item = SidebarNavItem::new("", label)
+        for (i, source) in SUB_ITEMS.into_iter().enumerate() {
+            let item = SidebarNavItem::new("", source.label())
                 .sub(true)
                 .active(sub_active(&app.ui, i));
             if ui.add(item).clicked() {

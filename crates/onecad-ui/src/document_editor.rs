@@ -9,6 +9,8 @@ use std::sync::Arc;
 pub struct DocumentEditor {
     pub documents: crate::document_flow::Flow,
     pub(crate) items: crate::document_items::Flow,
+    pub(crate) instances: crate::component_instances::State,
+    pub(crate) wizard: Option<crate::component_wizard::WizardState>,
     pub(crate) selection_preview: crate::item_selection::Preview,
     pub bridge: Bridge,
     pub display: Option<Arc<Display>>,
@@ -41,6 +43,8 @@ pub struct DocumentEditor {
     pub(crate) input_repair: Option<crate::input_repair_ui::Pending>,
     /// Staging for a Fillet, Chamfer or Offset Face the user chose, in flight.
     pub(crate) operation_start: Option<crate::operation_start::Pending>,
+    /// The component placement gesture owning this editor, if any.
+    pub(crate) placement: Option<crate::placement_gesture::ComponentPlacement>,
     pub numeric_id: Option<egui::Id>,
     pub status: String,
     pub command_status: bool,
@@ -82,6 +86,8 @@ impl DocumentEditor {
         Ok(Self {
             documents: Default::default(),
             items: Default::default(),
+            instances: Default::default(),
+            wizard: None,
             selection_preview: Default::default(),
             bridge,
             display: None,
@@ -107,6 +113,7 @@ impl DocumentEditor {
             selection: SelectionSet::default(),
             operand_staging: None,
             operation_start: None,
+            placement: None,
             input_repair: None,
             numeric_id: None,
             status,

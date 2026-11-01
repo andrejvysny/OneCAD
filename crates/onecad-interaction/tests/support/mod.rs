@@ -90,6 +90,7 @@ pub fn preview(tag: &RequestTag) -> PreviewResultDto {
         changed_bodies: Vec::new(),
         deleted_bodies: Vec::new(),
         needs_repair: Vec::new(),
+        mate_placement: None,
     }
 }
 

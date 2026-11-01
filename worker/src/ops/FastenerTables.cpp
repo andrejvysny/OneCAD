@@ -40,4 +40,35 @@ const std::map<std::string, ScrewSize>& iso4762_table() {
     return table;
 }
 
+// ISO 4032 hexagon nut, style 1 (mm). BOLTS `data/nut.blt`, class
+// `hexagonnut1`, retrieved 2026-08-13. Columns used: `d1` (thread nominal Ø,
+// which is the bore this cosmetic rendering cuts), `s` (width across flats),
+// `m_max` (thickness). Verbatim from the source.
+const std::map<std::string, NutSize>& iso4032_table() {
+    static const std::map<std::string, NutSize> table = {
+        {"M2", {2.0, 4.0, 1.6}},    {"M2.5", {2.5, 5.0, 2.0}},  {"M3", {3.0, 5.5, 2.4}},
+        {"M4", {4.0, 7.0, 3.2}},    {"M5", {5.0, 8.0, 4.7}},    {"M6", {6.0, 10.0, 5.2}},
+        {"M8", {8.0, 13.0, 6.8}},   {"M10", {10.0, 16.0, 8.4}}, {"M12", {12.0, 18.0, 10.8}},
+    };
+    return table;
+}
+
+// ISO 7089 plain washer, normal series, 200 HV (mm). BOLTS
+// `data/washer.blt`, class `plainwasher1`, retrieved 2026-08-13. Columns
+// used: `d1` (inner Ø), `d2` (outer Ø), `s` (thickness).
+//
+// ONE DELIBERATE DEVIATION FROM THE SOURCE: BOLTS lists M10 as inner Ø 10.0.
+// ISO 7089 (and DIN 125 A, which BOLTS anchors this table to) both publish
+// **10.5** — a washer with a 10.0 bore would not pass an M10 bolt. Taken as a
+// slip in the source and corrected here, recorded rather than silently fixed;
+// every other row matches BOLTS verbatim.
+const std::map<std::string, WasherSize>& iso7089_table() {
+    static const std::map<std::string, WasherSize> table = {
+        {"M2", {2.2, 5.0, 0.3}},   {"M2.5", {2.7, 6.0, 0.5}}, {"M3", {3.2, 7.0, 0.5}},
+        {"M4", {4.3, 9.0, 0.8}},   {"M5", {5.3, 10.0, 1.0}},  {"M6", {6.4, 12.0, 1.6}},
+        {"M8", {8.4, 16.0, 1.6}},  {"M10", {10.5, 20.0, 2.0}}, {"M12", {13.0, 24.0, 2.5}},
+    };
+    return table;
+}
+
 }  // namespace onecad::ops::fasteners

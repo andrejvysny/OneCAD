@@ -15,11 +15,21 @@ Components: ISO 4762 / DIN 912 socket-head cap screw dimensions
             data/hex_socket.blt, class "hexsocketheadcap"
             Retrieved 2026-08-12
 
-            (ISO 4014, ISO 4017, ISO 4032 and ISO 7089 tables were also
-            transcribed from BOLTS and have since been REMOVED along with
-            their generators. No BOLTS-derived data from those classes
-            remains in the tree; the entries are dropped here rather than
-            kept as a claim about data that is not shipped.)
+            ISO 4032 hexagon nut, style 1
+            (crates/onecad-library/src/tables/iso4032.rs,
+             worker/src/ops/FastenerTables.cpp::iso4032_table())
+            data/nut.blt, class "hexagonnut1"
+            Retrieved 2026-08-13
+
+            ISO 7089 plain washer, normal series
+            (crates/onecad-library/src/tables/iso7089.rs,
+             worker/src/ops/FastenerTables.cpp::iso7089_table())
+            data/washer.blt, class "plainwasher1"
+            Retrieved 2026-08-13
+
+            (ISO 4014 and ISO 4017 tables were also transcribed from BOLTS
+            and have since been REMOVED along with their generators. No
+            BOLTS-derived data from those classes remains in the tree.)
 
 Source:     BOLTS — Open Library of Technical Specifications
             https://github.com/boltsparts/BOLTS_archive
@@ -43,10 +53,12 @@ Notes:      Dimension values (M2–M12 where the standard defines them)
             carry their own LGPL 2.1+ headers, which is the license that
             applies to this data.
 
-            The shipped ISO 4762 values are verbatim from the source. (A
-            correction was carried against BOLTS' ISO 7089 M10 inner
-            diameter — 10.0 mm there, 10.5 mm in ISO 7089 and DIN 125 A —
-            for as long as that table shipped; it no longer does.)
+            The shipped ISO 4762 and ISO 4032 values are verbatim from the
+            source, as are all ISO 7089 values except one: a correction is
+            carried against BOLTS' ISO 7089 M10 inner diameter — 10.0 mm
+            there, 10.5 mm in ISO 7089 and DIN 125 A (a 10.0 mm bore would
+            not pass an M10 bolt). It is recorded at the table definition
+            in both copies and pinned by a test on each side.
 
 -------------------------------------------------------------------------
 Open CASCADE Technology (OCCT) 8.0.1 — geometry kernel

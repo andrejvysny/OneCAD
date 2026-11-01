@@ -225,6 +225,10 @@ Envelope build_response(const Envelope& req, const PreviewRequest& input,
         {"needsRepair", json::array()},
         {"meshes", std::move(meshes)},
     };
+    // SCHEMA §7.6: additive, present iff the candidate's mate resolved (moved or not).
+    if (outcome.mate_resolved_placement) {
+        response.result["matePlacement"] = *outcome.mate_resolved_placement;
+    }
     return response;
 }
 

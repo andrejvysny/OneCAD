@@ -339,9 +339,6 @@ pub fn unavailable_reason(id: ToolId) -> &'static str {
             "Native temporary/persistent body visibility is planned (ONECAD-320)"
         }
         ToolId::Measure => "Native measurement workflow is planned (ONECAD-245)",
-        ToolId::InsertComponent | ToolId::MakeComponent => {
-            "Native library placement is unavailable (ONECAD-300–303)"
-        }
         ToolId::Flange | ToolId::Dogbone | ToolId::CheckGeometry => {
             "Native extension execution is unavailable (ONECAD-92)"
         }
@@ -386,6 +383,9 @@ pub fn running_tool(app: &App) -> Option<ToolId> {
         Operation::Known(KnownOperation::CircularPattern(_)) => Some(ToolId::CircularPattern),
         Operation::Known(KnownOperation::MirrorBody(_)) => Some(ToolId::MirrorBody),
         Operation::Known(KnownOperation::Gear(_)) => Some(ToolId::Generators),
+        Operation::Known(
+            KnownOperation::PlaceComponent(_) | KnownOperation::DetachComponent(_),
+        ) => Some(ToolId::InsertComponent),
         _ => Some(ToolId::Edit),
     }
 }
@@ -571,6 +571,7 @@ mod tests {
                     | ToolId::CircularPattern
                     | ToolId::MirrorBody
                     | ToolId::Generators
+                    | ToolId::InsertComponent
             ) {
                 assert!(
                     unavailable_reason(tool.id).contains("ONECAD-"),

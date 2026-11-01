@@ -82,6 +82,27 @@ pub fn pick_with_tolerance<'a>(
         policy,
         tolerance: tolerance(edge_tolerance),
         indexed: true,
+        skip: None,
+    };
+    pick_impl(scene, view, capture, query)
+}
+
+/// As [`pick_with_tolerance`], ignoring every body `skip` accepts: such a body is
+/// transparent to the pick, so a hit falls through to whatever is behind it.
+pub fn pick_skipping<'a>(
+    scene: &'a SceneSnapshot,
+    view: &ViewSnapshot,
+    capture: CaptureIdentity,
+    logical: DVec2,
+    (policy, edge_tolerance): (PickPolicy, f64),
+    skip: &dyn Fn(BodyId) -> bool,
+) -> Result<Option<PickHit<'a>>, SceneError> {
+    let query = Query {
+        logical,
+        policy,
+        tolerance: tolerance(edge_tolerance),
+        indexed: true,
+        skip: Some(skip),
     };
     pick_impl(scene, view, capture, query)
 }
@@ -95,11 +116,13 @@ fn tolerance(edge_tolerance: f64) -> f64 {
 }
 
 #[derive(Clone, Copy)]
-struct Query {
+struct Query<'q> {
     logical: DVec2,
     policy: PickPolicy,
     tolerance: f64,
     indexed: bool,
+    /// Bodies that neither receive hits nor hide what is behind them.
+    skip: Option<&'q dyn Fn(BodyId) -> bool>,
 }
 
 /// Independent traversal oracle for acceleration qualification.
@@ -124,6 +147,7 @@ pub fn pick_brute_force_with_policy<'a>(
         policy,
         tolerance: EDGE_PICK_LOGICAL_PIXELS,
         indexed: false,
+        skip: None,
     };
     pick_impl(scene, view, capture, query)
 }
@@ -142,6 +166,7 @@ pub fn pick_brute_force_with_tolerance<'a>(
         policy,
         tolerance: tolerance(edge_tolerance),
         indexed: false,
+        skip: None,
     };
     pick_impl(scene, view, capture, query)
 }
@@ -150,7 +175,7 @@ fn pick_impl<'a>(
     scene: &'a SceneSnapshot,
     view: &ViewSnapshot,
     capture: CaptureIdentity,
-    query: Query,
+    query: Query<'_>,
 ) -> Result<Option<PickHit<'a>>, SceneError> {
     if scene.identity() != view.identity().scene || capture != view.identity() {
         return Err(SceneError::CaptureMismatch);
@@ -159,12 +184,18 @@ fn pick_impl<'a>(
     let mut face: Option<PickHit<'a>> = None;
     if query.policy == PickPolicy::FacesAndEdges {
         for body in scene.bodies() {
+            if query.skip.is_some_and(|skip| skip(body.body_id())) {
+                continue;
+            }
             let mesh = body.mesh()?;
             pick_body_faces(body, &mesh, view, ray, query.indexed, &mut face);
         }
     }
     let mut edge: Option<PickHit<'a>> = None;
     for body in scene.bodies() {
+        if query.skip.is_some_and(|skip| skip(body.body_id())) {
+            continue;
+        }
         let mesh = body.mesh()?;
         pick_body_edges(body, &mesh, view, ray, query, face.as_ref(), &mut edge);
     }
@@ -210,7 +241,7 @@ fn pick_body_edges<'a>(
     mesh: &MeshView<'a>,
     view: &ViewSnapshot,
     ray: Ray,
-    query: Query,
+    query: Query<'_>,
     face: Option<&PickHit<'a>>,
     edge: &mut Option<PickHit<'a>>,
 ) {
@@ -295,7 +326,7 @@ fn pick_edges<'a>(
     mesh: &MeshView<'a>,
     view: &ViewSnapshot,
     ray: Ray,
-    query: Query,
+    query: Query<'_>,
     face: Option<&PickHit<'a>>,
     best: &mut Option<PickHit<'a>>,
     candidates: impl Iterator<Item = (u32, u32)>,

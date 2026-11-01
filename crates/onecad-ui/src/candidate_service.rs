@@ -100,6 +100,9 @@ pub async fn candidate(context: CandidateBackend, generation: u64, candidate: Ca
                 crate::budget::Kind::Preview,
                 || {
                     backend.shared.is_current(generation)
+                        && backend
+                            .shared
+                            .relieve_cpu_pressure(crate::budget::PREVIEW_RESERVATION)
                         && !backend
                             .shared
                             .stopping

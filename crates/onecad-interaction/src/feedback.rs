@@ -64,6 +64,7 @@ impl Interaction {
         }
         match result {
             Ok(result) if result.snapshot_id == tag.context.snapshot_id.0 => {
+                self.retain_mate_placement(&tag, &result);
                 let status = if result.needs_repair.is_empty() {
                     PreviewStatus::Ready
                 } else {
@@ -77,6 +78,14 @@ impl Interaction {
                 None,
             ),
             Err(message) => self.finish_preview(tag, Some(PreviewStatus::Failed(message)), None),
+        }
+    }
+
+    /// Keeps the resolved placement only for the preview of the CURRENT draft: a
+    /// late result for an older tag must not stand in for it.
+    fn retain_mate_placement(&mut self, tag: &RequestTag, result: &PreviewResultDto) {
+        if let Some(tool) = self.tool.as_mut().filter(|tool| tool.tag == *tag) {
+            tool.mate_placement = result.mate_placement.clone();
         }
     }
 

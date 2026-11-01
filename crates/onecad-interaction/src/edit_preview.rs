@@ -112,5 +112,6 @@ fn geometry(result: EditPreview) -> PreviewResultDto {
             .collect(),
         deleted_bodies: Vec::new(),
         needs_repair: Vec::new(),
+        mate_placement: None,
     }
 }

@@ -11,22 +11,18 @@ use onecad_widgets::{
 };
 use std::sync::Arc;
 
-use super::data::Component;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChipKind {
     Plain,
     Accent,
     Warn,
-    Dark,
 }
 
-fn chip_colours(t: &Theme, kind: ChipKind) -> (Color32, Color32, Option<Color32>) {
+fn chip_colours(t: &Theme, kind: ChipKind) -> (Color32, Color32) {
     match kind {
-        ChipKind::Plain => (t.well, t.ink3, None),
-        ChipKind::Accent => (t.sel_soft, t.sel_text, None),
-        ChipKind::Warn => (t.warn_surface, t.warn, Some(t.warn_border)),
-        ChipKind::Dark => (t.tooltip, t.tooltip_text, None),
+        ChipKind::Plain => (t.well, t.ink3),
+        ChipKind::Accent => (t.sel_soft, t.sel_text),
+        ChipKind::Warn => (t.warn_surface, t.warn),
     }
 }
 
@@ -39,16 +35,8 @@ fn chip_galley(p: &Painter, t: &Theme, label: &str, kind: ChipKind) -> Arc<egui:
 pub fn paint_chip(p: &Painter, t: &Theme, pos: egui::Pos2, label: &str, kind: ChipKind) -> f32 {
     let g = chip_galley(p, t, label, kind);
     let rect = Rect::from_min_size(pos, vec2(g.size().x + 14.0, 20.0));
-    let (fill, _, border) = chip_colours(t, kind);
+    let (fill, _) = chip_colours(t, kind);
     p.rect_filled(rect, CornerRadius::same(5), fill);
-    if let Some(b) = border {
-        p.rect_stroke(
-            rect,
-            CornerRadius::same(5),
-            Stroke::new(1.0, b),
-            StrokeKind::Inside,
-        );
-    }
     p.galley(
         pos2(rect.left() + 7.0, rect.center().y - g.size().y / 2.0),
         g,
@@ -149,17 +137,6 @@ pub fn breadcrumb(ui: &mut Ui, crumbs: &[&str]) -> Option<usize> {
     clicked
 }
 
-/// Section heading: 14/600 title, optional muted subtitle.
-pub fn section_header(ui: &mut Ui, text: &str, sub: Option<&str>) {
-    ui.horizontal(|ui| {
-        title(ui, text, 14.0);
-        if let Some(sub) = sub {
-            let c = look(ui.ctx()).theme.ink5;
-            label(ui, sub, 12.0, FontFamily::Proportional, c);
-        }
-    });
-}
-
 /// Square-ish icon button with a hover wash (close, overflow).
 pub fn icon_button(ui: &mut Ui, name: &str, size: f32, bordered: bool) -> Response {
     let l = look(ui.ctx());
@@ -212,63 +189,42 @@ pub fn paint_icon(p: &Painter, rect: Rect, name: &str, bg: Color32, tint: Color3
     );
 }
 
-/// Four-button view strip floating over a preview (fit, iso, front, top).
-pub fn view_strip(ui: &mut Ui, preview: Rect, selected: &mut usize) {
-    let l = look(ui.ctx());
-    let t = &l.theme;
-    let strip = Rect::from_min_size(
-        pos2(
-            preview.right() - 10.0 - 134.0,
-            preview.bottom() - 10.0 - 36.0,
-        ),
-        vec2(134.0, 36.0),
-    );
-    let p = ui.painter();
-    p.rect_filled(strip, CornerRadius::same(8), t.surface);
-    p.rect_stroke(
-        strip,
-        CornerRadius::same(8),
-        Stroke::new(1.0, t.border),
-        StrokeKind::Inside,
-    );
-    for (i, name) in ["fit", "viewIso", "viewFront", "viewTop"]
-        .into_iter()
-        .enumerate()
-    {
-        let cell = Rect::from_min_size(
-            strip.min + vec2(3.0 + i as f32 * 32.0, 3.0),
-            vec2(30.0, 30.0),
-        );
-        let r = ui.interact(cell, ui.scope_id().with(("view", i)), Sense::click());
-        let on = *selected == i;
-        let fill = if on {
-            t.sel_bg
-        } else if r.hovered() {
-            t.hover
-        } else {
-            t.surface
-        };
-        let p = ui.painter();
-        p.rect_filled(cell, CornerRadius::same(6), fill);
-        let tint = if on { t.sel_text } else { t.ink3 };
-        paint_icon(
-            p,
-            Rect::from_center_size(cell.center(), vec2(18.0, 18.0)),
-            name,
-            fill,
-            tint,
-        );
-        if r.clicked() {
-            *selected = i;
-        }
-    }
-}
-
 const CARD_H: f32 = 214.0;
 const THUMB_H: f32 = 128.0;
 
+/// A decoded package preview ready to paint.
+#[derive(Clone, Copy, Debug)]
+pub struct Thumb {
+    pub id: egui::TextureId,
+    pub size: egui::Vec2,
+}
+
+/// What one catalog card shows; built from a search hit.
+pub struct CardView<'a> {
+    pub name: &'a str,
+    pub meta: &'a str,
+    pub icon: &'a str,
+    /// Decoded package preview; the icon stands in until it exists.
+    pub texture: Option<Thumb>,
+    pub chips: &'a [(String, ChipKind)],
+}
+
+/// Cards per row for a minimum card width and gap.
+pub fn columns(avail: f32, min: f32, gap: f32) -> usize {
+    (((avail + gap) / (min + gap)).floor() as usize).max(1)
+}
+
+/// Aspect-preserving rect of `source` pixels centred in `into`.
+pub fn fit_image(into: Rect, source: egui::Vec2) -> Rect {
+    if source.x <= 0.0 || source.y <= 0.0 {
+        return into;
+    }
+    let scale = (into.width() / source.x).min(into.height() / source.y);
+    Rect::from_center_size(into.center(), source * scale)
+}
+
 /// 08a card: thumbnail well, title, meta line and chips.
-pub fn component_card(ui: &mut Ui, w: f32, c: &Component) -> Response {
+pub fn component_card(ui: &mut Ui, w: f32, c: &CardView) -> Response {
     let l = look(ui.ctx());
     let t = &l.theme;
     let (rect, r) = ui.allocate_exact_size(vec2(w, CARD_H), Sense::click());
@@ -291,17 +247,7 @@ pub fn component_card(ui: &mut Ui, w: f32, c: &Component) -> Response {
         thumb.bottom(),
         Stroke::new(1.0, t.border_subtle),
     );
-    let icon = Rect::from_center_size(thumb.center(), vec2(64.0, 64.0));
-    paint_icon(p, icon, c.icon, t.well, t.ink4);
-    if c.update {
-        paint_chip(
-            p,
-            t,
-            thumb.min + vec2(10.0, 10.0),
-            "v4 available",
-            ChipKind::Warn,
-        );
-    }
+    paint_thumbnail(p, thumb, c.icon, c.texture, t);
     let x = rect.left() + 12.0;
     let max_w = w - 24.0;
     let g = fit(
@@ -316,6 +262,9 @@ pub fn component_card(ui: &mut Ui, w: f32, c: &Component) -> Response {
     p.galley(pos2(x, thumb.bottom() + 31.0), g, t.ink5);
     let mut cx = x;
     for (text, kind) in c.chips {
+        if cx + 40.0 > rect.right() - 12.0 {
+            break;
+        }
         cx += paint_chip(p, t, pos2(cx, thumb.bottom() + 53.0), text, *kind) + 4.0;
     }
     let border = if r.hovered() {
@@ -327,45 +276,25 @@ pub fn component_card(ui: &mut Ui, w: f32, c: &Component) -> Response {
     r.on_hover_cursor(CursorIcon::PointingHand)
 }
 
-/// 08a category tile: icon well, name, type count.
-pub fn category_tile(ui: &mut Ui, w: f32, name: &str, count: &str, icon_name: &str) -> Response {
-    let l = look(ui.ctx());
-    let t = &l.theme;
-    let (rect, r) = ui.allocate_exact_size(vec2(w, 64.0), Sense::click());
-    let radius = CornerRadius::same(RADIUS_LG);
-    let p = ui.painter();
-    p.rect_filled(rect, radius, t.surface);
-    let well = Rect::from_min_size(
-        pos2(rect.left() + 12.0, rect.center().y - 20.0),
-        vec2(40.0, 40.0),
-    );
-    p.rect_filled(well, CornerRadius::same(7), t.well);
-    p.rect_stroke(
-        well,
-        CornerRadius::same(7),
-        Stroke::new(1.0, t.border_subtle),
-        StrokeKind::Inside,
-    );
-    paint_icon(
-        p,
-        Rect::from_center_size(well.center(), vec2(27.0, 27.0)),
-        icon_name,
-        t.well,
-        t.ink4,
-    );
-    let x = well.right() + 12.0;
-    let max_w = rect.right() - 8.0 - x;
-    let g = fit(p, name, FontId::new(13.0, fonts::semibold()), t.ink, max_w);
-    p.galley(pos2(x, rect.center().y - 17.0), g, t.ink);
-    let g = fit(p, count, FontId::proportional(11.5), t.ink5, max_w);
-    p.galley(pos2(x, rect.center().y + 3.0), g, t.ink5);
-    let border = if r.hovered() {
-        t.card_hover_border
-    } else {
-        t.border
-    };
-    p.rect_stroke(rect, radius, Stroke::new(1.0, border), StrokeKind::Inside);
-    r.on_hover_cursor(CursorIcon::PointingHand)
+/// The package preview when decoded, else the component's icon.
+pub fn paint_thumbnail(
+    p: &Painter,
+    well: Rect,
+    icon_name: &str,
+    texture: Option<Thumb>,
+    t: &Theme,
+) {
+    match texture {
+        Some(Thumb { id, size }) => {
+            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+            // The well is a fixed box; the image keeps its aspect inside it.
+            p.image(id, fit_image(well.shrink(8.0), size), uv, Color32::WHITE);
+        }
+        None => {
+            let icon = Rect::from_center_size(well.center(), vec2(64.0, 64.0));
+            paint_icon(p, icon, icon_name, t.well, t.ink4);
+        }
+    }
 }
 
 /// Frame shared by the centred modals (sheet, wizard): r12, border, card shadow.

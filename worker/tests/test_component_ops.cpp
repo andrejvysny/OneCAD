@@ -286,6 +286,51 @@ void test_place_component_empty_generator_id_fails_loud() {
           "placeComponent: empty generatorId → OP_FAILED");
 }
 
+// ── The generator version pin is ENFORCED: iso4762 builds at version 1 only, and
+// any other (or absent) version is a recoverable UNSUPPORTED naming the id, the
+// requested version and the supported one — before any geometry is built. ───────
+ops::OpOutcome place_with_source(const std::string& op_id, const json& source) {
+    BodyStore bodies;
+    onecad::elementmap::ElementMapPartition part;
+    json op = {{"opType", "PlaceComponent"}, {"opId", op_id},
+               {"params", {{"componentId", "onecad.std.iso4762"},
+                           {"componentVersion", "1.0.0"},
+                           {"componentRevision", "sha256:" + std::string(64, '0')},
+                           {"source", source},
+                           {"placement", identity_placement()}}}};
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    return ops::execute_place_component(ctx, op, op_id);
+}
+
+void test_place_component_generator_version_pin() {
+    check(place_with_source("opv1", generator_source()).status == ops::OpOutcome::Status::Ok,
+          "generatorVersion 1: builds");
+
+    json v2 = generator_source();
+    v2["generatorVersion"] = 2;
+    const ops::OpOutcome refused = place_with_source("opv2", v2);
+    check(refused.status == ops::OpOutcome::Status::Failed && refused.error_code == "UNSUPPORTED",
+          "generatorVersion 2: UNSUPPORTED");
+    check(refused.error_message.find("iso4762") != std::string::npos &&
+              refused.error_message.find("version 2") != std::string::npos &&
+              refused.error_message.find("supported version: 1") != std::string::npos,
+          "generatorVersion 2: message names id, requested and supported version");
+
+    json absent = generator_source();
+    absent.erase("generatorVersion");
+    const ops::OpOutcome missing = place_with_source("opv3", absent);
+    check(missing.status == ops::OpOutcome::Status::Failed && missing.error_code == "UNSUPPORTED",
+          "generatorVersion absent: UNSUPPORTED");
+    check(missing.error_message.find("<absent>") != std::string::npos,
+          "generatorVersion absent: message says absent");
+
+    json frac = generator_source();
+    frac["generatorVersion"] = "1";
+    check(place_with_source("opv4", frac).error_code == "UNSUPPORTED",
+          "generatorVersion non-integer: UNSUPPORTED");
+}
+
 // ── WP-2.5: `thread_detail: "cosmetic"` explicit matches the DEFAULT (absent)
 // path exactly — proves the new param doesn't change cosmetic behavior. ──────────
 void test_place_component_thread_detail_cosmetic_matches_default() {
@@ -601,6 +646,7 @@ int main() {
     test_place_component_non_positive_length_fails_loud();
     test_place_component_unknown_source_kind_unsupported();
     test_place_component_empty_generator_id_fails_loud();
+    test_place_component_generator_version_pin();
     test_place_component_thread_detail_cosmetic_matches_default();
     test_place_component_thread_detail_simplified_removes_material();
     test_place_component_thread_detail_modeled_removes_material();

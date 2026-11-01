@@ -63,6 +63,9 @@ struct CandidateResult {
     // Echoed as `planStep.matePlacement` (SCHEMA §7.2) so Rust can persist
     // the reseat as a derived, no-undo writeback.
     std::optional<nlohmann::json> mate_placement;
+    // `ops::OpOutcome::mate_resolved_placement`: the solved seat whenever the mate
+    // resolved (moved or not). Read by PreviewOp only; never emitted on planStep.
+    std::optional<nlohmann::json> mate_resolved_placement;
     // Kernel-hardening WP-I: `ops::OpOutcome::mate_resolved` (see its own doc
     // comment), echoed as `planStep.mateResolved` (SCHEMA §7.2) on every step
     // whose mate resolved against a cylindrical target.

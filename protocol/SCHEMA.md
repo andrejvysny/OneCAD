@@ -3177,23 +3177,45 @@ OneCAD-CPP analogue. Added 2026-08-12 (Component Library WP-0.2/WP-1.2).
   four implemented** (WP-3.2, WP-C). An unknown kind refuses recoverably with
   `UNSUPPORTED`.
   - `generator` — `{generatorId, generatorVersion, params}`. Table-driven per
-    thread size as of WP-2.1 (spec §6), and DISPATCHED PER FAMILY on
-    `generatorId` as of WP-A1, extended with the non-fastener families in
-    WP-F2: `iso15` · `iso4014` · `iso4017` · `iso4032` · `iso4762` ·
-    `iso7089` · `iso7093` · `iso7380` · `nema17` · `nema23`. An unregistered
-    `generatorId` fails recoverably with `OP_FAILED`, naming the registered
-    ids — it does **not** fall back to any family (before WP-A1 every id built
-    an ISO 4762 socket cap, which is the silent substitution spec §0
-    invariant 4 forbids). `params.thread` / `.length` / `.thread_detail` are
-    the fastener free params; families with no external thread (nuts, washers,
-    bearings, motors) ignore `thread_detail`, and families with no length
-    (nuts, washers, bearings) ignore `length`. A family keyed by something
-    other than a thread reads its OWN string param — `iso15` reads
-    `params.code` (the bearing code) — and every string under `params` reaches
-    the generator verbatim, so a new key is not a wire change. An unknown
-    `thread` / `code` for the addressed family fails loudly with the known
-    values; an ABSENT one takes the family's documented default (`M6`, `608`,
-    and the frame's own body length for a motor).
+    thread size (spec §6) and DISPATCHED PER FAMILY on `generatorId`. The
+    registered set is **`iso4032`, `iso4762`, `iso7089`**, each at version 1:
+    - `iso4762` — socket head cap screw; params `thread` (M2..M12, default
+      `M6`), `length` (mm, default 20), `thread_detail` (`cosmetic` default |
+      `simplified` | `modeled`). Head z ∈ [0, k], shank z ∈ [−length, 0].
+    - `iso4032` — hex nut (style 1); param `thread` (M2..M12, default `M6`).
+      Hexagonal prism across-flats `s`, height `m`, through bore at the nominal
+      `d` (cosmetic thread; the 30° corner chamfer is not modeled). `length` and
+      `thread_detail` are accepted and ignored.
+    - `iso7089` — plain washer, normal series; param `thread` (M2..M12, default
+      `M6`; the bore is the washer's `d1`, e.g. 6.4 mm for M6, 10.5 mm for M10).
+      `length` and `thread_detail` are accepted and ignored.
+
+    A nut or washer seats its bearing face at the local origin (z = 0) and
+    occupies z ∈ [0, thickness] — it sits ON the surface it is mated to (a plane
+    mate aligns local +Z with the target face's outward normal).
+    Dimensions are the worker's `FastenerTables.cpp` rows (BOLTS, see
+    `THIRD_PARTY_NOTICES`). The other families
+    (`iso15` · `iso4014` · `iso4017` · `iso7093` · `iso7380` · `nema17` ·
+    `nema23`) were removed with the library seed catalog's `SEED_VERSION` 4 and
+    are not registered. Re-adding a family requires a generator, a table, a seed
+    entry and a fixture. An unregistered `generatorId` fails recoverably with
+    `OP_FAILED`, naming the registered ids — it does **not** fall back to any
+    family (the silent substitution spec §0 invariant 4 forbids). Fixtures:
+    `place_component_iso4032.ndjson`, `place_component_iso7089.ndjson`.
+    - **`generatorVersion` is enforced.** Each registered family builds exactly
+      one version (`iso4032`, `iso4762`, `iso7089` → `1`). A record whose `generatorVersion` is absent,
+      non-integer, or different is refused recoverably with `UNSUPPORTED`
+      BEFORE any geometry is built; the message names the generator id, the
+      requested version (`<absent>` when missing) and the supported version.
+      Rust always serialises a `u32`, so the absent leg is the worker's own
+      defence for a hand-edited or foreign document. An unregistered id is not
+      version-checked (it takes the `OP_FAILED` refusal above). Fixture:
+      `place_component_generator_version_refusal.ndjson`.
+    - `params.thread` / `.length` / `.thread_detail` are the fastener free
+      params; an unknown `thread` fails loudly with the known values, and an
+      ABSENT one takes the documented default (`M6`, 20 mm, `cosmetic`). Every
+      string under `params` reaches the generator verbatim, so a new key is not a
+      wire change.
   - `embedded` / `document` — a BAKED solid, carried as a content-addressed
     blob in the placing document's own `imports/` section:
     `{sha256, codec, brepFormat}`, plus `documentSha256` (the frozen authoring
@@ -3390,10 +3412,14 @@ OneCAD-CPP analogue. Added 2026-08-12 (Component Library WP-0.2/WP-1.2).
 - `placement` — SAME normative order as TransformBody: `X' = T ∘ R(center,
   axis, angleDeg) · X`. `rotate` defaults to the identity rotation when
   absent.
-- `componentRevision` is the package content hash at PLACE TIME (spec §4);
-  the library re-verifies it on regen and surfaces `NeedsRepair` on mismatch
-  at the app-crate layer (WP-1.3) — the worker itself never touches the
-  library, only the frozen `source`/`placement` this op already carries.
+- `componentRevision` is the package content hash at PLACE TIME (spec §4). The
+  worker and regen NEVER consult the library or compare it: the cached
+  `source`/`placement` this op already carries stay authoritative for geometry,
+  so a deleted library or a drifted revision changes no regen result. Revision
+  drift and missing definitions are reported by the app layer as per-instance
+  status (`Linked` / `UpgradeAvailable` / `DefinitionMissing` /
+  `RevisionMismatch`) without emitting `NeedsRepair` and without altering the
+  plan outcome.
 
 **DetachComponent** (`op.detachComponent`) — drop a placed component's
 library identity, keeping its cached geometry as an ordinary body: "the
@@ -4394,8 +4420,22 @@ session head and returns the resulting bodies' MESH1. Nothing is committed.
   "changedBodies": ["body_3"],
   "deletedBodies": [],
   "needsRepair": [],
-  "meshes": [ { "bodyId": "body_3", "bin": "mesh:body_3", … } ] }   // §7.6 handles
+  "meshes": [ { "bodyId": "body_3", "bin": "mesh:body_3", … } ],   // §7.6 handles
+  "matePlacement": { "translate": [0, 0, 5] } }   // OPTIONAL, mated PlaceComponent only
 ```
+
+- **`matePlacement` (OPTIONAL, 2026-11-01).** Present IFF the candidate op is a
+  `PlaceComponent` whose `params.mate` resolved `AutoBind` in this preview, whether
+  or not the recomputed seat moved (unlike [§7.2 `planStep.matePlacement`](#72-regen),
+  which stays "only when moved"). The value has the exact `FrozenPlacement` shape of
+  the solved seat. It lets a client commit a "Copy" placement (`DetachComponent`) at
+  the exact mate-snapped transform instead of the unsnapped draft. Absent on every
+  other op, on an unmated op, and on an unresolved or halted mate (no target object,
+  `NeedsRepair`, `mateAxisReversed`, `mateSeatOffFace`), so the result of every other
+  preview is byte-identical.
+  Additive under the §4 unknown-key-ignored rule: no `protocolVersion` bump and no
+  hello capability (an older worker simply omits it; a client then has no snapped
+  placement and MUST refuse a mated copy rather than use the draft).
 
 - `op` is the same **canonical worker operation** used inside `ExecutePlan`:
   profile binding is flat `params.sketchId`/`params.regionId`, body-bearing
@@ -6202,6 +6242,46 @@ and back Invariant 5 and checkpoint drift detection.
 ---
 
 ## 14. Changelog
+
+- **2026-11-01 — `PlaceComponent`/`DetachComponent` generators `iso4032` (hex
+  nut) and `iso7089` (plain washer) registered.** §7.3 `generator` sources: the
+  registered set grows from `iso4762` to `iso4032`, `iso4762`, `iso7089`, each at
+  `generatorVersion` 1 (the version pin applies to the new ids identically).
+  Both take the `thread` free param (M2..M12, default `M6`) and ignore `length` /
+  `thread_detail`; a nut/washer occupies z ∈ [0, thickness] with its bearing
+  face at z = 0. `iso4762` output is unchanged. No wire shape, `protocolVersion`
+  or fingerprint change — a worker that predates the ids answers an unregistered
+  `generatorId` with the existing `OP_FAILED`. Fixtures:
+  `protocol/fixtures/place_component_iso4032.ndjson`,
+  `place_component_iso7089.ndjson` (harness `canonical_place_component_iso4032`,
+  `canonical_place_component_iso7089`).
+
+- **2026-11-01 — §7.6 `PreviewOp` result gains OPTIONAL `matePlacement`.**
+  Additive result key, emitted iff a `PlaceComponent` candidate's mate resolved
+  (moved or not; same shape as §7.2 `planStep.matePlacement`, which stays "only
+  when moved"), so a Copy
+  placement can commit a `DetachComponent` at the exact snapped transform.
+  `protocolVersion`, fingerprint and hello capabilities unchanged (§4: readers
+  ignore unknown keys); every other preview is byte-identical. Fixture bump:
+  `protocol/fixtures/preview_component_mate_placement.ndjson` (harness
+  `canonical_preview_component_mate_placement`; presence on a mated-unmoved preview is
+  fixture leg 3; absence on an unmated preview is
+  asserted by the Rust real-worker test, the harness matcher being subset-only).
+
+- **2026-11-01 — Component generator version pin enforced; stale component
+  text corrected; embedded/detach fixtures.** §7.3 `PlaceComponent`/
+  `DetachComponent` `generator` sources: the worker now refuses an absent or
+  unsupported `generatorVersion` with recoverable `UNSUPPORTED` before building
+  (`iso4762` supports `1`; no existing fixture or test sent another value).
+  Doc-only corrections: the registered generator set is `iso4762` only (the
+  ten-family list was stale since `SEED_VERSION` 4), and `componentRevision`
+  drift is app-layer instance status, not a regen-time library re-check or
+  `NeedsRepair`. `protocolVersion`, wire shapes and fingerprint unchanged.
+  Fixture bump: `place_component_generator_version_refusal.ndjson`,
+  `place_component_embedded.ndjson`, `detach_component.ndjson` (C++
+  `canonical_place_component_generator_version_refusal` /
+  `canonical_place_component_embedded` / `canonical_detach_component`; the Rust
+  parse lane enumerates the directory).
 
 - **2026-10-21 — §7.6 `PreviewPlan`, a non-publishing full-replay edit preview
   (ONECAD-369).** Additive kernel-lane verb, advertised by the new hello capability

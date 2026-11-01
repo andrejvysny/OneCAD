@@ -1,0 +1,23 @@
+# CANONICAL §7.3 fixture — the `iso4032` generator (ISO 4032 hex nut). Places the M8 part, publishes
+# `body_op0` and reports a volume; an unknown `thread` is then refused loudly (recoverable
+# step failure, nothing published, the head does not move). The exact volume is an analytic
+# oracle in worker/tests/test_component_generators.cpp (never an NDJSON literal — numbers
+# compare exactly).
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_place_iso4032","documentRevision":0,"workerEpoch":4,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+# M8: published.
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":201,"documentRevision":0,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"targetStep":0,"ops":[{"opType":"PlaceComponent","opId":"op0","stepIndex":0,"inputs":[],"params":{"componentId":"onecad.std.iso4032","componentVersion":"1.0.0","componentRevision":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source":{"kind":"generator","generatorId":"iso4032","generatorVersion":1,"params":{"thread":"M8"}},"placement":{"translate":[0.0,0.0,0.0]}}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"jobId":201,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op0"}],"needsRepair":[]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":201,"result":{"planPrepared":true,"lastValidStep":0,"stoppedReason":"completed","perStepResults":[{"stepIndex":0,"status":"ok","bodyIds":["body_op0"]}],"historyPrefixHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":201,"documentRevision":0,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":201,"result":{"accepted":true,"snapshotId":"$present","documentRevision":0}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"QueryMassProperties","args":{"bodyId":"body_op0"}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"volume":"$present","surfaceArea":"$present"}}}
+# Unknown thread: refused, not substituted.
+{"send":{"v":1,"t":"req","id":5,"verb":"ExecutePlan","args":{"jobId":202,"documentRevision":1,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"targetStep":0,"ops":[{"opType":"PlaceComponent","opId":"op0","stepIndex":0,"inputs":[],"params":{"componentId":"onecad.std.iso4032","componentVersion":"1.0.0","componentRevision":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source":{"kind":"generator","generatorId":"iso4032","generatorVersion":1,"params":{"thread":"M99"}},"placement":{"translate":[0.0,0.0,0.0]}}}]}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"jobId":202,"result":{"planPrepared":true,"lastValidStep":null,"stoppedReason":"opFailed","perStepResults":[{"stepIndex":0,"status":"opFailed","message":"$present","diagnostics":[{"severity":"error","code":"OP_FAILED","stage":"build","message":"$present"}]}]}}}
+{"send":{"v":1,"t":"req","id":6,"verb":"DiscardPrepared","args":{"jobId":202}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"jobId":202,"result":{"discarded":true}}}
+{"send":{"v":1,"t":"req","id":7,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"result":{"goodbye":true}}}

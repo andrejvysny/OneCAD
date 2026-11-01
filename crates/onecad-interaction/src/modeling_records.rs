@@ -46,6 +46,15 @@ pub fn shell(refs: Vec<ElementRef>, id: RecordId, step: u32) -> Result<Operation
     ))
 }
 
+pub fn component(
+    id: RecordId,
+    step: u32,
+    name: &str,
+    params: PlaceComponentParams,
+) -> OperationRecord {
+    record(id, step, name, KnownOperation::PlaceComponent(params))
+}
+
 pub fn gear(id: RecordId, step: u32) -> OperationRecord {
     let origin = Vec3::new_unchecked(0.0, 0.0, 0.0);
     record(

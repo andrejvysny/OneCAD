@@ -10,7 +10,11 @@ use onecad_app::{
     api::{self, OperationEffects},
     dto::RegenFinished,
 };
-use onecad_core::{edit::EditCommand, ids::RecordId};
+use onecad_core::{
+    document::record::{KnownOperation, Operation},
+    edit::EditCommand,
+    ids::RecordId,
+};
 use onecad_interaction::RequestTag;
 use std::sync::mpsc;
 
@@ -22,6 +26,7 @@ pub async fn apply(
     sender: &mpsc::Sender<Message>,
 ) -> Result<CommandOutcome, String> {
     services::check_tag(&backend.state, &tag).await?;
+    stage_component_blob(backend, &command).await?;
     let fresh = match &command {
         EditCommand::AddOperation { record, .. } => Some(record.record_id),
         _ => None,
@@ -37,6 +42,43 @@ pub async fn apply(
     .await
     .map_err(|e| e.to_string())?;
     finish_apply(backend, tag, result, fresh, sender).await
+}
+
+/// A placement commits only with its geometry in the document: a Linked record is
+/// re-staged (the arm-time staging may predate a close or reopen), and a Copy's blob
+/// must already be present because nothing else can supply it.
+async fn stage_component_blob(backend: &Backend, command: &EditCommand) -> Result<(), String> {
+    let op = match command {
+        EditCommand::AddOperation { record, .. } => &record.op,
+        EditCommand::UpdateOperationParams { op, .. } => op,
+        _ => return Ok(()),
+    };
+    match op {
+        Operation::Known(KnownOperation::PlaceComponent(params)) => {
+            onecad_app::library::restage_component_blob(&backend.host, &backend.state, params)
+                .await
+                .map_err(|error| error.to_string())
+        }
+        Operation::Known(KnownOperation::DetachComponent(detached)) => {
+            let Some(blob) = detached.source.blob_ref() else {
+                return Ok(());
+            };
+            let wanted = blob.sha256.to_string();
+            let guard = backend.state.runtime.lock().await;
+            let present = guard
+                .as_ref()
+                .is_some_and(|runtime| runtime.import_blob_shas().contains(&wanted));
+            if present {
+                Ok(())
+            } else {
+                Err(
+                    "The component's geometry is not in this document; arm the placement again"
+                        .into(),
+                )
+            }
+        }
+        _ => Ok(()),
+    }
 }
 
 pub async fn repair(

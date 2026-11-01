@@ -3362,6 +3362,7 @@ dependencies = [
  "onecad-extension-api",
  "onecad-extension-host",
  "onecad-interaction",
+ "onecad-library",
  "onecad-protocol",
  "onecad-render",
  "onecad-scene",

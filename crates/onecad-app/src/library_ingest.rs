@@ -1121,6 +1121,7 @@ fn write_package(
             category: part.category.clone(),
             tags: part.tags.clone(),
             unit: "mm".to_string(),
+            default_configuration: None,
         },
         // Overwritten by the save with the blob source it produces.
         source: SourceSpec::Generator {
@@ -1129,6 +1130,7 @@ fn write_package(
         },
         parameters,
         attachments,
+        configurations: Default::default(),
     };
     let mut library = Library::open(library_root)
         .map_err(|e| PartRefusal::Failed(format!("open library: {e}")))?;

@@ -154,6 +154,7 @@ fn tree(app: &mut App, ui: &mut Ui) {
                     sketch_row(app, ui, sketch);
                 }
             }
+            crate::component_instances::section(app, ui, &filter);
             ui.add(SectionLabel::new("DATUMS"));
             for datum in display.projection.datums.values() {
                 if matches(&filter, &datum.name) {

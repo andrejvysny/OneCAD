@@ -476,6 +476,7 @@ impl App {
     /// gestures and previews are cancelled; tools, sketch mode and selection stay.
     fn deactivate(&mut self) {
         self.capture_thumbnail();
+        crate::placement_gesture::cancel(self);
         // A parked document keeps its authored values, never a half-finished drag.
         crate::parameter_drag::abandon(self, crate::parameter_drag::Outcome::Lost);
         if self.doc.interaction.tool.is_some() && !self.tabs.stranded.contains(&self.doc.tab) {
@@ -615,6 +616,7 @@ impl App {
     /// until the user picks something there.
     pub fn open_home(&mut self) {
         if crate::bars::home_allowed(self) {
+            crate::placement_gesture::cancel(self);
             self.ui.start_page = crate::ui_state::StartPage::Home;
             self.ui.start_open = true;
             self.sync_active_budget();

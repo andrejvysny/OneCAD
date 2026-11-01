@@ -155,6 +155,8 @@ impl Interaction {
             phase: SessionPhase::Editing,
             drag: None,
             progress: Default::default(),
+            copy: false,
+            mate_placement: None,
         };
         if let Some(field) = focus.and_then(|key| tool.params.field_mut(key)) {
             field.status = FieldStatus::Pending;
@@ -200,7 +202,9 @@ impl Interaction {
                 return Vec::new();
             }
         };
-        if let Err(message) = crate::extrude::validate_target(&operation) {
+        if let Err(message) = crate::extrude::validate_target(&operation).and_then(|()| {
+            crate::modeling_options::refuse_self_mate(&operation, tool.tag.record_id)
+        }) {
             tool.preview = PreviewStatus::Failed(message);
             return Vec::new();
         }
@@ -224,9 +228,16 @@ impl Interaction {
             self.status = CommitStatus::Idle;
             return vec![clear];
         }
+        let twin = match copy_twin(tool, &operation) {
+            Ok(twin) => twin,
+            Err(message) => {
+                tool.params.op_error = Some((None, message));
+                return Vec::new();
+            }
+        };
         tool.drag = None;
         tool.record.op = operation;
-        let (command, hide_sketch) = commit_command(tool);
+        let (command, hide_sketch) = commit_command(tool, twin);
         tool.phase = SessionPhase::Committing;
         self.status = CommitStatus::Pending(tool.tag.clone());
         vec![
@@ -273,7 +284,45 @@ fn declare(
     ParameterSet::declare(&record.op, fields, focus)
 }
 
-fn commit_command(tool: &ModelSession) -> (EditCommand, Option<onecad_core::ids::SketchId>) {
+/// The detached twin for a "Copy" placement, committed at the worker's
+/// mate-resolved placement. A mated draft with no fresh resolved placement is
+/// refused: an approximate placement is never committed.
+fn copy_twin(
+    tool: &ModelSession,
+    operation: &Operation,
+) -> Result<Option<OperationRecord>, String> {
+    if !tool.copy || tool.editing_existing {
+        return Ok(None);
+    }
+    let Operation::Known(KnownOperation::PlaceComponent(params)) = operation else {
+        return Err("Copy applies only to a component placement".into());
+    };
+    if params.mate.is_some() && tool.mate_placement.is_none() {
+        return Err(
+            "Copy needs the mate-resolved placement from a fresh preview; wait for the preview or place linked"
+                .into(),
+        );
+    }
+    let mut record = tool.record.clone();
+    record.op = operation.clone();
+    onecad_app::library::detached_record(record, tool.mate_placement.clone())
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+fn commit_command(
+    tool: &ModelSession,
+    twin: Option<OperationRecord>,
+) -> (EditCommand, Option<onecad_core::ids::SketchId>) {
+    if let Some(record) = twin {
+        return (
+            EditCommand::AddOperation {
+                record,
+                at_cursor: true,
+            },
+            None,
+        );
+    }
     if tool.editing_existing {
         return (
             EditCommand::UpdateOperationParams {
@@ -366,6 +415,7 @@ fn validate_bindings(operation: &KnownOperation) -> Result<(), String> {
         KnownOperation::OffsetFace(p) => validate_faces(&p.face_ids, &p.faces, p.target_body),
         KnownOperation::TransformBody(params) => params.validate(),
         KnownOperation::Gear(params) => params.validate(),
+        KnownOperation::PlaceComponent(params) => params.validate(),
         KnownOperation::LinearPattern(_)
         | KnownOperation::CircularPattern(_)
         | KnownOperation::MirrorBody(_)

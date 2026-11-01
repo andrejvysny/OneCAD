@@ -232,10 +232,17 @@ fn view(app: &App, def: &ToolDef, running: Option<ToolId>) -> View {
             }
             state
         }
-        ToolId::InsertComponent | ToolId::MakeComponent
-            if crate::editor_facade::PREVIEW_FACADES =>
-        {
-            gate(true, "")
+        ToolId::InsertComponent => gate(
+            crate::bars::home_allowed(app),
+            "Finish the current command first",
+        ),
+        ToolId::MakeComponent => {
+            let reason = crate::component_wizard::availability(app);
+            View {
+                state: ToolState::Default,
+                enabled: reason.is_none(),
+                reason,
+            }
         }
         ToolId::Flange | ToolId::Dogbone | ToolId::CheckGeometry
             if crate::editor_facade::PREVIEW_FACADES =>
@@ -288,6 +295,10 @@ pub(crate) fn activate(app: &mut App, ctx: &Context, id: ToolId) {
     };
     if !view(app, &definition, None).enabled {
         return;
+    }
+    // Starting something else ends a placement that has not opened yet.
+    if id != ToolId::InsertComponent && crate::placement_gesture::arming(app) {
+        crate::placement_gesture::cancel(app);
     }
     let sketch_tool = match id {
         ToolId::Select if app.sketch_active() => Some(SketchTool::Select),
@@ -342,12 +353,8 @@ pub(crate) fn activate(app: &mut App, ctx: &Context, id: ToolId) {
         | ToolId::Generators => crate::modeling_ui::begin_body_operation(app, id),
         ToolId::Import => app.document_request(crate::document_flow::Request::Import(None)),
         ToolId::Section => crate::display_menu::toggle(app, ctx.content_rect().shrink(48.0)),
-        ToolId::InsertComponent if crate::editor_facade::PREVIEW_FACADES => {
-            crate::editor_facade::show_library(app)
-        }
-        ToolId::MakeComponent if crate::editor_facade::PREVIEW_FACADES => {
-            crate::component_wizard::open(&mut app.ui)
-        }
+        ToolId::InsertComponent => crate::placement_gesture::open_library_page(app),
+        ToolId::MakeComponent => crate::component_wizard::open(app),
         ToolId::Flange | ToolId::Dogbone | ToolId::CheckGeometry
             if crate::editor_facade::PREVIEW_FACADES =>
         {
@@ -380,7 +387,9 @@ pub(crate) fn cancel_tool(app: &mut App) {
 }
 
 pub(crate) fn cancel_or_deselect(app: &mut App) {
-    if app.doc.interaction.tool.is_some() {
+    if crate::placement_gesture::arming(app) {
+        crate::placement_gesture::cancel(app);
+    } else if app.doc.interaction.tool.is_some() {
         cancel_tool(app);
     } else {
         clear_selection(app, selection_kind(app));

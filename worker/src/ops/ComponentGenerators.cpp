@@ -4,7 +4,8 @@
 // `ComponentOp.cpp` in WP-A1 (they were the whole of the generator lane back
 // when there was exactly one family). Nine more families were added and then
 // removed again with the seed catalog; ISO 4762's pinned exact-volume ctests
-// are the proof that neither move changed the one family that stayed.
+// are the proof that neither move changed the one family that stayed. ISO 4032
+// (nut) and ISO 7089 (washer) are the two families re-added since.
 //
 // The cutters keep their `thread_length_mm` argument — the threaded run
 // measured from the shank TIP — even though the sole caller passes the full
@@ -26,6 +27,7 @@
 #include <BRepLib.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
 #include <Geom2d_Line.hxx>
 #include <Geom_CylindricalSurface.hxx>
@@ -331,6 +333,94 @@ bool build_socket_cap(const GeneratorRequest& req, TopoDS_Shape& out, std::strin
     }
 }
 
+// A regular hexagonal prism of `width_across_flats` (the standard's `s`),
+// spanning z ∈ [0, height]. Vertices sit on the circumradius `s / √3`, which
+// puts the FLATS at `s / 2` from the axis — across-flats is what every
+// fastener standard tabulates.
+bool build_hex_prism(const std::string& op_label, double width_across_flats, double height,
+                     TopoDS_Shape& out, std::string& err) {
+    const double circumradius = width_across_flats / std::sqrt(3.0);
+    BRepBuilderAPI_MakePolygon poly;
+    for (int i = 0; i < 6; ++i) {
+        const double a = (kPi / 3.0) * static_cast<double>(i);
+        poly.Add(gp_Pnt(circumradius * std::cos(a), circumradius * std::sin(a), 0.0));
+    }
+    poly.Close();
+    if (!poly.IsDone()) {
+        err = op_label + ": hex profile failed";
+        return false;
+    }
+    BRepBuilderAPI_MakeFace face(poly.Wire());
+    if (!face.IsDone()) {
+        err = op_label + ": hex face failed";
+        return false;
+    }
+    BRepPrimAPI_MakePrism prism(face.Shape(), gp_Vec(0.0, 0.0, height));
+    if (!prism.IsDone() || prism.Shape().IsNull()) {
+        err = op_label + ": hex prism failed";
+        return false;
+    }
+    out = prism.Shape();
+    return true;
+}
+
+// Cuts a through bore of `bore_diameter` out of `body` (z ∈ [0, height]).
+// The tool overshoots both faces by 1 mm so the cut is a clean through hole,
+// never a coplanar-face boolean.
+bool cut_through_bore(const std::string& what, const TopoDS_Shape& body, double bore_diameter,
+                      double height, const std::string& op_label, TopoDS_Shape& out,
+                      std::string& err) {
+    const gp_Ax2 bore_axis(gp_Pnt(0.0, 0.0, -1.0), gp_Dir(0.0, 0.0, 1.0));
+    const TopoDS_Shape bore =
+        BRepPrimAPI_MakeCylinder(bore_axis, bore_diameter / 2.0, height + 2.0).Shape();
+    return generator_boolean(op_label + ": " + what, body, bore, app::BooleanMode::Cut, out, err);
+}
+
+// ISO 4032 hexagon nut: a hex prism bored through. FRAME: the bearing face
+// (seating plane) is at z = 0 and the nut occupies z ∈ [0, m], +Z pointing out
+// of the surface it seats against — a plane mate aligns local +Z with the
+// target face's outward normal, so the nut sits ON the surface (unlike a
+// screw, whose shank runs −Z into the hole). The internal thread is cosmetic (a plain bore at the
+// nominal Ø); the 30° chamfer of the real nut's corners is NOT modeled.
+// `thread_detail` and `length` are accepted and ignored.
+bool build_hex_nut(const GeneratorRequest& req, TopoDS_Shape& out, std::string& err) {
+    const ft::NutSize* size = lookup(ft::iso4032_table(), req.op_label, req.thread, err);
+    if (size == nullptr) return false;
+    try {
+        TopoDS_Shape body;
+        if (!build_hex_prism(req.op_label, size->width_across_flats_mm, size->thickness_mm, body,
+                             err)) {
+            return false;
+        }
+        return cut_through_bore(req.thread + " nut bore", body, size->bore_diameter_mm,
+                                size->thickness_mm, req.op_label, out, err);
+    } catch (const Standard_Failure& f) {
+        err = req.op_label + ": " + req.thread + " nut build raised: " +
+              (f.GetMessageString() ? f.GetMessageString() : "OCCT");
+        return false;
+    }
+}
+
+// ISO 7089 plain washer: an annulus. FRAME: seating plane at z = 0, part
+// occupies z ∈ [0, h] (sits ON the surface, see `build_hex_nut`).
+// `thread_detail` and `length` are accepted and ignored.
+bool build_washer(const GeneratorRequest& req, TopoDS_Shape& out, std::string& err) {
+    const ft::WasherSize* size = lookup(ft::iso7089_table(), req.op_label, req.thread, err);
+    if (size == nullptr) return false;
+    try {
+        const gp_Ax2 disc_axis(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+        const TopoDS_Shape disc =
+            BRepPrimAPI_MakeCylinder(disc_axis, size->outer_diameter_mm / 2.0, size->thickness_mm)
+                .Shape();
+        return cut_through_bore(req.thread + " washer bore", disc, size->inner_diameter_mm,
+                                size->thickness_mm, req.op_label, out, err);
+    } catch (const Standard_Failure& f) {
+        err = req.op_label + ": " + req.thread + " washer build raised: " +
+              (f.GetMessageString() ? f.GetMessageString() : "OCCT");
+        return false;
+    }
+}
+
 }  // namespace
 
 bool parse_thread_detail(const std::string& s, ThreadDetail& out) {
@@ -350,7 +440,14 @@ bool parse_thread_detail(const std::string& s, ThreadDetail& out) {
 }
 
 std::string known_generator_ids() {
-    return "iso4762";
+    return "iso4032, iso4762, iso7089";
+}
+
+int generator_supported_version(const std::string& generator_id) {
+    if (generator_id == "iso4032" || generator_id == "iso4762" || generator_id == "iso7089") {
+        return 1;
+    }
+    return 0;
 }
 
 std::optional<GeneratorBoundViolation> generator_bounds_violation(const std::string& generator_id,
@@ -401,6 +498,8 @@ std::optional<GeneratorBoundViolation> generator_bounds_violation(const std::str
 bool build_component(const std::string& generator_id, const GeneratorRequest& req,
                      TopoDS_Shape& solid_out, std::string& err) {
     if (generator_id == "iso4762") return build_socket_cap(req, solid_out, err);
+    if (generator_id == "iso4032") return build_hex_nut(req, solid_out, err);
+    if (generator_id == "iso7089") return build_washer(req, solid_out, err);
     err = req.op_label + ": unknown source.generatorId '" + generator_id +
           "' — known generators: " + known_generator_ids();
     return false;

@@ -42,7 +42,9 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
         }
         return;
     };
-    if app.sketch_active() || tool.editing_existing {
+    if app.sketch_active()
+        || tool.editing_existing && !crate::placement_gesture::is_placement(&tool)
+    {
         return;
     }
     let apply = can_apply(app, &tool);
@@ -53,7 +55,7 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
         focus_keys(app, response, apply);
     }
     if out.ok && apply {
-        app.dispatch(Action::Confirm);
+        crate::placement_gesture::confirm(app);
     }
     if (out.cancel || out.close) && editing {
         crate::pill::cancel_tool(app);
@@ -61,13 +63,11 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
 }
 
 pub(crate) fn history_editor(app: &mut App, ui: &mut Ui, record_id: &str) {
-    let Some(tool) = app
-        .doc
-        .interaction
-        .tool
-        .clone()
-        .filter(|tool| tool.editing_existing && tool.tag.record_id.to_string() == record_id)
-    else {
+    let Some(tool) = app.doc.interaction.tool.clone().filter(|tool| {
+        tool.editing_existing
+            && tool.tag.record_id.to_string() == record_id
+            && !crate::placement_gesture::is_placement(tool)
+    }) else {
         return;
     };
     ui.push_id(("history-editor", tool.tag.record_id.to_string()), |ui| {
@@ -154,7 +154,7 @@ fn card(
     let ok_label = if tool.editing_existing {
         "Apply ↵"
     } else {
-        "Create ↵"
+        crate::placement_gesture::ok_label(tool).unwrap_or("Create ↵")
     };
     let icon = icon(app);
     let mut response = None;
@@ -185,6 +185,7 @@ fn card_rows(
 ) {
     crate::extrude_ui::rows(app, rows, tool);
     crate::modeling_ui::rows(app, rows, tool);
+    crate::placement_gesture::card::rows(app, rows, tool);
     if choices(tool) > 1 {
         rows.row("Parameter", |ui| {
             crate::parameter_ui::selector(app, ui, tool);
@@ -331,7 +332,7 @@ fn focus_keys(app: &mut App, response: &egui::Response, can_apply: bool) {
         && ctx.input(|input| input.key_pressed(egui::Key::Enter))
         && can_apply
     {
-        app.dispatch(Action::Confirm);
+        crate::placement_gesture::confirm(app);
     }
     if response.has_focus()
         && !app.composing

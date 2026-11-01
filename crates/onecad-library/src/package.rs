@@ -42,6 +42,11 @@ pub struct Metadata {
     pub tags: Vec<String>,
     #[serde(default = "default_unit")]
     pub unit: String,
+    /// Name of the `[configurations.<name>]` table a placement uses when the
+    /// caller picks none. Absent ⇒ no preselected variant (the package's own
+    /// `[parameters]` defaults).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_configuration: Option<String>,
 }
 
 fn default_unit() -> String {
@@ -317,6 +322,75 @@ pub struct ComponentPackage {
     pub parameters: BTreeMap<String, ParameterSpec>,
     #[serde(default)]
     pub attachments: BTreeMap<String, AttachmentSpec>,
+    /// `[configurations.<name>]` — named variants, each a map of `role = "free"`
+    /// parameter key to value. Omitted from the manifest when empty, so every
+    /// pre-configuration package round-trips byte-identically.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub configurations: Configurations,
+}
+
+/// Named variants of a package: configuration name -> (free-param key -> value).
+pub type Configurations = BTreeMap<String, BTreeMap<String, toml::Value>>;
+
+/// Longest accepted configuration name.
+pub const MAX_CONFIGURATION_NAME_LEN: usize = 64;
+
+/// A configuration name: non-empty, at most [`MAX_CONFIGURATION_NAME_LEN`]
+/// characters, from `[A-Za-z0-9 _.-]`.
+#[must_use]
+pub fn is_valid_configuration_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().count() <= MAX_CONFIGURATION_NAME_LEN
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '.' | '-'))
+}
+
+/// Refuses configurations that could never be applied: bad names, empty
+/// variants, keys that are not declared `role = "free"` parameters, and a
+/// default that names no configuration.
+///
+/// # Errors
+/// [`LibraryError::MalformedPackage`] naming the offending configuration.
+pub fn validate_configurations(pkg: &ComponentPackage, path: &Path) -> LibraryResult<()> {
+    let bad = |message: String| LibraryError::MalformedPackage {
+        path: path.to_path_buf(),
+        message,
+    };
+    for (name, values) in &pkg.configurations {
+        if !is_valid_configuration_name(name) {
+            return Err(bad(format!(
+                "configurations.`{name}`: a name is 1..={MAX_CONFIGURATION_NAME_LEN} characters \
+                 of [A-Za-z0-9 _.-]"
+            )));
+        }
+        if values.is_empty() {
+            return Err(bad(format!(
+                "configurations.`{name}` is empty; a configuration sets at least one parameter"
+            )));
+        }
+        for key in values.keys() {
+            match pkg.parameters.get(key) {
+                Some(spec) if spec.role == ParameterRole::Free => {}
+                Some(_) => {
+                    return Err(bad(format!(
+                        "configurations.`{name}`: `{key}` is not a role = \"free\" parameter"
+                    )))
+                }
+                None => {
+                    return Err(bad(format!(
+                        "configurations.`{name}`: `{key}` is not a declared parameter"
+                    )))
+                }
+            }
+        }
+    }
+    match &pkg.metadata.default_configuration {
+        Some(d) if !pkg.configurations.contains_key(d) => Err(bad(format!(
+            "metadata.default_configuration `{d}` names no [configurations] table"
+        ))),
+        _ => Ok(()),
+    }
 }
 
 /// Parses `component.toml` bytes into a [`ComponentPackage`]. `path` is used
@@ -349,7 +423,26 @@ pub fn parse(toml_str: &str, path: &Path) -> LibraryResult<ComponentPackage> {
                     })?,
             );
     }
+    legacy_generator_defaults(&mut pkg);
+    validate_configurations(&pkg, path)?;
     Ok(pkg)
+}
+
+/// Legacy shim for pre-`SEED_VERSION` 6 seed manifests: a GENERATOR package's
+/// free parameter that sets `key` but no `value` (`thread = { role = "free",
+/// key = "M6", … }`) meant "`key` is the default". Every consumer reads
+/// defaults from `value`, so it is filled in here, at the one door manifests
+/// come through. `document` packages are untouched: their `key` names a
+/// source-document variable.
+fn legacy_generator_defaults(pkg: &mut ComponentPackage) {
+    if !matches!(pkg.source, SourceSpec::Generator { .. }) {
+        return;
+    }
+    for spec in pkg.parameters.values_mut() {
+        if spec.role == ParameterRole::Free && spec.value.is_none() {
+            spec.value = spec.key.clone().map(toml::Value::String);
+        }
+    }
 }
 
 /// Serializes a package back to `component.toml` text (spec §2.1).
@@ -381,6 +474,7 @@ pub fn to_toml(pkg: &ComponentPackage) -> LibraryResult<String> {
 /// I/O failure, or a package that fails [`validate_identity`].
 pub fn write_package(package_dir: &Path, pkg: &ComponentPackage) -> LibraryResult<String> {
     validate_identity(pkg)?;
+    validate_configurations(pkg, &package_dir.join(COMPONENT_MANIFEST_FILE))?;
     std::fs::create_dir_all(package_dir)?;
     let manifest_path = package_dir.join(COMPONENT_MANIFEST_FILE);
     std::fs::write(&manifest_path, to_toml(pkg)?)?;
@@ -427,8 +521,8 @@ pub fn validate_identity(pkg: &ComponentPackage) -> LibraryResult<()> {
     }
     if !is_path_safe_version(&pkg.identity.version) {
         return Err(LibraryError::InvalidIdentity(format!(
-            "identity.version `{}` may only contain [0-9A-Za-z.+-] \
-             (it names the package directory)",
+            "identity.version `{}` must be MAJOR.MINOR.PATCH (digits only; no pre-release \
+             or build metadata, which the version ordering cannot compare)",
             pkg.identity.version
         )));
     }
@@ -451,8 +545,11 @@ fn is_path_safe_id(id: &str) -> bool {
 }
 
 fn is_path_safe_version(v: &str) -> bool {
-    v.bytes()
-        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-'))
+    let parts: Vec<&str> = v.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
 fn is_sha256_hex(s: &str) -> bool {
@@ -926,5 +1023,156 @@ shank_axis = { on = "cylinder:shank", accepts = ["cylinder", "hole", "circularEd
         pkg.identity.id = "unnamespaced".to_string();
         assert!(write_package(&pkg_dir, &pkg).is_err());
         assert!(!pkg_dir.join(COMPONENT_MANIFEST_FILE).exists());
+    }
+
+    fn with_configs(extra: &str) -> String {
+        format!("{}\n{extra}", valid_toml())
+    }
+
+    fn parse_err(text: &str) -> String {
+        parse(text, Path::new("component.toml"))
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[test]
+    fn configurations_parse_and_round_trip() {
+        let text = with_configs(
+            "[configurations.Small]\nlength = 10\n\n[configurations.\"Heavy Duty\"]\nlength = 40\nthread = \"M8\"\n",
+        );
+        let text = text.replace(
+            "tags = [\"metric\", \"shcs\"]",
+            "tags = [\"metric\", \"shcs\"]\ndefault_configuration = \"Small\"",
+        );
+        let pkg = parse(&text, Path::new("component.toml")).unwrap();
+        assert_eq!(pkg.configurations.len(), 2);
+        assert_eq!(pkg.metadata.default_configuration.as_deref(), Some("Small"));
+        let again = parse(&to_toml(&pkg).unwrap(), Path::new("component.toml")).unwrap();
+        assert_eq!(pkg, again);
+    }
+
+    #[test]
+    fn a_package_without_configurations_serializes_none_of_them() {
+        let pkg = parse(valid_toml(), Path::new("component.toml")).unwrap();
+        let text = to_toml(&pkg).unwrap();
+        assert!(!text.contains("configurations"), "{text}");
+        assert!(!text.contains("default_configuration"), "{text}");
+    }
+
+    #[test]
+    fn a_configuration_naming_an_undeclared_or_non_free_key_is_refused() {
+        let undeclared = parse_err(&with_configs("[configurations.A]\nnope = 1\n"));
+        assert!(
+            undeclared.contains("`nope` is not a declared parameter"),
+            "{undeclared}"
+        );
+        let table = parse_err(&with_configs("[configurations.A]\nhead_d = 1\n"));
+        assert!(table.contains("`head_d` is not a role"), "{table}");
+    }
+
+    #[test]
+    fn an_empty_configuration_is_refused() {
+        let msg = parse_err(&with_configs("[configurations.A]\n"));
+        assert!(msg.contains("configurations.`A` is empty"), "{msg}");
+    }
+
+    #[test]
+    fn a_default_configuration_must_name_a_configuration() {
+        let text = valid_toml().replace(
+            "tags = [\"metric\", \"shcs\"]",
+            "tags = [\"metric\", \"shcs\"]\ndefault_configuration = \"Ghost\"",
+        );
+        let msg = parse_err(&text);
+        assert!(msg.contains("default_configuration `Ghost`"), "{msg}");
+    }
+
+    #[test]
+    fn configuration_names_are_bounded_and_charset_checked() {
+        assert!(is_valid_configuration_name("Heavy 2.0_a-b"));
+        assert!(!is_valid_configuration_name(""));
+        assert!(!is_valid_configuration_name(&"x".repeat(65)));
+        assert!(is_valid_configuration_name(&"x".repeat(64)));
+        assert!(!is_valid_configuration_name("a/b"));
+        let msg = parse_err(&with_configs("[configurations.\"a/b\"]\nlength = 1\n"));
+        assert!(msg.contains("configurations.`a/b`"), "{msg}");
+    }
+
+    #[test]
+    fn a_version_must_be_plain_major_minor_patch() {
+        let mut pkg = parse(valid_toml(), Path::new("component.toml")).unwrap();
+        for ok in ["1.0.0", "0.12.304"] {
+            pkg.identity.version = ok.to_string();
+            validate_identity(&pkg).unwrap();
+        }
+        for bad in [
+            "1.0",
+            "1.0.0-rc1",
+            "1.0.0+b5",
+            "1.x.0",
+            "1..0",
+            "1.0.0.0",
+            "v1.0.0",
+        ] {
+            pkg.identity.version = bad.to_string();
+            assert!(validate_identity(&pkg).is_err(), "{bad} must be refused");
+        }
+    }
+
+    const LEGACY_NUT: &str = r#"
+[identity]
+id = "onecad.std.iso4032"
+version = "1.0.0"
+revision = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+[metadata]
+name = "Hex Nut"
+designation = "ISO 4032 {thread}"
+[source]
+kind = "generator"
+generator = "iso4032"
+generator_version = 1
+[parameters]
+thread = { role = "free", key = "M6", domain = ["M2", "M2.5", "M3", "M4", "M5", "M6", "M8", "M10", "M12"] }
+"#;
+
+    const LEGACY_SCREW: &str = r#"
+[identity]
+id = "onecad.std.iso4762"
+version = "1.0.0"
+revision = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+[metadata]
+name = "Socket Head Cap Screw"
+designation = "ISO 4762 {thread}x{length}"
+[source]
+kind = "generator"
+generator = "iso4762"
+generator_version = 1
+[parameters]
+thread = { role = "free", key = "M6", domain = ["M2", "M6", "M8"] }
+length = { role = "free", value = 20, snap = "preferred", min = 2 }
+thread_detail = { role = "free", value = "cosmetic", domain = ["cosmetic", "modeled"] }
+"#;
+
+    #[test]
+    fn a_legacy_generator_key_is_the_default_when_no_value_is_declared() {
+        for text in [LEGACY_NUT, LEGACY_SCREW] {
+            let pkg = parse(text, Path::new("component.toml")).unwrap();
+            assert_eq!(
+                pkg.parameters["thread"].value,
+                Some(toml::Value::String("M6".into())),
+                "the legacy `key` is the default"
+            );
+        }
+        let screw = parse(LEGACY_SCREW, Path::new("component.toml")).unwrap();
+        assert_eq!(screw.parameters["length"].number(), Some(20.0));
+    }
+
+    #[test]
+    fn the_key_of_a_document_parameter_is_never_read_as_a_default() {
+        let text = valid_toml().replace(
+            "kind = \"generator\"\ngenerator = \"iso4762\"\ngenerator_version = 1",
+            "kind = \"document\"\nfile = \"s.onecad\"\ngeometry = \"abc\"",
+        );
+        let pkg = parse(&text, Path::new("component.toml")).unwrap();
+        assert_eq!(pkg.parameters["thread"].value, None);
     }
 }

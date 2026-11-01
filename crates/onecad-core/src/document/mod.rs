@@ -22,6 +22,7 @@
 //!   `{records, cursor}` alone (see [`crate::edit::undo`]).
 
 pub mod body;
+pub mod component_params;
 pub mod datum;
 pub mod element_index;
 pub mod hole_placement;

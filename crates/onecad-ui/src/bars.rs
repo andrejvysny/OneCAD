@@ -125,7 +125,8 @@ fn sync_window_title(app: &App, ctx: &Context) {
 
 pub(crate) fn home_allowed(app: &App) -> bool {
     !(app.sketch_active()
-        || app.doc.interaction.tool.is_some()
+            // A placement still being positioned is cancelled by leaving, not a blocker.
+        || (app.doc.interaction.tool.is_some() && !crate::placement_gesture::cancellable(app))
         || app.busy()
         || app.doc.transform_gizmo.gizmo.active())
 }

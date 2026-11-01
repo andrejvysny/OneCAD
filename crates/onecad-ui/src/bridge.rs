@@ -38,6 +38,9 @@ pub enum Command {
     Open,
     Document(crate::document_flow::Request),
     Items(crate::document_items::Request),
+    Library(crate::library_catalog::Request),
+    Instance(crate::component_instances::Request),
+    Author(crate::component_wizard::Request),
     Recovery {
         document_id: String,
         choice: crate::startup_recovery::Choice,
@@ -106,6 +109,21 @@ pub enum Message {
         sequence: u64,
         result: Result<crate::document_items::Reply, String>,
         _permit: Option<OwnedSemaphorePermit>,
+    },
+    Library {
+        sequence: u64,
+        result: Result<crate::library_catalog::Reply, String>,
+        _permit: OwnedSemaphorePermit,
+    },
+    Instance {
+        sequence: u64,
+        result: Result<crate::component_instances::Reply, String>,
+        _permit: OwnedSemaphorePermit,
+    },
+    Author {
+        sequence: u64,
+        result: Result<crate::component_wizard::Reply, String>,
+        _permit: OwnedSemaphorePermit,
     },
     Gesture {
         delivery: Box<crate::gesture_services::Delivery>,
@@ -253,6 +271,15 @@ impl Shared {
             .lock()
             .map(|mut cache| std::mem::take(&mut *cache))
             .unwrap_or_default()
+    }
+    /// Reused geometry keeps the admission it was first built under alive, so committed
+    /// features pile up reservations nothing is using. When `bytes` cannot be admitted the
+    /// cache goes; live prepared scenes and GPU sources retain their own guards.
+    pub(crate) fn relieve_cpu_pressure(&self, bytes: usize) -> bool {
+        if !self.host_budget.has_capacity(bytes) {
+            drop(self.take_preparation_cache());
+        }
+        true
     }
     pub(crate) fn restore_preparation_cache(&self, cache: onecad_render::PreparationCache) {
         if let Ok(mut slot) = self.preparation_cache.lock() {
@@ -829,6 +856,9 @@ pub fn command_name(command: &Command) -> &'static str {
         Command::Open => "Open",
         Command::Document(_) => "Document",
         Command::Items(_) => "Delete",
+        Command::Library(_) => "Library",
+        Command::Instance(_) => "Instance",
+        Command::Author(_) => "Author",
         Command::Recovery { .. } => "Recovery",
         Command::Sketch(_) => "Sketch",
         Command::Operands(_) => "Operands",

@@ -5,8 +5,8 @@
 // `PlaceComponent`/`DetachComponent` record carries in `source.generatorId`.
 // Before WP-A1 there was no dispatch at all: EVERY generatorId built an ISO
 // 4762 socket cap screw, which is exactly the silent-substitution failure
-// spec §0 invariant 4 exists to prevent. The catalog is back to that one
-// family, but the DISPATCH stays — an unknown id fails loudly, naming the ids
+// spec §0 invariant 4 exists to prevent. The catalog is small (iso4032, iso4762,
+// iso7089), and the DISPATCH stays — an unknown id fails loudly, naming the ids
 // that do exist, instead of quietly handing back a screw.
 //
 // Geometry conventions every family must follow — these ARE the mate contract,
@@ -18,8 +18,10 @@
 //     surface the part seats against.
 //   * A screw's head occupies z ∈ [0, k] and its shank z ∈ [-length, 0], so
 //     dropping it on a hole rim drives the shank into the hole.
-//   * A part that sits ON a surface rather than through it (a nut, a washer)
-//     occupies z ∈ [0, thickness].
+//   * A nut or washer (iso4032, iso7089) occupies z ∈ [0, thickness]: it sits
+//     ON the surface it seats against, since a plane mate aligns local +Z with
+//     the target face's outward normal. (A screw is the exception: its shank
+//     runs −Z into the hole.)
 //
 // Dimensions come from `FastenerTables.h` and nothing here hardcodes one.
 #ifndef ONECAD_OPS_COMPONENTGENERATORS_H
@@ -101,9 +103,16 @@ std::optional<GeneratorBoundViolation> generator_bounds_violation(const std::str
 bool build_component(const std::string& generator_id, const GeneratorRequest& req,
                      TopoDS_Shape& solid_out, std::string& err);
 
-/// `"iso4762"` — the registered ids, comma-separated, for the unknown-id
+/// `"iso4032, iso4762, iso7089"` — the registered ids, comma-separated, for the unknown-id
 /// message and for tests that assert the seed catalog's shape.
 std::string known_generator_ids();
+
+/// The one `generatorVersion` a registered family builds, or 0 for an
+/// unregistered id (that case keeps `build_component`'s unknown-id refusal).
+/// A family's geometry is a function of (id, version): a record pinned to a
+/// version this worker does not implement must be refused, not rebuilt as
+/// whatever the current code happens to produce (spec §0 invariant 4).
+int generator_supported_version(const std::string& generator_id);
 
 }  // namespace onecad::ops
 

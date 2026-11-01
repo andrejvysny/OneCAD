@@ -21,8 +21,10 @@
 //! and never merges — a package the user edited, or authored themselves under
 //! the same id, is left exactly as it is. A `.seed-version` marker records that
 //! the pass ran, so deleting a built-in package keeps it deleted; bumping
-//! [`SEED_VERSION`] (adding a family, correcting a manifest) re-runs the pass,
-//! which restores anything missing.
+//! [`SEED_VERSION`] (adding a family) re-runs the pass, which installs the
+//! packages that are NEW since the root's marker — see [`SeedPackage::since`].
+//! A package the user deleted while the marker was already at or past its
+//! `since` is never resurrected by a later bump.
 //!
 //! **The one exception, and why it is not one: pruning a RETIRED built-in.**
 //! When a family leaves [`SEED_PACKAGES`], the directory it left behind on
@@ -59,12 +61,12 @@ use sha2::{Digest, Sha256};
 /// corrected manifest, a family retired). A root whose marker is missing or
 /// lower re-runs the seeding pass; one at this version is left alone.
 ///
-/// **A bump installs what is missing and prunes what is retired** — see the
-/// module header for the proof prune requires. The one population it cannot
+/// **A bump installs what is NEW since the root's marker and prunes what is
+/// retired** — see the module header for the proof prune requires. The one population it cannot
 /// help is a root seeded BEFORE the ledger existed (marker ≤ 4): there is no
 /// record of what this app wrote there, so nothing can be proven and nothing is
 /// removed. Those roots need a manual `rm` of the dead directory, once.
-pub const SEED_VERSION: u32 = 5;
+pub const SEED_VERSION: u32 = 6;
 
 const SEED_MARKER_FILE: &str = ".seed-version";
 
@@ -77,12 +79,19 @@ const SEED_LEDGER_FILE: &str = ".seed-ledger.json";
 pub struct SeedPackage {
     pub id: &'static str,
     pub manifest: &'static str,
+    /// The [`SEED_VERSION`] this package first shipped in. A pass installs a
+    /// missing package only when the root's previous marker is below this (no
+    /// marker ⇒ a fresh root ⇒ everything installs). A root whose marker is
+    /// already `>= since` has been offered the package once, so a missing
+    /// directory there is the user's deletion and stays deleted.
+    pub since: u32,
 }
 
 macro_rules! seed {
-    ($id:literal) => {
+    ($id:literal, since: $since:literal) => {
         SeedPackage {
             id: $id,
+            since: $since,
             manifest: include_str!(concat!(
                 "../resources/library-seed/",
                 $id,
@@ -98,15 +107,19 @@ macro_rules! seed {
 /// the worker's side, `every_seed_package_parses_and_validates` the one from
 /// here.
 ///
-/// **The catalog is deliberately ONE family.** SEED_VERSION 4 dropped the six
-/// other fastener families and the three machine elements (bearing, two NEMA
-/// frames) that spec §6.2 sketched, along with their worker generators and
-/// dimension tables. The socket cap screw is the flagship §12 flow ("search M8
-/// socket head, drag it onto a hole") and the only family with pinned
-/// exact-volume ctests; the rest were breadth without a consumer. Re-adding one
-/// means a manifest here, a generator + table in the worker, and a
-/// `SEED_VERSION` bump — not a revert.
-pub const SEED_PACKAGES: &[SeedPackage] = &[seed!("onecad.std.iso4762")];
+/// **The catalog is deliberately small.** SEED_VERSION 4 dropped the six other
+/// fastener families and the three machine elements (bearing, two NEMA frames)
+/// that spec §6.2 sketched, along with their worker generators and dimension
+/// tables. The socket cap screw is the flagship §12 flow ("search M8 socket
+/// head, drag it onto a hole"); SEED_VERSION 6 re-added the hex nut and the
+/// plain washer, the two parts that complete a bolted joint. Re-adding a family
+/// means a manifest here (with `since` = the new `SEED_VERSION`), a generator +
+/// table in the worker, and a `SEED_VERSION` bump — not a revert.
+pub const SEED_PACKAGES: &[SeedPackage] = &[
+    seed!("onecad.std.iso4762", since: 1),
+    seed!("onecad.std.iso4032", since: 6),
+    seed!("onecad.std.iso7089", since: 6),
+];
 
 /// What one seeding pass did. `installed` names packages written now;
 /// `kept` names shipped packages already present on disk and therefore left
@@ -144,7 +157,8 @@ pub struct SeedOutcome {
 /// # Errors
 /// I/O failure creating the root, writing a manifest, or writing the marker.
 pub fn seed_library(root: &Path) -> std::io::Result<SeedOutcome> {
-    if marker_version(root) >= Some(SEED_VERSION) {
+    let previous_marker = marker_version(root);
+    if previous_marker >= Some(SEED_VERSION) {
         return Ok(SeedOutcome::default());
     }
 
@@ -174,6 +188,11 @@ pub fn seed_library(root: &Path) -> std::io::Result<SeedOutcome> {
             }
             continue;
         }
+        // Missing on a root that was already offered this package: the user
+        // deleted it, and a bump must not bring it back.
+        if !is_new_to_root(previous_marker, pkg.since) {
+            continue;
+        }
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join(COMPONENT_MANIFEST_FILE), pkg.manifest)?;
         // Ledger the EXACT bytes written, which is what a later prune has to
@@ -192,6 +211,12 @@ pub fn seed_library(root: &Path) -> std::io::Result<SeedOutcome> {
     write_ledger(root, &ledger)?;
     std::fs::write(root.join(SEED_MARKER_FILE), SEED_VERSION.to_string())?;
     Ok(outcome)
+}
+
+/// Whether a package that first shipped in `since` has never been offered to a
+/// root whose marker (before this pass) was `previous_marker`.
+fn is_new_to_root(previous_marker: Option<u32>, since: u32) -> bool {
+    previous_marker.is_none_or(|marker| marker < since)
 }
 
 /// Removes the leftovers of families this build no longer ships, but ONLY the
@@ -416,14 +441,13 @@ mod tests {
             std::fs::read_to_string(pkg_dir.join(COMPONENT_MANIFEST_FILE)).unwrap(),
             "# mine\n"
         );
-        // …and every OTHER shipped package still arrived (none, while the
-        // catalog is one family — the assertion is written against the list so
-        // it keeps meaning if a family is ever re-added).
+        // …and every OTHER shipped package still arrived.
         assert_eq!(outcome.installed.len(), SEED_PACKAGES.len() - 1);
     }
 
     // Deleting a built-in keeps it deleted: the marker is already current, so
-    // the next pass never looks. Only a SEED_VERSION bump restores it.
+    // the next pass never looks. A marker BELOW the package's `since` (the
+    // package is new to this root) is what installs it.
     #[test]
     fn a_deleted_package_stays_deleted_until_the_seed_version_moves() {
         let dir = tempfile::tempdir().unwrap();
@@ -435,10 +459,97 @@ mod tests {
         seed_library(root).unwrap();
         assert!(!root.join(id).exists(), "user deletion is respected");
 
-        // Simulate the bump: an older marker re-runs the pass.
+        // Simulate a root older than the package: a marker below `since`.
         std::fs::write(root.join(SEED_MARKER_FILE), "0").unwrap();
         let outcome = seed_library(root).unwrap();
         assert!(outcome.installed.contains(&id.to_string()));
+    }
+
+    fn seed_marker_at(root: &Path, marker: u32) {
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(root.join(SEED_MARKER_FILE), marker.to_string()).unwrap();
+    }
+
+    fn package_ids(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn the_catalog_is_the_three_families_with_their_since_versions() {
+        let shipped: Vec<(&str, u32)> = SEED_PACKAGES.iter().map(|p| (p.id, p.since)).collect();
+        assert_eq!(
+            shipped,
+            vec![
+                ("onecad.std.iso4762", 1),
+                ("onecad.std.iso4032", 6),
+                ("onecad.std.iso7089", 6)
+            ]
+        );
+        assert!(SEED_PACKAGES.iter().all(|p| p.since <= SEED_VERSION));
+    }
+
+    // A root at marker 5 that still has the screw gets only what is NEW.
+    #[test]
+    fn a_marker_5_root_with_every_old_package_gets_the_two_new_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seed_marker_at(root, 5);
+        let screw = root.join("onecad.std.iso4762");
+        std::fs::create_dir_all(&screw).unwrap();
+        std::fs::write(
+            screw.join(COMPONENT_MANIFEST_FILE),
+            SEED_PACKAGES[0].manifest,
+        )
+        .unwrap();
+
+        let outcome = seed_library(root).unwrap();
+        assert!(outcome.ran);
+        assert_eq!(
+            outcome.installed,
+            package_ids(&["onecad.std.iso4032", "onecad.std.iso7089"])
+        );
+        assert_eq!(outcome.kept, package_ids(&["onecad.std.iso4762"]));
+        assert_eq!(marker_version(root), Some(SEED_VERSION));
+    }
+
+    // The resurrection guard: the user deleted the screw while the marker was
+    // already past its `since`; the bump to 6 brings the NEW families only.
+    #[test]
+    fn a_marker_5_root_where_the_screw_was_deleted_does_not_get_it_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seed_marker_at(root, 5);
+
+        let outcome = seed_library(root).unwrap();
+        assert_eq!(
+            outcome.installed,
+            package_ids(&["onecad.std.iso4032", "onecad.std.iso7089"])
+        );
+        assert!(!root.join("onecad.std.iso4762").exists());
+        assert!(root.join("onecad.std.iso4032").is_dir());
+        assert!(root.join("onecad.std.iso7089").is_dir());
+        // …and the next bump (marker 6 now) restores neither deletion.
+        std::fs::remove_dir_all(root.join("onecad.std.iso4032")).unwrap();
+        seed_marker_at(root, SEED_VERSION);
+        assert!(!seed_library(root).unwrap().ran);
+        assert!(!root.join("onecad.std.iso4032").exists());
+    }
+
+    // The install rule on its own, so a FUTURE bump (marker 6 → 7) is covered
+    // without a SEED_VERSION that does not exist yet.
+    #[test]
+    fn the_install_rule_only_offers_a_package_once() {
+        assert!(
+            is_new_to_root(None, 6),
+            "no marker: a fresh root gets everything"
+        );
+        assert!(is_new_to_root(Some(5), 6));
+        assert!(
+            !is_new_to_root(Some(6), 6),
+            "offered at 6: a deletion is the user's"
+        );
+        assert!(!is_new_to_root(Some(7), 6));
+        assert!(is_new_to_root(Some(0), 1));
     }
 
     // Seeded packages must be indexable end to end — the panel reads the

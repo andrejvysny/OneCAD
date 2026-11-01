@@ -27,6 +27,11 @@ async fn restored_controls_use_real_context_and_do_not_enable_mock_actions() {
             continue;
         }
         crate::pill::activate(&mut app, &context, tool.id);
+        if tool.id == ToolId::InsertComponent {
+            // The pill opens the library page; placement starts from a component's page.
+            assert!(app.ui.start_open);
+            app.ui.start_open = false;
+        }
         cancel_supported_model_start(&mut app, tool.id);
         assert!(app.doc.interaction.tool.is_none(), "{:?}", tool.id);
         assert!(!app.doc.sketch_entry.open, "{:?}", tool.id);

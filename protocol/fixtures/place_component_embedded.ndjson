@@ -1,0 +1,43 @@
+# CANONICAL §7.3 fixture — `PlaceComponent` with `source.kind:"embedded"` (Component
+# Library WP-3.2). SELF-GENERATING, no tracked binary (the place_component_profile
+# pattern): plan 1 builds a 20x20x10 box, `ExportGeometry` bakes it to a worker-
+# writable temp BRep, and plan 2 places those bytes back through the wire-only,
+# NON-hashed `source.path` Rust injects from its materialised blob. `sha256` is a
+# fixed digest literal: the worker reads the injected path, it does not re-hash.
+# The placed body reports a volume; the cached source is the geometry authority. Refusal legs: a `brepFormat` the worker does not write and
+# an EMPTY path (unmaterialised blob) fail only their own step, recoverably. The
+# millimetres (exact volume) are pinned in worker/tests/test_component_blob_source.cpp.
+# `document` differs from `embedded` only in record provenance fields.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_place_component_embedded","documentRevision":0,"workerEpoch":4,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":121,"documentRevision":0,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"targetStep":1,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk1","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[20,0]},{"id":"e2","type":"Line","p0":[20,0],"p1":[20,20]},{"id":"e3","type":"Line","p0":[20,20],"p1":[0,20]},{"id":"e4","type":"Line","p0":[0,20],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"params":{"sketchId":"sk1","distance":10.0,"extrudeMode":"Blind","booleanMode":"NewBody"}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"jobId":121}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":1,"jobId":121,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":121,"result":{"planPrepared":true,"lastValidStep":1,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":121,"documentRevision":0,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":121,"result":{"accepted":true,"snapshotId":1,"documentRevision":0}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"QueryMassProperties","args":{"bodyId":"body_op1"}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"volume":"$present","surfaceArea":"$present"}}}
+{"send":{"v":1,"t":"req","id":5,"verb":"ExportGeometry","args":{"path":"/tmp/onecad_canonical_embedded.brep","bodyIds":["body_op1"],"codec":"brep","union":false}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"written":true,"bytes":"$present","codec":"brep","format":4,"solidCount":1}}}
+# Place the baked bytes.
+{"send":{"v":1,"t":"req","id":6,"verb":"ExecutePlan","args":{"jobId":122,"documentRevision":1,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":0,"ops":[{"opType":"PlaceComponent","opId":"op2","stepIndex":0,"inputs":[],"params":{"componentId":"acme.embedded.box","componentVersion":"1.0.0","componentRevision":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source":{"kind":"embedded","sha256":"1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef","codec":"brep","brepFormat":4,"path":"/tmp/onecad_canonical_embedded.brep"},"placement":{"translate":[0.0,0.0,0.0]}}}]}}}
+{"expect":{"v":1,"t":"event","id":6,"event":"planStep","stepIndex":0,"jobId":122,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op2"}],"needsRepair":[]}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"jobId":122,"result":{"planPrepared":true,"lastValidStep":0,"stoppedReason":"completed","perStepResults":[{"stepIndex":0,"status":"ok","bodyIds":["body_op2"]}],"historyPrefixHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
+{"send":{"v":1,"t":"req","id":7,"verb":"AcceptPrepared","args":{"jobId":122,"documentRevision":1,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"jobId":122,"result":{"accepted":true,"snapshotId":2,"documentRevision":1}}}
+{"send":{"v":1,"t":"req","id":8,"verb":"QueryMassProperties","args":{"bodyId":"body_op2"}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"result":{"volume":"$present","surfaceArea":"$present"}}}
+# Refusal: a brepFormat this worker does not write.
+{"send":{"v":1,"t":"req","id":9,"verb":"ExecutePlan","args":{"jobId":123,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],"targetStep":0,"ops":[{"opType":"PlaceComponent","opId":"op3","stepIndex":0,"inputs":[],"params":{"componentId":"acme.embedded.box","componentVersion":"1.0.0","componentRevision":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source":{"kind":"embedded","sha256":"1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef","codec":"brep","brepFormat":999,"path":"/tmp/onecad_canonical_embedded.brep"},"placement":{"translate":[0.0,0.0,0.0]}}}]}}}
+{"expect":{"v":1,"t":"resp","id":9,"ok":true,"jobId":123,"result":{"planPrepared":true,"lastValidStep":null,"stoppedReason":"opFailed","perStepResults":[{"stepIndex":0,"status":"opFailed","message":"$present","diagnostics":[{"severity":"error","stage":"build","message":"$present"}]}]}}}
+{"send":{"v":1,"t":"req","id":10,"verb":"DiscardPrepared","args":{"jobId":123}}}
+{"expect":{"v":1,"t":"resp","id":10,"ok":true,"jobId":123,"result":{"discarded":true}}}
+# Refusal: unmaterialised blob (empty injected path).
+{"send":{"v":1,"t":"req","id":11,"verb":"ExecutePlan","args":{"jobId":124,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],"targetStep":0,"ops":[{"opType":"PlaceComponent","opId":"op4","stepIndex":0,"inputs":[],"params":{"componentId":"acme.embedded.box","componentVersion":"1.0.0","componentRevision":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source":{"kind":"embedded","sha256":"1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef","codec":"brep","brepFormat":4,"path":""},"placement":{"translate":[0.0,0.0,0.0]}}}]}}}
+{"expect":{"v":1,"t":"resp","id":11,"ok":true,"jobId":124,"result":{"planPrepared":true,"lastValidStep":null,"stoppedReason":"opFailed","perStepResults":[{"stepIndex":0,"status":"opFailed","message":"$present","diagnostics":[{"severity":"error","stage":"build","message":"$present"}]}]}}}
+{"send":{"v":1,"t":"req","id":12,"verb":"DiscardPrepared","args":{"jobId":124}}}
+{"expect":{"v":1,"t":"resp","id":12,"ok":true,"jobId":124,"result":{"discarded":true}}}
+{"send":{"v":1,"t":"req","id":13,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":13,"ok":true,"result":{"goodbye":true}}}

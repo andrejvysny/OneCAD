@@ -1048,7 +1048,7 @@ fn validate_orthonormal_basis(plane: &onecad_core::sketch::SketchPlane) -> Resul
 /// this is a derived-geometry echo, not execution input — a malformed
 /// payload here means "no reseat happened" (dropped), never a
 /// `PROTOCOL_ERROR` that tears down an otherwise valid regen step.
-fn parse_mate_placement(v: Option<&Value>) -> Option<Box<FrozenPlacement>> {
+pub(crate) fn parse_mate_placement(v: Option<&Value>) -> Option<Box<FrozenPlacement>> {
     serde_json::from_value(v?.clone()).ok().map(Box::new)
 }
 
