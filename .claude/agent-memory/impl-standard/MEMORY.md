@@ -20,3 +20,11 @@
 - [Edge overflow app tests](edge-overflow-app-test-gotchas.md) — fillet_overflow.rs: re-edit clones live op, reason_code field, Lod::Fine preview==commit
 - [onecad-ui prefs backend](onecad-ui-prefs-backend.md) — nav/shortcut/decimals prefs: App-based viewport tests need worker+GPU, so logic lives in pure helpers
 - [onecad-ui Settings pages](onecad-ui-settings-pages.md) — no App in tests, disabled tooltip path, Id::unique, hook formats, mono-font gap
+- [Component library backend](component-library-backend-gotchas.md) — save guard, param validation, status pattern, seed never rewrites
+- [Worker fixture harness limits](worker-fixture-harness-limits.md) — C++ worker_harness lacks $capture/$ref; snapshotId drifts after DiscardPrepared; never run `git stash` in a shared tree
+- [component placement pipeline](component-placement-pipeline-gotchas.md) — apply_operation batch limit, scheduler-less real-worker harness, test filter trap
+- [Component Copy preview gotchas](component-copy-preview-gotchas.md) — harness can't assert absence, fmt --all blocked by onecad-ui, op_error/advance, matePlacement only on move
+- [Seed since + family re-add](seed-since-and-family-readd.md) — SeedPackage.since rule, file checklist for re-adding a standard-part family
+- [Component instances service](component-instances-service-gotchas.md) — upgrade/reset: merge-vs-remove, stale-plan checks, volume effects
+- [Placement gesture](placement-gesture-gotchas.md) — Placed inbox, one classify in flight, plate harness world-axis/modifier traps
+- [Create Component authoring](create-component-authoring-gotchas.md) — config/static_save/attachment_from_pick: struct-literal blast radius, id forms, variable-driven fixture
