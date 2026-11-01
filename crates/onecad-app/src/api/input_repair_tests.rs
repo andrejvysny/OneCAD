@@ -28,6 +28,8 @@ fn only_complete_single_input_features_are_eligible() {
         edges: vec![edge.clone()],
         chain_tangent_edges: false,
         tangent_closure_version: None,
+        overflow: None,
+        overflow_version: None,
         extra: Default::default(),
     };
     assert_eq!(
@@ -49,6 +51,8 @@ fn only_complete_single_input_features_are_eligible() {
         reference_face_refs: vec![],
         chain_tangent_edges: false,
         tangent_closure_version: None,
+        overflow: None,
+        overflow_version: None,
         extra: Default::default(),
     };
     assert!(input_repair_target(&record(KnownOperation::Chamfer(chamfer.clone()))).is_ok());

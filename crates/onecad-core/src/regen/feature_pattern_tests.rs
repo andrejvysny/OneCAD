@@ -148,6 +148,8 @@ mod tests {
                 edges: Vec::new(),
                 chain_tangent_edges: false,
                 tangent_closure_version: None,
+                overflow: None,
+                overflow_version: None,
                 extra: Extra::new(),
             })),
         );

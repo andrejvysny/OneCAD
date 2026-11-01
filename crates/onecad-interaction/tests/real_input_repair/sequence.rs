@@ -89,6 +89,8 @@ async fn sequence(root: &Path) {
         reference_face_refs: vec![],
         chain_tangent_edges: false,
         tangent_closure_version: None,
+        overflow: None,
+        overflow_version: None,
         extra: Default::default(),
     }));
     apply(

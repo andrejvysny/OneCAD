@@ -618,6 +618,8 @@ fn fillet_with_stamped_intent() -> OperationRecord {
         }],
         chain_tangent_edges: false,
         tangent_closure_version: None,
+        overflow: None,
+        overflow_version: None,
         extra: Default::default(),
     }));
     OperationRecord::new(rid(0x5), 0, "Fillet", op)
@@ -976,6 +978,8 @@ fn chamfer_with_reference_face(face: Option<&str>) -> OperationRecord {
         reference_face_refs: face.map(|id| vec![face_ref(id)]).unwrap_or_default(),
         chain_tangent_edges: true,
         tangent_closure_version: Some(1),
+        overflow: None,
+        overflow_version: None,
         extra: Default::default(),
     }));
     OperationRecord::new(rid(0xF00), 0, "Chamfer", op)

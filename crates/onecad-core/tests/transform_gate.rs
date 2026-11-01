@@ -148,6 +148,8 @@ fn fillet_record(id: RecordId, body: BodyId, el: &str) -> OperationRecord {
         radius: Scalar::new(2.0),
         chain_tangent_edges: false,
         tangent_closure_version: None,
+        overflow: None,
+        overflow_version: None,
         extra: Default::default(),
     }));
     let mut r = OperationRecord::new(id, 0, "Fillet", op);

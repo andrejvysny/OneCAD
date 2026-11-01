@@ -1,0 +1,62 @@
+# CANONICAL fixture - SCHEMA §7.3 Fillet/Chamfer `overflow` + `overflowVersion`
+# (Overflow, Shapr3D Auto parity, 2026-11-01) and §7.2 warnings
+# `FILLET_OVERFLOW_TRIMMED` / `CHAMFER_OVERFLOW_TRIMMED`.
+#
+# A 20 x 30 x 4 box (the XY sketch maps u->Y, v->-X, so the sketch rectangle is
+# 30 x 20 and the body spans x in [-20,0], y in [0,30]); the seed is the top edge whose vertices sit at x=0, z=4.
+# Native OCCT refuses a fillet radius >= 4 or a chamfer distance >= 4 there (the
+# blend exceeds the 4 mm side face). With `overflow:"auto"` + `overflowVersion:1`
+# the worker consumes the side face and trims the next one.
+#   (a) fillet r=11.2, auto  => ok, warning FILLET_OVERFLOW_TRIMMED, kind "cliff"
+#   (b) same r, no field     => opFailed, native diagnostic FILLET_START_SOLUTION_FAILED
+#                               (native-only, as before; no overflow diagnostic)
+#   (c) chamfer 6.2, auto    => ok, warning CHAMFER_OVERFLOW_TRIMMED, "extendedPlane"
+#   (d) overflow "bogus"     => opFailed OP_FAILED naming `overflow`
+#   (e) overflowVersion 2^32+1 => opFailed OP_FAILED (not narrowed to 1)
+#   (f) fillet r=52.5, auto   => opFailed; native error diagnostic, then
+#                               EDGE_OP_OVERFLOW_UNSUPPORTED/OVERFLOW_BOTH_SUPPORTS_CONSUMED
+# Measurements (setback, volumes, face ordinals) are `$any`: json_subset compares
+# numbers exactly and the closed-form pins live in test_blend_overflow.cpp.
+{"expect": {"v": 1, "t": "hello", "seq": 0}}
+{"send": {"v": 1, "t": "req", "id": 1, "verb": "OpenSession", "args": {"documentId": "doc_fillet_overflow", "documentRevision": 0, "workerEpoch": 4, "mode": "determinism"}}}
+{"expect": {"v": 1, "t": "resp", "id": 1, "ok": true, "result": {"sessionOpen": true}}}
+{"send": {"v": 1, "t": "req", "id": 2, "verb": "ExecutePlan", "args": {"jobId": 80, "documentRevision": 1, "workerEpoch": 4, "expectedBaseHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "prefixHashes": ["1111111111111111111111111111111111111111111111111111111111111111", "2222222222222222222222222222222222222222222222222222222222222222"], "targetStep": 1, "ops": [{"opType": "Sketch", "opId": "op0", "stepIndex": 0, "params": {"sketchId": "sk1", "plane": {"kind": "XY"}, "entities": [{"id": "l1", "type": "Line", "p0": [0, 0], "p1": [30, 0]}, {"id": "l2", "type": "Line", "p0": [30, 0], "p1": [30, 20]}, {"id": "l3", "type": "Line", "p0": [30, 20], "p1": [0, 20]}, {"id": "l4", "type": "Line", "p0": [0, 20], "p1": [0, 0]}], "constraints": []}}, {"opType": "Extrude", "opId": "op1", "stepIndex": 1, "inputs": [], "params": {"sketchId": "sk1", "distance": 4, "booleanMode": "NewBody", "extrudeMode": "Blind"}}]}}}
+{"expect": {"v": 1, "t": "event", "id": 2, "event": "planStep", "stepIndex": 0, "jobId": 80, "payload": {"bodyEvents": []}}}
+{"expect": {"v": 1, "t": "event", "id": 2, "event": "planStep", "stepIndex": 1, "jobId": 80, "payload": {"bodyEvents": [{"kind": "created", "bodyId": "body_op1"}]}}}
+{"expect": {"v": 1, "t": "resp", "id": 2, "ok": true, "jobId": 80, "result": {"planPrepared": true, "lastValidStep": 1, "stoppedReason": "completed"}}}
+# (a) fillet r=11.2, overflow auto: native refuses, cliff overflow publishes with warning
+{"send": {"v": 1, "t": "req", "id": 100, "verb": "AcceptPrepared", "args": {"jobId": 80, "documentRevision": 1, "workerEpoch": 4}}}
+{"expect": {"v": 1, "t": "resp", "id": 100, "ok": true, "jobId": 80, "result": {"accepted": true, "snapshotId": 1, "documentRevision": 1}}}
+{"send": {"v": 1, "t": "req", "id": 3, "verb": "ExecutePlan", "args": {"jobId": 81, "documentRevision": 2, "workerEpoch": 4, "expectedBaseHash": "2222222222222222222222222222222222222222222222222222222222222222", "prefixHashes": ["3333333333333333333333333333333333333333333333333333333333333333"], "targetStep": 2, "ops": [{"opType": "Fillet", "opId": "op2", "stepIndex": 2, "inputs": [{"primary": {"bodyId": "body_op1", "elementId": "el_top_edge", "kind": "edge"}, "anchor": {"worldPoint": [0.0, 15.0, 4.0]}}], "params": {"mode": "Fillet", "radius": 11.2, "edgeIds": ["el_top_edge"], "chainTangentEdges": true, "tangentClosureVersion": 1, "targetBodyId": "body_op1", "overflow": "auto", "overflowVersion": 1}}]}}}
+{"expect": {"v": 1, "t": "event", "id": 3, "event": "planStep", "stepIndex": 2, "jobId": 81, "payload": {"bodyEvents": [{"kind": "modified", "bodyId": "body_op1"}], "diagnostics": [{"severity": "warning", "code": "FILLET_OVERFLOW_TRIMMED", "stage": "publication", "message": "$any", "evidence": {"overflowKind": "cliff", "consumedFace": "$any", "survivingSupport": "$any", "setback": "$any", "analyticRemovedVolume": "$any", "measuredRemovedVolume": "$any"}}]}}}
+{"expect": {"v": 1, "t": "resp", "id": 3, "ok": true, "jobId": 81, "result": {"planPrepared": true, "lastValidStep": 2, "stoppedReason": "completed", "perStepResults": [{"stepIndex": 2, "status": "ok", "bodyIds": ["body_op1"]}]}}}
+{"send": {"v": 1, "t": "req", "id": 4, "verb": "DiscardPrepared", "args": {"jobId": 81}}}
+{"expect": {"v": 1, "t": "resp", "id": 4, "ok": true, "jobId": 81, "result": {"discarded": true}}}
+# (b) same radius, no overflow: native refusal, byte-identical to before
+{"send": {"v": 1, "t": "req", "id": 5, "verb": "ExecutePlan", "args": {"jobId": 82, "documentRevision": 2, "workerEpoch": 4, "expectedBaseHash": "2222222222222222222222222222222222222222222222222222222222222222", "prefixHashes": ["3333333333333333333333333333333333333333333333333333333333333333"], "targetStep": 2, "ops": [{"opType": "Fillet", "opId": "op2", "stepIndex": 2, "inputs": [{"primary": {"bodyId": "body_op1", "elementId": "el_top_edge", "kind": "edge"}, "anchor": {"worldPoint": [0.0, 15.0, 4.0]}}], "params": {"mode": "Fillet", "radius": 11.2, "edgeIds": ["el_top_edge"], "chainTangentEdges": true, "tangentClosureVersion": 1, "targetBodyId": "body_op1"}}]}}}
+{"expect": {"v": 1, "t": "resp", "id": 5, "ok": true, "jobId": 82, "result": {"planPrepared": true, "lastValidStep": null, "stoppedReason": "opFailed", "perStepResults": [{"stepIndex": 2, "status": "opFailed", "message": "$any", "diagnostics": [{"severity": "error", "code": "FILLET_START_SOLUTION_FAILED", "message": "$any", "stage": "build"}]}]}}}
+{"send": {"v": 1, "t": "req", "id": 6, "verb": "DiscardPrepared", "args": {"jobId": 82}}}
+{"expect": {"v": 1, "t": "resp", "id": 6, "ok": true, "jobId": 82, "result": {"discarded": true}}}
+# (c) chamfer 6.2, overflow auto: extended-plane overflow publishes with warning
+{"send": {"v": 1, "t": "req", "id": 7, "verb": "ExecutePlan", "args": {"jobId": 83, "documentRevision": 2, "workerEpoch": 4, "expectedBaseHash": "2222222222222222222222222222222222222222222222222222222222222222", "prefixHashes": ["3333333333333333333333333333333333333333333333333333333333333333"], "targetStep": 2, "ops": [{"opType": "Chamfer", "opId": "op2", "stepIndex": 2, "inputs": [{"primary": {"bodyId": "body_op1", "elementId": "el_top_edge", "kind": "edge"}, "anchor": {"worldPoint": [0.0, 15.0, 4.0]}}], "params": {"mode": "Chamfer", "radius": 6.2, "edgeIds": ["el_top_edge"], "chainTangentEdges": true, "tangentClosureVersion": 1, "targetBodyId": "body_op1", "overflow": "auto", "overflowVersion": 1}}]}}}
+{"expect": {"v": 1, "t": "event", "id": 7, "event": "planStep", "stepIndex": 2, "jobId": 83, "payload": {"bodyEvents": [{"kind": "modified", "bodyId": "body_op1"}], "diagnostics": [{"severity": "warning", "code": "CHAMFER_OVERFLOW_TRIMMED", "stage": "publication", "message": "$any", "evidence": {"overflowKind": "extendedPlane", "consumedFace": "$any", "survivingSupport": "$any", "setback": "$any", "analyticRemovedVolume": "$any", "measuredRemovedVolume": "$any"}}]}}}
+{"expect": {"v": 1, "t": "resp", "id": 7, "ok": true, "jobId": 83, "result": {"planPrepared": true, "lastValidStep": 2, "stoppedReason": "completed", "perStepResults": [{"stepIndex": 2, "status": "ok", "bodyIds": ["body_op1"]}]}}}
+{"send": {"v": 1, "t": "req", "id": 8, "verb": "DiscardPrepared", "args": {"jobId": 83}}}
+{"expect": {"v": 1, "t": "resp", "id": 8, "ok": true, "jobId": 83, "result": {"discarded": true}}}
+# (d) overflow outside {none,auto}: refused by name
+{"send": {"v": 1, "t": "req", "id": 9, "verb": "ExecutePlan", "args": {"jobId": 84, "documentRevision": 2, "workerEpoch": 4, "expectedBaseHash": "2222222222222222222222222222222222222222222222222222222222222222", "prefixHashes": ["3333333333333333333333333333333333333333333333333333333333333333"], "targetStep": 2, "ops": [{"opType": "Fillet", "opId": "op2", "stepIndex": 2, "inputs": [{"primary": {"bodyId": "body_op1", "elementId": "el_top_edge", "kind": "edge"}, "anchor": {"worldPoint": [0.0, 15.0, 4.0]}}], "params": {"mode": "Fillet", "radius": 11.2, "edgeIds": ["el_top_edge"], "chainTangentEdges": true, "tangentClosureVersion": 1, "targetBodyId": "body_op1", "overflow": "bogus"}}]}}}
+{"expect": {"v": 1, "t": "resp", "id": 9, "ok": true, "jobId": 84, "result": {"planPrepared": true, "lastValidStep": null, "stoppedReason": "opFailed", "perStepResults": [{"stepIndex": 2, "status": "opFailed", "message": "$any", "diagnostics": [{"severity": "error", "code": "OP_FAILED", "message": "$any", "stage": "build"}]}]}}}
+{"send": {"v": 1, "t": "req", "id": 10, "verb": "DiscardPrepared", "args": {"jobId": 84}}}
+{"expect": {"v": 1, "t": "resp", "id": 10, "ok": true, "jobId": 84, "result": {"discarded": true}}}
+# (e) overflowVersion wider than 32 bits is not narrowed to 1: refused naming overflowVersion
+{"send": {"v": 1, "t": "req", "id": 11, "verb": "ExecutePlan", "args": {"jobId": 85, "documentRevision": 2, "workerEpoch": 4, "expectedBaseHash": "2222222222222222222222222222222222222222222222222222222222222222", "prefixHashes": ["3333333333333333333333333333333333333333333333333333333333333333"], "targetStep": 2, "ops": [{"opType": "Fillet", "opId": "op2", "stepIndex": 2, "inputs": [{"primary": {"bodyId": "body_op1", "elementId": "el_top_edge", "kind": "edge"}, "anchor": {"worldPoint": [0.0, 15.0, 4.0]}}], "params": {"mode": "Fillet", "radius": 11.2, "edgeIds": ["el_top_edge"], "chainTangentEdges": true, "tangentClosureVersion": 1, "targetBodyId": "body_op1", "overflow": "auto", "overflowVersion": 4294967297}}]}}}
+{"expect": {"v": 1, "t": "resp", "id": 11, "ok": true, "jobId": 85, "result": {"planPrepared": true, "lastValidStep": null, "stoppedReason": "opFailed", "perStepResults": [{"stepIndex": 2, "status": "opFailed", "message": "$any", "diagnostics": [{"severity": "error", "code": "OP_FAILED", "message": "$any", "stage": "build"}]}]}}}
+{"send": {"v": 1, "t": "req", "id": 12, "verb": "DiscardPrepared", "args": {"jobId": 85}}}
+{"expect": {"v": 1, "t": "resp", "id": 12, "ok": true, "jobId": 85, "result": {"discarded": true}}}
+# (f) refusal pinned: r=52.5 consumes both supports; native error first, then EDGE_OP_OVERFLOW_UNSUPPORTED
+{"send": {"v": 1, "t": "req", "id": 13, "verb": "ExecutePlan", "args": {"jobId": 86, "documentRevision": 2, "workerEpoch": 4, "expectedBaseHash": "2222222222222222222222222222222222222222222222222222222222222222", "prefixHashes": ["3333333333333333333333333333333333333333333333333333333333333333"], "targetStep": 2, "ops": [{"opType": "Fillet", "opId": "op2", "stepIndex": 2, "inputs": [{"primary": {"bodyId": "body_op1", "elementId": "el_top_edge", "kind": "edge"}, "anchor": {"worldPoint": [0.0, 15.0, 4.0]}}], "params": {"mode": "Fillet", "radius": 52.5, "edgeIds": ["el_top_edge"], "chainTangentEdges": true, "tangentClosureVersion": 1, "targetBodyId": "body_op1", "overflow": "auto", "overflowVersion": 1}}]}}}
+{"expect": {"v": 1, "t": "resp", "id": 13, "ok": true, "jobId": 86, "result": {"planPrepared": true, "lastValidStep": null, "stoppedReason": "opFailed", "perStepResults": [{"stepIndex": 2, "status": "opFailed", "message": "$any", "diagnostics": [{"severity": "error", "code": "$any", "message": "$any", "stage": "build"}, {"severity": "error", "code": "EDGE_OP_OVERFLOW_UNSUPPORTED", "stage": "overflow", "reasonCode": "OVERFLOW_BOTH_SUPPORTS_CONSUMED", "message": "$any"}]}]}}}
+{"send": {"v": 1, "t": "req", "id": 14, "verb": "DiscardPrepared", "args": {"jobId": 86}}}
+{"expect": {"v": 1, "t": "resp", "id": 14, "ok": true, "jobId": 86, "result": {"discarded": true}}}
+{"send": {"v": 1, "t": "req", "id": 20, "verb": "Shutdown", "args": {}}}
+{"expect": {"v": 1, "t": "resp", "id": 20, "ok": true, "result": {"goodbye": true}}}

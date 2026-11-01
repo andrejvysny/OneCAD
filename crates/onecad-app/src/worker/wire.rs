@@ -7766,6 +7766,8 @@ mod body_wire_tests {
             edges: vec![],
             chain_tangent_edges: false,
             tangent_closure_version: None,
+            overflow: None,
+            overflow_version: None,
             extra: Default::default(),
         }));
         // The graph-view carries the operated body at bodies[0] (as the plan would
@@ -7899,6 +7901,8 @@ mod body_wire_tests {
                 reference_face_refs: Vec::new(),
                 chain_tangent_edges: true,
                 tangent_closure_version: None,
+                overflow: None,
+                overflow_version: None,
                 extra: Default::default(),
             }));
             let mut inputs = OperationInputs::default();
@@ -7945,6 +7949,8 @@ mod body_wire_tests {
             reference_face_refs: Vec::new(),
             chain_tangent_edges: true,
             tangent_closure_version: None,
+            overflow: None,
+            overflow_version: None,
             extra: Default::default(),
         };
         let err = both.validate().expect_err("both modes at once is refused");
@@ -8181,6 +8187,8 @@ mod body_wire_tests {
                     edges: vec![edge_ref(edge_body, "e:14"), edge_ref(edge_body, "e:15")],
                     chain_tangent_edges: true,
                     tangent_closure_version: None,
+                    overflow: None,
+                    overflow_version: None,
                     extra: Default::default(),
                 })),
             ),
@@ -8196,6 +8204,8 @@ mod body_wire_tests {
                     reference_face_refs: Vec::new(),
                     chain_tangent_edges: true,
                     tangent_closure_version: None,
+                    overflow: None,
+                    overflow_version: None,
                     extra: Default::default(),
                 })),
             ),
@@ -8996,6 +9006,8 @@ mod chamfer_reference_face_wire_tests {
             reference_face_refs: vec![typed_ref("el_top", ElementKind::Face, [-10.0, 20.0, 10.0])],
             chain_tangent_edges: true,
             tangent_closure_version: Some(1),
+            overflow: None,
+            overflow_version: None,
             extra: Default::default(),
         }));
         let inputs = op.derive_inputs();
@@ -9050,6 +9062,8 @@ mod chamfer_reference_face_wire_tests {
             reference_face_refs: Vec::new(),
             chain_tangent_edges: true,
             tangent_closure_version: Some(1),
+            overflow: None,
+            overflow_version: None,
             extra: Default::default(),
         }));
         let inputs = op.derive_inputs();

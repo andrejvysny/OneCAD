@@ -45,12 +45,45 @@ fn all_descriptor_fields_edit_exactly_one_scalar_preserve_typed_record() {
                 *new = old.clone();
             }
             assert_eq!(changes, 1);
-            assert_eq!(after, before);
+            // Every UI edit of a Fillet/Chamfer opts into overflow trimming.
+            let mut expected = before.clone();
+            expected.op = with_auto_overflow(&before.op);
+            assert_eq!(after, expected);
         }
     }
     assert!(seen.contains(&NumericParameter::HoleThreadPitch));
     assert!(seen.contains(&NumericParameter::FeaturePatternAngle));
     assert!(seen.contains(&NumericParameter::TransformTranslation(ParameterAxis::Z)));
+}
+
+#[test]
+fn edited_fillet_and_chamfer_carry_auto_overflow_version_one() {
+    for (op, parameter) in [
+        (
+            operations()
+                .into_iter()
+                .find(|op| matches!(op, KnownOperation::Fillet(_)))
+                .unwrap(),
+            NumericParameter::FilletRadius,
+        ),
+        (
+            operations()
+                .into_iter()
+                .find(|op| matches!(op, KnownOperation::Chamfer(_)))
+                .unwrap(),
+            NumericParameter::ChamferDistance,
+        ),
+    ] {
+        let before = record(op);
+        let after = edit(before.clone(), parameter, 3.0);
+        let (overflow, version) = match &after.op {
+            Operation::Known(KnownOperation::Fillet(p)) => (p.overflow, p.overflow_version),
+            Operation::Known(KnownOperation::Chamfer(p)) => (p.overflow, p.overflow_version),
+            _ => panic!("edge op expected"),
+        };
+        assert_eq!(overflow, Some(EdgeOverflow::Auto));
+        assert_eq!(version, Some(EDGE_OVERFLOW_VERSION));
+    }
 }
 
 #[test]

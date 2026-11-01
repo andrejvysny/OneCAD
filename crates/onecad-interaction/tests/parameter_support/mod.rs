@@ -37,6 +37,8 @@ pub fn edge_operations(body: BodyId) -> Vec<KnownOperation> {
             edges: edges.clone(),
             chain_tangent_edges: false,
             tangent_closure_version: None,
+            overflow: None,
+            overflow_version: None,
             extra: Default::default(),
         }),
         KnownOperation::Chamfer(ChamferParams {
@@ -49,6 +51,8 @@ pub fn edge_operations(body: BodyId) -> Vec<KnownOperation> {
             reference_face_refs: vec![],
             chain_tangent_edges: false,
             tangent_closure_version: None,
+            overflow: None,
+            overflow_version: None,
             extra: Default::default(),
         }),
         KnownOperation::Shell(ShellParams {
@@ -234,6 +238,24 @@ pub fn complete_edit_preview(state: &mut Interaction, tag: &RequestTag) {
     });
     assert!(state.tool.as_ref().unwrap().ready());
 }
+/// The operation a UI create/edit is expected to write: Fillet/Chamfer gain the
+/// overflow opt-in, everything else is unchanged.
+pub fn with_auto_overflow(op: &Operation) -> Operation {
+    let mut out = op.clone();
+    if let Operation::Known(known) = &mut out {
+        let slots = match known {
+            KnownOperation::Fillet(p) => Some((&mut p.overflow, &mut p.overflow_version)),
+            KnownOperation::Chamfer(p) => Some((&mut p.overflow, &mut p.overflow_version)),
+            _ => None,
+        };
+        if let Some((overflow, version)) = slots {
+            *overflow = Some(EdgeOverflow::Auto);
+            *version = Some(EDGE_OVERFLOW_VERSION);
+        }
+    }
+    out
+}
+
 pub fn edit(record: OperationRecord, parameter: NumericParameter, value: f64) -> OperationRecord {
     let expected_id = record.record_id;
     let (mut state, _) = begin(record, parameter);

@@ -514,6 +514,8 @@ fn chamfer_record(
             reference_face_refs: Vec::new(),
             chain_tangent_edges: false,
             tangent_closure_version: None,
+            overflow: None,
+            overflow_version: None,
             extra: Default::default(),
         })),
     )

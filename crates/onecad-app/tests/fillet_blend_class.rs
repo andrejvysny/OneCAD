@@ -239,6 +239,8 @@ fn fillet_record(
             edges: refs,
             chain_tangent_edges: chain_tangent,
             tangent_closure_version: chain_tangent.then_some(1),
+            overflow: None,
+            overflow_version: None,
             extra: Default::default(),
         })),
     )

@@ -2275,6 +2275,9 @@ fn validate_edge_op_distances(
             "tangentClosureVersion must be 1 when present".into(),
         ));
     }
+    if let Operation::Known(KnownOperation::Fillet(p)) = op {
+        p.validate().map_err(DomainError::Validation)?;
+    }
     match op {
         Operation::Known(KnownOperation::Chamfer(p)) => {
             p.validate().map_err(DomainError::Validation)?;
@@ -4758,6 +4761,8 @@ mod tests {
                     edges: vec![shell_face("e1", ElementKind::Edge), foreign.clone()],
                     chain_tangent_edges: false,
                     tangent_closure_version: None,
+                    overflow: None,
+                    overflow_version: None,
                     extra: Default::default(),
                 },
             )),
@@ -4772,6 +4777,8 @@ mod tests {
                     reference_face_refs: Vec::new(),
                     chain_tangent_edges: false,
                     tangent_closure_version: None,
+                    overflow: None,
+                    overflow_version: None,
                     extra: Default::default(),
                 },
             )),
@@ -4792,6 +4799,8 @@ mod tests {
                 }],
                 chain_tangent_edges: false,
                 tangent_closure_version: None,
+                overflow: None,
+                overflow_version: None,
                 extra: Default::default(),
             },
         ));

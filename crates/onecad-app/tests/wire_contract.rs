@@ -1084,6 +1084,8 @@ async fn fillet_body_context() {
             edges: vec![edge_ref],
             chain_tangent_edges: false,
             tangent_closure_version: None,
+            overflow: None,
+            overflow_version: None,
             extra: Default::default(),
         })),
     );
@@ -1536,6 +1538,8 @@ async fn chamfer_reaches_the_worker() {
                 reference_face_refs: Vec::new(),
                 chain_tangent_edges: false,
                 tangent_closure_version: None,
+                overflow: None,
+                overflow_version: None,
                 extra: Default::default(),
             })),
         ),

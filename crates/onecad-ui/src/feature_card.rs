@@ -212,6 +212,11 @@ fn card_rows(
             ui.add(egui::Label::new(message).wrap().selectable(true));
         });
     }
+    if let Some(message) = crate::overflow_advisory::for_tool(app, tool) {
+        rows.row("Advisory", |ui| {
+            ui.add(egui::Label::new(message).wrap().selectable(true));
+        });
+    }
 }
 
 fn apply_feedback(app: &App, tool: &ModelSession) -> Option<String> {
@@ -335,6 +340,15 @@ fn focus_keys(app: &mut App, response: &egui::Response, can_apply: bool) {
         crate::pill::cancel_tool(app);
         response.surrender_focus();
     }
+}
+
+#[cfg(test)]
+pub(crate) fn preview_feedback_for_test() -> Option<String> {
+    preview_feedback(
+        &Readiness::Ready,
+        &PreviewStatus::Ready,
+        SessionPhase::Editing,
+    )
 }
 
 #[cfg(test)]

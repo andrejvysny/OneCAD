@@ -359,6 +359,8 @@ fn chamfer_params(
         reference_face_refs: refs,
         chain_tangent_edges: false,
         tangent_closure_version: None,
+        overflow: None,
+        overflow_version: None,
         extra: Default::default(),
     }
 }
@@ -1540,6 +1542,8 @@ fn a_fillet_flip_to_an_asymmetric_chamfer_without_pairs_is_refused() {
             edges: vec![anchored_ref(body, &edge, ElementKind::Edge, at)],
             chain_tangent_edges: false,
             tangent_closure_version: None,
+            overflow: None,
+            overflow_version: None,
             extra: Default::default(),
         })),
     )]);

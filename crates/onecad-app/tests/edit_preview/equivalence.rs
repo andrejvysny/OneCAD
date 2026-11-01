@@ -229,6 +229,8 @@ fn fillet_op(edge: &ElementId, anchor: Vec3, radius: f64) -> Operation {
         edges: vec![edge_ref],
         chain_tangent_edges: false,
         tangent_closure_version: None,
+        overflow: None,
+        overflow_version: None,
         extra: Default::default(),
     }))
 }

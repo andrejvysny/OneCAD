@@ -338,6 +338,8 @@ mod tests {
             edges: Vec::new(),
             chain_tangent_edges: true,
             tangent_closure_version: None,
+            overflow: None,
+            overflow_version: None,
             extra: Default::default(),
         }));
         OperationRecord::new(rid(seed), 0, "Fillet", op)

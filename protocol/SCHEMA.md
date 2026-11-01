@@ -807,6 +807,9 @@ unknown code as an opaque warning):
 | `REGION_REBOUND_BY_ANCHOR` | the op's stored `regionId` matched no cell after an edit moved a crossing; the op bound the unique cell containing `regionAnchor` instead (§7.3 "Region anchor"). `stage` is `"profile"`. Evidence `{ "region": { "from": "<stale regionId>", "to": "<bound regionId>", "anchor": [u, v] } }`. The params are unchanged; the warning repeats on every regen until the user re-picks. |
 | `SKETCH_ENTITY_DEGENERATE` | an entity that is zero-length TO THE DETECTOR'S GRAPH — shorter (or a smaller radius) than the node-merge coincidence tolerance, 1e-6 mm, so its endpoints would collapse into one node and it can carry no edge — is dropped and detection continues instead of refusing the whole graph. NOT the authoring resolution: a 0.0005 mm edge is real boundary (dropping it deleted a hole from a region — adversarial review 2026-09-03). The message carries the measured length/radius and the tolerance. Emitted on the exact-fragment (V2/V3) path only; V1 profiles never emit it. `stage` is `"profile"`. Evidence `{ "entityId": "<wire entity id>" }` (the WIRE id space). The step still succeeds. Reaches the wire on the modeling path (`planStep` of the op that built the profile) and, since WP-S1 (2026-09-09), on the `SketchRegions` result's own OPTIONAL `diagnostics` array ([§7.4](#74-sketch-solver-lane)) — so a dropped degenerate entity is now visible in sketch mode too. Both channels are omission-legal; a consumer that sees neither is not entitled to assume nothing was dropped. |
 | `FILLET_BLEND_APPROXIMATED` | an approximated (walked) fillet blend published inside its fit bound + radius-relative section budget (kernel-hardening WP-G, 2026-09-06; §7.3 Fillet "Two blend classes"). `stage` is `"publication"`. Evidence is the `blendEvidence` object with the failure path's existing keys — `maximumSectionRadiusError`, `allowedSectionRadiusError`, `maximumTangencyRadians`, `allowedTangencyRadians` — plus `blendSurfaceClass`, `approximationTolerance`, `maxContourVertexValence` and the two counts `approximatedContours`, `approximatedBlendFaces`; ONE vocabulary, no aliases; emitted ONCE per step. The op published; the warning repeats on every regen because the geometry is what it is. |
+| `FILLET_OVERFLOW_TRIMMED` | an opted-in (`overflow: "auto"`) Fillet whose native build failed was published by the overflow builder (2026-11-01; §7.3 Fillet `overflow`). Severity `warning`, `stage` `"publication"`. Evidence `{ "overflowKind": "cliff", "consumedFace": "f:<ordinal>", "survivingSupport": "f:<ordinal>", "setback", "analyticRemovedVolume", "measuredRemovedVolume" }`. `consumedFace` and `survivingSupport` are PRE-op snapshot ordinals (the face map of the body BEFORE this op, not of the result). |
+| `CHAMFER_OVERFLOW_TRIMMED` | the Chamfer counterpart of `FILLET_OVERFLOW_TRIMMED`; `overflowKind` is `"extendedPlane"`. Same severity, stage and evidence. |
+| `EDGE_OP_OVERFLOW_UNSUPPORTED` | an opted-in Fillet/Chamfer failed natively and the overflow builder refused (2026-11-01). Severity `error`, `stage` `"overflow"`; `reasonCode` is one of `OVERFLOW_UNSUPPORTED_MODE`, `OVERFLOW_INPUT_INVALID`, `OVERFLOW_NOT_ISOLATED`, `OVERFLOW_INVALID_VALUE`, `OVERFLOW_NON_PLANAR_SUPPORT`, `OVERFLOW_DIHEDRAL_OUT_OF_RANGE`, `OVERFLOW_CAP_NOT_PERPENDICULAR`, `OVERFLOW_NOT_PRISMATIC`, `OVERFLOW_NOT_OVERFLOWING`, `OVERFLOW_BOTH_SUPPORTS_CONSUMED`, `OVERFLOW_AMBIGUOUS`, `OVERFLOW_BOOLEAN_FAILED`, `OVERFLOW_TOOL_TOUCHED_BODY`, `OVERFLOW_VOLUME_MISMATCH`, `OVERFLOW_PUBLICATION_REFUSED`, `OVERFLOW_REMNANT`; `message` is the kernel's text. The step still fails with the native error code and message; the native error diagnostics stay FIRST and this diagnostic is APPENDED after them. `OVERFLOW_INPUT_INVALID` means the pre-op body failed the TierB single-solid audit (the overflow path never publishes from an invalid input); `OVERFLOW_REMNANT` also covers a chamfer distance within authoring resolution of the consumed face width (never snapped). |
 | `ARTIFACT_TESSELLATE_FAILED` | the plan prepared but the `artifacts.tessellate` attachment for this step threw (kernel-hardening WP-H, 2026-09-05): the step is `Ok`, the scratch is stored, and the mesh is simply not attached — Rust treats it as "not cached" and fetches it through `Tessellate` later. `stage` is `"artifact"`; the message carries the kernel's text. Before WP-H an artifact failure failed the whole prepared plan. |
 
 **`diagnostics[].reasonCode` — the machine-readable publication-refusal reason.**
@@ -2079,6 +2082,30 @@ version. `chainTangentEdges:false` means exact picks; authoring refuses
   `legacyReferenceFace` halt (every lane, as above) emits one item per uncovered `edgeIds` entry with
   `seedEdgeId` = that edge and `refId` `<opId>.input<N+i>` numbered as above.
   Authoring MUST NOT add `tangentClosureVersion` while adding pairs.
+
+- `overflow` (Fillet and Chamfer, optional, skip-none) and `overflowVersion`
+  (integer): **Overflow (Shapr3D Auto parity)**, 2026-11-01. `overflow` is
+  `"none"` or `"auto"`; absent ⇒ `"none"`. Any other value is `OP_FAILED`
+  `<Op> overflow must be "none" or "auto"`. `"auto"` REQUIRES
+  `overflowVersion: 1` (an integer; anything else is `OP_FAILED` naming
+  `overflowVersion`), and `overflowVersion` present while `overflow` is absent or
+  `"none"` is `OP_FAILED` naming it. The NATIVE build always runs first; the
+  overflow builder runs ONLY when the record opted in AND the native build failed
+  with `OP_FAILED` or `GEOMETRY_INVALID` (never on `needsRepair` or cancellation)
+  on exactly one resolved seed edge. It builds the blend where it is larger than
+  an adjacent face: the narrow face is CONSUMED and the next face is TRIMMED.
+  Fillet = cliff-edge (a circle of radius `radius`, G1 to the surviving support,
+  through the far edge of the consumed face); Chamfer = extended-plane (the
+  planar chamfer extended over the cliff face). Phase-1 eligibility: ONE straight
+  convex edge, two planar 4-sided support faces, planar end caps perpendicular to
+  the edge, exactly one support consumed, dihedral within 20°–160°; a
+  distance-angle chamfer is unsupported. A two-distance chamfer measures `radius`
+  on the bound reference face. A refusal returns the native failure with an
+  `EDGE_OP_OVERFLOW_UNSUPPORTED` error diagnostic (§7.2); a success publishes a
+  `FILLET_OVERFLOW_TRIMMED` / `CHAMFER_OVERFLOW_TRIMMED` warning and history in
+  which the consumed face is deleted and the surviving support continues as a
+  successor. Records without the field replay native-only, byte-identical to
+  every existing document.
 
 Fillet execution is constant-radius only. `radius` MUST be finite and at least
 `1e-3` mm. The worker MUST NOT clamp it or retry with a different radius. OCCT

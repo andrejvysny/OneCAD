@@ -886,6 +886,15 @@ add_test(
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/fillet_approximated_blend.ndjson
 )
+# SCHEMA §7.3 Fillet/Chamfer `overflow:"auto"` (2026-11-01): a native refusal on an
+# over-wide blend falls back to the cliff / extended-plane overflow builder and
+# warns; the same record without the field stays native-only.
+add_test(
+    NAME canonical_fillet_overflow
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/fillet_overflow.ndjson
+)
 # SCHEMA §7.3 Chamfer `angleDeg` (WP6 item 1) — and the first canonical fixture to
 # drive a Chamfer at all, so it covers equal-leg and two-distance too. Pins the
 # delta/bodyEvents SHAPE (a distance-angle chamfer is indistinguishable from an
@@ -1319,3 +1328,9 @@ add_test(NAME tangent_at_point COMMAND test_tangent_at_point)
 add_test(NAME canonical_sketch_tangent_endpoint COMMAND worker_harness
     --worker $<TARGET_FILE:onecad-worker>
     --fixture ${PROTOCOL_FIXTURES}/sketch_tangent_endpoint.ndjson)
+
+# Overflow fillet/chamfer on one isolated straight convex edge (blend larger than
+# one adjacent face): analytic padded tool + Cut, certified. Kernel only.
+add_executable(test_blend_overflow test_blend_overflow.cpp)
+target_link_libraries(test_blend_overflow PRIVATE worker_core)
+add_test(NAME blend_overflow COMMAND test_blend_overflow)

@@ -983,6 +983,8 @@ fn element_only_inputs_form_no_graph_edge_so_isolation_must_fail_closed() {
             edges: Vec::new(),
             chain_tangent_edges: true,
             tangent_closure_version: None,
+            overflow: None,
+            overflow_version: None,
             extra: Default::default(),
         })),
     );

@@ -250,7 +250,7 @@
       "cancellationPolicy": "build is single OCCT call; cancellation wired via OCCT notifier",
       "previewFidelity": "exact kernel BRep",
       "persistenceBehavior": "typed edge refs persist; upstream edit rebinds by identity/descriptor",
-      "userRecoveryBehavior": "over-large radius and missing edges report structured diagnostics",
+      "userRecoveryBehavior": "over-large radius and missing edges report structured diagnostics; with overflow:auto (SCHEMA §7.3, 2026-11-01) an isolated straight planar edge whose radius exceeds one adjacent face publishes a cliff-edge overflow with warning FILLET_OVERFLOW_TRIMMED, else the native failure plus EDGE_OP_OVERFLOW_UNSUPPORTED",
       "notes": "P1A enforces co-body edge ownership before the ladder runs.",
       "uiExposure": "hidden"
     },
@@ -271,7 +271,7 @@
       "cancellationPolicy": "single OCCT call",
       "previewFidelity": "exact kernel BRep",
       "persistenceBehavior": "typed edge refs persist; equal-leg, two-distance (distance2) and distance-angle (angleDeg, degrees) modes round-trip; angleDeg and distance2 are mutually exclusive and refused by name at every boundary",
-      "userRecoveryBehavior": "short/curved edges and missing edges report diagnostics",
+      "userRecoveryBehavior": "short/curved edges and missing edges report diagnostics; with overflow:auto (SCHEMA §7.3, 2026-11-01) an isolated straight planar edge whose distance exceeds one adjacent face publishes an extended-plane overflow with warning CHAMFER_OVERFLOW_TRIMMED, else the native failure plus EDGE_OP_OVERFLOW_UNSUPPORTED",
       "notes": "P3 routes Chamfer through the same Tier B validator as Fillet.",
       "uiExposure": "hidden"
     },

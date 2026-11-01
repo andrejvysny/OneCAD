@@ -891,6 +891,8 @@ fn fillet_record(seed: u128, body: BodyId, edge: &str, anchor: Vec3) -> Operatio
         edges: vec![edge_ref],
         chain_tangent_edges: false,
         tangent_closure_version: None,
+        overflow: None,
+        overflow_version: None,
         extra: Default::default(),
     }));
     OperationRecord::new(RecordId(Uuid::from_u128(seed)), 0, "Fillet", op)
@@ -5939,6 +5941,8 @@ fn legacy_chamfer_runtime_with_seed_outcome(
         reference_face_refs: Vec::new(),
         chain_tangent_edges: true,
         tangent_closure_version: Some(1),
+        overflow: None,
+        overflow_version: None,
         extra: Default::default(),
     }));
     let mut record = OperationRecord::new(record_id, 0, "Chamfer", op);

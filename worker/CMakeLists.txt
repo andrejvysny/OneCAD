@@ -146,6 +146,8 @@ add_library(worker_core STATIC
     src/kernel/fillet/BlendEvidence.cpp
     src/kernel/fillet/BlendRecognizer.cpp
     src/kernel/fillet/AnalyticBlend.cpp
+    src/kernel/fillet/BlendOverflow.cpp
+    src/kernel/fillet/BlendOverflowPlan.cpp
     # --- WP3 C4: the suppress -> reblend engine (not wired to any op) ---
     src/kernel/fillet/BlendReconstruction.cpp
     # --- WP4 kernel half: feasible radius/distance range, bracketed by REAL
@@ -160,6 +162,7 @@ add_library(worker_core STATIC
     src/ops/RevolveOp.cpp
     src/ops/LoftOp.cpp
     src/ops/FilletChamferOp.cpp
+    src/ops/EdgeOpOverflow.cpp
     # --- M6a: breadth ops (Shell / Linear+Circular pattern / MirrorBody) ---
     src/ops/ShellOp.cpp
     # --- OFFSET-FACE W1: direct-modeling per-face offset (`op.offsetFace`, §7.3)

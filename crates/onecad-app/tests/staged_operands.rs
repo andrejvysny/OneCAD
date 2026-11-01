@@ -241,6 +241,8 @@ fn fillet_record(rec: u128, edges: Vec<ElementRef>, radius: f64) -> OperationRec
             edges,
             chain_tangent_edges: false,
             tangent_closure_version: None,
+            overflow: None,
+            overflow_version: None,
             extra: Default::default(),
         })),
     )

@@ -259,6 +259,7 @@ impl ParameterSet {
                 .validate_value(&op, scalar.value)
                 .and_then(|()| key.parameter().write(&mut op, scalar.clone()))
                 .map_err(|message| (Some(key), message))?;
+            crate::operand_binding::with_overflow_auto(&mut op);
         }
         crate::numeric_parameter::validate_operation(&op).map_err(|message| {
             let owner = self

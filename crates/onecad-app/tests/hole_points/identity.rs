@@ -34,6 +34,8 @@ fn chamfer_record(body: BodyId, edge: &ElementId, at: Vec3) -> OperationRecord {
         reference_face_refs: Vec::new(),
         chain_tangent_edges: false,
         tangent_closure_version: None,
+        overflow: None,
+        overflow_version: None,
         extra: Default::default(),
     }));
     OperationRecord::new(RecordId(Uuid::from_u128(CHAMFER)), 0, "Chamfer", op)

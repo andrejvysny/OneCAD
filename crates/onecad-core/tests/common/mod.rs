@@ -189,6 +189,8 @@ pub fn op_fillet() -> Operation {
         edges: vec![],
         chain_tangent_edges: true,
         tangent_closure_version: None,
+        overflow: None,
+        overflow_version: None,
         extra: Default::default(),
     }))
 }
@@ -204,6 +206,8 @@ pub fn op_chamfer() -> Operation {
         reference_face_refs: Vec::new(),
         chain_tangent_edges: true,
         tangent_closure_version: None,
+        overflow: None,
+        overflow_version: None,
         extra: Default::default(),
     }))
 }
@@ -244,6 +248,8 @@ pub fn op_fillet_with_edge_refs() -> Operation {
         ],
         chain_tangent_edges: true,
         tangent_closure_version: None,
+        overflow: None,
+        overflow_version: None,
         extra: Default::default(),
     }))
 }

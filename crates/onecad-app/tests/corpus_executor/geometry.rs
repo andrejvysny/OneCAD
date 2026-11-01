@@ -155,6 +155,8 @@ fn fillet_record_for(record: u128, body: BodyId, edge: ElementId, anchor: Vec3) 
             edges: vec![reference],
             chain_tangent_edges: true,
             tangent_closure_version: None,
+            overflow: None,
+            overflow_version: None,
             extra: Default::default(),
         })),
     )

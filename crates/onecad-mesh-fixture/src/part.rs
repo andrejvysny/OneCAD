@@ -221,6 +221,8 @@ pub fn fillet_record(edge: &ElementId, world: Vec3) -> OperationRecord {
             edges: vec![edge_ref],
             chain_tangent_edges: false,
             tangent_closure_version: None,
+            overflow: None,
+            overflow_version: None,
             extra: Default::default(),
         })),
     )

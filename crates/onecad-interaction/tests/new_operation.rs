@@ -102,7 +102,7 @@ fn real_preview_intent_and_single_add_keep_exact_typed_operation_targets_and_id(
         else {
             panic!("missing real preview intent")
         };
-        assert_eq!(operation.as_ref(), &before.op);
+        assert_eq!(operation.as_ref(), &with_auto_overflow(&before.op));
         assert_eq!(*sketch_id, profile(&before));
         assert_eq!(*expected_snapshot, tag.context.snapshot_id);
         assert!(state.dispatch(Action::Confirm).is_empty());
@@ -132,7 +132,9 @@ fn real_preview_intent_and_single_add_keep_exact_typed_operation_targets_and_id(
         else {
             panic!("must append exactly one new operation")
         };
-        assert_eq!(record, &before);
+        let mut expected = before.clone();
+        expected.op = with_auto_overflow(&before.op);
+        assert_eq!(record, &expected);
         assert!(state.dispatch(Action::Confirm).is_empty());
         assert!(begin_new(&mut state, before, parameter).is_empty());
         assert_eq!(state.tool.unwrap().phase, SessionPhase::Committing);

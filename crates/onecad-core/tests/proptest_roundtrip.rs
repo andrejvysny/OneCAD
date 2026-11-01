@@ -274,6 +274,8 @@ fn operation_strategy() -> impl Strategy<Value = Operation> {
                 edges: vec![],
                 chain_tangent_edges: chain,
                 tangent_closure_version: None,
+                overflow: None,
+                overflow_version: None,
                 extra,
             }))
         });
@@ -295,6 +297,8 @@ fn operation_strategy() -> impl Strategy<Value = Operation> {
                 reference_face_refs: Vec::new(),
                 chain_tangent_edges: chain,
                 tangent_closure_version: None,
+                overflow: None,
+                overflow_version: None,
                 extra,
             }))
         });

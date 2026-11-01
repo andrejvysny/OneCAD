@@ -354,6 +354,8 @@ fn fillet_record(
             edges: vec![edge_ref],
             chain_tangent_edges: false,
             tangent_closure_version: None,
+            overflow: None,
+            overflow_version: None,
             extra: Default::default(),
         })),
     )

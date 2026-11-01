@@ -1423,6 +1423,40 @@ impl RevolveParams {
     }
 }
 
+/// Edge-op overflow policy (Shapr3D "Auto" parity): when the blend would run past
+/// the adjacent face, `auto` trims it instead of failing. Absent on a record is
+/// `none`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EdgeOverflow {
+    None,
+    Auto,
+}
+
+/// The only overflow semantics version; required iff `overflow == auto`.
+pub const EDGE_OVERFLOW_VERSION: u8 = 1;
+
+/// Shared Fillet/Chamfer overflow-pair validity (names `overflowVersion`).
+pub fn validate_edge_overflow(
+    mode: &str,
+    overflow: Option<EdgeOverflow>,
+    version: Option<u8>,
+) -> Result<(), String> {
+    match (overflow, version) {
+        (Some(EdgeOverflow::Auto), Some(EDGE_OVERFLOW_VERSION)) => Ok(()),
+        (Some(EdgeOverflow::Auto), Some(v)) => Err(format!(
+            "{mode} overflowVersion must be {EDGE_OVERFLOW_VERSION} (got {v})"
+        )),
+        (Some(EdgeOverflow::Auto), None) => Err(format!(
+            "{mode} overflow \"auto\" requires overflowVersion {EDGE_OVERFLOW_VERSION}"
+        )),
+        (_, Some(_)) => Err(format!(
+            "{mode} overflowVersion is only valid with overflow \"auto\""
+        )),
+        (_, None) => Ok(()),
+    }
+}
+
 /// Fillet parameters (SPLIT from OneCAD-CPP `FilletChamferParams`
 /// `OperationRecord.h:114-120`). SCHEMA §7.3 field names.
 ///
@@ -1448,6 +1482,15 @@ pub struct FilletParams {
     pub chain_tangent_edges: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tangent_closure_version: Option<u8>,
+    /// Shapr3D "Auto" overflow opt-in. Absent ⇒ `none` (native-only replay), and
+    /// the key is skipped so old documents serialize byte-identically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overflow: Option<EdgeOverflow>,
+    /// Freezes the overflow-trim semantics a record replays with (must be
+    /// [`EDGE_OVERFLOW_VERSION`] iff `overflow` is `auto`), so a later algorithm
+    /// change cannot silently reshape saved geometry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overflow_version: Option<u8>,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     pub extra: Extra,
 }
@@ -1520,6 +1563,15 @@ pub struct ChamferParams {
     pub chain_tangent_edges: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tangent_closure_version: Option<u8>,
+    /// Shapr3D "Auto" overflow opt-in. Absent ⇒ `none` (native-only replay), and
+    /// the key is skipped so old documents serialize byte-identically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overflow: Option<EdgeOverflow>,
+    /// Freezes the overflow-trim semantics a record replays with (must be
+    /// [`EDGE_OVERFLOW_VERSION`] iff `overflow` is `auto`), so a later algorithm
+    /// change cannot silently reshape saved geometry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overflow_version: Option<u8>,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     pub extra: Extra,
 }
@@ -1537,6 +1589,13 @@ pub struct ChamferReferenceFace {
     pub edge_id: ElementId,
     /// The adjacent face `radius` is measured on.
     pub face_id: ElementId,
+}
+
+impl FilletParams {
+    /// Overflow opt-in pair validity; see [`validate_edge_overflow`].
+    pub fn validate(&self) -> Result<(), String> {
+        validate_edge_overflow("Fillet", self.overflow, self.overflow_version)
+    }
 }
 
 impl ChamferParams {
@@ -1569,6 +1628,7 @@ impl ChamferParams {
     /// Whether a pair is REQUIRED is not decided here — that needs the prior record
     /// (see `edit::session::validate_edge_op_distances`).
     pub fn validate(&self) -> Result<(), String> {
+        validate_edge_overflow("Chamfer", self.overflow, self.overflow_version)?;
         if let Some(d2) = self.distance2.as_ref() {
             if self.angle_deg.is_some() {
                 return Err(
@@ -6156,6 +6216,8 @@ mod tests {
             reference_face_refs: Vec::new(),
             chain_tangent_edges: true,
             tangent_closure_version: None,
+            overflow: None,
+            overflow_version: None,
             extra: Extra::new(),
         }
     }
@@ -6359,6 +6421,8 @@ mod tests {
                 edges: Vec::new(),
                 chain_tangent_edges: false,
                 tangent_closure_version: None,
+                overflow: None,
+                overflow_version: None,
                 extra: Extra::new(),
             })),
             vec![("Fillet.radius", Length)]
@@ -6567,6 +6631,75 @@ mod tests {
             ],
             "a Some(depthMm) exposes both thread scalars, appended last"
         );
+    }
+
+    // ── Fillet/Chamfer overflow opt-in ────────────────────────────────────
+
+    fn fillet_params() -> FilletParams {
+        FilletParams {
+            radius: Scalar::new(1.0),
+            edge_ids: vec![ElementId::new("e:1")],
+            edges: Vec::new(),
+            chain_tangent_edges: true,
+            tangent_closure_version: None,
+            overflow: None,
+            overflow_version: None,
+            extra: Extra::new(),
+        }
+    }
+
+    #[test]
+    fn overflow_absent_emits_no_keys() {
+        let f = serde_json::to_string(&fillet_params()).unwrap();
+        let c = serde_json::to_string(&chamfer_params(None, None)).unwrap();
+        for json in [f, c] {
+            assert!(!json.contains("overflow"), "{json}");
+        }
+    }
+
+    #[test]
+    fn overflow_auto_round_trips() {
+        let mut f = fillet_params();
+        f.overflow = Some(EdgeOverflow::Auto);
+        f.overflow_version = Some(EDGE_OVERFLOW_VERSION);
+        let json = serde_json::to_string(&f).unwrap();
+        assert!(json.contains(r#""overflow":"auto""#), "{json}");
+        assert!(json.contains(r#""overflowVersion":1"#), "{json}");
+        assert_eq!(serde_json::from_str::<FilletParams>(&json).unwrap(), f);
+        let mut c = chamfer_params(None, None);
+        c.overflow = f.overflow;
+        c.overflow_version = f.overflow_version;
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(serde_json::from_str::<ChamferParams>(&json).unwrap(), c);
+    }
+
+    #[test]
+    fn overflow_bogus_value_fails_to_deserialize() {
+        let json = r#"{"radius":1.0,"edgeIds":["e:1"],"overflow":"bogus"}"#;
+        assert!(serde_json::from_str::<FilletParams>(json).is_err());
+    }
+
+    #[test]
+    fn overflow_pair_validation() {
+        let mut f = fillet_params();
+        f.overflow = Some(EdgeOverflow::Auto);
+        let err = f.validate().unwrap_err();
+        assert!(err.contains("overflowVersion"), "{err}");
+        f.overflow_version = Some(2);
+        let err = f.validate().unwrap_err();
+        assert!(err.contains("overflowVersion must be 1"), "{err}");
+        f.overflow_version = Some(1);
+        assert!(f.validate().is_ok());
+        f.overflow = None;
+        let err = f.validate().unwrap_err();
+        assert!(err.contains("overflowVersion"), "{err}");
+        f.overflow = Some(EdgeOverflow::None);
+        assert!(f.validate().is_err());
+        let mut c = chamfer_params(None, None);
+        c.overflow_version = Some(1);
+        assert!(c.validate().unwrap_err().contains("overflowVersion"));
+        c.overflow = Some(EdgeOverflow::Auto);
+        assert!(c.validate().is_ok());
     }
 }
 

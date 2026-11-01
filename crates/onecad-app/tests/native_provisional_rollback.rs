@@ -460,6 +460,8 @@ fn unresolved_fillet() -> Operation {
         edges: vec![reference],
         chain_tangent_edges: false,
         tangent_closure_version: None,
+        overflow: None,
+        overflow_version: None,
         extra: Default::default(),
     }))
 }

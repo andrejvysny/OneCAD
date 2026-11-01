@@ -363,6 +363,8 @@ fn fillet_record(body: BodyId, edge_el: ElementId, anchor: Vec3, radius: f64) ->
             edges: vec![edge_ref],
             chain_tangent_edges: false,
             tangent_closure_version: None,
+            overflow: None,
+            overflow_version: None,
             extra: Default::default(),
         })),
     )

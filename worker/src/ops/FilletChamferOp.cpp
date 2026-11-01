@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
@@ -31,6 +32,7 @@
 #include "kernel/fillet/EdgeContour.h"
 #include "kernel/fillet/FilletSemanticChecks.h"
 #include "kernel/validation/GeometryPrecision.h"
+#include "ops/EdgeOpOverflow.h"
 #include "ops/OpCommon.h"
 #include "session/EdgePicks.h"
 #include "session/ShapeMetrics.h"
@@ -371,8 +373,44 @@ struct EdgeValues {
     // `has_edge_ids` false ⇒ the array was absent or was not an array at all.
     std::size_t edge_id_count = 0;
     bool has_edge_ids = false;
+    // SCHEMA §7.3 `overflow: "auto"` (+ `overflowVersion: 1`): opt-in fallback.
+    bool overflow_auto = false;
     std::optional<OpOutcome> stop;
 };
+
+// SCHEMA §7.3 `overflow` / `overflowVersion` (2026-11-01). Sets `values.stop`
+// on a malformed or inconsistent pair; each refusal NAMES the field.
+void read_overflow(const json& params, Mode mode, EdgeValues& values) {
+    const char* name = mode == Mode::Fillet ? "Fillet" : "Chamfer";
+    const bool version_present = params.contains("overflowVersion");
+    if (!params.contains("overflow")) {
+        if (version_present) {
+            values.stop = OpOutcome::fail(
+                "OP_FAILED", std::string(name) + " overflowVersion requires overflow \"auto\"");
+        }
+        return;
+    }
+    const json& flag = params["overflow"];
+    if (!flag.is_string() || (flag.get<std::string>() != "none" && flag.get<std::string>() != "auto")) {
+        values.stop = OpOutcome::fail(
+            "OP_FAILED", std::string(name) + " overflow must be \"none\" or \"auto\"");
+        return;
+    }
+    if (flag.get<std::string>() == "none") {
+        if (version_present) {
+            values.stop = OpOutcome::fail(
+                "OP_FAILED", std::string(name) + " overflowVersion requires overflow \"auto\"");
+        }
+        return;
+    }
+    if (!version_present || !params["overflowVersion"].is_number_integer() ||
+        params["overflowVersion"].get<std::int64_t>() != 1) {
+        values.stop = OpOutcome::fail(
+            "OP_FAILED", std::string(name) + " overflow \"auto\" requires overflowVersion 1");
+        return;
+    }
+    values.overflow_auto = true;
+}
 
 EdgeValues read_values(const json& op, Mode mode) {
     EdgeValues values;
@@ -395,6 +433,9 @@ EdgeValues read_values(const json& op, Mode mode) {
                                       "Chamfer angleDeg and distance2 are mutually exclusive");
         return values;
     }
+
+    read_overflow(params, mode, values);
+    if (values.stop) return values;
 
     // Parameter validation runs before the target body is resolved, and
     // `authoring_resolution()` is scale-independent in v1 (GeometryPrecision.h),
@@ -874,6 +915,22 @@ OpOutcome publish_result(OpContext& ctx, const std::string& target_id,
     return out;
 }
 
+// Opt-in Auto overflow: consulted only after the native build failed, only when
+// the record carries `overflow: "auto"`. Otherwise `failure` passes through.
+OpOutcome after_native_failure(OpContext& ctx, const EdgeValues& values, Mode mode,
+                               const std::string& target_id, const std::string& op_id,
+                               const EdgeResolution& resolved,
+                               const std::vector<TopoDS_Face>& seed_reference_faces,
+                               OpOutcome failure) {
+    if (!values.overflow_auto) return failure;
+    return edge_op_overflow_fallback(
+        ctx, target_id, op_id,
+        mode == Mode::Fillet ? kernel::fillet::EdgeOpMode::Fillet
+                             : kernel::fillet::EdgeOpMode::Chamfer,
+        values.distance_angle, values.two_distance, values.radius, values.distance2,
+        resolved.edges, seed_reference_faces, std::move(failure));
+}
+
 OpOutcome run(OpContext& ctx, const json& op, const std::string& op_id, Mode mode) {
     const char* name = mode == Mode::Fillet ? "Fillet" : "Chamfer";
     if (std::vector<json> repairs = operation_ref_ownership_repairs(op, op_id); !repairs.empty()) {
@@ -933,6 +990,9 @@ OpOutcome run(OpContext& ctx, const json& op, const std::string& op_id, Mode mod
     // Filled by whichever branch ran, so `publish_result` can certify blend-born
     // boundary topology without knowing which kernel builder produced it.
     std::vector<TopoDS_Shape> contour_edges;
+    // The try block only PRODUCES the native failure; the overflow fallback (which
+    // publishes) runs after it so a publication throw can never re-run it.
+    std::optional<OpOutcome> native_failure;
     try {
         std::optional<OpOutcome> failure = mode == Mode::Fillet
                                                ? build_fillet(
@@ -948,13 +1008,17 @@ OpOutcome run(OpContext& ctx, const json& op, const std::string& op_id, Mode mod
                                                      result_validation_tier(
                                                          ctx, kernel::validation::PublicationTier::TierB),
                                                      ctx.cancel, builder, result, contour_edges);
-        if (failure) return std::move(*failure);
+        native_failure = std::move(failure);
     } catch (const Standard_Failure& error) {
-        return OpOutcome::fail(
+        native_failure = OpOutcome::fail(
             "OP_FAILED", std::string(name) + " operation failed (radius too large?): " +
                              (error.GetMessageString() ? error.GetMessageString() : "OCCT"));
     } catch (...) {
         return OpOutcome::fail("OP_FAILED", std::string(name) + " operation failed");
+    }
+    if (native_failure) {
+        return after_native_failure(ctx, values, mode, target_id, op_id, resolved,
+                                    seed_reference_faces, std::move(*native_failure));
     }
 
     return publish_result(ctx, target_id, op_id, result, fillet_builder, builder, contour_edges,

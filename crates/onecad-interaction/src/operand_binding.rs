@@ -11,9 +11,9 @@ use onecad_app::{
 use onecad_core::{
     document::{
         record::{
-            ChamferParams, FilletParams, KnownOperation, OffsetDistanceType, OffsetFaceParams,
-            Operation, OperationRecord, TransformBodyParams, TransformRotation,
-            OFFSET_FACE_RESULT_POLICY_VERSION,
+            ChamferParams, EdgeOverflow, FilletParams, KnownOperation, OffsetDistanceType,
+            OffsetFaceParams, Operation, OperationRecord, TransformBodyParams, TransformRotation,
+            EDGE_OVERFLOW_VERSION, OFFSET_FACE_RESULT_POLICY_VERSION,
         },
         refs::{ElementKind, ElementRef},
         variables::Scalar,
@@ -49,6 +49,19 @@ impl EdgeOpKind {
             Self::Chamfer => NumericParameter::ChamferDistance,
         }
     }
+}
+
+/// Opts a Fillet/Chamfer into Shapr3D-style overflow trimming. Authoring (create
+/// and parameter edit) calls this; replay/undo/load never do, so old records keep
+/// their native-only semantics.
+pub(crate) fn with_overflow_auto(op: &mut Operation) {
+    let (overflow, version) = match op {
+        Operation::Known(KnownOperation::Fillet(p)) => (&mut p.overflow, &mut p.overflow_version),
+        Operation::Known(KnownOperation::Chamfer(p)) => (&mut p.overflow, &mut p.overflow_version),
+        _ => return,
+    };
+    *overflow = Some(EdgeOverflow::Auto);
+    *version = Some(EDGE_OVERFLOW_VERSION);
 }
 
 /// A new edge-op record over the staged closure, in `prepared.edges` order.
@@ -87,6 +100,8 @@ pub fn bind_edge_op(
             edges,
             chain_tangent_edges: true,
             tangent_closure_version: Some(TANGENT_CLOSURE_VERSION),
+            overflow: Some(EdgeOverflow::Auto),
+            overflow_version: Some(EDGE_OVERFLOW_VERSION),
             extra: Default::default(),
         }),
         EdgeOpKind::Chamfer => KnownOperation::Chamfer(ChamferParams {
@@ -99,6 +114,8 @@ pub fn bind_edge_op(
             reference_face_refs: Vec::new(),
             chain_tangent_edges: true,
             tangent_closure_version: Some(TANGENT_CLOSURE_VERSION),
+            overflow: Some(EdgeOverflow::Auto),
+            overflow_version: Some(EDGE_OVERFLOW_VERSION),
             extra: Default::default(),
         }),
     };

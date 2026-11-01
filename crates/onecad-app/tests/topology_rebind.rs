@@ -378,6 +378,8 @@ fn fillet_record(
             edges: vec![edge_ref],
             chain_tangent_edges: false,
             tangent_closure_version: None,
+            overflow: None,
+            overflow_version: None,
             extra: Default::default(),
         })),
     )
@@ -1431,6 +1433,8 @@ async fn fillet_reedit_swaps_to_chamfer_and_regens() {
         reference_face_refs: Vec::new(),
         chain_tangent_edges: false,
         tangent_closure_version: None,
+        overflow: None,
+        overflow_version: None,
         extra: Default::default(),
     }));
     rt.apply(EditCommand::UpdateOperationParams {
@@ -1566,6 +1570,8 @@ fn chamfer_op_on(
         reference_face_refs,
         chain_tangent_edges: false,
         tangent_closure_version: None,
+        overflow: None,
+        overflow_version: None,
         extra: Default::default(),
     }))
 }
@@ -1754,6 +1760,8 @@ fn fillet_op(setup: &FilletedBox, radius: f64) -> Operation {
         }],
         chain_tangent_edges: false,
         tangent_closure_version: None,
+        overflow: None,
+        overflow_version: None,
         extra: Default::default(),
     }))
 }

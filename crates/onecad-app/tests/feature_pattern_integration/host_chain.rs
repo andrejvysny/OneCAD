@@ -118,6 +118,8 @@ fn chamfer_record(
             reference_face_refs: vec![element_ref(body, face, ElementKind::Face, face_at)],
             chain_tangent_edges: false,
             tangent_closure_version: None,
+            overflow: None,
+            overflow_version: None,
             extra: Default::default(),
         })),
     )

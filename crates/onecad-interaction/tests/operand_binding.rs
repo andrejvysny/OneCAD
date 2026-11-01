@@ -127,6 +127,8 @@ fn fillet_binds_the_full_closure_in_prepared_order_and_begins() {
     assert_eq!(params.radius, Scalar::new(1.0));
     assert!(params.chain_tangent_edges);
     assert_eq!(params.tangent_closure_version, Some(1));
+    assert_eq!(params.overflow, Some(EdgeOverflow::Auto));
+    assert_eq!(params.overflow_version, Some(EDGE_OVERFLOW_VERSION));
     assert_eq!((record.record_id, record.step_index), (id, 4));
     assert_eq!(record.inputs, record.op.derive_inputs());
     let state = begin(record);
@@ -152,6 +154,8 @@ fn chamfer_binds_equal_leg_without_reference_faces_and_commits_one_add() {
         panic!("chamfer record expected")
     };
     assert!(!params.is_asymmetric());
+    assert_eq!(params.overflow, Some(EdgeOverflow::Auto));
+    assert_eq!(params.overflow_version, Some(EDGE_OVERFLOW_VERSION));
     assert!(params.reference_faces.is_empty() && params.reference_face_refs.is_empty());
     let mut state = begin(record.clone());
     let tag = state.tool.as_ref().unwrap().tag.clone();

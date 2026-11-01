@@ -178,6 +178,8 @@ fn fillet(id: RecordId, body: BodyId, el: &str, out: BodyId) -> OperationRecord 
         edges: vec![edge_ref(body, el)],
         chain_tangent_edges: true,
         tangent_closure_version: None,
+        overflow: None,
+        overflow_version: None,
         extra: Default::default(),
     }));
     record(id, "Fillet", op, vec![out])
@@ -1025,6 +1027,8 @@ fn fillet_op(edge_ids: &[&str], edges: Vec<ElementRef>) -> Operation {
         edges,
         chain_tangent_edges: true,
         tangent_closure_version: None,
+        overflow: None,
+        overflow_version: None,
         extra: Default::default(),
     }))
 }
@@ -1115,6 +1119,8 @@ fn chamfer_op(edge_ids: &[&str], edges: Vec<ElementRef>, radius: f64) -> Operati
         reference_face_refs: Vec::new(),
         chain_tangent_edges: true,
         tangent_closure_version: None,
+        overflow: None,
+        overflow_version: None,
         extra: Default::default(),
     }))
 }

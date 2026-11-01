@@ -368,6 +368,8 @@ fn fillet_record(
             edges: vec![anchored_ref(body, edge, ElementKind::Edge, at)],
             chain_tangent_edges: false,
             tangent_closure_version: None,
+            overflow: None,
+            overflow_version: None,
             extra: Default::default(),
         })),
     )
@@ -394,6 +396,8 @@ fn chamfer_record(
             reference_face_refs: Vec::new(),
             chain_tangent_edges: false,
             tangent_closure_version: None,
+            overflow: None,
+            overflow_version: None,
             extra: Default::default(),
         })),
     )
@@ -1210,6 +1214,8 @@ async fn edge_op_preview_without_typed_edges_fails_loudly() {
         edges: vec![],
         chain_tangent_edges: false,
         tangent_closure_version: None,
+        overflow: None,
+        overflow_version: None,
         extra: Default::default(),
     }));
     let preview = wm

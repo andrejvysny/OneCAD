@@ -2746,6 +2746,8 @@ mod tests {
             edges: vec![],
             chain_tangent_edges: true,
             tangent_closure_version: None,
+            overflow: None,
+            overflow_version: None,
             extra: Default::default(),
         }));
         check(&fillet, "2.0 mm", Some(2.0), Some("length"));
@@ -2761,6 +2763,8 @@ mod tests {
             reference_face_refs: Vec::new(),
             chain_tangent_edges: true,
             tangent_closure_version: None,
+            overflow: None,
+            overflow_version: None,
             extra: Default::default(),
         }));
         check(&chamfer, "1.0×2.5 mm", Some(1.0), Some("length"));
@@ -2924,6 +2928,8 @@ mod tests {
                 reference_face_refs: Vec::new(),
                 chain_tangent_edges: true,
                 tangent_closure_version: None,
+                overflow: None,
+                overflow_version: None,
                 extra: Default::default(),
             }))
         };
