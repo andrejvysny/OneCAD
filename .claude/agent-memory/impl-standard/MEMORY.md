@@ -14,3 +14,9 @@
 - [Interaction real_* tests need worker](interaction-real-tests-need-worker.md) — 4 env-only failures w/o ONECAD_WORKER_PATH; use --no-fail-fast
 - [real_arc_slot suite gotchas](real-arc-slot-suite-gotchas.md) — redo ulp drift, free-arc edit nondeterminism, #[path] mods, weld counts
 - [Extrude handle drag](extrude-handle-viewport-drag.md) — gate, sign convention, gizmo re-exports, flaky ignored test, fmt scope
+- [BlendOverflow OCCT gotchas](blend-overflow-occt-gotchas.md) — ancestor-map dupes, non-const Modified, slow build-worker.sh
+- [Edge-op overflow wiring](edge-op-overflow-wiring.md) — failure-diag suppression, fixture accept/discard lifecycle, history test harness
+- [Rust edge overflow authoring](rust-edge-overflow-authoring.md) — stamp sites, literal-script trick, preview DTO has no diagnostics
+- [Edge overflow app tests](edge-overflow-app-test-gotchas.md) — fillet_overflow.rs: re-edit clones live op, reason_code field, Lod::Fine preview==commit
+- [onecad-ui prefs backend](onecad-ui-prefs-backend.md) — nav/shortcut/decimals prefs: App-based viewport tests need worker+GPU, so logic lives in pure helpers
+- [onecad-ui Settings pages](onecad-ui-settings-pages.md) — no App in tests, disabled tooltip path, Id::unique, hook formats, mono-font gap
