@@ -23,7 +23,10 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         || app.ui.extensions.sheet.is_some()
         || app.ui.extensions.native.review.is_some()
         || app.ui.extensions.native.palette_open
-        || app.ui.extensions.native.reset_confirmation;
+        || app.ui.extensions.native.reset_confirmation
+        || app.ui.settings.shortcuts.capturing()
+        // Esc that closes a dropdown must not also leave the page.
+        || egui::Popup::is_any_open(&ctx);
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE)
         .show(ui, |ui| {
@@ -40,11 +43,19 @@ pub fn show(app: &mut App, ui: &mut Ui) {
 
 /// Esc steps from a detail page to its list, and from a list out of the Start screen.
 fn back(app: &mut App) {
-    app.ui.start_page = match app.ui.start_page {
-        StartPage::ComponentDetail | StartPage::StandardPart => StartPage::Library,
-        StartPage::ExtensionDetail => StartPage::Extensions,
-        StartPage::Home | StartPage::Library | StartPage::Extensions => return leave(app),
-    };
+    match parent(app.ui.start_page) {
+        Some(page) => app.ui.start_page = page,
+        None => leave(app),
+    }
+}
+
+/// The list a detail page returns to; `None` for pages Esc leaves the Start screen from.
+fn parent(page: StartPage) -> Option<StartPage> {
+    match page {
+        StartPage::ComponentDetail | StartPage::StandardPart => Some(StartPage::Library),
+        StartPage::ExtensionDetail => Some(StartPage::Extensions),
+        StartPage::Home | StartPage::Library | StartPage::Extensions | StartPage::Settings => None,
+    }
 }
 
 /// Main area right of the sidebar. Library pages own their padding and scrolling because
@@ -57,6 +68,12 @@ fn page(app: &mut App, ui: &mut Ui, area: Rect) {
         pos2(area.left() + sidebar_width(area.width()), area.top()),
         area.max,
     );
+    if app.ui.start_page == StartPage::Settings {
+        ui.scope_builder(UiBuilder::new().max_rect(content), |ui| {
+            crate::settings_pages::show(app, ui);
+        });
+        return;
+    }
     if matches!(
         app.ui.start_page,
         StartPage::Library | StartPage::ComponentDetail | StartPage::StandardPart
@@ -99,6 +116,7 @@ enum Nav {
     Library,
     Sub(usize),
     Extensions,
+    Settings,
 }
 
 const SUB_ITEMS: [&str; 3] = ["My components", "This project", "Standard parts"];
@@ -116,6 +134,7 @@ fn navigate(state: &mut crate::ui_state::UiState, nav: Nav) {
             state.library.source = i + 1;
         }
         Nav::Extensions => state.start_page = StartPage::Extensions,
+        Nav::Settings => state.start_page = StartPage::Settings,
     }
 }
 
@@ -171,10 +190,9 @@ fn sidebar(app: &mut App, ui: &mut Ui, area: Rect) {
             {
                 nav = Some(Nav::Extensions);
             }
-            ui.add(SidebarNavItem::new("settings", "Settings").enabled(false))
-                .on_disabled_hover_text(
-                    "Native settings page is not available yet; use the appearance menu",
-                );
+            if ui.add(settings_item(app.ui.start_page)).clicked() {
+                nav = Some(Nav::Settings);
+            }
             return;
         }
         ui.spacing_mut().item_spacing.y = 2.0;
@@ -190,11 +208,17 @@ fn sidebar(app: &mut App, ui: &mut Ui, area: Rect) {
         if ui.add(ext).clicked() {
             nav = Some(Nav::Extensions);
         }
-        ui.add(SidebarNavItem::new("settings", "Settings").enabled(false));
+        if ui.add(settings_item(page)).clicked() {
+            nav = Some(Nav::Settings);
+        }
     });
     if let Some(nav) = nav {
         navigate(&mut app.ui, nav);
     }
+}
+
+fn settings_item(page: StartPage) -> SidebarNavItem<'static> {
+    SidebarNavItem::new("settings", "Settings").active(page == StartPage::Settings)
 }
 
 fn top_items(app: &App, ui: &mut Ui) -> Option<Nav> {

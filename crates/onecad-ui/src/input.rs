@@ -247,6 +247,11 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
     if app.doc.documents.confirm.is_some() {
         return;
     }
+    // Home and Settings own the keyboard: Delete, Esc, Enter and tool keys must not
+    // act on the document hidden behind them (or steal a key being recorded).
+    if app.ui.start_open {
+        return;
+    }
     if !text && raw.focused && !composition && app.sketch_active() && app.viewport_ready() {
         sketch_arc_keys(app, ctx, &mut raw.events);
     }
@@ -356,6 +361,9 @@ fn route_menu(
     action: menu::Action,
     text: bool,
 ) {
+    // AppKit consumes menu key equivalents before winit, so the raw-chord check in
+    // `sync_recording` never sees them; any menu command ends a shortcut recording.
+    app.ui.settings.shortcuts.cancel();
     if text && route_text_menu(events, action) {
         return;
     }
@@ -406,13 +414,8 @@ fn route_menu(
             app.doc.camera = crate::camera_fov::default_camera(app.ui.camera_fov_degrees);
             app.doc.fit_pending = true;
         }
-        menu::Action::Appearance(choice) => {
-            app.ui.appearance = choice;
-            crate::appearance::sync(app, ctx);
-            if let Some(menu) = &app.menu {
-                menu.set_appearance(choice);
-            }
-        }
+        menu::Action::Settings => open_settings(app),
+        menu::Action::Appearance(choice) => set_appearance(app, ctx, choice),
         menu::Action::Paste if text => {
             #[cfg(all(target_os = "macos", feature = "desktop"))]
             if let Ok(text) =
@@ -423,6 +426,32 @@ fn route_menu(
         }
         _ => {}
     }
+}
+
+/// Applies and persists an appearance choice; the menu and Settings page share it.
+pub(crate) fn set_appearance(
+    app: &mut App,
+    ctx: &egui::Context,
+    choice: crate::ui_state::Appearance,
+) {
+    app.ui.appearance = choice;
+    crate::appearance::sync(app, ctx);
+    if let Some(menu) = &app.menu {
+        menu.set_appearance(choice);
+    }
+}
+
+/// ⌘, / App menu › Settings…: Home on its Settings page.
+pub(crate) fn open_settings(app: &mut App) {
+    app.open_home();
+    if app.ui.start_open {
+        app.ui.start_page = crate::ui_state::StartPage::Settings;
+    }
+}
+
+/// ⌘, with no Shift or Option; the native menu owns it on macOS.
+fn settings_shortcut(key: egui::Key, modifiers: egui::Modifiers) -> bool {
+    key == egui::Key::Comma && modifiers.command && !modifiers.shift && !modifiers.alt
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -565,15 +594,20 @@ mod overlay_tests;
 #[cfg(test)]
 mod tests;
 
-fn arc_key(event: &egui::Event) -> Option<bool> {
+fn arc_key(event: &egui::Event, arc: Option<egui::Key>) -> Option<bool> {
     match event {
         egui::Event::Key {
-            key: egui::Key::A,
+            key,
             pressed: true,
             repeat: false,
             modifiers,
             ..
-        } if !modifiers.command && !modifiers.ctrl && !modifiers.alt && !modifiers.mac_cmd => {
+        } if Some(*key) == arc
+            && !modifiers.command
+            && !modifiers.ctrl
+            && !modifiers.alt
+            && !modifiers.mac_cmd =>
+        {
             Some(modifiers.shift)
         }
         _ => None,
@@ -581,8 +615,13 @@ fn arc_key(event: &egui::Event) -> Option<bool> {
 }
 
 fn sketch_arc_keys(app: &mut App, ctx: &egui::Context, events: &mut Vec<egui::Event>) {
+    let arc = crate::tool_registry::effective_key(
+        &app.ui.shortcut_overrides,
+        crate::tool_registry::ToolId::Arc,
+        crate::shortcut_prefs::KeyContext::Sketch,
+    );
     events.retain(|event| {
-        let Some(three_point) = arc_key(event) else {
+        let Some(three_point) = arc_key(event, arc) else {
             return true;
         };
         if !three_point
@@ -614,8 +653,11 @@ fn sketch_arc_keys(app: &mut App, ctx: &egui::Context, events: &mut Vec<egui::Ev
 mod arc_key_tests {
     use super::*;
     fn key(modifiers: egui::Modifiers, repeat: bool) -> egui::Event {
+        key_of(egui::Key::A, modifiers, repeat)
+    }
+    fn key_of(key: egui::Key, modifiers: egui::Modifiers, repeat: bool) -> egui::Event {
         egui::Event::Key {
-            key: egui::Key::A,
+            key,
             physical_key: None,
             pressed: true,
             repeat,
@@ -624,17 +666,31 @@ mod arc_key_tests {
     }
     #[test]
     fn arc_keys_keep_modifiers_and_repeat_distinct() {
-        assert_eq!(arc_key(&key(egui::Modifiers::NONE, false)), Some(false));
-        assert_eq!(arc_key(&key(egui::Modifiers::SHIFT, false)), Some(true));
+        let a = Some(egui::Key::A);
+        assert_eq!(arc_key(&key(egui::Modifiers::NONE, false), a), Some(false));
+        assert_eq!(arc_key(&key(egui::Modifiers::SHIFT, false), a), Some(true));
         for modifiers in [
             egui::Modifiers::ALT,
             egui::Modifiers::CTRL,
             egui::Modifiers::COMMAND,
             egui::Modifiers::MAC_CMD,
         ] {
-            assert_eq!(arc_key(&key(modifiers, false)), None);
+            assert_eq!(arc_key(&key(modifiers, false), a), None);
         }
-        assert_eq!(arc_key(&key(egui::Modifiers::NONE, true)), None);
+        assert_eq!(arc_key(&key(egui::Modifiers::NONE, true), a), None);
+    }
+
+    #[test]
+    fn arc_follows_remap_and_unbound_arc_matches_nothing() {
+        let n = egui::Modifiers::NONE;
+        let q = Some(egui::Key::Q);
+        assert_eq!(arc_key(&key_of(egui::Key::Q, n, false), q), Some(false));
+        assert_eq!(
+            arc_key(&key_of(egui::Key::Q, egui::Modifiers::SHIFT, false), q),
+            Some(true)
+        );
+        assert_eq!(arc_key(&key(n, false), q), None);
+        assert_eq!(arc_key(&key(n, false), None), None);
     }
 }
 

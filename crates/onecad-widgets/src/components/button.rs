@@ -25,6 +25,7 @@ pub struct Button<'a> {
     enabled: bool,
     tip: Option<Tip<'a>>,
     min_width: f32,
+    hit_height: f32,
 }
 
 impl<'a> Button<'a> {
@@ -36,6 +37,7 @@ impl<'a> Button<'a> {
             enabled: true,
             tip: None,
             min_width: 0.0,
+            hit_height: 0.0,
         }
     }
     pub fn kind(mut self, kind: ButtonKind) -> Self {
@@ -56,6 +58,11 @@ impl<'a> Button<'a> {
     }
     pub fn min_width(mut self, width: f32) -> Self {
         self.min_width = width;
+        self
+    }
+    /// Grows the sensed area to at least `height` (touch targets); painting is unchanged.
+    pub fn hit_height(mut self, height: f32) -> Self {
+        self.hit_height = height;
         self
     }
 }
@@ -107,7 +114,9 @@ impl Widget for Button<'_> {
         } else {
             Sense::hover()
         };
-        let (rect, response) = ui.allocate_exact_size(Vec2::new(width, H_FIELD), sense);
+        let (outer, response) =
+            ui.allocate_exact_size(Vec2::new(width, H_FIELD.max(self.hit_height)), sense);
+        let rect = egui::Rect::from_center_size(outer.center(), Vec2::new(width, H_FIELD));
         let (fill, text, border) = colours(&l.theme, self.kind, response.hovered() && self.enabled);
         let opacity = if self.enabled { 1.0 } else { 0.4 };
         let p = ui.painter();

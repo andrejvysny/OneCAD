@@ -3,7 +3,7 @@ use super::{
     cache::{Cache, Drag, Placement, place},
     geometry::Witness,
 };
-use crate::sketch_numeric::format::{format_angle_degrees, format_measure};
+use crate::sketch_numeric::format::{format_angle_degrees_to, format_measure_to};
 use crate::theme::Theme;
 use egui::{FontId, Pos2, Rect, Sense, Stroke, Ui};
 use onecad_core::{
@@ -44,7 +44,7 @@ pub fn project(
     at.is_finite().then_some(at)
 }
 
-pub fn label(constraint: &Constraint) -> Option<(String, String)> {
+pub fn label(constraint: &Constraint, decimals: u8) -> Option<(String, String)> {
     let scalar = constraint.value()?;
     let (kind, prefix, number, unit) = match constraint {
         Constraint::Distance { .. } => ("Distance", "", scalar.value, "mm"),
@@ -59,9 +59,9 @@ pub fn label(constraint: &Constraint) -> Option<(String, String)> {
         return None;
     }
     let number = if matches!(constraint, Constraint::Angle { .. }) {
-        format_angle_degrees(number)
+        format_angle_degrees_to(number, decimals)
     } else {
-        format_measure(number)
+        format_measure_to(number, decimals)
     };
     let value = format!("{prefix}{number} {unit}");
     let text = scalar.expr.as_ref().map_or_else(

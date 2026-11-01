@@ -79,7 +79,7 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect, view: &ViewSnapshot) -> bool
                 || selected_dimension(session, constraint)
         })
         .filter_map(|constraint| {
-            let (text, accessible) = paint::label(constraint)?;
+            let (text, accessible) = paint::label(constraint, app.ui.display_decimals)?;
             Some(paint::Badge {
                 id: constraint.id(),
                 text,

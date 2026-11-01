@@ -24,6 +24,7 @@ pub struct SegmentedControl<'a> {
     segments: &'a [Segment<'a>],
     width: Option<f32>,
     accent_selected: bool,
+    hit_height: f32,
 }
 
 impl<'a> SegmentedControl<'a> {
@@ -38,11 +39,17 @@ impl<'a> SegmentedControl<'a> {
             segments,
             width: None,
             accent_selected: false,
+            hit_height: 0.0,
         }
     }
     /// Use the theme accent for the selected label in a choice popover.
     pub fn accent_selected(mut self) -> Self {
         self.accent_selected = true;
+        self
+    }
+    /// Grows each segment's sensed area to at least `height` (touch targets); painting is unchanged.
+    pub fn hit_height(mut self, height: f32) -> Self {
+        self.hit_height = height;
         self
     }
     /// Fixed total width, split equally; unset = content width.
@@ -150,7 +157,9 @@ impl Widget for SegmentedControl<'_> {
         };
         let total = widths.iter().sum::<f32>() + 4.0;
         let base = ui.make_persistent_id(self.id_salt);
-        let (rect, mut response) = ui.allocate_exact_size(vec2(total, 30.0), Sense::hover());
+        let (outer, mut response) =
+            ui.allocate_exact_size(vec2(total, 30.0_f32.max(self.hit_height)), Sense::hover());
+        let rect = Rect::from_center_size(outer.center(), vec2(total, 30.0));
         ui.painter()
             .rect_filled(rect, CornerRadius::same(7), t.well);
         let mut x = rect.left() + 2.0;
@@ -158,7 +167,8 @@ impl Widget for SegmentedControl<'_> {
         for (i, (seg, w)) in self.segments.iter().zip(&widths).enumerate() {
             let seg_rect = Rect::from_min_size(pos2(x, rect.top() + 2.0), vec2(*w, 26.0));
             x += w;
-            let r = ui.interact(seg_rect, base.with(i), Sense::click());
+            let hit = Rect::from_x_y_ranges(seg_rect.x_range(), outer.y_range());
+            let r = ui.interact(hit, base.with(i), Sense::click());
             let on = *self.selected == i;
             if r.clicked() && !on {
                 *self.selected = i;

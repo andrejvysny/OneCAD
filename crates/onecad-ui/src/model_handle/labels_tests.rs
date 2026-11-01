@@ -67,9 +67,12 @@ fn fixed_two_decimals_are_display_only_and_normalize_negative_zero() {
         (8.126, "8.13"),
     ] {
         let original = value;
-        assert_eq!(number(value), expected);
+        assert_eq!(number(value, 2), expected);
         assert_eq!(value, original);
     }
+    assert_eq!(number(8.1264, 3), "8.126");
+    assert_eq!(number(-0.4, 0), "0");
+    assert_eq!(number(8.5, 0), "9");
 }
 
 #[test]
@@ -214,7 +217,7 @@ fn mirror_caption_keeps_signed_plane_offset_before_during_and_after_drag() {
         original: String::new(),
     };
     assert_eq!(
-        caption_text(&baseline, None, 0.0),
+        caption_text(&baseline, None, 0.0, 2),
         "Mirror plane offset: -4.00 mm"
     );
     let view = super::super::test_support::view();
@@ -227,12 +230,12 @@ fn mirror_caption_keeps_signed_plane_offset_before_during_and_after_drag() {
         p.plane_point.x = -6.0;
     }
     assert_eq!(
-        caption_text(&current, Some(&drag), drag.value),
+        caption_text(&current, Some(&drag), drag.value, 2),
         "Mirror plane offset: -6.00 mm",
         "use frozen origin so updated draft is not counted twice"
     );
     assert_eq!(
-        caption_text(&current, None, 0.0),
+        caption_text(&current, None, 0.0, 2),
         "Mirror plane offset: -6.00 mm",
         "release keeps authored plane offset visible"
     );

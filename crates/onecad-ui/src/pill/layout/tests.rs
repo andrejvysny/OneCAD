@@ -62,7 +62,7 @@ fn input_frame(
                         if compact.is_none() {
                             SelectionLabel::new("Sketch entities", "12 selected").show(ui);
                         }
-                        draw_groups(ui, groups, &views, None, false)
+                        draw_groups(ui, groups, &views, None, false, &[])
                     },
                 );
                 capture = Some(Capture {

@@ -3,6 +3,7 @@
 use crate::{
     app::App,
     layout::Chrome,
+    shortcut_prefs::ShortcutOverride,
     sketch_ui,
     tool_registry::{SelectionKind, ToolDef, ToolId, pill_tools, running_tool, selection_kind},
 };
@@ -270,8 +271,12 @@ pub(crate) fn disabled_reason(app: &App, def: &ToolDef) -> Option<&'static str> 
 }
 
 /// Tooltip key for the current mode, from the same keymap the input router binds.
-fn bound_shortcut(def: &ToolDef, sketch: bool) -> Option<&'static str> {
-    crate::tool_registry::shortcut_label(def.id, sketch)
+fn bound_shortcut(
+    overrides: &[ShortcutOverride],
+    def: &ToolDef,
+    sketch: bool,
+) -> Option<&'static str> {
+    crate::tool_registry::shortcut_label(overrides, def.id, sketch)
 }
 
 pub(crate) fn activate(app: &mut App, ctx: &Context, id: ToolId) {
@@ -438,6 +443,7 @@ fn draw_groups(
     views: &[Vec<View>],
     running: Option<ToolId>,
     sketch: bool,
+    overrides: &[ShortcutOverride],
 ) -> Hits {
     let mut hits = Hits::default();
     for (gi, group) in groups.iter().enumerate() {
@@ -449,7 +455,7 @@ fn draw_groups(
                 .source
                 .map(|(ext, publisher)| format!("{ext} · {publisher}"));
             let tip = Tip::new(def.label)
-                .shortcut(bound_shortcut(def, sketch))
+                .shortcut(bound_shortcut(overrides, def, sketch))
                 .reason(v.reason)
                 .source(source.as_deref());
             let button = ToolButton::new(def.icon)
@@ -556,7 +562,14 @@ pub fn show(app: &mut App, ctx: &Context, chrome: &Chrome) {
                     clear = SelectionLabel::new(k, c).variant(*v).show(ui).clear;
                     pill_divider(ui);
                 }
-                hits = draw_groups(ui, groups, &views, running, app.sketch_active());
+                hits = draw_groups(
+                    ui,
+                    groups,
+                    &views,
+                    running,
+                    app.sketch_active(),
+                    &app.ui.shortcut_overrides,
+                );
             });
         });
     hits.clicked =

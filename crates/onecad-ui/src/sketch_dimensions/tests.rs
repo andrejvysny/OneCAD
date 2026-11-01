@@ -138,7 +138,7 @@ fn badges(session: &SketchSession) -> Vec<paint::Badge> {
         .constraints()
         .iter()
         .filter_map(|constraint| {
-            let (text, accessible) = paint::label(constraint)?;
+            let (text, accessible) = paint::label(constraint, 2)?;
             Some(paint::Badge {
                 id: constraint.id(),
                 text,

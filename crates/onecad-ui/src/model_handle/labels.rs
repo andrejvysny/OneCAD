@@ -9,21 +9,28 @@ const GAP: f32 = 4.0;
 const TIP_GAP: f32 = 14.0;
 const MIN_WRAP: f32 = 48.0;
 
-pub(super) fn number(value: f64) -> String {
+pub(super) fn number(value: f64, decimals: u8) -> String {
+    let scale = 10f64.powi(i32::from(decimals));
     let rounded = if value.is_finite() {
-        (value * 100.0).round() / 100.0
+        (value * scale).round() / scale
     } else {
         0.0
     };
-    format!("{:.2}", if rounded == 0.0 { 0.0 } else { rounded })
+    format!(
+        "{:.*}",
+        usize::from(decimals),
+        if rounded == 0.0 { 0.0 } else { rounded }
+    )
 }
 
 pub(super) fn caption_text(
     target: &super::Target,
     drag: Option<&super::Drag>,
     value: f64,
+    decimals: u8,
 ) -> String {
-    drag.map_or(target, |drag| &drag.target).label(value)
+    drag.map_or(target, |drag| &drag.target)
+        .label(value, decimals)
 }
 
 pub(super) fn paint(app: &App, ui: &egui::Ui, viewport: Rect, captions: &[(Pos2, String)]) {

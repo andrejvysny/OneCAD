@@ -2,6 +2,7 @@
 //! Groups and order follow the final native design reviewed at ed9ed33
 //! (docs/design/native-ui/final/README.md, retired from the tree in 79eb923).
 use crate::app::App;
+use crate::shortcut_prefs::{KeyContext, ShortcutOverride};
 use onecad_core::document::record::{KnownOperation, Operation};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,7 +19,8 @@ pub enum SelectionKind {
     Mixed,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 #[allow(
     dead_code,
     reason = "Legacy gallery identities are not native creation commands"
@@ -123,22 +125,70 @@ const SKETCH_KEYS: &[(egui::Key, ToolId)] = &[
     (egui::Key::X, ToolId::Construction),
 ];
 
-fn keymap(sketch: bool) -> &'static [(egui::Key, ToolId)] {
-    if sketch { SKETCH_KEYS } else { MODEL_KEYS }
+pub fn default_bindings(context: KeyContext) -> &'static [(egui::Key, ToolId)] {
+    if context.sketch() {
+        SKETCH_KEYS
+    } else {
+        MODEL_KEYS
+    }
 }
 
-pub fn shortcut_tool(key: egui::Key, sketch: bool) -> Option<ToolId> {
-    keymap(sketch)
+/// Letters and digits only: the keys a user may record for a tool.
+pub fn recordable(key: egui::Key) -> bool {
+    let name = key.name();
+    name.len() == 1 && name.as_bytes()[0].is_ascii_alphanumeric()
+}
+
+fn context(sketch: bool) -> KeyContext {
+    if sketch {
+        KeyContext::Sketch
+    } else {
+        KeyContext::Modeling
+    }
+}
+
+fn override_for(
+    overrides: &[ShortcutOverride],
+    id: ToolId,
+    context: KeyContext,
+) -> Option<&ShortcutOverride> {
+    overrides
         .iter()
-        .find(|(k, _)| *k == key)
+        .find(|o| o.context == context && o.tool == id)
+}
+
+pub fn effective_key(
+    overrides: &[ShortcutOverride],
+    id: ToolId,
+    context: KeyContext,
+) -> Option<egui::Key> {
+    match override_for(overrides, id, context) {
+        Some(o) => o.key.as_deref().and_then(egui::Key::from_name),
+        None => default_bindings(context)
+            .iter()
+            .find(|(_, t)| *t == id)
+            .map(|(k, _)| *k),
+    }
+}
+
+pub fn shortcut_tool(
+    overrides: &[ShortcutOverride],
+    key: egui::Key,
+    sketch: bool,
+) -> Option<ToolId> {
+    let context = context(sketch);
+    default_bindings(context)
+        .iter()
         .map(|(_, id)| *id)
+        .find(|id| effective_key(overrides, *id, context) == Some(key))
 }
 
-pub fn shortcut_label(id: ToolId, sketch: bool) -> Option<&'static str> {
-    keymap(sketch)
-        .iter()
-        .find(|(_, t)| *t == id)
-        .map(|(k, _)| k.name())
+pub fn shortcut_label(
+    overrides: &[ShortcutOverride],
+    id: ToolId,
+    sketch: bool,
+) -> Option<&'static str> {
+    effective_key(overrides, id, context(sketch)).map(egui::Key::name)
 }
 
 type Groups = &'static [&'static [ToolDef]];
@@ -248,6 +298,28 @@ pub const PLANNED_MODEL: &[ToolDef] = &[
     t(ToolId::Dogbone, "extension", "Dogbone"),
     t(ToolId::CheckGeometry, "check", "Check geometry"),
 ];
+
+/// Icon and label of any registered tool, for lists that show tools outside a pill.
+pub fn definition(id: ToolId) -> Option<ToolDef> {
+    const GROUPS: [Groups; 8] = [
+        NONE,
+        FACE,
+        EDGE,
+        BODY,
+        REGION,
+        SKETCH_IDLE,
+        SKETCH_ENTITY,
+        FEATURE,
+    ];
+    GROUPS
+        .iter()
+        .flat_map(|groups| groups.iter())
+        .flat_map(|group| group.iter())
+        .chain(PLANNED_MODEL)
+        .chain(PLANNED_SKETCH)
+        .find(|def| def.id == id)
+        .copied()
+}
 
 /// Implementation gaps are distinct from temporary selection/worker applicability.
 pub fn unavailable_reason(id: ToolId) -> &'static str {
@@ -413,11 +485,11 @@ mod tests {
     #[test]
     fn keymaps_have_unique_keys_and_tools() {
         for sketch in [false, true] {
-            let map = keymap(sketch);
+            let map = default_bindings(context(sketch));
             for (i, (key, id)) in map.iter().enumerate() {
                 assert!(map[i + 1..].iter().all(|(k, t)| k != key && t != id));
-                assert_eq!(shortcut_tool(*key, sketch), Some(*id));
-                assert_eq!(shortcut_label(*id, sketch), Some(key.name()));
+                assert_eq!(shortcut_tool(&[], *key, sketch), Some(*id));
+                assert_eq!(shortcut_label(&[], *id, sketch), Some(key.name()));
             }
         }
     }
@@ -441,10 +513,10 @@ mod tests {
         for (_, id) in MODEL_KEYS.iter().chain(SKETCH_KEYS) {
             assert!(known.contains(id), "{id:?} not in registry");
         }
-        assert_eq!(shortcut_tool(egui::Key::E, true), None);
-        assert_eq!(shortcut_tool(egui::Key::L, false), None);
-        assert_eq!(shortcut_label(ToolId::Line, false), None);
-        assert_eq!(shortcut_label(ToolId::Extrude, true), None);
+        assert_eq!(shortcut_tool(&[], egui::Key::E, true), None);
+        assert_eq!(shortcut_tool(&[], egui::Key::L, false), None);
+        assert_eq!(shortcut_label(&[], ToolId::Line, false), None);
+        assert_eq!(shortcut_label(&[], ToolId::Extrude, true), None);
     }
 
     #[test]

@@ -38,6 +38,8 @@ pub enum Action {
     Quit,
     Fit,
     Home,
+    /// App menu › Settings… (⌘,): Home's Settings page.
+    Settings,
     Appearance(crate::ui_state::Appearance),
 }
 
@@ -131,12 +133,15 @@ mod imp {
         let paste = item("Paste", cmd, Code::KeyV);
         let select_all = item("Select All", cmd, Code::KeyA);
         let home = item("Home View", Modifiers::META | Modifiers::SHIFT, Code::KeyH);
+        let settings = item("Settings…", cmd, Code::Comma);
         let e = |e: muda::Error| e.to_string();
         let app = Submenu::with_items(
             "OneCAD",
             true,
             &[
                 &PredefinedMenuItem::about(None, None),
+                &PredefinedMenuItem::separator(),
+                &settings,
                 &PredefinedMenuItem::separator(),
                 &PredefinedMenuItem::services(None),
                 &PredefinedMenuItem::separator(),
@@ -247,6 +252,7 @@ mod imp {
             (quit.id().clone(), Action::Quit),
             (fit.id().clone(), Action::Fit),
             (home.id().clone(), Action::Home),
+            (settings.id().clone(), Action::Settings),
             (cut.id().clone(), Action::Cut),
             (copy.id().clone(), Action::Copy),
             (paste.id().clone(), Action::Paste),
@@ -543,6 +549,7 @@ impl Action {
                     Self::Quit => (egui::Key::Q, false),
                     Self::Fit => (egui::Key::Num0, false),
                     Self::Home => (egui::Key::H, true),
+                    Self::Settings => (egui::Key::Comma, false),
                     // Save All carries Option, which the shift-only comparison cannot express.
                     Self::Appearance(_)
                     | Self::Export(_)

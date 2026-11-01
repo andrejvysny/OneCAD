@@ -155,3 +155,58 @@ fn linked_settings_are_preserved_and_never_followed() {
             .is_symlink()
     );
 }
+
+#[test]
+fn v1_file_without_new_fields_loads_defaults() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join(FILE_NAME),
+        br#"{"version":1,"appearance":"dark","explorerOpen":true,"inspectorOpen":true,"inspectorTab":"history","recentView":0,"cameraFovDegrees":45}"#,
+    )
+    .unwrap();
+    let (_, ui, warning) = load(&directory);
+    assert!(warning.is_none(), "{warning:?}");
+    assert_eq!(ui.display_decimals, 2);
+    assert_eq!(ui.navigation, NavigationPrefs::default());
+    assert!(ui.shortcut_overrides.is_empty());
+}
+
+#[test]
+fn navigation_shortcuts_and_decimals_roundtrip() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut store, mut ui, _) = load(&directory);
+    ui.display_decimals = 3;
+    ui.navigation
+        .apply_preset(crate::navigation_prefs::NavPreset::Trackpad);
+    ui.navigation.invert_scroll_zoom = true;
+    ui.navigation.zoom_toward_cursor = false;
+    shortcut_prefs::assign(
+        &mut ui.shortcut_overrides,
+        shortcut_prefs::KeyContext::Modeling,
+        crate::tool_registry::ToolId::Extrude,
+        egui::Key::Q,
+    );
+    store.save_if_changed(&ui).unwrap();
+    drop(store);
+    let (_, actual, warning) = load(&directory);
+    assert!(warning.is_none(), "{warning:?}");
+    assert_eq!(Preferences::capture(&actual), Preferences::capture(&ui));
+    assert_eq!(actual.display_decimals, 3);
+    assert_eq!(actual.shortcut_overrides.len(), 1);
+}
+
+#[test]
+fn four_decimals_are_rejected() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut invalid = Preferences::capture(&UiState::default());
+    invalid.display_decimals = 4;
+    assert!(invalid.validate().is_err());
+    fs::write(
+        directory.path().join(FILE_NAME),
+        serde_json::to_vec(&invalid).unwrap(),
+    )
+    .unwrap();
+    let (_, ui, warning) = load(&directory);
+    assert!(warning.is_some_and(|w| w.contains("decimals")));
+    assert_eq!(ui.display_decimals, 2);
+}

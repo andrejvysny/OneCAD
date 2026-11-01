@@ -34,7 +34,7 @@ fn selection_groups_name_every_tool_by_registry_id() {
         let views = enabled(groups);
         let named = author_ids(|ui| {
             ui.horizontal(|ui| {
-                draw_groups(ui, groups, &views, None, false);
+                draw_groups(ui, groups, &views, None, false, &[]);
             });
         });
         for tool in expected {
@@ -68,11 +68,11 @@ fn compact_pill_and_more_catalog_name_each_selection_tool_once() {
         let views = enabled(&pill);
         let named = author_ids(|ui| {
             ui.horizontal(|ui| {
-                draw_groups(ui, &pill, &views, None, false);
+                draw_groups(ui, &pill, &views, None, false, &[]);
             });
             let rows = catalog::overflow(groups, crate::tool_registry::PLANNED_MODEL, &drawn);
             for def in rows {
-                catalog::row(ui, def, true, false);
+                catalog::row(ui, def, true, false, &[]);
             }
         });
         for tool in expected {

@@ -68,6 +68,20 @@ fn sidebar_navigation_routes_pages() {
 }
 
 #[test]
+fn settings_is_a_sidebar_destination_that_esc_leaves() {
+    let mut state = crate::ui_state::UiState::default();
+    navigate(&mut state, Nav::Settings);
+    assert_eq!(state.start_page, StartPage::Settings);
+    assert!(!library_active(state.start_page));
+    assert_eq!(parent(StartPage::Settings), None);
+    assert_eq!(
+        parent(StartPage::ExtensionDetail),
+        Some(StartPage::Extensions)
+    );
+    assert_eq!(parent(StartPage::StandardPart), Some(StartPage::Library));
+}
+
+#[test]
 fn component_library_resets_source_tab() {
     let mut state = crate::ui_state::UiState::default();
     state.library.source = 3;

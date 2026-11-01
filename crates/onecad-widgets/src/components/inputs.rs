@@ -60,6 +60,7 @@ pub struct Select<'a> {
     icon: Option<&'a str>,
     width: f32,
     enabled: bool,
+    hit_height: f32,
 }
 
 pub struct SelectOutput {
@@ -80,6 +81,7 @@ impl<'a> Select<'a> {
             icon: None,
             width: 150.0,
             enabled: true,
+            hit_height: 0.0,
         }
     }
     pub fn icon(mut self, icon: Option<&'a str>) -> Self {
@@ -94,13 +96,22 @@ impl<'a> Select<'a> {
         self.enabled = enabled;
         self
     }
+    /// Grows the sensed area to at least `height` (touch targets); painting is unchanged.
+    pub fn hit_height(mut self, height: f32) -> Self {
+        self.hit_height = height;
+        self
+    }
 
     pub fn show(self, ui: &mut Ui) -> SelectOutput {
         let l = look(ui.ctx());
         let t = &l.theme;
-        let (rect, _) = ui.allocate_exact_size(vec2(self.width, H_FIELD), Sense::hover());
+        let (outer, _) = ui.allocate_exact_size(
+            vec2(self.width, H_FIELD.max(self.hit_height)),
+            Sense::hover(),
+        );
+        let rect = Rect::from_center_size(outer.center(), vec2(self.width, H_FIELD));
         let id = ui.make_persistent_id(self.id_salt);
-        let response = ui.interact(rect, id, sense(self.enabled, Sense::click()));
+        let response = ui.interact(outer, id, sense(self.enabled, Sense::click()));
         let op = opacity(self.enabled);
         let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
         let hovered = response.hovered() && self.enabled;
@@ -166,14 +177,24 @@ impl<'a> Select<'a> {
 pub struct Toggle<'a> {
     on: &'a mut bool,
     enabled: bool,
+    hit_height: f32,
 }
 
 impl<'a> Toggle<'a> {
     pub fn new(on: &'a mut bool) -> Self {
-        Self { on, enabled: true }
+        Self {
+            on,
+            enabled: true,
+            hit_height: 0.0,
+        }
     }
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
+        self
+    }
+    /// Grows the sensed area to at least `height` (touch targets); painting is unchanged.
+    pub fn hit_height(mut self, height: f32) -> Self {
+        self.hit_height = height;
         self
     }
 }
@@ -189,8 +210,11 @@ impl Widget for Toggle<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
         let l = look(ui.ctx());
         let t = &l.theme;
-        let (rect, mut response) =
-            ui.allocate_exact_size(vec2(30.0, 18.0), sense(self.enabled, Sense::click()));
+        let (outer, mut response) = ui.allocate_exact_size(
+            vec2(30.0, 18.0_f32.max(self.hit_height)),
+            sense(self.enabled, Sense::click()),
+        );
+        let rect = Rect::from_center_size(outer.center(), vec2(30.0, 18.0));
         if response.clicked() {
             *self.on = !*self.on;
             response.mark_changed();
@@ -406,6 +430,55 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn hit_height_grows_the_sensed_rect_only_when_set() {
+        use crate::components::{
+            button::Button,
+            lists::{Segment, SegmentedControl},
+        };
+        headless(false, Vec::new(), |ui| {
+            let mut on = false;
+            let mut sel = 0;
+            let segs = [
+                Segment {
+                    label: "A",
+                    icon: None,
+                },
+                Segment {
+                    label: "B",
+                    icon: None,
+                },
+            ];
+            let plain = [
+                ui.add(Toggle::new(&mut on)).rect.height(),
+                Select::new("s0", "a", &["a"])
+                    .show(ui)
+                    .response
+                    .rect
+                    .height(),
+                ui.add(Button::new("Go")).rect.height(),
+                ui.add(SegmentedControl::new("g0", &mut sel, &segs))
+                    .rect
+                    .height(),
+            ];
+            assert_eq!(plain, [18.0, 30.0, 30.0, 30.0]);
+            let tall = [
+                ui.add(Toggle::new(&mut on).hit_height(44.0)).rect.height(),
+                Select::new("s1", "a", &["a"])
+                    .hit_height(44.0)
+                    .show(ui)
+                    .response
+                    .rect
+                    .height(),
+                ui.add(Button::new("Go").hit_height(44.0)).rect.height(),
+                ui.add(SegmentedControl::new("g1", &mut sel, &segs).hit_height(44.0))
+                    .rect
+                    .height(),
+            ];
+            assert!(tall.iter().all(|h| *h >= 44.0), "{tall:?}");
+        });
     }
 
     #[test]

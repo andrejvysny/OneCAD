@@ -317,12 +317,25 @@ fn navigate_input(
     if !allowed {
         app.doc.navigation.cancel_activity();
     }
+    if allowed
+        && !over_chrome
+        && app.ui.navigation.fit_on_middle_double_click
+        && response.double_clicked_by(egui::PointerButton::Middle)
+    {
+        app.doc.fit_pending = true;
+        app.draw_dirty = true;
+    }
+    let anchor = crate::navigation_prefs::zoom_anchor(&app.ui.navigation, cursor);
     ui.input(|input| {
         for event in &input.events {
             let motion = app
                 .doc
                 .navigation
-                .event(event, input.time, viewport.height as f32);
+                .event(event, input.time, viewport.height as f32)
+                .map(|motion| {
+                    let wheel = matches!(event, egui::Event::MouseWheel { .. });
+                    crate::navigation_prefs::wheel_motion(&app.ui.navigation, wheel, motion)
+                });
             let eligible = allowed && !over_chrome && response.hovered();
             let mut changed = false;
             if let Some(mut motion) = motion
@@ -339,7 +352,7 @@ fn navigate_input(
                     &mut app.doc.camera,
                     viewport,
                     scene,
-                    cursor,
+                    anchor,
                     motion,
                 );
                 app.draw_dirty |= changed;
@@ -380,10 +393,11 @@ fn navigate_drag(
         return;
     }
     let delta = ui.input(|input| input.pointer.delta());
-    let motion = if secondary && !middle && ui.input(|input| input.modifiers.shift) {
-        crate::navigation::Motion::Orbit(delta)
-    } else {
-        crate::navigation::Motion::Pan(delta)
+    let shift = ui.input(|input| input.modifiers.shift);
+    let Some(motion) =
+        crate::navigation_prefs::drag_motion(&app.ui.navigation, secondary, middle, shift, delta)
+    else {
+        return;
     };
     app.draw_dirty |=
         crate::camera_navigation::apply(&mut app.doc.camera, viewport, scene, None, motion);

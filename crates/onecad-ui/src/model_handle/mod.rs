@@ -55,7 +55,7 @@ struct Target {
     caption: Option<&'static str>,
 }
 impl Target {
-    fn label(&self, value: f64) -> String {
+    fn label(&self, value: f64, decimals: u8) -> String {
         let (name, shown) = match &self.kind {
             Kind::Scalar(key) => (key.parameter().label(), value),
             Kind::Mirror(plane) => {
@@ -68,7 +68,7 @@ impl Target {
         format!(
             "{}: {} {}",
             self.caption.unwrap_or(name),
-            labels::number(shown),
+            labels::number(shown, decimals),
             if self.geometry.angle() { "°" } else { "mm" }
         )
     }
@@ -251,7 +251,10 @@ fn paint_targets(
             &app.theme,
             hovered || selected.is_some(),
         ) {
-            captions.push((tip, labels::caption_text(target, selected, value)));
+            captions.push((
+                tip,
+                labels::caption_text(target, selected, value, app.ui.display_decimals),
+            ));
         }
         hot |= hovered;
     }

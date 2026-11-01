@@ -1,8 +1,8 @@
 use super::model_selection_delivery_tests::{boxed, click, labels, targets};
 use super::point_center_delivery_tests::support::Host;
 
-fn orbit_frame(host: &mut Host, mut events: Vec<egui::Event>) {
-    events.insert(0, egui::Event::ModifiersChanged(egui::Modifiers::SHIFT));
+// Default mapping orbits on a plain right drag; ⇧ right drag pans.
+fn orbit_frame(host: &mut Host, events: Vec<egui::Event>) {
     host.ui(events);
 }
 
@@ -11,7 +11,7 @@ fn secondary(position: egui::Pos2, pressed: bool) -> egui::Event {
         pos: position,
         button: egui::PointerButton::Secondary,
         pressed,
-        modifiers: egui::Modifiers::SHIFT,
+        modifiers: egui::Modifiers::NONE,
     }
 }
 

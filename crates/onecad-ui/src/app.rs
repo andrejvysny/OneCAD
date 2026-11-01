@@ -856,7 +856,14 @@ impl App {
     }
 
     pub fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        let shown = (self.ui.start_open, self.ui.start_page);
+        crate::settings_pages::sync_recording(self, ctx, raw);
         crate::input::route(self, ctx, raw);
+        // ⌘, opens Settings from raw input; without a repaint the page is half drawn
+        // until the pointer moves.
+        if shown != (self.ui.start_open, self.ui.start_page) {
+            ctx.request_repaint();
+        }
     }
 
     pub fn logic(&mut self, ctx: &egui::Context) {

@@ -335,3 +335,32 @@ fn focused_editor_with_empty_history_retains_undo_and_redo_ownership() {
         assert!(text_owns_keyboard(&ctx));
     }
 }
+
+#[test]
+fn settings_shortcut_is_command_comma_only_and_deduped_with_the_menu() {
+    let command = egui::Modifiers::COMMAND;
+    assert!(settings_shortcut(egui::Key::Comma, command));
+    assert!(!settings_shortcut(egui::Key::Comma, egui::Modifiers::NONE));
+    assert!(!settings_shortcut(
+        egui::Key::Comma,
+        egui::Modifiers {
+            shift: true,
+            ..command
+        }
+    ));
+    assert!(!settings_shortcut(
+        egui::Key::Comma,
+        egui::Modifiers {
+            alt: true,
+            ..command
+        }
+    ));
+    assert!(!settings_shortcut(egui::Key::Period, command));
+    let mut events = Vec::new();
+    menu::push_command(&mut events, egui::Key::Comma, false);
+    menu::push_command(&mut events, egui::Key::Comma, true);
+    menu::remove_duplicate_events(&[menu::Action::Settings], &mut events);
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|event| matches!(event,
+        egui::Event::Key { modifiers, .. } if modifiers.shift)));
+}

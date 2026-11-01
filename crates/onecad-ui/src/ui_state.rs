@@ -40,6 +40,7 @@ pub enum StartPage {
     StandardPart,
     Extensions,
     ExtensionDetail,
+    Settings,
 }
 
 #[derive(Clone, Debug)]
@@ -68,9 +69,15 @@ pub struct UiState {
     pub recent_view: usize,
     /// Preferred perspective field of view for new and reset cameras.
     pub camera_fov_degrees: u16,
+    /// Decimals shown in viewport dimension labels and model-handle captions.
+    pub display_decimals: u8,
+    pub navigation: crate::navigation_prefs::NavigationPrefs,
+    /// Sparse single-key tool remaps; absent tools keep their default key.
+    pub shortcut_overrides: Vec<crate::shortcut_prefs::ShortcutOverride>,
     pub start_page: StartPage,
     pub library: crate::library_pages::LibraryUi,
     pub extensions: crate::extension_pages::ExtensionsUi,
+    pub settings: crate::settings_pages::SettingsUi,
     pub shell_facade: crate::workspace_ui::ShellFacade,
     pub editor_facade: crate::editor_facade::EditorFacade,
     /// The sketch tool before the current one, for the Pencil's "switch to
@@ -100,9 +107,13 @@ impl Default for UiState {
             theme_failed: None,
             recent_view: 0,
             camera_fov_degrees: crate::camera_fov::DEFAULT_FOV_DEGREES,
+            display_decimals: crate::settings::DEFAULT_DECIMALS,
+            navigation: Default::default(),
+            shortcut_overrides: Vec::new(),
             start_page: StartPage::default(),
             library: Default::default(),
             extensions: Default::default(),
+            settings: Default::default(),
             shell_facade: Default::default(),
             editor_facade: Default::default(),
             previous_sketch_tool: None,

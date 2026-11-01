@@ -1,7 +1,9 @@
 //! Profile-local chrome preferences; document state and transient editors never persist.
 use crate::{
     camera_fov::{DEFAULT_FOV_DEGREES, MAX_FOV_DEGREES, MIN_FOV_DEGREES},
+    navigation_prefs::NavigationPrefs,
     qa::QaPaths,
+    shortcut_prefs::{self, ShortcutOverride},
     ui_state::{Appearance, InspectorTab, UiState},
 };
 use serde::{Deserialize, Serialize};
@@ -14,6 +16,8 @@ use std::{
 
 const VERSION: u32 = 1;
 const MAX_BYTES: u64 = 64 * 1024;
+pub(crate) const DEFAULT_DECIMALS: u8 = 2;
+const MAX_DECIMALS: u8 = 3;
 const FILE_NAME: &str = "native-settings.json";
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -27,10 +31,20 @@ struct Preferences {
     recent_view: usize,
     #[serde(default = "default_fov")]
     camera_fov_degrees: u16,
+    #[serde(default = "default_decimals")]
+    display_decimals: u8,
+    #[serde(default)]
+    navigation: NavigationPrefs,
+    #[serde(default)]
+    shortcut_overrides: Vec<ShortcutOverride>,
 }
 
 fn default_fov() -> u16 {
     DEFAULT_FOV_DEGREES
+}
+
+fn default_decimals() -> u8 {
+    DEFAULT_DECIMALS
 }
 
 impl Preferences {
@@ -41,7 +55,11 @@ impl Preferences {
         if !(MIN_FOV_DEGREES..=MAX_FOV_DEGREES).contains(&self.camera_fov_degrees) {
             return Err("camera field of view must be 15 to 90 degrees");
         }
-        Ok(())
+        if self.display_decimals > MAX_DECIMALS {
+            return Err("displayed decimals must be 0 to 3");
+        }
+        self.navigation.validate()?;
+        shortcut_prefs::validate(&self.shortcut_overrides)
     }
 }
 
@@ -55,6 +73,9 @@ impl Preferences {
             inspector_tab: ui.inspector_tab,
             recent_view: ui.recent_view,
             camera_fov_degrees: ui.camera_fov_degrees,
+            display_decimals: ui.display_decimals,
+            navigation: ui.navigation.clone(),
+            shortcut_overrides: ui.shortcut_overrides.clone(),
         }
     }
 
@@ -65,6 +86,9 @@ impl Preferences {
         ui.inspector_tab = self.inspector_tab;
         ui.recent_view = self.recent_view;
         ui.camera_fov_degrees = self.camera_fov_degrees;
+        ui.display_decimals = self.display_decimals;
+        ui.navigation = self.navigation.clone();
+        ui.shortcut_overrides = self.shortcut_overrides.clone();
     }
 }
 

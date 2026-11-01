@@ -7,7 +7,10 @@
 //! than applied to the document that was shown at its position, and pointer input
 //! after it is dropped too, so no document receives half a gesture or a stray key.
 //! Only releases, modifier state and focus changes survive.
-use super::{TabShortcut, document_shortcut, history_shortcut, submit_history, tab_shortcut};
+use super::{
+    TabShortcut, document_shortcut, history_shortcut, open_settings, settings_shortcut,
+    submit_history, tab_shortcut,
+};
 use crate::app::App;
 
 /// `shortcuts` is false while an overlay owns the keyboard; the switcher still runs.
@@ -75,6 +78,12 @@ fn shortcut(
     }
     if focused && let Some(request) = document_shortcut(*key, *modifiers) {
         app.document_request(request);
+        return true;
+    }
+    if focused && settings_shortcut(*key, *modifiers) {
+        if !repeat {
+            open_settings(app);
+        }
         return true;
     }
     if focused && let Some(action) = tab_shortcut(*key, *modifiers) {

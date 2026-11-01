@@ -1,11 +1,13 @@
 //! Unmodified single-key tool shortcuts, scoped by model or sketch mode. Keys
 //! resolve through `tool_registry::shortcut_tool` and dispatch like a pill click.
 use crate::app::App;
+use crate::shortcut_prefs::ShortcutOverride;
 use crate::tool_registry::{ToolId, shortcut_tool};
 
 /// Remove each plain key press that maps to an available tool, in event order.
 fn take(
     events: &mut Vec<egui::Event>,
+    overrides: &[ShortcutOverride],
     sketch: bool,
     available: impl Fn(ToolId) -> bool,
 ) -> Vec<ToolId> {
@@ -21,7 +23,9 @@ fn take(
         else {
             return true;
         };
-        match shortcut_tool(*key, sketch).filter(|id| modifiers.is_none() && available(*id)) {
+        match shortcut_tool(overrides, *key, sketch)
+            .filter(|id| modifiers.is_none() && available(*id))
+        {
             Some(id) => {
                 tools.push(id);
                 false
@@ -32,6 +36,12 @@ fn take(
     tools
 }
 
+/// Home and Settings cover the document: its tool hotkeys must neither fire into
+/// it nor steal a key the Settings page is recording.
+fn blocked(start_open: bool, other: bool) -> bool {
+    start_open || other
+}
+
 pub(super) fn route(
     app: &mut App,
     ctx: &egui::Context,
@@ -40,12 +50,11 @@ pub(super) fn route(
     composition: bool,
 ) {
     let pointer = ctx.input(|i| i.pointer.any_down());
-    if text
-        || composition
-        || pointer
-        || !raw.focused
-        || crate::tool_registry::running_tool(app).is_some()
-    {
+    let running = crate::tool_registry::running_tool(app).is_some();
+    if blocked(
+        app.ui.start_open,
+        text || composition || pointer || !raw.focused || running,
+    ) {
         return;
     }
     let sketch = app.sketch_active();
@@ -58,7 +67,12 @@ pub(super) fn route(
         };
         crate::pill::available(app, &def)
     };
-    let tools = take(&mut raw.events, sketch, available);
+    let tools = take(
+        &mut raw.events,
+        &app.ui.shortcut_overrides,
+        sketch,
+        available,
+    );
     for id in tools {
         crate::pill::activate(app, ctx, id);
     }
@@ -79,9 +93,25 @@ mod tests {
     }
 
     fn run(events: Vec<egui::Event>, sketch: bool, ok: bool) -> (Vec<ToolId>, usize) {
+        run_with(&[], events, sketch, ok)
+    }
+
+    fn run_with(
+        overrides: &[ShortcutOverride],
+        events: Vec<egui::Event>,
+        sketch: bool,
+        ok: bool,
+    ) -> (Vec<ToolId>, usize) {
         let mut events = events;
-        let tools = take(&mut events, sketch, |_| ok);
+        let tools = take(&mut events, overrides, sketch, |_| ok);
         (tools, events.len())
+    }
+
+    #[test]
+    fn tool_keys_are_inert_while_home_is_open() {
+        assert!(blocked(true, false));
+        assert!(!blocked(false, false));
+        assert!(blocked(false, true));
     }
 
     #[test]
@@ -120,6 +150,32 @@ mod tests {
         assert_eq!(
             run(vec![press(egui::Key::E, n, false)], false, false),
             (vec![], 1)
+        );
+    }
+
+    #[test]
+    fn remapped_key_dispatches_and_old_key_does_not() {
+        use crate::shortcut_prefs::{KeyContext, assign};
+        let n = egui::Modifiers::NONE;
+        let mut overrides = Vec::new();
+        assign(
+            &mut overrides,
+            KeyContext::Modeling,
+            ToolId::Extrude,
+            egui::Key::Q,
+        );
+        let q = press(egui::Key::Q, n, false);
+        let e = press(egui::Key::E, n, false);
+        assert_eq!(
+            run_with(&overrides, vec![q], false, true),
+            (vec![ToolId::Extrude], 0)
+        );
+        assert_eq!(run_with(&overrides, vec![e], false, true), (vec![], 1));
+        // Sketch mode is independent of the modeling remap.
+        let l = press(egui::Key::L, n, false);
+        assert_eq!(
+            run_with(&overrides, vec![l], true, true),
+            (vec![ToolId::Line], 0)
         );
     }
 }
