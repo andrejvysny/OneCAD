@@ -1,4 +1,5 @@
 #include "session/FeaturePattern.h"
+#include "session/FeaturePatternRefs.h"
 #include "session/FeaturePatternValidation.h"
 
 #include <algorithm>
@@ -143,22 +144,6 @@ void transform_sketch_plane(json& params, const gp_Trsf& trsf) {
         if (plane.contains(key)) transform_vector(plane[key], trsf);
 }
 
-// ONECAD-361: a ref frozen on one hole of a multi-point Hole names its producer
-// record in `intent.descriptor.originSlot`. Inside an instance that producer
-// ran under its virtual opId, so the claim must name that id too; a producer
-// outside the selected sources keeps its own.
-void rewrite_origin_slot(json& descriptor, const std::string& pattern, int instance,
-                         const std::set<std::string>& selected_ids) {
-    if (!descriptor.is_object() || !descriptor.contains("originSlot") ||
-        !descriptor["originSlot"].is_object())
-        return;
-    json& origin = descriptor["originSlot"];
-    if (!origin.contains("recordId") || !origin["recordId"].is_string()) return;
-    const std::string producer = origin["recordId"].get<std::string>();
-    if (selected_ids.contains(producer))
-        origin["recordId"] = feature_pattern_virtual_id(pattern, producer, instance);
-}
-
 void rewrite_ref(json& ref, const gp_Trsf& trsf, const std::string& pattern,
                  int instance, bool shared_host_face,
                  const ScratchJob& job,
@@ -182,8 +167,8 @@ void rewrite_ref(json& ref, const gp_Trsf& trsf, const std::string& pattern,
     if (!shared_host_face && ref.contains("intent") && ref["intent"].is_object() &&
         ref["intent"].contains("descriptor")) {
         transform_descriptor(ref["intent"]["descriptor"], trsf);
-        rewrite_origin_slot(ref["intent"]["descriptor"], pattern, instance, selected_ids);
     }
+    rewrite_ref_slot_claims(ref, pattern, instance, shared_host_face, selected_ids);
 }
 
 json instantiate(json source, const gp_Trsf& trsf, const std::string& pattern,

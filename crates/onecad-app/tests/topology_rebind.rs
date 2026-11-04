@@ -26,6 +26,9 @@
 //!
 //! Gated on `ONECAD_WORKER_PATH` (else the dev-tree fallback); a missing binary skips.
 
+#[path = "fixtures/replay.rs"]
+mod fixture_replay;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -2352,6 +2355,17 @@ fn add_poly(sk: &mut Sketch, base: u128, pts: &[(f64, f64)]) {
 /// CCW from the origin; re-authoring with different rib placements moves geometry
 /// only (identical entity ids, identical topology).
 fn comb_sketch(sid: SketchId, left: (f64, f64), right: (f64, f64)) -> Sketch {
+    comb_sketch_with_ids(sid, 0x7000, left, right)
+}
+
+/// [`comb_sketch`] with an explicit entity-id base: same geometry, different
+/// entity ids (a re-created profile, for the generator-slot negative case).
+fn comb_sketch_with_ids(
+    sid: SketchId,
+    id_base: u128,
+    left: (f64, f64),
+    right: (f64, f64),
+) -> Sketch {
     let (l0, l1) = (left.0, left.0 + left.1);
     let (r0, r1) = (right.0, right.0 + right.1);
     assert!(
@@ -2373,8 +2387,29 @@ fn comb_sketch(sid: SketchId, left: (f64, f64), right: (f64, f64)) -> Sketch {
         (0.0, BASE_TOP),
     ];
     let mut sk = Sketch::on_world_plane(sid, "Comb", WorldPlane::XY);
-    add_poly(&mut sk, 0x7000, &pts);
+    add_poly(&mut sk, id_base, &pts);
     sk
+}
+
+/// The normative region id of the comb outline under entity-id base `id_base`,
+/// minted by `finish_sketch` on a scratch runtime. Region ids hash entity ids, not
+/// positions, so the id stays valid across every translation edit of the ribs.
+async fn comb_region_id(wm: &WorkerManager, sid: SketchId, id_base: u128) -> String {
+    let sketch = comb_sketch_with_ids(sid, id_base, (24.0, RIB_NARROW), (80.0, RIB_NARROW));
+    let mut scratch = runtime_over(wm);
+    scratch
+        .apply(EditCommand::AddSketch {
+            sketch: Sketch::on_world_plane(sid, "Comb", WorldPlane::XY),
+        })
+        .expect("AddSketch");
+    scratch.enter_sketch(sid).await.expect("enter_sketch");
+    scratch
+        .sketch_upsert(sid, edit_ops(&sketch))
+        .await
+        .expect("sketch_upsert");
+    let finished = scratch.finish_sketch(sid).await.expect("finish_sketch");
+    assert_eq!(finished.regions.len(), 1, "the comb is one closed region");
+    finished.regions[0].region_id.clone()
 }
 
 /// Exact volume of the comb solid (the extruded outline's area × depth) — the
@@ -2599,8 +2634,24 @@ async fn build_comb_fillet(
     right: (f64, f64),
     filleted_rib: (f64, f64),
 ) -> CombFillet {
+    build_comb_fillet_in_region(wm, rt, sid, "", left, right, filleted_rib).await
+}
+
+/// [`build_comb_fillet`] extruding an explicit `region` (a normative id authors a
+/// V3 profile, which is what makes the worker stamp generator slots; `""` is the
+/// legacy first-region fallback, whose profiles carry no labels and so stamp
+/// no slots on any path).
+async fn build_comb_fillet_in_region(
+    wm: &WorkerManager,
+    rt: &mut DocumentRuntime,
+    sid: SketchId,
+    region: &str,
+    left: (f64, f64),
+    right: (f64, f64),
+    filleted_rib: (f64, f64),
+) -> CombFillet {
     add_op(rt, sketch_record(&comb_sketch(sid, left, right)));
-    add_op(rt, extrude_record(sid, "", COMB_DEPTH));
+    add_op(rt, extrude_record(sid, region, COMB_DEPTH));
     let report = regen_all(rt).await;
     let _ = published(&report, "comb extrude");
     let body = report.changed[0].0;
@@ -2807,6 +2858,10 @@ async fn h5_non_congruent_decoy_at_the_stale_anchor() {
 /// Note the volume signature is deliberately NOT a discriminator here: congruent
 /// ribs remove identical volume, which is exactly why the tie must be refused
 /// rather than guessed.
+///
+/// LEGACY document: the stored ref's `descriptor.generatorSlot` is stripped before
+/// the edit, so this pins the pre-slot behaviour (NeedsRepair, never a guess). The
+/// slotted counterpart is `generator_slot_binds_congruent_rib_after_upstream_edit`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn h5_congruent_twin_never_silently_binds() {
     let Some(bin) = real_worker() else {
@@ -2823,7 +2878,17 @@ async fn h5_congruent_twin_never_silently_binds() {
     let after_left = (14.0, RIB_NARROW); // [14,26], midpoint 20 — 10 mm from the anchor
     let after_right = (34.0, RIB_NARROW); // [34,46], midpoint 40 — 10 mm the other way
 
-    let setup = build_comb_fillet(&wm, &mut rt, sid, before_left, before_right, before_left).await;
+    let region = comb_region_id(&wm, sid, 0x7000).await;
+    let setup = build_comb_fillet_in_region(
+        &wm,
+        &mut rt,
+        sid,
+        &region,
+        before_left,
+        before_right,
+        before_left,
+    )
+    .await;
     let authored_anchor = sketch_to_world(30.0, RIB_TOP, 0.0);
     assert!(
         (setup.anchor.x - authored_anchor.x).abs() < 0.01
@@ -2832,6 +2897,8 @@ async fn h5_congruent_twin_never_silently_binds() {
         setup.anchor.x,
         setup.anchor.y
     );
+    stored_generator_slot(&rt);
+    strip_fillet_generator_slot(&mut rt);
 
     rt.apply(EditCommand::UpdateOperationParams {
         record: RecordId(Uuid::from_u128(SKETCH_REC)),
@@ -2857,6 +2924,10 @@ async fn h5_congruent_twin_never_silently_binds() {
     // Whatever happens, the published body must be self-consistent: a fillet was
     // applied to SOME 30 mm rib, or none was applied at all.
     let one_rib = fillet_removed(H5_RADIUS, RIB_NARROW);
+    assert_eq!(
+        needs_repair, 1,
+        "legacy (slot-less) congruent post-edit tie must stay NeedsRepair"
+    );
     assert!(
         removed < 0.01 * base_vol || (removed - one_rib).abs() < 0.1 * one_rib,
         "either nothing was filleted (NeedsRepair) or exactly ONE congruent rib was — \
@@ -2869,6 +2940,149 @@ async fn h5_congruent_twin_never_silently_binds() {
         );
     }
 
+    wm.shutdown().await;
+}
+
+/// Generator slot: the SAME congruent comb and edit as
+/// [`h5_congruent_twin_never_silently_binds`], but the ref keeps the
+/// `descriptor.generatorSlot` the worker stamped at selection. The slot
+/// (`edge:side:<entity>|cap:…`) names the authored rib's profile edge, so the
+/// worker narrows the pool to the one edge that profile line generated and the
+/// ladder binds it with no repair — the congruent twin is not even a candidate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn generator_slot_binds_congruent_rib_after_upstream_edit() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let sid = SketchId(Uuid::from_u128(0x5012));
+
+    let before_left = (24.0, RIB_NARROW); // authored, mid 30
+    let before_right = (80.0, RIB_NARROW); // congruent twin
+    let after_left = (14.0, RIB_NARROW); // authored, mid 20
+    let after_right = (34.0, RIB_NARROW); // twin, mid 40
+
+    let region = comb_region_id(&wm, sid, 0x7000).await;
+    let setup = build_comb_fillet_in_region(
+        &wm,
+        &mut rt,
+        sid,
+        &region,
+        before_left,
+        before_right,
+        before_left,
+    )
+    .await;
+    let slot = stored_generator_slot(&rt);
+    eprintln!("  GENERATOR SLOT: stored slot = {slot}");
+
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(SKETCH_REC)),
+        op: sketch_record(&comb_sketch(sid, after_left, after_right)).op,
+    })
+    .expect("translate both ribs");
+    let report = regen_all(&mut rt).await;
+    let snap = published(&report, "generator slot edit").clone();
+    let needs_repair = snap.repair_summary.needs_repair_count;
+
+    let base_vol = comb_volume(after_left.1, after_right.1);
+    let (vol, c) = exact_mass(&wm, setup.body).await;
+    let removed = base_vol - vol;
+    let one_rib = fillet_removed(H5_RADIUS, RIB_NARROW);
+    let mids = [rib_mid(after_left), rib_mid(after_right)];
+    let bound = consumed_rib(removed, vol, c[1], mids);
+    // No dry-run score is printed: the published head has already consumed the
+    // filleted edge, so a ResolveRefs pool would be empty and say nothing about
+    // the in-op bind. The in-op evidence is "no repair item".
+    eprintln!(
+        "GENERATOR SLOT: needsRepair={needs_repair} removed={removed:.4} (one rib {one_rib:.4}) \
+         boundRib=mid {}",
+        mids[bound]
+    );
+    assert!(
+        rt.repair_items().is_empty(),
+        "the in-op bind left no repair item: {:?}",
+        rt.repair_items()
+    );
+
+    assert_eq!(
+        needs_repair, 0,
+        "the slot disambiguates the congruent twins"
+    );
+    assert!(
+        (removed - one_rib).abs() < 1e-6 * base_vol,
+        "exactly ONE rib was filleted: removed {removed:.6}, one rib {one_rib:.6}"
+    );
+    assert_eq!(
+        bound, 0,
+        "the fillet followed the AUTHORED rib (mid {}), not its twin (mid {})",
+        mids[0], mids[1]
+    );
+    wm.shutdown().await;
+}
+
+/// Generator slot, negative: the authored rib's profile is re-created with NEW
+/// entity ids (same geometry), so the stored slot names an entity that no longer
+/// exists. The gate is open (the Extrude still stamps slots) but the slot admits
+/// nothing: the ref must go NeedsRepair and never bind a congruent twin.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn generator_slot_recreated_profile_never_binds_a_twin() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let sid = SketchId(Uuid::from_u128(0x5013));
+    let left = (24.0, RIB_NARROW);
+    let right = (80.0, RIB_NARROW);
+
+    let region = comb_region_id(&wm, sid, 0x7000).await;
+    let setup = build_comb_fillet_in_region(&wm, &mut rt, sid, &region, left, right, left).await;
+    stored_generator_slot(&rt);
+
+    // New entity ids => a new normative region id; the Extrude must follow it.
+    let new_region = comb_region_id(&wm, sid, 0x8000).await;
+    assert_ne!(region, new_region, "re-created ids mint a new region id");
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(SKETCH_REC)),
+        op: sketch_record(&comb_sketch_with_ids(sid, 0x8000, left, right)).op,
+    })
+    .expect("re-create the profile under new entity ids");
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(EXTRUDE_REC)),
+        op: extrude_op(sid, &new_region, COMB_DEPTH),
+    })
+    .expect("follow the new region id");
+    let report = regen_all(&mut rt).await;
+    let snap = published(&report, "generator slot recreated").clone();
+    let needs_repair = snap.repair_summary.needs_repair_count;
+    let (vol, _) = exact_mass(&wm, setup.body).await;
+    let removed = comb_volume(left.1, right.1) - vol;
+    eprintln!("GENERATOR SLOT RECREATED: needsRepair={needs_repair} removed={removed:.4}");
+
+    assert!(
+        needs_repair >= 1,
+        "a vanished slot must be refused, not guessed"
+    );
+    // `no-candidates` (an empty narrowed pool) proves the generator-slot path
+    // refused; the HEAD tie veto would report `Ambiguous` instead.
+    let reasons: Vec<String> = rt
+        .repair_items()
+        .iter()
+        .map(|item| format!("{:?}", item.reason))
+        .collect();
+    assert_eq!(
+        reasons,
+        ["NoCandidates"],
+        "refused by the narrowed pool, not by a tie veto"
+    );
+    assert!(
+        removed.abs() < 1e-6,
+        "no twin may be filleted in its place, removed {removed:.6}"
+    );
     wm.shutdown().await;
 }
 
@@ -3003,6 +3217,7 @@ async fn teleport_suffix(
     rt: &mut DocumentRuntime,
     sid: SketchId,
     dummy_body: BodyId,
+    region: &str,
 ) -> (BodyId, Vec3) {
     add_op(
         rt,
@@ -3011,7 +3226,7 @@ async fn teleport_suffix(
             &comb_sketch(sid, TP_BEFORE_LEFT, TP_BEFORE_RIGHT),
         ),
     );
-    add_op(rt, extrude_record_as(EXTRUDE_REC, sid, "", COMB_DEPTH));
+    add_op(rt, extrude_record_as(EXTRUDE_REC, sid, region, COMB_DEPTH));
     let rep = regen_from(rt, 2).await;
     let _ = published(&rep, "teleport comb");
     let body = rep
@@ -3087,9 +3302,57 @@ fn teleport_bound_decoy(removed: f64, vol: f64, centroid_y: f64) -> bool {
     (centroid_y - y_if_decoy).abs() < (centroid_y - y_if_authored).abs()
 }
 
+/// Index (into `mids`) of the narrow rib the fillet consumed, by the same centroid
+/// argument as [`teleport_bound_decoy`]: removing `removed` at sketch `u = mids[i]`
+/// moves the body centroid's world Y to `yc + removed·(yc − mids[i])/vol`.
+fn consumed_rib(removed: f64, vol: f64, centroid_y: f64, mids: [f64; 2]) -> usize {
+    let a_base = COMB_SPAN * BASE_TOP;
+    let a_rib = RIB_NARROW * (RIB_TOP - BASE_TOP);
+    let yc = (a_base * COMB_SPAN / 2.0 + a_rib * (mids[0] + mids[1])) / (a_base + 2.0 * a_rib);
+    let err = |m: f64| (centroid_y - (yc + removed * (yc - m) / vol)).abs();
+    usize::from(err(mids[1]) < err(mids[0]))
+}
+
+/// Rewrites the stored fillet edge ref into a LEGACY one: drops
+/// `intent.descriptor.generatorSlot` and asserts it was there to drop.
+fn strip_fillet_generator_slot(rt: &mut DocumentRuntime) {
+    let params = rt
+        .operation_params(RecordId(Uuid::from_u128(FILLET_REC)))
+        .expect("fillet params");
+    let mut fillet: FilletParams = serde_json::from_value(params).expect("FilletParams");
+    let intent = fillet.edges[0].intent.as_mut().expect("stored intent");
+    intent
+        .descriptor
+        .as_object_mut()
+        .expect("descriptor object")
+        .remove("generatorSlot")
+        .expect("authored ref carries descriptor.generatorSlot");
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(FILLET_REC)),
+        op: Operation::Known(KnownOperation::Fillet(fillet)),
+    })
+    .expect("store the legacy (slot-less) fillet ref");
+}
+
+/// The stored fillet ref's `generatorSlot.slot`, asserted to be an Extrude edge slot.
+fn stored_generator_slot(rt: &DocumentRuntime) -> String {
+    let intent = stored_fillet_intent(rt).expect("stored intent");
+    let slot = intent["descriptor"]["generatorSlot"]["slot"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no descriptor.generatorSlot in {intent}"))
+        .to_owned();
+    assert!(
+        slot.starts_with("edge:") && slot.contains("side:"),
+        "edge slot vocabulary `edge:<a>|<b>` over side faces, got {slot:?}"
+    );
+    slot
+}
+
 /// The ordinary edit lane must fail closed when a congruent decoy teleports exactly
 /// onto the stale anchor. Descriptor evidence ties, so anchor exactness cannot prove
-/// continuity after an upstream edit.
+/// continuity after an upstream edit. LEGACY document: `generatorSlot` is stripped
+/// from the stored ref first (the slotted variant is
+/// `generator_slot_teleport_never_binds_the_decoy`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn post_edit_teleport_to_stale_anchor_is_refused() {
     let Some(bin) = real_worker() else {
@@ -3101,7 +3364,10 @@ async fn post_edit_teleport_to_stale_anchor_is_refused() {
     let sid = SketchId(Uuid::from_u128(0x5003));
 
     let dummy = teleport_prefix(&mut rt).await;
-    let (body, anchor) = teleport_suffix(&wm, &mut rt, sid, dummy).await;
+    let region = comb_region_id(&wm, sid, 0x7000).await;
+    let (body, anchor) = teleport_suffix(&wm, &mut rt, sid, dummy, &region).await;
+    stored_generator_slot(&rt);
+    strip_fillet_generator_slot(&mut rt);
     teleport_edit(&mut rt, sid);
 
     let edited = regen_from(&mut rt, 2).await;
@@ -3124,6 +3390,57 @@ async fn post_edit_teleport_to_stale_anchor_is_refused() {
         removed.abs() < 1e-6,
         "refusal must retain the last valid unfilleted edit result, not bind either twin"
     );
+    wm.shutdown().await;
+}
+
+/// Generator slot on the TELEPORT scene: same decoy parked on the stale anchor
+/// as [`post_edit_teleport_to_stale_anchor_is_refused`], but the ref keeps its
+/// `generatorSlot`. The decoy is the twin profile edge, so the slot excludes it:
+/// the result must be the authored rib or a refusal, never the decoy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn generator_slot_teleport_never_binds_the_decoy() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let sid = SketchId(Uuid::from_u128(0x5014));
+
+    let dummy = teleport_prefix(&mut rt).await;
+    let region = comb_region_id(&wm, sid, 0x7000).await;
+    let (body, _anchor) = teleport_suffix(&wm, &mut rt, sid, dummy, &region).await;
+    stored_generator_slot(&rt);
+    teleport_edit(&mut rt, sid);
+
+    let edited = regen_from(&mut rt, 2).await;
+    let snap = published(&edited, "teleport slotted").clone();
+    let needs_repair = snap.repair_summary.needs_repair_count;
+    let (vol, c) = exact_mass(&wm, body).await;
+    let removed = comb_volume(TP_AFTER_LEFT.1, TP_AFTER_RIGHT.1) - vol;
+    let decoy = teleport_bound_decoy(removed, vol, c[1]);
+    let outcome = if needs_repair == 0 {
+        "bound AUTHORED rib"
+    } else {
+        "NeedsRepair, nothing filleted"
+    };
+    eprintln!(
+        "GENERATOR SLOT TELEPORT: needsRepair={needs_repair} removed={removed:.4} \
+         centroidY={:.5} boundDecoy={decoy} -> {outcome}",
+        c[1]
+    );
+
+    assert!(!decoy, "the slotted ref must never bind the decoy");
+    if needs_repair == 0 {
+        let one_rib = fillet_removed(H5_RADIUS, RIB_NARROW);
+        assert!(
+            (removed - one_rib).abs() < 1e-6 * vol,
+            "a clean regen filleted exactly the authored rib: removed {removed:.6}"
+        );
+    } else {
+        assert_eq!(needs_repair, 1, "one ref, one repair item");
+        assert!(removed.abs() < 1e-6, "refusal leaves the body unfilleted");
+    }
     wm.shutdown().await;
 }
 
@@ -3151,7 +3468,7 @@ async fn vfm5_lane_d_checkpoint_fallback_replay_must_not_bind_the_decoy() {
     rt.take_checkpoint_at_head().await;
     assert_eq!(rt.checkpoint_count(), 1, "checkpoint minted at step 1");
 
-    let (body, _anchor) = teleport_suffix(&wm, &mut rt, sid, dummy).await;
+    let (body, _anchor) = teleport_suffix(&wm, &mut rt, sid, dummy, "").await;
     teleport_edit(&mut rt, sid);
 
     // Kill the worker: the restart is a new process whose in-session checkpoint map
@@ -3295,4 +3612,21 @@ async fn plate_top_edge_fillet_survives_commit_and_reopen() {
         "identical volume after reopen"
     );
     wm.shutdown().await;
+}
+
+/// The canonical Extrude generator-slot fixture (`AcquireElementIds` stamps
+/// `generatorSlot`; `ResolveRefs` narrows with the gate open and falls back with
+/// it closed) replayed on the real worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn canonical_extrude_generator_slot_fixture_replays_on_real_worker() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    fixture_replay::replay(
+        &bin,
+        &root.join("protocol/fixtures/extrude_generator_slot.ndjson"),
+    )
+    .await;
 }

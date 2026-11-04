@@ -146,7 +146,8 @@ void classify_kind(session::TopologyBodyHistory& history,
                    const std::vector<TopoDS_Shape>& birth_roots,
                    TopAbs_ShapeEnum kind, const TopoDS_Shape& result,
                    BRepBuilderAPI_MakeShape& builder,
-                   BoundaryCompletion& completion) {
+                   BoundaryCompletion& completion,
+                   const GeneratorSlotMap* root_slots) {
     TopTools_IndexedMapOfShape before;
     TopTools_IndexedMapOfShape outputs;
     TopExp::MapShapes(before_shape, kind, before);
@@ -169,18 +170,59 @@ void classify_kind(session::TopologyBodyHistory& history,
         for (int i = 1; i <= roots.Extent(); ++i)
             mark_generated(builder.Generated(roots(i)), outputs, births);
     }
+    // Per output: how many same-kind roots image onto it (Modified/IsSame), the
+    // slot of the last such root, and whether any Generated path reaches it.
+    std::vector<int> root_images(outputs.Extent(), 0);
+    std::vector<const std::string*> root_slot(outputs.Extent(), nullptr);
+    std::vector<bool> generated_image(outputs.Extent(), false);
+    std::vector<bool> image_same(outputs.Extent(), false);  // the one image IsSame its root
     for (const TopoDS_Shape& root : birth_roots) {
+        mark_generated(builder.Generated(root), outputs, generated_image);
         mark_generated(builder.Generated(root), outputs, births);
         mark_generated(builder.Modified(root), outputs, births);
         const int output = outputs.FindIndex(root);
         if (output > 0) births[static_cast<std::size_t>(output - 1)] = true;
+        if (root_slots == nullptr || root.ShapeType() != kind) continue;
+        const int slotted = root_slots->FindIndex(root);
+        std::vector<std::size_t> images;
+        bool same_image = false;
+        const auto note_image = [&](const TopoDS_Shape& image) {
+            const int index = outputs.FindIndex(image);
+            if (index == 0) return;
+            const auto at = static_cast<std::size_t>(index - 1);
+            if (std::find(images.begin(), images.end(), at) == images.end())
+                images.push_back(at);
+        };
+        if (output > 0) {
+            note_image(root);
+            same_image = true;
+        }
+        for (const TopoDS_Shape& modified : builder.Modified(root))
+            if (!modified.IsSame(root)) note_image(modified);
+        // A root split into several images hands its slot to none of them: the
+        // slot would otherwise name every fragment, and a later consumed piece
+        // would leave a sibling as the only candidate.
+        for (const std::size_t at : images) {
+            ++root_images[at];
+            root_slot[at] = images.size() == 1 && slotted > 0
+                                ? &root_slots->FindFromIndex(slotted) : nullptr;
+            image_same[at] = same_image;
+        }
     }
     for (int i = 1; i <= outputs.Extent(); ++i) {
         auto& prior = predecessors[static_cast<std::size_t>(i - 1)];
         const TopoDS_Shape& output = outputs(i);
         if (births[static_cast<std::size_t>(i - 1)] && !prior.empty())
             history.conflicts.push_back({output});
-        else if (births[static_cast<std::size_t>(i - 1)]) history.births.push_back({output});
+        else if (births[static_cast<std::size_t>(i - 1)]) {
+            const auto at = static_cast<std::size_t>(i - 1);
+            const bool inherits = root_images[at] == 1 && !generated_image[at] &&
+                                  root_slot[at] != nullptr;
+            if (inherits)
+                history.births.push_back({output, *root_slot[at], session::SlotScope::Generator,
+                                          image_same[at]});
+            else history.births.push_back({output});
+        }
         else if (prior.size() == 1 && output.IsSame(prior.front()))
             history.survivors.push_back({prior.front(), output});
         else if (!prior.empty()) history.successors.push_back({std::move(prior), output});
@@ -225,7 +267,8 @@ session::TopologyBodyHistory modified_body_history(
     const std::string& body_id, const TopoDS_Shape& before,
     const TopoDS_Shape& result, BRepBuilderAPI_MakeShape& builder,
     const std::vector<TopoDS_Shape>& birth_roots,
-    const BoundaryCompletionCertificate* certificate) {
+    const BoundaryCompletionCertificate* certificate,
+    const GeneratorSlotMap* root_slots) {
     session::TopologyBodyHistory history;
     history.body_id = body_id;
     history.coverage = session::HistoryCoverage::Proven;
@@ -235,7 +278,8 @@ session::TopologyBodyHistory modified_body_history(
     // `kReferenceKinds` is FACE, EDGE, VERTEX in that order, and vertex
     // completion reads the edges completed by the pass before it.
     for (const TopAbs_ShapeEnum kind : kReferenceKinds) {
-        classify_kind(history, before, birth_roots, kind, result, builder, completion);
+        classify_kind(history, before, birth_roots, kind, result, builder, completion,
+                      root_slots);
     }
     if (certificate != nullptr) {
         WLOG_DEBUG("topology-history %s: boundary completion %s contour=%d witnesses=%d "

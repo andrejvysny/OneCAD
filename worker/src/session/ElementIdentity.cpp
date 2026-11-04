@@ -219,9 +219,16 @@ json acquire_ids(const PublishedStateSnapshot& state, const std::string& body_id
         // Hole created carries its producer slot, so the ref Rust freezes from
         // this evidence can never be scored against a congruent sibling hole.
         const OriginClaim origin = state.topology_owners->lookup(body_id, sub);
-        if (origin.state == OriginState::Known && !origin.slot.empty()) {
+        if (origin.state == OriginState::Known && !origin.slot.empty() &&
+            origin.scope == SlotScope::Point) {
             descriptor["originSlot"] = {{"recordId", origin.producer_record_id},
                                         {"slot", origin.slot}};
+        } else if (origin.state == OriginState::Known && !origin.slot.empty() &&
+                   origin.scope == SlotScope::Generator) {
+            // SCHEMA §7.5: Extrude-generated element; evidence for the gated
+            // generator-slot narrowing, never identity.
+            descriptor["generatorSlot"] = {{"recordId", origin.producer_record_id},
+                                           {"slot", origin.slot}};
         }
         json entry = {{"topoKey", topo},
                       {"kind", kind_name},
@@ -332,6 +339,9 @@ json ladder_resolution(const PublishedStateSnapshot& state, const json& ref,
     if (!ladder_ref.origin_slot.empty()) {
         filter = origin_slot_filter(*state.topology_owners, body_id, ladder_ref.origin_record_id,
                                     ladder_ref.origin_slot);
+    } else if (!ladder_ref.generator_slot.empty()) {
+        filter = generator_slot_filter(*state.topology_owners, body_id,
+                                       ladder_ref.generator_record_id, ladder_ref.generator_slot);
     }
     const auto results = em::resolve_descriptor_stage(body, body_id, {ladder_ref}, {}, filter);
     const em::LadderResolution* result = results.empty() ? nullptr : &results[0];

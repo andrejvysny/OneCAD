@@ -507,6 +507,12 @@ add_executable(test_hole_points test_hole_points.cpp)
 target_link_libraries(test_hole_points PRIVATE worker_core)
 add_test(NAME hole_points COMMAND test_hole_points)
 
+# Extrude generator-provenance slots (SlotScope::Generator) in the topology
+# ledger: face/edge attribution, uniqueness drops, Boolean Add inheritance.
+add_executable(test_generator_slots test_generator_slots.cpp)
+target_link_libraries(test_generator_slots PRIVATE worker_core)
+add_test(NAME generator_slots COMMAND test_generator_slots)
+
 add_executable(test_feature_pattern test_feature_pattern.cpp)
 target_link_libraries(test_feature_pattern PRIVATE worker_core)
 add_test(NAME feature_pattern COMMAND test_feature_pattern)
@@ -927,6 +933,16 @@ add_test(
     COMMAND worker_harness
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/hole_points.ndjson
+)
+# SCHEMA §7.3/§7.5/§10 Extrude generator slots: AcquireElementIds returns
+# `descriptor.generatorSlot` for a V3 profile (none for legacy rect/circle), and
+# ResolveRefs narrows by it only while the body still holds the producer's
+# Generator claims (gate open); after a TransformBody it falls back.
+add_test(
+    NAME canonical_extrude_generator_slot
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/extrude_generator_slot.ndjson
 )
 add_test(
     NAME canonical_feature_pattern_malformed

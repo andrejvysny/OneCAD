@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -17,6 +18,12 @@ namespace onecad::session {
 
 enum class OriginState { Known, Ambiguous, Unknown };
 
+// Namespace of an OriginClaim slot. Point = Hole `points[].id` (SCHEMA §7.3);
+// Generator = deterministic profile-derived slot (Extrude side/cap/edge). The
+// scopes never compare equal so a Hole originSlot filter cannot admit a
+// Generator claim that happens to share a slot string.
+enum class SlotScope { Point, Generator };
+
 struct OriginClaim {
     OriginState state = OriginState::Unknown;
     std::string producer_record_id;
@@ -26,6 +33,12 @@ struct OriginClaim {
     // slot keep the producer and drop the slot, so producer-level consumers
     // (FeaturePattern) see exactly what they saw before slots existed.
     std::string slot;
+    // Meaningful only when `slot` is non-empty.
+    SlotScope scope = SlotScope::Point;
+    // Generator scope: the shape was born at the producer or carried only by
+    // IsSame survivors. A Modified (trimmed/split-continued) image keeps the slot
+    // but is not pristine; narrowing by that slot is withheld (SCHEMA §10).
+    bool pristine = true;
 };
 
 // Merge two rows of ONE shape: producer disagreement is Ambiguous; slot
@@ -34,7 +47,8 @@ inline OriginClaim merge_origin(const OriginClaim& a, const OriginClaim& b) {
     if (a.state != b.state || a.producer_record_id != b.producer_record_id)
         return {OriginState::Ambiguous, {}, {}};
     OriginClaim merged = a;
-    if (merged.slot != b.slot) merged.slot.clear();
+    if (merged.slot != b.slot || merged.scope != b.scope) merged.slot.clear();
+    merged.pristine = a.pristine && b.pristine;
     return merged;
 }
 
@@ -102,6 +116,31 @@ public:
         }
     }
 
+    // Body-level Generator slot uniqueness: a (producer, slot) that more than one
+    // effective IsSame class of `body_id` holds names no single element, so the
+    // slot is cleared on every row of those classes. A cleared claim stays Known
+    // for its producer; merge_origin/inherit_origin only ever drop slots, so a
+    // cleared slot cannot come back. Point (Hole) slots are not touched.
+    void clear_duplicate_generator_slots(const std::string& body_id) {
+        const EffectiveClaims claims = effective_claims(body_id);
+        std::map<std::pair<std::string, std::string>, int> held;
+        const auto is_slotted = [](const OriginClaim& claim) {
+            return claim.state == OriginState::Known && claim.scope == SlotScope::Generator &&
+                   !claim.slot.empty();
+        };
+        for (int i = 1; i <= claims.Extent(); ++i) {
+            const OriginClaim& claim = claims.FindFromIndex(i);
+            if (is_slotted(claim)) ++held[{claim.producer_record_id, claim.slot}];
+        }
+        for (OwnedShape& entry : entries_) {
+            if (entry.body_id != body_id || entry.shape.IsNull()) continue;
+            const OriginClaim* claim = claims.Seek(entry.shape);
+            if (claim != nullptr && is_slotted(*claim) &&
+                held[{claim->producer_record_id, claim->slot}] > 1)
+                entry.claim.slot.clear();
+        }
+    }
+
     void add(OwnedShape entry) { entries_.push_back(std::move(entry)); }
     bool contains(const std::string& body_id, const TopoDS_Shape& shape) const {
         return std::any_of(entries_.begin(), entries_.end(), [&](const OwnedShape& entry) {
@@ -127,7 +166,12 @@ struct TopologySurvivor { TopoDS_Shape before; TopoDS_Shape after; };
 struct TopologySuccessor { std::vector<TopoDS_Shape> before; TopoDS_Shape after; };
 // `slot` names the producer sub-feature that created the shape (Hole point id);
 // empty when the operation makes no per-slot claim.
-struct TopologyBirth { TopoDS_Shape after; std::string slot = {}; };
+struct TopologyBirth {
+    TopoDS_Shape after;
+    std::string slot = {};
+    SlotScope scope = SlotScope::Point;
+    bool pristine = true;
+};
 struct TopologyConflict { TopoDS_Shape after; };
 
 enum class HistoryCoverage { Proven, Unproven };
@@ -197,17 +241,20 @@ inline void apply_topology_history(TopologyOwnerLedger& ledger, const std::strin
                        inherit_origin(prior, history.body_id, {survivor.before}));
         }
         for (const TopologySuccessor& successor : history.successors) {
-            add_origin(classified, history.body_id, successor.after,
-                       inherit_origin(prior, history.body_id, successor.before));
+            // Modified lineage: the slot carries on but is no longer pristine.
+            OriginClaim claim = inherit_origin(prior, history.body_id, successor.before);
+            claim.pristine = false;
+            add_origin(classified, history.body_id, successor.after, std::move(claim));
         }
         for (const TopologyBirth& birth : history.births) {
             add_origin(classified, history.body_id, birth.after,
-                       {OriginState::Known, op_id, birth.slot});
+                       {OriginState::Known, op_id, birth.slot, birth.scope, birth.pristine});
         }
         for (const TopologyConflict& conflict : history.conflicts) {
             add_origin(classified, history.body_id, conflict.after,
                        {OriginState::Ambiguous, {}, {}});
         }
+        classified.clear_duplicate_generator_slots(history.body_id);
         for (const OwnedShape& entry : classified.entries()) ledger.add(entry);
     }
 }
@@ -225,7 +272,40 @@ inline std::function<bool(const TopoDS_Shape&)> origin_slot_filter(
     return [claims, producer_record_id, slot](const TopoDS_Shape& candidate) {
         const OriginClaim* claim = claims->Seek(candidate);
         return claim != nullptr && claim->state == OriginState::Known &&
-               claim->producer_record_id == producer_record_id && claim->slot == slot;
+               claim->producer_record_id == producer_record_id && claim->slot == slot &&
+               claim->scope == SlotScope::Point;
+    };
+}
+
+// Ladder admissibility for a ref whose frozen descriptor names an Extrude
+// generator slot (SCHEMA §7.5 `generatorSlot`). GATED: when no claim on the body
+// is a Known Generator-scope claim by `record_id` (provenance lost — a later
+// Boolean/Shell/Transform erased it, or the record is not live) the result is an
+// EMPTY function, i.e. no narrowing and today's pool. Otherwise only shapes
+// whose claim is Known Generator-scope with that producer and slot are admitted.
+inline std::function<bool(const TopoDS_Shape&)> generator_slot_filter(
+    const TopologyOwnerLedger& ledger, const std::string& body_id,
+    const std::string& record_id, const std::string& slot) {
+    if (slot.empty()) return {};
+    auto claims = std::make_shared<TopologyOwnerLedger::EffectiveClaims>(
+        ledger.effective_claims(body_id));
+    const auto is_generated = [record_id](const OriginClaim& claim) {
+        return claim.state == OriginState::Known && claim.scope == SlotScope::Generator &&
+               claim.producer_record_id == record_id && !claim.slot.empty();
+    };
+    bool gate_open = false;
+    for (int i = 1; i <= claims->Extent() && !gate_open; ++i)
+        gate_open = is_generated(claims->FindFromIndex(i));
+    if (!gate_open) return {};
+    // Narrow only on pristine holders: a trimmed continuation is not proof of
+    // lineage, so any non-pristine holder leaves the HEAD path to decide.
+    for (int i = 1; i <= claims->Extent(); ++i) {
+        const OriginClaim& claim = claims->FindFromIndex(i);
+        if (is_generated(claim) && claim.slot == slot && !claim.pristine) return {};
+    }
+    return [claims, is_generated, slot](const TopoDS_Shape& candidate) {
+        const OriginClaim* claim = claims->Seek(candidate);
+        return claim != nullptr && is_generated(*claim) && claim->slot == slot;
     };
 }
 

@@ -451,6 +451,12 @@ LadderRef ladder_ref_from_input(const nlohmann::json& input, const std::string& 
                 r.origin_record_id = origin["recordId"].get<std::string>();
                 r.origin_slot = origin["slot"].get<std::string>();
             }
+            const nlohmann::json generator = descriptor.value("generatorSlot", nlohmann::json());
+            if (generator.is_object() && generator.value("recordId", nlohmann::json()).is_string() &&
+                generator.value("slot", nlohmann::json()).is_string()) {
+                r.generator_record_id = generator["recordId"].get<std::string>();
+                r.generator_slot = generator["slot"].get<std::string>();
+            }
         }
     }
     // Anchor (world point narrows a descriptor tie / is the sole evidence otherwise).

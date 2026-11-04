@@ -26,11 +26,14 @@
 
 #include "modeling/BooleanMode.h"
 #include "kernel/validation/ShapeAudit.h"
+#include "loop/FaceBuilder.h"
 #include "nlohmann/json.hpp"
 #include "ops/OpTypes.h"  // OpContext / OpOutcome / session::BodyEvent
 #include "util/Cancel.h"
 
 namespace onecad::ops {
+
+using ProfileEdgeLabel = onecad::core::loop::ProfileEdgeLabel;
 
 // A dimensional param: bare number OR {value, expr?} object (SCHEMA §7.3).
 double read_scalar(const nlohmann::json& params, const char* key, double dflt);
@@ -129,7 +132,11 @@ std::optional<TopoDS_Face> build_profile_face(
     const nlohmann::json& sketch_params, const std::string& region_id,
     std::optional<int> region_identity_version, std::string& err,
     std::vector<nlohmann::json>* diagnostics_out = nullptr,
-    const std::optional<std::array<double, 2>>& region_anchor = std::nullopt);
+    const std::optional<std::array<double, 2>>& region_anchor = std::nullopt,
+    // Generator-provenance evidence: one label per profile edge built from a
+    // sketch entity, with DOCUMENT (wire) entity ids. Labels whose internal id has
+    // no wire mapping are dropped. Left untouched on failure.
+    std::vector<ProfileEdgeLabel>* labels_out = nullptr);
 
 // Compatibility overload for direct V1 callers and fixtures.
 std::optional<TopoDS_Face> build_profile_face(const nlohmann::json& sketch_params,

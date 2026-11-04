@@ -1,0 +1,60 @@
+# CANONICAL §7.3/§7.5/§10 fixture — Extrude generator slots (2026-11-04).
+#
+# WHAT IS PINNED HERE. The protocol shape a reader branches on; the topology
+# rules (split clears slots, legacy emits none, FeaturePattern rewrite, the
+# gate) are measured in worker/tests/test_generator_slots.cpp. The harness can
+# only subset-match, so ABSENCE of `generatorSlot` is shown behaviourally: a
+# slotted ref on a legacy body falls back to the ordinary pool.
+#   ROUND 1 — V3 rect extrude `op1` (regionIdentityVersion 3), ACCEPTED.
+#   ROUND 2 — AcquireElementIds on its top +x edge returns the LITERAL
+#             descriptor.generatorSlot {recordId op1, slot "edge:cap:+|side:e1"}.
+#   ROUND 3 — ResolveRefs, gate OPEN: a ref carrying that slot whose anchor
+#             sits on the congruent BOTTOM edge autoBinds the slotted top edge
+#             (e:4). The same ref without the slot is a NeedsRepair tie.
+#   ROUND 4 — a LEGACY rect (`op3`) and a LEGACY circle (`op5`), no
+#             regionIdentityVersion, ACCEPTED. Their edges are acquired without
+#             a slot, and the same slotted ref (their own record id) is NOT
+#             narrowed: NeedsRepair, as with no slot at all.
+#   ROUND 5 — TransformBody on `body_op1` erases its provenance (gate CLOSED);
+#             the slotted ref of ROUND 3 now falls back to the ordinary pool
+#             and is NeedsRepair.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_gs","documentRevision":0,"workerEpoch":5,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":100,"documentRevision":1,"workerEpoch":5,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"targetStep":1,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk1","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[30,0]},{"id":"e2","type":"Line","p0":[30,0],"p1":[30,10]},{"id":"e3","type":"Line","p0":[30,10],"p1":[0,10]},{"id":"e4","type":"Line","p0":[0,10],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"params":{"sketchId":"sk1","regionId":"r_d3ce8ad2ec7f2fa9","regionIdentityVersion":3,"distance":10.0,"extrudeMode":"Blind","booleanMode":"NewBody"}}]}}}
+{"expect":{"v":1,"t":"event","event":"planStep","id":2,"stepIndex":0,"jobId":100,"payload":{"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"event","event":"planStep","id":2,"stepIndex":1,"jobId":100,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":100,"result":{"planPrepared":true,"lastValidStep":1,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":100,"documentRevision":1,"workerEpoch":5}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":100,"result":{"accepted":true,"snapshotId":1,"documentRevision":1}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"AcquireElementIds","args":{"bodyId":"body_op1","picks":[{"kind":"edge","anchor":{"worldPoint":[0,15,10]}}]}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"ids":[{"kind":"edge","bodyId":"body_op1","topoKey":"e:4","descriptor":{"generatorSlot":{"recordId":"op1","slot":"edge:cap:+|side:e1"}}}]}}}
+{"send":{"v":1,"t":"req","id":5,"verb":"ResolveRefs","args":{"snapshotId":1,"refs":[{"refId":"slotted","primary":{"bodyId":"body_op1","elementId":"el_slotted","kind":"edge"},"intent":{"version":1,"kind":"edge","descriptor":{"adjacencyHash":"a4c4245403ebe8df","center":[0.0,15.0,10.0],"curveType":0,"hasNormal":false,"hasTangent":true,"magnitude":30.0,"normal":[0.0,0.0,1.0],"outward":[0.7071067811865475,0.0,0.7071067811865475],"shapeType":6,"size":30.000000200000002,"surfaceType":10,"tangent":[0.0,1.0,0.0],"generatorSlot":{"recordId":"op1","slot":"edge:cap:+|side:e1"}}},"anchor":{"worldPoint":[0,15,0]}}]}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"resolutions":[{"refId":"slotted","bodyId":"body_op1","outcome":"autoBind","topoKey":"e:4"}]}}}
+{"send":{"v":1,"t":"req","id":6,"verb":"ResolveRefs","args":{"snapshotId":1,"refs":[{"refId":"unslotted","primary":{"bodyId":"body_op1","elementId":"el_unslotted","kind":"edge"},"intent":{"version":1,"kind":"edge","descriptor":{"adjacencyHash":"a4c4245403ebe8df","center":[0.0,15.0,10.0],"curveType":0,"hasNormal":false,"hasTangent":true,"magnitude":30.0,"normal":[0.0,0.0,1.0],"outward":[0.7071067811865475,0.0,0.7071067811865475],"shapeType":6,"size":30.000000200000002,"surfaceType":10,"tangent":[0.0,1.0,0.0]}},"anchor":{"worldPoint":[0,15,0]}}]}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"result":{"resolutions":[{"refId":"unslotted","bodyId":"body_op1","outcome":"needsRepair","needsRepair":{"reason":"ambiguous"}}]}}}
+{"send":{"v":1,"t":"req","id":7,"verb":"ExecutePlan","args":{"jobId":101,"documentRevision":2,"workerEpoch":5,"expectedBaseHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],"targetStep":5,"ops":[{"opType":"Sketch","opId":"op2","stepIndex":2,"params":{"sketchId":"sk2","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[100,0],"p1":[130,0]},{"id":"e2","type":"Line","p0":[130,0],"p1":[130,10]},{"id":"e3","type":"Line","p0":[130,10],"p1":[100,10]},{"id":"e4","type":"Line","p0":[100,10],"p1":[100,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op3","stepIndex":3,"inputs":[{"primary":{"bodyId":"","elementId":"sk2.region.r0","kind":"face"}}],"params":{"sketchId":"sk2","distance":10.0,"extrudeMode":"Blind","booleanMode":"NewBody"}},{"opType":"Sketch","opId":"op4","stepIndex":4,"params":{"sketchId":"sk3","plane":{"kind":"XY"},"entities":[{"id":"c1","type":"Circle","center":[200,5],"radius":4.0}],"constraints":[]}},{"opType":"Extrude","opId":"op5","stepIndex":5,"inputs":[{"primary":{"bodyId":"","elementId":"sk3.region.r0","kind":"face"}}],"params":{"sketchId":"sk3","distance":10.0,"extrudeMode":"Blind","booleanMode":"NewBody"}}]}}}
+{"expect":{"v":1,"t":"event","event":"planStep","id":7,"stepIndex":2,"jobId":101}}
+{"expect":{"v":1,"t":"event","event":"planStep","id":7,"stepIndex":3,"jobId":101,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op3"}]}}}
+{"expect":{"v":1,"t":"event","event":"planStep","id":7,"stepIndex":4,"jobId":101}}
+{"expect":{"v":1,"t":"event","event":"planStep","id":7,"stepIndex":5,"jobId":101,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op5"}]}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"jobId":101,"result":{"planPrepared":true,"lastValidStep":5,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":8,"verb":"AcceptPrepared","args":{"jobId":101,"documentRevision":2,"workerEpoch":5}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"jobId":101,"result":{"accepted":true,"snapshotId":2,"documentRevision":2}}}
+{"send":{"v":1,"t":"req","id":9,"verb":"AcquireElementIds","args":{"bodyId":"body_op3","picks":[{"kind":"edge","anchor":{"worldPoint":[0,115,10]}}]}}}
+{"expect":{"v":1,"t":"resp","id":9,"ok":true,"result":{"ids":[{"kind":"edge","bodyId":"body_op3","topoKey":"e:4"}]}}}
+{"send":{"v":1,"t":"req","id":10,"verb":"AcquireElementIds","args":{"bodyId":"body_op5","picks":[{"kind":"edge","anchor":{"worldPoint":[-5,204,10]}}]}}}
+{"expect":{"v":1,"t":"resp","id":10,"ok":true,"result":{"ids":[{"kind":"edge","bodyId":"body_op5","topoKey":"e:3"}]}}}
+{"send":{"v":1,"t":"req","id":11,"verb":"ResolveRefs","args":{"snapshotId":2,"refs":[{"refId":"legacy_rect","primary":{"bodyId":"body_op3","elementId":"el_legacy_rect","kind":"edge"},"intent":{"version":1,"kind":"edge","descriptor":{"adjacencyHash":"a4c4245403ebe8df","center":[0.0,115.0,10.0],"curveType":0,"hasNormal":false,"hasTangent":true,"magnitude":30.0,"normal":[0.0,0.0,1.0],"outward":[0.7071067811865475,0.0,0.7071067811865475],"shapeType":6,"size":30.000000199999988,"surfaceType":10,"tangent":[0.0,1.0,0.0],"generatorSlot":{"recordId":"op3","slot":"edge:cap:+|side:e1"}}},"anchor":{"worldPoint":[0,115,0]}}]}}}
+{"expect":{"v":1,"t":"resp","id":11,"ok":true,"result":{"resolutions":[{"refId":"legacy_rect","bodyId":"body_op3","outcome":"needsRepair","needsRepair":{"reason":"ambiguous"}}]}}}
+{"send":{"v":1,"t":"req","id":12,"verb":"ResolveRefs","args":{"snapshotId":2,"refs":[{"refId":"legacy_circle","primary":{"bodyId":"body_op5","elementId":"el_legacy_circle","kind":"edge"},"intent":{"version":1,"kind":"edge","descriptor":{"adjacencyHash":"97dcac9531ebe346","center":[-5.0,200.0,10.0],"curveType":1,"hasNormal":false,"hasTangent":true,"magnitude":25.132741228718345,"normal":[0.0,0.0,1.0],"outward":[-0.7071067811865475,8.659560562354933e-17,0.7071067811865475],"shapeType":6,"size":11.313708781827465,"surfaceType":10,"tangent":[-1.2246467991473532e-16,-1.0,0.0],"generatorSlot":{"recordId":"op5","slot":"edge:cap:+|side:c1"}}},"anchor":{"worldPoint":[-5,200,0]}}]}}}
+{"expect":{"v":1,"t":"resp","id":12,"ok":true,"result":{"resolutions":[{"refId":"legacy_circle","bodyId":"body_op5","outcome":"needsRepair","needsRepair":{"reason":"ambiguous"}}]}}}
+{"send":{"v":1,"t":"req","id":13,"verb":"ExecutePlan","args":{"jobId":102,"documentRevision":3,"workerEpoch":5,"expectedBaseHash":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","prefixHashes":["1111111111111111111111111111111111111111111111111111111111111111"],"targetStep":6,"ops":[{"opType":"TransformBody","opId":"op6","stepIndex":6,"inputs":[],"params":{"targets":["body_op1"],"translate":[0,0,0]}}]}}}
+{"expect":{"v":1,"t":"event","event":"planStep","id":13,"stepIndex":6,"jobId":102,"payload":{"bodyEvents":[{"kind":"modified","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"resp","id":13,"ok":true,"jobId":102,"result":{"planPrepared":true,"lastValidStep":6,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":14,"verb":"AcceptPrepared","args":{"jobId":102,"documentRevision":3,"workerEpoch":5}}}
+{"expect":{"v":1,"t":"resp","id":14,"ok":true,"jobId":102,"result":{"accepted":true,"snapshotId":3,"documentRevision":3}}}
+{"send":{"v":1,"t":"req","id":15,"verb":"ResolveRefs","args":{"snapshotId":3,"refs":[{"refId":"gate_closed","primary":{"bodyId":"body_op1","elementId":"el_gate_closed","kind":"edge"},"intent":{"version":1,"kind":"edge","descriptor":{"adjacencyHash":"a4c4245403ebe8df","center":[0.0,15.0,10.0],"curveType":0,"hasNormal":false,"hasTangent":true,"magnitude":30.0,"normal":[0.0,0.0,1.0],"outward":[0.7071067811865475,0.0,0.7071067811865475],"shapeType":6,"size":30.000000200000002,"surfaceType":10,"tangent":[0.0,1.0,0.0],"generatorSlot":{"recordId":"op1","slot":"edge:cap:+|side:e1"}}},"anchor":{"worldPoint":[0,15,0]}}]}}}
+{"expect":{"v":1,"t":"resp","id":15,"ok":true,"result":{"resolutions":[{"refId":"gate_closed","bodyId":"body_op1","outcome":"needsRepair","needsRepair":{"reason":"ambiguous"}}]}}}
+{"send":{"v":1,"t":"req","id":16,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":16,"ok":true,"result":{"goodbye":true}}}

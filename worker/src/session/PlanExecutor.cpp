@@ -251,18 +251,34 @@ void resolve_input_refs(ScratchJob& job, const json& op, const std::string& op_i
         // unslotted refs (two refs never bind one shape) and keeps input order.
         std::vector<em::CandidateFilter> slot_filters(refs.size());
         std::map<std::pair<std::string, std::string>, em::CandidateFilter> by_origin;
+        // Precedence: originSlot > generatorSlot (gated; an empty filter means
+        // unfiltered) > none. The two caches are separate key spaces.
+        std::map<std::pair<std::string, std::string>, em::CandidateFilter> by_generator;
         for (std::size_t k = 0; k < refs.size(); ++k) {
-            if (refs[k].origin_slot.empty()) continue;
-            const std::pair<std::string, std::string> origin{refs[k].origin_record_id,
-                                                             refs[k].origin_slot};
-            auto it = by_origin.find(origin);
-            if (it == by_origin.end()) {
-                it = by_origin
-                         .emplace(origin, origin_slot_filter(job.topology_owners, bid,
-                                                             origin.first, origin.second))
-                         .first;
+            if (!refs[k].origin_slot.empty()) {
+                const std::pair<std::string, std::string> origin{refs[k].origin_record_id,
+                                                                 refs[k].origin_slot};
+                auto it = by_origin.find(origin);
+                if (it == by_origin.end()) {
+                    it = by_origin
+                             .emplace(origin, origin_slot_filter(job.topology_owners, bid,
+                                                                 origin.first, origin.second))
+                             .first;
+                }
+                slot_filters[k] = it->second;
+            } else if (!refs[k].generator_slot.empty()) {
+                const std::pair<std::string, std::string> generator{refs[k].generator_record_id,
+                                                                    refs[k].generator_slot};
+                auto it = by_generator.find(generator);
+                if (it == by_generator.end()) {
+                    it = by_generator
+                             .emplace(generator,
+                                      generator_slot_filter(job.topology_owners, bid,
+                                                            generator.first, generator.second))
+                             .first;
+                }
+                slot_filters[k] = it->second;
             }
-            slot_filters[k] = it->second;
         }
         const std::vector<em::LadderResolution> resolutions =
             em::resolve_descriptor_stage(rec->geom, bid, refs, edit, admissible, slot_filters);

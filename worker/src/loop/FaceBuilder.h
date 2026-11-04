@@ -27,6 +27,18 @@
 namespace onecad::core::loop {
 
 /**
+ * @brief Where one sketch entity's boundary edge sits in 3D
+ *
+ * `baseEntityId` is the loop entity id with any "#seg" split suffix removed, in
+ * the sketch's own (translator-internal) id space. Consumers use `midpoint` to
+ * find the extruded wall that grew from this edge.
+ */
+struct ProfileEdgeLabel {
+    gp_Pnt midpoint;
+    sk::EntityID baseEntityId;
+};
+
+/**
  * @brief Result of face building operation
  */
 struct FaceBuildResult {
@@ -41,6 +53,10 @@ struct FaceBuildResult {
 
     /// Warnings (non-fatal issues)
     std::vector<std::string> warnings;
+
+    /// One label per wire edge built from a sketch entity (outer + holes).
+    /// The polygon fallback records none.
+    std::vector<ProfileEdgeLabel> edgeLabels;
 };
 
 /**
@@ -58,6 +74,9 @@ struct WireBuildResult {
 
     /// Warnings (non-fatal issues)
     std::vector<std::string> warnings;
+
+    /// See FaceBuildResult::edgeLabels.
+    std::vector<ProfileEdgeLabel> edgeLabels;
 };
 
 /**

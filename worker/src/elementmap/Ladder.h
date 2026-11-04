@@ -52,6 +52,12 @@ struct LadderRef {
     // with it; the ladder itself never reads them.
     std::string origin_record_id;
     std::string origin_slot;
+    // Frozen `intent.descriptor.generatorSlot` (SCHEMA §7.5): the Extrude record
+    // and profile-derived slot (`side:<entityId>`, `cap:*`, `edge:<a>|<b>`) the
+    // element was generated from. Evidence only; callers narrow with it, the
+    // ladder never reads it.
+    std::string generator_record_id;
+    std::string generator_slot;
 };
 
 // One scored candidate sub-shape (evidence for the NeedsRepair payload).

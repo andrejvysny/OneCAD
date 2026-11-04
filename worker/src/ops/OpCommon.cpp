@@ -440,7 +440,8 @@ std::optional<TopoDS_Face> build_profile_face(
     const json& sketch_params, const std::string& region_id,
     std::optional<int> region_identity_version, std::string& err,
     std::vector<json>* diagnostics_out,
-    const std::optional<std::array<double, 2>>& region_anchor) {
+    const std::optional<std::array<double, 2>>& region_anchor,
+    std::vector<ProfileEdgeLabel>* labels_out) {
     // Sketch params → live Sketch (plane + entities + constraints). Mirrors
     // RegenerationEngine.cpp:1639-1667 buildFaceFromSketchRegion, but the sketch
     // is supplied inline in the plan (deterministic replay) rather than looked up
@@ -584,6 +585,17 @@ std::optional<TopoDS_Face> build_profile_face(
     if (!fr.success || fr.face.IsNull()) {
         err = "profile: " + (fr.errorMessage.empty() ? std::string("face build failed") : fr.errorMessage);
         return std::nullopt;
+    }
+    // Legacy profiles (no regionIdentityVersion 2/3) carry no labels, so they
+    // stamp no generator slots on any path (closed-curve, whole-entity, polygon).
+    if (labels_out != nullptr) {
+        labels_out->clear();
+        if (!exact_identity) return fr.face;
+        for (const ProfileEdgeLabel& label : fr.edgeLabels) {
+            const auto it = tr.index.internal_edge_to_wire.find(label.baseEntityId);
+            if (it == tr.index.internal_edge_to_wire.end()) continue;
+            labels_out->push_back({label.midpoint, it->second});
+        }
     }
     return fr.face;
 }

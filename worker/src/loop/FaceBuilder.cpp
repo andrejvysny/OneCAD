@@ -11,6 +11,7 @@
 #include "../sketch/SketchLine.h"
 #include "../sketch/SketchPoint.h"
 
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
@@ -70,6 +71,16 @@ bool normalize(sk::Vec3d& v) {
     v.y /= len;
     v.z /= len;
     return true;
+}
+
+sk::EntityID baseEdgeId(const sk::EntityID& entityId);
+
+// Mid-parameter point of a built edge; the wall grown from it contains this
+// point on the sketch plane regardless of later reshaping of the prism.
+ProfileEdgeLabel labelFor(const TopoDS_Edge& edge, const sk::EntityID& entityId) {
+    BRepAdaptor_Curve curve(edge);
+    const double mid = 0.5 * (curve.FirstParameter() + curve.LastParameter());
+    return {curve.Value(mid), baseEdgeId(entityId)};
 }
 
 sk::EntityID baseEdgeId(const sk::EntityID& entityId) {
@@ -525,6 +536,7 @@ WireBuildResult FaceBuilder::buildWire(const Loop& loop, const sk::Sketch& sketc
                                           fragment.baseEntityId;
                     return result;
                 }
+                result.edgeLabels.push_back(labelFor(*edge, fragment.baseEntityId));
                 wireMaker.Add(*edge);
                 if (wireMaker.Error() != BRepBuilderAPI_WireDone) {
                     result.errorMessage = std::string("Analytic wire build reported: ") +
@@ -538,6 +550,7 @@ WireBuildResult FaceBuilder::buildWire(const Loop& loop, const sk::Sketch& sketc
                 result.errorMessage = "Failed to create edge for entity: " + *closedBaseId;
                 return result;
             }
+            result.edgeLabels.push_back(labelFor(edge.value(), *closedBaseId));
             wireMaker.Add(edge.value());
             if (wireMaker.Error() != BRepBuilderAPI_WireDone) {
                 result.warnings.push_back(
@@ -554,6 +567,7 @@ WireBuildResult FaceBuilder::buildWire(const Loop& loop, const sk::Sketch& sketc
                     return result;
                 }
 
+                result.edgeLabels.push_back(labelFor(edge.value(), entityId));
                 wireMaker.Add(edge.value());
                 if (wireMaker.Error() != BRepBuilderAPI_WireDone) {
                     result.warnings.push_back(
@@ -651,6 +665,7 @@ FaceBuildResult FaceBuilder::buildFace(const Face& face, const sk::Sketch& sketc
     result.warnings.insert(result.warnings.end(),
                            outerWireResult.warnings.begin(),
                            outerWireResult.warnings.end());
+    result.edgeLabels = outerWireResult.edgeLabels;
 
     try {
         // Create face from outer wire
@@ -687,6 +702,9 @@ FaceBuildResult FaceBuilder::buildFace(const Face& face, const sk::Sketch& sketc
             result.warnings.insert(result.warnings.end(),
                                    holeWireResult.warnings.begin(),
                                    holeWireResult.warnings.end());
+            result.edgeLabels.insert(result.edgeLabels.end(),
+                                     holeWireResult.edgeLabels.begin(),
+                                     holeWireResult.edgeLabels.end());
 
             BRepBuilderAPI_MakeFace faceWithHole(topoFace);
             faceWithHole.Add(holeWireResult.wire);

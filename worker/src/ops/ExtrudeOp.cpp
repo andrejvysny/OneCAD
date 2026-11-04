@@ -2,6 +2,7 @@
 // (:774-1059) incl. ToFace/ToNext end conditions (:858-894) + draft (:977-1013).
 #include "ops/ExtrudeOp.h"
 #include "ops/TopologyHistory.h"
+#include "ops/GeneratorSlots.h"
 
 #include <algorithm>
 #include <array>
@@ -977,10 +978,11 @@ OpOutcome extrude_impl(OpContext& ctx, const json& op, const std::string& op_id,
         return OpOutcome::fail("OP_FAILED", "Extrude: " + anchor_error);
     }
     std::string perr;
+    std::vector<ProfileEdgeLabel> profile_labels;
     std::optional<TopoDS_Face> profile =
         build_profile_face(*sketch_params, read_str(params, "regionId"),
                            region_identity_version, perr, &profile_diagnostics,
-                           region_anchor);
+                           region_anchor, &profile_labels);
     if (!profile) return OpOutcome::fail("OP_FAILED", perr);
 
     gp_Pln plane;
@@ -1251,6 +1253,13 @@ OpOutcome extrude_impl(OpContext& ctx, const json& op, const std::string& op_id,
 
     OpOutcome out;
 
+    // Generator provenance of the FINAL tool (ledger only, SlotScope::Generator).
+    // Plane origin + extrude direction are the sketch plane's, so Symmetric and
+    // two-direction caps fall out as cap:+ / cap:-.
+    const GeneratorSlotMap generator_slots = attribute_extrude_slots(
+        tool_shape, profile_labels, origin, direction,
+        kernel::validation::precision_of(tool_shape).authoring_resolution());
+
     // --- boolean mode dispatch ---
     if (*boolean_mode == app::BooleanMode::NewBody) {
         // WP-E: a COMMITTED NewBody is held to Tier B (closed manifold, sliver bound,
@@ -1272,7 +1281,14 @@ OpOutcome extrude_impl(OpContext& ctx, const json& op, const std::string& op_id,
         ctx.bodies.create(bid, op_id, tool_shape);
         out.body_events.push_back({"created", bid, {}});  // no rankKey: no ordinal ranked
         out.body_ids.push_back(bid);
-        out.topology_history.push_back(created_body_history(bid, tool_shape));
+        session::TopologyBodyHistory born = created_body_history(bid, tool_shape);
+        for (session::TopologyBirth& birth : born.births) {
+            const int index = generator_slots.FindIndex(birth.after);
+            if (index == 0) continue;
+            birth.slot = generator_slots.FindFromIndex(index);
+            birth.scope = session::SlotScope::Generator;
+        }
+        out.topology_history.push_back(std::move(born));
         return out;  // new body: no pre-existing partition entries → empty delta
     }
 
@@ -1335,7 +1351,8 @@ OpOutcome extrude_impl(OpContext& ctx, const json& op, const std::string& op_id,
     publish_boolean_result(ctx, op_id, target_id, br.shape, builder.get(), out);
     if (builder && ctx.bodies.get(target_id)) {
         out.topology_history.push_back(modified_body_history(
-            target_id, old_target, br.shape, *builder, referenceable_topology(tool_shape)));
+            target_id, old_target, br.shape, *builder, referenceable_topology(tool_shape),
+            nullptr, &generator_slots));
     }
     return out;
 }

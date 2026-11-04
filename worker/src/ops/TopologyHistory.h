@@ -5,6 +5,7 @@
 
 #include <vector>
 
+#include "ops/GeneratorSlots.h"
 #include "session/TopologyOrigins.h"
 
 namespace onecad::ops {
@@ -35,7 +36,13 @@ session::TopologyBodyHistory modified_body_history(
     const std::string& body_id, const TopoDS_Shape& before,
     const TopoDS_Shape& result, BRepBuilderAPI_MakeShape& builder,
     const std::vector<TopoDS_Shape>& birth_roots = {},
-    const BoundaryCompletionCertificate* certificate = nullptr);
+    const BoundaryCompletionCertificate* certificate = nullptr,
+    // Generator slots of the tool's own topology (Extrude). An output of
+    // `birth_roots` inherits a root's slot ONLY when it is the Modified/IsSame
+    // image of exactly one root of its kind and that root is slotted; Generated
+    // images, multi-root outputs and `before` shapes get none. Null changes
+    // nothing.
+    const GeneratorSlotMap* root_slots = nullptr);
 
 std::vector<TopoDS_Shape> referenceable_topology(const TopoDS_Shape& shape);
 

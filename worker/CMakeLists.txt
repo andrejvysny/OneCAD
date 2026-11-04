@@ -156,6 +156,7 @@ add_library(worker_core STATIC
     src/ops/OpCommon.cpp
     src/ops/ExtrudeOp.cpp
     src/ops/TopologyHistory.cpp
+    src/ops/GeneratorSlots.cpp
     src/ops/BooleanOp.cpp
     src/ops/BooleanParticipation.cpp
     # --- W-WP6: new OCCT ops (Revolve / Fillet / Chamfer) + STEP IO ---
