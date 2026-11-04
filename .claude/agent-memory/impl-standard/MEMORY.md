@@ -28,3 +28,4 @@
 - [Component instances service](component-instances-service-gotchas.md) — upgrade/reset: merge-vs-remove, stale-plan checks, volume effects
 - [Placement gesture](placement-gesture-gotchas.md) — Placed inbox, one classify in flight, plate harness world-axis/modifier traps
 - [Create Component authoring](create-component-authoring-gotchas.md) — config/static_save/attachment_from_pick: struct-literal blast radius, id forms, variable-driven fixture
+- [Extrude generator slots](extrude-generator-slots-gotchas.md) — legacy region identity => no labels; test needs regionIdentityVersion 3
