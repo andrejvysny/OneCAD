@@ -1,3 +1,4 @@
+#include "source_hash_util.h"
 // test_import_step.cpp — STEP-IMPORT WP-A W1: the §7.3 `ImportStep` op (both
 // codecs) driven through the real ExecutePlan transaction, plus the read-only
 // §7.8 `InspectStep` verb and its brep conversion lane.
@@ -104,6 +105,7 @@ struct PlanRun {
     bool ok = false;                 // terminal resp ok
     std::string error_code;          // §8 code when !ok
     std::string stopped_reason;
+    json step_diagnostics = json::array();
     std::string step_message;        // perStepResults[0].message (opFailed channel)
     std::vector<json> step_events;   // streamed planStep payloads
     bool accepted = false;
@@ -139,6 +141,7 @@ PlanRun run_import_plan(Session& s, std::uint64_t job_id, const std::string& op_
     if (resp.result.contains("perStepResults") && resp.result["perStepResults"].is_array() &&
         !resp.result["perStepResults"].empty()) {
         run.step_message = resp.result["perStepResults"][0].value("message", std::string{});
+        run.step_diagnostics = resp.result["perStepResults"][0].value("diagnostics", json::array());
     }
     if (run.stopped_reason == "completed") {
         const Envelope acc = onecad::session::handle_accept_prepared(
@@ -155,7 +158,7 @@ PlanRun run_import_plan(Session& s, std::uint64_t job_id, const std::string& op_
 }
 
 json step_params(const std::string& path, double unit_scale = 1.0) {
-    json p = {{"sourceSha256", std::string(64, 'a')}, {"sourceName", "fixture.step"},
+    json p = {{"sourceSha256", source_file_hash(path)}, {"sourceName", "fixture.step"},
               {"sourceCodec", "step"}, {"healPolicy", "v1"}, {"unitScale", unit_scale},
               {"path", path}};
     return p;
@@ -163,7 +166,7 @@ json step_params(const std::string& path, double unit_scale = 1.0) {
 
 json brep_params(const std::string& path, double unit_scale = 1.0,
                  int brep_format = onecad::io::kBrepFormatVersion) {
-    json p = {{"sourceSha256", std::string(64, 'b')}, {"sourceName", "fixture.step"},
+    json p = {{"sourceSha256", source_file_hash(path)}, {"sourceName", "fixture.step"},
               {"sourceCodec", "brep"}, {"healPolicy", "v1"}, {"unitScale", unit_scale},
               {"brepFormat", brep_format}, {"path", path}};
     return p;
@@ -171,7 +174,7 @@ json brep_params(const std::string& path, double unit_scale = 1.0,
 
 json xbf_params(const std::string& path, double unit_scale = 1.0,
                 int format = onecad::io::kXcafFormatVersion) {
-    json p = {{"sourceSha256", std::string(64, 'c')}, {"sourceName", "fixture.step"},
+    json p = {{"sourceSha256", source_file_hash(path)}, {"sourceName", "fixture.step"},
               {"sourceCodec", onecad::io::kXcafCodecName}, {"healPolicy", "v1"},
               {"unitScale", unit_scale}, {"brepFormat", format}, {"path", path}};
     return p;
@@ -288,7 +291,7 @@ void test_garbage_file(const std::string& step_path, const std::string& garbage_
     check(bad.ok, "garbage: terminal resp is ok:true (op failure is per-STEP, not a frame error)");
     check_eq(bad.stopped_reason, "opFailed", "garbage: stoppedReason opFailed");
     check(!bad.step_message.empty(), "garbage: perStepResults carries the reason");
-    check(bad.step_message.find(std::string(64, 'a')) != std::string::npos,
+    check(bad.step_message.find(source_file_hash(garbage_path)) != std::string::npos,
           "garbage: the reason names the source sha (got '" + bad.step_message + "')");
     check(s.bodies_copy().size() == 0, "garbage: nothing published");
     check(s.head().snapshot_id == 0, "garbage: head untouched");
@@ -321,6 +324,37 @@ void test_garbage_file(const std::string& step_path, const std::string& garbage_
 
 // Param validation — each is a data problem, so each is OP_FAILED, never a frame
 // error and never a silent fallback to a different pipeline.
+void test_ambiguous_import_taxonomy() {
+    const std::string path = tmp_path("onecad_import_ambiguous.step");
+    check(stepfx::write_step_fixture(stepfx::make_ambiguous_order_solids(), path).empty(),
+          "ambiguous import fixture written");
+    Session s;
+    open_session(s);
+    CancelToken tok;
+    const PlanRun run = run_import_plan(s, 9, "ambiguous", step_params(path), tok);
+    check(run.ok && run.stopped_reason == "opFailed", "ambiguous import fails closed");
+    check(run.step_message.find("AMBIGUOUS_IMPORT_ORDER") != std::string::npos,
+          "ambiguous import retains reason");
+    check(!run.step_diagnostics.empty() && run.step_diagnostics[0].value("code", "") == "OP_FAILED" &&
+              run.step_diagnostics[0].value("reasonCode", "") == "AMBIGUOUS_IMPORT_ORDER",
+          "ambiguous import uses closed error taxonomy and reasonCode");
+    check(s.bodies_copy().size() == 0, "ambiguous import publishes no body");
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+}
+
+void test_forged_source_digest(const std::string& path) {
+    Session s;
+    open_session(s);
+    CancelToken tok;
+    json params = step_params(path);
+    params["sourceSha256"] = std::string(64, '0');
+    const PlanRun run = run_import_plan(s, 8, "forged", params, tok);
+    check(run.ok && run.stopped_reason == "opFailed", "forged source digest refuses import");
+    check(run.step_message.find("SHA-256") != std::string::npos, "forged digest refusal names SHA-256");
+    check(s.bodies_copy().size() == 0, "forged source publishes no body");
+}
+
 void test_param_guards(const std::string& path) {
     CancelToken tok;
     struct Case { const char* what; json params; };
@@ -358,7 +392,7 @@ void test_param_guards(const std::string& path) {
     Session s;
     open_session(s);
     const PlanRun run = run_import_plan(s, job, "op0", no_path, tok);
-    check(run.step_message.find(std::string(64, 'a')) != std::string::npos,
+    check(run.step_message.find(no_path["sourceSha256"].get<std::string>()) != std::string::npos,
           "guard: missing path names the sha (got '" + run.step_message + "')");
 }
 
@@ -565,6 +599,8 @@ int main() {
         test_unit_scale(multi, "unitScale(step)", step_params(multi, 2.0));
         test_garbage_file(multi, garbage, single);
         test_param_guards(multi);
+        test_forged_source_digest(multi);
+        test_ambiguous_import_taxonomy();
         test_cancel(multi);
         test_inspect(multi, xbf);
         write_brep_fixture(multi, brep);

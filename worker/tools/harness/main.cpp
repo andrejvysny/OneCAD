@@ -23,6 +23,10 @@
 // |actual − expected| <= max(abs, rel · |expected|). A non-finite actual never
 // matches — those are rejected on the wire (SCHEMA §4).
 //
+// Send-only "$artifact:name" expands to a file in a private per-run directory;
+// "$sha256:name" hashes an existing regular file there, bounded to 256 MiB.
+// Names are single safe path components. These are harness directives, not wire syntax.
+//
 // The worker emits an UNSOLICITED hello as its first frame (SCHEMA §6), so a
 // fixture's first `expect` matches that hello.
 //
@@ -45,6 +49,7 @@
 
 #include "nlohmann/json.hpp"
 #include "protocol/Frame.h"
+#include "ArtifactPlaceholders.h"
 
 using nlohmann::json;
 using onecad::protocol::Frame;
@@ -232,6 +237,13 @@ int run_fixture(const std::string& worker_path, const std::string& fixture_path)
         return 2;
     }
 
+    char artifact_template[] = "/tmp/onecad-harness-XXXXXX";
+    const char* artifact_dir = mkdtemp(artifact_template);
+    if (!artifact_dir) return 2;
+    struct ArtifactCleanup {
+        std::filesystem::path path;
+        ~ArtifactCleanup() { std::error_code ec; std::filesystem::remove_all(path, ec); }
+    } cleanup{artifact_dir};
     WorkerProc w;
     if (!spawn_worker(worker_path, w)) return 2;
 
@@ -258,6 +270,11 @@ int run_fixture(const std::string& worker_path, const std::string& fixture_path)
         }
 
         if (directive.contains("send")) {
+            if (!onecad::harness::expand_artifacts(directive["send"], cleanup.path)) {
+                std::cerr << "harness: line " << lineno << ": invalid or unavailable artifact placeholder\n";
+                ok = false;
+                break;
+            }
             if (!send_request(w, directive.at("send"))) {
                 ok = false;
                 break;

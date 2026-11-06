@@ -20,6 +20,7 @@
 #include "ops/TopologyHistory.h"
 #include "session/Session.h"
 #include "session/TopologyOrigins.h"
+#include "session/SourceHistory.h"
 
 namespace s = onecad::session;
 namespace {
@@ -174,6 +175,41 @@ private:
     TopTools_IndexedDataMapOfShapeListOfShape modified_;
     TopTools_ListOfShape empty_;
 };
+
+void source_conflict_preserves_forward_evidence() {
+    const TopoDS_Shape before = BRepPrimAPI_MakeBox(2, 2, 2).Shape();
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(before, TopAbs_FACE, faces);
+    const TopoDS_Shape source = faces(1);
+    TopTools_IndexedMapOfShape other_faces;
+    TopExp::MapShapes(BRepPrimAPI_MakeBox(gp_Pnt(10, 0, 0), 1, 1, 1).Shape(), TopAbs_FACE, other_faces);
+    const TopoDS_Shape conflict = other_faces(1);
+    BRep_Builder builder;
+    TopoDS_Compound result;
+    builder.MakeCompound(result);
+    builder.Add(result, before);
+    builder.Add(result, conflict);
+    PartialHistoryBuilder history_builder(result);
+    history_builder.report_modified(source, conflict);
+    history_builder.report_generated(source, conflict);
+    const auto history = onecad::ops::modified_body_history("body", before, result, history_builder);
+    bool has_survivor = false, has_conflict = false;
+    for (const auto& item : history.survivors)
+        if (item.before.IsSame(source) && item.after.IsSame(source)) has_survivor = true;
+    for (const auto& item : history.conflicts) {
+        if (!item.after.IsSame(conflict)) continue;
+        for (const auto& prior : item.before) if (prior.IsSame(source)) has_conflict = true;
+    }
+    check(has_survivor && has_conflict, "builder retains predecessor on mixed birth conflict");
+    std::size_t visits = 0;
+    check(!s::source_history_image(history, source, visits),
+          "survivor plus conflicting successor does not preserve source identity");
+    s::TopologyBodyHistory unknown;
+    unknown.conflicts.push_back({conflict, {}});
+    visits = 0;
+    check(!s::source_history_image(unknown, source, visits),
+          "conflict with unknown predecessors cannot prove source identity");
+}
 
 void boundary_completion_is_certified() {
     const TopoDS_Shape before = BRepPrimAPI_MakeBox(2, 2, 2).Shape();
@@ -436,6 +472,7 @@ int main() {
     conflicts_fail_closed();
     stale_and_rename();
     session_lifecycle();
+    source_conflict_preserves_forward_evidence();
     boundary_completion_is_certified();
     blend_corner_completes_every_orphan();
     effective_claims_agree_with_lookup();

@@ -1,5 +1,6 @@
 // PlanExecutor.cpp — see PlanExecutor.h. REAL OCCT ops (W-WP5).
 #include "session/PlanExecutor.h"
+#include "io/SourceIdentityGuard.h"
 
 #include <chrono>
 #include <cstdint>
@@ -40,6 +41,8 @@
 #include "session/ClassifyElement.h"
 #include "session/FeaturePattern.h"
 #include "session/Signatures.h"
+#include "session/SourceHistory.h"
+#include "session/SourceResolution.h"
 #include "session/SketchHostReseat.h"
 #include "tess/MeshHandle.h"
 #include "tess/Tessellate.h"
@@ -836,6 +839,7 @@ CandidateResult resolve_read_operand_inputs(ScratchJob& job, const json& op) {
         return result;
     }
     result.needs_repair = ops::operation_ref_ownership_repairs(op, op_id);
+    if (result.needs_repair.empty()) resolve_source_refs(job, op, op_id, result.delta, result.needs_repair);
     if (result.needs_repair.empty()) {
         resolve_input_refs(job, op, op_id, em::LadderEditContext{false, job.from_zero_replay},
                            result.delta, result.needs_repair, result.diagnostics);
@@ -866,6 +870,7 @@ CandidateResult execute_candidate_op(ScratchJob& job, const json& op,
     // against the body it names. Target-bound operations first reject a typed ref
     // that claims another body, so descriptor fallback cannot retarget it.
     result.needs_repair = ops::operation_ref_ownership_repairs(op, op_id);
+    if (result.needs_repair.empty()) resolve_source_refs(job, op, op_id, result.delta, result.needs_repair);
     if (result.needs_repair.empty()) {
         resolve_input_refs(job, op, op_id,
                            em::LadderEditContext{post_edit, job.from_zero_replay}, result.delta,
@@ -886,9 +891,34 @@ CandidateResult execute_candidate_op(ScratchJob& job, const json& op,
                     outcome = ops::OpOutcome::fail(
                         "OP_FAILED", "composite topology history is reserved for FeaturePattern");
                 }
+                if (!job.topology_owners.source_ledger().rows().empty()) {
+                    job.topology_owners.source_ledger().clear();
+                    outcome.diagnostics.push_back({{"severity", "warning"},
+                        {"code", "SOURCE_FACE_IDENTITY_PARTIAL"},
+                        {"message", "composite source identity history is unavailable"}});
+                }
             } else {
+                const auto source_count = job.topology_owners.source_ledger().rows().size();
+                if (!apply_source_history(job.topology_owners.source_ledger(), job.bodies,
+                                          outcome.body_events, outcome.topology_history)) {
+                    job.topology_owners.source_ledger().clear();
+                    outcome.diagnostics.push_back({{"severity", "warning"},
+                        {"code", "SOURCE_FACE_IDENTITY_PARTIAL"},
+                        {"message", "source identity history admission exhausted"}});
+                }
+                if (job.topology_owners.source_ledger().rows().size() < source_count) {
+                    outcome.diagnostics.push_back({{"severity", "warning"},
+                        {"code", "SOURCE_FACE_IDENTITY_PARTIAL"},
+                        {"message", "source identity has no unique live history"}});
+                }
                 apply_topology_history(job, op_id, outcome.body_events,
                                        outcome.topology_history);
+                if (outcome.source_face_claims &&
+                    !job.topology_owners.source_ledger().append(outcome.source_face_claims)) {
+                    outcome.diagnostics.push_back({{"severity", "warning"},
+                        {"code", "SOURCE_FACE_IDENTITY_PARTIAL"},
+                        {"message", "source identity ledger admission exhausted"}});
+                }
             }
         }
         merge_outcome(result, std::move(outcome));

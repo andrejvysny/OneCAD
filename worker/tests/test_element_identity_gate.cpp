@@ -51,6 +51,7 @@
 #include "protocol/Envelope.h"
 #include "session/ElementIdentity.h"
 #include "session/HistoryHash.h"
+#include "session/PlanExecutor.h"
 #include "session/ScratchJob.h"
 #include "session/Session.h"
 
@@ -351,6 +352,33 @@ void test_invalid_batches_are_atomic() {
           "failed batches preserve prior binding");
 }
 
+void test_uncertified_consumer_refusal() {
+    Session session;
+    const auto head = publish_cube(session);
+    check(bind(session, head, json::array({binding("f:1", "el_source", "face")})).ok == true,
+          "setup source face binding");
+    auto ref = primary_ref("r", "el_source", "face");
+    ref["importSourceIdentity"] = nullptr;
+    const auto resolution = resolve(session, head, json::array({ref}));
+    check(resolution.ok && resolution.result["resolutions"][0]["outcome"] == "needsRepair",
+          "null identity cannot use tracked direct binding");
+    auto row = binding("f:2", "el_bad", "face");
+    row["importSourceIdentity"] = nullptr;
+    check(bind(session, head, json::array({binding("e:1", "el_new", "edge"), row})).ok == false,
+          "identity bind refusal is atomic");
+    check(!query(session, head, "el_new").result.value("present", true), "failed batch added no binding");
+    const auto pick = acquire(session, {{"bodyId", kBody}, {"picks", json::array({
+        {{"topoKey", "f:1"}, {"importSourceIdentity", nullptr}}})}});
+    check(pick.ok == false, "identity on acquire cannot be ignored");
+    ScratchJob job;
+    std::string last;
+    onecad::CancelToken cancel;
+    const json op = {{"opType", "Hole"}, {"params", {{"face", ref}}}};
+    const auto candidate = onecad::session::execute_candidate_op(job, op, "op", last, cancel);
+    check(candidate.status == onecad::session::CandidateResult::Status::NeedsRepair,
+          "nested certified face refused before preview and operation fallback");
+}
+
 }  // namespace
 
 int main() {
@@ -361,6 +389,7 @@ int main() {
     test_bind_query_resolve_round_trip(true);
     test_identity_snapshot_fences();
     test_invalid_batches_are_atomic();
+    test_uncertified_consumer_refusal();
     if (g_failures == 0) std::fprintf(stderr, "element_identity_gate: OK\n");
     return g_failures;
 }

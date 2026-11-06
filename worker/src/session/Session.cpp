@@ -93,6 +93,7 @@ const elementmap::PartitionEntry* binding_at(
 
 std::optional<ErrorInfo> stage_binding(const BodyStore& bodies,
                                        elementmap::ElementMapPartition& staged,
+                                       SourceLedger& source,
                                        const std::map<std::string, ops::GearBodyInfo>& gear_bodies,
                                        const ElementBindingInput& binding, std::size_t index) {
     if (binding.body_id.empty() || !valid_element_id(binding.element_id))
@@ -126,6 +127,19 @@ std::optional<ErrorInfo> stage_binding(const BodyStore& bodies,
         return bind_error("REF_UNRESOLVED", "elementId conflicts with existing binding", index);
     if (by_topo && by_topo->element_id != binding.element_id)
         return bind_error("REF_UNRESOLVED", "topoKey conflicts with existing binding", index);
+    const auto bound_source = source.bound(binding.element_id);
+    if (binding.import_source_identity) {
+        const auto live = source.lookup(binding.body_id, shape);
+        if (kind != elementmap::km::ElementKind::Face || !live ||
+            staged.has_competing_shape(binding.element_id, shape) ||
+            !io::source_identity_matches(*live, *binding.import_source_identity) ||
+            (bound_source && !io::source_identity_matches(*bound_source, *binding.import_source_identity)) ||
+            !source.bind(binding.element_id, live)) {
+            return bind_error("REF_UNRESOLVED", "source identity does not name a unique live face", index);
+        }
+    } else if (bound_source) {
+        return bind_error("REF_UNRESOLVED", "critical source identity is missing", index);
+    }
     if (!by_id) staged.mint(binding.body_id, binding.element_id, kind, shape, body->geom,
                             binding.anchor);
     return std::nullopt;
@@ -502,9 +516,15 @@ BindElementsOutcome Session::bind_element_ids(
             static_cast<unsigned long long>(snapshot_id_), bindings.size());
         return out;
     }
+    if (scratch_.has_value() && std::any_of(bindings.begin(), bindings.end(),
+            [](const auto& binding) { return binding.import_source_identity.has_value(); })) {
+        out.error = ErrorInfo{"REF_UNRESOLVED", "BindElementIds: critical binding cannot race a prepared candidate", false};
+        return out;
+    }
     elementmap::ElementMapPartition staged = partition_;
+    SourceLedger staged_source = topology_owners_->source_ledger();
     for (std::size_t i = 0; i < bindings.size(); ++i) {
-        if (auto error = stage_binding(bodies_, staged, gear_bodies_, bindings[i], i)) {
+        if (auto error = stage_binding(bodies_, staged, staged_source, gear_bodies_, bindings[i], i)) {
             out.error = std::move(*error);
             WLOG_DEBUG(
                 "ref_identity verb=BindElementIds requested=%llu head=%llu batch=%zu "
@@ -515,7 +535,14 @@ BindElementsOutcome Session::bind_element_ids(
             return out;
         }
     }
+    std::shared_ptr<const TopologyOwnerLedger> next_owners = topology_owners_;
+    if (std::any_of(bindings.begin(), bindings.end(), [](const auto& b) { return b.import_source_identity.has_value(); })) {
+        auto owners = std::make_shared<TopologyOwnerLedger>(*topology_owners_);
+        owners->source_ledger() = std::move(staged_source);
+        next_owners = std::move(owners);
+    }
     partition_ = std::move(staged);
+    topology_owners_ = std::move(next_owners);
     out.ok = true;
     for (const auto& binding : bindings) {
         out.bound.push_back(BoundElement{binding.body_id, binding.topo_key, binding.element_id,

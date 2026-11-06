@@ -1,3 +1,4 @@
+#include "source_hash_util.h"
 // test_xcaf_import.cpp — WP-A W4.5: XCAF fidelity end to end.
 //
 // The claim under test is a SURVIVAL claim, not a parsing claim: a STEP file's
@@ -199,7 +200,7 @@ PlanRun run_import_plan(Session& s, std::uint64_t job_id, const std::string& op_
 }
 
 json xbf_params(const std::string& path, double unit_scale = 1.0) {
-    return json{{"sourceSha256", std::string(64, 'c')}, {"sourceName", "colored.step"},
+    return json{{"sourceSha256", source_file_hash(path)}, {"sourceName", "colored.step"},
                 {"sourceCodec", onecad::io::kXcafCodecName}, {"healPolicy", "v1"},
                 {"unitScale", unit_scale},
                 {"brepFormat", onecad::io::kXcafFormatVersion}, {"path", path}};

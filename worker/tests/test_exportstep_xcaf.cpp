@@ -1,3 +1,4 @@
+#include "source_hash_util.h"
 // test_exportstep_xcaf.cpp — DI-5 / W3: STEP export carries body NAMES and per-face
 // COLOURS through XCAF, proven by reading the written file back and comparing VALUES.
 //
@@ -196,7 +197,7 @@ void publish_colored_import(Session& s, const std::string& step_path, CancelToke
                   static_cast<std::streamsize>(probe.out_bin.size()));
     }
 
-    json params = {{"sourceSha256", std::string(64, 'c')},
+    json params = {{"sourceSha256", source_file_hash(xbf)},
                    {"sourceName", "colored.step"},
                    {"sourceCodec", onecad::io::kXcafCodecName},
                    {"healPolicy", "v1"},

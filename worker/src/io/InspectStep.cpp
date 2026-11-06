@@ -150,9 +150,13 @@ Envelope handle_inspect_step(const Envelope& req, const onecad::CancelToken& can
     // `ops::ordered_solids`), and that order becomes the xbf document's free-shape
     // order — the single point where the §7.3 ordinals are baked into the bytes.
     std::vector<std::uint8_t> blob;
-    const std::string err = write_xcaf_document(read.solids, bound.per_solid, blob);
+    bool identity_complete = false;
+    const std::string err = write_xcaf_document(read.solids, bound.per_solid, blob, &identity_complete);
     if (is_occt_busy(err)) return busy_response(req.id, err, "InspectStep");
     if (!err.empty()) return fail(req.id, "InspectStep: " + err);
+    if (!identity_complete) resp.result["diagnostics"].push_back(
+        {{"severity", "warning"}, {"code", "SOURCE_FACE_IDENTITY_PARTIAL"},
+         {"message", "source identity labels omitted because admission was exhausted"}});
     resp.bin.push_back(protocol::BinSection{"geometry", /*off=*/0, blob.size()});
     resp.out_bin = std::move(blob);
     return resp;

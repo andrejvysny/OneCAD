@@ -33,11 +33,14 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
 #include <string>
 #include <vector>
 
 #include <Quantity_ColorRGBA.hxx>
 #include <TopoDS_Shape.hxx>
+
+#include "io/SourceClaimBatch.h"
 
 namespace onecad::io {
 
@@ -89,7 +92,8 @@ struct SolidAttributes {
 // Returns "" on success, else the failure message.
 std::string write_xcaf_document(const std::vector<TopoDS_Shape>& solids,
                                 const std::vector<SolidAttributes>& attrs,
-                                std::vector<std::uint8_t>& bytes_out);
+                                std::vector<std::uint8_t>& bytes_out,
+                                bool* identity_complete = nullptr);
 
 struct XcafReadResult {
     // Free top-level shapes IN STORED ORDER (label tag order == the write order,
@@ -98,6 +102,8 @@ struct XcafReadResult {
     std::vector<TopoDS_Shape> solids;
     // 1:1 with `solids`.
     std::vector<SolidAttributes> attributes;
+    SourceClaimBatch face_claims;
+    std::size_t unclaimed_faces = 0;
     std::string error;  // "" on success
 
     bool ok() const { return error.empty(); }
@@ -110,5 +116,6 @@ struct XcafReadResult {
 // The `BINFILE` magic is checked BEFORE OCCT sees the bytes, for the same stdout
 // hygiene reason BrepCodec checks the BinTools banner (see the .cpp).
 XcafReadResult read_xcaf_solids(const std::string& path);
+XcafReadResult read_xcaf_solids_bytes(std::span<const std::uint8_t> bytes);
 
 }  // namespace onecad::io

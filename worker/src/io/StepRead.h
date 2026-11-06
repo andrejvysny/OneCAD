@@ -27,13 +27,16 @@
 // `solids` plus a `STEP_NO_SOLIDS` diagnostic.
 #pragma once
 
+#include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
 #include <TopoDS_Shape.hxx>
 
 #include "util/Cancel.h"
+#include "io/SourceClaimBatch.h"
 
 namespace onecad::io {
 
@@ -86,6 +89,7 @@ struct StepReadDiagnostic {
 struct StepReadResult {
     // Solids in `ops::ordered_solids` order. Empty is a legal success.
     std::vector<TopoDS_Shape> solids;
+    SourceClaimBatch face_claims;
     // STEP product name per TRANSFER ROOT, in root order — best effort: an entry
     // is "" when the root carries no recoverable product, and the whole vector is
     // empty when the reader exposes no roots. Roots are NOT 1:1 with `solids`
@@ -118,5 +122,9 @@ struct StepReadResult {
 // instead of running to completion. A fired token yields `cancelled == true`.
 StepReadResult read_step(const std::string& path, const StepReadPolicy& policy = StepReadPolicy{},
                          const onecad::CancelToken* cancel = nullptr);
+
+StepReadResult read_step_bytes(std::span<const std::uint8_t> bytes,
+                               const StepReadPolicy& policy = StepReadPolicy{},
+                               const onecad::CancelToken* cancel = nullptr);
 
 }  // namespace onecad::io

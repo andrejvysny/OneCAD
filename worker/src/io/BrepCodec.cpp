@@ -1,5 +1,6 @@
 // BrepCodec.cpp — see BrepCodec.h.
 #include "io/BrepCodec.h"
+#include "io/SourceCapture.h"
 
 #include <fstream>
 #include <sstream>
@@ -132,6 +133,30 @@ BrepShapeResult read_brep_shape(const std::string& path) {
     return out;
 }
 
+static BrepReadResult split_brep_solids(const TopoDS_Shape& shape) {
+    BrepReadResult out;
+    // Stored order, verbatim. A bare solid is accepted so a producer that skipped
+    // the compound wrapper still replays; anything else is malformed for this lane.
+    if (shape.ShapeType() == TopAbs_SOLID) {
+        out.solids.push_back(shape);
+        return out;
+    }
+    if (shape.ShapeType() != TopAbs_COMPOUND) {
+        out.error = "brep top-level shape is neither a solid nor a compound";
+        return out;
+    }
+    for (TopoDS_Iterator it(shape); it.More(); it.Next()) {
+        if (it.Value().ShapeType() != TopAbs_SOLID) {
+            out.error = "brep compound carries a non-solid child";
+            out.solids.clear();
+            return out;
+        }
+        out.solids.push_back(it.Value());
+    }
+    if (out.solids.empty()) out.error = "brep compound carries no solid";
+    return out;
+}
+
 BrepReadResult read_brep_solids(const std::string& path) {
     BrepReadResult out;
     out.error = header_error(path);
@@ -157,26 +182,38 @@ BrepReadResult read_brep_solids(const std::string& path) {
         return out;
     }
 
-    // Stored order, verbatim. A bare solid is accepted so a producer that skipped
-    // the compound wrapper still replays; anything else is malformed for this lane.
-    if (shape.ShapeType() == TopAbs_SOLID) {
-        out.solids.push_back(shape);
+    return split_brep_solids(shape);
+}
+
+BrepReadResult read_brep_solids_bytes(std::span<const std::uint8_t> bytes) {
+    BrepReadResult out;
+    const std::string_view header(kHeader);
+    if (bytes.size() < header.size() ||
+        std::string_view(reinterpret_cast<const char*>(bytes.data()), header.size()) != header) {
+        out.error = "brep bytes do not carry the expected BinTools header";
         return out;
     }
-    if (shape.ShapeType() != TopAbs_COMPOUND) {
-        out.error = "brep top-level shape is neither a solid nor a compound";
-        return out;
-    }
-    for (TopoDS_Iterator it(shape); it.More(); it.Next()) {
-        if (it.Value().ShapeType() != TopAbs_SOLID) {
-            out.error = "brep compound carries a non-solid child";
-            out.solids.clear();
+    TopoDS_Shape shape;
+    try {
+        SourceSpanStream source(bytes);
+        BinTools::Read(shape, source);
+        if (source.fail()) {
+            out.error = "brep byte stream is incomplete or unreadable";
             return out;
         }
-        out.solids.push_back(it.Value());
+    } catch (const Standard_Failure& f) {
+        out.error = std::string("brep read raised: ") +
+                    (f.GetMessageString() ? f.GetMessageString() : "OCCT failure");
+        return out;
+    } catch (const std::exception& e) {
+        out.error = std::string("brep read raised: ") + e.what();
+        return out;
     }
-    if (out.solids.empty()) out.error = "brep compound carries no solid";
-    return out;
+    if (shape.IsNull()) {
+        out.error = "brep bytes decoded to a null shape";
+        return out;
+    }
+    return split_brep_solids(shape);
 }
 
 }  // namespace onecad::io

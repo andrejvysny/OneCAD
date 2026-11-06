@@ -213,7 +213,7 @@ void classify_kind(session::TopologyBodyHistory& history,
         auto& prior = predecessors[static_cast<std::size_t>(i - 1)];
         const TopoDS_Shape& output = outputs(i);
         if (births[static_cast<std::size_t>(i - 1)] && !prior.empty())
-            history.conflicts.push_back({output});
+            history.conflicts.push_back({output, std::move(prior)});
         else if (births[static_cast<std::size_t>(i - 1)]) {
             const auto at = static_cast<std::size_t>(i - 1);
             const bool inherits = root_images[at] == 1 && !generated_image[at] &&

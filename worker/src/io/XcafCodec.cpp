@@ -1,12 +1,16 @@
 // XcafCodec.cpp — see XcafCodec.h.
 #include "io/XcafCodec.h"
+#include "io/SourceCapture.h"
+#include "util/PolicyVersions.h"
 
 #include "io/OcafApp.h"
 #include "io/OcctStaticGuard.h"
 
 #include <algorithm>
 #include <fstream>
+#include <map>
 #include <mutex>
+#include <set>
 #include <sstream>
 
 #include <PCDM_ReaderStatus.hxx>
@@ -16,8 +20,10 @@
 #include <Standard_Failure.hxx>
 #include <TCollection_AsciiString.hxx>
 #include <TCollection_ExtendedString.hxx>
+#include <TDF_ChildIterator.hxx>
 #include <TDF_Label.hxx>
 #include <TDF_LabelSequence.hxx>
+#include <TDF_Tool.hxx>
 #include <TDataStd_Name.hxx>
 #include <TDocStd_Application.hxx>
 #include <TDocStd_Document.hxx>
@@ -152,7 +158,29 @@ Quantity_ColorRGBA unpack_srgb(PackedColor color) {
 
 std::string write_xcaf_document(const std::vector<TopoDS_Shape>& solids,
                                 const std::vector<SolidAttributes>& attrs,
-                                std::vector<std::uint8_t>& bytes_out) {
+                                std::vector<std::uint8_t>& bytes_out,
+                                bool* identity_complete) {
+    // Count before allocating optional identity labels. Existing color labels
+    // remain required even when the optional all-face identity budget is full.
+    std::size_t total_faces = 0;
+    bool complete = true;
+    for (const auto& solid : solids) {
+        if (solid.IsNull()) continue;
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(solid, TopAbs_FACE, faces);
+        const auto count = static_cast<std::size_t>(faces.Extent());
+        if (count > kMaxSourceFaceClaims - total_faces) { complete = false; break; }
+        total_faces += count;
+    }
+    std::shared_ptr<const SourceClaimBudget::Lease> label_lease;
+    if (complete && total_faces > 0 &&
+        total_faces <= (std::numeric_limits<std::size_t>::max() - SourceClaimBatch::kBatchOverhead) /
+                           SourceClaimBatch::kBytesPerFace) {
+        label_lease = source_claim_budget().acquire(SourceClaimBatch::kBatchOverhead +
+                                                     total_faces * SourceClaimBatch::kBytesPerFace);
+    }
+    complete = complete && static_cast<bool>(label_lease);
+    if (identity_complete) *identity_complete = complete;
     // Bounded (OcctStaticGuard.h): an in-process sibling wedged inside an XCAF
     // call must not wedge this worker's kernel lane too.
     const BoundedLock lock(ocaf_mutex(), nullptr);
@@ -175,22 +203,26 @@ std::string write_xcaf_document(const std::vector<TopoDS_Shape>& solids,
             // free-shape sequence read back IS the ordinal list.
             const TDF_Label label = shapes->AddShape(solids[k], Standard_False);
             if (label.IsNull()) return "XcafCodec: AddShape produced no label";
-            if (k >= attrs.size()) continue;
-            const SolidAttributes& a = attrs[k];
-            if (!a.name.empty()) {
-                TDataStd_Name::Set(label, TCollection_ExtendedString(a.name.c_str()));
+            const SolidAttributes* a = k < attrs.size() ? &attrs[k] : nullptr;
+            if (a != nullptr && !a->name.empty()) {
+                TDataStd_Name::Set(label, TCollection_ExtendedString(a->name.c_str()));
             }
-            if (a.face_colors.empty()) continue;
-
             TopTools_IndexedMapOfShape faces;
             TopExp::MapShapes(solids[k], TopAbs_FACE, faces);
+            std::set<std::string> face_labels;
             for (int i = 1; i <= faces.Extent(); ++i) {
                 const std::size_t idx = static_cast<std::size_t>(i - 1);
-                if (idx >= a.face_colors.size() || a.face_colors[idx] == kUnsetColor) continue;
-                const PackedColor c = a.face_colors[idx];
+                const bool colored = a != nullptr && idx < a->face_colors.size() &&
+                                     a->face_colors[idx] != kUnsetColor;
+                if (!complete && !colored) continue;
                 const TDF_Label sub = shapes->AddSubShape(label, faces(i));
-                if (sub.IsNull()) continue;  // face not addressable — color dropped
-                colors->SetColor(sub, unpack_srgb(c), XCAFDoc_ColorSurf);
+                if (sub.IsNull()) return "XcafCodec: face subshape is not addressable";
+                TCollection_AsciiString entry;
+                TDF_Tool::Entry(sub, entry);
+                if (!face_labels.insert(entry.ToCString()).second) {
+                    return "XcafCodec: face subshape labels are not unique";
+                }
+                if (colored) colors->SetColor(sub, unpack_srgb(a->face_colors[idx]), XCAFDoc_ColorSurf);
             }
         }
 
@@ -226,23 +258,34 @@ std::string write_xcaf_document(const std::vector<TopoDS_Shape>& solids,
 }
 
 XcafReadResult read_xcaf_solids(const std::string& path) {
-    XcafReadResult out;
     std::string bytes;
+    XcafReadResult out;
     out.error = magic_error(path, bytes);
     if (!out.error.empty()) return out;
+    return read_xcaf_solids_bytes(std::span<const std::uint8_t>(
+        reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()));
+}
 
+XcafReadResult read_xcaf_solids_bytes(std::span<const std::uint8_t> bytes) {
+    XcafReadResult out;
+    const std::string_view magic(kMagic);
+    if (bytes.size() < magic.size() ||
+        std::string_view(reinterpret_cast<const char*>(bytes.data()), magic.size()) != magic) {
+        out.error = "xbf bytes do not carry the OCAF `BINFILE` magic (not an xbf blob written by this worker)";
+        return out;
+    }
     const BoundedLock lock(ocaf_mutex(), nullptr);  // see write_xcaf_document
     if (!lock.owns()) {
         out.error = lock.busy_error("XcafCodec read", "ocaf_mutex");
         return out;
     }
     try {
-        std::istringstream is(bytes, std::ios::in | std::ios::binary);
+        SourceSpanStream is(bytes);
         Handle(TDocStd_Document) doc;
         const PCDM_ReaderStatus status = ocaf_application()->Open(is, doc);
         if (status != PCDM_RS_OK || doc.IsNull()) {
             out.error = "xbf bytes are not readable as BinXCAF (status " +
-                        std::to_string(static_cast<int>(status)) + "): " + path;
+                        std::to_string(static_cast<int>(status)) + ")";
             return out;
         }
         OcafDocGuard guard(doc);
@@ -252,6 +295,7 @@ XcafReadResult read_xcaf_solids(const std::string& path) {
         TDF_LabelSequence free_labels;
         shapes->GetFreeShapes(free_labels);
 
+        bool identity_exhausted = false;
         for (int i = 1; i <= free_labels.Length(); ++i) {
             const TDF_Label label = free_labels.Value(i);
             const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(label);
@@ -259,14 +303,66 @@ XcafReadResult read_xcaf_solids(const std::string& path) {
                 out.error = "xbf free shape " + std::to_string(i) + " is null";
                 out.solids.clear();
                 out.attributes.clear();
+                out.face_claims.clear();
                 return out;
             }
             if (shape.ShapeType() != TopAbs_SOLID) {
                 out.error = "xbf free shape " + std::to_string(i) + " is not a solid";
                 out.solids.clear();
                 out.attributes.clear();
+                out.face_claims.clear();
                 return out;
             }
+            TopTools_IndexedMapOfShape faces;
+            TopExp::MapShapes(shape, TopAbs_FACE, faces);
+            const auto count = static_cast<std::size_t>(faces.Extent());
+            const bool within_budget = !identity_exhausted && label.Depth() <= 22 && count > 0 &&
+                count <= kMaxSourceFaceClaims - out.face_claims.size() && out.face_claims.admit(count);
+            if (!within_budget && !identity_exhausted) {
+                identity_exhausted = true;
+                out.unclaimed_faces += out.face_claims.size();
+                out.face_claims.clear();
+            }
+            std::map<int, std::vector<TDF_Label>> face_labels;
+            std::size_t visited = 0;
+            bool labels_complete = within_budget;
+            if (within_budget) {
+                for (TDF_ChildIterator it(label, Standard_False); it.More(); it.Next()) {
+                    if (++visited > count * 2 + 32) { labels_complete = false; break; }
+                    const TDF_Label sub = it.Value();
+                    if (sub.Depth() > 22) { labels_complete = false; break; }
+                    if (!XCAFDoc_ShapeTool::IsSubShape(sub)) continue;
+                    const TopoDS_Shape face = XCAFDoc_ShapeTool::GetShape(sub);
+                    if (face.IsNull() || face.ShapeType() != TopAbs_FACE) continue;
+                    const int index = faces.FindIndex(face);
+                    if (index > 0 && face.IsEqual(faces(index))) face_labels[index].push_back(sub);
+                }
+            }
+            if (!labels_complete) face_labels.clear();
+            TCollection_AsciiString root_entry;
+            if (!face_labels.empty()) TDF_Tool::Entry(label, root_entry);
+            std::size_t before_claims = out.face_claims.size();
+            for (const auto& [index, labels] : face_labels) {
+                if (labels.size() != 1) continue;
+                TCollection_AsciiString face_entry;
+                TDF_Tool::Entry(labels.front(), face_entry);
+                SourceFaceClaim claim;
+                claim.face = faces(index);
+                claim.codec = kXcafCodecName;
+                claim.codec_version = std::to_string(kXcafFormatVersion);
+                claim.address_kind = SourceFaceClaim::AddressKind::XbfLabel;
+                claim.xbf_root_label = root_entry.ToCString();
+                claim.xbf_face_label = face_entry.ToCString();
+                if (!out.face_claims.append(std::move(claim))) {
+                    out.unclaimed_faces += before_claims;
+                    out.face_claims.clear();
+                    before_claims = 0;
+                    identity_exhausted = true;
+                    break;
+                }
+            }
+            out.unclaimed_faces += static_cast<std::size_t>(faces.Extent()) -
+                                   (out.face_claims.size() - before_claims);
             SolidAttributes attrs;
             attrs.name = label_name(label);
             attrs.face_colors = read_face_colors(colors, label, shape);
@@ -274,16 +370,28 @@ XcafReadResult read_xcaf_solids(const std::string& path) {
             out.attributes.push_back(std::move(attrs));
         }
         if (out.solids.empty()) out.error = "xbf document carries no free solid";
+        if (!out.face_claims.empty()) {
+            const std::string digest = hashing::sha256_hex(bytes.data(), bytes.size());
+            for (auto& claim : out.face_claims) {
+                claim.source_sha256 = digest;
+                claim.reader_policy = "xbf-v12";
+                claim.kernel_fingerprint = policy::occt_fingerprint();
+                claim.target_unit = "MM";
+            }
+        }
     } catch (const Standard_Failure& f) {
         out.solids.clear();
         out.attributes.clear();
+        out.face_claims.clear();
         out.error = std::string("xbf read raised: ") +
                     (f.GetMessageString() != nullptr ? f.GetMessageString() : "OCCT failure");
     } catch (const std::exception& e) {
         out.solids.clear();
         out.attributes.clear();
+        out.face_claims.clear();
         out.error = std::string("xbf read raised: ") + e.what();
     }
+    out.face_claims.release_empty();
     return out;
 }
 

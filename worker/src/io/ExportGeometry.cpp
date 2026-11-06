@@ -176,12 +176,13 @@ Envelope handle_export_geometry(session::Session& session, const Envelope& req) 
 
     std::vector<std::uint8_t> bytes;
     int format = 0;
+    bool identity_complete = true;
     if (codec == "brep") {
         const std::string err = write_brep_compound(solids, bytes);
         if (!err.empty()) return fail(req.id, "ExportGeometry: " + err);
         format = kBrepFormatVersion;
     } else {
-        const std::string err = write_xcaf_document(solids, attrs, bytes);
+        const std::string err = write_xcaf_document(solids, attrs, bytes, &identity_complete);
         if (is_occt_busy(err)) return busy_response(req.id, err, "ExportGeometry");
         if (!err.empty()) return fail(req.id, "ExportGeometry: " + err);
         format = kXcafFormatVersion;
@@ -199,13 +200,15 @@ Envelope handle_export_geometry(session::Session& session, const Envelope& req) 
 
     WLOG_INFO("ExportGeometry: %zu solid(s) as %s v%d, %zu bytes", solids.size(), codec.c_str(),
               format, bytes.size());
-    return Envelope::ok_response(req.id, json{
-                                             {"written", true},
+    json result = {{"written", true},
                                              {"bytes", static_cast<std::uint64_t>(bytes.size())},
                                              {"codec", codec},
                                              {"format", format},
-                                             {"solidCount", static_cast<std::uint64_t>(solids.size())},
-                                         });
+                   {"solidCount", static_cast<std::uint64_t>(solids.size())}};
+    if (!identity_complete) result["diagnostics"] = json::array({
+        {{"severity", "warning"}, {"code", "SOURCE_FACE_IDENTITY_PARTIAL"},
+         {"message", "source identity labels omitted because admission was exhausted"}}});
+    return Envelope::ok_response(req.id, std::move(result));
 }
 
 }  // namespace onecad::io

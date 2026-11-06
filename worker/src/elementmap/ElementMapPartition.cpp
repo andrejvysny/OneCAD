@@ -38,6 +38,14 @@
 
 namespace onecad::elementmap {
 
+bool ElementMapPartition::has_competing_shape(const std::string& id, const TopoDS_Shape& shape) const {
+    if (shape.IsNull()) return false;
+    for (const auto& [other_id, entry] : entries_) {
+        if (other_id != id && !entry.shape.IsNull() && entry.shape.IsSame(shape)) return true;
+    }
+    return false;
+}
+
 namespace {
 
 TopAbs_ShapeEnum topabs_of(km::ElementKind kind) {

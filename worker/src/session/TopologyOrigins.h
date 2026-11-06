@@ -14,6 +14,8 @@
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ShapeMapHasher.hxx>
 
+#include "session/SourceLedger.h"
+
 namespace onecad::session {
 
 enum class OriginState { Known, Ambiguous, Unknown };
@@ -60,6 +62,8 @@ struct OwnedShape {
 
 class TopologyOwnerLedger {
 public:
+    SourceLedger& source_ledger() { return source_ledger_; }
+    const SourceLedger& source_ledger() const { return source_ledger_; }
     OriginClaim lookup(const std::string& body_id, const TopoDS_Shape& shape) const {
         OriginClaim result;
         bool found = false;
@@ -159,6 +163,7 @@ public:
     const std::vector<OwnedShape>& entries() const { return entries_; }
 
 private:
+    SourceLedger source_ledger_;
     std::vector<OwnedShape> entries_;
 };
 
@@ -172,7 +177,11 @@ struct TopologyBirth {
     SlotScope scope = SlotScope::Point;
     bool pristine = true;
 };
-struct TopologyConflict { TopoDS_Shape after; };
+struct TopologyConflict {
+    TopoDS_Shape after;
+    // Empty means predecessor evidence is unavailable, not that there were none.
+    std::vector<TopoDS_Shape> before;
+};
 
 enum class HistoryCoverage { Proven, Unproven };
 

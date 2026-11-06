@@ -144,6 +144,7 @@ struct ElementBindingInput {
     std::string element_id;
     std::string kind;
     nlohmann::json anchor;
+    std::optional<nlohmann::json> import_source_identity;
 };
 
 struct BoundElement {

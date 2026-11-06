@@ -99,6 +99,7 @@ public:
     // --- queries ---
     const PartitionEntry* find(const std::string& element_id) const;
     bool contains(const std::string& element_id) const;
+    bool has_competing_shape(const std::string& element_id, const TopoDS_Shape& shape) const;
     std::size_t size() const { return entries_.size(); }
     std::vector<const PartitionEntry*> entries_for_body(const std::string& body_id) const;
 

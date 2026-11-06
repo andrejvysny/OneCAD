@@ -1,3 +1,4 @@
+#include "source_hash_util.h"
 // test_occt_busy.cpp — every process-wide OCCT lock site refuses RETRIABLE with
 // the OCCT_GLOBALS_BUSY prefix FIRST (io/OcctBusy.h; ADR-0016 finding A).
 //
@@ -155,7 +156,7 @@ bool make_fixtures(Fixtures& fx) {
 }
 
 json import_op(const std::string& op_id, const std::string& codec, const std::string& path) {
-    json params = {{"sourceSha256", std::string(64, 'a')}, {"sourceName", "busy.step"},
+    json params = {{"sourceSha256", source_file_hash(path)}, {"sourceName", "busy.step"},
                    {"sourceCodec", codec}, {"healPolicy", "v1"}, {"unitScale", 1.0},
                    {"path", path}};
     if (codec == "brep") params["brepFormat"] = io::kBrepFormatVersion;

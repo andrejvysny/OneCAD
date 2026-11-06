@@ -408,7 +408,10 @@ Worker → Rust:
 
 `capabilities` above is an illustrative subset. The authoritative list is the
 worker's `make_hello_result_impl` (`worker/src/capi/WorkerRuntime.cpp`). Rust
-gates only on `constraint.tangentAtPoint`, `op.boolean.tools` and `plan.preview`.
+gates optional operations on their advertised capabilities. Critical imported
+face certificates additionally require `importSourceIdentityV1` on the current
+connection, including after a worker restart. The capability MUST NOT be
+advertised until the producer and all consumer paths below are implemented.
 
 Rust verifies `protocolVersion == 1` and applies the fingerprint policy
 (migration plan; V1/V2 §8): matching fingerprint ⇒ proceed; mismatch ⇒ warn →
@@ -4270,6 +4273,92 @@ own, then MUST complete [`BindElementIds`](#bindelementids) against the echoed
 head before a promotion command returns the id to the frontend. When Rust already
 holds an id for the same stable element, it supplies that id to the bind step
 (Invariant 1: an ElementId never changes because geometry changed).
+
+#### Critical imported-face source identity (`importSourceIdentityV1`)
+
+Document schema 4 reserves optional `importSourceIdentity` on a semantic element
+reference and its persisted element-index entry. Absence retains legacy
+resolution. Presence is critical: null, malformed fields, unknown versions,
+unsupported source address forms or missing capability MUST be refused. The
+worker emits the field from `AcquireElementIds` only when its source-to-live-face
+mapping is proven. A held legacy ID remains uncertified; an already-critical ID
+retains its certificate, and an unbound pick may offer a certificate for Rust's
+subsequent mint-and-bind transaction. Rust stores the certificate
+unchanged, fences its admission, and includes it when binding and resolving the
+reference. Core document body IDs are UUIDs; the worker wire uses the normal
+`body_<uuid>[:child]` form and the authoritative body-ID mapping.
+
+```json
+{
+  "version": 1,
+  "sourceSha256": "<64 lowercase hex digits>",
+  "codec": "step",
+  "codecVersion": "occt-step-stream-v1",
+  "readerPolicy": "step-v1",
+  "kernelFingerprint": "<16 lowercase hex digits>",
+  "producerRecordId": "<record UUID>",
+  "bodyId": "body_<UUID>",
+  "unitScaleBits": "3ff0000000000000",
+  "sourceAddress": {
+    "kind": "step", "rootEntityLabel": 5850,
+    "occurrencePath": [], "faceEntityLabel": 3042
+  }
+}
+```
+
+V1 STEP labels are positive entity labels in the captured source, not OCCT
+traversal indices. XBF uses `codec: "xbf"`, `codecVersion: "12"`,
+`readerPolicy: "xbf-v12"`, and `sourceAddress: {"kind":"xbf", "rootLabel":
+"0:1:1:1", "occurrencePath":[], "faceLabel":"0:1:1:1:7"}` for explicit
+persisted labels. The face label must be under the root label. V1 admits only
+empty occurrence paths; BREP addresses and nested occurrences remain unsupported.
+The scale is the 16-digit hexadecimal IEEE-754 bits of a finite positive scale.
+The kernel fingerprint is the fingerprint of the worker on this connection.
+
+The SHA-256 MUST cover the exact immutable bytes passed to the reader, not a
+filename or an independently reread path. A source claim is usable only when the
+producer proves a unique source-to-output face mapping through every relevant
+transfer, sewing, healing, placement and scaling step, scoped to the exact
+producer and output body. Ambiguous, deleted, split, merged or unproven mappings
+MUST NOT be certified. A source-addressed reference never falls back to a direct
+primary hit, an ordinal or descriptor scoring when its certificate is absent,
+stale, malformed or inconsistent with the current live source claim. It fails
+closed as repair/refusal. Uncertified references retain existing ladder behavior
+and the existing score/margin thresholds; `refsPolicy` is unchanged.
+
+`ResolveRefs` is read-only. A valid certificate with one live exact image may
+return `autoBind`, its exact current `topoKey`, and an empty `elementId` before
+that ID is critically bound. This is a candidate for the subsequent explicit,
+snapshot-fenced `BindElementIds`, not a binding or descriptor fallback. An
+existing certified binding may return `unchanged`. Query and resolution do not
+upgrade legacy IDs or mutate the partition. Critical binding while a prepared
+candidate exists is refused so later acceptance cannot erase new tombstones.
+
+Once an ID has been critically bound in a worker session, omission of its
+certificate is refused even after its live face disappears. On a fresh session,
+absence on a previously unknown ID is indistinguishable from legacy intent;
+Rust must restore the persisted critical authority with its certificate before
+use. This capability does not promise to detect a stripped certificate before
+the worker has received that authority.
+
+All certified references to one source face must use the same `ElementId`.
+Distinct IDs claiming the same certified face MUST cause atomic refusal across
+both the current binding batch and already-owned or staged identities. Repeated
+copies of the same ID remain legal. The identity and its source blob, when
+available, survive save/reopen even when the producer has been removed or the
+certificate is no longer live; the stale reference can then be repaired without
+silently changing its intent. Unavailable source blobs do not make a degraded
+document unsaveable. Worker implementation and full replay qualification remain
+separate from this schema contract.
+
+Owned source-identity metadata has a 16 MiB worker-process admission budget.
+Producer batches and immutable live-row/binding allocations retain reservations
+through their last owner; checkpoint aliases do not duplicate the charge.
+Critical tombstones retain identity metadata, not obsolete OCCT face handles.
+Optional new claims may be omitted with an explicit diagnostic on exhaustion;
+an existing certified reference without its live proof still fails closed.
+This budget excludes OCCT/OCAF internals, geometry and total process RSS; it
+does not qualify those allocations or replace existing geometry/resource caps.
 
 `descriptor.originSlot` (OPTIONAL, added 2026-10-21, ONECAD-361) is
 `{recordId, slot}`, present only when the element's live topology-owner claim

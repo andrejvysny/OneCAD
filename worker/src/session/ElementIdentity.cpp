@@ -1,5 +1,6 @@
 // ElementIdentity.cpp — see ElementIdentity.h. SCHEMA §7.5.
 #include "session/ElementIdentity.h"
+#include "io/SourceIdentityGuard.h"
 
 #include <cmath>
 #include <limits>
@@ -235,6 +236,16 @@ json acquire_ids(const PublishedStateSnapshot& state, const std::string& body_id
                       {"bodyId", body_id},
                       {"elementId", held ? held->element_id : ""},
                       {"descriptor", std::move(descriptor)}};
+        const auto claim = state.topology_owners->source_ledger().lookup(body_id, sub);
+        const auto critical = held ? state.topology_owners->source_ledger().bound(held->element_id) : nullptr;
+        if (critical && (!claim || !io::source_identity_matches(*critical, io::source_identity_json(*claim)))) {
+            continue;
+        }
+        if (claim && (!held || critical)) {
+            const auto certificate = io::source_identity_json(*claim);
+            if (certificate.is_null()) continue;
+            entry["importSourceIdentity"] = certificate;
+        }
         if (pick.contains("anchor")) entry["anchor"] = pick["anchor"];
         ids.push_back(std::move(entry));
     }
@@ -242,7 +253,8 @@ json acquire_ids(const PublishedStateSnapshot& state, const std::string& body_id
 }
 
 bool parse_binding(const json& raw, ElementBindingInput& out) {
-    if (!raw.is_object()) return false;
+    if (!raw.is_object() || (io::contains_source_identity(raw) && !raw.contains("importSourceIdentity")))
+        return false;
     for (const char* key : {"bodyId", "topoKey", "elementId", "kind"}) {
         if (!raw.contains(key) || !raw[key].is_string()) return false;
     }
@@ -253,6 +265,7 @@ bool parse_binding(const json& raw, ElementBindingInput& out) {
     out.element_id = raw["elementId"].get<std::string>();
     out.kind = raw["kind"].get<std::string>();
     out.anchor = raw.contains("anchor") ? raw["anchor"] : json(nullptr);
+    if (raw.contains("importSourceIdentity")) out.import_source_identity = raw["importSourceIdentity"];
     return true;
 }
 
@@ -371,12 +384,43 @@ json ladder_resolution(const PublishedStateSnapshot& state, const json& ref,
                 {"margin", results[0].margin}};
 }
 
+json resolve_certified_source(const PublishedStateSnapshot& state, const json& ref,
+                              const json& primary, const std::string& ref_id) {
+    const std::string body_id = get_str(primary, "bodyId");
+    const std::string element_id = get_str(primary, "elementId");
+    const auto& source = state.topology_owners->source_ledger();
+    const auto* row = source.resolve(body_id, ref["importSourceIdentity"]);
+    const BodyRecord* body = state.bodies.get(body_id);
+    if (get_str(primary, "kind") != "face" || element_id.empty() || !row || !body)
+        return missing_body_resolution(ref, ref_id, element_id, body_id);
+    if (!source.compatible(element_id, *row->birth))
+        return missing_body_resolution(ref, ref_id, element_id, body_id);
+    const auto bound = source.bound(element_id);
+    if (bound && !io::source_identity_matches(*bound, ref["importSourceIdentity"]))
+        return missing_body_resolution(ref, ref_id, element_id, body_id);
+    const auto* entry = state.partition.find(element_id);
+    if (entry && (entry->body_id != body_id || entry->kind != em::km::ElementKind::Face ||
+                  !entry->shape.IsEqual(row->live_face)))
+        return missing_body_resolution(ref, ref_id, element_id, body_id);
+    if (state.partition.has_competing_shape(element_id, row->live_face))
+        return missing_body_resolution(ref, ref_id, element_id, body_id);
+    const auto topo = em::ElementMapPartition::topokey_for_shape(body->geom, row->live_face, em::km::ElementKind::Face);
+    if (topo.empty()) return missing_body_resolution(ref, ref_id, element_id, body_id);
+    if (entry && bound) return {{"refId", ref_id}, {"bodyId", body_id}, {"outcome", "unchanged"},
+                       {"elementId", element_id}, {"topoKey", topo}};
+    return {{"refId", ref_id}, {"bodyId", body_id}, {"outcome", "autoBind"},
+            {"elementId", ""}, {"topoKey", topo}, {"score", 1.0}, {"margin", 1.0}};
+}
+
 json resolve_one(const PublishedStateSnapshot& state, const json& ref) {
     const std::string ref_id = get_str(ref, "refId");
     const json primary = ref.contains("primary") && ref["primary"].is_object()
                              ? ref["primary"]
                              : json::object();
     const std::string element_id = get_str(primary, "elementId");
+    if (ref.contains("importSourceIdentity")) return resolve_certified_source(state, ref, primary, ref_id);
+    if (io::contains_source_identity(ref) || state.topology_owners->source_ledger().bound(element_id))
+        return missing_body_resolution(ref, ref_id, element_id, get_str(primary, "bodyId"));
     if (!element_id.empty()) {
         if (const em::PartitionEntry* entry = state.partition.find(element_id)) {
             WLOG_DEBUG(
@@ -418,11 +462,29 @@ Envelope handle_acquire_element_ids(Session& session, const Envelope& req) {
                                         /*retriable=*/false});
     }
     const json picks = req.args.value("picks", json::array());
+    if (io::contains_source_identity(picks)) {
+        return Envelope::error_response(req.id, protocol::ErrorInfo{
+            "REF_UNRESOLVED", "AcquireElementIds: import source identity unavailable", false});
+    }
     WLOG_DEBUG("ref_identity verb=AcquireElementIds snapshot=%llu body=%s picks=%zu",
                static_cast<unsigned long long>(published.state->snapshot_id), body_id.c_str(),
                picks.is_array() ? picks.size() : 0);
-    return Envelope::ok_response(
-        req.id, json{{"ids", acquire_ids(*published.state, body_id, picks)}});
+    json ids = acquire_ids(*published.state, body_id, picks);
+    std::vector<ElementBindingInput> critical;
+    for (const auto& row : ids) {
+        if (!row.contains("importSourceIdentity") || get_str(row, "elementId").empty()) continue;
+        ElementBindingInput binding;
+        if (!parse_binding(row, binding)) {
+            return Envelope::error_response(req.id, protocol::ErrorInfo{
+                "REF_UNRESOLVED", "AcquireElementIds: invalid critical binding", false});
+        }
+        critical.push_back(std::move(binding));
+    }
+    if (!critical.empty()) {
+        auto bound = session.bind_element_ids(published.state->snapshot_id, critical);
+        if (!bound.ok) return Envelope::error_response(req.id, std::move(bound.error));
+    }
+    return Envelope::ok_response(req.id, json{{"ids", std::move(ids)}});
 }
 
 Envelope handle_bind_element_ids(Session& session, const Envelope& req) {
@@ -459,15 +521,42 @@ Envelope handle_bind_element_ids(Session& session, const Envelope& req) {
     return Envelope::ok_response(req.id, json{{"bound", bound_json(outcome.bound)}});
 }
 
+static Envelope source_query_response(const PublishedStateSnapshot& state, const Envelope& req,
+                                      json result) {
+    if (!result.value("present", false)) return Envelope::ok_response(req.id, std::move(result));
+    const std::string body_id = get_str(result, "bodyId");
+    const std::string element_id = get_str(result, "elementId");
+    const BodyRecord* body = state.bodies.get(body_id);
+    if (!body) return Envelope::ok_response(req.id, std::move(result));
+    const auto shape = em::ElementMapPartition::shape_for_topokey(body->geom, get_str(result, "topoKey"));
+    const auto& ledger = state.topology_owners->source_ledger();
+    const auto claim = ledger.lookup(body_id, shape);
+    const auto critical = ledger.bound(element_id);
+    if (critical && (!claim || !io::source_identity_matches(*critical, io::source_identity_json(*claim)))) {
+        return Envelope::error_response(req.id, protocol::ErrorInfo{
+            "REF_UNRESOLVED", "QueryElement: critical source identity is unavailable", false});
+    }
+    if (claim && critical) {
+        const auto certificate = io::source_identity_json(*claim);
+        if (certificate.is_null()) return Envelope::error_response(req.id, protocol::ErrorInfo{
+            "REF_UNRESOLVED", "QueryElement: source identity is invalid", false});
+        result["importSourceIdentity"] = certificate;
+    }
+    return Envelope::ok_response(req.id, std::move(result));
+}
+
 Envelope handle_query_element(Session& session, const Envelope& req) {
+    if (io::contains_source_identity(req.args)) {
+        return Envelope::error_response(req.id, protocol::ErrorInfo{
+            "REF_UNRESOLVED", "QueryElement: import source identity unavailable", false});
+    }
     PublishedRead published = published_for(session, req, "QueryElement", false);
     if (published.error) return std::move(*published.error);
     if (req.args.contains("elementId") && req.args["elementId"].is_string()) {
-        return Envelope::ok_response(
-            req.id, query_by_id(published.state->partition,
-                                req.args["elementId"].get<std::string>()));
+        return source_query_response(*published.state, req, query_by_id(
+            published.state->partition, req.args["elementId"].get<std::string>()));
     }
-    return Envelope::ok_response(req.id, query_by_topokey(*published.state, req.args));
+    return source_query_response(*published.state, req, query_by_topokey(*published.state, req.args));
 }
 
 Envelope handle_resolve_refs(Session& session, const Envelope& req) {

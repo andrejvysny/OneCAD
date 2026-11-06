@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "elementmap/ElementMapPartition.h"
+#include "io/SourceClaimBatch.h"
 #include "nlohmann/json.hpp"
 #include "session/BodyStore.h"
 #include "session/Signatures.h"
@@ -71,6 +72,8 @@ struct OpOutcome {
 
     // Success payload.
     std::vector<session::BodyEvent> body_events;
+    // Verified source addresses, internal to the producer/ledger boundary.
+    std::shared_ptr<io::SourceClaimBatch> source_face_claims;
     std::vector<std::string> body_ids;              // bodies present/produced at this step
     elementmap::ElementMapDelta delta;              // relabeled/removed from this op's history
     std::vector<nlohmann::json> needs_repair;       // §9 items (STATE, not error)

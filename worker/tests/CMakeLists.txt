@@ -645,6 +645,10 @@ add_library(occt_persistence_codec STATIC
     ../src/io/BrepCodec.cpp
     ../src/io/OcafApp.cpp
     ../src/io/XcafCodec.cpp
+    ../src/util/Hashing.cpp
+)
+target_compile_definitions(occt_persistence_codec PUBLIC
+    ONECAD_OCCT_FINGERPRINT_SEED="${ONECAD_OCCT_FINGERPRINT_SEED}"
 )
 target_include_directories(occt_persistence_codec PUBLIC
     ${PROJECT_SOURCE_DIR}/src
@@ -1364,3 +1368,24 @@ add_test(NAME canonical_sketch_tangent_endpoint COMMAND worker_harness
 add_executable(test_blend_overflow test_blend_overflow.cpp)
 target_link_libraries(test_blend_overflow PRIVATE worker_core)
 add_test(NAME blend_overflow COMMAND test_blend_overflow)
+
+add_executable(test_source_capture test_source_capture.cpp)
+target_link_libraries(test_source_capture PRIVATE worker_core)
+target_compile_definitions(test_source_capture PRIVATE ONECAD_REPO_ROOT="${CMAKE_SOURCE_DIR}/..")
+add_test(NAME source_capture COMMAND test_source_capture)
+
+add_executable(test_harness_artifacts test_harness_artifacts.cpp)
+target_link_libraries(test_harness_artifacts PRIVATE worker_core)
+add_test(NAME harness_artifacts COMMAND test_harness_artifacts)
+
+add_executable(test_source_claim_budget test_source_claim_budget.cpp)
+target_include_directories(test_source_claim_budget PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+add_test(NAME source_claim_budget COMMAND test_source_claim_budget)
+
+add_executable(test_source_ledger test_source_ledger.cpp)
+target_link_libraries(test_source_ledger PRIVATE worker_core)
+add_test(NAME source_ledger COMMAND test_source_ledger)
+
+add_executable(test_source_budget_scale test_source_budget_scale.cpp)
+target_link_libraries(test_source_budget_scale PRIVATE worker_core)
+add_test(NAME source_budget_scale COMMAND test_source_budget_scale)

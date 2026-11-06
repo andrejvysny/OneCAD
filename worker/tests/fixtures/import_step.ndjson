@@ -4,7 +4,7 @@
 # The fixture GENERATES its own STEP input rather than referencing a committed
 # binary: plan 88 builds a 40x20x25 box, ExportStep writes it to a worker-writable
 # temp path, and plan 89 imports that file straight back. So the harness needs no
-# tracked fixture bytes and the input is byte-reproducible from this file alone
+# tracked fixture bytes and the input is generated afresh for each run
 # (the same rationale as tests/step_fixture_util.h; corpus/step/NOTE.md records
 # why no STEP oracle exists to commit).
 #
@@ -21,18 +21,18 @@
 {"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":88,"documentRevision":0,"workerEpoch":3}}}
 {"expect":{"v":1,"t":"resp","id":3,"ok":true,"result":{"accepted":true,"snapshotId":1}}}
 # Produce the STEP input for the import below.
-{"send":{"v":1,"t":"req","id":4,"verb":"ExportStep","args":{"path":"/tmp/onecad_harness_import.step","bodyIds":["body_op1"],"schema":"AP214IS"}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"ExportStep","args":{"path":"$artifact:import.step","bodyIds":["body_op1"],"schema":"AP214IS"}}}
 {"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"written":true,"bytes":"$present"}}}
 # Read-only probe + conversion lane. `bin` carries the BinXCAF document; the
 # section table is what Rust addresses the bytes by (SCHEMA §5.2).
-{"send":{"v":1,"t":"req","id":5,"verb":"InspectStep","args":{"path":"/tmp/onecad_harness_import.step","includeGeometry":true}}}
+{"send":{"v":1,"t":"req","id":5,"verb":"InspectStep","args":{"path":"$artifact:import.step","includeGeometry":true}}}
 {"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"solidCount":1,"sourceUnit":"MM","geometryCodec":"xbf","geometryFormat":12,"bbox":{"min":"$present","max":"$present"},"productNames":"$present","diagnostics":"$present"},"bin":[{"name":"geometry","off":0,"len":"$present"}]}}
 # …and it published nothing: the head is byte-identical to the one after id 3.
 {"send":{"v":1,"t":"req","id":6,"verb":"GetWorkerHead","args":{}}}
 {"expect":{"v":1,"t":"resp","id":6,"ok":true,"result":{"documentRevision":0,"workerEpoch":3,"snapshotId":1,"hasScratch":false,"historyPrefixHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
 # The import itself is an OP on the timeline. A from-0 plan (D5) whose only step is
 # the import: one solid ⇒ the PLAIN `body_<opId>` form, `created`, no deleted parent.
-{"send":{"v":1,"t":"req","id":7,"verb":"ExecutePlan","args":{"jobId":89,"documentRevision":1,"workerEpoch":3,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":0,"ops":[{"opType":"ImportStep","opId":"op2","stepIndex":0,"params":{"sourceSha256":"1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef","sourceName":"roundtrip.step","sourceCodec":"step","healPolicy":"v1","unitScale":1.0,"brepFormat":null,"path":"/tmp/onecad_harness_import.step"}}]}}}
+{"send":{"v":1,"t":"req","id":7,"verb":"ExecutePlan","args":{"jobId":89,"documentRevision":1,"workerEpoch":3,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":0,"ops":[{"opType":"ImportStep","opId":"op2","stepIndex":0,"params":{"sourceSha256":"$sha256:import.step","sourceName":"roundtrip.step","sourceCodec":"step","healPolicy":"v1","unitScale":1.0,"brepFormat":null,"path":"$artifact:import.step"}}]}}}
 {"expect":{"v":1,"t":"event","id":7,"event":"planStep","stepIndex":0,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op2"}],"elementMapDelta":{"added":[],"relabeled":[],"removed":[]}}}}
 {"expect":{"v":1,"t":"resp","id":7,"ok":true,"result":{"planPrepared":true,"lastValidStep":0,"stoppedReason":"completed","perStepResults":[{"stepIndex":0,"status":"ok","bodyIds":["body_op2"]}],"historyPrefixHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
 {"send":{"v":1,"t":"req","id":8,"verb":"AcceptPrepared","args":{"jobId":89,"documentRevision":1,"workerEpoch":3}}}

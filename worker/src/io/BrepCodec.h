@@ -13,6 +13,7 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -54,6 +55,7 @@ struct BrepReadResult {
 // reports a version mismatch by printing to `std::cout` directly, which is the
 // worker's frame channel (see the rationale in the .cpp).
 BrepReadResult read_brep_solids(const std::string& path);
+BrepReadResult read_brep_solids_bytes(std::span<const std::uint8_t> bytes);
 
 struct BrepShapeResult {
     TopoDS_Shape shape;  // null on failure
