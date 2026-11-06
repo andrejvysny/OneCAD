@@ -53,6 +53,15 @@ pub(crate) fn parse_plan_previewed(
     expected: SnapshotId,
     steps: Vec<PlanStepEvent>,
 ) -> Result<PlanPreview, String> {
+    onecad_protocol::allocation::value_owned_bytes(result, 512 << 10)
+        .ok_or("PreviewPlan: owned metadata budget exceeded")?;
+    if result
+        .get("perStepResults")
+        .and_then(Value::as_array)
+        .is_some_and(|steps| steps.len() > 512)
+    {
+        return Err("PreviewPlan: step count exceeds 512".into());
+    }
     if result.get("planPreviewed") != Some(&Value::Bool(true)) {
         return Err("PreviewPlan: missing planPreviewed".into());
     }
@@ -163,6 +172,9 @@ fn parse_bodies(value: Option<&Value>) -> Result<Vec<BodyId>, String> {
     let items = value
         .and_then(Value::as_array)
         .ok_or("PreviewPlan: missing bodies array")?;
+    if items.len() > crate::worker::MAX_PREVIEW_BODIES {
+        return Err("PreviewPlan: body count exceeds 256".into());
+    }
     let mut seen = HashSet::with_capacity(items.len());
     items
         .iter()
@@ -189,6 +201,9 @@ fn parse_meshes(
     let handles = value
         .and_then(Value::as_array)
         .ok_or("PreviewPlan: missing meshes array")?;
+    if handles.len() > crate::worker::MAX_PREVIEW_BODIES {
+        return Err("PreviewPlan: mesh count exceeds 256".into());
+    }
     let by_name = wire::validate_bin_sections("PreviewPlan", sections, tail)?;
     let known: HashSet<BodyId> = bodies.iter().copied().collect();
     let mut referenced = HashSet::with_capacity(handles.len());
@@ -214,6 +229,9 @@ fn parse_meshes(
             .get("bin")
             .and_then(Value::as_str)
             .ok_or("PreviewPlan: mesh handle missing bin")?;
+        if !referenced.insert(name.to_string()) {
+            return Err("PreviewPlan: binary section reused".into());
+        }
         let section = by_name
             .get(name)
             .ok_or_else(|| format!("PreviewPlan: mesh section {name:?} absent"))?;
@@ -224,7 +242,6 @@ fn parse_meshes(
         let total = handle.get("totalBytes").and_then(Value::as_u64);
         let sha = handle.get("sha256").and_then(Value::as_str);
         wire::verify_mesh(blob, total, sha).map_err(|e| format!("PreviewPlan: {e}"))?;
-        referenced.insert(name.to_string());
         out.push(PreparedMeshRef {
             body,
             lod: lod_from_str(handle.get("lod").and_then(Value::as_str).unwrap_or("")),
@@ -340,6 +357,18 @@ mod tests {
             parse(vec![event(0), event(0), event(1)]).is_err(),
             "repeated"
         );
+    }
+
+    #[test]
+    fn terminal_arrays_and_nested_metadata_are_bounded() {
+        for (field, count) in [("bodies", 257), ("perStepResults", 513)] {
+            let mut result = terminal(json!([]), Value::Null, "completed");
+            result[field] = json!(vec![Value::Null; count]);
+            assert!(parse_plan_previewed(&result, &[], &[], SnapshotId(9), vec![]).is_err());
+        }
+        let mut result = terminal(json!([]), Value::Null, "completed");
+        result["extra"] = json!([vec![Value::Null; 12_000]]);
+        assert!(parse_plan_previewed(&result, &[], &[], SnapshotId(9), vec![]).is_err());
     }
 
     #[test]

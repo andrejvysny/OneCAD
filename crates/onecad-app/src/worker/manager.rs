@@ -2274,6 +2274,8 @@ fn parse_preview_result(
     sections: &[onecad_protocol::messages::BinSection],
     tail: &[u8],
 ) -> Result<crate::dto::PreviewResultDto, EngineError> {
+    onecad_protocol::allocation::value_owned_bytes(result, 512 << 10)
+        .ok_or_else(|| protocol("PreviewOp: owned metadata budget exceeded"))?;
     let snapshot_id = result
         .get("snapshotId")
         .and_then(Value::as_u64)
@@ -2281,7 +2283,7 @@ fn parse_preview_result(
     let body_events = parse_preview_body_events(result.get("bodyEvents"))?;
     let changed_bodies = preview_body_id_array(result.get("changedBodies"), "changedBodies")?;
     let deleted_bodies = preview_body_id_array(result.get("deletedBodies"), "deletedBodies")?;
-    let needs_repair = preview_value_array(result.get("needsRepair"), "needsRepair")?;
+    let needs_repair = preview_array(result.get("needsRepair"), "needsRepair")?.to_vec();
     let section_table =
         wire::validate_bin_sections("PreviewOp", sections, tail).map_err(|e| protocol(&e))?;
     let (bodies, referenced) = parse_preview_meshes(result.get("meshes"), &section_table, tail)?;
@@ -2299,9 +2301,10 @@ fn parse_preview_result(
     })
 }
 
-fn preview_value_array(value: Option<&Value>, field: &str) -> Result<Vec<Value>, EngineError> {
+fn preview_array<'a>(value: Option<&'a Value>, field: &str) -> Result<&'a [Value], EngineError> {
     match value {
-        Some(Value::Array(items)) => Ok(items.clone()),
+        Some(Value::Array(items)) if items.len() <= crate::worker::MAX_PREVIEW_BODIES => Ok(items),
+        Some(Value::Array(_)) => Err(protocol(&format!("PreviewOp: {field} exceeds 256 entries"))),
         _ => Err(protocol(&format!(
             "PreviewOp: missing/invalid {field} array"
         ))),
@@ -2309,8 +2312,8 @@ fn preview_value_array(value: Option<&Value>, field: &str) -> Result<Vec<Value>,
 }
 
 fn preview_body_id_array(value: Option<&Value>, field: &str) -> Result<Vec<String>, EngineError> {
-    preview_value_array(value, field)?
-        .into_iter()
+    preview_array(value, field)?
+        .iter()
         .map(|item| {
             let id = item.as_str().filter(|id| !id.is_empty()).ok_or_else(|| {
                 protocol(&format!(
@@ -2325,8 +2328,8 @@ fn preview_body_id_array(value: Option<&Value>, field: &str) -> Result<Vec<Strin
 fn parse_preview_body_events(
     value: Option<&Value>,
 ) -> Result<Vec<crate::dto::PreviewBodyEventDto>, EngineError> {
-    preview_value_array(value, "bodyEvents")?
-        .into_iter()
+    preview_array(value, "bodyEvents")?
+        .iter()
         .map(|event| {
             let kind = event.get("kind").and_then(Value::as_str).unwrap_or("");
             let body_id = event.get("bodyId").and_then(Value::as_str).unwrap_or("");
@@ -2352,11 +2355,18 @@ fn parse_preview_meshes<'a>(
     sections: &HashMap<&'a str, &'a onecad_protocol::messages::BinSection>,
     tail: &[u8],
 ) -> Result<(Vec<crate::dto::PreviewBodyDto>, HashSet<String>), EngineError> {
-    let meshes = preview_value_array(value, "meshes")?;
+    let meshes = preview_array(value, "meshes")?;
     let mut referenced = HashSet::with_capacity(meshes.len());
     let mut parsed = Vec::with_capacity(meshes.len());
     for mesh in meshes {
-        let (body, section) = parse_preview_mesh(&mesh, sections, tail)?;
+        let section_name = mesh
+            .get("bin")
+            .and_then(Value::as_str)
+            .ok_or_else(|| protocol("PreviewOp: mesh missing bin"))?;
+        if referenced.contains(section_name) {
+            return Err(protocol("PreviewOp: binary section reused"));
+        }
+        let (body, section) = parse_preview_mesh(mesh, sections, tail)?;
         if !referenced.insert(section.clone()) {
             return Err(protocol(&format!(
                 "PreviewOp: binary section {section:?} reused"
@@ -2472,7 +2482,13 @@ impl crate::worker::PreviewEngine for WorkerManager {
         // bodies the op touched), so there is no bulk-chunk lane to drain here —
         // unlike `fetch_mesh`, which serves arbitrary-size document meshes.
         let (resp, tail) = client
-            .start_request("PreviewOp", args, Lane::Control)
+            .start_request_bounded(
+                "PreviewOp",
+                args,
+                Lane::Control,
+                crate::worker::MAX_PREVIEW_RESPONSE_JSON_BYTES,
+                crate::worker::MAX_PREVIEW_RESPONSE_MESH_BYTES,
+            )
             .await
             .map_err(protocol_err)?
             .response_with_bin()
@@ -3087,6 +3103,29 @@ mod preview_parse_tests {
 
     fn assert_protocol_error(result: Result<crate::dto::PreviewResultDto, EngineError>) {
         assert!(matches!(result, Err(EngineError::Protocol { .. })));
+    }
+
+    #[test]
+    fn compact_nested_repair_metadata_refuses_before_clone() {
+        let mut result = base_result();
+        result["needsRepair"] = json!([vec![Value::Null; 12_000]]);
+        assert!(serde_json::to_vec(&result).unwrap().len() < 256 << 10);
+        assert_protocol_error(parse_preview_result(&result, &[], &[]));
+    }
+
+    #[test]
+    fn preview_arrays_refuse_over_budget_before_materialization() {
+        for field in [
+            "bodyEvents",
+            "changedBodies",
+            "deletedBodies",
+            "needsRepair",
+            "meshes",
+        ] {
+            let mut result = base_result();
+            result[field] = Value::Array(vec![Value::Null; 257]);
+            assert_protocol_error(parse_preview_result(&result, &[], &[]));
+        }
     }
 
     #[test]

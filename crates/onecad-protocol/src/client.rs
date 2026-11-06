@@ -8,6 +8,9 @@
 //! with [`ProtocolError::ConnectionLost`] (SCHEMA §8 — no resync, caller
 //! restarts). See `../../protocol/SCHEMA.md`.
 
+mod event_retention;
+pub use event_retention::RetainedEvent;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -123,6 +126,8 @@ fn trace_rx_frame(_frame: &Frame) {}
 struct Pending {
     waiters: HashMap<u64, oneshot::Sender<Result<RespWithBin, ProtocolError>>>,
     closed: bool,
+    response_limits: HashMap<u64, (u32, u32)>,
+    auxiliary_remaining: HashMap<u64, usize>,
 }
 
 type PendingMap = Arc<Mutex<Pending>>;
@@ -131,13 +136,13 @@ type PendingMap = Arc<Mutex<Pending>>;
 #[derive(Debug, Clone)]
 pub enum WorkerEvent {
     /// A `progress` frame.
-    Progress(ProgressFrame),
+    Progress(RetainedEvent<ProgressFrame>),
     /// An `event` frame (e.g. `ExecutePlan` `planStep`).
-    Event(EventFrame),
+    Event(RetainedEvent<EventFrame>),
     /// A `chunk` frame (manifest or data) with its raw binary tail (SCHEMA §1):
     /// a data frame's tail carries the bytes its `bin` section addresses, which
     /// the bulk assembler concatenates by `byteOffset` (SCHEMA §5.2).
-    Chunk(ChunkFrame, Vec<u8>),
+    Chunk(Box<ChunkFrame>, Vec<u8>),
     /// A `credit` frame (normally Rust → worker; surfaced for completeness).
     Credit(CreditFrame),
 }
@@ -299,6 +304,26 @@ impl ProtocolClient {
         args: serde_json::Value,
         lane: Lane,
     ) -> Result<InflightRequest, ProtocolError> {
+        self.start_request_bounded(
+            verb,
+            args,
+            lane,
+            crate::framing::MAX_JSON_LEN,
+            crate::framing::MAX_BIN_LEN,
+        )
+        .await
+    }
+
+    /// Admit a response envelope before parsing its DTO and its tail before allocating it. Exceeding this local
+    /// policy closes the transport; OCW1 framing limits remain unchanged.
+    pub async fn start_request_bounded(
+        &self,
+        verb: &str,
+        args: serde_json::Value,
+        lane: Lane,
+        max_json_len: u32,
+        max_binary_len: u32,
+    ) -> Result<InflightRequest, ProtocolError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let frame = Frame::Req(ReqFrame {
             v: PROTOCOL_VERSION,
@@ -317,11 +342,22 @@ impl ProtocolClient {
                 return Err(ProtocolError::ConnectionLost("connection closed"));
             }
             pending.waiters.insert(id, tx);
+            pending
+                .response_limits
+                .insert(id, (max_json_len, max_binary_len));
+            if max_json_len < crate::framing::MAX_JSON_LEN
+                || max_binary_len < crate::framing::MAX_BIN_LEN
+            {
+                pending.auxiliary_remaining.insert(id, 512 << 10);
+            }
         }
 
         let json_len = raw.json.len();
         if self.cmd_tx.send(raw).await.is_err() {
-            self.pending.lock().unwrap().waiters.remove(&id);
+            let mut pending = self.pending.lock().unwrap();
+            pending.waiters.remove(&id);
+            pending.response_limits.remove(&id);
+            pending.auxiliary_remaining.remove(&id);
             return Err(ProtocolError::ConnectionLost("writer task ended"));
         }
         trace_tx(id, verb, lane, json_len);
@@ -440,13 +476,25 @@ async fn reader_task<R>(
 ) where
     R: AsyncRead + Unpin,
 {
+    let mut admitted = None;
     loop {
         // Drain every complete frame currently buffered.
         loop {
+            if let Err(err) = cached_frame_size(&buf, &pending, &mut admitted) {
+                diag_warn!("onecad-protocol: response admission failed: {err}");
+                fail_all(&pending);
+                return;
+            }
             match decode_frame(&buf) {
                 Ok(Some((frame, consumed))) => {
                     buf.advance(consumed);
-                    dispatch(&frame, &pending, &events_tx);
+                    admitted = None;
+                    if buf.is_empty() {
+                        buf = BytesMut::with_capacity(HEADER_LEN);
+                    }
+                    if !dispatch(frame, &pending, &events_tx) {
+                        return;
+                    }
                 }
                 Ok(None) => break,
                 Err(err) => {
@@ -457,20 +505,21 @@ async fn reader_task<R>(
                 }
             }
         }
-        // Reserve for a known-but-incomplete frame so we read it in one shot.
-        if buf.len() >= HEADER_LEN {
-            // decode_frame above returned Ok(None) without erroring, so caps are
-            // valid; recompute the needed size defensively.
-            if let Ok(json_len) = try_len(&buf[4..8]) {
-                if let Ok(bin_len) = try_len(&buf[8..12]) {
-                    let total = HEADER_LEN + json_len + bin_len;
-                    if total > buf.len() {
-                        buf.reserve(total - buf.len());
-                    }
-                }
+        let needed = match cached_frame_size(&buf, &pending, &mut admitted) {
+            Ok(needed) => needed,
+            Err(err) => {
+                diag_warn!("onecad-protocol: response admission failed: {err}");
+                fail_all(&pending);
+                return;
             }
-        }
-        match reader.read_buf(&mut buf).await {
+        };
+        buf.reserve(needed.saturating_sub(buf.len()));
+        let remaining = needed.saturating_sub(buf.len()).max(1);
+        match (&mut reader)
+            .take(remaining as u64)
+            .read_buf(&mut buf)
+            .await
+        {
             Ok(0) => {
                 // EOF. Clean at a boundary or mid-frame: either way, pending
                 // requests can never complete -> ConnectionLost.
@@ -487,12 +536,109 @@ async fn reader_task<R>(
     }
 }
 
-fn try_len(bytes: &[u8]) -> Result<usize, ()> {
-    let arr: [u8; 4] = bytes.try_into().map_err(|_| ())?;
-    Ok(u32::from_le_bytes(arr) as usize)
+fn cached_frame_size(
+    buf: &[u8],
+    pending: &PendingMap,
+    admitted: &mut Option<usize>,
+) -> Result<usize, ProtocolError> {
+    if let Some(size) = *admitted {
+        return Ok(size);
+    }
+    let size = admitted_frame_size(buf, pending)?;
+    if buf.len() >= HEADER_LEN {
+        let header = crate::framing::parse_header(buf)?;
+        if buf.len() >= HEADER_LEN + header.json_len as usize {
+            *admitted = Some(size);
+        }
+    }
+    Ok(size)
 }
 
-fn dispatch(frame: &RawFrame, pending: &PendingMap, events_tx: &broadcast::Sender<WorkerEvent>) {
+// Read only header, then envelope, then the admitted tail. Parsing the small
+// routing view avoids constructing the response DTO before local admission.
+fn admitted_frame_size(buf: &[u8], pending: &PendingMap) -> Result<usize, ProtocolError> {
+    if buf.len() < HEADER_LEN {
+        return Ok(HEADER_LEN);
+    }
+    let header = crate::framing::parse_header(buf)?;
+    let envelope_end = HEADER_LEN + header.json_len as usize;
+    if buf.len() < envelope_end {
+        return Ok(envelope_end);
+    }
+    #[derive(serde::Deserialize)]
+    struct Routing {
+        id: Option<u64>,
+    }
+    let routing: Routing = serde_json::from_slice(&buf[HEADER_LEN..envelope_end])?;
+    if let Some((json_cap, cap)) = routing
+        .id
+        .and_then(|id| pending.lock().unwrap().response_limits.get(&id).copied())
+    {
+        if header.json_len > json_cap {
+            return Err(ProtocolError::TooLarge {
+                what: "response envelope admission",
+                len: header.json_len,
+                cap: json_cap,
+            });
+        }
+        if header.bin_len > cap {
+            return Err(ProtocolError::TooLarge {
+                what: "response binary admission",
+                len: header.bin_len,
+                cap,
+            });
+        }
+    }
+    Ok(envelope_end + header.bin_len as usize)
+}
+
+// Charge all progress/events for a bounded request before broadcasting them.
+// The cumulative allowance bounds both backlog and a slow consumer's history.
+fn admit_auxiliary(frame: &Frame, pending: &PendingMap) -> bool {
+    let (id, value, text_bytes) = match frame {
+        Frame::Event(event) => (event.id, Some(&event.payload), event.event.capacity()),
+        Frame::Progress(progress) => (
+            progress.id,
+            None,
+            progress.phase.capacity() + progress.message.as_ref().map_or(0, String::capacity),
+        ),
+        Frame::Chunk(chunk) => {
+            return !pending
+                .lock()
+                .unwrap()
+                .auxiliary_remaining
+                .contains_key(&chunk.id);
+        }
+        _ => return true,
+    };
+    let mut pending = pending.lock().unwrap();
+    let Some(remaining) = pending.auxiliary_remaining.get_mut(&id) else {
+        return true;
+    };
+    let value_bytes = match value {
+        Some(value) => match crate::allocation::value_owned_bytes(value, *remaining) {
+            Some(bytes) => bytes,
+            None => return false,
+        },
+        None => 0,
+    };
+    let bytes = value_bytes
+        .checked_add(text_bytes)
+        .and_then(|bytes| bytes.checked_add(size_of::<WorkerEvent>()));
+    match bytes.and_then(|bytes| remaining.checked_sub(bytes)) {
+        Some(left) => {
+            *remaining = left;
+            true
+        }
+        None => false,
+    }
+}
+
+fn dispatch(
+    frame: RawFrame,
+    pending: &PendingMap,
+    events_tx: &broadcast::Sender<WorkerEvent>,
+) -> bool {
     let parsed = match Frame::from_json_slice(&frame.json) {
         Ok(parsed) => parsed,
         Err(err) => {
@@ -500,27 +646,68 @@ fn dispatch(frame: &RawFrame, pending: &PendingMap, events_tx: &broadcast::Sende
             // frame stream is desynchronized. Fail everything (no resync).
             diag_warn!("onecad-protocol: malformed envelope: {err}");
             fail_all(pending);
-            return;
+            return false;
         }
     };
+    if !admit_auxiliary(&parsed, pending) {
+        diag_warn!("onecad-protocol: auxiliary response admission exceeded");
+        fail_all(pending);
+        return false;
+    }
     trace_rx_frame(&parsed);
     match parsed {
         Frame::Resp(resp) => {
-            let waiter = pending.lock().unwrap().waiters.remove(&resp.id);
+            let waiter = {
+                let mut pending = pending.lock().unwrap();
+                pending.response_limits.remove(&resp.id);
+                pending.auxiliary_remaining.remove(&resp.id);
+                pending.waiters.remove(&resp.id)
+            };
             if let Some(tx) = waiter {
-                let _ = tx.send(Ok((resp, frame.bin.clone())));
+                let _ = tx.send(Ok((resp, frame.bin)));
             } else {
                 diag_warn!("onecad-protocol: resp for unknown id {}", resp.id);
             }
         }
         Frame::Progress(p) => {
-            let _ = events_tx.send(WorkerEvent::Progress(p));
+            let bounded = pending
+                .lock()
+                .unwrap()
+                .auxiliary_remaining
+                .contains_key(&p.id);
+            let event = if bounded {
+                let bytes = p.phase.capacity() + p.message.as_ref().map_or(0, String::capacity);
+                let Some(event) = RetainedEvent::new(p, bytes) else {
+                    fail_all(pending);
+                    return false;
+                };
+                event
+            } else {
+                RetainedEvent::untracked(p)
+            };
+            let _ = events_tx.send(WorkerEvent::Progress(event));
         }
         Frame::Event(e) => {
-            let _ = events_tx.send(WorkerEvent::Event(e));
+            let bounded = pending
+                .lock()
+                .unwrap()
+                .auxiliary_remaining
+                .contains_key(&e.id);
+            let event = if bounded {
+                let bytes = crate::allocation::value_owned_bytes(&e.payload, 4 << 20)
+                    .and_then(|bytes| bytes.checked_add(e.event.capacity()));
+                let Some(event) = bytes.and_then(|bytes| RetainedEvent::new(e, bytes)) else {
+                    fail_all(pending);
+                    return false;
+                };
+                event
+            } else {
+                RetainedEvent::untracked(e)
+            };
+            let _ = events_tx.send(WorkerEvent::Event(event));
         }
         Frame::Chunk(c) => {
-            let _ = events_tx.send(WorkerEvent::Chunk(c, frame.bin.clone()));
+            let _ = events_tx.send(WorkerEvent::Chunk(Box::new(c), frame.bin));
         }
         Frame::Credit(c) => {
             let _ = events_tx.send(WorkerEvent::Credit(c));
@@ -532,10 +719,13 @@ fn dispatch(frame: &RawFrame, pending: &PendingMap, events_tx: &broadcast::Sende
             diag_warn!("onecad-protocol: worker sent a driver-only frame");
         }
     }
+    true
 }
 
 fn fail_all(pending: &PendingMap) {
     let mut map = pending.lock().unwrap();
+    map.response_limits.clear();
+    map.auxiliary_remaining.clear();
     map.closed = true; // latch first: a racing request now fails fast, never hangs.
     for (_, tx) in map.waiters.drain() {
         let _ = tx.send(Err(ProtocolError::ConnectionLost(
@@ -618,6 +808,151 @@ mod tests {
         })
     }
 
+    #[test]
+    fn bounded_response_refuses_tail_from_header_and_envelope_alone() {
+        let pending = Arc::new(Mutex::new(Pending::default()));
+        pending
+            .lock()
+            .unwrap()
+            .response_limits
+            .insert(7, (256 << 10, 32 << 20));
+        let json = br#"{"kind":"resp","id":7}"#;
+        let mut prefix = Vec::from(crate::framing::MAGIC_BYTES);
+        prefix.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        prefix.extend_from_slice(&crate::framing::MAX_BIN_LEN.to_le_bytes());
+        assert_eq!(
+            admitted_frame_size(&prefix, &pending).unwrap(),
+            HEADER_LEN + json.len()
+        );
+        prefix.extend_from_slice(json);
+        assert!(matches!(admitted_frame_size(&prefix, &pending),
+            Err(ProtocolError::TooLarge { cap, .. }) if cap == 32 << 20));
+        assert_eq!(prefix.len(), HEADER_LEN + json.len());
+        // Another correlation retains the normative transport limit.
+        pending.lock().unwrap().response_limits.clear();
+        assert_eq!(
+            admitted_frame_size(&prefix, &pending).unwrap(),
+            prefix.len() + (1 << 30)
+        );
+    }
+
+    #[test]
+    fn non_preview_event_keeps_existing_depth_and_size_semantics() {
+        let pending = Arc::new(Mutex::new(Pending::default()));
+        let (events, mut receiver) = broadcast::channel(256);
+        let mut payload = json!("x".repeat((4 << 20) + 1));
+        for _ in 0..40 {
+            payload = json!([payload]);
+        }
+        let event = Frame::Event(EventFrame {
+            v: 1,
+            id: 8,
+            event: "planStep".into(),
+            step_index: Some(0),
+            payload,
+            document_revision: 1,
+            worker_epoch: 1,
+            snapshot_id: 1,
+            job_id: Some(1),
+            seq: 1,
+        });
+        assert!(dispatch(
+            RawFrame::json_only(event.to_json_vec().unwrap()),
+            &pending,
+            &events
+        ));
+        let received = receiver.try_recv().unwrap();
+        assert!(matches!(received, WorkerEvent::Event(_)));
+        assert!(!pending.lock().unwrap().closed);
+    }
+
+    #[test]
+    fn bounded_event_flood_closes_before_unbounded_broadcast_backlog() {
+        let pending = Arc::new(Mutex::new(Pending::default()));
+        pending
+            .lock()
+            .unwrap()
+            .auxiliary_remaining
+            .insert(7, 512 << 10);
+        let (events, _slow_consumer) = broadcast::channel(256);
+        let event = Frame::Event(EventFrame {
+            v: 1,
+            id: 7,
+            event: "planStep".into(),
+            step_index: Some(0),
+            payload: json!({"padding": "x".repeat(4096)}),
+            document_revision: 1,
+            worker_epoch: 1,
+            snapshot_id: 1,
+            job_id: Some(1),
+            seq: 1,
+        });
+        let mut accepted = 0;
+        for _ in 0..1024 {
+            if !dispatch(
+                RawFrame::json_only(event.to_json_vec().unwrap()),
+                &pending,
+                &events,
+            ) {
+                break;
+            }
+            accepted += 1;
+        }
+        assert!(accepted > 0 && accepted < 256);
+        assert!(pending.lock().unwrap().closed);
+        assert!(events.len() < 256);
+    }
+
+    #[test]
+    fn bounded_response_refuses_envelope_before_dto_parse() {
+        let pending = Arc::new(Mutex::new(Pending::default()));
+        pending
+            .lock()
+            .unwrap()
+            .response_limits
+            .insert(7, (16, 32 << 20));
+        let json = br#"{"t":"resp","id":7,"result":[0,0,0,0]}"#;
+        let prefix = encode_frame(json, &[]).unwrap();
+        assert!(matches!(
+            admitted_frame_size(&prefix, &pending),
+            Err(ProtocolError::TooLarge {
+                what: "response envelope admission",
+                cap: 16,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn oversized_bounded_response_closes_without_waiting_for_tail() {
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let mut server = MockServer {
+            io: server_io,
+            rbuf: BytesMut::new(),
+        };
+        server.write_frame(&hello_frame()).await;
+        let (r, w) = tokio::io::split(client_io);
+        let client = ProtocolClient::connect(r, w).await.unwrap();
+        let request = client
+            .start_request_bounded("PreviewOp", json!({}), Lane::Control, 256 << 10, 32)
+            .await
+            .unwrap();
+        let req = server.read_req().await;
+        let json = ok_resp(req.id).to_json_vec().unwrap();
+        let mut prefix = Vec::from(crate::framing::MAGIC_BYTES);
+        prefix.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        prefix.extend_from_slice(&crate::framing::MAX_BIN_LEN.to_le_bytes());
+        prefix.extend_from_slice(&json);
+        server.io.write_all(&prefix).await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(1), request.response_with_bin())
+            .await
+            .unwrap();
+        assert!(matches!(result, Err(ProtocolError::ConnectionLost(_))));
+        assert!(client.is_closed());
+        assert!(client.pending.lock().unwrap().response_limits.is_empty());
+        client.close().await;
+    }
+
     #[tokio::test]
     async fn hello_is_consumed_on_connect() {
         let (client_io, server_io) = tokio::io::duplex(4096);
@@ -673,6 +1008,50 @@ mod tests {
         }
         server_task.await.unwrap();
         Arc::try_unwrap(client).ok().unwrap().close().await;
+    }
+
+    #[tokio::test]
+    async fn ambiguous_import_reason_keeps_typed_connection_usable() {
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let mut server = MockServer {
+            io: server_io,
+            rbuf: BytesMut::new(),
+        };
+        server.write_frame(&hello_frame()).await;
+        let server_task = tokio::spawn(async move {
+            let req = server.read_req().await;
+            let mut response = match ok_resp(req.id) {
+                Frame::Resp(response) => response,
+                _ => unreachable!(),
+            };
+            response.ok = false;
+            response.result = None;
+            response.error = Some(ErrorObject {
+                code: ErrorCode::OpFailed,
+                message: "InspectStep: AMBIGUOUS_IMPORT_ORDER: exact canonical tie".into(),
+                detail: Some(
+                    json!({"diagnostics":[{"severity":"error", "code":"OP_FAILED",
+                    "reasonCode":"AMBIGUOUS_IMPORT_ORDER", "stage":"import"}]}),
+                ),
+                retriable: false,
+            });
+            server.write_frame(&Frame::Resp(response)).await;
+            let next = server.read_req().await;
+            server.write_frame(&ok_resp(next.id)).await;
+        });
+        let (r, w) = tokio::io::split(client_io);
+        let client = ProtocolClient::connect(r, w).await.unwrap();
+        let response = client.request("InspectStep", json!({})).await.unwrap();
+        let error = response.error.unwrap();
+        assert_eq!(error.code, ErrorCode::OpFailed);
+        assert_eq!(
+            error.detail.unwrap()["diagnostics"][0]["reasonCode"],
+            "AMBIGUOUS_IMPORT_ORDER"
+        );
+        assert!(!client.is_closed());
+        assert!(client.request("GetWorkerHead", json!({})).await.unwrap().ok);
+        server_task.await.unwrap();
+        client.close().await;
     }
 
     #[tokio::test]

@@ -69,7 +69,7 @@ impl RawFrame {
 ///
 /// Validates the magic (as bytes) and the caps. Callers that already hold ≥12
 /// bytes use this to learn the total frame size.
-fn parse_header(head: &[u8]) -> Result<FrameHeader, ProtocolError> {
+pub(crate) fn parse_header(head: &[u8]) -> Result<FrameHeader, ProtocolError> {
     debug_assert!(head.len() >= HEADER_LEN);
     if head[0..4] != MAGIC_BYTES {
         return Err(ProtocolError::bad_magic([

@@ -81,6 +81,11 @@ async fn request(
     query: Option<OperandQuery>,
     cancel: CancelToken,
 ) -> Result<(PlanPreview, Value), EngineError> {
+    if req.plan.ops.len() > 512 {
+        return Err(EngineError::Protocol {
+            message: "PreviewPlan step budget exceeded".into(),
+        });
+    }
     if cancel.is_cancelled() {
         return Err(EngineError::Cancelled);
     }
@@ -179,7 +184,13 @@ async fn run(
         args["editOperandContext"] = operation.clone();
     }
     let inflight = client
-        .start_request("PreviewPlan", args, Lane::Control)
+        .start_request_bounded(
+            "PreviewPlan",
+            args,
+            Lane::Control,
+            crate::worker::MAX_PREVIEW_RESPONSE_JSON_BYTES,
+            crate::worker::MAX_PREVIEW_RESPONSE_MESH_BYTES,
+        )
         .await
         .map_err(protocol_err)?;
     let id = inflight.id;
@@ -192,7 +203,14 @@ async fn run(
             biased;
             ev = events.recv() => match ev {
                 Ok(WorkerEvent::Event(e)) if e.id == id && e.event == "planStep" => {
-                    let step = e.step_index.map_or(0, |s| s as usize);
+                    let step = e.step_index.and_then(|step| usize::try_from(step).ok());
+                    let expected = req.plan.ops.get(steps.len()).map(|op| op.step_index);
+                    if steps.len() >= 512 || step.is_none() || step != expected {
+                        break StreamEnd::Local(EngineError::Protocol {
+                            message: "PreviewPlan unexpected, repeated or over-budget planStep".into(),
+                        });
+                    }
+                    let step = step.expect("checked above");
                     match wire::parse_plan_step(&e.payload, step) {
                         Ok(s) => steps.push(s),
                         Err(message) => break StreamEnd::Local(EngineError::Protocol { message }),
@@ -212,6 +230,11 @@ async fn run(
             resp = &mut resp_fut => break StreamEnd::Resp(resp),
         }
     };
+    if matches!(terminal, StreamEnd::Local(_)) {
+        // Keep lane ownership until a refused stream reaches terminal IO.
+        let _ = client.cancel(id).await;
+        let _ = resp_fut.await;
+    }
     shared.inflight.lock().unwrap().remove(&job);
     finish(shared, op_keys, req, steps, terminal)
 }

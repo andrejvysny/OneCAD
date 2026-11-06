@@ -12,6 +12,7 @@
 //! - [`mesh`] — MESH1 header validation and checked immutable body views.
 //! - [`client`] — the async `ProtocolClient` (feature `client`).
 
+pub mod allocation;
 pub mod error;
 pub mod framing;
 pub mod mesh;

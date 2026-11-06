@@ -17,6 +17,12 @@
 //!
 //! [`AppState`]: crate::state::AppState
 
+// Native preview source admission includes the response, checked scene and
+// temporary copies. These local policies do not change OCW1/MESH1 limits.
+pub(crate) const MAX_PREVIEW_RESPONSE_JSON_BYTES: u32 = 256 << 10;
+pub(crate) const MAX_PREVIEW_RESPONSE_MESH_BYTES: u32 = 32 << 20;
+pub(crate) const MAX_PREVIEW_BODIES: usize = 256;
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
