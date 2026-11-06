@@ -45,6 +45,7 @@ fn symmetric_request(snapshot_id: SnapshotId, body: BodyId, centre: Vec3) -> Res
         refs: vec![ResolveRef {
             ref_id: "resolve_symmetric_ref".into(),
             element: ElementRef {
+                import_source_identity: None,
                 primary: Some(PrimaryRef {
                     body,
                     element: ElementId::new("el_center"),

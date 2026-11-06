@@ -412,10 +412,10 @@ impl DocumentRuntime {
             SlotFinish::Preempted => {
                 return Err(ApiError::Cancelled(
                     "edit preview preempted by a publishing regen".into(),
-                ))
+                ));
             }
             SlotFinish::Superseded => {
-                return Err(ApiError::StalePreview("edit preview superseded".into()))
+                return Err(ApiError::StalePreview("edit preview superseded".into()));
             }
         }
         let run = run.map_err(|error| map_preview_error(&job, error))?;

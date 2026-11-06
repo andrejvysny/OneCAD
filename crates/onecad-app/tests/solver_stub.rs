@@ -229,6 +229,7 @@ async fn stub_resolve_refs_passthrough() {
             ResolveRef {
                 ref_id: "op_5.input0".into(),
                 element: ElementRef {
+                    import_source_identity: None,
                     primary: Some(PrimaryRef {
                         body: BodyId(Uuid::from_u128(0x3)),
                         element: ElementId::new(""),
@@ -245,6 +246,7 @@ async fn stub_resolve_refs_passthrough() {
             ResolveRef {
                 ref_id: "op_5.input1".into(),
                 element: ElementRef {
+                    import_source_identity: None,
                     primary: None,
                     intent: None,
                     anchor: anchor(),

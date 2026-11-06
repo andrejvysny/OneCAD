@@ -19,8 +19,9 @@ pub fn start(state: &AppState, host: HostContext) -> Result<(), &'static str> {
         .host
         .set(host.clone())
         .map_err(|_| "application host already started")?;
+    start_library_initialization(state, &host)?;
     if state.services().claim_maintenance() {
-        start_maintenance(&host);
+        start_maintenance();
     }
     state.prewarm();
     let completion_host = host.clone();
@@ -61,18 +62,28 @@ pub fn start(state: &AppState, host: HostContext) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn start_maintenance(host: &HostContext) {
+fn start_library_initialization(state: &AppState, host: &HostContext) -> Result<(), &'static str> {
+    let (completion, receiver) = tokio::sync::watch::channel(None);
+    state
+        .library_initialization
+        .set(receiver)
+        .map_err(|_| "library initialization already started")?;
+    let root = library::library_root(host);
+    state.tasks.spawn_terminal_blocking(move || {
+        let result = root
+            .ok_or_else(|| "library root is unavailable".to_string())
+            .and_then(|root| library::seed_and_reindex_at(&root));
+        completion.send_replace(Some(result));
+    })
+}
+
+fn start_maintenance() {
     tokio::spawn(async {
         let _ = tokio::task::spawn_blocking(|| {
             imports::sweep_stale_workspaces(imports::STALE_WORKSPACE_AGE)
         })
         .await;
     });
-    if let Some(root) = library::library_root(host) {
-        tokio::spawn(async move {
-            let _ = tokio::task::spawn_blocking(move || library::seed_and_reindex_at(&root)).await;
-        });
-    }
 }
 
 fn start_autosave(state: &AppState, host: HostContext) {
@@ -89,5 +100,33 @@ fn start_autosave(state: &AppState, host: HostContext) {
             },
         ));
         state.tasks.track("autosave", lane);
+    }
+}
+
+#[cfg(test)]
+mod library_initialization_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn await_handles_unstarted_pending_failure_and_closed_sender() {
+        let state = AppState::default();
+        assert!(state.await_library_initialization().await.is_ok());
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        state.library_initialization.set(receiver).unwrap();
+        let waiter = state.await_library_initialization();
+        tokio::pin!(waiter);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiter)
+                .await
+                .is_err()
+        );
+        sender.send_replace(Some(Err("seed failed".into())));
+        assert_eq!(waiter.await.unwrap_err(), "seed failed");
+
+        let closed = AppState::default();
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        closed.library_initialization.set(receiver).unwrap();
+        drop(sender);
+        assert!(closed.await_library_initialization().await.is_err());
     }
 }

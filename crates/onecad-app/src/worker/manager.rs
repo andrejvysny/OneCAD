@@ -1783,10 +1783,58 @@ impl GeometryEngine for WorkerManager {
             .request("AcquireElementIds", wire::acquire_element_ids_args(&req))
             .await
             .map_err(protocol_err)?;
-        ok_result(resp).map(|r| wire::parse_acquire_evidence(&r, fallback))
+        let evidence = wire::parse_acquire_evidence(&ok_result(resp)?, fallback)
+            .map_err(|message| EngineError::Protocol { message })?;
+        if evidence
+            .iter()
+            .filter_map(|row| row.import_source_identity.as_ref())
+            .any(|identity| identity.kernel_fingerprint != client.hello().occt.fingerprint)
+        {
+            return Err(EngineError::Protocol {
+                message: "worker import source identity fingerprint mismatch".into(),
+            });
+        }
+        if evidence
+            .iter()
+            .any(|row| row.import_source_identity.is_some())
+            && !client
+                .hello()
+                .capabilities
+                .iter()
+                .any(|cap| cap == "importSourceIdentityV1")
+        {
+            return Err(EngineError::Protocol {
+                message: "worker returned unnegotiated import source identity".into(),
+            });
+        }
+        Ok(evidence)
     }
 
     async fn bind_element_ids(&self, req: BindElementIdsRequest) -> Result<(), EngineError> {
+        for (index, binding) in req.bindings.iter().enumerate() {
+            if let Some(identity) = &binding.import_source_identity {
+                identity
+                    .validate()
+                    .map_err(|message| EngineError::Protocol {
+                        message: message.into(),
+                    })?;
+                if identity.body_id != binding.body
+                    || binding.kind != onecad_core::document::refs::ElementKind::Face
+                {
+                    return Err(EngineError::Protocol {
+                        message: "import source identity body or kind mismatch".into(),
+                    });
+                }
+                if req.bindings[..index].iter().any(|other| {
+                    other.import_source_identity.as_ref() == Some(identity)
+                        && other.element_id != binding.element_id
+                }) {
+                    return Err(EngineError::Protocol {
+                        message: "competing element ids share import source identity".into(),
+                    });
+                }
+            }
+        }
         let client = self.client_or_err()?;
         let resp = client
             .request("BindElementIds", wire::bind_element_ids_args(&req))
@@ -1799,8 +1847,11 @@ impl GeometryEngine for WorkerManager {
     async fn resolve_refs(&self, req: ResolveRequest) -> Result<Vec<RefResolution>, EngineError> {
         // SCHEMA §7.5 dry-run ladder for repair dialogs (binds nothing).
         let client = self.client_or_err()?;
+        let args = wire::resolve_refs_args(&req);
+        wire::validate_import_source_identities(&args)
+            .map_err(|message| EngineError::Protocol { message })?;
         let resp = client
-            .request("ResolveRefs", wire::resolve_refs_args(&req))
+            .request("ResolveRefs", args)
             .await
             .map_err(protocol_err)?;
         let result = ok_result(resp)?;
@@ -2038,12 +2089,15 @@ async fn stream_plan(shared: Arc<Shared>, request: PlanRequest, tx: mpsc::Sender
     };
 
     let mut events = client.subscribe();
+    let args = wire::execute_plan_args(&request);
+    if let Err(message) = wire::validate_import_source_identities(&args) {
+        let _ = tx
+            .send(PlanEvent::Failed(EngineError::Protocol { message }))
+            .await;
+        return;
+    }
     let inflight = match client
-        .start_request(
-            "ExecutePlan",
-            wire::execute_plan_args(&request),
-            Lane::Control,
-        )
+        .start_request("ExecutePlan", args, Lane::Control)
         .await
     {
         Ok(i) => i,
@@ -2478,6 +2532,8 @@ impl crate::worker::PreviewEngine for WorkerManager {
         if let Some(snapshot) = expected_snapshot {
             args["expectedSnapshotId"] = json!(snapshot.0);
         }
+        wire::validate_import_source_identities(&args)
+            .map_err(|message| EngineError::Protocol { message })?;
         // Preview meshes ride INLINE in the response tail (coarse LOD, only the
         // bodies the op touched), so there is no bulk-chunk lane to drain here —
         // unlike `fetch_mesh`, which serves arbitrary-size document meshes.

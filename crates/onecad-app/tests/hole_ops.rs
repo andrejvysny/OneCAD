@@ -346,6 +346,7 @@ fn extrude_record(rec: u128, sketch: SketchId, dist: f64) -> OperationRecord {
 /// is nowhere near any other face's, which is every face of a box).
 fn face_ref(body: BodyId, element: &ElementId, at: Vec3) -> ElementRef {
     ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: element.clone(),
@@ -1074,6 +1075,7 @@ fn plus_y_face_centroid(view: &MeshHeaderView, blob: &[u8]) -> Vec3 {
 /// misses and there is nothing below it to score.
 fn blind_face_ref(body: BodyId, element: &str) -> ElementRef {
     ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: ElementId::new(element),

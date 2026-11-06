@@ -8,15 +8,11 @@
 # signature only — never a dimension. A size outside `thread.domain` is refused
 # loudly by the generator, never substituted (spec §0 invariant 4).
 #
-# `revision` is the package content hash over every file EXCEPT this manifest
-# (spec §2.1). A generator package carries no other file, so the hash is the
-# SHA-256 of nothing — the same value for every seed package here, correct
-# rather than coincidental, and pinned by a test in `crates/onecad-app/src/library.rs`.
 
 [identity]
 id = "onecad.std.iso4762"
-version = "1.0.0"
-revision = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+version = "1.0.1"
+revision = "sha256v2:1db4fa2a81841b17491ca7bc5ac7e8e668ded38d0c657bcfd53eb24d7e23e1eb"
 
 [metadata]
 name = "Socket Head Cap Screw"

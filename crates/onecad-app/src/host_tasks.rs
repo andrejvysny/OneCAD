@@ -17,6 +17,7 @@ const LANE_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Join handles plus a stop signal for the lanes a host spawned.
 pub(crate) struct HostTasks {
     handles: StdMutex<Vec<(&'static str, JoinHandle<()>)>>,
+    terminal_handles: StdMutex<Vec<JoinHandle<()>>>,
     stop: watch::Sender<bool>,
     /// Set while the host is being torn down: no new document may be installed.
     pub(crate) closing: std::sync::atomic::AtomicBool,
@@ -26,6 +27,7 @@ impl Default for HostTasks {
     fn default() -> Self {
         Self {
             handles: StdMutex::new(Vec::new()),
+            terminal_handles: StdMutex::new(Vec::new()),
             stop: watch::channel(false).0,
             closing: std::sync::atomic::AtomicBool::new(false),
         }
@@ -36,6 +38,25 @@ impl HostTasks {
     /// Records a spawned lane so [`stop`](Self::stop) can await it.
     pub(crate) fn track(&self, name: &'static str, handle: JoinHandle<()>) {
         self.handles.lock().unwrap().push((name, handle));
+    }
+
+    /// Own work that must reach its terminal I/O state before shutdown.
+    #[cfg(test)]
+    pub(crate) fn track_terminal(&self, handle: JoinHandle<()>) {
+        self.terminal_handles.lock().unwrap().push(handle);
+    }
+
+    /// Admit blocking I/O atomically with shutdown's terminal-work drain.
+    pub(crate) fn spawn_terminal_blocking<F>(&self, work: F) -> Result<(), &'static str>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let mut handles = self.terminal_handles.lock().unwrap();
+        if self.closing.load(std::sync::atomic::Ordering::Acquire) {
+            return Err("host is closing");
+        }
+        handles.push(tokio::task::spawn_blocking(work));
+        Ok(())
     }
 
     /// A receiver that resolves once [`stop`](Self::stop) is called.
@@ -56,7 +77,11 @@ impl HostTasks {
     pub(crate) fn begin_stop(&self) -> JoinHandle<()> {
         self.stop.send_replace(true);
         let handles = std::mem::take(&mut *self.handles.lock().unwrap());
+        let terminal = std::mem::take(&mut *self.terminal_handles.lock().unwrap());
         tokio::spawn(async move {
+            for handle in terminal {
+                let _ = handle.await;
+            }
             for (name, mut handle) in handles {
                 if tokio::time::timeout(LANE_STOP_TIMEOUT, &mut handle)
                     .await
@@ -72,6 +97,10 @@ impl HostTasks {
     #[cfg(test)]
     async fn stop_within(&self, timeout: Duration) {
         self.stop.send_replace(true);
+        let terminal = std::mem::take(&mut *self.terminal_handles.lock().unwrap());
+        for handle in terminal {
+            let _ = handle.await;
+        }
         let handles = std::mem::take(&mut *self.handles.lock().unwrap());
         for (name, mut handle) in handles {
             if tokio::time::timeout(timeout, &mut handle).await.is_err() {
@@ -100,6 +129,41 @@ pub(crate) async fn stopped(mut stop: watch::Receiver<bool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn terminal_io_is_not_admitted_after_closing() {
+        let tasks = HostTasks::default();
+        tasks
+            .closing
+            .store(true, std::sync::atomic::Ordering::Release);
+        let (sent, _received) = tokio::sync::oneshot::channel();
+        assert!(tasks
+            .spawn_terminal_blocking(move || {
+                let _ = sent.send(());
+            })
+            .is_err());
+        tasks.begin_stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_terminal_io() {
+        let tasks = HostTasks::default();
+        let (release, waiting) = tokio::sync::oneshot::channel();
+        tasks.track_terminal(tokio::spawn(async move {
+            let _ = waiting.await;
+        }));
+        let mut shutdown = tasks.begin_stop();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut shutdown)
+                .await
+                .is_err()
+        );
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), shutdown)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn stop_signals_and_awaits_every_tracked_lane() {

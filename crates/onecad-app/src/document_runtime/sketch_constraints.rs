@@ -335,7 +335,7 @@ fn validate_primitive_ops(sketch: &Sketch, ops: &[SketchEditOp]) -> Result<(), E
             _ => {
                 return Err(op_failed(
                     "Sketch primitive: unsupported candidate operation",
-                ))
+                ));
             }
         }
     }

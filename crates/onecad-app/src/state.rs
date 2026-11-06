@@ -152,10 +152,16 @@ pub type SharedHost = Arc<OnceLock<HostContext>>;
 
 /// Root application state handed to every command.
 pub struct AppState {
+    pub(crate) library_initialization:
+        OnceLock<tokio::sync::watch::Receiver<Option<Result<(), String>>>>,
+    archive_budget: OnceLock<crate::resource_admission::ArchiveBudget>,
     pub(crate) native_gestures: crate::document_runtime::native_gestures::control::Registry,
     /// The single open document (V1), or `None` when nothing is open. The regen
     /// driver and every command lock this one runtime (single writer).
     pub runtime: Arc<Mutex<Option<DocumentRuntime>>>,
+    /// One session-fenced placement capture; released on commit or cancellation.
+    pub(crate) captured_library_draft: StdMutex<Option<crate::library::CapturedDraft>>,
+    pub(crate) captured_library_generation: std::sync::atomic::AtomicU64,
     /// Exact manager/runtime pair allowed to react to a restart. Updated only
     /// while holding `runtime`; callbacks use the same runtime -> owner order.
     restart_owner: Arc<StdMutex<Option<(u64, String)>>>,
@@ -165,6 +171,19 @@ pub struct AppState {
     /// without that lock. Admitted I/O retains lane ownership independently of its
     /// caller. See `docs/persistence-transactions.md`.
     pub persistence: Arc<Mutex<()>>,
+    /// The active transient component worker, fenced by runtime session.
+    pub(crate) component_worker: Arc<StdMutex<Option<(String, WorkerManager)>>>,
+    pub(crate) joint_ticket: std::sync::atomic::AtomicU64,
+    pub(crate) joint_gate: StdMutex<()>,
+    pub(crate) joint_lane: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) joint_slots: Arc<tokio::sync::Semaphore>,
+    #[cfg(test)]
+    pub(crate) joint_before_commit: StdMutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
     #[cfg(test)]
     pub(crate) save_before_admission: StdMutex<
         Option<(
@@ -184,6 +203,20 @@ pub struct AppState {
         Option<(
             tokio::sync::oneshot::Sender<()>,
             std::sync::mpsc::Receiver<()>,
+        )>,
+    >,
+    #[cfg(test)]
+    pub(crate) component_before_commit: StdMutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
+    #[cfg(test)]
+    pub(crate) component_after_commit: StdMutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
         )>,
     >,
     /// The regen scheduler control surface, set once in `AppState::start`.
@@ -264,6 +297,27 @@ impl AppState {
         crate::lifecycle::start(self, host)
     }
 
+    /// Wait for this host's library seed and index transaction to finish.
+    pub async fn await_library_initialization(&self) -> Result<(), String> {
+        let Some(receiver) = self.library_initialization.get() else {
+            return if self.host.get().is_some() {
+                Err("library initialization has not been registered".into())
+            } else {
+                Ok(())
+            };
+        };
+        let mut receiver = receiver.clone();
+        loop {
+            if let Some(result) = receiver.borrow_and_update().clone() {
+                return result;
+            }
+            receiver
+                .changed()
+                .await
+                .map_err(|_| "library initialization ended without a result".to_string())?;
+        }
+    }
+
     pub(crate) fn projection_provider(&self) -> Arc<RwLock<Arc<dyn FaceBoundaryProjection>>> {
         self.face_projection.clone()
     }
@@ -308,10 +362,14 @@ impl AppState {
         services: Arc<ProcessServices>,
     ) -> Self {
         Self {
+            library_initialization: OnceLock::new(),
+            archive_budget: OnceLock::new(),
             host_id: services.next_host_id(),
             services,
             tasks: Default::default(),
             claims: Arc::new(StdMutex::new(Vec::new())),
+            captured_library_draft: StdMutex::new(None),
+            captured_library_generation: std::sync::atomic::AtomicU64::new(0),
             live: Arc::new(StdMutex::new(None)),
             displaced: StdMutex::new(None),
             backend_swap: StdMutex::new(Arc::new(())),
@@ -319,12 +377,23 @@ impl AppState {
             native_gestures: Arc::new(StdMutex::new(None)),
             restart_owner: Arc::new(StdMutex::new(None)),
             persistence: Arc::new(Mutex::new(())),
+            component_worker: Arc::new(StdMutex::new(None)),
+            joint_ticket: std::sync::atomic::AtomicU64::new(0),
+            joint_gate: StdMutex::new(()),
+            joint_lane: Arc::new(tokio::sync::Mutex::new(())),
+            joint_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            #[cfg(test)]
+            joint_before_commit: StdMutex::new(None),
             #[cfg(test)]
             save_before_admission: StdMutex::new(None),
             #[cfg(test)]
             open_before_publish: StdMutex::new(None),
             #[cfg(test)]
             open_after_publish: StdMutex::new(None),
+            #[cfg(test)]
+            component_before_commit: StdMutex::new(None),
+            #[cfg(test)]
+            component_after_commit: StdMutex::new(None),
             scheduler: Arc::new(OnceLock::new()),
             host: Arc::new(OnceLock::new()),
             autosave_tick: Arc::new(watch::channel(0u64).0),
@@ -674,6 +743,28 @@ impl AppState {
         self.services.prewarm();
     }
 
+    /// Installs this host's archive admission before opening or creating documents.
+    pub fn install_archive_budget(
+        &self,
+        budget: crate::resource_admission::ArchiveBudget,
+    ) -> Result<(), &'static str> {
+        let guard = self
+            .runtime
+            .try_lock()
+            .map_err(|_| "document runtime is busy")?;
+        if guard.is_some() {
+            return Err("archive budget must be installed before opening a document");
+        }
+        self.archive_budget
+            .set(budget)
+            .map_err(|_| "archive budget already installed")
+    }
+
+    #[must_use]
+    pub fn archive_budget(&self) -> crate::resource_admission::ArchiveBudget {
+        self.archive_budget.get().cloned().unwrap_or_default()
+    }
+
     /// The process services this host shares with every other open document.
     #[must_use]
     pub fn services(&self) -> &Arc<ProcessServices> {
@@ -790,22 +881,37 @@ impl AppState {
             restart_owner.clone(),
         );
         Self {
+            library_initialization: OnceLock::new(),
+            archive_budget: OnceLock::new(),
             host_id: services.next_host_id(),
             services,
             tasks: Default::default(),
             claims: Arc::new(StdMutex::new(Vec::new())),
+            captured_library_draft: StdMutex::new(None),
+            captured_library_generation: std::sync::atomic::AtomicU64::new(0),
             live,
             displaced: StdMutex::new(None),
             backend_swap: StdMutex::new(Arc::new(())),
             runtime,
             restart_owner,
             persistence: Arc::new(Mutex::new(())),
+            component_worker: Arc::new(StdMutex::new(None)),
+            joint_ticket: std::sync::atomic::AtomicU64::new(0),
+            joint_gate: StdMutex::new(()),
+            joint_lane: Arc::new(tokio::sync::Mutex::new(())),
+            joint_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            #[cfg(test)]
+            joint_before_commit: StdMutex::new(None),
             #[cfg(test)]
             save_before_admission: StdMutex::new(None),
             #[cfg(test)]
             open_before_publish: StdMutex::new(None),
             #[cfg(test)]
             open_after_publish: StdMutex::new(None),
+            #[cfg(test)]
+            component_before_commit: StdMutex::new(None),
+            #[cfg(test)]
+            component_after_commit: StdMutex::new(None),
             scheduler,
             native_gestures: Arc::new(StdMutex::new(None)),
             host: app,

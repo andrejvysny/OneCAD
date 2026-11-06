@@ -52,6 +52,7 @@ impl DocumentRuntime {
         if !self.face_entry_is_current(ticket) {
             return Err(face_entry_stale());
         }
+        self.validate_import_evidence(&evidence)?;
         if let Some(hit) =
             self.promoted
                 .get(&(ticket.snapshot, evidence.body, evidence.topo_key.clone()))
@@ -69,14 +70,16 @@ impl DocumentRuntime {
                     hit.kind == evidence.kind
                         && hit.descriptor.is_some()
                         && hit.descriptor == evidence.descriptor
+                        && hit.import_source_identity == evidence.import_source_identity
                 });
             if let Some(hit) = previous {
                 evidence.existing = Some(hit.element_id.clone());
             }
         }
-        mint_element_ids(vec![evidence])
-            .pop()
-            .ok_or_else(face_entry_stale)
+        self.validate_import_evidence(&evidence)?;
+        let mut minted = mint_element_ids(vec![evidence]);
+        self.validate_minted_import_identities(&minted)?;
+        minted.pop().ok_or_else(face_entry_stale)
     }
 
     pub(crate) fn commit_face_entry(
@@ -88,7 +91,27 @@ impl DocumentRuntime {
         if !self.face_entry_is_current(ticket) {
             return Err(face_entry_stale().into());
         }
-        let outcome = self.apply(EditCommand::AddSketch { sketch })?;
+        let staged = identity.as_ref().and_then(|(id, evidence)| {
+            if self.regen.elements.contains(id) {
+                return None;
+            }
+            let entry = ElementEntry::new(evidence.body, evidence.kind)
+                .with_evidence(evidence.anchor.clone(), evidence.descriptor.clone())
+                .with_import_source_identity(evidence.import_source_identity.clone());
+            Some((id.clone(), self.staged.insert(id.clone(), entry)))
+        });
+        let outcome = match self.apply(EditCommand::AddSketch { sketch }) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if let Some((id, previous)) = staged {
+                    self.staged.remove(&id);
+                    if let Some(previous) = previous {
+                        self.staged.insert(id, previous);
+                    }
+                }
+                return Err(error.into());
+            }
+        };
         if let Some((id, evidence)) = identity {
             // Reuse the existing fenced rebind lane at the next published regen.
             // Preparation never installs worker bindings on cancellation.
@@ -97,7 +120,8 @@ impl DocumentRuntime {
             self.regen.elements.insert(
                 id.clone(),
                 ElementEntry::new(evidence.body, evidence.kind)
-                    .with_evidence(evidence.anchor, evidence.descriptor.clone()),
+                    .with_evidence(evidence.anchor, evidence.descriptor.clone())
+                    .with_import_source_identity(evidence.import_source_identity.clone()),
             );
             self.promoted.insert(
                 (ticket.snapshot, evidence.body, evidence.topo_key),
@@ -105,6 +129,7 @@ impl DocumentRuntime {
                     element_id: id,
                     kind: evidence.kind,
                     descriptor: evidence.descriptor,
+                    import_source_identity: evidence.import_source_identity,
                 },
             );
         }

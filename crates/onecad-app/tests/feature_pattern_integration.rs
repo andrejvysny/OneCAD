@@ -294,6 +294,7 @@ fn extrude_record(sketch: SketchId, distance: f64) -> OperationRecord {
 
 fn anchored_ref(body: BodyId, element: ElementId, anchor: Vec3) -> ElementRef {
     ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element,

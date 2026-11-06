@@ -328,6 +328,7 @@ fn fillet_record(
     radius: f64,
 ) -> OperationRecord {
     let edge_ref = ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: edge_el.clone(),
@@ -547,6 +548,7 @@ fn primary_only_ref(body: BodyId, element_id: &str, kind: &str) -> ElementRef {
         other => panic!("unexpected promoted kind `{other}`"),
     };
     ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: ElementId::new(element_id),

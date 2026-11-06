@@ -207,6 +207,7 @@ const FILLET: u128 = 0x5E1;
 
 fn fillet_op(edge: &ElementId, anchor: Vec3, radius: f64) -> Operation {
     let edge_ref = ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body: body(EXTRUDE_A),
             element: edge.clone(),

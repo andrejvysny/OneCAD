@@ -1282,6 +1282,7 @@ async fn shell_box_open_top() {
         extra: Default::default(),
     };
     let face_ref = ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body: body_a,
             element: open_face.clone(),

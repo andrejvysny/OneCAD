@@ -8,6 +8,7 @@ const HOST_PATTERN: u128 = 0xF203;
 
 fn element_ref(body: BodyId, element: ElementId, kind: ElementKind, at: Vec3) -> ElementRef {
     ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element,

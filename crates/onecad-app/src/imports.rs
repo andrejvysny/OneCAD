@@ -154,6 +154,24 @@ impl ImportWorkspace {
         }
     }
 
+    pub(crate) fn release(&mut self, sha: &str) {
+        if !self.held.remove(sha) {
+            return;
+        }
+        let Ok(mut map) = registry().write() else {
+            return;
+        };
+        let Some(blob) = map.get_mut(sha) else {
+            return;
+        };
+        blob.holders = blob.holders.saturating_sub(1);
+        if blob.holders == 0 {
+            if let Some(blob) = map.remove(sha) {
+                let _ = std::fs::remove_file(blob.path);
+            }
+        }
+    }
+
     /// The shared directory blobs are materialized into (may not exist until the
     /// first materialization). It is per process, not per document.
     #[must_use]
@@ -439,7 +457,9 @@ pub async fn prepare_import(
         geometry_sha,
         ImportBlob {
             codec,
-            bytes: Arc::new(geometry_bytes),
+            bytes: Arc::new(onecad_core::io::imports::OwnedSource::untracked(
+                geometry_bytes,
+            )),
         },
     )];
     if params.provenance_sha256.is_some() {
@@ -447,7 +467,9 @@ pub async fn prepare_import(
             source_sha,
             ImportBlob {
                 codec: ImportSourceCodec::Step,
-                bytes: Arc::new(source_bytes),
+                bytes: Arc::new(onecad_core::io::imports::OwnedSource::untracked(
+                    source_bytes,
+                )),
             },
         ));
     }

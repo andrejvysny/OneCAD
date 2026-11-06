@@ -66,7 +66,7 @@ use sha2::{Digest, Sha256};
 /// help is a root seeded BEFORE the ledger existed (marker ≤ 4): there is no
 /// record of what this app wrote there, so nothing can be proven and nothing is
 /// removed. Those roots need a manual `rm` of the dead directory, once.
-pub const SEED_VERSION: u32 = 6;
+pub const SEED_VERSION: u32 = 7;
 
 const SEED_MARKER_FILE: &str = ".seed-version";
 
@@ -79,6 +79,7 @@ const SEED_LEDGER_FILE: &str = ".seed-ledger.json";
 pub struct SeedPackage {
     pub id: &'static str,
     pub manifest: &'static str,
+    pub legacy_manifest: &'static str,
     /// The [`SEED_VERSION`] this package first shipped in. A pass installs a
     /// missing package only when the root's previous marker is below this (no
     /// marker ⇒ a fresh root ⇒ everything installs). A root whose marker is
@@ -94,6 +95,11 @@ macro_rules! seed {
             since: $since,
             manifest: include_str!(concat!(
                 "../resources/library-seed/",
+                $id,
+                "/component.toml"
+            )),
+            legacy_manifest: include_str!(concat!(
+                "../resources/library-seed-legacy/",
                 $id,
                 "/component.toml"
             )),
@@ -169,7 +175,18 @@ pub fn seed_library(root: &Path) -> std::io::Result<SeedOutcome> {
     std::fs::create_dir_all(root)?;
     let mut ledger = read_ledger(root);
     for pkg in SEED_PACKAGES {
-        let dir = root.join(pkg.id);
+        let original = root.join(pkg.id);
+        let directory = if original.exists() && previous_marker.is_some() {
+            let legacy_digest = manifest_digest(pkg.legacy_manifest.as_bytes());
+            if !is_untouched(&original, &legacy_digest) {
+                outcome.kept.push(pkg.id.to_string());
+                continue;
+            }
+            format!("{}@1.0.1", pkg.id)
+        } else {
+            pkg.id.to_string()
+        };
+        let dir = root.join(&directory);
         let digest = manifest_digest(pkg.manifest.as_bytes());
         if dir.exists() {
             // The user's copy wins — including a package they authored under
@@ -184,20 +201,20 @@ pub fn seed_library(root: &Path) -> std::io::Result<SeedOutcome> {
             // the install. The evidence standard is the prune's own: same one
             // file, same bytes.
             if is_untouched(&dir, &digest) {
-                ledger.insert(pkg.id.to_string(), digest);
+                ledger.insert(directory.clone(), digest);
             }
             continue;
         }
         // Missing on a root that was already offered this package: the user
         // deleted it, and a bump must not bring it back.
-        if !is_new_to_root(previous_marker, pkg.since) {
+        if !original.exists() && !is_new_to_root(previous_marker, pkg.since) {
             continue;
         }
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join(COMPONENT_MANIFEST_FILE), pkg.manifest)?;
         // Ledger the EXACT bytes written, which is what a later prune has to
         // match. Recording the id alone would prove nothing.
-        ledger.insert(pkg.id.to_string(), digest);
+        ledger.insert(directory.clone(), digest);
         outcome.installed.push(pkg.id.to_string());
     }
     prune_retired(root, &mut ledger, &mut outcome)?;
@@ -211,6 +228,32 @@ pub fn seed_library(root: &Path) -> std::io::Result<SeedOutcome> {
     write_ledger(root, &ledger)?;
     std::fs::write(root.join(SEED_MARKER_FILE), SEED_VERSION.to_string())?;
     Ok(outcome)
+}
+
+/// A marker proves installation, not completion of its derived index write.
+pub(crate) fn seed_index_needs_rebuild(
+    root: &Path,
+    index: &onecad_library::index::LibraryIndex,
+) -> Result<bool, String> {
+    for seed in SEED_PACKAGES {
+        let package = onecad_library::package::parse(seed.manifest, root)
+            .map_err(|error| error.to_string())?;
+        let digest = manifest_digest(seed.manifest.as_bytes());
+        let installed = [
+            root.join(seed.id),
+            root.join(format!("{}@{}", seed.id, package.identity.version)),
+        ]
+        .iter()
+        .any(|path| is_untouched(path, &digest));
+        if installed
+            && index
+                .get(seed.id, Some(&package.identity.version))
+                .is_none_or(|(_, entry)| entry.revision != package.identity.revision)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Whether a package that first shipped in `since` has never been offered to a
@@ -234,7 +277,11 @@ fn prune_retired(
 ) -> std::io::Result<()> {
     let retired: Vec<String> = ledger
         .keys()
-        .filter(|id| !SEED_PACKAGES.iter().any(|p| p.id == id.as_str()))
+        .filter(|id| {
+            !SEED_PACKAGES
+                .iter()
+                .any(|p| p.id == id.as_str() || format!("{}@1.0.1", p.id) == **id)
+        })
         .cloned()
         .collect();
 
@@ -355,7 +402,9 @@ mod tests {
         let outcome = seed_library(dir.path()).unwrap();
         assert_eq!(outcome.installed.len(), SEED_PACKAGES.len());
         for pkg in SEED_PACKAGES {
-            let computed = package::compute_revision(&dir.path().join(pkg.id)).unwrap();
+            let parsed =
+                onecad_library::semantic::parse(pkg.manifest, &manifest_path(pkg.id)).unwrap();
+            let computed = onecad_library::semantic::revision(&parsed, None).unwrap();
             let declared = package::parse(pkg.manifest, &manifest_path(pkg.id))
                 .unwrap()
                 .identity
@@ -498,7 +547,7 @@ mod tests {
         std::fs::create_dir_all(&screw).unwrap();
         std::fs::write(
             screw.join(COMPONENT_MANIFEST_FILE),
-            SEED_PACKAGES[0].manifest,
+            SEED_PACKAGES[0].legacy_manifest,
         )
         .unwrap();
 
@@ -506,9 +555,17 @@ mod tests {
         assert!(outcome.ran);
         assert_eq!(
             outcome.installed,
-            package_ids(&["onecad.std.iso4032", "onecad.std.iso7089"])
+            package_ids(&[
+                "onecad.std.iso4762",
+                "onecad.std.iso4032",
+                "onecad.std.iso7089"
+            ])
         );
-        assert_eq!(outcome.kept, package_ids(&["onecad.std.iso4762"]));
+        assert_eq!(
+            std::fs::read_to_string(screw.join(COMPONENT_MANIFEST_FILE)).unwrap(),
+            SEED_PACKAGES[0].legacy_manifest
+        );
+        assert!(root.join("onecad.std.iso4762@1.0.1").is_dir());
         assert_eq!(marker_version(root), Some(SEED_VERSION));
     }
 

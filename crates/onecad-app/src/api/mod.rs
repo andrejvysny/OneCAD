@@ -3,11 +3,19 @@
 //! Desktop adapters marshal typed commands and supply host events, paths, and dialogs.
 //! Regeneration and persistence preserve their prepare, unlocked I/O, and fenced commit phases.
 
+pub(crate) mod component_execution;
 mod document_items;
 mod document_state;
 mod edit_operands;
 mod edit_preview;
 mod input_repair;
+pub use component_execution::{
+    apply_assembly_edit, apply_assembly_edit_at_generation, apply_assembly_edit_for_display,
+    assembly_generation, component_element_info, component_joint_origin, component_mesh_for_path,
+    get_assembly_projection, get_assembly_projection_bounded, get_joint_bindings,
+    regenerate_component, regenerate_component_at_generation, regenerate_component_bounded,
+    JointOriginRequest, JointOriginResolution,
+};
 pub use document_items::{
     delete_document_item, plan_delete_document_item, DeleteTarget, DeletionItem, DeletionPlan,
 };
@@ -123,7 +131,7 @@ pub fn open_runtime_over_new_backend(
     path: &Path,
 ) -> Result<DocumentRuntime, ApiError> {
     let (engine, meshes, solver, query) = state.make_backend_with_query();
-    DocumentRuntime::open(path, engine, meshes, solver)
+    DocumentRuntime::open_with_budget(path, engine, meshes, solver, false, state.archive_budget())
         .map(|mut rt| {
             rt.bind_geometry_read_query(query)
                 .expect("fresh runtime has no geometry-read provider");
@@ -153,9 +161,20 @@ pub async fn open_runtime_over_new_backend_blocking(
     state: &AppState,
     path: PathBuf,
 ) -> Result<DocumentRuntime, ApiError> {
+    open_runtime_over_new_backend_blocking_mode(state, path, false).await
+}
+
+async fn open_runtime_over_new_backend_blocking_mode(
+    state: &AppState,
+    path: PathBuf,
+    assembly: bool,
+) -> Result<DocumentRuntime, ApiError> {
     let (engine, meshes, solver, query) = state.make_backend_with_query();
+    let budget = state.archive_budget();
     match tokio::task::spawn_blocking(move || {
-        DocumentRuntime::open(&path, engine, meshes, solver).map(|mut rt| {
+        let result =
+            DocumentRuntime::open_with_budget(&path, engine, meshes, solver, assembly, budget);
+        result.map(|mut rt| {
             rt.bind_geometry_read_query(query)
                 .expect("fresh runtime has no geometry-read provider");
             rt
@@ -259,6 +278,18 @@ pub(crate) async fn schedule_initial_regen(state: &AppState) {
 }
 
 /// Creates a blank document and opens it (`CadClient.newDocument`).
+/// Retire an auxiliary worker before replacing its runtime while holding the runtime lock.
+pub(crate) fn retire_component_worker(state: &AppState) {
+    if let Some((_, worker)) = state
+        .component_worker
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take()
+    {
+        worker.retire();
+    }
+}
+
 pub async fn new_document(
     state: &AppState,
     app: HostContext,
@@ -266,6 +297,7 @@ pub async fn new_document(
     state.ensure_document_capacity()?;
     let (engine, meshes, solver, query) = state.make_backend_with_query();
     let mut runtime = DocumentRuntime::new_blank(engine, meshes, solver);
+    runtime.set_archive_budget(state.archive_budget());
     runtime
         .bind_geometry_read_query(query)
         .expect("fresh runtime has no geometry-read provider");
@@ -283,6 +315,8 @@ pub async fn new_document(
             state.rollback_backend();
             return Err(error);
         }
+        retire_component_worker(state);
+        crate::library::clear_component_draft_capture(state);
         *guard = Some(runtime);
         let rt = guard.as_ref().unwrap();
         rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
@@ -326,13 +360,34 @@ pub async fn open_document(
     path: String,
     on_recovery: Option<String>,
 ) -> Result<DocumentSnapshotDto, ApiError> {
+    open_document_mode(state, app, path, on_recovery, false).await
+}
+
+/// Opens a document for an assembly-aware host; component meshes start unready.
+pub async fn open_assembly_document(
+    state: &AppState,
+    app: HostContext,
+    path: String,
+    on_recovery: Option<String>,
+) -> Result<DocumentSnapshotDto, ApiError> {
+    open_document_mode(state, app, path, on_recovery, true).await
+}
+
+async fn open_document_mode(
+    state: &AppState,
+    app: HostContext,
+    path: String,
+    on_recovery: Option<String>,
+    assembly: bool,
+) -> Result<DocumentSnapshotDto, ApiError> {
     if let Some(offer) = state.pending_recovery_for_path(Path::new(&path)) {
         recovery_open_decision(&offer, &path, on_recovery.as_deref())?;
     }
     // Ownership first: a path open elsewhere is focused, not opened twice.
     let path_claim = state.claim_path(Path::new(&path))?;
     state.ensure_document_capacity()?;
-    let rt = open_runtime_over_new_backend_blocking(state, PathBuf::from(&path)).await?;
+    let rt =
+        open_runtime_over_new_backend_blocking_mode(state, PathBuf::from(&path), assembly).await?;
     let document_claim = match state.claim_document(rt.document_uuid()) {
         Ok(claim) => claim,
         Err(error) => {
@@ -368,6 +423,8 @@ pub async fn open_document(
             state.rollback_backend();
             return Err(error);
         }
+        retire_component_worker(state);
+        crate::library::clear_component_draft_capture(state);
         *guard = Some(rt);
         #[cfg(test)]
         if let Some((started, resume)) = after_publish {
@@ -452,6 +509,7 @@ pub async fn import_step(
     // — that document is still live and still needs its own worker.
     let prepared = crate::imports::prepare_import(staged.probe(), Path::new(&path)).await?;
     let mut rt = DocumentRuntime::new_blank(engine, meshes, solver);
+    rt.set_archive_budget(state.archive_budget());
     rt.bind_geometry_read_query(query)
         .expect("fresh runtime has no geometry-read provider");
     rt.add_import_record(&prepared, false)?;
@@ -460,6 +518,8 @@ pub async fn import_step(
         let mut guard = state.runtime.lock().await;
         state.ensure_not_closing()?;
         staged.publish(|| {
+            retire_component_worker(state);
+            crate::library::clear_component_draft_capture(state);
             *guard = Some(rt);
             let rt = guard.as_ref().unwrap();
             rt.adopt_current_epoch();
@@ -552,6 +612,7 @@ pub async fn import_project(
             state.ensure_document_capacity()?;
             let (engine, meshes, solver, query) = state.make_backend_with_query();
             let mut rt = DocumentRuntime::new_blank(engine, meshes, solver);
+            rt.set_archive_budget(state.archive_budget());
             rt.bind_geometry_read_query(query)
                 .expect("fresh runtime has no geometry-read provider");
             let staged = rt
@@ -565,6 +626,8 @@ pub async fn import_project(
                 }
             };
             rt.adopt_current_epoch();
+            retire_component_worker(state);
+            crate::library::clear_component_draft_capture(state);
             *guard = Some(rt);
             state.bind_restart_owner(guard.as_ref().unwrap());
             state.commit_backend();
@@ -837,6 +900,11 @@ pub(crate) fn decode_preview_png(encoded: Option<String>) -> Option<Vec<u8>> {
 ///
 /// The runtime lock is taken only to snapshot the metadata; every worker round-trip
 /// below runs outside it (the R-WP11 rule).
+///
+/// Documents with occurrences use a bounded flattened assembly path: visible
+/// root bodies and visible posed occurrence bodies are exported in millimetres.
+/// This path does not preserve hierarchy, names, colours, joints, or PMI. It
+/// refuses coincident identical solids while deterministic reimport is ambiguous.
 pub async fn export_step_file(
     state: &AppState,
     app: HostContext,
@@ -849,11 +917,25 @@ pub async fn export_step_file(
             None => return Ok(None), // dialog cancelled
         },
     };
+    let has_occurrences = {
+        let guard = state.runtime.lock().await;
+        !guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("exportStep".into()))?
+            .assembly_projection_bounded(2 << 20)?
+            .occurrences
+            .is_empty()
+    };
+    if has_occurrences {
+        crate::assembly_export::export(state, std::path::PathBuf::from(&target)).await?;
+        return Ok(Some(target));
+    }
     let (bodies, snapshot, fence, mut attributes, pending) = {
         let guard = state.runtime.lock().await;
         let rt = guard
             .as_ref()
             .ok_or_else(|| ApiError::NoDocument("exportStep".into()))?;
+        require_complete_export_scope(rt)?;
         let (attributes, pending) = crate::export::pending_step_attributes(rt);
         (
             rt.head_body_ids(),
@@ -960,6 +1042,7 @@ pub async fn export_3mf_file(
         let rt = guard
             .as_ref()
             .ok_or_else(|| ApiError::NoDocument("export3mf".into()))?;
+        require_complete_export_scope(rt)?;
         let (attributes, pending) = crate::export::pending_step_attributes(rt);
         (
             rt.head_body_ids(),
@@ -999,7 +1082,7 @@ pub async fn export_3mf_file(
         Err(e) => {
             return Err(ApiError::Io(format!(
                 "export3mf: write task did not complete: {e}"
-            )))
+            )));
         }
     }
     Ok(Some(target))
@@ -1014,7 +1097,18 @@ async fn head_bodies(state: &AppState) -> Result<(Vec<BodyId>, Option<SnapshotId
     let rt = guard
         .as_ref()
         .ok_or_else(|| ApiError::NoDocument("export".into()))?;
+    require_complete_export_scope(rt)?;
     Ok((rt.head_body_ids(), crate::export::export_fence(rt)))
+}
+
+pub(crate) fn require_complete_export_scope(runtime: &DocumentRuntime) -> Result<(), ApiError> {
+    if !runtime.assembly_projection()?.occurrences.is_empty() {
+        return Err(ApiError::InvalidCommand(
+            "assembly export is not yet supported; exporting only the root would omit occurrences"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Closes the document, retaining dirty recovery work after queued writes drain.
@@ -1085,7 +1179,7 @@ async fn start_close(
     discard_session: Option<&str>,
     rewarm: bool,
 ) -> Result<tokio::task::JoinHandle<()>, ApiError> {
-    let (closed, claims) = {
+    let (closed, claims, component_worker) = {
         let mut guard = state.runtime.lock().await;
         if discard_session.is_some_and(|expected| {
             !guard
@@ -1107,13 +1201,23 @@ async fn start_close(
                 rt.persisted_generation(),
             )
         });
+        let component_worker = state
+            .component_worker
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+            .map(|(_, worker)| worker);
+        if let Some(worker) = &component_worker {
+            worker.retire();
+        }
         *guard = None;
+        crate::library::clear_component_draft_capture(state);
         state.invalidate_backend_stage();
         state.clear_restart_owner();
         if rewarm {
             state.rewarm();
         }
-        (closed, state.take_claims())
+        (closed, state.take_claims(), component_worker)
     };
     // Never await the writer lane while holding the runtime lock. Admitted
     // autosaves finish before cleanup; queued old-session snapshots fail their fence.
@@ -1134,6 +1238,16 @@ async fn start_close(
             #[cfg(debug_assertions)]
             render_watchdog_reconcile_projection(&DocumentProjection::empty(), "document closed");
             let _ = app.emit(AppEvent::ProjectionUpdated(DocumentProjection::empty()));
+        }
+        drop(current);
+        drop(_lane);
+        if let Some(worker) = component_worker {
+            while !worker
+                .wait_torn_down(std::time::Duration::from_secs(30))
+                .await
+            {
+                tracing::warn!("component worker still retiring during close");
+            }
         }
     }))
 }
@@ -1242,6 +1356,28 @@ pub async fn recover_document_at_path(
     accept: bool,
     destination: Option<PathBuf>,
 ) -> Result<Option<DocumentSnapshotDto>, ApiError> {
+    recover_document_mode(state, app, document_id, accept, destination, false).await
+}
+
+/// Recovers an assembly into the explicit assembly-capable runtime.
+pub async fn recover_assembly_document_at_path(
+    state: &AppState,
+    app: HostContext,
+    document_id: String,
+    accept: bool,
+    destination: Option<PathBuf>,
+) -> Result<Option<DocumentSnapshotDto>, ApiError> {
+    recover_document_mode(state, app, document_id, accept, destination, true).await
+}
+
+async fn recover_document_mode(
+    state: &AppState,
+    app: HostContext,
+    document_id: String,
+    accept: bool,
+    destination: Option<PathBuf>,
+    assembly: bool,
+) -> Result<Option<DocumentSnapshotDto>, ApiError> {
     let id = parse_document_id(&document_id)?;
     if state.peek_pending_recovery(id).is_none() {
         return Ok(None);
@@ -1272,7 +1408,9 @@ pub async fn recover_document_at_path(
     state.ensure_document_capacity()?;
     // Restore: open the autosave container as the live document. Anything below that
     // fails leaves the offer pending, so the user can try again or discard.
-    let mut rt = open_runtime_over_new_backend_blocking(state, offer.autosave_path.clone()).await?;
+    let mut rt =
+        open_runtime_over_new_backend_blocking_mode(state, offer.autosave_path.clone(), assembly)
+            .await?;
     if rt.document_uuid() != id {
         state.rollback_backend();
         return Err(ApiError::InvalidCommand(
@@ -1311,6 +1449,8 @@ pub async fn recover_document_at_path(
             state.rollback_backend();
             return Err(error);
         }
+        retire_component_worker(state);
+        crate::library::clear_component_draft_capture(state);
         *guard = Some(rt);
         let rt = guard.as_ref().unwrap();
         rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
@@ -1402,6 +1542,9 @@ pub async fn apply_edit_command_with_completion(
     app: HostContext,
     command: EditCommand,
 ) -> Result<CommandCompletion<DocumentProjection>, ApiError> {
+    crate::library::commit_authorization::reject_generic_add(&command)?;
+    let update_authorization =
+        crate::library::commit_authorization::authorize_update(state, &command).await?;
     let summary = edit_command_summary(&command);
     // Recorded (not a span-attribute expression) so the digest is built ONCE.
     tracing::Span::current().record("cmd", summary.as_str());
@@ -1411,6 +1554,11 @@ pub async fn apply_edit_command_with_completion(
         let rt = guard
             .as_mut()
             .ok_or_else(|| ApiError::NoDocument("apply".into()))?;
+        crate::library::commit_authorization::check_existing_update(
+            rt,
+            &command,
+            update_authorization.as_ref(),
+        )?;
         let outcome = rt.apply(command).inspect_err(|e| {
             tracing::warn!("apply_edit_command: {summary} REJECTED: {e}");
         })?;
@@ -1470,6 +1618,27 @@ pub async fn apply_operation(
     app: HostContext,
     commands: Vec<EditCommand>,
     effects: Option<OperationEffects>,
+) -> Result<ApplyOperationResponse, ApiError> {
+    apply_operation_inner(state, app, commands, effects, None).await
+}
+
+/// Commits only to the exact host context that prepared a native operation.
+pub async fn apply_operation_in_context(
+    state: &AppState,
+    app: HostContext,
+    commands: Vec<EditCommand>,
+    effects: Option<OperationEffects>,
+    context: &PreviewContext,
+) -> Result<ApplyOperationResponse, ApiError> {
+    apply_operation_inner(state, app, commands, effects, Some(context)).await
+}
+
+async fn apply_operation_inner(
+    state: &AppState,
+    app: HostContext,
+    commands: Vec<EditCommand>,
+    effects: Option<OperationEffects>,
+    context: Option<&PreviewContext>,
 ) -> Result<ApplyOperationResponse, ApiError> {
     if commands.is_empty() {
         return Err(ApiError::InvalidCommand(
@@ -1532,13 +1701,110 @@ pub async fn apply_operation(
             visible: false,
         });
     }
+    let has_component = commands.iter().any(|command| matches!(command,
+        EditCommand::AddOperation { record, .. }
+            if matches!(record.op, Operation::Known(onecad_core::document::record::KnownOperation::PlaceComponent(_) | onecad_core::document::record::KnownOperation::DetachComponent(_)))));
+    let component_session = if has_component {
+        let guard = state.runtime.lock().await;
+        let runtime = guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("applyOperation".into()))?;
+        let session = runtime.runtime_session();
+        if context.is_some_and(|expected| expected.runtime_session != session) {
+            return Err(ApiError::StalePreview(
+                "operation context changed before authorization".into(),
+            ));
+        }
+        Some(session)
+    } else {
+        None
+    };
+    let update_authorization = if commands.len() == 1 {
+        crate::library::commit_authorization::authorize_update(state, &commands[0]).await?
+    } else {
+        None
+    };
+    let component_authorization = if let Some(session) = &component_session {
+        crate::library::commit_authorization::authorize(state, &commands, session).await?
+    } else {
+        None
+    };
     let (outcome, projection, rollback_token) = {
         let mut guard = state.runtime.lock().await;
         let rt = guard
             .as_mut()
             .ok_or_else(|| ApiError::NoDocument("applyOperation".into()))?;
+        if context.is_some_and(|expected| {
+            !rt.matches_runtime_session(&expected.runtime_session)
+                || rt.revision() != expected.revision
+                || rt.fencing().get().1 != expected.worker_epoch
+                || rt.head_snapshot_id().unwrap_or(SnapshotId(0)) != expected.snapshot_id
+        }) {
+            return Err(ApiError::StalePreview(
+                "operation context changed before commit".into(),
+            ));
+        }
+        for command in &commands {
+            crate::library::commit_authorization::check_existing_update(
+                rt,
+                command,
+                update_authorization.as_ref(),
+            )?;
+        }
         let prior_undo_position = rt.undo_position();
-        let outcome = rt.apply_transaction(&label, commands)?;
+        if component_session
+            .as_ref()
+            .is_some_and(|session| !rt.matches_runtime_session(session))
+        {
+            return Err(ApiError::StalePreview(
+                "component session changed before commit".into(),
+            ));
+        }
+        let mut draft = component_session
+            .as_ref()
+            .map(|session| {
+                crate::library::component_commit_guard(
+                    state,
+                    &commands,
+                    session,
+                    component_authorization.as_ref(),
+                )
+            })
+            .transpose()?;
+        let component_commit = commands.iter().any(|command| matches!(command,
+            EditCommand::AddOperation { record, .. }
+                if matches!(record.op, Operation::Known(onecad_core::document::record::KnownOperation::PlaceComponent(_) | onecad_core::document::record::KnownOperation::DetachComponent(_)))));
+        let prior_imports = rt.import_blob_shas();
+        let prior_archives = rt.library_archive_checkpoint();
+        if let Some(captured) = draft
+            .as_ref()
+            .filter(|_| component_commit)
+            .and_then(|slot| slot.as_ref())
+        {
+            let archive = captured.archive_for_commit(rt)?;
+            let metadata = crate::library_archive::metadata_command(rt, &[&archive])?;
+            if let Err(error) = captured.stage_for_commit(rt, &archive) {
+                rt.discard_uncommitted_component_blobs(&prior_imports);
+                rt.restore_library_archive_checkpoint(&prior_archives);
+                return Err(error);
+            }
+            commands.push(metadata);
+        }
+        let outcome = match rt.apply_transaction(&label, commands) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                rt.discard_uncommitted_component_blobs(&prior_imports);
+                rt.restore_library_archive_checkpoint(&prior_archives);
+                return Err(error.into());
+            }
+        };
+        if let Some(captured) = draft
+            .as_mut()
+            .filter(|_| component_commit)
+            .and_then(|slot| slot.as_mut())
+        {
+            captured.release_committed_bytes();
+        }
         let rollback_token = rt.arm_operation_rollback(record_ids, prior_undo_position);
         (outcome, rt.projection(), rollback_token)
     };
@@ -1641,7 +1907,7 @@ pub async fn repair_mate_axis(
         Some(other) => {
             return Err(ApiError::InvalidCommand(format!(
                 "repairMateAxis: resolvedSidedness must be `pin` or `hole` (got {other:?})"
-            )))
+            )));
         }
     };
     apply_edit_command(
@@ -1718,7 +1984,7 @@ pub async fn set_module_state(
         _ => {
             return Err(ApiError::InvalidCommand(
                 "set_module_state needs both schemaVersion and payload, or neither".into(),
-            ))
+            ));
         }
     };
     let mut guard = state.runtime.lock().await;
@@ -2059,7 +2325,7 @@ pub async fn evaluate_expression(
         other => {
             return Err(ApiError::InvalidCommand(format!(
                 "unknown expression site {other:?}: expected \"length\", \"angle\" or \"scalar\""
-            )))
+            )));
         }
     };
     let guard = state.runtime.lock().await;
@@ -2177,6 +2443,27 @@ pub async fn get_mesh(
     generation: Option<u64>,
     expected_runtime_session: Option<String>,
 ) -> Result<Vec<u8>, ApiError> {
+    Ok(get_mesh_shared_bounded(
+        state,
+        body_id,
+        lod,
+        generation,
+        expected_runtime_session,
+        usize::MAX,
+    )
+    .await?
+    .map_or_else(Vec::new, |bytes| bytes.as_ref().clone()))
+}
+
+/// Fetches an owned shared mesh and rejects an oversized handoff before copying it.
+pub async fn get_mesh_shared_bounded(
+    state: &AppState,
+    body_id: String,
+    lod: String,
+    generation: Option<u64>,
+    expected_runtime_session: Option<String>,
+    maximum_bytes: usize,
+) -> Result<Option<std::sync::Arc<Vec<u8>>>, ApiError> {
     let body = BodyId::from_str(&body_id)
         .map_err(|e| ApiError::InvalidCommand(format!("bad bodyId {body_id:?}: {e}")))?;
     let lod = lod_from_str(&lod);
@@ -2205,8 +2492,22 @@ pub async fn get_mesh(
     };
     tracing::debug!(bodyId = %body_id, generation, hit = bytes.is_some(), "get_mesh: complete");
     // MESH1 travels verbatim; a miss is an empty buffer (frontend keeps its mesh).
-    let data = bytes.map(|a| a.as_ref().clone()).unwrap_or_default();
-    Ok(data)
+    bounded_mesh(bytes, maximum_bytes)
+}
+
+fn bounded_mesh(
+    bytes: Option<std::sync::Arc<Vec<u8>>>,
+    maximum_bytes: usize,
+) -> Result<Option<std::sync::Arc<Vec<u8>>>, ApiError> {
+    if bytes
+        .as_ref()
+        .is_some_and(|data| data.len() > maximum_bytes)
+    {
+        return Err(ApiError::InvalidCommand(
+            "mesh exceeds native handoff budget".into(),
+        ));
+    }
+    Ok(bytes)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2735,12 +3036,16 @@ pub async fn preview_operation(
     expected_snapshot_id: Option<SnapshotId>,
     lod: onecad_core::regen::Lod,
 ) -> Result<crate::dto::PreviewResultDto, ApiError> {
-    {
+    let (workspace, session) = {
         let guard = state.runtime.lock().await;
-        guard
+        let runtime = guard
             .as_ref()
             .ok_or_else(|| ApiError::NoDocument("previewOp".into()))?;
-    }
+        let session = runtime.runtime_session();
+        let workspace =
+            crate::library::captured_component_draft_workspace(state, &operation, &session);
+        (workspace, session)
+    };
     if matches!(
         operation,
         Operation::Known(onecad_core::document::record::KnownOperation::FeaturePattern(_))
@@ -2750,16 +3055,58 @@ pub async fn preview_operation(
         ));
     }
     let op_id_log = op_id.to_string();
-    let result = state
-        .preview()
-        .preview_op(
-            operation,
-            op_id.to_string(),
-            sketch_id,
-            expected_snapshot_id,
-            lod,
-        )
-        .await;
+    let engine = state.preview();
+    let result = if let Some(workspace) = workspace {
+        static PREVIEW_SLOTS: tokio::sync::Semaphore =
+            tokio::sync::Semaphore::const_new(crate::reservations::MAX_OPEN_DOCUMENTS);
+        let permit = PREVIEW_SLOTS
+            .acquire()
+            .await
+            .map_err(|_| ApiError::Internal("component preview admission closed".into()))?;
+        let guard = state.runtime.lock().await;
+        if guard
+            .as_ref()
+            .is_none_or(|runtime| !runtime.matches_runtime_session(&session))
+        {
+            return Err(ApiError::StalePreview(
+                "document session changed before preview".into(),
+            ));
+        }
+        let still_current =
+            crate::library::captured_component_draft_workspace(state, &operation, &session)
+                .is_some_and(|current| std::sync::Arc::ptr_eq(&current, &workspace));
+        if !still_current {
+            return Err(ApiError::StalePreview(
+                "component draft changed before preview".into(),
+            ));
+        }
+        drop(guard);
+        tokio::spawn(async move {
+            let _workspace = workspace;
+            let _permit = permit;
+            engine
+                .preview_op(
+                    operation,
+                    op_id.to_string(),
+                    sketch_id,
+                    expected_snapshot_id,
+                    lod,
+                )
+                .await
+        })
+        .await
+        .map_err(|error| ApiError::Internal(format!("component preview task stopped: {error}")))?
+    } else {
+        engine
+            .preview_op(
+                operation,
+                op_id.to_string(),
+                sketch_id,
+                expected_snapshot_id,
+                lod,
+            )
+            .await
+    };
     match result {
         Err(onecad_core::regen::EngineError::OpFailed {
             code: onecad_core::regen::OpFailureCode::StalePreview,
@@ -3165,6 +3512,9 @@ pub async fn prepare_sketch_on_face(
     };
     let attachment = onecad_core::sketch::SketchAttachment::HostFace {
         face: ElementRef {
+            import_source_identity: identity
+                .as_ref()
+                .and_then(|(_, evidence)| evidence.import_source_identity.clone()),
             // Only a real, non-empty ElementId is a binding; an empty string
             // would be a fabricated identity the resolution ladder would chase.
             primary: (!element_id.is_empty()).then(|| PrimaryRef {
@@ -4116,13 +4466,13 @@ pub async fn prepare_offset_face(
             (None, None) => {
                 return Err(ApiError::InvalidCommand(format!(
                     "prepareOffsetFace: pick {i} carries neither elementId nor topoKey"
-                )))
+                )));
             }
             (Some(_), Some(_)) => {
                 return Err(ApiError::InvalidCommand(format!(
                     "prepareOffsetFace: pick {i} carries BOTH elementId and topoKey — the two \
                      rungs are mutually exclusive (SCHEMA §7.6)"
-                )))
+                )));
             }
             _ => {}
         }
@@ -4133,7 +4483,7 @@ pub async fn prepare_offset_face(
             None if topo.is_some() => {
                 return Err(ApiError::InvalidCommand(format!(
                     "prepareOffsetFace: pick {i} addresses a topoKey but carries no bodyId"
-                )))
+                )));
             }
             None => None,
         };
@@ -5106,6 +5456,10 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 }
 
 #[cfg(test)]
+mod export_scope_tests;
+#[cfg(test)]
+mod operation_context_tests;
+#[cfg(test)]
 mod recovery_identity_tests;
 
 #[cfg(test)]
@@ -5122,6 +5476,7 @@ mod tests {
                 id.into(),
                 crate::dto::BodyDto {
                     id: id.into(),
+                    created_by: "test-operation".into(),
                     name: id.into(),
                     visible,
                     health: onecad_core::document::body::BodyHealth::Healthy,

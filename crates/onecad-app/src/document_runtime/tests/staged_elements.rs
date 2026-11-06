@@ -185,6 +185,7 @@ async fn anchored_stage_carries_each_anchor_into_ref_and_staged_evidence() {
 
 fn host_face(id: &str, body: BodyId) -> ElementRef {
     ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: ElementId::new(id),

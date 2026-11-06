@@ -114,14 +114,14 @@ use crate::worker::{lod_str, wire, AdoptingEngine, EngineClock, MeshProvider, So
 /// holder ever mutates these tokens; reads are lock-free.
 #[derive(Debug)]
 pub struct FencingCell {
-    revision: AtomicU64,
+    revision: Arc<AtomicU64>,
     epoch: AtomicU64,
 }
 
 impl FencingCell {
     fn new(epoch: u64) -> Self {
         Self {
-            revision: AtomicU64::new(0),
+            revision: Arc::new(AtomicU64::new(0)),
             epoch: AtomicU64::new(epoch),
         }
     }
@@ -508,7 +508,18 @@ pub struct SavePayload {
     doc: Document,
     caches: ContainerCaches,
     imports: ImportBlobs,
+    library_archives: onecad_core::io::library::LibraryArchives,
+    _archive_scratch: Option<crate::resource_admission::Retention>,
+    library_error: Option<String>,
     meta: SaveMeta,
+}
+
+#[cfg(feature = "composition-test")]
+impl SavePayload {
+    /// Read-only save snapshot for composition-test diagnostics.
+    pub fn diagnostic_document(&self) -> &Document {
+        &self.doc
+    }
 }
 
 /// Which "open paints immediately" caches a save embeds in the container.
@@ -596,6 +607,8 @@ struct PromotionEntry {
     element_id: ElementId,
     kind: onecad_core::document::refs::ElementKind,
     descriptor: Option<serde_json::Value>,
+    import_source_identity:
+        Option<onecad_core::document::import_source_identity::ImportSourceIdentity>,
 }
 
 #[derive(Debug, Clone)]
@@ -703,7 +716,16 @@ pub struct DocumentRuntime {
     /// point is unknown (a recovered autosave).
     saved_history: Option<unsaved::SavedHistory>,
     read_only: bool,
+    transient_joint_repairs: BTreeSet<(
+        onecad_assembly::joint::JointId,
+        onecad_core::document::component::JointSide,
+    )>,
     mesh_cache: MeshCache,
+    component_cache: BTreeMap<
+        onecad_core::document::component::ComponentDefId,
+        component_execution::ComponentCache,
+    >,
+    component_generation: u64,
     /// MESH1 blobs read back from the container at **open** — the last-saved
     /// geometry, keyed WITHOUT a generation because it belongs to no live snapshot.
     ///
@@ -801,6 +823,11 @@ pub struct DocumentRuntime {
     /// file. Held in memory because a save must be able to rewrite every blob even
     /// if its temp materialization was deleted underneath us.
     imports: ImportBlobs,
+    library_archives: onecad_core::io::library::LibraryArchives,
+    archive_budget: crate::resource_admission::ArchiveBudget,
+    verified_library_archives: std::collections::BTreeSet<(String, String, String, String)>,
+    known_library_archives: std::collections::BTreeSet<String>,
+    library_archives_incomplete: bool,
     /// The temp directory the blobs are materialized into for the worker. Owned
     /// here so the files outlive the unlocked `PreparedRegen::drive` window and a
     /// worker-restart replay, and are cleaned when the document closes (Drop).
@@ -940,14 +967,66 @@ impl DocumentRuntime {
         meshes: Arc<dyn MeshProvider>,
         solver: Arc<dyn SolverEngine>,
     ) -> Result<Self, IoError> {
+        Self::open_with_assembly(path, engine, meshes, solver, false, Default::default())
+    }
+
+    /// Opens an assembly for an explicit assembly-aware host; geometry must be replayed.
+    ///
+    /// # Errors
+    /// Returns an error when the container cannot be decoded.
+    pub fn open_assembly(
+        path: &Path,
+        engine: Arc<dyn GeometryEngine>,
+        meshes: Arc<dyn MeshProvider>,
+        solver: Arc<dyn SolverEngine>,
+    ) -> Result<Self, IoError> {
+        Self::open_with_assembly(path, engine, meshes, solver, true, Default::default())
+    }
+
+    pub(crate) fn open_with_budget(
+        path: &Path,
+        engine: Arc<dyn GeometryEngine>,
+        meshes: Arc<dyn MeshProvider>,
+        solver: Arc<dyn SolverEngine>,
+        allow_assembly: bool,
+        budget: crate::resource_admission::ArchiveBudget,
+    ) -> Result<Self, IoError> {
+        Self::open_with_assembly(path, engine, meshes, solver, allow_assembly, budget)
+    }
+
+    pub(crate) fn set_archive_budget(&mut self, budget: crate::resource_admission::ArchiveBudget) {
+        self.archive_budget = budget;
+    }
+    fn open_with_assembly(
+        path: &Path,
+        engine: Arc<dyn GeometryEngine>,
+        meshes: Arc<dyn MeshProvider>,
+        solver: Arc<dyn SolverEngine>,
+        allow_assembly: bool,
+        budget: crate::resource_admission::ArchiveBudget,
+    ) -> Result<Self, IoError> {
         let loaded = ContainerReader::open(path)?;
+        if !allow_assembly
+            && (!loaded.document().definitions.is_empty()
+                || !loaded.document().assembly.occurrences.is_empty()
+                || !loaded.document().assembly.joints.is_empty())
+        {
+            return Err(IoError::UnsupportedFeature(
+                "assembly definition execution is not yet available".into(),
+            ));
+        }
         let read_only = loaded.outcome.read_only;
+        let migrated = loaded
+            .outcome
+            .migration_report
+            .as_ref()
+            .is_some_and(|report| report.applied);
         let doc = loaded.document().clone();
         let title = title_for_path(path);
         let mut rt = Self::from_document(
             doc,
             title,
-            Some(path.to_path_buf()),
+            (!migrated).then(|| path.to_path_buf()),
             read_only,
             engine,
             meshes,
@@ -958,6 +1037,8 @@ impl DocumentRuntime {
         // `ImportStep` steps cannot replay. Loaded eagerly (unlike caches) because
         // regen starts immediately after open and the worker needs real files.
         rt.load_import_blobs(&loaded);
+        rt.archive_budget = budget;
+        rt.load_library_archives(&loaded)?;
         // Last-saved geometry + thumbnail. Eager for the same reason: the whole
         // value is being resident BEFORE the open-regen's first publish.
         rt.load_open_caches(&loaded);
@@ -1016,7 +1097,10 @@ impl DocumentRuntime {
             // Opened (or new) means "matches the file": no step since then.
             saved_history: Some(unsaved::SavedHistory::default()),
             read_only,
+            transient_joint_repairs: BTreeSet::new(),
             mesh_cache: MeshCache::new(),
+            component_cache: BTreeMap::new(),
+            component_generation: 0,
             cached_meshes: HashMap::new(),
             preview_png: None,
             projection_stale: BTreeMap::new(),
@@ -1048,6 +1132,11 @@ impl DocumentRuntime {
             checkpoints: InMemoryCheckpointStore::new(),
             last_regen_used_checkpoint: false,
             imports: ImportBlobs::new(),
+            library_archives: Default::default(),
+            archive_budget: Default::default(),
+            verified_library_archives: Default::default(),
+            known_library_archives: Default::default(),
+            library_archives_incomplete: false,
             import_workspace,
             import_names: HashMap::new(),
             edit_preview: edit_preview::EditPreviewSlot::default(),
@@ -1284,12 +1373,45 @@ impl DocumentRuntime {
     /// # Errors
     /// [`DomainError`] on validation failure; the document is left unchanged.
     pub fn apply(&mut self, cmd: EditCommand) -> Result<CommandOutcome, DomainError> {
+        if matches!(cmd, EditCommand::Assembly { .. }) {
+            return Err(DomainError::Validation(
+                "assembly definition execution is not yet available".into(),
+            ));
+        }
+        self.apply_authoritative(cmd)
+    }
+
+    /// Applies an explicitly requested assembly edit through the single writer.
+    ///
+    /// # Errors
+    /// Returns the edit's validation error without applying it.
+    pub fn apply_assembly_edit(
+        &mut self,
+        edit: onecad_core::edit::AssemblyEdit,
+    ) -> Result<CommandOutcome, DomainError> {
+        if matches!(
+            edit,
+            onecad_core::edit::AssemblyEdit::SetJointsAndPoses { .. }
+                | onecad_core::edit::AssemblyEdit::SetBoundJointsAndPoses { .. }
+                | onecad_core::edit::AssemblyEdit::MarkJointOriginRepair { .. }
+        ) {
+            return Err(DomainError::Validation(
+                "joint poses require a fenced solve".into(),
+            ));
+        }
+        self.apply_authoritative(EditCommand::Assembly {
+            edit: Box::new(edit),
+        })
+    }
+
+    fn apply_authoritative(&mut self, cmd: EditCommand) -> Result<CommandOutcome, DomainError> {
         self.require_generation_capacity()?;
         if self.read_only {
             return Err(DomainError::ReadOnly);
         }
         self.reject_timeline_body_delete(&cmd)?;
-        let cmd = self.hydrate_ref_intents(cmd);
+        let mut cmd = self.hydrate_ref_intents(cmd);
+        self.validate_edit_import_identities(&mut cmd)?;
         let staged = self.staged_ids_in(std::slice::from_ref(&cmd));
         let is_rollback = matches!(cmd, EditCommand::SetRollback { .. });
         let (outcome, changed) = self.session.apply_with_change(cmd)?;
@@ -1320,6 +1442,14 @@ impl DocumentRuntime {
         label: &str,
         commands: Vec<EditCommand>,
     ) -> Result<CommandOutcome, DomainError> {
+        if commands
+            .iter()
+            .any(|command| matches!(command, EditCommand::Assembly { .. }))
+        {
+            return Err(DomainError::Validation(
+                "assembly definition execution is not yet available".into(),
+            ));
+        }
         self.require_generation_capacity()?;
         if self.read_only {
             return Err(DomainError::ReadOnly);
@@ -1341,7 +1471,9 @@ impl DocumentRuntime {
             {
                 self.reject_timeline_body_delete(&command)?;
             }
-            hydrated.push(self.hydrate_ref_intents(command));
+            let mut command = self.hydrate_ref_intents(command);
+            self.validate_edit_import_identities(&mut command)?;
+            hydrated.push(command);
         }
         let staged = self.staged_ids_in(&hydrated);
         self.session.begin_transaction(label);
@@ -1528,6 +1660,15 @@ impl DocumentRuntime {
     /// stamped ref, a ref with no primary, and an element the cache has no
     /// descriptor for are all left exactly as they are (H5 fill-iff-None).
     fn stamp_intent(&self, reference: &mut ElementRef) {
+        if reference.import_source_identity.is_none() {
+            if let Some(primary) = reference.primary.as_ref() {
+                reference.import_source_identity = self
+                    .staged
+                    .get(&primary.element)
+                    .or_else(|| self.regen.elements.get(&primary.element))
+                    .and_then(|entry| entry.import_source_identity.clone());
+            }
+        }
         if reference.intent.is_some() {
             return;
         }
@@ -2602,6 +2743,9 @@ impl DocumentRuntime {
         let mut scratch = scratch;
         self.guard_staged_leaks(&mut scratch);
         self.regen = scratch;
+        // Root geometry can grow independently of embedded definitions; retire
+        // their caches before publishing to preserve the aggregate scene budget.
+        self.component_cache.clear();
         self.latest_snapshot = Some(snap.clone());
         // First publish retires the container's last-saved geometry: real geometry
         // now exists, and these blobs describe a document state the timeline may
@@ -3012,6 +3156,41 @@ impl DocumentRuntime {
         if let Some(png) = caches.preview_png {
             self.preview_png = Some(Arc::new(png));
         }
+        crate::library_archive::prune_metadata(&mut doc);
+        let archives = crate::library_archive::snapshot_for_save(
+            &doc,
+            &self.library_archives,
+            &self.known_library_archives,
+        );
+        let mut library_error = if self.library_archives_incomplete {
+            Some("one or more carried component archives are unavailable".to_string())
+        } else {
+            None
+        };
+        let scratch_size = archives
+            .values()
+            .map(|archive| archive.len())
+            .max()
+            .unwrap_or(0)
+            .checked_mul(2)
+            .and_then(|size| size.checked_add(4096));
+        let archive_scratch = match scratch_size {
+            Some(_) if archives.is_empty() => None,
+            Some(size) => match self
+                .archive_budget
+                .reserve(size, crate::resource_admission::ArchiveUse::Scratch)
+            {
+                Ok(retention) => Some(retention),
+                Err(error) => {
+                    library_error = Some(error);
+                    None
+                }
+            },
+            None => {
+                library_error = Some("archive scratch size overflow".into());
+                None
+            }
+        };
         SavePayload {
             doc,
             caches: ContainerCaches {
@@ -3028,6 +3207,9 @@ impl DocumentRuntime {
                     .flatten(),
             },
             imports: self.imports.clone(),
+            library_archives: archives,
+            _archive_scratch: archive_scratch,
+            library_error,
             meta,
         }
     }
@@ -3097,11 +3279,17 @@ impl DocumentRuntime {
     /// [`IoError`] on a serialization / filesystem failure; the target is left
     /// untouched on any failure.
     pub fn write_payload(path: &Path, payload: &SavePayload) -> Result<(), IoError> {
-        ContainerWriter::save_with_imports(
+        if let Some(error) = &payload.library_error {
+            return Err(IoError::Corrupt(error.clone()));
+        }
+        crate::library_archive::require_complete(&payload.doc, &payload.library_archives)
+            .map_err(IoError::Corrupt)?;
+        ContainerWriter::save_with_imports_and_library(
             path,
             &payload.doc,
             &payload.caches,
             &payload.imports,
+            &payload.library_archives,
             &payload.meta,
         )
     }
@@ -3361,19 +3549,40 @@ impl DocumentRuntime {
     ) -> Result<(), ApiError> {
         if bytes.len() as u64 > MAX_IMPORT_BLOB_BYTES {
             return Err(ApiError::Io(format!(
+                "component geometry blob {sha256} exceeds the {MAX_IMPORT_BLOB_BYTES}-byte limit"
+            )));
+        }
+        self.stage_component_blob_shared(
+            sha256,
+            codec,
+            Arc::new(onecad_core::io::imports::OwnedSource::untracked(
+                bytes.to_vec(),
+            )),
+        )
+    }
+
+    /// Stages an owned shared payload without duplicating its bytes.
+    pub fn stage_component_blob_shared(
+        &mut self,
+        sha256: &str,
+        codec: ImportSourceCodec,
+        bytes: Arc<onecad_core::io::imports::OwnedSource>,
+    ) -> Result<(), ApiError> {
+        if bytes.len() as u64 > MAX_IMPORT_BLOB_BYTES {
+            return Err(ApiError::Io(format!(
                 "component geometry blob {sha256} is {} bytes, over the \
                  {MAX_IMPORT_BLOB_BYTES}-byte limit",
                 bytes.len()
             )));
         }
-        let actual = crate::imports::sha256_hex(bytes);
+        let actual = crate::imports::sha256_hex(&bytes);
         if actual != sha256 {
             return Err(ApiError::InvalidCommand(format!(
                 "component geometry blob is keyed {sha256} but its bytes hash to {actual}"
             )));
         }
         self.import_workspace
-            .materialize(sha256, codec, bytes)
+            .materialize(sha256, codec, &bytes)
             .map_err(|e| {
                 ApiError::Io(format!(
                     "cannot stage component geometry {sha256} for the geometry worker: {e}"
@@ -3381,11 +3590,22 @@ impl DocumentRuntime {
             })?;
         self.imports
             .entry(sha256.to_string())
-            .or_insert_with(|| ImportBlob {
-                codec,
-                bytes: Arc::new(bytes.to_vec()),
-            });
+            .or_insert_with(|| ImportBlob { codec, bytes });
         Ok(())
+    }
+
+    /// Roll back only imports added before a refused transaction, while locked.
+    pub(crate) fn discard_uncommitted_component_blobs(&mut self, prior: &[String]) {
+        let added: Vec<_> = self
+            .imports
+            .keys()
+            .filter(|key| !prior.contains(key))
+            .cloned()
+            .collect();
+        for sha in added {
+            self.imports.remove(&sha);
+            self.import_workspace.release(&sha);
+        }
     }
 
     /// Re-materializes an already carried import blob for the worker from the
@@ -3399,7 +3619,7 @@ impl DocumentRuntime {
         let Some(blob) = self.imports.get(sha256).cloned() else {
             return Ok(false);
         };
-        self.stage_component_blob(sha256, blob.codec, &blob.bytes)?;
+        self.stage_component_blob_shared(sha256, blob.codec, blob.bytes.clone())?;
         Ok(true)
     }
 
@@ -3423,6 +3643,181 @@ impl DocumentRuntime {
     /// open failure: `io::imports` designs the blast radius to be exactly one
     /// timeline step, so the document opens, the tree renders, and only that one
     /// `ImportStep` fails (loudly) at its own step.
+    pub(crate) fn stage_library_archive(
+        &mut self,
+        archive: &crate::library_archive::CapturedArchive,
+    ) -> Result<(), ApiError> {
+        let sha = &archive.reference.archive_sha256;
+        if let Some(existing) = self.library_archives.get(sha) {
+            if existing.as_slice() != archive.bytes.as_slice() {
+                return Err(ApiError::InvalidCommand(
+                    "component archive hash collision".into(),
+                ));
+            }
+        } else if self
+            .library_archive_bytes()
+            .checked_add(archive.bytes.len())
+            .is_none_or(|total| total > 32 * 1024 * 1024)
+        {
+            return Err(ApiError::InvalidCommand(
+                "document component archives exceed the 32 MiB limit".into(),
+            ));
+        }
+        self.known_library_archives.insert(sha.clone());
+        self.verified_library_archives.insert((
+            sha.clone(),
+            archive.revision.clone(),
+            archive.reference.component_id.clone(),
+            archive.reference.component_version.clone(),
+        ));
+        self.library_archives
+            .insert(sha.clone(), archive.bytes.clone());
+        Ok(())
+    }
+
+    pub(crate) fn library_archive_checkpoint(
+        &self,
+    ) -> (Vec<String>, std::collections::BTreeSet<String>) {
+        (
+            self.library_archives.keys().cloned().collect(),
+            self.known_library_archives.clone(),
+        )
+    }
+
+    pub(crate) fn restore_library_archive_checkpoint(
+        &mut self,
+        checkpoint: &(Vec<String>, std::collections::BTreeSet<String>),
+    ) {
+        self.library_archives
+            .retain(|sha, _| checkpoint.0.contains(sha));
+        self.known_library_archives = checkpoint.1.clone();
+    }
+
+    pub(crate) fn library_archive_verified(
+        &self,
+        sha: &str,
+        revision: &str,
+        id: &str,
+        version: &str,
+    ) -> bool {
+        self.verified_library_archives.contains(&(
+            sha.to_string(),
+            revision.to_string(),
+            id.to_string(),
+            version.to_string(),
+        ))
+    }
+
+    pub(crate) fn captured_library_archive(
+        &self,
+        component_id: &str,
+        component_version: &str,
+        revision: &str,
+    ) -> Result<Option<crate::library_archive::ArchiveHandle>, ApiError> {
+        let refs = crate::library_archive::references(self.session.document())?;
+        let Some(entry) = refs.get(revision) else {
+            return Ok(None);
+        };
+        if entry.component_id != component_id || entry.component_version != component_version {
+            return Err(ApiError::InvalidCommand(
+                "component archive identity mismatch".into(),
+            ));
+        }
+        let bytes = self
+            .library_archives
+            .get(&entry.archive_sha256)
+            .cloned()
+            .ok_or_else(|| {
+                ApiError::InvalidCommand("component source archive unavailable".into())
+            })?;
+        Ok(Some((entry.clone(), bytes)))
+    }
+
+    /// Bytes held by archive closures, for host aggregate admission.
+    pub fn library_archive_bytes(&self) -> usize {
+        self.library_archives
+            .values()
+            .map(|bytes| bytes.len())
+            .sum()
+    }
+
+    fn load_library_archives(&mut self, loaded: &LoadedContainer) -> Result<(), IoError> {
+        let refs = match crate::library_archive::references(loaded.document()) {
+            Ok(refs) => refs,
+            Err(_) => {
+                self.library_archives_incomplete = true;
+                return Ok(());
+            }
+        };
+        self.known_library_archives = refs
+            .values()
+            .map(|entry| entry.archive_sha256.clone())
+            .collect();
+        let mut remaining = 32 * 1024 * 1024u64;
+        for info in loaded.library_archives() {
+            if info.declared_size > remaining {
+                if !self.known_library_archives.contains(&info.sha256) {
+                    self.library_archives_incomplete = true;
+                }
+                continue;
+            }
+            let size = usize::try_from(info.declared_size)
+                .map_err(|_| IoError::TooLarge("archive size overflow".into()))?;
+            let retention = self
+                .archive_budget
+                .reserve(size, crate::resource_admission::ArchiveUse::Retained)
+                .map_err(IoError::TooLarge)?;
+            let mut bytes = onecad_core::io::library::ArchiveBytes::zeroed(size, retention);
+            if loaded
+                .read_library_archive_into(&info.sha256, bytes.buffer_mut())
+                .is_err()
+            {
+                if !self.known_library_archives.contains(&info.sha256) {
+                    self.library_archives_incomplete = true;
+                }
+                continue;
+            }
+            bytes.set_used(size)?;
+            for (revision, reference) in refs
+                .iter()
+                .filter(|(_, reference)| reference.archive_sha256 == info.sha256)
+            {
+                let scratch_size = size
+                    .checked_mul(2)
+                    .and_then(|n| n.checked_add(4096))
+                    .ok_or_else(|| IoError::TooLarge("archive decode size overflow".into()))?;
+                let _scratch = self
+                    .archive_budget
+                    .reserve(scratch_size, crate::resource_admission::ArchiveUse::Scratch)
+                    .map_err(IoError::TooLarge)?;
+                let request = onecad_library::resolve::ResolveRequest {
+                    component_id: &reference.component_id,
+                    component_version: &reference.component_version,
+                    component_revision: revision,
+                };
+                if onecad_library::archive::decode(
+                    bytes.as_slice(),
+                    &info.sha256,
+                    &request,
+                    32 * 1024 * 1024,
+                )
+                .is_ok()
+                {
+                    self.verified_library_archives.insert((
+                        info.sha256.clone(),
+                        revision.clone(),
+                        reference.component_id.clone(),
+                        reference.component_version.clone(),
+                    ));
+                }
+            }
+            remaining -= info.declared_size;
+            self.library_archives
+                .insert(info.sha256.clone(), Arc::new(bytes));
+        }
+        Ok(())
+    }
+
     fn load_import_blobs(&mut self, loaded: &LoadedContainer) {
         for info in loaded.import_blobs() {
             match loaded.read_import_blob(&info.sha256) {
@@ -3441,7 +3836,9 @@ impl DocumentRuntime {
                         info.sha256.clone(),
                         ImportBlob {
                             codec: info.codec,
-                            bytes: Arc::new(bytes),
+                            bytes: Arc::new(onecad_core::io::imports::OwnedSource::untracked(
+                                bytes,
+                            )),
                         },
                     );
                 }
@@ -3704,6 +4101,94 @@ impl DocumentRuntime {
 
     // ── Projection ───────────────────────────────────────────────────────────
 
+    /// Check an assembly edit against the native host's visible-body admission cap.
+    pub fn check_assembly_body_budget(
+        &self,
+        edit: &onecad_core::edit::assembly::AssemblyEdit,
+        maximum: usize,
+    ) -> Result<(), ApiError> {
+        assembly_budget::check(self, edit, maximum)
+    }
+
+    /// Returns whether the document contains any assembly occurrences.
+    #[must_use]
+    pub fn has_assembly_occurrences(&self) -> bool {
+        self.session
+            .document()
+            .assembly
+            .occurrences
+            .iter()
+            .next()
+            .is_some()
+    }
+
+    /// Returns definition-local body metadata and stable occurrence placements.
+    ///
+    /// # Errors
+    /// Returns an error if the assembly's references are invalid.
+    pub fn assembly_projection(&self) -> Result<crate::dto::AssemblyProjectionDto, ApiError> {
+        self.assembly_projection_bounded(usize::MAX)
+    }
+
+    /// Bounds projected metadata before cloning any document-owned fields.
+    pub fn assembly_projection_bounded(
+        &self,
+        maximum_bytes: usize,
+    ) -> Result<crate::dto::AssemblyProjectionDto, ApiError> {
+        let document = self.session.document();
+        self.assembly_projection_charge(maximum_bytes)?;
+        let root = self
+            .regen
+            .bodies
+            .bodies()
+            .iter()
+            .map(|meta| crate::assembly_projection::body(meta, document.bodies.get(meta.id)))
+            .collect();
+        let mut projection = crate::assembly_projection::project_with_root(document, root)?;
+        projection.persisted_generation = self.persisted_generation();
+        for binding in &mut projection.joint_bindings {
+            if self
+                .transient_joint_repairs
+                .contains(&(binding.joint, binding.side))
+            {
+                binding.needs_repair = true;
+            }
+        }
+        for definition in &mut projection.definitions {
+            if definition.id == document.root_definition_id.to_string() {
+                definition.mesh_generation = self
+                    .latest_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.generation);
+            } else if let Some((id, _)) = document
+                .definitions
+                .iter()
+                .find(|(id, _)| id.to_string() == definition.id)
+            {
+                definition.mesh_generation = self.component_generation(*id);
+            }
+        }
+        for (binding, source) in projection
+            .joint_bindings
+            .iter_mut()
+            .zip(&document.assembly.joint_bindings)
+        {
+            binding.verified = projection.definitions.iter().any(|definition| {
+                definition.id == source.definition.to_string()
+                    && definition.mesh_generation.is_some()
+            });
+        }
+        Ok(projection)
+    }
+
+    pub fn assembly_projection_charge(&self, maximum_bytes: usize) -> Result<usize, ApiError> {
+        crate::assembly_projection::preflight(
+            self.session.document(),
+            &self.regen.bodies,
+            maximum_bytes,
+        )
+    }
+
     /// Builds the frontend [`DocumentProjection`] from the authoritative document
     /// + the regen mirror (states) + the latest snapshot (body geometry).
     #[must_use]
@@ -3722,6 +4207,7 @@ impl DocumentRuntime {
                 b.id.to_string(),
                 BodyDto {
                     id: b.id.to_string(),
+                    created_by: b.created_by.to_string(),
                     name: b.name.clone(),
                     visible: b.visible,
                     health: b.health,
@@ -4733,8 +5219,9 @@ impl DocumentRuntime {
             // previously dropped on the floor, which is why an authored face colour
             // survived a save and then had nothing to paint after a reopen — the
             // worker's partition is minted on demand and dies with the process.
-            let entry = ElementEntry::new(ev.body, ev.kind)
+            let mut entry = ElementEntry::new(ev.body, ev.kind)
                 .with_evidence(ev.anchor.clone(), ev.descriptor.clone());
+            entry.import_source_identity = ev.import_source_identity.clone();
             changed |= self.regen.elements.get(&id) != Some(&entry);
             self.regen.elements.insert(id.clone(), entry);
             out.push(PromotedElementDto {
@@ -4845,6 +5332,9 @@ impl DocumentRuntime {
                 diagnostics: Vec::new(),
             });
         }
+        for item in &evidence {
+            self.validate_import_evidence(item)?;
+        }
         // Rust owns id identity: seed `existing` from the promotion cache so a
         // re-pick of the same (snapshot, body, topoKey) reuses the id (Invariant 1).
         let prev_gen = self.previous_promotion_generation(snapshot);
@@ -4866,16 +5356,22 @@ impl DocumentRuntime {
                     if hit.kind == e.kind
                         && hit.descriptor.is_some()
                         && hit.descriptor == e.descriptor
+                        && hit.import_source_identity == e.import_source_identity
                     {
                         e.existing = Some(hit.element_id.clone());
                     }
                 }
             }
         }
+        for item in &evidence {
+            self.validate_import_evidence(item)?;
+        }
         let minted = mint_element_ids(evidence);
+        self.validate_minted_import_identities(&minted)?;
         let bindings = minted
             .iter()
             .map(|(element_id, evidence)| ElementBinding {
+                import_source_identity: evidence.import_source_identity.clone(),
                 element_id: element_id.clone(),
                 topo_key: evidence.topo_key.clone(),
                 body: evidence.body,
@@ -4896,6 +5392,7 @@ impl DocumentRuntime {
                     element_id: id.clone(),
                     kind: ev.kind,
                     descriptor: ev.descriptor.clone(),
+                    import_source_identity: ev.import_source_identity.clone(),
                 },
             );
         }
@@ -5143,6 +5640,8 @@ impl DocumentRuntime {
     /// Binding a best guess here would be the silent wrong-bind (H5-B) this whole
     /// migration exists to eliminate.
     ///
+    /// An `Unchanged` result confirms an existing binding only when it echoes the
+    /// requested persistent identity. It does not install a new binding.
     /// Returns `(bound, unresolved)` counts. Never fails the open: a worker error
     /// leaves every id unbound, exactly as before this existed — but re-arms the
     /// pass (bounded), since a transport failure is not a ladder answer.
@@ -5297,6 +5796,7 @@ impl DocumentRuntime {
             .map(|(id, entry)| ResolveRef {
                 ref_id: id.as_str().to_string(),
                 element: ElementRef {
+                    import_source_identity: entry.import_source_identity.clone(),
                     primary: Some(PrimaryRef {
                         body: entry.body,
                         element: id.clone(),
@@ -5342,6 +5842,7 @@ impl DocumentRuntime {
             .collect();
         let mut bindings = Vec::new();
         let mut unresolved = 0usize;
+        let mut unchanged = 0usize;
         for res in &resolutions {
             let Some(entry) = by_entry.get(res.ref_id.as_str()) else {
                 continue;
@@ -5354,16 +5855,20 @@ impl DocumentRuntime {
                     topo_key: Some(key),
                     ..
                 } => bindings.push(ElementBinding {
+                    import_source_identity: entry.import_source_identity.clone(),
                     element_id: ElementId::new(res.ref_id.clone()),
                     topo_key: key.clone(),
                     body: entry.body,
                     kind: entry.kind,
                     anchor: entry.anchor.clone(),
                 }),
+                ResolveOutcome::Unchanged {
+                    element_id: Some(id),
+                } if id.as_str() == res.ref_id => unchanged += 1,
                 _ => unresolved += 1,
             }
         }
-        let bound = bindings.len();
+        let bound = bindings.len() + unchanged;
         if !bindings.is_empty() {
             if let Err(err) = engine
                 .bind_element_ids(BindElementIdsRequest {
@@ -5723,6 +6228,16 @@ impl DocumentRuntime {
         }
         let op = serde_json::to_value(&op).ok()?;
         op.get("params").cloned()
+    }
+
+    pub(crate) fn operation_authority(&self, record: RecordId) -> Option<&Operation> {
+        self.session
+            .document()
+            .timeline
+            .records()
+            .iter()
+            .find(|candidate| candidate.record_id == record)
+            .map(|candidate| &candidate.op)
     }
 
     /// Stored authoring data for typed hosts, without derived worker-only inputs.
@@ -7098,11 +7613,15 @@ fn element_ref_input(op: &Operation, index: usize) -> Option<&ElementRef> {
     }
 }
 
+mod assembly_budget;
+pub mod component_execution;
 pub mod deletion;
 mod edit_operands;
 pub mod edit_preview;
 mod face_entry;
 mod gestures;
+mod import_identity;
+pub mod joint_execution;
 mod staged_elements;
 mod timeline_states;
 pub use face_entry::FaceEntryTicket;

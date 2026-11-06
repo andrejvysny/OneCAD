@@ -142,7 +142,7 @@ fn seed_synthetic_import(rt: &mut DocumentRuntime, bytes: Vec<u8>) {
             sha,
             ImportBlob {
                 codec: ImportSourceCodec::Step,
-                bytes: Arc::new(bytes),
+                bytes: Arc::new(onecad_core::io::imports::OwnedSource::untracked(bytes)),
             },
         )],
         solid_count: 1,

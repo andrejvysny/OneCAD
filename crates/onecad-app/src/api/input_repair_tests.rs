@@ -5,6 +5,7 @@ use onecad_core::{
 };
 fn reference(kind: ElementKind) -> ElementRef {
     ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body: BodyId::new(),
             kind,

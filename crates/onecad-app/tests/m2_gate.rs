@@ -306,6 +306,7 @@ fn fillet_op_record(body: BodyId, edge_anchor: Vec3) -> OperationRecord {
     // R-WP2.1 F2 lockstep: `edges[i].primary.element` MUST equal `edge_ids[i]`.
     let edge_el = ElementId::new("el_edge");
     let edge_ref = ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: edge_el.clone(),

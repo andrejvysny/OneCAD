@@ -533,9 +533,7 @@ async fn a_bracket_saves_with_configurations_and_places_as_a_chosen_variant() {
     )
     .await
     .expect("prepare the Heavy placement");
-    stage_prepared_blob(&state, &prepared.blob)
-        .await
-        .expect("stage");
+    stage_prepared_blob(&state, &prepared).await.expect("stage");
     let (record, placed_volume, (lo, hi), undo_before, undo_after) = {
         let mut guard = state.runtime.lock().await;
         let rt = guard.as_mut().unwrap();
@@ -922,9 +920,7 @@ async fn a_non_default_variant_is_never_mated_and_authoring_is_checked_against_t
     )
     .await
     .expect("unmated default");
-    stage_prepared_blob(&state, &prepared.blob)
-        .await
-        .expect("stage");
+    stage_prepared_blob(&state, &prepared).await.expect("stage");
     let record_id = {
         let mut guard = state.runtime.lock().await;
         let rt = guard.as_mut().unwrap();

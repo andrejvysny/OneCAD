@@ -156,6 +156,7 @@ fn anchor_at(at: Vec3) -> AnchorIntent {
 
 fn anchored_ref(body: BodyId, element: &ElementId, kind: ElementKind, at: Vec3) -> ElementRef {
     ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: element.clone(),

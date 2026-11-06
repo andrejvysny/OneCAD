@@ -333,6 +333,7 @@ fn extrude_to_face_record(rec: u128, sketch: SketchId, face: ElementRef) -> Oper
 /// shape a real UI edge/face pick lowers to.
 fn anchored_ref(body: BodyId, element: &ElementId, kind: ElementKind, at: Vec3) -> ElementRef {
     ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: element.clone(),

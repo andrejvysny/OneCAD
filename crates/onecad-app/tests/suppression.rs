@@ -328,6 +328,7 @@ fn extrude_record(rec: u128, sketch: SketchId, dist: f64) -> OperationRecord {
 /// operated body — the input the dependency graph turns into a body edge.
 fn fillet_record(rec: u128, body: BodyId, edge_el: ElementId, anchor: Vec3) -> OperationRecord {
     let edge_ref = ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: edge_el.clone(),

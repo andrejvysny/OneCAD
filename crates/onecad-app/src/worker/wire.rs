@@ -57,6 +57,10 @@ use crate::dto::{
 use super::{lod_from_str, lod_str, StepInspection};
 
 #[cfg(test)]
+#[path = "wire_import_identity_tests.rs"]
+mod import_identity_tests;
+
+#[cfg(test)]
 #[path = "wire_loft_tests.rs"]
 mod loft_tests;
 
@@ -1542,7 +1546,7 @@ fn artifact_mesh(
         Some(other) => {
             return Err(format!(
                 "mesh handle {body_str:?} format {other:?} != MESH1"
-            ))
+            ));
         }
     }
     if let (Some(want), Some(got)) = (
@@ -2857,6 +2861,11 @@ pub fn bind_element_ids_args(req: &BindElementIdsRequest) -> Value {
             if let Some(anchor) = &binding.anchor {
                 value["anchor"] = anchor_to_wire(anchor);
             }
+            if let Some(identity) = &binding.import_source_identity {
+                let mut encoded = serde_json::to_value(identity).expect("identity serialization");
+                to_wire_body_form(&mut encoded);
+                value["importSourceIdentity"] = encoded;
+            }
             value
         })
         .collect();
@@ -3029,17 +3038,14 @@ pub fn parse_classify_element(result: &Value) -> Option<crate::dto::ClassifyElem
         o.get(key)
             .and_then(Value::as_array)
             .filter(|a| a.len() == 3)
-            .map(|a| {
-                let g = |i: usize| a[i].as_f64().unwrap_or(0.0);
-                [g(0), g(1), g(2)]
+            .and_then(|a| {
+                let value = [a[0].as_f64()?, a[1].as_f64()?, a[2].as_f64()?];
+                value.iter().all(|v| v.is_finite()).then_some(value)
             })
     };
-    let frame = result
-        .get("frame")
-        .map(|f| crate::dto::ClassifyElementFrameDto {
-            // A malformed origin is a PROTOCOL break, never a fabricated (0,0,0):
-            // that would seat a mate at the world origin instead of failing loudly.
-            origin: vec3(f, "origin").unwrap_or([0.0, 0.0, 0.0]),
+    let frame = result.get("frame").and_then(|f| {
+        Some(crate::dto::ClassifyElementFrameDto {
+            origin: vec3(f, "origin")?,
             normal: vec3(f, "normal"),
             axis: vec3(f, "axis"),
             radius: f.get("radius").and_then(Value::as_f64),
@@ -3052,7 +3058,8 @@ pub fn parse_classify_element(result: &Value) -> Option<crate::dto::ClassifyElem
                 .and_then(Value::as_str)
                 .filter(|s| *s == "pin" || *s == "hole")
                 .map(str::to_string),
-        });
+        })
+    });
     Some(crate::dto::ClassifyElementDto {
         kind: str_at("kind"),
         surface_type: str_at("surfaceType"),
@@ -3425,7 +3432,7 @@ pub fn parse_project_face_boundary(result: &Value) -> Result<Option<ProjectionPa
                 return Err(format!(
                     "ProjectFaceBoundary: unknown entity type {other:?} (SCHEMA §7.6 emits only \
                      Line/Circle/Arc — every other curve falls back to a Line polyline)"
-                ))
+                ));
             }
         });
     }
@@ -3734,7 +3741,7 @@ pub fn parse_project_to_sketch_plane(
                 return Err(format!(
                     "ProjectToSketchPlane: unknown entity type {other:?} (SCHEMA §7.6 emits only \
                      Line/Circle/Arc/Ellipse; every other curve is a per-source refusal)"
-                ))
+                ));
             }
         });
         // A curve without provenance is unusable: it could never be updated,
@@ -4303,34 +4310,102 @@ fn parse_offset_refusal(
 /// ids via [`mint_element_ids`](onecad_core::regen::mint_element_ids)). A worker
 /// `elementId` (echoed existing binding) rides through as `existing`. `fallback_body`
 /// backs a malformed/absent `bodyId`.
-#[must_use]
-pub fn parse_acquire_evidence(result: &Value, fallback_body: BodyId) -> Vec<WorkerElementEvidence> {
-    result
-        .get("ids")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .map(|e| WorkerElementEvidence {
-                    topo_key: TopoKey::new(e.get("topoKey").and_then(Value::as_str).unwrap_or("")),
-                    body: e
+pub fn parse_acquire_evidence(
+    result: &Value,
+    fallback_body: BodyId,
+) -> Result<Vec<WorkerElementEvidence>, String> {
+    let Some(rows) = result.get("ids").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    rows.iter()
+        .map(|e| {
+            let body = e
+                .get("bodyId")
+                .and_then(Value::as_str)
+                .and_then(|s| parse_body_id(s).ok())
+                .unwrap_or(fallback_body);
+            let kind = parse_kind(e.get("kind").and_then(Value::as_str).unwrap_or("face"));
+            let import_source_identity = if let Some(raw) = e.get("importSourceIdentity") {
+                if e.get("bodyId")
+                    .and_then(Value::as_str)
+                    .and_then(|id| parse_body_id(id).ok())
+                    != Some(body)
+                    || e.get("kind").and_then(Value::as_str) != Some("face")
+                {
+                    return Err("certified evidence requires an explicit matching face body".into());
+                }
+                let mut raw = raw.clone();
+                let body_wire = raw
+                    .get("bodyId")
+                    .and_then(Value::as_str)
+                    .ok_or("certificate missing bodyId")?;
+                let cert_body =
+                    parse_body_id(body_wire).map_err(|_| "certificate has invalid bodyId")?;
+                if cert_body != body || kind != ElementKind::Face {
+                    return Err("certificate body or kind mismatch".into());
+                }
+                raw["bodyId"] = serde_json::to_value(cert_body).map_err(|e| e.to_string())?;
+                Some(
+                    serde_json::from_value(raw)
+                        .map_err(|e| format!("invalid import source identity: {e}"))?,
+                )
+            } else {
+                None
+            };
+            Ok(WorkerElementEvidence {
+                import_source_identity,
+                topo_key: TopoKey::new(e.get("topoKey").and_then(Value::as_str).unwrap_or("")),
+                body,
+                kind,
+                anchor: e
+                    .get("anchor")
+                    .and_then(|a| serde_json::from_value::<AnchorIntent>(a.clone()).ok()),
+                descriptor: e.get("descriptor").cloned(),
+                existing: e
+                    .get("elementId")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(ElementId::new),
+            })
+        })
+        .collect()
+}
+
+/// Refuse malformed critical source identities before any request is sent.
+pub fn validate_import_source_identities(value: &Value) -> Result<(), String> {
+    let mut pending = vec![value];
+    while let Some(item) = pending.pop() {
+        match item {
+            Value::Object(fields) => {
+                if let Some(raw) = fields.get("importSourceIdentity") {
+                    let mut raw = raw.clone();
+                    let body_wire = raw
                         .get("bodyId")
                         .and_then(Value::as_str)
-                        .and_then(|s| parse_body_id(s).ok())
-                        .unwrap_or(fallback_body),
-                    kind: parse_kind(e.get("kind").and_then(Value::as_str).unwrap_or("face")),
-                    anchor: e
-                        .get("anchor")
-                        .and_then(|a| serde_json::from_value::<AnchorIntent>(a.clone()).ok()),
-                    descriptor: e.get("descriptor").cloned(),
-                    existing: e
-                        .get("elementId")
+                        .ok_or("import source identity missing bodyId")?;
+                    let body = parse_body_id(body_wire).map_err(|_| "invalid identity bodyId")?;
+                    raw["bodyId"] = serde_json::to_value(body).map_err(|e| e.to_string())?;
+                    let cert: onecad_core::document::import_source_identity::ImportSourceIdentity =
+                        serde_json::from_value(raw)
+                            .map_err(|e| format!("invalid import source identity: {e}"))?;
+                    let primary = fields.get("primary").unwrap_or(item);
+                    let expected = primary
+                        .get("bodyId")
                         .and_then(Value::as_str)
-                        .filter(|s| !s.is_empty())
-                        .map(ElementId::new),
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+                        .and_then(|id| parse_body_id(id).ok());
+                    if expected != Some(cert.body_id)
+                        || primary.get("kind").and_then(Value::as_str) != Some("face")
+                    {
+                        return Err("import source identity body or kind mismatch".into());
+                    }
+                }
+                pending.extend(fields.values());
+            }
+            Value::Array(items) => pending.extend(items),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// `ResolveRefs.args` (SCHEMA §7.5) — dry-run ladder for repair dialogs.
@@ -4408,12 +4483,12 @@ pub fn validate_resolve_refs_result(req: &ResolveRequest, result: &Value) -> Res
                 return Err(format!(
                     "ResolveRefs: resolutions[{index}] echoed snapshot {echoed}, requested {}",
                     req.snapshot_id.0
-                ))
+                ));
             }
             None => {
                 return Err(format!(
                     "ResolveRefs: resolutions[{index}] carries no snapshotId echo"
-                ))
+                ));
             }
         }
         let revision = actual
@@ -5282,6 +5357,7 @@ mod tests {
             entities: vec![],
             constraints: vec![],
             host_face: Some(ElementRef {
+                import_source_identity: None,
                 primary: Some(PrimaryRef {
                     body,
                     element: ElementId::new("el_top"),
@@ -5350,6 +5426,7 @@ mod tests {
             entities: vec![],
             constraints: vec![],
             host_face: Some(ElementRef {
+                import_source_identity: None,
                 primary: Some(PrimaryRef {
                     body: BodyId(Uuid::from_u128(0x77)),
                     element: ElementId::new("el_top"),
@@ -5556,6 +5633,7 @@ mod tests {
                 .map(|id| ResolveRef {
                     ref_id: (*id).to_string(),
                     element: ElementRef {
+                        import_source_identity: None,
                         primary: None,
                         intent: None,
                         anchor: None,
@@ -7378,7 +7456,7 @@ mod solver_wire_tests {
             { "topoKey": "f:22", "kind": "face", "bodyId": body_id_wire(body), "elementId": "el_00000000000004a1", "descriptor": {} },
             { "topoKey": "e:3", "kind": "edge", "bodyId": body_id_wire(body), "elementId": "" }
         ]});
-        let ev = parse_acquire_evidence(&result, body);
+        let ev = parse_acquire_evidence(&result, body).unwrap();
         assert_eq!(ev.len(), 2);
         assert_eq!(
             ev[0].existing.as_ref().unwrap().as_str(),
@@ -7397,6 +7475,7 @@ mod solver_wire_tests {
         let req = BindElementIdsRequest {
             snapshot_id: SnapshotId(5012),
             bindings: vec![ElementBinding {
+                import_source_identity: None,
                 element_id: ElementId::new("el_face"),
                 topo_key: TopoKey::new("f:2"),
                 body,
@@ -7714,6 +7793,7 @@ mod body_wire_tests {
         let mut extra = Extra::new();
         extra.insert("alienRefKey".into(), json!({ "keep": true }));
         let r = ElementRef {
+            import_source_identity: None,
             primary: Some(PrimaryRef {
                 body,
                 element: ElementId::new("el_9"),
@@ -7793,6 +7873,7 @@ mod body_wire_tests {
 
         let body = BodyId(Uuid::from_u128(0x68));
         let face = |el: &str| ElementRef {
+            import_source_identity: None,
             primary: Some(PrimaryRef {
                 body,
                 element: ElementId::new(el),
@@ -8133,6 +8214,7 @@ mod body_wire_tests {
             extra: Default::default(),
         };
         let edge_ref = |body: BodyId, element: &str| ElementRef {
+            import_source_identity: None,
             primary: Some(PrimaryRef {
                 body,
                 element: ElementId::new(element),
@@ -8144,6 +8226,7 @@ mod body_wire_tests {
             extra: Default::default(),
         };
         let face_ref = |body: BodyId, element: &str| ElementRef {
+            import_source_identity: None,
             primary: Some(PrimaryRef {
                 body,
                 element: ElementId::new(element),
@@ -8291,6 +8374,7 @@ mod body_wire_tests {
     fn wire_op_typed_revolve_axis_emits_one_repairable_input() {
         let body = BodyId(Uuid::from_u128(0x91));
         let typed = ElementRef {
+            import_source_identity: None,
             primary: Some(PrimaryRef {
                 body,
                 element: ElementId::new("el_axis"),
@@ -8961,6 +9045,7 @@ mod chamfer_reference_face_wire_tests {
 
     fn typed_ref(el: &str, kind: ElementKind, point: [f64; 3]) -> ElementRef {
         ElementRef {
+            import_source_identity: None,
             primary: Some(PrimaryRef {
                 body: body(),
                 element: ElementId::new(el),
@@ -9082,6 +9167,14 @@ mod chamfer_reference_face_wire_tests {
 #[cfg(test)]
 mod classify_element_tests {
     use super::*;
+
+    #[test]
+    fn malformed_origin_is_not_fabricated() {
+        for origin in [json!(null), json!([1, 2]), json!([1, "bad", 3])] {
+            let value = json!({"present": true, "kind": "face", "surfaceType": "plane", "frame": {"origin": origin, "normal": [0, 0, 1]}});
+            assert!(parse_classify_element(&value).unwrap().frame.is_none());
+        }
+    }
 
     /// SCHEMA §7.5 (kernel-hardening WP-I): a cylinder FACE frame may carry
     /// `sidedness`. It is OPTIONAL and CLOSED — absent, and a token this build

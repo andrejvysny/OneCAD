@@ -473,6 +473,7 @@ fn anchor_of(evidence: &serde_json::Value) -> AnchorIntent {
 
 fn face_ref(body: BodyId, element: &ElementId, anchor: AnchorIntent) -> ElementRef {
     ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: element.clone(),

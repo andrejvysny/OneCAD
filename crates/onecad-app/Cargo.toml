@@ -15,6 +15,7 @@ composition-test = []
 
 [dependencies]
 onecad-core = { workspace = true }
+onecad-assembly = { path = "../onecad-assembly" }
 onecad-library = { path = "../onecad-library" }
 onecad-protocol = { workspace = true, features = ["client", "tracing"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "time", "sync"] }
@@ -30,6 +31,7 @@ async-trait = { workspace = true }
 sha2 = { workspace = true }
 base64 = "0.22"
 toml = "0.8"
+tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -39,7 +41,6 @@ libc = "0.2"
 trash = "5"
 
 [dev-dependencies]
-tempfile = "3"
 # Virtual-time autosave scheduling tests must not depend on filesystem latency.
 tokio = { workspace = true, features = ["test-util"] }
 zip = { workspace = true }

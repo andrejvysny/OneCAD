@@ -337,6 +337,7 @@ fn transform_record(
 /// a world-midpoint anchor) — the SCHEMA §7.3 `inputs[]` shape the ladder binds.
 fn fillet_record(body: BodyId, edge_el: ElementId, anchor: Vec3, radius: f64) -> OperationRecord {
     let edge_ref = ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: edge_el.clone(),
@@ -1116,6 +1117,7 @@ fn hosted_rect_sketch(
         "OnFace",
         SketchAttachment::HostFace {
             face: ElementRef {
+                import_source_identity: None,
                 primary: Some(PrimaryRef {
                     body,
                     element: ElementId::new(el),

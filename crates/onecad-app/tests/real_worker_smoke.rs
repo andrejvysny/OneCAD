@@ -661,6 +661,7 @@ async fn real_worker_element_identity_verbs_are_live() {
         refs: vec![ResolveRef {
             ref_id: "op_0.input0".into(),
             element: ElementRef {
+                import_source_identity: None,
                 primary: None,
                 intent: None,
                 anchor: Some(AnchorIntent {

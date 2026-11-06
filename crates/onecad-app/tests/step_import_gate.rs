@@ -597,6 +597,7 @@ fn boolean_record(rec: u128, op: BooleanOp, target: BodyId, tool: BodyId) -> Ope
 /// SCHEMA §7.3 `inputs[]` carries.
 fn edge_ref(body: BodyId, edge_el: &ElementId, anchor: Vec3) -> ElementRef {
     ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: edge_el.clone(),

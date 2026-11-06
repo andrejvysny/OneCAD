@@ -312,6 +312,7 @@ fn extrude_record(rec: u128, sketch: SketchId, dist: f64) -> OperationRecord {
 
 fn anchored_ref(body: BodyId, element: &ElementId, kind: ElementKind, at: Vec3) -> ElementRef {
     ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: element.clone(),
@@ -1076,6 +1077,7 @@ async fn a_legacy_asymmetric_chamfer_halts_on_open_and_twice_more_after_an_upstr
                 refs: vec![ResolveRef {
                     ref_id: want.clone(),
                     element: ElementRef {
+                        import_source_identity: None,
                         primary: None,
                         intent: None,
                         anchor: None,

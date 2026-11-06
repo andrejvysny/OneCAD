@@ -18,6 +18,7 @@ use onecad_core::document::record::{
 use onecad_core::edit::{CommandOutcome, EditCommand};
 use onecad_core::ids::RecordId;
 use onecad_library::package::{ComponentPackage, SourceSpec};
+use onecad_library::resolve::ResolveRequest;
 use onecad_library::Library;
 
 use crate::dto::{
@@ -26,9 +27,12 @@ use crate::dto::{
 };
 use crate::error::ApiError;
 use crate::host::HostContext;
+#[cfg(test)]
+use crate::library::component_package_at;
 use crate::library::{
-    component_package_at, component_status_with, finish, free_defaults, library_root, open_at,
-    prepare_replace_component_at, set_component_params_removing_at, validate_component_params,
+    admitted_component_snapshot_at, component_status_with, finish, free_defaults, library_root,
+    open_at, prepare_replace_component_from_snapshot, set_component_params_removing_at,
+    validate_component_params,
 };
 use crate::state::AppState;
 
@@ -78,11 +82,40 @@ fn linked_instance(
     library: Option<&Library>,
     record: &OperationRecord,
     placed: &PlaceComponentParams,
+    archived: Option<crate::dto::LibraryComponentDto>,
 ) -> ComponentInstanceDto {
-    let entry = library
-        .and_then(|l| l.get(&placed.component_id, Some(&placed.component_version)))
-        .map(|(_, entry)| entry);
-    let defaults = entry.map_or_else(Params::new, |e| free_defaults(&e.parameters));
+    let package = library
+        .and_then(|l| {
+            l.resolve_snapshot(&ResolveRequest {
+                component_id: &placed.component_id,
+                component_version: &placed.component_version,
+                component_revision: &placed.component_revision,
+            })
+            .ok()
+        })
+        .map(|snapshot| snapshot.package);
+    let mut defaults = package
+        .as_ref()
+        .map_or_else(Params::new, |p| free_defaults(&p.parameters));
+    let mut designation = package
+        .as_ref()
+        .and_then(|p| p.metadata.designation.clone());
+    let mut status = match library {
+        Some(library) => component_status_with(library, placed),
+        None => ComponentStatusDto::DefinitionMissing,
+    };
+    if let Some(archived) = archived {
+        defaults = free_defaults(&archived.parameters);
+        designation = archived.designation;
+        if !matches!(
+            status,
+            ComponentStatusDto::Linked | ComponentStatusDto::UpgradeAvailable { .. }
+        ) {
+            status = ComponentStatusDto::ArchivedSnapshot {
+                catalog: Box::new(status),
+            };
+        }
+    }
     let mut effective = defaults.clone();
     effective.extend(placed.params.clone());
     let overrides = placed
@@ -91,13 +124,9 @@ fn linked_instance(
         .filter(|(key, value)| defaults.get(*key) != Some(*value))
         .map(|(key, _)| key.clone())
         .collect();
-    let designation = entry
-        .and_then(|e| e.designation.as_deref())
+    let designation = designation
+        .as_deref()
         .map(|template| resolve_designation(template, &effective));
-    let status = match library {
-        Some(library) => component_status_with(library, placed),
-        None => ComponentStatusDto::DefinitionMissing,
-    };
     ComponentInstanceDto {
         record_id: record.record_id.to_string(),
         name: record.name.clone(),
@@ -134,18 +163,34 @@ fn detached_instance(
 }
 
 /// Every `PlaceComponent`/`DetachComponent` record, in history order.
-async fn component_records(state: &AppState, what: &str) -> Result<Vec<OperationRecord>, ApiError> {
+async fn component_records(
+    state: &AppState,
+    what: &str,
+) -> Result<
+    (
+        String,
+        onecad_core::ids::DocumentRevision,
+        Vec<OperationRecord>,
+    ),
+    ApiError,
+> {
     let guard = state.runtime.lock().await;
     let rt = guard
         .as_ref()
         .ok_or_else(|| ApiError::NoDocument(what.into()))?;
-    Ok(rt
+    let records = rt
         .projection()
         .features
         .iter()
-        .filter(|f| matches!(f.op_type.as_str(), "PlaceComponent" | "DetachComponent"))
-        .filter_map(|f| rt.operation_record(RecordId::from_str(&f.id).ok()?))
-        .collect())
+        .filter(|feature| {
+            matches!(
+                feature.op_type.as_str(),
+                "PlaceComponent" | "DetachComponent"
+            )
+        })
+        .filter_map(|feature| rt.operation_record(RecordId::from_str(&feature.id).ok()?))
+        .collect();
+    Ok((rt.runtime_session(), rt.revision(), records))
 }
 
 /// Lists placed and detached component instances with resolved parameters.
@@ -155,20 +200,47 @@ pub async fn component_instances_at(
     root: Option<&Path>,
     state: &AppState,
 ) -> Result<Vec<ComponentInstanceDto>, ApiError> {
-    let records = component_records(state, "componentInstances").await?;
+    let (session, revision, records) = component_records(state, "componentInstances").await?;
     let library = root.and_then(|r| Library::open(r).ok());
-    Ok(records
-        .iter()
-        .filter_map(|record| match &record.op {
+    let mut result = Vec::new();
+    for record in &records {
+        match &record.op {
             Operation::Known(KnownOperation::PlaceComponent(placed)) => {
-                Some(linked_instance(library.as_ref(), record, placed))
+                let archived = crate::library::component_detail_archived(
+                    state,
+                    &placed.component_id,
+                    &placed.component_version,
+                    &placed.component_revision,
+                )
+                .await;
+                let detail = archived
+                    .as_ref()
+                    .ok()
+                    .and_then(|detail| detail.as_ref())
+                    .map(|detail| detail.component.clone());
+                let mut instance = linked_instance(library.as_ref(), record, placed, detail);
+                if let Err(error) = archived {
+                    instance.status = ComponentStatusDto::DefinitionUnreadable {
+                        reason: error.to_string(),
+                    };
+                }
+                result.push(instance);
             }
             Operation::Known(KnownOperation::DetachComponent(detached)) => {
-                Some(detached_instance(record, &detached.source))
+                result.push(detached_instance(record, &detached.source))
             }
-            _ => None,
-        })
-        .collect())
+            _ => {}
+        }
+    }
+    let guard = state.runtime.lock().await;
+    if guard.as_ref().is_none_or(|runtime| {
+        !runtime.matches_runtime_session(&session) || runtime.revision() != revision
+    }) {
+        return Err(ApiError::StalePreview(
+            "component listing belongs to an obsolete document".into(),
+        ));
+    }
+    Ok(result)
 }
 
 pub async fn component_instances(
@@ -186,10 +258,12 @@ struct Planned {
     item: UpgradeItemDto,
     component_id: String,
     snapshot: Option<PlaceComponentParams>,
+    target: Option<crate::library::AdmittedSnapshot>,
 }
 
 fn refused(record_id: &str, from: &str, to: &str, reason: String) -> UpgradeItemDto {
     UpgradeItemDto {
+        runtime_session: String::new(),
         record_id: record_id.to_string(),
         from_version: from.to_string(),
         to_version: to.to_string(),
@@ -258,17 +332,18 @@ fn resolve_target(
     library: &Library,
     placed: &PlaceComponentParams,
     requested: Option<&str>,
+    archived: bool,
 ) -> Result<String, (String, String)> {
     let from = &placed.component_version;
     let fail = |to: &str, why: String| Err((to.to_string(), why));
-    match component_status_with(library, placed) {
-        ComponentStatusDto::DefinitionMissing => {
+    match (archived, component_status_with(library, placed)) {
+        (false, ComponentStatusDto::DefinitionMissing) => {
             return fail(
                 from,
                 "current definition is missing from the library".into(),
             )
         }
-        ComponentStatusDto::DefinitionUnreadable { reason } => {
+        (false, ComponentStatusDto::DefinitionUnreadable { reason }) => {
             return fail(from, format!("current definition is unreadable: {reason}"))
         }
         _ => {}
@@ -281,11 +356,13 @@ fn resolve_target(
             .newer_than(&placed.component_id, from)
             .map_or_else(|| from.clone(), |(v, _)| v.to_string()),
     };
-    let position = |v: &str| versions.iter().position(|x| *x == v);
-    match (position(from), position(&to)) {
-        (_, None) => fail(&to, format!("version {to} is not in the library")),
-        (Some(a), Some(b)) if b > a => Ok(to),
-        _ => fail(&to, format!("{to} is not newer than {from}")),
+    if !versions.iter().any(|version| *version == to) {
+        return fail(&to, format!("version {to} is not in the library"));
+    }
+    if onecad_library::index::compare_versions(&to, from) == std::cmp::Ordering::Greater {
+        Ok(to)
+    } else {
+        fail(&to, format!("{to} is not newer than {from}"))
     }
 }
 
@@ -295,33 +372,71 @@ fn plan_placed(
     record_id: &str,
     placed: PlaceComponentParams,
     requested: Option<&str>,
+    archived: Result<Option<crate::library_archive::ArchiveHandle>, String>,
+    budget: &crate::resource_admission::ArchiveBudget,
 ) -> Planned {
     let from = placed.component_version.clone();
     let component_id = placed.component_id.clone();
-    let plan = |item, snapshot| Planned {
+    let plan = |item, snapshot, target| Planned {
         item,
         component_id: component_id.clone(),
         snapshot,
+        target,
     };
-    let to = match resolve_target(library, &placed, requested) {
+    let archived = match archived {
+        Ok(archive) => archive,
+        Err(error) => return plan(refused(record_id, &from, &from, error), None, None),
+    };
+    let to = match resolve_target(library, &placed, requested, archived.is_some()) {
         Ok(to) => to,
-        Err((to, why)) => return plan(refused(record_id, &from, &to, why), None),
+        Err((to, why)) => return plan(refused(record_id, &from, &to, why), None, None),
     };
-    let package = match component_package_at("upgrade", root, &component_id, &to) {
-        Ok(p) => p,
-        Err(e) => return plan(refused(record_id, &from, &to, e.to_string()), None),
+    let target =
+        match admitted_component_snapshot_at("upgrade", root, &component_id, &to, None, budget) {
+            Ok(snapshot) => snapshot,
+            Err(e) => return plan(refused(record_id, &from, &to, e.to_string()), None, None),
+        };
+    let package = &target.snapshot.package;
+    let (old, decode_retention) = if let Some((entry, bytes)) = archived {
+        match crate::library_archive::decode(&entry, &placed.component_revision, &bytes, budget) {
+            Ok((snapshot, guard)) => (snapshot.package, guard),
+            Err(error) => {
+                return plan(
+                    refused(record_id, &from, &to, error.to_string()),
+                    None,
+                    None,
+                )
+            }
+        }
+    } else {
+        match admitted_component_snapshot_at(
+            "upgrade",
+            root,
+            &component_id,
+            &from,
+            Some(&placed.component_revision),
+            budget,
+        ) {
+            Ok(snapshot) => (snapshot.snapshot.package, snapshot.retention),
+            Err(error) => {
+                return plan(
+                    refused(record_id, &from, &to, error.to_string()),
+                    None,
+                    None,
+                )
+            }
+        }
     };
-    let old = match component_package_at("upgrade", root, &component_id, &from) {
-        Ok(p) => p,
-        Err(e) => return plan(refused(record_id, &from, &to, e.to_string()), None),
-    };
-    let (kept_overrides, dropped_overrides) = reconcile_overrides(&placed, &old, &package);
+    let (kept_overrides, dropped_overrides) = reconcile_overrides(&placed, &old, package);
+    drop(old);
+    drop(decode_retention);
     let dropped_mate_attachment = placed
         .mate
         .as_ref()
         .map(|m| m.self_attachment.clone())
         .filter(|name| !package.attachments.contains_key(name));
     let item = UpgradeItemDto {
+        runtime_session: String::new(),
         record_id: record_id.to_string(),
         from_version: from,
         to_version: to,
@@ -332,7 +447,7 @@ fn plan_placed(
         applicable: true,
         refusal: None,
     };
-    plan(item, Some(placed))
+    plan(item, Some(placed), Some(target))
 }
 
 /// Reads each requested record once, under one lock: `None` marks a record that
@@ -341,11 +456,19 @@ async fn read_placed(
     state: &AppState,
     ids: &[String],
 ) -> Result<Vec<Option<PlaceComponentParams>>, ApiError> {
+    Ok(read_placed_with_session(state, ids).await?.1)
+}
+
+async fn read_placed_with_session(
+    state: &AppState,
+    ids: &[String],
+) -> Result<(String, Vec<Option<PlaceComponentParams>>), ApiError> {
     let guard = state.runtime.lock().await;
     let rt = guard
         .as_ref()
         .ok_or_else(|| ApiError::NoDocument("componentUpgrades".into()))?;
-    ids.iter()
+    let placed = ids
+        .iter()
         .map(|id| {
             let record = RecordId::from_str(id)
                 .map_err(|e| ApiError::InvalidCommand(format!("bad recordId {id:?}: {e}")))?;
@@ -354,7 +477,8 @@ async fn read_placed(
                 _ => None,
             }))
         })
-        .collect()
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    Ok((rt.runtime_session(), placed))
 }
 
 async fn plan_targets(
@@ -368,25 +492,84 @@ async fn plan_targets(
         .filter(|(id, _)| seen.insert(id.clone()))
         .collect();
     let ids: Vec<String> = targets.iter().map(|(id, _)| id.clone()).collect();
-    let placed = read_placed(state, &ids).await?;
+    let (runtime_session, generation, placed, archives) = {
+        let guard = state.runtime.lock().await;
+        let rt = guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("componentUpgrades".into()))?;
+        let mut placed = Vec::with_capacity(ids.len());
+        let mut archives = Vec::with_capacity(ids.len());
+        for id in &ids {
+            let record = RecordId::from_str(id)
+                .map_err(|error| ApiError::InvalidCommand(error.to_string()))?;
+            let component = rt
+                .operation_record(record)
+                .and_then(|record| match record.op {
+                    Operation::Known(KnownOperation::PlaceComponent(params)) => Some(params),
+                    _ => None,
+                });
+            let archive = component
+                .as_ref()
+                .map(|params| {
+                    rt.captured_library_archive(
+                        &params.component_id,
+                        &params.component_version,
+                        &params.component_revision,
+                    )
+                    .map_err(|error| error.to_string())
+                })
+                .unwrap_or(Ok(None));
+            placed.push(component);
+            archives.push(archive);
+        }
+        (
+            rt.runtime_session(),
+            rt.persisted_generation(),
+            placed,
+            archives,
+        )
+    };
     let library = open_at(root)?;
-    Ok(targets
+    let planned = targets
         .into_iter()
         .zip(placed)
-        .map(|((id, requested), placed)| match placed {
-            Some(p) => plan_placed(root, &library, &id, p, requested.as_deref()),
-            None => Planned {
-                item: refused(
+        .zip(archives)
+        .map(|(((id, requested), placed), archive)| {
+            let mut planned = match placed {
+                Some(params) => plan_placed(
+                    root,
+                    &library,
                     &id,
-                    "",
-                    requested.as_deref().unwrap_or(""),
-                    "not a linked component instance".into(),
+                    params,
+                    requested.as_deref(),
+                    archive,
+                    &state.archive_budget(),
                 ),
-                component_id: String::new(),
-                snapshot: None,
-            },
+                None => Planned {
+                    item: refused(
+                        &id,
+                        "",
+                        requested.as_deref().unwrap_or(""),
+                        "not a linked component instance".into(),
+                    ),
+                    component_id: String::new(),
+                    snapshot: None,
+                    target: None,
+                },
+            };
+            planned.item.runtime_session = runtime_session.clone();
+            planned
         })
-        .collect())
+        .collect();
+    let guard = state.runtime.lock().await;
+    if guard.as_ref().is_none_or(|rt| {
+        !rt.matches_runtime_session(&runtime_session) || rt.persisted_generation() != generation
+    }) {
+        return Err(ApiError::StalePreview(
+            "component upgrade plan belongs to an obsolete document".into(),
+        ));
+    }
+    Ok(planned)
 }
 
 /// Read-only upgrade plan for `record_ids`. `target_version` `None` means the
@@ -443,7 +626,7 @@ pub async fn apply_component_upgrades_at(
     if replanned.len() != approved.len() || replanned.iter().zip(&approved).any(|(a, b)| *a != b) {
         return Err(stale());
     }
-    let planned: Vec<Planned> = planned.into_iter().filter(|p| p.item.applicable).collect();
+    let mut planned: Vec<Planned> = planned.into_iter().filter(|p| p.item.applicable).collect();
     if planned.is_empty() {
         return Err(ApiError::InvalidCommand(
             "no applicable component upgrades".into(),
@@ -451,43 +634,43 @@ pub async fn apply_component_upgrades_at(
     }
     let mut commands = Vec::with_capacity(planned.len());
     let mut blobs = Vec::new();
-    for p in &planned {
-        let prepared = prepare_replace_component_at(
-            root,
+    let mut archives = Vec::new();
+    for p in &mut planned {
+        let prepared = prepare_replace_component_from_snapshot(
             state,
             p.item.record_id.clone(),
             p.component_id.clone(),
             p.item.to_version.clone(),
             p.item.kept_overrides.clone(),
+            p.target.take().ok_or_else(stale)?,
+            &p.item.runtime_session,
         )
         .await?;
         commands.push(prepared.command);
         blobs.extend(prepared.blob);
+        archives.push(prepared.archive);
     }
-    commit_upgrades(root, state, &planned, blobs, commands).await
+    commit_upgrades(state, &planned, blobs, archives, commands).await
 }
 
 /// Stages every blob and applies the transaction under one runtime lock, after
 /// re-checking each record still equals the state the plan was built from.
 async fn commit_upgrades(
-    root: &Path,
     state: &AppState,
     planned: &[Planned],
     blobs: Vec<crate::library::StagedBlob>,
+    archives: Vec<crate::library_archive::CapturedArchive>,
     commands: Vec<EditCommand>,
 ) -> Result<(CommandOutcome, DocumentProjection), ApiError> {
     let mut guard = state.runtime.lock().await;
     let rt = guard
         .as_mut()
         .ok_or_else(|| ApiError::NoDocument("applyComponentUpgrades".into()))?;
-    let library = open_at(root)?;
     for (p, command) in planned.iter().zip(&commands) {
-        // The library moves independently of the document: the target must still
-        // declare the revision the user approved, and the record we authored
-        // must name that same revision.
-        let declared = library
-            .declared_revision(&p.component_id, &p.item.to_version)
-            .map_err(|_| stale())?;
+        if !rt.matches_runtime_session(&p.item.runtime_session) {
+            return Err(stale());
+        }
+        // The command must use the exact verified target captured during replanning.
         let authored = match command {
             EditCommand::UpdateOperationParams {
                 op: Operation::Known(KnownOperation::PlaceComponent(c)),
@@ -495,7 +678,7 @@ async fn commit_upgrades(
             } => Some(c.component_revision.as_str()),
             _ => None,
         };
-        if declared != p.item.to_revision || authored != Some(p.item.to_revision.as_str()) {
+        if authored != Some(p.item.to_revision.as_str()) {
             return Err(stale());
         }
         let record = RecordId::from_str(&p.item.record_id)
@@ -508,10 +691,13 @@ async fn commit_upgrades(
             return Err(stale());
         }
     }
-    for blob in &blobs {
-        blob.stage_into(rt)?;
-    }
-    let outcome = rt.apply_transaction("Update components", commands)?;
+    let outcome = crate::library::commit_component_archives(
+        rt,
+        blobs,
+        archives,
+        commands,
+        "Update components",
+    )?;
     Ok((outcome, rt.projection()))
 }
 
@@ -609,6 +795,12 @@ mod tests {
 
     /// v1.0.0 declares `thread` (M3..M8), `length` and `thread_detail`; v1.1.0
     /// narrows `thread` to M3..M6 and drops `thread_detail` as a free parameter.
+    fn stamp_package(dir: &Path) {
+        let raw = std::fs::read_to_string(dir.join("component.toml")).unwrap();
+        let pkg = onecad_library::package::parse(&raw, dir).unwrap();
+        onecad_library::package::write_package(dir, &pkg).unwrap();
+    }
+
     fn write_version(root: &Path, version: &str) {
         let v11 = version == "1.1.0";
         let (domain, detail) = if v11 {
@@ -645,6 +837,7 @@ length = {{ role = "free", value = 20, min = 2 }}
             if v11 { "1" } else { "0" }.repeat(64)
         );
         std::fs::write(dir.join("component.toml"), toml).unwrap();
+        stamp_package(&dir);
     }
 
     fn num(v: f64) -> ComponentParamValue {
@@ -755,8 +948,11 @@ length = {{ role = "free", value = 20, min = 2 }}
         assert!(ic.component_id.is_empty() && ic.defaults.is_empty());
 
         let none = component_instances_at(None, &state).await.unwrap();
-        assert_eq!(none[0].status, ComponentStatusDto::DefinitionMissing);
-        assert!(none[0].defaults.is_empty() && none[0].designation.is_none());
+        assert!(
+            matches!(&none[0].status, ComponentStatusDto::ArchivedSnapshot { catalog } if **catalog == ComponentStatusDto::DefinitionMissing)
+        );
+        assert_eq!(none[0].defaults["length"], num(20.0));
+        assert!(none[0].designation.is_some());
     }
 
     #[tokio::test]
@@ -841,6 +1037,33 @@ length = {{ role = "free", value = 20, min = 2 }}
         }
         assert_eq!(placed(&state, &a).await, ua);
         assert_eq!(placed(&state, &b).await, ub);
+    }
+
+    #[tokio::test]
+    async fn same_document_reopen_invalidates_upgrade_plan() {
+        let (dir, state, [a, _, _]) = fixture().await;
+        let plan = plan_component_upgrades_at(dir.path(), &state, vec![a.clone()], None)
+            .await
+            .unwrap();
+        let path_dir = tempfile::tempdir().unwrap();
+        let path = path_dir.path().join("same.onecad");
+        let (old_id, old_session) = {
+            let mut guard = state.runtime.lock().await;
+            let rt = guard.as_mut().unwrap();
+            rt.save(&path, crate::api::save_meta()).unwrap();
+            (rt.document_id(), rt.runtime_session())
+        };
+        let (engine, meshes, solver) = state.make_backend();
+        let reopened = DocumentRuntime::open(&path, engine, meshes, solver).unwrap();
+        assert_eq!(reopened.document_id(), old_id);
+        assert_ne!(reopened.runtime_session(), old_session);
+        *state.runtime.lock().await = Some(reopened);
+        let before = placed(&state, &a).await;
+        let error = apply_component_upgrades_at(dir.path(), &state, plan)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("stale"), "{error}");
+        assert_eq!(placed(&state, &a).await, before);
     }
 
     #[tokio::test]
@@ -933,6 +1156,7 @@ thread_detail = {{ role = "free", value = "{default}", domain = ["cosmetic", "si
             if version == "1.1.0" { "1" } else { "0" }.repeat(64)
         );
         std::fs::write(dir.join("component.toml"), toml).unwrap();
+        stamp_package(&dir);
     }
 
     async fn blank_state() -> AppState {
@@ -995,6 +1219,23 @@ thread_detail = {{ role = "free", value = "{default}", domain = ["cosmetic", "si
     }
 
     #[tokio::test]
+    async fn upgrade_uses_pinned_archive_when_original_catalog_revision_changes() {
+        let (dir, state, [a, _, _]) = fixture().await;
+        let manifest = dir.path().join(format!("{ID}@1.0.0/component.toml"));
+        let edited = std::fs::read_to_string(&manifest)
+            .unwrap()
+            .replace("generator = \"iso4762\"", "generator = \"other\"");
+        std::fs::write(&manifest, edited).unwrap();
+        stamp_package(manifest.parent().unwrap());
+        reindex_library_at(dir.path()).unwrap();
+        let plan = plan_component_upgrades_at(dir.path(), &state, vec![a], None)
+            .await
+            .unwrap();
+        assert!(plan[0].applicable, "{plan:?}");
+        assert_eq!(plan[0].kept_overrides.get("length"), Some(&num(30.0)));
+    }
+
+    #[tokio::test]
     async fn a_package_resaved_with_new_content_after_the_plan_is_refused() {
         let (dir, state, [a, _, _]) = fixture().await;
         let plan = plan_component_upgrades_at(dir.path(), &state, vec![a.clone()], None)
@@ -1005,8 +1246,9 @@ thread_detail = {{ role = "free", value = "{default}", domain = ["cosmetic", "si
         let manifest = dir.path().join(format!("{ID}@1.1.0/component.toml"));
         let edited = std::fs::read_to_string(&manifest)
             .unwrap()
-            .replace(&"1".repeat(64), &"2".repeat(64));
+            .replace("generator = \"iso4762\"", "generator = \"other\"");
         std::fs::write(&manifest, edited).unwrap();
+        stamp_package(manifest.parent().unwrap());
         reindex_library_at(dir.path()).unwrap();
 
         let before = placed(&state, &a).await;
@@ -1092,6 +1334,7 @@ thread = {{ role = "free", key = "M6", domain = ["M5", "M6", "M8"] }}
             ),
         )
         .unwrap();
+        stamp_package(&pkg);
         reindex_library_at(dir.path()).unwrap();
         let state = blank_state().await;
         place_component_at(
@@ -1111,5 +1354,29 @@ thread = {{ role = "free", key = "M6", domain = ["M5", "M6", "M8"] }}
             .unwrap();
         assert_eq!(list[0].defaults["thread"], text("M6"));
         assert_eq!(list[0].designation.as_deref(), Some("ISO 4032 M6"));
+    }
+    #[tokio::test]
+    async fn upgrade_uses_archived_old_definition_after_catalog_removal() {
+        let (dir, state, [record, _, _]) = fixture().await;
+        std::fs::remove_dir_all(dir.path().join(format!("{ID}@1.0.0"))).unwrap();
+        reindex_library_at(dir.path()).unwrap();
+        let plan = plan_component_upgrades_at(
+            dir.path(),
+            &state,
+            vec![record.clone()],
+            Some("1.1.0".into()),
+        )
+        .await
+        .unwrap();
+        assert!(plan[0].applicable, "{:?}", plan[0].refusal);
+        assert_eq!(plan[0].kept_overrides.get("length"), Some(&num(30.0)));
+        assert!(plan[0]
+            .dropped_overrides
+            .iter()
+            .any(|item| item.key == "thread"));
+        apply_component_upgrades_at(dir.path(), &state, plan)
+            .await
+            .unwrap();
+        assert_eq!(placed(&state, &record).await.component_version, "1.1.0");
     }
 }

@@ -974,6 +974,7 @@ async fn extrude_to_face() {
 
     // Phase 2: a smaller profile extruded ToFace UP TO box A's top face (worldZ=25).
     let face_ref = ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body: body_a,
             element: top_el,
@@ -1058,6 +1059,7 @@ async fn fillet_body_context() {
     // input resolved, i.e. NOT the pre-fix "requires body input"/BodyStore miss).
     let edge_el = ElementId::new("el_fillet_edge");
     let edge_ref = ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body: body_a,
             element: edge_el.clone(),
@@ -1504,6 +1506,7 @@ async fn chamfer_reaches_the_worker() {
     let (_top_key, centroid) = top_face_pick(&plain_view, &plain);
     let edge_el = ElementId::new("el_chamfer_edge");
     let edge_ref = ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body: body_of(EXTRUDE_A),
             element: edge_el.clone(),

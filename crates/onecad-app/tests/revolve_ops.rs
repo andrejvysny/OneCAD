@@ -1545,6 +1545,7 @@ async fn promote_x_axis_edge(
 
 fn edge_ref_of(body: BodyId, edge_el: &ElementId, anchor: Vec3) -> ElementRef {
     ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: edge_el.clone(),

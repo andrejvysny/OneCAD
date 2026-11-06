@@ -74,6 +74,9 @@ pub async fn export_3mf(
         let guard = state.runtime.lock().await;
         let rt = guard.as_ref().ok_or_else(no_document)?;
         validate_target(rt, target)?;
+        if matches!(scope, ExportScope::Document) {
+            crate::api::require_complete_export_scope(rt)?;
+        }
         let bodies = select_bodies(rt.head_body_ids(), scope)?;
         let (attributes, pending) = crate::export::pending_step_attributes(rt);
         (

@@ -593,6 +593,7 @@ async fn real_worker_does_not_fold_a_cancelled_staged_id() {
         assert!(rt.is_dirty(), "legacy promotion still dirties");
         let other = ElementId::new(&other[0].element_id);
         let reference = ElementRef {
+            import_source_identity: None,
             primary: Some(onecad_core::document::refs::PrimaryRef {
                 body: body_a(),
                 element: other,

@@ -47,6 +47,7 @@ fn hosted_rectangle_sketch(
     );
     sketch.attachment = SketchAttachment::HostFace {
         face: ElementRef {
+            import_source_identity: None,
             primary: Some(PrimaryRef {
                 body,
                 element: face,
@@ -129,6 +130,7 @@ fn extrude_record_for(
 
 fn fillet_record_for(record: u128, body: BodyId, edge: ElementId, anchor: Vec3) -> OperationRecord {
     let reference = ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: edge.clone(),

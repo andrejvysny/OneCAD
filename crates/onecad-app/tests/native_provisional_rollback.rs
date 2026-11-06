@@ -444,6 +444,7 @@ async fn needs_repair_is_retained(harness: &Harness, baseline: &DocumentProjecti
 fn unresolved_fillet() -> Operation {
     let element = ElementId::new("el_unresolvable");
     let reference = ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body: profile::extrude_id().to_string().parse().unwrap(),
             element: element.clone(),

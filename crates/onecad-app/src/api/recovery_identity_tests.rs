@@ -396,6 +396,76 @@ async fn restored_pair_survives_second_crash_and_save_retires_it() {
 }
 
 #[tokio::test]
+async fn assembly_recovery_survives_second_crash_and_save_reopen() {
+    use onecad_core::document::component::{ComponentDef, ComponentDefId};
+    use onecad_core::io::container::{ContainerCaches, ContainerReader, ContainerWriter, SaveMeta};
+    let area = tempfile::tempdir().unwrap();
+    let (state, host, _, offer) = pending_copy(area.path(), false).await;
+    let mut doc = ContainerReader::open(&offer.autosave_path)
+        .unwrap()
+        .document()
+        .clone();
+    let id = ComponentDefId(uuid::Uuid::from_u128(991));
+    doc.definitions
+        .insert(id, ComponentDef::new(id, "Recovered component"));
+    let meta = SaveMeta {
+        app_version: "test".into(),
+        occt_fingerprint: None,
+        created: String::new(),
+        modified: String::new(),
+    };
+    ContainerWriter::save(&offer.autosave_path, &doc, &ContainerCaches::none(), &meta).unwrap();
+    assert!(
+        recover_document(&state, host.clone(), offer.document_id.to_string(), true)
+            .await
+            .is_err()
+    );
+    assert!(state.peek_pending_recovery(offer.document_id).is_some());
+    recover_assembly_document_at_path(
+        &state,
+        host.clone(),
+        offer.document_id.to_string(),
+        true,
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let offers = onecad_core::io::recovery::scan_recoverable(
+        area.path(),
+        |_| false,
+        std::time::SystemTime::now(),
+    )
+    .unwrap();
+    assert!(offers
+        .iter()
+        .any(|item| item.document_id == offer.document_id));
+    assert!(
+        save_document(&state, host.clone(), None, None)
+            .await
+            .unwrap()
+            .clean
+    );
+    let path = offer.marker.unwrap().opened_path.unwrap();
+    close_document(&state, host.clone()).await.unwrap();
+    assert!(check_recovery(&state, host.clone())
+        .await
+        .unwrap()
+        .is_empty());
+    let reopened = open_assembly_document(&state, host, path.to_string_lossy().into_owned(), None)
+        .await
+        .unwrap();
+    let projection =
+        super::component_execution::get_assembly_projection(&state, &reopened.runtime_session)
+            .await
+            .unwrap();
+    assert!(projection
+        .definitions
+        .iter()
+        .any(|part| part.id == id.to_string()));
+}
+
+#[tokio::test]
 async fn cancelled_shutdown_still_drains_close_and_releases_claims() {
     let area = tempfile::tempdir().unwrap();
     let (state, host, _, offer) = pending_copy(area.path(), false).await;

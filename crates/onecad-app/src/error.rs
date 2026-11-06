@@ -20,6 +20,8 @@ pub enum ApiError {
     NoDocument(String),
     /// A command mutated the document invalidly (validation / anti-time-travel).
     InvalidCommand(String),
+    /// A persisted topology identity could not be resolved with its evidence.
+    UnresolvedTopology(String),
     /// A recoverable geometry-op failure — the document stays editable.
     OpFailed {
         message: String,
@@ -71,6 +73,7 @@ impl std::fmt::Display for ApiError {
         match self {
             Self::NoDocument(m) => write!(f, "no document open: {m}"),
             Self::InvalidCommand(m) => write!(f, "invalid command: {m}"),
+            Self::UnresolvedTopology(m) => write!(f, "unresolved topology: {m}"),
             Self::OpFailed { message, .. } => write!(f, "operation failed: {message}"),
             Self::StalePreview(m) => write!(f, "stale preview: {m}"),
             Self::Worker(m) => write!(f, "worker error: {m}"),
@@ -96,6 +99,7 @@ impl Serialize for ApiError {
         let (kind, message, diagnostics) = match self {
             Self::NoDocument(message) => ("noDocument", message, None),
             Self::InvalidCommand(message) => ("invalidCommand", message, None),
+            Self::UnresolvedTopology(message) => ("invalidCommand", message, None),
             Self::OpFailed {
                 message,
                 diagnostics,

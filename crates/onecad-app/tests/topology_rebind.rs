@@ -355,6 +355,7 @@ fn fillet_record(
     radius: f64,
 ) -> OperationRecord {
     let edge_ref = ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: edge_el.clone(),
@@ -1279,6 +1280,7 @@ async fn h5b_fillet_survives_small_edit() {
     let probe = ResolveRef {
         ref_id: "fillet.edge.reresolve".into(),
         element: ElementRef {
+            import_source_identity: None,
             primary: Some(PrimaryRef {
                 body: setup.body,
                 element: setup.edge_el.clone(),
@@ -1416,6 +1418,7 @@ async fn fillet_reedit_swaps_to_chamfer_and_regens() {
         angle_deg: None,
         edge_ids: vec![setup.edge_el.clone()],
         edges: vec![ElementRef {
+            import_source_identity: None,
             primary: Some(PrimaryRef {
                 body: setup.body,
                 element: setup.edge_el.clone(),
@@ -1528,6 +1531,7 @@ fn chamfer_op_on(
                 face_id: face.clone(),
             }],
             vec![ElementRef {
+                import_source_identity: None,
                 primary: Some(PrimaryRef {
                     body: setup.body,
                     element: face.clone(),
@@ -1553,6 +1557,7 @@ fn chamfer_op_on(
         angle_deg: None,
         edge_ids: vec![setup.edge_el.clone()],
         edges: vec![ElementRef {
+            import_source_identity: None,
             primary: Some(PrimaryRef {
                 body: setup.body,
                 element: setup.edge_el.clone(),
@@ -1745,6 +1750,7 @@ fn fillet_op(setup: &FilletedBox, radius: f64) -> Operation {
         radius: Scalar::new(radius),
         edge_ids: vec![setup.edge_el.clone()],
         edges: vec![ElementRef {
+            import_source_identity: None,
             primary: Some(PrimaryRef {
                 body: setup.body,
                 element: setup.edge_el.clone(),
@@ -1869,6 +1875,7 @@ async fn h5b_destructive_edit_is_deterministic_needs_repair() {
 
     // (a) refId-only — the panel's `resolveRefs([{refId}])`, an EMPTY ElementRef.
     let empty_ref = ElementRef {
+        import_source_identity: None,
         primary: None,
         intent: None,
         anchor: None,
@@ -2194,6 +2201,7 @@ async fn symmetric_ambiguity_resolves_to_needs_repair() {
     // EQUIDISTANT (a mirror-symmetric tie). Auto-bind requires score1 ≥ 0.85 AND
     // margin ≥ 0.10; a tie has margin ≈ 0 ⇒ NeedsRepair (never a guess). SCHEMA §10.
     let face_ref = ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: ElementId::new("el_symmetric_probe"),
@@ -2586,6 +2594,7 @@ async fn measure_fillet_ref(rt: &DocumentRuntime, snapshot: u64, label: &str) ->
             refs: vec![ResolveRef {
                 ref_id,
                 element: ElementRef {
+                    import_source_identity: None,
                     primary: None,
                     intent: None,
                     anchor: None,

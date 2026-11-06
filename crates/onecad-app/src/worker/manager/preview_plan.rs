@@ -183,6 +183,8 @@ async fn run(
     if let Some(operation) = operation {
         args["editOperandContext"] = operation.clone();
     }
+    super::super::wire::validate_import_source_identities(&args)
+        .map_err(|message| EngineError::Protocol { message })?;
     let inflight = client
         .start_request_bounded(
             "PreviewPlan",

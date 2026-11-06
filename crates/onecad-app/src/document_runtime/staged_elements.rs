@@ -117,7 +117,8 @@ impl DocumentRuntime {
                 self.staged.insert(
                     id.clone(),
                     ElementEntry::new(evidence.body, evidence.kind)
-                        .with_evidence(evidence.anchor.clone(), evidence.descriptor.clone()),
+                        .with_evidence(evidence.anchor.clone(), evidence.descriptor.clone())
+                        .with_import_source_identity(evidence.import_source_identity.clone()),
                 );
             }
         }
@@ -171,6 +172,7 @@ impl DocumentRuntime {
         evidence: &onecad_core::regen::WorkerElementEvidence,
     ) -> ElementRef {
         let mut reference = ElementRef {
+            import_source_identity: evidence.import_source_identity.clone(),
             primary: Some(PrimaryRef {
                 body: evidence.body,
                 element: id.clone(),

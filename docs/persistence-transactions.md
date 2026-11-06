@@ -41,3 +41,26 @@ atomic replacement, and parent-directory synchronization. Tests of lane ownershi
 and recovery fencing do not qualify the real OCCT worker, physical GPU rendering,
 or device-specific lifecycle behavior; those require their respective repository
 qualification gates.
+
+Embedded component archives are admitted to the native host budget before their
+fixed-size storage is allocated. The same retained allocation is shared by the
+captured draft, runtime, and detached save payload; closing a document does not
+release its charge while an admitted save still owns it. Save payloads reserve
+archive decode scratch before leaving the runtime, so they can finish after the
+host closes. ZIP archive sections borrow the retained bytes instead of cloning
+them. Admission refusal leaves the previous runtime or save target intact.
+Headless hosts without an admission callback retain the existing archive limits.
+
+Catalog source resolution reserves a conservative `(32 MiB - 4096) / 3` source
+allowance before reading a bounded manifest, document, and geometry closure.
+Upgrade batches retain each target allowance through application. Shared source
+bytes carry their allowance into the runtime and detached saves; they release it
+with the last owner. This conservative allowance can refuse a batch even when its
+actual source bytes would fit. File reads use fixed-size buffers and reject files
+that grow during the read. Re-baked geometry reserves its file size before the
+fixed-size read and retains that admission with the shared source bytes.
+
+Archive scratch reservations are size-derived bounds for ZIP payload work. They
+do not establish a bound on all TOML/JSON parser allocations, library catalog
+reads, worker memory, or other model memory. Whole-process and device memory
+qualification remains open.

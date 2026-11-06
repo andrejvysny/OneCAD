@@ -211,6 +211,7 @@ fn fillet_record(
     let refs: Vec<ElementRef> = edges
         .iter()
         .map(|(el, anchor)| ElementRef {
+            import_source_identity: None,
             primary: Some(PrimaryRef {
                 body,
                 element: el.clone(),

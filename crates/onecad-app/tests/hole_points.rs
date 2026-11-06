@@ -345,6 +345,7 @@ pub(crate) fn anchored_ref(
     at: Vec3,
 ) -> ElementRef {
     ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: element.clone(),

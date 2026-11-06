@@ -508,6 +508,7 @@ impl GeometryEngine for FakeBackend {
             .picks
             .into_iter()
             .map(|p| WorkerElementEvidence {
+                import_source_identity: None,
                 kind: match p.topo_key.as_str().as_bytes().first() {
                     Some(b'e') => onecad_core::document::refs::ElementKind::Edge,
                     Some(b'v') => onecad_core::document::refs::ElementKind::Vertex,
@@ -781,6 +782,7 @@ fn mated_component_record(seed: u128, target_axis: Option<Vec3>) -> OperationRec
         mate: Some(ComponentMate {
             self_attachment: "shankAxis".to_string(),
             target: ElementRef {
+                import_source_identity: None,
                 primary: Some(PrimaryRef {
                     body: BodyId(Uuid::from_u128(0xB0D1)),
                     element: ElementId::new("el_target"),
@@ -869,6 +871,7 @@ fn revolve_record(seed: u128, angle: f64, line: u128) -> OperationRecord {
 fn fillet_record(seed: u128, body: BodyId, edge: &str, anchor: Vec3) -> OperationRecord {
     let el = ElementId::new(edge);
     let edge_ref = ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: el.clone(),
@@ -904,6 +907,7 @@ fn hole_record_at(seed: u128, body: BodyId, face: &str, anchor: Vec3) -> Operati
     let op = Operation::Known(KnownOperation::Hole(HoleParams {
         target_body: body,
         face: ElementRef {
+            import_source_identity: None,
             primary: Some(PrimaryRef {
                 body,
                 element: ElementId::new(face),
@@ -1004,6 +1008,7 @@ async fn projection_prefers_document_body_metadata() {
     assert!(rt.regen.bodies.get(body).unwrap().color.is_none());
 
     let dto = rt.projection().bodies.remove(&body.to_string()).unwrap();
+    assert_eq!(dto.created_by, RecordId(Uuid::from_u128(0x10)).to_string());
     assert_eq!(dto.name, "Bracket", "the document's name wins");
     assert!(!dto.visible, "the document's visibility wins");
     assert_eq!(
@@ -1024,6 +1029,23 @@ async fn projection_prefers_document_body_metadata() {
     let meta = saved.get(body).unwrap();
     assert_eq!((meta.name.as_str(), meta.visible), ("Bracket", false));
     assert_eq!(meta.color, Some([10, 20, 30, 240]));
+}
+
+#[test]
+fn body_projection_uses_recorded_producer_not_body_identity() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let body = BodyId(Uuid::from_u128(0xCAFE));
+    let producer = RecordId(Uuid::from_u128(0xBEEF));
+    rt.regen
+        .bodies
+        .register(onecad_core::document::body::BodyMeta::new(
+            body,
+            "Split child",
+            producer,
+        ));
+    let dto = rt.projection().bodies.remove(&body.to_string()).unwrap();
+    assert_eq!(dto.created_by, producer.to_string());
+    assert_ne!(dto.created_by, dto.id);
 }
 
 #[tokio::test]
@@ -1774,7 +1796,7 @@ fn seed_import_blob(rt: &mut DocumentRuntime, bytes: Vec<u8>) -> String {
         sha.clone(),
         ImportBlob {
             codec: ImportSourceCodec::Step,
-            bytes: Arc::new(bytes),
+            bytes: Arc::new(onecad_core::io::imports::OwnedSource::untracked(bytes)),
         },
     );
     sha
@@ -3933,6 +3955,7 @@ fn parse_input_ref_id_and_element_ref_input() {
 fn typed_revolve_axis_hydrates_at_input_zero() {
     let body = BodyId(Uuid::from_u128(0xB8));
     let edge_ref = ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: ElementId::new("el_axis"),
@@ -4014,6 +4037,7 @@ fn offset_face_inputs_hydrate_faces_then_the_opposite_face() {
 
     let body = BodyId(Uuid::from_u128(0xBA));
     let at = |el: &str, p: Vec3| ElementRef {
+        import_source_identity: None,
         primary: Some(PrimaryRef {
             body,
             element: ElementId::new(el),
@@ -4183,6 +4207,7 @@ async fn a_mate_axis_reversed_ref_is_answered_locally_never_from_the_ladder() {
             refs: vec![ResolveRef {
                 ref_id: ref_id.clone(),
                 element: ElementRef {
+                    import_source_identity: None,
                     primary: None,
                     intent: None,
                     anchor: None,
@@ -4231,6 +4256,7 @@ async fn a_mate_axis_reversed_ref_is_answered_locally_never_from_the_ladder() {
             refs: vec![ResolveRef {
                 ref_id,
                 element: ElementRef {
+                    import_source_identity: None,
                     primary: None,
                     intent: None,
                     anchor: None,
@@ -5030,6 +5056,7 @@ fn legacy_sketch_record(seed: u128, sketch: SketchId) -> OperationRecord {
 fn host_face_attachment(body: BodyId, el: &str) -> onecad_core::sketch::SketchAttachment {
     onecad_core::sketch::SketchAttachment::HostFace {
         face: ElementRef {
+            import_source_identity: None,
             primary: Some(PrimaryRef {
                 body,
                 element: ElementId::new(el),
@@ -5742,6 +5769,7 @@ impl crate::worker::FaceBoundaryProjection for FakeFaces {
 /// The lean refId-only request shape: an `ElementRef` with no evidence at all.
 fn empty_element_ref() -> ElementRef {
     ElementRef {
+        import_source_identity: None,
         primary: None,
         intent: None,
         anchor: None,
@@ -5938,6 +5966,7 @@ fn legacy_chamfer_runtime_with_seed_outcome(
         angle_deg: None,
         edge_ids: vec![edge.clone()],
         edges: vec![ElementRef {
+            import_source_identity: None,
             primary: Some(PrimaryRef {
                 body,
                 element: edge.clone(),
@@ -6656,6 +6685,9 @@ mod finish_history;
 #[path = "tests/staged_elements.rs"]
 mod staged_elements;
 
+#[path = "tests/import_identity.rs"]
+mod import_identity_tests;
+
 #[tokio::test]
 async fn promotion_during_save_cannot_be_marked_clean() {
     let mut rt = runtime_with(Arc::new(FakeBackend::new()));
@@ -6723,3 +6755,118 @@ fn exhausted_persisted_generation_refuses_edits_before_mutation() {
     assert_eq!(rt.undo_depth(), depth);
     assert_eq!(rt.persisted_generation(), u64::MAX);
 }
+
+#[test]
+fn assembly_budget_refuses_257th_visible_body_without_mutating_history() {
+    use onecad_core::document::component::{
+        ComponentDef, ComponentDefId, Occurrence, OccurrenceId, RigidTransform,
+    };
+    use onecad_core::edit::AssemblyEdit;
+    let backend = Arc::new(FakeBackend::new());
+    let mut document = Document::new(DocumentId(Uuid::from_u128(0xAA10)));
+    let definition_id = ComponentDefId(Uuid::from_u128(0xAA11));
+    let mut definition = ComponentDef::new(definition_id, "Part");
+    definition
+        .bodies
+        .register(onecad_core::document::body::BodyMeta::new(
+            BodyId(Uuid::from_u128(0xAA12)),
+            "Body",
+            RecordId(Uuid::from_u128(0xAA13)),
+        ));
+    document.definitions.insert(definition_id, definition);
+    let mut rt = DocumentRuntime::from_document(
+        document,
+        "Test".into(),
+        None,
+        false,
+        backend.clone(),
+        backend.clone(),
+        backend,
+    );
+    let occurrence = |n| Occurrence {
+        id: OccurrenceId(Uuid::from_u128(n)),
+        def: definition_id,
+        parent: None,
+        local: RigidTransform::IDENTITY,
+        grounded: false,
+        name: format!("Part {n}"),
+    };
+    for index in 1..=256 {
+        rt.apply_assembly_edit(AssemblyEdit::InsertOccurrence {
+            occurrence: occurrence(index),
+        })
+        .unwrap();
+    }
+    let edit = AssemblyEdit::InsertOccurrence {
+        occurrence: occurrence(257),
+    };
+    let revision = rt.revision();
+    assert!(rt.check_assembly_body_budget(&edit, 256).is_err());
+    assert_eq!(rt.revision(), revision);
+    assert_eq!(rt.assembly_projection().unwrap().occurrences.len(), 256);
+    assert!(rt.undo().is_some());
+    assert_eq!(rt.assembly_projection().unwrap().occurrences.len(), 255);
+    assert!(rt.check_assembly_body_budget(&edit, 256).is_ok());
+    let add_body = AssemblyEdit::EditDefinition {
+        id: definition_id,
+        command: Box::new(EditCommand::AddBody {
+            body: onecad_core::document::body::BodyMeta::new(
+                BodyId(Uuid::from_u128(0xAA14)),
+                "Second",
+                RecordId(Uuid::from_u128(0xAA15)),
+            ),
+        }),
+    };
+    assert!(rt.check_assembly_body_budget(&add_body, 256).is_err());
+    let hide_body = AssemblyEdit::EditDefinition {
+        id: definition_id,
+        command: Box::new(EditCommand::SetVisibility {
+            target: onecad_core::edit::VisibilityTarget::Body(BodyId(Uuid::from_u128(0xAA12))),
+            visible: false,
+        }),
+    };
+    assert!(rt.check_assembly_body_budget(&hide_body, 0).is_ok());
+}
+
+#[test]
+fn assembly_budget_refuses_unreplayed_visible_definition() {
+    use onecad_core::document::component::{
+        ComponentDef, ComponentDefId, Occurrence, OccurrenceId, RigidTransform,
+    };
+    use onecad_core::edit::AssemblyEdit;
+    let backend = Arc::new(FakeBackend::new());
+    let mut document = Document::new(DocumentId(Uuid::from_u128(0xBB10)));
+    let id = ComponentDefId(Uuid::from_u128(0xBB11));
+    let mut definition = ComponentDef::new(id, "Unreplayed");
+    let EditCommand::AddOperation { record, .. } = add_extrude(0xBB12, 3.0) else {
+        unreachable!()
+    };
+    definition.timeline.insert_at_cursor(record);
+    document.definitions.insert(id, definition);
+    let rt = DocumentRuntime::from_document(
+        document,
+        "Test".into(),
+        None,
+        false,
+        backend.clone(),
+        backend.clone(),
+        backend,
+    );
+    let edit = AssemblyEdit::InsertOccurrence {
+        occurrence: Occurrence {
+            id: OccurrenceId(Uuid::from_u128(0xBB13)),
+            def: id,
+            parent: None,
+            local: RigidTransform::IDENTITY,
+            grounded: false,
+            name: "Unreplayed".into(),
+        },
+    };
+    assert!(
+        matches!(rt.check_assembly_body_budget(&edit, 256), Err(ApiError::InvalidCommand(message)) if message.contains("replayed"))
+    );
+    assert!(rt.assembly_projection().unwrap().occurrences.is_empty());
+}
+
+#[path = "tests/rebind_outcomes.rs"]
+mod rebind_outcomes;

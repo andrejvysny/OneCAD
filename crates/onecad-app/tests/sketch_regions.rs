@@ -371,6 +371,7 @@ async fn a_custom_basis_sketch_solves_and_derives_regions() {
         // carries only the resolved basis), so an empty ref is the honest
         // fixture here — this test is about the FRAME, not the binding.
         face: onecad_core::document::refs::ElementRef {
+            import_source_identity: None,
             primary: None,
             intent: None,
             anchor: None,
@@ -434,6 +435,7 @@ async fn an_extrude_off_a_face_hosted_sketch_lands_on_that_frame() {
         // carries only the resolved basis), so an empty ref is the honest
         // fixture here — this test is about the FRAME, not the binding.
         face: onecad_core::document::refs::ElementRef {
+            import_source_identity: None,
             primary: None,
             intent: None,
             anchor: None,

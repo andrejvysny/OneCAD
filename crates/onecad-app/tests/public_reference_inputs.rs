@@ -128,6 +128,19 @@ async fn nist_ftc09_import_matches_frozen_upstream_properties_and_reopens_offlin
     );
     assert_eq!(projection.features.len(), 1);
     let body = projection.bodies.keys().next().unwrap().clone();
+    assert_eq!(
+        projection.bodies[&body].created_by,
+        projection.features[0].id
+    );
+    let record = api::get_operation_record(&state, projection.features[0].id.parse().unwrap())
+        .await
+        .unwrap();
+    assert!(matches!(
+        record.op,
+        onecad_core::document::record::Operation::Known(
+            onecad_core::document::record::KnownOperation::ImportStep(_)
+        )
+    ));
     let properties = mass(&state, &body).await;
     let tolerance = oracle["trialRelativeTolerance"].as_f64().unwrap();
     for (actual, expected) in [
@@ -167,5 +180,26 @@ async fn nist_ftc09_import_matches_frozen_upstream_properties_and_reopens_offlin
     let fresh = mass(&state, &body).await;
     assert_eq!(fresh.volume, properties.volume);
     assert_eq!(fresh.surface_area, properties.surface_area);
+    capture_verified_container(&saved);
     api::shutdown_host(&state, host, None).await.unwrap();
+}
+
+fn capture_verified_container(source: &Path) {
+    use std::io::Write;
+    let Some(target) = std::env::var_os("ONECAD_REFERENCE_CONTAINER_OUT") else {
+        return;
+    };
+    let bytes = std::fs::read(source).unwrap();
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .unwrap();
+    output.write_all(&bytes).unwrap();
+    output.sync_all().unwrap();
+    eprintln!(
+        "verified FTC09 ImportStep container sha256={:x} bytes={}",
+        Sha256::digest(&bytes),
+        bytes.len()
+    );
 }
