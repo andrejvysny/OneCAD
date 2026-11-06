@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 async fn reopened_shell_resolves_its_consumed_opening_handle() {
     let root = tempfile::tempdir().unwrap();
     let path = blank_document(root.path());
-    let mut host = solid(root.path(), &path, false).await;
+    let mut host = Box::pin(solid(root.path(), &path, false)).await;
     let pick = hole_pick(&host.app);
     let onecad_interaction::selection_set::SelectionItem::Face(picked) = &pick else {
         panic!()
@@ -56,7 +56,7 @@ async fn reopened_shell_resolves_its_consumed_opening_handle() {
     );
     save(&mut host).await;
     host.stop().await;
-    let mut host = opened(root.path(), &path).await;
+    let mut host = Box::pin(opened(root.path(), &path)).await;
     edit(&mut host, record.record_id).await;
     let (base, direction, scale) = model_handle::testing_axis(&host.app, N::ShellThickness)
         .expect("reopened Shell must resolve its authoritative prefix opening");
@@ -77,7 +77,7 @@ async fn reopened_shell_resolves_its_consumed_opening_handle() {
 async fn cylinder_diameter_handle_uses_the_worker_sample_and_radial_scale() {
     let root = tempfile::tempdir().unwrap();
     let path = blank_document(root.path());
-    let mut host = solid(root.path(), &path, true).await;
+    let mut host = Box::pin(solid(root.path(), &path, true)).await;
     let pick = cylinder_wall(&host);
     crate::item_selection::apply(
         &mut host.app,
@@ -109,7 +109,7 @@ async fn cylinder_diameter_handle_uses_the_worker_sample_and_radial_scale() {
     confirm(&mut host).await;
     save(&mut host).await;
     host.stop().await;
-    let mut host = opened(root.path(), &path).await;
+    let mut host = Box::pin(opened(root.path(), &path)).await;
     edit(&mut host, record).await;
     assert_diameter_scale(&host);
     host.app.dispatch(Action::Cancel);
@@ -139,7 +139,9 @@ fn blank_document(root: &Path) -> PathBuf {
 }
 
 async fn opened(root: &Path, path: &Path) -> Host {
-    let mut host = Host::new(root).await;
+    // Nested builders retain large native host states; heap ownership keeps
+    // debug-mode context construction within the normal test-thread stack.
+    let mut host = Box::pin(Host::new(root)).await;
     host.app.sketch_dispatch(SketchAction::Discard);
     pump_until(&mut host.app, &host.context, &mut host.frame, |app| {
         !app.sketch_active()
@@ -169,7 +171,7 @@ async fn opened(root: &Path, path: &Path) -> Host {
 }
 
 async fn solid(root: &Path, path: &Path, cylinder: bool) -> Host {
-    let mut host = opened(root, path).await;
+    let mut host = Box::pin(opened(root, path)).await;
     host.app.new_sketch();
     pump_until(&mut host.app, &host.context, &mut host.frame, active).await;
     host.app.doc.camera = Camera {
