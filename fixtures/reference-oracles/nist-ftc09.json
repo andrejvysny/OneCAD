@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "source": "../public-cad/nist/nist_ftc_09_asme1_rd.stp",
+  "sourceSha256": "d12866d3ab0fc260efd0f1a5c54af47950be513486f61f65513877045582afa8",
+  "kind": "upstream-authored-validation-properties",
+  "scope": "single MANIFOLD_SOLID_BREP #5384; not supplementary datum curves",
+  "representationTrace": [5795, 5796, 5797, 5798, 5787, 5785, 5384],
+  "solidVolumePropertyTrace": [5818, 5820, 5819, 5817],
+  "productVolumePropertyTrace": [5840, 5842, 5841, 5839],
+  "volumeInch3": 8.326391158987,
+  "volumeMm3": 136445.10481135413,
+  "solidAreaPropertyTrace": [5809, 5811, 5810, 5808],
+  "productAreaPropertyTrace": [5831, 5833, 5832, 5830],
+  "surfaceAreaInch2": 149.7523619055,
+  "surfaceAreaMm2": 96614.23380695238,
+  "inchInMm": 25.4,
+  "sourceConnectivityUncertaintyMm": 0.033816370229202,
+  "trialRelativeTolerance": 0.000001,
+  "toleranceStatus": "Preregistered trial before OneCAD measurement; independent numerical justification and second-reader crosscheck remain open. Do not widen after observing results.",
+  "qualification": "Import comparison only. This is not a native feature history, second-kernel measurement, or whole-part drawing reconstruction."
+}
