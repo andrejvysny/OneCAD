@@ -34,13 +34,18 @@ impl AppState {
     ///
     /// [`claim_document`]: Self::claim_document
     pub fn ensure_document_capacity(&self) -> Result<(), ApiError> {
+        self.ensure_not_closing()?;
+        let probe = DocumentId::new();
+        self.claim_document(probe).map(drop)
+    }
+
+    pub(crate) fn ensure_not_closing(&self) -> Result<(), ApiError> {
         if self.tasks.closing.load(Ordering::Acquire) {
             return Err(ApiError::InvalidCommand(
                 "this document is closing; open the file in another tab".into(),
             ));
         }
-        let probe = DocumentId::new();
-        self.claim_document(probe).map(drop)
+        Ok(())
     }
 
     /// Replaces every lease this host holds with `claims` — the commit point of an
@@ -67,15 +72,14 @@ impl AppState {
         self.tasks.closing.store(true, Ordering::Release);
     }
 
-    /// Reopens admission after a refused close.
-    pub(crate) fn cancel_closing(&self) {
-        self.tasks.closing.store(false, Ordering::Release);
-    }
-
     /// Releases every lease — the end of a host's teardown.
     pub fn release_claims(&self) {
         let previous = std::mem::take(&mut *self.claims_guard());
         drop(previous);
+    }
+
+    pub(crate) fn take_claims(&self) -> Vec<Claim> {
+        std::mem::take(&mut *self.claims_guard())
     }
 
     fn claims_guard(&self) -> std::sync::MutexGuard<'_, Vec<Claim>> {

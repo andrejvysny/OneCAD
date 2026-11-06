@@ -212,7 +212,7 @@ pub enum AutosaveAttempt {
 pub async fn autosave_current(
     runtime: &Mutex<Option<DocumentRuntime>>,
     app_data: &Path,
-    lane: &Mutex<()>,
+    lane: &Arc<Mutex<()>>,
 ) -> Option<AutosaveEvent> {
     match attempt(runtime, app_data, lane, None).await {
         AutosaveAttempt::Written(ev) => Some(ev),
@@ -227,7 +227,7 @@ pub async fn autosave_current(
 pub async fn autosave_current_reporting(
     runtime: &Mutex<Option<DocumentRuntime>>,
     app_data: &Path,
-    lane: &Mutex<()>,
+    lane: &Arc<Mutex<()>>,
 ) -> Option<AutosaveEvent> {
     match attempt(runtime, app_data, lane, None).await {
         AutosaveAttempt::Written(ev) | AutosaveAttempt::Failed(ev) => Some(ev),
@@ -250,7 +250,7 @@ pub async fn autosave_current_reporting(
 pub async fn checkpoint(
     runtime: &Mutex<Option<DocumentRuntime>>,
     app_data: &Path,
-    lane: &Mutex<()>,
+    lane: &Arc<Mutex<()>>,
     session: &str,
 ) -> AutosaveAttempt {
     attempt(runtime, app_data, lane, Some(session)).await
@@ -261,14 +261,14 @@ pub async fn checkpoint(
 pub async fn checkpoint_until(
     runtime: &Mutex<Option<DocumentRuntime>>,
     app_data: &Path,
-    lane: &Mutex<()>,
+    lane: &Arc<Mutex<()>>,
     session: Option<&str>,
     stop: impl std::future::Future<Output = ()>,
 ) -> AutosaveAttempt {
     let guard = tokio::select! {
         biased;
         () = stop => return AutosaveAttempt::Skipped,
-        guard = lane.lock() => guard,
+        guard = lane.clone().lock_owned() => guard,
     };
     attempt_admitted(runtime, app_data, session, guard).await
 }
@@ -276,10 +276,10 @@ pub async fn checkpoint_until(
 async fn attempt(
     runtime: &Mutex<Option<DocumentRuntime>>,
     app_data: &Path,
-    lane: &Mutex<()>,
+    lane: &Arc<Mutex<()>>,
     expected_session: Option<&str>,
 ) -> AutosaveAttempt {
-    let guard = lane.lock().await;
+    let guard = lane.clone().lock_owned().await;
     attempt_admitted(runtime, app_data, expected_session, guard).await
 }
 
@@ -287,7 +287,7 @@ async fn attempt_admitted(
     runtime: &Mutex<Option<DocumentRuntime>>,
     app_data: &Path,
     expected_session: Option<&str>,
-    _lane: tokio::sync::MutexGuard<'_, ()>,
+    lane: tokio::sync::OwnedMutexGuard<()>,
 ) -> AutosaveAttempt {
     let now = now_rfc3339();
     let meta = SaveMeta {
@@ -301,7 +301,7 @@ async fn attempt_admitted(
     //    a timer against a document the user is actively editing, and its container
     //    is only ever read by crash recovery — which regens from 0 regardless. The
     //    "paint at open" caches belong to an explicit save.
-    let (payload, doc_id, session, opened, title, identity) = {
+    let (payload, doc_id, session, generation, opened, title, identity) = {
         let mut guard = runtime.lock().await;
         let Some(rt) = guard.as_mut() else {
             return AutosaveAttempt::Skipped; // no document open.
@@ -324,6 +324,7 @@ async fn attempt_admitted(
             rt.build_save_payload(meta, SaveCaches::none()),
             doc_id,
             rt.runtime_session(),
+            rt.persisted_generation(),
             opened,
             title,
             identity,
@@ -352,12 +353,15 @@ async fn attempt_admitted(
         document_id: doc_id,
         pid: std::process::id(),
         opened_path: opened,
+        runtime_session: Some(session),
+        persisted_generation: Some(generation),
         last_autosave: now,
         title: Some(title),
     };
     let target = path.clone();
     let root = app_data.to_owned();
     let write = tokio::task::spawn_blocking(move || {
+        let _lane = lane;
         checkpoint_store::preserve_pair(
             &target,
             &onecad_core::io::recovery::marker_path(&root, doc_id),
@@ -405,46 +409,93 @@ impl AttemptIdentity {
     }
 }
 
-/// The explicit save's **persistence half**: container write (off the runtime lock,
-/// on a blocking thread) followed by recovery-state clearing, both under `lane`.
-///
-/// Split out of [`save_document`](crate::api::save_document) so the two lanes share
-/// one ordering primitive and one code path. Clearing the marker INSIDE the lane is
-/// what closes M2 — an autosave that already holds the lane finishes first and its
-/// marker is then removed, instead of landing after the clear and resurrecting a
-/// bogus recovery offer for a cleanly-saved document.
-///
-/// Residual (accepted, documented): an autosave that snapshotted its payload *before*
-/// this save but only reaches the lane *after* it re-writes its marker. The offer that
-/// produces is spurious but harmless — the marker still points at a real autosave
-/// container holding a superset of the saved work, so recovery cannot lose anything.
-///
-/// `recovery_root` `None` ⇒ headless / no app-data dir; nothing to clear.
+/// Writes a payload under the persistence lane, independently of its waiter.
+/// This low-level entry point has no session/generation proof and preserves all
+/// recovery state, including when `recovery_root` is supplied. The document API
+/// uses a fenced transaction that may clear a positively superseded checkpoint.
 ///
 /// # Errors
 /// [`IoError`] when the container write fails — the target is untouched, and the
 /// recovery state is deliberately NOT cleared (a failed save must not discard the
 /// crash snapshot that is now the only copy of the work).
 pub async fn write_save_payload(
-    lane: &Mutex<()>,
+    lane: &Arc<Mutex<()>>,
     path: &Path,
     payload: SavePayload,
     recovery_root: Option<&Path>,
     document_id: DocumentId,
 ) -> Result<(), IoError> {
-    let _lane = lane.lock().await;
-    let target = path.to_path_buf();
-    match tokio::task::spawn_blocking(move || DocumentRuntime::write_payload(&target, &payload))
+    write_save_payload_claimed(lane, path, payload, recovery_root, document_id, None, None)
         .await
+        .map(|_| ())
+}
+
+pub(crate) async fn write_save_payload_claimed(
+    lane: &Arc<Mutex<()>>,
+    path: &Path,
+    payload: SavePayload,
+    recovery_root: Option<&Path>,
+    document_id: DocumentId,
+    claim: Option<crate::reservations::Claim>,
+    saved: Option<(String, u64)>,
+) -> Result<Option<crate::reservations::Claim>, IoError> {
+    let lane = Arc::new(lane.clone().lock_owned().await);
+    write_save_payload_admitted(
+        lane,
+        path,
+        payload,
+        recovery_root,
+        document_id,
+        claim,
+        saved,
+    )
+    .await
+}
+
+pub(crate) async fn write_save_payload_admitted(
+    lane: Arc<tokio::sync::OwnedMutexGuard<()>>,
+    path: &Path,
+    payload: SavePayload,
+    recovery_root: Option<&Path>,
+    document_id: DocumentId,
+    claim: Option<crate::reservations::Claim>,
+    saved: Option<(String, u64)>,
+) -> Result<Option<crate::reservations::Claim>, IoError> {
+    let target = path.to_path_buf();
+    let recovery_root = recovery_root.map(Path::to_path_buf);
+    match tokio::task::spawn_blocking(move || {
+        let _lane = lane;
+        DocumentRuntime::write_payload(&target, &payload)?;
+        if let (Some(root), Some((session, generation))) = (recovery_root, saved) {
+            clear_superseded_recovery(&root, document_id, &session, generation);
+        }
+        Ok(claim)
+    })
+    .await
     {
-        Ok(result) => result?,
-        Err(e) => return Err(IoError::Io(format!("save task did not complete: {e}"))),
+        Ok(result) => result,
+        Err(e) => Err(IoError::Io(format!("save task did not complete: {e}"))),
     }
-    // A clean save supersedes any crash-recovery state for this document.
-    if let Some(root) = recovery_root {
-        clear_recovery_state(root, document_id);
+}
+
+pub(crate) fn clear_superseded_recovery(
+    root: &Path,
+    id: DocumentId,
+    session: &str,
+    generation: u64,
+) {
+    let marker = std::fs::read(onecad_core::io::recovery::marker_path(root, id))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<SessionMarker>(&bytes).ok());
+    if marker.is_some_and(|marker| {
+        marker.document_id == id
+            && marker.runtime_session.as_deref() == Some(session)
+            && marker
+                .persisted_generation
+                .is_some_and(|value| value <= generation)
+    }) {
+        clear_recovery_state(root, id);
     }
-    Ok(())
 }
 
 /// Clears a document's crash marker + stale autosave after a clean save/close or

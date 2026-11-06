@@ -444,3 +444,39 @@ async fn autosave_with_a_real_import_blob_completes_while_edits_land() {
         "the import plus all 40 concurrent edits are in the live document"
     );
 }
+
+#[test]
+fn cancelled_save_keeps_lane_until_blocking_write_finishes() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let area = tempfile::tempdir().unwrap();
+        let lane = Arc::new(Mutex::new(()));
+        let (release, wait) = std::sync::mpsc::channel();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            let _ = started.send(());
+            let _ = wait.recv();
+        });
+        ready.await.unwrap();
+        let mut document = pending_runtime();
+        let id = document.document_uuid();
+        let payload = document.build_save_payload(save_meta(), SaveCaches::none());
+        let target = area.path().join("target.onecad");
+        let task_lane = lane.clone();
+        let task = tokio::spawn(async move {
+            autosave::write_save_payload(&task_lane, &target, payload, None, id).await
+        });
+        tokio::task::yield_now().await;
+        assert!(lane.try_lock().is_err());
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let retained = lane.try_lock().is_err();
+        release.send(()).unwrap();
+        blocker.await.unwrap();
+        assert!(retained, "cancelled waiter released an admitted write");
+    });
+}

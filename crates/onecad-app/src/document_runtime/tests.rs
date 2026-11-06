@@ -1638,8 +1638,13 @@ async fn import_project_appends_source_records_and_sketches() {
     rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
         .await;
     let before = rt.projection().features.len();
+    let old_generation = rt.persisted_generation();
+    assert!(rt.mark_saved(&dir.path().join("target.onecad"), old_generation));
 
     let _ = rt.import_project(&source_path).unwrap();
+    assert_eq!(rt.persisted_generation(), old_generation + 1);
+    assert!(rt.is_dirty());
+    assert!(!rt.mark_saved(&dir.path().join("target.onecad"), old_generation));
 
     let proj = rt.projection();
     assert_eq!(
@@ -1683,8 +1688,10 @@ async fn import_project_refuses_a_colliding_record_id() {
     rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
         .await;
     let features_before = rt.projection().features.len();
+    let generation_before = rt.persisted_generation();
 
     let err = rt.import_project(&source_path).unwrap_err();
+    assert_eq!(rt.persisted_generation(), generation_before);
 
     assert!(
         err.to_string().contains("already exists"),
@@ -1722,8 +1729,15 @@ async fn import_project_into_a_blank_runtime_succeeds() {
     }
 
     // The start-screen lane: no document is open, so the import seeds a fresh one.
-    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let mut rt = runtime_with(Arc::new(FakeBackend::with_failing_plan()));
     rt.import_project(&source_path).unwrap();
+    let generation = rt.persisted_generation();
+    let report = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    assert!(matches!(report.outcome, Outcome::EngineFailed(_)));
+    assert!(rt.is_dirty());
+    assert_eq!(rt.persisted_generation(), generation);
 
     let proj = rt.projection();
     assert_eq!(
@@ -2087,7 +2101,7 @@ async fn mark_saved_keeps_the_document_dirty_when_an_edit_lands_mid_write() {
     rt.apply(add_extrude(0x10, 25.0)).unwrap();
 
     let payload = rt.build_save_payload(test_save_meta(), SaveCaches::explicit());
-    let revision = rt.revision();
+    let revision = rt.persisted_generation();
     DocumentRuntime::write_payload(&path, &payload).unwrap();
     // …an edit lands while the container was being deflated.
     rt.apply(add_extrude(0x11, 40.0)).unwrap();
@@ -2108,7 +2122,7 @@ async fn mark_saved_keeps_the_document_dirty_when_an_edit_lands_mid_write() {
 
     // The quiet case still goes clean.
     let payload = rt.build_save_payload(test_save_meta(), SaveCaches::explicit());
-    let revision = rt.revision();
+    let revision = rt.persisted_generation();
     DocumentRuntime::write_payload(&path, &payload).unwrap();
     assert!(rt.mark_saved(&path, revision));
     assert!(!rt.is_dirty(), "no interleaved edit ⇒ the save is clean");
@@ -2850,7 +2864,10 @@ fn feature_transaction_refusal_preserves_caller_owned_transaction() {
 fn noop_undo_keeps_a_saved_empty_document_clean() {
     let mut rt = runtime_with(Arc::new(FakeBackend::new()));
     let revision = rt.revision();
-    assert!(rt.mark_saved(std::path::Path::new("/tmp/noop-undo.onecad"), revision));
+    assert!(rt.mark_saved(
+        std::path::Path::new("/tmp/noop-undo.onecad"),
+        rt.persisted_generation()
+    ));
     assert!(!rt.is_dirty());
 
     assert!(rt.undo().is_none());
@@ -6638,3 +6655,71 @@ mod finish_history;
 
 #[path = "tests/staged_elements.rs"]
 mod staged_elements;
+
+#[tokio::test]
+async fn promotion_during_save_cannot_be_marked_clean() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let saved_generation = rt.persisted_generation();
+    rt.promote_selection(
+        SnapshotId(0),
+        BodyId(Uuid::from_u128(0xB0)),
+        vec![(TopoKey::new("f:1"), None)],
+    )
+    .await
+    .unwrap();
+    assert!(!rt.mark_saved(
+        std::path::Path::new("/tmp/promotion.onecad"),
+        saved_generation
+    ));
+    assert!(rt.is_dirty());
+}
+
+#[test]
+fn persisted_generation_advances_only_for_accepted_edits_and_history() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let initial = rt.persisted_generation();
+    let revision = rt.revision();
+    let noop = rt.apply(EditCommand::SetRollback { cursor: 0 }).unwrap();
+    assert_eq!(noop.regen, onecad_core::edit::RegenHint::None);
+    assert_eq!(rt.persisted_generation(), initial);
+    assert_eq!(rt.revision(), revision);
+    assert!(rt.apply(EditCommand::SetRollback { cursor: 1 }).is_err());
+    assert_eq!(rt.persisted_generation(), initial);
+    rt.apply(add_extrude(0xAD77, 3.0)).unwrap();
+    assert_eq!(rt.persisted_generation(), initial + 1);
+    rt.undo().unwrap();
+    assert_eq!(rt.persisted_generation(), initial + 2);
+    rt.redo().unwrap().unwrap();
+    assert_eq!(rt.persisted_generation(), initial + 3);
+}
+
+#[tokio::test]
+async fn published_regen_fences_overlapping_save_without_dirtying_clean_document() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    rt.apply(add_extrude(0xAD78, 3.0)).unwrap();
+    let before = rt.persisted_generation();
+    assert!(rt.mark_saved(std::path::Path::new("/tmp/regen.onecad"), before));
+    let report = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    assert!(matches!(report.outcome, Outcome::Published(_)));
+    assert!(!rt.is_dirty());
+    assert!(rt.persisted_generation() > before);
+    assert!(!rt.mark_saved(std::path::Path::new("/tmp/regen.onecad"), before));
+    assert!(rt.is_dirty());
+}
+
+#[test]
+fn exhausted_persisted_generation_refuses_edits_before_mutation() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    rt.apply(add_extrude(0xAD79, 3.0)).unwrap();
+    let revision = rt.revision();
+    let depth = rt.undo_depth();
+    rt.persisted_generation = u64::MAX;
+    assert!(rt.apply(add_extrude(0xAD80, 4.0)).is_err());
+    assert!(rt.undo().is_none());
+    assert!(rt.redo().is_err());
+    assert_eq!(rt.revision(), revision);
+    assert_eq!(rt.undo_depth(), depth);
+    assert_eq!(rt.persisted_generation(), u64::MAX);
+}

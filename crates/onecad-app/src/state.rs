@@ -159,24 +159,33 @@ pub struct AppState {
     /// Exact manager/runtime pair allowed to react to a restart. Updated only
     /// while holding `runtime`; callbacks use the same runtime -> owner order.
     restart_owner: Arc<StdMutex<Option<(u64, String)>>>,
-    /// The **persistence lane** — serializes the two writers that can touch the same
-    /// on-disk recovery state: an autosave (container + crash marker) and an explicit
-    /// save (container + marker/autosave *clearing*).
-    ///
-    /// Not a general IO lock. It exists for exactly two races opened by moving the
-    /// container write off the runtime lock (VF-B7):
-    ///
-    /// * **M3** — two concurrent writers on one target path eat each other's temps
-    ///   (`ContainerWriter` sweeps sibling temps with
-    ///   [`cleanup_stale_temps`](onecad_core::io::container) before its rename);
-    /// * **M2** — an in-flight autosave landing *after* a save cleared the crash
-    ///   marker would resurrect a bogus recovery offer for a cleanly-saved document.
-    ///
-    /// **Lock order is `runtime` → release → `persistence`, never nested.** No path
-    /// may await this lane while holding the runtime lock: both lanes take the
-    /// runtime lock first (to build a [`SavePayload`](crate::document_runtime::SavePayload)),
-    /// release it, and only then contend here.
+    /// Serializes document writes and recovery lifecycle changes for this host.
+    /// Never await lane admission while holding `runtime`. An admitted transaction
+    /// may briefly lock `runtime` to capture or fence state, then performs I/O
+    /// without that lock. Admitted I/O retains lane ownership independently of its
+    /// caller. See `docs/persistence-transactions.md`.
     pub persistence: Arc<Mutex<()>>,
+    #[cfg(test)]
+    pub(crate) save_before_admission: StdMutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
+    #[cfg(test)]
+    pub(crate) open_before_publish: StdMutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
+    #[cfg(test)]
+    pub(crate) open_after_publish: StdMutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            std::sync::mpsc::Receiver<()>,
+        )>,
+    >,
     /// The regen scheduler control surface, set once in `AppState::start`.
     pub scheduler: SharedScheduler,
     /// The app handle, set once in `AppState::start` (the worker-status
@@ -204,7 +213,7 @@ pub struct AppState {
     pub(crate) tasks: crate::host_tasks::HostTasks,
     /// This host's committed path and document-identity leases (see
     /// [`crate::reservations`]); released when the host shuts down.
-    pub(crate) claims: StdMutex<Vec<crate::reservations::Claim>>,
+    pub(crate) claims: Arc<StdMutex<Vec<crate::reservations::Claim>>>,
     /// When the last *blur-triggered* autosave flush ran, for
     /// [`AppState::claim_blur_flush`].
     ///
@@ -302,7 +311,7 @@ impl AppState {
             host_id: services.next_host_id(),
             services,
             tasks: Default::default(),
-            claims: StdMutex::new(Vec::new()),
+            claims: Arc::new(StdMutex::new(Vec::new())),
             live: Arc::new(StdMutex::new(None)),
             displaced: StdMutex::new(None),
             backend_swap: StdMutex::new(Arc::new(())),
@@ -310,6 +319,12 @@ impl AppState {
             native_gestures: Arc::new(StdMutex::new(None)),
             restart_owner: Arc::new(StdMutex::new(None)),
             persistence: Arc::new(Mutex::new(())),
+            #[cfg(test)]
+            save_before_admission: StdMutex::new(None),
+            #[cfg(test)]
+            open_before_publish: StdMutex::new(None),
+            #[cfg(test)]
+            open_after_publish: StdMutex::new(None),
             scheduler: Arc::new(OnceLock::new()),
             host: Arc::new(OnceLock::new()),
             autosave_tick: Arc::new(watch::channel(0u64).0),
@@ -699,7 +714,11 @@ impl AppState {
     /// Retires this host's own workers — live and any staged swap — and waits,
     /// bounded, until their processes are reaped. The process pool is untouched.
     pub async fn retire_host(&self) {
-        for worker in &self.retire_host_workers() {
+        Self::reap_host_workers(&self.retire_host_workers()).await;
+    }
+
+    pub(crate) async fn reap_host_workers(workers: &[WorkerManager]) {
+        for worker in workers {
             if !worker.wait_torn_down(WORKER_REAP_TIMEOUT).await {
                 tracing::warn!("closed host's worker was not reaped in time");
             }
@@ -774,13 +793,19 @@ impl AppState {
             host_id: services.next_host_id(),
             services,
             tasks: Default::default(),
-            claims: StdMutex::new(Vec::new()),
+            claims: Arc::new(StdMutex::new(Vec::new())),
             live,
             displaced: StdMutex::new(None),
             backend_swap: StdMutex::new(Arc::new(())),
             runtime,
             restart_owner,
             persistence: Arc::new(Mutex::new(())),
+            #[cfg(test)]
+            save_before_admission: StdMutex::new(None),
+            #[cfg(test)]
+            open_before_publish: StdMutex::new(None),
+            #[cfg(test)]
+            open_after_publish: StdMutex::new(None),
             scheduler,
             native_gestures: Arc::new(StdMutex::new(None)),
             host: app,
@@ -1356,6 +1381,8 @@ mod recovery_state_tests {
                 document_id,
                 pid: 4321,
                 opened_path: path.map(PathBuf::from),
+                runtime_session: None,
+                persisted_generation: None,
                 last_autosave: String::new(),
                 title: Some("Bracket".into()),
             }),

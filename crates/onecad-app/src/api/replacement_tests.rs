@@ -104,9 +104,12 @@ async fn failed_save_keeps_dirty_recovery_until_explicit_discard() {
 }
 
 #[tokio::test]
-async fn successful_save_cleans_recovery_and_clean_close_removes_stale_copy() {
+async fn successful_save_cleans_superseded_recovery_and_clean_close_preserves_orphan() {
     let area = tempfile::tempdir().unwrap();
     let (state, host, id) = dirty_active(area.path()).await;
+    autosave::autosave_current(&state.runtime, area.path(), &state.persistence)
+        .await
+        .unwrap();
     let outcome = save_document(&state, host.clone(), None, None)
         .await
         .unwrap();
@@ -115,7 +118,7 @@ async fn successful_save_cleans_recovery_and_clean_close_removes_stale_copy() {
     assert!(!marker_path(area.path(), id).exists());
     std::fs::copy(&outcome.path, autosave_path(area.path(), id)).unwrap();
     close_document(&state, host).await.unwrap();
-    assert!(!autosave_path(area.path(), id).exists());
+    assert!(autosave_path(area.path(), id).exists());
 }
 
 #[tokio::test]

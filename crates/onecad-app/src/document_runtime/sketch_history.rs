@@ -143,6 +143,8 @@ impl DocumentRuntime {
         &mut self,
         driven: DrivenSketchHistory,
     ) -> Result<(SketchHistoryDto, RevertReport, SketchUpsertDto), EngineError> {
+        self.require_generation_capacity()
+            .map_err(|error| op_failed(error.to_string()))?;
         let prepared = driven.prepared;
         let session = self.check_sketch_history(&prepared.scope)?;
         let redo = session.history_redo;

@@ -87,6 +87,12 @@ pub struct SessionMarker {
     /// filesystem path). `None` for an unsaved (autosave-only) document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opened_path: Option<PathBuf>,
+    /// Runtime and persisted generation that produced this recovery copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_session: Option<String>,
+    /// Monotonic generation within the producing runtime session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persisted_generation: Option<u64>,
     /// RFC3339 timestamp of the last autosave (caller-supplied — the core does not
     /// read the wall clock).
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -268,6 +274,8 @@ mod tests {
             document_id: id,
             pid,
             opened_path: Some(app_data.join("real.onecad")),
+            runtime_session: None,
+            persisted_generation: None,
             last_autosave: "2026-07-16T12:00:00Z".into(),
             title: Some("real".into()),
         }

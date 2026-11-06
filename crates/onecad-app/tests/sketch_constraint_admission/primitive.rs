@@ -89,7 +89,10 @@ async fn undefined_numeric_expression_and_infeasible_winning_inference_never_aut
         return;
     };
     let area = tempfile::tempdir().unwrap();
-    assert!(runtime.mark_saved(&area.path().join("clean.onecad"), runtime.revision()));
+    assert!(runtime.mark_saved(
+        &area.path().join("clean.onecad"),
+        runtime.persisted_generation()
+    ));
     let before = runtime.sketch_snapshot(sid, "test").unwrap();
     let projection = runtime.projection();
     let solve = serde_json::to_value(runtime.get_sketch(sid).unwrap()).unwrap();

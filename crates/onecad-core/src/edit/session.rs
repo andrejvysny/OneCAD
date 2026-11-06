@@ -237,6 +237,17 @@ impl DocumentSession {
     /// `CommandProcessor::execute` `CommandProcessor.cpp:62-67`) before the
     /// error propagates.
     pub fn apply(&mut self, cmd: EditCommand) -> Result<CommandOutcome, DomainError> {
+        self.apply_with_change(cmd).map(|(outcome, _)| outcome)
+    }
+
+    /// Applies a command and reports whether it changed authoritative state.
+    ///
+    /// # Errors
+    /// Returns the command's validation error without recording an edit.
+    pub fn apply_with_change(
+        &mut self,
+        cmd: EditCommand,
+    ) -> Result<(CommandOutcome, bool), DomainError> {
         let (outcome, inverse) = match self.apply_forward(&cmd) {
             Ok(v) => v,
             Err(e) => {
@@ -268,7 +279,7 @@ impl DocumentSession {
             }
             None => {}
         }
-        Ok(outcome)
+        Ok((outcome, undoable))
     }
 
     /// Opens a transaction: subsequent [`apply`]s batch into one undo step until

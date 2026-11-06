@@ -9,7 +9,7 @@ async fn cancellation_after_worker_solve_preserves_accepted_state() {
     let directory = tempfile::tempdir().unwrap();
     assert!(runtime.mark_saved(
         &directory.path().join("accepted.onecad"),
-        runtime.revision()
+        runtime.persisted_generation()
     ));
     assert!(!runtime.is_dirty());
     let before = runtime.sketch_snapshot(sketch, "before").unwrap();

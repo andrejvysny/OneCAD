@@ -145,7 +145,10 @@ async fn redundant_candidate_preserves_redo_clean_state_and_authoritative_solve(
     runtime.undo().unwrap();
     runtime.enter_sketch(sid).await.unwrap();
     let directory = tempfile::tempdir().unwrap();
-    assert!(runtime.mark_saved(&directory.path().join("qa.onecad"), runtime.revision()));
+    assert!(runtime.mark_saved(
+        &directory.path().join("qa.onecad"),
+        runtime.persisted_generation()
+    ));
     let projection = runtime.projection();
     let solve = serde_json::to_value(runtime.get_sketch(sid).unwrap()).unwrap();
     let history = (runtime.undo_depth(), runtime.redo_depth());
@@ -372,7 +375,7 @@ async fn impossible_triangle_dimension_edit_preserves_clean_document_and_solver_
     let directory = tempfile::tempdir().unwrap();
     assert!(runtime.mark_saved(
         &directory.path().join("triangle.onecad"),
-        runtime.revision()
+        runtime.persisted_generation()
     ));
     let before = runtime.sketch_snapshot(sid, "test").unwrap();
     let projection = runtime.projection();

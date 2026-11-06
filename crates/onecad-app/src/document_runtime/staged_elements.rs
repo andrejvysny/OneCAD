@@ -199,12 +199,15 @@ impl DocumentRuntime {
         referenced
     }
 
-    pub(crate) fn adopt_staged(&mut self, ids: Vec<ElementId>) {
+    pub(crate) fn adopt_staged(&mut self, ids: Vec<ElementId>) -> bool {
+        let mut changed = false;
         for id in ids {
             if let Some(entry) = self.staged.remove(&id) {
+                changed |= self.regen.elements.get(&id) != Some(&entry);
                 self.regen.elements.insert(id, entry);
             }
         }
+        changed
     }
 
     /// Strips staged-but-unadopted ids a regen delta folded into `scratch`. The

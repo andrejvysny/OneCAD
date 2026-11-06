@@ -164,7 +164,10 @@ async fn primitive_bounds_freshness_locks_whitelist_and_missing_refs_refuse_befo
 async fn primitive_invalid_expressions_or_scalars_preserve_clean_document_without_solving() {
     let (mut runtime, solver) = runtime(Mode::Unchanged);
     let area = tempfile::tempdir().unwrap();
-    assert!(runtime.mark_saved(&area.path().join("clean.onecad"), runtime.revision()));
+    assert!(runtime.mark_saved(
+        &area.path().join("clean.onecad"),
+        runtime.persisted_generation()
+    ));
     let before = runtime.sketch_snapshot(sketch_id(), "test").unwrap();
     let projection = runtime.projection();
     for value in [
@@ -217,7 +220,10 @@ async fn primitive_conflicts_errors_and_stale_worker_results_never_publish_candi
             .clone();
         let history = (runtime.undo_depth(), runtime.redo_depth());
         let area = tempfile::tempdir().unwrap();
-        assert!(runtime.mark_saved(&area.path().join("clean.onecad"), runtime.revision()));
+        assert!(runtime.mark_saved(
+            &area.path().join("clean.onecad"),
+            runtime.persisted_generation()
+        ));
         *solver.mode.lock().unwrap() = mode;
         let result = runtime
             .author_sketch_primitive_with_outcome(sketch_id(), primitive(Scalar::new(3.0)))

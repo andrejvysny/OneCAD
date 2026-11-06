@@ -698,6 +698,7 @@ pub struct DocumentRuntime {
     title: String,
     path: Option<PathBuf>,
     dirty: bool,
+    persisted_generation: u64,
     /// The undo history as of the last save (see `unsaved.rs`); `None` when that
     /// point is unknown (a recovered autosave).
     saved_history: Option<unsaved::SavedHistory>,
@@ -1011,6 +1012,7 @@ impl DocumentRuntime {
             title,
             path,
             dirty: false,
+            persisted_generation: 0,
             // Opened (or new) means "matches the file": no step since then.
             saved_history: Some(unsaved::SavedHistory::default()),
             read_only,
@@ -1151,6 +1153,12 @@ impl DocumentRuntime {
         self.fencing.revision()
     }
 
+    /// Generation of the authoritative persisted document state.
+    #[must_use]
+    pub fn persisted_generation(&self) -> u64 {
+        self.persisted_generation
+    }
+
     /// The lock-free fencing cell (revision + epoch). The live regen driver clones
     /// this `Arc` so its gate observes concurrent edits during worker IO (R-WP11).
     #[must_use]
@@ -1276,6 +1284,7 @@ impl DocumentRuntime {
     /// # Errors
     /// [`DomainError`] on validation failure; the document is left unchanged.
     pub fn apply(&mut self, cmd: EditCommand) -> Result<CommandOutcome, DomainError> {
+        self.require_generation_capacity()?;
         if self.read_only {
             return Err(DomainError::ReadOnly);
         }
@@ -1283,8 +1292,11 @@ impl DocumentRuntime {
         let cmd = self.hydrate_ref_intents(cmd);
         let staged = self.staged_ids_in(std::slice::from_ref(&cmd));
         let is_rollback = matches!(cmd, EditCommand::SetRollback { .. });
-        let outcome = self.session.apply(cmd)?;
-        self.adopt_staged(staged);
+        let (outcome, changed) = self.session.apply_with_change(cmd)?;
+        let staged_changed = self.adopt_staged(staged);
+        if !changed && !staged_changed {
+            return Ok(outcome);
+        }
         // Truncation eviction (SCHEMA §7.7): every checkpoint at or above the dirty
         // floor describes a prefix this edit just changed, so the planner would reject
         // it on every future plan — an orphan that only grows the cache. Metadata-only
@@ -1308,6 +1320,7 @@ impl DocumentRuntime {
         label: &str,
         commands: Vec<EditCommand>,
     ) -> Result<CommandOutcome, DomainError> {
+        self.require_generation_capacity()?;
         if self.read_only {
             return Err(DomainError::ReadOnly);
         }
@@ -1559,6 +1572,9 @@ impl DocumentRuntime {
     /// See [`revert_report`](Self::revert_report) for what the returned
     /// [`RevertReport`] guarantees.
     pub fn undo(&mut self) -> Option<RevertReport> {
+        if self.require_generation_capacity().is_err() {
+            return None;
+        }
         if self.read_only || self.revert_blocked_by_gesture("undo") {
             return None;
         }
@@ -1578,6 +1594,7 @@ impl DocumentRuntime {
     /// # Errors
     /// [`DomainError`] if a replayed command fails.
     pub fn redo(&mut self) -> Result<Option<RevertReport>, DomainError> {
+        self.require_generation_capacity()?;
         if self.read_only || self.revert_blocked_by_gesture("redo") {
             return Ok(None);
         }
@@ -1717,7 +1734,20 @@ impl DocumentRuntime {
         // it reverts. Insert-only — user-authored name/visible survive.
         self.session.adopt_regen_bodies(&self.regen.bodies);
         self.fencing.bump_revision();
+        self.persisted_generation = self
+            .persisted_generation
+            .checked_add(1)
+            .expect("persisted generation exhausted");
         self.dirty = true;
+    }
+
+    fn require_generation_capacity(&self) -> Result<(), DomainError> {
+        if self.persisted_generation == u64::MAX {
+            return Err(DomainError::Validation(
+                "persisted generation exhausted".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Rebuilds the regen mirror timeline from the authoritative session timeline
@@ -2275,7 +2305,10 @@ impl DocumentRuntime {
             );
         }
         if let Outcome::Published(snap) = &outcome {
-            if same_instance && self.fencing.get() == expected {
+            if same_instance
+                && self.fencing.get() == expected
+                && self.persisted_generation < u64::MAX
+            {
                 let snapshot_id = snap.id.0;
                 let existing_body_metadata: HashSet<BodyId> = self
                     .session
@@ -2326,6 +2359,12 @@ impl DocumentRuntime {
                 // commands (rename / visibility) can address it at all.
                 self.session.adopt_regen_bodies(&self.regen.bodies);
                 self.inherit_v2_pattern_child_display_metadata(&existing_body_metadata);
+                // Published geometry can update persisted derived fields. This fences
+                // overlapping saves without dirtying a clean document on cold open.
+                self.persisted_generation = self
+                    .persisted_generation
+                    .checked_add(1)
+                    .expect("persisted generation exhausted");
                 // Post-commit: the live repair state now reflects this regen. A lean
                 // per-item set drives the `needs-repair` event (empty ⇒ repairs
                 // cleared → banner drop).
@@ -2940,9 +2979,9 @@ impl DocumentRuntime {
     /// untouched on any failure.
     pub fn save(&mut self, path: &Path, meta: SaveMeta) -> Result<(), IoError> {
         let payload = self.build_save_payload(meta, SaveCaches::explicit());
-        let revision = self.revision();
+        let generation = self.persisted_generation();
         Self::write_payload(path, &payload)?;
-        self.mark_saved(path, revision);
+        self.mark_saved(path, generation);
         Ok(())
     }
 
@@ -3069,30 +3108,23 @@ impl DocumentRuntime {
 
     /// Adopts the result of a **successful** container write: `path` becomes the
     /// live save target, and the document goes clean **only if no edit landed since
-    /// `revision_at_build`**.
+    /// the captured persisted `generation`**.
     ///
     /// The conditional is load-bearing now that the write runs off the runtime lock:
     /// an edit applied while the bytes were being deflated is NOT in those bytes, so
     /// clearing `dirty` unconditionally would advertise unsaved work as saved. The
     /// path is adopted either way — the file at `path` is a real (if slightly older)
     /// container, and a subsequent Save must target it rather than re-prompting.
-    pub fn mark_saved(&mut self, path: &Path, revision_at_build: DocumentRevision) -> bool {
+    pub fn mark_saved(&mut self, path: &Path, generation: u64) -> bool {
         self.path = Some(path.to_path_buf());
         self.title = title_for_path(path);
-        let now = self.fencing.revision();
-        if now == revision_at_build {
-            self.dirty = false;
-            self.saved_history = Some(self.history_now());
-            true
-        } else {
-            tracing::info!(
-                "save: document stays DIRTY — edits landed during the container write \
-                 (built at revision {}, now {})",
-                revision_at_build.0,
-                now.0
-            );
-            false
+        if self.persisted_generation != generation {
+            self.dirty = true;
+            return false;
         }
+        self.dirty = false;
+        self.saved_history = Some(self.history_now());
+        true
     }
 
     /// Writes an autosave copy of the document (+ merged regen outputs) to `path`
@@ -3179,6 +3211,7 @@ impl DocumentRuntime {
         prepared: &PreparedImport,
         at_cursor: bool,
     ) -> Result<CommandOutcome, ApiError> {
+        self.require_generation_capacity()?;
         for (sha, blob) in &prepared.blobs {
             if blob.bytes.len() as u64 > MAX_IMPORT_BLOB_BYTES {
                 return Err(ApiError::Io(format!(
@@ -3193,7 +3226,6 @@ impl DocumentRuntime {
                         "cannot stage import source {sha} for the geometry worker: {e}"
                     ))
                 })?;
-            self.imports.insert(sha.clone(), blob.clone());
         }
         let record = OperationRecord::new(
             RecordId(Uuid::new_v4()),
@@ -3210,6 +3242,9 @@ impl DocumentRuntime {
             "importStep: authoring record"
         );
         let outcome = self.apply(EditCommand::AddOperation { record, at_cursor })?;
+        for (sha, blob) in &prepared.blobs {
+            self.imports.insert(sha.clone(), blob.clone());
+        }
         // Product names cannot be applied yet — the bodies are worker-minted and do
         // not exist until this record executes. Parked until adoption.
         if prepared.product_names.iter().any(|n| !n.is_empty()) {
@@ -3231,6 +3266,7 @@ impl DocumentRuntime {
     /// This is a static snapshot: editing the source file later does NOT update this
     /// document (live XREF is out of scope for V1).
     pub fn import_project(&mut self, path: &std::path::Path) -> Result<CommandOutcome, ApiError> {
+        self.require_generation_capacity()?;
         use onecad_core::io::project_import::{
             find_import_collisions, read_project_for_import, ImportCollisions,
         };
@@ -3263,34 +3299,28 @@ impl DocumentRuntime {
                         "cannot stage import source {sha} for the geometry worker: {e}"
                     ))
                 })?;
-            self.imports.insert(sha.clone(), blob.clone());
         }
-
-        self.session.begin_transaction("Import Project");
-        let mut combined = empty_outcome();
+        let mut commands = Vec::new();
         for record in imported.records {
             let name = record.name.clone();
             let record_id = record.record_id;
-            let outcome = self
-                .session
-                .apply(EditCommand::AddOperation {
-                    record,
-                    at_cursor: true,
-                })
-                .map_err(ApiError::from)?;
-            merge_outcome(&mut combined, &outcome);
+            commands.push(EditCommand::AddOperation {
+                record,
+                at_cursor: true,
+            });
             tracing::info!(record = %record_id, name = %name, "importProject: appended record");
         }
         for (sketch_id, sketch) in imported.sketches {
-            let outcome = self
-                .session
-                .apply(EditCommand::AddSketch { sketch })
-                .map_err(ApiError::from)?;
-            merge_outcome(&mut combined, &outcome);
+            commands.push(EditCommand::AddSketch { sketch });
             tracing::info!(sketch = %sketch_id, "importProject: added sketch");
         }
-        if let Some(outcome) = self.session.end_transaction() {
-            merge_outcome(&mut combined, &outcome);
+        let combined = if commands.is_empty() {
+            empty_outcome()
+        } else {
+            self.apply_transaction("Import Project", commands)?
+        };
+        for (sha, blob) in imported.import_blobs {
+            self.imports.insert(sha, blob);
         }
 
         tracing::info!(
@@ -4377,6 +4407,11 @@ impl DocumentRuntime {
         sketch_id: SketchId,
         discard: bool,
     ) -> Result<CancelSketchOutcome, EngineError> {
+        if discard && self.require_generation_capacity().is_err() {
+            return Ok(CancelSketchOutcome::kept(Some(
+                "persisted generation exhausted",
+            )));
+        }
         let created = self
             .sketch_session
             .as_ref()
@@ -4583,6 +4618,7 @@ impl DocumentRuntime {
         sketch_id: SketchId,
         append_to_sketch_edit: bool,
     ) -> Result<Option<CommandOutcome>, DomainError> {
+        self.require_generation_capacity()?;
         let Some(sketch) = self.session.document().sketch(sketch_id).cloned() else {
             return Ok(None);
         };
@@ -4683,8 +4719,11 @@ impl DocumentRuntime {
         body: BodyId,
         picks: Vec<(TopoKey, Option<AnchorIntent>)>,
     ) -> Result<Vec<PromotedElementDto>, EngineError> {
+        self.require_generation_capacity()
+            .map_err(|error| op_failed(error.to_string()))?;
         let minted = self.promote_inner(snapshot, body, picks).await?;
         let mut out = Vec::with_capacity(minted.len());
+        let mut changed = false;
         for (id, ev) in minted {
             // A persisted promotion supersedes any staged evidence for the same id.
             self.staged.remove(&id);
@@ -4694,11 +4733,10 @@ impl DocumentRuntime {
             // previously dropped on the floor, which is why an authored face colour
             // survived a save and then had nothing to paint after a reopen — the
             // worker's partition is minted on demand and dies with the process.
-            self.regen.elements.insert(
-                id.clone(),
-                ElementEntry::new(ev.body, ev.kind)
-                    .with_evidence(ev.anchor.clone(), ev.descriptor.clone()),
-            );
+            let entry = ElementEntry::new(ev.body, ev.kind)
+                .with_evidence(ev.anchor.clone(), ev.descriptor.clone());
+            changed |= self.regen.elements.get(&id) != Some(&entry);
+            self.regen.elements.insert(id.clone(), entry);
             out.push(PromotedElementDto {
                 topo_key: ev.topo_key.as_str().to_string(),
                 element_id: id.as_str().to_string(),
@@ -4718,7 +4756,11 @@ impl DocumentRuntime {
         // else can dirty one, and a promotion is identity plumbing rather than user
         // intent: claiming unsaved work on a document that cannot be saved would arm
         // a crash marker and offer a face pick back as "unsaved changes".
-        if !out.is_empty() && !self.read_only {
+        if changed && !self.read_only {
+            self.persisted_generation = self
+                .persisted_generation
+                .checked_add(1)
+                .expect("persisted generation exhausted");
             self.dirty = true;
         }
         Ok(out)

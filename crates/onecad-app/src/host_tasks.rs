@@ -48,10 +48,28 @@ impl HostTasks {
     /// A lane that does not stop in time is aborted rather than waited on forever:
     /// a wedged lane must not hold the user's close hostage. Lanes only observe the
     /// signal between units of work, so an in-flight autosave write completes.
+    #[cfg(test)]
     pub(crate) async fn stop(&self) {
         self.stop_within(LANE_STOP_TIMEOUT).await;
     }
 
+    pub(crate) fn begin_stop(&self) -> JoinHandle<()> {
+        self.stop.send_replace(true);
+        let handles = std::mem::take(&mut *self.handles.lock().unwrap());
+        tokio::spawn(async move {
+            for (name, mut handle) in handles {
+                if tokio::time::timeout(LANE_STOP_TIMEOUT, &mut handle)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(lane = name, "host lane did not stop in time; aborting");
+                    handle.abort();
+                }
+            }
+        })
+    }
+
+    #[cfg(test)]
     async fn stop_within(&self, timeout: Duration) {
         self.stop.send_replace(true);
         let handles = std::mem::take(&mut *self.handles.lock().unwrap());
