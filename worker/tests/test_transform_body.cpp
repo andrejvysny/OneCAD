@@ -37,6 +37,7 @@
 #include "ops/OpTypes.h"
 #include "ops/TransformOp.h"
 #include "session/BodyStore.h"
+#include "session/SourceHistory.h"
 #include "session/ShapeMetrics.h"
 #include "util/Cancel.h"
 
@@ -458,6 +459,49 @@ void test_guards() {
     check(bodies.size() == 1, "guard: no body minted by any failing placement");
 }
 
+void test_source_face_history() {
+    for (int scenario = 0; scenario != 2; ++scenario) {
+        TopoDS_Shape box = BRepPrimAPI_MakeBox(20.0, 10.0, 5.0).Shape();
+        BodyStore bodies;
+        bodies.create("body_1", "source", box);
+        em::ElementMapPartition part;
+        Ctx context;
+        auto ctx = context.make(bodies, part);
+        const auto op = transform_op("source_move", {"body_1"}, 3.0, -4.0, 2.0,
+                                     scenario ? rotate_json(1, 2, 3, 1, 2, 3, 37) : json());
+        const auto outcome = ops::execute_transform_body(ctx, op, "source_move");
+        check(outcome.status == ops::OpOutcome::Status::Ok, "source move succeeds");
+        check(outcome.topology_history.size() == 1, "source move supplies one body history");
+        if (outcome.topology_history.size() != 1) continue;
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(box, TopAbs_FACE, faces);
+        std::size_t visits = 0;
+        for (int i = 1; i <= faces.Extent(); ++i) {
+            const auto image = onecad::session::source_history_image(outcome.topology_history[0], faces(i), visits);
+            check(image.has_value(), "source face has unique oriented image");
+            if (image) {
+                check(onecad::session::source_image_is_live(bodies, "body_1", *image, visits),
+                      "source image belongs to result with matching orientation");
+                const TopoDS_Shape reversed_image = image->Reversed();
+                check(!onecad::session::source_image_is_live(bodies, "body_1", reversed_image, visits),
+                      "opposite image orientation is not live ownership");
+            }
+            const TopoDS_Shape reversed_input = faces(i).Reversed();
+            check(!onecad::session::source_history_image(outcome.topology_history[0], reversed_input, visits),
+                  "opposite input orientation cannot inherit identity");
+        }
+    }
+    BodyStore bodies;
+    bodies.create("body_1", "source", BRepPrimAPI_MakeBox(2, 3, 4).Shape());
+    em::ElementMapPartition part;
+    Ctx context;
+    auto ctx = context.make(bodies, part);
+    const auto copy = ops::execute_transform_body(ctx, transform_op("copy", {"body_1"}, 3, 0, 0, json(), true), "copy");
+    check(copy.status == ops::OpOutcome::Status::Ok, "source copy succeeds");
+    check(copy.topology_history.empty(), "copy never transfers source identity to new body");
+    check(copy.body_events.size() == 1 && copy.body_events[0].kind == "created", "copy leaves source body untouched");
+}
+
 }  // namespace
 
 int main() {
@@ -468,6 +512,7 @@ int main() {
     test_tracked_element_follows_the_body();
     test_identity_is_a_no_op();
     test_guards();
+    test_source_face_history();
     if (g_failures == 0) std::fprintf(stderr, "test_transform_body: all checks PASS\n");
     return g_failures;
 }

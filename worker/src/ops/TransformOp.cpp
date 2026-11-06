@@ -1,6 +1,8 @@
 // TransformOp.cpp — see TransformOp.h.
 #include "ops/TransformOp.h"
+#include "ops/TopologyHistory.h"
 
+#include <algorithm>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -26,6 +28,30 @@ constexpr double kPi = 3.14159265358979323846;
 // Below this an axis is treated as degenerate (squared length; matches MirrorOp).
 constexpr double kMinAxisLen2 = 1e-20;
 constexpr std::size_t kMaxTransformTargets = 128;
+
+// The general history classifier indexes shapes without orientation. Certified
+// source faces additionally require the transform builder's exact oriented image.
+void certify_oriented_face_history(session::TopologyBodyHistory& history,
+                                   BRepBuilderAPI_Transform& builder) {
+    auto invalid = [&](const session::TopologySuccessor& successor) {
+        if (successor.after.ShapeType() != TopAbs_FACE) return false;
+        bool proven = successor.before.size() == 1;
+        if (proven) {
+            const auto& input = successor.before.front();
+            std::size_t count = 0;
+            for (const TopoDS_Shape& image : builder.Modified(input)) {
+                ++count;
+                if (!image.IsEqual(successor.after)) proven = false;
+            }
+            const TopoDS_Shape image = builder.ModifiedShape(input);
+            proven = proven && count == 1 && !image.IsNull() && image.IsEqual(successor.after);
+        }
+        if (!proven) history.conflicts.push_back({successor.after, successor.before});
+        return !proven;
+    };
+    auto& successors = history.successors;
+    successors.erase(std::remove_if(successors.begin(), successors.end(), invalid), successors.end());
+}
 
 bool read_scalar_value(const json& value, double& result) {
     if (value.is_number()) {
@@ -232,6 +258,9 @@ OpOutcome execute_transform_body(OpContext& ctx, const json& op, const std::stri
             // MODIFY lineage: the BodyId is preserved (corpus invariant) and the
             // element map follows the geometry — history first (shape/topoKey/
             // descriptor), then the rigid anchor migration.
+            auto history = modified_body_history(target_id, sources[k], result, builder);
+            certify_oriented_face_history(history, builder);
+            out.topology_history.push_back(std::move(history));
             ctx.bodies.create(target_id, op_id, result);
             ctx.partition.apply_history(target_id, result, builder, out.delta,
                                         &out.needs_repair);
