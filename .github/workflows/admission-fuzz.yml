@@ -1,0 +1,38 @@
+name: Bounded admission fuzz
+
+on:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  pure-admission:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record source and toolchain
+        run: |
+          mkdir -p artifacts
+          git rev-parse HEAD > artifacts/source.txt
+          rustc -Vv > artifacts/rustc.txt
+          cargo -V > artifacts/cargo.txt
+          uname -a > artifacts/os.txt
+      - name: Run fixed admission campaigns
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p onecad-core -p onecad-protocol --test bounded_admission_fuzz --test bounded_mesh_fuzz -- --nocapture 2>&1 | tee artifacts/admission.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bounded-admission-${{ github.sha }}
+          path: artifacts
+          if-no-files-found: error
