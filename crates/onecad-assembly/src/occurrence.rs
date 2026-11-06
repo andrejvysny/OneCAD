@@ -102,7 +102,7 @@ impl TryFrom<TreeRepr> for OccurrenceTree {
         }
         let mut tree = Self::new();
         for occ in repr.occurrences {
-            if !occ.local.is_finite() {
+            if !occ.local.is_rigid() {
                 return Err(AssemblyError::NonFiniteTransform(occ.id));
             }
             let id = occ.id;
@@ -145,13 +145,13 @@ impl OccurrenceTree {
         self.occurrences.values()
     }
 
-    /// Inserts an occurrence. Refuses duplicates, unknown parents, non-finite
+    /// Inserts an occurrence. Refuses duplicates, unknown parents, non-rigid or non-finite
     /// transforms, nesting beyond `MAX_DEPTH` and counts beyond `MAX_OCCURRENCES`.
     pub fn insert(&mut self, occ: Occurrence) -> Result<(), AssemblyError> {
         if self.occurrences.contains_key(&occ.id) {
             return Err(AssemblyError::DuplicateOccurrence(occ.id));
         }
-        if !occ.local.is_finite() {
+        if !occ.local.is_rigid() {
             return Err(AssemblyError::NonFiniteTransform(occ.id));
         }
         if self.occurrences.len() >= MAX_OCCURRENCES {
@@ -186,7 +186,7 @@ impl OccurrenceTree {
         id: OccurrenceId,
         local: RigidTransform,
     ) -> Result<(), AssemblyError> {
-        if !local.is_finite() {
+        if !local.is_rigid() {
             return Err(AssemblyError::NonFiniteTransform(id));
         }
         let occ = self
@@ -451,6 +451,31 @@ mod tests {
         let orphan = occ(def, Some(OccurrenceId::new()));
         let json = serde_json::to_string(&TreeRepr {
             occurrences: vec![orphan],
+        })
+        .unwrap();
+        assert!(serde_json::from_str::<OccurrenceTree>(&json).is_err());
+    }
+    #[test]
+    fn rejects_non_unit_rotation_at_tree_boundaries() {
+        let mut tree = OccurrenceTree::new();
+        let valid = occ(ComponentDefId::new(), None);
+        let id = valid.id;
+        tree.insert(valid).unwrap();
+        let invalid = RigidTransform {
+            rotation: Quat {
+                w: 2.0,
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            translation: Vec3d::ZERO,
+        };
+        assert!(tree.set_local(id, invalid).is_err());
+        let mut bad = occ(ComponentDefId::new(), None);
+        bad.local = invalid;
+        assert!(tree.insert(bad.clone()).is_err());
+        let json = serde_json::to_string(&TreeRepr {
+            occurrences: vec![bad],
         })
         .unwrap();
         assert!(serde_json::from_str::<OccurrenceTree>(&json).is_err());

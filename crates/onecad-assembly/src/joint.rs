@@ -55,6 +55,7 @@ impl JointKind {
 }
 
 /// Travel limits: radians for revolute, millimetres for slider.
+/// Revolute bounds must lie in the principal interval [-π, π].
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JointLimits {
@@ -117,6 +118,8 @@ pub enum JointError {
     LimitsOnRigid,
     #[error("invalid limits [{min}, {max}]")]
     InvalidLimits { min: f64, max: f64 },
+    #[error("revolute limits must lie in [-pi, pi], got [{min}, {max}]")]
+    RevoluteLimitsOutsidePrincipalRange { min: f64, max: f64 },
     #[error("joint value {0} is not finite")]
     NonFiniteValue(f64),
     #[error("joint value {value} outside limits [{min}, {max}]")]
@@ -145,6 +148,14 @@ impl Joint {
             return Err(JointError::LimitsOnRigid);
         }
         limits.validate()?;
+        if self.kind == JointKind::Revolute
+            && (limits.min < -std::f64::consts::PI || limits.max > std::f64::consts::PI)
+        {
+            return Err(JointError::RevoluteLimitsOutsidePrincipalRange {
+                min: limits.min,
+                max: limits.max,
+            });
+        }
         if limits.contains(self.value) {
             Ok(())
         } else {

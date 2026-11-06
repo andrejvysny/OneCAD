@@ -14,7 +14,7 @@ pub enum AssemblyError {
     DepthExceeded { limit: usize },
     #[error("occurrence count exceeds instance limit {limit}")]
     InstanceLimit { limit: usize },
-    #[error("occurrence {0} has a non-finite transform")]
+    #[error("occurrence {0} has a non-rigid or non-finite transform")]
     NonFiniteTransform(OccurrenceId),
     #[error("occurrence {0} still has children")]
     HasChildren(OccurrenceId),

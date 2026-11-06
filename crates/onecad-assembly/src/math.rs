@@ -100,12 +100,38 @@ impl Mul<f64> for Vec3d {
 
 /// Unit quaternion (Hamilton convention, `w` scalar part).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(try_from = "QuatRepr", into = "QuatRepr")]
 pub struct Quat {
-    pub w: f64,
-    pub x: f64,
-    pub y: f64,
-    pub z: f64,
+    pub(crate) w: f64,
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) z: f64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct QuatRepr {
+    w: f64,
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+impl From<Quat> for QuatRepr {
+    fn from(q: Quat) -> Self {
+        Self {
+            w: q.w,
+            x: q.x,
+            y: q.y,
+            z: q.z,
+        }
+    }
+}
+
+impl TryFrom<QuatRepr> for Quat {
+    type Error = &'static str;
+    fn try_from(q: QuatRepr) -> Result<Self, Self::Error> {
+        Self::try_new(q.w, q.x, q.y, q.z).ok_or("quaternion must be a finite unit rotation")
+    }
 }
 
 impl Quat {
@@ -115,6 +141,18 @@ impl Quat {
         y: 0.0,
         z: 0.0,
     };
+
+    /// Accepts only unit quaternions within 1e-12 norm-squared roundoff.
+    #[must_use]
+    pub fn try_new(w: f64, x: f64, y: f64, z: f64) -> Option<Self> {
+        let q = Self { w, x, y, z };
+        q.is_unit().then_some(q)
+    }
+
+    #[must_use]
+    pub fn components(self) -> [f64; 4] {
+        [self.w, self.x, self.y, self.z]
+    }
 
     fn vector_part(self) -> Vec3d {
         Vec3d::new(self.x, self.y, self.z)
@@ -139,8 +177,11 @@ impl Quat {
 
     /// Exponential map: rotation vector (axis * angle) to quaternion.
     #[must_use]
-    pub fn from_rotation_vector(v: Vec3d) -> Self {
+    pub fn from_rotation_vector(v: Vec3d) -> Option<Self> {
         let angle = v.norm();
+        if !angle.is_finite() {
+            return None;
+        }
         let (w, k) = if angle < SMALL_ANGLE {
             let a2 = angle * angle;
             (1.0 - a2 / 8.0, 0.5 - a2 / 48.0)
@@ -148,12 +189,7 @@ impl Quat {
             let half = 0.5 * angle;
             (half.cos(), half.sin() / angle)
         };
-        Self {
-            w,
-            x: v.x * k,
-            y: v.y * k,
-            z: v.z * k,
-        }
+        Self::try_new(w, v.x * k, v.y * k, v.z * k)
     }
 
     /// Log map, shortest arc (angle in [0, pi]).
@@ -189,6 +225,8 @@ impl Quat {
             y: self.w * rhs.y - self.x * rhs.z + self.y * rhs.w + self.z * rhs.x,
             z: self.w * rhs.z + self.x * rhs.y - self.y * rhs.x + self.z * rhs.w,
         }
+        .normalized()
+        .expect("product of unit quaternions is finite and nonzero")
     }
 
     #[must_use]
@@ -220,6 +258,13 @@ impl Quat {
     #[must_use]
     pub fn is_finite(self) -> bool {
         self.w.is_finite() && self.x.is_finite() && self.y.is_finite() && self.z.is_finite()
+    }
+
+    /// True for finite unit rotations, allowing 1e-12 norm-squared roundoff.
+    #[must_use]
+    pub fn is_unit(self) -> bool {
+        let n2 = self.w * self.w + self.x * self.x + self.y * self.y + self.z * self.z;
+        n2.is_finite() && (n2 - 1.0).abs() <= 1e-12
     }
 
     /// Rotates `v`: `v + 2w (u x v) + 2 u x (u x v)` with `u` the vector part.
@@ -380,6 +425,11 @@ impl RigidTransform {
     pub fn is_finite(&self) -> bool {
         self.rotation.is_finite() && self.translation.is_finite()
     }
+
+    #[must_use]
+    pub fn is_rigid(&self) -> bool {
+        self.rotation.is_unit() && self.translation.is_finite()
+    }
 }
 
 /// Orthonormal frame given by origin, z axis and x axis; `y = z × x` is
@@ -438,14 +488,14 @@ mod tests {
             Vec3d::new(0.0, 0.0, 0.0),
             Vec3d::new(2.0, 1.0, -1.0),
         ] {
-            let back = Quat::from_rotation_vector(v).to_rotation_vector();
+            let back = Quat::from_rotation_vector(v).unwrap().to_rotation_vector();
             assert!(close(back, v, EPS), "{v:?} -> {back:?}");
         }
     }
 
     #[test]
     fn log_map_takes_shortest_arc() {
-        let q = Quat::from_rotation_vector(Vec3d::new(0.0, 0.0, 4.0));
+        let q = Quat::from_rotation_vector(Vec3d::new(0.0, 0.0, 4.0)).unwrap();
         let v = q.to_rotation_vector();
         assert!(close(v, Vec3d::new(0.0, 0.0, 4.0 - 2.0 * PI), 1e-9));
         let neg = Quat {
@@ -635,5 +685,27 @@ mod tests {
         assert!(json.contains("\"rotation\"") && json.contains("\"translation\""));
         let back: RigidTransform = serde_json::from_str(&json).unwrap();
         assert_eq!(t, back);
+    }
+    #[test]
+    fn checked_quaternions_preserve_rigid_geometry() {
+        for w in [0.0, 1e-100, 1e100, 2.0, f64::NAN, f64::INFINITY] {
+            assert!(Quat::try_new(w, 0.0, 0.0, 0.0).is_none());
+        }
+        for json in [
+            r#"{"w":0,"x":0,"y":0,"z":0}"#,
+            r#"{"w":2,"x":0,"y":0,"z":0}"#,
+        ] {
+            assert!(serde_json::from_str::<Quat>(json).is_err());
+        }
+        assert!(Quat::from_rotation_vector(Vec3d::new(f64::INFINITY, 0.0, 0.0)).is_none());
+        let q = Quat::from_axis_angle(Vec3d::new(1.0, 2.0, 3.0), 1.2).unwrap();
+        let v = Vec3d::new(3.0, -2.0, 5.0);
+        assert!((q.rotate(v).norm() - v.norm()).abs() < EPS);
+        let a = q.rotate(Vec3d::X);
+        let b = q.rotate(Vec3d::Y);
+        let c = q.rotate(Vec3d::Z);
+        assert!((a.dot(b.cross(c)) - 1.0).abs() < EPS);
+        assert!((q.conjugate().rotate(q.rotate(v)) - v).norm() < EPS);
+        assert!((q.negated().rotate(v) - q.rotate(v)).norm() < EPS);
     }
 }
