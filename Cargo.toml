@@ -19,6 +19,7 @@ members = [
     "crates/onecad-regen",
     "crates/onecad-kernelbench",
     "crates/onecad-library",
+    "crates/onecad-assembly",
     "crates/onecad-library-ingest",
     "crates/onecad-embedded-worker",
     "crates/onecad-ios",

@@ -17,6 +17,7 @@ pub(super) const LAYERS: &[(&str, &[&str])] = &[
     ("onecad-widgets", &[]),
     ("onecad-protocol", &[]),
     ("onecad-library", &[]),
+    ("onecad-assembly", &[]),
     ("onecad-embedded-worker", &[]),
     (
         "onecad-app",

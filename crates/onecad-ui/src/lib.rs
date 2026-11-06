@@ -127,6 +127,7 @@ mod viewport_options;
 mod viewport_selection;
 mod viewport_updates;
 mod viewport_widgets;
+mod workbench;
 mod workspace_ui;
 
 pub use qa::{HostLayout, QaPaths};

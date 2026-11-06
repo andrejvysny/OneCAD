@@ -3150,6 +3150,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "onecad-assembly"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "onecad-core"
 version = "0.1.0"
 dependencies = [

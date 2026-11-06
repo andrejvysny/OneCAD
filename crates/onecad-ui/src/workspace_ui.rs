@@ -4,6 +4,7 @@ mod customize;
 mod layers;
 
 use crate::app::App;
+use crate::workbench::Workbench;
 use egui::{Context, Rect, Response};
 use onecad_widgets::components::{
     lists::menu_frame,
@@ -51,14 +52,20 @@ impl ShellFacade {
     }
 }
 
-fn item<'a>(label: &'a str, icon: &'a str, key: &'a str, live: bool) -> WorkspaceItem<'a> {
+fn item<'a>(
+    label: &'a str,
+    icon: &'a str,
+    key: &'a str,
+    live: bool,
+    active: Workbench,
+) -> WorkspaceItem<'a> {
     WorkspaceItem {
         label,
         icon,
         shortcut: Some(key),
         subtitle: None,
         enabled: live,
-        active: label == "Design",
+        active: label == active.label(),
     }
 }
 
@@ -66,18 +73,20 @@ fn item<'a>(label: &'a str, icon: &'a str, key: &'a str, live: bool) -> Workspac
 /// `anchor` owns the open/close toggle; the card matches `bounds` width (min 200).
 pub fn workspace_menu(app: &mut App, ctx: &Context, anchor: &Response, bounds: Rect) {
     let live = crate::editor_facade::PREVIEW_FACADES;
+    let wb = app.ui.workbench;
     let items = [
-        item("Design", "body", "⌃1", true),
-        item("Assembly", "component", "⌃2", false),
-        item("Simulation", "study", "⌃3", false),
-        item("Drawing", "viewFront", "⌃4", false),
+        item("Design", "body", "⌃1", true, wb),
+        item("Assembly", "component", "⌃2", true, wb),
+        item("Simulation", "study", "⌃3", false, wb),
+        item("Drawing", "viewFront", "⌃4", false, wb),
     ];
-    let ext = [item("CNC", "panelLeft", "⌃5", live)];
+    let ext = [item("CNC", "panelLeft", "⌃5", live, wb)];
     let hint =
         (!live).then_some("Native workspace integration is unavailable (ONECAD-301 / ONECAD-92)");
     let width = bounds.width().max(200.0);
     let frame = menu_frame(ctx).corner_radius(egui::CornerRadius::same(10));
     let mut customize = false;
+    let mut picked = None;
     egui::Popup::menu(anchor)
         .anchor(bounds)
         .gap(4.0)
@@ -88,9 +97,14 @@ pub fn workspace_menu(app: &mut App, ctx: &Context, anchor: &Response, bounds: R
             ui.set_width(width - 12.0);
             let out = workspace_menu_compact(ui, &items, &ext, ("Customize…", live), hint);
             customize = out.customize && live;
+            picked = out.picked;
         });
     let id = egui::Popup::default_response_id(anchor);
     app.ui.workspace_menu_open = egui::Popup::is_id_open(ctx, id);
+    // Menu rows 0..ALL.len() mirror `Workbench::ALL`; Simulation/Drawing are disabled.
+    if let Some(wb) = picked.and_then(|i| Workbench::ALL.get(i)) {
+        app.ui.workbench = *wb;
+    }
     if customize {
         app.ui.shell_facade.customize_open = true;
     }

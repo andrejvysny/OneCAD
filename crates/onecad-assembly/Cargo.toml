@@ -1,0 +1,17 @@
+[package]
+name = "onecad-assembly"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+description = "OneCAD pure assembly model: occurrences, rigid transforms, joints and the joint solver"
+edition = "2021"
+
+# INVARIANT: pure foundation crate (docs/rust-dependency-layers.md). No UI, GPU,
+# worker or network dependencies; onecad-app consumes it.
+
+[dependencies]
+serde = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

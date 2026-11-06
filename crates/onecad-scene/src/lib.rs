@@ -12,6 +12,7 @@
 mod camera;
 mod fit;
 mod index;
+pub mod instances;
 mod picking;
 mod scene;
 

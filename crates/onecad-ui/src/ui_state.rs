@@ -49,6 +49,8 @@ pub struct UiState {
     pub inspector_open: bool,
     pub inspector_tab: InspectorTab,
     pub workspace_menu_open: bool,
+    /// Active workbench; label-only until tool filtering lands (ONECAD-397/398).
+    pub workbench: crate::workbench::Workbench,
     pub start_open: bool,
     pub explorer_filter: String,
     /// Anchor of the open Display menu; `None` while closed.
@@ -94,6 +96,7 @@ impl Default for UiState {
             inspector_open: true,
             inspector_tab: InspectorTab::default(),
             workspace_menu_open: false,
+            workbench: Default::default(),
             start_open: false,
             explorer_filter: String::new(),
             display_menu: None,

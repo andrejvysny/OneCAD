@@ -78,7 +78,7 @@ fn toggle(app: &mut App, ctx: &Context, chrome: &Chrome) {
                 }
                 let (line, _) = ui.allocate_exact_size(egui::vec2(1.0, 18.0), Sense::hover());
                 ui.painter().rect_filled(line, 0.0, l.theme.border_strong);
-                let selector = WorkspaceSelector::new("Design", "body")
+                let selector = WorkspaceSelector::new(app.ui.workbench.label(), "body")
                     .compact(true)
                     .open(app.ui.workspace_menu_open);
                 let response = ui.add(selector);
@@ -115,8 +115,8 @@ fn header(app: &mut App, ui: &mut Ui) {
             app.ui.explorer_open = false;
         }
         if !app.ui.start_open {
-            let selector =
-                WorkspaceSelector::new("Design", "body").open(app.ui.workspace_menu_open);
+            let selector = WorkspaceSelector::new(app.ui.workbench.label(), "body")
+                .open(app.ui.workspace_menu_open);
             let response = ui.add(selector);
             let bounds = toggle_resp.rect.union(response.rect);
             crate::workspace_ui::workspace_menu(app, &ctx, &response, bounds);

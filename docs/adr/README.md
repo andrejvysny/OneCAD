@@ -31,5 +31,8 @@ the native direction. Accepted direction does not imply qualification or deliver
 | [0017](0017-external-addons-deferred.md) | Deferral superseded by 0018; native boundaries remain toolkit-independent |
 | [0018](0018-portable-command-addons.md) | Restricted portable command addons, Rust SDK and host-owned effects |
 | [0019](0019-ipados-embedded-kernel.md) | iPadOS hosts the OCCT worker in-process behind the same supervision |
+| [0020](0020-assembly-components-occurrences.md) | Proposed: assemblies are component definitions and occurrences in one document |
+| [0021](0021-instanced-assembly-geometry.md) | Proposed: assembly geometry is instanced in the scene, local in MESH1 |
+| [0022](0022-joint-solver-hosting.md) | Proposed: the joint solver is pure Rust in the host process |
 
 Status values: `Proposed`, `Accepted`, `Superseded by NNNN`.
