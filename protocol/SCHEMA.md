@@ -6079,6 +6079,13 @@ Higher = better match. Policy:
 - For a set of referenced elements, use **min-cost assignment** over the
   **referenced-only** candidate sets (greedy is a documented counterexample —
   never greedy).
+- **Repeated input identity.** Generic predecessor resolution groups exact input
+  JSON copies naming the same semantic element before assignment. Each input
+  slot retains its own `refId` and binding/repair evidence; the element is minted
+  once. Untracked inputs that reuse one `elementId` with nonidentical evidence
+  (including different owning bodies or kinds) produce NeedsRepair before any
+  mint. Distinct element identities still compete in the joint assignment;
+  scoring thresholds and `resolverVersion` remain unchanged.
 - **`originSlot` pool narrowing (ONECAD-361).** In generic input resolution and
   `ResolveRefs` only, a ref whose `intent.descriptor.originSlot` is present
   ([§7.5](#acquireelementids), §7.3 Hole) admits only candidates whose live
@@ -6086,7 +6093,7 @@ Higher = better match. Policy:
   `slot`. A non-admitted (ref, candidate) pair is never scored, ranked or
   counted as a rival, and costs what an empty assignment column costs; the
   min-cost assignment still spans every referenced ref of the step, slotted or
-  not, so two refs never bind one shape. A ref left without an admitted
+  not, so two distinct element identities never bind one shape. A ref left without an admitted
   candidate halts `no-candidates`. Op-internal ladders do not narrow by slot.
   Refs without the member score exactly as before, so `resolverVersion` stays
   `6`.

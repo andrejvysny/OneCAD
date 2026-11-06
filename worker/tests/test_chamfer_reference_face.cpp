@@ -73,6 +73,7 @@
 #include "session/BodyStore.h"
 #include "session/EdgePicks.h"
 #include "session/ShapeMetrics.h"
+#include "session/PlanExecutor.h"
 #include "util/Cancel.h"
 
 using nlohmann::json;
@@ -738,10 +739,72 @@ void test_adjacent_face_ordinals() {
                             std::to_string(circles));
 }
 
+json repeated_top_face_op(const TopoDS_Shape& shape, int mode) {
+    const std::string body = "body_repeated";
+    const auto front = nearest(shape, TopAbs_EDGE, kW / 2, 0, kDepth);
+    const auto back = nearest(shape, TopAbs_EDGE, kW / 2, kH, kDepth);
+    const auto top = nearest(shape, TopAbs_FACE, kW / 2, kH / 2, kDepth);
+    const char* second = mode == 1 ? "el_top_second" : "el_top";
+    const double anchor_z = mode == 2 ? 100000.0 : kDepth;
+    const json face = element_input(body, "el_top", "face", top, kW / 2, kH / 2, anchor_z);
+    json second_face = face;
+    second_face["primary"]["elementId"] = second;
+    if (mode == 3) second_face = element_input(body, "el_top", "face",
+        nearest(shape, TopAbs_FACE, kW / 2, kH / 2, 0), kW / 2, kH / 2, 0);
+    if (mode == 4) second_face["primary"]["bodyId"] = "body_other";
+    if (mode == 5) second_face["primary"]["kind"] = "edge";
+    return {{"opType", "Chamfer"}, {"opId", "repeat"},
+            {"inputs", json::array({element_input(body, "el_front_edge", "edge", front, kW / 2, 0, kDepth),
+                                     element_input(body, "el_back_edge", "edge", back, kW / 2, kH, kDepth),
+                                     face, second_face})},
+            {"params", {{"mode", "Chamfer"}, {"radius", 1.0}, {"distance2", 0.5},
+                        {"edgeIds", json::array({"el_front_edge", "el_back_edge"})},
+                        {"chainTangentEdges", true}, {"tangentClosureVersion", 1},
+                        {"referenceFaces", json::array({json{{"edgeId", "el_front_edge"}, {"faceId", "el_top"}},
+                                                        json{{"edgeId", "el_back_edge"}, {"faceId", second}}})}}}};
+}
+
+void test_repeated_semantic_face_inputs() {
+    for (int mode = 0; mode < 6; ++mode) {
+        const auto shape = BRepPrimAPI_MakeBox(kW, kH, kDepth).Shape();
+        onecad::session::ScratchJob job;
+        job.bodies.create("body_repeated", "box", shape);
+        const json op = repeated_top_face_op(shape, mode);
+        onecad::CancelToken cancel;
+        std::string sketch;
+        const auto result = mode >= 3
+            ? onecad::session::resolve_read_operand_inputs(job, op)
+            : onecad::session::execute_candidate_op(job, op, "repeat", sketch, cancel);
+        if (mode == 0) {
+            check(result.status == onecad::session::CandidateResult::Status::Ok && result.needs_repair.empty(),
+                  "repeated face identity: both contour references resolve and chamfer publishes");
+            check_near(onecad::session::shape_volume(job.bodies.get("body_repeated")->geom),
+                       kW * kH * kDepth - 2.0 * kW * 1.0 * 0.5 / 2.0, 1e-6, "repeated face: two independent 1 x 0.5 wedges");
+            check(result.ref_bindings.size() == 4, "repeated face: all input-slot bindings retained");
+        } else {
+            check(!result.needs_repair.empty(), "distinct identities or missed anchors still refuse");
+            check_near(onecad::session::shape_volume(job.bodies.get("body_repeated")->geom),
+                       kW * kH * kDepth, 1e-6, "refusal preserves predecessor geometry");
+            if (mode == 2) check(result.needs_repair.size() == 2, "unresolved duplicate: evidence for both slots");
+            if (mode >= 3) check(job.partition.find("el_top") == nullptr,
+                                 "conflicting identity evidence must not mint or overwrite a binding");
+            if (mode == 3) {
+                const auto full = onecad::session::execute_candidate_op(job, op, "repeat", sketch, cancel);
+                check(full.status == onecad::session::CandidateResult::Status::NeedsRepair,
+                      "conflicting identity: full candidate refuses publication");
+                check(job.partition.find("el_top") == nullptr, "conflicting candidate leaves no minted binding");
+                check_near(onecad::session::shape_volume(job.bodies.get("body_repeated")->geom),
+                           kW * kH * kDepth, 1e-6, "conflicting candidate preserves geometry");
+            }
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
     try {
+        test_repeated_semantic_face_inputs();
         // ── (a) THE INVARIANT: a TYPED pair anchors the 4 mm leg to a PHYSICAL
         //     face, so an upstream feature that touches neither chamfered face
         //     cannot move it. This is what the whole work package is for. ──

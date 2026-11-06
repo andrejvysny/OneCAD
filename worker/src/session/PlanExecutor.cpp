@@ -186,13 +186,63 @@ bool tracked_binding_is_refused_gear_element(const ScratchJob& job, const std::s
     return true;
 }
 
+using RepeatedRefs = std::map<std::string, std::vector<em::LadderRef>>;
+
+void append_repair_occurrences(const json& repair, const std::string& representative,
+                               const RepeatedRefs& repeated, std::vector<json>& out) {
+    out.push_back(repair);
+    const auto found = repeated.find(representative);
+    if (found == repeated.end()) return;
+    for (const auto& ref : found->second) {
+        json copy = repair;
+        copy["refId"] = ref.ref_id;
+        std::string label = copy.value("uiLabel", std::string());
+        const auto at = label.find(representative);
+        if (at != std::string::npos) label.replace(at, representative.size(), ref.ref_id);
+        copy["uiLabel"] = ref.ui_label.empty() ? label : ref.ui_label;
+        out.push_back(std::move(copy));
+    }
+}
+
+bool reject_conflicting_first_refs(const ScratchJob& job, const json& op,
+                                    const std::string& op_id, std::vector<json>& repairs) {
+    std::map<std::string, std::string> evidence;
+    std::set<std::string> conflicts;
+    for (const json& input : op["inputs"]) {
+        if (!input.is_object() || !input.contains("primary") || !input["primary"].is_object()) continue;
+        const std::string id = get_str(input["primary"], "elementId");
+        if (id.empty() || job.partition.contains(id)) continue;
+        const std::string frozen = input.dump();
+        const auto [found, inserted] = evidence.emplace(id, frozen);
+        if (!inserted && found->second != frozen) conflicts.insert(id);
+    }
+    if (conflicts.empty()) return false;
+    std::size_t index = 0;
+    for (const json& input : op["inputs"]) {
+        const auto ref = em::ladder_ref_from_input(input, op_id + ".input" + std::to_string(index++));
+        if (!conflicts.contains(ref.element_id)) continue;
+        em::LadderResolution repair;
+        repair.ref_id = ref.ref_id;
+        repair.element_id = ref.element_id;
+        repair.kind = ref.kind;
+        repair.reason = "ambiguous";
+        repair.anchor_json = ref.anchor_json;
+        repair.ui_label = "conflicting first-seen evidence for " + ref.element_id + " (" + ref.ref_id + ")";
+        repairs.push_back(repair.to_needs_repair_json());
+    }
+    return true;
+}
+
 void resolve_input_refs(ScratchJob& job, const json& op, const std::string& op_id,
                         const em::LadderEditContext& edit, em::ElementMapDelta& delta,
                         std::vector<json>& needs_repair, std::vector<json>& diagnostics) {
     if (!op.contains("inputs") || !op["inputs"].is_array()) return;
+    if (reject_conflicting_first_refs(job, op, op_id, needs_repair)) return;
 
     // Group sub-element refs by owning body (assignment/scoring is per-body pool).
     std::map<std::string, std::vector<em::LadderRef>> by_body;
+    std::map<std::string, std::string> representatives;
+    RepeatedRefs repeated;
     std::size_t i = 0;
     for (const json& in : op["inputs"]) {
         em::LadderRef r = em::ladder_ref_from_input(in, op_id + ".input" + std::to_string(i++));
@@ -215,13 +265,22 @@ void resolve_input_refs(ScratchJob& job, const json& op, const std::string& op_i
             }
             continue;
         }
+        // Input slots may name one semantic element repeatedly. Only exact
+        // evidence copies share resolution; distinct identities still compete.
+        const auto [entry, inserted] = representatives.emplace(in.dump(), r.ref_id);
+        if (!inserted) {
+            repeated[entry->second].push_back(std::move(r));
+            continue;
+        }
         by_body[bid].push_back(std::move(r));
     }
 
     for (auto& [bid, refs] : by_body) {
         const BodyRecord* rec = job.bodies.get(bid);
         if (!rec) {
-            for (const em::LadderRef& r : refs) needs_repair.push_back(missing_body_repair(r, bid));
+            for (const em::LadderRef& r : refs) {
+                append_repair_occurrences(missing_body_repair(r, bid), r.ref_id, repeated, needs_repair);
+            }
             continue;
         }
         // SCHEMA §7.3 (WP-I): on a gear body the refused faces are REMOVED FROM
@@ -289,7 +348,7 @@ void resolve_input_refs(ScratchJob& job, const json& op, const std::string& op_i
                 delta.added.push_back(job.partition.mint(bid, res.element_id, res.kind,
                                                          res.bound_shape, rec->geom, std::move(anchor)));
             } else {
-                needs_repair.push_back(res.to_needs_repair_json());
+                append_repair_occurrences(res.to_needs_repair_json(), res.ref_id, repeated, needs_repair);
                 // Say WHY a ref on a gear body could not bind: the pool it was
                 // scored against excludes tooth geometry by rule.
                 if (gear && (refs[k].kind == em::km::ElementKind::Face ||
