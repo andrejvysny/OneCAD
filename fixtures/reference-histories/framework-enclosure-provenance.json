@@ -1,0 +1,56 @@
+{
+  "sourceSha256": "6128186260b22ace271e83f096e2c16707b60866b3aa1b3a3f2ea0e38c3c7c09",
+  "profileExtractorSha256": "0b29b802fa4fb46ad07dead1fec9aad2f7c8e71513d12bf021ee8ad81c808190",
+  "profilesSha256": "d286bf4c161bbb9729125fdd5f7b62c4e62ce110e8e755f421652a538fc2020a",
+  "comparisonScriptSha256": "01a75e75c30d4fe32765c92ef4b992ecf6f69f0edc959821461b36e2bacca255",
+  "blendInspectorSha256": "1b9bd9ea4868f4433829c5eb8af047e1c11b6b96fd9af0dfbb304aded61660a1",
+  "blendAdjacencySha256": "873aac15e36c0894fe8256b986eac8e94915242d55d3ebaa2d948e5a924d3978",
+  "wheelSha256": "78b9033a47d72049b290c18e2c4c80bffc56c055b52eb60f49aca76550a9ddc8",
+  "sourceSolidProduct": "FW_EXP_1USBC_FRAME_CLIP_BC_229_",
+  "reader": "cadquery-ocp-novtk 8.0.1.1.0 / OCCT 8.0.1; same kernel family as worker",
+  "sourceFaces": {
+    "mainFloor": 3,
+    "bossCaps": [
+      6,
+      157
+    ],
+    "rearUnderside": 24,
+    "rearFloor": 143,
+    "bottom": 177,
+    "frontRadius": 178,
+    "sidePlanes": [
+      34,
+      36,
+      88,
+      90
+    ],
+    "connectorCoreCylinders": [
+      127,
+      129
+    ],
+    "connectorOuterLipTori": [
+      122,
+      124
+    ]
+  },
+  "sourceTransform": [
+    [
+      1,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      -1
+    ],
+    [
+      0,
+      1,
+      0
+    ]
+  ],
+  "qualification": "Intermediate native history and same-kernel geometry diagnostics only; not an enclosure oracle or completed source reconstruction.",
+  "surfaceInspectorSha256": "87d86b98ddcef7d58facc3d544869a450ccadd5369e323c19fcef232e4984cd3",
+  "surfaceFitsSha256": "9d1a9dc7051a9c1b266008367503d24badd813b1c7e4dbcc8df2be3fc191fd15"
+}

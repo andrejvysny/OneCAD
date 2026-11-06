@@ -1,0 +1,726 @@
+{
+  "name": "gear",
+  "step_occurrence": "NAUO4",
+  "product_name": "RB9.01.062.040 Gear for gripper_ISO - Spur gear 0.8M 18T 20PA 5FW ---S18B10H8L6.0S1",
+  "stl_sha256": "9f88db5828c1e26b7b15e3c0a4cfcea42805f0652b48beecca2ac57d037d8094",
+  "stl_vertices": 549,
+  "step_local_to_root_matrix": [
+    [
+      2.3915439168848388e-17,
+      -0.07209194582575794,
+      -0.9973979904466702,
+      -9.48442102583999e-16
+    ],
+    [
+      -1.2010682576764952e-16,
+      0.9973979904466702,
+      -0.07209194582575794,
+      5.66824207456932e-15
+    ],
+    [
+      1.0,
+      1.215184172045418e-16,
+      1.519447619111383e-17,
+      -1.7988823999991697
+    ]
+  ],
+  "step_product_bounds_mm": [
+    [
+      -2.001117600000008,
+      -10.0,
+      -10.0
+    ],
+    [
+      6.0,
+      10.0,
+      10.0
+    ]
+  ],
+  "threshold_mm": 0.0001,
+  "eligible_rotation_count": 24,
+  "candidates": [
+    {
+      "axis_permutation": [
+        0,
+        1,
+        2
+      ],
+      "axis_signs": [
+        -1,
+        -1,
+        1
+      ],
+      "translation_mm": [
+        6.000025325518795,
+        9.99999975040555,
+        -10.0
+      ],
+      "extent_residual_mm": 0.06830928474664688,
+      "checked_vertices": 1,
+      "maximum_observed_distance_mm": 2.076083119937879,
+      "rejected_witness": {
+        "vertex": [
+          0.0,
+          0.034154392778873444,
+          9.174206733703613
+        ],
+        "distance_mm": 2.076083119937879
+      },
+      "pass": false
+    },
+    {
+      "axis_permutation": [
+        0,
+        1,
+        2
+      ],
+      "axis_signs": [
+        -1,
+        1,
+        -1
+      ],
+      "translation_mm": [
+        6.000025325518795,
+        -9.99999975040555,
+        10.0
+      ],
+      "extent_residual_mm": 0.06830928474664688,
+      "checked_vertices": 1,
+      "maximum_observed_distance_mm": 2.0760831199378624,
+      "rejected_witness": {
+        "vertex": [
+          0.0,
+          0.034154392778873444,
+          9.174206733703613
+        ],
+        "distance_mm": 2.0760831199378624
+      },
+      "pass": false
+    },
+    {
+      "axis_permutation": [
+        0,
+        1,
+        2
+      ],
+      "axis_signs": [
+        1,
+        -1,
+        -1
+      ],
+      "translation_mm": [
+        -2.0011429255188027,
+        9.99999975040555,
+        10.0
+      ],
+      "extent_residual_mm": 0.06830928474664688,
+      "checked_vertices": 549,
+      "maximum_observed_distance_mm": 2.5586293013000387e-05,
+      "rejected_witness": null,
+      "pass": true
+    },
+    {
+      "axis_permutation": [
+        0,
+        1,
+        2
+      ],
+      "axis_signs": [
+        1,
+        1,
+        1
+      ],
+      "translation_mm": [
+        -2.0011429255188027,
+        -9.99999975040555,
+        -10.0
+      ],
+      "extent_residual_mm": 0.06830928474664688,
+      "checked_vertices": 549,
+      "maximum_observed_distance_mm": 2.558629301297759e-05,
+      "rejected_witness": null,
+      "pass": true
+    },
+    {
+      "axis_permutation": [
+        0,
+        2,
+        1
+      ],
+      "axis_signs": [
+        -1,
+        -1,
+        -1
+      ],
+      "translation_mm": [
+        6.000025325518795,
+        10.0,
+        9.99999975040555
+      ],
+      "extent_residual_mm": 0.06830928474664688,
+      "checked_vertices": 1,
+      "maximum_observed_distance_mm": 2.0555765332913056,
+      "rejected_witness": {
+        "vertex": [
+          0.0,
+          0.034154392778873444,
+          9.174206733703613
+        ],
+        "distance_mm": 2.0555765332913056
+      },
+      "pass": false
+    },
+    {
+      "axis_permutation": [
+        0,
+        2,
+        1
+      ],
+      "axis_signs": [
+        -1,
+        1,
+        1
+      ],
+      "translation_mm": [
+        6.000025325518795,
+        -10.0,
+        -9.99999975040555
+      ],
+      "extent_residual_mm": 0.06830928474664688,
+      "checked_vertices": 1,
+      "maximum_observed_distance_mm": 2.055576533291321,
+      "rejected_witness": {
+        "vertex": [
+          0.0,
+          0.034154392778873444,
+          9.174206733703613
+        ],
+        "distance_mm": 2.055576533291321
+      },
+      "pass": false
+    },
+    {
+      "axis_permutation": [
+        0,
+        2,
+        1
+      ],
+      "axis_signs": [
+        1,
+        -1,
+        1
+      ],
+      "translation_mm": [
+        -2.0011429255188027,
+        10.0,
+        -9.99999975040555
+      ],
+      "extent_residual_mm": 0.06830928474664688,
+      "checked_vertices": 318,
+      "maximum_observed_distance_mm": 0.6983231214543141,
+      "rejected_witness": {
+        "vertex": [
+          3.0,
+          2.1394314765930176,
+          8.89572525024414
+        ],
+        "distance_mm": 0.6983231214543141
+      },
+      "pass": false
+    },
+    {
+      "axis_permutation": [
+        0,
+        2,
+        1
+      ],
+      "axis_signs": [
+        1,
+        1,
+        -1
+      ],
+      "translation_mm": [
+        -2.0011429255188027,
+        -10.0,
+        9.99999975040555
+      ],
+      "extent_residual_mm": 0.06830928474664688,
+      "checked_vertices": 318,
+      "maximum_observed_distance_mm": 0.6983231214543578,
+      "rejected_witness": {
+        "vertex": [
+          3.0,
+          2.1394314765930176,
+          8.89572525024414
+        ],
+        "distance_mm": 0.6983231214543578
+      },
+      "pass": false
+    },
+    {
+      "axis_permutation": [
+        1,
+        0,
+        2
+      ],
+      "axis_signs": [
+        -1,
+        -1,
+        -1
+      ],
+      "translation_mm": [
+        11.999440950405546,
+        4.000584125518799,
+        10.0
+      ],
+      "extent_residual_mm": 11.998831748962402,
+      "checked_vertices": 1,
+      "maximum_observed_distance_mm": 5.965286557626673,
+      "rejected_witness": {
+        "vertex": [
+          0.0,
+          0.034154392778873444,
+          9.174206733703613
+        ],
+        "distance_mm": 5.965286557626673
+      },
+      "pass": false
+    },
+    {
+      "axis_permutation": [
+        1,
+        0,
+        2
+      ],
+      "axis_signs": [
+        -1,
+        1,
+        1
+      ],
+      "translation_mm": [
+        11.999440950405546,
+        -4.000584125518799,
+        -10.0
+      ],
+      "extent_residual_mm": 11.998831748962402,
+      "checked_vertices": 1,
+      "maximum_observed_distance_mm": 5.965286557626673,
+      "rejected_witness": {
+        "vertex": [
+          0.0,
+          0.034154392778873444,
+          9.174206733703613
+        ],
+        "distance_mm": 5.965286557626673
+      },
+      "pass": false
+    },
+    {
+      "axis_permutation": [
+        1,
+        0,
+        2
+      ],
+      "axis_signs": [
+        1,
+        -1,
+        1
+      ],
+      "translation_mm": [
+        -8.000558550405554,
+        4.000584125518799,
+        -10.0
+      ],
+      "extent_residual_mm": 11.998831748962402,
+      "checked_vertices": 1,
+      "maximum_observed_distance_mm": 5.965286557626673,
+      "rejected_witness": {
+        "vertex": [
+          0.0,
+          0.034154392778873444,
+          9.174206733703613
+        ],
+        "distance_mm": 5.965286557626673
+      },
+      "pass": false
+    },
+    {
+      "axis_permutation": [
+        1,
+        0,
+        2
+      ],
+      "axis_signs": [
+        1,
+        1,
+        -1
+      ],
+      "translation_mm": [
+        -8.000558550405554,
+        -4.000584125518799,
+        10.0
+      ],
+      "extent_residual_mm": 11.998831748962402,
+      "checked_vertices": 1,
+      "maximum_observed_distance_mm": 5.965286557626673,
+      "rejected_witness": {
+        "vertex": [
+          0.0,
+          0.034154392778873444,
+          9.174206733703613
+        ],
+        "distance_mm": 5.965286557626673
+      },
+      "pass": false
+    },
+    {
+      "axis_permutation": [
+        1,
+        2,
+        0
+      ],
+      "axis_signs": [
+        -1,
+        -1,
+        1
+      ],
+      "translation_mm": [
+        11.999440950405546,
+        10.0,
+        -4.000584125518799
+      ],
+      "extent_residual_mm": 11.998831748962402,
+      "checked_vertices": 1,
+      "maximum_observed_distance_mm": 5.965286557626673,
+      "rejected_witness": {
+        "vertex": [
+          0.0,
+          0.034154392778873444,
+          9.174206733703613
+        ],
+        "distance_mm": 5.965286557626673
+      },
+      "pass": false
+    },
+    {
+      "axis_permutation": [
+        1,
+        2,
+        0
+      ],
+      "axis_signs": [
+        -1,
+        1,
+        -1
+      ],
+      "translation_mm": [
+        11.999440950405546,
+        -10.0,
+        4.000584125518799
+      ],
+      "extent_residual_mm": 11.998831748962402,
+      "checked_vertices": 1,
+      "maximum_observed_distance_mm": 5.965286557626673,
+      "rejected_witness": {
+        "vertex": [
+          0.0,
+          0.034154392778873444,
+          9.174206733703613
+        ],
+        "distance_mm": 5.965286557626673
+      },
+      "pass": false
+    },
+    {
+      "axis_permutation": [
+        1,
+        2,
+        0
+      ],
+      "axis_signs": [
+        1,
+        -1,
+        -1
+      ],
+      "translation_mm": [
+        -8.000558550405554,
+        10.0,
+        4.000584125518799
+      ],
+      "extent_residual_mm": 11.998831748962402,
+      "checked_vertices": 1,
+      "maximum_observed_distance_mm": 5.965286557626673,
+      "rejected_witness": {
+        "vertex": [
+          0.0,
+          0.034154392778873444,
+          9.174206733703613
+        ],
+        "distance_mm": 5.965286557626673
+      },
+      "pass": false
+    },
+    {
+      "axis_permutation": [
+        1,
+        2,
+        0
+      ],
+      "axis_signs": [
+        1,
+        1,
+        1
+      ],
+      "translation_mm": [
+        -8.000558550405554,
+        -10.0,
+        -4.000584125518799
+      ],
+      "extent_residual_mm": 11.998831748962402,
+      "checked_vertices": 1,
+      "maximum_observed_distance_mm": 5.965286557626673,
+      "rejected_witness": {
+        "vertex": [
+          0.0,
+          0.034154392778873444,
+          9.174206733703613
+        ],
+        "distance_mm": 5.965286557626673
+      },
+      "pass": false
+    },
+    {
+      "axis_permutation": [
+        2,
+        0,
+        1
+      ],
+      "axis_signs": [
+        -1,
+        -1,
+        1
+      ],
+      "translation_mm": [
+        11.999441199999996,
+        4.000584125518799,
+        -9.99999975040555
+      ],
+      "extent_residual_mm": 11.998882399999992,
+      "checked_vertices": 1,
+      "maximum_observed_distance_mm": 2.7389921061073133,
+      "rejected_witness": {
+        "vertex": [
+          0.0,
+          0.034154392778873444,
+          9.174206733703613
+        ],
+        "distance_mm": 2.7389921061073133
+      },
+      "pass": false
+    },
+    {
+      "axis_permutation": [
+        2,
+        0,
+        1
+      ],
+      "axis_signs": [
+        -1,
+        1,
+        -1
+      ],
+      "translation_mm": [
+        11.999441199999996,
+        -4.000584125518799,
+        9.99999975040555
+      ],
+      "extent_residual_mm": 11.998882399999992,
+      "checked_vertices": 1,
+      "maximum_observed_distance_mm": 2.7389921061073124,
+      "rejected_witness": {
+        "vertex": [
+          0.0,
+          0.034154392778873444,
+          9.174206733703613
+        ],
+        "distance_mm": 2.7389921061073124
+      },
+      "pass": false
+    },
+    {
+      "axis_permutation": [
+        2,
+        0,
+        1
+      ],
+      "axis_signs": [
+        1,
+        -1,
+        -1
+      ],
+      "translation_mm": [
+        -8.000558800000004,
+        4.000584125518799,
+        9.99999975040555
+      ],
+      "extent_residual_mm": 11.998882399999992,
+      "checked_vertices": 1,
+      "maximum_observed_distance_mm": 1.3868447344175074,
+      "rejected_witness": {
+        "vertex": [
+          0.0,
+          0.034154392778873444,
+          9.174206733703613
+        ],
+        "distance_mm": 1.3868447344175074
+      },
+      "pass": false
+    },
+    {
+      "axis_permutation": [
+        2,
+        0,
+        1
+      ],
+      "axis_signs": [
+        1,
+        1,
+        1
+      ],
+      "translation_mm": [
+        -8.000558800000004,
+        -4.000584125518799,
+        -9.99999975040555
+      ],
+      "extent_residual_mm": 11.998882399999992,
+      "checked_vertices": 1,
+      "maximum_observed_distance_mm": 1.3868447344175079,
+      "rejected_witness": {
+        "vertex": [
+          0.0,
+          0.034154392778873444,
+          9.174206733703613
+        ],
+        "distance_mm": 1.3868447344175079
+      },
+      "pass": false
+    },
+    {
+      "axis_permutation": [
+        2,
+        1,
+        0
+      ],
+      "axis_signs": [
+        -1,
+        -1,
+        -1
+      ],
+      "translation_mm": [
+        11.999441199999996,
+        9.99999975040555,
+        4.000584125518799
+      ],
+      "extent_residual_mm": 11.998882399999992,
+      "checked_vertices": 1,
+      "maximum_observed_distance_mm": 2.920246331158353,
+      "rejected_witness": {
+        "vertex": [
+          0.0,
+          0.034154392778873444,
+          9.174206733703613
+        ],
+        "distance_mm": 2.920246331158353
+      },
+      "pass": false
+    },
+    {
+      "axis_permutation": [
+        2,
+        1,
+        0
+      ],
+      "axis_signs": [
+        -1,
+        1,
+        1
+      ],
+      "translation_mm": [
+        11.999441199999996,
+        -9.99999975040555,
+        -4.000584125518799
+      ],
+      "extent_residual_mm": 11.998882399999992,
+      "checked_vertices": 1,
+      "maximum_observed_distance_mm": 2.9202463311583533,
+      "rejected_witness": {
+        "vertex": [
+          0.0,
+          0.034154392778873444,
+          9.174206733703613
+        ],
+        "distance_mm": 2.9202463311583533
+      },
+      "pass": false
+    },
+    {
+      "axis_permutation": [
+        2,
+        1,
+        0
+      ],
+      "axis_signs": [
+        1,
+        -1,
+        1
+      ],
+      "translation_mm": [
+        -8.000558800000004,
+        9.99999975040555,
+        -4.000584125518799
+      ],
+      "extent_residual_mm": 11.998882399999992,
+      "checked_vertices": 1,
+      "maximum_observed_distance_mm": 1.3868447344175077,
+      "rejected_witness": {
+        "vertex": [
+          0.0,
+          0.034154392778873444,
+          9.174206733703613
+        ],
+        "distance_mm": 1.3868447344175077
+      },
+      "pass": false
+    },
+    {
+      "axis_permutation": [
+        2,
+        1,
+        0
+      ],
+      "axis_signs": [
+        1,
+        1,
+        -1
+      ],
+      "translation_mm": [
+        -8.000558800000004,
+        -9.99999975040555,
+        4.000584125518799
+      ],
+      "extent_residual_mm": 11.998882399999992,
+      "checked_vertices": 1,
+      "maximum_observed_distance_mm": 1.3868447344175074,
+      "rejected_witness": {
+        "vertex": [
+          0.0,
+          0.034154392778873444,
+          9.174206733703613
+        ],
+        "distance_mm": 1.3868447344175074
+      },
+      "pass": false
+    }
+  ],
+  "caveat": "source STEP subtree same-kernel diagnostic, vertex-to-surface only; nonmatching bounding-center poses are not excluded"
+}

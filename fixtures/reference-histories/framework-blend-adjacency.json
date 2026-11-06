@@ -1,0 +1,641 @@
+{
+  "sourceSha256": "6128186260b22ace271e83f096e2c16707b60866b3aa1b3a3f2ea0e38c3c7c09",
+  "reader": "cadquery-ocp-novtk 8.0.1.1.0 / OCCT 8.0.1",
+  "qualification": "Source adjacency evidence, not a recovered feature history or independent oracle.",
+  "faces": [
+    {
+      "faceIndex": 49,
+      "degreeUV": [
+        3,
+        3
+      ],
+      "poleCountUV": [
+        4,
+        11
+      ],
+      "rationalUV": [
+        false,
+        true
+      ],
+      "neighbors": [
+        {
+          "faceIndex": 28,
+          "surfaceType": "GeomAbs_Plane"
+        },
+        {
+          "faceIndex": 48,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.2999999999992
+        },
+        {
+          "faceIndex": 50,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3000000000002
+        },
+        {
+          "faceIndex": 75,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3000000000883
+        }
+      ]
+    },
+    {
+      "faceIndex": 51,
+      "degreeUV": [
+        3,
+        3
+      ],
+      "poleCountUV": [
+        4,
+        11
+      ],
+      "rationalUV": [
+        false,
+        true
+      ],
+      "neighbors": [
+        {
+          "faceIndex": 28,
+          "surfaceType": "GeomAbs_Plane"
+        },
+        {
+          "faceIndex": 31,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.2999999999911
+        },
+        {
+          "faceIndex": 50,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3000000000002
+        },
+        {
+          "faceIndex": 52,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3000000000239
+        }
+      ]
+    },
+    {
+      "faceIndex": 53,
+      "degreeUV": [
+        3,
+        3
+      ],
+      "poleCountUV": [
+        4,
+        17
+      ],
+      "rationalUV": [
+        false,
+        true
+      ],
+      "neighbors": [
+        {
+          "faceIndex": 52,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3000000000239
+        },
+        {
+          "faceIndex": 54,
+          "surfaceType": "GeomAbs_BSplineSurface"
+        },
+        {
+          "faceIndex": 56,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3
+        },
+        {
+          "faceIndex": 66,
+          "surfaceType": "GeomAbs_BSplineSurface"
+        }
+      ]
+    },
+    {
+      "faceIndex": 54,
+      "degreeUV": [
+        3,
+        3
+      ],
+      "poleCountUV": [
+        4,
+        8
+      ],
+      "rationalUV": [
+        false,
+        true
+      ],
+      "neighbors": [
+        {
+          "faceIndex": 32,
+          "surfaceType": "GeomAbs_Plane"
+        },
+        {
+          "faceIndex": 53,
+          "surfaceType": "GeomAbs_BSplineSurface"
+        },
+        {
+          "faceIndex": 55,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3
+        },
+        {
+          "faceIndex": 56,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3
+        }
+      ]
+    },
+    {
+      "faceIndex": 59,
+      "degreeUV": [
+        3,
+        3
+      ],
+      "poleCountUV": [
+        4,
+        11
+      ],
+      "rationalUV": [
+        false,
+        true
+      ],
+      "neighbors": [
+        {
+          "faceIndex": 34,
+          "surfaceType": "GeomAbs_Plane"
+        },
+        {
+          "faceIndex": 58,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3000000000023
+        },
+        {
+          "faceIndex": 60,
+          "surfaceType": "GeomAbs_Plane"
+        },
+        {
+          "faceIndex": 61,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.1500000000029
+        }
+      ]
+    },
+    {
+      "faceIndex": 66,
+      "degreeUV": [
+        3,
+        3
+      ],
+      "poleCountUV": [
+        4,
+        8
+      ],
+      "rationalUV": [
+        false,
+        true
+      ],
+      "neighbors": [
+        {
+          "faceIndex": 53,
+          "surfaceType": "GeomAbs_BSplineSurface"
+        },
+        {
+          "faceIndex": 56,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3
+        },
+        {
+          "faceIndex": 64,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3
+        },
+        {
+          "faceIndex": 65,
+          "surfaceType": "GeomAbs_Plane"
+        }
+      ]
+    },
+    {
+      "faceIndex": 67,
+      "degreeUV": [
+        3,
+        3
+      ],
+      "poleCountUV": [
+        4,
+        8
+      ],
+      "rationalUV": [
+        false,
+        true
+      ],
+      "neighbors": [
+        {
+          "faceIndex": 64,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3
+        },
+        {
+          "faceIndex": 65,
+          "surfaceType": "GeomAbs_Plane"
+        },
+        {
+          "faceIndex": 68,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.2999999999998
+        },
+        {
+          "faceIndex": 74,
+          "surfaceType": "GeomAbs_BSplineSurface"
+        }
+      ]
+    },
+    {
+      "faceIndex": 73,
+      "degreeUV": [
+        3,
+        3
+      ],
+      "poleCountUV": [
+        4,
+        8
+      ],
+      "rationalUV": [
+        false,
+        true
+      ],
+      "neighbors": [
+        {
+          "faceIndex": 44,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3
+        },
+        {
+          "faceIndex": 45,
+          "surfaceType": "GeomAbs_Plane"
+        },
+        {
+          "faceIndex": 68,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.2999999999998
+        },
+        {
+          "faceIndex": 74,
+          "surfaceType": "GeomAbs_BSplineSurface"
+        }
+      ]
+    },
+    {
+      "faceIndex": 74,
+      "degreeUV": [
+        3,
+        3
+      ],
+      "poleCountUV": [
+        4,
+        10
+      ],
+      "rationalUV": [
+        false,
+        true
+      ],
+      "neighbors": [
+        {
+          "faceIndex": 67,
+          "surfaceType": "GeomAbs_BSplineSurface"
+        },
+        {
+          "faceIndex": 68,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.2999999999998
+        },
+        {
+          "faceIndex": 73,
+          "surfaceType": "GeomAbs_BSplineSurface"
+        },
+        {
+          "faceIndex": 75,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3000000000883
+        }
+      ]
+    },
+    {
+      "faceIndex": 96,
+      "degreeUV": [
+        3,
+        3
+      ],
+      "poleCountUV": [
+        4,
+        11
+      ],
+      "rationalUV": [
+        false,
+        true
+      ],
+      "neighbors": [
+        {
+          "faceIndex": 28,
+          "surfaceType": "GeomAbs_Plane"
+        },
+        {
+          "faceIndex": 94,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3000000000018
+        },
+        {
+          "faceIndex": 97,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3000000000002
+        },
+        {
+          "faceIndex": 115,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.2999999999416
+        }
+      ]
+    },
+    {
+      "faceIndex": 98,
+      "degreeUV": [
+        3,
+        3
+      ],
+      "poleCountUV": [
+        4,
+        11
+      ],
+      "rationalUV": [
+        false,
+        true
+      ],
+      "neighbors": [
+        {
+          "faceIndex": 28,
+          "surfaceType": "GeomAbs_Plane"
+        },
+        {
+          "faceIndex": 76,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.2999999999856
+        },
+        {
+          "faceIndex": 97,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3000000000002
+        },
+        {
+          "faceIndex": 99,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3000000000146
+        }
+      ]
+    },
+    {
+      "faceIndex": 100,
+      "degreeUV": [
+        3,
+        3
+      ],
+      "poleCountUV": [
+        4,
+        17
+      ],
+      "rationalUV": [
+        false,
+        true
+      ],
+      "neighbors": [
+        {
+          "faceIndex": 99,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3000000000146
+        },
+        {
+          "faceIndex": 101,
+          "surfaceType": "GeomAbs_BSplineSurface"
+        },
+        {
+          "faceIndex": 103,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3
+        },
+        {
+          "faceIndex": 112,
+          "surfaceType": "GeomAbs_BSplineSurface"
+        }
+      ]
+    },
+    {
+      "faceIndex": 101,
+      "degreeUV": [
+        3,
+        3
+      ],
+      "poleCountUV": [
+        4,
+        8
+      ],
+      "rationalUV": [
+        false,
+        true
+      ],
+      "neighbors": [
+        {
+          "faceIndex": 80,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3
+        },
+        {
+          "faceIndex": 100,
+          "surfaceType": "GeomAbs_BSplineSurface"
+        },
+        {
+          "faceIndex": 102,
+          "surfaceType": "GeomAbs_Plane"
+        },
+        {
+          "faceIndex": 103,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3
+        }
+      ]
+    },
+    {
+      "faceIndex": 110,
+      "degreeUV": [
+        3,
+        3
+      ],
+      "poleCountUV": [
+        4,
+        8
+      ],
+      "rationalUV": [
+        false,
+        true
+      ],
+      "neighbors": [
+        {
+          "faceIndex": 109,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.2999999999995
+        },
+        {
+          "faceIndex": 111,
+          "surfaceType": "GeomAbs_Plane"
+        },
+        {
+          "faceIndex": 113,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3
+        },
+        {
+          "faceIndex": 116,
+          "surfaceType": "GeomAbs_BSplineSurface"
+        }
+      ]
+    },
+    {
+      "faceIndex": 112,
+      "degreeUV": [
+        3,
+        3
+      ],
+      "poleCountUV": [
+        4,
+        8
+      ],
+      "rationalUV": [
+        false,
+        true
+      ],
+      "neighbors": [
+        {
+          "faceIndex": 100,
+          "surfaceType": "GeomAbs_BSplineSurface"
+        },
+        {
+          "faceIndex": 103,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3
+        },
+        {
+          "faceIndex": 111,
+          "surfaceType": "GeomAbs_Plane"
+        },
+        {
+          "faceIndex": 113,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3
+        }
+      ]
+    },
+    {
+      "faceIndex": 116,
+      "degreeUV": [
+        3,
+        3
+      ],
+      "poleCountUV": [
+        4,
+        10
+      ],
+      "rationalUV": [
+        false,
+        true
+      ],
+      "neighbors": [
+        {
+          "faceIndex": 109,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.2999999999995
+        },
+        {
+          "faceIndex": 110,
+          "surfaceType": "GeomAbs_BSplineSurface"
+        },
+        {
+          "faceIndex": 115,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.2999999999416
+        },
+        {
+          "faceIndex": 117,
+          "surfaceType": "GeomAbs_BSplineSurface"
+        }
+      ]
+    },
+    {
+      "faceIndex": 117,
+      "degreeUV": [
+        3,
+        3
+      ],
+      "poleCountUV": [
+        4,
+        8
+      ],
+      "rationalUV": [
+        false,
+        true
+      ],
+      "neighbors": [
+        {
+          "faceIndex": 92,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3
+        },
+        {
+          "faceIndex": 93,
+          "surfaceType": "GeomAbs_Plane"
+        },
+        {
+          "faceIndex": 109,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.2999999999995
+        },
+        {
+          "faceIndex": 116,
+          "surfaceType": "GeomAbs_BSplineSurface"
+        }
+      ]
+    },
+    {
+      "faceIndex": 119,
+      "degreeUV": [
+        3,
+        3
+      ],
+      "poleCountUV": [
+        4,
+        14
+      ],
+      "rationalUV": [
+        false,
+        true
+      ],
+      "neighbors": [
+        {
+          "faceIndex": 90,
+          "surfaceType": "GeomAbs_Plane"
+        },
+        {
+          "faceIndex": 118,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.3000000000019
+        },
+        {
+          "faceIndex": 120,
+          "surfaceType": "GeomAbs_Cylinder",
+          "radiusMm": 0.1500000000029
+        },
+        {
+          "faceIndex": 121,
+          "surfaceType": "GeomAbs_Plane"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,312 @@
+{
+  "source_sha256": "3d10caca74f4e82e8d0b26c0ef2254e12dc1495c027eba1eae207944521d2104",
+  "revision": "e7cb78a7a1cd073ea8f845486398a23549343c7b",
+  "ocp": "8.0.1.1",
+  "format": "BinXCAF v12",
+  "parts": [
+    {
+      "occurrence": "NAUO1",
+      "source_product_entity": 48712,
+      "product_name": "RB9.01.062.010 Main frame_125 follower",
+      "source_referred_nested_components": 0,
+      "source_occurrence_matrix": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          -0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          -0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          -0.0
+        ]
+      ],
+      "first_pose": "identity; source occurrence root geometry baked",
+      "before": {
+        "solids": 1,
+        "faces": 181,
+        "valid": true,
+        "volume_mm3": 30350.27903841628,
+        "volume_relative_estimate": 7.689291451095449e-16,
+        "volume_integration_eps": 1e-09,
+        "bounds_mm": [
+          [
+            -64.00000000000001,
+            -24.000000100000005,
+            -8.000000000000004
+          ],
+          [
+            63.999999999999986,
+            35.5,
+            16.000000000000004
+          ]
+        ]
+      },
+      "after": {
+        "solids": 1,
+        "faces": 181,
+        "valid": true,
+        "volume_mm3": 30350.27903841628,
+        "volume_relative_estimate": 7.689291451095449e-16,
+        "volume_integration_eps": 1e-09,
+        "bounds_mm": [
+          [
+            -64.00000000000001,
+            -24.000000100000005,
+            -8.000000000000004
+          ],
+          [
+            63.999999999999986,
+            35.5,
+            16.000000000000004
+          ]
+        ]
+      },
+      "face_subshape_labels": 181,
+      "root_color_slots": 1,
+      "face_color_slots": 0,
+      "colors_roundtrip_equal": true,
+      "output": "part-010.xbf",
+      "output_bytes": 118968,
+      "output_sha256": "f643cfdf9ec480a23d14888bf896cad30e02bd05be079a0baf11f7fc88bd1992"
+    },
+    {
+      "occurrence": "NAUO2",
+      "source_product_entity": 34184,
+      "product_name": "RB9.01.062.020 Clamp",
+      "source_referred_nested_components": 0,
+      "source_occurrence_matrix": [
+        [
+          1.4419889425226597e-16,
+          2.5590038255574447e-18,
+          -1.0,
+          51.999999999999986
+        ],
+        [
+          -1.0,
+          -1.1102230246251563e-16,
+          -1.4419889425226597e-16,
+          -1.9492579253885274e-14
+        ],
+        [
+          -1.1102230246251563e-16,
+          1.0,
+          2.5590038255574285e-18,
+          10.999999999999996
+        ]
+      ],
+      "first_pose": "identity; source occurrence root geometry baked",
+      "before": {
+        "solids": 1,
+        "faces": 168,
+        "valid": true,
+        "volume_mm3": 13246.219316420005,
+        "volume_relative_estimate": 6.530692435173697e-10,
+        "volume_integration_eps": 1e-09,
+        "bounds_mm": [
+          [
+            41.99999989999997,
+            -23.00000010000003,
+            -1.5000000000000122
+          ],
+          [
+            58.000000099999994,
+            23.00000009999999,
+            78.50000000000001
+          ]
+        ]
+      },
+      "after": {
+        "solids": 1,
+        "faces": 168,
+        "valid": true,
+        "volume_mm3": 13246.219316420005,
+        "volume_relative_estimate": 6.530692435173685e-10,
+        "volume_integration_eps": 1e-09,
+        "bounds_mm": [
+          [
+            41.99999989999997,
+            -23.00000010000003,
+            -1.5000000000000122
+          ],
+          [
+            58.000000099999994,
+            23.00000009999999,
+            78.50000000000001
+          ]
+        ]
+      },
+      "face_subshape_labels": 168,
+      "root_color_slots": 1,
+      "face_color_slots": 0,
+      "colors_roundtrip_equal": true,
+      "output": "part-020.xbf",
+      "output_bytes": 154964,
+      "output_sha256": "932cc0452078850d9059ed6ad0716dd3658d35b8117c5598c2f0699e2b14b21c"
+    },
+    {
+      "occurrence": "NAUO3",
+      "source_product_entity": 16015,
+      "product_name": "RB9.01.062.030 Gear rack_m0.8",
+      "source_referred_nested_components": 0,
+      "source_occurrence_matrix": [
+        [
+          -1.1969591984240003e-16,
+          1.2490009027033014e-16,
+          1.0,
+          59.0
+        ],
+        [
+          -1.1102230246250526e-16,
+          -1.0,
+          1.249000902703301e-16,
+          -6.000000000000022
+        ],
+        [
+          1.0,
+          -1.1102230246250525e-16,
+          1.1969591984240006e-16,
+          0.9999999999999902
+        ]
+      ],
+      "first_pose": "identity; source occurrence root geometry baked",
+      "before": {
+        "solids": 1,
+        "faces": 108,
+        "valid": true,
+        "volume_mm3": 1470.542831897816,
+        "volume_relative_estimate": 1.0155017436748396e-15,
+        "volume_integration_eps": 1e-09,
+        "bounds_mm": [
+          [
+            -3.0000001000000016,
+            -13.35000000000003,
+            -1.000000000000018
+          ],
+          [
+            58.0,
+            -4.000000000000021,
+            3.500000099999988
+          ]
+        ]
+      },
+      "after": {
+        "solids": 1,
+        "faces": 108,
+        "valid": true,
+        "volume_mm3": 1470.5428318978163,
+        "volume_relative_estimate": 1.0139224252554386e-15,
+        "volume_integration_eps": 1e-09,
+        "bounds_mm": [
+          [
+            -3.0000001000000016,
+            -13.35000000000003,
+            -1.000000000000018
+          ],
+          [
+            58.0,
+            -4.000000000000021,
+            3.500000099999988
+          ]
+        ]
+      },
+      "face_subshape_labels": 108,
+      "root_color_slots": 1,
+      "face_color_slots": 0,
+      "colors_roundtrip_equal": true,
+      "output": "part-030.xbf",
+      "output_bytes": 58366,
+      "output_sha256": "d9880bc3f2d82b2e9cf49919603ada70af7e3f4c7d9d60caeb3f81a26fc28d8e"
+    },
+    {
+      "occurrence": "NAUO4",
+      "source_product_entity": 38241,
+      "product_name": "RB9.01.062.040 Gear for gripper_ISO - Spur gear 0.8M 18T 20PA 5FW ---S18B10H8L6.0S1",
+      "source_referred_nested_components": 0,
+      "source_occurrence_matrix": [
+        [
+          2.3915439168848388e-17,
+          -0.07209194582575794,
+          -0.9973979904466702,
+          -9.48442102583999e-16
+        ],
+        [
+          -1.2010682576764952e-16,
+          0.9973979904466702,
+          -0.07209194582575794,
+          5.66824207456932e-15
+        ],
+        [
+          1.0,
+          1.215184172045418e-16,
+          1.519447619111383e-17,
+          -1.7988823999991697
+        ]
+      ],
+      "first_pose": "identity; source occurrence root geometry baked",
+      "before": {
+        "solids": 1,
+        "faces": 96,
+        "valid": true,
+        "volume_mm3": 1291.5861297907377,
+        "volume_relative_estimate": 7.916019035881514e-16,
+        "volume_integration_eps": 1e-09,
+        "bounds_mm": [
+          [
+            -10.000000000000002,
+            -9.999999999999995,
+            -3.7999999999991787
+          ],
+          [
+            9.999999999999998,
+            10.000000000000005,
+            4.201117600000831
+          ]
+        ]
+      },
+      "after": {
+        "solids": 1,
+        "faces": 96,
+        "valid": true,
+        "volume_mm3": 1291.5861297907375,
+        "volume_relative_estimate": 1.1890891546614064e-15,
+        "volume_integration_eps": 1e-09,
+        "bounds_mm": [
+          [
+            -10.000000000000002,
+            -9.999999999999995,
+            -3.7999999999991787
+          ],
+          [
+            9.999999999999998,
+            10.000000000000005,
+            4.201117600000831
+          ]
+        ]
+      },
+      "face_subshape_labels": 96,
+      "root_color_slots": 1,
+      "face_color_slots": 0,
+      "colors_roundtrip_equal": true,
+      "output": "part-040.xbf",
+      "output_bytes": 85170,
+      "output_sha256": "2e780afa05c59f10fb3a8c4acf1cc0c2289d45312dedc0172bc7fa83ecbeffc0"
+    }
+  ],
+  "evidence_scope": "Same-kernel extraction/readback observations; not independent geometry or physical assembly qualification.",
+  "source_product_definitions": {
+    "010": 57054,
+    "020": 846,
+    "030": 24442,
+    "040": 32962
+  },
+  "repeat_pose": "Second clamp and rack: explicit root Z rotation pi; first occurrence root coordinates baked, first pose identity."
+}

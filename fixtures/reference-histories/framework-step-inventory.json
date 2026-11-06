@@ -1,0 +1,206 @@
+{
+  "schemaVersion": 1,
+  "sourceSha256": "6128186260b22ace271e83f096e2c16707b60866b3aa1b3a3f2ea0e38c3c7c09",
+  "reader": "cadquery-ocp-novtk 8.0.1.1.0 / OCCT 8.0.1",
+  "qualification": "Same-kernel diagnostic inventory only; not a mass oracle or native feature history.",
+  "solids": [
+    {
+      "occurrencePath": [
+        "FW_EXC_3PARTY_WO_LID_ASM_M2_ASM",
+        "FW_EXC_3PARTY_WO_LID_ASM_2",
+        "FW_EXP_MCU_ASM_1",
+        "MICROCONTROLLER-PCBA",
+        "OPEN_CASCADE_STEP_TRANSLATOR_6_",
+        "COMPOUND"
+      ],
+      "productName": "COMPOUND_3",
+      "diagnosticGeometry": {
+        "volumeMm3": 596.382343773221,
+        "areaMm2": 1593.6799898407837,
+        "localBoundsMm": [
+          [
+            126.97381699997901,
+            -156.7,
+            0.0
+          ],
+          [
+            153.02618300002098,
+            -127.0,
+            0.8
+          ]
+        ],
+        "faceTypes": {
+          "GeomAbs_Cylinder": 24,
+          "GeomAbs_Plane": 24
+        }
+      },
+      "diagnosticGeometrySha256": "dac1bd0a07c61e9d8db8900ec7fc561d4ec78da08a87107f7863d243a48b8313"
+    },
+    {
+      "occurrencePath": [
+        "FW_EXC_3PARTY_WO_LID_ASM_M2_ASM",
+        "FW_EXC_3PARTY_WO_LID_ASM_2",
+        "REF_C",
+        "FW_EXP_1USBC_CLIP_BC_MAIN_ASSY_",
+        "FW_EXP_1USBC_FRAME_CLIP_BC_ASSY",
+        "FW_EXP_1USBC_FRAME_CLIP_BC"
+      ],
+      "productName": "FW_EXP_1USBC_FRAME_CLIP_BC_229_",
+      "diagnosticGeometry": {
+        "volumeMm3": 2002.3764093378575,
+        "areaMm2": 3197.878936161651,
+        "localBoundsMm": [
+          [
+            -15.00000010001477,
+            -1e-07,
+            -32.000004904589716
+          ],
+          [
+            15.000000100001902,
+            6.8,
+            1e-07
+          ]
+        ],
+        "faceTypes": {
+          "GeomAbs_BSplineSurface": 18,
+          "GeomAbs_Cone": 8,
+          "GeomAbs_Cylinder": 71,
+          "GeomAbs_Plane": 62,
+          "GeomAbs_Sphere": 12,
+          "GeomAbs_Torus": 8
+        }
+      },
+      "diagnosticGeometrySha256": "b105ca10d56daffa0a82ddd1a93d867780058e7da25d474d153b5e1e7463a3f5"
+    },
+    {
+      "occurrencePath": [
+        "FW_EXC_3PARTY_WO_LID_ASM_M2_ASM",
+        "FW_EXC_3PARTY_WO_LID_ASM_2",
+        "REF_C",
+        "FW_EXP_1USBC_CLIP_BC_MAIN_ASSY_",
+        "FW_EXP_1USBC_FRAME_CLIP_BC_ASSY",
+        "NUT_M1-6X1-5L"
+      ],
+      "productName": "NUT_M2X1-6L_2",
+      "diagnosticGeometry": {
+        "volumeMm3": 10.421710029508288,
+        "areaMm2": 39.7796440420112,
+        "localBoundsMm": [
+          [
+            -13.100000000000001,
+            1.35,
+            -12.3
+          ],
+          [
+            -9.5,
+            2.85000000000005,
+            -8.7
+          ]
+        ],
+        "faceTypes": {
+          "GeomAbs_Cone": 2,
+          "GeomAbs_Cylinder": 4,
+          "GeomAbs_Plane": 2
+        }
+      },
+      "diagnosticGeometrySha256": "6757542793b1ba1170a052349b9d8eb112344e5628ee646a1cfda7aca0d27472"
+    },
+    {
+      "occurrencePath": [
+        "FW_EXC_3PARTY_WO_LID_ASM_M2_ASM",
+        "FW_EXC_3PARTY_WO_LID_ASM_2",
+        "REF_C",
+        "FW_EXP_1USBC_CLIP_BC_MAIN_ASSY_",
+        "FW_EXP_1USBC_FRAME_CLIP_BC_ASSY",
+        "NUT_M2X1-6L"
+      ],
+      "productName": "NUT_M2X1-6L_2",
+      "diagnosticGeometry": {
+        "volumeMm3": 10.421710029508287,
+        "areaMm2": 39.7796440420112,
+        "localBoundsMm": [
+          [
+            9.5,
+            1.35,
+            -12.3
+          ],
+          [
+            13.100000000000001,
+            2.85000000000005,
+            -8.7
+          ]
+        ],
+        "faceTypes": {
+          "GeomAbs_Cone": 2,
+          "GeomAbs_Cylinder": 4,
+          "GeomAbs_Plane": 2
+        }
+      },
+      "diagnosticGeometrySha256": "ab94ca0a32de5edf04e70a6284113a9fb1422e1553d098db83d874828b939008"
+    },
+    {
+      "occurrencePath": [
+        "FW_EXC_3PARTY_WO_LID_ASM_M2_ASM",
+        "FW_EXC_3PARTY_WO_LID_ASM_2",
+        "REF_C",
+        "FW_EXP_1USBC_CLIP_BC_MAIN_ASSY_",
+        "STAR_SCREW_M1-6X3L"
+      ],
+      "productName": "STAR_SCREW_M2X3L_298_2",
+      "diagnosticGeometry": {
+        "volumeMm3": 16.71324541622446,
+        "areaMm2": 45.89360878938433,
+        "localBoundsMm": [
+          [
+            -13.0500001,
+            0.9500000000000002,
+            -12.2500001
+          ],
+          [
+            -9.549999900000001,
+            4.7500001,
+            -8.7499999
+          ]
+        ],
+        "faceTypes": {
+          "GeomAbs_Cylinder": 16,
+          "GeomAbs_Plane": 4,
+          "GeomAbs_Torus": 4
+        }
+      },
+      "diagnosticGeometrySha256": "ba9ee47a50f628649f5dbc7710864d7e3ea9253821316d0ad934d1ecaa6379bb"
+    },
+    {
+      "occurrencePath": [
+        "FW_EXC_3PARTY_WO_LID_ASM_M2_ASM",
+        "FW_EXC_3PARTY_WO_LID_ASM_2",
+        "REF_C",
+        "FW_EXP_1USBC_CLIP_BC_MAIN_ASSY_",
+        "STAR_SCREW_M2X3L_298"
+      ],
+      "productName": "STAR_SCREW_M2X3L_298_2",
+      "diagnosticGeometry": {
+        "volumeMm3": 16.71324541622446,
+        "areaMm2": 45.89360878938433,
+        "localBoundsMm": [
+          [
+            9.549999900000001,
+            0.9500000000000002,
+            -12.2500001
+          ],
+          [
+            13.0500001,
+            4.7500001,
+            -8.7499999
+          ]
+        ],
+        "faceTypes": {
+          "GeomAbs_Cylinder": 16,
+          "GeomAbs_Plane": 4,
+          "GeomAbs_Torus": 4
+        }
+      },
+      "diagnosticGeometrySha256": "16f7838f0118035a4d6c520e3be10a918598d3f3e3725dc29c1608e2a7903029"
+    }
+  ]
+}

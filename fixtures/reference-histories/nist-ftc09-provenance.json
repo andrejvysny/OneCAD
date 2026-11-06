@@ -1,0 +1,9 @@
+{
+  "sourceSha256": "d12866d3ab0fc260efd0f1a5c54af47950be513486f61f65513877045582afa8",
+  "recipeSha256": "0ee2e64b4c3e229b9a2e873a09e5df0ae092bfa290bc296f967c3171aa0e7d35",
+  "extractorSha256": "03753c14959e18592efa76b45d8d2030050ec2f3b8d81cb78235f8f1c26bec2a",
+  "reader": "cadquery-ocp-novtk 8.0.1.1.0 / OCCT 8.0.1; same kernel family as OneCAD",
+  "wheelSha256": "78b9033a47d72049b290c18e2c4c80bffc56c055b52eb60f49aca76550a9ddc8",
+  "sourceAnalyticBoundsMm": {"min": [-95.25, 0.0, -139.7], "max": [95.25, 3.03784, 139.7]},
+  "notes": "Analytic source extrema and source curve observations are coordinate/topology checks, not a second-kernel oracle. OCCT source bounding includes 0.0000001 mm bounding tolerance on maximum Y."
+}

@@ -1,0 +1,43 @@
+{
+  "name": "gear",
+  "step_occurrence": "NAUO4",
+  "product_name": "RB9.01.062.040 Gear for gripper_ISO - Spur gear 0.8M 18T 20PA 5FW ---S18B10H8L6.0S1",
+  "stl_sha256": "9f88db5828c1e26b7b15e3c0a4cfcea42805f0652b48beecca2ac57d037d8094",
+  "stl_vertices": 549,
+  "step_local_to_root_matrix": [
+    [
+      2.3915439168848388e-17,
+      -0.07209194582575794,
+      -0.9973979904466702,
+      -9.48442102583999e-16
+    ],
+    [
+      -1.2010682576764952e-16,
+      0.9973979904466702,
+      -0.07209194582575794,
+      5.66824207456932e-15
+    ],
+    [
+      1.0,
+      1.215184172045418e-16,
+      1.519447619111383e-17,
+      -1.7988823999991697
+    ]
+  ],
+  "step_root_bounds_mm": [
+    [
+      -10.000000000000002,
+      -9.999999999999995,
+      -3.7999999999991787
+    ],
+    [
+      9.999999999999998,
+      10.000000000000005,
+      4.201117600000831
+    ]
+  ],
+  "threshold_mm": 0.05,
+  "eligible_rotation_count": 0,
+  "candidates": [],
+  "caveat": "source STEP subtree same-kernel diagnostic, vertex-to-surface only; nonmatching bounding-center poses are not excluded"
+}

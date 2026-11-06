@@ -1,0 +1,479 @@
+{
+  "sourceSha256": "6128186260b22ace271e83f096e2c16707b60866b3aa1b3a3f2ea0e38c3c7c09",
+  "method": "19x19 interior UV grid, trimmed to face; centered least-squares sphere fit and adjacent source cylinders",
+  "sourceConnectivityUncertaintyMm": 0.004470832106062,
+  "readerConfusionMm": 1e-07,
+  "qualification": "Finite samples cannot establish exact surface identity. Connectivity uncertainty and reader confusion are not source fit acceptance tolerances.",
+  "faces": [
+    {
+      "faceIndex": 49,
+      "sampleCount": 324,
+      "sphereFit": {
+        "centerMm": [
+          -12.839315536352274,
+          2.146253681241109,
+          -32.45631073805029
+        ],
+        "radiusMm": 0.5624048916974367,
+        "maxResidualMm": 0.04250366678681983
+      },
+      "adjacentCylinderComparisons": [
+        {
+          "faceIndex": 48,
+          "radiusMm": 0.2999999999992,
+          "maxResidualMm": 0.24633334994462208
+        },
+        {
+          "faceIndex": 50,
+          "radiusMm": 0.3000000000002,
+          "maxResidualMm": 0.24632407700784098
+        },
+        {
+          "faceIndex": 75,
+          "radiusMm": 0.3000000000883,
+          "maxResidualMm": 0.1357490085655878
+        }
+      ]
+    },
+    {
+      "faceIndex": 51,
+      "sampleCount": 328,
+      "sphereFit": {
+        "centerMm": [
+          -12.827333295095865,
+          4.559315631180083,
+          -32.42652053152848
+        ],
+        "radiusMm": 0.5307849427149203,
+        "maxResidualMm": 0.044680338145600795
+      },
+      "adjacentCylinderComparisons": [
+        {
+          "faceIndex": 31,
+          "radiusMm": 0.2999999999911,
+          "maxResidualMm": 0.23126310594819272
+        },
+        {
+          "faceIndex": 50,
+          "radiusMm": 0.3000000000002,
+          "maxResidualMm": 0.2312813058922596
+        },
+        {
+          "faceIndex": 52,
+          "radiusMm": 0.3000000000239,
+          "maxResidualMm": 0.134832305307176
+        }
+      ]
+    },
+    {
+      "faceIndex": 53,
+      "sampleCount": 345,
+      "sphereFit": {
+        "centerMm": [
+          -13.399118630317952,
+          4.016707276631045,
+          -31.13320142888541
+        ],
+        "radiusMm": 0.21313264718043168,
+        "maxResidualMm": 0.026225375763436365
+      },
+      "adjacentCylinderComparisons": [
+        {
+          "faceIndex": 52,
+          "radiusMm": 0.3000000000239,
+          "maxResidualMm": 0.07240814374877996
+        },
+        {
+          "faceIndex": 56,
+          "radiusMm": 0.3,
+          "maxResidualMm": 0.07186602468060899
+        }
+      ]
+    },
+    {
+      "faceIndex": 54,
+      "sampleCount": 361,
+      "sphereFit": {
+        "centerMm": [
+          -13.423781975849328,
+          4.5138790581801995,
+          -31.008122760517725
+        ],
+        "radiusMm": 0.2982412028883824,
+        "maxResidualMm": 0.0018111487961129935
+      },
+      "adjacentCylinderComparisons": [
+        {
+          "faceIndex": 55,
+          "radiusMm": 0.3,
+          "maxResidualMm": 0.003152704438383558
+        },
+        {
+          "faceIndex": 56,
+          "radiusMm": 0.3,
+          "maxResidualMm": 0.049831618680560186
+        }
+      ]
+    },
+    {
+      "faceIndex": 59,
+      "sampleCount": 220,
+      "sphereFit": {
+        "centerMm": [
+          -14.526666682947123,
+          3.926418710861713,
+          -27.335679032495403
+        ],
+        "radiusMm": 0.518172321854245,
+        "maxResidualMm": 0.06668612384532258
+      },
+      "adjacentCylinderComparisons": [
+        {
+          "faceIndex": 58,
+          "radiusMm": 0.3000000000023,
+          "maxResidualMm": 0.06719298473815682
+        },
+        {
+          "faceIndex": 61,
+          "radiusMm": 0.1500000000029,
+          "maxResidualMm": 0.4294413073728407
+        }
+      ]
+    },
+    {
+      "faceIndex": 66,
+      "sampleCount": 361,
+      "sphereFit": {
+        "centerMm": [
+          -12.903920762312225,
+          3.9660606098875903,
+          -31.00812250187131
+        ],
+        "radiusMm": 0.2982416155161788,
+        "maxResidualMm": 0.001810967235034433
+      },
+      "adjacentCylinderComparisons": [
+        {
+          "faceIndex": 56,
+          "radiusMm": 0.3,
+          "maxResidualMm": 0.04983165080211138
+        },
+        {
+          "faceIndex": 64,
+          "radiusMm": 0.3,
+          "maxResidualMm": 0.00315258302520649
+        }
+      ]
+    },
+    {
+      "faceIndex": 67,
+      "sampleCount": 361,
+      "sphereFit": {
+        "centerMm": [
+          -12.904416706012341,
+          2.7532336477310224,
+          -31.008094700391585
+        ],
+        "radiusMm": 0.29790994572596013,
+        "maxResidualMm": 0.0019619295019648875
+      },
+      "adjacentCylinderComparisons": [
+        {
+          "faceIndex": 64,
+          "radiusMm": 0.3,
+          "maxResidualMm": 0.0034037112486169363
+        },
+        {
+          "faceIndex": 68,
+          "radiusMm": 0.2999999999998,
+          "maxResidualMm": 0.05014898626591563
+        }
+      ]
+    },
+    {
+      "faceIndex": 73,
+      "sampleCount": 361,
+      "sphereFit": {
+        "centerMm": [
+          -13.44750071342087,
+          2.2050394249877385,
+          -31.008226083580883
+        ],
+        "radiusMm": 0.29778592566625817,
+        "maxResidualMm": 0.002009536166643955
+      },
+      "adjacentCylinderComparisons": [
+        {
+          "faceIndex": 44,
+          "radiusMm": 0.3,
+          "maxResidualMm": 0.0034819803273067884
+        },
+        {
+          "faceIndex": 68,
+          "radiusMm": 0.2999999999998,
+          "maxResidualMm": 0.05014492385656599
+        }
+      ]
+    },
+    {
+      "faceIndex": 74,
+      "sampleCount": 343,
+      "sphereFit": {
+        "centerMm": [
+          -13.401617329307577,
+          2.702650234086467,
+          -31.133095899135373
+        ],
+        "radiusMm": 0.2151228686700391,
+        "maxResidualMm": 0.024986911173891624
+      },
+      "adjacentCylinderComparisons": [
+        {
+          "faceIndex": 68,
+          "radiusMm": 0.2999999999998,
+          "maxResidualMm": 0.07375096466983128
+        },
+        {
+          "faceIndex": 75,
+          "radiusMm": 0.3000000000883,
+          "maxResidualMm": 0.0743410349856542
+        }
+      ]
+    },
+    {
+      "faceIndex": 96,
+      "sampleCount": 328,
+      "sphereFit": {
+        "centerMm": [
+          12.82733182512634,
+          4.559313287880263,
+          -32.42651996737572
+        ],
+        "radiusMm": 0.5307845525746413,
+        "maxResidualMm": 0.04467963920914675
+      },
+      "adjacentCylinderComparisons": [
+        {
+          "faceIndex": 94,
+          "radiusMm": 0.3000000000018,
+          "maxResidualMm": 0.23127968953969652
+        },
+        {
+          "faceIndex": 97,
+          "radiusMm": 0.3000000000002,
+          "maxResidualMm": 0.2312647979799407
+        },
+        {
+          "faceIndex": 115,
+          "radiusMm": 0.2999999999416,
+          "maxResidualMm": 0.13483161566256985
+        }
+      ]
+    },
+    {
+      "faceIndex": 98,
+      "sampleCount": 324,
+      "sphereFit": {
+        "centerMm": [
+          12.839313405296757,
+          2.1462522978738914,
+          -32.45629195539555
+        ],
+        "radiusMm": 0.562387889197531,
+        "maxResidualMm": 0.042509466046739774
+      },
+      "adjacentCylinderComparisons": [
+        {
+          "faceIndex": 76,
+          "radiusMm": 0.2999999999856,
+          "maxResidualMm": 0.24631418588121345
+        },
+        {
+          "faceIndex": 97,
+          "radiusMm": 0.3000000000002,
+          "maxResidualMm": 0.24634218883407
+        },
+        {
+          "faceIndex": 99,
+          "radiusMm": 0.3000000000146,
+          "maxResidualMm": 0.13574780577995477
+        }
+      ]
+    },
+    {
+      "faceIndex": 100,
+      "sampleCount": 343,
+      "sphereFit": {
+        "centerMm": [
+          13.40015836101583,
+          2.7012176063188322,
+          -31.138253808225194
+        ],
+        "radiusMm": 0.21511720842076743,
+        "maxResidualMm": 0.02498188972757648
+      },
+      "adjacentCylinderComparisons": [
+        {
+          "faceIndex": 99,
+          "radiusMm": 0.3000000000146,
+          "maxResidualMm": 0.07375293530111166
+        },
+        {
+          "faceIndex": 103,
+          "radiusMm": 0.3,
+          "maxResidualMm": 0.07432885393018585
+        }
+      ]
+    },
+    {
+      "faceIndex": 101,
+      "sampleCount": 361,
+      "sphereFit": {
+        "centerMm": [
+          13.447502916876573,
+          2.2050397284357937,
+          -31.00822648135325
+        ],
+        "radiusMm": 0.29778544229760834,
+        "maxResidualMm": 0.002009589696731706
+      },
+      "adjacentCylinderComparisons": [
+        {
+          "faceIndex": 80,
+          "radiusMm": 0.3,
+          "maxResidualMm": 0.0034818765685997177
+        },
+        {
+          "faceIndex": 103,
+          "radiusMm": 0.3,
+          "maxResidualMm": 0.05014262335132269
+        }
+      ]
+    },
+    {
+      "faceIndex": 110,
+      "sampleCount": 361,
+      "sphereFit": {
+        "centerMm": [
+          12.903920649824451,
+          3.9660588086794117,
+          -31.00812274847569
+        ],
+        "radiusMm": 0.29824161115614406,
+        "maxResidualMm": 0.0018110478500544258
+      },
+      "adjacentCylinderComparisons": [
+        {
+          "faceIndex": 109,
+          "radiusMm": 0.2999999999995,
+          "maxResidualMm": 0.049832854659959624
+        },
+        {
+          "faceIndex": 113,
+          "radiusMm": 0.3,
+          "maxResidualMm": 0.0031525156552546507
+        }
+      ]
+    },
+    {
+      "faceIndex": 112,
+      "sampleCount": 361,
+      "sphereFit": {
+        "centerMm": [
+          12.904416957846365,
+          2.75323131351308,
+          -31.008094419505674
+        ],
+        "radiusMm": 0.29790986192572394,
+        "maxResidualMm": 0.0019618705293427685
+      },
+      "adjacentCylinderComparisons": [
+        {
+          "faceIndex": 103,
+          "radiusMm": 0.3,
+          "maxResidualMm": 0.05014770781577915
+        },
+        {
+          "faceIndex": 113,
+          "radiusMm": 0.3,
+          "maxResidualMm": 0.0034038399412444353
+        }
+      ]
+    },
+    {
+      "faceIndex": 116,
+      "sampleCount": 345,
+      "sphereFit": {
+        "centerMm": [
+          13.399140901548943,
+          4.016696276208841,
+          -31.133227718661807
+        ],
+        "radiusMm": 0.21315824879527756,
+        "maxResidualMm": 0.02622253726179294
+      },
+      "adjacentCylinderComparisons": [
+        {
+          "faceIndex": 109,
+          "radiusMm": 0.2999999999995,
+          "maxResidualMm": 0.07186534524838678
+        },
+        {
+          "faceIndex": 115,
+          "radiusMm": 0.2999999999416,
+          "maxResidualMm": 0.07240173602189032
+        }
+      ]
+    },
+    {
+      "faceIndex": 117,
+      "sampleCount": 361,
+      "sphereFit": {
+        "centerMm": [
+          13.423781263992383,
+          4.5138796463933435,
+          -31.00812244498342
+        ],
+        "radiusMm": 0.2982418414047212,
+        "maxResidualMm": 0.0018109945063507493
+      },
+      "adjacentCylinderComparisons": [
+        {
+          "faceIndex": 92,
+          "radiusMm": 0.3,
+          "maxResidualMm": 0.0031526034873571307
+        },
+        {
+          "faceIndex": 109,
+          "radiusMm": 0.2999999999995,
+          "maxResidualMm": 0.049833781064418714
+        }
+      ]
+    },
+    {
+      "faceIndex": 119,
+      "sampleCount": 220,
+      "sphereFit": {
+        "centerMm": [
+          14.526553990877726,
+          3.9263869547515444,
+          -27.335698541150002
+        ],
+        "radiusMm": 0.5181102730846865,
+        "maxResidualMm": 0.06667975505525581
+      },
+      "adjacentCylinderComparisons": [
+        {
+          "faceIndex": 118,
+          "radiusMm": 0.3000000000019,
+          "maxResidualMm": 0.06719232049257517
+        },
+        {
+          "faceIndex": 120,
+          "radiusMm": 0.1500000000029,
+          "maxResidualMm": 0.4294497928217056
+        }
+      ]
+    }
+  ]
+}
