@@ -22,6 +22,9 @@
 #include <Message.hxx>
 #include <Message_Messenger.hxx>
 #include <Message_PrinterOStream.hxx>
+#include <BRep_Builder.hxx>
+#include <Poly_Triangulation.hxx>
+#include <TopoDS_Face.hxx>
 
 #include "io/MeshExport.h"
 #include "nlohmann/json.hpp"
@@ -91,6 +94,34 @@ std::size_t count_lines_prefixed(const std::string& path, const std::string& pre
         if (line.rfind(prefix, 0) == 0) ++n;
     }
     return n;
+}
+
+void check_partial_export_refusal(Session& s, const std::string& path) {
+    Handle(Poly_Triangulation) tri = new Poly_Triangulation(3, 1, false);
+    tri->SetNode(1, gp_Pnt(0, 0, 0));
+    tri->SetNode(2, gp_Pnt(1, 0, 0));
+    tri->SetNode(3, gp_Pnt(0, 1, 0));
+    tri->SetTriangle(1, Poly_Triangle(1, 2, 3));
+    BRep_Builder builder;
+    TopoDS_Face face;
+    builder.MakeFace(face, tri);
+    onecad::session::ScratchJob job;
+    job.job_id = 99;
+    job.bodies = s.bodies_copy();
+    job.bodies.create("polygon_only", "test", face);
+    s.store_prepared(std::move(job));
+    check(s.accept_prepared(99, 0, 3).ok, "meshexport: mixed body fixture published");
+    for (const bool obj : {false, true}) {
+        std::ofstream(path) << "preserve existing target";
+        const auto request = Envelope::request(99, obj ? "ExportObj" : "ExportStl",
+            json{{"path", path}, {"bodyIds", {"body_op1", "polygon_only"}}});
+        const auto result = obj ? onecad::io::handle_export_obj(s, request)
+                                : onecad::io::handle_export_stl(s, request);
+        check(!result.ok.value_or(false), "meshexport: mixed unmeshable body refuses whole export");
+        std::ifstream input(path);
+        const std::string bytes((std::istreambuf_iterator<char>(input)), {});
+        check(bytes == "preserve existing target", "meshexport: refusal preserves target bytes");
+    }
 }
 }  // namespace
 
@@ -172,6 +203,7 @@ int main() {
         s, Envelope::request(5, "ExportStl", json{{"path", stl_bin}, {"bodyIds", json::array({"body_nope"})}}));
     check(!empty_resp.ok.value_or(false), "meshexport: unknown-body export fails (OP_FAILED)");
 
+    check_partial_export_refusal(s, stl_bin);
     for (const auto& p : {stl_bin, stl_ascii, obj}) std::filesystem::remove(p, rm);
     if (g_failures == 0) std::fprintf(stderr, "wp6_meshexport: OK\n");
     return g_failures;

@@ -14,6 +14,12 @@
 #include <string>
 #include <vector>
 
+#include <BRep_Tool.hxx>
+#include <BRepMesh_IncrementalMesh.hxx>
+#include <BinTools.hxx>
+#include <Poly_PolygonOnTriangulation.hxx>
+#include <future>
+#include <sstream>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
@@ -171,6 +177,7 @@ void test_fine_cylinder_is_materially_denser_than_coarse() {
         fine_cylinder, "body_fine", "fine", true, nullptr);
 
     check(coarse.ok && fine.ok, "cylinder tessellation succeeds for coarse and fine");
+    if (!coarse.ok || !fine.ok) return;
     check(fine.triangle_count >= coarse.triangle_count * 3,
           "fine cylinder has at least 3x the coarse triangle density");
 
@@ -365,7 +372,114 @@ void test_degenerate_face_retains_topology_row() {
 
 }  // namespace
 
+void test_lod_request_order_is_not_geometry_state() {
+    const TopoDS_Shape shape = BRepPrimAPI_MakeCylinder(10, 20).Shape();
+    const auto coarse = onecad::tess::tessellate_body(shape, "cache", "coarse", true, nullptr);
+    const auto fine = onecad::tess::tessellate_body(shape, "cache", "fine", true, nullptr);
+    const auto coarse_after_fine = onecad::tess::tessellate_body(shape, "cache", "coarse", true, nullptr);
+    check(coarse.ok && fine.ok && coarse_after_fine.ok, "LOD sequence meshes succeed");
+    check(coarse.blob == coarse_after_fine.blob,
+          "coarse MESH1 is byte-identical before and after fine request");
+    const auto raw = onecad::tess::tessellate_raw(shape, "coarse");
+    check(raw.triangle_count == coarse.triangle_count,
+          "raw coarse export matches cold coarse viewport after fine request");
+    bool original_has_mesh = false;
+    for (TopExp_Explorer faces(shape, TopAbs_FACE); faces.More(); faces.Next()) {
+        TopLoc_Location location;
+        original_has_mesh = original_has_mesh ||
+            !BRep_Tool::Triangulation(TopoDS::Face(faces.Current()), location).IsNull();
+    }
+    check(!original_has_mesh, "meshing does not mutate published source triangulation");
+}
+
+std::string brep_bytes(const TopoDS_Shape& shape) {
+    std::ostringstream stream(std::ios::out | std::ios::binary);
+    BinTools::Write(shape, stream);
+    return stream.str();
+}
+
+struct CacheState {
+    std::vector<const void*> handles;
+    std::vector<double> deflections;
+    std::vector<bool> flags;
+    bool operator==(const CacheState&) const = default;
+};
+
+CacheState cache_state(const TopoDS_Shape& shape) {
+    CacheState state;
+    for (TopExp_Explorer faces(shape, TopAbs_FACE); faces.More(); faces.Next()) {
+        const auto face = TopoDS::Face(faces.Current());
+        TopLoc_Location location;
+        const auto tri = BRep_Tool::Triangulation(face, location);
+        state.handles.push_back(tri.get());
+        state.deflections.push_back(tri.IsNull() ? 0.0 : tri->Deflection());
+        state.flags.insert(state.flags.end(), {face.Free(), face.Locked(), face.Modified(), face.Checked()});
+        for (TopExp_Explorer edges(face, TopAbs_EDGE); edges.More(); edges.Next()) {
+            const auto edge = TopoDS::Edge(edges.Current());
+            state.flags.insert(state.flags.end(), {edge.Free(), edge.Locked(), edge.Modified(), edge.Checked(),
+                                                  BRep_Tool::SameParameter(edge), BRep_Tool::SameRange(edge)});
+            const auto polygon = tri.IsNull() ? Handle(Poly_PolygonOnTriangulation){}
+                : BRep_Tool::PolygonOnTriangulation(edge, tri, location);
+            state.handles.push_back(polygon.get());
+            state.deflections.push_back(polygon.IsNull() ? 0.0 : polygon->Deflection());
+        }
+    }
+    return state;
+}
+
+void test_existing_cache_and_snapshot_identity_are_preserved() {
+    const TopoDS_Shape shape = BRepPrimAPI_MakeCylinder(10, 20).Shape();
+    const TopoDS_Shape snapshot = shape;
+    BRepMesh_IncrementalMesh seed(shape, 0.001, false, 0.02, false);
+    check(seed.IsDone(), "seed cached fine triangulation");
+    const auto before = brep_bytes(shape);
+    const auto caches = cache_state(shape);
+    onecad::elementmap::ElementMapPartition partition;
+    TopExp_Explorer faces(shape, TopAbs_FACE);
+    partition.mint("cache", "el_side", onecad::kernel::elementmap::ElementKind::Face,
+                   faces.Current(), shape);
+    const std::vector<std::uint32_t> colors{0x112233ff, 0x445566ff, 0x778899ff};
+    const auto first = onecad::tess::tessellate_body(shape, "cache", "coarse", true, &partition, &colors);
+    const auto fine = onecad::tess::tessellate_raw(shape, "fine");
+    auto call = [&] { return onecad::tess::tessellate_body(snapshot, "cache", "coarse", true, &partition, &colors); };
+    auto a = std::async(std::launch::async, call);
+    auto b = std::async(std::launch::async, call);
+    const auto second = a.get();
+    const auto third = b.get();
+    check(first.ok && second.ok && third.ok && fine.triangle_count > first.triangle_count,
+          "isolated mixed-LOD and concurrent requests succeed");
+    check(first.blob == second.blob && first.blob == third.blob,
+          "snapshot requests retain exact bounds, IDs, colors and geometry");
+    check(cache_state(shape) == caches && cache_state(snapshot) == caches,
+          "original cache handles, deflections and shape/edge flags are unchanged");
+    check(brep_bytes(shape) == before && brep_bytes(snapshot) == before,
+          "source BREP, triangulation, edge polygons and serialized flags remain unchanged");
+    const auto cold = BRepPrimAPI_MakeCylinder(10, 20).Shape();
+    const auto raw = onecad::tess::tessellate_raw(shape, "coarse");
+    const auto cold_raw = onecad::tess::tessellate_raw(cold, "coarse");
+    check(raw.positions == cold_raw.positions && raw.normals == cold_raw.normals && raw.indices == cold_raw.indices,
+          "raw export geometry independent of source cached triangulation");
+}
+
+void test_polygon_only_face_refuses_without_partial_geometry() {
+    Handle(Poly_Triangulation) tri = new Poly_Triangulation(3, 1, false);
+    tri->SetNode(1, gp_Pnt(0, 0, 0));
+    tri->SetNode(2, gp_Pnt(1, 0, 0));
+    tri->SetNode(3, gp_Pnt(0, 1, 0));
+    tri->SetTriangle(1, Poly_Triangle(1, 2, 3));
+    BRep_Builder builder;
+    TopoDS_Face face;
+    builder.MakeFace(face, tri);
+    const auto mesh = onecad::tess::tessellate_body(face, "polygon_only", "fine", true, nullptr);
+    const auto raw = onecad::tess::tessellate_raw(face, "fine");
+    check(!mesh.ok && mesh.blob.empty() && !raw.ok && raw.indices.empty(),
+          "polygon-only input refuses explicitly without silently losing geometry");
+}
+
 int main() {
+    test_polygon_only_face_refuses_without_partial_geometry();
+    test_existing_cache_and_snapshot_identity_are_preserved();
+    test_lod_request_order_is_not_geometry_state();
     test_fine_cylinder_is_materially_denser_than_coarse();
     test_edge_metadata_fixtures();
     test_non_manifold_edge();

@@ -40,9 +40,13 @@ struct RawMesh {
     std::vector<float> normals;           // 3·V (per-vertex, area-weighted)
     std::vector<std::uint32_t> indices;   // 3·T (triangle vertex indices)
     std::uint32_t triangle_count = 0;
+    bool ok = false;  // false refuses the whole export, even alongside valid bodies
 };
 
 // Tessellate one body into a MESH1 blob. `lod` ∈ "coarse"|"medium"|"fine".
+// Meshes an isolated copy with checked source face/edge/vertex row correspondence;
+// LOD requests do not mutate published BREP caches. Nondegenerate polygon-only
+// faces without geometric surfaces are refused rather than partially rendered.
 // `partition` (optional) supplies minted ElementIds by TopoKey for id labelling.
 //
 // `face_colors` (optional, WP-A W4.5) is the body's authored appearance in

@@ -8,6 +8,8 @@
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
+#include <Standard_Failure.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
@@ -156,18 +158,56 @@ bool topology_only_face(const TopoDS_Face& face) {
     return true;
 }
 
+bool copied_topology_matches(const TopoDS_Shape& source, const TopoDS_Shape& copy,
+                             const BRepBuilderAPI_Copy& copier) {
+    for (const auto kind : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+        TopTools_IndexedMapOfShape original, copied;
+        TopExp::MapShapes(source, kind, original);
+        TopExp::MapShapes(copy, kind, copied);
+        if (original.Extent() != copied.Extent()) return false;
+        for (int i = 1; i <= original.Extent(); ++i) {
+            const auto mapped = copier.ModifiedShape(original(i));
+            // History map values are canonical-forward; the actual copied row
+            // carries the source orientation used for winding and adjacency.
+            if (mapped.IsNull() || !mapped.IsSame(copied(i)) ||
+                copied(i).Orientation() != original(i).Orientation() ||
+                !copied(i).Location().IsEqual(original(i).Location())) return false;
+        }
+    }
+    return true;
+}
+
+TopoDS_Shape private_mesh_shape(const TopoDS_Shape& source) {
+    if (source.IsNull()) return {};
+    for (TopExp_Explorer faces(source, TopAbs_FACE); faces.More(); faces.Next()) {
+        const auto face = TopoDS::Face(faces.Current());
+        if (BRep_Tool::Surface(face).IsNull() && !topology_only_face(face)) return {};
+    }
+    try {
+        // copyGeom=false shares polygonal caches even when copyMesh=false.
+        // Meshing owns this complete copy; published snapshots stay untouched.
+        BRepBuilderAPI_Copy copier(source, true, false);
+        if (!copier.IsDone()) return {};
+        const auto copy = copier.Shape();
+        return copied_topology_matches(source, copy, copier) ? copy : TopoDS_Shape{};
+    } catch (const Standard_Failure&) {
+        return {};
+    }
+}
+
 }  // namespace
 
-BodyMesh tessellate_body(const TopoDS_Shape& shape, const std::string& body_id,
+BodyMesh tessellate_body(const TopoDS_Shape& source, const std::string& body_id,
                          const std::string& lod, bool include_edges,
                          const elementmap::ElementMapPartition* partition,
                          const std::vector<std::uint32_t>* face_colors) {
     BodyMesh out;
     out.body_id = body_id;
+    const auto shape = private_mesh_shape(source);
     if (shape.IsNull()) return out;
 
     Bnd_Box box;
-    BRepBndLib::Add(shape, box);
+    BRepBndLib::Add(shape, box, false);
     double diag = 1.0;
     if (!box.IsVoid()) {
         Standard_Real xmin, ymin, zmin, xmax, ymax, zmax;
@@ -347,12 +387,13 @@ BodyMesh tessellate_body(const TopoDS_Shape& shape, const std::string& body_id,
     return out;
 }
 
-RawMesh tessellate_raw(const TopoDS_Shape& shape, const std::string& lod) {
+RawMesh tessellate_raw(const TopoDS_Shape& source, const std::string& lod) {
     RawMesh out;
+    const auto shape = private_mesh_shape(source);
     if (shape.IsNull()) return out;
 
     Bnd_Box box;
-    BRepBndLib::Add(shape, box);
+    BRepBndLib::Add(shape, box, false);
     double diag = 1.0;
     if (!box.IsVoid()) {
         Standard_Real xmin, ymin, zmin, xmax, ymax, zmax;
@@ -366,6 +407,7 @@ RawMesh tessellate_raw(const TopoDS_Shape& shape, const std::string& lod) {
     // tessellate_body, so the produced triangle set is identical.
     BRepMesh_IncrementalMesh mesher(shape, lin, Standard_False, ang, Standard_False);
     mesher.Perform();
+    if (!mesher.IsDone()) return out;
 
     TopTools_IndexedMapOfShape faces;
     TopExp::MapShapes(shape, TopAbs_FACE, faces);
@@ -374,7 +416,10 @@ RawMesh tessellate_raw(const TopoDS_Shape& shape, const std::string& lod) {
         const TopoDS_Face face = TopoDS::Face(faces(fi));
         TopLoc_Location loc;
         Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, loc);
-        if (tri.IsNull() || tri->NbNodes() < 3 || tri->NbTriangles() < 1) continue;
+        if (tri.IsNull() || tri->NbNodes() < 3 || tri->NbTriangles() < 1) {
+            if (!topology_only_face(face)) return {};
+            continue;
+        }
         const gp_Trsf trsf = loc.Transformation();
         const bool reversed = (face.Orientation() == TopAbs_REVERSED);
 
@@ -418,6 +463,7 @@ RawMesh tessellate_raw(const TopoDS_Shape& shape, const std::string& lod) {
     }
 
     out.triangle_count = static_cast<std::uint32_t>(out.indices.size() / 3);
+    out.ok = true;
     return out;
 }
 

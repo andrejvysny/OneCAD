@@ -81,6 +81,10 @@ bool collect_meshes(const json& args, const session::BodyStore& bodies, const st
         const session::BodyRecord* rec = bodies.get(bid);
         if (!rec || rec->geom.IsNull()) continue;
         tess::RawMesh m = tess::tessellate_raw(rec->geom, lod);
+        if (!m.ok) {
+            err = "body tessellation failed: " + bid;
+            return false;
+        }
         if (m.triangle_count == 0) continue;
         out.push_back(std::move(m));
     }
@@ -189,6 +193,7 @@ Envelope handle_export_obj(session::Session& session, const Envelope& req) {
         const session::BodyRecord* rec = bodies.get(bid);
         if (!rec || rec->geom.IsNull()) continue;
         tess::RawMesh m = tess::tessellate_raw(rec->geom, lod);
+        if (!m.ok) return fail(req.id, "ExportObj: body tessellation failed: " + bid);
         if (m.triangle_count == 0) continue;
         meshed.emplace_back(bid, std::move(m));
     }
