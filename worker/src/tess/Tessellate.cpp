@@ -170,8 +170,16 @@ bool copied_topology_matches(const TopoDS_Shape& source, const TopoDS_Shape& cop
             // History map values are canonical-forward; the actual copied row
             // carries the source orientation used for winding and adjacency.
             if (mapped.IsNull() || !mapped.IsSame(copied(i)) ||
-                copied(i).Orientation() != original(i).Orientation() ||
-                !copied(i).Location().IsEqual(original(i).Location())) return false;
+                copied(i).Orientation() != original(i).Orientation()) return false;
+            if (kind == TopAbs_VERTEX) {
+                // OCCT bakes vertex locations into copied point coordinates.
+                // Check exact world coordinates rather than location storage.
+                const auto a = BRep_Tool::Pnt(TopoDS::Vertex(original(i)));
+                const auto b = BRep_Tool::Pnt(TopoDS::Vertex(copied(i)));
+                if (a.X() != b.X() || a.Y() != b.Y() || a.Z() != b.Z()) return false;
+            } else if (!copied(i).Location().IsEqual(original(i).Location())) {
+                return false;
+            }
         }
     }
     return true;

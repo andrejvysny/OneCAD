@@ -35,6 +35,7 @@
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Shape.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Ax1.hxx>
 #include <gp_Trsf.hxx>
 
 #include "tess/Tessellate.h"
@@ -196,6 +197,7 @@ std::array<std::uint32_t, 7> check_metadata(const TopoDS_Shape& shape,
     const auto mesh = onecad::tess::tessellate_body(shape, name, "fine", true, nullptr);
     const auto repeated = onecad::tess::tessellate_body(shape, name, "fine", true, nullptr);
     check(mesh.ok && repeated.ok, name + ": repeated tessellation succeeds");
+    if (!mesh.ok || !repeated.ok) return {};
     for (const std::uint32_t type : {5U, 6U, 9U, 10U, 14U, 15U, 16U}) {
         const auto a = find_section(mesh.blob, type);
         const auto b = find_section(repeated.blob, type);
@@ -265,6 +267,15 @@ void test_edge_metadata_fixtures() {
     check(check_metadata(BRepBuilderAPI_Transform(box, transform, true).Shape(),
                         "transformed_box")[2] == 12,
           "located faces preserve sharp classification");
+    check(check_metadata(BRepBuilderAPI_Transform(box, transform, false).Shape(),
+                        "relocated_box")[2] == 12,
+          "shared-geometry moved faces preserve sharp classification");
+    transform.SetRotation(gp_Ax1(gp_Pnt(3, -7, 11), gp_Dir(1, 2, 3)), 0.731);
+    const auto located = box.Moved(TopLoc_Location(transform));
+    transform.SetTranslation(gp_Vec(19, -23, 31));
+    check(check_metadata(located.Moved(TopLoc_Location(transform)).Reversed(),
+                        "nested_rotated_box")[2] == 12,
+          "composed rigid locations preserve world vertices and winding");
 }
 
 void test_non_manifold_edge() {
