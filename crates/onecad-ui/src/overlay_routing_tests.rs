@@ -144,7 +144,11 @@ fn assert_display_popover(app: &mut App, context: &egui::Context, host: &mut efr
                         assert!(labels.contains(&"Hidden line"));
                         assert!(labels.contains(&"Perspective"));
                         assert!(labels.contains(&"Orthographic"));
-                        assert!(!labels.contains(&"SSAA 1×"));
+                        assert_eq!(
+                            labels.contains(&"SSAA 1×"),
+                            app.renderer.profile().supersampling()
+                        );
+                        assert!(!labels.contains(&"More settings"));
                     }
                 }
             }

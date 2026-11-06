@@ -253,7 +253,7 @@ async fn three_documents_and_a_rotation_stay_within_the_display_aggregate() {
     host.stop().await;
 }
 
-/// Accessible labels of the Display menu body with "More settings" opened.
+/// Accessible labels of the direct Display menu body.
 fn display_menu_labels(host: &mut Host) -> Vec<String> {
     let pass = |host: &mut Host, events: Vec<egui::Event>| {
         let raw = egui::RawInput {
@@ -272,23 +272,8 @@ fn display_menu_labels(host: &mut Host) -> Vec<String> {
     // A new area spends its first pass sizing itself, invisible.
     pass(host, vec![]);
     let widgets = pass(host, vec![]);
-    let header = widgets
-        .iter()
-        .find(|(label, _)| label == "More settings")
-        .unwrap_or_else(|| panic!("no More settings in {widgets:?}"))
-        .1
-        .center();
-    let press = super::point_center_delivery_tests::support::button;
-    pass(
-        host,
-        vec![egui::Event::PointerMoved(header), press(header, true)],
-    );
-    pass(host, vec![press(header, false)]);
-    let mut labels = vec![];
-    for _ in 0..30 {
-        labels = pass(host, vec![]);
-    }
-    labels.into_iter().map(|(label, _)| label).collect()
+    assert!(!widgets.iter().any(|(label, _)| label == "More settings"));
+    widgets.into_iter().map(|(label, _)| label).collect()
 }
 
 fn idle_delay(host: &mut Host) -> std::time::Duration {

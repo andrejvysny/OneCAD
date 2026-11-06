@@ -326,6 +326,12 @@ fn route_fresh(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
             }
             if key == egui::Key::Escape
                 && !chain_capture_was_active
+                && !app
+                    .doc
+                    .sketch
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.draft.is_some())
                 && crate::sketch_creation::discard_snap(ctx, app)
             {
                 continue;
