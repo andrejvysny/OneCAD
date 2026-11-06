@@ -212,7 +212,7 @@ async fn a_stroke_whose_release_the_canvas_missed_is_dropped() {
 #[ignore = "requires production worker and Metal; synthetic native input is not physical acceptance"]
 async fn drag_authoring_follows_sketch_tools_and_canvas_handles() {
     let area = tempfile::tempdir().unwrap();
-    let mut host = Host::new(area.path()).await;
+    let mut host = Box::new(Box::pin(Host::new(area.path())).await);
     assert_eq!(tool(&host), SketchTool::Select);
     assert!(
         crate::host::drag_authoring(&host.app),

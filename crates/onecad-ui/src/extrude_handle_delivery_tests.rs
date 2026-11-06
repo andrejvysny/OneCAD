@@ -477,7 +477,7 @@ impl Axis {
 }
 
 pub(super) async fn extruding(root: &std::path::Path, draft: &str, value: f64) -> (Host, Axis) {
-    let mut host = Host::new(root).await;
+    let mut host = Box::pin(Host::new(root)).await;
     host.control("Rectangle");
     host.xy(0.0, 0.0);
     host.xy(80.0, 60.0);
