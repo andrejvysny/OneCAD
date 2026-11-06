@@ -12,7 +12,7 @@ const SMALL_ANGLE: f64 = 1e-8;
 
 /// 3D vector / point in f64.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Vec3d {
     pub x: f64,
     pub y: f64,
@@ -109,6 +109,7 @@ pub struct Quat {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct QuatRepr {
     w: f64,
     x: f64,
@@ -346,7 +347,7 @@ impl Mul for Quat {
 
 /// Rigid transform: rotate, then translate (`p' = R p + t`).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RigidTransform {
     pub rotation: Quat,
     pub translation: Vec3d,
@@ -435,7 +436,7 @@ impl RigidTransform {
 /// Orthonormal frame given by origin, z axis and x axis; `y = z × x` is
 /// derived, never stored (same convention as `MateFrame` in onecad-core).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Frame {
     pub origin: Vec3d,
     pub z: Vec3d,

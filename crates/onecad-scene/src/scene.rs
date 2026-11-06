@@ -40,6 +40,10 @@ impl Bounds {
 pub struct SceneBody {
     body_id: BodyId,
     mesh_revision: u64,
+    source_body_id: BodyId,
+    model: crate::DMat4,
+    occurrence_path: Option<crate::instances::OccurrencePath>,
+    visible: bool,
     geometry: Arc<BodyGeometry>,
 }
 
@@ -89,6 +93,10 @@ impl SceneBody {
         Ok(Self {
             body_id,
             mesh_revision,
+            source_body_id: body_id,
+            model: crate::DMat4::IDENTITY,
+            occurrence_path: None,
+            visible: true,
             geometry: Arc::new(BodyGeometry {
                 checked,
                 indices: OnceLock::new(),
@@ -98,6 +106,59 @@ impl SceneBody {
                 bounds,
             }),
         })
+    }
+
+    /// Create one placed view of this checked definition geometry.
+    /// `display_id` must uniquely identify this body occurrence in the scene.
+    pub fn instance(
+        &self,
+        display_id: BodyId,
+        path: crate::instances::OccurrencePath,
+        model: crate::DMat4,
+        visible: bool,
+    ) -> Result<Self, SceneError> {
+        if path.0.is_empty() || path.0.len() > crate::instances::MAX_DEPTH {
+            return Err(SceneError::InvalidInstance("occurrence path depth"));
+        }
+        crate::instances::check_rigid(&model)
+            .map_err(|_| SceneError::InvalidInstance("model is not rigid"))?;
+        let (min, max) = crate::instances::transformed_aabb(
+            self.geometry.bounds.min,
+            self.geometry.bounds.max,
+            &model,
+        );
+        Bounds::new(min, max)?;
+        Ok(Self {
+            body_id: display_id,
+            mesh_revision: self.mesh_revision,
+            source_body_id: self.source_body_id,
+            model,
+            occurrence_path: Some(path),
+            visible,
+            geometry: Arc::clone(&self.geometry),
+        })
+    }
+
+    pub fn source_body_id(&self) -> BodyId {
+        self.source_body_id
+    }
+    pub fn model(&self) -> crate::DMat4 {
+        self.model
+    }
+    pub fn occurrence_path(&self) -> Option<&crate::instances::OccurrencePath> {
+        self.occurrence_path.as_ref()
+    }
+    pub fn visible(&self) -> bool {
+        self.visible
+    }
+    pub fn triangle_count(&self) -> usize {
+        self.geometry.triangles
+    }
+    pub fn edge_segment_count(&self) -> usize {
+        self.geometry.segments
+    }
+    pub fn local_bounds(&self) -> Bounds {
+        self.geometry.bounds
     }
 
     /// Compare immutable content on the preparation thread, never during picks.
@@ -153,7 +214,12 @@ impl SceneBody {
         Ok(self.geometry.checked.view())
     }
     pub fn bounds(&self) -> Bounds {
-        self.geometry.bounds
+        let (min, max) = crate::instances::transformed_aabb(
+            self.geometry.bounds.min,
+            self.geometry.bounds.max,
+            &self.model,
+        );
+        Bounds { min, max }
     }
 }
 
@@ -193,6 +259,14 @@ impl SceneSnapshot {
     ) -> Result<Self, SceneError> {
         if bodies.len() > limits.max_bodies {
             return Err(SceneError::BudgetExceeded("body count"));
+        }
+        if bodies
+            .iter()
+            .filter(|body| body.occurrence_path.is_some())
+            .count()
+            > crate::instances::MAX_INSTANCES
+        {
+            return Err(SceneError::BudgetExceeded("instance count"));
         }
         unique_bodies(&bodies)?;
         let (bytes, bounds) = bounded_usage(&bodies, limits)?;
@@ -235,17 +309,55 @@ fn bounded_usage(
 ) -> Result<(usize, Option<Bounds>), SceneError> {
     let mut bytes = size_of::<SceneSnapshot>();
     let (mut triangles, mut segments, mut scratch) = (0usize, 0usize, 0usize);
+    let (mut visible_triangles, mut visible_segments) = (0usize, 0usize);
     let mut bounds: Option<Bounds> = None;
-    for body in bodies {
-        let geometry = &body.geometry;
-        let metadata = size_of::<SceneBody>() + size_of::<BodyGeometry>() + 4 * size_of::<usize>();
-        let retained = budget_add(
-            body.bytes().len(),
-            metadata,
+    for (index, body) in bodies.iter().enumerate() {
+        let path_bytes = body.occurrence_path.as_ref().map_or(0, |path| {
+            path.0.capacity() * size_of::<crate::instances::OccurrenceKey>()
+        });
+        bytes = budget_add(
+            bytes,
+            size_of::<SceneBody>() + path_bytes,
             limits.max_resident_bytes,
-            "body bytes",
+            "instance metadata",
         )?;
-        bytes = budget_add(bytes, retained, limits.max_resident_bytes, "mesh bytes")?;
+        if body.visible {
+            visible_triangles = budget_add(
+                visible_triangles,
+                body.geometry.triangles,
+                limits.max_triangles,
+                "visible triangles",
+            )?;
+            visible_segments = budget_add(
+                visible_segments,
+                body.geometry.segments,
+                limits.max_edge_segments,
+                "visible edge segments",
+            )?;
+            let b = body.bounds();
+            bounds = Some(match bounds {
+                Some(old) => Bounds {
+                    min: old.min.min(b.min),
+                    max: old.max.max(b.max),
+                },
+                None => b,
+            });
+        }
+        if bodies[..index]
+            .iter()
+            .any(|previous| previous.shares_geometry(body))
+        {
+            continue;
+        }
+        let geometry = &body.geometry;
+        let metadata = size_of::<BodyGeometry>() + 4 * size_of::<usize>();
+        bytes = budget_add(
+            bytes,
+            body.bytes().len(),
+            limits.max_resident_bytes,
+            "mesh bytes",
+        )?;
+        bytes = budget_add(bytes, metadata, limits.max_resident_bytes, "body metadata")?;
         bytes = budget_add(
             bytes,
             geometry.checked.metadata_bytes(),
@@ -270,13 +382,6 @@ fn bounded_usage(
             bytes = budget_add(bytes, index, limits.max_resident_bytes, "pick index")?;
         }
         scratch = scratch.max(geometry.decode_scratch_bytes);
-        bounds = Some(match bounds {
-            Some(b) => Bounds {
-                min: b.min.min(geometry.bounds.min),
-                max: b.max.max(geometry.bounds.max),
-            },
-            None => geometry.bounds,
-        });
     }
     let bytes = budget_add(bytes, scratch, limits.max_resident_bytes, "decoder scratch")?;
     Ok((bytes, bounds))
@@ -284,6 +389,14 @@ fn bounded_usage(
 
 fn unique_bodies(bodies: &[SceneBody]) -> Result<(), SceneError> {
     for (i, body) in bodies.iter().enumerate() {
+        if body.occurrence_path.is_some()
+            && bodies[..i].iter().any(|other| {
+                other.source_body_id == body.source_body_id
+                    && other.occurrence_path == body.occurrence_path
+            })
+        {
+            return Err(SceneError::InvalidInstance("duplicate occurrence body"));
+        }
         if bodies[..i]
             .iter()
             .any(|other| other.body_id == body.body_id)

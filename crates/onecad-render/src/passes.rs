@@ -47,6 +47,7 @@ fn begin<'a>(
 }
 fn geometry(pass: &mut wgpu::RenderPass<'_>, body: &GpuBody) {
     pass.set_bind_group(0, &body.frame_bind, &[]);
+    pass.set_bind_group(2, &body.model_bind, &[]);
     pass.set_vertex_buffer(0, body.positions.slice(..));
     pass.set_vertex_buffer(1, body.normals.slice(..));
     pass.set_index_buffer(body.indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -88,6 +89,7 @@ impl Renderer {
             if self.options.section[..3].iter().any(|v| *v != 0.0) {
                 self.section_mask(&mut pass, &self.pipelines.pre_cap_mask, false);
                 pass.set_pipeline(&self.pipelines.pre_cap);
+                pass.set_bind_group(2, &self.identity_model.bind, &[]);
                 pass.set_bind_group(0, &self.frame_bindings.normal.bind, &[]);
                 pass.draw(0..3, 0..1);
             }
@@ -129,6 +131,7 @@ impl Renderer {
         pass.set_bind_group(1, &target.body_bind, &[]);
         for body in self.visible_committed() {
             pass.set_bind_group(0, &body.frame_bind, &[]);
+            pass.set_bind_group(2, &body.model_bind, &[]);
             pass.set_vertex_buffer(0, body.positions.slice(..));
             pass.set_index_buffer(body.indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..body.index_count, 0, 0..1);
@@ -136,6 +139,7 @@ impl Renderer {
         if self.options.section[2] < 0.0 {
             self.section_mask(&mut pass, &self.pipelines.height_cap_mask, true);
             pass.set_pipeline(&self.pipelines.height_cap);
+            pass.set_bind_group(2, &self.identity_model.bind, &[]);
             pass.set_bind_group(0, &self.frame_bindings.normal.bind, &[]);
             pass.draw(0..3, 0..1);
         }
@@ -210,6 +214,7 @@ impl Renderer {
             } else {
                 &self.pipelines.cap
             });
+            pass.set_bind_group(2, &self.identity_model.bind, &[]);
             pass.set_bind_group(0, &self.frame_bindings.normal.bind, &[]);
             pass.draw(0..3, 0..1);
         }
@@ -225,6 +230,7 @@ impl Renderer {
             pass.set_pipeline(&self.pipelines.hidden);
             for body in self.line_bodies() {
                 pass.set_bind_group(0, &body.frame_bind, &[]);
+                pass.set_bind_group(1, &body.model_bind, &[]);
                 pass.set_vertex_buffer(
                     0,
                     if wireframe {
@@ -247,6 +253,7 @@ impl Renderer {
             pass.set_pipeline(&self.pipelines.hidden_silhouette);
             for body in self.line_bodies() {
                 pass.set_bind_group(0, &body.frame_bind, &[]);
+                pass.set_bind_group(1, &body.model_bind, &[]);
                 pass.set_vertex_buffer(0, body.silhouettes.slice(..));
                 pass.draw(0..4, 0..body.silhouette_count);
             }
@@ -255,6 +262,7 @@ impl Renderer {
             pass.set_pipeline(&self.pipelines.silhouette);
             for body in self.line_bodies() {
                 pass.set_bind_group(0, &body.frame_bind, &[]);
+                pass.set_bind_group(1, &body.model_bind, &[]);
                 pass.set_vertex_buffer(0, body.silhouettes.slice(..));
                 pass.draw(0..4, 0..body.silhouette_count);
             }
@@ -263,6 +271,7 @@ impl Renderer {
             pass.set_pipeline(&self.pipelines.edge);
             for body in self.line_bodies() {
                 pass.set_bind_group(0, &body.frame_bind, &[]);
+                pass.set_bind_group(1, &body.model_bind, &[]);
                 pass.set_vertex_buffer(
                     0,
                     if wireframe {
@@ -286,24 +295,27 @@ impl Renderer {
         pass.set_bind_group(1, &target.body_bind, &[]);
         if wireframe {
             pass.set_pipeline(&self.pipelines.edge);
-            for body in &self.preview {
+            for body in self.preview.iter().filter(|body| body.visible) {
                 pass.set_bind_group(0, &body.frame_bind, &[]);
+                pass.set_bind_group(1, &body.model_bind, &[]);
                 pass.set_vertex_buffer(0, body.segments.slice(..));
                 pass.draw(0..4, 0..body.segment_count);
             }
             pass.set_pipeline(&self.pipelines.silhouette);
-            for body in &self.preview {
+            for body in self.preview.iter().filter(|body| body.visible) {
                 pass.set_bind_group(0, &body.frame_bind, &[]);
+                pass.set_bind_group(1, &body.model_bind, &[]);
                 pass.set_vertex_buffer(0, body.silhouettes.slice(..));
                 pass.draw(0..4, 0..body.silhouette_count);
             }
         } else {
-            for body in &self.preview {
+            for body in self.preview.iter().filter(|body| body.visible) {
                 geometry(&mut pass, body);
             }
             self.draw_preview_edges(&mut pass);
         }
         if !wireframe {
+            pass.set_bind_group(1, &target.body_bind, &[]);
             self.draw_preview_cap(&mut pass);
         }
         self.draw_highlights(&mut pass, crate::HighlightKind::Edge);
@@ -315,12 +327,13 @@ impl Renderer {
                     if self
                         .committed
                         .get(draw.body_index)
-                        .is_none_or(|body| body.preview_suppressed)
+                        .is_none_or(|body| body.preview_suppressed || !body.visible)
                     {
                         continue;
                     }
                     let tone = usize::from(draw.tone == crate::highlights::HighlightTone::Hover);
                     pass.set_bind_group(0, &highlights.binds[tone], &[]);
+                    pass.set_bind_group(1, &self.committed[draw.body_index].model_bind, &[]);
                     pass.draw(0..4, draw.first..draw.first + draw.count);
                 }
             }
@@ -334,14 +347,16 @@ impl Renderer {
             (&self.pipelines.edge, &self.pipelines.silhouette),
         ] {
             pass.set_pipeline(edges);
-            for body in &self.preview {
+            for body in self.preview.iter().filter(|body| body.visible) {
                 pass.set_bind_group(0, &body.frame_bind, &[]);
+                pass.set_bind_group(1, &body.model_bind, &[]);
                 pass.set_vertex_buffer(0, body.feature_segments.slice(..));
                 pass.draw(0..4, 0..body.feature_segment_count);
             }
             pass.set_pipeline(silhouettes);
-            for body in &self.preview {
+            for body in self.preview.iter().filter(|body| body.visible) {
                 pass.set_bind_group(0, &body.frame_bind, &[]);
+                pass.set_bind_group(1, &body.model_bind, &[]);
                 pass.set_vertex_buffer(0, body.silhouettes.slice(..));
                 pass.draw(0..4, 0..body.silhouette_count);
             }
@@ -361,13 +376,15 @@ impl Renderer {
             return;
         }
         pass.set_pipeline(&self.pipelines.preview_cap_clear);
+        pass.set_bind_group(2, &self.identity_model.bind, &[]);
         pass.set_bind_group(0, &self.frame_bindings.normal.bind, &[]);
         pass.draw(0..3, 0..1);
         pass.set_pipeline(&self.pipelines.cap_mask);
-        for body in &self.preview {
+        for body in self.preview.iter().filter(|body| body.visible) {
             geometry(pass, body);
         }
         pass.set_pipeline(&self.pipelines.preview_cap);
+        pass.set_bind_group(2, &self.identity_model.bind, &[]);
         pass.set_bind_group(0, &preview.frame_bind, &[]);
         pass.draw(0..3, 0..1);
     }
@@ -389,6 +406,7 @@ impl Renderer {
         if self.options.section[..3].iter().any(|v| *v != 0.0) {
             self.section_mask(&mut pass, &self.pipelines.oit_mask, false);
             pass.set_pipeline(&self.pipelines.oit_cap);
+            pass.set_bind_group(2, &self.identity_model.bind, &[]);
             pass.set_bind_group(0, &self.frame_bindings.normal.bind, &[]);
             pass.draw(0..3, 0..1);
         }
@@ -418,6 +436,7 @@ impl Renderer {
         for body in self.visible_committed() {
             if height {
                 pass.set_bind_group(0, &body.frame_bind, &[]);
+                pass.set_bind_group(2, &body.model_bind, &[]);
                 pass.set_vertex_buffer(0, body.positions.slice(..));
                 pass.set_index_buffer(body.indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..body.index_count, 0, 0..1);
@@ -438,7 +457,7 @@ impl Renderer {
             let Some(body) = self.committed.get(draw.body_index) else {
                 continue;
             };
-            if body.preview_suppressed {
+            if body.preview_suppressed || !body.visible {
                 continue;
             }
             let uniform = match draw.tone {
@@ -447,11 +466,13 @@ impl Renderer {
             };
             pass.set_bind_group(0, &highlights.binds[uniform], &[]);
             if kind == crate::HighlightKind::Face {
+                pass.set_bind_group(2, &body.model_bind, &[]);
                 pass.set_vertex_buffer(0, body.positions.slice(..));
                 pass.set_vertex_buffer(1, body.normals.slice(..));
                 pass.set_index_buffer(body.indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(draw.first..draw.first + draw.count, 0, 0..1);
             } else {
+                pass.set_bind_group(1, &body.model_bind, &[]);
                 pass.set_vertex_buffer(0, body.segments.slice(..));
                 pass.draw(0..4, draw.first..draw.first + draw.count);
             }

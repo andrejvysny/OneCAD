@@ -54,7 +54,7 @@ uuid_id!(
 
 /// One placed instance of a component definition.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Occurrence {
     pub id: OccurrenceId,
     pub def: ComponentDefId,
@@ -70,7 +70,7 @@ pub struct Occurrence {
 pub struct OccurrencePath(pub Vec<OccurrenceId>);
 
 #[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TreeRepr {
     occurrences: Vec<Occurrence>,
 }

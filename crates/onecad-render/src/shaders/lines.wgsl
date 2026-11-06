@@ -1,3 +1,4 @@
+@group(1) @binding(0) var<uniform> model: mat4x4<f32>;
 // Instanced screen-space wide lines. Each segment instance expands to a quad around its
 // projected endpoints (round caps, so polylines join without gaps); the fragment computes its
 // distance to the segment and covers pixels analytically. Lines preserve reversed-Z
@@ -69,7 +70,9 @@ fn expand(vi: u32, a: vec3<f32>, b: vec3<f32>, width: f32, rgb: vec3<f32>, alpha
 // Topological edges (MESH1 EDGE_POSITIONS polylines, one instance per segment).
 @vertex
 fn vs_edge(@builtin(vertex_index) vi: u32, @location(0) a: vec3<f32>, @location(1) b: vec3<f32>) -> LOut {
-    return expand(vi, a, b, u.lines.x, u.edge.rgb, 1.0);
+    let wa = (model * vec4<f32>(a, 1.0)).xyz;
+    let wb = (model * vec4<f32>(b, 1.0)).xyz;
+    return expand(vi, wa, wb, u.lines.x, u.edge.rgb, 1.0);
 }
 
 // Silhouette candidates: an interior edge of a curved face is drawn only where one of its two
@@ -82,12 +85,16 @@ fn vs_sil(
     @location(2) n0: vec3<f32>,
     @location(3) n1: vec3<f32>,
 ) -> LOut {
-    let e = view_direction((a + b) * 0.5);
+    let wa = (model * vec4<f32>(a, 1.0)).xyz;
+    let wb = (model * vec4<f32>(b, 1.0)).xyz;
+    let wn0 = (model * vec4<f32>(n0, 0.0)).xyz;
+    let wn1 = (model * vec4<f32>(n1, 0.0)).xyz;
+    let e = view_direction((wa + wb) * 0.5);
     if (u.material.z > 0.5) { return culled(); }
-    if (dot(n0, e) * dot(n1, e) > 0.0) {
+    if (dot(wn0, e) * dot(wn1, e) > 0.0) {
         return culled();
     }
-    return expand(vi, a, b, u.lines.y, u.edge.rgb, u.edge.w);
+    return expand(vi, wa, wb, u.lines.y, u.edge.rgb, u.edge.w);
 }
 
 // Origin triad without vertex buffers: instances 0..3 are the half-rays, 3..6 their origin dots.

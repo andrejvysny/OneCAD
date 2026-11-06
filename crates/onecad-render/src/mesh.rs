@@ -29,6 +29,12 @@ pub(crate) struct Segment {
 pub(crate) struct PreparedBody {
     pub(crate) mesh_revision: u64,
     pub(crate) geometry: Arc<PreparedGeometry>,
+    pub(crate) model: [[f32; 4]; 4],
+    pub(crate) is_instance: bool,
+    pub(crate) visible: bool,
+    pub(crate) source_body_id: BodyId,
+    pub(crate) path: Option<onecad_scene::instances::OccurrencePath>,
+    pub(crate) model64: [f64; 16],
 }
 
 pub(crate) struct PreparedGeometry {
@@ -62,6 +68,14 @@ pub(crate) struct GpuBody {
     pub segment_count: u32,
     pub uniform: wgpu::Buffer,
     pub frame_bind: wgpu::BindGroup,
+    pub model_buffer: wgpu::Buffer,
+    pub model_bind: wgpu::BindGroup,
+    pub model: [[f32; 4]; 4],
+    pub is_instance: bool,
+    pub visible: bool,
+    pub source_body_id: BodyId,
+    pub path: Option<onecad_scene::instances::OccurrencePath>,
+    pub model64: [f64; 16],
     _source_retention: Option<Arc<dyn Send + Sync>>,
 }
 
@@ -174,7 +188,77 @@ fn reserve<T>(count: usize) -> Result<Vec<T>, RenderError> {
     Ok(values)
 }
 
+// Bound f32 model conversion and shader arithmetic to less than 1/1024 mm.
+pub(crate) fn check_occurrence_precision(body: &SceneBody) -> Result<(), RenderError> {
+    if body.occurrence_path().is_none() {
+        return Ok(());
+    }
+    let matrix = body.model().to_cols_array();
+    let bounds = body.local_bounds();
+    let extent = bounds.min.abs().max(bounds.max.abs()).to_array();
+    for row in 0..3 {
+        let translation = matrix[12 + row];
+        let mut error = (translation - f64::from(translation as f32)).abs();
+        let mut magnitude = translation.abs();
+        for col in 0..3 {
+            let coefficient = matrix[col * 4 + row];
+            error += (coefficient - f64::from(coefficient as f32)).abs() * extent[col];
+            magnitude += coefficient.abs() * extent[col];
+        }
+        error += 8.0 * f64::from(f32::EPSILON) * magnitude;
+        if !error.is_finite() || error > 1.0 / 1024.0 {
+            return Err(RenderError::Mesh(
+                "occurrence exceeds 1/1024 mm GPU precision bound",
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl PreparedBody {
+    pub(crate) fn from_geometry(
+        body: &SceneBody,
+        geometry: Arc<PreparedGeometry>,
+    ) -> Result<Self, RenderError> {
+        check_occurrence_precision(body)?;
+        let bounds = body.bounds();
+        if bounds
+            .min
+            .to_array()
+            .into_iter()
+            .chain(bounds.max.to_array())
+            .any(|value| !(value as f32).is_finite())
+        {
+            return Err(RenderError::Mesh("occurrence bounds exceed GPU precision"));
+        }
+        let values = body.model().to_cols_array().map(|value| value as f32);
+        if values.iter().any(|v| !v.is_finite()) {
+            return Err(RenderError::Mesh("occurrence model exceeds GPU precision"));
+        }
+        Ok(Self {
+            mesh_revision: body.mesh_revision(),
+            geometry,
+            model: [
+                values[0..4]
+                    .try_into()
+                    .map_err(|_| RenderError::Mesh("model"))?,
+                values[4..8]
+                    .try_into()
+                    .map_err(|_| RenderError::Mesh("model"))?,
+                values[8..12]
+                    .try_into()
+                    .map_err(|_| RenderError::Mesh("model"))?,
+                values[12..16]
+                    .try_into()
+                    .map_err(|_| RenderError::Mesh("model"))?,
+            ],
+            is_instance: body.occurrence_path().is_some(),
+            visible: body.visible(),
+            source_body_id: body.source_body_id(),
+            path: body.occurrence_path().cloned(),
+            model64: body.model().to_cols_array(),
+        })
+    }
     #[cfg(test)]
     pub(crate) fn new(body: &SceneBody) -> Result<Self, RenderError> {
         Self::new_retained(body, crate::PreparationRetention::default())
@@ -238,9 +322,9 @@ impl PreparedBody {
             }
         }
         let silhouettes = crate::silhouette::candidates(&mesh)?;
-        Ok(Self {
-            mesh_revision: body.mesh_revision(),
-            geometry: Arc::new(PreparedGeometry {
+        Self::from_geometry(
+            body,
+            Arc::new(PreparedGeometry {
                 source: Arc::clone(body.bytes()),
                 source_retention: retention.source,
                 _preparation_retention: retention.preparation,
@@ -251,13 +335,14 @@ impl PreparedBody {
                 feature_segments,
                 silhouettes,
             }),
-        })
+        )
     }
     pub(crate) fn upload(
         self,
         gpu: &Gpu,
         frame: &crate::uniforms::FrameBinding,
         id: BodyId,
+        model: &ModelBinding,
     ) -> GpuBody {
         let buffer = |label, data: &[u8], usage| {
             gpu.device
@@ -311,7 +396,33 @@ impl PreparedBody {
             ),
             uniform: frame.buffer.clone(),
             frame_bind: frame.bind.clone(),
+            model_buffer: model.buffer.clone(),
+            model_bind: model.bind.clone(),
+            model: self.model,
+            is_instance: self.is_instance,
+            visible: self.visible,
+            source_body_id: self.source_body_id,
+            path: self.path,
+            model64: self.model64,
         }
+    }
+}
+
+pub(crate) struct ModelBinding {
+    pub buffer: wgpu::Buffer,
+    pub bind: wgpu::BindGroup,
+}
+impl ModelBinding {
+    pub fn new(gpu: &Gpu, layout: &wgpu::BindGroupLayout, model: &[[f32; 4]; 4]) -> Self {
+        let buffer = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("occurrence model"),
+                contents: bytemuck::bytes_of(model),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = gpu.bind("occurrence model", layout, &[buffer.as_entire_binding()]);
+        Self { buffer, bind }
     }
 }
 
@@ -330,6 +441,31 @@ pub(crate) fn gpu_bytes(body: &GpuBody) -> u64 {
         + body.segments.size()
         + body.feature_segments.size()
         + body.silhouettes.size()
+}
+
+pub(crate) fn path_metadata_bytes(bodies: &[GpuBody]) -> u64 {
+    bodies
+        .iter()
+        .map(|body| {
+            body.path
+                .as_ref()
+                .map_or(0, |path| path.0.capacity() as u64 * 16)
+        })
+        .sum()
+}
+
+pub(crate) fn unique_gpu_bytes(bodies: &[GpuBody]) -> u64 {
+    bodies
+        .iter()
+        .enumerate()
+        .filter(|(index, body)| {
+            !bodies[..*index]
+                .iter()
+                .any(|other| Arc::ptr_eq(&other.source, &body.source))
+        })
+        .map(|(_, body)| gpu_bytes(body))
+        .sum::<u64>()
+        + bodies.iter().filter(|body| body.is_instance).count() as u64 * 64
 }
 
 #[cfg(test)]

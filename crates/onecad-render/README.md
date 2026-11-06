@@ -149,3 +149,31 @@ capture may be used for picking or authoring until a later replacement succeeds.
 Budget/allocation refusals are recoverable; device/validation errors are distinct.
 The native host retries changed dimensions or an explicit Retry action and keeps
 Save reachable. It never raises resource caps or silently reduces quality.
+
+### Occurrence placements
+
+`SceneBody::instance` creates an occurrence view over existing checked geometry.
+The caller supplies a scene-unique display `BodyId`, definition-local source body,
+root-to-leaf occurrence path, rigid local-to-world matrix and visibility. Picks
+return both the display key and the source body/path with the local topology ID.
+Use a fresh `SceneIdentity.scene` whenever the source revision, occurrence path,
+pose or visibility changes. Reusing an identity for a changed occurrence scene
+is refused by the renderer.
+
+Scene admission counts shared checked geometry and its BVH once, plus each
+placement's metadata. The existing 500,000 unique-triangle limit remains. Visible
+draw work is separately limited to 500,000 triangles and 500,000 edge segments,
+including retained committed and preview bodies together. At most 2,000 occurrence
+placements and path depth 8 are accepted. GPU preparation
+shares vertex, index, edge and silhouette buffers and charges one 64-byte model
+uniform per occurrence. Each visible occurrence is a separate draw. Pose changes
+replace model uniforms while preserving shared geometry buffers. CPU picking uses
+f64 rigid transforms; GPU transforms use f32. Occurrences are refused before
+publication when a conservative bound on model conversion and f32 transform
+arithmetic exceeds 1/1024 mm per world coordinate, or converted values are not
+finite. This bound does not qualify projection or depth-buffer precision.
+
+Occurrence section views are currently unsupported and refused before scene or
+option publication. Part-only section behavior is unchanged. The app must supply
+occurrence projections and unique display keys; this renderer interface alone
+does not establish assembly workflow qualification.

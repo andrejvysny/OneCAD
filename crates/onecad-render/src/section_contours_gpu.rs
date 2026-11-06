@@ -20,6 +20,11 @@ impl Renderer {
         contours: PreparedSectionContours,
     ) -> Result<(), RenderError> {
         self.require_idle()?;
+        if scene.has_instances() {
+            return Err(RenderError::Mesh(
+                "section views of occurrences are not supported",
+            ));
+        }
         crate::options::validate_section_bodies(self.options, scene.body_count())?;
         let (identity, bounds, source) = (scene.identity, scene.bounds, scene.source_bytes);
         let estimate = self.scene_contour_estimate(&scene, &contours, None)?;
@@ -36,6 +41,11 @@ impl Renderer {
         contours: PreparedSectionContours,
     ) -> Result<(), RenderError> {
         self.require_idle()?;
+        if scene.has_instances() {
+            return Err(RenderError::Mesh(
+                "section views of occurrences are not supported",
+            ));
+        }
         if Some(identity.base) != self.scene_identity
             || scene.identity != identity.base
             || self
@@ -308,6 +318,7 @@ impl Renderer {
         }
         pass.set_pipeline(&self.pipelines.edge);
         pass.set_bind_group(0, &self.frame_bindings.normal.bind, &[]);
+        pass.set_bind_group(1, &self.identity_model.bind, &[]);
         for contours in self.section_contours.iter().flatten() {
             if Some(contours.key.scene) == self.scene_identity
                 && contours.key.section == self.options.section.map(f32::to_bits)

@@ -25,6 +25,9 @@ pub enum PickPolicy {
 #[derive(Clone, Copy, Debug)]
 pub struct PickHit<'a> {
     pub body_id: BodyId,
+    /// Definition-local body identity and occurrence path; the display key is `body_id`.
+    pub source_body_id: BodyId,
+    pub occurrence_path: Option<&'a crate::instances::OccurrencePath>,
     pub mesh_revision: u64,
     pub capture: CaptureIdentity,
     pub kind: PickKind,
@@ -184,7 +187,7 @@ fn pick_impl<'a>(
     let mut face: Option<PickHit<'a>> = None;
     if query.policy == PickPolicy::FacesAndEdges {
         for body in scene.bodies() {
-            if query.skip.is_some_and(|skip| skip(body.body_id())) {
+            if !body.visible() || query.skip.is_some_and(|skip| skip(body.body_id())) {
                 continue;
             }
             let mesh = body.mesh()?;
@@ -193,7 +196,7 @@ fn pick_impl<'a>(
     }
     let mut edge: Option<PickHit<'a>> = None;
     for body in scene.bodies() {
-        if query.skip.is_some_and(|skip| skip(body.body_id())) {
+        if !body.visible() || query.skip.is_some_and(|skip| skip(body.body_id())) {
             continue;
         }
         let mesh = body.mesh()?;
@@ -210,6 +213,9 @@ fn pick_body_faces<'a>(
     indexed: bool,
     face: &mut Option<PickHit<'a>>,
 ) {
+    let (origin, direction) =
+        crate::instances::ray_to_local(ray.origin, ray.direction, &body.model());
+    let ray = Ray { origin, direction };
     if let Some(index) = body.face_index().filter(|_| indexed) {
         index.visit(
             |bounds| crate::index::ray_bounds(ray, bounds),
@@ -247,7 +253,16 @@ fn pick_body_edges<'a>(
 ) {
     if let Some(index) = body.edge_index().filter(|_| query.indexed) {
         index.visit(
-            |bounds| crate::index::screen_bounds(view, query.logical, query.tolerance, bounds),
+            |bounds| {
+                let (min, max) =
+                    crate::instances::transformed_aabb(bounds.min, bounds.max, &body.model());
+                crate::index::screen_bounds(
+                    view,
+                    query.logical,
+                    query.tolerance,
+                    crate::Bounds { min, max },
+                )
+            },
             |p| {
                 pick_edges(
                     body,
@@ -296,7 +311,9 @@ fn pick_faces<'a>(
         let Some((distance, normal)) = triangle_hit(ray, a, b, c) else {
             continue;
         };
-        let world = ray.origin + ray.direction * distance;
+        let local = ray.origin + ray.direction * distance;
+        let world = body.model().transform_point3(local);
+        let normal = body.model().transform_vector3(normal);
         let depth = view.depth(world);
         if depth < view.camera().near || depth > view.camera().far {
             continue;
@@ -342,8 +359,10 @@ fn pick_edges<'a>(
             view,
             query.logical,
             query.tolerance,
-            DVec3::from_array(a.map(f64::from)),
-            DVec3::from_array(b.map(f64::from)),
+            body.model()
+                .transform_point3(DVec3::from_array(a.map(f64::from))),
+            body.model()
+                .transform_point3(DVec3::from_array(b.map(f64::from))),
         ) else {
             continue;
         };
@@ -367,7 +386,7 @@ fn pick_edges<'a>(
 
 #[allow(clippy::too_many_arguments)]
 fn make_hit<'a>(
-    body: &SceneBody,
+    body: &'a SceneBody,
     mesh: &MeshView<'a>,
     view: &ViewSnapshot,
     kind: PickKind,
@@ -378,6 +397,8 @@ fn make_hit<'a>(
 ) -> PickHit<'a> {
     PickHit {
         body_id: body.body_id(),
+        source_body_id: body.source_body_id(),
+        occurrence_path: body.occurrence_path(),
         mesh_revision: body.mesh_revision(),
         capture: view.identity(),
         kind,

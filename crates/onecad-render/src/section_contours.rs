@@ -160,6 +160,16 @@ impl PreparedSectionContours {
         section: [f32; 4],
         current: &impl Fn() -> bool,
     ) -> Result<Self, RenderError> {
+        if section[..3].iter().any(|v| *v != 0.0)
+            && scene
+                .bodies()
+                .iter()
+                .any(|body| body.occurrence_path().is_some())
+        {
+            return Err(RenderError::Mesh(
+                "section views of occurrences are not supported",
+            ));
+        }
         if !section.iter().all(|v| v.is_finite()) {
             return Err(RenderError::Mesh("invalid section plane"));
         }

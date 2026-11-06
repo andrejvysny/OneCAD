@@ -57,7 +57,7 @@ impl JointKind {
 /// Travel limits: radians for revolute, millimetres for slider.
 /// Revolute bounds must lie in the principal interval [-π, π].
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct JointLimits {
     pub min: f64,
     pub max: f64,
@@ -87,7 +87,7 @@ impl JointLimits {
 /// The frame is already resolved by the worker. Persistent ElementRef binding
 /// is a follow-up (ONECAD-402).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct JointOrigin {
     pub occurrence: OccurrenceId,
     pub frame: Frame,
@@ -95,7 +95,7 @@ pub struct JointOrigin {
 
 /// A joint between occurrences `a` and `b`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Joint {
     pub id: JointId,
     pub name: String,
